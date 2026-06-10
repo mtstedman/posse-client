@@ -1,0 +1,118 @@
+{
+  "ok": true,
+  "action": "repo.quality",
+  "versionId": "corpus@v1",
+  "data": {
+    "repoRoot": "<stripped>",
+    "viewPath": "<stripped>",
+    "view": {
+      "branch": "main",
+      "ledgerSeq": 6,
+      "headSeq": 6,
+      "current": true,
+      "reason": null
+    },
+    "coverage": {
+      "files": 6,
+      "symbols": 23,
+      "languages": [
+        "go",
+        "py",
+        "rs",
+        "sh",
+        "ts"
+      ]
+    },
+    "edges": {
+      "total": 20,
+      "resolved": 9,
+      "unresolved": 11,
+      "unresolvedRate": 0.55,
+      "internal": 9,
+      "external": 0,
+      "byKind": {
+        "calls": 10,
+        "extends": 2,
+        "implements": 3,
+        "imports": 5
+      },
+      "callTotal": 10,
+      "callResolved": 3,
+      "callResolutionRate": 0.3,
+      "runtimeExternal": 5,
+      "dynamicReceiver": 0,
+      "importScopedExternal": 0,
+      "localUnbound": 0,
+      "selfReceiver": 0,
+      "trueUnresolved": 6,
+      "taxonomy": {
+        "internalResolved": 9,
+        "externalResolved": 0,
+        "runtimeExternal": 5,
+        "importScopedExternal": 0,
+        "dynamicReceiver": 0,
+        "localUnbound": 0,
+        "selfReceiver": 0,
+        "trueUnresolved": 6
+      }
+    },
+    "dataQuality": {
+      "symbols": {
+        "total": 23,
+        "bySource": {
+          "treesitter": 23
+        },
+        "hiddenNoisySymbols": 0,
+        "generatedFileSymbols": 0,
+        "literalSymbols": 0,
+        "literalDuplicateGroups": {
+          "groups": 0,
+          "duplicateRows": 0
+        }
+      },
+      "edges": {
+        "treesitter": {
+          "total": 20,
+          "resolved": 9,
+          "external": 0,
+          "unresolved": 11
+        }
+      }
+    },
+    "treeSitter": {
+      "knownLanguageCount": 13,
+      "observedLanguages": [
+        "go",
+        "py",
+        "rs",
+        "sh",
+        "ts"
+      ],
+      "observedFailures": [],
+      "probed": false,
+      "probedLanguages": []
+    },
+    "embeddings": {
+      "enabled": false,
+      "provider": "off",
+      "backend": "auto",
+      "reason": "disabled"
+    },
+    "feedback": {
+      "totalFeedback": 0,
+      "usefulFeedback": 0,
+      "missingFeedback": 0,
+      "topMissingSymbols": []
+    },
+    "diagnostics": {
+      "warnings": [
+        "High unresolved edge rate: 55%."
+      ]
+    }
+  },
+  "meta": {
+    "warnings": [
+      "High unresolved edge rate: 55%."
+    ]
+  }
+}

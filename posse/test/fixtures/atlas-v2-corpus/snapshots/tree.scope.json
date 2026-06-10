@@ -1,0 +1,87 @@
+{
+  "ok": true,
+  "action": "tree.scope",
+  "versionId": "corpus@v1",
+  "data": {
+    "available": true,
+    "queryTerms": [
+      "greeter"
+    ],
+    "seeds": {
+      "taskText": true,
+      "paths": [],
+      "symbolIds": [],
+      "nodeIds": [],
+      "refs": [],
+      "exactFileSeeds": 0,
+      "matchedFiles": 0,
+      "matchedSymbols": 0,
+      "matchedDirs": 0,
+      "broadRefs": 0
+    },
+    "candidateFiles": [
+      {
+        "path": "src/greeter.ts",
+        "nodeId": "file:src/greeter.ts",
+        "score": 21.358,
+        "reasons": [
+          "task:file"
+        ],
+        "exactSeed": false,
+        "symbolCount": 7,
+        "generated": false,
+        "test": false,
+        "config": false
+      }
+    ],
+    "candidateDirs": [],
+    "refinementCandidates": [],
+    "rejectedBroadDirs": [],
+    "rejectedBroadRefs": [],
+    "metrics": {
+      "candidateFileCount": 1,
+      "estimatedTouchedFiles": 1,
+      "candidateDirCount": 0,
+      "areasTouched": 1,
+      "largestAreaFileCount": 1,
+      "generatedFileCount": 0,
+      "testFileCount": 0,
+      "configFileCount": 0,
+      "sourceFileCount": 1,
+      "symbolCount": 7,
+      "compression": 0.167,
+      "queryTermCoverage": 1,
+      "confidence": 0.77,
+      "scopeBand": "single_file",
+      "scopeRisk": "low",
+      "testsLikelyNeeded": false,
+      "generatedOrConfigTouched": false,
+      "exactSeedCount": 0,
+      "queryTermCount": 1,
+      "broadRefCount": 0,
+      "broadDirCount": 0
+    },
+    "sidecar": {
+      "used": true,
+      "source": "atlas_tree_scope_nodes",
+      "files": 6,
+      "dirs": 2,
+      "terms": 43
+    },
+    "warnings": [],
+    "latestRun": {
+      "builtAt": "<stripped>",
+      "status": "ok",
+      "durationMs": "<stripped>",
+      "details": {
+        "nodes": 32,
+        "refs": 15,
+        "scopeNodes": 8,
+        "scopeTerms": 148,
+        "scopeSymbols": 23,
+        "files": 6,
+        "symbols": 23
+      }
+    }
+  }
+}

@@ -1,0 +1,76 @@
+node_modules/
+
+# Posse runtime
+db/
+resources/
+.posse-worktrees/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+.posse/
+posse/resources/
+posse/.posse
+posse/db/
+.posse-smoke-project-*/
+posse/.manual-smoke-db.sqlite
+posse/.manual-smoke-db.sqlite-journal
+posse/test/runtime-db-*/
+posse/test/tmp-*/
+test-output.txt
+
+# Local environment, credentials, and machine-specific config
+.env
+.env.*
+!.env.example
+*.env
+.envrc
+*.local
+*.local.*
+*.local.json
+*-mcp-config.json
+
+# Test logs and scratch directories
+test-results*.log
+test-results*.json
+*-chat-log-*.json
+*-rabbit-hole-log-*.json
+*-waypoint-log-*.json
+tmp-*/
+tmp-*
+temp/
+.tmp/
+
+# Claude Code
+AGENTS.md
+CLAUDE.md
+.claude/
+claude/
+posse/CLAUDE.md
+posse/.claude/
+posse/claude/
+
+#Node
+posse/node-modules
+posse/node_modules/
+
+# Artifacts
+*.zip
+# Posse runtime (auto-added)
+sdl-mcp/
+logs/
+
+# Private docs + dev-only benchmark scratch (kept locally, out of the repo)
+posse/docs/
+posse/benchmarks/
+
+# Agent guidance — private, kept local, out of the (public) repo
+AGENTS.md
+CLAUDE.md
+
+# Internal working plan — keep local, never commit
+posse/MIGRATION-CUTOVER-PLAN.md

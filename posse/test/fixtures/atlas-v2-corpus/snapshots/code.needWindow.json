@@ -1,0 +1,24 @@
+{
+  "ok": true,
+  "action": "code.needWindow",
+  "versionId": "corpus@v1",
+  "data": {
+    "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:5",
+    "repo_rel_path": "src/greeter.ts",
+    "content": "class Greeter extends Base implements Greeting {\r\n  public hello(): string {\r\n    return `Hello, ${this.name}!`;\r\n  }\r\n}",
+    "startLine": 12,
+    "endLine": 16,
+    "estimatedTokens": 30,
+    "truncated": false
+  },
+  "meta": {
+    "ladderPolicy": {
+      "mode": "warn",
+      "ok": true,
+      "warnings": [
+        "code.needWindow was requested before code.getHotPath for this target/session."
+      ],
+      "requiredRung": 3
+    }
+  }
+}

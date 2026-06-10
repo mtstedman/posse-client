@@ -1,0 +1,3 @@
+@ECHO OFF
+SETLOCAL DISABLEDELAYEDEXPANSION
+node "%~dp0scip-php.mjs" %*

@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "action": "memory.store",
+  "versionId": "corpus@v1",
+  "data": {
+    "ok": true,
+    "memoryId": "<stripped>",
+    "memory_id": "<stripped>",
+    "created": true,
+    "deduplicated": false
+  }
+}

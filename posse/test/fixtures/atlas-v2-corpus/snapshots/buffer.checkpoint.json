@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "action": "buffer.checkpoint",
+  "versionId": "corpus@v1",
+  "data": {
+    "filePath": "src/greeter.ts",
+    "sessionId": "default",
+    "cleared": true,
+    "wroteToDisk": false,
+    "diskMatches": false,
+    "contentHash": "cd2be59d2960406b194559b0da1c342325369ae6625470649e9791a44d18185b"
+  }
+}

@@ -1,0 +1,373 @@
+{
+ "dev/false": {
+  "openai": [],
+  "grok": [],
+  "claude": {
+   "tools": "Read,Glob,Grep",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop"
+  },
+  "codex": []
+ },
+ "dev/true": {
+  "openai": [
+   "bash",
+   "clean_image",
+   "edit_file",
+   "extract_image_text",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "prune_artifact_output",
+   "read_file",
+   "read_image_metadata",
+   "search_files",
+   "validate_artifact_output",
+   "write_file"
+  ],
+  "grok": [
+   "bash",
+   "clean_image",
+   "edit_file",
+   "extract_image_text",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "prune_artifact_output",
+   "read_file",
+   "read_image_metadata",
+   "search_files",
+   "validate_artifact_output",
+   "write_file"
+  ],
+  "claude": {
+   "tools": "Bash,Read,Write,Edit,Glob,Grep",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop",
+   "dangerouslySkipPermissions": false
+  },
+  "codex": [
+   "bash",
+   "clean_image",
+   "create_test",
+   "create_test_suite",
+   "edit_file",
+   "extract_image_text",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "prune_artifact_output",
+   "read_file",
+   "read_image_metadata",
+   "run_scoped_checks",
+   "run_test",
+   "run_test_suite",
+   "search_files",
+   "validate_artifact_output",
+   "write_file"
+  ]
+ },
+ "artificer/false": {
+  "openai": [],
+  "grok": [],
+  "claude": {
+   "tools": "Read,Glob,Grep",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop"
+  },
+  "codex": []
+ },
+ "artificer/true": {
+  "openai": [
+   "bash",
+   "clean_image",
+   "extract_image_text",
+   "generate_image",
+   "inspect_file",
+   "list_files",
+   "prune_artifact_output",
+   "read_file",
+   "read_image_metadata",
+   "search_files",
+   "validate_artifact_output",
+   "write_file"
+  ],
+  "grok": [
+   "bash",
+   "clean_image",
+   "extract_image_text",
+   "generate_image",
+   "inspect_file",
+   "list_files",
+   "prune_artifact_output",
+   "read_file",
+   "read_image_metadata",
+   "search_files",
+   "validate_artifact_output",
+   "write_file"
+  ],
+  "claude": {
+   "tools": "Bash,Read,Write,Glob,Grep",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop",
+   "dangerouslySkipPermissions": false
+  },
+  "codex": [
+   "bash",
+   "clean_image",
+   "extract_image_text",
+   "generate_image",
+   "inspect_file",
+   "list_files",
+   "prune_artifact_output",
+   "read_file",
+   "read_image_metadata",
+   "search_files",
+   "validate_artifact_output",
+   "write_file"
+  ]
+ },
+ "assessor/false": {
+  "openai": [
+   "bash",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "search_files"
+  ],
+  "grok": [
+   "bash",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "search_files"
+  ],
+  "claude": {
+   "tools": "Read,Glob,Grep,Bash",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop",
+   "allowedTools": "Read,Glob,Grep,Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(find:*),Bash(node:*),Bash(npm test:*),Bash(npm run:*)",
+   "dangerouslySkipPermissions": false
+  },
+  "codex": [
+   "bash",
+   "create_test",
+   "create_test_suite",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "run_scoped_checks",
+   "run_test",
+   "run_test_suite",
+   "search_files"
+  ]
+ },
+ "assessor/true": {
+  "openai": [
+   "bash",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "search_files"
+  ],
+  "grok": [
+   "bash",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "search_files"
+  ],
+  "claude": {
+   "tools": "Read,Glob,Grep,Bash",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop",
+   "allowedTools": "Read,Glob,Grep,Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(find:*),Bash(node:*),Bash(npm test:*),Bash(npm run:*)",
+   "dangerouslySkipPermissions": false
+  },
+  "codex": [
+   "bash",
+   "create_test",
+   "create_test_suite",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "run_scoped_checks",
+   "run_test",
+   "run_test_suite",
+   "search_files"
+  ]
+ },
+ "researcher/false": {
+  "openai": [
+   "chain_read",
+   "chain_verdict",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "search_files"
+  ],
+  "grok": [
+   "chain_read",
+   "chain_verdict",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "search_files"
+  ],
+  "claude": {
+   "tools": "",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop"
+  },
+  "codex": [
+   "chain_read",
+   "chain_verdict",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "search_files"
+  ]
+ },
+ "researcher/true": {
+  "openai": [
+   "chain_read",
+   "chain_verdict",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "search_files"
+  ],
+  "grok": [
+   "chain_read",
+   "chain_verdict",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "search_files"
+  ],
+  "claude": {
+   "tools": "",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop"
+  },
+  "codex": [
+   "chain_read",
+   "chain_verdict",
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "search_files"
+  ]
+ },
+ "planner/false": {
+  "openai": [
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "search_files"
+  ],
+  "grok": [
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "search_files"
+  ],
+  "claude": {
+   "tools": "",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop"
+  },
+  "codex": [
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "search_files"
+  ]
+ },
+ "planner/true": {
+  "openai": [
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "search_files"
+  ],
+  "grok": [
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "search_files"
+  ],
+  "claude": {
+   "tools": "",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop"
+  },
+  "codex": [
+   "git_history",
+   "hash_file",
+   "inspect_file",
+   "list_files",
+   "read_file",
+   "search_files"
+  ]
+ },
+ "preflight/false": {
+  "openai": [],
+  "grok": [],
+  "claude": {
+   "tools": "",
+   "disallowedTools": "Read,Glob,Grep,Write,Edit,Bash,WebFetch,WebSearch,NotebookEdit,Task,TodoWrite,ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop",
+   "dangerouslySkipPermissions": true
+  },
+  "codex": []
+ },
+ "preflight/true": {
+  "openai": [],
+  "grok": [],
+  "claude": {
+   "tools": "",
+   "disallowedTools": "Read,Glob,Grep,Write,Edit,Bash,WebFetch,WebSearch,NotebookEdit,Task,TodoWrite,ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop",
+   "dangerouslySkipPermissions": true
+  },
+  "codex": []
+ },
+ "delegator/false": {
+  "openai": [],
+  "grok": [],
+  "claude": {
+   "tools": "",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop"
+  },
+  "codex": []
+ },
+ "delegator/true": {
+  "openai": [],
+  "grok": [],
+  "claude": {
+   "tools": "",
+   "disallowedTools": "ToolSearch,AskUserQuestion,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,Monitor,PushNotification,RemoteTrigger,TaskOutput,TaskStop"
+  },
+  "codex": []
+ }
+}

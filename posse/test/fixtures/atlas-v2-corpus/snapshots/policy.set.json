@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "action": "policy.set",
+  "versionId": "corpus@v1",
+  "data": {
+    "ok": true,
+    "repoId": "fixture-corpus",
+    "policy": {
+      "maxWindowLines": 250,
+      "maxWindowTokens": 8000,
+      "requireIdentifiers": true,
+      "allowBreakGlass": false,
+      "defaultMinCallConfidence": 0.5,
+      "defaultDenyRaw": false,
+      "memoryEnabled": true,
+      "runtimeEnabled": false,
+      "budgetCaps": {
+        "maxCards": 20,
+        "maxEstimatedTokens": 50000
+      }
+    }
+  }
+}

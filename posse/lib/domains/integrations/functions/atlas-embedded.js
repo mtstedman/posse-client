@@ -1,0 +1,1120 @@
+// @ts-check
+//
+// Embedded ATLAS v2 executor for providers that expose ATLAS as in-process
+// tools.
+
+import fs from "fs";
+import crypto from "crypto";
+import { AsyncGateBusyError, AsyncResourceGate } from "../../../shared/concurrency/functions/async-gate.js";
+import {
+  buildAtlasProcessEnv,
+  getAtlasIntegrationConfig,
+  getAtlasRuntimeDisabledReason,
+  resolveAtlasRepoTargetAsync,
+} from "./atlas.js";
+import {
+  getAtlasDeterministicToolDefinitions,
+  prepareAtlasDeterministicPayload,
+  resolveAtlasDeterministicAction,
+} from "../../../functions/toolkit/atlas.js";
+import { getObservationContext, recordObservation, atlasSummaryHint } from "../../observability/functions/observations.js";
+import { formatAtlasToolDisplayName } from "../../../functions/tools/mcp-surface.js";
+import { log } from "../../../shared/telemetry/functions/logging/logger.js";
+import { Ledger } from "../../atlas/classes/v2/Ledger.js";
+import { View } from "../../atlas/classes/v2/View.js";
+import { dispatch as dispatchAtlasV2 } from "../../atlas/functions/v2/retrieval/dispatch.js";
+import {
+  openEmbeddingResources,
+  semanticDispatchEnabled,
+} from "../../atlas/functions/v2/embeddings/resources.js";
+import { extractAtlasResponseTelemetry, extractAtlasResultArtifacts } from "../../atlas/functions/v2/signal-extraction.js";
+import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functions/v2/runtime-paths.js";
+import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
+import { assertTestContext } from "../../runtime/functions/test-context.js";
+import { resolveTargetBranch } from "../../git/functions/target-branch.js";
+import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
+import {
+  getAtlasEmbeddedQueueWaitMs,
+  getAtlasEmbeddedTimeoutMs,
+  getAtlasJobCacheTtlMs,
+  getAtlasPrefetchCacheTtlMs,
+} from "../../settings/functions/tunables.js";
+
+const DEFAULT_EMBEDDED_MAX_BUFFER_BYTES = 1024 * 1024 * 4;
+const ATLAS_JOB_CACHE_PER_JOB_MAX = 32;
+const ATLAS_PREFETCH_CACHE_MAX = 128;
+const ATLAS_JOB_CACHE_ACTIONS = new Set([
+  "repo.status",
+  "context",
+  "symbol.search",
+  "symbol.getCard",
+  "slice.build",
+  "slice.refresh",
+  "code.getSkeleton",
+  "code.getHotPath",
+]);
+const ATLAS_V2_VIEW_OPTIONAL_ACTIONS = new Set([
+  "query",
+  "code",
+  "repo",
+  "agent",
+  "action.search",
+  "manual",
+  "workflow",
+  "info",
+  "repo.register",
+  "index.refresh",
+  "buffer.push",
+  "buffer.checkpoint",
+  "buffer.status",
+  "agent.feedback.query",
+  "memory.store",
+  "memory.query",
+  "memory.remove",
+  "memory.surface",
+  "policy.get",
+  "policy.set",
+  "runtime.execute",
+  "runtime.queryOutput",
+  "usage.stats",
+  "scip.ingest",
+]);
+const ATLAS_V2_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent"]);
+const ATLAS_V2_BLOCKING_ACTIONS = new Set([
+  "repo.register",
+  "index.refresh",
+  "scip.ingest",
+  "workflow",
+  "buffer.push",
+  "buffer.checkpoint",
+  "agent.feedback",
+  "memory.store",
+  "memory.remove",
+  "policy.set",
+  "runtime.execute",
+]);
+
+const ATLAS_JOB_CACHE = new Map();
+const ATLAS_PREFETCH_CACHE = new Map();
+const ATLAS_CORRUPTION_BACKOFF = new Map();
+const ATLAS_PROTECTED_ASSET_GATE = new AsyncResourceGate({ name: "ATLAS protected asset" });
+
+function stableStringify(value) {
+  if (value === undefined) return "undefined";
+  if (value === null) return "null";
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (typeof value === "object") {
+    const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(String(value));
+}
+
+function hashArgs(payload) {
+  return crypto.createHash("sha1").update(stableStringify(payload || {})).digest("hex").slice(0, 16);
+}
+
+function atlasJobCacheEnabled(config = {}) {
+  return config?.jobCacheEnabled === true;
+}
+
+// In-flight coalescing eligibility. Concurrent identical reads (same repo asset
+// + version + action + args) can share one execution. Writes / non-cacheable
+// actions never coalesce because their results are not interchangeable, and a
+// call is only coalesceable when it is scoped to a concrete repo asset and a
+// concrete version (otherwise distinct states could share a result).
+const ATLAS_EXEC_COALESCE_OFF_VALUES = new Set(["off", "false", "0", "no"]);
+
+function atlasExecCoalesceEnabled(config = {}) {
+  const raw = String(process.env.POSSE_ATLAS_EMBEDDED_COALESCE ?? "").trim().toLowerCase();
+  if (raw && ATLAS_EXEC_COALESCE_OFF_VALUES.has(raw)) return false;
+  if (config?.embeddedCoalesceEnabled === false) return false;
+  return true;
+}
+
+function atlasExecCoalesceKey({
+  enabled = true,
+  action = null,
+  assetKey = null,
+  versionId = null,
+  payload = null,
+} = {}) {
+  if (!enabled) return null;
+  if (!action || !ATLAS_JOB_CACHE_ACTIONS.has(action)) return null;
+  if (assetKey == null || versionId == null) return null;
+  return `${assetKey}|${versionId}|${action}:${hashArgs(payload)}`;
+}
+
+function atlasCacheGet(jobId, action, payload, { enabled = false, versionId = "unknown" } = {}) {
+  if (!enabled || jobId == null || !ATLAS_JOB_CACHE_ACTIONS.has(action)) return null;
+  const per = ATLAS_JOB_CACHE.get(jobId);
+  if (!per) return null;
+  const key = `${versionId || "unknown"}|${action}:${hashArgs(payload)}`;
+  const entry = per.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt < Date.now()) {
+    per.delete(key);
+    return null;
+  }
+  per.delete(key);
+  per.set(key, entry);
+  return entry.value;
+}
+
+function atlasCacheSet(jobId, action, payload, value, {
+  enabled = false,
+  versionId = "unknown",
+  ttlMs = getAtlasJobCacheTtlMs(),
+} = {}) {
+  if (!enabled || jobId == null || !ATLAS_JOB_CACHE_ACTIONS.has(action)) return;
+  let per = ATLAS_JOB_CACHE.get(jobId);
+  if (!per) {
+    per = new Map();
+    ATLAS_JOB_CACHE.set(jobId, per);
+  }
+  const key = `${versionId || "unknown"}|${action}:${hashArgs(payload)}`;
+  per.delete(key);
+  per.set(key, { value, expiresAt: Date.now() + Math.max(0, Number(ttlMs) || 0) });
+  while (per.size > ATLAS_JOB_CACHE_PER_JOB_MAX) {
+    const oldest = per.keys().next().value;
+    if (oldest == null) break;
+    per.delete(oldest);
+  }
+}
+
+export function clearAtlasJobCache(jobId) {
+  if (jobId == null) return;
+  ATLAS_JOB_CACHE.delete(jobId);
+}
+
+export function __testResetAtlasJobCache() {
+  assertTestContext("__testResetAtlasJobCache");
+  ATLAS_JOB_CACHE.clear();
+  ATLAS_PREFETCH_CACHE.clear();
+  ATLAS_CORRUPTION_BACKOFF.clear();
+}
+
+export function __testBuildAtlasProtectedAssetKey(opts = {}) {
+  assertTestContext("__testBuildAtlasProtectedAssetKey");
+  return atlasProtectedAssetKey(opts);
+}
+
+export function __testGetAtlasProtectedGateSnapshot() {
+  assertTestContext("__testGetAtlasProtectedGateSnapshot");
+  return ATLAS_PROTECTED_ASSET_GATE.snapshot();
+}
+
+export function __testHoldAtlasProtectedAsset(assetKey = "atlas:test", ms = 50) {
+  assertTestContext("__testHoldAtlasProtectedAsset");
+  const waitMs = Math.max(1000, Number(ms) + 1000);
+  return ATLAS_PROTECTED_ASSET_GATE.write(assetKey, () => new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, Number(ms) || 0));
+  }), { label: "test-hold", waitMs });
+}
+
+export function __testSetAtlasCorruptionBackoff(repo = {}, reason = "ATLAS v2 storage corruption") {
+  assertTestContext("__testSetAtlasCorruptionBackoff");
+  setCorruptionBackoff(repo, reason);
+}
+
+export function __testGetAtlasCorruptionBackoff(repo = {}) {
+  return activeCorruptionBackoff(repo);
+}
+
+export function __testAtlasExecCoalesceKey(opts = {}) {
+  assertTestContext("__testAtlasExecCoalesceKey");
+  return atlasExecCoalesceKey(opts);
+}
+
+export function __testAtlasExecCoalesceEnabled(config = {}) {
+  assertTestContext("__testAtlasExecCoalesceEnabled");
+  return atlasExecCoalesceEnabled(config);
+}
+
+export function __testSetAtlasLockBackoff() {
+  assertTestContext("__testSetAtlasLockBackoff");
+  return null;
+}
+
+export function __testGetAtlasLockBackoff() {
+  return null;
+}
+
+function repoBackoffKey(repo = {}) {
+  if (repo?.repoPath) return `path:${String(repo.repoPath).replace(/\\/g, "/").toLowerCase()}`;
+  if (repo?.repoId) return `id:${String(repo.repoId).toLowerCase()}`;
+  return "default";
+}
+
+function activeCorruptionBackoff(repo = {}) {
+  const entry = ATLAS_CORRUPTION_BACKOFF.get(repoBackoffKey(repo));
+  if (!entry) return null;
+  if (Number(entry.untilMs || 0) <= Date.now()) {
+    ATLAS_CORRUPTION_BACKOFF.delete(repoBackoffKey(repo));
+    return null;
+  }
+  return entry;
+}
+
+function setCorruptionBackoff(repo = {}, reason = "ATLAS v2 storage corruption", cooldownMs = 120000) {
+  ATLAS_CORRUPTION_BACKOFF.set(repoBackoffKey(repo), {
+    untilMs: Date.now() + Math.max(0, Number(cooldownMs) || 0),
+    reason: String(reason || "ATLAS v2 storage corruption"),
+  });
+}
+
+function prefetchScopeId(ctx, repo) {
+  if (ctx?.work_item_id != null) return `wi:${ctx.work_item_id}`;
+  if (repo?.repoId) return `repo:${String(repo.repoId)}`;
+  if (repo?.repoPath) return `path:${String(repo.repoPath).replace(/\\/g, "/").toLowerCase()}`;
+  return null;
+}
+
+function gitHeadForCacheAsync(cwd) {
+  if (!cwd) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    import("child_process").then(({ execFile }) => {
+      try {
+        execFile("git", ["rev-parse", "HEAD"], {
+          cwd,
+          encoding: "utf8",
+          timeout: 5000,
+          windowsHide: true,
+        }, (err, stdout) => resolve(err ? null : (String(stdout || "").trim() || null)));
+      } catch {
+        resolve(null);
+      }
+    }, () => resolve(null));
+  });
+}
+
+async function prefetchVersionId(cwd, repo = {}) {
+  const head = await gitHeadForCacheAsync(cwd);
+  if (head) return `head:${head}`;
+  if (repo?.repoPath) return `path:${String(repo.repoPath).replace(/\\/g, "/").toLowerCase()}:unknown`;
+  if (repo?.repoId) return `repo:${String(repo.repoId).toLowerCase()}:unknown`;
+  return "unknown";
+}
+
+function prefetchCacheKey(scopeId, action, payload, versionId = "unknown") {
+  if (!scopeId || !action) return null;
+  return `${scopeId}|${versionId}|${action}:${hashArgs(payload)}`;
+}
+
+function prefetchCacheGet(scopeId, action, payload, versionId = "unknown") {
+  const key = prefetchCacheKey(scopeId, action, payload, versionId);
+  if (!key) return null;
+  const entry = ATLAS_PREFETCH_CACHE.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt < Date.now()) {
+    ATLAS_PREFETCH_CACHE.delete(key);
+    return null;
+  }
+  ATLAS_PREFETCH_CACHE.delete(key);
+  ATLAS_PREFETCH_CACHE.set(key, entry);
+  return entry.value;
+}
+
+function prefetchCacheSet(scopeId, action, payload, value, versionId = "unknown", ttlMs = getAtlasPrefetchCacheTtlMs()) {
+  const key = prefetchCacheKey(scopeId, action, payload, versionId);
+  if (!key) return;
+  ATLAS_PREFETCH_CACHE.set(key, { value, expiresAt: Date.now() + Math.max(0, Number(ttlMs) || 0) });
+  while (ATLAS_PREFETCH_CACHE.size > ATLAS_PREFETCH_CACHE_MAX) {
+    const oldest = ATLAS_PREFETCH_CACHE.keys().next().value;
+    if (oldest == null) break;
+    ATLAS_PREFETCH_CACHE.delete(oldest);
+  }
+}
+
+/**
+ * @param {any} [args]
+ */
+function atlasProtectedAssetKey({ repo = {}, graphDbPath = null, cwd = null, config = null } = {}) {
+  const raw = graphDbPath
+    || config?.requestedGraphDbPath
+    || repo?.graphDbPath
+    || repo?.repoPath
+    || repo?.repoId
+    || cwd
+    || "default";
+  const normalized = String(raw).replace(/\\/g, "/").toLowerCase();
+  return `atlas:${normalized}`;
+}
+
+function openEmbeddedLedger(dbPath, { readOnly = false } = {}) {
+  if (!readOnly) return Ledger.open({ dbPath });
+  try {
+    return Ledger.openReadOnly({ dbPath });
+  } catch {
+    return Ledger.open({ dbPath });
+  }
+}
+
+function closeEmbeddedAtlasHandle(handle, label, { action = "unknown", origin = "agent" } = {}) {
+  if (!handle || typeof handle.close !== "function") return;
+  const startedAt = Date.now();
+  try {
+    handle.close();
+  } finally {
+    const durationMs = Date.now() - startedAt;
+    if (durationMs > 1000) {
+      log.warn("atlas", "Embedded ATLAS handle close was slow", { action, origin, label, durationMs });
+    }
+  }
+}
+
+function gatewayEffectiveAction(action, args = {}) {
+  const target = String(
+    args?.gatewayAction
+    || args?.targetAction
+    || args?.actionName
+    || args?.action
+    || "",
+  ).trim();
+  return target || action;
+}
+
+function isBlockingAction(action, payload = {}) {
+  const effective = ATLAS_V2_GATEWAY_ACTIONS.has(action) ? gatewayEffectiveAction(action, payload) : action;
+  return ATLAS_V2_BLOCKING_ACTIONS.has(effective);
+}
+
+function atlasGateMode(action, payload = {}, origin = "agent") {
+  if (origin === "prefetch") return "non-blocking";
+  return isBlockingAction(action, payload) ? "blocking" : "non-blocking";
+}
+
+function isAtlasGateError(err) {
+  return err instanceof AsyncGateBusyError
+    || err?.code === "ASYNC_GATE_BUSY"
+    || err?.code === "ASYNC_GATE_TIMEOUT";
+}
+
+function formatAtlasGateMessage(err, { action = "unknown", payload = {}, origin = "agent" } = {}) {
+  const raw = err?.message || String(err || "ATLAS protected asset is busy");
+  const mode = atlasGateMode(action, payload, origin);
+  return mode === "non-blocking"
+    ? `${raw}; skipped non-blocking ATLAS read to avoid waiting behind protected-asset work.`
+    : raw;
+}
+
+function atlasEmbeddedQueueWaitMs(config, fallbackMs = getAtlasEmbeddedQueueWaitMs()) {
+  const raw = config?.queueWaitMs;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 0) return Math.min(n, 120000);
+  const fallback = Number(fallbackMs);
+  if (Number.isFinite(fallback) && fallback >= 0) return Math.min(fallback, 120000);
+  return getAtlasEmbeddedQueueWaitMs();
+}
+
+function withProtectedAtlasGate(fn, {
+  action = "unknown",
+  payload = {},
+  origin = "agent",
+  config = null,
+  timeoutMs = null,
+  assetKey = "atlas:default",
+} = {}) {
+  const mode = atlasGateMode(action, payload, origin);
+  const opts = {
+    label: `${origin}:${action}`,
+    waitMs: atlasEmbeddedQueueWaitMs(config, timeoutMs),
+  };
+  return mode === "blocking"
+    ? ATLAS_PROTECTED_ASSET_GATE.write(assetKey, fn, opts)
+    : ATLAS_PROTECTED_ASSET_GATE.read(assetKey, fn, opts);
+}
+
+function truncateForObservation(value, max = 240) {
+  const text = String(value == null ? "" : value);
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+export function classifyAtlasFailure(message) {
+  const lower = String(message || "").toLowerCase();
+  if (!lower) return "ATLAS unavailable";
+  if (
+    lower.includes("invalid atlas parameters")
+    || lower.includes("invalid_params")
+    || lower.includes("schema validation")
+    || lower.includes("must be one of")
+    || lower.includes("not a supported parameter")
+    || lower.includes("unsupported parameter")
+    || lower.includes("gateway cannot route action")
+    || lower.includes("unknown atlas action")
+  ) {
+    return "ATLAS bad parameters";
+  }
+  if (
+    lower.includes("ledger branch")
+    || lower.includes("view branch")
+    || lower.includes("branch_missing")
+    || lower.includes("ledger lacks")
+    || lower.includes("view/ledger")
+  ) {
+    return "ATLAS view/ledger mismatch";
+  }
+  if (
+    lower.includes("view is not current")
+    || lower.includes("view not current")
+    || lower.includes("view is behind")
+    || lower.includes("view is ahead")
+    || lower.includes("stale view")
+    || lower.includes("out-of-date view")
+    || lower.includes("out of date view")
+  ) {
+    return "ATLAS view not current";
+  }
+  if (
+    lower.includes("not_indexed")
+    || lower.includes("requires an atlas view")
+    || lower.includes("missing atlas view")
+    || lower.includes("no atlas view")
+  ) {
+    return "ATLAS view unavailable";
+  }
+  if (lower.includes("busy") || lower.includes("locked") || lower.includes("sqlite_busy")) return "ATLAS SQLite lock contention";
+  if (
+    lower.includes("sqlite_corrupt")
+    || lower.includes("database disk image is malformed")
+    || lower.includes("file is not a database")
+    || lower.includes("database schema is corrupt")
+    || lower.includes("wal")
+    || lower.includes("write-ahead")
+  ) {
+    return "ATLAS v2 storage corruption";
+  }
+  if (lower.includes("timeout") || lower.includes("timed out")) return "ATLAS timeout";
+  return "ATLAS unavailable";
+}
+
+function summarizeAtlasArgs(args = {}) {
+  const out = {};
+  const source = args && typeof args === "object" ? args : {};
+  const keys = Object.keys(source).slice(0, 8);
+  for (const key of keys) {
+    const value = source[key];
+    if (value == null) out[key] = null;
+    else if (typeof value === "string") out[key] = truncateForObservation(value, 160);
+    else if (typeof value === "number" || typeof value === "boolean") out[key] = value;
+    else if (Array.isArray(value)) out[key] = value.slice(0, 8).map((item) => truncateForObservation(item, 80));
+    else if (typeof value === "object") out[key] = "[object]";
+    else out[key] = truncateForObservation(value, 80);
+  }
+  return out;
+}
+
+/**
+ * @param {any} [args]
+ */
+function recordAtlasToolObservation({
+  action,
+  cliAction = null,
+  invocation = null,
+  args = {},
+  ok = false,
+  durationMs = null,
+  error = null,
+  origin = "agent",
+  cacheHit = false,
+  queueInfo = null,
+  artifacts = null,
+  resultChars = null,
+  responseTelemetry = null,
+} = {}) {
+  try {
+    const rawContext = getObservationContext();
+    const context = rawContext || {};
+    const originTag = origin === "prefetch" ? " [prefetch]" : cacheHit ? " [cache]" : "";
+    const hint = atlasSummaryHint(args, action);
+    const displayName = formatAtlasToolDisplayName(action) || `atlas ${action}`;
+    const failureKind = ok ? null : classifyAtlasFailure(error);
+    const fallbackText = origin === "prefetch" && !ok ? " -> using deterministic fallback tools" : "";
+    const statusText = ok ? "ok" : `failed: ${failureKind}${fallbackText}`;
+    recordObservation(/** @type {any} */ ({
+      work_item_id: context.work_item_id ?? null,
+      job_id: context.job_id ?? null,
+      attempt_id: context.attempt_id ?? null,
+      observation_type: origin === "prefetch" ? "tool.atlas.prefetch" : "tool.atlas",
+      summary: `${displayName}${hint ? ` (${hint})` : ""}${originTag} ${statusText}${durationMs != null ? ` (${durationMs}ms)` : ""}`,
+      detail: {
+        kind: "atlas",
+        origin,
+        action,
+        role: context.role ?? null,
+        cli_action: cliAction,
+        ok: !!ok,
+        duration_ms: durationMs,
+        transport: invocation?.source || null,
+        command: invocation?.command || null,
+        args: summarizeAtlasArgs(args),
+        error: error ? truncateForObservation(error, 500) : null,
+        failure_classification: failureKind,
+        fallback: origin === "prefetch" && !ok ? "deterministic_tools" : null,
+        cache_hit: !!cacheHit,
+        atlas_artifacts: artifacts || null,
+        response: responseTelemetry ? {
+          ...responseTelemetry,
+          result_chars: Number(resultChars || 0),
+        } : null,
+        context_missing: !rawContext,
+        queue: queueInfo ? {
+          wait_ms: Number(queueInfo.waitMs || 0),
+          depth_at_enqueue: Number(queueInfo.depthAtEnqueue || 0),
+          in_flight_at_enqueue: Number(queueInfo.inFlightAtEnqueue || 0),
+          label: queueInfo.label || null,
+          key: queueInfo.key || null,
+          mode: queueInfo.mode || null,
+        } : null,
+      },
+    }));
+  } catch (err) {
+    try { log.debug("atlas", "observation write failed", { action, origin, err: err?.message || String(err) }); }
+    catch { /* logger itself can't fail quietly */ }
+  }
+}
+
+function existingFilePath(value) {
+  if (!value || typeof value !== "string") return null;
+  try { return fs.existsSync(value) ? value : null; } catch { return null; }
+}
+
+function candidateEmbeddedV2ViewPaths({ cwd, repoRoot }) {
+  const candidates = [
+    cwd ? worktreeViewPath(cwd) : null,
+    repoRoot ? worktreeViewPath(repoRoot) : null,
+    repoRoot ? mainViewPath(repoRoot) : null,
+  ];
+  const paths = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const found = existingFilePath(candidate);
+    if (found && !seen.has(found)) {
+      seen.add(found);
+      paths.push(found);
+    }
+  }
+  return paths;
+}
+
+function preferredEmbeddedV2ViewPath({ cwd }) {
+  const candidates = [cwd ? worktreeViewPath(cwd) : null];
+  for (const candidate of candidates) {
+    const found = existingFilePath(candidate);
+    if (found) return found;
+  }
+  return null;
+}
+
+function uniqueExistingFilePaths(candidates = []) {
+  const paths = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const found = existingFilePath(candidate);
+    if (found && !seen.has(found)) {
+      seen.add(found);
+      paths.push(found);
+    }
+  }
+  return paths;
+}
+
+function candidateEmbeddedV2LedgerPaths({ repoRoot, viewMeta, cwd = null, config = null }) {
+  const candidates = [
+    config?.atlasV2LedgerDbPath || null,
+    config?.ledgerDbPath || null,
+    repoRoot ? ledgerDbPath(repoRoot) : null,
+    viewMeta?.repo_root ? ledgerDbPath(viewMeta.repo_root) : null,
+    cwd ? ledgerDbPath(cwd) : null,
+  ];
+  return uniqueExistingFilePaths(candidates);
+}
+
+function resolveEmbeddedV2LedgerPath({ repoRoot, viewMeta, cwd = null, config = null }) {
+  return candidateEmbeddedV2LedgerPaths({ repoRoot, viewMeta, cwd, config })[0] || null;
+}
+
+function embeddedLedgerSupportsViewMeta(ledger, viewMeta) {
+  const branch = typeof viewMeta?.branch === "string" && viewMeta.branch ? viewMeta.branch : null;
+  if (!ledger || !branch || typeof ledger.getBranch !== "function") return true;
+  try { return !!ledger.getBranch(branch); } catch { return false; }
+}
+
+function openEmbeddedLedgerForView({ repoRoot, viewMeta, cwd = null, config = null, readOnly = false }) {
+  const paths = candidateEmbeddedV2LedgerPaths({ repoRoot, viewMeta, cwd, config });
+  let fallback = null;
+  for (const dbPath of paths) {
+    let candidate = null;
+    try {
+      candidate = openEmbeddedLedger(dbPath, { readOnly });
+      if (embeddedLedgerSupportsViewMeta(candidate, viewMeta)) {
+        if (fallback) closeEmbeddedAtlasHandle(fallback, "ledger", { action: "ledger-fallback", origin: "embedded" });
+        return { ledger: candidate, dbPath };
+      }
+      log.debug("atlas", "Skipping ATLAS ledger that does not contain view branch", {
+        ledgerPath: dbPath,
+        branch: viewMeta?.branch || null,
+      });
+      if (!fallback) fallback = candidate;
+      else closeEmbeddedAtlasHandle(candidate, "ledger", { action: "ledger-skip", origin: "embedded" });
+    } catch (err) {
+      log.debug("atlas", "Skipping unreadable ATLAS ledger candidate", {
+        ledgerPath: dbPath,
+        error: err?.message || String(err),
+      });
+      try { closeEmbeddedAtlasHandle(candidate, "ledger", { action: "ledger-error", origin: "embedded" }); } catch { /* ignore */ }
+    }
+  }
+  return fallback ? { ledger: fallback, dbPath: null } : { ledger: null, dbPath: null };
+}
+
+function resolveEmbeddedV2ReadRoot({ cwd, repoRoot, viewPath, viewMeta }) {
+  if (cwd && viewPath === worktreeViewPath(cwd)) return cwd;
+  return cwd || viewMeta?.repo_root || repoRoot || process.cwd();
+}
+
+function atlasV2ViewWaitMs(config) {
+  const raw = config?.viewWaitMs;
+  if (raw == null || String(raw).trim() === "") return 2500;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 0) return Math.min(n, 30000);
+  return 2500;
+}
+
+function baselineBranchForRepo(repoRoot) {
+  try {
+    return resolveTargetBranch(repoRoot || process.cwd());
+  } catch {
+    return "main";
+  }
+}
+
+function atlasV2EnvelopeError(envelope) {
+  const message = envelope?.error?.message || envelope?.error?.code || "v2 dispatch failed";
+  const err = new Error(message);
+  /** @type {any} */ (err).atlasV2Error = envelope?.error || null;
+  return err;
+}
+
+function formatAtlasV2EmbeddedError(action, err) {
+  const message = err?.message || String(err);
+  const text = `Error: ATLAS tool ${action} failed via atlas-v2: ${message.slice(0, 600)}`;
+  const error = (/** @type {any} */ (err))?.atlasV2Error;
+  if (!error || typeof error !== "object") return text;
+  const structured = {
+    code: error.code ? String(error.code) : "error",
+    message: error.message ? String(error.message) : message,
+  };
+  if (error.details !== undefined) structured.details = error.details;
+  try {
+    return `${text}\n${JSON.stringify({ error: structured }, null, 2)}`;
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * @param {any} args
+ */
+async function executeEmbeddedAtlasV2Tool({
+  action,
+  payload,
+  cwd,
+  config,
+  repo,
+  startedAt,
+  origin,
+  queueInfo = null,
+}) {
+  const repoRoot = repo?.repoPath || config?.requestedRepoPath || cwd || process.cwd();
+  const optionalView = ATLAS_V2_VIEW_OPTIONAL_ACTIONS.has(action);
+  const preferredViewPath = preferredEmbeddedV2ViewPath({ cwd: cwd || repoRoot });
+  const viewCandidates = preferredViewPath
+    ? [preferredViewPath]
+    : candidateEmbeddedV2ViewPaths({ cwd: cwd || repoRoot, repoRoot });
+  if (viewCandidates.length === 0 && !optionalView) {
+    const message = "ATLAS v2 view is not available";
+    recordAtlasToolObservation({
+      action,
+      invocation: { source: "atlas-v2", command: null },
+      args: payload,
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      origin,
+      queueInfo,
+    });
+    return `Error: ATLAS tool ${action} failed via atlas-v2: ${message}`;
+  }
+  let view = null;
+  let ledger = null;
+  let embeddingResources = null;
+  let viewPath = null;
+  try {
+    let meta = null;
+    const configuredLedgerPath = existingFilePath(config?.atlasV2LedgerDbPath || config?.ledgerDbPath || null);
+    if (configuredLedgerPath) {
+      ledger = openEmbeddedLedger(configuredLedgerPath, { readOnly: !isBlockingAction(action, payload) });
+    }
+    const waitMs = atlasV2ViewWaitMs(config);
+    if (viewCandidates.length > 0) {
+      const probe = await waitForCurrentView({
+        viewPaths: viewCandidates,
+        ViewClass: View,
+        ledger,
+        timeoutMs: waitMs,
+      });
+      if (probe.ok) {
+        view = probe.view;
+        meta = probe.meta;
+        viewPath = probe.dbPath;
+      } else {
+        log.debug("atlas", "ATLAS v2 view not ready", {
+          viewPath: probe.dbPath,
+          error: probe.error?.message || String(probe.error),
+          attempts: probe.attempts || 0,
+        });
+      }
+    }
+    if ((!view || !meta) && !optionalView) throw new Error("ATLAS v2 view is not available");
+    if (ledger && meta && !embeddedLedgerSupportsViewMeta(ledger, meta)) {
+      try { closeEmbeddedAtlasHandle(ledger, "ledger", { action, origin }); } catch { /* ignore */ }
+      ledger = null;
+    }
+    const ledgerPath = ledger ? null : resolveEmbeddedV2LedgerPath({ repoRoot, viewMeta: meta, cwd, config });
+    if (!ledger && !ledgerPath && !optionalView) throw new Error("ATLAS v2 ledger is not available");
+    if (!ledger && ledgerPath) {
+      const opened = openEmbeddedLedgerForView({
+        repoRoot,
+        viewMeta: meta,
+        cwd,
+        config,
+        readOnly: !isBlockingAction(action, payload),
+      });
+      ledger = opened.ledger;
+    }
+    if (view && meta && ledger) {
+      const freshness = viewFreshness(meta, ledger);
+      if (!freshness.current) {
+        try { view.close(); } catch { /* ignore stale view close */ }
+        view = null;
+        const secondProbe = await waitForCurrentView({
+          viewPaths: viewCandidates,
+          ViewClass: View,
+          ledger,
+          timeoutMs: waitMs,
+        });
+        if (!secondProbe.ok) {
+          throw new Error(`ATLAS v2 view is not current: ${secondProbe.error?.message || "view is stale"}`);
+        }
+        view = secondProbe.view;
+        meta = secondProbe.meta;
+        viewPath = secondProbe.dbPath;
+      }
+    }
+    const branch = meta?.branch || baselineBranchForRepo(repoRoot);
+    const ledgerSeq = meta?.ledger_seq ?? (ledger && typeof ledger.headSeq === "function" ? ledger.headSeq(branch) : 0);
+    const versionId = `${branch}@${ledgerSeq}`;
+    const readRoot = resolveEmbeddedV2ReadRoot({ cwd: cwd || null, repoRoot, viewPath, viewMeta: meta });
+    const wantsSemanticDispatch = (action === "symbol.search" && payload?.semantic)
+      || (action === "slice.build" && payload?.taskText && payload?.semantic !== false)
+      || ((action === "context" || action === "context.summary") && payload?.taskText);
+    if (wantsSemanticDispatch && semanticDispatchEnabled(config || {})) {
+      embeddingResources = openEmbeddingResources({ repoRoot: readRoot, config: config || {} });
+    }
+    const callPayload = payload && typeof payload === "object" ? payload : {};
+    const envelope = await Promise.resolve(dispatchAtlasV2(
+      ATLAS_V2_GATEWAY_ACTIONS.has(action)
+        ? { ...callPayload, action, gatewayAction: typeof callPayload.action === "string" ? callPayload.action : callPayload.gatewayAction }
+        : { action, ...callPayload },
+      {
+        view,
+        ledger,
+        versionId,
+        repoRoot: readRoot,
+        repoId: repo?.repoId || null,
+        config: config || {},
+        embeddingIndex: embeddingResources?.enabled ? embeddingResources.index : undefined,
+        encoder: embeddingResources?.enabled ? embeddingResources.encoder : undefined,
+        taskText: typeof payload?.taskText === "string" ? payload.taskText : (action === "symbol.search" ? payload?.query : undefined),
+        taskType: typeof payload?.taskType === "string" ? payload.taskType : undefined,
+      },
+    ));
+    if (envelope?.ok === false || envelope?.error) throw atlasV2EnvelopeError(envelope);
+    const data = envelope?.data ?? {};
+    const payloadWithMeta = envelope?.meta && data && typeof data === "object" && !Array.isArray(data)
+      ? { ...data, _meta: envelope.meta }
+      : data;
+    const output = JSON.stringify(payloadWithMeta, null, 2);
+    const responseTelemetry = extractAtlasResponseTelemetry(output);
+    recordAtlasToolObservation({
+      action,
+      invocation: { source: "atlas-v2", command: viewPath },
+      args: payload,
+      ok: true,
+      durationMs: Date.now() - startedAt,
+      origin,
+      queueInfo,
+      resultChars: output.length,
+      responseTelemetry,
+      artifacts: extractAtlasResultArtifacts(output, { action, args: payload }),
+    });
+    return output;
+  } catch (err) {
+    const message = err?.message || String(err);
+    recordAtlasToolObservation({
+      action,
+      invocation: { source: "atlas-v2", command: viewPath },
+      args: payload,
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      origin,
+      queueInfo,
+    });
+    return formatAtlasV2EmbeddedError(action, err);
+  } finally {
+    try { closeEmbeddedAtlasHandle(view, "view", { action, origin }); } catch { /* ignore */ }
+    try { closeEmbeddedAtlasHandle(ledger, "ledger", { action, origin }); } catch { /* ignore */ }
+    try { await embeddingResources?.close?.(); } catch { /* ignore */ }
+  }
+}
+
+export function getAtlasEmbeddedToolDefinitions(toolNames = []) {
+  return getAtlasDeterministicToolDefinitions(toolNames);
+}
+
+export function resolveEmbeddedAtlasAction(toolName) {
+  return resolveAtlasDeterministicAction(toolName);
+}
+
+export function createAtlasEmbeddedToolkit({ executor = null } = {}) {
+  const run = typeof executor === "function"
+    ? executor
+    : async (toolName, args = {}, opts = {}) => executeEmbeddedAtlasTool(toolName, args, opts);
+  return {
+    getToolDefinitions: getAtlasEmbeddedToolDefinitions,
+    toolDefinitions: getAtlasEmbeddedToolDefinitions,
+    resolveAction: resolveEmbeddedAtlasAction,
+    executeTool: run,
+  };
+}
+
+export function buildEmbeddedAtlasInvocation(action, { cwd = null, config = getAtlasIntegrationConfig() } = {}) {
+  const env = buildAtlasProcessEnv({ cwd, config });
+  return {
+    command: null,
+    args: [],
+    cwd: cwd || process.cwd(),
+    env,
+    source: "atlas-v2-native",
+    action,
+    accessMode: isBlockingAction(action) ? "readwrite" : "readonly",
+    readOnlyRequested: !isBlockingAction(action),
+    repoId: config?.requestedRepoId || null,
+    backend: "atlas-v2",
+  };
+}
+
+function isRuntimeDisabled(config = {}) {
+  const mode = String(config?.normalizedMode || config?.mode || "").trim().toLowerCase();
+  return config?.enabled === false || mode === "off";
+}
+
+export async function executeEmbeddedAtlasTool(action, args = {}, {
+  cwd = null,
+  config = getAtlasIntegrationConfig(),
+  timeoutMs = null,
+  origin = "agent",
+  maxBufferBytes = DEFAULT_EMBEDDED_MAX_BUFFER_BYTES,
+} = {}) {
+  void maxBufferBytes;
+  const startedAt = Date.now();
+  if (isRuntimeDisabled(config)) {
+    const message = "ATLAS is disabled by configuration.";
+    recordAtlasToolObservation({
+      action,
+      invocation: { source: "disabled-config", command: null },
+      args,
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      origin,
+    });
+    return `Error: ATLAS tool ${action} skipped: ${message}`;
+  }
+  const repo = await resolveAtlasRepoTargetAsync({ cwd, config });
+  const graphDbPath = buildAtlasProcessEnv({ cwd, config })?.ATLAS_GRAPH_DB_PATH || null;
+  const protectedAssetKey = atlasProtectedAssetKey({ repo, graphDbPath, cwd, config });
+  const repoDisabledReason = getAtlasRuntimeDisabledReason(repo.repoId)
+    || getAtlasRuntimeDisabledReason(repo.repoPath)
+    || getAtlasRuntimeDisabledReason(graphDbPath);
+  if (repoDisabledReason) {
+    const message = `ATLAS is disabled for this repository: ${repoDisabledReason}`;
+    recordAtlasToolObservation({
+      action,
+      invocation: { source: "repo-disabled", command: null },
+      args,
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      origin,
+    });
+    return `Error: ATLAS tool ${action} skipped: ${message}`;
+  }
+  const corruptionBackoff = activeCorruptionBackoff(repo);
+  if (corruptionBackoff) {
+    const waitMs = Math.max(0, Number(corruptionBackoff.untilMs || 0) - Date.now());
+    const message = `ATLAS temporarily disabled for ${Math.ceil(waitMs / 1000)}s after ${corruptionBackoff.reason}; using deterministic fallback tools.`;
+    recordAtlasToolObservation({
+      action,
+      invocation: { source: "corruption-backoff", command: null },
+      args,
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      origin,
+    });
+    return `Error: ATLAS tool ${action} skipped: ${message}`;
+  }
+  let prepared;
+  try {
+    prepared = prepareAtlasDeterministicPayload(action, args, { repoId: repo.repoId || null });
+  } catch (err) {
+    const message = err?.message || String(err);
+    recordAtlasToolObservation({
+      action,
+      invocation: null,
+      args,
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      origin,
+    });
+    return `Error: ${message}`;
+  }
+
+  const obsCtx = getObservationContext() || {};
+  const prefetchScope = origin === "prefetch" ? prefetchScopeId(obsCtx, repo) : null;
+  const prefetchVersion = origin === "prefetch" ? await prefetchVersionId(cwd, repo) : null;
+  const jobVersion = origin === "agent" ? await prefetchVersionId(cwd || repo.repoPath, repo) : null;
+  const jobCacheEnabled = atlasJobCacheEnabled(config);
+  if (origin === "agent") {
+    const cached = atlasCacheGet(obsCtx.job_id ?? null, prepared.action, prepared.payload, { enabled: jobCacheEnabled, versionId: jobVersion });
+    if (cached != null) {
+      recordAtlasToolObservation({
+        action: prepared.action,
+        cliAction: prepared.cliAction,
+        invocation: null,
+        args: prepared.payload || args,
+        ok: true,
+        durationMs: Date.now() - startedAt,
+        origin,
+        cacheHit: true,
+        artifacts: extractAtlasResultArtifacts(cached, { action: prepared.action, args: prepared.payload }),
+      });
+      return cached;
+    }
+  } else if (origin === "prefetch") {
+    const cached = prefetchCacheGet(prefetchScope, prepared.action, prepared.payload, prefetchVersion);
+    if (cached != null) {
+      recordAtlasToolObservation({
+        action: prepared.action,
+        cliAction: prepared.cliAction,
+        invocation: null,
+        args: prepared.payload || args,
+        ok: true,
+        durationMs: Date.now() - startedAt,
+        origin,
+        cacheHit: true,
+        artifacts: extractAtlasResultArtifacts(cached, { action: prepared.action, args: prepared.payload }),
+      });
+      return cached;
+    }
+  }
+
+  try {
+    recordMemorySample("atlas.embedded.before", {
+      action: prepared.action,
+      origin,
+      repo_id: repo.repoId || null,
+      work_item_id: obsCtx.work_item_id ?? null,
+      job_id: obsCtx.job_id ?? null,
+    });
+    const output = await withProtectedAtlasGate((queueInfo) => executeEmbeddedAtlasV2Tool({
+      action: prepared.action,
+      payload: prepared.payload,
+      cwd,
+      config,
+      repo,
+      startedAt,
+      origin,
+      queueInfo,
+    }), {
+      action: prepared.action,
+      payload: prepared.payload,
+      origin,
+      config,
+      timeoutMs: Math.max(1000, Number(timeoutMs) || Number(config?.embeddedTimeoutMs) || getAtlasEmbeddedTimeoutMs()),
+      assetKey: protectedAssetKey,
+    });
+    if (!/^Error:/i.test(String(output || ""))) {
+      if (origin === "agent") {
+        atlasCacheSet(obsCtx.job_id ?? null, prepared.action, prepared.payload, output, {
+          enabled: jobCacheEnabled,
+          versionId: jobVersion,
+          ttlMs: config?.jobCacheTtlMs,
+        });
+      } else if (origin === "prefetch") {
+        prefetchCacheSet(prefetchScope, prepared.action, prepared.payload, output, prefetchVersion, config?.prefetchCacheTtlMs);
+      }
+    }
+    recordMemorySample("atlas.embedded.after_success", {
+      action: prepared.action,
+      origin,
+      repo_id: repo.repoId || null,
+      work_item_id: obsCtx.work_item_id ?? null,
+      job_id: obsCtx.job_id ?? null,
+      duration_ms: Date.now() - startedAt,
+      output_chars: typeof output === "string" ? output.length : null,
+    });
+    return output;
+  } catch (err) {
+    recordMemorySample("atlas.embedded.after_error", {
+      action: prepared.action,
+      origin,
+      repo_id: repo.repoId || null,
+      work_item_id: obsCtx.work_item_id ?? null,
+      job_id: obsCtx.job_id ?? null,
+      duration_ms: Date.now() - startedAt,
+      error_name: err?.name || null,
+      error_message: String(err?.message || err).slice(0, 1000),
+    });
+    if (!isAtlasGateError(err)) throw err;
+    const message = formatAtlasGateMessage(err, { action: prepared.action, payload: prepared.payload, origin });
+    recordAtlasToolObservation({
+      action: prepared.action,
+      cliAction: prepared.cliAction,
+      invocation: { source: "atlas-gate", command: null },
+      args: prepared.payload || args,
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      origin,
+      queueInfo: {
+        key: protectedAssetKey,
+        mode: atlasGateMode(prepared.action, prepared.payload, origin),
+        label: `${origin}:${prepared.action}`,
+        waitMs: 0,
+        depthAtEnqueue: 0,
+        inFlightAtEnqueue: 0,
+      },
+    });
+    return `Error: ATLAS tool ${action} skipped: ${message}`;
+  }
+}
+
+export function __testBuildEmbeddedAtlasInvocation(action, opts = {}) {
+  return buildEmbeddedAtlasInvocation(action, opts);
+}

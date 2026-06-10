@@ -1,0 +1,41 @@
+# Posse runtime (auto-added)
+
+db/
+resources/
+logs/
+.posse-worktrees/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+.posse/
+.smoke-runtime*/
+.manual-smoke-db.sqlite
+.manual-smoke-db.sqlite-journal
+test/runtime-db-*/
+test-output.txt
+node_modules/
+
+# Posse-managed SCIP toolchain runtimes live under scip/. Keep manifests and
+# wrappers tracked, but not downloaded package trees or binary payloads.
+scip/node/node_modules/
+scip/php/vendor/
+scip/bin/*
+!scip/bin/*.cmd
+!scip/bin/*.sh
+!scip/bin/*.mjs
+!scip/bin/.gitkeep
+scip/downloads/
+
+# Local development guidance docs
+CLAUDE.md
+claude/rules/
+.recovery/
+data/
+
+# One-off local ATLAS probes against sibling repos.
+scripts/atlas-streaming-*.mjs

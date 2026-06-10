@@ -1,0 +1,78 @@
+{
+  "ok": true,
+  "action": "context.summary",
+  "versionId": "corpus@v1",
+  "data": {
+    "taskId": "ctx_82f24ee79c4a9d1d",
+    "taskType": "explain",
+    "success": true,
+    "summary": "Task: explain Greeter Primary symbols: Greeter, Base, Greeting, run, Greeting.hello. Files: src/greeter.ts, src/runner.ts. Evidence items returned: 3.",
+    "answer": "Use the explain context around Greeter (class): public TypeScript class Greeter in src/greeter.ts.; Base (class): public TypeScript class Base in src/greeter.ts.; Greeting (interface): public TypeScript interface Greeting in src/greeter.ts..",
+    "finalEvidence": [
+      {
+        "type": "symbol",
+        "reference": "src/greeter.ts:12",
+        "summary": "Greeter (class): public TypeScript class Greeter in src/greeter.ts.",
+        "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:5",
+        "location": {
+          "repo_rel_path": "src/greeter.ts",
+          "startLine": 12,
+          "endLine": 16,
+          "startByte": 173,
+          "endByte": 293
+        }
+      },
+      {
+        "type": "symbol",
+        "reference": "src/greeter.ts:5",
+        "summary": "Base (class): public TypeScript class Base in src/greeter.ts.",
+        "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:2",
+        "location": {
+          "repo_rel_path": "src/greeter.ts",
+          "startLine": 5,
+          "endLine": 10,
+          "startByte": 61,
+          "endByte": 162
+        }
+      },
+      {
+        "type": "symbol",
+        "reference": "src/greeter.ts:1",
+        "summary": "Greeting (interface): public TypeScript interface Greeting in src/greeter.ts.",
+        "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:0",
+        "location": {
+          "repo_rel_path": "src/greeter.ts",
+          "startLine": 1,
+          "endLine": 3,
+          "startByte": 7,
+          "endByte": 50
+        }
+      }
+    ],
+    "estimatedTokens": 342,
+    "actionsConsumed": 1,
+    "contextQuality": {
+      "confidence": "high",
+      "evidenceItems": 5,
+      "selectedContextItems": 3,
+      "limitations": [
+        "Evidence was capped by maxEvidence."
+      ],
+      "guidance": [
+        "Use symbol.getCard for dependency/card details.",
+        "Use code.getSkeleton or code.getHotPath before requesting raw windows."
+      ]
+    },
+    "retrievalEvidence": {
+      "sources": [
+        "src/greeter.ts:12",
+        "src/greeter.ts:5",
+        "src/greeter.ts:1"
+      ],
+      "symbolCount": 5,
+      "memoryCount": 0,
+      "mode": "broad"
+    },
+    "nextBestAction": "code.getSkeleton"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "ok": true,
+  "action": "edit.plan",
+  "versionId": "corpus@v1",
+  "data": {
+    "planId": "ep_97a1c1d984687247",
+    "previewOnly": true,
+    "edits": [
+      {
+        "editId": "ed_c1e95bce48265628",
+        "operation": "inspect",
+        "repo_rel_path": "src/greeter.ts",
+        "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:0",
+        "symbolName": "Greeting",
+        "search": "Greeter",
+        "replace": "Greeter",
+        "precondition": {
+          "versionId": "corpus@v1",
+          "symbolEtag": "s:993b0ce0f88a1337",
+          "contentHash": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb",
+          "rangeStart": 7,
+          "rangeEnd": 50
+        },
+        "confidence": 0.75,
+        "rationale": "Preview inspect scoped to symbol Greeting."
+      },
+      {
+        "editId": "ed_8cf593798fe53dee",
+        "operation": "inspect",
+        "repo_rel_path": "src/greeter.ts",
+        "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:1",
+        "symbolName": "hello",
+        "search": "Greeter",
+        "replace": "Greeter",
+        "precondition": {
+          "versionId": "corpus@v1",
+          "symbolEtag": "s:ca22bfdc4e98c399",
+          "contentHash": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb",
+          "rangeStart": 31,
+          "rangeEnd": 46
+        },
+        "confidence": 0.75,
+        "rationale": "Preview inspect scoped to symbol hello."
+      }
+    ],
+    "coverage": {
+      "files": 1,
+      "symbols": 7
+    },
+    "warnings": [],
+    "nextActions": [
+      "code.getSkeleton",
+      "code.getHotPath",
+      "file.read"
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "ok": true,
+  "action": "pr.risk.analyze",
+  "versionId": "corpus@v1",
+  "data": {
+    "fromVersion": "corpus@v0",
+    "toVersion": "corpus@v1",
+    "findings": [
+      {
+        "id": "high_impact:1b804c617022f3dd8c66d91cbab2bfdcf2724064740eb04ef41d4546efa1b7cf:0",
+        "severity": "high",
+        "category": "public_api_change",
+        "message": "Greeter is a high-impact changed symbol; 0 inbound references found",
+        "relatedSymbols": [
+          "1b804c617022f3dd8c66d91cbab2bfdcf2724064740eb04ef41d4546efa1b7cf:0"
+        ]
+      },
+      {
+        "id": "high_impact:1b804c617022f3dd8c66d91cbab2bfdcf2724064740eb04ef41d4546efa1b7cf:1",
+        "severity": "high",
+        "category": "public_api_change",
+        "message": "Hello is a high-impact changed symbol; 1 inbound reference found",
+        "relatedSymbols": [
+          "1b804c617022f3dd8c66d91cbab2bfdcf2724064740eb04ef41d4546efa1b7cf:1"
+        ]
+      }
+    ],
+    "blastRadius": [],
+    "recommendedTests": [],
+    "riskScore": 10
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "posse-scip-node-indexers",
+  "version": "1.0.0",
+  "description": "Posse-managed SCIP Node CLI indexers for ATLAS warmup.",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "postinstall": "node patch-scip-python.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "dependencies": {
+    "@sourcegraph/scip-python": "^0.6.6",
+    "@sourcegraph/scip-typescript": "^0.4.0"
+  }
+}

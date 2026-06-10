@@ -1,0 +1,17 @@
+{
+  "name": "posse/scip-indexers",
+  "description": "Posse-managed SCIP CLI indexers for local ATLAS warmup.",
+  "type": "project",
+  "require-dev": {
+    "davidrjenni/scip-php": "v0.0.2"
+  },
+  "scripts": {
+    "post-install-cmd": "node patch-scip-php.mjs",
+    "post-update-cmd": "node patch-scip-php.mjs"
+  },
+  "config": {
+    "audit": {
+      "block-insecure": false
+    }
+  }
+}

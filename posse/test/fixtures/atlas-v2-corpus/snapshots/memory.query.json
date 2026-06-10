@@ -1,0 +1,40 @@
+{
+  "ok": true,
+  "action": "memory.query",
+  "versionId": "corpus@v1",
+  "data": {
+    "repoId": "fixture-corpus",
+    "memories": [
+      {
+        "memoryId": "<stripped>",
+        "memory_id": "<stripped>",
+        "repoId": "fixture-corpus",
+        "type": "decision",
+        "title": "Prefer native ATLAS v2",
+        "content": "Memory is stored in the ATLAS v2 ledger for the fixture corpus.",
+        "tags": [
+          "snapshot"
+        ],
+        "confidence": 0.8,
+        "createdAt": "<stripped>",
+        "updatedAt": "<stripped>",
+        "stale": false,
+        "linkedSymbols": [
+          "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:5"
+        ],
+        "symbolIds": [
+          "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:5"
+        ],
+        "fileRelPaths": [
+          "src/greeter.ts"
+        ],
+        "score": 3.55,
+        "matchedSymbols": [],
+        "matchedFiles": []
+      }
+    ],
+    "total": 1,
+    "hasMore": false,
+    "nextOffset": null
+  }
+}

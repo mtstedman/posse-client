@@ -1,0 +1,30 @@
+{
+  "ok": true,
+  "action": "file.read",
+  "versionId": "corpus@v1",
+  "data": {
+    "repo_rel_path": "src/greeter.ts",
+    "content": "export interface Greeting {\n  hello(): string;\n}\n\nexport class Base {\n  protected name: string;\n  constructor(name: string) {\n    this.name = name;\n  }\n}\n\nexport class Greeter extends Base implements Greeting {\n  public hello(): string {\n    return `Hello, ${this.name}!`;\n  }\n}\n",
+    "totalBytes": 295,
+    "totalLines": 17,
+    "returnedLines": 17,
+    "startLine": 1,
+    "truncated": false,
+    "matches": [
+      {
+        "line": 12,
+        "text": "export class Greeter extends Base implements Greeting {",
+        "context": {
+          "before": [
+            "}",
+            ""
+          ],
+          "after": [
+            "  public hello(): string {",
+            "    return `Hello, ${this.name}!`;"
+          ]
+        }
+      }
+    ]
+  }
+}

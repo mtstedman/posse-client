@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "target": "ES2022"
+  },
+  "exclude": [
+    ".posse",
+    ".posse-worktrees",
+    "coverage",
+    "dist",
+    "node_modules"
+  ],
+  "include": [
+    "**/*.js",
+    "**/*.mjs"
+  ]
+}

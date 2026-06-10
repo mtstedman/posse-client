@@ -1,0 +1,85 @@
+{
+  "ok": true,
+  "action": "symbol.search",
+  "versionId": "corpus@v1",
+  "data": {
+    "items": [
+      {
+        "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:5",
+        "name": "Greeter",
+        "kind": "class",
+        "lang": "ts",
+        "location": {
+          "repo_rel_path": "src/greeter.ts",
+          "startLine": 12,
+          "endLine": 16,
+          "startByte": 173,
+          "endByte": 293
+        },
+        "score": 0.016393,
+        "relevance": "exact"
+      },
+      {
+        "symbolId": "f26072227984cea10d5fb1b182b92d714667ea7b69a5d5c680a1fbae96b7cad9:2",
+        "name": "Greeter",
+        "kind": "struct",
+        "lang": "rs",
+        "location": {
+          "repo_rel_path": "src/lib.rs",
+          "startLine": 7,
+          "endLine": 9,
+          "startByte": 85,
+          "endByte": 131
+        },
+        "score": 0.016129,
+        "relevance": "exact"
+      }
+    ],
+    "total": 4,
+    "truncated": true
+  },
+  "meta": {
+    "backendHealth": {
+      "backends": {
+        "fts": {
+          "ok": true
+        },
+        "vector": {
+          "ok": false,
+          "reason": "unavailable"
+        }
+      },
+      "active": [
+        "fts"
+      ],
+      "unavailable": [
+        "vector"
+      ],
+      "fullyDegraded": false
+    },
+    "scoreScheme": {
+      "score": "raw_rrf",
+      "rrfK": 60,
+      "relevance": "exact|strong|weak"
+    },
+    "prefetch": {
+      "strategy": "top-search-cards",
+      "scheduled": true,
+      "targets": 2,
+      "variantsPerTarget": 2,
+      "planned": 4
+    },
+    "queryPlan": {
+      "identifiers": [
+        "Greeter"
+      ],
+      "paths": [],
+      "fileNames": [],
+      "languageHints": [],
+      "symptom": null,
+      "keywords": [],
+      "identifierLike": true,
+      "stackFrames": []
+    }
+  }
+}

@@ -1,0 +1,301 @@
+{
+  "ok": true,
+  "action": "action.search",
+  "versionId": "corpus@v1",
+  "data": {
+    "query": "memory store",
+    "namespace": null,
+    "total": 7,
+    "offset": 0,
+    "limit": 5,
+    "actions": [
+      {
+        "action": "memory.store",
+        "toolName": "atlas_memory_store",
+        "namespace": "memory",
+        "description": "Memory. Store or update a native ATLAS v2 development memory linked to symbols and repo-relative files.",
+        "summary": "Store or update a native ATLAS v2 development memory linked to symbols/files.",
+        "required": [
+          "type",
+          "title",
+          "content"
+        ],
+        "parameters": [
+          {
+            "name": "repoId",
+            "type": "string",
+            "description": "Optional repository identifier; defaults to the current ATLAS repo."
+          },
+          {
+            "name": "type",
+            "type": "string",
+            "description": "Memory type.",
+            "enumValues": [
+              "decision",
+              "bugfix",
+              "task_context",
+              "pattern",
+              "convention",
+              "architecture",
+              "performance",
+              "security"
+            ]
+          },
+          {
+            "name": "title",
+            "type": "string",
+            "description": "Short memory title."
+          },
+          {
+            "name": "content",
+            "type": "string",
+            "description": "Memory content. Capture why the decision/context matters."
+          },
+          {
+            "name": "tags",
+            "type": "array",
+            "description": "Optional tags."
+          },
+          {
+            "name": "confidence",
+            "type": "number",
+            "description": "Confidence from 0 to 1."
+          },
+          {
+            "name": "symbolIds",
+            "type": "array",
+            "description": "Optional linked ATLAS symbol IDs."
+          },
+          {
+            "name": "fileRelPaths",
+            "type": "array",
+            "description": "Optional linked repo-relative files."
+          },
+          {
+            "name": "memoryId",
+            "type": "string",
+            "description": "Optional existing memory ID to update."
+          }
+        ],
+        "tags": [
+          "memory",
+          "mutates"
+        ],
+        "examples": [
+          {
+            "action": "memory.store",
+            "type": "decision",
+            "title": "Why",
+            "content": "Decision details",
+            "symbolIds": [
+              "<symbolId>"
+            ]
+          }
+        ],
+        "prerequisites": [
+          "Memory policy must be enabled for the repo."
+        ],
+        "recommendedNextActions": [
+          "memory.query"
+        ],
+        "score": 26
+      },
+      {
+        "action": "memory.remove",
+        "toolName": "atlas_memory_remove",
+        "namespace": "memory",
+        "description": "Memory. Soft-delete a native ATLAS v2 memory.",
+        "summary": "Soft-delete a native ATLAS v2 memory.",
+        "required": [
+          "memoryId"
+        ],
+        "parameters": [
+          {
+            "name": "repoId",
+            "type": "string",
+            "description": "Optional repository identifier; defaults to the current ATLAS repo."
+          },
+          {
+            "name": "memoryId",
+            "type": "string",
+            "description": "Memory ID to remove."
+          },
+          {
+            "name": "deleteFile",
+            "type": "boolean",
+            "description": "Accepted for compatibility; native v2 memories are ledger-backed."
+          }
+        ],
+        "tags": [
+          "memory",
+          "mutates"
+        ],
+        "examples": [
+          {
+            "action": "memory.remove"
+          }
+        ],
+        "prerequisites": [
+          "Memory policy must be enabled for the repo."
+        ],
+        "recommendedNextActions": [],
+        "score": 18
+      },
+      {
+        "action": "memory.query",
+        "toolName": "atlas_memory_query",
+        "namespace": "memory",
+        "description": "Memory. Search native ATLAS v2 memories by text, type, tags, linked symbols, linked files, staleness, recency, or confidence.",
+        "summary": "Search native ATLAS v2 memories by text, type, tags, linked symbols, or files.",
+        "required": [],
+        "parameters": [
+          {
+            "name": "repoId",
+            "type": "string",
+            "description": "Optional repository identifier; defaults to the current ATLAS repo."
+          },
+          {
+            "name": "query",
+            "type": "string",
+            "description": "Text search over title, content, and tags."
+          },
+          {
+            "name": "types",
+            "type": "array",
+            "description": "Optional memory type filters."
+          },
+          {
+            "name": "tags",
+            "type": "array",
+            "description": "Required tags; all supplied tags must match."
+          },
+          {
+            "name": "symbolIds",
+            "type": "array",
+            "description": "Optional linked symbol filters."
+          },
+          {
+            "name": "fileRelPaths",
+            "type": "array",
+            "description": "Optional linked file filters."
+          },
+          {
+            "name": "staleOnly",
+            "type": "boolean",
+            "description": "Return only stale memories."
+          },
+          {
+            "name": "limit",
+            "type": "integer",
+            "description": "Maximum memories to return."
+          },
+          {
+            "name": "offset",
+            "type": "integer",
+            "description": "Pagination offset."
+          },
+          {
+            "name": "sortBy",
+            "type": "string",
+            "description": "Sort mode.",
+            "enumValues": [
+              "recency",
+              "confidence",
+              "score"
+            ]
+          }
+        ],
+        "tags": [
+          "memory"
+        ],
+        "examples": [
+          {
+            "action": "memory.query"
+          }
+        ],
+        "prerequisites": [
+          "Memory policy must be enabled for the repo."
+        ],
+        "recommendedNextActions": [],
+        "score": 16
+      },
+      {
+        "action": "agent",
+        "toolName": "atlas_agent",
+        "namespace": "agent",
+        "description": "Gateway. Compact native ATLAS v2 agent wrapper for context, feedback, live buffers, and memory actions.",
+        "summary": "Compact gateway for native ATLAS v2 context, feedback, buffer, and memory actions.",
+        "required": [
+          "action"
+        ],
+        "parameters": [
+          {
+            "name": "action",
+            "type": "string",
+            "description": "ATLAS agent action to route through this gateway.",
+            "enumValues": [
+              "context.summary",
+              "buffer.push",
+              "buffer.checkpoint",
+              "memory.store",
+              "memory.query",
+              "memory.remove"
+            ]
+          }
+        ],
+        "tags": [
+          "agent"
+        ],
+        "examples": [
+          {
+            "action": "agent"
+          }
+        ],
+        "prerequisites": [],
+        "recommendedNextActions": [],
+        "score": 4
+      },
+      {
+        "action": "action.search",
+        "toolName": "atlas_action_search",
+        "namespace": "action",
+        "description": "Discovery. Search the native ATLAS v2 action catalog for the right tool/action to call.",
+        "summary": "Search the native ATLAS v2 action catalog for the right tool/action.",
+        "required": [],
+        "parameters": [
+          {
+            "name": "query",
+            "type": "string",
+            "description": "Search terms such as symbol, memory, policy, risk, or raw window."
+          },
+          {
+            "name": "namespace",
+            "type": "string",
+            "description": "Optional namespace filter such as repo, symbol, code, memory, policy, or agent."
+          },
+          {
+            "name": "limit",
+            "type": "integer",
+            "description": "Maximum actions to return."
+          },
+          {
+            "name": "offset",
+            "type": "integer",
+            "description": ""
+          }
+        ],
+        "tags": [
+          "action"
+        ],
+        "examples": [
+          {
+            "action": "action.search"
+          }
+        ],
+        "prerequisites": [],
+        "recommendedNextActions": [],
+        "score": 2
+      }
+    ]
+  }
+}

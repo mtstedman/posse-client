@@ -1,0 +1,35 @@
+{
+  "baselineVersion": 1,
+  "skeleton": {
+    "lineCount": 3,
+    "startLine": 1,
+    "endLine": 6,
+    "hasBodyElisionMarker": true,
+    "identifiersFilterHonored": true,
+    "firstLine": "export function alpha(user) {"
+  },
+  "hotPath": {
+    "identifiersFound": [
+      "beta"
+    ],
+    "falsePositiveIdentifiers": [],
+    "lineByIdentifier": {
+      "beta": 8
+    },
+    "matchCount": 2
+  },
+  "slice": {
+    "cardNames": [
+      "Entry",
+      "HighCall",
+      "ImplementsPeer",
+      "ExtendsPeer",
+      "SecondHop",
+      "ImportPeer"
+    ],
+    "totalCardCount": 7,
+    "hasFrontier": true,
+    "truncated": true,
+    "includesLowConfidenceInTotal": false
+  }
+}

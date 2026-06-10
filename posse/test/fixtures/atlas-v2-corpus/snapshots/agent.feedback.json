@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "action": "agent.feedback",
+  "versionId": "corpus@v1",
+  "data": {
+    "recorded": true,
+    "usefulCount": 0,
+    "missingCount": 0
+  }
+}

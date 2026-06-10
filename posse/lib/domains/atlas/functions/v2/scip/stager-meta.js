@@ -1,0 +1,219 @@
+// @ts-check
+//
+// Advisory sidecar metadata for staged `.scip` files. The ledger tracks what
+// was ingested; this file tracks what produced the on-disk staging artifact so
+// the stager can make a cheap freshness decision before ingest runs.
+
+import crypto from "crypto";
+import fs from "fs";
+import path from "path";
+
+export const SCIP_STAGER_META_SCHEMA_VERSION = 1;
+
+/**
+ * @param {string} outputPath
+ * @returns {string}
+ */
+export function stagerMetaPathForOutput(outputPath) {
+  const text = String(outputPath || "");
+  if (/\.scip$/iu.test(text)) return text.replace(/\.scip$/iu, ".meta.json");
+  return `${text}.meta.json`;
+}
+
+/**
+ * @param {string} outputPath
+ * @returns {Promise<Record<string, any> | null>}
+ */
+export async function readStagerMeta(outputPath) {
+  const metaPath = stagerMetaPathForOutput(outputPath);
+  try {
+    const raw = await fs.promises.readFile(metaPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {string} outputPath
+ * @param {Record<string, any>} meta
+ * @returns {Promise<{ ok: boolean, path: string, error?: string }>}
+ */
+export async function writeStagerMeta(outputPath, meta) {
+  const metaPath = stagerMetaPathForOutput(outputPath);
+  const dir = path.dirname(metaPath);
+  const tmpPath = path.join(dir, `.${path.basename(metaPath)}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(tmpPath, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
+    await fs.promises.rename(tmpPath, metaPath);
+    return { ok: true, path: metaPath };
+  } catch (err) {
+    try { await fs.promises.rm(tmpPath, { force: true }); } catch { /* best effort */ }
+    return { ok: false, path: metaPath, error: err?.message || String(err) };
+  }
+}
+
+/**
+ * @param {{ command?: string, args?: string[], label?: string, indexerId?: string, commandSource?: string, timeoutMs?: number, commandArgsHashTimeoutMs?: number }} plan
+ * @returns {string}
+ */
+export function computeCommandArgsHash(plan) {
+  const payload = {
+    command: String(plan?.command || ""),
+    args: Array.isArray(plan?.args) ? plan.args.map((arg) => String(arg)) : [],
+    label: String(plan?.label || ""),
+    indexer_id: String(plan?.indexerId || ""),
+    command_source: String(plan?.commandSource || ""),
+    timeout_ms: Number(plan?.commandArgsHashTimeoutMs ?? plan?.timeoutMs ?? 0) || 0,
+  };
+  return `sha256:${crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex")}`;
+}
+
+/**
+ * @param {{ indexerId?: string, label?: string, command?: string, commandSource?: string }} plan
+ * @param {{ head?: string | null, commandArgsHash?: string | null, filesetHash?: string | null }} input
+ * @returns {Record<string, any>}
+ */
+export function buildStagerMeta(plan, { head = null, commandArgsHash = null, filesetHash = null } = {}) {
+  const language = String(plan?.indexerId || "configured").trim() || "configured";
+  return {
+    schema_version: SCIP_STAGER_META_SCHEMA_VERSION,
+    status: "staged",
+    language,
+    head: head || null,
+    staged_at: new Date().toISOString(),
+    indexer_command: String(plan?.command || ""),
+    indexer_command_label: String(plan?.label || ""),
+    command_source: String(plan?.commandSource || ""),
+    command_args_hash: commandArgsHash || computeCommandArgsHash(plan),
+    fileset_hash: filesetHash || null,
+  };
+}
+
+/**
+ * Metadata for an orphaned `.staging` file that was promoted to canonical.
+ * It intentionally does not claim freshness; smart policy must re-run the
+ * indexer against the current fileset before treating the artifact as current.
+ *
+ * @param {{ indexerId?: string, label?: string, command?: string, commandSource?: string }} plan
+ * @param {{ head?: string | null, commandArgsHash?: string | null }} input
+ * @returns {Record<string, any>}
+ */
+export function buildRecoveredStagerMeta(plan, { head = null, commandArgsHash = null } = {}) {
+  const language = String(plan?.indexerId || "configured").trim() || "configured";
+  return {
+    schema_version: SCIP_STAGER_META_SCHEMA_VERSION,
+    status: "recovered",
+    language,
+    head: head || null,
+    recovered_at: new Date().toISOString(),
+    indexer_command: String(plan?.command || ""),
+    indexer_command_label: String(plan?.label || ""),
+    command_source: String(plan?.commandSource || ""),
+    command_args_hash: commandArgsHash || computeCommandArgsHash(plan),
+    fileset_hash: null,
+    recovery_reason: "orphan_staging",
+  };
+}
+
+/**
+ * @param {{ indexerId?: string, label?: string, command?: string, commandSource?: string }} plan
+ * @param {{ head?: string | null, commandArgsHash?: string | null, filesetHash?: string | null, error?: string | null, reason?: string | null, previousMeta?: Record<string, any> | null }} input
+ * @returns {Record<string, any>}
+ */
+export function buildFailedStagerMeta(plan, {
+  head = null,
+  commandArgsHash = null,
+  filesetHash = null,
+  error = null,
+  reason = null,
+  previousMeta = null,
+} = {}) {
+  const language = String(plan?.indexerId || "configured").trim() || "configured";
+  const previousAttempts = Number(previousMeta?.attempt_count || 0);
+  const previousStaged = stagedSnapshotFromMeta(previousMeta);
+  return {
+    schema_version: SCIP_STAGER_META_SCHEMA_VERSION,
+    status: "failed",
+    language,
+    head: head || null,
+    failed_at: new Date().toISOString(),
+    attempt_count: Number.isFinite(previousAttempts) && previousAttempts > 0 ? Math.floor(previousAttempts) + 1 : 1,
+    indexer_command: String(plan?.command || ""),
+    indexer_command_label: String(plan?.label || ""),
+    command_source: String(plan?.commandSource || ""),
+    command_args_hash: commandArgsHash || computeCommandArgsHash(plan),
+    fileset_hash: filesetHash || null,
+    failure_reason: reason || null,
+    error: error || null,
+    previous_staged: previousStaged,
+  };
+}
+
+/**
+ * @param {any} meta
+ * @param {{ head?: string | null, filesetHash?: string | null, previousFilesetHash?: string | null, plan?: any, maxAgeHours?: number | null, nowMs?: number }} input
+ * @returns {{ current: boolean, reason: string }}
+ */
+export function metaIsCurrent(meta, { head = null, filesetHash = null, previousFilesetHash = null, plan, maxAgeHours = null, nowMs = Date.now() } = {}) {
+  if (!meta || typeof meta !== "object") return { current: false, reason: "missing_meta" };
+  if (Number(meta.schema_version) !== SCIP_STAGER_META_SCHEMA_VERSION) {
+    return { current: false, reason: "schema_version" };
+  }
+  const status = String(meta.status || "staged").trim().toLowerCase();
+  if (status === "failed") {
+    const previous = meta.previous_staged && typeof meta.previous_staged === "object" ? meta.previous_staged : null;
+    if (previous) {
+      const previousFresh = metaIsCurrent(previous, { head, filesetHash, previousFilesetHash, plan, maxAgeHours, nowMs });
+      if (previousFresh.current) return { current: true, reason: "fresh_after_failed_restage" };
+    }
+    return { current: false, reason: "previous_failure" };
+  }
+  if (status && status !== "staged") return { current: false, reason: `status_${status}` };
+  const expectedHash = computeCommandArgsHash(plan);
+  if (String(meta.command_args_hash || "") !== expectedHash) {
+    return { current: false, reason: "command_changed" };
+  }
+  const currentFilesetHash = String(filesetHash || "");
+  if (currentFilesetHash) {
+    const metaFilesetHash = String(meta.fileset_hash || previousFilesetHash || "");
+    if (!metaFilesetHash) return { current: false, reason: "missing_fileset_hash" };
+    if (metaFilesetHash !== currentFilesetHash) return { current: false, reason: "fileset_changed" };
+  } else if (head && String(meta.head || "") !== String(head)) {
+    return { current: false, reason: "head_changed" };
+  }
+  const maxAge = Number(maxAgeHours);
+  if (Number.isFinite(maxAge) && maxAge > 0) {
+    const stagedAt = Date.parse(String(meta.staged_at || ""));
+    if (!Number.isFinite(stagedAt)) return { current: false, reason: "missing_staged_at" };
+    if (stagedAt + maxAge * 60 * 60 * 1000 < nowMs) {
+      return { current: false, reason: "max_age" };
+    }
+  }
+  return { current: true, reason: "fresh" };
+}
+
+function stagedSnapshotFromMeta(meta) {
+  if (!meta || typeof meta !== "object") return null;
+  const status = String(meta.status || "staged").trim().toLowerCase();
+  if (status === "failed") {
+    return meta.previous_staged && typeof meta.previous_staged === "object"
+      ? stagedSnapshotFromMeta(meta.previous_staged)
+      : null;
+  }
+  if (status && status !== "staged") return null;
+  return {
+    schema_version: Number(meta.schema_version) || SCIP_STAGER_META_SCHEMA_VERSION,
+    status: "staged",
+    language: String(meta.language || ""),
+    head: meta.head || null,
+    staged_at: meta.staged_at || null,
+    indexer_command: String(meta.indexer_command || ""),
+    indexer_command_label: String(meta.indexer_command_label || ""),
+    command_source: String(meta.command_source || ""),
+    command_args_hash: meta.command_args_hash || null,
+    fileset_hash: meta.fileset_hash || null,
+  };
+}

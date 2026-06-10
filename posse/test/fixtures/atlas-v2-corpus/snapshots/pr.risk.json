@@ -1,0 +1,120 @@
+{
+  "ok": true,
+  "action": "pr.risk",
+  "versionId": "corpus@v1",
+  "data": {
+    "delta": {
+      "fromVersion": "corpus@v0",
+      "toVersion": "corpus@v1",
+      "cards": [
+        {
+          "symbolId": "8439eeb5eec831d8a63011ced8c33a41c06fdb4ca09063eeb10e418f74030185:0",
+          "change": "added",
+          "after": {
+            "symbolId": "8439eeb5eec831d8a63011ced8c33a41c06fdb4ca09063eeb10e418f74030185:0",
+            "name": "greet",
+            "qualifiedName": null,
+            "kind": "function",
+            "lang": "sh",
+            "location": {
+              "repo_rel_path": "cmd/script.sh",
+              "startLine": 4,
+              "endLine": 6,
+              "startByte": 36,
+              "endByte": 74
+            },
+            "signature": null,
+            "summary": null,
+            "etag": "<stripped>"
+          }
+        },
+        {
+          "symbolId": "8439eeb5eec831d8a63011ced8c33a41c06fdb4ca09063eeb10e418f74030185:1",
+          "change": "added",
+          "after": {
+            "symbolId": "8439eeb5eec831d8a63011ced8c33a41c06fdb4ca09063eeb10e418f74030185:1",
+            "name": "farewell",
+            "qualifiedName": null,
+            "kind": "function",
+            "lang": "sh",
+            "location": {
+              "repo_rel_path": "cmd/script.sh",
+              "startLine": 8,
+              "endLine": 10,
+              "startByte": 78,
+              "endByte": 110
+            },
+            "signature": null,
+            "summary": null,
+            "etag": "<stripped>"
+          }
+        },
+        {
+          "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:0",
+          "change": "added",
+          "after": {
+            "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:0",
+            "name": "Greeting",
+            "qualifiedName": null,
+            "kind": "interface",
+            "lang": "ts",
+            "location": {
+              "repo_rel_path": "src/greeter.ts",
+              "startLine": 1,
+              "endLine": 3,
+              "startByte": 7,
+              "endByte": 50
+            },
+            "signature": null,
+            "summary": null,
+            "etag": "<stripped>"
+          }
+        }
+      ],
+      "summary": {
+        "added": 3,
+        "removed": 0,
+        "modified": 0,
+        "moved": 0,
+        "touchedPaths": [
+          "cmd/script.sh",
+          "src/greeter.ts"
+        ]
+      },
+      "budgetUsage": {
+        "cardsReturned": 3,
+        "estimatedTokens": 240,
+        "hitCardCap": true,
+        "hitTokenCap": false
+      },
+      "truncated": true
+    },
+    "risk": {
+      "fromVersion": "corpus@v0",
+      "toVersion": "corpus@v1",
+      "findings": [
+        {
+          "id": "high_impact:1b804c617022f3dd8c66d91cbab2bfdcf2724064740eb04ef41d4546efa1b7cf:0",
+          "severity": "high",
+          "category": "public_api_change",
+          "message": "Greeter is a high-impact changed symbol; 0 inbound references found",
+          "relatedSymbols": [
+            "1b804c617022f3dd8c66d91cbab2bfdcf2724064740eb04ef41d4546efa1b7cf:0"
+          ]
+        },
+        {
+          "id": "high_impact:1b804c617022f3dd8c66d91cbab2bfdcf2724064740eb04ef41d4546efa1b7cf:1",
+          "severity": "high",
+          "category": "public_api_change",
+          "message": "Hello is a high-impact changed symbol; 1 inbound reference found",
+          "relatedSymbols": [
+            "1b804c617022f3dd8c66d91cbab2bfdcf2724064740eb04ef41d4546efa1b7cf:1"
+          ]
+        }
+      ],
+      "blastRadius": [],
+      "recommendedTests": [],
+      "riskScore": 10
+    }
+  }
+}

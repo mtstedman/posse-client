@@ -1,0 +1,25 @@
+{
+  "ok": true,
+  "action": "buffer.push",
+  "versionId": "corpus@v1",
+  "data": {
+    "filePath": "src/greeter.ts",
+    "sessionId": "default",
+    "contentHash": "cd2be59d2960406b194559b0da1c342325369ae6625470649e9791a44d18185b",
+    "byteLength": 53,
+    "version": 1,
+    "parsed": true,
+    "symbolCount": 2,
+    "persisted": true,
+    "eventType": "change",
+    "language": "typescript",
+    "dirty": true,
+    "cursor": {
+      "line": 1,
+      "column": 23
+    },
+    "selections": [],
+    "updatedAt": "<stripped>",
+    "warnings": []
+  }
+}

@@ -1,0 +1,156 @@
+{
+  "ok": true,
+  "action": "manual",
+  "versionId": "corpus@v1",
+  "data": {
+    "query": "",
+    "format": "text",
+    "actions": [
+      {
+        "action": "symbol.search",
+        "toolName": "atlas_symbol_search",
+        "namespace": "symbol",
+        "description": "Discovery. Search ATLAS's indexed symbol graph for relevant symbols by name, concept, or semantic hint when you do not yet know the symbol ID.",
+        "required": [
+          "query"
+        ],
+        "parameters": [
+          {
+            "name": "query",
+            "type": "string",
+            "description": "Symbol search query."
+          },
+          {
+            "name": "limit",
+            "type": "integer",
+            "description": "Maximum number of results to return."
+          },
+          {
+            "name": "semantic",
+            "type": "boolean",
+            "description": "Enable semantic reranking when supported."
+          },
+          {
+            "name": "entities",
+            "type": "array",
+            "description": "Entity families to include. Default symbols; memories and feedback are returned in a separate entities list."
+          },
+          {
+            "name": "scope",
+            "type": "string",
+            "description": "Search symbol names, symbol-body identifier tokens, or both. Default either.",
+            "default": "either",
+            "enumValues": [
+              "name",
+              "body",
+              "either"
+            ]
+          },
+          {
+            "name": "sessionId",
+            "type": "string",
+            "description": ""
+          },
+          {
+            "name": "taskText",
+            "type": "string",
+            "description": ""
+          },
+          {
+            "name": "taskType",
+            "type": "string",
+            "description": "",
+            "enumValues": [
+              "debug",
+              "review",
+              "implement",
+              "explain"
+            ]
+          }
+        ],
+        "tags": [
+          "symbol",
+          "query"
+        ],
+        "prerequisites": [],
+        "recommendedNextActions": [
+          "symbol.getCard",
+          "symbol.usages",
+          "slice.build",
+          "code.getSkeleton"
+        ]
+      },
+      {
+        "action": "code.needWindow",
+        "toolName": "atlas_code_need_window",
+        "namespace": "code",
+        "description": "Iris Rung 4 (~2000 tokens). Request a policy-gated raw code window for one ATLAS symbol or file only after card, skeleton, or hot-path evidence is insufficient. Prefer expectedLines as a JSON number and identifiersToFind as a JSON array; legacy strings are normalized.",
+        "required": [
+          "reason",
+          "expectedLines",
+          "identifiersToFind"
+        ],
+        "parameters": [
+          {
+            "name": "symbolId",
+            "type": "string",
+            "description": "Opaque ATLAS symbol ID from symbol.search, symbol.getCard, slice.build, skeleton, or hot path results. Do not pass a file path, symbol name, or file:symbol pair here."
+          },
+          {
+            "name": "file",
+            "type": "string",
+            "description": "Repository-relative file path fallback when you have a file but not an opaque symbolId."
+          },
+          {
+            "name": "reason",
+            "type": "string",
+            "description": "Required proof-of-need justification for raw window escalation."
+          },
+          {
+            "name": "expectedLines",
+            "type": "integer|string",
+            "description": "Approximate line count. Prefer a JSON number, for example 40; legacy numeric strings are normalized."
+          },
+          {
+            "name": "identifiersToFind",
+            "type": "array|string",
+            "description": "Identifiers expected in the requested window, for example [\"generateMusic\",\"json_decode\"]. Prefer a JSON array; legacy scalar strings are normalized."
+          },
+          {
+            "name": "granularity",
+            "type": "string",
+            "description": "",
+            "default": "symbol",
+            "enumValues": [
+              "symbol",
+              "block",
+              "fileWindow"
+            ]
+          },
+          {
+            "name": "maxTokens",
+            "type": "integer",
+            "description": "Max tokens budget for the raw window."
+          },
+          {
+            "name": "sliceContext",
+            "type": "object",
+            "description": ""
+          },
+          {
+            "name": "sessionId",
+            "type": "string",
+            "description": ""
+          }
+        ],
+        "tags": [
+          "code"
+        ],
+        "prerequisites": [],
+        "recommendedNextActions": []
+      }
+    ],
+    "manual": "- symbol.search: Discovery. Search ATLAS's indexed symbol graph for relevant symbols by name, concept, or semantic hint when you do not yet know the symbol ID. Params: query*, limit, semantic, entities, scope[name|body|either]=either, sessionId, taskText, taskType[debug|review|implement|explain]. Next: symbol.getCard, symbol.usages, slice.build, code.getSkeleton.\n- code.needWindow: Iris Rung 4 (~2000 tokens). Request a policy-gated raw code window for one ATLAS symbol or file only after card, skeleton, or hot-path evidence is insufficient. Prefer expectedLines as a JSON number and identifiersToFind as a JSON array; legacy strings are normalized. Params: symbolId, file, reason*, expectedLines*, identifiersToFind*, granularity[symbol|block|fileWindow]=symbol, maxTokens, sliceContext, sessionId.",
+    "tokenEstimate": 201
+  }
+}

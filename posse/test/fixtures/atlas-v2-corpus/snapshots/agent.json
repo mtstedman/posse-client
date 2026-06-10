@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "action": "memory.query",
+  "versionId": "corpus@v1",
+  "data": {
+    "repoId": "fixture-corpus",
+    "memories": [],
+    "total": 0,
+    "hasMore": false,
+    "nextOffset": null
+  }
+}
