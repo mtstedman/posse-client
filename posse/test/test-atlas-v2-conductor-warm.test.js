@@ -139,6 +139,42 @@ describe("ATLAS v2 Conductor warm op", () => {
     assert.equal(viaConductor.skipped.length, direct.skipped.length);
   });
 
+  it("conductor.retrieve dispatches read tools off-thread against a built view", async () => {
+    const repoRoot = path.join(tmp, "repoRetrieve");
+    setupRepo(repoRoot);
+    const conductor = createConductorDaemon();
+    try {
+      // Build the main view in the conductor, then retrieve against it.
+      await conductor.warm({
+        ledgerPath: ledgerDbPath(repoRoot),
+        dbPath: mainViewPath(repoRoot),
+        repoRoot,
+        branch: "main",
+        config: {},
+        job: { purpose: "main-full", out_view_path: mainViewPath(repoRoot), paths: [] },
+      });
+      const envelope = await conductor.retrieve({
+        call: { action: "symbol.search", query: "Foo", limit: 5 },
+        viewPath: mainViewPath(repoRoot),
+        ledgerPath: ledgerDbPath(repoRoot),
+        versionId: "main@1",
+        readRoot: repoRoot,
+        repoId: "retrieve-test",
+      });
+      assert.equal(envelope.ok, true);
+      assert.equal(envelope.action, "symbol.search");
+      assert.ok(envelope.data.items.some((item) => item.name === "Foo"));
+
+      // The retrieval handle is request-scoped: the view file must be freely
+      // replaceable right after (no lingering reader locks on Windows).
+      fs.rmSync(mainViewPath(repoRoot));
+      assert.equal(fs.existsSync(mainViewPath(repoRoot)), false);
+    } finally {
+      await conductor.close();
+      await conductor.daemon.dispose();
+    }
+  });
+
   it("streams per-stage progress over the daemon channel during warm", async () => {
     const repo = path.join(tmp, "repoProgress");
     setupRepo(repo);

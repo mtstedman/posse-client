@@ -23,6 +23,7 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View } from "../../atlas/classes/v2/View.js";
 import { dispatch as dispatchAtlasV2 } from "../../atlas/functions/v2/retrieval/dispatch.js";
+import { getSharedConductor, isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import {
   openEmbeddingResources,
   semanticDispatchEnabled,
@@ -851,11 +852,54 @@ async function executeEmbeddedAtlasV2Tool({
       embeddingResources = openEmbeddingResources({ repoRoot: readRoot, config: config || {} });
     }
     const callPayload = payload && typeof payload === "object" ? payload : {};
-    const envelope = await Promise.resolve(dispatchAtlasV2(
-      ATLAS_V2_GATEWAY_ACTIONS.has(action)
-        ? { ...callPayload, action, gatewayAction: typeof callPayload.action === "string" ? callPayload.action : callPayload.gatewayAction }
-        : { action, ...callPayload },
-      {
+    const dispatchCall = ATLAS_V2_GATEWAY_ACTIONS.has(action)
+      ? { ...callPayload, action, gatewayAction: typeof callPayload.action === "string" ? callPayload.action : callPayload.gatewayAction }
+      : { action, ...callPayload };
+    // Off-loop dispatch: better-sqlite3 is synchronous, so in-process reads
+    // block the orchestrator event loop for their full duration (multi-second
+    // for graph walks). Eligible plain reads run in the Atlas-Conductor
+    // thread instead; anything needing process-local state (semantic encoder
+    // handles, live buffers, runtime exec) or write semantics stays here, as
+    // does everything when the daemon misbehaves (automatic fallback).
+    const conductorEligible = (config?.embeddedDispatch || "conductor") !== "in-process"
+      && !!view && !!viewPath
+      && !embeddingResources
+      && !ATLAS_V2_GATEWAY_ACTIONS.has(action)
+      && !ATLAS_V2_BLOCKING_ACTIONS.has(action)
+      && !isBlockingAction(action, payload)
+      && !action.startsWith("buffer.")
+      && !action.startsWith("runtime.")
+      && !action.startsWith("memory.")
+      && action !== "policy.set" && action !== "agent.feedback";
+    let envelope = null;
+    if (conductorEligible) {
+      try {
+        const conductorLedgerPath = configuredLedgerPath
+          || resolveEmbeddedV2LedgerPath({ repoRoot, viewMeta: meta, cwd, config });
+        let conductorConfig = {};
+        try { conductorConfig = JSON.parse(JSON.stringify(config || {})); } catch { conductorConfig = {}; }
+        envelope = await getSharedConductor().retrieve({
+          call: dispatchCall,
+          viewPath,
+          ledgerPath: conductorLedgerPath || null,
+          versionId,
+          readRoot,
+          repoId: repo?.repoId || null,
+          config: conductorConfig,
+        }, { timeoutMs: Math.max(5000, Number(config?.embeddedTimeoutMs) || getAtlasEmbeddedTimeoutMs()) });
+      } catch (err) {
+        // Daemon trouble (timeout/overload/transport) or a mount race with a
+        // view rebuild — run the call in-process rather than failing it.
+        log.debug("atlas", "Conductor retrieval fell back in-process", {
+          action,
+          error: String(/** @type {any} */ (err)?.message || err).slice(0, 200),
+          code: /** @type {any} */ (err)?.code || null,
+        });
+        envelope = null;
+      }
+    }
+    if (!envelope) {
+      envelope = await Promise.resolve(dispatchAtlasV2(dispatchCall, {
         view,
         ledger,
         versionId,
@@ -866,8 +910,8 @@ async function executeEmbeddedAtlasV2Tool({
         encoder: embeddingResources?.enabled ? embeddingResources.encoder : undefined,
         taskText: typeof payload?.taskText === "string" ? payload.taskText : (action === "symbol.search" ? payload?.query : undefined),
         taskType: typeof payload?.taskType === "string" ? payload.taskType : undefined,
-      },
-    ));
+      }));
+    }
     if (envelope?.ok === false || envelope?.error) throw atlasV2EnvelopeError(envelope);
     const data = envelope?.data ?? {};
     const payloadWithMeta = envelope?.meta && data && typeof data === "object" && !Array.isArray(data)
@@ -942,6 +986,36 @@ export function buildEmbeddedAtlasInvocation(action, { cwd = null, config = getA
     repoId: config?.requestedRepoId || null,
     backend: "atlas-v2",
   };
+}
+
+// Transient ATLAS failures: conditions that resolve themselves within
+// seconds (a view mid-rebuild, sqlite write contention, daemon churn).
+// A single occurrence must not fail the tool call — and absolutely must not
+// flip the role into deterministic fallback. Corruption/disabled states are
+// deliberately NOT transient.
+const ATLAS_TRANSIENT_ERROR_RE = /view is not current|view is not ready|view is stale|database is locked|SQLITE_BUSY|DAEMON_TIMEOUT|DAEMON_OVERLOADED|DAEMON_TRANSPORT_GONE/i;
+const ATLAS_TRANSIENT_RETRY_DELAYS_MS = [400, 1200];
+const ATLAS_TRANSIENT_INDEXING_WAIT_MS = 15_000;
+
+export function isTransientAtlasError(text) {
+  const value = String(text || "");
+  if (!/^Error:/i.test(value)) return false;
+  if (/corrupt|disabled by configuration|disabled for this repository/i.test(value)) return false;
+  return ATLAS_TRANSIENT_ERROR_RE.test(value);
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// When the conductor is mid-warm/merge, "view is not current" means "your
+// data is seconds away" — wait for the indexing to land instead of burning
+// retries against a moving target.
+async function waitForConductorIndexingToSettle(maxMs = ATLAS_TRANSIENT_INDEXING_WAIT_MS) {
+  const deadline = Date.now() + Math.max(0, maxMs);
+  while (Date.now() < deadline && isConductorIndexingInFlight()) {
+    await sleepMs(500);
+  }
 }
 
 function isRuntimeDisabled(config = {}) {
@@ -1069,7 +1143,7 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
       work_item_id: obsCtx.work_item_id ?? null,
       job_id: obsCtx.job_id ?? null,
     });
-    const output = await withProtectedAtlasGate((queueInfo) => executeEmbeddedAtlasV2Tool({
+    const runGatedCall = () => withProtectedAtlasGate((queueInfo) => executeEmbeddedAtlasV2Tool({
       action: prepared.action,
       payload: prepared.payload,
       cwd,
@@ -1086,6 +1160,28 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
       timeoutMs: Math.max(1000, Number(timeoutMs) || Number(config?.embeddedTimeoutMs) || getAtlasEmbeddedTimeoutMs()),
       assetKey: protectedAssetKey,
     });
+    // Read calls get a bounded second chance on transient failures instead of
+    // surfacing one-off errors (which downstream treats as fallback signals).
+    const transientRetryable = !isBlockingAction(prepared.action, prepared.payload)
+      && prepared.action !== "memory.store"
+      && prepared.action !== "memory.remove"
+      && prepared.action !== "policy.set";
+    let output = await runGatedCall();
+    for (let attempt = 0; transientRetryable
+      && attempt < ATLAS_TRANSIENT_RETRY_DELAYS_MS.length
+      && isTransientAtlasError(output); attempt++) {
+      if (isConductorIndexingInFlight()) {
+        await waitForConductorIndexingToSettle();
+      } else {
+        await sleepMs(ATLAS_TRANSIENT_RETRY_DELAYS_MS[attempt]);
+      }
+      log.debug("atlas", "Retrying embedded ATLAS call after transient failure", {
+        action: prepared.action,
+        attempt: attempt + 1,
+        error: String(output).slice(0, 160),
+      });
+      output = await runGatedCall();
+    }
     if (!/^Error:/i.test(String(output || ""))) {
       if (origin === "agent") {
         atlasCacheSet(obsCtx.job_id ?? null, prepared.action, prepared.payload, output, {

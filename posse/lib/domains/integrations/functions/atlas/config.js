@@ -687,6 +687,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbBootTimeoutMs = useLiveSettings ? readDbSetting("atlas_v2_boot_timeout_ms") : null;
   const dbBootSoftTimeoutMs = useLiveSettings ? readDbSetting("atlas_v2_boot_soft_timeout_ms") : null;
   const dbEmbeddedTimeoutMs = useLiveSettings ? readDbSetting("atlas_embedded_timeout_ms") : null;
+  const dbEmbeddedDispatch = useLiveSettings ? readDbSetting("atlas_embedded_dispatch") : null;
   const dbEmbeddedQueueWaitMs = useLiveSettings ? readDbSetting("atlas_embedded_queue_wait_ms") : null;
   const dbJobCacheTtlMs = useLiveSettings ? readDbSetting("atlas_job_cache_ttl_ms") : null;
   const dbPrefetchCacheTtlMs = useLiveSettings ? readDbSetting("atlas_prefetch_cache_ttl_ms") : null;
@@ -864,6 +865,8 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const bootTimeoutMs = parseIntOrNull(firstProvided(explicitValue("bootTimeoutMs", "atlas_v2_boot_timeout_ms", "POSSE_ATLAS_V2_BOOT_TIMEOUT_MS"), dbBootTimeoutMs)) ?? 5400000;
   const bootSoftTimeoutMs = parseIntOrNull(firstProvided(explicitValue("bootSoftTimeoutMs", "atlas_v2_boot_soft_timeout_ms", "POSSE_ATLAS_V2_BOOT_SOFT_TIMEOUT_MS"), dbBootSoftTimeoutMs)) ?? 15000;
   const embeddedTimeoutMs = parseIntOrNull(firstProvided(explicitValue("embeddedTimeoutMs", "atlas_embedded_timeout_ms", "POSSE_ATLAS_EMBEDDED_TIMEOUT_MS"), dbEmbeddedTimeoutMs)) ?? 30000;
+  const rawEmbeddedDispatch = String(firstProvided(explicitValue("embeddedDispatch", "atlas_embedded_dispatch", "POSSE_ATLAS_EMBEDDED_DISPATCH"), dbEmbeddedDispatch, "")).trim().toLowerCase();
+  const embeddedDispatch = rawEmbeddedDispatch === "in-process" ? "in-process" : "conductor";
   const queueWaitMs = parseIntOrNull(firstProvided(explicitValue("queueWaitMs", "atlas_embedded_queue_wait_ms", "POSSE_ATLAS_EMBEDDED_QUEUE_WAIT_MS"), dbEmbeddedQueueWaitMs)) ?? 30000;
   const jobCacheTtlMs = parseIntOrNull(firstProvided(explicitValue("jobCacheTtlMs", "atlas_job_cache_ttl_ms", "POSSE_ATLAS_JOB_CACHE_TTL_MS"), dbJobCacheTtlMs)) ?? 300000;
   const prefetchCacheTtlMs = parseIntOrNull(firstProvided(explicitValue("prefetchCacheTtlMs", "atlas_prefetch_cache_ttl_ms", "POSSE_ATLAS_PREFETCH_CACHE_TTL_MS"), dbPrefetchCacheTtlMs)) ?? 600000;
@@ -947,6 +950,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     bootTimeoutMs,
     bootSoftTimeoutMs,
     embeddedTimeoutMs,
+    embeddedDispatch,
     queueWaitMs,
     jobCacheTtlMs,
     prefetchCacheTtlMs,

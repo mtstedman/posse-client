@@ -112,6 +112,14 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       return dbWrite.run(() => engine.handleWarmJob(payload.job ?? { paths: payload.paths ?? [] }));
     }
 
+    case "retrieve": {
+      // Read-only tool dispatch with request-scoped handles; deliberately NOT
+      // on the write queue — WAL readers run concurrently with the writers
+      // this thread owns.
+      const { runConductorRetrieve } = await import("./retrieve-runner.js");
+      return runConductorRetrieve(payload);
+    }
+
     case "merge": {
       // The "zip" — serialized on the write queue, scoped by contentHashes
       // (null = full/boot). Reads Ledger, writes View, in this thread.

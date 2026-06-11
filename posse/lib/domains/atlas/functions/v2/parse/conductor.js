@@ -39,6 +39,7 @@ export function createConductorDaemon() {
   const ingest = (opts, reqOpts) => call({ op: "ingest", ...opts }, reqOpts);
   const warm = (opts, reqOpts) => call({ op: "warm", ...opts }, reqOpts);
   const merge = (opts, reqOpts) => call({ op: "merge", ...opts }, reqOpts);
+  const retrieve = (opts, reqOpts) => call({ op: "retrieve", ...opts }, reqOpts);
 
   return {
     daemon,
@@ -46,6 +47,7 @@ export function createConductorDaemon() {
     ingest,
     warm,
     merge,
+    retrieve,
     info: () => call({ op: "info" }),
     close: () => call({ op: "close" }),
     /**
@@ -168,6 +170,27 @@ function _tracked(fn) {
   };
 }
 
+// Indexing-activity counter, separate from the idle tracking: retrieval-side
+// transient-retry logic uses this to recognize "the view is mid-rebuild;
+// wait for the warm to land" instead of failing or falling back.
+let _indexingInflight = 0;
+function _indexTracked(fn) {
+  const tracked = _tracked(fn);
+  return async (/** @type {any[]} */ ...args) => {
+    _indexingInflight++;
+    try {
+      return await tracked(...args);
+    } finally {
+      _indexingInflight--;
+    }
+  };
+}
+
+/** True while any warm/merge/ingest/stage/reindex op is running in the conductor. */
+export function isConductorIndexingInFlight() {
+  return _indexingInflight > 0;
+}
+
 /**
  * Get the process-global Atlas-Conductor daemon, creating it on first use. The
  * returned client's request ops are idle-tracked (see SHARED_IDLE_MS).
@@ -180,12 +203,13 @@ export function getSharedConductor() {
       daemon: base.daemon,
       info: base.info,
       close: base.close,
-      stage: _tracked(base.stage),
-      ingest: _tracked(base.ingest),
-      warm: _tracked(base.warm),
-      merge: _tracked(base.merge),
-      reindex: _tracked(base.reindex),
-      reindexLanguage: _tracked(base.reindexLanguage),
+      stage: _indexTracked(base.stage),
+      ingest: _indexTracked(base.ingest),
+      warm: _indexTracked(base.warm),
+      merge: _indexTracked(base.merge),
+      reindex: _indexTracked(base.reindex),
+      reindexLanguage: _indexTracked(base.reindexLanguage),
+      retrieve: _tracked(base.retrieve),
     };
   }
   return _sharedConductor;
