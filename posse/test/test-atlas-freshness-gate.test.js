@@ -85,7 +85,7 @@ function createMainWarmJob() {
 }
 
 describe("ATLAS main freshness gate", () => {
-  it("degrades instead of queuing a no-op refresh when project ATLAS runtime is missing", () => withTempRuntimeDb((runtimeDir) => {
+  it("degrades instead of queuing a no-op refresh when project ATLAS runtime is missing", () => withTempRuntimeDb(async (runtimeDir) => {
     const projectDir = path.join(runtimeDir, "cold-project");
     initBasicRepo(projectDir);
     const config = {
@@ -99,7 +99,7 @@ describe("ATLAS main freshness gate", () => {
 
     assert.equal(fs.existsSync(path.join(projectDir, ".posse")), false);
 
-    const gate = checkAtlasMainFreshnessGate({
+    const gate = await checkAtlasMainFreshnessGate({
       cwd: projectDir,
       config,
       targetBranch: "main",
@@ -111,11 +111,11 @@ describe("ATLAS main freshness gate", () => {
     assert.equal(gate.reason, "atlas_warm_runtime_missing");
     assert.equal(gate.pendingWarmJobs.length, 0);
 
-    const pending = listPendingAtlasMainWarmJobs({ cwd: projectDir, config, targetBranch: "main" });
+    const pending = await listPendingAtlasMainWarmJobs({ cwd: projectDir, config, targetBranch: "main" });
     assert.equal(pending.length, 0);
   }));
 
-  it("detects queued main warm jobs before probing graph readiness", () => withTempRuntimeDb((projectDir) => {
+  it("detects queued main warm jobs before probing graph readiness", () => withTempRuntimeDb(async (projectDir) => {
     const warmJob = createMainWarmJob();
     const config = {
       enabled: true,
@@ -126,11 +126,11 @@ describe("ATLAS main freshness gate", () => {
       autoRefreshStale: false,
     };
 
-    const pending = listPendingAtlasMainWarmJobs({ cwd: projectDir, config, targetBranch: "main" });
+    const pending = await listPendingAtlasMainWarmJobs({ cwd: projectDir, config, targetBranch: "main" });
     assert.equal(pending.length, 1);
     assert.equal(pending[0].id, warmJob.id);
 
-    const gate = checkAtlasMainFreshnessGate({
+    const gate = await checkAtlasMainFreshnessGate({
       cwd: projectDir,
       config,
       targetBranch: "main",
@@ -206,7 +206,7 @@ describe("ATLAS main freshness gate", () => {
     releaseLease(plan.id, lease.leaseToken, "queued");
   }));
 
-  it("queues a main refresh after a successful squash merge", () => withTempRuntimeDb((projectDir) => {
+  it("queues a main refresh after a successful squash merge", () => withTempRuntimeDb(async (projectDir) => {
     initMergeRepo(projectDir);
     seedAtlasSettings(projectDir);
     const wi = createWorkItem("Atlas merge refresh", "merge branch and refresh main");
@@ -216,7 +216,7 @@ describe("ATLAS main freshness gate", () => {
     assert.equal(result.ok, true);
     assert.ok(result.mergeHash);
 
-    const pending = listPendingAtlasMainWarmJobs({ cwd: projectDir, targetBranch: "main" });
+    const pending = await listPendingAtlasMainWarmJobs({ cwd: projectDir, targetBranch: "main" });
     assert.equal(pending.length, 1);
     assert.equal(pending[0].purpose, "main-incremental");
     assert.equal(pending[0].targetBranch, "main");

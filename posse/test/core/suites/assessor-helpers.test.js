@@ -7,6 +7,7 @@ import {
   __dirname,
   path,
   suite,
+  runtimeModules,
 } from "../support/core-harness.js";
 import { withTempRuntimeDb } from "../../helpers/regression-test-harness.js";
 import { getDb } from "../../../lib/shared/storage/functions/index.js";
@@ -39,6 +40,75 @@ suite("Assessor helpers", () => {
     assert.equal(taskkillCall.command, "taskkill");
     assert.deepEqual(taskkillCall.args, ["/pid", "4321", "/T", "/F"]);
     assert.equal(taskkillCall.opts.windowsHide, true);
+  });
+
+  it("records a deterministic assessor pass for satisfied no-op jobs", async () => {
+    const assessment = await import("../../../lib/domains/worker/functions/helpers/assessment-pipeline.js");
+    const { queueMod } = runtimeModules;
+    const wi = queueMod.createWorkItem("Satisfied cleanup", "desc");
+    const job = queueMod.createJob({
+      work_item_id: wi.id,
+      job_type: "dev",
+      title: "Remove stale generated file",
+      payload_json: JSON.stringify({ files_to_delete: ["src/generated/old.js"] }),
+    });
+    const lease = queueMod.acquireLease(job.id, "test-worker", 900);
+    const created = queueMod.incrementAndCreateAttempt(job.id, lease.leaseToken, "dev", null, "medium");
+    const events = [];
+    let assessorDisplaySynced = false;
+    let cleanedUp = false;
+
+    await assessment.runPostExecutionAssessment({
+      autoApprove: false,
+      display: null,
+      dryRun: false,
+      emit: (_jobId, message) => events.push(message),
+      parsePayload: (row) => JSON.parse(row.payload_json || "{}"),
+      projectDir: process.cwd(),
+      silent: true,
+      _cleanupWorktreeIfDone: () => { cleanedUp = true; },
+      _shouldSkipAssessment: () => false,
+      _spawnFileRequestFollowUp: () => {},
+    }, {
+      attempt: created.attempt,
+      committedHash: null,
+      filesCommitted: [],
+      filesReverted: [],
+      hasFileChanges: true,
+      job: queueMod.getJob(job.id),
+      leaseToken: lease.leaseToken,
+      output: "already absent",
+      pendingFileRequests: null,
+      preAssessAlreadyVerified: false,
+      preManifestState: null,
+      satisfiedNoop: true,
+      startTime: Date.now(),
+      verifiedNoChange: false,
+      wtPath: process.cwd(),
+    }, {
+      assessmentRetryFallbackReads: () => 0,
+      isAssessorParseRetryBudgetExceeded: () => ({ exceeded: false }),
+      isProviderError: () => false,
+      logBadInputFailure: () => {},
+      shouldFastPassArtifactAssessment: () => false,
+      shouldOverrideArtifactMissingFail: () => false,
+      shortJobTitle: (row) => row.title,
+      syncAssessorWorkerDisplay: () => { assessorDisplaySynced = true; },
+    });
+
+    const refreshed = queueMod.getJob(job.id);
+    const attempts = queueMod.getAttempts(job.id);
+    const assessedEvents = queueMod.getEvents(job.id, 20).filter((event) => event.event_type === "job.assessed");
+
+    assert.equal(refreshed.status, "succeeded");
+    assert.equal(refreshed.assessor_verdict, "pass");
+    assert.equal(refreshed.assessor_confidence, "high");
+    assert.equal(attempts.at(-1).status, "succeeded");
+    assert.equal(assessorDisplaySynced, true);
+    assert.equal(cleanedUp, true);
+    assert.ok(events.some((line) => String(line).includes("[assessor]") && String(line).includes("deterministic no-op pass")));
+    assert.equal(assessedEvents.length, 1);
+    assert.match(assessedEvents[0].message, /Deterministic no-op pass/);
   });
 
   it("passes assessment scope through for Codex read-only verification", async () => {

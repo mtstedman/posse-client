@@ -17,7 +17,8 @@ import { POSSE_MCP_GATEWAY_TRANSPORT } from "./mcp-gateway.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View as AtlasView } from "../../atlas/classes/v2/View.js";
 import { Warmer } from "../../atlas/classes/v2/Warmer.js";
-import { resolveTargetBranch } from "../../git/functions/target-branch.js";
+import { resolveTargetBranch, resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
+import { gitCurrentHashAsync } from "../../git/functions/utils.js";
 import { ledgerBranchForWi } from "../../atlas/functions/v2/runtime-paths.js";
 import { describeScipStagingState, ensureScipStaged } from "../../atlas/functions/v2/scip/stager.js";
 import { listScipFiles } from "../../atlas/functions/v2/scip/ingester.js";
@@ -297,6 +298,18 @@ function resolveAtlasBaselineBranch(repoRoot = null) {
   }
 }
 
+// Async twin for in-session call sites (freshness gate, warm jobs, runtime
+// mounts): branch resolution is a native git call (~50–95ms), and the sync
+// form blocks the orchestrator event loop — a visible TUI hiccup every time
+// the warm route fires.
+async function resolveAtlasBaselineBranchAsync(repoRoot = null) {
+  try {
+    return await resolveTargetBranchAsync(repoRoot || process.cwd());
+  } catch {
+    return "main";
+  }
+}
+
 function parseAtlasWarmPayload(value) {
   if (!value) return {};
   try {
@@ -321,26 +334,18 @@ function atlasWarmPayloadIsMainRefresh(payload = {}, targetBranch = "main") {
   return atlasWarmPayloadTargetBranch(payload, targetBranch) === String(targetBranch || "main");
 }
 
-function currentGitHead(cwd = process.cwd()) {
+async function currentGitHeadAsync(cwd = process.cwd()) {
   try {
-    const out = spawnSync("git", ["rev-parse", "HEAD"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 5000,
-      windowsHide: true,
-    });
-    if (Number.isInteger(out.status) && out.status !== 0) return "";
-    return String(out.stdout || "").trim();
+    return String(await gitCurrentHashAsync(cwd, { timeoutMs: 5000 }) || "").trim();
   } catch {
     return "";
   }
 }
 
-export function listPendingAtlasMainWarmJobs({ cwd = null, config = getAtlasIntegrationConfig(), targetBranch = null } = {}) {
+export async function listPendingAtlasMainWarmJobs({ cwd = null, config = getAtlasIntegrationConfig(), targetBranch = null } = {}) {
   if (!config?.enabled || !isAtlasIndexMaintenanceEnabled(config)) return [];
   const storage = repoStorageFor({ cwd, config });
-  const branch = String(targetBranch || resolveAtlasBaselineBranch(storage.repoRoot) || "main").trim() || "main";
+  const branch = String(targetBranch || await resolveAtlasBaselineBranchAsync(storage.repoRoot) || "main").trim() || "main";
   const db = getDb();
   const rows = db.prepare(`
     SELECT id, work_item_id, status, priority, payload_json, ready_at, lease_owner, lease_expires_at, updated_at
@@ -365,7 +370,7 @@ export function listPendingAtlasMainWarmJobs({ cwd = null, config = getAtlasInte
     .filter((row) => atlasWarmPayloadIsMainRefresh(row.payload, branch));
 }
 
-export function requestAtlasMainRefreshForFreshnessGate({
+export async function requestAtlasMainRefreshForFreshnessGate({
   cwd = null,
   config = getAtlasIntegrationConfig(),
   targetBranch = null,
@@ -378,8 +383,8 @@ export function requestAtlasMainRefreshForFreshnessGate({
     return { ok: false, attempted: false, skipped: "atlas_v2_emission_disabled", backend: "atlas-v2" };
   }
   const storage = repoStorageFor({ cwd, config });
-  const branch = String(targetBranch || resolveAtlasBaselineBranch(storage.repoRoot) || "main").trim() || "main";
-  const head = currentGitHead(storage.repoRoot);
+  const branch = String(targetBranch || await resolveAtlasBaselineBranchAsync(storage.repoRoot) || "main").trim() || "main";
+  const head = await currentGitHeadAsync(storage.repoRoot);
   const result = emitAtlasV2MainAdvanced({
     payload: {
       from_sha: "",
@@ -400,7 +405,7 @@ export function requestAtlasMainRefreshForFreshnessGate({
   };
 }
 
-export function checkAtlasMainFreshnessGate({
+export async function checkAtlasMainFreshnessGate({
   cwd = null,
   config = getAtlasIntegrationConfig(),
   targetBranch = null,
@@ -414,9 +419,9 @@ export function checkAtlasMainFreshnessGate({
   }
 
   const storage = repoStorageFor({ cwd, config });
-  const branch = String(targetBranch || resolveAtlasBaselineBranch(storage.repoRoot) || "main").trim() || "main";
+  const branch = String(targetBranch || await resolveAtlasBaselineBranchAsync(storage.repoRoot) || "main").trim() || "main";
   const runtimeExists = atlasWarmRuntimeExists(storage);
-  const pending = listPendingAtlasMainWarmJobs({ cwd: storage.repoRoot, config, targetBranch: branch });
+  const pending = await listPendingAtlasMainWarmJobs({ cwd: storage.repoRoot, config, targetBranch: branch });
   if (!runtimeExists) {
     const readiness = probeAtlasGraphReadiness({ cwd: storage.repoRoot, config });
     return {
@@ -456,13 +461,13 @@ export function checkAtlasMainFreshnessGate({
   }
 
   if (requestRefresh && config.autoRefreshStale !== false) {
-    const requested = requestAtlasMainRefreshForFreshnessGate({
+    const requested = await requestAtlasMainRefreshForFreshnessGate({
       cwd: storage.repoRoot,
       config,
       targetBranch: branch,
       reason: readiness.reason || "atlas_view_not_ready",
     });
-    const refreshedPending = listPendingAtlasMainWarmJobs({ cwd: storage.repoRoot, config, targetBranch: branch });
+    const refreshedPending = await listPendingAtlasMainWarmJobs({ cwd: storage.repoRoot, config, targetBranch: branch });
     if (requested.ok || refreshedPending.length > 0) {
       return {
         ready: false,
@@ -995,7 +1000,7 @@ async function v2JoinResultAsync(args = {}) {
   ensureParentDir(ctx.viewDbPath);
   const workItemId = args.workItemId ?? null;
   const ledgerBranch = workItemId != null ? ledgerBranchForWi(workItemId) : null;
-  const baselineBranch = resolveAtlasBaselineBranch(ctx.repoRoot);
+  const baselineBranch = await resolveAtlasBaselineBranchAsync(ctx.repoRoot);
   let ledger = null;
   try {
     ledger = Ledger.open({ dbPath: ctx.ledgerDbPath });
@@ -1380,8 +1385,7 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
   }
   const storage = repoStorageFor({ cwd: opts?.cwd, config });
   await asyncBoundary();
-  const baselineBranch = resolveAtlasBaselineBranch(storage.repoRoot);
-  await asyncBoundary();
+  const baselineBranch = await resolveAtlasBaselineBranchAsync(storage.repoRoot);
   ensureParentDir(storage.ledgerDbPath);
   const [ledgerPresent, mainViewPresent] = await Promise.all([
     fs.promises.access(storage.ledgerDbPath).then(() => true, () => false),
@@ -1495,7 +1499,7 @@ export async function startAtlasPreflightIndex(opts = {}) {
     return { cold: false, attempted: false, ready: Promise.resolve({ attempted: false, skipped: "atlas_disabled", backend: "atlas-v2" }) };
   }
   const storage = repoStorageFor({ cwd: opts?.cwd, config });
-  const baselineBranch = resolveAtlasBaselineBranch(storage.repoRoot);
+  const baselineBranch = await resolveAtlasBaselineBranchAsync(storage.repoRoot);
   const [ledgerPresent, mainViewPresent] = await Promise.all([
     fs.promises.access(storage.ledgerDbPath).then(() => true, () => false),
     fs.promises.access(storage.mainViewDbPath).then(() => true, () => false),
@@ -1624,7 +1628,7 @@ export async function warmAtlasMergedToMainNow(opts = {}) {
   }
 
   const storage = repoStorageFor({ cwd: opts?.cwd, config });
-  const targetBranch = String(opts?.targetBranch || resolveAtlasBaselineBranch(storage.repoRoot) || "main").trim() || "main";
+  const targetBranch = String(opts?.targetBranch || await resolveAtlasBaselineBranchAsync(storage.repoRoot) || "main").trim() || "main";
   const sourceBranch = String(opts?.sourceBranch || ledgerBranchForWi(workItemId)).trim();
   ensureParentDir(storage.ledgerDbPath);
 

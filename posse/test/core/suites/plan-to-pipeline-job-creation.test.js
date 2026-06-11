@@ -21,6 +21,7 @@ import {
   normalizePromoteMappings,
   artifactsDir,
   workItemArtifactRoot,
+  stripDisplayAnsi,
 } from "../support/core-harness.js";
 
 let db;
@@ -554,6 +555,52 @@ suite("Plan to pipeline job creation", () => {
     const payload = JSON.parse(devJob.payload_json);
     assert.equal(payload.deepthink_budget, "xhigh");
     assert.equal(payload.deepthink, true);
+  });
+
+  it("logs budget and policy reasoning changes with their actual cause", () => {
+    const { queueMod, workerMod } = runtimeModules;
+    const wi = queueMod.createWorkItem("Reasoning cause", "desc");
+    const planJob = queueMod.createJob({
+      work_item_id: wi.id,
+      job_type: "plan",
+      title: "Plan: Reasoning cause",
+    });
+    const emitted = [];
+    const worker = new workerMod.Worker({
+      projectDir: path.resolve(__dirname, ".."),
+      silent: true,
+    });
+    worker.emit = (_jobId, message) => {
+      emitted.push(stripDisplayAnsi(message));
+    };
+
+    worker.createJobsFromPlan(planJob, [{
+      title: "Do budgeted risky thing",
+      job_type: "dev",
+      task_mode: "code",
+      task_spec: "Implement auth permission handling.",
+      model_tier: "cheap",
+      reasoning_effort: "medium",
+      deepthink_budget: "xhigh",
+      files_to_modify: ["src/auth-policy.js"],
+      files_to_create: [],
+      risk: 5,
+      risk_tags: ["auth"],
+      scope_confidence: "high",
+      test_command: "npm run test:auth:fast",
+      success_criteria: ["auth behavior updated"],
+      depends_on_index: [],
+    }]);
+
+    assert.ok(emitted.some((line) =>
+      line.includes('applied deepthink_budget="xhigh": reasoning_effort "medium" → "high" in task "Do budgeted risky thing"')
+    ));
+    assert.ok(!emitted.some((line) =>
+      line.includes('normalized reasoning_effort "medium" → "high" in task "Do budgeted risky thing"')
+    ));
+    assert.ok(emitted.some((line) =>
+      line.includes('policy adjusted model_tier "cheap" → "standard" in task "Do budgeted risky thing"')
+    ));
   });
 
   it("normalizes artifact-copy dev tasks into promote jobs", () => {
@@ -2137,6 +2184,85 @@ suite("Plan to pipeline job creation", () => {
     assert.equal(planPayload._planner_scope_recovery_reason, "under_scoped_code_tasks");
     const wiEvents = queueMod.getEventsByWorkItem(wi.id);
     assert.ok(wiEvents.some((evt) => evt.event_type === "plan.recovery_escalated"));
+  });
+
+  it("does not spawn a dropped under-scoped task when scoped sibling tasks survive", () => {
+    const { queueMod, workerMod } = runtimeModules;
+    const wi = queueMod.createWorkItem("Mixed scoped plan", "Drop vague work but keep scoped repairs", "normal", { mode: "build" });
+    const researchJob = queueMod.createJob({
+      work_item_id: wi.id,
+      job_type: "research",
+      title: "Research: Mixed scoped plan",
+    });
+    queueMod.updateJobStatus(researchJob.id, "succeeded");
+    queueMod.storeArtifact({
+      work_item_id: wi.id,
+      job_id: researchJob.id,
+      attempt_id: null,
+      artifact_type: "response",
+      content_long: `\`\`\`json\n${JSON.stringify({
+        key_files: [
+          "src/FlowInspector.tsx",
+          "src/FlowTransport.ts",
+          "src/useTransport.ts",
+          "src/player.ts",
+          "src/timer.ts",
+        ],
+        related_files: [],
+        patterns: {},
+        constraints: [],
+        questions_for_human: false,
+        questions: [],
+      }, null, 2)}\n\`\`\``,
+    });
+    const planJob = queueMod.createJob({
+      work_item_id: wi.id,
+      job_type: "plan",
+      title: "Plan: Mixed scoped plan",
+    });
+    const emitted = [];
+    const worker = new workerMod.Worker({
+      projectDir: path.resolve(__dirname, ".."),
+      silent: true,
+    });
+    worker.emit = (_jobId, message) => {
+      emitted.push(stripDisplayAnsi(message));
+    };
+
+    worker.createJobsFromPlan(planJob, [
+      {
+        title: "Remove stray duplicate FlowInspector implementation",
+        job_type: "dev",
+        task_mode: "code",
+        task_spec: "Remove the stray duplicate FlowInspector implementation wherever it exists.",
+        files_to_modify: [],
+        files_to_create: [],
+        files_to_delete: [],
+        create_roots: [],
+        success_criteria: ["Duplicate implementation removed"],
+        depends_on_index: [],
+      },
+      {
+        title: "Fix FlowInspector copy-timer robustness",
+        job_type: "dev",
+        task_mode: "code",
+        task_spec: "Fix the scoped copy-timer behavior in FlowInspector.",
+        files_to_modify: ["src/FlowInspector.tsx"],
+        files_to_create: [],
+        files_to_delete: [],
+        create_roots: [],
+        success_criteria: ["Copy timer behavior is robust"],
+        depends_on_index: [],
+      },
+    ]);
+
+    const devJobs = queueMod.listJobsByWorkItem(wi.id).filter((job) => job.parent_job_id === planJob.id && job.job_type === "dev");
+    assert.equal(devJobs.length, 1);
+    assert.equal(devJobs[0].title, "Fix FlowInspector copy-timer robustness");
+    assert.ok(!devJobs.some((job) => job.title === "Remove stray duplicate FlowInspector implementation"));
+    assert.ok(emitted.some((line) =>
+      line.includes('dropped under-scoped code task "Remove stray duplicate FlowInspector implementation"')
+    ));
   });
 
   it("warns but keeps broad narrow-scope code tasks when planner_under_scoped_broad_gate=warn", () => {

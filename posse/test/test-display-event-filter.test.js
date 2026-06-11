@@ -12,8 +12,8 @@ describe("Display event filtering", () => {
     const display = new Display({ concurrency: 1 });
 
     display.addEvent("[system] WI#127 job #195: started - ATLAS warm: refresh WI view");
-    display.addEvent("[system] [atlas-warm initializing] warming wi");
-    display.addEvent("[system] [atlas-warm scip] ingesting SCIP php.scip");
+    display.addEvent("[atlas] warm initializing: warming wi");
+    display.addEvent("[atlas] warm scip: ingesting SCIP php.scip");
     display.addEvent("[system] WI#127 job #195: succeeded (4.1s)");
     display.addEvent("[promote] WI#127 job #191: started - Promote images for UI");
     display.addEvent("[promote] WI#127 job #191: copied 2 file(s) -> abc1234");

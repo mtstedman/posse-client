@@ -271,7 +271,7 @@ export const SETTINGS_CATALOG = [
 
   // ── ATLAS integration ──────────────────────────────────────────────────────
   { key: "atlas_mode",                    default: "preferred",          options: ATLAS_MODE_VALUES, adminVisible: false, description: "Legacy ATLAS authority mode. preferred is the default alias for ATLAS v2 on." },
-  { key: "atlas_v2",                      default: "on",                 options: ATLAS_V2_MODE_VALUES, description: "ATLAS v2 backend mode: on/v2 by default; off disables ATLAS" },
+  { key: "atlas_v2",                      default: "on",                 options: ATLAS_V2_MODE_VALUES, description: "ATLAS v2 backend mode. The pipeline contract (research seed handoffs, tree prefetch, symbol cards) assumes on; off is a degraded-compatibility escape hatch (broken native binary, CI, kill switch) where agents fall back to raw read/search tools." },
   { key: "atlas_parse_max_parallel",       default: "",                   numeric: { integer: true, min: 1 }, adminVisible: false, description: "Internal Atlas Parse maximum concurrent SCIP-stage subprocesses (empty = computed from languages and CPU)" },
   { key: "atlas_parse_per_lang_tandem",    default: "true",               valueType: "boolean", adminVisible: false, description: "Internal Atlas Parse tandem tree-sitter/SCIP staging flag" },
   { key: "atlas_parse_file_progress_throttle_ms", default: "100",         numeric: { integer: true, min: 0 }, adminVisible: false, description: "Internal Atlas Parse filename progress throttle in milliseconds; 0 emits every event" },

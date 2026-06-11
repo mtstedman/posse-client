@@ -1,5 +1,5 @@
 import { forceUpdateJobStatus, listJobsByWorkItem, logEvent } from "../../../queue/functions/index.js";
-import { STALE_CANCELABLE_JOB_STATUSES } from "../../../queue/functions/common.js";
+import { ACTIVE_LEASE_STATUSES, STALE_CANCELABLE_JOB_STATUSES } from "../../../queue/functions/common.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
@@ -16,9 +16,15 @@ export function cancelSupersededPlanChildren(worker, planJob) {
   if (olderPlanIds.size === 0) return 0;
 
   const staleStatuses = new Set(STALE_CANCELABLE_JOB_STATUSES);
+  const activeStatuses = new Set(ACTIVE_LEASE_STATUSES);
   let canceledCount = 0;
+  let activeOlderCount = 0;
   for (const job of allJobs) {
     if (!olderPlanIds.has(job.parent_job_id)) continue;
+    if (activeStatuses.has(job.status)) {
+      activeOlderCount += 1;
+      continue;
+    }
     if (!staleStatuses.has(job.status)) continue;
     if (!forceUpdateJobStatus(job.id, "canceled")) continue;
     canceledCount += 1;
@@ -31,8 +37,11 @@ export function cancelSupersededPlanChildren(worker, planJob) {
       event_json: JSON.stringify({ superseding_plan_id: planJob.id, stale_plan_id: job.parent_job_id }),
     });
   }
-  if (canceledCount > 0) {
-    worker?.emit?.(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: canceled ${canceledCount} queued job(s) from older plan wave(s)`);
+  if (canceledCount > 0 || activeOlderCount > 0) {
+    const parts = [];
+    if (canceledCount > 0) parts.push(`canceled ${canceledCount} queued job(s) from older plan wave(s)`);
+    if (activeOlderCount > 0) parts.push(`${activeOlderCount} active older-plan job(s) already running`);
+    worker?.emit?.(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: ${parts.join("; ")}`);
   }
   return canceledCount;
 }

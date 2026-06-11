@@ -21,19 +21,21 @@ describe("ATLAS warm readiness state", () => {
     __resetWarmReadinessForTests();
   });
 
+  // The ATLAS composite is stage-anchored: the "view" stage owns the 70–90
+  // slice of the bar, so view@40% renders as 70 + 0.4·20 = 78 composite.
   it("non-embedding stages drive ATLAS; embeddings drive ONNX", () => {
     const t = 1_000;
     warmReadinessStarted(t);
     warmReadinessProgress({ stage: "view", percent: 40, language: "php" }, t + 1);
     let r = getWarmReadiness(t + 2);
     assert.equal(r.active, true);
-    assert.equal(r.atlas, 40);
+    assert.equal(r.atlas, 78);
     assert.equal(r.onnx, null, "ONNX untouched by atlas stages");
     assert.equal(r.lang, "php");
 
     warmReadinessProgress({ stage: "embeddings", percent: 25, language: "ts" }, t + 3);
     r = getWarmReadiness(t + 4);
-    assert.equal(r.atlas, 40, "ATLAS held while ONNX advances");
+    assert.equal(r.atlas, 78, "ATLAS held while ONNX advances");
     assert.equal(r.onnx, 25);
     assert.equal(r.lang, "ts");
   });
@@ -44,7 +46,7 @@ describe("ATLAS warm readiness state", () => {
     warmReadinessProgress({ stage: "view", percent: 60 }, t + 1);
     warmReadinessProgress({ stage: "encoding", percent: 35, language: "js" }, t + 2);
     const r = getWarmReadiness(t + 3);
-    assert.equal(r.atlas, 60, "ATLAS untouched by encode-loop events");
+    assert.equal(r.atlas, 82, "ATLAS untouched by encode-loop events");
     assert.equal(r.onnx, 35, "per-symbol encode progress lands on the ONNX bar");
   });
 
@@ -58,6 +60,49 @@ describe("ATLAS warm readiness state", () => {
     assert.equal(r.atlas, 100);
     assert.equal(r.onnx, null, "no embeddings ever observed — stays unknown");
     assert.equal(r.stage, "ready");
+  });
+
+  it("a second language starting at 0% never drags the composite backwards", () => {
+    const t = 1_700;
+    warmReadinessStarted(t);
+    const samples = [];
+    const tick = (event, offset) => {
+      warmReadinessProgress(event, t + offset);
+      samples.push(getWarmReadiness(t + offset).atlas);
+    };
+    tick({ stage: "parsing", percent: 50, language: "php" }, 1);   // parse slice 25–70 → 47.5
+    tick({ stage: "parsing", percent: 100, language: "php" }, 2);  // → 70
+    tick({ stage: "parsing", percent: 0, language: "typescript" }, 3);   // mean drops; ratchet holds 70
+    tick({ stage: "parsing", percent: 60, language: "typescript" }, 4);  // still under the ratchet
+    tick({ stage: "view", percent: 50, language: null }, 5);       // view slice 70–90 → 80
+    for (let i = 1; i < samples.length; i++) {
+      assert.ok(samples[i] >= samples[i - 1], `composite regressed at sample ${i}: ${samples.join(", ")}`);
+    }
+    assert.equal(samples[1], 70, "php parse completion fills the parse slice");
+    assert.equal(samples[2], 70, "typescript@0% plateaus instead of resetting to 0");
+    assert.equal(samples[4], 80, "view progress resumes the sweep");
+  });
+
+  it("the composite never reads 100 while the warm is still active", () => {
+    const t = 1_800;
+    warmReadinessStarted(t);
+    warmReadinessProgress({ stage: "view", percent: 100 }, t + 1);
+    warmReadinessProgress({ stage: "tree", percent: 100 }, t + 2);
+    assert.ok(getWarmReadiness(t + 3).atlas < 100, "done()/seed() own the 100");
+    warmReadinessDone(true, t + 4);
+    assert.equal(getWarmReadiness(t + 5).atlas, 100);
+  });
+
+  it("unknown stages tick liveness but do not move the bar", () => {
+    const t = 1_900;
+    warmReadinessStarted(t);
+    warmReadinessProgress({ stage: "view", percent: 50 }, t + 1);
+    const before = getWarmReadiness(t + 2).atlas;
+    warmReadinessProgress({ stage: "mystery-stage", percent: 5 }, t + 3);
+    const r = getWarmReadiness(t + 4);
+    assert.equal(r.atlas, before, "unweighted stage left the composite alone");
+    assert.equal(r.active, true);
+    assert.equal(r.stage, "mystery-stage");
   });
 
   it("done(success) rests ONNX at 100 when embeddings did run", () => {
@@ -93,7 +138,7 @@ describe("ATLAS warm readiness state", () => {
     warmReadinessDone(false, t + 2);
     const r = getWarmReadiness(t + 3);
     assert.equal(r.active, false);
-    assert.equal(r.atlas, 55, "partial progress retained on failure");
+    assert.equal(r.atlas, 81, "partial progress retained on failure");
     assert.equal(r.stage, "incomplete");
   });
 
@@ -102,7 +147,10 @@ describe("ATLAS warm readiness state", () => {
     warmReadinessStarted(t);
     warmReadinessProgress({ stage: "view", percent: 30 }, t + 1);
     assert.equal(getWarmReadiness(t + 100).active, true, "fresh tick is active");
-    assert.equal(getWarmReadiness(t + 10_000).active, false, "stale tick reads idle");
+    // Legitimately-quiet phases (view merge, ONNX model load) can go tens of
+    // seconds without a percent — they must NOT flash the resting label.
+    assert.equal(getWarmReadiness(t + 10_000).active, true, "quiet phase stays active");
+    assert.equal(getWarmReadiness(t + 60_000).active, false, "stale tick reads idle");
   });
 
   it("seed rests the bars from real boot state and records enablement", () => {
@@ -124,7 +172,7 @@ describe("ATLAS warm readiness state", () => {
     warmReadinessProgress({ stage: "encoding", percent: 20 }, t + 2);
     warmReadinessSeed({ atlasEnabled: true, onnxEnabled: true }, t + 3);
     const r = getWarmReadiness(t + 4);
-    assert.equal(r.atlas, 45, "live partial kept");
+    assert.equal(r.atlas, 79, "live partial kept");
     assert.equal(r.onnx, 20, "live partial kept");
     assert.equal(r.onnxEnabled, true);
   });

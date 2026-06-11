@@ -199,7 +199,7 @@ function namespaceOf(action) {
 function actionTags(action) {
   const ns = namespaceOf(action);
   const tags = new Set([ns]);
-  if (["symbol.search", "symbol.getCard", "symbol.getCards", "symbol.usages", "tree.overview", "tree.scope", "slice.build", "edit.plan", "context"].includes(action)) tags.add("query");
+  if (["symbol.search", "symbol.getCard", "symbol.getCards", "symbol.usages", "tree.overview", "tree.walk", "tree.scope", "tree.grow", "slice.build", "edit.plan", "context"].includes(action)) tags.add("query");
   if (["buffer.push", "buffer.checkpoint", "memory.store", "memory.remove", "policy.set", "agent.feedback", "index.refresh", "scip.ingest"].includes(action)) tags.add("mutates");
   if (action === "workflow" || action.startsWith("runtime.")) tags.add("orchestration");
   return [...tags].filter(Boolean);
@@ -210,8 +210,10 @@ function examplesFor(action) {
     "symbol.search": [{ action, query: "auth middleware", limit: 5 }],
     "symbol.getCard": [{ action, symbolId: "<symbolId>", includeResolutionMetadata: true }],
     "symbol.usages": [{ action, symbolId: "<symbolId>", kind: ["calls", "references"], limit: 25 }],
-    "tree.overview": [{ action, path: "lib/domains/atlas", maxDepth: 2, limit: 50 }],
+    "tree.overview": [{ action, maxDepth: 2, limit: 50 }],
+    "tree.walk": [{ action, path: "lib/domains/atlas", maxDepth: 2, limit: 50 }],
     "tree.scope": [{ action, taskText: "fix auth middleware regression", maxFiles: 40, branchFileCap: 20 }],
+    "tree.grow": [{ action, paths: ["lib/auth/middleware.ts"], maxFiles: 40, branchFileCap: 20 }],
     "slice.build": [{ action, taskText: "debug auth middleware", budget: { maxCards: 8 } }],
     "edit.plan": [{ action, targetSymbols: ["<symbolId>"], search: "oldName", replace: "newName" }],
     "code.needWindow": [{ action, symbolId: "<symbolId>", reason: "Need implementation details after card/skeleton", identifiersToFind: ["handler"], expectedLines: 80 }],
@@ -226,8 +228,9 @@ function prerequisitesFor(action) {
   if (action === "repo.register") return ["A repoRoot must be available in params or dispatch context."];
   if (action === "index.refresh") return ["The repo should be registered or have a writable ATLAS ledger path."];
   if (action === "symbol.getCard" || action === "symbol.getCards" || action === "symbol.usages") return ["Use symbol.search first when you do not already have a symbolId."];
-  if (action === "tree.overview") return ["Run index.refresh first if tree-derived state is missing or stale."];
-  if (action === "tree.scope") return ["Use taskText and/or seeds from symbol.search, tree.overview, or known file scope."];
+  if (action === "tree.overview" || action === "tree.walk") return ["Run index.refresh first if tree-derived state is missing or stale."];
+  if (action === "tree.scope") return ["Prefetch-only: the handoff runs this with the full task text. Agents should use tree.grow with validated seeds instead."];
+  if (action === "tree.grow") return ["Seed with files/areas already validated (from the brief, tree.walk, or symbol.usages locations)."];
   if (action.startsWith("slice.") || action === "context") return ["Start from symbol.search, symbol.getCard, or taskText."];
   if (action === "edit.plan") return ["Resolve target symbols with symbol.search or target files with file.read/search first."];
   if (action.startsWith("runtime.")) return ["Runtime execution must be enabled by ATLAS policy."];
@@ -238,10 +241,12 @@ function prerequisitesFor(action) {
 function nextActionsFor(action) {
   const next = {
     "symbol.search": ["symbol.getCard", "symbol.usages", "slice.build", "code.getSkeleton"],
-    "symbol.getCard": ["symbol.usages", "tree.overview", "tree.scope", "slice.build", "code.needWindow", "agent.feedback"],
-    "symbol.usages": ["symbol.getCard", "tree.overview", "tree.scope", "slice.build", "code.needWindow"],
-    "tree.overview": ["tree.scope", "symbol.getCard", "slice.build", "code.getSkeleton"],
+    "symbol.getCard": ["symbol.usages", "tree.walk", "tree.scope", "slice.build", "code.needWindow", "agent.feedback"],
+    "symbol.usages": ["symbol.getCard", "tree.walk", "tree.scope", "slice.build", "code.needWindow"],
+    "tree.overview": ["tree.walk", "tree.scope", "symbol.getCard", "slice.build", "code.getSkeleton"],
+    "tree.walk": ["tree.grow", "symbol.getCard", "slice.build", "code.getSkeleton"],
     "tree.scope": ["slice.build", "context", "code.getSkeleton", "pr.risk.analyze"],
+    "tree.grow": ["tree.walk", "code.getSkeleton", "symbol.search", "slice.build"],
     "slice.build": ["slice.refresh", "agent.feedback", "context"],
     "edit.plan": ["code.getSkeleton", "code.getHotPath", "file.read"],
     "repo.register": ["index.refresh", "repo.status"],

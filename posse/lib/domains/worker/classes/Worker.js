@@ -3284,7 +3284,7 @@ export class Worker {
     }
     const priorDeferrals = atlasFreshnessDeferralCount(payload);
     const config = getAtlasIntegrationConfig();
-    const gate = checkAtlasMainFreshnessGate({
+    const gate = await checkAtlasMainFreshnessGate({
       cwd: this.projectDir,
       config,
       requestRefresh: priorDeferrals < ATLAS_FRESHNESS_GATE_MAX_DEFERRALS,

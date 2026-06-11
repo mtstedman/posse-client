@@ -22,7 +22,7 @@ import { repoRegister, repoStatus, indexRefresh, repoOverview, repoQuality } fro
 import { bufferPush, bufferCheckpoint, bufferStatus, makeOverlayReadFile } from "./buffer.js";
 import { symbolGetCard, symbolGetCards } from "./symbol-card.js";
 import { symbolUsages } from "./usages.js";
-import { treeOverview, treeScope } from "./tree.js";
+import { treeGrow, treeOverview, treeScope, treeWalk } from "./tree.js";
 import { codeGetSkeleton, codeGetHotPath, codeNeedWindow } from "./code.js";
 import { contextBuild, contextSummary, agentFeedback, agentFeedbackQuery } from "./context.js";
 import { fileRead } from "./file-read.js";
@@ -212,6 +212,14 @@ function dispatchImpl(call, ctx) {
       }));
     case "symbol.getCard":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
+      // Unified single/batch: symbolIds (or symbolRefs/cards arrays) answer in
+      // the batch shape under the requested action; symbol.getCards remains a
+      // legacy alias of the batch path.
+      if ((Array.isArray(call.symbolIds) && call.symbolIds.length > 0)
+        || (Array.isArray(call.symbolRefs) && call.symbolRefs.length > 0)
+        || (Array.isArray(call.cards) && call.cards.length > 0)) {
+        return /** @type {any} */ (symbolGetCards({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId, action: "symbol.getCard" }));
+      }
       return /** @type {any} */ (symbolGetCard({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "symbol.getCards":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
@@ -222,9 +230,15 @@ function dispatchImpl(call, ctx) {
     case "tree.overview":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (treeOverview({ view: ctx.view, versionId: ctx.versionId, params: call }));
+    case "tree.walk":
+      if (!ctx.view) return notIndexed(action, ctx.versionId);
+      return /** @type {any} */ (treeWalk({ view: ctx.view, versionId: ctx.versionId, params: call }));
     case "tree.scope":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (treeScope({ view: ctx.view, versionId: ctx.versionId, params: call }));
+    case "tree.grow":
+      if (!ctx.view) return notIndexed(action, ctx.versionId);
+      return /** @type {any} */ (treeGrow({ view: ctx.view, versionId: ctx.versionId, params: call }));
     case "slice.build":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (sliceBuild({
@@ -325,7 +339,9 @@ const GATEWAY_ACTIONS = Object.freeze({
     "symbol.getCards",
     "symbol.usages",
     "tree.overview",
+    "tree.walk",
     "tree.scope",
+    "tree.grow",
     "slice.build",
     "slice.refresh",
     "slice.spillover.get",

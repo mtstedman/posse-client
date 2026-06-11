@@ -20,7 +20,7 @@ import {
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { ATLAS_WARM_JOB_POLICY } from "../../../atlas/functions/v2/contracts/jobs.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
-import { resolveTargetBranch } from "../../../git/functions/target-branch.js";
+import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.js";
 import { ledgerDbPath, mainViewPath } from "../../../atlas/functions/v2/runtime-paths.js";
 import { getSharedConductor } from "../../../atlas/functions/v2/parse/conductor.js";
 import { warmReadinessStarted, warmReadinessProgress, warmReadinessDone } from "../../../atlas/functions/v2/warm-progress.js";
@@ -52,9 +52,11 @@ function clampPaths(paths, max = 100) {
   return out;
 }
 
-function resolveAtlasWarmBaselineBranch(repoRoot) {
+// Async on purpose: this runs on the orchestrator main loop at every warm
+// dispatch, and the sync native-git resolve was a visible TUI hiccup.
+async function resolveAtlasWarmBaselineBranch(repoRoot) {
   try {
-    return resolveTargetBranch(repoRoot);
+    return await resolveTargetBranchAsync(repoRoot);
   } catch {
     return "main";
   }
@@ -93,7 +95,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
     const payload = parseJobPayload(job) || {};
     const purpose = String(payload.purpose || "wi");
     const repoRoot = resolveAtlasRepoRoot(worker);
-    const baselineBranch = resolveAtlasWarmBaselineBranch(repoRoot);
+    const baselineBranch = await resolveAtlasWarmBaselineBranch(repoRoot);
     const branch = typeof payload.branch === "string" ? payload.branch : (purpose === "wi" ? null : baselineBranch);
     const paths = clampPaths(payload.paths);
     const config = getAtlasIntegrationConfig();
@@ -191,7 +193,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
     }
     const msg = err?.message || String(err);
     const verbose = isVerboseAtlasErrors();
-    worker.emit(job.id, `${C.yellow}[atlas-warm] job #${job.id} failed: ${msg}${C.reset}`);
+    worker.emit(job.id, `${C.yellow}[atlas] warm job #${job.id} failed: ${msg}${C.reset}`);
     logAtlasError(`[atlas-warm] job #${job.id} threw:`, err);
     completeAttempt(attempt.attempt.id, {
       status: "failed",
@@ -305,7 +307,7 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
     // failure here is a real bug, not "not ready" — surface it.
     const message = /** @type {any} */ (err)?.message || String(err);
     try {
-      worker.emit(jobId, `${C.yellow}[atlas-warm] real warmer failed: ${message}${C.reset}`);
+      worker.emit(jobId, `${C.yellow}[atlas] warm failed: ${message}${C.reset}`);
     } catch { /* ignore */ }
     logAtlasError(`[atlas-warm] runRealWarmer threw (job #${jobId}):`, err);
     if (isVerboseAtlasErrors()) {
@@ -329,7 +331,7 @@ function emitAtlasWarmProgress(worker, jobId, event = {}) {
   if (!text) return;
   const stage = typeof event?.stage === "string" && event.stage.trim() ? ` ${event.stage.trim()}` : "";
   try {
-    worker?.emit?.(jobId, `${C.dim}[atlas-warm${stage}] ${text}${C.reset}`);
+    worker?.emit?.(jobId, `${C.dim}[atlas] warm${stage}: ${text}${C.reset}`);
   } catch {
     // Progress is observational.
   }

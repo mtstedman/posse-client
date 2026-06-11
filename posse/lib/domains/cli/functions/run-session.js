@@ -1658,6 +1658,8 @@ export class RunSession {
   const onBeforeLoop = async () => {
     let bootAtlasProgress = null;
     let bootScipProgress = null;
+    let lastAtlasBootActivityEventKey = null;
+    let lastScipBootActivityEventKey = null;
     const parseAtlasProgressPercent = (value) => {
       const text = String(value || "");
       const percentMatch = text.match(/(?:^|[^\d])(\d{1,3})(?:\.\d+)?\s*%/);
@@ -1692,6 +1694,12 @@ export class RunSession {
       softTimeoutMs = null,
       softTimeoutDetail = "continuing in background",
       onSoftTimeout = null,
+      // Chip status at soft-timeout. "ok" (default) suits steps whose tail is
+      // genuinely fire-and-forget. Steps that still GATE boot after the
+      // soft-timeout (the ATLAS warm — the pre-TUI gate keeps waiting on the
+      // real task) must pass "running" so the hero gauge can't read 100%/ready
+      // while boot is in fact still blocked on them.
+      softTimeoutStatus = "ok",
     } = {}) => {
       const startedAt = Date.now();
       // Step-start diagnostic — pairs with "Boot readiness step complete" /
@@ -1744,9 +1752,41 @@ export class RunSession {
               });
             }
             updateBootStep(label, {
-              status: "ok",
+              status: softTimeoutStatus,
               detail: result.detail || "continuing in background",
             });
+            if (softTimeoutStatus === "running") {
+              // The step stays in-flight on the panel, so flip it to its true
+              // terminal state when the real task settles — otherwise the chip
+              // spins forever and the gauge never reaches an honest 100%.
+              // (An Enter-to-background can mark the step "deferred" first;
+              // this late settle then upgrades it to the real outcome.)
+              runTask.then(
+                (taskResult) => {
+                  const ok = isOk(taskResult);
+                  const detail = done(taskResult, ok);
+                  updateBootStep(label, { status: ok ? "ok" : "failed", detail, force: true });
+                  log?.info?.("run", "Boot readiness step complete", {
+                    label,
+                    ok,
+                    duration_ms: Date.now() - startedAt,
+                    detail,
+                    after_soft_timeout: true,
+                  });
+                },
+                (error) => {
+                  updateBootStep(label, {
+                    status: "failed",
+                    detail: `failed (${firstLine(error?.message || error)})`,
+                    force: true,
+                  });
+                  log?.warn?.("run", "Boot warmup failed after soft-timeout", {
+                    label,
+                    error: String(error?.message || error || "unknown"),
+                  });
+                },
+              );
+            }
             log?.info?.("run", "Boot readiness step soft-timeout", {
               label,
               duration_ms: durationMs,
@@ -2023,7 +2063,11 @@ export class RunSession {
           force: final || (!!text && text !== previousDetail),
         });
         if (display && text) {
-          display.addEvent(`${failed ? C.yellow : C.dim}SCIP: ${text}${C.reset}`);
+          const eventKey = `${failed ? "failed" : completed ? "complete" : "progress"}:${text.replace(/\s*\(\d+s elapsed\)$/i, "")}`;
+          if (failed || final || eventKey !== lastScipBootActivityEventKey) {
+            lastScipBootActivityEventKey = eventKey;
+            display.addEvent(`${failed ? C.yellow : C.dim}SCIP: ${text}${C.reset}`);
+          }
         }
       };
       const renderAtlasBootActivity = ({ elapsedMs = 0, final = false, ok = null, status = null, stage = null, detail = null, current = null, total = null } = {}) => {
@@ -2053,7 +2097,11 @@ export class RunSession {
         };
         updateBootStep("ATLAS warmup", patch);
         if (display && (final || detail)) {
-          display.addEvent(`${C.dim}ATLAS indexing: ${tail}${C.reset}`);
+          const eventKey = `${final ? "final" : "progress"}:${tail.replace(/\s*\(\d+s elapsed\)$/i, "")}`;
+          if (final || eventKey !== lastAtlasBootActivityEventKey) {
+            lastAtlasBootActivityEventKey = eventKey;
+            display.addEvent(`${C.dim}ATLAS indexing: ${tail}${C.reset}`);
+          }
         }
       };
       // Captures the per-language SYMBOL total from encoding events so the
@@ -2513,6 +2561,11 @@ export class RunSession {
         ? Math.max(0, Number(atlasWarmupBootConfig.bootSoftTimeoutMs))
         : 33 * 60 * 1000,
       softTimeoutDetail: "indexing — press Enter to background",
+      // The pre-TUI gate below keeps waiting on the warm after this step's
+      // soft-timeout, so the chip must stay "running": marking it ok here made
+      // the whole panel read 100%/ready while boot was still blocked on the
+      // warm (and only an Enter — or the warm finishing — would advance it).
+      softTimeoutStatus: "running",
       onSoftTimeout: () => {
         if (atlasBootBackgroundRequested) return;
         updateBootFooter("hit Enter to continue with ATLAS in the background");

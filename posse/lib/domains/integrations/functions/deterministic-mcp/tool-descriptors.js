@@ -1120,11 +1120,12 @@ const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.getCard": {
     type: "function",
     name: "atlas_symbol_get_card",
-    description: "Iris Rung 1 (~100 tokens). Fetch an ATLAS symbol card by opaque symbolId returned from ATLAS, or by symbolRef when you do not have an ID yet: signature, summary, callers/callees, and location.",
+    description: "Iris Rung 1 (~100 tokens). Fetch symbol card(s): pass symbolId (or symbolRef) for one card, or symbolIds for a batch answered as { cards, errors } with partial success. Signature, summary, callers/callees, and location.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID returned by symbol.search, symbol.getCard, slice.build, skeleton, or hot path results. Do not construct this from file paths or names." },
+        symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Batch mode: fetch up to 100 cards in one call; the result is { cards, errors } with per-symbol partial success." },
         symbolRef: {
           type: "object",
           description: "Fallback lookup when you do not have a symbolId. Prefer symbol.search first; use this for a concrete name plus optional file.",
@@ -1253,7 +1254,31 @@ const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.overview": {
     type: "function",
     name: "atlas_tree_overview",
-    description: "Code tree navigation. Inspect ATLAS parser-derived code containment by root, path, symbolId, nodeId, or cluster/process ref, returning bounded nodes with aggregate counts.",
+    description: "Top-level code tree orientation. Returns the root page of the ATLAS containment tree plus the compressed-tree labeled area map. Use tree.walk to drill into a specific branch.",
+    parameters: {
+      type: "object",
+      properties: {
+        nodeId: { type: "string", description: "Exact ATLAS tree node id, such as root, dir:src, file:src/run.ts, or a symbol node id." },
+        path: { type: "string", description: "Canonical repo-relative file or directory path to focus." },
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Stable ATLAS symbol ID/ref. Duplicated blobs may return multiple tree locations; pass path to disambiguate." },
+        refType: { type: "string", enum: ["cluster", "process"], description: "Direct leaf ref lookup type." },
+        refId: { type: "string", description: "Cluster/process id for ref lookup." },
+        maxDepth: { type: "integer", description: "Descendant depth from focused node(s). Default 1, max 8." },
+        limit: { type: "integer", description: "Maximum nodes to return. Default 100, max 500." },
+        offset: { type: "integer", description: "Page offset into the focused subtree." },
+        includeAggregates: { type: "boolean", description: "Include aggregate counts/raw metrics on each node. Default true." },
+        includeTerms: { type: "boolean", description: "Include generated search terms on each node. Default false." },
+        includeRefs: { type: "boolean", description: "Include direct cluster/process refs on returned nodes. Default false." },
+        includeLatestRun: { type: "boolean", description: "Include latest tree-derived build run metadata. Default true." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  "tree.walk": {
+    type: "function",
+    name: "atlas_tree_walk",
+    description: "Walk a code-tree branch. Focus a path, nodeId, symbolId, or cluster/process ref and page through its descendants with aggregate counts and compressed-tree area labels.",
     parameters: {
       type: "object",
       properties: {
@@ -1277,12 +1302,49 @@ const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.scope": {
     type: "function",
     name: "atlas_tree_scope",
-    description: "Code scope planning. Condense task text and/or code-tree seeds into bounded candidate files, accepted/rejected containment branches, refinement candidates, and deterministic scope/risk metrics for handoff policy.",
+    description: "Prefetch-only task scoping. The handoff runs this with the full task text; agents should use tree.grow (seed expansion), tree.walk, and symbol tools instead.",
     parameters: {
       type: "object",
       properties: {
         taskText: { type: "string", description: "Natural-language task, bug, or planning text to score against projected tree terms." },
         taskType: { type: "string", enum: ["debug", "review", "implement", "explain"], description: "Optional task type for test/scope hints." },
+        paths: { type: "array", items: { type: "string" }, description: "Repo-relative file or directory seeds." },
+        editedFiles: { type: "array", items: { type: "string" }, description: "Known or proposed repo-relative file scope seeds." },
+        path: { type: "string", description: "Single repo-relative file or directory seed." },
+        symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Opaque ATLAS symbol IDs to use as exact seeds." },
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Single opaque ATLAS symbol ID seed." },
+        nodeIds: { type: "array", items: { type: "string" }, description: "Exact tree node ids from tree.overview." },
+        refs: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              refType: { type: "string", enum: ["cluster", "process"] },
+              refId: { type: "string" },
+            },
+            required: ["refType", "refId"],
+            additionalProperties: false,
+          },
+          description: "Cluster/process refs as weak seeds; broad refs are rejected and reported.",
+        },
+        refType: { type: "string", enum: ["cluster", "process"], description: "Single ref type." },
+        refId: { type: "string", description: "Single cluster/process ref id." },
+        maxFiles: { type: "integer", description: "Maximum candidate files returned. Default 40, max 500." },
+        maxBranches: { type: "integer", description: "Maximum accepted containment branches. Default 12." },
+        branchFileCap: { type: "integer", description: "Maximum files under one accepted branch before it is treated as broad. Default 40." },
+        refMatchLimit: { type: "integer", description: "Maximum ref matches to score before treating the ref as broad. Default 50." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  "tree.grow": {
+    type: "function",
+    name: "atlas_tree_grow",
+    description: "Grow scope from validated seeds. Expand files/areas you already know matter into surrounding branches, sibling files, tests, and entrypoints, with deterministic scope/risk metrics. Use symbol.getCard/symbol.usages for symbol identity; use this for file/area breadth.",
+    parameters: {
+      type: "object",
+      properties: {
         paths: { type: "array", items: { type: "string" }, description: "Repo-relative file or directory seeds." },
         editedFiles: { type: "array", items: { type: "string" }, description: "Known or proposed repo-relative file scope seeds." },
         path: { type: "string", description: "Single repo-relative file or directory seed." },
@@ -2013,11 +2075,13 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "buffer.checkpoint": { access: "atlas", summary: "Clear or persist an ATLAS v2 editor buffer overlay." },
   "buffer.status": { access: "atlas", summary: "Inspect active ATLAS v2 editor buffer overlays." },
   "symbol.search": { access: "atlas", summary: "Search indexed symbols through ATLAS for targeted semantic discovery." },
-  "symbol.getCard": { access: "atlas", summary: "Fetch a symbol card through ATLAS without loading whole files." },
+  "symbol.getCard": { access: "atlas", summary: "Fetch one symbol card (symbolId/symbolRef) or a batch (symbolIds) without loading whole files." },
   "symbol.getCards": { access: "atlas", summary: "Batch fetch symbol cards through ATLAS with partial-success errors." },
   "symbol.usages": { access: "atlas", summary: "List compact call/reference sites for a symbol without full caller cards." },
-  "tree.overview": { access: "atlas", summary: "Inspect parser-derived code containment, path/symbol hierarchy, and aggregate counts." },
-  "tree.scope": { access: "atlas", summary: "Condense task/seeds into bounded candidate files plus deterministic scope, refinement, and risk metrics." },
+  "tree.overview": { access: "atlas", summary: "Top-level code-tree orientation: root containment page plus the compressed-tree labeled area map." },
+  "tree.walk": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels." },
+  "tree.scope": { access: "atlas", summary: "Prefetch-only task scoping; agents use tree.grow for seed expansion instead." },
+  "tree.grow": { access: "atlas", summary: "Grow scope from validated seed files/areas: surrounding branches, siblings, tests, entrypoints, risk metrics." },
   "slice.build": { access: "atlas", summary: "Build a task-scoped ATLAS slice for bounded dependency context." },
   "slice.refresh": { access: "atlas", summary: "Refresh an ATLAS slice incrementally instead of rebuilding from scratch." },
   "edit.plan": { access: "atlas", summary: "Preview symbol/file-scoped edit candidates with preconditions before using write tools." },
@@ -2094,12 +2158,13 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
         "repo.status",
         "repo.overview",
         "tree.overview",
+        "tree.walk",
         "tree.scope",
+        "tree.grow",
         "repo.quality",
         "buffer.status",
         "symbol.search",
         "symbol.getCard",
-        "symbol.getCards",
         "symbol.usages",
         "slice.build",
         "slice.refresh",
@@ -2126,7 +2191,9 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
         "repo.status",
         "repo.overview",
         "tree.overview",
+        "tree.walk",
         "tree.scope",
+        "tree.grow",
         "repo.quality",
         "buffer.status",
         "slice.build",
@@ -2135,7 +2202,6 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
         "context.summary",
         "symbol.search",
         "symbol.getCard",
-        "symbol.getCards",
         "symbol.usages",
         "code.getSkeleton",
         "code.getHotPath",
@@ -2154,7 +2220,9 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
         "repo.status",
         "repo.overview",
         "tree.overview",
+        "tree.walk",
         "tree.scope",
+        "tree.grow",
         "repo.quality",
         "buffer.status",
         "symbol.search",
@@ -2162,7 +2230,6 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
         "pr.risk.analyze",
         "delta.get",
         "symbol.getCard",
-        "symbol.getCards",
         "symbol.usages",
         "slice.build",
         "slice.refresh",
@@ -2186,12 +2253,13 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
         "repo.status",
         "repo.overview",
         "tree.overview",
+        "tree.walk",
         "tree.scope",
+        "tree.grow",
         "repo.quality",
         "buffer.status",
         "symbol.search",
         "symbol.getCard",
-        "symbol.getCards",
         "symbol.usages",
         "slice.build",
         "slice.refresh",
@@ -2237,7 +2305,9 @@ export const GATED_ROLES = new Set(["researcher", "planner", "dev", "assessor"])
 export const MEANINGFUL_ATLAS_ACTIONS = new Set([
   "repo.overview",
   "tree.overview",
+  "tree.walk",
   "tree.scope",
+  "tree.grow",
   "symbol.search",
   "symbol.getCard",
   "symbol.getCards",
@@ -2794,6 +2864,18 @@ const ATLAS_FALLBACK_ONLY_ACTIONS = new Set([
   "file.read",
 ]);
 
+// Actions the handoff prefetch runs on the agent's behalf with better input
+// (full task text) than the agent could reconstruct — kept in role routes so
+// the prefetch can use them, but never advertised to the agent. Agents get
+// tree.grow (seed expansion) instead.
+const ATLAS_PREFETCH_ONLY_ACTIONS = new Set([
+  "tree.scope",
+]);
+
+export function isPrefetchOnlyAtlasTool(name) {
+  return ATLAS_PREFETCH_ONLY_ACTIONS.has(stripAtlasPrefix(name));
+}
+
 function stripAtlasPrefix(name) {
   const raw = String(name || "");
   if (raw.startsWith("atlas.")) return raw.slice("atlas.".length);
@@ -2815,7 +2897,9 @@ export function isExternallyRoutedAtlasTool(name) {
   // policy.get, usage.stats, etc.). Those actions are routed/allowed for the
   // role even though they are not advertised as standalone enum values; only
   // mutating and fallback-only actions are stripped from the role route.
-  return !isBlockedFoldedAtlasTool(action) && !isFallbackOnlyAtlasTool(action);
+  return !isBlockedFoldedAtlasTool(action)
+    && !isFallbackOnlyAtlasTool(action)
+    && !ATLAS_PREFETCH_ONLY_ACTIONS.has(action);
 }
 
 export function buildNativeToolDescriptor(schema) {

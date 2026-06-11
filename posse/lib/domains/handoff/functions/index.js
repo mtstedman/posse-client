@@ -55,6 +55,7 @@ import {
 import {
   extractResearcherFiles as extractResearcherFilesFromModule,
   normalizeResearcherFilePriorities as normalizeResearcherFilePrioritiesFromModule,
+  normalizeResearcherKeySymbols as normalizeResearcherKeySymbolsFromModule,
   parseResearcherStructuredOutput as parseResearcherStructuredOutputFromModule,
   researcherOutputNeedsHuman as researcherOutputNeedsHumanFromModule,
 } from "./helpers/researcher-output.js";
@@ -1803,6 +1804,10 @@ export function researcherOutputNeedsHuman(output) {
 
 export function extractResearcherFiles(artifacts) {
   return extractResearcherFilesFromModule(artifacts);
+}
+
+export function normalizeResearcherKeySymbols(parsed, maxItems = 24) {
+  return normalizeResearcherKeySymbolsFromModule(parsed, maxItems);
 }
 
 export function normalizeResearcherFilePriorities(parsed) {

@@ -19,6 +19,7 @@ import { getRetrievalCache, RetrievalCache } from "../lib/domains/atlas/classes/
 import { sha256Hex } from "../lib/domains/atlas/functions/v2/hash.js";
 import { refreshGraphDerivedState } from "../lib/domains/atlas/functions/v2/graph-derived.js";
 import { readTreeOverview, refreshTreeDerivedState, treeDerivedInputSignature } from "../lib/domains/atlas/functions/v2/tree-derived.js";
+import { ensureTreeCompressionTables } from "../lib/domains/atlas/functions/v2/tree-compression.js";
 import { readSemanticEnrichmentStatus } from "../lib/domains/atlas/functions/v2/semantic-enrichment.js";
 import { recordLiveBufferEvent, liveReconciliationStatus } from "../lib/domains/atlas/functions/v2/live-reconciliation.js";
 import { ATLAS_TOOL_ACTIONS } from "../lib/domains/atlas/functions/v2/contracts/tool-params.js";
@@ -814,6 +815,112 @@ describe("retrieval dispatcher", () => {
       assert.ok(broadSeedScope.data.refinementCandidates.some((candidate) => candidate.path === "src/domain"));
       assert.ok(broadSeedScope.data.refinementCandidates.some((candidate) => candidate.path === "src/copy"));
       assert.ok(broadSeedScope.data.refinementCandidates.every((candidate) => candidate.acceptsBranchFileCap === true));
+
+      // Without compression tables the scope pass reports the compressed tree
+      // as unavailable rather than failing.
+      assert.equal(scoped.data.compression.available, false);
+      assert.deepEqual(scoped.data.compression.matchedSeeds, []);
+
+      // Compressed-tree seeds bridge task vocabulary ("salutation pipeline")
+      // that never appears in paths or symbol terms to the annotated area, and
+      // entrypoints pin its files into the candidate set.
+      ensureTreeCompressionTables(db);
+      const snapshotRow = db.prepare(
+        `INSERT INTO atlas_tree_compression_snapshots (built_at, profile, source_signature, status)
+         VALUES (?, ?, ?, ?)`,
+      ).run("2026-06-11T00:00:00Z", "quick_dirty_tree_ml_features_v0", "sig", "ok");
+      db.prepare(
+        `INSERT INTO atlas_tree_compression_seeds
+           (snapshot_id, node_id, repo_rel_path, label, confidence, aliases_json,
+            entrypoints_json, likely_tests_json, avoid_if_query_only_mentions_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        Number(snapshotRow.lastInsertRowid),
+        "dir:src/domain",
+        "src/domain",
+        "salutation pipeline",
+        0.9,
+        JSON.stringify(["greeting flow"]),
+        JSON.stringify([fileA]),
+        "[]",
+        JSON.stringify(["generic UI polish"]),
+      );
+      const compressedScope = dispatch(
+        /** @type {any} */ ({ action: "tree.scope", taskText: "trace the salutation pipeline output", maxFiles: 10, branchFileCap: 4 }),
+        { view, versionId: "tree@2" },
+      );
+      assert.equal(compressedScope.ok, true);
+      assert.equal(compressedScope.data.compression.available, true);
+      assert.equal(compressedScope.data.compression.matchedSeeds.length, 1);
+      assert.equal(compressedScope.data.compression.matchedSeeds[0].path, "src/domain");
+      assert.equal(compressedScope.data.compression.matchedSeeds[0].label, "salutation pipeline");
+      assert.deepEqual(compressedScope.data.compression.areaMap, [
+        { path: "src/domain", label: "salutation pipeline", confidence: "high" },
+      ]);
+      assert.ok(compressedScope.data.candidateFiles.some((file) => file.path === fileA));
+      assert.ok(compressedScope.data.candidateFiles.some((file) => (file.reasons || []).some((reason) => String(reason).startsWith("compression:"))));
+
+      // Walking the branch shows the compressed-tree label on the dir node.
+      cover("tree.walk");
+      const labeledWalk = dispatch(
+        /** @type {any} */ ({ action: "tree.walk", path: "src/domain", maxDepth: 1 }),
+        { view, versionId: "tree@2" },
+      );
+      assert.equal(labeledWalk.ok, true);
+      const domainNode = labeledWalk.data.nodes.find((node) => node.repoRelPath === "src/domain");
+      assert.equal(domainNode?.areaLabel, "salutation pipeline");
+
+      // tree.walk is focused-only; the top-level view belongs to tree.overview.
+      const walkWithoutFocus = dispatch(
+        /** @type {any} */ ({ action: "tree.walk", maxDepth: 1 }),
+        { view, versionId: "tree@2" },
+      );
+      assert.equal(walkWithoutFocus.ok, false);
+      assert.equal(walkWithoutFocus.error?.code, "invalid_params");
+
+      // tree.grow expands validated seeds (no taskText) and requires seeds.
+      cover("tree.grow");
+      const grown = dispatch(
+        /** @type {any} */ ({ action: "tree.grow", paths: [fileC], maxFiles: 5, branchFileCap: 5 }),
+        { view, versionId: "tree@2" },
+      );
+      assert.equal(grown.ok, true);
+      assert.equal(grown.action, "tree.grow");
+      assert.equal(grown.data.candidateFiles[0].path, fileC);
+      assert.equal(grown.data.candidateFiles[0].exactSeed, true);
+      const grownWithoutSeeds = dispatch(
+        /** @type {any} */ ({ action: "tree.grow", maxFiles: 5 }),
+        { view, versionId: "tree@2" },
+      );
+      assert.equal(grownWithoutSeeds.ok, false);
+      assert.equal(grownWithoutSeeds.error?.code, "invalid_params");
+
+      // The top-level overview carries the compressed-tree area map; a legacy
+      // focused overview still works but points the caller at tree.walk.
+      const topOverview = dispatch(
+        /** @type {any} */ ({ action: "tree.overview", maxDepth: 1 }),
+        { view, versionId: "tree@2" },
+      );
+      assert.equal(topOverview.ok, true);
+      assert.deepEqual(topOverview.data.areaMap, [
+        { path: "src/domain", label: "salutation pipeline", confidence: "high" },
+      ]);
+      const focusedOverview = dispatch(
+        /** @type {any} */ ({ action: "tree.overview", path: "src/domain", maxDepth: 1 }),
+        { view, versionId: "tree@2" },
+      );
+      assert.equal(focusedOverview.ok, true);
+      assert.equal(focusedOverview.data.areaMap, undefined);
+      assert.ok(focusedOverview.data.warnings.some((warning) => /tree\.walk/.test(warning)));
+
+      // The seed's own avoid-guard: a task made up entirely of avoid terms
+      // must not match the area.
+      const avoidedScope = dispatch(
+        /** @type {any} */ ({ action: "tree.scope", taskText: "generic UI polish", maxFiles: 10, branchFileCap: 4 }),
+        { view, versionId: "tree@3" },
+      );
+      assert.equal(avoidedScope.ok, true);
+      assert.deepEqual(avoidedScope.data.compression.matchedSeeds, []);
 
       const snapshotSql = `SELECT node_id AS nodeId, parent_node_id AS parentNodeId, depth, sort_order AS sortOrder
                            FROM atlas_tree_nodes
@@ -1621,6 +1728,22 @@ describe("retrieval dispatcher", () => {
     assert.equal(r.data.partial, true);
     assert.ok(r.data.cards.some((card) => card.name === "Greeter"));
     assert.ok(r.data.cards.some((card) => card.name === "run"));
+  });
+
+  it("symbol.getCard with symbolIds answers in the batch shape (one tool, single or batch)", () => {
+    const r = dispatch(
+      /** @type {any} */ ({
+        action: "symbol.getCard",
+        symbolIds: [env.symbolIdByName.Greeter, `${"0".repeat(64)}:99`],
+      }),
+      { view: env.view, versionId: "v1" },
+    );
+    assert.equal(r.ok, true);
+    assert.equal(r.action, "symbol.getCard");
+    assert.equal(r.data.total, 2);
+    assert.equal(r.data.okCount, 1);
+    assert.equal(r.data.errorCount, 1);
+    assert.ok(r.data.cards.some((card) => card.name === "Greeter"));
   });
 
   it("symbol.getCards dedupes symbolRefs independent of property order", () => {

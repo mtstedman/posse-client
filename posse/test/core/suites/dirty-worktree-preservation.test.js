@@ -1473,6 +1473,51 @@ suite("Dirty worktree preservation", () => {
     }
   });
 
+  it("does not defer terminal cleanup for a stale sentinel whose job already finished", async () => {
+    const { queueMod, workerMod } = runtimeModules;
+    const { writeActiveWorktreeSentinel } = await import("../../../lib/domains/worker/functions/helpers/worktree-lifecycle.js");
+    const projectDir = makeGitRepo("tmp-terminal-stale-sentinel-");
+    try {
+      const wi = queueMod.createWorkItem("terminal-cleanup-stale-sentinel", "desc");
+      const branchName = `posse/wi-${wi.id}-stale-sentinel`;
+      const wtDir = path.join(workerMod.worktreeRoot(projectDir), `wi-${wi.id}`);
+      execFileSync("git", ["worktree", "add", "-b", branchName, wtDir], { cwd: projectDir, stdio: "ignore" });
+      queueMod.setWorkItemBranch(wi.id, branchName, execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectDir, encoding: "utf-8" }).trim());
+      fs.writeFileSync(path.join(wtDir, "tsconfig.json"), "{}\n", "utf-8");
+
+      const job = queueMod.createJob({
+        work_item_id: wi.id,
+        job_type: "dev",
+        title: "finished but sentinel not yet cleared",
+      });
+      queueMod.updateJobStatus(job.id, "succeeded", { force: true });
+      // The job's finally block clears the sentinel after WI completion fires;
+      // simulate the in-between window where the sentinel still names a job
+      // that is already terminal in the queue while its pid (this process) is
+      // alive.
+      writeActiveWorktreeSentinel(wtDir, {
+        pid: process.pid,
+        jobId: job.id,
+        wiId: wi.id,
+        branchName,
+      });
+      assert.equal(queueMod.updateWorkItemStatus(wi.id, "complete"), true);
+
+      const worker = new workerMod.Worker({ projectDir, silent: true });
+      await worker._cleanupWorktreeIfDone(wi.id);
+
+      assert.equal(fs.existsSync(wtDir), false);
+      assert.equal(queueMod.getEvents(null, 100).some((event) =>
+        event.work_item_id === wi.id
+        && event.event_type === "worktree.dirty_cleanup_deferred"
+      ), false);
+      const snapshots = listSnapshotRefsMatching(projectDir, `wi-${wi.id}`);
+      assert.ok(snapshots.length > 0, "expected the untracked leftover to be snapshotted before removal");
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it("skips terminal startup GC while a job still holds the worktree bench", async () => {
     const { queueMod, workerMod } = runtimeModules;
     const projectDir = makeGitRepo("tmp-startup-gc-terminal-held-");

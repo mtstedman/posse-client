@@ -3,6 +3,7 @@
 // Researcher structured output parsing helpers.
 
 import { extractJsonResult } from "../../../../shared/format/functions/json.js";
+import { sanitizeAtlasSymbolIdList } from "../../../atlas/functions/v2/symbol-id.js";
 
 /**
  * Extract the structured researcher appendix from output text.
@@ -18,6 +19,7 @@ export function parseResearcherStructuredOutput(output) {
   const hasRecognizedFields =
     Array.isArray(parsed.key_files) ||
     Array.isArray(parsed.related_files) ||
+    Array.isArray(parsed.key_symbols) ||
     Array.isArray(parsed.planner_file_priorities) ||
     Array.isArray(parsed.ranked_files) ||
     Array.isArray(parsed.constraints) ||
@@ -27,6 +29,37 @@ export function parseResearcherStructuredOutput(output) {
     Array.isArray(parsed.questions);
   if (hasRecognizedFields) return parsed;
   return null;
+}
+
+/**
+ * Normalize researcher-provided key_symbols (opaque ATLAS symbol IDs) for
+ * downstream seeding. Symbols that fail the ATLAS id shape are dropped —
+ * the brief's symbol list is a seed contract, not free text. Entries may be
+ * bare id strings or { symbolId, name?, why? } objects.
+ *
+ * @param {any} parsed
+ * @param {number} [maxItems]
+ * @returns {string[]}
+ */
+export function normalizeResearcherKeySymbols(parsed, maxItems = 24) {
+  const source = Array.isArray(parsed?.key_symbols) ? parsed.key_symbols : [];
+  const rawIds = source
+    .map((entry) => (typeof entry === "string" ? entry : entry?.symbolId || entry?.symbol_id || ""))
+    .filter(Boolean);
+  try {
+    return sanitizeAtlasSymbolIdList(rawIds, maxItems, "researcher key_symbols");
+  } catch {
+    // A malformed entry must not discard the whole list — re-validate one by one.
+    const out = [];
+    for (const id of rawIds) {
+      try {
+        const [valid] = sanitizeAtlasSymbolIdList([id], 1, "researcher key_symbols");
+        if (valid && !out.includes(valid)) out.push(valid);
+      } catch { /* drop the malformed id */ }
+      if (out.length >= maxItems) break;
+    }
+    return out;
+  }
 }
 
 function filePathFromResearcherValue(value) {

@@ -235,8 +235,10 @@
 
 /**
  * @typedef {Object} SymbolGetCardParams
- * @property {string} [symbolId]              Required iff symbolRef is absent.
- * @property {SymbolRef} [symbolRef]          Required iff symbolId is absent.
+ * @property {string} [symbolId]              Required iff symbolRef/symbolIds are absent.
+ * @property {SymbolRef} [symbolRef]          Required iff symbolId/symbolIds are absent.
+ * @property {string[]} [symbolIds]           Batch mode: answers in the symbol.getCards shape ({ cards, errors }).
+ * @property {SymbolRef[]} [symbolRefs]       Batch mode natural refs.
  * @property {string} [ifNoneMatch]
  * @property {number} [minCallConfidence]     0..1
  * @property {boolean} [includeResolutionMetadata]
@@ -631,7 +633,9 @@
  *   | { action: "symbol.getCards" } & SymbolGetCardsParams
  *   | { action: "symbol.usages" } & SymbolUsagesParams
  *   | { action: "tree.overview" } & TreeOverviewParams
+ *   | { action: "tree.walk" } & TreeOverviewParams
  *   | { action: "tree.scope" } & TreeScopeParams
+ *   | { action: "tree.grow" } & TreeScopeParams
  *   | { action: "slice.build" } & SliceBuildParams
  *   | { action: "slice.refresh" } & SliceRefreshParams
  *   | { action: "slice.spillover.get" } & SliceSpilloverGetParams
@@ -683,7 +687,9 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "symbol.getCards",
   "symbol.usages",
   "tree.overview",
+  "tree.walk",
   "tree.scope",
+  "tree.grow",
   "slice.build",
   "slice.refresh",
   "slice.spillover.get",

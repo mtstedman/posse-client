@@ -724,9 +724,17 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         if (t.model_tier && !usedTierSynonym && t.model_tier !== modelTier) {
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: normalized model_tier "${t.model_tier}" → "${modelTier}" in task "${t.title}"`);
         }
-        const rawEffort = EFFORT_SYNONYMS[t.reasoning_effort] || t.reasoning_effort;
+        const usedEffortSynonym = typeof t.reasoning_effort === "string" && Object.hasOwn(EFFORT_SYNONYMS, t.reasoning_effort);
+        const rawEffort = usedEffortSynonym ? EFFORT_SYNONYMS[t.reasoning_effort] : t.reasoning_effort;
         const baseReasoningEffort = VALID_EFFORTS.has(rawEffort) ? rawEffort : "medium";
         const taskHasExplicitBudget = t.deepthink_budget != null || t.research_budget != null || t.deepthink != null;
+        const taskBudgetSource = t.deepthink_budget != null
+          ? "deepthink_budget"
+          : t.research_budget != null
+            ? "research_budget"
+            : t.deepthink != null
+              ? "deepthink"
+              : null;
         const taskResearchBudget = t.deepthink_budget != null
           ? t.deepthink_budget
           : t.research_budget != null
@@ -741,8 +749,14 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           ? researchBudgetToReasoningEffort(deepthinkBudget, baseReasoningEffort)
           : baseReasoningEffort;
         const deepthink = isResearchBudgetDeep(deepthinkBudget);
-        if (t.reasoning_effort && t.reasoning_effort !== reasoningEffort) {
-          worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: normalized reasoning_effort "${t.reasoning_effort}" → "${reasoningEffort}" in task "${t.title}"`);
+        if (t.reasoning_effort && (usedEffortSynonym || t.reasoning_effort !== baseReasoningEffort)) {
+          worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: normalized reasoning_effort "${t.reasoning_effort}" → "${baseReasoningEffort}" in task "${t.title}"`);
+        }
+        if (taskHasExplicitBudget && baseReasoningEffort !== reasoningEffort) {
+          const sourceValue = taskBudgetSource === "deepthink"
+            ? String(!!t.deepthink)
+            : deepthinkBudget;
+          worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: applied ${taskBudgetSource}="${sourceValue}": reasoning_effort "${baseReasoningEffort}" → "${reasoningEffort}" in task "${t.title}"`);
         }
 
         // ── Task mode validation ──
@@ -1354,6 +1368,19 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           : executionPolicy?.dev?.reasoning_effort || reasoningEffort;
         const resolvedMaxTurnsOverride = executionPolicy?.dev?.max_turns_override || null;
         const resolvedRiskTags = executionPolicy?.risk_tags || normalizeRiskTags(t.risk_tags);
+        if (executionPolicy && (resolvedModelTier !== modelTier || resolvedReasoningEffort !== reasoningEffort)) {
+          const policyChanges = [];
+          if (resolvedModelTier !== modelTier) {
+            policyChanges.push(`model_tier "${modelTier}" → "${resolvedModelTier}"`);
+          }
+          if (resolvedReasoningEffort !== reasoningEffort) {
+            policyChanges.push(`reasoning_effort "${reasoningEffort}" → "${resolvedReasoningEffort}"`);
+          }
+          const reasons = Array.isArray(executionPolicy.dev?.reasons) && executionPolicy.dev.reasons.length > 0
+            ? executionPolicy.dev.reasons.join("; ")
+            : "execution policy";
+          worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: policy adjusted ${policyChanges.join(", ")} in task "${t.title}" (${reasons})`);
+        }
         const payloadJson = finalJobType === "promote"
           ? JSON.stringify(normalizedPromotePayload)
           : JSON.stringify({

@@ -213,7 +213,7 @@ describe("merge safety", () => {
     }
   });
 
-  it("refuses to merge when the source WI worktree has unresolved dirty files", () => {
+  it("refuses to merge when the source WI worktree has uncommitted tracked changes", () => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-merge-source-dirty-"));
     try {
       initRepo(projectDir);
@@ -226,15 +226,46 @@ describe("merge safety", () => {
       const wiId = createCompletedWorkItemForBranch(projectDir, "posse/wi-source-dirty");
       const wtDir = worktreePath(projectDir, wiId);
       git(projectDir, ["worktree", "add", wtDir, "posse/wi-source-dirty"], { stdio: "ignore" });
-      fs.writeFileSync(path.join(wtDir, "uncommitted.txt"), "not ready\n", "utf-8");
+      fs.writeFileSync(path.join(wtDir, "feature.txt"), "edited but never committed\n", "utf-8");
 
       const result = runMergeCommand(projectDir, wiId);
       assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
       assert.match(`${result.stdout}\n${result.stderr}`, /Merge refused: WI#\d+ worktree has 1 unresolved dirty file/);
       assert.throws(() => git(projectDir, ["show", "main:feature.txt"]));
-      assert.equal(fs.readFileSync(path.join(wtDir, "uncommitted.txt"), "utf-8"), "not ready\n");
-      assert.match(git(wtDir, ["status", "--porcelain"]), /\?\? uncommitted\.txt/);
+      assert.equal(fs.readFileSync(path.join(wtDir, "feature.txt"), "utf-8"), "edited but never committed\n");
+      assert.match(git(wtDir, ["status", "--porcelain"]), /M feature\.txt/);
       assert.equal(readWorkItem(projectDir, wiId).merge_state, "merge_failed");
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it("snapshots untracked leftovers and merges when the source WI worktree has no tracked changes", () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-merge-source-untracked-"));
+    try {
+      initRepo(projectDir);
+      git(projectDir, ["checkout", "-b", "posse/wi-source-untracked"], { stdio: "ignore" });
+      fs.writeFileSync(path.join(projectDir, "feature.txt"), "feature\n", "utf-8");
+      git(projectDir, ["add", "feature.txt"], { stdio: "ignore" });
+      git(projectDir, ["commit", "-m", "feature"], { stdio: "ignore" });
+      git(projectDir, ["checkout", "main"], { stdio: "ignore" });
+
+      const wiId = createCompletedWorkItemForBranch(projectDir, "posse/wi-source-untracked");
+      const wtDir = worktreePath(projectDir, wiId);
+      git(projectDir, ["worktree", "add", wtDir, "posse/wi-source-untracked"], { stdio: "ignore" });
+      fs.writeFileSync(path.join(wtDir, "tsconfig.json"), "{}\n", "utf-8");
+
+      const result = runMergeCommand(projectDir, wiId);
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.equal(git(projectDir, ["show", "main:feature.txt"]), "feature");
+      assert.equal(git(projectDir, ["ls-tree", "-r", "--name-only", "main"]).includes("tsconfig.json"), false);
+      assert.equal(branchExists(projectDir, "posse/wi-source-untracked"), false);
+      assert.equal(readWorkItem(projectDir, wiId).merge_state, "merged");
+
+      const snapshots = snapshotRefsMatching(projectDir, "untracked-leftovers");
+      assert.ok(snapshots.length > 0, "expected untracked leftovers to be snapshotted before merging");
+      const latest = snapshots.sort().at(-1);
+      assert.equal(git(projectDir, ["show", `${latest}^3:tsconfig.json`]), "{}");
     } finally {
       fs.rmSync(projectDir, { recursive: true, force: true });
     }

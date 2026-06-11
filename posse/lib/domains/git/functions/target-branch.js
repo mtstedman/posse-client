@@ -5,7 +5,7 @@
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getSetting, listWorkItems } from "../../queue/functions/index.js";
-import { runGitNativeMethod } from "./native/invoke.js";
+import { runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
 
 const _warnedTargetBranchMessages = new Set();
 
@@ -46,25 +46,42 @@ function warnNativeTargetBranchMessages(projectDir, warnings) {
   }
 }
 
-/**
- * Resolve the merge target branch from the persisted target_branch setting,
- * known work-item branches, and native Git branch state.
- */
-export function resolveTargetBranch(projectDir, nativeParity = {}) {
-  const result = runGitNativeMethod(
-    "git.resolveTargetBranch",
-    {
-      projectDir,
-      configuredTarget: configuredTargetBranch(projectDir) || null,
-      knownWorkItemBranches: knownWorkItemBranches(),
-    },
-    nativeParity,
-  );
+function targetBranchRequestPayload(projectDir) {
+  return {
+    projectDir,
+    configuredTarget: configuredTargetBranch(projectDir) || null,
+    knownWorkItemBranches: knownWorkItemBranches(),
+  };
+}
 
+function normalizeResolvedTargetBranch(projectDir, result) {
   if (result && typeof result === "object" && !Array.isArray(result)) {
     const resolved = /** @type {{ branch?: unknown, warnings?: unknown }} */ (result);
     warnNativeTargetBranchMessages(projectDir, resolved.warnings);
     return String(resolved.branch || "").trim() || "main";
   }
   return String(result || "").trim() || "main";
+}
+
+/**
+ * Resolve the merge target branch from the persisted target_branch setting,
+ * known work-item branches, and native Git branch state.
+ */
+export function resolveTargetBranch(projectDir, nativeParity = {}) {
+  return normalizeResolvedTargetBranch(
+    projectDir,
+    runGitNativeMethod("git.resolveTargetBranch", targetBranchRequestPayload(projectDir), nativeParity),
+  );
+}
+
+/**
+ * Async twin for main-loop call sites (job lifecycle, freshness gate, warm
+ * dispatch): the native git call runs off the event loop, so a TUI render
+ * frame never blocks on branch resolution.
+ */
+export async function resolveTargetBranchAsync(projectDir, options = {}) {
+  return normalizeResolvedTargetBranch(
+    projectDir,
+    await runGitNativeMethodAsync("git.resolveTargetBranch", targetBranchRequestPayload(projectDir), options),
+  );
 }

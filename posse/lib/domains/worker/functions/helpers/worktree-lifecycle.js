@@ -11,6 +11,7 @@ import { cleanupArtifactDirs, cleanupArtifactDirsAsync, isArtifactMode, contextD
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../queue/functions/common.js";
 import {
   completeAttempt,
+  getJob,
   getWorkItem,
   incrementAndCreateAttempt,
   logEvent,
@@ -19,8 +20,10 @@ import {
   storeArtifact,
   updateJobPayload,
 } from "../../../queue/functions/index.js";
+import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
+const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const SETUP_DEFER_NOTICE_INTERVAL_MS = 30_000;
 const SETUP_DEFER_RETRY_DELAY_MS = 30_000;
 // Debounce cache for setup-deferral notices, keyed wi:job:phase → last-emit
@@ -676,11 +679,31 @@ export function clearActiveWorktreeSentinel(wtPath, { jobId = null } = {}) {
   }
 }
 
+function sentinelJobStillActive(payload = {}) {
+  const jobId = Number(payload?.jobId);
+  if (!Number.isInteger(jobId) || jobId <= 0) return true;
+  try {
+    const job = getJob(jobId);
+    if (!job) return false;
+    return !TERMINAL_JOB_STATUS_SET.has(job.status);
+  } catch {
+    return true;
+  }
+}
+
 function deferTerminalCleanupIfActiveWork(wi, wtDir) {
   const siblingLocks = activeLiveSiblingWriteLocks({ work_item_id: wi.id });
   const sentinel = readActiveWorktreeSentinel(wtDir);
-  const sentinelBlocks = sentinel?.payload?.jobId != null
+  let sentinelBlocks = sentinel?.payload?.jobId != null
     && isSentinelProcessAlive(sentinel.payload) === true;
+  if (sentinelBlocks && !sentinelJobStillActive(sentinel.payload)) {
+    // The sentinel pid is this orchestrator process (workers run in-process),
+    // so pid liveness cannot distinguish "job still using the worktree" from
+    // "job finished but its finally block has not cleared the sentinel yet".
+    // The queue is authoritative: a terminal job no longer owns the worktree.
+    clearActiveWorktreeSentinel(wtDir, { jobId: sentinel.payload.jobId });
+    sentinelBlocks = false;
+  }
   if (siblingLocks.length === 0 && !sentinelBlocks) return false;
   logEvent({
     work_item_id: wi.id,

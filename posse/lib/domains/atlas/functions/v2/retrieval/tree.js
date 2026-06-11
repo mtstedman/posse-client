@@ -5,6 +5,7 @@
 
 import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { isGeneratedPath } from "./hygiene.js";
+import { readLatestTreeCompressionSnapshot } from "../tree-compression.js";
 
 const TREE_RUN_KIND = "tree-derived";
 const INVALID_PATH_WARNING = "path must be a canonical repo-relative path.";
@@ -46,7 +47,16 @@ const TREE_SCOPE_TABLES = Object.freeze([
 ]);
 const REF_TYPES = new Set(["cluster", "process"]);
 
+function treeFocusRequested(params = {}) {
+  return !!(params.path || params.nodeId || params.symbolId || params.refId || params.refType);
+}
+
 /**
+ * Top-level tree orientation: the root view of the containment tree plus the
+ * compressed-tree area map. Focused traversal belongs to tree.walk — a legacy
+ * focus param still works here (served by the same traversal) but earns a
+ * pointer warning.
+ *
  * @param {{
  *   view: import("../contracts/api.js").View,
  *   versionId: string,
@@ -54,21 +64,55 @@ const REF_TYPES = new Set(["cluster", "process"]);
  * }} args
  */
 export function treeOverview({ view, versionId, params = {} }) {
+  return treeTraversal({ view, versionId, params, action: "tree.overview" });
+}
+
+/**
+ * Walk a branch of the containment tree: focus a path/node/symbol/ref and
+ * page through its descendants. The drill-down counterpart to tree.overview.
+ *
+ * @param {{
+ *   view: import("../contracts/api.js").View,
+ *   versionId: string,
+ *   params?: import("../contracts/tool-params.js").TreeOverviewParams,
+ * }} args
+ */
+export function treeWalk({ view, versionId, params = {} }) {
+  if (!treeFocusRequested(params)) {
+    return errorEnvelope({
+      action: "tree.walk",
+      versionId,
+      code: "invalid_params",
+      message: "tree.walk requires a focus: pass path, nodeId, symbolId, or refType+refId. Use tree.overview for the top-level view.",
+    });
+  }
+  return treeTraversal({ view, versionId, params, action: "tree.walk" });
+}
+
+/**
+ * @param {{
+ *   view: import("../contracts/api.js").View,
+ *   versionId: string,
+ *   params?: import("../contracts/tool-params.js").TreeOverviewParams,
+ *   action: "tree.overview" | "tree.walk",
+ * }} args
+ */
+function treeTraversal({ view, versionId, params = {}, action }) {
   const db = typeof /** @type {any} */ (view)._unsafeDb === "function"
     ? /** @type {any} */ (view)._unsafeDb()
     : null;
   if (!db) {
     return errorEnvelope({
-      action: "tree.overview",
+      action,
       versionId,
       code: "view_unavailable",
-      message: "tree.overview requires an open ATLAS view database.",
+      message: `${action} requires an open ATLAS view database.`,
     });
   }
   const missing = missingTreeTables(db);
   if (missing.length > 0) {
     return okEnvelope({
-      action: "tree.overview",
+      action,
       versionId,
       data: {
         available: false,
@@ -102,10 +146,26 @@ export function treeOverview({ view, versionId, params = {} }) {
     ? readTreePage(db, rootIds, { maxDepth, limit, offset, includeAggregates, includeTerms })
     : { nodes: [], total: 0 };
   if (includeRefs) attachRefs(db, page.nodes);
+  attachCompressionLabels(db, page.nodes);
   const latestRun = includeLatestRun ? readLatestRun(db) : null;
 
+  const warnings = [...focus.warnings];
+  const focused = treeFocusRequested(params);
+  if (action === "tree.overview" && focused) {
+    warnings.push("tree.overview is the top-level orientation view; use tree.walk for focused branch traversal.");
+  }
+  // The top-level view doubles as repo orientation: include the compressed
+  // tree's labeled area map alongside the root page.
+  let areaMap;
+  if (action === "tree.overview" && !focused) {
+    try {
+      const snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: COMPRESSION_SEED_READ_LIMIT });
+      if (snapshot?.available) areaMap = compressionAreaMap(snapshot.seeds);
+    } catch { /* compression tables are optional */ }
+  }
+
   return okEnvelope({
-    action: "tree.overview",
+    action,
     versionId,
     data: {
       available: true,
@@ -122,7 +182,8 @@ export function treeOverview({ view, versionId, params = {} }) {
       truncated: focusTruncated || offset + page.nodes.length < page.total,
       nextOffset: offset + page.nodes.length < page.total ? offset + page.nodes.length : null,
       latestRun,
-      warnings: focus.warnings,
+      ...(areaMap ? { areaMap } : {}),
+      warnings,
     },
   });
 }
@@ -135,21 +196,67 @@ export function treeOverview({ view, versionId, params = {} }) {
  * }} args
  */
 export function treeScope({ view, versionId, params = {} }) {
+  return runTreeScope({ view, versionId, params, action: "tree.scope" });
+}
+
+function treeGrowSeedsRequested(params = {}) {
+  const has = (value) => (Array.isArray(value) ? value.length > 0 : !!value);
+  return has(params.paths) || has(params.editedFiles) || has(params.path)
+    || has(params.symbolIds) || has(params.symbolId)
+    || has(params.nodeIds) || has(params.refs) || !!(params.refType && params.refId);
+}
+
+/**
+ * Grow the candidate scope outward from VALIDATED seeds (files/areas the
+ * brief or the agent already confirmed matter): surrounding branches,
+ * siblings, tests, and entrypoints. The agent-facing counterpart of
+ * tree.scope, which is task-text driven and prefetch-only. No taskText —
+ * the contract is "you already know these matter".
+ *
+ * @param {{
+ *   view: import("../contracts/api.js").View,
+ *   versionId: string,
+ *   params?: import("../contracts/tool-params.js").TreeScopeParams,
+ * }} args
+ */
+export function treeGrow({ view, versionId, params = {} }) {
+  if (!treeGrowSeedsRequested(params)) {
+    return errorEnvelope({
+      action: "tree.grow",
+      versionId,
+      code: "invalid_params",
+      message: "tree.grow requires at least one seed: paths, editedFiles, symbolIds, nodeIds, or refType+refId.",
+    });
+  }
+  const { taskText, taskType, ...seedParams } = /** @type {any} */ (params);
+  void taskText; void taskType;
+  return runTreeScope({ view, versionId, params: seedParams, action: "tree.grow" });
+}
+
+/**
+ * @param {{
+ *   view: import("../contracts/api.js").View,
+ *   versionId: string,
+ *   params?: import("../contracts/tool-params.js").TreeScopeParams,
+ *   action: "tree.scope" | "tree.grow",
+ * }} args
+ */
+function runTreeScope({ view, versionId, params = {}, action }) {
   const db = typeof /** @type {any} */ (view)._unsafeDb === "function"
     ? /** @type {any} */ (view)._unsafeDb()
     : null;
   if (!db) {
     return errorEnvelope({
-      action: "tree.scope",
+      action,
       versionId,
       code: "view_unavailable",
-      message: "tree.scope requires an open ATLAS view database.",
+      message: `${action} requires an open ATLAS view database.`,
     });
   }
   const missing = missingTreeTables(db);
   if (missing.length > 0) {
     return okEnvelope({
-      action: "tree.scope",
+      action,
       versionId,
       data: {
         available: false,
@@ -163,6 +270,7 @@ export function treeScope({ view, versionId, params = {} }) {
         rejectedBroadDirs: [],
         rejectedBroadRefs: [],
         metrics: emptyScopeMetrics(),
+        compression: { available: false, reason: "tree_derived_tables_missing", matchedSeeds: [] },
         sidecar: { used: false, reason: "tree_derived_tables_missing" },
         warnings: ["Run index.refresh first if tree-derived state is missing or stale."],
       },
@@ -223,6 +331,17 @@ export function treeScope({ view, versionId, params = {} }) {
     });
   }
 
+  const compression = scoreCompressionSeeds({
+    db,
+    model,
+    queryTerms,
+    opts,
+    fileScores,
+    branchScores,
+    rejectedBroadDirs,
+    refinementCandidateMap,
+  });
+
   const scope = selectScope({
     model,
     fileScores,
@@ -241,7 +360,7 @@ export function treeScope({ view, versionId, params = {} }) {
   });
 
   return okEnvelope({
-    action: "tree.scope",
+    action,
     versionId,
     data: {
       available: true,
@@ -256,6 +375,7 @@ export function treeScope({ view, versionId, params = {} }) {
       rejectedBroadDirs,
       rejectedBroadRefs,
       metrics,
+      compression,
       sidecar: model.sidecar,
       warnings,
       latestRun: readLatestRun(db),
@@ -435,6 +555,37 @@ function readTreePage(db, rootIds, opts) {
     total: Number(countRow?.cnt || 0),
     nodes: rowsToNodes(rows, opts),
   };
+}
+
+/**
+ * Annotate walked nodes with their compressed-tree labels, so drilling a
+ * branch via tree.overview shows the labeled area map instead of bare dir
+ * names. Best-effort: compression tables are optional.
+ *
+ * @param {import("better-sqlite3").Database} db
+ * @param {Array<Record<string, unknown>>} nodes
+ */
+function attachCompressionLabels(db, nodes) {
+  if (!Array.isArray(nodes) || nodes.length === 0) return;
+  let snapshot;
+  try {
+    snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: 500 });
+  } catch {
+    return;
+  }
+  if (!snapshot?.available || snapshot.seeds.length === 0) return;
+  const labelByPath = new Map();
+  for (const seed of snapshot.seeds) {
+    const path = String(seed?.path || "").trim();
+    const label = String(seed?.label || "").trim();
+    if (path && label && !labelByPath.has(path)) labelByPath.set(path, label);
+  }
+  for (const node of nodes) {
+    const path = typeof node.repoRelPath === "string" ? node.repoRelPath : null;
+    if (!path) continue;
+    const label = labelByPath.get(path);
+    if (label) node.areaLabel = label;
+  }
 }
 
 /**
@@ -962,6 +1113,148 @@ function scoreTaskText({ model, queryTerms, opts, fileScores, branchScores, reje
       branchFileCap: opts.branchFileCap,
     });
   }
+}
+
+// Fold the compressed tree (tree-compression seed annotations) into scope
+// scoring. Seeds act as a vocabulary bridge: a task phrased in domain words
+// ("rating logic") can reach an area whose paths/terms never mention them via
+// the seed's label/alias vocabulary, and a seed's entrypoints pin the files
+// most likely to matter inside a matched area. Advisory only — seeds boost
+// candidates through the same scoring rails as task-text matching; they never
+// gate or replace raw tree evidence.
+const COMPRESSION_SEED_READ_LIMIT = 200;
+const COMPRESSION_MATCH_LIMIT = 8;
+
+// Confidence is an internal ranking signal; surfaced output gets words, not
+// numbers — an unanchored "0.83" means nothing to a model reading the result.
+function confidenceBand(value) {
+  const n = Math.max(0, Math.min(1, Number(value) || 0));
+  if (n >= 0.75) return "high";
+  if (n >= 0.45) return "medium";
+  return "low";
+}
+function scoreCompressionSeeds({ db, model, queryTerms, opts, fileScores, branchScores, rejectedBroadDirs, refinementCandidateMap }) {
+  let snapshot;
+  try {
+    snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: COMPRESSION_SEED_READ_LIMIT });
+  } catch {
+    return { available: false, reason: "tree_compression_read_failed", profile: null, matchedSeeds: [] };
+  }
+  if (!snapshot?.available) {
+    return { available: false, reason: snapshot?.reason || "tree_compression_unavailable", profile: null, matchedSeeds: [] };
+  }
+  const profile = snapshot.snapshot?.profile || null;
+  if (queryTerms.length === 0) {
+    return { available: true, reason: null, profile, matchedSeeds: [] };
+  }
+  const querySet = new Set(queryTerms);
+  // Ubiquitous-vocabulary filter: deterministic seed terms inherit extraction
+  // noise (var/const/function/tsx appear in nearly every area's aliases). A
+  // term carried by a large share of seeds has no discriminative power, so it
+  // can't count as a hit. Absolute floor keeps tiny snapshots intact.
+  const seedTermSets = snapshot.seeds.map((seed) => new Set(splitTerms([seed.label, ...(seed.aliases || [])].join(" "))));
+  const termSeedCounts = new Map();
+  for (const terms of seedTermSets) {
+    for (const term of terms) termSeedCounts.set(term, (termSeedCounts.get(term) || 0) + 1);
+  }
+  const ubiquityFloor = Math.max(4, Math.ceil(snapshot.seeds.length * 0.25));
+  const isUbiquitousTerm = (term) => (termSeedCounts.get(term) || 0) >= ubiquityFloor;
+  const matched = [];
+  for (let i = 0; i < snapshot.seeds.length; i++) {
+    const seed = snapshot.seeds[i];
+    const seedTerms = seedTermSets[i];
+    let hits = 0;
+    for (const term of querySet) {
+      if (seedTerms.has(term) && !isUbiquitousTerm(term)) hits += 1;
+    }
+    if (hits === 0) continue;
+    // The seed's own guard: when every query term sits in the avoid list, the
+    // match is vocabulary noise for this area ("generic UI polish") — skip it.
+    const avoidTerms = new Set(splitTerms((seed.avoidIfQueryOnlyMentions || []).join(" ")));
+    if (avoidTerms.size > 0 && [...querySet].every((term) => avoidTerms.has(term))) continue;
+    const confidence = Math.max(0, Math.min(1, Number(seed.confidence) || 0));
+    const score = hits * (4 + 6 * confidence);
+    const node = model.byId.get(seed.nodeId)
+      || model.dirByPath.get(seed.path)
+      || model.fileByPath.get(seed.path);
+    // Broad root areas (apps, www, src) match almost any task vocabulary;
+    // boosting them — or their entrypoints — floods the candidate set with
+    // top-level pages. Mirror addBranchScore's own broad-dir rejection: areas
+    // over the branch file cap stay advisory (label reported, no score).
+    const tooBroadToBoost = node?.kind === "dir"
+      && Number(node.descendantFileCount || 0) > opts.branchFileCap;
+    const entrypoints = (seed.entrypoints || []).slice(0, 4);
+    if (!tooBroadToBoost) {
+      if (node?.kind === "file") {
+        addFileScore(fileScores, node, score, `compression:${seed.path}`, false);
+      } else if (node) {
+        addBranchScore({
+          model,
+          fileScores,
+          branchScores,
+          rejectedBroadDirs,
+          refinementCandidateMap,
+          branch: node,
+          score,
+          reason: `compression:${seed.path}`,
+          branchFileCap: opts.branchFileCap,
+        });
+      }
+      for (const entry of entrypoints) {
+        const file = model.fileByPath.get(normalizeRepoPath(entry));
+        if (file) addFileScore(fileScores, file, score * 1.5, `compression:entry:${seed.path}`, false);
+      }
+    }
+    matched.push({
+      path: seed.path,
+      label: seed.label,
+      confidence,
+      hits,
+      entrypoints,
+    });
+  }
+  matched.sort((a, b) => b.hits - a.hits
+    || b.confidence - a.confidence
+    || String(a.path || "").localeCompare(String(b.path || "")));
+  return {
+    available: true,
+    reason: null,
+    profile,
+    matchedSeeds: matched.slice(0, COMPRESSION_MATCH_LIMIT)
+      .map((seed) => ({ ...seed, confidence: confidenceBand(seed.confidence) })),
+    areaMap: compressionAreaMap(snapshot.seeds),
+  };
+}
+
+// Compact labeled repo orientation from the compressed tree: the most specific
+// annotated areas, with ancestor chains collapsed (apps → apps/web →
+// apps/web/src all carry near-identical labels; only the deepest tells the
+// reader something). This is the handoff's "what lives where" map — small
+// enough to inline, drilled into via tree.overview when an area matters.
+const COMPRESSION_AREA_MAP_LIMIT = 16;
+function compressionAreaMap(seeds) {
+  const byPath = new Map();
+  for (const seed of seeds) {
+    const path = String(seed?.path || "").trim();
+    if (!path || !String(seed?.label || "").trim()) continue;
+    if (!byPath.has(path)) byPath.set(path, seed);
+  }
+  const paths = [...byPath.keys()];
+  const hasDescendantSeed = (path) => paths.some((other) => other !== path && other.startsWith(`${path}/`));
+  return paths
+    .filter((path) => !hasDescendantSeed(path))
+    .map((path) => {
+      const seed = byPath.get(path);
+      return {
+        path,
+        label: String(seed.label),
+        confidence: Math.max(0, Math.min(1, Number(seed.confidence) || 0)),
+      };
+    })
+    .sort((a, b) => b.confidence - a.confidence || a.path.localeCompare(b.path))
+    .slice(0, COMPRESSION_AREA_MAP_LIMIT)
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .map((area) => ({ ...area, confidence: confidenceBand(area.confidence) }));
 }
 
 function lexicalScopeFileScore(file, qtf, model) {

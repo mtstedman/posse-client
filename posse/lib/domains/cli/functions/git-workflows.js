@@ -968,7 +968,12 @@ export function createGitWorkflowHelpers({
       .filter(Boolean)
       .filter((line) => !isRuntimePorcelainLine(line, wtDir));
     if (dirtyFiles.length === 0) return null;
-    return { wtDir, dirtyFiles };
+    // Tracked changes are potential lost work and block the merge; untracked
+    // leftovers are agent scaffolding that never entered a commit and can be
+    // snapshotted away.
+    const trackedFiles = dirtyFiles.filter((line) => !line.startsWith("??"));
+    const untrackedFiles = dirtyFiles.filter((line) => line.startsWith("??"));
+    return { wtDir, dirtyFiles, trackedFiles, untrackedFiles };
   }
 
 
@@ -1855,16 +1860,17 @@ export function createGitWorkflowHelpers({
     }
 
     const sourceDirty = sourceWorktreeDirtyState(wiId);
-    if (sourceDirty) {
-      const message = `Merge refused: WI#${wiId} worktree has ${sourceDirty.dirtyFiles.length} unresolved dirty file(s) before merging ${branch}`;
+    if (sourceDirty && sourceDirty.trackedFiles.length > 0) {
+      const message = `Merge refused: WI#${wiId} worktree has ${sourceDirty.trackedFiles.length} unresolved dirty file(s) before merging ${branch}`;
       log(message, {
         json: {
           branch,
           target: targetBranch,
           source_dirty: true,
           worktree: sourceDirty.wtDir,
-          dirty_count: sourceDirty.dirtyFiles.length,
-          dirty_files: sourceDirty.dirtyFiles.slice(0, 50),
+          dirty_count: sourceDirty.trackedFiles.length,
+          dirty_files: sourceDirty.trackedFiles.slice(0, 50),
+          untracked_files: sourceDirty.untrackedFiles.slice(0, 50),
         },
       });
       return {
@@ -1873,8 +1879,54 @@ export function createGitWorkflowHelpers({
         sourceDirty: true,
         message,
         wtDir: sourceDirty.wtDir,
-        dirtyFiles: sourceDirty.dirtyFiles.slice(0, 50),
+        dirtyFiles: sourceDirty.trackedFiles.slice(0, 50),
       };
+    }
+    if (sourceDirty) {
+      // Untracked-only leftovers cannot reach the squash merge — it stages only
+      // the branch's commits — so they don't gate it. Post-merge cleanup
+      // force-removes the worktree, making the snapshot taken here the only
+      // surviving copy; refuse the merge if it cannot be written.
+      let snapshotRef = null;
+      try {
+        snapshotRef = preserveDirtyWorktreeSnapshot(sourceDirty.wtDir, projectDir, {
+          reason: "untracked-leftovers",
+          branchName: branch,
+          wiId,
+          onMsg: (msg) => log(msg, { json: { branch, worktree: sourceDirty.wtDir } }),
+        });
+      } catch {
+        snapshotRef = null;
+      }
+      if (!snapshotRef) {
+        const message = `Merge refused: could not snapshot ${sourceDirty.untrackedFiles.length} untracked leftover file(s) in WI#${wiId} worktree before merging ${branch}`;
+        log(message, {
+          json: {
+            branch,
+            target: targetBranch,
+            source_dirty: true,
+            worktree: sourceDirty.wtDir,
+            untracked_files: sourceDirty.untrackedFiles.slice(0, 50),
+          },
+        });
+        return {
+          ok: false,
+          dirty: true,
+          sourceDirty: true,
+          message,
+          wtDir: sourceDirty.wtDir,
+          dirtyFiles: sourceDirty.untrackedFiles.slice(0, 50),
+        };
+      }
+      log(`Proceeding with merge of ${branch} despite ${sourceDirty.untrackedFiles.length} untracked leftover file(s) in WI#${wiId} worktree; preserved at ${snapshotRef}`, {
+        json: {
+          branch,
+          target: targetBranch,
+          worktree: sourceDirty.wtDir,
+          untracked_files: sourceDirty.untrackedFiles.slice(0, 50),
+          snapshot_ref: String(snapshotRef),
+        },
+      });
     }
 
     let currentBranch = null;

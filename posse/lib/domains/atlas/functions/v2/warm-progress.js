@@ -20,7 +20,49 @@
 //   * `warmReadinessDone` never downgrades ONNX: a successful warm whose
 //     embeddings stage had nothing to do keeps the previous resting state.
 
-const STALE_MS = 4000; // a warm that hasn't ticked in this long reads as idle
+// A warm that hasn't ticked in this long reads as idle. This is a crashed-warm
+// backstop only — both warm paths land a terminal done()/seed() — so it must
+// sit ABOVE the longest legitimately-quiet phase (view merge, ONNX model load
+// emit no percents for tens of seconds). A short window here made the bar
+// flash its resting "incomplete" label mid-warm and then resume.
+const STALE_MS = 30_000;
+
+// Stage-anchored composite for the ATLAS bar. Raw ParseEngine percents are
+// per-stage and per-language (php parse runs 0→100, then typescript starts at
+// 0 again), so copying them straight into the bar made it saw-tooth back to
+// 0% on every language/stage handoff. Instead each pipeline stage owns a fixed
+// slice of the bar, a stage's fill is the mean across the languages observed
+// in it, and the composite only ever ratchets forward while a warm is active.
+// Languages parse sequentially, so the bar may plateau at a stage boundary
+// until the next language/stage reports — a plateau, never a reset. The
+// weights are a display heuristic, not a measurement.
+const STAGE_BUCKETS = [
+  { key: "start", from: 0, to: 3, stages: ["starting", "worker"] },
+  { key: "freshness", from: 3, to: 10, stages: ["checking", "sampling", "freshness", "cached"] },
+  { key: "scip", from: 10, to: 25, stages: ["scip", "scip.indexing"] },
+  { key: "parse", from: 25, to: 70, stages: ["parsing", "indexing", "writing ledger", "recording delta"] },
+  { key: "view", from: 70, to: 90, stages: ["view"] },
+  { key: "tree", from: 90, to: 97, stages: ["tree"] },
+];
+const STAGE_TO_BUCKET = new Map(
+  STAGE_BUCKETS.flatMap((bucket) => bucket.stages.map((stage) => [stage, bucket])),
+);
+
+/** Per-warm unit progress: `"<bucketKey> <lang>"` → percent. Reset on start. */
+const _units = new Map();
+
+function compositeCandidate(bucket) {
+  let sum = 0;
+  let count = 0;
+  const prefix = `${bucket.key} `;
+  for (const [key, pct] of _units) {
+    if (!key.startsWith(prefix)) continue;
+    sum += pct;
+    count += 1;
+  }
+  const fill = count > 0 ? sum / count : 0;
+  return bucket.from + (fill / 100) * (bucket.to - bucket.from);
+}
 
 /** @typedef {{ active: boolean, atlas: number|null, onnx: number|null, lang: string|null, stage: string|null, sawEmbeddings: boolean, atlasEnabled: boolean|null, onnxEnabled: boolean|null, at: number }} WarmReadiness */
 
@@ -58,6 +100,7 @@ function isOnnxStage(stage) {
  * resting state (a warm that never reaches embeddings shouldn't blank the
  * bar) and the seeded enablement flags. */
 export function warmReadinessStarted(now = Date.now()) {
+  _units.clear();
   _s = {
     ..._s,
     active: true,
@@ -83,7 +126,15 @@ export function warmReadinessProgress(event, now = Date.now()) {
     _s.sawEmbeddings = true;
     if (pct != null) _s.onnx = pct;
   } else if (pct != null) {
-    _s.atlas = pct;
+    const bucket = STAGE_TO_BUCKET.get(stage);
+    if (bucket) {
+      _units.set(`${bucket.key} ${lang || ""}`, pct);
+      // Ratchet: the composite never moves backwards during a warm, and never
+      // reads complete while still active (done()/seed() own the 100).
+      _s.atlas = Math.max(_s.atlas ?? 0, Math.min(99, compositeCandidate(bucket)));
+    }
+    // Unknown stages still tick liveness/labels above but don't move the bar —
+    // a misweighted guess is worse than a brief plateau.
   }
 }
 
@@ -144,6 +195,7 @@ export function getWarmReadiness(now = Date.now()) {
 
 /** Test-only: return the singleton to its pristine pre-boot state. */
 export function __resetWarmReadinessForTests() {
+  _units.clear();
   _s = {
     active: false,
     atlas: null,

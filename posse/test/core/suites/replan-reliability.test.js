@@ -12,6 +12,7 @@ import {
   resetRuntimeDb,
   sanitizeHumanQuestions,
   isRepoFileAccessQuestion,
+  stripDisplayAnsi,
 } from "../support/core-harness.js";
 
 let db;
@@ -252,7 +253,11 @@ suite("Replan reliability", () => {
       job_type: "plan",
       title: "Plan: Supersede old plan wave",
     });
+    const emitted = [];
     const worker = new workerMod.Worker({ projectDir: path.resolve(__dirname, ".."), silent: true });
+    worker.emit = (_jobId, message) => {
+      emitted.push(stripDisplayAnsi(message));
+    };
     worker.createJobsFromPlan(newPlan, [{
       title: "New implementation",
       job_type: "dev",
@@ -266,6 +271,9 @@ suite("Replan reliability", () => {
     assert.equal(queueMod.getJob(stalePromote.id).status, "canceled");
     assert.equal(queueMod.getJob(alreadyDone.id).status, "succeeded");
     assert.equal(queueMod.getJob(activeOld.id).status, "leased");
+    assert.ok(emitted.some((line) =>
+      line.includes("canceled 2 queued job(s) from older plan wave(s); 1 active older-plan job(s) already running")
+    ));
     assert.ok(queueMod.listJobsByWorkItem(wi.id).some((job) => job.parent_job_id === newPlan.id && job.title === "New implementation"));
   });
 

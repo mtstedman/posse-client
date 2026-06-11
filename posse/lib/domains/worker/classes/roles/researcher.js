@@ -302,7 +302,7 @@ function buildResearchRetrySalvageBlock(job, ctx = {}) {
 
 function buildResearchRetryShapeBlock({ atlasActive = false } = {}) {
   const atlasLine = atlasActive
-    ? "- Retry shape: use ATLAS tree.scope first, then slice.build or context.summary, then final synthesis."
+    ? "- Retry shape: use ATLAS symbol.search/tree.walk first, then tree.grow from files you validated, then slice.build or context.summary, then final synthesis."
     : "- Retry shape: ATLAS is not active; make only targeted search/chain_read checks needed to validate prior evidence, then final synthesis.";
   return [
     "RESEARCH RETRY SHAPE BREAKER:",

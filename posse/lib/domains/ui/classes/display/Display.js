@@ -1150,16 +1150,33 @@ export class Display {
     return out;
   }
 
+  _normalizeAtlasEventText(text) {
+    const clean = stripAnsi(String(text ?? "")).trim();
+    if (!clean) return text;
+    let normalized = clean;
+    normalized = normalized.replace(/^\[system\]\s+((?:\[atlas(?:[^\]]*)?\]|ATLAS\b|SCIP\s*:).*)$/i, "$1");
+    normalized = normalized.replace(/^\[atlas-warm(?:\s+([^\]]+))?\]\s*(.*)$/i, (_match, stage, body) => {
+      const stageText = stage ? ` ${String(stage).trim()}` : "";
+      const suffix = body ? ` ${String(body).trim()}` : "";
+      return `[atlas] warm${stageText}:${suffix}`;
+    });
+    return normalized === clean ? text : normalized;
+  }
+
   _appendEvent(text) {
     const time = new Date().toTimeString().slice(0, 8);
-    const styled = _sanitizeDisplayLine(_colorizeAssessorVerdictWords(text));
-    if (this._eventLane(text) === "system") {
+    const displayText = this._normalizeAtlasEventText(text);
+    const lane = this._eventLane(displayText);
+    if (lane === "system") {
+      const plain = stripAnsi(String(displayText ?? "")).trim();
+      const styled = `${C.dim}${_sanitizeDisplayLine(plain)}${C.reset}`;
       this._systemEvents.push({ time, text: styled });
       if (this._systemEvents.length > this._maxSystemEvents) {
         this._systemEvents.splice(0, this._systemEvents.length - this._maxSystemEvents);
       }
       return;
     }
+    const styled = _sanitizeDisplayLine(_colorizeAssessorVerdictWords(displayText));
     this.events.push({ time, text: styled });
     if (this.events.length > this.maxEvents) {
       this.events.splice(0, this.events.length - this.maxEvents);
@@ -1172,7 +1189,9 @@ export class Display {
   // main log so an error can never hide in a 2-line tail.
   _eventLane(text) {
     const clean = stripAnsi(String(text || "")).trim();
-    const isSystem = /^\[(?:system|atlas|git)\]/i.test(clean)
+    const isSystem = /^\[(?:system|git|atlas(?:[^\]]*)?)\]/i.test(clean)
+      || /^atlas\s+(?:indexing|boot check|background reindex)\b/i.test(clean)
+      || /^scip\s*:/i.test(clean)
       || /^atlas\b.*\breindex\b/i.test(clean)
       || /^atlas background reindex\b/i.test(clean);
     if (!isSystem) return "log";
@@ -1407,9 +1426,9 @@ export class Display {
     const tag = w ? this._roleTagLong(w.role) : `${C.dim}[?]${C.reset}`;
 
     // Pass through system/structured messages unfiltered (no tag — they already have a prefix)
-    const clean = stripAnsi(line).trim();
+    const clean = stripAnsi(this._normalizeAtlasEventText(line)).trim();
     if (clean) this._markWorkerProviderActivity(jobId);
-    const isStructured = clean.startsWith("[") && /^\[(git|planner|assessor|researcher|delegator|dev|developer|artificer|human|pre-assess|auto-approve|plan-validate|dry-run|idempotency|skip-assess|stale-lease|stderr|worker|escalation|merge|atlas|system|mcp)\]/.test(clean);
+    const isStructured = clean.startsWith("[") && /^\[(git|planner|assessor|researcher|delegator|dev|developer|artificer|human|pre-assess|auto-approve|plan-validate|dry-run|idempotency|skip-assess|stale-lease|stderr|worker|escalation|merge|atlas(?:[^\]]*)?|system|mcp)\]/.test(clean);
     const isStructuredStderr = /^\[stderr\]/.test(clean);
     if (this._isNoisyStructuredWorkerEvent(clean)) {
       return;

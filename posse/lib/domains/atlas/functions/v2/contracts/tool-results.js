@@ -455,6 +455,7 @@
  * @property {Record<string, unknown>} [aggregates]
  * @property {string[]} [terms]
  * @property {Array<{ refType: "cluster" | "process" | string, refId: string, weight: number }>} [refs]
+ * @property {string} [areaLabel]  Compressed-tree label for this area, when a compression seed annotates the node's path.
  */
 
 /**
@@ -468,6 +469,7 @@
  * @property {number} matchTotal              Total focus matches before the capped matches array is returned.
  * @property {boolean} focusTruncated         True when focus lookup matched more nodes than the capped matches array.
  * @property {TreeNodeSummary[]} nodes
+ * @property {Array<{ path: string, label: string, confidence: "high" | "medium" | "low" }>} [areaMap]  Top-level calls only: compressed-tree labeled area map.
  * @property {number} total
  * @property {number} [offset]
  * @property {number} [limit]
@@ -566,9 +568,25 @@
  * @property {Array<Record<string, unknown>>} rejectedBroadDirs
  * @property {Array<Record<string, unknown>>} rejectedBroadRefs
  * @property {TreeScopeMetrics} metrics
+ * @property {TreeScopeCompression} [compression]
  * @property {TreeScopeSidecar} [sidecar]
  * @property {{ builtAt: string, status: string, durationMs: number, details: Record<string, unknown> } | null} [latestRun]
  * @property {string[]} [warnings]
+ */
+
+/**
+ * Compressed-tree (tree-compression seed) involvement in this scope pass.
+ * Seeds are advisory vocabulary bridges; matchedSeeds lists the repo areas
+ * whose label/alias vocabulary matched the task text and boosted candidates.
+ *
+ * @typedef {Object} TreeScopeCompression
+ * @property {boolean} available
+ * @property {string | null} [reason]
+ * @property {string | null} [profile]
+ * @property {Array<{ path: string, label: string, confidence: "high" | "medium" | "low", hits: number, entrypoints: string[] }>} matchedSeeds
+ * @property {Array<{ path: string, label: string, confidence: "high" | "medium" | "low" }>} [areaMap]
+ *   Labeled repo orientation: most-specific annotated areas with ancestor
+ *   chains collapsed. Drill into any area via tree.overview {path, maxDepth}.
  */
 
 // ============================================================================
@@ -1095,7 +1113,9 @@
  *   | ToolResultEnvelope<SymbolGetCardsData>   & { action: "symbol.getCards" }
  *   | ToolResultEnvelope<SymbolUsagesData>     & { action: "symbol.usages" }
  *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.overview" }
+ *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.walk" }
  *   | ToolResultEnvelope<TreeScopeData>         & { action: "tree.scope" }
+ *   | ToolResultEnvelope<TreeScopeData>         & { action: "tree.grow" }
  *   | ToolResultEnvelope<SliceData>            & { action: "slice.build" }
  *   | ToolResultEnvelope<SliceRefreshData>     & { action: "slice.refresh" }
  *   | ToolResultEnvelope<SliceSpilloverGetData> & { action: "slice.spillover.get" }
@@ -1166,6 +1186,13 @@ export const ATLAS_TOOL_RESULT_FIELD_CATALOG = Object.freeze({
     total: "total",
     nextOffset: "nextOffset",
   }),
+  "tree.walk": Object.freeze({
+    root: "root",
+    matches: "matches",
+    nodes: "nodes",
+    total: "total",
+    nextOffset: "nextOffset",
+  }),
   "tree.scope": Object.freeze({
     candidateFiles: "candidateFiles",
     candidateDirs: "candidateDirs",
@@ -1174,6 +1201,21 @@ export const ATLAS_TOOL_RESULT_FIELD_CATALOG = Object.freeze({
     scopeRisk: "metrics.scopeRisk",
     candidateFileCount: "metrics.candidateFileCount",
     estimatedTouchedFiles: "metrics.estimatedTouchedFiles",
+    compression: "compression",
+    compressionSeeds: "compression.matchedSeeds",
+    compressionAreaMap: "compression.areaMap",
+  }),
+  "tree.grow": Object.freeze({
+    candidateFiles: "candidateFiles",
+    candidateDirs: "candidateDirs",
+    refinementCandidates: "refinementCandidates",
+    metrics: "metrics",
+    scopeRisk: "metrics.scopeRisk",
+    candidateFileCount: "metrics.candidateFileCount",
+    estimatedTouchedFiles: "metrics.estimatedTouchedFiles",
+    compression: "compression",
+    compressionSeeds: "compression.matchedSeeds",
+    compressionAreaMap: "compression.areaMap",
   }),
   "code.getSkeleton": Object.freeze({
     symbolId: "symbolId",

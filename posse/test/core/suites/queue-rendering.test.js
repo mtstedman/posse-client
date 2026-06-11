@@ -2309,6 +2309,44 @@ suite("Queue Rendering", () => {
     assert.equal(lines.some((line) => line.includes("queued")), false);
   });
 
+  it("routes ATLAS and SCIP boot progress to a muted system lane", () => {
+    const display = new Display({ concurrency: 3 });
+
+    display.addEvent("\x1b[36mATLAS indexing: worker: starting ATLAS boot worker\x1b[0m");
+    display.addEvent("\x1b[33mSCIP: typescript indexing 1/2 files\x1b[0m");
+
+    assert.equal(display.events.length, 0);
+    assert.equal(display._systemEvents.length, 2);
+    assert.deepEqual(display._systemEvents.map((event) => plain(event.text)), [
+      "ATLAS indexing: worker: starting ATLAS boot worker",
+      "SCIP: typescript indexing 1/2 files",
+    ]);
+    assert.equal(display._systemEvents.some((event) => /\x1b\[(?:33|36)m/.test(event.text)), false);
+  });
+
+  it("keeps ATLAS worker stream lines atlas-owned instead of system-prefixed", () => {
+    const display = new Display({ concurrency: 3 });
+    display.workers.set(300, {
+      role: "system",
+      activity: "ATLAS warm",
+      startTime: Date.now(),
+      workItemId: 135,
+    });
+
+    display.workerLine(300, "[atlas] WI#135 preparing worktree graph before dev join");
+    display.workerLine(300, "[atlas-warm wi] dispatched to conductor");
+    display.workerLine(300, "[system] [atlas-warm initializing] warming wi");
+
+    const systemLines = display._systemEvents.map((event) => plain(event.text));
+    assert.deepEqual(systemLines, [
+      "[atlas] WI#135 preparing worktree graph before dev join",
+      "[atlas] warm wi: dispatched to conductor",
+      "[atlas] warm initializing: warming wi",
+    ]);
+    assert.equal(systemLines.some((line) => line.startsWith("[system] [atlas")), false);
+    assert.equal(display.events.length, 0);
+  });
+
   it("deduplicates direct role-owned start events for retried jobs", () => {
     const display = new Display({ concurrency: 3 });
 

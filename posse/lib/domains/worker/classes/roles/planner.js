@@ -33,6 +33,7 @@ import {
   composePromptRemoteAware,
   handoff,
   normalizeResearcherFilePriorities,
+  normalizeResearcherKeySymbols,
   parseResearcherStructuredOutput,
   renderAtlasHandoffSections,
   _parseFunctions,
@@ -388,6 +389,7 @@ export class PlannerRole extends BaseRole {
       });
 
     let keyFiles = [];
+    let keySymbols = [];
     let relatedFiles = [];
     let plannerFilePriorities = [];
     let structuredData = null;
@@ -417,11 +419,13 @@ export class PlannerRole extends BaseRole {
       keyFiles = priorityPaths.length > 0
         ? [...new Set([...priorityPaths, ...sanitizedKeyFiles.files])]
         : sanitizedKeyFiles.files;
+      keySymbols = normalizeResearcherKeySymbols(parsed);
       relatedFiles = sanitizedRelatedFiles.files;
       plannerFilePriorities = sanitizedPlannerPriorities.files;
       structuredData = {
         ...parsed,
         key_files: keyFiles,
+        key_symbols: keySymbols,
         related_files: relatedFiles,
       };
       delete structuredData.ranked_files;
@@ -660,6 +664,7 @@ export class PlannerRole extends BaseRole {
         files_to_modify: [],
         context_hints: {
           atlas_seed_files: keyFiles,
+          atlas_seed_symbols: keySymbols,
         },
       },
     });

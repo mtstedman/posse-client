@@ -177,12 +177,12 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
  *   repoId?: string | null,
  * }} args
  */
-export function symbolGetCards({ view, versionId, params, repoRoot, ledger, repoId }) {
+export function symbolGetCards({ view, versionId, params, repoRoot, ledger, repoId, action = "symbol.getCards" }) {
   const { requests, invalidRequests } = normalizeBatchRequests(params);
   if (requests.length === 0) {
     if (invalidRequests.length > 0) {
       return okEnvelope({
-        action: "symbol.getCards",
+        action,
         versionId,
         data: {
           cards: [],
@@ -195,10 +195,10 @@ export function symbolGetCards({ view, versionId, params, repoRoot, ledger, repo
       });
     }
     return errorEnvelope({
-      action: "symbol.getCards",
+      action,
       versionId,
       code: "invalid_params",
-      message: "symbol.getCards requires symbolIds, symbolRefs, or cards",
+      message: `${action} requires symbolIds, symbolRefs, or cards`,
     });
   }
   const cards = [];
@@ -230,7 +230,7 @@ export function symbolGetCards({ view, versionId, params, repoRoot, ledger, repo
     }
   }
   return okEnvelope({
-    action: "symbol.getCards",
+    action,
     versionId,
     data: {
       cards,

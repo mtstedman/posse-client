@@ -1488,7 +1488,65 @@ export async function runPostExecutionAssessment(worker, {
   // Skip assessment when the job made no file changes but has file requests.
   const skipAssessForFileRequest = !hasFileChanges && hasPendingFileRequests();
   const skipAssessForSatisfiedNoop = satisfiedNoop && !verifiedNoChange;
-  if (ASSESSABLE_JOB_TYPES.has(job.job_type) && !worker.dryRun && !worker._shouldSkipAssessment(job) && !skipAssessForFileRequest && !skipAssessForSatisfiedNoop) {
+  const shouldRunAssessment = ASSESSABLE_JOB_TYPES.has(job.job_type)
+    && !worker.dryRun
+    && !worker._shouldSkipAssessment(job);
+  if (shouldRunAssessment && skipAssessForSatisfiedNoop) {
+    updateJobStatus(job.id, "awaiting_assessment", leaseToken != null ? { leaseToken } : {});
+    syncAssessorWorkerDisplay(worker.display, job, {
+      tier: "cheap",
+      effort: job.reasoning_effort || "medium",
+      attempt: attempt.attempt_number || job.attempt_count || 1,
+    });
+    const passMsg = "Deterministic no-op pass: the scoped end state was already satisfied, so no commit was required.";
+    worker.emit(job.id, `${C.green}[assessor]${C.reset} WI#${job.work_item_id} job #${job.id}: deterministic no-op pass`);
+    const verdict = {
+      verdict: "pass",
+      confidence: "high",
+      reasons: [passMsg],
+      spawn_jobs: [],
+      human_questions: [],
+      suggestions: [],
+    };
+    if (!isLeaseValid(job.id, leaseToken)) {
+      worker.emit(job.id, `${C.yellow}[lease] WI#${job.work_item_id} job #${job.id} — lease expired before deterministic no-op verdict${C.reset}`);
+      completeAttempt(attempt.id, {
+        status: "interrupted",
+        duration_ms: Date.now() - startTime,
+        error_text: "Lease expired before deterministic no-op verdict — result discarded",
+      });
+      refreshAndExtractInsights(job.work_item_id);
+      worker._cleanupWorktreeIfDone(job.work_item_id);
+      return;
+    }
+    const emitFn = (msg) => worker.emit(job.id, msg);
+    const { action } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
+    log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons });
+    jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${verdict.verdict} (${verdict.confidence}) — ${passMsg.slice(0, 100)}` });
+    recordObservation({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      attempt_id: attempt.id,
+      observation_type: "assessment.verdict",
+      summary: `${verdict.verdict}: ${passMsg}`,
+      detail: { verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons, action },
+    });
+
+    const freshJob = getJob(job.id);
+    const finalStatus = freshJob?.status === "succeeded" ? "succeeded" : "failed";
+    completeAttempt(attempt.id, {
+      status: finalStatus,
+      duration_ms: Date.now() - startTime,
+      output_chars: output.length,
+    });
+    if (freshJob?.status === "succeeded" && hasPendingFileRequests() && !spawnedFileRequestFollowUp) {
+      spawnPendingFileRequestsOnce();
+    }
+    refreshAndExtractInsights(job.work_item_id);
+    worker._cleanupWorktreeIfDone(job.work_item_id);
+    return;
+  }
+  if (shouldRunAssessment && !skipAssessForFileRequest && !skipAssessForSatisfiedNoop) {
     // Keep the scoped job lock active while the committed work is being assessed.
     updateJobStatus(job.id, "awaiting_assessment", leaseToken != null ? { leaseToken } : {});
     worker.emit(job.id, `${C.yellow}[assessor]${C.reset} WI#${job.work_item_id} job #${job.id}: assessing ${shortJobTitle(job).slice(0, 50)}`);

@@ -369,6 +369,42 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
     };
   }
 
+  if (normalizedAction === "tree.grow") {
+    const rawPaths = [
+      ...sanitizeRelativePathList(payload.paths, 100),
+      ...sanitizeRelativePathList(payload.editedFiles, 100),
+    ];
+    if (payload.path != null) rawPaths.push(requireSafeRelativePath(payload.path, "tree.grow path"));
+    assertNoUnsafeRelativePaths(payload.paths, "tree.grow paths");
+    assertNoUnsafeRelativePaths(payload.editedFiles, "tree.grow editedFiles");
+    const refs = Array.isArray(payload.refs)
+      ? payload.refs
+        .map((ref) => ({
+          refType: sanitizeString(ref?.refType, 32),
+          refId: sanitizeString(ref?.refId, 512),
+        }))
+        .filter((ref) => ["cluster", "process"].includes(ref.refType) && ref.refId)
+        .slice(0, 20)
+      : [];
+    const refType = sanitizeString(payload.refType, 32);
+    const refId = sanitizeString(payload.refId, 512);
+    if (["cluster", "process"].includes(refType) && refId) refs.push({ refType, refId });
+    return {
+      action: normalizedAction,
+      cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
+      payload: {
+        paths: [...new Set(rawPaths)].slice(0, 100),
+        symbolIds: sanitizeAtlasSymbolIdList(payload.symbolIds || (payload.symbolId ? [payload.symbolId] : []), 100, "tree.grow symbolIds"),
+        nodeIds: sanitizeShortStringList(payload.nodeIds, 100, 2000),
+        refs,
+        ...(payload.maxFiles == null ? {} : { maxFiles: clampInt(payload.maxFiles, 1, 500, DEFAULT_ATLAS_SCOPE_MAX_FILES) }),
+        ...(payload.maxBranches == null ? {} : { maxBranches: clampInt(payload.maxBranches, 1, 100, 12) }),
+        ...(payload.branchFileCap == null ? {} : { branchFileCap: clampInt(payload.branchFileCap, 1, 500, 40) }),
+        ...(payload.refMatchLimit == null ? {} : { refMatchLimit: clampInt(payload.refMatchLimit, 1, 500, 50) }),
+      },
+    };
+  }
+
   if (normalizedAction === "context") {
     const rawFocusPaths = payload.focusPaths || payload.editedFiles || payload.options?.focusPaths;
     assertNoUnsafeRelativePaths(rawFocusPaths, "focusPaths");
@@ -489,8 +525,24 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
         ...(payload.symbolRef.exportedOnly == null ? {} : { exportedOnly: !!payload.symbolRef.exportedOnly }),
       }
       : null;
+    // Batch mode: symbolIds answers in the symbol.getCards shape. One tool,
+    // single or batch by input.
+    const batchSymbolIds = sanitizeAtlasSymbolIdList(payload.symbolIds, 100, "symbol.getCard symbolIds");
+    if (batchSymbolIds.length > 0 || (Array.isArray(payload.symbolRefs) && payload.symbolRefs.length > 0)) {
+      return {
+        action: normalizedAction,
+        cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
+        payload: {
+          ...(batchSymbolIds.length > 0 ? { symbolIds: batchSymbolIds } : {}),
+          ...(Array.isArray(payload.symbolRefs) && payload.symbolRefs.length > 0 ? { symbolRefs: payload.symbolRefs.slice(0, 100) } : {}),
+          ...(payload.minCallConfidence == null ? {} : { minCallConfidence: Number(payload.minCallConfidence) }),
+          ...(payload.includeResolutionMetadata == null ? {} : { includeResolutionMetadata: !!payload.includeResolutionMetadata }),
+          ...(payload.repoId ? { repoId: payload.repoId } : {}),
+        },
+      };
+    }
     if (!symbolId && !symbolRef?.name) {
-      throw new Error("ATLAS symbol.getCard requires symbolId or symbolRef.");
+      throw new Error("ATLAS symbol.getCard requires symbolId, symbolIds, or symbolRef.");
     }
     return {
       action: normalizedAction,

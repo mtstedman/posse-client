@@ -242,7 +242,9 @@ function sampleCallsFor() {
     "symbol.getCards": { action: "symbol.getCards", symbolIds: [greeterId, runId] },
     "symbol.usages": { action: "symbol.usages", symbolId: greeterId, kind: ["calls"], limit: 5 },
     "tree.overview": { action: "tree.overview", maxDepth: 2, limit: 50 },
+    "tree.walk": { action: "tree.walk", path: "src", maxDepth: 2, limit: 50 },
     "tree.scope": { action: "tree.scope", taskText: "Greeter", maxFiles: 10 },
+    "tree.grow": { action: "tree.grow", paths: ["src"], maxFiles: 10, branchFileCap: 20 },
     "slice.build": {
       action: "slice.build",
       taskText: "Greeter",
