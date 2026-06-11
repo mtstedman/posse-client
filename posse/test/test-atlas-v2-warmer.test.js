@@ -13,6 +13,7 @@ import { StubEmbeddingEncoder } from "../lib/domains/atlas/classes/v2/EmbeddingE
 import { View } from "../lib/domains/atlas/classes/v2/View.js";
 import { ViewBuilder } from "../lib/domains/atlas/classes/v2/ViewBuilder.js";
 import { Warmer } from "../lib/domains/atlas/classes/v2/Warmer.js";
+import { shouldRunMlTreeCompressionReseed } from "../lib/domains/atlas/classes/v2/ParseEngine.js";
 import { sharedParserAdapter } from "../lib/domains/atlas/functions/v2/parser/adapter.js";
 import { sha256Hex } from "../lib/domains/atlas/functions/v2/hash.js";
 import { VIEW_SCHEMA_VERSION } from "../lib/domains/atlas/functions/v2/contracts/ddl/index.js";
@@ -165,6 +166,18 @@ describe("ATLAS v2 Warmer", () => {
     } finally {
       led.close();
     }
+  });
+
+  it("ML tree-compression reseed only runs on boot-triggered main warms", () => {
+    const gate = (args) => shouldRunMlTreeCompressionReseed(args);
+    assert.deepEqual(gate({ purpose: "main-full", mode: "ml", triggerEvent: "boot" }), { run: true, reason: null });
+    assert.deepEqual(gate({ purpose: "main-incremental", mode: "ml", triggerEvent: "boot" }), { run: true, reason: null });
+    // Re-warms (post-commit, merge replays, anything not boot) never pay the
+    // provider pass; the compressed tree is allowed to lag until next boot.
+    assert.deepEqual(gate({ purpose: "main-incremental", mode: "ml", triggerEvent: "post-commit" }), { run: false, reason: "ml_reseed_boot_only" });
+    assert.deepEqual(gate({ purpose: "main-merge", mode: "ml", triggerEvent: null }), { run: false, reason: "ml_reseed_boot_only" });
+    assert.deepEqual(gate({ purpose: "wi", mode: "ml", triggerEvent: "boot" }), { run: false, reason: "not_main_purpose" });
+    assert.deepEqual(gate({ purpose: "main-full", mode: "deterministic", triggerEvent: "boot" }), { run: false, reason: "mode_not_ml" });
   });
 
   it("handleWarmJob('wi') is idempotent — re-running with existing file returns the existing etag", async () => {

@@ -1384,7 +1384,7 @@ export class ParseEngine {
         if (carriedMlSnapshot) this.#importMlCompressionSnapshot(outPath, carriedMlSnapshot);
         await this.#emitStage("embeddings", `checking embeddings for ${path.basename(outPath)}`);
         await this.#maybeIngestEmbeddings({ viewPath: outPath, base, purpose: payload.purpose });
-        await this.#maybeReseedTreeCompression({ viewPath: outPath, base, purpose: payload.purpose });
+        await this.#maybeReseedTreeCompression({ viewPath: outPath, base, purpose: payload.purpose, triggerEvent: payload?.trigger_event ?? null });
       } catch (err) {
         logAtlasError(`[Warmer.#rebuildBranchView] branch=${branch} threw:`, err);
         base.skipped.push({
@@ -1692,7 +1692,7 @@ export class ParseEngine {
         });
         await this.#emitStage("embeddings", `checking embeddings for ${path.basename(outPath)}`);
         await this.#maybeIngestEmbeddings({ viewPath: outPath, base, purpose: payload.purpose });
-        await this.#maybeReseedTreeCompression({ viewPath: outPath, base, purpose: payload.purpose });
+        await this.#maybeReseedTreeCompression({ viewPath: outPath, base, purpose: payload.purpose, triggerEvent: payload?.trigger_event ?? null });
         return { fallback: false, result: base };
       } catch (err) {
         logAtlasError(`[Warmer.#updateBranchViewIncremental] branch=${branch} fell back to full rebuild:`, err);
@@ -2217,12 +2217,18 @@ export class ParseEngine {
    * @param {{ viewPath: string, base: AtlasWarmJobResult, purpose: string }} args
    * @returns {Promise<void>}
    */
-  async #maybeReseedTreeCompression({ viewPath, base, purpose }) {
-    const isMainPurpose = purpose === "main-incremental"
-      || purpose === "main-full"
-      || purpose === "main-merge";
-    if (!isMainPurpose) return;
-    if (this.#treeCompressionMode !== "ml") return;
+  async #maybeReseedTreeCompression({ viewPath, base, purpose, triggerEvent = null }) {
+    const decision = shouldRunMlTreeCompressionReseed({
+      purpose,
+      mode: this.#treeCompressionMode,
+      triggerEvent,
+    });
+    if (!decision.run) {
+      if (decision.reason === "ml_reseed_boot_only") {
+        base.tree_compression_reseed = { ok: true, skipped: decision.reason };
+      }
+      return;
+    }
     try {
       await this.#emitStage("tree-compression", `reseeding tree compression for ${path.basename(viewPath)}`);
       const { runAtlasTreeCompressionModelPass } = await import(
@@ -2519,6 +2525,24 @@ function scipBasenameSourceLanguages(scipPath) {
   if (base === "rust") return ["rs"];
   if (["ts", "js", "py", "php", "go", "rs"].includes(base)) return [base];
   return [];
+}
+
+/**
+ * ML labeling runs ONCE, at boot. Re-warms must not wait ~2 minutes on a
+ * provider pass — the compressed tree is an orientation layer and is allowed
+ * to lag; carried-forward labels cover it until the next boot.
+ *
+ * @param {{ purpose?: string | null, mode?: string | null, triggerEvent?: string | null }} args
+ * @returns {{ run: boolean, reason: string | null }}
+ */
+export function shouldRunMlTreeCompressionReseed({ purpose, mode, triggerEvent } = {}) {
+  const isMainPurpose = purpose === "main-incremental"
+    || purpose === "main-full"
+    || purpose === "main-merge";
+  if (!isMainPurpose) return { run: false, reason: "not_main_purpose" };
+  if (mode !== "ml") return { run: false, reason: "mode_not_ml" };
+  if (triggerEvent !== "boot") return { run: false, reason: "ml_reseed_boot_only" };
+  return { run: true, reason: null };
 }
 
 function normalizeTreeCompressionMode(value) {
