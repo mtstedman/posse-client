@@ -808,6 +808,16 @@ describe("retrieval dispatcher", () => {
       assert.equal(seededScope.data.candidateFiles[0].exactSeed, true);
       assert.equal(seededScope.data.metrics.exactSeedCount, 1);
       assert.equal(seededScope.data.sidecar.used, true);
+      // Siblings pulled in only because the seed's branch was selected are
+      // structural fill: a fraction of the trigger score with an explicit
+      // branch-fill reason — never seed-equal rank.
+      const seedScore = seededScope.data.candidateFiles[0].score;
+      for (const candidate of seededScope.data.candidateFiles.slice(1)) {
+        if ((candidate.reasons || []).some((reason) => String(reason).startsWith("branch-fill:"))) {
+          assert.ok(candidate.score <= seedScore * 0.1, `fill candidate ${candidate.path} scored ${candidate.score} vs seed ${seedScore}`);
+          assert.equal(candidate.exactSeed, false);
+        }
+      }
 
       const broadSeedScope = dispatch(
         /** @type {any} */ ({ action: "tree.scope", paths: ["src"], maxFiles: 5, branchFileCap: 1 }),

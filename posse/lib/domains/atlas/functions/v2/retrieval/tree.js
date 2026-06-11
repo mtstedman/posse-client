@@ -1366,11 +1366,17 @@ function selectScope({ model, fileScores, branchScores, opts }) {
         ]),
       });
       for (const file of newFiles) {
+        const own = fileScores.get(file.repoRelPath);
+        // A sibling admitted purely because its branch was selected is
+        // structural fill, not evidence. Inheriting the triggering entry's
+        // score made route/lib siblings rank EQUAL to validated seeds and
+        // flood the prompt-facing top of the candidate list — fill files get
+        // a fraction of the trigger score and an explicit reason instead.
         selectedFiles.set(file.repoRelPath, {
           file,
-          score: roundScore(fileScores.get(file.repoRelPath)?.score || entry.score),
-          reasons: topReasonKeys(fileScores.get(file.repoRelPath)?.reasons || entry.reasons),
-          exactSeed: !!fileScores.get(file.repoRelPath)?.exactSeed,
+          score: roundScore(own?.score ?? entry.score * 0.05),
+          reasons: own ? topReasonKeys(own.reasons) : [`branch-fill:${branch.repoRelPath}`],
+          exactSeed: !!own?.exactSeed,
         });
       }
       continue;
