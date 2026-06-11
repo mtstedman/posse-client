@@ -848,9 +848,7 @@ async function executeEmbeddedAtlasV2Tool({
     const wantsSemanticDispatch = (action === "symbol.search" && payload?.semantic)
       || (action === "slice.build" && payload?.taskText && payload?.semantic !== false)
       || ((action === "context" || action === "context.summary") && payload?.taskText);
-    if (wantsSemanticDispatch && semanticDispatchEnabled(config || {})) {
-      embeddingResources = openEmbeddingResources({ repoRoot: readRoot, config: config || {} });
-    }
+    const semanticWanted = !!(wantsSemanticDispatch && semanticDispatchEnabled(config || {}));
     const callPayload = payload && typeof payload === "object" ? payload : {};
     const dispatchCall = ATLAS_V2_GATEWAY_ACTIONS.has(action)
       ? { ...callPayload, action, gatewayAction: typeof callPayload.action === "string" ? callPayload.action : callPayload.gatewayAction }
@@ -862,14 +860,13 @@ async function executeEmbeddedAtlasV2Tool({
     // handles, live buffers, runtime exec) or write semantics stays here, as
     // does everything when the daemon misbehaves (automatic fallback).
     const conductorEligible = (config?.embeddedDispatch || "conductor") !== "in-process"
-      && !!view && !!viewPath
-      && !embeddingResources
+      && (!!viewPath || freshnessExempt)
       && !ATLAS_V2_GATEWAY_ACTIONS.has(action)
       && !ATLAS_V2_BLOCKING_ACTIONS.has(action)
       && !isBlockingAction(action, payload)
       && !action.startsWith("buffer.")
       && !action.startsWith("runtime.")
-      && !action.startsWith("memory.")
+      && action !== "memory.store" && action !== "memory.remove"
       && action !== "policy.set" && action !== "agent.feedback";
     let envelope = null;
     if (conductorEligible) {
@@ -880,11 +877,14 @@ async function executeEmbeddedAtlasV2Tool({
         try { conductorConfig = JSON.parse(JSON.stringify(config || {})); } catch { conductorConfig = {}; }
         envelope = await getSharedConductor().retrieve({
           call: dispatchCall,
-          viewPath,
+          viewPath: viewPath || null,
           ledgerPath: conductorLedgerPath || null,
           versionId,
           readRoot,
           repoId: repo?.repoId || null,
+          semantic: semanticWanted,
+          taskText: typeof payload?.taskText === "string" ? payload.taskText : (action === "symbol.search" ? payload?.query : undefined),
+          taskType: typeof payload?.taskType === "string" ? payload.taskType : undefined,
           config: conductorConfig,
         }, { timeoutMs: Math.max(5000, Number(config?.embeddedTimeoutMs) || getAtlasEmbeddedTimeoutMs()) });
       } catch (err) {
@@ -899,6 +899,13 @@ async function executeEmbeddedAtlasV2Tool({
       }
     }
     if (!envelope) {
+      // In-process path (kill switch, ineligible action, or daemon fallback):
+      // open the semantic handles here, exactly as before the conductor split.
+      if (semanticWanted && !embeddingResources) {
+        try {
+          embeddingResources = openEmbeddingResources({ repoRoot: readRoot, config: config || {} });
+        } catch { embeddingResources = null; }
+      }
       envelope = await Promise.resolve(dispatchAtlasV2(dispatchCall, {
         view,
         ledger,

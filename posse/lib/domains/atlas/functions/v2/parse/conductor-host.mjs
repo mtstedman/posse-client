@@ -109,7 +109,14 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         // this is the per-stage progress the strict request/response path dropped.
         onProgress: (event) => emitProgress(event),
       });
-      return dbWrite.run(() => engine.handleWarmJob(payload.job ?? { paths: payload.paths ?? [] }));
+      try {
+        return await dbWrite.run(() => engine.handleWarmJob(payload.job ?? { paths: payload.paths ?? [] }));
+      } finally {
+        // The warm may have rewritten the on-disk ANN; cached retrieval-side
+        // embedding handles hold the old index in memory.
+        const { invalidateConductorRetrieveResources } = await import("./retrieve-runner.js");
+        await invalidateConductorRetrieveResources();
+      }
     }
 
     case "retrieve": {
@@ -125,14 +132,23 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // (null = full/boot). Reads Ledger, writes View, in this thread.
       const ledger = await getLedger(payload.ledgerPath, payload.dbPath);
       const view = await getView(payload.ledgerPath, payload.dbPath);
-      return dbWrite.run(() => view.mergeLanguageLayers({
-        ledger,
-        lang: payload.lang,
-        contentHashes: payload.contentHashes ?? null,
-      }));
+      try {
+        return await dbWrite.run(() => view.mergeLanguageLayers({
+          ledger,
+          lang: payload.lang,
+          contentHashes: payload.contentHashes ?? null,
+        }));
+      } finally {
+        const { invalidateConductorRetrieveResources } = await import("./retrieve-runner.js");
+        await invalidateConductorRetrieveResources();
+      }
     }
 
     case "close": {
+      try {
+        const { disposeConductorRetrieveResources } = await import("./retrieve-runner.js");
+        await disposeConductorRetrieveResources();
+      } catch { /* best effort */ }
       for (const { ledger, view } of handles.values()) {
         try { ledger?.close?.(); } catch { /* best effort */ }
         try { view?.close?.(); } catch { /* best effort */ }

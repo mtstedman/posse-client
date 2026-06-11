@@ -169,6 +169,18 @@ describe("ATLAS v2 Conductor warm op", () => {
       // replaceable right after (no lingering reader locks on Windows).
       fs.rmSync(mainViewPath(repoRoot));
       assert.equal(fs.existsSync(mainViewPath(repoRoot)), false);
+
+      // Ledger-only reads run viewless through the same op.
+      const viewless = await conductor.retrieve({
+        call: { action: "policy.get" },
+        viewPath: null,
+        ledgerPath: ledgerDbPath(repoRoot),
+        versionId: "main@1",
+        readRoot: repoRoot,
+        repoId: "retrieve-test",
+      });
+      assert.equal(viewless.ok, true);
+      assert.equal(viewless.action, "policy.get");
     } finally {
       await conductor.close();
       await conductor.daemon.dispose();
