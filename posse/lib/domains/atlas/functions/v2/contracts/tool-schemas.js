@@ -531,13 +531,16 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     includeCards: b(),
   }, ["taskText"]),
   "agent.feedback": o({
+    // Optional: tree-first retrieval surfaces symbols without ever building
+    // a slice, and the ledger stores feedback per symbol with a nullable
+    // slice_handle — feedback must not require a slice to exist.
     sliceHandle: s({ minLength: 1, maxLength: 512 }),
     usefulSymbols: a(s({ minLength: 1, maxLength: 512 }), { maxItems: 1000 }),
     missingSymbols: a(s({ minLength: 1, maxLength: 512 }), { maxItems: 1000 }),
     taskType: s({ enum: TASK_TYPES }),
     taskText: s({ maxLength: 200_000 }),
     taskTags: a(s({ minLength: 1, maxLength: 256 }), { maxItems: 100 }),
-  }, ["sliceHandle"]),
+  }, []),
   "agent.feedback.query": o({
     since: s({ maxLength: 80 }),
     limit: i({ minimum: 1, maximum: 10_000 }),

@@ -13,6 +13,7 @@ import { closePromptLog, recordPrompt } from "../lib/shared/telemetry/functions/
 import { closeObservationLog, getRecentToolInvocations, recordObservation } from "../lib/domains/observability/functions/observations.js";
 import { flushEventsNow, getEvents, logEvent, _discardPendingEventsForTests } from "../lib/domains/queue/functions/events.js";
 import { getArtifact, storeArtifact } from "../lib/domains/queue/functions/artifacts.js";
+import * as queueFunctions from "../lib/domains/queue/functions/index.js";
 import { setRuntimePathOverridesForTests } from "../lib/domains/runtime/functions/paths.js";
 import { pruneTelemetryTableToTail } from "../lib/shared/telemetry/functions/db-tail.js";
 import { recordMemorySample } from "../lib/shared/telemetry/functions/memory.js";
@@ -131,6 +132,41 @@ describe("run telemetry file storage", () => {
     const observations = readRunTelemetryEntries("observations", { limit: 100 });
     assert.equal(observations.some((entry) => String(entry.summary || "").startsWith("old observation")), false);
     assert.equal(observations.some((entry) => entry.summary === "new observation"), true);
+  });
+
+  it("keeps job-scoped observations alive past the tail until the job is terminal", () => {
+    const { createWorkItem, createJob } = queueFunctions;
+    const wi = createWorkItem("Telemetry tail test", "desc");
+    const job = createJob({ work_item_id: wi.id, job_type: "dev", title: "tail-protected job" });
+
+    const db = getDb();
+    const oldAt = "2000-01-01T00:00:00.000Z";
+    const insertJobObservation = db.prepare(`
+      INSERT INTO job_observations (work_item_id, job_id, attempt_id, observation_type, summary, detail_json, created_at)
+      VALUES (?, ?, NULL, 'tool.atlas.prefetch', ?, NULL, ?)
+    `);
+    for (let i = 0; i < 5; i += 1) {
+      insertJobObservation.run(wi.id, job.id, `prefetch evidence ${i}`, oldAt);
+    }
+    // Push far past the tail limit with job-less rows; the job-scoped rows
+    // must survive because the job is not terminal (the auto-feedback
+    // finalizer reads them after the job completes).
+    for (let i = 0; i < 40; i += 1) {
+      recordObservation({ observation_type: "tool.search", summary: `filler ${i}`, detail: { i } });
+    }
+    const survivors = db.prepare(
+      `SELECT COUNT(*) AS count FROM job_observations WHERE job_id = ?`,
+    ).get(job.id).count;
+    assert.equal(survivors, 5);
+
+    // Once the job is terminal (and the rows are older than the grace
+    // window), the same rows become prunable.
+    db.prepare(`UPDATE jobs SET status = 'succeeded' WHERE id = ?`).run(job.id);
+    pruneTelemetryTableToTail(db, "job_observations", 20);
+    const afterTerminal = db.prepare(
+      `SELECT COUNT(*) AS count FROM job_observations WHERE job_id = ?`,
+    ).get(job.id).count;
+    assert.equal(afterTerminal, 0);
   });
 
   it("does not treat previous run files with the same epoch as current-run telemetry", () => {

@@ -283,6 +283,44 @@ export class TrackedProviderClient {
     }
   }
 
+  _recordSessionRecycleDecision({
+    job_id,
+    work_item_id,
+    attempt_id,
+    providerName,
+    role,
+    recycleMode,
+    decision,
+  } = {}) {
+    try {
+      const mode = decision?.recyclingMode || "fresh";
+      const reason = decision?.reason || (mode === "resume" ? "resumed" : "unknown");
+      const deniedSkills = Array.isArray(decision?.skillPolicy?.deniedSkills)
+        ? decision.skillPolicy.deniedSkills
+        : [];
+      recordObservation({
+        work_item_id: work_item_id ?? null,
+        job_id: job_id ?? null,
+        attempt_id: attempt_id ?? null,
+        observation_type: "session.recycle_decision",
+        summary: mode === "resume"
+          ? `session recycle: resume (role=${role || "?"} provider=${providerName || "?"})`
+          : `session recycle: fresh (${reason}${deniedSkills.length ? `: ${deniedSkills.join(",")}` : ""}) role=${role || "?"} provider=${providerName || "?"}`,
+        detail: {
+          mode,
+          reason,
+          recycle_mode_setting: recycleMode || null,
+          provider: providerName || null,
+          role: role || null,
+          lane_id: decision?.lane?.id ?? null,
+          session_id: decision?.session?.id ?? null,
+          ...(decision?.coverage?.missingRoles?.length ? { missing_roles: decision.coverage.missingRoles } : {}),
+          ...(deniedSkills.length ? { denied_skills: deniedSkills } : {}),
+        },
+      });
+    } catch { /* observability only — never block the call path */ }
+  }
+
   _prepareSessionReuse(prompt, opts, {
     providerName,
     job_id,
@@ -301,6 +339,19 @@ export class TrackedProviderClient {
     const decision = manager.acquireForJob(job, {
       provider: providerName,
       jobId: job_id,
+    });
+    // The decision and its reason are otherwise invisible: a session_recycle
+    // setting that never engages (skill gate, coverage gap) looks identical
+    // to one that was never read. One observation per acquire makes it
+    // diagnosable from the run logs.
+    this._recordSessionRecycleDecision({
+      job_id,
+      work_item_id,
+      attempt_id,
+      providerName,
+      role: opts.role,
+      recycleMode,
+      decision,
     });
 
     const freshLineageReasons = new Set(["no_available_session", "transition_reset"]);

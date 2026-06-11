@@ -1,9 +1,14 @@
+import { TERMINAL_JOB_STATUSES_SQL } from "../../../catalog/job.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getIntSetting } from "../../../domains/queue/functions/settings.js";
 import { recordMemorySample } from "./memory.js";
 import { appendRunTelemetry, getRunTelemetryEpoch, getRunTelemetryStartedAt } from "./run-telemetry.js";
 
 export const DEFAULT_DB_TELEMETRY_TAIL_LIMIT = 20;
+// Post-job finalizers (ATLAS auto-feedback) read job_observations from the
+// live table after the job turns terminal; a grace window keeps just-written
+// rows out of the prune so a concurrent writer cannot evict them first.
+const JOB_OBSERVATION_PRUNE_GRACE_MS = 10 * 60 * 1000;
 const _mirroredRowIds = new Map([
   ["events", new Map()],
   ["job_observations", new Map()],
@@ -81,6 +86,23 @@ export function pruneTelemetryTableToTail(db, tableName, limit = getDbTelemetryT
   if (safeLimit === 0) return 0;
   const archiveStream = safeTable === "events" ? "events" : "observations";
   const mirroredIds = mirroredSetFor(safeTable);
+  // job_observations feed the post-job ATLAS auto-feedback finalizer, which
+  // reads the live table once the job turns terminal. Job-scoped rows are
+  // exempt from the tail prune until their job is terminal AND a grace
+  // window has passed (covering the terminal-flip → finalizer read window).
+  // Job-less rows keep the plain tail behavior; everything is mirrored to
+  // the JSONL archive regardless.
+  const prunablePredicate = safeTable === "job_observations"
+    ? `AND (job_id IS NULL OR (
+         job_id NOT IN (
+           SELECT id FROM jobs WHERE status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+         )
+         AND created_at < ?
+       ))`
+    : "";
+  const prunableParams = safeTable === "job_observations"
+    ? [new Date(Date.now() - JOB_OBSERVATION_PRUNE_GRACE_MS).toISOString()]
+    : [];
   const victims = db.prepare(`
     SELECT id, created_at
     FROM ${safeTable}
@@ -89,8 +111,9 @@ export function pruneTelemetryTableToTail(db, tableName, limit = getDbTelemetryT
       ORDER BY id DESC
       LIMIT ?
     )
+    ${prunablePredicate}
     ORDER BY id ASC
-  `).all(safeLimit);
+  `).all(safeLimit, ...prunableParams);
   const shouldSampleMemory = victims.length > 0 && (_pruneSampleCounter++ % 25 === 0);
   if (shouldSampleMemory) {
     recordMemorySample("db.telemetry_prune.before", {
@@ -131,7 +154,8 @@ export function pruneTelemetryTableToTail(db, tableName, limit = getDbTelemetryT
       ORDER BY id DESC
       LIMIT ?
     )
-  `).run(safeLimit).changes;
+    ${prunablePredicate}
+  `).run(safeLimit, ...prunableParams).changes;
   if (shouldSampleMemory) {
     recordMemorySample("db.telemetry_prune.after", {
       table: safeTable,

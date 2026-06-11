@@ -1400,6 +1400,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               files_to_create: t.files_to_create || [],
               files_to_delete: t.files_to_delete || [],
               create_roots: t.create_roots || [],
+              ...(Array.isArray(t.must_modify) && t.must_modify.length > 0 ? { must_modify: t.must_modify } : {}),
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: t.test_command || null,
               _planner_set_files: (t.files_to_modify?.length > 0 || t.files_to_create?.length > 0 || t.files_to_delete?.length > 0) || false,

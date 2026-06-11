@@ -155,6 +155,7 @@ export class SessionManager {
         reason: eligibility.reason,
         key: eligibility.key || this.keyForJob(job, { provider }),
         coverage: eligibility.coverage || null,
+        skillPolicy: eligibility.skillPolicy || null,
       };
     }
 

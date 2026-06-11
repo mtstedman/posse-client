@@ -203,7 +203,10 @@ function resolveDevPolicy({
     reasoningEffort = "low";
     reasons.push("small low-risk tested scope");
   }
-  if (riskScore >= 4 || riskTags.some((tag) => CRITICAL_RISK_TAGS.has(tag))) {
+  // The tag-derived floor is already folded into riskScore by the caller
+  // (including the small/tested softening), so the score is the single
+  // authority here — a critical tag must not bypass that softening.
+  if (riskScore >= 4) {
     modelTier = maxTier(modelTier, "standard");
     reasoningEffort = maxEffort(reasoningEffort, "high");
     reasons.push("risk floor raised dev reasoning");
@@ -303,7 +306,19 @@ export function resolveTaskExecutionPolicy({
     ...inferRiskTagsFromTask(task),
   ]);
   const structuralRiskFloor = riskFloorFromTags(riskTags);
-  const riskScore = Math.max(plannerRiskScore ?? 1, structuralRiskFloor);
+  // A risk tag alone must not out-rank the planner's own judgment on a
+  // small, tested, well-understood scope: a one-file doc-comment fix tagged
+  // "security" is not an IDOR fix. Soften the tag floor when the planner
+  // scored the task low and the structure agrees it is contained; a real
+  // planner score of 3+ always keeps the full floor via the max() below.
+  const bucket = scopeBucket(facts);
+  const tagFloorSoftened = structuralRiskFloor >= 4
+    && (plannerRiskScore ?? 1) <= 2
+    && (bucket === "small" || bucket === "medium")
+    && facts.has_test_command
+    && scopeConfidence !== "low";
+  const effectiveRiskFloor = tagFloorSoftened ? 3 : structuralRiskFloor;
+  const riskScore = Math.max(plannerRiskScore ?? 1, effectiveRiskFloor);
 
   const dev = resolveDevPolicy({
     currentModelTier,
@@ -322,6 +337,7 @@ export function resolveTaskExecutionPolicy({
   return {
     version: 1,
     risk_score: riskScore,
+    ...(tagFloorSoftened ? { risk_floor_softened: true } : {}),
     planner_risk_score: plannerRiskScore,
     verification_difficulty: plannerVerificationScore,
     scope_confidence: scopeConfidence,

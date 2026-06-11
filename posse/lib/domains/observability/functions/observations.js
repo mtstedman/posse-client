@@ -650,6 +650,22 @@ export function atlasSummaryHint(input = {}, action = null) {
     return "";
   }
 
+  if (a === "tree.scope" || a === "tree.grow") {
+    // Seeds are the load-bearing input — show them, not the task text, so a
+    // seeded scope never reads like a raw text search in the invocation log.
+    const seeds = firstArrayEntry(args.paths && args.paths.length ? args.paths : args.editedFiles, 1);
+    if (seeds) return `seeds: ${_truncate(seeds, 60)}`;
+    const symbols = firstArrayEntry(args.symbolIds, 1);
+    if (symbols) return `seeds: ${_truncate(symbols, 24)}`;
+    if (args.taskText) return "task-text only (no seeds)";
+    return "";
+  }
+
+  if (a === "tree.walk") {
+    const focus = args.path || args.nodeId || (args.symbolId ? `sym:${String(args.symbolId).slice(0, 8)}` : null);
+    if (focus) return _truncate(String(focus), 80);
+  }
+
   if (a === "code.getskeleton" || a === "code.gethotpath" || a === "code.needwindow") {
     const loc = args.file || (args.symbolId ? `sym:${String(args.symbolId).slice(0, 8)}` : null);
     const ids = firstArrayEntry(args.identifiersToFind, 3);

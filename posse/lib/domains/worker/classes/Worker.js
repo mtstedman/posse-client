@@ -197,6 +197,7 @@ import {
   validatePlannedTask as validatePlannedTaskFromModule,
 } from "../functions/helpers/plan-routing.js";
 import {
+  extractCheckpointFromOutput as extractCheckpointFromOutputFromModule,
   inferDeletionTargets as inferDeletionTargetsFromModule,
   isDeleteNoopSatisfied as isDeleteNoopSatisfiedFromModule,
   isFilePlacementNoopSatisfied as isFilePlacementNoopSatisfiedFromModule,
@@ -308,7 +309,7 @@ async function pathExistsInWorktreeAsync(cwd, relativePath) {
   }
 }
 
-async function validateDeclaredOutputContract({
+export async function validateDeclaredOutputContract({
   job,
   payload = {},
   filesCommitted = [],
@@ -317,10 +318,26 @@ async function validateDeclaredOutputContract({
   if (!DECLARED_OUTPUT_CONTRACT_JOB_TYPES.has(job?.job_type)) return { ok: true };
   if (declaredOutputContractDisabled(payload)) return { ok: true, skipped: true };
 
+  // normPath lowercases on win32 so comparisons are case-insensitive, but
+  // failure messages must show paths as the planner declared them.
+  const displayByNormalized = new Map();
+  for (const raw of [
+    ...(Array.isArray(payload.files_to_create) ? payload.files_to_create : []),
+    ...(Array.isArray(payload.files_to_modify) ? payload.files_to_modify : []),
+    ...(Array.isArray(payload.must_modify) ? payload.must_modify : []),
+  ]) {
+    const normalized = normalizeDeclaredOutputPath(raw, cwd);
+    if (normalized && !displayByNormalized.has(normalized)) {
+      displayByNormalized.set(normalized, String(raw).replace(/\\/g, "/").trim());
+    }
+  }
+  const display = (paths) => paths.map((p) => displayByNormalized.get(p) || p);
+
   const declaredCreates = uniqueNormalizedPaths(payload.files_to_create, cwd);
   const declaredModifies = uniqueNormalizedPaths(payload.files_to_modify, cwd);
   if (declaredCreates.length === 0 && declaredModifies.length === 0) return { ok: true };
 
+  const mustModify = new Set(uniqueNormalizedPaths(payload.must_modify, cwd));
   const committed = new Set(uniqueNormalizedPaths(filesCommitted, cwd));
   // Check all declared paths in parallel. This is in the post-commit hot
   // path so a synchronous loop of fs.existsSync over N declared files
@@ -330,19 +347,27 @@ async function validateDeclaredOutputContract({
     Promise.all(declaredModifies.map((filePath) => pathExistsInWorktreeAsync(cwd, filePath))),
   ]);
   const missingCreates = declaredCreates.filter((_, i) => !createsExist[i]);
-  const missingModifies = declaredModifies.filter((_, i) => !modifiesExist[i]);
   const untouchedCreates = declaredCreates.filter((filePath) => !committed.has(filePath));
-  const untouchedModifies = declaredModifies.filter((filePath) => !committed.has(filePath));
+  // files_to_modify is allowed scope, not a work order: a dev that correctly
+  // judges a declared file needs no change must not fail the attempt. Only
+  // paths the planner explicitly listed in must_modify stay hard-required;
+  // the rest are reported as unmodified scope for the assessor to weigh.
+  const missingModifiesAll = declaredModifies.filter((_, i) => !modifiesExist[i]);
+  const missingModifies = missingModifiesAll.filter((filePath) => mustModify.has(filePath));
+  const untouchedModifiesAll = declaredModifies.filter((filePath) => !committed.has(filePath));
+  const untouchedModifies = untouchedModifiesAll.filter((filePath) => mustModify.has(filePath));
+  const unmodifiedDeclaredScope = untouchedModifiesAll.filter((filePath) => !mustModify.has(filePath));
 
   return {
     ok: missingCreates.length === 0
       && missingModifies.length === 0
       && untouchedCreates.length === 0
       && untouchedModifies.length === 0,
-    missingCreates,
-    missingModifies,
-    untouchedCreates,
-    untouchedModifies,
+    missingCreates: display(missingCreates),
+    missingModifies: display(missingModifies),
+    untouchedCreates: display(untouchedCreates),
+    untouchedModifies: display(untouchedModifies),
+    unmodifiedDeclaredScope: display(unmodifiedDeclaredScope),
   };
 }
 
@@ -447,6 +472,45 @@ function formatCommitFailureSummary(error = {}) {
   const stdoutLine = firstMeaningfulCommitErrorLine(error?.stdout);
   const extra = stderrLine || stdoutLine || error?.code || "";
   return extra && !String(base).includes(extra) ? `${base} - ${extra}` : base;
+}
+
+// Commit failures raised by the native identity/heartbeat layer are transient
+// infrastructure faults: the agent's work in the tree is intact and a short
+// in-place re-commit usually succeeds once the key renews. Scope, hook, and
+// content failures must never classify as transient — those need a real retry.
+const TRANSIENT_COMMIT_INFRA_RE = /posse_key\s+heartbeat|pulse[\s_-]?token|identity\s+heartbeat/i;
+export function isTransientCommitInfraFailure(error = {}) {
+  if (Array.isArray(error?.createdOutOfScope) && error.createdOutOfScope.length > 0) return false;
+  if (String(error?.hookOutput || "").trim()) return false;
+  const text = [error?.message, error?.stderr, error?.stdout].filter(Boolean).join("\n");
+  return TRANSIENT_COMMIT_INFRA_RE.test(text);
+}
+
+// When an attempt dies AFTER the agent finished (commit failure, output
+// contract, hooks), the agent's reasoning is done and correct work may
+// already sit in the tree. Persist a checkpoint unconditionally so the retry
+// prompt inherits the prior approach instead of re-deriving it blind — the
+// threshold-gated checkpoint in processOutput only fires for large outputs.
+function storePostAgentFailureCheckpoint({ job, attemptId, output, failureNote }) {
+  try {
+    const text = String(output || "");
+    const distilled = extractCheckpointFromOutputFromModule(text) || text.slice(-2000).trim();
+    if (!distilled) return;
+    storeArtifact({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      attempt_id: attemptId,
+      artifact_type: "log",
+      content_long: [
+        "checkpoint:POST-AGENT FAILURE NOTE: the previous attempt's agent run COMPLETED;",
+        `the attempt failed afterwards (${String(failureNote || "post-agent step failed").slice(0, 300)}).`,
+        "Its work may already be present in the worktree or branch — verify current state",
+        "before redoing anything.",
+        "",
+        distilled,
+      ].join("\n"),
+    });
+  } catch { /* checkpoint is best-effort */ }
 }
 
 function normalizeFileRequestScopePath(filePath, cwd) {
@@ -1840,6 +1904,47 @@ export class Worker {
             }
             const headBefore = await gitCurrentHashAsync(wtPath);
             const commitMsg = `posse: ${job.job_type} job #${job.id} - ${job.title}`;
+            // Retry the commit step in place when the failure is a transient
+            // identity/heartbeat fault. The agent's work is already correct;
+            // failing the whole attempt would discard it and re-run the
+            // provider call just to reproduce the same tree.
+            let commitResult = null;
+            for (let commitInfraRetries = 0; ; commitInfraRetries += 1) {
+              try {
+                commitResult = await gitCommitAllAsyncFromModule(commitMsg, wtPath, {
+                  modifyFiles: jobPayload.files_to_modify || [],
+                  createFiles: jobPayload.files_to_create || [],
+                  deleteFiles: jobPayload.files_to_delete || [],
+                  createRoots: jobPayload.create_roots || [],
+                }, {
+                  projectDir: this.projectDir,
+                  wiId: job.work_item_id,
+                  branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+                  snapshotReason: `dev-scope-enforcement-job-${job.id}`,
+                  taskMode: jobPayload.task_mode || "code",
+                  jobId: job.id,
+                  activeFileLocks: activeLocksForCommit,
+                });
+                break;
+              } catch (commitErr) {
+                if (commitInfraRetries >= 2 || !isTransientCommitInfraFailure(commitErr)) throw commitErr;
+                const retryMsg = `Commit hit transient infra fault (${formatCommitFailureSummary(commitErr)}) — retrying commit in place (${commitInfraRetries + 1}/2)`;
+                this.emit(job.id, `${C.yellow}[git] WI#${job.work_item_id} job #${job.id}: ${retryMsg}${C.reset}`);
+                logEvent({
+                  work_item_id: job.work_item_id,
+                  job_id: job.id,
+                  attempt_id: attempt.id,
+                  event_type: EVENT_TYPES.JOB_COMMIT_INFRA_RETRY,
+                  actor_type: EVENT_ACTORS.WORKER,
+                  message: retryMsg,
+                  event_json: JSON.stringify({
+                    retry: commitInfraRetries + 1,
+                    error: formatCommitFailureSummary(commitErr).slice(0, 500),
+                  }),
+                });
+                await new Promise((resolve) => setTimeout(resolve, (commitInfraRetries + 1) * 2000));
+              }
+            }
             const {
               hash: commitHash,
               reverted,
@@ -1856,20 +1961,7 @@ export class Worker {
               siblingDirtySkipped,
               siblingUntrackedSkipped,
               siblingStagingSkipped,
-            } = await gitCommitAllAsyncFromModule(commitMsg, wtPath, {
-              modifyFiles: jobPayload.files_to_modify || [],
-              createFiles: jobPayload.files_to_create || [],
-              deleteFiles: jobPayload.files_to_delete || [],
-              createRoots: jobPayload.create_roots || [],
-            }, {
-              projectDir: this.projectDir,
-              wiId: job.work_item_id,
-              branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-              snapshotReason: `dev-scope-enforcement-job-${job.id}`,
-              taskMode: jobPayload.task_mode || "code",
-              jobId: job.id,
-              activeFileLocks: activeLocksForCommit,
-            });
+            } = commitResult;
 
             filesReverted = reverted;
 
@@ -2145,6 +2237,12 @@ export class Worker {
                     return;
                   }
                 }
+                storePostAgentFailureCheckpoint({
+                  job,
+                  attemptId: attempt.id,
+                  output,
+                  failureNote: contractMsg,
+                });
                 completeAttempt(attempt.id, {
                   status: "failed",
                   duration_ms: Date.now() - startTime,
@@ -2152,6 +2250,26 @@ export class Worker {
                 });
                 this._retryOrFail(job, leaseToken, contractMsg);
                 return;
+              }
+              if (outputContract.unmodifiedDeclaredScope?.length > 0) {
+                // Declared-but-unmodified scope passes the contract (scope is
+                // an allowance, not a work order); record it so the assessor
+                // and operators can see the dev's no-change judgment call.
+                const unusedMsg = `Declared modify scope left unmodified (allowed): ${outputContract.unmodifiedDeclaredScope.slice(0, 10).join(", ")}`;
+                this.emit(job.id, `${C.dim}[contract] WI#${job.work_item_id} job #${job.id}: ${unusedMsg}${C.reset}`);
+                logEvent({
+                  work_item_id: job.work_item_id,
+                  job_id: job.id,
+                  attempt_id: attempt.id,
+                  event_type: EVENT_TYPES.JOB_OUTPUT_CONTRACT_SCOPE_UNUSED,
+                  actor_type: EVENT_ACTORS.WORKER,
+                  message: unusedMsg,
+                  event_json: JSON.stringify({
+                    visible: false,
+                    files_committed: filesCommitted,
+                    unmodified_declared_scope: outputContract.unmodifiedDeclaredScope,
+                  }),
+                });
               }
 
               // -- Deterministic hook: post-dev build/lint verification --
@@ -2273,6 +2391,7 @@ export class Worker {
                 : `Git commit failed: ${gitFailureSummary}`,
               event_json: JSON.stringify({
                 ...(hookOutput ? { hook_output: hookOutput } : {}),
+                ...(isTransientCommitInfraFailure(gitErr) ? { transient_infra: true, infra_retries_exhausted: true } : {}),
                 ...(gitErr.stderr ? { stderr: String(gitErr.stderr).slice(0, 4000) } : {}),
                 ...(gitErr.stdout ? { stdout: String(gitErr.stdout).slice(0, 4000) } : {}),
                 ...(gitErr.code ? { code: gitErr.code } : {}),
@@ -2338,6 +2457,12 @@ export class Worker {
               attempt_id: attempt.id,
               artifact_type: "log",
               content_long: `${lockTimeout.timeout ? "Git commit blocked by worktree lock timeout" : "Git commit failed"} (job #${job.id}, attempt ${attemptCount}): ${gitFailureDetail}`,
+            });
+            storePostAgentFailureCheckpoint({
+              job,
+              attemptId: attempt.id,
+              output,
+              failureNote: `Git commit failed: ${gitFailureSummary}`,
             });
             completeAttempt(attempt.id, {
               status: lockTimeout.timeout ? "interrupted" : "failed",

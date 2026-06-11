@@ -877,6 +877,26 @@ function _normalizeSliceCard(card, filePaths) {
   };
 }
 
+// One skeleton fetch per file per handoff: the slice/tree prefetch and the
+// exact-scoped-file prefetch both want skeletons and routinely overlap on the
+// same key files. Memoizing the in-flight promise on the packet keeps the
+// second caller from re-running (and re-logging) an identical embedded call.
+function _memoizedSkeletonFetch(packet, file, perFileTimeoutMs) {
+  if (!(packet._atlasSkeletonPrefetchMemo instanceof Map)) {
+    packet._atlasSkeletonPrefetchMemo = new Map();
+  }
+  const memo = packet._atlasSkeletonPrefetchMemo;
+  const key = String(file);
+  if (memo.has(key)) return memo.get(key);
+  const promise = executeEmbeddedAtlasTool(
+    "code.getSkeleton",
+    { file },
+    { cwd: packet.cwd, config: packet.atlas_config || undefined, timeoutMs: perFileTimeoutMs, origin: "prefetch" },
+  );
+  memo.set(key, promise);
+  return promise;
+}
+
 async function _prefetchSliceSkeletons(filePaths, {
   packet,
   toolsAvailable,
@@ -889,11 +909,7 @@ async function _prefetchSliceSkeletons(filePaths, {
     .filter((file) => _isIndexedSourcePath(file))
     .slice(0, Math.max(1, maxFiles));
   if (targets.length === 0) return [];
-  const results = await Promise.all(targets.map((file) => executeEmbeddedAtlasTool(
-    "code.getSkeleton",
-    { file },
-    { cwd: packet.cwd, config: packet.atlas_config || undefined, timeoutMs: perFileTimeoutMs, origin: "prefetch" },
-  ).then(
+  const results = await Promise.all(targets.map((file) => _memoizedSkeletonFetch(packet, file, perFileTimeoutMs).then(
     (raw) => {
       if (String(raw || "").startsWith("Error:")) {
         return { file, ok: false, error: String(raw).slice(0, 240) };
@@ -971,11 +987,7 @@ async function _prefetchExactScopedFiles(filePaths, {
     };
   }).catch((err) => ({ file, ok: false, kind: "read_file", error: String(err?.message || err).slice(0, 240) }));
 
-  const readSkeleton = (file) => executeEmbeddedAtlasTool(
-    "code.getSkeleton",
-    { file },
-    { cwd: packet.cwd, config: packet.atlas_config || undefined, timeoutMs: perFileTimeoutMs, origin: "prefetch" },
-  ).then(
+  const readSkeleton = (file) => _memoizedSkeletonFetch(packet, file, perFileTimeoutMs).then(
     (raw) => {
       if (String(raw || "").startsWith("Error:")) {
         return { file, ok: false, kind: "code.getSkeleton", error: String(raw).slice(0, 240) };

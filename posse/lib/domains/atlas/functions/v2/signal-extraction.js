@@ -111,13 +111,64 @@ export function extractAtlasResultArtifacts(value, { action = null, args = {} } 
     : null;
   if (directId) addSymbol(artifacts.symbols, directId, null, new Set(artifacts.symbols.map((s) => s.symbolId)));
 
-  if (!artifacts.versionId && !artifacts.sliceHandle && artifacts.symbols.length === 0) return null;
+  const normalizedAction = normalizeAtlasActionName(action || parsed.action || "");
+  const tree = extractTreeResultSummary(normalizedAction, data);
+
+  if (!artifacts.versionId && !artifacts.sliceHandle && artifacts.symbols.length === 0 && !tree) return null;
   return {
-    action: normalizeAtlasActionName(action || parsed.action || ""),
+    action: normalizedAction,
     versionId: artifacts.versionId,
     sliceHandle: artifacts.sliceHandle,
     symbols: artifacts.symbols.slice(0, RESULT_SYMBOL_LIMIT),
+    ...(tree ? { tree } : {}),
   };
+}
+
+const TREE_RESULT_FILE_LIMIT = 24;
+const TREE_RESULT_DIR_LIMIT = 8;
+const TREE_RESULT_AREA_LIMIT = 16;
+
+// Tree actions return files/dirs/areas rather than symbols, so without this
+// the observation log shows nothing about what the tree pass actually chose
+// — the scoping quality of the primary retrieval path would be unauditable.
+function extractTreeResultSummary(action, data) {
+  if (!/^tree\./.test(String(action || ""))) return null;
+  if (!data || typeof data !== "object") return null;
+  /** @type {Record<string, any>} */
+  const out = {};
+  if (data.available === false) {
+    out.available = false;
+    if (data.reason) out.reason = String(data.reason).slice(0, 200);
+    return out;
+  }
+  const summarized = new Set(["candidateFiles", "candidateDirs", "areaMap", "warnings"]);
+  if (Array.isArray(data.candidateFiles)) {
+    out.candidate_file_count = data.candidateFiles.length;
+    out.candidate_files = data.candidateFiles.slice(0, TREE_RESULT_FILE_LIMIT).map((entry) => ({
+      path: entry?.path ?? null,
+      score: entry?.score ?? null,
+      ...(entry?.exactSeed ? { exact_seed: true } : {}),
+      ...(entry?.generated ? { generated: true } : {}),
+      ...(entry?.test ? { test: true } : {}),
+    }));
+  }
+  if (Array.isArray(data.candidateDirs)) {
+    out.candidate_dir_count = data.candidateDirs.length;
+    out.candidate_dirs = data.candidateDirs.slice(0, TREE_RESULT_DIR_LIMIT).map((entry) => ({
+      path: entry?.path ?? null,
+      score: entry?.score ?? null,
+      file_count: entry?.fileCount ?? null,
+    }));
+  }
+  if (data.metrics && typeof data.metrics === "object") out.metrics = data.metrics;
+  if (Array.isArray(data.areaMap)) out.area_map = data.areaMap.slice(0, TREE_RESULT_AREA_LIMIT);
+  if (Array.isArray(data.warnings) && data.warnings.length > 0) out.warnings = data.warnings.slice(0, 8);
+  // Walk/overview payloads vary; record array sizes so the shape of every
+  // tree response is at least countable without logging unbounded blobs.
+  for (const [key, value] of Object.entries(data)) {
+    if (Array.isArray(value) && !summarized.has(key)) out[`${key}_count`] = value.length;
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 export function extractAtlasResponseTelemetry(value) {
