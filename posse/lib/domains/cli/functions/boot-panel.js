@@ -17,7 +17,8 @@
 //
 // State lives in a `BootPanel` instance returned by `createBootPanel`. The
 // caller drives it via `updateStep(label, patch)`, `updateLang(lang, side,
-// patch)`, `updateZip`, `updateEncode`. `lines()` returns the rendered rows.
+// patch)`, `updateZip`, `updateTree`, `updateEncode`. `lines()` returns the
+// rendered rows.
 
 const SECTION_ORDER = ["scheduler", "workspace", "providers"];
 const SECTION_LABELS = {
@@ -82,8 +83,28 @@ const isCascadeDetail = (detail) => CASCADE_DETAIL_RE.test(String(detail || ""))
  *   columns?: () => number,
  * }} deps
  */
-export function createBootPanel({ C, columns = () => 100 }) {
+export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   const startedAt = Date.now();
+
+  // Serialized step list for the optional onChange mirror (bridge
+  // instance_status). Kept tiny: identifiers and counters only.
+  const serializeSteps = () =>
+    [...steps.entries()].map(([label, step]) => ({
+      label,
+      status: step.status,
+      ...(Number.isFinite(Number(step.percent)) ? { percent: Number(step.percent) } : {}),
+      ...(step.detail ? { detail: String(step.detail) } : {}),
+      section: step.section,
+    }));
+
+  const notifyChange = () => {
+    if (typeof onChange !== "function") return;
+    try {
+      onChange(serializeSteps());
+    } catch {
+      // Status mirroring must never break boot rendering.
+    }
+  };
 
   /**
    * Each step row: { status: 'pending'|'running'|'ok'|'failed'|'skipped'|'deferred',
@@ -157,6 +178,7 @@ export function createBootPanel({ C, columns = () => 100 }) {
     if (!sectionOrder.has(section)) sectionOrder.set(section, []);
     const arr = sectionOrder.get(section);
     if (!arr.includes(label)) arr.push(label);
+    notifyChange();
   };
 
   const updateLang = (lang, side, patch = {}) => {
@@ -208,6 +230,34 @@ export function createBootPanel({ C, columns = () => 100 }) {
       merged.finishedAt = Date.now();
     }
     zip = merged;
+  };
+
+  /**
+   * The tree-derived build (containment tree + scope sidecar + compression
+   * seeds) — runs inside the view build right after the merge, before encode.
+   * Rendered as its own bottom bar so a failing/skipped tree build is visible
+   * instead of silently riding inside the merge bar.
+   * @type {{ state: string, percent: number | null, detail: string, startedAt: number, finishedAt: number | null } | null}
+   */
+  let tree = null;
+  const updateTree = (patch = {}) => {
+    const previous = tree || {
+      state: "idle", percent: null, detail: "", startedAt: Date.now(), finishedAt: null,
+    };
+    const merged = { ...previous, ...patch };
+    if (previous.state === "idle" && patch.state && patch.state !== "idle" && !patch.startedAt) {
+      merged.startedAt = Date.now();
+    }
+    // Monotonic within the building phase — late "0/N" ticks shouldn't snap back.
+    if (merged.state === "building" && previous.state === "building"
+      && Number.isFinite(previous.percent) && Number.isFinite(merged.percent)
+      && merged.percent < previous.percent) {
+      merged.percent = previous.percent;
+    }
+    if ((merged.state === "done" || merged.state === "skipped" || merged.state === "failed") && !merged.finishedAt) {
+      merged.finishedAt = Date.now();
+    }
+    tree = merged;
   };
 
   /**
@@ -509,7 +559,7 @@ export function createBootPanel({ C, columns = () => 100 }) {
   // independent embedding tail is still encoding.
   const ledgerInputsLanded = () => {
     const activeTail = (st) => st && st.state && st.state !== "idle";
-    return activeTail(zip) || activeTail(encode);
+    return activeTail(zip) || activeTail(tree) || activeTail(encode);
   };
   const resolveWaitingAfterLedgerInput = (kind) => {
     if (!ledgerInputsLanded()) return kind;
@@ -528,6 +578,10 @@ export function createBootPanel({ C, columns = () => 100 }) {
       sum += fracOf(...effectiveScipParseKind(e.scip)); units += 1;
     }
     sum += tailFrac(zip); units += 1;
+    // The tree refresh only emits events when a view build actually runs (and
+    // only from builders new enough to emit them) — count it as a unit once it
+    // has started so its absence can't cap the band below 100%.
+    if (tree && tree.state !== "idle") { sum += tailFrac(tree); units += 1; }
     return units === 0 ? 0 : Math.round((sum / units) * 100);
   };
   const tailRow = (label, st) => {
@@ -622,6 +676,7 @@ export function createBootPanel({ C, columns = () => 100 }) {
       out.push(...ledger.rows);
       out.push(blank());
       out.push(tailRow("merge", zip));
+      out.push(tailRow("tree", tree));
       out.push(tailRow("encode", encode));
     }
     const footerRows = renderFooter();
@@ -638,6 +693,7 @@ export function createBootPanel({ C, columns = () => 100 }) {
     updateStep,
     updateLang,
     updateZip,
+    updateTree,
     updateEncode,
     setFooter,
     lines,

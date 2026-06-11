@@ -8,7 +8,7 @@ import { Repo, CommitScope, Worktree, SnapshotRef } from "../lib/domains/git/cla
 import { isGitReadOnlyArgs } from "../lib/domains/git/classes/Repo.js";
 import { log } from "../lib/shared/telemetry/functions/logging/logger.js";
 import { createWorkItem, setWorkItemBranch, updateWorkItemStatus } from "../lib/domains/queue/functions/index.js";
-import { __testGitDiagnostics, gcWorktrees, worktreeRoot } from "../lib/domains/git/functions/worktree.js";
+import { __testGitDiagnostics, gcWorktreesAsync, worktreeRoot } from "../lib/domains/git/functions/worktree.js";
 import {
   __testReadLockMetadata,
   __testRemoveLockIfOwner,
@@ -732,7 +732,7 @@ describe("git domain class contract", () => {
     }
   });
 
-  it("startup GC skips worktree paths that disappear between readdir and stat", () => withTempRuntimeDb((runtimeRoot) => {
+  it("startup GC skips worktree paths that disappear between readdir and stat", () => withTempRuntimeDb(async (runtimeRoot) => {
     const projectDir = path.join(runtimeRoot, "repo");
     fs.mkdirSync(projectDir, { recursive: true });
     git(projectDir, ["init", "-b", "main"]);
@@ -742,8 +742,8 @@ describe("git domain class contract", () => {
     git(projectDir, ["add", "tracked.txt"]);
     git(projectDir, ["commit", "-m", "init"]);
 
-    const originalReaddirSync = fs.readdirSync;
-    const originalStatSync = fs.statSync;
+    const originalReaddir = fs.promises.readdir;
+    const originalStat = fs.promises.stat;
     try {
       const wi = createWorkItem("startup gc raced stat", "desc");
       const branchName = `posse/wi-${wi.id}-after-raced-stat`;
@@ -757,27 +757,27 @@ describe("git domain class contract", () => {
       fs.mkdirSync(racedDir, { recursive: true });
       git(projectDir, ["worktree", "add", "-b", branchName, wtDir]);
 
-      fs.readdirSync = function patchedReaddirSync(target, ...args) {
+      fs.promises.readdir = async function patchedReaddir(target, ...args) {
         if (path.resolve(String(target)) === path.resolve(root)) {
           return [racedEntry, path.basename(wtDir)];
         }
-        return originalReaddirSync.call(this, target, ...args);
+        return originalReaddir.call(this, target, ...args);
       };
-      fs.statSync = function patchedStatSync(target, ...args) {
+      fs.promises.stat = async function patchedStat(target, ...args) {
         if (path.resolve(String(target)) === path.resolve(racedDir)) {
           fs.rmSync(racedDir, { recursive: true, force: true });
           const err = new Error("ENOENT: no such file or directory, stat");
           err.code = "ENOENT";
           throw err;
         }
-        return originalStatSync.call(this, target, ...args);
+        return originalStat.call(this, target, ...args);
       };
 
-      assert.doesNotThrow(() => gcWorktrees(projectDir));
+      await assert.doesNotReject(() => gcWorktreesAsync(projectDir));
       assert.equal(fs.existsSync(wtDir), false);
     } finally {
-      fs.readdirSync = originalReaddirSync;
-      fs.statSync = originalStatSync;
+      fs.promises.readdir = originalReaddir;
+      fs.promises.stat = originalStat;
     }
   }));
 

@@ -31,6 +31,18 @@ export {
   TERMINAL_WORK_ITEM_STATUSES_SQL,
 } from "../../../catalog/work-item.js";
 
+// Push-offer gates are persistent "deploy from the phone" prompts modeled as
+// human_input jobs. They piggyback on the gate machinery but must NOT count
+// toward work-item status/completion (a completed WI with an open push gate
+// stays complete) — exclusion sites match on this payload subtype.
+export const PUSH_OFFER_SUBTYPE = "push_offer";
+
+export function isPushOfferJob(job) {
+  if (!job || job.job_type !== "human_input") return false;
+  const raw = job.payload_json;
+  return typeof raw === "string" && raw.includes(`"subtype":"${PUSH_OFFER_SUBTYPE}"`);
+}
+
 let _nowClockForTests = null;
 
 export function now() {

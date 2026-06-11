@@ -183,10 +183,13 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
     return await encoder.encode(texts, signal);
   };
 
-  // Per-ingest source cache. Keyed by repo_rel_path so each file is read
-  // at most once across the whole ingest. Values are the full file text
-  // (or null when the read failed). Memory: bounded by walker policy that
-  // already filters minified files >250KB.
+  // Per-ingest source cache keyed by repo_rel_path. Values are the full
+  // file text (or null when the read failed). Symbols arrive grouped by
+  // file, so a small LRU keeps re-reads rare while bounding memory on cold
+  // full ingests — nothing upstream caps per-file text size here (the
+  // minified-content heuristics and parse ceiling filter what gets
+  // *parsed*, not what this cache holds).
+  const SOURCE_CACHE_MAX_FILES = 64;
   /** @type {Map<string, string | null>} */
   const sourceCache = new Map();
   async function readBodyLead(symbol) {
@@ -201,7 +204,13 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
       } catch {
         content = null;
       }
-      sourceCache.set(symbol.repo_rel_path, content);
+    } else {
+      sourceCache.delete(symbol.repo_rel_path);
+    }
+    sourceCache.set(symbol.repo_rel_path, content);
+    if (sourceCache.size > SOURCE_CACHE_MAX_FILES) {
+      const oldest = sourceCache.keys().next().value;
+      if (oldest !== undefined) sourceCache.delete(oldest);
     }
     if (!content) return null;
     const start = Math.max(0, symbol.range_start);

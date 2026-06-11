@@ -23,6 +23,14 @@ const LANGUAGE_ALIASES = Object.freeze({
   go: "go",
   rs: "rust",
   rust: "rust",
+  // Mirrors the Rust scip_language_alias map exactly.
+  c: "clang",
+  "c++": "clang",
+  cc: "clang",
+  cpp: "clang",
+  cxx: "clang",
+  clang: "clang",
+  "scip-clang": "clang",
 });
 
 /**

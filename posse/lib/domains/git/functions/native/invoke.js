@@ -61,6 +61,10 @@ const WORKER_ELIGIBLE_METHODS = new Set([
   "git.snapshot.readNote",
   "git.snapshot.findExistingDedupRef",
   "git.snapshot.exists",
+  // Read-only by construction (log/diff queries with scope filtering); riding
+  // the persistent worker saves the 150-200ms per-call posse-git spawn that
+  // every git_history tool invocation otherwise pays.
+  "git.history",
 ]);
 
 /**

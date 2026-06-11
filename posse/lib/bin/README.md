@@ -80,8 +80,9 @@ const data = runAtlasNativeMethod("parser.parseBuffer", {
 });
 ```
 
-Native execution is **off by default**. Enable per tool with the
-`posse_native_atlas` / `posse_native_git` settings, or at runtime with the
-`POSSE_NATIVE_BINARIES` (master) / `POSSE_NATIVE_ATLAS` /
-`POSSE_NATIVE_GIT` / `POSSE_NATIVE_REMOTE`
+Git and ATLAS are fully cut over: the native binary is the only
+implementation path, hardwired on in `BinaryManager` — no setting or env
+override can disable it, and there is no JS fallback. Tools still
+mid-migration are gated per tool with `posse_native_<tool>` settings, or at
+runtime with the `POSSE_NATIVE_BINARIES` (master) / `POSSE_NATIVE_<TOOL>`
 env overrides. `POSSE_NATIVE_BIN_ROOT` overrides the staging root (used in tests).

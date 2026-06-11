@@ -17,6 +17,7 @@ import { classifyProviderError } from "./helpers/api-resilience.js";
 import { providerRegistry } from "../classes/registry-singleton.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { getDefaultTierModel, PROVIDER_OPTIONS } from "./model-catalog.js";
+import { resolveEffectiveTierModel } from "./model-catalog-validate.js";
 import {
   DELEGATION_PROVIDER_ROLE_NAMES,
   PROVIDER_ROLE_NAMES,
@@ -338,7 +339,11 @@ export function tierModelName(tier, { providerName, role, jobType } = {}) {
   }
   const providerKey = canonicalProviderName(name);
   const tierConfig = getProviderTierInfo(providerKey, tier);
-  return tierConfig.model || getDefaultTierModel(providerKey, tier);
+  const candidate = tierConfig.model || getDefaultTierModel(providerKey, tier);
+  // Stale-model guard: a configured model that vanished from the merged
+  // catalog warns and resolves to the tier default (per enforcement mode)
+  // instead of failing at the provider API.
+  return resolveEffectiveTierModel(providerKey, tier, candidate).model;
 }
 
 // ─── Provider Readiness ─────────────────────────────────────────────────────

@@ -201,10 +201,30 @@ export class DisplayApprovalRenderer {
     }).join("  ");
     navLines.push(` ${C.bold}Work Items:${C.reset} ${wiIndicators}`);
 
-    if (current._isInfo) {
-      navLines.push(` ${C.cyan}[INFO]${C.reset} ${C.dim}Research-only \u2014 no action needed.  [\u2190\u2192] WI  [Tab/1-4] Section  [\u2191\u2193] Scroll  [Esc] Done${C.reset}`);
+    if (this._approvalExitConfirm) {
+      const undecided = this._approvalData.filter((d) => !d._decision && !d._isInfo).length;
+      navLines.push(` ${C.yellow}${C.bold}Leave review?${C.reset} ${C.yellow}${undecided} undecided item${undecided === 1 ? "" : "s"} will stay pending.${C.reset}  ${C.dim}[Enter/y] Leave  [Esc/n] Keep reviewing${C.reset}`);
+    } else if (current._isInfo) {
+      navLines.push(` ${C.cyan}[INFO]${C.reset} ${C.dim}Research-only \u2014 no action needed.  [\u2190\u2192] WI  [Tab/1-4] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
     } else {
-      navLines.push(` ${C.green}[a]${C.reset} Approve  ${C.red}[r]${C.reset} Re-queue  ${C.red}[d]${C.reset} Delete  ${C.green}[c]${C.reset} Commit  ${C.yellow}[t]${C.reset} Stash tgt  ${C.red}[x]${C.reset} Discard\u2026  ${C.dim}[s] Skip  [\u2190\u2192] WI  [Tab/1-4] Section  [\u2191\u2193] Scroll  [Esc] Done${C.reset}`);
+      navLines.push(` ${C.green}[a]${C.reset} Approve  ${C.red}[r]${C.reset} Re-queue  ${C.red}[d]${C.reset} Delete  ${C.green}[c]${C.reset} Commit  ${C.yellow}[t]${C.reset} Stash tgt  ${C.red}[x]${C.reset} Discard\u2026  ${C.dim}[s] Skip  [\u2190\u2192] WI  [Tab/1-4] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
+    }
+
+    // Always-visible action feedback: the in-flight/most-recent git action and
+    // the auto-advance cue. The Tasks tab embeds the same status in its
+    // content, but the user may be on any tab when an action lands.
+    const flashFresh = this._approvalFlash
+      && (Date.now() - (this._approvalFlash.at || 0)) < 2_500
+      ? this._approvalFlash.text
+      : null;
+    const navActionStatus = current._mergeInFlight
+      ? `${C.yellow}${spin} ${current._mergePhase || "Working...."}${C.reset}`
+      : (this._approvalTab !== 0 && current._mergeResult ? current._mergeResult : null);
+    if (navActionStatus || flashFresh) {
+      const bits = [];
+      if (flashFresh) bits.push(`${C.cyan}${flashFresh}${C.reset}`);
+      if (navActionStatus) bits.push(navActionStatus);
+      navLines.push(` ${bits.join(`  ${C.dim}\u00b7${C.reset}  `)}`);
     }
 
     // -3 for: top border, tab bar, divider above nav; -navLines.length for nav; -1 for bottom border

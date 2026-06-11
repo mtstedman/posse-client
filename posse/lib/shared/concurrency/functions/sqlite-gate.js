@@ -34,6 +34,10 @@ const SQLITE_GATE = new SqliteResourceGate({
   name: "SQLite protected asset",
 });
 
+// IMPORTANT: this gate is per-thread (per JS realm), not cross-process or
+// cross-worker. It serializes writers within this thread only; actual
+// cross-thread/process arbitration is SQLite's WAL mode + busy_timeout. Do
+// not rely on it for exclusivity against other workers or daemons.
 export function runSqliteWrite(dbPath, fn, { label = "sqlite.write", waitMs = 30000 } = {}) {
   return SQLITE_GATE.write(dbPath, fn, { label, waitMs });
 }

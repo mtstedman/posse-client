@@ -76,6 +76,59 @@ suite("Pricing + cost", () => {
     assert.equal(got.source, "db");
   });
 
+  it("remote catalog pricing beats builtin defaults but loses to db overrides", async () => {
+    const { setPricing, resolvePricing, invalidatePricingCache } = await import("../../../lib/domains/billing/functions/pricing.js");
+    const { normalizeRemoteModelCatalog, setRemoteCatalogForTest } = await import("../../../lib/domains/providers/functions/model-catalog-store.js");
+    invalidatePricingCache();
+    setRemoteCatalogForTest(normalizeRemoteModelCatalog({
+      schema_version: 1,
+      catalog_version: "pricing-test",
+      providers: {
+        claude: {
+          tier_defaults: {},
+          text_models: [
+            // Overrides a model that also exists in builtin DEFAULT_PRICING.
+            { id: "sonnet", tier: "standard", pricing: { input_per_million_usd: 4, output_per_million_usd: 20, cached_input_per_million_usd: 0.4 } },
+            // New model with aliases — only the remote catalog knows it.
+            { id: "claude-nova-7", tier: "strong", aliases: ["nova"], pricing: { input_per_million_usd: 12, output_per_million_usd: 60 } },
+          ],
+          image_models: [],
+          listing: { source: "curated", checked_at: null, live: false },
+        },
+      },
+    }));
+    try {
+      // Remote beats builtin DEFAULT_PRICING (sonnet is 3/15 builtin).
+      const sonnet = resolvePricing({ provider: "claude", modelName: "sonnet" });
+      assert.equal(sonnet.inputPerM, 4);
+      assert.equal(sonnet.outputPerM, 20);
+      assert.equal(sonnet.cachedInputPerM, 0.4);
+      assert.equal(sonnet.source, "remote:claude:sonnet");
+
+      // Remote-only model resolves exactly; missing cached rate falls back to input.
+      const nova = resolvePricing({ provider: "claude", modelName: "claude-nova-7" });
+      assert.equal(nova.inputPerM, 12);
+      assert.equal(nova.cachedInputPerM, 12);
+
+      // Family candidates match against the remote map (date suffix stripped).
+      const dated = resolvePricing({ provider: "claude", modelName: "claude-nova-7-20270101" });
+      assert.equal(dated.source, "remote:claude:claude-nova-7");
+
+      // Alias keys resolve too.
+      const alias = resolvePricing({ provider: "claude", modelName: "nova" });
+      assert.equal(alias.inputPerM, 12);
+
+      // A db override still wins over the remote catalog.
+      setPricing({ provider: "claude", modelName: "sonnet", inputPerM: 99, outputPerM: 199, modelTier: "standard" });
+      const overridden = resolvePricing({ provider: "claude", modelName: "sonnet" });
+      assert.equal(overridden.source, "db");
+      assert.equal(overridden.inputPerM, 99);
+    } finally {
+      setRemoteCatalogForTest(null);
+      invalidatePricingCache();
+    }
+  });
+
   it("estimateCallCost prefers a non-negative knownCostUsd over recompute", async () => {
     const { estimateCallCost } = await import("../../../lib/domains/billing/functions/pricing.js");
     const r = estimateCallCost({

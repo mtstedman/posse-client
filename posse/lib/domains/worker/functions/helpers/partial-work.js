@@ -22,8 +22,13 @@ import {
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { gitCommitAll, gitCommitAllAsync } from "../../../git/functions/commit-scope.js";
-import { gitCurrentHash, gitCurrentHashAsync, gitExec, gitExecAsync, gitHasChanges } from "../../../git/functions/utils.js";
-import { snapshotAndResetDirtyWorktree, withWorktreeLock, withWorktreeLockAsync } from "../../../git/functions/worktree.js";
+import { gitCurrentHash, gitCurrentHashAsync, gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
+import {
+  snapshotAndResetDirtyWorktree,
+  snapshotAndResetDirtyWorktreeAsync,
+  withWorktreeLock,
+  withWorktreeLockAsync,
+} from "../../../git/functions/worktree.js";
 import {
   acquireWorktreeLock,
   acquireWorktreeLockAsync,
@@ -104,6 +109,10 @@ export function collectPartialWorkState(job, wtPath) {
   } catch {
     return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
   }
+  return classifyPartialWorkEntries(job, wtPath, raw);
+}
+
+function classifyPartialWorkEntries(job, wtPath, raw) {
   const entries = parseStatusPorcelain(raw);
   if (entries.length === 0) return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
 
@@ -144,6 +153,17 @@ export function collectPartialWorkState(job, wtPath) {
     siblingPaths,
     payload,
   };
+}
+
+export async function collectPartialWorkStateAsync(job, wtPath, { signal = null } = {}) {
+  if (!job?.id || !wtPath) return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
+  let raw = "";
+  try {
+    raw = await gitExecAsync(["-c", "core.quotePath=false", "status", "--porcelain"], wtPath, { signal });
+  } catch {
+    return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
+  }
+  return classifyPartialWorkEntries(job, wtPath, raw);
 }
 
 function nextTurnOverrideFromDetails(errorDetails = null, fallback = 36) {
@@ -257,7 +277,7 @@ export async function stashPartialWorkForExtensionAsync(job, wtPath, {
   if (!job?.id || !wtPath) return false;
   if (!projectDir) throw new Error("projectDir is required to stash partial work safely");
   return await withWorktreeLockAsync(wtPath, projectDir, async () => {
-    const state = collectPartialWorkState(job, wtPath);
+    const state = await collectPartialWorkStateAsync(job, wtPath, { signal });
     if (!state.hasChanges || state.inScopePaths.length === 0) return false;
     const stashLockPath = await gitStashLockPathAsync(wtPath, projectDir, { signal });
     const stashLock = await acquireWorktreeLockAsync(stashLockPath, { signal });
@@ -435,7 +455,7 @@ export async function commitScopedPartialWorkAsync(worker, job, attempt, wtPath,
   reason = "partial work",
   output = "",
 } = {}) {
-  const state = collectPartialWorkState(job, wtPath);
+  const state = await collectPartialWorkStateAsync(job, wtPath);
   if (!state.hasChanges || state.inScopePaths.length === 0) {
     return { committed: false, state };
   }
@@ -520,12 +540,12 @@ export async function commitScopedPartialWorkAsync(worker, job, attempt, wtPath,
   };
 }
 
-export function revertPartialWork(worker, job, wtPath, {
+export async function revertPartialWork(worker, job, wtPath, {
   attemptId = null,
   reason = "partial-work-revert",
 } = {}) {
-  if (!wtPath || !gitHasChanges(wtPath)) return { reverted: false };
-  const snapshotDir = snapshotAndResetDirtyWorktree(wtPath, worker?.projectDir || wtPath, {
+  if (!wtPath || !(await gitHasChangesAsync(wtPath))) return { reverted: false };
+  const snapshotDir = await snapshotAndResetDirtyWorktreeAsync(wtPath, worker?.projectDir || wtPath, {
     reason,
     branchName: getWorkItem(job.work_item_id)?.branch_name || null,
     wiId: job.work_item_id,

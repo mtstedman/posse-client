@@ -34,6 +34,8 @@ import { extractBodyIdentifiers } from "./body-identifiers.js";
 /** @typedef {import("../contracts/schemas.js").SymbolRow} SymbolRow */
 /** @typedef {import("../contracts/schemas.js").EdgeRow} EdgeRow */
 
+import { parseBufferNative } from "../native/parser.js";
+
 export {
   diffParseBufferNativeParity,
   parseBufferNative,
@@ -124,6 +126,12 @@ export function parseBuffer(args) {
   if (!descriptor) {
     throw new Error(`parseBuffer: unsupported language "${lang}" for ${repo_rel_path}`);
   }
+  if (descriptor.native) {
+    // Rust-owned extraction. The binary returns the COMPLETE ParseResult —
+    // UTF-16 ranges, line numbers, signature hashes, body identifiers —
+    // corpus-parity-gated against the deleted JS extractor per language.
+    return parseBufferNative({ bytes: buf, repo_rel_path, lang: descriptor.tag });
+  }
   const extracted = descriptor.extract({
     content_hash,
     repo_rel_path,
@@ -213,7 +221,11 @@ export class ParserAdapter {
    */
   supports(extOrLang) {
     const descriptor = resolveLanguage(extOrLang);
-    return !!descriptor && descriptor.supported && !!parserFor(descriptor.tag);
+    if (!descriptor || !descriptor.supported) return false;
+    // Native-owned languages need no JS grammar; the binary carries its
+    // grammars at compile time.
+    if (descriptor.native) return true;
+    return !!parserFor(descriptor.tag);
   }
 
   /**

@@ -1593,6 +1593,8 @@ export class Display {
     const done = this._approvalDone;
     this._approvalDone = null;
     this._approvalPicker = null;
+    this._approvalExitConfirm = false;
+    this._approvalFlash = null;
     try { done({ canceled: true }); } catch { /* resolver should not throw */ }
     return true;
   }
@@ -1606,7 +1608,9 @@ export class Display {
   /**
    * Enter approval mode with a full-screen report.
    * reportData: array of { wi, jobs, agentCalls, gitDiff, totalDuration, totalPrompt, totalOutput }
-   * Returns a promise that resolves when all work items are reviewed.
+   * Returns a promise that resolves with { canceled } — canceled is true when
+   * the session was torn down (shutdown or a newer approval session) rather
+   * than reviewed to completion.
    */
   _normalizeApprovalViewState() {
     const data = Array.isArray(this._approvalData) ? this._approvalData : [];
@@ -1652,12 +1656,18 @@ export class Display {
 
   enterApprovalMode(reportData, initialIdx = 0) {
     return new Promise((resolve) => {
+      // Re-entry guard: settle any still-pending approval promise (resolving
+      // it { canceled: true }) so overwriting _approvalDone can never strand
+      // an earlier session's awaiter.
+      this._cancelApprovalMode();
       this._mode = "approval";
       this._approvalData = reportData;
       this._approvalIdx = initialIdx >= 0 && initialIdx < reportData.length ? initialIdx : 0;
       this._approvalScroll = 0;
       this._approvalTab = 0;
       this._approvalTabScrolls = [0, 0, 0, 0];
+      this._approvalExitConfirm = false;
+      this._approvalFlash = null;
       this._approvalDone = resolve;
       this.requestRender({ force: true });
     });
@@ -2595,8 +2605,10 @@ export class Display {
   /**
    * Two live code-intelligence readiness bars (ATLAS composite + ONNX) for the
    * left panel, above the queue. Fed by the conductor's streamed warm progress
-   * (see warm-progress.js): they fill while a warm runs and rest at "ready"
-   * (ONNX shows "off" when embeddings are disabled — the default).
+   * and seeded from the boot warm's real result (see warm-progress.js): they
+   * fill while a warm runs and rest at "ready"/"incomplete". "off" is reserved
+   * for genuinely-disabled-by-config; "not ready" means nothing has been
+   * observed yet this session.
    */
   _buildAtlasReadinessLines() {
     let r;
@@ -2634,20 +2646,26 @@ export class Display {
       const st = rowState(color, known, r.active, target ?? 0, off);
       return ` ${st.glyph} ${color}${label.padEnd(5)}${C.reset} ${g.bar} ${st.restColor}${right}${C.reset}`;
     };
-    // Resting label: idle (never warmed) → "idle"; full → "ready"; partial →
-    // "incomplete". Active → live % + the language/stage being worked.
-    const restLabel = (pct) => pct == null ? "idle" : (pct >= 100 ? "ready" : "incomplete");
+    // Resting label: "ready" (fully warmed) / "incomplete" (warm didn't
+    // finish) / "not ready" (nothing observed yet this session — e.g. boot
+    // failed before seeding). Active → live % + the language/stage worked.
+    const restLabel = (pct) => pct == null ? "not ready" : (pct >= 100 ? "ready" : "incomplete");
+    // "off" only when config genuinely disables the subsystem (seeded at boot
+    // from real settings) — never inferred from "no percent observed yet".
+    const atlasOff = r.atlasEnabled === false;
+    const onnxOff = atlasOff || r.onnxEnabled === false;
     // ATLAS composite (scip + tree-sitter + view-merge).
-    const atlasRight = r.active
-      ? `${pctStr(r.atlas ?? 0)} ${r.lang || r.stage || ""}`.trimEnd()
-      : restLabel(r.atlas);
-    // ONNX (embeddings): null → never ran (opt-in / off by default).
-    const onnxOff = r.onnx == null;
+    const atlasRight = atlasOff
+      ? "off"
+      : (r.active
+        ? `${pctStr(r.atlas ?? 0)} ${r.lang || r.stage || ""}`.trimEnd()
+        : restLabel(r.atlas));
+    // ONNX (embeddings).
     const onnxRight = onnxOff
       ? "off"
-      : (r.active ? pctStr(r.onnx) : restLabel(r.onnx));
+      : (r.active && r.onnx != null ? pctStr(r.onnx) : restLabel(r.onnx));
     return [
-      row("atlas", "ATLAS", C.cyan, r.atlas ?? 0, r.atlas != null || r.active, atlasRight),
+      row("atlas", "ATLAS", C.cyan, r.atlas ?? 0, r.atlas != null || r.active, atlasRight, atlasOff),
       row("onnx", "ONNX", C.magenta, r.onnx ?? 0, r.onnx != null, onnxRight, onnxOff),
     ];
   }
@@ -2787,8 +2805,11 @@ export class Display {
           const glowOn = Math.floor(this._spinIdx / 3) % 2 === 0;
           const glow = glowOn ? `${C.bold}${C.brightWhite}` : `${C.bold}${tc}`;
           const jobRef = `${C.dim}#${j.id}${C.reset}`;
-          const jTitle = formatQueueJobTitle(jobLabel(j.job_type, j.title), inner - 20, queueJobLabels);
+          // Budget the title around the status tag so long tags (e.g. ATLAS
+          // warm details) shrink the title instead of overflowing the row.
           const statusTag = this._jobStatusTag(j);
+          const tagWidth = statusTag ? stripAnsi(statusTag).length : 0;
+          const jTitle = formatQueueJobTitle(jobLabel(j.job_type, j.title), Math.max(12, inner - 20 - tagWidth), queueJobLabels);
           lines.push(`  ${runTag} ${jobRef} ${glow}${jTitle}${C.reset}${statusTag}`);
         }
 
@@ -2804,7 +2825,8 @@ export class Display {
           const typeTag = `${tc}[${JOB_TYPE_ABBR[j.job_type] || j.job_type[0].toUpperCase()}]${C.reset}`;
           const jobRef = `${C.dim}#${j.id}${C.reset}`;
           const statusTag = this._jobStatusTag(j);
-          const jTitle = formatQueueJobTitle(jobLabel(j.job_type, j.title), inner - 20, queueJobLabels);
+          const tagWidth = statusTag ? stripAnsi(statusTag).length : 0;
+          const jTitle = formatQueueJobTitle(jobLabel(j.job_type, j.title), Math.max(12, inner - 20 - tagWidth), queueJobLabels);
           lines.push(`  ${icon}${C.reset} ${typeTag} ${jobRef} ${jTitle}${statusTag}`);
         }
         if (pendingJobs.length > maxPending) {
@@ -3101,8 +3123,11 @@ export class Display {
       contentLines.push("");
     }
 
-    // Apply scroll
+    // Apply scroll. Clamp (and write back) so holding the down key past the
+    // end can't scroll the content fully out of view into a blank panel.
     const available = maxLines - lines.length;
+    const maxScroll = Math.max(0, contentLines.length - available);
+    if (this._pipelineScroll > maxScroll) this._pipelineScroll = maxScroll;
     const scrolled = contentLines.slice(this._pipelineScroll, this._pipelineScroll + available);
     lines.push(...scrolled);
 

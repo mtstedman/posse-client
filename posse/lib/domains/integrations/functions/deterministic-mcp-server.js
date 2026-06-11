@@ -79,7 +79,7 @@ import { ATLAS_TOOL_ACTIONS } from "../../atlas/functions/v2/contracts/tool-para
 import { POSSE_MCP_GATEWAY_SERVER_INFO_NAME, stripPosseMcpGatewayPrefix } from "./mcp-gateway.js";
 import { setRuntimePathOverrides } from "../../runtime/functions/paths.js";
 import { AsyncResourceGate } from "../../../shared/concurrency/functions/async-gate.js";
-import { assertSafeRemoteAuthUrl, resolvePosseKey } from "../../remote/functions/client.js";
+import { assertSafeRemoteAuthUrl, readResponseTextWithLimit, resolvePosseKey } from "../../remote/functions/client.js";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../runtime/functions/protected-paths.js";
 
 /** Safe wrapper — recording must never break tool execution in the MCP subprocess. */
@@ -96,6 +96,11 @@ function recordToolInvocation(opts) {
 const SERVER_INFO = { name: POSSE_MCP_GATEWAY_SERVER_INFO_NAME, version: "1.0.0" };
 const SUPPORTED_PROTOCOL = "2024-11-05";
 const MAX_STDIN_CONTENT_LENGTH_BYTES = 16 * 1024 * 1024;
+// Hard ceiling on accumulated, unframed stdin. A complete legal frame is
+// consumed as soon as it arrives, so the buffer only approaches this when a
+// writer streams bytes with no newline / short Content-Length body — 2x the
+// frame max leaves room for one max-size body plus headers and pipelining.
+const MAX_STDIN_BUFFER_BYTES = MAX_STDIN_CONTENT_LENGTH_BYTES * 2;
 const scopeParseState = { invalid: false };
 const ATLAS_LIVE_BUFFER_GATE = new AsyncResourceGate({ name: "ATLAS live buffer" });
 const DETERMINISTIC_TOOL_GATE = new AsyncResourceGate({ name: "deterministic native tool" });
@@ -653,7 +658,13 @@ async function fetchRemoteToolCatalog() {
         if (!response.ok) {
           throw new Error(`HTTP ${response.status} ${response.statusText}`);
         }
-        const catalog = await response.json();
+        // Same 1MB response cap as every other posse-remote call; a bare
+        // response.json() would buffer an unbounded body.
+        const text = await readResponseTextWithLimit(response, {
+          operation: "remote tool catalog",
+          url,
+        });
+        const catalog = text ? JSON.parse(text) : null;
         const remoteToolCatalog = catalog && typeof catalog === "object" ? catalog : null;
         if (remoteToolCatalog) {
           _remoteToolCatalogCache = { key: cacheKey, catalog: remoteToolCatalog };
@@ -1714,7 +1725,7 @@ if (writeEnabled) {
   mcpToolRegistry.attach("make_dir", (args) => makeDirWithinScope(args || {}));
 }
 if (allowBash && execBash) {
-  mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd, writeEnabled, effectiveScopePredicates.hasScope));
+  mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd));
 }
 if (roleName === "dev" || roleName === "assessor") {
   mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
@@ -2634,6 +2645,17 @@ function processInputBuffer() {
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
   processInputBuffer();
+  // Anything still buffered here is an incomplete frame. The 16MB limit on
+  // Content-Length only bounds declared bodies; a frame that never completes
+  // (e.g. a JSONL line with no newline) would otherwise accumulate forever.
+  if (inputBuffer.length > MAX_STDIN_BUFFER_BYTES) {
+    reportParseError(
+      "stream",
+      new Error(`stdin buffered ${inputBuffer.length} bytes without a complete frame (max ${MAX_STDIN_BUFFER_BYTES})`),
+      inputBuffer.length,
+    );
+    inputBuffer = Buffer.alloc(0);
+  }
 });
 
 async function shutdownAndExit(code = 0) {

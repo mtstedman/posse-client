@@ -23,6 +23,10 @@ import {
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 const SETUP_DEFER_NOTICE_INTERVAL_MS = 30_000;
 const SETUP_DEFER_RETRY_DELAY_MS = 30_000;
+// Debounce cache for setup-deferral notices, keyed wi:job:phase → last-emit
+// ms. Bounded: once it exceeds 1000 entries, shouldEmitSetupDeferNotice
+// evicts entries idle for 4× the notice interval. Stale entries are harmless
+// (a finished job's key is simply never consulted again).
 const setupDeferNoticeLastSeen = new Map();
 import { MUTATING_JOB_TYPES } from "./job-type-sets.js";
 import { jobNeedsGitWorktree } from "../../../git/functions/policy.js";
@@ -73,12 +77,24 @@ import {
 import { withBranchLockAsync } from "../../../git/functions/worktree-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
+// Memoized per path: the worktree's repo root cannot change for the lifetime
+// of a session, and this backs the active-job sentinel which is read/written
+// several times per job — without the cache each touch pays a synchronous
+// `git rev-parse` on the main thread. Only successful resolutions are cached
+// (a pre-creation miss must retry once the worktree exists).
+const _worktreeRootCache = new Map();
+
 function resolveWorktreeRoot(wtPath) {
   if (!wtPath) return null;
+  const key = path.resolve(wtPath);
+  const cached = _worktreeRootCache.get(key);
+  if (cached) return cached;
   try {
-    return path.resolve(gitExec(["rev-parse", "--show-toplevel"], wtPath));
+    const root = path.resolve(gitExec(["rev-parse", "--show-toplevel"], wtPath));
+    _worktreeRootCache.set(key, root);
+    return root;
   } catch {
-    return path.resolve(wtPath);
+    return key;
   }
 }
 

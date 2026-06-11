@@ -25,6 +25,13 @@ const requireGrammar = createRequire(import.meta.url);
  * @type {Record<LangTag, { pkg: string, pick: (m: any) => any }>}
  */
 const GRAMMAR_REGISTRY = {
+  // NOTE the split after the parser.parseBuffer cutover: ledger INGESTION
+  // for ts/tsx/js/py/rs/php is native-only (their JS extractors are deleted;
+  // the Rust binary carries those grammars at compile time). The node
+  // grammars below remain ONLY for read-time AST tools — code.getSkeleton /
+  // code.getHotPath / repo overview (retrieval/ast.js) — which still parse
+  // live buffers in-process, plus the languages whose extraction has not
+  // yet been ported (go/java/cs/cpp/c/kt/sh).
   ts: { pkg: "tree-sitter-typescript", pick: (m) => m.typescript ?? m.default?.typescript ?? m },
   tsx: { pkg: "tree-sitter-typescript", pick: (m) => m.tsx ?? m.default?.tsx ?? m },
   js: { pkg: "tree-sitter-javascript", pick: (m) => m.default ?? m },

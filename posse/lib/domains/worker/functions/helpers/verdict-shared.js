@@ -473,7 +473,7 @@ function _queueInternalAssessmentRetry(
   }
   const previousTier = job.model_tier || "standard";
   const retryTier = _nextAssessmentRetryTier(previousTier);
-  payload._assess_only = 1;
+  payload._assess_only = true;
   payload._assess_model_tier = retryTier;
   delete payload._assess_model_name;
   const queued = runInTransaction(() => {

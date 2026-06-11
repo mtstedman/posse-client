@@ -3,16 +3,34 @@ import { getSetting } from "../../../../domains/queue/functions/settings.js";
 import { SECRET_PATTERNS } from "../../../../domains/worker/functions/helpers/hooks.js";
 import { redactString } from "../../../../domains/bridge/functions/redaction.js";
 
+// scrubSecrets runs on every log line; cache the synchronous SQLite setting
+// read briefly so logging doesn't pay a DB round-trip per line. A settings
+// flip takes effect within the TTL.
+const SCRUB_SETTING_TTL_MS = 5000;
+let _scrubEnabledCache = null;
+let _scrubEnabledCacheAt = 0;
+
 export function logScrubbingEnabled() {
-  let value = null;
-  try {
-    value = getSetting(SETTING_KEYS.LOG_SCRUB_SECRETS);
-  } catch {
-    return true;
+  const now = Date.now();
+  if (_scrubEnabledCache != null && now - _scrubEnabledCacheAt < SCRUB_SETTING_TTL_MS) {
+    return _scrubEnabledCache;
   }
-  const normalized = String(value ?? "").trim().toLowerCase();
-  if (!normalized) return true;
-  return ["1", "true", "yes", "on"].includes(normalized);
+  let enabled = true;
+  try {
+    const value = getSetting(SETTING_KEYS.LOG_SCRUB_SECRETS);
+    const normalized = String(value ?? "").trim().toLowerCase();
+    enabled = !normalized || ["1", "true", "yes", "on"].includes(normalized);
+  } catch {
+    enabled = true;
+  }
+  _scrubEnabledCache = enabled;
+  _scrubEnabledCacheAt = now;
+  return enabled;
+}
+
+export function invalidateLogScrubCache() {
+  _scrubEnabledCache = null;
+  _scrubEnabledCacheAt = 0;
 }
 
 export function scrubSecrets(text) {

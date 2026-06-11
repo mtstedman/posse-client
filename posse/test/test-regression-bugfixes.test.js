@@ -7,7 +7,7 @@ import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { __testMaskCredentialValue, purgeRuntimeLogs as purgeRuntimeLogsFromAdmin } from "../lib/domains/ui/classes/admin/AdminTUI.js";
+import { AdminTUI, purgeRuntimeLogs as purgeRuntimeLogsFromAdmin } from "../lib/domains/ui/classes/admin/AdminTUI.js";
 import { Job } from "../lib/domains/queue/classes/job/Job.js";
 import { Scheduler } from "../lib/domains/scheduler/classes/Scheduler.js";
 import { Worker, filterFileRequestsToOutOfScope, leaseRenewalIntervalMs, renewJobLeaseOrAbort } from "../lib/domains/worker/classes/Worker.js";
@@ -1344,25 +1344,25 @@ describe("targeted regression bugfixes", () => {
     try {
       const bash = createBashExecutor();
       assert.match(
-        bash({ command: "mkdir created-by-bash" }, root, true, false),
+        bash({ command: "mkdir created-by-bash" }, root),
         /Mutating command blocked/i,
       );
       assert.equal(fs.existsSync(path.join(root, "created-by-bash")), false);
       assert.match(
-        bash({ command: 'node -e "require(\'fs\').writeFileSync(\'owned.txt\', \'nope\')"' }, root, true, false),
+        bash({ command: 'node -e "require(\'fs\').writeFileSync(\'owned.txt\', \'nope\')"' }, root),
         /Mutating command blocked/i,
       );
       assert.equal(fs.existsSync(path.join(root, "owned.txt")), false);
       fs.writeFileSync(path.join(root, "writer.js"), "require('fs').writeFileSync('outside-scope.txt', 'nope')\n", "utf8");
       assert.match(
-        bash({ command: "node writer.js" }, root, true, true),
+        bash({ command: "node writer.js" }, root),
         /Command not in allowlist/i,
       );
       assert.equal(fs.existsSync(path.join(root, "outside-scope.txt")), false);
 
       const policy = new MutationPolicy({ cwd: root });
-      assert.equal(policy.authorizeBash("python -m pytest tests", { allowWrite: true, hasFileScope: true }).ok, true);
-      assert.equal(policy.authorizeBash("python build.py", { allowWrite: true, hasFileScope: true }).ok, false);
+      assert.equal(policy.authorizeBash("python -m pytest tests").ok, true);
+      assert.equal(policy.authorizeBash("python build.py").ok, false);
     } finally {
       removeTempTree(root);
     }
@@ -2597,7 +2597,7 @@ describe("targeted regression bugfixes", () => {
     const payload = JSON.parse(fresh.payload_json);
     assert.equal(fresh.status, "queued");
     assert.equal(fresh.model_tier, "standard");
-    assert.equal(payload._assess_only, 1);
+    assert.equal(payload._assess_only, true);
     assert.equal(payload._assess_model_tier, "standard");
     const event = getEvents(job.id, 10).find((e) => e.event_type === "job.assessment_internal_retry");
     assert.match(event.message, /cheap -> standard/);
@@ -2731,12 +2731,23 @@ describe("targeted regression bugfixes", () => {
     }
   }));
 
-  it("masks credential values without relying on KEY in the variable name", () => {
+  it("never renders credential values in the admin settings tab", () => {
     const token = "oauth-token-secret-value";
-    const masked = __testMaskCredentialValue(token);
-    assert.equal(masked, "oauth-to...");
-    assert.notEqual(masked, token);
-    assert.equal(masked.includes("secret"), false);
-    assert.equal(__testMaskCredentialValue("short"), "***");
+    const original = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
+    try {
+      const tui = new AdminTUI({ projectDir: process.cwd() });
+      tui._settingsPane = "providers";
+      const plain = tui._buildSettings(158).map((line) => String(line).replace(/\x1b\[[0-9;]*m/g, ""));
+      const keyLine = plain.find((line) => line.includes("CLAUDE_CODE_OAUTH_TOKEN"));
+      assert.ok(keyLine, "credential key row should be listed");
+      assert.match(keyLine, /configured/);
+      // Neither the full secret nor any prefix of it may appear anywhere.
+      assert.equal(plain.some((line) => line.includes(token)), false);
+      assert.equal(plain.some((line) => line.includes("oauth-to")), false);
+    } finally {
+      if (original == null) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = original;
+    }
   });
 });

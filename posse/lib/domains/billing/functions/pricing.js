@@ -1,16 +1,19 @@
 // lib/pricing.js
 //
 // Pricing lookup for cost attribution. Resolution order:
-//   1. Exact match in the provider_pricing table on (provider, model_name).
-//   2. Family match: a fuzzy substring against known prefixes of `model_name`
-//      (e.g. "claude-sonnet-4-5-20250929" → "claude-sonnet-4-5" → "sonnet").
-//   3. Tier default table keyed by (provider, tier).
-//   4. Last-resort "unknown" return that renders as $0 but is flagged.
+//   1. Exact match in the provider_pricing table on (provider, model_name) —
+//      operator overrides; never written by remote data.
+//   2. Remote model catalog cache (fetched from posse-remote, exact then
+//      family match) so new-model rates land without a client patch.
+//   3. Builtin DEFAULT_PRICING (exact then family match).
+//   4. Tier default table keyed by (provider, tier).
+//   5. Last-resort "unknown" return that renders as $0 but is flagged.
 //
 // The module never throws; unknown models return an explicit { source: "none" }
 // so callers can warn rather than surface NaN.
 
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { getRemotePricingMap } from "../../providers/functions/model-catalog-store.js";
 
 // Defaults as of May 2026. Rates in USD per million input/output tokens.
 // Operators can override any row via the provider_pricing table (admin CLI).
@@ -109,13 +112,17 @@ function dbRows() {
     const sig = db.prepare(`SELECT MAX(updated_at) AS mx, COUNT(*) AS cnt FROM provider_pricing`).get();
     const sigKey = `${sig?.mx || ""}|${sig?.cnt || 0}`;
     if (_cachedDbRows && _cachedDbSig === sigKey) return _cachedDbRows;
-    const rows = db.prepare(`SELECT provider, model_name, model_tier, input_per_million_usd, output_per_million_usd FROM provider_pricing`).all();
+    const rows = db.prepare(`SELECT provider, model_name, model_tier, input_per_million_usd, cached_input_per_million_usd, output_per_million_usd FROM provider_pricing`).all();
     _cachedDbRows = rows.map((row) => ({
       provider: normalizeProvider(row.provider),
       modelName: normalizeModel(row.model_name),
       modelTier: normalizeTier(row.model_tier),
       inputPerM: Number(row.input_per_million_usd),
-      cachedInputPerM: Number(row.input_per_million_usd),
+      // NULL cached rate means the operator didn't specify one; fall back to
+      // the uncached input rate (conservative — never under-reports).
+      cachedInputPerM: row.cached_input_per_million_usd != null && Number.isFinite(Number(row.cached_input_per_million_usd))
+        ? Number(row.cached_input_per_million_usd)
+        : Number(row.input_per_million_usd),
       outputPerM: Number(row.output_per_million_usd),
     }));
     _cachedDbSig = sigKey;
@@ -176,6 +183,28 @@ function findInRows(rows, provider, modelName) {
   return null;
 }
 
+function findInRemoteCatalog(provider, modelName) {
+  let map = null;
+  try {
+    map = getRemotePricingMap();
+  } catch {
+    return null;
+  }
+  if (!map || map.size === 0) return null;
+  const prov = normalizeProvider(provider);
+  const model = normalizeModel(modelName);
+  if (!prov || !model) return null;
+  const exactKey = `${prov}:${model}`;
+  const exact = map.get(exactKey);
+  if (exact) return { ...exact, key: exactKey };
+  for (const cand of familyCandidates(model)) {
+    const key = `${prov}:${cand}`;
+    const hit = map.get(key);
+    if (hit) return { ...hit, key };
+  }
+  return null;
+}
+
 function findInDefaults(provider, modelName) {
   const prov = normalizeProvider(provider);
   const model = normalizeModel(modelName);
@@ -227,6 +256,19 @@ export function resolvePricing({ provider, modelName, modelTier } = {}) {
   const dbHit = findInRows(dbRows(), provider, modelName);
   if (dbHit) {
     return { inputPerM: dbHit.inputPerM, cachedInputPerM: dbHit.cachedInputPerM, outputPerM: dbHit.outputPerM, source: "db" };
+  }
+  const remoteHit = findInRemoteCatalog(provider, modelName);
+  if (remoteHit) {
+    return {
+      inputPerM: remoteHit.input,
+      // Null cached rate means the catalog didn't curate one; fall back to the
+      // uncached input rate (conservative — never under-reports).
+      cachedInputPerM: remoteHit.cachedInput != null && Number.isFinite(Number(remoteHit.cachedInput))
+        ? Number(remoteHit.cachedInput)
+        : remoteHit.input,
+      outputPerM: remoteHit.output,
+      source: `remote:${remoteHit.key}`,
+    };
   }
   const defHit = findInDefaults(provider, modelName);
   if (defHit) {
@@ -287,7 +329,7 @@ export function listDefaultPricing() {
 /**
  * Upsert a pricing row (DB overrides default). Returns the stored row.
  */
-export function setPricing({ provider, modelName, modelTier = null, inputPerM, outputPerM, note = null } = {}) {
+export function setPricing({ provider, modelName, modelTier = null, inputPerM, outputPerM, cachedInputPerM = null, note = null } = {}) {
   const prov = normalizeProvider(provider);
   const model = normalizeModel(modelName);
   const tier = normalizeTier(modelTier);
@@ -296,19 +338,25 @@ export function setPricing({ provider, modelName, modelTier = null, inputPerM, o
   const output = Number(outputPerM);
   if (!Number.isFinite(input) || input < 0) throw new Error("inputPerM must be a non-negative number");
   if (!Number.isFinite(output) || output < 0) throw new Error("outputPerM must be a non-negative number");
+  let cachedInput = null;
+  if (cachedInputPerM != null) {
+    cachedInput = Number(cachedInputPerM);
+    if (!Number.isFinite(cachedInput) || cachedInput < 0) throw new Error("cachedInputPerM must be a non-negative number");
+  }
   const db = getDb();
   db.prepare(`
-    INSERT INTO provider_pricing (provider, model_name, model_tier, input_per_million_usd, output_per_million_usd, note, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    INSERT INTO provider_pricing (provider, model_name, model_tier, input_per_million_usd, cached_input_per_million_usd, output_per_million_usd, note, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     ON CONFLICT (provider, model_name) DO UPDATE SET
       model_tier = excluded.model_tier,
       input_per_million_usd = excluded.input_per_million_usd,
+      cached_input_per_million_usd = excluded.cached_input_per_million_usd,
       output_per_million_usd = excluded.output_per_million_usd,
       note = excluded.note,
       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-  `).run(prov, model, tier, input, output, note);
+  `).run(prov, model, tier, input, cachedInput, output, note);
   invalidatePricingCache();
-  return { provider: prov, modelName: model, modelTier: tier, inputPerM: input, outputPerM: output, note };
+  return { provider: prov, modelName: model, modelTier: tier, inputPerM: input, cachedInputPerM: cachedInput, outputPerM: output, note };
 }
 
 export function listPricing() {

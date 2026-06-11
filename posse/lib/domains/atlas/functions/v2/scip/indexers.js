@@ -93,6 +93,17 @@ const SCIP_INDEXERS = Object.freeze([
     sourceExtensions: [".rs"],
     args: ["--output", "{output}", "."],
   }),
+  // Mirrors the Rust scip_indexer_candidates() clang entry. scip-clang needs
+  // a compilation database; without compile_commands.json staging is skipped
+  // by the marker check just like a Go repo without go.mod.
+  Object.freeze({
+    id: "clang",
+    command: "scip-clang",
+    outputName: "clang.scip",
+    markers: ["compile_commands.json", "compile_flags.txt", "CMakeLists.txt"],
+    sourceExtensions: [".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"],
+    args: ["--compdb-path", "compile_commands.json", "--index-output-path", "{output}"],
+  }),
 ]);
 
 /**

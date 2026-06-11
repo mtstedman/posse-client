@@ -1340,15 +1340,20 @@ suite("Queue Rendering", () => {
 
     assert.ok(queueMod.acquireLeaseWithWriteLocks(holder, "sched", 60)?.leaseToken);
 
+    // The dedicated admin Locks tab is gone (the live TUI tools report covers
+    // it); the snapshot still feeds the non-interactive admin overview.
     const admin = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
-    const lines = admin._buildLocks(120).map(plain);
+    const snapshot = admin._getAdminLockSnapshot();
 
-    assert.ok(lines.some((line) => line.includes("Waiting On Locks")));
-    assert.ok(lines.some((line) => line.includes(`job #${waiting.id}`) && line.includes(`WI#${waitingWi.id}`)));
-    assert.ok(lines.some((line) => line.includes(`WI#${holderWi.id}`) && line.includes("Lock holder WI")));
-    assert.ok(lines.some((line) => line.includes("WI Locks")));
-    assert.ok(lines.some((line) => line.includes("Job Locks By WI")));
-    assert.ok(lines.some((line) => line.includes(`job #${holder.id}`) && line.includes("dev/leased")));
+    const waitRow = snapshot.waiting.find((row) => row.waiting.jobId === waiting.id);
+    assert.ok(waitRow, "waiting job should be classified as blocked on a lock");
+    assert.equal(waitRow.waiting.workItemId, waitingWi.id);
+    assert.match(waitRow.waiting.scope, /src\/shared\.js/);
+    // The lease takes both WI- and job-level locks; the conflict reports the
+    // WI lock as the holder, while the job lock shows up in jobLocks.
+    assert.match(waitRow.holder.label, new RegExp(`WI#${holderWi.id}`));
+    assert.match(waitRow.holder.detail, /Lock holder WI/);
+    assert.ok(snapshot.jobLocks.some((lock) => Number(lock.job_id) === holder.id));
   });
 
   it("shows web tool invocations in the live tools report", () => {

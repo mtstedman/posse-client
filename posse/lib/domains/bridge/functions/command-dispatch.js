@@ -21,6 +21,7 @@ import {
 } from "./state-snapshot.js";
 import { answerHumanInput } from "./human-input-answer.js";
 import { approveReview, rejectReview, resolveReviewGateJob } from "./review-decision.js";
+import { executeGitPushGate } from "./git-push-gate.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 const ALLOWED_COMMAND_SET = new Set(BRIDGE_ALLOWED_COMMANDS);
@@ -30,6 +31,7 @@ const MUTATING_COMMAND_SET = new Set([
   BRIDGE_COMMANDS.REVIEW_REJECT,
   BRIDGE_COMMANDS.PLAN_APPROVE,
   BRIDGE_COMMANDS.PLAN_REJECT,
+  BRIDGE_COMMANDS.GIT_PUSH,
 ]);
 
 function commandIdFromFrame(frame = {}) {
@@ -208,6 +210,12 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
     case BRIDGE_COMMANDS.ASK: {
       const jobId = jobIdArg(args);
       return answerHumanInput(jobId, args, context);
+    }
+
+    case BRIDGE_COMMANDS.GIT_PUSH: {
+      const jobId = explicitJobIdArg(args);
+      if (!jobId) return { ok: false, reason: "invalid_job_id" };
+      return executeGitPushGate(jobId, args, context);
     }
 
     case BRIDGE_COMMANDS.PLAN_APPROVE: {

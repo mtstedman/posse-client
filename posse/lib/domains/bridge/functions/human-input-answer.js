@@ -59,6 +59,9 @@ export async function answerHumanInput(jobId, args = {}, { projectDir = process.
   if (payload?.subtype === "plan_approval") {
     return { ok: false, reason: "use_plan_approve_or_reject" };
   }
+  if (payload?.subtype === "push_offer") {
+    return { ok: false, reason: "use_git_push" };
+  }
   const questions = Array.isArray(payload?.questions) && payload.questions.length > 0
     ? payload.questions
     : [`Human input needed for: ${current.title}`];

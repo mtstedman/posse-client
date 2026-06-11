@@ -65,7 +65,12 @@
     "test:ui:slow": "node scripts/run-core-suite.mjs ui slow",
     "test:ui:full": "node scripts/run-core-suite.mjs ui full",
     "test:slow": "node scripts/run-core-suite.mjs all slow",
-    "test:clean": "node scripts/clean-test-artifacts.mjs"
+    "test:clean": "node scripts/clean-test-artifacts.mjs",
+    "check:protocol": "node scripts/check-control-protocol-drift.mjs",
+    "deploy:rust-binaries": "node scripts/deploy-rust-binaries.mjs",
+    "deploy:rust-binaries:all": "node scripts/deploy-rust-binaries.mjs --platform all",
+    "rebuild:rust-binaries": "node scripts/rebuild-rust-binaries.mjs",
+    "rebuild:rust-binaries:all": "node scripts/rebuild-rust-binaries.mjs --platform all"
   },
   "dependencies": {
     "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1-beta.2",

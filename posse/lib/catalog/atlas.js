@@ -76,6 +76,11 @@ export const ATLAS_SCIP_LANGUAGE_OPTIONS = Object.freeze([
   Object.freeze({ value: "php", label: "PHP" }),
   Object.freeze({ value: "go", label: "Go" }),
   Object.freeze({ value: "rust", label: "Rust" }),
+  // scip-clang ships Linux/macOS binaries only; on Windows the indexer must
+  // be provided manually (WSL, or atlas_scip_index_command override). The
+  // option still lists everywhere so the setting round-trips identically to
+  // the Rust candidate table (atlas_core scip_indexer_candidates).
+  Object.freeze({ value: "clang", label: "C / C++ (scip-clang)" }),
 ]);
 export const ATLAS_SCIP_LANGUAGE_VALUES = Object.freeze(ATLAS_SCIP_LANGUAGE_OPTIONS.map((entry) => entry.value));
 export const VALID_ATLAS_SCIP_LANGUAGES = new Set(ATLAS_SCIP_LANGUAGE_VALUES);

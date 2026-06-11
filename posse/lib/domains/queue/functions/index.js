@@ -18,6 +18,7 @@ import {
   TERMINAL_JOB_STATUSES,
   TERMINAL_JOB_STATUSES_SQL,
   TERMINAL_WORK_ITEM_STATUSES,
+  isPushOfferJob,
   normalizeSkillsColumn,
   now,
   runImmediateTransaction,
@@ -535,7 +536,11 @@ export function refreshWorkItemStatus(workItemId) {
   const db = getDb();
   let result = null;
   const execute = () => {
-    const jobs = listJobsByWorkItem(workItemId).filter((job) => !isShadowFanoutJob(job));
+    // Push-offer gates are out-of-band deploy prompts — an open one must not
+    // drag a completed work item back to waiting_on_human.
+    const jobs = listJobsByWorkItem(workItemId)
+      .filter((job) => !isShadowFanoutJob(job))
+      .filter((job) => !isPushOfferJob(job));
     if (jobs.length === 0) return;
     const completionJobs = jobs.filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
     const stateJobs = completionJobs.length > 0 ? completionJobs : jobs;
@@ -594,6 +599,7 @@ export function refreshWorkItemStatuses(statusFilter = null) {
 export function completionBlockersForWorkItem(workItemId) {
   const jobs = listJobsByWorkItem(workItemId)
     .filter((job) => !isShadowFanoutJob(job))
+    .filter((job) => !isPushOfferJob(job))
     .filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
   if (jobs.length === 0) return [];
 
@@ -1133,6 +1139,58 @@ export function requeueWaitingHumanInputJobs() {
 // in this file because they also need refreshWorkItemStatus to fan
 // out to the affected WIs.
 
+// Lease-holding statuses that are parked rather than actively executing.
+// Derived from the catalog so a future parked status inherits the sweep.
+const PARKED_LEASE_STATUSES_SQL = LEASE_HOLDING_STATUSES
+  .filter((status) => !ACTIVE_LEASE_STATUS_SET.has(status))
+  .map((status) => `'${status}'`)
+  .join(",");
+
+/**
+ * Crash-only recovery: a process can die between processVerdict() parking a
+ * job in waiting_on_human / waiting_on_review and the worker releasing the
+ * lease immediately afterwards. Parked jobs are deliberately excluded from
+ * the requeue sweeps (they may wait indefinitely on a human), so a lease
+ * token retained across that crash would otherwise stick forever. Clear the
+ * lease fields once the lease expires; status and file locks stay untouched —
+ * parked statuses hold their locks by design.
+ */
+function clearExpiredParkedLeaseTokens(db, ts, cutoff) {
+  const parkedStale = db.prepare(`
+    SELECT id, status, lease_token FROM jobs
+    WHERE status IN (${PARKED_LEASE_STATUSES_SQL})
+      AND lease_token IS NOT NULL
+      AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+  `).all(cutoff);
+  if (parkedStale.length === 0) return 0;
+
+  const clearParked = db.prepare(`
+    UPDATE jobs
+    SET lease_owner = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        updated_at = ?
+    WHERE id = ?
+      AND lease_token = ?
+      AND status IN (${PARKED_LEASE_STATUSES_SQL})
+  `);
+  let cleared = 0;
+  runInTransaction(() => {
+    for (const { id, status, lease_token } of parkedStale) {
+      const res = clearParked.run(ts, id, lease_token);
+      if ((res?.changes || 0) < 1) continue;
+      cleared += 1;
+      logEvent({
+        job_id: id,
+        event_type: EVENT_TYPES.JOB_LEASE_EXPIRED,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        message: `Cleared lease token retained by parked ${status} job (process died before release)`,
+      });
+    }
+  });
+  return cleared;
+}
+
 /**
  * Find jobs with expired leases and requeue them.
  * Returns the number of requeued jobs.
@@ -1249,6 +1307,7 @@ export function requeueExpiredLeases() {
   const db = getDb();
   const ts = now();
   const cutoff = _graceCutoff();
+  clearExpiredParkedLeaseTokens(db, ts, cutoff);
   const expired = db.prepare(`
     SELECT id, status, work_item_id, lease_token, lease_owner, job_type FROM jobs
     WHERE status IN (${ACTIVE_LEASE_STATUSES_SQL})

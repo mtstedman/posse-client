@@ -41,7 +41,6 @@ import { errorForTelemetry, recordEmbeddingForensics } from "../../functions/v2/
 import { cleanupStaleEmbeddingDirs, openEmbeddingResources } from "../../functions/v2/embeddings/resources.js";
 import { openViewWithMeta, removeSqliteFile, viewFreshness } from "../../functions/v2/view-health.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
-import { nativeBinaries } from "../../../../classes/tools/BinaryManager.js";
 import {
   inspectSampleForMinified,
   isOversizedForParsing,
@@ -411,6 +410,29 @@ export class ParseEngine {
   #emitProgress(event) {
     if (!this.#onProgress) return;
     try { this.#onProgress(event); } catch { /* progress callbacks are observational */ }
+  }
+
+  /**
+   * Forward a ViewBuilder `phase:"tree"` event as a `stage:"tree"` progress
+   * line. The tree refresh (tree-derived + compression seeds) drives its own
+   * boot-panel bar, separate from the view/zip merge bar; `status` carries the
+   * terminal ok/failed verdict so a native-unavailable compression failure is
+   * visible at boot instead of only in derived_state_runs.
+   *
+   * @param {{ current?: number, total?: number, detail?: string, status?: string }} e
+   */
+  #emitTreeProgress(e) {
+    const frac = (e?.total > 0) ? Math.max(0, Math.min(1, e.current / e.total)) : 0;
+    this.#emitProgress({
+      kind: "line",
+      stream: "system",
+      stage: "tree",
+      text: e?.detail || "building tree",
+      percent: frac * 100,
+      status: e?.status ?? null,
+      progress_current: e?.current ?? null,
+      progress_total: e?.total ?? null,
+    });
   }
 
   /**
@@ -1307,6 +1329,13 @@ export class ParseEngine {
           // Map the build's per-phase progress to one overall view/zip %:
           // symbols 0-45%, edges 45-90%, resolve 90-100%. Emitted as
           // stage:"view" so the boot panel's zip bar climbs for real.
+          // The tree-derived/compression refresh rides its own stage:"tree"
+          // (and its own boot bar) — letting it fall through would snap the
+          // zip bar back to the 0% "merging" default.
+          if (e?.phase === "tree") {
+            this.#emitTreeProgress(e);
+            return;
+          }
           const frac = (e?.total > 0) ? Math.max(0, Math.min(1, e.current / e.total)) : 0;
           let percent = 0;
           let label = "merging";
@@ -1612,6 +1641,10 @@ export class ParseEngine {
             view, ledger: this.#ledger, entries,
           }, {
             onProgress: (e) => {
+              if (e?.phase === "tree") {
+                this.#emitTreeProgress(e);
+                return;
+              }
               const frac = (e?.total > 0) ? Math.max(0, Math.min(1, e.current / e.total)) : 0;
               let percent = 0;
               let label = "applying entries";
@@ -2135,10 +2168,6 @@ export class ParseEngine {
       || purpose === "main-merge";
     if (!isMainPurpose) return;
     if (this.#treeCompressionMode !== "ml") return;
-    if (!nativeBinaries.shouldUse("atlas")) {
-      base.tree_compression_reseed_skipped = "atlas_native_unavailable";
-      return;
-    }
     try {
       await this.#emitStage("tree-compression", `reseeding tree compression for ${path.basename(viewPath)}`);
       const { runAtlasTreeCompressionModelPass } = await import(

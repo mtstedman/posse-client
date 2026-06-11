@@ -90,10 +90,9 @@ import {
   repairWebAssetCreateScope as repairWebAssetCreateScopeFromModule,
 } from "../../git/functions/commit-scope.js";
 import {
-  gcWorktrees as gcWorktreesFromModule,
   gcWorktreesAsync as gcWorktreesAsyncFromModule,
   preserveDirtyWorktreeSnapshot as preserveDirtyWorktreeSnapshotFromModule,
-  resetDirtyWorktreeFallback as resetDirtyWorktreeFallbackFromModule,
+  resetDirtyWorktreeFallbackAsync as resetDirtyWorktreeFallbackAsyncFromModule,
   snapshotAndResetDirtyWorktree as snapshotAndResetDirtyWorktreeFromModule,
   snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule,
   worktreeRoot as worktreeRootFromModule,
@@ -115,7 +114,6 @@ import {
 } from "../functions/helpers/dead-letter.js";
 import {
   clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule,
-  cleanupWorktreeIfDone as cleanupWorktreeIfDoneFromModule,
   cleanupWorktreeIfDoneAsync as cleanupWorktreeIfDoneAsyncFromModule,
   primeCreatableFiles as primeCreatableFilesFromModule,
   readActiveWorktreeSentinel as readActiveWorktreeSentinelFromModule,
@@ -177,7 +175,7 @@ import {
   shouldShortCircuitNoWriteAssessment as shouldShortCircuitNoWriteAssessmentFromModule,
 } from "../functions/helpers/no-write-retry.js";
 import {
-  collectPartialWorkState as collectPartialWorkStateFromModule,
+  collectPartialWorkStateAsync as collectPartialWorkStateAsyncFromModule,
   commitScopedPartialWorkAsync as commitScopedPartialWorkAsyncFromModule,
   recordPartialWorkDetected as recordPartialWorkDetectedFromModule,
   revertPartialWork as revertPartialWorkFromModule,
@@ -828,10 +826,6 @@ function gitCommitAll(message, cwd, scope = null, opts = null) {
 
 export function worktreeRoot(projectDir) {
   return worktreeRootFromModule(projectDir);
-}
-
-export function gcWorktrees(projectDir, onMsg = () => {}) {
-  return gcWorktreesFromModule(projectDir, onMsg);
 }
 
 export function gcWorktreesAsync(projectDir, onMsg = () => {}, opts = {}) {
@@ -1646,7 +1640,7 @@ export class Worker {
                     event_json: JSON.stringify({ locks: siblingLocks.slice(0, 20) }),
                   });
                 } else {
-                  snapshotAndResetDirtyWorktreeFromModule(wtPath, this.projectDir, {
+                  await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
                     reason: `blocked-job-${job.id}`,
                     branchName: getWorkItem(job.work_item_id)?.branch_name || null,
                     wiId: job.work_item_id,
@@ -1654,7 +1648,7 @@ export class Worker {
                 }
               }
             } catch {
-              try { resetDirtyWorktreeFallbackFromModule(wtPath, this.projectDir); } catch { /* best effort */ }
+              try { await resetDirtyWorktreeFallbackAsyncFromModule(wtPath, this.projectDir); } catch { /* best effort */ }
             }
           }
 
@@ -1744,7 +1738,7 @@ export class Worker {
                     event_json: JSON.stringify({ locks: siblingLocks.slice(0, 20) }),
                   });
                 } else {
-                  snapshotAndResetDirtyWorktreeFromModule(wtPath, this.projectDir, {
+                  await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
                     reason: `stale-lease-job-${job.id}`,
                     branchName: getWorkItem(job.work_item_id)?.branch_name || null,
                     wiId: job.work_item_id,
@@ -2326,13 +2320,13 @@ export class Worker {
                     });
                   } else {
                     try {
-                      snapshotAndResetDirtyWorktreeFromModule(wtPath, this.projectDir, {
+                      await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
                         reason: `commit-failed-job-${job.id}`,
                         branchName: getWorkItem(job.work_item_id)?.branch_name || null,
                         wiId: job.work_item_id,
                       });
                     } catch {
-                      try { resetDirtyWorktreeFallbackFromModule(wtPath, this.projectDir); } catch { /* ignore */ }
+                      try { await resetDirtyWorktreeFallbackAsyncFromModule(wtPath, this.projectDir); } catch { /* ignore */ }
                     }
                   }
                 }
@@ -2687,11 +2681,12 @@ export class Worker {
           job,
           leaseToken,
           output,
+          signal: executeAbortController?.signal || null,
           startTime,
           wtPath,
         });
         if (partialHandled) return;
-        handleExecuteAttemptErrorFromModule(this, {
+        await handleExecuteAttemptErrorFromModule(this, {
           attempt,
           attemptCount,
           err,
@@ -2779,6 +2774,7 @@ export class Worker {
     job,
     leaseToken,
     output = "",
+    signal = null,
     startTime,
     wtPath,
   } = {}) {
@@ -2789,7 +2785,7 @@ export class Worker {
     const maxAttempts = Number(freshJob.max_attempts || job.max_attempts || 3);
     const usedAttempts = Number(freshJob.attempt_count || attemptCount || 0);
     const finalAttempt = usedAttempts >= maxAttempts;
-    const state = collectPartialWorkStateFromModule(job, wtPath);
+    const state = await collectPartialWorkStateAsyncFromModule(job, wtPath);
     if (!state.hasChanges) return false;
 
     const reason = errorDetails.summary || err?.message || "job failed with partial work";
@@ -2799,7 +2795,7 @@ export class Worker {
     if (!finalAttempt) {
       if (canResumeDirtyWork) {
         try {
-          if (await stashPartialWorkForExtensionAsyncFromModule(job, wtPath, { projectDir: this.projectDir })) {
+          if (await stashPartialWorkForExtensionAsyncFromModule(job, wtPath, { projectDir: this.projectDir, signal })) {
             this.emit(job.id, `${C.yellow}[partial]${C.reset} WI#${job.work_item_id} job #${job.id}: stashed partial work for turn-budget retry resume`);
           }
         } catch {
@@ -2813,7 +2809,7 @@ export class Worker {
     if (canResumeDirtyWork) {
       let stashed = false;
       try {
-        stashed = await stashPartialWorkForExtensionAsyncFromModule(job, wtPath, { projectDir: this.projectDir });
+        stashed = await stashPartialWorkForExtensionAsyncFromModule(job, wtPath, { projectDir: this.projectDir, signal });
       } catch {
         stashed = false;
       }
@@ -2894,7 +2890,7 @@ export class Worker {
 
     if (finalAttempt && state.outOfScopePaths.length > 0 && state.siblingPaths.length === 0) {
       try {
-        revertPartialWorkFromModule(this, job, wtPath, {
+        await revertPartialWorkFromModule(this, job, wtPath, {
           attemptId: attempt.id,
           reason: `partial-work-out-of-scope-job-${job.id}`,
         });

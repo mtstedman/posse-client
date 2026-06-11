@@ -4,21 +4,24 @@
 // extractor that produces SymbolRow/EdgeRow arrays from a source string.
 //
 // Every entry in `LANGUAGES` must produce SymbolRow.lang values matching
-// its `tag` field. Adding a language: add an entry here, write the
-// extractor under ./<lang>.js, and add a fixture to
-// test/fixtures/atlas-v2-parser/.
+// its `tag` field. Languages with `native: true` are owned by the Rust
+// binary's `parser.parseBuffer` (their JS extractors were deleted at
+// cutover, parity-gated per language against real corpora); adapter.js
+// routes them through parseBufferNative and never calls `extract`.
+// Porting one of the remaining JS languages: mirror its spec in
+// atlas_core/src/parse_extract/, corpus-gate it with
+// diffParseBufferNativeParity, flip it to `native: true`, then delete the
+// JS spec in the same change.
 
-import { extract as extractJsTs } from "./javascript.js";
-import { extract as extractPython } from "./python.js";
-import { extract as extractGo } from "./go.js";
-import { extract as extractRust } from "./rust.js";
 import { extract as extractJava } from "./java.js";
 import { extract as extractCSharp } from "./csharp.js";
-import { extract as extractPhp } from "./php.js";
 import { extract as extractKotlin } from "./kotlin.js";
 import { extract as extractShell } from "./shell.js";
-import { extract as extractC } from "./c.js";
-import { extract as extractCpp } from "./cpp.js";
+
+/** @type {(tag: string) => never} */
+const nativeOnly = (tag) => {
+  throw new Error(`languages/index: lang "${tag}" is native-only; adapter.js must route it through parseBufferNative`);
+};
 
 /** @typedef {import("../../contracts/schemas.js").SymbolRow} SymbolRow */
 /** @typedef {import("../../contracts/schemas.js").EdgeRow} EdgeRow */
@@ -37,6 +40,7 @@ import { extract as extractCpp } from "./cpp.js";
  * @property {string[]} extensions        Lowercase, leading "." preserved (e.g. ".ts").
  * @property {ExtractFn} extract
  * @property {boolean} supported          False for placeholder languages that throw.
+ * @property {boolean} [native]           True when extraction is owned by the Rust binary's parser.parseBuffer; `extract` must never be called.
  */
 
 /** @type {LanguageDescriptor[]} */
@@ -44,28 +48,31 @@ export const LANGUAGES = [
   {
     tag: "ts",
     extensions: [".ts", ".tsx", ".mts", ".cts"],
-    extract: (args) => extractJsTs({ ...args, lang: "ts", parserLang: jsParserLangForPath(args.repo_rel_path, "ts") }),
+    extract: () => nativeOnly("ts"),
     supported: true,
+    native: true,
   },
   {
     tag: "js",
     extensions: [".js", ".jsx", ".mjs", ".cjs"],
-    extract: (args) => extractJsTs({ ...args, lang: "js", parserLang: jsParserLangForPath(args.repo_rel_path, "js") }),
+    extract: () => nativeOnly("js"),
     supported: true,
+    native: true,
   },
-  { tag: "py", extensions: [".py", ".pyi"], extract: extractPython, supported: true },
-  { tag: "go", extensions: [".go"], extract: extractGo, supported: true },
-  { tag: "rs", extensions: [".rs"], extract: extractRust, supported: true },
+  { tag: "py", extensions: [".py", ".pyi"], extract: () => nativeOnly("py"), supported: true, native: true },
+  { tag: "go", extensions: [".go"], extract: () => nativeOnly("go"), supported: true, native: true },
+  { tag: "rs", extensions: [".rs"], extract: () => nativeOnly("rs"), supported: true, native: true },
   { tag: "java", extensions: [".java"], extract: extractJava, supported: true },
   { tag: "cs", extensions: [".cs"], extract: extractCSharp, supported: true },
   {
     tag: "cpp",
     extensions: [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"],
-    extract: extractCpp,
+    extract: () => nativeOnly("cpp"),
     supported: true,
+    native: true,
   },
-  { tag: "c", extensions: [".c", ".h"], extract: extractC, supported: true },
-  { tag: "php", extensions: [".php"], extract: extractPhp, supported: true },
+  { tag: "c", extensions: [".c", ".h"], extract: () => nativeOnly("c"), supported: true, native: true },
+  { tag: "php", extensions: [".php"], extract: () => nativeOnly("php"), supported: true, native: true },
   { tag: "kt", extensions: [".kt", ".kts"], extract: extractKotlin, supported: true },
   { tag: "sh", extensions: [".sh", ".bash"], extract: extractShell, supported: true },
 ];
@@ -113,16 +120,3 @@ export function allRegisteredLanguageTags() {
   return LANGUAGES.map((d) => d.tag);
 }
 
-/**
- * JSX-bearing files need the TSX grammar even when the public ATLAS language
- * tag remains "ts" or "js".
- *
- * @param {string} repoRelPath
- * @param {"js" | "ts"} fallback
- * @returns {"js" | "ts" | "tsx"}
- */
-function jsParserLangForPath(repoRelPath, fallback) {
-  const lower = String(repoRelPath || "").toLowerCase();
-  if (lower.endsWith(".tsx") || lower.endsWith(".jsx")) return "tsx";
-  return fallback;
-}

@@ -84,11 +84,9 @@ function buildFixtureView(prefix) {
 describe("ATLAS tree compression snapshot", { skip: nativeHeartbeatSkipReason() ?? false }, () => {
   it("builds deterministic seeds through the binary with carry-forward reseed", async () => {
     const { repoRoot, view, db, scoringFile, scoringTest } = buildFixtureView("ml");
-    const priorNativeAtlas = process.env.POSSE_NATIVE_ATLAS;
     const restoreHeartbeat = installNativeHeartbeatForProcess(
       path.join(repoRoot, ".posse", "account.db"),
     );
-    process.env.POSSE_NATIVE_ATLAS = "1";
     try {
       const signature = treeCompressionInputSignature(db);
       assert.equal(typeof signature, "string");
@@ -210,8 +208,6 @@ describe("ATLAS tree compression snapshot", { skip: nativeHeartbeatSkipReason() 
       });
       assert.equal(configuredPass.ok, true, configuredPass.error || "configured pass failed");
     } finally {
-      if (priorNativeAtlas === undefined) delete process.env.POSSE_NATIVE_ATLAS;
-      else process.env.POSSE_NATIVE_ATLAS = priorNativeAtlas;
       restoreHeartbeat();
       view.close();
       fs.rmSync(repoRoot, { recursive: true, force: true });

@@ -248,15 +248,22 @@ suite("Admin image model cycling", () => {
     assert.equal(tui._tab, 2);
   });
 
-  it("supports q as a direct quit hotkey", () => {
+  it("supports q as a direct quit hotkey outside the settings tab", () => {
     const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
     let exited = false;
     tui._exit = () => { exited = true; };
     tui._render = () => {};
+    tui._tab = 1; // Overview — on Settings (the initial tab) q falls through to type-to-edit
 
     tui._onKeypress("q", { name: "q", sequence: "q" });
 
     assert.equal(exited, true);
+  });
+
+  it("starts on the Settings tab", () => {
+    const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
+    assert.equal(tui._tab, 0);
+    assert.equal(tui._tabId(), "settings");
   });
 
   it("handles Ctrl+C through TUI cleanup without exiting the process", () => {
@@ -436,26 +443,85 @@ suite("Admin image model cycling", () => {
     runtimeModules.queueMod.setSetting("assessor_fallback_reads", "0");
   });
 
-  it("keeps everyday settings separate from debug tuning rows in interactive settings", () => {
+  it("splits interactive settings into Providers, ATLAS, General, and Debug panes", () => {
     const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
     tui.cols = 150;
     const plain = (line) => String(line).replace(/\x1b\[[0-9;]*m/g, "");
 
-    tui._settingsPane = "core";
-    const coreLines = tui._buildSettings(148).map(plain);
-    assert.ok(coreLines.some((line) => line.includes("[Core]")));
-    assert.ok(coreLines.some((line) => line.includes("auto_merge_completed")));
-    assert.ok(coreLines.some((line) => line.includes("scheduler_concurrency")));
-    assert.equal(coreLines.some((line) => line.includes("assessor_fallback_reads")), false);
-    assert.equal(coreLines.some((line) => line.includes("scheduler_poll_ms")), false);
+    tui._settingsPane = "providers";
+    const providerLines = tui._buildSettings(148).map(plain);
+    assert.ok(providerLines.some((line) => line.includes("[Providers]")));
+    assert.ok(providerLines.some((line) => line.includes("provider_dev")));
+    assert.ok(providerLines.some((line) => line.includes("delegation_mode")));
+    assert.ok(providerLines.some((line) => line.toUpperCase().includes("CREDENTIAL KEYS")));
+    assert.equal(providerLines.some((line) => line.includes("atlas_v2")), false);
+    assert.equal(providerLines.some((line) => line.includes("auto_merge_completed")), false);
 
-    tui._settingsPane = "tuning";
+    tui._settingsPane = "atlas";
     tui._settingsIndex = 0;
-    const tuningLines = tui._buildSettings(148).map(plain);
-    assert.ok(tuningLines.some((line) => line.includes("[Debug / Tuning]")));
-    assert.ok(tuningLines.some((line) => line.includes("assessor_fallback_reads")));
-    assert.ok(tuningLines.some((line) => line.includes("scheduler_poll_ms")));
-    assert.equal(tuningLines.some((line) => line.includes("auto_merge_completed")), false);
+    const atlasLines = tui._buildSettings(148).map(plain);
+    assert.ok(atlasLines.some((line) => line.includes("[ATLAS]")));
+    assert.ok(atlasLines.some((line) => line.includes("atlas_v2")));
+    assert.ok(atlasLines.some((line) => line.includes("atlas_scip_index_timeout_ms")));
+    assert.equal(atlasLines.some((line) => line.includes("scheduler_concurrency")), false);
+
+    tui._settingsPane = "general";
+    tui._settingsIndex = 0;
+    const generalLines = tui._buildSettings(148).map(plain);
+    assert.ok(generalLines.some((line) => line.includes("[General]")));
+    assert.ok(generalLines.some((line) => line.includes("auto_merge_completed")));
+    assert.ok(generalLines.some((line) => line.includes("scheduler_concurrency")));
+    assert.equal(generalLines.some((line) => line.includes("assessor_fallback_reads")), false);
+    assert.equal(generalLines.some((line) => line.includes("scheduler_poll_ms")), false);
+
+    tui._settingsPane = "debug";
+    tui._settingsIndex = 0;
+    const debugLines = tui._buildSettings(148).map(plain);
+    assert.ok(debugLines.some((line) => line.includes("[Debug]")));
+    assert.ok(debugLines.some((line) => line.includes("assessor_fallback_reads")));
+    assert.ok(debugLines.some((line) => line.includes("scheduler_poll_ms")));
+    assert.equal(debugLines.some((line) => line.includes("auto_merge_completed")), false);
+    assert.equal(debugLines.some((line) => line.includes("atlas_scip_index_timeout_ms")), false);
+  });
+
+  it("cycles settings panes with the left/right pane switcher", () => {
+    const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
+    tui._render = () => {};
+    tui._settingsPane = "providers";
+
+    tui._onKeypress("", { name: "right" });
+    assert.equal(tui._settingsPane, "atlas");
+    tui._onKeypress("", { name: "left" });
+    assert.equal(tui._settingsPane, "providers");
+    tui._onKeypress("", { name: "left" });
+    assert.equal(tui._settingsPane, "debug");
+  });
+
+  it("hides the artifact protocol dump from the settings tab", () => {
+    const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
+    tui.cols = 150;
+    const plain = (line) => String(line).replace(/\x1b\[[0-9;]*m/g, "");
+    const lines = tui._buildSettings(148).map(plain);
+    assert.equal(lines.some((line) => line.toUpperCase().includes("ARTIFACT PROTOCOLS")), false);
+  });
+
+  it("switches the Logs tab between prompt and output sources", () => {
+    const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
+    tui._render = () => {};
+    tui._tab = 3; // Logs
+    assert.equal(tui._tabId(), "logs");
+    const plain = (line) => String(line).replace(/\x1b\[[0-9;]*m/g, "");
+
+    const promptLines = tui._buildLogs(148).map(plain);
+    assert.ok(promptLines.some((line) => line.includes("[Prompts]")));
+
+    tui._onKeypress("", { name: "right" });
+    assert.equal(tui._logSource, "outputs");
+    const outputLines = tui._buildLogs(148).map(plain);
+    assert.ok(outputLines.some((line) => line.includes("[Outputs]")));
+
+    tui._onKeypress("", { name: "left" });
+    assert.equal(tui._logSource, "prompts");
   });
 
   it("shows codex_auth_mode as an editable admin setting", () => {
@@ -876,7 +942,7 @@ suite("Admin image model cycling", () => {
   it("starts editing the selected settings row on Enter", () => {
     const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
     tui._render = () => {};
-    tui._tab = 2;
+    tui._tab = 0; // Settings
     const entries = tui._getEditableSettings();
     tui._settingsIndex = entries.findIndex((entry) => entry.setting_key === "assessor_fallback_reads");
     assert.ok(tui._settingsIndex >= 0);
@@ -924,7 +990,7 @@ suite("Admin image model cycling", () => {
   it("starts editing the selected settings row on enter-named key events", () => {
     const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
     tui._render = () => {};
-    tui._tab = 2;
+    tui._tab = 0; // Settings
     const entries = tui._getEditableSettings();
     tui._settingsIndex = entries.findIndex((entry) => entry.setting_key === "assessor_fallback_reads");
     assert.ok(tui._settingsIndex >= 0);
@@ -938,7 +1004,7 @@ suite("Admin image model cycling", () => {
   it("starts editing the selected settings row on raw carriage-return input", () => {
     const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
     tui._render = () => {};
-    tui._tab = 2;
+    tui._tab = 0; // Settings
     const entries = tui._getEditableSettings();
     tui._settingsIndex = entries.findIndex((entry) => entry.setting_key === "assessor_fallback_reads");
     assert.ok(tui._settingsIndex >= 0);
@@ -952,7 +1018,7 @@ suite("Admin image model cycling", () => {
   it("starts editing the selected settings row when hotkeys arrive through key.name", () => {
     const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
     tui._render = () => {};
-    tui._tab = 2;
+    tui._tab = 0; // Settings
     const entries = tui._getEditableSettings();
     tui._settingsIndex = entries.findIndex((entry) => entry.setting_key === "assessor_fallback_reads");
     assert.ok(tui._settingsIndex >= 0);
@@ -966,7 +1032,7 @@ suite("Admin image model cycling", () => {
   it("starts editing the selected settings row when typing a printable character", () => {
     const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
     tui._render = () => {};
-    tui._tab = 2;
+    tui._tab = 0; // Settings
     const entries = tui._getEditableSettings();
     tui._settingsIndex = entries.findIndex((entry) => entry.setting_key === "assessor_fallback_reads");
     assert.ok(tui._settingsIndex >= 0);
@@ -981,7 +1047,7 @@ suite("Admin image model cycling", () => {
   it("starts editing when printable input arrives through key.sequence", () => {
     const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
     tui._render = () => {};
-    tui._tab = 2;
+    tui._tab = 0; // Settings
     const entries = tui._getEditableSettings();
     tui._settingsIndex = entries.findIndex((entry) => entry.setting_key === "assessor_fallback_reads");
     assert.ok(tui._settingsIndex >= 0);
@@ -1146,7 +1212,7 @@ suite("Admin image model cycling", () => {
   it("cancels admin edit mode when tabbing to another section", () => {
     const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
     tui._render = () => {};
-    tui._tab = 2;
+    tui._tab = 0; // Settings
     tui._editing = "editValue";
     tui._editKey = "assessor_fallback_reads";
     tui._editStorageKey = "assessor_fallback_reads";
@@ -1156,7 +1222,7 @@ suite("Admin image model cycling", () => {
 
     assert.equal(tui._editing, false);
     assert.equal(tui._editKey, "");
-    assert.equal(tui._tab, 3);
+    assert.equal(tui._tab, 1);
   });
 
   it("saves provider toggle selections without relying on text input", () => {
@@ -1293,7 +1359,7 @@ suite("Admin image model cycling", () => {
     const tui = new AdminTUI({ projectDir: path.resolve(__dirname, "..") });
     tui.rows = 12;
     tui.cols = 80;
-    tui._tab = 2;
+    tui._tab = 0; // Settings
     tui._editing = "editValue";
     tui._editKey = "scheduler_poll_ms";
     tui._editBuf = "12345";

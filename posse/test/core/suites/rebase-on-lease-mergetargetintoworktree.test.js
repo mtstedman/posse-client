@@ -16,9 +16,9 @@ let db;
 const NODE_GIT_PARITY_DISABLED = Object.freeze({ disabled: true });
 const TARGET_BRANCH_NATIVE = targetBranchNativeParity();
 
-suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
+suite("Rebase-on-lease (mergeTargetIntoWorktreeAsync)", () => {
   it("returns updated:false when the WI branch is already up-to-date with target", async () => {
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-rebase-noop-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -31,7 +31,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
       const wtDir = path.join(worktreeRoot(projectDir, NODE_GIT_PARITY_DISABLED), "wi-1");
       execFileSync("git", ["worktree", "add", "-b", "posse/wi-1", wtDir], { cwd: projectDir, stdio: "ignore" });
 
-      const result = mergeTargetIntoWorktree(wtDir, projectDir, "main");
+      const result = await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main");
       assert.equal(result.ok, true);
       assert.equal(result.updated, false);
     } finally {
@@ -40,7 +40,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
   });
 
   it("refuses to treat the current WI branch as the merge target", async () => {
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-rebase-current-target-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -54,7 +54,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
       const branchName = "custom/work-current-target";
       execFileSync("git", ["worktree", "add", "-b", branchName, wtDir], { cwd: projectDir, stdio: "ignore" });
 
-      const result = mergeTargetIntoWorktree(wtDir, projectDir, branchName);
+      const result = await mergeTargetIntoWorktreeAsync(wtDir, projectDir, branchName);
       assert.equal(result.ok, false);
       assert.match(result.error, /current worktree branch/);
     } finally {
@@ -63,7 +63,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
   });
 
   it("merges target into WI branch when target moved with no conflicts", async () => {
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-rebase-clean-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -86,7 +86,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
       execFileSync("git", ["add", "wi-work.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi work"], { cwd: wtDir, stdio: "ignore" });
 
-      const result = mergeTargetIntoWorktree(wtDir, projectDir, "main");
+      const result = await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main");
       assert.equal(result.ok, true);
       assert.equal(result.updated, true);
       assert.ok(result.mergeCommit && result.mergeCommit.length >= 7);
@@ -101,7 +101,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
   });
 
   it("aborts and reports conflicts when target and WI branch touch the same file", async () => {
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-rebase-conflict-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -123,7 +123,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
       execFileSync("git", ["add", "shared.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits shared"], { cwd: wtDir, stdio: "ignore" });
 
-      const result = mergeTargetIntoWorktree(wtDir, projectDir, "main");
+      const result = await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main");
       assert.equal(result.ok, false);
       assert.ok(Array.isArray(result.conflicts));
       assert.ok(result.conflicts.some((c) => c === "shared.txt"));
@@ -137,7 +137,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
   });
 
   it("returns an error when target branch does not exist", async () => {
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-rebase-missing-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -150,7 +150,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
       const wtDir = path.join(worktreeRoot(projectDir, NODE_GIT_PARITY_DISABLED), "wi-4");
       execFileSync("git", ["worktree", "add", "-b", "posse/wi-4", wtDir], { cwd: projectDir, stdio: "ignore" });
 
-      const result = mergeTargetIntoWorktree(wtDir, projectDir, "nonexistent-branch");
+      const result = await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "nonexistent-branch");
       assert.equal(result.ok, false);
       assert.match(result.error, /not found/);
     } finally {
@@ -414,7 +414,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
   });
 
   it("leaves MERGE_HEAD and markers in tree when leaveOnConflict is set", async () => {
-    const { mergeTargetIntoWorktree, isMergeInProgress, listMergeConflicts, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, isMergeInProgress, listMergeConflicts, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-rebase-leave-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -435,7 +435,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
       execFileSync("git", ["add", "shared.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits shared"], { cwd: wtDir, stdio: "ignore" });
 
-      const result = mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      const result = await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
       assert.equal(result.ok, false);
       assert.equal(result.leftInTree, true);
       assert.ok(result.conflicts.includes("shared.txt"));
@@ -452,7 +452,7 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
   });
 
   it("short-circuits when a prior merge is still in progress", async () => {
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-rebase-in-progress-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -474,11 +474,11 @@ suite("Rebase-on-lease (mergeTargetIntoWorktree)", () => {
       execFileSync("git", ["commit", "-m", "wi edits"], { cwd: wtDir, stdio: "ignore" });
 
       // First call leaves merge in progress.
-      const first = mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      const first = await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
       assert.equal(first.leftInTree, true);
 
       // Second call must not retry / abort — just report the existing state.
-      const second = mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      const second = await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
       assert.equal(second.ok, false);
       assert.equal(second.alreadyInProgress, true);
       assert.ok(second.conflicts.includes("shared.txt"));

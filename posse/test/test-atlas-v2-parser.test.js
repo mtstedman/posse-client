@@ -312,15 +312,19 @@ export function Widget() {
   });
 
   it("continues walking when a spec callback fails for one node", () => {
-    const src = "function kept() { return 1; }\n";
+    // Uses the Go grammar: the JS-side walker only hosts the languages that
+    // have not yet cut over to the native parser (js/ts grammars moved into
+    // the binary), and what's under test is the walker's per-node try/catch,
+    // not any particular grammar.
+    const src = "package main\n\nfunc kept() int { return 1 }\n";
     const r = extractWithTreeSitter({
       content_hash: sha256Hex(src),
-      repo_rel_path: "src/kept.js",
+      repo_rel_path: "src/kept.go",
       source: src,
       spec: {
-        lang: "js",
+        lang: "go",
         symbolOf(node) {
-          if (node.type === "program") throw new Error("boom");
+          if (node.type === "source_file") throw new Error("boom");
           if (node.type !== "function_declaration") return null;
           const name = node.childForFieldName("name")?.text || "";
           return { kind: "function", name };

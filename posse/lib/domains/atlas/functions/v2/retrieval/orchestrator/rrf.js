@@ -9,7 +9,6 @@
 // only uses rank position, which is uniformly comparable.
 
 import { runAtlasNativeOperation } from "../../native/invoke.js";
-import { nativeBinaries } from "../../../../../../classes/tools/BinaryManager.js";
 
 /**
  * The k constant. 60 matches atlas-mcp and the original Cormack et al.
@@ -74,41 +73,7 @@ export function toRanked(items, idOf) {
  * @returns {FusedEntry<P>[]}
  */
 export function rrfFuse(listsByBackend, opts) {
-  if (nativeBinaries.shouldUse("atlas")) {
-    const k = typeof opts?.k === "number" && opts.k > 0 ? opts.k : RRF_K;
-    return /** @type {any} */ (runAtlasNativeOperation({ op: "rrf_fuse", lists_by_backend: listsByBackend, k }));
-  }
-  return rrfFuseNode(listsByBackend, opts);
-}
-
-function rrfFuseNode(listsByBackend, opts) {
+  // Fusion is owned by the native posse-atlas binary — the only path.
   const k = typeof opts?.k === "number" && opts.k > 0 ? opts.k : RRF_K;
-  /** @type {Map<string, FusedEntry<P>>} */
-  const acc = new Map();
-  for (const [backend, entries] of Object.entries(listsByBackend)) {
-    for (const e of entries) {
-      const contrib = 1 / (k + e.rank);
-      const existing = acc.get(e.id);
-      if (existing) {
-        existing.score += contrib;
-        existing.contributions[backend] = e.rank;
-      } else {
-        acc.set(e.id, {
-          id: e.id,
-          score: contrib,
-          payload: e.payload,
-          contributions: { [backend]: e.rank },
-        });
-      }
-    }
-  }
-  const out = Array.from(acc.values());
-  // Sort by score desc, break ties on the id for determinism (rather
-  // than insertion order, which depends on which backend was iterated
-  // first).
-  out.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    return a.id.localeCompare(b.id);
-  });
-  return out;
+  return /** @type {any} */ (runAtlasNativeOperation({ op: "rrf_fuse", lists_by_backend: listsByBackend, k }));
 }

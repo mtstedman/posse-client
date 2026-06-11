@@ -17,6 +17,7 @@ import {
   DEADLOCK_TERMINAL_STATUSES,
   LOCK_HOLDING_JOB_STATUSES,
   TERMINAL_JOB_STATUSES,
+  isPushOfferJob,
 } from "../../queue/functions/common.js";
 import {
   addCrossWiMergeDependency,
@@ -69,6 +70,12 @@ import {
   startRunHeartbeat,
 } from "../../../shared/telemetry/functions/run-diagnostics.js";
 import { maybeRunRuntimeRetention } from "../../ui/functions/admin/retention.js";
+import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
+import { describeModelCatalogWarning } from "../../providers/functions/model-catalog-validate.js";
+import {
+  RUNTIME_STATUS_KEYS,
+  writeRuntimeStatus,
+} from "../../queue/functions/runtime-status.js";
 import { maybeExpireStuckFanoutChildren } from "../../research/functions/fanout.js";
 import { yieldNow } from "../../runtime/functions/yield.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
@@ -1346,6 +1353,9 @@ export class Scheduler {
         try {
         const lapStartQueueGeneration = getQueueWakeGeneration();
         this._refreshRuntimeSettings();
+        // Read once per tick: the candidate scan below can touch ~100 jobs
+        // per lap, and each readBoolSetting call is a synchronous DB read.
+        const shadowConflictMetricsEnabled = readBoolSetting("scheduler_shadow_conflict_metrics", true);
 
         // Periodic safety-rebuild of the queue snapshot. State-change
         // emission is the primary path; this catches the rare case where
@@ -1386,6 +1396,33 @@ export class Scheduler {
           this._log(`Runtime retention failed: ${retention.error}`, "yellow");
         }
 
+        // Heartbeat + queue-depth mirror for bridge instance_status (max
+        // 1/10s; one GROUP BY over jobs — cheap). Read by the serve process.
+        if (Date.now() - (this._lastRuntimeStatusWriteAt || 0) > 10_000) {
+          this._lastRuntimeStatusWriteAt = Date.now();
+          try {
+            const counts = countJobsByStatus();
+            writeRuntimeStatus(RUNTIME_STATUS_KEYS.SCHEDULER, {
+              active_workers: activeWorkers.size,
+              running_jobs:
+                (counts.running || 0) + (counts.leased || 0) + (counts.awaiting_assessment || 0),
+              queued_jobs: counts.queued || 0,
+              owner_id: this.ownerId,
+            });
+          } catch { /* status telemetry is best-effort */ }
+        }
+
+        // Keep the remote model catalog fresh. TTL-gated internally (24h
+        // default + failure backoff) and fully async — never blocks the loop.
+        maybeRefreshModelCatalog()
+          .then((refresh) => {
+            if (!refresh?.attempted || !refresh.ok) return;
+            for (const warning of refresh.staleWarnings || []) {
+              this._log(`Model catalog: ${describeModelCatalogWarning(warning)}`, "yellow");
+            }
+          })
+          .catch(() => { /* best-effort */ });
+
         // Expire fanout children stuck in `queued` past timeout so synthesis
         // can run with N-1 branches instead of blocking forever on one stuck
         // branch. Throttled internally; safe to call every tick.
@@ -1402,6 +1439,9 @@ export class Scheduler {
         if (!this._hasDisplay && hasJobs(["waiting_on_human"])) {
           const stuckHuman = listJobs(["waiting_on_human"]);
           for (const hj of stuckHuman) {
+            // Push-offer gates wait indefinitely for the phone/CLI by
+            // design — never time them out, headless or not.
+            if (isPushOfferJob(hj)) continue;
             if (hj.job_type !== "human_input") {
               if (!headlessNonHumanWaitingLogged.has(hj.id)) {
                 headlessNonHumanWaitingLogged.add(hj.id);
@@ -1733,7 +1773,7 @@ export class Scheduler {
                   continue;
                   }
                 }
-                if (readBoolSetting("scheduler_shadow_conflict_metrics", true)) {
+                if (shadowConflictMetricsEnabled) {
                   strictShadowOverlaps = collectStrictOnlyRootConflicts(jobScope, lockedRoots);
                 }
               } else if (lockedFiles.size > 0 || lockedRoots.size > 0) {

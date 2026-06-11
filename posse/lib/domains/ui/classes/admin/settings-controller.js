@@ -25,11 +25,8 @@ import {
   getJob,
 } from "../../../queue/functions/index.js";
 import {
-  getArtifactProtocols,
-  getArtifactProtocol,
   getConfiguredImageModel,
   getConfiguredImageProviders,
-  getResolvedImageProtocol,
 } from "../../../artifacts/functions/index.js";
 import { getConfiguredProviderUsage, inferProviderWindowLimit, providerRegistry } from "../../../providers/functions/provider.js";
 import { getRuntimeDbPath, getRuntimeLogDir, getRuntimeReportsDir } from "../../../runtime/functions/paths.js";
@@ -46,13 +43,13 @@ import {
   setSkillEnabled,
 } from "../../../../shared/skills/functions/registry.js";
 import {
-  IMAGE_MODEL_OPTIONS_BY_PROVIDER,
   IMAGE_PROVIDER_OPTIONS,
   MODEL_SETTING_DEFS,
   PROVIDER_OPTIONS,
-  TEXT_MODEL_OPTIONS_BY_PROVIDER,
   getDefaultTierModel,
+  getImageModelOptions,
   getProviderTierDefaults,
+  getTextModelOptions,
 } from "../../../providers/functions/model-catalog.js";
 import { PROVIDER_ROLE_NAMES } from "../../../providers/functions/roles.js";
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
@@ -76,7 +73,8 @@ import {
   NUMERIC_SETTING_RULES,
   PROVIDER_SETTING_KEYS,
   SETTINGS_GROUPS,
-  isTuningSettingKey,
+  SETTINGS_PANES,
+  settingsPaneForKey,
   SKILL_SETTING_PREFIX,
   SYNTHETIC_SETTING_KEYS,
   toDisplaySettingKey,
@@ -90,17 +88,6 @@ const PROVIDER_USAGE_SETTING_DEFS = [
   { provider: "claude", key: "claude_observed_pct_session", label: "Claude session observed %", description: "Observed Claude session usage percent; saving this calibrates the 5-hour token cap." },
   { provider: "claude", key: "claude_observed_pct_week", label: "Claude weekly observed %", description: "Observed Claude weekly usage percent; saving this calibrates the 7-day token cap." },
 ];
-
-function maskCredentialValue(value) {
-  const text = String(value ?? "");
-  if (!text) return "";
-  if (text.length <= 8) return "***";
-  return `${text.slice(0, 8)}...`;
-}
-
-function __testMaskCredentialValue(value) {
-  return maskCredentialValue(value);
-}
 
 const MODEL_SETTING_KEYS = new Set(MODEL_SETTING_DEFS.map((def) => def.key));
 const PROVIDER_USAGE_SETTING_KEYS = new Set(PROVIDER_USAGE_SETTING_DEFS.map((def) => def.key));
@@ -529,7 +516,7 @@ function getEffectiveModelSetting(def) {
 
 function getEffectiveImageModelSetting(def) {
   const stored = safeGetSetting(def.key);
-  const choices = IMAGE_MODEL_OPTIONS_BY_PROVIDER[def.provider] || [];
+  const choices = getImageModelOptions(def.provider, { currentValue: stored });
   const storedIsValid = choices.some((choice) => choice.value === stored);
   const effectiveModel = storedIsValid
     ? stored
@@ -550,15 +537,17 @@ function formatModelSettingDisplayValue(entry) {
 
 function getModelChoicesForEntry(entry) {
   if (!entry) return [{ value: "", label: "(default: tier model)" }];
+  const currentValue = safeGetSetting(entry.key);
   if (entry.kind === "image") {
-    return (IMAGE_MODEL_OPTIONS_BY_PROVIDER[entry.provider] || []).slice();
+    return getImageModelOptions(entry.provider, { currentValue }).slice();
   }
-  const baseChoices = TEXT_MODEL_OPTIONS_BY_PROVIDER[entry.provider] || [{ value: "", label: "(default: tier model)" }];
+  const baseChoices = getTextModelOptions(entry.provider, { includeDefault: true, currentValue });
+  if (baseChoices.length === 0) return [{ value: "", label: "(default: tier model)" }];
   if (entry.provider === "claude" && entry.tier === "standard") {
     const defaultModel = getDefaultTierModel("claude", "standard") || "sonnet";
     return [{ value: "", label: `(default: ${defaultModel})` }, ...baseChoices.slice(1)];
   }
-  return baseChoices;
+  return baseChoices.slice();
 }
 
 function isAdminProviderOption(providerName) {
@@ -898,7 +887,7 @@ function loadReports(projectDir) {
 export class AdminSettingsController {
   _cycleImageModel() {
     const imagePresets = IMAGE_PROVIDER_OPTIONS.flatMap((providerOption) =>
-      (IMAGE_MODEL_OPTIONS_BY_PROVIDER[providerOption.value] || []).map((modelOption) => ({
+      getImageModelOptions(providerOption.value).map((modelOption) => ({
         provider: providerOption.value,
         model: modelOption.value,
       }))
@@ -988,7 +977,8 @@ export class AdminSettingsController {
 
     // Sort dbSettings to match the visual order in SETTINGS_GROUPS so that
     // ↑/↓ navigation walks through the same sequence the user sees, and so
-    // section-jump nav lands on contiguous index ranges.
+    // section-jump nav lands on contiguous index ranges. Ungrouped keys sort
+    // to the end (they render in a Misc section).
     const groupOrder = new Map();
     let groupOrderCounter = 0;
     for (const group of SETTINGS_GROUPS) {
@@ -1000,39 +990,48 @@ export class AdminSettingsController {
       if (oa !== ob) return oa - ob;
       return String(a.setting_key).localeCompare(String(b.setting_key));
     });
-    const coreDbSettings = dbSettings.filter((entry) => !isTuningSettingKey(entry.setting_key));
-    const tuningDbSettings = dbSettings.filter((entry) => isTuningSettingKey(entry.setting_key));
+    const dbSettingsByPane = { providers: [], atlas: [], general: [], debug: [] };
+    for (const entry of dbSettings) {
+      const pane = settingsPaneForKey(entry.setting_key);
+      (dbSettingsByPane[pane] || dbSettingsByPane.general).push(entry);
+    }
     const modelSettings = this._getModelSettingEntries();
     const artifactSettings = this._getArtifactSettingEntries();
     const providerUsageSettings = this._getProviderUsageSettingEntries();
     const providerSettings = this._getProviderSettingEntries();
     const delegationSettings = this._getDelegationSettingEntries();
     const skillSettings = this._getSkillSettingEntries();
+    // Per-pane editable lists. Order here MUST match the visual row order
+    // _buildSettings renders for that pane — ↑/↓ selection walks this list.
+    const paneEditableSettings = {
+      providers: [
+        ...providerSettings,
+        ...delegationSettings,
+        ...artifactSettings,
+        ...providerUsageSettings,
+        ...modelSettings,
+        ...dbSettingsByPane.providers,
+      ],
+      atlas: [
+        ...dbSettingsByPane.atlas,
+      ],
+      general: [
+        ...dbSettingsByPane.general,
+        ...skillSettings,
+      ],
+      debug: [
+        ...dbSettingsByPane.debug,
+      ],
+    };
     const editableSettings = [
-      ...providerSettings,
-      ...artifactSettings,
-      ...providerUsageSettings,
-      ...modelSettings,
-      ...dbSettings,
-      ...skillSettings,
-      ...delegationSettings,
-    ];
-    const coreEditableSettings = [
-      ...providerSettings,
-      ...artifactSettings,
-      ...providerUsageSettings,
-      ...modelSettings,
-      ...coreDbSettings,
-      ...skillSettings,
-      ...delegationSettings,
-    ];
-    const tuningEditableSettings = [
-      ...tuningDbSettings,
+      ...paneEditableSettings.providers,
+      ...paneEditableSettings.atlas,
+      ...paneEditableSettings.general,
+      ...paneEditableSettings.debug,
     ];
     this._settingsCache = {
       dbSettings,
-      coreDbSettings,
-      tuningDbSettings,
+      dbSettingsByPane,
       modelSettings,
       artifactSettings,
       providerUsageSettings,
@@ -1040,8 +1039,7 @@ export class AdminSettingsController {
       delegationSettings,
       skillSettings,
       editableSettings,
-      coreEditableSettings,
-      tuningEditableSettings,
+      paneEditableSettings,
     };
     this._settingsCacheAt = now;
     return this._settingsCache;
@@ -1123,9 +1121,18 @@ export class AdminSettingsController {
 
   _getEditableSettings() {
     const snapshot = this._getSettingsSnapshot();
-    if (this._settingsPane === "core") return snapshot.coreEditableSettings || snapshot.editableSettings;
-    if (this._settingsPane === "tuning") return snapshot.tuningEditableSettings || [];
-    return snapshot.editableSettings;
+    const paneList = snapshot.paneEditableSettings?.[this._settingsPane];
+    return paneList || snapshot.editableSettings;
+  }
+
+  _cycleSettingsPane(direction) {
+    const paneIds = SETTINGS_PANES.map((pane) => pane.id);
+    const currentIndex = paneIds.indexOf(this._settingsPane);
+    const nextIndex = ((currentIndex >= 0 ? currentIndex : 0) + direction + paneIds.length) % paneIds.length;
+    this._settingsPane = paneIds[nextIndex];
+    this._settingsIndex = 0;
+    this._scroll = 0;
+    this._tabScrolls[this._tab] = 0;
   }
 
   _getSelectedEditableSetting() {
@@ -1333,6 +1340,12 @@ export class AdminSettingsController {
           this._installScipLanguageDependencies(value);
         }
       }
+      // Transient nav-bar confirmation: saves are otherwise only visible as
+      // the value changing in the list, which is easy to miss.
+      this._settingsSavedFlash = {
+        text: `Saved ${toDisplaySettingKey(storageKey)}`,
+        at: Date.now(),
+      };
       return true;
     } catch (err) {
       this._editError = `Save failed: ${err?.message || err}`;
@@ -1606,9 +1619,8 @@ export class AdminSettingsController {
   _buildSettings(width) {
     const lines = [];
     const inner = width - 2;
-    const settingsPane = this._settingsPane === "core" || this._settingsPane === "tuning"
-      ? this._settingsPane
-      : "all";
+    const paneIds = SETTINGS_PANES.map((pane) => pane.id);
+    const settingsPane = paneIds.includes(this._settingsPane) ? this._settingsPane : "all";
     this._settingsRowMap = new Map();
     // List of row indices that hold a section header \u2014 used by PgUp/PgDn
     // jump nav to step between groups.
@@ -1616,20 +1628,20 @@ export class AdminSettingsController {
     const ruleWidth = Math.max(40, Math.min(inner, 76));
 
     lines.push("");
-    lines.push(brandRule({ label: settingsPane === "tuning" ? "debug / tuning" : "settings", color: C.cyan, width: ruleWidth }));
+    lines.push(brandRule({ label: "settings", color: C.cyan, width: ruleWidth }));
     if (settingsPane !== "all") {
-      const coreLabel = settingsPane === "core" ? `${C.bold}${C.cyan}[Core]${C.reset}` : `${C.dim}Core${C.reset}`;
-      const tuningLabel = settingsPane === "tuning" ? `${C.bold}${C.cyan}[Debug / Tuning]${C.reset}` : `${C.dim}Debug / Tuning${C.reset}`;
-      lines.push(` ${coreLabel} ${C.dim}|${C.reset} ${tuningLabel}  ${C.dim}press t to switch${C.reset}`);
+      const paneBar = SETTINGS_PANES.map((pane) => (
+        pane.id === settingsPane
+          ? `${C.bold}${C.cyan}[${pane.label}]${C.reset}`
+          : `${C.dim}${pane.label}${C.reset}`
+      )).join(` ${C.dim}|${C.reset} `);
+      lines.push(` ${paneBar}  ${C.dim}press \u2190/\u2192 to switch${C.reset}`);
     }
     lines.push("");
 
     const settingsSnapshot = this._getSettingsSnapshot();
-    const settings = settingsPane === "core"
-      ? (settingsSnapshot.coreDbSettings || [])
-      : settingsPane === "tuning"
-        ? (settingsSnapshot.tuningDbSettings || [])
-        : settingsSnapshot.dbSettings;
+    const dbSettingsByPane = settingsSnapshot.dbSettingsByPane
+      || { providers: [], atlas: [], general: [], debug: [] };
     const providerSettings = settingsSnapshot.providerSettings;
     const modelSettings = settingsSnapshot.modelSettings;
     const artifactSettings = settingsSnapshot.artifactSettings || [];
@@ -1647,19 +1659,11 @@ export class AdminSettingsController {
     const selectedSetting = editableSettings[this._settingsIndex] || null;
     const selectedKey = this._editing ? this._editKey : selectedSetting?.setting_key;
     const isHighlightedSetting = (settingKey) => selectedKey === settingKey;
-    // Compute the key column width from the longest setting key actually
-    // rendered, so very long keys (e.g. context_expand_file_budget_per_attempt)
-    // no longer push the value column out of alignment. Clamp into a sane
-    // range so descriptions still get most of the row width.
-    const allRenderedKeyEntries = [
-      ...(settingsPane !== "tuning" ? providerSettings : []),
-      ...(settingsPane !== "tuning" ? artifactSettings : []),
-      ...(settingsPane !== "tuning" ? providerUsageSettings : []),
-      ...(settingsPane !== "tuning" ? modelSettings : []),
-      ...settings,
-      ...(settingsPane !== "tuning" ? skillSettings : []),
-    ];
-    const longestKeyLen = allRenderedKeyEntries.reduce(
+    // Compute the key column width from the longest setting key across every
+    // pane (not just the active one) so columns stay flush when switching
+    // panes. Clamp into a sane range so descriptions still get most of the
+    // row width.
+    const longestKeyLen = (settingsSnapshot.editableSettings || []).reduce(
       (max, s) => Math.max(max, String(s.setting_key || "").length),
       0,
     );
@@ -1707,7 +1711,49 @@ export class AdminSettingsController {
       rowIndex += 1;
     };
 
-    if (settingsPane !== "tuning") {
+    // Resolution order:
+    //   1. entry's own .description (set by builders like _getSkillSettingEntries)
+    //   2. catalog entry's description (the canonical doc string)
+    //   3. placeholder so every row has tooltip text
+    const resolveDesc = (displayKey, entry) => {
+      if (entry?.description) return entry.description;
+      const catalog = getCatalogEntry(toStorageSettingKey(displayKey));
+      if (catalog?.description) return catalog.description;
+      return "(no description; add one in SETTINGS_CATALOG)";
+    };
+
+    // ── Database settings, split into focused groups per pane ─────────────
+    const settingsByKey = new Map((settingsSnapshot.dbSettings || []).map((s) => [s.setting_key, s]));
+    const renderDbGroupsForPane = (paneId) => {
+      const placedKeys = new Set();
+      for (const group of SETTINGS_GROUPS) {
+        if (group.pane !== paneId) continue;
+        const present = group.keys.filter((k) => settingsByKey.has(k));
+        if (present.length === 0) continue;
+        pushSection(group.label, "(press 'e' to edit)");
+        pushTableHeader();
+        for (const key of present) {
+          const s = settingsByKey.get(key);
+          pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(key, s));
+          placedKeys.add(key);
+        }
+        lines.push("");
+      }
+      // Surface any catalog keys routed to this pane but not yet placed in a
+      // group, so new settings remain visible until explicitly slotted into
+      // SETTINGS_GROUPS.
+      const ungrouped = (dbSettingsByPane[paneId] || []).filter((s) => !placedKeys.has(s.setting_key));
+      if (ungrouped.length > 0) {
+        pushSection("misc", "(unmapped — add to SETTINGS_GROUPS)");
+        pushTableHeader();
+        for (const s of ungrouped) {
+          pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(s.setting_key, s));
+        }
+        lines.push("");
+      }
+    };
+
+    const renderProvidersPane = () => {
       pushSection("Provider Configuration", "(most commonly adjusted)");
       pushTableHeader();
       for (const s of providerSettings) {
@@ -1721,76 +1767,67 @@ export class AdminSettingsController {
         const valueColor = isDelegatorInactive ? C.dim : C.cyan;
         pushEditableRow(s.setting_key, formatProviderSettingValue(s), desc, valueColor, { dimmed: isDelegatorInactive });
       }
+      for (const s of delegationSettings) {
+        pushEditableRow(s.setting_key, s.setting_value || "", `${s.description} (${s.source})`);
+      }
       for (const s of artifactSettings) {
         pushEditableRow(s.setting_key, s.setting_value || "", s.description || "");
       }
       lines.push("");
-    }
 
-    if (settingsPane !== "tuning" && providerUsageSettings.length > 0) {
-      pushSection("Provider Usage Limits", `(${getAccountSettingsPathForDisplay()})`);
-      pushTableHeader();
-      for (const s of providerUsageSettings) {
-        const baseDesc = s.description || "";
-        const liveHint = getProviderUsageSettingHint(s.setting_key, providerUsageWindowMap);
-        const desc = liveHint ? `${baseDesc} (${liveHint})` : baseDesc;
-        pushEditableRow(s.setting_key, s.setting_value || "", desc);
+      if (providerUsageSettings.length > 0) {
+        pushSection("Provider Usage Limits", `(${getAccountSettingsPathForDisplay()})`);
+        pushTableHeader();
+        for (const s of providerUsageSettings) {
+          const baseDesc = s.description || "";
+          const liveHint = getProviderUsageSettingHint(s.setting_key, providerUsageWindowMap);
+          const desc = liveHint ? `${baseDesc} (${liveHint})` : baseDesc;
+          pushEditableRow(s.setting_key, s.setting_value || "", desc);
+        }
+        lines.push("");
+      }
+
+      if (modelSettings.length > 0) {
+        pushSection("Provider Models", "(editable when provider credentials are available)");
+        pushTableHeader();
+        for (const s of modelSettings) {
+          const source = s.source || "default";
+          const desc = `${s.description} (${s.provider}, ${source}; using ${s.effective_model || "?"})`;
+          const displayValue = formatModelSettingDisplayValue(s);
+          const valueColor = s.setting_value ? C.cyan : C.dim;
+          pushEditableRow(s.setting_key, displayValue, desc, valueColor);
+        }
+        lines.push("");
+      }
+
+      renderDbGroupsForPane("providers");
+
+      // Secrets stay env-only; show which ones are present without ever
+      // rendering any part of the value.
+      pushSection("Credential Keys", "(env-only; values are never shown)");
+      const envVars = [
+        ["OPENAI_API_KEY", "OpenAI API key (openai)"],
+        ["CODEX_API_KEY", "Optional Codex CLI API key"],
+        ["XAI_API_KEY", "xAI API key (grok)"],
+        ["CLAUDE_CODE_OAUTH_TOKEN", "Claude OAuth token"],
+      ];
+      for (const [key, label] of envVars) {
+        if (process.env[key]) {
+          lines.push(`  ${C.green}✓${C.reset} ${C.bold}${key.padEnd(30)}${C.reset} ${C.green}configured${C.reset}  ${C.dim}${label}${C.reset}`);
+        } else {
+          lines.push(`  ${C.dim}· ${key.padEnd(30)} not set     ${label}${C.reset}`);
+        }
       }
       lines.push("");
-    }
-
-    if (settingsPane !== "tuning" && modelSettings.length > 0) {
-      pushSection("Provider Models", "(editable when provider credentials are available)");
-      pushTableHeader();
-      for (const s of modelSettings) {
-        const source = s.source || "default";
-        const desc = `${s.description} (${s.provider}, ${source}; using ${s.effective_model || "?"})`;
-        const displayValue = formatModelSettingDisplayValue(s);
-        const valueColor = s.setting_value ? C.cyan : C.dim;
-        pushEditableRow(s.setting_key, displayValue, desc, valueColor);
-      }
-      lines.push("");
-    }
-
-    // Resolution order:
-    //   1. entry's own .description (set by builders like _getSkillSettingEntries)
-    //   2. catalog entry's description (the canonical doc string)
-    //   3. placeholder so every row has tooltip text
-    const resolveDesc = (displayKey, entry) => {
-      if (entry?.description) return entry.description;
-      const catalog = getCatalogEntry(toStorageSettingKey(displayKey));
-      if (catalog?.description) return catalog.description;
-      return "(no description; add one in SETTINGS_CATALOG)";
     };
 
-    // ── Database settings, split into focused groups ──────────────────────
-    const settingsByKey = new Map(settings.map((s) => [s.setting_key, s]));
-    const placedKeys = new Set();
-    for (const group of SETTINGS_GROUPS) {
-      const present = group.keys.filter((k) => settingsByKey.has(k));
-      if (present.length === 0) continue;
-      pushSection(group.label, "(press 'e' to edit)");
-      pushTableHeader();
-      for (const key of present) {
-        const s = settingsByKey.get(key);
-        pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(key, s));
-        placedKeys.add(key);
-      }
-      lines.push("");
-    }
-    // Surface any catalog keys not yet placed in a group, so new settings
-    // remain visible until they're explicitly slotted into SETTINGS_GROUPS.
-    const ungrouped = settings.filter((s) => !placedKeys.has(s.setting_key));
-    if (ungrouped.length > 0) {
-      pushSection("misc", "(unmapped — add to SETTINGS_GROUPS)");
-      pushTableHeader();
-      for (const s of ungrouped) {
-        pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(s.setting_key, s));
-      }
-      lines.push("");
-    }
+    const renderAtlasPane = () => {
+      renderDbGroupsForPane("atlas");
+    };
 
-    if (settingsPane !== "tuning") {
+    const renderGeneralPane = () => {
+      renderDbGroupsForPane("general");
+
       pushSection("Skills", "(planner-selected; new skills default on)");
       if (skillSettings.length === 0) {
         lines.push(`  ${C.dim}No skills found in the remote prompt bundle.${C.reset}`);
@@ -1801,52 +1838,36 @@ export class AdminSettingsController {
         }
       }
       lines.push("");
+
+      pushSection("Paths");
+      const dbPath = getRuntimeDbPath(this.projectDir);
+      const reportsDir = path.resolve(path.dirname(dbPath), "reports");
+      lines.push(`  ${C.dim}Project:${C.reset}  ${this.projectDir}`);
+      lines.push(`  ${C.dim}Database:${C.reset} ${dbPath}`);
+      lines.push(`  ${C.dim}Reports:${C.reset}  ${reportsDir}`);
+      lines.push("");
+    };
+
+    const renderDebugPane = () => {
+      renderDbGroupsForPane("debug");
+    };
+
+    if (settingsPane === "providers") {
+      renderProvidersPane();
+    } else if (settingsPane === "atlas") {
+      renderAtlasPane();
+    } else if (settingsPane === "general") {
+      renderGeneralPane();
+    } else if (settingsPane === "debug") {
+      renderDebugPane();
+    } else {
+      // "all" — non-interactive snapshots and tests render every pane in the
+      // same order paneEditableSettings concatenates them.
+      renderProvidersPane();
+      renderAtlasPane();
+      renderGeneralPane();
+      renderDebugPane();
     }
-
-    pushSection("Artifact Protocols");
-    try {
-      if (!this._artifactProtocolsCache) this._artifactProtocolsCache = getArtifactProtocols();
-      const protocols = this._artifactProtocolsCache;
-      for (const [type, proto] of Object.entries(protocols)) {
-        const providerStr = proto.provider ? `${C.cyan}${proto.provider}${C.reset}` : `${C.dim}default${C.reset}`;
-        const modelStr = proto.model ? `${C.bold}${proto.model}${C.reset}` : `${C.dim}?${C.reset}`;
-        const fmtStr = proto.allowed_formats ? proto.allowed_formats.join(", ") : "any";
-        const typeColors = { image: C.magenta, report: C.cyan, content: C.green };
-        const tc = typeColors[type] || C.dim;
-        lines.push(`  ${tc}${type.padEnd(12)}${C.reset} provider: ${providerStr}  model: ${modelStr}`);
-        lines.push(`  ${"".padEnd(12)} formats: ${C.dim}${fmtStr}${C.reset}  max: ${C.dim}${proto.max_outputs || "?"}${C.reset}  min_bytes: ${C.dim}${proto.output_validation?.min_bytes || 0}${C.reset}`);
-      }
-    } catch {
-      lines.push(`  ${C.dim}(config/artifact-protocols.json not found)${C.reset}`);
-    }
-    lines.push("");
-
-    pushSection("Credential Environment", "(read-only, secrets only)");
-    const envVars = [
-      ["OPENAI_API_KEY", "OpenAI API key (openai)"],
-      ["CODEX_API_KEY", "Optional Codex CLI API key"],
-      ["XAI_API_KEY", "xAI API key (grok)"],
-      ["CLAUDE_CODE_OAUTH_TOKEN", "Claude OAuth token"],
-    ];
-
-    for (const [key] of envVars) {
-      const val = process.env[key];
-      if (val) {
-        const display = maskCredentialValue(val);
-        lines.push(`  ${C.cyan}${key.padEnd(30)}${C.reset} ${C.bold}${display}${C.reset}`);
-      } else {
-        lines.push(`  ${C.dim}${key.padEnd(30)} (not set)${C.reset}`);
-      }
-    }
-    lines.push("");
-
-    pushSection("Paths");
-    const dbPath = getRuntimeDbPath(this.projectDir);
-    const reportsDir = path.resolve(path.dirname(dbPath), "reports");
-    lines.push(`  ${C.dim}Project:${C.reset}  ${this.projectDir}`);
-    lines.push(`  ${C.dim}Database:${C.reset} ${dbPath}`);
-    lines.push(`  ${C.dim}Reports:${C.reset}  ${reportsDir}`);
-    lines.push("");
 
     return lines;
   }

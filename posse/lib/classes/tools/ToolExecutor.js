@@ -239,7 +239,6 @@ export class ToolExecutor {
       return `Error: move_file source and destination are the same path: ${destination}`;
     }
 
-    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
     const destinationStat = this._lstatIfExists(destinationPath);
     if (destinationStat) {
       if (!ctx.scopePredicates.canEdit(destinationPath)) {
@@ -256,6 +255,7 @@ export class ToolExecutor {
       return `Error: move_file blocked - ${destination} is outside the allowed creation scope.`;
     }
 
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
     try {
       fs.renameSync(sourcePath, destinationPath);
     } catch (err) {
@@ -302,7 +302,6 @@ export class ToolExecutor {
       return `Error: copy_file source and destination are the same path: ${destination}`;
     }
 
-    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
     const destinationStat = this._lstatIfExists(destinationPath);
     if (destinationStat) {
       if (!ctx.scopePredicates.canEdit(destinationPath)) {
@@ -319,6 +318,7 @@ export class ToolExecutor {
       return `Error: copy_file blocked - ${destination} is outside the allowed creation scope.`;
     }
 
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
     fs.copyFileSync(sourcePath, destinationPath, fs.constants.COPYFILE_EXCL);
 
     return JSON.stringify({

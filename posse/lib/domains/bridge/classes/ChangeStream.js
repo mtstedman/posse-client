@@ -11,6 +11,8 @@ import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { EVENT_TYPES } from "../../../catalog/event.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { redactBridgeValue } from "../functions/redaction.js";
+import { composeInstanceStatus } from "../functions/instance-status.js";
+import { workItemCost } from "../../billing/functions/cost.js";
 
 const DEFAULT_REPLAY_LIMIT = 1000;
 const DEFAULT_TAIL_LIMIT = 100;
@@ -55,6 +57,7 @@ function resolutionForJob(job) {
 }
 
 function gateKindForJob(job, payload = {}) {
+  if (payload?.subtype === "push_offer") return "push";
   if (payload?.subtype === "plan_approval") return "plan";
   if (payload?.review_type) return "review";
   if (job?.status === "waiting_on_review") return "review";
@@ -164,6 +167,9 @@ export class ChangeStream extends EventEmitter {
     pollMs = 500,
     instanceId = null,
     replayLimit = DEFAULT_REPLAY_LIMIT,
+    instanceStatusMinIntervalMs = 2_000,
+    jobProgressScanIntervalMs = 5_000,
+    costScanIntervalMs = 30_000,
   } = {}) {
     super();
     this.dbPath = dbPath;
@@ -179,6 +185,20 @@ export class ChangeStream extends EventEmitter {
     this.useBridgeChangeSeq = false;
     this.gateStatusByJobId = new Map();
     this.replay = [];
+    // instance_status: emit on change, min interval apart.
+    this.instanceStatusMinIntervalMs = Math.max(250, Number(instanceStatusMinIntervalMs) || 2_000);
+    this.instanceStatusLastCheckAt = 0;
+    this.instanceStatusLastJson = "";
+    // job_progress: periodic scan of non-terminal jobs, per-job dedupe.
+    this.jobProgressScanIntervalMs = Math.max(500, Number(jobProgressScanIntervalMs) || 5_000);
+    this.jobProgressLastScanAt = 0;
+    this.jobProgressLastByJobId = new Map();
+    // cost_updated cadence: periodic recompute for active WIs + forced
+    // recompute when a job lands in a terminal status.
+    this.costScanIntervalMs = Math.max(1_000, Number(costScanIntervalMs) || 30_000);
+    this.costLastScanAt = 0;
+    this.costTotalsByWiId = new Map();
+    this.costDirtyWiIds = new Set();
   }
 
   start() {
@@ -234,12 +254,17 @@ export class ChangeStream extends EventEmitter {
 
   seedGateStatuses() {
     this.gateStatusByJobId.clear();
+    // Terminal gates are not seeded: they can never reopen, so tracking them
+    // would only grow the map for the daemon's lifetime. An untracked terminal
+    // job that gets touched again emits nothing (gate_closed requires a known
+    // previous status), which is the desired behavior.
     const rows = this.db.prepare(`
       SELECT id, status
       FROM jobs
       WHERE job_type = 'human_input'
     `).all();
     for (const row of rows) {
+      if (TERMINAL_JOB_STATUS_SET.has(row.status)) continue;
       this.gateStatusByJobId.set(Number(row.id), row.status);
     }
   }
@@ -287,9 +312,129 @@ export class ChangeStream extends EventEmitter {
       this.pollEvents();
       this.pollWorkItems();
       this.pollJobs();
+      this.pollInstanceStatus();
+      this.pollJobProgress();
+      this.pollCosts();
     } catch (err) {
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.FAILED, {
         summary: err?.message || String(err),
+      });
+    }
+  }
+
+  pollInstanceStatus(nowMs = Date.now()) {
+    if (nowMs - this.instanceStatusLastCheckAt < this.instanceStatusMinIntervalMs) return;
+    this.instanceStatusLastCheckAt = nowMs;
+    let status;
+    try {
+      status = composeInstanceStatus(this.db, { nowMs });
+    } catch {
+      return; // older DB without runtime_status — degrade silently
+    }
+    // Emit on change only; updated_at is excluded from the comparison so a
+    // quiet instance doesn't re-emit an identical status every interval.
+    const { updated_at: _ignored, ...comparable } = status;
+    const json = JSON.stringify(comparable);
+    if (json === this.instanceStatusLastJson) return;
+    this.instanceStatusLastJson = json;
+    this.emitBridgeEvent(BRIDGE_EVENT_KINDS.INSTANCE_STATUS, status);
+  }
+
+  pollJobProgress(nowMs = Date.now()) {
+    if (nowMs - this.jobProgressLastScanAt < this.jobProgressScanIntervalMs) return;
+    this.jobProgressLastScanAt = nowMs;
+    const jobs = this.db.prepare(`
+      SELECT id, work_item_id, job_type, status, title, provider, model_name,
+             attempt_count, created_at, started_at, updated_at
+      FROM jobs
+      WHERE status IN ('running', 'leased', 'awaiting_assessment')
+      LIMIT 100
+    `).all();
+
+    const liveIds = new Set();
+    for (const job of jobs) {
+      const jobId = Number(job.id);
+      liveIds.add(jobId);
+      let tokens = { tokens_in: null, tokens_out: null, last_activity_at: null };
+      try {
+        const row = this.db.prepare(`
+          SELECT SUM(input_tokens) AS tokens_in,
+                 SUM(output_tokens) AS tokens_out,
+                 MAX(created_at) AS last_activity_at
+          FROM agent_calls
+          WHERE job_id = ?
+        `).get(jobId);
+        tokens = {
+          tokens_in: row?.tokens_in == null ? null : Number(row.tokens_in),
+          tokens_out: row?.tokens_out == null ? null : Number(row.tokens_out),
+          last_activity_at: row?.last_activity_at || null,
+        };
+      } catch { /* agent_calls may be absent in minimal fixtures */ }
+
+      const startedAtMs = Date.parse(job.started_at || job.created_at || "") || nowMs;
+      // elapsed ticks every scan, so dedupe on the meaningful fields only.
+      const dedupeKey = [job.status, job.attempt_count, tokens.tokens_in, tokens.tokens_out, tokens.last_activity_at].join("|");
+      if (this.jobProgressLastByJobId.get(jobId) === dedupeKey) continue;
+      this.jobProgressLastByJobId.set(jobId, dedupeKey);
+
+      this.emitBridgeEvent(BRIDGE_EVENT_KINDS.JOB_PROGRESS, {
+        job_id: jobId,
+        work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),
+        job_type: job.job_type,
+        status: job.status,
+        attempt_count: Number(job.attempt_count) || 0,
+        provider: job.provider || null,
+        model_name: job.model_name || null,
+        started_at: job.started_at || job.created_at || null,
+        elapsed_ms: Math.max(0, nowMs - startedAtMs),
+        last_activity_at: tokens.last_activity_at,
+        tokens_in: tokens.tokens_in,
+        tokens_out: tokens.tokens_out,
+      });
+    }
+    // Evict throttle entries for jobs that left the live set.
+    for (const jobId of this.jobProgressLastByJobId.keys()) {
+      if (!liveIds.has(jobId)) this.jobProgressLastByJobId.delete(jobId);
+    }
+  }
+
+  pollCosts(nowMs = Date.now()) {
+    const due = nowMs - this.costLastScanAt >= this.costScanIntervalMs;
+    if (!due && this.costDirtyWiIds.size === 0) return;
+
+    let wiIds;
+    if (due) {
+      this.costLastScanAt = nowMs;
+      const rows = this.db.prepare(`
+        SELECT DISTINCT work_item_id AS id
+        FROM jobs
+        WHERE status IN ('running', 'leased', 'awaiting_assessment', 'queued')
+        LIMIT 100
+      `).all();
+      wiIds = new Set(rows.map((row) => Number(row.id)).filter(Boolean));
+      for (const id of this.costDirtyWiIds) wiIds.add(id);
+    } else {
+      wiIds = new Set(this.costDirtyWiIds);
+    }
+    this.costDirtyWiIds.clear();
+
+    for (const wiId of wiIds) {
+      let cost;
+      try {
+        cost = workItemCost(wiId, { db: this.db });
+      } catch {
+        continue;
+      }
+      const total = Number(cost?.totalCostUsd ?? 0);
+      if (!Number.isFinite(total)) continue;
+      const previous = this.costTotalsByWiId.get(wiId) ?? 0;
+      const delta = total - previous;
+      if (Math.abs(delta) <= 0.001) continue;
+      this.costTotalsByWiId.set(wiId, total);
+      this.emitBridgeEvent(BRIDGE_EVENT_KINDS.COST_UPDATED, {
+        work_item_id: wiId,
+        usd_total: total,
+        usd_delta: delta,
       });
     }
   }
@@ -360,6 +505,7 @@ export class ChangeStream extends EventEmitter {
       const jobPayload = normalizeJobPayload(row);
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.JOB_UPDATED, jobPayload);
       this.emitGateTransition(row);
+      this.markCostDirtyOnTerminal(row);
     }
   }
 
@@ -376,7 +522,14 @@ export class ChangeStream extends EventEmitter {
       const jobPayload = normalizeJobPayload(row);
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.JOB_UPDATED, jobPayload);
       this.emitGateTransition(row);
+      this.markCostDirtyOnTerminal(row);
     }
+  }
+
+  markCostDirtyOnTerminal(row) {
+    if (!TERMINAL_JOB_STATUS_SET.has(row.status)) return;
+    const wiId = Number(row.work_item_id);
+    if (Number.isInteger(wiId) && wiId > 0) this.costDirtyWiIds.add(wiId);
   }
 
   emitGateTransition(row) {
@@ -393,7 +546,14 @@ export class ChangeStream extends EventEmitter {
     } else if (isTerminal && previousStatus !== undefined && !wasTerminal) {
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.GATE_CLOSED, gateClosedPayloadForJob(row));
     }
-    this.gateStatusByJobId.set(jobId, row.status);
+    // Evict terminal gates instead of tracking them forever — human-input
+    // jobs never leave a terminal status, and this map lives as long as the
+    // daemon does.
+    if (isTerminal) {
+      this.gateStatusByJobId.delete(jobId);
+    } else {
+      this.gateStatusByJobId.set(jobId, row.status);
+    }
   }
 
   close() {

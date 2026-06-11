@@ -24,6 +24,7 @@ import {
   gitExecAsync,
   gitGateSnapshot,
   gitHasChanges,
+  gitHasChangesAsync,
   gitHasIgnoredChanges,
 } from "./utils.js";
 import { resolveTargetBranch } from "./target-branch.js";
@@ -34,6 +35,7 @@ import {
   acquireWorktreeLockAsync,
   worktreeLockPath,
   gitStashLockPath,
+  gitStashLockPathAsync,
   withWorktreeLock,
   withWorktreeLockAsync,
 } from "./worktree-locks.js";
@@ -271,10 +273,6 @@ function gitCurrentBranchAsync(cwd, options = {}) {
   return Worktree.at(cwd, cwd).currentBranchAsync(options);
 }
 
-function normalizeLocalBranchName(branchName) {
-  return String(branchName || "").trim().replace(/^refs\/heads\//, "");
-}
-
 function removeWorktreePath(wtPath, mainCwd) {
   Worktree.at(mainCwd, wtPath).remove({ force: true, prune: true, fallbackRemove: true });
 }
@@ -341,7 +339,14 @@ function worktreeNeedsRecovery(wtPath) {
   try {
     return gitHasChanges(wtPath)
       || (parseBooleanSetting("worktree_clean_ignored", false) && gitHasIgnoredChanges(wtPath));
-  } catch {
+  } catch (err) {
+    // Fail closed: callers treat "clean" as "leave the worktree alone", so an
+    // unreadable/corrupt worktree is never reset. Log it so corruption isn't
+    // silently invisible.
+    log.warn("git", "Worktree dirty-state check failed; treating as clean (no recovery)", {
+      wtPath,
+      error: err?.message || String(err),
+    });
     return false;
   }
 }
@@ -352,6 +357,10 @@ async function worktreeNeedsRecoveryAsync(wtPath, options = {}) {
       || (parseBooleanSetting("worktree_clean_ignored", false) && await worktreeHasIgnoredChangesNodeAsync(wtPath, options));
   } catch (err) {
     if (isAbortError(err)) throw err;
+    log.warn("git", "Worktree dirty-state check failed; treating as clean (no recovery)", {
+      wtPath,
+      error: err?.message || String(err),
+    });
     return false;
   }
 }
@@ -652,6 +661,13 @@ export function resetDirtyWorktreeFallback(wtPath, projectDir = null) {
   });
 }
 
+export async function resetDirtyWorktreeFallbackAsync(wtPath, projectDir = null, { signal = null } = {}) {
+  return withWorktreeLockAsync(wtPath, projectDir || wtPath, async () => {
+    await gitExecAsync(["checkout", "--", "."], wtPath, { signal });
+    await gitExecAsync(["clean", "-fd"], wtPath, { signal });
+  }, { signal });
+}
+
 export function stashDirtyWorktree(
   wtPath,
   projectDir,
@@ -687,6 +703,44 @@ export function stashDirtyWorktree(
       stashLock.release();
     }
   }, { waitMs: worktreeLockWaitMs });
+}
+
+export async function stashDirtyWorktreeAsync(
+  wtPath,
+  projectDir,
+  message,
+  { worktreeLockWaitMs = null, stashLockWaitMs = null, shouldDefer = null, signal = null } = {},
+) {
+  if (!wtPath) return false;
+  const mainCwd = projectDir || wtPath;
+  return withWorktreeLockAsync(wtPath, mainCwd, async () => {
+    if (typeof shouldDefer === "function") {
+      let defer = false;
+      try {
+        defer = !!shouldDefer({ wtPath, projectDir: mainCwd, message });
+      } catch {
+        return false;
+      }
+      if (defer) return false;
+    }
+    if (!(await gitHasChangesAsync(wtPath, { signal }))) return false;
+
+    // refs/stash is shared by every worktree in the repository.
+    const lockPath = await gitStashLockPathAsync(wtPath, mainCwd, { signal });
+    const stashLock = await acquireWorktreeLockAsync(lockPath, {
+      waitMs: stashLockWaitMs ?? worktreeLockWaitMs,
+      signal,
+    });
+    if (!stashLock.acquired) {
+      throw new Error(`Timed out waiting for git stash lock: ${lockPath}`);
+    }
+    try {
+      await gitExecAsync(["stash", "push", "--include-untracked", "-m", message], wtPath, { signal });
+      return true;
+    } finally {
+      await stashLock.releaseAsync();
+    }
+  }, { waitMs: worktreeLockWaitMs, signal });
 }
 
 /**
@@ -1512,6 +1566,22 @@ export async function listMergeConflictsAsync(wtPath, { signal = null, nativePar
   );
 }
 
+function compactNativeMergeResult(value = {}) {
+  const result = { ok: Boolean(value.ok) };
+  if (value.error) result.error = String(value.error);
+  if (value.updated !== null && value.updated !== undefined) result.updated = Boolean(value.updated);
+  if (value.mergeCommit) result.mergeCommit = String(value.mergeCommit);
+  if (value.alreadyInProgress) result.alreadyInProgress = true;
+  if (value.leftInTree) result.leftInTree = true;
+  if (value.abortFailed) result.abortFailed = true;
+  if (value.manualRecoveryRequired) result.manualRecoveryRequired = true;
+  if (Array.isArray(value.conflicts) && (!result.ok || value.conflicts.length > 0)) {
+    result.conflicts = value.conflicts;
+  }
+  if (value.message) result.message = String(value.message);
+  return result;
+}
+
 /**
  * Merge the target branch (main/master) into the WI branch inside its worktree.
  * Called before mutating jobs run so the dev agent sees the current state of
@@ -1532,98 +1602,6 @@ export async function listMergeConflictsAsync(wtPath, { signal = null, nativePar
  *     and conflict markers are left in the worktree so downstream (handoff + dev)
  *     can complete the merge. When false, the merge is aborted cleanly.
  */
-export function mergeTargetIntoWorktree(wtPath, projectDir, targetBranch, { leaveOnConflict = false } = {}) {
-  if (!targetBranch) return { ok: false, error: "no target branch resolved" };
-  if (!fs.existsSync(wtPath)) return { ok: false, error: `worktree missing: ${wtPath}` };
-
-  try {
-    const currentBranch = normalizeLocalBranchName(gitCurrentBranch(wtPath, { disabled: true }));
-    if (currentBranch && currentBranch === normalizeLocalBranchName(targetBranch)) {
-      return { ok: false, error: `target branch ${targetBranch} is the current worktree branch; refusing no-op merge` };
-    }
-  } catch {
-    // Detached or unreadable current branch; target rev-parse below will surface real failures.
-  }
-
-  if (isMergeInProgress(wtPath, { disabled: true })) {
-    return {
-      ok: false,
-      alreadyInProgress: true,
-      conflicts: listMergeConflicts(wtPath, { disabled: true }),
-    };
-  }
-
-  let targetHash;
-  try {
-    targetHash = gitExec(["rev-parse", "--verify", targetBranch], projectDir, { nativeParity: { disabled: true } }).trim();
-  } catch (err) {
-    return { ok: false, error: `target branch ${targetBranch} not found: ${err.message.split("\n")[0]}` };
-  }
-
-  try {
-    gitExec(["merge-base", "--is-ancestor", targetHash, "HEAD"], wtPath, { nativeParity: { disabled: true } });
-    return { ok: true, updated: false };
-  } catch {
-    // Target is not an ancestor of HEAD, or ancestry could not be proven.
-    // Let the merge surface conflicts or unrelated-history errors below.
-  }
-
-  try {
-    gitExec(["merge", "--no-edit", "--no-ff", targetHash], wtPath);
-    let mergeCommit = null;
-    try { mergeCommit = gitExec(["rev-parse", "HEAD"], wtPath, { nativeParity: { disabled: true } }).trim(); } catch { /* best effort */ }
-    return { ok: true, updated: true, mergeCommit };
-  } catch (mergeErr) {
-    const conflicts = listMergeConflicts(wtPath, { disabled: true });
-    if (leaveOnConflict) {
-      return {
-        ok: false,
-        conflicts,
-        leftInTree: true,
-        message: mergeErr.message.split("\n")[0],
-      };
-    }
-    let abortError = null;
-    try { gitExec(["merge", "--abort"], wtPath); } catch (err) {
-      abortError = err;
-      try { gitExec(["reset", "--merge"], wtPath); abortError = null; } catch (resetErr) {
-        abortError = resetErr;
-      }
-    }
-    if (isMergeInProgress(wtPath, { disabled: true })) {
-      return {
-        ok: false,
-        conflicts,
-        abortFailed: true,
-        manualRecoveryRequired: true,
-        leftInTree: true,
-        message: `merge abort failed; MERGE_HEAD still set (${abortError?.message?.split("\n")[0] || "unknown"})`,
-      };
-    }
-    return {
-      ok: false,
-      conflicts,
-      message: mergeErr.message.split("\n")[0],
-    };
-  }
-}
-
-function compactNativeMergeResult(value = {}) {
-  const result = { ok: Boolean(value.ok) };
-  if (value.error) result.error = String(value.error);
-  if (value.updated !== null && value.updated !== undefined) result.updated = Boolean(value.updated);
-  if (value.mergeCommit) result.mergeCommit = String(value.mergeCommit);
-  if (value.alreadyInProgress) result.alreadyInProgress = true;
-  if (value.leftInTree) result.leftInTree = true;
-  if (value.abortFailed) result.abortFailed = true;
-  if (value.manualRecoveryRequired) result.manualRecoveryRequired = true;
-  if (Array.isArray(value.conflicts) && (!result.ok || value.conflicts.length > 0)) {
-    result.conflicts = value.conflicts;
-  }
-  if (value.message) result.message = String(value.message);
-  return result;
-}
-
 export async function mergeTargetIntoWorktreeAsync(wtPath, projectDir, targetBranch, {
   leaveOnConflict = false,
   initialMergeInProgress = null,
@@ -1906,14 +1884,6 @@ function gcSnapshotRemovalCallbacks(wi, {
   };
 }
 
-function gcSnapshotAndRemoveWorktree(projectDir, wtDir, wi, options) {
-  return safeSnapshotAndRemoveWorktree(
-    wtDir,
-    projectDir,
-    gcSnapshotRemovalCallbacks(wi, options),
-  );
-}
-
 async function gcSnapshotAndRemoveWorktreeAsync(projectDir, wtDir, wi, options) {
   const { signal = null } = options || {};
   return safeSnapshotAndRemoveWorktreeAsync(
@@ -1924,164 +1894,6 @@ async function gcSnapshotAndRemoveWorktreeAsync(projectDir, wtDir, wi, options) 
       signal,
     },
   );
-}
-
-export function gcWorktrees(projectDir, onMsg = () => {}) {
-  pruneRecoveredWorktreeSnapshots(projectDir, onMsg);
-
-  const root = worktreeRoot(projectDir, { disabled: true });
-  if (!fs.existsSync(root)) return;
-
-  let entries;
-  try { entries = fs.readdirSync(root); } catch { return; }
-
-  let removed = 0;
-  let cleaned = 0;
-  let preserved = 0;
-
-  for (const entry of entries) {
-    const wtDir = path.join(root, entry);
-    let stat = null;
-    try { stat = fs.statSync(wtDir); } catch { continue; }
-    if (!stat.isDirectory()) continue;
-
-    const match = entry.match(/^wi-(\d+)(?:-|$)/);
-    if (!match) continue;
-
-    const wiId = parseInt(match[1], 10);
-    let wi;
-    try {
-      refreshWorkItemStatus(wiId);
-      wi = getWorkItem(wiId);
-    } catch {
-      continue;
-    }
-
-    if (wi && TERMINAL_WORK_ITEM_STATUS_SET.has(wi.status)) {
-      let holdsBench = false;
-      try {
-        holdsBench = workItemHoldsBench(wiId);
-      } catch {
-        onMsg(`GC: unable to resolve bench hold for terminal WI#${wiId}; skipping cleanup for this worktree`);
-        continue;
-      }
-      if (holdsBench) {
-        onMsg(`GC: skipping terminal worktree cleanup for WI#${wiId}; a job still holds the bench`);
-        continue;
-      }
-      let cleanupResult = null;
-      try {
-        cleanupResult = gcSnapshotAndRemoveWorktree(projectDir, wtDir, wi, {
-          wiId,
-          reason: "startup-gc-terminal-worktree",
-          label: "terminal",
-          onMsg,
-        });
-      } catch (err) {
-        onMsg(`GC: failed to clean terminal worktree for WI#${wiId}: ${err?.message || err}`);
-        continue;
-      }
-      if (cleanupResult?.snapshotDir) preserved++;
-      if (cleanupResult?.skipped || (cleanupResult?.existed && !cleanupResult?.removed)) continue;
-      const shouldDeleteBranch = shouldDeleteBranchForInactiveWi(wi);
-      let branchCleanup = null;
-      if (shouldDeleteBranch && wi.branch_name) {
-        branchCleanup = deleteBranchPreservingTip(projectDir, wi.branch_name, {
-          reason: wi.status === "canceled" ? "startup-gc-canceled-branch" : "startup-gc-merged-branch",
-          wiId,
-          onMsg,
-        });
-        if (branchCleanup.ok) {
-          clearWorkItemBranchState(wi, { clearMergeState: wi.status === "canceled" });
-        } else {
-          onMsg(`GC: retained WI#${wiId} branch ${wi.branch_name} (${branchCleanup.reason})`);
-        }
-      }
-      const ctxDir = contextDir(wiScopeId(wiId), projectDir);
-      if (fs.existsSync(ctxDir)) {
-        try { fs.rmSync(ctxDir, { recursive: true, force: true }); } catch {}
-      }
-      disposeTerminalWorkItemAtlasGraph(projectDir, wiId);
-      removed++;
-      onMsg(gcTerminalWorktreeMessage(wi, branchCleanup));
-    } else {
-      let holdsBench = false;
-      try {
-        holdsBench = workItemHoldsBench(wiId);
-      } catch {
-        onMsg(`GC: unable to resolve bench hold for WI#${wiId}; skipping cleanup for this worktree`);
-        continue;
-      }
-      if (!holdsBench) {
-        let cleanupResult = null;
-        try {
-          cleanupResult = gcSnapshotAndRemoveWorktree(projectDir, wtDir, wi, {
-            wiId,
-            reason: "startup-gc-inactive-worktree",
-            label: "inactive",
-            onMsg,
-          });
-        } catch (err) {
-          onMsg(`GC: failed to clean inactive worktree for WI#${wiId}: ${err?.message || err}`);
-          continue;
-        }
-        if (cleanupResult?.snapshotDir) preserved++;
-        if (cleanupResult?.skipped || (cleanupResult?.existed && !cleanupResult?.removed)) continue;
-        const staleBranch = wi?.branch_name || null;
-        const shouldDeleteBranch = shouldDeleteBranchForInactiveWi(wi);
-        let branchCleanup = null;
-        if (staleBranch && shouldDeleteBranch) {
-          branchCleanup = deleteBranchPreservingTip(projectDir, staleBranch, {
-            reason: wi.status === "canceled" ? "startup-gc-canceled-inactive-branch" : "startup-gc-merged-inactive-branch",
-            wiId,
-            onMsg,
-          });
-          if (branchCleanup.ok) {
-            clearWorkItemBranchState(wi, { clearMergeState: wi.merge_state === "merged" });
-          } else {
-            onMsg(`GC: retained WI#${wiId} branch ${staleBranch} (${branchCleanup.reason})`);
-          }
-        } else if (staleBranch) {
-          onMsg(`GC: retained WI#${wiId} branch ${staleBranch} (merge_state=${wi?.merge_state || "null"})`);
-        }
-        const ctxDir = contextDir(wiScopeId(wiId), projectDir);
-        if (fs.existsSync(ctxDir)) {
-          try { fs.rmSync(ctxDir, { recursive: true, force: true }); } catch {}
-        }
-        removed++;
-        onMsg(gcInactiveWorktreeMessage(wi, branchCleanup));
-        continue;
-      }
-      try {
-        if (worktreeNeedsRecovery(wtDir)) {
-          const snapshotDir = snapshotAndResetDirtyWorktree(wtDir, projectDir, {
-            reason: "startup-gc-dirty-worktree",
-            branchName: wi?.branch_name || null,
-            wiId,
-            onMsg,
-            onResetIncomplete: ({ remainingPaths = [] }) => {
-              const preview = remainingPaths.slice(0, 10).join(", ");
-              const more = remainingPaths.length > 10 ? " ..." : "";
-              onMsg(`GC: reset incomplete for held WI#${wiId}; remaining path(s): ${preview}${more}`);
-            },
-          });
-          if (snapshotDir) {
-            preserved++;
-            onMsg(`GC: preserved dirty worktree for WI#${wiId} at ${snapshotDir}`);
-          }
-          cleaned++;
-        }
-      } catch (err) {
-        onMsg(`GC: failed to clean held worktree for WI#${wiId}: ${err?.message || err}`);
-      }
-    }
-  }
-
-  try { gitExec(["worktree", "prune"], projectDir); } catch {}
-
-  if (removed > 0 || cleaned > 0 || preserved > 0) {
-    onMsg(`GC: cleaned up ${removed} leftover worktree(s), reset ${cleaned} held dirty worktree(s), preserved ${preserved} snapshot(s)`);
-  }
 }
 
 export async function gcWorktreesAsync(projectDir, onMsg = () => {}, { signal = null, timingSlowMs = null, timingNow = null } = {}) {

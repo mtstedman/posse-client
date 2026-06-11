@@ -44,8 +44,13 @@ export {
 };
 
 function nativeAsyncOptions(options = {}) {
+  // Only native-parity keys cross into the native invocation, plus the
+  // explicitly threaded manager/signal/timeout — never the whole caller
+  // options bag.
+  const parity = options.nativeParity || {};
   return {
-    ...(options.nativeParity || options || {}),
+    ...parity,
+    manager: options.manager ?? parity.manager,
     signal: options.signal,
     timeoutMs: options.timeoutMs,
   };
@@ -544,7 +549,7 @@ export async function pruneRecoveredWorktreeSnapshotsAsync(projectDir, onMsg = (
     }
     if (refToRemove.length > 0) {
       try { await gitExecAsync(["notes", `--ref=${SNAPSHOT_NOTES_REF}`, "prune"], projectDir, { signal }); } catch (err) { if (isAbortError(err)) throw err; }
-      try { await gitExecAsync(["gc"], projectDir, { signal }); } catch (err) { if (isAbortError(err)) throw err; }
+      try { await gitExecAsync(["gc", "--auto"], projectDir, { signal }); } catch (err) { if (isAbortError(err)) throw err; }
       onMsg(`GC: pruned ${refToRemove.length} snapshot ref(s)`);
     }
   }

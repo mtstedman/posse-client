@@ -122,8 +122,10 @@ export function rewireDependency(jobId, oldDependsOn, newDependsOn, kind = "hard
   }
   let rewired = false;
   const execute = () => {
-    db.prepare(`DELETE FROM job_dependencies WHERE job_id = ? AND depends_on_job_id = ?`)
-      .run(jobId, oldDependsOn);
+    // Check the cycle before touching the old edge: an aborted rewire must
+    // not commit the deletion and leave the job with no blocker. The old
+    // edge can't produce a false positive — any chain that traverses it has
+    // already reached jobId, which is the detection condition itself.
     const cycle = db.prepare(`
       WITH RECURSIVE dep_chain(id) AS (
         SELECT depends_on_job_id FROM job_dependencies WHERE job_id = ?
@@ -144,6 +146,8 @@ export function rewireDependency(jobId, oldDependsOn, newDependsOn, kind = "hard
       });
       return;
     }
+    db.prepare(`DELETE FROM job_dependencies WHERE job_id = ? AND depends_on_job_id = ?`)
+      .run(jobId, oldDependsOn);
     db.prepare(`INSERT OR IGNORE INTO job_dependencies (job_id, depends_on_job_id, dependency_kind) VALUES (?, ?, ?)`)
       .run(jobId, newDependsOn, kind);
     rewired = true;

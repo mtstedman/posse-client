@@ -114,12 +114,15 @@ export class ViewBuilder {
       });
       db.transaction(() => {
         refreshGraphDerivedStateIfChanged(db, { force: true });
-        refreshTreeDerivedStateIfChanged(db, { force: true });
-        refreshTreeCompressionSnapshotIfChanged(db, {
+        emitPhase({ phase: "tree", current: 0, total: 2, detail: "building tree" });
+        const treeDerived = refreshTreeDerivedStateIfChanged(db, { force: true });
+        emitPhase({ phase: "tree", current: 1, total: 2, detail: "compressing seeds" });
+        const treeCompression = refreshTreeCompressionSnapshotIfChanged(db, {
           force: true,
           mode: options.treeCompressionMode,
           maxSeeds: options.treeCompressionMaxSeeds,
         });
+        emitPhase(treeRefreshOutcomeEvent(treeDerived, treeCompression));
       })();
       if (hasHint) {
         db.transaction(() => {
@@ -196,7 +199,10 @@ export class ViewBuilder {
     const progress = typeof onProgress === "function" ? onProgress : null;
     const emitPhase = (phase, current, total) => {
       if (!progress) return;
-      try { progress({ phase, current, total }); } catch { /* observational */ }
+      const event = phase && typeof phase === "object"
+        ? phase
+        : { phase, current, total };
+      try { progress(event); } catch { /* observational */ }
     };
     const current = view.meta();
     if (entries.length === 0) return current;
@@ -248,11 +254,14 @@ export class ViewBuilder {
       emitPhase("resolve", 0, 1);
       runResolverPass(db, pathToBlob);
       refreshGraphDerivedStateIfChanged(db);
-      refreshTreeDerivedStateIfChanged(db);
-      refreshTreeCompressionSnapshotIfChanged(db, {
+      emitPhase({ phase: "tree", current: 0, total: 2, detail: "building tree" });
+      const treeDerived = refreshTreeDerivedStateIfChanged(db);
+      emitPhase({ phase: "tree", current: 1, total: 2, detail: "compressing seeds" });
+      const treeCompression = refreshTreeCompressionSnapshotIfChanged(db, {
         mode: options.treeCompressionMode,
         maxSeeds: options.treeCompressionMaxSeeds,
       });
+      emitPhase(treeRefreshOutcomeEvent(treeDerived, treeCompression));
       emitPhase("resolve", 1, 1);
       writeMeta(db, {
         ...current,
@@ -959,6 +968,38 @@ function normalizeTreeCompressionMode(value) {
   const raw = String(value || "deterministic").trim().toLowerCase();
   if (raw === "off" || raw === "deterministic" || raw === "ml") return raw;
   return "deterministic";
+}
+
+/**
+ * Terminal "tree" progress event for the boot panel's tree bar. Folds the
+ * tree-derived refresh and the compression-seed refresh into one outcome:
+ * a failure in either surfaces as status "failed" with the error inline
+ * (compression has no Node fallback, so a disabled native binary would
+ * otherwise fail silently on every build).
+ *
+ * @param {{ skipped: boolean, result?: { ok: boolean, nodes?: number, error?: string } }} treeDerived
+ * @param {{ skipped: boolean, reason?: string, result?: { ok: boolean, seedCount?: number, error?: string } }} treeCompression
+ */
+function treeRefreshOutcomeEvent(treeDerived, treeCompression) {
+  const base = { phase: "tree", current: 2, total: 2 };
+  const firstLine = (text) => String(text || "").split(/\r?\n/)[0].trim();
+  if (treeDerived?.result && treeDerived.result.ok === false) {
+    return { ...base, status: "failed", detail: `tree build failed: ${firstLine(treeDerived.result.error) || "unknown"}` };
+  }
+  if (treeCompression?.result && treeCompression.result.ok === false) {
+    return { ...base, status: "failed", detail: `seeds failed: ${firstLine(treeCompression.result.error) || "unknown"}` };
+  }
+  const nodes = Number(treeDerived?.result?.nodes);
+  const treePart = treeDerived?.skipped
+    ? "tree up-to-date"
+    : (Number.isFinite(nodes) && nodes > 0 ? `${nodes} nodes` : "tree built");
+  const seedCount = Number(treeCompression?.result?.seedCount);
+  const seedPart = treeCompression?.reason === "tree_compression_off"
+    ? "seeds off"
+    : treeCompression?.skipped
+      ? "seeds current"
+      : (Number.isFinite(seedCount) ? `${seedCount} seeds` : "seeds built");
+  return { ...base, status: "ok", detail: `${treePart} · ${seedPart}` };
 }
 
 function positiveIntOrNull(value) {

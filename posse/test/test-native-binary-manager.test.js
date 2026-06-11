@@ -280,10 +280,10 @@ describe("BinaryManager gating", () => {
   const tmps = [];
   afterEach(() => { while (tmps.length) fs.rmSync(tmps.pop(), { recursive: true, force: true }); });
 
-  it("env master/per-tool overrides beat the tunable resolver", () => {
+  it("git and atlas are hardwired on; env/resolver gate the rest", () => {
     const off = new BinaryManager({ env: {}, enabledResolver: () => false });
-    assert.equal(off.enabled("atlas"), false);
-    assert.equal(off.enabled("git"), true);
+    assert.equal(off.enabled("atlas"), true, "atlas is hardwired on");
+    assert.equal(off.enabled("git"), true, "git is hardwired on");
     assert.equal(off.enabled("remote"), false);
 
     const resolverOn = new BinaryManager({ env: {}, enabledResolver: () => true });
@@ -295,14 +295,9 @@ describe("BinaryManager gating", () => {
     assert.equal(master.enabled("git"), true);
     assert.equal(master.enabled("remote"), true);
 
-    const perTool = new BinaryManager({ env: { POSSE_NATIVE_ATLAS: "on" }, enabledResolver: () => false });
-    assert.equal(perTool.enabled("atlas"), true);
-    assert.equal(perTool.enabled("git"), true);
-    assert.equal(perTool.enabled("remote"), false);
-
     const masterOff = new BinaryManager({ env: { POSSE_NATIVE_BINARIES: "0" }, enabledResolver: () => true });
-    assert.equal(masterOff.enabled("atlas"), false);
-    assert.equal(masterOff.enabled("git"), true);
+    assert.equal(masterOff.enabled("atlas"), true, "master env off cannot disable atlas");
+    assert.equal(masterOff.enabled("git"), true, "master env off cannot disable git");
     assert.equal(masterOff.enabled("remote"), false);
   });
 
@@ -310,10 +305,11 @@ describe("BinaryManager gating", () => {
     const binRoot = makeTmp("bm-"); tmps.push(binRoot);
     const mk = (enabled) => new BinaryManager({ binRoot, enabledResolver: () => enabled });
 
-    assert.equal(mk(true).shouldUse("atlas"), false, "enabled but not staged");
+    assert.equal(mk(true).shouldUse("atlas"), false, "hardwired on but not staged");
     stageBinary(binRoot, "atlas", osKey(), archKey());
-    assert.equal(mk(true).shouldUse("atlas"), true, "enabled and staged");
-    assert.equal(mk(false).shouldUse("atlas"), false, "staged but disabled");
+    assert.equal(mk(true).shouldUse("atlas"), true, "staged");
+    assert.equal(mk(false).shouldUse("atlas"), true, "resolver cannot disable atlas");
+    assert.equal(mk(false).shouldUse("remote"), false, "resolver still gates remote");
   });
 
   it("rejects unknown binaries", () => {

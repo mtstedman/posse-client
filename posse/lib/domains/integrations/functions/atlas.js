@@ -27,6 +27,12 @@ import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager
 import { sanitizeWorkerExecArgv } from "../../runtime/functions/worker-exec-argv.js";
 import { getAtlasV2BootTimeoutMs } from "../../settings/functions/tunables.js";
 import { recordEmbeddingForensics, errorForTelemetry } from "../../atlas/functions/v2/embeddings/forensics.js";
+import { embeddingsExplicitlyEnabled, configuredVectorBackend } from "../../atlas/functions/v2/embeddings/resources.js";
+import {
+  warmReadinessProgress,
+  warmReadinessSeed,
+  warmReadinessStarted,
+} from "../../atlas/functions/v2/warm-progress.js";
 import {
   formatAtlasError,
   isVerboseAtlasErrors,
@@ -1316,11 +1322,62 @@ export function prewarmAtlasV2BootDeps() {
   return _atlasV2DepsPrewarmPromise;
 }
 
+/**
+ * Whether the warm pipeline's embeddings stage is configured to run at all.
+ * Mirrors the gates `openEmbeddingResources` applies before opening an encoder.
+ */
+function atlasEmbeddingsConfigured(config) {
+  return !!config && embeddingsExplicitlyEnabled(config) && configuredVectorBackend(config) !== "off";
+}
+
+/**
+ * Rest the TUI readiness bars on the boot warm's REAL outcome, so a session
+ * that booted with a current index reads "ready" instead of "idle", and ONNX
+ * reads "off" only when embeddings are genuinely disabled (see warm-progress.js
+ * honesty contract).
+ *
+ * @param {{ ok: boolean, result?: any, config?: any }} args
+ */
+function seedAtlasBootReadiness({ ok, result = null, config = null }) {
+  const embeddingsOn = atlasEmbeddingsConfigured(config);
+  /** @type {Parameters<typeof warmReadinessSeed>[0]} */
+  const seed = { atlasEnabled: true, onnxEnabled: embeddingsOn };
+  if (ok) {
+    seed.atlas = 100;
+    if (!embeddingsOn) {
+      seed.onnx = null;
+    } else {
+      const candidates = Number(result?.embeddings_candidates);
+      const covered = (Number(result?.embeddings_indexed) || 0)
+        + (Number(result?.embeddings_already_indexed) || 0);
+      if (result?.embeddings_error) {
+        // Encoder/index trouble: rest at the reported coverage (or 0) so the
+        // bar honestly reads "incomplete" rather than "ready" or "off".
+        seed.onnx = Number.isFinite(candidates) && candidates > 0
+          ? (covered / candidates) * 100
+          : 0;
+      } else if (Number.isFinite(candidates)) {
+        seed.onnx = candidates > 0 ? (covered / candidates) * 100 : 100;
+      } else {
+        // Warm succeeded without reporting embeddings work: the freshness
+        // scan found nothing to encode, so the on-disk index is current.
+        seed.onnx = 100;
+      }
+    }
+  }
+  // On failure: keep whatever percents the live progress events left behind
+  // (honest partial), but still record enablement so labels read correctly.
+  warmReadinessSeed(seed);
+}
+
 export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
   const config = opts?.config || getAtlasIntegrationConfig();
-  if (!shouldUseAtlasV2({ config })) return { attempted: false, skipped: "atlas_disabled", backend: "atlas-v2" };
-  if (!config?.enabled) return { attempted: false, skipped: "atlas_disabled", backend: "atlas-v2" };
-  if (!isAtlasIndexMaintenanceEnabled(config)) return { attempted: false, skipped: "phase_not_enabled", backend: "atlas-v2" };
+  if (!shouldUseAtlasV2({ config }) || !config?.enabled || !isAtlasIndexMaintenanceEnabled(config)) {
+    // No warm will ever run this session — both bars honestly read "off".
+    warmReadinessSeed({ atlas: null, onnx: null, atlasEnabled: false, onnxEnabled: false });
+    const skipped = (!shouldUseAtlasV2({ config }) || !config?.enabled) ? "atlas_disabled" : "phase_not_enabled";
+    return { attempted: false, skipped, backend: "atlas-v2" };
+  }
   const storage = repoStorageFor({ cwd: opts?.cwd, config });
   await asyncBoundary();
   const baselineBranch = resolveAtlasBaselineBranch(storage.repoRoot);
@@ -1357,9 +1414,19 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
     // current, the worker now performs a source-stat freshness scan so disk
     // changes that never reached the ledger can feed a partial warm.
   }
+  // Fold boot warm progress into the live readiness bars too. During a normal
+  // boot the TUI isn't up yet (harmless), but when the operator backgrounds
+  // the ONNX encode and enters the TUI early, the bars sweep live instead of
+  // resting on a stale "idle"/"off".
+  const callerOnProgress = opts?.onProgress;
+  const onProgressWithReadiness = (event) => {
+    try { warmReadinessProgress(event); } catch { /* observational */ }
+    if (typeof callerOnProgress === "function") callerOnProgress(event);
+  };
+  warmReadinessStarted();
   try {
     const result = await runAtlasV2BootWarmWithProgress({
-      onProgress: opts?.onProgress,
+      onProgress: onProgressWithReadiness,
       heartbeatMs: opts?.heartbeatMs,
       repoId: storage.repo.repoId || null,
       branch: baselineBranch,
@@ -1378,6 +1445,7 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
         });
       },
     });
+    seedAtlasBootReadiness({ ok: true, result, config });
     return {
       attempted: true,
       ok: true,
@@ -1391,6 +1459,7 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
       branch: baselineBranch,
     };
   } catch (err) {
+    seedAtlasBootReadiness({ ok: false, config });
     logAtlasError(`[atlas] ensureAtlasRepoIndexedOnBoot (repoRoot=${storage.repoRoot}):`, err);
     if (isVerboseAtlasErrors()) throw err;
     return {

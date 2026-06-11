@@ -91,6 +91,41 @@ async function compileOrSkip(t, client, request) {
 }
 
 describe("posse remote prompt parity", () => {
+  it("serves a normalizable model catalog at /v1/catalog/models", async (t) => {
+    const client = new RemotePromptClient({
+      baseUrl: REMOTE_URL,
+      timeoutMs: Number.isFinite(REMOTE_TIMEOUT_MS) && REMOTE_TIMEOUT_MS > 0
+        ? REMOTE_TIMEOUT_MS
+        : POSSE_REMOTE_DEFAULT_TIMEOUT_MS,
+    });
+    let raw;
+    try {
+      raw = await client.getModelCatalog();
+    } catch (err) {
+      if (isReachabilityError(err)) {
+        t.skip(`posse-remote is not reachable at ${REMOTE_URL}: ${err?.message || err}`);
+        return;
+      }
+      if (isMissingRemoteAuth(err)) {
+        t.skip(`posse-remote requires POSSE_KEY for parity checks at ${REMOTE_URL}`);
+        return;
+      }
+      if (Number(err?.status) === 404 || /not_found|unsupported route/i.test(String(err?.message || ""))) {
+        t.skip(`posse-remote at ${REMOTE_URL} does not serve /v1/catalog/models yet`);
+        return;
+      }
+      throw err;
+    }
+    const { normalizeRemoteModelCatalog } = await import("../lib/domains/providers/functions/model-catalog-store.js");
+    const normalized = normalizeRemoteModelCatalog(raw);
+    assert.ok(normalized, "remote model catalog payload must normalize under the CLI contract");
+    assert.ok(normalized.catalogVersion);
+    assert.ok(Object.keys(normalized.providers).length >= 1);
+    for (const entry of Object.values(normalized.providers)) {
+      assert.ok(entry.textModels.length > 0);
+    }
+  });
+
   it("resolves POSSE_KEY as the canonical remote auth key", () => {
     assert.equal(resolvePosseKey({ POSSE_KEY: "new-key" }), "new-key");
     assert.equal(resolvePosseKey({ POSSE_REMOTE_API_KEY: "old-key" }), "");

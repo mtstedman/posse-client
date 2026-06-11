@@ -10,6 +10,7 @@ import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { getSetting, listCrossWiMergeBlockers, listWorkItems, logEvent, refreshWorkItemStatuses, setMergeState } from "../../queue/functions/index.js";
+import { markOpenPushOfferGatePushed, upsertPushOfferGate } from "../../queue/functions/push-offer.js";
 import { C } from "../../providers/functions/claude.js";
 import { runHook } from "../../worker/functions/helpers/hooks.js";
 import { disposeWorkItemAtlasGraph, warmAtlasMergedToMainNow } from "../../integrations/functions/atlas.js";
@@ -1118,6 +1119,32 @@ export function createGitWorkflowHelpers({
     } catch {
       workingTreeStatus = "";
     }
+
+    // Commits on the push branch that the remote tracking ref doesn't have.
+    // This — not "did this wrap-up pass merge anything" — is what warrants a
+    // push offer: mid-run auto-merges land before the wrap-up counts them, so
+    // gating on the pass-local merge count strands merged work unpushed.
+    // null = no upstream ref yet (never pushed) or git error; callers fall
+    // back to the merge-count gate in that case.
+    let aheadCount = null;
+    try {
+      const upstreamRef = `${effectiveRemote}/${pushBranch}`;
+      execFileSync("git", ["rev-parse", "--verify", "--quiet", upstreamRef], {
+        cwd: projectDir,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const counted = execFileSync("git", ["rev-list", "--count", `${upstreamRef}..${pushBranch}`], {
+        cwd: projectDir,
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+      const parsed = Number.parseInt(counted, 10);
+      aheadCount = Number.isFinite(parsed) ? parsed : null;
+    } catch {
+      aheadCount = null;
+    }
+
     const dirtyItems = auditWorktreeState();
     const unmergedWIs = dirtyItems
       .filter(d => d.issues.some(i => i.type === "unmerged"))
@@ -1138,6 +1165,7 @@ export function createGitWorkflowHelpers({
       effectiveRemote,
       workingTreeStatus,
       unmergedWIs,
+      aheadCount,
     };
   }
 
@@ -1208,16 +1236,34 @@ export function createGitWorkflowHelpers({
     const targetBranch = state.targetBranch || currentTargetBranch();
     const pushBranchInfo = state.pushBranchInfo || {};
     if (!pushBranchInfo.branch) {
-      console.log(`\n  ${C.bold}${mergedCount} work item(s) merged, but no local branch is available to push.${C.reset}`);
-      console.log(`  ${C.yellow}Configured target branch ${C.cyan}${targetBranch}${C.yellow} is not a local branch.${C.reset}`);
-      console.log(`  ${C.dim}Create/check out the target branch or update Posse admin setting target_branch before pushing.${C.reset}`);
+      if (mergedCount > 0) {
+        console.log(`\n  ${C.bold}${mergedCount} work item(s) merged, but no local branch is available to push.${C.reset}`);
+        console.log(`  ${C.yellow}Configured target branch ${C.cyan}${targetBranch}${C.yellow} is not a local branch.${C.reset}`);
+        console.log(`  ${C.dim}Create/check out the target branch or update Posse admin setting target_branch before pushing.${C.reset}`);
+      }
+      console.log("");
+      return;
+    }
+
+    // The offer is warranted by unpushed commits on the push branch, not just
+    // by merges performed in this wrap-up pass: WIs auto-merged mid-run land
+    // before the wrap-up counts them and would otherwise strand unpushed.
+    const aheadCount = Number.isFinite(state.aheadCount) ? state.aheadCount : 0;
+    if (mergedCount <= 0 && aheadCount <= 0) {
       console.log("");
       return;
     }
 
     const pushBranch = state.pushBranch;
     const effectiveRemote = state.effectiveRemote;
-    console.log(`\n  ${C.bold}${mergedCount} work item(s) merged into ${C.cyan}${pushBranch}${C.reset}`);
+    if (mergedCount > 0) {
+      console.log(`\n  ${C.bold}${mergedCount} work item(s) merged into ${C.cyan}${pushBranch}${C.reset}`);
+    } else {
+      console.log(`\n  ${C.bold}${aheadCount} unpushed commit(s) on ${C.cyan}${pushBranch}${C.reset}${C.bold} from earlier merges${C.reset}`);
+    }
+    if (mergedCount > 0 && aheadCount > 0) {
+      console.log(`  ${C.dim}${aheadCount} commit(s) ahead of ${effectiveRemote}/${pushBranch}${C.reset}`);
+    }
     if (pushBranchInfo.fallback) {
       console.log(`  ${C.yellow}Configured target branch ${C.cyan}${pushBranchInfo.missingBranch}${C.yellow} is not a local branch; using ${C.cyan}${pushBranch}${C.yellow} for push.${C.reset}`);
     }
@@ -1245,9 +1291,27 @@ export function createGitWorkflowHelpers({
       console.log(`  ${C.dim}Use 'node orchestrator.js review' or 'merge' to include them.${C.reset}`);
     }
 
+    // Persist the offer as a bridge gate FIRST, regardless of TTY: the
+    // phone (or a later CLI session) can deploy even when nobody answers
+    // here. Pushing below closes the gate; declining leaves it open.
+    let pushGate = { ok: false };
+    try {
+      pushGate = upsertPushOfferGate(state, { createdBy: "run_wrapup" });
+    } catch (err) {
+      console.log(`  ${C.dim}Push gate not created: ${err?.message || err}${C.reset}`);
+    }
+
+    // Headless (no TTY): never prompt \u2014 the old readline fallback blocked
+    // forever on a non-interactive stdin. The gate above carries the offer.
+    if (!process.stdin.isTTY) {
+      console.log(`  ${C.dim}Push offer available \u2014 answer from the Posse app, or run: git push${C.reset}`);
+      console.log("");
+      return;
+    }
+
     const answer = await askSingleKeyYesNo(`  Push to remote? [y/N] `, { fallbackAsk: askFn });
     if (answer.toLowerCase() !== "y" && answer.toLowerCase() !== "yes") {
-      console.log(`  ${C.dim}Skipped push. You can push manually: git push${C.reset}`);
+      console.log(`  ${C.dim}Skipped push. You can push manually, or from the Posse app.${C.reset}`);
       console.log("");
       return;
     }
@@ -1260,6 +1324,9 @@ export function createGitWorkflowHelpers({
     }));
     if (pushed.ok) {
       console.log(`  ${C.green}\u2713 Pushed to ${effectiveRemote}${C.reset}`);
+      try {
+        markOpenPushOfferGatePushed({ remote: effectiveRemote, branch: pushBranch, via: "terminal" });
+      } catch { /* gate close is best-effort; supersede covers stragglers */ }
     } else if (pushed.reason === "conflict_markers") {
       const files = Array.isArray(pushed.files) ? pushed.files : [];
       console.log(`  ${C.red}\u2717 Conflict markers found in ${files.length} file(s) — refusing to push:${C.reset}`);

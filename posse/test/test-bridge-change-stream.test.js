@@ -6,7 +6,12 @@ import { EVENT_TYPES } from "../lib/catalog/event.js";
 import { ChangeStream } from "../lib/domains/bridge/classes/ChangeStream.js";
 import { getDb } from "../lib/shared/storage/functions/index.js";
 import { redactBridgeValue } from "../lib/domains/bridge/functions/redaction.js";
-import { tailEvents } from "../lib/domains/bridge/functions/state-snapshot.js";
+import { collectStateSnapshot, tailEvents } from "../lib/domains/bridge/functions/state-snapshot.js";
+import {
+  RUNTIME_STATUS_KEYS,
+  markCleanShutdown,
+  writeRuntimeStatus,
+} from "../lib/domains/queue/functions/runtime-status.js";
 import {
   createJob,
   createWorkItem,
@@ -205,5 +210,187 @@ describe("bridge change stream", () => {
     } finally {
       stream.close();
     }
+  }));
+
+  it("streams instance_status phases from runtime_status rows, emit-on-change", () => withTempRuntimeDb(() => {
+    getDb(); // materialize the runtime DB before the readonly stream opens it
+    const stream = new ChangeStream({ pollMs: 100, instanceId: "posse-test" });
+    const frames = [];
+    stream.on("frame", (frame) => frames.push(frame));
+    stream.start();
+    try {
+      let nowMs = Date.now();
+      const statusFrames = () => frames.filter((f) => f.kind === BRIDGE_EVENT_KINDS.INSTANCE_STATUS);
+
+      // No runtime rows at all → offline (serve without run).
+      stream.pollInstanceStatus(nowMs);
+      assert.equal(statusFrames().at(-1)?.payload.phase, "offline");
+
+      // Identical state inside the min interval → no re-emit.
+      stream.pollInstanceStatus(nowMs + 1);
+      assert.equal(statusFrames().length, 1);
+
+      // Booting: boot row with an unfinished step + fresh heartbeat.
+      writeRuntimeStatus(RUNTIME_STATUS_KEYS.BOOT, {
+        steps: [
+          { label: "lock acquired", status: "ok", section: "scheduler" },
+          { label: "workspace health", status: "running", percent: 40, section: "workspace" },
+        ],
+        started_at: new Date(nowMs).toISOString(),
+      });
+      nowMs += 5_000;
+      stream.pollInstanceStatus(nowMs);
+      let latest = statusFrames().at(-1);
+      assert.equal(latest.payload.phase, "booting");
+      assert.equal(latest.payload.boot_steps.length, 2);
+
+      // Warming: only ATLAS-ish steps still active.
+      writeRuntimeStatus(RUNTIME_STATUS_KEYS.BOOT, {
+        steps: [
+          { label: "lock acquired", status: "ok", section: "scheduler" },
+          { label: "ATLAS warmup", status: "running", percent: 43, section: "scheduler" },
+        ],
+        started_at: new Date(nowMs).toISOString(),
+      });
+      nowMs += 5_000;
+      stream.pollInstanceStatus(nowMs);
+      assert.equal(statusFrames().at(-1).payload.phase, "warming");
+
+      // Running: boot settled + fresh scheduler heartbeat with running jobs.
+      writeRuntimeStatus(RUNTIME_STATUS_KEYS.BOOT, {
+        steps: [{ label: "lock acquired", status: "ok", section: "scheduler" }],
+        started_at: new Date(nowMs).toISOString(),
+      });
+      writeRuntimeStatus(RUNTIME_STATUS_KEYS.SCHEDULER, {
+        active_workers: 2,
+        running_jobs: 1,
+        queued_jobs: 4,
+      });
+      nowMs += 5_000;
+      stream.pollInstanceStatus(nowMs);
+      latest = statusFrames().at(-1);
+      assert.equal(latest.payload.phase, "running");
+      assert.equal(latest.payload.scheduler.active_workers, 2);
+      assert.equal(latest.payload.boot_steps.length, 0, "boot steps omitted once past warming");
+
+      // Stalled: heartbeat ages past 90s without a clean shutdown.
+      nowMs += 5 * 60 * 1000;
+      stream.pollInstanceStatus(nowMs);
+      assert.equal(statusFrames().at(-1).payload.phase, "stalled");
+
+      // Clean shutdown → offline.
+      markCleanShutdown();
+      nowMs += 5_000;
+      stream.pollInstanceStatus(nowMs);
+      assert.equal(statusFrames().at(-1).payload.phase, "offline");
+    } finally {
+      stream.close();
+    }
+  }));
+
+  it("emits throttled job_progress with token sums and evicts terminal jobs", () => withTempRuntimeDb(() => {
+    const wi = createWorkItem("Progress item", "desc");
+    const job = createJob({ work_item_id: wi.id, job_type: "dev", title: "Long dev job" });
+    updateJobStatus(job.id, "running");
+    getDb().prepare(`
+      INSERT INTO agent_calls (work_item_id, job_id, role, provider, model_tier, model_name,
+                               input_tokens, output_tokens, status)
+      VALUES (?, ?, 'dev', 'claude', 'strong', 'claude-opus-4-8', 48200, 3100, 'succeeded')
+    `).run(wi.id, job.id);
+
+    const stream = new ChangeStream({ pollMs: 100, instanceId: "posse-test" });
+    const frames = [];
+    stream.on("frame", (frame) => frames.push(frame));
+    stream.start();
+    try {
+      let nowMs = Date.now() + 10_000;
+      stream.pollJobProgress(nowMs);
+      const progress = frames.filter((f) => f.kind === BRIDGE_EVENT_KINDS.JOB_PROGRESS);
+      assert.equal(progress.length, 1);
+      assert.equal(progress[0].payload.job_id, job.id);
+      assert.equal(progress[0].payload.tokens_in, 48200);
+      assert.equal(progress[0].payload.tokens_out, 3100);
+      assert.ok(progress[0].payload.elapsed_ms >= 0);
+
+      // Unchanged state → no re-emit on the next scan.
+      nowMs += 10_000;
+      stream.pollJobProgress(nowMs);
+      assert.equal(frames.filter((f) => f.kind === BRIDGE_EVENT_KINDS.JOB_PROGRESS).length, 1);
+
+      // New tokens → delta emits.
+      getDb().prepare(`
+        INSERT INTO agent_calls (work_item_id, job_id, role, provider, model_tier, model_name,
+                                 input_tokens, output_tokens, status)
+        VALUES (?, ?, 'dev', 'claude', 'strong', 'claude-opus-4-8', 1000, 50, 'succeeded')
+      `).run(wi.id, job.id);
+      nowMs += 10_000;
+      stream.pollJobProgress(nowMs);
+      const updated = frames.filter((f) => f.kind === BRIDGE_EVENT_KINDS.JOB_PROGRESS);
+      assert.equal(updated.length, 2);
+      assert.equal(updated[1].payload.tokens_in, 49200);
+
+      // Terminal job leaves the live set (throttle map evicted, no frames).
+      updateJobStatus(job.id, "succeeded");
+      nowMs += 10_000;
+      stream.pollJobProgress(nowMs);
+      assert.equal(frames.filter((f) => f.kind === BRIDGE_EVENT_KINDS.JOB_PROGRESS).length, 2);
+      assert.equal(stream.jobProgressLastByJobId.size, 0);
+    } finally {
+      stream.close();
+    }
+  }));
+
+  it("emits cost_updated on cadence and immediately after terminal transitions", () => withTempRuntimeDb(() => {
+    const wi = createWorkItem("Cost item", "desc");
+    const job = createJob({ work_item_id: wi.id, job_type: "dev", title: "Costly job" });
+    updateJobStatus(job.id, "running");
+    getDb().prepare(`
+      INSERT INTO agent_calls (work_item_id, job_id, role, provider, model_tier, model_name,
+                               input_tokens, output_tokens, cost_estimate_usd, status)
+      VALUES (?, ?, 'dev', 'claude', 'strong', 'claude-opus-4-8', 1000, 100, 0.42, 'succeeded')
+    `).run(wi.id, job.id);
+
+    const stream = new ChangeStream({ pollMs: 100, instanceId: "posse-test" });
+    const frames = [];
+    stream.on("frame", (frame) => frames.push(frame));
+    stream.start();
+    try {
+      let nowMs = Date.now() + 60_000;
+      stream.pollCosts(nowMs);
+      const costFrames = () => frames.filter((f) => f.kind === BRIDGE_EVENT_KINDS.COST_UPDATED);
+      assert.equal(costFrames().length, 1);
+      assert.ok(Math.abs(costFrames()[0].payload.usd_total - 0.42) < 1e-9);
+
+      // No change within the cadence → nothing new.
+      stream.pollCosts(nowMs + 1_000);
+      assert.equal(costFrames().length, 1);
+
+      // Terminal transition marks the WI dirty → immediate recompute even
+      // before the 30s cadence elapses.
+      getDb().prepare(`
+        INSERT INTO agent_calls (work_item_id, job_id, role, provider, model_tier, model_name,
+                                 input_tokens, output_tokens, cost_estimate_usd, status)
+        VALUES (?, ?, 'dev', 'claude', 'strong', 'claude-opus-4-8', 500, 50, 0.08, 'succeeded')
+      `).run(wi.id, job.id);
+      updateJobStatus(job.id, "succeeded");
+      stream.poll();
+      assert.equal(costFrames().length, 2);
+      assert.ok(Math.abs(costFrames()[1].payload.usd_delta - 0.08) < 1e-9);
+      assert.ok(Math.abs(costFrames()[1].payload.usd_total - 0.5) < 1e-9);
+    } finally {
+      stream.close();
+    }
+  }));
+
+  it("includes instance_status in state snapshots", () => withTempRuntimeDb(() => {
+    writeRuntimeStatus(RUNTIME_STATUS_KEYS.SCHEDULER, {
+      active_workers: 1,
+      running_jobs: 0,
+      queued_jobs: 0,
+    });
+    const snapshot = collectStateSnapshot({ headEventId: 0 });
+    assert.ok(snapshot.instance_status);
+    assert.equal(snapshot.instance_status.phase, "idle");
+    assert.equal(snapshot.instance_status.scheduler.active_workers, 1);
   }));
 });

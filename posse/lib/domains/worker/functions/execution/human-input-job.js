@@ -229,7 +229,7 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
             const freshOrigJob = getJob(origJob.id) || origJob;
             const origPayload = worker.parsePayload(freshOrigJob);
             delete origPayload._stall_resume;
-            origPayload._assess_only = 1;
+            origPayload._assess_only = true;
             origPayload._partial_work_recovery = {
               ...(origPayload._partial_work_recovery || {}),
               recovery_job_id: job.id,
@@ -409,7 +409,7 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
             return;
           }
           const origPayload = worker.parsePayload(origJob);
-          origPayload._assess_only = 1;
+          origPayload._assess_only = true;
           updateJobPayload(origJob.id, JSON.stringify(origPayload));
           await worker._setJobRowStatus(origJob, "queued");
           handledReviewDecision = true;

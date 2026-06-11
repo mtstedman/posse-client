@@ -53,7 +53,7 @@ suite("Handoff pending-merge detection", () => {
 
   it("detectPendingMerge reports conflicts and MERGE_HEAD inside a linked worktree", async () => {
     const { detectPendingMerge } = await import("../../../lib/domains/handoff/functions/index.js");
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-handoff-merge-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -72,7 +72,7 @@ suite("Handoff pending-merge detection", () => {
       execFileSync("git", ["add", "shared.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits"], { cwd: wtDir, stdio: "ignore" });
 
-      mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
 
       const pending = detectPendingMerge(wtDir);
       assert.ok(pending);
@@ -85,7 +85,7 @@ suite("Handoff pending-merge detection", () => {
 
   it("handoff() adds conflicted paths to files_to_modify and populates pending_merge", async () => {
     const { handoff, packetToContextString } = await import("../../../lib/domains/handoff/functions/index.js");
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-handoff-packet-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -105,7 +105,7 @@ suite("Handoff pending-merge detection", () => {
       execFileSync("git", ["add", "shared.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits"], { cwd: wtDir, stdio: "ignore" });
 
-      mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
 
       const packet = {
         recipient: "dev",
@@ -165,7 +165,7 @@ suite("Handoff pending-merge detection", () => {
 
   it("keeps all pending-merge conflicts editable when preload is capped", async () => {
     const { handoff, packetToContextString } = await import("../../../lib/domains/handoff/functions/index.js");
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-handoff-large-merge-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -190,7 +190,7 @@ suite("Handoff pending-merge detection", () => {
       execFileSync("git", ["add", "."], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits"], { cwd: wtDir, stdio: "ignore" });
 
-      mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
 
       const packet = {
         recipient: "dev",
@@ -245,7 +245,7 @@ suite("Handoff pending-merge detection", () => {
 
   it("developer runtime scope includes handoff-expanded merge conflicts", async () => {
     const { DeveloperRole } = await import("../../../lib/domains/worker/classes/roles/developer.js");
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const { queueMod } = runtimeModules;
     resetRuntimeDb();
 
@@ -268,7 +268,7 @@ suite("Handoff pending-merge detection", () => {
       execFileSync("git", ["add", "shared.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits"], { cwd: wtDir, stdio: "ignore" });
 
-      mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
 
       const wi = queueMod.createWorkItem("Merge scope", "desc");
       const job = queueMod.createJob({

@@ -1,8 +1,10 @@
 // lib/admin.js — Admin TUI for stats, work-item logs, and settings management
 //
 // Standalone TUI that uses alternate screen + raw mode.
-// Tabs: Overview | Work Items | Settings | ATLAS Report | Prompts | Locks
-// Navigation: 1-6 or Tab to switch, ↑↓ to scroll/select, Enter to drill in, Esc/Bksp to back up, 'e' to edit settings.
+// Tabs: Settings | Overview | Work Items | Logs | ATLAS Report
+// Navigation: 1-6 or Tab to switch, ↑↓ to scroll/select, Enter to drill in,
+// Esc/Bksp to back up, 'e' to edit settings, ←→ to switch settings panes /
+// log sources.
 
 import readline from "readline";
 import fs from "fs";
@@ -60,13 +62,13 @@ import {
   setSkillEnabled,
 } from "../../../../shared/skills/functions/registry.js";
 import {
-  IMAGE_MODEL_OPTIONS_BY_PROVIDER,
   IMAGE_PROVIDER_OPTIONS,
   MODEL_SETTING_DEFS,
   PROVIDER_OPTIONS,
-  TEXT_MODEL_OPTIONS_BY_PROVIDER,
   getDefaultTierModel,
+  getImageModelOptions,
   getProviderTierDefaults,
+  getTextModelOptions,
 } from "../../../providers/functions/model-catalog.js";
 import {
   getCurrentRunProviderUsage,
@@ -112,23 +114,23 @@ const PROVIDER_USAGE_SETTING_DEFS = [
   { provider: "claude", key: "claude_observed_pct_week", label: "Claude weekly observed %", description: "Observed Claude weekly usage percent; saving this calibrates the 7-day token cap." },
 ];
 
-const ADMIN_TAB_NAMES = ["Overview", "Work Items", "Settings", "ATLAS Report", "Prompts", "Locks"];
-const ADMIN_TAB_COUNT = ADMIN_TAB_NAMES.length;
-const ADMIN_TAB_KEYS = new Set(ADMIN_TAB_NAMES.map((_, index) => String(index + 1)));
+// Settings leads — it's the page admins reach for most often.
+const ADMIN_TABS = Object.freeze([
+  Object.freeze({ id: "settings", name: "Settings" }),
+  Object.freeze({ id: "overview", name: "Overview" }),
+  Object.freeze({ id: "work_items", name: "Work Items" }),
+  Object.freeze({ id: "logs", name: "Logs" }),
+  Object.freeze({ id: "atlas_report", name: "ATLAS Report" }),
+]);
+const ADMIN_TAB_COUNT = ADMIN_TABS.length;
+const ADMIN_TAB_KEYS = new Set(ADMIN_TABS.map((_, index) => String(index + 1)));
 const ADMIN_TAB_NAV_LABEL = `Tab/1-${ADMIN_TAB_COUNT}`;
+const ADMIN_LOG_SOURCES = Object.freeze([
+  Object.freeze({ id: "prompts", label: "Prompts" }),
+  Object.freeze({ id: "outputs", label: "Outputs" }),
+]);
 const SCIP_DEPENDENCY_SPINNER_FRAMES = ["|", "/", "-", "\\"];
 const SCIP_DEPENDENCY_ALERT_DISMISS_MS = 12_000;
-
-function maskCredentialValue(value) {
-  const text = String(value ?? "");
-  if (!text) return "";
-  if (text.length <= 8) return "***";
-  return `${text.slice(0, 8)}...`;
-}
-
-export function __testMaskCredentialValue(value) {
-  return maskCredentialValue(value);
-}
 
 const MODEL_SETTING_KEYS = new Set(MODEL_SETTING_DEFS.map((def) => def.key));
 const PROVIDER_USAGE_SETTING_KEYS = new Set(PROVIDER_USAGE_SETTING_DEFS.map((def) => def.key));
@@ -382,7 +384,7 @@ function getEffectiveModelSetting(def) {
 
 function getEffectiveImageModelSetting(def) {
   const stored = safeGetSetting(def.key);
-  const choices = IMAGE_MODEL_OPTIONS_BY_PROVIDER[def.provider] || [];
+  const choices = getImageModelOptions(def.provider, { currentValue: stored });
   const effectiveModel = choices.some((choice) => choice.value === stored)
     ? stored
     : (choices[0]?.value || "");
@@ -402,15 +404,17 @@ function formatModelSettingDisplayValue(entry) {
 
 function getModelChoicesForEntry(entry) {
   if (!entry) return [{ value: "", label: "(default: tier model)" }];
+  const currentValue = safeGetSetting(entry.key);
   if (entry.kind === "image") {
-    return (IMAGE_MODEL_OPTIONS_BY_PROVIDER[entry.provider] || []).slice();
+    return getImageModelOptions(entry.provider, { currentValue }).slice();
   }
-  const baseChoices = TEXT_MODEL_OPTIONS_BY_PROVIDER[entry.provider] || [{ value: "", label: "(default: tier model)" }];
+  const baseChoices = getTextModelOptions(entry.provider, { includeDefault: true, currentValue });
+  if (baseChoices.length === 0) return [{ value: "", label: "(default: tier model)" }];
   if (entry.provider === "claude" && entry.tier === "standard") {
     const defaultModel = getDefaultTierModel("claude", "standard") || "sonnet";
     return [{ value: "", label: `(default: ${defaultModel})` }, ...baseChoices.slice(1)];
   }
-  return baseChoices;
+  return baseChoices.slice();
 }
 
 function getSelectableImageProviders() {
@@ -699,12 +703,14 @@ function loadReports(projectDir) {
 export class AdminTUI {
   constructor({ projectDir }) {
     this.projectDir = projectDir;
-    this._tab = 0;        // see ADMIN_TAB_NAMES
+    this._tab = 0;        // index into ADMIN_TABS — starts on Settings
     this._scroll = 0;
     this._tabScrolls = Array.from({ length: ADMIN_TAB_COUNT }, () => 0);
+    this._logSource = "prompts"; // see ADMIN_LOG_SOURCES
     this._promptExpanded = -1;
     this._promptSelected = 0;
     this._promptCount = 0;
+    this._promptRowMap = new Map();
     this._purgeLogsConfirm = false;
     this._purgeLogsMessage = "";
     this._done = null;
@@ -725,6 +731,7 @@ export class AdminTUI {
     this._settingsIndex = 0;
     this._settingsPane = null;
     this._settingsRowMap = new Map();
+    this._settingsSavedFlash = null;
     // Work Items tab state — three drill levels: list → WI detail → call detail.
     // _selectedWi / _selectedCall are DB ids (null = at that level's list).
     this._wiListIndex = 0;
@@ -747,7 +754,6 @@ export class AdminTUI {
     this._settingsCache = null;
     this._settingsCacheAt = 0;
     this._settingsController = new AdminSettingsController();
-    this._artifactProtocolsCache = null;
     this._lastExitAt = 0;
     this._consoleMessages = [];
     this._consoleInterceptState = null;
@@ -771,6 +777,10 @@ export class AdminTUI {
 
     this.cols = process.stdout.columns || 120;
     this.rows = process.stdout.rows || 40;
+  }
+
+  _tabId() {
+    return ADMIN_TABS[this._tab]?.id || ADMIN_TABS[0].id;
   }
 
   _buildCurrentRunUsageSection(width, providerUsage = null) {
@@ -932,7 +942,7 @@ export class AdminTUI {
   run() {
     return new Promise((resolve) => {
       this._done = resolve;
-      if (!this._settingsPane) this._settingsPane = "core";
+      if (!this._settingsPane) this._settingsPane = "providers";
       this._installConsoleIntercept();
       this._installExitHandlers();
       process.on("exit", this._onProcessExit);
@@ -1334,7 +1344,7 @@ export class AdminTUI {
       this._resetEditState();
     }
 
-    if (this._tab === 4 && this._purgeLogsConfirm) {
+    if (this._tabId() === "logs" && this._purgeLogsConfirm) {
       if (matchesHotkey(str, key, "y")) {
         try {
           const result = purgeRuntimeLogs({ projectDir: this.projectDir });
@@ -1363,30 +1373,31 @@ export class AdminTUI {
       }
     }
 
+    const tabId = this._tabId();
     if (key && key.name === "escape") {
-      if (this._tab === 1 && this._selectedCall != null) {
+      if (tabId === "work_items" && this._selectedCall != null) {
         this._selectedCall = null;
         this._scroll = 0;
-      } else if (this._tab === 1 && this._selectedWi != null) {
+      } else if (tabId === "work_items" && this._selectedWi != null) {
         this._selectedWi = null;
         this._scroll = this._tabScrolls[this._tab];
-      } else if (this._tab === 4 && this._promptExpanded >= 0) {
+      } else if (tabId === "logs" && this._promptExpanded >= 0) {
         this._promptExpanded = -1;
       } else {
         this._exit();
       }
-    } else if (matchesHotkey(str, key, "q") && this._tab !== 2) {
+    } else if (matchesHotkey(str, key, "q") && tabId !== "settings") {
       // On the settings tab printable keys (including q) fall through to the
       // type-to-edit fallback below instead of quitting.
       this._exit();
-    } else if (isBackspaceKey(str, key) && this._tab === 1 && this._selectedCall != null) {
+    } else if (isBackspaceKey(str, key) && tabId === "work_items" && this._selectedCall != null) {
       this._selectedCall = null;
       this._scroll = 0;
-    } else if (isBackspaceKey(str, key) && this._tab === 1 && this._selectedWi != null) {
+    } else if (isBackspaceKey(str, key) && tabId === "work_items" && this._selectedWi != null) {
       this._selectedWi = null;
       this._scroll = this._tabScrolls[this._tab];
     } else if (isEnterKey(str, key)) {
-      if (this._tab === 1 && this._selectedCall == null && this._selectedWi == null) {
+      if (tabId === "work_items" && this._selectedCall == null && this._selectedWi == null) {
         // Enter on WI list — open highlighted WI detail
         const rows = this._getWiRows();
         if (rows.length > 0) {
@@ -1395,7 +1406,7 @@ export class AdminTUI {
           this._callListIndex = 0;
           this._scroll = 0;
         }
-      } else if (this._tab === 1 && this._selectedWi != null && this._selectedCall == null) {
+      } else if (tabId === "work_items" && this._selectedWi != null && this._selectedCall == null) {
         // Enter on call list — open highlighted agent_call detail
         const calls = this._getWiCalls(this._selectedWi);
         if (calls.length > 0) {
@@ -1403,10 +1414,10 @@ export class AdminTUI {
           this._selectedCall = calls[this._callListIndex].id;
           this._scroll = 0;
         }
-      } else if (this._tab === 2) {
+      } else if (tabId === "settings") {
         this._startEdit();
         return;
-      } else if (this._tab === 4) {
+      } else if (tabId === "logs") {
         if (this._promptExpanded >= 0) {
           this._promptExpanded = -1;
         } else {
@@ -1414,26 +1425,35 @@ export class AdminTUI {
           this._scroll = 0;
         }
       }
-    } else if (this._tab === 4 && (matchesHotkey(str, key, "j") || matchesHotkey(str, key, "k"))) {
+    } else if (tabId === "logs" && (matchesHotkey(str, key, "j") || matchesHotkey(str, key, "k"))) {
       const delta = matchesHotkey(str, key, "j") ? 1 : -1;
       const maxPrompt = Math.max(0, Number(this._promptCount || 0) - 1);
       this._promptSelected = Math.min(maxPrompt, Math.max(0, (this._promptSelected || 0) + delta));
       if (this._promptExpanded >= 0) {
         this._promptExpanded = this._promptSelected;
         this._scroll = 0;
+      } else {
+        // Keep the > marker on screen — selection and scroll were previously
+        // independent, letting j/k walk the cursor out of the viewport.
+        this._scrollToMappedRow(this._promptRowMap.get(this._promptSelected));
+        this._tabScrolls[this._tab] = this._scroll;
       }
-    } else if (this._tab === 4 && matchesHotkey(str, key, "x")) {
+    } else if (tabId === "logs" && matchesHotkey(str, key, "x")) {
       this._purgeLogsConfirm = true;
       this._purgeLogsMessage = "";
+    } else if (tabId === "logs" && (key?.name === "left" || key?.name === "right")) {
+      this._cycleLogSource(key.name === "right" ? 1 : -1);
+    } else if (tabId === "settings" && (key?.name === "left" || key?.name === "right")) {
+      this._cycleSettingsPane(key.name === "right" ? 1 : -1);
     } else if (key && key.name === "up") {
-      if (this._tab === 2) {
+      if (tabId === "settings") {
         const selectedRow = this._settingsRowMap.get(this._getSelectedEditableSetting()?.setting_key);
         if (typeof selectedRow === "number" && this._scroll > selectedRow) {
           this._scroll--;
         } else {
           this._moveSettingsSelection(-1);
         }
-      } else if (this._tab === 1 && this._selectedCall == null && this._selectedWi == null) {
+      } else if (tabId === "work_items" && this._selectedCall == null && this._selectedWi == null) {
         const rows = this._getWiRows();
         if (rows.length > 0) {
           this._wiListIndex = Math.max(0, this._wiListIndex - 1);
@@ -1441,7 +1461,7 @@ export class AdminTUI {
         } else if (this._scroll > 0) {
           this._scroll--;
         }
-      } else if (this._tab === 1 && this._selectedWi != null && this._selectedCall == null) {
+      } else if (tabId === "work_items" && this._selectedWi != null && this._selectedCall == null) {
         const calls = this._getWiCalls(this._selectedWi);
         if (calls.length > 0) {
           this._callListIndex = Math.max(0, this._callListIndex - 1);
@@ -1454,14 +1474,14 @@ export class AdminTUI {
       }
       this._tabScrolls[this._tab] = this._scroll;
     } else if (key && key.name === "down") {
-      if (this._tab === 2) {
+      if (tabId === "settings") {
         const settingsList = this._getEditableSettings();
         if (settingsList.length > 0 && this._settingsIndex >= settingsList.length - 1) {
           this._scroll++;
         } else {
           this._moveSettingsSelection(1);
         }
-      } else if (this._tab === 1 && this._selectedCall == null && this._selectedWi == null) {
+      } else if (tabId === "work_items" && this._selectedCall == null && this._selectedWi == null) {
         const rows = this._getWiRows();
         if (rows.length > 0) {
           this._wiListIndex = Math.min(rows.length - 1, this._wiListIndex + 1);
@@ -1469,7 +1489,7 @@ export class AdminTUI {
         } else {
           this._scroll++;
         }
-      } else if (this._tab === 1 && this._selectedWi != null && this._selectedCall == null) {
+      } else if (tabId === "work_items" && this._selectedWi != null && this._selectedCall == null) {
         const calls = this._getWiCalls(this._selectedWi);
         if (calls.length > 0) {
           this._callListIndex = Math.min(calls.length - 1, this._callListIndex + 1);
@@ -1490,7 +1510,7 @@ export class AdminTUI {
         ? (this._tab + ADMIN_TAB_COUNT - 1) % ADMIN_TAB_COUNT
         : (this._tab + 1) % ADMIN_TAB_COUNT;
       this._scroll = this._tabScrolls[this._tab];
-      if (this._tab === 2 && !this._settingsPane) this._settingsPane = "core";
+      if (this._tabId() === "settings" && !this._settingsPane) this._settingsPane = "providers";
     } else if (ADMIN_TAB_KEYS.has(String(str))) {
       this._resetEditState();
       this._selectedWi = null;
@@ -1498,22 +1518,17 @@ export class AdminTUI {
       this._purgeLogsConfirm = false;
       this._tab = parseInt(str) - 1;
       this._scroll = this._tabScrolls[this._tab];
-      if (this._tab === 2 && !this._settingsPane) this._settingsPane = "core";
-    } else if (matchesHotkey(str, key, "e") && this._tab === 2) {
+      if (this._tabId() === "settings" && !this._settingsPane) this._settingsPane = "providers";
+    } else if (matchesHotkey(str, key, "e") && tabId === "settings") {
       this._startEdit();
       return;
-    } else if (matchesHotkey(str, key, "m") && this._tab === 2) {
+    } else if (matchesHotkey(str, key, "m") && tabId === "settings") {
       this._cycleImageModel();
-    } else if (matchesHotkey(str, key, "t") && this._tab === 2) {
-      this._settingsPane = this._settingsPane === "tuning" ? "core" : "tuning";
-      this._settingsIndex = 0;
-      this._scroll = 0;
-      this._tabScrolls[this._tab] = 0;
-    } else if (this._tab === 2 && (key?.name === "pageup" || key?.name === "pagedown")) {
+    } else if (tabId === "settings" && (key?.name === "pageup" || key?.name === "pagedown")) {
       this._jumpSettingsSection(key.name === "pagedown" ? 1 : -1);
       this.requestRender({ force: true });
       return;
-    } else if (this._tab === 2 && !key?.ctrl && !key?.meta) {
+    } else if (tabId === "settings" && !key?.ctrl && !key?.meta) {
       const printable = getPrintableInput(str, key);
       if (!printable) {
         this.requestRender({ force: true });
@@ -1527,6 +1542,17 @@ export class AdminTUI {
     this.requestRender({ force: true });
   }
 
+  _cycleLogSource(direction) {
+    const sourceIds = ADMIN_LOG_SOURCES.map((source) => source.id);
+    const currentIndex = sourceIds.indexOf(this._logSource);
+    const nextIndex = ((currentIndex >= 0 ? currentIndex : 0) + direction + sourceIds.length) % sourceIds.length;
+    this._logSource = sourceIds[nextIndex];
+    this._promptSelected = 0;
+    this._promptExpanded = -1;
+    this._scroll = 0;
+    this._tabScrolls[this._tab] = 0;
+  }
+
   // ── Image Model Cycling ────────────────────────────────────────────────
 
   _cycleImageModel(...args) {
@@ -1535,6 +1561,10 @@ export class AdminTUI {
 
   _jumpSettingsSection(...args) {
     return this._settingsController._jumpSettingsSection.call(this, ...args);
+  }
+
+  _cycleSettingsPane(...args) {
+    return this._settingsController._cycleSettingsPane.call(this, ...args);
   }
 
   _invalidateSettingsCache(...args) {
@@ -1664,23 +1694,23 @@ export class AdminTUI {
     this._lastRenderAt = Date.now();
     const fullW = this.cols - 2;
 
-    const builders = [
-      () => this._buildOverview(fullW),
-      () => this._buildWorkItemsTab(fullW),
-      () => this._buildSettings(fullW),
-      () => this._buildAtlasReport(fullW),
-      () => this._buildPrompts(fullW),
-      () => this._buildLocks(fullW),
-    ];
-    const content = builders[this._tab]().map(normalizeAdminLine);
+    const builders = {
+      settings: () => this._buildSettings(fullW),
+      overview: () => this._buildOverview(fullW),
+      work_items: () => this._buildWorkItemsTab(fullW),
+      logs: () => this._buildLogs(fullW),
+      atlas_report: () => this._buildAtlasReport(fullW),
+    };
+    const tabId = this._tabId();
+    const content = builders[tabId]().map(normalizeAdminLine);
 
     // Tab bar
-    const tabBar = ADMIN_TAB_NAMES.map((name, i) => {
+    const tabBar = ADMIN_TABS.map((tab, i) => {
       const num = `${i + 1}`;
       if (i === this._tab) {
-        return `${C.bold}${C.cyan}[${num}:${name}]${C.reset}`;
+        return `${C.bold}${C.cyan}[${num}:${tab.name}]${C.reset}`;
       }
-      return `${C.dim} ${num}:${name} ${C.reset}`;
+      return `${C.dim} ${num}:${tab.name} ${C.reset}`;
     }).join(" ");
 
     // Nav bar
@@ -1729,27 +1759,30 @@ export class AdminTUI {
         navLines.push(` ${C.dim}… ${choices.length - (start + visible)} more below${C.reset}`);
       }
       navLines.push(` ${C.dim}[↑↓] Move  [Space] Toggle  [PgUp/PgDn] Page  [Home/End] Jump  [Enter] Save  [Esc] Cancel${C.reset}`);
-    } else if (this._tab === 1 && this._selectedCall != null) {
+    } else if (tabId === "work_items" && this._selectedCall != null) {
       navLines.push(` ${C.dim}[Esc/Bksp] Back to WI  [\u2191\u2193] Scroll  [${ADMIN_TAB_NAV_LABEL}] Section${C.reset}`);
-    } else if (this._tab === 1 && this._selectedWi != null) {
+    } else if (tabId === "work_items" && this._selectedWi != null) {
       navLines.push(` ${C.dim}[↑↓] Select call  [Enter] Open call  [Esc/Bksp] Back to list  [${ADMIN_TAB_NAV_LABEL}] Section${C.reset}`);
-    } else if (this._tab === 1) {
-      navLines.push(` ${C.dim}[↑↓] Select WI  [Enter] Open WI  [${ADMIN_TAB_NAV_LABEL}] Section  [Esc] Exit${C.reset}`);
-    } else if (this._tab === 2) {
+    } else if (tabId === "work_items") {
+      navLines.push(` ${C.dim}[↑↓] Select WI  [Enter] Open WI  [${ADMIN_TAB_NAV_LABEL}] Section  [q/Esc] Exit${C.reset}`);
+    } else if (tabId === "settings") {
       const selected = this._getSelectedEditableSetting();
-      navLines.push(` ${C.dim}[↑↓] Select  [PgUp/PgDn] Jump section  [t] Core/Debug  [Enter/e/type] Edit highlighted item  [${ADMIN_TAB_NAV_LABEL}] Section  [Esc] Exit${C.reset}`);
+      navLines.push(` ${C.dim}[←→] Pane  [↑↓] Select  [PgUp/PgDn] Jump section  [Enter/e/type] Edit highlighted item  [${ADMIN_TAB_NAV_LABEL}] Section  [Esc] Exit${C.reset}`);
       if (selected) navLines.push(` ${C.dim}Selected:${C.reset} ${C.bold}${selected.setting_key}${C.reset} ${C.dim}${selected.description || ""}${C.reset}`);
-    } else if (this._tab === 3) {
-      navLines.push(` ${C.dim}[↑↓] Scroll  [${ADMIN_TAB_NAV_LABEL}] Section  [Esc] Exit${C.reset}`);
-    } else if (this._tab === 4) {
+      if (this._settingsSavedFlash && (Date.now() - (this._settingsSavedFlash.at || 0)) < 3_000) {
+        navLines.push(` ${C.green}✓ ${this._settingsSavedFlash.text}${C.reset}`);
+      }
+    } else if (tabId === "atlas_report") {
+      navLines.push(` ${C.dim}[↑↓] Scroll  [${ADMIN_TAB_NAV_LABEL}] Section  [q/Esc] Exit${C.reset}`);
+    } else if (tabId === "logs") {
       const expanded = this._promptExpanded >= 0;
       if (this._purgeLogsConfirm) {
         navLines.push(` ${C.red}Purge runtime logs, DB history, and ATLAS telemetry?${C.reset} ${C.dim}[y] Confirm  [n/Esc] Cancel${C.reset}`);
       } else {
-        navLines.push(` ${C.dim}[\u2191\u2193] Scroll  [Enter] ${expanded ? "Collapse" : "Expand selected"}  [j/k] Prev/Next  [x] Purge logs+DB history+ATLAS telemetry  [${ADMIN_TAB_NAV_LABEL}] Section  [Esc] ${expanded ? "Collapse" : "Exit"}${C.reset}`);
+        navLines.push(` ${C.dim}[\u2190\u2192] Log source  [\u2191\u2193] Scroll  [Enter] ${expanded ? "Collapse" : "Expand selected"}  [j/k] Prev/Next  [x] Purge logs+DB history+ATLAS telemetry  [${ADMIN_TAB_NAV_LABEL}] Section  [Esc] ${expanded ? "Collapse" : "Exit"}${C.reset}`);
       }
     } else {
-      navLines.push(` ${C.dim}[${ADMIN_TAB_NAV_LABEL}] Section  [\u2191\u2193] Scroll  [Esc] Exit${C.reset}`);
+      navLines.push(` ${C.dim}[${ADMIN_TAB_NAV_LABEL}] Section  [\u2191\u2193] Scroll  [q/Esc] Exit${C.reset}`);
     }
     navLines.push(...this._buildScipDependencyInstallNavLines());
     if (this._consoleMessages.length > 0) {
@@ -1920,119 +1953,6 @@ export class AdminTUI {
         source: "",
       },
     };
-  }
-
-  _buildLocks(width) {
-    const lines = [];
-    const inner = Math.max(20, width - 2);
-    const snapshot = this._getAdminLockSnapshot();
-    const { waiting, wiLocks, jobLocks, wiById } = snapshot;
-    const heldCount = wiLocks.length + jobLocks.length;
-    const clip = (value, max) => {
-      const text = String(value ?? "").replace(/\s+/g, " ").trim();
-      if (text.length <= max) return text;
-      if (max <= 1) return "\u2026";
-      return `${text.slice(0, max - 1)}\u2026`;
-    };
-    const cell = (value, max) => clip(value, max).padEnd(max);
-    const pathWidth = Math.max(18, Math.min(42, inner - 56));
-
-    lines.push("");
-    lines.push(` ${C.bold}${C.cyan}\u2550\u2550\u2550 LOCKS \u2550\u2550\u2550${C.reset}  ${C.dim}${waiting.length} waiting · ${wiLocks.length} WI lock${wiLocks.length === 1 ? "" : "s"} · ${jobLocks.length} job lock${jobLocks.length === 1 ? "" : "s"}${C.reset}`);
-    lines.push("");
-
-    lines.push(` ${C.bold}Waiting On Locks${C.reset}`);
-    lines.push(` ${C.dim}${"\u2500".repeat(Math.min(inner, 92))}${C.reset}`);
-    if (waiting.length === 0) {
-      lines.push(`  ${C.dim}No runnable queued jobs are currently waiting on file locks.${C.reset}`);
-    } else {
-      const waitWidth = Math.max(24, Math.min(34, Math.floor(inner * 0.32)));
-      const scopeWidth = Math.max(22, Math.min(36, Math.floor(inner * 0.28)));
-      const hdr = `  ${cell("Waiting", waitWidth)} ${cell("Scope", scopeWidth)} Holding The Lock`;
-      lines.push(` ${C.dim}${hdr}${C.reset}`);
-      for (const row of waiting) {
-        const waitingLabel = `job #${row.waiting.jobId} WI#${row.waiting.workItemId} ${row.waiting.jobType}`;
-        const holderLabel = `${row.holder.label}${row.holder.path && row.holder.path !== row.waiting.scope ? ` (${row.holder.path})` : ""}`;
-        lines.push(`  ${C.yellow}${cell(waitingLabel, waitWidth)}${C.reset} ${cell(row.waiting.scope, scopeWidth)} ${C.cyan}${clip(holderLabel, Math.max(18, inner - waitWidth - scopeWidth - 6))}${C.reset}`);
-        const detail = [
-          row.waiting.title ? `waiting: ${row.waiting.title}` : "",
-          row.holder.detail ? `holder: ${row.holder.detail}` : "",
-          row.holder.source,
-        ].filter(Boolean).join("  ");
-        if (detail) lines.push(`   ${C.dim}${clip(detail, inner - 3)}${C.reset}`);
-      }
-    }
-    lines.push("");
-
-    lines.push(` ${C.bold}WI Locks${C.reset}  ${C.dim}persistent cross-WI blockers${C.reset}`);
-    lines.push(` ${C.dim}${"\u2500".repeat(Math.min(inner, 92))}${C.reset}`);
-    if (wiLocks.length === 0) {
-      lines.push(`  ${C.dim}No active WI-level file locks.${C.reset}`);
-    } else {
-      const byWi = new Map();
-      for (const lock of wiLocks) {
-        const key = lock.work_item_id == null ? "?" : String(lock.work_item_id);
-        if (!byWi.has(key)) byWi.set(key, []);
-        byWi.get(key).push(lock);
-      }
-      for (const [wiId, locks] of [...byWi.entries()].sort((a, b) => Number(a[0]) - Number(b[0]))) {
-        const wi = wiById.get(Number(wiId));
-        const status = [wi?.status || locks[0]?.work_item_status, wi?.merge_state || locks[0]?.merge_state]
-          .filter(Boolean)
-          .join("/");
-        const title = wi?.title || locks[0]?.work_item_title || "";
-        lines.push(`  ${C.cyan}WI#${wiId}${C.reset} ${C.dim}${status || "unknown"}${C.reset}  ${clip(title, Math.max(18, inner - 24))}`);
-        for (const lock of locks) {
-          const source = lock.source_job_id != null ? `source #${lock.source_job_id}` : "source ?";
-          const sourceType = lock.source_job_type ? ` ${lock.source_job_type}` : "";
-          const sourceStatus = lock.source_job_status ? `/${lock.source_job_status}` : "";
-          lines.push(
-            `   ${cell(lock.lock_kind || "lock", 5)} ` +
-            `${cell(lock.path || "unknown", pathWidth)} ` +
-            `${C.dim}${source}${sourceType}${sourceStatus}  acquired ${fmtDate(lock.acquired_at)}${C.reset}`
-          );
-        }
-      }
-    }
-    lines.push("");
-
-    lines.push(` ${C.bold}Job Locks By WI${C.reset}  ${C.dim}active per-job holders${C.reset}`);
-    lines.push(` ${C.dim}${"\u2500".repeat(Math.min(inner, 92))}${C.reset}`);
-    if (jobLocks.length === 0) {
-      lines.push(`  ${C.dim}No active job-level file locks.${C.reset}`);
-    } else {
-      const byWi = new Map();
-      for (const lock of jobLocks) {
-        const key = lock.work_item_id == null ? "?" : String(lock.work_item_id);
-        if (!byWi.has(key)) byWi.set(key, []);
-        byWi.get(key).push(lock);
-      }
-      for (const [wiId, locks] of [...byWi.entries()].sort((a, b) => Number(a[0]) - Number(b[0]))) {
-        const wi = wiById.get(Number(wiId));
-        lines.push(`  ${C.cyan}WI#${wiId}${C.reset} ${C.dim}${wi?.status || "unknown"}${C.reset}  ${clip(wi?.title || "", Math.max(18, inner - 24))}`);
-        const byJob = new Map();
-        for (const lock of locks) {
-          const key = lock.job_id == null ? "?" : String(lock.job_id);
-          if (!byJob.has(key)) byJob.set(key, []);
-          byJob.get(key).push(lock);
-        }
-        for (const [jobId, rows] of [...byJob.entries()].sort((a, b) => Number(a[0]) - Number(b[0]))) {
-          const first = rows[0] || {};
-          const label = `job #${jobId} ${first.job_type || "?"}/${first.job_status || "?"}`;
-          lines.push(`   ${C.bold}${label}${C.reset}  ${clip(first.job_title || "", Math.max(18, inner - label.length - 8))}`);
-          for (const lock of rows) {
-            lines.push(`    ${cell(lock.lock_kind || "lock", 5)} ${cell(lock.path || "unknown", pathWidth)} ${C.dim}acquired ${fmtDate(lock.acquired_at)}${C.reset}`);
-          }
-        }
-      }
-    }
-
-    if (heldCount === 0 && waiting.length === 0) {
-      lines.push("");
-      lines.push(` ${C.dim}Locks will appear here once a mutating job leases scoped work or a completed WI is waiting to merge.${C.reset}`);
-    }
-    lines.push("");
-    return lines;
   }
 
   // ── Tab 1: Overview ───────────────────────────────────────────────────
@@ -2994,12 +2914,19 @@ export class AdminTUI {
     return lines;
   }
 
-  _buildPrompts(width) {
+  _buildLogs(width) {
+    const source = this._logSource === "outputs" ? "outputs" : "prompts";
     const lines = [];
     const inner = width - 2;
+    this._promptRowMap = new Map();
+    const sourceBar = ADMIN_LOG_SOURCES.map((entry) => (
+      entry.id === source
+        ? `${C.bold}${C.cyan}[${entry.label}]${C.reset}`
+        : `${C.dim}${entry.label}${C.reset}`
+    )).join(` ${C.dim}|${C.reset} `);
     lines.push("");
-    lines.push(` ${C.bold}${C.cyan}\u2550\u2550\u2550 PROMPT LOG \u2550\u2550\u2550${C.reset}`);
-    lines.push(` ${C.dim}Last 3 days of provider prompts. Shown newest first.${C.reset}`);
+    lines.push(` ${C.bold}${C.cyan}\u2550\u2550\u2550 LOGS \u2550\u2550\u2550${C.reset}  ${sourceBar}  ${C.dim}(\u2190\u2192 to switch)${C.reset}`);
+    lines.push(` ${C.dim}Last 3 days of provider ${source}. Shown newest first.${C.reset}`);
     lines.push(` ${C.dim}Press ${C.bold}x${C.reset}${C.dim} to purge disk logs, DB work-item history, and ATLAS report telemetry.${C.reset}`);
     if (this._purgeLogsConfirm) {
       lines.push(` ${C.red}${C.bold}Confirm purge:${C.reset} ${C.red}this deletes runtime log files, terminal WI history, DB log rows, and ATLAS report telemetry. Press y to confirm, n/Esc to cancel.${C.reset}`);
@@ -3007,6 +2934,11 @@ export class AdminTUI {
       lines.push(` ${C.green}${this._purgeLogsMessage}${C.reset}`);
     }
     lines.push("");
+
+    if (source === "outputs") {
+      this._appendOutputLogLines(lines, inner);
+      return lines;
+    }
 
     let records;
     try {
@@ -3146,12 +3078,98 @@ export class AdminTUI {
       const marker = i === selected ? `${C.yellow}>${C.reset}` : " ";
       const numStr = String(i + 1).padStart(3);
       const rowColor = i === selected ? C.bold : "";
+      this._promptRowMap.set(i, lines.length);
       lines.push(
         `${marker} ${rowColor}${numStr} ${ts.padEnd(19)} ${role.padEnd(11)} ${provider.padEnd(9)} ${model.padEnd(18)} ${jobTag.padEnd(9)} ${wiTag.padEnd(6)} ${chars.padStart(7)}  ${preview}${C.reset}`
       );
     }
     lines.push("");
     return lines;
+  }
+
+  // Output-log view of the Logs tab. Shares selection/expansion state with
+  // the prompts view (_promptSelected/_promptExpanded) so j/k and Enter work
+  // identically across sources.
+  _appendOutputLogLines(lines, inner) {
+    let records;
+    try {
+      records = readRecentOutputs({ limit: 200 });
+    } catch (err) {
+      this._promptCount = 0;
+      lines.push(` ${C.red}Failed to read output log:${C.reset} ${err?.message || err}`);
+      lines.push("");
+      return;
+    }
+    this._promptCount = Array.isArray(records) ? records.length : 0;
+
+    if (!records || records.length === 0) {
+      lines.push(` ${C.dim}No outputs recorded yet. Run a job to populate this log.${C.reset}`);
+      lines.push("");
+      return;
+    }
+
+    if (this._promptExpanded >= 0 && this._promptExpanded < records.length) {
+      const rec = records[this._promptExpanded];
+      const ts = String(rec.ts || "").replace("T", " ").replace(/\..*$/, "");
+      const role = String(rec.role || "?");
+      const provider = String(rec.provider || "?");
+      const model = String(rec.model || "?");
+      const tier = String(rec.model_tier || "?");
+      const jobTag = rec.job_id != null ? `job#${rec.job_id}` : "job#?";
+      const wiTag = rec.work_item_id != null ? `wi#${rec.work_item_id}` : "";
+      const statusColor = rec.status === "succeeded" ? C.green : rec.status === "failed" ? C.red : C.dim;
+      lines.push(` ${C.bold}${ts}${C.reset}  ${C.cyan}${role}${C.reset} ${C.dim}${provider}/${model} (${tier})${C.reset}  ${statusColor}${rec.status || "?"}${C.reset}`);
+      const tokens = `${fmtTokens(Number(rec.input_tokens) || 0)} in + ${fmtTokens(Number(rec.output_tokens) || 0)} out`;
+      const duration = rec.duration_ms != null ? `  ${fmtDuration(Number(rec.duration_ms) || 0)}` : "";
+      const activity = rec.activity ? ` activity=${rec.activity}` : "";
+      const attempt = rec.attempt != null ? ` attempt=${rec.attempt}` : "";
+      lines.push(` ${C.dim}${jobTag} ${wiTag}${activity}${attempt}  chars=${rec.output_chars || 0}  ${tokens}${duration}${C.reset}`);
+      lines.push(` ${C.dim}${"─".repeat(Math.min(inner, 90))}${C.reset}`);
+      if (rec.error_text) {
+        lines.push(` ${C.red}Error:${C.reset} ${String(rec.error_text).replace(/\s+/g, " ").slice(0, Math.max(10, inner - 10))}`);
+        lines.push("");
+      }
+      const text = String(rec.output || "");
+      for (const line of text.split(/\r?\n/)) {
+        if (!line) { lines.push(""); continue; }
+        let remaining = line;
+        while (remaining.length > inner - 2) {
+          lines.push(` ${remaining.slice(0, inner - 2)}`);
+          remaining = remaining.slice(inner - 2);
+        }
+        lines.push(` ${remaining}`);
+      }
+      lines.push("");
+      return;
+    }
+
+    lines.push(` ${C.dim}Showing ${records.length} outputs. Use ↑↓ to scroll, j/k to select, Enter to view full output.${C.reset}`);
+    lines.push("");
+    const hdr = `  ${"#".padStart(3)} ${"When".padEnd(19)} ${"Role".padEnd(11)} ${"Provider".padEnd(9)} ${"Model".padEnd(18)} ${"Job".padEnd(9)} ${"WI".padEnd(6)} ${"Status".padEnd(9)} ${"Chars".padStart(7)}  Preview`;
+    lines.push(` ${C.dim}${hdr}${C.reset}`);
+    lines.push(` ${C.dim}${"─".repeat(Math.min(inner, hdr.length + 2))}${C.reset}`);
+
+    const selected = this._promptSelected ?? 0;
+    for (let i = 0; i < records.length; i++) {
+      const rec = records[i];
+      const ts = String(rec.ts || "").replace("T", " ").replace(/\..*$/, "");
+      const role = String(rec.role || "?").slice(0, 11);
+      const provider = String(rec.provider || "?").slice(0, 9);
+      const model = String(rec.model || "?").slice(0, 18);
+      const jobTag = rec.job_id != null ? `j#${rec.job_id}` : "j#?";
+      const wiTag = rec.work_item_id != null ? `w#${rec.work_item_id}` : "";
+      const status = String(rec.status || "?").slice(0, 9);
+      const chars = String(rec.output_chars || 0);
+      const preview = String(rec.output || "").replace(/\s+/g, " ").trim().slice(0, Math.max(10, inner - 105));
+      const marker = i === selected ? `${C.yellow}>${C.reset}` : " ";
+      const numStr = String(i + 1).padStart(3);
+      const rowColor = i === selected ? C.bold : "";
+      this._promptRowMap.set(i, lines.length);
+      lines.push(
+        `${marker} ${rowColor}${numStr} ${ts.padEnd(19)} ${role.padEnd(11)} ${provider.padEnd(9)} ${model.padEnd(18)} ${jobTag.padEnd(9)} ${wiTag.padEnd(6)} ${status.padEnd(9)} ${chars.padStart(7)}  ${preview}${C.reset}`
+      );
+    }
+    lines.push("");
   }
 
   _buildSettings(...args) {

@@ -41,7 +41,7 @@ const DEFAULT_BRANCH_CACHE = new Map();
 const EDGE_TAXONOMY_CACHE_TTL_MS = 30_000;
 const EDGE_TAXONOMY_CACHE_MAX = 32;
 const EDGE_TAXONOMY_CACHE = new Map();
-// Emitted by parser/treesitter/spec-javascript.js importEdges(). These
+// Emitted by the native parser's js/ts import edges (spec_javascript.rs). These
 // confidence values are a temporary import-kind channel until the edge schema
 // carries an explicit import_kind/external_descriptor.
 const JS_IMPORT_CONFIDENCE_NAMESPACE = 85;

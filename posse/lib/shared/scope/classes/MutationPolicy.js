@@ -16,8 +16,7 @@ const BLOCKED_MUTATING_COMMAND = new RegExp(
   "i",
 );
 const BLOCKED_INLINE_SCRIPT_WRITE = /\b(?:node\s+-e|python3?\s+-c)\b[\s\S]*(?:writeFile|appendFile|createWriteStream|fs\.(?:rm|unlink|mkdir|rename|copyFile)|open\s*\(|Path\s*\([^)]*\)\.write|shutil\.|os\.(?:remove|unlink|mkdir|rmdir|rename))/i;
-const SCOPED_BASH_ALLOWLIST = /^\s*(npm\s+test|npm\s+run|npx\s+(?:tsc|eslint|prettier|jest|vitest|mocha)\b|pnpm\s+(test|run|exec)|yarn\s+(test|run)|tsc\s|eslint\s|prettier\s|jest\s|vitest\s|mocha\s|pip\s+show|python3?\s+-m\s+(?:pytest|unittest|build)\b|pytest\s|ruff\s|mypy\s|flake8\s|black\s+--check|php\s|composer\s+(test|run)|phpunit\s|cargo\s+(test|check|build|clippy)|rustfmt\s+--check|go\s+(test|vet|build)|make\s|cmake\s|gradle\s|mvn\s|dotnet\s+(test|build)|cat\s|head\s|tail\s|ls\s|find\s|wc\s|file\s|du\s|diff\s|sort\s|uniq\s|grep\s|rg\s|git\s+diff|git\s+log|git\s+status|git\s+show|echo\s|pwd|whoami)/i;
-const READONLY_BASH_ALLOWLIST = SCOPED_BASH_ALLOWLIST;
+const READONLY_BASH_ALLOWLIST = /^\s*(npm\s+test|npm\s+run|npx\s+(?:tsc|eslint|prettier|jest|vitest|mocha)\b|pnpm\s+(test|run|exec)|yarn\s+(test|run)|tsc\s|eslint\s|prettier\s|jest\s|vitest\s|mocha\s|pip\s+show|python3?\s+-m\s+(?:pytest|unittest|build)\b|pytest\s|ruff\s|mypy\s|flake8\s|black\s+--check|php\s|composer\s+(test|run)|phpunit\s|cargo\s+(test|check|build|clippy)|rustfmt\s+--check|go\s+(test|vet|build)|make\s|cmake\s|gradle\s|mvn\s|dotnet\s+(test|build)|cat\s|head\s|tail\s|ls\s|find\s|wc\s|file\s|du\s|diff\s|sort\s|uniq\s|grep\s|rg\s|git\s+diff|git\s+log|git\s+status|git\s+show|echo\s|pwd|whoami)/i;
 const SENSITIVE_ENV_BASENAME_RE = /^\.env(?:\.|$)/i;
 const SHELL_VARIABLE_EXPANSION_RE = /(?:%[A-Za-z_][A-Za-z0-9_]*%|\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*))/;
 const INFERRED_DELETE_FILE_EXTENSIONS = new Set([
@@ -361,6 +360,10 @@ export class MutationPolicy {
     return changed.filter((filePath) => !this.scope.contains(filePath));
   }
 
+  // Note: canEdit and canCreate deliberately accept entries from BOTH
+  // modifyFiles and createFiles — a file declared for creation may need a
+  // follow-up edit in the same job, and vice versa. Do not assume the two
+  // lists are enforced as semantically distinct permissions.
   canEdit(filePath) {
     const rel = relFromCandidate(this.cwd, filePath);
     return this.scope.modifyFiles.includes(rel)
@@ -399,7 +402,11 @@ export class MutationPolicy {
     };
   }
 
-  authorizeBash(command, { allowWrite = false, hasFileScope = false } = {}) {
+  // Bash is read-only by design regardless of the caller's write grant: the
+  // rejection messages steer mutations to write_file/edit_file, and a
+  // regression test pins that writes stay blocked. No options are accepted so
+  // callers can't be misled into expecting an allowWrite knob to work.
+  authorizeBash(command) {
     const cmd = String(command || "");
     if (!cmd || typeof command !== "string") {
       return { ok: false, error: "Error: No command provided." };

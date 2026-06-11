@@ -33,7 +33,8 @@ const MEMORY_TYPES = new Set([
 export function memoryStore({ versionId, params, ledger, repoId }) {
   const db = ledgerDb(ledger);
   if (!db) return ledgerUnavailable("memory.store", versionId);
-  if (!getEffectivePolicy(ledger, effectiveRepo(repoId, params.repoId)).memoryEnabled) {
+  const policy = getEffectivePolicy(ledger, effectiveRepo(repoId, params.repoId));
+  if (!policy.memoryEnabled) {
     return memoryDisabled("memory.store", versionId);
   }
 
@@ -111,6 +112,29 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
     });
   }
 
+  // Exact-hash dedupe misses rewordings of the same knowledge. For
+  // auto-generated ids (agent "just remember this" writes) a conservative
+  // near-duplicate check folds the write into the existing memory instead of
+  // accumulating parallel variants. Explicit ids are intentional updates and
+  // are never redirected.
+  if (!providedId && !existing) {
+    const nearDuplicate = findNearDuplicateMemory(db, effectiveRepoId, type, title, content);
+    if (nearDuplicate) {
+      return okEnvelope({
+        action: "memory.store",
+        versionId,
+        data: {
+          ok: true,
+          memoryId: nearDuplicate.memory_id,
+          memory_id: nearDuplicate.memory_id,
+          created: false,
+          deduplicated: true,
+          nearDuplicate: true,
+        },
+      });
+    }
+  }
+
   const now = new Date().toISOString();
   const txn = db.transaction(() => {
     if (duplicateToReplace) {
@@ -158,6 +182,8 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
       message: err?.message || String(err),
     });
   }
+  sweepStaleMemories(db, effectiveRepoId, policy);
+  enforceMemoryCap(db, effectiveRepoId, policy, now);
   getRetrievalCache().invalidateAll();
 
   return okEnvelope({
@@ -185,17 +211,21 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
 export function memoryQuery({ versionId, params, ledger, repoId }) {
   const db = ledgerDb(ledger);
   if (!db) return ledgerUnavailable("memory.query", versionId);
-  if (!getEffectivePolicy(ledger, effectiveRepo(repoId, params.repoId)).memoryEnabled) {
+  const effectiveRepoId = effectiveRepo(repoId, params.repoId);
+  const policy = getEffectivePolicy(ledger, effectiveRepoId);
+  if (!policy.memoryEnabled) {
     return memoryDisabled("memory.query", versionId);
   }
+  sweepStaleMemories(db, effectiveRepoId, policy);
   const limit = clampInt(params.limit, 1, 100, 20);
   const offset = clampInt(params.offset, 0, 10_000, 0);
-  const rows = candidateRows(db, effectiveRepo(repoId, params.repoId), {
+  const rows = candidateRows(db, effectiveRepoId, {
     includeDeleted: false,
     query: params.query,
   });
-  const filtered = filterRows(db, rows, params);
-  const scored = filtered.map((row) => hydrateMemory(db, row, {
+  const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
+  const filtered = filterRows(rows, params, links, { anchorMode: "all" });
+  const scored = filtered.map((row) => hydrateMemory(row, links, {
     query: params.query,
     symbolIds: params.symbolIds,
     fileRelPaths: params.fileRelPaths,
@@ -206,7 +236,7 @@ export function memoryQuery({ versionId, params, ledger, repoId }) {
     action: "memory.query",
     versionId,
     data: {
-      repoId: effectiveRepo(repoId, params.repoId),
+      repoId: effectiveRepoId,
       memories: page,
       total: scored.length,
       hasMore: offset + limit < scored.length,
@@ -268,20 +298,23 @@ export function memoryRemove({ versionId, params, ledger, repoId }) {
 export function memorySurface({ versionId, params, ledger, repoId }) {
   const db = ledgerDb(ledger);
   if (!db) return ledgerUnavailable("memory.surface", versionId);
-  if (!getEffectivePolicy(ledger, effectiveRepo(repoId, params.repoId)).memoryEnabled) {
+  const effectiveRepoId = effectiveRepo(repoId, params.repoId);
+  const policy = getEffectivePolicy(ledger, effectiveRepoId);
+  if (!policy.memoryEnabled) {
     return memoryDisabled("memory.surface", versionId);
   }
+  sweepStaleMemories(db, effectiveRepoId, policy);
   const limit = clampInt(params.limit, 1, 50, 6);
-  const effectiveRepoId = effectiveRepo(repoId, params.repoId);
   const rows = candidateRows(db, effectiveRepoId, { includeDeleted: false });
-  const filtered = filterRows(db, rows, params);
-  const surfaced = filtered
-    .map((row) => hydrateMemory(db, row, {
-      symbolIds: params.symbolIds,
-      fileRelPaths: params.fileRelPaths,
-      taskType: params.taskType,
-    }))
-    .filter((memory) => memory.score > 0 || hasNoSurfaceCriteria(params));
+  const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
+  // Surfacing is proactive: a memory anchored to any of the provided symbols
+  // OR files is relevant, and stale memories never surface on their own.
+  const filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true });
+  const surfaced = filtered.map((row) => hydrateMemory(row, links, {
+    symbolIds: params.symbolIds,
+    fileRelPaths: params.fileRelPaths,
+    taskType: params.taskType,
+  }));
   sortMemories(surfaced, "score");
   return okEnvelope({
     action: "memory.surface",
@@ -392,6 +425,58 @@ function findMemoryById(db, memoryId) {
   return db.prepare("SELECT * FROM memories WHERE memory_id = ? LIMIT 1").get(memoryId);
 }
 
+// High bar on purpose: only near-verbatim rewordings fold into an existing
+// memory. Distinct lessons that merely share vocabulary must stay separate.
+const NEAR_DUPLICATE_JACCARD = 0.9;
+
+function findNearDuplicateMemory(db, repoId, type, title, content) {
+  const target = new Set(tokenize(`${title}\n${content}`));
+  if (target.size === 0) return null;
+  const rows = db.prepare(
+    `SELECT memory_id, title, content FROM memories
+     WHERE repo_id = ? AND type = ? AND deleted = 0
+     ORDER BY updated_at DESC
+     LIMIT 200`,
+  ).all(repoId, type);
+  for (const row of rows) {
+    const candidate = new Set(tokenize(`${row.title || ""}\n${row.content || ""}`));
+    if (jaccardSimilarity(target, candidate) >= NEAR_DUPLICATE_JACCARD) return row;
+  }
+  return null;
+}
+
+function jaccardSimilarity(a, b) {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const token of a) if (b.has(token)) intersection += 1;
+  return intersection / (a.size + b.size - intersection);
+}
+
+/**
+ * Keep each repo's active memory count under policy.memoryMaxPerRepo by
+ * soft-deleting the least valuable rows (stale first, then lowest confidence,
+ * then oldest). The just-written memory has the newest updated_at, so it is
+ * only evicted if everything else outranks it.
+ */
+function enforceMemoryCap(db, repoId, policy, now) {
+  const cap = clampInt(policy?.memoryMaxPerRepo, 0, 100_000, 0);
+  if (cap <= 0) return;
+  const count = db.prepare(
+    "SELECT COUNT(*) AS c FROM memories WHERE repo_id = ? AND deleted = 0",
+  ).get(repoId)?.c || 0;
+  if (count <= cap) return;
+  const victims = db.prepare(
+    `SELECT memory_id FROM memories
+     WHERE repo_id = ? AND deleted = 0
+     ORDER BY stale DESC, confidence ASC, updated_at ASC
+     LIMIT ?`,
+  ).all(repoId, count - cap);
+  const evict = db.prepare(
+    "UPDATE memories SET deleted = 1, deleted_at = ?, updated_at = ? WHERE memory_id = ?",
+  );
+  for (const victim of victims) evict.run(now, now, victim.memory_id);
+}
+
 function replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths) {
   db.prepare("DELETE FROM memory_symbol_links WHERE memory_id = ?").run(memoryId);
   db.prepare("DELETE FROM memory_file_links WHERE memory_id = ?").run(memoryId);
@@ -442,7 +527,40 @@ function candidateRowsByFts(db, repoId, { query, includeDeleted }) {
   }
 }
 
-function filterRows(db, rows, params = {}) {
+/**
+ * Batch-fetch symbol/file links for a set of memories in chunked IN queries so
+ * filtering and hydration never issue per-row lookups.
+ */
+function fetchMemoryLinks(db, memoryIds) {
+  const symbolsById = new Map();
+  const filesById = new Map();
+  const unique = [...new Set(memoryIds)];
+  for (let start = 0; start < unique.length; start += 400) {
+    const chunk = unique.slice(start, start + 400);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const symbolRows = db.prepare(
+      `SELECT memory_id, content_hash, local_id FROM memory_symbol_links
+       WHERE memory_id IN (${placeholders})
+       ORDER BY content_hash, local_id`,
+    ).all(...chunk);
+    for (const row of symbolRows) {
+      if (!symbolsById.has(row.memory_id)) symbolsById.set(row.memory_id, []);
+      symbolsById.get(row.memory_id).push(`${row.content_hash}:${row.local_id}`);
+    }
+    const fileRows = db.prepare(
+      `SELECT memory_id, repo_rel_path FROM memory_file_links
+       WHERE memory_id IN (${placeholders})
+       ORDER BY repo_rel_path`,
+    ).all(...chunk);
+    for (const row of fileRows) {
+      if (!filesById.has(row.memory_id)) filesById.set(row.memory_id, []);
+      filesById.get(row.memory_id).push(row.repo_rel_path);
+    }
+  }
+  return { symbolsById, filesById };
+}
+
+function filterRows(rows, params = {}, links, { anchorMode = "all", excludeStale = false } = {}) {
   const types = new Set((Array.isArray(params.types) ? params.types : [])
     .map((t) => normalizeMemoryType(t))
     .filter(Boolean));
@@ -453,6 +571,7 @@ function filterRows(db, rows, params = {}) {
   const queryTokens = tokenize(query);
   return rows.filter((row) => {
     if (types.size > 0 && !types.has(row.type)) return false;
+    if (excludeStale && Number(row.stale || 0) === 1) return false;
     if (params.staleOnly && Number(row.stale || 0) !== 1) return false;
     const rowTags = parseJsonArray(row.tags_json);
     if (tags.length > 0 && !tags.every((tag) => rowTags.includes(tag))) return false;
@@ -460,8 +579,17 @@ function filterRows(db, rows, params = {}) {
       const text = memorySearchText(row, rowTags);
       if (!queryTokens.every((token) => text.includes(token))) return false;
     }
-    if (symbols.length > 0 && !hasAnySymbolLink(db, row.memory_id, symbols)) return false;
-    if (files.length > 0 && !hasAnyFileLink(db, row.memory_id, files)) return false;
+    const linkedSymbols = links.symbolsById.get(row.memory_id) || [];
+    const linkedFiles = links.filesById.get(row.memory_id) || [];
+    const symbolHit = symbols.length > 0 && symbols.some((s) => linkedSymbols.includes(s));
+    const fileHit = files.length > 0 && linkedFiles.some((f) => files.includes(f));
+    if (anchorMode === "any") {
+      // Proactive surfacing: any provided anchor (symbol OR file) qualifies.
+      if ((symbols.length > 0 || files.length > 0) && !symbolHit && !fileHit) return false;
+    } else {
+      if (symbols.length > 0 && !symbolHit) return false;
+      if (files.length > 0 && !fileHit) return false;
+    }
     return true;
   });
 }
@@ -474,35 +602,10 @@ function safeSymbolIds(values) {
   }
 }
 
-function hasAnySymbolLink(db, memoryId, symbolIds) {
-  const stmt = db.prepare(
-    `SELECT 1 FROM memory_symbol_links
-     WHERE memory_id = ? AND content_hash = ? AND local_id = ?
-     LIMIT 1`,
-  );
-  for (const symbolId of symbolIds) {
-    const parsed = parseAtlasSymbolId(symbolId);
-    if (parsed && stmt.get(memoryId, parsed.content_hash, parsed.local_id)) return true;
-  }
-  return false;
-}
-
-function hasAnyFileLink(db, memoryId, fileRelPaths) {
-  const stmt = db.prepare(
-    "SELECT 1 FROM memory_file_links WHERE memory_id = ? AND repo_rel_path = ? LIMIT 1",
-  );
-  for (const file of fileRelPaths) if (stmt.get(memoryId, file)) return true;
-  return false;
-}
-
-function hydrateMemory(db, row, criteria = {}) {
+function hydrateMemory(row, links, criteria = {}) {
   const tags = parseJsonArray(row.tags_json);
-  const linkedSymbols = db.prepare(
-    "SELECT content_hash, local_id FROM memory_symbol_links WHERE memory_id = ? ORDER BY content_hash, local_id",
-  ).all(row.memory_id).map((s) => `${s.content_hash}:${s.local_id}`);
-  const fileRelPaths = db.prepare(
-    "SELECT repo_rel_path FROM memory_file_links WHERE memory_id = ? ORDER BY repo_rel_path",
-  ).all(row.memory_id).map((f) => f.repo_rel_path);
+  const linkedSymbols = links.symbolsById.get(row.memory_id) || [];
+  const fileRelPaths = links.filesById.get(row.memory_id) || [];
   const matchedSymbols = (safeSymbolIds(criteria.symbolIds || [])).filter((s) => linkedSymbols.includes(s));
   const matchedFiles = normalizePaths(criteria.fileRelPaths || []).filter((f) => fileRelPaths.includes(f));
   const score = memoryScore(row, {
@@ -538,7 +641,7 @@ function hydrateMemory(db, row, criteria = {}) {
 function memoryScore(row, detail) {
   let score = 0;
   score += Number(row.confidence || 0) || 0;
-  score += recencyScore(row.updated_at);
+  score += recencyScore(row.updated_at, detail.nowMs ?? Date.now());
   score += detail.matchedSymbols.length * 2;
   score += detail.matchedFiles.length;
   if (detail.taskType && row.type === detail.taskType) score += 0.75;
@@ -553,10 +656,10 @@ function memoryScore(row, detail) {
   return Math.round(score * 1000) / 1000;
 }
 
-function recencyScore(value) {
+function recencyScore(value, nowMs = Date.now()) {
   const ts = Date.parse(String(value || ""));
   if (!Number.isFinite(ts)) return 0;
-  const ageDays = Math.max(0, (Date.now() - ts) / 86_400_000);
+  const ageDays = Math.max(0, (nowMs - ts) / 86_400_000);
   return Math.exp(-ageDays / 45);
 }
 
@@ -591,6 +694,17 @@ function parseJsonArray(value) {
   }
 }
 
+// Deterministic method core, exported for parity fixtures and the Rust port
+// (posse-encoder-rust atlas_core::memory_rank). Keep these pure.
+export {
+  tokenize as memoryRankTokenize,
+  ftsMatchQuery as memoryFtsMatchQuery,
+  recencyScore as memoryRecencyScore,
+  memoryScore as memoryRankScore,
+  jaccardSimilarity as memoryJaccardSimilarity,
+  NEAR_DUPLICATE_JACCARD as MEMORY_NEAR_DUPLICATE_JACCARD,
+};
+
 function sortMemories(memories, sortBy) {
   memories.sort((a, b) => {
     if (sortBy === "confidence") {
@@ -605,8 +719,21 @@ function sortMemories(memories, sortBy) {
   });
 }
 
-function hasNoSurfaceCriteria(params = {}) {
-  return !(Array.isArray(params.symbolIds) && params.symbolIds.length > 0)
-    && !(Array.isArray(params.fileRelPaths) && params.fileRelPaths.length > 0)
-    && !params.taskType;
+/**
+ * Opportunistic staleness sweep: memories untouched for longer than the policy
+ * window are flagged stale so proactive surfacing skips them. memory.store
+ * resets the flag when a memory is refreshed, and memory.query still returns
+ * stale rows (flagged) so they stay discoverable and correctable.
+ */
+function sweepStaleMemories(db, repoId, policy) {
+  const days = clampInt(policy?.memoryStaleAfterDays, 0, 3650, 0);
+  if (days <= 0) return;
+  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+  try {
+    db.prepare(
+      "UPDATE memories SET stale = 1 WHERE repo_id = ? AND deleted = 0 AND stale = 0 AND updated_at < ?",
+    ).run(repoId, cutoff);
+  } catch {
+    // Staleness is best-effort; never fail a read because the sweep could not run.
+  }
 }

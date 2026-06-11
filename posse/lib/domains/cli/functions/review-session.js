@@ -355,10 +355,9 @@ export class ReviewSession {
   const requeued = listWorkItems("queued").length;
   console.log(`\n  ${C.bold}Result:${C.reset} ${C.green}${approvedCount} approved${C.reset}${requeued > 0 ? `  ${C.yellow}${requeued} re-queued${C.reset}` : ""}\n`);
 
-  // Offer to push if anything was merged
-  if (mergedCount > 0) {
-    await offerPush(mergedCount);
-  }
+  // Offer to push merged work (self-gated: also fires when the target branch
+  // has unpushed commits from merges earlier in the session).
+  await offerPush(mergedCount);
 
   await (this.ensureCleanTargetBranchAsync || ensureCleanTargetBranch)("review wrap-up", { logWhenClean: true });
 
@@ -477,10 +476,11 @@ export class ReviewSession {
     }
   }
 
-  // If review was skipped or nothing to review, check for auto-merged WIs and offer push
-  if (autoMergedNow > 0) {
-    await offerPush(autoMergedNow);
-  }
+  // If review was skipped or nothing to review, offer to push. offerPush
+  // self-gates: it prompts when this pass merged something OR the target
+  // branch has unpushed commits (e.g. WIs auto-merged mid-run), and stays
+  // silent otherwise.
+  await offerPush(autoMergedNow);
 
   // ── Review assessor suggestions (always, even if WI review was skipped) ──
   await this.reviewSuggestions();
@@ -1316,7 +1316,11 @@ export class ReviewSession {
 
   const firstActionable = reportData.findIndex(d => !d._isInfo);
   display.addEvent(`${C.cyan}Opening review for ${reviewable.length} pending work item(s)${C.reset}`);
-  await display.enterApprovalMode(reportData, firstActionable >= 0 ? firstActionable : 0);
+  const approvalResult = await display.enterApprovalMode(reportData, firstActionable >= 0 ? firstActionable : 0);
+  // canceled means the session was torn down externally (shutdown, or a newer
+  // approval session re-entered). Still drain queued git work and save the
+  // report, but leave the display state alone — it belongs to someone else.
+  const approvalCanceled = approvalResult?.canceled === true;
 
   const closeout = createTuiWrapUpTracker(display, {
     title: "Review closeout",
@@ -1340,6 +1344,7 @@ export class ReviewSession {
     await closeout.run("report", () => this.saveReport(reportData));
     const approved = reportData.filter(d => d._decision === "approved").length;
     await closeout.run("return", () => {
+      if (approvalCanceled) return;
       display._mode = "normal";
       display._approvalData = [];
       display._approvalDone = null;
@@ -1347,7 +1352,7 @@ export class ReviewSession {
       display.requestRender({ force: true });
     });
   } finally {
-    if (typeof display._mode === "string" && display._mode !== "normal") {
+    if (!approvalCanceled && typeof display._mode === "string" && display._mode !== "normal") {
       display._mode = "normal";
     }
     closeout.clear();
@@ -1837,19 +1842,17 @@ export class ReviewSession {
       if (typeof display.setRunPhase === "function") {
         display.setRunPhase(`Ready to push ${autoMergedNow} merged work item${autoMergedNow === 1 ? "" : "s"}`);
       }
-      await new Promise(r => setTimeout(r, 1500));
-      wrapUp.clear();
-      display.stop();
-      await notifyDirtyState();
-      await offerPush(autoMergedNow);
     } else {
       display.addEvent(`${C.dim}No work items to review.${C.reset}`);
       if (typeof display.setRunPhase === "function") display.setRunPhase("Wrap-up complete");
-      await new Promise(r => setTimeout(r, 1500));
-      wrapUp.clear();
-      display.stop();
-      await notifyDirtyState();
     }
+    await new Promise(r => setTimeout(r, 1500));
+    wrapUp.clear();
+    display.stop();
+    await notifyDirtyState();
+    // Even with zero merges this pass, WIs auto-merged mid-run may have left
+    // the target branch ahead of the remote; offerPush self-gates on that.
+    await offerPush(autoMergedNow);
     return;
   }
 
@@ -1923,9 +1926,9 @@ export class ReviewSession {
   // Notify about dirty worktrees/branches before push decisions
   await notifyDirtyState();
 
-  if (totalMerged > 0) {
-    await offerPush(totalMerged);
-  }
+  // Self-gated: prompts on merges from this pass OR unpushed commits left by
+  // mid-run auto-merges; silent when there is nothing to push.
+  await offerPush(totalMerged);
 
   // ── Review assessor suggestions ──
   await this.reviewSuggestions();

@@ -78,6 +78,14 @@ export class RemotePromptClient {
     }, isRetryableRemoteRequestError);
   }
 
+  async getModelCatalog() {
+    return this.requestJsonWithRetries({
+      path: "/v1/catalog/models",
+      method: "GET",
+      operation: "remote model catalog",
+    }, isRetryableRemoteRequestError);
+  }
+
   async resolveToolSurface(request) {
     return this.requestJsonWithRetries({
       path: "/v1/catalog/tool-surface",

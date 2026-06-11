@@ -8,7 +8,7 @@ import { SETTING_KEYS } from "../lib/catalog/settings.js";
 import { runPairCommand, runServeCommand } from "../lib/domains/cli/functions/commands/serve.js";
 import {
   closeAccountSettingsDb,
-  getAccountSetting,
+  getAccountRepoSetting,
   setAccountSettingsDbPathForTests,
 } from "../lib/domains/settings/functions/account-settings.js";
 
@@ -31,6 +31,7 @@ describe("posse serve --pair", () => {
       calls.push({
         url: String(url),
         body: init.body ? JSON.parse(String(init.body)) : null,
+        authorization: init.headers?.authorization || null,
       });
       if (String(url).endsWith("/start")) {
         return jsonResponse(200, {
@@ -50,11 +51,14 @@ describe("posse serve --pair", () => {
     try {
       const { result } = await captureConsole(() => runPairCommand(
         { relayUrl: "wss://relay.example.test/proxy/v1/instance", label: "Fixture" },
-        { C, promptCode: async () => promptCodes.shift(), retryDelayMs: 0 },
+        { C, promptCode: async () => promptCodes.shift(), retryDelayMs: 0, posseKey: "test-posse-key", projectDir: tmp },
       ));
 
       assert.equal(result.ok, true);
-      assert.equal(getAccountSetting(SETTING_KEYS.BRIDGE_RELAY_TOKEN), "bridge-token-1");
+      // Relay token is stored repo-scoped: each repo is its own instance.
+      assert.equal(getAccountRepoSetting(SETTING_KEYS.BRIDGE_RELAY_TOKEN, tmp), "bridge-token-1");
+      // Every pair-start/confirm request carries the API key bearer.
+      assert.ok(calls.every((call) => call.authorization === "Bearer test-posse-key"));
       assert.deepEqual(
         calls.map((call) => new URL(call.url).pathname),
         [
@@ -103,11 +107,11 @@ describe("posse serve --pair", () => {
     try {
       const { result } = await captureConsole(() => runPairCommand(
         { relayUrl: "wss://relay.example.test/proxy/v1/instance", label: "Fixture" },
-        { C, promptCode: async () => promptCodes.shift(), retryDelayMs: 0 },
+        { C, promptCode: async () => promptCodes.shift(), retryDelayMs: 0, posseKey: "test-posse-key", projectDir: tmp },
       ));
 
       assert.equal(result.ok, true);
-      assert.equal(getAccountSetting(SETTING_KEYS.BRIDGE_RELAY_TOKEN), "bridge-token-1");
+      assert.equal(getAccountRepoSetting(SETTING_KEYS.BRIDGE_RELAY_TOKEN, tmp), "bridge-token-1");
       assert.deepEqual(
         calls.map((call) => new URL(call.url).pathname),
         [
@@ -140,12 +144,30 @@ describe("posse serve --pair", () => {
 
     const { result } = await captureConsole(() => runPairCommand(
       { relayUrl: "wss://relay.example.test/v1/instance", label: "Fixture" },
-      { C, argv: ["--confirmation-code", "O0I1"] },
+      { C, argv: ["--confirmation-code", "O0I1"], posseKey: "test-posse-key" },
     ));
 
     assert.equal(result.ok, false);
     assert.equal(result.reason, "invalid_confirmation_code");
     assert.deepEqual(calls.map((call) => new URL(call.url).pathname), ["/v1/bridge-pair/start"]);
+  });
+
+  it("refuses to pair without a POSSE_KEY and never contacts the relay", async () => {
+    const calls = [];
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      return jsonResponse(200, {});
+    };
+
+    const { result, lines } = await captureConsole(() => runPairCommand(
+      { relayUrl: "wss://relay.example.test/v1/instance", label: "Fixture" },
+      { C, argv: ["--confirmation-code", "ABCD"], posseKey: "" },
+    ));
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "missing_posse_key");
+    assert.deepEqual(calls, []);
+    assert.ok(lines.some((line) => line.includes("POSSE_KEY is required to pair")));
   });
 
   it("maps qr_token_already_used to a friendly pair failure", async () => {
@@ -161,7 +183,7 @@ describe("posse serve --pair", () => {
 
     const { result, lines } = await captureConsole(() => runPairCommand(
       { relayUrl: "wss://relay.example.test/v1/instance", label: "Fixture" },
-      { C, argv: ["--confirmation-code", "ABCD"] },
+      { C, argv: ["--confirmation-code", "ABCD"], posseKey: "test-posse-key" },
     ));
 
     assert.equal(result.ok, false);

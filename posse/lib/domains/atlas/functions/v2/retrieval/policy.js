@@ -13,6 +13,14 @@ export const DEFAULT_ATLAS_POLICY = Object.freeze({
   defaultMinCallConfidence: 0.5,
   defaultDenyRaw: false,
   memoryEnabled: true,
+  // Memories untouched for this many days are flagged stale and stop
+  // surfacing proactively (0 disables the sweep). Refreshing via memory.store
+  // clears the flag.
+  memoryStaleAfterDays: 180,
+  // Active memories beyond this cap are soft-deleted on write, least valuable
+  // first (0 disables). Matches the 5000-row retrieval candidate scan limit:
+  // rows past it were unreachable in recency order anyway.
+  memoryMaxPerRepo: 5000,
   runtimeEnabled: false,
   budgetCaps: Object.freeze({
     maxCards: 50,
@@ -139,6 +147,8 @@ function normalizePolicyPatch(patch) {
   if ("defaultMinCallConfidence" in patch) out.defaultMinCallConfidence = clampNumber(patch.defaultMinCallConfidence, 0, 1, DEFAULT_ATLAS_POLICY.defaultMinCallConfidence);
   if ("defaultDenyRaw" in patch) out.defaultDenyRaw = !!patch.defaultDenyRaw;
   if ("memoryEnabled" in patch) out.memoryEnabled = !!patch.memoryEnabled;
+  if ("memoryStaleAfterDays" in patch) out.memoryStaleAfterDays = clampInt(patch.memoryStaleAfterDays, 0, 3650, DEFAULT_ATLAS_POLICY.memoryStaleAfterDays);
+  if ("memoryMaxPerRepo" in patch) out.memoryMaxPerRepo = clampInt(patch.memoryMaxPerRepo, 0, 100_000, DEFAULT_ATLAS_POLICY.memoryMaxPerRepo);
   if ("runtimeEnabled" in patch) out.runtimeEnabled = !!patch.runtimeEnabled;
   if (isPlainObject(patch.budgetCaps)) {
     out.budgetCaps = {};
@@ -157,6 +167,8 @@ function normalizePolicy(policy) {
     defaultMinCallConfidence: clampNumber(policy.defaultMinCallConfidence, 0, 1, DEFAULT_ATLAS_POLICY.defaultMinCallConfidence),
     defaultDenyRaw: !!policy.defaultDenyRaw,
     memoryEnabled: policy.memoryEnabled !== false,
+    memoryStaleAfterDays: clampInt(policy.memoryStaleAfterDays, 0, 3650, DEFAULT_ATLAS_POLICY.memoryStaleAfterDays),
+    memoryMaxPerRepo: clampInt(policy.memoryMaxPerRepo, 0, 100_000, DEFAULT_ATLAS_POLICY.memoryMaxPerRepo),
     runtimeEnabled: !!policy.runtimeEnabled,
     budgetCaps: {
       maxCards: clampInt(policy.budgetCaps?.maxCards, 1, 500, DEFAULT_ATLAS_POLICY.budgetCaps.maxCards),

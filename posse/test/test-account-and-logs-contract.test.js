@@ -149,6 +149,7 @@ describe("account + logs class contract", () => {
     const { PromptLog } = await import("../lib/shared/telemetry/classes/logging/PromptLog.js");
     const { OutputLog } = await import("../lib/shared/telemetry/classes/logging/OutputLog.js");
     const { writeRuntimeLogAtDir } = await import("../lib/shared/telemetry/functions/logging/logger.js");
+    const { invalidateLogScrubCache } = await import("../lib/shared/telemetry/classes/logging/secret-scrub.js");
     const accountFns = await import("../lib/domains/settings/functions/account-settings.js");
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-prompt-scrub-"));
     const runtimeLogDir = path.join(tmpDir, "runtime");
@@ -193,6 +194,9 @@ describe("account + logs class contract", () => {
         authorization: `Bearer ${openAiRawKey}`,
       }), true);
       accountFns.setAccountSetting("posse_log_scrub_secrets", "false");
+      // The scrub toggle is TTL-cached per process; drop the cache so the
+      // flip takes effect for the next record() in this same test run.
+      invalidateLogScrubCache();
       promptLog.record({
         job_id: 13,
         role: "dev",
@@ -251,6 +255,7 @@ describe("account + logs class contract", () => {
       assert.doesNotMatch(runtimeLogText, /ZYXWVUTSRQPONMLKJIHGFEDCBA/);
       assert.doesNotMatch(runtimeLogText, /sk-raw_/);
     } finally {
+      invalidateLogScrubCache();
       accountFns.closeAccountSettingsDb();
       accountFns.setAccountSettingsPathForTests(null);
       try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}

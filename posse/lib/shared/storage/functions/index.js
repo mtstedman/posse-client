@@ -1934,6 +1934,7 @@ export function getDb() {
         model_name TEXT NOT NULL,
         model_tier TEXT,
         input_per_million_usd REAL NOT NULL,
+        cached_input_per_million_usd REAL,
         output_per_million_usd REAL NOT NULL,
         note TEXT,
         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -1942,12 +1943,39 @@ export function getDb() {
     `);
   }
 
+  // ── Migration: cached-input rate on provider_pricing ────────────────────
+  // NULL means "no override known" — pricing falls back to the uncached input
+  // rate rather than silently charging cache reads at zero.
+  const hasCachedInputRate = _db.prepare(
+    `SELECT COUNT(*) as cnt FROM pragma_table_info('provider_pricing') WHERE name='cached_input_per_million_usd'`
+  ).get();
+  if (hasCachedInputRate.cnt === 0) {
+    _db.exec(`ALTER TABLE provider_pricing ADD COLUMN cached_input_per_million_usd REAL`);
+  }
+
   // ── Migration: rendered per-job context snapshot ───────────────────────
   const hasJobContextText = _db.prepare(
     `SELECT COUNT(*) as cnt FROM pragma_table_info('jobs') WHERE name='context_text'`
   ).get();
   if (hasJobContextText.cnt === 0) {
     _db.exec(`ALTER TABLE jobs ADD COLUMN context_text TEXT`);
+  }
+
+  // ── Migration: runtime_status for bridge instance feedback ─────────────
+  // Tiny key/value rows (boot, scheduler, shutdown) written by the run
+  // process and polled read-only by the bridge ChangeStream so the phone
+  // can see boot progress and scheduler liveness.
+  const hasRuntimeStatus = _db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_status'`
+  ).get();
+  if (!hasRuntimeStatus) {
+    _db.exec(`
+      CREATE TABLE runtime_status (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      );
+    `);
   }
 
   // ── Migration: planner-selected skills on jobs ───────────────────────────

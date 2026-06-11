@@ -8,9 +8,10 @@
 //
 //   if (nativeBinaries.shouldUse("atlas")) { ...call binary... }
 //
-// `shouldUse` = enabled (feature flag, default OFF) AND available (build is
-// staged for this os/arch). ATLAS migration code must not use this as an
-// implicit JS fallback switch: mirror in Rust, A/B against the Node oracle,
+// `shouldUse` = enabled AND available (build is staged for this os/arch).
+// Git and ATLAS are fully cut over: enabled is hardwired true, so shouldUse
+// reduces to availability and there is no JS fallback path. The migration
+// recipe for remaining tools: mirror in Rust, A/B against the Node oracle,
 // switch the call site to the binary, then delete the replaced Node function.
 
 import { BINARY_NAMES, VALID_BINARY_NAMES } from "../../catalog/binary.js";
@@ -99,16 +100,17 @@ export class BinaryManager {
   }
 
   /**
-   * Whether native invocation is enabled for a tool. Git is hard-migrated to
-   * the native binary when staged; ATLAS still honors the persisted tunable and
-   * legacy env overrides while that migration is in progress.
+   * Whether native invocation is enabled for a tool. Git and ATLAS are
+   * hard-migrated: the native binary is the only implementation path, so
+   * neither settings nor env overrides can turn them off. Remaining tools
+   * still honor the persisted tunable and legacy env overrides.
    *
    * @param {string} name
    * @returns {boolean}
    */
   enabled(name) {
     if (!VALID_BINARY_NAMES.has(name)) return false;
-    if (name === "git") return true;
+    if (name === "git" || name === "atlas") return true;
     const master = envFlag(this._env.POSSE_NATIVE_BINARIES);
     if (master != null) return master;
     const perTool = envFlag(this._env[`POSSE_NATIVE_${name.toUpperCase()}`]);

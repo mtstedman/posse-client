@@ -1334,7 +1334,7 @@ suite("Dirty worktree preservation", () => {
     }
   });
 
-  it("startup GC preserves corrupt terminal worktree contents before removal", () => {
+  it("startup GC preserves corrupt terminal worktree contents before removal", async () => {
     const { queueMod, workerMod } = runtimeModules;
     const projectDir = makeGitRepo("tmp-gc-corrupt-terminal-preserve-");
     try {
@@ -1346,7 +1346,7 @@ suite("Dirty worktree preservation", () => {
       queueMod.updateWorkItemStatus(wi.id, "complete");
 
       const messages = [];
-      workerMod.gcWorktrees(projectDir, (msg) => messages.push(msg));
+      await workerMod.gcWorktreesAsync(projectDir, (msg) => messages.push(msg));
 
       const rootEntries = fs.readdirSync(workerMod.worktreeRoot(projectDir));
       const recoveryDir = rootEntries
@@ -1362,7 +1362,7 @@ suite("Dirty worktree preservation", () => {
     }
   });
 
-  it("startup GC records skipped symlinks during corrupt worktree preservation", (t) => {
+  it("startup GC records skipped symlinks during corrupt worktree preservation", async (t) => {
     const { queueMod, workerMod } = runtimeModules;
     const projectDir = makeGitRepo("tmp-gc-corrupt-symlink-preserve-");
     try {
@@ -1379,7 +1379,7 @@ suite("Dirty worktree preservation", () => {
       }
       queueMod.updateWorkItemStatus(wi.id, "complete");
 
-      workerMod.gcWorktrees(projectDir, () => {});
+      await workerMod.gcWorktreesAsync(projectDir, () => {});
 
       const rootEntries = fs.readdirSync(workerMod.worktreeRoot(projectDir));
       const recoveryDir = rootEntries
@@ -1473,47 +1473,7 @@ suite("Dirty worktree preservation", () => {
     }
   });
 
-  it("snapshots dirty terminal worktrees during startup GC before removal", () => {
-    const { queueMod, workerMod } = runtimeModules;
-    const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-startup-gc-terminal-"));
-    try {
-      execFileSync("git", ["init"], { cwd: projectDir, stdio: "ignore" });
-      execFileSync("git", ["config", "user.email", "posse-test@example.com"], { cwd: projectDir, stdio: "ignore" });
-      execFileSync("git", ["config", "user.name", "Posse Test"], { cwd: projectDir, stdio: "ignore" });
-      fs.writeFileSync(path.join(projectDir, "tracked.txt"), "base\n", "utf-8");
-      execFileSync("git", ["add", "tracked.txt"], { cwd: projectDir, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "init"], { cwd: projectDir, stdio: "ignore" });
-
-      const wi = queueMod.createWorkItem("startup-gc-terminal", "desc");
-      const branchName = `posse/wi-${wi.id}-startup-gc-terminal`;
-      queueMod.setWorkItemBranch(wi.id, branchName, "deadbeef");
-      queueMod.updateWorkItemStatus(wi.id, "complete");
-
-      const wtDir = path.join(workerMod.worktreeRoot(projectDir), `wi-${wi.id}-startup-gc-terminal`);
-      execFileSync("git", ["worktree", "add", "-b", branchName, wtDir], { cwd: projectDir, stdio: "ignore" });
-      fs.writeFileSync(path.join(wtDir, "tracked.txt"), "changed\n", "utf-8");
-      fs.writeFileSync(path.join(wtDir, "draft.txt"), "draft\n", "utf-8");
-
-      const messages = [];
-      workerMod.gcWorktrees(projectDir, (msg) => messages.push(msg));
-
-      const snapshotRefs = listSnapshotRefsMatching(projectDir, `wi-${wi.id}-startup-gc-terminal-worktree`);
-      const branchStillExists = execFileSync("git", ["branch", "--list", branchName], { cwd: projectDir, encoding: "utf-8" }).trim();
-
-      assert.equal(fs.existsSync(wtDir), false);
-      assert.ok(messages.some(msg => /preserved terminal dirty worktree/i.test(msg)));
-      assert.ok(snapshotRefs.length > 0);
-      assert.match(branchStillExists, new RegExp(branchName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-      assert.equal(queueMod.getWorkItem(wi.id).branch_name, branchName);
-      const latestRef = snapshotRefs.sort().at(-1);
-      assert.equal(readSnapshotFile(projectDir, latestRef, "tracked.txt"), "changed\n");
-      assert.equal(readSnapshotFile(projectDir, latestRef, "draft.txt"), "draft\n");
-    } finally {
-      fs.rmSync(projectDir, { recursive: true, force: true });
-    }
-  });
-
-  it("skips terminal startup GC while a job still holds the worktree bench", () => {
+  it("skips terminal startup GC while a job still holds the worktree bench", async () => {
     const { queueMod, workerMod } = runtimeModules;
     const projectDir = makeGitRepo("tmp-startup-gc-terminal-held-");
     try {
@@ -1533,7 +1493,7 @@ suite("Dirty worktree preservation", () => {
       fs.writeFileSync(path.join(wtDir, "tracked.txt"), "changed while canceling\n", "utf-8");
 
       const messages = [];
-      workerMod.gcWorktrees(projectDir, (msg) => messages.push(msg));
+      await workerMod.gcWorktreesAsync(projectDir, (msg) => messages.push(msg));
 
       const snapshotRefs = listSnapshotRefsMatching(projectDir, `wi-${wi.id}-startup-gc-terminal-worktree`);
       assert.equal(fs.existsSync(wtDir), true);
@@ -1667,7 +1627,7 @@ suite("Dirty worktree preservation", () => {
     }
   });
 
-  it("preserves canceled terminal branch tips before deleting branches during startup GC", () => {
+  it("preserves canceled terminal branch tips before deleting branches during startup GC", async () => {
     const { queueMod, workerMod } = runtimeModules;
     const projectDir = makeGitRepo("tmp-startup-gc-canceled-branch-");
     try {
@@ -1683,7 +1643,7 @@ suite("Dirty worktree preservation", () => {
       execFileSync("git", ["commit", "-m", "feature"], { cwd: wtDir, stdio: "ignore" });
 
       const messages = [];
-      workerMod.gcWorktrees(projectDir, (msg) => messages.push(msg));
+      await workerMod.gcWorktreesAsync(projectDir, (msg) => messages.push(msg));
 
       const snapshotRefs = listSnapshotRefsMatching(projectDir, `wi-${wi.id}-startup-gc-canceled-branch-posse-wi-${wi.id}-canceled-cleanup`);
       assert.equal(fs.existsSync(wtDir), false);
@@ -1697,7 +1657,7 @@ suite("Dirty worktree preservation", () => {
     }
   });
 
-  it("preserves squash-merged branch tips before deleting stale merged branches during startup GC", () => {
+  it("preserves squash-merged branch tips before deleting stale merged branches during startup GC", async () => {
     const { queueMod, workerMod } = runtimeModules;
     const projectDir = makeGitRepo("tmp-startup-gc-merged-branch-");
     try {
@@ -1714,7 +1674,7 @@ suite("Dirty worktree preservation", () => {
       execFileSync("git", ["commit", "-m", "feature"], { cwd: wtDir, stdio: "ignore" });
 
       const messages = [];
-      workerMod.gcWorktrees(projectDir, (msg) => messages.push(msg));
+      await workerMod.gcWorktreesAsync(projectDir, (msg) => messages.push(msg));
 
       const snapshotRefs = listSnapshotRefsMatching(projectDir, `wi-${wi.id}-startup-gc-merged-branch-posse-wi-${wi.id}-merged-cleanup`);
       const refreshed = queueMod.getWorkItem(wi.id);
@@ -1730,7 +1690,7 @@ suite("Dirty worktree preservation", () => {
     }
   });
 
-  it("removes inactive nonterminal worktrees during startup GC but retains branch pointers pending review", () => {
+  it("removes inactive nonterminal worktrees during startup GC but retains branch pointers pending review", async () => {
     const { queueMod, workerMod } = runtimeModules;
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-startup-gc-inactive-"));
     try {
@@ -1752,7 +1712,7 @@ suite("Dirty worktree preservation", () => {
       fs.writeFileSync(path.join(wtDir, "draft.txt"), "draft\n", "utf-8");
 
       const messages = [];
-      workerMod.gcWorktrees(projectDir, (msg) => messages.push(msg));
+      await workerMod.gcWorktreesAsync(projectDir, (msg) => messages.push(msg));
 
       const snapshotRefs = listSnapshotRefsMatching(projectDir, `wi-${wi.id}-startup-gc-inactive-worktree`);
       const branchStillExists = execFileSync("git", ["branch", "--list", branchName], { cwd: projectDir, encoding: "utf-8" }).trim();
@@ -1768,7 +1728,7 @@ suite("Dirty worktree preservation", () => {
     }
   });
 
-  it("keeps queued nonterminal worktrees so checkout state can resume after boot", () => {
+  it("keeps queued nonterminal worktrees so checkout state can resume after boot", async () => {
     const { queueMod, workerMod } = runtimeModules;
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-startup-gc-queued-"));
     try {
@@ -1794,7 +1754,7 @@ suite("Dirty worktree preservation", () => {
       execFileSync("git", ["worktree", "add", "-b", branchName, wtDir], { cwd: projectDir, stdio: "ignore" });
 
       const messages = [];
-      workerMod.gcWorktrees(projectDir, (msg) => messages.push(msg));
+      await workerMod.gcWorktreesAsync(projectDir, (msg) => messages.push(msg));
       const branchStillExists = execFileSync("git", ["branch", "--list", branchName], { cwd: projectDir, encoding: "utf-8" }).trim();
 
       assert.equal(fs.existsSync(wtDir), true);

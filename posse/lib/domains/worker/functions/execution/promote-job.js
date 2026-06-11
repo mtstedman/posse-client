@@ -4,8 +4,8 @@ import { createHash } from "crypto";
 import { resolvePathWithin } from "../helpers/scope.js";
 import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { gitCommitAllAsync } from "../../../git/functions/commit-scope.js";
-import { gitExec, gitHasChanges } from "../../../git/functions/utils.js";
-import { resetDirtyWorktreeFallback, snapshotAndResetDirtyWorktree } from "../../../git/functions/worktree.js";
+import { gitHasChangesAsync } from "../../../git/functions/utils.js";
+import { resetDirtyWorktreeFallbackAsync, snapshotAndResetDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import {
@@ -337,7 +337,7 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
     worker.emit(job.id, `${C.red}[promote] WI#${job.work_item_id} job #${job.id} failed: ${err.message}${C.reset}`);
     if (job._worktreePath) {
       try {
-        if (gitHasChanges(job._worktreePath)) {
+        if (await gitHasChangesAsync(job._worktreePath)) {
           const siblingLocks = activeSiblingWriteLocks(job);
           if (siblingLocks.length > 0) {
             logEvent({
@@ -351,13 +351,13 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
             });
           } else {
             try {
-              snapshotAndResetDirtyWorktree(job._worktreePath, worker.projectDir, {
+              await snapshotAndResetDirtyWorktreeAsync(job._worktreePath, worker.projectDir, {
                 reason: `promote-failed-job-${job.id}`,
                 branchName: getWorkItem(job.work_item_id)?.branch_name || null,
                 wiId: job.work_item_id,
               });
             } catch {
-              try { resetDirtyWorktreeFallback(job._worktreePath, worker.projectDir); } catch { /* ignore */ }
+              try { await resetDirtyWorktreeFallbackAsync(job._worktreePath, worker.projectDir); } catch { /* ignore */ }
             }
           }
         }

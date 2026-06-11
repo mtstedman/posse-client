@@ -17,6 +17,7 @@ export const SETTING_KEYS = Object.freeze({
   ASSESSOR_PARSE_RETRY_INPUT_TOKENS_CAP: "assessor_parse_retry_input_tokens_cap",
   AUTO_MERGE_COMPLETED: "auto_merge_completed",
   BRIDGE_BIND_HOST: "bridge_bind_host",
+  BRIDGE_IDENTITY_MIGRATED_TO: "bridge_identity_migrated_to",
   BRIDGE_INSTANCE_ID: "bridge_instance_id",
   BRIDGE_LABEL: "bridge_label",
   BRIDGE_LOCAL_TOKEN: "bridge_local_token",
@@ -38,6 +39,10 @@ export const SETTING_KEYS = Object.freeze({
   HANDOFF_MAX_CONTEXT_CHARS: "handoff_max_context_chars",
   HANDOFF_MAX_PRELOAD_TOTAL_BYTES: "handoff_max_preload_total_bytes",
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES: "handoff_preload_editable_file_bodies",
+  MODEL_CATALOG_JSON: "model_catalog_json",
+  MODEL_CATALOG_FETCHED_AT: "model_catalog_fetched_at",
+  MODEL_CATALOG_CACHE_MS: "model_catalog_cache_ms",
+  MODEL_CATALOG_ENFORCEMENT: "model_catalog_enforcement",
   PLAN_APPROVAL_MODE: "plan_approval_mode",
   PLANNER_MAX_TASKS: "planner_max_tasks",
   PLANNER_UNDER_SCOPED_BROAD_GATE: "planner_under_scoped_broad_gate",
@@ -89,8 +94,6 @@ export const SETTING_KEYS = Object.freeze({
   WORKER_PROVIDER_CIRCUIT_TTL_MS: "worker_provider_circuit_ttl_ms",
   WORKTREE_LOCK_WAIT_MS: "worktree_lock_wait_ms",
   GIT_ATLAS_POST_COMMIT_HOOK_TIMEOUT_MS: "git_atlas_post_commit_hook_timeout_ms",
-  NATIVE_ATLAS: "posse_native_atlas",
-  NATIVE_GIT: "posse_native_git",
   NATIVE_REMOTE: "posse_native_remote",
 
   // Account-level keys read via getAccountSetting() directly (bypassing the
@@ -112,6 +115,7 @@ export const FIX_SCOPE_HANDOFF_GUARD_VALUES = Object.freeze(["off", "warn", "enf
 export const HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES = Object.freeze(["off", "small", "always"]);
 export const KAIZEN_TO_ATLAS_MODE_VALUES = Object.freeze(["off", "shadow", "write"]);
 export const LOG_LEVEL_VALUES = Object.freeze(["debug", "info", "warn", "error"]);
+export const MODEL_CATALOG_ENFORCEMENT_VALUES = Object.freeze(["warn_and_fallback", "warn_only", "off"]);
 export const PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES = Object.freeze(["off", "warn", "enforce"]);
 export const POSSE_REMOTE_MODE_VALUES = Object.freeze(["required"]);
 export const RESEARCH_FANOUT_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);

@@ -120,10 +120,10 @@ describe("scope class contract", () => {
       scope: new Scope({ modifyFiles: ["src/app.js"] }),
     });
     for (const cmd of ["env", "env --version", "printenv", "printenv POSSE_API_KEY", "echo %POSSE_API_KEY%", "echo $POSSE_API_KEY"]) {
-      const result = policy.authorizeBash(cmd, { hasFileScope: true });
+      const result = policy.authorizeBash(cmd);
       assert.equal(result.ok, false, `expected ${cmd} to be rejected`);
     }
-    assert.equal(policy.authorizeBash("npm test", { hasFileScope: true }).ok, true);
+    assert.equal(policy.authorizeBash("npm test").ok, true);
   });
 
   it("blocks allowlisted bash readers from reading sensitive env files", () => {
@@ -131,7 +131,7 @@ describe("scope class contract", () => {
       scope: new Scope({ modifyFiles: ["src/app.js"] }),
     });
     for (const cmd of ["sort .env", "od -c .env.local", "xxd config/.env.production", "nl ./.env", "strings .env.test", "diff .env /dev/null"]) {
-      const result = policy.authorizeBash(cmd, { hasFileScope: true });
+      const result = policy.authorizeBash(cmd);
       assert.equal(result.ok, false, `expected ${cmd} to be rejected`);
       assert.match(result.error, /Access to \.env files is blocked/);
     }

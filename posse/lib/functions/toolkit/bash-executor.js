@@ -136,9 +136,9 @@ export function createBashExecutor({
   spawnSyncImpl = spawnSync,
   execSyncImpl = execSync,
 } = {}) {
-  return function execBash(args, cwd, allowWrite = true, hasFileScope = false) {
+  return function execBash(args, cwd) {
     const cmd = args.command;
-    const auth = new MutationPolicy({ cwd }).authorizeBash(cmd, { allowWrite, hasFileScope });
+    const auth = new MutationPolicy({ cwd }).authorizeBash(cmd);
     if (!auth.ok) return auth.error;
     const timeout = Math.min(args.timeout || 60000, 120000);
     const maxBuffer = 1024 * 1024;

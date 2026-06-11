@@ -26,8 +26,12 @@ import {
   retryingAttemptWording,
 } from "./diagnostics.js";
 import { refreshAndExtractInsights } from "./insights.js";
-import { gitHasChanges } from "../../../git/functions/utils.js";
-import { resetDirtyWorktreeFallback, snapshotAndResetDirtyWorktree, stashDirtyWorktree } from "../../../git/functions/worktree.js";
+import { gitHasChangesAsync } from "../../../git/functions/utils.js";
+import {
+  resetDirtyWorktreeFallbackAsync,
+  snapshotAndResetDirtyWorktreeAsync,
+  stashDirtyWorktreeAsync,
+} from "../../../git/functions/worktree.js";
 import {
   activeSiblingWriteLocks,
   siblingLockSummary,
@@ -49,21 +53,21 @@ function deferInterruptedCleanupIfSiblingLocks(job, label) {
   return true;
 }
 
-function stashInterruptedWork(job, wtPath, label, projectDir = null) {
+async function stashInterruptedWork(job, wtPath, label, projectDir = null) {
   if (!wtPath) return false;
   try {
-    if (!gitHasChanges(wtPath)) return false;
+    if (!(await gitHasChangesAsync(wtPath))) return false;
     const mainCwd = projectDir || wtPath;
     if (deferInterruptedCleanupIfSiblingLocks(job, label)) return false;
     try {
-      const stashed = stashDirtyWorktree(wtPath, mainCwd, `posse: stash from ${label} job #${job.id}`, {
+      const stashed = await stashDirtyWorktreeAsync(wtPath, mainCwd, `posse: stash from ${label} job #${job.id}`, {
         shouldDefer: () => deferInterruptedCleanupIfSiblingLocks(job, label),
       });
       if (stashed) flagStallResume(job.id);
       return stashed;
     } catch {
       try {
-        resetDirtyWorktreeFallback(wtPath, mainCwd);
+        await resetDirtyWorktreeFallbackAsync(wtPath, mainCwd);
       } catch {
         // best effort cleanup
       }
@@ -74,10 +78,10 @@ function stashInterruptedWork(job, wtPath, label, projectDir = null) {
   }
 }
 
-function stashWorktreeForFailure(job, wtPath, projectDir) {
+async function stashWorktreeForFailure(job, wtPath, projectDir) {
   if (!wtPath) return;
   try {
-    if (!gitHasChanges(wtPath)) return;
+    if (!(await gitHasChangesAsync(wtPath))) return;
     const siblingLocks = activeSiblingWriteLocks(job);
     if (siblingLocks.length > 0) {
       logEvent({
@@ -95,7 +99,7 @@ function stashWorktreeForFailure(job, wtPath, projectDir) {
     // and reset the worktree clean. Using snapshot-and-reset instead of
     // git stash avoids accumulating orphan stashes across failed jobs.
     try {
-      snapshotAndResetDirtyWorktree(wtPath, projectDir || wtPath, {
+      await snapshotAndResetDirtyWorktreeAsync(wtPath, projectDir || wtPath, {
         reason: `failed-job-${job.id}`,
         branchName: getWorkItem(job.work_item_id)?.branch_name || null,
         wiId: job.work_item_id,
@@ -125,7 +129,7 @@ function stashWorktreeForFailure(job, wtPath, projectDir) {
       });
     } catch {
       try {
-        resetDirtyWorktreeFallback(wtPath, projectDir || wtPath);
+        await resetDirtyWorktreeFallbackAsync(wtPath, projectDir || wtPath);
       } catch {
         // ignore
       }
@@ -236,7 +240,7 @@ export function handleDeterministicInterruption(worker, job, attemptId, startTim
   return false;
 }
 
-export function handleExecuteAttemptError(worker, {
+export async function handleExecuteAttemptError(worker, {
   attempt,
   attemptCount,
   err,
@@ -288,7 +292,7 @@ export function handleExecuteAttemptError(worker, {
       });
     }
 
-    const hasStash = stashInterruptedWork(job, wtPath, err._killReason, worker?.projectDir);
+    const hasStash = await stashInterruptedWork(job, wtPath, err._killReason, worker?.projectDir);
 
     logEvent({
       work_item_id: job.work_item_id,
@@ -313,7 +317,7 @@ export function handleExecuteAttemptError(worker, {
       error_text: "Nudged by user",
     });
 
-    const hasStash = stashInterruptedWork(job, wtPath, "nudged", worker?.projectDir);
+    const hasStash = await stashInterruptedWork(job, wtPath, "nudged", worker?.projectDir);
     logEvent({
       work_item_id: job.work_item_id,
       job_id: job.id,
@@ -346,7 +350,7 @@ export function handleExecuteAttemptError(worker, {
       return;
     }
 
-    const hasStash = stashInterruptedWork(job, wtPath, "stall-killed", worker?.projectDir);
+    const hasStash = await stashInterruptedWork(job, wtPath, "stall-killed", worker?.projectDir);
 
     logEvent({
       work_item_id: job.work_item_id,
@@ -370,7 +374,7 @@ export function handleExecuteAttemptError(worker, {
       error_text: `Runtime exceeded — killed by scheduler for model escalation`,
     });
 
-    const hasStash = stashInterruptedWork(job, wtPath, "runtime-exceeded", worker?.projectDir);
+    const hasStash = await stashInterruptedWork(job, wtPath, "runtime-exceeded", worker?.projectDir);
 
     logEvent({
       work_item_id: job.work_item_id,
@@ -430,7 +434,7 @@ export function handleExecuteAttemptError(worker, {
       error_text: `Provider error: ${err.message}`,
     });
 
-    if (stashInterruptedWork(job, wtPath, "rate-limited", worker?.projectDir)) {
+    if (await stashInterruptedWork(job, wtPath, "rate-limited", worker?.projectDir)) {
       // already flagged for resume in helper
     }
 
@@ -480,7 +484,7 @@ export function handleExecuteAttemptError(worker, {
   });
   setJobError(job.id, err.message);
 
-  stashWorktreeForFailure(job, wtPath, worker?.projectDir);
+  await stashWorktreeForFailure(job, wtPath, worker?.projectDir);
 
   const attemptMessage = retryWording
     ? `Attempt ${attemptCount} ${retryWording.eventVerb}: ${err.message}`

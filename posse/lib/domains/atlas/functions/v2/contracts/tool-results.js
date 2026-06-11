@@ -920,6 +920,8 @@
  * @property {string} [memory_id]
  * @property {boolean} created
  * @property {boolean} deduplicated
+ * @property {boolean} [nearDuplicate]
+ * @property {string} [mergedDuplicateMemoryId]
  */
 
 /**

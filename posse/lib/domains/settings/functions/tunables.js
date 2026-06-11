@@ -39,8 +39,6 @@ const TUNABLE_DEFAULTS = Object.freeze({
   atlas_job_cache_ttl_ms: 300000,
   atlas_prefetch_cache_ttl_ms: 600000,
   atlas_corruption_cooldown_ms: 120000,
-  posse_native_atlas: false,
-  posse_native_git: true,
   posse_native_remote: true,
 });
 
@@ -214,11 +212,12 @@ export function getAtlasCorruptionCooldownMs() {
 
 /**
  * Whether native (Rust) binary invocation is enabled for a tool, via the
- * `posse_native_<name>` tunable. ATLAS remains opt-in while Git and remote
- * auth HTTP default on when their binaries are staged. Used by BinaryManager
- * (env overrides take precedence there). Unknown tool names return false.
+ * `posse_native_<name>` tunable. Git and ATLAS are hardwired on inside
+ * BinaryManager and never reach this resolver; remote auth HTTP defaults on
+ * when its binary is staged. Used by BinaryManager (env overrides take
+ * precedence there). Unknown tool names return false.
  *
- * @param {string} name  A catalog binary name (e.g. "atlas", "git").
+ * @param {string} name  A catalog binary name (e.g. "remote").
  * @returns {boolean}
  */
 export function getNativeBinaryEnabled(name) {

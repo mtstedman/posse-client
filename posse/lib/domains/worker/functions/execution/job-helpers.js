@@ -1,14 +1,10 @@
 import path from "path";
 import {
-  flagStallResume,
   getArtifacts,
 } from "../../../queue/functions/index.js";
 import { slugify } from "../../../../shared/format/functions/slug.js";
 import { estimateCallCost } from "../../../billing/functions/pricing.js";
-import { gitHasChanges } from "../../../git/functions/utils.js";
-import { resetDirtyWorktreeFallback, stashDirtyWorktree } from "../../../git/functions/worktree.js";
 import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
-import { activeSiblingWriteLocks } from "../helpers/shared-worktree-locks.js";
 
 const PROVIDER_ERROR_PATTERNS = [
   /overloaded_error/i,
@@ -31,27 +27,6 @@ export function loadNudges(jobId) {
   if (nudges.length === 0) return "";
   const lines = nudges.map((a) => a.content_long).filter(Boolean);
   return `HUMAN CORRECTION (you were going in the wrong direction - follow this guidance):\n${lines.join("\n")}\n`;
-}
-
-export function stashInterruptedWork(job, wtPath, label, projectDir = null) {
-  if (!wtPath) return false;
-  try {
-    if (!gitHasChanges(wtPath)) return false;
-    const mainCwd = projectDir || wtPath;
-    if (activeSiblingWriteLocks(job).length > 0) return false;
-    try {
-      const stashed = stashDirtyWorktree(wtPath, mainCwd, `posse: stash from ${label} job #${job.id}`, {
-        shouldDefer: () => activeSiblingWriteLocks(job).length > 0,
-      });
-      if (stashed) flagStallResume(job.id);
-      return stashed;
-    } catch {
-      try { resetDirtyWorktreeFallback(wtPath, mainCwd); } catch { /* ignore */ }
-      return false;
-    }
-  } catch {
-    return false;
-  }
 }
 
 export function isProcessAlive(pid) {

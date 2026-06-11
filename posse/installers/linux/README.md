@@ -133,3 +133,13 @@ If `posse validate` shows `failed`, run manually to see the error:
 cd <posse-dir>
 posse status
 ```
+
+## Package As Tarball
+
+From the `posse` directory:
+
+```bash
+bash scripts/package-linux-installer.sh
+```
+
+This emits a versioned tarball in `posse/dist/`.

@@ -3,6 +3,16 @@
 
 import readline from "readline";
 import { displayRoleForJobType } from "../../providers/functions/roles.js";
+import { ensureRemoteCatalogLoaded, getRemoteCatalog } from "../../providers/functions/model-catalog-store.js";
+import { describeModelCatalogWarning, validateConfiguredModels } from "../../providers/functions/model-catalog-validate.js";
+import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
+import { cancelOpenPushOfferGates } from "../../queue/functions/push-offer.js";
+import {
+  RUNTIME_STATUS_KEYS,
+  clearRuntimeStatus,
+  markCleanShutdown,
+  writeRuntimeStatus,
+} from "../../queue/functions/runtime-status.js";
 import { createBootPanel } from "./boot-panel.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
 import { inspectLocalOnnxStatus } from "../../atlas/functions/v2/embeddings/local-onnx.js";
@@ -174,6 +184,9 @@ export function buildImageInjectionPayload({ prompt = "", outputRoot = "" } = {}
 }
 
 export function closeRuntimeStateForExit() {
+  // Record the clean shutdown FIRST (needs the DB open) so the bridge
+  // derives `offline` instead of `stalled` once the heartbeat ages out.
+  try { markCleanShutdown(); } catch { /* best effort */ }
   try { flushEventsNow(); } catch { /* best effort */ }
   try { closePromptLog(); } catch { /* best effort */ }
   try { closeOutputLog(); } catch { /* best effort */ }
@@ -654,10 +667,42 @@ export class RunSession {
     return 120;
   };
   const bootRenderColumns = () => Math.max(1, bootTerminalColumns() - BOOT_RENDER_GUTTER_COLUMNS);
+  // Mirror boot step state into runtime_status (throttled, trailing-edge)
+  // so the bridge can stream instance_status boot progress to the phone.
+  let bootStatusTimer = null;
+  let bootStatusPending = null;
+  const bootStartedAtIso = new Date().toISOString();
+  const flushBootStatus = () => {
+    bootStatusTimer = null;
+    const steps = bootStatusPending;
+    bootStatusPending = null;
+    if (!steps) return;
+    try {
+      writeRuntimeStatus(RUNTIME_STATUS_KEYS.BOOT, {
+        steps: steps.slice(0, 30).map((step) => ({
+          ...step,
+          label: String(step.label || "").slice(0, 120),
+          ...(step.detail ? { detail: String(step.detail).slice(0, 200) } : {}),
+        })),
+        started_at: bootStartedAtIso,
+      });
+    } catch { /* status mirroring is best-effort */ }
+  };
   const bootPanel = createBootPanel({
     C,
     columns: bootRenderColumns,
+    onChange: (steps) => {
+      bootStatusPending = steps;
+      if (bootStatusTimer) return;
+      bootStatusTimer = setTimeout(flushBootStatus, 500);
+      bootStatusTimer.unref?.();
+    },
   });
+  // Stale rows from a previous crash must not masquerade as a live boot.
+  try {
+    clearRuntimeStatus(RUNTIME_STATUS_KEYS.SHUTDOWN);
+    writeRuntimeStatus(RUNTIME_STATUS_KEYS.BOOT, { steps: [], started_at: bootStartedAtIso });
+  } catch { /* best-effort */ }
   const STEP_SECTION_MAP = new Map([
     ["repo setup", "scheduler"],
     ["dependencies", "workspace"],
@@ -1384,7 +1429,11 @@ export class RunSession {
       force: true,
     });
     if (!dependencyResult.ok) {
-      throw new Error(`Boot dependency sync failed: ${formatBootDependencySyncForRun(dependencyResult)}`);
+      // Boot already attempted the repair itself (dependency sync runs in
+      // install mode); a failure here means a needed dependency could not be
+      // installed automatically. Point at doctor, which reruns the same
+      // repair with unbounded timeouts and a full per-dependency report.
+      throw new Error(`Boot dependency sync failed: ${formatBootDependencySyncForRun(dependencyResult)} — run "posse doctor" to repair`);
     }
   } catch (err) {
     updateBootStep("dependencies", {
@@ -1739,6 +1788,17 @@ export class RunSession {
         });
     };
 
+    // A push-offer gate from the previous run is about to go stale (this
+    // run will merge more work and re-offer at wrap-up). Supersede it now —
+    // also prevents the scheduler loop from idling on a waiting_on_human
+    // job nobody at this terminal can answer.
+    try {
+      const canceledPushGates = cancelOpenPushOfferGates("superseded_by_new_run");
+      if (canceledPushGates > 0) {
+        log?.info?.("run", "Superseded stale push-offer gate(s) at boot", { canceled: canceledPushGates });
+      }
+    } catch { /* best-effort */ }
+
     const bootWarmups = [];
     const remotePromptBundleWarmupLabel = "Remote prompt bundle";
     const remotePromptWarmupLabel = "Remote prompt compiler";
@@ -1767,6 +1827,50 @@ export class RunSession {
         isOk: (result = {}) => result.ok !== false,
       }));
     }
+
+    // Remote model catalog: refresh when stale (TTL-gated), then validate the
+    // configured model settings against the merged catalog. Non-fatal — when
+    // remote is unreachable the cached catalog (or builtin lists) keep working.
+    bootWarmups.push(bootWarmup("Model catalog", async () => {
+      await ensureRemoteCatalogLoaded();
+      let refresh = null;
+      try {
+        refresh = await maybeRefreshModelCatalog();
+      } catch { /* never fatal */ }
+      const catalog = getRemoteCatalog();
+      const warnings = validateConfiguredModels();
+      for (const warning of warnings) {
+        log?.warn?.("run", "Model catalog stale setting", {
+          setting: warning.key,
+          configured: warning.configured,
+          status: warning.status,
+          fallback: warning.fallback,
+          detail: describeModelCatalogWarning(warning),
+        });
+      }
+      const modelCount = catalog
+        ? Object.values(catalog.providers).reduce((sum, entry) => sum + entry.textModels.length + entry.imageModels.length, 0)
+        : 0;
+      return {
+        catalogVersion: catalog?.catalogVersion || null,
+        modelCount,
+        warnings,
+        refreshed: refresh?.attempted === true && refresh?.ok === true,
+      };
+    }, {
+      start: "fetching",
+      softTimeoutMs: 4_000,
+      softTimeoutDetail: "refreshing in background",
+      done: (result = {}) => {
+        const staleSuffix = result.warnings?.length
+          ? `; ${result.warnings.length} stale model setting(s)`
+          : "";
+        if (!result.catalogVersion) return `builtin only${staleSuffix}`;
+        const freshness = result.refreshed ? "" : " (cached)";
+        return `${result.catalogVersion}${freshness} — ${result.modelCount} models${staleSuffix}`;
+      },
+      isOk: () => true,
+    }));
 
     if (typeof prewarmAtlasV2BootDeps === "function") {
       bootWarmups.push(bootWarmup("ATLAS native prewarm", async () => {
@@ -1876,6 +1980,11 @@ export class RunSession {
       // terminal state on the zip indicator (warm-cache skips build no view).
       let atlasZipStarted = false;
       let atlasEncodeStarted = false;
+      // Tree-derived/compression refresh inside the view build ("tree" stage).
+      // Terminal means a status:"ok"/"failed" event already painted the bar —
+      // the boot-end sweep must not overwrite a failed tree row with "done".
+      let atlasTreeStarted = false;
+      let atlasTreeTerminal = false;
       const setAtlasBootIndexPercent = (value, { allowReset = false } = {}) => {
         const parsed = Number(value);
         if (!Number.isFinite(parsed)) return atlasBootIndexPercent;
@@ -2108,6 +2217,29 @@ export class RunSession {
               detail: zipDetail,
             });
           }
+          // The tree-derived/compression refresh runs inside the view build and
+          // drives its own bar. Its terminal event carries status ok/failed —
+          // failed stays failed (e.g. compression has no Node fallback and the
+          // native atlas binary is disabled).
+          if (String(event.stage || "") === "tree") {
+            atlasTreeStarted = true;
+            const treePercent = Number(event.percent ?? event.progress_percent);
+            const treeDetail = firstLine(event.text || "") || "building tree";
+            const treeStatus = String(event.status || "");
+            if (treeStatus === "failed") {
+              atlasTreeTerminal = true;
+              bootPanel.updateTree({ state: "failed", detail: treeDetail });
+            } else if (treeStatus === "ok") {
+              atlasTreeTerminal = true;
+              bootPanel.updateTree({ state: "done", percent: 100, detail: treeDetail });
+            } else {
+              bootPanel.updateTree({
+                state: "building",
+                percent: Number.isFinite(treePercent) ? treePercent : null,
+                detail: treeDetail,
+              });
+            }
+          }
           if (event.kind === "start") {
             atlasBootStartedAt = Date.now();
             atlasBootOutputLines = 0;
@@ -2256,6 +2388,7 @@ export class RunSession {
       } else if (atlasBoot.attempted && atlasBoot.ok) {
         if (atlasBootIndexPercent != null) setAtlasBootIndexPercent(100);
         if (atlasZipStarted) bootPanel.updateZip({ state: "done", percent: 100, detail: "merged" });
+        if (atlasTreeStarted && !atlasTreeTerminal) bootPanel.updateTree({ state: "done", percent: 100, detail: "tree ready" });
         if (atlasEncodeStarted) bootPanel.updateEncode({ state: "done", percent: 100, detail: "encoded" });
         if (!atlasBootBackgroundRequested) {
           updateBootFooter("");
@@ -2311,6 +2444,7 @@ export class RunSession {
       } else if (atlasBoot.attempted && !atlasBoot.ok) {
         const detail = (atlasBoot.error || atlasBoot.stderr || atlasBoot.stdout || "").split(/\r?\n/).filter(Boolean).slice(-1)[0] || `exit ${atlasBoot.status}`;
         if (atlasZipStarted) bootPanel.updateZip({ state: "failed", detail: "view build failed" });
+        if (atlasTreeStarted && !atlasTreeTerminal) bootPanel.updateTree({ state: "failed", detail: "view build failed" });
         if (atlasEncodeStarted) bootPanel.updateEncode({ state: "failed", detail: "encode failed" });
         if (!atlasBootBackgroundRequested) {
           updateBootFooter("");
@@ -2670,6 +2804,10 @@ export class RunSession {
     }
   }
 
+  // Tracks an in-flight live review ('r' keybinding) so wrap-up can wait for
+  // its closeout instead of re-entering approval mode over a live session.
+  let liveReviewPromise = null;
+
   // Wire inject keybinding — pressing 'i' in the TUI creates a work item + research/plan jobs
   if (display) {
     display.onInject = (description) => {
@@ -2820,7 +2958,6 @@ export class RunSession {
       }
     };
 
-    let liveReviewPromise = null;
     display.onReviewPending = () => {
       if (liveReviewPromise) {
         display.addEvent(`${C.dim}Review is already open/running${C.reset}`);
@@ -3194,6 +3331,14 @@ export class RunSession {
   try {
     let nextAction = null;
     if (display) {
+      if (liveReviewPromise) {
+        // The scheduler can drain and exit on its own while a live review is
+        // still open. Wait for runLiveReview's closeout (merge-queue drain +
+        // report save) so wrapUpTui doesn't re-enter approval mode over the
+        // live session and strand its resolver.
+        emitCloseoutStatus("Run wrap-up: waiting for the open review to finish.", C.cyan);
+        await liveReviewPromise;
+      }
       emitCloseoutStatus("Run wrap-up: starting closeout.", C.cyan);
       if (typeof display.setRunPhase === "function") display.setRunPhase("Run wrap-up");
       await flushCloseoutStatus();

@@ -37,8 +37,12 @@ import {
   renderAtlasHandoffSections,
 } from "../../../handoff/functions/index.js";
 import { refreshAndExtractInsights } from "./insights.js";
-import { gitExec, gitExecAsync, gitHasChanges } from "../../../git/functions/utils.js";
-import { resetDirtyWorktreeFallback, snapshotAndResetDirtyWorktreeAsync, stashDirtyWorktree } from "../../../git/functions/worktree.js";
+import { gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
+import {
+  resetDirtyWorktreeFallbackAsync,
+  snapshotAndResetDirtyWorktreeAsync,
+  stashDirtyWorktreeAsync,
+} from "../../../git/functions/worktree.js";
 import { ASSESSABLE_JOB_TYPES } from "./job-type-sets.js";
 import { effectiveArtifactTaskMode } from "./execution-routing.js";
 import {
@@ -87,7 +91,7 @@ function readSettingBool(key, fallback = false) {
 function markAssessmentRetryAssessOnly(job) {
   if (!job || !ASSESSABLE_JOB_TYPES.has(job.job_type)) return false;
   const payload = parseJobPayload(job);
-  payload._assess_only = 1;
+  payload._assess_only = true;
   const nextPayloadJson = JSON.stringify(payload);
   updateJobPayload(job.id, nextPayloadJson);
   job.payload_json = nextPayloadJson;
@@ -178,14 +182,27 @@ export function __testLooksLikeAssessorAccessLimitation(text) {
   return _looksLikeAssessorAccessLimitation(text);
 }
 
+// Memoized per cwd: the nested-repo prefix is fixed for a directory for the
+// lifetime of a session, and this runs inside every committed-scope check —
+// without the cache each check pays a synchronous `git rev-parse` on the main
+// thread. Failures are not cached (a transient git error must retry).
+// Bounded by the number of distinct worktree/project cwds the process touches
+// (a handful per run); never invalidated — the prefix is derived from on-disk
+// repo layout, which is stable for the process lifetime.
+const _nestedRepoPrefixCache = new Map();
+
 function _deriveNestedRepoPrefix(cwd = process.cwd()) {
   if (!cwd) return null;
+  const key = path.resolve(cwd);
+  if (_nestedRepoPrefixCache.has(key)) return _nestedRepoPrefixCache.get(key);
   try {
     const repoRoot = path.resolve(gitExec(["rev-parse", "--show-toplevel"], cwd));
-    const rel = path.relative(repoRoot, path.resolve(cwd));
-    if (!rel || rel === "." || !isInsideRoot(path.resolve(cwd), repoRoot, { allowEqual: false, followSymlinks: false })) return null;
-    const normalized = normPath(rel);
-    return normalized || null;
+    const rel = path.relative(repoRoot, key);
+    const prefix = (!rel || rel === "." || !isInsideRoot(key, repoRoot, { allowEqual: false, followSymlinks: false }))
+      ? null
+      : (normPath(rel) || null);
+    _nestedRepoPrefixCache.set(key, prefix);
+    return prefix;
   } catch {
     return null;
   }
@@ -2033,7 +2050,7 @@ export async function runPostExecutionAssessment(worker, {
 
         if (wtPath) {
           try {
-            if (gitHasChanges(wtPath)) {
+            if (await gitHasChangesAsync(wtPath)) {
               const siblingLocks = activeSiblingWriteLocks(job);
               if (siblingLocks.length > 0) {
                 logEvent({
@@ -2047,7 +2064,7 @@ export async function runPostExecutionAssessment(worker, {
                 });
               } else {
                 try {
-                  stashDirtyWorktree(wtPath, worker.projectDir, `posse: stash from rate-limited assessment job #${job.id}`, {
+                  await stashDirtyWorktreeAsync(wtPath, worker.projectDir, `posse: stash from rate-limited assessment job #${job.id}`, {
                     shouldDefer: () => {
                       const lateSiblingLocks = activeSiblingWriteLocks(job);
                       if (lateSiblingLocks.length === 0) return false;
@@ -2064,7 +2081,7 @@ export async function runPostExecutionAssessment(worker, {
                     },
                   });
                 }
-                catch { try { resetDirtyWorktreeFallback(wtPath, worker.projectDir); } catch { /* ignore */ } }
+                catch { try { await resetDirtyWorktreeFallbackAsync(wtPath, worker.projectDir); } catch { /* ignore */ } }
               }
             }
           } catch { /* ignore */ }

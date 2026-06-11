@@ -57,10 +57,12 @@ function enrichCall(call) {
 /**
  * Total cost for a single work item.
  * Returns { wiId, totalCostUsd, inputTokens, outputTokens, callCount, costSourceCounts, unknownCostCalls }.
+ * Pass `db` to compute on an alternate handle (the bridge ChangeStream uses
+ * its readonly connection instead of the shared write handle).
  */
-export function workItemCost(wiId, { since = null } = {}) {
+export function workItemCost(wiId, { since = null, db = null } = {}) {
   if (wiId == null) return null;
-  const db = getDb();
+  if (!db) db = getDb();
   const { where, params } = buildWhere({ wiId, since });
   const rows = db.prepare(`
     SELECT work_item_id, job_id, role, provider, model_tier, model_name,
@@ -148,26 +150,40 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
 export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
   const db = getDb();
   const { where, params } = buildWhere({ since });
+  // Single scan: per-call cost needs the JS-side pricing resolution, so we
+  // fetch every matching row once and group by work item here rather than
+  // re-querying agent_calls per work item.
   const rows = db.prepare(`
-    SELECT DISTINCT work_item_id
+    SELECT work_item_id, job_id, role, provider, model_tier, model_name,
+           input_tokens, output_tokens, cached_input_tokens, cost_estimate_usd, status
     FROM agent_calls
     ${where}
   `).all(...params);
 
-  const enriched = rows
-    .filter((row) => row.work_item_id != null)
-    .map((row) => {
-      const wiCost = workItemCost(row.work_item_id, { since });
-      return {
-        wiId: row.work_item_id,
-        callCount: wiCost.callCount,
-        inputTokens: wiCost.inputTokens,
-        outputTokens: wiCost.outputTokens,
-        totalCostUsd: wiCost.totalCostUsd,
-        unknownCostCalls: wiCost.unknownCostCalls,
+  const byWi = new Map();
+  for (const raw of rows) {
+    if (raw.work_item_id == null) continue;
+    const call = enrichCall(raw);
+    let entry = byWi.get(call.work_item_id);
+    if (!entry) {
+      entry = {
+        wiId: call.work_item_id,
+        callCount: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalCostUsd: 0,
+        unknownCostCalls: 0,
       };
-    });
+      byWi.set(call.work_item_id, entry);
+    }
+    entry.callCount += 1;
+    entry.inputTokens += call.input_tokens || 0;
+    entry.outputTokens += call.output_tokens || 0;
+    entry.totalCostUsd += call.resolved_cost_usd || 0;
+    if (call.cost_source === "none") entry.unknownCostCalls += 1;
+  }
 
+  const enriched = [...byWi.values()];
   enriched.sort((a, b) => b.totalCostUsd - a.totalCostUsd);
   const trimmed = enriched.slice(0, limit);
   const grandCost = enriched.reduce((acc, e) => acc + e.totalCostUsd, 0);

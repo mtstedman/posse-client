@@ -242,6 +242,29 @@ export async function ingestScipFile({
   }
 
   const writeResult = await runScipIngestWrite(ledger, () => {
+    if (pathSnapshotError) {
+      // A failed branch-snapshot read fails every document identically, so
+      // fail the run once up front instead of burning the whole document
+      // loop (one thrown error + one failed event per document) on every
+      // re-warm while the failure persists.
+      documentsFailed = totalDocuments;
+      emit(onEvent, {
+        kind: "atlas.scip.ingest.failed",
+        scheme,
+        language,
+        source_languages: sourceLanguages,
+        reason: "branch_snapshot_failed",
+        message: `SCIP ingest cannot append to branch '${appendBranch}' because its snapshot could not be read: ` +
+          `${pathSnapshotError instanceof Error ? pathSnapshotError.message : String(pathSnapshotError)}`,
+      });
+      const recordedId = ledger.recordScipIndex({
+        ...indexRecord,
+        documents_failed: documentsFailed,
+        status: "partial",
+        return_existing: effectiveForce,
+      });
+      return { status: "partial", recordedId };
+    }
     const bindExternal = makeExternalBinder(ledger, () => { externalsBound++; });
 
     // Throttle per-document progress to ~1% steps (min every 5 docs) so the
@@ -292,12 +315,6 @@ export async function ingestScipFile({
         }
         if (!document.content_hash) {
           throw new RangeError("SCIP document has no text and could not be hydrated from disk");
-        }
-        if (pathSnapshotError) {
-          throw new RangeError(
-            `SCIP document cannot append to branch '${appendBranch}' because its snapshot could not be read: ` +
-            `${pathSnapshotError instanceof Error ? pathSnapshotError.message : String(pathSnapshotError)}`,
-          );
         }
         if (document.range_clamp_count > 0) {
           emit(onEvent, {

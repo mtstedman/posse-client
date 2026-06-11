@@ -12,6 +12,8 @@
       "defaultMinCallConfidence": 0.5,
       "defaultDenyRaw": false,
       "memoryEnabled": true,
+      "memoryStaleAfterDays": 180,
+      "memoryMaxPerRepo": 5000,
       "runtimeEnabled": false,
       "budgetCaps": {
         "maxCards": 50,

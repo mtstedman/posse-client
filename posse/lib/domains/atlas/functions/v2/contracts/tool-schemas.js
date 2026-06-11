@@ -225,6 +225,8 @@ const policyPatch = () => o({
   defaultMinCallConfidence: n({ minimum: 0, maximum: 1 }),
   defaultDenyRaw: b(),
   memoryEnabled: b(),
+  memoryStaleAfterDays: i({ minimum: 0, maximum: 3650 }),
+  memoryMaxPerRepo: i({ minimum: 0, maximum: 100_000 }),
   runtimeEnabled: b(),
   budgetCaps: sliceBudget(),
 }, [], { type: ["object", "array"] });

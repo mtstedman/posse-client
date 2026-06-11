@@ -21,7 +21,9 @@ export class DatedRotatingLog {
     this._fd = null;
     this._currentDate = "";
     this._lastPruneDate = "";
-    this._initFailed = false;
+    // Date stamp of the last reported open failure: anti-spam within a day,
+    // but re-arms on rollover so a persistent failure isn't silent forever.
+    this._initFailedDate = "";
   }
 
   _today() {
@@ -45,11 +47,11 @@ export class DatedRotatingLog {
       fs.mkdirSync(logDir, { recursive: true });
       this._fd = fs.openSync(this._filePath(logDir, today), "a");
       this._currentDate = today;
-      this._initFailed = false;
+      this._initFailedDate = "";
       return { fd: this._fd, logDir };
     } catch (err) {
-      if (!this._initFailed && typeof this.onOpenError === "function") {
-        this._initFailed = true;
+      if (this._initFailedDate !== today && typeof this.onOpenError === "function") {
+        this._initFailedDate = today;
         this.onOpenError(err, logDir);
       }
       return { fd: null, logDir };

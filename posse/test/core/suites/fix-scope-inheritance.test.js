@@ -318,7 +318,7 @@ suite("Fix scope inheritance", () => {
     const refreshed = queueMod.getJob(current.id);
     const payload = JSON.parse(refreshed.payload_json || "{}");
     assert.equal(refreshed.status, "queued");
-    assert.equal(payload._assess_only, 1);
+    assert.equal(payload._assess_only, true);
     assert.equal(first.spawnedJobs.length, 0);
 
     queueMod.setSetting("assessor_internal_retry_limit", previousRetryLimit);

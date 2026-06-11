@@ -26,6 +26,7 @@ import {
   getDefaultImageProvider,
   normalizeGrokImageModelName,
 } from "../../providers/functions/model-catalog.js";
+import { resolveEffectiveImageModel } from "../../providers/functions/model-catalog-validate.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -160,7 +161,11 @@ export function getConfiguredImageModel(provider, protocol = null) {
   const currentProtocol = protocol || getArtifactProtocol("image") || {};
   const saved = getAccountSetting(`${selectedProvider}_image_model`);
   const fallback = currentProtocol.provider === selectedProvider ? currentProtocol.model : null;
-  return normalizeImageModelForProvider(selectedProvider, saved || fallback);
+  const normalized = normalizeImageModelForProvider(selectedProvider, saved || fallback);
+  // Stale-model guard (after typo normalization): a model the remote catalog
+  // marks deprecated/removed warns and resolves to the provider default.
+  const effective = resolveEffectiveImageModel(selectedProvider, normalized);
+  return effective.model || normalized;
 }
 
 /** Resolve the effective image protocol, normalizing provider/model mismatches. */
@@ -817,10 +822,10 @@ function _isDirEmpty(dir) {
       if (e.isDirectory() && !_isDirEmpty(path.join(dir, e.name))) return false;
     }
     return true;
-  } catch {
-    // Preserve the historical startup-cleanup behavior: if we cannot inspect a
-    // transient scope dir, let the forceful rm attempt decide whether it can go.
-    return true;
+  } catch (err) {
+    // Only a vanished dir is safely "empty". Any other readdir failure (EACCES,
+    // transient AV lock) must not green-light the recursive rm that follows.
+    return err?.code === "ENOENT";
   }
 }
 
@@ -832,7 +837,7 @@ async function _isDirEmptyAsync(dir) {
       if (e.isDirectory() && !(await _isDirEmptyAsync(path.join(dir, e.name)))) return false;
     }
     return true;
-  } catch {
-    return true;
+  } catch (err) {
+    return err?.code === "ENOENT";
   }
 }

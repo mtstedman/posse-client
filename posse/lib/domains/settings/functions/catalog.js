@@ -34,6 +34,7 @@ import {
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES,
   KAIZEN_TO_ATLAS_MODE_VALUES,
   LOG_LEVEL_VALUES,
+  MODEL_CATALOG_ENFORCEMENT_VALUES,
   PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES,
   POSSE_REMOTE_MODE_VALUES,
   RESEARCH_FANOUT_MODE_VALUES,
@@ -67,6 +68,7 @@ export {
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES,
   KAIZEN_TO_ATLAS_MODE_VALUES,
   LOG_LEVEL_VALUES,
+  MODEL_CATALOG_ENFORCEMENT_VALUES,
   PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES,
   POSSE_REMOTE_MODE_VALUES,
   RESEARCH_FANOUT_MODE_VALUES,
@@ -124,6 +126,12 @@ export const SETTINGS_CATALOG = [
   // ── Model selection (empty = use provider tier default) ──────────────────
   ...MODEL_SELECTION_SETTINGS,
   { key: "artifact_image_provider", default: "", description: "Provider used for image artifacts (openai or grok)" },
+
+  // ── Remote model catalog (fetched from posse-remote /v1/catalog/models) ──
+  { key: "model_catalog_cache_ms", default: "86400000", numeric: { integer: true, min: 60000 }, description: "Milliseconds to cache the remote model catalog before refreshing (default 24h)" },
+  { key: "model_catalog_enforcement", default: "warn_and_fallback", options: MODEL_CATALOG_ENFORCEMENT_VALUES, description: "Stale configured-model handling: warn_and_fallback substitutes the tier default at runtime, warn_only keeps the configured model, off disables validation" },
+  { key: "model_catalog_json", default: "", adminVisible: false, description: "Cached remote model/pricing catalog payload (auto-updated)" },
+  { key: "model_catalog_fetched_at", default: "", adminVisible: false, description: "Timestamp of the last successful model catalog fetch (auto-updated)" },
 
   // ── Token caps and observed-usage calibration ────────────────────────────
   { key: "claude_limit_tokens_session", default: "", numeric: { integer: true, min: 0 }, description: "Token cap for Claude's 5-hour rolling window" },
@@ -196,13 +204,17 @@ export const SETTINGS_CATALOG = [
   { key: "posse_display_event_rate_limit_per_sec", default: "300", numeric: { integer: true, min: 10 }, description: "Per-second event rate above which the terminal UI starts dropping events to stay responsive" },
 
   // ── Bridge ───────────────────────────────────────────────────────────────
-  { key: "bridge_port", default: "7531", numeric: { integer: true, min: 1, max: 65535 }, description: "Loopback port for the local Posse bridge" },
-  { key: "bridge_label", default: "", description: "Optional display label for this Posse bridge instance" },
+  // Identity is repo-scoped: each repo is its own relay instance so one
+  // machine can expose N posse sessions to the phone. The LAN token, bind
+  // host, and relay URL stay machine-global.
+  { key: "bridge_port", default: "", scope: "repo", numeric: { integer: true, min: 1, max: 65535 }, description: "Loopback port for this repo's Posse bridge (empty = auto-pick 7531+)" },
+  { key: "bridge_label", default: "", scope: "repo", description: "Optional display label for this repo's Posse bridge instance" },
   { key: "bridge_bind_host", default: "127.0.0.1", adminVisible: false, description: "Bind host for the local Posse bridge" },
   { key: "bridge_local_token", default: "", adminVisible: false, description: "Bearer token for local Posse bridge clients" },
-  { key: "bridge_instance_id", default: "", adminVisible: false, description: "Stable local Posse bridge instance identifier" },
-  { key: "bridge_relay_token", default: "", adminVisible: false, description: "Bearer token for the Posse relay bridge connection" },
+  { key: "bridge_instance_id", default: "", scope: "repo", adminVisible: false, description: "Stable Posse bridge instance identifier for this repo" },
+  { key: "bridge_relay_token", default: "", scope: "repo", adminVisible: false, description: "Bearer token for this repo's Posse relay bridge connection" },
   { key: "bridge_relay_url", default: "wss://app.yourposseai.com/v1/instance", adminVisible: false, description: "Relay WebSocket URL for the Posse bridge" },
+  { key: "bridge_identity_migrated_to", default: "", adminVisible: false, description: "Project dir that claimed the legacy machine-global bridge identity (auto-updated)" },
 
   // ── Behaviors ────────────────────────────────────────────────────────────
   { key: "auto_merge_completed", default: "false", valueType: "boolean", description: "Auto-merge work items that pass assessment" },
@@ -266,11 +278,11 @@ export const SETTINGS_CATALOG = [
   { key: "atlas_parse_band_max_rows",      default: "8",                  numeric: { integer: true, min: 1 }, adminVisible: false, description: "Internal Atlas Parse terminal band maximum row count" },
   { key: "atlas_parse_onnx_background_initial", default: "true",          valueType: "boolean", adminVisible: false, description: "Internal Atlas Parse initial ONNX embedding background flag" },
   { key: "atlas_parse_onnx_background_batch_size", default: "128",        numeric: { integer: true, min: 1 }, adminVisible: false, description: "Internal Atlas Parse background ONNX embedding batch size" },
-  // Native (Rust) binary delegation. Default off; only takes effect when a
-  // compiled build is staged for the host os/arch (BinaryManager.shouldUse).
-  // Runtime env overrides POSSE_NATIVE_BINARIES / POSSE_NATIVE_<TOOL> win.
-  { key: "posse_native_atlas",            default: "false",              valueType: "boolean", adminVisible: false, description: "Enable Rust-owned ATLAS methods through the native posse-atlas binary when present" },
-  { key: "posse_native_git",              default: "true",               valueType: "boolean", adminVisible: false, description: "Delegate supported git operations to the native posse-git binary when present" },
+  // Native (Rust) binary delegation. Git and ATLAS are hardwired native in
+  // BinaryManager (no setting, no env override, no JS path); the keys below
+  // only gate tools still mid-migration, and only take effect when a compiled
+  // build is staged for the host os/arch (BinaryManager.shouldUse). Runtime
+  // env overrides POSSE_NATIVE_BINARIES / POSSE_NATIVE_<TOOL> win.
   { key: "posse_native_remote",           default: "true",               valueType: "boolean", adminVisible: false, description: "Delegate authenticated Posse remote prompt/catalog HTTP calls to the native posse-remote binary when present" },
   { key: "posse_native_heartbeat_url",    default: "",                   adminVisible: false, description: "Heartbeat URL passed explicitly to key-gated native Posse binaries" },
   { key: "posse_native_heartbeat_public_key_url", default: "",           adminVisible: false, description: "Optional heartbeat public-key discovery URL passed explicitly to native Posse binaries" },

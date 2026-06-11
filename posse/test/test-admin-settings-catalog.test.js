@@ -69,6 +69,25 @@ describe("admin settings catalog", () => {
     assert.equal(SETTINGS_DEFAULTS.atlas_drift_check, "true");
   });
 
+  it("registers the remote model catalog settings with safe defaults", () => {
+    assert.equal(SETTINGS_DEFAULTS.model_catalog_cache_ms, "86400000");
+    assert.equal(SETTINGS_DEFAULTS.model_catalog_enforcement, "warn_and_fallback");
+    assert.equal(SETTINGS_DEFAULTS.model_catalog_json, "");
+    assert.equal(SETTINGS_DEFAULTS.model_catalog_fetched_at, "");
+
+    // The cache blob and timestamp are runtime state, not admin-editable.
+    assert.equal(isAdminVisibleCatalogKey("model_catalog_json"), false);
+    assert.equal(isAdminVisibleCatalogKey("model_catalog_fetched_at"), false);
+    assert.equal(isAdminVisibleCatalogKey("model_catalog_cache_ms"), true);
+    assert.equal(isAdminVisibleCatalogKey("model_catalog_enforcement"), true);
+
+    // Enforcement is enum-validated; cache TTL has a sane floor.
+    assert.equal(validateCatalogSettingValue("model_catalog_enforcement", "warn_only").ok, true);
+    assert.equal(validateCatalogSettingValue("model_catalog_enforcement", "bogus").ok, false);
+    assert.equal(validateCatalogSettingValue("model_catalog_cache_ms", "1000").ok, false);
+    assert.equal(validateCatalogSettingValue("model_catalog_cache_ms", "3600000").ok, true);
+  });
+
   it("normalizes ATLAS tree compression config from admin-shaped keys", async () => {
     const { getAtlasIntegrationConfig } = await import("../lib/domains/integrations/functions/atlas/config.js");
 

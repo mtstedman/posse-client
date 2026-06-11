@@ -16,7 +16,9 @@ import {
 } from "../../queue/functions/common.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
 import { redactBridgeValue } from "./redaction.js";
+import { composeInstanceStatus } from "./instance-status.js";
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -90,6 +92,7 @@ function promptFromGatePayload(payload, fallback = null) {
 }
 
 function gateKindForJob(job, payload = {}) {
+  if (payload?.subtype === "push_offer") return "push";
   if (payload?.subtype === "plan_approval") return "plan";
   if (payload?.review_type) return "review";
   if (job?.status === "waiting_on_review") return "review";
@@ -222,6 +225,12 @@ export function collectStateSnapshot({ limit = DEFAULT_LIMIT, eventLimit = 50, h
     .slice(0, capped)
     .map(normalizeJob);
   const openGates = activeJobs.filter(isOpenGateJob).slice(0, capped).map(normalizeGate).filter(Boolean);
+  let instanceStatus = null;
+  try {
+    instanceStatus = composeInstanceStatus(getDb());
+  } catch {
+    // Older DB without runtime_status — snapshot simply omits it.
+  }
   return {
     generated_at: new Date().toISOString(),
     head_event_id: Number(headEventId || 0),
@@ -232,5 +241,6 @@ export function collectStateSnapshot({ limit = DEFAULT_LIMIT, eventLimit = 50, h
     pending_human_input: pendingHumanInput,
     pending_plan_gates: pendingPlanGates,
     reviewable_work_items: workItems.filter((wi) => wi.reviewable),
+    instance_status: instanceStatus,
   };
 }

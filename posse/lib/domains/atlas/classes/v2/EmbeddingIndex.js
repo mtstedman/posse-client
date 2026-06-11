@@ -38,7 +38,6 @@ const localRequire = createRequire(import.meta.url);
 let usearch = null;
 /** @type {string | null} */
 let usearchLoadError = null;
-let annSaveFailureLogged = false;
 try {
   const mod = localRequire("usearch");
   usearch = /** @type {any} */ (mod?.default ?? mod);
@@ -70,12 +69,13 @@ export function usearchUnavailableReason() {
 }
 
 /**
+ * Deduplication is per index instance (see #annSaveFailureLogged) so one
+ * failing index can't silence warnings from every other index in the process.
+ *
  * @param {string} context
  * @param {unknown} err
  */
 function logAnnSaveFailure(context, err) {
-  if (annSaveFailureLogged) return;
-  annSaveFailureLogged = true;
   const message = /** @type {any} */ (err)?.message || String(err);
   console.warn(`[atlas-v2 embeddings] failed to save ANN index during ${context}; will retry on close: ${message}`);
   recordAnnRecoveryEvent("ann.save_failed", { context, error: message });
@@ -211,6 +211,8 @@ export class EmbeddingIndex {
   #annDirtyBatches = 0;
   /** @type {number} */
   #lastAnnSaveAt = Date.now();
+  /** @type {boolean} */
+  #annSaveFailureLogged = false;
 
   /**
    * @param {{
@@ -701,9 +703,14 @@ export class EmbeddingIndex {
   #saveBestEffort(context, timing = null) {
     try {
       this.save(timing);
+      // A recovered save ends the failure streak; log the next one anew.
+      this.#annSaveFailureLogged = false;
       return true;
     } catch (err) {
-      logAnnSaveFailure(context, err);
+      if (!this.#annSaveFailureLogged) {
+        this.#annSaveFailureLogged = true;
+        logAnnSaveFailure(context, err);
+      }
       return false;
     }
   }

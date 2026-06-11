@@ -188,9 +188,9 @@ export function runCostCommand(args = []) {
   if (args[0] === "pricing") {
     const sub = args[1] || "list";
     if (sub === "set") {
-      const [, , provider, model, inRate, outRate, tier] = args;
+      const [, , provider, model, inRate, outRate, tier, cachedRate] = args;
       if (!provider || !model || !inRate || !outRate) {
-        console.log(`\n  Usage: posse cost pricing set <provider> <model> <inputPerM> <outputPerM> [tier]\n`);
+        console.log(`\n  Usage: posse cost pricing set <provider> <model> <inputPerM> <outputPerM> [tier] [cachedInputPerM]\n`);
         process.exitCode = 2;
         return;
       }
@@ -201,8 +201,9 @@ export function runCostCommand(args = []) {
           inputPerM: Number(inRate),
           outputPerM: Number(outRate),
           modelTier: tier || null,
+          cachedInputPerM: cachedRate != null && cachedRate !== "" ? Number(cachedRate) : null,
         });
-        console.log(`\n  ${C.green}Updated pricing:${C.reset} ${row.provider}/${row.modelName} in=$${row.inputPerM}/M out=$${row.outputPerM}/M${row.modelTier ? ` tier=${row.modelTier}` : ""}\n`);
+        console.log(`\n  ${C.green}Updated pricing:${C.reset} ${row.provider}/${row.modelName} in=$${row.inputPerM}/M out=$${row.outputPerM}/M${row.cachedInputPerM != null ? ` cached=$${row.cachedInputPerM}/M` : ""}${row.modelTier ? ` tier=${row.modelTier}` : ""}\n`);
       } catch (err) {
         console.log(`\n  ${C.red}Error:${C.reset} ${err.message}\n`);
         process.exitCode = 1;
@@ -215,7 +216,7 @@ export function runCostCommand(args = []) {
     console.log(`\n  ${C.bold}Pricing Overrides (DB)${C.reset} ${C.dim}(${dbRows.length} row(s))${C.reset}\n`);
     if (dbRows.length === 0) console.log(`  ${C.dim}(none - using baked-in defaults)${C.reset}`);
     for (const row of dbRows) {
-      console.log(`  ${row.provider}/${row.modelName}  in=$${row.inputPerM}/M  out=$${row.outputPerM}/M${row.modelTier ? `  ${C.dim}tier=${row.modelTier}${C.reset}` : ""}`);
+      console.log(`  ${row.provider}/${row.modelName}  in=$${row.inputPerM}/M  cached=$${row.cachedInputPerM}/M  out=$${row.outputPerM}/M${row.modelTier ? `  ${C.dim}tier=${row.modelTier}${C.reset}` : ""}`);
     }
     console.log(`\n  ${C.bold}Baked-in defaults${C.reset} ${C.dim}(fallback when DB + family match miss)${C.reset}\n`);
     for (const row of defaults) {
@@ -229,7 +230,7 @@ export function runCostCommand(args = []) {
     console.log(`
   Usage: posse cost [wi-id] [--json] [--by provider|role|tier|model|wi] [--since DATE]
          posse cost [wi-id] --recycling [--json]
-         posse cost pricing [list|set <provider> <model> <in/M> <out/M> [tier]]
+         posse cost pricing [list|set <provider> <model> <in/M> <out/M> [tier] [cached-in/M]]
 
   No arguments: top 20 most-expensive work items + grand total.
   With wi-id:   per-WI breakdown (grouped by provider by default).

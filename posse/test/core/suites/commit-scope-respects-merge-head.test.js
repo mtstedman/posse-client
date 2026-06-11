@@ -76,7 +76,7 @@ suite("Commit scope respects MERGE_HEAD", () => {
 
   it("bypasses scope enforcement when a merge is in progress", async () => {
     const { gitCommitAll } = await import("../../../lib/domains/git/functions/commit-scope.js");
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-commit-scope-merge-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -98,7 +98,7 @@ suite("Commit scope respects MERGE_HEAD", () => {
       execFileSync("git", ["add", "shared.txt", "task.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits"], { cwd: wtDir, stdio: "ignore" });
 
-      mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
 
       // Dev "resolves" the conflict by writing a clean version of shared.txt.
       fs.writeFileSync(path.join(wtDir, "shared.txt"), "merged resolution\n", "utf-8");
@@ -130,7 +130,7 @@ suite("Commit scope respects MERGE_HEAD", () => {
 
   it("refuses to commit when staged content still contains conflict markers", async () => {
     const { gitCommitAll } = await import("../../../lib/domains/git/functions/commit-scope.js");
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-commit-scope-markers-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -149,7 +149,7 @@ suite("Commit scope respects MERGE_HEAD", () => {
       execFileSync("git", ["add", "shared.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits"], { cwd: wtDir, stdio: "ignore" });
 
-      mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
 
       // Dev "resolves" sloppily — leaves conflict markers in the file.
       fs.writeFileSync(
@@ -176,7 +176,7 @@ suite("Commit scope respects MERGE_HEAD", () => {
 
   it("preserves MERGE_HEAD when secrets scan blocks a merge commit", async () => {
     const { gitCommitAll } = await import("../../../lib/domains/git/functions/commit-scope.js");
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-commit-scope-secrets-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -195,7 +195,7 @@ suite("Commit scope respects MERGE_HEAD", () => {
       execFileSync("git", ["add", "shared.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits"], { cwd: wtDir, stdio: "ignore" });
 
-      mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
       fs.writeFileSync(
         path.join(wtDir, "shared.txt"),
         "SECRET_KEY=abcdefghijklmnopqrstuvwxyz123456\n",
@@ -221,7 +221,7 @@ suite("Commit scope respects MERGE_HEAD", () => {
 
   it("quarantines edits outside scope and merge diff during scoped merge commits", async () => {
     const { gitCommitAll } = await import("../../../lib/domains/git/functions/commit-scope.js");
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-commit-scope-audit-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -244,7 +244,7 @@ suite("Commit scope respects MERGE_HEAD", () => {
       execFileSync("git", ["add", "shared.txt", "task.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits"], { cwd: wtDir, stdio: "ignore" });
 
-      mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
 
       fs.writeFileSync(path.join(wtDir, "shared.txt"), "merged resolution\n", "utf-8");
       // Dev also edits stray.txt — which is neither in scope nor brought in by merge.
@@ -284,7 +284,7 @@ suite("Commit scope respects MERGE_HEAD", () => {
 
   it("detectPendingMerge returns paths relative to the worktree cwd", async () => {
     const { detectPendingMerge } = await import("../../../lib/domains/handoff/functions/index.js");
-    const { mergeTargetIntoWorktree, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
+    const { mergeTargetIntoWorktreeAsync, worktreeRoot } = await import("../../../lib/domains/git/functions/worktree.js");
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-handoff-relative-"));
     try {
       execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -304,7 +304,7 @@ suite("Commit scope respects MERGE_HEAD", () => {
       execFileSync("git", ["add", "sub/nested.txt"], { cwd: wtDir, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "wi edits"], { cwd: wtDir, stdio: "ignore" });
 
-      mergeTargetIntoWorktree(wtDir, projectDir, "main", { leaveOnConflict: true });
+      await mergeTargetIntoWorktreeAsync(wtDir, projectDir, "main", { leaveOnConflict: true });
 
       // Call detectPendingMerge from a nested cwd — paths should be relative to it.
       const nested = path.join(wtDir, "sub");

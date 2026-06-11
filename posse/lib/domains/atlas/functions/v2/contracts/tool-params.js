@@ -555,6 +555,8 @@
  * @property {number} [policyPatch.defaultMinCallConfidence]
  * @property {boolean} [policyPatch.defaultDenyRaw]
  * @property {boolean} [policyPatch.memoryEnabled]
+ * @property {number} [policyPatch.memoryStaleAfterDays]
+ * @property {number} [policyPatch.memoryMaxPerRepo]
  * @property {boolean} [policyPatch.runtimeEnabled]
  * @property {{ maxCards?: number, maxEstimatedTokens?: number }} [policyPatch.budgetCaps]
  */

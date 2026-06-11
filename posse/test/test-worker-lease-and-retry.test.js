@@ -28,6 +28,7 @@ import {
   listJobsByWorkItem,
   logEvent,
   releaseLease,
+  requeueExpiredLeases,
   updateJobStatus,
   completeAttempt,
   setAttemptCommitHash,
@@ -148,6 +149,46 @@ describe("Worker lease + retry recovery", () => {
     const worker = new Worker({ projectDir: process.cwd(), silent: true });
     worker._openProviderCircuit("codex", "test trip");
     assert.equal(worker._providerCircuitOpen.get("codex").ttlMs, 1234);
+  }));
+
+  it("clears expired lease tokens retained by parked jobs without unparking them", () => withTempRuntimeDb(() => {
+    const wi = createWorkItem("parked lease token sweep", "regression");
+    const job = createJob({
+      work_item_id: wi.id,
+      job_type: "dev",
+      title: "Parked with retained token",
+    });
+    const lease = acquireLease(job.id, "test-worker", 900);
+    // Simulate a crash between processVerdict() parking the job and the
+    // worker's immediate lease release: parked status, token still set.
+    updateJobStatus(job.id, "waiting_on_review", { leaseToken: lease.leaseToken });
+    getDb().prepare(`UPDATE jobs SET lease_expires_at = ? WHERE id = ?`)
+      .run(new Date(Date.now() - 60 * 60 * 1000).toISOString(), job.id);
+
+    requeueExpiredLeases();
+
+    const refreshed = getJob(job.id);
+    assert.equal(refreshed.status, "waiting_on_review");
+    assert.equal(refreshed.lease_token, null);
+    assert.equal(refreshed.lease_owner, null);
+    assert.equal(refreshed.lease_expires_at, null);
+  }));
+
+  it("leaves unexpired parked lease tokens alone", () => withTempRuntimeDb(() => {
+    const wi = createWorkItem("parked lease token fresh", "regression");
+    const job = createJob({
+      work_item_id: wi.id,
+      job_type: "dev",
+      title: "Parked inside the release window",
+    });
+    const lease = acquireLease(job.id, "test-worker", 900);
+    updateJobStatus(job.id, "waiting_on_review", { leaseToken: lease.leaseToken });
+
+    requeueExpiredLeases();
+
+    const refreshed = getJob(job.id);
+    assert.equal(refreshed.status, "waiting_on_review");
+    assert.equal(refreshed.lease_token, lease.leaseToken);
   }));
 
   it("keeps assess-only payload flags when the assessor attempt cannot claim a stale lease", async () => withTempRuntimeDb(async (projectDir) => {
@@ -304,7 +345,7 @@ describe("Worker lease + retry recovery", () => {
     assert.equal(getEvents(job.id, 10).some((evt) => evt.event_type === "job.noop_failure"), false);
   }));
 
-  it("records early tool-budget exhaustion as interrupted while preserving retry tuning", () => withTempRuntimeDb((projectDir) => {
+  it("records early tool-budget exhaustion as interrupted while preserving retry tuning", () => withTempRuntimeDb(async (projectDir) => {
     const wi = createWorkItem("early tool budget", "regression");
     const job = createJob({
       work_item_id: wi.id,
@@ -321,7 +362,7 @@ describe("Worker lease + retry recovery", () => {
       _retryOrFail: () => { retried = true; },
     };
 
-    handleExecuteAttemptError(worker, {
+    await handleExecuteAttemptError(worker, {
       attempt,
       attemptCount: 1,
       err: new Error("tool calls exhausted before final answer"),
@@ -566,7 +607,7 @@ describe("Worker lease + retry recovery", () => {
     const payload = JSON.parse(refreshed.payload_json || "{}");
     assert.equal(refreshed.status, "queued");
     assert.equal(refreshed.max_attempts, 2);
-    assert.equal(payload._assess_only, 1);
+    assert.equal(payload._assess_only, true);
     assert.equal(payload._stall_resume, undefined);
     assert.match(payload._partial_work_recovery.commit_hash, /^[0-9a-f]{40}$/);
     assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: wtPath, encoding: "utf-8" }).trim(), "");

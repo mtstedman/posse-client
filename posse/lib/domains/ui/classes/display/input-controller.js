@@ -659,6 +659,23 @@ export class DisplayInputController {
       return;
     }
 
+    // Exit-confirm prompt is up: only y/Enter (leave) and n/Esc (stay) answer
+    // it. Any other key dismisses the prompt and is handled normally below.
+    if (this._approvalExitConfirm) {
+      if (isEnterKey(str, key) || matchesHotkey(str, key, "y")) {
+        this._approvalExitConfirm = false;
+        if (this._approvalDone) { this._approvalDone({ canceled: false }); this._approvalDone = null; }
+        this.requestRender({ force: true });
+        return;
+      }
+      if (isEscapeKey(str, key) || matchesHotkey(str, key, "n")) {
+        this._approvalExitConfirm = false;
+        this.requestRender({ force: true });
+        return;
+      }
+      this._approvalExitConfirm = false;
+    }
+
     const digit = digitInput(str, key);
     if (key && key.name === "up") {
       if (this._approvalScroll > 0) this._approvalScroll--;
@@ -743,19 +760,29 @@ export class DisplayInputController {
       } else if (current && !current._decision && this.onApprovalAction) {
         this.onApprovalAction(current.wi.id, "discard_dirty");
       }
-    } else if (isEscapeKey(str, key)) {
-      // Finish review. Keep _mode = "approval" so the frame keeps rendering
-      // the review layout (and the merging spinner) while the caller awaits
-      // the background merge queue. The caller tears the display down via
-      // stop() once queued git work has drained.
-      if (this._approvalDone) { this._approvalDone(); this._approvalDone = null; }
+    } else if (isEnterKey(str, key) || isEscapeKey(str, key)) {
+      // Finish review (Enter is the deliberate finisher; Esc backs out too,
+      // but never silently with work left undecided). Decisions were applied
+      // the moment their key was pressed, so exiting just leaves the screen —
+      // undecided items stay pending. Keep _mode = "approval" so the frame
+      // keeps rendering the review layout (and the merging spinner) while the
+      // caller awaits the background merge queue. The caller tears the
+      // display down via stop() once queued git work has drained.
+      const undecided = (this._approvalData || [])
+        .filter((d) => !d._decision && !d._isInfo).length;
+      if (undecided > 0) {
+        this._approvalExitConfirm = true;
+      } else if (this._approvalDone) {
+        this._approvalDone({ canceled: false });
+        this._approvalDone = null;
+      }
     }
     this.requestRender({ force: true });
   }
 
   _advanceApproval() {
     if (!Array.isArray(this._approvalData) || this._approvalData.length === 0) {
-      if (this._approvalDone) { this._approvalDone(); this._approvalDone = null; }
+      if (this._approvalDone) { this._approvalDone({ canceled: false }); this._approvalDone = null; }
       return;
     }
     if (typeof this._normalizeApprovalViewState === "function") {
@@ -766,10 +793,19 @@ export class DisplayInputController {
     for (let i = 0; i < this._approvalData.length; i++) {
       const nextIdx = (this._approvalIdx + 1 + i) % this._approvalData.length;
       if (!this._approvalData[nextIdx]._decision) {
+        const movingTo = nextIdx !== this._approvalIdx ? this._approvalData[nextIdx] : null;
         this._approvalIdx = nextIdx;
         this._approvalScroll = 0;
         this._approvalTab = 0;
         this._approvalTabScrolls = [0, 0, 0, 0];
+        if (movingTo) {
+          // Transient nav-bar cue so a rapid decision doesn't silently jump
+          // the cursor to another work item under the user's fingers.
+          this._approvalFlash = {
+            text: `→ now reviewing WI#${movingTo.wi?.id ?? nextIdx + 1}`,
+            at: Date.now(),
+          };
+        }
         return;
       }
     }
@@ -777,7 +813,7 @@ export class DisplayInputController {
     // caller awaits the merge queue after this, and we want the spinner UI
     // to stay visible until the queue drains instead of flickering to an
     // empty "normal" frame.
-    if (this._approvalDone) { this._approvalDone(); this._approvalDone = null; }
+    if (this._approvalDone) { this._approvalDone({ canceled: false }); this._approvalDone = null; }
   }
 
 }

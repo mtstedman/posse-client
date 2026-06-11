@@ -146,6 +146,21 @@ export class AccountSettings {
     this._dbPathOverride = normalizeDbPath(dbPath);
   }
 
+  /**
+   * Read an account_settings row regardless of the key's catalog scope.
+   * Exists for one-time migrations that must see legacy account-level rows
+   * after a key has been reclassified as repo-scoped (normal get() hides
+   * repo-scoped keys). Bypasses the cache; do not use on hot paths.
+   */
+  getRawAccountValue(key) {
+    const db = this._openForReadOrWrite();
+    const row = db
+      .prepare(`SELECT setting_value FROM account_settings WHERE setting_key = ?`)
+      .get(String(key));
+    const value = row?.setting_value;
+    return value == null || value === "" ? null : String(value);
+  }
+
   get(key) {
     const cacheKey = String(key);
     if (REPO_SCOPED_SETTING_KEYS.has(cacheKey)) return null;

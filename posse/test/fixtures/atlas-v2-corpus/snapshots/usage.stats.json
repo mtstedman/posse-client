@@ -7,9 +7,9 @@
       "sessionId": "native-v2",
       "repoId": "fixture-corpus",
       "timestamp": "<stripped>",
-      "totalAtlasTokens": 1579,
-      "totalRawEquivalent": 3158,
-      "totalSavedTokens": 1579,
+      "totalAtlasTokens": 1631,
+      "totalRawEquivalent": 3262,
+      "totalSavedTokens": 1631,
       "overallSavingsPercent": 50,
       "totalCalls": 12,
       "okCalls": 11,
@@ -22,9 +22,9 @@
       "byTaskType": {
         "unspecified": {
           "calls": 12,
-          "atlasTokens": 1579,
-          "rawEquivalent": 3158,
-          "savedTokens": 1579
+          "atlasTokens": 1631,
+          "rawEquivalent": 3262,
+          "savedTokens": 1631
         }
       },
       "sessionCount": 1,
@@ -33,9 +33,9 @@
       "toolBreakdown": [
         {
           "tool": "info",
-          "atlasTokens": 604,
-          "rawEquivalent": 1208,
-          "savedTokens": 604,
+          "atlasTokens": 630,
+          "rawEquivalent": 1260,
+          "savedTokens": 630,
           "callCount": 2,
           "okCount": 2,
           "errorCount": 0,
@@ -81,9 +81,9 @@
         },
         {
           "tool": "policy.set",
-          "atlasTokens": 74,
-          "rawEquivalent": 148,
-          "savedTokens": 74,
+          "atlasTokens": 87,
+          "rawEquivalent": 174,
+          "savedTokens": 87,
           "callCount": 1,
           "okCount": 1,
           "errorCount": 0,
@@ -93,9 +93,9 @@
         },
         {
           "tool": "policy.get",
-          "atlasTokens": 72,
-          "rawEquivalent": 144,
-          "savedTokens": 72,
+          "atlasTokens": 85,
+          "rawEquivalent": 170,
+          "savedTokens": 85,
           "callCount": 1,
           "okCount": 1,
           "errorCount": 0,
@@ -165,9 +165,9 @@
           "sessionId": "native-v2",
           "repoId": "fixture-corpus",
           "timestamp": "<stripped>",
-          "totalAtlasTokens": 74,
-          "totalRawEquivalent": 148,
-          "totalSavedTokens": 74,
+          "totalAtlasTokens": 87,
+          "totalRawEquivalent": 174,
+          "totalSavedTokens": 87,
           "savingsPercent": 50,
           "callCount": 1,
           "action": "policy.set",
@@ -175,8 +175,8 @@
           "durationMs": "<stripped>",
           "estimated": {
             "method": "result_bytes/action_multiplier",
-            "atlasTokens": 74,
-            "rawEquivalent": 148
+            "atlasTokens": 87,
+            "rawEquivalent": 174
           }
         },
         {
@@ -184,9 +184,9 @@
           "sessionId": "native-v2",
           "repoId": "fixture-corpus",
           "timestamp": "<stripped>",
-          "totalAtlasTokens": 72,
-          "totalRawEquivalent": 144,
-          "totalSavedTokens": 72,
+          "totalAtlasTokens": 85,
+          "totalRawEquivalent": 170,
+          "totalSavedTokens": 85,
           "savingsPercent": 50,
           "callCount": 1,
           "action": "policy.get",
@@ -194,8 +194,8 @@
           "durationMs": "<stripped>",
           "estimated": {
             "method": "result_bytes/action_multiplier",
-            "atlasTokens": 72,
-            "rawEquivalent": 144
+            "atlasTokens": 85,
+            "rawEquivalent": 170
           }
         },
         {
@@ -336,9 +336,9 @@
           "sessionId": "native-v2",
           "repoId": "fixture-corpus",
           "timestamp": "<stripped>",
-          "totalAtlasTokens": 302,
-          "totalRawEquivalent": 604,
-          "totalSavedTokens": 302,
+          "totalAtlasTokens": 315,
+          "totalRawEquivalent": 630,
+          "totalSavedTokens": 315,
           "savingsPercent": 50,
           "callCount": 1,
           "action": "info",
@@ -346,8 +346,8 @@
           "durationMs": "<stripped>",
           "estimated": {
             "method": "result_bytes/action_multiplier",
-            "atlasTokens": 302,
-            "rawEquivalent": 604
+            "atlasTokens": 315,
+            "rawEquivalent": 630
           }
         },
         {
@@ -374,9 +374,9 @@
           "sessionId": "native-v2",
           "repoId": "fixture-corpus",
           "timestamp": "<stripped>",
-          "totalAtlasTokens": 302,
-          "totalRawEquivalent": 604,
-          "totalSavedTokens": 302,
+          "totalAtlasTokens": 315,
+          "totalRawEquivalent": 630,
+          "totalSavedTokens": 315,
           "savingsPercent": 50,
           "callCount": 1,
           "action": "info",
@@ -384,15 +384,15 @@
           "durationMs": "<stripped>",
           "estimated": {
             "method": "result_bytes/action_multiplier",
-            "atlasTokens": 302,
-            "rawEquivalent": 604
+            "atlasTokens": 315,
+            "rawEquivalent": 630
           }
         }
       ],
       "aggregate": {
-        "totalAtlasTokens": 1579,
-        "totalRawEquivalent": 3158,
-        "totalSavedTokens": 1579,
+        "totalAtlasTokens": 1631,
+        "totalRawEquivalent": 3262,
+        "totalSavedTokens": 1631,
         "overallSavingsPercent": 50,
         "totalCalls": 12,
         "okCalls": 11,
@@ -405,9 +405,9 @@
         "byTaskType": {
           "unspecified": {
             "calls": 12,
-            "atlasTokens": 1579,
-            "rawEquivalent": 3158,
-            "savedTokens": 1579
+            "atlasTokens": 1631,
+            "rawEquivalent": 3262,
+            "savedTokens": 1631
           }
         },
         "sessionCount": 1,
@@ -416,7 +416,7 @@
         "topToolsBySavings": [
           {
             "tool": "info",
-            "savedTokens": 604,
+            "savedTokens": 630,
             "savingsPercent": 50,
             "callCount": 2
           },
@@ -440,13 +440,13 @@
           },
           {
             "tool": "policy.set",
-            "savedTokens": 74,
+            "savedTokens": 87,
             "savingsPercent": 50,
             "callCount": 1
           },
           {
             "tool": "policy.get",
-            "savedTokens": 72,
+            "savedTokens": 85,
             "savingsPercent": 50,
             "callCount": 1
           },
@@ -482,6 +482,6 @@
         }
       }
     },
-    "formattedSummary": "Native ATLAS v2 usage: 12 calls, 1579 estimated tokens saved (50% vs raw context estimate)."
+    "formattedSummary": "Native ATLAS v2 usage: 12 calls, 1631 estimated tokens saved (50% vs raw context estimate)."
   }
 }

@@ -3372,6 +3372,187 @@ describe("retrieval dispatcher", () => {
     assert.ok(surface.data.memories.some((memory) => memory.memoryId === "mem_surface_soft_task_type"));
   });
 
+  it("memory.surface matches any provided anchor instead of requiring all of them", () => {
+    const store = dispatch(
+      /** @type {any} */ ({
+        action: "memory.store",
+        memoryId: "mem_surface_file_only_anchor",
+        type: "bugfix",
+        title: "File-only anchored memory",
+        content: "This memory is anchored to a file but not to any symbol.",
+        fileRelPaths: [env.fileA],
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "surface-or-repo" },
+    );
+    assert.equal(store.ok, true);
+
+    const surface = dispatch(
+      /** @type {any} */ ({
+        action: "memory.surface",
+        symbolIds: [env.symbolIdByName.Greeter],
+        fileRelPaths: [env.fileA],
+        limit: 5,
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "surface-or-repo" },
+    );
+    assert.equal(surface.ok, true);
+    const surfaced = surface.data.memories.find((memory) => memory.memoryId === "mem_surface_file_only_anchor");
+    assert.ok(surfaced, "file-anchored memory should surface when symbol and file anchors are both provided");
+    assert.deepEqual(surfaced.matchedFiles, [env.fileA]);
+
+    const unrelated = dispatch(
+      /** @type {any} */ ({
+        action: "memory.surface",
+        symbolIds: [env.symbolIdByName.Greeter],
+        fileRelPaths: ["src/does-not-exist.ts"],
+        limit: 5,
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "surface-or-repo" },
+    );
+    assert.equal(unrelated.ok, true);
+    assert.equal(
+      unrelated.data.memories.some((memory) => memory.memoryId === "mem_surface_file_only_anchor"),
+      false,
+      "memories with no matching anchor must not surface",
+    );
+  });
+
+  it("memory staleness sweep flags old memories and keeps them out of surface", () => {
+    const store = dispatch(
+      /** @type {any} */ ({
+        action: "memory.store",
+        memoryId: "mem_stale_candidate",
+        type: "decision",
+        title: "Old decision",
+        content: "This memory has not been touched in a very long time.",
+        fileRelPaths: [env.fileA],
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "stale-repo" },
+    );
+    assert.equal(store.ok, true);
+
+    env.ledger._unsafeDb().prepare(
+      "UPDATE memories SET updated_at = ? WHERE memory_id = ?",
+    ).run("2020-01-01T00:00:00.000Z", "mem_stale_candidate");
+
+    const query = dispatch(
+      /** @type {any} */ ({ action: "memory.query", limit: 5 }),
+      { versionId: "v1", ledger: env.ledger, repoId: "stale-repo" },
+    );
+    assert.equal(query.ok, true);
+    const queried = query.data.memories.find((memory) => memory.memoryId === "mem_stale_candidate");
+    assert.ok(queried, "stale memories must stay queryable");
+    assert.equal(queried.stale, true);
+
+    const surface = dispatch(
+      /** @type {any} */ ({ action: "memory.surface", fileRelPaths: [env.fileA], limit: 5 }),
+      { versionId: "v1", ledger: env.ledger, repoId: "stale-repo" },
+    );
+    assert.equal(surface.ok, true);
+    assert.equal(
+      surface.data.memories.some((memory) => memory.memoryId === "mem_stale_candidate"),
+      false,
+      "stale memories must not surface proactively",
+    );
+
+    const refresh = dispatch(
+      /** @type {any} */ ({
+        action: "memory.store",
+        memoryId: "mem_stale_candidate",
+        type: "decision",
+        title: "Old decision",
+        content: "This memory has been refreshed with current guidance.",
+        fileRelPaths: [env.fileA],
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "stale-repo" },
+    );
+    assert.equal(refresh.ok, true);
+    const resurface = dispatch(
+      /** @type {any} */ ({ action: "memory.surface", fileRelPaths: [env.fileA], limit: 5 }),
+      { versionId: "v1", ledger: env.ledger, repoId: "stale-repo" },
+    );
+    assert.ok(resurface.data.memories.some((memory) => memory.memoryId === "mem_stale_candidate"));
+  });
+
+  it("memory.store folds near-duplicate auto-id writes into the existing memory", () => {
+    const first = dispatch(
+      /** @type {any} */ ({
+        action: "memory.store",
+        type: "bugfix",
+        title: "Worker heartbeat config rebuild",
+        content: "The atlas cli worker must rebuild its heartbeat validator whenever heartbeat config changes during long sessions.",
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "near-dup-repo" },
+    );
+    assert.equal(first.ok, true);
+    assert.equal(first.data.created, true);
+
+    const reworded = dispatch(
+      /** @type {any} */ ({
+        action: "memory.store",
+        type: "bugfix",
+        title: "Worker heartbeat config rebuild",
+        content: "The atlas cli worker must rebuild its heartbeat validator whenever heartbeat config changes during long sessions today.",
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "near-dup-repo" },
+    );
+    assert.equal(reworded.ok, true);
+    assert.equal(reworded.data.deduplicated, true);
+    assert.equal(reworded.data.nearDuplicate, true);
+    assert.equal(reworded.data.memoryId, first.data.memoryId);
+
+    const distinct = dispatch(
+      /** @type {any} */ ({
+        action: "memory.store",
+        type: "bugfix",
+        title: "Push guard refspec validation",
+        content: "Push refspecs are validated against the allowlist before any remote mutation runs.",
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "near-dup-repo" },
+    );
+    assert.equal(distinct.ok, true);
+    assert.equal(distinct.data.created, true);
+    assert.notEqual(distinct.data.memoryId, first.data.memoryId);
+  });
+
+  it("memory.store enforces the per-repo memory cap by evicting the least valuable rows", () => {
+    const policy = dispatch(
+      /** @type {any} */ ({ action: "policy.set", policyPatch: { memoryMaxPerRepo: 2 } }),
+      { versionId: "v1", ledger: env.ledger, repoId: "cap-repo" },
+    );
+    assert.equal(policy.ok, true);
+    assert.equal(policy.data.policy.memoryMaxPerRepo, 2);
+
+    const seeds = [
+      { memoryId: "mem_cap_low", confidence: 0.1, content: "Low confidence row that should be evicted first." },
+      { memoryId: "mem_cap_high", confidence: 0.9, content: "High confidence row that should survive the cap." },
+      { memoryId: "mem_cap_new", confidence: 0.8, content: "Newest row that should also survive the cap." },
+    ];
+    for (const seed of seeds) {
+      const stored = dispatch(
+        /** @type {any} */ ({
+          action: "memory.store",
+          memoryId: seed.memoryId,
+          type: "convention",
+          title: `Cap seed ${seed.memoryId}`,
+          content: seed.content,
+          confidence: seed.confidence,
+        }),
+        { versionId: "v1", ledger: env.ledger, repoId: "cap-repo" },
+      );
+      assert.equal(stored.ok, true);
+    }
+
+    const rows = env.ledger._unsafeDb().prepare(
+      "SELECT memory_id, deleted FROM memories WHERE repo_id = ? ORDER BY memory_id",
+    ).all("cap-repo");
+    assert.deepEqual(rows.map((row) => [row.memory_id, row.deleted]), [
+      ["mem_cap_high", 0],
+      ["mem_cap_low", 1],
+      ["mem_cap_new", 0],
+    ]);
+  });
+
   it("slice.build forwards repoId when enriching slices with memories", () => {
     const store = dispatch(
       /** @type {any} */ ({

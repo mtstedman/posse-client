@@ -6,6 +6,7 @@ import {
   setBridgeRelayToken,
 } from "../../../bridge/functions/auth.js";
 import { listAllowedBridgeCommands } from "../../../bridge/functions/command-dispatch.js";
+import { resolvePosseKey } from "../../../remote/functions/client.js";
 
 function hasFlag(argv, flag) {
   return (argv || []).includes(flag);
@@ -109,11 +110,29 @@ const PAIR_CONFIRM_FRIENDLY = Object.freeze({
  */
 export async function runPairCommand(
   config,
-  { C = new Proxy({}, { get: () => "" }), argv = [], promptCode = promptForConfirmationCode, retryDelayMs = 2_000 } = {},
+  {
+    C = new Proxy({}, { get: () => "" }),
+    argv = [],
+    promptCode = promptForConfirmationCode,
+    retryDelayMs = 2_000,
+    posseKey = resolvePosseKey(),
+    projectDir = process.cwd(),
+  } = {},
 ) {
   const relayHttpBase = relayHttpBaseFromWs(config.relayUrl);
 
   console.log(`\n  ${C.bold}Pair this Posse instance${C.reset}`);
+
+  // Pairing requires a valid API key (bridge:pair grant) — the relay
+  // refuses to mint or confirm QR tokens for keyless installs.
+  if (!posseKey) {
+    console.log(`\n  ${C.red}POSSE_KEY is required to pair.${C.reset} Set the POSSE_KEY environment variable to your API key and run \`posse serve --pair\` again.\n`);
+    return { ok: false, reason: "missing_posse_key" };
+  }
+  const pairAuthHeaders = {
+    "content-type": "application/json",
+    authorization: `Bearer ${posseKey}`,
+  };
 
   // Step 1: ask the relay to mint a QR token.
   const startUrl = bridgePairUrl(relayHttpBase, "start");
@@ -121,7 +140,7 @@ export async function runPairCommand(
   try {
     startRes = await fetch(startUrl, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: pairAuthHeaders,
       body: JSON.stringify({ instance_label: config.label }),
     });
   } catch (err) {
@@ -182,7 +201,7 @@ export async function runPairCommand(
     try {
       confirmRes = await fetch(confirmUrl, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: pairAuthHeaders,
         body: JSON.stringify({
           qr_token: qrToken,
           confirmation_code: confirmationCode,
@@ -230,12 +249,13 @@ export async function runPairCommand(
     return { ok: false, reason: "missing_bridge_token", body };
   }
 
-  setBridgeRelayToken(token);
+  // Repo-scoped: this pairing belongs to THIS repo's bridge instance.
+  setBridgeRelayToken(token, projectDir);
   const instanceLabel = body?.instance?.label || config.label;
   const instanceId = body?.instance?.id || "(unknown id)";
   console.log(`  ${C.green}Paired.${C.reset}`);
   console.log(`  ${C.dim}Instance:${C.reset} ${instanceLabel} (${instanceId})`);
-  console.log(`  ${C.dim}Relay token stored in account settings.${C.reset}\n`);
+  console.log(`  ${C.dim}Relay token stored for this repo.${C.reset}\n`);
   return { ok: true, paired: true, instance: body.instance };
 }
 
@@ -264,7 +284,7 @@ export async function runServeCommand(argv = [], {
   const config = getBridgeConfig(projectDir);
 
   if (hasFlag(argv, "--pair")) {
-    const result = await runPairCommand(config, { C, argv });
+    const result = await runPairCommand(config, { C, argv, projectDir });
     if (!result.ok) process.exitCode = 1;
     return result;
   }
@@ -282,7 +302,7 @@ export async function runServeCommand(argv = [], {
     console.log(`  ${C.dim}Use this on the phone when adding a LAN bridge:${C.reset}`);
     console.log(`  ${C.cyan}${config.token}${C.reset}`);
     console.log(
-      `\n  ${C.dim}Bridge bind:${C.reset} ${C.cyan}http://${config.bindHost}:${config.port}${C.reset}`,
+      `\n  ${C.dim}Bridge bind:${C.reset} ${C.cyan}http://${config.bindHost}:${config.port || "(auto 7531+)"}${C.reset}`,
     );
     console.log(`  ${C.dim}Instance:${C.reset} ${config.instanceId}`);
     console.log(`  ${C.dim}Label:${C.reset} ${config.label}\n`);

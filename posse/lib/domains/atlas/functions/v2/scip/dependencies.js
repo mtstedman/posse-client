@@ -97,6 +97,9 @@ export function installScipLanguageDependenciesSync(input = {}) {
   if (languages.includes("rust")) {
     results.push(installRustScipDeps({ posseRoot, force, dryRun, timeoutMs, onProgress }));
   }
+  if (languages.includes("clang")) {
+    results.push(installClangScipDeps({ posseRoot, force, dryRun, timeoutMs, onProgress }));
+  }
 
   return {
     ok: results.every((result) => result.ok),
@@ -118,6 +121,7 @@ export function getScipLanguageDependencyStatus(input = {}) {
     if (language === "php") return statusForInstalledCommand(posseRoot, language, ["scip", "php", "vendor", "bin"], "scip-php");
     if (language === "go") return statusForInstalledCommand(posseRoot, language, ["scip", "bin"], "scip-go");
     if (language === "rust") return statusForInstalledCommand(posseRoot, language, ["scip", "bin"], "scip-rust");
+    if (language === "clang") return clangScipStatus(posseRoot);
     return { language, ok: false, status: "failed", message: "unknown SCIP language" };
   });
 }
@@ -207,6 +211,96 @@ function installRustScipDeps({ posseRoot, force, dryRun, timeoutMs, onProgress }
   emit(onProgress, "writing Rust SCIP wrapper");
   writeRustWrapper(binDir);
   return ok("rust", "installed", "installed scip-rust wrapper");
+}
+
+// Pinned scip-clang release. Upstream publishes single-file binaries per
+// release (v0.4.0 ships scip-clang-x86_64-linux and scip-clang-arm64-darwin;
+// there is NO Windows build). Bump deliberately — staged .scip output format
+// must stay compatible with the ingester.
+const SCIP_CLANG_VERSION = "v0.4.0";
+
+function clangReleaseAssetCandidates() {
+  const arch = process.arch === "arm64" ? "arm64" : "x86_64";
+  const os = process.platform === "darwin" ? "darwin" : "linux";
+  // Try both historical naming orders so an upstream rename degrades to a
+  // clear failure message instead of a silent wrong-asset 404.
+  return [`scip-clang-${arch}-${os}`, `scip-clang-${os}-${arch}`];
+}
+
+/**
+ * Managed install for scip-clang, mirroring the go/rust flows: a Posse-owned
+ * binary in scip/bin. Upstream has no package-manager path, so this is a
+ * direct download of the pinned GitHub release via curl (the install env
+ * allowlist already carries the proxy/CA variables curl needs).
+ *
+ * Windows is deliberately a NON-FATAL skip, not a failure: no upstream
+ * Windows build exists, and boot hard-stops on failed dependency sync — a
+ * hard failure here would brick boots of every C/C++ repo on Windows hosts.
+ * The C/C++ SCIP layer simply stays off there (WSL or
+ * atlas_scip_index_command are the escape hatches); tree-sitter remains the
+ * symbol source.
+ */
+function installClangScipDeps({ posseRoot, force, dryRun, timeoutMs, onProgress }) {
+  const found = findCommandPath(posseRoot, ["scip", "bin"], "scip-clang")
+    || (commandOnPath("scip-clang") ? "scip-clang" : null);
+  if (process.platform === "win32") {
+    if (found) return ok("clang", "ok", "scip-clang already installed");
+    return {
+      language: "clang",
+      ok: true,
+      status: "skipped",
+      message: "scip-clang has no Windows build; C/C++ SCIP stays off (use WSL or atlas_scip_index_command)",
+    };
+  }
+  if (!force && found) return ok("clang", "ok", "scip-clang already installed");
+  const binDir = path.join(posseRoot, "scip", "bin");
+  if (dryRun) {
+    return ok("clang", "dry-run", `would download scip-clang ${SCIP_CLANG_VERSION} into ${binDir}`);
+  }
+  if (!commandOnPath("curl")) {
+    return failed("clang", "curl not found; install curl or place scip-clang on PATH / in Posse scip/bin");
+  }
+  fs.mkdirSync(binDir, { recursive: true });
+  const dest = path.join(binDir, "scip-clang");
+  const tmpDest = `${dest}.download`;
+  const errors = [];
+  for (const asset of clangReleaseAssetCandidates()) {
+    const url = `https://github.com/sourcegraph/scip-clang/releases/download/${SCIP_CLANG_VERSION}/${asset}`;
+    emit(onProgress, `downloading ${asset} (${SCIP_CLANG_VERSION})`);
+    const run = runCommand("curl", ["-fsSL", "--retry", "2", "-o", tmpDest, url], { timeoutMs });
+    if (!run.ok) {
+      errors.push(`${asset}: ${run.message || "download failed"}`);
+      try { fs.rmSync(tmpDest, { force: true }); } catch { /* best effort */ }
+      continue;
+    }
+    fs.renameSync(tmpDest, dest);
+    fs.chmodSync(dest, 0o755);
+    const probe = runCommand(dest, ["--version"], { timeoutMs: 30_000 });
+    if (!probe.ok) {
+      try { fs.rmSync(dest, { force: true }); } catch { /* best effort */ }
+      return failed("clang", `downloaded scip-clang failed its --version probe: ${probe.message}`);
+    }
+    return ok("clang", "installed", `installed scip-clang ${SCIP_CLANG_VERSION}`);
+  }
+  return failed(
+    "clang",
+    `scip-clang ${SCIP_CLANG_VERSION} download failed (${errors.join("; ")}); download manually from https://github.com/sourcegraph/scip-clang/releases into ${binDir}`,
+  );
+}
+
+function clangScipStatus(posseRoot) {
+  const found = findCommandPath(posseRoot, ["scip", "bin"], "scip-clang")
+    || (commandOnPath("scip-clang") ? "scip-clang" : null);
+  if (found) return ok("clang", "ok", "installed");
+  if (process.platform === "win32") {
+    return {
+      language: "clang",
+      ok: true,
+      status: "skipped",
+      message: "scip-clang has no Windows build (WSL or atlas_scip_index_command)",
+    };
+  }
+  return failed("clang", `missing scip-clang (PATH or ${expectedCommandPath(posseRoot, ["scip", "bin"], "scip-clang")}); posse doctor installs it`);
 }
 
 function writeRustWrapper(binDir) {

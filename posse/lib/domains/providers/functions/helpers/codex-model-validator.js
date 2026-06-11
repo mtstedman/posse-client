@@ -1,7 +1,7 @@
 import { spawnSync } from "child_process";
 import { getSetting } from "../../../queue/functions/index.js";
 import { getClaudeInfo, getModelTierConfig } from "../codex.js";
-import { CODEX_VALIDATION_KNOWN_MODELS } from "../model-catalog.js";
+import { getMergedTextModels } from "../model-catalog.js";
 
 function normalizeModelName(value) {
   const model = String(value || "").trim();
@@ -46,7 +46,9 @@ export function getCurrentCodexModels({ includeKnown = true } = {}) {
   const candidates = [
     ...getStoredCodexModelCandidates(),
     ...tierModels,
-    ...(includeKnown ? CODEX_VALIDATION_KNOWN_MODELS : []),
+    // Merged catalog (builtin + remote, deprecated excluded) so newly
+    // published codex models become probe candidates without a client patch.
+    ...(includeKnown ? getMergedTextModels("codex") : []),
   ];
   return uniqueModels(candidates);
 }
