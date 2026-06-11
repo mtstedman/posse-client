@@ -131,6 +131,28 @@ describe("ATLAS slice section tree-scope rendering", () => {
     assert.equal(classifyAtlasPrefetchRelevance(packet, "planner"), true);
   });
 
+  it("renders the area map even when the slice fallback produced the candidates", () => {
+    const packet = packetWithSlice(
+      "Trace the flow upload pipeline",
+      {
+        source: "slice.build",
+        sliceHandle: "sl_test",
+        cardCount: 0,
+        filePaths: ["apps/web/src/flows/upload.ts"],
+        cards: [],
+        areaMap: [
+          { path: "apps/web/src/flows", label: "flow builder and upload pipeline", confidence: "high" },
+        ],
+        treeScope: { ok: false, error: "tree_derived_tables_missing" },
+      },
+    );
+
+    const text = renderAtlasHandoffSections(packet);
+    assert.match(text, /SLICE PRUNING/);
+    assert.match(text, /Repo area map \(compressed tree; drill into a branch with .*tree\.walk.* \{path, maxDepth\}\):/);
+    assert.match(text, /- apps\/web\/src\/flows — flow builder and upload pipeline/);
+  });
+
   it("renders a tree.scope failure line without hiding the slice", () => {
     const packet = packetWithSlice(
       "Trace the flow upload pipeline",

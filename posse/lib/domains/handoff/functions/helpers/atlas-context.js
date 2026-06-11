@@ -1095,6 +1095,29 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
   }
 }
 
+// Top-level orientation for every handoff: tree.overview's compressed-tree
+// area map. Fetched independently of the discovery pass so a slice fallback
+// or a seed-only grow still opens with the "what lives where" map.
+async function _prefetchAtlasAreaMap(packet) {
+  try {
+    const raw = await executeEmbeddedAtlasTool("tree.overview", {
+      maxDepth: 0,
+      limit: 1,
+      includeLatestRun: false,
+    }, {
+      cwd: packet.cwd,
+      config: packet.atlas_config || undefined,
+      origin: "prefetch",
+    });
+    if (String(raw || "").startsWith("Error:")) return [];
+    const parsed = extractAtlasJsonPayload(raw);
+    const areaMap = atlasResultField("tree.overview", parsed, "areaMap");
+    return Array.isArray(areaMap) ? areaMap.slice(0, 16) : [];
+  } catch {
+    return [];
+  }
+}
+
 // Batch-hydrate the brief's key symbols (researcher-validated symbol IDs) so
 // planner/dev open with the cards already in hand instead of re-searching.
 async function _prefetchSeedSymbolCards(packet, { symbolIds }) {
@@ -1143,9 +1166,10 @@ export async function attachAtlasPlannerSlice(packet) {
 
     let treeScope = null;
     let seedSymbolCards = [];
-    if (treeToolAvailable || wantSymbolCards) {
+    let areaMap = [];
+    if (treeToolAvailable || wantSymbolCards || tools.has("tree.overview")) {
       packet.atlas_slice_prefetch_attempted = true;
-      [treeScope, seedSymbolCards] = await Promise.all([
+      [treeScope, seedSymbolCards, areaMap] = await Promise.all([
         treeToolAvailable
           ? _prefetchAtlasTreeScope(packet, {
             taskText: plan.useTaskText ? taskText : null,
@@ -1156,14 +1180,21 @@ export async function attachAtlasPlannerSlice(packet) {
         wantSymbolCards
           ? _prefetchSeedSymbolCards(packet, { symbolIds: seedSymbols })
           : Promise.resolve([]),
+        tools.has("tree.overview")
+          ? _prefetchAtlasAreaMap(packet)
+          : Promise.resolve([]),
       ]);
     }
+    // The overview's map is authoritative top-level orientation; the scope
+    // pass's copy is the fallback when overview is unavailable.
+    if (areaMap.length === 0 && Array.isArray(treeScope?.areaMap)) areaMap = treeScope.areaMap;
+
     if (treeScope?.ok && treeScope.candidateFiles.length > 0) {
-      await _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards, prefetchMode: plan.mode });
+      await _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards, areaMap, prefetchMode: plan.mode });
       return;
     }
 
-    await _attachAtlasSlicePrefetchContext(packet, { tools, taskText, seedFiles: plan.seedFiles, treeScope, seedSymbolCards });
+    await _attachAtlasSlicePrefetchContext(packet, { tools, taskText, seedFiles: plan.seedFiles, treeScope, seedSymbolCards, areaMap });
   } catch (err) {
     packet.atlas_slice_context = {
       ok: false,
@@ -1176,7 +1207,7 @@ export async function attachAtlasPlannerSlice(packet) {
 // an empty list) so every downstream consumer — relevance classification,
 // insight promotion, step-0 insights — keeps working unchanged; `source`
 // tells the renderer which discovery pass produced the candidates.
-async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards = [], prefetchMode = null }) {
+async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards = [], areaMap = [], prefetchMode = null }) {
   const prefetchTargets = selectAtlasPrefetchTargets(packet, treeScope.candidateFiles);
   packet.atlas_slice_candidates = {
     filePaths: prefetchTargets.filePaths,
@@ -1209,6 +1240,7 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
     source: treeScope.action === "tree.grow" ? "tree.grow" : "tree.scope",
     prefetchMode,
     seedSymbolCards,
+    areaMap,
     sliceHandle: null,
     knownVersion: null,
     ledgerVersion: null,
@@ -1227,7 +1259,7 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
 // Fallback graph-slice prefetch — runs only when tree.scope was unavailable
 // or returned nothing. `treeScope` (the failed/empty attempt, if any) rides
 // along so the rendered section can say why the tree pass didn't apply.
-async function _attachAtlasSlicePrefetchContext(packet, { tools, taskText, seedFiles, treeScope, seedSymbolCards = [] }) {
+async function _attachAtlasSlicePrefetchContext(packet, { tools, taskText, seedFiles, treeScope, seedSymbolCards = [], areaMap = [] }) {
   if (!tools.has("slice.build")) {
     if (treeScope && !treeScope.ok) {
       packet.atlas_slice_context = {
@@ -1334,6 +1366,7 @@ async function _attachAtlasSlicePrefetchContext(packet, { tools, taskText, seedF
     ok: true,
     source: "slice.build",
     seedSymbolCards,
+    areaMap,
     sliceHandle: atlasResultField("slice.build", parsed, "sliceHandle") || parsed.sliceHandle || null,
     knownVersion: atlasResultField("slice.build", parsed, "knownVersion") || parsed.knownVersion || null,
     ledgerVersion: parsed.ledgerVersion || parsed.versionId || null,
@@ -1788,19 +1821,24 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     atlasField("Repo", slice.repoId || ATLAS_MISSING_VALUE),
   ].filter(Boolean);
 
+  // Orientation first: the compressed tree's labeled area map tells the
+  // agent what lives where before any file list — rendered regardless of
+  // which discovery pass produced the candidates (tree.overview supplies it
+  // even when the slice fallback ran). Dropped at higher trim levels since
+  // the candidates below are the more load-bearing signal.
+  const renderedAreaMap = Array.isArray(slice.areaMap) && slice.areaMap.length > 0
+    ? slice.areaMap
+    : (Array.isArray(slice.treeScope?.areaMap) ? slice.treeScope.areaMap : []);
+  if (trim < 2 && renderedAreaMap.length > 0) {
+    const walkTool = displayAtlasToolName("tree.walk", packet.atlas);
+    lines.push(`Repo area map (compressed tree; drill into a branch with ${walkTool} {path, maxDepth}):`);
+    for (const area of renderedAreaMap) {
+      lines.push(`- ${area.path} — ${area.label}`);
+    }
+  }
+
   const treeScope = slice.treeScope;
   if (treeScope?.ok) {
-    // Orientation first: the compressed tree's labeled area map tells the
-    // agent what lives where before any file list. Walking a branch is one
-    // tree.overview call away; dropped at higher trim levels since the
-    // candidates below are the more load-bearing signal.
-    if (trim < 2 && Array.isArray(treeScope.areaMap) && treeScope.areaMap.length > 0) {
-      const walkTool = displayAtlasToolName("tree.walk", packet.atlas);
-      lines.push(`Repo area map (compressed tree; drill into a branch with ${walkTool} {path, maxDepth}):`);
-      for (const area of treeScope.areaMap) {
-        lines.push(`- ${area.path} — ${area.label}`);
-      }
-    }
     const meta = [];
     if (treeScope.scopeRisk) meta.push(`risk=${treeScope.scopeRisk}`);
     if (treeScope.confidence != null) meta.push(`confidence=${treeScope.confidence}`);

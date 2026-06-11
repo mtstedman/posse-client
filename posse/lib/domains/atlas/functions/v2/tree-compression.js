@@ -441,6 +441,52 @@ export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {})
 }
 
 /**
+ * Export the persisted ML snapshot (with its source signature) so a full view
+ * rebuild — which recreates the view FILE and would otherwise destroy it —
+ * can carry the annotations into the new file. Without this, every rebuild
+ * re-ran the full model pass (~2min of provider time) instead of a delta.
+ *
+ * @param {import("better-sqlite3").Database} db
+ * @returns {{ snapshot: object, sourceSignature: string | null } | null}
+ */
+export function exportTreeCompressionMlSnapshot(db) {
+  try {
+    const prior = readLatestTreeCompressionSnapshot(db, {
+      profile: TREE_COMPRESSION_ML_PROFILE,
+      seedLimit: 1000,
+    });
+    if (!prior.available || !prior.snapshot) return null;
+    const reconstructed = readPriorMlSnapshot(db);
+    if (!reconstructed) return null;
+    return {
+      snapshot: reconstructed,
+      sourceSignature: prior.snapshot.sourceSignature || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Import a previously exported ML snapshot into a freshly built view so the
+ * next model pass sees it as the carry-forward prior.
+ *
+ * @param {import("better-sqlite3").Database} db
+ * @param {{ snapshot: object, sourceSignature: string | null } | null} exported
+ * @returns {{ ok: boolean, seeds?: number, error?: string }}
+ */
+export function importTreeCompressionMlSnapshot(db, exported) {
+  if (!exported?.snapshot) return { ok: false, error: "nothing_to_import" };
+  try {
+    ensureTreeCompressionTables(db);
+    writeTreeCompressionSnapshot(db, exported.snapshot, exported.sourceSignature ?? null);
+    return { ok: true, seeds: Array.isArray(exported.snapshot.seeds) ? exported.snapshot.seeds.length : 0 };
+  } catch (err) {
+    return { ok: false, error: String(/** @type {any} */ (err)?.message || err) };
+  }
+}
+
+/**
  * Reconstruct the persisted ML snapshot as a binary-shaped TreeCompressionSnapshot
  * for carry-forward, or null when none exists yet.
  *

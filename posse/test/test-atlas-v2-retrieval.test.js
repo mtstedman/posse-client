@@ -19,7 +19,12 @@ import { getRetrievalCache, RetrievalCache } from "../lib/domains/atlas/classes/
 import { sha256Hex } from "../lib/domains/atlas/functions/v2/hash.js";
 import { refreshGraphDerivedState } from "../lib/domains/atlas/functions/v2/graph-derived.js";
 import { readTreeOverview, refreshTreeDerivedState, treeDerivedInputSignature } from "../lib/domains/atlas/functions/v2/tree-derived.js";
-import { ensureTreeCompressionTables } from "../lib/domains/atlas/functions/v2/tree-compression.js";
+import {
+  ensureTreeCompressionTables,
+  exportTreeCompressionMlSnapshot,
+  importTreeCompressionMlSnapshot,
+  readLatestTreeCompressionSnapshot,
+} from "../lib/domains/atlas/functions/v2/tree-compression.js";
 import { readSemanticEnrichmentStatus } from "../lib/domains/atlas/functions/v2/semantic-enrichment.js";
 import { recordLiveBufferEvent, liveReconciliationStatus } from "../lib/domains/atlas/functions/v2/live-reconciliation.js";
 import { ATLAS_TOOL_ACTIONS } from "../lib/domains/atlas/functions/v2/contracts/tool-params.js";
@@ -921,6 +926,32 @@ describe("retrieval dispatcher", () => {
       );
       assert.equal(avoidedScope.ok, true);
       assert.deepEqual(avoidedScope.data.compression.matchedSeeds, []);
+
+      // ML snapshot survives a view-file recreation via export/import: this is
+      // what keeps the model pass delta-only across full rebuilds.
+      const mlSnap = db.prepare(
+        `INSERT INTO atlas_tree_compression_snapshots (built_at, profile, source_signature, status)
+         VALUES (?, ?, ?, ?)`,
+      ).run("2026-06-11T01:00:00Z", "one_time_tree_ml_seed_v0", "ml-sig", "ok");
+      db.prepare(
+        `INSERT INTO atlas_tree_compression_seeds
+           (snapshot_id, node_id, repo_rel_path, label, confidence, aliases_json, deterministic_signature)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(Number(mlSnap.lastInsertRowid), "dir:src/domain", "src/domain", "ML salutation pipeline", 0.95, JSON.stringify(["greeting"]), "det-sig-1");
+      const exported = exportTreeCompressionMlSnapshot(db);
+      assert.ok(exported?.snapshot);
+      assert.equal(exported.sourceSignature, "ml-sig");
+      assert.equal(exported.snapshot.seeds[0].deterministicSignature, "det-sig-1");
+      db.prepare("DELETE FROM atlas_tree_compression_seeds").run();
+      db.prepare("DELETE FROM atlas_tree_compression_snapshots").run();
+      const imported = importTreeCompressionMlSnapshot(db, exported);
+      assert.equal(imported.ok, true);
+      assert.equal(imported.seeds, 1);
+      const reread = readLatestTreeCompressionSnapshot(db, { profile: "one_time_tree_ml_seed_v0" });
+      assert.equal(reread.available, true);
+      assert.equal(reread.snapshot.sourceSignature, "ml-sig");
+      assert.equal(reread.seeds[0].label, "ML salutation pipeline");
+      assert.equal(reread.seeds[0].deterministicSignature, "det-sig-1");
 
       const snapshotSql = `SELECT node_id AS nodeId, parent_node_id AS parentNodeId, depth, sort_order AS sortOrder
                            FROM atlas_tree_nodes

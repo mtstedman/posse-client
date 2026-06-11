@@ -23,6 +23,10 @@ import fs from "fs";
 import path from "path";
 import { ViewBuilder } from "./ViewBuilder.js";
 import { View } from "./View.js";
+import {
+  exportTreeCompressionMlSnapshot,
+  importTreeCompressionMlSnapshot,
+} from "../../functions/v2/tree-compression.js";
 import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
 import {
   ledgerBranchForWi,
@@ -1321,6 +1325,13 @@ export class ParseEngine {
           progress_current: 0,
           progress_total: 1,
         });
+        // A full rebuild recreates the view FILE, which would destroy the
+        // ML tree-compression snapshot and force a full (provider-priced)
+        // re-annotation on the next reseed. Export it first; re-import after
+        // the build so the reseed only models deltas.
+        const carriedMlSnapshot = this.#treeCompressionMode === "ml"
+          ? this.#exportMlCompressionSnapshot(outPath)
+          : null;
         removeSqliteFile(outPath);
         const canonicalHints = Array.isArray(hintPaths)
           ? hintPaths.filter(isCanonicalRepoPath).slice(0, 200)
@@ -1370,6 +1381,7 @@ export class ParseEngine {
         }, { onProgress: viewProgress });
         base.view_written = outPath;
         base.view_etag = meta.built_at;
+        if (carriedMlSnapshot) this.#importMlCompressionSnapshot(outPath, carriedMlSnapshot);
         await this.#emitStage("embeddings", `checking embeddings for ${path.basename(outPath)}`);
         await this.#maybeIngestEmbeddings({ viewPath: outPath, base, purpose: payload.purpose });
         await this.#maybeReseedTreeCompression({ viewPath: outPath, base, purpose: payload.purpose });
@@ -2148,6 +2160,49 @@ export class ParseEngine {
     }
     if (purpose === "wi") {
       base.embeddings_skipped_reason = `wi_embeddings_${mode}`;
+    }
+  }
+
+  /**
+   * Best-effort export of the persisted ML compression snapshot from an
+   * existing view file, ahead of a full rebuild deleting it.
+   *
+   * @param {string} viewPath
+   * @returns {object | null}
+   */
+  #exportMlCompressionSnapshot(viewPath) {
+    if (!fs.existsSync(viewPath)) return null;
+    let view = null;
+    try {
+      view = View.mount({ dbPath: viewPath, mode: "readonly" });
+      return exportTreeCompressionMlSnapshot(view._unsafeDb());
+    } catch (err) {
+      logAtlasError(`[Warmer.#exportMlCompressionSnapshot] viewPath=${viewPath} threw:`, err);
+      return null;
+    } finally {
+      try { view?.close?.(); } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Best-effort re-import of a carried ML compression snapshot into the
+   * freshly rebuilt view so the next reseed carries annotations forward.
+   *
+   * @param {string} viewPath
+   * @param {object} carried
+   */
+  #importMlCompressionSnapshot(viewPath, carried) {
+    let view = null;
+    try {
+      view = View.mount({ dbPath: viewPath, mode: "readwrite" });
+      const result = importTreeCompressionMlSnapshot(view._unsafeDb(), /** @type {any} */ (carried));
+      if (!result.ok) {
+        logAtlasError(`[Warmer.#importMlCompressionSnapshot] viewPath=${viewPath} import skipped:`, new Error(result.error || "unknown"));
+      }
+    } catch (err) {
+      logAtlasError(`[Warmer.#importMlCompressionSnapshot] viewPath=${viewPath} threw:`, err);
+    } finally {
+      try { view?.close?.(); } catch { /* ignore */ }
     }
   }
 

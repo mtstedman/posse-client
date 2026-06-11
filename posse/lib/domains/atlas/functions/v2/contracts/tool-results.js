@@ -1185,6 +1185,7 @@ export const ATLAS_TOOL_RESULT_FIELD_CATALOG = Object.freeze({
     nodes: "nodes",
     total: "total",
     nextOffset: "nextOffset",
+    areaMap: "areaMap",
   }),
   "tree.walk": Object.freeze({
     root: "root",
