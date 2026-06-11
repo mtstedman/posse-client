@@ -7,7 +7,7 @@ import { Ledger } from "../lib/domains/atlas/classes/v2/Ledger.js";
 import { View } from "../lib/domains/atlas/classes/v2/View.js";
 import { ViewBuilder } from "../lib/domains/atlas/classes/v2/ViewBuilder.js";
 import { sha256Hex } from "../lib/domains/atlas/functions/v2/hash.js";
-import { removeSqliteFile } from "../lib/domains/atlas/functions/v2/view-health.js";
+import { removeSqliteFile, waitForCurrentView } from "../lib/domains/atlas/functions/v2/view-health.js";
 import { VIEW_SCHEMA_VERSION } from "../lib/domains/atlas/functions/v2/contracts/ddl/index.js";
 
 function makeTmp(prefix) {
@@ -123,6 +123,53 @@ describe("ATLAS v2 View / ViewBuilder", () => {
     } finally {
       fs.unlinkSync = originalUnlinkSync;
       fs.rmSync(dbPath, { force: true });
+    }
+  });
+
+  it("waitForCurrentView allowStale returns a stale view immediately instead of waiting/failing", async () => {
+    const ledPath = path.join(tmp, "ledger-stale.db");
+    const viewPath = path.join(tmp, "view-stale.db");
+    const { led } = setupBasicRepo(ledPath);
+    try {
+      new ViewBuilder().buildFrom({
+        ledger: led, branch: "main", atSeq: led.headSeq("main"), outPath: viewPath,
+      });
+      // Advance the ledger past the built view: the view is now stale.
+      const cContent = "function extra() { return 2; }";
+      const cHash = hashOf(cContent);
+      led.ingestBlob({
+        content_hash: cHash, lang: "ts", byte_size: cContent.length,
+        symbols: [{
+          content_hash: cHash, local_id: 0,
+          kind: "function", name: "extra", qualified_name: "extra",
+          parent_local_id: null, repo_rel_path: "src/extra.ts", lang: "ts",
+          range_start: 0, range_end: cContent.length,
+          signature_hash: sha256Hex("extra()"),
+          visibility: "public", doc: null,
+        }],
+        edges: [],
+      });
+      led.append({
+        branch: "main", op: "add", repo_rel_path: "src/extra.ts",
+        before_content_hash: null, after_content_hash: cHash,
+      });
+
+      const strict = await waitForCurrentView({
+        viewPaths: [viewPath], ViewClass: View, ledger: led, timeoutMs: 0,
+      });
+      assert.equal(strict.ok, false, "strict probe must reject a stale view");
+
+      const startedAt = Date.now();
+      const lax = await waitForCurrentView({
+        viewPaths: [viewPath], ViewClass: View, ledger: led, timeoutMs: 5000, allowStale: true,
+      });
+      assert.equal(lax.ok, true, "allowStale must return the stale view");
+      assert.equal(lax.stale, true);
+      assert.equal(lax.freshness?.current, false);
+      assert.ok(Date.now() - startedAt < 1000, "allowStale must not sit out the wait window");
+      try { lax.view?.close?.(); } catch { /* ignore */ }
+    } finally {
+      led.close();
     }
   });
 

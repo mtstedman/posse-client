@@ -79,6 +79,25 @@ const ATLAS_V2_VIEW_OPTIONAL_ACTIONS = new Set([
   "usage.stats",
   "scip.ingest",
 ]);
+// Ledger-only actions whose results do not depend on view currency: memory,
+// policy, usage, feedback queries — plus repo.status, whose job is to REPORT
+// freshness (failing it because the view is stale is self-defeating). These
+// never wait for a current view and never fail on staleness; they use a stale
+// view's meta for branch resolution only.
+const ATLAS_V2_VIEW_FRESHNESS_EXEMPT_ACTIONS = new Set([
+  "memory.store",
+  "memory.query",
+  "memory.remove",
+  "memory.surface",
+  "agent.feedback.query",
+  "policy.get",
+  "policy.set",
+  "usage.stats",
+  "info",
+  "action.search",
+  "manual",
+  "repo.status",
+]);
 const ATLAS_V2_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent"]);
 const ATLAS_V2_BLOCKING_ACTIONS = new Set([
   "repo.register",
@@ -729,6 +748,7 @@ async function executeEmbeddedAtlasV2Tool({
 }) {
   const repoRoot = repo?.repoPath || config?.requestedRepoPath || cwd || process.cwd();
   const optionalView = ATLAS_V2_VIEW_OPTIONAL_ACTIONS.has(action);
+  const freshnessExempt = ATLAS_V2_VIEW_FRESHNESS_EXEMPT_ACTIONS.has(action);
   const preferredViewPath = preferredEmbeddedV2ViewPath({ cwd: cwd || repoRoot });
   const viewCandidates = preferredViewPath
     ? [preferredViewPath]
@@ -763,7 +783,10 @@ async function executeEmbeddedAtlasV2Tool({
         viewPaths: viewCandidates,
         ViewClass: View,
         ledger,
-        timeoutMs: waitMs,
+        // Freshness-exempt actions never wait on view currency — take the
+        // view as it is right now (stale included) or run ledger-only.
+        timeoutMs: freshnessExempt ? 0 : waitMs,
+        allowStale: freshnessExempt,
       });
       if (probe.ok) {
         view = probe.view;
@@ -794,7 +817,7 @@ async function executeEmbeddedAtlasV2Tool({
       });
       ledger = opened.ledger;
     }
-    if (view && meta && ledger) {
+    if (view && meta && ledger && !freshnessExempt) {
       const freshness = viewFreshness(meta, ledger);
       if (!freshness.current) {
         try { view.close(); } catch { /* ignore stale view close */ }
@@ -814,7 +837,11 @@ async function executeEmbeddedAtlasV2Tool({
       }
     }
     const branch = meta?.branch || baselineBranchForRepo(repoRoot);
-    const ledgerSeq = meta?.ledger_seq ?? (ledger && typeof ledger.headSeq === "function" ? ledger.headSeq(branch) : 0);
+    // Exempt actions may hold a stale view whose meta.ledger_seq is behind —
+    // stamp their results with the ledger's actual head instead.
+    const ledgerSeq = freshnessExempt && ledger && typeof ledger.headSeq === "function"
+      ? ledger.headSeq(branch)
+      : (meta?.ledger_seq ?? (ledger && typeof ledger.headSeq === "function" ? ledger.headSeq(branch) : 0));
     const versionId = `${branch}@${ledgerSeq}`;
     const readRoot = resolveEmbeddedV2ReadRoot({ cwd: cwd || null, repoRoot, viewPath, viewMeta: meta });
     const wantsSemanticDispatch = (action === "symbol.search" && payload?.semantic)

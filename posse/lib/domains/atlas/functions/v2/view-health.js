@@ -190,6 +190,10 @@ export async function waitForCurrentView({
   ledger = null,
   timeoutMs = 0,
   intervalMs = 75,
+  // Ledger-only callers (memory, policy, usage, status reporting) accept a
+  // stale view rather than waiting or failing: they only need meta/branch,
+  // and view currency says nothing about ledger-backed state.
+  allowStale = false,
 }) {
   const paths = [];
   const seen = new Set();
@@ -220,6 +224,7 @@ export async function waitForCurrentView({
       }
       const freshness = viewFreshness(probe.meta, ledger);
       if (freshness.current) return { ...probe, freshness, attempts: last.attempts };
+      if (allowStale) return { ...probe, freshness, stale: true, attempts: last.attempts };
       try { probe.view.close(); } catch { /* ignore stale probe close */ }
       last = {
         ok: false,
