@@ -2177,12 +2177,10 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
         "agent.feedback",
         "agent.feedback.query",
         "memory.query",
-        "memory.store",
-        "memory.remove",
         "policy.get",
         "usage.stats",
       ]),
-      rationale: "Use ATLAS-first laddered retrieval for bounded investigation, escalating from cards/slices to focused code views only when needed. Curate durable, scope-linked findings with memory.store as you go (the harness also auto-promotes validated findings post-assessment); do not call memory.remove from this route.",
+      rationale: "Use ATLAS-first laddered retrieval for bounded investigation, escalating from cards/slices to focused code views only when needed. Durable findings ride your structured appendix (memories field, max 5/round) and persist automatically — do not call memory.store/memory.remove; the harness also auto-promotes validated findings post-assessment.",
     }),
     planner: Object.freeze({
       phase: "planning",

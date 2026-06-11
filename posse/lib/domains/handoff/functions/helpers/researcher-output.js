@@ -4,6 +4,7 @@
 
 import { extractJsonResult } from "../../../../shared/format/functions/json.js";
 import { sanitizeAtlasSymbolIdList } from "../../../atlas/functions/v2/symbol-id.js";
+import { MEMORY_TYPES } from "../../../atlas/functions/v2/contracts/tool-schemas.js";
 
 /**
  * Extract the structured researcher appendix from output text.
@@ -20,6 +21,7 @@ export function parseResearcherStructuredOutput(output) {
     Array.isArray(parsed.key_files) ||
     Array.isArray(parsed.related_files) ||
     Array.isArray(parsed.key_symbols) ||
+    Array.isArray(parsed.memories) ||
     Array.isArray(parsed.planner_file_priorities) ||
     Array.isArray(parsed.ranked_files) ||
     Array.isArray(parsed.constraints) ||
@@ -29,6 +31,73 @@ export function parseResearcherStructuredOutput(output) {
     Array.isArray(parsed.questions);
   if (hasRecognizedFields) return parsed;
   return null;
+}
+
+const RESEARCHER_MEMORY_TYPES = new Set(MEMORY_TYPES);
+const RESEARCHER_MEMORY_TITLE_MAX = 160;
+const RESEARCHER_MEMORY_CONTENT_MAX = 2000;
+
+function safeRelMemoryPath(value) {
+  const raw = String(value || "").trim().replace(/\\/g, "/");
+  if (!raw || raw.startsWith("/") || /^[A-Za-z]:/.test(raw)) return null;
+  const segments = raw.split("/").filter(Boolean);
+  if (segments.length === 0 || segments.some((segment) => segment === "." || segment === "..")) return null;
+  return segments.join("/");
+}
+
+function resilientSymbolIdList(values, maxItems, fieldName) {
+  const rawIds = (Array.isArray(values) ? values : []).map((v) => String(v || "").trim()).filter(Boolean);
+  const out = [];
+  for (const id of rawIds) {
+    try {
+      const [valid] = sanitizeAtlasSymbolIdList([id], 1, fieldName);
+      if (valid && !out.includes(valid)) out.push(valid);
+    } catch { /* drop the malformed id */ }
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+/**
+ * Normalize the researcher's `memories` appendix field: durable findings the
+ * pipeline persists deterministically (no agent tool calls). Hard-capped per
+ * round, type-whitelisted, length-bounded, deduped by title — the appendix is
+ * a seed contract, not free text.
+ *
+ * @param {any} parsed
+ * @param {number} [maxItems]
+ * @returns {Array<{ type: string, title: string, content: string, symbolIds: string[], fileRelPaths: string[] }>}
+ */
+export function normalizeResearcherMemories(parsed, maxItems = 5) {
+  const source = Array.isArray(parsed?.memories) ? parsed.memories : [];
+  const out = [];
+  const seenTitles = new Set();
+  for (const entry of source) {
+    if (!entry || typeof entry !== "object") continue;
+    const type = String(entry.type || "").trim().toLowerCase();
+    if (!RESEARCHER_MEMORY_TYPES.has(type)) continue;
+    const title = String(entry.title || "").trim().slice(0, RESEARCHER_MEMORY_TITLE_MAX);
+    const content = String(entry.content || "").trim().slice(0, RESEARCHER_MEMORY_CONTENT_MAX);
+    if (!title || !content) continue;
+    const titleKey = title.toLowerCase();
+    if (seenTitles.has(titleKey)) continue;
+    seenTitles.add(titleKey);
+    const fileRelPaths = [];
+    for (const value of Array.isArray(entry.key_files) ? entry.key_files : (Array.isArray(entry.files) ? entry.files : [])) {
+      const path = safeRelMemoryPath(value);
+      if (path && !fileRelPaths.includes(path)) fileRelPaths.push(path);
+      if (fileRelPaths.length >= 12) break;
+    }
+    out.push({
+      type,
+      title,
+      content,
+      symbolIds: resilientSymbolIdList(entry.key_symbols ?? entry.symbolIds, 12, "researcher memory symbolIds"),
+      fileRelPaths,
+    });
+    if (out.length >= maxItems) break;
+  }
+  return out;
 }
 
 /**
@@ -46,20 +115,7 @@ export function normalizeResearcherKeySymbols(parsed, maxItems = 24) {
   const rawIds = source
     .map((entry) => (typeof entry === "string" ? entry : entry?.symbolId || entry?.symbol_id || ""))
     .filter(Boolean);
-  try {
-    return sanitizeAtlasSymbolIdList(rawIds, maxItems, "researcher key_symbols");
-  } catch {
-    // A malformed entry must not discard the whole list — re-validate one by one.
-    const out = [];
-    for (const id of rawIds) {
-      try {
-        const [valid] = sanitizeAtlasSymbolIdList([id], 1, "researcher key_symbols");
-        if (valid && !out.includes(valid)) out.push(valid);
-      } catch { /* drop the malformed id */ }
-      if (out.length >= maxItems) break;
-    }
-    return out;
-  }
+  return resilientSymbolIdList(rawIds, maxItems, "researcher key_symbols");
 }
 
 function filePathFromResearcherValue(value) {

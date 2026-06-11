@@ -17,6 +17,7 @@ import {
   storeArtifact,
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
+import { persistResearcherMemories } from "../../functions/helpers/research-memories.js";
 import {
   getConfiguredImageProviders,
   getResolvedImageProtocol,
@@ -596,6 +597,26 @@ export class ResearcherRole extends BaseRole {
       artifact_type: "summary",
       content_long: output,
     });
+
+    // Durable findings ride the structured appendix (memories field) — the
+    // pipeline persists them here, capped per round, instead of the agent
+    // spending tool calls on memory.store. Fan-out children skip: only the
+    // primary/synthesis output represents the round.
+    const memoryPayload = ctx.payload || parseJobPayload(job) || {};
+    const isChildBranch = memoryPayload.role_mode === "child" || memoryPayload.fanout_shadow === true;
+    if (output && !isChildBranch) {
+      try {
+        const persisted = await persistResearcherMemories({
+          output,
+          cwd: ctx.projectDir || this.context?.projectDir || process.cwd(),
+          workItemId: job.work_item_id,
+          jobId: job.id,
+        });
+        if (persisted.stored > 0 || persisted.failed > 0) {
+          this.context?.emit?.(job.id, `${C.magenta}[researcher]${C.reset} ${C.dim}memories: ${persisted.stored} stored${persisted.duplicates ? `, ${persisted.duplicates} duplicate` : ""}${persisted.failed ? `, ${persisted.failed} failed` : ""} (cap 5/round)${C.reset}`);
+        }
+      } catch { /* memory persistence must never fail research output handling */ }
+    }
 
     if (output) {
       const firstLines = output.split("\n").filter((line) => line.trim()).slice(0, 3).join(" ").slice(0, 200);

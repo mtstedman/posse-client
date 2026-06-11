@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { classifyAtlasPrefetchRelevance, renderAtlasHandoffSections, resolveAtlasPrefetchPlan } from "../lib/domains/handoff/functions/helpers/atlas-context.js";
-import { normalizeResearcherKeySymbols, parseResearcherStructuredOutput } from "../lib/domains/handoff/functions/helpers/researcher-output.js";
+import { normalizeResearcherKeySymbols, normalizeResearcherMemories, parseResearcherStructuredOutput } from "../lib/domains/handoff/functions/helpers/researcher-output.js";
+import { persistResearcherMemories } from "../lib/domains/worker/functions/helpers/research-memories.js";
 
 function packetWithSlice(taskText, slice) {
   return {
@@ -251,5 +252,75 @@ describe("researcher key_symbols contract", () => {
       key_symbols: ["not-a-symbol", SYMBOL, { symbolId: SYMBOL }, { symbolId: "also/bad" }],
     });
     assert.deepEqual(symbols, [SYMBOL]);
+  });
+});
+
+describe("researcher memories contract", () => {
+  const SYMBOL = `${"b".repeat(64)}:1`;
+  const memory = (overrides = {}) => ({
+    type: "decision",
+    title: "Sessions validate in middleware",
+    content: "Handlers assume session middleware already ran.",
+    ...overrides,
+  });
+
+  it("caps, type-whitelists, dedupes, and sanitizes anchors", () => {
+    const entries = normalizeResearcherMemories({
+      memories: [
+        memory({ key_files: ["src/middleware/session.js", "../escape.js"], key_symbols: [SYMBOL, "bad-id"] }),
+        memory({ title: "sessions validate in MIDDLEWARE" }), // dup by title (case-insensitive)
+        memory({ type: "note", title: "wrong type" }),
+        memory({ title: "", content: "no title" }),
+        memory({ title: "two", content: "" }),
+        memory({ title: "m3", type: "pattern" }),
+        memory({ title: "m4", type: "convention" }),
+        memory({ title: "m5", type: "bugfix" }),
+        memory({ title: "m6", type: "architecture" }),
+        memory({ title: "m7", type: "security" }),
+      ],
+    });
+    assert.equal(entries.length, 5, "hard cap per round");
+    assert.deepEqual(entries[0].fileRelPaths, ["src/middleware/session.js"]);
+    assert.deepEqual(entries[0].symbolIds, [SYMBOL]);
+    assert.ok(entries.every((entry) => entry.title !== "wrong type"));
+  });
+
+  it("persists non-duplicates through the memory client without agent tool calls", async () => {
+    const calls = [];
+    const fakeAction = async (action, args) => {
+      calls.push({ action, args });
+      if (action === "memory.query") {
+        return {
+          ok: true,
+          json: {
+            memories: args.query.startsWith("Already known")
+              ? [{ title: "Already known fact", memoryId: "m-1" }]
+              : [],
+          },
+        };
+      }
+      return { ok: true, json: { memoryId: `m-${calls.length}` } };
+    };
+    const output = `Brief.\n\`\`\`json\n${JSON.stringify({
+      memories: [
+        memory({ title: "Already known fact" }),
+        memory({ title: "Fresh finding", type: "pattern" }),
+      ],
+    })}\n\`\`\``;
+
+    const result = await persistResearcherMemories({
+      output,
+      cwd: process.cwd(),
+      workItemId: 42,
+      memoryClient: { ok: true, call: async () => ({ isError: false, content: [] }) },
+      memoryAction: fakeAction,
+    });
+    assert.equal(result.total, 2);
+    assert.equal(result.duplicates, 1);
+    assert.equal(result.stored, 1);
+    assert.equal(result.failed, 0);
+    const store = calls.find((entry) => entry.action === "memory.store");
+    assert.equal(store.args.title, "Fresh finding");
+    assert.deepEqual(store.args.tags, ["posse-research", "wi-42"]);
   });
 });
