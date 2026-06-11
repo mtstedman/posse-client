@@ -1027,6 +1027,7 @@ export function getAtlasRouteForRole(role, { config = getAtlasIntegrationConfig(
     role: normalizedRole || "unknown",
     phase: route.phase,
     tools: [...route.tools],
+    internalTools: [...(route.internalTools || route.tools)],
     rationale: route.rationale,
     shouldAdvertise,
     active,

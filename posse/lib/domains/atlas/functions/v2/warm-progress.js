@@ -42,7 +42,7 @@ const STAGE_BUCKETS = [
   { key: "scip", from: 10, to: 25, stages: ["scip", "scip.indexing"] },
   { key: "parse", from: 25, to: 70, stages: ["parsing", "indexing", "writing ledger", "recording delta"] },
   { key: "view", from: 70, to: 90, stages: ["view"] },
-  { key: "tree", from: 90, to: 97, stages: ["tree"] },
+  { key: "tree", from: 90, to: 97, stages: ["tree", "tree-compression"] },
 ];
 const STAGE_TO_BUCKET = new Map(
   STAGE_BUCKETS.flatMap((bucket) => bucket.stages.map((stage) => [stage, bucket])),

@@ -428,9 +428,16 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   };
 
   // ---- hero / bands / borders ----
+  // The hero must not read 100%/"ready" while a ledger tail bar is still
+  // active: the readiness steps can all be resolved while the warm is in a
+  // long quiet phase (encode finishing, ML tree labeling) that still gates
+  // the TUI. Cap at 99% until the tails are terminal.
+  const ledgerTailActive = () => [zip, tree, encode].some(
+    (st) => st && !["idle", "done", "skipped", "failed"].includes(st.state),
+  );
   const heroRow = () => {
     const w = innerWidth();
-    const pct = overallBootPercent();
+    const pct = ledgerTailActive() ? Math.min(overallBootPercent(), 99) : overallBootPercent();
     const tag = pct >= 100 ? "ready" : "readiness";
     const barW = Math.max(16, Math.min(30, w - 24));
     return line(`   ${gaugeBar(pct, barW, "green")}   ${col("bold")}${String(pct).padStart(3)}%${col("reset")}   ${col("cyan")}▸ ${tag}${col("reset")}`);

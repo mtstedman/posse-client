@@ -2265,6 +2265,24 @@ export class RunSession {
               detail: zipDetail,
             });
           }
+          // The tree-compression ML reseed runs AFTER encode, inside the warm:
+          // a provider model pass labeling repo areas, minutes-long with no
+          // percent stream. Without a bar it reads as a boot hang at 100% —
+          // reopen the tree bar (it IS tree work) and refresh the footer so
+          // the operator can see it and background it.
+          if (String(event.stage || "") === "tree-compression") {
+            atlasTreeStarted = true;
+            atlasTreeTerminal = false;
+            bootPanel.updateTree({
+              state: "building",
+              percent: null,
+              detail: firstLine(event.text || "") || "ML seed labeling",
+            });
+            if (!atlasBootBackgroundRequested) {
+              updateBootFooter("ML tree labeling — hit Enter to continue in the background");
+              setBootEnterAction(() => requestAtlasBootBackground("tree-compression-enter"));
+            }
+          }
           // The tree-derived/compression refresh runs inside the view build and
           // drives its own bar. Its terminal event carries status ok/failed —
           // failed stays failed (e.g. compression has no Node fallback and the

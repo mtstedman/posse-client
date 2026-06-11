@@ -115,6 +115,22 @@ describe("Atlas system ownership boundary", () => {
     assert.equal(isBlockedFoldedAtlasTool("atlas.scip.ingest"), true);
   });
 
+  it("keeps prefetch-only actions routed internally but never advertised", () => {
+    // tree.scope is the prefetch's discovery pass: the handoff executes it on
+    // the agent's behalf via internalTools, so it must stay in the role route
+    // while being stripped from the agent-advertised list. Filtering it out
+    // of the route entirely silently broke tree-first prefetch (the prefetch
+    // fell back to slice.build on every handoff).
+    for (const role of ["researcher", "planner", "dev", "assessor"]) {
+      const route = getAtlasRouteDefinitionForRole(role);
+      assert.equal(route.tools.includes("tree.scope"), false, `${role} advertises tree.scope`);
+      assert.equal(route.internalTools.includes("tree.scope"), true, `${role} internal route lost tree.scope`);
+      assert.equal(route.internalTools.includes("tree.grow"), true, `${role} internal route lost tree.grow`);
+      assert.equal(route.internalTools.includes("index.refresh"), false, `${role} internal route exposes mutation`);
+      assert.equal(route.internalTools.includes("file.read"), false, `${role} internal route exposes fallback-only action`);
+    }
+  });
+
   it("refreshes deterministic live writes through system.atlas.refresh instead of MCP forwarding", () => {
     const source = fs.readFileSync(
       path.join(repoDir, "lib", "domains", "integrations", "functions", "deterministic-mcp-server.js"),

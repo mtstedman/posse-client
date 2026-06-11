@@ -2559,7 +2559,13 @@ export function getAtlasRouteDefinitionForRole(role) {
   });
   return {
     phase: route.phase,
+    // Advertised to (and gate-callable by) the agent: prefetch-only actions
+    // are excluded here on purpose.
     tools: [...route.tools].filter(isExternallyRoutedAtlasTool),
+    // Routed for the role at all — what the handoff prefetch may execute on
+    // the agent's behalf. Prefetch-only actions (tree.scope) stay in THIS
+    // list; only mutating and fallback-only actions are stripped.
+    internalTools: [...route.tools].filter((tool) => !isBlockedFoldedAtlasTool(tool) && !isFallbackOnlyAtlasTool(tool)),
     rationale: route.rationale,
   };
 }
