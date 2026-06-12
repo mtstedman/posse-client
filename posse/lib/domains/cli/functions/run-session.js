@@ -17,6 +17,7 @@ import { createBootPanel } from "./boot-panel.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
 import { inspectLocalOnnxStatus } from "../../atlas/functions/v2/embeddings/local-onnx.js";
 import { setConductorKeepWarm, closeSharedConductor } from "../../atlas/functions/v2/parse/conductor.js";
+import { setOnnxDaemonKeepWarm, closeSharedOnnxDaemon } from "../../atlas/functions/v2/embeddings/onnx-daemon.js";
 import { renderNeuralNetworkBanner } from "../../ui/functions/display/neural-network-banner.js";
 import { getOnnxWarmState, resetOnnxWarmState, setOnnxWarmState } from "../../atlas/functions/v2/embeddings/onnx-warm-state.js";
 import { recordEmbeddingForensics } from "../../atlas/functions/v2/embeddings/forensics.js";
@@ -564,10 +565,12 @@ export class RunSession {
       emitCloseoutStatus(`${label}: ATLAS cleanup...`, C.cyan);
       await flushCloseoutStatus();
     }
-    // Release the keep-warm pin and dispose the shared conductor — terminates its
-    // worker thread (its MessagePort pins the event loop on Node ≥22) so the
-    // process can drain and exit instead of waiting out the idle backstop.
+    // Release the keep-warm pins and dispose the shared conductor + ONNX
+    // encoder daemons — each terminates a worker thread whose MessagePort pins
+    // the event loop on Node ≥22, so the process can drain and exit instead of
+    // waiting out the idle backstops.
     try { setConductorKeepWarm(false); await closeSharedConductor(); } catch { /* best-effort */ }
+    try { setOnnxDaemonKeepWarm(false); await closeSharedOnnxDaemon(); } catch { /* best-effort */ }
     if (announce) {
       const elapsedSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
       emitCloseoutStatus(`${label}: ATLAS cleanup complete (${elapsedSec}s).`, C.green);
@@ -3274,9 +3277,11 @@ export class RunSession {
     });
   } catch { /* observational */ }
 
-  // Hold the Atlas conductor warm for the whole run so per-WI warms reuse one hot
-  // ParseEngine. Released + disposed by cleanupAtlasForSession on every exit path.
+  // Hold the Atlas conductor + ONNX encoder daemons warm for the whole run so
+  // per-WI warms reuse one hot ParseEngine and encodes reuse one loaded model.
+  // Released + disposed by cleanupAtlasForSession on every exit path.
   try { setConductorKeepWarm(true); } catch { /* best-effort */ }
+  try { setOnnxDaemonKeepWarm(true); } catch { /* best-effort */ }
 
   await scheduler.runLoop(
     (job) => worker.execute(job),

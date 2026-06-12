@@ -347,6 +347,10 @@ export class ParseEngine {
   #onProgress;
   /** @type {boolean} */
   #defaultBranchEnsured = false;
+  /** @type {boolean} */
+  #deferEmbeddings;
+  /** @type {Array<{ viewPath: string, base: AtlasWarmJobResult }>} */
+  #pendingEmbeddingIngests = [];
 
   /**
    * @param {{
@@ -359,9 +363,10 @@ export class ParseEngine {
    *   scipMode?: string,
    *   scipDir?: string,
    *   onProgress?: ((event: Record<string, unknown>) => void) | null,
+   *   deferEmbeddings?: boolean,
    * }} args
    */
-  constructor({ ledger, viewBuilder, parserAdapter, repoRoot, defaultBranch = "main", config, scipMode, scipDir, onProgress = null }) {
+  constructor({ ledger, viewBuilder, parserAdapter, repoRoot, defaultBranch = "main", config, scipMode, scipDir, onProgress = null, deferEmbeddings = false }) {
     if (!ledger) throw new TypeError("ParseEngine: ledger is required");
     if (!repoRoot) throw new TypeError("ParseEngine: repoRoot is required");
     this.#ledger = ledger;
@@ -385,6 +390,7 @@ export class ParseEngine {
       80,
     );
     this.#onProgress = typeof onProgress === "function" ? onProgress : null;
+    this.#deferEmbeddings = deferEmbeddings === true;
     // Default-branch ledger init is deferred until the first job/mount
     // entry point so a transient ledger fault surfaces through the
     // appropriate error contract (skipped record for handleWarmJob,
@@ -2155,12 +2161,36 @@ export class ParseEngine {
       || purpose === "main-merge";
 
     if (isMainPurpose || (purpose === "wi" && mode === "on")) {
+      if (this.#deferEmbeddings) {
+        // Deferred mode (conductor host): the encode-heavy embeddings pass is
+        // queued and run by flushDeferredEmbeddings() AFTER the warm releases
+        // the serial write queue, so merges and queued warms aren't held
+        // behind vector encoding. `base` is captured by reference — the flush
+        // fills the same result object the warm returns.
+        this.#pendingEmbeddingIngests.push({ viewPath, base });
+        return;
+      }
       await this.#ingestEmbeddingsForView({ viewPath, base });
       return;
     }
     if (purpose === "wi") {
       base.embeddings_skipped_reason = `wi_embeddings_${mode}`;
     }
+  }
+
+  /**
+   * Run the embeddings passes queued while `deferEmbeddings` was set. Called
+   * by the conductor host after handleWarmJob returns and the write-queue slot
+   * is released. Best-effort like the inline path: #ingestEmbeddingsForView
+   * never throws past its own catch (failures land in base.embeddings_error).
+   * @returns {Promise<number>} how many deferred passes ran
+   */
+  async flushDeferredEmbeddings() {
+    const pending = this.#pendingEmbeddingIngests.splice(0);
+    for (const item of pending) {
+      await this.#ingestEmbeddingsForView(item);
+    }
+    return pending.length;
   }
 
   /**

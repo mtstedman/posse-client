@@ -1879,6 +1879,73 @@ suite("Scheduler", () => {
     assert.equal(launched.includes(human.id), true);
     assert.equal(queueMod.getJob(human.id).status, "succeeded");
   });
+
+  it("holds non-warm dispatch while ATLAS indexing is in flight, letting human gates through", async () => {
+    const { queueMod, schedulerMod } = runtimeModules;
+    const wi = queueMod.createWorkItem("Atlas indexing hold", "desc");
+    const dev = queueMod.createJob({
+      work_item_id: wi.id,
+      job_type: "dev",
+      title: "Held compute",
+      priority: "urgent",
+    });
+    const human = queueMod.createJob({
+      work_item_id: wi.id,
+      job_type: "human_input",
+      title: "Human gate",
+      priority: "low",
+    });
+
+    const state = { inFlight: true };
+    const scheduler = new schedulerMod.Scheduler({
+      ownerId: "sched-atlas-hold",
+      pollMs: 5,
+      leaseSec: 60,
+      concurrency: 2,
+      isAtlasIndexingInFlight: () => state.inFlight,
+    });
+    scheduler.onEvent = () => {};
+    assert.equal(queueMod.acquireSchedulerLock("main", scheduler.ownerId, 60), true);
+    scheduler._running = true;
+
+    const launched = [];
+    const loop = scheduler.runLoop(async (job) => {
+      launched.push(job.id);
+      queueMod.releaseLease(job.id, job._leaseToken, "succeeded");
+      if (job.id === dev.id) scheduler.stop();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(launched.includes(dev.id), false, "dev must not dispatch during the hold");
+    assert.equal(launched.includes(human.id), true, "human gate still dispatches during the hold");
+
+    state.inFlight = false;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    scheduler.stop();
+    await loop;
+    assert.equal(launched.includes(dev.id), true, "dev dispatches once indexing settles");
+  });
+
+  it("ATLAS indexing hold honors the failsafe window and the opt-out", () => {
+    const { schedulerMod } = runtimeModules;
+    const held = new schedulerMod.Scheduler({
+      ownerId: "sched-atlas-hold-failsafe",
+      isAtlasIndexingInFlight: () => true,
+    });
+    held.onEvent = () => {};
+    assert.equal(held._atlasIndexingDispatchHold(), true);
+    // Backdate the episode past the failsafe: the hold must release rather
+    // than wedge dispatch behind a stuck warm forever.
+    held._atlasIndexingHoldStartedAt = Date.now() - (held._atlasIndexingHoldMaxMs + 1_000);
+    assert.equal(held._atlasIndexingDispatchHold(), false);
+
+    const optedOut = new schedulerMod.Scheduler({
+      ownerId: "sched-atlas-hold-off",
+      pauseDispatchDuringAtlasIndexing: false,
+      isAtlasIndexingInFlight: () => true,
+    });
+    optedOut.onEvent = () => {};
+    assert.equal(optedOut._atlasIndexingDispatchHold(), false);
+  });
 });
 
 // TEST: findRunnableJob query correctness

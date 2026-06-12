@@ -831,6 +831,12 @@ export class EmbeddingIndex {
       );
     }
     assertFiniteVector(vector, "EmbeddingIndex.nearest");
+    // usearch.search on an EMPTY index aborts the whole process natively
+    // (0xC0000409 fail-fast on Windows — not a catchable JS error). An empty
+    // ANN legitimately occurs before any ingest (lazy WI views, on-demand
+    // fill skipped or incomplete) and after a quarantine reset while the
+    // keys.db rebuild is pending, so answer "no hits" instead of dying.
+    if ((nativeIndexStats(this.#usearch).size ?? 0) === 0) return [];
     const k = Math.max(1, Math.min(Number.isInteger(opts.k) ? /** @type {number} */ (opts.k) : 20, 1000));
     const minScore = typeof opts.minScore === "number"
       ? Math.max(0, Math.min(1, opts.minScore))

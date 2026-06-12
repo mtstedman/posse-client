@@ -16,6 +16,7 @@ import { EventEmitter } from "node:events";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "url";
 import { closeAccountSettingsDb, setAccountSettings, setAccountSettingsPathForTests } from "../../../lib/domains/settings/functions/account-settings.js";
+import { invalidateRemoteModelCatalog } from "../../../lib/domains/providers/functions/model-catalog-store.js";
 import { setRuntimePathOverridesForTests } from "../../../lib/domains/runtime/functions/paths.js";
 import { setDaemonLedgerDirForTests } from "../../../lib/classes/tools/daemon/index.js";
 import { providerUsageRuntimeCache } from "../../../lib/domains/providers/classes/usage-runtime-cache-singleton.js";
@@ -421,6 +422,12 @@ function resetRuntimeDb() {
     _removeDbWithSidecars(runtimeAccountSettingsPath);
     setAccountSettingsPathForTests(runtimeAccountSettingsPath);
   }
+  // Drop the in-memory remote model catalog. Its lazy background load can
+  // race the sandbox path swap above and cache the developer's REAL
+  // ~/.posse/account.db catalog (e.g. claude:sonnet pricing resolving as
+  // "remote:" instead of "default:"). Invalidating here forces the next read
+  // to go through the sandboxed account-settings DB, which is empty.
+  invalidateRemoteModelCatalog();
 }
 
 /**

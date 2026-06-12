@@ -4,6 +4,11 @@ import assert from "node:assert/strict";
 import {
   __testAtlasExecCoalesceKey as coalesceKey,
   __testAtlasExecCoalesceEnabled as coalesceEnabled,
+  __testAtlasSharedReadKey as sharedReadKey,
+  __testAtlasSharedReadCacheSeed as sharedReadSeed,
+  __testAtlasSharedReadCacheState as sharedReadState,
+  __testResetAtlasJobCache as resetAtlasCaches,
+  invalidateAtlasSharedReadCache,
 } from "../lib/domains/integrations/functions/atlas-embedded.js";
 
 const base = {
@@ -70,5 +75,48 @@ describe("atlas embedded coalesce enable flag", () => {
   it("honors an explicit config disable", () => {
     delete process.env.POSSE_ATLAS_EMBEDDED_COALESCE;
     assert.equal(coalesceEnabled({ embeddedCoalesceEnabled: false }), false);
+  });
+});
+
+describe("atlas shared read cache (tree.overview / repo.status)", () => {
+  afterEach(() => resetAtlasCaches());
+
+  const base = {
+    enabled: true,
+    action: "tree.overview",
+    assetKey: "atlas:/repo/a",
+    versionId: "head:abc123",
+    payload: {},
+  };
+
+  it("keys only the shared-read actions, scoped to asset + version + args", () => {
+    const k1 = sharedReadKey(base);
+    const k2 = sharedReadKey({ ...base, payload: {} });
+    assert.ok(k1, "expected a key for tree.overview");
+    assert.equal(k1, k2, "same inputs → same key");
+    assert.ok(sharedReadKey({ ...base, action: "repo.status" }), "repo.status is shared-cacheable");
+    assert.notEqual(k1, sharedReadKey({ ...base, versionId: "head:def456" }), "different version → different key");
+    assert.notEqual(k1, sharedReadKey({ ...base, assetKey: "atlas:/repo/b" }), "different asset → different key");
+  });
+
+  it("refuses non-shared actions, missing scope, and disabled coalescing", () => {
+    assert.equal(sharedReadKey({ ...base, action: "slice.build" }), null);
+    assert.equal(sharedReadKey({ ...base, action: "tree.scope" }), null);
+    assert.equal(sharedReadKey({ ...base, assetKey: null }), null);
+    assert.equal(sharedReadKey({ ...base, versionId: null }), null);
+    assert.equal(sharedReadKey({ ...base, enabled: false }), null);
+  });
+
+  it("invalidation clears entries and bumps the epoch (post-reindex void)", () => {
+    const key = sharedReadKey(base);
+    sharedReadSeed(key, "{\"tree\":\"...\"}");
+    const before = sharedReadState();
+    assert.equal(before.size, 1);
+    assert.ok(before.keys.includes(key));
+
+    invalidateAtlasSharedReadCache();
+    const after = sharedReadState();
+    assert.equal(after.size, 0, "reindex success voids cached entries");
+    assert.equal(after.epoch, before.epoch + 1, "epoch bump rejects in-flight promotions started pre-reindex");
   });
 });

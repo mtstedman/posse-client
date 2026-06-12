@@ -79,6 +79,7 @@ export function symbolSearch({
   feedbackHalfLifeDays,
   repoId,
   repoRoot,
+  onDemandEmbeddingFill = true,
 }) {
   const limit = typeof params.limit === "number" && params.limit > 0 ? params.limit : 50;
   const overlayHits = rankOverlaySymbols({
@@ -97,22 +98,29 @@ export function symbolSearch({
   if (params.semantic && embeddingIndex && encoder && encoder.dim === embeddingIndex.dim) {
     return (async () => {
       let embeddingEnsureStatus = null;
-      try {
-        embeddingEnsureStatus = await ensureEmbeddingsForView({
-          view,
-          index: embeddingIndex,
-          encoder,
-          repoRoot,
-          limit: 5000,
-          timeoutMs: 15000,
-        });
-      } catch (err) {
-        embeddingEnsureStatus = {
-          skipped: false,
-          incomplete: true,
-          reason: String(err?.code || err?.message || err || "encode_error"),
-        };
-        logAtlasError("[symbolSearch.ensureEmbeddingsForView] threw:", err);
+      if (!onDemandEmbeddingFill) {
+        // Caller opted out of the bulk fill (e.g. the in-process retrieval
+        // fallback protecting the main loop): search whatever is already
+        // indexed instead of encoding the gap first.
+        embeddingEnsureStatus = { skipped: true, reason: "on_demand_fill_disabled" };
+      } else {
+        try {
+          embeddingEnsureStatus = await ensureEmbeddingsForView({
+            view,
+            index: embeddingIndex,
+            encoder,
+            repoRoot,
+            limit: 5000,
+            timeoutMs: 15000,
+          });
+        } catch (err) {
+          embeddingEnsureStatus = {
+            skipped: false,
+            incomplete: true,
+            reason: String(err?.code || err?.message || err || "encode_error"),
+          };
+          logAtlasError("[symbolSearch.ensureEmbeddingsForView] threw:", err);
+        }
       }
       const ensuredResult = await hybridSearch({
         view,

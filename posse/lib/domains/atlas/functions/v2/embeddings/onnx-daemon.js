@@ -56,10 +56,70 @@ export function createOnnxDaemon(getConfig) {
 // Process-global persistent encoder. Unlike the per-ingestView pool (which tears
 // the model down each call), this keeps one warm model for the whole session;
 // the Daemon recycles it automatically when the embedding identity changes.
-/** @type {ReturnType<typeof createOnnxDaemon> | null} */
+//
+// IDLE EVICTION — same constraint as the shared conductor: the worker's
+// communication MessagePort stays an active libuv handle until terminate()
+// resolves, so `unref()` alone does NOT let a process that encoded once exit.
+// The shared daemon self-disposes after an idle window with no in-flight
+// encodes; a long-lived run pins it warm via setOnnxDaemonKeepWarm(true) so
+// the ~6s model load is paid once per session, not once per quiet gap.
+const DEFAULT_IDLE_MS = 30_000;
+const KEEPWARM_IDLE_MS = 900_000; // 15 min backstop while pinned
+let _idleMs = DEFAULT_IDLE_MS;
+let _keepWarm = false;
+/** @type {{ daemon: Daemon, encode: Function, warm: Function, info: Function } | null} */
 let _shared = null;
 /** @type {Record<string, any>} */
 let _sharedConfig = {};
+let _sharedInflight = 0;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let _sharedIdleTimer = null;
+/** @type {Promise<void> | null} guards re-entrant closeSharedOnnxDaemon calls. */
+let _sharedClosing = null;
+
+function _disarmIdle() {
+  if (_sharedIdleTimer) { clearTimeout(_sharedIdleTimer); _sharedIdleTimer = null; }
+}
+
+function _armIdle() {
+  _disarmIdle();
+  if (_sharedInflight > 0) return;
+  _sharedIdleTimer = setTimeout(() => {
+    _sharedIdleTimer = null;
+    if (_sharedInflight === 0) closeSharedOnnxDaemon().catch(() => { /* best effort */ });
+  }, _keepWarm ? KEEPWARM_IDLE_MS : _idleMs);
+  _sharedIdleTimer.unref?.();
+}
+
+/** Wrap an op so the idle timer is held off while it runs. */
+function _tracked(fn) {
+  return async (/** @type {any[]} */ ...args) => {
+    _sharedInflight++;
+    _disarmIdle();
+    try {
+      return await fn(...args);
+    } finally {
+      _sharedInflight--;
+      _armIdle();
+    }
+  };
+}
+
+/**
+ * Pin the shared encoder warm for the duration of a long-lived run (the
+ * session sets true at boot, false in ATLAS cleanup). No-op-safe.
+ * @param {boolean} on
+ */
+export function setOnnxDaemonKeepWarm(on) {
+  _keepWarm = !!on;
+  if (_shared) _armIdle();
+}
+
+/** Test hook: override the idle-eviction window. Pass nothing to restore. */
+export function setOnnxDaemonIdleMsForTests(ms = DEFAULT_IDLE_MS) {
+  const n = Number(ms);
+  _idleMs = Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_IDLE_MS;
+}
 
 /**
  * Get the process-global ONNX encoder daemon, updating the live config it reads
@@ -69,8 +129,34 @@ let _sharedConfig = {};
  */
 export function getSharedOnnxDaemon(config = {}) {
   _sharedConfig = config;
-  if (!_shared) _shared = createOnnxDaemon(() => _sharedConfig);
+  if (!_shared) {
+    const base = createOnnxDaemon(() => _sharedConfig);
+    _shared = {
+      daemon: base.daemon,
+      info: base.info,
+      encode: _tracked(base.encode),
+      warm: _tracked(base.warm),
+    };
+    _armIdle();
+  }
   return _shared;
+}
+
+/**
+ * Tear down the shared encoder daemon (terminate the worker thread). Safe to
+ * call when none exists. Awaiting it guarantees the worker's MessagePort is
+ * released so the process can exit.
+ */
+export async function closeSharedOnnxDaemon() {
+  if (_sharedClosing) return _sharedClosing;
+  _disarmIdle();
+  const shared = _shared;
+  _shared = null;
+  if (!shared) return;
+  _sharedClosing = (async () => {
+    try { await shared.daemon.dispose(); } catch { /* best effort */ }
+  })();
+  try { await _sharedClosing; } finally { _sharedClosing = null; }
 }
 
 /**

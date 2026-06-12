@@ -82,7 +82,7 @@ const REFRESH_DIFF_LIMIT = 100;
  * }} args
  * @returns {SliceBuildEnvelope | Promise<SliceBuildEnvelope>}
  */
-export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, taskType }) {
+export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, taskType, onDemandEmbeddingFill = true }) {
   const detail = /** @type {CardDetail} */ (params.cardDetail || "compact");
   const budget = params.budget || {};
   const maxCards = budget.maxCards ?? DEFAULT_BUDGET_CARDS;
@@ -180,17 +180,21 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
       },
     };
     return (async () => {
-      try {
-        await ensureEmbeddingsForView({
-          view,
-          index: /** @type {EmbeddingIndex} */ (embeddingIndex),
-          encoder: /** @type {EmbeddingEncoder} */ (encoder),
-          repoRoot,
-          limit: 5000,
-          timeoutMs: 15000,
-        });
-      } catch (err) {
-        logAtlasError("[sliceBuild.ensureEmbeddingsForView] threw:", err);
+      // Skipped when the caller opted out of the bulk fill (in-process
+      // retrieval fallback): entry discovery searches what's already indexed.
+      if (onDemandEmbeddingFill) {
+        try {
+          await ensureEmbeddingsForView({
+            view,
+            index: /** @type {EmbeddingIndex} */ (embeddingIndex),
+            encoder: /** @type {EmbeddingEncoder} */ (encoder),
+            repoRoot,
+            limit: 5000,
+            timeoutMs: 15000,
+          });
+        } catch (err) {
+          logAtlasError("[sliceBuild.ensureEmbeddingsForView] threw:", err);
+        }
       }
       applySearchResult(await hybridSearch(searchArgs));
       return finishBuild();

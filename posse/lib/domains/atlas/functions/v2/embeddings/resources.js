@@ -15,6 +15,7 @@ import { embeddingsRoot } from "../runtime-paths.js";
 import { inspectLocalOnnxStatus, localOnnxRequested, LOCAL_ONNX_PROVIDER_ALIASES } from "./local-onnx.js";
 import { resolveConfiguredEncoder } from "../../../classes/v2/EmbeddingEncoder.js";
 import { ChildEmbeddingIndex, childEmbeddingModelDirName } from "../../../classes/v2/ChildEmbeddingIndex.js";
+import { encodeViaSharedOnnxDaemon } from "./onnx-daemon.js";
 import { errorForTelemetry, recordEmbeddingForensics } from "./forensics.js";
 
 /** @typedef {import("../contracts/embeddings.js").EmbeddingEncoder} EmbeddingEncoder */
@@ -103,6 +104,75 @@ function usearchPackageResolvable() {
   }
 }
 
+// Encode placement. Local-ONNX inference is transformers.js: tokenization and
+// pooling are synchronous JS, so calling encoder.encode() inline pins whatever
+// thread asked for vectors — the main loop on the in-process retrieval path,
+// the conductor thread during warms/retrieves. Production opens therefore wrap
+// the encoder so encode() delegates to the shared persistent ONNX daemon (its
+// own worker thread, one warm model per process). The wrapper preserves the
+// encoder's full identity (model/model_version/dim drive index dir naming and
+// pool eligibility), so the per-ingest worker pool still activates for bulk
+// warm ingests when embeddingThreads > 1.
+const ONNX_DAEMON_OFF_VALUES = new Set(["off", "false", "0", "no"]);
+
+function onnxDaemonEnabled(config = {}) {
+  const raw = String(process.env.POSSE_ATLAS_ONNX_DAEMON ?? "").trim().toLowerCase();
+  if (raw && ONNX_DAEMON_OFF_VALUES.has(raw)) return false;
+  if (config?.onnxDaemonEnabled === false) return false;
+  return true;
+}
+
+/**
+ * @param {any} encoder  a LocalOnnxEmbeddingEncoder instance
+ * @returns {EmbeddingEncoder}
+ */
+function daemonBackedLocalOnnxEncoder(encoder) {
+  // The daemon host reconstructs the encoder from this config — it must round-
+  // trip the exact constructor identity (model_version is passed back as
+  // modelVersion so the host's composed version string matches ours).
+  const daemonConfig = {
+    cacheDir: encoder.cacheDir,
+    modelName: encoder.modelName,
+    modelId: encoder.modelId,
+    dim: encoder.dim,
+    modelVersion: encoder.model_version,
+    batchSize: encoder.batchSize,
+    maxInputChars: encoder.maxInputChars,
+    maxInputTokens: encoder.maxInputTokens,
+    dtype: encoder.dtype,
+    localFilesOnly: encoder.localFilesOnly,
+  };
+  return /** @type {any} */ ({
+    model: encoder.model,
+    model_version: encoder.model_version,
+    dim: encoder.dim,
+    modelName: encoder.modelName,
+    modelId: encoder.modelId,
+    cacheDir: encoder.cacheDir,
+    batchSize: encoder.batchSize,
+    maxInputChars: encoder.maxInputChars,
+    maxInputTokens: encoder.maxInputTokens,
+    dtype: encoder.dtype,
+    localFilesOnly: encoder.localFilesOnly,
+    daemonBacked: true,
+    buildSymbolText: (/** @type {any} */ symbol) => encoder.buildSymbolText(symbol),
+    encode: (/** @type {string[]} */ texts, /** @type {AbortSignal} */ signal) =>
+      encodeViaSharedOnnxDaemon(texts, daemonConfig, { signal }),
+    // Dispose the wrapped inline encoder only (it never loaded a model — encode
+    // is delegated). The shared daemon outlives any one open and is reclaimed
+    // by its own idle eviction / session cleanup.
+    dispose: () => encoder.dispose?.(),
+  });
+}
+
+export function __testDaemonBackedLocalOnnxEncoder(encoder) {
+  return daemonBackedLocalOnnxEncoder(encoder);
+}
+
+export function __testOnnxDaemonEnabled(config = {}) {
+  return onnxDaemonEnabled(config);
+}
+
 /**
  * @param {{
  *   repoRoot: string,
@@ -150,7 +220,10 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {} }) {
   }
 
   try {
-    const encoder = resolveConfiguredEncoder(effectiveConfig, env);
+    let encoder = resolveConfiguredEncoder(effectiveConfig, env);
+    if (encoder?.model === "local-onnx" && onnxDaemonEnabled(effectiveConfig)) {
+      encoder = daemonBackedLocalOnnxEncoder(encoder);
+    }
     const result = openIndexForBackend({
       backend: vectorBackend,
       encoder,

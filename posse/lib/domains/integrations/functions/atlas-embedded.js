@@ -23,7 +23,7 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View } from "../../atlas/classes/v2/View.js";
 import { dispatch as dispatchAtlasV2 } from "../../atlas/functions/v2/retrieval/dispatch.js";
-import { getSharedConductor, isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
+import { getSharedConductor, isConductorIndexingInFlight, onConductorIndexingSuccess } from "../../atlas/functions/v2/parse/conductor.js";
 import {
   openEmbeddingResources,
   semanticDispatchEnabled,
@@ -46,6 +46,7 @@ const ATLAS_JOB_CACHE_PER_JOB_MAX = 32;
 const ATLAS_PREFETCH_CACHE_MAX = 128;
 const ATLAS_JOB_CACHE_ACTIONS = new Set([
   "repo.status",
+  "tree.overview",
   "context",
   "symbol.search",
   "symbol.getCard",
@@ -54,6 +55,47 @@ const ATLAS_JOB_CACHE_ACTIONS = new Set([
   "code.getSkeleton",
   "code.getHotPath",
 ]);
+
+// Cross-agent read-through cache for the hot "shape of the repo" reads that
+// every agent issues right after attach. The first call after a (re)index
+// executes and concurrent identical calls coalesce onto it; later callers get
+// the settled result without touching the gate or the conductor. Entries are
+// keyed by asset+version+args but version is git HEAD — a drift reindex lands
+// new view content under the SAME HEAD, so the cache is also voided whenever
+// a conductor indexing op completes successfully (see the subscription below).
+const ATLAS_SHARED_READ_ACTIONS = new Set([
+  "tree.overview",
+  "repo.status",
+]);
+const ATLAS_SHARED_READ_CACHE = new Map(); // key → output string
+const ATLAS_SHARED_READ_INFLIGHT = new Map(); // key → Promise<string>
+const ATLAS_SHARED_READ_CACHE_MAX = 64;
+let _sharedReadCacheEpoch = 0;
+
+/** Void the shared tree.overview/repo.status cache (post-reindex, tests). */
+export function invalidateAtlasSharedReadCache() {
+  _sharedReadCacheEpoch++;
+  ATLAS_SHARED_READ_CACHE.clear();
+}
+
+onConductorIndexingSuccess(() => invalidateAtlasSharedReadCache());
+
+function atlasSharedReadKey({ enabled = true, action = null, assetKey = null, versionId = null, payload = null } = {}) {
+  if (!enabled) return null;
+  if (!action || !ATLAS_SHARED_READ_ACTIONS.has(action)) return null;
+  if (assetKey == null || versionId == null) return null;
+  return `${assetKey}|${versionId}|${action}:${hashArgs(payload)}`;
+}
+
+function sharedReadCacheSet(key, value) {
+  ATLAS_SHARED_READ_CACHE.delete(key);
+  ATLAS_SHARED_READ_CACHE.set(key, value);
+  while (ATLAS_SHARED_READ_CACHE.size > ATLAS_SHARED_READ_CACHE_MAX) {
+    const oldest = ATLAS_SHARED_READ_CACHE.keys().next().value;
+    if (oldest == null) break;
+    ATLAS_SHARED_READ_CACHE.delete(oldest);
+  }
+}
 const ATLAS_V2_VIEW_OPTIONAL_ACTIONS = new Set([
   "query",
   "code",
@@ -213,6 +255,8 @@ export function __testResetAtlasJobCache() {
   ATLAS_JOB_CACHE.clear();
   ATLAS_PREFETCH_CACHE.clear();
   ATLAS_CORRUPTION_BACKOFF.clear();
+  ATLAS_SHARED_READ_CACHE.clear();
+  ATLAS_SHARED_READ_INFLIGHT.clear();
 }
 
 export function __testBuildAtlasProtectedAssetKey(opts = {}) {
@@ -250,6 +294,26 @@ export function __testAtlasExecCoalesceKey(opts = {}) {
 export function __testAtlasExecCoalesceEnabled(config = {}) {
   assertTestContext("__testAtlasExecCoalesceEnabled");
   return atlasExecCoalesceEnabled(config);
+}
+
+export function __testAtlasSharedReadKey(opts = {}) {
+  assertTestContext("__testAtlasSharedReadKey");
+  return atlasSharedReadKey(opts);
+}
+
+export function __testAtlasSharedReadCacheSeed(key, value) {
+  assertTestContext("__testAtlasSharedReadCacheSeed");
+  sharedReadCacheSet(key, value);
+}
+
+export function __testAtlasSharedReadCacheState() {
+  assertTestContext("__testAtlasSharedReadCacheState");
+  return {
+    size: ATLAS_SHARED_READ_CACHE.size,
+    keys: [...ATLAS_SHARED_READ_CACHE.keys()],
+    inflight: ATLAS_SHARED_READ_INFLIGHT.size,
+    epoch: _sharedReadCacheEpoch,
+  };
 }
 
 export function __testSetAtlasLockBackoff() {
@@ -869,6 +933,7 @@ async function executeEmbeddedAtlasV2Tool({
       && action !== "memory.store" && action !== "memory.remove"
       && action !== "policy.set" && action !== "agent.feedback";
     let envelope = null;
+    let conductorFellBack = false;
     if (conductorEligible) {
       try {
         const conductorLedgerPath = configuredLedgerPath
@@ -896,14 +961,21 @@ async function executeEmbeddedAtlasV2Tool({
           code: /** @type {any} */ (err)?.code || null,
         });
         envelope = null;
+        conductorFellBack = true;
       }
     }
     if (!envelope) {
       // In-process path (kill switch, ineligible action, or daemon fallback):
       // open the semantic handles here, exactly as before the conductor split.
+      // On a daemon FALLBACK the conductor is typically busy (mid-warm) — skip
+      // the bulk on-demand embedding fill so the main loop only pays for the
+      // search itself, not for encoding the view's vector gap.
+      const inProcessConfig = conductorFellBack
+        ? { ...(config || {}), onDemandEmbeddingFill: false }
+        : (config || {});
       if (semanticWanted && !embeddingResources) {
         try {
-          embeddingResources = openEmbeddingResources({ repoRoot: readRoot, config: config || {} });
+          embeddingResources = openEmbeddingResources({ repoRoot: readRoot, config: inProcessConfig });
         } catch { embeddingResources = null; }
       }
       envelope = await Promise.resolve(dispatchAtlasV2(dispatchCall, {
@@ -912,7 +984,7 @@ async function executeEmbeddedAtlasV2Tool({
         versionId,
         repoRoot: readRoot,
         repoId: repo?.repoId || null,
-        config: config || {},
+        config: inProcessConfig,
         embeddingIndex: embeddingResources?.enabled ? embeddingResources.index : undefined,
         encoder: embeddingResources?.enabled ? embeddingResources.encoder : undefined,
         taskText: typeof payload?.taskText === "string" ? payload.taskText : (action === "symbol.search" ? payload?.query : undefined),
@@ -1173,21 +1245,77 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
       && prepared.action !== "memory.store"
       && prepared.action !== "memory.remove"
       && prepared.action !== "policy.set";
-    let output = await runGatedCall();
-    for (let attempt = 0; transientRetryable
-      && attempt < ATLAS_TRANSIENT_RETRY_DELAYS_MS.length
-      && isTransientAtlasError(output); attempt++) {
-      if (isConductorIndexingInFlight()) {
-        await waitForConductorIndexingToSettle();
-      } else {
-        await sleepMs(ATLAS_TRANSIENT_RETRY_DELAYS_MS[attempt]);
+    const runWithTransientRetries = async () => {
+      let result = await runGatedCall();
+      for (let attempt = 0; transientRetryable
+        && attempt < ATLAS_TRANSIENT_RETRY_DELAYS_MS.length
+        && isTransientAtlasError(result); attempt++) {
+        if (isConductorIndexingInFlight()) {
+          await waitForConductorIndexingToSettle();
+        } else {
+          await sleepMs(ATLAS_TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        }
+        log.debug("atlas", "Retrying embedded ATLAS call after transient failure", {
+          action: prepared.action,
+          attempt: attempt + 1,
+          error: String(result).slice(0, 160),
+        });
+        result = await runGatedCall();
       }
-      log.debug("atlas", "Retrying embedded ATLAS call after transient failure", {
+      return result;
+    };
+
+    const sharedReadKey = atlasSharedReadKey({
+      enabled: atlasExecCoalesceEnabled(config),
+      action: prepared.action,
+      assetKey: protectedAssetKey,
+      versionId: origin === "agent" ? jobVersion : prefetchVersion,
+      payload: prepared.payload,
+    });
+    let output;
+    let sharedReadHit = false;
+    if (sharedReadKey != null) {
+      const cached = ATLAS_SHARED_READ_CACHE.get(sharedReadKey);
+      if (cached != null) {
+        output = cached;
+        sharedReadHit = true;
+      } else if (ATLAS_SHARED_READ_INFLIGHT.has(sharedReadKey)) {
+        // Coalesce: ride the identical in-flight call instead of queueing on
+        // the gate/conductor behind it.
+        output = await ATLAS_SHARED_READ_INFLIGHT.get(sharedReadKey);
+        sharedReadHit = true;
+      } else {
+        const epochAtStart = _sharedReadCacheEpoch;
+        const pending = runWithTransientRetries();
+        ATLAS_SHARED_READ_INFLIGHT.set(sharedReadKey, pending);
+        try {
+          output = await pending;
+        } finally {
+          if (ATLAS_SHARED_READ_INFLIGHT.get(sharedReadKey) === pending) {
+            ATLAS_SHARED_READ_INFLIGHT.delete(sharedReadKey);
+          }
+        }
+        // Don't promote a result that raced a reindex landing mid-call.
+        if (epochAtStart === _sharedReadCacheEpoch && !/^Error:/i.test(String(output || ""))) {
+          sharedReadCacheSet(sharedReadKey, output);
+        }
+      }
+    } else {
+      output = await runWithTransientRetries();
+    }
+    if (sharedReadHit) {
+      recordAtlasToolObservation({
         action: prepared.action,
-        attempt: attempt + 1,
-        error: String(output).slice(0, 160),
+        cliAction: prepared.cliAction,
+        invocation: null,
+        args: prepared.payload || args,
+        ok: !/^Error:/i.test(String(output || "")),
+        durationMs: Date.now() - startedAt,
+        origin,
+        cacheHit: true,
+        artifacts: extractAtlasResultArtifacts(output, { action: prepared.action, args: prepared.payload }),
       });
-      output = await runGatedCall();
+      return output;
     }
     if (!/^Error:/i.test(String(output || ""))) {
       if (origin === "agent") {

@@ -48,6 +48,8 @@ import {
   embeddingsExplicitlyEnabled,
   openEmbeddingResources,
   semanticDispatchEnabled,
+  __testDaemonBackedLocalOnnxEncoder,
+  __testOnnxDaemonEnabled,
 } from "../lib/domains/atlas/functions/v2/embeddings/resources.js";
 import { semanticSearch } from "../lib/domains/atlas/functions/v2/embeddings/search.js";
 import { symbolSearch } from "../lib/domains/atlas/functions/v2/retrieval/search.js";
@@ -196,6 +198,47 @@ describe("ATLAS v2 embedding resource selection", () => {
     assert.equal(semanticDispatchEnabled({ semanticEnabled: "true" }), true);
     assert.equal(semanticDispatchEnabled({ semanticEnabled: "yes" }), true);
     assert.equal(semanticDispatchEnabled({ semanticEnabled: "on" }), true);
+  });
+
+  it("daemon-backed local-onnx wrapper preserves identity and pool eligibility", () => {
+    const inline = new LocalOnnxEmbeddingEncoder({
+      cacheDir: path.join(os.tmpdir(), "onnx-wrap-test"),
+      modelName: "fixture/model",
+      modelId: "fixture-model",
+      dim: 64,
+      dtype: "q8",
+    });
+    const wrapped = __testDaemonBackedLocalOnnxEncoder(inline);
+    // Identity must round-trip exactly: index dir naming and the daemon host's
+    // reconstructed encoder both key off these fields.
+    assert.equal(wrapped.model, "local-onnx");
+    assert.equal(wrapped.model_version, inline.model_version);
+    assert.equal(wrapped.dim, inline.dim);
+    assert.equal(wrapped.modelName, inline.modelName);
+    assert.equal(wrapped.modelId, inline.modelId);
+    assert.equal(wrapped.cacheDir, inline.cacheDir);
+    assert.equal(wrapped.daemonBacked, true);
+    assert.equal(typeof wrapped.encode, "function");
+    assert.equal(wrapped.buildSymbolText({ name: "x", lang: "js" }), inline.buildSymbolText({ name: "x", lang: "js" }));
+    // The warm-path worker pool reads these props off the encoder — wrapping
+    // must not silently disable multi-threaded bulk ingest.
+    assert.equal(shouldUseLocalOnnxEncodePool(wrapped, 2), true);
+  });
+
+  it("onnx daemon routing honors the env and config kill switches", () => {
+    const original = process.env.POSSE_ATLAS_ONNX_DAEMON;
+    try {
+      delete process.env.POSSE_ATLAS_ONNX_DAEMON;
+      assert.equal(__testOnnxDaemonEnabled({}), true);
+      assert.equal(__testOnnxDaemonEnabled({ onnxDaemonEnabled: false }), false);
+      for (const off of ["off", "false", "0", "no"]) {
+        process.env.POSSE_ATLAS_ONNX_DAEMON = off;
+        assert.equal(__testOnnxDaemonEnabled({}), false, `expected disabled for "${off}"`);
+      }
+    } finally {
+      if (original === undefined) delete process.env.POSSE_ATLAS_ONNX_DAEMON;
+      else process.env.POSSE_ATLAS_ONNX_DAEMON = original;
+    }
   });
 
   it("keeps embeddings opt-in and honors vector backend off", () => {
@@ -1992,6 +2035,87 @@ describe("ATLAS v2 ingest + semantic search end-to-end", { skip: skipIfNoUsearch
       assert.equal(envelope.action, "slice.build");
       assert.equal(envelope.ok, true);
       assert.ok(envelope.data.cards.some((card) => card.name === "greet"));
+    } finally {
+      idx.close();
+      view.close();
+    }
+  });
+
+  it("symbol.search skips the bulk on-demand fill when onDemandEmbeddingFill is false", async () => {
+    const viewPath = setupView(tmp, "sym-search-nofill");
+    const view = View.mount({ dbPath: viewPath });
+    const enc = new StubEmbeddingEncoder({ dim: 64 });
+    // Count how many texts get encoded: the query itself may be encoded for
+    // vector search, but the view's symbols must NOT be bulk-encoded.
+    let textsEncoded = 0;
+    const countingEnc = {
+      model: enc.model,
+      model_version: enc.model_version,
+      dim: enc.dim,
+      buildSymbolText: (symbol) => enc.buildSymbolText(symbol),
+      encode: async (texts, signal) => {
+        textsEncoded += Array.isArray(texts) ? texts.length : 0;
+        return enc.encode(texts, signal);
+      },
+    };
+    const idx = EmbeddingIndex.open({
+      model: enc.model, model_version: enc.model_version, dim: enc.dim,
+      embeddingsRoot: path.join(tmp, "sym-search-nofill-emb"),
+    });
+    try {
+      const envelope = await symbolSearch({
+        view,
+        versionId: "test-v1",
+        params: { action: "symbol.search", query: "greet", semantic: true, limit: 5 },
+        embeddingIndex: idx,
+        encoder: countingEnc,
+        onDemandEmbeddingFill: false,
+      });
+      assert.equal(envelope.ok, true);
+      const items = envelope.data?.items ?? [];
+      assert.ok(items.length >= 1, "lexical results still surface without the fill");
+      assert.ok(textsEncoded <= 1, `expected at most the query encode, saw ${textsEncoded} texts encoded`);
+    } finally {
+      idx.close();
+      view.close();
+    }
+  });
+
+  it("slice.build skips the bulk on-demand fill when onDemandEmbeddingFill is false", async () => {
+    const viewPath = setupView(tmp, "slice-build-nofill");
+    const view = View.mount({ dbPath: viewPath });
+    const enc = new StubEmbeddingEncoder({ dim: 64 });
+    let textsEncoded = 0;
+    const countingEnc = {
+      model: enc.model,
+      model_version: enc.model_version,
+      dim: enc.dim,
+      buildSymbolText: (symbol) => enc.buildSymbolText(symbol),
+      encode: async (texts, signal) => {
+        textsEncoded += Array.isArray(texts) ? texts.length : 0;
+        return enc.encode(texts, signal);
+      },
+    };
+    const idx = EmbeddingIndex.open({
+      model: enc.model, model_version: enc.model_version, dim: enc.dim,
+      embeddingsRoot: path.join(tmp, "slice-build-nofill-emb"),
+    });
+    try {
+      const envelope = await sliceBuild({
+        view,
+        versionId: "test-v1",
+        params: {
+          action: "slice.build",
+          taskText: "greet",
+          semantic: true,
+          budget: { maxCards: 5, maxEstimatedTokens: 10000 },
+        },
+        embeddingIndex: idx,
+        encoder: countingEnc,
+        onDemandEmbeddingFill: false,
+      });
+      assert.equal(envelope.ok, true);
+      assert.ok(textsEncoded <= 1, `expected at most the query encode, saw ${textsEncoded} texts encoded`);
     } finally {
       idx.close();
       view.close();

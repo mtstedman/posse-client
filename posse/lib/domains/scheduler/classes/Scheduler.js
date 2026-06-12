@@ -87,6 +87,7 @@ import {
 } from "../../system/functions/preflight-probes.js";
 import { QUEUE_LOCKING_JOB_TYPES } from "../../worker/functions/helpers/job-type-sets.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
+import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import {
   DEFAULT_LEASE_SEC,
   DEFAULT_CONCURRENCY,
@@ -171,6 +172,20 @@ function atlasWarmConcurrencyKey(job) {
     || "main",
   ).trim();
   return target || null;
+}
+
+// While the ATLAS conductor is actively indexing (warm/merge/reindex), new
+// non-warm jobs are held back instead of leased: agents attaching mid-warm
+// all pound the half-built index and pile up on the conductor queue. Jobs
+// that don't touch ATLAS (the warm itself, human gates) still dispatch. The
+// failsafe bounds the hold so a wedged warm cannot stall the run forever.
+const ATLAS_INDEXING_HOLD_MAX_MS = 15 * 60 * 1000;
+const ATLAS_INDEXING_PAUSE_OFF_VALUES = new Set(["off", "false", "0", "no"]);
+const ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES = new Set(["atlas_warm", "human_input"]);
+
+function atlasIndexingPauseEnabledFromEnv() {
+  const raw = String(process.env.POSSE_SCHEDULER_PAUSE_ON_ATLAS_INDEXING ?? "").trim().toLowerCase();
+  return !(raw && ATLAS_INDEXING_PAUSE_OFF_VALUES.has(raw));
 }
 
 function terminateSchedulerChild(child, { force = false } = {}) {
@@ -419,6 +434,19 @@ export class Scheduler {
       );
     }
 
+    // Incremental-warm dispatch hold (see ATLAS_INDEXING_HOLD_MAX_MS above).
+    // Complements the cold-boot gate: this one reacts to live conductor
+    // indexing activity during the run rather than the one-shot boot build.
+    this._pauseDispatchDuringAtlasIndexing = opts.pauseDispatchDuringAtlasIndexing !== false
+      && atlasIndexingPauseEnabledFromEnv();
+    this._isAtlasIndexingInFlight = typeof opts.isAtlasIndexingInFlight === "function"
+      ? opts.isAtlasIndexingInFlight
+      : isConductorIndexingInFlight;
+    this._atlasIndexingHoldMaxMs = Math.max(30_000, Number(opts.atlasIndexingHoldMaxMs) || ATLAS_INDEXING_HOLD_MAX_MS);
+    this._atlasIndexingHoldStartedAt = 0;
+    this._atlasIndexingHoldPauseLogged = false;
+    this._atlasIndexingHoldFailsafeLogged = false;
+
     // Queue snapshot emission — pushes a {workItems, jobs, generation, at}
     // snapshot to one subscriber (typically the Display) so consumers don't
     // have to re-query the DB on every render. State-change driven via
@@ -437,6 +465,48 @@ export class Scheduler {
     // entirely when nothing in the queue has changed.
     this._nextReadyAtCacheGeneration = -1;
     this._nextReadyAtCacheMs = null;
+  }
+
+  /**
+   * True while new non-warm job dispatch should be held because the ATLAS
+   * conductor is actively indexing. Tracks the hold episode so the pause and
+   * resume are each logged once, and releases after a failsafe window so a
+   * wedged warm cannot stall dispatch forever.
+   */
+  _atlasIndexingDispatchHold() {
+    if (!this._pauseDispatchDuringAtlasIndexing) return false;
+    let inFlight = false;
+    try { inFlight = !!this._isAtlasIndexingInFlight(); } catch { inFlight = false; }
+    const now = Date.now();
+    if (!inFlight) {
+      if (this._atlasIndexingHoldStartedAt && this._atlasIndexingHoldPauseLogged) {
+        this._log(`Resuming dispatch: ATLAS indexing settled after ${Math.round((now - this._atlasIndexingHoldStartedAt) / 1000)}s`);
+        log.info("scheduler", "Resuming job dispatch: ATLAS indexing settled", {
+          heldMs: now - this._atlasIndexingHoldStartedAt,
+        });
+      }
+      this._atlasIndexingHoldStartedAt = 0;
+      this._atlasIndexingHoldPauseLogged = false;
+      this._atlasIndexingHoldFailsafeLogged = false;
+      return false;
+    }
+    if (!this._atlasIndexingHoldStartedAt) this._atlasIndexingHoldStartedAt = now;
+    if (now - this._atlasIndexingHoldStartedAt > this._atlasIndexingHoldMaxMs) {
+      if (!this._atlasIndexingHoldFailsafeLogged) {
+        log.warn("scheduler", "ATLAS indexing hold exceeded failsafe; dispatching anyway", {
+          heldMs: now - this._atlasIndexingHoldStartedAt,
+          failsafeMs: this._atlasIndexingHoldMaxMs,
+        });
+        this._atlasIndexingHoldFailsafeLogged = true;
+      }
+      return false;
+    }
+    if (!this._atlasIndexingHoldPauseLogged) {
+      this._log(`Dispatch paused: ATLAS indexing in flight`);
+      log.info("scheduler", "Pausing job dispatch: ATLAS indexing in flight", {});
+      this._atlasIndexingHoldPauseLogged = true;
+    }
+    return true;
   }
 
   /**
@@ -708,9 +778,13 @@ export class Scheduler {
     // keeps running, so holding here cannot starve the scheduler lock.
     if (!this._dispatchReadyResolved) return null;
 
+    // 2c. Hold non-warm dispatch while the ATLAS conductor is mid-(re)index.
+    const atlasIndexingHold = this._atlasIndexingDispatchHold();
+
     // 3. Find next runnable job
     const job = findRunnableJob();
     if (!job) return null;
+    if (atlasIndexingHold && !ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES.has(job.job_type)) return null;
 
     // 4. Lease it
     const lease = this.leaseManager.acquireWithLocks(job, this.ownerId, null, this.leaseSec);
@@ -1654,6 +1728,7 @@ export class Scheduler {
           if (key) activeAtlasWarmKeys.add(key);
         }
         const activeWorktreeCap = readActiveWorktreeCap();
+        const atlasIndexingHold = this._atlasIndexingDispatchHold();
 
         const skipJobIds = new Set();
         let launched = false;
@@ -1689,6 +1764,18 @@ export class Scheduler {
             candidateCount++;
             scanExcludeJobIds.add(job.id);
             if (activeWorkers.has(job.id)) {
+              skipJobIds.add(job.id);
+              continue;
+            }
+            if (atlasIndexingHold && !ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES.has(job.job_type)) {
+              rememberBlockedLock({
+                job_id: job.id,
+                work_item_id: job.work_item_id,
+                holder_type: "atlas_indexing",
+                holder_id: null,
+                path: "atlas:indexing",
+                message: `#${job.id} waits for ATLAS indexing to settle`,
+              });
               skipJobIds.add(job.id);
               continue;
             }

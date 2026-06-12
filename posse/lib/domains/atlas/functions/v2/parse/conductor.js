@@ -174,12 +174,39 @@ function _tracked(fn) {
 // transient-retry logic uses this to recognize "the view is mid-rebuild;
 // wait for the warm to land" instead of failing or falling back.
 let _indexingInflight = 0;
+
+// Success listeners for indexing ops. Read-side caches keyed by git HEAD
+// (e.g. the shared tree.overview/repo.status cache) subscribe here because a
+// drift reindex can land NEW view content under the SAME HEAD — version-keyed
+// entries alone would serve stale results across it.
+const _indexingSuccessListeners = new Set();
+
+/**
+ * Subscribe to "an indexing op (warm/merge/ingest/stage/reindex) completed
+ * successfully". Listeners must not throw; failures are swallowed so a bad
+ * subscriber cannot break the indexing pipeline. Returns an unsubscribe fn.
+ * @param {() => void} listener
+ */
+export function onConductorIndexingSuccess(listener) {
+  if (typeof listener !== "function") return () => {};
+  _indexingSuccessListeners.add(listener);
+  return () => _indexingSuccessListeners.delete(listener);
+}
+
+function _notifyIndexingSuccess() {
+  for (const listener of _indexingSuccessListeners) {
+    try { listener(); } catch { /* subscriber errors must not break indexing */ }
+  }
+}
+
 function _indexTracked(fn) {
   const tracked = _tracked(fn);
   return async (/** @type {any[]} */ ...args) => {
     _indexingInflight++;
     try {
-      return await tracked(...args);
+      const result = await tracked(...args);
+      _notifyIndexingSuccess();
+      return result;
     } finally {
       _indexingInflight--;
     }

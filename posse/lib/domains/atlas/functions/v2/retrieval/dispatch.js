@@ -209,6 +209,7 @@ function dispatchImpl(call, ctx) {
         taskType: ctx.taskType || (typeof /** @type {any} */ (call).taskType === "string" ? /** @type {any} */ (call).taskType : undefined),
         repoId: ctx.repoId,
         repoRoot: ctx.repoRoot,
+        onDemandEmbeddingFill: ctx.config?.onDemandEmbeddingFill !== false,
       }));
     case "symbol.getCard":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
@@ -251,6 +252,7 @@ function dispatchImpl(call, ctx) {
         embeddingIndex: ctx.embeddingIndex,
         encoder: ctx.encoder,
         taskType: ctx.taskType || (typeof /** @type {any} */ (call).taskType === "string" ? /** @type {any} */ (call).taskType : undefined),
+        onDemandEmbeddingFill: ctx.config?.onDemandEmbeddingFill !== false,
       }));
     case "slice.refresh":
       if (!ctx.view) return notIndexed(action, ctx.versionId);

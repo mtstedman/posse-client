@@ -16,6 +16,14 @@
 
 import { runDaemonThread } from "../../../../../classes/tools/daemon/thread-host.js";
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
+import { setOnnxDaemonKeepWarm } from "../embeddings/onnx-daemon.js";
+
+// This thread's nested ONNX encoder daemon (spawned on first daemon-backed
+// encode) stays warm for the conductor's lifetime: the conductor itself is
+// idle-evicted/terminated by its owner, which tears the nested worker down
+// with it, so a short idle window here would only thrash the ~6s model load
+// between retrieval bursts.
+setOnnxDaemonKeepWarm(true);
 
 // One handle entry per (ledger, view) target, reused across requests. The
 // ledger and view connections are opened lazily and independently: the `warm`
@@ -108,9 +116,18 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         // channel so callers (the TUI readiness bars) can render live movement —
         // this is the per-stage progress the strict request/response path dropped.
         onProgress: (event) => emitProgress(event),
+        // Embeddings run AFTER the write-queue slot is released (flush below):
+        // the encode pass is the longest warm stage and read-only w.r.t. the
+        // ledger/view writers, so queued merges/warms must not wait behind it.
+        deferEmbeddings: true,
       });
       try {
-        return await dbWrite.run(() => engine.handleWarmJob(payload.job ?? { paths: payload.paths ?? [] }));
+        const result = await dbWrite.run(() => engine.handleWarmJob(payload.job ?? { paths: payload.paths ?? [] }));
+        // Outside dbWrite.run, still inside this request: progress events keep
+        // streaming and the response carries the embeddings result fields the
+        // flush writes into `result` (captured by reference at defer time).
+        await engine.flushDeferredEmbeddings();
+        return result;
       } finally {
         // The warm may have rewritten the on-disk ANN; cached retrieval-side
         // embedding handles hold the old index in memory.

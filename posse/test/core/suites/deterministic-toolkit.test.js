@@ -1292,9 +1292,14 @@ suite("Deterministic toolkit", () => {
     assert.equal(prepared.payload.sliceHandle, "slice-1");
     assert.deepEqual(prepared.payload.usefulSymbols, [symbolId]);
     assert.deepEqual(prepared.payload.taskTags, ["role:dev"]);
-    assert.throws(() => atlasToolkitMod.prepareAtlasDeterministicPayload("agent.feedback", {
+
+    // Tree-first retrieval surfaces symbols without ever building a slice, so
+    // feedback must be emittable without a sliceHandle (omitted, not null).
+    const sliceless = atlasToolkitMod.prepareAtlasDeterministicPayload("agent.feedback", {
       usefulSymbols: [symbolId],
-    }), /requires sliceHandle/i);
+    });
+    assert.equal("sliceHandle" in sliceless.payload, false);
+    assert.deepEqual(sliceless.payload.usefulSymbols, [symbolId]);
   });
 
   it("sanitizes context entrySymbols values", async () => {

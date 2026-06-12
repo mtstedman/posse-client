@@ -618,15 +618,15 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
   }
 
   if (normalizedAction === "agent.feedback") {
+    // sliceHandle is optional: tree-first retrieval surfaces symbols without
+    // ever building a slice, and the ledger stores feedback per symbol with a
+    // nullable slice_handle — feedback must not require a slice to exist.
     const sliceHandle = sanitizeString(payload.sliceHandle, 128);
-    if (!sliceHandle) {
-      throw new Error("ATLAS agent.feedback requires sliceHandle.");
-    }
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        sliceHandle,
+        ...(sliceHandle ? { sliceHandle } : {}),
         usefulSymbols: sanitizeAtlasSymbolIdList(payload.usefulSymbols, 40, "agent.feedback usefulSymbols"),
         missingSymbols: sanitizeAtlasSymbolIdList(payload.missingSymbols, 40, "agent.feedback missingSymbols"),
         ...(payload.taskType ? { taskType: sanitizeString(payload.taskType, 64) } : {}),
