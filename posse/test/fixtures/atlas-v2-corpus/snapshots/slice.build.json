@@ -102,6 +102,88 @@
         ]
       },
       {
+        "symbolId": "c6640a2ad7bfe01ffa52202050d8d3982626aa186f46f51a62b29bf1b2cee646:0",
+        "name": "run",
+        "qualifiedName": null,
+        "kind": "function",
+        "lang": "ts",
+        "location": {
+          "repo_rel_path": "src/runner.ts",
+          "startLine": 3,
+          "endLine": 6,
+          "startByte": 50,
+          "endByte": 142
+        },
+        "signature": "function run(name: string): string",
+        "summary": "public TypeScript function run in src/runner.ts.",
+        "etag": "<stripped>",
+        "detailLevel": "compact",
+        "visibility": "public",
+        "deps": {
+          "imports": [
+            "Greeter"
+          ],
+          "calls": [
+            "Greeter",
+            "g.hello"
+          ]
+        },
+        "metrics": {
+          "fanIn": 0,
+          "fanOut": 3,
+          "callFanIn": 0,
+          "callFanOut": 2,
+          "importCount": 1,
+          "unresolvedFanOut": 0
+        },
+        "callers": [],
+        "callees": [
+          {
+            "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:5",
+            "name": "Greeter",
+            "kind": "class",
+            "lang": "ts",
+            "location": {
+              "repo_rel_path": "src/greeter.ts",
+              "startLine": 12,
+              "endLine": 16,
+              "startByte": 173,
+              "endByte": 293
+            },
+            "confidence": 0.85
+          },
+          {
+            "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:5",
+            "name": "Greeter",
+            "kind": "class",
+            "lang": "ts",
+            "location": {
+              "repo_rel_path": "src/greeter.ts",
+              "startLine": 12,
+              "endLine": 16,
+              "startByte": 173,
+              "endByte": 293
+            },
+            "confidence": 0.88
+          },
+          {
+            "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:1",
+            "name": "hello",
+            "kind": "method",
+            "lang": "ts",
+            "location": {
+              "repo_rel_path": "src/greeter.ts",
+              "startLine": 2,
+              "endLine": 2,
+              "startByte": 31,
+              "endByte": 46
+            },
+            "qualifiedName": "Greeting.hello",
+            "confidence": 0.56
+          }
+        ]
+      },
+      {
         "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:2",
         "name": "Base",
         "qualifiedName": null,
@@ -188,88 +270,6 @@
           }
         ],
         "callees": []
-      },
-      {
-        "symbolId": "c6640a2ad7bfe01ffa52202050d8d3982626aa186f46f51a62b29bf1b2cee646:0",
-        "name": "run",
-        "qualifiedName": null,
-        "kind": "function",
-        "lang": "ts",
-        "location": {
-          "repo_rel_path": "src/runner.ts",
-          "startLine": 3,
-          "endLine": 6,
-          "startByte": 50,
-          "endByte": 142
-        },
-        "signature": "function run(name: string): string",
-        "summary": "public TypeScript function run in src/runner.ts.",
-        "etag": "<stripped>",
-        "detailLevel": "compact",
-        "visibility": "public",
-        "deps": {
-          "imports": [
-            "Greeter"
-          ],
-          "calls": [
-            "Greeter",
-            "g.hello"
-          ]
-        },
-        "metrics": {
-          "fanIn": 0,
-          "fanOut": 3,
-          "callFanIn": 0,
-          "callFanOut": 2,
-          "importCount": 1,
-          "unresolvedFanOut": 0
-        },
-        "callers": [],
-        "callees": [
-          {
-            "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:5",
-            "name": "Greeter",
-            "kind": "class",
-            "lang": "ts",
-            "location": {
-              "repo_rel_path": "src/greeter.ts",
-              "startLine": 12,
-              "endLine": 16,
-              "startByte": 173,
-              "endByte": 293
-            },
-            "confidence": 0.85
-          },
-          {
-            "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:5",
-            "name": "Greeter",
-            "kind": "class",
-            "lang": "ts",
-            "location": {
-              "repo_rel_path": "src/greeter.ts",
-              "startLine": 12,
-              "endLine": 16,
-              "startByte": 173,
-              "endByte": 293
-            },
-            "confidence": 0.88
-          },
-          {
-            "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:1",
-            "name": "hello",
-            "kind": "method",
-            "lang": "ts",
-            "location": {
-              "repo_rel_path": "src/greeter.ts",
-              "startLine": 2,
-              "endLine": 2,
-              "startByte": 31,
-              "endByte": 46
-            },
-            "qualifiedName": "Greeting.hello",
-            "confidence": 0.56
-          }
-        ]
       },
       {
         "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:1",

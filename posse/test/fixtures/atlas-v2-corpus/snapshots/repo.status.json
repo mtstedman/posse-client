@@ -22,18 +22,18 @@
     "ledgerSeq": 6,
     "diagnostics": {
       "warnings": [
-        "High true-unresolved edge rate: 30%."
+        "High true-unresolved edge rate: 33%."
       ]
     },
     "health": {
       "schemaVersion": 2,
-      "healthScore": 79,
+      "healthScore": 78,
       "components": {
         "coverage": 100,
         "indexedCoverage": 100,
         "parseHealth": 100,
-        "edgeResolution": 45,
-        "edgeQuality": 45,
+        "edgeResolution": 39,
+        "edgeQuality": 39,
         "callResolution": 30,
         "freshness": 100,
         "embeddingFreshness": 75,
@@ -68,16 +68,16 @@
       }
     },
     "edges": {
-      "total": 20,
-      "resolved": 9,
+      "total": 18,
+      "resolved": 7,
       "unresolved": 11,
-      "unresolvedRate": 0.55,
-      "internal": 9,
+      "unresolvedRate": 0.6111111111111112,
+      "internal": 7,
       "external": 0,
       "byKind": {
         "calls": 10,
-        "extends": 2,
-        "implements": 3,
+        "extends": 1,
+        "implements": 2,
         "imports": 5
       },
       "callTotal": 10,
@@ -90,7 +90,7 @@
       "selfReceiver": 0,
       "trueUnresolved": 6,
       "taxonomy": {
-        "internalResolved": 9,
+        "internalResolved": 7,
         "externalResolved": 0,
         "runtimeExternal": 5,
         "importScopedExternal": 0,
@@ -394,7 +394,7 @@
             "enabled": true,
             "active": true,
             "status": "available",
-            "edgeCount": 20
+            "edgeCount": 18
           },
           {
             "id": "scip",
@@ -419,11 +419,11 @@
           }
         ],
         "edgeSources": {
-          "treesitter": 20
+          "treesitter": 18
         },
         "exactEdgeCount": 0,
         "externalEdges": 0,
-        "resolvedEdges": 9,
+        "resolvedEdges": 7,
         "unresolvedEdges": 11,
         "callResolutionRate": 0.3,
         "symbolResolution": {
@@ -446,8 +446,8 @@
         "dependencies": [
           {
             "name": "@huggingface/transformers",
-            "available": true,
-            "path": "C:\\development\\claude\\tools\\posse\\node_modules\\@huggingface\\transformers\\dist\\transformers.node.cjs"
+            "available": false,
+            "path": null
           },
           {
             "name": "onnxruntime-node",
@@ -575,10 +575,10 @@
           "lang": "ts",
           "repo_rel_path": "src/greeter.ts",
           "fanIn": 2,
-          "fanOut": 4,
+          "fanOut": 2,
           "callFanIn": 1,
           "callFanOut": 0,
-          "score": 11
+          "score": 9
         },
         {
           "symbolId": "c6640a2ad7bfe01ffa52202050d8d3982626aa186f46f51a62b29bf1b2cee646:0",
@@ -617,18 +617,29 @@
           "score": 5
         },
         {
-          "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:0",
-          "name": "Greeting",
-          "kind": "interface",
-          "lang": "ts",
-          "repo_rel_path": "src/greeter.ts",
-          "fanIn": 2,
-          "fanOut": 0,
+          "symbolId": "1b804c617022f3dd8c66d91cbab2bfdcf2724064740eb04ef41d4546efa1b7cf:2",
+          "name": "main",
+          "kind": "function",
+          "lang": "go",
+          "repo_rel_path": "src/main.go",
+          "fanIn": 0,
+          "fanOut": 1,
           "callFanIn": 0,
-          "callFanOut": 0,
-          "score": 4
+          "callFanOut": 1,
+          "score": 2.5
         }
       ]
+    },
+    "treeCompression": {
+      "available": true,
+      "profile": "quick_dirty_tree_ml_features_v0",
+      "builtAt": "<stripped>",
+      "seedCount": 2,
+      "currentLabels": 2,
+      "staleLabels": 0,
+      "maxDriftCount": 0,
+      "oldestStaleSince": null,
+      "lastLabeledAt": "<stripped>"
     },
     "memoryStats": null,
     "features": {
@@ -652,8 +663,8 @@
       },
       "edges": {
         "treesitter": {
-          "total": 20,
-          "resolved": 9,
+          "total": 18,
+          "resolved": 7,
           "external": 0,
           "unresolved": 11
         }
@@ -668,7 +679,7 @@
   },
   "meta": {
     "warnings": [
-      "High true-unresolved edge rate: 30%."
+      "High true-unresolved edge rate: 33%."
     ]
   }
 }

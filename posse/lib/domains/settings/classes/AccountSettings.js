@@ -228,6 +228,36 @@ export class AccountSettings {
     notifySettingsChanged();
   }
 
+  /**
+   * Atomically write `key` only when it has no value yet (no row, or the
+   * empty default row that _seedDefaults materializes); returns true when
+   * this process won the claim. Exists for one-time migrations that must
+   * elect exactly one winner across concurrently booting processes — a
+   * read-then-set sequence lets every racer pass the read.
+   */
+  claimAccountValueIfAbsent(key, value) {
+    const normalizedKey = String(key);
+    if (REPO_SCOPED_SETTING_KEYS.has(normalizedKey)) {
+      throw new Error(`claimAccountValueIfAbsent: "${normalizedKey}" is repo-scoped`);
+    }
+    const validated = validateCatalogSettingValue(normalizedKey, value);
+    if (!validated.ok) throw new Error(validated.error);
+    const db = this._openForReadOrWrite();
+    const info = db.prepare(
+      `INSERT INTO account_settings (setting_key, setting_value, updated_at)
+       VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+       ON CONFLICT(setting_key) DO UPDATE
+         SET setting_value = excluded.setting_value,
+             updated_at = excluded.updated_at
+         WHERE account_settings.setting_value IS NULL
+            OR account_settings.setting_value = ''`,
+    ).run(normalizedKey, String(validated.value ?? ""));
+    this._cache.delete(normalizedKey);
+    this._dataVersion = this._readDataVersion(db);
+    notifySettingsChanged();
+    return info.changes > 0;
+  }
+
   getRepo(key, repoPath) {
     const normalizedKey = String(key);
     const normalizedRepoPath = normalizeRepoPath(repoPath);

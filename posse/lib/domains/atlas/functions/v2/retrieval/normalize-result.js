@@ -40,6 +40,12 @@ export const VOLATILE_FIELDS = Object.freeze(
     "timestamp",
     "lastTs",
     "lastRunAt",
+    // ML seed-label staleness stamps (labeled_at/stale_since tracking).
+    "lastLabeledAt",
+    "labeledAt",
+    "labeled_at",
+    "staleSince",
+    "stale_since",
     "memoryId",
     "memory_id",
     "snapshotId",

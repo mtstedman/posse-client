@@ -1,0 +1,9 @@
+{
+  "ok": false,
+  "action": "memory.flag",
+  "versionId": "corpus@v1",
+  "error": {
+    "code": "memory_not_found",
+    "message": "Memory mem_snapshot_missing was not found"
+  }
+}

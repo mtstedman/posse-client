@@ -339,6 +339,12 @@ function sampleCallsFor() {
       action: "memory.remove",
       memoryId: "mem_snapshot_missing",
     },
+    "memory.flag": {
+      action: "memory.flag",
+      memoryId: "mem_snapshot_missing",
+      reason: "manual",
+      detail: "snapshot fixture",
+    },
     "policy.get": { action: "policy.get" },
     "policy.set": {
       action: "policy.set",

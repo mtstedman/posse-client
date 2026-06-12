@@ -19,6 +19,10 @@ export function setAccountRepoSetting(key, value, repoPath) {
   getDefaultAccountSettings().setRepo(key, value, repoPath);
 }
 
+export function claimAccountSettingIfAbsent(key, value) {
+  return getDefaultAccountSettings().claimAccountValueIfAbsent(key, value);
+}
+
 export function setAccountSettings(updates = {}) {
   getDefaultAccountSettings().setMany(updates);
 }

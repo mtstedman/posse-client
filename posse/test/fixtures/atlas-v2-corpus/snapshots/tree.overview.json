@@ -27,12 +27,12 @@
         "symbolsSelf": 23,
         "descendantSymbolCount": 23,
         "descendantFileCount": 6,
-        "fanInTotal": 9,
-        "fanOutTotal": 9,
+        "fanInTotal": 7,
+        "fanOutTotal": 7,
         "callFanInTotal": 3,
         "callFanOutTotal": 3,
-        "centralitySum": 40.5,
-        "centralityMax": 11,
+        "centralitySum": 34.5,
+        "centralityMax": 9,
         "symbolKinds": {
           "function": 5,
           "class": 3,
@@ -74,12 +74,12 @@
           "symbolsSelf": 23,
           "descendantSymbolCount": 23,
           "descendantFileCount": 6,
-          "fanInTotal": 9,
-          "fanOutTotal": 9,
+          "fanInTotal": 7,
+          "fanOutTotal": 7,
           "callFanInTotal": 3,
           "callFanOutTotal": 3,
-          "centralitySum": 40.5,
-          "centralityMax": 11,
+          "centralitySum": 34.5,
+          "centralityMax": 9,
           "symbolKinds": {
             "function": 5,
             "class": 3,
@@ -124,12 +124,12 @@
           "symbolsSelf": 23,
           "descendantSymbolCount": 23,
           "descendantFileCount": 6,
-          "fanInTotal": 9,
-          "fanOutTotal": 9,
+          "fanInTotal": 7,
+          "fanOutTotal": 7,
           "callFanInTotal": 3,
           "callFanOutTotal": 3,
-          "centralitySum": 40.5,
-          "centralityMax": 11,
+          "centralitySum": 34.5,
+          "centralityMax": 9,
           "symbolKinds": {
             "function": 5,
             "class": 3,
@@ -180,7 +180,8 @@
             "function": 2
           },
           "refs": {}
-        }
+        },
+        "areaLabel": "cmd area for dir farewell greet script"
       },
       {
         "nodeId": "dir:src",
@@ -201,12 +202,12 @@
           "symbolsSelf": 21,
           "descendantSymbolCount": 21,
           "descendantFileCount": 5,
-          "fanInTotal": 9,
-          "fanOutTotal": 9,
+          "fanInTotal": 7,
+          "fanOutTotal": 7,
           "callFanInTotal": 3,
           "callFanOutTotal": 3,
-          "centralitySum": 40.5,
-          "centralityMax": 11,
+          "centralitySum": 34.5,
+          "centralityMax": 9,
           "symbolKinds": {
             "class": 3,
             "method": 8,
@@ -226,7 +227,8 @@
             "process:process:c8c8d7f89f16768d": 1,
             "process:process:6c9f4df7fdb474ee": 1
           }
-        }
+        },
+        "areaLabel": "src area for hello greeter dir main"
       },
       {
         "nodeId": "file:cmd/script.sh",
@@ -278,12 +280,12 @@
           "symbolsSelf": 7,
           "descendantSymbolCount": 7,
           "descendantFileCount": 1,
-          "fanInTotal": 7,
-          "fanOutTotal": 4,
+          "fanInTotal": 5,
+          "fanOutTotal": 2,
           "callFanInTotal": 2,
           "callFanOutTotal": 0,
-          "centralitySum": 24,
-          "centralityMax": 11,
+          "centralitySum": 18,
+          "centralityMax": 9,
           "symbolKinds": {
             "class": 2,
             "method": 3,
@@ -459,6 +461,18 @@
         "symbols": 23
       }
     },
+    "areaMap": [
+      {
+        "path": "cmd",
+        "label": "cmd area for dir farewell greet script",
+        "confidence": "high"
+      },
+      {
+        "path": "src",
+        "label": "src area for hello greeter dir main",
+        "confidence": "high"
+      }
+    ],
     "warnings": []
   }
 }

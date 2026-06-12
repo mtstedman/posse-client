@@ -19,6 +19,9 @@
         "createdAt": "<stripped>",
         "updatedAt": "<stripped>",
         "stale": false,
+        "staleReason": null,
+        "contradictedAt": null,
+        "contradictionCount": 0,
         "linkedSymbols": [
           "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:5"
         ],

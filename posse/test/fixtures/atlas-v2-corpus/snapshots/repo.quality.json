@@ -24,16 +24,16 @@
       ]
     },
     "edges": {
-      "total": 20,
-      "resolved": 9,
+      "total": 18,
+      "resolved": 7,
       "unresolved": 11,
-      "unresolvedRate": 0.55,
-      "internal": 9,
+      "unresolvedRate": 0.6111111111111112,
+      "internal": 7,
       "external": 0,
       "byKind": {
         "calls": 10,
-        "extends": 2,
-        "implements": 3,
+        "extends": 1,
+        "implements": 2,
         "imports": 5
       },
       "callTotal": 10,
@@ -46,7 +46,7 @@
       "selfReceiver": 0,
       "trueUnresolved": 6,
       "taxonomy": {
-        "internalResolved": 9,
+        "internalResolved": 7,
         "externalResolved": 0,
         "runtimeExternal": 5,
         "importScopedExternal": 0,
@@ -72,8 +72,8 @@
       },
       "edges": {
         "treesitter": {
-          "total": 20,
-          "resolved": 9,
+          "total": 18,
+          "resolved": 7,
           "external": 0,
           "unresolved": 11
         }
@@ -106,13 +106,13 @@
     },
     "diagnostics": {
       "warnings": [
-        "High unresolved edge rate: 55%."
+        "High unresolved edge rate: 61%."
       ]
     }
   },
   "meta": {
     "warnings": [
-      "High unresolved edge rate: 55%."
+      "High unresolved edge rate: 61%."
     ]
   }
 }

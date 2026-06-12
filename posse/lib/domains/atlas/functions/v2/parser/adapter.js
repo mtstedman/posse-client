@@ -35,6 +35,10 @@ import { extractBodyIdentifiers } from "./body-identifiers.js";
 /** @typedef {import("../contracts/schemas.js").EdgeRow} EdgeRow */
 
 import { parseBufferNative } from "../native/parser.js";
+import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
+
+/** @type {boolean | null} Lazily probed nativeBinaries.shouldUse("atlas"). */
+let nativeParserUsable = null;
 
 export {
   diffParseBufferNativeParity,
@@ -223,8 +227,15 @@ export class ParserAdapter {
     const descriptor = resolveLanguage(extOrLang);
     if (!descriptor || !descriptor.supported) return false;
     // Native-owned languages need no JS grammar; the binary carries its
-    // grammars at compile time.
-    if (descriptor.native) return true;
+    // grammars at compile time. But without a usable binary there is no
+    // parser at all — claiming support would queue every file just to fail
+    // it individually as a parse_error. Probed once: shouldUse stats the
+    // staged binary on every call and supports() runs per file in the
+    // ParseEngine filters; staging doesn't change within a process.
+    if (descriptor.native) {
+      if (nativeParserUsable == null) nativeParserUsable = nativeBinaries.shouldUse("atlas");
+      return nativeParserUsable;
+    }
     return !!parserFor(descriptor.tag);
   }
 

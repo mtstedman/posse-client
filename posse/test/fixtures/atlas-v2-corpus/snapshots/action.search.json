@@ -5,7 +5,7 @@
   "data": {
     "query": "memory store",
     "namespace": null,
-    "total": 7,
+    "total": 8,
     "offset": 0,
     "limit": 5,
     "actions": [
@@ -99,6 +99,57 @@
           "memory.query"
         ],
         "score": 26
+      },
+      {
+        "action": "memory.flag",
+        "toolName": "atlas_memory_flag",
+        "namespace": "memory",
+        "description": "Memory. Flag a native ATLAS v2 memory stale with an evidence reason (contradicted | anchors_missing | manual) instead of deleting it. Flagged memories stop auto-surfacing but stay queryable and correctable.",
+        "summary": "Flag a native ATLAS v2 memory stale with an evidence reason (contradicted/anchors_missing/manual).",
+        "required": [
+          "memoryId",
+          "reason"
+        ],
+        "parameters": [
+          {
+            "name": "repoId",
+            "type": "string",
+            "description": "Optional repository identifier; defaults to the current ATLAS repo."
+          },
+          {
+            "name": "memoryId",
+            "type": "string",
+            "description": "Memory ID to flag."
+          },
+          {
+            "name": "reason",
+            "type": "string",
+            "description": "Why the memory is stale: contradicted = the just-assessed work proved it wrong; anchors_missing = the code it referenced is gone; manual = human judgment.",
+            "enumValues": [
+              "contradicted",
+              "anchors_missing",
+              "manual"
+            ]
+          },
+          {
+            "name": "detail",
+            "type": "string",
+            "description": "Short evidence note (one sentence)."
+          }
+        ],
+        "tags": [
+          "memory"
+        ],
+        "examples": [
+          {
+            "action": "memory.flag"
+          }
+        ],
+        "prerequisites": [
+          "Memory policy must be enabled for the repo."
+        ],
+        "recommendedNextActions": [],
+        "score": 18
       },
       {
         "action": "memory.remove",
@@ -239,7 +290,8 @@
               "buffer.checkpoint",
               "memory.store",
               "memory.query",
-              "memory.remove"
+              "memory.remove",
+              "memory.flag"
             ]
           }
         ],
@@ -254,47 +306,6 @@
         "prerequisites": [],
         "recommendedNextActions": [],
         "score": 4
-      },
-      {
-        "action": "action.search",
-        "toolName": "atlas_action_search",
-        "namespace": "action",
-        "description": "Discovery. Search the native ATLAS v2 action catalog for the right tool/action to call.",
-        "summary": "Search the native ATLAS v2 action catalog for the right tool/action.",
-        "required": [],
-        "parameters": [
-          {
-            "name": "query",
-            "type": "string",
-            "description": "Search terms such as symbol, memory, policy, risk, or raw window."
-          },
-          {
-            "name": "namespace",
-            "type": "string",
-            "description": "Optional namespace filter such as repo, symbol, code, memory, policy, or agent."
-          },
-          {
-            "name": "limit",
-            "type": "integer",
-            "description": "Maximum actions to return."
-          },
-          {
-            "name": "offset",
-            "type": "integer",
-            "description": ""
-          }
-        ],
-        "tags": [
-          "action"
-        ],
-        "examples": [
-          {
-            "action": "action.search"
-          }
-        ],
-        "prerequisites": [],
-        "recommendedNextActions": [],
-        "score": 2
       }
     ]
   }

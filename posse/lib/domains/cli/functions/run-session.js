@@ -2103,6 +2103,9 @@ export class RunSession {
       // the boot-end sweep must not overwrite a failed tree row with "done".
       let atlasTreeStarted = false;
       let atlasTreeTerminal = false;
+      // The ML reseed reopens the tree bar; a failed deterministic tree build
+      // must stay visibly failed instead of being repainted "building"/"done".
+      let atlasTreeFailed = false;
       const setAtlasBootIndexPercent = (value, { allowReset = false } = {}) => {
         const parsed = Number(value);
         if (!Number.isFinite(parsed)) return atlasBootIndexPercent;
@@ -2350,12 +2353,14 @@ export class RunSession {
           // the operator can see it and background it.
           if (String(event.stage || "") === "tree-compression") {
             atlasTreeStarted = true;
-            atlasTreeTerminal = false;
-            bootPanel.updateTree({
-              state: "building",
-              percent: null,
-              detail: firstLine(event.text || "") || "ML seed labeling",
-            });
+            if (!atlasTreeFailed) {
+              atlasTreeTerminal = false;
+              bootPanel.updateTree({
+                state: "building",
+                percent: null,
+                detail: firstLine(event.text || "") || "ML seed labeling",
+              });
+            }
             if (!atlasBootBackgroundRequested) {
               updateBootFooter("ML tree labeling — hit Enter to continue in the background");
               setBootEnterAction(() => requestAtlasBootBackground("tree-compression-enter"));
@@ -2372,9 +2377,11 @@ export class RunSession {
             const treeStatus = String(event.status || "");
             if (treeStatus === "failed") {
               atlasTreeTerminal = true;
+              atlasTreeFailed = true;
               bootPanel.updateTree({ state: "failed", detail: treeDetail });
             } else if (treeStatus === "ok") {
               atlasTreeTerminal = true;
+              atlasTreeFailed = false;
               bootPanel.updateTree({ state: "done", percent: 100, detail: treeDetail });
             } else {
               bootPanel.updateTree({

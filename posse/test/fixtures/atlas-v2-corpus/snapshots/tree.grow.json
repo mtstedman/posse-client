@@ -1,32 +1,30 @@
 {
   "ok": true,
-  "action": "tree.scope",
+  "action": "tree.grow",
   "versionId": "corpus@v1",
   "data": {
     "available": true,
-    "queryTerms": [
-      "greeter"
-    ],
+    "queryTerms": [],
     "seeds": {
-      "taskText": true,
-      "paths": [],
+      "taskText": false,
+      "paths": [
+        "src"
+      ],
       "symbolIds": [],
       "nodeIds": [],
       "refs": [],
       "exactFileSeeds": 0,
       "matchedFiles": 0,
       "matchedSymbols": 0,
-      "matchedDirs": 0,
+      "matchedDirs": 1,
       "broadRefs": 0
     },
     "candidateFiles": [
       {
         "path": "src/greeter.ts",
         "nodeId": "file:src/greeter.ts",
-        "score": 40.596,
+        "score": 40.249,
         "reasons": [
-          "task:file",
-          "compression:entry:src",
           "branch:src"
         ],
         "exactSeed": false,
@@ -36,11 +34,23 @@
         "config": false
       },
       {
+        "path": "src/lib.rs",
+        "nodeId": "file:src/lib.rs",
+        "score": 40.249,
+        "reasons": [
+          "branch:src"
+        ],
+        "exactSeed": false,
+        "symbolCount": 5,
+        "generated": false,
+        "test": false,
+        "config": false
+      },
+      {
         "path": "src/main.go",
         "nodeId": "file:src/main.go",
-        "score": 19.238,
+        "score": 40.249,
         "reasons": [
-          "compression:entry:src",
           "branch:src"
         ],
         "exactSeed": false,
@@ -52,9 +62,8 @@
       {
         "path": "src/runner.ts",
         "nodeId": "file:src/runner.ts",
-        "score": 19.238,
+        "score": 40.249,
         "reasons": [
-          "compression:entry:src",
           "branch:src"
         ],
         "exactSeed": false,
@@ -66,21 +75,7 @@
       {
         "path": "src/util.py",
         "nodeId": "file:src/util.py",
-        "score": 19.238,
-        "reasons": [
-          "compression:entry:src",
-          "branch:src"
-        ],
-        "exactSeed": false,
-        "symbolCount": 5,
-        "generated": false,
-        "test": false,
-        "config": false
-      },
-      {
-        "path": "src/lib.rs",
-        "nodeId": "file:src/lib.rs",
-        "score": 4.418,
+        "score": 40.249,
         "reasons": [
           "branch:src"
         ],
@@ -95,11 +90,9 @@
       {
         "path": "src",
         "nodeId": "dir:src",
-        "score": 40.596,
+        "score": 90,
         "reasons": [
-          "compression:src",
-          "task:file",
-          "compression:entry:src",
+          "seed:dir:src",
           "branch:src"
         ],
         "fileCount": 5,
@@ -121,14 +114,14 @@
       "sourceFileCount": 5,
       "symbolCount": 21,
       "compression": 0.833,
-      "queryTermCoverage": 1,
-      "confidence": 0.77,
+      "queryTermCoverage": 0,
+      "confidence": 0.47,
       "scopeBand": "small_cluster",
       "scopeRisk": "low",
       "testsLikelyNeeded": false,
       "generatedOrConfigTouched": false,
       "exactSeedCount": 0,
-      "queryTermCount": 1,
+      "queryTermCount": 0,
       "broadRefCount": 0,
       "broadDirCount": 0
     },
@@ -136,32 +129,7 @@
       "available": true,
       "reason": null,
       "profile": "quick_dirty_tree_ml_features_v0",
-      "matchedSeeds": [
-        {
-          "path": "src",
-          "label": "src area for hello greeter dir main",
-          "confidence": "high",
-          "hits": 1,
-          "entrypoints": [
-            "src/main.go",
-            "src/runner.ts",
-            "src/greeter.ts",
-            "src/util.py"
-          ]
-        }
-      ],
-      "areaMap": [
-        {
-          "path": "cmd",
-          "label": "cmd area for dir farewell greet script",
-          "confidence": "high"
-        },
-        {
-          "path": "src",
-          "label": "src area for hello greeter dir main",
-          "confidence": "high"
-        }
-      ]
+      "matchedSeeds": []
     },
     "sidecar": {
       "used": true,

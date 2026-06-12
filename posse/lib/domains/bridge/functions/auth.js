@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import {
+  claimAccountSettingIfAbsent,
   getAccountRepoSetting,
   getAccountSetting,
   setAccountRepoSetting,
@@ -91,6 +92,21 @@ function claimLegacyGlobalIdentityIfFirst(projectDir) {
   if (readSetting(SETTING_KEYS.BRIDGE_IDENTITY_MIGRATED_TO)) return;
   const legacyInstanceId = readLegacyGlobalSetting(SETTING_KEYS.BRIDGE_INSTANCE_ID);
   if (!legacyInstanceId) return;
+  // The marker INSERT is the atomic gate: two repos booting concurrently must
+  // elect exactly one claimant, or both would adopt the same relay identity.
+  // Losers fall through and mint fresh identities. (Claiming the marker
+  // before copying the rows means a crash mid-claim costs only a re-pair for
+  // this repo — never a duplicated identity.)
+  let wonClaim = false;
+  try {
+    wonClaim = claimAccountSettingIfAbsent(
+      SETTING_KEYS.BRIDGE_IDENTITY_MIGRATED_TO,
+      String(projectDir || process.cwd()),
+    );
+  } catch {
+    return;
+  }
+  if (!wonClaim) return;
   writeRepoSetting(SETTING_KEYS.BRIDGE_INSTANCE_ID, legacyInstanceId, projectDir);
   const legacyRelayToken = readLegacyGlobalSetting(SETTING_KEYS.BRIDGE_RELAY_TOKEN);
   if (legacyRelayToken) {
@@ -104,10 +120,6 @@ function claimLegacyGlobalIdentityIfFirst(projectDir) {
   if (legacyPort) {
     writeRepoSetting(SETTING_KEYS.BRIDGE_PORT, legacyPort, projectDir);
   }
-  writeSetting(
-    SETTING_KEYS.BRIDGE_IDENTITY_MIGRATED_TO,
-    String(projectDir || process.cwd()),
-  );
 }
 
 export function ensureBridgeInstanceId(projectDir = process.cwd()) {

@@ -334,7 +334,15 @@ export async function validateDeclaredOutputContract({
   const display = (paths) => paths.map((p) => displayByNormalized.get(p) || p);
 
   const declaredCreates = uniqueNormalizedPaths(payload.files_to_create, cwd);
-  const declaredModifies = uniqueNormalizedPaths(payload.files_to_modify, cwd);
+  // must_modify is a hard requirement on its own; the planner is not required
+  // to duplicate those paths into files_to_modify for them to be enforced.
+  const declaredModifies = uniqueNormalizedPaths(
+    [
+      ...(Array.isArray(payload.files_to_modify) ? payload.files_to_modify : []),
+      ...(Array.isArray(payload.must_modify) ? payload.must_modify : []),
+    ],
+    cwd,
+  );
   if (declaredCreates.length === 0 && declaredModifies.length === 0) return { ok: true };
 
   const mustModify = new Set(uniqueNormalizedPaths(payload.must_modify, cwd));
@@ -1912,7 +1920,12 @@ export class Worker {
             for (let commitInfraRetries = 0; ; commitInfraRetries += 1) {
               try {
                 commitResult = await gitCommitAllAsyncFromModule(commitMsg, wtPath, {
-                  modifyFiles: jobPayload.files_to_modify || [],
+                  // must_modify paths are writable scope even when the planner
+                  // didn't duplicate them into files_to_modify.
+                  modifyFiles: [...new Set([
+                    ...(Array.isArray(jobPayload.files_to_modify) ? jobPayload.files_to_modify : []),
+                    ...(Array.isArray(jobPayload.must_modify) ? jobPayload.must_modify : []),
+                  ])],
                   createFiles: jobPayload.files_to_create || [],
                   deleteFiles: jobPayload.files_to_delete || [],
                   createRoots: jobPayload.create_roots || [],
@@ -2335,6 +2348,12 @@ export class Worker {
                     return;
                   }
                 }
+                storePostAgentFailureCheckpoint({
+                  job,
+                  attemptId: attempt.id,
+                  output,
+                  failureNote: verifyMsg,
+                });
                 completeAttempt(attempt.id, {
                   status: "failed",
                   duration_ms: Date.now() - startTime,

@@ -20,6 +20,20 @@
         }
       },
       {
+        "symbolId": "c6640a2ad7bfe01ffa52202050d8d3982626aa186f46f51a62b29bf1b2cee646:0",
+        "name": "run",
+        "qualifiedName": null,
+        "kind": "function",
+        "lang": "ts",
+        "location": {
+          "repo_rel_path": "src/runner.ts",
+          "startLine": 3,
+          "endLine": 6,
+          "startByte": 50,
+          "endByte": 142
+        }
+      },
+      {
         "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:2",
         "name": "Base",
         "qualifiedName": null,
@@ -45,20 +59,6 @@
           "endLine": 3,
           "startByte": 7,
           "endByte": 50
-        }
-      },
-      {
-        "symbolId": "c6640a2ad7bfe01ffa52202050d8d3982626aa186f46f51a62b29bf1b2cee646:0",
-        "name": "run",
-        "qualifiedName": null,
-        "kind": "function",
-        "lang": "ts",
-        "location": {
-          "repo_rel_path": "src/runner.ts",
-          "startLine": 3,
-          "endLine": 6,
-          "startByte": 50,
-          "endByte": 142
         }
       },
       {
@@ -92,6 +92,25 @@
         },
         "signature": "class Greeter extends Base implements Greeting",
         "summary": "public TypeScript class Greeter in src/greeter.ts.",
+        "visibility": "public",
+        "etag": "<stripped>",
+        "detailLevel": "signature"
+      },
+      {
+        "symbolId": "c6640a2ad7bfe01ffa52202050d8d3982626aa186f46f51a62b29bf1b2cee646:0",
+        "name": "run",
+        "qualifiedName": null,
+        "kind": "function",
+        "lang": "ts",
+        "location": {
+          "repo_rel_path": "src/runner.ts",
+          "startLine": 3,
+          "endLine": 6,
+          "startByte": 50,
+          "endByte": 142
+        },
+        "signature": "function run(name: string): string",
+        "summary": "public TypeScript function run in src/runner.ts.",
         "visibility": "public",
         "etag": "<stripped>",
         "detailLevel": "signature"
@@ -135,25 +154,6 @@
         "detailLevel": "signature"
       },
       {
-        "symbolId": "c6640a2ad7bfe01ffa52202050d8d3982626aa186f46f51a62b29bf1b2cee646:0",
-        "name": "run",
-        "qualifiedName": null,
-        "kind": "function",
-        "lang": "ts",
-        "location": {
-          "repo_rel_path": "src/runner.ts",
-          "startLine": 3,
-          "endLine": 6,
-          "startByte": 50,
-          "endByte": 142
-        },
-        "signature": "function run(name: string): string",
-        "summary": "public TypeScript function run in src/runner.ts.",
-        "visibility": "public",
-        "etag": "<stripped>",
-        "detailLevel": "signature"
-      },
-      {
         "symbolId": "c498d9d1ec132fbc38ed57ebaf5809ffae2963f37a02bce8923efa6f95c9a3bb:1",
         "name": "hello",
         "qualifiedName": "Greeting.hello",
@@ -172,7 +172,7 @@
         "detailLevel": "signature"
       }
     ],
-    "generatedContext": "# Task: explain Greeter\nType: explain\n\n## Relevant symbols\n- `Greeter` (class, src/greeter.ts)\n  - class Greeter extends Base implements Greeting\n- `Base` (class, src/greeter.ts)\n  - class Base\n- `Greeting` (interface, src/greeter.ts)\n  - interface Greeting\n- `run` (function, src/runner.ts)\n  - function run(name: string): string\n- `Greeting.hello` (method, src/greeter.ts)\n  - hello(): string",
+    "generatedContext": "# Task: explain Greeter\nType: explain\n\n## Relevant symbols\n- `Greeter` (class, src/greeter.ts)\n  - class Greeter extends Base implements Greeting\n- `run` (function, src/runner.ts)\n  - function run(name: string): string\n- `Base` (class, src/greeter.ts)\n  - class Base\n- `Greeting` (interface, src/greeter.ts)\n  - interface Greeting\n- `Greeting.hello` (method, src/greeter.ts)\n  - hello(): string",
     "estimatedTokens": 1318,
     "actionsConsumed": 1
   }

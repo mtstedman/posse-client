@@ -54,6 +54,25 @@ describe("declared output contract", () => {
     assert.deepEqual(result.unmodifiedDeclaredScope, []);
   });
 
+  it("enforces must_modify even when not duplicated into files_to_modify", async () => {
+    const untouched = await validateDeclaredOutputContract({
+      job: devJob,
+      payload: { must_modify: ["Tests/Media/UploadTest.php"] },
+      filesCommitted: [],
+      cwd: tmpDir,
+    });
+    assert.equal(untouched.ok, false);
+    assert.deepEqual(untouched.untouchedModifies, ["Tests/Media/UploadTest.php"]);
+
+    const committed = await validateDeclaredOutputContract({
+      job: devJob,
+      payload: { must_modify: ["Tests/Media/UploadTest.php"] },
+      filesCommitted: ["Tests/Media/UploadTest.php"],
+      cwd: tmpDir,
+    });
+    assert.equal(committed.ok, true);
+  });
+
   it("preserves declared path casing in reported paths", async () => {
     const result = await validateDeclaredOutputContract({
       job: devJob,
@@ -103,8 +122,10 @@ describe("declared output contract", () => {
       assert.deepEqual(result.untouchedModifies, ["Tests/Media/UploadTest.php"]);
     } else {
       // Case-sensitive platforms treat the differently-cased must_modify
-      // entry as a distinct (nonexistent, untouched) declaration.
-      assert.equal(result.ok, true);
+      // entry as a distinct declaration — still a hard requirement, so the
+      // untouched lowercase path fails the contract under its own casing.
+      assert.equal(result.ok, false);
+      assert.deepEqual(result.untouchedModifies, ["tests/media/uploadtest.php"]);
       assert.deepEqual(result.unmodifiedDeclaredScope, ["Tests/Media/UploadTest.php"]);
     }
   });

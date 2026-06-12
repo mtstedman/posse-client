@@ -218,6 +218,7 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
     return content.slice(start, Math.min(end, start + BODY_LEAD_BYTES));
   }
 
+  let poolCloseError = null;
   try {
     for (let i = 0; i < symbols.length; i += size) {
       const batchStartedAt = performance.now();
@@ -427,7 +428,9 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         elapsed_ms: roundMs(elapsedSince(closeStartedAt)),
         error: errorForTelemetry(err),
       });
-      throw err;
+      // Deferred past the finally: throwing here would mask an in-flight
+      // encode/index failure with the (secondary) close failure.
+      poolCloseError = err;
     } finally {
       timings.poolCloseMs += elapsedSince(closeStartedAt);
       if (localOnnxPool) {
@@ -438,6 +441,8 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
       }
     }
   }
+
+  if (poolCloseError) throw poolCloseError;
 
   currentBatchTiming = null;
   emitProgress(true);
