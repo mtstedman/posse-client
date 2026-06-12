@@ -4,6 +4,7 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
 import { jobIsWriteStep } from "../../ui/functions/display/helpers/job-status.js";
 import { finalAssessmentFor } from "./review-report.js";
+import { applyMemoryReviewAction } from "./memory-feedback.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { FAILED_JOB_STATUSES } from "../../../catalog/job.js";
 
@@ -238,7 +239,7 @@ export class ReviewSession {
       console.log(`     ${C.bold}Final Assessment:${C.reset} ${color}${assessment.status}${C.reset} ${C.dim}${assessment.reason || ""}${C.reset}`);
     }
     if (report?.memoriesSurfaced) {
-      console.log(`     ${C.bold}Memories surfaced:${C.reset} ${report.memoriesSurfaced.length || 0}${report.memoriesSurfaced.length > 0 ? ` ${C.dim}(review: note | suppress | correct)${C.reset}` : ""}`);
+      console.log(`     ${C.bold}Memories surfaced:${C.reset} ${report.memoriesSurfaced.length || 0}${report.memoriesSurfaced.length > 0 ? ` ${C.dim}(act via: posse admin memory note|flag|suppress|correct <memoryId>)${C.reset}` : ""}`);
     }
     if (report?.finalAssessment?.status === "BLOCKED") {
       console.log(`     ${C.yellow}This WI is blocked until dirty tree or memory-review blockers are resolved.${C.reset}`);
@@ -1114,6 +1115,40 @@ export class ReviewSession {
           await this._refreshWorktreeStatus(item);
         }
       }, { overlay: "Discarding....", advanceAfter: false });
+      return { deferAdvance: true };
+    } else if (action && typeof action === "object" && action.kind === "memory_action") {
+      // The review screen's memory actions execute the SAME operations as
+      // `posse admin memory ...` — the UI never advertises an action the
+      // system does not perform. Async + best-effort: memory curation must
+      // never block the approve/reject flow.
+      const targetId = String(action.memoryId || "").trim();
+      const memory = (item.memoriesSurfaced || []).find((m) => String(m.memoryId || m.id || "") === targetId);
+      if (!targetId || !memory) return false;
+      if (memory._feedbackBusy) return { deferAdvance: true };
+      memory._feedbackBusy = true;
+      memory._feedback = "applying…";
+      display.requestRender({ force: true });
+      const labels = { note: "noted", suppress: "suppressed", flag: "flagged stale", correct: "corrected" };
+      applyMemoryReviewAction({
+        action: action.action,
+        memoryId: targetId,
+        replacement: action.replacement || "",
+        reason: action.reason || "contradicted",
+        detail: action.detail || `human review of WI#${wiId}`,
+        cwd: PROJECT_DIR,
+      }).then((result) => {
+        memory._feedbackBusy = false;
+        memory._feedbackOk = !!result.ok;
+        memory._feedback = result.ok
+          ? labels[String(action.action || "").toLowerCase()] || "done"
+          : `failed: ${String(result.error || "unknown").slice(0, 80)}`;
+        display.requestRender({ force: true });
+      }).catch((err) => {
+        memory._feedbackBusy = false;
+        memory._feedbackOk = false;
+        memory._feedback = `failed: ${String(err?.message || err).slice(0, 80)}`;
+        display.requestRender({ force: true });
+      });
       return { deferAdvance: true };
     }
     return false;

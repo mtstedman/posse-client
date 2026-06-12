@@ -595,6 +595,68 @@ export class DisplayInputController {
     this.requestRender({ force: true });
   }
 
+  _startMemoryPicker(item) {
+    const memories = Array.isArray(item.memoriesSurfaced) ? item.memoriesSurfaced : [];
+    if (memories.length === 0) return;
+    this._approvalMemoryPicker = {
+      itemId: item.wi.id,
+      memories,
+      cursor: 0,
+      textEntry: null, // { action: "correct", buffer: "" } while typing replacement text
+    };
+    this.requestRender({ force: true });
+  }
+
+  _onApprovalMemoryPickerKeypress(str, key) {
+    const picker = this._approvalMemoryPicker;
+    if (!picker) return;
+    const memories = picker.memories;
+    const current = memories[picker.cursor];
+
+    if (picker.textEntry) {
+      // Inline replacement-text entry for "correct".
+      if (isEscapeKey(str, key)) {
+        picker.textEntry = null;
+      } else if (isEnterKey(str, key)) {
+        const replacement = picker.textEntry.buffer.trim();
+        if (replacement && current?.memoryId && this.onApprovalAction) {
+          this.onApprovalAction(picker.itemId, {
+            kind: "memory_action",
+            action: "correct",
+            memoryId: current.memoryId,
+            replacement,
+          });
+          picker.textEntry = null;
+        }
+      } else if (key && (key.name === "backspace" || key.name === "delete")) {
+        picker.textEntry.buffer = picker.textEntry.buffer.slice(0, -1);
+      } else if (typeof str === "string" && str.length > 0 && !key?.ctrl && !key?.meta && str >= " ") {
+        if (picker.textEntry.buffer.length < 500) picker.textEntry.buffer += str;
+      }
+      this.requestRender({ force: true });
+      return;
+    }
+
+    if (isEscapeKey(str, key) || isEnterKey(str, key)) {
+      this._approvalMemoryPicker = null;
+    } else if ((key && key.name === "up") || matchesHotkey(str, key, "k")) {
+      picker.cursor = Math.max(0, picker.cursor - 1);
+    } else if ((key && key.name === "down") || matchesHotkey(str, key, "j")) {
+      picker.cursor = Math.min(Math.max(0, memories.length - 1), picker.cursor + 1);
+    } else if (current?.memoryId && !current._feedbackBusy && this.onApprovalAction) {
+      if (matchesHotkey(str, key, "n")) {
+        this.onApprovalAction(picker.itemId, { kind: "memory_action", action: "note", memoryId: current.memoryId });
+      } else if (matchesHotkey(str, key, "s")) {
+        this.onApprovalAction(picker.itemId, { kind: "memory_action", action: "suppress", memoryId: current.memoryId });
+      } else if (matchesHotkey(str, key, "f")) {
+        this.onApprovalAction(picker.itemId, { kind: "memory_action", action: "flag", memoryId: current.memoryId, reason: "contradicted" });
+      } else if (matchesHotkey(str, key, "c")) {
+        picker.textEntry = { action: "correct", buffer: "" };
+      }
+    }
+    this.requestRender({ force: true });
+  }
+
   _onApprovalPickerKeypress(str, key) {
     const picker = this._approvalPicker;
     if (!picker) return;
@@ -651,6 +713,11 @@ export class DisplayInputController {
 
     if (this._approvalPicker) {
       this._onApprovalPickerKeypress(str, key);
+      return;
+    }
+
+    if (this._approvalMemoryPicker) {
+      this._onApprovalMemoryPickerKeypress(str, key);
       return;
     }
 
@@ -751,6 +818,9 @@ export class DisplayInputController {
       if (current && !current._decision && this.onApprovalAction) {
         this.onApprovalAction(current.wi.id, "stash_target");
       }
+    } else if (matchesHotkey(str, key, "m")) {
+      const current = this._approvalData[this._approvalIdx];
+      if (current) this._startMemoryPicker(current);
     } else if (matchesHotkey(str, key, "x")) {
       const current = this._approvalData[this._approvalIdx];
       const ws = current?.worktreeStatus;

@@ -924,6 +924,10 @@
  * @property {string} createdAt
  * @property {string} updatedAt
  * @property {boolean} stale
+ * @property {string | null} [staleReason]    'age' | 'anchors_missing' | 'contradicted' | 'manual' when stale.
+ * @property {string | null} [contradictedAt]
+ * @property {number} [contradictionCount]
+ * @property {string[]} [missingAnchors]      Anchored files absent from the indexed tree (partial anchor loss).
  * @property {SymbolId[]} linkedSymbols
  * @property {SymbolId[]} symbolIds
  * @property {string[]} fileRelPaths
@@ -957,6 +961,17 @@
  * @property {boolean} ok
  * @property {string} memoryId
  * @property {string} [memory_id]
+ */
+
+/**
+ * @typedef {Object} MemoryFlagData
+ * @property {boolean} ok
+ * @property {string} memoryId
+ * @property {string} [memory_id]
+ * @property {boolean} stale
+ * @property {"contradicted" | "anchors_missing" | "manual"} staleReason
+ * @property {number} contradictionCount
+ * @property {string} [detail]
  */
 
 /**
@@ -1135,6 +1150,7 @@
  *   | ToolResultEnvelope<MemoryStoreData>      & { action: "memory.store" }
  *   | ToolResultEnvelope<MemoryQueryData>      & { action: "memory.query" }
  *   | ToolResultEnvelope<MemoryRemoveData>     & { action: "memory.remove" }
+ *   | ToolResultEnvelope<MemoryFlagData>       & { action: "memory.flag" }
  *   | ToolResultEnvelope<MemoryQueryData>      & { action: "memory.surface" }
  *   | ToolResultEnvelope<PolicyData>           & { action: "policy.get" }
  *   | ToolResultEnvelope<PolicyData>           & { action: "policy.set" }

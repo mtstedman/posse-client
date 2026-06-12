@@ -47,7 +47,7 @@ function collectSurfacedInsights(events = []) {
         whySurfaced: item.why_surface || null,
         stale: !!item.stale,
         usedBy: role ? [role] : [],
-        suggestedActions: ["note", "suppress", "correct"],
+        suggestedActions: ["note", "flag", "suppress", "correct"],
       });
     }
   }

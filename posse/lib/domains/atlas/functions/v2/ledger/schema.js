@@ -192,6 +192,19 @@ export function ensureLegacyScipColumnsBeforeDdl(db) {
 }
 
 /**
+ * Memory evidence provenance (additive, nullable per schema policy): why a
+ * memory is stale and how often assessment evidence contradicted it.
+ *
+ * @param {Database.Database} db
+ */
+export function ensureMemoryEvidenceColumns(db) {
+  if (!tableExists(db, "memories")) return;
+  ensureColumn(db, "memories", "stale_reason", "TEXT");
+  ensureColumn(db, "memories", "contradicted_at", "TEXT");
+  ensureColumn(db, "memories", "contradiction_count", "INTEGER NOT NULL DEFAULT 0");
+}
+
+/**
  * Existing ledgers may predate the external-content FTS tables. Rebuild only
  * when the visible row counts diverge so normal opens stay cheap.
  *

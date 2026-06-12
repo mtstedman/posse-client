@@ -27,7 +27,7 @@ import { codeGetSkeleton, codeGetHotPath, codeNeedWindow } from "./code.js";
 import { contextBuild, contextSummary, agentFeedback, agentFeedbackQuery } from "./context.js";
 import { fileRead } from "./file-read.js";
 import { deltaGet, prRiskAnalyze, prRisk } from "./blast-radius.js";
-import { memoryStore, memoryQuery, memoryRemove, memorySurface } from "./memory.js";
+import { memoryStore, memoryQuery, memoryRemove, memorySurface, memoryFlag } from "./memory.js";
 import { policyGet, policySet } from "./policy.js";
 import { usageStats, recordAtlasUsageEvent } from "./usage.js";
 import { runtimeExecute, runtimeQueryOutput } from "./runtime.js";
@@ -298,8 +298,12 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ (memoryQuery({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "memory.remove":
       return /** @type {any} */ (memoryRemove({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
+    case "memory.flag":
+      return /** @type {any} */ (memoryFlag({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "memory.surface":
-      return /** @type {any} */ (memorySurface({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
+      // The view (when present) lets surfacing validate file anchors against
+      // the indexed tree; surfacing still works ledger-only without it.
+      return /** @type {any} */ (memorySurface({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId, view: ctx.view }));
     case "policy.get":
       return /** @type {any} */ (policyGet({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "policy.set":
@@ -391,6 +395,7 @@ const GATEWAY_ACTIONS = Object.freeze({
     "memory.store",
     "memory.query",
     "memory.remove",
+    "memory.flag",
   ]),
 });
 

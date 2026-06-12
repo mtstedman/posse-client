@@ -373,6 +373,12 @@ CREATE TABLE IF NOT EXISTS memories (
   confidence      REAL NOT NULL DEFAULT 0.5,
   content_hash    TEXT NOT NULL,
   stale           INTEGER NOT NULL DEFAULT 0,
+  -- Why the stale flag is set: 'age' (policy window), 'anchors_missing'
+  -- (every anchored file vanished from the indexed tree), 'contradicted'
+  -- (assessment/evidence proved it wrong), 'manual'. NULL when not stale.
+  stale_reason    TEXT,
+  contradicted_at TEXT,
+  contradiction_count INTEGER NOT NULL DEFAULT 0,
   deleted         INTEGER NOT NULL DEFAULT 0,
   created_at      TEXT NOT NULL,
   updated_at      TEXT NOT NULL,

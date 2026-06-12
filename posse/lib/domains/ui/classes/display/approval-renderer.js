@@ -207,7 +207,7 @@ export class DisplayApprovalRenderer {
     } else if (current._isInfo) {
       navLines.push(` ${C.cyan}[INFO]${C.reset} ${C.dim}Research-only \u2014 no action needed.  [\u2190\u2192] WI  [Tab/1-4] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
     } else {
-      navLines.push(` ${C.green}[a]${C.reset} Approve  ${C.red}[r]${C.reset} Re-queue  ${C.red}[d]${C.reset} Delete  ${C.green}[c]${C.reset} Commit  ${C.yellow}[t]${C.reset} Stash tgt  ${C.red}[x]${C.reset} Discard\u2026  ${C.dim}[s] Skip  [\u2190\u2192] WI  [Tab/1-4] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
+      navLines.push(` ${C.green}[a]${C.reset} Approve  ${C.red}[r]${C.reset} Re-queue  ${C.red}[d]${C.reset} Delete  ${C.green}[c]${C.reset} Commit  ${C.yellow}[t]${C.reset} Stash tgt  ${C.red}[x]${C.reset} Discard\u2026  ${C.cyan}[m]${C.reset} Memories  ${C.dim}[s] Skip  [\u2190\u2192] WI  [Tab/1-4] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
     }
 
     // Always-visible action feedback: the in-flight/most-recent git action and
@@ -278,6 +278,8 @@ export class DisplayApprovalRenderer {
     buf += `\x1b[${row};1H\x1b[J`;
     if (this._approvalPicker) {
       buf += this._renderDiscardPickerOverlay(this._approvalPicker);
+    } else if (this._approvalMemoryPicker) {
+      buf += this._renderMemoryPickerOverlay(this._approvalMemoryPicker);
     }
     if (typeof this._baseFrameForBlockingOverlay === "function") {
       buf = this._baseFrameForBlockingOverlay(buf);
@@ -302,6 +304,53 @@ export class DisplayApprovalRenderer {
         this._lastFrame = buf;
       }
     }
+  }
+
+  _renderMemoryPickerOverlay(picker) {
+    const innerW = Math.min(Math.max(48, this.cols - 12), 110);
+    const maxList = Math.min(picker.memories.length, Math.max(6, this.rows - 12));
+    const startCol = Math.max(2, Math.floor((this.cols - (innerW + 2)) / 2) + 1);
+    const startRow = Math.max(2, Math.floor((this.rows - (maxList + 6)) / 2) + 1);
+    let buf = "";
+    let row = startRow;
+    const horiz = "\u2500".repeat(innerW);
+    const edge = (ch) => `\x1b[${row};${startCol}H${C.dim}${ch}${C.reset}`;
+    const body = (text) => {
+      buf += `\x1b[${row};${startCol}H${C.dim}\u2502${C.reset}${fit(_sanitizeDisplayLine(text), innerW)}${C.dim}\u2502${C.reset}`;
+      row++;
+    };
+    buf += edge(`\u250c${horiz}\u2510`); row++;
+    body(` ${C.bold}${C.cyan}Review memories${C.reset}  ${C.dim}\u2014 actions apply to the highlighted memory${C.reset}`);
+    buf += edge(`\u251c${horiz}\u2524`); row++;
+
+    const scroll = Math.max(0, picker.cursor - (maxList - 1));
+    for (let i = 0; i < maxList; i++) {
+      const idx = i + scroll;
+      let line = "";
+      if (idx < picker.memories.length) {
+        const memory = picker.memories[idx];
+        const focus = idx === picker.cursor ? `${C.cyan}\u25b6${C.reset}` : " ";
+        const kind = memory.kind || memory.type || "memory";
+        const id = memory.memoryId || memory.id || "";
+        const flags = [];
+        if (memory.stale) flags.push(`${C.yellow}stale${memory.staleReason ? `:${memory.staleReason}` : ""}${C.reset}`);
+        if (!memory.memoryId) flags.push(`${C.dim}local-only${C.reset}`);
+        if (memory._feedback) flags.push(memory._feedbackOk === false ? `${C.red}${memory._feedback}${C.reset}` : `${C.green}${memory._feedback}${C.reset}`);
+        const summary = String(memory.summary || memory.action || id).slice(0, Math.max(12, innerW - 30));
+        line = ` ${focus} ${C.dim}[${kind}]${C.reset} ${summary}${flags.length > 0 ? ` ${flags.join(" ")}` : ""}`;
+      }
+      body(line);
+    }
+
+    buf += edge(`\u251c${horiz}\u2524`); row++;
+    if (picker.textEntry) {
+      body(` ${C.bold}Correction:${C.reset} ${picker.textEntry.buffer}${C.cyan}\u2588${C.reset}`);
+      body(` ${C.dim}Type the replacement guidance \u2014 [enter] store correction + suppress old  [esc] cancel${C.reset}`);
+    } else {
+      body(` ${C.dim}[\u2191\u2193/j/k] move  [n] note  [f] flag stale  [s] suppress  [c] correct\u2026  [esc] close${C.reset}`);
+    }
+    buf += edge(`\u2514${horiz}\u2518`);
+    return buf;
   }
 
   _renderDiscardPickerOverlay(picker) {
@@ -583,7 +632,7 @@ export class DisplayApprovalRenderer {
         const id = memory.memoryId || memory.id || "?";
         lines.push(`   ${C.dim}[${kind}]${C.reset} ${String(memory.summary || memory.action || id).slice(0, inner - 14)}`);
       }
-      lines.push(`   ${C.dim}Review memories: note | suppress | correct${C.reset}`);
+      lines.push(`   ${C.dim}[m] review memories \u2014 note / flag stale / suppress / correct${C.reset}`);
       lines.push("");
     } else {
       lines.push(` ${C.bold}Memories Surfaced:${C.reset} ${C.dim}none${C.reset}`);
@@ -956,11 +1005,14 @@ export class DisplayApprovalRenderer {
       for (const memory of surfaced.slice(0, 12)) {
         const id = memory.memoryId || memory.id || "(local)";
         const kind = memory.kind || memory.type || "memory";
-        const stale = memory.stale ? ` ${C.yellow}(stale)${C.reset}` : "";
-        lines.push(`  ${C.cyan}${kind}${C.reset} ${C.dim}${id}${C.reset}${stale}`);
+        const stale = memory.stale ? ` ${C.yellow}(stale${memory.staleReason ? `: ${memory.staleReason}` : ""})${C.reset}` : "";
+        const feedback = memory._feedback
+          ? ` ${memory._feedbackOk === false ? C.red : C.green}[${memory._feedback}]${C.reset}`
+          : "";
+        lines.push(`  ${C.cyan}${kind}${C.reset} ${C.dim}${id}${C.reset}${stale}${feedback}`);
         lines.push(`    ${String(memory.summary || memory.action || "").slice(0, inner - 6)}`);
         if (memory.whySurfaced) lines.push(`    ${C.dim}why: ${String(memory.whySurfaced).slice(0, inner - 10)}${C.reset}`);
-        lines.push(`    ${C.dim}actions: note | suppress | correct${C.reset}`);
+        lines.push(`    ${C.dim}actions: [m] note / flag stale / suppress / correct${C.reset}`);
       }
       if (surfaced.length > 12) lines.push(`  ${C.dim}… ${surfaced.length - 12} more surfaced memories${C.reset}`);
     }

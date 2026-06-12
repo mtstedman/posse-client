@@ -155,6 +155,7 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
           confidence = excluded.confidence,
           content_hash = excluded.content_hash,
           stale = 0,
+          stale_reason = NULL,
           deleted = 0,
           updated_at = excluded.updated_at,
           deleted_at = NULL`,
@@ -287,15 +288,108 @@ export function memoryRemove({ versionId, params, ledger, repoId }) {
   });
 }
 
+const MEMORY_FLAG_REASONS = new Set(["contradicted", "anchors_missing", "manual"]);
+
+/**
+ * Evidence-based staleness: flag a memory stale WITH a reason instead of
+ * deleting it. 'contradicted' (assessment/work proved it wrong) also stamps
+ * contradicted_at and bumps contradiction_count. Flagged memories stop
+ * surfacing proactively but stay queryable and correctable — suppression
+ * stays a deliberate memory.remove.
+ *
+ * @param {{
+ *   versionId: string,
+ *   params: import("../contracts/tool-params.js").MemoryFlagParams,
+ *   ledger?: import("../contracts/api.js").Ledger,
+ *   repoId?: string | null,
+ * }} args
+ */
+export function memoryFlag({ versionId, params, ledger, repoId }) {
+  const db = ledgerDb(ledger);
+  if (!db) return ledgerUnavailable("memory.flag", versionId);
+  const effectiveRepoId = effectiveRepo(repoId, params.repoId);
+  if (!getEffectivePolicy(ledger, effectiveRepoId).memoryEnabled) {
+    return memoryDisabled("memory.flag", versionId);
+  }
+  const memoryId = cleanMemoryId(params.memoryId);
+  if (!memoryId) {
+    return errorEnvelope({
+      action: "memory.flag",
+      versionId,
+      code: "invalid_memory_id",
+      message: "memory.flag requires memoryId",
+    });
+  }
+  const reason = String(params.reason || "").trim().toLowerCase();
+  if (!MEMORY_FLAG_REASONS.has(reason)) {
+    return errorEnvelope({
+      action: "memory.flag",
+      versionId,
+      code: "invalid_flag_reason",
+      message: `memory.flag reason must be one of: ${[...MEMORY_FLAG_REASONS].join(", ")}`,
+    });
+  }
+  const row = findMemoryById(db, memoryId);
+  if (!row || Number(row.deleted || 0) === 1 || row.repo_id !== effectiveRepoId) {
+    return errorEnvelope({
+      action: "memory.flag",
+      versionId,
+      code: "memory_not_found",
+      message: `Memory ${memoryId} was not found`,
+    });
+  }
+  const now = new Date().toISOString();
+  flagMemoryStale(db, memoryId, reason, now);
+  getRetrievalCache().invalidateAll();
+  const updated = findMemoryById(db, memoryId);
+  return okEnvelope({
+    action: "memory.flag",
+    versionId,
+    data: {
+      ok: true,
+      memoryId,
+      memory_id: memoryId,
+      stale: true,
+      staleReason: reason,
+      contradictionCount: Number(updated?.contradiction_count || 0),
+      detail: cleanString(params.detail, 500) || undefined,
+    },
+  });
+}
+
+/**
+ * @param {import("better-sqlite3").Database} db
+ * @param {string} memoryId
+ * @param {string} reason
+ * @param {string} now
+ */
+function flagMemoryStale(db, memoryId, reason, now) {
+  // updated_at is deliberately NOT bumped: it drives the recency score and
+  // the age sweep, and flagging a memory must not make it look fresher.
+  if (reason === "contradicted") {
+    db.prepare(
+      `UPDATE memories
+       SET stale = 1, stale_reason = ?, contradicted_at = ?,
+           contradiction_count = contradiction_count + 1
+       WHERE memory_id = ?`,
+    ).run(reason, now, memoryId);
+  } else {
+    db.prepare(
+      "UPDATE memories SET stale = 1, stale_reason = ? WHERE memory_id = ?",
+    ).run(reason, memoryId);
+  }
+}
+
 /**
  * @param {{
  *   versionId: string,
  *   params: import("../contracts/tool-params.js").MemorySurfaceParams,
  *   ledger?: import("../contracts/api.js").Ledger,
  *   repoId?: string | null,
+ *   view?: import("../contracts/api.js").View | null,
  * }} args
  */
-export function memorySurface({ versionId, params, ledger, repoId }) {
+export function memorySurface({ versionId, params, ledger, repoId, view = null }) {
   const db = ledgerDb(ledger);
   if (!db) return ledgerUnavailable("memory.surface", versionId);
   const effectiveRepoId = effectiveRepo(repoId, params.repoId);
@@ -309,7 +403,8 @@ export function memorySurface({ versionId, params, ledger, repoId }) {
   const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
   // Surfacing is proactive: a memory anchored to any of the provided symbols
   // OR files is relevant, and stale memories never surface on their own.
-  const filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true });
+  let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true });
+  filtered = applyAnchorEvidence(db, view, filtered, links);
   const surfaced = filtered.map((row) => hydrateMemory(row, links, {
     symbolIds: params.symbolIds,
     fileRelPaths: params.fileRelPaths,
@@ -629,6 +724,12 @@ function hydrateMemory(row, links, criteria = {}) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     stale: Number(row.stale || 0) === 1,
+    staleReason: row.stale_reason || null,
+    contradictedAt: row.contradicted_at || null,
+    contradictionCount: Number(row.contradiction_count || 0),
+    ...(Array.isArray(row._missingAnchors) && row._missingAnchors.length > 0
+      ? { missingAnchors: row._missingAnchors }
+      : {}),
     linkedSymbols,
     symbolIds: linkedSymbols,
     fileRelPaths,
@@ -720,6 +821,63 @@ function sortMemories(memories, sortBy) {
 }
 
 /**
+ * Deterministic anchor evidence: a memory whose EVERY anchored file has
+ * vanished from the indexed tree describes code that no longer exists. Flag
+ * it stale ('anchors_missing') and stop surfacing it; partial loss only
+ * decorates the surfaced memory with the missing paths. Guards:
+ * - needs an open view (ledger-only surfacing skips the check),
+ * - only memories created BEFORE the view was built can be flagged — the
+ *   surface route is freshness-exempt, so a fresh memory anchored to a file
+ *   newer than a stale view must not be punished for the view's lag.
+ *
+ * @param {import("better-sqlite3").Database} db
+ * @param {import("../contracts/api.js").View | null | undefined} view
+ * @param {any[]} rows
+ * @param {{ filesById: Map<string, string[]> }} links
+ */
+function applyAnchorEvidence(db, view, rows, links) {
+  const viewDb = typeof /** @type {any} */ (view)?._unsafeDb === "function"
+    ? /** @type {any} */ (view)._unsafeDb()
+    : null;
+  if (!viewDb) return rows;
+  let viewBuiltAt = "";
+  let hasPath;
+  try {
+    viewBuiltAt = String(/** @type {any} */ (view).meta?.()?.built_at || "");
+    const stmt = viewDb.prepare("SELECT 1 AS hit FROM path_to_blob WHERE repo_rel_path = ? LIMIT 1");
+    const cache = new Map();
+    hasPath = (p) => {
+      if (!cache.has(p)) cache.set(p, !!stmt.get(p));
+      return cache.get(p);
+    };
+  } catch {
+    return rows; // anchor evidence is advisory; never fail a surface read
+  }
+  const kept = [];
+  for (const row of rows) {
+    const files = links.filesById.get(row.memory_id) || [];
+    if (files.length === 0) { kept.push(row); continue; }
+    let missing;
+    try {
+      missing = files.filter((f) => !hasPath(f));
+    } catch {
+      kept.push(row);
+      continue;
+    }
+    if (missing.length === 0) { kept.push(row); continue; }
+    const olderThanView = !viewBuiltAt
+      || String(row.created_at || "") < viewBuiltAt;
+    if (missing.length === files.length && olderThanView) {
+      try { flagMemoryStale(db, row.memory_id, "anchors_missing", new Date().toISOString()); } catch { /* advisory */ }
+      continue; // every anchor gone: do not surface
+    }
+    row._missingAnchors = missing;
+    kept.push(row);
+  }
+  return kept;
+}
+
+/**
  * Opportunistic staleness sweep: memories untouched for longer than the policy
  * window are flagged stale so proactive surfacing skips them. memory.store
  * resets the flag when a memory is refreshed, and memory.query still returns
@@ -731,7 +889,7 @@ function sweepStaleMemories(db, repoId, policy) {
   const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
   try {
     db.prepare(
-      "UPDATE memories SET stale = 1 WHERE repo_id = ? AND deleted = 0 AND stale = 0 AND updated_at < ?",
+      "UPDATE memories SET stale = 1, stale_reason = 'age' WHERE repo_id = ? AND deleted = 0 AND stale = 0 AND updated_at < ?",
     ).run(repoId, cutoff);
   } catch {
     // Staleness is best-effort; never fail a read because the sweep could not run.

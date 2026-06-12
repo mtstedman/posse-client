@@ -528,6 +528,14 @@
  */
 
 /**
+ * @typedef {Object} MemoryFlagParams
+ * @property {string} [repoId]
+ * @property {string} memoryId
+ * @property {"contradicted" | "anchors_missing" | "manual"} reason
+ * @property {string} [detail]                Short evidence note (logged, not stored on the row).
+ */
+
+/**
  * @typedef {Object} MemorySurfaceParams
  * @property {string} [repoId]
  * @property {string[]} [symbolIds]
@@ -654,6 +662,7 @@
  *   | { action: "memory.store" } & MemoryStoreParams
  *   | { action: "memory.query" } & MemoryQueryParams
  *   | { action: "memory.remove" } & MemoryRemoveParams
+ *   | { action: "memory.flag" } & MemoryFlagParams
  *   | { action: "memory.surface" } & MemorySurfaceParams
  *   | { action: "policy.get" } & PolicyGetParams
  *   | { action: "policy.set" } & PolicySetParams
@@ -709,6 +718,7 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "memory.query",
   "memory.surface",
   "memory.remove",
+  "memory.flag",
   "policy.get",
   "policy.set",
   "usage.stats",

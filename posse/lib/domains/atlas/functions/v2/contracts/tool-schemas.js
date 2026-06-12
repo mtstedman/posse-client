@@ -169,6 +169,7 @@ const AGENT_GATEWAY_ACTIONS = Object.freeze([
   "memory.store",
   "memory.query",
   "memory.remove",
+  "memory.flag",
 ]);
 
 export const ATLAS_GATEWAY_ACTIONS = Object.freeze({
@@ -605,6 +606,12 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     memoryId: s({ minLength: 1, maxLength: 256 }),
     deleteFile: b(),
   }, ["memoryId"]),
+  "memory.flag": o({
+    repoId: s({ maxLength: 256 }),
+    memoryId: s({ minLength: 1, maxLength: 256 }),
+    reason: s({ enum: ["contradicted", "anchors_missing", "manual"] }),
+    detail: s({ maxLength: 500 }),
+  }, ["memoryId", "reason"]),
   "memory.surface": o({
     repoId: s({ maxLength: 256 }),
     symbolIds: symbolIds(1000),

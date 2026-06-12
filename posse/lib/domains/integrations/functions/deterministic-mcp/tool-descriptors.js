@@ -841,7 +841,7 @@ const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["context", "context.summary", "agent.feedback", "agent.feedback.query", "buffer.push", "buffer.checkpoint", "buffer.status", "memory.store", "memory.query", "memory.remove"], description: "ATLAS agent action to route through this gateway." },
+        action: { type: "string", enum: ["context", "context.summary", "agent.feedback", "agent.feedback.query", "buffer.push", "buffer.checkpoint", "buffer.status", "memory.store", "memory.query", "memory.remove", "memory.flag"], description: "ATLAS agent action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -1623,6 +1623,22 @@ const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
+  "memory.flag": {
+    type: "function",
+    name: "atlas_memory_flag",
+    description: "Memory. Flag a native ATLAS v2 memory stale with an evidence reason (contradicted | anchors_missing | manual) instead of deleting it. Flagged memories stop auto-surfacing but stay queryable and correctable.",
+    parameters: {
+      type: "object",
+      properties: {
+        repoId: { type: "string", description: "Optional repository identifier; defaults to the current ATLAS repo." },
+        memoryId: { type: "string", description: "Memory ID to flag." },
+        reason: { type: "string", enum: ["contradicted", "anchors_missing", "manual"], description: "Why the memory is stale: contradicted = the just-assessed work proved it wrong; anchors_missing = the code it referenced is gone; manual = human judgment." },
+        detail: { type: "string", description: "Short evidence note (one sentence)." },
+      },
+      required: ["memoryId", "reason"],
+      additionalProperties: false,
+    },
+  },
   "memory.surface": {
     type: "function",
     name: "atlas_memory_surface",
@@ -2100,6 +2116,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "memory.store": { access: "atlas", summary: "Store or update a native ATLAS v2 development memory linked to symbols/files." },
   "memory.query": { access: "atlas", summary: "Search native ATLAS v2 memories by text, type, tags, linked symbols, or files." },
   "memory.remove": { access: "atlas", summary: "Soft-delete a native ATLAS v2 memory." },
+  "memory.flag": { access: "atlas", summary: "Flag a native ATLAS v2 memory stale with an evidence reason (contradicted/anchors_missing/manual)." },
   "policy.get": { access: "atlas", summary: "Fetch native ATLAS v2 policy for the current repository." },
   "policy.set": { access: "atlas", summary: "Patch native ATLAS v2 policy settings." },
   "usage.stats": { access: "atlas", summary: "Report native ATLAS v2 action usage and estimated token savings." },
@@ -2238,11 +2255,12 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
         "agent.feedback",
         "agent.feedback.query",
         "memory.query",
+        "memory.flag",
         "policy.get",
         "runtime.queryOutput",
         "usage.stats",
       ]),
-      rationale: "Use ATLAS versions/risk plus focused code evidence for blast-radius analysis; verdict authority remains assessor judgment. Post-verdict findings are promoted to durable memory automatically by the harness; memory curation is the researcher's role.",
+      rationale: "Use ATLAS versions/risk plus focused code evidence for blast-radius analysis; verdict authority remains assessor judgment. Post-verdict findings are promoted to durable memory automatically by the harness; memory curation is the researcher's role. memory.flag marks a surfaced memory the assessed work disproved (reason: contradicted) so it stops misleading future readers — flag, don't remove.",
     }),
     dev: Object.freeze({
       phase: "dev",
@@ -2854,9 +2872,10 @@ const ATLAS_MUTATING_ACTIONS = new Set([
   "file.write",
   "index.refresh",
   "memory.remove",
-  // memory.store is intentionally NOT here: curating a development memory is not a
-  // repo mutation (Posse `write` = repo write). It is surfaced per-route via the
-  // route tool-lists (researcher only) rather than blocked as a mutating action.
+  // memory.store and memory.flag are intentionally NOT here: curating a
+  // development memory is not a repo mutation (Posse `write` = repo write).
+  // They are surfaced per-route via the route tool-lists (store: researcher;
+  // flag: assessor) rather than blocked as mutating actions.
   "policy.set",
   "repo.register",
   "runtime.execute",

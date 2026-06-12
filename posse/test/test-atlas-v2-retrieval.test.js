@@ -3459,6 +3459,142 @@ describe("retrieval dispatcher", () => {
     assert.equal(remove.ok, true);
   });
 
+  it("memory.flag marks evidence-based staleness without deleting", () => {
+    cover("memory.flag");
+    const store = dispatch(
+      /** @type {any} */ ({
+        action: "memory.store",
+        type: "pattern",
+        title: "Flag target",
+        content: "Claims something the assessed work later disproved.",
+        fileRelPaths: [env.fileA],
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "flag-repo" },
+    );
+    assert.equal(store.ok, true);
+
+    const badReason = dispatch(
+      /** @type {any} */ ({ action: "memory.flag", memoryId: store.data.memoryId, reason: "nope" }),
+      { versionId: "v1", ledger: env.ledger, repoId: "flag-repo" },
+    );
+    assert.equal(badReason.ok, false);
+    assert.equal(badReason.error?.code, "invalid_flag_reason");
+
+    const flagged = dispatch(
+      /** @type {any} */ ({ action: "memory.flag", memoryId: store.data.memoryId, reason: "contradicted", detail: "assessment disproved the claim" }),
+      { versionId: "v1", ledger: env.ledger, repoId: "flag-repo" },
+    );
+    assert.equal(flagged.ok, true);
+    assert.equal(flagged.data.stale, true);
+    assert.equal(flagged.data.staleReason, "contradicted");
+    assert.equal(flagged.data.contradictionCount, 1);
+
+    // Repeat contradiction evidence accumulates instead of overwriting.
+    const again = dispatch(
+      /** @type {any} */ ({ action: "memory.flag", memoryId: store.data.memoryId, reason: "contradicted" }),
+      { versionId: "v1", ledger: env.ledger, repoId: "flag-repo" },
+    );
+    assert.equal(again.data.contradictionCount, 2);
+
+    // Flagged ≠ deleted: query (staleOnly) still finds it, with the evidence.
+    const query = dispatch(
+      /** @type {any} */ ({ action: "memory.query", staleOnly: true, limit: 5 }),
+      { versionId: "v1", ledger: env.ledger, repoId: "flag-repo" },
+    );
+    assert.equal(query.ok, true);
+    assert.equal(query.data.total, 1);
+    assert.equal(query.data.memories[0].staleReason, "contradicted");
+    assert.ok(query.data.memories[0].contradictedAt);
+    assert.equal(query.data.memories[0].contradictionCount, 2);
+
+    // ...but proactive surfacing skips it.
+    const surface = dispatch(
+      /** @type {any} */ ({ action: "memory.surface", fileRelPaths: [env.fileA], limit: 5 }),
+      { versionId: "v1", ledger: env.ledger, repoId: "flag-repo" },
+    );
+    assert.equal(surface.ok, true);
+    assert.equal(surface.data.memories.length, 0);
+
+    // Refreshing the memory (an intentional update) clears the flag.
+    const refresh = dispatch(
+      /** @type {any} */ ({
+        action: "memory.store",
+        memoryId: store.data.memoryId,
+        type: "pattern",
+        title: "Flag target",
+        content: "Corrected claim that supersedes the contradicted one.",
+        fileRelPaths: [env.fileA],
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "flag-repo" },
+    );
+    assert.equal(refresh.ok, true);
+    const active = dispatch(
+      /** @type {any} */ ({ action: "memory.query", query: "corrected claim", limit: 5 }),
+      { versionId: "v1", ledger: env.ledger, repoId: "flag-repo" },
+    );
+    assert.equal(active.data.memories[0].stale, false);
+    assert.equal(active.data.memories[0].staleReason, null);
+  });
+
+  it("memory.surface flags memories whose file anchors vanished from the indexed tree", () => {
+    const ghost = dispatch(
+      /** @type {any} */ ({
+        action: "memory.store",
+        type: "bugfix",
+        title: "Ghost anchor",
+        content: "Anchored only to a file that no longer exists.",
+        fileRelPaths: ["src/ghost/gone.ts"],
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "anchor-repo" },
+    );
+    const partial = dispatch(
+      /** @type {any} */ ({
+        action: "memory.store",
+        type: "bugfix",
+        title: "Partial anchor",
+        content: "Anchored to one live file and one deleted file.",
+        fileRelPaths: [env.fileA, "src/ghost/gone2.ts"],
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "anchor-repo" },
+    );
+    assert.equal(ghost.ok, true);
+    assert.equal(partial.ok, true);
+    // Backdate past the view build so the freshness guard (a stale view must
+    // not condemn a memory anchored to a newer file) lets evidence apply.
+    env.ledger._unsafeDb().prepare(
+      "UPDATE memories SET created_at = '2000-01-01T00:00:00.000Z' WHERE memory_id IN (?, ?)",
+    ).run(ghost.data.memoryId, partial.data.memoryId);
+
+    const surface = dispatch(
+      /** @type {any} */ ({
+        action: "memory.surface",
+        fileRelPaths: [env.fileA, "src/ghost/gone.ts", "src/ghost/gone2.ts"],
+        limit: 10,
+      }),
+      { versionId: "v1", ledger: env.ledger, repoId: "anchor-repo", view: env.view },
+    );
+    assert.equal(surface.ok, true);
+    // Every anchor gone: excluded from surfacing and persistently flagged.
+    assert.ok(!surface.data.memories.some((m) => m.memoryId === ghost.data.memoryId));
+    const ghostRow = env.ledger._unsafeDb().prepare(
+      "SELECT stale, stale_reason AS reason FROM memories WHERE memory_id = ?",
+    ).get(ghost.data.memoryId);
+    assert.equal(Number(ghostRow.stale), 1);
+    assert.equal(ghostRow.reason, "anchors_missing");
+    // Partial loss: still surfaced, with the missing paths called out.
+    const surfacedPartial = surface.data.memories.find((m) => m.memoryId === partial.data.memoryId);
+    assert.ok(surfacedPartial);
+    assert.deepEqual(surfacedPartial.missingAnchors, ["src/ghost/gone2.ts"]);
+
+    // Ledger-only surfacing (no view) must not flag anything new.
+    const blind = dispatch(
+      /** @type {any} */ ({ action: "memory.surface", fileRelPaths: [env.fileA], limit: 10 }),
+      { versionId: "v1", ledger: env.ledger, repoId: "anchor-repo" },
+    );
+    assert.equal(blind.ok, true);
+    assert.ok(blind.data.memories.some((m) => m.memoryId === partial.data.memoryId));
+  });
+
   it("memory.store rejects cross-repo memoryId takeover", () => {
     const first = dispatch(
       /** @type {any} */ ({

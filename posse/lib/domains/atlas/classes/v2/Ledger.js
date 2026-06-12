@@ -20,6 +20,7 @@ import {
   ensureColumn,
   ensureLedgerFtsBackfill,
   ensureLegacyScipColumnsBeforeDdl,
+  ensureMemoryEvidenceColumns,
   openLedgerDb,
   openLedgerDbReadOnly,
   runDdl,
@@ -119,6 +120,7 @@ export class Ledger {
     // omits the fresh-DB CHECK; writer-side validation keeps values bounded.
     ensureColumn(this.#db, "scip_indexes", "documents_failed", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(this.#db, "scip_indexes", "status", "TEXT NOT NULL DEFAULT 'complete'");
+    ensureMemoryEvidenceColumns(this.#db);
     ensureLedgerFtsBackfill(this.#db);
     this.#stmt = this.#prepareAll();
     this.#interner = new Interner(this.#db);

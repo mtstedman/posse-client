@@ -114,6 +114,7 @@ const ATLAS_V2_VIEW_OPTIONAL_ACTIONS = new Set([
   "memory.store",
   "memory.query",
   "memory.remove",
+  "memory.flag",
   "memory.surface",
   "policy.get",
   "policy.set",
@@ -131,6 +132,7 @@ const ATLAS_V2_VIEW_FRESHNESS_EXEMPT_ACTIONS = new Set([
   "memory.store",
   "memory.query",
   "memory.remove",
+  "memory.flag",
   "memory.surface",
   "agent.feedback.query",
   "policy.get",
@@ -152,6 +154,7 @@ const ATLAS_V2_BLOCKING_ACTIONS = new Set([
   "agent.feedback",
   "memory.store",
   "memory.remove",
+  "memory.flag",
   "policy.set",
   "runtime.execute",
 ]);
@@ -930,7 +933,7 @@ async function executeEmbeddedAtlasV2Tool({
       && !isBlockingAction(action, payload)
       && !action.startsWith("buffer.")
       && !action.startsWith("runtime.")
-      && action !== "memory.store" && action !== "memory.remove"
+      && action !== "memory.store" && action !== "memory.remove" && action !== "memory.flag"
       && action !== "policy.set" && action !== "agent.feedback";
     let envelope = null;
     let conductorFellBack = false;
