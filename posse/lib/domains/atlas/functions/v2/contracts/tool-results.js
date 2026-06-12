@@ -224,6 +224,7 @@
  * @property {Record<string, unknown>} [indexProgress]
  * @property {Record<string, unknown>} [graphDerivedState]
  * @property {{ memories: number, feedbackSignals: number } | null} [memoryStats]
+ * @property {{ available: boolean, profile?: string | null, builtAt?: string | null, seedCount?: number, currentLabels?: number, staleLabels?: number, maxDriftCount?: number, oldestStaleSince?: string | null, lastLabeledAt?: string | null } | null} [treeCompression]
  * @property {Record<string, unknown>} [dataQuality]
  * @property {{ memory: boolean, runtime: boolean, workflow: boolean, liveBuffers: boolean, scipIngest: boolean }} [features]
  */

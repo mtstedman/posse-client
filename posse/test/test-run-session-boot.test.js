@@ -753,6 +753,143 @@ describe("RunSession boot lifecycle", () => {
     assert.deepEqual(events, ["auto-merge", "wrap-up"]);
   });
 
+  it("drains queued atlas_warm jobs at wrap-up, including chained follow-ups", async () => {
+    const executed = [];
+    // Wrap-up merges enqueue warm follow-ups after the scheduler loop exits;
+    // the drain must run them — and re-poll for the jobs they chain (a merge
+    // warm enqueues the scip restage) — before the conductor closes.
+    const warmQueue = [{
+      id: 11,
+      work_item_id: null,
+      status: "queued",
+      job_type: "atlas_warm",
+      title: "ATLAS warm: main incremental",
+      payload_json: JSON.stringify({ purpose: "main-incremental" }),
+    }];
+    const devJob = {
+      id: 1,
+      work_item_id: 1,
+      status: "queued",
+      job_type: "dev",
+      title: "Test job",
+      payload_json: "{}",
+    };
+    let wrappedUp = false;
+
+    class FakeScheduler {
+      constructor() {
+        this.leaseSec = 60;
+        this.ownerId = "test-owner";
+        this.leaseManager = {
+          acquireWithLocks: (job) => ({ leaseToken: `lease-${job.id}` }),
+        };
+      }
+
+      async boot(opts) {
+        await opts.onBeforeLoop();
+        return true;
+      }
+
+      async runLoop(workerCallback, opts) {
+        opts.onDone();
+      }
+
+      stop() {}
+    }
+
+    class FakeWorker {
+      async execute(job) {
+        executed.push({ id: job.id, purpose: JSON.parse(job.payload_json).purpose, lease: job._leaseToken });
+        const idx = warmQueue.findIndex((w) => w.id === job.id);
+        if (idx >= 0) warmQueue.splice(idx, 1);
+        if (job.id === 11) {
+          warmQueue.push({
+            id: 12,
+            work_item_id: null,
+            status: "queued",
+            job_type: "atlas_warm",
+            title: "ATLAS warm: SCIP restage",
+            payload_json: JSON.stringify({ purpose: "scip-restage" }),
+          });
+        }
+      }
+    }
+
+    const session = new RunSession(createRunSessionBootTestDeps({
+      Scheduler: FakeScheduler,
+      Worker: FakeWorker,
+      // Before wrap-up the queue holds the dev job (so the run starts); the
+      // warm follow-ups appear once wrap-up has run its merges.
+      listJobs: () => (wrappedUp ? [...warmQueue] : [devJob]),
+      wrapUp: async () => {
+        wrappedUp = true;
+        return { rerun: false };
+      },
+    }));
+
+    await session.run();
+
+    assert.deepEqual(executed, [
+      { id: 11, purpose: "main-incremental", lease: "lease-11" },
+      { id: 12, purpose: "scip-restage", lease: "lease-12" },
+    ]);
+    assert.equal(warmQueue.length, 0);
+  });
+
+  it("skips the wrap-up atlas drain when POSSE_WRAPUP_ATLAS_DRAIN is off", async () => {
+    const executed = [];
+    let wrappedUp = false;
+
+    class FakeScheduler {
+      constructor() {
+        this.leaseSec = 60;
+        this.ownerId = "test-owner";
+        this.leaseManager = {
+          acquireWithLocks: (job) => ({ leaseToken: `lease-${job.id}` }),
+        };
+      }
+
+      async boot(opts) {
+        await opts.onBeforeLoop();
+        return true;
+      }
+
+      async runLoop(workerCallback, opts) {
+        opts.onDone();
+      }
+
+      stop() {}
+    }
+
+    class FakeWorker {
+      async execute(job) {
+        executed.push(job.id);
+      }
+    }
+
+    const prior = process.env.POSSE_WRAPUP_ATLAS_DRAIN;
+    process.env.POSSE_WRAPUP_ATLAS_DRAIN = "off";
+    try {
+      const session = new RunSession(createRunSessionBootTestDeps({
+        Scheduler: FakeScheduler,
+        Worker: FakeWorker,
+        listJobs: () => (wrappedUp
+          ? [{ id: 21, status: "queued", job_type: "atlas_warm", title: "ATLAS warm", payload_json: "{}" }]
+          : [{ id: 1, work_item_id: 1, status: "queued", job_type: "dev", title: "Test job", payload_json: "{}" }]),
+        wrapUp: async () => {
+          wrappedUp = true;
+          return { rerun: false };
+        },
+      }));
+      await session.run();
+    } finally {
+      if (prior === undefined) delete process.env.POSSE_WRAPUP_ATLAS_DRAIN;
+      else process.env.POSSE_WRAPUP_ATLAS_DRAIN = prior;
+    }
+
+    assert.deepEqual(executed, []);
+  });
+
   it("waits for job-completion auto-merge before wrap-up", async () => {
     const events = [];
 

@@ -594,6 +594,81 @@ export class RunSession {
     return schedulerStopPromise;
   };
 
+  // Wrap-up merges enqueue atlas_warm follow-ups (wi-cleanup, then
+  // main-incremental, then a scip-restage) AFTER the scheduler loop has
+  // already drained, so nothing executes them — the session exits with a
+  // stale index and unresolved edges, and the next boot starts behind.
+  // Natural-completion wrap-up drains them here, bounded, before the
+  // conductor closes. Chained follow-ups (a merge warm enqueues the restage
+  // that lifts edge resolution) surface on re-poll, hence the loop.
+  // Graceful shutdown (Ctrl+C) intentionally skips this: the user asked out.
+  const ATLAS_WRAPUP_DRAIN_BUDGET_MS = 10 * 60 * 1000;
+  const ATLAS_WRAPUP_DRAIN_MAX_READY_WAIT_MS = 30 * 1000;
+  const wrapUpAtlasDrainEnabled = () => {
+    const raw = String(process.env.POSSE_WRAPUP_ATLAS_DRAIN ?? "").trim().toLowerCase();
+    return !(raw && ["off", "false", "0", "no"].includes(raw));
+  };
+  const drainPendingAtlasWarmJobs = async ({ label = "Run wrap-up" } = {}) => {
+    if (!wrapUpAtlasDrainEnabled()) return { ran: 0, remaining: 0 };
+    const queuedWarms = () => {
+      try {
+        return listJobs(["queued"]).filter((j) => j.job_type === "atlas_warm");
+      } catch {
+        return [];
+      }
+    };
+    const deadline = Date.now() + ATLAS_WRAPUP_DRAIN_BUDGET_MS;
+    let ran = 0;
+    let announced = false;
+    try {
+      while (Date.now() < deadline) {
+        const pending = queuedWarms();
+        if (pending.length === 0) break;
+        if (!announced) {
+          announced = true;
+          if (hasLiveDisplay()) display.setRunPhase?.("ATLAS index finish");
+          emitCloseoutStatus(`${label}: finishing ${pending.length} queued ATLAS warm job(s) before exit...`, C.cyan);
+          await flushCloseoutStatus();
+        }
+        const now = Date.now();
+        const readyAtMs = (j) => (j.ready_at ? new Date(j.ready_at).getTime() : 0);
+        const job = pending.find((j) => readyAtMs(j) <= now);
+        if (!job) {
+          // Everything left is debounced into the future (e.g. a requeued
+          // failure backoff) — wait only for near-term ready times, otherwise
+          // leave them for the next boot instead of idling out the budget.
+          const earliest = Math.min(...pending.map(readyAtMs));
+          if (earliest - now > ATLAS_WRAPUP_DRAIN_MAX_READY_WAIT_MS) break;
+          await new Promise((resolve) => setTimeout(resolve, Math.min(1000, Math.max(100, earliest - now))));
+          continue;
+        }
+        const lease = scheduler.leaseManager.acquireWithLocks(job, scheduler.ownerId, null, scheduler.leaseSec);
+        if (!lease) break; // another owner holds it; don't fight at exit
+        const purpose = String(parseJobPayload(job)?.purpose || "wi");
+        emitCloseoutStatus(`${label}: ATLAS warm (${purpose})...`, C.cyan);
+        await flushCloseoutStatus();
+        try {
+          await worker.execute({ ...job, _leaseToken: lease.leaseToken });
+          ran += 1;
+        } catch (err) {
+          emitCloseoutStatus(`${label}: ATLAS warm (${purpose}) failed — ${String(err?.message || err).slice(0, 160)}`, C.yellow);
+          break; // don't grind a failing pipeline at exit; next boot retries
+        }
+      }
+    } catch { /* drain is best-effort; never block exit */ }
+    const remaining = queuedWarms().length;
+    if (announced) {
+      emitCloseoutStatus(
+        remaining === 0
+          ? `${label}: ATLAS index work finished (${ran} warm job(s)).`
+          : `${label}: ATLAS drain stopped — ${remaining} warm job(s) left for next boot.`,
+        remaining === 0 ? C.green : C.yellow,
+      );
+      await flushCloseoutStatus();
+    }
+    return { ran, remaining };
+  };
+
   maybeAnnounceAutoMergeSetting();
   const jobs = listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
   const needsGit = jobsNeedGitWorktree(jobs);
@@ -3424,6 +3499,9 @@ export class RunSession {
       await this.run();
       return;
     }
+    // Wrap-up merges queued ATLAS follow-up work; finish it while the
+    // conductor is still alive so the next boot opens on a current index.
+    await drainPendingAtlasWarmJobs({ label: "Run wrap-up" });
     emitCloseoutStatus("Run wrap-up: done.", C.green);
     await flushCloseoutStatus();
   } finally {

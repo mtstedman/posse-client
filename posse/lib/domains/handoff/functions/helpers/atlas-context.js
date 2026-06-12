@@ -1845,7 +1845,7 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     const walkTool = displayAtlasToolName("tree.walk", packet.atlas);
     lines.push(`Repo area map (compressed tree; drill into a branch with ${walkTool} {path, maxDepth}):`);
     for (const area of renderedAreaMap) {
-      lines.push(`- ${area.path} — ${area.label}`);
+      lines.push(`- ${area.path} — ${area.label}${area.labelStale ? " (label predates recent changes here)" : ""}`);
     }
   }
 
@@ -1862,7 +1862,11 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
       lines.push("- compressed-tree area matches:");
       for (const seed of treeScope.compressionSeeds) {
         const entry = (seed.entrypoints || [])[0];
-        lines.push(`  - ${seed.path} — ${seed.label}${entry ? ` (entry: ${entry})` : ""}`);
+        const notes = [
+          entry ? `entry: ${entry}` : null,
+          seed.labelStale ? "label predates recent changes here" : null,
+        ].filter(Boolean);
+        lines.push(`  - ${seed.path} — ${seed.label}${notes.length > 0 ? ` (${notes.join("; ")})` : ""}`);
       }
     }
   } else if (treeScope && treeScope.error) {

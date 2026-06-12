@@ -19,6 +19,7 @@ import { inspectLocalOnnxStatus } from "../embeddings/local-onnx.js";
 import { openViewWithMeta, removeSqliteFile, viewFreshness } from "../view-health.js";
 import { buildAtlasCapabilities } from "../capabilities.js";
 import { readGraphOverview } from "../graph-derived.js";
+import { readLatestTreeCompressionSnapshot } from "../tree-compression.js";
 import { readSemanticEnrichmentStatus } from "../semantic-enrichment.js";
 import { mergeLayerRows } from "../ledger/layer-merge.js";
 import { symbolHit, symbolIdOf } from "./cards.js";
@@ -164,6 +165,7 @@ export function repoStatus({ view, versionId, params, repoId = "default", repoRo
   const semanticStatus = buildSemanticStatus({ config, embeddingStatus, view, edges, repoRoot: root });
   const indexProgress = buildIndexProgress({ meta, freshness, versionId });
   const graphDerivedState = buildGraphDerivedState(view);
+  const treeCompression = buildTreeCompressionStatus(view);
   const dataQuality = params.detail === "minimal" ? null : buildDataQuality(view, ledger);
   const memoryStats = ledger ? buildMemoryStats(ledger) : null;
   /** @type {RepoStatusData} */
@@ -195,6 +197,7 @@ export function repoStatus({ view, versionId, params, repoId = "default", repoRo
     semanticStatus,
     indexProgress,
     graphDerivedState,
+    treeCompression,
     memoryStats,
     features: {
       memory: policy ? policy.memoryEnabled !== false : true,
@@ -237,6 +240,51 @@ export function repoStatus({ view, versionId, params, repoId = "default", repoRo
     data,
     meta: warnings.length > 0 ? { warnings: warnings.slice() } : undefined,
   });
+}
+
+/**
+ * Compressed-tree label freshness: how many ML-authored area labels still
+ * match the current deterministic tree, how many have drifted (area re-treed
+ * since labeling), and when the model last actually wrote text. The ML pass
+ * runs only at boot, so drift here is expected steady-state — this summary is
+ * what tells you whether the overview labels are merely "slightly behind" or
+ * genuinely rotten.
+ *
+ * @param {import("../contracts/api.js").View} view
+ */
+function buildTreeCompressionStatus(view) {
+  const db = typeof /** @type {any} */ (view)?._unsafeDb === "function"
+    ? /** @type {any} */ (view)._unsafeDb()
+    : null;
+  if (!db) return null;
+  try {
+    const snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: 1000, withStaleness: true });
+    if (!snapshot?.available || !snapshot.snapshot) return { available: false };
+    let staleLabels = 0;
+    let maxDriftCount = 0;
+    let oldestStaleSince = null;
+    let lastLabeledAt = null;
+    for (const seed of snapshot.seeds) {
+      if (seed.labelStale === true) staleLabels += 1;
+      const drift = Number(seed.driftCount || 0);
+      if (drift > maxDriftCount) maxDriftCount = drift;
+      if (seed.staleSince && (!oldestStaleSince || seed.staleSince < oldestStaleSince)) oldestStaleSince = seed.staleSince;
+      if (seed.labeledAt && (!lastLabeledAt || seed.labeledAt > lastLabeledAt)) lastLabeledAt = seed.labeledAt;
+    }
+    return {
+      available: true,
+      profile: snapshot.snapshot.profile || null,
+      builtAt: snapshot.snapshot.builtAt || null,
+      seedCount: snapshot.seeds.length,
+      currentLabels: snapshot.seeds.length - staleLabels,
+      staleLabels,
+      maxDriftCount,
+      oldestStaleSince,
+      lastLabeledAt,
+    };
+  } catch {
+    return { available: false };
+  }
 }
 
 /**

@@ -72,6 +72,13 @@ export function ensureTreeCompressionTables(db) {
   // reseed match unchanged deterministic seeds against the prior ML snapshot and
   // run the model only on the deltas.
   ensureColumn(db, "atlas_tree_compression_seeds", "deterministic_signature", "TEXT NOT NULL DEFAULT ''");
+  // Per-seed label provenance: when the ML pass actually authored the text
+  // (carried forward verbatim across reseeds/rebuilds), how many tree
+  // refreshes have changed the area since, and when it first drifted.
+  ensureColumn(db, "atlas_tree_compression_seeds", "labeled_at", "TEXT");
+  ensureColumn(db, "atlas_tree_compression_seeds", "drift_count", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "atlas_tree_compression_seeds", "stale_since", "TEXT");
+  ensureColumn(db, "atlas_tree_compression_seeds", "drift_signature", "TEXT");
 }
 
 /**
@@ -134,12 +141,14 @@ export function refreshTreeCompressionSnapshot(db, opts = {}) {
     }
 
     const { snapshotId } = writeTreeCompressionSnapshot(db, snapshot, sourceSignature);
+    const drift = updateTreeCompressionDrift(db);
     const durationMs = Date.now() - started;
     recordRun(db, TREE_COMPRESSION_RUN_KIND, "ok", durationMs, {
       profile: snapshot.profile,
       source_signature: sourceSignature,
       seed_count: snapshot.seeds.length,
       totals: snapshot.summary.totals,
+      ml_label_drift: drift.ok ? { checked: drift.checked, drifted: drift.drifted, cleared: drift.cleared } : { error: drift.error },
     });
     db.exec("RELEASE tree_compression_refresh");
     return {
@@ -391,6 +400,7 @@ export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {})
       nativeOpts,
     ));
     const enrichedSeeds = Array.isArray(enriched?.seeds) ? enriched.seeds : [];
+    stampSeedLabelProvenance(enrichedSeeds, readMlSeedProvenance(db), enriched?.builtAt);
 
     db.exec("SAVEPOINT tree_compression_ml_refresh");
     try {
@@ -441,6 +451,133 @@ export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {})
 }
 
 /**
+ * Read label provenance for the persisted ML seeds, keyed by node id. Kept
+ * separate from readPriorMlSnapshot so the binary-shaped prior payload stays
+ * exactly what the native code expects.
+ *
+ * @param {import("better-sqlite3").Database} db
+ * @returns {Map<string, { label: string, labeledAt: string | null, driftCount: number, staleSince: string | null, driftSignature: string | null }>}
+ */
+function readMlSeedProvenance(db) {
+  const out = new Map();
+  try {
+    const rows = db.prepare(
+      `SELECT s.node_id AS nodeId, s.label, s.labeled_at AS labeledAt,
+              s.drift_count AS driftCount, s.stale_since AS staleSince,
+              s.drift_signature AS driftSignature
+       FROM atlas_tree_compression_seeds s
+       JOIN atlas_tree_compression_snapshots p ON p.id = s.snapshot_id
+       WHERE p.profile = ?`,
+    ).all(TREE_COMPRESSION_ML_PROFILE);
+    for (const row of rows) {
+      out.set(String(row.nodeId || ""), {
+        label: String(row.label || ""),
+        labeledAt: row.labeledAt ? String(row.labeledAt) : null,
+        driftCount: numberOr(row.driftCount, 0),
+        staleSince: row.staleSince ? String(row.staleSince) : null,
+        driftSignature: row.driftSignature ? String(row.driftSignature) : null,
+      });
+    }
+  } catch { /* no prior ML snapshot yet */ }
+  return out;
+}
+
+/**
+ * Stamp label provenance onto seeds about to be persisted. A seed whose label
+ * text matches the prior ML seed was carried forward, so it keeps the original
+ * labeled_at and any accumulated drift state; a new or re-labeled seed starts
+ * fresh (labeled now, zero drift).
+ *
+ * @param {any[]} seeds
+ * @param {Map<string, any>} provenance
+ * @param {string | null | undefined} builtAt
+ */
+export function stampSeedLabelProvenance(seeds, provenance, builtAt) {
+  const now = builtAt || new Date().toISOString();
+  for (const seed of seeds || []) {
+    const prior = provenance.get(String(seed.nodeId || ""));
+    if (prior && prior.label === String(seed.label || "")) {
+      seed.labeledAt = prior.labeledAt || now;
+      seed.driftCount = prior.driftCount;
+      seed.staleSince = prior.staleSince;
+      seed.driftSignature = prior.driftSignature;
+    } else {
+      seed.labeledAt = now;
+      seed.driftCount = 0;
+      seed.staleSince = null;
+      seed.driftSignature = null;
+    }
+  }
+  return seeds;
+}
+
+/**
+ * Reconcile ML seed drift state against the freshest deterministic snapshot.
+ * Runs after every deterministic refresh (i.e. every warm), so re-treed areas
+ * accumulate an honest "changed N times since the label was written" counter
+ * without ever invoking the model:
+ *
+ * - current signature matches the labeled one: the label is accurate again;
+ *   drift state resets.
+ * - current signature differs from the LAST OBSERVED one: the area changed
+ *   again; drift_count increments, stale_since is set on first drift.
+ * - the node vanished from the deterministic seed set: counted once as a
+ *   drift to "missing".
+ *
+ * @param {import("better-sqlite3").Database} db
+ * @returns {{ ok: boolean, checked: number, drifted: number, cleared: number, error?: string }}
+ */
+export function updateTreeCompressionDrift(db) {
+  try {
+    const mlRow = db.prepare(
+      "SELECT id FROM atlas_tree_compression_snapshots WHERE profile = ? ORDER BY id DESC LIMIT 1",
+    ).get(TREE_COMPRESSION_ML_PROFILE);
+    const detRow = db.prepare(
+      "SELECT id FROM atlas_tree_compression_snapshots WHERE profile = ? ORDER BY id DESC LIMIT 1",
+    ).get(TREE_COMPRESSION_PROFILE);
+    if (!mlRow || !detRow) return { ok: true, checked: 0, drifted: 0, cleared: 0 };
+
+    const detSigs = new Map(db.prepare(
+      "SELECT node_id AS nodeId, deterministic_signature AS sig FROM atlas_tree_compression_seeds WHERE snapshot_id = ?",
+    ).all(detRow.id).map((row) => [String(row.nodeId || ""), String(row.sig || "")]));
+
+    const mlSeeds = db.prepare(
+      `SELECT node_id AS nodeId, deterministic_signature AS labeledSig,
+              drift_count AS driftCount, stale_since AS staleSince,
+              drift_signature AS driftSignature
+       FROM atlas_tree_compression_seeds WHERE snapshot_id = ?`,
+    ).all(mlRow.id);
+
+    const update = db.prepare(
+      `UPDATE atlas_tree_compression_seeds
+       SET drift_count = ?, stale_since = ?, drift_signature = ?
+       WHERE snapshot_id = ? AND node_id = ?`,
+    );
+    const now = new Date().toISOString();
+    let drifted = 0;
+    let cleared = 0;
+    for (const seed of mlSeeds) {
+      const nodeId = String(seed.nodeId || "");
+      const labeledSig = String(seed.labeledSig || "");
+      const lastSeen = seed.driftSignature ? String(seed.driftSignature) : labeledSig;
+      const current = detSigs.has(nodeId) ? detSigs.get(nodeId) : "__missing__";
+      if (current === labeledSig) {
+        if (seed.staleSince || numberOr(seed.driftCount, 0) !== 0 || seed.driftSignature) {
+          update.run(0, null, null, mlRow.id, nodeId);
+          cleared += 1;
+        }
+      } else if (current !== lastSeen) {
+        update.run(numberOr(seed.driftCount, 0) + 1, seed.staleSince || now, current, mlRow.id, nodeId);
+        drifted += 1;
+      }
+    }
+    return { ok: true, checked: mlSeeds.length, drifted, cleared };
+  } catch (err) {
+    return { ok: false, checked: 0, drifted: 0, cleared: 0, error: String(/** @type {any} */ (err)?.message || err) };
+  }
+}
+
+/**
  * Export the persisted ML snapshot (with its source signature) so a full view
  * rebuild — which recreates the view FILE and would otherwise destroy it —
  * can carry the annotations into the new file. Without this, every rebuild
@@ -458,6 +595,16 @@ export function exportTreeCompressionMlSnapshot(db) {
     if (!prior.available || !prior.snapshot) return null;
     const reconstructed = readPriorMlSnapshot(db);
     if (!reconstructed) return null;
+    const provenance = readMlSeedProvenance(db);
+    for (const seed of reconstructed.seeds) {
+      const prov = provenance.get(seed.nodeId);
+      if (prov) {
+        seed.labeledAt = prov.labeledAt;
+        seed.driftCount = prov.driftCount;
+        seed.staleSince = prov.staleSince;
+        seed.driftSignature = prov.driftSignature;
+      }
+    }
     return {
       snapshot: reconstructed,
       sourceSignature: prior.snapshot.sourceSignature || null,
@@ -573,7 +720,11 @@ export function readLatestTreeCompressionSnapshot(db, opts = {}) {
             avoid_if_query_only_mentions_json AS avoidJson,
             ml_features_json AS mlFeaturesJson,
             signals_json AS signalsJson,
-            deterministic_signature AS deterministicSignature
+            deterministic_signature AS deterministicSignature,
+            labeled_at AS labeledAt,
+            drift_count AS driftCount,
+            stale_since AS staleSince,
+            drift_signature AS driftSignature
      FROM atlas_tree_compression_seeds
      WHERE snapshot_id = ?
      ORDER BY confidence DESC, repo_rel_path ASC
@@ -590,7 +741,37 @@ export function readLatestTreeCompressionSnapshot(db, opts = {}) {
     mlFeatures: parseJsonObject(seed.mlFeaturesJson),
     signals: parseJsonObject(seed.signalsJson),
     deterministicSignature: String(seed.deterministicSignature || ""),
+    labeledAt: seed.labeledAt ? String(seed.labeledAt) : null,
+    driftCount: numberOr(seed.driftCount, 0),
+    staleSince: seed.staleSince ? String(seed.staleSince) : null,
+    driftSignature: seed.driftSignature ? String(seed.driftSignature) : null,
   }));
+
+  // Optional staleness decoration: a seed's label is "stale" when the area's
+  // CURRENT deterministic signature no longer matches the one the label was
+  // written against (the area was re-treed after labeling). Computed against
+  // the deterministic-profile snapshot, which refreshes on every warm.
+  if (opts.withStaleness && row.profile === TREE_COMPRESSION_ML_PROFILE) {
+    try {
+      const det = db.prepare(
+        `SELECT s.node_id AS nodeId, s.deterministic_signature AS sig
+         FROM atlas_tree_compression_seeds s
+         JOIN atlas_tree_compression_snapshots p ON p.id = s.snapshot_id
+         WHERE p.profile = ?
+         ORDER BY p.id DESC`,
+      ).all(TREE_COMPRESSION_PROFILE);
+      const currentSig = new Map();
+      for (const entry of det) {
+        if (!currentSig.has(entry.nodeId)) currentSig.set(String(entry.nodeId), String(entry.sig || ""));
+      }
+      if (currentSig.size > 0) {
+        for (const seed of seeds) {
+          const sig = currentSig.get(seed.nodeId);
+          seed.labelStale = sig === undefined || sig !== seed.deterministicSignature;
+        }
+      }
+    } catch { /* staleness is advisory */ }
+  }
   return {
     available: true,
     snapshot: {
@@ -637,8 +818,9 @@ function writeTreeCompressionSnapshot(db, snapshot, sourceSignature) {
     `INSERT INTO atlas_tree_compression_seeds
        (snapshot_id, node_id, repo_rel_path, label, confidence, aliases_json,
         entrypoints_json, likely_tests_json, avoid_if_query_only_mentions_json,
-        ml_features_json, signals_json, deterministic_signature)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ml_features_json, signals_json, deterministic_signature,
+        labeled_at, drift_count, stale_since, drift_signature)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const seed of snapshot.seeds || []) {
     seedInsert.run(
@@ -654,6 +836,10 @@ function writeTreeCompressionSnapshot(db, snapshot, sourceSignature) {
       JSON.stringify(seed.mlFeatures || {}),
       JSON.stringify(seed.signals || {}),
       String(seed.deterministicSignature || ""),
+      seed.labeledAt ?? snapshot.builtAt ?? null,
+      Number.isFinite(Number(seed.driftCount)) ? Number(seed.driftCount) : 0,
+      seed.staleSince ?? null,
+      seed.driftSignature ?? null,
     );
   }
   return { snapshotId };

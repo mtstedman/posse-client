@@ -24,6 +24,8 @@ import {
   exportTreeCompressionMlSnapshot,
   importTreeCompressionMlSnapshot,
   readLatestTreeCompressionSnapshot,
+  stampSeedLabelProvenance,
+  updateTreeCompressionDrift,
 } from "../lib/domains/atlas/functions/v2/tree-compression.js";
 import { readSemanticEnrichmentStatus } from "../lib/domains/atlas/functions/v2/semantic-enrichment.js";
 import { recordLiveBufferEvent, liveReconciliationStatus } from "../lib/domains/atlas/functions/v2/live-reconciliation.js";
@@ -962,6 +964,99 @@ describe("retrieval dispatcher", () => {
       assert.equal(reread.snapshot.sourceSignature, "ml-sig");
       assert.equal(reread.seeds[0].label, "ML salutation pipeline");
       assert.equal(reread.seeds[0].deterministicSignature, "det-sig-1");
+
+      // Label-drift tracking: the ML pass runs only at boot, so deterministic
+      // refreshes reconcile each ML label against the area's CURRENT signature
+      // — counting changes since labeling without ever invoking the model.
+      const writeDetSnapshot = (sig) => {
+        const prior = db.prepare(
+          "SELECT id FROM atlas_tree_compression_snapshots WHERE profile = 'quick_dirty_tree_ml_features_v0'",
+        ).all().map((row) => row.id);
+        for (const id of prior) {
+          db.prepare("DELETE FROM atlas_tree_compression_seeds WHERE snapshot_id = ?").run(id);
+          db.prepare("DELETE FROM atlas_tree_compression_snapshots WHERE id = ?").run(id);
+        }
+        const snap = db.prepare(
+          `INSERT INTO atlas_tree_compression_snapshots (built_at, profile, source_signature, status)
+           VALUES (?, 'quick_dirty_tree_ml_features_v0', ?, 'ok')`,
+        ).run("2026-06-11T02:00:00Z", sig);
+        db.prepare(
+          `INSERT INTO atlas_tree_compression_seeds
+             (snapshot_id, node_id, repo_rel_path, label, confidence, deterministic_signature)
+           VALUES (?, 'dir:src/domain', 'src/domain', 'salutation pipeline', 0.9, ?)`,
+        ).run(Number(snap.lastInsertRowid), sig);
+      };
+
+      // Matching signature: no drift, label reads as current.
+      writeDetSnapshot("det-sig-1");
+      let drift = updateTreeCompressionDrift(db);
+      assert.deepEqual(drift, { ok: true, checked: 1, drifted: 0, cleared: 0 });
+      let staleRead = readLatestTreeCompressionSnapshot(db, { profile: "one_time_tree_ml_seed_v0", withStaleness: true });
+      assert.equal(staleRead.seeds[0].labelStale, false);
+      assert.equal(staleRead.seeds[0].driftCount, 0);
+      assert.equal(staleRead.seeds[0].staleSince, null);
+
+      // Area re-treed: one drift counted, stale_since stamped...
+      writeDetSnapshot("det-sig-2");
+      drift = updateTreeCompressionDrift(db);
+      assert.deepEqual(drift, { ok: true, checked: 1, drifted: 1, cleared: 0 });
+      staleRead = readLatestTreeCompressionSnapshot(db, { profile: "one_time_tree_ml_seed_v0", withStaleness: true });
+      assert.equal(staleRead.seeds[0].labelStale, true);
+      assert.equal(staleRead.seeds[0].driftCount, 1);
+      assert.ok(staleRead.seeds[0].staleSince);
+      const firstStaleSince = staleRead.seeds[0].staleSince;
+
+      // ...but re-running against the SAME signature does not inflate the count
+      // (drift counts distinct changes, not refresh ticks).
+      drift = updateTreeCompressionDrift(db);
+      assert.deepEqual(drift, { ok: true, checked: 1, drifted: 0, cleared: 0 });
+
+      // A second distinct change bumps it again and keeps the first stale-since.
+      writeDetSnapshot("det-sig-3");
+      drift = updateTreeCompressionDrift(db);
+      assert.deepEqual(drift, { ok: true, checked: 1, drifted: 1, cleared: 0 });
+      staleRead = readLatestTreeCompressionSnapshot(db, { profile: "one_time_tree_ml_seed_v0", withStaleness: true });
+      assert.equal(staleRead.seeds[0].driftCount, 2);
+      assert.equal(staleRead.seeds[0].staleSince, firstStaleSince);
+
+      // Drift state survives the rebuild export/import carry.
+      const driftedExport = exportTreeCompressionMlSnapshot(db);
+      assert.equal(driftedExport.snapshot.seeds[0].driftCount, 2);
+      db.prepare("DELETE FROM atlas_tree_compression_seeds").run();
+      db.prepare("DELETE FROM atlas_tree_compression_snapshots").run();
+      assert.equal(importTreeCompressionMlSnapshot(db, driftedExport).ok, true);
+      staleRead = readLatestTreeCompressionSnapshot(db, { profile: "one_time_tree_ml_seed_v0" });
+      assert.equal(staleRead.seeds[0].driftCount, 2);
+      assert.equal(staleRead.seeds[0].staleSince, firstStaleSince);
+
+      // Content back at the labeled signature: the label is accurate again.
+      writeDetSnapshot("det-sig-1");
+      drift = updateTreeCompressionDrift(db);
+      assert.deepEqual(drift, { ok: true, checked: 1, drifted: 0, cleared: 1 });
+      staleRead = readLatestTreeCompressionSnapshot(db, { profile: "one_time_tree_ml_seed_v0", withStaleness: true });
+      assert.equal(staleRead.seeds[0].labelStale, false);
+      assert.equal(staleRead.seeds[0].driftCount, 0);
+      assert.equal(staleRead.seeds[0].staleSince, null);
+
+      // Provenance stamping for the boot ML pass: carried-forward labels keep
+      // their original labeled_at and drift state; re-labeled seeds reset.
+      const provenance = new Map([
+        ["dir:a", { label: "kept label", labeledAt: "2026-01-01T00:00:00Z", driftCount: 3, staleSince: "2026-02-01T00:00:00Z", driftSignature: "sig-x" }],
+        ["dir:b", { label: "old label", labeledAt: "2026-01-01T00:00:00Z", driftCount: 1, staleSince: null, driftSignature: null }],
+      ]);
+      const stamped = stampSeedLabelProvenance([
+        { nodeId: "dir:a", label: "kept label" },
+        { nodeId: "dir:b", label: "rewritten label" },
+        { nodeId: "dir:c", label: "brand new label" },
+      ], provenance, "2026-06-11T03:00:00Z");
+      assert.equal(stamped[0].labeledAt, "2026-01-01T00:00:00Z");
+      assert.equal(stamped[0].driftCount, 3);
+      assert.equal(stamped[0].staleSince, "2026-02-01T00:00:00Z");
+      assert.equal(stamped[1].labeledAt, "2026-06-11T03:00:00Z");
+      assert.equal(stamped[1].driftCount, 0);
+      assert.equal(stamped[1].staleSince, null);
+      assert.equal(stamped[2].labeledAt, "2026-06-11T03:00:00Z");
+      assert.equal(stamped[2].driftCount, 0);
 
       const snapshotSql = `SELECT node_id AS nodeId, parent_node_id AS parentNodeId, depth, sort_order AS sortOrder
                            FROM atlas_tree_nodes

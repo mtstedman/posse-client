@@ -159,7 +159,7 @@ function treeTraversal({ view, versionId, params = {}, action }) {
   let areaMap;
   if (action === "tree.overview" && !focused) {
     try {
-      const snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: COMPRESSION_SEED_READ_LIMIT });
+      const snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: COMPRESSION_SEED_READ_LIMIT, withStaleness: true });
       if (snapshot?.available) areaMap = compressionAreaMap(snapshot.seeds);
     } catch { /* compression tables are optional */ }
   }
@@ -569,7 +569,7 @@ function attachCompressionLabels(db, nodes) {
   if (!Array.isArray(nodes) || nodes.length === 0) return;
   let snapshot;
   try {
-    snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: 500 });
+    snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: 500, withStaleness: true });
   } catch {
     return;
   }
@@ -578,13 +578,16 @@ function attachCompressionLabels(db, nodes) {
   for (const seed of snapshot.seeds) {
     const path = String(seed?.path || "").trim();
     const label = String(seed?.label || "").trim();
-    if (path && label && !labelByPath.has(path)) labelByPath.set(path, label);
+    if (path && label && !labelByPath.has(path)) labelByPath.set(path, seed);
   }
   for (const node of nodes) {
     const path = typeof node.repoRelPath === "string" ? node.repoRelPath : null;
     if (!path) continue;
-    const label = labelByPath.get(path);
-    if (label) node.areaLabel = label;
+    const seed = labelByPath.get(path);
+    if (seed) {
+      node.areaLabel = String(seed.label).trim();
+      if (seed.labelStale === true) node.areaLabelStale = true;
+    }
   }
 }
 
@@ -1136,7 +1139,7 @@ function confidenceBand(value) {
 function scoreCompressionSeeds({ db, model, queryTerms, opts, fileScores, branchScores, rejectedBroadDirs, refinementCandidateMap }) {
   let snapshot;
   try {
-    snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: COMPRESSION_SEED_READ_LIMIT });
+    snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: COMPRESSION_SEED_READ_LIMIT, withStaleness: true });
   } catch {
     return { available: false, reason: "tree_compression_read_failed", profile: null, matchedSeeds: [] };
   }
@@ -1211,6 +1214,7 @@ function scoreCompressionSeeds({ db, model, queryTerms, opts, fileScores, branch
       confidence,
       hits,
       entrypoints,
+      ...(seed.labelStale === true ? { labelStale: true } : {}),
     });
   }
   matched.sort((a, b) => b.hits - a.hits
@@ -1249,12 +1253,15 @@ function compressionAreaMap(seeds) {
         path,
         label: String(seed.label),
         confidence: Math.max(0, Math.min(1, Number(seed.confidence) || 0)),
+        ...(seed.labelStale === true ? { labelStale: true } : {}),
       };
     })
     .sort((a, b) => b.confidence - a.confidence || a.path.localeCompare(b.path))
     .slice(0, COMPRESSION_AREA_MAP_LIMIT)
     .sort((a, b) => a.path.localeCompare(b.path))
     .map((area) => ({ ...area, confidence: confidenceBand(area.confidence) }));
+  // Note: labelStale flags ride through the spread above; stale labels stay in
+  // the map (an approximate label beats no label) but readers see the caveat.
 }
 
 function lexicalScopeFileScore(file, qtf, model) {
