@@ -8,6 +8,7 @@
 // scheduler can still drain the queue without blocking pipeline work.
 
 import fs from "fs";
+import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import {
   completeAttempt,
@@ -23,8 +24,9 @@ import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-
 import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.js";
 import { ledgerDbPath, mainViewPath } from "../../../atlas/functions/v2/runtime-paths.js";
 import { getSharedConductor } from "../../../atlas/functions/v2/parse/conductor.js";
+import { emitEmbeddingsResume } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { warmReadinessStarted, warmReadinessProgress, warmReadinessDone } from "../../../atlas/functions/v2/warm-progress.js";
-import { getAtlasIntegrationConfig } from "../../../integrations/functions/atlas/config.js";
+import { getAtlasIntegrationConfig, getAtlasRuntimeDisabledReason } from "../../../integrations/functions/atlas/config.js";
 import {
   formatAtlasError,
   isVerboseAtlasErrors,
@@ -67,19 +69,33 @@ function positiveMs(value) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
+// One embeddings slice is encode-bound, not parse-bound: budget for the slice
+// cap at a conservative local-ONNX rate plus model warm-up, independent of the
+// boot/scip timeouts that size full warms.
+const ATLAS_EMBEDDINGS_SLICE_BUDGET_MS = 10 * 60_000;
+
 function atlasWarmRuntimeBudgetMs(purpose, config = {}) {
   const policyBudget = positiveMs(ATLAS_WARM_JOB_POLICY.maxRuntimeMs) || 60_000;
-  const candidates = [
-    policyBudget,
-    positiveMs(config.bootTimeoutMs),
-  ];
+  if (purpose === "wi" || purpose === "wi-cleanup") return policyBudget;
+  if (purpose === "embeddings") return Math.max(policyBudget, ATLAS_EMBEDDINGS_SLICE_BUDGET_MS);
+  const candidates = [policyBudget];
   if (purpose === "main-full" || purpose === "main-incremental" || purpose === "scip-restage") {
     candidates.push(
+      positiveMs(config.bootTimeoutMs),
       positiveMs(config.scipIndexTimeoutMs),
       positiveMs(config.scipColdIndexTimeoutMs),
     );
+  } else if (purpose === "main-merge") {
+    candidates.push(positiveMs(config.bootTimeoutMs));
   }
   return Math.max(...candidates.filter((n) => n != null));
+}
+
+function atlasRuntimeDisabledReasonForRepo(repoRoot) {
+  return getAtlasRuntimeDisabledReason()
+    || getAtlasRuntimeDisabledReason(repoRoot)
+    || getAtlasRuntimeDisabledReason(path.basename(String(repoRoot || "")))
+    || getAtlasRuntimeDisabledReason(ledgerDbPath(repoRoot));
 }
 
 export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abortSignal = null } = {}) {
@@ -99,6 +115,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
     const branch = typeof payload.branch === "string" ? payload.branch : (purpose === "wi" ? null : baselineBranch);
     const paths = clampPaths(payload.paths);
     const config = getAtlasIntegrationConfig();
+    const disabledReason = atlasRuntimeDisabledReasonForRepo(repoRoot);
 
     worker._throwIfKilled?.(job.id);
 
@@ -111,7 +128,26 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
     /** @type {import("../../../atlas/functions/v2/contracts/jobs.js").AtlasWarmJobResult} */
     let result;
     let backend = "atlas-v2-stub";
-    if (exceeded) {
+    if (disabledReason || config?.enabled === false) {
+      const reason = disabledReason || config?.disabledReason || config?.skipped || "atlas_disabled";
+      result = {
+        purpose: /** @type {any} */ (purpose),
+        paths_considered: paths.length,
+        paths_indexed: 0,
+        blobs_ingested: 0,
+        blobs_reused: 0,
+        ledger_entries_appended: 0,
+        view_written: payload.out_view_path || null,
+        view_etag: null,
+        duration_ms: 0,
+        skipped: (paths.length > 0 ? paths : ["."]).map((repo_rel_path) => ({
+          repo_rel_path,
+          reason: "atlas_disabled",
+          message: `ATLAS disabled for this run: ${reason}`,
+        })),
+      };
+      backend = "atlas-v2-disabled";
+    } else if (exceeded) {
       result = {
         purpose: /** @type {any} */ (purpose),
         paths_considered: paths.length,
@@ -179,6 +215,33 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
     });
 
     setJobResult(job.id, result);
+
+    // Budget-sliced resume loop: an embeddings warm that stopped short of
+    // parity enqueues the next slice (coalescing with any already-queued one).
+    // A slice that made zero progress AND errored does not re-enqueue — that
+    // would hot-loop a deterministic failure; the next boot readiness check or
+    // pipeline event retries instead.
+    if (purpose === "embeddings" && backend === "atlas-v2" && result.embeddings_complete === false) {
+      const encoded = Number(result.embeddings_indexed) || 0;
+      const remaining = Number(result.embeddings_remaining) || 0;
+      if (remaining > 0 && (encoded > 0 || !result.embeddings_error)) {
+        try {
+          emitEmbeddingsResume({
+            payload: {
+              target_branch: branch || baselineBranch,
+              reason: "warm_incomplete",
+              remaining,
+            },
+            jobId: job.id,
+            maxSymbols: Number.isInteger(payload.max_symbols) && payload.max_symbols > 0
+              ? payload.max_symbols
+              : null,
+          });
+          worker.emit(job.id, `${C.dim}[atlas] embeddings resume: ${remaining} symbols remaining — next slice queued${C.reset}`);
+        } catch { /* best effort — readiness self-repair re-detects the gap */ }
+      }
+    }
+
     completeAttempt(attempt.attempt.id, {
       status: "succeeded",
       duration_ms: result.duration_ms,

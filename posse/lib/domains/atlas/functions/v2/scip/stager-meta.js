@@ -9,6 +9,14 @@ import fs from "fs";
 import path from "path";
 
 export const SCIP_STAGER_META_SCHEMA_VERSION = 1;
+const LEGACY_TIMEOUT_HASH_VALUES = Object.freeze([
+  0,
+  120_000,
+  300_000,
+  360_000,
+  600_000,
+  1_800_000,
+]);
 
 /**
  * @param {string} outputPath
@@ -55,29 +63,57 @@ export async function writeStagerMeta(outputPath, meta) {
   }
 }
 
-/**
- * @param {{ command?: string, args?: string[], label?: string, indexerId?: string, commandSource?: string, timeoutMs?: number, commandArgsHashTimeoutMs?: number }} plan
- * @returns {string}
- */
-export function computeCommandArgsHash(plan) {
+function commandArgsHashPayload(plan, { includeTimeout = false, timeoutMs = 0 } = {}) {
   const payload = {
     command: String(plan?.command || ""),
     args: Array.isArray(plan?.args) ? plan.args.map((arg) => String(arg)) : [],
     label: String(plan?.label || ""),
     indexer_id: String(plan?.indexerId || ""),
     command_source: String(plan?.commandSource || ""),
-    timeout_ms: Number(plan?.commandArgsHashTimeoutMs ?? plan?.timeoutMs ?? 0) || 0,
   };
+  if (includeTimeout) payload.timeout_ms = Number(timeoutMs) || 0;
+  return payload;
+}
+
+function sha256Json(payload) {
   return `sha256:${crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex")}`;
 }
 
 /**
+ * @param {{ command?: string, args?: string[], label?: string, indexerId?: string, commandSource?: string }} plan
+ * @returns {string}
+ */
+export function computeCommandArgsHash(plan) {
+  return sha256Json(commandArgsHashPayload(plan));
+}
+
+function computeLegacyTimeoutCommandArgsHash(plan, timeoutMs) {
+  return sha256Json(commandArgsHashPayload(plan, { includeTimeout: true, timeoutMs }));
+}
+
+function commandArgsHashMatches(metaHash, plan) {
+  const actual = String(metaHash || "");
+  if (!actual) return false;
+  if (actual === computeCommandArgsHash(plan)) return true;
+  const legacyTimeouts = new Set([
+    Number(plan?.commandArgsHashTimeoutMs),
+    Number(plan?.timeoutMs),
+    ...LEGACY_TIMEOUT_HASH_VALUES,
+  ].filter((value) => Number.isFinite(value) && value >= 0).map((value) => Math.floor(value)));
+  for (const timeoutMs of legacyTimeouts) {
+    if (actual === computeLegacyTimeoutCommandArgsHash(plan, timeoutMs)) return true;
+  }
+  return false;
+}
+
+/**
  * @param {{ indexerId?: string, label?: string, command?: string, commandSource?: string }} plan
- * @param {{ head?: string | null, commandArgsHash?: string | null, filesetHash?: string | null }} input
+ * @param {{ head?: string | null, commandArgsHash?: string | null, filesetHash?: string | null, durationMs?: number | null }} input
  * @returns {Record<string, any>}
  */
-export function buildStagerMeta(plan, { head = null, commandArgsHash = null, filesetHash = null } = {}) {
+export function buildStagerMeta(plan, { head = null, commandArgsHash = null, filesetHash = null, durationMs = null } = {}) {
   const language = String(plan?.indexerId || "configured").trim() || "configured";
+  const duration = Number(durationMs);
   return {
     schema_version: SCIP_STAGER_META_SCHEMA_VERSION,
     status: "staged",
@@ -89,6 +125,10 @@ export function buildStagerMeta(plan, { head = null, commandArgsHash = null, fil
     command_source: String(plan?.commandSource || ""),
     command_args_hash: commandArgsHash || computeCommandArgsHash(plan),
     fileset_hash: filesetHash || null,
+    // How long the indexer actually ran. Restage timeouts size off this so a
+    // language whose full index is known to take minutes is never killed by a
+    // generic default. null when the meta was refreshed without a run.
+    staged_duration_ms: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null,
   };
 }
 
@@ -120,7 +160,7 @@ export function buildRecoveredStagerMeta(plan, { head = null, commandArgsHash = 
 
 /**
  * @param {{ indexerId?: string, label?: string, command?: string, commandSource?: string }} plan
- * @param {{ head?: string | null, commandArgsHash?: string | null, filesetHash?: string | null, error?: string | null, reason?: string | null, previousMeta?: Record<string, any> | null }} input
+ * @param {{ head?: string | null, commandArgsHash?: string | null, filesetHash?: string | null, error?: string | null, reason?: string | null, previousMeta?: Record<string, any> | null, durationMs?: number | null }} input
  * @returns {Record<string, any>}
  */
 export function buildFailedStagerMeta(plan, {
@@ -130,10 +170,12 @@ export function buildFailedStagerMeta(plan, {
   error = null,
   reason = null,
   previousMeta = null,
+  durationMs = null,
 } = {}) {
   const language = String(plan?.indexerId || "configured").trim() || "configured";
   const previousAttempts = Number(previousMeta?.attempt_count || 0);
   const previousStaged = stagedSnapshotFromMeta(previousMeta);
+  const duration = Number(durationMs);
   return {
     schema_version: SCIP_STAGER_META_SCHEMA_VERSION,
     status: "failed",
@@ -148,6 +190,7 @@ export function buildFailedStagerMeta(plan, {
     fileset_hash: filesetHash || null,
     failure_reason: reason || null,
     error: error || null,
+    failed_after_ms: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null,
     previous_staged: previousStaged,
   };
 }
@@ -172,8 +215,7 @@ export function metaIsCurrent(meta, { head = null, filesetHash = null, previousF
     return { current: false, reason: "previous_failure" };
   }
   if (status && status !== "staged") return { current: false, reason: `status_${status}` };
-  const expectedHash = computeCommandArgsHash(plan);
-  if (String(meta.command_args_hash || "") !== expectedHash) {
+  if (!commandArgsHashMatches(meta.command_args_hash, plan)) {
     return { current: false, reason: "command_changed" };
   }
   const currentFilesetHash = String(filesetHash || "");
@@ -215,5 +257,6 @@ function stagedSnapshotFromMeta(meta) {
     command_source: String(meta.command_source || ""),
     command_args_hash: meta.command_args_hash || null,
     fileset_hash: meta.fileset_hash || null,
+    staged_duration_ms: Number(meta.staged_duration_ms) > 0 ? Math.round(Number(meta.staged_duration_ms)) : null,
   };
 }

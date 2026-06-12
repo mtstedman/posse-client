@@ -533,6 +533,200 @@ suite("Provider aliases", () => {
     }
   });
 
+  it("runs Claude interactive mode through the tracked Posse provider workflow", async () => {
+    const claude = await import("../../../lib/domains/providers/functions/claude.js");
+    const { ClaudeProvider } = await import("../../../lib/domains/providers/classes/ClaudeProvider.js");
+    const { TrackedProviderClient } = await import("../../../lib/domains/worker/classes/TrackedProviderClient.js");
+    const { queueMod, dbMod } = runtimeModules;
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-interactive-workflow-"));
+    const claudeHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-interactive-workflow-home-"));
+    fs.mkdirSync(path.join(projectDir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(projectDir, "src", "app.js"), "export const value = 1;\n", "utf8");
+
+    const wi = queueMod.createWorkItem("Interactive Claude workflow", "exercise tracked provider context");
+    const job = queueMod.createJob({
+      work_item_id: wi.id,
+      job_type: "dev",
+      title: "Use interactive Claude harness",
+      provider: "claude",
+      payload_json: {
+        task_mode: "code",
+        files_to_modify: ["src/app.js"],
+        files_to_create: ["src/generated.js"],
+      },
+    });
+
+    const promptRecords = [];
+    const outputRecords = [];
+    const observationContexts = [];
+    const observed = {};
+    let loaderPath = null;
+
+    const valueAfterArg = (args, flag) => {
+      const index = args.indexOf(flag);
+      return index >= 0 ? args[index + 1] : null;
+    };
+
+    const backend = createFakeInteractiveBackend(({ data, args, opts, emit, exit }) => {
+      if (data === "/exit\r") {
+        exit();
+        return;
+      }
+      if (!data.includes("Summarize the workflow sentinel")) return;
+
+      observed.args = args;
+      observed.spawnCwd = opts.cwd;
+      observed.promptWrite = data;
+
+      const systemPromptPath = valueAfterArg(args, "--system-prompt-file");
+      observed.systemPrompt = fs.readFileSync(systemPromptPath, "utf8");
+
+      const mcpConfigPath = valueAfterArg(args, "--mcp-config");
+      observed.mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf8"));
+      const gateway = observed.mcpConfig.mcpServers?.["posse-gateway"];
+      const encodedBoot = valueAfterArg(gateway?.args || [], "--config-json");
+      observed.bootPayload = JSON.parse(Buffer.from(encodedBoot, "base64").toString("utf8"));
+
+      assert.match(observed.systemPrompt, /REMOTE ROLE SENTINEL: beta-17/);
+      assert.match(observed.systemPrompt, /WORKFLOW CONTEXT SENTINEL: alpha-42/);
+      assert.equal(observed.bootPayload.cwd, projectDir);
+      assert.deepEqual(observed.bootPayload.scopedFiles, ["src/app.js"]);
+      assert.deepEqual(observed.bootPayload.createFiles, ["src/generated.js"]);
+      assert.equal(observed.bootPayload.providerName, "claude");
+      assert.equal(observed.bootPayload.jobId, job.id);
+      assert.equal(observed.bootPayload.workItemId, wi.id);
+
+      const sessionId = "workflow-interactive-session";
+      const projectLogDir = claude.__testGetClaudeProjectDirForCwd(opts.cwd);
+      const sessionsDir = path.join(claudeHome, "sessions");
+      fs.mkdirSync(projectLogDir, { recursive: true });
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      const nowIso = new Date().toISOString();
+      const rows = [
+        { type: "user", sessionId, timestamp: nowIso, message: { role: "user", content: "Summarize the workflow sentinel." } },
+        { type: "assistant", sessionId, timestamp: nowIso, message: { role: "assistant", content: [{ type: "text", text: "workflow context ok" }], usage: { input_tokens: 21, output_tokens: 4 } } },
+        { type: "system", subtype: "turn_duration", sessionId, timestamp: nowIso, durationMs: 18 },
+      ];
+      fs.writeFileSync(
+        path.join(projectLogDir, `${sessionId}.jsonl`),
+        `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+        "utf8"
+      );
+      fs.writeFileSync(path.join(sessionsDir, "workflow.json"), JSON.stringify({
+        sessionId,
+        cwd: opts.cwd,
+        kind: "interactive",
+        entrypoint: "cli",
+        status: "idle",
+        updatedAt: Date.now(),
+      }), "utf8");
+      emit("workflow context ok\r\n");
+    });
+
+    try {
+      claude.__testSetClaudeResolution("claude", []);
+      setClaudeConfigDirForTests(claudeHome);
+      const provider = new ClaudeProvider({ module: claude });
+      const worker = {
+        projectDir,
+        display: null,
+        stallTimeout: 1,
+        _abortControllers: new Map(),
+        _killReasons: new Map(),
+        emit() {},
+      };
+      const client = new TrackedProviderClient({
+        worker,
+        deps: {
+          getAvailableProviders: () => ["claude"],
+          getProvider: () => provider,
+          getProviderRateLimitState: () => ({ blocked: false, retryInSec: 0, reason: "" }),
+          selectProviderName: () => "claude",
+          filterProviderToolUseReplay: (tools) => tools,
+          getObservationContext: () => ({}),
+          recordObservation: () => {},
+          recordToolUseObservations: () => {},
+          runWithObservationContext: async (ctx, fn) => {
+            observationContexts.push(ctx);
+            return await fn();
+          },
+          recordPrompt: (entry) => promptRecords.push(entry),
+          recordOutput: (entry) => outputRecords.push(entry),
+          resolveAtlasExecutionAttachment: () => ({ method: "baseline" }),
+          sanitizeExecutionHintsForRole: (_role, opts) => opts,
+          resolvePrimaryExecutionModelName: (_jobModelName, _opts, tierConfig) => tierConfig.model,
+          selectFallbackProvider: () => null,
+          provisionAgentLoader: (_projectDir, jobId) => {
+            loaderPath = path.join(projectDir, ".posse-test-loaders", `job-${jobId}`);
+            fs.mkdirSync(loaderPath, { recursive: true });
+            return loaderPath;
+          },
+          assertLoaderClean: (dir) => assert.equal(dir, loaderPath),
+          recordRecoveryCheckpoint: () => {},
+          retainReplayOutput: () => {},
+          retainReplayPrompt: () => {},
+          retainReplayToolUses: () => {},
+        },
+      });
+
+      const result = await client.call("Summarize the workflow sentinel.", {
+        role: "dev",
+        allowWrite: true,
+        modelTier: "standard",
+        activity: "interactive workflow",
+        scopedFiles: ["src/app.js"],
+        createFiles: ["src/generated.js"],
+        stableContext: "WORKFLOW CONTEXT SENTINEL: alpha-42",
+        remoteSystemPrompt: "REMOTE ROLE SENTINEL: beta-17",
+        disableAtlas: true,
+        silent: true,
+        maxTurns: 1,
+        interactiveBackend: backend,
+      }, {
+        job_id: job.id,
+        work_item_id: wi.id,
+        cwd: projectDir,
+        jobProvider: "claude",
+      });
+
+      assert.equal(result.output, "workflow context ok");
+      assert.equal(result.stats.executionMode, "interactive");
+      assert.equal(result.stats.sessionHandle, "workflow-interactive-session");
+      assert.equal(result.stats.inputTokens, 21);
+      assert.equal(result.stats.outputTokens, 4);
+      assert.equal(observed.spawnCwd, loaderPath);
+      assert.equal(observed.bootPayload.cwd, projectDir);
+      assert.ok(observed.args.includes("--permission-mode"));
+      assert.ok(observed.args.includes("dontAsk"));
+      assert.equal(observed.args.includes("-p"), false);
+      assert.equal(observed.args.includes("--output-format"), false);
+      assert.equal(observed.args.includes("--dangerously-skip-permissions"), false);
+      assert.match(observed.promptWrite, /Summarize the workflow sentinel/);
+      assert.ok(backend.writes.includes("/exit\r"));
+      assert.deepEqual(observationContexts, [{
+        work_item_id: wi.id,
+        job_id: job.id,
+        attempt_id: null,
+        role: "dev",
+      }]);
+      assert.equal(promptRecords.length, 1);
+      assert.match(promptRecords[0].systemPrompt, /WORKFLOW CONTEXT SENTINEL: alpha-42/);
+      assert.equal(outputRecords[0].output, "workflow context ok");
+      const storedCall = queueMod.getAgentCalls(job.id)[0];
+      assert.equal(storedCall.provider, "claude");
+      assert.equal(storedCall.status, "succeeded");
+      assert.equal(storedCall.session_handle, "workflow-interactive-session");
+      assert.equal(storedCall.input_tokens, 21);
+      assert.equal(storedCall.output_tokens, 4);
+      assert.equal(dbMod.getDb().prepare(`SELECT COUNT(*) AS count FROM agent_calls WHERE job_id = ?`).get(job.id).count, 1);
+    } finally {
+      setClaudeConfigDirForTests(null);
+      claude.__testResetClaudeResolution();
+      fs.rmSync(projectDir, { recursive: true, force: true });
+      fs.rmSync(claudeHome, { recursive: true, force: true });
+    }
+  });
+
   it("captures Claude full-message tool_use blocks in provider stats", async () => {
     const claude = await import("../../../lib/domains/providers/functions/claude.js");
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-claude-tool-use-"));

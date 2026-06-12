@@ -86,3 +86,40 @@ override can disable it, and there is no JS fallback. Tools still
 mid-migration are gated per tool with `posse_native_<tool>` settings, or at
 runtime with the `POSSE_NATIVE_BINARIES` (master) / `POSSE_NATIVE_<TOOL>`
 env overrides. `POSSE_NATIVE_BIN_ROOT` overrides the staging root (used in tests).
+
+## Worker host protocol — supervision ops (`posse.daemon.v1`)
+
+The persistent `worker --stdio` hosts speak newline-delimited JSON envelopes.
+The Node side (`Daemon` + `DaemonSupervisor`) layers a recovery ladder on top —
+request abandon, liveness probe, graceful retire, circuit breaker — and asks
+hosts to implement these protocol-level supervision ops so recovery rarely
+needs process replacement at all. Until a host ships them, the Node side
+degrades gracefully (see "compatibility" notes). Rust implementation lives in
+the sibling `posse-encoder-rust` workspace.
+
+All ops use `protocol: "posse.daemon.v1"` and the standard envelope:
+`{ protocol, method, payload, id }` in → `{ id, ok, data | error }` out.
+
+- `daemon.ping` → `{ ok: true, data: { uptime_ms, inflight, version } }`.
+  Liveness probe with a short client deadline (~250ms). **Compatibility:** the
+  Node prober treats ANY reply — including `{ ok: false, error: "unknown
+  method" }` from an older host — as proof the request loop is alive; only
+  silence past the deadline marks the host wedged. So shipping a real handler
+  upgrades diagnostics but is not required for the probe to work.
+- `daemon.shutdown` → drain in-flight requests, flush, `exit 0`. Hosts MUST
+  also treat **EOF on stdin** as the same drain-and-exit signal — that is what
+  the Node `retire(graceMs)` path sends today, with a hard kill only after the
+  grace window. Never rely on the parent to kill you; exiting on EOF is what
+  makes graceful replacement and clean shutdown possible.
+- `daemon.reload` → re-read configuration/auth in place (for the ONNX encoder:
+  swap models) and reply `{ ok: true }`. Lets an identity/key change become a
+  protocol message instead of a process replacement. **Compatibility:** the
+  Node side capability-detects via `daemon.ping`'s `version` and falls back to
+  replace when absent.
+- **Internal watchdog:** the host owns deadlines for its own subprocess work
+  (e.g. a runaway `git` invocation): kill the child, reply with a structured
+  `{ ok: false, error: { code: "GIT_TIMEOUT", ... } }`, and stay alive. A slow
+  request must never become a dead host.
+- **Busy heartbeat (optional):** while a request runs long, the host may emit
+  `{ heartbeat: true }` lines (no `id`); the Node line parser ignores unknown
+  shapes today, and future clients can use them to distinguish busy from hung.

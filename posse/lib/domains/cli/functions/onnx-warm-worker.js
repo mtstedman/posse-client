@@ -24,6 +24,13 @@ function emit(event) {
   post({ type: "progress", event });
 }
 
+let stopRequested = false;
+parentPort?.on("message", (message = {}) => {
+  if (message?.type !== "stop") return;
+  stopRequested = true;
+  emit({ stage: "stopping", reason: message.reason || "stop requested" });
+});
+
 process.on("uncaughtException", (err) => {
   recordEmbeddingForensics("onnx.warm_worker.uncaught_exception", {
     worker_data: publicWorkerData(),
@@ -53,9 +60,11 @@ async function run() {
   const { LocalOnnxEmbeddingEncoder } = await import("../../atlas/classes/v2/LocalOnnxEmbeddingEncoder.js");
   const encoder = new LocalOnnxEmbeddingEncoder({ cacheDir, modelName, modelId, dim });
   try {
+    if (stopRequested) throw new Error("ONNX warm stopped before encode");
     // encode() triggers the lazy _pipeline() — that's the blocking step we
     // wanted off the main thread.
     await encoder.encode(["ping"]);
+    if (stopRequested) throw new Error("ONNX warm stopped after encode");
     emit({ stage: "ready" });
     recordEmbeddingForensics("onnx.warm_worker.ready", {
       worker_data: publicWorkerData(),

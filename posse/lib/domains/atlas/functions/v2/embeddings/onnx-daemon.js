@@ -26,7 +26,7 @@ export function onnxModelKey(config = {}) {
 /**
  * @param {() => Record<string, any>} getConfig  current encoder config (live, so
  *   a settings change is observed on the next request and triggers a recycle).
- * @returns {{ encode: (texts: string[], opts?: { signal?: AbortSignal }) => Promise<Float32Array[]>, warm: () => Promise<void>, info: () => Promise<any>, daemon: Daemon }}
+ * @returns {{ encode: (texts: string[], opts?: { signal?: AbortSignal }) => Promise<Float32Array[]>, warm: () => Promise<void>, info: () => Promise<any>, dispose: () => Promise<void>, daemon: Daemon }}
  */
 export function createOnnxDaemon(getConfig) {
   const daemon = new Daemon({
@@ -50,6 +50,7 @@ export function createOnnxDaemon(getConfig) {
     },
     async warm() { await call({ op: "warm" }); },
     info() { return call({ op: "info" }); },
+    async dispose() { await call({ op: "dispose" }, { timeoutMs: 30_000 }); },
   };
 }
 
@@ -65,9 +66,10 @@ export function createOnnxDaemon(getConfig) {
 // the ~6s model load is paid once per session, not once per quiet gap.
 const DEFAULT_IDLE_MS = 30_000;
 const KEEPWARM_IDLE_MS = 900_000; // 15 min backstop while pinned
+const SHARED_CLOSE_DRAIN_MS = 10_000;
 let _idleMs = DEFAULT_IDLE_MS;
 let _keepWarm = false;
-/** @type {{ daemon: Daemon, encode: Function, warm: Function, info: Function } | null} */
+/** @type {{ daemon: Daemon, encode: Function, warm: Function, info: Function, dispose?: Function } | null} */
 let _shared = null;
 /** @type {Record<string, any>} */
 let _sharedConfig = {};
@@ -89,6 +91,17 @@ function _armIdle() {
     if (_sharedInflight === 0) closeSharedOnnxDaemon().catch(() => { /* best effort */ });
   }, _keepWarm ? KEEPWARM_IDLE_MS : _idleMs);
   _sharedIdleTimer.unref?.();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function _waitForSharedIdle(maxMs = SHARED_CLOSE_DRAIN_MS) {
+  const deadline = Date.now() + Math.max(0, Number(maxMs) || 0);
+  while (_sharedInflight > 0 && Date.now() < deadline) {
+    await delay(Math.min(100, Math.max(1, deadline - Date.now())));
+  }
 }
 
 /** Wrap an op so the idle timer is held off while it runs. */
@@ -134,6 +147,7 @@ export function getSharedOnnxDaemon(config = {}) {
     _shared = {
       daemon: base.daemon,
       info: base.info,
+      dispose: base.dispose,
       encode: _tracked(base.encode),
       warm: _tracked(base.warm),
     };
@@ -154,6 +168,8 @@ export async function closeSharedOnnxDaemon() {
   _shared = null;
   if (!shared) return;
   _sharedClosing = (async () => {
+    await _waitForSharedIdle();
+    try { await shared.dispose?.(); } catch { /* best effort */ }
     try { await shared.daemon.dispose(); } catch { /* best effort */ }
   })();
   try { await _sharedClosing; } finally { _sharedClosing = null; }

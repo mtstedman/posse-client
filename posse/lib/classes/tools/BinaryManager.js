@@ -131,6 +131,48 @@ export class BinaryManager {
   shouldUse(name) {
     return this.enabled(name) && this.available(name);
   }
+
+  /**
+   * Aggregated worker→per-call fallback counts across instantiated handles.
+   * Nonzero means the daemon layer degraded somewhere this run — surface it.
+   *
+   * @returns {{ total: number, byBinary: Record<string, { count: number, byReason: Record<string, number> }> }}
+   */
+  workerFallbackStats() {
+    /** @type {Record<string, { count: number, byReason: Record<string, number> }>} */
+    const byBinary = {};
+    let total = 0;
+    for (const [name, handle] of this._handles) {
+      const stats = handle.workerFallbacks;
+      if (!stats || stats.count === 0) continue;
+      byBinary[name] = { count: stats.count, byReason: { ...stats.byReason } };
+      total += stats.count;
+    }
+    return { total, byBinary };
+  }
+
+  /**
+   * Dispose every daemon this manager's handles created. Worker-thread entry
+   * points MUST call this in a finally before the thread exits — module state
+   * is per-thread, so a thread's daemons are invisible to the main thread's
+   * supervisor registry and would otherwise outlive their creator as orphans
+   * (the main supervisor's shutdown ledger sweep is the safety net, not the
+   * plan). Safe to call repeatedly; a disposed handle just respawns on the
+   * next use.
+   *
+   * @returns {Promise<void>}
+   */
+  async disposeAll() {
+    const waits = [];
+    for (const handle of this._handles.values()) {
+      const daemon = handle._daemon;
+      if (daemon) {
+        handle._daemon = null;
+        waits.push((async () => { try { await daemon.dispose(); } catch { /* best effort */ } })());
+      }
+    }
+    await Promise.all(waits);
+  }
 }
 
 /**

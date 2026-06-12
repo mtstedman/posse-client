@@ -124,6 +124,111 @@ export async function reconcileEmbeddings({ view, index, encoder, repoRoot, limi
 }
 
 /**
+ * One budget-sliced resume step toward embedding parity for a view. Unlike
+ * reconcileEmbeddings (which encodes the whole gap in one pass), this encodes
+ * at most `maxEncode` of the missing symbols and reports how many remain, so a
+ * scheduler-driven warm job can close a large gap across several bounded jobs.
+ * Resume state is the index itself: keys.db is authoritative for what's done —
+ * each slice recomputes the missing set from it, so slices survive crashes,
+ * restarts, and interleaved warms without coordination.
+ *
+ * @param {{
+ *   view: View, index: EmbeddingIndex, encoder: EmbeddingEncoder,
+ *   repoRoot?: string, maxEncode?: number, limit?: number, timeoutMs?: number,
+ * }} args
+ * @returns {Promise<{
+ *   skipped: boolean, reason?: string, candidates: number, missing: number,
+ *   encoded: number, remaining: number, complete: boolean,
+ *   hadInterruptedBatch: boolean, interruptedKeys: number,
+ * }>}
+ */
+export async function resumeEmbeddingsSlice({
+  view,
+  index,
+  encoder,
+  repoRoot,
+  maxEncode = 4000,
+  limit = 100_000,
+  timeoutMs = 120_000,
+}) {
+  const empty = { candidates: 0, missing: 0, encoded: 0, remaining: 0, complete: false, hadInterruptedBatch: false, interruptedKeys: 0 };
+  if (!view || !index || !encoder) {
+    return { ...empty, skipped: true, reason: "unavailable" };
+  }
+  if (encoder.dim !== index.dim) {
+    return { ...empty, skipped: true, reason: "dim_mismatch" };
+  }
+  const inflight = typeof index?.readInflight === "function" ? await index.readInflight() : null;
+  const hadInterruptedBatch = !!inflight;
+  const interruptedKeys = Array.isArray(inflight?.keys) ? inflight.keys.length : 0;
+
+  const symbolsLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100_000) : 100_000;
+  const symbols = view.query.allSymbols({ limit: symbolsLimit });
+  const missing = await missingSymbols({ index, symbols });
+  if (missing.length === 0) {
+    if (typeof index?.clearEncoding === "function") await index.clearEncoding();
+    recordEmbeddingForensics("resume_slice.parity", {
+      candidates: symbols.length,
+      had_interrupted_batch: hadInterruptedBatch,
+      encoder: encoderTelemetry(encoder),
+      index: indexTelemetry(index),
+    });
+    return {
+      skipped: true,
+      reason: "fully_indexed",
+      candidates: symbols.length,
+      missing: 0,
+      encoded: 0,
+      remaining: 0,
+      complete: true,
+      hadInterruptedBatch,
+      interruptedKeys,
+    };
+  }
+  const sliceBudget = Number.isInteger(maxEncode) && maxEncode > 0 ? maxEncode : 4000;
+  const slice = missing.slice(0, sliceBudget);
+  recordEmbeddingForensics("resume_slice.start", {
+    candidates: symbols.length,
+    missing_count: missing.length,
+    slice: slice.length,
+    had_interrupted_batch: hadInterruptedBatch,
+    interrupted_keys: interruptedKeys,
+    encoder: encoderTelemetry(encoder),
+    index: indexTelemetry(index),
+  });
+  const res = await encodeMissingSymbols({ view, index, encoder, repoRoot, missing: slice, timeoutMs });
+  const encoded = Number(res.encoded) || 0;
+  // A clean slice retires everything it attempted (skipped-as-ineligible
+  // symbols are permanently ineligible, not remaining work); an interrupted
+  // slice only retires what actually landed.
+  const remaining = res.incomplete
+    ? Math.max(0, missing.length - encoded)
+    : missing.length - slice.length;
+  const complete = !res.incomplete && remaining === 0;
+  if (complete && typeof index?.clearEncoding === "function") {
+    await index.clearEncoding();
+  }
+  recordEmbeddingForensics("resume_slice.done", {
+    encoded,
+    remaining,
+    complete,
+    incomplete: !!res.incomplete,
+    reason: res.reason ?? null,
+  });
+  return {
+    skipped: false,
+    reason: res.reason,
+    candidates: symbols.length,
+    missing: missing.length,
+    encoded,
+    remaining,
+    complete,
+    hadInterruptedBatch,
+    interruptedKeys,
+  };
+}
+
+/**
  * @param {{
  *   view: View,
  *   index: EmbeddingIndex,

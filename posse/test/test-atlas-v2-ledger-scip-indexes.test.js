@@ -140,6 +140,36 @@ describe("ATLAS v2 Ledger scip_indexes", () => {
     }
   });
 
+  it("findScipIndexId ignores total-failure rows so the next ingest can retry", () => {
+    const led = Ledger.open({ dbPath: path.join(tmp, "total-failure-retry.db") });
+    try {
+      const base = {
+        scheme: "scip-typescript",
+        tool_name: "scip-typescript",
+        indexer_version: "0.3.0",
+        indexer_arguments: [],
+        project_root: "/repo",
+        langs: "ts",
+        fileset_hash: "f".repeat(64),
+        config_hash: "",
+        deps_hash: "",
+        document_count: 3,
+        occurrence_count: 3,
+        external_symbol_count: 0,
+      };
+      // Every document failed (branch-snapshot error / fully-drifted .scip):
+      // the row must NOT mask future ingests as already done.
+      const failedAll = led.recordScipIndex({ ...base, status: "partial", documents_failed: 3 });
+      assert.ok(Number.isInteger(failedAll) && failedAll > 0);
+      assert.equal(led.findScipIndexId(base), null);
+      // A later successful run upgrades the row and dedupes normally again.
+      led.recordScipIndex({ ...base, status: "complete", documents_failed: 0, return_existing: true });
+      assert.equal(led.findScipIndexId(base), failedAll);
+    } finally {
+      led.close();
+    }
+  });
+
   it("distinguishes records that differ by config_hash / deps_hash", () => {
     const led = Ledger.open({ dbPath: path.join(tmp, "vary.db") });
     try {

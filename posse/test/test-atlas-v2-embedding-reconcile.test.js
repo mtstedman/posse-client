@@ -19,7 +19,7 @@ import {
 } from "../lib/domains/atlas/classes/v2/EmbeddingIndex.js";
 import { StubEmbeddingEncoder } from "../lib/domains/atlas/classes/v2/EmbeddingEncoder.js";
 import { ingestView } from "../lib/domains/atlas/functions/v2/embeddings/ingest.js";
-import { reconcileEmbeddings } from "../lib/domains/atlas/functions/v2/embeddings/on-demand.js";
+import { reconcileEmbeddings, resumeEmbeddingsSlice } from "../lib/domains/atlas/functions/v2/embeddings/on-demand.js";
 import { sha256Hex } from "../lib/domains/atlas/functions/v2/hash.js";
 
 const skip = isUsearchAvailable() ? undefined : `usearch unavailable: ${usearchUnavailableReason() ?? "missing"}`;
@@ -128,6 +128,57 @@ describe("ATLAS v2 embedding breadcrumb + reconcile", { skip }, () => {
       assert.equal(res.hadInterruptedBatch, false);
       assert.equal(res.skipped, true);
       assert.equal(res.reason, "fully_indexed");
+    } finally { index.close?.(); }
+  });
+
+  it("resumeEmbeddingsSlice closes a gap across bounded slices and clears the breadcrumb at parity", async () => {
+    const symbols = makeSymbols(5);
+    const { enc, index } = openIndex("slice");
+    try {
+      // Simulate a gone owner: breadcrumb present, nothing committed.
+      index.markEncoding(symbols.map((s) => ({ content_hash: s.content_hash, local_id: s.local_id })), { batch: 1 });
+
+      const first = await resumeEmbeddingsSlice({ view: stubView(symbols, "v-slice"), index, encoder: enc, maxEncode: 2 });
+      assert.equal(first.hadInterruptedBatch, true);
+      assert.equal(first.candidates, 5);
+      assert.equal(first.missing, 5);
+      assert.equal(first.encoded, 2);
+      assert.equal(first.remaining, 3);
+      assert.equal(first.complete, false);
+
+      const second = await resumeEmbeddingsSlice({ view: stubView(symbols, "v-slice"), index, encoder: enc, maxEncode: 2 });
+      assert.equal(second.encoded, 2);
+      assert.equal(second.remaining, 1);
+      assert.equal(second.complete, false);
+
+      const third = await resumeEmbeddingsSlice({ view: stubView(symbols, "v-slice"), index, encoder: enc, maxEncode: 2 });
+      assert.equal(third.encoded, 1);
+      assert.equal(third.remaining, 0);
+      assert.equal(third.complete, true);
+      assert.equal(index.readInflight(), null, "breadcrumb cleared once the index reached parity");
+      for (const s of symbols) assert.ok(index.contains(s.content_hash, s.local_id));
+
+      const done = await resumeEmbeddingsSlice({ view: stubView(symbols, "v-slice"), index, encoder: enc, maxEncode: 2 });
+      assert.equal(done.skipped, true);
+      assert.equal(done.reason, "fully_indexed");
+      assert.equal(done.complete, true);
+    } finally { index.close?.(); }
+  });
+
+  it("resumeEmbeddingsSlice reports an interrupted slice without claiming parity", async () => {
+    const symbols = makeSymbols(3);
+    const { index } = openIndex("slice-fail");
+    const boomEncoder = {
+      model: "stub-boom", model_version: "v1", dim: 32,
+      buildSymbolText: (s) => `${s.kind} ${s.name}`,
+      encode: async () => { throw new Error("boom-encode"); },
+    };
+    try {
+      const res = await resumeEmbeddingsSlice({ view: stubView(symbols, "v-slice-fail"), index, encoder: boomEncoder, maxEncode: 2 });
+      assert.equal(res.complete, false);
+      assert.equal(res.encoded, 0);
+      assert.equal(res.remaining, 3, "an errored slice retires nothing");
+      assert.match(String(res.reason || ""), /boom-encode|encode_error/);
     } finally { index.close?.(); }
   });
 });

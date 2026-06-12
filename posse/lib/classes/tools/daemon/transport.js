@@ -13,7 +13,10 @@
 //   send(message):  void               send one request object (the transport frames it)
 //   onMessage(cb):  void               register cb(responseObject) — one call per response
 //   onExit(cb):     void               register cb() — called once when the host dies
-//   kill():         void               terminate the host
+//   kill():         void               terminate the host immediately
+//   retire(graceMs): void              graceful stop: signal end-of-input, give the
+//                                      host graceMs to drain and exit on its own,
+//                                      then kill. Never blocks the caller.
 //   isAlive():      boolean
 //
 // Two host kinds, one interface:
@@ -32,7 +35,10 @@ import { recordDaemonSpawn, forgetDaemonSpawn } from "./process-ledger.js";
  * @property {(cb: (message: Record<string, unknown>) => void) => void} onMessage
  * @property {(cb: () => void) => void} onExit
  * @property {() => void} kill
+ * @property {(graceMs?: number) => void} [retire]
  * @property {() => boolean} isAlive
+ * @property {() => Promise<void>} [dispose]
+ * @property {() => number | null} [hostPid]
  */
 
 /**
@@ -44,6 +50,7 @@ import { recordDaemonSpawn, forgetDaemonSpawn } from "./process-ledger.js";
  *   buildArgs: () => string[],
  *   env?: () => NodeJS.ProcessEnv,
  *   spawnImpl?: typeof spawn,
+ *   label?: string,
  * }} opts
  * @returns {Transport}
  */
@@ -94,7 +101,7 @@ export function ProcessTransport(opts) {
       // Hard-ledger the child so a crashed parent's orphan can be reaped at the
       // next boot (the unref above means the OS won't clean it up for us).
       spawnedPid = proc.pid ?? null;
-      recordDaemonSpawn(spawnedPid, bin);
+      recordDaemonSpawn(spawnedPid, bin, { label: opts.label });
       proc.stdout?.on("data", (chunk) => {
         buffer += chunk.toString("utf8");
         let newline;
@@ -128,8 +135,41 @@ export function ProcessTransport(opts) {
       try { p?.stdin?.end(); } catch { /* ignore */ }
       try { p?.kill(); } catch { /* ignore */ }
     },
+    /**
+     * Graceful stop. EOF on stdin is the stdio-host stop signal: the worker
+     * loop drains its in-flight request and exits on its own — no mid-native-
+     * call termination. Only if the host is still alive after `graceMs` does
+     * the hard kill fire. Detaches immediately so a replacement can start
+     * while the old host drains; the existing exit handler forgets the pid.
+     * @param {number} [graceMs]
+     */
+    retire(graceMs = 2000) {
+      const p = proc;
+      const pid = spawnedPid;
+      if (!p) return;
+      // Detach now: this transport reports dead, late events are ignored by
+      // the Daemon's identity guard, and a fresh host can spawn immediately.
+      proc = null;
+      spawnedPid = null;
+      try { p.stdin?.end(); } catch { /* ignore */ }
+      const timer = setTimeout(() => {
+        try {
+          if (p.exitCode == null && !p.killed) p.kill();
+        } catch { /* ignore */ }
+      }, Math.max(0, graceMs));
+      // Never hold the loop open for a draining host.
+      if (typeof timer.unref === "function") timer.unref();
+      p.on("exit", () => {
+        clearTimeout(timer);
+        if (pid != null) forgetDaemonSpawn(pid);
+      });
+    },
     isAlive() {
       return !!proc && !proc.killed && proc.exitCode == null;
+    },
+    /** Current host pid (for shutdown reap exclusion), null when not running. */
+    hostPid() {
+      return proc?.pid ?? null;
     },
   };
 }

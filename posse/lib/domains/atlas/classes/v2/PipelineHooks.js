@@ -31,6 +31,7 @@ import { getRetrievalCache } from "./RetrievalCache.js";
 /** @typedef {import("../../functions/v2/contracts/events.js").MainAdvancedPayload} MainAdvancedPayload */
 /** @typedef {import("../../functions/v2/contracts/events.js").ScipRestageRequestedPayload} ScipRestageRequestedPayload */
 /** @typedef {import("../../functions/v2/contracts/events.js").WiCleanupPayload} WiCleanupPayload */
+/** @typedef {import("../../functions/v2/contracts/events.js").EmbeddingsResumePayload} EmbeddingsResumePayload */
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmJobPayload} AtlasWarmJobPayload */
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmPurpose} AtlasWarmPurpose */
 
@@ -79,6 +80,10 @@ function warmJobTitle(eventType) {
       return "ATLAS SCIP restage";
     case ATLAS_EVENTS.WI_CLEANUP:
       return "ATLAS warm: WI cleanup view disposal";
+    case ATLAS_EVENTS.EMBEDDINGS_RESUME:
+      return "ATLAS embeddings resume: close vector index gap";
+    case ATLAS_EVENTS.SELF_REPAIR:
+      return "ATLAS self-repair: rebuild degraded layer";
     default:
       return `ATLAS warm: ${eventType}`;
   }
@@ -93,6 +98,10 @@ function purposeForEvent(eventType) {
   if (eventType === ATLAS_EVENTS.MERGED_TO_MAIN) return "main-merge";
   if (eventType === ATLAS_EVENTS.SCIP_RESTAGE_REQUESTED) return "scip-restage";
   if (eventType === ATLAS_EVENTS.WI_CLEANUP) return "wi-cleanup";
+  if (eventType === ATLAS_EVENTS.EMBEDDINGS_RESUME) return "embeddings";
+  // Self-repair emitters always pass an explicit warmJobPayload; this default
+  // only labels the event row when one is (incorrectly) omitted.
+  if (eventType === ATLAS_EVENTS.SELF_REPAIR) return "main-full";
   return "wi";
 }
 
@@ -522,6 +531,31 @@ export function emitWiCleanup({ payload, jobId = null, onError = undefined }) {
     payload,
     workItemId: payload?.wi_id ?? null,
     jobId,
+    onError,
+  });
+}
+
+/**
+ * @param {{ payload: EmbeddingsResumePayload, jobId?: number | null, maxSymbols?: number | null, onError?: (err: Error) => void }} args
+ */
+export function emitEmbeddingsResume({ payload, jobId = null, maxSymbols = null, onError = undefined }) {
+  /** @type {AtlasWarmJobPayload} */
+  const warmJobPayload = {
+    purpose: "embeddings",
+    branch: typeof payload?.target_branch === "string" && payload.target_branch
+      ? payload.target_branch
+      : "main",
+    trigger_event: ATLAS_EVENTS.EMBEDDINGS_RESUME,
+  };
+  if (Number.isInteger(maxSymbols) && Number(maxSymbols) > 0) {
+    warmJobPayload.max_symbols = Number(maxSymbols);
+  }
+  return emitAtlasPipelineEvent({
+    eventType: ATLAS_EVENTS.EMBEDDINGS_RESUME,
+    payload,
+    workItemId: null,
+    jobId,
+    warmJobPayload,
     onError,
   });
 }

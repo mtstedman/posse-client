@@ -24,7 +24,7 @@ import { nativeBinaryPlatform, nativeBinaryIsKeyGated } from "../../catalog/bina
 import { osKey, archKey } from "../../shared/platform/functions/native-platform.js";
 import { buildRuntimeEnv } from "../../domains/runtime/functions/paths.js";
 import { signalAbortError } from "../../domains/runtime/functions/yield.js";
-import { Daemon, ProcessTransport, SyncBridge } from "./daemon/index.js";
+import { Daemon, ProcessTransport, daemonSupervisor } from "./daemon/index.js";
 import { resolvePosseKey } from "../../domains/remote/functions/client.js";
 import { POSSE_REMOTE_DEFAULT_URL } from "../../domains/remote/functions/mode.js";
 
@@ -87,14 +87,24 @@ export class NativeBinary {
     this.workerCapable = name === "git" || name === "atlas";
     /** @type {import("./daemon/index.js").Daemon | null} */
     this._daemon = null;
-    /** @type {import("./daemon/index.js").SyncBridge | null} */
-    this._syncBridge = null;
+    /**
+     * Worker→per-call fallback visibility: every time a worker-eligible
+     * request degrades to a per-call spawn the daemon layer is unhealthy, and
+     * the transparent fallback would otherwise hide it completely. Counted
+     * here, surfaced once per run at closeout (and via BinaryManager stats).
+     * @type {{ count: number, byReason: Record<string, number> }}
+     */
+    this.workerFallbacks = { count: 0, byReason: {} };
     // os/arch resolved once at construction; throws on unsupported host.
     this.os = osKey(platform);
     this.arch = archKey(arch);
     this._spawn = spawnImpl;
     this._spawnSync = spawnSyncImpl;
+    this._instanceSeq = NativeBinary._nextInstanceSeq++;
   }
+
+  /** Distinguishes supervisor identities across instances (tests construct many). */
+  static _nextInstanceSeq = 1;
 
   /** Args to launch this binary's `worker --stdio` host (key first, like #buildArgs). */
   #buildWorkerArgs() {
@@ -107,19 +117,64 @@ export class NativeBinary {
     return out;
   }
 
-  /** Lazily create the shared async Daemon (process transport) for this binary. */
+  /**
+   * Lazily create the shared async Daemon (process transport) for this binary,
+   * registered with the process-wide supervisor so shutdown and lifecycle
+   * telemetry cover it. Identity is per NativeBinary instance: production has
+   * exactly one manager singleton (one handle per name), so this equals
+   * per-name dedup there, while test-constructed managers with injected spawn
+   * impls stay isolated from each other.
+   */
   #daemon() {
     if (!this._daemon) {
-      this._daemon = new Daemon({
-        transportFactory: () => ProcessTransport({
-          resolveBin: () => this.resolvePath(),
-          buildArgs: () => this.#buildWorkerArgs(),
-          env: () => this.#childEnv(),
-          spawnImpl: this._spawn,
+      const label = `${this.name}:worker`;
+      this._daemon = daemonSupervisor.daemon({
+        kind: "native-binary",
+        identity: `${this.name}#${this._instanceSeq}`,
+        label,
+        create: () => new Daemon({
+          label,
+          transportFactory: () => ProcessTransport({
+            resolveBin: () => this.resolvePath(),
+            buildArgs: () => this.#buildWorkerArgs(),
+            env: () => this.#childEnv(),
+            spawnImpl: this._spawn,
+            label,
+          }),
         }),
       });
     }
     return this._daemon;
+  }
+
+  /** @param {string} reason */
+  #noteWorkerFallback(reason) {
+    this.workerFallbacks.count += 1;
+    this.workerFallbacks.byReason[reason] = (this.workerFallbacks.byReason[reason] || 0) + 1;
+  }
+
+  /**
+   * After a request timeout: decide whether the host is wedged instead of
+   * inferring it. Any reply to the probe — even an "unknown method" error from
+   * hosts that predate daemon.ping — proves the request loop is alive, so the
+   * slow request stays an isolated abandon. Only silence retires the host
+   * (gracefully: EOF + drain window, never a mid-call kill). Single-flight so
+   * a burst of timeouts can't stack probes.
+   */
+  async #probeWorkerHealth() {
+    if (this._workerProbeInFlight) return;
+    this._workerProbeInFlight = true;
+    try {
+      const daemon = this.#daemon();
+      const verdict = await daemon.probe({
+        protocol: "posse.daemon.v1",
+        method: "daemon.ping",
+        payload: null,
+      });
+      if (verdict === "silent") daemon.retire({});
+    } catch { /* probe is best-effort */ } finally {
+      this._workerProbeInFlight = false;
+    }
   }
 
   /**
@@ -139,12 +194,33 @@ export class NativeBinary {
     } catch {
       return this.#runPerCall(subcommand, args, opts);
     }
-    const response = await this.#daemon().request(envelope, {
+    let response = await this.#daemon().request(envelope, {
       signal: opts.signal,
       timeoutMs: opts.timeoutMs,
     });
+    if (response?._transportGone === true && opts.signal?.aborted !== true) {
+      // Host died/retired under this request. Everything routed through the
+      // worker is read-only/idempotent by the WORKER_ELIGIBLE contract
+      // (invoke.js), so one transparent retry on the replacement host is safe
+      // and keeps the fast path instead of degrading to a per-call spawn.
+      response = await this.#daemon().request(envelope, {
+        signal: opts.signal,
+        timeoutMs: opts.timeoutMs,
+      });
+    }
+    if (response?._timedOut === true) {
+      // One slow request is not a dead host: the Daemon already abandoned the
+      // request id (a late reply is dropped), so only PROBE the host — retire
+      // fires solely when the probe gets silence. Fire-and-forget; this
+      // request still falls back per-call below.
+      void this.#probeWorkerHealth();
+    }
     if (response?._transportGone === true || response?._timedOut === true || response?._overloaded === true) {
-      // Daemon died/timed out/overloaded; transparently retry per-call.
+      // Degrade to a per-call spawn — counted, because the transparent
+      // fallback otherwise hides an unhealthy daemon layer completely.
+      const reason = response._transportGone === true ? "transport_gone"
+        : response._timedOut === true ? "timeout" : "overloaded";
+      this.#noteWorkerFallback(reason);
       return this.#runPerCall(subcommand, args, opts);
     }
     if (response?._aborted === true) {
@@ -243,55 +319,17 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string, worker?: boolean }} [opts]
    * @returns {RunResult}
    */
   runSync(subcommand, args = [], opts = {}) {
-    if (this.workerCapable && opts.worker === true) {
-      const viaWorker = this.#runSyncViaWorker(subcommand, args, opts);
-      if (viaWorker) return viaWorker;
-    }
+    // Sync invocations are always per-call spawns. The Atomics SyncBridge that
+    // used to serve `worker: true` here was removed: the sync method twins are
+    // production-caller-less (async variants own the live paths), and the
+    // bridge both wedged for the full wait timeout when its broker failed to
+    // boot and stranded its host child on stop(). `opts.worker` is accepted
+    // and ignored so shared call sites (invoke.js) need no sync/async forks.
     return this.#runSyncPerCall(subcommand, args, opts);
-  }
-
-  /** Lazily create the shared synchronous bridge (broker thread + Atomics). */
-  #syncBridge() {
-    if (!this._syncBridge) {
-      this._syncBridge = new SyncBridge({
-        transportSpec: { binPath: this.resolvePath() || "", args: this.#buildWorkerArgs() },
-      });
-    }
-    return this._syncBridge;
-  }
-
-  /**
-   * Run a native method synchronously through the persistent worker via the
-   * Atomics bridge. Returns null (caller falls back to a per-call spawn) if the
-   * input isn't a native envelope or the bridge is unavailable.
-   *
-   * @param {string | null} subcommand
-   * @param {string[]} args
-   * @param {{ input?: Buffer | string, json?: boolean, key?: string }} opts
-   * @returns {RunResult | null}
-   */
-  #runSyncViaWorker(subcommand, args, opts) {
-    let envelope;
-    try {
-      envelope = JSON.parse(String(opts.input));
-    } catch {
-      return null;
-    }
-    const response = this.#syncBridge().request(envelope);
-    if (!response) return null;
-    return {
-      ok: true,
-      code: 0,
-      signal: null,
-      stdout: JSON.stringify(response),
-      stderr: response.ok === false ? String(/** @type {any} */ (response.error)?.message || "") : "",
-      error: null,
-      json: response,
-    };
   }
 
   /**
@@ -329,7 +367,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string, signal?: AbortSignal }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string, signal?: AbortSignal, worker?: boolean }} [opts]
    * @returns {Promise<RunResult>}
    */
   run(subcommand, args = [], opts = {}) {

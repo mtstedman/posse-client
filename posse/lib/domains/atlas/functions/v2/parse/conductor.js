@@ -100,6 +100,7 @@ export function createConductorDaemon() {
 // bursts, while a one-shot CLI / test process drains and exits shortly after its
 // last warm. An in-flight counter guarantees we never terminate mid-op.
 const DEFAULT_IDLE_MS = 30_000;
+const SHARED_CLOSE_DRAIN_MS = 10_000;
 let _idleMs = DEFAULT_IDLE_MS;
 // A long-lived scheduler run PINS the conductor warm via setConductorKeepWarm(true)
 // so per-WI warms reuse one hot ParseEngine instead of re-bootstrapping during the
@@ -154,6 +155,17 @@ function _armIdle() {
   // The timer must not itself pin the loop — it only fires if the (port-pinned)
   // loop is already alive; once it disposes the daemon, the loop drains.
   _sharedIdleTimer.unref?.();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function _waitForSharedIdle(maxMs = SHARED_CLOSE_DRAIN_MS) {
+  const deadline = Date.now() + Math.max(0, Number(maxMs) || 0);
+  while (_sharedInflight > 0 && Date.now() < deadline) {
+    await delay(Math.min(100, Math.max(1, deadline - Date.now())));
+  }
 }
 
 /** Wrap a conductor op so the idle timer is held off while it runs. */
@@ -260,6 +272,7 @@ export async function closeSharedConductor() {
   _sharedConductor = null;
   if (!conductor) return;
   _sharedClosing = (async () => {
+    await _waitForSharedIdle();
     try { await conductor.close(); } catch { /* best effort */ }
     // Await full transport termination — `stop()`/unref leaves the worker's
     // MessagePort as an active handle, so a short-lived process wouldn't exit.

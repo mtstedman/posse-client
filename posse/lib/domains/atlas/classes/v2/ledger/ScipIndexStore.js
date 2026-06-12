@@ -43,7 +43,7 @@ export class ScipIndexStore {
 
       // SCIP index bookkeeping.
       scipIndexSelect: db.prepare(
-        `SELECT id, status FROM scip_indexes
+        `SELECT id, status, document_count, documents_failed FROM scip_indexes
          WHERE scheme = ? AND indexer_version = ? AND fileset_hash = ?
             AND config_hash = ? AND deps_hash = ?`,
       ),
@@ -247,6 +247,11 @@ export class ScipIndexStore {
    * it. Used by ingesters so partially failed runs do not mark an index as
    * complete before all document rows land.
    *
+   * A row only counts as "already ingested" when its run made progress: a
+   * total-failure row (every document failed, e.g. a branch-snapshot read
+   * error or a stale .scip whose files all moved) returns null so the next
+   * ingest retries instead of being silently masked as done forever.
+   *
    * @param {{
    *   scheme: string,
    *   indexer_version: string,
@@ -270,10 +275,16 @@ export class ScipIndexStore {
     }
     const configHash = input.config_hash == null ? "" : String(input.config_hash);
     const depsHash = input.deps_hash == null ? "" : String(input.deps_hash);
-    const existing = /** @type {{ id: number, status?: string } | undefined} */ (
+    const existing = /** @type {{ id: number, status?: string, document_count?: number, documents_failed?: number } | undefined} */ (
       this.#stmt.scipIndexSelect.get(scheme, indexerVersion, filesetHash, configHash, depsHash)
     );
-    return existing ? existing.id : null;
+    if (!existing) return null;
+    if (String(existing.status || "") !== "complete") {
+      const documentCount = Number(existing.document_count) || 0;
+      const documentsFailed = Number(existing.documents_failed) || 0;
+      if (documentCount > 0 && documentsFailed >= documentCount) return null;
+    }
+    return existing.id;
   }
 
   /**

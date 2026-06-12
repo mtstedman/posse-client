@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { decideStageAction, describeScipStagingState, ensureScipStaged, extractScipIndexerProgressEvents } from "../lib/domains/atlas/functions/v2/scip/stager.js";
 import {
@@ -12,18 +13,52 @@ import {
 } from "../lib/domains/atlas/functions/v2/scip/indexers.js";
 import { installScipLanguageDependenciesSync } from "../lib/domains/atlas/functions/v2/scip/dependencies.js";
 import { DEFAULT_POSSE_ROOT as DEFAULT_RUNTIME_POSSE_ROOT } from "../lib/domains/runtime/functions/python-runtime.js";
-import { buildStagerMeta, readStagerMeta, stagerMetaPathForOutput } from "../lib/domains/atlas/functions/v2/scip/stager-meta.js";
+import { buildFailedStagerMeta, buildStagerMeta, readStagerMeta, stagerMetaPathForOutput } from "../lib/domains/atlas/functions/v2/scip/stager-meta.js";
 import { encodeIndex, encodeToolInfo } from "./helpers/scip-encoder.mjs";
+
+const SCIP_SCRIPT_HELPER = [
+  "function scipVarint(value) {",
+  "  let v = BigInt(value);",
+  "  const out = [];",
+  "  while (v > 0x7fn) {",
+  "    out.push(Number(v & 0x7fn) | 0x80);",
+  "    v >>= 7n;",
+  "  }",
+  "  out.push(Number(v));",
+  "  return out;",
+  "}",
+  "function scipTag(fieldNumber, wireType) { return scipVarint((fieldNumber << 3) | wireType); }",
+  "function scipStrField(fieldNumber, value) {",
+  "  const buf = Buffer.from(String(value), 'utf8');",
+  "  return [...scipTag(fieldNumber, 2), ...scipVarint(buf.length), ...buf];",
+  "}",
+  "function scipMsgField(fieldNumber, subBytes) { return [...scipTag(fieldNumber, 2), ...scipVarint(subBytes.length), ...subBytes]; }",
+  "function inferScipFixtureLanguage(out) {",
+  "  const base = String(out || '').toLowerCase();",
+  "  if (base.includes('python')) return 'python';",
+  "  if (base.includes('php')) return 'php';",
+  "  if (base.includes('go')) return 'go';",
+  "  if (base.includes('rust')) return 'rust';",
+  "  return 'typescript';",
+  "}",
+  "function writeScipFixture(out, language = inferScipFixtureLanguage(out), relativePath = null) {",
+  "  const ext = language === 'python' ? 'py' : language === 'php' ? 'php' : language === 'go' ? 'go' : language === 'rust' ? 'rs' : 'ts';",
+  "  const docPath = relativePath || ('fixture-' + Date.now() + '.' + ext);",
+  "  const doc = [...scipStrField(1, docPath), ...scipStrField(4, language), ...scipStrField(5, 'fixture')];",
+  "  fs.writeFileSync(out, Buffer.from(scipMsgField(2, doc)));",
+  "}",
+];
 
 function writeFakeScipIndexer(binDir, names, { inferredTsconfig = '{"compilerOptions":{"allowJs":true}}' } = {}) {
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(path.join(binDir, "fake-indexer.mjs"), [
     "import fs from 'node:fs';",
+    ...SCIP_SCRIPT_HELPER,
     "if (process.argv.includes('--infer-tsconfig') && !fs.existsSync('tsconfig.json')) {",
     `  fs.writeFileSync('tsconfig.json', ${JSON.stringify(inferredTsconfig)});`,
     "}",
     "const out = process.argv[process.argv.indexOf('--output') + 1];",
-    "fs.writeFileSync(out, `generated:${Date.now()}:${out}`);",
+    "writeScipFixture(out);",
   ].join("\n"));
   if (process.platform === "win32") {
     for (const name of names) {
@@ -41,7 +76,13 @@ function writeFakeScipIndexer(binDir, names, { inferredTsconfig = '{"compilerOpt
 function writeScriptedScipIndexer(binDir, commandName, scriptLines) {
   fs.mkdirSync(binDir, { recursive: true });
   const scriptName = `${commandName}.mjs`;
-  fs.writeFileSync(path.join(binDir, scriptName), scriptLines.join("\n"));
+  const insertAt = scriptLines.findIndex((line) => !/^\s*import\b/u.test(String(line)));
+  const prefixLength = insertAt === -1 ? scriptLines.length : insertAt;
+  fs.writeFileSync(path.join(binDir, scriptName), [
+    ...scriptLines.slice(0, prefixLength),
+    ...SCIP_SCRIPT_HELPER,
+    ...scriptLines.slice(prefixLength),
+  ].join("\n"));
   if (process.platform === "win32") {
     fs.writeFileSync(path.join(binDir, `${commandName}.cmd`), `@echo off\r\nnode "%~dp0${scriptName}" %*\r\n`);
   } else {
@@ -153,6 +194,18 @@ function readCallLog(file) {
   } catch {
     return [];
   }
+}
+
+function legacyCommandArgsHash(plan, timeoutMs) {
+  const payload = {
+    command: String(plan?.command || ""),
+    args: Array.isArray(plan?.args) ? plan.args.map((arg) => String(arg)) : [],
+    label: String(plan?.label || ""),
+    indexer_id: String(plan?.indexerId || ""),
+    command_source: String(plan?.commandSource || ""),
+    timeout_ms: Number(timeoutMs) || 0,
+  };
+  return `sha256:${createHash("sha256").update(JSON.stringify(payload)).digest("hex")}`;
 }
 
 describe("ATLAS v2 SCIP stager indexer registry", () => {
@@ -296,7 +349,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       });
 
       assert.equal(result.reason, "staged");
-      assert.match(fs.readFileSync(path.join(scipDir, "typescript.scip"), "utf8"), /^generated:/);
+      assert.ok(fs.statSync(path.join(scipDir, "typescript.scip")).size > 0);
       assert.equal(fs.existsSync(path.join(repoRoot, "tsconfig.json")), false);
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -324,7 +377,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       });
 
       assert.equal(result.reason, "staged");
-      assert.match(fs.readFileSync(path.join(scipDir, "typescript.scip"), "utf8"), /^generated:/);
+      assert.ok(fs.statSync(path.join(scipDir, "typescript.scip")).size > 0);
       assert.equal(fs.existsSync(path.join(repoRoot, "tsconfig.json")), false);
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -340,6 +393,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       const binDir = path.join(posseRoot, "scip", "bin");
       const preloadPath = path.join(tmpRoot, "preload.cjs");
       const preloadSentinel = path.join(tmpRoot, "preload-ran.txt");
+      const envSnapshotPath = path.join(tmpRoot, "env-snapshot.json");
       fs.mkdirSync(scipDir, { recursive: true });
       fs.writeFileSync(path.join(repoRoot, "pyproject.toml"), "[project]\nname = 'fixture'\n");
       fs.writeFileSync(path.join(repoRoot, "app.py"), "print('fixture')\n");
@@ -350,13 +404,14 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       writeScriptedScipIndexer(binDir, "scip-python", [
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
-        "fs.writeFileSync(out, JSON.stringify({",
+        `fs.writeFileSync(${JSON.stringify(envSnapshotPath)}, JSON.stringify({`,
         "  POSSE_KEY: process.env.POSSE_KEY || null,",
         "  POSSE_SCIP_SECRET: process.env.POSSE_SCIP_SECRET || null,",
         "  NODE_OPTIONS: process.env.NODE_OPTIONS || null,",
         "  NODE_PATH: process.env.NODE_PATH || null,",
         "  PATH_PRESENT: Boolean(process.env.PATH || process.env.Path),",
         "}));",
+        "writeScipFixture(out, 'python', 'app.py');",
       ]);
 
       const result = await withTemporaryEnv({
@@ -373,7 +428,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       }));
 
       assert.equal(result.reason, "staged");
-      const snapshot = JSON.parse(fs.readFileSync(path.join(scipDir, "python.scip"), "utf8"));
+      const snapshot = JSON.parse(fs.readFileSync(envSnapshotPath, "utf8"));
       assert.equal(snapshot.POSSE_KEY, null);
       assert.equal(snapshot.POSSE_SCIP_SECRET, null);
       assert.equal(snapshot.NODE_OPTIONS, null);
@@ -580,7 +635,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
 
       assert.equal(result.reason, "staged");
       assert.equal(fs.readFileSync(path.join(scipDir, "python.scip"), "utf8"), "existing");
-      assert.match(fs.readFileSync(path.join(scipDir, "php.scip"), "utf8"), /^generated:/);
+      assert.ok(fs.statSync(path.join(scipDir, "php.scip")).size > 0);
       assert.equal(fs.existsSync(stagerMetaPathForOutput(path.join(scipDir, "php.scip"))), true);
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -602,13 +657,13 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       writeScriptedScipIndexer(binDir, "scip-python", [
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
-        "fs.writeFileSync(out, 'python generated');",
+        "writeScipFixture(out, 'python', 'app.py');",
       ]);
       writeScriptedScipIndexer(binDir, "scip-php", [
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
         "await new Promise((resolve) => setTimeout(resolve, 150));",
-        "fs.writeFileSync(out, 'php generated');",
+        "writeScipFixture(out, 'php', 'index.php');",
       ]);
 
       const ready = [];
@@ -631,6 +686,30 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       assert.equal(ready[0].phpExists, false);
       assert.equal(fs.existsSync(path.join(scipDir, "python.scip")), true);
       assert.equal(fs.existsSync(path.join(scipDir, "php.scip")), true);
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("requires a root project marker for indexers that cannot run without one", () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "posse-scip-marker-gate-"));
+    try {
+      const repoRoot = path.join(tmpRoot, "repo");
+      const posseRoot = path.join(tmpRoot, "posse");
+      const binDir = path.join(posseRoot, "scip", "bin");
+      fs.mkdirSync(path.join(repoRoot, "fixtures"), { recursive: true });
+      // A stray vendored/fixture .rs file without a Cargo workspace must not
+      // summon scip-rust — it deterministically fails with "no projects".
+      fs.writeFileSync(path.join(repoRoot, "fixtures", "sample.rs"), "fn main() {}\n");
+      writeFakeScipIndexer(binDir, ["scip-rust"]);
+
+      const without = resolveScipStagePlans({ repoRoot, posseRoot, scipDir: path.join(repoRoot, ".posse", "atlas", "scip"), languages: "rust" });
+      assert.deepEqual(without.plans, []);
+      assert.deepEqual(without.projectKinds, []);
+
+      fs.writeFileSync(path.join(repoRoot, "Cargo.toml"), "[workspace]\n");
+      const withMarker = resolveScipStagePlans({ repoRoot, posseRoot, scipDir: path.join(repoRoot, ".posse", "atlas", "scip"), languages: "rust" });
+      assert.deepEqual(withMarker.plans.map((plan) => plan.indexerId), ["rust"]);
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
@@ -682,7 +761,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       writeScriptedScipIndexer(binDir, "scip-php", [
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
-        "fs.writeFileSync(out, 'php generated');",
+        "writeScipFixture(out, 'php', 'index.php');",
       ]);
 
       const result = await ensureScipStaged({
@@ -710,7 +789,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       writeScriptedScipIndexer(binDir, "scip-python", [
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
-        "fs.writeFileSync(out, 'python generated');",
+        "writeScipFixture(out, 'python', 'app.py');",
       ]);
       const retry = await ensureScipStaged({
         repoRoot,
@@ -732,6 +811,78 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       assert.equal(fs.existsSync(path.join(scipDir, "python.scip")), true);
       const retriedMeta = await readStagerMeta(path.join(scipDir, "python.scip"));
       assert.equal(retriedMeta?.status, "staged");
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails freshly staged empty SCIP output when the language matched source files", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "posse-scip-empty-output-"));
+    try {
+      const repoRoot = path.join(tmpRoot, "repo");
+      const posseRoot = path.join(tmpRoot, "posse");
+      const scipDir = path.join(repoRoot, ".posse", "atlas", "scip");
+      const binDir = path.join(posseRoot, "scip", "bin");
+      fs.mkdirSync(scipDir, { recursive: true });
+      fs.writeFileSync(path.join(repoRoot, "pyproject.toml"), "[project]\nname = 'fixture'\n");
+      fs.writeFileSync(path.join(repoRoot, "app.py"), "print('fixture')\n");
+      writeScriptedScipIndexer(binDir, "scip-python", [
+        "import fs from 'node:fs';",
+        "const out = process.argv[process.argv.indexOf('--output') + 1];",
+        "fs.writeFileSync(out, Buffer.alloc(0));",
+      ]);
+
+      const result = await ensureScipStaged({
+        repoRoot,
+        posseRoot,
+        scipDir,
+        mode: "on",
+        config: { scipRestagePolicy: "always", scipLanguages: ["python"] },
+      });
+
+      assert.equal(result.reason, "indexer_failed");
+      assert.match(result.error, /empty \.scip output/);
+      assert.deepEqual(result.failedLanguages, ["py"]);
+      assert.equal(fs.existsSync(path.join(scipDir, "python.scip")), false);
+      const meta = await readStagerMeta(path.join(scipDir, "python.scip"));
+      assert.equal(meta?.status, "failed");
+      assert.match(meta?.error || "", /empty \.scip output/);
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails freshly staged corrupt SCIP output when the language matched source files", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "posse-scip-corrupt-output-"));
+    try {
+      const repoRoot = path.join(tmpRoot, "repo");
+      const posseRoot = path.join(tmpRoot, "posse");
+      const scipDir = path.join(repoRoot, ".posse", "atlas", "scip");
+      const binDir = path.join(posseRoot, "scip", "bin");
+      fs.mkdirSync(scipDir, { recursive: true });
+      fs.writeFileSync(path.join(repoRoot, "pyproject.toml"), "[project]\nname = 'fixture'\n");
+      fs.writeFileSync(path.join(repoRoot, "app.py"), "print('fixture')\n");
+      writeScriptedScipIndexer(binDir, "scip-python", [
+        "import fs from 'node:fs';",
+        "const out = process.argv[process.argv.indexOf('--output') + 1];",
+        "fs.writeFileSync(out, Buffer.from([0x12, 0xff]));",
+      ]);
+
+      const result = await ensureScipStaged({
+        repoRoot,
+        posseRoot,
+        scipDir,
+        mode: "on",
+        config: { scipRestagePolicy: "always", scipLanguages: ["python"] },
+      });
+
+      assert.equal(result.reason, "indexer_failed");
+      assert.match(result.error, /corrupt \.scip output/);
+      assert.deepEqual(result.failedLanguages, ["py"]);
+      assert.equal(fs.existsSync(path.join(scipDir, "python.scip")), false);
+      const meta = await readStagerMeta(path.join(scipDir, "python.scip"));
+      assert.equal(meta?.status, "failed");
+      assert.match(meta?.error || "", /corrupt \.scip output/);
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
@@ -978,7 +1129,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       });
       assert.equal(first.reason, "staged");
       const outputPath = path.join(scipDir, "typescript.scip");
-      const firstContent = fs.readFileSync(outputPath, "utf8");
+      const firstContent = fs.readFileSync(outputPath);
       const firstMeta = await readStagerMeta(outputPath);
       assert.equal(firstMeta?.head, firstHead);
 
@@ -997,9 +1148,9 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
         config: { scipRestagePolicy: "smart", scipLanguages: ["typescript"] },
       });
       assert.equal(second.reason, "staged");
-      const secondContent = fs.readFileSync(outputPath, "utf8");
+      const secondContent = fs.readFileSync(outputPath);
       const secondMeta = await readStagerMeta(outputPath);
-      assert.notEqual(secondContent, firstContent);
+      assert.equal(secondContent.equals(firstContent), false);
       assert.equal(secondMeta?.head, secondHead);
 
       const third = await ensureScipStaged({
@@ -1010,7 +1161,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
         config: { scipRestagePolicy: "smart", scipLanguages: ["typescript"] },
       });
       assert.equal(third.reason, "already_staged");
-      assert.equal(fs.readFileSync(outputPath, "utf8"), secondContent);
+      assert.equal(fs.readFileSync(outputPath).equals(secondContent), true);
 
       const state = await describeScipStagingState({
         repoRoot,
@@ -1042,13 +1193,13 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
         `fs.appendFileSync(${JSON.stringify(callsPath)}, 'python\\n');`,
-        "fs.writeFileSync(out, `python:${Date.now()}`);",
+        "writeScipFixture(out, 'python', 'app-' + process.hrtime.bigint() + '.py');",
       ]);
       writeScriptedScipIndexer(binDir, "scip-php", [
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
         `fs.appendFileSync(${JSON.stringify(callsPath)}, 'php\\n');`,
-        "fs.writeFileSync(out, `php:${Date.now()}`);",
+        "writeScipFixture(out, 'php', 'index-' + process.hrtime.bigint() + '.php');",
       ]);
       git(repoRoot, ["init"]);
       git(repoRoot, ["config", "user.email", "test@example.com"]);
@@ -1062,8 +1213,8 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       assert.deepEqual(readCallLog(callsPath).sort(), ["php", "python"]);
       const pythonOutput = path.join(scipDir, "python.scip");
       const phpOutput = path.join(scipDir, "php.scip");
-      const firstPython = fs.readFileSync(pythonOutput, "utf8");
-      const firstPhp = fs.readFileSync(phpOutput, "utf8");
+      const firstPython = fs.readFileSync(pythonOutput);
+      const firstPhp = fs.readFileSync(phpOutput);
 
       fs.writeFileSync(path.join(repoRoot, "docs", "note.md"), "docs only\n");
       git(repoRoot, ["add", "docs/note.md"]);
@@ -1073,8 +1224,8 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       const second = await ensureScipStaged({ repoRoot, posseRoot, scipDir, mode: "on", config });
       assert.equal(second.reason, "already_staged");
       assert.deepEqual(readCallLog(callsPath).sort(), ["php", "python"]);
-      assert.equal(fs.readFileSync(pythonOutput, "utf8"), firstPython);
-      assert.equal(fs.readFileSync(phpOutput, "utf8"), firstPhp);
+      assert.equal(fs.readFileSync(pythonOutput).equals(firstPython), true);
+      assert.equal(fs.readFileSync(phpOutput).equals(firstPhp), true);
       assert.equal((await readStagerMeta(pythonOutput))?.head, docsHead);
       assert.equal((await readStagerMeta(phpOutput))?.head, docsHead);
     } finally {
@@ -1099,13 +1250,13 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
         `fs.appendFileSync(${JSON.stringify(callsPath)}, 'python\\n');`,
-        "fs.writeFileSync(out, `python:${Date.now()}`);",
+        "writeScipFixture(out, 'python', 'app-' + process.hrtime.bigint() + '.py');",
       ]);
       writeScriptedScipIndexer(binDir, "scip-php", [
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
         `fs.appendFileSync(${JSON.stringify(callsPath)}, 'php\\n');`,
-        "fs.writeFileSync(out, `php:${Date.now()}`);",
+        "writeScipFixture(out, 'php', 'index-' + process.hrtime.bigint() + '.php');",
       ]);
       git(repoRoot, ["init"]);
       git(repoRoot, ["config", "user.email", "test@example.com"]);
@@ -1119,7 +1270,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       assert.deepEqual([...initialCalls].sort(), ["php", "python"]);
       const pythonOutput = path.join(scipDir, "python.scip");
       const phpOutput = path.join(scipDir, "php.scip");
-      const initialPhp = fs.readFileSync(phpOutput, "utf8");
+      const initialPhp = fs.readFileSync(phpOutput);
 
       fs.writeFileSync(path.join(repoRoot, "app.py"), "print('python changed')\n");
       git(repoRoot, ["add", "app.py"]);
@@ -1128,18 +1279,18 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       assert.equal(afterPython.reason, "staged");
       const pythonCalls = readCallLog(callsPath);
       assert.deepEqual(pythonCalls.slice(initialCalls.length), ["python"]);
-      assert.equal(fs.readFileSync(phpOutput, "utf8"), initialPhp);
+      assert.equal(fs.readFileSync(phpOutput).equals(initialPhp), true);
       assert.equal(afterPython.results.find((row) => row.language === "python")?.staged, true);
       assert.equal(afterPython.results.find((row) => row.language === "php")?.skipped, true);
 
-      const afterPythonOutput = fs.readFileSync(pythonOutput, "utf8");
+      const afterPythonOutput = fs.readFileSync(pythonOutput);
       fs.writeFileSync(path.join(repoRoot, "composer.lock"), "{}\n");
       git(repoRoot, ["add", "composer.lock"]);
       git(repoRoot, ["commit", "-m", "php dependency change"]);
       const afterPhp = await ensureScipStaged({ repoRoot, posseRoot, scipDir, mode: "on", config });
       assert.equal(afterPhp.reason, "staged");
       assert.deepEqual(readCallLog(callsPath).slice(pythonCalls.length), ["php"]);
-      assert.equal(fs.readFileSync(pythonOutput, "utf8"), afterPythonOutput);
+      assert.equal(fs.readFileSync(pythonOutput).equals(afterPythonOutput), true);
       assert.equal(afterPhp.results.find((row) => row.language === "python")?.skipped, true);
       assert.equal(afterPhp.results.find((row) => row.language === "php")?.staged, true);
     } finally {
@@ -1163,7 +1314,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
         `fs.appendFileSync(${JSON.stringify(callsPath)}, 'php\\n');`,
-        "fs.writeFileSync(out, `php:${Date.now()}`);",
+        "writeScipFixture(out, 'php', 'src/Domain/Thing-' + process.hrtime.bigint() + '.php');",
       ]);
       git(repoRoot, ["init"]);
       git(repoRoot, ["config", "user.email", "test@example.com"]);
@@ -1204,7 +1355,7 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
         `fs.appendFileSync(${JSON.stringify(callsPath)}, 'python\\n');`,
-        "fs.writeFileSync(out, `python:${Date.now()}`);",
+        "writeScipFixture(out, 'python', 'app-' + process.hrtime.bigint() + '.py');",
       ]);
       git(repoRoot, ["init"]);
       git(repoRoot, ["config", "user.email", "test@example.com"]);
@@ -1224,13 +1375,13 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       git(repoRoot, ["add", "docs/note.md"]);
       git(repoRoot, ["commit", "-m", "docs only"]);
       const docsHead = git(repoRoot, ["rev-parse", "HEAD"]);
-      const before = fs.readFileSync(outputPath, "utf8");
+      const before = fs.readFileSync(outputPath);
 
       const result = await ensureScipStaged({ repoRoot, posseRoot, scipDir, mode: "on", config });
       const migratedMeta = await readStagerMeta(outputPath);
       assert.equal(result.reason, "already_staged");
       assert.deepEqual(readCallLog(callsPath), ["python"]);
-      assert.equal(fs.readFileSync(outputPath, "utf8"), before);
+      assert.equal(fs.readFileSync(outputPath).equals(before), true);
       assert.equal(migratedMeta?.head, docsHead);
       assert.match(String(migratedMeta?.fileset_hash || ""), /^sha256:/);
     } finally {
@@ -1248,6 +1399,27 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
     const meta = buildStagerMeta(plan);
     assert.deepEqual(decideStageAction({ plan, policy: "smart", existingOutput: true, currentHead: null, meta }), { action: "skip", reason: "fresh" });
     assert.deepEqual(decideStageAction({
+      plan: { ...plan, timeoutMs: 2000 },
+      policy: "smart",
+      existingOutput: true,
+      currentHead: null,
+      meta,
+    }), { action: "skip", reason: "fresh" });
+    assert.deepEqual(decideStageAction({
+      plan: { ...plan, timeoutMs: 360000 },
+      policy: "smart",
+      existingOutput: true,
+      currentHead: null,
+      meta: { ...meta, command_args_hash: legacyCommandArgsHash(plan, 120000) },
+    }), { action: "skip", reason: "fresh" });
+    assert.deepEqual(decideStageAction({
+      plan: { ...plan, args: ["index", "--changed"] },
+      policy: "smart",
+      existingOutput: true,
+      currentHead: null,
+      meta,
+    }), { action: "stage", reason: "command_changed" });
+    assert.deepEqual(decideStageAction({
       plan,
       policy: "smart",
       existingOutput: true,
@@ -1256,6 +1428,108 @@ describe("ATLAS v2 SCIP stager indexer registry", () => {
       maxAgeHours: 1,
     }), { action: "stage", reason: "max_age" });
     assert.deepEqual(decideStageAction({ plan, policy: "smart", existingOutput: false, currentHead: null }), { action: "stage", reason: "missing_output" });
+  });
+
+  it("backs off repeat failures with unchanged inputs and retries on new evidence", () => {
+    const plan = { command: "scip-python", args: ["index"], outputPath: "python.scip", label: "scip-python", source: "auto", timeoutMs: 1000 };
+    const now = Date.now();
+    const failedOnce = buildFailedStagerMeta(plan, { head: "abc", filesetHash: "sha256:f1" });
+    // A first failure retries freely — transient errors and fixed environments
+    // must not wait out a backoff window.
+    assert.deepEqual(
+      decideStageAction({ plan, policy: "smart", existingOutput: false, currentHead: "abc", filesetHash: "sha256:f1", meta: failedOnce, nowMs: now }),
+      { action: "stage", reason: "previous_failure" },
+    );
+    const failedTwice = buildFailedStagerMeta(plan, { head: "abc", filesetHash: "sha256:f1", previousMeta: failedOnce });
+    assert.equal(failedTwice.attempt_count, 2);
+    // A second failure with identical inputs backs off instead of paying a
+    // doomed indexer launch on every warm.
+    assert.deepEqual(
+      decideStageAction({ plan, policy: "smart", existingOutput: false, currentHead: "abc", filesetHash: "sha256:f1", meta: failedTwice, nowMs: now }),
+      { action: "skip", reason: "failure_backoff" },
+    );
+    // Policy "missing" computes no fileset hash; the backoff still applies on
+    // command-hash + age evidence alone.
+    assert.deepEqual(
+      decideStageAction({ plan, policy: "missing", existingOutput: false, meta: failedTwice, nowMs: now }),
+      { action: "skip", reason: "failure_backoff" },
+    );
+    // New evidence unlocks an immediate retry: a changed fileset...
+    assert.deepEqual(
+      decideStageAction({ plan, policy: "smart", existingOutput: false, currentHead: "def", filesetHash: "sha256:f2", meta: failedTwice, nowMs: now }),
+      { action: "stage", reason: "previous_failure" },
+    );
+    // ...or a changed indexer command.
+    assert.deepEqual(
+      decideStageAction({ plan: { ...plan, args: ["index", "--strict"] }, policy: "smart", existingOutput: false, currentHead: "abc", filesetHash: "sha256:f1", meta: failedTwice, nowMs: now }),
+      { action: "stage", reason: "previous_failure" },
+    );
+    // The window expires (second attempt backs off five minutes).
+    const afterBackoff = Date.parse(String(failedTwice.failed_at)) + 5 * 60_000 + 1;
+    assert.deepEqual(
+      decideStageAction({ plan, policy: "smart", existingOutput: false, currentHead: "abc", filesetHash: "sha256:f1", meta: failedTwice, nowMs: afterBackoff }),
+      { action: "stage", reason: "previous_failure" },
+    );
+    // policy=always is an operator override and ignores the backoff.
+    assert.deepEqual(
+      decideStageAction({ plan, policy: "always", existingOutput: false, meta: failedTwice, nowMs: now }),
+      { action: "stage", reason: "missing_output" },
+    );
+  });
+
+  it("gives fileset-changed restages the full-index timeout and stretches it by recorded duration", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "posse-scip-restage-timeout-"));
+    try {
+      const repoRoot = path.join(tmpRoot, "repo");
+      const posseRoot = path.join(tmpRoot, "posse");
+      const scipDir = path.join(repoRoot, ".posse", "atlas", "scip");
+      const binDir = path.join(posseRoot, "scip", "bin");
+      fs.mkdirSync(repoRoot, { recursive: true });
+      fs.mkdirSync(scipDir, { recursive: true });
+      fs.writeFileSync(path.join(repoRoot, "pyproject.toml"), "[project]\nname = 'fixture'\n");
+      fs.writeFileSync(path.join(repoRoot, "app.py"), "print('fixture')\n");
+      writeFakeScipIndexer(binDir, ["scip-python"]);
+      git(repoRoot, ["init"]);
+      git(repoRoot, ["config", "user.email", "test@example.com"]);
+      git(repoRoot, ["config", "user.name", "Test"]);
+      git(repoRoot, ["add", "pyproject.toml", "app.py"]);
+      git(repoRoot, ["commit", "-m", "initial"]);
+      const config = {
+        scipRestagePolicy: "smart",
+        scipLanguages: ["python"],
+        scipIndexTimeoutMs: 1000,
+        scipColdIndexTimeoutMs: 5000,
+      };
+
+      const first = await ensureScipStaged({ repoRoot, posseRoot, scipDir, mode: "on", config });
+      assert.equal(first.reason, "staged");
+      const outputPath = path.join(scipDir, "python.scip");
+      const firstMeta = await readStagerMeta(outputPath);
+      // The run's real duration lands in the meta as timeout evidence.
+      assert.ok(Number(firstMeta?.staged_duration_ms) > 0);
+
+      fs.writeFileSync(path.join(repoRoot, "app.py"), "print('changed')\n");
+      git(repoRoot, ["add", "app.py"]);
+      git(repoRoot, ["commit", "-m", "change"]);
+      const second = await ensureScipStaged({ repoRoot, posseRoot, scipDir, mode: "on", config });
+      const row = second.results.find((r) => r.language === "python");
+      // A restage is a whole-project index run: it must get the cold timeout,
+      // not the short incremental one that used to kill long indexer runs.
+      assert.equal(row?.reason, "fileset_changed");
+      assert.equal(row?.cold, true);
+      assert.equal(row?.timeoutMs, 5000);
+
+      // A recorded long duration stretches the stage timeout past the cold
+      // floor (2.5x headroom over the last full index).
+      const metaPath = stagerMetaPathForOutput(outputPath);
+      const staged = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      fs.writeFileSync(metaPath, JSON.stringify({ ...staged, fileset_hash: "sha256:stale", staged_duration_ms: 60_000 }));
+      const state = await describeScipStagingState({ repoRoot, posseRoot, scipDir, config });
+      assert.equal(state.rows[0]?.decision?.action, "stage");
+      assert.equal(state.rows[0]?.timeout_ms, 150_000);
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1303,7 +1577,7 @@ describe("ATLAS v2 SCIP indexer progress extraction", () => {
         "import fs from 'node:fs';",
         "const out = process.argv[process.argv.indexOf('--output') + 1];",
         "for (let i = 1; i <= 5; i++) process.stderr.write(\"\\r[bar] \" + i + \"/5 files\");",
-        "fs.writeFileSync(out, 'python generated');",
+        "writeScipFixture(out, 'python', 'app.py');",
       ]);
 
       const events = [];

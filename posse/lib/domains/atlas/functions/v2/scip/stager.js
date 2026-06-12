@@ -222,7 +222,7 @@ export async function ensureScipStaged({
       }))
       .map((row) => ({
         ...row,
-        plan: row.cold ? planWithRuntimeTimeout(row.plan, coldTimeoutMs) : row.plan,
+        plan: row.cold ? planWithRuntimeTimeout(row.plan, stageTimeoutMsForRow(row, coldTimeoutMs)) : row.plan,
       }));
     const skippedResults = decisions
       .filter((row) => row.decision.action !== "stage")
@@ -422,6 +422,9 @@ async function refreshSkippedStagerMetadata(rows, currentHead, onProgress = null
     if (!row?.existingOutput || row?.decision?.action === "stage") continue;
     const reason = String(row?.decision?.reason || "");
     if (reason === "already_staged" || reason.startsWith("policy_never")) continue;
+    // A failure-backoff skip must keep its failed meta intact — rewriting it
+    // as "staged" would erase the attempt count and fake freshness.
+    if (reason === "failure_backoff") continue;
     const filesetHash = row?.fileset?.currentHash || null;
     if (!filesetHash) continue;
     const meta = row.meta || null;
@@ -434,6 +437,9 @@ async function refreshSkippedStagerMetadata(rows, currentHead, onProgress = null
       head: currentHead,
       commandArgsHash: computeCommandArgsHash(row.plan),
       filesetHash,
+      // A refresh records no new run; carry the last real duration forward so
+      // history-aware stage timeouts survive head-only meta refreshes.
+      durationMs: Number(stagedMetaForFilesetFallback(meta)?.staged_duration_ms) || null,
     }));
     if (!metaResult.ok) {
       emit(onProgress, `SCIP restage metadata refresh failed for ${path.basename(row.plan.outputPath)}: ${metaResult.error || "unknown"}`, {
@@ -521,7 +527,9 @@ export async function describeScipStagingState({
       decision,
       meta_status: String(meta?.status || (meta ? "staged" : "") || ""),
       cold: shouldUseColdTimeout({ existingOutput: exists, meta, decision }),
-      timeout_ms: shouldUseColdTimeout({ existingOutput: exists, meta, decision }) ? coldTimeoutMs : plan.timeoutMs,
+      timeout_ms: shouldUseColdTimeout({ existingOutput: exists, meta, decision })
+        ? stageTimeoutMsForRow({ meta }, coldTimeoutMs)
+        : plan.timeoutMs,
       currentHead,
       fileset_hash: fileset.currentHash || null,
       fileset_files: fileset.current?.files ?? null,
@@ -530,6 +538,45 @@ export async function describeScipStagingState({
     });
   }
   return { policy, currentHead, rows };
+}
+
+// Repeat-failure backoff. A failed indexer used to be relaunched on EVERY
+// warm (reason previous_failure) — a deterministically broken language paid a
+// failed subprocess launch per warm forever, and a hanging one paid the full
+// cold timeout per warm. The failure meta carries the evidence to do better:
+// retry immediately when the inputs changed (fileset or command) or when the
+// failure is a first attempt; otherwise back off exponentially per attempt.
+const SCIP_FAILURE_BACKOFF_BASE_MS = 5 * 60_000;
+const SCIP_FAILURE_BACKOFF_MAX_MS = 6 * 60 * 60_000;
+
+/**
+ * @param {Record<string, any> | null} meta
+ * @param {{ plan?: ScipStagePlan, currentHead?: string | null, filesetHash?: string | null, nowMs?: number }} input
+ * @returns {{ action: "skip", reason: string } | null} skip decision, or null to allow the retry
+ */
+function failureBackoffDecision(meta, { plan, currentHead = null, filesetHash = null, nowMs = Date.now() } = {}) {
+  if (String(meta?.status || "").trim().toLowerCase() !== "failed") return null;
+  // Changed inputs are new evidence — retry immediately.
+  if (String(meta?.command_args_hash || "") !== computeCommandArgsHash(plan)) return null;
+  const failedFileset = String(meta?.fileset_hash || "");
+  const currentFileset = String(filesetHash || "");
+  if (failedFileset && currentFileset && failedFileset !== currentFileset) return null;
+  if (!failedFileset || !currentFileset) {
+    const failedHead = String(meta?.head || "");
+    if (failedHead && currentHead && failedHead !== String(currentHead)) return null;
+  }
+  // First failure retries freely (transient errors, fixed environments); the
+  // backoff only throttles a failure that has already been retried unchanged.
+  const attempts = Math.floor(Number(meta?.attempt_count) || 1);
+  if (attempts < 2) return null;
+  const failedAt = Date.parse(String(meta?.failed_at || ""));
+  if (!Number.isFinite(failedAt)) return null;
+  const backoffMs = Math.min(
+    SCIP_FAILURE_BACKOFF_BASE_MS * 2 ** Math.min(attempts - 2, 30),
+    SCIP_FAILURE_BACKOFF_MAX_MS,
+  );
+  if (nowMs - failedAt >= backoffMs) return null;
+  return { action: "skip", reason: "failure_backoff" };
 }
 
 /**
@@ -542,6 +589,7 @@ export async function describeScipStagingState({
  *   filesetHash?: string | null,
  *   previousFilesetHash?: string | null,
  *   maxAgeHours?: number | null,
+ *   nowMs?: number,
  * }} input
  * @returns {{ action: "stage" | "skip", reason: string }}
  */
@@ -554,20 +602,23 @@ export function decideStageAction({
   filesetHash = null,
   previousFilesetHash = null,
   maxAgeHours = ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
+  nowMs = Date.now(),
 } = {}) {
   const normalizedPolicy = normalizeScipRestagePolicy(policy);
   if (normalizedPolicy === "never") {
     return { action: "skip", reason: existingOutput ? "policy_never_present" : "policy_never_missing" };
   }
-  if (normalizedPolicy === "missing") {
-    return existingOutput
-      ? { action: "skip", reason: "already_staged" }
-      : { action: "stage", reason: String(meta?.status || "").toLowerCase() === "failed" ? "previous_failure" : "missing_output" };
-  }
   if (normalizedPolicy === "always") {
     return { action: "stage", reason: existingOutput ? "policy_always" : "missing_output" };
   }
+  const backoff = failureBackoffDecision(meta, { plan, currentHead, filesetHash, nowMs });
+  if (normalizedPolicy === "missing") {
+    if (existingOutput) return { action: "skip", reason: "already_staged" };
+    if (backoff) return backoff;
+    return { action: "stage", reason: String(meta?.status || "").toLowerCase() === "failed" ? "previous_failure" : "missing_output" };
+  }
   if (!existingOutput) {
+    if (backoff) return backoff;
     return { action: "stage", reason: String(meta?.status || "").toLowerCase() === "failed" ? "previous_failure" : "missing_output" };
   }
   const freshness = metaIsCurrent(meta, {
@@ -577,9 +628,9 @@ export function decideStageAction({
     plan,
     maxAgeHours,
   });
-  return freshness.current
-    ? { action: "skip", reason: "fresh" }
-    : { action: "stage", reason: freshness.reason };
+  if (freshness.current) return { action: "skip", reason: "fresh" };
+  if (backoff) return backoff;
+  return { action: "stage", reason: freshness.reason };
 }
 
 /**
@@ -636,7 +687,9 @@ async function stagePlanThroughGate(plan, { cwd, policy, currentHead, maxAgeHour
       timeoutMs: plan.timeoutMs,
       cold: Boolean(plan.runtimeColdTimeout),
     });
+    const stageStartedAt = Date.now();
     const run = await runScipIndexerAtomic(plan, { cwd, onProgress });
+    const stageDurationMs = Date.now() - stageStartedAt;
     if (!run.ok) {
       const message = run.error || `exit ${run.status ?? "unknown"}`;
       await writeStagerMeta(plan.outputPath, buildFailedStagerMeta(plan, {
@@ -646,6 +699,7 @@ async function stagePlanThroughGate(plan, { cwd, policy, currentHead, maxAgeHour
         reason: decision.reason,
         error: message,
         previousMeta: meta,
+        durationMs: stageDurationMs,
       }));
       emit(onProgress, `SCIP restage failed for ${plan.indexerId || plan.label}: ${run.error || `exit ${run.status ?? "unknown"}`}`, {
         kind: "atlas.scip.restage_failed",
@@ -663,6 +717,7 @@ async function stagePlanThroughGate(plan, { cwd, policy, currentHead, maxAgeHour
       head: currentHead,
       commandArgsHash: computeCommandArgsHash(plan),
       filesetHash: fileset.currentHash,
+      durationMs: stageDurationMs,
     }));
     if (!metaResult.ok) {
       emit(onProgress, `SCIP restage metadata write failed for ${path.basename(plan.outputPath)}: ${metaResult.error || "unknown"}`, {
@@ -723,7 +778,14 @@ async function runScipIndexerAtomic(plan, { cwd, onProgress = null }) {
       source_languages: sourceLanguagesForPlan(plan),
     });
     try {
-      return await runScipIndexer(plan, { cwd, onProgress });
+      const run = await runScipIndexer(plan, { cwd, onProgress });
+      if (!run.ok) return run;
+      if (!(await fileExists(plan.outputPath))) {
+        return { ok: false, error: `indexer completed but did not produce ${path.basename(plan.outputPath)}` };
+      }
+      const validation = validateScipOutputFile(plan.outputPath, run.sourceFiles);
+      if (!validation.ok) return { ...run, ok: false, error: validation.error, scipDocuments: validation.documents };
+      return { ...run, scipDocuments: validation.documents };
     } finally {
       await cleanupGeneratedTsconfig(inferredTsconfig, hadTsconfig);
     }
@@ -735,8 +797,10 @@ async function runScipIndexerAtomic(plan, { cwd, onProgress = null }) {
     if (!(await fileExists(tempPath))) {
       return { ok: false, error: `indexer completed but did not produce ${path.basename(tempPath)}` };
     }
+    const validation = validateScipOutputFile(tempPath, run.sourceFiles);
+    if (!validation.ok) return { ...run, ok: false, error: validation.error, scipDocuments: validation.documents };
     await replaceFile(tempPath, plan.outputPath);
-    return run;
+    return { ...run, scipDocuments: validation.documents };
   } finally {
     try { await fs.promises.rm(tempPath, { force: true }); } catch { /* best effort */ }
     await cleanupGeneratedTsconfig(inferredTsconfig, hadTsconfig);
@@ -774,11 +838,26 @@ function cleanupGraceMs(config, explicitTimeoutMs = null) {
   return Math.max(SCIP_STAGING_ORPHAN_GRACE_MS, normal, cold) + 60_000;
 }
 
+// SCIP indexers are whole-project: a restage costs the same full-index run as
+// a cold boot, so EVERY stage action gets the cold ("full index") timeout. The
+// short normal timeout previously applied to fileset-changed restages killed
+// long indexer runs at the default 120s, threw the work away, and left the
+// retry to a later warm — exactly the slow-warm-restage failure mode.
 function shouldUseColdTimeout(row = {}) {
-  if (row?.decision?.action !== "stage") return false;
-  if (!row.existingOutput) return true;
-  const status = String(row?.meta?.status || "").trim().toLowerCase();
-  return status === "failed" || row?.decision?.reason === "previous_failure";
+  return row?.decision?.action === "stage";
+}
+
+// Timeout for a stage run: the cold floor, stretched by the language's last
+// recorded full-index duration (with headroom) when the meta has one. Evidence
+// beats the generic default — a repo whose typescript index takes 9 minutes
+// must not be killed at the 600s floor.
+const SCIP_DURATION_TIMEOUT_HEADROOM = 2.5;
+function stageTimeoutMsForRow(row = {}, coldTimeoutMs = DEFAULT_SCIP_COLD_INDEX_TIMEOUT_MS) {
+  const history = Number(stagedMetaForFilesetFallback(row?.meta)?.staged_duration_ms);
+  const fromHistory = Number.isFinite(history) && history > 0
+    ? Math.ceil(history * SCIP_DURATION_TIMEOUT_HEADROOM)
+    : 0;
+  return Math.max(coldTimeoutMs, fromHistory);
 }
 
 function planWithRuntimeTimeout(plan, timeoutMs) {
@@ -1177,6 +1256,7 @@ function runScipIndexer(plan, { cwd, onProgress = null }) {
         ok: status === 0,
         status,
         signal,
+        sourceFiles: syntheticTotal,
         error: status === 0 ? undefined : (stderrTail.trim() || `exit ${status ?? "unknown"}`),
       });
     });
@@ -1198,7 +1278,7 @@ function runScipIndexer(plan, { cwd, onProgress = null }) {
     }
     timer = setTimeout(() => {
       killProcessTree(child);
-      finish({ ok: false, error: `timed out after ${plan.timeoutMs}ms` });
+      finish({ ok: false, error: `timed out after ${plan.timeoutMs}ms`, sourceFiles: syntheticTotal });
     }, plan.timeoutMs);
     timer.unref?.();
   });
@@ -1281,6 +1361,29 @@ function countScipDocumentsInFile(filePath) {
   }
 }
 
+function validateScipOutputFile(filePath, sourceFiles) {
+  const totalSources = Number(sourceFiles);
+  const documents = countScipDocumentsInFile(filePath);
+  if (!Number.isFinite(totalSources) || totalSources <= 0) {
+    return { ok: true, documents: Number.isFinite(documents) ? documents : null };
+  }
+  if (!Number.isFinite(documents)) {
+    return {
+      ok: false,
+      documents: null,
+      error: `indexer produced corrupt .scip output for ${Math.round(totalSources)} source file${Math.round(totalSources) === 1 ? "" : "s"}`,
+    };
+  }
+  if (documents <= 0) {
+    return {
+      ok: false,
+      documents,
+      error: `indexer produced empty .scip output for ${Math.round(totalSources)} source file${Math.round(totalSources) === 1 ? "" : "s"}`,
+    };
+  }
+  return { ok: true, documents };
+}
+
 function emit(onProgress, text, extra = {}) {
   if (typeof onProgress !== "function") return;
   try {
@@ -1310,6 +1413,7 @@ function parseScipIndexerProgress(text) {
     current,
     total,
     percent: Math.max(0, Math.min(100, (current / total) * 100)),
+    progress_source: "indexer-ratio",
   };
 }
 
@@ -1350,6 +1454,7 @@ export function extractScipIndexerProgressEvents(text, ctx) {
           total: syntheticTotal,
           percent: Math.max(0, Math.min(100, (current / syntheticTotal) * 100)),
           synthetic: true,
+          progress_source: "stdout-path",
         };
       }
     }

@@ -399,7 +399,7 @@ export class ChildEmbeddingIndex {
     }
   }
 
-  #sendToCurrent(op, args = {}, { timeoutMs = CHILD_REQUEST_TIMEOUT_MS } = {}) {
+  #sendToCurrent(op, args = {}, { timeoutMs = CHILD_REQUEST_TIMEOUT_MS, killOnTimeout = true } = {}) {
     const child = this.#child;
     if (!this.#isCurrentChildRunning()) {
       throw decorateError(new Error("EmbeddingIndex child is not running"), { code: "EMBEDDING_CHILD_EXIT" });
@@ -433,7 +433,9 @@ export class ChildEmbeddingIndex {
             op,
             timeoutMs,
           }));
-          try { child.kill(); } catch { /* best effort */ }
+          if (killOnTimeout) {
+            try { child.kill(); } catch { /* best effort */ }
+          }
         }, Number(timeoutMs))
         : null;
       timer?.unref?.();
@@ -608,22 +610,47 @@ export class ChildEmbeddingIndex {
     if (this.#closed) return;
     this.#closed = true;
     this.#stopping = true;
+    const child = this.#child;
     try {
-      if (this.#child && !this.#child.killed) {
-        await this.#sendToCurrent("close", {}, { timeoutMs: 30_000 }).catch(() => undefined);
+      if (child && !child.killed) {
+        await this.#sendToCurrent("close", {}, { timeoutMs: 10_000, killOnTimeout: false }).catch(() => undefined);
       }
     } finally {
-      const child = this.#child;
-      this.#child = null;
       for (const pending of this.#pending.values()) {
         if (pending.timer) clearTimeout(pending.timer);
         pending.reject(decorateError(new Error("EmbeddingIndex child closed"), { code: "EMBEDDING_CHILD_CLOSED" }));
       }
       this.#pending.clear();
       try { child?.disconnect?.(); } catch { /* best effort */ }
-      try { child?.kill?.(); } catch { /* best effort */ }
+      const exited = await waitForChildExit(child, 5_000);
+      if (!exited && isChildRunning(child)) {
+        try { child?.kill?.(); } catch { /* best effort */ }
+      }
+      if (this.#child === child) this.#child = null;
     }
   }
+}
+
+function isChildRunning(child) {
+  return !!child && !child.killed && child.exitCode == null && child.signalCode == null;
+}
+
+function waitForChildExit(child, graceMs) {
+  if (!isChildRunning(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      child.off?.("exit", onExit);
+      resolve(value);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), Math.max(1, Number(graceMs) || 1));
+    timer.unref?.();
+    child.once?.("exit", onExit);
+  });
 }
 
 function diagnosticReportExecArgv(reportDir) {

@@ -16,6 +16,7 @@
 
 import { runDaemonThread } from "../../../../../classes/tools/daemon/thread-host.js";
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
+import { SCIP_INDEXER_COUNT } from "../scip/indexers.js";
 import { setOnnxDaemonKeepWarm } from "../embeddings/onnx-daemon.js";
 
 // This thread's nested ONNX encoder daemon (spawned on first daemon-backed
@@ -34,7 +35,11 @@ setOnnxDaemonKeepWarm(true);
 /** @type {Map<string, { ledgerPath: string, dbPath: string, ledger: any, view: any }>} */
 const handles = new Map();
 const dbWrite = createDbWriteSemaphore();
-const scipStage = createScipStageSemaphore(1);
+// Generation fans out: one slot per known indexer so concurrent per-language
+// stage ops never queue behind the valve. Correctness does not depend on this
+// width — the stager's per-(cwd,output) gate serializes same-language runs and
+// re-checks freshness inside the gate, so duplicates collapse to skips.
+const scipStage = createScipStageSemaphore(SCIP_INDEXER_COUNT);
 
 function getEntry(ledgerPath, dbPath) {
   const key = `${ledgerPath}|${dbPath}`;
@@ -71,13 +76,20 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       return { openTargets: [...handles.keys()], dbWriteDepth: dbWrite.depth?.() ?? null };
 
     case "stage": {
-      // Parallel SCIP generation, gated by the stage semaphore.
+      // Parallel SCIP generation, gated by the stage semaphore. A `lang`
+      // scopes the run to that language's indexer (aliases like `ts`/`py`
+      // normalize; unknown values fall back to all detected languages);
+      // without it the run covers every detected language.
       const { ensureScipStaged } = await import("../scip/stager.js");
+      const lang = String(payload.lang || "").trim();
+      const config = lang
+        ? { ...(payload.config || {}), scipLanguages: [lang] }
+        : payload.config;
       return scipStage.run(() => ensureScipStaged({
         repoRoot: payload.repoRoot,
         scipDir: payload.scipDir,
         mode: payload.mode,
-        config: payload.config,
+        config,
       }));
     }
 
@@ -171,6 +183,13 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         try { view?.close?.(); } catch { /* best effort */ }
       }
       handles.clear();
+      // This thread's module graph owns any native daemon hosts it spawned
+      // (posse-atlas via the parser adapter); dispose them before the parent
+      // terminates the thread or they outlive it as orphaned processes.
+      try {
+        const { nativeBinaries } = await import("../../../../../classes/tools/BinaryManager.js");
+        await nativeBinaries.disposeAll();
+      } catch { /* best effort */ }
       return { closed: true };
     }
 

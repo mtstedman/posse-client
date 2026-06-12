@@ -40,7 +40,8 @@ import {
   logAtlasError,
 } from "../../functions/v2/verbose-errors.js";
 import { ingestView } from "../../functions/v2/embeddings/ingest.js";
-import { reconcileEmbeddings } from "../../functions/v2/embeddings/on-demand.js";
+import { reconcileEmbeddings, resumeEmbeddingsSlice } from "../../functions/v2/embeddings/on-demand.js";
+import { ATLAS_EMBEDDINGS_WARM_SLICE_SYMBOLS } from "../../functions/v2/contracts/jobs.js";
 import { errorForTelemetry, recordEmbeddingForensics } from "../../functions/v2/embeddings/forensics.js";
 import { cleanupStaleEmbeddingDirs, openEmbeddingResources } from "../../functions/v2/embeddings/resources.js";
 import { openViewWithMeta, removeSqliteFile, viewFreshness } from "../../functions/v2/view-health.js";
@@ -349,6 +350,8 @@ export class ParseEngine {
   #defaultBranchEnsured = false;
   /** @type {boolean} */
   #deferEmbeddings;
+  /** @type {AbortSignal | null} */
+  #signal;
   /** @type {Array<{ viewPath: string, base: AtlasWarmJobResult }>} */
   #pendingEmbeddingIngests = [];
 
@@ -364,9 +367,10 @@ export class ParseEngine {
    *   scipDir?: string,
    *   onProgress?: ((event: Record<string, unknown>) => void) | null,
    *   deferEmbeddings?: boolean,
+   *   signal?: AbortSignal | null,
    * }} args
    */
-  constructor({ ledger, viewBuilder, parserAdapter, repoRoot, defaultBranch = "main", config, scipMode, scipDir, onProgress = null, deferEmbeddings = false }) {
+  constructor({ ledger, viewBuilder, parserAdapter, repoRoot, defaultBranch = "main", config, scipMode, scipDir, onProgress = null, deferEmbeddings = false, signal = null }) {
     if (!ledger) throw new TypeError("ParseEngine: ledger is required");
     if (!repoRoot) throw new TypeError("ParseEngine: repoRoot is required");
     this.#ledger = ledger;
@@ -391,6 +395,7 @@ export class ParseEngine {
     );
     this.#onProgress = typeof onProgress === "function" ? onProgress : null;
     this.#deferEmbeddings = deferEmbeddings === true;
+    this.#signal = signal && typeof signal === "object" ? signal : null;
     // Default-branch ledger init is deferred until the first job/mount
     // entry point so a transient ledger fault surfaces through the
     // appropriate error contract (skipped record for handleWarmJob,
@@ -493,17 +498,14 @@ export class ParseEngine {
    * @param {AtlasWarmPurpose} purpose
    */
   #scipPhaseEligible(purpose) {
+    // WI warms are intentionally hot-view materialization only. Repo-level
+    // SCIP staging/intake belongs to main warms; letting a WI warm run it turns
+    // a one-file follow-up into a boot-scale indexing job.
     return (
       purpose === "main-incremental" ||
       purpose === "main-full" ||
-      purpose === "main-merge" ||
-      purpose === "wi"
+      purpose === "main-merge"
     );
-    // On `wi`, SCIP consume appends to the default branch before the WI view
-    // is built. That helps cold WIs that still fall back to the default
-    // branch. If a WI branch already exists, its lineage is capped at its
-    // parent_seq, so default-branch SCIP appends after that fork are not
-    // visible until a future branch sync/rebase path handles them explicitly.
   }
 
   /**
@@ -594,6 +596,16 @@ export class ParseEngine {
           },
         });
         if (result.skipped) continue;
+        if (result.stale_scip) {
+          // Drift evidence from intake: the index references files the tree no
+          // longer has. Re-ingesting the same artifact is futile — surface it
+          // so the operator (and a future auto-restage hook) can see it.
+          base.skipped.push({
+            repo_rel_path: ".",
+            reason: "parse_error",
+            message: `SCIP index ${path.basename(scipPath)} is stale: ${result.documents_missing_text} document(s) reference files missing from the tree — restage needed`,
+          });
+        }
         base.blobs_ingested += result.documents_ingested;
         base.blobs_reused += result.blobs_reused;
         base.ledger_entries_appended += result.ledger_entries_appended || 0;
@@ -790,6 +802,8 @@ export class ParseEngine {
         }
         case "scip-restage":
           return finalize(await this.#restageScip(payload, base), start);
+        case "embeddings":
+          return finalize(await this.#resumeEmbeddings(payload, base), start);
         default:
           base.skipped = (payload?.paths || []).map((p) => ({
             repo_rel_path: String(p),
@@ -1283,6 +1297,50 @@ export class ParseEngine {
       const warmedFiles = Array.isArray(payload.paths) && payload.paths.length > 0
         ? payload.paths.slice(0, 200)
         : null;
+      const branchRec = this.#ledger.getBranch(branchHint);
+      const branchLocalHeadSeq = branchRec ? this.#ledger.headSeq(branchRec.name) : null;
+      const parentCloneSeq = branchRec && branchLocalHeadSeq === 0
+        ? branchRec.parent_seq
+        : null;
+      const main = mainViewPath(this.#repoRoot);
+      if (fs.existsSync(main)) {
+        const mainProbe = openViewWithMeta(main, View);
+        const canCloneMain = mainProbe.ok
+          ? viewCanServeBranch({
+              meta: mainProbe.meta,
+              ledger: this.#ledger,
+              branch: targetBranch,
+              allowParentBranchAtSeq: parentCloneSeq,
+              parentBranch: branchRec?.parent_branch || this.#defaultBranch,
+            })
+          : { ok: false };
+        if (mainProbe.ok) {
+          try { mainProbe.view.close(); } catch { /* ignore */ }
+        }
+        if (canCloneMain.ok) {
+          await this.#emitStage("view", `cloning main view for ${targetBranch}`);
+          this.#builder.cloneView({ sourcePath: main, destPath: outPath });
+          if (branchRec) {
+            patchViewBranchMeta(outPath, {
+              branch: branchRec.name,
+              parent_branch: branchRec.parent_branch,
+              parent_seq: branchRec.parent_seq,
+              ledger_seq: this.#ledger.headSeq(branchRec.name),
+            });
+          }
+          const cloned = View.mount({ dbPath: outPath });
+          try {
+            const meta = cloned.meta();
+            base.view_written = outPath;
+            base.view_etag = meta.built_at;
+          } finally {
+            cloned.close();
+          }
+          await this.#emitStage("embeddings", `checking embeddings for ${path.basename(outPath)}`);
+          await this.#maybeIngestEmbeddings({ viewPath: outPath, base, purpose: "wi" });
+          return base;
+        }
+      }
       await this.#emitStage("view", `building ${targetBranch} view at seq ${atSeq}`);
       const meta = await this.#builder.buildFromAsync({
         ledger: this.#ledger,
@@ -2188,9 +2246,101 @@ export class ParseEngine {
   async flushDeferredEmbeddings() {
     const pending = this.#pendingEmbeddingIngests.splice(0);
     for (const item of pending) {
-      await this.#ingestEmbeddingsForView(item);
+      if (typeof item.run === "function") await item.run();
+      else await this.#ingestEmbeddingsForView(item);
     }
     return pending.length;
+  }
+
+  /**
+   * Purpose === "embeddings": one budget-sliced step toward vector parity for
+   * an existing view. No ledger/view writes — under the conductor the encode
+   * is deferred past the serial write queue exactly like the ride-along
+   * embeddings pass, so queued merges/warms never wait behind it. The caller
+   * (warm job executor) re-enqueues another slice while
+   * `embeddings_complete === false`.
+   *
+   * @param {AtlasWarmJobPayload} payload
+   * @param {AtlasWarmJobResult} base
+   * @returns {Promise<AtlasWarmJobResult>}
+   */
+  async #resumeEmbeddings(payload, base) {
+    const viewPath = String(payload?.out_view_path || mainViewPath(this.#repoRoot));
+    if (!fs.existsSync(viewPath)) {
+      // No view yet means the views layer owns the work; its warm runs the
+      // full ride-along ingest. Report complete so the resume loop ends.
+      base.embeddings_skipped_reason = "view_missing";
+      base.embeddings_complete = true;
+      base.embeddings_remaining = 0;
+      return base;
+    }
+    if (this.#deferEmbeddings) {
+      this.#pendingEmbeddingIngests.push({
+        viewPath,
+        base,
+        run: () => this.#resumeEmbeddingsNow({ viewPath, base, payload }),
+      });
+      return base;
+    }
+    await this.#resumeEmbeddingsNow({ viewPath, base, payload });
+    return base;
+  }
+
+  /**
+   * @param {{ viewPath: string, base: AtlasWarmJobResult, payload: AtlasWarmJobPayload }} args
+   * @returns {Promise<void>}
+   */
+  async #resumeEmbeddingsNow({ viewPath, base, payload }) {
+    await this.#emitStage("embeddings", `resuming embeddings for ${path.basename(viewPath)}`);
+    const resources = openEmbeddingResources({
+      repoRoot: this.#repoRoot,
+      config: this.#runtimeConfig,
+    });
+    if (!resources.enabled) {
+      // Embeddings off or unopenable: there is nothing for the resume loop to
+      // converge on, so report complete instead of re-enqueueing forever.
+      base.embeddings_provider = resources.provider;
+      base.embeddings_skipped_reason = resources.reason || "disabled";
+      base.embeddings_complete = true;
+      base.embeddings_remaining = 0;
+      return;
+    }
+    /** @type {View | null} */
+    let view = null;
+    try {
+      view = View.mount({ dbPath: viewPath, mode: "readonly" });
+      const maxEncode = Number.isInteger(payload?.max_symbols) && payload.max_symbols > 0
+        ? payload.max_symbols
+        : ATLAS_EMBEDDINGS_WARM_SLICE_SYMBOLS;
+      const result = await resumeEmbeddingsSlice({
+        view,
+        index: /** @type {any} */ (resources.index),
+        encoder: /** @type {any} */ (resources.encoder),
+        repoRoot: this.#repoRoot,
+        maxEncode,
+      });
+      base.embeddings_provider = resources.provider;
+      base.embeddings_candidates = result.candidates;
+      base.embeddings_indexed = result.encoded;
+      base.embeddings_remaining = result.remaining;
+      base.embeddings_complete = result.complete;
+      if (result.skipped && result.reason && result.reason !== "fully_indexed") {
+        base.embeddings_skipped_reason = result.reason;
+        // Unusable encoder/index pairing (e.g. dim mismatch) cannot converge.
+        base.embeddings_complete = true;
+        base.embeddings_remaining = 0;
+      } else if (!result.complete && result.reason) {
+        base.embeddings_error = result.reason;
+      }
+    } catch (err) {
+      logAtlasError(`[Warmer.#resumeEmbeddingsNow] viewPath=${viewPath} threw:`, err);
+      base.embeddings_provider = resources.provider;
+      base.embeddings_error = formatAtlasError(err);
+      base.embeddings_complete = false;
+    } finally {
+      try { view?.close?.(); } catch { /* ignore */ }
+      try { await resources.close(); } catch { /* ignore */ }
+    }
   }
 
   /**
@@ -2341,6 +2491,7 @@ export class ParseEngine {
           ?? /** @type {any} */ (this.#runtimeConfig)?.atlasEmbeddingThreads
           ?? /** @type {any} */ (this.#runtimeConfig)?.atlas_embedding_threads
           ?? 1,
+        signal: this.#signal,
         onProgress: (event) => {
           // Translate ingestView's structured progress into the standard
           // progress event shape so the display can render per-language bars.

@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { threadId } from "node:worker_threads";
 
 // Global by default so any boot can find a crashed session's breadcrumbs.
 // Overridable only via the test hook below (no env/admin knob — there is no
@@ -46,7 +47,7 @@ function ownLedgerPath() {
   return path.join(ledgerDir(), `${process.pid}.json`);
 }
 
-/** @returns {Array<{ pid: number, bin: string, startedAt: number }>} */
+/** @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string }>} */
 function readLedger(file) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -105,21 +106,78 @@ function imageMatches(pid, binBase) {
 }
 
 /**
- * Record a freshly spawned daemon child in this process's ledger.
+ * Record a freshly spawned daemon child in this process's ledger. The entry
+ * carries owner attribution (spawning thread id + creator label) so a leaked
+ * host is identifiable by lookup instead of forensic reconstruction.
  * @param {number | null | undefined} pid
  * @param {string | null | undefined} bin resolved binary path (basename is stored)
+ * @param {{ label?: string }} [context]
  */
-export function recordDaemonSpawn(pid, bin) {
+export function recordDaemonSpawn(pid, bin, context = {}) {
   if (!Number.isInteger(pid) || /** @type {number} */ (pid) <= 0) return;
   try {
     const file = ownLedgerPath();
     const entries = readLedger(file);
     if (entries.some((e) => e.pid === pid)) return;
-    entries.push({ pid: /** @type {number} */ (pid), bin: path.basename(String(bin || "")), startedAt: Date.now() });
+    entries.push({
+      pid: /** @type {number} */ (pid),
+      bin: path.basename(String(bin || "")),
+      startedAt: Date.now(),
+      threadId,
+      label: String(context?.label || "") || undefined,
+    });
     writeLedger(file, entries);
   } catch {
     /* best effort */
   }
+}
+
+/**
+ * Snapshot of this process's recorded daemon children (all threads — worker
+ * threads share the pid, so their spawns land in the same file).
+ * @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string }>}
+ */
+export function listOwnDaemonSpawns() {
+  return readLedger(ownLedgerPath());
+}
+
+/**
+ * Shutdown safety net: kill every daemon child this process still has on the
+ * ledger, except `exceptPids` (hosts a caller just retired gracefully and is
+ * still waiting out). Covers hosts minted by worker threads whose module-graph
+ * daemons were never disposed — the exact leak class where entries accumulate
+ * because the spawning thread died without observing its child's exit.
+ * Image-name verified so a recycled pid is never friendly-fired.
+ * @param {{ exceptPids?: Iterable<number> }} [opts]
+ * @returns {{ killed: number, skipped: number }}
+ */
+export function reapOwnDaemonSpawns(opts = {}) {
+  let killed = 0;
+  let skipped = 0;
+  const except = new Set(opts.exceptPids || []);
+  try {
+    const file = ownLedgerPath();
+    const entries = readLedger(file);
+    if (!entries.length) return { killed, skipped };
+    /** @type {typeof entries} */
+    const remaining = [];
+    for (const entry of entries) {
+      if (except.has(entry.pid)) { remaining.push(entry); continue; }
+      if (isAlive(entry.pid)) {
+        if (imageMatches(entry.pid, entry.bin)) {
+          try { process.kill(entry.pid, "SIGKILL"); killed++; } catch { skipped++; remaining.push(entry); continue; }
+        } else {
+          // Alive but not our binary (recycled pid) — drop the stale entry.
+          skipped++;
+        }
+      }
+      // Dead entries are simply dropped from the ledger.
+    }
+    writeLedger(file, remaining);
+  } catch {
+    /* best effort */
+  }
+  return { killed, skipped };
 }
 
 /**

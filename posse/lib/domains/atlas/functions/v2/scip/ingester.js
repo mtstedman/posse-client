@@ -31,6 +31,9 @@ import { runSqliteWrite } from "../../../../../shared/concurrency/functions/sqli
  * @property {number} documents_ingested
  * @property {number} documents_failed
  * @property {number} documents_skipped
+ * @property {number} [documents_missing_text]   Docs whose source no longer exists on disk (stale-.scip drift).
+ * @property {number} [documents_range_clamped]  Docs whose source changed under the index (drift).
+ * @property {boolean} [stale_scip]              True when missing_text drift was observed; restage, don't re-ingest.
  * @property {number} blobs_reused
  * @property {number} external_symbols
  * @property {string[]} covered_content_hashes  Hashes of every blob SCIP touched.
@@ -212,6 +215,12 @@ export async function ingestScipFile({
   let documentsFailed = 0;
   let documentsSkipped = 0;
   let ledgerEntriesAppended = 0;
+  // Drift evidence: missing_text means the index references a file the tree
+  // no longer has (moved/deleted since staging); range clamps mean the file
+  // changed under the index. Either signals a stale .scip that needs a
+  // restage, not a re-ingest.
+  let documentsMissingText = 0;
+  let documentsRangeClamped = 0;
 
   const appendBranch = appendLedgerEntries && branch ? String(branch) : "";
   let pathSnapshot = null;
@@ -317,6 +326,7 @@ export async function ingestScipFile({
           throw new RangeError("SCIP document has no text and could not be hydrated from disk");
         }
         if (document.range_clamp_count > 0) {
+          documentsRangeClamped++;
           emit(onEvent, {
             kind: "atlas.scip.ingest.warning",
             scheme,
@@ -408,13 +418,15 @@ export async function ingestScipFile({
         });
       } catch (err) {
         documentsFailed++;
+        const failReason = document.skip_reason || (!repoRelPath ? "path_not_canonical" : "parse_error");
+        if (failReason === "missing_text") documentsMissingText++;
         emit(onEvent, {
           kind: "atlas.scip.ingest.failed",
           scheme,
           language,
           source_languages: sourceLanguages,
           repo_rel_path: repoRelPath,
-          reason: document.skip_reason || (!repoRelPath ? "path_not_canonical" : "parse_error"),
+          reason: failReason,
           message: err instanceof Error ? err.message : String(err),
         });
         // Continue on per-document failure — one bad document should never
@@ -437,6 +449,7 @@ export async function ingestScipFile({
   const status = writeResult.status;
   const recordedId = writeResult.recordedId;
 
+  const staleScip = documentsMissingText > 0;
   emit(onEvent, {
     kind: "atlas.scip.ingest.completed",
     scheme,
@@ -448,6 +461,9 @@ export async function ingestScipFile({
     documents_ingested: documentsIngested,
     documents_failed: documentsFailed,
     documents_skipped: documentsSkipped,
+    documents_missing_text: documentsMissingText,
+    documents_range_clamped: documentsRangeClamped,
+    stale_scip: staleScip,
     blobs_reused: blobsReused,
     external_symbols: externalsBound,
     ledger_entries_appended: ledgerEntriesAppended,
@@ -463,6 +479,9 @@ export async function ingestScipFile({
     documents_ingested: documentsIngested,
     documents_failed: documentsFailed,
     documents_skipped: documentsSkipped,
+    documents_missing_text: documentsMissingText,
+    documents_range_clamped: documentsRangeClamped,
+    stale_scip: staleScip,
     blobs_reused: blobsReused,
     external_symbols: externalsBound,
     covered_content_hashes: coveredHashes,

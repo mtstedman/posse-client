@@ -90,6 +90,8 @@ export {
   withAtlasConfigOverrides,
 };
 export { runAtlasTreeCompressionModelPass } from "./atlas/tree-compression.js";
+export { computeAtlasLayerReadiness, summarizeAtlasReadiness } from "../../atlas/functions/v2/readiness.js";
+export { enqueueAtlasSelfRepair } from "../../atlas/functions/v2/self-repair.js";
 
 const ATLAS_V2_BOOT_WORKER_URL = new URL("./atlas-v2-boot-worker.js", import.meta.url);
 // Boot-time main-view freshness checks run in a worker thread so their
@@ -100,6 +102,7 @@ const ATLAS_V2_BOOT_WORKER_URL = new URL("./atlas-v2-boot-worker.js", import.met
 const VIEW_INSPECT_WORKER_URL = new URL("../../atlas/functions/v2/view-inspect-worker.js", import.meta.url);
 const ATLAS_BOOT_THREAD_MANAGER = new ThreadManager();
 const ATLAS_MAIN_WARM_PURPOSES = new Set(["main-incremental", "main-full", "main-merge", "scip-restage"]);
+const ATLAS_V2_BOOT_WORKER_STOP_GRACE_MS = 10_000;
 
 /**
  * Run the boot main-view freshness check in a worker thread.
@@ -569,6 +572,11 @@ function emitBootProgress(onProgress, event = {}) {
   try { onProgress({ backend: "atlas-v2", ...event }); } catch { /* progress callbacks are observational */ }
 }
 
+function tailText(value, max = 4000) {
+  const text = String(value || "");
+  return text.length > max ? text.slice(text.length - max) : text;
+}
+
 function errorFromWorkerPayload(payload = {}) {
   const err = new Error(payload?.message || "ATLAS v2 boot worker failed");
   err.name = payload?.name || "Error";
@@ -603,6 +611,7 @@ function runAtlasV2BootWarmWorkerThread({
     let settled = false;
     const worker = new NodeWorker(ATLAS_V2_BOOT_WORKER_URL, {
       execArgv: sanitizeWorkerExecArgv(),
+      stderr: true,
       workerData: {
         ledgerDbPath,
         repoRoot,
@@ -622,6 +631,15 @@ function runAtlasV2BootWarmWorkerThread({
       worker_thread_id: worker.threadId,
       timeout_ms: maxMs,
     });
+    worker.stderr?.on("data", (chunk) => {
+      const stderr = tailText(chunk, 4000);
+      if (!stderr.trim()) return;
+      log.warn("atlas", "ATLAS boot worker stderr", {
+        worker_thread_id: worker.threadId,
+        purpose,
+        stderr,
+      });
+    });
     const cleanup = () => {
       if (timer) clearTimeout(timer);
       timer = null;
@@ -634,6 +652,38 @@ function runAtlasV2BootWarmWorkerThread({
       settled = true;
       cleanup();
       fn(value);
+    };
+    const stopThenTerminate = (err, reason) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      recordEmbeddingForensics("atlas.boot_worker_thread.stop_requested", {
+        worker_thread_id: worker.threadId,
+        purpose,
+        reason,
+        grace_ms: ATLAS_V2_BOOT_WORKER_STOP_GRACE_MS,
+      });
+      try { worker.postMessage({ type: "stop", reason }); } catch { /* worker may already be gone */ }
+      let done = false;
+      let graceTimer = null;
+      const complete = () => {
+        if (done) return;
+        done = true;
+        if (graceTimer) clearTimeout(graceTimer);
+        cleanup();
+        reject(err);
+      };
+      worker.once("exit", complete);
+      graceTimer = setTimeout(() => {
+        recordEmbeddingForensics("atlas.boot_worker_thread.stop_grace_expired", {
+          worker_thread_id: worker.threadId,
+          purpose,
+          reason,
+        });
+        worker.terminate().catch(() => {}).finally(complete);
+      }, ATLAS_V2_BOOT_WORKER_STOP_GRACE_MS);
+      graceTimer.unref?.();
     };
     worker.on("message", (message = {}) => {
       if (message?.type === "progress") {
@@ -701,8 +751,7 @@ function runAtlasV2BootWarmWorkerThread({
           timeout_ms: maxMs,
           error: errorForTelemetry(err),
         });
-        finish(reject, err);
-        worker.terminate().catch(() => {});
+        stopThenTerminate(err, "ATLAS v2 boot worker timed out");
       }, maxMs);
       timer.unref?.();
     }
@@ -815,13 +864,17 @@ async function runAtlasV2BootWarmWithProgress({
   const elapsedMs = () => Math.max(0, Date.now() - startedAt);
   let activeStage = "warming main view";
   let activeDetail = null;
-  const emitProgress = (event = {}) => emitBootProgress(progress, {
-    elapsedMs: elapsedMs(),
-    repoId,
-    branch,
-    stage: activeStage,
-    ...event,
-  });
+  const emitProgress = (event = {}) => {
+    if (event?.stage) activeStage = String(event.stage);
+    if (event?.detail || event?.text) activeDetail = String(event.detail || event.text || "");
+    emitBootProgress(progress, {
+      elapsedMs: elapsedMs(),
+      repoId,
+      branch,
+      stage: activeStage,
+      ...event,
+    });
+  };
   const tickMs = Number.isFinite(Number(heartbeatMs)) && Number(heartbeatMs) > 0
     ? Number(heartbeatMs)
     : 5000;

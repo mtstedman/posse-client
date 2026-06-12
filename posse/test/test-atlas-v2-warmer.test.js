@@ -168,6 +168,220 @@ describe("ATLAS v2 Warmer", () => {
     }
   });
 
+  it("handleWarmJob('wi') does not run repo-level SCIP staging", async () => {
+    const repoRoot = path.join(tmp, "repo-wi-no-scip");
+    fs.mkdirSync(repoRoot, { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, "package.json"), "{}\n");
+    const command = writeFakeScipIndexer(repoRoot);
+    const { led } = setupRepo(repoRoot);
+    try {
+      const warmer = new Warmer({
+        ledger: led,
+        repoRoot,
+        config: {
+          scipMode: "on",
+          scipIndexCommand: command,
+          scipRestagePolicy: "always",
+        },
+      });
+      const result = await warmer.handleWarmJob({
+        purpose: "wi",
+        work_item_id: 43,
+        out_view_path: warmedViewPath(repoRoot, 43),
+        paths: ["src/foo.ts"],
+      });
+      assert.equal(result.purpose, "wi");
+      assert.equal(result.skipped.length, 0);
+      assert.equal(
+        fs.existsSync(path.join(repoRoot, ".posse", "atlas", "scip", "configured.scip")),
+        false,
+      );
+    } finally {
+      led.close();
+    }
+  });
+
+  it("handleWarmJob('embeddings') reports complete when no view exists yet", async () => {
+    const repoRoot = path.join(tmp, "repo-embeddings-no-view");
+    const { led } = setupRepo(repoRoot);
+    try {
+      const warmer = new Warmer({ ledger: led, repoRoot, config: {} });
+      const result = await warmer.handleWarmJob({ purpose: "embeddings", branch: "main" });
+      assert.equal(result.purpose, "embeddings");
+      // No view means the views layer owns the work (its warm runs the
+      // ride-along ingest); the resume loop must end instead of re-enqueueing.
+      assert.equal(result.embeddings_complete, true);
+      assert.equal(result.embeddings_remaining, 0);
+      assert.equal(result.embeddings_skipped_reason, "view_missing");
+      assert.equal(result.view_written, null);
+    } finally {
+      led.close();
+    }
+  });
+
+  it("handleWarmJob('embeddings') reports complete when embeddings are not configured", async () => {
+    const repoRoot = path.join(tmp, "repo-embeddings-disabled");
+    const { led } = setupRepo(repoRoot);
+    try {
+      new ViewBuilder().buildFrom({
+        ledger: led,
+        branch: "main",
+        atSeq: led.headSeq("main"),
+        outPath: mainViewPath(repoRoot),
+        options: { repoRoot },
+      });
+      const warmer = new Warmer({ ledger: led, repoRoot, config: {} });
+      const result = await warmer.handleWarmJob({ purpose: "embeddings", branch: "main" });
+      assert.equal(result.embeddings_complete, true);
+      assert.equal(result.embeddings_remaining, 0);
+      assert.ok(result.embeddings_skipped_reason, "a disabled provider must surface a skip reason");
+    } finally {
+      led.close();
+    }
+  });
+
+  it("handleWarmJob('embeddings') resumes toward parity in bounded slices", { skip: skipIfNoUsearch }, async () => {
+    const repoRoot = path.join(tmp, "repo-embeddings-slices");
+    const { led } = setupRepo(repoRoot);
+    const config = { embeddingProvider: "stub", embeddingDim: 32 };
+    try {
+      new ViewBuilder().buildFrom({
+        ledger: led,
+        branch: "main",
+        atSeq: led.headSeq("main"),
+        outPath: mainViewPath(repoRoot),
+        options: { repoRoot },
+      });
+      const warmer = new Warmer({ ledger: led, repoRoot, config });
+
+      // The fixture view has 2 symbols; a 1-symbol budget needs two slices.
+      const first = await warmer.handleWarmJob({ purpose: "embeddings", branch: "main", max_symbols: 1 });
+      assert.equal(first.embeddings_complete, false);
+      assert.equal(first.embeddings_indexed, 1);
+      assert.equal(first.embeddings_remaining, 1);
+
+      const second = await warmer.handleWarmJob({ purpose: "embeddings", branch: "main", max_symbols: 1 });
+      assert.equal(second.embeddings_complete, true);
+      assert.equal(second.embeddings_remaining, 0);
+
+      const third = await warmer.handleWarmJob({ purpose: "embeddings", branch: "main", max_symbols: 1 });
+      assert.equal(third.embeddings_complete, true);
+      assert.equal(third.embeddings_skipped_reason, undefined);
+    } finally {
+      led.close();
+    }
+  });
+
+  it("handleWarmJob('wi') clones a current main view instead of rebuilding it", async () => {
+    const repoRoot = path.join(tmp, "repo-wi-clone-main");
+    const { led } = setupRepo(repoRoot);
+    class CloneOnlyBuilder extends ViewBuilder {
+      async buildFromAsync() {
+        throw new Error("WI warm should clone the existing main view");
+      }
+    }
+    try {
+      const mainView = mainViewPath(repoRoot);
+      new ViewBuilder().buildFrom({
+        ledger: led,
+        branch: "main",
+        atSeq: led.headSeq("main"),
+        outPath: mainView,
+        options: { repoRoot },
+      });
+      const warmer = new Warmer({
+        ledger: led,
+        repoRoot,
+        viewBuilder: new CloneOnlyBuilder(),
+      });
+      const result = await warmer.handleWarmJob({
+        purpose: "wi",
+        work_item_id: 45,
+        out_view_path: warmedViewPath(repoRoot, 45),
+        paths: ["src/foo.ts"],
+      });
+      assert.equal(result.purpose, "wi");
+      assert.ok(result.view_written);
+      assert.ok(result.view_etag);
+      const view = View.mount({ dbPath: result.view_written });
+      try {
+        const meta = view.meta();
+        assert.equal(meta.branch, "main");
+        assert.equal(meta.ledger_seq, led.headSeq("main"));
+        assert.equal(view.query.symbolsInFile("src/foo.ts").length, 2);
+      } finally {
+        view.close();
+      }
+    } finally {
+      led.close();
+    }
+  });
+
+  it("handleWarmJob('wi') builds the WI branch when it has diverged from main", async () => {
+    const repoRoot = path.join(tmp, "repo-wi-diverged-from-main");
+    const { led } = setupRepo(repoRoot);
+    try {
+      new ViewBuilder().buildFrom({
+        ledger: led,
+        branch: "main",
+        atSeq: led.headSeq("main"),
+        outPath: mainViewPath(repoRoot),
+        options: { repoRoot },
+      });
+      const branch = ledgerBranchForWi(46);
+      const forkSeq = led.headSeq("main");
+      led.forkBranch(branch, "main", forkSeq);
+      const bContent = "export function branchOnly() { return 1; }\n";
+      const bHash = hashOf(bContent);
+      led.ingestBlob({
+        content_hash: bHash,
+        lang: "ts",
+        byte_size: bContent.length,
+        symbols: [{
+          content_hash: bHash,
+          local_id: 0,
+          kind: "function",
+          name: "branchOnly",
+          qualified_name: "branchOnly",
+          parent_local_id: null,
+          repo_rel_path: "src/branch-only.ts",
+          lang: "ts",
+          range_start: 0,
+          range_end: bContent.length,
+          signature_hash: sha256Hex("branchOnly()"),
+          visibility: "public",
+          doc: null,
+        }],
+        edges: [],
+      });
+      led.append({
+        branch,
+        op: "add",
+        repo_rel_path: "src/branch-only.ts",
+        before_content_hash: null,
+        after_content_hash: bHash,
+      });
+      const warmer = new Warmer({ ledger: led, repoRoot });
+      const result = await warmer.handleWarmJob({
+        purpose: "wi",
+        work_item_id: 46,
+        out_view_path: warmedViewPath(repoRoot, 46),
+        paths: ["src/branch-only.ts"],
+      });
+      const view = View.mount({ dbPath: result.view_written });
+      try {
+        const meta = view.meta();
+        assert.equal(meta.branch, branch);
+        assert.equal(meta.parent_seq, forkSeq);
+        assert.equal(view.query.symbolsInFile("src/branch-only.ts").length, 1);
+      } finally {
+        view.close();
+      }
+    } finally {
+      led.close();
+    }
+  });
+
   it("ML tree-compression reseed only runs on boot-triggered main warms", () => {
     const gate = (args) => shouldRunMlTreeCompressionReseed(args);
     assert.deepEqual(gate({ purpose: "main-full", mode: "ml", triggerEvent: "boot" }), { run: true, reason: null });
@@ -1555,7 +1769,7 @@ describe("ATLAS v2 Warmer", () => {
     }
   });
 
-  it("handleWarmJob consumes SCIP on wi warm before building the WI view", async () => {
+  it("handleWarmJob('wi') leaves staged SCIP to main warms", async () => {
     const repoRoot = path.join(tmp, "repo-scip-only-wi");
     const led = Ledger.open({ dbPath: ledgerDbPath(repoRoot) });
     try {
@@ -1589,14 +1803,14 @@ describe("ATLAS v2 Warmer", () => {
         work_item_id: 31,
         out_view_path: warmedViewPath(repoRoot, 31),
       });
-      assert.equal(result.ledger_entries_appended, 1);
+      assert.equal(result.ledger_entries_appended, 0);
       assert.equal(result.view_written, warmedViewPath(repoRoot, 31));
+      assert.equal(led.pathSnapshotAt("main", led.headSeq("main")).has("src/wi-scip.txt"), false);
 
       const view = View.mount({ dbPath: result.view_written });
       try {
         const symbols = view.query.symbolsInFile("src/wi-scip.txt");
-        assert.equal(symbols.length, 1);
-        assert.equal(symbols[0].name, "wiScip");
+        assert.equal(symbols.length, 0);
       } finally {
         view.close();
       }
@@ -1605,7 +1819,7 @@ describe("ATLAS v2 Warmer", () => {
     }
   });
 
-  it("handleWarmJob('wi') with an existing WI branch does not see default-branch SCIP appends past the fork", async () => {
+  it("handleWarmJob('wi') with an existing WI branch does not append default-branch SCIP", async () => {
     const repoRoot = path.join(tmp, "repo-scip-existing-wi");
     const led = Ledger.open({ dbPath: ledgerDbPath(repoRoot) });
     try {
@@ -1641,8 +1855,8 @@ describe("ATLAS v2 Warmer", () => {
         work_item_id: 32,
         out_view_path: warmedViewPath(repoRoot, 32),
       });
-      assert.equal(result.ledger_entries_appended, 1);
-      assert.ok(led.pathSnapshotAt("main", led.headSeq("main")).has("src/after-fork.txt"));
+      assert.equal(result.ledger_entries_appended, 0);
+      assert.equal(led.pathSnapshotAt("main", led.headSeq("main")).has("src/after-fork.txt"), false);
 
       const view = View.mount({ dbPath: result.view_written });
       try {

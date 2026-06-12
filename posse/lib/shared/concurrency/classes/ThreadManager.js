@@ -78,11 +78,12 @@ export class ThreadManager {
    *   label?: string,
    *   timeoutMs?: number | null,
    *   signal?: AbortSignal | null,
- *   onProgress?: ((event: Record<string, unknown>) => void) | null,
- *   onLifecycle?: ((event: Record<string, unknown>) => void) | null,
- *   workerOptions?: Record<string, unknown>,
- *   unref?: boolean,
- * }} [opts]
+   *   onProgress?: ((event: Record<string, unknown>) => void) | null,
+   *   onLifecycle?: ((event: Record<string, unknown>) => void) | null,
+   *   workerOptions?: Record<string, unknown>,
+   *   unref?: boolean,
+   *   stopGraceMs?: number | null,
+   * }} [opts]
    * @returns {Promise<T>}
    */
   run(workerUrl, {
@@ -94,8 +95,12 @@ export class ThreadManager {
     onLifecycle = null,
     workerOptions = {},
     unref = false,
+    stopGraceMs = 0,
   } = {}) {
     const maxMs = Number(timeoutMs);
+    const gracefulStopMs = Number.isFinite(Number(stopGraceMs)) && Number(stopGraceMs) > 0
+      ? Math.floor(Number(stopGraceMs))
+      : 0;
     return new Promise((resolve, reject) => {
       /** @type {NodeJS.Timeout | null} */
       let timer = null;
@@ -152,12 +157,44 @@ export class ThreadManager {
           fn(value);
           return;
         }
-        worker.terminate()
-          .catch(() => undefined)
-          .finally(() => {
-            cleanup();
-            fn(value);
+        if (gracefulStopMs <= 0) {
+          worker.terminate()
+            .catch(() => undefined)
+            .finally(() => {
+              cleanup();
+              fn(value);
+            });
+          return;
+        }
+        emitLifecycle(onLifecycle, {
+          kind: "stop_requested",
+          label,
+          worker_url: String(workerUrl),
+          worker_thread_id: worker.threadId,
+          grace_ms: gracefulStopMs,
+        });
+        try { worker.postMessage?.({ type: "stop", reason: `${label} stopping` }); } catch { /* worker may already be gone */ }
+        let done = false;
+        let graceTimer = null;
+        const complete = () => {
+          if (done) return;
+          done = true;
+          if (graceTimer) clearTimeout(graceTimer);
+          cleanup();
+          fn(value);
+        };
+        worker.once("exit", complete);
+        graceTimer = setTimeout(() => {
+          emitLifecycle(onLifecycle, {
+            kind: "stop_grace_expired",
+            label,
+            worker_url: String(workerUrl),
+            worker_thread_id: worker.threadId,
+            grace_ms: gracefulStopMs,
           });
+          worker.terminate().catch(() => undefined).finally(complete);
+        }, gracefulStopMs);
+        graceTimer.unref?.();
       };
 
       /** @param {ThreadMessage} message */

@@ -9,6 +9,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { Warmer } from "../../atlas/classes/v2/Warmer.js";
 import { sharedParserAdapter } from "../../atlas/functions/v2/parser/adapter.js";
+import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
 import {
   errorForTelemetry,
   recordEmbeddingForensics,
@@ -31,6 +32,22 @@ function progress(event) {
   });
   post({ type: "progress", event });
 }
+
+const stopController = new AbortController();
+let stopRequested = false;
+
+parentPort?.on("message", (message = {}) => {
+  if (message?.type !== "stop") return;
+  stopRequested = true;
+  const reason = String(message.reason || "ATLAS boot worker stop requested");
+  progress({
+    kind: "line",
+    stream: "system",
+    stage: "stopping",
+    text: reason,
+  });
+  if (!stopController.signal.aborted) stopController.abort(new Error(reason));
+});
 
 process.on("uncaughtException", (err) => {
   recordEmbeddingForensics("atlas.boot_worker.uncaught_exception", {
@@ -115,6 +132,7 @@ async function main() {
       defaultBranch: String(defaultBranch || "main").trim() || "main",
       config: config && typeof config === "object" ? config : {},
       onProgress: progress,
+      signal: stopController.signal,
     });
 
     const warmPurpose = purpose === "main-incremental" ? "main-incremental" : "main-full";
@@ -131,12 +149,20 @@ async function main() {
       out_view_path: mainViewDbPath,
       trigger_event: "boot",
     });
+    if (stopRequested && stopController.signal.aborted) {
+      throw stopController.signal.reason || new Error("ATLAS boot worker stopped");
+    }
     recordEmbeddingForensics("atlas.boot_worker.done", {
       worker_data: publicWorkerData(),
       result,
     });
   } finally {
     try { ledger?.close?.(); } catch { /* ignore */ }
+    // This worker thread has its own module graph, so any native daemon hosts
+    // it spawned (posse-git/posse-atlas via its thread-local BinaryManager)
+    // are invisible to the main thread's supervisor. Dispose them here or
+    // they outlive the thread as orphaned processes.
+    try { await nativeBinaries.disposeAll(); } catch { /* best effort */ }
   }
   post({ type: "result", result });
 }

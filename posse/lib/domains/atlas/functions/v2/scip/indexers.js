@@ -69,11 +69,19 @@ const SCIP_INDEXERS = Object.freeze([
     sourceExtensions: [".py", ".pyi"],
     args: ["index", "--output", "{output}"],
   }),
+  // requiresMarker: these indexers need their project metadata at the repo
+  // root to run at all (composer autoload, go.mod, cargo workspace, compdb).
+  // Without it the launch deterministically fails — e.g. a single vendored
+  // .rs file used to summon scip-rust, which died with "no projects" on
+  // every warm. typescript/python stay extension-only: they can infer a
+  // project (--infer-tsconfig / bare sources) and must keep indexing
+  // marker-less repos.
   Object.freeze({
     id: "php",
     command: "scip-php",
     outputName: "php.scip",
     markers: ["composer.json"],
+    requiresMarker: true,
     sourceExtensions: [".php"],
     args: ["index", "--output", "{output}"],
   }),
@@ -82,6 +90,7 @@ const SCIP_INDEXERS = Object.freeze([
     command: "scip-go",
     outputName: "go.scip",
     markers: ["go.mod"],
+    requiresMarker: true,
     sourceExtensions: [".go"],
     args: ["--output", "{output}"],
   }),
@@ -90,6 +99,7 @@ const SCIP_INDEXERS = Object.freeze([
     command: "scip-rust",
     outputName: "rust.scip",
     markers: ["Cargo.toml"],
+    requiresMarker: true,
     sourceExtensions: [".rs"],
     args: ["--output", "{output}", "."],
   }),
@@ -101,10 +111,16 @@ const SCIP_INDEXERS = Object.freeze([
     command: "scip-clang",
     outputName: "clang.scip",
     markers: ["compile_commands.json", "compile_flags.txt", "CMakeLists.txt"],
+    requiresMarker: true,
     sourceExtensions: [".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"],
     args: ["--compdb-path", "compile_commands.json", "--index-output-path", "{output}"],
   }),
 ]);
+
+// Upper bound on distinct per-language stage fan-out. Stage semaphores size
+// off this so cross-language generation is never queued behind the valve;
+// same-language runs still serialize on the stager's per-output gate.
+export const SCIP_INDEXER_COUNT = SCIP_INDEXERS.length;
 
 /**
  * Resolve every applicable SCIP indexer plan for a repo. A configured command
@@ -311,9 +327,24 @@ function autoCandidates(repoRoot, enabledLanguages) {
     if (!enabledLanguages.has(indexer.id)) continue;
     const sourceLanguages = repoSourceLanguagesForExtensions(repoRoot, indexer.sourceExtensions);
     if (sourceLanguages.length === 0) continue;
+    if (indexer.requiresMarker && !repoRootHasMarker(repoRoot, indexer.markers)) continue;
     out.push({ ...indexer, sourceLanguages });
   }
   return out;
+}
+
+// Root-level check on purpose: the indexers run with cwd at the repo root and
+// discover their project there, so a nested-only marker would not save the
+// launch anyway.
+function repoRootHasMarker(repoRoot, markers = []) {
+  for (const marker of markers || []) {
+    try {
+      if (fs.existsSync(path.join(repoRoot, String(marker)))) return true;
+    } catch {
+      // Unreadable root entries cannot satisfy the marker.
+    }
+  }
+  return false;
 }
 
 const SOURCE_SCAN_IGNORED_DIRS = new Set([

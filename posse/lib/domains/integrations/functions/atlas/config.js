@@ -598,6 +598,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
       serverName: DEFAULT_SERVER_NAME,
       bootReindexPolicy: "smart",
       reindexOnCommit: false,
+      bootWaitEmbeddings: false,
       bootTimeoutMs: 5400000,
       embeddedTimeoutMs: 30000,
       queueWaitMs: 30000,
@@ -684,6 +685,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbServerName = useLiveSettings ? readDbSetting("atlas_server_name") : null;
   const dbBootReindexPolicy = useLiveSettings ? readDbSetting("atlas_boot_reindex_policy") : null;
   const dbReindexOnCommit = useLiveSettings ? readDbSettingBool("atlas_reindex_on_commit") : null;
+  const dbBootWaitEmbeddings = useLiveSettings ? readDbSettingBool("atlas_boot_wait_embeddings") : null;
   const dbBootTimeoutMs = useLiveSettings ? readDbSetting("atlas_v2_boot_timeout_ms") : null;
   const dbBootSoftTimeoutMs = useLiveSettings ? readDbSetting("atlas_v2_boot_soft_timeout_ms") : null;
   const dbEmbeddedTimeoutMs = useLiveSettings ? readDbSetting("atlas_embedded_timeout_ms") : null;
@@ -862,6 +864,12 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const reindexOnCommit = provided(explicitReindexOnCommit) && String(explicitReindexOnCommit).trim() !== ""
     ? parseBool(explicitReindexOnCommit)
     : (dbReindexOnCommit != null ? dbReindexOnCommit : true);
+  const explicitBootWaitEmbeddings = explicitValue("bootWaitEmbeddings", "atlas_boot_wait_embeddings");
+  // Boot blocks on embedding parity only when the operator opts in; default is
+  // return-at-views-ready with the encode continuing in the background.
+  const bootWaitEmbeddings = provided(explicitBootWaitEmbeddings) && String(explicitBootWaitEmbeddings).trim() !== ""
+    ? parseBool(explicitBootWaitEmbeddings)
+    : (dbBootWaitEmbeddings === true);
   const bootTimeoutMs = parseIntOrNull(firstProvided(explicitValue("bootTimeoutMs", "atlas_v2_boot_timeout_ms", "POSSE_ATLAS_V2_BOOT_TIMEOUT_MS"), dbBootTimeoutMs)) ?? 5400000;
   const bootSoftTimeoutMs = parseIntOrNull(firstProvided(explicitValue("bootSoftTimeoutMs", "atlas_v2_boot_soft_timeout_ms", "POSSE_ATLAS_V2_BOOT_SOFT_TIMEOUT_MS"), dbBootSoftTimeoutMs)) ?? 15000;
   const embeddedTimeoutMs = parseIntOrNull(firstProvided(explicitValue("embeddedTimeoutMs", "atlas_embedded_timeout_ms", "POSSE_ATLAS_EMBEDDED_TIMEOUT_MS"), dbEmbeddedTimeoutMs)) ?? 30000;
@@ -947,6 +955,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     serverName,
     bootReindexPolicy,
     reindexOnCommit,
+    bootWaitEmbeddings,
     bootTimeoutMs,
     bootSoftTimeoutMs,
     embeddedTimeoutMs,

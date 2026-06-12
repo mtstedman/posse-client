@@ -15,6 +15,7 @@ import {
 } from "./forensics.js";
 
 const LOCAL_ONNX_ENCODE_WORKER_URL = new URL("./local-onnx-encode-worker.js", import.meta.url);
+const LOCAL_ONNX_WORKER_CLOSE_GRACE_MS = 10_000;
 
 /**
  * @param {unknown} value
@@ -152,7 +153,7 @@ export class LocalOnnxEncodePool {
       encoder: encoderTelemetry(this.#encoder),
       worker_count: workers.length,
     });
-    await Promise.all(workers.map((worker) => worker.terminate().catch(() => {})));
+    await Promise.all(workers.map((worker) => closeLocalOnnxWorker(worker)));
     recordEmbeddingForensics("onnx.pool.close.done", {
       encoder: encoderTelemetry(this.#encoder),
       worker_count: workers.length,
@@ -179,7 +180,7 @@ export class LocalOnnxEncodePool {
 
   async #terminateAllWorkers() {
     const workers = this.#workers.splice(0);
-    await Promise.all(workers.map((worker) => worker.terminate().catch(() => {})));
+    await Promise.all(workers.map((worker) => closeLocalOnnxWorker(worker)));
   }
 
   #removeWorker(worker) {
@@ -357,7 +358,7 @@ export class LocalOnnxEncodePool {
         finish(reject, new Error(`local ONNX encode worker exited during encode (code ${code})`));
       };
       const onAbort = () => {
-        try { worker.terminate().catch(() => {}); } catch { /* best effort */ }
+        try { closeLocalOnnxWorker(worker).catch(() => {}); } catch { /* best effort */ }
         finish(reject, abortReasonToError(signal, "encode aborted"));
       };
       worker.on("message", onMessage);
@@ -399,6 +400,48 @@ export class LocalOnnxEncodePool {
     if (!this.#onTiming) return;
     try { this.#onTiming(event); } catch { /* timing is observational */ }
   }
+}
+
+function closeLocalOnnxWorker(worker, graceMs = LOCAL_ONNX_WORKER_CLOSE_GRACE_MS) {
+  return new Promise((resolve) => {
+    if (!worker) {
+      resolve();
+      return;
+    }
+    const id = `close-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let settled = false;
+    let timer = null;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      worker.off("message", onMessage);
+      worker.off("error", onDone);
+      worker.off("exit", onDone);
+    };
+    const finish = (terminate = true) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (!terminate) {
+        resolve();
+        return;
+      }
+      worker.terminate().catch(() => {}).finally(resolve);
+    };
+    const onDone = () => finish(false);
+    const onMessage = (message) => {
+      if (message?.type === "closed" && message.id === id) finish(true);
+    };
+    worker.on("message", onMessage);
+    worker.once("error", onDone);
+    worker.once("exit", onDone);
+    timer = setTimeout(() => finish(true), Math.max(1, Number(graceMs) || LOCAL_ONNX_WORKER_CLOSE_GRACE_MS));
+    timer.unref?.();
+    try {
+      worker.postMessage({ type: "close", id });
+    } catch {
+      finish(true);
+    }
+  });
 }
 
 function encoderTelemetry(encoder) {

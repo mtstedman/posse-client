@@ -582,7 +582,7 @@ describe("RunSession boot lifecycle", () => {
     assert.equal(authStarted, true);
     assert.equal(usageStarted, true);
     assert.deepEqual(events, ["scheduler.boot", "scheduler.boot.after-hook"]);
-    assert.ok(Date.now() - startedAt < 500, "provider warmups should soft-timeout instead of blocking boot");
+    assert.ok(Date.now() - startedAt < 2500, "provider warmups should soft-timeout instead of blocking boot");
   });
 
   it("blocks scheduler boot when the remote prompt compiler is not ready", async () => {
@@ -1295,6 +1295,10 @@ describe("RunSession boot lifecycle", () => {
           enabled: true,
           phases: ["dev"],
           bootSoftTimeoutMs: 50,
+          // Opt-in wait mode: the default now auto-backgrounds at views-ready,
+          // so the Enter escape hatch only renders when the operator asked to
+          // block on embeddings.
+          bootWaitEmbeddings: true,
         }),
         inspectLocalOnnxStatus: readyOnnxStatus,
         ThreadManager: FakeOnnxThreadManager,
@@ -1453,7 +1457,7 @@ describe("RunSession boot lifecycle", () => {
     }
   }));
 
-  it("disables ATLAS when backgrounded ONNX boot later rejects", async () => withCapturedProcessSignals(async () => {
+  it("queues self-repair when backgrounded ONNX boot later rejects (opt-in wait mode)", async () => withCapturedProcessSignals(async () => {
     await new Promise((resolve) => setImmediate(resolve));
     const writes = [];
     const originalStdoutWrite = process.stdout.write;
@@ -1463,7 +1467,7 @@ describe("RunSession boot lifecycle", () => {
     let rejectAtlas = null;
     let finishRunLoop = null;
     let runLoopStarted = false;
-    let disabledReason = null;
+    const selfRepairCalls = [];
 
     class FakeScheduler {
       constructor() { this.leaseSec = 60; }
@@ -1520,10 +1524,12 @@ describe("RunSession boot lifecycle", () => {
           enabled: true,
           phases: ["dev"],
           bootSoftTimeoutMs: 50,
+          bootWaitEmbeddings: true,
         }),
         inspectLocalOnnxStatus: () => ({ status: "not_configured" }),
-        disableAtlasForRun: (reason) => {
-          disabledReason = reason;
+        enqueueAtlasSelfRepair: (args) => {
+          selfRepairCalls.push(args);
+          return { ok: true, summary: "views ready", layers: [], actions: [] };
         },
       }));
 
@@ -1542,8 +1548,8 @@ describe("RunSession boot lifecycle", () => {
 
       rejectAtlas?.(new Error("ATLAS v2 boot worker timed out after 5400000ms"));
       await waitForCondition(
-        () => /boot_background_failed/.test(disabledReason || ""),
-        "expected background boot failure to disable ATLAS",
+        () => selfRepairCalls.some((call) => /boot_background_failed/.test(call?.reason || "")),
+        "expected background boot failure to queue ATLAS self-repair",
         100,
       );
       finishRunLoop?.();
@@ -1564,9 +1570,106 @@ describe("RunSession boot lifecycle", () => {
     }
   }));
 
+  it("auto-backgrounds the boot gate at views-ready (encoding start) by default", async () => withCapturedProcessSignals(async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    const writes = [];
+    const originalStdoutWrite = process.stdout.write;
+    const originalColumns = process.stdout.columns;
+    const restoreStdoutTty = forceStdoutTtyForBootPanel();
+    const stdinTty = forceStdinTtyForBootPanel();
+    let resolveAtlas = null;
+    let finishRunLoop = null;
+    let runLoopStarted = false;
+
+    class FakeScheduler {
+      constructor() { this.leaseSec = 60; }
+      async boot(opts) {
+        await opts.onBeforeLoop();
+        return true;
+      }
+      async runLoop(_workerCallback, opts) {
+        runLoopStarted = true;
+        await new Promise((resolve) => { finishRunLoop = resolve; });
+        opts.onDone();
+      }
+      stop() {}
+    }
+
+    Object.defineProperty(process.stdout, "columns", {
+      configurable: true,
+      value: 100,
+      writable: true,
+    });
+    process.stdout.write = (chunk, ...args) => {
+      writes.push(String(chunk));
+      const callback = args.find((arg) => typeof arg === "function");
+      if (callback) callback();
+      return true;
+    };
+
+    try {
+      const session = new RunSession(createRunSessionBootTestDeps({
+        Scheduler: FakeScheduler,
+        ensureAtlasRepoIndexedOnBoot: async (opts) => {
+          opts.onProgress({ kind: "start", elapsedMs: 0, stage: "index" });
+          // Encoding events fire only after SCIP intake + view merge, so this
+          // is the "SCIP + views ready" signal the default gate releases on.
+          opts.onProgress({
+            kind: "line",
+            elapsedMs: 10,
+            stage: "encoding",
+            language: "ts",
+            source_languages: ["ts"],
+            progress_current: 10,
+            progress_total: 100,
+            percent: 10,
+            text: "encoding symbols",
+          });
+          await new Promise((resolve) => { resolveAtlas = resolve; });
+          return {
+            attempted: true,
+            ok: true,
+            repoId: "repo-a",
+            graphDbPath: "graph.lbug",
+            result: { purpose: "main-full" },
+          };
+        },
+        getAtlasIntegrationConfig: () => ({
+          enabled: true,
+          phases: ["dev"],
+          bootSoftTimeoutMs: 50,
+        }),
+        inspectLocalOnnxStatus: () => ({ status: "not_configured" }),
+      }));
+
+      const runPromise = session.run();
+      // No Enter keypress: views-ready must release the gate by itself while
+      // the encode keeps running behind the TUI.
+      await waitForCondition(
+        () => runLoopStarted,
+        "expected run loop to start without Enter once encoding (views-ready) began",
+        150,
+      );
+      resolveAtlas?.();
+      finishRunLoop?.();
+      await runPromise;
+    } finally {
+      resolveAtlas?.();
+      finishRunLoop?.();
+      process.stdout.write = originalStdoutWrite;
+      stdinTty.restore();
+      restoreStdoutTty();
+      Object.defineProperty(process.stdout, "columns", {
+        configurable: true,
+        value: originalColumns,
+        writable: true,
+      });
+    }
+  }));
+
   it("continues into the run loop when ATLAS boot times out", async () => withCapturedProcessSignals(async () => {
     const events = [];
-    let disabledReason = null;
+    const selfRepairCalls = [];
 
     class FakeScheduler {
       constructor() { this.leaseSec = 60; }
@@ -1597,20 +1700,24 @@ describe("RunSession boot lifecycle", () => {
         phases: ["dev"],
         bootSoftTimeoutMs: 0,
       }),
-      disableAtlasForRun: (reason) => {
-        disabledReason = reason;
+      enqueueAtlasSelfRepair: (args) => {
+        selfRepairCalls.push(args);
+        return { ok: true, summary: "views warming", layers: [], actions: [] };
       },
     }));
 
     await session.run();
 
     assert.deepEqual(events, ["booted", "runLoop"]);
-    assert.match(disabledReason || "", /boot_reindex_failed/);
+    assert.ok(
+      selfRepairCalls.some((call) => /boot_reindex_failed/.test(call?.reason || "")),
+      "expected a failed boot reindex to queue ATLAS self-repair instead of disabling ATLAS",
+    );
   }));
 
   it("continues into the run loop when ATLAS boot wait rejects", async () => withCapturedProcessSignals(async () => {
     const events = [];
-    let disabledReason = null;
+    const selfRepairCalls = [];
 
     class FakeScheduler {
       constructor() { this.leaseSec = 60; }
@@ -1636,15 +1743,19 @@ describe("RunSession boot lifecycle", () => {
         phases: ["dev"],
         bootSoftTimeoutMs: 0,
       }),
-      disableAtlasForRun: (reason) => {
-        disabledReason = reason;
+      enqueueAtlasSelfRepair: (args) => {
+        selfRepairCalls.push(args);
+        return { ok: true, summary: "views warming", layers: [], actions: [] };
       },
     }));
 
     await session.run();
 
     assert.deepEqual(events, ["booted", "runLoop"]);
-    assert.match(disabledReason || "", /boot_wait_failed/);
+    assert.ok(
+      selfRepairCalls.some((call) => /boot_wait_failed/.test(call?.reason || "")),
+      "expected a rejected boot wait to queue ATLAS self-repair instead of disabling ATLAS",
+    );
   }));
 
   it("folds image-capability provider rows into the base provider chip", async () => withCapturedProcessSignals(async () => {

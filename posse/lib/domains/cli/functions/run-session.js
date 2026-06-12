@@ -35,6 +35,8 @@ import { LOCK_HOLDING_JOB_STATUSES } from "../../../catalog/job.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { fit as fitAnsi } from "../../../shared/format/functions/ansi.js";
+import { nativeBinaries as defaultNativeBinaries } from "../../../classes/tools/BinaryManager.js";
+import { daemonSupervisor as defaultDaemonSupervisor } from "../../../classes/tools/daemon/index.js";
 
 export const PROVIDER_AUTH_WARMUP_TIMEOUT_MS = 30_000;
 export const PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS = 1_200;
@@ -372,6 +374,15 @@ export class RunSession {
       inspectLocalOnnxStatus: inspectLocalOnnxStatusForRun = inspectLocalOnnxStatus,
       ThreadManager: RunThreadManager = ThreadManager,
       disableAtlasForRun,
+      isAtlasRuntimeDisabled,
+      getAtlasRuntimeDisabledReason,
+      enqueueAtlasSelfRepair,
+      setConductorKeepWarm: setConductorKeepWarmForRun = setConductorKeepWarm,
+      closeSharedConductor: closeSharedConductorForRun = closeSharedConductor,
+      setOnnxDaemonKeepWarm: setOnnxDaemonKeepWarmForRun = setOnnxDaemonKeepWarm,
+      closeSharedOnnxDaemon: closeSharedOnnxDaemonForRun = closeSharedOnnxDaemon,
+      nativeBinaries: nativeBinariesForRun = defaultNativeBinaries,
+      daemonSupervisor: daemonSupervisorForRun = defaultDaemonSupervisor,
       log,
       Display,
       STALL_TIMEOUT,
@@ -569,8 +580,8 @@ export class RunSession {
     // encoder daemons — each terminates a worker thread whose MessagePort pins
     // the event loop on Node ≥22, so the process can drain and exit instead of
     // waiting out the idle backstops.
-    try { setConductorKeepWarm(false); await closeSharedConductor(); } catch { /* best-effort */ }
-    try { setOnnxDaemonKeepWarm(false); await closeSharedOnnxDaemon(); } catch { /* best-effort */ }
+    try { setConductorKeepWarmForRun(false); await closeSharedConductorForRun(); } catch { /* best-effort */ }
+    try { setOnnxDaemonKeepWarmForRun(false); await closeSharedOnnxDaemonForRun(); } catch { /* best-effort */ }
     if (announce) {
       const elapsedSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
       emitCloseoutStatus(`${label}: ATLAS cleanup complete (${elapsedSec}s).`, C.green);
@@ -613,6 +624,9 @@ export class RunSession {
   };
   const drainPendingAtlasWarmJobs = async ({ label = "Run wrap-up" } = {}) => {
     if (!wrapUpAtlasDrainEnabled()) return { ran: 0, remaining: 0 };
+    const atlasDisabledForRun = (() => {
+      try { return typeof isAtlasRuntimeDisabled === "function" && isAtlasRuntimeDisabled(); } catch { return false; }
+    })();
     const queuedWarms = () => {
       try {
         return listJobs(["queued"]).filter((j) => j.job_type === "atlas_warm");
@@ -620,12 +634,29 @@ export class RunSession {
         return [];
       }
     };
+    if (atlasDisabledForRun) {
+      const remaining = queuedWarms().length;
+      if (remaining > 0) {
+        const reason = (() => {
+          try { return typeof getAtlasRuntimeDisabledReason === "function" ? getAtlasRuntimeDisabledReason() : null; } catch { return null; }
+        })();
+        const tail = reason ? ` (${reason})` : "";
+        emitCloseoutStatus(`${label}: ATLAS disabled for this run${tail}; leaving ${remaining} queued warm job(s) for next boot.`, C.yellow);
+        await flushCloseoutStatus();
+      }
+      return { ran: 0, remaining };
+    }
+    // Embeddings-resume warms are excluded: each slice re-enqueues the next
+    // while below parity, so draining them would chase the encode toward the
+    // full budget at exit. Their resume state is keys.db — the next boot's
+    // readiness pass picks the gap right back up.
+    const drainableWarm = (j) => String(parseJobPayload(j)?.purpose || "wi") !== "embeddings";
     const deadline = Date.now() + ATLAS_WRAPUP_DRAIN_BUDGET_MS;
     let ran = 0;
     let announced = false;
     try {
       while (Date.now() < deadline) {
-        const pending = queuedWarms();
+        const pending = queuedWarms().filter(drainableWarm);
         if (pending.length === 0) break;
         if (!announced) {
           announced = true;
@@ -2098,6 +2129,8 @@ export class RunSession {
       // terminal state on the zip indicator (warm-cache skips build no view).
       let atlasZipStarted = false;
       let atlasEncodeStarted = false;
+      let atlasEncodeStartedAt = null;
+      let bootEncodeProgress = null;
       // Tree-derived/compression refresh inside the view build ("tree" stage).
       // Terminal means a status:"ok"/"failed" event already painted the bar —
       // the boot-end sweep must not overwrite a failed tree row with "done".
@@ -2182,6 +2215,58 @@ export class RunSession {
           if (final || eventKey !== lastAtlasBootActivityEventKey) {
             lastAtlasBootActivityEventKey = eventKey;
             display.addEvent(`${C.dim}ATLAS indexing: ${tail}${C.reset}`);
+          }
+        }
+      };
+      const formatBootCount = (value) => {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return null;
+        return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+      };
+      const formatBootEta = (ms) => {
+        const seconds = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+        if (seconds < 60) return `${seconds}s`;
+        const minutes = Math.round(seconds / 60);
+        if (minutes < 60) return `${minutes}m`;
+        const hours = Math.floor(minutes / 60);
+        const remainder = minutes % 60;
+        return remainder > 0 ? `${hours}h ${remainder}m` : `${hours}h`;
+      };
+      const renderEncodeBootActivity = (event = {}) => {
+        atlasEncodeStarted = true;
+        if (atlasEncodeStartedAt == null) atlasEncodeStartedAt = Date.now();
+        const current = Number(event.progress_current ?? event.current ?? bootEncodeProgress?.current);
+        const total = Number(event.progress_total ?? event.total ?? bootEncodeProgress?.total);
+        const rawPercent = Number(event.percent ?? bootEncodeProgress?.percent);
+        const hasCount = Number.isFinite(current) && Number.isFinite(total) && total > 0;
+        const percent = Number.isFinite(rawPercent)
+          ? Math.max(0, Math.min(100, rawPercent))
+          : (hasCount ? Math.max(0, Math.min(100, (current / total) * 100)) : null);
+        const elapsedMs = atlasEncodeStartedAt == null ? 0 : Date.now() - atlasEncodeStartedAt;
+        const eta = hasCount && current > 0 && current < total
+          ? formatBootEta((elapsedMs / current) * (total - current))
+          : null;
+        const countDetail = hasCount
+          ? `${formatBootCount(current)}/${formatBootCount(total)} symbols`
+          : firstLine(event.detail || event.text || bootEncodeProgress?.detail || "encoding");
+        const detail = eta ? `${countDetail} · ~${eta} left` : countDetail;
+        bootEncodeProgress = { current: hasCount ? current : null, total: hasCount ? total : null, percent, detail };
+        bootPanel.updateEncode({
+          state: "building",
+          percent,
+          detail,
+        });
+        if (!atlasBootBackgroundRequested) {
+          // Encoding starts only after SCIP intake + view merge have landed,
+          // so this is the "SCIP + views ready" point. Default policy: release
+          // the boot gate now and let the encode finish in the background; the
+          // atlas_boot_wait_embeddings setting restores block-until-parity
+          // behind an explicit Enter escape hatch.
+          if (!atlasWarmupBootConfig?.bootWaitEmbeddings) {
+            requestAtlasBootBackground("views-ready");
+          } else {
+            updateBootFooter("hit Enter to load ONNX in the background");
+            setBootEnterAction(() => requestAtlasBootBackground("enter"));
           }
         }
       };
@@ -2297,25 +2382,7 @@ export class RunSession {
                   // The encode bar shows OVERALL progress across all languages —
                   // the event carries it in progress_current/progress_total/percent,
                   // identical on every per-language iteration, so this is idempotent.
-                  const overallCurrent = Number(event.progress_current ?? event.current);
-                  const overallTotal = Number(event.progress_total ?? event.total);
-                  const overallPercent = Number.isFinite(Number(event.percent))
-                    ? Number(event.percent)
-                    : (Number.isFinite(overallCurrent) && Number.isFinite(overallTotal) && overallTotal > 0
-                      ? (overallCurrent / overallTotal) * 100
-                      : null);
-                  atlasEncodeStarted = true;
-                  bootPanel.updateEncode({
-                    state: "building",
-                    percent: overallPercent,
-                    detail: (Number.isFinite(overallCurrent) && Number.isFinite(overallTotal) && overallTotal > 0)
-                      ? `${overallCurrent}/${overallTotal} symbols`
-                      : "encoding",
-                  });
-                  if (!atlasBootBackgroundRequested) {
-                    updateBootFooter("hit Enter to load ONNX in the background");
-                    setBootEnterAction(() => requestAtlasBootBackground("enter"));
-                  }
+                  renderEncodeBootActivity(event);
                 } else {
                   const detail = hasCount
                     ? `parsing ${usedCurrent}/${usedTotal} files`
@@ -2362,8 +2429,15 @@ export class RunSession {
               });
             }
             if (!atlasBootBackgroundRequested) {
-              updateBootFooter("ML tree labeling — hit Enter to continue in the background");
-              setBootEnterAction(() => requestAtlasBootBackground("tree-compression-enter"));
+              // Same post-view hold point as encoding: by default the boot
+              // gate releases at views-ready instead of waiting on the
+              // minutes-long ML labeling pass.
+              if (!atlasWarmupBootConfig?.bootWaitEmbeddings) {
+                requestAtlasBootBackground("views-ready");
+              } else {
+                updateBootFooter("ML tree labeling — hit Enter to continue in the background");
+                setBootEnterAction(() => requestAtlasBootBackground("tree-compression-enter"));
+              }
             }
           }
           // The tree-derived/compression refresh runs inside the view build and
@@ -2399,6 +2473,10 @@ export class RunSession {
           } else if (event.kind === "line") {
             const text = String(event.text || "");
             if (!text.trim()) return;
+            if (event.stage === "embeddings" || event.stage === "encoding") {
+              renderEncodeBootActivity(event);
+              return;
+            }
             if (event.stage === "scip" || event.stage === "scip.indexing") {
               if (scipBootStartedAt == null) scipBootStartedAt = Date.now();
               renderScipBootActivity({
@@ -2428,6 +2506,10 @@ export class RunSession {
             });
           } else if (event.kind === "heartbeat") {
             const parsedPercent = atlasProgressPercentFromEvent(event);
+            if (event.stage === "embeddings" || event.stage === "encoding") {
+              renderEncodeBootActivity(event);
+              return;
+            }
             if (event.stage === "scip" || event.stage === "scip.indexing") {
               if (scipBootStartedAt == null) scipBootStartedAt = Date.now();
               const heartbeatDetail = event.detail || bootScipProgress?.detail || null;
@@ -2601,14 +2683,37 @@ export class RunSession {
           updateBootFooter("");
           setBootEnterAction(null);
         }
-        disableAtlasForRun(`boot_reindex_failed: ${detail}`, atlasBoot.repoId || atlasBoot.graphDbPath || PROJECT_DIR);
+        // Per-layer model: a failed boot index costs the degraded layers, not
+        // the engine. Tools, gate, and MCP attachment stay up against whatever
+        // artifacts exist; readiness-driven repair warms rebuild the rest in
+        // the background through the scheduler.
+        let repair = { actions: [], summary: "self-repair unavailable" };
+        try {
+          if (typeof enqueueAtlasSelfRepair === "function") {
+            repair = enqueueAtlasSelfRepair({
+              repoRoot: PROJECT_DIR,
+              config: getAtlasIntegrationConfig(),
+              reason: `boot_reindex_failed: ${detail}`,
+            }) || repair;
+          }
+        } catch (err) {
+          log?.warn?.("atlas", "ATLAS self-repair enqueue failed after boot index failure", {
+            error: firstLine(err?.message || err),
+          });
+        }
+        try { disableAtlasForRun?.(`boot_reindex_failed: ${detail}`); } catch { /* best-effort */ }
         const msg = `ATLAS boot check: indexing failed${atlasBoot.repoId ? ` for ${atlasBoot.repoId}` : ""} (${detail})`;
-        const noteMsg = "ATLAS disabled for this run — tools, gate, and MCP attachment fall back to baseline. Restart after fixing the reindex error to re-enable.";
-        log.warn("atlas", "Boot index failed — ATLAS disabled for this run", {
+        const repairActions = Array.isArray(repair.actions) ? repair.actions : [];
+        const noteMsg = repairActions.length > 0
+          ? `ATLAS continues with degraded layers (${repair.summary}); ${repairActions.length} repair warm${repairActions.length === 1 ? "" : "s"} queued.`
+          : `ATLAS continues with degraded layers (${repair.summary}).`;
+        log.warn("atlas", "Boot index failed — continuing with degraded layers; self-repair queued", {
           repoId: atlasBoot.repoId || null,
           graphDbPath: atlasBoot.graphDbPath || null,
           status: atlasBoot.status,
           detail,
+          readiness: repair.summary,
+          repairActions,
           stderrTail: (atlasBoot.stderr || "").split(/\r?\n/).filter(Boolean).slice(-3).join(" | ") || null,
         });
         if (bootAtlasProgress) {
@@ -2624,6 +2729,15 @@ export class RunSession {
           detail: `${msg}; ${noteMsg}`,
           showDetail: true,
         });
+        return {
+          atlasBoot,
+          atlasRuntime: {
+            attempted: false,
+            skipped: "boot_failed",
+            ok: false,
+            backend: "atlas-v2",
+          },
+        };
       }
       renderAtlasBootActivity({
         elapsedMs: atlasBootStartedAt ? Date.now() - atlasBootStartedAt : bootAtlasProgress?.elapsedMs || 0,
@@ -2703,6 +2817,7 @@ export class RunSession {
         onnxWarmManager.run(onnxWorkerUrl, {
           label: "ONNX encoder warm",
           timeoutMs: 5 * 60 * 1000,
+          stopGraceMs: 10_000,
           unref: true,
           workerData: {
             cacheDir: onnxStatusAtBoot.cacheDir,
@@ -2858,8 +2973,27 @@ export class RunSession {
   // (off the event loop), so the scheduler lock keeps renewing while we wait —
   // jobs see a current index instead of one still building in the background.
   if (atlasWarmCompletion) {
-    const disableAtlasAfterBackgroundFailure = (reason) => {
-      try { disableAtlasForRun(`boot_background_failed: ${firstLine(reason)}`, PROJECT_DIR); } catch { /* best effort */ }
+    // The owner of interrupted/failed boot work is gone, so inspect artifacts
+    // and queue bounded warm jobs that repair whatever is not ready. Also mark
+    // ATLAS disabled for this run so wrap-up does not drain warm work against
+    // a just-failed/torn-down conductor.
+    const repairAtlasAfterOwnerGone = (reason) => {
+      const repairReason = firstLine(reason);
+      try {
+        if (typeof enqueueAtlasSelfRepair === "function") {
+          const repair = enqueueAtlasSelfRepair({
+            repoRoot: PROJECT_DIR,
+            config: getAtlasIntegrationConfig(),
+            reason: repairReason,
+          }) || { actions: [], summary: "self-repair unavailable" };
+          log?.info?.("atlas", "ATLAS self-repair after interrupted boot work", {
+            reason: repairReason,
+            readiness: repair.summary,
+            repairActions: repair.actions,
+          });
+        }
+      } catch { /* best effort — the next boot readiness pass retries */ }
+      try { disableAtlasForRun?.(repairReason); } catch { /* best effort */ }
     };
     const watchAtlasCompletion = () => {
       void atlasWarmCompletion.then(
@@ -2871,7 +3005,7 @@ export class RunSession {
               reason: atlasBootBackgroundReason,
               error: firstLine(reason),
             });
-            disableAtlasAfterBackgroundFailure(reason);
+            repairAtlasAfterOwnerGone(`boot_background_failed: ${firstLine(reason)}`);
             return;
           }
           log?.info?.("atlas", "Background ATLAS/ONNX boot work completed", {
@@ -2883,7 +3017,7 @@ export class RunSession {
             reason: atlasBootBackgroundReason,
             error: firstLine(err?.message || err),
           });
-          disableAtlasAfterBackgroundFailure(err?.message || err);
+          repairAtlasAfterOwnerGone(`boot_background_failed: ${firstLine(err?.message || err)}`);
         },
       );
     };
@@ -2907,10 +3041,10 @@ export class RunSession {
         throw outcome.error;
       }
     } catch (err) {
-      log?.warn?.("atlas", "ATLAS boot wait failed; entering TUI with ATLAS disabled", {
+      log?.warn?.("atlas", "ATLAS boot wait failed; entering TUI with degraded layers", {
         error: firstLine(err?.message || err),
       });
-      try { disableAtlasForRun(`boot_wait_failed: ${firstLine(err?.message || err)}`, PROJECT_DIR); } catch { /* best effort */ }
+      repairAtlasAfterOwnerGone(`boot_wait_failed: ${firstLine(err?.message || err)}`);
     }
   }
 
@@ -3287,8 +3421,8 @@ export class RunSession {
   // Hold the Atlas conductor + ONNX encoder daemons warm for the whole run so
   // per-WI warms reuse one hot ParseEngine and encodes reuse one loaded model.
   // Released + disposed by cleanupAtlasForSession on every exit path.
-  try { setConductorKeepWarm(true); } catch { /* best-effort */ }
-  try { setOnnxDaemonKeepWarm(true); } catch { /* best-effort */ }
+  try { setConductorKeepWarmForRun(true); } catch { /* best-effort */ }
+  try { setOnnxDaemonKeepWarmForRun(true); } catch { /* best-effort */ }
 
   await scheduler.runLoop(
     (job) => worker.execute(job),
@@ -3514,6 +3648,15 @@ export class RunSession {
     // Wrap-up merges queued ATLAS follow-up work; finish it while the
     // conductor is still alive so the next boot opens on a current index.
     await drainPendingAtlasWarmJobs({ label: "Run wrap-up" });
+    // Daemon-layer health: the worker→per-call fallback is transparent by
+    // design, which means a broken bridge/host is invisible unless reported.
+    const fallbackStats = nativeBinariesForRun?.workerFallbackStats?.() || { total: 0, byBinary: {} };
+    if (fallbackStats.total > 0) {
+      const detail = Object.entries(fallbackStats.byBinary)
+        .map(([name, s]) => `${name}=${s.count}`)
+        .join(", ");
+      emitCloseoutStatus(`Run wrap-up: native worker degraded to ${fallbackStats.total} per-call spawn(s) (${detail}) — daemon layer needs attention.`, C.yellow);
+    }
     emitCloseoutStatus("Run wrap-up: done.", C.green);
     await flushCloseoutStatus();
   } finally {
@@ -3525,6 +3668,16 @@ export class RunSession {
     // Natural-completion exit: release + dispose the conductor so its worker
     // thread doesn't pin the loop (shutdown paths already do this via 3133).
     await cleanupAtlasForSession({ label: "Run wrap-up", announce: false });
+    // Retire every supervised daemon host (EOF + drain grace, no mid-call
+    // kills), then sweep this process's daemon ledger so thread-minted strays
+    // can't outlive the run. A clean exit leaves zero hosts and no ledger.
+    try {
+      const swept = await daemonSupervisorForRun?.shutdownAll?.() || { reaped: 0 };
+      if (swept.reaped > 0) {
+        emitCloseoutStatus(`Run wrap-up: reaped ${swept.reaped} stray daemon host(s) at exit.`, C.yellow);
+        await flushCloseoutStatus();
+      }
+    } catch { /* shutdown sweep is best-effort */ }
   }
 
   }

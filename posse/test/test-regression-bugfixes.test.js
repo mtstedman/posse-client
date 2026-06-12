@@ -254,6 +254,7 @@ function createRunSessionBootTestDeps(overrides = {}) {
     getAtlasIntegrationConfig: () => ({}),
     ensureAtlasRepoIndexedOnBoot: async () => ({ attempted: false, skipped: "atlas_disabled" }),
     disableAtlasForRun: () => {},
+    enqueueAtlasSelfRepair: () => ({ ok: true, summary: "all layers ready", layers: [], actions: [] }),
     log: { warn: () => {} },
     Display: class {},
     STALL_TIMEOUT: 1,

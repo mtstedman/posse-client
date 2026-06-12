@@ -47,6 +47,7 @@ export { HOST_MIGRATIONS } from "./ddl/host-migrations/index.js";
 export {
   ATLAS_WARM_JOB_POLICY,
   ATLAS_WARM_JOB_TYPE,
+  ATLAS_EMBEDDINGS_WARM_SLICE_SYMBOLS,
 } from "./jobs.js";
 export {
   ATLAS_TOOL_ACTIONS,

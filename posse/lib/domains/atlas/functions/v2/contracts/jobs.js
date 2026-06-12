@@ -39,6 +39,7 @@
  *   | "main-merge"        // Replay a WI ledger branch onto main, then refresh main view.
  *   | "main-full"         // Full reindex of main (rare; admin-triggered).
  *   | "scip-restage"      // Refresh staged SCIP artifacts without rebuilding a view.
+ *   | "embeddings"        // Budget-sliced vector index resume against an existing view; re-enqueues itself until parity.
  * )} AtlasWarmPurpose
  */
 
@@ -54,6 +55,7 @@
  * @property {string} [trigger_event]         Originating event name (one of ATLAS_EVENTS values). Informational only.
  * @property {string} [language]              Optional SCIP language filter for purpose === "scip-restage".
  * @property {boolean} [force]                Force SCIP restage for purpose === "scip-restage".
+ * @property {number} [max_symbols]           For purpose === "embeddings": encode at most this many missing symbols in one slice (defaults to ATLAS_EMBEDDINGS_WARM_SLICE_SYMBOLS). Resume state lives in keys.db/inflight.json, so each slice picks up where the last stopped.
  */
 
 // ============================================================================
@@ -77,6 +79,8 @@
  * @property {number} [embeddings_stale_dirs_removed] Old embedding index directories removed.
  * @property {string} [embeddings_skipped_reason] Reason embeddings were intentionally skipped.
  * @property {string} [embeddings_error]      Best-effort ingest error; view warming still succeeds.
+ * @property {number} [embeddings_remaining]  For purpose === "embeddings": symbols still missing vectors after this slice.
+ * @property {boolean} [embeddings_complete]  For purpose === "embeddings": true once the index reached parity (no missing symbols).
  * @property {boolean} [truncated]            True when a hard warmer cap limited the scan.
  * @property {string} [truncation_reason]
  * @property {number} duration_ms
@@ -122,3 +126,11 @@ export const ATLAS_WARM_JOB_POLICY = Object.freeze({
  * constant rather than hardcoding "atlas_warm".
  */
 export const ATLAS_WARM_JOB_TYPE = ATLAS_WARM_JOB_POLICY.jobType;
+
+/**
+ * Default encode budget for one "embeddings" warm slice. Sized so a slice
+ * finishes well inside the warm runtime budget on a cold local-ONNX encoder;
+ * a below-parity index re-enqueues another slice rather than stretching one
+ * job, so the scheduler can interleave pipeline work between slices.
+ */
+export const ATLAS_EMBEDDINGS_WARM_SLICE_SYMBOLS = 4000;

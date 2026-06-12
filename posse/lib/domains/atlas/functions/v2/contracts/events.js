@@ -17,6 +17,8 @@
  *   | "atlas.main_advanced"
  *   | "atlas.scip_restage_requested"
  *   | "atlas.wi_cleanup"
+ *   | "atlas.embeddings_resume"
+ *   | "atlas.self_repair"
  * )} AtlasEventName
  */
 
@@ -41,6 +43,12 @@ export const ATLAS_EVENTS = Object.freeze({
 
   /** Emitted when a WI is being purged. Payload: { wi_id, branch }. Triggers view file deletion; ledger partition is retained for audit. */
   WI_CLEANUP: "atlas.wi_cleanup",
+
+  /** Emitted when the embedding index is below parity and its owner is gone (boot backgrounded/failed, crash). Payload: { target_branch, reason, remaining }. Triggers a budget-sliced embeddings warm that re-enqueues itself until coverage reaches parity. */
+  EMBEDDINGS_RESUME: "atlas.embeddings_resume",
+
+  /** Emitted when readiness inspection finds a non-ready layer with no live owner. Payload: { reason, layers }. The emitter supplies an explicit warm payload for the repair (e.g. main-full). */
+  SELF_REPAIR: "atlas.self_repair",
 });
 
 /** Ordered tuple of all event names. Useful for switch exhaustiveness checks and metrics enumeration. */
@@ -146,6 +154,19 @@ export const ATLAS_EVENT_NAMES = Object.freeze(
  */
 
 /**
+ * @typedef {Object} EmbeddingsResumePayload
+ * @property {string} target_branch
+ * @property {string} reason                  Why the resume was requested (e.g. "boot_backgrounded", "warm_incomplete", "self_repair").
+ * @property {number} [remaining]             Best-known count of symbols still missing vectors.
+ */
+
+/**
+ * @typedef {Object} SelfRepairPayload
+ * @property {string} reason                  The triggering condition (e.g. "boot_reindex_failed: ...").
+ * @property {string[]} layers                Readiness layer names that were not ready.
+ */
+
+/**
  * Discriminated union of every event payload, keyed by event_type.
  *
  * @typedef {(
@@ -156,5 +177,7 @@ export const ATLAS_EVENT_NAMES = Object.freeze(
  *   | { type: "atlas.main_advanced" } & MainAdvancedPayload
  *   | { type: "atlas.scip_restage_requested" } & ScipRestageRequestedPayload
  *   | { type: "atlas.wi_cleanup" } & WiCleanupPayload
+ *   | { type: "atlas.embeddings_resume" } & EmbeddingsResumePayload
+ *   | { type: "atlas.self_repair" } & SelfRepairPayload
  * )} AtlasEventPayload
  */

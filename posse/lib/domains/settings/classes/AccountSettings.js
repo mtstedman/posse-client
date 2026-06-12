@@ -20,9 +20,27 @@ function normalizeRepoPath(repoPath) {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
+// Tests must never touch the operator's real ~/.posse/account.db. Before this
+// guard, any test that called setSetting() without an explicit
+// POSSE_ACCOUNT_DB_PATH wrote the LIVE global settings — e.g. the scip CLI
+// suite flipped atlas_scip_mode off and reset atlas_scip_restage_policy on
+// every run. Under node --test (NODE_TEST_CONTEXT), an unset account DB path
+// now resolves to a per-process temp DB instead, pinned into the env so
+// subprocesses the test spawns share the same isolated DB. Tests that point
+// POSSE_ACCOUNT_DB_PATH somewhere explicit keep full control.
+let _testRedirectPath = null;
+function resolveTestRedirectPath() {
+  if (_testRedirectPath) return _testRedirectPath;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-test-account-"));
+  _testRedirectPath = path.join(dir, "account.db");
+  process.env.POSSE_ACCOUNT_DB_PATH = _testRedirectPath;
+  return _testRedirectPath;
+}
+
 function resolveDefaultPath() {
   const envPath = normalizeDbPath(process.env.POSSE_ACCOUNT_DB_PATH);
   if (envPath) return envPath;
+  if (process.env.NODE_TEST_CONTEXT) return resolveTestRedirectPath();
   return path.join(os.homedir(), ".posse", "account.db");
 }
 

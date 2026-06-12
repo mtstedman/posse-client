@@ -1,6 +1,7 @@
 // @ts-check
 
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
+import { SCIP_INDEXER_COUNT } from "../scip/indexers.js";
 import { emitParseEvent } from "./events.js";
 import { startOnnxRefresh } from "./onnx-index-runner.js";
 
@@ -13,7 +14,9 @@ import { startOnnxRefresh } from "./onnx-index-runner.js";
  */
 export function createParsePipeline({
   dbWriteSemaphore = createDbWriteSemaphore(),
-  scipStageSemaphore = createScipStageSemaphore(1),
+  // Generation fans out across languages by default; intake stays serialized
+  // on the DB write semaphore.
+  scipStageSemaphore = createScipStageSemaphore(SCIP_INDEXER_COUNT),
   onEvent,
 } = {}) {
   return {
@@ -44,7 +47,7 @@ export function createParsePipeline({
 export async function runParsePipeline(opts) {
   const pipeline = createParsePipeline({
     dbWriteSemaphore: opts.dbWriteSemaphore || createDbWriteSemaphore(),
-    scipStageSemaphore: opts.scipStageSemaphore || createScipStageSemaphore(1),
+    scipStageSemaphore: opts.scipStageSemaphore || createScipStageSemaphore(SCIP_INDEXER_COUNT),
     onEvent: opts.onEvent,
   });
   await Promise.all((opts.languages || []).map(async (lang) => {
