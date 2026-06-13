@@ -35,18 +35,21 @@ describe("ATLAS warm readiness state", () => {
 
     warmReadinessProgress({ stage: "embeddings", percent: 25, language: "ts" }, t + 3);
     r = getWarmReadiness(t + 4);
-    assert.equal(r.atlas, 78, "ATLAS held while ONNX advances");
+    // Encode runs after the parse/view/tree pipeline, so the first
+    // embeddings event completes the ATLAS bar instead of pinning it at the
+    // last bucket (it sat at 97% for the whole multi-minute encode pass).
+    assert.equal(r.atlas, 100, "ATLAS completes once encode begins");
     assert.equal(r.onnx, 25);
     assert.equal(r.lang, "ts");
   });
 
-  it("the encode loop's 'encoding' stage drives ONNX, not ATLAS", () => {
+  it("the encode loop's 'encoding' stage drives ONNX and completes ATLAS", () => {
     const t = 1_500;
     warmReadinessStarted(t);
     warmReadinessProgress({ stage: "view", percent: 60 }, t + 1);
     warmReadinessProgress({ stage: "encoding", percent: 35, language: "js" }, t + 2);
     const r = getWarmReadiness(t + 3);
-    assert.equal(r.atlas, 82, "ATLAS untouched by encode-loop events");
+    assert.equal(r.atlas, 100, "encode-loop events mark the ATLAS side complete");
     assert.equal(r.onnx, 35, "per-symbol encode progress lands on the ONNX bar");
   });
 
@@ -172,7 +175,7 @@ describe("ATLAS warm readiness state", () => {
     warmReadinessProgress({ stage: "encoding", percent: 20 }, t + 2);
     warmReadinessSeed({ atlasEnabled: true, onnxEnabled: true }, t + 3);
     const r = getWarmReadiness(t + 4);
-    assert.equal(r.atlas, 79, "live partial kept");
+    assert.equal(r.atlas, 100, "encode began, so the ATLAS side is complete");
     assert.equal(r.onnx, 20, "live partial kept");
     assert.equal(r.onnxEnabled, true);
   });

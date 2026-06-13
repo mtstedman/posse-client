@@ -33,6 +33,11 @@ const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_BIN_ROOT = path.resolve(THIS_DIR, "..", "..", "bin");
 const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120000;
+// A silent probe only retires the host once it has produced no message at all
+// for this long (see #probeWorkerHealth): long enough that any worker-routed
+// request a serial host could legitimately be chewing has passed its own
+// timeout, short enough that a truly wedged host is replaced within minutes.
+const WORKER_WEDGE_SILENCE_MS = 120_000;
 
 /**
  * Resolve the heartbeat URL the key-gated Posse binaries authenticate against.
@@ -157,9 +162,17 @@ export class NativeBinary {
    * After a request timeout: decide whether the host is wedged instead of
    * inferring it. Any reply to the probe — even an "unknown method" error from
    * hosts that predate daemon.ping — proves the request loop is alive, so the
-   * slow request stays an isolated abandon. Only silence retires the host
-   * (gracefully: EOF + drain window, never a mid-call kill). Single-flight so
-   * a burst of timeouts can't stack probes.
+   * slow request stays an isolated abandon. Single-flight so a burst of
+   * timeouts can't stack probes.
+   *
+   * A silent probe alone is NOT enough to retire: the Rust worker hosts read
+   * stdin serially with no out-of-band ping handler, so a host mid-way through
+   * one slow request is silent essentially deterministically right after a
+   * caller timeout. Silence only means wedged when the host has also produced
+   * NO message for the wedge window — a host that replied recently is busy,
+   * not dead, and killing it would discard its in-progress work, cold-start a
+   * replacement, and (repeated) read as a crash loop. Retire (gracefully: EOF
+   * + drain window) only on silent probe + prolonged total silence.
    */
   async #probeWorkerHealth() {
     if (this._workerProbeInFlight) return;
@@ -171,7 +184,9 @@ export class NativeBinary {
         method: "daemon.ping",
         payload: null,
       });
-      if (verdict === "silent") daemon.retire({});
+      if (verdict === "silent" && daemon.silenceMs() >= WORKER_WEDGE_SILENCE_MS) {
+        daemon.retire({});
+      }
     } catch { /* probe is best-effort */ } finally {
       this._workerProbeInFlight = false;
     }
@@ -324,11 +339,15 @@ export class NativeBinary {
    */
   runSync(subcommand, args = [], opts = {}) {
     // Sync invocations are always per-call spawns. The Atomics SyncBridge that
-    // used to serve `worker: true` here was removed: the sync method twins are
-    // production-caller-less (async variants own the live paths), and the
-    // bridge both wedged for the full wait timeout when its broker failed to
-    // boot and stranded its host child on stop(). `opts.worker` is accepted
-    // and ignored so shared call sites (invoke.js) need no sync/async forks.
+    // used to serve `worker: true` here was removed because it both wedged for
+    // the full wait timeout when its broker failed to boot and stranded its
+    // host child on stop(). NOTE: the sync atlas invoke path still has live
+    // production callers (retrieval redaction/tokenize/rank, tree-compression
+    // — see invoke.js runAtlasNativeMethod), so every such call pays a full
+    // spawn here. Call sites batch/memoize to stay O(1) spawns per action;
+    // the durable fix is migrating the retrieval pipeline to the async
+    // daemon variants. `opts.worker` is accepted and ignored so shared call
+    // sites (invoke.js) need no sync/async forks.
     return this.#runSyncPerCall(subcommand, args, opts);
   }
 

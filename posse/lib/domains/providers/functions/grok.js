@@ -23,7 +23,7 @@ import {
   isGateActive,
   isGatedTool,
   checkNativeToolAllowed,
-  noteAtlasCall as noteGateAtlasCall,
+  noteAtlasToolResult as noteGateAtlasToolResult,
   releaseGate,
   unlockForAtlasUnavailable,
   isFallbackAtlasPrefetchStatus,
@@ -363,10 +363,7 @@ async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atla
   });
 
   if (atlasAction) {
-    const text = typeof result === "string" ? result : String(result ?? "");
-    const errored = /^Error:/i.test(text);
-    const empty = !errored && (text.trim().length === 0 || text.trim() === "ATLAS returned no output.");
-    noteGateAtlasCall({ action: atlasAction, ok: !errored, empty, args: gateArgs, cwd, scopeKey: gateScopeKey });
+    return noteGateAtlasToolResult(result, { action: atlasAction, args: gateArgs, cwd, scopeKey: gateScopeKey });
   }
 
   return result;

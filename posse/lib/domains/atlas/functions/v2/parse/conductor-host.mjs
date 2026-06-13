@@ -149,11 +149,26 @@ runDaemonThread(async (payload, _message, emitProgress) => {
     }
 
     case "retrieve": {
-      // Read-only tool dispatch with request-scoped handles; deliberately NOT
-      // on the write queue — WAL readers run concurrently with the writers
-      // this thread owns.
+      // LEGACY: production reads route to the reader lane (reader-host.mjs)
+      // so they never queue behind this thread's long sync sections. Kept for
+      // back-compat with direct host callers; same request-scoped handles,
+      // deliberately NOT on the write queue.
       const { runConductorRetrieve } = await import("./retrieve-runner.js");
       return runConductorRetrieve(payload);
+    }
+
+    case "debug.block": {
+      // Test-only: occupy this thread's event loop with a synchronous
+      // busy-wait, standing in for a warm's long sync sections (the 19–26s
+      // SCIP ingest transaction, view merge). The reader-lane starvation
+      // regression test proves retrieves complete while this runs. Throws
+      // outside `node --test`.
+      const { assertTestContext } = await import("../../../../runtime/functions/test-context.js");
+      assertTestContext("conductor debug.block");
+      const ms = Math.min(30_000, Math.max(0, Number(/** @type {any} */ (payload)?.ms) || 0));
+      const start = Date.now();
+      while (Date.now() - start < ms) { /* sync busy-wait */ }
+      return { blockedMs: Date.now() - start };
     }
 
     case "merge": {

@@ -81,7 +81,10 @@ function normalizeSurfaceMemory(memory = {}) {
     insight_kind: kind,
     action: firstLine,
     confidence: memory.confidence != null ? String(memory.confidence) : null,
-    source: "atlas_memory",
+    // Provenance: who originally wrote this memory (agent, human, kaizen, ...),
+    // carried from the memories.source column; insight_type already marks the
+    // surfacing path as atlas_memory.
+    source: `memory:${String(memory.source || "agent").trim() || "agent"}`,
     evidence: JSON.stringify([
       `surface score: ${memory.score ?? "n/a"}`,
       ...(Array.isArray(memory.matchedSymbols) && memory.matchedSymbols.length > 0

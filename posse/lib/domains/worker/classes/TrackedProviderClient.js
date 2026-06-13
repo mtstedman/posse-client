@@ -18,6 +18,8 @@ import {
   getProviderRateLimitState,
   selectProviderName,
 } from "../../providers/functions/provider.js";
+import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
+import { resolveEffectiveTierModel } from "../../providers/functions/model-catalog-validate.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { filterProviderToolUseReplay, getObservationContext, recordObservation, recordToolUseObservations, runWithObservationContext } from "../../observability/functions/observations.js";
 import { recordPrompt } from "../../../shared/telemetry/functions/logging/prompt-log.js";
@@ -56,6 +58,12 @@ const DEFAULT_PROVIDER_ERROR_PATTERNS = [
   /connection error/i,
   /circuit breaker open/i,
 ];
+const RUNTIME_MODEL_ERROR_PATTERNS = [
+  /\b(?:model|deployment)\b[^\n]{0,160}\b(?:does\s+not\s+exist|unsupported|is\s+not\s+supported|not\s+supported|does\s+not\s+support)\b/i,
+  /\b(?:unknown|unsupported|invalid)\s+model\b/i,
+  /\bnot\s+supported\s+when\s+using\s+codex\b/i,
+  /\b(?:do\s+not|don't|does\s+not)\s+have\s+access\b[^\n]{0,100}\bmodel\b/i,
+];
 const SLOW_PROVIDER_SETUP_PHASE_MS = 1000;
 
 async function timeProviderSetupPhase(label, meta, fn, { warnMs = SLOW_PROVIDER_SETUP_PHASE_MS } = {}) {
@@ -80,6 +88,45 @@ async function timeProviderSetupPhase(label, meta, fn, { warnMs = SLOW_PROVIDER_
 function defaultIsProviderError(err) {
   const msg = err?.message || "";
   return DEFAULT_PROVIDER_ERROR_PATTERNS.some((re) => re.test(msg));
+}
+
+function errorSearchText(err) {
+  // Model-rejection errors surface in the error message or on stderr. Never
+  // scan stdout/output: CLI providers attach the failed run's full agent
+  // transcript there, and agent prose that merely mentions "unknown model"
+  // must not trigger a silent model fallback.
+  return [
+    err?.message,
+    err?.stderr,
+    err?.stats?.stderr,
+  ].filter(Boolean).join("\n");
+}
+
+function isRuntimeModelError(err) {
+  const text = errorSearchText(err);
+  return RUNTIME_MODEL_ERROR_PATTERNS.some((re) => re.test(text));
+}
+
+function normalizeModelName(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function resolveCatalogSafeTierModel(providerName, tier, candidate) {
+  const providerKey = String(providerName || "").trim().toLowerCase();
+  const tierKey = String(tier || "standard").trim().toLowerCase();
+  const selected = String(candidate || "").trim();
+  if (!selected) return selected || null;
+  return resolveEffectiveTierModel(providerKey, tierKey, selected).model || selected || null;
+}
+
+function resolveRuntimeModelFallback(providerName, tier, attemptedModel) {
+  const providerKey = String(providerName || "").trim().toLowerCase();
+  const tierKey = String(tier || "standard").trim().toLowerCase();
+  const fallback = getDefaultTierModel(providerKey, tierKey);
+  const effectiveFallback = resolveEffectiveTierModel(providerKey, tierKey, fallback).model || fallback || null;
+  if (!effectiveFallback) return null;
+  if (normalizeModelName(effectiveFallback) === normalizeModelName(attemptedModel)) return null;
+  return effectiveFallback;
 }
 
 function defaultResolveCallCostEstimate(stats) {
@@ -905,12 +952,20 @@ export class TrackedProviderClient {
       job_id,
       work_item_id,
     }, () => provider.getModelTierConfig?.(tier) || provider.MODEL_TIERS?.[tier] || provider.MODEL_TIERS?.standard || {});
-    const executionModelName = await timeProviderSetupPhase("provider.model_resolve", {
+    const selectedExecutionModelName = await timeProviderSetupPhase("provider.model_resolve", {
       role: opts.role,
       provider: providerName,
       job_id,
       work_item_id,
     }, () => resolvePrimaryExecutionModelName(jobModelName, opts, tierConfig));
+    // Catalog enforcement keeps tier-config models honest, but an explicit
+    // per-job pin is the user's call: the cached catalog snapshot can lag a
+    // newly released model, and silently swapping a pinned model for the tier
+    // default would run (and bill) a model the job never selected.
+    const jobPinnedModel = !!jobModelName && selectedExecutionModelName === jobModelName;
+    const executionModelName = jobPinnedModel
+      ? selectedExecutionModelName
+      : resolveCatalogSafeTierModel(providerName, tier, selectedExecutionModelName);
 
     if (executionModelName) opts = { ...opts, modelName: executionModelName };
 
@@ -973,6 +1028,12 @@ export class TrackedProviderClient {
       work_item_id,
       attempt_id: ambient.attempt_id ?? null,
     }));
+    // Session reuse may replace the prompt with a resume-handoff delta and
+    // suppress the role/system prompt (skipRolePrompt/stableContext). Retries
+    // that open a fresh session must start from these pre-reuse values — a
+    // resume delta is incoherent without the prior session behind it.
+    const preReusePrompt = prompt;
+    const preReuseOpts = opts;
     prompt = sessionPrepared.prompt;
     opts = sessionPrepared.opts;
 
@@ -1025,7 +1086,73 @@ export class TrackedProviderClient {
       }
       return result;
     } catch (err) {
-      if (this.isProviderError(err)) {
+      let activeErr = err;
+      const runtimeFallbackModel = opts._modelFallbackAttempted
+        ? null
+        : (isRuntimeModelError(activeErr) ? resolveRuntimeModelFallback(providerName, tier, executionModelName) : null);
+      if (runtimeFallbackModel) {
+        try {
+          recordObservation({
+            work_item_id,
+            job_id,
+            attempt_id: ambient.attempt_id ?? null,
+            observation_type: "provider.model_fallback",
+            summary: `${providerName} ${executionModelName || "(provider default)"} -> ${runtimeFallbackModel}`,
+            detail: {
+              role: opts.role,
+              provider: providerName,
+              from_model: executionModelName || null,
+              to_model: runtimeFallbackModel,
+              model_tier: tier,
+              reason: "runtime_model_error",
+            },
+          });
+          this.emitStatus(job_id, `${C.yellow}[model-fallback] ${providerName} rejected model ${executionModelName || "(provider default)"} -> retrying ${runtimeFallbackModel}${C.reset}`);
+          // Retry from the pre-reuse prompt/opts: the retry runs in a fresh
+          // session, so a resume-handoff prompt and its skipRolePrompt/
+          // stableContext suppressions must not carry over.
+          const {
+            _sessionRecycle: _discardModelSessionRecycle,
+            priorSessionHandle: _discardModelPriorSessionHandle,
+            recyclingMode: _discardModelRecyclingMode,
+            ...modelRetryBaseOpts
+          } = preReuseOpts;
+          const retryOpts = {
+            ...modelRetryBaseOpts,
+            // Loader provisioning ran after the pre-reuse snapshot; keep it.
+            ...(opts.loaderCwd ? { loaderCwd: opts.loaderCwd, mcpCwd: opts.mcpCwd } : {}),
+            modelName: runtimeFallbackModel,
+            _modelFallbackAttempted: true,
+          };
+          const retry = await this._executeOneAttempt(preReusePrompt, retryOpts, {
+            provider,
+            providerName,
+            tier,
+            modelName: runtimeFallbackModel,
+            work_item_id,
+            job_id,
+            cwd,
+            observationContext: {
+              work_item_id,
+              job_id,
+              attempt_id: ambient.attempt_id ?? null,
+              role: opts.role ?? ambient.role ?? null,
+            },
+            abortSignal: ac.signal,
+          });
+          if (job_id) {
+            updateJobProvider(job_id, providerName, retry.stats?.modelName || runtimeFallbackModel || null);
+          }
+          this.emitStatus(job_id, `${C.green}[model-fallback] ${providerName} succeeded on ${retry.stats?.modelName || runtimeFallbackModel}${C.reset}`);
+          return retry;
+        } catch (modelErr) {
+          if (isAbortError(modelErr) || modelErr?._killReason) throw modelErr;
+          activeErr = modelErr;
+          this.emitStatus(job_id, `${C.red}[model-fallback] ${providerName} fallback model also failed: ${modelErr.message?.split("\n")[0]?.slice(0, 100)}${C.reset}`);
+        }
+      }
+
+      if (this.isProviderError(activeErr) || isRuntimeModelError(activeErr)) {
         recordAttemptedProvider(attemptedProviders, providerName);
         const fallbackName = this._selectFallbackCandidate({
           configuredPool,
@@ -1083,6 +1210,11 @@ export class TrackedProviderClient {
             this.emitStatus(job_id, `${C.yellow}[fallback] ${providerName} failed (API error) -> trying ${fallbackName}${C.reset}`);
 
             const fbTierConfig = fbProvider.getModelTierConfig?.(tier) || fbProvider.MODEL_TIERS?.[tier] || fbProvider.MODEL_TIERS?.standard || {};
+            const fbModelName = resolveCatalogSafeTierModel(
+              fallbackName,
+              tier,
+              fbTierConfig.model || getDefaultTierModel(fallbackName, tier),
+            );
             const fbAc = new AbortController();
             if (job_id) {
               const prevAc = this.worker._abortControllers.get(job_id);
@@ -1098,6 +1230,7 @@ export class TrackedProviderClient {
             const fbOpts = {
               ...sessionlessOpts,
               abortSignal: fbAc.signal,
+              modelName: fbModelName || undefined,
               _fallbackAttempted: true,
               _fallbackAttemptedProviders: [...attemptedProviders, fallbackName],
               allowedProviders: configuredPool,
@@ -1114,7 +1247,7 @@ export class TrackedProviderClient {
               providerName: fallbackName,
               provider: fbProvider,
               tier,
-              modelName: fbTierConfig.model || null,
+              modelName: fbModelName || null,
               work_item_id,
               job_id,
               cwd,
@@ -1128,7 +1261,7 @@ export class TrackedProviderClient {
             });
 
             if (job_id) {
-              updateJobProvider(job_id, fallbackName, fbStats.modelName || fbTierConfig.model || null);
+              updateJobProvider(job_id, fallbackName, fbStats.modelName || fbModelName || null);
             }
             this.emitStatus(job_id, `${C.green}[fallback] ${fallbackName} succeeded${C.reset}`);
             return { output: fbOutput, stats: fbStats };
@@ -1144,9 +1277,9 @@ export class TrackedProviderClient {
       }
 
       if (job_id && this.worker._killReasons.has(job_id)) {
-        err._killReason = this.worker._killReasons.get(job_id);
+        activeErr._killReason = this.worker._killReasons.get(job_id);
       }
-      throw err;
+      throw activeErr;
     } finally {
       if (createdAbortController && job_id) {
         this.worker._abortControllers.delete(job_id);

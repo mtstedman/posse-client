@@ -10,7 +10,7 @@ import {
   parseRetrievalAst,
   smallestNodeCoveringRange,
 } from "./ast.js";
-import { redactSecrets } from "./redaction.js";
+import { redactSecretsLines } from "./redaction.js";
 
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
 /** @typedef {import("../contracts/tool-results.js").CodeHotPathData} CodeHotPathData */
@@ -97,6 +97,8 @@ export function buildAstHotPath(args) {
   /** @type {CodeHotPathData["matches"]} */
   const matches = [];
 
+  /** @type {Array<{ line: number, ident: string }>} */
+  const rawMatches = [];
   walkAstSubtree(scope, (node) => {
     if (SKIP_TYPES.has(node.type)) return false;
     if (!IDENTIFIER_TYPES.has(node.type)) return;
@@ -107,18 +109,24 @@ export function buildAstHotPath(args) {
     if (seen.has(key)) return;
     seen.add(key);
     found.add(ident);
-    const lineText = lines[line - 1] || "";
+    rawMatches.push({ line, ident });
+  });
+
+  // One native redaction call for the whole source instead of one per matched
+  // line plus one per context line (each sync call is a process spawn).
+  const redactedLines = rawMatches.length > 0 ? redactSecretsLines(lines) : lines;
+  for (const { line, ident } of rawMatches) {
     matches.push({
       repo_rel_path: args.file,
       line,
-      text: redactSecrets(lineText),
+      text: redactedLines[line - 1] || "",
       identifier: ident,
       context: {
-        before: lines.slice(Math.max(0, line - 1 - contextLines), line - 1).map(redactSecrets),
-        after: lines.slice(line, Math.min(lines.length, line + contextLines)).map(redactSecrets),
+        before: redactedLines.slice(Math.max(0, line - 1 - contextLines), line - 1),
+        after: redactedLines.slice(line, Math.min(lines.length, line + contextLines)),
       },
     });
-  });
+  }
 
   matches.sort((a, b) => a.line - b.line || a.identifier.localeCompare(b.identifier));
   const identifiersFound = [...found].sort();

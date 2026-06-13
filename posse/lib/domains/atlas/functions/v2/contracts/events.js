@@ -41,6 +41,9 @@ export const ATLAS_EVENTS = Object.freeze({
   /** Emitted when staged SCIP artifacts should be refreshed. Payload: { to_sha, target_branch, reason }. Triggers a scip-restage warm job. */
   SCIP_RESTAGE_REQUESTED: "atlas.scip_restage_requested",
 
+  /** Emitted when a standalone scip-restage staged FRESH artifacts. Staging alone never ingests (WI warms are hot-view-only and readiness reports staged as ready), so this triggers the main-incremental warm whose SCIP phase consumes the staged index — otherwise the symbols wait for the next unrelated main warm. Payload: { target_branch, reason }. */
+  SCIP_STAGED: "atlas.scip_staged",
+
   /** Emitted when a WI is being purged. Payload: { wi_id, branch }. Triggers view file deletion; ledger partition is retained for audit. */
   WI_CLEANUP: "atlas.wi_cleanup",
 

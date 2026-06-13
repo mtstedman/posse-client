@@ -237,7 +237,10 @@ export async function createRunSessionDeps(bootDeps) {
     disableAtlasForRun: atlasModule.disableAtlasForRun,
     isAtlasRuntimeDisabled: atlasModule.isAtlasRuntimeDisabled,
     getAtlasRuntimeDisabledReason: atlasModule.getAtlasRuntimeDisabledReason,
-    enqueueAtlasSelfRepair: atlasModule.enqueueAtlasSelfRepair,
+    // Worker-backed variant: the readiness sqlite scans run off the main
+    // thread; same args/result shape, just async (run-session awaits it, and
+    // test stubs returning plain objects still work through the await).
+    enqueueAtlasSelfRepair: atlasModule.enqueueAtlasSelfRepairInWorker,
     log,
     Display,
     STALL_TIMEOUT: getStallTimeout(),

@@ -9,6 +9,7 @@ import {
   getPosseRemoteTimeoutMs,
   getPosseRemoteUrl,
 } from "../functions/mode.js";
+import { recordObservation } from "../../observability/functions/observations.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 
 function joinPromptParts(parts = []) {
@@ -145,8 +146,36 @@ export class RemoteComposer {
         latency_ms: latencyMs,
       },
     };
+    recordPromptSectionAccounting(packet, composed);
     return composed;
   }
+}
+
+// Operator-facing accounting of what the compiled prompt cost per section.
+// Telemetry only — nothing here is rendered into the agent prompt.
+function recordPromptSectionAccounting(packet, composed) {
+  try {
+    const metadata = composed?.metadata || {};
+    const droppedCount = Array.isArray(metadata.sections_dropped) ? metadata.sections_dropped.length : 0;
+    recordObservation({
+      work_item_id: packet?.work_item_id ?? null,
+      job_id: packet?.job_id ?? null,
+      observation_type: "prompt.section.accounting",
+      summary: `Prompt compiled: ${composed.prompt.length} chars`
+        + (droppedCount > 0 ? `, ${droppedCount} section(s) dropped` : "")
+        + (packet?.atlas_render_meta?.trim_level > 0 ? `, atlas trim level ${packet.atlas_render_meta.trim_level}` : ""),
+      detail: {
+        total_chars: composed.prompt.length,
+        system_prompt_chars: composed.systemPrompt?.length || 0,
+        stable_context_chars: composed.stableContext?.length || 0,
+        user_prompt_chars: composed.userPrompt?.length || 0,
+        enrichment_chars: composed.enrichment?.length || 0,
+        sections: Array.isArray(metadata.sections) ? metadata.sections : null,
+        sections_dropped: Array.isArray(metadata.sections_dropped) ? metadata.sections_dropped : [],
+        atlas_render: packet?.atlas_render_meta || null,
+      },
+    });
+  } catch { /* accounting must never break compose */ }
 }
 
 function applyRemoteIssuanceToPacket(packet, response) {

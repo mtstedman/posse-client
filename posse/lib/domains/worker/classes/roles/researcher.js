@@ -31,7 +31,7 @@ import {
 import { currentExecutionProvider, extractResearchRetryContext } from "../../functions/helpers/diagnostics.js";
 import { getProviderName, isProviderReady } from "../../../providers/functions/provider.js";
 import { getDefaultImageModel } from "../../../providers/functions/model-catalog.js";
-import { composePromptRemoteAware, handoff, parseResearcherStructuredOutput, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
+import { collectAtlasCoveredFiles, composePromptRemoteAware, handoff, parseResearcherStructuredOutput, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
 import {
   getResearchBudget as defaultGetResearchBudget,
   isDeepthinkTask as defaultIsDeepthinkTask,
@@ -346,7 +346,6 @@ export class ResearcherRole extends BaseRole {
     const deepthink = isResearchBudgetDeep(researchBudget);
     const intakeHints = getWorkItemIntakeHints(workItem, workItem?.mode || "build");
     const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(workItem), this.getRole());
-    const hintedPreload = buildResearchIntakePreload(projectDir, intakeHints);
     const webFetchCachePreload = buildWebFetchCachePreload(job.work_item_id);
     const artifactConfigPath = path.join(projectDir, "config", "artifact-protocols.json").replace(/\\/g, "/");
     const imageProviders = getConfiguredImageProviders();
@@ -474,6 +473,11 @@ export class ResearcherRole extends BaseRole {
       // injected when the researcher may need fresh code discovery.
       atlasHandoffBlock = renderAtlasHandoffSections(researcherPacket);
     }
+    // Built after the ATLAS handoff state resolves so hinted files the ATLAS
+    // prefetch already covered render as pointers instead of body previews.
+    const hintedPreload = buildResearchIntakePreload(projectDir, intakeHints, {
+      atlasCoveredFiles: collectAtlasCoveredFiles(researcherPacket),
+    });
 
     Object.assign(ctx, {
       deepthink,

@@ -178,6 +178,64 @@ describe("daemon recovery ladder", () => {
     assert.equal(spawned, 5, "half-open allows a comeback attempt");
     assert.ok(events.includes("breaker_half_open"));
   });
+
+  it("retire-replacement spawns do not feed the crash breaker", async () => {
+    let fakeNow = 1_000_000;
+    let spawned = 0;
+    const factory = () => {
+      spawned++;
+      return fakeTransport((message, api) => api.reply({ id: message.id, ok: true, data: spawned }));
+    };
+    const events = [];
+    const daemon = new Daemon({
+      transportFactory: factory,
+      restartBackoffMs: 0,
+      breakerMaxSpawns: 3,
+      breakerWindowMs: 60_000,
+      breakerCooldownMs: 300_000,
+      onLifecycle: (e) => events.push(e.kind),
+      now: () => fakeNow,
+    });
+
+    // Healthy hosts, deliberately retired over and over inside one breaker
+    // window (the probe-driven path): the replacement spawns are not
+    // crash-loop evidence and must never open the breaker.
+    for (let i = 0; i < 6; i++) {
+      fakeNow += 1_000;
+      const res = await daemon.request({ method: "work" });
+      assert.equal(res.ok, true, `request ${i} must succeed (breaker must stay closed)`);
+      daemon.retire({});
+    }
+    assert.equal(spawned, 6);
+    assert.equal(daemon.breakerTrips, 0, "deliberate retires opened the crash breaker");
+    assert.ok(!events.includes("breaker_open"));
+  });
+
+  it("silenceMs() tracks the last message from the current host", async () => {
+    let fakeNow = 1_000_000;
+    let replyToFirstOnly = true;
+    const transport = fakeTransport((message, api) => {
+      if (replyToFirstOnly) {
+        replyToFirstOnly = false;
+        api.reply({ id: message.id, ok: true, data: null });
+      }
+      // After the first request: busy/silent.
+    });
+    const daemon = new Daemon({ transportFactory: () => transport, timeoutMs: 50, now: () => fakeNow });
+
+    assert.equal(daemon.silenceMs(), Infinity, "no host yet — silence is unknowable");
+
+    await daemon.request({ method: "warm" });
+    assert.equal(daemon.silenceMs(), 0, "a reply just landed");
+
+    fakeNow += 30_000;
+    assert.equal(daemon.silenceMs(), 30_000);
+
+    // A timed-out request does not advance the message clock.
+    const timedOut = await daemon.request({ method: "slow" });
+    assert.equal(timedOut._timedOut, true);
+    assert.equal(daemon.silenceMs(), 30_000, "silence keeps counting from the last actual message");
+  });
 });
 
 describe("daemon supervisor", () => {

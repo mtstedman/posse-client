@@ -306,12 +306,16 @@ const CODEX_ROLE_GUARD_BLOCKS = {
     "- Use the active retrieval context first when it is available; then use the manifest entries whose canonical labels are read_file, list_files, and search_files for exact worktree inspection before editing.",
     "- For files in your create_roots scope that live outside the working directory (e.g. resources/artifacts paths), the manifest entry whose canonical label is write_file still succeeds — it runs outside the Codex sandbox.",
     "- If a test_command is provided, run that command after the file changes are complete.",
+    "- For lint/typecheck, including PHP syntax checks, use the manifest entry whose canonical label is run_scoped_checks before considering shell.",
     "- Do not use shell for ad-hoc repository discovery when ATLAS or the manifest file/search tools can answer the question.",
+    "- Do not use shell for lint/typecheck commands unless run_scoped_checks reports that the needed check is unavailable or cannot cover the scope; state that reason when falling back.",
   ].join("\n"),
   assessor: [
     "ASSESSOR TOOL PRIORITY:",
     "- Verify files with the manifest entries whose canonical labels are read_file, list_files, and search_files before using shell; when retrieval evidence is active, start there first.",
+    "- Use the manifest entry whose canonical label is run_scoped_checks for lint/typecheck first, including PHP syntax checks.",
     "- Use shell only for explicit verification commands such as the provided test command or a narrow project test/build command.",
+    "- Do not use shell for lint/typecheck commands unless run_scoped_checks reports that the needed check is unavailable or cannot cover the scope; state that reason when falling back.",
     "- Do not use shell-based search to decide whether the implementation changed the right files.",
   ].join("\n"),
   artificer: [

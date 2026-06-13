@@ -691,6 +691,10 @@ export class ParseEngine {
         message: staged.error,
       });
     }
+    // Staging alone never ingests — surface "fresh artifacts exist" so the
+    // warm-job executor can enqueue the main-incremental intake that consumes
+    // them (ensureScipStaged returns staged:false for already_staged/no-op).
+    if (staged.staged === true) base.scip_staged_fresh = true;
     return base;
   }
 

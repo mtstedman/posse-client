@@ -74,6 +74,13 @@ export class Daemon {
     this._breakerOpenUntil = 0;
     /** How many times the breaker has tripped (telemetry). */
     this.breakerTrips = 0;
+    /** When the next spawn replaces a deliberately retired host, it is not
+     * crash-loop evidence and must not feed the breaker. */
+    this._nextSpawnIsRetireReplacement = false;
+    /** Timestamp of the last message received from the current host (0 = none). */
+    this._lastMessageAt = 0;
+    /** Timestamp of the current host's spawn (0 = none). */
+    this._lastSpawnAt = 0;
     this._exitHookInstalled = false;
     /** @type {(() => void) | null} the process-exit cleanup handler, kept so it can be removed on stop/dispose */
     this._exitHandler = null;
@@ -158,8 +165,19 @@ export class Daemon {
       transport.onMessage((message) => { if (this._transport === transport) this.#onMessage(message); });
       transport.onExit(() => { if (this._transport === transport) this.#onExit(); });
       if (!transport.start()) return false;
-      this.#noteSpawn();
-      this.#emitLifecycle("spawn", { pid: transport.hostPid?.() ?? null });
+      // A retire-replacement is deliberate (probe verdict, supervisor recycle),
+      // not crash-loop evidence: counting it would let repeated retires open
+      // the crash breaker with zero crashes and force 5 minutes of per-call
+      // spawns. Crash respawns (host exited on its own) still count.
+      const isRetireReplacement = this._nextSpawnIsRetireReplacement;
+      this._nextSpawnIsRetireReplacement = false;
+      if (!isRetireReplacement) this.#noteSpawn();
+      this._lastSpawnAt = this._now();
+      this._lastMessageAt = 0;
+      this.#emitLifecycle("spawn", {
+        pid: transport.hostPid?.() ?? null,
+        ...(isRetireReplacement ? { retire_replacement: true } : {}),
+      });
       this._transport = transport;
       this._runningKey = desiredKey;
       if (!this._exitHookInstalled) {
@@ -173,6 +191,10 @@ export class Daemon {
 
   /** @param {Record<string, unknown>} message */
   #onMessage(message) {
+    // Any message — a late reply to an abandoned id, progress, anything —
+    // proves the host's request loop is alive. Tracked so probe policy can
+    // distinguish "busy serial host" from "wedged" (see silenceMs()).
+    this._lastMessageAt = this._now();
     const id = Number(message?.id);
     const entry = this._pending.get(id);
     if (!entry) return;
@@ -274,6 +296,10 @@ export class Daemon {
     if (!transport) return;
     this._transport = null;
     this._runningKey = null;
+    // The replacement spawn for a deliberate retire is exempt from breaker
+    // accounting (see #ensureTransport) for the same reason retire skips the
+    // restart backoff: a retire is deliberate, not a crash.
+    this._nextSpawnIsRetireReplacement = true;
     this.#emitLifecycle("retire", { pid: transport.hostPid?.() ?? null });
     const waiters = [...this._pending.values()];
     this._pending.clear();
@@ -303,6 +329,22 @@ export class Daemon {
     if (response?._timedOut === true) return "silent";
     if (response?._transportGone === true) return "gone";
     return "alive";
+  }
+
+  /**
+   * How long the current host has been silent: time since the last message
+   * received from it, or since its spawn if it has never replied. Infinity
+   * when no host is up. Probe policy uses this to distinguish a busy serial
+   * host (replied recently, currently chewing a slow request) from a wedged
+   * one — a single silent probe alone cannot tell them apart on hosts that
+   * process stdin serially.
+   * @returns {number}
+   */
+  silenceMs() {
+    if (!this._transport) return Infinity;
+    const reference = Math.max(this._lastMessageAt, this._lastSpawnAt);
+    if (reference <= 0) return Infinity;
+    return Math.max(0, this._now() - reference);
   }
 
   /** Pid of the live host process, if any (ProcessTransport hosts only). */

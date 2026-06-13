@@ -79,6 +79,8 @@ import {
   noteAtlasCall,
   unlockForAtlasPrefetch,
   unlockForAtlasUnavailable,
+  unlockGateForDeadAtlasResult,
+  isDeadAtlasResultText,
   __resetGateForTests,
 } from "../../../lib/domains/integrations/functions/deterministic-mcp/gate.js";
 import {
@@ -738,6 +740,8 @@ export {
   noteAtlasCall,
   unlockForAtlasPrefetch,
   unlockForAtlasUnavailable,
+  unlockGateForDeadAtlasResult,
+  isDeadAtlasResultText,
   __resetGateForTests,
   buildFoldedAtlasToolDescriptor,
   buildNativeToolDescriptor,

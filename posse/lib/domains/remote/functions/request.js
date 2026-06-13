@@ -78,6 +78,34 @@ function readOnlyFileSnippets(packet = {}) {
   }));
 }
 
+// The remote renderer trims each insight field to ~240 chars anyway, so cap
+// the wire payload to the same order of magnitude instead of shipping full
+// detail/evidence bodies that can never reach the prompt.
+const INSIGHT_TEXT_CAP = 600;
+const INSIGHT_EVIDENCE_ITEMS = 3;
+const INSIGHT_EVIDENCE_ITEM_CAP = 160;
+
+function _capInsightText(value) {
+  if (value == null) return null;
+  const text = String(value);
+  return text.length > INSIGHT_TEXT_CAP ? `${text.slice(0, INSIGHT_TEXT_CAP)}…` : text;
+}
+
+function _capInsightEvidence(evidence) {
+  if (evidence == null) return null;
+  let items = evidence;
+  if (typeof items === "string") {
+    try { items = JSON.parse(items); } catch { return _capInsightText(items); }
+  }
+  if (!Array.isArray(items)) return _capInsightText(String(evidence));
+  return items
+    .slice(0, INSIGHT_EVIDENCE_ITEMS)
+    .map((item) => {
+      const text = String(item ?? "");
+      return text.length > INSIGHT_EVIDENCE_ITEM_CAP ? `${text.slice(0, INSIGHT_EVIDENCE_ITEM_CAP)}…` : text;
+    });
+}
+
 function insightForRemote(item) {
   if (!item || typeof item !== "object") return String(item || "");
   return {
@@ -85,11 +113,12 @@ function insightForRemote(item) {
     insight_kind: item.insight_kind || item.kind || null,
     confidence: item.confidence || null,
     memory_id: item.memory_id || null,
-    summary: item.summary || null,
-    action: item.action || null,
-    detail: item.detail || null,
-    evidence: item.evidence || null,
-    why_surface: item.why_surface || null,
+    summary: _capInsightText(item.summary),
+    action: _capInsightText(item.action),
+    detail: _capInsightText(item.detail),
+    evidence: _capInsightEvidence(item.evidence),
+    why_surface: _capInsightText(item.why_surface),
+    source: item.source || null,
   };
 }
 

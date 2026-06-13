@@ -25,6 +25,8 @@ import {
   noteAtlasCall,
   unlockForAtlasPrefetch,
   unlockForAtlasUnavailable,
+  unlockGateForDeadAtlasResult,
+  isDeadAtlasResultText,
   __resetGateForTests,
   buildFoldedAtlasToolDescriptor,
   buildNativeToolDescriptor,
@@ -238,6 +240,76 @@ suite("Researcher ATLAS gate", () => {
     assert.equal(checkNativeToolAllowed("chain_verdict", { relevant: true }, { cwd }).allowed, true);
     unlockForAtlasUnavailable({ reason: "atlas_proxy_init_failed" });
     assert.equal(checkNativeToolAllowed("chain_read", { path: "src/app.ts" }, { cwd }).allowed, true);
+  });
+
+  it("classifies dead-ATLAS error texts and ignores ordinary call failures", () => {
+    assert.equal(isDeadAtlasResultText("Error: ATLAS tool symbol.search skipped: ATLAS is disabled by configuration."), true);
+    assert.equal(isDeadAtlasResultText("Error: ATLAS tool code.getSkeleton skipped: ATLAS is disabled for this repository: boot_reindex_failed"), true);
+    assert.equal(isDeadAtlasResultText("Error: ATLAS tool slice.build skipped: ATLAS temporarily disabled for 42s after view_corruption; using deterministic fallback tools."), true);
+    assert.equal(isDeadAtlasResultText("Error: ATLAS call symbol.search failed: v2 backend unavailable"), true);
+    assert.equal(isDeadAtlasResultText("Error: ATLAS proxy init failed: spawn ENOENT"), true);
+    assert.equal(isDeadAtlasResultText("Error: ATLAS call symbol.search failed: invalid args"), false);
+    assert.equal(isDeadAtlasResultText("ATLAS returned no output."), false);
+    assert.equal(isDeadAtlasResultText(""), false);
+  });
+
+  it("unlocks on a dead-ATLAS result and returns an in-band notice", () => {
+    configureGate({ role: "dev", atlasAvailable: true });
+    assert.equal(isGateActive(), true);
+    assert.equal(isGateUnlocked(), false);
+
+    const notice = unlockGateForDeadAtlasResult(
+      "Error: ATLAS tool symbol.search skipped: ATLAS is disabled for this repository: boot_reindex_failed",
+    );
+    assert.ok(notice, "dead-ATLAS result should produce an unlock notice");
+    assert.match(notice, /gate has been unlocked/i);
+    assert.equal(isGateUnlocked(), true);
+    assert.equal(getUnlockReason(), "atlas_runtime_disabled");
+  });
+
+  it("dead-ATLAS unlock dissolves per-file source read locks", () => {
+    configureGate({ role: "researcher", atlasAvailable: true });
+    const cwd = "C:/repo";
+    assert.equal(checkNativeToolAllowed("read_file", { path: "src/app.ts" }, { cwd }).allowed, false);
+    assert.equal(checkNativeToolAllowed("edit_file", { path: "src/app.ts" }, { cwd }).allowed, false);
+
+    unlockGateForDeadAtlasResult("Error: ATLAS tool code.getSkeleton skipped: ATLAS is disabled by configuration.");
+
+    assert.equal(checkNativeToolAllowed("read_file", { path: "src/app.ts" }, { cwd }).allowed, true);
+    assert.equal(checkNativeToolAllowed("edit_file", { path: "src/app.ts" }, { cwd }).allowed, true);
+    assert.equal(checkNativeToolAllowed("bash", { command: "npm test" }, { cwd }).allowed, true);
+  });
+
+  it("upgrades a fallback unlock to unavailable so per-file locks dissolve too", () => {
+    configureGate({ role: "researcher", atlasAvailable: true });
+    const cwd = "C:/repo";
+    for (let i = 0; i < getFallbackStrikeLimit(); i++) {
+      noteAtlasCall({ action: "slice.build", ok: false, empty: false });
+    }
+    assert.equal(isGateUnlocked(), true);
+    assert.equal(getUnlockReason(), "fallback");
+    assert.equal(checkNativeToolAllowed("read_file", { path: "src/app.ts" }, { cwd }).allowed, false);
+
+    unlockGateForDeadAtlasResult("Error: ATLAS call symbol.search failed: v2 backend unavailable");
+    assert.equal(getUnlockReason(), "atlas_runtime_disabled");
+    assert.equal(checkNativeToolAllowed("read_file", { path: "src/app.ts" }, { cwd }).allowed, true);
+  });
+
+  it("returns no notice when the gate was never active or the error is not dead-ATLAS", () => {
+    configureGate({ role: "researcher", atlasAvailable: false });
+    assert.equal(
+      unlockGateForDeadAtlasResult("Error: ATLAS tool symbol.search skipped: ATLAS is disabled by configuration."),
+      null,
+      "inactive gate never locked tools, so no notice is needed",
+    );
+
+    configureGate({ role: "researcher", atlasAvailable: true });
+    assert.equal(
+      unlockGateForDeadAtlasResult("Error: ATLAS call symbol.search failed: invalid args"),
+      null,
+      "ordinary call failures must stay strikes, not unlocks",
+    );
+    assert.equal(isGateUnlocked(), false);
   });
 
   it("stays unlocked once primary-unlocked — no re-locking on later empty calls", () => {

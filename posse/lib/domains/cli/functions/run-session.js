@@ -625,7 +625,9 @@ export class RunSession {
   const drainPendingAtlasWarmJobs = async ({ label = "Run wrap-up" } = {}) => {
     if (!wrapUpAtlasDrainEnabled()) return { ran: 0, remaining: 0 };
     const atlasDisabledForRun = (() => {
-      try { return typeof isAtlasRuntimeDisabled === "function" && isAtlasRuntimeDisabled(); } catch { return false; }
+      // Pass the repo key: the owner-gone repair path disables per-repo, and a
+      // keyless lookup only sees the (never set here) global entry.
+      try { return typeof isAtlasRuntimeDisabled === "function" && isAtlasRuntimeDisabled(PROJECT_DIR); } catch { return false; }
     })();
     const queuedWarms = () => {
       try {
@@ -638,7 +640,7 @@ export class RunSession {
       const remaining = queuedWarms().length;
       if (remaining > 0) {
         const reason = (() => {
-          try { return typeof getAtlasRuntimeDisabledReason === "function" ? getAtlasRuntimeDisabledReason() : null; } catch { return null; }
+          try { return typeof getAtlasRuntimeDisabledReason === "function" ? getAtlasRuntimeDisabledReason(PROJECT_DIR) : null; } catch { return null; }
         })();
         const tail = reason ? ` (${reason})` : "";
         emitCloseoutStatus(`${label}: ATLAS disabled for this run${tail}; leaving ${remaining} queued warm job(s) for next boot.`, C.yellow);
@@ -2686,22 +2688,24 @@ export class RunSession {
         // Per-layer model: a failed boot index costs the degraded layers, not
         // the engine. Tools, gate, and MCP attachment stay up against whatever
         // artifacts exist; readiness-driven repair warms rebuild the rest in
-        // the background through the scheduler.
+        // the background through the scheduler. Deliberately NO runtime
+        // disable here: it would no-op the repair warms just queued and turn
+        // off tools this message promises stay up. (The engine is alive —
+        // only the index work failed.)
         let repair = { actions: [], summary: "self-repair unavailable" };
         try {
           if (typeof enqueueAtlasSelfRepair === "function") {
-            repair = enqueueAtlasSelfRepair({
+            repair = (await enqueueAtlasSelfRepair({
               repoRoot: PROJECT_DIR,
               config: getAtlasIntegrationConfig(),
               reason: `boot_reindex_failed: ${detail}`,
-            }) || repair;
+            })) || repair;
           }
         } catch (err) {
           log?.warn?.("atlas", "ATLAS self-repair enqueue failed after boot index failure", {
             error: firstLine(err?.message || err),
           });
         }
-        try { disableAtlasForRun?.(`boot_reindex_failed: ${detail}`); } catch { /* best-effort */ }
         const msg = `ATLAS boot check: indexing failed${atlasBoot.repoId ? ` for ${atlasBoot.repoId}` : ""} (${detail})`;
         const repairActions = Array.isArray(repair.actions) ? repair.actions : [];
         const noteMsg = repairActions.length > 0
@@ -2975,17 +2979,20 @@ export class RunSession {
   if (atlasWarmCompletion) {
     // The owner of interrupted/failed boot work is gone, so inspect artifacts
     // and queue bounded warm jobs that repair whatever is not ready. Also mark
-    // ATLAS disabled for this run so wrap-up does not drain warm work against
-    // a just-failed/torn-down conductor.
-    const repairAtlasAfterOwnerGone = (reason) => {
+    // ATLAS disabled for THIS REPO so wrap-up does not drain warm work against
+    // a just-failed/torn-down conductor. The disable must stay repo-scoped:
+    // a process can serve other repos whose ATLAS is healthy, and a global
+    // entry would shadow every per-repo lookup (config.js checks global
+    // first) and turn their tools off too.
+    const repairAtlasAfterOwnerGone = async (reason) => {
       const repairReason = firstLine(reason);
       try {
         if (typeof enqueueAtlasSelfRepair === "function") {
-          const repair = enqueueAtlasSelfRepair({
+          const repair = (await enqueueAtlasSelfRepair({
             repoRoot: PROJECT_DIR,
             config: getAtlasIntegrationConfig(),
             reason: repairReason,
-          }) || { actions: [], summary: "self-repair unavailable" };
+          })) || { actions: [], summary: "self-repair unavailable" };
           log?.info?.("atlas", "ATLAS self-repair after interrupted boot work", {
             reason: repairReason,
             readiness: repair.summary,
@@ -2993,7 +3000,7 @@ export class RunSession {
           });
         }
       } catch { /* best effort — the next boot readiness pass retries */ }
-      try { disableAtlasForRun?.(repairReason); } catch { /* best effort */ }
+      try { disableAtlasForRun?.(repairReason, PROJECT_DIR); } catch { /* best effort */ }
     };
     const watchAtlasCompletion = () => {
       void atlasWarmCompletion.then(

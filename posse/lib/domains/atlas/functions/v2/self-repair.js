@@ -30,7 +30,11 @@ import { computeAtlasLayerReadiness, summarizeAtlasReadiness } from "./readiness
  *   reason?: string,
  *   targetBranch?: string,
  *   onError?: (err: Error) => void,
- * }} args
+ *   readiness?: { layers: AtlasLayerReadiness[], notReady?: AtlasLayerReadiness[] } | null,
+ * }} args  `readiness` lets a caller supply a precomputed inspection (e.g.
+ *   computed in a worker thread so the sync sqlite scans never block the main
+ *   loop — see enqueueAtlasSelfRepairInWorker in integrations/atlas.js);
+ *   without it the inspection runs inline.
  * @returns {{
  *   ok: boolean,
  *   skipped?: string,
@@ -45,12 +49,20 @@ export function enqueueAtlasSelfRepair({
   reason = "unspecified",
   targetBranch = "main",
   onError = undefined,
+  readiness = null,
 }) {
   try {
     if (config?.enabled === false) {
       return { ok: false, skipped: "atlas_disabled", summary: "atlas disabled", layers: [], actions: [] };
     }
-    const { layers, notReady } = computeAtlasLayerReadiness({ repoRoot, config });
+    const { layers, notReady } = readiness && Array.isArray(readiness.layers)
+      ? {
+        layers: readiness.layers,
+        notReady: Array.isArray(readiness.notReady)
+          ? readiness.notReady
+          : readiness.layers.filter((layer) => layer.status !== "ready" && layer.status !== "off"),
+      }
+      : computeAtlasLayerReadiness({ repoRoot, config });
     const summary = summarizeAtlasReadiness(layers);
     /** @type {Array<{ layer: string, event: string, warmJobId: number | null, coalesced: boolean }>} */
     const actions = [];

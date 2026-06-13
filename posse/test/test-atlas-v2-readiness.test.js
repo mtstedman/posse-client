@@ -229,6 +229,80 @@ describe("ATLAS v2 per-layer readiness", () => {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it("surfaces a failed stage whose output was never promoted (failed meta, no .scip)", async () => {
+    // A failing indexer writes to a temp path that is only promoted on
+    // success, so the normal first-failure state is exactly "failed meta,
+    // no artifact". This must surface as scip:<lang> failed — it is what
+    // self-repair's restage trigger keys on — even when another language
+    // staged successfully.
+    const tmp = makeTmp("atlas-readiness-failed-noscip-");
+    try {
+      await writeScipFixture(tmp, { language: "typescript" }); // healthy sibling
+      const scipDir = path.join(tmp, ".posse", "atlas", "scip");
+      const plan = { indexerId: "python", label: "scip-python", command: "scip-python", commandSource: "test" };
+      const failedMeta = buildFailedStagerMeta(plan, { head: "abc", reason: "stage_failed", error: "exit 1" });
+      fs.writeFileSync(path.join(scipDir, "python.meta.json"), JSON.stringify(failedMeta, null, 2));
+
+      const { layers } = computeAtlasLayerReadiness({ repoRoot: tmp, config: { scipMode: "on" } });
+      assert.equal(layer(layers, "scip:typescript")?.status, "ready");
+      const python = layer(layers, "scip:python");
+      assert.equal(python?.status, "failed", "meta-only failure must not be invisible");
+      assert.match(python?.detail || "", /no staged output/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("reports warming for a non-failed meta whose staged output is missing", async () => {
+    const tmp = makeTmp("atlas-readiness-orphan-meta-");
+    try {
+      const scipDir = path.join(tmp, ".posse", "atlas", "scip");
+      fs.mkdirSync(scipDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(scipDir, "go.meta.json"),
+        JSON.stringify({ schema_version: 1, language: "go", head: "abc", status: "staged" }),
+      );
+      const { layers } = computeAtlasLayerReadiness({ repoRoot: tmp, config: { scipMode: "on" } });
+      const go = layer(layers, "scip:go");
+      assert.equal(go?.status, "warming", "a staged meta without its artifact must never read as ready");
+      assert.match(go?.detail || "", /output missing/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("excludes symbols without language semantics from the embeddings parity denominator", () => {
+    // ingest filters by hasLanguageSemantics and skipped symbols never enter
+    // keys.db, so counting them as candidates pins parity below threshold
+    // forever (perpetual "warming" + futile self-repair resume warms).
+    const tmp = makeTmp("atlas-readiness-inelig-parity-");
+    try {
+      writeLedgerFixture(tmp, { indexedBlobs: 2, headSeq: 3 });
+      writeViewFixture(tmp, { symbols: 4, ledgerSeq: 3 });
+      // Add ineligible symbols (no semantics adapter for 'sh') beyond parity slack.
+      const db = new Database(mainViewPath(tmp));
+      try {
+        const insert = db.prepare(`
+          INSERT INTO symbols (content_hash, local_id, kind, name, repo_rel_path, range_start, range_end, signature_hash, lang)
+          VALUES (?, ?, 'function', ?, 'scripts/x.sh', 0, 1, ?, 'sh')
+        `);
+        for (let i = 0; i < 6; i++) insert.run("hash-sh", 100 + i, `sh_fn_${i}`, `sh-sig-${i}`);
+      } finally {
+        db.close();
+      }
+      writeEmbeddingsFixture(tmp, { vectors: 4, modelVersion: "v1" });
+      const { layers } = computeAtlasLayerReadiness({
+        repoRoot: tmp,
+        config: { scipMode: "off", treeCompressionMode: "off", embeddingProvider: "stub" },
+      });
+      const embeddings = layer(layers, "embeddings:v1");
+      assert.equal(embeddings?.status, "ready", "4/4 encodable symbols is parity; 6 shell symbols must not drag it to 40%");
+      assert.equal(embeddings?.coverage, 100);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("ATLAS v2 self-repair", () => {

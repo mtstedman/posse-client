@@ -1417,4 +1417,34 @@ suite("Deterministic toolkit", () => {
       fs.rmSync(projectDir, { recursive: true, force: true });
     }
   });
+
+  it("routes PHP syntax lint through scoped checks", async () => {
+    const toolkitMod = await import("../../../lib/functions/toolkit/index.js");
+    const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-scoped-checks-php-"));
+
+    try {
+      fs.writeFileSync(path.join(projectDir, "broken.php"), "<?php\nfunction broken( {\n", "utf-8");
+
+      const toolkit = toolkitMod.createDeterministicToolkit({ safePath: toolkitMod.safePath });
+      const result = JSON.parse(toolkit.execRunScopedChecks({
+        checks: ["lint"],
+        scope: { files: ["broken.php"] },
+      }, projectDir, null, {}));
+
+      const lintCheck = result.checks.find((check) => check.name === "lint");
+      const phpSubcheck = lintCheck?.subchecks?.find((check) => check.name === "php-lint");
+      assert.ok(phpSubcheck, "expected scoped lint to include a php-lint subcheck");
+
+      if (phpSubcheck.status === "skipped") {
+        assert.match(phpSubcheck.reason || "", /php executable not available/);
+      } else {
+        assert.equal(result.ok, false);
+        assert.equal(phpSubcheck.status, "failed");
+        assert.match(JSON.stringify(result.failures), /broken\.php/);
+        assert.match(JSON.stringify(result.failures), /php -l/);
+      }
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
 });

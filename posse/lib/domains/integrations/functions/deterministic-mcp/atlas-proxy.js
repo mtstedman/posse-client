@@ -7,7 +7,7 @@
 import fs from "fs";
 import path from "path";
 import { recordObservation, atlasSummaryHint, getObservationContext } from "../../../observability/functions/observations.js";
-import { noteAtlasCall, unlockForAtlasUnavailable } from "./gate.js";
+import { noteAtlasCall, unlockGateForDeadAtlasResult } from "./gate.js";
 import { SURFACED_ATLAS_TOOL_DEFS } from "./tool-descriptors.js";
 import { coerceLooseAtlasSymbolArgs, extractAtlasResponseTelemetry, extractAtlasResultArtifacts, validateAtlasPayloadSymbolIds } from "../../../atlas/functions/v2/signal-extraction.js";
 import { ATLAS_TOOL_ACTIONS } from "../../../atlas/functions/v2/contracts/tool-params.js";
@@ -200,8 +200,12 @@ export async function forwardAtlasCall({ toolName, args = {}, source = null } = 
         },
       });
     } catch { /* observation recording must never break tool execution */ }
-    unlockForAtlasUnavailable({ reason: "atlas_proxy_init_failed", scopeKey: _config.gateScopeKey });
-    return _errorPayload(`ATLAS proxy init failed: ${errorMsg}`);
+    const initMessage = `ATLAS proxy init failed: ${errorMsg}`;
+    const initNotice = unlockGateForDeadAtlasResult(initMessage, {
+      scopeKey: _config.gateScopeKey,
+      reason: "atlas_proxy_init_failed",
+    });
+    return _errorPayload(initNotice ? `${initMessage}\n\n${initNotice}` : initMessage);
   }
 
   const normalizedArgs = _normalizeToolArgs(toolName, args);
@@ -325,7 +329,9 @@ export async function forwardAtlasCall({ toolName, args = {}, source = null } = 
   });
 
   if (errorMsg) {
-    return _errorPayload(`ATLAS call ${toolName} failed: ${errorMsg}`);
+    const message = `ATLAS call ${toolName} failed: ${errorMsg}`;
+    const deadNotice = unlockGateForDeadAtlasResult(message, { scopeKey: _config.gateScopeKey });
+    return _errorPayload(deadNotice ? `${message}\n\n${deadNotice}` : message);
   }
   return result;
 }

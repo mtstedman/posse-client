@@ -5,7 +5,7 @@
 
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
-import { redactSecrets } from "./redaction.js";
+import { redactSecrets, redactSecretsLines } from "./redaction.js";
 
 /** @typedef {import("../contracts/tool-params.js").FileReadParams} FileReadParams */
 /** @typedef {import("../contracts/tool-results.js").FileReadData} FileReadData */
@@ -129,7 +129,8 @@ export function fileRead({ versionId, params, readFile, view }) {
       });
     }
     const ctxLines = typeof params.searchContext === "number" ? params.searchContext : 2;
-    const matches = [];
+    /** @type {number[]} */
+    const matchLines = [];
     const searchStartedAt = Date.now();
     for (let li = 0; li < lines.length; li++) {
       if (Date.now() - searchStartedAt > SEARCH_TIME_BUDGET_MS) {
@@ -142,21 +143,24 @@ export function fileRead({ versionId, params, readFile, view }) {
         ? lines[li].slice(0, MAX_SEARCH_LINE_CHARS)
         : lines[li];
       if (re.test(searchableLine)) {
-        matches.push({
-          line: offset + li + 1,
-          text: redactSecrets(lines[li]),
-          context: {
-            before: lines.slice(Math.max(0, li - ctxLines), li).map(redactSecrets),
-            after: lines.slice(li + 1, Math.min(lines.length, li + 1 + ctxLines)).map(redactSecrets),
-          },
-        });
-        if (matches.length >= MAX_SEARCH_MATCHES) {
+        matchLines.push(li);
+        if (matchLines.length >= MAX_SEARCH_MATCHES) {
           truncated = true;
           break;
         }
       }
     }
-    data.matches = matches;
+    // One native redaction call for the whole window instead of one per
+    // matched line plus one per context line (each sync call is a spawn).
+    const redactedLines = matchLines.length > 0 ? redactSecretsLines(lines) : lines;
+    data.matches = matchLines.map((li) => ({
+      line: offset + li + 1,
+      text: redactedLines[li],
+      context: {
+        before: redactedLines.slice(Math.max(0, li - ctxLines), li),
+        after: redactedLines.slice(li + 1, Math.min(lines.length, li + 1 + ctxLines)),
+      },
+    }));
   }
 
   if (params.jsonPath) {

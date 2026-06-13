@@ -2,7 +2,9 @@ import fs from "fs";
 import path from "path";
 import { spawnSync } from "child_process";
 
-const SOURCE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"]);
+const JS_SOURCE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"]);
+const PHP_SOURCE_EXTENSIONS = new Set([".php"]);
+const SOURCE_EXTENSIONS = new Set([...JS_SOURCE_EXTENSIONS, ...PHP_SOURCE_EXTENSIONS]);
 const MAX_SCOPE_ROOT_FILES = 250;
 const MAX_FAILURES = 60;
 const MAX_OUTPUT_CHARS = 6000;
@@ -87,6 +89,16 @@ function lintableFiles(cwd, files = []) {
     .filter((file) => SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
 }
 
+function jsLintableFiles(cwd, files = []) {
+  return existingFiles(cwd, files)
+    .filter((file) => JS_SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
+}
+
+function phpLintableFiles(cwd, files = []) {
+  return existingFiles(cwd, files)
+    .filter((file) => PHP_SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
+}
+
 function compact(value, max = MAX_OUTPUT_CHARS) {
   const text = String(value || "").trim();
   if (text.length <= max) return text;
@@ -167,10 +179,9 @@ function parseEslintFindings(stdout, stderr, cwd) {
   return findings;
 }
 
-function runScopedLint(cwd, files) {
-  const targets = lintableFiles(cwd, files);
+function runScopedJsLint(cwd, targets) {
   if (targets.length === 0) {
-    return { name: "lint", status: "skipped", reason: "no lintable scoped files", targets: [] };
+    return { name: "eslint", status: "skipped", reason: "no JS/TS lintable scoped files", targets: [] };
   }
   const eslint = eslintBin(cwd);
   const result = eslint
@@ -179,13 +190,118 @@ function runScopedLint(cwd, files) {
   const findings = parseEslintFindings(result.stdout, result.stderr, cwd)
     .filter((finding) => finding.severity === "error");
   return {
-    name: "lint",
+    name: "eslint",
     status: result.exitCode === 0 && findings.length === 0 ? "passed" : "failed",
     targets,
     command: result.command,
     durationMs: result.durationMs,
     failures: findings,
     output: result.exitCode === 0 ? null : compact(result.stderr || result.stdout || result.error || ""),
+  };
+}
+
+function parsePhpLintFinding(result, cwd, file) {
+  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `php -l exited ${result.exitCode}`;
+  const lineMatch = text.match(/\bon\s+line\s+(\d+)\b/i);
+  return {
+    file: relPath(cwd, file) || file,
+    line: lineMatch ? Number(lineMatch[1]) : null,
+    column: null,
+    rule: "php -l",
+    message: text.replace(/\n?Errors parsing .+$/i, "").trim() || "PHP syntax check failed",
+    severity: "error",
+  };
+}
+
+function runScopedPhpLint(cwd, targets) {
+  if (targets.length === 0) {
+    return { name: "php-lint", status: "skipped", reason: "no PHP lintable scoped files", targets: [] };
+  }
+
+  const failures = [];
+  let unavailable = false;
+  let durationMs = 0;
+  for (const file of targets) {
+    const result = runProcess("php", ["-l", file], cwd);
+    durationMs += result.durationMs;
+    if (result.error && /ENOENT|not found/i.test(result.error)) {
+      unavailable = true;
+      break;
+    }
+    if (result.exitCode !== 0) {
+      failures.push(parsePhpLintFinding(result, cwd, file));
+      if (failures.length >= MAX_FAILURES) break;
+    }
+  }
+
+  if (unavailable) {
+    return {
+      name: "php-lint",
+      status: "skipped",
+      reason: "php executable not available",
+      targets,
+      durationMs,
+    };
+  }
+
+  return {
+    name: "php-lint",
+    status: failures.length === 0 ? "passed" : "failed",
+    targets,
+    command: `php -l ${targets.length === 1 ? targets[0] : "<scoped php files>"}`,
+    durationMs,
+    failures,
+  };
+}
+
+function runScopedLint(cwd, files) {
+  const targets = lintableFiles(cwd, files);
+  if (targets.length === 0) {
+    return { name: "lint", status: "skipped", reason: "no lintable scoped files", targets: [] };
+  }
+
+  const subchecks = [
+    runScopedJsLint(cwd, jsLintableFiles(cwd, files)),
+    runScopedPhpLint(cwd, phpLintableFiles(cwd, files)),
+  ].filter((check) => check.targets?.length > 0);
+  const failed = subchecks.filter((check) => check.status === "failed");
+  const passed = subchecks.filter((check) => check.status === "passed");
+  const skipped = subchecks.filter((check) => check.status === "skipped");
+  const status = failed.length > 0
+    ? "failed"
+    : passed.length > 0
+      ? "passed"
+      : "skipped";
+  const failures = failed.flatMap((check) =>
+    (check.failures || []).map((failure) => ({ ...failure, subcheck: check.name }))
+  );
+
+  // A skipped subcheck alongside passes must stay visible at the top level:
+  // "passed" with php-lint silently skipped reads as full PHP coverage.
+  const skippedNote = skipped.length > 0 && status !== "skipped"
+    ? skipped.map((check) => `${check.name} skipped: ${check.reason || "unknown reason"}`).join("; ")
+    : null;
+  return {
+    name: "lint",
+    status,
+    reason: status === "skipped"
+      ? skipped.map((check) => check.reason).filter(Boolean).join("; ") || "all lint subchecks skipped"
+      : skippedNote,
+    targets,
+    command: subchecks.map((check) => check.command).filter(Boolean).join(" && ") || null,
+    durationMs: subchecks.reduce((sum, check) => sum + (Number(check.durationMs) || 0), 0),
+    failures,
+    // Raw runner output from failed subchecks; runScopedChecks falls back to
+    // this when a failure produced no parsed findings (e.g. eslint config
+    // errors that print only to stderr).
+    output: failed.map((check) => check.output).filter(Boolean).join("\n") || null,
+    subchecks: subchecks.map((check) => ({
+      name: check.name,
+      status: check.status,
+      reason: check.reason || null,
+      target_count: check.targets?.length ?? null,
+      command: check.command || null,
+    })),
   };
 }
 
@@ -229,9 +345,16 @@ export function runScopedChecks({ args = {}, cwd, declaredScope = {} } = {}) {
     .filter((check) => !check.failures?.length && check.output)
     .map((check) => ({ check: check.name, message: check.output }));
   const ok = failed.length === 0;
+  // Keep skip caveats in the headline: agents act on ok/summary alone, and a
+  // bare "all checks passed" over a skipped subcheck overstates coverage.
+  const skipNotes = ok
+    ? checks.filter((check) => check.status !== "failed" && check.reason).map((check) => `${check.name}: ${check.reason}`)
+    : [];
   return {
     ok,
-    summary: ok ? "all checks passed" : `${failed.map((check) => check.name).join(", ")} failed`,
+    summary: ok
+      ? (skipNotes.length ? `all checks passed (${skipNotes.join("; ")})` : "all checks passed")
+      : `${failed.map((check) => check.name).join(", ")} failed`,
     scoped_files: files,
     checks: checks.map((check) => ({
       name: check.name,
@@ -240,6 +363,7 @@ export function runScopedChecks({ args = {}, cwd, declaredScope = {} } = {}) {
       target_count: check.targets?.length ?? null,
       duration_ms: check.durationMs ?? null,
       command: check.command || null,
+      subchecks: check.subchecks || null,
     })),
     failures: [...failures, ...outputFailures].slice(0, MAX_FAILURES),
   };

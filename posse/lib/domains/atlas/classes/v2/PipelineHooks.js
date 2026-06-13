@@ -42,6 +42,7 @@ const CACHE_INVALIDATING_EVENTS = new Set([
   ATLAS_EVENTS.MERGED_TO_MAIN,
   ATLAS_EVENTS.MAIN_ADVANCED,
   ATLAS_EVENTS.SCIP_RESTAGE_REQUESTED,
+  ATLAS_EVENTS.SCIP_STAGED,
   ATLAS_EVENTS.WI_CLEANUP,
 ]);
 
@@ -78,6 +79,8 @@ function warmJobTitle(eventType) {
       return "ATLAS reindex: incremental main refresh";
     case ATLAS_EVENTS.SCIP_RESTAGE_REQUESTED:
       return "ATLAS SCIP restage";
+    case ATLAS_EVENTS.SCIP_STAGED:
+      return "ATLAS SCIP intake: consume freshly staged artifacts";
     case ATLAS_EVENTS.WI_CLEANUP:
       return "ATLAS warm: WI cleanup view disposal";
     case ATLAS_EVENTS.EMBEDDINGS_RESUME:
@@ -95,6 +98,7 @@ function warmJobTitle(eventType) {
  */
 function purposeForEvent(eventType) {
   if (eventType === ATLAS_EVENTS.MAIN_ADVANCED) return "main-incremental";
+  if (eventType === ATLAS_EVENTS.SCIP_STAGED) return "main-incremental";
   if (eventType === ATLAS_EVENTS.MERGED_TO_MAIN) return "main-merge";
   if (eventType === ATLAS_EVENTS.SCIP_RESTAGE_REQUESTED) return "scip-restage";
   if (eventType === ATLAS_EVENTS.WI_CLEANUP) return "wi-cleanup";
@@ -518,6 +522,28 @@ export function emitScipRestageRequested({ payload, jobId = null, onError = unde
     payload,
     workItemId: null,
     jobId,
+    onError,
+  });
+}
+
+/**
+ * @param {{ payload: { target_branch: string, reason: string }, jobId?: number | null, onError?: (err: Error) => void }} args
+ */
+export function emitScipStaged({ payload, jobId = null, onError = undefined }) {
+  /** @type {AtlasWarmJobPayload} */
+  const warmJobPayload = {
+    purpose: "main-incremental",
+    branch: typeof payload?.target_branch === "string" && payload.target_branch
+      ? payload.target_branch
+      : "main",
+    trigger_event: ATLAS_EVENTS.SCIP_STAGED,
+  };
+  return emitAtlasPipelineEvent({
+    eventType: ATLAS_EVENTS.SCIP_STAGED,
+    payload,
+    workItemId: null,
+    jobId,
+    warmJobPayload,
     onError,
   });
 }

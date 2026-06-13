@@ -5,6 +5,7 @@
 // stay cheap and semantic search pays only for missing symbols.
 
 import { ingestView } from "./ingest.js";
+import { hasLanguageSemantics } from "../resolver/adapters/registry.js";
 import {
   errorForTelemetry,
   recordEmbeddingForensics,
@@ -348,10 +349,18 @@ function fallbackViewKey(view) {
 }
 
 /**
+ * The missing set is "eligible view symbols not yet in keys.db". Eligibility
+ * must mirror ingestView's filter (ingest.js): symbols whose language has no
+ * semantics adapter are NEVER written to keys.db, so counting them as missing
+ * makes the gap unclosable — each resume slice would re-discover the same
+ * permanently-ineligible symbols and re-enqueue forever, and parity could
+ * never be reached.
+ *
  * @param {{ index: EmbeddingIndex, symbols: ViewSymbol[] }} args
  * @returns {Promise<ViewSymbol[]>}
  */
-async function missingSymbols({ index, symbols }) {
+async function missingSymbols({ index, symbols: rawSymbols }) {
+  const symbols = rawSymbols.filter((symbol) => hasLanguageSemantics(symbol?.lang));
   if (typeof index?.containsMany === "function") {
     const keys = [];
     const candidates = [];

@@ -112,6 +112,60 @@ export function unlockForAtlasUnavailable({ reason = "atlas_unavailable", scopeK
   _getGate(scopeKey).unlockForAtlasUnavailable({ reason });
 }
 
+// Result texts that mean ATLAS itself is gone (runtime-disabled, dead backend,
+// failed proxy) rather than a single call failing. These must unlock the gate:
+// the gate's premise is "ATLAS-first while ATLAS is available", and a dead
+// ATLAS must never keep standard tools (edit/read/bash) locked.
+const DEAD_ATLAS_RESULT_PATTERNS = [
+  /ATLAS is disabled by configuration/i,
+  /ATLAS is disabled for this repository/i,
+  /ATLAS temporarily disabled for \d+s/i,
+  /backend unavailable/i,
+  /ATLAS proxy init failed/i,
+];
+
+export function isDeadAtlasResultText(text) {
+  const raw = String(text ?? "");
+  if (!raw) return false;
+  return DEAD_ATLAS_RESULT_PATTERNS.some((pattern) => pattern.test(raw));
+}
+
+/* When an ATLAS tool result reports ATLAS itself is dead, unlock the gate for
+ * the scope and return a notice to append to that same tool result, so the
+ * agent learns in-band — at the moment of failure — that standard tools are
+ * available. Returns null when the text is not a dead-ATLAS error or the gate
+ * was never active (tools were never locked, no notice needed). The atlas_*
+ * reason also dissolves per-file read locks (isUnavailableUnlockReason). */
+export function unlockGateForDeadAtlasResult(resultText, { scopeKey = null, reason = "atlas_runtime_disabled" } = {}) {
+  if (!isDeadAtlasResultText(resultText)) return null;
+  const gate = _getGate(scopeKey);
+  if (!gate.isActive()) return null;
+  gate.unlockForAtlasUnavailable({ reason });
+  const label = gate.atlasLabel || "ATLAS";
+  return [
+    `[${label}-first] ${label} is unavailable, so the ${label}-first gate has been unlocked for this job.`,
+    `Standard tools (read_file, search_files, list_files, edit_file, write_file, bash, ...) are available now,`,
+    `including reads of files that had no prior ${label} discovery. Use them directly; ${label} calls are not required first.`,
+  ].join(" ");
+}
+
+/* Classify an embedded ATLAS tool result, notify the gate, and return the
+ * result text — decorated with the in-band unlock notice when the result
+ * reports ATLAS itself is dead. Single entry point for provider tool loops
+ * (grok/openai executeTool); the embedded executor's conventions ("Error: ..."
+ * on failure, "ATLAS returned no output." on empty success) live here once. */
+export function noteAtlasToolResult(result, { action = "", args = {}, cwd = null, scopeKey = null } = {}) {
+  const text = typeof result === "string" ? result : String(result ?? "");
+  const errored = /^Error:/i.test(text);
+  const empty = !errored && (text.trim().length === 0 || text.trim() === "ATLAS returned no output.");
+  noteAtlasCall({ action, ok: !errored, empty, args, cwd, scopeKey });
+  if (errored) {
+    const unlockNotice = unlockGateForDeadAtlasResult(text, { scopeKey });
+    if (unlockNotice) return `${text}\n\n${unlockNotice}`;
+  }
+  return text;
+}
+
 export function unlockForAtlasPrefetch({ reason = "prefetch_ok", scopeKey = null } = {}) {
   void reason;
   void scopeKey;

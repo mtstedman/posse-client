@@ -165,6 +165,44 @@ describe("ATLAS v2 embedding breadcrumb + reconcile", { skip }, () => {
     } finally { index.close?.(); }
   });
 
+  it("resumeEmbeddingsSlice never treats unsupported-language symbols as remaining work", async () => {
+    // Ingest permanently excludes symbols without language semantics from
+    // keys.db, so counting them as "missing" makes the gap unclosable: each
+    // slice would re-discover the same ineligible symbols, report remaining>0
+    // at zero progress, and re-enqueue the next slice forever.
+    const eligible = makeSymbols(2);
+    const ineligible = Array.from({ length: 5 }, (_, i) => ({
+      content_hash: sha256Hex(`shell-${i}`),
+      local_id: 100 + i,
+      kind: "function",
+      lang: "sh",
+      name: `sh_fn_${i}`,
+      qualified_name: `sh_fn_${i}`,
+      parent_local_id: null,
+      repo_rel_path: `scripts/s${i}.sh`,
+      range_start: 0,
+      range_end: 10,
+      signature_hash: `sh-sig-${i}`,
+      visibility: "public",
+      doc: null,
+    }));
+    // Ineligible first: the old behavior sliced these 5 ahead of the slice
+    // budget of 2 and could never make progress.
+    const symbols = [...ineligible, ...eligible];
+    const { enc, index } = openIndex("ineligible");
+    try {
+      const first = await resumeEmbeddingsSlice({ view: stubView(symbols, "v-inelig"), index, encoder: enc, maxEncode: 2 });
+      assert.equal(first.missing, 2, "only encodable symbols may count as missing");
+      assert.equal(first.encoded, 2);
+      assert.equal(first.remaining, 0, "ineligible symbols are not remaining work");
+      assert.equal(first.complete, true);
+
+      const again = await resumeEmbeddingsSlice({ view: stubView(symbols, "v-inelig"), index, encoder: enc, maxEncode: 2 });
+      assert.equal(again.skipped, true);
+      assert.equal(again.reason, "fully_indexed", "no zero-progress re-enqueue chain may survive parity");
+    } finally { index.close?.(); }
+  });
+
   it("resumeEmbeddingsSlice reports an interrupted slice without claiming parity", async () => {
     const symbols = makeSymbols(3);
     const { index } = openIndex("slice-fail");

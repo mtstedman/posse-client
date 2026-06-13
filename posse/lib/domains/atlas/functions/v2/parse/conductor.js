@@ -5,26 +5,58 @@
 // contract; the main thread posts stage/merge/reindex jobs and awaits. Warm DB
 // handles + the serial write queue live for the whole session, so steady-state
 // incremental reindex pays no reopen cost.
+//
+// Lanes (CONDUCTOR-THREAD-BUNDLE-SPEC.md): the writer thread above is one lane
+// of a bundle. `retrieve` routes to a separate READER lane — its own thread
+// with request-scoped readonly WAL connections — so reads never queue behind
+// the writer's long synchronous sections (SCIP ingest transactions, view
+// merges). The reader spawns lazily on first retrieve; warm-only consumers
+// (post-commit hooks, most tests) never pay the second thread.
 
 import { Daemon, ThreadTransport } from "../../../../../classes/tools/daemon/index.js";
+import { log } from "../../../../../shared/telemetry/functions/logging/logger.js";
 
 const HOST_URL = new URL("./conductor-host.mjs", import.meta.url);
+const READER_HOST_URL = new URL("./reader-host.mjs", import.meta.url);
 const STAGE_TIMEOUT_MS = 600_000; // the indexer can be slow; bound it generously.
+// Reads are interactive: callers pass their own per-request budget (the
+// embedded timeout); this is only the ceiling when they don't.
+const RETRIEVE_TIMEOUT_MS = 60_000;
+// Reader housekeeping (invalidate/close) must never stall a warm's completion
+// behind a wedged reader — short fuse, best-effort.
+const READER_OP_TIMEOUT_MS = 5_000;
 
-/** @returns {{ stage, merge, reindexLanguage, info, close, daemon: Daemon }} */
+/** @returns {{ stage, ingest, warm, merge, retrieve, reindex, reindexLanguage, info, readerInfo, close, daemon: Daemon }} */
 export function createConductorDaemon() {
   const daemon = new Daemon({
     transportFactory: () => ThreadTransport({ moduleUrl: HOST_URL }),
     timeoutMs: STAGE_TIMEOUT_MS,
+    label: "atlas-conductor",
   });
+
+  /** @type {Daemon | null} reader lane; lazy so warm-only consumers skip it. */
+  let readerDaemon = null;
+  const getReaderDaemon = () => {
+    if (!readerDaemon) {
+      readerDaemon = new Daemon({
+        transportFactory: () => ThreadTransport({ moduleUrl: READER_HOST_URL }),
+        timeoutMs: RETRIEVE_TIMEOUT_MS,
+        label: "atlas-reader",
+        onLifecycle: (event) => {
+          if (event?.kind === "spawn") log.debug("atlas", "Conductor reader lane spawned");
+        },
+      });
+    }
+    return readerDaemon;
+  };
 
   // daemon.request never rejects — it RESOLVES with { ok:false, error, _flag }
   // on timeout/abort/overload/transport-loss. Surface those as a thrown Error
   // that carries a `code`, so callers can distinguish a genuine abort/timeout
   // (must propagate — e.g. honor a worker kill or runtime budget) from a plain
   // op failure (safe to treat as "not ready" and fall back).
-  const call = async (payload, opts = {}) => {
-    const res = await daemon.request(payload, opts);
+  const call = async (target, payload, opts = {}) => {
+    const res = await target.request(payload, opts);
     if (res?.ok === true) return res.data;
     const r = /** @type {any} */ (res);
     const err = new Error(String(r?.error?.message || "conductor call failed"));
@@ -35,11 +67,29 @@ export function createConductorDaemon() {
     throw err;
   };
 
-  const stage = (opts, reqOpts) => call({ op: "stage", ...opts }, reqOpts);
-  const ingest = (opts, reqOpts) => call({ op: "ingest", ...opts }, reqOpts);
-  const warm = (opts, reqOpts) => call({ op: "warm", ...opts }, reqOpts);
-  const merge = (opts, reqOpts) => call({ op: "merge", ...opts }, reqOpts);
-  const retrieve = (opts, reqOpts) => call({ op: "retrieve", ...opts }, reqOpts);
+  // The reader lane caches embedding resources (ANN child process + encoder)
+  // per-thread, so the writer host's own in-thread invalidation cannot reach
+  // them. After any op that rewrites the on-disk ANN, tell the reader to drop
+  // its handles — mirroring the writer host's `finally` invalidation.
+  const invalidateReaders = async () => {
+    if (!readerDaemon?.isHostAlive()) return;
+    try {
+      await call(readerDaemon, { op: "invalidate" }, { timeoutMs: READER_OP_TIMEOUT_MS });
+    } catch { /* best effort — a wedged reader recycles via its own breaker */ }
+  };
+  const invalidatesReaders = (fn) => async (/** @type {any[]} */ ...args) => {
+    try {
+      return await fn(...args);
+    } finally {
+      await invalidateReaders();
+    }
+  };
+
+  const stage = (opts, reqOpts) => call(daemon, { op: "stage", ...opts }, reqOpts);
+  const ingest = (opts, reqOpts) => call(daemon, { op: "ingest", ...opts }, reqOpts);
+  const warm = invalidatesReaders((opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts));
+  const merge = invalidatesReaders((opts, reqOpts) => call(daemon, { op: "merge", ...opts }, reqOpts));
+  const retrieve = (opts, reqOpts) => call(getReaderDaemon(), { op: "retrieve", ...opts }, reqOpts);
 
   return {
     daemon,
@@ -48,8 +98,28 @@ export function createConductorDaemon() {
     warm,
     merge,
     retrieve,
-    info: () => call({ op: "info" }),
-    close: () => call({ op: "close" }),
+    info: async () => {
+      const data = await call(daemon, { op: "info" });
+      return { ...data, readerAlive: readerDaemon?.isHostAlive() ?? false };
+    },
+    /** Reader-lane counters (`{ lane, retrieves, invalidations }`), null when never spawned. */
+    readerInfo: () => (readerDaemon?.isHostAlive()
+      ? call(readerDaemon, { op: "info" }, { timeoutMs: READER_OP_TIMEOUT_MS })
+      : Promise.resolve(null)),
+    close: async () => {
+      // Tear the reader lane down WITH the writer: close drains its cached
+      // embedding resources, dispose releases the thread + MessagePort. The
+      // lane is lazy, so a later retrieve on this client simply respawns it.
+      if (readerDaemon) {
+        const reader = readerDaemon;
+        readerDaemon = null;
+        if (reader.isHostAlive()) {
+          try { await call(reader, { op: "close" }, { timeoutMs: READER_OP_TIMEOUT_MS }); } catch { /* best effort */ }
+        }
+        try { await reader.dispose(); } catch { /* best effort */ }
+      }
+      return call(daemon, { op: "close" });
+    },
     /**
      * Full reindex via the hosted ParseEngine: warm (parse tree-sitter + SCIP
      * and ingest both layers into the ledger) then merge ("zip") the view,
@@ -241,6 +311,7 @@ export function getSharedConductor() {
     _sharedConductor = {
       daemon: base.daemon,
       info: base.info,
+      readerInfo: base.readerInfo,
       close: base.close,
       stage: _indexTracked(base.stage),
       ingest: _indexTracked(base.ingest),

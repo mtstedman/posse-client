@@ -133,6 +133,24 @@ describe("ATLAS v2 Warmer", () => {
       assert.equal(fs.existsSync(outputPath), true);
       const meta = await readStagerMeta(outputPath);
       assert.equal(meta?.language, "configured");
+      // Fresh staging must be surfaced so the warm-job executor enqueues the
+      // main-incremental intake — staging alone never ingests, and readiness
+      // reports staged artifacts as ready, so nothing else would consume them.
+      assert.equal(result.scip_staged_fresh, true);
+
+      // A second restage with policy "missing" is an already-staged no-op and
+      // must NOT re-trigger the intake follow-up.
+      const noopWarmer = new Warmer({
+        ledger: led,
+        repoRoot,
+        config: {
+          scipMode: "on",
+          scipIndexCommand: command,
+          scipRestagePolicy: "missing",
+        },
+      });
+      const noop = await noopWarmer.handleWarmJob({ purpose: "scip-restage" });
+      assert.notEqual(noop.scip_staged_fresh, true, "already-staged restage must not claim fresh artifacts");
     } finally {
       led.close();
     }

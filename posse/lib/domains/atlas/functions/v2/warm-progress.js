@@ -125,6 +125,12 @@ export function warmReadinessProgress(event, now = Date.now()) {
   if (isOnnxStage(stage)) {
     _s.sawEmbeddings = true;
     if (pct != null) _s.onnx = pct;
+    // Encode runs AFTER the parse/view/tree pipeline (deferred embeddings
+    // flush post-warm), so the ATLAS side is complete by the first encoding
+    // event. Without this the ATLAS bar sat pinned at the tree bucket's 97%
+    // for the entire (potentially 30min+) encode pass — reading as stuck —
+    // because done() only fires after the embeddings flush.
+    _s.atlas = Math.max(_s.atlas ?? 0, 100);
   } else if (pct != null) {
     const bucket = STAGE_TO_BUCKET.get(stage);
     if (bucket) {

@@ -450,6 +450,7 @@ export const TOOL_BASH = {
   name: "bash",
   description:
     "Execute a read-only inspection command or test/build runner and return stdout+stderr. " +
+    "Do not use this for lint/typecheck when run_scoped_checks can cover the declared scope. " +
     "Do not use this to modify files; use write_file/edit_file or scoped file tools for workspace changes.",
   parameters: {
     type: "object",
@@ -466,7 +467,7 @@ export const TOOL_RUN_SCOPED_CHECKS = {
   type: "function",
   name: "run_scoped_checks",
   description:
-    "Run deterministic lint/typecheck checks for the declared job scope in one batch. " +
+    "Run the canonical deterministic lint/typecheck checks for the declared job scope in one batch, including scoped PHP syntax lint when PHP files are present. " +
     "Returns only all-checks-passed or compact failure feedback with file/line/rule details.",
   parameters: {
     type: "object",
@@ -2046,7 +2047,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   },
   run_scoped_checks: {
     access: "shell",
-    summary: "Run lint/typecheck checks for the declared job scope and return compact failure feedback.",
+    summary: "Canonical lint/typecheck route for the declared job scope, including scoped PHP syntax lint when applicable.",
     observation: { type: "tool.run_scoped_checks", label: "ScopedChecks", format: "generic", targetKeys: ["checks", "scope"] },
   },
   create_test_suite: {
@@ -2071,7 +2072,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   },
   bash: {
     access: "shell",
-    summary: "Run guarded shell commands only when deterministic tools cannot satisfy the task.",
+    summary: "Run guarded shell commands only when deterministic tools cannot satisfy the task; do not bypass run_scoped_checks for lint/typecheck.",
     observation: { type: "tool.bash", label: "Bash", format: "command", commandKey: "command", kind: "system_call" },
   },
   "query": { access: "atlas", summary: "Compact gateway for native ATLAS v2 retrieval actions." },

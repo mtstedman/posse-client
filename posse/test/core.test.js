@@ -12,6 +12,7 @@ import "./core/suites/research-budgets.test.js";
 import "./core/suites/atlas-integration-routing.test.js";
 import "./core/suites/atlas-smoke-helpers.test.js";
 import "./core/suites/researcher-atlas-gate.test.js";
+import "./core/suites/atlas-warm-disabled-requeue.test.js";
 import "./core/suites/pre-push-gate.test.js";
 import "./core/suites/dependency-rewiring.test.js";
 import "./core/suites/file-scope-logic.test.js";

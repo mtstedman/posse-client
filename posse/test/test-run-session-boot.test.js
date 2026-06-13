@@ -1468,6 +1468,7 @@ describe("RunSession boot lifecycle", () => {
     let finishRunLoop = null;
     let runLoopStarted = false;
     const selfRepairCalls = [];
+    const disableCalls = [];
 
     class FakeScheduler {
       constructor() { this.leaseSec = 60; }
@@ -1531,6 +1532,7 @@ describe("RunSession boot lifecycle", () => {
           selfRepairCalls.push(args);
           return { ok: true, summary: "views ready", layers: [], actions: [] };
         },
+        disableAtlasForRun: (...args) => { disableCalls.push(args); },
       }));
 
       const runPromise = session.run();
@@ -1551,6 +1553,14 @@ describe("RunSession boot lifecycle", () => {
         () => selfRepairCalls.some((call) => /boot_background_failed/.test(call?.reason || "")),
         "expected background boot failure to queue ATLAS self-repair",
         100,
+      );
+      assert.ok(
+        disableCalls.length > 0,
+        "expected the owner-gone repair path to disable ATLAS for this run",
+      );
+      assert.ok(
+        disableCalls.every(([, repoKey]) => typeof repoKey === "string" && repoKey.length > 0),
+        "owner-gone disable must be repo-scoped — a global entry would shadow every per-repo lookup",
       );
       finishRunLoop?.();
       await runPromise;
@@ -1685,6 +1695,7 @@ describe("RunSession boot lifecycle", () => {
       stop() {}
     }
 
+    const disableCalls = [];
     const session = new RunSession(createRunSessionBootTestDeps({
       Scheduler: FakeScheduler,
       ensureAtlasRepoIndexedOnBoot: async () => ({
@@ -1704,6 +1715,7 @@ describe("RunSession boot lifecycle", () => {
         selfRepairCalls.push(args);
         return { ok: true, summary: "views warming", layers: [], actions: [] };
       },
+      disableAtlasForRun: (...args) => { disableCalls.push(args); },
     }));
 
     await session.run();
@@ -1712,6 +1724,11 @@ describe("RunSession boot lifecycle", () => {
     assert.ok(
       selfRepairCalls.some((call) => /boot_reindex_failed/.test(call?.reason || "")),
       "expected a failed boot reindex to queue ATLAS self-repair instead of disabling ATLAS",
+    );
+    assert.deepEqual(
+      disableCalls,
+      [],
+      "a failed boot reindex must NOT disable ATLAS — tools/gate/MCP stay up and the queued repair warms must be allowed to run",
     );
   }));
 

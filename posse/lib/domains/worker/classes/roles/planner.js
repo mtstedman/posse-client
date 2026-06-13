@@ -101,6 +101,71 @@ function normalizePlannerRoleMode(value) {
   return ["normal", "primary", "redteam", "synth"].includes(raw) ? raw : "normal";
 }
 
+function isQuestionOnlyBinding(explicitBindings = {}) {
+  const desiredOutputs = Array.isArray(explicitBindings.desiredOutputs)
+    ? explicitBindings.desiredOutputs
+    : [];
+  return explicitBindings.outputMode === "question_only"
+    || explicitBindings.deliverableType === "answer"
+    || desiredOutputs.includes("question_only");
+}
+
+function buildQuestionAnswerTask({ workItem, job, projectDir, reason = "" } = {}) {
+  const artifactDir = artifactsDir(wiScopeId(job.work_item_id), projectDir).replace(/\\/g, "/");
+  return {
+    title: `Answer: ${String(workItem?.title || job.title || "Question").replace(/^Plan:\s*/i, "")}`.slice(0, 120),
+    job_type: "artificer",
+    task_mode: "report",
+    task_spec: [
+      "Write a concise answer brief for the user's question.",
+      "Use the researcher/planner context already staged for this work item as source material.",
+      "Do not edit repository source files.",
+      "Create answer.md in output_root so the final answer is visible as a user-facing artifact.",
+      reason ? `Planner no-task reason to account for: ${reason}` : null,
+      "",
+      `Question/title: ${workItem?.title || ""}`,
+      workItem?.description ? `Question/details: ${workItem.description}` : null,
+    ].filter(Boolean).join("\n"),
+    files_to_modify: [],
+    files_to_create: ["answer.md"],
+    files_to_delete: [],
+    create_roots: [artifactDir],
+    output_root: artifactDir,
+    success_criteria: [
+      "answer.md exists under output_root",
+      "answer.md directly answers the user's question using available evidence",
+    ],
+    depends_on_index: [],
+  };
+}
+
+function queueQuestionAnswerTask(worker, job, ctx, { reason = "", output = "", storeResponse = false } = {}) {
+  const answerTask = buildQuestionAnswerTask({
+    workItem: ctx.workItem,
+    job,
+    projectDir: worker.projectDir,
+    reason,
+  });
+  emit(worker, job.id, `${C.cyan}[planner]${C.reset} WI#${job.work_item_id}: queued visible answer brief`);
+  if (storeResponse) {
+    storeArtifact({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      attempt_id: ctx.attemptId,
+      artifact_type: "response",
+      content_long: output,
+    });
+  }
+  storeArtifact({
+    work_item_id: job.work_item_id,
+    job_id: job.id,
+    attempt_id: ctx.attemptId,
+    artifact_type: "summary",
+    content_long: `Planner: question-only answer brief required. ${reason}`,
+  });
+  worker.createJobsFromPlan(job, [answerTask]);
+}
+
 function researcherPathFromValue(value) {
   if (typeof value === "string") return value;
   if (value && typeof value.path === "string") return value.path;
@@ -620,7 +685,7 @@ export class PlannerRole extends BaseRole {
             ? "- Plan repo-edit tasks: use job_type \"dev\", task_mode \"code\", and target real repo files/surfaces"
             : explicitBindings.outputMode === "artifact"
               ? "- Plan artifact tasks: use job_type \"artificer\" or \"promote\" and target artifact output directories, not repo edits"
-              : "- Keep the plan in question/answer mode; do not invent repo-edit or artifact-generation tasks",
+              : "- Plan exactly one visible answer task: use job_type \"artificer\", task_mode \"report\", and write answer.md under output_root; do not invent repo-edit tasks",
           "- Do NOT override this binding just because the wording sounds visual, design-oriented, or mock-like",
           "",
         ].join("\n")
@@ -635,8 +700,11 @@ export class PlannerRole extends BaseRole {
           explicitBindings.desiredOutputs.includes("artifact")
             ? "- Include artifact generation when needed; for repo+artifact work, ensure the plan covers both generation and integration."
             : "- Artifact generation is optional unless it is required to reach the requested repo outcome.",
+          explicitBindings.desiredOutputs.includes("question_only")
+            ? "- A question-only work item is not complete until an artificer/report job writes a visible answer brief such as answer.md; internal planner/research summaries are not terminal output."
+            : "",
           "",
-        ].join("\n")
+        ].filter(Boolean).join("\n")
       : "";
     const plannerRoutingContext = [
       "PIPELINE ROUTING CONTEXT (treat this as source-of-truth project configuration):",
@@ -736,6 +804,7 @@ export class PlannerRole extends BaseRole {
     Object.assign(ctx, {
       contextDirsBlock,
       desiredOutputsBlock,
+      explicitBindings,
       fastDir,
       fastFileCount,
       fullCount,
@@ -870,6 +939,10 @@ export class PlannerRole extends BaseRole {
     if (/NO_TASKS_NEEDED/i.test(output) && !extractJson(output) && !dualMode) {
       const reasonMatch = output.match(/NO_TASKS_NEEDED[:\s]*([^\n]+)/i);
       const reason = reasonMatch ? reasonMatch[1].trim() : "research already covers this work item";
+      if (isQuestionOnlyBinding(ctx.explicitBindings)) {
+        queueQuestionAnswerTask(worker, job, ctx, { reason, output, storeResponse: true });
+        return output;
+      }
       emit(worker, job.id, `${C.cyan}[planner]${C.reset} WI#${job.work_item_id}: no tasks needed - ${reason}`);
       storeArtifact({
         work_item_id: job.work_item_id,
@@ -933,6 +1006,12 @@ export class PlannerRole extends BaseRole {
     // call. A repair LLM given "[]" has nothing to work with; repairJson rejects
     // empty arrays by design, so calling it here just burns tokens.
     const originalWasEmptyArray = Array.isArray(tasks) && tasks.length === 0;
+    if (originalWasEmptyArray && isQuestionOnlyBinding(ctx.explicitBindings)) {
+      queueQuestionAnswerTask(worker, job, ctx, {
+        reason: "planner returned an empty task array for a question-only work item",
+      });
+      return output;
+    }
     let repairAttempted = false;
     if (Array.isArray(tasks) && tasks.length > 0) {
       emit(worker, job.id, `${C.cyan}[planner]${C.reset} WI#${job.work_item_id}: parsed ${tasks.length} task(s) from output (${(output || "").length} chars)`);

@@ -1402,7 +1402,6 @@ async function _attachAtlasSlicePrefetchContext(packet, { tools, taskText, seedF
 // when new prefetch tools are added.
 const ATLAS_MISSING_VALUE = "(unknown)";
 const ATLAS_EMPTY_LIST_LINE = "- (none)";
-const ATLAS_FAILURE_FALLBACK = "Fallback: continue with deterministic preload context.";
 
 // Soft cap on the total rendered ATLAS section size. ~12k chars is roughly 3k
 // tokens, leaving room for the rest of the handoff (editable files, related
@@ -1443,12 +1442,32 @@ function atlasSubFailureLine(label, error) {
   return `${label} prefetch failed: ${error || "unknown error"}`;
 }
 
+// One line per independent sub-prefetch failure. The fallback policy is stated
+// once in the ATLAS CONTEXT / retrieval-order guidance, not repeated here.
 function renderAtlasFailureSection(title, label, error) {
   return [
     atlasHeading(title),
     atlasSubFailureLine(label, error),
-    ATLAS_FAILURE_FALLBACK,
   ].join("\n");
+}
+
+// Names of sub-prefetches that failed alongside a whole-prefetch failure, so
+// the single consolidated notice can enumerate them instead of rendering one
+// failure section per sub-prefetch carrying the same bit.
+function _collectFailedSubPrefetchLabels(packet) {
+  const labels = [];
+  if (packet.atlas_assessment_baseline && !packet.atlas_assessment_baseline.ok) {
+    labels.push("assessment baseline");
+  }
+  if (packet.atlas_research_context && !packet.atlas_research_context.ok) {
+    labels.push("research context");
+  }
+  if (packet.atlas_slice_context && !packet.atlas_slice_context.ok) {
+    const treeSourced = packet.atlas_slice_context.source === "tree.scope"
+      || packet.atlas_slice_context.source === "tree.grow";
+    labels.push(treeSourced ? "tree scope" : "slice");
+  }
+  return labels;
 }
 
 function displayAtlasToolName(toolName, atlas = {}) {
@@ -1693,16 +1712,19 @@ function renderAtlasContextSection(packet) {
     // Prefetch failed but we're in a fallback-eligible mode. Keep phase/repo
     // for debuggability but replace the "active" framing and tool guidance
     // with a single fallback notice so the agent doesn't try to call ATLAS tools.
+    // One sentence + one detail line: the per-sub-prefetch failure sections are
+    // suppressed in _buildAtlasSections because they share this common cause.
     const detail = packet.atlas.prefetchFailureDetail
       ? `Failure detail: ${String(packet.atlas.prefetchFailureDetail).split(/\r?\n/)[0].slice(0, 240)}`
       : null;
+    const failedPrefetches = _collectFailedSubPrefetchLabels(packet);
     return [
       atlasHeading(`${label} CONTEXT`),
       packet.atlas.fallbackNotice
         ? formatAtlasBackendText(packet.atlas.fallbackNotice, label)
-        : `${label} prefetch failed. Do not call ${label} tools for this handoff; continue with deterministic file/search/edit tools and preload context.`,
-      `${label} TOOL STATUS: unavailable for this handoff. Normal tools remain available; keep working without ${label}.`,
+        : `${label} prefetch failed; ${label} tools are unavailable for this handoff. Continue with deterministic file/search/edit tools and preload context.`,
       detail,
+      failedPrefetches.length > 0 ? `Failed prefetches: ${failedPrefetches.join(", ")}` : null,
       atlasField("Phase", packet.atlas.phase),
       atlasField("Repo target", packet.atlas.repo?.repoPath),
     ].filter(Boolean).join("\n");
@@ -1894,10 +1916,17 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
   }
 
   if (Array.isArray(slice.cards) && slice.cards.length > 0) {
+    // Keep the top few cards only; the candidate file list below carries the
+    // breadth signal, so the long card tail is mostly redundant chars.
+    const cardCap = trim >= 1 ? 4 : 8;
+    const shownCards = slice.cards.slice(0, cardCap);
     lines.push("Top cards (semantic summaries):");
-    for (const card of slice.cards) {
+    for (const card of shownCards) {
       lines.push(_renderCardLine(card));
       for (const detail of _renderCardDetailLines(card)) lines.push(detail);
+    }
+    if (slice.cards.length > shownCards.length) {
+      lines.push(`(+${slice.cards.length - shownCards.length} more cards omitted)`);
     }
   } else if ((slice.cardCount || 0) > 0) {
     lines.push("Top cards unavailable in this payload; rely on file paths below.");
@@ -2054,6 +2083,11 @@ function renderAtlasAssessmentBaselineSection(packet, { trim = 0 } = {}) {
 function _buildAtlasSections(packet, trim) {
   const sections = [];
 
+  // When the whole prefetch failed, every sub-prefetch failure shares that one
+  // cause; the consolidated notice in ATLAS CONTEXT enumerates them, so the
+  // per-sub-prefetch failure sections below are suppressed.
+  const wholePrefetchFailed = !!packet.atlas?.prefetchFailed;
+
   if (packet.atlas?.active) {
     sections.push(renderAtlasContextSection(packet));
   }
@@ -2061,7 +2095,7 @@ function _buildAtlasSections(packet, trim) {
   if (packet.atlas_assessment_baseline) {
     if (packet.atlas_assessment_baseline.ok) {
       sections.push(renderAtlasAssessmentBaselineSection(packet, { trim }));
-    } else if (packet.atlas?.active) {
+    } else if (packet.atlas?.active && !wholePrefetchFailed) {
       sections.push(renderAtlasFailureSection(
         "ATLAS ASSESSMENT BASELINE",
         "ATLAS assessment",
@@ -2073,7 +2107,7 @@ function _buildAtlasSections(packet, trim) {
   if (packet.atlas_research_context) {
     if (packet.atlas_research_context.ok) {
       sections.push(renderAtlasResearchContextSection(packet, { trim }));
-    } else if (packet.atlas?.active) {
+    } else if (packet.atlas?.active && !wholePrefetchFailed) {
       sections.push(renderAtlasFailureSection(
         "ATLAS RESEARCH PREFETCH",
         "ATLAS research",
@@ -2085,7 +2119,7 @@ function _buildAtlasSections(packet, trim) {
   if (packet.atlas_slice_context) {
     if (packet.atlas_slice_context.ok) {
       sections.push(renderAtlasSliceSection(packet, { trim }));
-    } else if (packet.atlas?.active) {
+    } else if (packet.atlas?.active && !wholePrefetchFailed) {
       const treeSourced = packet.atlas_slice_context.source === "tree.scope"
         || packet.atlas_slice_context.source === "tree.grow";
       sections.push(renderAtlasFailureSection(
@@ -2123,4 +2157,26 @@ export function renderAtlasHandoffSectionsWithMeta(packet) {
 
 export function renderAtlasHandoffSections(packet) {
   return renderAtlasHandoffSectionsWithMeta(packet).text;
+}
+
+// Lowercased repo-relative paths whose content the ATLAS prefetch already
+// supplied (exact bodies, skeleton outlines, or symbol cards). Used to gate
+// duplicate local previews (e.g. HINTED FILE PREVIEW) behind ATLAS coverage.
+export function collectAtlasCoveredFiles(packet) {
+  const slice = packet?.atlas_slice_context;
+  if (!slice?.ok) return new Set();
+  const paths = [];
+  for (const item of (Array.isArray(slice.exactFiles) ? slice.exactFiles : [])) {
+    if (item?.ok && item.file) paths.push(item.file);
+  }
+  for (const sk of (Array.isArray(slice.skeletons) ? slice.skeletons : [])) {
+    if (sk?.ok && sk.file) paths.push(sk.file);
+  }
+  for (const card of (Array.isArray(slice.cards) ? slice.cards : [])) {
+    if (card?.file) paths.push(card.file);
+  }
+  for (const card of (Array.isArray(slice.seedSymbolCards) ? slice.seedSymbolCards : [])) {
+    if (card?.file) paths.push(card.file);
+  }
+  return _pathSet(paths);
 }

@@ -26,7 +26,7 @@ import {
   isGateActive,
   isGatedTool,
   checkNativeToolAllowed,
-  noteAtlasCall as noteGateAtlasCall,
+  noteAtlasToolResult as noteGateAtlasToolResult,
   releaseGate,
   unlockForAtlasUnavailable,
   isFallbackAtlasPrefetchStatus,
@@ -548,14 +548,10 @@ async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atla
   });
 
   // Route 2: if this was an ATLAS call, classify the result and notify the
-  // gate. The embedded executor returns "Error: ..." on failure, "ATLAS
-  // returned no output." on an empty successful call, and trimmed JSON or
-  // text otherwise. Treat non-empty, non-error strings as useful.
+  // gate (shared helper owns the error/empty conventions and the in-band
+  // dead-ATLAS unlock notice).
   if (atlasAction) {
-    const text = typeof result === "string" ? result : String(result ?? "");
-    const errored = /^Error:/i.test(text);
-    const empty = !errored && (text.trim().length === 0 || text.trim() === "ATLAS returned no output.");
-    noteGateAtlasCall({ action: atlasAction, ok: !errored, empty, args: gateArgs, cwd, scopeKey: gateScopeKey });
+    return noteGateAtlasToolResult(result, { action: atlasAction, args: gateArgs, cwd, scopeKey: gateScopeKey });
   }
 
   return result;

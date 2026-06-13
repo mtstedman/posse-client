@@ -1903,9 +1903,16 @@ export function __testParseClaudeInteractiveLogSince(logPath, offset = 0) {
   return parseClaudeInteractiveLogSince(logPath, offset);
 }
 
-function writeClaudeInteractivePrompt(session, prompt) {
+async function writeClaudeInteractivePrompt(session, prompt) {
   const text = String(prompt || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  session.write(`\x1b[200~${text}\x1b[201~\r`);
+  // Bracketed paste: without it the TUI treats every embedded \n as Enter and
+  // submits the prompt piecemeal. The settle delays before each Enter remain —
+  // the TUI needs time to ingest a large paste before it accepts the submit.
+  session.write(`\x1b[200~${text}\x1b[201~`);
+  await sleepInteractiveMs(1_000);
+  session.write("\r");
+  await sleepInteractiveMs(1_000);
+  session.write("\r");
 }
 
 function findClaudeInteractiveSessionState({ cwd, sessionId = null, pid = null, sinceMs = 0 } = {}) {
@@ -1926,6 +1933,17 @@ function findClaudeInteractiveSessionState({ cwd, sessionId = null, pid = null, 
     const stateSessionId = typeof state.sessionId === "string" ? state.sessionId.trim() : "";
     const statePid = Number(state.pid);
     const updatedAt = Number(state.updatedAt || state.startedAt || 0);
+    // A known-mismatched identity disqualifies outright: with concurrent
+    // interactive sessions (same cwd, overlapping recency) another session's
+    // state file must never outrank the absence of our own. A sessionId match
+    // overrides a pid mismatch — on Windows the spawned pid can be a .cmd
+    // shim's, not the CLI's own.
+    const sessionIdMatches = !!sessionId && !!stateSessionId && stateSessionId === sessionId;
+    if (sessionId && stateSessionId && !sessionIdMatches) continue;
+    if (!sessionIdMatches
+      && Number.isFinite(pid) && pid > 0
+      && Number.isFinite(statePid) && statePid > 0
+      && statePid !== pid) continue;
     let score = 0;
     if (sessionId && stateSessionId === sessionId) score += 100;
     if (Number.isFinite(pid) && pid > 0 && statePid === pid) score += 50;
@@ -1938,7 +1956,8 @@ function findClaudeInteractiveSessionState({ cwd, sessionId = null, pid = null, 
   return candidates[0] || null;
 }
 
-async function closeInteractiveSessionGracefully(session) {
+async function closeInteractiveSessionGracefully(session, { slashCommandsEnabled = true } = {}) {
+  if (!slashCommandsEnabled) return;
   try {
     session.sendLine("/exit");
     await session.waitForQuiet({ quietMs: 300, timeoutMs: 1_500 }).catch(() => {});
@@ -1959,6 +1978,11 @@ function claudeInteractiveSafetyPromptVisible(text) {
 function claudeInteractiveBypassPromptVisible(text) {
   const clean = stripTerminalControls(text);
   return /bypass\s*permissions\s*mode|yes,\s*i\s*accept|proceeding,\s*you\s*accept/i.test(clean);
+}
+
+function claudeInteractiveInputReady(text) {
+  const clean = stripTerminalControls(text);
+  return /(?:^|\n)>\s*(?:Try\b|["“]|$)|don'?t\s*ask\s*on|\/effort/i.test(clean);
 }
 
 async function answerClaudeInteractiveSafetyPrompt(session, { timeoutMs = 2_000 } = {}) {
@@ -1988,14 +2012,35 @@ async function answerClaudeInteractiveStartupPrompt(session, { timeoutMs = 2_000
 }
 
 async function prepareClaudeInteractiveSession(session, { timeoutMs = 5_000 } = {}) {
-  const deadline = Date.now() + Math.max(500, Math.min(timeoutMs, 7_000));
+  const deadline = Date.now() + Math.max(500, Math.min(timeoutMs, 30_000));
+  let startupPromptAnsweredAt = 0;
   while (Date.now() < deadline) {
     if (await answerClaudeInteractiveStartupPrompt(session, { timeoutMs })) {
+      startupPromptAnsweredAt = Date.now();
       await sleepInteractiveMs(100);
       continue;
     }
+    const state = findClaudeInteractiveSessionState({
+      cwd: session.cwd,
+      pid: session?.proc?.pid,
+      sinceMs: session.startedAt,
+    });
+    const inputReady = claudeInteractiveInputReady(session.getTranscript());
+    const stateStatus = String(state?.status || "").toLowerCase();
+    const stateUpdatedAt = Number(state?.updatedAt || 0);
+    // Only an identity-grade match (pid or sessionId, score >= 50) may break
+    // readiness: a cwd+recency match can be a concurrent session that is idle
+    // while ours is still on the trust/bypass dialog. Without an identity
+    // match the quiet-transcript heuristic below carries readiness.
+    const stateIsOurs = Number(state?._score || 0) >= 50;
+    if (stateIsOurs && stateStatus === "idle" && stateUpdatedAt >= session.startedAt - 1_000 && (!startupPromptAnsweredAt || inputReady)) {
+      break;
+    }
     const clean = stripTerminalControls(session.getTranscript());
-    if (clean.trim() && Date.now() - session.lastDataAt >= 500) {
+    const quietForMs = Date.now() - session.lastDataAt;
+    const settleAfterStartupMs = startupPromptAnsweredAt ? 6_000 : 0;
+    const settledAfterStartup = !startupPromptAnsweredAt || Date.now() - startupPromptAnsweredAt >= settleAfterStartupMs;
+    if (clean.trim() && quietForMs >= 500 && settledAfterStartup && (!startupPromptAnsweredAt || inputReady)) {
       break;
     }
     await sleepInteractiveMs(100);
@@ -2172,11 +2217,11 @@ async function runClaudeInteractiveProviderCall({
       else abortSignal.addEventListener("abort", onAbort, { once: true });
     }
     if (aborted) throw abortError;
-    await prepareClaudeInteractiveSession(session, { timeoutMs: Math.min(timeoutMs, 7_000) });
+    await prepareClaudeInteractiveSession(session, { timeoutMs: Math.min(timeoutMs, 30_000) });
     const promptLog = findClaudeProjectLogFile(session.cwd, { sinceMs: session.startedAt });
     const promptLogOffset = promptLog?.size || 0;
     const sentAt = Date.now();
-    writeClaudeInteractivePrompt(session, prompt);
+    await writeClaudeInteractivePrompt(session, prompt);
     if (onLine || directOutput) {
       progressTimer = setInterval(() => {
         const logInfo = promptLog?.file
@@ -2208,7 +2253,7 @@ async function runClaudeInteractiveProviderCall({
     }
     await session.waitForQuiet({ quietMs: 500, timeoutMs: Math.min(timeoutMs, 3_000) }).catch(() => {});
     const transcript = session.cleanTranscript();
-    await closeInteractiveSessionGracefully(session);
+    await closeInteractiveSessionGracefully(session, { slashCommandsEnabled: false });
     return {
       output: completed.output,
       transcript,

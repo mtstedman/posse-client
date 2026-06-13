@@ -351,7 +351,15 @@ function _readFilePreview(projectDir, relPath) {
   }
 }
 
-export function buildResearchIntakePreload(projectDir, hints) {
+function _normalizeHintPath(value) {
+  return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+}
+
+// atlasCoveredFiles: lowercased repo-relative paths whose content the ATLAS
+// prefetch already supplied (see collectAtlasCoveredFiles in atlas-context.js).
+// Hinted files ATLAS already covers get a one-line pointer instead of a body
+// preview so the same content is not paid for twice in one prompt.
+export function buildResearchIntakePreload(projectDir, hints, { atlasCoveredFiles = null } = {}) {
   if (!hints) return "";
   const safeHints = normalizeIntakeHints(hints);
   if (!_hasMaterialResearchPreloadHints(safeHints)) return "";
@@ -370,6 +378,10 @@ export function buildResearchIntakePreload(projectDir, hints) {
   }
 
   for (const file of (safeHints.suspected_files || []).slice(0, 3)) {
+    if (atlasCoveredFiles?.has?.(_normalizeHintPath(file))) {
+      sections.push(`HINTED FILE (already covered by ATLAS prefetch context): ${file}`);
+      continue;
+    }
     const preview = _readFilePreview(projectDir, file);
     if (preview) sections.push(`HINTED FILE PREVIEW: ${file}\n${preview}`);
   }

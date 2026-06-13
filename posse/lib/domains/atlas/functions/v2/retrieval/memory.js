@@ -725,6 +725,7 @@ function hydrateMemory(row, links, criteria = {}) {
     updatedAt: row.updated_at,
     stale: Number(row.stale || 0) === 1,
     staleReason: row.stale_reason || null,
+    source: row.source || "agent",
     contradictedAt: row.contradicted_at || null,
     contradictionCount: Number(row.contradiction_count || 0),
     ...(Array.isArray(row._missingAnchors) && row._missingAnchors.length > 0

@@ -24,7 +24,7 @@ import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-
 import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.js";
 import { ledgerDbPath, mainViewPath } from "../../../atlas/functions/v2/runtime-paths.js";
 import { getSharedConductor } from "../../../atlas/functions/v2/parse/conductor.js";
-import { emitEmbeddingsResume } from "../../../atlas/classes/v2/PipelineHooks.js";
+import { emitEmbeddingsResume, emitScipStaged } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { warmReadinessStarted, warmReadinessProgress, warmReadinessDone } from "../../../atlas/functions/v2/warm-progress.js";
 import { getAtlasIntegrationConfig, getAtlasRuntimeDisabledReason } from "../../../integrations/functions/atlas/config.js";
 import {
@@ -38,6 +38,12 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 function nowMs() {
   return Date.now();
 }
+
+// How long a runtime-disabled warm job stays unready after being released
+// back to the queue. Long enough that the scheduler does not lease/skip it in
+// a hot loop for the rest of the disabled run; short enough that the next
+// boot (which clears the in-memory disable) picks it up promptly.
+const ATLAS_WARM_DISABLED_REQUEUE_DELAY_MS = 10 * 60 * 1000;
 
 function clampPaths(paths, max = 100) {
   if (!Array.isArray(paths)) return [];
@@ -119,6 +125,27 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
 
     worker._throwIfKilled?.(job.id);
 
+    // Runtime disable (e.g. the owner-gone repair path disabled this repo
+    // after queueing self-repair warms): the disable is in-memory and clears
+    // at the next boot, so leave the job QUEUED instead of consuming it as a
+    // no-op "success" — these are often the very repair warms the disable
+    // path just enqueued, and the wrap-up message promises to leave them for
+    // the next boot. The readyAt backoff keeps the scheduler from re-leasing
+    // in a hot loop while the disable lasts. (A configuration disable below
+    // is durable, so those jobs are still consumed as no-op stubs.)
+    if (disabledReason) {
+      completeAttempt(attempt.attempt.id, {
+        status: "interrupted",
+        duration_ms: nowMs() - startTime,
+        error_text: `ATLAS disabled for this run: ${disabledReason}`,
+      });
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+        readyAt: new Date(Date.now() + ATLAS_WARM_DISABLED_REQUEUE_DELAY_MS).toISOString(),
+      });
+      worker.emit(job.id, `${C.dim}[atlas] warm (${purpose}) deferred: ATLAS disabled for this run (${disabledReason}) — left queued for next boot${C.reset}`);
+      return;
+    }
+
     // Bounded runtime guard — surface a deterministic skip if the policy
     // budget has already been exhausted (e.g. shutdown right before lease).
     const elapsed = nowMs() - startTime;
@@ -128,8 +155,8 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
     /** @type {import("../../../atlas/functions/v2/contracts/jobs.js").AtlasWarmJobResult} */
     let result;
     let backend = "atlas-v2-stub";
-    if (disabledReason || config?.enabled === false) {
-      const reason = disabledReason || config?.disabledReason || config?.skipped || "atlas_disabled";
+    if (config?.enabled === false) {
+      const reason = config?.disabledReason || config?.skipped || "atlas_disabled";
       result = {
         purpose: /** @type {any} */ (purpose),
         paths_considered: paths.length,
@@ -143,7 +170,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
         skipped: (paths.length > 0 ? paths : ["."]).map((repo_rel_path) => ({
           repo_rel_path,
           reason: "atlas_disabled",
-          message: `ATLAS disabled for this run: ${reason}`,
+          message: `ATLAS disabled by configuration: ${reason}`,
         })),
       };
       backend = "atlas-v2-disabled";
@@ -240,6 +267,25 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
           worker.emit(job.id, `${C.dim}[atlas] embeddings resume: ${remaining} symbols remaining — next slice queued${C.reset}`);
         } catch { /* best effort — readiness self-repair re-detects the gap */ }
       }
+    }
+
+    // A standalone scip-restage only STAGES artifacts; nothing ingests them
+    // until a main warm runs (WI warms are hot-view-only and readiness
+    // reports staged artifacts as ready, so no repair fires either). When the
+    // restage staged fresh artifacts, enqueue the coalescing main-incremental
+    // intake now instead of letting the symbols wait for the next unrelated
+    // commit.
+    if (purpose === "scip-restage" && backend === "atlas-v2" && result.scip_staged_fresh === true) {
+      try {
+        emitScipStaged({
+          payload: {
+            target_branch: branch || baselineBranch,
+            reason: "scip_restage_staged_fresh",
+          },
+          jobId: job.id,
+        });
+        worker.emit(job.id, `${C.dim}[atlas] scip restage staged fresh artifacts — main intake warm queued${C.reset}`);
+      } catch { /* best effort — the next main warm ingests staged scip anyway */ }
     }
 
     completeAttempt(attempt.attempt.id, {

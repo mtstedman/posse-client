@@ -10,7 +10,7 @@
 import { parseSymbolId, locationOf } from "./cards.js";
 import { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
-import { redactSecrets } from "./redaction.js";
+import { redactSecrets, redactSecretsLines } from "./redaction.js";
 import { findOverlaySymbol, getOverlaySymbols } from "./buffer.js";
 import { sha256Hex } from "../hash.js";
 import { getEffectivePolicy } from "./policy.js";
@@ -242,8 +242,8 @@ export function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) 
   }
   /** @type {Set<string>} */
   const found = new Set();
-  /** @type {CodeHotPathData["matches"]} */
-  const matches = [];
+  /** @type {Array<{ li: number, ident: string }>} */
+  const rawMatches = [];
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li];
     for (const ident of idents) {
@@ -251,19 +251,24 @@ export function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) 
       const re = new RegExp(`\\b${escapeRegExp(ident)}\\b`);
       if (re.test(line)) {
         found.add(ident);
-        matches.push({
-          repo_rel_path: targetPath,
-          line: li + 1,
-          text: redactSecrets(line),
-          identifier: ident,
-          context: {
-            before: lines.slice(Math.max(0, li - contextLines), li).map(redactSecrets),
-            after: lines.slice(li + 1, Math.min(lines.length, li + 1 + contextLines)).map(redactSecrets),
-          },
-        });
+        rawMatches.push({ li, ident });
       }
     }
   }
+  // One native redaction call for the whole file instead of one per matched
+  // line plus one per context line (each sync call is a process spawn).
+  const redactedLines = rawMatches.length > 0 ? redactSecretsLines(lines) : lines;
+  /** @type {CodeHotPathData["matches"]} */
+  const matches = rawMatches.map(({ li, ident }) => ({
+    repo_rel_path: targetPath,
+    line: li + 1,
+    text: redactedLines[li],
+    identifier: ident,
+    context: {
+      before: redactedLines.slice(Math.max(0, li - contextLines), li),
+      after: redactedLines.slice(li + 1, Math.min(lines.length, li + 1 + contextLines)),
+    },
+  }));
   const missing = idents.filter((i) => !found.has(i));
   const etagSeed = symbolId || `${targetPath}:${sha256Hex(source).slice(0, 16)}`;
   const etag = `hp:${etagSeed}:${idents.join(",")}:${matches.length}`;

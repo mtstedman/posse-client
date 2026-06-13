@@ -524,12 +524,90 @@ suite("Provider aliases", () => {
       assert.ok(spawnedArgs.includes("dontAsk"));
       assert.ok(promptWrite.includes("Use the PTY wrapper."));
       assert.equal(/POSSE_RESPONSE_(?:START|DONE)_/i.test(promptWrite), false);
-      assert.ok(backend.writes.includes("/exit\r"));
+      assert.equal(backend.writes.includes("/exit\r"), false);
     } finally {
       setClaudeConfigDirForTests(null);
       claude.__testResetClaudeResolution();
       fs.rmSync(tmpDir, { recursive: true, force: true });
       fs.rmSync(claudeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("retries runtime model errors on the provider tier default model", async () => {
+    const { TrackedProviderClient } = await import("../../../lib/domains/worker/classes/TrackedProviderClient.js");
+    const { setRemoteCatalogForTest } = await import("../../../lib/domains/providers/functions/model-catalog-store.js");
+    setRemoteCatalogForTest(null);
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-model-fallback-"));
+    const attemptedModels = [];
+    const observations = [];
+    let agentCallId = 0;
+    const provider = {
+      getModelTierConfig: () => ({ model: "gpt-dead-model" }),
+      async call(_prompt, opts) {
+        attemptedModels.push(opts.modelName || null);
+        if (attemptedModels.length === 1) {
+          throw new Error("OpenAI error: unknown model gpt-dead-model");
+        }
+        return {
+          output: "ok after model fallback",
+          stats: { modelName: opts.modelName, durationMs: 1, outputChars: 23 },
+        };
+      },
+    };
+    const worker = {
+      projectDir,
+      display: null,
+      stallTimeout: 1,
+      _abortControllers: new Map(),
+      _killReasons: new Map(),
+      emit() {},
+    };
+    const client = new TrackedProviderClient({
+      worker,
+      deps: {
+        getAvailableProviders: () => ["openai"],
+        getProvider: () => provider,
+        getProviderRateLimitState: () => ({ blocked: false, retryInSec: 0, reason: "" }),
+        selectProviderName: () => "openai",
+        filterProviderToolUseReplay: (tools) => tools,
+        getObservationContext: () => ({}),
+        recordObservation: (entry) => observations.push(entry),
+        recordToolUseObservations: () => {},
+        runWithObservationContext: async (_ctx, fn) => await fn(),
+        createAgentCall: (entry) => ({ id: ++agentCallId, ...entry }),
+        completeAgentCall: () => {},
+        recordPrompt: () => {},
+        recordOutput: () => {},
+        resolveAtlasExecutionAttachment: () => ({ method: null }),
+        sanitizeExecutionHintsForRole: (_role, opts) => opts,
+        resolvePrimaryExecutionModelName: (_jobModelName, _opts, tierConfig) => tierConfig.model,
+        selectFallbackProvider: () => null,
+        recordRecoveryCheckpoint: () => {},
+        retainReplayOutput: () => {},
+        retainReplayPrompt: () => {},
+        retainReplayToolUses: () => {},
+      },
+    });
+
+    try {
+      const result = await client.call("answer", {
+        role: "dev",
+        allowWrite: false,
+        modelTier: "standard",
+        activity: "model fallback test",
+        disableAtlas: true,
+      }, {
+        cwd: projectDir,
+        jobProvider: "openai",
+      });
+
+      assert.equal(result.output, "ok after model fallback");
+      assert.deepEqual(attemptedModels, ["gpt-dead-model", "gpt-4.1"]);
+      assert.ok(observations.some((entry) => entry.observation_type === "provider.model_fallback"));
+    } finally {
+      setRemoteCatalogForTest(null);
+      fs.rmSync(projectDir, { recursive: true, force: true });
     }
   });
 
@@ -669,7 +747,10 @@ suite("Provider aliases", () => {
         },
       });
 
-      const result = await client.call("Summarize the workflow sentinel.", {
+      const result = await client.call([
+        "Summarize the workflow sentinel.",
+        "Confirm the supplied context was available.",
+      ].join("\n"), {
         role: "dev",
         allowWrite: true,
         modelTier: "standard",
@@ -702,7 +783,8 @@ suite("Provider aliases", () => {
       assert.equal(observed.args.includes("--output-format"), false);
       assert.equal(observed.args.includes("--dangerously-skip-permissions"), false);
       assert.match(observed.promptWrite, /Summarize the workflow sentinel/);
-      assert.ok(backend.writes.includes("/exit\r"));
+      assert.ok(backend.writes.filter((entry) => entry === "\r").length >= 2);
+      assert.equal(backend.writes.includes("/exit\r"), false);
       assert.deepEqual(observationContexts, [{
         work_item_id: wi.id,
         job_id: job.id,
@@ -1120,10 +1202,14 @@ process.stdin.on("end", () => {
     assert.match(devBlock || "", /Use the manifest entries whose canonical labels are write_file and edit_file for file changes/i);
     assert.match(devBlock || "", /do not report that no writable file-edit tool exists before trying the exact manifest write\/edit tool names/i);
     assert.match(devBlock || "", /manifest entries whose canonical labels are read_file, list_files, and search_files/i);
+    assert.match(devBlock || "", /run_scoped_checks before considering shell/i);
+    assert.match(devBlock || "", /including PHP syntax checks/i);
     assert.match(devBlock || "", /Do not use shell for ad-hoc repository discovery/i);
 
     const assessorBlock = codex.__testBuildCodexRoleGuardBlock({ role: "assessor", allowWrite: false });
     assert.match(assessorBlock || "", /Verify files with the manifest entries whose canonical labels are read_file, list_files, and search_files/i);
+    assert.match(assessorBlock || "", /run_scoped_checks for lint\/typecheck first/i);
+    assert.match(assessorBlock || "", /including PHP syntax checks/i);
     assert.match(assessorBlock || "", /Use shell only for explicit verification commands/i);
   });
 
@@ -1519,7 +1605,9 @@ process.stdin.on("end", () => {
     assert.match(block, /read_file \[read\]/);
     assert.match(block, /list_files \[read\]/);
     assert.match(block, /search_files \[read\]/);
+    assert.match(block, /Canonical lint\/typecheck route/);
     assert.match(block, /bash \[shell\]/);
+    assert.match(block, /do not bypass run_scoped_checks for lint\/typecheck/);
   });
 
   it("derives Claude CLI tool grants from the shared contract", async () => {

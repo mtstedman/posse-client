@@ -76,6 +76,29 @@ suite("Intake hints", () => {
     }
   });
 
+  it("renders pointers instead of previews for hinted files ATLAS already covered", () => {
+    const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-intake-project-"));
+    try {
+      fs.mkdirSync(path.join(projectDir, "lib"), { recursive: true });
+      fs.writeFileSync(path.join(projectDir, "lib", "covered.js"), "export const covered = true;\n", "utf-8");
+      fs.writeFileSync(path.join(projectDir, "lib", "uncovered.js"), "export const uncovered = true;\n", "utf-8");
+
+      const preload = buildResearchIntakePreload(projectDir, {
+        intent_type: "context",
+        deliverable_type: "answer",
+        output_mode: "question_only",
+        desired_outputs: ["question_only"],
+        suspected_files: ["lib\\covered.js", "lib/uncovered.js"],
+      }, { atlasCoveredFiles: new Set(["lib/covered.js"]) });
+
+      assert.match(preload, /HINTED FILE \(already covered by ATLAS prefetch context\): lib\/covered\.js/);
+      assert.doesNotMatch(preload, /HINTED FILE PREVIEW: lib\/covered\.js/);
+      assert.match(preload, /HINTED FILE PREVIEW: lib\/uncovered\.js/);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it("omits generic research preload hints when intake added no material context", () => {
     const projectDir = fs.mkdtempSync(path.join(__dirname, "tmp-intake-project-"));
     try {
@@ -155,6 +178,50 @@ suite("Intake hints", () => {
     // The planner instructions are embedded as a JSON literal (INSTRUCTIONS (literal
     // JSON string)), so the binding's double quotes are JSON-escaped in the final prompt.
     assert.match(plannerPrompt, /output_mode is explicitly bound to \\?"artifact\\?"/);
+  });
+
+  it("turns question-only no-task planner output into a visible answer brief job", async () => {
+    const { queueMod, workerMod } = runtimeModules;
+    const wi = queueMod.createWorkItem("Why is Atlas warmup slow?", "Explain the likely causes.", "normal", {
+      metadata: {
+        intake_hints: {
+          intent_type: "question",
+          deliverable_type: "answer",
+          output_mode: "question_only",
+          desired_outputs: ["question_only"],
+        },
+      },
+      mode: "build",
+    });
+    const planJob = queueMod.createJob({
+      work_item_id: wi.id,
+      job_type: "plan",
+      title: "Plan: Why is Atlas warmup slow?",
+    });
+
+    let plannerPrompt = "";
+    const worker = makeWorker(workerMod, {
+      projectDir: path.resolve(__dirname, ".."),
+      silent: true,
+    }, async (prompt) => {
+      plannerPrompt = prompt;
+      return {
+        output: "NO_TASKS_NEEDED: research already covers the answer",
+        stats: {},
+      };
+    });
+
+    await dispatchWorker(worker, planJob, "standard", null);
+
+    assert.match(plannerPrompt, /Plan exactly one visible answer task/);
+    const created = queueMod.listJobsByWorkItem(wi.id).filter((job) => job.id !== planJob.id && job.job_type !== "delegate");
+    assert.equal(created.length, 1);
+    assert.equal(created[0].job_type, "artificer");
+    const payload = JSON.parse(created[0].payload_json);
+    assert.equal(payload.task_mode, "report");
+    assert.match(payload.output_root, new RegExp(`wi-${wi.id}`));
+    assert.match(payload.files_to_create[0], /answer\.md$/);
+    assert.match(payload.task_spec, /Create answer\.md/);
   });
 
   it("injects intake hints into the assessor prompt", async () => {

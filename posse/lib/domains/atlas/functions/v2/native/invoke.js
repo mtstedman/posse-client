@@ -92,8 +92,10 @@ export function runAtlasNativeMethod(method, payload, opts = {}) {
       json: true,
       timeoutMs: opts.timeoutMs,
       key: opts.key,
-      // Atlas-Helper: every native method is a stateless deterministic helper,
-      // so all route through the persistent worker (sync bridge here).
+      // Sync calls are per-call spawns now (the sync bridge was removed) —
+      // runSync accepts and ignores `worker`. Keep call volume O(1) per
+      // action (batch lines, memoize tokenize) or prefer the async variant,
+      // which does route through the persistent Atlas-Helper daemon.
       worker: true,
     },
   );

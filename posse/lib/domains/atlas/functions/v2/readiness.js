@@ -24,6 +24,7 @@ import {
   configuredVectorBackend,
   embeddingsExplicitlyEnabled,
 } from "./embeddings/resources.js";
+import { semanticLanguageTags } from "./resolver/adapters/registry.js";
 import { shouldRunScipPhase } from "../../../integrations/functions/atlas-v2-mode.js";
 
 /**
@@ -79,7 +80,7 @@ function formatCount(value) {
 
 /**
  * @param {string} repoRoot
- * @returns {{ views: AtlasLayerReadiness, treesitter: AtlasLayerReadiness, candidates: number }}
+ * @returns {{ views: AtlasLayerReadiness, treesitter: AtlasLayerReadiness, candidates: number, eligibleCandidates: number }}
  */
 function inspectViewAndTreesitter(repoRoot) {
   const viewPath = mainViewPath(repoRoot);
@@ -87,6 +88,7 @@ function inspectViewAndTreesitter(repoRoot) {
   const ledgerDb = openReadonly(ledgerPath);
   const viewDb = openReadonly(viewPath);
   let candidates = 0;
+  let eligibleCandidates = 0;
 
   /** @type {AtlasLayerReadiness} */
   let views;
@@ -140,6 +142,18 @@ function inspectViewAndTreesitter(repoRoot) {
       try {
         candidates = Number(viewDb.prepare("SELECT COUNT(*) AS c FROM symbols").get()?.c) || 0;
       } catch { /* leave 0 */ }
+      try {
+        // Embedding parity denominator: only symbols whose language the
+        // embeddings ingest can actually encode (ingest.js filters by
+        // hasLanguageSemantics, and skipped symbols never enter keys.db).
+        // Counting ineligible symbols here pins parity below the threshold
+        // forever on repos with enough unsupported-language symbols.
+        const tags = semanticLanguageTags();
+        const placeholders = tags.map(() => "?").join(",");
+        eligibleCandidates = Number(
+          viewDb.prepare(`SELECT COUNT(*) AS c FROM symbols WHERE lang IN (${placeholders})`).get(...tags)?.c,
+        ) || 0;
+      } catch { /* leave 0 */ }
       const branch = meta.branch || "main";
       const viewSeq = Number(meta.ledger_seq);
       let headSeq = null;
@@ -172,7 +186,7 @@ function inspectViewAndTreesitter(repoRoot) {
     try { ledgerDb?.close(); } catch { /* ignore */ }
     try { viewDb?.close(); } catch { /* ignore */ }
   }
-  return { views, treesitter, candidates };
+  return { views, treesitter, candidates, eligibleCandidates };
 }
 
 /**
@@ -194,15 +208,18 @@ function inspectScipLayers(repoRoot, config) {
   } catch {
     entries = [];
   }
+  const readMeta = (outputPath) => {
+    try {
+      return JSON.parse(fs.readFileSync(stagerMetaPathForOutput(outputPath), "utf8"));
+    } catch {
+      return null;
+    }
+  };
+  const stagedOutputs = new Set();
   for (const name of entries) {
     if (!/\.scip$/iu.test(name)) continue;
-    const outputPath = path.join(scipDir, name);
-    let meta = null;
-    try {
-      meta = JSON.parse(fs.readFileSync(stagerMetaPathForOutput(outputPath), "utf8"));
-    } catch {
-      meta = null;
-    }
+    stagedOutputs.add(name.toLowerCase());
+    const meta = readMeta(path.join(scipDir, name));
     const language = String(meta?.language || name.replace(/\.scip$/iu, "")) || "unknown";
     // An absent status field means "staged" — the field postdates schema v1
     // metas, and metaIsCurrent applies the same reading.
@@ -228,6 +245,37 @@ function inspectScipLayers(repoRoot, config) {
         status: "warming",
         coverage: 0,
         detail: `meta status ${status}`,
+      });
+    }
+  }
+  // Meta sidecars whose .scip output is absent: a failed stage never promotes
+  // its temp output, so the normal first-failure state is exactly this —
+  // failed meta, no artifact. Without this pass the failure is invisible
+  // (generic "scip warming", or nothing at all when another language staged
+  // fine) and self-repair's failed-status restage trigger never fires.
+  for (const name of entries) {
+    if (!/\.meta\.json$/iu.test(name)) continue;
+    const outputName = name.replace(/\.meta\.json$/iu, ".scip");
+    if (stagedOutputs.has(outputName.toLowerCase())) continue;
+    const meta = readMeta(path.join(scipDir, outputName));
+    const language = String(meta?.language || outputName.replace(/\.scip$/iu, "")) || "unknown";
+    const status = String(meta?.status || "staged").trim().toLowerCase();
+    if (status === "failed") {
+      const attempts = Number(meta?.attempt_count) || 1;
+      layers.push({
+        layer: `scip:${language}`,
+        status: "failed",
+        coverage: 0,
+        detail: `${meta?.failure_reason || "stage failed"} (attempt ${attempts}, no staged output)`,
+      });
+    } else {
+      // A non-failed meta without its output is inconsistent (artifact
+      // deleted out from under the meta) — report warming, never ready.
+      layers.push({
+        layer: `scip:${language}`,
+        status: "warming",
+        coverage: 0,
+        detail: `meta status ${status} but staged output missing`,
       });
     }
   }
@@ -292,7 +340,9 @@ function inspectTreeCompression(repoRoot, config) {
 /**
  * @param {string} repoRoot
  * @param {Record<string, any>} config
- * @param {number} candidates  Symbol count of the main view (embedding denominator).
+ * @param {number} candidates  Encodable symbol count of the main view (embedding
+ *   denominator) — symbols with language semantics only, matching what the
+ *   embeddings ingest will ever write to keys.db.
  * @param {number} parity
  * @returns {AtlasLayerReadiness[]}
  */
@@ -368,13 +418,13 @@ function inspectEmbeddings(repoRoot, config, candidates, parity) {
  */
 export function computeAtlasLayerReadiness({ repoRoot, config = {}, parity = ATLAS_EMBEDDINGS_PARITY }) {
   const root = String(repoRoot || "");
-  const { views, treesitter, candidates } = inspectViewAndTreesitter(root);
+  const { views, treesitter, eligibleCandidates } = inspectViewAndTreesitter(root);
   const layers = [
     treesitter,
     ...inspectScipLayers(root, config),
     views,
     inspectTreeCompression(root, config),
-    ...inspectEmbeddings(root, config, candidates, parity),
+    ...inspectEmbeddings(root, config, eligibleCandidates, parity),
   ];
   const notReady = layers.filter((layer) => layer.status !== "ready" && layer.status !== "off");
   return { layers, notReady };

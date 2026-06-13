@@ -77,7 +77,8 @@ import {
   attachAtlasPlannerSlice as attachAtlasPlannerSliceFromModule,
   attachAtlasResearcherPrefetch as attachAtlasResearcherPrefetchFromModule,
   classifyAtlasPrefetchRelevance as classifyAtlasPrefetchRelevanceFromModule,
-  renderAtlasHandoffSections as renderAtlasHandoffSectionsFromModule,
+  collectAtlasCoveredFiles as collectAtlasCoveredFilesFromModule,
+  renderAtlasHandoffSectionsWithMeta as renderAtlasHandoffSectionsWithMetaFromModule,
   resolveAtlasHandoffState as resolveAtlasHandoffStateFromModule,
 } from "./helpers/atlas-context.js";
 import { classifyAtlasFailure } from "../../integrations/functions/atlas-embedded.js";
@@ -1625,7 +1626,23 @@ export function attachAssessmentDiffContext(assessmentContext = null, cwd = null
  * The packet is the source of truth — this just formats it for the model.
  */
 export function renderAtlasHandoffSections(packet) {
-  return renderAtlasHandoffSectionsFromModule(packet);
+  const meta = renderAtlasHandoffSectionsWithMetaFromModule(packet);
+  if (packet && typeof packet === "object") {
+    // Stashed for the prompt-section accounting observation (operator-facing
+    // telemetry only; never rendered into the agent prompt).
+    packet.atlas_render_meta = {
+      char_count: meta.charCount,
+      original_length: meta.originalLength,
+      trim_level: meta.trimLevel,
+      truncated: meta.truncated,
+      cap: meta.cap,
+    };
+  }
+  return meta.text;
+}
+
+export function collectAtlasCoveredFiles(packet) {
+  return collectAtlasCoveredFilesFromModule(packet);
 }
 
 export function packetToContextString(packet) {

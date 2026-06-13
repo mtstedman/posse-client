@@ -92,6 +92,7 @@ export {
 export { runAtlasTreeCompressionModelPass } from "./atlas/tree-compression.js";
 export { computeAtlasLayerReadiness, summarizeAtlasReadiness } from "../../atlas/functions/v2/readiness.js";
 export { enqueueAtlasSelfRepair } from "../../atlas/functions/v2/self-repair.js";
+import { enqueueAtlasSelfRepair as enqueueAtlasSelfRepairSync } from "../../atlas/functions/v2/self-repair.js";
 
 const ATLAS_V2_BOOT_WORKER_URL = new URL("./atlas-v2-boot-worker.js", import.meta.url);
 // Boot-time main-view freshness checks run in a worker thread so their
@@ -116,6 +117,51 @@ function inspectMainViewForBootInWorker({ viewPath, branch, ledgerDbPath = null,
     signal,
     workerData: { viewPath, branch, ledgerDbPath },
   });
+}
+
+const ATLAS_READINESS_WORKER_URL = new URL("../../atlas/functions/v2/readiness-worker.js", import.meta.url);
+
+/**
+ * Worker-backed enqueueAtlasSelfRepair: the readiness inspection (synchronous
+ * better-sqlite3 COUNT(*) scans over view symbols and per-model vectors) runs
+ * in a worker thread so a mid-run repair — e.g. backgrounded boot work failing
+ * after the TUI attached — never blocks the CLI event loop or starves the
+ * scheduler's lock-renew heartbeat. The repair-warm enqueues themselves stay
+ * on the main thread (cheap, coalescing outbox writes). Falls back to the
+ * inline inspection if the worker fails — self-repair must stay best-effort.
+ *
+ * @param {{
+ *   repoRoot: string,
+ *   config?: Record<string, any>,
+ *   reason?: string,
+ *   targetBranch?: string,
+ *   onError?: (err: Error) => void,
+ *   timeoutMs?: number,
+ * }} args
+ * @returns {Promise<ReturnType<typeof enqueueAtlasSelfRepairSync>>}
+ */
+export async function enqueueAtlasSelfRepairInWorker({
+  repoRoot,
+  config = {},
+  reason = "unspecified",
+  targetBranch = "main",
+  onError = undefined,
+  timeoutMs = 120_000,
+} = {}) {
+  if (config?.enabled === false) {
+    return { ok: false, skipped: "atlas_disabled", summary: "atlas disabled", layers: [], actions: [] };
+  }
+  let readiness = null;
+  try {
+    readiness = await ATLAS_BOOT_THREAD_MANAGER.run(ATLAS_READINESS_WORKER_URL, {
+      label: "ATLAS readiness inspect",
+      timeoutMs,
+      workerData: { repoRoot, config },
+    });
+  } catch {
+    readiness = null; // worker unavailable — fall back to the inline scan
+  }
+  return enqueueAtlasSelfRepairSync({ repoRoot, config, reason, targetBranch, onError, readiness });
 }
 const ATLAS_POST_COMMIT_HOOK_BEGIN = "# >>> POSSE ATLAS REINDEX (managed) >>>";
 const ATLAS_POST_COMMIT_HOOK_END = "# <<< POSSE ATLAS REINDEX (managed) <<<";
