@@ -86,7 +86,7 @@ import {
 } from "../lib/domains/cli/functions/command-registry.js";
 import { buildImageInjectionPayload, handleWrapUpSignal, PROVIDER_AUTH_WARMUP_TIMEOUT_MS, RunSession } from "../lib/domains/cli/functions/run-session.js";
 import { ReviewSession } from "../lib/domains/cli/functions/review-session.js";
-import { __testResetClaudeResolution } from "../lib/domains/providers/functions/claude.js";
+import { __testResetClaudeResolution, __testSelectWindowsClaudeBinary } from "../lib/domains/providers/functions/claude.js";
 import { getAvailableProviders, getProviderHealth, isProviderReady } from "../lib/domains/providers/functions/provider.js";
 import { artifactsDir, wiScopeId } from "../lib/domains/artifacts/functions/index.js";
 import {
@@ -1109,6 +1109,41 @@ describe("targeted regression bugfixes", () => {
       __testResetClaudeResolution();
       removeTempTree(emptyPath);
     }
+  });
+
+  it("skips the npm POSIX shell shim when resolving the Windows claude binary", () => {
+    // npm's global install lists the extensionless `#!/bin/sh` shim first; it is
+    // not spawnable on Windows, so resolution must prefer the .cmd/.exe wrapper.
+    assert.equal(
+      __testSelectWindowsClaudeBinary([
+        "C:\\Program Files\\nodejs\\claude",
+        "C:\\Program Files\\nodejs\\claude.cmd",
+        "C:\\Program Files\\nodejs\\claude.ps1",
+      ]),
+      "C:\\Program Files\\nodejs\\claude.cmd",
+    );
+    // A native .exe install resolves directly.
+    assert.equal(
+      __testSelectWindowsClaudeBinary(["C:\\Users\\me\\.local\\bin\\claude.exe"]),
+      "C:\\Users\\me\\.local\\bin\\claude.exe",
+    );
+    // PATH order wins among spawnable entries; the .ps1-only / shim entries are skipped.
+    assert.equal(
+      __testSelectWindowsClaudeBinary([
+        "C:\\nope\\claude",
+        "C:\\nope\\claude.ps1",
+        "C:\\first\\claude.cmd",
+        "C:\\second\\claude.exe",
+      ]),
+      "C:\\first\\claude.cmd",
+    );
+    // With no spawnable extension, fall back to the first entry so the missing-CLI
+    // error path still surfaces.
+    assert.equal(
+      __testSelectWindowsClaudeBinary(["C:\\only\\claude", "C:\\only\\claude.ps1"]),
+      "C:\\only\\claude",
+    );
+    assert.equal(__testSelectWindowsClaudeBinary([]), null);
   });
 
   it("does not report Claude health when every role is routed elsewhere", () => withTempAccountSettings(() => {

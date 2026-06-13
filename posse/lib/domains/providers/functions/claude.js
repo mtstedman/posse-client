@@ -379,19 +379,48 @@ export class ClaudeCliNotFoundError extends Error {
   }
 }
 
+// `where claude` can return several entries from a single bin directory. npm's
+// global install drops an extensionless POSIX shell shim (`claude`), a
+// `claude.cmd`, and a `claude.ps1` side by side — and when Node itself lives in
+// `C:\Program Files\nodejs` (npm's default global prefix) those land right next
+// to node. `where` lists the extensionless shim first, but it is a `#!/bin/sh`
+// script Windows CreateProcess cannot execute, so spawning it with shell:false
+// fails (e.g. `spawn C:\Program Files\nodejs\claude ENOENT`). Walk the results in
+// PATH order and take the first entry with an extension Windows can actually
+// launch, falling back to the raw first line so a genuinely missing binary still
+// surfaces the original error.
+const WINDOWS_SPAWNABLE_CLAUDE_EXTS = new Set([".exe", ".cmd", ".bat", ".com"]);
+
+function selectWindowsClaudeBinary(lines) {
+  const candidates = (Array.isArray(lines) ? lines : [])
+    .map((line) => String(line || "").trim())
+    .filter(Boolean);
+  if (candidates.length === 0) return null;
+  const spawnable = candidates.find((candidate) =>
+    WINDOWS_SPAWNABLE_CLAUDE_EXTS.has(path.extname(candidate).toLowerCase())
+  );
+  return spawnable || candidates[0];
+}
+
+export function __testSelectWindowsClaudeBinary(lines) {
+  return selectWindowsClaudeBinary(lines);
+}
+
 function resolveClaude() {
   const isWin = process.platform === "win32";
   const cmd = isWin ? "where claude" : "which claude";
 
   let binPath;
   try {
-    binPath = execSync(cmd, {
+    const lines = execSync(cmd, {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
-    }).trim().split(/\r?\n/)[0];
+    }).trim().split(/\r?\n/);
+    binPath = isWin ? selectWindowsClaudeBinary(lines) : (lines[0] || "").trim();
   } catch {
     throw new ClaudeCliNotFoundError();
   }
+  if (!binPath) throw new ClaudeCliNotFoundError();
 
   // On Windows, parse the .cmd wrapper to extract the JS entry point
   if (isWin && binPath.toLowerCase().endsWith(".cmd")) {
@@ -440,12 +469,15 @@ function findClaudeBinaryAsync() {
         reject(new ClaudeCliNotFoundError());
         return;
       }
-      const first = String(stdout || "").trim().split(/\r?\n/).find(Boolean);
-      if (!first) {
+      const lines = String(stdout || "").trim().split(/\r?\n/);
+      const selected = isWin
+        ? selectWindowsClaudeBinary(lines)
+        : lines.map((line) => line.trim()).find(Boolean);
+      if (!selected) {
         reject(new ClaudeCliNotFoundError());
         return;
       }
-      resolve(first);
+      resolve(selected);
     });
   });
 }
