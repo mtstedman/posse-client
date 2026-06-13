@@ -406,6 +406,32 @@ export function __testSelectWindowsClaudeBinary(lines) {
   return selectWindowsClaudeBinary(lines);
 }
 
+// Parse an npm-style `claude.cmd` wrapper and return the absolute path to the JS
+// entry point it launches (so we can run it as `node <entry>` rather than
+// spawning the `.cmd` itself). Returns null when no entry can be parsed.
+//
+// npm emits the wrapper's own directory in one of two forms: the classic
+// `%~dp0` (trailing-backslash) token, and the `%dp0%` token set by the
+// `:find_dp0` helper that newer npm generates. Only rewriting `%~dp0` left the
+// `%dp0%` form unresolved, so resolution fell back to spawning `claude.cmd`
+// directly — which Node refuses with EINVAL since the CVE-2024-27980 fix
+// (Node 18.20.2 / 20.12.2 / 21.7.2+). Rewrite both forms.
+function extractCmdShimJsPath(cmdContent, binPath) {
+  const content = String(cmdContent || "");
+  const jsMatch = content.match(/"([^"]*(?:claude-code|claude)[^"]*\.(?:js|mjs))"/i)
+               || content.match(/node\s+"?([^\s"]+\.(?:js|mjs))"?/i);
+  if (!jsMatch) return null;
+  const cmdDir = path.dirname(binPath);
+  const jsPath = jsMatch[1]
+    .replace(/%~dp0\\?/gi, cmdDir + path.sep)
+    .replace(/%dp0%\\?/gi, cmdDir + path.sep);
+  return path.resolve(jsPath);
+}
+
+export function __testExtractCmdShimJsPath(cmdContent, binPath) {
+  return extractCmdShimJsPath(cmdContent, binPath);
+}
+
 function resolveClaude() {
   const isWin = process.platform === "win32";
   const cmd = isWin ? "where claude" : "which claude";
@@ -426,20 +452,11 @@ function resolveClaude() {
   if (isWin && binPath.toLowerCase().endsWith(".cmd")) {
     try {
       const cmdContent = fs.readFileSync(binPath, "utf-8");
-      const jsMatch = cmdContent.match(/"([^"]*(?:claude-code|claude)[^"]*\.(?:js|mjs))"/i)
-                   || cmdContent.match(/node\s+"?([^\s"]+\.(?:js|mjs))"?/i);
-
-      if (jsMatch) {
-        let jsPath = jsMatch[1];
-        const cmdDir = path.dirname(binPath);
-        jsPath = jsPath.replace(/%~dp0\\?/gi, cmdDir + path.sep);
-        jsPath = path.resolve(jsPath);
-
-        if (fs.existsSync(jsPath)) {
-          CLAUDE_CMD = process.execPath;
-          CLAUDE_ARGS = [jsPath];
-          return;
-        }
+      const jsPath = extractCmdShimJsPath(cmdContent, binPath);
+      if (jsPath && fs.existsSync(jsPath)) {
+        CLAUDE_CMD = process.execPath;
+        CLAUDE_ARGS = [jsPath];
+        return;
       }
     } catch { /* fall through */ }
 
@@ -487,13 +504,8 @@ async function resolveClaudeAsync() {
   if (process.platform === "win32" && binPath.toLowerCase().endsWith(".cmd")) {
     try {
       const cmdContent = await fs.promises.readFile(binPath, "utf-8");
-      const jsMatch = cmdContent.match(/"([^"]*(?:claude-code|claude)[^"]*\.(?:js|mjs))"/i)
-                   || cmdContent.match(/node\s+"?([^\s"]+\.(?:js|mjs))"?/i);
-      if (jsMatch) {
-        let jsPath = jsMatch[1];
-        const cmdDir = path.dirname(binPath);
-        jsPath = jsPath.replace(/%~dp0\\?/gi, cmdDir + path.sep);
-        jsPath = path.resolve(jsPath);
+      const jsPath = extractCmdShimJsPath(cmdContent, binPath);
+      if (jsPath) {
         await fs.promises.access(jsPath);
         CLAUDE_CMD = process.execPath;
         CLAUDE_ARGS = [jsPath];
