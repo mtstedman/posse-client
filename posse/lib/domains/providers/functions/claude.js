@@ -1908,7 +1908,10 @@ async function writeClaudeInteractivePrompt(session, prompt) {
   // Bracketed paste: without it the TUI treats every embedded \n as Enter and
   // submits the prompt piecemeal. The settle delays before each Enter remain —
   // the TUI needs time to ingest a large paste before it accepts the submit.
-  session.write(`\x1b[200~${text}\x1b[201~`);
+  // Strip any embedded end-paste marker so prompt content can't close paste
+  // mode early and have its tail interpreted as terminal input.
+  const pasteSafe = text.replace(/\x1b\[201~/g, "");
+  session.write(`\x1b[200~${pasteSafe}\x1b[201~`);
   await sleepInteractiveMs(1_000);
   session.write("\r");
   await sleepInteractiveMs(1_000);
