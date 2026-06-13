@@ -406,30 +406,55 @@ export function __testSelectWindowsClaudeBinary(lines) {
   return selectWindowsClaudeBinary(lines);
 }
 
-// Parse an npm-style `claude.cmd` wrapper and return the absolute path to the JS
-// entry point it launches (so we can run it as `node <entry>` rather than
-// spawning the `.cmd` itself). Returns null when no entry can be parsed.
-//
-// npm emits the wrapper's own directory in one of two forms: the classic
-// `%~dp0` (trailing-backslash) token, and the `%dp0%` token set by the
-// `:find_dp0` helper that newer npm generates. Only rewriting `%~dp0` left the
-// `%dp0%` form unresolved, so resolution fell back to spawning `claude.cmd`
-// directly — which Node refuses with EINVAL since the CVE-2024-27980 fix
-// (Node 18.20.2 / 20.12.2 / 21.7.2+). Rewrite both forms.
-function extractCmdShimJsPath(cmdContent, binPath) {
+// Resolve an `%~dp0`/`%dp0%`-relative path emitted inside a `.cmd` shim to an
+// absolute path. npm emits the wrapper's own directory in one of two forms: the
+// classic `%~dp0` (trailing-backslash) token, and the `%dp0%` token set by the
+// `:find_dp0` helper that newer npm generates. Rewrite both.
+function rewriteCmdShimPath(rawPath, cmdDir) {
+  return path.resolve(
+    String(rawPath)
+      .replace(/%~dp0\\?/gi, cmdDir + path.sep)
+      .replace(/%dp0%\\?/gi, cmdDir + path.sep)
+  );
+}
+
+// Parse an npm-style `claude.cmd` wrapper and return what it actually launches.
+// Two shapes exist in the wild:
+//   - older shims run `node "<entry>.js"` — we re-launch as `node <entry>`
+//   - newer shims (and the bundled @anthropic-ai/claude-code install) invoke a
+//     native `"<dir>\bin\claude.exe" %*` directly — we launch the .exe directly
+// Either way the `.cmd` itself must NOT be spawned with shell:false — Node
+// refuses it with EINVAL since the CVE-2024-27980 fix (Node 18.20.2 / 20.12.2 /
+// 21.7.2+), which is what produced the "posse go" EINVAL on the claude provider.
+// Returns { kind: "node" | "exe", path } or null when nothing can be parsed.
+function extractCmdShimTarget(cmdContent, binPath) {
   const content = String(cmdContent || "");
+  const cmdDir = path.dirname(binPath);
   const jsMatch = content.match(/"([^"]*(?:claude-code|claude)[^"]*\.(?:js|mjs))"/i)
                || content.match(/node\s+"?([^\s"]+\.(?:js|mjs))"?/i);
-  if (!jsMatch) return null;
-  const cmdDir = path.dirname(binPath);
-  const jsPath = jsMatch[1]
-    .replace(/%~dp0\\?/gi, cmdDir + path.sep)
-    .replace(/%dp0%\\?/gi, cmdDir + path.sep);
-  return path.resolve(jsPath);
+  if (jsMatch) {
+    return { kind: "node", path: rewriteCmdShimPath(jsMatch[1], cmdDir) };
+  }
+  const exeMatch = content.match(/"([^"]*\.exe)"/i)
+               || content.match(/(\S+\.exe)/i);
+  if (exeMatch) {
+    return { kind: "exe", path: rewriteCmdShimPath(exeMatch[1], cmdDir) };
+  }
+  return null;
+}
+
+// Backwards-compatible helper: only the JS-entry form (returns null otherwise).
+function extractCmdShimJsPath(cmdContent, binPath) {
+  const target = extractCmdShimTarget(cmdContent, binPath);
+  return target?.kind === "node" ? target.path : null;
 }
 
 export function __testExtractCmdShimJsPath(cmdContent, binPath) {
   return extractCmdShimJsPath(cmdContent, binPath);
+}
+
+export function __testExtractCmdShimTarget(cmdContent, binPath) {
+  return extractCmdShimTarget(cmdContent, binPath);
 }
 
 function resolveClaude() {
@@ -448,14 +473,20 @@ function resolveClaude() {
   }
   if (!binPath) throw new ClaudeCliNotFoundError();
 
-  // On Windows, parse the .cmd wrapper to extract the JS entry point
+  // On Windows, parse the .cmd wrapper to extract the real target it launches
+  // (a node JS entry, or a native claude.exe) so we never spawn the .cmd itself.
   if (isWin && binPath.toLowerCase().endsWith(".cmd")) {
     try {
       const cmdContent = fs.readFileSync(binPath, "utf-8");
-      const jsPath = extractCmdShimJsPath(cmdContent, binPath);
-      if (jsPath && fs.existsSync(jsPath)) {
+      const target = extractCmdShimTarget(cmdContent, binPath);
+      if (target?.kind === "node" && fs.existsSync(target.path)) {
         CLAUDE_CMD = process.execPath;
-        CLAUDE_ARGS = [jsPath];
+        CLAUDE_ARGS = [target.path];
+        return;
+      }
+      if (target?.kind === "exe" && fs.existsSync(target.path)) {
+        CLAUDE_CMD = target.path;
+        CLAUDE_ARGS = [];
         return;
       }
     } catch { /* fall through */ }
@@ -504,11 +535,17 @@ async function resolveClaudeAsync() {
   if (process.platform === "win32" && binPath.toLowerCase().endsWith(".cmd")) {
     try {
       const cmdContent = await fs.promises.readFile(binPath, "utf-8");
-      const jsPath = extractCmdShimJsPath(cmdContent, binPath);
-      if (jsPath) {
-        await fs.promises.access(jsPath);
+      const target = extractCmdShimTarget(cmdContent, binPath);
+      if (target?.kind === "node") {
+        await fs.promises.access(target.path);
         CLAUDE_CMD = process.execPath;
-        CLAUDE_ARGS = [jsPath];
+        CLAUDE_ARGS = [target.path];
+        return;
+      }
+      if (target?.kind === "exe") {
+        await fs.promises.access(target.path);
+        CLAUDE_CMD = target.path;
+        CLAUDE_ARGS = [];
         return;
       }
     } catch {

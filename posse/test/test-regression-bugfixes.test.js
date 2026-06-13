@@ -86,7 +86,7 @@ import {
 } from "../lib/domains/cli/functions/command-registry.js";
 import { buildImageInjectionPayload, handleWrapUpSignal, PROVIDER_AUTH_WARMUP_TIMEOUT_MS, RunSession } from "../lib/domains/cli/functions/run-session.js";
 import { ReviewSession } from "../lib/domains/cli/functions/review-session.js";
-import { __testResetClaudeResolution, __testSelectWindowsClaudeBinary } from "../lib/domains/providers/functions/claude.js";
+import { __testExtractCmdShimTarget, __testResetClaudeResolution, __testSelectWindowsClaudeBinary } from "../lib/domains/providers/functions/claude.js";
 import { getAvailableProviders, getProviderHealth, isProviderReady } from "../lib/domains/providers/functions/provider.js";
 import { artifactsDir, wiScopeId } from "../lib/domains/artifacts/functions/index.js";
 import {
@@ -1144,6 +1144,43 @@ describe("targeted regression bugfixes", () => {
       "C:\\only\\claude",
     );
     assert.equal(__testSelectWindowsClaudeBinary([]), null);
+  });
+
+  it("resolves the native claude.exe target from a modern claude.cmd shim", () => {
+    // The bundled @anthropic-ai/claude-code install ships a `.cmd` wrapper that
+    // launches a native `claude.exe` directly (no `node <entry>.js`). Spawning
+    // the `.cmd` with shell:false fails with EINVAL since the CVE-2024-27980
+    // fix, so resolution must extract the `.exe` target instead. Covers the
+    // `%dp0%`/`:find_dp0` form newer npm emits.
+    const binPath = "C:\\Program Files\\nodejs\\claude.cmd";
+    const cmdContent = [
+      "@ECHO off",
+      "GOTO start",
+      ":find_dp0",
+      "SET dp0=%~dp0",
+      "EXIT /b",
+      ":start",
+      "SETLOCAL",
+      "CALL :find_dp0",
+      '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*',
+    ].join("\r\n");
+    assert.deepEqual(
+      __testExtractCmdShimTarget(cmdContent, binPath),
+      {
+        kind: "exe",
+        path: "C:\\Program Files\\nodejs\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe",
+      },
+    );
+
+    // Older `node "<entry>.js"` shims still resolve to a node target.
+    const nodeShim = '"%~dp0\\node.exe"  "%~dp0\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*';
+    const nodeTarget = __testExtractCmdShimTarget(nodeShim, binPath);
+    assert.equal(nodeTarget.kind, "node");
+    assert.match(nodeTarget.path, /cli\.js$/);
+
+    // A wrapper that launches nothing recognizable yields null (caller then
+    // falls back to spawning the wrapper directly, surfacing the real error).
+    assert.equal(__testExtractCmdShimTarget("@echo off\r\nrem nothing\r\n", binPath), null);
   });
 
   it("does not report Claude health when every role is routed elsewhere", () => withTempAccountSettings(() => {
