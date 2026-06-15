@@ -55,6 +55,7 @@ export class RemoteComposer {
     maxPromptChars = null,
     maxContextChars = null,
   } = {}) {
+    const localPolicyBeforeRemote = localPolicyCeiling(packet?.tool_policy);
     const request = buildRemoteCompileRequest(packet, instructions, {
       providerName,
       maxPromptChars,
@@ -101,15 +102,25 @@ export class RemoteComposer {
       });
     }
     applyRemoteIssuanceToPacket(packet, response);
-    const systemPrompt = String(response?.system_prompt || "").trim() || null;
-    const stableContext = String(response?.stable_context || "").trim() || null;
-    const remoteUserPrompt = String(response?.user_prompt || "").trim() || null;
-    const skeleton = response?.final_prompt || joinPromptParts([
+    const preserveAssessorShell = shouldPreserveAssessorReadOnlyShell(packet, localPolicyBeforeRemote);
+    let systemPrompt = String(response?.system_prompt || "").trim() || null;
+    let stableContext = String(response?.stable_context || "").trim() || null;
+    let remoteUserPrompt = String(response?.user_prompt || "").trim() || null;
+    if (preserveAssessorShell) {
+      systemPrompt = normalizeRemoteAssessorShellWording(systemPrompt);
+      stableContext = normalizeRemoteAssessorShellWording(stableContext);
+      remoteUserPrompt = normalizeRemoteAssessorShellWording(remoteUserPrompt);
+    }
+    let skeleton = response?.final_prompt || joinPromptParts([
       systemPrompt,
       stableContext,
       remoteUserPrompt,
     ]);
+    if (preserveAssessorShell) skeleton = normalizeRemoteAssessorShellWording(skeleton);
     if (!skeleton) throw new Error("remote prompt compile returned an empty prompt");
+    const localPolicyOverlay = renderLocalPolicyOverlay(packet, {
+      localPolicy: localPolicyBeforeRemote,
+    });
     // The enrichment cwd is the local file-read sandbox root. It must come
     // from the local packet, never the remote response — a compromised remote
     // could otherwise point cwd at an arbitrary directory and have its files
@@ -117,8 +128,8 @@ export class RemoteComposer {
     const enrichment = this.renderEnrichment(response?.handoff, {
       cwd: packet?.cwd || process.cwd(),
     });
-    const prompt = joinPromptParts([skeleton, enrichment]);
-    const userPrompt = joinPromptParts([remoteUserPrompt || skeleton, enrichment]);
+    const prompt = joinPromptParts([skeleton, localPolicyOverlay, enrichment]);
+    const userPrompt = joinPromptParts([remoteUserPrompt || skeleton, localPolicyOverlay, enrichment]);
     const promptCap = Number(maxPromptChars);
     if (Number.isFinite(promptCap) && promptCap > 0 && prompt.length > promptCap) {
       const err = new Error(`remote prompt plus local enrichment exceeded max prompt chars (${prompt.length} > ${promptCap})`);
@@ -181,6 +192,7 @@ function recordPromptSectionAccounting(packet, composed) {
 function applyRemoteIssuanceToPacket(packet, response) {
   if (!packet || !response) return;
   const issuance = response.issuance || null;
+  const localPolicy = localPolicyCeiling(packet.tool_policy);
   if (issuance) {
     packet.remote_issuance = issuance;
     packet.remote_tool_surface = Array.isArray(issuance.tool_surface)
@@ -189,12 +201,15 @@ function applyRemoteIssuanceToPacket(packet, response) {
   }
   const policy = issuance?.tool_policy || response?.handoff?.tool_policy || null;
   if (policy) {
-    const localPolicy = localPolicyCeiling(packet.tool_policy);
+    const preserveAssessorShell = shouldPreserveAssessorReadOnlyShell(packet, localPolicy);
     packet.tool_policy = {
       allow_read: clampPolicyGrant(policy.allow_read, localPolicy, "allow_read"),
       allow_write: clampPolicyGrant(policy.allow_write, localPolicy, "allow_write"),
-      allow_shell: clampPolicyGrant(policy.allow_shell, localPolicy, "allow_shell"),
+      allow_shell: preserveAssessorShell ? true : clampPolicyGrant(policy.allow_shell, localPolicy, "allow_shell"),
     };
+    if (preserveAssessorShell && Array.isArray(packet.remote_tool_surface) && !packet.remote_tool_surface.includes("tools.bash")) {
+      packet.remote_tool_surface.push("tools.bash");
+    }
     packet.budgets = {
       ...(packet.budgets || {}),
       fallback_reads_remaining: resolveFallbackReadBudget(
@@ -232,6 +247,30 @@ function promptVersionSkewMetadata(bundlePromptVersion, compilePromptVersion) {
 function localPolicyCeiling(policy) {
   if (!policy || typeof policy !== "object") return null;
   return policy;
+}
+
+function shouldPreserveAssessorReadOnlyShell(packet, localPolicy) {
+  return String(packet?.recipient || packet?.job_type || "").toLowerCase() === "assessor"
+    && localPolicy?.allow_shell === true
+    && localPolicy?.allow_write === false;
+}
+
+function renderLocalPolicyOverlay(packet, { localPolicy = null } = {}) {
+  if (!shouldPreserveAssessorReadOnlyShell(packet, localPolicy || packet?.tool_policy)) return "";
+  return [
+    "LOCAL EXECUTION POLICY NOTE:",
+    "- Assessor shell policy: read-only bash is allowed for inspection and verification commands only.",
+    "- Use run_scoped_checks for lint/typecheck, including PHP syntax checks; do not run php -l or php --syntax-check through bash.",
+    "- Assessors have no write permission. Bash must not modify files.",
+  ].join("\n");
+}
+
+function normalizeRemoteAssessorShellWording(text) {
+  if (!text) return text;
+  return String(text).replace(
+    /^(\s*allow_shell:\s*)false\s*$/gmi,
+    "$1true  # read-only assessor bash; use run_scoped_checks for lint/typecheck",
+  );
 }
 
 function clampPolicyGrant(remoteGrant, localPolicy, key) {

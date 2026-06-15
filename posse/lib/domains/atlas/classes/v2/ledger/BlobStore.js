@@ -478,6 +478,8 @@ export class BlobStore {
 
       /** @type {Map<number, number>} */
       const localIdMap = new Map();
+      /** @type {Array<{ sym: SymbolRow, newLocalId: number }>} */
+      const symbolsToInsert = [];
       for (const sym of symbols || []) {
         this.#assertSymbolShape(sym, content_hash);
         const key = symbolMergeKey(sym);
@@ -490,6 +492,10 @@ export class BlobStore {
         const newLocalId = nextLocalId++;
         localIdMap.set(sym.local_id, newLocalId);
         existingByKey.set(key, newLocalId);
+        symbolsToInsert.push({ sym, newLocalId });
+      }
+
+      for (const { sym, newLocalId } of symbolsToInsert) {
         const kindId = this.#interner.internString(sym.kind);
         const nameId = this.#interner.internString(sym.name);
         const qualifiedNameId =

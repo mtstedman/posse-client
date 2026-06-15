@@ -98,6 +98,8 @@ export function ProcessTransport(opts) {
       proc.stdout?.unref();
       proc.stderr?.unref();
       proc.stdin?.unref();
+      proc.stdin?.on?.("error", () => {});
+      proc.stdout?.setEncoding?.("utf8");
       // Hard-ledger the child so a crashed parent's orphan can be reaped at the
       // next boot (the unref above means the OS won't clean it up for us).
       spawnedPid = proc.pid ?? null;

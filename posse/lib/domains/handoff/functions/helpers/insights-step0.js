@@ -133,9 +133,10 @@ export function loadRelevantInsights(role, payload) {
     const byCreatedDesc = (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""));
     const seen = new Set();
     const selected = [];
+    const fileScoped = [];
 
     if (["dev", "fix", "researcher", "planner"].includes(role) && filePaths.length > 0) {
-      pushUnique(selected, getInsights({ limit: 8, file_paths: filePaths, only_actionable: true }), seen);
+      pushUnique(fileScoped, getInsights({ limit: 8, file_paths: filePaths, only_actionable: true }), new Set());
     }
 
     if (["planner", "researcher", "dev", "fix"].includes(role)) {
@@ -160,11 +161,10 @@ export function loadRelevantInsights(role, payload) {
       pushUnique(selected, failures.slice(0, 2), seen);
       pushUnique(selected, patterns.slice(0, 2), seen);
     }
+    pushUnique(selected, fileScoped, seen);
 
     if (selected.length > 0) {
-      return selected
-        .sort(byCreatedDesc)
-        .slice(0, 6);
+      return selected.slice(0, 6);
     }
     return [];
   } catch {

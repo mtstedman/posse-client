@@ -119,23 +119,26 @@ function payloadForDbEvent(row) {
       event: redactedEvent,
     };
   }
+  const { event_json: _eventJson, ...safeRow } = row;
   return {
-    ...row,
+    ...safeRow,
     event: redactedEvent,
   };
 }
 
 function normalizeJobPayload(row) {
+  const { payload_json: _payloadJson, result_json: _resultJson, ...safeRow } = row;
   return {
-    ...row,
+    ...safeRow,
     payload: redactBridgeValue(parseJsonField(row.payload_json)),
     result: redactBridgeValue(parseJsonField(row.result_json)),
   };
 }
 
 function normalizeWorkItemPayload(row) {
+  const { metadata_json: _metadataJson, ...safeRow } = row;
   return {
-    ...row,
+    ...safeRow,
     metadata: redactBridgeValue(parseJsonField(row.metadata_json)),
   };
 }

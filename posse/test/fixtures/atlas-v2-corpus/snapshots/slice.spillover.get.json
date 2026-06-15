@@ -1,9 +1,0 @@
-{
-  "ok": false,
-  "action": "slice.spillover.get",
-  "versionId": "corpus@v1",
-  "error": {
-    "code": "unknown_spillover_handle",
-    "message": "No spillover for handle sl_unknown:spill"
-  }
-}

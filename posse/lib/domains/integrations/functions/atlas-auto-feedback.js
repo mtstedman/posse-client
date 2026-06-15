@@ -21,6 +21,13 @@ export function resolveAtlasAutoFeedbackMode(config = null) {
   return "off";
 }
 
+export function classifyAtlasAutoFeedbackEmitResult(result) {
+  if (/^Error:/i.test(String(result || ""))) {
+    return { ok: false, emitted: false, reason: "emit_rejected" };
+  }
+  return { ok: true, emitted: true, reason: null };
+}
+
 /**
  * @param {{ job?: any, attemptId?: any, cwd?: string | null, config?: any, outcome?: string | null }} [opts]
  */
@@ -80,20 +87,28 @@ export async function emitAtlasAutoFeedbackForJob({
       attempt_id: attemptId,
       role: roleForFeedback(job.job_type),
     }, () => executeEmbeddedAtlasTool("agent.feedback", candidate.payload, executeOpts));
+    const emitResult = classifyAtlasAutoFeedbackEmitResult(result);
+    const resultText = String(result || "");
     recordObservation(/** @type {any} */ ({
       work_item_id: job.work_item_id ?? null,
       job_id: job.id,
       attempt_id: attemptId,
       observation_type: "atlas.feedback.emit",
-      summary: `ATLAS auto-feedback emitted ${candidate.payload.usefulSymbols.length} useful symbol(s)`,
+      summary: emitResult.ok
+        ? `ATLAS auto-feedback emitted ${candidate.payload.usefulSymbols.length} useful symbol(s)`
+        : `ATLAS auto-feedback rejected: ${resultText.slice(0, 120)}`,
       detail: {
         mode,
-        ok: !/^Error:/i.test(String(result || "")),
+        ok: emitResult.ok,
         useful_count: candidate.payload.usefulSymbols.length,
         version_id: candidate.diagnostics?.versionId || null,
         slice_handle: candidate.payload.sliceHandle,
+        ...(emitResult.ok ? {} : { error: resultText.slice(0, 500) }),
       },
     }));
+    if (!emitResult.ok) {
+      return { ok: false, mode, emitted: false, reason: emitResult.reason, candidate, result };
+    }
     return { ok: true, mode, emitted: true, candidate, result };
   } catch (err) {
     recordObservation(/** @type {any} */ ({

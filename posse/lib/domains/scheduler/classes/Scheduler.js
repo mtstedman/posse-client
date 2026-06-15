@@ -418,6 +418,9 @@ export class Scheduler {
     this._lastSchedulerLockRenewedAt = 0;
     this._lastSchedulerLockStarvedAt = 0;
     this._lockStarvationThresholdMs = opts.lockStarvationThresholdMs || LOCK_RENEW_SEC * 1500;
+    this._schedulerLockRenewalErrorCount = 0;
+    this._schedulerLockRenewalFirstErrorAt = 0;
+    this._lockRenewalErrorMaxMs = Math.max(1, Number(opts.lockRenewalErrorMaxMs) || LOCK_RENEW_SEC * 2 * 1000);
 
     // Job-dispatch gate. Holds leasing until the initial (cold) ATLAS index
     // build resolves, so the full index is built pre-flight — before the main
@@ -676,6 +679,27 @@ export class Scheduler {
     });
   }
 
+  _stopForSchedulerLockLoss(message, { eventType = null, eventJson = null } = {}) {
+    this._log(message, "red");
+    this._lockLost = true;
+    this._running = false;
+    if (this._lockInterval) {
+      clearInterval(this._lockInterval);
+      this._lockInterval = null;
+    }
+    if (eventType) {
+      logEvent({
+        event_type: eventType,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        actor_id: this.ownerId,
+        message,
+        ...(eventJson ? { event_json: eventJson } : {}),
+      });
+    }
+    this._abortActiveWorkersForLockLoss();
+    this._wakeSleeps();
+  }
+
   _renewSchedulerLock() {
     if (!this._running) return false;
     const nowMs = Date.now();
@@ -689,22 +713,46 @@ export class Scheduler {
       // no catch, so a throw becomes an uncaughtException → recordFatalCrash →
       // process.exit(1). Keep running and let the next interval retry; the lock
       // is still valid for ~LOCK_RENEW_SEC after the last successful renew. (B2)
-      this._log(`Scheduler lock renewal errored (transient — will retry next interval): ${err?.message || err}`, "yellow");
-      log.warn("scheduler", "scheduler lock renewal errored (transient)", { error: err?.message || String(err) });
+      this._schedulerLockRenewalErrorCount += 1;
+      if (!this._schedulerLockRenewalFirstErrorAt) this._schedulerLockRenewalFirstErrorAt = nowMs;
+      const lastGoodMs = this._lastSchedulerLockRenewedAt || this._schedulerLockRenewalFirstErrorAt;
+      const elapsedSinceSuccessMs = nowMs - lastGoodMs;
+      const errorText = err?.message || String(err);
+      if (elapsedSinceSuccessMs >= this._lockRenewalErrorMaxMs) {
+        const message = `Scheduler lock renewal errored for ${Math.ceil(elapsedSinceSuccessMs / 1000)}s; treating scheduler lock as lost`;
+        log.warn("scheduler", "scheduler lock renewal errored past safety window", {
+          error: errorText,
+          errorCount: this._schedulerLockRenewalErrorCount,
+          elapsedSinceSuccessMs,
+          maxErrorMs: this._lockRenewalErrorMaxMs,
+        });
+        this._stopForSchedulerLockLoss(message, {
+          eventType: EVENT_TYPES.SCHEDULER_LOCK_RENEWAL_FAILED,
+          eventJson: {
+            error: errorText,
+            error_count: this._schedulerLockRenewalErrorCount,
+            elapsed_since_success_ms: elapsedSinceSuccessMs,
+            max_error_ms: this._lockRenewalErrorMaxMs,
+            lock_renew_sec: LOCK_RENEW_SEC,
+          },
+        });
+        return false;
+      }
+      this._log(`Scheduler lock renewal errored (transient - will retry next interval): ${errorText}`, "yellow");
+      log.warn("scheduler", "scheduler lock renewal errored (transient)", {
+        error: errorText,
+        errorCount: this._schedulerLockRenewalErrorCount,
+        elapsedSinceSuccessMs,
+        maxErrorMs: this._lockRenewalErrorMaxMs,
+      });
       return true;
     }
     if (!renewed) {
-      this._log("Lock stolen by another scheduler - stopping", "red");
-      this._lockLost = true;
-      this._running = false;
-      if (this._lockInterval) {
-        clearInterval(this._lockInterval);
-        this._lockInterval = null;
-      }
-      this._abortActiveWorkersForLockLoss();
-      this._wakeSleeps();
+      this._stopForSchedulerLockLoss("Lock stolen by another scheduler - stopping");
       return false;
     }
+    this._schedulerLockRenewalErrorCount = 0;
+    this._schedulerLockRenewalFirstErrorAt = 0;
     this._lastSchedulerLockRenewedAt = nowMs;
     return true;
   }
@@ -1056,6 +1104,9 @@ export class Scheduler {
     emitBootEvent("lock acquired", { section: "scheduler", status: "ok", detail: "held" });
 
     this._running = true;
+    this._lastSchedulerLockRenewedAt = Date.now();
+    this._schedulerLockRenewalErrorCount = 0;
+    this._schedulerLockRenewalFirstErrorAt = 0;
     if (!this._startLockRenewal()) return false;
     return true;
   }

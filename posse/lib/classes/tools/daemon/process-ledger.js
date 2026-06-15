@@ -9,9 +9,9 @@
 //
 // The ledger is the durable record that lets boot reap those orphans:
 //
-//   - On spawn:    append { pid, bin, startedAt } to THIS process's ledger file.
+//   - On spawn:    append { pid, bin, startedAt } to THIS thread's ledger shard.
 //   - On teardown: each daemon kill forgets its pid; when the last is gone the
-//                  ledger file is deleted. A clean shutdown therefore leaves no
+//                  ledger shard is deleted. A clean shutdown therefore leaves no
 //                  file; a crash leaves the file behind as a breadcrumb.
 //   - On boot:     reap ledgers whose OWNER process is dead — kill the orphaned
 //                  child pids they list (verified by image name so a recycled
@@ -19,13 +19,21 @@
 //                  owned by a still-alive process (a concurrent posse instance)
 //                  are left untouched.
 //
-// Files are keyed by owner pid: <home>/.posse/daemons/<ownerPid>.json.
+// Files are sharded by owner pid + worker thread:
+// <home>/.posse/daemons/<ownerPid>-<threadId>.json. Boot reaping still accepts
+// the legacy unsharded <ownerPid>.json shape.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { threadId } from "node:worker_threads";
+
+const LEDGER_LOCK_WAIT_MS = 5000;
+const LEDGER_LOCK_RETRY_MS = 2;
+const LEDGER_LOCK_STALE_CHECK_MS = 100;
+const LEDGER_LOCK_STALE_MS = 30_000;
+const LEDGER_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
 
 // Global by default so any boot can find a crashed session's breadcrumbs.
 // Overridable only via the test hook below (no env/admin knob — there is no
@@ -44,7 +52,106 @@ export function setDaemonLedgerDirForTests(dir = null) {
 }
 
 function ownLedgerPath() {
-  return path.join(ledgerDir(), `${process.pid}.json`);
+  return path.join(ledgerDir(), `${process.pid}-${threadId}.json`);
+}
+
+function parseLedgerOwnerPid(name) {
+  const match = /^(\d+)(?:-\d+)?\.json$/.exec(String(name || ""));
+  if (!match) return null;
+  const ownerPid = Number(match[1]);
+  return Number.isInteger(ownerPid) ? ownerPid : null;
+}
+
+function ownLedgerFiles() {
+  const dir = ledgerDir();
+  try {
+    return fs.readdirSync(dir)
+      .filter((name) => parseLedgerOwnerPid(name) === process.pid)
+      .map((name) => path.join(dir, name));
+  } catch {
+    return [];
+  }
+}
+
+function sleepSync(ms) {
+  try { Atomics.wait(LEDGER_LOCK_SLEEP, 0, 0, ms); } catch { /* best effort */ }
+}
+
+function readLockInfo(lockFile) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(lockFile, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function isStaleLock(lockFile, now = Date.now()) {
+  const info = readLockInfo(lockFile);
+  const createdAt = Number(info.createdAt || 0);
+  const ownerPid = Number(info.pid || 0);
+  if (Number.isInteger(ownerPid) && ownerPid > 0 && !isAlive(ownerPid)) return true;
+  if (!Number.isFinite(createdAt) || createdAt <= 0) {
+    try {
+      const stat = fs.statSync(lockFile);
+      return now - stat.mtimeMs > LEDGER_LOCK_STALE_MS;
+    } catch {
+      return true;
+    }
+  }
+  return now - createdAt > LEDGER_LOCK_STALE_MS;
+}
+
+function removeLockFile(lockFile, waitMs = 0) {
+  const deadline = Date.now() + waitMs;
+  while (true) {
+    try {
+      fs.rmSync(lockFile, { force: true });
+      return true;
+    } catch {
+      if (Date.now() >= deadline) return false;
+      sleepSync(LEDGER_LOCK_RETRY_MS);
+    }
+  }
+}
+
+function acquireLedgerLock(file) {
+  const lockFile = `${file}.lock`;
+  const deadline = Date.now() + LEDGER_LOCK_WAIT_MS;
+  let nextStaleCheckAt = 0;
+  while (true) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const fd = fs.openSync(lockFile, "wx");
+      try {
+        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, threadId, createdAt: Date.now() }));
+      } finally {
+        try { fs.closeSync(fd); } catch { /* ignore */ }
+      }
+      return () => {
+        removeLockFile(lockFile, 1000);
+      };
+    } catch (err) {
+      if (/** @type {any} */ (err)?.code !== "EEXIST") return null;
+      const now = Date.now();
+      if (now >= nextStaleCheckAt) {
+        nextStaleCheckAt = now + LEDGER_LOCK_STALE_CHECK_MS;
+        if (isStaleLock(lockFile) && removeLockFile(lockFile, 1000)) continue;
+      }
+      if (now >= deadline) return null;
+      sleepSync(LEDGER_LOCK_RETRY_MS);
+    }
+  }
+}
+
+function withLedgerLock(file, fn) {
+  const release = acquireLedgerLock(file);
+  if (!release) return undefined;
+  try {
+    return fn();
+  } finally {
+    release();
+  }
 }
 
 /** @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string }>} */
@@ -117,28 +224,29 @@ export function recordDaemonSpawn(pid, bin, context = {}) {
   if (!Number.isInteger(pid) || /** @type {number} */ (pid) <= 0) return;
   try {
     const file = ownLedgerPath();
-    const entries = readLedger(file);
-    if (entries.some((e) => e.pid === pid)) return;
-    entries.push({
-      pid: /** @type {number} */ (pid),
-      bin: path.basename(String(bin || "")),
-      startedAt: Date.now(),
-      threadId,
-      label: String(context?.label || "") || undefined,
+    withLedgerLock(file, () => {
+      const entries = readLedger(file);
+      if (entries.some((e) => e.pid === pid)) return;
+      entries.push({
+        pid: /** @type {number} */ (pid),
+        bin: path.basename(String(bin || "")),
+        startedAt: Date.now(),
+        threadId,
+        label: String(context?.label || "") || undefined,
+      });
+      writeLedger(file, entries);
     });
-    writeLedger(file, entries);
   } catch {
     /* best effort */
   }
 }
 
 /**
- * Snapshot of this process's recorded daemon children (all threads — worker
- * threads share the pid, so their spawns land in the same file).
+ * Snapshot of this process's recorded daemon children across all thread shards.
  * @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string }>}
  */
 export function listOwnDaemonSpawns() {
-  return readLedger(ownLedgerPath());
+  return ownLedgerFiles().flatMap((file) => withLedgerLock(file, () => readLedger(file)) || []);
 }
 
 /**
@@ -156,24 +264,27 @@ export function reapOwnDaemonSpawns(opts = {}) {
   let skipped = 0;
   const except = new Set(opts.exceptPids || []);
   try {
-    const file = ownLedgerPath();
-    const entries = readLedger(file);
-    if (!entries.length) return { killed, skipped };
-    /** @type {typeof entries} */
-    const remaining = [];
-    for (const entry of entries) {
-      if (except.has(entry.pid)) { remaining.push(entry); continue; }
-      if (isAlive(entry.pid)) {
-        if (imageMatches(entry.pid, entry.bin)) {
-          try { process.kill(entry.pid, "SIGKILL"); killed++; } catch { skipped++; remaining.push(entry); continue; }
-        } else {
-          // Alive but not our binary (recycled pid) — drop the stale entry.
-          skipped++;
+    for (const file of ownLedgerFiles()) {
+      withLedgerLock(file, () => {
+        const entries = readLedger(file);
+        if (!entries.length) return;
+        /** @type {typeof entries} */
+        const remaining = [];
+        for (const entry of entries) {
+          if (except.has(entry.pid)) { remaining.push(entry); continue; }
+          if (isAlive(entry.pid)) {
+            if (imageMatches(entry.pid, entry.bin)) {
+              try { process.kill(entry.pid, "SIGKILL"); killed++; } catch { skipped++; remaining.push(entry); continue; }
+            } else {
+              // Alive but not our binary (recycled pid) — drop the stale entry.
+              skipped++;
+            }
+          }
+          // Dead entries are simply dropped from the ledger.
         }
-      }
-      // Dead entries are simply dropped from the ledger.
+        writeLedger(file, remaining);
+      });
     }
-    writeLedger(file, remaining);
   } catch {
     /* best effort */
   }
@@ -189,9 +300,11 @@ export function forgetDaemonSpawn(pid) {
   if (!Number.isInteger(pid) || /** @type {number} */ (pid) <= 0) return;
   try {
     const file = ownLedgerPath();
-    const entries = readLedger(file);
-    if (!entries.length) return;
-    writeLedger(file, entries.filter((e) => e.pid !== pid));
+    withLedgerLock(file, () => {
+      const entries = readLedger(file);
+      if (!entries.length) return;
+      writeLedger(file, entries.filter((e) => e.pid !== pid));
+    });
   } catch {
     /* best effort */
   }
@@ -220,7 +333,7 @@ export function reapOrphanedDaemons() {
   if (names.length > 200) names = names.slice(0, 200);
   for (const name of names) {
     if (!name.endsWith(".json")) continue;
-    const ownerPid = Number(path.basename(name, ".json"));
+    const ownerPid = parseLedgerOwnerPid(name);
     if (!Number.isInteger(ownerPid)) continue;
     if (ownerPid === process.pid) continue; // our own live ledger
     if (isAlive(ownerPid)) continue; // a concurrent live instance owns it
@@ -240,7 +353,11 @@ export function reapOrphanedDaemons() {
   return { killed, skipped, ledgers };
 }
 
-/** Delete this process's ledger file outright (final clean-exit sweep). */
+/** Delete this process's ledger shards outright (final clean-exit sweep). */
 export function cleanupOwnDaemonLedger() {
-  try { fs.rmSync(ownLedgerPath(), { force: true }); } catch { /* best effort */ }
+  try {
+    for (const file of ownLedgerFiles()) {
+      withLedgerLock(file, () => fs.rmSync(file, { force: true }));
+    }
+  } catch { /* best effort */ }
 }

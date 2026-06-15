@@ -406,55 +406,62 @@ export function __testSelectWindowsClaudeBinary(lines) {
   return selectWindowsClaudeBinary(lines);
 }
 
-// Resolve an `%~dp0`/`%dp0%`-relative path emitted inside a `.cmd` shim to an
-// absolute path. npm emits the wrapper's own directory in one of two forms: the
-// classic `%~dp0` (trailing-backslash) token, and the `%dp0%` token set by the
-// `:find_dp0` helper that newer npm generates. Rewrite both.
-function rewriteCmdShimPath(rawPath, cmdDir) {
-  return path.resolve(
-    String(rawPath)
-      .replace(/%~dp0\\?/gi, cmdDir + path.sep)
-      .replace(/%dp0%\\?/gi, cmdDir + path.sep)
-  );
+function quoteWindowsArg(arg) {
+  const value = String(arg == null ? "" : arg);
+  if (!/[\s"&|<>^()%]/u.test(value)) return value;
+  return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
 }
 
-// Parse an npm-style `claude.cmd` wrapper and return what it actually launches.
-// Two shapes exist in the wild:
-//   - older shims run `node "<entry>.js"` — we re-launch as `node <entry>`
-//   - newer shims (and the bundled @anthropic-ai/claude-code install) invoke a
-//     native `"<dir>\bin\claude.exe" %*` directly — we launch the .exe directly
-// Either way the `.cmd` itself must NOT be spawned with shell:false — Node
-// refuses it with EINVAL since the CVE-2024-27980 fix (Node 18.20.2 / 20.12.2 /
-// 21.7.2+), which is what produced the "posse go" EINVAL on the claude provider.
-// Returns { kind: "node" | "exe", path } or null when nothing can be parsed.
-function extractCmdShimTarget(cmdContent, binPath) {
+function quoteWindowsCommand(command) {
+  const value = String(command == null ? "" : command);
+  return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
+}
+
+function buildClaudeSpawn(command, args) {
+  if (process.platform !== "win32") {
+    return { command, args, windowsVerbatimArguments: false };
+  }
+  if (/\.exe$/i.test(String(command || ""))) {
+    return { command, args, windowsVerbatimArguments: false };
+  }
+
+  const cmdExe = process.env.ComSpec || "C:\\WINDOWS\\System32\\cmd.exe";
+  const commandLine = [quoteWindowsCommand(command), ...args.map(quoteWindowsArg)].join(" ");
+  return {
+    command: cmdExe,
+    args: ["/d", "/s", "/c", commandLine],
+    windowsVerbatimArguments: true,
+  };
+}
+
+export function __testBuildClaudeSpawn(command, args = []) {
+  return buildClaudeSpawn(command, args);
+}
+
+// Parse an npm-style `claude.cmd` wrapper and return the absolute path to the JS
+// entry point it launches (so we can run it as `node <entry>` rather than
+// spawning the `.cmd` itself). Returns null when no entry can be parsed.
+//
+// npm emits the wrapper's own directory in one of two forms: the classic
+// `%~dp0` (trailing-backslash) token, and the `%dp0%` token set by the
+// `:find_dp0` helper that newer npm generates. Only rewriting `%~dp0` left the
+// `%dp0%` form unresolved, so resolution fell back to spawning `claude.cmd`
+// directly — which Node refuses with EINVAL since the CVE-2024-27980 fix
+// (Node 18.20.2 / 20.12.2 / 21.7.2+). Rewrite both forms.
+function extractCmdShimJsPath(cmdContent, binPath) {
   const content = String(cmdContent || "");
-  const cmdDir = path.dirname(binPath);
   const jsMatch = content.match(/"([^"]*(?:claude-code|claude)[^"]*\.(?:js|mjs))"/i)
                || content.match(/node\s+"?([^\s"]+\.(?:js|mjs))"?/i);
-  if (jsMatch) {
-    return { kind: "node", path: rewriteCmdShimPath(jsMatch[1], cmdDir) };
-  }
-  const exeMatch = content.match(/"([^"]*\.exe)"/i)
-               || content.match(/(\S+\.exe)/i);
-  if (exeMatch) {
-    return { kind: "exe", path: rewriteCmdShimPath(exeMatch[1], cmdDir) };
-  }
-  return null;
-}
-
-// Backwards-compatible helper: only the JS-entry form (returns null otherwise).
-function extractCmdShimJsPath(cmdContent, binPath) {
-  const target = extractCmdShimTarget(cmdContent, binPath);
-  return target?.kind === "node" ? target.path : null;
+  if (!jsMatch) return null;
+  const cmdDir = path.dirname(binPath);
+  const jsPath = jsMatch[1]
+    .replace(/%~dp0\\?/gi, cmdDir + path.sep)
+    .replace(/%dp0%\\?/gi, cmdDir + path.sep);
+  return path.resolve(jsPath);
 }
 
 export function __testExtractCmdShimJsPath(cmdContent, binPath) {
   return extractCmdShimJsPath(cmdContent, binPath);
-}
-
-export function __testExtractCmdShimTarget(cmdContent, binPath) {
-  return extractCmdShimTarget(cmdContent, binPath);
 }
 
 function resolveClaude() {
@@ -473,20 +480,14 @@ function resolveClaude() {
   }
   if (!binPath) throw new ClaudeCliNotFoundError();
 
-  // On Windows, parse the .cmd wrapper to extract the real target it launches
-  // (a node JS entry, or a native claude.exe) so we never spawn the .cmd itself.
+  // On Windows, parse the .cmd wrapper to extract the JS entry point
   if (isWin && binPath.toLowerCase().endsWith(".cmd")) {
     try {
       const cmdContent = fs.readFileSync(binPath, "utf-8");
-      const target = extractCmdShimTarget(cmdContent, binPath);
-      if (target?.kind === "node" && fs.existsSync(target.path)) {
+      const jsPath = extractCmdShimJsPath(cmdContent, binPath);
+      if (jsPath && fs.existsSync(jsPath)) {
         CLAUDE_CMD = process.execPath;
-        CLAUDE_ARGS = [target.path];
-        return;
-      }
-      if (target?.kind === "exe" && fs.existsSync(target.path)) {
-        CLAUDE_CMD = target.path;
-        CLAUDE_ARGS = [];
+        CLAUDE_ARGS = [jsPath];
         return;
       }
     } catch { /* fall through */ }
@@ -535,17 +536,11 @@ async function resolveClaudeAsync() {
   if (process.platform === "win32" && binPath.toLowerCase().endsWith(".cmd")) {
     try {
       const cmdContent = await fs.promises.readFile(binPath, "utf-8");
-      const target = extractCmdShimTarget(cmdContent, binPath);
-      if (target?.kind === "node") {
-        await fs.promises.access(target.path);
+      const jsPath = extractCmdShimJsPath(cmdContent, binPath);
+      if (jsPath) {
+        await fs.promises.access(jsPath);
         CLAUDE_CMD = process.execPath;
-        CLAUDE_ARGS = [target.path];
-        return;
-      }
-      if (target?.kind === "exe") {
-        await fs.promises.access(target.path);
-        CLAUDE_CMD = target.path;
-        CLAUDE_ARGS = [];
+        CLAUDE_ARGS = [jsPath];
         return;
       }
     } catch {
@@ -810,19 +805,23 @@ export function warmOauthSession({ cwd = null, timeoutMs = 20_000 } = {}) {
   const prompt = "Reply with OK.";
   const invoke = typeof globalThis.__posseWarmClaudeOauthSession === "function"
     ? globalThis.__posseWarmClaudeOauthSession
-    : ({ resolvedCwd, resolvedTimeoutMs }) => spawnSync(
-      CLAUDE_CMD,
-      [...CLAUDE_ARGS, "-p", "--max-turns", "1", "--output-format", "text"],
-      {
-        cwd: resolvedCwd,
-        input: prompt,
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-        shell: false,
-        timeout: resolvedTimeoutMs,
-      }
-    );
+    : ({ resolvedCwd, resolvedTimeoutMs }) => {
+      const launch = buildClaudeSpawn(CLAUDE_CMD, [...CLAUDE_ARGS, "-p", "--max-turns", "1", "--output-format", "text"]);
+      return spawnSync(
+        launch.command,
+        launch.args,
+        {
+          cwd: resolvedCwd,
+          input: prompt,
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+          shell: false,
+          windowsVerbatimArguments: launch.windowsVerbatimArguments,
+          timeout: resolvedTimeoutMs,
+        }
+      );
+    };
 
   try {
     const result = invoke({
@@ -840,14 +839,16 @@ function spawnClaudeWarmupAsync({ resolvedCwd, resolvedTimeoutMs, prompt }) {
     let stdout = "";
     let stderr = "";
     let settled = false;
+    const launch = buildClaudeSpawn(CLAUDE_CMD, [...CLAUDE_ARGS, "-p", "--max-turns", "1", "--output-format", "text"]);
     const child = spawn(
-      CLAUDE_CMD,
-      [...CLAUDE_ARGS, "-p", "--max-turns", "1", "--output-format", "text"],
+      launch.command,
+      launch.args,
       {
         cwd: resolvedCwd,
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
         shell: false,
+        windowsVerbatimArguments: launch.windowsVerbatimArguments,
       },
     );
     const finish = (result) => {
@@ -2873,24 +2874,40 @@ export async function callProvider(promptText, {
 
     let proc;
     try {
-      proc = spawn(CLAUDE_CMD, fullArgs, {
+      const launch = buildClaudeSpawn(CLAUDE_CMD, fullArgs);
+      proc = spawn(launch.command, launch.args, {
         cwd: spawnCwd,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
         env: childEnv,
         windowsHide: true,
+        windowsVerbatimArguments: launch.windowsVerbatimArguments,
       });
     } catch (spawnErr) {
       cleanupSetupFiles();
       throw spawnErr;
     }
 
-    // Abort handling — kill the child process when signal fires
-  if (abortSignal) {
-    const onAbort = () => {
-      terminateSpawnedProcess(proc, { force: false });
-      setTimeout(() => terminateSpawnedProcess(proc, { force: true }), 3000);
+    const forceKillTimers = new Set();
+    const scheduleForceKill = () => {
+      const timer = setTimeout(() => {
+        forceKillTimers.delete(timer);
+        terminateSpawnedProcess(proc, { force: true });
+      }, 3000);
+      timer.unref?.();
+      forceKillTimers.add(timer);
     };
+    const clearForceKillTimers = () => {
+      for (const timer of forceKillTimers) clearTimeout(timer);
+      forceKillTimers.clear();
+    };
+
+    // Abort handling — kill the child process when signal fires
+    if (abortSignal) {
+      const onAbort = () => {
+        terminateSpawnedProcess(proc, { force: false });
+        scheduleForceKill();
+      };
       if (abortSignal.aborted) {
         onAbort();
       } else {
@@ -3026,7 +3043,7 @@ export async function callProvider(promptText, {
           const phase = gotFirstOutput ? "mid-execution" : "waiting for first output";
           process.stdout.write(`\r${color}|${C.reset} ${C.red}!! Stalled ${phase} (no output for ${(STALL_TIMEOUT / 1000)}s) -- killing process.${C.reset}\n`);
           terminateSpawnedProcess(proc, { force: false });
-          setTimeout(() => terminateSpawnedProcess(proc, { force: true }), 3000);
+          scheduleForceKill();
         }
       }, 500);
     } else if (onLine) {
@@ -3037,7 +3054,7 @@ export async function callProvider(promptText, {
           const phase = gotFirstOutput ? "mid-execution" : "waiting for first output";
           onLine(`${C.red}!! Stalled ${phase} (no output for ${(STALL_TIMEOUT / 1000)}s) -- killing process${C.reset}`);
           terminateSpawnedProcess(proc, { force: false });
-          setTimeout(() => terminateSpawnedProcess(proc, { force: true }), 3000);
+          scheduleForceKill();
         }
       }, 500);
     } else {
@@ -3048,7 +3065,7 @@ export async function callProvider(promptText, {
           clearInterval(heartbeat);
           killedByStallDetector = true;
           terminateSpawnedProcess(proc, { force: false });
-          setTimeout(() => terminateSpawnedProcess(proc, { force: true }), 3000);
+          scheduleForceKill();
         }
       }, 500);
     }
@@ -3191,6 +3208,7 @@ export async function callProvider(promptText, {
     proc.on("close", (code, signal) => {
       cleanupSetupFiles();
       if (heartbeat) clearInterval(heartbeat);
+      clearForceKillTimers();
       const durationMs = Date.now() - startTime;
       const elapsed = (durationMs / 1000).toFixed(1);
 
@@ -3343,6 +3361,7 @@ export async function callProvider(promptText, {
     proc.on("error", (err) => {
       cleanupSetupFiles();
       if (heartbeat) clearInterval(heartbeat);
+      clearForceKillTimers();
       const wrapped = new Error(
         `Failed to spawn claude at: ${CLAUDE_CMD} ${CLAUDE_ARGS.join(" ")}\n` +
         `Is Claude Code installed? npm install -g @anthropic-ai/claude-code\n${err.message}`

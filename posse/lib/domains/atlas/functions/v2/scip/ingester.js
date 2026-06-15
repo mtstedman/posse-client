@@ -106,9 +106,11 @@ export async function ingestScipFile({
   // source-language buckets below so scip-typescript can still distinguish JS
   // files from TS files.
   const language = String(scheme || "").replace(/^scip-/, "").toLowerCase() || null;
-  const totalDocuments = index.documents.length;
-  let sourceLanguages = collectSourceLanguagesFromDocuments(index.documents);
-  let sourceLanguageTotals = collectSourceLanguageCountsFromDocuments(index.documents);
+  await prepareAndMutateDocumentText(index, repoRoot);
+  const cache = buildScipIndexCache(index);
+  const totalDocuments = countDocuments(cache);
+  let sourceLanguages = collectSourceLanguages(cache);
+  let sourceLanguageTotals = collectSourceLanguageCounts(cache);
   const sourceLanguageCurrent = zeroCountsFromTotals(sourceLanguageTotals);
   emit(onEvent, {
     kind: "atlas.scip.ingest.started",
@@ -140,8 +142,6 @@ export async function ingestScipFile({
       message: "SCIP Metadata.ToolInfo.version is absent; using 'unknown'",
     });
   }
-  await prepareAndMutateDocumentText(index, repoRoot);
-  const cache = buildScipIndexCache(index);
   const filesetHash = cache.filesetHash();
   const indexerVersion = index.metadata.tool_info.version || "unknown";
   const toolName = index.metadata.tool_info.name || scheme;
@@ -149,8 +149,6 @@ export async function ingestScipFile({
   // Already ingested? recordScipIndex returns null when the bookkeeping
   // row's UNIQUE key matched — short-circuit the row work entirely.
   const langs = collectLangs(cache);
-  sourceLanguages = collectSourceLanguages(cache);
-  sourceLanguageTotals = collectSourceLanguageCounts(cache);
   resetCounts(sourceLanguageCurrent, sourceLanguageTotals);
 
   const indexRecord = {
@@ -163,7 +161,7 @@ export async function ingestScipFile({
     fileset_hash: filesetHash,
     config_hash: configHash || "",
     deps_hash: depsHash || "",
-    document_count: index.documents.length,
+    document_count: totalDocuments,
     occurrence_count: countOccurrences(cache),
     external_symbol_count: index.external_symbols.length,
     produced_at: effectiveProducedAt,
@@ -746,7 +744,8 @@ function inferSchemeFromIndex(index) {
  * @returns {string}
  */
 function schemeFromSymbol(symbol) {
-  const raw = String(symbol || "");
+  const raw = String(symbol || "").trim();
+  if (!raw || raw.startsWith("local ")) return "";
   const space = raw.indexOf(" ");
   return space > 0 ? raw.slice(0, space) : "";
 }
@@ -785,33 +784,6 @@ function collectSourceLanguageCounts(cache) {
   /** @type {Record<string, number>} */
   const counts = {};
   for (const doc of cache.documents()) {
-    const lang = sourceLanguageForDocument(doc);
-    if (lang) counts[lang] = (counts[lang] || 0) + 1;
-  }
-  return sortCountRecord(counts);
-}
-
-/**
- * @param {Array<{ relative_path?: string, language?: string }>} documents
- * @returns {string[]}
- */
-function collectSourceLanguagesFromDocuments(documents) {
-  const set = new Set();
-  for (const doc of Array.isArray(documents) ? documents : []) {
-    const lang = sourceLanguageForDocument(doc);
-    if (lang) set.add(lang);
-  }
-  return sortLanguageTags([...set]);
-}
-
-/**
- * @param {Array<{ relative_path?: string, language?: string }>} documents
- * @returns {Record<string, number>}
- */
-function collectSourceLanguageCountsFromDocuments(documents) {
-  /** @type {Record<string, number>} */
-  const counts = {};
-  for (const doc of Array.isArray(documents) ? documents : []) {
     const lang = sourceLanguageForDocument(doc);
     if (lang) counts[lang] = (counts[lang] || 0) + 1;
   }
@@ -875,6 +847,16 @@ function sortCountRecord(counts) {
 function countOccurrences(cache) {
   let n = 0;
   for (const doc of cache.documents()) n += doc.occurrences.length;
+  return n;
+}
+
+/**
+ * @param {ScipIndexCache} cache
+ * @returns {number}
+ */
+function countDocuments(cache) {
+  let n = 0;
+  for (const _doc of cache.documents()) n++;
   return n;
 }
 

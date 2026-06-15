@@ -13,7 +13,6 @@ const RETENTION_TARGETS = Object.freeze([
   Object.freeze({ table: "events", column: "created_at" }),
   Object.freeze({ table: "agent_calls", column: "created_at" }),
   Object.freeze({ table: "job_observations", column: "created_at" }),
-  Object.freeze({ table: "run_insights", column: "created_at" }),
   Object.freeze({ table: "session_recycle_savings", column: "recorded_at" }),
 ]);
 

@@ -1,9 +1,0 @@
-{
-  "ok": false,
-  "action": "slice.refresh",
-  "versionId": "corpus@v1",
-  "error": {
-    "code": "unknown_slice_handle",
-    "message": "No slice registered for handle sl_unknown"
-  }
-}

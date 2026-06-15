@@ -43,16 +43,18 @@ function parseJsonField(text) {
 
 function normalizeWorkItem(row) {
   if (!row) return null;
+  const { metadata_json: _metadataJson, ...safeRow } = row;
   return {
-    ...row,
+    ...safeRow,
     metadata: redactBridgeValue(parseJsonField(row.metadata_json)),
   };
 }
 
 function normalizeJob(row) {
   if (!row) return null;
+  const { payload_json: _payloadJson, result_json: _resultJson, ...safeRow } = row;
   return {
-    ...row,
+    ...safeRow,
     payload: redactBridgeValue(parseJobPayload(row)),
     result: redactBridgeValue(parseJsonField(row.result_json)),
   };
@@ -60,8 +62,9 @@ function normalizeJob(row) {
 
 function normalizeEvent(row) {
   if (!row) return null;
+  const { event_json: _eventJson, ...safeRow } = row;
   return {
-    ...row,
+    ...safeRow,
     event: redactBridgeValue(parseJsonField(row.event_json)),
   };
 }
@@ -101,7 +104,9 @@ function gateKindForJob(job, payload = {}) {
 
 export function normalizeGate(job) {
   if (!job || job.job_type !== "human_input") return null;
-  const payload = parseJobPayload(job);
+  const payload = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
+    ? job.payload
+    : parseJobPayload(job);
   return {
     job_id: Number(job.id),
     work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),

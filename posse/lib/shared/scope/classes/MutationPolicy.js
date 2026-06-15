@@ -17,6 +17,7 @@ const BLOCKED_MUTATING_COMMAND = new RegExp(
 );
 const BLOCKED_INLINE_SCRIPT_WRITE = /\b(?:node\s+-e|python3?\s+-c)\b[\s\S]*(?:writeFile|appendFile|createWriteStream|fs\.(?:rm|unlink|mkdir|rename|copyFile)|open\s*\(|Path\s*\([^)]*\)\.write|shutil\.|os\.(?:remove|unlink|mkdir|rmdir|rename))/i;
 const READONLY_BASH_ALLOWLIST = /^\s*(npm\s+test|npm\s+run|npx\s+(?:tsc|eslint|prettier|jest|vitest|mocha)\b|pnpm\s+(test|run|exec)|yarn\s+(test|run)|tsc\s|eslint\s|prettier\s|jest\s|vitest\s|mocha\s|pip\s+show|python3?\s+-m\s+(?:pytest|unittest|build)\b|pytest\s|ruff\s|mypy\s|flake8\s|black\s+--check|php\s|composer\s+(test|run)|phpunit\s|cargo\s+(test|check|build|clippy)|rustfmt\s+--check|go\s+(test|vet|build)|make\s|cmake\s|gradle\s|mvn\s|dotnet\s+(test|build)|cat\s|head\s|tail\s|ls\s|find\s|wc\s|file\s|du\s|diff\s|sort\s|uniq\s|grep\s|rg\s|git\s+diff|git\s+log|git\s+status|git\s+show|echo\s|pwd|whoami)/i;
+const PHP_SYNTAX_LINT_FLAG_RE = /(?:^|\s)(?:-l|--syntax-check)(?:\s|$)/i;
 const SENSITIVE_ENV_BASENAME_RE = /^\.env(?:\.|$)/i;
 const SHELL_VARIABLE_EXPANSION_RE = /(?:%[A-Za-z_][A-Za-z0-9_]*%|\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*))/;
 const INFERRED_DELETE_FILE_EXTENSIONS = new Set([
@@ -29,6 +30,11 @@ const INFERRED_DELETE_FILE_EXTENSIONS = new Set([
 
 function normalizeList(values = []) {
   return [...new Set((Array.isArray(values) ? values : []).filter(Boolean).map((value) => String(value)))];
+}
+
+function isPhpSyntaxLintCommand(command) {
+  const text = String(command || "");
+  return /^\s*php(?:\s|$)/i.test(text) && PHP_SYNTAX_LINT_FLAG_RE.test(text);
 }
 
 function normalizeRel(value) {
@@ -434,6 +440,9 @@ export class MutationPolicy {
     }
 
     for (const sub of subcommands) {
+      if (isPhpSyntaxLintCommand(sub)) {
+        return { ok: false, error: "Error: PHP syntax lint must use run_scoped_checks with checks:[\"lint\"] for the declared scope instead of bash/php -l." };
+      }
       if (!READONLY_BASH_ALLOWLIST.test(sub)) {
         return { ok: false, error: `Error: Command not in allowlist - bash is restricted to test/build/lint runners and read-only utilities. File writes must go through write_file/edit_file: ${sub.slice(0, 100)}` };
       }

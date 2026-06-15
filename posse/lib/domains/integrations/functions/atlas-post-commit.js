@@ -44,19 +44,35 @@ function commitRangePaths(cwd, fromSha, toSha) {
   }
 }
 
+function commitParents(cwd, ref = "HEAD") {
+  try {
+    return git(["show", "-s", "--format=%P", ref], cwd)
+      .split(/\s+/)
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function uniqueCommitRangePaths(cwd, ranges = []) {
+  const paths = [];
+  const seen = new Set();
+  for (const [fromSha, toSha] of ranges) {
+    for (const filePath of commitRangePaths(cwd, fromSha, toSha)) {
+      if (seen.has(filePath)) continue;
+      seen.add(filePath);
+      paths.push(filePath);
+    }
+  }
+  return paths;
+}
+
 function previousCommitSha(cwd, headSha) {
   try { return git(["rev-parse", `${headSha || "HEAD"}^`], cwd); } catch { return ""; }
 }
 
 function mergeCommitDetails(cwd) {
-  let parents = [];
-  try {
-    parents = git(["show", "-s", "--format=%P", "HEAD"], cwd)
-      .split(/\s+/)
-      .filter(Boolean);
-  } catch {
-    parents = [];
-  }
+  const parents = commitParents(cwd);
 
   let subject = "";
   try { subject = git(["show", "-s", "--format=%s", "HEAD"], cwd); } catch { subject = ""; }
@@ -71,6 +87,23 @@ function mergeCommitDetails(cwd) {
   if (/^Squash merge\b/i.test(subject)) return { ...details, reason: "squash_merge" };
   if (/^Manual merge\b/i.test(subject)) return { ...details, reason: "manual_merge" };
   return details;
+}
+
+function postCommitDiffScope(cwd, headSha, mergeReason) {
+  const prevSha = previousCommitSha(cwd, headSha);
+  if (mergeReason === "merge_commit") {
+    const parents = commitParents(cwd, headSha);
+    if (parents.length > 1) {
+      return {
+        fromSha: prevSha,
+        paths: uniqueCommitRangePaths(cwd, parents.map((parent) => [parent, headSha])),
+      };
+    }
+  }
+  return {
+    fromSha: prevSha,
+    paths: commitRangePaths(cwd, prevSha, headSha),
+  };
 }
 
 function parseHookArgs(argv = process.argv.slice(2)) {
@@ -257,12 +290,11 @@ export async function runAtlasPostCommitHook({
   if (isAtlasV2EmissionEnabled(config)) {
     try {
       const headFull = git(["rev-parse", "HEAD"], cwd);
-      const prevSha = previousCommitSha(cwd, headFull);
-      const paths = commitRangePaths(cwd, prevSha, headFull);
+      const { fromSha, paths } = postCommitDiffScope(cwd, headFull, mergeReason);
       const targetBranch = mergeDetails.target || resolveTargetBranch(cwd);
       emitAtlasV2MainAdvanced({
         payload: {
-          from_sha: String(prevSha || ""),
+          from_sha: String(fromSha || ""),
           to_sha: String(headFull || ""),
           target_branch: String(targetBranch || "main"),
           paths,

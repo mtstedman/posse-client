@@ -43,7 +43,9 @@ const WORKER_WEDGE_SILENCE_MS = 120_000;
  * Resolve the heartbeat URL the key-gated Posse binaries authenticate against.
  * They all talk to the same central server, so default to it. Precedence (from
  * the provided child env): explicit POSSE_HEARTBEAT_URL -> POSSE_REMOTE_URL base
- * -> central default. Reads only the passed env so callers/tests stay in control.
+ * -> central default. Derived URLs use the canonical native heartbeat route
+ * shared with the JSON auth envelope. Reads only the passed env so callers/tests
+ * stay in control.
  *
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
@@ -52,7 +54,7 @@ function resolveHeartbeatUrl(env) {
   const explicit = String(env?.POSSE_HEARTBEAT_URL || "").trim();
   if (explicit) return explicit;
   const base = String(env?.POSSE_REMOTE_URL || POSSE_REMOTE_DEFAULT_URL).trim().replace(/\/+$/, "");
-  return base ? `${base}/heartbeat` : "";
+  return base ? `${base}/v1/native/heartbeat` : "";
 }
 
 /**
@@ -429,6 +431,7 @@ export class NativeBinary {
       const stderrChunks = [];
       child.stdout?.on("data", (d) => stdoutChunks.push(d));
       child.stderr?.on("data", (d) => stderrChunks.push(d));
+      child.stdin?.on?.("error", () => {});
 
       const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
       const timer = timeoutMs > 0 ? setTimeout(() => {
@@ -526,9 +529,9 @@ export class NativeBinary {
 
   /**
    * Build the child env. Starts from the caller's env or the runtime env, and
-   * for key-gated Posse binaries injects POSSE_HEARTBEAT_URL (central server)
-   * when it isn't already present — these binaries require it for heartbeat
-   * auth and shouldn't depend on ambient shell setup.
+   * for key-gated Posse binaries injects POSSE_HEARTBEAT_URL (canonical native
+   * heartbeat route on the central server) when it isn't already present. These
+   * binaries require heartbeat auth and shouldn't depend on ambient shell setup.
    *
    * @param {NodeJS.ProcessEnv} [optsEnv]
    * @returns {NodeJS.ProcessEnv}

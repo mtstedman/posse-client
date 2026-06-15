@@ -39,11 +39,12 @@ const TOOLS_SUITE = [
   // Researcher chain-read tools: offered on both transports now.
   { name: "chain_read", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "chain_verdict", mutatesWorktree: false, advertise: ["function", "mcp"] },
-  // MCP-only (deterministic MCP server for Claude/Codex): not function-advertised.
+  // MCP-first mutation/test helpers. Safe read-only checks are also exposed on
+  // embedded function transports so OpenAI/Grok do not fall back to bash lint.
   { name: "move_file", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "copy_file", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "make_dir", mutatesWorktree: true, advertise: ["mcp"] },
-  { name: "run_scoped_checks", mutatesWorktree: false, advertise: ["mcp"] },
+  { name: "run_scoped_checks", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "create_test", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "create_test_suite", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "run_test", mutatesWorktree: false, advertise: ["mcp"] },

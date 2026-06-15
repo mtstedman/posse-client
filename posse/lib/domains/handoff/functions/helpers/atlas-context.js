@@ -1433,6 +1433,11 @@ function atlasFrontierLine(edge) {
   return why ? `- ${symbolId} via ${why}` : `- ${symbolId}`;
 }
 
+function atlasFrontierHasSignal(edge) {
+  const symbolId = String(edge?.symbolId || edge?.s || "").trim().toLowerCase();
+  return !!symbolId && symbolId !== "unknown" && symbolId !== ATLAS_MISSING_VALUE;
+}
+
 function atlasListLines(items, mapper) {
   if (!Array.isArray(items) || items.length === 0) return [ATLAS_EMPTY_LIST_LINE];
   return items.map(mapper);
@@ -1682,7 +1687,7 @@ function renderRequiredRetrievalOrderLine(packet) {
   const prefetchStatus = String(packet?.atlas?.prefetchStatus || "").toLowerCase();
   if (!gateEnabled) {
     if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-      return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use that prefetch as a comprehension scaffold: form the first mental model of the domain, key files, symbols, and likely data flow before deciding what to inspect next. A useful ${label} pass should improve your understanding of the content and behavior, not merely list matching files; if results only show names or signatures, follow with targeted symbol/slice/skeleton/window tools or standard reads under the fallback policy. Make additional ${label} calls only for specific gaps, preferably with targeted symbol/slice/skeleton tools rather than repeated broad overview or memory calls. Use standard tools when ${label} is unavailable, insufficient, you have mutated files and need exact current worktree state, or git/test/build/shell operations are required.`;
+      return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use prefetch as the first code map, then make only targeted additional ${label} calls for specific evidence gaps. Prefer symbol/slice/skeleton/window tools over repeated broad overview or memory calls. Use standard tools when ${label} is unavailable, insufficient, you have mutated files and need exact current worktree state, or git/test/build/shell operations are required.`;
     }
     if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
       return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Try a task-relevant ${label} retrieval first when possible, then use standard tools if ${label} cannot provide sufficient information.`;
@@ -1694,7 +1699,7 @@ function renderRequiredRetrievalOrderLine(packet) {
     return `${label} RETRIEVAL ORDER: use ${label} tools when possible for repository discovery, codebase understanding, and line-level inspection${examples}. Treat ${label} output as a map of concepts, relationships, content, and likely behavior, then read only the few decisive files needed to verify exact behavior. Use standard tools when ${label} is unavailable, insufficient, you have mutated files and need exact current worktree state, git/test/build/shell operations are required, or ${label} does not expose the needed operation.`;
   }
   if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-    return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use prefetch as a comprehension scaffold for the first mental model of the code's content and behavior; it does not count as active ${label} use or unlock fallback. Make the minimum targeted ${label} calls needed for remaining evidence or gate unlocks, and avoid calls made only to satisfy usage.`;
+    return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use prefetch as the first code map; it does not count as active ${label} use or unlock fallback. Make only targeted additional ${label} calls for remaining evidence or gate unlocks, and never call ${label} just to satisfy usage.`;
   }
   if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
     return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Make focused ${label} retrieval calls for the exact task or scoped files before broad native reads; stop once the needed context or fallback unlock is obtained.`;
@@ -1729,14 +1734,9 @@ function renderAtlasContextSection(packet) {
       atlasField("Repo target", packet.atlas.repo?.repoPath),
     ].filter(Boolean).join("\n");
   }
-  const provider = packet.atlas?.provider || "unknown";
-  const transport = String(packet.atlas?.transport || "").trim().toLowerCase();
-  const route = transport === "mcp-gateway" || transport === "posse-gateway" || transport === "deterministic-mcp"
-    ? "through the Posse MCP gateway as the atlas.* suite"
-    : (transport ? `through ${packet.atlas.transport}` : "through the configured provider tool surface");
   return [
     atlasHeading(`${label} CONTEXT`),
-    `${label} is active for this handoff via provider ${provider} ${route}.`,
+    `${label} is active for this handoff; use the listed ${label} tools when they can answer the task.`,
     atlasField("Phase", packet.atlas.phase),
     atlasField("Repo target", packet.atlas.repo?.repoPath),
     packet.atlas.tools?.length > 0 ? atlasField(`Preferred ${label} tools`, displayAtlasToolList(packet.atlas.tools, packet.atlas)) : null,
@@ -1967,9 +1967,10 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     }
   }
 
-  if (!_sliceShouldDropFrontier(trim) && Array.isArray(slice.frontier) && slice.frontier.length > 0) {
+  const usefulFrontier = Array.isArray(slice.frontier) ? slice.frontier.filter(atlasFrontierHasSignal) : [];
+  if (!_sliceShouldDropFrontier(trim) && usefulFrontier.length > 0) {
     lines.push("Top frontier hints:");
-    lines.push(...atlasListLines(slice.frontier, atlasFrontierLine));
+    lines.push(...atlasListLines(usefulFrontier, atlasFrontierLine));
   }
 
   const evidenceNoun = isTreeSourced ? "tree scope" : "summaries";

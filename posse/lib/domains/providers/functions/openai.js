@@ -306,24 +306,28 @@ function summarizeOpenAiUsageEntries(entries, nowMs, limits) {
 }
 
 function loadOpenAiUsageEntries(nowMs) {
-  const weekWindow = OPENAI_USAGE_WINDOW_DEFS.find((def) => def.key === "week")?.durationMs || (7 * 24 * 60 * 60 * 1000);
-  const oldestRelevantIso = new Date(nowMs - weekWindow).toISOString();
-  const db = getDb();
-  const rows = db.prepare(`
-    SELECT created_at, input_tokens, output_tokens
-    FROM agent_calls
-    WHERE provider = 'openai'
-      AND created_at >= ?
-      AND COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) > 0
-    ORDER BY created_at ASC
-  `).all(oldestRelevantIso);
+  try {
+    const weekWindow = OPENAI_USAGE_WINDOW_DEFS.find((def) => def.key === "week")?.durationMs || (7 * 24 * 60 * 60 * 1000);
+    const oldestRelevantIso = new Date(nowMs - weekWindow).toISOString();
+    const db = getDb();
+    const rows = db.prepare(`
+      SELECT created_at, input_tokens, output_tokens
+      FROM agent_calls
+      WHERE provider = 'openai'
+        AND created_at >= ?
+        AND COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) > 0
+      ORDER BY created_at ASC
+    `).all(oldestRelevantIso);
 
-  return rows.flatMap((row) => {
-    const timestampMs = Date.parse(row.created_at);
-    const totalTokens = (row.input_tokens || 0) + (row.output_tokens || 0);
-    if (!Number.isFinite(timestampMs) || totalTokens <= 0) return [];
-    return [{ timestampMs, totalTokens }];
-  });
+    return rows.flatMap((row) => {
+      const timestampMs = Date.parse(row.created_at);
+      const totalTokens = (row.input_tokens || 0) + (row.output_tokens || 0);
+      if (!Number.isFinite(timestampMs) || totalTokens <= 0) return [];
+      return [{ timestampMs, totalTokens }];
+    });
+  } catch {
+    return [];
+  }
 }
 
 export function getUsageSummary({ nowMs = Date.now() } = {}) {
@@ -460,7 +464,7 @@ const DEFAULT_FALLBACK_READS = 3;
 function getToolsForRole(contract) {
   return buildEmbeddedToolDefinitions(contract, {
     bash: contract?.role === "assessor"
-      ? bashReadOnly("Also allowed: node, npm test, npm run.")
+      ? bashReadOnly("For lint/typecheck, including PHP syntax checks, call run_scoped_checks first; use bash only for verification commands scoped checks cannot cover.")
       : TOOL_BASH,
     generate_image: buildImageTool(),
   });
@@ -483,6 +487,7 @@ const {
   execReencodeImage: deterministicReencodeImage,
   execCleanImage: deterministicCleanImage,
   execExtractImageText: deterministicExtractImageText,
+  execRunScopedChecks: deterministicRunScopedChecks,
 } = createDeterministicToolkit({ safePath: sharedSafePath });
 const deterministicBash = createBashExecutor();
 const standardToolHandlers = createStandardToolHandlerMap({
@@ -502,6 +507,7 @@ const standardToolHandlers = createStandardToolHandlerMap({
   deterministicReencodeImage,
   deterministicCleanImage,
   deterministicExtractImageText,
+  deterministicRunScopedChecks,
   deterministicBash,
   execGenerateImage,
   safePath: sharedSafePath,
@@ -524,7 +530,7 @@ async function execGenerateImage(args, cwd, scopePredicates) {
  *  instead of dispatching. After any embedded ATLAS call, we classify the
  *  string result (empty / error / useful) and notify the gate so it can
  *  unlock on the primary or fallback path. */
-async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atlasConfig = null, gateScopeKey = null) {
+async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atlasConfig = null, gateScopeKey = null, declaredScope = {}) {
   // Route 1: researcher gate on native tools. The gate is scoped to the
   // current job via observation context, so concurrent researcher jobs
   // don't cross-pollute unlock state.
@@ -537,7 +543,7 @@ async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atla
   }
 
   const atlasAction = resolveEmbeddedAtlasAction(name);
-  const result = await executeToolWithMap(name, argsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey }, {
+  const result = await executeToolWithMap(name, argsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey, declaredScope }, {
     handlers: standardToolHandlers,
     onUnknown: (toolName, args) => {
       if (atlasAction) {
@@ -705,12 +711,13 @@ export async function callProvider(promptText, {
   const directOutput = !onLine && !silent;
 
   // Build scope predicates for tool execution
-  const scopePredicates = sharedBuildScopePredicates(workingDir, {
+  const declaredScope = {
     modifyFiles: scopedFiles || [],
     createFiles: createFiles || [],
     deleteFiles: deleteFiles || [],
     createRoots: createRoots || [],
-  });
+  };
+  const scopePredicates = sharedBuildScopePredicates(workingDir, declaredScope);
 
   // -- Assemble initial input --
   const userText = [
@@ -923,7 +930,7 @@ export async function callProvider(promptText, {
         const displayToolName = formatAtlasToolUseDisplayName(call.name, callInput) || call.name;
         emit(`${C.dim}  [tool] ${displayToolName}(${shortArgs}${shortArgs.length >= 100 ? "..." : ""})${C.reset}`);
 
-        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey);
+        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey, declaredScope);
         const toolMs = Date.now() - toolStart;
         // executeTool can yield non-strings (e.g. error paths in tool handlers
         // that surface objects). Coerce before .length / .slice so a single

@@ -1,9 +1,0 @@
-{
-  "ok": false,
-  "action": "scip.ingest",
-  "versionId": "corpus@v1",
-  "error": {
-    "code": "not_found",
-    "message": "SCIP index not found: missing.scip"
-  }
-}

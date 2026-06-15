@@ -68,6 +68,8 @@ export class Daemon {
     /** @type {Map<number, { finish: (response: Record<string, unknown>) => void, onProgress: ((event: unknown) => void) | null }>} */
     this._pending = new Map();
     this._lastExitAt = 0;
+    /** Last failed transport start, for spawn-failure backoff. */
+    this._lastStartFailureAt = 0;
     /** @type {number[]} spawn timestamps inside the breaker window */
     this._spawnTimes = [];
     /** Breaker open until this timestamp; 0 = closed. */
@@ -159,19 +161,27 @@ export class Daemon {
     }
     if (!this._transport) {
       if (this.#breakerForbidsSpawn()) return false;
+      if (this._lastStartFailureAt > 0 && this._now() - this._lastStartFailureAt < this._restartBackoffMs) {
+        return false;
+      }
       const transport = this._transportFactory(desiredKey);
       // Guard handlers on identity: a torn-down transport's delayed exit/message
       // events must not clobber the transport that replaced it.
       transport.onMessage((message) => { if (this._transport === transport) this.#onMessage(message); });
       transport.onExit(() => { if (this._transport === transport) this.#onExit(); });
-      if (!transport.start()) return false;
       // A retire-replacement is deliberate (probe verdict, supervisor recycle),
       // not crash-loop evidence: counting it would let repeated retires open
       // the crash breaker with zero crashes and force 5 minutes of per-call
       // spawns. Crash respawns (host exited on its own) still count.
       const isRetireReplacement = this._nextSpawnIsRetireReplacement;
       this._nextSpawnIsRetireReplacement = false;
+      if (!transport.start()) {
+        this._lastStartFailureAt = this._now();
+        this.#noteSpawn();
+        return false;
+      }
       if (!isRetireReplacement) this.#noteSpawn();
+      this._lastStartFailureAt = 0;
       this._lastSpawnAt = this._now();
       this._lastMessageAt = 0;
       this.#emitLifecycle("spawn", {
@@ -358,9 +368,12 @@ export class Daemon {
   }
 
   stop() {
+    // Capture before #onExit(), which clears this._transport.
+    const transport = this._transport;
+    this._runningKey = null;
     this.#removeExitHook();
     this.#onExit();
-    this.#teardown();
+    try { transport?.kill(); } catch { /* ignore */ }
   }
 
   /**

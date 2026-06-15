@@ -1,9 +1,0 @@
-{
-  "ok": false,
-  "action": "runtime.queryOutput",
-  "versionId": "corpus@v1",
-  "error": {
-    "code": "artifact_not_found",
-    "message": "No runtime artifact found for handle missing"
-  }
-}

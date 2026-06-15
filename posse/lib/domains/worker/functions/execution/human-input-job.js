@@ -140,6 +140,13 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
 
     let finalHumanStatus = "succeeded";
     let handledReviewDecision = false;
+    let leaseReleased = false;
+    const releaseHumanLease = (status) => {
+      const released = worker._releaseLease(job, leaseToken, status);
+      if (released !== false) leaseReleased = true;
+      return released;
+    };
+    try {
     if (Array.isArray(payload.file_requests) && payload.file_requests.length > 0) {
       const answers = extractHumanAnswers(output);
       const lastAnswer = answers.length > 0 ? extractHumanAnswerText(answers[answers.length - 1]) : "";
@@ -344,7 +351,7 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
         });
       }
     }
-    worker._releaseLease(job, leaseToken, finalHumanStatus);
+    releaseHumanLease(finalHumanStatus);
 
     if (!handledReviewDecision && payload.original_job_id && payload.review_type) {
       const origJob = getJob(payload.original_job_id);
@@ -464,6 +471,26 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
       }
     }
     refreshAndExtractInsights(job.work_item_id);
+    } catch (postErr) {
+      const message = postErr instanceof Error ? postErr.message : String(postErr);
+      worker.emit(job.id, `${C.yellow}[human] Post-answer resolution failed after human input was recorded: ${message}${C.reset}`);
+      try {
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          attempt_id: attempt.attempt.id,
+          event_type: EVENT_TYPES.JOB_HUMAN_RESOLUTION_FAILED,
+          actor_type: EVENT_ACTORS.WORKER,
+          message: `Post-answer human-input resolution failed after attempt success: ${message}`,
+        });
+      } catch {
+        // The original answer is already recorded; audit logging is best-effort.
+      }
+      if (!leaseReleased) {
+        try { releaseHumanLease(finalHumanStatus); } catch { /* keep the succeeded attempt terminal */ }
+      }
+      try { refreshAndExtractInsights(job.work_item_id); } catch { /* best effort */ }
+    }
   } catch (err) {
     if (worker._handleDeterministicInterruption(job, attempt.attempt.id, startTime, leaseToken, err)) {
       return;

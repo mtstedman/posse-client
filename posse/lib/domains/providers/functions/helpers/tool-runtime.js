@@ -172,6 +172,7 @@ export function createStandardToolHandlerMap({
   deterministicReencodeImage,
   deterministicCleanImage,
   deterministicExtractImageText,
+  deterministicRunScopedChecks,
   deterministicBash,
   execGenerateImage,
   safePath,
@@ -291,6 +292,12 @@ export function createStandardToolHandlerMap({
         return "Error: extract_image_text is not wired into this provider runtime.";
       }
       return deterministicExtractImageText(args, ctx.cwd, ctx.scopePredicates);
+    },
+    run_scoped_checks(args, ctx) {
+      if (typeof deterministicRunScopedChecks !== "function") {
+        return "Error: run_scoped_checks is not wired into this provider runtime.";
+      }
+      return deterministicRunScopedChecks(args, ctx.cwd, ctx.scopePredicates, ctx.declaredScope || {});
     },
     bash(args, ctx) {
       return deterministicBash(args, ctx.cwd, ctx.allowWrite, ctx.scopePredicates.hasScope ? true : null);

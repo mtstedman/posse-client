@@ -187,6 +187,15 @@ export class ToolContract {
       if (readFile && listFiles && searchFiles) {
         lines.push(`- File content path: use ${readFile}/${listFiles}/${searchFiles} for exact missing context.`);
       }
+    } else if (contract.role === "assessor") {
+      const bash = renderedNameForCanonicalTool(contract, "bash");
+      const scopedChecks = renderedNameForCanonicalTool(contract, "run_scoped_checks");
+      if (bash) {
+        lines.push(`- Assessor shell policy: ${bash} is read-only and only for inspection or verification commands. Assessors must not modify files.`);
+      }
+      if (bash && scopedChecks) {
+        lines.push(`- Lint/typecheck path: use ${scopedChecks} first, including PHP syntax checks. Do not run php -l or php --syntax-check through ${bash}.`);
+      }
     }
     const hasAtlasTools = (contract.tools || []).some((tool) => (tool?.access || "") === "atlas");
     if (hasAtlasTools) {
@@ -367,7 +376,7 @@ export class ToolContract {
         "Bash(jest:*)", "Bash(vitest:*)", "Bash(mocha:*)",
         "Bash(python:*)", "Bash(python3:*)", "Bash(pytest:*)",
         "Bash(ruff:*)", "Bash(mypy:*)", "Bash(flake8:*)", "Bash(pip show:*)",
-        "Bash(php:*)", "Bash(composer test:*)", "Bash(composer run:*)", "Bash(phpunit:*)",
+        "Bash(php -v:*)", "Bash(php --version:*)", "Bash(composer test:*)", "Bash(composer run:*)", "Bash(phpunit:*)",
         "Bash(cargo test:*)", "Bash(cargo check:*)", "Bash(cargo build:*)", "Bash(cargo clippy:*)",
         "Bash(go test:*)", "Bash(go vet:*)", "Bash(go build:*)",
         "Bash(make:*)", "Bash(cmake:*)", "Bash(gradle:*)", "Bash(mvn:*)",

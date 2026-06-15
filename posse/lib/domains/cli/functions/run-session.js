@@ -2913,6 +2913,17 @@ export class RunSession {
   const bootSigtermCleanup = () => cleanupDuringBoot("SIGTERM");
   const bootSigbreakCleanup = () => cleanupDuringBoot("SIGBREAK");
   const bootMessageCleanup = (msg) => { if (msg === "shutdown") cleanupDuringBoot("SIGTERM"); };
+  let bootSignalHandlersInstalled = false;
+  const removeBootSignalHandlers = () => {
+    if (!bootSignalHandlersInstalled) return;
+    bootSignalHandlersInstalled = false;
+    process.off("SIGINT", bootSigintCleanup);
+    process.off("SIGTERM", bootSigtermCleanup);
+    if (process.platform === "win32") {
+      process.off("SIGBREAK", bootSigbreakCleanup);
+      process.off("message", bootMessageCleanup);
+    }
+  };
 
   process.on("SIGINT", bootSigintCleanup);
   process.on("SIGTERM", bootSigtermCleanup);
@@ -2920,6 +2931,7 @@ export class RunSession {
     process.on("SIGBREAK", bootSigbreakCleanup);
     process.on("message", bootMessageCleanup);
   }
+  bootSignalHandlersInstalled = true;
 
   let booted = false;
   try {
@@ -2929,12 +2941,7 @@ export class RunSession {
       onBootEvent: handleSchedulerBootEvent,
     });
   } finally {
-    process.off("SIGINT", bootSigintCleanup);
-    process.off("SIGTERM", bootSigtermCleanup);
-    if (process.platform === "win32") {
-      process.off("SIGBREAK", bootSigbreakCleanup);
-      process.off("message", bootMessageCleanup);
-    }
+    if (!booted) removeBootSignalHandlers();
   }
   if (!booted) {
     // Boot failed/aborted — tear the panel down so we leave clean stdout
@@ -3409,6 +3416,7 @@ export class RunSession {
       display.requestRender({ force: true });
     }
   };
+  removeBootSignalHandlers();
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
   // Windows: SIGTERM doesn't fire. SIGBREAK (Ctrl+Break) is the closest equivalent
@@ -3649,6 +3657,8 @@ export class RunSession {
     if (nextAction?.rerun) {
       stopDisplaySnapshotCaches();
       if (display) display.stop();
+      process.off("SIGINT", wrapUpSigintCleanup);
+      process.off("SIGTERM", wrapUpSigtermCleanup);
       await this.run();
       return;
     }

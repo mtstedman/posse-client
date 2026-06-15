@@ -77,7 +77,7 @@ export function buildScipIndexCache(index) {
   /** @type {Map<string, { content_hash: string, local_id: number, repo_rel_path: string }>} */
   const definitionBySymbol = new Map();
 
-  for (const doc of index.documents) {
+  for (const doc of mergeScipDocuments(index.documents)) {
     const text = doc.text || "";
     const positionEncoding = doc.position_encoding || 2;
     const hasSourceBytes = doc.source_bytes != null;
@@ -203,6 +203,103 @@ export function buildScipIndexCache(index) {
       return filesetHashCached;
     },
   };
+}
+
+/**
+ * Some SCIP producers emit one Document per compilation unit, which can repeat
+ * the same relative_path. ATLAS stores blobs by content hash/path, so merge
+ * same-path documents before building the path-keyed cache.
+ *
+ * @param {ScipDocument[]} documents
+ * @returns {ScipDocument[]}
+ */
+function mergeScipDocuments(documents) {
+  /** @type {ScipDocument[]} */
+  const out = [];
+  /** @type {Map<string, ScipDocument & { _occurrenceKeys?: Set<string> }>} */
+  const byPath = new Map();
+  for (const doc of Array.isArray(documents) ? documents : []) {
+    const rel = String(doc?.relative_path || "");
+    const existing = byPath.get(rel);
+    if (!existing) {
+      const copy = {
+        ...doc,
+        occurrences: [],
+        symbols: [],
+      };
+      copy._occurrenceKeys = new Set();
+      appendOccurrences(copy, doc.occurrences);
+      appendSymbols(copy, doc.symbols);
+      byPath.set(rel, copy);
+      out.push(copy);
+      continue;
+    }
+
+    appendOccurrences(existing, doc.occurrences);
+    appendSymbols(existing, doc.symbols);
+    if (!existing.language && doc.language) existing.language = doc.language;
+    if (!existing.text && doc.text) {
+      existing.text = doc.text;
+    } else if (existing.text && doc.text && existing.text !== doc.text) {
+      existing.atlas_skip_reason = existing.atlas_skip_reason || "duplicate_path_text_conflict";
+      existing.atlas_skip_message = existing.atlas_skip_message
+        || `SCIP emitted duplicate document path '${rel}' with conflicting text snapshots`;
+    }
+    if (existing.source_bytes == null && doc.source_bytes != null) {
+      existing.source_bytes = doc.source_bytes;
+    } else if (existing.source_bytes != null && doc.source_bytes != null && !sameBytes(existing.source_bytes, doc.source_bytes)) {
+      existing.atlas_skip_reason = existing.atlas_skip_reason || "duplicate_path_text_conflict";
+      existing.atlas_skip_message = existing.atlas_skip_message
+        || `SCIP emitted duplicate document path '${rel}' with conflicting source bytes`;
+    }
+  }
+  for (const doc of out) delete /** @type {any} */ (doc)._occurrenceKeys;
+  return out;
+}
+
+/**
+ * @param {ScipDocument & { _occurrenceKeys?: Set<string> }} target
+ * @param {ScipOccurrence[] | undefined} occurrences
+ */
+function appendOccurrences(target, occurrences) {
+  const seen = target._occurrenceKeys || (target._occurrenceKeys = new Set());
+  for (const occ of Array.isArray(occurrences) ? occurrences : []) {
+    const key = JSON.stringify([
+      occ.symbol || "",
+      occ.symbol_roles || 0,
+      occ.range || [],
+      occ.enclosing_range || [],
+    ]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    target.occurrences.push(occ);
+  }
+}
+
+/**
+ * @param {ScipDocument} target
+ * @param {ScipSymbolInformation[] | undefined} symbols
+ */
+function appendSymbols(target, symbols) {
+  const seen = new Set(target.symbols.map((sym) => sym.symbol).filter(Boolean));
+  for (const sym of Array.isArray(symbols) ? symbols : []) {
+    if (sym.symbol && seen.has(sym.symbol)) continue;
+    if (sym.symbol) seen.add(sym.symbol);
+    target.symbols.push(sym);
+  }
+}
+
+/**
+ * @param {Uint8Array} a
+ * @param {Uint8Array} b
+ * @returns {boolean}
+ */
+function sameBytes(a, b) {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 /**

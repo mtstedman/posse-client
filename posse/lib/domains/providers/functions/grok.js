@@ -280,7 +280,7 @@ const DEFAULT_FALLBACK_READS = 3;
 function getToolsForRole(contract) {
   return buildEmbeddedToolDefinitions(contract, {
     bash: contract?.role === "assessor"
-      ? bashReadOnly("Also allowed: node, npm test, npm run.")
+      ? bashReadOnly("For lint/typecheck, including PHP syntax checks, call run_scoped_checks first; use bash only for verification commands scoped checks cannot cover.")
       : TOOL_BASH,
     generate_image: buildImageTool(),
   });
@@ -303,6 +303,7 @@ const {
   execReencodeImage: deterministicReencodeImage,
   execCleanImage: deterministicCleanImage,
   execExtractImageText: deterministicExtractImageText,
+  execRunScopedChecks: deterministicRunScopedChecks,
 } = createDeterministicToolkit({ safePath: sharedSafePath });
 const deterministicBash = createBashExecutor();
 const standardToolHandlers = createStandardToolHandlerMap({
@@ -322,6 +323,7 @@ const standardToolHandlers = createStandardToolHandlerMap({
   deterministicReencodeImage,
   deterministicCleanImage,
   deterministicExtractImageText,
+  deterministicRunScopedChecks,
   deterministicBash,
   execGenerateImage,
   safePath: sharedSafePath,
@@ -342,7 +344,7 @@ async function execGenerateImage(args, cwd, scopePredicates) {
  *  Applies the researcher ATLAS-first gate (see lib/integrations/
  *  deterministic-mcp/gate.js). The gate is scoped per-job via observation
  *  context, so concurrent Grok researcher jobs don't share unlock state. */
-async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atlasConfig = null, gateScopeKey = null) {
+async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atlasConfig = null, gateScopeKey = null, declaredScope = {}) {
   const gateArgs = parseGateToolArgs(argsStr);
   if (isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(name)) {
     const gateDecision = checkNativeToolAllowed(name, gateArgs, { cwd, scopeKey: gateScopeKey });
@@ -352,7 +354,7 @@ async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atla
   }
 
   const atlasAction = resolveEmbeddedAtlasAction(name);
-  const result = await executeToolWithMap(name, argsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey }, {
+  const result = await executeToolWithMap(name, argsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey, declaredScope }, {
     handlers: standardToolHandlers,
     onUnknown: (toolName, args) => {
       if (atlasAction) {
@@ -588,12 +590,13 @@ export async function callProvider(promptText, {
   const directOutput = !onLine && !silent;
 
   // Build scope predicates for tool execution
-  const scopePredicates = sharedBuildScopePredicates(workingDir, {
+  const declaredScope = {
     modifyFiles: scopedFiles || [],
     createFiles: createFiles || [],
     deleteFiles: deleteFiles || [],
     createRoots: createRoots || [],
-  });
+  };
+  const scopePredicates = sharedBuildScopePredicates(workingDir, declaredScope);
 
   // -- Assemble initial input --
   const userText = [
@@ -809,7 +812,7 @@ export async function callProvider(promptText, {
         const displayToolName = formatAtlasToolUseDisplayName(call.name, callInput) || call.name;
         emit(`${C.dim}  [tool] ${displayToolName}(${shortArgs}${shortArgs.length >= 100 ? "..." : ""})${C.reset}`);
 
-        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey);
+        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey, declaredScope);
         const toolMs = Date.now() - toolStart;
         // executeTool can yield non-strings (e.g. error paths in tool handlers
         // that surface objects). Coerce before .length / .slice so a single

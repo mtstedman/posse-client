@@ -963,11 +963,26 @@ export function preserveDirtyWorktreeSnapshot(
     };
     writeSnapshotNote(repoCwd, stashHash, note);
 
+    let restoreFailed = false;
+    let restoreError = null;
     try {
       gitExec(["stash", "apply", "--index", stashHash], wtPath);
     } catch (applyErr) {
+      restoreFailed = true;
+      restoreError = applyErr?.message || String(applyErr);
+      const failedNote = {
+        ...note,
+        restore_failed_count: 1,
+        last_restore_failure: {
+          at: new Date().toISOString(),
+          worktree_path: wtPath,
+          error: restoreError,
+        },
+      };
+      writeSnapshotNote(repoCwd, stashHash, failedNote);
+      try { gitExec(["reset", "--hard", "HEAD"], wtPath); } catch { /* worktree may be too broken to reset */ }
       if (typeof onMsg === "function") {
-        onMsg(`snapshot restore failed after pinning ${refName}; inspect with git show ${refName} and restore with git stash apply ${refName} (${applyErr?.message || String(applyErr)})`);
+        onMsg(`snapshot restore failed after pinning ${refName}; inspect with git show ${refName} and restore with git stash apply ${refName} (${restoreError})`);
       }
     } finally {
       try { dropStashEntryByToken(wtPath, uniqueToken); } catch { /* ignore */ }
@@ -976,7 +991,7 @@ export function preserveDirtyWorktreeSnapshot(
       objectHash: stashHash,
       projectDir: repoCwd,
       worktreePath: wtPath,
-      metadata: { reason, wiId, branchName, dedupHash },
+      metadata: { reason, wiId, branchName, dedupHash, restoreFailed, restoreError },
     });
     } finally {
       stashLock.release();
@@ -1153,11 +1168,40 @@ export async function preserveDirtyWorktreeSnapshotAsync(
       staged_patch: stagedPatch,
     }, { signal, nativeParity });
 
+    let restoreFailed = false;
+    let restoreError = null;
     try {
       await gitExecAsync(["stash", "apply", "--index", stashHash], wtPath, { signal });
     } catch (applyErr) {
+      restoreFailed = true;
+      restoreError = applyErr?.message || String(applyErr);
+      await writeSnapshotNoteAsync(repoCwd, stashHash, {
+        storage: "git-ref",
+        ref_name: refName,
+        object_hash: stashHash,
+        source_worktree: wtPath,
+        project_dir: projectDir,
+        branch_name: branchName,
+        work_item_id: wiId,
+        reason,
+        captured_at: new Date().toISOString(),
+        head_sha: headSha,
+        tracked_dirty: trackedDirty,
+        untracked,
+        dedup_hash: dedupHash,
+        status,
+        diff_patch: diffPatch,
+        staged_patch: stagedPatch,
+        restore_failed_count: 1,
+        last_restore_failure: {
+          at: new Date().toISOString(),
+          worktree_path: wtPath,
+          error: restoreError,
+        },
+      }, { signal, nativeParity });
+      try { await gitExecAsync(["reset", "--hard", "HEAD"], wtPath, { signal }); } catch { /* worktree may be too broken to reset */ }
       if (typeof onMsg === "function") {
-        onMsg(`snapshot restore failed after pinning ${refName}; inspect with git show ${refName} and restore with git stash apply ${refName} (${applyErr?.message || String(applyErr)})`);
+        onMsg(`snapshot restore failed after pinning ${refName}; inspect with git show ${refName} and restore with git stash apply ${refName} (${restoreError})`);
       }
     } finally {
       try { await dropStashEntryByTokenAsync(wtPath, uniqueToken, { signal }); } catch { /* ignore */ }
@@ -1166,7 +1210,7 @@ export async function preserveDirtyWorktreeSnapshotAsync(
       objectHash: stashHash,
       projectDir: repoCwd,
       worktreePath: wtPath,
-      metadata: { reason, wiId, branchName, dedupHash },
+      metadata: { reason, wiId, branchName, dedupHash, restoreFailed, restoreError },
     });
     } finally {
       if (!stashLockReleased) {

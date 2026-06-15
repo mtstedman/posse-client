@@ -3284,8 +3284,11 @@ export class Display {
 
     const panes = [toolLines, roleLines, lockLines];
     const contentLines = panes[this._toolsTab] || toolLines;
-    const available = maxLines - lines.length;
-    const scroll = this._toolsTabScrolls[this._toolsTab] || 0;
+    const available = Math.max(0, maxLines - lines.length);
+    const maxScroll = Math.max(0, contentLines.length - available);
+    const rawScroll = this._toolsTabScrolls[this._toolsTab] || 0;
+    const scroll = Math.max(0, Math.min(rawScroll, maxScroll));
+    this._toolsTabScrolls[this._toolsTab] = scroll;
     this._toolScroll = scroll;
     const scrolled = contentLines.slice(scroll, scroll + available);
     lines.push(...scrolled);

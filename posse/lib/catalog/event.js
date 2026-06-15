@@ -130,6 +130,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_HEADLESS_RECOVERY: "job.headless_recovery",
   JOB_HEADLESS_TIMEOUT: "job.headless_timeout",
   JOB_HOOK_VERIFY_FAILED: "job.hook_verify_failed",
+  JOB_HUMAN_RESOLUTION_FAILED: "job.human_resolution_failed",
   JOB_HUMAN_PROMPT_REQUEUED: "job.human_prompt_requeued",
   JOB_LEASE_EXPIRED: "job.lease_expired",
   JOB_LEASE_RELEASED: "job.lease_released",

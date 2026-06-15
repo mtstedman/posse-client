@@ -10,6 +10,32 @@ const SAFE_TOKEN_KEYS = new Set([
 ]);
 
 const SENSITIVE_KEY_RE = /(^|[_-])(api[_-]?key|authorization|auth|auth[_-]?header|access[_-]?token|refresh[_-]?token|id[_-]?token|lease[_-]?token|session[_-]?token|token|secret|password|passwd|pwd|credential|credentials|private[_-]?key|client[_-]?secret|cookie)([_-]|$)/i;
+const SENSITIVE_KEY_SEGMENTS = new Set([
+  "authorization",
+  "auth",
+  "authentication",
+  "secret",
+  "password",
+  "passwd",
+  "pwd",
+  "credential",
+  "credentials",
+  "cookie",
+]);
+const SENSITIVE_KEY_PAIRS = new Set([
+  "api:key",
+  "access:key",
+  "access:token",
+  "bearer:token",
+  "client:secret",
+  "id:token",
+  "lease:token",
+  "oauth:token",
+  "private:key",
+  "refresh:token",
+  "session:token",
+  "setup:token",
+]);
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{6,}/gi;
 const BASIC_RE = /\bBasic\s+[A-Za-z0-9+/=]{8,}/gi;
 const OPENAI_KEY_RE = /\bsk-[A-Za-z0-9_-]{4,}\b/g;
@@ -29,10 +55,33 @@ function isBinaryLike(value) {
   return value instanceof ArrayBuffer || ArrayBuffer.isView(value);
 }
 
+function canonicalKey(key) {
+  return String(key || "")
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+}
+
+function keySegments(key) {
+  const canonical = canonicalKey(key);
+  if (!canonical) return [];
+  return canonical.split("_").filter(Boolean);
+}
+
 function isSensitiveKey(key) {
   const normalized = String(key || "").trim().toLowerCase();
-  if (!normalized || SAFE_TOKEN_KEYS.has(normalized)) return false;
-  return SENSITIVE_KEY_RE.test(normalized);
+  const canonical = canonicalKey(key);
+  if (!normalized || SAFE_TOKEN_KEYS.has(normalized) || SAFE_TOKEN_KEYS.has(canonical)) return false;
+  if (SENSITIVE_KEY_RE.test(normalized)) return true;
+  const segments = keySegments(key);
+  if (segments.some((segment) => SENSITIVE_KEY_SEGMENTS.has(segment))) return true;
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    if (SENSITIVE_KEY_PAIRS.has(`${segments[i]}:${segments[i + 1]}`)) return true;
+  }
+  return false;
 }
 
 // Exported for reuse by the telemetry log scrubber (secret-scrub.js) so file

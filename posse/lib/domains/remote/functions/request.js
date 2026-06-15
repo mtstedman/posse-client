@@ -78,6 +78,71 @@ function readOnlyFileSnippets(packet = {}) {
   }));
 }
 
+function isAtlasSummaryBlock(value) {
+  const text = String(value || "");
+  return /(?:^|\n)===\s*ATLAS/i.test(text)
+    || /\bATLASv2 CONTEXT\b/i.test(text)
+    || /\bATLAS ASSESSMENT BASELINE\b/i.test(text)
+    || /\bATLAS RESEARCH PREFETCH\b/i.test(text);
+}
+
+function isPlaceholderAtlasFrontierLine(line) {
+  const text = String(line || "").replace(/^\s*[-*]\s*/, "").trim().toLowerCase();
+  return !text || text === "unknown" || text === "(unknown)";
+}
+
+function sanitizeAtlasSummary(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^\s*Top frontier hints:\s*$/i.test(line)) {
+      const kept = [];
+      let j = i + 1;
+      while (j < lines.length) {
+        const next = lines[j];
+        if (!/^\s*[-*]\s+/.test(next) && next.trim() !== "") break;
+        if (next.trim() !== "" && !isPlaceholderAtlasFrontierLine(next)) kept.push(next);
+        j += 1;
+      }
+      if (kept.length > 0) {
+        out.push(line);
+        out.push(...kept);
+      }
+      i = j - 1;
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim() || null;
+}
+
+function dedupeAtlasSummaryFromInstructions(instructions, rawAtlasSummary, sanitizedAtlasSummary) {
+  let text = String(instructions || "");
+  const candidates = [String(rawAtlasSummary || "").trim(), sanitizedAtlasSummary]
+    .filter((candidate, index, values) =>
+      candidate
+      && candidate.length > 80
+      && isAtlasSummaryBlock(candidate)
+      && values.indexOf(candidate) === index
+    )
+    .sort((a, b) => b.length - a.length);
+  for (const candidate of candidates) {
+    if (text.includes(candidate)) {
+      text = text.split(candidate).join("");
+    }
+  }
+  return text.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function assessorShellPolicyHint(role, packet = {}) {
+  if (String(role || "").toLowerCase() !== "assessor") return null;
+  if (packet?.tool_policy?.allow_shell !== true && packet?.capabilities?.tools?.shell !== true) return null;
+  return "Assessor shell policy: read-only bash is allowed for inspection/verification only. Use run_scoped_checks for lint/typecheck, including PHP syntax checks; do not run php -l through bash.";
+}
+
 // The remote renderer trims each insight field to ~240 chars anyway, so cap
 // the wire payload to the same order of magnitude instead of shipping full
 // detail/evidence bodies that can never reach the prompt.
@@ -130,6 +195,9 @@ export function buildRemoteCompileRequest(packet, instructions, {
 } = {}) {
   const role = packet?.recipient || "dev";
   const provider = providerName || packet?.execution_provider || packet?.provider || "claude";
+  const atlasSummary = sanitizeAtlasSummary(packet?.atlas?.summary);
+  const requestInstructions = dedupeAtlasSummaryFromInstructions(instructions, packet?.atlas?.summary, atlasSummary);
+  const shellPolicyHint = assessorShellPolicyHint(role, packet);
   const selectedSkills = Array.isArray(packet?.skills_attached)
     ? packet.skills_attached
     : (Array.isArray(packet?.skills) ? packet.skills : []);
@@ -149,7 +217,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
       model_tier: packet?.model_tier || null,
       reasoning_effort: packet?.reasoning_effort || null,
     },
-    instructions: String(instructions || ""),
+    instructions: requestInstructions,
     attempt: {
       count: packet?.attempt?.count ?? 1,
       max: packet?.attempt?.max ?? 1,
@@ -167,7 +235,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
     },
     context: {
       project_summary: packet?.project_context || null,
-      atlas_summary: packet?.atlas?.summary || null,
+      atlas_summary: atlasSummary,
       step0_context: packet?.step0_context || null,
       file_snippets: readOnlyFileSnippets(packet),
       insights: Array.isArray(packet?.run_insights) ? packet.run_insights.map(insightForRemote) : [],
@@ -186,6 +254,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
     },
     extra: {
       local_prompt_contract: "remote_skeleton_local_enrichment",
+      ...(shellPolicyHint ? { shell_policy_hint: shellPolicyHint } : {}),
     },
   };
 }

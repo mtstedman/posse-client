@@ -41,6 +41,14 @@ export class ParseStateRegistry {
 }
 
 function keyFor(kind, lang) {
-  const family = String(kind || "").split(".").slice(0, 4).join(".");
+  const parts = String(kind || "").split(".").filter(Boolean);
+  let family;
+  if (parts[0] === "atlas" && parts[1] === "parse") {
+    family = parts[2] === "scip" && parts[3]
+      ? parts.slice(0, 4).join(".")
+      : parts.slice(0, 3).join(".");
+  } else {
+    family = parts.slice(0, Math.max(0, parts.length - 1)).join(".");
+  }
   return `${family}:${lang}`;
 }
