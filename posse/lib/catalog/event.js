@@ -316,6 +316,7 @@ export const EVENT_TYPES = Object.freeze({
   WORK_ITEM_MERGE_DEFERRED: "work_item.merge_deferred",
   WORK_ITEM_MERGE_FAILED: "work_item.merge_failed",
   WORK_ITEM_MERGED: "work_item.merged",
+  WORK_ITEM_INTAKE_HINTS_CORRECTED: "work_item.intake_hints_corrected",
   WORK_ITEM_METADATA_PARSE_ERROR: "work_item.metadata_parse_error",
   WORK_ITEM_REJECTED: "work_item.rejected",
   WORK_ITEM_STATUS_CHANGED: "work_item.status_changed",

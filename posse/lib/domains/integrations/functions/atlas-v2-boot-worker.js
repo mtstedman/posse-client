@@ -10,10 +10,15 @@ import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { Warmer } from "../../atlas/classes/v2/Warmer.js";
 import { sharedParserAdapter } from "../../atlas/functions/v2/parser/adapter.js";
 import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
+import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import {
   errorForTelemetry,
   recordEmbeddingForensics,
 } from "../../atlas/functions/v2/embeddings/forensics.js";
+
+if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
+  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { keyless: false }));
+}
 
 /**
  * @param {Record<string, unknown>} message

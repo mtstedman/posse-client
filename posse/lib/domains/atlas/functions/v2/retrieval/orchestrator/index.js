@@ -6,21 +6,21 @@
 // alongside a per-backend degradation report.
 //
 // Sync-vs-async: the vector backend is async because the encoder is.
-// When the caller did not pass an encoder + index, the orchestrator
-// runs synchronously and returns immediately. The dispatcher uses this
-// to keep symbol.search synchronous in the default config.
+// A caller-provided async planner also makes the orchestrator async, which
+// lets the conductor use the warmed native worker without changing direct
+// sync callers.
 //
 // The orchestrator NEVER throws on backend failure — it downgrades.
 // A degraded ranking is always preferred to an error envelope.
 
-import { rrfFuse, RRF_K } from "./rrf.js";
-import { runFtsBackend } from "./backends/fts.js";
+import { rrfFuse, rrfFuseAsync, RRF_K } from "./rrf.js";
+import { runFtsBackend, runFtsBackendAsync } from "./backends/fts.js";
 import { runVectorBackend } from "./backends/vector.js";
 import { runEntityFtsBackends } from "./backends/entity-fts.js";
 import { buildFeedbackIndex, applyFeedbackBoost } from "./feedback-boost.js";
-import { applyTaskQueryRanking } from "./task-query-ranking.js";
+import { applyTaskQueryRanking, applyTaskQueryRankingAsync } from "./task-query-ranking.js";
 import { summarizeBackends } from "./fallback.js";
-import { planQuery } from "./query-planner.js";
+import { planQuery, planQueryAsync } from "./query-planner.js";
 
 /** @typedef {import("../../contracts/api.js").View} View */
 /** @typedef {import("../../contracts/api.js").Ledger} Ledger */
@@ -42,6 +42,8 @@ import { planQuery } from "./query-planner.js";
  * @property {number} [rrfK]                     Override the RRF k constant. Default 60.
  * @property {string[]} [entities]               Optional extra ledger entity types: "memories", "feedback".
  * @property {"name" | "body" | "either"} [searchScope]
+ * @property {import("./query-planner-types.js").QueryPlan} [plan]
+ * @property {(input: string) => import("./query-planner-types.js").QueryPlan | Promise<import("./query-planner-types.js").QueryPlan>} [planner]
  */
 
 /**
@@ -77,31 +79,49 @@ const DEFAULT_LIMIT = 50;
  * @returns {HybridSearchResult | Promise<HybridSearchResult>}
  */
 export function hybridSearch(args) {
+  const planInput = args.options?.taskText || args.query;
   const wantSemantic =
     !!args.options?.semantic &&
     !!args.embeddingIndex &&
     !!args.encoder &&
     args.encoder.dim === args.embeddingIndex.dim;
-  if (wantSemantic) {
-    return hybridSearchAsync(args);
+  const planned = args.options?.plan
+    || (args.options?.planner ? args.options.planner(planInput) : (wantSemantic ? planQueryAsync(planInput) : planQuery(planInput)));
+  if (planned && typeof /** @type {any} */ (planned).then === "function") {
+    return /** @type {Promise<import("./query-planner-types.js").QueryPlan>} */ (planned)
+      .then((plan) => hybridSearchWithPlan(args, plan, true));
   }
-  return hybridSearchSync(args);
+  return hybridSearchWithPlan(args, /** @type {import("./query-planner-types.js").QueryPlan} */ (planned), false);
+}
+
+/**
+ * @param {Parameters<typeof hybridSearch>[0]} args
+ * @param {import("./query-planner-types.js").QueryPlan} plan
+ * @param {boolean} preferAsync
+ * @returns {HybridSearchResult | Promise<HybridSearchResult>}
+ */
+function hybridSearchWithPlan(args, plan, preferAsync = false) {
+  const wantSemantic =
+    !!args.options?.semantic &&
+    !!args.embeddingIndex &&
+    !!args.encoder &&
+    args.encoder.dim === args.embeddingIndex.dim;
+  if (preferAsync || wantSemantic) {
+    return hybridSearchAsync(args, plan);
+  }
+  return hybridSearchSync(args, plan);
 }
 
 /**
  * Synchronous path. No vector backend.
  *
  * @param {Parameters<typeof hybridSearch>[0]} args
+ * @param {import("./query-planner-types.js").QueryPlan} plan
  * @returns {HybridSearchResult}
  */
-function hybridSearchSync(args) {
+function hybridSearchSync(args, plan) {
   const { view, query, ledger, repoId, options } = args;
   const limit = options?.limit && options.limit > 0 ? options.limit : DEFAULT_LIMIT;
-  // Build the plan once. The FTS backend drives probes off it; the
-  // task-query ranking pass falls back to the plan when taskText is
-  // missing so the fused order reflects identifier/keyword overlap
-  // instead of the noisy whole-string tokenization.
-  const plan = planQuery(options?.taskText || query);
   const fts = runFtsBackend({ view, query, limit, plan, scope: options?.searchScope });
   /** @type {Record<string, { ok: boolean, total: number, reason?: string }>} */
   const backendStatus = { fts: { ok: fts.ok, total: fts.total, reason: fts.reason } };
@@ -141,18 +161,25 @@ function hybridSearchSync(args) {
  * Async path. Runs FTS and vector backends in parallel.
  *
  * @param {Parameters<typeof hybridSearch>[0]} args
+ * @param {import("./query-planner-types.js").QueryPlan} plan
  * @returns {Promise<HybridSearchResult>}
  */
-async function hybridSearchAsync(args) {
+async function hybridSearchAsync(args, plan) {
   const { view, query, ledger, repoId, embeddingIndex, encoder, options, signal } = args;
   const limit = options?.limit && options.limit > 0 ? options.limit : DEFAULT_LIMIT;
-  const plan = planQuery(options?.taskText || query);
 
   // Run both backends in parallel. Each backend handles its own errors
   // and returns a degraded result rather than throwing.
+  const wantSemantic =
+    !!options?.semantic &&
+    !!embeddingIndex &&
+    !!encoder &&
+    encoder.dim === embeddingIndex.dim;
   const [fts, vector] = await Promise.all([
-    Promise.resolve(runFtsBackend({ view, query, limit, plan, scope: options?.searchScope })),
-    runVectorBackend({ view, query, limit, embeddingIndex, encoder, signal }),
+    runFtsBackendAsync({ view, query, limit, plan, scope: options?.searchScope }),
+    wantSemantic
+      ? runVectorBackend({ view, query, limit, embeddingIndex, encoder, signal })
+      : Promise.resolve({ ok: false, entries: [], raw: [], total: 0, reason: "unavailable" }),
   ]);
 
   /** @type {Record<string, { ok: boolean, total: number, reason?: string }>} */
@@ -161,7 +188,7 @@ async function hybridSearchAsync(args) {
     vector: { ok: vector.ok, total: vector.total, reason: vector.reason },
   };
 
-  const fused = fuseAndAdjust({
+  const fused = await fuseAndAdjustAsync({
     fts,
     vector,
     ledger,
@@ -188,6 +215,41 @@ async function hybridSearchAsync(args) {
     plan,
     ...(entities.length > 0 ? { entities } : {}),
   };
+}
+
+/**
+ * Common async path used when planning or vector retrieval already made the
+ * search asynchronous; keeps native helper calls on the warmed daemon.
+ *
+ * @param {Parameters<typeof fuseAndAdjust>[0]} args
+ * @returns {Promise<FusedSymbolEntry[]>}
+ */
+async function fuseAndAdjustAsync({
+  fts,
+  vector,
+  ledger,
+  taskType,
+  taskText,
+  feedbackSinceTs,
+  feedbackHalfLifeDays,
+  k,
+}) {
+  /** @type {Record<string, ReturnType<typeof runFtsBackend>["entries"]>} */
+  const lists = {};
+  if (fts.ok && fts.entries.length > 0) lists.fts = fts.entries;
+  if (vector && vector.ok && vector.entries.length > 0) lists.vector = vector.entries;
+  const fused = await rrfFuseAsync(lists, { k: typeof k === "number" ? k : RRF_K });
+
+  const feedbackIndex = buildFeedbackIndex({
+    ledger,
+    taskType,
+    taskText,
+    sinceTs: feedbackSinceTs,
+    halfLifeDays: feedbackHalfLifeDays,
+  });
+  applyFeedbackBoost(fused, feedbackIndex);
+  await applyTaskQueryRankingAsync(fused, taskText);
+  return fused;
 }
 
 /**

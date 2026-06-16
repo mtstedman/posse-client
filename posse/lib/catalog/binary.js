@@ -44,8 +44,9 @@ export const ARCH_BY_NODE_ARCH = Object.freeze({
 function defineBinary(pkg, files, { macosUniversal = true, keyGated = true } = {}) {
   return Object.freeze({
     package: pkg,
-    // Posse method binaries are gated on the Posse key (POSSE_KEY env / the
-    // --posse-key flag). When true the runtime wrapper supplies the key.
+    // Posse method binaries are gated on native heartbeat auth: when true the
+    // runtime wrapper supplies the heartbeat envelope (URL + pinned public key
+    // + audience) and, for compatibility, the legacy POSSE_KEY via --posse-key.
     keyGated,
     platforms: Object.freeze({
       windows: Object.freeze({
@@ -116,8 +117,9 @@ export function nativeBinaryIsUniversal(name, os) {
 }
 
 /**
- * Whether a tool requires the Posse key to run (gated on --posse-key /
- * POSSE_KEY). The runtime wrapper supplies the key for these.
+ * Whether a tool is gated on native heartbeat auth. The runtime wrapper supplies
+ * the heartbeat envelope for these (and, transitionally, the legacy POSSE_KEY
+ * via --posse-key). The name stays `keyGated` for catalog/back-compat reasons.
  *
  * @param {string} name
  * @returns {boolean}

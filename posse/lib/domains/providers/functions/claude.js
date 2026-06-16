@@ -18,10 +18,11 @@ import { appendExecutionTools, buildClaudeCliToolConfig, buildExecutionContract,
 import { buildMcpAtlasSurfaceToolDescriptors, buildMcpSurfaceToolDescriptors, buildSurfaceNameMap, formatAtlasToolUseDisplayName } from "../../../functions/tools/mcp-surface.js";
 import { buildRuntimeEnv, normalizeProviderPaths } from "../../runtime/functions/paths.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, logAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment } from "../../integrations/functions/atlas.js";
-import { buildDeterministicReadMcpServerConfig, getDeterministicMcpToolNames, roleUsesDeterministicReadMcp } from "../../integrations/functions/deterministic-mcp.js";
+import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, getDeterministicMcpToolNames, roleUsesDeterministicReadMcp } from "../../integrations/functions/deterministic-mcp.js";
 import { resolveAtlasToolGateEnabled } from "../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME, stripPosseMcpGatewayPrefix } from "../../integrations/functions/mcp-gateway.js";
 import { summarizeObservedToolUse } from "./helpers/tool-runtime.js";
+import { buildWindowsSpawn, terminateSpawnedProcess } from "./helpers/windows-spawn.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { stripAnsi } from "../../../shared/format/functions/ansi.js";
@@ -93,6 +94,13 @@ function readPositiveMsSetting(key, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function isAccountSettingsBusyError(err) {
+  const code = String(err?.code || "").toUpperCase();
+  if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
+  const message = String(err?.message || err || "");
+  return /\bSQLITE_(?:BUSY|LOCKED)\b|database is (?:locked|busy)/i.test(message);
 }
 
 function claudeUsageCacheMs() {
@@ -210,30 +218,71 @@ export function __testBuildClaudeDeterministicReadMcpConfigPayload(role, cwd, op
   return buildClaudeDeterministicReadMcpConfigPayload(role, cwd, options);
 }
 
+async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cwd, {
+  scopedFiles = [],
+  createFiles = [],
+  deleteFiles = [],
+  createRoots = [],
+  needsImageGeneration = false,
+  disableSystemTools = false,
+  jobId = null,
+  workItemId = null,
+  atlasPrefetchStatus = null,
+  atlasAvailable = null,
+  atlasGateEnabled = false,
+  atlasConfig = null,
+} = {}) {
+  const enabled = roleUsesDeterministicReadMcp(role);
+  if (!enabled) {
+    return { active: false, tools: [], payload: null };
+  }
+  const server = await buildDeterministicReadMcpServerConfigAsync(role, {
+    cwd,
+    scopedFiles,
+    createFiles,
+    deleteFiles,
+    createRoots,
+    needsImageGeneration,
+    providerName: "claude",
+    disableSystemTools,
+    jobId,
+    workItemId,
+    atlasPrefetchStatus,
+    atlasAvailable,
+    atlasGateEnabled,
+    atlasConfig,
+  });
+  if (!server?.ready) {
+    return { active: false, tools: [], payload: null };
+  }
+  const serverName = server.name || POSSE_MCP_GATEWAY_SERVER_NAME;
+  const toolNames = getDeterministicMcpToolNames(role, { needsImageGeneration });
+  return {
+    active: true,
+    tools: toolNames,
+    serverName,
+    contractTools: buildMcpSurfaceToolDescriptors(toolNames, {
+      providerName: "claude",
+      serverName,
+    }),
+    payload: {
+      mcpServers: {
+        [serverName]: {
+          command: server.command,
+          args: server.args || [],
+          cwd: server.cwd || undefined,
+          env: server.env || undefined,
+        },
+      },
+    },
+  };
+}
+
 function isDeprecatedClaudeLogUsageEnabled() {
   return false;
 }
 
 // ─── Colors ──────────────────────────────────────────────────────────────────
-
-function terminateSpawnedProcess(proc, { force = false } = {}) {
-  if (!proc || proc.exitCode != null || proc.killed) return;
-  if (process.platform === "win32") {
-    try {
-      const taskkillArgs = ["/pid", String(proc.pid), "/T"];
-      if (force) taskkillArgs.push("/F");
-      const killer = spawn("taskkill", taskkillArgs, {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      killer.unref?.();
-      return;
-    } catch {
-      // Fall through to proc.kill best-effort.
-    }
-  }
-  try { proc.kill(force ? "SIGKILL" : "SIGTERM"); } catch {}
-}
 
 // ─── Capabilities ───────────────────────────────────────────────────────────
 
@@ -406,36 +455,8 @@ export function __testSelectWindowsClaudeBinary(lines) {
   return selectWindowsClaudeBinary(lines);
 }
 
-function quoteWindowsArg(arg) {
-  const value = String(arg == null ? "" : arg);
-  if (!/[\s"&|<>^()%]/u.test(value)) return value;
-  return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
-}
-
-function quoteWindowsCommand(command) {
-  const value = String(command == null ? "" : command);
-  return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
-}
-
-function buildClaudeSpawn(command, args) {
-  if (process.platform !== "win32") {
-    return { command, args, windowsVerbatimArguments: false };
-  }
-  if (/\.exe$/i.test(String(command || ""))) {
-    return { command, args, windowsVerbatimArguments: false };
-  }
-
-  const cmdExe = process.env.ComSpec || "C:\\WINDOWS\\System32\\cmd.exe";
-  const commandLine = [quoteWindowsCommand(command), ...args.map(quoteWindowsArg)].join(" ");
-  return {
-    command: cmdExe,
-    args: ["/d", "/s", "/c", commandLine],
-    windowsVerbatimArguments: true,
-  };
-}
-
 export function __testBuildClaudeSpawn(command, args = []) {
-  return buildClaudeSpawn(command, args);
+  return buildWindowsSpawn(command, args);
 }
 
 // Parse an npm-style `claude.cmd` wrapper and return the absolute path to the JS
@@ -806,7 +827,7 @@ export function warmOauthSession({ cwd = null, timeoutMs = 20_000 } = {}) {
   const invoke = typeof globalThis.__posseWarmClaudeOauthSession === "function"
     ? globalThis.__posseWarmClaudeOauthSession
     : ({ resolvedCwd, resolvedTimeoutMs }) => {
-      const launch = buildClaudeSpawn(CLAUDE_CMD, [...CLAUDE_ARGS, "-p", "--max-turns", "1", "--output-format", "text"]);
+      const launch = buildWindowsSpawn(CLAUDE_CMD, [...CLAUDE_ARGS, "-p", "--max-turns", "1", "--output-format", "text"]);
       return spawnSync(
         launch.command,
         launch.args,
@@ -839,7 +860,7 @@ function spawnClaudeWarmupAsync({ resolvedCwd, resolvedTimeoutMs, prompt }) {
     let stdout = "";
     let stderr = "";
     let settled = false;
-    const launch = buildClaudeSpawn(CLAUDE_CMD, [...CLAUDE_ARGS, "-p", "--max-turns", "1", "--output-format", "text"]);
+    const launch = buildWindowsSpawn(CLAUDE_CMD, [...CLAUDE_ARGS, "-p", "--max-turns", "1", "--output-format", "text"]);
     const child = spawn(
       launch.command,
       launch.args,
@@ -1035,18 +1056,23 @@ function persistClaudeUsageSummaryToSettings(summary, nowMs = Date.now()) {
   if (!Number.isFinite(session.usedTokens) || !Number.isFinite(session.limitTokens)) return;
   if (!Number.isFinite(week.usedTokens) || !Number.isFinite(week.limitTokens)) return;
 
-  setAccountSettings({
-    [CLAUDE_USAGE_SETTING_KEYS.sessionUsed]: String(session.usedTokens),
-    [CLAUDE_USAGE_SETTING_KEYS.sessionMax]: String(session.limitTokens),
-    [CLAUDE_USAGE_SETTING_KEYS.sessionResetAt]: session.resetAt || null,
-    [CLAUDE_USAGE_SETTING_KEYS.weekUsed]: String(week.usedTokens),
-    [CLAUDE_USAGE_SETTING_KEYS.weekMax]: String(week.limitTokens),
-    [CLAUDE_USAGE_SETTING_KEYS.weekResetAt]: week.resetAt || null,
-    [CLAUDE_USAGE_SETTING_KEYS.subscriptionType]: summary.subscriptionType || null,
-    [CLAUDE_USAGE_SETTING_KEYS.rateLimitTier]: summary.rateLimitTier || null,
-    [CLAUDE_USAGE_SETTING_KEYS.source]: summary.source || "anthropic-oauth-usage-api",
-    [CLAUDE_USAGE_SETTING_KEYS.lastUpdated]: String(nowMs),
-  });
+  try {
+    setAccountSettings({
+      [CLAUDE_USAGE_SETTING_KEYS.sessionUsed]: String(session.usedTokens),
+      [CLAUDE_USAGE_SETTING_KEYS.sessionMax]: String(session.limitTokens),
+      [CLAUDE_USAGE_SETTING_KEYS.sessionResetAt]: session.resetAt || null,
+      [CLAUDE_USAGE_SETTING_KEYS.weekUsed]: String(week.usedTokens),
+      [CLAUDE_USAGE_SETTING_KEYS.weekMax]: String(week.limitTokens),
+      [CLAUDE_USAGE_SETTING_KEYS.weekResetAt]: week.resetAt || null,
+      [CLAUDE_USAGE_SETTING_KEYS.subscriptionType]: summary.subscriptionType || null,
+      [CLAUDE_USAGE_SETTING_KEYS.rateLimitTier]: summary.rateLimitTier || null,
+      [CLAUDE_USAGE_SETTING_KEYS.source]: summary.source || "anthropic-oauth-usage-api",
+      [CLAUDE_USAGE_SETTING_KEYS.lastUpdated]: String(nowMs),
+    });
+  } catch (err) {
+    if (isAccountSettingsBusyError(err)) return;
+    throw err;
+  }
 }
 
 function readClaudeUsageDiskCache(configDir = getClaudeConfigDir()) {
@@ -2479,6 +2505,7 @@ export async function callProvider(promptText, {
     { assignmentUnit: assignmentUnitForAtlas, workItemId, disableAtlas, atlasConfig },
   );
   return new Promise((resolve, reject) => {
+    void (async () => {
     let cleanupAtlasMcpConfig = () => {};
     let cleanupRolePromptFile = () => {};
     let cleanupStablePromptFile = () => {};
@@ -2544,7 +2571,7 @@ export async function callProvider(promptText, {
       atlasAttachment,
     });
     const disableSystemToolsResolved = resolveDisableSystemTools();
-    const deterministicReadMcp = buildClaudeDeterministicReadMcpConfigPayload(role, mcpWorkspaceCwd, {
+    const deterministicReadMcp = await buildClaudeDeterministicReadMcpConfigPayloadAsync(role, mcpWorkspaceCwd, {
       scopedFiles,
       createFiles,
       deleteFiles,
@@ -2874,7 +2901,7 @@ export async function callProvider(promptText, {
 
     let proc;
     try {
-      const launch = buildClaudeSpawn(CLAUDE_CMD, fullArgs);
+      const launch = buildWindowsSpawn(CLAUDE_CMD, fullArgs);
       proc = spawn(launch.command, launch.args, {
         cwd: spawnCwd,
         shell: false,
@@ -3383,6 +3410,7 @@ export async function callProvider(promptText, {
       cleanupSetupFiles();
       reject(err);
     }
+    })();
   });
 }
 

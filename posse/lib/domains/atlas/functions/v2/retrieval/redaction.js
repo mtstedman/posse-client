@@ -5,7 +5,7 @@
 // before raw windows are sent back to an agent. The pattern set lives in
 // the native posse-atlas binary — the only implementation path.
 
-import { runAtlasNativeOperation } from "../native/invoke.js";
+import { runAtlasNativeOperation, runAtlasNativeOperationAsync } from "../native/invoke.js";
 
 /**
  * @param {string} value
@@ -13,6 +13,14 @@ import { runAtlasNativeOperation } from "../native/invoke.js";
  */
 export function redactSecrets(value) {
   return /** @type {string} */ (runAtlasNativeOperation({ op: "redact_secrets", value: String(value ?? "") }));
+}
+
+/**
+ * @param {string} value
+ * @returns {Promise<string>}
+ */
+export async function redactSecretsAsync(value) {
+  return /** @type {string} */ (await runAtlasNativeOperationAsync({ op: "redact_secrets", value: String(value ?? "") }));
 }
 
 /**
@@ -33,5 +41,18 @@ export function redactSecretsLines(lines) {
   if (list.length === 1) return [redactSecrets(list[0])];
   const redacted = redactSecrets(list.join("\n")).split("\n");
   if (redacted.length !== list.length) return list.map((line) => redactSecrets(line));
+  return redacted;
+}
+
+/**
+ * @param {string[]} lines
+ * @returns {Promise<string[]>}
+ */
+export async function redactSecretsLinesAsync(lines) {
+  const list = Array.isArray(lines) ? lines.map((line) => String(line ?? "")) : [];
+  if (list.length === 0) return [];
+  if (list.length === 1) return [await redactSecretsAsync(list[0])];
+  const redacted = (await redactSecretsAsync(list.join("\n"))).split("\n");
+  if (redacted.length !== list.length) return await Promise.all(list.map((line) => redactSecretsAsync(line)));
   return redacted;
 }

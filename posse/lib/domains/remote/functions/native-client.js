@@ -68,9 +68,14 @@ export async function runRemoteNativeRequestJson(request, opts = {}) {
     throw new Error("remote native client requires a Posse key");
   }
   const envelope = buildRemoteNativeRequest("request-json", request);
-  const auth = opts.auth && typeof opts.auth === "object"
+  // Heartbeat envelope from the manager's single auth authority (cached) when
+  // available; an explicit caller `auth` wins, and settings is only a defensive
+  // fallback for stub managers.
+  const auth = (opts.auth && typeof opts.auth === "object")
     ? opts.auth
-    : nativeHeartbeatAuthFromSettings();
+    : (typeof manager.nativeAuthEnvelope === "function"
+      ? manager.nativeAuthEnvelope()
+      : nativeHeartbeatAuthFromSettings());
   if (auth && typeof auth === "object") {
     /** @type {Record<string, unknown>} */ (envelope).auth = auth;
   }

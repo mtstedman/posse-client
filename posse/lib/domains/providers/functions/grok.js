@@ -8,7 +8,6 @@
 // file/shell access matching Claude Code's tool set per role.
 
 import OpenAI from "openai";
-import readline from "readline";
 import { getSetting } from "../../queue/functions/index.js";
 import { getResolvedImageProtocol } from "../../artifacts/functions/index.js";
 import { composeRemoteAssessorPromptForProvider } from "./helpers/remote-assessor-prompt.js";
@@ -262,7 +261,8 @@ function bashReadOnly(extra = "") {
   return {
     ...TOOL_BASH,
     description:
-      "Execute a READ-ONLY shell command (ls, cat, head, tail, find, wc, git log, git diff, etc.). " +
+      "Execute a READ-ONLY shell command for repo-native inspection or verification (git log, git diff, test/build runners, etc.). " +
+      "On Windows, use PowerShell-compatible syntax and avoid Unix-only filters such as head/wc or Bash-only operators. " +
       "Do NOT use this to modify files or run destructive commands." +
       (extra ? " " + extra : ""),
   };
@@ -929,50 +929,7 @@ export async function callProvider(promptText, {
 
 // --- Input helpers ----------------------------------------------------------
 
-export function ask(question) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    let resolved = false;
-    rl.question(question, (answer) => {
-      resolved = true;
-      rl.close();
-      resolve(answer);
-    });
-    rl.on("close", () => {
-      if (!resolved) resolve("");
-    });
-  });
-}
-
-export function askMultiline(prompt) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
-    const lines = [];
-    let resolved = false;
-    console.log(prompt);
-    console.log(`${C.dim}(finish with a single "." on its own line)${C.reset}`);
-
-    rl.on("line", (line) => {
-      if (line.trim() === ".") {
-        resolved = true;
-        rl.close();
-        resolve(lines.join("\n").trim());
-        return;
-      }
-      lines.push(line);
-    });
-    rl.on("close", () => {
-      if (!resolved) resolve(lines.join("\n").trim());
-    });
-  });
-}
+export { ask, askMultiline } from "./helpers/cli-input.js";
 
 // --- Rate Limit State ------------------------------------------------------
 // Unified with the circuit breaker: getRateLimitState reports the breaker's

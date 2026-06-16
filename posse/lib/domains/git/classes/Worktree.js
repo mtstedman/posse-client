@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Repo } from "./Repo.js";
 import { runGitNativeMethod, runGitNativeMethodAsync } from "../functions/native/invoke.js";
+import { FORCE_REMOVE_OPTIONS } from "../functions/worktree-remove-options.js";
 
 function ensureRepo(repoOrCwd) {
   return repoOrCwd instanceof Repo ? repoOrCwd : new Repo(repoOrCwd);
@@ -111,7 +112,7 @@ export class Worktree {
       try { this.prune(); } catch { /* best effort */ }
     }
     if (fallbackRemove && fs.existsSync(this.path)) {
-      try { fs.rmSync(this.path, { recursive: true, force: true }); } catch { /* caller retry/add will surface persistent failures */ }
+      try { fs.rmSync(this.path, FORCE_REMOVE_OPTIONS); } catch { /* caller retry/add will surface persistent failures */ }
     }
     if (prune) {
       try { this.prune(); } catch { /* best effort */ }

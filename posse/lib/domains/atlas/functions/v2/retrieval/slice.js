@@ -40,6 +40,7 @@ import { logAtlasError } from "../verbose-errors.js";
 /** @typedef {import("../contracts/tool-results.js").SliceSpilloverGetData} SliceSpilloverGetData */
 /** @typedef {import("../contracts/tool-results.js").SymbolCard} SymbolCard */
 /** @typedef {import("./orchestrator/index.js").HybridSearchResult} HybridSearchResult */
+/** @typedef {import("./orchestrator/query-planner-types.js").QueryPlan} QueryPlan */
 /** @typedef {ReturnType<typeof okEnvelope<SliceData>> | ReturnType<typeof errorEnvelope> | ReturnType<typeof notModifiedEnvelope>} SliceBuildEnvelope */
 /** @typedef {{
  *   versionId: string,
@@ -79,10 +80,11 @@ const REFRESH_DIFF_LIMIT = 100;
  *   embeddingIndex?: EmbeddingIndex,
  *   encoder?: EmbeddingEncoder,
  *   taskType?: TaskType,
+ *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  * }} args
  * @returns {SliceBuildEnvelope | Promise<SliceBuildEnvelope>}
  */
-export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, taskType, onDemandEmbeddingFill = true }) {
+export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, taskType, planner, onDemandEmbeddingFill = true }) {
   const detail = /** @type {CardDetail} */ (params.cardDetail || "compact");
   const budget = params.budget || {};
   const maxCards = budget.maxCards ?? DEFAULT_BUDGET_CARDS;
@@ -177,6 +179,7 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
         taskText: params.taskText,
         taskType: effectiveTaskType,
         limit: 25,
+        planner,
       },
     };
     return (async () => {
@@ -212,6 +215,7 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
         taskType: effectiveTaskType,
         limit: 25,
         searchScope: "either",
+        planner,
       },
     });
     if (lexicalResult && typeof (/** @type {any} */ (lexicalResult)).then === "function") {

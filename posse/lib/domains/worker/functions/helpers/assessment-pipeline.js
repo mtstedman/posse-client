@@ -28,7 +28,7 @@ import { recordObservation } from "../../../observability/functions/observations
 import { isArtifactMode, buildManifest, validateManifestAgainstContract } from "../../../artifacts/functions/index.js";
 import { getProviderBackoff, getProviderName } from "../../../providers/functions/provider.js";
 import {
-  attachAssessmentDiffContext,
+  attachAssessmentDiffContextAsync,
   buildRoutingPacket,
   composePromptRemoteAware,
   buildSmartPreload,
@@ -1849,7 +1849,7 @@ export async function runPostExecutionAssessment(worker, {
       }
 
       const jobAc = worker._abortControllers.get(job.id);
-      const assessmentContext = attachAssessmentDiffContext({
+      const assessmentContext = await attachAssessmentDiffContextAsync({
         task_mode: taskMode,
         manifest,
         contract_violations: contractViolations,

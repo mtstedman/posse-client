@@ -11,7 +11,6 @@ import { cleanupArtifactDirs, cleanupArtifactDirsAsync, isArtifactMode, contextD
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../queue/functions/common.js";
 import {
   completeAttempt,
-  getJob,
   getWorkItem,
   incrementAndCreateAttempt,
   logEvent,
@@ -20,12 +19,12 @@ import {
   storeArtifact,
   updateJobPayload,
 } from "../../../queue/functions/index.js";
-import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
-const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const SETUP_DEFER_NOTICE_INTERVAL_MS = 30_000;
 const SETUP_DEFER_RETRY_DELAY_MS = 30_000;
+const SETUP_TRANSIENT_INFRA_RETRY_DELAY_MS = 5_000;
+const MAX_SETUP_TRANSIENT_INFRA_RETRIES = 3;
 // Debounce cache for setup-deferral notices, keyed wi:job:phase → last-emit
 // ms. Bounded: once it exceeds 1000 entries, shouldEmitSetupDeferNotice
 // evicts entries idle for 4× the notice interval. Stale entries are harmless
@@ -49,7 +48,6 @@ import {
   gitWorktreeAddAsync,
   isMergeInProgressAsync,
   mergeTargetIntoWorktreeAsync,
-  preserveDirtyWorktreeSnapshotAsync,
   resolveTargetBranch,
   safeSnapshotAndRemoveWorktree,
   safeSnapshotAndRemoveWorktreeAsync,
@@ -59,7 +57,6 @@ import {
 } from "../../../git/functions/worktree.js";
 import {
   gitCurrentHashAsync,
-  gitExec,
   gitExecAsync,
 } from "../../../git/functions/utils.js";
 import { isAbortError, yieldNow } from "../../../runtime/functions/yield.js";
@@ -72,6 +69,7 @@ import {
   startPrepTrace,
   withPhase,
 } from "./prep-telemetry.js";
+import { isTransientCommitInfraFailure } from "./commit-infra.js";
 import { isIterativeWorkItemActive } from "../../../planning/functions/state.js";
 import {
   activeLiveSiblingWriteLocks,
@@ -79,27 +77,32 @@ import {
 } from "./shared-worktree-locks.js";
 import { withBranchLockAsync } from "../../../git/functions/worktree-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import {
+  clearActiveWorktreeSentinel,
+  isSentinelProcessAlive,
+  readActiveWorktreeSentinel,
+  sentinelJobStillActive,
+  writeActiveWorktreeSentinel,
+} from "./worktree-sentinel.js";
+import {
+  classifyIgnorableSetupDirty,
+  inspectIgnorableSetupDirty,
+  isRuntimeResidualPath,
+  normalizeRepoPath,
+  parsePorcelainEntries,
+  payloadExplicitlyClaimsPath,
+  snapshotAndResetSetupBlockingPathsAsync,
+  targetedSetupDirtyRecoveryEligible,
+} from "./worktree-dirty-classification.js";
 
-// Memoized per path: the worktree's repo root cannot change for the lifetime
-// of a session, and this backs the active-job sentinel which is read/written
-// several times per job — without the cache each touch pays a synchronous
-// `git rev-parse` on the main thread. Only successful resolutions are cached
-// (a pre-creation miss must retry once the worktree exists).
-const _worktreeRootCache = new Map();
-
-function resolveWorktreeRoot(wtPath) {
-  if (!wtPath) return null;
-  const key = path.resolve(wtPath);
-  const cached = _worktreeRootCache.get(key);
-  if (cached) return cached;
-  try {
-    const root = path.resolve(gitExec(["rev-parse", "--show-toplevel"], wtPath));
-    _worktreeRootCache.set(key, root);
-    return root;
-  } catch {
-    return key;
-  }
-}
+// Re-exported for external importers (Worker.js, tests) that previously
+// imported these sentinel helpers from this module before the extraction into
+// worktree-sentinel.js.
+export {
+  clearActiveWorktreeSentinel,
+  readActiveWorktreeSentinel,
+  writeActiveWorktreeSentinel,
+} from "./worktree-sentinel.js";
 
 function logTerminalCleanupFailure(worker, wi, wtDir, message, extra = {}) {
   logEvent({
@@ -118,40 +121,26 @@ function logTerminalCleanupFailure(worker, wi, wtDir, message, extra = {}) {
   }
 }
 
-function activeWorktreeSentinelPath(wtPath, { ensureDir = false } = {}) {
-  const root = resolveWorktreeRoot(wtPath);
-  if (!root) return null;
-  const posseDir = path.join(root, ".posse");
-  if (ensureDir) fs.mkdirSync(posseDir, { recursive: true });
-  return path.join(posseDir, "active-job");
-}
-
-export function writeActiveWorktreeSentinel(wtPath, payload = {}) {
-  const sentinelPath = activeWorktreeSentinelPath(wtPath, { ensureDir: true });
-  if (!sentinelPath) return null;
-  fs.writeFileSync(sentinelPath, `${JSON.stringify({
-    ...payload,
-    written_at: new Date().toISOString(),
-  })}\n`, "utf-8");
-  return sentinelPath;
-}
-
-export function readActiveWorktreeSentinel(wtPath) {
-  const sentinelPath = activeWorktreeSentinelPath(wtPath, { ensureDir: false });
-  if (!sentinelPath || !fs.existsSync(sentinelPath)) return null;
+function transientSetupRetryCount(worker, job) {
   try {
-    const raw = fs.readFileSync(sentinelPath, "utf-8");
-    const payload = JSON.parse(raw);
-    return { sentinelPath, payload };
+    const payload = worker.parsePayload(job) || {};
+    const value = Number(payload?._transient_infra_retries?.worktree_setup || 0);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
   } catch {
-    return { sentinelPath, payload: null };
+    return 0;
   }
 }
 
-function normalizeRepoPath(value) {
-  const normalized = String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "").trim();
-  if (!normalized || normalized === "." || normalized.startsWith("../") || path.posix.isAbsolute(normalized)) return "";
-  return normalized;
+function bumpTransientSetupRetry(worker, job) {
+  const payload = worker.parsePayload(job) || {};
+  const current = Number(payload?._transient_infra_retries?.worktree_setup || 0);
+  const next = (Number.isFinite(current) && current > 0 ? Math.floor(current) : 0) + 1;
+  payload._transient_infra_retries = {
+    ...(payload._transient_infra_retries || {}),
+    worktree_setup: next,
+  };
+  updateJobPayload(job.id, JSON.stringify(payload));
+  return next;
 }
 
 function pendingCrossWiFileSyncs(payload = {}) {
@@ -163,144 +152,6 @@ function pendingCrossWiFileSyncs(payload = {}) {
       source_work_item_id: Number(entry?.source_work_item_id),
     }))
     .filter((entry) => entry.path && entry.source_branch && Number.isFinite(entry.source_work_item_id));
-}
-
-function payloadExplicitlyClaimsPath(payload = {}, repoPath = "") {
-  const normalized = normalizeRepoPath(repoPath);
-  if (!normalized) return false;
-  const claimed = [
-    ...(Array.isArray(payload.files_to_modify) ? payload.files_to_modify : []),
-    ...(Array.isArray(payload.files_to_create) ? payload.files_to_create : []),
-    ...(Array.isArray(payload.files_to_delete) ? payload.files_to_delete : []),
-  ].map(normalizeRepoPath).filter(Boolean);
-  const fold = (value) => process.platform === "win32" ? value.toLowerCase() : value;
-  const foldedNormalized = fold(normalized);
-  if (new Set(claimed.map(fold)).has(foldedNormalized)) return true;
-  const roots = (Array.isArray(payload.create_roots) ? payload.create_roots : [])
-    .map(normalizeRepoPath)
-    .filter(Boolean)
-    .map(fold);
-  return roots.some((root) =>
-    root === "*"
-    || root === "."
-    || foldedNormalized === root
-    || foldedNormalized.startsWith(`${root}/`)
-  );
-}
-
-function foldRepoPath(value) {
-  const normalized = normalizeRepoPath(value);
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-}
-
-function siblingLockCoversPath(lock, repoPath) {
-  const normalized = foldRepoPath(repoPath);
-  const rawLockPath = String(lock?.path || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "").trim();
-  if (!normalized || !rawLockPath) return false;
-  if (rawLockPath === "*" || rawLockPath === ".") return true;
-  const lockPath = foldRepoPath(rawLockPath);
-  if (!lockPath) return false;
-  if (lock?.lock_kind === "root") {
-    return normalized === lockPath || normalized.startsWith(`${lockPath}/`);
-  }
-  return normalized === lockPath;
-}
-
-function parsePorcelainEntries(raw = "") {
-  return String(raw || "")
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .filter(Boolean)
-    .map((line) => {
-      // Some git helpers trim leading whitespace, so a porcelain entry that
-      // should be " M file" can arrive as "M file". Recover that shape without
-      // corrupting staged "M  file" entries.
-      const trimmedLeadingWorktreeOnly = line.length > 2 && line[1] === " " && line[2] !== " ";
-      const status = trimmedLeadingWorktreeOnly ? ` ${line[0]}` : line.slice(0, 2);
-      const rawPath = (trimmedLeadingWorktreeOnly ? line.slice(2) : line.slice(3)).trim();
-      const repoPath = rawPath.includes(" -> ")
-        ? rawPath.split(" -> ").pop().trim()
-        : rawPath;
-      return {
-        status,
-        path: normalizeRepoPath(repoPath),
-        raw: line,
-      };
-    })
-    .filter((entry) => entry.path);
-}
-
-function dedupePorcelainEntries(entries = []) {
-  const seen = new Set();
-  return entries.filter((entry) => {
-    const key = `${entry.status}\0${entry.path}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function classifyIgnorableSetupDirty(payload = {}, dirtyPorcelain = "", ignoredPorcelain = "", siblingLocks = []) {
-  const ignoredEntries = parsePorcelainEntries(ignoredPorcelain).filter((entry) => entry.status === "!!");
-  const entries = dedupePorcelainEntries([
-    ...parsePorcelainEntries(dirtyPorcelain),
-    ...ignoredEntries,
-  ]);
-  if (entries.length === 0) return {
-    tolerated: false,
-    entries: [],
-    paths: [],
-    residualEntries: [],
-    siblingEntries: [],
-    blockingEntries: [],
-  };
-
-  const residualEntries = [];
-  const siblingEntries = [];
-  const blockingEntries = [];
-  for (const entry of entries) {
-    const claimedByCurrent = payloadExplicitlyClaimsPath(payload, entry.path);
-    const untrackedResidual = (entry.status === "??" || entry.status === "!!") && !claimedByCurrent;
-    const siblingLock = !claimedByCurrent
-      ? siblingLocks.find((lock) => siblingLockCoversPath(lock, entry.path))
-      : null;
-    if (siblingLock) {
-      siblingEntries.push({ ...entry, job_id: siblingLock.job_id ?? null, lock_path: siblingLock.path || null });
-    } else if (untrackedResidual) {
-      residualEntries.push(entry);
-    } else {
-      blockingEntries.push(entry);
-    }
-  }
-
-  return {
-    tolerated: blockingEntries.length === 0,
-    entries,
-    paths: entries.map((entry) => entry.path),
-    residualEntries,
-    siblingEntries,
-    blockingEntries,
-  };
-}
-
-function isRuntimeResidualPath(repoPath = "") {
-  const normalized = normalizeRepoPath(repoPath);
-  return normalized === ".posse"
-    || normalized.startsWith(".posse/")
-    || normalized === ".posse-worktrees"
-    || normalized.startsWith(".posse-worktrees/")
-    || normalized === ".posse-test-suites"
-    || normalized.startsWith(".posse-test-suites/");
-}
-
-async function inspectIgnorableSetupDirty(wtPath, payload = {}, siblingLocks = [], { signal = null } = {}) {
-  const dirtyPorcelain = await gitExecAsync(["status", "--porcelain", "--untracked-files=all"], wtPath, { signal });
-  const ignoredPorcelain = await gitExecAsync(["status", "--porcelain", "--ignored=matching", "--untracked-files=all"], wtPath, { signal });
-  return {
-    dirtyPorcelain,
-    ignoredPorcelain,
-    ...classifyIgnorableSetupDirty(payload, dirtyPorcelain, ignoredPorcelain, siblingLocks),
-  };
 }
 
 function logToleratedUntrackedResidual(worker, job, wi, residuals, phase) {
@@ -365,84 +216,6 @@ function jobHasSetupCleanupPrecedence(job, siblingLocks = []) {
   const jobId = Number(job?.id);
   const winnerId = setupCleanupPrecedenceJobId(job, siblingLocks);
   return Number.isFinite(jobId) && winnerId != null && jobId === winnerId;
-}
-
-function targetedSetupDirtyRecoveryEligible(dirty = {}) {
-  const blockingEntries = dirty.blockingEntries || [];
-  if (blockingEntries.length === 0) return false;
-  // Ignored files are not captured by the existing dirty snapshot path. Leave
-  // those to the conservative retry path rather than deleting unpreserved data.
-  return blockingEntries.every((entry) => entry.status !== "!!");
-}
-
-async function snapshotAndResetSetupBlockingPathsAsync(worker, job, wi, wtPath, {
-  branchName = null,
-  dirty = {},
-  signal = null,
-} = {}) {
-  const entries = dirty.blockingEntries || [];
-  const paths = [...new Set(entries.map((entry) => normalizeRepoPath(entry.path)).filter(Boolean))];
-  if (paths.length === 0) return null;
-
-  const reason = `dirty-worktree-setup-wi-${wi.id}-job-${job.id}-targeted`;
-  const snapshotDir = await preserveDirtyWorktreeSnapshotAsync(wtPath, worker.projectDir, {
-    reason,
-    branchName,
-    wiId: wi.id,
-    signal,
-    onMsg: (msg) => {
-      worker.emit(job.id, `${C.dim}[system] WI#${wi.id} ${msg}${C.reset}`);
-    },
-  });
-  if (!snapshotDir) {
-    throw new Error(`Dirty worktree snapshot failed before targeted setup cleanup for: ${paths.slice(0, 10).join(", ")}`);
-  }
-
-  const trackedPaths = paths.filter((repoPath) =>
-    entries.some((entry) => normalizeRepoPath(entry.path) === repoPath && entry.status !== "??" && entry.status !== "!!")
-  );
-  const untrackedPaths = paths.filter((repoPath) =>
-    entries.some((entry) => normalizeRepoPath(entry.path) === repoPath && entry.status === "??")
-  );
-  if (trackedPaths.length > 0) {
-    try { await gitExecAsync(["reset", "HEAD", "--", ...trackedPaths], wtPath, { signal }); } catch (err) { if (isAbortError(err)) throw err; }
-    try { await gitExecAsync(["checkout", "HEAD", "--", ...trackedPaths], wtPath, { signal }); } catch (err) {
-      if (isAbortError(err)) throw err;
-      // Paths newly added to the index have no HEAD version. After reset they
-      // become untracked and are removed by the clean step below.
-      untrackedPaths.push(...trackedPaths);
-    }
-  }
-  const uniqueUntracked = [...new Set(untrackedPaths)];
-  if (uniqueUntracked.length > 0) {
-    await gitExecAsync(["clean", "-fd", "--", ...uniqueUntracked], wtPath, { signal });
-  }
-
-  const post = await gitExecAsync(["status", "--porcelain", "--untracked-files=all", "--", ...paths], wtPath, { signal });
-  const ignoredPost = await gitExecAsync(["status", "--porcelain", "--ignored=matching", "--untracked-files=all", "--", ...paths], wtPath, { signal });
-  const remaining = dedupePorcelainEntries([
-    ...parsePorcelainEntries(post),
-    ...parsePorcelainEntries(ignoredPost).filter((entry) => entry.status === "!!"),
-  ]);
-  if (remaining.length > 0) {
-    const preview = remaining.slice(0, 10).map((entry) => `${entry.status} ${entry.path}`).join(", ");
-    throw new Error(`Targeted setup cleanup left dirty path(s): ${preview}`);
-  }
-
-  worker.emit(job.id, `${C.dim}[system] WI#${wi.id} targeted setup cleanup reset ${paths.length} blocking path(s): ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? " ..." : ""}${C.reset}`);
-  logEvent({
-    work_item_id: wi.id,
-    job_id: job.id,
-    event_type: EVENT_TYPES.WORKTREE_DIRTY_RECOVERED,
-    actor_type: EVENT_ACTORS.WORKER,
-    message: `Targeted setup cleanup reset ${paths.length} blocking dirty path(s) while same-WI siblings were active`,
-    event_json: JSON.stringify({
-      paths: paths.slice(0, 100),
-      snapshot_dir: snapshotDir,
-      sibling_locks: (dirty.siblingLocks || []).slice(0, 20),
-    }),
-  });
-  return snapshotDir;
 }
 
 function markCrossWiSyncsApplied(job, payload, appliedPaths) {
@@ -649,45 +422,6 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
         path: sync.path,
       }),
     });
-  }
-}
-
-function isSentinelProcessAlive(payload = {}) {
-  const pid = Number(payload?.pid);
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    if (err?.code === "ESRCH") return false;
-    return null;
-  }
-}
-
-export function clearActiveWorktreeSentinel(wtPath, { jobId = null } = {}) {
-  const current = readActiveWorktreeSentinel(wtPath);
-  if (!current?.sentinelPath) return false;
-  if (jobId != null && current?.payload?.jobId != null && Number(current.payload.jobId) !== Number(jobId)) {
-    const alive = isSentinelProcessAlive(current.payload);
-    if (alive === true) return false;
-  }
-  try {
-    fs.rmSync(current.sentinelPath, { force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function sentinelJobStillActive(payload = {}) {
-  const jobId = Number(payload?.jobId);
-  if (!Number.isInteger(jobId) || jobId <= 0) return true;
-  try {
-    const job = getJob(jobId);
-    if (!job) return false;
-    return !TERMINAL_JOB_STATUS_SET.has(job.status);
-  } catch {
-    return true;
   }
 }
 
@@ -1119,42 +853,47 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
           worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} join check skipped while merge is in progress${C.reset}`);
         } else {
           worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} preparing worktree graph before dev join${C.reset}`);
-          const joined = await ensureWorkItemAtlasJoinAsync({
-            projectDir: worker.projectDir,
-            worktreePath: wtPath,
-            workItemId: wi.id,
-            config: getAtlasIntegrationConfig(),
-            signal,
-            onStatus: ({ ok, error, status }) => {
-              if (ok) {
-                worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph refresh complete${C.reset}`);
-              } else {
-                const detail = error || (status != null ? `exit ${status}` : "unknown");
-                worker.emit(job.id, `${C.yellow}[atlas] WI#${wi.id} worktree graph refresh failed: ${detail}${C.reset}`);
-              }
-            },
-          });
-          job._atlasConfig = joined.config || null;
-          job._atlasGraphDbPath = joined.graphDbPath || null;
-          job._atlasDisabledForWorkItem = !!joined.disableAtlas;
-          if (joined.state === "up_to_date") {
-            worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph up to date${C.reset}`);
-          } else if (joined.state === "seeded_refresh") {
-            const refreshReady = joined.refreshWait?.completed && joined.refreshWait?.ok !== false;
-            let refreshState = joined.attempted ? "started" : "queued/skipped";
-            if (refreshReady) refreshState = "complete";
-            else if (joined.refreshWait?.skipped === "refresh_wait_timeout") refreshState = "still running after wait";
-            worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} seeded worktree graph; refresh ${refreshState}${C.reset}`);
-          } else if (joined.state === "refresh") {
-            const refreshReady = joined.refreshWait?.completed && joined.refreshWait?.ok !== false;
-            let refreshState = joined.attempted ? "started" : "queued/skipped";
-            if (refreshReady) refreshState = "complete";
-            else if (joined.refreshWait?.skipped === "refresh_wait_timeout") refreshState = "still running after wait";
-            worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph refresh ${refreshState}${C.reset}`);
-          } else if (joined.state === "primary_graph_absent") {
-            worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} no primary graph available; ATLAS disabled for this worktree join${C.reset}`);
-          } else if (joined.state === "seed_busy") {
-            worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} graph seed busy; ATLAS disabled for this worktree join${C.reset}`);
+          let joined = null;
+          try {
+            joined = await ensureWorkItemAtlasJoinAsync({
+              projectDir: worker.projectDir,
+              worktreePath: wtPath,
+              workItemId: wi.id,
+              config: getAtlasIntegrationConfig(),
+              signal,
+              onStatus: ({ ok, error, status }) => {
+                if (ok) {
+                  worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph refresh complete${C.reset}`);
+                } else {
+                  const detail = error || (status != null ? `exit ${status}` : "unknown");
+                  worker.emit(job.id, `${C.yellow}[atlas] WI#${wi.id} worktree graph refresh failed: ${detail}${C.reset}`);
+                }
+              },
+            });
+            job._atlasConfig = joined.config || null;
+            job._atlasGraphDbPath = joined.graphDbPath || null;
+            job._atlasDisabledForWorkItem = !!joined.disableAtlas;
+            if (joined.state === "up_to_date") {
+              worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph up to date${C.reset}`);
+            } else if (joined.state === "seeded_refresh") {
+              const refreshReady = joined.refreshWait?.completed && joined.refreshWait?.ok !== false;
+              let refreshState = joined.attempted ? "started" : "queued/skipped";
+              if (refreshReady) refreshState = "complete";
+              else if (joined.refreshWait?.skipped === "refresh_wait_timeout") refreshState = "still running after wait";
+              worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} seeded worktree graph; refresh ${refreshState}${C.reset}`);
+            } else if (joined.state === "refresh") {
+              const refreshReady = joined.refreshWait?.completed && joined.refreshWait?.ok !== false;
+              let refreshState = joined.attempted ? "started" : "queued/skipped";
+              if (refreshReady) refreshState = "complete";
+              else if (joined.refreshWait?.skipped === "refresh_wait_timeout") refreshState = "still running after wait";
+              worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph refresh ${refreshState}${C.reset}`);
+            } else if (joined.state === "primary_graph_absent") {
+              worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} no primary graph available; ATLAS disabled for this worktree join${C.reset}`);
+            } else if (joined.state === "seed_busy") {
+              worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} graph seed busy; ATLAS disabled for this worktree join${C.reset}`);
+            }
+          } finally {
+            try { joined?.view?.close?.(); } catch { /* best effort */ }
           }
         }
       } catch (atlasErr) {
@@ -1211,6 +950,31 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       setJobError(job.id, `Git worktree setup blocked by worktree lock timeout: ${gitErr.message}`);
       worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
       return { ok: false, wtPath: null, branchName: null, sentinelPath: job._activeWorktreeSentinel || null };
+    }
+    if (isTransientCommitInfraFailure(gitErr)) {
+      const retryCount = transientSetupRetryCount(worker, job);
+      if (retryCount < MAX_SETUP_TRANSIENT_INFRA_RETRIES) {
+        const nextRetry = bumpTransientSetupRetry(worker, job);
+        const readyAt = new Date(Date.now() + SETUP_TRANSIENT_INFRA_RETRY_DELAY_MS).toISOString();
+        const message = `Transient git/native infrastructure fault during worktree setup; retrying (${nextRetry}/${MAX_SETUP_TRANSIENT_INFRA_RETRIES})`;
+        worker.emit(job.id, `${C.yellow}[system] WI#${job.work_item_id} ${message}${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          event_type: EVENT_TYPES.JOB_COMMIT_INFRA_RETRY,
+          actor_type: EVENT_ACTORS.WORKER,
+          message,
+          event_json: JSON.stringify({
+            phase: "worktree_setup",
+            retry: nextRetry,
+            max_retries: MAX_SETUP_TRANSIENT_INFRA_RETRIES,
+            error: String(gitErr?.message || gitErr).slice(0, 500),
+          }),
+        });
+        setJobError(job.id, `Git worktree setup transient infra fault: ${gitErr.message}`);
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+        return { ok: false, wtPath: null, branchName: null, sentinelPath: job._activeWorktreeSentinel || null };
+      }
     }
     worker.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} worktree setup failed: ${gitErr.message.split("\n")[0]}${C.reset}`);
     const cleanupStart = Date.now();
@@ -1358,6 +1122,17 @@ export function primeCreatableFiles(cwd, filesToCreate = []) {
   return created;
 }
 
+function shouldPreserveUnmergedCompleteAtlasView(wi) {
+  return wi?.status === "complete" && wi?.merge_state !== "merged";
+}
+
+function atlasCleanupDisposition(wi) {
+  if (shouldPreserveUnmergedCompleteAtlasView(wi)) return null;
+  if (wi.status === "complete") return "merged";
+  if (wi.status === "canceled") return "abandoned";
+  return "purged";
+}
+
 export function cleanupWorktreeIfDone(worker, workItemId) {
   try {
     const wi = getWorkItem(workItemId);
@@ -1368,7 +1143,19 @@ export function cleanupWorktreeIfDone(worker, workItemId) {
 
     const wtDir = worktreePath(worker.projectDir, wi.id, wi.title);
     if (deferTerminalCleanupIfActiveWork(wi, wtDir)) return;
+    let atlasDisposed = false;
+    const disposeAtlas = () => {
+      if (atlasDisposed) return;
+      atlasDisposed = true;
+      disposeWorkItemAtlasGraph({
+        projectDir: worker.projectDir,
+        workItemId: wi.id,
+        worktreePath: wtDir,
+        includeWarmed: !shouldPreserveUnmergedCompleteAtlasView(wi),
+      });
+    };
     if (fs.existsSync(wtDir)) {
+      disposeAtlas();
       const cleanupResult = safeSnapshotAndRemoveWorktree(wtDir, worker.projectDir, {
         reason: "terminal-worktree-cleanup",
         branchName: wi.branch_name || null,
@@ -1415,21 +1202,19 @@ export function cleanupWorktreeIfDone(worker, workItemId) {
       if (cleanupResult.skipped) return;
     }
 
-    disposeWorkItemAtlasGraph({ projectDir: worker.projectDir, workItemId: wi.id });
+    disposeAtlas();
     if (isAtlasV2EmissionEnabled()) {
-      const disposition = wi.status === "complete"
-        ? "merged"
-        : wi.status === "canceled"
-          ? "abandoned"
-          : "purged";
-      emitAtlasV2WiCleanup({
-        payload: {
-          wi_id: Number(wi.id),
-          branch: String(wi.branch_name || ""),
-          disposition,
-        },
-        onError: () => { /* outbox failure must not block cleanup */ },
-      });
+      const disposition = atlasCleanupDisposition(wi);
+      if (disposition) {
+        emitAtlasV2WiCleanup({
+          payload: {
+            wi_id: Number(wi.id),
+            branch: String(wi.branch_name || ""),
+            disposition,
+          },
+          onError: () => { /* outbox failure must not block cleanup */ },
+        });
+      }
     }
 
     const ctxDir = contextDir(wiScopeId(wi.id), worker.projectDir);
@@ -1474,6 +1259,17 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
 
     const wtDir = worktreePath(worker.projectDir, wi.id, wi.title);
     if (deferTerminalCleanupIfActiveWork(wi, wtDir)) return;
+    let atlasDisposed = false;
+    const disposeAtlas = () => {
+      if (atlasDisposed) return;
+      atlasDisposed = true;
+      disposeWorkItemAtlasGraph({
+        projectDir: worker.projectDir,
+        workItemId: wi.id,
+        worktreePath: wtDir,
+        includeWarmed: !shouldPreserveUnmergedCompleteAtlasView(wi),
+      });
+    };
     let wtExists = false;
     try {
       await fs.promises.access(wtDir);
@@ -1482,6 +1278,7 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
       wtExists = false;
     }
     if (wtExists) {
+      disposeAtlas();
       const cleanupResult = await safeSnapshotAndRemoveWorktreeAsync(wtDir, worker.projectDir, {
         reason: "terminal-worktree-cleanup",
         branchName: wi.branch_name || null,
@@ -1529,21 +1326,19 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
       if (cleanupResult.skipped) return;
     }
 
-    disposeWorkItemAtlasGraph({ projectDir: worker.projectDir, workItemId: wi.id });
+    disposeAtlas();
     if (isAtlasV2EmissionEnabled()) {
-      const disposition = wi.status === "complete"
-        ? "merged"
-        : wi.status === "canceled"
-          ? "abandoned"
-          : "purged";
-      emitAtlasV2WiCleanup({
-        payload: {
-          wi_id: Number(wi.id),
-          branch: String(wi.branch_name || ""),
-          disposition,
-        },
-        onError: () => { /* outbox failure must not block cleanup */ },
-      });
+      const disposition = atlasCleanupDisposition(wi);
+      if (disposition) {
+        emitAtlasV2WiCleanup({
+          payload: {
+            wi_id: Number(wi.id),
+            branch: String(wi.branch_name || ""),
+            disposition,
+          },
+          onError: () => { /* outbox failure must not block cleanup */ },
+        });
+      }
     }
 
     const ctxDir = contextDir(wiScopeId(wi.id), worker.projectDir);

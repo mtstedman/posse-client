@@ -25,6 +25,7 @@ import { listScipFiles } from "../../atlas/functions/v2/scip/ingester.js";
 import { openViewWithMeta, viewFreshness } from "../../atlas/functions/v2/view-health.js";
 import { runSqliteWrite } from "../../../shared/concurrency/functions/sqlite-gate.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
+import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { sanitizeWorkerExecArgv } from "../../runtime/functions/worker-exec-argv.js";
 import { getAtlasV2BootTimeoutMs } from "../../settings/functions/tunables.js";
 import { recordEmbeddingForensics, errorForTelemetry } from "../../atlas/functions/v2/embeddings/forensics.js";
@@ -666,6 +667,7 @@ function runAtlasV2BootWarmWorkerThread({
         config,
         testBlockMs,
         purpose,
+        nativeAuth: heartbeatAuthManager.getCapability(),
       },
     });
     recordEmbeddingForensics("atlas.boot_worker_thread.start", {
@@ -1307,9 +1309,11 @@ export async function seedWorkItemAtlasGraphFromPrimaryAsync(opts = {}) {
 }
 
 export function disposeWorkItemAtlasGraph(opts = {}) {
+  const includeWarmed = opts?.includeWarmed !== false;
+  const includeWorktree = opts?.includeWorktree !== false;
   const targets = [
-    warmedWorkItemViewPath(opts?.projectDir, opts?.workItemId),
-    opts?.worktreePath ? workItemViewPath(opts.worktreePath) : null,
+    includeWarmed ? warmedWorkItemViewPath(opts?.projectDir, opts?.workItemId) : null,
+    includeWorktree && opts?.worktreePath ? workItemViewPath(opts.worktreePath) : null,
   ].filter(Boolean);
   if (targets.length === 0) return { ok: false, skipped: "missing_path", root: null, backend: "atlas-v2" };
   const removed = [];

@@ -19,8 +19,9 @@
 //                             re-emits and re-enqueues. Don't retry the
 //                             same warm because the underlying ledger
 //                             state may have moved.
-//   * `max_runtime_ms: 60_000` — bounded; if it can't finish in 60s the
-//                             dev job will fall back to clone-from-main.
+//   * `max_runtime_ms: 180_000` — bounded; gives active-path warms room to
+//                             finish under local ONNX / Windows load before
+//                             callers fall back to clone-from-main.
 //   * `work_item_id: nullable` — main-incremental and main-full warms have
 //                             no owning WI; per-WI warms carry the wi_id.
 //   * `provider: null`, `model_*: null`, `reasoning_effort: null` —
@@ -106,10 +107,11 @@ export const ATLAS_WARM_JOB_POLICY = Object.freeze({
   mutating: false,
   escalating: false,
   maxAttempts: 1,
-  maxRuntimeMs: 60_000,
+  maxRuntimeMs: 180_000,
   /**
    * Priority defaults for the scheduler. Warming should never preempt
-   * pipeline work — it is strictly best-effort prefetch.
+   * pipeline work by default; active-path event hooks opt into higher
+   * priority when freshness gates depend on the warm result.
    */
   defaultPriority: "low",
   /**

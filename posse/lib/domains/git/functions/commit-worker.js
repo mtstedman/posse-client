@@ -1,5 +1,7 @@
 import { isMainThread, parentPort, workerData } from "worker_threads";
 import { gitCommitAll } from "./commit-scope.js";
+import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
+import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 
 function post(message) {
   try { parentPort?.postMessage(message); } catch { /* worker is closing */ }
@@ -7,6 +9,9 @@ function post(message) {
 
 function runCommit() {
   try {
+    if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
+      nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { keyless: false }));
+    }
     const { message, cwd, scope, opts } = workerData || {};
     const result = gitCommitAll(message, cwd, scope, opts);
     post({ ok: true, result });

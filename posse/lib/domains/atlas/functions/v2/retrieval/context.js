@@ -21,6 +21,7 @@ import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 /** @typedef {import("../contracts/tool-results.js").AgentFeedbackData} AgentFeedbackData */
 /** @typedef {import("../contracts/tool-results.js").AgentFeedbackQueryData} AgentFeedbackQueryData */
 /** @typedef {import("../contracts/tool-results.js").SymbolCard} SymbolCard */
+/** @typedef {import("./orchestrator/query-planner-types.js").QueryPlan} QueryPlan */
 
 /**
  * Build a context envelope. Internally calls slice.build with the
@@ -36,9 +37,11 @@ import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
  *   repoId?: string | null,
  *   embeddingIndex?: import("../contracts/embeddings.js").EmbeddingIndex,
  *   encoder?: import("../contracts/embeddings.js").EmbeddingEncoder,
+ *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  * }} args
+ * @returns {ReturnType<typeof okEnvelope<ContextData>> | ReturnType<typeof errorEnvelope> | Promise<ReturnType<typeof okEnvelope<ContextData>> | ReturnType<typeof errorEnvelope>>}
  */
-export function contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder }) {
+export function contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner }) {
   const maxTokens = params.maxTokens || 6000;
   const sliceEnv = /** @type {any} */ (sliceBuild({
     view,
@@ -48,6 +51,7 @@ export function contextBuild({ view, versionId, params, ledger, repoRoot, repoId
     repoId,
     embeddingIndex,
     encoder,
+    planner,
     taskType: params.taskType,
     params: {
       taskText: params.taskText,
@@ -57,6 +61,31 @@ export function contextBuild({ view, versionId, params, ledger, repoRoot, repoId
       budget: { maxEstimatedTokens: maxTokens },
     },
   }));
+  if (sliceEnv && typeof sliceEnv.then === "function") {
+    return sliceEnv.then((resolved) => finishContextBuild({
+      sliceEnv: resolved,
+      versionId,
+      params,
+      maxTokens,
+    }));
+  }
+  return finishContextBuild({
+    sliceEnv,
+    versionId,
+    params,
+    maxTokens,
+  });
+}
+
+/**
+ * @param {{
+ *   sliceEnv: any,
+ *   versionId: string,
+ *   params: ContextParams,
+ *   maxTokens: number,
+ * }}
+ */
+function finishContextBuild({ sliceEnv, versionId, params, maxTokens }) {
   if (!sliceEnv.ok) {
     return /** @type {any} */ ({ ...sliceEnv, action: "context" });
   }
@@ -89,10 +118,34 @@ export function contextBuild({ view, versionId, params, ledger, repoRoot, repoId
  *   repoId?: string | null,
  *   embeddingIndex?: import("../contracts/embeddings.js").EmbeddingIndex,
  *   encoder?: import("../contracts/embeddings.js").EmbeddingEncoder,
+ *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  * }} args
+ * @returns {ReturnType<typeof okEnvelope<ContextSummaryData>> | ReturnType<typeof errorEnvelope> | Promise<ReturnType<typeof okEnvelope<ContextSummaryData>> | ReturnType<typeof errorEnvelope>>}
  */
-export function contextSummary({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder }) {
-  const contextEnv = contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder });
+export function contextSummary({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner }) {
+  const contextEnv = contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner });
+  if (contextEnv && typeof /** @type {any} */ (contextEnv).then === "function") {
+    return /** @type {Promise<any>} */ (contextEnv).then((resolved) => finishContextSummary({
+      contextEnv: resolved,
+      versionId,
+      params,
+    }));
+  }
+  return finishContextSummary({
+    contextEnv,
+    versionId,
+    params,
+  });
+}
+
+/**
+ * @param {{
+ *   contextEnv: any,
+ *   versionId: string,
+ *   params: ContextSummaryParams,
+ * }}
+ */
+function finishContextSummary({ contextEnv, versionId, params }) {
   if (!contextEnv.ok) {
     return errorEnvelope({
       action: "context.summary",

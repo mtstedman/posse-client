@@ -23,9 +23,16 @@ import { bufferPush, bufferCheckpoint, bufferStatus, makeOverlayReadFile } from 
 import { symbolGetCard, symbolGetCards } from "./symbol-card.js";
 import { symbolUsages } from "./usages.js";
 import { treeGrow, treeOverview, treeScope, treeWalk } from "./tree.js";
-import { codeGetSkeleton, codeGetHotPath, codeNeedWindow } from "./code.js";
+import {
+  codeGetSkeleton,
+  codeGetSkeletonAsync,
+  codeGetHotPath,
+  codeGetHotPathAsync,
+  codeNeedWindow,
+  codeNeedWindowAsync,
+} from "./code.js";
 import { contextBuild, contextSummary, agentFeedback, agentFeedbackQuery } from "./context.js";
-import { fileRead } from "./file-read.js";
+import { fileRead, fileReadAsync } from "./file-read.js";
 import { deltaGet, prRiskAnalyze, prRisk } from "./blast-radius.js";
 import { memoryStore, memoryQuery, memoryRemove, memorySurface, memoryFlag } from "./memory.js";
 import { policyGet, policySet } from "./policy.js";
@@ -44,6 +51,7 @@ import { workflowExecute } from "./workflow.js";
 /** @typedef {import("../contracts/tool-params.js").AtlasToolAction} AtlasToolAction */
 /** @typedef {import("../contracts/tool-params.js").TaskType} TaskType */
 /** @typedef {import("../contracts/tool-results.js").AnyToolResult} AnyToolResult */
+/** @typedef {import("./orchestrator/query-planner-types.js").QueryPlan} QueryPlan */
 
 /** @typedef {(path: string) => string | null} ReadFile */
 
@@ -61,6 +69,8 @@ import { workflowExecute } from "./workflow.js";
  * @property {EmbeddingEncoder} [encoder]
  * @property {string} [taskText]      When present, threads into hybrid search task-query re-ranking on symbol.search.
  * @property {TaskType} [taskType]    When present, scopes feedback boost for symbol.search to one task type.
+ * @property {(input: string) => QueryPlan | Promise<QueryPlan>} [planner]
+ * @property {boolean} [asyncNativeRedaction] When true, redaction-heavy retrieval uses async native daemon calls.
  */
 
 /**
@@ -102,11 +112,12 @@ function dispatchImpl(call, ctx) {
   }
   const validation = validateAtlasToolCall(call);
   if (validation.ok === false) {
+    const validationCode = validationErrorCodeForAction(action, validation.errors);
     return /** @type {any} */ (
       errorEnvelope({
         action,
         versionId: ctx.versionId,
-        code: "invalid_params",
+        code: validationCode,
         message: `Invalid ATLAS parameters for ${action}: ${validation.errors[0]?.message || "request failed schema validation"}`,
         details: { errors: validation.errors },
       })
@@ -209,6 +220,7 @@ function dispatchImpl(call, ctx) {
         taskType: ctx.taskType || (typeof /** @type {any} */ (call).taskType === "string" ? /** @type {any} */ (call).taskType : undefined),
         repoId: ctx.repoId,
         repoRoot: ctx.repoRoot,
+        planner: ctx.planner,
         onDemandEmbeddingFill: ctx.config?.onDemandEmbeddingFill !== false,
       }));
     case "symbol.getCard":
@@ -252,6 +264,7 @@ function dispatchImpl(call, ctx) {
         embeddingIndex: ctx.embeddingIndex,
         encoder: ctx.encoder,
         taskType: ctx.taskType || (typeof /** @type {any} */ (call).taskType === "string" ? /** @type {any} */ (call).taskType : undefined),
+        planner: ctx.planner,
         onDemandEmbeddingFill: ctx.config?.onDemandEmbeddingFill !== false,
       }));
     case "slice.refresh":
@@ -265,19 +278,19 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ (editPlan({ view: ctx.view, versionId: ctx.versionId, params: call }));
     case "code.getSkeleton":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (codeGetSkeleton({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
+      return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeGetSkeletonAsync : codeGetSkeleton)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
     case "code.getHotPath":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (codeGetHotPath({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
+      return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeGetHotPathAsync : codeGetHotPath)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
     case "code.needWindow":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (codeNeedWindow({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
+      return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeNeedWindowAsync : codeNeedWindow)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "context":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (contextBuild({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder }));
+      return /** @type {any} */ (contextBuild({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder, planner: ctx.planner }));
     case "context.summary":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (contextSummary({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder }));
+      return /** @type {any} */ (contextSummary({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder, planner: ctx.planner }));
     case "agent.feedback":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (agentFeedback({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger }));
@@ -291,7 +304,7 @@ function dispatchImpl(call, ctx) {
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (prRisk({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger }));
     case "file.read":
-      return /** @type {any} */ (fileRead({ versionId: ctx.versionId, params: call, readFile, view: ctx.view }));
+      return /** @type {any} */ ((ctx.asyncNativeRedaction ? fileReadAsync : fileRead)({ versionId: ctx.versionId, params: call, readFile, view: ctx.view }));
     case "memory.store":
       return /** @type {any} */ (memoryStore({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "memory.query":
@@ -336,6 +349,16 @@ function dispatchImpl(call, ctx) {
         })
       );
   }
+}
+
+function validationErrorCodeForAction(action, errors = []) {
+  if (
+    action === "memory.flag"
+    && errors.some((error) => error?.path === "$.reason" && ["enum", "required"].includes(String(error?.code || "")))
+  ) {
+    return "invalid_flag_reason";
+  }
+  return "invalid_params";
 }
 
 const GATEWAY_ACTIONS = Object.freeze({

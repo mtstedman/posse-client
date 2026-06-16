@@ -61,6 +61,20 @@ import {
   shouldRunScipPhase,
 } from "../../../integrations/functions/atlas-v2-mode.js";
 import { resolveLanguage } from "../../functions/v2/parser/languages/index.js";
+import {
+  normalizedScipPath,
+  scipEventToProgressText,
+} from "../../functions/v2/scip-progress.js";
+import {
+  normalizeTreeCompressionMode,
+  positiveIntOrDefault,
+  shouldRunMlTreeCompressionReseed,
+} from "../../functions/v2/tree-compression-policy.js";
+import { MAX_FULL_WARM_PATHS, walkRepoFilesAsync } from "../../functions/v2/warm-walk.js";
+
+// Re-exported for the warmer test suite, which imports this decision helper
+// from the engine's public surface.
+export { shouldRunMlTreeCompressionReseed };
 
 /**
  * Map a file extension (with leading dot, lowercased) to the source-language
@@ -2656,165 +2670,6 @@ export class ParseEngine {
       logAtlasError(`[Warmer.#reconcileInterruptedEmbeddings] ${viewPath} threw:`, err);
     }
   }
-}
-
-/**
- * Compact a SCIP-ingest event into a single-line progress string the
- * existing system stream can render. The Warmer's progress channel is
- * line-oriented; the event payload stays available in result_json via
- * the per-purpose handlers' own counters.
- *
- * @param {{ kind: string, [k: string]: any }} event
- * @param {string} scipPath
- * @returns {string}
- */
-function scipEventToProgressText(event, scipPath) {
-  const base = path.basename(scipPath);
-  switch (event.kind) {
-    case "atlas.scip.ingest.started":
-      return `scip ingest ${base}: ${event.documents || 0} documents`;
-    case "atlas.scip.ingest.completed": {
-      const ingested = Number(event.documents_ingested || 0);
-      const failed = Number(event.documents_failed || 0);
-      const skipped = Number(event.documents_skipped || 0);
-      const externals = Number(event.external_symbols || 0);
-      const reused = Number(event.blobs_reused || 0);
-      const reusedText = reused > 0 ? `, ${reused} reused` : "";
-      const skippedText = skipped > 0 ? `, ${skipped} skipped` : "";
-      return `scip ingest ${base}: ${ingested} ingested${reusedText}${skippedText}, ${failed} failed, ${externals} externals`;
-    }
-    case "atlas.scip.ingest.skipped":
-      return `scip ingest ${base}: already up-to-date`;
-    case "atlas.scip.ingest.failed":
-      return `scip ingest ${base}: ${event.repo_rel_path || ""} ${event.message || ""}`.trim();
-    case "atlas.scip.ingest.warning":
-      return `scip ingest ${base}: warning ${event.reason || ""} ${event.message || ""}`.trim();
-    default:
-      return `scip event ${event.kind} (${base})`;
-  }
-}
-
-function normalizedScipPath(scipPath) {
-  const value = String(scipPath || "").trim();
-  if (!value) return "";
-  const normalized = path.resolve(value).replace(/\\/g, "/");
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-}
-
-function scipBasenameSourceLanguages(scipPath) {
-  const base = path.basename(String(scipPath || ""), ".scip").toLowerCase();
-  if (base === "typescript") return ["ts", "js"];
-  if (base === "python") return ["py"];
-  if (base === "php") return ["php"];
-  if (base === "go") return ["go"];
-  if (base === "rust") return ["rs"];
-  if (["ts", "js", "py", "php", "go", "rs"].includes(base)) return [base];
-  return [];
-}
-
-/**
- * ML labeling runs ONCE, at boot. Re-warms must not wait ~2 minutes on a
- * provider pass — the compressed tree is an orientation layer and is allowed
- * to lag; carried-forward labels cover it until the next boot.
- *
- * @param {{ purpose?: string | null, mode?: string | null, triggerEvent?: string | null }} args
- * @returns {{ run: boolean, reason: string | null }}
- */
-export function shouldRunMlTreeCompressionReseed({ purpose, mode, triggerEvent } = {}) {
-  const isMainPurpose = purpose === "main-incremental"
-    || purpose === "main-full"
-    || purpose === "main-merge";
-  if (!isMainPurpose) return { run: false, reason: "not_main_purpose" };
-  if (mode !== "ml") return { run: false, reason: "mode_not_ml" };
-  if (triggerEvent !== "boot") return { run: false, reason: "ml_reseed_boot_only" };
-  return { run: true, reason: null };
-}
-
-function normalizeTreeCompressionMode(value) {
-  const raw = String(value || "deterministic").trim().toLowerCase();
-  if (raw === "off" || raw === "deterministic" || raw === "ml") return raw;
-  return "deterministic";
-}
-
-function positiveIntOrDefault(value, fallback) {
-  const parsed = Number.parseInt(String(value ?? ""), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-/**
- * Upper bound on paths a single `main-full` warm job will index. Keeps
- * one job from blowing the per-job runtime budget when pointed at a
- * very large repo. main-full is admin-triggered and rare; an operator
- * can chain a few jobs if a repo legitimately exceeds this.
- */
-const MAX_FULL_WARM_PATHS = 5000;
-
-const WALK_SKIP_DIRS = new Set([
-  ".git",
-  ".hg",
-  ".svn",
-  "node_modules",
-  ".posse",
-  ".posse-worktrees",
-  ".posse-test-suites",
-  ".venv",
-  "venv",
-  "__pycache__",
-  "vendor",
-  "build",
-  "dist",
-  "out",
-  "target",
-  "coverage",
-  ".next",
-  ".nuxt",
-  ".cache",
-]);
-
-/**
- * Async variant used by warm jobs so a full-repo scan yields between
- * directory reads instead of monopolizing the event loop.
- *
- * @param {string} repoRoot
- * @param {(filename: string, relPath: string) => boolean} accept
- * @param {{ maxPaths?: number }} [opts]
- * @returns {Promise<string[]>}
- */
-async function walkRepoFilesAsync(repoRoot, accept, opts = {}) {
-  const maxPaths = Number.isInteger(opts.maxPaths) && /** @type {number} */ (opts.maxPaths) > 0
-    ? /** @type {number} */ (opts.maxPaths)
-    : Infinity;
-  /** @type {string[]} */
-  const out = [];
-  /**
-   * @param {string} absDir
-   * @param {string} relDir
-   * @returns {Promise<boolean>}
-   */
-  async function walk(absDir, relDir) {
-    if (out.length >= maxPaths) return false;
-    /** @type {fs.Dirent[]} */
-    let entries;
-    try { entries = await fs.promises.readdir(absDir, { withFileTypes: true }); }
-    catch { return true; }
-    for (const ent of entries) {
-      if (out.length >= maxPaths) return false;
-      const name = ent.name;
-      if (ent.isDirectory()) {
-        if (WALK_SKIP_DIRS.has(name)) continue;
-        if (name.startsWith(".") && !relDir) continue;
-        const childRel = relDir ? `${relDir}/${name}` : name;
-        if (!await walk(path.join(absDir, name), childRel)) return false;
-      } else if (ent.isFile()) {
-        const relPath = relDir ? `${relDir}/${name}` : name;
-        if (!accept(name, relPath)) continue;
-        out.push(relPath);
-      }
-    }
-    return true;
-  }
-  await walk(repoRoot, "");
-  return out;
 }
 
 /**

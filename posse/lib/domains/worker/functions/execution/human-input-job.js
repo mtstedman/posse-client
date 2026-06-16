@@ -32,6 +32,7 @@ import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import {
   buildDeadLetterRetryPayload,
   classifyApprovalAnswer,
+  classifyBlockedRecoveryAnswer,
   classifyDeadLetterRecoveryAnswer,
   classifyPartialWorkRecoveryAnswer,
   classifyReviewAnswer,
@@ -271,6 +272,95 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
       } else {
         finalHumanStatus = "failed";
         worker.emit(job.id, `${C.yellow}[human] Partial-work recovery answer was not actionable; expected extend, commit, or revert${C.reset}`);
+      }
+    }
+
+    if (payload.original_job_id && payload.review_type === "blocked_recovery") {
+      const origJob = getJob(payload.original_job_id);
+      const answers = extractHumanAnswers(output);
+      const lastAnswer = answers.length > 0 ? extractHumanAnswerText(answers[answers.length - 1]) : "";
+      const decision = classifyBlockedRecoveryAnswer(lastAnswer);
+      handledReviewDecision = true;
+
+      if (!origJob) {
+        finalHumanStatus = "failed";
+        worker.emit(job.id, `${C.yellow}[human] Blocked recovery could not find original job #${payload.original_job_id}${C.reset}`);
+      } else if (decision === "retry") {
+        const origPayload = worker.parsePayload(origJob);
+        const recoveryNote = [
+          `Blocked recovery from human_input job #${job.id}:`,
+          String(lastAnswer || "").trim() || "(no additional instructions)",
+        ].join("\n");
+        if (typeof origPayload.task_spec === "string" && origPayload.task_spec.trim()) {
+          origPayload.task_spec = `${origPayload.task_spec.trim()}\n\nBLOCKED RECOVERY GUIDANCE:\n${recoveryNote}`;
+        } else {
+          origPayload.task_spec = recoveryNote;
+        }
+        origPayload._blocked_recovery = {
+          ...(origPayload._blocked_recovery || {}),
+          recovery_job_id: job.id,
+          action: "retry",
+          human_answer: String(lastAnswer || ""),
+        };
+        updateJobPayload(origJob.id, JSON.stringify(origPayload));
+        extendJobMaxAttempts(origJob.id, Number(origJob.attempt_count || 0) + 1);
+        await worker._setJobRowStatus(origJob, "queued");
+        worker.emit(job.id, `${C.cyan}[human] Blocked job #${origJob.id} queued for retry with human guidance${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: origJob.id,
+          attempt_id: attempt.attempt.id,
+          event_type: EVENT_TYPES.JOB_UNBLOCKED,
+          actor_type: EVENT_ACTORS.WORKER,
+          message: `Human requested blocked-job retry via job #${job.id}`,
+          event_json: JSON.stringify({ recovery_job_id: job.id, answer: lastAnswer }),
+        });
+      } else if (decision === "replan") {
+        const emitFn = (msg) => worker.emit(job.id, msg);
+        processVerdict(origJob, {
+          verdict: "needs_replan",
+          confidence: "high",
+          reasons: [`Human requested replan for blocked job via recovery job #${job.id}: ${lastAnswer || "(no details)"}`],
+          spawn_jobs: [],
+          human_questions: [],
+        }, { emit: emitFn, autoApprove: worker.autoApprove });
+        worker.emit(job.id, `${C.cyan}[human] Blocked job #${origJob.id} routed to replan${C.reset}`);
+      } else if (decision === "skip") {
+        await worker._setJobRowStatus(origJob, "canceled");
+        worker.emit(job.id, `${C.yellow}[human] Blocked recovery skipped job #${origJob.id}${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: origJob.id,
+          attempt_id: attempt.attempt.id,
+          event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
+          actor_type: EVENT_ACTORS.WORKER,
+          message: `Human skipped blocked job via recovery job #${job.id}`,
+        });
+      } else if (decision === "pass") {
+        await worker._setJobRowStatus(origJob, "succeeded");
+        worker.emit(job.id, `${C.green}[human] Blocked recovery marked job #${origJob.id} succeeded${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: origJob.id,
+          attempt_id: attempt.attempt.id,
+          event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
+          actor_type: EVENT_ACTORS.WORKER,
+          message: `Human passed blocked job via recovery job #${job.id}`,
+        });
+      } else if (decision === "fail") {
+        await worker._setJobRowStatus(origJob, "failed");
+        worker.emit(job.id, `${C.yellow}[human] Blocked recovery failed job #${origJob.id}${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: origJob.id,
+          attempt_id: attempt.attempt.id,
+          event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
+          actor_type: EVENT_ACTORS.WORKER,
+          message: `Human failed blocked job via recovery job #${job.id}`,
+        });
+      } else {
+        finalHumanStatus = "failed";
+        worker.emit(job.id, `${C.yellow}[human] Blocked recovery answer was not actionable; expected retry, skip, replan, pass, or fail${C.reset}`);
       }
     }
 

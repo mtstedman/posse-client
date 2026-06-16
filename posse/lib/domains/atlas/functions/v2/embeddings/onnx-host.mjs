@@ -9,8 +9,14 @@
 
 import { workerData } from "node:worker_threads";
 import { runDaemonThread } from "../../../../../classes/tools/daemon/thread-host.js";
+import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
+import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 
 const config = workerData?.config || {};
+
+if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
+  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { keyless: false }));
+}
 
 /** @type {Promise<any> | null} */
 let encoderPromise = null;
@@ -53,6 +59,7 @@ runDaemonThread(async (payload) => {
         try { await (await encoderPromise).dispose?.(); } catch { /* best effort */ }
         encoderPromise = null;
       }
+      try { await nativeBinaries.disposeAll(); } catch { /* best effort */ }
       return { disposed: true };
     }
     default:

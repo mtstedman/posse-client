@@ -4,6 +4,7 @@ import { REPLAN_CANCELABLE_JOB_TYPES, STALE_CANCELABLE_JOB_STATUSES } from "../.
 import { TERMINAL_JOB_STATUSES } from "../../../../queue/functions/common.js";
 import {
   getWorkItem,
+  getAttempts,
   forceUpdateJobStatus,
   invalidateSessionLanesForWorkItem,
   listJobsByWorkItem,
@@ -22,6 +23,29 @@ function isLoopbackReplanResearchJob(job) {
   const payload = parseJobPayload(job);
   if (payload?._is_loopback === true) return true;
   return /^Research \(replan\):/.test(job?.title || "");
+}
+
+function collectScopedFiles(payload = {}) {
+  const files = [
+    ...(Array.isArray(payload.files_to_modify) ? payload.files_to_modify : []),
+    ...(Array.isArray(payload.files_to_create) ? payload.files_to_create : []),
+    ...(Array.isArray(payload.files_to_delete) ? payload.files_to_delete : []),
+    ...(Array.isArray(payload.must_modify) ? payload.must_modify : []),
+  ];
+  return [...new Set(files.map((file) => String(file || "").replace(/\\/g, "/").trim()).filter(Boolean))];
+}
+
+function latestCommitHashForJob(jobId) {
+  try {
+    const attempts = getAttempts(jobId);
+    for (let i = attempts.length - 1; i >= 0; i--) {
+      const hash = String(attempts[i]?.commit_hash || "").trim();
+      if (hash) return hash;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export function handle(job, verdict, ctx) {
@@ -112,6 +136,9 @@ export function handle(job, verdict, ctx) {
 
     const wi = getWorkItem(job.work_item_id);
     const wiTitle = (wi?.title || job.title).slice(0, 60);
+    const originalPayload = parseJobPayload(job);
+    const originalScopedFiles = collectScopedFiles(originalPayload);
+    const originalCommitHash = latestCommitHashForJob(job.id);
     const reResearchJob = spawnFromAssessor("failed", "research", {
       work_item_id: job.work_item_id,
       title: `Research (replan): ${wiTitle}`,
@@ -121,9 +148,16 @@ export function handle(job, verdict, ctx) {
       reasoning_effort: "medium",
       payload_json: JSON.stringify({
         _is_loopback: true,
+        _assessment_replan: true,
         replan_reason: verdict.reasons.join("\n"),
         original_job_id: job.id,
+        original_job_type: job.job_type,
+        original_task_mode: originalPayload.task_mode || "code",
         original_title: job.title,
+        original_commit_hash: originalCommitHash,
+        original_scoped_files: originalScopedFiles,
+        wi_branch_name: wi?.branch_name || null,
+        wi_merge_base_hash: null,
         instructions: `Re-research for replan. Previous approach failed:\n${verdict.reasons.join("\n")}\nInvestigate the current codebase state and produce an updated research brief.`,
       }),
     });

@@ -9,10 +9,29 @@
 //      the Rust method and the matching Node body is deleted in the same change.
 
 import { nativeBinaries } from "../../../../classes/tools/BinaryManager.js";
-import { nativeAuthFromSettings } from "../../../remote/functions/native-auth.js";
+import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../classes/tools/daemon/native-thread-bridge.js";
 import { isAbortError, signalAbortError } from "../../../runtime/functions/yield.js";
 
 export const GIT_NATIVE_PROTOCOL = "posse.git.native.v1";
+
+/**
+ * Resolve the heartbeat auth envelope for a native request. An explicit
+ * `opts.auth` always wins; otherwise the envelope comes from the manager's
+ * single auth authority (cached, resolved once per runtime). Stub managers that
+ * want auth in tests should expose nativeAuthEnvelope(); this leaf must not
+ * silently re-read settings/env.
+ *
+ * @param {GitNativeMethodRunOptions} opts
+ * @param {import("../../../../classes/tools/BinaryManager.js").BinaryManager} manager
+ * @returns {Record<string, unknown> | null}
+ */
+function resolveGitAuthEnvelope(opts, manager) {
+  if (opts.auth && typeof opts.auth === "object") return opts.auth;
+  if (manager && typeof manager.nativeAuthEnvelope === "function") {
+    return manager.nativeAuthEnvelope();
+  }
+  return null;
+}
 
 // Read-only methods that are safe to run through the persistent worker: no
 // side effects (or idempotent ones), so an abort can simply discard the result
@@ -75,6 +94,8 @@ const WORKER_ELIGIBLE_METHODS = new Set([
  * @property {boolean} [disabled]
  * @property {AbortSignal} [signal]
  * @property {Record<string, unknown>} [auth]
+ * @property {boolean} [bypassNativeBridge]
+ * @property {boolean} [worker]
  * @property {(value: unknown) => unknown} [normalizeNodeResult]
  * @property {(value: unknown) => unknown} [normalizeNativeResult]
  * @property {(value: unknown) => unknown} [mapNativeReturn]
@@ -130,9 +151,7 @@ export function runGitNativeMethod(method, payload, opts = {}) {
     throw new Error(`Git native method unavailable: ${method}`);
   }
   const request = buildGitNativeMethodRequest(method, payload);
-  const auth = opts.auth && typeof opts.auth === "object"
-    ? opts.auth
-    : nativeAuthFromSettings();
+  const auth = resolveGitAuthEnvelope(opts, manager);
   if (auth && typeof auth === "object") {
     /** @type {Record<string, unknown>} */ (request).auth = auth;
   }
@@ -169,14 +188,20 @@ export function runGitNativeMethod(method, payload, opts = {}) {
  * @returns {Promise<unknown>}
  */
 export async function runGitNativeMethodAsync(method, payload, opts = {}) {
+  if (opts.bypassNativeBridge !== true && hasNativeThreadBridge()) {
+    const { bypassNativeBridge, manager, signal, ...bridgeOpts } = opts;
+    const auth = resolveGitAuthEnvelope(opts, manager || nativeBinaries);
+    if (auth && typeof auth === "object") {
+      /** @type {Record<string, unknown>} */ (bridgeOpts).auth = auth;
+    }
+    return nativeThreadBridgeRequest("git", method, payload, bridgeOpts);
+  }
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("git")) {
     throw new Error(`Git native method unavailable: ${method}`);
   }
   const request = buildGitNativeMethodRequest(method, payload);
-  const auth = opts.auth && typeof opts.auth === "object"
-    ? opts.auth
-    : nativeAuthFromSettings();
+  const auth = resolveGitAuthEnvelope(opts, manager);
   if (auth && typeof auth === "object") {
     /** @type {Record<string, unknown>} */ (request).auth = auth;
   }
@@ -189,7 +214,7 @@ export async function runGitNativeMethodAsync(method, payload, opts = {}) {
       timeoutMs: opts.timeoutMs,
       key: opts.key,
       signal: opts.signal,
-      worker: WORKER_ELIGIBLE_METHODS.has(request.method),
+      worker: opts.worker !== false && WORKER_ELIGIBLE_METHODS.has(request.method),
     },
   );
   if (!res.ok) {

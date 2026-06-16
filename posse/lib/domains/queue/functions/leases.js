@@ -20,6 +20,7 @@ import { logEvent } from "./events.js";
 import { isLeaseValid } from "./attempts.js";
 import {
   acquireLeaseWithWriteLocks,
+  acquireLeaseWithWriteLocksAsync,
   releaseJobLocksForStatus,
 } from "./file-locks.js";
 import {
@@ -170,6 +171,7 @@ export function getLeaseManager({ defaultDurationSec = 900 } = {}) {
     DEFAULT_LEASE_MANAGER = LeaseManager.fromQueueFns({
       acquireLease,
       acquireLeaseWithWriteLocks,
+      acquireLeaseWithWriteLocksAsync,
       renewLease,
       releaseLease,
       releaseLeaseWithoutAttemptPenalty,

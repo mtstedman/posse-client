@@ -27,6 +27,7 @@ import { resolveEdges } from "../../functions/v2/resolver/index.js";
 import { graphDerivedInputSignature, refreshGraphDerivedState } from "../../functions/v2/graph-derived.js";
 import { refreshTreeDerivedState, treeDerivedInputSignature } from "../../functions/v2/tree-derived.js";
 import { refreshTreeCompressionSnapshot, treeCompressionInputSignature } from "../../functions/v2/tree-compression.js";
+import { normalizeTreeCompressionMode } from "../../functions/v2/tree-compression-policy.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
 import { normalizeLangFromScip } from "../../functions/v2/scip/to-rows.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
@@ -962,12 +963,6 @@ function refreshTreeCompressionSnapshotIfChanged(viewDb, opts = {}) {
     writeMetaValue(viewDb, TREE_COMPRESSION_SIGNATURE_META_KEY, nextSignature);
   }
   return { skipped: false, signature: nextSignature, result };
-}
-
-function normalizeTreeCompressionMode(value) {
-  const raw = String(value || "deterministic").trim().toLowerCase();
-  if (raw === "off" || raw === "deterministic" || raw === "ml") return raw;
-  return "deterministic";
 }
 
 /**

@@ -4,6 +4,8 @@ import path from "path";
 import Database from "better-sqlite3";
 import { SETTINGS_CATALOG, getCatalogEntry, validateCatalogSettingValue } from "../functions/catalog.js";
 
+const ACCOUNT_DB_BUSY_TIMEOUT_MS = 2000;
+
 const REPO_SCOPED_SETTING_KEYS = new Set(
   SETTINGS_CATALOG.filter((entry) => entry.scope === "repo").map((entry) => entry.key),
 );
@@ -92,6 +94,7 @@ export class AccountSettings {
     try { fs.chmodSync(targetPath, 0o600); } catch { /* Windows/best-effort */ }
     this._db.pragma("journal_mode = WAL");
     this._db.pragma("synchronous = NORMAL");
+    this._db.pragma(`busy_timeout = ${ACCOUNT_DB_BUSY_TIMEOUT_MS}`);
     this._db.exec(`
       CREATE TABLE IF NOT EXISTS account_settings (
         setting_key TEXT PRIMARY KEY,

@@ -75,6 +75,10 @@ export async function answerHumanInput(jobId, args = {}, { projectDir = process.
 
   const display = {
     askQuestions: async () => answers,
+    workerLine: () => {},
+    addEvent: () => {},
+    requestRender: () => {},
+    setRunPhase: () => {},
   };
   const worker = new Worker({
     projectDir,

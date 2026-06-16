@@ -15,7 +15,7 @@
 /** @typedef {import("../query-planner-types.js").QueryPlan} QueryPlan */
 
 import { symbolIdOf } from "../../cards.js";
-import { rankSymbols } from "../../rank.js";
+import { rankSymbols, rankSymbolsAsync } from "../../rank.js";
 import { isDefaultVisibleSymbol, isExplicitLiteralSymbolQuery, isLiteralSymbolName, pathSymbolPriority } from "../../hygiene.js";
 import { toRanked } from "../rrf.js";
 import { planQuery } from "../query-planner.js";
@@ -48,6 +48,36 @@ export function runFtsBackend({ view, query, limit, plan, scope = "either" }) {
     // Lexical rerank — FTS returns rows in MATCH-rank order, but we want
     // identifier-exact hits first so the fused ranking favors them.
     const ranked = rankSymbols(query, raw);
+    return {
+      ok: true,
+      entries: toRanked(ranked, (s) => symbolIdOf(s)),
+      raw: ranked,
+      total: raw.length,
+      plan: usedPlan,
+    };
+  } catch {
+    return { ok: false, entries: [], raw: [], total: 0, reason: "query_error", plan: usedPlan };
+  }
+}
+
+/**
+ * Async daemon-backed variant for retrieval paths that already resolved an
+ * async planner or vector backend.
+ *
+ * @param {{ view: View, query: string, limit: number, plan?: QueryPlan, scope?: "name" | "body" | "either" }} args
+ * @returns {Promise<FtsBackendResult>}
+ */
+export async function runFtsBackendAsync({ view, query, limit, plan, scope = "either" }) {
+  if (!view || !view.query || typeof view.query.findSymbol !== "function") {
+    return { ok: false, entries: [], raw: [], total: 0, reason: "unavailable" };
+  }
+  if (typeof query !== "string" || query.length === 0) {
+    return { ok: false, entries: [], raw: [], total: 0, reason: "query_error" };
+  }
+  const usedPlan = plan ?? planQuery(query);
+  try {
+    const raw = collectFtsHits({ view, query, limit, plan: usedPlan, scope });
+    const ranked = await rankSymbolsAsync(query, raw);
     return {
       ok: true,
       entries: toRanked(ranked, (s) => symbolIdOf(s)),

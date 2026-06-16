@@ -35,7 +35,7 @@ export function shouldFastPassArtifactAssessment({
       const rel = path.relative(rootAbs, fileAbs).replace(/\\/g, "/");
       return isInsideRoot(fileAbs, rootAbs, { allowEqual: false }) ? rel : path.posix.basename(file);
     });
-  if (required.length === 0) return false;
+  if (required.length === 0) return taskMode === "report" && manifestPaths.size > 0;
 
   return required.every((relPath) => manifestPaths.has(relPath));
 }

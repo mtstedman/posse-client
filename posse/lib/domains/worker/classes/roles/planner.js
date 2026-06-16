@@ -32,7 +32,6 @@ import {
 import {
   composePromptRemoteAware,
   handoff,
-  normalizeResearcherFilePriorities,
   normalizeResearcherKeySymbols,
   parseResearcherStructuredOutput,
   renderAtlasHandoffSections,
@@ -48,10 +47,8 @@ import {
 } from "../../functions/helpers/intake-hints.js";
 import { currentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import { getExplicitIntakeBindings } from "../../functions/helpers/plan-routing.js";
-import { resolvePathWithin } from "../../functions/helpers/scope.js";
 import { getProviderName, isProviderReady } from "../../../providers/functions/provider.js";
 import { getDefaultImageModel } from "../../../providers/functions/model-catalog.js";
-import { isSensitiveEnvFilePath, safePath } from "../../../../functions/toolkit/index.js";
 import { getEnabledSkillsForRole } from "../../../../shared/skills/functions/registry.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import {
@@ -75,6 +72,18 @@ import {
   spawnSuccessForRole,
 } from "../../functions/helpers/role-spawn-policies.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import {
+  emit,
+  normalizePlannerRoleMode,
+  isQuestionOnlyBinding,
+  queueQuestionAnswerTask,
+  sanitizeResearcherFileList,
+  sanitizeResearcherFilePriorities,
+  renderPlannerFilePriorities,
+  latestPlanArtifactText,
+  buildPlanSynthesisArtifact,
+  validatePlannerContextPreflight,
+} from "../../functions/helpers/planner-helpers.js";
 
 const DEFAULT_DEPS = {
   classifyPlannerOutput: defaultClassifyPlannerOutput,
@@ -89,242 +98,6 @@ const DEFAULT_DEPS = {
   shortJobTitle: defaultShortJobTitle,
   unwrapTaskArray: defaultUnwrapTaskArray,
 };
-
-function emit(worker, jobId, message) {
-  if (typeof worker?.emit === "function") {
-    worker.emit(jobId, message);
-  }
-}
-
-function normalizePlannerRoleMode(value) {
-  const raw = String(value || "normal").trim().toLowerCase();
-  return ["normal", "primary", "redteam", "synth"].includes(raw) ? raw : "normal";
-}
-
-function isQuestionOnlyBinding(explicitBindings = {}) {
-  const desiredOutputs = Array.isArray(explicitBindings.desiredOutputs)
-    ? explicitBindings.desiredOutputs
-    : [];
-  return explicitBindings.outputMode === "question_only"
-    || explicitBindings.deliverableType === "answer"
-    || desiredOutputs.includes("question_only");
-}
-
-function buildQuestionAnswerTask({ workItem, job, projectDir, reason = "" } = {}) {
-  const artifactDir = artifactsDir(wiScopeId(job.work_item_id), projectDir).replace(/\\/g, "/");
-  return {
-    title: `Answer: ${String(workItem?.title || job.title || "Question").replace(/^Plan:\s*/i, "")}`.slice(0, 120),
-    job_type: "artificer",
-    task_mode: "report",
-    task_spec: [
-      "Write a concise answer brief for the user's question.",
-      "Use the researcher/planner context already staged for this work item as source material.",
-      "Do not edit repository source files.",
-      "Create answer.md in output_root so the final answer is visible as a user-facing artifact.",
-      reason ? `Planner no-task reason to account for: ${reason}` : null,
-      "",
-      `Question/title: ${workItem?.title || ""}`,
-      workItem?.description ? `Question/details: ${workItem.description}` : null,
-    ].filter(Boolean).join("\n"),
-    files_to_modify: [],
-    files_to_create: ["answer.md"],
-    files_to_delete: [],
-    create_roots: [artifactDir],
-    output_root: artifactDir,
-    success_criteria: [
-      "answer.md exists under output_root",
-      "answer.md directly answers the user's question using available evidence",
-    ],
-    depends_on_index: [],
-  };
-}
-
-function queueQuestionAnswerTask(worker, job, ctx, { reason = "", output = "", storeResponse = false } = {}) {
-  const answerTask = buildQuestionAnswerTask({
-    workItem: ctx.workItem,
-    job,
-    projectDir: worker.projectDir,
-    reason,
-  });
-  emit(worker, job.id, `${C.cyan}[planner]${C.reset} WI#${job.work_item_id}: queued visible answer brief`);
-  if (storeResponse) {
-    storeArtifact({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      attempt_id: ctx.attemptId,
-      artifact_type: "response",
-      content_long: output,
-    });
-  }
-  storeArtifact({
-    work_item_id: job.work_item_id,
-    job_id: job.id,
-    attempt_id: ctx.attemptId,
-    artifact_type: "summary",
-    content_long: `Planner: question-only answer brief required. ${reason}`,
-  });
-  worker.createJobsFromPlan(job, [answerTask]);
-}
-
-function researcherPathFromValue(value) {
-  if (typeof value === "string") return value;
-  if (value && typeof value.path === "string") return value.path;
-  return "";
-}
-
-function sanitizeResearcherFileList(values, projectDir, field) {
-  const files = [];
-  const dropped = [];
-  const seen = new Set();
-  const list = Array.isArray(values) ? values : [];
-
-  const drop = (value, reason) => {
-    dropped.push({
-      field,
-      path: researcherPathFromValue(value) || String(value ?? ""),
-      reason,
-    });
-  };
-
-  for (const value of list) {
-    const raw = researcherPathFromValue(value).trim();
-    if (!raw) {
-      drop(value, "empty");
-      continue;
-    }
-    if (raw.includes("\0")) {
-      drop(value, "nul_byte");
-      continue;
-    }
-
-    const slashPath = raw.replace(/\\/g, "/");
-    if (path.isAbsolute(raw) || path.posix.isAbsolute(slashPath) || /^[A-Za-z]:\//.test(slashPath)) {
-      drop(value, "absolute_path");
-      continue;
-    }
-
-    const normalized = path.posix.normalize(slashPath).replace(/^\.\//, "");
-    if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
-      drop(value, "path_traversal");
-      continue;
-    }
-    if (isSensitiveEnvFilePath(normalized)) {
-      drop(value, "sensitive_env");
-      continue;
-    }
-    const parts = normalized.toLowerCase().split("/").filter(Boolean);
-    if (parts.some((part) => part === ".git" || part === ".claude" || part === ".codex")) {
-      drop(value, "private_workspace_metadata");
-      continue;
-    }
-    if (parts[0] === ".posse" && parts[1] !== "resources") {
-      drop(value, "private_workspace_metadata");
-      continue;
-    }
-
-    const resolved = resolvePathWithin(projectDir, normalized, { allowEqual: false });
-    if (!resolved) {
-      drop(value, "outside_project_scope");
-      continue;
-    }
-    try {
-      safePath(projectDir, normalized);
-    } catch {
-      drop(value, "private_workspace_metadata");
-      continue;
-    }
-
-    const rel = path.relative(projectDir, resolved).replace(/\\/g, "/");
-    if (!rel || rel === "." || seen.has(rel)) continue;
-    seen.add(rel);
-    files.push(rel);
-  }
-
-  return { files, dropped };
-}
-
-function sanitizeResearcherFilePriorities(parsed, projectDir) {
-  const files = [];
-  const dropped = [];
-  const seen = new Set();
-  const priorities = normalizeResearcherFilePriorities(parsed);
-
-  for (const entry of priorities) {
-    const sanitized = sanitizeResearcherFileList([entry.path], projectDir, "planner_file_priorities");
-    dropped.push(...sanitized.dropped);
-    const rel = sanitized.files[0];
-    if (!rel || seen.has(rel)) continue;
-    seen.add(rel);
-    files.push({
-      ...entry,
-      path: rel,
-      rank: files.length + 1,
-    });
-  }
-
-  return { files, dropped };
-}
-
-function oneLine(value, max = 180) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max);
-}
-
-function renderPlannerFilePriorities(entries) {
-  if (!Array.isArray(entries) || entries.length === 0) return "";
-  return [
-    "# Planner File Priorities",
-    "",
-    "Researcher-ranked files for planning order and scope. Use these as the first read targets, then fall back to the full brief when detail is missing.",
-    "",
-    ...entries.map((entry) => {
-      const details = [
-        entry.usefulness && entry.usefulness !== "unspecified" ? `usefulness=${oneLine(entry.usefulness, 60)}` : "",
-        entry.evidence && entry.evidence !== "unspecified" ? `evidence=${oneLine(entry.evidence, 60)}` : "",
-        entry.reason ? oneLine(entry.reason, 200) : "",
-      ].filter(Boolean);
-      return `${entry.rank}. ${entry.path}${details.length > 0 ? ` - ${details.join("; ")}` : ""}`;
-    }),
-    "",
-  ].join("\n");
-}
-
-function latestPlanArtifactText(workItemId, jobId, preferredTypes = []) {
-  if (!jobId) return "";
-  const artifacts = getArtifactsByWorkItem(workItemId)
-    .filter((artifact) => Number(artifact.job_id) === Number(jobId));
-  for (const type of preferredTypes) {
-    const match = artifacts
-      .filter((artifact) => artifact.artifact_type === type)
-      .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
-    if (match?.content_long) return match.content_long;
-  }
-  const fallback = artifacts
-    .filter((artifact) => artifact.content_long)
-    .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
-  return fallback?.content_long || "";
-}
-
-function buildPlanSynthesisArtifact(ctx, output) {
-  return [
-    "# Red-Team Planning Synthesis",
-    "",
-    `work_item_id: ${ctx.workItem?.id ?? "unknown"}`,
-    `primary_plan_job_id: ${ctx.payload?.primary_plan_job_id ?? "unknown"}`,
-    `red_team_plan_job_id: ${ctx.payload?.red_team_plan_job_id ?? "unknown"}`,
-    "",
-    "## Primary Planner Output",
-    ctx.primaryPlanText || "(missing)",
-    "",
-    "## Red-Team Planner Output",
-    ctx.redTeamPlanText || "(missing)",
-    "",
-    "## Synthesized Write-Layer Plan",
-    output || "(empty)",
-  ].join("\n");
-}
 
 export class PlannerRole extends BaseRole {
   static role = "planner";
@@ -1064,57 +837,5 @@ export class PlannerRole extends BaseRole {
     worker.createJobsFromPlan(job, tasks);
 
     return output;
-  }
-}
-
-function failPlannerContextPreflight(worker, job, attemptId, detail) {
-  const message = `Planner handoff preflight failed: ${detail}`;
-  emit(worker, job.id, `${C.red}[context]${C.reset} WI#${job.work_item_id}: ${message}`);
-  storeArtifact({
-    work_item_id: job.work_item_id,
-    job_id: job.id,
-    attempt_id: attemptId,
-    artifact_type: "summary",
-    content_long: message,
-  });
-  storeArtifact({
-    work_item_id: job.work_item_id,
-    job_id: job.id,
-    attempt_id: attemptId,
-    artifact_type: "response",
-    content_long: `PLANNER_CONTEXT_ERROR: ${detail}`,
-  });
-  throw new Error(message);
-}
-
-function validatePlannerContextPreflight(worker, job, attemptId, { fastDir, researchArtifacts }) {
-  if (!Array.isArray(researchArtifacts) || researchArtifacts.length === 0) return;
-
-  const briefPath = path.join(fastDir, "brief.md");
-  let briefStat = null;
-  try {
-    briefStat = fs.statSync(briefPath);
-  } catch (err) {
-    const reason = err?.code === "ENOENT"
-      ? "missing fast/brief.md"
-      : `unable to stat fast/brief.md (${err?.code || "unknown"}: ${err?.message?.split("\n")[0]?.slice(0, 120) || "no detail"})`;
-    failPlannerContextPreflight(worker, job, attemptId, reason);
-  }
-  if (!briefStat?.isFile()) {
-    failPlannerContextPreflight(worker, job, attemptId, "fast/brief.md is not a regular file");
-  }
-  if (briefStat.size <= 0) {
-    failPlannerContextPreflight(worker, job, attemptId, "fast/brief.md is empty");
-  }
-
-  let briefContent = "";
-  try {
-    briefContent = fs.readFileSync(briefPath, "utf-8");
-  } catch (err) {
-    const reason = `unable to read fast/brief.md (${err?.code || "unknown"}: ${err?.message?.split("\n")[0]?.slice(0, 120) || "no detail"})`;
-    failPlannerContextPreflight(worker, job, attemptId, reason);
-  }
-  if (!String(briefContent || "").trim()) {
-    failPlannerContextPreflight(worker, job, attemptId, "fast/brief.md is blank");
   }
 }

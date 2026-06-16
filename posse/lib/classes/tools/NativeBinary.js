@@ -25,7 +25,7 @@ import { osKey, archKey } from "../../shared/platform/functions/native-platform.
 import { buildRuntimeEnv } from "../../domains/runtime/functions/paths.js";
 import { signalAbortError } from "../../domains/runtime/functions/yield.js";
 import { Daemon, ProcessTransport, daemonSupervisor } from "./daemon/index.js";
-import { resolvePosseKey } from "../../domains/remote/functions/client.js";
+import { HeartbeatAuthManager } from "../../shared/native/classes/HeartbeatAuthManager.js";
 import { POSSE_REMOTE_DEFAULT_URL } from "../../domains/remote/functions/mode.js";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -78,17 +78,22 @@ export class NativeBinary {
    *   posseKey?: string,
    *   env?: NodeJS.ProcessEnv,
    *   keyResolver?: () => string | null,
+   *   nativeAuthManager?: import("../../shared/native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
    *   spawnImpl?: typeof spawn,
    *   spawnSyncImpl?: typeof spawnSync,
    * }} args
    */
-  constructor({ name, binRoot, platform, arch, posseKey, env, keyResolver, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
+  constructor({ name, binRoot, platform, arch, posseKey, env, keyResolver, nativeAuthManager, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
     if (!name) throw new TypeError("NativeBinary: name is required");
     this.name = name;
     this._binRoot = binRoot || null;
     this._posseKey = posseKey || null;
     this._env = env || null;
     this._keyResolver = keyResolver || null;
+    // Single native-auth authority. Production injects the shared manager via
+    // BinaryManager; standalone construction (tests) lazily derives one from the
+    // legacy posseKey/keyResolver/env so key resolution stays in one place.
+    this._nativeAuthManager = nativeAuthManager || null;
     this.keyGated = nativeBinaryIsKeyGated(name);
     // posse-git and posse-atlas implement the `worker --stdio` persistent loop.
     this.workerCapable = name === "git" || name === "atlas";
@@ -205,24 +210,31 @@ export class NativeBinary {
    * @returns {Promise<RunResult>}
    */
   async #runViaWorker(subcommand, args, opts) {
-    let envelope;
-    try {
-      envelope = JSON.parse(String(opts.input));
-    } catch {
-      return this.#runPerCall(subcommand, args, opts);
+    const inputWithAuth = this.#inputWithNativeAuthDetails(opts.input);
+    const requestOpts = {
+      ...opts,
+      input: inputWithAuth.input,
+    };
+    let envelope = inputWithAuth.request;
+    if (!envelope) {
+      try {
+        envelope = JSON.parse(String(requestOpts.input));
+      } catch {
+        return this.#runPerCall(subcommand, args, requestOpts);
+      }
     }
     let response = await this.#daemon().request(envelope, {
-      signal: opts.signal,
-      timeoutMs: opts.timeoutMs,
+      signal: requestOpts.signal,
+      timeoutMs: requestOpts.timeoutMs,
     });
-    if (response?._transportGone === true && opts.signal?.aborted !== true) {
+    if (response?._transportGone === true && requestOpts.signal?.aborted !== true) {
       // Host died/retired under this request. Everything routed through the
       // worker is read-only/idempotent by the WORKER_ELIGIBLE contract
       // (invoke.js), so one transparent retry on the replacement host is safe
       // and keeps the fast path instead of degrading to a per-call spawn.
       response = await this.#daemon().request(envelope, {
-        signal: opts.signal,
-        timeoutMs: opts.timeoutMs,
+        signal: requestOpts.signal,
+        timeoutMs: requestOpts.timeoutMs,
       });
     }
     if (response?._timedOut === true) {
@@ -238,14 +250,14 @@ export class NativeBinary {
       const reason = response._transportGone === true ? "transport_gone"
         : response._timedOut === true ? "timeout" : "overloaded";
       this.#noteWorkerFallback(reason);
-      return this.#runPerCall(subcommand, args, opts);
+      return this.#runPerCall(subcommand, args, requestOpts);
     }
     if (response?._aborted === true) {
       // Rebuild a real AbortError from the signal so callers preserve abort
       // identity (a cancelled native call must not read as a git failure).
       return {
         ok: false, code: null, signal: null, stdout: "", stderr: "aborted",
-        error: opts.signal ? signalAbortError(opts.signal) : new Error("aborted"),
+        error: requestOpts.signal ? signalAbortError(requestOpts.signal) : new Error("aborted"),
       };
     }
     return {
@@ -336,7 +348,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string, worker?: boolean }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string, worker?: boolean, signal?: AbortSignal }} [opts]
    * @returns {RunResult}
    */
   runSync(subcommand, args = [], opts = {}) {
@@ -368,7 +380,7 @@ export class NativeBinary {
     const res = this._spawnSync(bin, fullArgs, {
       cwd: opts.cwd || process.cwd(),
       env: this.#childEnv(opts.env),
-      input: opts.input,
+      input: this.#inputWithNativeAuth(opts.input),
       encoding: "utf8",
       windowsHide: true,
       timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -393,6 +405,14 @@ export class NativeBinary {
    */
   run(subcommand, args = [], opts = {}) {
     if (this.workerCapable && opts.worker === true) {
+      if (this.keyGated && (opts.key || !this.#resolveKey())) {
+        // The persistent worker authenticates at process launch. Keyless
+        // contexts can still authenticate per request through the JSON auth
+        // envelope, but only the per-call spawn path can carry that envelope
+        // before the binary starts handling work.
+        this.#noteWorkerFallback(opts.key ? "per_call_key" : "missing_launch_key");
+        return this.#runPerCall(subcommand, args, opts);
+      }
       return this.#runViaWorker(subcommand, args, opts);
     }
     return this.#runPerCall(subcommand, args, opts);
@@ -419,6 +439,7 @@ export class NativeBinary {
       }, opts.json === true));
     }
     const fullArgs = this.#buildArgs(subcommand, args, opts.key);
+    const input = this.#inputWithNativeAuth(opts.input);
     return new Promise((resolve) => {
       let settled = false;
       const child = this._spawn(bin, fullArgs, {
@@ -463,9 +484,9 @@ export class NativeBinary {
       child.on("error", (err) => finish(null, null, err));
       child.on("close", (code, signal) => finish(code, signal, null));
 
-      if (opts.input != null) {
+      if (input != null) {
         try {
-          child.stdin?.end(opts.input);
+          child.stdin?.end(input);
         } catch (err) {
           this.#kill(child);
           finish(null, null, /** @type {Error} */ (err));
@@ -489,19 +510,34 @@ export class NativeBinary {
   }
 
   /**
-   * Resolve the Posse key for a key-gated invocation: explicit option, then the
-   * constructor value, then the POSSE_KEY env (read at call time).
+   * The native-auth authority for this handle. Production injects the shared
+   * HeartbeatAuthManager through BinaryManager; a standalone handle lazily
+   * derives one from its own posseKey/keyResolver/env so the `--posse-key`
+   * legacy path is produced in exactly one place.
+   *
+   * @returns {HeartbeatAuthManager}
+   */
+  #authManager() {
+    if (!this._nativeAuthManager) {
+      this._nativeAuthManager = new HeartbeatAuthManager({
+        env: this._env,
+        posseKey: this._posseKey,
+        keyResolver: this._keyResolver,
+      });
+    }
+    return this._nativeAuthManager;
+  }
+
+  /**
+   * Resolve the optional legacy `--posse-key` for a key-gated invocation via the
+   * auth manager (the single owner of key resolution). Returns null in keyless
+   * contexts, where the binary authenticates from the heartbeat envelope alone.
    *
    * @param {string} [optKey]
    * @returns {string | null}
    */
   #resolveKey(optKey) {
-    if (optKey) return optKey;
-    if (this._posseKey) return this._posseKey;
-    if (this._keyResolver) return this._keyResolver() || null;
-    // POSSE_KEY only (env then Windows-persisted). NOT the remote API key —
-    // these are distinct credentials and the binary is gated on POSSE_KEY.
-    return resolvePosseKey(this._env || process.env) || null;
+    return this.#authManager().getLaunchKey({ optKey, env: this._env || undefined }) || null;
   }
 
   /**
@@ -525,6 +561,53 @@ export class NativeBinary {
     if (subcommand) out.push(subcommand);
     for (const a of args) out.push(a);
     return out;
+  }
+
+  /**
+   * Native protocol requests must carry the heartbeat envelope owned by this
+   * handle's auth manager. Leaf invoke modules normally attach it, but the
+   * spawn boundary is the last reliable place to enforce that invariant for
+   * key-gated binaries and worker respawns.
+   *
+   * @param {Buffer | string | undefined} input
+   * @returns {Buffer | string | undefined}
+   */
+  #inputWithNativeAuth(input) {
+    return this.#inputWithNativeAuthDetails(input).input;
+  }
+
+  /**
+   * @param {Buffer | string | undefined} input
+   * @returns {{ input: Buffer | string | undefined, request: Record<string, unknown> | null }}
+   */
+  #inputWithNativeAuthDetails(input) {
+    if (!this.keyGated || input == null) return { input, request: null };
+    const wasBuffer = Buffer.isBuffer(input);
+    const raw = wasBuffer ? input.toString("utf8") : String(input);
+    let request;
+    try {
+      request = JSON.parse(raw);
+    } catch {
+      return { input, request: null };
+    }
+    if (!request || typeof request !== "object" || Array.isArray(request)) {
+      return { input, request: null };
+    }
+    if (!Object.prototype.hasOwnProperty.call(request, "protocol")
+      || !Object.prototype.hasOwnProperty.call(request, "method")
+      || Object.prototype.hasOwnProperty.call(request, "auth")) {
+      return { input, request };
+    }
+    const auth = this.#authManager().getNativeAuthEnvelope();
+    if (!auth || typeof auth !== "object" || Object.keys(auth).length === 0) {
+      return { input, request };
+    }
+    const requestWithAuth = { ...request, auth };
+    const encoded = `${JSON.stringify(requestWithAuth)}\n`;
+    return {
+      input: wasBuffer ? Buffer.from(encoded, "utf8") : encoded,
+      request: requestWithAuth,
+    };
   }
 
   /**

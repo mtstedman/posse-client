@@ -8,7 +8,7 @@
 // wrappers are the only path (the Node implementations were deleted at
 // cutover).
 
-import { runAtlasNativeOperation } from "../native/invoke.js";
+import { runAtlasNativeOperation, runAtlasNativeOperationAsync } from "../native/invoke.js";
 
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
 
@@ -33,6 +33,15 @@ export function lexicalScore(query, sym) {
 }
 
 /**
+ * @param {string} query
+ * @param {ViewSymbol} sym
+ * @returns {Promise<number>}
+ */
+export async function lexicalScoreAsync(query, sym) {
+  return /** @type {number} */ (await runAtlasNativeOperationAsync({ op: "lexical_score", query, symbol: sym }));
+}
+
+/**
  * Order a list of symbols by lexical score descending, then by name.
  *
  * @param {string} query
@@ -41,4 +50,13 @@ export function lexicalScore(query, sym) {
  */
 export function rankSymbols(query, symbols) {
   return /** @type {any} */ (runAtlasNativeOperation({ op: "rank_symbols", query, symbols }));
+}
+
+/**
+ * @param {string} query
+ * @param {ViewSymbol[]} symbols
+ * @returns {Promise<Array<ViewSymbol & { __score: number }>>}
+ */
+export async function rankSymbolsAsync(query, symbols) {
+  return /** @type {any} */ (await runAtlasNativeOperationAsync({ op: "rank_symbols", query, symbols }));
 }

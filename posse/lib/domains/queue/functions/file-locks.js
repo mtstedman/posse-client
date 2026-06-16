@@ -43,6 +43,11 @@ function normalizeScopeFromPayload(payload = {}) {
   return { files: scope.allFiles(), roots: [...scope.createRoots] };
 }
 
+async function normalizeScopeFromPayloadAsync(payload = {}) {
+  const scope = await Scope.fromPayloadAsync(payload, { cwd: process.cwd() });
+  return { files: scope.allFiles(), roots: [...scope.createRoots] };
+}
+
 function normalizeScopeInput(scope = null) {
   if (!scope) return null;
   if (scope instanceof Scope) {
@@ -81,7 +86,16 @@ export function getJobWriteScope(job = {}) {
   return scope;
 }
 
+export async function getJobWriteScopeAsync(job = {}) {
+  const scope = await normalizeScopeFromPayloadAsync(parseJobPayload(job));
+  if (jobNeedsWriteLocks(job) && !hasWriteScope(scope)) {
+    return { files: [], roots: ["*"], unknown: true };
+  }
+  return scope;
+}
+
 export function hasWriteScope(scope = {}) {
+  if (!scope) return false;
   return (Array.isArray(scope.files) && scope.files.length > 0)
     || (Array.isArray(scope.roots) && scope.roots.length > 0);
 }
@@ -407,10 +421,12 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
     leaseDurationSec = scopeOrLeaseDurationSec;
     opts = {};
   }
-  const scope = hasExplicitScope
-    ? normalizeScopeInput(scopeOrLeaseDurationSec)
-    : getJobWriteScope(job);
   const needsWriteLocks = jobNeedsWriteLocks(job);
+  const scope = needsWriteLocks
+    ? (hasExplicitScope
+      ? normalizeScopeInput(scopeOrLeaseDurationSec)
+      : getJobWriteScope(job))
+    : null;
   const hasScope = hasWriteScope(scope);
   const skipConflictCheck = !!opts?.skipConflictCheck;
 
@@ -474,6 +490,21 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
 
     return { leaseToken };
   });
+}
+
+export async function acquireLeaseWithWriteLocksAsync(job, ownerId, scopeOrLeaseDurationSec = null, leaseDurationSec = 900, opts = {}) {
+  const hasExplicitScope = scopeOrLeaseDurationSec && typeof scopeOrLeaseDurationSec === "object";
+  if (!hasExplicitScope && scopeOrLeaseDurationSec != null) {
+    leaseDurationSec = scopeOrLeaseDurationSec;
+    opts = {};
+  }
+  const needsWriteLocks = jobNeedsWriteLocks(job);
+  const scope = needsWriteLocks
+    ? (hasExplicitScope
+      ? scopeOrLeaseDurationSec
+      : await getJobWriteScopeAsync(job))
+    : null;
+  return acquireLeaseWithWriteLocks(job, ownerId, scope, leaseDurationSec, opts);
 }
 
 export function releaseJobFileLocks(jobId, reason = "job_done") {

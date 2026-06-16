@@ -35,6 +35,7 @@ import {
   cancelDeadlockedJobsAtomic,
   getSetting,
   listJobs,
+  listJobsMinimal,
   listWorkItems,
   hasJobs,
   countJobsByStatus,
@@ -520,7 +521,7 @@ export class Scheduler {
     try {
       const generation = getQueueWakeGeneration();
       const workItems = listWorkItems();
-      const jobs = listJobs();
+      const jobs = listJobsMinimal();
       return { generation, workItems, jobs, at: Date.now() };
     } catch (err) {
       this._log?.(`Queue snapshot build failed: ${err.message}`, "yellow");
@@ -703,8 +704,14 @@ export class Scheduler {
   _renewSchedulerLock() {
     if (!this._running) return false;
     const nowMs = Date.now();
-    this._maybeLogSchedulerLockStarvation(nowMs);
     let renewed;
+    try {
+      this._maybeLogSchedulerLockStarvation(nowMs);
+    } catch (err) {
+      const errorText = err?.message || String(err);
+      this._log(`Scheduler lock starvation telemetry failed: ${errorText}`, "yellow");
+      log.warn("scheduler", "scheduler lock starvation telemetry failed", { error: errorText });
+    }
     try {
       renewed = renewSchedulerLock("main", this.ownerId, LOCK_RENEW_SEC * 2);
     } catch (err) {
@@ -803,10 +810,10 @@ export class Scheduler {
   }
 
   /**
-   * One tick of the scheduler loop.
-   * Returns a leased job or null.
+   * Shared tick preamble. Returns the next dispatchable job, before leasing, or
+   * null if dispatch is currently held.
    */
-  tick() {
+  _nextDispatchableJobForTick() {
     this._refreshRuntimeSettings();
     // 1. Requeue any expired leases
     const requeued = this.leaseManager.requeueExpired();
@@ -834,6 +841,17 @@ export class Scheduler {
     if (!job) return null;
     if (atlasIndexingHold && !ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES.has(job.job_type)) return null;
 
+    return job;
+  }
+
+  /**
+   * One tick of the scheduler loop.
+   * Returns a leased job or null.
+   */
+  tick() {
+    const job = this._nextDispatchableJobForTick();
+    if (!job) return null;
+
     // 4. Lease it
     const lease = this.leaseManager.acquireWithLocks(job, this.ownerId, null, this.leaseSec);
     if (!lease) {
@@ -842,6 +860,20 @@ export class Scheduler {
     }
 
     // Return the job with lease info attached
+    return { ...job, _leaseToken: lease.leaseToken };
+  }
+
+  /**
+   * Async tick variant for one-shot callers that cannot tolerate synchronous
+   * native scope parsing when a queued mutating job has no precomputed scope.
+   * The long-running scheduler loop already passes explicit parsed scopes.
+   */
+  async tickAsync() {
+    const job = this._nextDispatchableJobForTick();
+    if (!job) return null;
+
+    const lease = await this.leaseManager.acquireWithLocksAsync(job, this.ownerId, null, this.leaseSec);
+    if (!lease) return null;
     return { ...job, _leaseToken: lease.leaseToken };
   }
 
@@ -2165,7 +2197,6 @@ export class Scheduler {
         // the index can drift. Reconciling against the DB on every idle
         // timeout is cheap and bounds drift to one repair interval.
         if (sleepResult?.reason === "repair_timer") {
-          queueLockIndex.refreshJobScopesFromDb();
           queueLockIndex.refreshFromDb();
         }
         } catch (loopErr) {

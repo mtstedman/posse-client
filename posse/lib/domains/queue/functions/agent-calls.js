@@ -153,10 +153,14 @@ export function getAgentCallStats() {
   `).all();
 }
 
-export function getResearcherGuardrailStats({ sinceIso = null, limit = 50 } = {}) {
+export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, includeDetached = false } = {}) {
   const db = getDb();
   const filters = ["ac.role = 'researcher'"];
   const params = [];
+  if (!includeDetached) {
+    filters.push("ac.work_item_id IS NOT NULL");
+    filters.push("ac.job_id IS NOT NULL");
+  }
   if (sinceIso) {
     filters.push("COALESCE(ac.started_at, ac.created_at) >= ?");
     params.push(String(sinceIso));

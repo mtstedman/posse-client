@@ -187,8 +187,10 @@ export class FixRole extends BaseRole {
     }
 
     const fixAttempts = getAttempts(job.id);
-    const lastError = fixAttempts.length > 0
-      ? (job.last_error || fixAttempts[fixAttempts.length - 1].error_text || null)
+    const previousFixAttempts = fixAttempts.filter((attempt) => attempt.status !== "running");
+    const currentFixAttemptNumber = previousFixAttempts.length + 1;
+    const lastError = previousFixAttempts.length > 0
+      ? (job.last_error || previousFixAttempts[previousFixAttempts.length - 1].error_text || null)
       : null;
 
     const packet = buildRoutingPacket(job, {
@@ -196,7 +198,7 @@ export class FixRole extends BaseRole {
       payload,
       role: this.getRole(),
       effectiveTier: ctx.tier,
-      attemptCount: fixAttempts.length + 1,
+      attemptCount: currentFixAttemptNumber,
       maxAttempts: job.max_attempts || 3,
       lastError,
       cwd: fixCwd,
@@ -240,7 +242,7 @@ export class FixRole extends BaseRole {
     }
 
     let fixContinuation = "";
-    const isFixRetry = fixAttempts.length > 0;
+    const isFixRetry = previousFixAttempts.length > 0;
     if (payload._stall_resume && job._worktreePath) {
       const resumed = await worker.applyStallStashAsync(job, job._worktreePath);
       if (resumed) {
@@ -255,7 +257,7 @@ export class FixRole extends BaseRole {
         fixContinuation = `CHECKPOINT FROM PREVIOUS ATTEMPT (use this to avoid repeating work):\n${checkpoint}`;
         worker.emit(job.id, `${C.green}[checkpoint]${C.reset} WI#${job.work_item_id} job #${job.id}: loaded checkpoint from previous attempt`);
       }
-      worker.emit(job.id, `${C.yellow}[restart]${C.reset} WI#${job.work_item_id} job #${job.id}: attempt ${fixAttempts.length + 1} - starting over`);
+      worker.emit(job.id, `${C.yellow}[restart]${C.reset} WI#${job.work_item_id} job #${job.id}: attempt ${currentFixAttemptNumber} - starting over`);
     } else {
       worker.emit(job.id, `${C.green}[new]${C.reset} WI#${job.work_item_id} job #${job.id}: first attempt`);
     }

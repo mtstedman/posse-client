@@ -9,7 +9,7 @@ import { spawn } from "child_process";
 import { randomBytes, createHash } from "crypto";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { getEffectivePolicy } from "./policy.js";
-import { redactSecrets } from "./redaction.js";
+import { redactSecretsAsync } from "./redaction.js";
 import { ATLAS_RUNTIME_SPECS } from "../contracts/runtimes.js";
 
 /** @typedef {import("../contracts/tool-params.js").RuntimeExecuteParams} RuntimeExecuteParams */
@@ -135,8 +135,10 @@ export async function runtimeExecute({ versionId, params, ledger, repoRoot, repo
     env: scrubbedRuntimeEnv(),
   });
   const durationMs = Date.now() - startedAt;
-  const stdout = redactSecrets(result.stdout);
-  const stderr = redactSecrets(result.stderr);
+  const [stdout, stderr] = await Promise.all([
+    redactSecretsAsync(result.stdout),
+    redactSecretsAsync(result.stderr),
+  ]);
   const status = result.timedOut
     ? "timeout"
     : result.exitCode === 0

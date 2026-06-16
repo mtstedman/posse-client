@@ -8,11 +8,9 @@
 // file/shell access matching Claude Code's tool set per role.
 
 import OpenAI from "openai";
-import readline from "readline";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getAccountSetting } from "../../settings/functions/account-settings.js";
 import { getSetting } from "../../queue/functions/index.js";
-import { getDb } from "../../../shared/storage/functions/index.js";
 import { getResolvedImageProtocol } from "../../artifacts/functions/index.js";
 import { composeRemoteAssessorPromptForProvider } from "./helpers/remote-assessor-prompt.js";
 import { appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../functions/tools/contract.js";
@@ -48,6 +46,7 @@ import { selectExecutionModel } from "./helpers/model-selection.js";
 import { normalizeProviderUsage } from "./helpers/usage-normalization.js";
 import { escalateModelTier, getMaxTurnsForProvider } from "./helpers/turns.js";
 import { resolveProviderStallTimeout } from "./helpers/stall-timeout.js";
+import { loadUsageEntries, summarizeUsageEntries } from "./helpers/local-usage-summary.js";
 import { roleBrandColor, roleBrandIcon } from "../../ui/functions/display/helpers/brand.js";
 
 const OPENAI_USAGE_WINDOW_DEFS = [
@@ -283,55 +282,8 @@ function getOpenAiAccountUsageSummary() {
   };
 }
 
-function summarizeOpenAiUsageEntries(entries, nowMs, limits) {
-  return OPENAI_USAGE_WINDOW_DEFS.map((def) => {
-    const cutoff = nowMs - def.durationMs;
-    const matching = entries.filter((entry) => entry.timestampMs >= cutoff);
-    const usedTokens = matching.reduce((sum, entry) => sum + entry.totalTokens, 0);
-    const oldestTs = matching.reduce((min, entry) => Math.min(min, entry.timestampMs), Number.POSITIVE_INFINITY);
-    const limitTokens = limits[def.key] ?? null;
-    const remainingTokens = limitTokens == null ? null : Math.max(0, limitTokens - usedTokens);
-    const resetAt = Number.isFinite(oldestTs) ? new Date(oldestTs + def.durationMs).toISOString() : null;
-
-    return {
-      key: def.key,
-      label: def.label,
-      durationMs: def.durationMs,
-      usedTokens,
-      limitTokens,
-      remainingTokens,
-      resetAt,
-    };
-  });
-}
-
-function loadOpenAiUsageEntries(nowMs) {
-  try {
-    const weekWindow = OPENAI_USAGE_WINDOW_DEFS.find((def) => def.key === "week")?.durationMs || (7 * 24 * 60 * 60 * 1000);
-    const oldestRelevantIso = new Date(nowMs - weekWindow).toISOString();
-    const db = getDb();
-    const rows = db.prepare(`
-      SELECT created_at, input_tokens, output_tokens
-      FROM agent_calls
-      WHERE provider = 'openai'
-        AND created_at >= ?
-        AND COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) > 0
-      ORDER BY created_at ASC
-    `).all(oldestRelevantIso);
-
-    return rows.flatMap((row) => {
-      const timestampMs = Date.parse(row.created_at);
-      const totalTokens = (row.input_tokens || 0) + (row.output_tokens || 0);
-      if (!Number.isFinite(timestampMs) || totalTokens <= 0) return [];
-      return [{ timestampMs, totalTokens }];
-    });
-  } catch {
-    return [];
-  }
-}
-
 export function getUsageSummary({ nowMs = Date.now() } = {}) {
-  const entries = loadOpenAiUsageEntries(nowMs);
+  const entries = loadUsageEntries({ nowMs, windowDefs: OPENAI_USAGE_WINDOW_DEFS, provider: "openai" });
   const localUsedTokens = entries.reduce((sum, entry) => sum + (entry.totalTokens || 0), 0);
   const accountSummary = getOpenAiAccountUsageSummary();
   if (accountSummary) {
@@ -346,7 +298,7 @@ export function getUsageSummary({ nowMs = Date.now() } = {}) {
     subscriptionType: null,
     rateLimitTier: null,
     localUsedTokens,
-    windows: summarizeOpenAiUsageEntries(entries, nowMs, getOpenAiUsageLimits()),
+    windows: summarizeUsageEntries(entries, nowMs, getOpenAiUsageLimits(), OPENAI_USAGE_WINDOW_DEFS),
   };
 }
 
@@ -446,7 +398,8 @@ function bashReadOnly(extra = "") {
   return {
     ...TOOL_BASH,
     description:
-      "Execute a READ-ONLY shell command (ls, cat, head, tail, find, wc, git log, git diff, etc.). " +
+      "Execute a READ-ONLY shell command for repo-native inspection or verification (git log, git diff, test/build runners, etc.). " +
+      "On Windows, use PowerShell-compatible syntax and avoid Unix-only filters such as head/wc or Bash-only operators. " +
       "Do NOT use this to modify files or run destructive commands." +
       (extra ? " " + extra : ""),
   };
@@ -1059,50 +1012,7 @@ export async function callProvider(promptText, {
 
 // --- Input helpers ----------------------------------------------------------
 
-export function ask(question) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    let resolved = false;
-    rl.question(question, (answer) => {
-      resolved = true;
-      rl.close();
-      resolve(answer);
-    });
-    rl.on("close", () => {
-      if (!resolved) resolve("");
-    });
-  });
-}
-
-export function askMultiline(prompt) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
-    const lines = [];
-    let resolved = false;
-    console.log(prompt);
-    console.log(`${C.dim}(finish with a single "." on its own line)${C.reset}`);
-
-    rl.on("line", (line) => {
-      if (line.trim() === ".") {
-        resolved = true;
-        rl.close();
-        resolve(lines.join("\n").trim());
-        return;
-      }
-      lines.push(line);
-    });
-    rl.on("close", () => {
-      if (!resolved) resolve(lines.join("\n").trim());
-    });
-  });
-}
+export { ask, askMultiline } from "./helpers/cli-input.js";
 
 // --- Rate Limit State ------------------------------------------------------
 // Unified with the circuit breaker: getRateLimitState reports the breaker's

@@ -8,7 +8,7 @@
 // tiebreaker, not a primary signal. The split/stop-word logic is owned by
 // the native posse-atlas binary — the only implementation path.
 
-import { runAtlasNativeOperation } from "../../native/invoke.js";
+import { runAtlasNativeOperation, runAtlasNativeOperationAsync } from "../../native/invoke.js";
 
 // Memo for tokenize results. Task-query ranking tokenizes 1-2 strings PER
 // fused symbol per query, and each sync native call is a full process spawn
@@ -19,6 +19,8 @@ import { runAtlasNativeOperation } from "../../native/invoke.js";
 const TOKENIZE_MEMO_MAX = 4096;
 /** @type {Map<string, string[]>} */
 const TOKENIZE_MEMO = new Map();
+/** @type {Map<string, Promise<string[]>>} */
+const TOKENIZE_INFLIGHT = new Map();
 
 /**
  * Tokenize for ranking. Splits camelCase ("getUserById" → "get",
@@ -32,6 +34,37 @@ export function tokenizeForRanking(input) {
   const cached = TOKENIZE_MEMO.get(key);
   if (cached) return cached.slice();
   const tokens = /** @type {string[]} */ (runAtlasNativeOperation({ op: "tokenize", input: key }));
+  memoizeTokens(key, tokens);
+  return Array.isArray(tokens) ? tokens.slice() : [];
+}
+
+/**
+ * Async daemon-backed tokenizer for retrieval paths that are already async.
+ *
+ * @param {string} input
+ * @returns {Promise<string[]>}
+ */
+export async function tokenizeForRankingAsync(input) {
+  const key = String(input ?? "");
+  const cached = TOKENIZE_MEMO.get(key);
+  if (cached) return cached.slice();
+  let inFlight = TOKENIZE_INFLIGHT.get(key);
+  if (!inFlight) {
+    inFlight = runAtlasNativeOperationAsync({ op: "tokenize", input: key })
+      .then((tokens) => {
+        memoizeTokens(key, tokens);
+        return Array.isArray(tokens) ? tokens.slice() : [];
+      })
+      .finally(() => {
+        if (TOKENIZE_INFLIGHT.get(key) === inFlight) TOKENIZE_INFLIGHT.delete(key);
+      });
+    TOKENIZE_INFLIGHT.set(key, inFlight);
+  }
+  const tokens = await inFlight;
+  return tokens.slice();
+}
+
+function memoizeTokens(key, tokens) {
   if (TOKENIZE_MEMO.size >= TOKENIZE_MEMO_MAX) {
     // Drop the oldest entry (Map preserves insertion order) — cheap bound,
     // no LRU bookkeeping needed for a tiebreaker-quality cache.
@@ -39,5 +72,4 @@ export function tokenizeForRanking(input) {
     if (oldest !== undefined) TOKENIZE_MEMO.delete(oldest);
   }
   TOKENIZE_MEMO.set(key, Array.isArray(tokens) ? tokens : []);
-  return Array.isArray(tokens) ? tokens.slice() : [];
 }

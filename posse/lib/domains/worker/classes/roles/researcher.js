@@ -3,6 +3,7 @@
 // Researcher role handler that gathers repo/project context into a structured
 // brief for planning without mutating repo state.
 
+import fs from "fs";
 import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
@@ -19,9 +20,18 @@ import {
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { persistResearcherMemories } from "../../functions/helpers/research-memories.js";
 import {
+  contextDir,
   getConfiguredImageProviders,
   getResolvedImageProtocol,
+  wiScopeId,
 } from "../../../artifacts/functions/index.js";
+import {
+  ensureDetachedReadOnlyWorktreeAsync,
+} from "../../../git/functions/worktree.js";
+import {
+  buildDiffNarrativeAsync,
+  formatDiffNarrative,
+} from "../../functions/helpers/diff-narrator.js";
 import {
   buildResearchIntakePreload,
   getWorkItemIntakeHints,
@@ -149,6 +159,79 @@ function buildFanoutSynthBlock(payload, childBriefs) {
     "",
     childBriefs ? `CHILD RESEARCH BRIEFS:\n${childBriefs}\n` : "CHILD RESEARCH BRIEFS: none found. State this limitation in the output.\n",
   ].join("\n");
+}
+
+function collectReplanScopedFiles(payload = {}) {
+  const files = Array.isArray(payload?.original_scoped_files) ? payload.original_scoped_files : [];
+  return [...new Set(files.map((file) => String(file || "").replace(/\\/g, "/").trim()).filter(Boolean))];
+}
+
+function isAssessmentReplanPayload(payload = {}) {
+  const originalJobType = String(payload?.original_job_type || "").trim();
+  return payload?._assessment_replan === true
+    && Number.isInteger(Number(payload?.original_job_id))
+    && ["dev", "fix", "promote", "artificer"].includes(originalJobType);
+}
+
+function buildAssessmentReplanEvidenceBlock(payload, { researchCwd = "", diffBlock = "", cwdError = "" } = {}) {
+  if (!isAssessmentReplanPayload(payload)) return "";
+  const scopedFiles = collectReplanScopedFiles(payload);
+  const lines = [
+    "ASSESSMENT REPLAN EVIDENCE:",
+    "- This replan was triggered by assessor failure after a mutating job, so inspect the current work-item branch state before proposing replacement work.",
+    `- Original job: #${payload.original_job_id} (${payload.original_job_type}${payload.original_task_mode ? `/${payload.original_task_mode}` : ""}) ${payload.original_title || ""}`.trim(),
+    `- Work-item branch: ${payload.wi_branch_name || "(not recorded)"}`,
+    `- Original commit: ${payload.original_commit_hash || "(not recorded)"}`,
+    payload.wi_merge_base_hash ? `- Merge base: ${payload.wi_merge_base_hash}` : "",
+    researchCwd ? `- Research cwd: ${researchCwd}` : "",
+    cwdError ? `- Branch worktree note: ${cwdError}` : "",
+    scopedFiles.length > 0 ? `- Original scoped files:\n${scopedFiles.map((file) => `  - ${file}`).join("\n")}` : "- Original scoped files: (not recorded)",
+    payload.replan_reason ? `\nAssessor reasons:\n${payload.replan_reason}` : "",
+    diffBlock ? `\n${diffBlock}` : "",
+    "",
+  ];
+  return lines.filter(Boolean).join("\n");
+}
+
+async function resolveAssessmentReplanCwd(baseProjectDir, job, payload, { signal = null } = {}) {
+  if (!isAssessmentReplanPayload(payload)) {
+    return { cwd: baseProjectDir, error: "" };
+  }
+  const targetRef = payload.wi_branch_name || payload.original_commit_hash || "";
+  if (!targetRef) {
+    return { cwd: baseProjectDir, error: "no branch or commit was recorded; using base project checkout" };
+  }
+  try {
+    const readonlyDir = path.join(
+      contextDir(wiScopeId(job.work_item_id), baseProjectDir),
+      "replan-readonly",
+      `job-${job.id}`,
+    );
+    const cwd = await ensureDetachedReadOnlyWorktreeAsync(baseProjectDir, {
+      targetRef,
+      worktreeDir: readonlyDir,
+      signal,
+    });
+    return { cwd, error: "" };
+  } catch (err) {
+    return {
+      cwd: baseProjectDir,
+      error: `could not create detached worktree for ${targetRef}: ${err?.message || String(err)}`,
+    };
+  }
+}
+
+async function buildAssessmentReplanDiffBlock(payload, researchCwd) {
+  const commitHash = String(payload?.original_commit_hash || "").trim();
+  const scopedFiles = collectReplanScopedFiles(payload);
+  if (!commitHash || scopedFiles.length === 0 || !researchCwd || !fs.existsSync(researchCwd)) return "";
+  const narrative = await buildDiffNarrativeAsync({
+    cwd: researchCwd,
+    commitHash,
+    paths: scopedFiles,
+  });
+  if (narrative?.ok) return formatDiffNarrative(narrative);
+  return narrative?.reason ? `DIFF NARRATIVE: unavailable (${narrative.reason})` : "";
 }
 
 function truncateWithNote(value, maxChars, note) {
@@ -325,7 +408,8 @@ export class ResearcherRole extends BaseRole {
 
   async assembleContext(job, ctx) {
     const worker = this.context;
-    const projectDir = worker?.projectDir || process.cwd();
+    const baseProjectDir = worker?.projectDir || process.cwd();
+    let projectDir = baseProjectDir;
     const {
       getResearchBudget,
       isDeepthinkTask,
@@ -336,6 +420,14 @@ export class ResearcherRole extends BaseRole {
 
     const workItem = getWorkItem(job.work_item_id);
     const payload = parsePayload(worker, job);
+    const replanCwd = await resolveAssessmentReplanCwd(baseProjectDir, job, payload, { signal: ctx.abortSignal || null });
+    projectDir = replanCwd.cwd;
+    const assessmentReplanDiffBlock = await buildAssessmentReplanDiffBlock(payload, projectDir);
+    const assessmentReplanEvidenceBlock = buildAssessmentReplanEvidenceBlock(payload, {
+      researchCwd: projectDir,
+      diffBlock: assessmentReplanDiffBlock,
+      cwdError: replanCwd.error,
+    });
     const roleMode = normalizeResearchRoleMode(payload.role_mode);
     const webOnlyAnswer = payload.web_only_answer === true;
     const fanoutRunId = payload.fanout_run_id || null;
@@ -506,6 +598,7 @@ export class ResearcherRole extends BaseRole {
       webOnlyAnswer ? buildWebOnlyAnswerBlock(payload) : "",
       roleMode === "child" ? buildFanoutChildBlock(payload) : "",
       roleMode === "synth" ? buildFanoutSynthBlock(payload, childBriefs) : "",
+      assessmentReplanEvidenceBlock,
       atlasHandoffBlock || null,
       retrySynthesisMode ? buildResearchRetryShapeBlock({ atlasActive: !!researcherPacket?.atlas?.active }) : "",
       payloadRetrySynthesisMode ? "TURN-BUDGET RETRY MODE:\nPrevious research exceeded a deterministic turn/tool budget. Produce a partial planner-ready brief from available context and salvage; only make targeted verification reads if absolutely necessary.\n" : "",

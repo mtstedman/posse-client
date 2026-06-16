@@ -5,7 +5,7 @@
 
 import { normPath, normalizeRoots, isUnderRoot, rootsOverlap } from "../../worker/functions/helpers/scope.js";
 import { parseJsonObject } from "../../queue/functions/payload.js";
-import { runGitNativeMethod } from "../functions/native/invoke.js";
+import { runGitNativeMethod, runGitNativeMethodAsync } from "../functions/native/invoke.js";
 
 function normalizeLockPath(value) {
   const normalized = normPath(value);
@@ -81,9 +81,20 @@ export class CommitScope {
     return new CommitScope(value && typeof value === "object" ? value : {});
   }
 
+  static async emptyAsync(options = {}) {
+    const value = await runGitNativeMethodAsync("git.commitScope.fromInput", nativeOptions(options), options.nativeParity || {});
+    return new CommitScope(value && typeof value === "object" ? value : {});
+  }
+
   static wildcard(options = {}) {
     const input = { ...nativeOptions(options), roots: ["*"], unknown: options.unknown ?? true };
     const value = runGitNativeMethod("git.commitScope.fromInput", input, options.nativeParity || {});
+    return new CommitScope(value && typeof value === "object" ? value : {});
+  }
+
+  static async wildcardAsync(options = {}) {
+    const input = { ...nativeOptions(options), roots: ["*"], unknown: options.unknown ?? true };
+    const value = await runGitNativeMethodAsync("git.commitScope.fromInput", input, options.nativeParity || {});
     return new CommitScope(value && typeof value === "object" ? value : {});
   }
 
@@ -96,8 +107,21 @@ export class CommitScope {
     return new CommitScope(value && typeof value === "object" ? value : {});
   }
 
+  static async fromPayloadAsync(payload = {}, options = {}) {
+    const value = await runGitNativeMethodAsync(
+      "git.commitScope.fromPayload",
+      { payload, options: nativeOptions(options) },
+      options.nativeParity || {},
+    );
+    return new CommitScope(value && typeof value === "object" ? value : {});
+  }
+
   static fromJob(job = {}, options = {}) {
     return CommitScope.fromPayload(job.payload_json, options);
+  }
+
+  static fromJobAsync(job = {}, options = {}) {
+    return CommitScope.fromPayloadAsync(job.payload_json, options);
   }
 
   hasScope(nativeParity = {}) {

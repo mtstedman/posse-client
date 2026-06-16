@@ -17,6 +17,7 @@ import { ensurePosseGitInfoExclude } from "../../runtime/functions/ignore.js";
 import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { jobNeedsGitWorktree } from "./policy.js";
+import { FORCE_REMOVE_OPTIONS } from "./worktree-remove-options.js";
 import { contextDir, wiScopeId } from "../../artifacts/functions/index.js";
 import { disposeWorkItemAtlasGraph } from "../../integrations/functions/atlas.js";
 import {
@@ -281,6 +282,16 @@ function removeWorktreePathAsync(wtPath, mainCwd, options = {}) {
   return Worktree.at(mainCwd, wtPath).removeAsync({ force: true, prune: true, fallbackRemove: true, ...options });
 }
 
+async function forceRemoveWorktreePathAfterNativeAsync(wtPath, mainCwd, { signal = null } = {}) {
+  try { await gitExecAsync(["worktree", "prune"], mainCwd, { signal }); } catch (err) { if (isAbortError(err)) throw err; }
+  try {
+    await fs.promises.rm(wtPath, FORCE_REMOVE_OPTIONS);
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+  }
+  try { await gitExecAsync(["worktree", "prune"], mainCwd, { signal }); } catch (err) { if (isAbortError(err)) throw err; }
+}
+
 function worktreePorcelain(wtPath) {
   return gitExec(["status", "--porcelain"], wtPath).trim();
 }
@@ -525,8 +536,12 @@ function clearWorkItemBranchState(wi, { clearMergeState = false } = {}) {
   if (clearMergeState) setMergeState(wi.id, null);
 }
 
-function disposeTerminalWorkItemAtlasGraph(projectDir, wiId) {
-  disposeWorkItemAtlasGraph({ projectDir, workItemId: wiId });
+function shouldPreserveUnmergedCompleteAtlasView(wi) {
+  return wi?.status === "complete" && wi?.merge_state !== "merged";
+}
+
+function disposeTerminalWorkItemAtlasGraph(projectDir, wiId, worktreePath = null, options = {}) {
+  disposeWorkItemAtlasGraph({ projectDir, workItemId: wiId, worktreePath, ...options });
 }
 
 function shouldDeleteBranchForInactiveWi(wi) {
@@ -766,6 +781,8 @@ function preserveCorruptWorktreeContents(wtPath, projectDir, { wiId, branchName 
     try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       if (entry.name === ".git") continue;
+      // Worktree-local Posse state is regenerated runtime data, not user work.
+      if (path.resolve(srcDir) === path.resolve(wtPath) && entry.name === ".posse") continue;
       const srcPath = path.join(srcDir, entry.name);
       const dstPath = path.join(dstDir, entry.name);
       if (entry.isDirectory()) {
@@ -818,6 +835,33 @@ export function worktreePath(projectDir, wiId, _wiTitle = null, nativeParity = {
     { projectDir: path.resolve(projectDir), wiId: String(wiId) },
     nativeParity,
   );
+}
+
+export async function ensureDetachedReadOnlyWorktreeAsync(projectDir, {
+  targetRef = "",
+  worktreeDir = "",
+  signal = null,
+} = {}) {
+  const ref = String(targetRef || "").trim();
+  if (!ref) throw new Error("targetRef is required for detached read-only worktree");
+  if (!worktreeDir) throw new Error("worktreeDir is required for detached read-only worktree");
+
+  await fs.promises.mkdir(path.dirname(worktreeDir), { recursive: true });
+  let targetDir = path.resolve(worktreeDir);
+  if (fs.existsSync(targetDir)) {
+    try {
+      await gitExecAsync(["rev-parse", "--git-dir"], targetDir, { signal });
+      await gitExecAsync(["checkout", "--detach", ref], targetDir, { signal });
+      await gitExecAsync(["reset", "--hard", ref], targetDir, { signal });
+      await gitExecAsync(["clean", "-fd"], targetDir, { signal });
+      return targetDir;
+    } catch {
+      targetDir = `${targetDir}-${randomToken()}`;
+    }
+  }
+
+  await gitExecAsync(["worktree", "add", "--detach", targetDir, ref], projectDir, { signal });
+  return targetDir;
 }
 
 export function findLegacyWorktreeForWi(projectDir, wiId, nativeParity = {}) {
@@ -1492,7 +1536,28 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
       });
     }
 
-    const removed = !fs.existsSync(wtPath);
+    let removed = !fs.existsSync(wtPath);
+    if (!removed) {
+      try {
+        await forceRemoveWorktreePathAfterNativeAsync(wtPath, projectDir, { signal });
+        removed = !fs.existsSync(wtPath);
+      } catch (err) {
+        if (isAbortError(err)) throw err;
+        notifySafeRemoveFailure(onFailure, {
+          wtPath,
+          projectDir,
+          reason,
+          branchName,
+          wiId,
+          phase: "remove",
+          message: `Force-remove retry failed after native worktree removal: ${err?.message || String(err)}`,
+          error: err?.message || String(err),
+          snapshotDir,
+          snapshotSucceeded,
+          verifiedClean,
+        });
+      }
+    }
     if (!removed) {
       notifySafeRemoveFailure(onFailure, {
         wtPath,
@@ -1951,6 +2016,9 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, { signal = 
         }
         let cleanupResult = null;
         try {
+          disposeTerminalWorkItemAtlasGraph(projectDir, wiId, wtDir, {
+            includeWarmed: !shouldPreserveUnmergedCompleteAtlasView(wi),
+          });
           cleanupResult = await timing.step(`terminal WI#${wiId} snapshot/remove`, () => gcSnapshotAndRemoveWorktreeAsync(projectDir, wtDir, wi, {
             wiId,
             reason: "startup-gc-terminal-worktree",
@@ -1982,7 +2050,6 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, { signal = 
         }
         const ctxDir = contextDir(wiScopeId(wiId), projectDir);
         try { await timing.step(`WI#${wiId} context cleanup`, () => fs.promises.rm(ctxDir, { recursive: true, force: true })); } catch {}
-        disposeTerminalWorkItemAtlasGraph(projectDir, wiId);
         removed++;
         onMsg(gcTerminalWorktreeMessage(wi, branchCleanup));
       } else {
@@ -1996,6 +2063,7 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, { signal = 
         if (!holdsBench) {
           let cleanupResult = null;
           try {
+            disposeTerminalWorkItemAtlasGraph(projectDir, wiId, wtDir);
             cleanupResult = await timing.step(`inactive WI#${wiId} snapshot/remove`, () => gcSnapshotAndRemoveWorktreeAsync(projectDir, wtDir, wi, {
               wiId,
               reason: "startup-gc-inactive-worktree",

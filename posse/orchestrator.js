@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { installCliWarningFilter } from "./lib/domains/cli/functions/warnings.js";
+import { scrubSecrets } from "./lib/shared/telemetry/classes/logging/secret-scrub.js";
 
 installCliWarningFilter();
 
@@ -18,7 +19,7 @@ installCliWarningFilter();
 const recordFatalCrash = (kind, err) => {
   const stack = err && err.stack ? err.stack : String(err);
   const code = err && err.code ? ` code=${err.code}` : "";
-  const line = `\n[${new Date().toISOString()}] FATAL ${kind}${code}\n${stack}\n`;
+  const line = scrubSecrets(`\n[${new Date().toISOString()}] FATAL ${kind}${code}\n${stack}\n`);
   try { process.stderr.write(`\x1b[?25h\x1b[0m${line}`); } catch { /* best effort */ }
   try {
     const dir = path.join(process.cwd(), ".posse", "logs");

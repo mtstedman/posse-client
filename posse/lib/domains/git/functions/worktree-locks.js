@@ -25,6 +25,7 @@ const WORKTREE_LOCK_STALE_MS = 2 * 60 * 1000;
 const WORKTREE_LOCK_WAIT_MS = 3 * 60 * 1000;
 const WORKTREE_LOCK_POLL_MS = 50;
 const WORKTREE_LOCK_LIVE_PID_STALE_MULTIPLIER = 10;
+const ACTIVE_WORKTREE_LOCK_TOKENS = new Set();
 
 function sleepMs(ms) {
   // Synchronous by design: used only in worker-side lock polling, not
@@ -90,6 +91,7 @@ function shouldReclaimParsedWorktreeLock({
   ownerCreatedAtMs,
   ownerPid,
   ownerState,
+  ownerThreadId,
   ownerToken,
   releasedAtMs,
   staleMs,
@@ -98,7 +100,22 @@ function shouldReclaimParsedWorktreeLock({
   if (Number.isFinite(releasedAtMs)) return { reclaim: true, ownerToken, stat };
   if (ownerState === false) return { reclaim: true, ownerToken, stat };
   if (hasOwnerPid && ownerState === true) {
-    if (Number(ownerPid) === process.pid) return false;
+    if (Number(ownerPid) === process.pid) {
+      if (
+        !ownerToken
+        || !Number.isInteger(ownerThreadId)
+        || ownerThreadId !== threadId
+        || ACTIVE_WORKTREE_LOCK_TOKENS.has(ownerToken)
+      ) {
+        return false;
+      }
+      return reclaimWorktreeLockByAge({
+        ownerCreatedAtMs,
+        ownerToken,
+        staleMs,
+        stat,
+      });
+    }
     return reclaimWorktreeLockByAge({
       ownerCreatedAtMs,
       ownerToken,
@@ -143,6 +160,7 @@ export class WorktreeLock {
     this.#fd = fd;
     this.#owner = cloneOwner(owner);
     this.#ownerToken = owner?.ownerToken || null;
+    if (this.#ownerToken) ACTIVE_WORKTREE_LOCK_TOKENS.add(this.#ownerToken);
   }
 
   get fd() {
@@ -166,6 +184,7 @@ export class WorktreeLock {
     try { if (this.#fd != null) fs.closeSync(this.#fd); } catch { /* ignore */ }
     this.#fd = null;
     this.#released = true;
+    if (this.#ownerToken) ACTIVE_WORKTREE_LOCK_TOKENS.delete(this.#ownerToken);
     for (let attempt = 0; attempt < 5; attempt += 1) {
       if (removeLockIfOwner(this.lockPath, this.#ownerToken)) return true;
       sleepMs(25 * (attempt + 1));
@@ -192,6 +211,7 @@ export class AsyncWorktreeLock {
     this.#fileHandle = fileHandle;
     this.#owner = cloneOwner(owner);
     this.#ownerToken = owner?.ownerToken || null;
+    if (this.#ownerToken) ACTIVE_WORKTREE_LOCK_TOKENS.add(this.#ownerToken);
   }
 
   get fileHandle() {
@@ -219,6 +239,7 @@ export class AsyncWorktreeLock {
     try { if (this.#fileHandle?.close) await this.#fileHandle.close(); } catch { /* ignore */ }
     this.#fileHandle = null;
     this.#released = true;
+    if (this.#ownerToken) ACTIVE_WORKTREE_LOCK_TOKENS.delete(this.#ownerToken);
     for (let attempt = 0; attempt < 5; attempt += 1) {
       if (await removeLockIfOwnerAsync(this.lockPath, this.#ownerToken)) return true;
       await sleepMsAsync(25 * (attempt + 1)).catch(() => {});
@@ -382,6 +403,7 @@ function shouldReclaimWorktreeLock(lockPath, {
   let ownerState = null;
   let hasOwnerPid = false;
   let ownerPid = null;
+  let ownerThreadId = null;
   let ownerCreatedAtMs = null;
   let releasedAtMs = null;
   let ownerToken = null;
@@ -395,6 +417,7 @@ function shouldReclaimWorktreeLock(lockPath, {
       ownerPid = parsed.pid;
       ownerState = isProcessAliveFn(parsed.pid);
     }
+    if (parsed?.threadId != null) ownerThreadId = Number(parsed.threadId);
     const parsedCreatedAt = Date.parse(parsed?.createdAt || "");
     if (Number.isFinite(parsedCreatedAt)) ownerCreatedAtMs = parsedCreatedAt;
   } catch {
@@ -406,6 +429,7 @@ function shouldReclaimWorktreeLock(lockPath, {
     ownerCreatedAtMs,
     ownerPid,
     ownerState,
+    ownerThreadId,
     ownerToken,
     releasedAtMs,
     staleMs,
@@ -421,6 +445,7 @@ async function shouldReclaimWorktreeLockAsync(lockPath, {
   let ownerState = null;
   let hasOwnerPid = false;
   let ownerPid = null;
+  let ownerThreadId = null;
   let ownerCreatedAtMs = null;
   let releasedAtMs = null;
   let ownerToken = null;
@@ -434,6 +459,7 @@ async function shouldReclaimWorktreeLockAsync(lockPath, {
       ownerPid = parsed.pid;
       ownerState = isProcessAliveFn(parsed.pid);
     }
+    if (parsed?.threadId != null) ownerThreadId = Number(parsed.threadId);
     const parsedCreatedAt = Date.parse(parsed?.createdAt || "");
     if (Number.isFinite(parsedCreatedAt)) ownerCreatedAtMs = parsedCreatedAt;
   } catch {
@@ -445,6 +471,7 @@ async function shouldReclaimWorktreeLockAsync(lockPath, {
     ownerCreatedAtMs,
     ownerPid,
     ownerState,
+    ownerThreadId,
     ownerToken,
     releasedAtMs,
     staleMs,

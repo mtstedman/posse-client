@@ -5,12 +5,28 @@
 // the embedding identity (backend:model:version:dim) changes — the lifecycle
 // the per-ingestView encode pool deliberately punted on.
 
-import { Daemon, ThreadTransport } from "../../../../../classes/tools/daemon/index.js";
+import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../classes/tools/daemon/index.js";
+import { heartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 
 const HOST_URL = new URL("./onnx-host.mjs", import.meta.url);
 // Generous ceiling: first request pays the ~6s model load, and a big batch can
 // take a while. A wedged encode still can't hang forever.
 const ENCODE_TIMEOUT_MS = 300_000;
+let ONNX_SUPERVISOR_SEQ = 0;
+
+function registerOnnxThreadDaemon(daemon) {
+  const key = `atlas-onnx#${++ONNX_SUPERVISOR_SEQ}`;
+  daemonSupervisor.register(key, daemon, { label: "atlas-onnx" });
+  const dispose = daemon.dispose.bind(daemon);
+  daemon.dispose = async (...args) => {
+    try {
+      return await dispose(...args);
+    } finally {
+      daemonSupervisor.unregister(key);
+    }
+  };
+  return daemon;
+}
 
 /**
  * The recycle key — when this changes the daemon tears down the warm model and
@@ -29,11 +45,12 @@ export function onnxModelKey(config = {}) {
  * @returns {{ encode: (texts: string[], opts?: { signal?: AbortSignal }) => Promise<Float32Array[]>, warm: () => Promise<void>, info: () => Promise<any>, dispose: () => Promise<void>, daemon: Daemon }}
  */
 export function createOnnxDaemon(getConfig) {
-  const daemon = new Daemon({
+  const nativeAuth = heartbeatAuthManager.getCapability();
+  const daemon = registerOnnxThreadDaemon(new Daemon({
     key: () => onnxModelKey(getConfig()),
-    transportFactory: () => ThreadTransport({ moduleUrl: HOST_URL, workerData: { config: getConfig() } }),
+    transportFactory: () => ThreadTransport({ moduleUrl: HOST_URL, workerData: { config: getConfig(), nativeAuth } }),
     timeoutMs: ENCODE_TIMEOUT_MS,
-  });
+  }));
 
   const call = async (payload, opts = {}) => {
     const res = await daemon.request(payload, opts);

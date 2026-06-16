@@ -124,13 +124,7 @@ export class HeldQueueLockIndex {
     this._jobLocks = new Map();
     this._workItemLocks = new Map();
     this._jobScopes = new Map();
-    this.refreshJobScopesFromDb();
     this.refreshFromDb();
-  }
-
-  refreshJobScopesFromDb() {
-    this._jobScopes.clear();
-    for (const job of this._loadJobs() || []) this.cacheJob(job);
   }
 
   refreshFromDb() {
@@ -312,7 +306,6 @@ export class HeldQueueLockIndex {
       this.removeWorkItemLockForPath(payload.workItemId, payload.path, payload.lockKind);
     }
     if (FULL_REFRESH_WAKE_REASONS.has(reason)) {
-      this.refreshJobScopesFromDb();
       this.refreshFromDb();
     }
   }

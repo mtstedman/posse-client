@@ -46,9 +46,33 @@ export class Scope {
     });
   }
 
+  static async fromPayloadAsync(payload = {}, { cwd = process.cwd() } = {}) {
+    const parsed = parseJsonObject(payload);
+    const promoted = await CommitScope.fromPayloadAsync({ mappings: parsed.mappings || [] }, { cwd });
+    return new Scope({
+      modifyFiles: parsed.files_to_modify || [],
+      createFiles: [...(parsed.files_to_create || []), ...promoted.files],
+      createRoots: [...(parsed.create_roots || []), ...promoted.roots],
+      deleteFiles: parsed.files_to_delete || [],
+      cwd,
+    });
+  }
+
   static fromMappings(mappings = [], { cwd = process.cwd() } = {}) {
     const payload = { mappings };
     const commitScope = CommitScope.fromPayload(payload, { cwd });
+    return new Scope({
+      modifyFiles: [],
+      createFiles: [...commitScope.files],
+      createRoots: [...commitScope.roots],
+      deleteFiles: [],
+      cwd,
+    });
+  }
+
+  static async fromMappingsAsync(mappings = [], { cwd = process.cwd() } = {}) {
+    const payload = { mappings };
+    const commitScope = await CommitScope.fromPayloadAsync(payload, { cwd });
     return new Scope({
       modifyFiles: [],
       createFiles: [...commitScope.files],

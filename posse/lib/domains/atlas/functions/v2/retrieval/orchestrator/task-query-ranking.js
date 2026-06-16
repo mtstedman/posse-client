@@ -11,7 +11,7 @@
 // A future revision can swap in semantic similarity once embeddings are
 // stable (Workstream H).
 
-import { tokenizeForRanking } from "./tokens.js";
+import { tokenizeForRanking, tokenizeForRankingAsync } from "./tokens.js";
 
 /** @typedef {import("../../contracts/api.js").ViewSymbol} ViewSymbol */
 /** @typedef {import("./rrf.js").FusedEntry<ViewSymbol>} FusedSymbolEntry */
@@ -57,12 +57,52 @@ export function applyTaskQueryRanking(fused, taskText) {
 }
 
 /**
+ * Async daemon-backed variant for retrieval paths that are already async.
+ *
+ * @param {FusedSymbolEntry[]} fused
+ * @param {string | undefined} taskText
+ * @returns {Promise<FusedSymbolEntry[]>}
+ */
+export async function applyTaskQueryRankingAsync(fused, taskText) {
+  if (!taskText || typeof taskText !== "string") return fused;
+  const taskTokens = await tokenSetAsync(taskText);
+  if (taskTokens.size === 0) return fused;
+  const symbolTokenSets = await Promise.all(fused.map((entry) => symbolTokenSetAsync(entry.payload)));
+  for (let i = 0; i < fused.length; i += 1) {
+    const entry = fused[i];
+    const symbolTokens = symbolTokenSets[i];
+    if (symbolTokens.size === 0) continue;
+    const overlap = intersectionSize(taskTokens, symbolTokens);
+    if (overlap === 0) continue;
+    const overlapRatio = overlap / symbolTokens.size;
+    const bonus = TASK_BONUS_SCALE * overlapRatio;
+    entry.score += bonus;
+    /** @type {any} */ (entry).taskRanking = { overlap, overlapRatio, bonus };
+  }
+  fused.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.id.localeCompare(b.id);
+  });
+  return fused;
+}
+
+/**
  * @param {string} text
  * @returns {Set<string>}
  */
 function tokenSet(text) {
   const out = new Set();
   for (const t of tokenizeForRanking(text)) out.add(t);
+  return out;
+}
+
+/**
+ * @param {string} text
+ * @returns {Promise<Set<string>>}
+ */
+async function tokenSetAsync(text) {
+  const out = new Set();
+  for (const t of await tokenizeForRankingAsync(text)) out.add(t);
   return out;
 }
 
@@ -76,6 +116,21 @@ function symbolTokenSet(sym) {
   if (sym.qualified_name) {
     for (const t of tokenizeForRanking(sym.qualified_name)) out.add(t);
   }
+  return out;
+}
+
+/**
+ * @param {ViewSymbol} sym
+ * @returns {Promise<Set<string>>}
+ */
+async function symbolTokenSetAsync(sym) {
+  const out = new Set();
+  const [nameTokens, qualifiedTokens] = await Promise.all([
+    tokenizeForRankingAsync(sym.name || ""),
+    sym.qualified_name ? tokenizeForRankingAsync(sym.qualified_name) : Promise.resolve([]),
+  ]);
+  for (const t of nameTokens) out.add(t);
+  for (const t of qualifiedTokens) out.add(t);
   return out;
 }
 

@@ -47,6 +47,9 @@ export function processVerdict(job, verdict, { emit = null, autoApprove = false,
   verdict = {
     ...verdict,
     confidence: normalizedConfidence || "none",
+    reasons: Array.isArray(verdict.reasons) ? verdict.reasons : [],
+    human_questions: Array.isArray(verdict.human_questions) ? verdict.human_questions : [],
+    spawn_jobs: Array.isArray(verdict.spawn_jobs) ? verdict.spawn_jobs : [],
   };
 
   // Map parse_error to valid DB values (CHECK constraint only allows

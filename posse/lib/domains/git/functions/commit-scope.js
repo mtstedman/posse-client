@@ -19,6 +19,7 @@ import { getGitAtlasPostCommitHookTimeoutMs } from "../../settings/functions/tun
 import { isUnderRoot, normalizeRoots } from "../../worker/functions/helpers/scope.js";
 import { findActiveSiblingLockForPath } from "../../worker/functions/helpers/shared-worktree-locks.js";
 import { MutationPolicy } from "../../../shared/scope/classes/MutationPolicy.js";
+import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { UNSCOPED_GIT_ADD_TASK_MODES } from "../../../catalog/artifact.js";
 import { runGitNativeMethod } from "./native/invoke.js";
 
@@ -309,7 +310,7 @@ export function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
     let settled = false;
     const worker = new NodeWorker(new URL("./commit-worker.js", import.meta.url), {
       execArgv: sanitizeWorkerExecArgv(),
-      workerData: { message, cwd, scope, opts },
+      workerData: { message, cwd, scope, opts, nativeAuth: heartbeatAuthManager.getCapability() },
     });
     const settle = (fn, value) => {
       if (settled) return;

@@ -98,8 +98,12 @@ export function applyIterativeWorkflowProfile(intakeHints, workflowMode, default
   return normalizeIntakeHints({
     ...intakeHints,
     intent_type: profile.intent_type,
+    intent_type_source: "explicit",
     deliverable_type: profile.deliverable_type,
+    deliverable_type_source: "explicit",
     output_mode: profile.output_mode,
+    output_mode_source: "explicit",
+    desired_outputs_source: "explicit",
     subtasks: [...profile.subtasks, ...(Array.isArray(intakeHints?.subtasks) ? intakeHints.subtasks : [])],
     constraints: [...profile.constraints, ...(Array.isArray(intakeHints?.constraints) ? intakeHints.constraints : [])],
   }, {

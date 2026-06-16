@@ -36,6 +36,7 @@ import { tierModelName } from "../../../providers/functions/provider.js";
 import { escalateModelTier } from "../../../providers/functions/helpers/turns.js";
 import { providerRoleForJobType } from "../../../providers/functions/roles.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { isTransientCommitInfraFailure } from "./commit-infra.js";
 
 const MAX_STALL_EXHAUSTED_RECOVERY_RETRIES = 1;
 
@@ -371,6 +372,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhauste
   const errRepeatKey = errorDetails.repeatKey || errSummary;
   const turnBudgetExhausted = isTurnBudgetExhaustedError(errorDetails);
   const permanentProviderConfigError = isPermanentProviderConfigError(errorDetails);
+  const transientCommitInfraFailure = isTransientCommitInfraFailure(errorOrMsg);
 
   if (worker.shuttingDown) {
     const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
@@ -445,6 +447,11 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhauste
         // rather than silently masking the failure.
       }
     }
+  }
+
+  if (!permanentProviderConfigError && sameErrorRepeat && transientCommitInfraFailure && freshJob.attempt_count < freshJob.max_attempts) {
+    sameErrorRepeat = false;
+    worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: repeated transient git/native infrastructure fault — allowing bounded retry${C.reset}`);
   }
 
   if (permanentProviderConfigError || sameErrorRepeat || freshJob.attempt_count >= freshJob.max_attempts) {

@@ -9,13 +9,12 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
-import { getDb } from "../../../shared/storage/functions/index.js";
 import { getSetting } from "../../queue/functions/index.js";
 import { adaptExecutionContractForProvider, appendExecutionTools, buildExecutionContract, renderExecutionContractBlock, WEB_TOOL_ROLES } from "../../../functions/tools/contract.js";
 import { buildMcpAtlasSurfaceToolDescriptors, buildMcpSurfaceToolDescriptors, buildSurfaceNameMap } from "../../../functions/tools/mcp-surface.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, logAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment } from "../../integrations/functions/atlas.js";
 import { atlasBackendLabel } from "../../integrations/functions/atlas-label.js";
-import { buildDeterministicReadMcpServerConfig, getDeterministicMcpToolNames, roleUsesDeterministicReadMcp } from "../../integrations/functions/deterministic-mcp.js";
+import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, getDeterministicMcpToolNames, roleUsesDeterministicReadMcp } from "../../integrations/functions/deterministic-mcp.js";
 import { isFallbackAtlasPrefetchStatus } from "../../integrations/functions/deterministic-mcp/gate.js";
 import { resolveAtlasToolGateEnabled } from "../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../integrations/functions/mcp-gateway.js";
@@ -26,6 +25,7 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { CODEX_OAUTH_SUPPORTED_MODELS, getProviderTierDefaults } from "./model-catalog.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
+import { buildWindowsSpawn, terminateSpawnedProcess } from "./helpers/windows-spawn.js";
 import { selectExecutionModel } from "./helpers/model-selection.js";
 import {
   InteractiveCliSession,
@@ -36,6 +36,7 @@ import {
 import { escalateModelTier, getMaxTurnsForProvider } from "./helpers/turns.js";
 import { resolveProviderStallTimeout } from "./helpers/stall-timeout.js";
 import { classifyProviderError } from "./helpers/api-resilience.js";
+import { loadUsageEntries, summarizeUsageEntries } from "./helpers/local-usage-summary.js";
 import { roleBrandColor, roleBrandIcon } from "../../ui/functions/display/helpers/brand.js";
 import { isWebToolName, recordToolUseObservations } from "../../observability/functions/observations.js";
 
@@ -78,6 +79,38 @@ const CODEX_USAGE_WINDOW_DEFS = [
 ];
 const DEFAULT_CODEX_USAGE_CACHE_MS = 2 * 60 * 1000;
 const DEFAULT_CODEX_USAGE_BACKOFF_MS = 5 * 60 * 1000;
+
+const CODEX_EXIT_CLEANUPS = new Set();
+let codexExitCleanupHandler = null;
+
+function drainCodexExitCleanups() {
+  const handler = codexExitCleanupHandler;
+  const pending = [...CODEX_EXIT_CLEANUPS];
+  CODEX_EXIT_CLEANUPS.clear();
+  codexExitCleanupHandler = null;
+  if (handler) {
+    try { process.removeListener("exit", handler); } catch { /* best effort */ }
+  }
+  for (const cleanup of pending) {
+    try { cleanup(); } catch { /* one cleanup must not block the rest */ }
+  }
+}
+
+function registerCodexExitCleanup(cleanup) {
+  if (typeof cleanup !== "function") return () => {};
+  CODEX_EXIT_CLEANUPS.add(cleanup);
+  if (!codexExitCleanupHandler) {
+    codexExitCleanupHandler = drainCodexExitCleanups;
+    process.once("exit", codexExitCleanupHandler);
+  }
+  return () => {
+    CODEX_EXIT_CLEANUPS.delete(cleanup);
+    if (CODEX_EXIT_CLEANUPS.size === 0 && codexExitCleanupHandler) {
+      try { process.removeListener("exit", codexExitCleanupHandler); } catch { /* best effort */ }
+      codexExitCleanupHandler = null;
+    }
+  };
+}
 let _usageSummaryCache = null;
 let _interactiveUsageUnavailableReason = null;
 let _testFetchCodexStatusViaInteractive = null;
@@ -285,7 +318,8 @@ export function __testBuildShellDisciplineBlock({ platform = process.platform, a
     "- The shell is Windows PowerShell, not bash.",
     "- Do not assume repo-root-relative paths are valid; use the current working directory or absolute paths.",
     "- Do NOT use bash heredocs like <<'PY' or <<EOF.",
-    "- Do NOT use bash chaining/operators like && when composing commands.",
+    "- Do NOT use bash chaining/operators like && or || when composing commands.",
+    "- Do NOT use Unix-only filters like head or wc; use file tools first, or PowerShell commands such as Select-Object and Measure-Object when shell is truly needed.",
     "- Do NOT use rg, grep, or findstr for routine repository search on Windows. Use the manifest entries whose canonical labels are search_files/list_files instead.",
     "- Before using Python or shell to read a file, verify the file path with the manifest entry whose canonical label is read_file first.",
     "- For multiple PowerShell statements, use separate commands or PowerShell syntax.",
@@ -416,41 +450,6 @@ function isBareCommand(cmd) {
   return !cmd.includes("\\") && !cmd.includes("/");
 }
 
-function quoteWindowsArg(arg) {
-  const value = String(arg == null ? "" : arg);
-  // Quote on whitespace, quotes, OR cmd metacharacters. This builds a cmd.exe
-  // /c command line (windowsVerbatimArguments:true), so an unquoted & | < > ^
-  // ( ) would be interpreted by cmd and split/redirect the command. Double
-  // quotes neutralize them; CommandLineToArgvW in the target strips the quotes.
-  // (%VAR% still expands even when quoted — cmd has no reliable command-line
-  // escape for it; .exe-preferred resolution keeps this route off the hot
-  // path.) (B20)
-  if (!/[\s"&|<>^()%]/u.test(value)) return value;
-  return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
-}
-
-function quoteWindowsCommand(command) {
-  const value = String(command == null ? "" : command);
-  return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
-}
-
-function buildCodexSpawn(command, args) {
-  if (process.platform !== "win32") {
-    return { command, args, windowsVerbatimArguments: false };
-  }
-  if (/\.exe$/i.test(String(command || ""))) {
-    return { command, args, windowsVerbatimArguments: false };
-  }
-
-  const cmdExe = process.env.ComSpec || "C:\\WINDOWS\\System32\\cmd.exe";
-  const commandLine = [quoteWindowsCommand(command), ...args.map(quoteWindowsArg)].join(" ");
-  return {
-    command: cmdExe,
-    args: ["/d", "/s", "/c", commandLine],
-    windowsVerbatimArguments: true,
-  };
-}
-
 function sanitizeLaunchArg(arg) {
   const value = String(arg == null ? "" : arg);
   if (!value) return value;
@@ -467,25 +466,6 @@ function sanitizeLaunchArg(arg) {
 function formatSpawnLaunchForError(launch) {
   const safeArgs = Array.isArray(launch?.args) ? launch.args.map((arg) => sanitizeLaunchArg(arg)) : [];
   return `${launch?.command || "codex"} ${safeArgs.join(" ")}`.trim();
-}
-
-function terminateSpawnedProcess(proc, { force = false } = {}) {
-  if (!proc || proc.exitCode != null || proc.killed) return;
-  if (process.platform === "win32") {
-    try {
-      const taskkillArgs = ["/pid", String(proc.pid), "/T"];
-      if (force) taskkillArgs.push("/F");
-      const killer = spawn("taskkill", taskkillArgs, {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      killer.unref?.();
-      return;
-    } catch {
-      // Fall through to proc.kill best-effort.
-    }
-  }
-  try { proc.kill(force ? "SIGKILL" : "SIGTERM"); } catch {}
 }
 
 function findWindowsAppCodex() {
@@ -585,7 +565,7 @@ function isExecutableCodexCli(exePath, spawnSyncImpl = spawnSync) {
   const target = String(exePath || "");
   if (!target) return false;
   try {
-    const launch = buildCodexSpawn(target, ["--version"]);
+    const launch = buildWindowsSpawn(target, ["--version"]);
     const result = spawnSyncImpl(launch.command, launch.args, {
       windowsHide: true,
       windowsVerbatimArguments: launch.windowsVerbatimArguments,
@@ -602,7 +582,7 @@ function isExecutableCodexCli(exePath, spawnSyncImpl = spawnSync) {
 function codexCliSupportsExecContract(exePath, spawnSyncImpl = spawnSync) {
   if (!isExecutableCodexCli(exePath, spawnSyncImpl)) return false;
   try {
-    const launch = buildCodexSpawn(exePath, ["exec", "resume", "--help"]);
+    const launch = buildWindowsSpawn(exePath, ["exec", "resume", "--help"]);
     const result = spawnSyncImpl(launch.command, launch.args, {
       windowsHide: true,
       windowsVerbatimArguments: launch.windowsVerbatimArguments,
@@ -886,54 +866,13 @@ function getCodexUsageLimits() {
   };
 }
 
-function summarizeCodexUsageEntries(entries, nowMs, limits = {}) {
-  return CODEX_USAGE_WINDOW_DEFS.map((def) => {
-    const cutoff = nowMs - def.durationMs;
-    const matching = entries.filter((entry) => entry.timestampMs >= cutoff);
-    const usedTokens = matching.reduce((sum, entry) => sum + entry.totalTokens, 0);
-    const oldestTs = matching.reduce((min, entry) => Math.min(min, entry.timestampMs), Number.POSITIVE_INFINITY);
-    const limitTokens = limits[def.key] ?? null;
-    const remainingTokens = limitTokens == null ? null : Math.max(0, limitTokens - usedTokens);
-    const resetAt = Number.isFinite(oldestTs) ? new Date(oldestTs + def.durationMs).toISOString() : null;
-    return {
-      key: def.key,
-      label: def.label,
-      durationMs: def.durationMs,
-      usedTokens,
-      limitTokens,
-      remainingTokens,
-      resetAt,
-    };
-  });
-}
-
-function loadCodexUsageEntries(nowMs) {
-  try {
-    const weekWindow = CODEX_USAGE_WINDOW_DEFS.find((def) => def.key === "week")?.durationMs || (7 * 24 * 60 * 60 * 1000);
-    const oldestRelevantIso = new Date(nowMs - weekWindow).toISOString();
-    const db = getDb();
-    const rows = db.prepare(`
-      SELECT created_at, input_tokens, output_tokens
-      FROM agent_calls
-      WHERE LOWER(TRIM(provider)) = 'codex'
-        AND created_at >= ?
-        AND COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) > 0
-      ORDER BY created_at ASC
-    `).all(oldestRelevantIso);
-
-    return rows.flatMap((row) => {
-      const timestampMs = Date.parse(row.created_at);
-      const totalTokens = (row.input_tokens || 0) + (row.output_tokens || 0);
-      if (!Number.isFinite(timestampMs) || totalTokens <= 0) return [];
-      return [{ timestampMs, totalTokens }];
-    });
-  } catch {
-    return [];
-  }
-}
-
 function buildCodexLocalUsageSummary(nowMs = Date.now(), detail = null) {
-  const entries = loadCodexUsageEntries(nowMs);
+  const entries = loadUsageEntries({
+    nowMs,
+    windowDefs: CODEX_USAGE_WINDOW_DEFS,
+    provider: "codex",
+    normalizeProvider: true,
+  });
   const localUsedTokens = entries.reduce((sum, entry) => sum + (entry.totalTokens || 0), 0);
   return {
     provider: "codex",
@@ -941,7 +880,7 @@ function buildCodexLocalUsageSummary(nowMs = Date.now(), detail = null) {
     subscriptionType: null,
     rateLimitTier: null,
     localUsedTokens,
-    windows: summarizeCodexUsageEntries(entries, nowMs, getCodexUsageLimits()),
+    windows: summarizeUsageEntries(entries, nowMs, getCodexUsageLimits(), CODEX_USAGE_WINDOW_DEFS),
     detail: detail ? String(detail) : null,
   };
 }
@@ -1287,7 +1226,7 @@ async function fetchCodexStatusViaInteractive({
     "--sandbox", "read-only",
   ];
   if (cwd) args.push("--cd", cwd);
-  const launch = buildCodexSpawn(CODEX_CMD, args);
+  const launch = buildWindowsSpawn(CODEX_CMD, args);
   const session = new InteractiveCliSession({
     command: launch.command,
     args: launch.args,
@@ -1322,7 +1261,7 @@ async function fetchCodexRateLimitsViaAppServer({
 } = {}) {
   await ensureCodexResolvedAsync();
   if (!CODEX_CMD) throw new Error(CODEX_RESOLVE_ERROR || "Codex CLI not found");
-  const launch = buildCodexSpawn(CODEX_CMD, [...CODEX_ARGS, "app-server", "--listen", "stdio://"]);
+  const launch = buildWindowsSpawn(CODEX_CMD, [...CODEX_ARGS, "app-server", "--listen", "stdio://"]);
   const resolvedTimeoutMs = Math.max(1_000, Number(timeoutMs) || 8_000);
 
   return await new Promise((resolve, reject) => {
@@ -1958,6 +1897,85 @@ export function __testBuildCodexDeterministicReadConfigOverrides(role, cwd, opti
   return buildCodexDeterministicReadConfigOverrides(role, cwd, options);
 }
 
+async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd, {
+  scopedFiles = [],
+  createFiles = [],
+  deleteFiles = [],
+  createRoots = [],
+  needsImageGeneration = false,
+  disableSystemTools = false,
+  jobId = null,
+  workItemId = null,
+  atlasPrefetchStatus = null,
+  atlasAvailable = null,
+  atlasGateEnabled = false,
+  atlasConfig = null,
+} = {}) {
+  const enabled = roleUsesDeterministicReadMcp(role);
+  if (!enabled) {
+    return {
+      active: false,
+      tools: [],
+      configOverrides: [],
+      serverConfig: null,
+      serverKey: null,
+    };
+  }
+
+  const serverConfig = await buildDeterministicReadMcpServerConfigAsync(role, {
+    cwd,
+    scopedFiles,
+    createFiles,
+    deleteFiles,
+    createRoots,
+    needsImageGeneration,
+    providerName: "codex",
+    disableSystemTools,
+    jobId,
+    workItemId,
+    atlasPrefetchStatus,
+    atlasAvailable,
+    atlasGateEnabled,
+    atlasConfig,
+  });
+  if (!serverConfig?.ready) {
+    return {
+      active: false,
+      tools: [],
+      configOverrides: [],
+      serverConfig,
+      serverKey: null,
+    };
+  }
+
+  const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
+  const configOverrides = [
+    `mcp_servers.${serverKey}.command=${_toTomlLiteral(serverConfig.command)}`,
+    `mcp_servers.${serverKey}.args=${_toTomlLiteral(serverConfig.args || [])}`,
+  ];
+  const toolNames = getDeterministicMcpToolNames(role, { needsImageGeneration });
+  if (serverConfig.cwd) {
+    configOverrides.push(`mcp_servers.${serverKey}.cwd=${_toTomlLiteral(serverConfig.cwd)}`);
+  }
+  appendCodexMcpEnvOverrides(configOverrides, serverKey, serverConfig.env, {
+    extraAllowedKeys: toolNames.includes("generate_image")
+      ? ["OPENAI_API_KEY", "XAI_API_KEY"]
+      : [],
+  });
+
+  return {
+    active: true,
+    tools: toolNames,
+    contractTools: buildMcpSurfaceToolDescriptors(toolNames, {
+      providerName: "codex",
+      serverName: serverKey,
+    }),
+    configOverrides,
+    serverConfig,
+    serverKey,
+  };
+}
+
 function buildCodexSystemToolLockdownOverrides({ disableSystemTools = false } = {}) {
   if (!disableSystemTools) return [];
   return [
@@ -2045,7 +2063,7 @@ function _parseCodexToolArguments(value) {
 async function codexCliSupportsExecContractAsync(exePath) {
   if (!(await isExecutableCodexCliAsync(exePath))) return false;
   try {
-    const launch = buildCodexSpawn(exePath, ["exec", "resume", "--help"]);
+    const launch = buildWindowsSpawn(exePath, ["exec", "resume", "--help"]);
     const result = await spawnProbeAsync(launch.command, launch.args, {
       windowsVerbatimArguments: launch.windowsVerbatimArguments,
     }, 3000);
@@ -2083,7 +2101,7 @@ async function isExecutableCodexCliAsync(exePath) {
   const target = String(exePath || "");
   if (!target) return false;
   try {
-    const launch = buildCodexSpawn(target, ["--version"]);
+    const launch = buildWindowsSpawn(target, ["--version"]);
     const result = await spawnProbeAsync(launch.command, launch.args, {
       windowsVerbatimArguments: launch.windowsVerbatimArguments,
     }, 3000);
@@ -2520,6 +2538,8 @@ export async function callProvider(promptText, {
   );
 
   return new Promise((resolve, reject) => {
+    void (async () => {
+    try {
     const tierConfig = getModelTierConfig(modelTier);
     const authResolution = resolveCodexAuthModeInternal({ configuredMode: getConfiguredCodexAuthMode() });
     if (!authResolution.ok) {
@@ -2564,7 +2584,7 @@ export async function callProvider(promptText, {
       atlasPrefetchStatus,
       atlasAttachment,
     });
-    const deterministicReadMcp = buildCodexDeterministicReadConfigOverrides(role, mcpWorkspaceCwd, {
+    const deterministicReadMcp = await buildCodexDeterministicReadConfigOverridesAsync(role, mcpWorkspaceCwd, {
       scopedFiles,
       createFiles,
       deleteFiles,
@@ -2678,9 +2698,7 @@ export async function callProvider(promptText, {
       cleanupTempDir(temp.dir);
       configRoute.cleanup();
     };
-    const exitCleanup = cleanupRunTemps;
-    process.once("exit", exitCleanup);
-    const clearExitCleanup = () => process.removeListener("exit", exitCleanup);
+    const clearExitCleanup = registerCodexExitCleanup(cleanupRunTemps);
     const forceReadOnlySandbox = !!(deterministicReadMcp.active && allowWrite);
     const args = buildCodexExecArgs({
       outputFile: temp.file,
@@ -2736,7 +2754,7 @@ export async function callProvider(promptText, {
     delete childEnv.GITHUB_TOKEN;
     if (configRoute.codexHome) childEnv.CODEX_HOME = configRoute.codexHome;
 
-    const launch = buildCodexSpawn(CODEX_CMD, args);
+    const launch = buildWindowsSpawn(CODEX_CMD, args);
     const startTime = Date.now();
     let stdout = "";
     let stderr = "";
@@ -2822,6 +2840,7 @@ export async function callProvider(promptText, {
     const seenStderrNotices = new Set();
     const toolUses = [];
     let stdoutLineBuffer = "";
+    const LINE_BUF_MAX = 16 * 1024 * 1024;
     const handleStdoutLine = (raw) => {
       if (!raw) return;
       try {
@@ -2884,6 +2903,10 @@ export async function callProvider(promptText, {
         lastActivity = Date.now();
         const parts = `${stdoutLineBuffer}${text}`.split(/\r?\n/);
         stdoutLineBuffer = parts.pop() || "";
+        if (stdoutLineBuffer.length > LINE_BUF_MAX) {
+          emit(`${C.yellow}Codex stdout line exceeded ${LINE_BUF_MAX} bytes without newline -- dropping buffer${C.reset}`);
+          stdoutLineBuffer = "";
+        }
         for (const raw of parts.filter(Boolean)) handleStdoutLine(raw);
       } catch (handlerErr) {
         const msg = String(handlerErr?.message || handlerErr || "unknown stream handler error");
@@ -2977,12 +3000,16 @@ export async function callProvider(promptText, {
       err.toolUses = toolUses;
       reject(err);
     });
+    } catch (err) {
+      reject(err);
+    }
+    })();
   });
 }
 
 
 export { C, ask, askMultiline };
-export const __testBuildCodexSpawn = buildCodexSpawn;
+export const __testBuildCodexSpawn = buildWindowsSpawn;
 export const __testPrepareCodexConfigForSpawn = prepareCodexConfigForSpawn;
 export const __testShouldSpillCodexConfigOverrides = shouldSpillCodexConfigOverrides;
 export const __testTerminateSpawnedProcess = terminateSpawnedProcess;
@@ -2995,6 +3022,16 @@ export const __testNormalizeCodexRateLimitsResponse = normalizeCodexRateLimitsRe
 export const __testFetchCodexStatusViaInteractive = fetchCodexStatusViaInteractive;
 export const __testFetchCodexRateLimitsViaAppServer = fetchCodexRateLimitsViaAppServer;
 export const __testBuildCodexLocalUsageSummary = buildCodexLocalUsageSummary;
+
+export function __testRegisterCodexExitCleanup(cleanup) {
+  assertTestContext("__testRegisterCodexExitCleanup");
+  return registerCodexExitCleanup(cleanup);
+}
+
+export function __testDrainCodexExitCleanups() {
+  assertTestContext("__testDrainCodexExitCleanups");
+  drainCodexExitCleanups();
+}
 
 export function __testSetCodexUsageFetchers({ interactive = null, appServer = null } = {}) {
   assertTestContext("__testSetCodexUsageFetchers");

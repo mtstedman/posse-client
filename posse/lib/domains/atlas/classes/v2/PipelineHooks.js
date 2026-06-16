@@ -114,9 +114,16 @@ function isWiScopedPurpose(purpose) {
 }
 
 function warmJobPriority(eventType) {
-  // Lease-time warm jobs are on the active dev path; post-change reindexing
-  // stays low priority background maintenance.
-  if (eventType === ATLAS_EVENTS.DEV_LEASED) return "high";
+  // These warms feed planner/dev freshness gates or newly staged main indexes;
+  // they need to run ahead of ordinary low-priority background maintenance.
+  if (
+    eventType === ATLAS_EVENTS.RESEARCH_COMPLETE
+    || eventType === ATLAS_EVENTS.DEV_LEASED
+    || eventType === ATLAS_EVENTS.MAIN_ADVANCED
+    || eventType === ATLAS_EVENTS.SCIP_STAGED
+  ) {
+    return "high";
+  }
   return ATLAS_WARM_JOB_POLICY.defaultPriority;
 }
 
@@ -284,6 +291,9 @@ function cancelQueuedWiWarmJobs(db, workItemId, reason) {
  * @param {AtlasWarmJobPayload} [args.warmJobPayload]
  *   Override the auto-derived warm-job payload. When omitted the hook
  *   constructs one from the event payload + purpose mapping.
+ * @param {boolean} [args.enqueueWarmJob]
+ *   When false, record the event only. Used for terminal WI commits whose
+ *   branch-local warm would be superseded by merge cleanup/main refresh.
  * @param {(err: Error) => void} [args.onError]
  * @returns {{ ok: boolean, eventId: number | null, warmJobId: number | null, skipped?: string, coalesced?: boolean, canceledWarmJobs?: number }}
  */
@@ -293,6 +303,7 @@ export function emitAtlasPipelineEvent({
   workItemId = null,
   jobId = null,
   warmJobPayload = undefined,
+  enqueueWarmJob = true,
   onError = undefined,
 }) {
   if (!eventType || !payload || typeof payload !== "object") {
@@ -358,8 +369,8 @@ export function emitAtlasPipelineEvent({
   try {
     const db = getDb();
     const eventJson = JSON.stringify({ type: eventType, ...payload });
-    const queuedWarmPayload = annotateWarmPayload(effectiveWarmPayload, eventType);
-    const warmPayloadJson = JSON.stringify(queuedWarmPayload);
+    const queuedWarmPayload = enqueueWarmJob ? annotateWarmPayload(effectiveWarmPayload, eventType) : null;
+    const warmPayloadJson = queuedWarmPayload ? JSON.stringify(queuedWarmPayload) : null;
 
     const insertEvent = db.prepare(`
       INSERT INTO events (work_item_id, job_id, event_type, actor_type, actor_id, message, event_json)
@@ -389,6 +400,7 @@ export function emitAtlasPipelineEvent({
         eventJson,
       );
       eventId = Number(eventInfo.lastInsertRowid);
+      if (!enqueueWarmJob) return;
       const existingWarm = findCoalescableQueuedWarm(db, queuedWarmPayload);
       if (existingWarm) {
         const mergedPayload = mergeWarmPayload(existingWarm.payload, queuedWarmPayload);
@@ -431,7 +443,14 @@ export function emitAtlasPipelineEvent({
       getRetrievalCache().invalidateAll();
     }
 
-    return { ok: true, eventId, warmJobId, coalesced, canceledWarmJobs };
+    return {
+      ok: true,
+      eventId,
+      warmJobId,
+      coalesced,
+      canceledWarmJobs,
+      ...(enqueueWarmJob ? {} : { skipped: "warm_job_suppressed" }),
+    };
   } catch (err) {
     if (typeof onError === "function") onError(/** @type {Error} */ (err));
     return {
@@ -475,14 +494,15 @@ export function emitDevLeased({ payload, onError = undefined }) {
 }
 
 /**
- * @param {{ payload: DevCommittedPayload, onError?: (err: Error) => void }} args
+ * @param {{ payload: DevCommittedPayload, enqueueWarmJob?: boolean, onError?: (err: Error) => void }} args
  */
-export function emitDevCommitted({ payload, onError = undefined }) {
+export function emitDevCommitted({ payload, enqueueWarmJob = true, onError = undefined }) {
   return emitAtlasPipelineEvent({
     eventType: ATLAS_EVENTS.DEV_COMMITTED,
     payload,
     workItemId: payload?.wi_id ?? null,
     jobId: payload?.job_id ?? null,
+    enqueueWarmJob,
     onError,
   });
 }

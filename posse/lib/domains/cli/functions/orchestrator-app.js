@@ -35,7 +35,9 @@ installCliWarningFilter();
 // Flags:
 //   --auto-approve      Dev skips tool permission prompts
 //   --auto-merge        Merge completed WI branches at end-of-run
+//   --no-auto-merge     Disable auto-merge for this run, even if enabled in settings
 //   --approve-plan      After planning, pause for human review before dev/fix run
+//   --auto-approve-plan Disable plan-approval gates for this run
 //   --deepthink         Raise planner/research turn budget for this work item
 //   --deepthink-budget  Set planner/research budget: low, normal, high, xhigh
 //   --input-contexts    Comma list of resources/inputs dirs (name, index, or 'all')
@@ -255,7 +257,13 @@ const AUTO_APPROVE = process.argv.includes("--auto-approve");
 if (process.argv.includes("--approve-plan")) {
   setPlanApprovalOverrideForRun(true);
 }
+if (process.argv.includes("--auto-approve-plan")) {
+  setPlanApprovalOverrideForRun(false);
+}
 const NO_TUI = process.argv.includes("--no-tui");
+const NON_INTERACTIVE = process.argv.includes("--non-interactive") ||
+  process.argv.includes("--yes") ||
+  process.argv.includes("-y");
 const DRY_RUN = process.argv.includes("--dry-run");
 const ITERATE_FLAG = process.argv.includes("--iterate");
 const RED_TEAM_PLAN = process.argv.includes("--red-team-plan");
@@ -566,6 +574,7 @@ async function getGitWorkflowHelpers() {
         projectDir: PROJECT_DIR,
         getTargetBranch,
         autoMerge: getAutoMergeConfig().enabled,
+        nonInteractive: NON_INTERACTIVE,
         askFn: ask,
         isIterativeWorkItemActive,
         shouldAutoApproveIterativeWorkItem,
@@ -894,8 +903,12 @@ async function promptForScopedAdd(description, defaultMode = "build", defaultDee
     return {
       intakeHints: applyIterativeWorkflowProfile(normalizeIntakeHints({
         intent_type: profile.intent_type,
+        intent_type_source: "explicit",
         deliverable_type: profile.deliverable_type,
+        deliverable_type_source: "explicit",
         output_mode: profile.output_mode,
+        output_mode_source: "explicit",
+        desired_outputs_source: "explicit",
         suspected_files: hintedFilesOption,
         suspected_dirs: selectedInputContextDirs,
         subtasks: profile.subtasks,
@@ -918,7 +931,10 @@ async function promptForScopedAdd(description, defaultMode = "build", defaultDee
   return {
     intakeHints: normalizeIntakeHints({
       intent_type: kindInput || null,
+      intent_type_source: kindInput ? "explicit" : "inferred",
       output_mode: outputInput || defaultOutputMode,
+      output_mode_source: outputInput ? "explicit" : "inferred",
+      desired_outputs_source: outputInput ? "explicit" : "inferred",
       suspected_files: hintedFilesOption,
       suspected_dirs: selectedInputContextDirs,
       subtasks: null,
@@ -1157,8 +1173,12 @@ function cmdAsk() {
   );
   const intakeHints = normalizeIntakeHints({
     intent_type: "question",
+    intent_type_source: "explicit",
     deliverable_type: "answer",
+    deliverable_type_source: "explicit",
     output_mode: "question_only",
+    output_mode_source: "explicit",
+    desired_outputs_source: "explicit",
     suspected_files: parseFlagValue("--files"),
     suspected_dirs: mergedDirs.merged,
     subtasks: parseFlagValue("--subtasks"),
@@ -1252,7 +1272,7 @@ async function cmdImage() {
   console.log(`\n  ${C.magenta}Image WI#${item.id}${C.reset} — job #${imageJob.id}`);
   console.log(`  ${C.dim}Prompt: ${prompt.slice(0, 70)}${prompt.length > 70 ? "..." : ""}${C.reset}`);
   console.log(`  ${C.dim}Output: ${path.relative(PROJECT_DIR, dirs.artifactRoot).replace(/\\/g, "/")}${C.reset}`);
-  console.log(`  ${C.dim}The scheduler will execute this directly via ${provider}.${C.reset}\n`);
+  console.log(`  ${C.dim}The scheduler will run the artificer job through the configured role provider; generate_image will use ${provider} at tool-call time.${C.reset}\n`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1435,6 +1455,7 @@ function sessionBootDeps() {
   return {
     projectDir: PROJECT_DIR,
     NO_TUI,
+    nonInteractive: NON_INTERACTIVE,
     AUTO_APPROVE,
     DRY_RUN,
     ask,
@@ -2138,6 +2159,8 @@ ${aliasDiagnostic}
   ${C.bold}Flags:${C.reset}
       ${C.cyan}--auto-approve${C.reset}   Dev won't pause for tool permission prompts
       ${C.cyan}--auto-merge${C.reset}     Merge completed WI branches during wrap-up
+      ${C.cyan}--no-auto-merge${C.reset}  Disable auto-merge for this run
+      ${C.cyan}--auto-approve-plan${C.reset} Skip plan approval gates for this run
       ${C.cyan}--deepthink${C.reset}      Raise planner/research budget for deeper analysis
       ${C.cyan}--deepthink-budget N${C.reset}  Set planner/research budget: low, normal, high, xhigh
       ${C.cyan}--input-contexts${C.reset} Select context dirs from resources/inputs (names, indices, or all)
@@ -2150,6 +2173,7 @@ ${aliasDiagnostic}
       ${C.cyan}--iterate-red-team${C.reset} Persist red-team planning across iterative follow-up rounds
       ${C.cyan}--concurrency N${C.reset}  Run N workers in parallel       ${C.dim}(default: ${getCatalogRuntimeFallbackInt("scheduler_concurrency", 3)})${C.reset}
     ${C.cyan}--no-tui${C.reset}         Disable split-screen display (classic output)
+    ${C.cyan}--non-interactive${C.reset} Suppress terminal prompts; leave app gates open instead
     ${C.cyan}--dry-run${C.reset}        Research + plan only — dev jobs auto-pass without execution
     ${C.cyan}--stall-timeout N${C.reset}  Seconds before killing stalled process ${C.dim}(default: ${getCatalogRuntimeFallbackInt("stall_timeout", 600)})${C.reset}
 

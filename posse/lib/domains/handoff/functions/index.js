@@ -25,7 +25,8 @@ import { HANDOFF_SOURCE_EXTENSIONS } from "../../../catalog/files.js";
 
 import fs from "fs";
 import path from "path";
-import { execFileSync } from "child_process";
+import { execFile, execFileSync } from "child_process";
+import { promisify } from "util";
 import { getIntSetting, getSetting, logEvent } from "../../queue/functions/index.js";
 import {
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES,
@@ -38,7 +39,7 @@ import {
   validateSkillIds,
 } from "../../../shared/skills/functions/registry.js";
 import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../worker/functions/helpers/job-type-sets.js";
-import { attachDiffNarrative } from "../../worker/functions/helpers/diff-narrator.js";
+import { attachDiffNarrative, attachDiffNarrativeAsync } from "../../worker/functions/helpers/diff-narrator.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
 import { resolvePathWithin } from "../../worker/functions/helpers/scope.js";
 import {
@@ -60,6 +61,7 @@ import {
   researcherOutputNeedsHuman as researcherOutputNeedsHumanFromModule,
 } from "./helpers/researcher-output.js";
 import {
+  detectPendingMergeAsync as detectPendingMergeAsyncFromModule,
   detectPendingMerge as detectPendingMergeFromModule,
 } from "./helpers/merge-state.js";
 import {
@@ -209,6 +211,7 @@ function copyAtlasPrefetchFields(target, source) {
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const SKIP_DIRS = createWorkspaceSkipDirs();
+const execFileAsync = promisify(execFile);
 
 const SOURCE_EXTENSIONS = HANDOFF_SOURCE_EXTENSIONS;
 
@@ -512,6 +515,10 @@ const ASSESSABLE_TYPES = ASSESSABLE_JOB_TYPES;
  */
 export function detectPendingMerge(cwd) {
   return detectPendingMergeFromModule(cwd);
+}
+
+export async function detectPendingMergeAsync(cwd) {
+  return detectPendingMergeAsyncFromModule(cwd);
 }
 
 function _readFile(relPath, cwd, opts = {}) {
@@ -1298,7 +1305,7 @@ export async function handoff(input) {
   // not spuriously rejected.
   const CONFLICT_EXPANSION_CAP = 50;
   if (packet.cwd && recipient === "dev") {
-    const pending = detectPendingMerge(packet.cwd);
+    const pending = await detectPendingMergeAsync(packet.cwd);
     if (pending) {
       const { safe: conflicts, invalid: invalidConflicts } = sanitizePendingMergeConflicts(packet.cwd, pending.conflicts);
       packet.pending_merge = {
@@ -1614,6 +1621,41 @@ export function attachAssessmentDiffContext(assessmentContext = null, cwd = null
     // best effort only
   }
   attachDiffNarrative(assessmentContext, cwd);
+  return assessmentContext;
+}
+
+export async function attachAssessmentDiffContextAsync(assessmentContext = null, cwd = null) {
+  if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
+  const commitHash = String(assessmentContext.commit_hash || "").trim();
+  const scopedPaths = [...new Set([
+    ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
+    ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
+  ].filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))].slice(0, 20);
+  if (!commitHash || scopedPaths.length === 0) return assessmentContext;
+  try {
+    const { stdout } = await execFileAsync("git", [
+      "diff",
+      "--unified=6",
+      `${commitHash}^!`,
+      "--",
+      ...scopedPaths,
+    ], {
+      cwd,
+      encoding: "utf8",
+      timeout: 15000,
+      maxBuffer: 1024 * 1024 * 2,
+      windowsHide: true,
+    });
+    const trimmed = String(stdout || "").trim();
+    if (trimmed) {
+      assessmentContext.scoped_git_diff = trimmed.length > 50000
+        ? `${trimmed.slice(0, 50000)}\n...[diff truncated]`
+        : trimmed;
+    }
+  } catch {
+    // best effort only
+  }
+  await attachDiffNarrativeAsync(assessmentContext, cwd);
   return assessmentContext;
 }
 

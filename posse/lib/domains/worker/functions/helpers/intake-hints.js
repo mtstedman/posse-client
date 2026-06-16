@@ -35,6 +35,11 @@ const VALID_DESIRED_OUTPUTS = new Set([
   "question_only",
 ]);
 
+const VALID_HINT_SOURCES = new Set([
+  "explicit",
+  "inferred",
+]);
+
 const VALID_WORKFLOW_MODES = new Set([
   "bugfix",
   "ux",
@@ -97,9 +102,32 @@ function _dedupe(list, mapFn = (v) => v) {
   return out;
 }
 
+function _hasValue(input, key) {
+  if (!input || !Object.prototype.hasOwnProperty.call(input, key)) return false;
+  const value = input[key];
+  if (value == null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  return String(value).trim() !== "";
+}
+
+function _normalizeHintSource(value, fallback = "inferred") {
+  const source = String(value || "").trim().toLowerCase();
+  return VALID_HINT_SOURCES.has(source) ? source : fallback;
+}
+
 export function inferIntakeHints(text = "", fallbackMode = "build") {
   const lower = String(text || "").toLowerCase();
   const hints = {};
+  const imageNoun = String.raw`(?:image|images|photo|picture|illustration|logo|banner|png|jpg|jpeg|webp|hero image|icon set|icons?)`;
+  const imageVerb = String.raw`(?:generate|create|render|draw|design|produce|make)`;
+  const imageGenerationRe = new RegExp(
+    String.raw`\b${imageVerb}\b[\s\S]{0,80}\b${imageNoun}\b|\b${imageNoun}\b[\s\S]{0,80}\b${imageVerb}\b`,
+  );
+  const reportNoun = String.raw`(?:report|summary|write[- ]?up|analysis|brief|export)`;
+  const reportVerb = String.raw`(?:write|prepare|draft|produce|create|generate|compile|export|deliver)`;
+  const reportGenerationRe = new RegExp(
+    String.raw`\b${reportVerb}\b[\s\S]{0,80}\b${reportNoun}\b|\b${reportNoun}\b[\s\S]{0,80}\b${reportVerb}\b`,
+  );
 
   if (/\b(why|what|where|how|explain|understand|investigate)\b/.test(lower)) {
     hints.intent_type = "question";
@@ -111,12 +139,12 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
     hints.deliverable_type = "code";
     hints.output_mode = "auto";
     hints.desired_outputs = ["repo"];
-  } else if (/\b(report|summary|write up|write-up|analysis)\b/.test(lower)) {
+  } else if (reportGenerationRe.test(lower)) {
     hints.intent_type = "report";
     hints.deliverable_type = /\bpdf\b/.test(lower) ? "pdf" : "markdown";
     hints.output_mode = "auto";
     hints.desired_outputs = ["artifact"];
-  } else if (/\b(image|images|logo|banner|illustration|png|jpg|hero image|icon set)\b/.test(lower)) {
+  } else if (imageGenerationRe.test(lower) || /\b(dall-?e|midjourney|stable.?diffusion|image.?gen)\b/.test(lower)) {
     hints.intent_type = "image";
     hints.deliverable_type = "image";
     hints.output_mode = "auto";
@@ -145,6 +173,28 @@ export function normalizeIntakeHints(input = {}, { requestText = "", fallbackMod
   const rawOutput = String(input.output_mode || inferred.output_mode || "").toLowerCase();
   const output = VALID_OUTPUTS.has(rawOutput) ? rawOutput : inferred.output_mode;
   const desiredOutputs = _parseDesiredOutputs(input.desired_outputs || input.output_mode, inferred.desired_outputs || []);
+  const inferredOutputMode = String(inferred.output_mode || "auto").toLowerCase();
+  const inputOutputMode = String(input.output_mode || "").trim().toLowerCase();
+  const legacyExplicitOutputMode = _hasValue(input, "output_mode")
+    && inputOutputMode
+    && inputOutputMode !== "auto"
+    && inputOutputMode !== inferredOutputMode;
+  const outputModeSource = _normalizeHintSource(
+    input.output_mode_source,
+    legacyExplicitOutputMode ? "explicit" : "inferred",
+  );
+  const deliverableTypeSource = _normalizeHintSource(
+    input.deliverable_type_source,
+    _hasValue(input, "deliverable_type") ? "explicit" : "inferred",
+  );
+  const desiredOutputsSource = _normalizeHintSource(
+    input.desired_outputs_source,
+    (_hasValue(input, "desired_outputs") || legacyExplicitOutputMode) ? "explicit" : "inferred",
+  );
+  const intentTypeSource = _normalizeHintSource(
+    input.intent_type_source,
+    _hasValue(input, "intent_type") ? "explicit" : "inferred",
+  );
   const suspectedFiles = _dedupe(
     _splitList(input.suspected_files)
       .map(_normPath)
@@ -162,9 +212,13 @@ export function normalizeIntakeHints(input = {}, { requestText = "", fallbackMod
 
   return {
     intent_type: VALID_INTENTS.has(intent) ? intent : inferred.intent_type,
+    intent_type_source: intentTypeSource,
     deliverable_type: VALID_DELIVERABLES.has(deliverable) ? deliverable : inferred.deliverable_type,
+    deliverable_type_source: deliverableTypeSource,
     output_mode: output,
+    output_mode_source: outputModeSource,
     desired_outputs: desiredOutputs,
+    desired_outputs_source: desiredOutputsSource,
     suspected_files: suspectedFiles.slice(0, 12),
     suspected_dirs: suspectedDirs.slice(0, 8),
     subtasks: subtasks.slice(0, 12),

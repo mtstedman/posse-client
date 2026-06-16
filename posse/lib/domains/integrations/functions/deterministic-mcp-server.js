@@ -45,6 +45,8 @@ import { atlasBackendLabel } from "./atlas-label.js";
 import { refresh as systemAtlasRefresh } from "../../system/functions/atlas.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { ledgerDbPath } from "../../atlas/functions/v2/runtime-paths.js";
+import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
+import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import {
   configureGate,
   isGateActive,
@@ -63,6 +65,14 @@ import {
   forwardAtlasCall,
   shutdown as shutdownAtlasProxy,
 } from "./deterministic-mcp/atlas-proxy.js";
+import {
+  DEFAULT_MCP_OAUTH_TTL_SECONDS,
+  MCP_OAUTH_AUDIENCE,
+  MCP_OAUTH_TOKEN_TYPE,
+  bootConfigFromMcpOAuthClaims,
+  buildMcpOAuthClaimsFromBootConfig,
+  verifyMcpOAuthToken,
+} from "./deterministic-mcp/oauth-token.js";
 import {
   DETERMINISTIC_IMAGE_HELPER_TOOLS,
   DETERMINISTIC_IMAGE_TOOLS,
@@ -181,34 +191,89 @@ function parseBootConfig(argv = process.argv) {
   }
 }
 
-const bootConfig = parseBootConfig();
-const workspaceCwd = String(bootConfig.cwd || "").trim() || process.cwd();
-const allowWrite = bootConfig.allowWrite === true;
-const allowImageHelpers = bootConfig.allowImageHelpers === true;
-const allowImageGeneration = bootConfig.allowImageGeneration === true;
-const roleName = String(bootConfig.role || "").trim() || null;
-const isResearcherRole = roleName === "researcher";
-const providerName = String(bootConfig.providerName || "").trim() || null;
-const runId = String(bootConfig.runId || "").trim() || null;
-const toolLogPath = String(bootConfig.toolLogPath || "").trim() || null;
-const mcpDbPath = String(bootConfig.dbPath || "").trim() || null;
-const mcpJobId = Number(bootConfig.jobId) || null;
-const mcpWorkItemId = Number(bootConfig.workItemId) || null;
-const atlasAvailable = bootConfig.atlasAvailable === true;
-const atlasGateEnabled = bootConfig.atlasGateEnabled === true;
-const atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().toLowerCase();
-const gateBootedAtMs = Date.now();
+function bootConfigFromOAuthToken(config = {}) {
+  const token = String(
+    config.mcpOAuthToken
+    || config.mcpOauthToken
+    || config.mcpAuth?.accessToken
+    || config.mcpAuth?.token
+    || "",
+  ).trim();
+  if (!token) return config;
+  try {
+    const claims = verifyMcpOAuthToken(token);
+    return {
+      ...config,
+      ...bootConfigFromMcpOAuthClaims(claims),
+      mcpOAuth: {
+        verified: true,
+        tokenId: claims.jti || null,
+        expiresAt: claims.exp || null,
+      },
+    };
+  } catch (err) {
+    scopeParseState.invalid = true;
+    return {
+      cwd: String(config.cwd || "").trim(),
+      dbPath: String(config.dbPath || "").trim(),
+      role: "",
+      providerName: "",
+      scopedFiles: [],
+      createFiles: [],
+      deleteFiles: [],
+      createRoots: [],
+      allowWrite: false,
+      allowImageHelpers: false,
+      allowImageGeneration: false,
+      disableSystemTools: true,
+      atlasAvailable: false,
+      atlasGateEnabled: false,
+      atlasPrefetchStatus: "",
+      atlas: {},
+      remoteCatalog: { enabled: false },
+      nativeAuth: config.nativeAuth,
+      mcpOAuth: {
+        verified: false,
+        errorCode: err?.code || "invalid_token",
+        error: String(err?.message || err),
+      },
+    };
+  }
+}
+
+let bootConfig = bootConfigFromOAuthToken(parseBootConfig());
+const ownerHotProcess = bootConfig.ownerHotGateway === true;
+let ownerHotGateway = ownerHotProcess || bootConfig.ownerHotGateway === true;
+let workspaceCwd = String(bootConfig.cwd || "").trim() || process.cwd();
+let allowWrite = bootConfig.allowWrite === true || ownerHotGateway;
+let allowImageHelpers = bootConfig.allowImageHelpers === true || ownerHotGateway;
+let allowImageGeneration = bootConfig.allowImageGeneration === true || ownerHotGateway;
+let roleName = String(bootConfig.role || "").trim() || null;
+let isResearcherRole = roleName === "researcher";
+let providerName = String(bootConfig.providerName || "").trim() || null;
+let runId = String(bootConfig.runId || "").trim() || null;
+let toolLogPath = String(bootConfig.toolLogPath || "").trim() || null;
+let mcpDbPath = String(bootConfig.dbPath || "").trim() || null;
+let mcpJobId = Number(bootConfig.jobId) || null;
+let mcpWorkItemId = Number(bootConfig.workItemId) || null;
+let atlasAvailable = bootConfig.atlasAvailable === true;
+let atlasGateEnabled = bootConfig.atlasGateEnabled === true;
+let atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().toLowerCase();
+let gateBootedAtMs = Date.now();
 // Fail-open deadman: if ATLAS-first gate remains locked while ATLAS calls are
 // stuck/cancelled in the host bridge, unlock native tools to avoid permanent
 // job deadlock. Keep this short so blocked runs recover promptly.
 const GATE_FAIL_OPEN_MS = 15000;
-const imageGenerationMaxCalls = Number.isInteger(Number(bootConfig.imageGenerationMaxCalls)) && Number(bootConfig.imageGenerationMaxCalls) >= 0
+let imageGenerationMaxCalls = Number.isInteger(Number(bootConfig.imageGenerationMaxCalls)) && Number(bootConfig.imageGenerationMaxCalls) >= 0
   ? Number(bootConfig.imageGenerationMaxCalls)
   : 12;
 let imageGenerationCallCount = 0;
-const remoteToolCatalogConfig = bootConfig.remoteCatalog && typeof bootConfig.remoteCatalog === "object"
+let remoteToolCatalogConfig = bootConfig.remoteCatalog && typeof bootConfig.remoteCatalog === "object"
   ? bootConfig.remoteCatalog
   : {};
+let remoteToolCatalogPreload = bootConfig.remoteToolSurface && typeof bootConfig.remoteToolSurface === "object"
+  ? bootConfig.remoteToolSurface
+  : null;
 const RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS = 12;
 const RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS = 4;
 const RESEARCH_NATIVE_EXPLORATION_TOOLS = new Set([
@@ -233,18 +298,30 @@ if (mcpDbPath) {
   setRuntimePathOverrides({ dbPath: mcpDbPath });
 }
 
+// Native-binary auth: when the parent supplied a non-secret heartbeat capability
+// (config-json boots), install it as this child's KEYLESS auth authority so
+// ATLAS/git native calls authenticate from the heartbeat envelope alone — no raw
+// POSSE_KEY in this sandboxed child (it is scrubbed from the env), and no per-call
+// PowerShell key lookup. Env-only boots carry no capability and keep the default
+// manager (which still resolves POSSE_KEY from the inherited env) untouched.
+if (!ownerHotProcess && bootConfig.nativeAuth && typeof bootConfig.nativeAuth === "object") {
+  try {
+    nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(bootConfig.nativeAuth));
+  } catch { /* best effort: leave the default manager in place */ }
+}
+
 // Tag all tool observations with the job context so the display can query by job_id
 if (mcpJobId || mcpWorkItemId) {
   enterObservationContext({ work_item_id: mcpWorkItemId, job_id: mcpJobId });
 }
 
-const scopePredicates = buildScopePredicates(workspaceCwd, {
+let scopePredicates = buildScopePredicates(workspaceCwd, {
   modifyFiles: Array.isArray(bootConfig.scopedFiles) ? bootConfig.scopedFiles : [],
   createFiles: Array.isArray(bootConfig.createFiles) ? bootConfig.createFiles : [],
   deleteFiles: Array.isArray(bootConfig.deleteFiles) ? bootConfig.deleteFiles : [],
   createRoots: Array.isArray(bootConfig.createRoots) ? bootConfig.createRoots : [],
 });
-const declaredJobScope = Object.freeze({
+let declaredJobScope = Object.freeze({
   modifyFiles: Array.isArray(bootConfig.scopedFiles) ? [...bootConfig.scopedFiles] : [],
   createFiles: Array.isArray(bootConfig.createFiles) ? [...bootConfig.createFiles] : [],
   deleteFiles: Array.isArray(bootConfig.deleteFiles) ? [...bootConfig.deleteFiles] : [],
@@ -256,8 +333,8 @@ if (scopeParseState.invalid) {
     error: "One or more scope env JSON values were malformed; forcing write-disabled scope.",
   });
 }
-const writeEnabled = allowWrite && !scopeParseState.invalid;
-const effectiveScopePredicates = scopeParseState.invalid
+let writeEnabled = allowWrite && !scopeParseState.invalid;
+let effectiveScopePredicates = scopeParseState.invalid
   ? {
     canEdit: () => false,
     canCreate: () => false,
@@ -280,7 +357,7 @@ let _lastReadMeta = null;
 // or until ATLAS is unavailable.
 // Researcher, planner, dev, and assessor are all gated; artificer/delegator
 // are exempt. Both modules live under ./deterministic-mcp/.
-const gateScopeKey = configureGate({
+let gateScopeKey = configureGate({
   role: roleName,
   atlasAvailable,
   enabled: atlasGateEnabled,
@@ -568,6 +645,7 @@ if (!remoteToolCatalogEnabled() && atlasAvailable && roleName && _atlasAllowedAc
 
 let _remoteToolCatalogPromise = null;
 let _remoteToolCatalogCache = null;
+let _remoteToolSurfaceRequest = null;
 
 function remoteToolCatalogEnabled() {
   return remoteToolCatalogConfig.enabled === true
@@ -600,6 +678,11 @@ function remoteToolCatalogCacheKey(request) {
   });
 }
 
+function preloadedRemoteToolCatalog() {
+  if (!remoteToolCatalogPreload || !Array.isArray(remoteToolCatalogPreload.tools)) return null;
+  return remoteToolCatalogPreload;
+}
+
 function remoteToolCatalogUnavailableError() {
   const err = new Error(
     `Required remote tool catalog unavailable for ${providerName || "unknown-provider"}/${roleName || "unknown-role"}; refusing to expose an empty MCP tool surface.`,
@@ -626,6 +709,17 @@ async function fetchRemoteToolCatalog() {
   if (!remoteToolCatalogEnabled()) return null;
   const request = buildRemoteToolSurfaceRequest();
   const cacheKey = remoteToolCatalogCacheKey(request);
+  const preloadedCatalog = preloadedRemoteToolCatalog();
+  if (preloadedCatalog) {
+    _remoteToolCatalogCache = { key: cacheKey, catalog: preloadedCatalog };
+    appendToolLog({
+      event: "remote_tool_surface_preloaded",
+      source: "posse-remote",
+      suiteCount: Array.isArray(preloadedCatalog?.suites) ? preloadedCatalog.suites.length : 0,
+      toolCount: Array.isArray(preloadedCatalog?.tools) ? preloadedCatalog.tools.length : 0,
+    });
+    return preloadedCatalog;
+  }
   if (_remoteToolCatalogCache?.key === cacheKey) {
     appendToolLog({
       event: "remote_tool_surface_cache_hit",
@@ -708,6 +802,11 @@ function requestedRemoteToolSuites() {
 }
 
 function buildRemoteToolSurfaceRequest() {
+  if (_remoteToolSurfaceRequest) return _remoteToolSurfaceRequest;
+  const claims = buildMcpOAuthClaimsFromBootConfig(bootConfig);
+  const capabilities = claims.capabilities && typeof claims.capabilities === "object"
+    ? claims.capabilities
+    : {};
   const atlasCapabilities = {
     available: atlasAvailable,
     backend: atlasAvailable ? "v2" : "",
@@ -715,7 +814,7 @@ function buildRemoteToolSurfaceRequest() {
   const memoryCount = getAtlasMemoryCountForRemoteCatalog();
   if (memoryCount != null) atlasCapabilities.memory_count = memoryCount;
 
-  return {
+  _remoteToolSurfaceRequest = {
     role: roleName || "",
     provider: providerName || "",
     requested_suites: requestedRemoteToolSuites(),
@@ -728,7 +827,16 @@ function buildRemoteToolSurfaceRequest() {
       },
       atlas: atlasCapabilities,
     },
+    mcp_oauth: {
+      requested: true,
+      audience: MCP_OAUTH_AUDIENCE,
+      token_type: MCP_OAUTH_TOKEN_TYPE,
+      ttl_seconds: DEFAULT_MCP_OAUTH_TTL_SECONDS,
+      subject: claims.sub || null,
+      capabilities,
+    },
   };
+  return _remoteToolSurfaceRequest;
 }
 
 function _stripToolsPrefix(name) {
@@ -758,6 +866,7 @@ function remoteAtlasRouteTools(catalog) {
 }
 
 async function resolveNativeAllowedToolNames() {
+  if (ownerHotGateway) return null;
   if (!remoteToolCatalogEnabled()) return null;
   const catalog = await fetchRemoteToolCatalog();
   if (catalog && Array.isArray(catalog.tools)) {
@@ -768,6 +877,7 @@ async function resolveNativeAllowedToolNames() {
 }
 
 async function resolveAtlasAllowedActions() {
+  if (ownerHotGateway && atlasAvailable) return new Set(ATLAS_TOOL_ACTIONS.filter(isExternallyRoutedAtlasTool));
   if (!atlasAvailable || !roleName) return _atlasAllowedActions;
   const catalog = await fetchRemoteToolCatalog();
   if (catalog && Array.isArray(catalog.tools)) return new Set(remoteAtlasRouteTools(catalog));
@@ -778,7 +888,7 @@ async function resolveAtlasAllowedActions() {
 let _atlasProxyConfigurePromise = null;
 
 async function ensureAtlasProxyReady() {
-  if (!atlasAvailable || !roleName) return false;
+  if (!atlasAvailable || (!roleName && !ownerHotGateway)) return false;
   if (!remoteToolCatalogEnabled() && _atlasAllowedActions && _atlasAllowedActions.size === 0) return false;
   if (isAtlasProxyConfigured()) return true;
   if (_atlasProxyConfigurePromise) return await _atlasProxyConfigurePromise;
@@ -1006,12 +1116,40 @@ function dedupeReadFile(args = {}) {
   return result;
 }
 
-const allowBash = ["dev", "artificer", "assessor"].includes(roleName);
-const execBash = allowBash ? createBashExecutor() : null;
+let allowBash = ownerHotGateway || ["dev", "artificer", "assessor"].includes(roleName);
+let execBash = allowBash ? createBashExecutor() : null;
 const WRITE_TOOL_NAMES = new Set(DETERMINISTIC_WRITE_TOOLS);
 const IMAGE_HELPER_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_HELPER_TOOLS);
 const IMAGE_GENERATION_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_TOOLS);
 const OCR_TOOL_NAMES = new Set(DETERMINISTIC_OCR_TOOLS);
+
+const ALL_NATIVE_TOOL_NAMES = Object.freeze([
+  "read_file",
+  "chain_read",
+  "chain_verdict",
+  "list_files",
+  "search_files",
+  "git_history",
+  "inspect_file",
+  "hash_file",
+  "write_file",
+  "edit_file",
+  "prune_artifact_output",
+  "move_file",
+  "copy_file",
+  "make_dir",
+  "bash",
+  "run_scoped_checks",
+  "create_test_suite",
+  "create_test",
+  "run_test",
+  "run_test_suite",
+  "read_image_metadata",
+  "validate_artifact_output",
+  "clean_image",
+  "extract_image_text",
+  "generate_image",
+]);
 
 function legacyToolNamesForUnscopedRole() {
   return [
@@ -1038,14 +1176,16 @@ function runtimeToolAvailable(toolName) {
   return true;
 }
 
-const DECLARED_NATIVE_TOOL_NAMES = (roleName
-  ? getDeterministicMcpToolNames(roleName, { needsImageGeneration: allowImageGeneration })
-  : legacyToolNamesForUnscopedRole()
+let DECLARED_NATIVE_TOOL_NAMES = (ownerHotGateway
+  ? [...ALL_NATIVE_TOOL_NAMES]
+  : (roleName
+    ? getDeterministicMcpToolNames(roleName, { needsImageGeneration: allowImageGeneration })
+    : legacyToolNamesForUnscopedRole())
 ).filter(runtimeToolAvailable);
-const DECLARED_NATIVE_TOOL_NAME_SET = new Set(DECLARED_NATIVE_TOOL_NAMES);
+let DECLARED_NATIVE_TOOL_NAME_SET = new Set(DECLARED_NATIVE_TOOL_NAMES);
 
 
-const TOOL_SCHEMAS = [];
+let TOOL_SCHEMAS = [];
 function addToolSchema(schema) {
   const toolName = schema?.name;
   if (DECLARED_NATIVE_TOOL_NAME_SET.has(toolName) && runtimeToolAvailable(toolName)) {
@@ -1053,8 +1193,14 @@ function addToolSchema(schema) {
   }
 }
 
-// Researcher gets chain_read + chain_verdict instead of read_file — enforces the audit ledger
-if (isResearcherRole) {
+// Researcher gets chain_read + chain_verdict instead of read_file — enforces the audit ledger.
+// Owner-hot mode keeps every tool implementation loaded; per-session shims/owner
+// gates decide which of these schemas an agent sees and may call.
+if (ownerHotGateway) {
+  addToolSchema(TOOL_READ_FILE);
+  addToolSchema(TOOL_CHAIN_READ);
+  addToolSchema(TOOL_CHAIN_VERDICT);
+} else if (isResearcherRole) {
   addToolSchema(TOOL_CHAIN_READ);
   addToolSchema(TOOL_CHAIN_VERDICT);
 } else {
@@ -1071,7 +1217,7 @@ if (writeEnabled) {
 if (allowBash) {
   addToolSchema(TOOL_BASH);
 }
-if (roleName === "dev" || roleName === "assessor") {
+if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
   addToolSchema(TOOL_RUN_SCOPED_CHECKS);
   addToolSchema(TOOL_CREATE_TEST_SUITE);
   addToolSchema(TOOL_CREATE_TEST);
@@ -1101,7 +1247,7 @@ if (allowImageGeneration) {
   addToolSchema(TOOL_GENERATE_IMAGE);
 }
 
-const TOOL_SCHEMA_MAP = new Map(TOOL_SCHEMAS.map((schema) => [schema.name, schema]));
+let TOOL_SCHEMA_MAP = new Map(TOOL_SCHEMAS.map((schema) => [schema.name, schema]));
 
 function buildGatewayNativeToolDescriptor(schema) {
   const descriptor = buildNativeToolDescriptor(schema);
@@ -1364,7 +1510,8 @@ function makeDirWithinScope(args = {}) {
 // Tracks what the researcher has read, gates the next read until a verdict is
 // emitted (relevant/irrelevant). Persists to a JSONL file so restarts resume.
 
-const researchState = {
+function createResearchState() {
+  return {
   currentlyReading: null,      // { path, content } — awaiting verdict
   relevant: new Map(),         // path → { summary, content }
   irrelevant: new Set(),       // paths tagged irrelevant
@@ -1374,9 +1521,13 @@ const researchState = {
   synthesisRequiredAt: null,
   synthesisReason: null,
   synthesisNoticeEmitted: false,
-};
+  };
+}
 
-const researchLogPath = (() => {
+let researchState = createResearchState();
+const researchStatesByKey = new Map();
+
+let researchLogPath = (() => {
   if (!isResearcherRole || !mcpJobId) return null;
   const logDir = path.join(workspaceCwd, ".posse", "research-state");
   return path.join(logDir, `job-${mcpJobId}.json`);
@@ -1708,7 +1859,7 @@ function recordResearchEvidenceObservation({
 // metadata, so the MCP runtime's handler set flows through the same registry the
 // embedded OpenAI/Grok runtime builds from. Executors and role gating are
 // unchanged; the registry is the single declaration both runtimes share.
-const mcpToolRegistry = declareToolSuites(new ToolRegistry());
+let mcpToolRegistry = declareToolSuites(new ToolRegistry());
 mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("search_files", (args) => execSearchFiles(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -1727,7 +1878,7 @@ if (writeEnabled) {
 if (allowBash && execBash) {
   mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd));
 }
-if (roleName === "dev" || roleName === "assessor") {
+if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
   mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
   const actor = { role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId };
   mcpToolRegistry.attach("create_test_suite", (args) => execCreateTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
@@ -1758,12 +1909,12 @@ if (allowImageGeneration) {
     return result;
   });
 }
-if (isResearcherRole) {
+if (ownerHotGateway || isResearcherRole) {
   mcpToolRegistry.attach("chain_read", (args) => chainRead(args || {}));
   mcpToolRegistry.attach("chain_verdict", (args) => chainVerdict(args || {}));
 }
 
-const TOOL_EXECUTORS = new Map(Object.entries(mcpToolRegistry.handlerMap()));
+let TOOL_EXECUTORS = new Map(Object.entries(mcpToolRegistry.handlerMap()));
 for (const toolName of [...TOOL_EXECUTORS.keys()]) {
   if (!TOOL_SCHEMA_MAP.has(toolName)) TOOL_EXECUTORS.delete(toolName);
 }
@@ -1777,6 +1928,265 @@ for (const schemaName of TOOL_SCHEMA_MAP.keys()) {
 }
 for (const [toolName, handler] of [...TOOL_EXECUTORS.entries()]) {
   TOOL_EXECUTORS.set(toolName, (args) => runNativeToolThroughGate(toolName, args || {}, handler));
+}
+
+let activeRuntimeSessionKey = "";
+
+function runtimeSessionKey(config = bootConfig) {
+  const job = config?.jobId != null && config.jobId !== "" ? `job:${config.jobId}` : "";
+  const workItem = config?.workItemId != null && config.workItemId !== "" ? `wi:${config.workItemId}` : "";
+  const role = String(config?.role || "").trim();
+  const cwd = String(config?.cwd || "").trim();
+  return [job, workItem, role, cwd].filter(Boolean).join("|") || "owner-hot";
+}
+
+function computeDeclaredNativeToolNamesForCurrentBoot() {
+  return (ownerHotGateway
+    ? [...ALL_NATIVE_TOOL_NAMES]
+    : (roleName
+      ? getDeterministicMcpToolNames(roleName, { needsImageGeneration: allowImageGeneration })
+      : legacyToolNamesForUnscopedRole())
+  ).filter(runtimeToolAvailable);
+}
+
+function rebuildNativeToolSchemas() {
+  DECLARED_NATIVE_TOOL_NAMES = computeDeclaredNativeToolNamesForCurrentBoot();
+  DECLARED_NATIVE_TOOL_NAME_SET = new Set(DECLARED_NATIVE_TOOL_NAMES);
+  TOOL_SCHEMAS = [];
+  if (ownerHotGateway) {
+    addToolSchema(TOOL_READ_FILE);
+    addToolSchema(TOOL_CHAIN_READ);
+    addToolSchema(TOOL_CHAIN_VERDICT);
+  } else if (isResearcherRole) {
+    addToolSchema(TOOL_CHAIN_READ);
+    addToolSchema(TOOL_CHAIN_VERDICT);
+  } else {
+    addToolSchema(TOOL_READ_FILE);
+  }
+  for (const schema of [TOOL_LIST_FILES, TOOL_SEARCH_FILES, TOOL_GIT_HISTORY, TOOL_INSPECT_FILE, TOOL_HASH_FILE]) {
+    addToolSchema(schema);
+  }
+  if (writeEnabled) {
+    for (const schema of [TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
+      addToolSchema(schema);
+    }
+  }
+  if (allowBash) addToolSchema(TOOL_BASH);
+  if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
+    addToolSchema(TOOL_RUN_SCOPED_CHECKS);
+    addToolSchema(TOOL_CREATE_TEST_SUITE);
+    addToolSchema(TOOL_CREATE_TEST);
+    addToolSchema(TOOL_RUN_TEST);
+    addToolSchema(TOOL_RUN_TEST_SUITE);
+  }
+  if (allowImageHelpers) {
+    for (const schema of [TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT]) {
+      addToolSchema(schema);
+    }
+  }
+  if (allowImageGeneration) addToolSchema(TOOL_GENERATE_IMAGE);
+  TOOL_SCHEMA_MAP = new Map(TOOL_SCHEMAS.map((schema) => [schema.name, schema]));
+}
+
+function attachToolExecutorsForCurrentBoot() {
+  mcpToolRegistry = declareToolSuites(new ToolRegistry());
+  mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
+  mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("search_files", (args) => execSearchFiles(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("git_history", (args) => execGitHistory(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("inspect_file", (args) => execInspectFile(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("hash_file", (args) => execHashFile(args || {}, workspaceCwd, effectiveScopePredicates));
+
+  if (writeEnabled) {
+    mcpToolRegistry.attach("write_file", (args) => writeFileWithinScope(args || {}));
+    mcpToolRegistry.attach("edit_file", (args) => editFileWithinScope(args || {}));
+    mcpToolRegistry.attach("prune_artifact_output", (args) => execPruneArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
+    mcpToolRegistry.attach("move_file", (args) => moveFileWithinScope(args || {}));
+    mcpToolRegistry.attach("copy_file", (args) => copyFileWithinScope(args || {}));
+    mcpToolRegistry.attach("make_dir", (args) => makeDirWithinScope(args || {}));
+  }
+  if (allowBash && execBash) {
+    mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd));
+  }
+  if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
+    mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
+    const actor = { role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId };
+    mcpToolRegistry.attach("create_test_suite", (args) => execCreateTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+    mcpToolRegistry.attach("create_test", (args) => execCreateTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+    mcpToolRegistry.attach("run_test", (args) => execRunTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+    mcpToolRegistry.attach("run_test_suite", (args) => execRunTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+  }
+  if (allowImageHelpers) {
+    mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
+    mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
+    mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
+    mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
+  }
+  if (allowImageGeneration) {
+    mcpToolRegistry.attach("generate_image", async (args) => {
+      if (imageGenerationCallCount >= imageGenerationMaxCalls) {
+        return `Error: generate_image call limit reached for this job (${imageGenerationMaxCalls}). Ask for operator guidance before generating more images.`;
+      }
+      imageGenerationCallCount += 1;
+      const result = await execGenerateImageInternal(args || {}, {
+        cwd: workspaceCwd,
+        scopePredicates: effectiveScopePredicates,
+        safePathImpl: safePath,
+      });
+      if (typeof result === "string" && result.startsWith("Error:")) {
+        imageGenerationCallCount = Math.max(0, imageGenerationCallCount - 1);
+      }
+      return result;
+    });
+  }
+  if (ownerHotGateway || isResearcherRole) {
+    mcpToolRegistry.attach("chain_read", (args) => chainRead(args || {}));
+    mcpToolRegistry.attach("chain_verdict", (args) => chainVerdict(args || {}));
+  }
+}
+
+function rebuildToolExecutors() {
+  attachToolExecutorsForCurrentBoot();
+  TOOL_EXECUTORS = new Map(Object.entries(mcpToolRegistry.handlerMap()));
+  for (const toolName of [...TOOL_EXECUTORS.keys()]) {
+    if (!TOOL_SCHEMA_MAP.has(toolName)) TOOL_EXECUTORS.delete(toolName);
+  }
+  for (const schemaName of TOOL_SCHEMA_MAP.keys()) {
+    if (mcpToolRegistry.has(schemaName) && !TOOL_EXECUTORS.has(schemaName)) {
+      throw new Error(`deterministic MCP tool "${schemaName}" is advertised but has no attached executor`);
+    }
+  }
+  for (const [toolName, handler] of [...TOOL_EXECUTORS.entries()]) {
+    TOOL_EXECUTORS.set(toolName, (args) => runNativeToolThroughGate(toolName, args || {}, handler));
+  }
+}
+
+function recomputeAtlasAllowedActionsForCurrentBoot() {
+  if (ownerHotGateway && atlasAvailable) {
+    return new Set(ATLAS_TOOL_ACTIONS.filter(isExternallyRoutedAtlasTool));
+  }
+  if (!atlasAvailable || !roleName || remoteToolCatalogRequired()) return null;
+  try {
+    const route = getAtlasRouteForRole(roleName, { config: getDeterministicAtlasConfig() });
+    if (route?.tools?.length > 0) {
+      return new Set(route.tools.map(_stripAtlasPrefix).filter(isExternallyRoutedAtlasTool));
+    }
+    return new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function selectResearchStateForCurrentBoot() {
+  researchLogPath = (() => {
+    if (!isResearcherRole || !mcpJobId) return null;
+    const logDir = path.join(workspaceCwd, ".posse", "research-state");
+    return path.join(logDir, `job-${mcpJobId}.json`);
+  })();
+  const key = runtimeSessionKey();
+  let entry = researchStatesByKey.get(key);
+  if (!entry) {
+    entry = { state: createResearchState(), loaded: false };
+    researchStatesByKey.set(key, entry);
+  }
+  researchState = entry.state;
+  if (!entry.loaded) {
+    loadResearchState();
+    entry.loaded = true;
+  }
+}
+
+function applyRuntimeBootConfig(nextConfig = {}) {
+  const parsedConfig = bootConfigFromOAuthToken(nextConfig && typeof nextConfig === "object" ? nextConfig : {});
+  const nextSessionKey = runtimeSessionKey(parsedConfig);
+  const sessionChanged = nextSessionKey !== activeRuntimeSessionKey;
+  bootConfig = parsedConfig;
+  ownerHotGateway = ownerHotProcess || bootConfig.ownerHotGateway === true;
+  scopeParseState.invalid = bootConfig?.mcpOAuth?.verified === false;
+  workspaceCwd = String(bootConfig.cwd || "").trim() || process.cwd();
+  allowWrite = bootConfig.allowWrite === true || ownerHotGateway;
+  allowImageHelpers = bootConfig.allowImageHelpers === true || ownerHotGateway;
+  allowImageGeneration = bootConfig.allowImageGeneration === true || ownerHotGateway;
+  roleName = String(bootConfig.role || "").trim() || null;
+  isResearcherRole = roleName === "researcher";
+  providerName = String(bootConfig.providerName || "").trim() || null;
+  runId = String(bootConfig.runId || "").trim() || null;
+  toolLogPath = String(bootConfig.toolLogPath || "").trim() || null;
+  mcpDbPath = String(bootConfig.dbPath || "").trim() || null;
+  mcpJobId = Number(bootConfig.jobId) || null;
+  mcpWorkItemId = Number(bootConfig.workItemId) || null;
+  atlasAvailable = bootConfig.atlasAvailable === true;
+  atlasGateEnabled = bootConfig.atlasGateEnabled === true;
+  atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().toLowerCase();
+  imageGenerationMaxCalls = Number.isInteger(Number(bootConfig.imageGenerationMaxCalls)) && Number(bootConfig.imageGenerationMaxCalls) >= 0
+    ? Number(bootConfig.imageGenerationMaxCalls)
+    : 12;
+  remoteToolCatalogConfig = bootConfig.remoteCatalog && typeof bootConfig.remoteCatalog === "object"
+    ? bootConfig.remoteCatalog
+    : {};
+  remoteToolCatalogPreload = bootConfig.remoteToolSurface && typeof bootConfig.remoteToolSurface === "object"
+    ? bootConfig.remoteToolSurface
+    : null;
+  allowBash = ownerHotGateway || ["dev", "artificer", "assessor"].includes(roleName);
+  execBash = allowBash ? createBashExecutor() : null;
+  scopePredicates = buildScopePredicates(workspaceCwd, {
+    modifyFiles: Array.isArray(bootConfig.scopedFiles) ? bootConfig.scopedFiles : [],
+    createFiles: Array.isArray(bootConfig.createFiles) ? bootConfig.createFiles : [],
+    deleteFiles: Array.isArray(bootConfig.deleteFiles) ? bootConfig.deleteFiles : [],
+    createRoots: Array.isArray(bootConfig.createRoots) ? bootConfig.createRoots : [],
+  });
+  declaredJobScope = Object.freeze({
+    modifyFiles: Array.isArray(bootConfig.scopedFiles) ? [...bootConfig.scopedFiles] : [],
+    createFiles: Array.isArray(bootConfig.createFiles) ? [...bootConfig.createFiles] : [],
+    deleteFiles: Array.isArray(bootConfig.deleteFiles) ? [...bootConfig.deleteFiles] : [],
+    createRoots: Array.isArray(bootConfig.createRoots) ? [...bootConfig.createRoots] : [],
+  });
+  writeEnabled = allowWrite && !scopeParseState.invalid;
+  effectiveScopePredicates = scopeParseState.invalid
+    ? {
+      canEdit: () => false,
+      canCreate: () => false,
+      isWithinScopeRoot: () => false,
+      hasScope: true,
+    }
+    : scopePredicates;
+  if (mcpDbPath) {
+    setRuntimePathOverrides({ dbPath: mcpDbPath });
+  }
+  if (!ownerHotProcess && bootConfig.nativeAuth && typeof bootConfig.nativeAuth === "object") {
+    try {
+      nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(bootConfig.nativeAuth));
+    } catch { /* best effort */ }
+  }
+  gateScopeKey = configureGate({
+    role: roleName,
+    atlasAvailable,
+    enabled: atlasGateEnabled,
+    atlasLabel: atlasBackendLabel(atlasAvailable ? getAtlasIntegrationConfig() : null),
+    scopeKey: mcpJobId != null ? `job:${mcpJobId}` : null,
+  });
+  if (atlasAvailable && isFallbackAtlasPrefetchStatus(atlasPrefetchStatus)) {
+    unlockForAtlasUnavailable({ reason: `prefetch_${atlasPrefetchStatus}`, scopeKey: gateScopeKey });
+  }
+  _atlasAllowedActions = recomputeAtlasAllowedActionsForCurrentBoot();
+  if (!remoteToolCatalogEnabled() && atlasAvailable && roleName && _atlasAllowedActions?.size === 0) {
+    unlockForAtlasUnavailable({ reason: "atlas_no_allowed_actions", scopeKey: gateScopeKey });
+  }
+  _atlasMemoryCountResolved = false;
+  _atlasMemoryCount = null;
+  _remoteToolSurfaceRequest = null;
+  _remoteToolCatalogPromise = null;
+  _atlasProxyConfigurePromise = null;
+  if (sessionChanged) {
+    gateBootedAtMs = Date.now();
+    imageGenerationCallCount = 0;
+    _lastReadMeta = null;
+    try { configureAtlasProxy({ transport: "" }); } catch { /* best effort */ }
+    activeRuntimeSessionKey = nextSessionKey;
+  }
+  rebuildNativeToolSchemas();
+  rebuildToolExecutors();
+  selectResearchStateForCurrentBoot();
 }
 
 const BLOCKING_NATIVE_TOOL_NAMES = new Set([
@@ -1821,6 +2231,22 @@ function jsonRpcSuccess(id, result) {
 
 function jsonRpcError(id, code, message, data = undefined) {
   return { jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } };
+}
+
+function hiddenSessionFromParams(params = {}) {
+  const session = params && typeof params === "object" ? params._posseSession : null;
+  if (!session || typeof session !== "object") return null;
+  const boot = session.bootConfig && typeof session.bootConfig === "object" ? session.bootConfig : null;
+  return boot ? { bootConfig: boot } : null;
+}
+
+function stripHiddenSessionParam(params = {}) {
+  if (!params || typeof params !== "object" || !Object.prototype.hasOwnProperty.call(params, "_posseSession")) {
+    return params;
+  }
+  const out = { ...params };
+  delete out._posseSession;
+  return out;
 }
 
 function isSuccessfulNativeToolResult(text) {
@@ -2152,6 +2578,11 @@ function sendMessage(payload) {
 }
 
 async function handleRequest(msg) {
+  const session = hiddenSessionFromParams(msg?.params);
+  if (session) {
+    applyRuntimeBootConfig(session.bootConfig);
+    msg = { ...msg, params: stripHiddenSessionParam(msg?.params) };
+  }
   const { id, method, params } = msg || {};
   if (!method) {
     if (id != null) sendMessage(jsonRpcError(id, -32600, "Invalid request: missing method"));
@@ -2538,8 +2969,13 @@ function dispatchParsed(parsed) {
   // Re-establish observation context per-message — stdin's async scope
   // predates module-level enterObservationContext, so ALS values set at
   // load time don't propagate into data events.
+  const session = hiddenSessionFromParams(parsed?.params);
+  const sessionBoot = session?.bootConfig || {};
   requestQueue = requestQueue.then(() => runWithObservationContext(
-    { work_item_id: mcpWorkItemId, job_id: mcpJobId },
+    {
+      work_item_id: Number(sessionBoot.workItemId) || mcpWorkItemId,
+      job_id: Number(sessionBoot.jobId) || mcpJobId,
+    },
     () => handleRequest(parsed),
   )).catch((err) => {
     const id = parsed && Object.prototype.hasOwnProperty.call(parsed, "id") ? parsed.id : null;
@@ -2658,7 +3094,12 @@ process.stdin.on("data", (chunk) => {
   }
 });
 
+let shuttingDown = false;
+
 async function shutdownAndExit(code = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try { await requestQueue; } catch { /* requestQueue is best-effort guarded */ }
   try { await shutdownAtlasProxy(); } catch { /* best effort */ }
   process.exit(code);
 }

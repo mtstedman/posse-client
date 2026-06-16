@@ -159,10 +159,12 @@ export {
 } from "./settings.js";
 
 export {
+  acquireLeaseWithWriteLocksAsync,
   acquireLeaseWithWriteLocks,
   ancestorJobIdsForJob,
   cleanupStaleFileLocks,
   findWriteLockConflict,
+  getJobWriteScopeAsync,
   getJobWriteScope,
   jobHasWritePermission,
   jobNeedsWriteLocks,
@@ -1496,7 +1498,7 @@ export { countJobsByStatus } from "./stats.js";
 
 export function listJobsMinimal(statusFilter = null) {
   const db = getDb();
-  const cols = "id, work_item_id, job_type, status, payload_json, priority, created_at, updated_at";
+  const cols = "id, work_item_id, job_type, status, title, payload_json, priority, created_at, updated_at";
   if (statusFilter) {
     if (Array.isArray(statusFilter)) {
       if (statusFilter.length === 0) return [];

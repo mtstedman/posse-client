@@ -1144,6 +1144,11 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             worker.emit(planJob.id, `${C.cyan}[plan-validate]${C.reset} WI#${planJob.work_item_id}: scoped artifact task "${t.title}" to ${scopedRoot}`);
           }
 
+          if (taskMode === "report" && (!Array.isArray(t.files_to_create) || t.files_to_create.length === 0)) {
+            t.files_to_create = ["report.md"];
+            worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: synthesized report deliverable file for task "${t.title}"`);
+          }
+
           const normalizedFilesToCreate = normalizeArtifactCreateFiles(t.files_to_create || [], t.output_root || defaultRoot);
           if (JSON.stringify(normalizedFilesToCreate) !== JSON.stringify(t.files_to_create || [])) {
             t.files_to_create = normalizedFilesToCreate;

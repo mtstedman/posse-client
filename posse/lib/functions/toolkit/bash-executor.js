@@ -2,7 +2,9 @@
 // argv-form, no shell injection surface) with an execSync fallback
 // for commands that genuinely need shell features (pipes,
 // redirection, &&) or fall through ENOENT on Windows where PATH
-// resolution behaves differently than on POSIX. MutationPolicy gates
+// resolution behaves differently than on POSIX. Windows fallback runs
+// through PowerShell so provider-visible shell guidance and aliases like
+// `cat`/`ls` match the runtime. MutationPolicy gates
 // every invocation against the job's allowed scope before the
 // process is spawned.
 
@@ -74,8 +76,149 @@ function isMissingExecutableOnWindows(platform, error) {
   return platform === "win32" && error?.code === "ENOENT";
 }
 
-function execBashWithShell(command, { cwd, timeout, maxBuffer, env, execSyncImpl }) {
-  return execSyncImpl(command, {
+function powershellEncodedCommand(command) {
+  return Buffer.from(String(command || ""), "utf16le").toString("base64");
+}
+
+function splitTopLevelOperator(command, operator) {
+  const text = String(command || "");
+  let quote = null;
+  for (let i = 0; i <= text.length - operator.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (text.slice(i, i + operator.length) !== operator) continue;
+    const left = text.slice(0, i).trim();
+    const right = text.slice(i + operator.length).trim();
+    if (!left || !right) return null;
+    return [left, right];
+  }
+  return null;
+}
+
+function splitTopLevelPipes(command) {
+  const text = String(command || "");
+  const parts = [];
+  let quote = null;
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch !== "|") continue;
+    if (text[i + 1] === "|") {
+      i += 1;
+      continue;
+    }
+    parts.push(text.slice(start, i).trim());
+    start = i + 1;
+  }
+  parts.push(text.slice(start).trim());
+  return parts.every(Boolean) ? parts : [text.trim()];
+}
+
+function powershellSingleQuoted(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function headCountFromTokens(tokens) {
+  if (!Array.isArray(tokens) || tokens[0] !== "head") return null;
+  if (tokens.length === 1) return 10;
+  if (tokens[1] === "-n" && /^\d+$/.test(String(tokens[2] || ""))) return Number(tokens[2]);
+  const compact = String(tokens[1] || "").match(/^-n?(\d+)$/);
+  if (compact) return Number(compact[1]);
+  return null;
+}
+
+function wcLineCountFromTokens(tokens) {
+  if (!Array.isArray(tokens) || tokens[0] !== "wc") return null;
+  return tokens.includes("-l") ? true : null;
+}
+
+function headFileFromTokens(tokens) {
+  if (!Array.isArray(tokens) || tokens[0] !== "head") return null;
+  let index = 1;
+  if (tokens[index] === "-n") {
+    index += 2;
+  } else if (/^-n?\d+$/.test(String(tokens[index] || ""))) {
+    index += 1;
+  }
+  return tokens[index] || null;
+}
+
+function numberedContentCommand(file) {
+  const literal = powershellSingleQuoted(file);
+  return `& { $i = 0; Get-Content -LiteralPath ${literal} | ForEach-Object { $i++; "{0,6}\\t{1}" -f $i, $_ } }`;
+}
+
+function normalizePipedWindowsCommand(command) {
+  const parts = splitTopLevelPipes(command);
+  if (parts.length < 2) return command;
+  const lastTokens = parseCommandLine(parts[parts.length - 1]);
+  const headCount = headCountFromTokens(lastTokens);
+  if (headCount != null) {
+    const prefix = parts.slice(0, -1).join(" | ");
+    return `${prefix} | Select-Object -First ${headCount}`;
+  }
+  if (wcLineCountFromTokens(lastTokens)) {
+    const prefix = parts.slice(0, -1).join(" | ");
+    return `(${prefix} | Measure-Object -Line).Lines`;
+  }
+  return command;
+}
+
+function normalizeStandaloneWindowsCommand(command) {
+  const tokens = parseCommandLine(command);
+  if (!tokens?.length) return command;
+  if (tokens[0] === "wc" && tokens.includes("-l")) {
+    const file = tokens.find((token, index) => index > 0 && token !== "-l");
+    if (file) return `(Get-Content -LiteralPath ${powershellSingleQuoted(file)} | Measure-Object -Line).Lines`;
+  }
+  if (tokens[0] === "head") {
+    const count = headCountFromTokens(tokens);
+    const file = headFileFromTokens(tokens);
+    if (count != null && file) {
+      return `Get-Content -LiteralPath ${powershellSingleQuoted(file)} | Select-Object -First ${count}`;
+    }
+  }
+  if ((tokens[0] === "cat" || tokens[0] === "type") && tokens[1] === "-n" && tokens[2]) {
+    return numberedContentCommand(tokens[2]);
+  }
+  return command;
+}
+
+function normalizeWindowsShellCommand(command) {
+  const text = String(command || "").trim();
+  if (!text) return text;
+  const orSplit = splitTopLevelOperator(text, "||");
+  if (orSplit) {
+    return `& { ${normalizeWindowsShellCommand(orSplit[0])}; if (-not $?) { ${normalizeWindowsShellCommand(orSplit[1])} } }`;
+  }
+  const andSplit = splitTopLevelOperator(text, "&&");
+  if (andSplit) {
+    return `& { ${normalizeWindowsShellCommand(andSplit[0])}; if ($?) { ${normalizeWindowsShellCommand(andSplit[1])} } }`;
+  }
+  return normalizeStandaloneWindowsCommand(normalizePipedWindowsCommand(text));
+}
+
+function execBashWithShell(command, { cwd, timeout, maxBuffer, env, platform = process.platform, execSyncImpl }) {
+  const shellBody = platform === "win32" ? normalizeWindowsShellCommand(command) : command;
+  const shellCommand = platform === "win32"
+    ? `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${powershellEncodedCommand(shellBody)}`
+    : shellBody;
+  return execSyncImpl(shellCommand, {
     cwd,
     env,
     encoding: "utf-8",
@@ -108,7 +251,7 @@ function execBashCommand(command, {
       });
       if (result.error) {
         if (isMissingExecutableOnWindows(platform, result.error)) {
-          return execBashWithShell(command, { cwd, timeout, maxBuffer, env, execSyncImpl });
+          return execBashWithShell(command, { cwd, timeout, maxBuffer, env, platform, execSyncImpl });
         }
         const err = result.error;
         err.stdout = result.stdout;
@@ -127,7 +270,7 @@ function execBashCommand(command, {
     }
   }
 
-  return execBashWithShell(command, { cwd, timeout, maxBuffer, env, execSyncImpl });
+  return execBashWithShell(command, { cwd, timeout, maxBuffer, env, platform, execSyncImpl });
 }
 
 export function createBashExecutor({
@@ -174,6 +317,8 @@ export {
   canUseArgvExecution,
   isMissingExecutableOnWindows,
   scrubBashSubprocessEnv,
+  powershellEncodedCommand,
+  normalizeWindowsShellCommand,
   execBashWithShell,
   execBashCommand,
 };

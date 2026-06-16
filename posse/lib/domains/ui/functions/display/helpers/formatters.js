@@ -2,6 +2,7 @@
 
 import { C } from "../../../../../shared/format/functions/colors.js";
 import { formatTokens, formatUsd } from "../../../../../shared/format/functions/units.js";
+import { scrubSecrets } from "../../../../../shared/telemetry/classes/logging/secret-scrub.js";
 export { displayColumnWidth, fit, stripAnsi } from "../../../../../shared/format/functions/ansi.js";
 import { stripAnsi } from "../../../../../shared/format/functions/ansi.js";
 
@@ -17,6 +18,7 @@ export function formatConsoleArg(arg) {
     }
   }
   if (text == null) text = "";
+  text = scrubSecrets(text);
   return text.length > 1000 ? `${text.slice(0, 1000)}...` : text;
 }
 

@@ -8,7 +8,7 @@
 // scores on incompatible scales (FTS rank vs cosine similarity). RRF
 // only uses rank position, which is uniformly comparable.
 
-import { runAtlasNativeOperation } from "../../native/invoke.js";
+import { runAtlasNativeOperation, runAtlasNativeOperationAsync } from "../../native/invoke.js";
 
 /**
  * The k constant. 60 matches atlas-mcp and the original Cormack et al.
@@ -76,4 +76,19 @@ export function rrfFuse(listsByBackend, opts) {
   // Fusion is owned by the native posse-atlas binary — the only path.
   const k = typeof opts?.k === "number" && opts.k > 0 ? opts.k : RRF_K;
   return /** @type {any} */ (runAtlasNativeOperation({ op: "rrf_fuse", lists_by_backend: listsByBackend, k }));
+}
+
+/**
+ * Async daemon-backed variant for retrieval paths that are already async
+ * (conductor reads, semantic search). Keeps those paths off per-call native
+ * process spawns.
+ *
+ * @template P
+ * @param {Record<string, RankedEntry<P>[]>} listsByBackend
+ * @param {{ k?: number }} [opts]
+ * @returns {Promise<FusedEntry<P>[]>}
+ */
+export async function rrfFuseAsync(listsByBackend, opts) {
+  const k = typeof opts?.k === "number" && opts.k > 0 ? opts.k : RRF_K;
+  return /** @type {any} */ (await runAtlasNativeOperationAsync({ op: "rrf_fuse", lists_by_backend: listsByBackend, k }));
 }

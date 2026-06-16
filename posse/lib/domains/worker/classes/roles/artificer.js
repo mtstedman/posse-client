@@ -147,14 +147,16 @@ export class ArtificerRole extends BaseRole {
     const summaries = getArtifactsByWorkItem(job.work_item_id, "summary");
     const projectContext = summaries.length > 0 ? summaries[summaries.length - 1].content_long : "";
     const attempts = getAttempts(job.id);
-    const lastError = attempts.length > 0
-      ? (job.last_error || attempts[attempts.length - 1].error_text || null)
+    const previousAttempts = attempts.filter((attempt) => attempt.status !== "running");
+    const currentAttemptNumber = previousAttempts.length + 1;
+    const lastError = previousAttempts.length > 0
+      ? (job.last_error || previousAttempts[previousAttempts.length - 1].error_text || null)
       : null;
 
     if (payload._stall_resume && outputRoot) {
       emit(worker, job.id, `${C.green}[resume]${C.reset} WI#${job.work_item_id} job #${job.id}: continuing from previous attempt`);
-    } else if (attempts.length > 0) {
-      emit(worker, job.id, `${C.yellow}[restart]${C.reset} WI#${job.work_item_id} job #${job.id}: attempt ${attempts.length + 1} - starting over`);
+    } else if (previousAttempts.length > 0) {
+      emit(worker, job.id, `${C.yellow}[restart]${C.reset} WI#${job.work_item_id} job #${job.id}: attempt ${currentAttemptNumber} - starting over`);
     } else {
       emit(worker, job.id, `${C.green}[new]${C.reset} WI#${job.work_item_id} job #${job.id}: first attempt`);
     }
@@ -164,7 +166,7 @@ export class ArtificerRole extends BaseRole {
       payload,
       role: this.getRole(),
       effectiveTier: ctx.tier,
-      attemptCount: attempts.length + 1,
+      attemptCount: currentAttemptNumber,
       maxAttempts: job.max_attempts || 3,
       lastError,
       cwd: artCwd,

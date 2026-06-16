@@ -37,6 +37,7 @@ import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { fit as fitAnsi } from "../../../shared/format/functions/ansi.js";
 import { nativeBinaries as defaultNativeBinaries } from "../../../classes/tools/BinaryManager.js";
 import { daemonSupervisor as defaultDaemonSupervisor } from "../../../classes/tools/daemon/index.js";
+import { persistentMcpOwner } from "../../../classes/tools/PersistentMcpOwner.js";
 
 export const PROVIDER_AUTH_WARMUP_TIMEOUT_MS = 30_000;
 export const PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS = 1_200;
@@ -678,7 +679,7 @@ export class RunSession {
           await new Promise((resolve) => setTimeout(resolve, Math.min(1000, Math.max(100, earliest - now))));
           continue;
         }
-        const lease = scheduler.leaseManager.acquireWithLocks(job, scheduler.ownerId, null, scheduler.leaseSec);
+        const lease = await scheduler.leaseManager.acquireWithLocksAsync(job, scheduler.ownerId, null, scheduler.leaseSec);
         if (!lease) break; // another owner holds it; don't fight at exit
         const purpose = String(parseJobPayload(job)?.purpose || "wi");
         emitCloseoutStatus(`${label}: ATLAS warm (${purpose})...`, C.cyan);
@@ -708,6 +709,18 @@ export class RunSession {
   maybeAnnounceAutoMergeSetting();
   const jobs = listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
   const needsGit = jobsNeedGitWorktree(jobs);
+  const cleanupResidualWorktreesAfterAtlas = async ({ label = "Run wrap-up" } = {}) => {
+    if (typeof startupWorktreeCleanup !== "function") return;
+    try {
+      await startupWorktreeCleanup({
+        skipDirtyTreeGuard: true,
+        onMsg: (msg) => emitCloseoutStatus(`${label}: ${msg}`, C.dim),
+      });
+    } catch (err) {
+      emitCloseoutStatus(`${label}: post-ATLAS worktree cleanup skipped (${firstLine(err?.message || err)}).`, C.yellow);
+      await flushCloseoutStatus();
+    }
+  };
 
   if (jobs.length === 0) {
     const iterateResult = await processIterativeWrapUp({
@@ -3695,6 +3708,10 @@ export class RunSession {
         await flushCloseoutStatus();
       }
     } catch { /* shutdown sweep is best-effort */ }
+    try {
+      await persistentMcpOwner.close({ force: true });
+    } catch { /* MCP owner shutdown is best-effort */ }
+    await cleanupResidualWorktreesAfterAtlas({ label: "Run wrap-up" });
   }
 
   }

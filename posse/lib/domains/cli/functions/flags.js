@@ -21,6 +21,7 @@ export function settingEnabled(value) {
 
 export function parseAutoMerge() {
   if (process.argv.includes("--auto-merge")) return { enabled: true, source: "flag" };
+  if (process.argv.includes("--no-auto-merge")) return { enabled: false, source: "flag-off" };
   try {
     if (settingEnabled(getSetting(SETTING_KEYS.AUTO_MERGE_COMPLETED))) return { enabled: true, source: "setting" };
   } catch { /* DB not ready */ }
@@ -101,7 +102,14 @@ export function inferWiMode(text) {
   if (/\b(generate|create|make|draw|design)\b.*\b(image|photo|picture|illustration|banner|icon|logo|artwork|mermaid)\b/i.test(lower)) return "image";
   if (/\b(image|photo|picture|illustration|banner|icon|logo)\b.*\b(generat|creat|mak|draw|design)/i.test(lower)) return "image";
   if (/\b(dall-?e|midjourney|stable.?diffusion|image.?gen)/i.test(lower)) return "image";
-  if (/\b(report|summary|analyz|export|csv|spreadsheet)\b/i.test(lower)) return "report";
+  const reportAction = "\\b(write|prepare|draft|produce|create|generate|compile|export|deliver|analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\\b";
+  const reportObject = "\\b(report|summary|write[- ]?up|analysis|brief|csv|spreadsheet|analy[sz](?:e|ed|es|ing))\\b";
+  if (new RegExp(`${reportAction}[\\s\\S]{0,80}${reportObject}`, "i").test(lower)) return "report";
+  if (new RegExp(`${reportObject}[\\s\\S]{0,80}${reportAction}`, "i").test(lower)) return "report";
+  const directAnalysisIntent = /\b(summary|analysis|brief)\s+of\b/i.test(lower)
+    || /\b(analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\b/i.test(lower);
+  const mutationIntent = /\b(fix|implement|change|update|modify|edit|refactor|add|remove|delete|migrate|build)\b/i.test(lower);
+  if (directAnalysisIntent && !mutationIntent) return "report";
   return null;
 }
 
@@ -216,6 +224,7 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   // Boolean flags.
   { name: "--all", takesValue: false, category: "boolean" },
   { name: "--auto-approve", takesValue: false, category: "boolean" },
+  { name: "--auto-approve-plan", takesValue: false, category: "boolean" },
   { name: "--approve-plan", takesValue: false, category: "boolean" },
   { name: "--active", takesValue: false, category: "boolean" },
   { name: "--auto-merge", takesValue: false, category: "boolean" },
@@ -233,7 +242,9 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--red-team-iterate", takesValue: false, category: "boolean" },
   { name: "--redteam-iterate", takesValue: false, category: "boolean" },
   { name: "--json", takesValue: false, category: "boolean" },
+  { name: "--non-interactive", takesValue: false, category: "boolean" },
   { name: "--no-tui", takesValue: false, category: "boolean" },
+  { name: "--no-auto-merge", takesValue: false, category: "boolean" },
   { name: "--pricing", takesValue: false, category: "boolean" },
   { name: "--force-refresh", takesValue: false, category: "boolean" },
   { name: "--recycling", takesValue: false, category: "boolean" },
@@ -466,15 +477,22 @@ export function defaultOutputModeForMode(fallbackMode = "build") {
 
 export function parseIntakeHintsFromArgv(description, fallbackMode = "build") {
   const inputSelection = parseFlagValue("--input-contexts") || parseFlagValue("--contexts");
+  const outputFlag = parseFlagValue("--output");
+  const deliverableFlag = parseFlagValue("--deliverable");
+  const intentFlag = parseFlagValue("--intent");
   const mergedDirs = mergeSuspectedDirsWithInputContexts(
     parseFlagValue("--dirs"),
     inputSelection,
     process.cwd(),
   );
   return normalizeIntakeHints({
-    intent_type: parseFlagValue("--intent"),
-    deliverable_type: parseFlagValue("--deliverable"),
-    output_mode: parseFlagValue("--output") || defaultOutputModeForMode(fallbackMode),
+    intent_type: intentFlag,
+    intent_type_source: hasArgFlag("--intent") ? "explicit" : "inferred",
+    deliverable_type: deliverableFlag,
+    deliverable_type_source: hasArgFlag("--deliverable") ? "explicit" : "inferred",
+    output_mode: outputFlag || defaultOutputModeForMode(fallbackMode),
+    output_mode_source: hasArgFlag("--output") ? "explicit" : "inferred",
+    desired_outputs_source: hasArgFlag("--output") ? "explicit" : "inferred",
     suspected_files: parseFlagValue("--files"),
     suspected_dirs: mergedDirs.merged,
     subtasks: parseFlagValue("--subtasks"),

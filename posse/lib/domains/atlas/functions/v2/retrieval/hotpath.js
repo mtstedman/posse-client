@@ -10,7 +10,7 @@ import {
   parseRetrievalAst,
   smallestNodeCoveringRange,
 } from "./ast.js";
-import { redactSecretsLines } from "./redaction.js";
+import { redactSecretsLines, redactSecretsLinesAsync } from "./redaction.js";
 
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
 /** @typedef {import("../contracts/tool-results.js").CodeHotPathData} CodeHotPathData */
@@ -77,6 +77,34 @@ const SKIP_TYPES = new Set([
  * }}
  */
 export function buildAstHotPath(args) {
+  return buildAstHotPathWithRedactor(args, redactSecretsLines);
+}
+
+/**
+ * @param {{
+ *   repoRoot?: string,
+ *   file: string,
+ *   source: string,
+ *   target?: ViewSymbol | null,
+ *   identifiers: string[],
+ *   contextLines?: number,
+ * }} args
+ * @returns {Promise<{
+ *   ok: true,
+ *   matches: CodeHotPathData["matches"],
+ *   identifiersFound: string[],
+ *   identifiersMissing: string[],
+ *   etagSeed: string,
+ * } | {
+ *   ok: false,
+ *   reason: string,
+ * }>}
+ */
+export async function buildAstHotPathAsync(args) {
+  return await buildAstHotPathWithRedactor(args, redactSecretsLinesAsync);
+}
+
+function buildAstHotPathWithRedactor(args, redactLines) {
   const parsed = parseRetrievalAst({
     repoRoot: args.repoRoot,
     file: args.file,
@@ -114,29 +142,38 @@ export function buildAstHotPath(args) {
 
   // One native redaction call for the whole source instead of one per matched
   // line plus one per context line (each sync call is a process spawn).
-  const redactedLines = rawMatches.length > 0 ? redactSecretsLines(lines) : lines;
-  for (const { line, ident } of rawMatches) {
-    matches.push({
-      repo_rel_path: args.file,
-      line,
-      text: redactedLines[line - 1] || "",
-      identifier: ident,
-      context: {
-        before: redactedLines.slice(Math.max(0, line - 1 - contextLines), line - 1),
-        after: redactedLines.slice(line, Math.min(lines.length, line + contextLines)),
-      },
-    });
-  }
+  const redactedLines = rawMatches.length > 0 ? redactLines(lines) : lines;
+  return mapMaybePromise(redactedLines, (resolvedLines) => {
+    for (const { line, ident } of rawMatches) {
+      matches.push({
+        repo_rel_path: args.file,
+        line,
+        text: resolvedLines[line - 1] || "",
+        identifier: ident,
+        context: {
+          before: resolvedLines.slice(Math.max(0, line - 1 - contextLines), line - 1),
+          after: resolvedLines.slice(line, Math.min(lines.length, line + contextLines)),
+        },
+      });
+    }
 
-  matches.sort((a, b) => a.line - b.line || a.identifier.localeCompare(b.identifier));
-  const identifiersFound = [...found].sort();
-  return {
-    ok: true,
-    matches,
-    identifiersFound,
-    identifiersMissing: args.identifiers.filter((ident) => !found.has(ident)).sort(),
-    etagSeed: `ast:${doc.lang}:${scope.startIndex}-${scope.endIndex}:${matches.length}`,
-  };
+    matches.sort((a, b) => a.line - b.line || a.identifier.localeCompare(b.identifier));
+    const identifiersFound = [...found].sort();
+    return {
+      ok: true,
+      matches,
+      identifiersFound,
+      identifiersMissing: args.identifiers.filter((ident) => !found.has(ident)).sort(),
+      etagSeed: `ast:${doc.lang}:${scope.startIndex}-${scope.endIndex}:${matches.length}`,
+    };
+  });
+}
+
+function mapMaybePromise(value, map) {
+  if (value && typeof /** @type {any} */ (value).then === "function") {
+    return /** @type {any} */ (value).then(map);
+  }
+  return map(value);
 }
 
 /**

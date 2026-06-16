@@ -7,7 +7,7 @@
 const DEFAULT_WAIT_MS = 30000;
 
 /** @typedef {{ name?: string, maxConcurrency?: number }} QueueOptions */
-/** @typedef {"read-priority" | "fifo"} GatePolicy */
+/** @typedef {"read-priority" | "fifo" | "writer-priority"} GatePolicy */
 /** @typedef {{ name?: string, policy?: GatePolicy }} ProtectedAssetGateOptions */
 /** @typedef {{ label?: string, waitMs?: number, onBeforeRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void | Promise<void>) | null, onRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void) | null, onCancel?: ((info: QueueInfo & { key?: string, error?: unknown }) => void) | null }} RunOptions */
 /** @typedef {{ waitMs: number, depthAtEnqueue: number, inFlightAtEnqueue: number, label: string, key?: string, mode?: "blocking" | "non-blocking" }} QueueInfo */
@@ -310,6 +310,11 @@ export class AsyncGateBusyError extends Error {
  *     still run concurrently; the only behavior change is that a reader
  *     arriving while a writer is queued goes to the back of the queue
  *     instead of jumping ahead.
+ *   - "writer-priority": once a writer is active or queued, later readers wait
+ *     behind all queued writers. Writers retain FIFO order relative to other
+ *     writers, and consecutive readers still run concurrently once no writer is
+ *     waiting. Use for resources whose readers may hold cached handles that a
+ *     writer must retire before mutating files.
  *
  * Pick "fifo" when bounded writer fairness matters more than read throughput.
  * Otherwise stick with the default.
@@ -325,7 +330,7 @@ export class ProtectedAssetGate {
    */
   constructor({ name = "protected asset", policy = "read-priority" } = {}) {
     this.#name = name;
-    this.#policy = policy === "fifo" ? "fifo" : "read-priority";
+    this.#policy = policy === "fifo" || policy === "writer-priority" ? policy : "read-priority";
   }
 
   /**
@@ -448,6 +453,16 @@ export class ProtectedAssetGate {
    * @param {any} task
    */
   #insertTask(state, task) {
+    if (this.#policy === "writer-priority") {
+      if (task.mode === "blocking") {
+        const firstReader = state.queue.findIndex((entry) => !entry.cancelled && entry.mode === "non-blocking");
+        if (firstReader < 0) state.queue.push(task);
+        else state.queue.splice(firstReader, 0, task);
+        return;
+      }
+      state.queue.push(task);
+      return;
+    }
     if (this.#policy === "fifo" || task.mode !== "non-blocking" || !state.activeWriter) {
       state.queue.push(task);
       return;

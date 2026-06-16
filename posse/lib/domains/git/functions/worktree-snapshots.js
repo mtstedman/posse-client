@@ -34,6 +34,7 @@ const DEFAULT_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_SNAPSHOT_MAX_FILES = 500;
 const DEFAULT_SNAPSHOT_MAX_COPY_BYTES = 100 * 1024 * 1024;
 const DEFAULT_SNAPSHOT_MAX_REFS = 500;
+const SNAPSHOT_NATIVE_DEDUP_LOOKUP_TIMEOUT_MS = 180_000;
 
 export {
   DEFAULT_SNAPSHOT_RETENTION_DAYS,
@@ -88,8 +89,24 @@ function randomToken(bytes = 4) {
   return randomBytes(bytes).toString("hex");
 }
 
+function safeFilenameNode(text) {
+  return slugify(text, { alphabet: "filename", fallback: "snapshot" });
+}
+
+function withDefaultTimeout(nativeParity = {}, timeoutMs = SNAPSHOT_NATIVE_DEDUP_LOOKUP_TIMEOUT_MS) {
+  return {
+    ...nativeParity,
+    timeoutMs: nativeParity?.timeoutMs ?? timeoutMs,
+  };
+}
+
 export function safeFilename(text, nativeParity = {}) {
-  return runGitNativeMethod("git.snapshot.safeFilename", { text: String(text || "") }, nativeParity);
+  if (nativeParity?.disabled === true) return safeFilenameNode(text);
+  try {
+    return runGitNativeMethod("git.snapshot.safeFilename", { text: String(text || "") }, nativeParity);
+  } catch {
+    return safeFilenameNode(text);
+  }
 }
 
 export function parsePositiveIntSetting(name, defaultValue) {
@@ -291,7 +308,12 @@ export async function readSnapshotNotesByObjectHashAsync(projectDir, objectHashe
 }
 
 export function listSnapshotRefs(projectDir, nativeParity = {}) {
-  return runGitNativeMethod("git.snapshot.listRefs", { projectDir: path.resolve(projectDir) }, nativeParity);
+  if (nativeParity?.disabled === true) return listSnapshotRefsNode(projectDir);
+  try {
+    return runGitNativeMethod("git.snapshot.listRefs", { projectDir: path.resolve(projectDir) }, nativeParity);
+  } catch {
+    return listSnapshotRefsNode(projectDir);
+  }
 }
 
 export async function listSnapshotRefsAsync(projectDir, options = {}) {
@@ -300,6 +322,46 @@ export async function listSnapshotRefsAsync(projectDir, options = {}) {
     { projectDir: path.resolve(projectDir) },
     nativeAsyncOptions(options),
   );
+}
+
+function listSnapshotRefsNode(projectDir) {
+  let raw = "";
+  try {
+    raw = gitExec([
+      "for-each-ref",
+      "--format=%(refname)|%(objectname)|%(creatordate:unix)",
+      SNAPSHOT_REF_PREFIX,
+    ], projectDir, { nativeParity: { disabled: true } });
+  } catch {
+    return [];
+  }
+  const refRows = String(raw || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [refName, objectHash, createdUnix] = line.split("|");
+      return { refName, objectHash, createdUnix };
+    });
+  const notesByObject = readSnapshotNotesByObjectHash(
+    projectDir,
+    refRows.map((row) => row.objectHash),
+  );
+  return refRows
+    .map(({ refName, objectHash, createdUnix }) => {
+      const note = notesByObject.get(objectHash) || null;
+      const noteCapturedMs = note?.captured_at ? Date.parse(note.captured_at) : NaN;
+      const fallbackMs = Number(createdUnix) * 1000;
+      const createdMs = Number.isFinite(noteCapturedMs) && noteCapturedMs > 0
+        ? noteCapturedMs
+        : (Number.isFinite(fallbackMs) ? fallbackMs : 0);
+      return {
+        refName,
+        objectHash,
+        createdMs: Number.isFinite(createdMs) ? createdMs : 0,
+      };
+    })
+    .sort((a, b) => a.createdMs - b.createdMs);
 }
 
 async function listSnapshotRefsNodeAsync(projectDir, options = {}) {
@@ -399,24 +461,51 @@ export async function writeSnapshotNoteAsync(projectDir, objectHash, note, optio
 }
 
 export function findExistingDedupSnapshotRef(projectDir, { wiId = null, reason = "dirty-worktree", dedupHash = null, nativeParity = {} } = {}) {
-  return runGitNativeMethod(
-    "git.snapshot.findExistingDedupRef",
-    { projectDir: path.resolve(projectDir), wiId: wiId == null ? null : String(wiId), reason, dedupHash: String(dedupHash || "") },
-    nativeParity,
-  );
+  if (nativeParity?.disabled === true) {
+    return findExistingDedupSnapshotRefNode(projectDir, { wiId, reason, dedupHash });
+  }
+  try {
+    return runGitNativeMethod(
+      "git.snapshot.findExistingDedupRef",
+      { projectDir: path.resolve(projectDir), wiId: wiId == null ? null : String(wiId), reason, dedupHash: String(dedupHash || "") },
+      withDefaultTimeout(nativeParity),
+    );
+  } catch {
+    return findExistingDedupSnapshotRefNode(projectDir, { wiId, reason, dedupHash });
+  }
 }
 
 export async function findExistingDedupSnapshotRefAsync(projectDir, { wiId = null, reason = "dirty-worktree", dedupHash = null, signal = null, nativeParity = {} } = {}) {
-  return await runGitNativeMethodAsync(
-    "git.snapshot.findExistingDedupRef",
-    {
-      projectDir: path.resolve(projectDir),
-      wiId: wiId == null ? null : String(wiId),
-      reason,
-      dedupHash: String(dedupHash || ""),
-    },
-    { ...nativeParity, signal },
-  );
+  if (nativeParity?.disabled === true) {
+    return await findExistingDedupSnapshotRefNodeAsync(projectDir, { wiId, reason, dedupHash, signal });
+  }
+  try {
+    return await runGitNativeMethodAsync(
+      "git.snapshot.findExistingDedupRef",
+      {
+        projectDir: path.resolve(projectDir),
+        wiId: wiId == null ? null : String(wiId),
+        reason,
+        dedupHash: String(dedupHash || ""),
+      },
+      { ...withDefaultTimeout(nativeParity), signal },
+    );
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    return await findExistingDedupSnapshotRefNodeAsync(projectDir, { wiId, reason, dedupHash, signal });
+  }
+}
+
+function findExistingDedupSnapshotRefNode(projectDir, { wiId = null, reason = "dirty-worktree", dedupHash = null } = {}) {
+  if (!dedupHash) return null;
+  const wiPart = wiId != null ? `wi-${wiId}` : "wi-unknown";
+  const reasonPart = safeFilenameNode(reason);
+  const refs = listSnapshotRefsNode(projectDir);
+  const candidates = refs.filter((ref) => {
+    if (!ref.refName || !ref.refName.endsWith(`-${dedupHash}`)) return false;
+    return ref.refName.includes(`/${wiPart}-${reasonPart}-`);
+  });
+  return candidates.length > 0 ? candidates[candidates.length - 1] : null;
 }
 
 async function findExistingDedupSnapshotRefNodeAsync(projectDir, { wiId = null, reason = "dirty-worktree", dedupHash = null, signal = null } = {}) {

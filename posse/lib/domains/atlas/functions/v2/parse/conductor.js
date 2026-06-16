@@ -8,12 +8,14 @@
 //
 // Lanes (CONDUCTOR-THREAD-BUNDLE-SPEC.md): the writer thread above is one lane
 // of a bundle. `retrieve` routes to a separate READER lane — its own thread
-// with request-scoped readonly WAL connections — so reads never queue behind
-// the writer's long synchronous sections (SCIP ingest transactions, view
-// merges). The reader spawns lazily on first retrieve; warm-only consumers
-// (post-commit hooks, most tests) never pay the second thread.
+// with cached readonly WAL connections behind a writer-priority gate. Indexing
+// writers ask the reader lane to drain and retire affected read handles before
+// mutating view files, then release it after the write. The reader spawns
+// lazily on first retrieve; warm-only consumers (post-commit hooks, most tests)
+// never pay the second thread.
 
-import { Daemon, ThreadTransport } from "../../../../../classes/tools/daemon/index.js";
+import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../classes/tools/daemon/index.js";
+import { heartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { log } from "../../../../../shared/telemetry/functions/logging/logger.js";
 
 const HOST_URL = new URL("./conductor-host.mjs", import.meta.url);
@@ -25,27 +27,44 @@ const RETRIEVE_TIMEOUT_MS = 60_000;
 // Reader housekeeping (invalidate/close) must never stall a warm's completion
 // behind a wedged reader — short fuse, best-effort.
 const READER_OP_TIMEOUT_MS = 5_000;
+const READER_WRITE_OP_TIMEOUT_MS = 70_000;
+let CONDUCTOR_SUPERVISOR_SEQ = 0;
+
+function registerAtlasThreadDaemon(kind, daemon, label) {
+  const key = `${kind}#${++CONDUCTOR_SUPERVISOR_SEQ}`;
+  daemonSupervisor.register(key, daemon, { label });
+  const dispose = daemon.dispose.bind(daemon);
+  daemon.dispose = async (...args) => {
+    try {
+      return await dispose(...args);
+    } finally {
+      daemonSupervisor.unregister(key);
+    }
+  };
+  return daemon;
+}
 
 /** @returns {{ stage, ingest, warm, merge, retrieve, reindex, reindexLanguage, info, readerInfo, close, daemon: Daemon }} */
 export function createConductorDaemon() {
-  const daemon = new Daemon({
-    transportFactory: () => ThreadTransport({ moduleUrl: HOST_URL }),
+  const nativeAuth = heartbeatAuthManager.getCapability();
+  const daemon = registerAtlasThreadDaemon("atlas-conductor", new Daemon({
+    transportFactory: () => ThreadTransport({ moduleUrl: HOST_URL, workerData: { nativeAuth }, nativeBridge: true }),
     timeoutMs: STAGE_TIMEOUT_MS,
     label: "atlas-conductor",
-  });
+  }), "atlas-conductor");
 
   /** @type {Daemon | null} reader lane; lazy so warm-only consumers skip it. */
   let readerDaemon = null;
   const getReaderDaemon = () => {
     if (!readerDaemon) {
-      readerDaemon = new Daemon({
-        transportFactory: () => ThreadTransport({ moduleUrl: READER_HOST_URL }),
+      readerDaemon = registerAtlasThreadDaemon("atlas-reader", new Daemon({
+        transportFactory: () => ThreadTransport({ moduleUrl: READER_HOST_URL, workerData: { nativeAuth }, nativeBridge: true }),
         timeoutMs: RETRIEVE_TIMEOUT_MS,
         label: "atlas-reader",
         onLifecycle: (event) => {
           if (event?.kind === "spawn") log.debug("atlas", "Conductor reader lane spawned");
         },
-      });
+      }), "atlas-reader");
     }
     return readerDaemon;
   };
@@ -77,18 +96,95 @@ export function createConductorDaemon() {
       await call(readerDaemon, { op: "invalidate" }, { timeoutMs: READER_OP_TIMEOUT_MS });
     } catch { /* best effort — a wedged reader recycles via its own breaker */ }
   };
-  const invalidatesReaders = (fn) => async (/** @type {any[]} */ ...args) => {
+
+  /**
+   * @param {Record<string, any>} [opts]
+   * @returns {Array<{ viewPath?: string, ledgerPath?: string }>}
+   */
+  const readerWriteTargets = (opts = {}) => {
+    const ledgerPath = opts?.ledgerPath ? String(opts.ledgerPath) : "";
+    const candidates = [
+      opts?.job?.out_view_path,
+      opts?.viewPath,
+      opts?.dbPath,
+    ];
+    const seen = new Set();
+    const targets = [];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const viewPath = String(candidate);
+      const key = `${viewPath}\0${ledgerPath}`.replace(/\\/g, "/").toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({ viewPath, ...(ledgerPath ? { ledgerPath } : {}) });
+    }
+    return targets;
+  };
+
+  /**
+   * Drain the reader lane before a writer mutates ATLAS DB files. This is a
+   * no-op until the lazy reader has actually spawned; if the reader wedges,
+   * dispose only that lane so the writer can proceed without a stale handle.
+   *
+   * @param {Record<string, any>} [opts]
+   */
+  const beginReaderWrite = async (opts = {}) => {
+    const reader = readerDaemon;
+    if (!reader?.isHostAlive()) return [];
+    const targets = readerWriteTargets(opts);
+    if (targets.length === 0) return [];
+    const held = [];
+    try {
+      for (const target of targets) {
+        await call(reader, { op: "beginWrite", ...target }, { timeoutMs: READER_WRITE_OP_TIMEOUT_MS });
+        held.push(target);
+      }
+      return held;
+    } catch {
+      for (const target of held.reverse()) {
+        try { await call(reader, { op: "endWrite", ...target }, { timeoutMs: READER_OP_TIMEOUT_MS }); } catch { /* best effort */ }
+      }
+      if (readerDaemon === reader) readerDaemon = null;
+      try { await reader.dispose(); } catch { /* best effort */ }
+      return [];
+    }
+  };
+
+  /**
+   * @param {Array<{ viewPath?: string, ledgerPath?: string }>} targets
+   */
+  const endReaderWrite = async (targets) => {
+    if (!Array.isArray(targets) || targets.length === 0) return;
+    const reader = readerDaemon;
+    if (!reader?.isHostAlive()) return;
+    let failed = false;
+    for (const target of [...targets].reverse()) {
+      try {
+        await call(reader, { op: "endWrite", ...target }, { timeoutMs: READER_OP_TIMEOUT_MS });
+      } catch {
+        failed = true;
+      }
+    }
+    if (failed) {
+      if (readerDaemon === reader) readerDaemon = null;
+      try { await reader.dispose(); } catch { /* best effort */ }
+    }
+  };
+
+  const writesWithReaderHold = (fn) => async (/** @type {any[]} */ ...args) => {
+    const heldTargets = await beginReaderWrite(/** @type {any} */ (args[0]) || {});
     try {
       return await fn(...args);
     } finally {
       await invalidateReaders();
+      await endReaderWrite(heldTargets);
     }
   };
 
   const stage = (opts, reqOpts) => call(daemon, { op: "stage", ...opts }, reqOpts);
-  const ingest = (opts, reqOpts) => call(daemon, { op: "ingest", ...opts }, reqOpts);
-  const warm = invalidatesReaders((opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts));
-  const merge = invalidatesReaders((opts, reqOpts) => call(daemon, { op: "merge", ...opts }, reqOpts));
+  const ingest = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "ingest", ...opts }, reqOpts));
+  const warm = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts));
+  const merge = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "merge", ...opts }, reqOpts));
   const retrieve = (opts, reqOpts) => call(getReaderDaemon(), { op: "retrieve", ...opts }, reqOpts);
 
   return {
@@ -102,7 +198,7 @@ export function createConductorDaemon() {
       const data = await call(daemon, { op: "info" });
       return { ...data, readerAlive: readerDaemon?.isHostAlive() ?? false };
     },
-    /** Reader-lane counters (`{ lane, retrieves, invalidations }`), null when never spawned. */
+    /** Reader-lane counters (`{ lane, retrieves, invalidations, writeBegins, writeEnds }`), null when never spawned. */
     readerInfo: () => (readerDaemon?.isHostAlive()
       ? call(readerDaemon, { op: "info" }, { timeoutMs: READER_OP_TIMEOUT_MS })
       : Promise.resolve(null)),

@@ -15,6 +15,10 @@ import {
   getPosseRemoteUrl,
 } from "../../domains/remote/functions/mode.js";
 import { resolvePosseKey } from "../../domains/remote/functions/client.js";
+import { heartbeatAuthManager } from "../../shared/native/classes/HeartbeatAuthManager.js";
+import { mintMcpOAuthTokenForBootConfig } from "../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
+import { resolveRemoteMcpToolSurfaceForBootConfig } from "../../domains/integrations/functions/deterministic-mcp/remote-tool-surface.js";
+import { persistentMcpOwner } from "./PersistentMcpOwner.js";
 import { McpServer } from "./McpServer.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -119,11 +123,44 @@ function deterministicMcpBootArg(payload = {}) {
   return Buffer.from(json, "utf8").toString("base64");
 }
 
+function stripMcpOwnerOnlyBootFields(payload = {}) {
+  const out = JSON.parse(JSON.stringify(payload || {}));
+  delete out.mcpOAuthToken;
+  delete out.mcpOauthToken;
+  if (out.mcpAuth && typeof out.mcpAuth === "object") {
+    delete out.mcpAuth.accessToken;
+    delete out.mcpAuth.token;
+  }
+  return out;
+}
+
+function sanitizeRemoteToolSurfaceForBoot(surface = null) {
+  if (!surface || typeof surface !== "object") return null;
+  const out = JSON.parse(JSON.stringify(surface));
+  delete out.mcp_oauth_token;
+  delete out.mcpOAuthToken;
+  delete out.oauth_token;
+  delete out.access_token;
+  delete out.token;
+  if (out.mcp_auth && typeof out.mcp_auth === "object") {
+    delete out.mcp_auth.access_token;
+    delete out.mcp_auth.token;
+  }
+  if (out.mcpAuth && typeof out.mcpAuth === "object") {
+    delete out.mcpAuth.accessToken;
+    delete out.mcpAuth.token;
+  }
+  return out;
+}
+
 function boolEnv(value) {
   return value ? "true" : "false";
 }
 
-function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}) {
+function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}, {
+  includeEmbeddingApiKey = true,
+  includeRemoteApiKey = true,
+} = {}) {
   const out = {
     POSSE_DETERMINISTIC_MCP_DB_PATH: String(payload.dbPath || ""),
     POSSE_DETERMINISTIC_MCP_CWD: String(payload.cwd || ""),
@@ -153,8 +190,13 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}) {
   };
   // Credential transport intentionally stays env-backed; the boot JSON payload
   // is carried in process args and must not contain provider secrets.
-  if (atlasConfig?.embeddingApiKey) out.POSSE_ATLAS_EMBEDDING_API_KEY = String(atlasConfig.embeddingApiKey);
-  if (payload.remoteCatalog?.enabled === true) {
+  if (includeEmbeddingApiKey && atlasConfig?.embeddingApiKey) out.POSSE_ATLAS_EMBEDDING_API_KEY = String(atlasConfig.embeddingApiKey);
+  // NOTE: this POSSE_KEY is the REMOTE-API credential (Bearer token for the
+  // /v1/catalog tool-surface fetch), NOT native-binary auth — native ATLAS/git
+  // now travel as the non-secret heartbeat capability in the boot payload. It is
+  // the only remaining raw-key handed to the child and is scoped to when the
+  // remote catalog is enabled; it goes away once the catalog fetch is brokered.
+  if (includeRemoteApiKey && payload.remoteCatalog?.enabled === true) {
     const posseKey = resolvePosseKey();
     if (posseKey) {
       out.POSSE_KEY = posseKey;
@@ -165,6 +207,202 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}) {
   if (payload.workItemId != null) out.POSSE_DETERMINISTIC_MCP_WORK_ITEM_ID = String(payload.workItemId);
   if (payload.atlasPrefetchStatus) out.POSSE_DETERMINISTIC_MCP_ATLAS_PREFETCH_STATUS = String(payload.atlasPrefetchStatus);
   return out;
+}
+
+function deterministicMcpShimMetadataEnv(payload = {}, atlasConfig = {}) {
+  const out = deterministicMcpCompatibilityEnv(payload, atlasConfig, {
+    includeEmbeddingApiKey: false,
+    includeRemoteApiKey: false,
+  });
+  // The stdio shim is a forwarding gate only. Keep non-secret deterministic
+  // metadata for diagnostics/back-compat, but never give the shim credentials
+  // or values that would let it perform remote/catalog/native work itself.
+  return out;
+}
+
+function deterministicMcpScriptPaths() {
+  return {
+    serverScriptPath: path.resolve(__dirname, "..", "..", "domains", "integrations", "functions", "deterministic-mcp-server.js"),
+    shimScriptPath: path.resolve(__dirname, "..", "..", "domains", "integrations", "functions", "deterministic-mcp-shim.js"),
+  };
+}
+
+function buildDeterministicMcpBootPayload(role, {
+  cwd = process.cwd(),
+  scopedFiles = [],
+  createFiles = [],
+  deleteFiles = [],
+  createRoots = [],
+  needsImageGeneration = false,
+  providerName = null,
+  disableSystemTools = false,
+  jobId = null,
+  workItemId = null,
+  atlasPrefetchStatus = null,
+  atlasAvailable = null,
+  atlasGateEnabled = true,
+  atlasConfig = null,
+} = {}) {
+  const resolvedAtlasConfig = atlasConfig || getAtlasIntegrationConfig();
+  const atlasEnabled = (typeof atlasAvailable === "boolean")
+    ? atlasAvailable
+    : resolvedAtlasConfig.enabled;
+  const allowImageGeneration = roleUsesDeterministicImageMcp(role) && !!needsImageGeneration;
+  const remoteCatalogMode = getPosseRemoteMode();
+  const remoteCatalogEnabled = remoteCatalogMode !== "off";
+  return {
+    bootPayload: {
+      cwd,
+      scopedFiles: Array.isArray(scopedFiles) ? scopedFiles : [],
+      createFiles: Array.isArray(createFiles) ? createFiles : [],
+      deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
+      createRoots: Array.isArray(createRoots) ? createRoots : [],
+      allowWrite: roleUsesDeterministicWriteMcp(role),
+      allowImageHelpers: roleUsesDeterministicImageHelpers(role),
+      allowImageGeneration,
+      role,
+      providerName: providerName || null,
+      disableSystemTools,
+      jobId,
+      workItemId,
+      atlasAvailable: atlasEnabled,
+      atlasGateEnabled,
+      atlasPrefetchStatus: atlasPrefetchStatus != null ? String(atlasPrefetchStatus) : "",
+      atlas: {
+        repoPath: resolvedAtlasConfig?.requestedRepoPath || "",
+        repoId: resolvedAtlasConfig?.requestedRepoId || "",
+        graphDbPath: resolvedAtlasConfig?.requestedGraphDbPath || "",
+        liveBuffers: resolvedAtlasConfig?.liveBuffersEnabled === false ? "off" : "deterministic-writes",
+        semanticEnabled: resolvedAtlasConfig?.semanticEnabled === true,
+        vectorBackend: resolvedAtlasConfig?.vectorBackend || "auto",
+        viewWaitMs: resolvedAtlasConfig?.viewWaitMs ?? null,
+        autoRefreshStale: resolvedAtlasConfig?.autoRefreshStale ?? null,
+        embeddingProvider: resolvedAtlasConfig?.embeddingProvider || resolvedAtlasConfig?.atlasEmbeddingProvider || "",
+        embeddingEndpoint: resolvedAtlasConfig?.embeddingEndpoint || "",
+        embeddingModel: resolvedAtlasConfig?.embeddingModel || "",
+        embeddingDim: resolvedAtlasConfig?.embeddingDim ?? null,
+        embeddingModelVersion: resolvedAtlasConfig?.embeddingModelVersion || "",
+        embeddingTimeoutMs: resolvedAtlasConfig?.embeddingTimeoutMs ?? null,
+        embeddingHeaders: resolvedAtlasConfig?.embeddingHeaders || null,
+        embeddingSendDimensions: resolvedAtlasConfig?.embeddingSendDimensions === true,
+        remoteEncoderMode: resolvedAtlasConfig?.remoteEncoderMode || "off",
+        remoteEncoderUrl: resolvedAtlasConfig?.remoteEncoderUrl || "",
+        remoteEncoderModel: resolvedAtlasConfig?.remoteEncoderModel || "",
+        remoteEncoderDim: resolvedAtlasConfig?.remoteEncoderDim ?? null,
+        remoteEncoderModelVersion: resolvedAtlasConfig?.remoteEncoderModelVersion || "",
+        remoteEncoderTimeoutMs: resolvedAtlasConfig?.remoteEncoderTimeoutMs ?? null,
+      },
+      remoteCatalog: {
+        enabled: remoteCatalogEnabled,
+        mode: remoteCatalogMode,
+        baseUrl: remoteCatalogEnabled ? getPosseRemoteUrl() : "",
+        timeoutMs: remoteCatalogEnabled ? getPosseRemoteTimeoutMs() : "",
+        requestedSuites: [
+          "tools",
+          ...(atlasEnabled ? ["atlas"] : []),
+        ],
+      },
+      dbPath: getRuntimeDbPath(),
+      // Native-binary auth as a parent-minted, NON-SECRET capability (heartbeat
+      // URL + pinned public verification key + audience — no POSSE_KEY). The
+      // sidecar reconstructs a keyless child-scoped auth manager from this and
+      // authenticates ATLAS/git native calls from the envelope alone, so the
+      // child never needs the raw key for native work.
+      nativeAuth: heartbeatAuthManager.getCapability(),
+    },
+    resolvedAtlasConfig,
+    allowImageGeneration,
+  };
+}
+
+function buildDeterministicMcpConfigFromBootPayload(role, {
+  bootPayload,
+  resolvedAtlasConfig,
+  cwd = process.cwd(),
+  allowImageGeneration = false,
+  remoteToolSurface = null,
+  remoteMcpOAuthToken = "",
+} = {}) {
+  const command = process.execPath;
+  const { serverScriptPath, shimScriptPath } = deterministicMcpScriptPaths();
+  if (remoteToolSurface && typeof remoteToolSurface === "object") {
+    bootPayload.remoteToolSurface = sanitizeRemoteToolSurfaceForBoot(remoteToolSurface);
+  }
+  bootPayload.mcpOAuthToken = remoteMcpOAuthToken || mintMcpOAuthTokenForBootConfig(bootPayload);
+  const ownerEndpoint = persistentMcpOwner.ensureStarted();
+  const ownerHotBootPayload = stripMcpOwnerOnlyBootFields({
+    ...bootPayload,
+    ownerHotGateway: true,
+    role: "",
+    providerName: "",
+    jobId: null,
+    workItemId: null,
+    scopedFiles: [],
+    createFiles: [],
+    deleteFiles: [],
+    createRoots: [],
+    allowWrite: true,
+    allowImageHelpers: true,
+    allowImageGeneration: true,
+    atlasGateEnabled: false,
+    atlasPrefetchStatus: "",
+    remoteToolSurface: null,
+    nativeAuth: null,
+  });
+  const ownerHotPosseKey = resolvePosseKey();
+  const serverEnv = {
+    ...deterministicMcpBaseEnv(process.env),
+    ...imageGenerationCredentialEnv(process.env),
+    ...deterministicMcpCompatibilityEnv(ownerHotBootPayload, resolvedAtlasConfig, {
+      includeRemoteApiKey: false,
+    }),
+    ...(ownerHotPosseKey ? { POSSE_KEY: ownerHotPosseKey } : {}),
+  };
+  persistentMcpOwner.registerSession({
+    token: bootPayload.mcpOAuthToken,
+    bootConfig: bootPayload,
+    serverSpec: {
+      command,
+      args: [serverScriptPath, "--config-json", deterministicMcpBootArg(ownerHotBootPayload)],
+      cwd,
+      env: serverEnv,
+    },
+    trustedRemoteIssued: !!remoteMcpOAuthToken,
+    prewarm: !process.env.NODE_TEST_CONTEXT,
+  });
+
+  return new McpServerConfig({
+    ready: true,
+    name: POSSE_MCP_GATEWAY_SERVER_NAME,
+    transport: "stdio",
+    command,
+    args: [
+      shimScriptPath,
+      "--owner-pipe",
+      ownerEndpoint.pipePath,
+      "--owner-token",
+      ownerEndpoint.token,
+      "--mcp-oauth-token",
+      bootPayload.mcpOAuthToken,
+    ],
+    cwd,
+    env: {
+      ...deterministicMcpBaseEnv(process.env),
+      ...deterministicMcpShimMetadataEnv(bootPayload, resolvedAtlasConfig),
+    },
+  });
+}
+
+function requiredRemoteToolSurfaceError(role, cause = null, reason = "unavailable") {
+  const err = new Error(`Required remote MCP tool surface ${reason} for ${role || "unknown-role"}; refusing local shim gate fallback.`);
+  err.code = "POSSE_REMOTE_MCP_TOOL_SURFACE_REQUIRED";
+  if (cause) err.cause = cause;
+  return err;
+}
+
+function remoteToolSurfaceRequired(bootPayload = {}) {
+  return bootPayload.remoteCatalog?.enabled === true
+    && String(bootPayload.remoteCatalog?.mode || "").trim().toLowerCase() === "required";
 }
 
 export class McpServerConfig {
@@ -224,6 +462,8 @@ export class McpServerConfig {
     atlasAvailable = null,
     atlasGateEnabled = true,
     atlasConfig = null,
+    remoteToolSurface = null,
+    remoteMcpOAuthToken = "",
   } = {}) {
     if (!roleUsesDeterministicReadMcp(role)) {
       return new McpServerConfig({
@@ -233,81 +473,60 @@ export class McpServerConfig {
       });
     }
 
-    const command = process.execPath;
-    const scriptPath = path.resolve(__dirname, "..", "..", "domains", "integrations", "functions", "deterministic-mcp-server.js");
-    const resolvedAtlasConfig = atlasConfig || getAtlasIntegrationConfig();
-    const atlasEnabled = (typeof atlasAvailable === "boolean")
-      ? atlasAvailable
-      : resolvedAtlasConfig.enabled;
-    const allowImageGeneration = roleUsesDeterministicImageMcp(role) && !!needsImageGeneration;
-    const remoteCatalogMode = getPosseRemoteMode();
-    const remoteCatalogEnabled = remoteCatalogMode !== "off";
-    const bootPayload = {
+    const { bootPayload, resolvedAtlasConfig, allowImageGeneration } = buildDeterministicMcpBootPayload(role, {
       cwd,
-      scopedFiles: Array.isArray(scopedFiles) ? scopedFiles : [],
-      createFiles: Array.isArray(createFiles) ? createFiles : [],
-      deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
-      createRoots: Array.isArray(createRoots) ? createRoots : [],
-      allowWrite: roleUsesDeterministicWriteMcp(role),
-      allowImageHelpers: roleUsesDeterministicImageHelpers(role),
-      allowImageGeneration,
-      role,
-      providerName: providerName || null,
+      scopedFiles,
+      createFiles,
+      deleteFiles,
+      createRoots,
+      needsImageGeneration,
+      providerName,
       disableSystemTools,
       jobId,
       workItemId,
-      atlasAvailable: atlasEnabled,
+      atlasPrefetchStatus,
+      atlasAvailable,
       atlasGateEnabled,
-      atlasPrefetchStatus: atlasPrefetchStatus != null ? String(atlasPrefetchStatus) : "",
-      atlas: {
-        repoPath: resolvedAtlasConfig?.requestedRepoPath || "",
-        repoId: resolvedAtlasConfig?.requestedRepoId || "",
-        graphDbPath: resolvedAtlasConfig?.requestedGraphDbPath || "",
-        liveBuffers: resolvedAtlasConfig?.liveBuffersEnabled === false ? "off" : "deterministic-writes",
-        semanticEnabled: resolvedAtlasConfig?.semanticEnabled === true,
-        vectorBackend: resolvedAtlasConfig?.vectorBackend || "auto",
-        viewWaitMs: resolvedAtlasConfig?.viewWaitMs ?? null,
-        autoRefreshStale: resolvedAtlasConfig?.autoRefreshStale ?? null,
-        embeddingProvider: resolvedAtlasConfig?.embeddingProvider || resolvedAtlasConfig?.atlasEmbeddingProvider || "",
-        embeddingEndpoint: resolvedAtlasConfig?.embeddingEndpoint || "",
-        embeddingModel: resolvedAtlasConfig?.embeddingModel || "",
-        embeddingDim: resolvedAtlasConfig?.embeddingDim ?? null,
-        embeddingModelVersion: resolvedAtlasConfig?.embeddingModelVersion || "",
-        embeddingTimeoutMs: resolvedAtlasConfig?.embeddingTimeoutMs ?? null,
-        embeddingHeaders: resolvedAtlasConfig?.embeddingHeaders || null,
-        embeddingSendDimensions: resolvedAtlasConfig?.embeddingSendDimensions === true,
-        remoteEncoderMode: resolvedAtlasConfig?.remoteEncoderMode || "off",
-        remoteEncoderUrl: resolvedAtlasConfig?.remoteEncoderUrl || "",
-        remoteEncoderModel: resolvedAtlasConfig?.remoteEncoderModel || "",
-        remoteEncoderDim: resolvedAtlasConfig?.remoteEncoderDim ?? null,
-        remoteEncoderModelVersion: resolvedAtlasConfig?.remoteEncoderModelVersion || "",
-        remoteEncoderTimeoutMs: resolvedAtlasConfig?.remoteEncoderTimeoutMs ?? null,
-      },
-      remoteCatalog: {
-        enabled: remoteCatalogEnabled,
-        mode: remoteCatalogMode,
-        baseUrl: remoteCatalogEnabled ? getPosseRemoteUrl() : "",
-        timeoutMs: remoteCatalogEnabled ? getPosseRemoteTimeoutMs() : "",
-        requestedSuites: [
-          "tools",
-          ...(atlasEnabled ? ["atlas"] : []),
-        ],
-      },
-      dbPath: getRuntimeDbPath(),
-    };
-
-    return new McpServerConfig({
-      ready: true,
-      name: POSSE_MCP_GATEWAY_SERVER_NAME,
-      transport: "stdio",
-      command,
-      args: [scriptPath, "--config-json", deterministicMcpBootArg(bootPayload)],
+      atlasConfig,
+    });
+    return buildDeterministicMcpConfigFromBootPayload(role, {
+      bootPayload,
+      resolvedAtlasConfig,
       cwd,
-      env: {
-        ...deterministicMcpBaseEnv(process.env),
-        ...(allowImageGeneration ? imageGenerationCredentialEnv(process.env) : {}),
-        ...deterministicMcpCompatibilityEnv(bootPayload, resolvedAtlasConfig),
-      },
+      allowImageGeneration,
+      remoteToolSurface,
+      remoteMcpOAuthToken,
+    });
+  }
+
+  static async forDeterministicReadAsync(role, opts = {}) {
+    if (!roleUsesDeterministicReadMcp(role)) {
+      return McpServerConfig.forDeterministicRead(role, opts);
+    }
+    const { bootPayload, resolvedAtlasConfig, allowImageGeneration } = buildDeterministicMcpBootPayload(role, opts);
+    let remoteResolution = null;
+    let remoteResolutionError = null;
+    try {
+      remoteResolution = await resolveRemoteMcpToolSurfaceForBootConfig(bootPayload, opts.remoteToolSurfaceOptions || {});
+    } catch (err) {
+      remoteResolutionError = err;
+      remoteResolution = null;
+    }
+    if (remoteToolSurfaceRequired(bootPayload)) {
+      if (!remoteResolution?.surface) {
+        throw requiredRemoteToolSurfaceError(role, remoteResolutionError);
+      }
+      if (!remoteResolution?.mcpOAuthToken) {
+        throw requiredRemoteToolSurfaceError(role, null, "did not include a remote-issued MCP OAuth token");
+      }
+    }
+    return buildDeterministicMcpConfigFromBootPayload(role, {
+      bootPayload,
+      resolvedAtlasConfig,
+      cwd: opts.cwd || process.cwd(),
+      allowImageGeneration,
+      remoteToolSurface: remoteResolution?.surface || null,
+      remoteMcpOAuthToken: remoteResolution?.mcpOAuthToken || "",
     });
   }
 }

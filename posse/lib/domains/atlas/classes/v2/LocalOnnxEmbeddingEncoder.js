@@ -74,7 +74,7 @@ export class LocalOnnxEmbeddingEncoder {
     dim,
     textShapeVersion = TEXT_SHAPE_VERSION,
     modelVersion = null,
-    batchSize = 64,
+    batchSize = 16,
     maxInputChars = 8192,
     maxInputTokens = 8192,
     dtype = "q8",
@@ -97,7 +97,7 @@ export class LocalOnnxEmbeddingEncoder {
     this.modelName = normalizedModelName;
     this.modelId = normalizedModelId;
     this.cacheDir = path.resolve(normalizedCacheDir);
-    this.batchSize = Math.max(1, Math.min(Number.isInteger(batchSize) ? batchSize : 64, 512));
+    this.batchSize = Math.max(1, Math.min(Number.isInteger(batchSize) ? batchSize : 16, 512));
     this.maxInputChars = Math.max(1, Math.min(Number.isInteger(maxInputChars) ? maxInputChars : 8192, 200_000));
     this.maxInputTokens = Math.max(1, Math.min(Number.isInteger(maxInputTokens) ? maxInputTokens : 8192, 32768));
     this.dtype = normalizedDtype;

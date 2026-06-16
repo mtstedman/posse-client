@@ -18,6 +18,7 @@ import {
   runInTransaction,
   updateJobPayload,
   updateJobStatus,
+  updateWorkItemMetadata,
 } from "../../../queue/functions/index.js";
 import { parseJobPayload, parseJsonObject } from "../../../queue/functions/payload.js";
 import { artifactsDir, isArtifactMode, wiScopeId } from "../../../artifacts/functions/index.js";
@@ -35,6 +36,9 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 const ASSESSMENT_RETRY_TIER_ORDER = ["cheap", "standard", "strong"];
 const ASSESSOR_CONFIDENCE_VALUES = new Set(["low", "medium", "high"]);
 const ASSESSOR_CONFIDENCE_RANK = Object.freeze({ none: -1, low: 0, medium: 1, high: 2 });
+const OUTPUT_CONTRACT_WI_MODES = new Set(["image", "report", "question"]);
+const OUTPUT_CONTRACT_JOB_TYPES = new Set(["dev", "fix", "promote", "artificer"]);
+const VALID_OUTPUT_SOURCES = new Set(["explicit", "inferred"]);
 
 export function normalizeAssessorConfidence(value, { fallback = "medium", allowNone = true } = {}) {
   if (value == null || value === "") return fallback;
@@ -141,14 +145,34 @@ function _isLikelyArtifactRouteMismatch(job, verdict) {
 }
 
 function _getDesiredOutputs(workItem) {
+  return _getDesiredOutputBinding(workItem).desiredOutputs;
+}
+
+function _workItemMode(workItem, metadata = null) {
+  const mode = String(metadata?.mode || workItem?.mode || "").trim().toLowerCase();
+  return mode || "build";
+}
+
+function _getDesiredOutputBinding(workItem) {
   try {
     const metadata = workItem?.metadata_json ? JSON.parse(workItem.metadata_json) : {};
     const hints = metadata?.intake_hints && typeof metadata.intake_hints === "object" ? metadata.intake_hints : {};
-    return Array.isArray(hints.desired_outputs)
+    const desiredOutputs = Array.isArray(hints.desired_outputs)
       ? hints.desired_outputs.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
       : [];
+    const rawSource = String(hints.desired_outputs_source || "").trim().toLowerCase();
+    const source = VALID_OUTPUT_SOURCES.has(rawSource)
+      ? rawSource
+      : (rawSource ? "inferred" : "legacy");
+    return {
+      desiredOutputs,
+      source,
+      metadata,
+      hints,
+      workItemMode: _workItemMode(workItem, metadata),
+    };
   } catch {
-    return [];
+    return { desiredOutputs: [], source: "inferred", metadata: {}, hints: {}, workItemMode: "build" };
   }
 }
 
@@ -177,10 +201,60 @@ function _jobSatisfiesDesiredOutput(job, output, payload = null, workItem = null
   }
 }
 
+function _planShapeIsTerminalCodeOnly(jobs = []) {
+  const outputJobs = (Array.isArray(jobs) ? jobs : [])
+    .filter((candidate) => OUTPUT_CONTRACT_JOB_TYPES.has(candidate?.job_type));
+  if (outputJobs.length === 0) return false;
+  if (outputJobs.some((candidate) => candidate.job_type === "artificer" || candidate.job_type === "promote")) return false;
+  return outputJobs.every((candidate) => {
+    const payload = parseJobPayload(candidate);
+    const taskMode = String(payload.task_mode || "code").trim().toLowerCase();
+    return (candidate.job_type === "dev" || candidate.job_type === "fix") && taskMode === "code";
+  });
+}
+
+function _correctInferredDesiredOutputsToRepo(workItem, binding, missing = []) {
+  if (!workItem?.id || !binding?.metadata || !binding?.hints) return false;
+  try {
+    const nextMetadata = {
+      ...binding.metadata,
+      intake_hints: {
+        ...binding.hints,
+        desired_outputs: ["repo"],
+        desired_outputs_source: "inferred",
+        needs_review: true,
+        review_reason: "inferred_desired_outputs_impossible_for_code_plan",
+        previous_desired_outputs: binding.desiredOutputs,
+      },
+    };
+    updateWorkItemMetadata(workItem.id, nextMetadata);
+    logEvent({
+      work_item_id: workItem.id,
+      event_type: EVENT_TYPES.WORK_ITEM_INTAKE_HINTS_CORRECTED,
+      actor_type: EVENT_ACTORS.ASSESSOR,
+      message: `Corrected inferred desired_outputs from [${binding.desiredOutputs.join(", ")}] to [repo]`,
+      event_json: JSON.stringify({
+        previous_desired_outputs: binding.desiredOutputs,
+        desired_outputs: ["repo"],
+        missing,
+        reason: "inferred_output_contract_impossible_for_terminal_code_plan",
+      }),
+    });
+    return true;
+  } catch (err) {
+    log.warn("assessor", "Failed to correct inferred desired_outputs metadata", {
+      workItemId: workItem.id,
+      error: err?.message || String(err),
+    });
+    return false;
+  }
+}
+
 function _shouldReplanForDesiredOutputs(job, verdict) {
   if (!job || verdict?.verdict !== "pass") return null;
   const workItem = getWorkItem(job.work_item_id);
-  const desiredOutputs = _getDesiredOutputs(workItem);
+  const binding = _getDesiredOutputBinding(workItem);
+  const desiredOutputs = binding.desiredOutputs;
   if (desiredOutputs.length === 0) return null;
 
   const jobs = listJobsByWorkItem(job.work_item_id);
@@ -209,11 +283,29 @@ function _shouldReplanForDesiredOutputs(job, verdict) {
   }
   const missing = desiredOutputs.filter((output) => !satisfied.has(output));
   if (missing.length === 0) return null;
+  const hardEnforced = binding.source === "explicit"
+    || binding.source === "legacy"
+    || OUTPUT_CONTRACT_WI_MODES.has(binding.workItemMode);
+  if (!hardEnforced) {
+    if (binding.source === "inferred" && missing.includes("artifact") && _planShapeIsTerminalCodeOnly(jobs)) {
+      return {
+        action: "metadata_correction_review",
+        desiredOutputs,
+        missing,
+        currentPayload,
+        source: binding.source,
+        corrected: _correctInferredDesiredOutputsToRepo(workItem, binding, missing),
+      };
+    }
+    return null;
+  }
 
   return {
+    action: "replan",
     desiredOutputs,
     missing,
     currentPayload,
+    source: binding.source,
   };
 }
 
@@ -243,7 +335,20 @@ export function prepareVerdictForDispatch(job, verdict) {
   }
 
   const outputGap = _shouldReplanForDesiredOutputs(job, prepared);
-  if (outputGap) {
+  if (outputGap?.action === "metadata_correction_review") {
+    prepared = {
+      ...prepared,
+      verdict: "needs_review",
+      _disable_internal_retry: true,
+      reasons: [
+        `Corrected inferred terminal output hint: desired_outputs [${outputGap.desiredOutputs.join(", ")}] could not be satisfied by the compiled code-only plan, so the work item was reclassified toward repo output instead of replanning for a manufactured artifact.`,
+        ...(prepared.reasons || []),
+      ],
+      human_questions: [
+        `Job #${job.id} ("${job.title}") passed, but an inferred artifact output hint did not match the code-only plan. I corrected desired_outputs to repo. Should this stand as passed, or should the work item be replanned? (pass / replan / fail / retry)`,
+      ],
+    };
+  } else if (outputGap) {
     prepared = {
       ...prepared,
       verdict: "needs_replan",

@@ -29,6 +29,8 @@ export function handle(job, verdict, ctx) {
       model_tier: "cheap",
       payload_json: JSON.stringify({
         original_job_id: job.id,
+        review_type: "blocked_recovery",
+        choices: ["retry", "skip", "replan", "pass", "fail"],
         questions: verdict.human_questions,
         context: verdict.reasons,
       }),
@@ -49,6 +51,8 @@ export function handle(job, verdict, ctx) {
     model_tier: "cheap",
     payload_json: JSON.stringify({
       original_job_id: job.id,
+      review_type: "blocked_recovery",
+      choices: ["retry", "skip", "replan", "pass", "fail"],
       questions: [
         `Job #${job.id} ("${job.title}") is blocked.`,
         `Reasons: ${verdict.reasons.join("; ")}`,

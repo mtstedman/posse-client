@@ -14,10 +14,19 @@
 // Steady state is incremental: merge is scoped by `contentHashes`. A full
 // (unscoped) merge is the cold-boot case.
 
+import { workerData } from "node:worker_threads";
 import { runDaemonThread } from "../../../../../classes/tools/daemon/thread-host.js";
+import { installNativeThreadBridge } from "../../../../../classes/tools/daemon/native-thread-bridge.js";
+import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
+import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
 import { SCIP_INDEXER_COUNT } from "../scip/indexers.js";
 import { setOnnxDaemonKeepWarm } from "../embeddings/onnx-daemon.js";
+
+if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
+  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { keyless: false }));
+}
+installNativeThreadBridge(workerData?.nativeBridgePort);
 
 // This thread's nested ONNX encoder daemon (spawned on first daemon-backed
 // encode) stays warm for the conductor's lifetime: the conductor itself is
@@ -202,7 +211,6 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // (posse-atlas via the parser adapter); dispose them before the parent
       // terminates the thread or they outlive it as orphaned processes.
       try {
-        const { nativeBinaries } = await import("../../../../../classes/tools/BinaryManager.js");
         await nativeBinaries.disposeAll();
       } catch { /* best effort */ }
       return { closed: true };

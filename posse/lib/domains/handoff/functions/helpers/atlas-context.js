@@ -1713,6 +1713,7 @@ function renderRequiredRetrievalOrderLine(packet) {
 
 function renderAtlasContextSection(packet) {
   const label = atlasBackendLabel(packet?.atlas);
+  const hasCallableTools = displayableAtlasTools(packet?.atlas?.tools, packet?.atlas).length > 0;
   if (packet.atlas?.prefetchFailed) {
     // Prefetch failed but we're in a fallback-eligible mode. Keep phase/repo
     // for debuggability but replace the "active" framing and tool guidance
@@ -1736,14 +1737,16 @@ function renderAtlasContextSection(packet) {
   }
   return [
     atlasHeading(`${label} CONTEXT`),
-    `${label} is active for this handoff; use the listed ${label} tools when they can answer the task.`,
+    hasCallableTools
+      ? `${label} is active for this handoff; use the listed ${label} tools when they can answer the task.`
+      : `${label} context prefetch is active for this handoff, but no callable ${label} tools are exposed in this provider session. Use the prefetched context as a code map and continue with deterministic file/search/edit tools for exact evidence.`,
     atlasField("Phase", packet.atlas.phase),
     atlasField("Repo target", packet.atlas.repo?.repoPath),
-    packet.atlas.tools?.length > 0 ? atlasField(`Preferred ${label} tools`, displayAtlasToolList(packet.atlas.tools, packet.atlas)) : null,
+    hasCallableTools ? atlasField(`Preferred ${label} tools`, displayAtlasToolList(packet.atlas.tools, packet.atlas)) : null,
     // Explicit priority framing keeps the loaded ATLAS backend as the default
     // discovery path while
     // preserving deterministic tools for exact worktree state and edits.
-    renderRequiredRetrievalOrderLine(packet),
+    hasCallableTools ? renderRequiredRetrievalOrderLine(packet) : null,
   ].filter(Boolean).join("\n");
 }
 

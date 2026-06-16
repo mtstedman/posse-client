@@ -18,6 +18,7 @@ import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getRuntimeResourcesDir } from "../../runtime/functions/paths.js";
+import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { getAccountSetting } from "../../settings/functions/account-settings.js";
 import { resolvePathWithin } from "../../worker/functions/helpers/scope.js";
 import {
@@ -54,6 +55,7 @@ let _protocols = null;
 let _protocolsSignature = null;
 let _protocolsStatKey = null;
 let _protocolsWarned = false;
+let _protocolsOverrideForTests = null;
 const _invalidImageProviderWarnings = new Set();
 const DEFAULT_MANIFEST_MAX_DEPTH = 64;
 const DEFAULT_MANIFEST_MAX_FILES = 10000;
@@ -77,6 +79,7 @@ function warnProtocolLoadFailure(err, { usingCache = false } = {}) {
 }
 
 export function getArtifactProtocols() {
+  if (_protocolsOverrideForTests) return _protocolsOverrideForTests;
   try {
     const stat = fs.statSync(ARTIFACT_PROTOCOLS_PATH);
     const statKey = `${stat.size}:${stat.mtimeMs}`;
@@ -110,6 +113,14 @@ export function reloadArtifactProtocols() {
   _protocolsStatKey = null;
   _protocolsWarned = false;
   _invalidImageProviderWarnings.clear();
+}
+
+export function setArtifactProtocolsForTests(protocols = null) {
+  assertTestContext("setArtifactProtocolsForTests");
+  _protocolsOverrideForTests = protocols && typeof protocols === "object"
+    ? JSON.parse(JSON.stringify(protocols))
+    : null;
+  reloadArtifactProtocols();
 }
 
 /** Get the protocol for a specific artifact type (task_mode). */
@@ -377,7 +388,7 @@ export function initArtifactRoots(projectDir = null) {
         // transiently locked files. A successful write proves the directory is
         // usable for runtime artifacts, so tolerate cleanup failures.
         const code = String(cleanupErr?.code || "");
-        if (!["EPERM", "EACCES", "EBUSY"].includes(code)) {
+        if (!["EPERM", "EACCES", "EBUSY", "ENOENT"].includes(code)) {
           throw cleanupErr;
         }
       }
@@ -406,7 +417,7 @@ export async function initArtifactRootsAsync(projectDir = null) {
         await fs.promises.unlink(testFile);
       } catch (cleanupErr) {
         const code = String(cleanupErr?.code || "");
-        if (!["EPERM", "EACCES", "EBUSY"].includes(code)) {
+        if (!["EPERM", "EACCES", "EBUSY", "ENOENT"].includes(code)) {
           throw cleanupErr;
         }
       }
@@ -668,6 +679,16 @@ export function buildManifest(dir, relBase = null, opts = {}) {
     truncated = true;
   }
 
+  function relativeManifestPath(fullPath) {
+    return path.relative(base, fullPath).replace(/\\/g, "/");
+  }
+
+  function isNestedRuntimeDir(fullPath) {
+    const relPath = relativeManifestPath(fullPath);
+    if (!relPath || relPath.startsWith("..")) return false;
+    return relPath.split("/").filter(Boolean).includes(".posse");
+  }
+
   function walk(d, depth = 0) {
     if (depth > maxDepth) {
       recordError(`max_depth ${d}: ${maxDepth}`);
@@ -687,11 +708,12 @@ export function buildManifest(dir, relBase = null, opts = {}) {
       if (entry.isSymbolicLink()) {
         recordError(`symlink ${full}: skipped`);
       } else if (entry.isDirectory()) {
+        if (isNestedRuntimeDir(full)) continue;
         walk(full, depth + 1);
       } else if (entry.isFile()) {
         try {
           const stat = fs.statSync(full);
-          const relPath = path.relative(base, full).replace(/\\/g, "/");
+          const relPath = relativeManifestPath(full);
           files.push({
             path: relPath,
             size: stat.size,

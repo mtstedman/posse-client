@@ -25,8 +25,9 @@
 //   ThreadTransport  — a Node worker thread exchanging structured-clone messages.
 
 import { spawn } from "node:child_process";
-import { Worker } from "node:worker_threads";
+import { MessageChannel, Worker } from "node:worker_threads";
 import { recordDaemonSpawn, forgetDaemonSpawn } from "./process-ledger.js";
+import { attachNativeThreadBridge } from "./native-thread-bridge.js";
 
 /**
  * @typedef {Object} Transport
@@ -185,6 +186,7 @@ export function ProcessTransport(opts) {
  *   moduleUrl: URL | string,
  *   workerData?: Record<string, unknown>,
  *   resourceLimits?: import("node:worker_threads").ResourceLimits,
+ *   nativeBridge?: boolean,
  * }} opts
  * @returns {Transport}
  */
@@ -205,9 +207,19 @@ export function ThreadTransport(opts) {
     start() {
       if (worker) return true;
       try {
+        const workerData = { ...(opts.workerData || {}) };
+        /** @type {Transferable[]} */
+        const transferList = [];
+        if (opts.nativeBridge === true) {
+          const channel = new MessageChannel();
+          attachNativeThreadBridge(channel.port1);
+          workerData.nativeBridgePort = channel.port2;
+          transferList.push(channel.port2);
+        }
         worker = new Worker(opts.moduleUrl, {
-          workerData: opts.workerData || {},
+          workerData,
           resourceLimits: opts.resourceLimits,
+          transferList,
         });
       } catch {
         worker = null;

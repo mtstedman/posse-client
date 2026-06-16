@@ -10,12 +10,12 @@
 import { parseSymbolId, locationOf } from "./cards.js";
 import { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
-import { redactSecrets, redactSecretsLines } from "./redaction.js";
+import { redactSecrets, redactSecretsAsync, redactSecretsLines, redactSecretsLinesAsync } from "./redaction.js";
 import { findOverlaySymbol, getOverlaySymbols } from "./buffer.js";
 import { sha256Hex } from "../hash.js";
 import { getEffectivePolicy } from "./policy.js";
 import { buildAstSkeleton, selectSkeletonSymbols } from "./skeleton.js";
-import { buildAstHotPath } from "./hotpath.js";
+import { buildAstHotPath, buildAstHotPathAsync } from "./hotpath.js";
 import { annotateCodeLadder, validateCodeLadder } from "./code-ladder.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
@@ -39,6 +39,23 @@ import { annotateCodeLadder, validateCodeLadder } from "./code-ladder.js";
  * }} args
  */
 export function codeGetSkeleton({ view, versionId, params, readFile, repoRoot }) {
+  return codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoRoot }, redactSecrets);
+}
+
+/**
+ * @param {{
+ *   view: View,
+ *   versionId: string,
+ *   params: CodeGetSkeletonParams,
+ *   readFile: ReadFile,
+ *   repoRoot?: string,
+ * }} args
+ */
+export async function codeGetSkeletonAsync({ view, versionId, params, readFile, repoRoot }) {
+  return await codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoRoot }, redactSecretsAsync);
+}
+
+function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoRoot }, redactText) {
   const sessionId = /** @type {any} */ (params).sessionId;
   const ladder = validateCodeLadder({
     action: "code.getSkeleton",
@@ -126,21 +143,23 @@ export function codeGetSkeleton({ view, versionId, params, readFile, repoRoot })
       if (params.ifNoneMatch && params.ifNoneMatch === etag) {
         return notModifiedEnvelope({ action: "code.getSkeleton", versionId, etag });
       }
-      /** @type {CodeSkeletonData} */
-      const data = {
-        repo_rel_path: targetPath,
-        content: redactSecrets(astSkeleton.content),
-        startLine: astSkeleton.startLine,
-        endLine: astSkeleton.endLine,
-        truncated: astSkeleton.truncated,
-        etag,
-      };
-      return annotateCodeLadder(okEnvelope({
-        action: "code.getSkeleton",
-        versionId,
-        data,
-        meta: { etag },
-      }), ladder, { action: "code.getSkeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
+      return mapMaybePromise(redactText(astSkeleton.content), (content) => {
+        /** @type {CodeSkeletonData} */
+        const data = {
+          repo_rel_path: targetPath,
+          content,
+          startLine: astSkeleton.startLine,
+          endLine: astSkeleton.endLine,
+          truncated: astSkeleton.truncated,
+          etag,
+        };
+        return annotateCodeLadder(okEnvelope({
+          action: "code.getSkeleton",
+          versionId,
+          data,
+          meta: { etag },
+        }), ladder, { action: "code.getSkeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
+      });
     }
   }
 
@@ -197,6 +216,29 @@ export function codeGetSkeleton({ view, versionId, params, readFile, repoRoot })
  * }} args
  */
 export function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) {
+  return codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRoot }, {
+    buildHotPath: buildAstHotPath,
+    redactLines: redactSecretsLines,
+  });
+}
+
+/**
+ * @param {{
+ *   view: View,
+ *   versionId: string,
+ *   params: CodeGetHotPathParams,
+ *   readFile: ReadFile,
+ *   repoRoot?: string,
+ * }} args
+ */
+export async function codeGetHotPathAsync({ view, versionId, params, readFile, repoRoot }) {
+  return await codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRoot }, {
+    buildHotPath: buildAstHotPathAsync,
+    redactLines: redactSecretsLinesAsync,
+  });
+}
+
+function codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRoot }, redaction) {
   const resolved = resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.getHotPath" });
   if (!resolved.ok) return errorEnvelope({ action: "code.getHotPath", versionId, code: resolved.code, message: resolved.message });
   const { source, targetPath, symbolId } = resolved;
@@ -210,7 +252,7 @@ export function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) 
   const lines = source.split(/\r?\n/);
   const idents = normalizeIdentifiers(params.identifiersToFind);
   const contextLines = typeof params.contextLines === "number" ? params.contextLines : 2;
-  const astHotPath = buildAstHotPath({
+  const astHotPath = redaction.buildHotPath({
     repoRoot,
     file: targetPath,
     source,
@@ -218,6 +260,25 @@ export function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) 
     identifiers: idents,
     contextLines,
   });
+  return mapMaybePromise(astHotPath, (resolvedAstHotPath) => {
+    return finishCodeHotPath({
+      versionId,
+      params,
+      source,
+      targetPath,
+      symbolId,
+      sessionId,
+      ladder,
+      lines,
+      idents,
+      contextLines,
+      astHotPath: resolvedAstHotPath,
+      redactLines: redaction.redactLines,
+    });
+  });
+}
+
+function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, sessionId, ladder, lines, idents, contextLines, astHotPath, redactLines }) {
   if (astHotPath.ok) {
     const etagSeed = symbolId || `${targetPath}:${sha256Hex(source).slice(0, 16)}`;
     const etag = `hp:${etagSeed}:${idents.join(",")}:${astHotPath.etagSeed}`;
@@ -257,39 +318,41 @@ export function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) 
   }
   // One native redaction call for the whole file instead of one per matched
   // line plus one per context line (each sync call is a process spawn).
-  const redactedLines = rawMatches.length > 0 ? redactSecretsLines(lines) : lines;
-  /** @type {CodeHotPathData["matches"]} */
-  const matches = rawMatches.map(({ li, ident }) => ({
-    repo_rel_path: targetPath,
-    line: li + 1,
-    text: redactedLines[li],
-    identifier: ident,
-    context: {
-      before: redactedLines.slice(Math.max(0, li - contextLines), li),
-      after: redactedLines.slice(li + 1, Math.min(lines.length, li + 1 + contextLines)),
-    },
-  }));
-  const missing = idents.filter((i) => !found.has(i));
-  const etagSeed = symbolId || `${targetPath}:${sha256Hex(source).slice(0, 16)}`;
-  const etag = `hp:${etagSeed}:${idents.join(",")}:${matches.length}`;
-  if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-    return notModifiedEnvelope({ action: "code.getHotPath", versionId, etag });
-  }
-  /** @type {CodeHotPathData} */
-  const data = {
-    ...(symbolId ? { symbolId } : {}),
-    repo_rel_path: targetPath,
-    matches,
-    identifiersFound: [...found].sort(),
-    identifiersMissing: missing.sort(),
-    etag,
-  };
-  return annotateCodeLadder(okEnvelope({
-    action: "code.getHotPath",
-    versionId,
-    data,
-    meta: { etag },
-  }), ladder, { action: "code.getHotPath", sessionId, symbolId: symbolId || null, file: targetPath });
+  const redactedLines = rawMatches.length > 0 ? redactLines(lines) : lines;
+  return mapMaybePromise(redactedLines, (resolvedLines) => {
+    /** @type {CodeHotPathData["matches"]} */
+    const matches = rawMatches.map(({ li, ident }) => ({
+      repo_rel_path: targetPath,
+      line: li + 1,
+      text: resolvedLines[li],
+      identifier: ident,
+      context: {
+        before: resolvedLines.slice(Math.max(0, li - contextLines), li),
+        after: resolvedLines.slice(li + 1, Math.min(lines.length, li + 1 + contextLines)),
+      },
+    }));
+    const missing = idents.filter((i) => !found.has(i));
+    const etagSeed = symbolId || `${targetPath}:${sha256Hex(source).slice(0, 16)}`;
+    const etag = `hp:${etagSeed}:${idents.join(",")}:${matches.length}`;
+    if (params.ifNoneMatch && params.ifNoneMatch === etag) {
+      return notModifiedEnvelope({ action: "code.getHotPath", versionId, etag });
+    }
+    /** @type {CodeHotPathData} */
+    const data = {
+      ...(symbolId ? { symbolId } : {}),
+      repo_rel_path: targetPath,
+      matches,
+      identifiersFound: [...found].sort(),
+      identifiersMissing: missing.sort(),
+      etag,
+    };
+    return annotateCodeLadder(okEnvelope({
+      action: "code.getHotPath",
+      versionId,
+      data,
+      meta: { etag },
+    }), ladder, { action: "code.getHotPath", sessionId, symbolId: symbolId || null, file: targetPath });
+  });
 }
 
 /**
@@ -304,6 +367,25 @@ export function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) 
  * }} args
  */
 export function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
+  return codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRoot, ledger, repoId }, redactSecrets);
+}
+
+/**
+ * @param {{
+ *   view: View,
+ *   versionId: string,
+ *   params: CodeNeedWindowParams,
+ *   readFile: ReadFile,
+ *   repoRoot?: string,
+ *   ledger?: import("../contracts/api.js").Ledger,
+ *   repoId?: string | null,
+ * }} args
+ */
+export async function codeNeedWindowAsync({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
+  return await codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRoot, ledger, repoId }, redactSecretsAsync);
+}
+
+function codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRoot, ledger, repoId }, redactText) {
   const resolved = resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.needWindow" });
   if (!resolved.ok) return errorEnvelope({ action: "code.needWindow", versionId, code: resolved.code, message: resolved.message });
   const sessionId = /** @type {any} */ (params).sessionId;
@@ -356,12 +438,21 @@ export function codeNeedWindow({ view, versionId, params, readFile, repoRoot, le
     data.estimatedTokens = Math.ceil(data.content.length / 4);
     data.truncated = true;
   }
-  data.content = redactSecrets(data.content);
-  return annotateCodeLadder(
-    okEnvelope({ action: "code.needWindow", versionId, data }),
-    ladder,
-    { action: "code.needWindow", sessionId, symbolId: resolved.symbolId || null, file: resolved.targetPath },
-  );
+  return mapMaybePromise(redactText(data.content), (content) => {
+    data.content = content;
+    return annotateCodeLadder(
+      okEnvelope({ action: "code.needWindow", versionId, data }),
+      ladder,
+      { action: "code.needWindow", sessionId, symbolId: resolved.symbolId || null, file: resolved.targetPath },
+    );
+  });
+}
+
+function mapMaybePromise(value, map) {
+  if (value && typeof /** @type {any} */ (value).then === "function") {
+    return /** @type {any} */ (value).then(map);
+  }
+  return map(value);
 }
 
 function limitWindowLines(window, maxLines) {

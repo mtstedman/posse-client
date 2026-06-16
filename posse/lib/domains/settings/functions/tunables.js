@@ -33,7 +33,7 @@ const TUNABLE_DEFAULTS = Object.freeze({
   atlas_parse_file_progress_throttle_ms: 100,
   atlas_parse_band_max_rows: 8,
   atlas_parse_onnx_background_initial: true,
-  atlas_parse_onnx_background_batch_size: 128,
+  atlas_parse_onnx_background_batch_size: 16,
   atlas_embedded_timeout_ms: 90000,
   atlas_embedded_queue_wait_ms: 90000,
   atlas_job_cache_ttl_ms: 300000,

@@ -69,6 +69,7 @@ export async function createReviewSessionDeps(bootDeps) {
   const {
     projectDir,
     NO_TUI,
+    nonInteractive,
     ask,
     cmdDashboard,
     loadDisplayModule,
@@ -92,6 +93,7 @@ export async function createReviewSessionDeps(bootDeps) {
     listWorkItems,
     isReviewableWorkItem,
     NO_TUI,
+    nonInteractive: !!nonInteractive,
     Display,
     cmdDashboard,
     C,

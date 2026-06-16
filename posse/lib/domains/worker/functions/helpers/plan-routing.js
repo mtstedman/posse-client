@@ -368,17 +368,25 @@ export function getExplicitIntakeBindings(workItem) {
     const metadata = workItem?.metadata_json ? JSON.parse(workItem.metadata_json) : {};
     const hints = metadata?.intake_hints && typeof metadata.intake_hints === "object" ? metadata.intake_hints : {};
     const outputMode = typeof hints.output_mode === "string" ? hints.output_mode.trim().toLowerCase() : null;
+    const outputModeSource = typeof hints.output_mode_source === "string" ? hints.output_mode_source.trim().toLowerCase() : null;
+    const desiredOutputsSource = typeof hints.desired_outputs_source === "string" ? hints.desired_outputs_source.trim().toLowerCase() : null;
+    const deliverableTypeSource = typeof hints.deliverable_type_source === "string" ? hints.deliverable_type_source.trim().toLowerCase() : null;
+    const hasSourceMetadata = !!(outputModeSource || desiredOutputsSource || deliverableTypeSource);
     const desiredOutputs = Array.isArray(hints.desired_outputs)
       ? hints.desired_outputs.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
       : [];
     const deliverableType = typeof hints.deliverable_type === "string" ? hints.deliverable_type.trim().toLowerCase() : null;
-    const hasExplicitOutputMode = outputMode === "repo" || outputMode === "artifact" || outputMode === "question_only";
-    const hasExplicitDeliverableType = !!deliverableType;
+    const hasExplicitOutputMode = (outputMode === "repo" || outputMode === "artifact" || outputMode === "question_only")
+      && (!hasSourceMetadata || outputModeSource === "explicit");
+    const hasExplicitDesiredOutputs = desiredOutputs.length > 0
+      && (!hasSourceMetadata || desiredOutputsSource === "explicit");
+    const hasExplicitDeliverableType = !!deliverableType
+      && (!hasSourceMetadata || deliverableTypeSource === "explicit");
     return {
       outputMode: hasExplicitOutputMode ? outputMode : null,
-      desiredOutputs,
+      desiredOutputs: hasExplicitDesiredOutputs ? desiredOutputs : [],
       deliverableType: hasExplicitDeliverableType ? deliverableType : null,
-      isBound: hasExplicitOutputMode || hasExplicitDeliverableType || desiredOutputs.length > 0,
+      isBound: hasExplicitOutputMode || hasExplicitDeliverableType || hasExplicitDesiredOutputs,
     };
   } catch {
     return { outputMode: null, desiredOutputs: [], deliverableType: null, isBound: false };

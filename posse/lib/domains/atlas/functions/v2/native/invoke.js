@@ -8,9 +8,28 @@
 // are used only as explicit parity oracles outside this boundary.
 
 import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
-import { nativeAuthFromSettings } from "../../../../remote/functions/native-auth.js";
+import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../../classes/tools/daemon/native-thread-bridge.js";
 
 export const ATLAS_NATIVE_PROTOCOL = "posse.atlas.native.v1";
+
+/**
+ * Resolve the heartbeat auth envelope for a native request. An explicit
+ * `opts.auth` always wins; otherwise the envelope comes from the manager's
+ * single auth authority (cached, resolved once per runtime). Stub managers that
+ * want auth in tests should expose nativeAuthEnvelope(); this leaf must not
+ * silently re-read settings/env.
+ *
+ * @param {NativeMethodRunOptions} opts
+ * @param {import("../../../../../classes/tools/BinaryManager.js").BinaryManager} manager
+ * @returns {Record<string, unknown> | null}
+ */
+function resolveAtlasAuthEnvelope(opts, manager) {
+  if (opts.auth && typeof opts.auth === "object") return opts.auth;
+  if (manager && typeof manager.nativeAuthEnvelope === "function") {
+    return manager.nativeAuthEnvelope();
+  }
+  return null;
+}
 
 /**
  * @typedef {Object} NativeMethodRunOptions
@@ -20,6 +39,8 @@ export const ATLAS_NATIVE_PROTOCOL = "posse.atlas.native.v1";
  * @property {boolean} [disabled]
  * @property {Record<string, unknown>} [auth]
  * @property {Record<string, unknown>} [heartbeat]
+ * @property {boolean} [bypassNativeBridge]
+ * @property {boolean} [worker]
  * @property {(value: unknown) => unknown} [normalizeNodeResult]
  * @property {(value: unknown) => unknown} [normalizeNativeResult]
  * @property {(value: unknown) => unknown} [mapNativeReturn]
@@ -75,9 +96,7 @@ export function runAtlasNativeMethod(method, payload, opts = {}) {
     throw new Error(`ATLAS native method unavailable: ${method}`);
   }
   const request = buildAtlasNativeMethodRequest(method, payload);
-  const auth = opts.auth && typeof opts.auth === "object"
-    ? opts.auth
-    : nativeAuthFromSettings();
+  const auth = resolveAtlasAuthEnvelope(opts, manager);
   if (auth && typeof auth === "object") {
     /** @type {Record<string, unknown>} */ (request).auth = auth;
   }
@@ -117,14 +136,20 @@ export function runAtlasNativeMethod(method, payload, opts = {}) {
  * @returns {Promise<unknown>}
  */
 export async function runAtlasNativeMethodAsync(method, payload, opts = {}) {
+  if (opts.bypassNativeBridge !== true && hasNativeThreadBridge()) {
+    const { bypassNativeBridge, manager, signal, ...bridgeOpts } = opts;
+    const auth = resolveAtlasAuthEnvelope(opts, manager || nativeBinaries);
+    if (auth && typeof auth === "object") {
+      /** @type {Record<string, unknown>} */ (bridgeOpts).auth = auth;
+    }
+    return nativeThreadBridgeRequest("atlas", method, payload, bridgeOpts);
+  }
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("atlas")) {
     throw new Error(`ATLAS native method unavailable: ${method}`);
   }
   const request = buildAtlasNativeMethodRequest(method, payload);
-  const auth = opts.auth && typeof opts.auth === "object"
-    ? opts.auth
-    : nativeAuthFromSettings();
+  const auth = resolveAtlasAuthEnvelope(opts, manager);
   if (auth && typeof auth === "object") {
     /** @type {Record<string, unknown>} */ (request).auth = auth;
   }
@@ -140,7 +165,7 @@ export async function runAtlasNativeMethodAsync(method, payload, opts = {}) {
       timeoutMs: opts.timeoutMs,
       key: opts.key,
       signal: opts.signal,
-      worker: true,
+      worker: opts.worker !== false,
     },
   );
   if (!res.ok) {

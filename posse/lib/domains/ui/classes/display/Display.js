@@ -934,6 +934,7 @@ export class Display {
     const plainText = stripAnsi(String(text || "")).trim();
     if (!plainText) return false;
     if (/^Job #\d+ started:/i.test(plainText)) return true;
+    if (/^\[scheduler\]\s+(?:Dispatch paused|Resuming dispatch|Dispatch resumed):\s+ATLAS indexing\b/i.test(plainText)) return true;
     if (this._isLowSignalPromoteEvent(plainText)) return true;
     const lifecycleStartKey = this._lifecycleStartEventKey(plainText);
     if (lifecycleStartKey) {

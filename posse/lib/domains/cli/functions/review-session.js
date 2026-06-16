@@ -177,6 +177,7 @@ export class ReviewSession {
       commitInScopeChangesAsyncFn,
       discardWorktreeFilesAsyncFn,
       stashTargetBranchChangesAsyncFn,
+      nonInteractive,
     } = this;
 
   const reviewAutoMerge = await withMergeLock(() => autoMergeCompletedWorkItems({ reason: "review" }));
@@ -418,6 +419,7 @@ export class ReviewSession {
       commitInScopeChangesAsyncFn,
       discardWorktreeFilesAsyncFn,
       stashTargetBranchChangesAsyncFn,
+      nonInteractive,
     } = this;
 
   cleanupRunningAgentCalls();
@@ -468,12 +470,16 @@ export class ReviewSession {
 
   const hasReviewable = listWorkItems(["complete", "running", "planned"]).some(isReviewableWorkItem);
   if (hasReviewable) {
-    const doReview = await ask(`\n  Review and approve work items now? (y/n): `);
-    if (doReview.toLowerCase() === "y") {
-      await this.cmdReview();
-      return;
+    if (nonInteractive) {
+      console.log(`  ${C.dim}Non-interactive mode: skipping review prompt. Run 'review' anytime to approve work items.${C.reset}\n`);
     } else {
-      console.log(`  ${C.dim}Run 'review' anytime to approve work items.${C.reset}\n`);
+      const doReview = await ask(`\n  Review and approve work items now? (y/n): `);
+      if (doReview.toLowerCase() === "y") {
+        await this.cmdReview();
+        return;
+      } else {
+        console.log(`  ${C.dim}Run 'review' anytime to approve work items.${C.reset}\n`);
+      }
     }
   }
 
@@ -597,6 +603,7 @@ export class ReviewSession {
       wiScopeId,
       fs,
       updateJobPayload,
+      nonInteractive,
     } = this;
 
   return listReviewableWorkItemsForApprovalFromModule(isReviewableWorkItem);
@@ -1555,6 +1562,10 @@ export class ReviewSession {
   }
 
   if (allSuggestions.length === 0) return 0;
+  if (nonInteractive) {
+    console.log(`\n  ${C.dim}Non-interactive mode: skipping ${allSuggestions.length} assessor suggestion(s). Run 'review' to handle them later.${C.reset}\n`);
+    return 0;
+  }
 
   console.log(`\n  ${C.bold}Assessor Suggestions (${allSuggestions.length}):${C.reset}\n`);
 

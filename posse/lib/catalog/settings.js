@@ -21,6 +21,7 @@ export const SETTING_KEYS = Object.freeze({
   BRIDGE_INSTANCE_ID: "bridge_instance_id",
   BRIDGE_LABEL: "bridge_label",
   BRIDGE_LOCAL_TOKEN: "bridge_local_token",
+  MCP_OAUTH_SIGNING_KEY: "mcp_oauth_signing_key",
   BRIDGE_PORT: "bridge_port",
   BRIDGE_RELAY_TOKEN: "bridge_relay_token",
   BRIDGE_RELAY_URL: "bridge_relay_url",

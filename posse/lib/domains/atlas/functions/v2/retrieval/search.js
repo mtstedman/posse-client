@@ -50,6 +50,7 @@ function warnOnceDimMismatch(encoder, index) {
 /** @typedef {import("../contracts/tool-params.js").TaskType} TaskType */
 /** @typedef {import("../contracts/tool-results.js").SymbolSearchData} SymbolSearchData */
 /** @typedef {import("./orchestrator/index.js").HybridSearchResult} HybridSearchResult */
+/** @typedef {import("./orchestrator/query-planner-types.js").QueryPlan} QueryPlan */
 
 /**
  * @param {{
@@ -64,6 +65,7 @@ function warnOnceDimMismatch(encoder, index) {
  *   feedbackHalfLifeDays?: number,
  *   repoId?: string | null,
  *   repoRoot?: string,
+ *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  * }} args
  * @returns {ReturnType<typeof okEnvelope<SymbolSearchData>> | Promise<ReturnType<typeof okEnvelope<SymbolSearchData>>>}
  */
@@ -79,6 +81,7 @@ export function symbolSearch({
   feedbackHalfLifeDays,
   repoId,
   repoRoot,
+  planner,
   onDemandEmbeddingFill = true,
 }) {
   const limit = typeof params.limit === "number" && params.limit > 0 ? params.limit : 50;
@@ -137,6 +140,7 @@ export function symbolSearch({
           feedbackHalfLifeDays,
           entities: normalizeEntities(/** @type {any} */ (params).entities),
           searchScope: normalizeSearchScope(/** @type {any} */ (params).scope),
+          planner,
         },
       });
       return buildEnvelope({
@@ -170,6 +174,7 @@ export function symbolSearch({
       feedbackHalfLifeDays,
       entities: normalizeEntities(/** @type {any} */ (params).entities),
       searchScope: normalizeSearchScope(/** @type {any} */ (params).scope),
+      planner,
     },
   });
   if (result && typeof (/** @type {any} */ (result)).then === "function") {

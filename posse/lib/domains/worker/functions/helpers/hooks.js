@@ -311,6 +311,11 @@ export const SECRET_PATTERNS = [
   { re: /AKIA[0-9A-Z]{16}/, label: "AWS access key" },
   // OpenAI-style API keys, including project-scoped sk-proj-* tokens.
   { re: /\bsk-[A-Za-z0-9_-]{20,}\b/, label: "OpenAI API key" },
+  // xAI API keys.
+  { re: /\bxai-[A-Za-z0-9_-]{20,}\b/, label: "xAI API key" },
+  // Posse remote keys. Keep the body alphanumeric to avoid redacting
+  // ordinary setting names such as posse_native_heartbeat_timeout_seconds.
+  { re: /\bposse[_-][A-Za-z0-9]{20,}\b/, label: "Posse API key" },
   // Generic API keys/tokens assigned as string literals to common variable names.
   // Requiring a quoted literal avoids false positives like:
   //   $apiKey = resolveApiKeyFromEnvironment();

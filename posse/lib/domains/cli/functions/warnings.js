@@ -1,9 +1,16 @@
+import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
+
 const WARNING_FILTER_INSTALLED = Symbol.for("posse.cli.warningFilterInstalled");
+
+function formatWarningForLog(warning) {
+  const text = String(warning?.stack || warning?.message || warning || "");
+  return scrubSecrets(text);
+}
 
 export function installCliWarningFilter({
   processLike = process,
   suppressedCodes = ["DEP0040"],
-  warn = (warning) => console.warn(warning),
+  warn = (warning) => console.warn(formatWarningForLog(warning)),
 } = {}) {
   if (processLike[WARNING_FILTER_INSTALLED]) return false;
   const suppressed = new Set(suppressedCodes.map((code) => String(code)));

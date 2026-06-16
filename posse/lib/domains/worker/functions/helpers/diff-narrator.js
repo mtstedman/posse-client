@@ -1,9 +1,11 @@
-import { execFileSync } from "child_process";
+import { execFile, execFileSync } from "child_process";
+import { promisify } from "util";
 
 const MAX_FILES = 40;
 const MAX_HUNKS_PER_FILE = 12;
 const MAX_SIGNALS_PER_FILE = 8;
 const MAX_NARRATIVE_CHARS = 12000;
+const execFileAsync = promisify(execFile);
 
 function git(cwd, args) {
   return execFileSync("git", args, {
@@ -13,6 +15,17 @@ function git(cwd, args) {
     timeout: 15000,
     maxBuffer: 1024 * 1024 * 2,
   });
+}
+
+async function gitAsync(cwd, args) {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 15000,
+    maxBuffer: 1024 * 1024 * 2,
+    windowsHide: true,
+  });
+  return String(stdout || "");
 }
 
 function normalizePath(value) {
@@ -167,6 +180,63 @@ export function buildDiffNarrative({
   }
 }
 
+export async function buildDiffNarrativeAsync({
+  cwd = process.cwd(),
+  commitHash = "",
+  paths = [],
+} = {}) {
+  const commit = String(commitHash || "").trim();
+  const scopedPaths = [...new Set((Array.isArray(paths) ? paths : []).map(normalizePath).filter(Boolean))].slice(0, MAX_FILES);
+  if (!commit || scopedPaths.length === 0) {
+    return { ok: false, reason: "commitHash and paths are required", summary: "", files: [] };
+  }
+
+  try {
+    const [numstatRaw, nameStatusRaw, statRaw, unifiedRaw] = await Promise.all([
+      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--numstat"])),
+      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--name-status"])),
+      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--stat", "--summary"])),
+      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--unified=0"])),
+    ]);
+    const numstat = parseNumstat(numstatRaw);
+    const nameStatus = parseNameStatus(nameStatusRaw);
+    const stat = statRaw.trim();
+    const unified = parseUnifiedDiff(unifiedRaw);
+    const files = nameStatus.slice(0, MAX_FILES).map((entry) => {
+      const counts = numstat.get(entry.file) || {};
+      const detail = unified.get(entry.file) || { hunks: [], addedSignals: [], removedSignals: [] };
+      return {
+        file: entry.file,
+        status: changeKind(entry.status),
+        status_code: entry.code,
+        added: counts.added ?? null,
+        deleted: counts.deleted ?? null,
+        hunks: detail.hunks,
+        added_signals: detail.addedSignals,
+        removed_signals: detail.removedSignals,
+      };
+    });
+    const totalAdded = files.reduce((sum, file) => sum + (Number.isFinite(file.added) ? file.added : 0), 0);
+    const totalDeleted = files.reduce((sum, file) => sum + (Number.isFinite(file.deleted) ? file.deleted : 0), 0);
+    return {
+      ok: true,
+      commit_hash: commit,
+      summary: `${files.length} file(s) changed, +${totalAdded}/-${totalDeleted}`,
+      files,
+      stat,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err?.message?.split("\n")[0] || String(err),
+      commit_hash: commit,
+      paths: scopedPaths,
+      summary: "",
+      files: [],
+    };
+  }
+}
+
 export function formatDiffNarrative(narrative) {
   if (!narrative?.ok) return "";
   const lines = [
@@ -199,6 +269,22 @@ export function attachDiffNarrative(assessmentContext = null, cwd = null) {
     ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
   ];
   const narrative = buildDiffNarrative({ cwd, commitHash, paths });
+  const formatted = formatDiffNarrative(narrative);
+  if (formatted) {
+    assessmentContext.scoped_diff_narrative = formatted;
+    assessmentContext.scoped_diff_narrative_json = narrative;
+  }
+  return assessmentContext;
+}
+
+export async function attachDiffNarrativeAsync(assessmentContext = null, cwd = null) {
+  if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
+  const commitHash = String(assessmentContext.commit_hash || "").trim();
+  const paths = [
+    ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
+    ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
+  ];
+  const narrative = await buildDiffNarrativeAsync({ cwd, commitHash, paths });
   const formatted = formatDiffNarrative(narrative);
   if (formatted) {
     assessmentContext.scoped_diff_narrative = formatted;

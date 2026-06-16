@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { execFileSync, execSync } from "child_process";
-import { pruneEmptyArtifactDirs } from "../../artifacts/functions/index.js";
+import { initArtifactRoots, pruneEmptyArtifactDirs } from "../../artifacts/functions/index.js";
 import { buildInventory, inventoryIsEmpty, inventorySummary } from "../../cleanup/functions/survey.js";
 import { triageInventory, buildItemIndex } from "../../cleanup/functions/triage.js";
 import { applyAction } from "../../cleanup/functions/actions.js";
@@ -9,9 +9,29 @@ import { deleteBranchPreservingTip, snapshotAndResetDirtyWorktree } from "../../
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { clearAll, getLiveSchedulerBlockMessage, listWorkItems } from "../../queue/functions/index.js";
 import { C as defaultColors, ask as defaultAsk } from "../../providers/functions/claude.js";
+import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { worktreeRoot } from "../../worker/classes/Worker.js";
 
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
+
+function clearWorktreeLockFiles(projectDir) {
+  const lockDir = path.join(getRuntimeRoot(projectDir), "worktree-locks");
+  if (!fs.existsSync(lockDir)) return 0;
+  let count = 0;
+  try {
+    const entries = fs.readdirSync(lockDir, { withFileTypes: true });
+    count = entries.length;
+  } catch {
+    count = 0;
+  }
+  try {
+    fs.rmSync(lockDir, { recursive: true, force: true });
+  } catch {
+    // Best effort: a failed removal should not leave the DB half-cleared.
+  }
+  return count;
+}
+
 function requireFn(name, value) {
   if (typeof value !== "function") {
     throw new Error(`maintenance commands require ${name}`);
@@ -98,9 +118,12 @@ export function createMaintenanceCommands({
     }
 
     clearAll();
+    const prunedLocks = clearWorktreeLockFiles(projectDir);
     const pruned = pruneEmptyArtifactDirs(projectDir);
+    initArtifactRoots(projectDir);
     const pruneMsg = pruned > 0 ? `; ${pruned} empty dir(s) pruned` : "";
-    console.log(`\n  ${C.green}Session cleared.${C.reset} ${C.dim}(artifact files, event log, and agent call history preserved; git branches cleaned${pruneMsg})${C.reset}\n`);
+    const lockMsg = prunedLocks > 0 ? `; ${prunedLocks} stale lock file(s) removed` : "";
+    console.log(`\n  ${C.green}Session cleared.${C.reset} ${C.dim}(artifact files, event log, and agent call history preserved; git branches cleaned${pruneMsg}${lockMsg})${C.reset}\n`);
   }
 
   async function prune(argv = process.argv) {

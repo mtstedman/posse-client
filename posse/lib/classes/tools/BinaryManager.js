@@ -16,6 +16,7 @@
 
 import { BINARY_NAMES, VALID_BINARY_NAMES } from "../../catalog/binary.js";
 import { getNativeBinaryEnabled } from "../../domains/settings/functions/tunables.js";
+import { heartbeatAuthManager } from "../../shared/native/classes/HeartbeatAuthManager.js";
 import { NativeBinary } from "./NativeBinary.js";
 
 /**
@@ -43,14 +44,60 @@ export class BinaryManager {
    *   spawnSyncImpl?: import("node:child_process").spawnSync,
    *   env?: NodeJS.ProcessEnv,
    *   enabledResolver?: (name: string) => boolean,
+   *   nativeAuthManager?: import("../../shared/native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
    * }} [opts]
    */
   constructor(opts = {}) {
     this._opts = opts;
     this._env = opts.env || process.env;
     this._enabledResolver = opts.enabledResolver || getNativeBinaryEnabled;
+    // The single native-auth authority for every handle this manager owns.
+    // Lazily falls back to the shared singleton (see the nativeAuthManager
+    // getter): referencing it here would hit a temporal-dead-zone error during
+    // the BinaryManager <-> HeartbeatAuthManager <-> remote-client import cycle
+    // at module load. The MCP sidecar swaps in a keyless, capability-seeded
+    // manager via setNativeAuthManager().
+    this._nativeAuthManager = opts.nativeAuthManager || null;
     /** @type {Map<string, NativeBinary>} */
     this._handles = new Map();
+  }
+
+  /**
+   * The native-auth authority backing every handle. Leaf invoke boundaries read
+   * the heartbeat envelope from here so auth is resolved once per runtime.
+   *
+   * @returns {import("../../shared/native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager}
+   */
+  get nativeAuthManager() {
+    if (!this._nativeAuthManager) this._nativeAuthManager = heartbeatAuthManager;
+    return this._nativeAuthManager;
+  }
+
+  /**
+   * The cached, non-secret heartbeat auth envelope (or null). Leaf boundaries
+   * default `request.auth` to this instead of re-reading settings per call.
+   *
+   * @param {{ refresh?: boolean }} [opts]
+   * @returns {Record<string, unknown> | null}
+   */
+  nativeAuthEnvelope(opts) {
+    return this.nativeAuthManager.getNativeAuthEnvelope(opts);
+  }
+
+  /**
+   * Replace the native-auth authority and propagate it to already-created
+   * handles. The MCP sidecar calls this at boot with a keyless manager rebuilt
+   * from the parent's non-secret capability, so its native calls never need a
+   * raw POSSE_KEY.
+   *
+   * @param {import("../../shared/native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager} manager
+   * @returns {void}
+   */
+  setNativeAuthManager(manager) {
+    this._nativeAuthManager = manager || heartbeatAuthManager;
+    for (const handle of this._handles.values()) {
+      handle._nativeAuthManager = this._nativeAuthManager;
+    }
   }
 
   /** @returns {readonly string[]} */
@@ -77,6 +124,10 @@ export class BinaryManager {
         arch: this._opts.arch,
         spawnImpl: this._opts.spawnImpl,
         spawnSyncImpl: this._opts.spawnSyncImpl,
+        // Previously dropped on the floor: a manager-scoped env (and the auth
+        // authority) now reach the handle so key/heartbeat resolution honors it.
+        env: this._opts.env,
+        nativeAuthManager: this.nativeAuthManager,
       });
       this._handles.set(name, handle);
     }

@@ -9,6 +9,7 @@ export class LeaseManager {
     defaultDurationSec = 900,
     acquireLease = defaultNoop,
     acquireLeaseWithWriteLocks = defaultNoop,
+    acquireLeaseWithWriteLocksAsync = null,
     renewLease = () => false,
     releaseLease = () => false,
     releaseLeaseWithoutAttemptPenalty = () => false,
@@ -22,6 +23,7 @@ export class LeaseManager {
     this.deps = {
       acquireLease,
       acquireLeaseWithWriteLocks,
+      acquireLeaseWithWriteLocksAsync,
       renewLease,
       releaseLease,
       releaseLeaseWithoutAttemptPenalty,
@@ -54,6 +56,18 @@ export class LeaseManager {
 
   acquireWithLocks(job, ownerId, scope = null, durationSec = this.defaultDurationSec, opts = {}) {
     const acquired = this.deps.acquireLeaseWithWriteLocks(job, ownerId, scope, durationSec, opts);
+    if (!acquired?.leaseToken) return null;
+    return this._buildLease({
+      jobId: job?.id ?? null,
+      token: acquired.leaseToken,
+      ownerId,
+      durationSec,
+    });
+  }
+
+  async acquireWithLocksAsync(job, ownerId, scope = null, durationSec = this.defaultDurationSec, opts = {}) {
+    const acquire = this.deps.acquireLeaseWithWriteLocksAsync || this.deps.acquireLeaseWithWriteLocks;
+    const acquired = await acquire(job, ownerId, scope, durationSec, opts);
     if (!acquired?.leaseToken) return null;
     return this._buildLease({
       jobId: job?.id ?? null,
@@ -96,6 +110,9 @@ export class LeaseManager {
           ? queueFns.acquireLeaseWithWriteLocks(job, ownerId, scope, durationSec, opts)
           : null
       ),
+      acquireLeaseWithWriteLocksAsync: queueFns.acquireLeaseWithWriteLocksAsync
+        ? (job, ownerId, scope, durationSec, opts) => queueFns.acquireLeaseWithWriteLocksAsync(job, ownerId, scope, durationSec, opts)
+        : null,
       renewLease: queueFns.renewLease,
       releaseLease: queueFns.releaseLease,
       releaseLeaseWithoutAttemptPenalty: queueFns.releaseLeaseWithoutAttemptPenalty,

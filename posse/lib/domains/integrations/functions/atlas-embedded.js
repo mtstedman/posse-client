@@ -28,6 +28,7 @@ import {
   openEmbeddingResources,
   semanticDispatchEnabled,
 } from "../../atlas/functions/v2/embeddings/resources.js";
+import { fallbackQueryPlan, planQueryAsync } from "../../atlas/functions/v2/retrieval/orchestrator/query-planner.js";
 import { extractAtlasResponseTelemetry, extractAtlasResultArtifacts } from "../../atlas/functions/v2/signal-extraction.js";
 import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
@@ -72,13 +73,45 @@ const ATLAS_SHARED_READ_INFLIGHT = new Map(); // key → Promise<string>
 const ATLAS_SHARED_READ_CACHE_MAX = 64;
 let _sharedReadCacheEpoch = 0;
 
+/** @type {Map<string, AtlasCachedResourceEntry>} */
+const ATLAS_EMBEDDED_LEDGER_CACHE = new Map();
+/** @type {Map<string, AtlasCachedResourceEntry>} */
+const ATLAS_EMBEDDED_EMBEDDING_CACHE = new Map();
+const ATLAS_EMBEDDED_RESOURCE_CACHE_MAX = 16;
+const ATLAS_EMBEDDED_RESOURCE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * @typedef {Object} AtlasCachedResourceEntry
+ * @property {any} value
+ * @property {number} expiresAt
+ * @property {number} refCount
+ * @property {boolean} retired
+ * @property {(value: any) => void} close
+ */
+
 /** Void the shared tree.overview/repo.status cache (post-reindex, tests). */
 export function invalidateAtlasSharedReadCache() {
   _sharedReadCacheEpoch++;
   ATLAS_SHARED_READ_CACHE.clear();
 }
 
-onConductorIndexingSuccess(() => invalidateAtlasSharedReadCache());
+export async function invalidateAtlasEmbeddedResourceCache() {
+  const entries = [
+    ...ATLAS_EMBEDDED_LEDGER_CACHE.entries(),
+    ...ATLAS_EMBEDDED_EMBEDDING_CACHE.entries(),
+  ];
+  ATLAS_EMBEDDED_LEDGER_CACHE.clear();
+  ATLAS_EMBEDDED_EMBEDDING_CACHE.clear();
+  for (const [, entry] of entries) {
+    entry.retired = true;
+    if (entry.refCount <= 0) closeCachedAtlasResource(entry);
+  }
+}
+
+onConductorIndexingSuccess(() => {
+  invalidateAtlasSharedReadCache();
+  void invalidateAtlasEmbeddedResourceCache();
+});
 
 function atlasSharedReadKey({ enabled = true, action = null, assetKey = null, versionId = null, payload = null } = {}) {
   if (!enabled) return null;
@@ -260,6 +293,7 @@ export function __testResetAtlasJobCache() {
   ATLAS_CORRUPTION_BACKOFF.clear();
   ATLAS_SHARED_READ_CACHE.clear();
   ATLAS_SHARED_READ_INFLIGHT.clear();
+  void invalidateAtlasEmbeddedResourceCache();
 }
 
 export function __testBuildAtlasProtectedAssetKey(opts = {}) {
@@ -317,6 +351,31 @@ export function __testAtlasSharedReadCacheState() {
     inflight: ATLAS_SHARED_READ_INFLIGHT.size,
     epoch: _sharedReadCacheEpoch,
   };
+}
+
+export function __testAtlasEmbeddedResourceCacheState() {
+  assertTestContext("__testAtlasEmbeddedResourceCacheState");
+  return {
+    ledgers: ATLAS_EMBEDDED_LEDGER_CACHE.size,
+    embeddings: ATLAS_EMBEDDED_EMBEDDING_CACHE.size,
+    ledgerRefs: [...ATLAS_EMBEDDED_LEDGER_CACHE.values()].map((entry) => entry.refCount),
+    embeddingRefs: [...ATLAS_EMBEDDED_EMBEDDING_CACHE.values()].map((entry) => entry.refCount),
+  };
+}
+
+export function __testAcquireEmbeddedLedgerForCache(dbPath, opts = {}) {
+  assertTestContext("__testAcquireEmbeddedLedgerForCache");
+  return acquireEmbeddedLedger(dbPath, opts);
+}
+
+export function __testAcquireEmbeddedEmbeddingResourcesForCache(repoRoot, config = {}) {
+  assertTestContext("__testAcquireEmbeddedEmbeddingResourcesForCache");
+  return acquireEmbeddedEmbeddingResources(repoRoot, config);
+}
+
+export function __testReleaseEmbeddedResourceLease(lease) {
+  assertTestContext("__testReleaseEmbeddedResourceLease");
+  releaseEmbeddedResourceLease(lease);
 }
 
 export function __testSetAtlasLockBackoff() {
@@ -429,6 +488,81 @@ function atlasProtectedAssetKey({ repo = {}, graphDbPath = null, cwd = null, con
   return `atlas:${normalized}`;
 }
 
+/**
+ * @param {Map<string, AtlasCachedResourceEntry>} cache
+ * @param {string} key
+ * @param {() => any} open
+ * @param {(value: any) => void} close
+ * @returns {{ value: any, entry: AtlasCachedResourceEntry }}
+ */
+function acquireCachedAtlasResource(cache, key, open, close) {
+  const now = Date.now();
+  let entry = cache.get(key);
+  if (entry && entry.expiresAt <= now) {
+    retireCachedAtlasResource(cache, key, entry);
+    entry = null;
+  }
+  if (!entry) {
+    entry = {
+      value: open(),
+      expiresAt: now + ATLAS_EMBEDDED_RESOURCE_CACHE_TTL_MS,
+      refCount: 0,
+      retired: false,
+      close,
+    };
+    cache.set(key, entry);
+  } else {
+    cache.delete(key);
+    cache.set(key, entry);
+    entry.expiresAt = now + ATLAS_EMBEDDED_RESOURCE_CACHE_TTL_MS;
+  }
+  entry.refCount += 1;
+  while (cache.size > ATLAS_EMBEDDED_RESOURCE_CACHE_MAX) {
+    const oldest = cache.keys().next().value;
+    if (oldest == null) break;
+    const oldestEntry = cache.get(oldest);
+    if (!oldestEntry) break;
+    retireCachedAtlasResource(cache, oldest, oldestEntry);
+  }
+  return { value: entry.value, entry };
+}
+
+/**
+ * @param {Map<string, AtlasCachedResourceEntry>} cache
+ * @param {string} key
+ * @param {AtlasCachedResourceEntry} entry
+ */
+function retireCachedAtlasResource(cache, key, entry) {
+  cache.delete(key);
+  entry.retired = true;
+  if (entry.refCount <= 0) closeCachedAtlasResource(entry);
+}
+
+/**
+ * @param {AtlasCachedResourceEntry} entry
+ */
+function closeCachedAtlasResource(entry) {
+  try {
+    const result = entry.close(entry.value);
+    if (result && typeof result.then === "function") result.catch(() => {});
+  } catch {
+    // Cache cleanup is best-effort; callers degrade on their next open.
+  }
+}
+
+/**
+ * @param {{ value?: any, entry?: AtlasCachedResourceEntry | null, close?: (value: any) => void } | null} lease
+ */
+function releaseEmbeddedResourceLease(lease) {
+  if (!lease) return;
+  if (lease.entry) {
+    lease.entry.refCount = Math.max(0, lease.entry.refCount - 1);
+    if (lease.entry.retired && lease.entry.refCount <= 0) closeCachedAtlasResource(lease.entry);
+    return;
+  }
+  try { lease.close?.(lease.value); } catch { /* best effort */ }
+}
+
 function openEmbeddedLedger(dbPath, { readOnly = false } = {}) {
   if (!readOnly) return Ledger.open({ dbPath });
   try {
@@ -436,6 +570,76 @@ function openEmbeddedLedger(dbPath, { readOnly = false } = {}) {
   } catch {
     return Ledger.open({ dbPath });
   }
+}
+
+/**
+ * @param {string} dbPath
+ * @param {{ readOnly?: boolean, cache?: boolean }} opts
+ */
+function acquireEmbeddedLedger(dbPath, { readOnly = false, cache = false } = {}) {
+  const normalized = String(dbPath || "").replace(/\\/g, "/").toLowerCase();
+  if (!cache || !readOnly || !normalized) {
+    const ledger = openEmbeddedLedger(dbPath, { readOnly });
+    return {
+      value: ledger,
+      ledger,
+      entry: null,
+      close: (handle) => closeEmbeddedAtlasHandle(handle, "ledger", { action: "ledger-close", origin: "embedded" }),
+    };
+  }
+  const lease = acquireCachedAtlasResource(
+    ATLAS_EMBEDDED_LEDGER_CACHE,
+    `ledger:${normalized}`,
+    () => openEmbeddedLedger(dbPath, { readOnly: true }),
+    (handle) => closeEmbeddedAtlasHandle(handle, "ledger", { action: "ledger-cache", origin: "embedded" }),
+  );
+  return { ...lease, ledger: lease.value };
+}
+
+/**
+ * @param {string} repoRoot
+ * @param {Record<string, unknown>} config
+ */
+function acquireEmbeddedEmbeddingResources(repoRoot, config = {}) {
+  const key = embeddedEmbeddingResourceKey(repoRoot, config);
+  const lease = acquireCachedAtlasResource(
+    ATLAS_EMBEDDED_EMBEDDING_CACHE,
+    key,
+    () => openEmbeddingResources({ repoRoot, config }),
+    (resources) => {
+      try {
+        const result = resources?.close?.();
+        if (result && typeof result.then === "function") result.catch(() => {});
+      } catch { /* best effort */ }
+    },
+  );
+  return { ...lease, resources: lease.value };
+}
+
+/**
+ * @param {string} repoRoot
+ * @param {Record<string, unknown>} config
+ */
+function embeddedEmbeddingResourceKey(repoRoot, config = {}) {
+  const relevantConfig = {};
+  for (const [key, value] of Object.entries(config || {})) {
+    if (/embedding|encoder|onnx|vector/i.test(key)) relevantConfig[key] = value;
+  }
+  return stableStringify({
+    repoRoot: String(repoRoot || "").replace(/\\/g, "/").toLowerCase(),
+    config: relevantConfig,
+  });
+}
+
+async function embeddedPlanQuery(input) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await planQueryAsync(input);
+    } catch {
+      // A planner hiccup should not fail the in-process fallback path.
+    }
+  }
+  return fallbackQueryPlan(input);
 }
 
 function closeEmbeddedAtlasHandle(handle, label, { action = "unknown", origin = "agent" } = {}) {
@@ -732,28 +936,30 @@ function openEmbeddedLedgerForView({ repoRoot, viewMeta, cwd = null, config = nu
   const paths = candidateEmbeddedV2LedgerPaths({ repoRoot, viewMeta, cwd, config });
   let fallback = null;
   for (const dbPath of paths) {
+    let candidateLease = null;
     let candidate = null;
     try {
-      candidate = openEmbeddedLedger(dbPath, { readOnly });
+      candidateLease = acquireEmbeddedLedger(dbPath, { readOnly, cache: readOnly });
+      candidate = candidateLease.ledger;
       if (embeddedLedgerSupportsViewMeta(candidate, viewMeta)) {
-        if (fallback) closeEmbeddedAtlasHandle(fallback, "ledger", { action: "ledger-fallback", origin: "embedded" });
-        return { ledger: candidate, dbPath };
+        if (fallback) releaseEmbeddedResourceLease(fallback);
+        return { ledger: candidate, dbPath, lease: candidateLease };
       }
       log.debug("atlas", "Skipping ATLAS ledger that does not contain view branch", {
         ledgerPath: dbPath,
         branch: viewMeta?.branch || null,
       });
-      if (!fallback) fallback = candidate;
-      else closeEmbeddedAtlasHandle(candidate, "ledger", { action: "ledger-skip", origin: "embedded" });
+      if (!fallback) fallback = candidateLease;
+      else releaseEmbeddedResourceLease(candidateLease);
     } catch (err) {
       log.debug("atlas", "Skipping unreadable ATLAS ledger candidate", {
         ledgerPath: dbPath,
         error: err?.message || String(err),
       });
-      try { closeEmbeddedAtlasHandle(candidate, "ledger", { action: "ledger-error", origin: "embedded" }); } catch { /* ignore */ }
+      try { releaseEmbeddedResourceLease(candidateLease); } catch { /* ignore */ }
     }
   }
-  return fallback ? { ledger: fallback, dbPath: null } : { ledger: null, dbPath: null };
+  return fallback ? { ledger: fallback.ledger, dbPath: null, lease: fallback } : { ledger: null, dbPath: null, lease: null };
 }
 
 function resolveEmbeddedV2ReadRoot({ cwd, repoRoot, viewPath, viewMeta }) {
@@ -838,12 +1044,16 @@ async function executeEmbeddedAtlasV2Tool({
   let view = null;
   let ledger = null;
   let embeddingResources = null;
+  let ledgerLease = null;
+  let embeddingResourcesLease = null;
   let viewPath = null;
   try {
     let meta = null;
     const configuredLedgerPath = existingFilePath(config?.atlasV2LedgerDbPath || config?.ledgerDbPath || null);
     if (configuredLedgerPath) {
-      ledger = openEmbeddedLedger(configuredLedgerPath, { readOnly: !isBlockingAction(action, payload) });
+      const readOnlyLedger = !isBlockingAction(action, payload);
+      ledgerLease = acquireEmbeddedLedger(configuredLedgerPath, { readOnly: readOnlyLedger, cache: readOnlyLedger });
+      ledger = ledgerLease.ledger;
     }
     const waitMs = atlasV2ViewWaitMs(config);
     if (viewCandidates.length > 0) {
@@ -870,8 +1080,9 @@ async function executeEmbeddedAtlasV2Tool({
     }
     if ((!view || !meta) && !optionalView) throw new Error("ATLAS v2 view is not available");
     if (ledger && meta && !embeddedLedgerSupportsViewMeta(ledger, meta)) {
-      try { closeEmbeddedAtlasHandle(ledger, "ledger", { action, origin }); } catch { /* ignore */ }
+      try { releaseEmbeddedResourceLease(ledgerLease); } catch { /* ignore */ }
       ledger = null;
+      ledgerLease = null;
     }
     const ledgerPath = ledger ? null : resolveEmbeddedV2LedgerPath({ repoRoot, viewMeta: meta, cwd, config });
     if (!ledger && !ledgerPath && !optionalView) throw new Error("ATLAS v2 ledger is not available");
@@ -884,6 +1095,7 @@ async function executeEmbeddedAtlasV2Tool({
         readOnly: !isBlockingAction(action, payload),
       });
       ledger = opened.ledger;
+      ledgerLease = opened.lease;
     }
     if (view && meta && ledger && !freshnessExempt) {
       const freshness = viewFreshness(meta, ledger);
@@ -978,7 +1190,8 @@ async function executeEmbeddedAtlasV2Tool({
         : (config || {});
       if (semanticWanted && !embeddingResources) {
         try {
-          embeddingResources = openEmbeddingResources({ repoRoot: readRoot, config: inProcessConfig });
+          embeddingResourcesLease = acquireEmbeddedEmbeddingResources(readRoot, inProcessConfig);
+          embeddingResources = embeddingResourcesLease.resources;
         } catch { embeddingResources = null; }
       }
       envelope = await Promise.resolve(dispatchAtlasV2(dispatchCall, {
@@ -992,6 +1205,8 @@ async function executeEmbeddedAtlasV2Tool({
         encoder: embeddingResources?.enabled ? embeddingResources.encoder : undefined,
         taskText: typeof payload?.taskText === "string" ? payload.taskText : (action === "symbol.search" ? payload?.query : undefined),
         taskType: typeof payload?.taskType === "string" ? payload.taskType : undefined,
+        planner: embeddedPlanQuery,
+        asyncNativeRedaction: true,
       }));
     }
     if (envelope?.ok === false || envelope?.error) throw atlasV2EnvelopeError(envelope);
@@ -1029,8 +1244,8 @@ async function executeEmbeddedAtlasV2Tool({
     return formatAtlasV2EmbeddedError(action, err);
   } finally {
     try { closeEmbeddedAtlasHandle(view, "view", { action, origin }); } catch { /* ignore */ }
-    try { closeEmbeddedAtlasHandle(ledger, "ledger", { action, origin }); } catch { /* ignore */ }
-    try { await embeddingResources?.close?.(); } catch { /* ignore */ }
+    try { releaseEmbeddedResourceLease(ledgerLease); } catch { /* ignore */ }
+    try { releaseEmbeddedResourceLease(embeddingResourcesLease); } catch { /* ignore */ }
   }
 }
 

@@ -5,7 +5,7 @@
 
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
-import { redactSecrets, redactSecretsLines } from "./redaction.js";
+import { redactSecrets, redactSecretsAsync, redactSecretsLines, redactSecretsLinesAsync } from "./redaction.js";
 
 /** @typedef {import("../contracts/tool-params.js").FileReadParams} FileReadParams */
 /** @typedef {import("../contracts/tool-results.js").FileReadData} FileReadData */
@@ -30,6 +30,28 @@ const BLOCKED_JSON_PATH_SEGMENTS = new Set(["__proto__", "constructor", "prototy
  * }} args
  */
 export function fileRead({ versionId, params, readFile, view }) {
+  return fileReadWithRedaction({ versionId, params, readFile, view }, {
+    redactText: redactSecrets,
+    redactLines: redactSecretsLines,
+  });
+}
+
+/**
+ * @param {{
+ *   versionId: string,
+ *   params: FileReadParams,
+ *   readFile: ReadFile,
+ *   view?: View,
+ * }} args
+ */
+export async function fileReadAsync({ versionId, params, readFile, view }) {
+  return await fileReadWithRedaction({ versionId, params, readFile, view }, {
+    redactText: redactSecretsAsync,
+    redactLines: redactSecretsLinesAsync,
+  });
+}
+
+function fileReadWithRedaction({ versionId, params, readFile, view }, redaction) {
   if (!params.filePath || !isCanonicalRepoPath(params.filePath)) {
     return errorEnvelope({
       action: "file.read",
@@ -87,82 +109,91 @@ export function fileRead({ versionId, params, readFile, view }) {
       : Math.min(totalLines - offset, DEFAULT_MAX_LINES);
   const lines = allLines.slice(offset, offset + limit);
 
-  let content = redactSecrets(lines.join("\n"));
-  let truncated = offset + lines.length < totalLines;
-  const buf = Buffer.from(content, "utf8");
-  if (buf.length > requestedMaxBytes) {
-    content = buf.subarray(0, requestedMaxBytes).toString("utf8");
-    truncated = true;
-  }
-
-  /** @type {FileReadData} */
-  const data = {
-    repo_rel_path: params.filePath,
-    content,
-    totalBytes,
-    totalLines,
-    returnedLines: lines.length,
-    startLine: offset + 1,
-    truncated,
-  };
-
-  if (params.search) {
-    const compiled = compileSearchPattern(params.search);
-    if (compiled.ok === false) {
-      return errorEnvelope({
-        action: "file.read",
-        versionId,
-        code: compiled.code,
-        message: compiled.message,
-      });
+  return mapMaybePromise(redaction.redactText(lines.join("\n")), (redactedContent) => {
+    let content = redactedContent;
+    let truncated = offset + lines.length < totalLines;
+    const buf = Buffer.from(content, "utf8");
+    if (buf.length > requestedMaxBytes) {
+      content = buf.subarray(0, requestedMaxBytes).toString("utf8");
+      truncated = true;
     }
-    const re = compiled.re;
-    try {
-      // Touch once so invalid engines fail before we start scanning.
-      re.test("");
-    } catch (err) {
-      return errorEnvelope({
-        action: "file.read",
-        versionId,
-        code: "invalid_regex",
-        message: `Invalid search regex: ${err.message}`,
-      });
-    }
-    const ctxLines = typeof params.searchContext === "number" ? params.searchContext : 2;
-    /** @type {number[]} */
-    const matchLines = [];
-    const searchStartedAt = Date.now();
-    for (let li = 0; li < lines.length; li++) {
-      if (Date.now() - searchStartedAt > SEARCH_TIME_BUDGET_MS) {
-        data.searchTimedOut = true;
-        truncated = true;
-        data.truncated = true;
-        break;
+
+    /** @type {FileReadData} */
+    const data = {
+      repo_rel_path: params.filePath,
+      content,
+      totalBytes,
+      totalLines,
+      returnedLines: lines.length,
+      startLine: offset + 1,
+      truncated,
+    };
+
+    if (params.search) {
+      const compiled = compileSearchPattern(params.search);
+      if (compiled.ok === false) {
+        return errorEnvelope({
+          action: "file.read",
+          versionId,
+          code: compiled.code,
+          message: compiled.message,
+        });
       }
-      const searchableLine = lines[li].length > MAX_SEARCH_LINE_CHARS
-        ? lines[li].slice(0, MAX_SEARCH_LINE_CHARS)
-        : lines[li];
-      if (re.test(searchableLine)) {
-        matchLines.push(li);
-        if (matchLines.length >= MAX_SEARCH_MATCHES) {
+      const re = compiled.re;
+      try {
+        // Touch once so invalid engines fail before we start scanning.
+        re.test("");
+      } catch (err) {
+        return errorEnvelope({
+          action: "file.read",
+          versionId,
+          code: "invalid_regex",
+          message: `Invalid search regex: ${err.message}`,
+        });
+      }
+      const ctxLines = typeof params.searchContext === "number" ? params.searchContext : 2;
+      /** @type {number[]} */
+      const matchLines = [];
+      const searchStartedAt = Date.now();
+      for (let li = 0; li < lines.length; li++) {
+        if (Date.now() - searchStartedAt > SEARCH_TIME_BUDGET_MS) {
+          data.searchTimedOut = true;
           truncated = true;
+          data.truncated = true;
           break;
         }
+        const searchableLine = lines[li].length > MAX_SEARCH_LINE_CHARS
+          ? lines[li].slice(0, MAX_SEARCH_LINE_CHARS)
+          : lines[li];
+        if (re.test(searchableLine)) {
+          matchLines.push(li);
+          if (matchLines.length >= MAX_SEARCH_MATCHES) {
+            truncated = true;
+            break;
+          }
+        }
       }
+      // One native redaction call for the whole window instead of one per
+      // matched line plus one per context line (each sync call is a spawn).
+      const redactedLines = matchLines.length > 0 ? redaction.redactLines(lines) : lines;
+      return mapMaybePromise(redactedLines, (resolvedLines) => {
+        data.matches = matchLines.map((li) => ({
+          line: offset + li + 1,
+          text: resolvedLines[li],
+          context: {
+            before: resolvedLines.slice(Math.max(0, li - ctxLines), li),
+            after: resolvedLines.slice(li + 1, Math.min(lines.length, li + 1 + ctxLines)),
+          },
+        }));
+        return finishFileRead({ params, source, versionId, data });
+      });
     }
-    // One native redaction call for the whole window instead of one per
-    // matched line plus one per context line (each sync call is a spawn).
-    const redactedLines = matchLines.length > 0 ? redactSecretsLines(lines) : lines;
-    data.matches = matchLines.map((li) => ({
-      line: offset + li + 1,
-      text: redactedLines[li],
-      context: {
-        before: redactedLines.slice(Math.max(0, li - ctxLines), li),
-        after: redactedLines.slice(li + 1, Math.min(lines.length, li + 1 + ctxLines)),
-      },
-    }));
-  }
 
+    return finishFileRead({ params, source, versionId, data });
+  });
+}
+
+function finishFileRead({ params, source, versionId, data }) {
   if (params.jsonPath) {
     try {
       const parsed = JSON.parse(source);
@@ -173,6 +204,13 @@ export function fileRead({ versionId, params, readFile, view }) {
   }
 
   return okEnvelope({ action: "file.read", versionId, data });
+}
+
+function mapMaybePromise(value, map) {
+  if (value && typeof /** @type {any} */ (value).then === "function") {
+    return /** @type {any} */ (value).then(map);
+  }
+  return map(value);
 }
 
 /**

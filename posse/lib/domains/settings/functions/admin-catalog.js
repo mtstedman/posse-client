@@ -103,6 +103,7 @@ export const HIDDEN_SETTING_KEYS = new Set([
   "openai_observed_pct_week",
   "bridge_bind_host",
   "bridge_local_token",
+  "mcp_oauth_signing_key",
   "bridge_instance_id",
   "bridge_relay_token",
   "bridge_relay_url",

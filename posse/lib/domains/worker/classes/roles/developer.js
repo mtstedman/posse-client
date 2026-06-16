@@ -72,8 +72,10 @@ export class DeveloperRole extends BaseRole {
     let createRoots = payload.create_roots || [];
 
     const attempts = getAttempts(job.id);
-    const lastError = attempts.length > 0
-      ? (job.last_error || attempts[attempts.length - 1].error_text || null)
+    const previousAttempts = attempts.filter((attempt) => attempt.status !== "running");
+    const currentAttemptNumber = previousAttempts.length + 1;
+    const lastError = previousAttempts.length > 0
+      ? (job.last_error || previousAttempts[previousAttempts.length - 1].error_text || null)
       : null;
 
     const packet = buildRoutingPacket(job, {
@@ -81,7 +83,7 @@ export class DeveloperRole extends BaseRole {
       payload,
       role: this.getRole(),
       effectiveTier: ctx.tier,
-      attemptCount: attempts.length + 1,
+      attemptCount: currentAttemptNumber,
       maxAttempts: job.max_attempts || 3,
       lastError,
       cwd: devCwd,
@@ -110,7 +112,7 @@ export class DeveloperRole extends BaseRole {
     const driftContext = worker.detectDrift(job, files, devCwd);
 
     let continuationContext = "";
-    const isRetry = attempts.length > 0;
+    const isRetry = previousAttempts.length > 0;
     if (payload._stall_resume && job._worktreePath) {
       const resumed = await worker.applyStallStashAsync(job, job._worktreePath);
       if (resumed) {
@@ -125,7 +127,7 @@ export class DeveloperRole extends BaseRole {
         continuationContext = `CHECKPOINT FROM PREVIOUS ATTEMPT (use this to avoid repeating work):\n${checkpoint}`;
         worker.emit(job.id, `${C.green}[checkpoint]${C.reset} WI#${job.work_item_id} job #${job.id}: loaded checkpoint from previous attempt`);
       }
-      worker.emit(job.id, `${C.yellow}[restart]${C.reset} WI#${job.work_item_id} job #${job.id}: attempt ${attempts.length + 1} - starting over`);
+      worker.emit(job.id, `${C.yellow}[restart]${C.reset} WI#${job.work_item_id} job #${job.id}: attempt ${currentAttemptNumber} - starting over`);
     } else {
       worker.emit(job.id, `${C.green}[new]${C.reset} WI#${job.work_item_id} job #${job.id}: first attempt`);
     }

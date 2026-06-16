@@ -7,6 +7,7 @@ import path from "path";
 import { execFile, execFileSync, execSync } from "child_process";
 import { promisify } from "util";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
+import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { getSetting, listCrossWiMergeBlockers, listWorkItems, logEvent, refreshWorkItemStatuses, setMergeState } from "../../queue/functions/index.js";
@@ -21,6 +22,7 @@ import {
   isAtlasV2EmissionEnabled,
 } from "../../atlas/classes/v2/PipelineHooks.js";
 import { GIT_OPERATION_TIMEOUT_MS, resolvePushBranch } from "../../git/functions/utils.js";
+import { FORCE_REMOVE_OPTIONS } from "../../git/functions/worktree-remove-options.js";
 import {
   worktreePath as canonicalWorktreePath,
   findLegacyWorktreeForWi,
@@ -101,6 +103,7 @@ export function createGitWorkflowHelpers({
   targetBranch,
   getTargetBranch = null,
   autoMerge = false,
+  nonInteractive = false,
   askFn = async () => "",
   isIterativeWorkItemActive = () => false,
   shouldAutoApproveIterativeWorkItem = () => false,
@@ -141,6 +144,8 @@ export function createGitWorkflowHelpers({
         projectDir,
         targetBranch: currentTargetBranch(),
         autoMerge,
+        nonInteractive,
+        nativeAuth: heartbeatAuthManager.getCapability(),
       },
       onProgress: (event = {}) => {
         if (typeof onPhase === "function") {
@@ -1306,9 +1311,9 @@ export function createGitWorkflowHelpers({
       console.log(`  ${C.dim}Push gate not created: ${err?.message || err}${C.reset}`);
     }
 
-    // Headless (no TTY): never prompt \u2014 the old readline fallback blocked
-    // forever on a non-interactive stdin. The gate above carries the offer.
-    if (!process.stdin.isTTY) {
+    // Headless/explicit batch mode: never prompt. The gate above carries the
+    // offer for the app or a later terminal session.
+    if (!process.stdin.isTTY || nonInteractive) {
       console.log(`  ${C.dim}Push offer available \u2014 answer from the Posse app, or run: git push${C.reset}`);
       console.log("");
       return;
@@ -2443,7 +2448,7 @@ export function createGitWorkflowHelpers({
     }
     if (fs.existsSync(worktreePath)) {
       try {
-        fs.rmSync(worktreePath, { recursive: true, force: true });
+        fs.rmSync(worktreePath, FORCE_REMOVE_OPTIONS);
         removed = true;
       } catch {
         // best effort; caller can decide whether branch state is safe to clear
@@ -2600,7 +2605,11 @@ export function createGitWorkflowHelpers({
     if (fs.existsSync(canonical)) addManagedCandidate(canonical);
     if (legacy && !sameFsPath(legacy, canonical) && fs.existsSync(legacy)) addManagedCandidate(legacy);
     for (const wtPath of gitWorktreePathsForBranch(branchName, projectDir)) addManagedCandidate(wtPath);
-    for (const wtPath of candidates) gitWorktreeRemove(wtPath, projectDir);
+    disposeWorkItemAtlasGraph({ projectDir: projectDir, workItemId: wi.id });
+    for (const wtPath of candidates) {
+      disposeWorkItemAtlasGraph({ projectDir: projectDir, workItemId: wi.id, worktreePath: wtPath });
+      gitWorktreeRemove(wtPath, projectDir);
+    }
     try { execSync("git worktree prune", { cwd: projectDir, encoding: "utf-8", stdio: "pipe", timeout: 10000 }); } catch { /* best effort */ }
     const remainingExternalWorktrees = gitWorktreePathsForBranch(branchName, projectDir)
       .filter((wtPath) => !isManagedWiWorktreePath(wtPath, wi.id));
@@ -2641,7 +2650,6 @@ export function createGitWorkflowHelpers({
     db.prepare(`UPDATE work_items SET branch_name = NULL, merge_base_hash = NULL, updated_at = ? WHERE id = ?`)
       .run(new Date().toISOString(), wi.id);
     if (clearMergeState) setMergeState(wi.id, null);
-    disposeWorkItemAtlasGraph({ projectDir: projectDir, workItemId: wi.id });
     if (isAtlasV2EmissionEnabled()) {
       emitAtlasV2WiCleanup({
         payload: {

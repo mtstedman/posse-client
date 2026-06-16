@@ -60,7 +60,7 @@ import { TrackedProviderClient } from "./TrackedProviderClient.js";
 import { RoleRegistry } from "./RoleRegistry.js";
 import { runHumanInputHandler } from "../functions/helpers/human-input.js";
 import { ROLE_CLASSES_BY_JOB_TYPE } from "./role-classes.js";
-import { buildRoutingPacket, handoff, parseMissingContext, parseFileRequest, splitFileRequestsByRisk, parseResearcherStructuredOutput, researcherOutputNeedsHuman, _parseFunctions, applyDeterministicDeletes, attachAssessmentDiffContext, hasWritableScope, renderAtlasHandoffSections } from "../../handoff/functions/index.js";
+import { buildRoutingPacket, handoff, parseMissingContext, parseFileRequest, splitFileRequestsByRisk, parseResearcherStructuredOutput, researcherOutputNeedsHuman, _parseFunctions, applyDeterministicDeletes, attachAssessmentDiffContextAsync, hasWritableScope, renderAtlasHandoffSections } from "../../handoff/functions/index.js";
 import { injectArtifactScope, normalizeArtifactCreateFiles, isArtifactMode, isValidTaskMode, buildManifest, wiScopeId, artifactsDir, workspaceDir, inputsDir, contextDir, getWiModeConfig, validateManifestAgainstContract, getArtifactProtocol, getResolvedImageProtocol, getConfiguredImageProviders, getConfiguredImageModel } from "../../artifacts/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
@@ -112,6 +112,10 @@ import {
   retryOrFail as retryOrFailFromModule,
   spawnDeadLetterRecoveryForDependents as spawnDeadLetterRecoveryForDependentsFromModule,
 } from "../functions/helpers/dead-letter.js";
+import {
+  isTransientCommitInfraFailure,
+} from "../functions/helpers/commit-infra.js";
+export { isTransientCommitInfraFailure };
 import {
   clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule,
   cleanupWorktreeIfDoneAsync as cleanupWorktreeIfDoneAsyncFromModule,
@@ -480,18 +484,6 @@ function formatCommitFailureSummary(error = {}) {
   const stdoutLine = firstMeaningfulCommitErrorLine(error?.stdout);
   const extra = stderrLine || stdoutLine || error?.code || "";
   return extra && !String(base).includes(extra) ? `${base} - ${extra}` : base;
-}
-
-// Commit failures raised by the native identity/heartbeat layer are transient
-// infrastructure faults: the agent's work in the tree is intact and a short
-// in-place re-commit usually succeeds once the key renews. Scope, hook, and
-// content failures must never classify as transient — those need a real retry.
-const TRANSIENT_COMMIT_INFRA_RE = /posse_key\s+heartbeat|pulse[\s_-]?token|identity\s+heartbeat/i;
-export function isTransientCommitInfraFailure(error = {}) {
-  if (Array.isArray(error?.createdOutOfScope) && error.createdOutOfScope.length > 0) return false;
-  if (String(error?.hookOutput || "").trim()) return false;
-  const text = [error?.message, error?.stderr, error?.stdout].filter(Boolean).join("\n");
-  return TRANSIENT_COMMIT_INFRA_RE.test(text);
 }
 
 // When an attempt dies AFTER the agent finished (commit failure, output
@@ -1346,7 +1338,7 @@ export class Worker {
           try {
             const jobPayloadForAssess = this.parsePayload(job);
             const assessAc = this._abortControllers.get(job.id);
-            const assessmentContext = attachAssessmentDiffContext({
+            const assessmentContext = await attachAssessmentDiffContextAsync({
               task_mode: jobPayloadForAssess.task_mode || "code",
               manifest: null,
               commit_hash: lastWithCommit.commit_hash || null,
@@ -1743,6 +1735,8 @@ export class Worker {
 
           const blockedPayload = {
             original_job_id: job.id,
+            review_type: "blocked_recovery",
+            choices: ["retry", "skip", "replan", "pass", "fail"],
             questions: [`Agent was blocked on job #${job.id}. What should be done?`],
             context: [
               `Task: ${job.title}`,
@@ -2610,6 +2604,9 @@ export class Worker {
                   priority: "urgent",
                   model_tier: "cheap",
                   payload_json: JSON.stringify({
+                    original_job_id: job.id,
+                    review_type: "blocked_recovery",
+                    choices: ["retry", "skip", "replan", "pass", "fail"],
                     questions: [
                       `Job #${job.id} "${job.title}" has been blocked ${blockedCount + 1} times with the same issue. How should we proceed?`,
                     ],
@@ -2634,6 +2631,8 @@ export class Worker {
             // Create human_input job — include file requests if present
             const blockedPayload = {
               original_job_id: job.id,
+              review_type: "blocked_recovery",
+              choices: ["retry", "skip", "replan", "pass", "fail"],
               questions: [`Dev was blocked on job #${job.id}. What should be done?`],
               context: [
                 `Task: ${job.title}`,
@@ -3588,20 +3587,21 @@ export class Worker {
   // --- Utilities --------------------------------------------------------
 
   emit(jobId, message) {
-    if (this.display) {
+    if (this.display && typeof this.display.workerLine === "function") {
       this.display.workerLine(jobId, message);
     } else if (!this.silent) {
       console.log(message);
     }
   }
 
-  async _kickAtlasReindex(jobOrId, commitHash) {
+  async _kickAtlasReindex(jobOrId, commitHash, options = {}) {
     const job = jobOrId && typeof jobOrId === "object" ? jobOrId : null;
     const jobId = job?.id ?? jobOrId;
+    const suppressTerminalWiRefresh = options?.suppressTerminalWiRefresh === true;
 
     // ATLAS v2 transactional outbox: emit `atlas.dev_committed` and enqueue a
-    // companion warm job whenever the flag is set, independent of the
-    // legacy reindex path below.
+    // companion warm job. A branch-local warm is still useful while a completed
+    // WI waits for review or a cross-WI blocker before merge-to-main replay.
     if (job && commitHash && isAtlasV2EmissionEnabled()) {
       try {
         let branchName = job._branchName || null;
@@ -3629,6 +3629,7 @@ export class Worker {
             paths,
             job_id: Number(job.id),
           },
+          enqueueWarmJob: !suppressTerminalWiRefresh,
           onError: (err) => {
             this.emit(jobId, `${C.dim}[atlas-v2] outbox emit failed: ${err.message.split("\n")[0]}${C.reset}`);
           },
@@ -3647,6 +3648,10 @@ export class Worker {
     }
     if (!atlasConfig.enabled || job?._atlasDisabledForWorkItem) return;
     const shortHash = commitHash ? String(commitHash).slice(0, 8) : "";
+    if (suppressTerminalWiRefresh) {
+      this.emit(jobId, `${C.dim}[atlas] reindex skipped after ${shortHash} (commit warm explicitly suppressed)${C.reset}`);
+      return;
+    }
     const reindexCwd = job?._worktreePath || this.projectDir;
     const repoKey = String(reindexCwd || this.projectDir);
     const nowMs = Date.now();

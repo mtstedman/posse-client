@@ -149,7 +149,35 @@ export function normalizedGlob(value) {
   return normalizeRelPath(String(value || "").trim());
 }
 
-export function isWorkspaceRootIgnoredByGit(cwd) {
+const GIT_IGNORE_SESSION_CACHE_MAX_ENTRIES = 64;
+const GIT_IGNORE_SNAPSHOT_MAX_BUFFER = 16 * 1024 * 1024;
+const GIT_IGNORE_SNAPSHOT_TIMEOUT_MS = 5000;
+const _workspaceRootIgnoredCache = new Map();
+const _gitIgnoreCheckerCache = new Map();
+
+function normalizeGitCacheKey(cwd) {
+  const resolved = path.resolve(String(cwd || process.cwd()));
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function getSessionCacheEntry(cache, key) {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  cache.delete(key);
+  cache.set(key, entry);
+  return entry;
+}
+
+function setCacheEntry(cache, key, entry) {
+  cache.set(key, entry);
+  while (cache.size > GIT_IGNORE_SESSION_CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest == null) break;
+    cache.delete(oldest);
+  }
+}
+
+function isWorkspaceRootIgnoredByGitUncached(cwd) {
   try {
     const rootResult = spawnSync("git", ["rev-parse", "--show-toplevel"], {
       cwd,
@@ -173,27 +201,77 @@ export function isWorkspaceRootIgnoredByGit(cwd) {
   }
 }
 
+function normalizeGitIgnoredRel(value) {
+  return normalizeRelPath(String(value || ""))
+    .replace(/^\.\/+/, "")
+    .replace(/\/+/g, "/")
+    .replace(/\/+$/, "");
+}
+
+function buildGitIgnoredPathSnapshot(cwd) {
+  const ignoredFiles = new Set();
+  const ignoredDirs = new Set();
+  try {
+    const result = spawnSync("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+      timeout: GIT_IGNORE_SNAPSHOT_TIMEOUT_MS,
+      maxBuffer: GIT_IGNORE_SNAPSHOT_MAX_BUFFER,
+    });
+    if (result.status !== 0 || result.error) return { ignoredFiles, ignoredDirs };
+    for (const rawEntry of String(result.stdout || "").split("\0")) {
+      if (!rawEntry) continue;
+      const isDir = /[\\/]$/.test(rawEntry);
+      const rel = normalizeGitIgnoredRel(rawEntry);
+      if (!rel) continue;
+      if (isDir) ignoredDirs.add(rel);
+      else ignoredFiles.add(rel);
+    }
+  } catch {
+    // Ignore checks are advisory for list/search tools. On any Git issue, keep
+    // the existing fail-open behavior rather than blocking deterministic reads.
+  }
+  return { ignoredFiles, ignoredDirs };
+}
+
+function ignoredSnapshotMatches(snapshot, relPath) {
+  const rel = normalizeGitIgnoredRel(relPath);
+  if (!rel) return false;
+  if (snapshot.ignoredFiles.has(rel) || snapshot.ignoredDirs.has(rel)) return true;
+  for (const dir of snapshot.ignoredDirs) {
+    if (rel.startsWith(`${dir}/`)) return true;
+  }
+  return false;
+}
+
 export function makeGitIgnoreChecker(cwd) {
-  if (isWorkspaceRootIgnoredByGit(cwd)) return () => false;
-  const cache = new Map();
-  return function isGitIgnored(absPath) {
+  const key = normalizeGitCacheKey(cwd);
+  const cached = getSessionCacheEntry(_gitIgnoreCheckerCache, key);
+  if (cached) return cached.checker;
+  if (isWorkspaceRootIgnoredByGit(cwd)) {
+    const checker = () => false;
+    setCacheEntry(_gitIgnoreCheckerCache, key, { checker });
+    return checker;
+  }
+  const snapshot = buildGitIgnoredPathSnapshot(cwd);
+  const checker = function isGitIgnored(absPath) {
     const rel = normalizeRelPath(path.relative(cwd, absPath));
     if (!rel || rel === ".") return false;
-    if (cache.has(rel)) return cache.get(rel);
-    let ignored = false;
-    try {
-      const result = spawnSync("git", ["check-ignore", "-q", "--", rel], {
-        cwd,
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      ignored = result.status === 0;
-    } catch {
-      ignored = false;
-    }
-    cache.set(rel, ignored);
-    return ignored;
+    return ignoredSnapshotMatches(snapshot, rel);
   };
+  setCacheEntry(_gitIgnoreCheckerCache, key, { checker });
+  return checker;
+}
+
+export function isWorkspaceRootIgnoredByGit(cwd) {
+  const key = normalizeGitCacheKey(cwd);
+  const cached = getSessionCacheEntry(_workspaceRootIgnoredCache, key);
+  if (cached) return cached.ignored;
+  const ignored = isWorkspaceRootIgnoredByGitUncached(cwd);
+  setCacheEntry(_workspaceRootIgnoredCache, key, { ignored });
+  return ignored;
 }
 
 export function addRipgrepSkipGlobs(rgArgs, skipDirs) {

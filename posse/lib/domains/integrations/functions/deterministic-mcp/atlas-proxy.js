@@ -82,7 +82,10 @@ let _toolSchemas = [];
 let _atlasToolNames = new Set();
 const _inflightReadOnlyCalls = new Map(); // dedupeKey -> Promise<{ result, ok, empty, resultChars, errorMsg }>
 const _v2RefreshQueue = new Map(); // queueKey -> { job: Promise<boolean>, head: number }
+const _v2LedgerCache = new Map(); // cacheKey -> { value, expiresAt, refCount, retired, close }
 const ATLAS_V2_DISPATCH_GATE = new AsyncResourceGate({ name: "ATLAS v2 dispatch" });
+const ATLAS_V2_LEDGER_CACHE_MAX = 16;
+const ATLAS_V2_LEDGER_CACHE_TTL_MS = 5 * 60 * 1000;
 let _lastSuccessfulDedupe = null;  // { key, atMs, payload }
 let _diagnostics = {          // surfaced on failure so we fail loud, not silent
   initError: null,
@@ -95,6 +98,7 @@ export function configureAtlasProxy(cfg = {}) {
     _toolSchemas = [];
     _atlasToolNames = new Set();
     _v2RefreshQueue.clear();
+    invalidateAtlasProxyResourceCache();
     return;
   }
   const env = cfg.env || {};
@@ -342,6 +346,16 @@ export function getDiagnostics() {
 
 export async function shutdown() {
   _initPromise = null;
+  invalidateAtlasProxyResourceCache();
+}
+
+export function invalidateAtlasProxyResourceCache() {
+  const entries = [..._v2LedgerCache.entries()];
+  _v2LedgerCache.clear();
+  for (const [, entry] of entries) {
+    entry.retired = true;
+    if (entry.refCount <= 0) _closeAtlasProxyCachedResource(entry);
+  }
 }
 
 // Test hooks.
@@ -355,6 +369,7 @@ export function __resetForTests() {
   _lastSuccessfulDedupe = null;
   _v2LoadFailureLogged = false;
   _diagnostics = { initError: null };
+  invalidateAtlasProxyResourceCache();
 }
 
 // ── internals ────────────────────────────────────────────────────────────
@@ -796,34 +811,39 @@ function _v2EnvelopeToMcp(envelope) {
 let _v2DispatchModule = null;
 let _v2ClassesModule = null;
 let _v2EmbeddingResourcesModule = null;
+let _v2QueryPlannerModule = null;
 let _v2LoadFailureLogged = false;
 
 async function _loadV2Modules() {
-  if (_v2DispatchModule && _v2ClassesModule && _v2EmbeddingResourcesModule) {
+  if (_v2DispatchModule && _v2ClassesModule && _v2EmbeddingResourcesModule && _v2QueryPlannerModule) {
     return {
       dispatch: _v2DispatchModule.dispatch,
       Ledger: _v2ClassesModule.Ledger,
       View: _v2ClassesModule.View,
       openEmbeddingResources: _v2EmbeddingResourcesModule.openEmbeddingResources,
       semanticDispatchEnabled: _v2EmbeddingResourcesModule.semanticDispatchEnabled,
+      planQueryAsync: _v2QueryPlannerModule.planQueryAsync,
     };
   }
   try {
-    const [dispatchMod, ledgerMod, viewMod, embeddingResourcesMod] = await Promise.all([
+    const [dispatchMod, ledgerMod, viewMod, embeddingResourcesMod, queryPlannerMod] = await Promise.all([
       import("../../../atlas/functions/v2/retrieval/dispatch.js"),
       import("../../../atlas/classes/v2/Ledger.js"),
       import("../../../atlas/classes/v2/View.js"),
       import("../../../atlas/functions/v2/embeddings/resources.js"),
+      import("../../../atlas/functions/v2/retrieval/orchestrator/query-planner.js"),
     ]);
     _v2DispatchModule = dispatchMod;
     _v2ClassesModule = { Ledger: ledgerMod.Ledger, View: viewMod.View };
     _v2EmbeddingResourcesModule = embeddingResourcesMod;
+    _v2QueryPlannerModule = queryPlannerMod;
     return {
       dispatch: dispatchMod.dispatch,
       Ledger: ledgerMod.Ledger,
       View: viewMod.View,
       openEmbeddingResources: embeddingResourcesMod.openEmbeddingResources,
       semanticDispatchEnabled: embeddingResourcesMod.semanticDispatchEnabled,
+      planQueryAsync: queryPlannerMod.planQueryAsync,
     };
   } catch (err) {
     if (!_v2LoadFailureLogged) {
@@ -926,27 +946,119 @@ function _ledgerSupportsViewMeta(ledger, viewMeta) {
   }
 }
 
-function _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta }) {
+function _openV2LedgerHandle(Ledger, dbPath, { readOnly = false } = {}) {
+  if (readOnly && typeof Ledger.openReadOnly === "function") {
+    try {
+      return Ledger.openReadOnly({ dbPath });
+    } catch {
+      // Existing pre-migration ledgers may need one read-write open to apply
+      // additive schema work. The successful migrated handle is then cached.
+    }
+  }
+  return Ledger.open({ dbPath });
+}
+
+function _cachePathKey(dbPath) {
+  if (!dbPath) return "";
+  const normalized = path.resolve(String(dbPath)).replace(/\\/g, "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function _acquireCachedAtlasProxyResource(cache, key, open, close) {
+  const now = Date.now();
+  let entry = cache.get(key);
+  if (entry && entry.expiresAt <= now) {
+    _retireAtlasProxyCachedResource(cache, key, entry);
+    entry = null;
+  }
+  if (!entry) {
+    entry = {
+      value: open(),
+      expiresAt: now + ATLAS_V2_LEDGER_CACHE_TTL_MS,
+      refCount: 0,
+      retired: false,
+      close,
+    };
+    cache.set(key, entry);
+  } else {
+    cache.delete(key);
+    cache.set(key, entry);
+    entry.expiresAt = now + ATLAS_V2_LEDGER_CACHE_TTL_MS;
+  }
+  entry.refCount += 1;
+  while (cache.size > ATLAS_V2_LEDGER_CACHE_MAX) {
+    const oldest = cache.keys().next().value;
+    if (oldest == null) break;
+    const oldestEntry = cache.get(oldest);
+    if (!oldestEntry) break;
+    _retireAtlasProxyCachedResource(cache, oldest, oldestEntry);
+  }
+  return { value: entry.value, entry };
+}
+
+function _retireAtlasProxyCachedResource(cache, key, entry) {
+  cache.delete(key);
+  entry.retired = true;
+  if (entry.refCount <= 0) _closeAtlasProxyCachedResource(entry);
+}
+
+function _closeAtlasProxyCachedResource(entry) {
+  try { entry.close(entry.value); } catch { /* cache cleanup is best effort */ }
+}
+
+function _releaseAtlasProxyResourceLease(lease) {
+  if (!lease) return;
+  if (lease.entry) {
+    lease.entry.refCount = Math.max(0, lease.entry.refCount - 1);
+    if (lease.entry.retired && lease.entry.refCount <= 0) _closeAtlasProxyCachedResource(lease.entry);
+    return;
+  }
+  try { lease.close?.(lease.value); } catch { /* best effort */ }
+}
+
+function _acquireV2Ledger(Ledger, dbPath, { readOnly = false, cache = false } = {}) {
+  const cacheKey = _cachePathKey(dbPath);
+  if (!cache || !readOnly || !cacheKey) {
+    const ledger = _openV2LedgerHandle(Ledger, dbPath, { readOnly });
+    return {
+      value: ledger,
+      ledger,
+      entry: null,
+      close: (handle) => handle?.close?.(),
+    };
+  }
+  const lease = _acquireCachedAtlasProxyResource(
+    _v2LedgerCache,
+    `ledger:${cacheKey}`,
+    () => _openV2LedgerHandle(Ledger, dbPath, { readOnly: true }),
+    (handle) => handle?.close?.(),
+  );
+  return { ...lease, ledger: lease.value };
+}
+
+function _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta, readOnly = false }) {
   const paths = _candidateV2LedgerPaths({ configuredRepoRoot, viewMeta });
   let fallback = null;
   for (const dbPath of paths) {
     let candidate = null;
+    let candidateLease = null;
     try {
-      candidate = Ledger.open({ dbPath });
+      candidateLease = _acquireV2Ledger(Ledger, dbPath, { readOnly, cache: readOnly });
+      candidate = candidateLease.ledger;
       if (_ledgerSupportsViewMeta(candidate, viewMeta)) {
         if (fallback) {
-          try { fallback.close(); } catch { /* ignore */ }
+          _releaseAtlasProxyResourceLease(fallback);
         }
-        return { ledger: candidate, dbPath };
+        return { ledger: candidate, dbPath, lease: candidateLease };
       }
       _log({
         event: "atlas_v2_ledger_branch_missing",
         path: dbPath,
         branch: viewMeta?.branch || null,
       });
-      if (!fallback) fallback = candidate;
+      if (!fallback) fallback = candidateLease;
       else {
-        try { candidate.close(); } catch { /* ignore */ }
+        _releaseAtlasProxyResourceLease(candidateLease);
       }
     } catch (err) {
       _log({
@@ -954,10 +1066,10 @@ function _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta }) {
         path: dbPath,
         error: String(err?.message || err),
       });
-      try { candidate?.close?.(); } catch { /* ignore */ }
+      try { _releaseAtlasProxyResourceLease(candidateLease); } catch { /* ignore */ }
     }
   }
-  return fallback ? { ledger: fallback, dbPath: null } : { ledger: null, dbPath: null };
+  return fallback ? { ledger: fallback.ledger, dbPath: null, lease: fallback } : { ledger: null, dbPath: null, lease: null };
 }
 
 function _resolveV2ReadRoot({ configuredRepoRoot, viewMeta, viewPath }) {
@@ -1150,7 +1262,16 @@ function _queueV2Refresh({ queueKey, head = 0, target, action, work }) {
   return job;
 }
 
-async function _awaitQueuedAutoRefreshStaleView({ dispatch, ledger, configuredRepoRoot, probe, viewCandidates, action }) {
+async function _awaitQueuedAutoRefreshStaleView({
+  dispatch,
+  Ledger,
+  ledger,
+  ledgerReadOnly = false,
+  configuredRepoRoot,
+  probe,
+  viewCandidates,
+  action,
+}) {
   if (!_atlasV2AutoRefreshStaleEnabled()) return false;
   if (!ledger || _isV2LifecycleAction(action)) return false;
   const target = probe?.dbPath
@@ -1171,31 +1292,49 @@ async function _awaitQueuedAutoRefreshStaleView({ dispatch, ledger, configuredRe
     target,
     action,
     work: async () => {
-      const head = typeof ledger.headSeq === "function" ? ledger.headSeq(branch) : 0;
-      const call = { action: "index.refresh", mode: "smart", branch };
-      const envelope = await _dispatchV2ThroughGate({
-        dispatch,
-        call,
-        context: {
-          versionId: `${branch}@${head}`,
-          repoRoot: configuredRepoRoot,
-          ledger,
-        },
-        action: "index.refresh",
-        configuredRepoRoot,
-        ledger,
-        viewPath: target,
-      });
-      const ok = envelope?.ok !== false && !envelope?.error;
-      if (!ok) {
-        _log({
-          event: "atlas_v2_auto_refresh_error",
-          path: target,
-          action,
-          error: envelope?.error?.message || envelope?.error?.code || "index.refresh failed",
+      let refreshLedger = ledger;
+      let refreshLease = null;
+      if (ledgerReadOnly && Ledger) {
+        const opened = _openV2LedgerForView({
+          Ledger,
+          configuredRepoRoot,
+          viewMeta: { branch },
+          readOnly: false,
         });
+        if (opened.ledger) {
+          refreshLedger = opened.ledger;
+          refreshLease = opened.lease;
+        }
       }
-      return ok;
+      try {
+        const head = typeof refreshLedger.headSeq === "function" ? refreshLedger.headSeq(branch) : 0;
+        const call = { action: "index.refresh", mode: "smart", branch };
+        const envelope = await _dispatchV2ThroughGate({
+          dispatch,
+          call,
+          context: {
+            versionId: `${branch}@${head}`,
+            repoRoot: configuredRepoRoot,
+            ledger: refreshLedger,
+          },
+          action: "index.refresh",
+          configuredRepoRoot,
+          ledger: refreshLedger,
+          viewPath: target,
+        });
+        const ok = envelope?.ok !== false && !envelope?.error;
+        if (!ok) {
+          _log({
+            event: "atlas_v2_auto_refresh_error",
+            path: target,
+            action,
+            error: envelope?.error?.message || envelope?.error?.code || "index.refresh failed",
+          });
+        }
+        return ok;
+      } finally {
+        _releaseAtlasProxyResourceLease(refreshLease);
+      }
     },
   });
 }
@@ -1220,7 +1359,7 @@ async function _executeV2Call(toolName, args) {
   if (!configuredRepoRoot) return null;
   const modules = await _loadV2Modules();
   if (!modules) return null;
-  const { dispatch, Ledger, View, openEmbeddingResources, semanticDispatchEnabled } = modules;
+  const { dispatch, Ledger, View, openEmbeddingResources, semanticDispatchEnabled, planQueryAsync } = modules;
   const optionalView = ATLAS_V2_VIEW_OPTIONAL_ACTIONS.has(action);
   const preferredViewPath = _preferredExistingV2ViewPath();
   const viewCandidates = preferredViewPath
@@ -1236,10 +1375,15 @@ async function _executeV2Call(toolName, args) {
   let viewPath = null;
   /** @type {ReturnType<typeof openEmbeddingResources> | null} */
   let embeddingResources = null;
+  let ledgerLease = null;
+  const readOnlyLedger = !_isV2BlockingAction(action, args);
   try {
     let meta = null;
     const initialLedgerPath = _existingFilePath(_config?.ledgerDbPath);
-    if (initialLedgerPath) ledger = Ledger.open({ dbPath: initialLedgerPath });
+    if (initialLedgerPath) {
+      ledgerLease = _acquireV2Ledger(Ledger, initialLedgerPath, { readOnly: readOnlyLedger, cache: readOnlyLedger });
+      ledger = ledgerLease.ledger;
+    }
     if (viewCandidates.length > 0) {
       const waitMs = _atlasV2ViewWaitMs();
       const probe = await waitForCurrentView({
@@ -1264,12 +1408,15 @@ async function _executeV2Call(toolName, args) {
             error: mismatch.error.message,
           });
           if (!ledger) {
-            const opened = _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta: meta });
+            const opened = _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta: meta, readOnly: readOnlyLedger });
             ledger = opened.ledger;
+            ledgerLease = opened.lease;
           }
           const refreshed = !optionalView && await _awaitQueuedAutoRefreshStaleView({
             dispatch,
+            Ledger,
             ledger,
+            ledgerReadOnly: readOnlyLedger,
             configuredRepoRoot,
             probe: mismatch,
             viewCandidates,
@@ -1303,7 +1450,9 @@ async function _executeV2Call(toolName, args) {
         if (!optionalView) {
           const refreshed = await _awaitQueuedAutoRefreshStaleView({
             dispatch,
+            Ledger,
             ledger,
+            ledgerReadOnly: readOnlyLedger,
             configuredRepoRoot,
             probe,
             viewCandidates,
@@ -1335,13 +1484,15 @@ async function _executeV2Call(toolName, args) {
         path: initialLedgerPath,
         branch: meta?.branch || null,
       });
-      try { ledger.close(); } catch { /* ignore */ }
+      _releaseAtlasProxyResourceLease(ledgerLease);
       ledger = null;
+      ledgerLease = null;
     }
     const ledgerPath = ledger ? null : _resolveV2LedgerPath({ configuredRepoRoot, viewMeta: meta });
     if (ledgerPath) {
-      const opened = _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta: meta });
+      const opened = _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta: meta, readOnly: readOnlyLedger });
       ledger = opened.ledger;
+      ledgerLease = opened.lease;
     }
     if (!ledger && !ATLAS_V2_VIEW_OPTIONAL_ACTIONS.has(action)) return null;
     if (view && meta && ledger) {
@@ -1359,7 +1510,9 @@ async function _executeV2Call(toolName, args) {
         if (!probe.ok) {
           const refreshed = await _awaitQueuedAutoRefreshStaleView({
             dispatch,
+            Ledger,
             ledger,
+            ledgerReadOnly: readOnlyLedger,
             configuredRepoRoot,
             probe,
             viewCandidates,
@@ -1391,7 +1544,9 @@ async function _executeV2Call(toolName, args) {
             viewPath = null;
             const refreshed = await _awaitQueuedAutoRefreshStaleView({
               dispatch,
+              Ledger,
               ledger,
+              ledgerReadOnly: readOnlyLedger,
               configuredRepoRoot,
               probe: mismatch,
               viewCandidates,
@@ -1450,6 +1605,8 @@ async function _executeV2Call(toolName, args) {
         config: _config || {},
         embeddingIndex: embeddingResources?.enabled ? embeddingResources.index : undefined,
         encoder: embeddingResources?.enabled ? embeddingResources.encoder : undefined,
+        planner: planQueryAsync,
+        asyncNativeRedaction: true,
       },
       action,
       configuredRepoRoot,
@@ -1479,7 +1636,7 @@ async function _executeV2Call(toolName, args) {
     };
   } finally {
     try { if (view) view.close(); } catch { /* ignore */ }
-    try { if (ledger) ledger.close(); } catch { /* ignore */ }
+    _releaseAtlasProxyResourceLease(ledgerLease);
     try { if (embeddingResources) await embeddingResources.close(); } catch { /* ignore */ }
     void start;
   }
@@ -1494,4 +1651,8 @@ export const __testV2Helpers = {
   isDedupeEligible: _isDedupeEligible,
   isV2BlockingAction: _isV2BlockingAction,
   atlasV2ViewWaitMs: _atlasV2ViewWaitMs,
+  resourceCacheState: () => ({
+    ledgers: _v2LedgerCache.size,
+    ledgerRefs: [..._v2LedgerCache.values()].map((entry) => entry.refCount),
+  }),
 };

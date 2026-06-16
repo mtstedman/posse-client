@@ -15,6 +15,15 @@ export {
 } from "./deterministic-mcp/tool-descriptors.js";
 export { McpServerConfig } from "../../../classes/tools/McpServerConfig.js";
 export { McpServer } from "../../../classes/tools/McpServer.js";
+export {
+  bootConfigFromMcpOAuthClaims,
+  buildMcpOAuthClaimsFromBootConfig,
+  ensureMcpOAuthSigningKey,
+  getMcpOAuthSigningKey,
+  mintMcpOAuthToken,
+  mintMcpOAuthTokenForBootConfig,
+  verifyMcpOAuthToken,
+} from "./deterministic-mcp/oauth-token.js";
 
 export function buildDeterministicReadMcpServerConfig(role, {
   cwd = process.cwd(),
@@ -48,4 +57,40 @@ export function buildDeterministicReadMcpServerConfig(role, {
     atlasGateEnabled,
     atlasConfig,
   }).toSpawnArgs();
+}
+
+export async function buildDeterministicReadMcpServerConfigAsync(role, {
+  cwd = process.cwd(),
+  scopedFiles = [],
+  createFiles = [],
+  deleteFiles = [],
+  createRoots = [],
+  needsImageGeneration = false,
+  providerName = null,
+  disableSystemTools = false,
+  jobId = null,
+  workItemId = null,
+  atlasPrefetchStatus = null,
+  atlasAvailable = null,
+  atlasGateEnabled = true,
+  atlasConfig = null,
+  remoteToolSurfaceOptions = null,
+} = {}) {
+  return (await McpServerConfig.forDeterministicReadAsync(role, {
+    cwd,
+    scopedFiles,
+    createFiles,
+    deleteFiles,
+    createRoots,
+    needsImageGeneration,
+    providerName,
+    disableSystemTools,
+    jobId,
+    workItemId,
+    atlasPrefetchStatus,
+    atlasAvailable,
+    atlasGateEnabled,
+    atlasConfig,
+    remoteToolSurfaceOptions,
+  })).toSpawnArgs();
 }
