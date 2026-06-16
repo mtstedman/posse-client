@@ -362,7 +362,7 @@ let gateScopeKey = configureGate({
   atlasAvailable,
   enabled: atlasGateEnabled,
   atlasLabel: atlasBackendLabel(atlasAvailable ? getAtlasIntegrationConfig() : null),
-  scopeKey: mcpJobId != null ? `job:${mcpJobId}` : null,
+  scopeKey: gateScopeKeyForBootConfig(bootConfig),
 });
 if (atlasAvailable && isFallbackAtlasPrefetchStatus(atlasPrefetchStatus)) {
   unlockForAtlasUnavailable({ reason: `prefetch_${atlasPrefetchStatus}`, scopeKey: gateScopeKey });
@@ -1933,11 +1933,19 @@ for (const [toolName, handler] of [...TOOL_EXECUTORS.entries()]) {
 let activeRuntimeSessionKey = "";
 
 function runtimeSessionKey(config = bootConfig) {
+  const token = String(config?.mcpOAuth?.tokenId || "").trim();
   const job = config?.jobId != null && config.jobId !== "" ? `job:${config.jobId}` : "";
   const workItem = config?.workItemId != null && config.workItemId !== "" ? `wi:${config.workItemId}` : "";
   const role = String(config?.role || "").trim();
   const cwd = String(config?.cwd || "").trim();
-  return [job, workItem, role, cwd].filter(Boolean).join("|") || "owner-hot";
+  return [token ? `mcp:${token}` : "", job, workItem, role, cwd].filter(Boolean).join("|") || "owner-hot";
+}
+
+function gateScopeKeyForBootConfig(config = bootConfig) {
+  const token = String(config?.mcpOAuth?.tokenId || "").trim();
+  if (token) return `mcp:${token}`;
+  const jobId = Number(config?.jobId) || null;
+  return jobId != null ? `job:${jobId}` : null;
 }
 
 function computeDeclaredNativeToolNamesForCurrentBoot() {
@@ -2163,7 +2171,7 @@ function applyRuntimeBootConfig(nextConfig = {}) {
     atlasAvailable,
     enabled: atlasGateEnabled,
     atlasLabel: atlasBackendLabel(atlasAvailable ? getAtlasIntegrationConfig() : null),
-    scopeKey: mcpJobId != null ? `job:${mcpJobId}` : null,
+    scopeKey: gateScopeKeyForBootConfig(bootConfig),
   });
   if (atlasAvailable && isFallbackAtlasPrefetchStatus(atlasPrefetchStatus)) {
     unlockForAtlasUnavailable({ reason: `prefetch_${atlasPrefetchStatus}`, scopeKey: gateScopeKey });

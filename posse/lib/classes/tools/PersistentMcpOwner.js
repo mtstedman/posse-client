@@ -79,6 +79,11 @@ function tokenHash(value) {
   return crypto.createHash("sha256").update(String(value || ""), "utf8").digest("base64url");
 }
 
+function isPowershellClixmlProgressNoise(chunk) {
+  const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
+  return /#<\s*CLIXML/i.test(text) && /Preparing modules for first use/i.test(text);
+}
+
 function remoteIssuedSessionId(value) {
   return `remote:${tokenHash(value).slice(0, 32)}`;
 }
@@ -320,6 +325,7 @@ class PersistentMcpSession {
     this._proc.stdout?.on("data", (chunk) => this._handleStdout(chunk));
     this._proc.stderr?.on("data", (chunk) => {
       try {
+        if (isPowershellClixmlProgressNoise(chunk)) return;
         process.stderr.write(`[posse-mcp-owner:${this.id}] ${chunk}`);
       } catch {
         // diagnostics only
@@ -531,6 +537,16 @@ export class PersistentMcpOwner {
     if (!claims.__source) claims.__source = verified ? "local" : "remote";
     const id = String(claims.jti || claims.sub || "");
     if (!id) throw new Error("MCP OAuth token is missing a session id");
+    const sessionBootConfig = {
+      ...bootConfigFromMcpOAuthClaims(claims),
+      ...bootConfig,
+      mcpOAuth: {
+        verified: true,
+        tokenId: id,
+        expiresAt: claims.exp || null,
+        source: claims.__source || (verified ? "local" : "remote"),
+      },
+    };
     let session = this._sessions.get(id);
     if (session && !tokenEqual(session.token, token)) {
       throw new Error("MCP OAuth token session id collision");
@@ -540,13 +556,13 @@ export class PersistentMcpOwner {
         id,
         token,
         claims,
-        bootConfig,
+        bootConfig: sessionBootConfig,
         serverSpec: null,
         spawnImpl: this._spawn,
       });
       this._sessions.set(id, session);
     } else {
-      session.update({ token, claims, bootConfig, serverSpec: null });
+      session.update({ token, claims, bootConfig: sessionBootConfig, serverSpec: null });
     }
     this._ensureGatewaySession({ serverSpec, prewarm });
     this._sessionIdsByTokenHash.set(tokenHash(token), id);
@@ -659,7 +675,7 @@ export class PersistentMcpOwner {
         ...bootConfigFromMcpOAuthClaims(claims),
         mcpOAuth: {
           verified: true,
-          tokenId: claims.jti || null,
+          tokenId: id,
           expiresAt: claims.exp || null,
         },
       };

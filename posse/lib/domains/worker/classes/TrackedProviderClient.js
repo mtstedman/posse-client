@@ -54,6 +54,8 @@ const DEFAULT_PROVIDER_ERROR_PATTERNS = [
   /claude exited null/i,
   /claude exited with unknown status/i,
   /claude exited via signal/i,
+  /socket connection was closed unexpectedly/i,
+  /^Codex CLI exited with code 1\s*$/i,
   /ECONNREFUSED|ECONNRESET|ETIMEDOUT/i,
   /connection error/i,
   /circuit breaker open/i,

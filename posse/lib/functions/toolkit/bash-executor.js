@@ -142,13 +142,70 @@ function headCountFromTokens(tokens) {
   return null;
 }
 
+function tailCountFromTokens(tokens) {
+  if (!Array.isArray(tokens) || tokens[0] !== "tail") return null;
+  if (tokens.length === 1) return 10;
+  if (tokens[1] === "-n" && /^\d+$/.test(String(tokens[2] || ""))) return Number(tokens[2]);
+  const compact = String(tokens[1] || "").match(/^-n?(\d+)$/);
+  if (compact) return Number(compact[1]);
+  return null;
+}
+
 function wcLineCountFromTokens(tokens) {
   if (!Array.isArray(tokens) || tokens[0] !== "wc") return null;
   return tokens.includes("-l") ? true : null;
 }
 
+function grepFromTokens(tokens) {
+  if (!Array.isArray(tokens) || tokens[0] !== "grep") return null;
+  let caseInsensitive = false;
+  let pattern = null;
+  const files = [];
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "-e" || token === "--regexp") {
+      pattern = tokens[index + 1] || null;
+      index += 1;
+      continue;
+    }
+    if (token === "-i" || token === "--ignore-case") {
+      caseInsensitive = true;
+      continue;
+    }
+    if (/^-[A-Za-z]+$/.test(token)) {
+      if (token.includes("i")) caseInsensitive = true;
+      continue;
+    }
+    if (pattern == null) {
+      pattern = token;
+      continue;
+    }
+    files.push(token);
+  }
+  return pattern ? { pattern, caseInsensitive, files } : null;
+}
+
+function selectStringCommand({ pattern, caseInsensitive = false, files = [] } = {}) {
+  const pathPart = files.length > 0
+    ? ` -Path ${files.map(powershellSingleQuoted).join(", ")}`
+    : "";
+  const casePart = caseInsensitive ? "" : " -CaseSensitive";
+  return `Select-String${pathPart} -Pattern ${powershellSingleQuoted(pattern)}${casePart}`;
+}
+
 function headFileFromTokens(tokens) {
   if (!Array.isArray(tokens) || tokens[0] !== "head") return null;
+  let index = 1;
+  if (tokens[index] === "-n") {
+    index += 2;
+  } else if (/^-n?\d+$/.test(String(tokens[index] || ""))) {
+    index += 1;
+  }
+  return tokens[index] || null;
+}
+
+function tailFileFromTokens(tokens) {
+  if (!Array.isArray(tokens) || tokens[0] !== "tail") return null;
   let index = 1;
   if (tokens[index] === "-n") {
     index += 2;
@@ -163,18 +220,44 @@ function numberedContentCommand(file) {
   return `& { $i = 0; Get-Content -LiteralPath ${literal} | ForEach-Object { $i++; "{0,6}\\t{1}" -f $i, $_ } }`;
 }
 
+function catFilesFromTokens(tokens) {
+  if (!Array.isArray(tokens) || (tokens[0] !== "cat" && tokens[0] !== "type")) return null;
+  if (tokens[1] === "-n") return null;
+  const files = tokens.slice(1).filter(Boolean);
+  return files.length > 1 ? files : null;
+}
+
+function contentCommandForFiles(files = []) {
+  return `Get-Content -LiteralPath ${files.map(powershellSingleQuoted).join(", ")}`;
+}
+
+function fileInfoCommand(file) {
+  const literal = powershellSingleQuoted(file);
+  return `& { $p = ${literal}; if (Test-Path -LiteralPath $p -PathType Container) { "{0}: directory" -f $p } elseif (Test-Path -LiteralPath $p -PathType Leaf) { $item = Get-Item -LiteralPath $p; "{0}: regular file, {1} bytes" -f $p, $item.Length } else { "file: cannot open ''{0}'' (No such file or directory)" -f $p; exit 1 } }`;
+}
+
 function normalizePipedWindowsCommand(command) {
   const parts = splitTopLevelPipes(command);
   if (parts.length < 2) return command;
   const lastTokens = parseCommandLine(parts[parts.length - 1]);
   const headCount = headCountFromTokens(lastTokens);
   if (headCount != null) {
-    const prefix = parts.slice(0, -1).join(" | ");
+    const prefix = parts.slice(0, -1).map(normalizeStandaloneWindowsCommand).join(" | ");
     return `${prefix} | Select-Object -First ${headCount}`;
   }
+  const tailCount = tailCountFromTokens(lastTokens);
+  if (tailCount != null) {
+    const prefix = parts.slice(0, -1).map(normalizeStandaloneWindowsCommand).join(" | ");
+    return `${prefix} | Select-Object -Last ${tailCount}`;
+  }
   if (wcLineCountFromTokens(lastTokens)) {
-    const prefix = parts.slice(0, -1).join(" | ");
+    const prefix = parts.slice(0, -1).map(normalizeStandaloneWindowsCommand).join(" | ");
     return `(${prefix} | Measure-Object -Line).Lines`;
+  }
+  const grep = grepFromTokens(lastTokens);
+  if (grep) {
+    const prefix = parts.slice(0, -1).map(normalizeStandaloneWindowsCommand).join(" | ");
+    return `${prefix} | ${selectStringCommand(grep)}`;
   }
   return command;
 }
@@ -193,9 +276,23 @@ function normalizeStandaloneWindowsCommand(command) {
       return `Get-Content -LiteralPath ${powershellSingleQuoted(file)} | Select-Object -First ${count}`;
     }
   }
+  if (tokens[0] === "tail") {
+    const count = tailCountFromTokens(tokens);
+    const file = tailFileFromTokens(tokens);
+    if (count != null && file) {
+      return `Get-Content -LiteralPath ${powershellSingleQuoted(file)} | Select-Object -Last ${count}`;
+    }
+  }
   if ((tokens[0] === "cat" || tokens[0] === "type") && tokens[1] === "-n" && tokens[2]) {
     return numberedContentCommand(tokens[2]);
   }
+  const catFiles = catFilesFromTokens(tokens);
+  if (catFiles) return contentCommandForFiles(catFiles);
+  if (tokens[0] === "file" && tokens.length === 2) {
+    return fileInfoCommand(tokens[1]);
+  }
+  const grep = grepFromTokens(tokens);
+  if (grep) return selectStringCommand(grep);
   return command;
 }
 
@@ -213,8 +310,14 @@ function normalizeWindowsShellCommand(command) {
   return normalizeStandaloneWindowsCommand(normalizePipedWindowsCommand(text));
 }
 
+function powershellFallbackCommand(command) {
+  const normalized = normalizeWindowsShellCommand(command);
+  if (!normalized) return normalized;
+  return `$ProgressPreference = 'SilentlyContinue'; $InformationPreference = 'SilentlyContinue'; ${normalized}`;
+}
+
 function execBashWithShell(command, { cwd, timeout, maxBuffer, env, platform = process.platform, execSyncImpl }) {
-  const shellBody = platform === "win32" ? normalizeWindowsShellCommand(command) : command;
+  const shellBody = platform === "win32" ? powershellFallbackCommand(command) : command;
   const shellCommand = platform === "win32"
     ? `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${powershellEncodedCommand(shellBody)}`
     : shellBody;

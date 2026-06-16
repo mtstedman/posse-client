@@ -159,7 +159,10 @@ export async function collectPartialWorkStateAsync(job, wtPath, { signal = null 
   if (!job?.id || !wtPath) return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
   let raw = "";
   try {
-    raw = await gitExecAsync(["-c", "core.quotePath=false", "status", "--porcelain"], wtPath, { signal });
+    raw = await gitExecAsync(["-c", "core.quotePath=false", "status", "--porcelain"], wtPath, {
+      signal,
+      nativeParity: { disabled: true },
+    });
   } catch {
     return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
   }

@@ -14,7 +14,7 @@ const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { ensurePosseGitInfoExclude } from "../../runtime/functions/ignore.js";
-import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
+import { isAbortError, signalAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { jobNeedsGitWorktree } from "./policy.js";
 import { FORCE_REMOVE_OPTIONS } from "./worktree-remove-options.js";
@@ -84,6 +84,9 @@ const DEFAULT_SNAPSHOT_MAX_FILES = 500;
 const DEFAULT_SNAPSHOT_MAX_COPY_BYTES = 100 * 1024 * 1024;
 const DEFAULT_GC_TIMING_SLOW_MS = 1000;
 const GC_TIMING_SUMMARY_LIMIT = 5;
+const WORKTREE_REMOVE_RETRY_DELAYS_MS = Object.freeze(process.platform === "win32"
+  ? [250, 750, 1500, 3000]
+  : [100]);
 
 function randomToken(bytes = 4) {
   return randomBytes(bytes).toString("hex");
@@ -94,6 +97,31 @@ function formatGcDuration(ms) {
   if (rounded < 1000) return `${rounded}ms`;
   const seconds = rounded / 1000;
   return `${seconds >= 10 ? seconds.toFixed(0) : seconds.toFixed(1)}s`;
+}
+
+function sleepSyncMs(ms) {
+  const delay = Math.max(0, Number(ms) || 0);
+  if (delay <= 0) return;
+  const buffer = new SharedArrayBuffer(4);
+  Atomics.wait(new Int32Array(buffer), 0, 0, delay);
+}
+
+function sleepMs(ms, { signal = null } = {}) {
+  const delay = Math.max(0, Number(ms) || 0);
+  throwIfAborted(signal);
+  if (delay <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, delay);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signalAbortError(signal));
+    };
+    function done() {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function normalizeGitGateKey(cwd) {
@@ -282,6 +310,17 @@ function removeWorktreePathAsync(wtPath, mainCwd, options = {}) {
   return Worktree.at(mainCwd, wtPath).removeAsync({ force: true, prune: true, fallbackRemove: true, ...options });
 }
 
+function forceRemoveWorktreePathAfterNative(wtPath, mainCwd) {
+  try { gitExec(["worktree", "prune"], mainCwd); } catch {}
+  try {
+    fs.rmSync(wtPath, FORCE_REMOVE_OPTIONS);
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    throw err;
+  }
+  try { gitExec(["worktree", "prune"], mainCwd); } catch {}
+}
+
 async function forceRemoveWorktreePathAfterNativeAsync(wtPath, mainCwd, { signal = null } = {}) {
   try { await gitExecAsync(["worktree", "prune"], mainCwd, { signal }); } catch (err) { if (isAbortError(err)) throw err; }
   try {
@@ -290,6 +329,38 @@ async function forceRemoveWorktreePathAfterNativeAsync(wtPath, mainCwd, { signal
     if (isAbortError(err)) throw err;
   }
   try { await gitExecAsync(["worktree", "prune"], mainCwd, { signal }); } catch (err) { if (isAbortError(err)) throw err; }
+}
+
+function retryForceRemoveWorktreePathAfterNative(wtPath, mainCwd) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= WORKTREE_REMOVE_RETRY_DELAYS_MS.length; attempt += 1) {
+    if (attempt > 0) sleepSyncMs(WORKTREE_REMOVE_RETRY_DELAYS_MS[attempt - 1]);
+    try {
+      forceRemoveWorktreePathAfterNative(wtPath, mainCwd);
+      if (!fs.existsSync(wtPath)) return true;
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      lastError = err;
+    }
+  }
+  if (lastError) throw lastError;
+  return !fs.existsSync(wtPath);
+}
+
+async function retryForceRemoveWorktreePathAfterNativeAsync(wtPath, mainCwd, { signal = null } = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= WORKTREE_REMOVE_RETRY_DELAYS_MS.length; attempt += 1) {
+    if (attempt > 0) await sleepMs(WORKTREE_REMOVE_RETRY_DELAYS_MS[attempt - 1], { signal });
+    try {
+      await forceRemoveWorktreePathAfterNativeAsync(wtPath, mainCwd, { signal });
+      if (!fs.existsSync(wtPath)) return true;
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      lastError = err;
+    }
+  }
+  if (lastError) throw lastError;
+  return !fs.existsSync(wtPath);
 }
 
 function worktreePorcelain(wtPath) {
@@ -1298,7 +1369,26 @@ export function safeSnapshotAndRemoveWorktree(
       });
     }
 
-    const removed = !fs.existsSync(wtPath);
+    let removed = !fs.existsSync(wtPath);
+    if (!removed) {
+      try {
+        removed = retryForceRemoveWorktreePathAfterNative(wtPath, projectDir);
+      } catch (err) {
+        notifySafeRemoveFailure(onFailure, {
+          wtPath,
+          projectDir,
+          reason,
+          branchName,
+          wiId,
+          phase: "remove",
+          message: `Force-remove retry failed after native worktree removal: ${err?.message || String(err)}`,
+          error: err?.message || String(err),
+          snapshotDir,
+          snapshotSucceeded,
+          verifiedClean,
+        });
+      }
+    }
     if (!removed) {
       notifySafeRemoveFailure(onFailure, {
         wtPath,
@@ -1539,8 +1629,7 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
     let removed = !fs.existsSync(wtPath);
     if (!removed) {
       try {
-        await forceRemoveWorktreePathAfterNativeAsync(wtPath, projectDir, { signal });
-        removed = !fs.existsSync(wtPath);
+        removed = await retryForceRemoveWorktreePathAfterNativeAsync(wtPath, projectDir, { signal });
       } catch (err) {
         if (isAbortError(err)) throw err;
         notifySafeRemoveFailure(onFailure, {

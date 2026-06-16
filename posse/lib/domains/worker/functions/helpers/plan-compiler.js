@@ -85,6 +85,7 @@ import {
 } from "./role-utils.js";
 import { spawnFromRole as defaultSpawnFromRole } from "../spawn-guard.js";
 import {
+  collectRequestedImageOutputs,
   hasRequestedImageGenerationOutput,
 } from "../planning/image-outputs.js";
 import {
@@ -778,9 +779,20 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           || (Array.isArray(t.files_to_delete) && t.files_to_delete.length > 0);
         const plannerRepoCreateScope = Array.isArray(t.files_to_create) && t.files_to_create.length > 0;
         const plannerRepoWritableScope = plannerRepoMutationScope || plannerRepoCreateScope;
-        const hintedRepoDesignTask = looksLikeRepoDesignTaskFromModule(t, intakeHints);
         const forceRepoOutput = explicitBindings.outputMode === "repo";
         const forceArtifactOutput = explicitBindings.outputMode === "artifact";
+        const intakeDesiredOutputs = Array.isArray(intakeHints.desired_outputs)
+          ? intakeHints.desired_outputs.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+          : [];
+        const artifactOnlyOutputHint =
+          !forceRepoOutput
+          && (
+            forceArtifactOutput
+            || wiMode === "report"
+            || wiMode === "image"
+            || (intakeDesiredOutputs.includes("artifact") && !intakeDesiredOutputs.includes("repo"))
+          );
+        const hintedRepoDesignTask = !artifactOnlyOutputHint && looksLikeRepoDesignTaskFromModule(t, intakeHints);
 
         // Repo-output bindings can rescue artifact-looking work, but not tasks
         // that are explicitly marked as image generation.
@@ -805,10 +817,16 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             || /\b(existing|current|already)\b[\s\S]{0,80}\b(logo|icon|image|images|banner|photo|graphic|artwork|illustration|asset|assets)\b/.test(spec);
           const explicitImageAsset = /\b(png|jpg|jpeg|webp|svg|illustration|photo|raster image|screenshot|mockup|thumbnail|hero image|image asset|dall-?e)\b/.test(spec);
           const explicitImageGeneration = hasRequestedImageGenerationOutput(t, { pathOnlyIsIntent: false });
+          const structuredImageOutputs = collectRequestedImageOutputs(t, { includeText: false });
+          const documentationArtifactIntent =
+            taskMode !== "image"
+            && structuredImageOutputs.length === 0
+            && /\b(readme|markdown|\.md|report|documentation|docs?|usage note|intended use|explaining|describing)\b/.test(spec);
           const shouldInferImageGeneration =
             !forceRepoOutput
             && !hintedRepoDesignTask
             && !referencesExistingAsset
+            && !documentationArtifactIntent
             && (explicitImageGeneration || (!plannerRepoWritableScope && explicitImageAsset));
           if (shouldInferImageGeneration) {
             t.needs_image_generation = true;

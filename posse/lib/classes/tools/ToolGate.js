@@ -80,15 +80,27 @@ export class ToolGate {
   }
 
   configure({ role = null, atlasAvailable = false, atlasLabel = "ATLAS" } = {}) {
+    const nextRole = role || null;
+    const nextAtlasAvailable = !!atlasAvailable;
+    const nextAtlasLabel = String(atlasLabel || "ATLAS").trim() || "ATLAS";
+    if (
+      this._configured === true
+      && this.role === nextRole
+      && this.atlasAvailable === nextAtlasAvailable
+      && this.atlasLabel === nextAtlasLabel
+    ) {
+      return;
+    }
     this.role = role || null;
-    this.atlasAvailable = !!atlasAvailable;
-    this.atlasLabel = String(atlasLabel || "ATLAS").trim() || "ATLAS";
+    this.atlasAvailable = nextAtlasAvailable;
+    this.atlasLabel = nextAtlasLabel;
     this.unlocked = false;
     this.unlockReason = null;
     this.unhelpfulStrikes = 0;
     this.meaningfulAtlasCalls = 0;
     this.usefulAtlasCalls = 0;
     this.discoveredFiles = new Set();
+    this._configured = true;
   }
 
   release() {
@@ -100,6 +112,7 @@ export class ToolGate {
     this.meaningfulAtlasCalls = 0;
     this.usefulAtlasCalls = 0;
     this.discoveredFiles = new Set();
+    this._configured = false;
   }
 
   isActive() {

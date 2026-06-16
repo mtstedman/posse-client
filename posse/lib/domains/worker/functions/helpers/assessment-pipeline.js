@@ -1210,9 +1210,19 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
           || _looksLikeAssessorAccessLimitation(accessContext)
         )
       ) {
-        const err = new Error("Assessor requested repository file contents instead of using local reads");
-        err.assessmentRetryable = true;
-        throw err;
+        const rawReasons = Array.isArray(verdict.reasons) ? verdict.reasons : [];
+        verdict = {
+          ...verdict,
+          verdict: ["blocked", "needs_review"].includes(String(verdict.verdict || "").toLowerCase())
+            ? "blocked"
+            : verdict.verdict,
+          reasons: [
+            "Assessor asked the human for repository file contents or diffs that must be verified from local assessment context; sanitized the request and disabled internal assessment retry.",
+            ...rawReasons,
+          ],
+          human_questions: [],
+          _disable_internal_retry: true,
+        };
       }
     }
   }
@@ -1277,6 +1287,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     human_questions: (Array.isArray(verdict.human_questions) ? verdict.human_questions : []).map(q => typeof q === "string" ? q : String(q)),
     suggestions: Array.isArray(verdict.suggestions) ? verdict.suggestions : [],
     raw: response,
+    ...(verdict._disable_internal_retry ? { _disable_internal_retry: true } : {}),
   };
 }
 

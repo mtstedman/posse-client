@@ -78,7 +78,7 @@ export function completeAttempt(attemptId, {
         prompt_chars = ?, output_chars = ?,
         estimated_input_tokens = ?, estimated_output_tokens = ?,
         prompt_artifact_id = ?, output_artifact_id = ?,
-        error_text = ?, notes = ?, commit_hash = ?
+        error_text = ?, notes = ?, commit_hash = COALESCE(?, commit_hash)
     WHERE id = ?
   `).run(
     status, now(), duration_ms,

@@ -114,7 +114,7 @@ export function normalizeRequestedImageOutput(value) {
   return normalized;
 }
 
-export function collectRequestedImageOutputs(task = {}) {
+export function collectRequestedImageOutputs(task = {}, { includeText = true } = {}) {
   const candidates = [];
   const appendArray = (value) => {
     if (!Array.isArray(value)) return;
@@ -137,14 +137,16 @@ export function collectRequestedImageOutputs(task = {}) {
     appendArray(task.outputs.assets);
   }
 
-  const text = [
-    task.title || "",
-    task.task_spec || "",
-    task.instructions || "",
-    ...(Array.isArray(task.success_criteria) ? task.success_criteria : [task.success_criteria || ""]),
-  ].join("\n");
-  for (const match of String(text || "").matchAll(REQUESTED_IMAGE_PATH_RE)) {
-    if (match?.[1]) candidates.push(match[1]);
+  if (includeText) {
+    const text = [
+      task.title || "",
+      task.task_spec || "",
+      task.instructions || "",
+      ...(Array.isArray(task.success_criteria) ? task.success_criteria : [task.success_criteria || ""]),
+    ].join("\n");
+    for (const match of String(text || "").matchAll(REQUESTED_IMAGE_PATH_RE)) {
+      if (match?.[1]) candidates.push(match[1]);
+    }
   }
 
   const outputs = [];

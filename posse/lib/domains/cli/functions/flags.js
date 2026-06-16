@@ -97,11 +97,26 @@ export function parseStallTimeout(argv = process.argv) {
   return null; // null = provider helper uses catalog-backed stall_timeout fallback
 }
 
+const IMAGE_MODE_ACTION_RE = /\b(generate|create|make|draw|design)\b/i;
+const IMAGE_MODE_NOUN_RE = /\b(image|photo|picture|illustration|banner|icon|logo|artwork|mermaid)\b/i;
+const IMAGE_MODE_DIRECT_RE = /\b(dall-?e|midjourney|stable.?diffusion|image.?gen)\b/i;
+const NEGATED_IMAGE_MODE_RE = /\b(?:not\s+(?:an?\s+)?|no\s+(?:new\s+)?|without\s+(?:an?\s+)?)(?:image|photo|picture|illustration|banner|icon|logo|artwork|mermaid|images|photos|pictures|illustrations|banners|icons|logos)\b|\b(?:do not|don't|no need to)\s+(?:generate|create|make|draw|design)\b[\s\S]{0,60}\b(?:image|photo|picture|illustration|banner|icon|logo|artwork|mermaid|images|photos|pictures|illustrations|banners|icons|logos)\b/i;
+
+function hasImageModeIntent(text) {
+  const source = String(text || "");
+  const sentences = source.match(/[^.!?\r\n]+[.!?\r\n]*/g) || [source];
+  for (const rawSentence of sentences) {
+    const sentence = rawSentence.trim();
+    if (!sentence || NEGATED_IMAGE_MODE_RE.test(sentence)) continue;
+    if (IMAGE_MODE_DIRECT_RE.test(sentence)) return true;
+    if (IMAGE_MODE_ACTION_RE.test(sentence) && IMAGE_MODE_NOUN_RE.test(sentence)) return true;
+  }
+  return false;
+}
+
 export function inferWiMode(text) {
   const lower = text.toLowerCase();
-  if (/\b(generate|create|make|draw|design)\b.*\b(image|photo|picture|illustration|banner|icon|logo|artwork|mermaid)\b/i.test(lower)) return "image";
-  if (/\b(image|photo|picture|illustration|banner|icon|logo)\b.*\b(generat|creat|mak|draw|design)/i.test(lower)) return "image";
-  if (/\b(dall-?e|midjourney|stable.?diffusion|image.?gen)/i.test(lower)) return "image";
+  if (hasImageModeIntent(lower)) return "image";
   const reportAction = "\\b(write|prepare|draft|produce|create|generate|compile|export|deliver|analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\\b";
   const reportObject = "\\b(report|summary|write[- ]?up|analysis|brief|csv|spreadsheet|analy[sz](?:e|ed|es|ing))\\b";
   if (new RegExp(`${reportAction}[\\s\\S]{0,80}${reportObject}`, "i").test(lower)) return "report";
