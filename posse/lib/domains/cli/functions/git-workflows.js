@@ -1186,7 +1186,7 @@ export function createGitWorkflowHelpers({
   function executePush({ effectiveRemote, pushBranch, mergedCount = 0 }) {
     try {
       const markerCheck = execSync(
-        'git grep -l "^<<<<<<<\\|^=======\\|^>>>>>>>" HEAD -- . ":(exclude).posse/**"',
+        'git grep -l -e "^<<<<<<<" -e "^=======$" -e "^>>>>>>>" HEAD -- . ":(exclude).posse/**"',
         { cwd: projectDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10000 },
       ).trim();
       if (markerCheck) {

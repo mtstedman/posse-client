@@ -63,6 +63,74 @@ function nativeOptions(options = {}) {
   return rest;
 }
 
+function isAbortLike(err) {
+  return err?.name === "AbortError" || err?.code === "ABORT_ERR" || err?.code === "THREAD_ABORTED";
+}
+
+function shouldFallbackNativeScope(err) {
+  return !isAbortLike(err);
+}
+
+function nodeScopeFromInput(input = {}, options = {}) {
+  const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  return {
+    files: normalizeFileList(source.files || []),
+    roots: normalizeRootList(source.roots || [], source.cwd || options.cwd || process.cwd()),
+    unknown: Boolean(source.unknown),
+  };
+}
+
+function nodeScopeFromPayload(payload = {}, options = {}) {
+  const parsed = parseJsonObject(payload);
+  const promoted = normalizePromoteMappings(parsed.mappings || []);
+  return nodeScopeFromInput({
+    files: [
+      ...(Array.isArray(parsed.files_to_modify) ? parsed.files_to_modify : []),
+      ...(Array.isArray(parsed.files_to_create) ? parsed.files_to_create : []),
+      ...(Array.isArray(parsed.files_to_delete) ? parsed.files_to_delete : []),
+      ...promoted.files,
+    ],
+    roots: [
+      ...(Array.isArray(parsed.create_roots) ? parsed.create_roots : []),
+      ...promoted.roots,
+    ],
+    unknown: parsed.unknown === true,
+    cwd: options.cwd,
+  }, options);
+}
+
+function nodeHasScope(scope) {
+  return Boolean(scope?.unknown) || (scope?.files || []).length > 0 || (scope?.roots || []).length > 0;
+}
+
+function nodeIsWildcard(scope) {
+  return Boolean(scope?.unknown) || (scope?.roots || []).includes("*");
+}
+
+function nodeContainsFile(scope, filePath) {
+  if (nodeIsWildcard(scope)) return true;
+  const normalized = normalizeLockPath(filePath);
+  if (!normalized) return false;
+  if ((scope?.files || []).includes(normalized)) return true;
+  return isUnderRoot(normalized, scope?.roots || []);
+}
+
+function nodeLockRows(scope) {
+  return Object.freeze([
+    ...(scope?.files || []).map((path) => ({ path, lock_kind: "file" })),
+    ...(scope?.roots || []).map((path) => ({ path, lock_kind: "root" })),
+  ]);
+}
+
+function nodeFindConflict(left, right) {
+  for (const leftRow of nodeLockRows(left)) {
+    for (const rightRow of nodeLockRows(right)) {
+      if (rowsConflict(leftRow, rightRow)) return { left: leftRow, right: rightRow };
+    }
+  }
+  return null;
+}
+
 export class CommitScope {
   constructor({
     files = [],
@@ -77,42 +145,82 @@ export class CommitScope {
   }
 
   static empty(options = {}) {
-    const value = runGitNativeMethod("git.commitScope.fromInput", nativeOptions(options), options.nativeParity || {});
+    const input = nativeOptions(options);
+    let value;
+    try {
+      value = runGitNativeMethod("git.commitScope.fromInput", input, options.nativeParity || {});
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      value = nodeScopeFromInput(input, options);
+    }
     return new CommitScope(value && typeof value === "object" ? value : {});
   }
 
   static async emptyAsync(options = {}) {
-    const value = await runGitNativeMethodAsync("git.commitScope.fromInput", nativeOptions(options), options.nativeParity || {});
+    const input = nativeOptions(options);
+    let value;
+    try {
+      value = await runGitNativeMethodAsync("git.commitScope.fromInput", input, options.nativeParity || {});
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      value = nodeScopeFromInput(input, options);
+    }
     return new CommitScope(value && typeof value === "object" ? value : {});
   }
 
   static wildcard(options = {}) {
     const input = { ...nativeOptions(options), roots: ["*"], unknown: options.unknown ?? true };
-    const value = runGitNativeMethod("git.commitScope.fromInput", input, options.nativeParity || {});
+    let value;
+    try {
+      value = runGitNativeMethod("git.commitScope.fromInput", input, options.nativeParity || {});
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      value = nodeScopeFromInput(input, options);
+    }
     return new CommitScope(value && typeof value === "object" ? value : {});
   }
 
   static async wildcardAsync(options = {}) {
     const input = { ...nativeOptions(options), roots: ["*"], unknown: options.unknown ?? true };
-    const value = await runGitNativeMethodAsync("git.commitScope.fromInput", input, options.nativeParity || {});
+    let value;
+    try {
+      value = await runGitNativeMethodAsync("git.commitScope.fromInput", input, options.nativeParity || {});
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      value = nodeScopeFromInput(input, options);
+    }
     return new CommitScope(value && typeof value === "object" ? value : {});
   }
 
   static fromPayload(payload = {}, options = {}) {
-    const value = runGitNativeMethod(
-      "git.commitScope.fromPayload",
-      { payload, options: nativeOptions(options) },
-      options.nativeParity || {},
-    );
+    const opts = nativeOptions(options);
+    let value;
+    try {
+      value = runGitNativeMethod(
+        "git.commitScope.fromPayload",
+        { payload, options: opts },
+        options.nativeParity || {},
+      );
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      value = nodeScopeFromPayload(payload, opts);
+    }
     return new CommitScope(value && typeof value === "object" ? value : {});
   }
 
   static async fromPayloadAsync(payload = {}, options = {}) {
-    const value = await runGitNativeMethodAsync(
-      "git.commitScope.fromPayload",
-      { payload, options: nativeOptions(options) },
-      options.nativeParity || {},
-    );
+    const opts = nativeOptions(options);
+    let value;
+    try {
+      value = await runGitNativeMethodAsync(
+        "git.commitScope.fromPayload",
+        { payload, options: opts },
+        options.nativeParity || {},
+      );
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      value = nodeScopeFromPayload(payload, opts);
+    }
     return new CommitScope(value && typeof value === "object" ? value : {});
   }
 
@@ -125,29 +233,59 @@ export class CommitScope {
   }
 
   hasScope(nativeParity = {}) {
-    return runGitNativeMethod("git.commitScope.hasScope", this, nativeParity);
+    try {
+      return runGitNativeMethod("git.commitScope.hasScope", this, nativeParity);
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      return nodeHasScope(this);
+    }
   }
 
   isWildcard(nativeParity = {}) {
-    return runGitNativeMethod("git.commitScope.isWildcard", this, nativeParity);
+    try {
+      return runGitNativeMethod("git.commitScope.isWildcard", this, nativeParity);
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      return nodeIsWildcard(this);
+    }
   }
 
   containsFile(filePath, nativeParity = {}) {
-    return runGitNativeMethod("git.commitScope.containsFile", { scope: this, filePath }, nativeParity);
+    try {
+      return runGitNativeMethod("git.commitScope.containsFile", { scope: this, filePath }, nativeParity);
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      return nodeContainsFile(this, filePath);
+    }
   }
 
   toLockRows(nativeParity = {}) {
-    return runGitNativeMethod("git.commitScope.lockRows", this, nativeParity);
+    try {
+      return runGitNativeMethod("git.commitScope.lockRows", this, nativeParity);
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      return nodeLockRows(this);
+    }
   }
 
   findConflict(other, nativeParity = {}) {
     const right = other instanceof CommitScope ? other : new CommitScope(other);
-    return runGitNativeMethod("git.commitScope.findConflict", { left: this, right }, nativeParity);
+    try {
+      return runGitNativeMethod("git.commitScope.findConflict", { left: this, right }, nativeParity);
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      return nodeFindConflict(this, right);
+    }
   }
 
   conflictsWith(other, nativeParity = {}) {
     const right = other instanceof CommitScope ? other : new CommitScope(other);
-    return runGitNativeMethod("git.commitScope.conflictsWith", { left: this, right }, nativeParity);
+    try {
+      return runGitNativeMethod("git.commitScope.conflictsWith", { left: this, right }, nativeParity);
+    } catch (err) {
+      if (!shouldFallbackNativeScope(err)) throw err;
+      return nodeFindConflict(this, right) != null;
+    }
   }
 
   toJSON() {

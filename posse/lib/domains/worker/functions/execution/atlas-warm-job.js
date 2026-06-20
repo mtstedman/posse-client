@@ -149,47 +149,65 @@ function atlasRuntimeDisabledReasonForRepo(repoRoot) {
     || getAtlasRuntimeDisabledReason(ledgerDbPath(repoRoot));
 }
 
-export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abortSignal = null } = {}) {
-  const attempt = incrementAndCreateAttempt(job.id, leaseToken, "system", "atlas-warm", null);
-  if (!attempt) {
-    logAttemptSkippedStaleLease(job, "system", "Skipped atlas_warm attempt because the lease was stale or expired");
-    worker.emit(job.id, `${C.red}[stale-lease]${C.reset} job #${job.id} atlas_warm — lease lost`);
-    return;
-  }
+function atlasWarmSkippedResult({ payload, purpose, paths, reason, message }) {
+  const skippedPaths = paths.length > 0 ? paths : ["."];
+  return {
+    purpose: /** @type {any} */ (purpose),
+    paths_considered: paths.length,
+    paths_indexed: 0,
+    blobs_ingested: 0,
+    blobs_reused: 0,
+    ledger_entries_appended: 0,
+    view_written: payload.out_view_path || null,
+    view_etag: null,
+    duration_ms: 0,
+    skipped: skippedPaths.map((repo_rel_path) => ({ repo_rel_path, reason, message })),
+  };
+}
 
+function isAtlasWarmGateBusy(err) {
+  return err?.code === "ASYNC_GATE_BUSY" || err?.code === "ASYNC_GATE_TIMEOUT";
+}
+
+function isAtlasWarmSoftInfrastructureMiss(err) {
+  return err?.code === "THREAD_TIMEOUT" || err?.code === "DAEMON_TIMEOUT";
+}
+
+export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abortSignal = null } = {}) {
   const startTime = nowMs();
+  let attempt = null;
   try {
     const payload = parseJobPayload(job) || {};
     const purpose = String(payload.purpose || "wi");
     const repoRoot = resolveAtlasRepoRoot(worker);
-    const baselineBranch = await resolveAtlasWarmBaselineBranch(repoRoot);
-    const branch = typeof payload.branch === "string" ? payload.branch : (purpose === "wi" ? null : baselineBranch);
     const paths = clampPaths(payload.paths);
     const config = getAtlasIntegrationConfig();
     const disabledReason = atlasRuntimeDisabledReasonForRepo(repoRoot);
 
-    worker._throwIfKilled?.(job.id);
-
-    // Runtime disable (e.g. the owner-gone repair path disabled this repo
-    // after queueing self-repair warms): the disable is in-memory and clears
-    // at the next boot, so leave the job QUEUED instead of consuming it as a
-    // no-op "success" — these are often the very repair warms the disable
-    // path just enqueued, and the wrap-up message promises to leave them for
-    // the next boot. The readyAt backoff keeps the scheduler from re-leasing
-    // in a hot loop while the disable lasts. (A configuration disable below
-    // is durable, so those jobs are still consumed as no-op stubs.)
+    // Runtime disable is transient and clears at next boot. Do not create an
+    // attempt row here: releaseWithoutAttemptPenalty previously decremented
+    // jobs.attempt_count, but the next attempt number still came from the
+    // attempt table, so disabled warms could exceed maxAttempts=1 on paper.
     if (disabledReason) {
-      completeAttempt(attempt.attempt.id, {
-        status: "interrupted",
-        duration_ms: nowMs() - startTime,
-        error_text: `ATLAS disabled for this run: ${disabledReason}`,
-      });
-      worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+      const released = worker._releaseLease(job, leaseToken, "queued", {
         readyAt: new Date(Date.now() + ATLAS_WARM_DISABLED_REQUEUE_DELAY_MS).toISOString(),
       });
+      if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
       worker.emit(job.id, `${C.dim}[atlas] warm (${purpose}) deferred: ATLAS disabled for this run (${disabledReason}) — left queued for next boot${C.reset}`);
       return;
     }
+
+    worker._throwIfKilled?.(job.id);
+
+    attempt = incrementAndCreateAttempt(job.id, leaseToken, "system", "atlas-warm", null);
+    if (!attempt) {
+      logAttemptSkippedStaleLease(job, "system", "Skipped atlas_warm attempt because the lease was stale or expired");
+      worker.emit(job.id, `${C.red}[stale-lease]${C.reset} job #${job.id} atlas_warm — lease lost`);
+      return;
+    }
+
+    const baselineBranch = await resolveAtlasWarmBaselineBranch(repoRoot);
+    const branch = typeof payload.branch === "string" ? payload.branch : (purpose === "wi" ? null : baselineBranch);
 
     // Bounded runtime guard — surface a deterministic skip if the policy
     // budget has already been exhausted (e.g. shutdown right before lease).
@@ -342,6 +360,12 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
       refreshWorkItemStatus(job.work_item_id);
     }
   } catch (err) {
+    if (!attempt) {
+      const msg = err?.message || String(err);
+      worker.emit(job.id, `${C.yellow}[atlas] warm job #${job.id} could not start: ${msg}${C.reset}`);
+      logAtlasError("[atlas-warm] job #" + job.id + " failed before attempt creation:", err);
+      return;
+    }
     if (worker._handleDeterministicInterruption?.(job, attempt.attempt.id, startTime, leaseToken, err)) {
       return;
     }
@@ -522,20 +546,34 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
       warmReadinessDone(warmOk);
     }
   } catch (err) {
-    // Propagate kill/abort/timeout AND infrastructure failures (the conductor
-    // thread died / transport gone) rather than masking them as a stub success.
-    // Only a genuine in-warm error falls through to the stub-or-rethrow below.
-    if (err?._killReason || err?.code === "THREAD_ABORTED" || err?.name === "AbortError" || err?.code === "THREAD_TIMEOUT"
-      || err?.code === "DAEMON_ABORTED" || err?.code === "DAEMON_TIMEOUT" || err?.code === "DAEMON_TRANSPORT_GONE") {
+    const purpose = String(payload?.purpose || "wi");
+    const message = /** @type {any} */ (err)?.message || String(err);
+    if (isAtlasWarmGateBusy(err)) {
+      logAtlasWarmTelemetry("atlas.warm.skipped", {
+        ...atlasWarmTelemetryContext({ jobId, purpose, branch: branch || payload?.branch || null, baselineBranch, repoRoot, paths, budgetMs: timeoutMs, timeoutMs }),
+        outcome: "sqlite_gate_busy",
+        error: errorSummary(err),
+      });
+      return atlasWarmSkippedResult({ payload, purpose, paths, reason: "busy", message });
+    }
+    if (err?._killReason || err?.code === "THREAD_ABORTED" || err?.name === "AbortError"
+      || err?.code === "DAEMON_ABORTED" || err?.code === "DAEMON_TRANSPORT_GONE") {
       throw err;
+    }
+    if (isAtlasWarmSoftInfrastructureMiss(err) && !isVerboseAtlasErrors()) {
+      logAtlasWarmTelemetry("atlas.warm.skipped", {
+        ...atlasWarmTelemetryContext({ jobId, purpose, branch: branch || payload?.branch || null, baselineBranch, repoRoot, paths, budgetMs: timeoutMs, timeoutMs }),
+        outcome: "infrastructure_timeout",
+        error: errorSummary(err),
+      });
+      return atlasWarmSkippedResult({ payload, purpose, paths, reason: "infra_unavailable", message });
     }
     // The .posse runtime exists, so warming SHOULD have worked. A
     // failure here is a real bug, not "not ready" — surface it.
-    const message = /** @type {any} */ (err)?.message || String(err);
     try {
       worker.emit(jobId, `${C.yellow}[atlas] warm failed: ${message}${C.reset}`);
     } catch { /* ignore */ }
-    logAtlasError(`[atlas-warm] runRealWarmer threw (job #${jobId}):`, err);
+    logAtlasError("[atlas-warm] runRealWarmer threw (job #" + jobId + "):", err);
     if (isVerboseAtlasErrors()) {
       // Re-throw so the outer executor records the full stack on the
       // attempt and marks the job failed. Operators set the env var

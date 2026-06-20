@@ -180,7 +180,8 @@ function atlasWarmConcurrencyKey(job) {
 // all pound the half-built index and pile up on the conductor queue. Jobs
 // that don't touch ATLAS (the warm itself, human gates) still dispatch. The
 // failsafe bounds the hold so a wedged warm cannot stall the run forever.
-const ATLAS_INDEXING_HOLD_MAX_MS = 15 * 60 * 1000;
+// Keep this short: ATLAS is a freshness accelerator, not a global run gate.
+const ATLAS_INDEXING_HOLD_MAX_MS = 30 * 1000;
 const ATLAS_INDEXING_PAUSE_OFF_VALUES = new Set(["off", "false", "0", "no"]);
 const ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES = new Set(["atlas_warm", "human_input"]);
 

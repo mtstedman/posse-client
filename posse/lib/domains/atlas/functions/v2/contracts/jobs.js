@@ -92,7 +92,7 @@
 /**
  * @typedef {Object} AtlasWarmSkip
  * @property {string} repo_rel_path
- * @property {"unsupported_lang" | "read_error" | "parse_error" | "size_exceeded" | "minified_skip"} reason
+ * @property {"unsupported_lang" | "read_error" | "parse_error" | "size_exceeded" | "minified_skip" | "busy" | "infra_unavailable"} reason
  * @property {string} [message]
  */
 

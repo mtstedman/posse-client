@@ -1219,18 +1219,21 @@ export function requeueOrphanedJobs({ force = false } = {}) {
   // window). Parked human/review jobs are intentionally excluded.
   const orphaned = force
     ? db.prepare(`
-      SELECT id, status, work_item_id FROM jobs
+      SELECT id, status, work_item_id, job_type FROM jobs
       WHERE status IN (${ACTIVE_LEASE_STATUSES_SQL})
     `).all()
     : db.prepare(`
-      SELECT id, status, work_item_id FROM jobs
+      SELECT id, status, work_item_id, job_type FROM jobs
       WHERE status IN (${ACTIVE_LEASE_STATUSES_SQL})
         AND (lease_expires_at IS NULL OR lease_expires_at < ?)
     `).all(leaseNow);
 
   if (orphaned.length === 0) return 0;
-  const orphanedIds = orphaned.map((row) => row.id);
-  const assessOnlyIds = orphaned.filter((row) => row.status === "awaiting_assessment").map((row) => row.id);
+  const warmOrphanIds = orphaned.filter((row) => row.job_type === "atlas_warm").map((row) => row.id);
+  const requeueIds = orphaned.filter((row) => row.job_type !== "atlas_warm").map((row) => row.id);
+  const assessOnlyIds = orphaned
+    .filter((row) => row.job_type !== "atlas_warm" && row.status === "awaiting_assessment")
+    .map((row) => row.id);
   const chunkSize = 200;
   const chunked = (values, fn) => {
     for (let i = 0; i < values.length; i += chunkSize) {
@@ -1239,15 +1242,34 @@ export function requeueOrphanedJobs({ force = false } = {}) {
   };
 
   const affectedWIs = new Set();
+  let failedWarmCount = 0;
+  let requeuedCount = 0;
 
   // Phase 1: bulk-UPDATE under IMMEDIATE transaction. Keep the writer hold
   // short — per-row lock release and event emission run after commit so they
   // don't block readers. If the process crashes between phases, the stale
   // file-lock sweeper (cleanupStaleFileLocks) requeues abandoned locks.
-  const requeueAll = db.transaction(() => {
-    chunked(orphanedIds, (ids) => {
+  const recoverAll = db.transaction(() => {
+    chunked(warmOrphanIds, (ids) => {
       const placeholders = ids.map(() => "?").join(",");
-      db.prepare(`
+      const res = db.prepare(`
+        UPDATE jobs
+        SET status = 'failed',
+            lease_owner = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            finished_at = ?,
+            updated_at = ?,
+            last_error = COALESCE(last_error, 'atlas_warm: orphaned on scheduler boot (fail-silent per policy)')
+        WHERE id IN (${placeholders})
+          AND status IN (${ACTIVE_LEASE_STATUSES_SQL})
+      `).run(ts, ts, ...ids);
+      failedWarmCount += res?.changes || 0;
+    });
+
+    chunked(requeueIds, (ids) => {
+      const placeholders = ids.map(() => "?").join(",");
+      const res = db.prepare(`
         UPDATE jobs
         SET status = 'queued',
             lease_owner = NULL,
@@ -1263,6 +1285,7 @@ export function requeueOrphanedJobs({ force = false } = {}) {
         WHERE id IN (${placeholders})
           AND status IN (${ACTIVE_LEASE_STATUSES_SQL})
       `).run(ts, ts, ...ids);
+      requeuedCount += res?.changes || 0;
     });
 
     if (assessOnlyIds.length > 0) {
@@ -1277,12 +1300,22 @@ export function requeueOrphanedJobs({ force = false } = {}) {
     }
   });
 
-  requeueAll();
+  recoverAll();
 
   // Phase 2: per-row follow-up work outside the write transaction.
-  for (const { id, status, work_item_id } of orphaned) {
-    releaseJobLocksForStatus(id, "queued");
+  for (const { id, status, work_item_id, job_type } of orphaned) {
     affectedWIs.add(work_item_id);
+    if (job_type === "atlas_warm") {
+      releaseJobLocksForStatus(id, "failed");
+      logEvent({
+        job_id: id,
+        event_type: EVENT_TYPES.JOB_WARM_LEASE_EXPIRED,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        message: "atlas_warm orphaned on scheduler boot; marked failed (fail-silent per ATLAS_WARM_JOB_POLICY)",
+      });
+      continue;
+    }
+    releaseJobLocksForStatus(id, "queued");
     const wasAssessing = status === "awaiting_assessment";
     logEvent({
       job_id: id,
@@ -1294,15 +1327,18 @@ export function requeueOrphanedJobs({ force = false } = {}) {
     });
   }
 
-  // Refresh WI status so it reflects the requeued jobs
+  // Refresh WI status so it reflects the recovered jobs.
   for (const wiId of affectedWIs) {
     refreshWorkItemStatus(wiId);
   }
-  notifyQueueStateChanged({
-    reason: "job_orphan_requeue",
-  });
 
-  return orphaned.length;
+  if (failedWarmCount + requeuedCount > 0) {
+    notifyQueueStateChanged({
+      reason: "job_orphan_requeue",
+    });
+  }
+
+  return requeuedCount;
 }
 
 export function requeueExpiredLeases() {
