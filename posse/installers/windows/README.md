@@ -10,7 +10,8 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
 
 - Verifies required tools (`git`, `node` >= 24, `npm`) and warns about soft gaps
   (missing provider credentials, unset global git identity).
-- Clones a missing `posse` checkout into the configured install directory.
+- Uses the Posse checkout containing the installer when available; cloning is
+  only a fallback for standalone use.
 - Installs host CLI dependencies used by Posse helper tools when they are
   missing: ripgrep (`rg`), Tesseract OCR (`tesseract`), ImageMagick (`magick`),
   and FFmpeg (`ffmpeg`).
@@ -27,6 +28,8 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
 - Seeds missing rows in `~\.posse\account.db` (ATLAS mode/phases plus
   `atlas_scip_mode=on` and all SCIP languages) so the admin TUI and in-process
   callers pick it up. Existing user values are preserved -- never overwritten.
+- Runs `posse admin init --non-interactive` to detect `claude` and `codex` CLI
+  paths when possible.
 - Optionally (`-ConfigureKeys`) prompts for provider API keys (hidden via
   `Read-Host -AsSecureString`), writes them to
   `%USERPROFILE%\.config\posse\providers.env.ps1` with an NTFS ACL locked to
@@ -53,7 +56,6 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
 ```powershell
 cd <posse-dir>\installers\windows
 powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
-  -PosseDir <posse-dir> `
   -RepoPath C:\repos\your-target-repo `
   -RepoId your-target-repo
 ```
@@ -69,8 +71,8 @@ If you omit `-RepoPath`, install still completes and the smoke test is skipped.
 | Flag | Purpose |
 |------|---------|
 | `-InstallRoot <path>` | Base directory for installs (default: `$env:USERPROFILE\claude-tools`) |
-| `-PosseDir <path>` | Posse checkout directory (default: `<InstallRoot>\posse`) |
-| `-PosseRepoUrl <url>` | Posse Git URL used when `-PosseDir` is missing (default: `https://github.com/mtstedman/posse.git`) |
+| `-PosseDir <path>` | Posse checkout directory (default: installer checkout when available, else `<InstallRoot>\posse`) |
+| `-PosseRepoUrl <url>` | Fallback Git URL used only when no checkout is detected and `-PosseDir` is missing |
 | `-RepoId <id>` | ATLAS repo id for smoke test / defaults |
 | `-RepoPath <path>` | ATLAS repo path for smoke test / defaults |
 | `-SmokeQuery <q>` | Query used for atlas-smoke (default: `auth`) |

@@ -537,6 +537,7 @@ export class TrackedProviderClient {
     });
     const attemptOpts = {
       ...opts,
+      attemptId: observationContext?.attempt_id ?? opts.attemptId ?? null,
       abortSignal,
       recordFinalPrompt: (finalPrompt, { systemPrompt = null, systemPromptFiles = null } = {}) => {
         const promptText = typeof finalPrompt === "string" ? finalPrompt : String(finalPrompt ?? "");

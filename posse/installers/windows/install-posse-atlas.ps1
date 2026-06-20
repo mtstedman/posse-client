@@ -6,16 +6,17 @@
   Idempotent installer for posse on Windows. ATLAS is built into Posse — there
   is no separate ATLAS checkout or build step. Parity with the Linux bash
   installer: same flags, same checks, same post-install validation, same
-  account-settings seeding. A missing posse checkout is cloned automatically.
+  account-settings seeding. It uses the Posse checkout containing this installer
+  when available; cloning is only a fallback for standalone use.
 
 .PARAMETER InstallRoot
   Base directory for installs. Default: $env:USERPROFILE\claude-tools
 
 .PARAMETER PosseDir
-  Posse checkout directory. Default: <InstallRoot>\posse
+  Posse checkout directory. Default: installer checkout when available, else <InstallRoot>\posse
 
 .PARAMETER PosseRepoUrl
-  Git URL used when posse must be cloned on first run.
+  Fallback Git URL used only when no checkout is detected and PosseDir is missing.
 
 .PARAMETER RepoId
   ATLAS repo id for smoke tests.
@@ -93,6 +94,7 @@ $script:Steps = [ordered]@{
   "env file"              = "pending"
   "posse alias"           = "pending"
   "account settings seed" = "pending"
+  "admin init"            = "pending"
   "posse validate"        = "pending"
   "provider keys"         = "skipped"
   "smoke test"            = "pending"
@@ -163,6 +165,13 @@ function Resolve-FullPath {
   catch {
     return [System.IO.Path]::GetFullPath($PathValue)
   }
+}
+
+function Get-InstallerPosseDir {
+  if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { return "" }
+  $candidate = Resolve-FullPath (Join-Path $PSScriptRoot "..\..")
+  if (Test-Path (Join-Path $candidate "orchestrator.js")) { return $candidate }
+  return ""
 }
 
 function Test-DepsFresh {
@@ -526,6 +535,27 @@ console.log(`[seed-settings] wrote ${settingsPath} -- added ${added}, kept ${kep
   }
 }
 
+function Invoke-AdminInit {
+  param([string]$NodeBin)
+  if ($DryRun) {
+    Write-Log "(dry-run) would run posse admin init --non-interactive"
+    $script:Steps["admin init"] = "dry-run"
+    return
+  }
+  Push-Location $PosseDir
+  try {
+    & $NodeBin orchestrator.js admin init --non-interactive
+    if ($LASTEXITCODE -eq 0) {
+      $script:Steps["admin init"] = "done"
+    }
+    else {
+      $script:Steps["admin init"] = "failed"
+      Write-Warn "posse admin init failed (exit $LASTEXITCODE). Run it manually to see provider CLI detection details."
+    }
+  }
+  finally { Pop-Location }
+}
+
 function Validate-Posse {
   if ($DryRun) { $script:Steps["posse validate"] = "dry-run"; return }
   Push-Location $PosseDir
@@ -783,7 +813,16 @@ if ($nodeMajor -lt $NodeMinMajor) {
   Fail "Node $NodeMinMajor+ required. Found $(node -v). Install via nvm-windows or https://nodejs.org."
 }
 
-if (-not $PosseDir) { $PosseDir = Join-Path $InstallRoot "posse" }
+if (-not $PosseDir) {
+  $detectedPosseDir = Get-InstallerPosseDir
+  if ($detectedPosseDir) {
+    $PosseDir = $detectedPosseDir
+    Write-Log "Using Posse checkout containing this installer: $PosseDir"
+  }
+  else {
+    $PosseDir = Join-Path $InstallRoot "posse"
+  }
+}
 
 $PosseDir = Resolve-FullPath $PosseDir
 
@@ -858,6 +897,8 @@ if (-not $SkipSettings) {
 else {
   $script:Steps["account settings seed"] = "skipped"
 }
+
+Invoke-AdminInit -NodeBin $nodeBin
 
 # -----------------------------------------------------------------------------
 # Post-install validation

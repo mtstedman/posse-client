@@ -220,6 +220,7 @@ export const SETTINGS_CATALOG = [
   // ── Behaviors ────────────────────────────────────────────────────────────
   { key: "auto_merge_completed", default: "false", valueType: "boolean", description: "Auto-merge work items that pass assessment" },
   { key: "claude_execution_mode", default: "print", options: CLAUDE_EXECUTION_MODE_VALUES, description: "Claude execution mode: print uses claude -p stream-json; interactive uses a PTY session and Claude session/log idle state" },
+  { key: "claude_cli_path",       default: "",      adminVisible: false, description: "Explicit path to Claude CLI binary (empty = auto-detect)" },
   { key: "codex_auth_mode",      default: "oauth", options: CODEX_AUTH_MODE_OPTIONS, description: "Codex auth mode (oauth, api, or auto). oauth/auto never fall back to API keys; api must be explicit." },
   { key: "codex_cli_path",       default: "",      adminVisible: false, description: "Explicit path to Codex CLI binary (empty = auto-detect)" },
   { key: "pre_assess_cmd",       default: "",      description: "Optional shell command to run before assessment" },

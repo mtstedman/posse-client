@@ -28,6 +28,7 @@ POSSE_REPO_URL="https://github.com/mtstedman/posse.git"
 REPO_ID=""
 REPO_PATH=""
 NODE_MIN_MAJOR="24"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # Step results — populated as the installer runs, printed in the final summary.
 STEP_POSSE_CLONE="pending"
@@ -38,6 +39,7 @@ STEP_POSSE_SCIP="pending"
 STEP_ENV_FILE="pending"
 STEP_POSSE_ALIAS="pending"
 STEP_SEED_SETTINGS="pending"
+STEP_ADMIN_INIT="pending"
 STEP_POSSE_VALIDATE="pending"
 STEP_SMOKE="pending"
 STEP_KEYS="skipped"
@@ -51,8 +53,8 @@ Usage:
 
 Options:
   --install-root <path>   Base directory for installs (default: ~/claude-tools)
-  --posse-dir <path>      Posse checkout directory (default: <install-root>/posse)
-  --posse-repo-url <url>  Posse Git URL (used when --posse-dir is missing)
+  --posse-dir <path>      Posse checkout directory (default: installer checkout, else <install-root>/posse)
+  --posse-repo-url <url>  Fallback Git URL when no checkout is detected and --posse-dir is missing
   --repo-id <id>          ATLAS repo id for smoke tests
   --repo-path <path>      ATLAS repo path for smoke tests
   --smoke-query <query>   Query used for atlas-smoke (default: auth)
@@ -70,7 +72,8 @@ Options:
   --help                  Show help
 
 Notes:
-  - A missing posse checkout is cloned automatically into --posse-dir.
+  - Uses the Posse checkout containing this installer when available; cloning
+    is only a fallback.
   - ATLAS is built into Posse (no separate ATLAS checkout or build step).
   - It installs host CLI tools, posse npm deps including optional packages,
     Python helper deps, all Posse-managed SCIP indexer environments, writes
@@ -157,6 +160,14 @@ set_step() {
 resolve_full_path() {
   local input_path="$1"
   node -e 'const path = require("path"); process.stdout.write(path.resolve(process.argv[1]));' "$input_path"
+}
+
+detect_installer_posse_dir() {
+  local candidate
+  candidate="$(cd "$SCRIPT_DIR/../.." && pwd -P)" || return 1
+  if [[ -f "$candidate/orchestrator.js" ]]; then
+    printf "%s\n" "$candidate"
+  fi
 }
 
 ensure_git_checkout() {
@@ -488,6 +499,20 @@ validate_posse() {
   fi
 }
 
+admin_init() {
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    log "(dry-run) would run posse admin init --non-interactive"
+    STEP_ADMIN_INIT="dry-run"
+    return
+  fi
+  if ( cd "$POSSE_DIR" && "$NODE_BIN" orchestrator.js admin init --non-interactive ); then
+    STEP_ADMIN_INIT="done"
+  else
+    STEP_ADMIN_INIT="failed"
+    warn "posse admin init failed. Run it manually to see provider CLI detection details."
+  fi
+}
+
 check_provider_credentials() {
   local have=0
   local candidates=()
@@ -633,6 +658,7 @@ print_summary() {
   printf "  env file              : %s\n" "$STEP_ENV_FILE"
   printf "  posse alias           : %s\n" "$STEP_POSSE_ALIAS"
   printf "  account settings seed : %s\n" "$STEP_SEED_SETTINGS"
+  printf "  admin init            : %s\n" "$STEP_ADMIN_INIT"
   printf "  posse validate        : %s\n" "$STEP_POSSE_VALIDATE"
   printf "  provider keys         : %s\n" "$STEP_KEYS"
   printf "  smoke test            : %s\n" "$STEP_SMOKE"
@@ -691,7 +717,15 @@ if [[ "${NODE_MAJOR}" -lt "${NODE_MIN_MAJOR}" ]]; then
   fail "Node ${NODE_MIN_MAJOR}+ required. Found $(node -v). Install via nvm: nvm install ${NODE_MIN_MAJOR} && nvm use ${NODE_MIN_MAJOR}"
 fi
 
-POSSE_DIR="${POSSE_DIR:-${INSTALL_ROOT}/posse}"
+if [[ -z "${POSSE_DIR}" ]]; then
+  DETECTED_POSSE_DIR="$(detect_installer_posse_dir || true)"
+  if [[ -n "$DETECTED_POSSE_DIR" ]]; then
+    POSSE_DIR="$DETECTED_POSSE_DIR"
+    log "Using Posse checkout containing this installer: $POSSE_DIR"
+  else
+    POSSE_DIR="${INSTALL_ROOT}/posse"
+  fi
+fi
 POSSE_DIR="$(resolve_full_path "$POSSE_DIR")"
 
 ensure_git_checkout "$POSSE_DIR" "$POSSE_REPO_URL" "STEP_POSSE_CLONE" "posse" "$POSSE_DIR/orchestrator.js" "orchestrator.js"
@@ -789,6 +823,7 @@ else
   STEP_SEED_SETTINGS="skipped"
 fi
 
+admin_init
 # -----------------------------------------------------------------------------
 # Post-install validation
 # -----------------------------------------------------------------------------

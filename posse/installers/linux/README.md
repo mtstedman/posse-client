@@ -11,7 +11,8 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
 
 - Verifies required tools (`git`, `node` ≥ 24, `npm`) and warns about soft gaps
   (missing provider credentials, unset global git identity).
-- Clones a missing `posse` checkout into the configured install directory.
+- Uses the Posse checkout containing the installer when available; cloning is
+  only a fallback for standalone use.
 - Installs host CLI dependencies used by Posse helper tools when they are
   missing: ripgrep (`rg`), Tesseract OCR (`tesseract`), ImageMagick (`magick`),
   and FFmpeg (`ffmpeg`).
@@ -27,6 +28,8 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
 - Seeds missing rows in `~/.posse/account.db` (ATLAS mode/phases plus
   `atlas_scip_mode=on` and all SCIP languages) so the admin TUI and in-process
   callers pick it up. Existing user values are preserved — never overwritten.
+- Runs `posse admin init --non-interactive` to detect `claude` and `codex` CLI
+  paths when possible.
 - Optionally (`--configure-keys`) prompts for provider API keys with hidden
   input, writes them to `~/.config/posse/providers.env` (chmod 600), and
   offers to launch `claude` / `codex login` for the CLI-based providers.
@@ -49,7 +52,6 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
 ```bash
 chmod +x install-posse-atlas.sh
 ./install-posse-atlas.sh \
-  --posse-dir /opt/claude/tools/posse \
   --repo-path /opt/repos/your-target-repo \
   --repo-id your-target-repo
 ```
@@ -61,8 +63,8 @@ If you omit `--repo-path`, install still completes and the smoke test is skipped
 | Flag | Purpose |
 |------|---------|
 | `--install-root <path>` | Base directory for installs (default: `~/claude-tools`) |
-| `--posse-dir <path>` | Posse checkout directory (default: `<install-root>/posse`) |
-| `--posse-repo-url <url>` | Posse Git URL used when `--posse-dir` is missing (default: `https://github.com/mtstedman/posse.git`) |
+| `--posse-dir <path>` | Posse checkout directory (default: installer checkout when available, else `<install-root>/posse`) |
+| `--posse-repo-url <url>` | Fallback Git URL used only when no checkout is detected and `--posse-dir` is missing |
 | `--repo-id <id>` | ATLAS repo id for smoke test / defaults |
 | `--repo-path <path>` | ATLAS repo path for smoke test / defaults |
 | `--smoke-query <q>` | Query used for atlas-smoke (default: `auth`) |

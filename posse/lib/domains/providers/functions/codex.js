@@ -4,7 +4,7 @@
 // Uses `codex exec` in non-interactive mode and maps the result onto the
 // shared provider interface expected by worker.js / assessor.js.
 
-import { execFile, spawn, spawnSync, execSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -25,7 +25,9 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { CODEX_OAUTH_SUPPORTED_MODELS, getProviderTierDefaults } from "./model-catalog.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
+import { logProviderMcpSurfaceTelemetry } from "./helpers/mcp-telemetry.js";
 import { buildWindowsSpawn, terminateSpawnedProcess } from "./helpers/windows-spawn.js";
+import { discoverCommandCandidates } from "./helpers/cli-discovery.js";
 import { selectExecutionModel } from "./helpers/model-selection.js";
 import {
   InteractiveCliSession,
@@ -393,6 +395,13 @@ function buildCodexWebToolsNote(role) {
 let CODEX_CMD = null;
 let CODEX_ARGS = [];
 let CODEX_RESOLVE_ERROR = null;
+const CODEX_REQUIRED_EXEC_FLAGS = [
+  "--json",
+  "--output-last-message",
+  "--skip-git-repo-check",
+  "--ignore-rules",
+  "--config",
+];
 
 function splitPathEntries(pathValue) {
   return String(pathValue || "")
@@ -420,22 +429,6 @@ function resolveWindowsPathCommand(commandBase, envPath = getWindowsEnvPath()) {
         if (fs.existsSync(candidate) && !isProtectedWindowsAppCodexPath(candidate)) {
           return candidate;
         }
-      } catch {
-        // Ignore unreadable PATH entries and keep searching.
-      }
-    }
-  }
-  return null;
-}
-
-async function resolveWindowsPathCommandAsync(commandBase, envPath = getWindowsEnvPath()) {
-  const preferredExts = [".exe", ".cmd", ".bat", ""];
-  for (const dir of splitPathEntries(envPath)) {
-    for (const ext of preferredExts) {
-      const candidate = path.join(dir, `${commandBase}${ext}`);
-      try {
-        await fs.promises.access(candidate);
-        if (!isProtectedWindowsAppCodexPath(candidate)) return candidate;
       } catch {
         // Ignore unreadable PATH entries and keep searching.
       }
@@ -483,47 +476,6 @@ function findWindowsAppCodex() {
     // Ignore lookup failures; caller falls back to PATH.
   }
   return null;
-}
-
-async function findWindowsAppCodexAsync() {
-  const baseDir = "C:\\Program Files\\WindowsApps";
-  try {
-    const dirs = (await fs.promises.readdir(baseDir))
-      .filter((name) => /^OpenAI\.Codex_/i.test(name))
-      .sort()
-      .reverse();
-    for (const dir of dirs) {
-      const exePath = path.join(baseDir, dir, "app", "resources", "codex.exe");
-      try {
-        await fs.promises.access(exePath);
-        if (!isProtectedWindowsAppCodexPath(exePath)) return exePath;
-      } catch {
-        // Keep searching.
-      }
-    }
-  } catch {
-    // Ignore lookup failures; caller falls back to PATH.
-  }
-  return null;
-}
-
-function findCodexSandboxBin() {
-  const exePath = path.join(os.homedir(), ".codex", ".sandbox-bin", "codex.exe");
-  try {
-    return fs.existsSync(exePath) && codexCliSupportsExecContract(exePath) ? exePath : null;
-  } catch {
-    return null;
-  }
-}
-
-async function findCodexSandboxBinAsync() {
-  const exePath = path.join(os.homedir(), ".codex", ".sandbox-bin", "codex.exe");
-  try {
-    await fs.promises.access(exePath);
-    return await codexCliSupportsExecContractAsync(exePath) ? exePath : null;
-  } catch {
-    return null;
-  }
 }
 
 function spawnProbeAsync(command, args, options = {}, timeoutMs = 3000) {
@@ -579,10 +531,17 @@ function isExecutableCodexCli(exePath, spawnSyncImpl = spawnSync) {
   }
 }
 
-function codexCliSupportsExecContract(exePath, spawnSyncImpl = spawnSync) {
-  if (!isExecutableCodexCli(exePath, spawnSyncImpl)) return false;
+function probeCodexCli(exePath, spawnSyncImpl = spawnSync) {
+  const target = String(exePath || "").trim();
+  if (!target) return { ok: false, path: target, reason: "empty path", missingFlags: [] };
+  if (isProtectedWindowsAppCodexPath(target)) {
+    return { ok: false, path: target, reason: "protected WindowsApps resource binary", missingFlags: [] };
+  }
+  if (!isExecutableCodexCli(target, spawnSyncImpl)) {
+    return { ok: false, path: target, reason: "codex --version failed", missingFlags: [] };
+  }
   try {
-    const launch = buildWindowsSpawn(exePath, ["exec", "resume", "--help"]);
+    const launch = buildWindowsSpawn(target, ["exec", "resume", "--help"]);
     const result = spawnSyncImpl(launch.command, launch.args, {
       windowsHide: true,
       windowsVerbatimArguments: launch.windowsVerbatimArguments,
@@ -590,81 +549,92 @@ function codexCliSupportsExecContract(exePath, spawnSyncImpl = spawnSync) {
       timeout: 3000,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    if (!result || result.status !== 0) return false;
+    if (!result || result.status !== 0) {
+      return { ok: false, path: target, reason: "codex exec resume --help failed", missingFlags: [] };
+    }
     const help = `${result.stdout || ""}\n${result.stderr || ""}`;
-    return [
-      "--json",
-      "--output-last-message",
-      "--skip-git-repo-check",
-      "--ignore-rules",
-      "--config",
-    ].every((flag) => help.includes(flag));
-  } catch {
-    return false;
+    const missingFlags = CODEX_REQUIRED_EXEC_FLAGS.filter((flag) => !help.includes(flag));
+    if (missingFlags.length > 0) {
+      return { ok: false, path: target, reason: `missing required flags: ${missingFlags.join(", ")}`, missingFlags };
+    }
+    return { ok: true, path: target, reason: null, missingFlags: [] };
+  } catch (err) {
+    return { ok: false, path: target, reason: err?.message || "probe failed", missingFlags: [] };
   }
 }
 
-function resolveCodex() {
+function codexCliSupportsExecContract(exePath, spawnSyncImpl = spawnSync) {
+  return probeCodexCli(exePath, spawnSyncImpl).ok;
+}
+
+function getCodexConfiguredPath() {
   const configuredPath = readModelSetting("codex_cli_path");
-  if (
-    configuredPath
-    && fs.existsSync(configuredPath)
-    && !isProtectedWindowsAppCodexPath(configuredPath)
-    && codexCliSupportsExecContract(configuredPath)
-  ) {
+  if (!configuredPath || isProtectedWindowsAppCodexPath(configuredPath)) return null;
+  try {
+    return fs.existsSync(configuredPath) ? configuredPath : null;
+  } catch {
+    return null;
+  }
+}
+
+function getCodexCandidatePaths() {
+  const extraPaths = [];
+  const configuredPath = getCodexConfiguredPath();
+  if (configuredPath) extraPaths.push(configuredPath);
+  if (process.platform === "win32") {
+    extraPaths.push(path.join(os.homedir(), ".codex", ".sandbox-bin", "codex.exe"));
+    const appExe = findWindowsAppCodex();
+    if (appExe) extraPaths.push(appExe);
+  }
+  return discoverCommandCandidates("codex", {
+    extraPaths,
+    protectedPath: isProtectedWindowsAppCodexPath,
+  });
+}
+
+function chooseCodexCandidate(spawnSyncImpl = spawnSync) {
+  const checked = [];
+  for (const candidate of getCodexCandidatePaths()) {
+    const probe = probeCodexCli(candidate, spawnSyncImpl);
+    checked.push(probe);
+    if (probe.ok) return { selected: candidate, checked };
+  }
+  return { selected: null, checked };
+}
+
+function formatCodexResolveError(checked = []) {
+  const base = "Codex CLI not found with required `codex exec resume` contract flags. Install or update @openai/codex.";
+  const failed = checked
+    .filter((entry) => entry?.path)
+    .slice(0, 6)
+    .map((entry) => `${entry.path} (${entry.reason || "rejected"})`);
+  return failed.length > 0 ? `${base} Checked: ${failed.join("; ")}` : base;
+}
+
+export function discoverCodexCli() {
+  const result = chooseCodexCandidate();
+  return {
+    provider: "codex",
+    settingKey: "codex_cli_path",
+    selected: result.selected,
+    candidates: result.checked.map((entry) => entry.path),
+    checked: result.checked,
+    ready: !!result.selected,
+    reason: result.selected ? null : formatCodexResolveError(result.checked),
+  };
+}
+function resolveCodex() {
+  const result = chooseCodexCandidate();
+  if (result.selected) {
     CODEX_RESOLVE_ERROR = null;
-    CODEX_CMD = configuredPath;
+    CODEX_CMD = result.selected;
     CODEX_ARGS = [];
     return;
   }
-
-  if (process.platform === "win32") {
-    const sandboxBin = findCodexSandboxBin();
-    if (sandboxBin) {
-      CODEX_RESOLVE_ERROR = null;
-      CODEX_CMD = sandboxBin;
-      CODEX_ARGS = [];
-      return;
-    }
-
-    const pathExe = resolveWindowsPathCommand("codex");
-    if (pathExe && codexCliSupportsExecContract(pathExe)) {
-      CODEX_RESOLVE_ERROR = null;
-      CODEX_CMD = pathExe;
-      CODEX_ARGS = [];
-      return;
-    }
-
-    const appExe = findWindowsAppCodex();
-    if (appExe && codexCliSupportsExecContract(appExe)) {
-      CODEX_RESOLVE_ERROR = null;
-      CODEX_CMD = appExe;
-      CODEX_ARGS = [];
-      return;
-    }
-  }
-
-  try {
-    const cmd = process.platform === "win32" ? "where codex" : "which codex";
-    const resolved = execSync(cmd, {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim().split(/\r?\n/)[0];
-    if (resolved && codexCliSupportsExecContract(resolved)) {
-      CODEX_RESOLVE_ERROR = null;
-      CODEX_CMD = resolved;
-      CODEX_ARGS = [];
-      return;
-    }
-  } catch {
-    // Fall through.
-  }
-
-  CODEX_RESOLVE_ERROR = "Codex CLI not found with required `codex exec resume` contract flags. Install or update @openai/codex.";
+  CODEX_RESOLVE_ERROR = formatCodexResolveError(result.checked);
   CODEX_CMD = null;
   CODEX_ARGS = [];
 }
-
 function ensureCodexResolved() {
   if (!CODEX_CMD || (process.platform === "win32" && isBareCommand(CODEX_CMD))) {
     resolveCodex();
@@ -672,57 +642,17 @@ function ensureCodexResolved() {
 }
 
 async function resolveCodexAsync() {
-  const configuredPath = readModelSetting("codex_cli_path");
-  if (
-    configuredPath
-    && !isProtectedWindowsAppCodexPath(configuredPath)
-    && await codexCliSupportsExecContractAsync(configuredPath)
-  ) {
+  const result = await chooseCodexCandidateAsync();
+  if (result.selected) {
     CODEX_RESOLVE_ERROR = null;
-    CODEX_CMD = configuredPath;
+    CODEX_CMD = result.selected;
     CODEX_ARGS = [];
     return;
   }
-
-  if (process.platform === "win32") {
-    const sandboxBin = await findCodexSandboxBinAsync();
-    if (sandboxBin) {
-      CODEX_RESOLVE_ERROR = null;
-      CODEX_CMD = sandboxBin;
-      CODEX_ARGS = [];
-      return;
-    }
-
-    const pathExe = await resolveWindowsPathCommandAsync("codex");
-    if (pathExe && await codexCliSupportsExecContractAsync(pathExe)) {
-      CODEX_RESOLVE_ERROR = null;
-      CODEX_CMD = pathExe;
-      CODEX_ARGS = [];
-      return;
-    }
-
-    const appExe = await findWindowsAppCodexAsync();
-    if (appExe && await codexCliSupportsExecContractAsync(appExe)) {
-      CODEX_RESOLVE_ERROR = null;
-      CODEX_CMD = appExe;
-      CODEX_ARGS = [];
-      return;
-    }
-  }
-
-  const pathResolved = await findPathCodexAsync();
-  if (pathResolved && await codexCliSupportsExecContractAsync(pathResolved)) {
-    CODEX_RESOLVE_ERROR = null;
-    CODEX_CMD = pathResolved;
-    CODEX_ARGS = [];
-    return;
-  }
-
-  CODEX_RESOLVE_ERROR = "Codex CLI not found with required `codex exec resume` contract flags. Install or update @openai/codex.";
+  CODEX_RESOLVE_ERROR = formatCodexResolveError(result.checked);
   CODEX_CMD = null;
   CODEX_ARGS = [];
 }
-
 async function ensureCodexResolvedAsync() {
   if (!CODEX_CMD || (process.platform === "win32" && isBareCommand(CODEX_CMD))) {
     await resolveCodexAsync();
@@ -1825,6 +1755,7 @@ function buildCodexDeterministicReadConfigOverrides(role, cwd, {
   disableSystemTools = false,
   jobId = null,
   workItemId = null,
+  attemptId = null,
   atlasPrefetchStatus = null,
   atlasAvailable = null,
   atlasGateEnabled = false,
@@ -1853,6 +1784,7 @@ function buildCodexDeterministicReadConfigOverrides(role, cwd, {
     disableSystemTools,
     jobId,
     workItemId,
+    attemptId,
     atlasPrefetchStatus,
     atlasAvailable,
     atlasGateEnabled,
@@ -2065,43 +1997,43 @@ function _parseCodexToolArguments(value) {
   }
 }
 
-async function codexCliSupportsExecContractAsync(exePath) {
-  if (!(await isExecutableCodexCliAsync(exePath))) return false;
+async function probeCodexCliAsync(exePath) {
+  const target = String(exePath || "").trim();
+  if (!target) return { ok: false, path: target, reason: "empty path", missingFlags: [] };
+  if (isProtectedWindowsAppCodexPath(target)) {
+    return { ok: false, path: target, reason: "protected WindowsApps resource binary", missingFlags: [] };
+  }
+  if (!(await isExecutableCodexCliAsync(target))) {
+    return { ok: false, path: target, reason: "codex --version failed", missingFlags: [] };
+  }
   try {
-    const launch = buildWindowsSpawn(exePath, ["exec", "resume", "--help"]);
+    const launch = buildWindowsSpawn(target, ["exec", "resume", "--help"]);
     const result = await spawnProbeAsync(launch.command, launch.args, {
       windowsVerbatimArguments: launch.windowsVerbatimArguments,
     }, 3000);
-    if (!result || result.status !== 0) return false;
+    if (!result || result.status !== 0) {
+      return { ok: false, path: target, reason: "codex exec resume --help failed", missingFlags: [] };
+    }
     const help = `${result.stdout || ""}\n${result.stderr || ""}`;
-    return [
-      "--json",
-      "--output-last-message",
-      "--skip-git-repo-check",
-      "--ignore-rules",
-      "--config",
-    ].every((flag) => help.includes(flag));
-  } catch {
-    return false;
+    const missingFlags = CODEX_REQUIRED_EXEC_FLAGS.filter((flag) => !help.includes(flag));
+    if (missingFlags.length > 0) {
+      return { ok: false, path: target, reason: `missing required flags: ${missingFlags.join(", ")}`, missingFlags };
+    }
+    return { ok: true, path: target, reason: null, missingFlags: [] };
+  } catch (err) {
+    return { ok: false, path: target, reason: err?.message || "probe failed", missingFlags: [] };
   }
 }
 
-async function findPathCodexAsync() {
-  if (process.platform === "win32") return await resolveWindowsPathCommandAsync("codex");
-  return await new Promise((resolve) => {
-    execFile("which", ["codex"], {
-      encoding: "utf-8",
-      windowsHide: true,
-    }, (error, stdout) => {
-      if (error) {
-        resolve(null);
-        return;
-      }
-      resolve(String(stdout || "").trim().split(/\r?\n/).find(Boolean) || null);
-    });
-  });
+async function chooseCodexCandidateAsync() {
+  const checked = [];
+  for (const candidate of getCodexCandidatePaths()) {
+    const probe = await probeCodexCliAsync(candidate);
+    checked.push(probe);
+    if (probe.ok) return { selected: candidate, checked };
+  }
+  return { selected: null, checked };
 }
-
 async function isExecutableCodexCliAsync(exePath) {
   const target = String(exePath || "");
   if (!target) return false;
@@ -2519,6 +2451,7 @@ export async function callProvider(promptText, {
   needsImageGeneration = false,
   jobId = null,
   workItemId = null,
+  attemptId = null,
   atlasPrefetchStatus = null,
   skipRolePrompt = false,
   recyclingMode = "fresh",
@@ -2600,6 +2533,7 @@ export async function callProvider(promptText, {
       disableSystemTools,
       jobId,
       workItemId,
+      attemptId,
       atlasPrefetchStatus,
       atlasAvailable: atlasReadyForMcp,
       atlasGateEnabled: atlasToolGateEnabled,
@@ -2708,6 +2642,22 @@ export async function callProvider(promptText, {
     };
     const clearExitCleanup = registerCodexExitCleanup(cleanupRunTemps);
     const forceReadOnlySandbox = !!(deterministicReadMcp.active && allowWrite);
+    logProviderMcpSurfaceTelemetry({
+      providerName: "codex",
+      role,
+      workItemId,
+      jobId,
+      attemptId,
+      deterministicReadMcp,
+      atlasReadyForMcp,
+      atlasContractTools,
+      mcpServerNames: [
+        deterministicReadMcp.active ? deterministicReadMcp.serverKey : null,
+        (!atlasServedByGateway && atlasReadyForMcp) ? atlasMcpServerKey : null,
+      ].filter(Boolean),
+      configOverrideCount: combinedConfigOverrides.length,
+      forceReadOnlySandbox,
+    });
     const args = buildCodexExecArgs({
       outputFile: temp.file,
       workingDir,

@@ -546,6 +546,7 @@ let _reviewSessionModulePromise = null;
 let _adminTuiModulePromise = null;
 let _adminSettingsModulePromise = null;
 let _adminCatalogModulePromise = null;
+let _providerCliInitModulePromise = null;
 let _concurrency = null;
 let _stallTimeout = undefined;
 
@@ -561,6 +562,10 @@ async function loadProviderModule() {
   return _providerModulePromise;
 }
 
+async function loadProviderCliInitModule() {
+  _providerCliInitModulePromise ||= import("../../providers/functions/provider-cli-init.js");
+  return _providerCliInitModulePromise;
+}
 async function loadAtlasModule() {
   _atlasModulePromise ||= import("../../integrations/functions/atlas.js");
   return _atlasModulePromise;
@@ -1951,7 +1956,7 @@ async function cmdAdmin() {
     await loadRemotePromptBundle();
   };
   const printAdminUsage = () => {
-    console.log("\n  Usage: node orchestrator.js admin [snapshot|worktrees|memory|settings|list|get <key>|set <key> <value>|tui]\n");
+    console.log("\n  Usage: node orchestrator.js admin [init|snapshot|worktrees|memory|settings|list|get <key>|set <key> <value>|tui]\n");
   };
   const setAdminSettingFromArgs = (key, value, usageLabel = "admin set", extraArgs = []) => {
     if (!key || typeof value === "undefined") {
@@ -1977,6 +1982,44 @@ async function cmdAdmin() {
     console.log(`Updated ${storageKey}=${displayValue}`);
   };
 
+  const renderProviderCliInitEntry = (entry) => {
+    const name = String(entry.provider || "provider").padEnd(6);
+    if (entry.status === "updated" || entry.status === "would_update") {
+      const verb = entry.status === "would_update" ? "would set" : "set";
+      console.log(`  ${C.green}${name}${C.reset} ${verb} ${entry.settingKey}=${entry.selected}`);
+      return;
+    }
+    if (entry.status === "kept") {
+      const source = entry.current ? entry.current : entry.selected;
+      console.log(`  ${C.green}${name}${C.reset} ready ${C.dim}${source}${C.reset}`);
+      return;
+    }
+    console.log(`  ${C.yellow}${name}${C.reset} not found ${C.dim}${entry.reason || "no executable candidate found"}${C.reset}`);
+  };
+
+  if (adminAction === "init") {
+    const dryRun = hasArgFlag("--dry-run");
+    const force = hasArgFlag("--force");
+    const nonInteractive = hasArgFlag("--non-interactive") || !process.stdout?.isTTY;
+
+    console.log(`\n${C.bold}Posse admin init${C.reset}`);
+    if (nonInteractive) {
+      console.log(`  ${C.dim}Non-interactive mode: skipping prompt-based repo repair.${C.reset}`);
+    } else {
+      const repoReady = await ensureRepoSetupConfirmed();
+      if (!repoReady) {
+        process.exitCode = 2;
+        return;
+      }
+    }
+
+    const { initializeProviderCliSettings } = await loadProviderCliInitModule();
+    const report = initializeProviderCliSettings({ force, dryRun });
+    console.log(`\n${C.bold}Provider CLIs${C.reset}`);
+    for (const entry of report.entries) renderProviderCliInitEntry(entry);
+    console.log("");
+    return;
+  }
   if (adminAction === "settings") {
     const settingsAction = adminArg1?.toLowerCase();
     if (settingsAction === "set") {
@@ -2149,7 +2192,7 @@ ${aliasDiagnostic}
     ${C.cyan}audit${C.reset}      Provider/handoff audit for jobs or work items
     ${C.dim}             audit | audit <jobId> | audit wi<id> | audit worktrees${C.reset}
     ${C.cyan}admin${C.reset}      Stats, session history, and settings management
-    ${C.dim}             admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin settings${C.reset}
+    ${C.dim}             admin init | admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin settings${C.reset}
     ${C.cyan}merge${C.reset}      Merge a completed WI branch
     ${C.cyan}prune${C.reset}      Clean up orphaned worktrees
     ${C.dim}             prune [--dry-run]${C.reset}

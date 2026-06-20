@@ -6,7 +6,7 @@
 // - JSON extraction from LLM responses
 // - Model tier configuration
 
-import { execFile, spawn, spawnSync, execSync } from "child_process";
+import { execFile, spawn, spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -23,7 +23,9 @@ import { resolveAtlasToolGateEnabled } from "../../integrations/functions/determ
 import { POSSE_MCP_GATEWAY_SERVER_NAME, stripPosseMcpGatewayPrefix } from "../../integrations/functions/mcp-gateway.js";
 import { summarizeObservedToolUse } from "./helpers/tool-runtime.js";
 import { buildWindowsSpawn, terminateSpawnedProcess } from "./helpers/windows-spawn.js";
+import { discoverCommandCandidates } from "./helpers/cli-discovery.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
+import { logProviderMcpSurfaceTelemetry } from "./helpers/mcp-telemetry.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { stripAnsi } from "../../../shared/format/functions/ansi.js";
 import { extractJson } from "../../../shared/format/functions/json.js";
@@ -164,6 +166,7 @@ function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
   disableSystemTools = false,
   jobId = null,
   workItemId = null,
+  attemptId = null,
   atlasPrefetchStatus = null,
   atlasAvailable = null,
   atlasGateEnabled = false,
@@ -185,6 +188,7 @@ function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
     disableSystemTools,
     jobId,
     workItemId,
+    attemptId,
     atlasPrefetchStatus,
     atlasAvailable,
     atlasGateEnabled,
@@ -230,6 +234,7 @@ async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cwd, {
   disableSystemTools = false,
   jobId = null,
   workItemId = null,
+  attemptId = null,
   atlasPrefetchStatus = null,
   atlasAvailable = null,
   atlasGateEnabled = false,
@@ -251,6 +256,7 @@ async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cwd, {
     disableSystemTools,
     jobId,
     workItemId,
+    attemptId,
     atlasPrefetchStatus,
     atlasAvailable,
     atlasGateEnabled,
@@ -423,6 +429,7 @@ export function __testGetMaxTurns(role, modelTier = "standard", complexity = nul
 
 let CLAUDE_CMD;
 let CLAUDE_ARGS;
+const CLAUDE_CLI_PATH_SETTING = "claude_cli_path";
 
 export class ClaudeCliNotFoundError extends Error {
   constructor() {
@@ -463,6 +470,15 @@ export function __testBuildClaudeSpawn(command, args = []) {
   return buildWindowsSpawn(command, args);
 }
 
+function readClaudeCliPathSetting() {
+  try {
+    const value = getSetting(CLAUDE_CLI_PATH_SETTING);
+    return value && String(value).trim() ? String(value).trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 // Parse an npm-style `claude.cmd` wrapper and return the absolute path to the JS
 // entry point it launches (so we can run it as `node <entry>` rather than
 // spawning the `.cmd` itself). Returns null when no entry can be parsed.
@@ -489,22 +505,8 @@ export function __testExtractCmdShimJsPath(cmdContent, binPath) {
   return extractCmdShimJsPath(cmdContent, binPath);
 }
 
-function resolveClaude() {
+function configureClaudeCommandFromBinary(binPath) {
   const isWin = process.platform === "win32";
-  const cmd = isWin ? "where claude" : "which claude";
-
-  let binPath;
-  try {
-    const lines = execSync(cmd, {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim().split(/\r?\n/);
-    binPath = isWin ? selectWindowsClaudeBinary(lines) : (lines[0] || "").trim();
-  } catch {
-    throw new ClaudeCliNotFoundError();
-  }
-  if (!binPath) throw new ClaudeCliNotFoundError();
-
   // On Windows, parse the .cmd wrapper to extract the JS entry point
   if (isWin && binPath.toLowerCase().endsWith(".cmd")) {
     try {
@@ -526,36 +528,59 @@ function resolveClaude() {
   CLAUDE_ARGS = [];
 }
 
+function getClaudeCandidatePaths() {
+  const configured = readClaudeCliPathSetting();
+  return discoverCommandCandidates("claude", {
+    extraPaths: configured ? [configured] : [],
+  });
+}
+
+function findClaudeBinary() {
+  const candidates = getClaudeCandidatePaths();
+  if (candidates.length === 0) return null;
+  return process.platform === "win32"
+    ? selectWindowsClaudeBinary(candidates)
+    : candidates[0];
+}
+
+export function discoverClaudeCli() {
+  const candidates = getClaudeCandidatePaths();
+  const selected = process.platform === "win32"
+    ? selectWindowsClaudeBinary(candidates)
+    : (candidates[0] || null);
+  return {
+    provider: "claude",
+    settingKey: CLAUDE_CLI_PATH_SETTING,
+    selected,
+    candidates,
+    ready: !!selected,
+    reason: selected ? null : new ClaudeCliNotFoundError().message,
+  };
+}
+
+function resolveClaude() {
+  const binPath = findClaudeBinary();
+  if (!binPath) throw new ClaudeCliNotFoundError();
+  configureClaudeCommandFromBinary(binPath);
+}
 function ensureClaudeResolved() {
   if (!CLAUDE_CMD) resolveClaude();
 }
 
 function findClaudeBinaryAsync() {
-  const isWin = process.platform === "win32";
-  const command = isWin ? "where.exe" : "which";
-  const args = ["claude"];
   return new Promise((resolve, reject) => {
-    execFile(command, args, {
-      encoding: "utf-8",
-      windowsHide: true,
-    }, (error, stdout) => {
-      if (error) {
-        reject(new ClaudeCliNotFoundError());
-        return;
-      }
-      const lines = String(stdout || "").trim().split(/\r?\n/);
-      const selected = isWin
-        ? selectWindowsClaudeBinary(lines)
-        : lines.map((line) => line.trim()).find(Boolean);
+    try {
+      const selected = findClaudeBinary();
       if (!selected) {
         reject(new ClaudeCliNotFoundError());
         return;
       }
       resolve(selected);
-    });
+    } catch {
+      reject(new ClaudeCliNotFoundError());
+    }
   });
 }
-
 async function resolveClaudeAsync() {
   const binPath = await findClaudeBinaryAsync();
   if (process.platform === "win32" && binPath.toLowerCase().endsWith(".cmd")) {
@@ -2487,6 +2512,7 @@ export async function callProvider(promptText, {
   needsImageGeneration = false,
   jobId = null,
   workItemId = null,
+  attemptId = null,
   skipRolePrompt = false,
   recyclingMode = "fresh",
   priorSessionHandle = null,
@@ -2586,6 +2612,7 @@ export async function callProvider(promptText, {
       disableSystemTools: disableSystemToolsResolved,
       jobId,
       workItemId,
+      attemptId,
       atlasPrefetchStatus,
       atlasAvailable: atlasReadyForMcp,
       atlasGateEnabled: atlasToolGateEnabled,
@@ -2675,6 +2702,18 @@ export async function callProvider(promptText, {
         ...(deterministicReadMcp.payload?.mcpServers || {}),
         ...(atlasServedByGateway || !atlasReadyForMcp ? {} : (atlasMcpPayload?.mcpServers || {})),
       };
+      logProviderMcpSurfaceTelemetry({
+        providerName: "claude",
+        role,
+        workItemId,
+        jobId,
+        attemptId,
+        deterministicReadMcp,
+        atlasReadyForMcp,
+        atlasContractTools,
+        mcpServerNames: Object.keys(mergedMcpServers),
+        cliToolConfig,
+      });
       if (Object.keys(mergedMcpServers).length > 0) {
         const mcpConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-atlas-v2-"));
         cleanupAtlasMcpConfig = () => {
