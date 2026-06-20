@@ -44,6 +44,21 @@ setOnnxDaemonKeepWarm(true);
 /** @type {Map<string, { ledgerPath: string, dbPath: string, ledger: any, view: any }>} */
 const handles = new Map();
 const dbWrite = createDbWriteSemaphore();
+// Embedding ANN writes run OUTSIDE dbWrite.run() (the encode is read-only w.r.t.
+// the ledger/view writers, so it's flushed after the write-queue slot releases),
+// and this host services warm requests concurrently — so two warms for the same
+// repo could otherwise save/rename index.usearch at once. Serialize embedding
+// flushes per repo so there is a single in-host ANN writer.
+const embeddingWriteChains = new Map();
+function runEmbeddingWriteExclusive(key, fn) {
+  const k = String(key || "");
+  const prev = embeddingWriteChains.get(k) || Promise.resolve();
+  const run = prev.then(() => {}, () => {}).then(fn);
+  const tail = run.then(() => {}, () => {});
+  embeddingWriteChains.set(k, tail);
+  void tail.finally(() => { if (embeddingWriteChains.get(k) === tail) embeddingWriteChains.delete(k); });
+  return run;
+}
 // Generation fans out: one slot per known indexer so concurrent per-language
 // stage ops never queue behind the valve. Correctness does not depend on this
 // width — the stager's per-(cwd,output) gate serializes same-language runs and
@@ -147,7 +162,9 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         // Outside dbWrite.run, still inside this request: progress events keep
         // streaming and the response carries the embeddings result fields the
         // flush writes into `result` (captured by reference at defer time).
-        await engine.flushDeferredEmbeddings();
+        // Serialized per repo so this index's ANN save/rename can't race a
+        // concurrent warm's in this host (single in-host embedding writer).
+        await runEmbeddingWriteExclusive(payload.repoRoot || payload.ledgerPath, () => engine.flushDeferredEmbeddings());
         return result;
       } finally {
         // The warm may have rewritten the on-disk ANN; cached retrieval-side

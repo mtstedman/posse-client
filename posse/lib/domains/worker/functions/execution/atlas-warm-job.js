@@ -142,6 +142,30 @@ function atlasWarmRuntimeBudgetMs(purpose, config = {}) {
   return Math.max(...candidates.filter((n) => n != null));
 }
 
+// Gate-wait and post-acquire runtime are DISTINCT budgets. The conductor gets
+// its full per-purpose runtime budget once it holds the gate; this caps only how
+// long a warm waits IN LINE for the gate before skipping (best-effort). It must
+// NOT be the full runtime budget, or a bulk warm could wait ~one budget then run
+// another (~2x wall-clock) and keep a worker occupied long enough to recreate
+// the starvation this is meant to reduce.
+//   - wi / wi-cleanup: give up fast so cheap views never queue behind bulk work.
+//   - main-* / embeddings / scip-*: a bounded fair-share wait; on timeout the
+//     warm skips and the scheduler re-enqueues it, rather than holding a worker.
+const ATLAS_WARM_SHORT_GATE_WAIT_MS = 30_000;
+const ATLAS_WARM_BULK_GATE_WAIT_MS = 3 * 60_000;
+export function atlasWarmGateWaitMs(purpose) {
+  if (purpose === "wi" || purpose === "wi-cleanup") return ATLAS_WARM_SHORT_GATE_WAIT_MS;
+  return ATLAS_WARM_BULK_GATE_WAIT_MS;
+}
+
+// wi / wi-cleanup warms take write-gate intake priority so they jump a backlog of
+// queued bulk warms (main-*, embeddings, boot index) instead of waiting it out —
+// keeping WI-view freshness during big indexes. The gate ages queued bulk warms
+// so they still make progress (no starvation).
+export function atlasWarmGatePriority(purpose) {
+  return (purpose === "wi" || purpose === "wi-cleanup") ? 1 : 0;
+}
+
 function atlasRuntimeDisabledReasonForRepo(repoRoot) {
   return getAtlasRuntimeDisabledReason()
     || getAtlasRuntimeDisabledReason(repoRoot)
@@ -441,7 +465,8 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
     }
     const label = `ATLAS warm conductor job #${jobId}`;
     const budgetMs = Math.max(1, Number(timeoutMs) || Number(ATLAS_WARM_JOB_POLICY.maxRuntimeMs) || 60_000);
-    const gateStartedAt = nowMs();
+    const gateWaitMs = atlasWarmGateWaitMs(purpose);
+    const gatePriority = atlasWarmGatePriority(purpose);
     config ||= getAtlasIntegrationConfig();
     const warmTelemetry = atlasWarmTelemetryContext({ jobId, purpose, branch: branch || payload?.branch || null, baselineBranch, repoRoot, paths, budgetMs, timeoutMs });
     // The conductor caches DB handles per (ledgerPath|dbPath) target. `warm` is
@@ -488,7 +513,10 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
                 config,
                 job,
               },
-              { signal: abortSignal, timeoutMs: Math.max(1, budgetMs - (nowMs() - gateStartedAt)), onProgress },
+              // The conductor gets its OWN full runtime budget, measured from
+              // gate acquisition — gate-wait is bounded separately by waitMs
+              // below and must not be charged against the conductor deadline.
+              { signal: abortSignal, timeoutMs: budgetMs, onProgress },
             );
             logAtlasWarmTelemetry("atlas.warm.conductor_result", {
               ...warmTelemetry,
@@ -512,7 +540,8 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
         },
         {
           label,
-          waitMs: budgetMs,
+          waitMs: gateWaitMs,
+          priority: gatePriority,
           onCancel: (info = {}) => {
             logAtlasWarmTelemetry("atlas.warm.sqlite_gate", {
               ...warmTelemetry,

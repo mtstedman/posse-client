@@ -84,6 +84,7 @@ import {
   getAssessmentInternalRetryLimit,
 } from "../functions/helpers/assessment-shared.js";
 import { refreshAndExtractInsights as refreshAndExtractInsightsFromModule } from "../functions/helpers/insights.js";
+import { isTransientMcpInfraBlock, MAX_MCP_INFRA_BLOCK_RETRIES, MCP_INFRA_BLOCK_BACKOFF_MS } from "../functions/helpers/block-reason.js";
 import {
   gitCommitAll as gitCommitAllFromModule,
   gitCommitAllAsync as gitCommitAllAsyncFromModule,
@@ -1733,6 +1734,29 @@ export class Worker {
           });
           await wrappedJob.setError(blockMsg);
 
+          // Transient MCP-gateway attach failures are infrastructure, not a real
+          // block: the agent ran without its write tools because the CLI couldn't
+          // attach the stdio gateway under load. Auto-requeue with backoff instead
+          // of escalating to a human (capped, so a persistently broken gateway
+          // still escalates).
+          if (isTransientMcpInfraBlock(blockReason)) {
+            const infraRetries = allAttempts.filter(
+              (a) => a.status === "blocked" && isTransientMcpInfraBlock(a.error_text),
+            ).length;
+            if (infraRetries < MAX_MCP_INFRA_BLOCK_RETRIES) {
+              const delayMs = MCP_INFRA_BLOCK_BACKOFF_MS[
+                Math.min(infraRetries, MCP_INFRA_BLOCK_BACKOFF_MS.length - 1)
+              ];
+              const readyAt = new Date(Date.now() + delayMs).toISOString();
+              this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: transient MCP gateway attach failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
+              this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+              refreshAndExtractInsightsFromModule(job.work_item_id);
+              this._cleanupWorktreeIfDone(job.work_item_id);
+              return;
+            }
+            this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: MCP gateway attach failed ${infraRetries} time(s) — escalating to human${C.reset}`);
+          }
+
           const blockedPayload = {
             original_job_id: job.id,
             review_type: "blocked_recovery",
@@ -2606,6 +2630,27 @@ export class Worker {
               message: blockMsg,
             });
             await wrappedJob.setError(blockMsg);
+
+            // Transient MCP-gateway attach failures are infrastructure, not a real
+            // block — auto-requeue with backoff instead of escalating to a human
+            // (capped, so a persistently broken gateway still escalates).
+            if (isTransientMcpInfraBlock(blockReason)) {
+              const infraRetries = allAttempts.filter(
+                (a) => a.status === "blocked" && isTransientMcpInfraBlock(a.error_text),
+              ).length;
+              if (infraRetries < MAX_MCP_INFRA_BLOCK_RETRIES) {
+                const delayMs = MCP_INFRA_BLOCK_BACKOFF_MS[
+                  Math.min(infraRetries, MCP_INFRA_BLOCK_BACKOFF_MS.length - 1)
+                ];
+                const readyAt = new Date(Date.now() + delayMs).toISOString();
+                this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: transient MCP gateway attach failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
+                this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+                refreshAndExtractInsightsFromModule(job.work_item_id);
+                this._cleanupWorktreeIfDone(job.work_item_id);
+                return;
+              }
+              this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: MCP gateway attach failed ${infraRetries} time(s) — escalating to human${C.reset}`);
+            }
 
             // Don't consume the attempt — BLOCKED is a correct diagnosis, not a
             // failure. The human needs to provide guidance (expand scope, etc.)

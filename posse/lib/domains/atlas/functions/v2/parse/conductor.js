@@ -128,37 +128,55 @@ export function createConductorDaemon() {
    *
    * @param {Record<string, any>} [opts]
    */
-  const beginReaderWrite = async (opts = {}) => {
+  const beginReaderWrite = async (opts = {}, { holdEmbeddings = false } = {}) => {
     const reader = readerDaemon;
-    if (!reader?.isHostAlive()) return [];
+    if (!reader?.isHostAlive()) return { dbTargets: [], embRoot: null };
     const targets = readerWriteTargets(opts);
-    if (targets.length === 0) return [];
+    const embRoot = holdEmbeddings && opts?.repoRoot ? String(opts.repoRoot) : null;
+    if (targets.length === 0 && !embRoot) return { dbTargets: [], embRoot: null };
     const held = [];
+    let heldEmb = null;
     try {
       for (const target of targets) {
         await call(reader, { op: "beginWrite", ...target }, { timeoutMs: READER_WRITE_OP_TIMEOUT_MS });
         held.push(target);
       }
-      return held;
+      if (embRoot) {
+        // Confirmed-close barrier: drain semantic reads and close (confirmed)
+        // the reader's cached ANN child — releasing index.usearch — before the
+        // conductor renames it. Keyed by repoRoot since the child is shared
+        // across the repo's views.
+        await call(reader, { op: "beginEmbeddingWrite", readRoot: embRoot }, { timeoutMs: READER_WRITE_OP_TIMEOUT_MS });
+        heldEmb = embRoot;
+      }
+      return { dbTargets: held, embRoot: heldEmb };
     } catch {
+      if (heldEmb) {
+        try { await call(reader, { op: "endEmbeddingWrite", readRoot: heldEmb }, { timeoutMs: READER_OP_TIMEOUT_MS }); } catch { /* best effort */ }
+      }
       for (const target of held.reverse()) {
         try { await call(reader, { op: "endWrite", ...target }, { timeoutMs: READER_OP_TIMEOUT_MS }); } catch { /* best effort */ }
       }
       if (readerDaemon === reader) readerDaemon = null;
       try { await reader.dispose(); } catch { /* best effort */ }
-      return [];
+      return { dbTargets: [], embRoot: null };
     }
   };
 
   /**
-   * @param {Array<{ viewPath?: string, ledgerPath?: string }>} targets
+   * @param {{ dbTargets?: Array<{ viewPath?: string, ledgerPath?: string }>, embRoot?: string | null }} held
    */
-  const endReaderWrite = async (targets) => {
-    if (!Array.isArray(targets) || targets.length === 0) return;
+  const endReaderWrite = async (held) => {
+    const dbTargets = Array.isArray(held?.dbTargets) ? held.dbTargets : [];
+    const embRoot = held?.embRoot || null;
+    if (dbTargets.length === 0 && !embRoot) return;
     const reader = readerDaemon;
     if (!reader?.isHostAlive()) return;
     let failed = false;
-    for (const target of [...targets].reverse()) {
+    if (embRoot) {
+      try { await call(reader, { op: "endEmbeddingWrite", readRoot: embRoot }, { timeoutMs: READER_OP_TIMEOUT_MS }); } catch { failed = true; }
+    }
+    for (const target of [...dbTargets].reverse()) {
       try {
         await call(reader, { op: "endWrite", ...target }, { timeoutMs: READER_OP_TIMEOUT_MS });
       } catch {
@@ -171,19 +189,19 @@ export function createConductorDaemon() {
     }
   };
 
-  const writesWithReaderHold = (fn) => async (/** @type {any[]} */ ...args) => {
-    const heldTargets = await beginReaderWrite(/** @type {any} */ (args[0]) || {});
+  const writesWithReaderHold = (fn, holdOpts = {}) => async (/** @type {any[]} */ ...args) => {
+    const held = await beginReaderWrite(/** @type {any} */ (args[0]) || {}, holdOpts);
     try {
       return await fn(...args);
     } finally {
       await invalidateReaders();
-      await endReaderWrite(heldTargets);
+      await endReaderWrite(held);
     }
   };
 
   const stage = (opts, reqOpts) => call(daemon, { op: "stage", ...opts }, reqOpts);
   const ingest = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "ingest", ...opts }, reqOpts));
-  const warm = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts));
+  const warm = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts), { holdEmbeddings: true });
   const merge = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "merge", ...opts }, reqOpts));
   const retrieve = (opts, reqOpts) => call(getReaderDaemon(), { op: "retrieve", ...opts }, reqOpts);
 

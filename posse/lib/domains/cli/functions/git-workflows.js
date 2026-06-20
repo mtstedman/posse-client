@@ -2856,7 +2856,17 @@ export function createGitWorkflowHelpers({
     const prior = autoMergeCompletedWorkItemsPromise;
     const queued = (prior || Promise.resolve())
       .catch(() => {})
-      .then(() => autoMergeCompletedWorkItemsImpl(args));
+      .then(() => autoMergeCompletedWorkItemsImpl(args).catch((err) => {
+        // Auto-merge is best-effort run wrap-up. A native-git/heartbeat failure
+        // here (e.g. resolveTargetBranch during the merge loop) must NOT escape
+        // as an unhandledRejection — that exits the orchestrator and aborts the
+        // whole wrap-up. Log and report zero merges; nothing already committed
+        // is lost, and the WIs stay mergeable for the next wrap-up / review.
+        try {
+          console.log(`  ${C.yellow}[git]${C.reset} Auto-merge skipped (wrap-up error): ${err?.message || err}`);
+        } catch { /* best effort: never let logging crash wrap-up */ }
+        return 0;
+      }));
     const tracked = queued.finally(() => {
       if (autoMergeCompletedWorkItemsPromise === tracked) {
         autoMergeCompletedWorkItemsPromise = null;

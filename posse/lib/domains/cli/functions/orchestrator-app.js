@@ -130,6 +130,8 @@ import {
   inferWiMode,
   listInputContextDirectories,
   mergeSuspectedDirsWithInputContexts,
+  normalizeIterativeWorkflowModeChoice,
+  normalizeRequestKindChoice,
   parseAutoMerge,
   parseConcurrency,
   parseFlagValue,
@@ -457,8 +459,10 @@ async function ensureGitReady() {
 }
 
 /**
- * Interactive first-run setup check. Prompts to auto-fix missing git repo or
- * missing HEAD. Prints instructions for manual-only issues (user identity).
+ * First-run setup check. Auto-initializes a missing git repo and creates the
+ * initial commit when HEAD is missing — no confirmation prompt, so `posse go`
+ * works the first time in a fresh directory. Only missing user identity still
+ * prompts (interactive) or aborts (non-interactive), since it can't be derived.
  * Returns true if the repo is ready to proceed, false to abort cmdRun.
  */
 async function ensureRepoSetupConfirmed() {
@@ -470,12 +474,10 @@ async function ensureRepoSetupConfirmed() {
   try { await runGit(["rev-parse", "--git-dir"]); } catch { isRepo = false; }
 
   if (!isRepo) {
-    console.log(`\n  ${C.yellow}${PROJECT_DIR} is not a git repository.${C.reset}`);
-    const answer = (await ask(`  Initialize a new git repo here? [y/N]: `)).trim().toLowerCase();
-    if (answer !== "y" && answer !== "yes") {
-      console.log(`  ${C.red}Aborted — posse requires a git repo.${C.reset}\n`);
-      return false;
-    }
+    // First run in a fresh directory: auto-initialize the repo rather than
+    // gating boot on a manual confirmation. git init is local and reversible,
+    // and posse can't do anything useful without a repo to branch worktrees from.
+    console.log(`\n  ${C.yellow}${PROJECT_DIR} is not a git repository — initializing one.${C.reset}`);
     try {
       await runGit(["init"]);
       console.log(`  ${C.green}Initialized git repo.${C.reset}`);
@@ -514,12 +516,10 @@ async function ensureRepoSetupConfirmed() {
   let hasHead = true;
   try { await runGit(["rev-parse", "HEAD"]); } catch { hasHead = false; }
   if (!hasHead) {
-    console.log(`\n  ${C.yellow}Repo has no commits yet — worktrees need a valid HEAD.${C.reset}`);
-    const answer = (await ask(`  Create an initial empty commit? [Y/n]: `)).trim().toLowerCase();
-    if (answer === "n" || answer === "no") {
-      console.log(`  ${C.red}Aborted — posse needs at least one commit to branch from.${C.reset}\n`);
-      return false;
-    }
+    // Worktrees need a valid HEAD to branch from. ensureGitReady creates this
+    // commit unconditionally later in boot, so make it automatic here too
+    // instead of prompting.
+    console.log(`\n  ${C.yellow}Repo has no commits yet — creating an initial commit so worktrees can branch from HEAD.${C.reset}`);
     try {
       await runGit(["commit", "--allow-empty", "-m", "chore: initial commit (posse bootstrap)"]);
       console.log(`  ${C.green}Initial commit created.${C.reset}\n`);
@@ -870,10 +870,11 @@ function isReviewableWorkItem(wi) {
 
 
 async function promptForIterativeWorkflowMode() {
-  const answer = (await ask(`  Iterative workflow mode? bugfix / ux / refactor / audit / iterate [bugfix]: `))
+  const answer = (await ask(`  Iterative workflow mode? [b]ugfix / [d]esign(ux) / [r]efactor / [a]udit / [i]terate [bugfix]: `))
     .trim()
     .toLowerCase();
-  return Object.prototype.hasOwnProperty.call(ITERATIVE_WORKFLOW_PROFILES, answer) ? answer : "bugfix";
+  const mode = normalizeIterativeWorkflowModeChoice(answer, "bugfix");
+  return Object.prototype.hasOwnProperty.call(ITERATIVE_WORKFLOW_PROFILES, mode) ? mode : "bugfix";
 }
 
 async function promptForScopedAdd(description, defaultMode = "build", defaultDeepthink = false, workflowMode = null) {
@@ -923,7 +924,8 @@ async function promptForScopedAdd(description, defaultMode = "build", defaultDee
     };
   }
 
-  const kindInput = (await ask(`  What kind of request is this? task / bugfix / context / question / image / report [task]: `)).trim().toLowerCase();
+  const rawKindInput = await ask(`  What kind of request is this? [t]ask / [b]ugfix / [d]esign / [c]ontext / [q]uestion / [i]mage / [r]eport [task]: `);
+  const explicitKind = normalizeRequestKindChoice(rawKindInput, "");
   const defaultOutputMode = defaultOutputModeForMode(defaultMode);
   const outputInput = (await ask(`  What should the result be? auto / repo / artifact / question_only / comma-separated desired outputs [${defaultOutputMode}]: `)).trim().toLowerCase();
   let deepthink = defaultDeepthink;
@@ -935,8 +937,8 @@ async function promptForScopedAdd(description, defaultMode = "build", defaultDee
   }
   return {
     intakeHints: normalizeIntakeHints({
-      intent_type: kindInput || null,
-      intent_type_source: kindInput ? "explicit" : "inferred",
+      intent_type: explicitKind || null,
+      intent_type_source: explicitKind ? "explicit" : "inferred",
       output_mode: outputInput || defaultOutputMode,
       output_mode_source: outputInput ? "explicit" : "inferred",
       desired_outputs_source: outputInput ? "explicit" : "inferred",
@@ -998,7 +1000,7 @@ async function cmdAdd() {
   const rawArgs = process.argv.slice(3);
   if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
     console.log(`\n  Usage: posse add "description of what you want built"`);
-    console.log(`  ${C.dim}Optional: --mode build|report|image --intent task|bugfix|report|image --output repo|artifact|question_only --files LIST --constraints LIST${C.reset}\n`);
+    console.log(`  ${C.dim}Optional: --mode build|report|image --intent task|bugfix|design|context|question|report|image (hotkeys ok: b,d,c,q,r,i) --output repo|artifact|question_only --files LIST --constraints LIST${C.reset}\n`);
     return;
   }
 
@@ -2213,13 +2215,14 @@ ${aliasDiagnostic}
       ${C.cyan}--auto-approve-plan${C.reset} Skip plan approval gates for this run
       ${C.cyan}--deepthink${C.reset}      Raise planner/research budget for deeper analysis
       ${C.cyan}--deepthink-budget N${C.reset}  Set planner/research budget: low, normal, high, xhigh
+      ${C.cyan}--intent KIND${C.reset}    Intake type: task, bugfix, design, context, question, report, image ${C.dim}(hotkeys ok)${C.reset}
       ${C.cyan}--input-contexts${C.reset} Select context dirs from resources/inputs (names, indices, or all)
       ${C.cyan}--files LIST${C.reset}     Optional hinted files for research/planning
       ${C.cyan}--constraints LIST${C.reset} Optional intake constraints for research/planning
       ${C.cyan}--session-recycle${C.reset} Enable session recycling for this work item
       ${C.cyan}--no-session-recycle${C.reset} Disable session recycling for this work item
       ${C.cyan}--red-team-plan${C.reset}  Use primary planner -> red-team planner -> synthesis planner
-      ${C.cyan}--iterate${C.reset}        Guided iterative workflow intake ${C.dim}(bugfix|ux|refactor|audit|iterate)${C.reset}
+      ${C.cyan}--iterate${C.reset}        Guided iterative workflow intake ${C.dim}([b]ugfix|[d]esign/ux|[r]efactor|[a]udit|[i]terate)${C.reset}
       ${C.cyan}--iterate-red-team${C.reset} Persist red-team planning across iterative follow-up rounds
       ${C.cyan}--concurrency N${C.reset}  Run N workers in parallel       ${C.dim}(default: ${getCatalogRuntimeFallbackInt("scheduler_concurrency", 3)})${C.reset}
     ${C.cyan}--no-tui${C.reset}         Disable split-screen display (classic output)

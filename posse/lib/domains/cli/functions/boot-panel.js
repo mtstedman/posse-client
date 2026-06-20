@@ -415,33 +415,36 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     return ["wait", null];
   };
 
-  // Overall boot % — each readiness item an equal slice (drives the hero gauge
-  // and the boot band stat). Resolved = ok / skipped / deferred; a failed step
-  // stays uncounted so the bar can't read 100% while something is broken.
-  const overallBootPercent = () => {
-    if (steps.size === 0) return 0;
-    let done = 0;
-    for (const s of steps.values()) {
-      if (s.status === "ok" || s.status === "skipped" || s.status === "deferred") done += 1;
+  // ---- runtime band status ----
+  // The boot section is a CHECKLIST of discrete gates (scheduler lock,
+  // workspace, provider auth) — not smooth progress — so it carries a word
+  // status, never a gauge: "ready" once every group resolves, "needs attn" if
+  // anything failed, else "<ready>/<total>" groups so far. The real continuous
+  // percentage lives on the atlas-ledger band below, where it actually means
+  // something. A group = one rendered runtime row (scheduler / workspace /
+  // providers).
+  const isStepResolved = (s) => s.status === "ok" || s.status === "skipped" || s.status === "deferred";
+  const runtimeGroups = () => {
+    const groups = [];
+    for (const section of SECTION_ORDER) {
+      const labels = sectionOrder.get(section) || [];
+      const stepList = labels.map((l) => steps.get(l)).filter(Boolean);
+      if (stepList.length > 0) groups.push(stepList);
     }
-    return Math.round((done / steps.size) * 100);
+    return groups;
+  };
+  const runtimeStatusText = () => {
+    const groups = runtimeGroups();
+    if (groups.length === 0) return `${col("dim")}…${col("reset")}`;
+    if (groups.some((g) => g.some((s) => s.status === "failed"))) {
+      return `${col("red")}needs attn${col("reset")}`;
+    }
+    const ready = groups.filter((g) => g.every(isStepResolved)).length;
+    if (ready === groups.length) return `${col("green")}ready${col("reset")}`;
+    return `${col("dim")}${ready}/${groups.length}${col("reset")}`;
   };
 
-  // ---- hero / bands / borders ----
-  // The hero must not read 100%/"ready" while a ledger tail bar is still
-  // active: the readiness steps can all be resolved while the warm is in a
-  // long quiet phase (encode finishing, ML tree labeling) that still gates
-  // the TUI. Cap at 99% until the tails are terminal.
-  const ledgerTailActive = () => [zip, tree, encode].some(
-    (st) => st && !["idle", "done", "skipped", "failed"].includes(st.state),
-  );
-  const heroRow = () => {
-    const w = innerWidth();
-    const pct = ledgerTailActive() ? Math.min(overallBootPercent(), 99) : overallBootPercent();
-    const tag = pct >= 100 ? "ready" : "readiness";
-    const barW = Math.max(16, Math.min(30, w - 24));
-    return line(`   ${gaugeBar(pct, barW, "green")}   ${col("bold")}${String(pct).padStart(3)}%${col("reset")}   ${col("cyan")}▸ ${tag}${col("reset")}`);
-  };
+  // ---- bands / borders ----
   const bandRow = (label, statText, spineKey) => {
     const w = innerWidth();
     const prefix = `  ${col(spineKey)}▌${col("reset")} ${col("bold")}${label}${col("reset")} `;
@@ -480,22 +483,21 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   // shows what it's doing, then pending steps, then already-resolved ones as
   // plain chips. Without this, fixed insertion order leaves finished chips on
   // the left and pushes the running step past the truncated right edge.
+  // In-flight non-provider group (scheduler / workspace): one moving line, not a
+  // list. Sequential phases (lock → orphan → pre-loop) share a row, so showing
+  // every step as a chip overflowed and truncated mid-word. Instead surface the
+  // single current activity (the running step's live detail); between steps show
+  // a quiet done/total so the row still reads as advancing. The leading section
+  // glyph already spins, so the body carries no spinner of its own.
   const runningSectionBody = (labels) => {
-    // running first (what it's doing now), then resolved (progress so far),
-    // then still-pending steps — so the chip that survives truncation is a
-    // reassuring ✓ rather than a not-started-yet placeholder.
-    const rank = (status) => (status === "running" ? 0 : status === "pending" ? 2 : 1);
-    const ordered = labels
-      .map((l) => [l, steps.get(l)])
-      .filter(([, s]) => s)
-      .sort((a, b) => rank(a[1].status) - rank(b[1].status));
-    return ordered
-      .map(([label, s]) => {
-        if (s.status !== "running") return chipFor(label);
-        const detail = s.detail ? ` ${col("dim")}${s.detail}${col("reset")}` : "";
-        return `${col("bold")}${label}${col("reset")} ${spinner()}${detail}`;
-      })
-      .join("   ");
+    const entries = labels.map((l) => [l, steps.get(l)]).filter(([, s]) => s);
+    const active = entries.find(([, s]) => s.status === "running");
+    if (active) return active[1].detail || active[0];
+    const done = entries.filter(([, s]) => isStepResolved(s)).length;
+    if (done > 0 && done < entries.length) {
+      return `${col("dim")}${done}/${entries.length} done${col("reset")}`;
+    }
+    return `${col("dim")}starting…${col("reset")}`;
   };
   const sectionElapsed = (stepList) => {
     const starts = stepList.map((s) => s.startedAt).filter(Number.isFinite);
@@ -514,16 +516,25 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
       const allOk = stepList.every((s) => s.status === "ok");
       const allSkipped = stepList.every((s) => s.status === "skipped");
       if (section === "providers") {
-        // Providers never collapse — always show per-provider health chips.
-        // Split across two rows (chips are name-padded so the glyphs line up)
-        // since a single row of 4+ providers crowds the panel.
-        const nameW = Math.max(1, ...labels.map((l) => l.length));
-        const chips = labels.map((l) => chipFor(l, nameW));
-        const half = Math.ceil(chips.length / 2);
-        const indent = 4 + 1 + 1 + 10 + 1; // "    " + glyph + " " + name(10) + " "
-        out.push(line(`    ${glyph} ${name} ${chips.slice(0, half).join("   ")}`));
-        const rest = chips.slice(half).join("   ");
-        if (rest) out.push(line(`${" ".repeat(indent)}${rest}`));
+        // All authed: a clean dotted name list — the row's own ✓ already
+        // carries the health, so per-name glyphs are just noise. Anything
+        // not-ok: per-provider chips ordered worst-first, so a failure survives
+        // truncation; the full reason still renders in the notes section below.
+        const provs = labels.map((l) => [l, steps.get(l)]).filter(([, s]) => s);
+        const anyNotOk = provs.some(([, s]) => s.status !== "ok");
+        let body;
+        if (!anyNotOk) {
+          body = provs.map(([l]) => l).join(`${col("dim")} · ${col("reset")}`);
+        } else {
+          const rank = (status) => (status === "failed" ? 0
+            : status === "deferred" ? 1
+              : (status === "running" || status === "pending") ? 2 : 3);
+          body = provs
+            .sort((a, b) => rank(a[1].status) - rank(b[1].status))
+            .map(([l]) => chipFor(l))
+            .join("   ");
+        }
+        out.push(line(`    ${glyph} ${name} ${body}`));
         continue;
       }
       let body;
@@ -665,9 +676,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     const out = [];
     out.push(topBorder());
     out.push(blank());
-    out.push(heroRow());
-    out.push(blank());
-    out.push(bandRow("boot", `${overallBootPercent()}%`, "cyan"));
+    out.push(bandRow("runtime", runtimeStatusText(), "cyan"));
     out.push(blank());
     out.push(...renderBootSection());
     const notes = renderNotes();

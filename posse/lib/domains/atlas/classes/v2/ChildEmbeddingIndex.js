@@ -127,6 +127,16 @@ export class ChildEmbeddingIndex {
   #stderrTail = "";
   /** @type {Record<string, any> | null} */
   #lastAddTiming = null;
+  /**
+   * Children we intentionally killed (request-timeout or close). Their later
+   * async `exit` would otherwise look "stale" — a fresh child has already
+   * replaced #child — and log child.stale_exit, which is alarming telemetry for
+   * a deliberate retirement (the dominant source of the 100+ "stale exits" seen
+   * per run). Tracked here so #onChildExit reports child.retired instead and a
+   * genuinely unexpected stale exit stays distinguishable.
+   * @type {Set<import("node:child_process").ChildProcess>}
+   */
+  #retiredChildren = new Set();
 
   /**
    * @param {{
@@ -341,12 +351,17 @@ export class ChildEmbeddingIndex {
       });
       this.#pending.delete(id);
     }
+    // Deliberately-killed children (request-timeout / close) were recorded as
+    // retired; their exit is expected, not a stale anomaly. Delete runs for
+    // every exit so the set never leaks.
+    const retired = this.#retiredChildren.delete(child);
     if (stale) {
-      this.#log("child.stale_exit", {
+      this.#log(retired ? "child.retired" : "child.stale_exit", {
         child_pid: childPid,
         current_child_pid: this.#child?.pid || null,
         exit_code: code ?? null,
         signal: signal || null,
+        ...(retired ? { reason: "intentional_kill" } : {}),
       });
       return;
     }
@@ -434,6 +449,9 @@ export class ChildEmbeddingIndex {
             timeoutMs,
           }));
           if (killOnTimeout) {
+            // Mark as a deliberate retirement BEFORE killing so the async exit
+            // is logged as child.retired, not child.stale_exit.
+            this.#retiredChildren.add(child);
             try { child.kill(); } catch { /* best effort */ }
           }
         }, Number(timeoutMs))
@@ -624,6 +642,7 @@ export class ChildEmbeddingIndex {
       try { child?.disconnect?.(); } catch { /* best effort */ }
       const exited = await waitForChildExit(child, 5_000);
       if (!exited && isChildRunning(child)) {
+        this.#retiredChildren.add(child);
         try { child?.kill?.(); } catch { /* best effort */ }
       }
       if (this.#child === child) this.#child = null;

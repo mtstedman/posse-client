@@ -457,7 +457,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhauste
   if (permanentProviderConfigError || sameErrorRepeat || freshJob.attempt_count >= freshJob.max_attempts) {
     const reason = stallExhausted
       ? "stall retries exhausted"
-      : (permanentProviderConfigError ? "permanent provider configuration/model error" : (sameErrorRepeat ? "same error repeated" : `exceeded max attempts (${freshJob.max_attempts})`));
+      : (permanentProviderConfigError ? "permanent provider configuration/model error" : (sameErrorRepeat ? "same error repeated" : `exceeded max attempts (${freshJob.attempt_count}/${freshJob.max_attempts})`));
     log.error("worker", `Dead letter: ${job.job_type} #${job.id}`, { jobId: job.id, wiId: job.work_item_id, type: job.job_type, attempts: freshJob.attempt_count, error: errSummary, reason });
     jobLog("DEAD_LETTER", { wi: job.work_item_id, job: job.id, detail: `${job.job_type} "${shortJobTitle(job).slice(0, 50)}" — ${reason}: ${errSummary}` });
     recordObservation({

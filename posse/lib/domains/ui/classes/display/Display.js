@@ -2030,7 +2030,14 @@ export class Display {
     } else {
       payload = full;
     }
-    const ok = process.stdout.write(payload);
+    // Wrap the frame write in DEC 2026 synchronized-output markers (BSU/ESU) so
+    // terminals that support it (Windows Terminal, modern xterm/kitty) buffer the
+    // whole repaint and present it atomically instead of tearing mid-frame. When
+    // busy we rewrite the entire frame on every change — token counters and the
+    // provider gauges (the [S]/[W] rows) tick constantly — and an un-synchronized
+    // full repaint at render cadence is what makes those rows flicker. Terminals
+    // that don't implement 2026 ignore the unknown private mode harmlessly.
+    const ok = process.stdout.write(`\x1b[?2026h${payload}\x1b[?2026l`);
     if (!ok) {
       this._stdoutBackedUp = true;
       process.stdout.once("drain", () => {

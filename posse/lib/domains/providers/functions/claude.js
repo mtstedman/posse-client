@@ -25,7 +25,7 @@ import { summarizeObservedToolUse } from "./helpers/tool-runtime.js";
 import { buildWindowsSpawn, terminateSpawnedProcess } from "./helpers/windows-spawn.js";
 import { discoverCommandCandidates } from "./helpers/cli-discovery.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
-import { logProviderMcpSurfaceTelemetry } from "./helpers/mcp-telemetry.js";
+import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry } from "./helpers/mcp-telemetry.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { stripAnsi } from "../../../shared/format/functions/ansi.js";
 import { extractJson } from "../../../shared/format/functions/json.js";
@@ -3385,6 +3385,21 @@ export async function callProvider(promptText, {
         sessionExpired: false,
         executionMode: CLAUDE_EXECUTION_MODE_PRINT,
       };
+
+      // Persist MCP-relevant CLI stderr (only when present) so a gateway
+      // attach-under-load failure leaves a trace even on a clean exit, where
+      // the stderr would otherwise be discarded. Best-effort; never throws.
+      try {
+        logProviderCliStderrTelemetry({
+          providerName: "claude",
+          role,
+          workItemId,
+          jobId,
+          attemptId,
+          exitCode: code,
+          stderr,
+        });
+      } catch { /* telemetry only */ }
 
       if (code !== 0) {
         const reason = killedByStallDetector ? "stall_kill" : "error";

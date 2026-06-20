@@ -17,7 +17,7 @@ import { ensurePosseGitInfoExclude } from "../../runtime/functions/ignore.js";
 import { isAbortError, signalAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { jobNeedsGitWorktree } from "./policy.js";
-import { FORCE_REMOVE_OPTIONS } from "./worktree-remove-options.js";
+import { FORCE_REMOVE_OPTIONS, isWorktreeInUseError } from "./worktree-remove-options.js";
 import { contextDir, wiScopeId } from "../../artifacts/functions/index.js";
 import { disposeWorkItemAtlasGraph } from "../../integrations/functions/atlas.js";
 import {
@@ -337,14 +337,18 @@ function retryForceRemoveWorktreePathAfterNative(wtPath, mainCwd) {
     if (attempt > 0) sleepSyncMs(WORKTREE_REMOVE_RETRY_DELAYS_MS[attempt - 1]);
     try {
       forceRemoveWorktreePathAfterNative(wtPath, mainCwd);
-      if (!fs.existsSync(wtPath)) return true;
+      if (!fs.existsSync(wtPath)) return { removed: true, inUse: false };
     } catch (err) {
       if (isAbortError(err)) throw err;
       lastError = err;
+      // A live handle won't clear by force-fighting it; stop and defer to the
+      // next GC pass instead of burning the remaining retry budget.
+      if (isWorktreeInUseError(err)) break;
     }
   }
-  if (lastError) throw lastError;
-  return !fs.existsSync(wtPath);
+  const removed = !fs.existsSync(wtPath);
+  if (!removed && lastError && !isWorktreeInUseError(lastError)) throw lastError;
+  return { removed, inUse: !removed && isWorktreeInUseError(lastError) };
 }
 
 async function retryForceRemoveWorktreePathAfterNativeAsync(wtPath, mainCwd, { signal = null } = {}) {
@@ -353,14 +357,18 @@ async function retryForceRemoveWorktreePathAfterNativeAsync(wtPath, mainCwd, { s
     if (attempt > 0) await sleepMs(WORKTREE_REMOVE_RETRY_DELAYS_MS[attempt - 1], { signal });
     try {
       await forceRemoveWorktreePathAfterNativeAsync(wtPath, mainCwd, { signal });
-      if (!fs.existsSync(wtPath)) return true;
+      if (!fs.existsSync(wtPath)) return { removed: true, inUse: false };
     } catch (err) {
       if (isAbortError(err)) throw err;
       lastError = err;
+      // A live handle won't clear by force-fighting it; stop and defer to the
+      // next GC pass instead of burning the remaining retry budget.
+      if (isWorktreeInUseError(err)) break;
     }
   }
-  if (lastError) throw lastError;
-  return !fs.existsSync(wtPath);
+  const removed = !fs.existsSync(wtPath);
+  if (!removed && lastError && !isWorktreeInUseError(lastError)) throw lastError;
+  return { removed, inUse: !removed && isWorktreeInUseError(lastError) };
 }
 
 function worktreePorcelain(wtPath) {
@@ -616,7 +624,7 @@ function shouldDeferBranchBackedCompleteCleanupUntilMerge(wi) {
 }
 
 function disposeTerminalWorkItemAtlasGraph(projectDir, wiId, worktreePath = null, options = {}) {
-  disposeWorkItemAtlasGraph({ projectDir, workItemId: wiId, worktreePath, ...options });
+  return disposeWorkItemAtlasGraph({ projectDir, workItemId: wiId, worktreePath, ...options });
 }
 
 function shouldDeleteBranchForInactiveWi(wi) {
@@ -1354,19 +1362,23 @@ export function safeSnapshotAndRemoveWorktree(
       });
     }
 
+    let deferredInUse = false;
     try {
       removeWorktreePath(wtPath, projectDir);
     } catch (err) {
-      const message = `Failed to remove worktree after cleanup gate passed: ${err?.message || String(err)}`;
+      deferredInUse = isWorktreeInUseError(err);
       notifySafeRemoveFailure(onFailure, {
         wtPath,
         projectDir,
         reason,
         branchName,
         wiId,
-        phase: "remove",
-        message,
+        phase: deferredInUse ? "defer" : "remove",
+        message: deferredInUse
+          ? `Worktree in use by another process; deferring removal to next GC: ${err?.message || String(err)}`
+          : `Failed to remove worktree after cleanup gate passed: ${err?.message || String(err)}`,
         error: err?.message || String(err),
+        inUse: deferredInUse,
         snapshotDir,
         snapshotSucceeded,
         verifiedClean,
@@ -1374,9 +1386,13 @@ export function safeSnapshotAndRemoveWorktree(
     }
 
     let removed = !fs.existsSync(wtPath);
-    if (!removed) {
+    // Don't force-fight a worktree that's actively in use — leave it for the
+    // next GC pass once the holder (a daemon/conductor op or git child) releases.
+    if (!removed && !deferredInUse) {
       try {
-        removed = retryForceRemoveWorktreePathAfterNative(wtPath, projectDir);
+        const retry = retryForceRemoveWorktreePathAfterNative(wtPath, projectDir);
+        removed = retry.removed;
+        deferredInUse = retry.inUse;
       } catch (err) {
         notifySafeRemoveFailure(onFailure, {
           wtPath,
@@ -1400,8 +1416,11 @@ export function safeSnapshotAndRemoveWorktree(
         reason,
         branchName,
         wiId,
-        phase: "remove",
-        message: "Worktree removal command completed but path still exists",
+        phase: deferredInUse ? "defer" : "remove",
+        message: deferredInUse
+          ? "Worktree in use; left for the next GC pass"
+          : "Worktree removal command completed but path still exists",
+        inUse: deferredInUse,
         snapshotDir,
         snapshotSucceeded,
         verifiedClean,
@@ -1413,7 +1432,7 @@ export function safeSnapshotAndRemoveWorktree(
       snapshotSucceeded,
       snapshotFailed,
       verifiedClean,
-      reason: removed ? "removed" : "remove_incomplete",
+      reason: removed ? "removed" : (deferredInUse ? "deferred_in_use" : "remove_incomplete"),
     });
   }, { waitMs: worktreeLockWaitMs });
 }
@@ -1610,20 +1629,24 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
       });
     }
 
+    let deferredInUse = false;
     try {
       await removeWorktreePathAsync(wtPath, projectDir, { signal });
     } catch (err) {
       if (isAbortError(err)) throw err;
-      const message = `Failed to remove worktree after cleanup gate passed: ${err?.message || String(err)}`;
+      deferredInUse = isWorktreeInUseError(err);
       notifySafeRemoveFailure(onFailure, {
         wtPath,
         projectDir,
         reason,
         branchName,
         wiId,
-        phase: "remove",
-        message,
+        phase: deferredInUse ? "defer" : "remove",
+        message: deferredInUse
+          ? `Worktree in use by another process; deferring removal to next GC: ${err?.message || String(err)}`
+          : `Failed to remove worktree after cleanup gate passed: ${err?.message || String(err)}`,
         error: err?.message || String(err),
+        inUse: deferredInUse,
         snapshotDir,
         snapshotSucceeded,
         verifiedClean,
@@ -1631,9 +1654,13 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
     }
 
     let removed = !fs.existsSync(wtPath);
-    if (!removed) {
+    // Don't force-fight a worktree that's actively in use — leave it for the
+    // next GC pass once the holder (a daemon/conductor op or git child) releases.
+    if (!removed && !deferredInUse) {
       try {
-        removed = await retryForceRemoveWorktreePathAfterNativeAsync(wtPath, projectDir, { signal });
+        const retry = await retryForceRemoveWorktreePathAfterNativeAsync(wtPath, projectDir, { signal });
+        removed = retry.removed;
+        deferredInUse = retry.inUse;
       } catch (err) {
         if (isAbortError(err)) throw err;
         notifySafeRemoveFailure(onFailure, {
@@ -1658,8 +1685,11 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
         reason,
         branchName,
         wiId,
-        phase: "remove",
-        message: "Worktree removal command completed but path still exists",
+        phase: deferredInUse ? "defer" : "remove",
+        message: deferredInUse
+          ? "Worktree in use; left for the next GC pass"
+          : "Worktree removal command completed but path still exists",
+        inUse: deferredInUse,
         snapshotDir,
         snapshotSucceeded,
         verifiedClean,
@@ -1671,7 +1701,7 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
       snapshotSucceeded,
       snapshotFailed,
       verifiedClean,
-      reason: removed ? "removed" : "remove_incomplete",
+      reason: removed ? "removed" : (deferredInUse ? "deferred_in_use" : "remove_incomplete"),
     });
   }, { signal, waitMs: worktreeLockWaitMs });
 }
@@ -2145,9 +2175,12 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
         }
         let cleanupResult = null;
         try {
-          disposeTerminalWorkItemAtlasGraph(projectDir, wiId, wtDir, {
+          const atlasDispose = disposeTerminalWorkItemAtlasGraph(projectDir, wiId, wtDir, {
             includeWarmed: !shouldPreserveUnmergedCompleteAtlasView(wi),
           });
+          if (atlasDispose?.deferredInUse) {
+            onMsg(`GC: WI#${wiId} ATLAS view DB still in use; deferring its delete to the next GC (${(atlasDispose.errors || []).filter((e) => e.inUse).map((e) => e.path).join(", ")})`);
+          }
           cleanupResult = await timing.step(`terminal WI#${wiId} snapshot/remove`, () => gcSnapshotAndRemoveWorktreeAsync(projectDir, wtDir, wi, {
             wiId,
             reason: "startup-gc-terminal-worktree",
@@ -2192,7 +2225,10 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
         if (!holdsBench) {
           let cleanupResult = null;
           try {
-            disposeTerminalWorkItemAtlasGraph(projectDir, wiId, wtDir);
+            const atlasDispose = disposeTerminalWorkItemAtlasGraph(projectDir, wiId, wtDir);
+            if (atlasDispose?.deferredInUse) {
+              onMsg(`GC: WI#${wiId} ATLAS view DB still in use; deferring its delete to the next GC (${(atlasDispose.errors || []).filter((e) => e.inUse).map((e) => e.path).join(", ")})`);
+            }
             cleanupResult = await timing.step(`inactive WI#${wiId} snapshot/remove`, () => gcSnapshotAndRemoveWorktreeAsync(projectDir, wtDir, wi, {
               wiId,
               reason: "startup-gc-inactive-worktree",

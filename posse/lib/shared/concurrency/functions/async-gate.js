@@ -5,6 +5,10 @@
 // and similar resource-scoped work.
 
 const DEFAULT_WAIT_MS = 30000;
+// A queued blocking task that has waited at least this long can no longer be
+// jumped by a higher-priority blocking task — anti-starvation so a backlog of
+// short high-priority warms can't perpetually defer a long bulk warm.
+const PRIORITY_AGING_MS = 30000;
 
 /** @typedef {{ name?: string, maxConcurrency?: number }} QueueOptions */
 /** @typedef {"read-priority" | "fifo" | "writer-priority"} GatePolicy */
@@ -342,8 +346,8 @@ export class ProtectedAssetGate {
    * @param {RunOptions} [options]
    * @returns {Promise<T>}
    */
-  runBlocking(key, fn, { label = "work", waitMs = DEFAULT_WAIT_MS, onBeforeRelease = null, onRelease = null, onCancel = null } = {}) {
-    return this.#enqueue(key, "blocking", fn, { label, waitMs, onBeforeRelease, onRelease, onCancel });
+  runBlocking(key, fn, { label = "work", waitMs = DEFAULT_WAIT_MS, onBeforeRelease = null, onRelease = null, onCancel = null, priority = 0 } = {}) {
+    return this.#enqueue(key, "blocking", fn, { label, waitMs, onBeforeRelease, onRelease, onCancel, priority });
   }
 
   /**
@@ -382,7 +386,7 @@ export class ProtectedAssetGate {
    * @param {RunOptions} options
    * @returns {Promise<T>}
    */
-  #enqueue(key, mode, fn, { label, waitMs, onBeforeRelease = null, onRelease = null, onCancel = null }) {
+  #enqueue(key, mode, fn, { label, waitMs, onBeforeRelease = null, onRelease = null, onCancel = null, priority = 0 }) {
     const normalized = normalizeGateKey(key);
     const state = this.#stateFor(normalized);
     const requestedAt = Date.now();
@@ -391,6 +395,7 @@ export class ProtectedAssetGate {
       const waiter = {
         key: normalized,
         mode,
+        priority: mode === "blocking" ? (Number(priority) || 0) : 0,
         label,
         fn,
         requestedAt,
@@ -453,6 +458,25 @@ export class ProtectedAssetGate {
    * @param {any} task
    */
   #insertTask(state, task) {
+    // Per-acquire writer-vs-writer intake priority: a high-priority blocking task
+    // (e.g. a short wi warm) jumps ahead of normal-priority QUEUED writers so it
+    // isn't starved behind a backlog of long bulk warms. It never preempts the
+    // active writer (not in the queue), never jumps an equal/higher-priority
+    // writer, never reorders relative to readers, and never jumps a writer aged
+    // past PRIORITY_AGING_MS. Normal-priority tasks (priority 0) fall through to
+    // the existing policy unchanged.
+    if (task.mode === "blocking" && (task.priority || 0) > 0) {
+      const now = Date.now();
+      let i = 0;
+      for (; i < state.queue.length; i += 1) {
+        const e = state.queue[i];
+        if (e.cancelled || e.mode !== "blocking") continue;
+        const eprio = (now - e.requestedAt) >= PRIORITY_AGING_MS ? Infinity : (e.priority || 0);
+        if (eprio < task.priority) break;
+      }
+      state.queue.splice(i, 0, task);
+      return;
+    }
     if (this.#policy === "writer-priority") {
       if (task.mode === "blocking") {
         const firstReader = state.queue.findIndex((entry) => !entry.cancelled && entry.mode === "non-blocking");

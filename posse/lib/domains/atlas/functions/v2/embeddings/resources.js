@@ -168,6 +168,104 @@ export function __testDaemonBackedLocalOnnxEncoder(encoder) {
  * }} args
  * @returns {OpenEmbeddingResourcesResult}
  */
+// ---------------------------------------------------------------------------
+// Per-realm embedding-resource pool (default ON).
+//
+// The old behavior forked a fresh ChildEmbeddingIndex (and encoder) per
+// openEmbeddingResources() and killed it on close() — one fork per warm slice,
+// the dominant source of child-index churn (100+ spawns/run). Successive opens
+// for the same (repo, provider, backend) in this realm now reuse ONE
+// reference-counted encoder+index; an idle entry is closed after a grace TTL.
+// Safe because B (reader read-only) + D (in-host flush serialization) keep a
+// single writer regardless of pooling. Escape hatch:
+// POSSE_ATLAS_EMBEDDING_CHILD_POOL=0 (or config atlasEmbeddingChildPool false).
+// ---------------------------------------------------------------------------
+// Idle pooled children are closed after this TTL. A short TTL (the original 60s)
+// closes the child between spaced-out warms and loses the reuse benefit, so the
+// default is 5min; override with POSSE_ATLAS_EMBEDDING_POOL_IDLE_MS. Only matters
+// when pooling is enabled.
+const EMBEDDING_POOL_IDLE_MS = Number(process.env.POSSE_ATLAS_EMBEDDING_POOL_IDLE_MS) > 0
+  ? Number(process.env.POSSE_ATLAS_EMBEDDING_POOL_IDLE_MS)
+  : 300_000;
+
+// Default ON: pooling the per-realm child across warm slices avoids the
+// fork-per-open churn (100+ child spawns/run) and is safe — B (reader read-only)
+// + D (in-host flush serialization) remove concurrent writers regardless of
+// pooling, and it ran clean under load. An explicit falsey value (0/false/off/no)
+// is the escape hatch.
+export function embeddingChildPoolEnabled(config = {}, env = {}) {
+  const raw = config?.atlasEmbeddingChildPool
+    ?? config?.atlas_embedding_child_pool
+    ?? env?.POSSE_ATLAS_EMBEDDING_CHILD_POOL
+    ?? process.env.POSSE_ATLAS_EMBEDDING_CHILD_POOL;
+  if (raw == null || String(raw).trim() === "") return true;
+  return !/^(0|false|off|no)$/i.test(String(raw).trim());
+}
+
+export function createEmbeddingResourcePool({ idleMs = EMBEDDING_POOL_IDLE_MS } = {}) {
+  /** @type {Map<string, { resources: any, refCount: number, idleTimer: any }>} */
+  const entries = new Map();
+
+  function wrap(key, entry) {
+    let released = false;
+    return {
+      ...entry.resources,
+      close: async () => {
+        if (released) return;
+        released = true;
+        if (entries.get(key) !== entry) return; // entry already evicted
+        entry.refCount = Math.max(0, entry.refCount - 1);
+        if (entry.refCount > 0) return;
+        // No active users — keep the child warm briefly, then really close.
+        if (entry.idleTimer) clearTimeout(entry.idleTimer);
+        entry.idleTimer = setTimeout(() => { void evict(key, entry); }, idleMs);
+        entry.idleTimer?.unref?.();
+      },
+    };
+  }
+
+  async function evict(key, entry) {
+    if (entries.get(key) !== entry || entry.refCount > 0) return; // reacquired
+    entries.delete(key);
+    if (entry.idleTimer) { clearTimeout(entry.idleTimer); entry.idleTimer = null; }
+    try { await entry.resources.close(); } catch { /* best effort */ }
+  }
+
+  return {
+    /** @param {string} key @param {() => any} build */
+    acquire(key, build) {
+      let entry = entries.get(key);
+      if (!entry) {
+        const resources = build();
+        // Never pool a disabled/failed open — return it unwrapped so the caller
+        // sees the real reason and nothing lingers in the pool.
+        if (!resources || resources.enabled === false) return resources;
+        entry = { resources, refCount: 0, idleTimer: null };
+        entries.set(key, entry);
+      }
+      if (entry.idleTimer) { clearTimeout(entry.idleTimer); entry.idleTimer = null; }
+      entry.refCount += 1;
+      return wrap(key, entry);
+    },
+    async closeAll() {
+      const all = [...entries.values()];
+      entries.clear();
+      for (const entry of all) {
+        if (entry.idleTimer) clearTimeout(entry.idleTimer);
+        try { await entry.resources.close(); } catch { /* best effort */ }
+      }
+    },
+    size() { return entries.size; },
+  };
+}
+
+const embeddingResourcePool = createEmbeddingResourcePool();
+
+/** Close every pooled embedding resource (for explicit realm/daemon teardown). */
+export function closeAllPooledEmbeddingResources() {
+  return embeddingResourcePool.closeAll();
+}
+
 export function openEmbeddingResources({ repoRoot, config = {}, env = {} }) {
   /** @type {Record<string, unknown>} */
   const effectiveConfig = {
@@ -206,7 +304,10 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {} }) {
     }
   }
 
-  try {
+  const poolKey = embeddingChildPoolEnabled(effectiveConfig, env)
+    ? `${embeddingsRoot(repoRoot)}|${provider}|${vectorBackend}`
+    : null;
+  const build = () => {
     let encoder = resolveConfiguredEncoder(effectiveConfig, env);
     if (encoder?.model === "local-onnx") {
       encoder = daemonBackedLocalOnnxEncoder(encoder);
@@ -224,8 +325,12 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {} }) {
       encoder: encoderTelemetry(result.encoder),
       index: indexTelemetry(result.index),
       embeddings_root: embeddingsRoot(repoRoot),
+      pooled: !!poolKey,
     });
     return result;
+  };
+  try {
+    return poolKey ? embeddingResourcePool.acquire(poolKey, build) : build();
   } catch (err) {
     recordEmbeddingForensics("resources.open.error", {
       repo_root: repoRoot,

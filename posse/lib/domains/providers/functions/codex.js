@@ -25,7 +25,7 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { CODEX_OAUTH_SUPPORTED_MODELS, getProviderTierDefaults } from "./model-catalog.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
-import { logProviderMcpSurfaceTelemetry } from "./helpers/mcp-telemetry.js";
+import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry } from "./helpers/mcp-telemetry.js";
 import { buildWindowsSpawn, terminateSpawnedProcess } from "./helpers/windows-spawn.js";
 import { discoverCommandCandidates } from "./helpers/cli-discovery.js";
 import { selectExecutionModel } from "./helpers/model-selection.js";
@@ -2936,6 +2936,20 @@ export async function callProvider(promptText, {
         sessionHandle: latestSessionHandle,
         priorSessionHandle: resumeSessionHandle,
       });
+
+      // Persist MCP-relevant CLI stderr (only when present) so a gateway
+      // attach-under-load failure leaves a trace even on a clean exit.
+      try {
+        logProviderCliStderrTelemetry({
+          providerName: "codex",
+          role,
+          workItemId,
+          jobId,
+          attemptId,
+          exitCode: code,
+          stderr,
+        });
+      } catch { /* telemetry only */ }
 
       if (code === 0) {
         resolve({ output: finalOutput || stdout.trim(), stats });

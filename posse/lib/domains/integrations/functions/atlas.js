@@ -1316,20 +1316,35 @@ export function disposeWorkItemAtlasGraph(opts = {}) {
     includeWorktree && opts?.worktreePath ? workItemViewPath(opts.worktreePath) : null,
   ].filter(Boolean);
   if (targets.length === 0) return { ok: false, skipped: "missing_path", root: null, backend: "atlas-v2" };
+  // A view DB held open by the reader/conductor blocks deletion on Windows
+  // (deleting an open file IS blocked, unlike rename). Retry transient holds;
+  // a sustained hold is classified deferred-in-use and left for the next GC
+  // pass — same defer philosophy as the worktree remove path (3a), and the
+  // errors[].inUse + path is the residual-holder diagnostic (3c).
+  const rmOpts = { force: true, maxRetries: process.platform === "win32" ? 10 : 3, retryDelay: process.platform === "win32" ? 150 : 50 };
+  const isInUse = (err) => {
+    const code = /** @type {any} */ (err)?.code;
+    if (code === "EBUSY" || code === "EPERM" || code === "EACCES") return true;
+    return /being used by another process|os error 32|sharing violation|\bEBUSY\b|\bEPERM\b|\bEACCES\b/i.test(String(/** @type {any} */ (err)?.message || err));
+  };
   const removed = [];
   const errors = [];
+  let deferredInUse = false;
   for (const target of targets) {
     try {
-      fs.rmSync(target, { force: true });
-      fs.rmSync(`${target}-wal`, { force: true });
-      fs.rmSync(`${target}-shm`, { force: true });
+      fs.rmSync(target, rmOpts);
+      fs.rmSync(`${target}-wal`, rmOpts);
+      fs.rmSync(`${target}-shm`, rmOpts);
       removed.push(target);
     } catch (err) {
-      errors.push({ path: target, error: String(err?.message || err || "unknown") });
+      const inUse = isInUse(err);
+      if (inUse) deferredInUse = true;
+      errors.push({ path: target, error: String(/** @type {any} */ (err)?.message || err || "unknown"), inUse });
     }
   }
   return {
     ok: errors.length === 0,
+    deferredInUse,
     root: targets[0] ? path.dirname(targets[0]) : null,
     viewDbPath: targets[0] || null,
     removed,

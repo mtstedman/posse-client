@@ -4,6 +4,7 @@ import path from "path";
 const VALID_INTENTS = new Set([
   "task",
   "bugfix",
+  "design",
   "context",
   "question",
   "image",

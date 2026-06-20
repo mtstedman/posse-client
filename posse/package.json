@@ -28,6 +28,7 @@
     "rebuild:rust-binaries:all": "node scripts/rebuild-rust-binaries.mjs --platform all"
   },
   "dependencies": {
+    "agentkeepalive": "^4.2.1",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1-beta.2",
     "better-sqlite3": "12.8.0",
     "node-pty": "^1.1.0",

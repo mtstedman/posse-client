@@ -1094,6 +1094,17 @@ export class RunSession {
     ensureBootMonitor();
     renderBootMonitor({ force: true });
   };
+  // Whether boot can pause for an interactive "Enter to background" keypress.
+  // Mirrors installBootInput's requirements exactly (raw-mode TTY on both ends):
+  // if those hold the boot panel can capture Enter, so it's safe to hold the
+  // gate. When they don't there's nobody to press Enter, so callers must release
+  // the gate themselves instead of hanging a headless boot until the encode
+  // finishes on its own. Independent of useTui — the boot panel and its Enter
+  // handler run whenever stdin/stdout are TTYs, even under --no-tui.
+  const bootCanPromptForBackground = () =>
+    !!process.stdin?.isTTY &&
+    !!process.stdout?.isTTY &&
+    typeof process.stdin?.setRawMode === "function";
   const requestAtlasBootBackground = (reason = "user-enter") => {
     if (atlasBootBackgroundRequested) return;
     atlasBootBackgroundRequested = true;
@@ -2297,16 +2308,17 @@ export class RunSession {
           detail,
         });
         if (!atlasBootBackgroundRequested) {
-          // Encoding starts only after SCIP intake + view merge have landed,
-          // so this is the "SCIP + views ready" point. Default policy: release
-          // the boot gate now and let the encode finish in the background; the
-          // atlas_boot_wait_embeddings setting restores block-until-parity
-          // behind an explicit Enter escape hatch.
-          if (!atlasWarmupBootConfig?.bootWaitEmbeddings) {
-            requestAtlasBootBackground("views-ready");
-          } else {
+          // Encoding starts only after SCIP intake + view merge have landed, so
+          // this is the "SCIP + views ready" point — the embedding/ONNX layer is
+          // now warming. Hold boot here so the user can watch it warm, with Enter
+          // to drop it to the background at any point during the encode. A
+          // headless/non-interactive boot can't take that keypress, so it
+          // releases immediately and keeps encoding behind the run loop.
+          if (bootCanPromptForBackground()) {
             updateBootFooter("hit Enter to load ONNX in the background");
             setBootEnterAction(() => requestAtlasBootBackground("enter"));
+          } else {
+            requestAtlasBootBackground("non-interactive-views-ready");
           }
         }
       };
@@ -2469,14 +2481,14 @@ export class RunSession {
               });
             }
             if (!atlasBootBackgroundRequested) {
-              // Same post-view hold point as encoding: by default the boot
-              // gate releases at views-ready instead of waiting on the
-              // minutes-long ML labeling pass.
-              if (!atlasWarmupBootConfig?.bootWaitEmbeddings) {
-                requestAtlasBootBackground("views-ready");
-              } else {
+              // Same post-view hold point as encoding: hold through the
+              // minutes-long ML labeling pass with an Enter escape, but release
+              // immediately when there's no TTY to take the keypress.
+              if (bootCanPromptForBackground()) {
                 updateBootFooter("ML tree labeling — hit Enter to continue in the background");
                 setBootEnterAction(() => requestAtlasBootBackground("tree-compression-enter"));
+              } else {
+                requestAtlasBootBackground("non-interactive-views-ready");
               }
             }
           }

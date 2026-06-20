@@ -30,6 +30,64 @@ function serverNamesFromPayload(payload = null) {
   return servers && typeof servers === "object" ? Object.keys(servers).filter(Boolean) : [];
 }
 
+// Provider-agnostic extraction of MCP/gateway-relevant lines from an agent
+// CLI's stderr. The attach-under-load failure (the CLI failing to bring up the
+// stdio posse-gateway server) surfaces in the CLI's own stderr, which Posse
+// otherwise discards on a clean (exit 0) run — so the failure was invisible.
+const MCP_STDERR_TOPIC = /(mcp|posse-gateway|gateway|tool)/i;
+const MCP_STDERR_PROBLEM = /(fail|error|not connected|unavailable|timed?\s?out|refused|disconnect|no such tool|could not|unable to|ENOENT|ECONNREFUSED|ECONNRESET|EPIPE)/i;
+const MCP_STDERR_GATEWAY = /(posse-gateway|mcp[^.]{0,30}(gateway|server))/i;
+const MCP_STDERR_GATEWAY_FAIL = /(fail|not connected|unavailable|refused|disconnect|timed?\s?out|no such tool|could not|unable)/i;
+
+export function extractMcpStderrSignals(stderr, { maxLines = 25 } = {}) {
+  const text = String(stderr || "");
+  if (!text) return { lines: [], gatewayAttachFailed: false };
+  const lines = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (MCP_STDERR_TOPIC.test(line) && MCP_STDERR_PROBLEM.test(line)) {
+      lines.push(line.slice(0, 400));
+      if (lines.length >= maxLines) break;
+    }
+  }
+  const gatewayAttachFailed = lines.some(
+    (l) => MCP_STDERR_GATEWAY.test(l) && MCP_STDERR_GATEWAY_FAIL.test(l),
+  );
+  return { lines, gatewayAttachFailed };
+}
+
+// Records MCP-relevant CLI stderr (only when a signal is present, to stay
+// low-noise) so a gateway attach failure leaves a trace keyed by job_id.
+export function logProviderCliStderrTelemetry({
+  providerName,
+  role,
+  workItemId = null,
+  jobId = null,
+  attemptId = null,
+  exitCode = null,
+  stderr = "",
+  extra = {},
+} = {}) {
+  const { lines, gatewayAttachFailed } = extractMcpStderrSignals(stderr);
+  if (lines.length === 0) return null;
+  appendRunTelemetry("diagnostics", {
+    kind: "provider.cli_mcp_stderr",
+    component: "provider_tool_surface",
+    provider: providerName || null,
+    role: role || null,
+    work_item_id: workItemId ?? null,
+    job_id: jobId ?? null,
+    attempt_id: attemptId ?? null,
+    exit_code: exitCode ?? null,
+    gateway_attach_failed: gatewayAttachFailed,
+    mcp_stderr_line_count: lines.length,
+    mcp_stderr_lines: lines,
+    ...extra,
+  });
+  return { lines, gatewayAttachFailed };
+}
+
 export function logProviderMcpSurfaceTelemetry({
   providerName,
   role,

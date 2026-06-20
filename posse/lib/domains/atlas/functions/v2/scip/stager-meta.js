@@ -43,6 +43,37 @@ export async function readStagerMeta(outputPath) {
   }
 }
 
+const RENAME_RETRYABLE_WIN_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+
+/**
+ * Atomic-rename a temp file onto its destination, retrying the Windows-only
+ * transient failure where a just-written dest is briefly held open by a scanner/
+ * indexer or is delete-pending and the rename returns EPERM/EBUSY/EACCES instead
+ * of succeeding. POSIX renames don't hit this, so only win32 retries; everything
+ * else (and exhausted retries) throws as before.
+ *
+ * @param {string} from
+ * @param {string} to
+ * @param {{ attempts?: number, baseDelayMs?: number, rename?: (from: string, to: string) => Promise<void>, platform?: string }} [opts]
+ */
+export async function renameWithWindowsRetry(from, to, {
+  attempts = 5,
+  baseDelayMs = 40,
+  rename = fs.promises.rename,
+  platform = process.platform,
+} = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (err) {
+      const retryable = platform === "win32" && RENAME_RETRYABLE_WIN_CODES.has(err?.code);
+      if (!retryable || attempt >= attempts) throw err;
+      await new Promise((resolve) => { setTimeout(resolve, baseDelayMs * attempt); });
+    }
+  }
+}
+
 /**
  * @param {string} outputPath
  * @param {Record<string, any>} meta
@@ -55,7 +86,7 @@ export async function writeStagerMeta(outputPath, meta) {
   try {
     await fs.promises.mkdir(dir, { recursive: true });
     await fs.promises.writeFile(tmpPath, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
-    await fs.promises.rename(tmpPath, metaPath);
+    await renameWithWindowsRetry(tmpPath, metaPath);
     return { ok: true, path: metaPath };
   } catch (err) {
     try { await fs.promises.rm(tmpPath, { force: true }); } catch { /* best effort */ }

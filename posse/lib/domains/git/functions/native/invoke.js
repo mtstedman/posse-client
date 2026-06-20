@@ -60,6 +60,89 @@ function isHeartbeatFailureText(value) {
   return /heartbeat|posse_key|pulse[\s_-]?token|identity[\s_-]?heartbeat/i.test(String(value || ""));
 }
 
+// A native heartbeat/identity failure is almost always a transient round-trip
+// blip (network/5xx/clock) at binary startup, before any git work runs. Retry a
+// couple of times here, in the leaf — BEFORE the error reaches the job layer and
+// consumes an attempt. atlas_warm has maxAttempts:1, so a single un-retried blip
+// dead-letters it; normal jobs waste a retry. Persistent auth (401/403) and
+// aborts fail fast so we never spin on a real misconfiguration. Because the
+// heartbeat is validated at process startup before mutations, retrying is safe.
+const HEARTBEAT_RETRY_MAX_ATTEMPTS = 3;
+const HEARTBEAT_RETRY_BASE_MS = 150;
+
+function isPersistentNativeAuthError(err) {
+  const status = Number(err?.status || err?.statusCode || err?.cause?.status || err?.cause?.statusCode || 0);
+  if (status === 401 || status === 403) return true;
+  // Native binaries report heartbeat auth failures as stderr text, and the
+  // res.ok===false rethrow flattens that into a fresh Error message with no
+  // structured status — so classify persistent auth from the text too, or a
+  // real 401/403 would be retried three times.
+  return /\b401\b|\b403\b|unauthor|forbidden/i.test(String(err?.message || err || ""));
+}
+
+export function shouldRetryNativeHeartbeat(err) {
+  if (isAbortError(err)) return false;
+  if (!isHeartbeatFailureText(err?.message || String(err || ""))) return false;
+  if (isPersistentNativeAuthError(err)) return false;
+  return true;
+}
+
+function sleepMsSync(ms) {
+  const timeout = Math.max(1, Number(ms) || 1);
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, timeout); }
+  catch { /* best effort */ }
+}
+
+function delayMsAsync(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, Math.max(1, Number(ms) || 1)); });
+}
+
+/**
+ * Public sync entry point. Retries only transient native heartbeat failures;
+ * all other errors (including the structured `{ ok: false }` git failures)
+ * propagate on the first throw, exactly as before.
+ *
+ * @param {string} method
+ * @param {unknown} payload
+ * @param {GitNativeMethodRunOptions} [opts]
+ * @returns {unknown}
+ */
+export function runGitNativeMethod(method, payload, opts = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= HEARTBEAT_RETRY_MAX_ATTEMPTS; attempt++) {
+    try {
+      return runGitNativeMethodOnce(method, payload, opts);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= HEARTBEAT_RETRY_MAX_ATTEMPTS || !shouldRetryNativeHeartbeat(err)) throw err;
+      sleepMsSync(HEARTBEAT_RETRY_BASE_MS * attempt);
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * Public async entry point. Same heartbeat-retry policy as the sync form.
+ *
+ * @param {string} method
+ * @param {unknown} payload
+ * @param {GitNativeMethodRunOptions} [opts]
+ * @returns {Promise<unknown>}
+ */
+export async function runGitNativeMethodAsync(method, payload, opts = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= HEARTBEAT_RETRY_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await runGitNativeMethodAsyncOnce(method, payload, opts);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= HEARTBEAT_RETRY_MAX_ATTEMPTS || !shouldRetryNativeHeartbeat(err)) throw err;
+      await delayMsAsync(HEARTBEAT_RETRY_BASE_MS * attempt);
+    }
+  }
+  throw lastErr;
+}
+
 function safeUrlOrigin(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -222,7 +305,7 @@ function unwrapGitNativeMethodResponse(value) {
  * @param {GitNativeMethodRunOptions} [opts]
  * @returns {unknown}
  */
-export function runGitNativeMethod(method, payload, opts = {}) {
+function runGitNativeMethodOnce(method, payload, opts = {}) {
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("git")) {
     throw new Error(`Git native method unavailable: ${method}`);
@@ -311,7 +394,7 @@ export function runGitNativeMethod(method, payload, opts = {}) {
  * @param {GitNativeMethodRunOptions} [opts]
  * @returns {Promise<unknown>}
  */
-export async function runGitNativeMethodAsync(method, payload, opts = {}) {
+async function runGitNativeMethodAsyncOnce(method, payload, opts = {}) {
   if (opts.bypassNativeBridge !== true && hasNativeThreadBridge()) {
     const { bypassNativeBridge, manager, signal, ...bridgeOpts } = opts;
     const bridgeManager = manager || nativeBinaries;

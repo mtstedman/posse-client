@@ -85,6 +85,27 @@ runDaemonThread(async (payload) => {
       return result;
     }
 
+    case "beginEmbeddingWrite": {
+      // The conductor is about to save/rename this repo's index.usearch. Drain
+      // active semantic reads and close (confirmed) this lane's cached ANN child
+      // so its open handle can't collide with the rename.
+      writeBegins++;
+      const { beginConductorEmbeddingWrite } = await import("./retrieve-runner.js");
+      const result = await beginConductorEmbeddingWrite(String(/** @type {any} */ (payload).readRoot || ""));
+      if (result?.held) activeWriteHolds++;
+      return result;
+    }
+
+    case "endEmbeddingWrite": {
+      writeEnds++;
+      const { endConductorEmbeddingWrite } = await import("./retrieve-runner.js");
+      const result = await endConductorEmbeddingWrite(String(/** @type {any} */ (payload).readRoot || ""));
+      if (activeWriteHolds > 0 && (result?.released === true || typeof result?.count === "number")) {
+        activeWriteHolds--;
+      }
+      return result;
+    }
+
     case "info":
       return { lane: "reader", retrieves, invalidations, writeBegins, writeEnds, activeWriteHolds, invalidationsDuringWrite };
 

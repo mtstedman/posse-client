@@ -700,9 +700,9 @@ export class EmbeddingIndex {
    * @param {string} context
    * @returns {boolean}
    */
-  #saveBestEffort(context, timing = null) {
+  #saveBestEffort(context, timing = null, { durable = true } = {}) {
     try {
-      this.save(timing);
+      this.save(timing, { durable });
       // A recovered save ends the failure streak; log the next one anew.
       this.#annSaveFailureLogged = false;
       return true;
@@ -885,7 +885,7 @@ export class EmbeddingIndex {
    *
    * @returns {void}
    */
-  save(timing = null) {
+  save(timing = null, { durable = true } = {}) {
     if (!this.#dirty && fs.existsSync(this.#usearchPath)) return;
     ensureDir(path.dirname(this.#usearchPath));
     const tmpPath = uniqueTempPath(this.#usearchPath);
@@ -904,9 +904,19 @@ export class EmbeddingIndex {
       this.#usearch.save(tmpPath);
       if (timing) timing.annSaveMs += elapsedSince(saveStartedAt);
       const stat = fs.statSync(tmpPath);
-      const hashStartedAt = performance.now();
-      const sha256 = sha256File(tmpPath);
-      if (timing) timing.annHashMs += elapsedSince(hashStartedAt);
+      // Throttled (non-durable) checkpoints skip the whole-file sha256 — the
+      // dominant per-checkpoint cost re-hashed every 16 batches / 30s. The
+      // manifest then records sha256:null, so on load the file is treated as
+      // untrusted and rebuilt from the sidecar (the existing fallback — the
+      // sidecar holds the vectors, so it's a re-insert, not a re-encode). Only
+      // the durable save (close / rebuild / error recovery) pays for a trusted,
+      // hashed index.
+      let sha256 = null;
+      if (durable) {
+        const hashStartedAt = performance.now();
+        sha256 = sha256File(tmpPath);
+        if (timing) timing.annHashMs += elapsedSince(hashStartedAt);
+      }
       const nativeStats = nativeIndexStats(this.#usearch);
       const manifest = {
         version: ANN_MANIFEST_VERSION,
@@ -922,6 +932,7 @@ export class EmbeddingIndex {
         native_connectivity: nativeStats.connectivity,
         size: stat.size,
         sha256,
+        durable,
         saved_at: new Date().toISOString(),
       };
       recordEmbeddingForensics("embedding_index.save.rename.start", {
@@ -1031,7 +1042,9 @@ export class EmbeddingIndex {
       }
       return false;
     }
-    const saved = this.#saveBestEffort(context, timing);
+    // Checkpoints are crash-recovery hints, not the durable index — skip the
+    // expensive whole-file hash here; a crash rebuilds from the sidecar.
+    const saved = this.#saveBestEffort(context, timing, { durable: false });
     if (!saved && timing) {
       timing.annDeferred = true;
       timing.annDirtyBatches = this.#annDirtyBatches;

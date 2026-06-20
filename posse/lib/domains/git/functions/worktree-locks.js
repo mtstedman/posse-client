@@ -27,6 +27,31 @@ const WORKTREE_LOCK_POLL_MS = 50;
 const WORKTREE_LOCK_LIVE_PID_STALE_MULTIPLIER = 10;
 const ACTIVE_WORKTREE_LOCK_TOKENS = new Set();
 
+// Exclusive-create (`wx`) lock open normally fails with EEXIST when the lock is
+// held. On Windows it can instead fail with EPERM/EBUSY/EACCES when the lock
+// path is in a delete-pending state (a prior holder just unlinked it) or is
+// briefly held open by a scanner/indexer. Those are transient/contended states,
+// not hard failures — treat them like EEXIST so the poll/reclaim loop retries
+// instead of failing the whole worktree setup. POSIX keeps the strict EEXIST
+// behavior to avoid masking genuine permission errors.
+export function isRetryableLockOpenError(error) {
+  if (error?.code === "EEXIST") return true;
+  if (process.platform === "win32") {
+    return error?.code === "EPERM" || error?.code === "EBUSY" || error?.code === "EACCES";
+  }
+  return false;
+}
+
+// On acquire timeout, surface the last retryable open error (e.g. a Windows
+// EPERM/EBUSY that was a real ACL problem, not a transient race) so callers
+// throw something diagnosable instead of a bare "timed out" after the full wait.
+function worktreeLockTimeoutDetail(lock) {
+  if (!lock || lock.acquired) return "";
+  const code = lock.lastErrorCode ? ` ${lock.lastErrorCode}` : "";
+  const msg = lock.lastErrorMessage ? `: ${lock.lastErrorMessage}` : "";
+  return code || msg ? ` (last open error${code}${msg})` : "";
+}
+
 function sleepMs(ms) {
   // Synchronous by design: used only in worker-side lock polling, not
   // scheduler/event-loop ticks.
@@ -506,6 +531,7 @@ export function acquireWorktreeLock(lockPath, {
 } = {}) {
   const start = Date.now();
   const resolvedWaitMs = resolveWorktreeLockWaitMs(waitMs);
+  let lastRetryableError = null;
   while (Date.now() - start < resolvedWaitMs) {
     try {
       fs.mkdirSync(path.dirname(lockPath), { recursive: true });
@@ -526,7 +552,8 @@ export function acquireWorktreeLock(lockPath, {
       }
       return new WorktreeLock({ lockPath, fd, owner });
     } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
+      if (!isRetryableLockOpenError(error)) throw error;
+      lastRetryableError = error;
       try {
         const stat = fs.statSync(lockPath);
         const reclaim = shouldReclaimWorktreeLock(lockPath, { stat, staleMs });
@@ -548,7 +575,7 @@ export function acquireWorktreeLock(lockPath, {
       sleepMs(pollMs + Math.floor(Math.random() * pollMs));
     }
   }
-  return { acquired: false, reason: "timeout", lockPath };
+  return { acquired: false, reason: "timeout", lockPath, lastErrorCode: lastRetryableError?.code || null, lastErrorMessage: lastRetryableError?.message || null };
 }
 
 export function releaseWorktreeLock(lockOrPath, maybeLock = null) {
@@ -567,6 +594,7 @@ export async function acquireWorktreeLockAsync(lockPath, {
 } = {}) {
   const start = Date.now();
   const resolvedWaitMs = resolveWorktreeLockWaitMs(waitMs);
+  let lastRetryableError = null;
   while (Date.now() - start < resolvedWaitMs) {
     throwIfAborted(signal);
     try {
@@ -595,7 +623,8 @@ export async function acquireWorktreeLockAsync(lockPath, {
       return new AsyncWorktreeLock({ lockPath, fileHandle, owner });
     } catch (error) {
       if (isAbortError(error)) throw error;
-      if (error?.code !== "EEXIST") throw error;
+      if (!isRetryableLockOpenError(error)) throw error;
+      lastRetryableError = error;
       try {
         const stat = await fs.promises.stat(lockPath);
         const reclaim = await shouldReclaimWorktreeLockAsync(lockPath, { stat, staleMs });
@@ -614,7 +643,7 @@ export async function acquireWorktreeLockAsync(lockPath, {
       await sleepMsAsync(pollMs + Math.floor(Math.random() * pollMs), signal);
     }
   }
-  return { acquired: false, reason: "timeout", lockPath };
+  return { acquired: false, reason: "timeout", lockPath, lastErrorCode: lastRetryableError?.code || null, lastErrorMessage: lastRetryableError?.message || null };
 }
 
 export async function releaseWorktreeLockAsync(lockOrPath, maybeLock = null) {
@@ -671,7 +700,7 @@ export function withWorktreeLock(wtPath, projectDir, fn, opts = {}) {
   const lockPath = worktreeLockPath(wtPath, projectDir, { disabled: true });
   const lock = acquireWorktreeLock(lockPath, opts);
   if (!lock.acquired) {
-    throw new Error(`Timed out waiting for worktree lock: ${lockPath}`);
+    throw new Error(`Timed out waiting for worktree lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
   }
   try {
     return fn();
@@ -684,7 +713,7 @@ export async function withWorktreeLockAsync(wtPath, projectDir, fn, opts = {}) {
   const lockPath = worktreeLockPath(wtPath, projectDir);
   const lock = await acquireWorktreeLockAsync(lockPath, opts);
   if (!lock.acquired) {
-    throw new Error(`Timed out waiting for worktree lock: ${lockPath}`);
+    throw new Error(`Timed out waiting for worktree lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
   }
   try {
     return await fn();
@@ -697,7 +726,7 @@ export function withBranchLock(wtPath, branchName, projectDir, fn, opts = {}) {
   const lockPath = gitBranchLockPath(wtPath, branchName, projectDir);
   const lock = acquireWorktreeLock(lockPath, opts);
   if (!lock.acquired) {
-    throw new Error(`Timed out waiting for git branch lock: ${lockPath}`);
+    throw new Error(`Timed out waiting for git branch lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
   }
   try {
     return fn();
@@ -710,7 +739,7 @@ export async function withBranchLockAsync(wtPath, branchName, projectDir, fn, op
   const lockPath = gitBranchLockPath(wtPath, branchName, projectDir);
   const lock = await acquireWorktreeLockAsync(lockPath, opts);
   if (!lock.acquired) {
-    throw new Error(`Timed out waiting for git branch lock: ${lockPath}`);
+    throw new Error(`Timed out waiting for git branch lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
   }
   try {
     return await fn();

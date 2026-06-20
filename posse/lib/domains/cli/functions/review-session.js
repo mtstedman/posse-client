@@ -1534,6 +1534,7 @@ export class ReviewSession {
       wiScopeId,
       fs,
       updateJobPayload,
+      nonInteractive,
     } = this;
 
   const askChoice = this.askSingleKeyChoice || askSingleKeyChoice;

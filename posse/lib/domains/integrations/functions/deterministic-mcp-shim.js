@@ -12,6 +12,34 @@ const MAX_STDIN_CONTENT_LENGTH_BYTES = 16 * 1024 * 1024;
 const MAX_STDIN_BUFFER_BYTES = MAX_STDIN_CONTENT_LENGTH_BYTES * 2;
 const OWNER_RETRY_MS = 50;
 const OWNER_RETRY_DEADLINE_MS = 5000;
+// Handshake methods (initialize/tools/list/etc.) are idempotent and must attach
+// reliably even when the shared owner child is briefly busy under concurrent
+// load. Give them a longer retry window and allow retrying transient owner 5xx /
+// request timeouts — the failure mode where an agent runs a whole session with
+// no gateway tools is almost always a single transient miss at attach time.
+const OWNER_HANDSHAKE_RETRY_DEADLINE_MS = 30000;
+// Per-request timeouts so a wedged owner never hangs the shim forever. Keep the
+// non-idempotent budget above the owner's own request timeout (120s) so the
+// owner returns a proper error first instead of the shim cutting off a legit
+// long-running tool call (e.g. a slow test run).
+const OWNER_HANDSHAKE_REQUEST_TIMEOUT_MS = 30000;
+const OWNER_DEFAULT_REQUEST_TIMEOUT_MS = 150000;
+// Connection-level errors are safe to retry for any method (the request never
+// reached the owner). Timeouts and 5xx are only replayed for idempotent methods.
+const CONNECTION_RETRY_CODES = ["ENOENT", "ECONNREFUSED", "EPIPE", "ECONNRESET"];
+const IDEMPOTENT_METHODS = new Set([
+  "initialize",
+  "tools/list",
+  "prompts/list",
+  "resources/list",
+  "resources/templates/list",
+  "ping",
+]);
+
+function isIdempotentMethod(message) {
+  const method = String(message?.method || "");
+  return IDEMPOTENT_METHODS.has(method) || method.startsWith("notifications/");
+}
 
 function argValue(name) {
   const index = process.argv.indexOf(name);
@@ -52,7 +80,7 @@ function sendMessage(payload) {
   }
 }
 
-function ownerRequest(message) {
+function ownerRequest(message, { timeoutMs = OWNER_DEFAULT_REQUEST_TIMEOUT_MS } = {}) {
   const body = JSON.stringify({ token: mcpOAuthToken, message });
   return new Promise((resolve, reject) => {
     const req = http.request({
@@ -77,12 +105,23 @@ function ownerRequest(message) {
           return;
         }
         if (res.statusCode !== 200 || parsed?.ok !== true) {
-          reject(new Error(parsed?.error || `owner request failed (${res.statusCode})`));
+          const err = new Error(parsed?.error || `owner request failed (${res.statusCode})`);
+          // 5xx means the owner accepted the request but failed transiently
+          // (child busy/restarting); safe to replay for idempotent methods.
+          if (Number(res.statusCode) >= 500) err.transient = true;
+          reject(err);
           return;
         }
         resolve(parsed.message || null);
       });
     });
+    if (timeoutMs) {
+      req.setTimeout(timeoutMs, () => {
+        const err = new Error(`owner request timed out after ${timeoutMs}ms`);
+        err.code = "ETIMEDOUT";
+        req.destroy(err);
+      });
+    }
     req.on("error", reject);
     req.write(body, "utf8");
     req.end();
@@ -90,15 +129,23 @@ function ownerRequest(message) {
 }
 
 async function forwardToOwner(message) {
+  const idempotent = isIdempotentMethod(message);
+  const deadline = idempotent ? OWNER_HANDSHAKE_RETRY_DEADLINE_MS : OWNER_RETRY_DEADLINE_MS;
+  const timeoutMs = idempotent ? OWNER_HANDSHAKE_REQUEST_TIMEOUT_MS : OWNER_DEFAULT_REQUEST_TIMEOUT_MS;
   const started = Date.now();
   let lastErr = null;
-  while (Date.now() - started <= OWNER_RETRY_DEADLINE_MS) {
+  while (Date.now() - started <= deadline) {
     try {
-      return await ownerRequest(message);
+      return await ownerRequest(message, { timeoutMs });
     } catch (err) {
       lastErr = err;
       const code = String(err?.code || "");
-      if (!["ENOENT", "ECONNREFUSED", "EPIPE", "ECONNRESET"].includes(code)) throw err;
+      const isConnError = CONNECTION_RETRY_CODES.includes(code);
+      // Timeouts and transient owner 5xx are only replayed for idempotent
+      // handshake methods — never auto-replay a tools/call that may have
+      // partially executed.
+      const isRetryableIdempotent = idempotent && (code === "ETIMEDOUT" || err?.transient === true);
+      if (!isConnError && !isRetryableIdempotent) throw err;
       await sleep(OWNER_RETRY_MS);
     }
   }
