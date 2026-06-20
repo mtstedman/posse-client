@@ -11,6 +11,7 @@
 import { nativeBinaries } from "../../../../classes/tools/BinaryManager.js";
 import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../classes/tools/daemon/native-thread-bridge.js";
 import { isAbortError, signalAbortError } from "../../../runtime/functions/yield.js";
+import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 
 export const GIT_NATIVE_PROTOCOL = "posse.git.native.v1";
 
@@ -31,6 +32,83 @@ function resolveGitAuthEnvelope(opts, manager) {
     return manager.nativeAuthEnvelope();
   }
   return null;
+}
+
+function capString(value, max = 500) {
+  const text = String(value ?? "");
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
+}
+
+function errorSummary(err) {
+  if (!err) return null;
+  const cause = err.cause && err.cause !== err ? err.cause : null;
+  return {
+    name: err?.name || null,
+    code: err?.code || err?.errno || null,
+    status: err?.status || err?.statusCode || null,
+    message: capString(err?.message || String(err), 900),
+    cause: cause ? {
+      name: cause?.name || null,
+      code: cause?.code || cause?.errno || null,
+      status: cause?.status || cause?.statusCode || null,
+      message: capString(cause?.message || String(cause), 900),
+    } : null,
+  };
+}
+
+function isHeartbeatFailureText(value) {
+  return /heartbeat|posse_key|pulse[\s_-]?token|identity[\s_-]?heartbeat/i.test(String(value || ""));
+}
+
+function safeUrlOrigin(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.username = "";
+    url.password = "";
+    url.pathname = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function nativeAuthTelemetry(manager, auth) {
+  const envelope = auth && typeof auth === "object" ? auth : null;
+  let launchKeyPresent = false;
+  let managerShouldUse = false;
+  let binaryAvailable = false;
+  try { launchKeyPresent = !!manager?.nativeAuthManager?.getLaunchKey?.(); } catch { launchKeyPresent = false; }
+  try { managerShouldUse = manager?.shouldUse?.("git") === true; } catch { managerShouldUse = false; }
+  try { binaryAvailable = manager?.available?.("git") === true; } catch { binaryAvailable = false; }
+  return {
+    auth_envelope_present: !!envelope,
+    auth_heartbeat_url_present: !!String(envelope?.heartbeatUrl || "").trim(),
+    auth_heartbeat_origin: safeUrlOrigin(envelope?.heartbeatUrl),
+    auth_public_key_present: !!(envelope?.heartbeatJwtPublicKey || envelope?.heartbeatJwtPublicKeySha256),
+    auth_audience_present: !!String(envelope?.heartbeatJwtAudience || "").trim(),
+    launch_key_present: launchKeyPresent,
+    binary_available: binaryAvailable,
+    manager_should_use: managerShouldUse,
+  };
+}
+
+function logNativeHeartbeatFailure({ method, asyncMode = false, bridge = false, workerRequested = null, workerEligible = null, manager, auth, detail = "", error = null } = {}) {
+  appendRunTelemetry("diagnostics", {
+    kind: "native.heartbeat.failure",
+    component: "native_git",
+    method: method || null,
+    async: asyncMode === true,
+    bridge: bridge === true,
+    worker_requested: workerRequested,
+    worker_eligible: workerEligible,
+    detail: capString(detail || error?.message || "", 1200),
+    error: errorSummary(error),
+    ...nativeAuthTelemetry(manager, auth),
+  });
 }
 
 // Read-only methods that are safe to run through the persistent worker: no
@@ -154,17 +232,36 @@ export function runGitNativeMethod(method, payload, opts = {}) {
   if (auth && typeof auth === "object") {
     /** @type {Record<string, unknown>} */ (request).auth = auth;
   }
-  const res = manager.binary("git").runSync(
-    request.method,
-    [],
-    {
-      input: `${JSON.stringify(request)}\n`,
-      json: true,
-      timeoutMs: opts.timeoutMs,
-      signal: opts.signal,
-      worker: WORKER_ELIGIBLE_METHODS.has(request.method),
-    },
-  );
+  const workerEligible = WORKER_ELIGIBLE_METHODS.has(request.method);
+  let res;
+  try {
+    res = manager.binary("git").runSync(
+      request.method,
+      [],
+      {
+        input: `${JSON.stringify(request)}\n`,
+        json: true,
+        timeoutMs: opts.timeoutMs,
+        signal: opts.signal,
+        worker: workerEligible,
+      },
+    );
+  } catch (err) {
+    const detail = err?.message || String(err);
+    if (isHeartbeatFailureText(detail)) {
+      logNativeHeartbeatFailure({
+        method: request.method,
+        asyncMode: false,
+        workerRequested: workerEligible,
+        workerEligible,
+        manager,
+        auth,
+        detail,
+        error: err,
+      });
+    }
+    throw err;
+  }
   if (!res.ok) {
     // Preserve abort identity: a cancelled native call must surface as an
     // AbortError (with its kill reason) so callers handle it as a cancellation
@@ -172,9 +269,38 @@ export function runGitNativeMethod(method, payload, opts = {}) {
     if (isAbortError(res.error)) throw res.error;
     if (opts.signal?.aborted) throw signalAbortError(opts.signal);
     const detail = String(res.stderr || res.error?.message || "native process failed").trim();
+    if (isHeartbeatFailureText(detail)) {
+      logNativeHeartbeatFailure({
+        method: request.method,
+        asyncMode: false,
+        workerRequested: workerEligible,
+        workerEligible,
+        manager,
+        auth,
+        detail,
+        error: res.error || null,
+      });
+    }
     throw new Error(`Git native method ${request.method} failed${detail ? `: ${detail}` : ""}`);
   }
-  return unwrapGitNativeMethodResponse(res.json);
+  try {
+    return unwrapGitNativeMethodResponse(res.json);
+  } catch (err) {
+    const detail = err?.message || String(err);
+    if (isHeartbeatFailureText(detail)) {
+      logNativeHeartbeatFailure({
+        method: request.method,
+        asyncMode: false,
+        workerRequested: workerEligible,
+        workerEligible,
+        manager,
+        auth,
+        detail,
+        error: err,
+      });
+    }
+    throw err;
+  }
 }
 
 /**
@@ -188,11 +314,32 @@ export function runGitNativeMethod(method, payload, opts = {}) {
 export async function runGitNativeMethodAsync(method, payload, opts = {}) {
   if (opts.bypassNativeBridge !== true && hasNativeThreadBridge()) {
     const { bypassNativeBridge, manager, signal, ...bridgeOpts } = opts;
-    const auth = resolveGitAuthEnvelope(opts, manager || nativeBinaries);
+    const bridgeManager = manager || nativeBinaries;
+    const auth = resolveGitAuthEnvelope(opts, bridgeManager);
     if (auth && typeof auth === "object") {
       /** @type {Record<string, unknown>} */ (bridgeOpts).auth = auth;
     }
-    return nativeThreadBridgeRequest("git", method, payload, bridgeOpts);
+    const bridgeMethod = String(method || "").trim() || String(method || "");
+    const workerEligible = WORKER_ELIGIBLE_METHODS.has(bridgeMethod);
+    try {
+      return await nativeThreadBridgeRequest("git", method, payload, bridgeOpts);
+    } catch (err) {
+      const detail = err?.message || String(err);
+      if (isHeartbeatFailureText(detail)) {
+        logNativeHeartbeatFailure({
+          method: bridgeMethod,
+          asyncMode: true,
+          bridge: true,
+          workerRequested: opts.worker !== false,
+          workerEligible,
+          manager: bridgeManager,
+          auth,
+          detail,
+          error: err,
+        });
+      }
+      throw err;
+    }
   }
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("git")) {
@@ -203,17 +350,37 @@ export async function runGitNativeMethodAsync(method, payload, opts = {}) {
   if (auth && typeof auth === "object") {
     /** @type {Record<string, unknown>} */ (request).auth = auth;
   }
-  const res = await manager.binary("git").run(
-    request.method,
-    [],
-    {
-      input: `${JSON.stringify(request)}\n`,
-      json: true,
-      timeoutMs: opts.timeoutMs,
-      signal: opts.signal,
-      worker: opts.worker !== false && WORKER_ELIGIBLE_METHODS.has(request.method),
-    },
-  );
+  const workerEligible = WORKER_ELIGIBLE_METHODS.has(request.method);
+  const workerRequested = opts.worker !== false && workerEligible;
+  let res;
+  try {
+    res = await manager.binary("git").run(
+      request.method,
+      [],
+      {
+        input: `${JSON.stringify(request)}\n`,
+        json: true,
+        timeoutMs: opts.timeoutMs,
+        signal: opts.signal,
+        worker: workerRequested,
+      },
+    );
+  } catch (err) {
+    const detail = err?.message || String(err);
+    if (isHeartbeatFailureText(detail)) {
+      logNativeHeartbeatFailure({
+        method: request.method,
+        asyncMode: true,
+        workerRequested,
+        workerEligible,
+        manager,
+        auth,
+        detail,
+        error: err,
+      });
+    }
+    throw err;
+  }
   if (!res.ok) {
     // Preserve abort identity: a cancelled native call must surface as an
     // AbortError (with its kill reason) so callers handle it as a cancellation
@@ -221,7 +388,36 @@ export async function runGitNativeMethodAsync(method, payload, opts = {}) {
     if (isAbortError(res.error)) throw res.error;
     if (opts.signal?.aborted) throw signalAbortError(opts.signal);
     const detail = String(res.stderr || res.error?.message || "native process failed").trim();
+    if (isHeartbeatFailureText(detail)) {
+      logNativeHeartbeatFailure({
+        method: request.method,
+        asyncMode: true,
+        workerRequested,
+        workerEligible,
+        manager,
+        auth,
+        detail,
+        error: res.error || null,
+      });
+    }
     throw new Error(`Git native method ${request.method} failed${detail ? `: ${detail}` : ""}`);
   }
-  return unwrapGitNativeMethodResponse(res.json);
+  try {
+    return unwrapGitNativeMethodResponse(res.json);
+  } catch (err) {
+    const detail = err?.message || String(err);
+    if (isHeartbeatFailureText(detail)) {
+      logNativeHeartbeatFailure({
+        method: request.method,
+        asyncMode: true,
+        workerRequested,
+        workerEligible,
+        manager,
+        auth,
+        detail,
+        error: err,
+      });
+    }
+    throw err;
+  }
 }

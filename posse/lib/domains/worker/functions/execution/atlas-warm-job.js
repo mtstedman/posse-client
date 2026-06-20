@@ -21,6 +21,7 @@ import {
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { ATLAS_WARM_JOB_POLICY } from "../../../atlas/functions/v2/contracts/jobs.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
+import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.js";
 import { ledgerDbPath, mainViewPath } from "../../../atlas/functions/v2/runtime-paths.js";
 import { getSharedConductor } from "../../../atlas/functions/v2/parse/conductor.js";
@@ -73,6 +74,50 @@ async function resolveAtlasWarmBaselineBranch(repoRoot) {
 function positiveMs(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function capString(value, max = 500) {
+  const text = String(value ?? "");
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
+}
+
+function errorSummary(err) {
+  if (!err) return null;
+  const cause = err.cause && err.cause !== err ? err.cause : null;
+  return {
+    name: err?.name || null,
+    code: err?.code || err?.errno || null,
+    status: err?.status || err?.statusCode || null,
+    message: capString(err?.message || String(err), 700),
+    cause: cause ? {
+      name: cause?.name || null,
+      code: cause?.code || cause?.errno || null,
+      status: cause?.status || cause?.statusCode || null,
+      message: capString(cause?.message || String(cause), 700),
+    } : null,
+  };
+}
+
+function logAtlasWarmTelemetry(kind, extra = {}) {
+  appendRunTelemetry("diagnostics", {
+    kind,
+    component: "atlas_warm",
+    ...extra,
+  });
+}
+
+function atlasWarmTelemetryContext({ jobId, purpose, branch, baselineBranch, repoRoot, paths, budgetMs, timeoutMs }) {
+  return {
+    job_id: jobId ?? null,
+    purpose: purpose || null,
+    branch: branch || null,
+    baseline_branch: baselineBranch || null,
+    repo_root_basename: path.basename(String(repoRoot || "")) || null,
+    path_count: Array.isArray(paths) ? paths.length : 0,
+    path_sample: Array.isArray(paths) ? paths.slice(0, 20) : [],
+    budget_ms: Number(budgetMs) || null,
+    timeout_ms: Number(timeoutMs) || null,
+  };
 }
 
 // One embeddings slice is encode-bound, not parse-bound: budget for the slice
@@ -351,23 +396,40 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
 async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBranch, repoRoot, abortSignal = null, timeoutMs = null, config = null }) {
   try {
     const ledgerPath = ledgerDbPath(repoRoot);
+    const purpose = String(payload?.purpose || "wi");
     // Skip if the surrounding .posse runtime directory does not exist —
     // that means no posse project is bootstrapped here.
     const fsExistsRuntime = (() => {
       try { return fs.existsSync(ledgerPath) || fs.existsSync(repoRoot + "/.posse"); }
       catch { return false; }
     })();
-    if (!fsExistsRuntime) return null;
+    if (!fsExistsRuntime) {
+      logAtlasWarmTelemetry("atlas.warm.skipped", {
+        outcome: "runtime_missing",
+        job_id: jobId,
+        purpose,
+        branch: branch || payload?.branch || null,
+        baseline_branch: baselineBranch || null,
+        repo_root_basename: path.basename(String(repoRoot || "")) || null,
+        path_count: Array.isArray(paths) ? paths.length : 0,
+      });
+      return null;
+    }
     const label = `ATLAS warm conductor job #${jobId}`;
     const budgetMs = Math.max(1, Number(timeoutMs) || Number(ATLAS_WARM_JOB_POLICY.maxRuntimeMs) || 60_000);
     const gateStartedAt = nowMs();
     config ||= getAtlasIntegrationConfig();
-    const purpose = String(payload?.purpose || "wi");
+    const warmTelemetry = atlasWarmTelemetryContext({ jobId, purpose, branch: branch || payload?.branch || null, baselineBranch, repoRoot, paths, budgetMs, timeoutMs });
     // The conductor caches DB handles per (ledgerPath|dbPath) target. `warm` is
     // ledger-only — ParseEngine resolves and writes its own view from the job's
     // out_view_path — so dbPath here is just a stable per-repo handle-cache key.
     const viewKeyPath = mainViewPath(repoRoot);
     const job = { ...payload, purpose, branch: branch || payload?.branch || undefined, paths };
+    logAtlasWarmTelemetry("atlas.warm.conductor_dispatch", {
+      ...warmTelemetry,
+      outcome: "started",
+      label,
+    });
     emitAtlasWarmProgress(worker, jobId, { stage: purpose, text: "dispatched to conductor" });
     const conductor = getSharedConductor();
     // Feed the conductor's now-streamed per-stage progress to BOTH the job log
@@ -381,22 +443,77 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
     try {
       const result = await runSqliteWrite(
         ledgerPath,
-        () => conductor.warm(
-          {
-            ledgerPath,
-            dbPath: viewKeyPath,
-            repoRoot,
-            branch: baselineBranch,
-            scipMode: config?.scipMode,
-            scipDir: config?.scipDir,
-            config,
-            job,
-          },
-          { signal: abortSignal, timeoutMs: Math.max(1, budgetMs - (nowMs() - gateStartedAt)), onProgress },
-        ),
+        async (gateInfo = {}) => {
+          const conductorStartedAt = nowMs();
+          logAtlasWarmTelemetry("atlas.warm.conductor_start", {
+            ...warmTelemetry,
+            sqlite_wait_ms: gateInfo.waitMs ?? null,
+            sqlite_depth_at_enqueue: gateInfo.depthAtEnqueue ?? null,
+            sqlite_in_flight_at_enqueue: gateInfo.inFlightAtEnqueue ?? null,
+            sqlite_mode: gateInfo.mode || null,
+          });
+          try {
+            const result = await conductor.warm(
+              {
+                ledgerPath,
+                dbPath: viewKeyPath,
+                repoRoot,
+                branch: baselineBranch,
+                scipMode: config?.scipMode,
+                scipDir: config?.scipDir,
+                config,
+                job,
+              },
+              { signal: abortSignal, timeoutMs: Math.max(1, budgetMs - (nowMs() - gateStartedAt)), onProgress },
+            );
+            logAtlasWarmTelemetry("atlas.warm.conductor_result", {
+              ...warmTelemetry,
+              outcome: "ok",
+              duration_ms: nowMs() - conductorStartedAt,
+              paths_indexed: Number(result?.paths_indexed) || 0,
+              blobs_ingested: Number(result?.blobs_ingested) || 0,
+              ledger_entries_appended: Number(result?.ledger_entries_appended) || 0,
+              embeddings_complete: result?.embeddings_complete ?? null,
+            });
+            return result;
+          } catch (err) {
+            logAtlasWarmTelemetry("atlas.warm.conductor_result", {
+              ...warmTelemetry,
+              outcome: "error",
+              duration_ms: nowMs() - conductorStartedAt,
+              error: errorSummary(err),
+            });
+            throw err;
+          }
+        },
         {
           label,
           waitMs: budgetMs,
+          onCancel: (info = {}) => {
+            logAtlasWarmTelemetry("atlas.warm.sqlite_gate", {
+              ...warmTelemetry,
+              outcome: "timeout",
+              status: "canceled",
+              wait_ms: info.waitMs ?? null,
+              depth_at_enqueue: info.depthAtEnqueue ?? null,
+              in_flight_at_enqueue: info.inFlightAtEnqueue ?? null,
+              label: info.label || label,
+              error: errorSummary(info.error),
+            });
+          },
+          onRelease: (info = {}) => {
+            logAtlasWarmTelemetry("atlas.warm.sqlite_gate", {
+              ...warmTelemetry,
+              outcome: info.status === "fulfilled" ? "released" : "error",
+              status: info.status || null,
+              wait_ms: info.waitMs ?? null,
+              depth_at_enqueue: info.depthAtEnqueue ?? null,
+              in_flight_at_enqueue: info.inFlightAtEnqueue ?? null,
+              sqlite_mode: info.mode || null,
+              label: info.label || label,
+              error: errorSummary(info.error),
+            });
+          },
         },
       );
       warmOk = true;

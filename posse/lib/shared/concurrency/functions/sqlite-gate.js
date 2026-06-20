@@ -38,8 +38,9 @@ const SQLITE_GATE = new SqliteResourceGate({
 // cross-worker. It serializes writers within this thread only; actual
 // cross-thread/process arbitration is SQLite's WAL mode + busy_timeout. Do
 // not rely on it for exclusivity against other workers or daemons.
-export function runSqliteWrite(dbPath, fn, { label = "sqlite.write", waitMs = 30000 } = {}) {
-  return SQLITE_GATE.write(dbPath, fn, { label, waitMs });
+export function runSqliteWrite(dbPath, fn, options = {}) {
+  const { label = "sqlite.write", waitMs = 30000 } = options;
+  return SQLITE_GATE.write(dbPath, fn, { ...options, label, waitMs });
 }
 
 export function runSqliteReadNonBlocking(dbPath, fn, { label = "sqlite.read" } = {}) {

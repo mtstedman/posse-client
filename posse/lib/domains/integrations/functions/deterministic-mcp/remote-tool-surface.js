@@ -12,6 +12,7 @@ import {
   getPosseRemoteTimeoutMs,
   getPosseRemoteUrl,
 } from "../../../remote/functions/mode.js";
+import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 import {
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
   MCP_OAUTH_AUDIENCE,
@@ -23,6 +24,105 @@ function numberOrNull(value) {
   if (value == null || value === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function capString(value, max = 500) {
+  const text = String(value ?? "");
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
+}
+
+function errorSummary(err) {
+  if (!err) return null;
+  const cause = err.cause && err.cause !== err ? err.cause : null;
+  return {
+    name: err?.name || null,
+    code: err?.code || err?.errno || null,
+    status: err?.status || err?.statusCode || err?.response?.status || null,
+    message: capString(err?.message || String(err), 700),
+    cause: cause ? {
+      name: cause?.name || null,
+      code: cause?.code || cause?.errno || null,
+      status: cause?.status || cause?.statusCode || cause?.response?.status || null,
+      message: capString(cause?.message || String(cause), 700),
+    } : null,
+  };
+}
+
+function safeRemoteOrigin(baseUrl) {
+  const raw = String(baseUrl || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.username = "";
+    url.password = "";
+    url.pathname = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function remoteSurfaceSummary(surface = null) {
+  if (!surface || typeof surface !== "object") {
+    return {
+      present: false,
+      suite_count: 0,
+      tool_count: 0,
+      tool_names_sample: [],
+    };
+  }
+  const tools = Array.isArray(surface.tools) ? surface.tools : [];
+  const suites = Array.isArray(surface.suites) ? surface.suites : [];
+  return {
+    present: true,
+    suite_count: suites.length,
+    tool_count: tools.length,
+    tool_names_sample: tools
+      .map((tool) => String(tool?.name || tool?.local_name || "").trim())
+      .filter(Boolean)
+      .slice(0, 30),
+  };
+}
+
+function promptClientRuntimeSummary(promptClient, { apiKey = "", useNativeClient = true } = {}) {
+  let nativeAuth = null;
+  let nativeManagerAvailable = false;
+  let nativeClientSelected = false;
+  try { nativeAuth = promptClient?.nativeAuthEnvelope?.() || null; } catch { nativeAuth = null; }
+  try { nativeManagerAvailable = promptClient?.nativeManager?.shouldUse?.("remote") === true; } catch { nativeManagerAvailable = false; }
+  try { nativeClientSelected = promptClient?.shouldUseNativeClient?.() === true; } catch { nativeClientSelected = false; }
+  return {
+    api_key_present: !!String(promptClient?.apiKey ?? apiKey ?? "").trim(),
+    default_fetch: promptClient?.usesDefaultFetch === true,
+    native_client_requested: useNativeClient !== false && promptClient?.useNativeClient !== false,
+    native_auth_present: !!nativeAuth,
+    native_manager_available: nativeManagerAvailable,
+    native_client_selected: nativeClientSelected,
+    timeout_ms: Number(promptClient?.timeoutMs) || null,
+    max_retries: Number(promptClient?.maxRetries) || 0,
+  };
+}
+
+function logRemoteGatewayTelemetry(kind, bootConfig = {}, extra = {}) {
+  const remoteCatalog = bootConfig.remoteCatalog || {};
+  appendRunTelemetry("diagnostics", {
+    kind,
+    component: "remote_mcp_gateway",
+    role: bootConfig.role || null,
+    provider: bootConfig.providerName || null,
+    work_item_id: bootConfig.workItemId ?? null,
+    job_id: bootConfig.jobId ?? null,
+    attempt_id: bootConfig.attemptId ?? null,
+    remote_catalog_enabled: remoteCatalog.enabled === true,
+    remote_catalog_mode: remoteCatalog.mode || "",
+    remote_catalog_base_present: !!String(remoteCatalog.baseUrl || "").trim(),
+    remote_catalog_origin: safeRemoteOrigin(remoteCatalog.baseUrl),
+    remote_catalog_timeout_ms: Number(remoteCatalog.timeoutMs) || null,
+    requested_suites: Array.isArray(remoteCatalog.requestedSuites) ? remoteCatalog.requestedSuites : [],
+    ...extra,
+  });
 }
 
 function requestedRemoteToolSuites(bootConfig = {}) {
@@ -101,9 +201,21 @@ export async function resolveRemoteMcpToolSurfaceForBootConfig(bootConfig = {}, 
   apiKey = resolvePosseKey(),
   useNativeClient = true,
 } = {}) {
-  if (bootConfig.remoteCatalog?.enabled !== true) return null;
+  if (bootConfig.remoteCatalog?.enabled !== true) {
+    logRemoteGatewayTelemetry("mcp.remote_gateway.call_skipped", bootConfig, {
+      outcome: "disabled",
+      api_key_present: !!String(apiKey || "").trim(),
+    });
+    return null;
+  }
   const baseUrl = String(bootConfig.remoteCatalog?.baseUrl || getPosseRemoteUrl() || "").trim();
-  if (!baseUrl) return null;
+  if (!baseUrl) {
+    logRemoteGatewayTelemetry("mcp.remote_gateway.call_skipped", bootConfig, {
+      outcome: "missing_base_url",
+      api_key_present: !!String(apiKey || "").trim(),
+    });
+    return null;
+  }
   const timeoutMs = Number(bootConfig.remoteCatalog?.timeoutMs) || getPosseRemoteTimeoutMs();
   const promptClient = client || new RemotePromptClient({
     baseUrl,
@@ -113,10 +225,42 @@ export async function resolveRemoteMcpToolSurfaceForBootConfig(bootConfig = {}, 
     useNativeClient,
   });
   const request = buildRemoteToolSurfaceRequestFromBootConfig(bootConfig);
-  const surface = await promptClient.resolveToolSurface(request);
-  return surface && typeof surface === "object" ? {
-    request,
-    surface,
-    mcpOAuthToken: extractRemoteMcpOAuthToken(surface),
-  } : null;
+  const runtime = promptClientRuntimeSummary(promptClient, { apiKey, useNativeClient });
+  logRemoteGatewayTelemetry("mcp.remote_gateway.call_start", bootConfig, {
+    outcome: "started",
+    remote_catalog_origin: safeRemoteOrigin(baseUrl),
+    requested_suites: request.requested_suites,
+    mcp_oauth_requested: request.mcp_oauth?.requested === true,
+    ...runtime,
+  });
+  const startedAt = Date.now();
+  try {
+    const surface = await promptClient.resolveToolSurface(request);
+    const mcpOAuthToken = extractRemoteMcpOAuthToken(surface);
+    logRemoteGatewayTelemetry("mcp.remote_gateway.call_result", bootConfig, {
+      outcome: surface && typeof surface === "object" ? "ok" : "empty",
+      duration_ms: Date.now() - startedAt,
+      remote_catalog_origin: safeRemoteOrigin(baseUrl),
+      remote_surface_present: !!(surface && typeof surface === "object"),
+      remote_oauth_present: !!mcpOAuthToken,
+      remote_surface: remoteSurfaceSummary(surface),
+      ...runtime,
+    });
+    return surface && typeof surface === "object" ? {
+      request,
+      surface,
+      mcpOAuthToken,
+    } : null;
+  } catch (err) {
+    logRemoteGatewayTelemetry("mcp.remote_gateway.call_result", bootConfig, {
+      outcome: "error",
+      duration_ms: Date.now() - startedAt,
+      remote_catalog_origin: safeRemoteOrigin(baseUrl),
+      remote_surface_present: false,
+      remote_oauth_present: false,
+      error: errorSummary(err),
+      ...runtime,
+    });
+    throw err;
+  }
 }

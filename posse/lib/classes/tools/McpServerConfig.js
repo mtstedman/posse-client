@@ -3,6 +3,7 @@ import { fileURLToPath } from "url";
 import { getAtlasIntegrationConfig } from "../../domains/integrations/functions/atlas.js";
 import { getRuntimeDbPath } from "../../domains/runtime/functions/paths.js";
 import {
+  getDeterministicMcpToolNames,
   roleUsesDeterministicImageHelpers,
   roleUsesDeterministicImageMcp,
   roleUsesDeterministicReadMcp,
@@ -18,6 +19,7 @@ import { resolvePosseKey } from "../../domains/remote/functions/client.js";
 import { heartbeatAuthManager } from "../../shared/native/classes/HeartbeatAuthManager.js";
 import { mintMcpOAuthTokenForBootConfig } from "../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { resolveRemoteMcpToolSurfaceForBootConfig } from "../../domains/integrations/functions/deterministic-mcp/remote-tool-surface.js";
+import { appendRunTelemetry } from "../../shared/telemetry/functions/run-telemetry.js";
 import { persistentMcpOwner } from "./PersistentMcpOwner.js";
 import { McpServer } from "./McpServer.js";
 
@@ -157,6 +159,99 @@ function boolEnv(value) {
   return value ? "true" : "false";
 }
 
+function capString(value, max = 500) {
+  const text = String(value ?? "");
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
+}
+
+function errorSummary(err) {
+  if (!err) return null;
+  const cause = err.cause && err.cause !== err ? err.cause : null;
+  return {
+    name: err?.name || null,
+    code: err?.code || err?.errno || null,
+    status: err?.status || err?.statusCode || err?.response?.status || null,
+    message: capString(err?.message || String(err), 700),
+    cause: cause ? {
+      name: cause?.name || null,
+      code: cause?.code || cause?.errno || null,
+      status: cause?.status || cause?.statusCode || cause?.response?.status || null,
+      message: capString(cause?.message || String(cause), 700),
+    } : null,
+  };
+}
+
+function safeRemoteOrigin(baseUrl) {
+  const raw = String(baseUrl || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.username = "";
+    url.password = "";
+    url.pathname = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function remoteSurfaceSummary(surface = null) {
+  if (!surface || typeof surface !== "object") {
+    return {
+      present: false,
+      suite_count: 0,
+      tool_count: 0,
+      tool_names_sample: [],
+    };
+  }
+  const tools = Array.isArray(surface.tools) ? surface.tools : [];
+  const suites = Array.isArray(surface.suites) ? surface.suites : [];
+  return {
+    present: true,
+    suite_count: suites.length,
+    tool_count: tools.length,
+    tool_names_sample: tools
+      .map((tool) => String(tool?.name || tool?.local_name || "").trim())
+      .filter(Boolean)
+      .slice(0, 30),
+  };
+}
+
+function expectedMcpToolNames(role, bootPayload = {}) {
+  try {
+    return getDeterministicMcpToolNames(role, {
+      needsImageGeneration: bootPayload.allowImageGeneration === true,
+    });
+  } catch {
+    return [];
+  }
+}
+
+function logMcpBootTelemetry(kind, role, bootPayload = {}, extra = {}) {
+  const remoteCatalog = bootPayload.remoteCatalog || {};
+  const expectedTools = expectedMcpToolNames(role, bootPayload);
+  appendRunTelemetry("diagnostics", {
+    kind,
+    component: "deterministic_mcp",
+    role: role || bootPayload.role || null,
+    provider: bootPayload.providerName || null,
+    work_item_id: bootPayload.workItemId ?? null,
+    job_id: bootPayload.jobId ?? null,
+    attempt_id: bootPayload.attemptId ?? null,
+    remote_catalog_enabled: remoteCatalog.enabled === true,
+    remote_catalog_mode: remoteCatalog.mode || "",
+    remote_catalog_base_present: !!String(remoteCatalog.baseUrl || "").trim(),
+    remote_catalog_origin: safeRemoteOrigin(remoteCatalog.baseUrl),
+    remote_catalog_timeout_ms: Number(remoteCatalog.timeoutMs) || null,
+    requested_suites: Array.isArray(remoteCatalog.requestedSuites) ? remoteCatalog.requestedSuites : [],
+    expected_tool_count: expectedTools.length,
+    expected_tool_names_sample: expectedTools.slice(0, 30),
+    ...extra,
+  });
+}
+
 function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}, {
   includeEmbeddingApiKey = true,
   includeRemoteApiKey = true,
@@ -240,6 +335,7 @@ function buildDeterministicMcpBootPayload(role, {
   disableSystemTools = false,
   jobId = null,
   workItemId = null,
+  attemptId = null,
   atlasPrefetchStatus = null,
   atlasAvailable = null,
   atlasGateEnabled = true,
@@ -268,6 +364,7 @@ function buildDeterministicMcpBootPayload(role, {
       disableSystemTools,
       jobId,
       workItemId,
+      attemptId,
       atlasAvailable: atlasEnabled,
       atlasGateEnabled,
       atlasPrefetchStatus: atlasPrefetchStatus != null ? String(atlasPrefetchStatus) : "",
@@ -331,7 +428,28 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
     bootPayload.remoteToolSurface = sanitizeRemoteToolSurfaceForBoot(remoteToolSurface);
   }
   bootPayload.mcpOAuthToken = remoteMcpOAuthToken || mintMcpOAuthTokenForBootConfig(bootPayload);
-  const ownerEndpoint = persistentMcpOwner.ensureStarted();
+  let ownerEndpoint = null;
+  const ownerStartAt = Date.now();
+  try {
+    ownerEndpoint = persistentMcpOwner.ensureStarted();
+    logMcpBootTelemetry("mcp.owner.ensure_started", role, bootPayload, {
+      outcome: "ok",
+      duration_ms: Date.now() - ownerStartAt,
+      owner_boot_id: ownerEndpoint?.bootId || null,
+      owner_transport: ownerEndpoint?.transport || null,
+      remote_oauth_present: !!remoteMcpOAuthToken,
+      oauth_source: remoteMcpOAuthToken ? "remote" : "local",
+    });
+  } catch (err) {
+    logMcpBootTelemetry("mcp.owner.ensure_started", role, bootPayload, {
+      outcome: "error",
+      duration_ms: Date.now() - ownerStartAt,
+      remote_oauth_present: !!remoteMcpOAuthToken,
+      oauth_source: remoteMcpOAuthToken ? "remote" : "local",
+      error: errorSummary(err),
+    });
+    throw err;
+  }
   const ownerHotBootPayload = stripMcpOwnerOnlyBootFields({
     ...bootPayload,
     ownerHotGateway: true,
@@ -361,17 +479,52 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
     }),
     ...(ownerHotPosseKey ? { POSSE_KEY: ownerHotPosseKey } : {}),
   };
-  persistentMcpOwner.registerSession({
-    token: bootPayload.mcpOAuthToken,
-    bootConfig: bootPayload,
-    serverSpec: {
-      command,
-      args: [serverScriptPath, "--config-json", deterministicMcpBootArg(ownerHotBootPayload)],
-      cwd,
-      env: serverEnv,
-    },
-    trustedRemoteIssued: !!remoteMcpOAuthToken,
-    prewarm: !process.env.NODE_TEST_CONTEXT,
+  const registerAt = Date.now();
+  try {
+    const registration = persistentMcpOwner.registerSession({
+      token: bootPayload.mcpOAuthToken,
+      bootConfig: bootPayload,
+      serverSpec: {
+        command,
+        args: [serverScriptPath, "--config-json", deterministicMcpBootArg(ownerHotBootPayload)],
+        cwd,
+        env: serverEnv,
+      },
+      trustedRemoteIssued: !!remoteMcpOAuthToken,
+      prewarm: !process.env.NODE_TEST_CONTEXT,
+    });
+    logMcpBootTelemetry("mcp.owner.register_session", role, bootPayload, {
+      outcome: "ok",
+      duration_ms: Date.now() - registerAt,
+      owner_boot_id: registration?.bootId || ownerEndpoint?.bootId || null,
+      remote_surface_present: !!remoteToolSurface,
+      remote_oauth_present: !!remoteMcpOAuthToken,
+      oauth_source: remoteMcpOAuthToken ? "remote" : "local",
+      prewarm_requested: !process.env.NODE_TEST_CONTEXT,
+      session_count: persistentMcpOwner.status()?.sessionCount ?? null,
+    });
+  } catch (err) {
+    logMcpBootTelemetry("mcp.owner.register_session", role, bootPayload, {
+      outcome: "error",
+      duration_ms: Date.now() - registerAt,
+      owner_boot_id: ownerEndpoint?.bootId || null,
+      remote_surface_present: !!remoteToolSurface,
+      remote_oauth_present: !!remoteMcpOAuthToken,
+      oauth_source: remoteMcpOAuthToken ? "remote" : "local",
+      prewarm_requested: !process.env.NODE_TEST_CONTEXT,
+      error: errorSummary(err),
+    });
+    throw err;
+  }
+
+  logMcpBootTelemetry("mcp.config.ready", role, bootPayload, {
+    outcome: "ok",
+    server_name: POSSE_MCP_GATEWAY_SERVER_NAME,
+    transport: "stdio",
+    remote_surface_present: !!remoteToolSurface,
+    remote_oauth_present: !!remoteMcpOAuthToken,
+    oauth_source: remoteMcpOAuthToken ? "remote" : "local",
+    remote_surface: remoteSurfaceSummary(remoteToolSurface),
   });
 
   return new McpServerConfig({
@@ -394,6 +547,47 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
       ...deterministicMcpShimMetadataEnv(bootPayload, resolvedAtlasConfig),
     },
   });
+}
+
+function buildDeterministicMcpConfigWithTelemetry(role, args = {}) {
+  const bootPayload = args?.bootPayload || {};
+  const remoteToolSurface = args?.remoteToolSurface || null;
+  const remoteMcpOAuthToken = args?.remoteMcpOAuthToken || "";
+  const startedAt = Date.now();
+  logMcpBootTelemetry("mcp.config.create_start", role, bootPayload, {
+    outcome: "started",
+    remote_surface_present: !!remoteToolSurface,
+    remote_oauth_present: !!remoteMcpOAuthToken,
+    oauth_source: remoteMcpOAuthToken ? "remote" : "local",
+    remote_surface: remoteSurfaceSummary(remoteToolSurface),
+  });
+  try {
+    const config = buildDeterministicMcpConfigFromBootPayload(role, args);
+    logMcpBootTelemetry("mcp.config.create_result", role, bootPayload, {
+      outcome: "ok",
+      duration_ms: Date.now() - startedAt,
+      ready: config?.ready === true,
+      reason: config?.reason || null,
+      server_name: config?.name || null,
+      transport: config?.transport || null,
+      remote_surface_present: !!remoteToolSurface,
+      remote_oauth_present: !!remoteMcpOAuthToken,
+      oauth_source: remoteMcpOAuthToken ? "remote" : "local",
+      remote_surface: remoteSurfaceSummary(remoteToolSurface),
+    });
+    return config;
+  } catch (err) {
+    logMcpBootTelemetry("mcp.config.create_result", role, bootPayload, {
+      outcome: "error",
+      duration_ms: Date.now() - startedAt,
+      remote_surface_present: !!remoteToolSurface,
+      remote_oauth_present: !!remoteMcpOAuthToken,
+      oauth_source: remoteMcpOAuthToken ? "remote" : "local",
+      remote_surface: remoteSurfaceSummary(remoteToolSurface),
+      error: errorSummary(err),
+    });
+    throw err;
+  }
 }
 
 function requiredRemoteToolSurfaceError(role, cause = null, reason = "unavailable") {
@@ -462,6 +656,7 @@ export class McpServerConfig {
     disableSystemTools = false,
     jobId = null,
     workItemId = null,
+    attemptId = null,
     atlasPrefetchStatus = null,
     atlasAvailable = null,
     atlasGateEnabled = true,
@@ -489,12 +684,13 @@ export class McpServerConfig {
       disableSystemTools,
       jobId,
       workItemId,
+      attemptId,
       atlasPrefetchStatus,
       atlasAvailable,
       atlasGateEnabled,
       atlasConfig,
     });
-    return buildDeterministicMcpConfigFromBootPayload(role, {
+    return buildDeterministicMcpConfigWithTelemetry(role, {
       bootPayload,
       resolvedAtlasConfig,
       cwd,
@@ -511,21 +707,50 @@ export class McpServerConfig {
     const { bootPayload, resolvedAtlasConfig, allowImageGeneration } = buildDeterministicMcpBootPayload(role, opts);
     let remoteResolution = null;
     let remoteResolutionError = null;
+    const remoteStartedAt = Date.now();
+    logMcpBootTelemetry("mcp.remote_surface.resolve_start", role, bootPayload, {
+      outcome: "started",
+      required: remoteToolSurfaceRequired(bootPayload),
+    });
     try {
       remoteResolution = await resolveRemoteMcpToolSurfaceForBootConfig(bootPayload, opts.remoteToolSurfaceOptions || {});
     } catch (err) {
       remoteResolutionError = err;
       remoteResolution = null;
     }
+    const remoteDurationMs = Date.now() - remoteStartedAt;
+    logMcpBootTelemetry("mcp.remote_surface.resolve_result", role, bootPayload, {
+      outcome: remoteResolution?.surface ? "ok" : (remoteResolutionError ? "error" : "unavailable"),
+      required: remoteToolSurfaceRequired(bootPayload),
+      duration_ms: remoteDurationMs,
+      remote_surface_present: !!remoteResolution?.surface,
+      remote_oauth_present: !!remoteResolution?.mcpOAuthToken,
+      remote_surface: remoteSurfaceSummary(remoteResolution?.surface || null),
+      error: errorSummary(remoteResolutionError),
+    });
     if (remoteToolSurfaceRequired(bootPayload)) {
       if (!remoteResolution?.surface) {
+        logMcpBootTelemetry("mcp.remote_surface.required_refused", role, bootPayload, {
+          outcome: "missing_surface",
+          duration_ms: remoteDurationMs,
+          remote_surface_present: false,
+          remote_oauth_present: false,
+          error: errorSummary(remoteResolutionError),
+        });
         throw requiredRemoteToolSurfaceError(role, remoteResolutionError);
       }
       if (!remoteResolution?.mcpOAuthToken) {
+        logMcpBootTelemetry("mcp.remote_surface.required_refused", role, bootPayload, {
+          outcome: "missing_oauth",
+          duration_ms: remoteDurationMs,
+          remote_surface_present: true,
+          remote_oauth_present: false,
+          remote_surface: remoteSurfaceSummary(remoteResolution.surface),
+        });
         throw requiredRemoteToolSurfaceError(role, null, "did not include a remote-issued MCP OAuth token");
       }
     }
-    return buildDeterministicMcpConfigFromBootPayload(role, {
+    return buildDeterministicMcpConfigWithTelemetry(role, {
       bootPayload,
       resolvedAtlasConfig,
       cwd: opts.cwd || process.cwd(),

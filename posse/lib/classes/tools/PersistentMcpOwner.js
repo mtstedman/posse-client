@@ -23,6 +23,7 @@ import {
   getDeterministicMcpToolNames,
   isExternallyRoutedAtlasTool,
 } from "../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
+import { appendRunTelemetry } from "../../shared/telemetry/functions/run-telemetry.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
@@ -77,6 +78,28 @@ function tokenEqual(left, right) {
 
 function tokenHash(value) {
   return crypto.createHash("sha256").update(String(value || ""), "utf8").digest("base64url");
+}
+
+function capString(value, max = 500) {
+  const text = String(value ?? "");
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
+}
+
+function ownerErrorSummary(err) {
+  if (!err) return null;
+  const cause = err.cause && err.cause !== err ? err.cause : null;
+  return {
+    name: err?.name || null,
+    code: err?.code || err?.errno || null,
+    status: err?.status || err?.statusCode || err?.response?.status || null,
+    message: capString(err?.message || String(err), 700),
+    cause: cause ? {
+      name: cause?.name || null,
+      code: cause?.code || cause?.errno || null,
+      status: cause?.status || cause?.statusCode || cause?.response?.status || null,
+      message: capString(cause?.message || String(cause), 700),
+    } : null,
+  };
 }
 
 function isPowershellClixmlProgressNoise(chunk) {
@@ -584,9 +607,38 @@ export class PersistentMcpOwner {
       this._gatewaySession.update({ serverSpec });
     }
     if (prewarm) {
-      this._gatewaySession.prewarm().catch(() => {
-        // The first shim request will surface the concrete error; prewarm is best effort.
-      });
+      const startedAt = Date.now();
+      this._gatewaySession.prewarm()
+        .then(() => {
+          appendRunTelemetry("diagnostics", {
+            kind: "mcp.owner.gateway_prewarm",
+            component: "deterministic_mcp",
+            outcome: "ok",
+            owner_boot_id: this.bootId,
+            duration_ms: Date.now() - startedAt,
+            session_count: this._sessions.size,
+            gateway_running: !!this._gatewaySession?._proc
+              && this._gatewaySession._proc.exitCode == null
+              && !this._gatewaySession._proc.killed,
+            prewarmed_at: this._gatewaySession?.prewarmedAt || null,
+          });
+        })
+        .catch((err) => {
+          appendRunTelemetry("diagnostics", {
+            kind: "mcp.owner.gateway_prewarm",
+            component: "deterministic_mcp",
+            outcome: "error",
+            owner_boot_id: this.bootId,
+            duration_ms: Date.now() - startedAt,
+            session_count: this._sessions.size,
+            gateway_running: !!this._gatewaySession?._proc
+              && this._gatewaySession._proc.exitCode == null
+              && !this._gatewaySession._proc.killed,
+            prewarm_error: this._gatewaySession?.prewarmError || null,
+            last_exit: this._gatewaySession?.lastExit || null,
+            error: ownerErrorSummary(err),
+          });
+        });
     }
     return this._gatewaySession;
   }
