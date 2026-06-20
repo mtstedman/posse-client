@@ -350,9 +350,19 @@ function packageManagerCommand(manager) {
   return process.platform === "win32" ? `${base}.cmd` : base;
 }
 
-function installArgsForPackageManager(manager) {
+function nodeInstallCacheDir(root, opts = {}) {
+  const resolvedRoot = path.resolve(root || process.cwd());
+  const projectRoot = path.resolve(opts.projectDir || resolvedRoot);
+  const relToProject = path.relative(projectRoot, resolvedRoot);
+  const rootUnderProject = !relToProject || (!relToProject.startsWith("..") && !path.isAbsolute(relToProject));
+  const baseRoot = rootUnderProject ? projectRoot : resolvedRoot;
+  const key = hashText(resolvedRoot.toLowerCase()).slice(0, 12);
+  return path.join(baseRoot, ".posse", "deps", "npm-cache", key);
+}
+
+function installArgsForPackageManager(manager, root, opts = {}) {
   if (manager === "bun") return ["install"];
-  if (manager === "npm") return ["install", "--include=optional"];
+  if (manager === "npm") return ["install", "--include=optional", "--cache", nodeInstallCacheDir(root, opts)];
   return ["install"];
 }
 
@@ -650,7 +660,7 @@ async function ensureNodeProject(entry, opts) {
   const before = inspectNodeProject(entry.root);
   if (!before.present) return before;
   const command = packageManagerCommand(before.manager);
-  const args = installArgsForPackageManager(before.manager);
+  const args = installArgsForPackageManager(before.manager, entry.root, opts);
   if (before.status === "ok") {
     if (!opts.dryRun && before.needs_stamp) writeNodeManifestStamp(entry.root, before.manifest_hash);
     return { ...before, label: entry.label, action: before.needs_stamp ? "stamp" : "none", message: "node packages ready" };
@@ -1021,6 +1031,7 @@ export async function ensureBootDependencies(input = {}) {
   const opts = {
     dryRun,
     posseRoot,
+    projectDir,
     timeoutMs: normalizeCommandTimeoutMs(input.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS),
     onProgress: typeof input.onProgress === "function" ? input.onProgress : null,
   };

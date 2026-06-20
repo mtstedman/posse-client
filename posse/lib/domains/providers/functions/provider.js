@@ -358,14 +358,6 @@ export function tierModelName(tier, { providerName, role, jobType } = {}) {
  */
 export function isProviderReady(providerName, capability = null) {
   const canonicalName = canonicalProviderName(providerName);
-  if (capability === "images" && !isImageCapableProvider(canonicalName)) {
-    return { ready: false, reason: `provider "${providerName}" does not support image generation` };
-  }
-  if (canonicalName === "claude") {
-    const ready = providerRegistry.get("claude")?.isReady?.();
-    return ready || { ready: false, reason: "claude provider not loaded" };
-  }
-
   if (!providerRegistry.has(canonicalName)) {
     const loadErr = providerRegistry.getLoadError(canonicalName);
     const reason = loadErr
@@ -376,6 +368,13 @@ export function isProviderReady(providerName, capability = null) {
         : loadErr.message?.split("\n")[0] || String(loadErr)
       : `provider module "${providerName}" not loaded`;
     return { ready: false, reason };
+  }
+  if (capability === "images" && !isImageCapableProvider(canonicalName)) {
+    return { ready: false, reason: `provider "${providerName}" does not support image generation` };
+  }
+  if (canonicalName === "claude") {
+    const ready = providerRegistry.get("claude")?.isReady?.();
+    return ready || { ready: false, reason: "claude provider not loaded" };
   }
 
   // Module loaded — now check credentials. Providers self-declare the env
