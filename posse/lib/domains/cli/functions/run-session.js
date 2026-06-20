@@ -619,6 +619,7 @@ export class RunSession {
   // Graceful shutdown (Ctrl+C) intentionally skips this: the user asked out.
   const ATLAS_WRAPUP_DRAIN_BUDGET_MS = 10 * 60 * 1000;
   const ATLAS_WRAPUP_DRAIN_MAX_READY_WAIT_MS = 30 * 1000;
+  const WORKTREE_CLOSEOUT_CLEANUP_TIMEOUT_MS = 90 * 1000;
   const wrapUpAtlasDrainEnabled = () => {
     const raw = String(process.env.POSSE_WRAPUP_ATLAS_DRAIN ?? "").trim().toLowerCase();
     return !(raw && ["off", "false", "0", "no"].includes(raw));
@@ -627,7 +628,7 @@ export class RunSession {
     if (!wrapUpAtlasDrainEnabled()) return { ran: 0, remaining: 0 };
     const atlasDisabledForRun = (() => {
       // Pass the repo key: the owner-gone repair path disables per-repo, and a
-      // keyless lookup only sees the (never set here) global entry.
+      // global lookup only sees the (never set here) global entry.
       try { return typeof isAtlasRuntimeDisabled === "function" && isAtlasRuntimeDisabled(PROJECT_DIR); } catch { return false; }
     })();
     const queuedWarms = () => {
@@ -679,7 +680,11 @@ export class RunSession {
           await new Promise((resolve) => setTimeout(resolve, Math.min(1000, Math.max(100, earliest - now))));
           continue;
         }
-        const lease = await scheduler.leaseManager.acquireWithLocksAsync(job, scheduler.ownerId, null, scheduler.leaseSec);
+        const acquireWithLocks = typeof scheduler.leaseManager?.acquireWithLocksAsync === "function"
+          ? scheduler.leaseManager.acquireWithLocksAsync.bind(scheduler.leaseManager)
+          : scheduler.leaseManager?.acquireWithLocks?.bind(scheduler.leaseManager);
+        if (typeof acquireWithLocks !== "function") break;
+        const lease = await acquireWithLocks(job, scheduler.ownerId, null, scheduler.leaseSec);
         if (!lease) break; // another owner holds it; don't fight at exit
         const purpose = String(parseJobPayload(job)?.purpose || "wi");
         emitCloseoutStatus(`${label}: ATLAS warm (${purpose})...`, C.cyan);
@@ -709,17 +714,37 @@ export class RunSession {
   maybeAnnounceAutoMergeSetting();
   const jobs = listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
   const needsGit = jobsNeedGitWorktree(jobs);
-  const cleanupResidualWorktreesAfterAtlas = async ({ label = "Run wrap-up" } = {}) => {
+
+  const runBoundedCloseoutWorktreeCleanup = async ({
+    label = "Run wrap-up",
+    failureText = "worktree cleanup skipped",
+  } = {}) => {
     if (typeof startupWorktreeCleanup !== "function") return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort(new Error(`worktree cleanup timed out after ${Math.ceil(WORKTREE_CLOSEOUT_CLEANUP_TIMEOUT_MS / 1000)}s`));
+    }, WORKTREE_CLOSEOUT_CLEANUP_TIMEOUT_MS);
+    timer.unref?.();
     try {
       await startupWorktreeCleanup({
+        signal: controller.signal,
         skipDirtyTreeGuard: true,
         onMsg: (msg) => emitCloseoutStatus(`${label}: ${msg}`, C.dim),
       });
+      return true;
     } catch (err) {
-      emitCloseoutStatus(`${label}: post-ATLAS worktree cleanup skipped (${firstLine(err?.message || err)}).`, C.yellow);
+      emitCloseoutStatus(`${label}: ${failureText} (${firstLine(err?.message || err)}).`, C.yellow);
       await flushCloseoutStatus();
+      return false;
+    } finally {
+      clearTimeout(timer);
     }
+  };
+  const cleanupResidualWorktreesAfterAtlas = async ({ label = "Run wrap-up" } = {}) => {
+    await runBoundedCloseoutWorktreeCleanup({
+      label,
+      failureText: "post-ATLAS worktree cleanup skipped",
+    });
   };
 
   if (jobs.length === 0) {
@@ -3600,8 +3625,11 @@ export class RunSession {
     if (needsGit) {
       emitCloseoutStatus("Graceful shutdown - run wrap-up: cleaning worktrees...", C.cyan);
       await flushCloseoutStatus();
-      await startupWorktreeCleanup();
-      emitCloseoutStatus("Graceful shutdown - run wrap-up: worktrees clean.", C.green);
+      const cleaned = await runBoundedCloseoutWorktreeCleanup({
+        label: "Graceful shutdown - run wrap-up",
+        failureText: "worktree cleanup skipped",
+      });
+      if (cleaned) emitCloseoutStatus("Graceful shutdown - run wrap-up: worktrees clean.", C.green);
     }
     await flushCloseoutStatus();
     await cleanupAtlasForSession({ label: "Graceful shutdown - run wrap-up" });
@@ -3713,6 +3741,20 @@ export class RunSession {
     } catch { /* MCP owner shutdown is best-effort */ }
     await cleanupResidualWorktreesAfterAtlas({ label: "Run wrap-up" });
   }
+
+  // Natural-completion exit. The finally above disposes the conductor, ONNX
+  // daemon, native daemon hosts, and MCP owner, but a backgrounded ATLAS
+  // boot-warm worker thread (the operator pressed Enter to defer the encode)
+  // is fire-and-forget and never unref'd — its MessagePort keeps the event loop
+  // alive, so the process hangs after "Run wrap-up: done." instead of exiting
+  // (Enter does nothing; only Ctrl+C escapes). Every signal-driven exit path
+  // already exits explicitly; mirror them here — record the clean shutdown,
+  // flush runtime state, and exit. Reaching this line means a clean run: reruns
+  // return inside the try (so they skip this and the innermost run exits), and
+  // errors propagate past the finally, so exit code 0 is correct.
+  closeRuntimeStateForExit();
+  process.exitCode = 0;
+  exitProcess?.(0);
 
   }
 }

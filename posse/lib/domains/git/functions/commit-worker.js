@@ -10,7 +10,7 @@ function post(message) {
 function runCommit() {
   try {
     if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
-      nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { keyless: false }));
+      nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
     }
     const { message, cwd, scope, opts } = workerData || {};
     const result = gitCommitAll(message, cwd, scope, opts);

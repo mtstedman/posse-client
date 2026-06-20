@@ -112,6 +112,7 @@ function normalizeContractShape(contract = {}) {
       modifyFiles: Array.isArray(contract?.scope?.modifyFiles) ? [...contract.scope.modifyFiles] : [],
       createFiles: Array.isArray(contract?.scope?.createFiles) ? [...contract.scope.createFiles] : [],
       createRoots: Array.isArray(contract?.scope?.createRoots) ? [...contract.scope.createRoots] : [],
+      readRoots: Array.isArray(contract?.scope?.readRoots) ? [...contract.scope.readRoots] : [],
       deleteFiles: Array.isArray(contract?.scope?.deleteFiles) ? [...contract.scope.deleteFiles] : [],
     },
     tools: Array.isArray(contract.tools) ? contract.tools.map((tool) => ({ ...tool })) : [],
@@ -155,6 +156,7 @@ export class ToolContract {
     if ((scope.modifyFiles || []).length > 0) scopeBits.push(`modify=${scope.modifyFiles.length}`);
     if ((scope.createFiles || []).length > 0) scopeBits.push(`create=${scope.createFiles.length}`);
     if ((scope.createRoots || []).length > 0) scopeBits.push(`create_roots=${scope.createRoots.length}`);
+    if ((scope.readRoots || []).length > 0) scopeBits.push(`read_roots=${scope.readRoots.length}`);
     if ((scope.deleteFiles || []).length > 0) scopeBits.push(`delete=${scope.deleteFiles.length}`);
     lines.push(`- Scope summary: ${scopeBits.length > 0 ? scopeBits.join(", ") : "no explicit file scope"}`);
     if ((contract.tools || []).length === 0) {
@@ -421,6 +423,7 @@ export class ToolContract {
     scopedFiles = [],
     createFiles = [],
     createRoots = [],
+    readRoots = [],
     deleteFiles = [],
     fallbackReads = null,
     platform = process.platform,
@@ -446,6 +449,7 @@ export class ToolContract {
         modifyFiles: Array.isArray(scopedFiles) ? scopedFiles : [],
         createFiles: Array.isArray(createFiles) ? createFiles : [],
         createRoots: Array.isArray(createRoots) ? createRoots : [],
+        readRoots: Array.isArray(readRoots) ? readRoots : [],
         deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
       },
       tools: toolNames.map((name) => ({ name, ...ToolCatalog.getExecutionSpec(name) })),
@@ -526,6 +530,7 @@ export class ToolContract {
     scopedFiles = [],
     createFiles = [],
     createRoots = [],
+    readRoots = [],
     deleteFiles = [],
     fallbackReads = null,
     platform = process.platform,
@@ -548,6 +553,7 @@ export class ToolContract {
         modifyFiles: Array.isArray(scopedFiles) ? scopedFiles : [],
         createFiles: Array.isArray(createFiles) ? createFiles : [],
         createRoots: Array.isArray(createRoots) ? createRoots : [],
+        readRoots: Array.isArray(readRoots) ? readRoots : [],
         deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
       },
       tools: toolNames.map((name) => ({ name, ...catalog.getExecutionSpec(name) })),

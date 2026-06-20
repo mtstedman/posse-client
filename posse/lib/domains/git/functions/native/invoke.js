@@ -90,7 +90,6 @@ const WORKER_ELIGIBLE_METHODS = new Set([
  * @typedef {Object} GitNativeMethodRunOptions
  * @property {import("../../../../classes/tools/BinaryManager.js").BinaryManager} [manager]
  * @property {number} [timeoutMs]
- * @property {string} [key]
  * @property {boolean} [disabled]
  * @property {AbortSignal} [signal]
  * @property {Record<string, unknown>} [auth]
@@ -162,7 +161,6 @@ export function runGitNativeMethod(method, payload, opts = {}) {
       input: `${JSON.stringify(request)}\n`,
       json: true,
       timeoutMs: opts.timeoutMs,
-      key: opts.key,
       signal: opts.signal,
       worker: WORKER_ELIGIBLE_METHODS.has(request.method),
     },
@@ -212,7 +210,6 @@ export async function runGitNativeMethodAsync(method, payload, opts = {}) {
       input: `${JSON.stringify(request)}\n`,
       json: true,
       timeoutMs: opts.timeoutMs,
-      key: opts.key,
       signal: opts.signal,
       worker: opts.worker !== false && WORKER_ELIGIBLE_METHODS.has(request.method),
     },

@@ -1126,6 +1126,24 @@ function shouldPreserveUnmergedCompleteAtlasView(wi) {
   return wi?.status === "complete" && wi?.merge_state !== "merged";
 }
 
+function shouldDeferBranchBackedCompleteCleanupUntilMerge(wi) {
+  return wi?.status === "complete" && !!wi?.branch_name && wi?.merge_state !== "merged";
+}
+
+function logCompleteCleanupDeferredUntilMerge(wi) {
+  logEvent({
+    work_item_id: wi.id,
+    event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+    actor_type: EVENT_ACTORS.WORKER,
+    message: `Deferred terminal worktree cleanup until WI merge; branch ${wi.branch_name} is still pending review`,
+    event_json: JSON.stringify({
+      branch_name: wi.branch_name,
+      merge_state: wi.merge_state || null,
+      reason: "complete_branch_pending_merge",
+    }),
+  });
+}
+
 function atlasCleanupDisposition(wi) {
   if (shouldPreserveUnmergedCompleteAtlasView(wi)) return null;
   if (wi.status === "complete") return "merged";
@@ -1140,6 +1158,10 @@ export function cleanupWorktreeIfDone(worker, workItemId) {
 
     if (!TERMINAL_WORK_ITEM_STATUS_SET.has(wi.status)) return;
     if (isIterativeWorkItemActive(wi)) return;
+    if (shouldDeferBranchBackedCompleteCleanupUntilMerge(wi)) {
+      logCompleteCleanupDeferredUntilMerge(wi);
+      return;
+    }
 
     const wtDir = worktreePath(worker.projectDir, wi.id, wi.title);
     if (deferTerminalCleanupIfActiveWork(wi, wtDir)) return;
@@ -1256,6 +1278,10 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
 
     if (!TERMINAL_WORK_ITEM_STATUS_SET.has(wi.status)) return;
     if (isIterativeWorkItemActive(wi)) return;
+    if (shouldDeferBranchBackedCompleteCleanupUntilMerge(wi)) {
+      logCompleteCleanupDeferredUntilMerge(wi);
+      return;
+    }
 
     const wtDir = worktreePath(worker.projectDir, wi.id, wi.title);
     if (deferTerminalCleanupIfActiveWork(wi, wtDir)) return;

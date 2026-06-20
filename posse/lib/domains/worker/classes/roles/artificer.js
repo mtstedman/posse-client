@@ -137,7 +137,7 @@ export class ArtificerRole extends BaseRole {
     }
 
     const createRoots = resolveContainedArtifactRoots(projectDir, payload.create_roots || [], "create_roots");
-    const inputRoots = payload.input_roots || [];
+    const inputRoots = resolveContainedArtifactRoots(projectDir, payload.input_roots || [], "input_roots");
     const researchArtifacts = getArtifactsByWorkItem(job.work_item_id, "response")
       .filter((a) => {
         const relatedJob = getJob(a.job_id);
@@ -239,6 +239,7 @@ export class ArtificerRole extends BaseRole {
       expandedFiles: new Set(),
       fallbackReads: packet.budgets?.fallback_reads_remaining ?? null,
       maxExpandSteps,
+      inputRoots,
       needsImageGeneration,
       outputRoot,
       packet,
@@ -262,6 +263,7 @@ export class ArtificerRole extends BaseRole {
       scopedFiles: null,
       createFiles: null,
       createRoots: ctx.artRoots,
+      readRoots: ctx.inputRoots?.length > 0 ? ctx.inputRoots : null,
       stableContext: ctx.packet?.stable_context || null,
       remoteSystemPrompt: ctx.packet?.remote_system_prompt || null,
       skillsAttached: ctx.packet?.skills_attached || null,

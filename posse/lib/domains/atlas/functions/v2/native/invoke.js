@@ -35,7 +35,6 @@ function resolveAtlasAuthEnvelope(opts, manager) {
  * @typedef {Object} NativeMethodRunOptions
  * @property {import("../../../../../classes/tools/BinaryManager.js").BinaryManager} [manager]
  * @property {number} [timeoutMs]
- * @property {string} [key]
  * @property {boolean} [disabled]
  * @property {Record<string, unknown>} [auth]
  * @property {Record<string, unknown>} [heartbeat]
@@ -110,7 +109,6 @@ export function runAtlasNativeMethod(method, payload, opts = {}) {
       input: `${JSON.stringify(request)}\n`,
       json: true,
       timeoutMs: opts.timeoutMs,
-      key: opts.key,
       // Sync calls are per-call spawns now (the sync bridge was removed) —
       // runSync accepts and ignores `worker`. Keep call volume O(1) per
       // action (batch lines, memoize tokenize) or prefer the async variant,
@@ -163,7 +161,6 @@ export async function runAtlasNativeMethodAsync(method, payload, opts = {}) {
       input: `${JSON.stringify(request)}\n`,
       json: true,
       timeoutMs: opts.timeoutMs,
-      key: opts.key,
       signal: opts.signal,
       worker: opts.worker !== false,
     },

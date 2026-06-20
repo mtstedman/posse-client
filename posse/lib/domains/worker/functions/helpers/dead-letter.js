@@ -419,10 +419,10 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhauste
   }
 
   // If the same-error guard fired but the next attempt would actually swap
-  // models (e.g. codex `cheap` and `standard` both map to gpt-5.3-codex but
-  // `strong` maps to gpt-5.5), suppress the dead-letter so the retry runs on
-  // a genuinely different model. Mirrors the idempotency-guard pattern in
-  // Worker.js for identical-output retries.
+  // models (e.g. a provider whose `standard` and `strong` tiers resolve to the
+  // same model id, so only some tier bumps change the model), suppress the
+  // dead-letter so the retry runs on a genuinely different model. Mirrors the
+  // idempotency-guard pattern in Worker.js for identical-output retries.
   if (!permanentProviderConfigError && sameErrorRepeat && freshJob.attempt_count < freshJob.max_attempts && failedAttempts.length > 0) {
     const lastFailed = failedAttempts[failedAttempts.length - 1];
     const lastModel = lastFailed?.model_name || null;

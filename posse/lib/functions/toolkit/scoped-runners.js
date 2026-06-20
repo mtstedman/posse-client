@@ -105,16 +105,30 @@ function compact(value, max = MAX_OUTPUT_CHARS) {
   return `${text.slice(0, max)}\n... (truncated ${text.length - max} chars)`;
 }
 
+function quoteCmdArg(value) {
+  const text = String(value || "");
+  if (text === "") return "\"\"";
+  if (!/[\s"]/u.test(text)) return text;
+  return `"${text
+    .replace(/(\\*)"/g, "$1$1\\\"")
+    .replace(/\\+$/g, "$&$&")}"`;
+}
+
 function runProcess(command, args, cwd, { timeoutMs = 120000 } = {}) {
   const startedAt = Date.now();
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
-  const result = spawnSync(command, args, {
+  const useCmdTrampoline = process.platform === "win32" && /\.cmd$/i.test(command);
+  const spawnCommand = useCmdTrampoline ? (process.env.ComSpec || "cmd.exe") : command;
+  const spawnArgs = useCmdTrampoline
+    ? ["/d", "/s", "/c", [command, ...args].map(quoteCmdArg).join(" ")]
+    : args;
+  const result = spawnSync(spawnCommand, spawnArgs, {
     cwd,
     env,
     encoding: "utf8",
     windowsHide: true,
-    shell: process.platform === "win32" && /\.cmd$/i.test(command),
+    shell: false,
     timeout: timeoutMs,
     maxBuffer: 8 * 1024 * 1024,
   });

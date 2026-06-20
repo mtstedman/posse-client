@@ -1959,6 +1959,8 @@ export class Worker {
               createdOutOfScope,
               skippedIgnoredCreateFiles,
               skippedStaleModifyFiles,
+              outOfScopeDirtySkipped,
+              outOfScopeStagingSkipped,
               gitAddWarnings,
               scopeCleanedNoOp,
               mergeCompleted,
@@ -2042,9 +2044,9 @@ export class Worker {
             }
 
             // Log residual untracked files outside scope. They are deliberately
-            // left on disk and ignored until terminal WI cleanup.
+            // left on disk and ignored until WI merge cleanup.
             if (createdOutOfScope && createdOutOfScope.length > 0) {
-              const oosMsg = `Left ${createdOutOfScope.length} out-of-scope untracked file(s) for terminal cleanup: ${createdOutOfScope.slice(0, 10).join(", ")}`;
+              const oosMsg = `Left ${createdOutOfScope.length} out-of-scope untracked file(s) for WI merge cleanup: ${createdOutOfScope.slice(0, 10).join(", ")}`;
               this.emit(job.id, `${C.yellow}[scope-compat] WI#${job.work_item_id} job #${job.id}: ${oosMsg}${C.reset}`);
               logEvent({
                 work_item_id: job.work_item_id,
@@ -2054,6 +2056,25 @@ export class Worker {
                 actor_type: EVENT_ACTORS.WORKER,
                 message: oosMsg,
                 event_json: JSON.stringify({ files: createdOutOfScope }),
+              });
+            }
+
+            if ((outOfScopeDirtySkipped?.length || 0) > 0 || (outOfScopeStagingSkipped?.length || 0) > 0) {
+              const deferredDirty = outOfScopeDirtySkipped || [];
+              const unstaged = outOfScopeStagingSkipped || [];
+              const deferredMsg = `Left ${deferredDirty.length} out-of-scope dirty path(s) and unstaged ${unstaged.length} out-of-scope staged path(s) for WI merge cleanup`;
+              this.emit(job.id, `${C.yellow}[scope-compat] WI#${job.work_item_id} job #${job.id}: ${deferredMsg}${C.reset}`);
+              logEvent({
+                work_item_id: job.work_item_id,
+                job_id: job.id,
+                attempt_id: attempt.id,
+                event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+                actor_type: EVENT_ACTORS.WORKER,
+                message: deferredMsg,
+                event_json: JSON.stringify({
+                  dirty: deferredDirty.slice(0, 50),
+                  unstaged: unstaged.slice(0, 50),
+                }),
               });
             }
 
@@ -2156,6 +2177,8 @@ export class Worker {
                   files_reverted: filesReverted,
                   created_via_modify_scope: createdViaModifyScope,
                   skipped_stale_modify_files: skippedStaleModifyFiles || [],
+                  out_of_scope_dirty_skipped: outOfScopeDirtySkipped || [],
+                  out_of_scope_staging_skipped: outOfScopeStagingSkipped || [],
                   scope_cleaned_noop: scopeCleanedNoOp,
                   sibling_dirty_skipped: siblingSkipped,
                 },

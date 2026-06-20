@@ -1596,10 +1596,11 @@ function collectCodexExtraDirs({
   createFiles = [],
   deleteFiles = [],
   createRoots = [],
+  readRoots = [],
   fsImpl = fs,
 } = {}) {
   const extraDirs = new Set();
-  for (const p of [...(scopedFiles || []), ...(createFiles || []), ...(createRoots || [])]) {
+  for (const p of [...(scopedFiles || []), ...(createFiles || []), ...(createRoots || []), ...(readRoots || [])]) {
     if (!p) continue;
     const abs = path.isAbsolute(p) ? p : path.resolve(workingDir, p);
     const dir = fsImpl.existsSync(abs) && fsImpl.statSync(abs).isDirectory() ? abs : path.dirname(abs);
@@ -1819,6 +1820,7 @@ function buildCodexDeterministicReadConfigOverrides(role, cwd, {
   createFiles = [],
   deleteFiles = [],
   createRoots = [],
+  readRoots = [],
   needsImageGeneration = false,
   disableSystemTools = false,
   jobId = null,
@@ -1845,6 +1847,7 @@ function buildCodexDeterministicReadConfigOverrides(role, cwd, {
     createFiles,
     deleteFiles,
     createRoots,
+    readRoots,
     needsImageGeneration,
     providerName: "codex",
     disableSystemTools,
@@ -1902,6 +1905,7 @@ async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd, {
   createFiles = [],
   deleteFiles = [],
   createRoots = [],
+  readRoots = [],
   needsImageGeneration = false,
   disableSystemTools = false,
   jobId = null,
@@ -1928,6 +1932,7 @@ async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd, {
     createFiles,
     deleteFiles,
     createRoots,
+    readRoots,
     needsImageGeneration,
     providerName: "codex",
     disableSystemTools,
@@ -2494,6 +2499,7 @@ export async function callProvider(promptText, {
   scopedFiles = null,
   createFiles = null,
   createRoots = null,
+  readRoots = null,
   deleteFiles = null,
   stableContext = null,
   remoteSystemPrompt = null,
@@ -2589,6 +2595,7 @@ export async function callProvider(promptText, {
       createFiles,
       deleteFiles,
       createRoots,
+      readRoots,
       needsImageGeneration,
       disableSystemTools,
       jobId,
@@ -2643,6 +2650,7 @@ export async function callProvider(promptText, {
       createFiles,
       createRoots,
       deleteFiles,
+      readRoots,
       needsImageGeneration,
       fallbackReads,
       platform: process.platform,
@@ -2710,7 +2718,7 @@ export async function callProvider(promptText, {
       priorSessionHandle: resumeSessionHandle,
     });
 
-    const extraDirs = collectCodexExtraDirs({ workingDir, scopedFiles, createFiles, createRoots });
+    const extraDirs = collectCodexExtraDirs({ workingDir, scopedFiles, createFiles, createRoots, readRoots });
     if (resumeSessionHandle && extraDirs.size > 0) {
       clearExitCleanup();
       cleanupRunTemps();

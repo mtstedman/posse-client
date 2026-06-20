@@ -9,8 +9,10 @@
 // is read-mostly aggregation for dashboards and the delegator.
 
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { normalizeSkillsColumn, now } from "./common.js";
-import { EVENT_TYPES } from "../../../catalog/event.js";
+import { normalizeSkillsColumn, now, LEASE_HOLDING_STATUSES_SQL } from "./common.js";
+import { leaseNowMs } from "./lease-clock.js";
+import { logEvent } from "./events.js";
+import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { DEADLOCK_TERMINAL_STATUSES } from "../../../catalog/job.js";
 import { appendRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
 
@@ -356,6 +358,59 @@ export function cleanupRunningAgentCalls() {
     });
   }
   return result;
+}
+
+/**
+ * Boot-time reconciliation of agent_calls left in 'running' by a crashed or
+ * force-killed worker. Mirrors reconcileOrphanedAttempts(): if we hold the
+ * scheduler lock, no live worker owns a running call, so any row whose owning
+ * job is no longer actively leased (or has no job at all) is an orphan.
+ *
+ * Unlike cleanupRunningAgentCalls() — which unconditionally times out every
+ * running row at wrap-up — this is lease-guarded so it is safe to run during
+ * boot maintenance, and it logs a queryable event per reconciled row instead
+ * of only appending run telemetry. Returns the number of rows reconciled.
+ */
+export function reconcileOrphanedAgentCalls() {
+  const db = getDb();
+  const ts = new Date(leaseNowMs()).toISOString();
+  const stuck = db.prepare(`
+    SELECT ac.id, ac.job_id
+    FROM agent_calls ac
+    LEFT JOIN jobs j ON j.id = ac.job_id
+    WHERE ac.status = 'running'
+      AND (
+        ac.job_id IS NULL
+        OR j.id IS NULL
+        OR j.status NOT IN (${LEASE_HOLDING_STATUSES_SQL})
+        OR j.lease_expires_at IS NULL
+        OR j.lease_expires_at < ?
+      )
+  `).all(ts);
+
+  if (stuck.length === 0) return 0;
+
+  const fix = db.prepare(`
+    UPDATE agent_calls
+    SET status = 'timeout',
+        finished_at = COALESCE(finished_at, ?),
+        error_text = COALESCE(error_text, 'Orphaned by scheduler crash')
+    WHERE id = ?
+  `);
+
+  db.transaction(() => {
+    for (const { id, job_id } of stuck) {
+      fix.run(ts, id);
+      logEvent({
+        job_id,
+        event_type: EVENT_TYPES.AGENT_CALL_ORPHAN_RECONCILED,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        message: `Orphaned running agent call #${id} marked as timeout`,
+      });
+    }
+  })();
+
+  return stuck.length;
 }
 
 /**

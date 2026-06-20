@@ -15,7 +15,7 @@ import { HeartbeatAuthManager } from "../../../../../shared/native/classes/Heart
 const config = workerData?.config || {};
 
 if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
-  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { keyless: false }));
+  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
 }
 
 /** @type {Promise<any> | null} */

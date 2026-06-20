@@ -990,7 +990,14 @@ function promptViaEditor(header) {
 }
 
 async function cmdAdd() {
-  const descArgs = getCommandPositionalArgs(process.argv.slice(3));
+  const rawArgs = process.argv.slice(3);
+  if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
+    console.log(`\n  Usage: posse add "description of what you want built"`);
+    console.log(`  ${C.dim}Optional: --mode build|report|image --intent task|bugfix|report|image --output repo|artifact|question_only --files LIST --constraints LIST${C.reset}\n`);
+    return;
+  }
+
+  const descArgs = getCommandPositionalArgs(rawArgs);
   let description = descArgs.join(" ").trim();
 
   if (!description) {

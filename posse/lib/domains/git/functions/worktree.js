@@ -611,6 +611,10 @@ function shouldPreserveUnmergedCompleteAtlasView(wi) {
   return wi?.status === "complete" && wi?.merge_state !== "merged";
 }
 
+function shouldDeferBranchBackedCompleteCleanupUntilMerge(wi) {
+  return wi?.status === "complete" && !!wi?.branch_name && wi?.merge_state !== "merged";
+}
+
 function disposeTerminalWorkItemAtlasGraph(projectDir, wiId, worktreePath = null, options = {}) {
   disposeWorkItemAtlasGraph({ projectDir, workItemId: wiId, worktreePath, ...options });
 }
@@ -2050,10 +2054,42 @@ async function gcSnapshotAndRemoveWorktreeAsync(projectDir, wtDir, wi, options) 
   );
 }
 
-export async function gcWorktreesAsync(projectDir, onMsg = () => {}, { signal = null, timingSlowMs = null, timingNow = null } = {}) {
+const DEFAULT_RECOVERY_SNAPSHOT_PRUNE_MIN_INTERVAL_MS = 5 * 60 * 1000;
+// Narrow runtime throttle: closeout/startup can call GC several times in one
+// process, and recovery snapshot pruning walks git refs/notes. Worktree cleanup
+// still runs every time; only the expensive snapshot-retention sweep is skipped
+// when it just ran for the same project.
+const lastRecoverySnapshotPruneAtByProject = new Map();
+
+function recoverySnapshotPruneProjectKey(projectDir) {
+  return path.resolve(String(projectDir || process.cwd()));
+}
+
+function gcNowMs(nowFn) {
+  if (typeof nowFn === "function") {
+    const value = Number(nowFn());
+    if (Number.isFinite(value)) return value;
+  }
+  return Date.now();
+}
+
+export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
+  signal = null,
+  timingSlowMs = null,
+  timingNow = null,
+  recoveryPruneMinIntervalMs = DEFAULT_RECOVERY_SNAPSHOT_PRUNE_MIN_INTERVAL_MS,
+  forceRecoveryPrune = false,
+} = {}) {
   const timing = createGcTiming(onMsg, { slowMs: timingSlowMs, now: timingNow });
   try {
-    await timing.step("recovery snapshot prune", () => pruneRecoveredWorktreeSnapshotsAsync(projectDir, onMsg, { signal }), { gitCwd: projectDir });
+    const projectKey = recoverySnapshotPruneProjectKey(projectDir);
+    const minIntervalMs = Math.max(0, Number(recoveryPruneMinIntervalMs) || 0);
+    const lastPrunedAt = lastRecoverySnapshotPruneAtByProject.get(projectKey) || 0;
+    const now = gcNowMs(timingNow);
+    if (forceRecoveryPrune || minIntervalMs === 0 || now - lastPrunedAt >= minIntervalMs) {
+      await timing.step("recovery snapshot prune", () => pruneRecoveredWorktreeSnapshotsAsync(projectDir, onMsg, { signal }), { gitCwd: projectDir });
+      lastRecoverySnapshotPruneAtByProject.set(projectKey, gcNowMs(timingNow));
+    }
     throwIfAborted(signal);
 
     const root = worktreeRoot(projectDir, { disabled: true });
@@ -2092,6 +2128,10 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, { signal = 
       }
 
       if (wi && TERMINAL_WORK_ITEM_STATUS_SET.has(wi.status)) {
+        if (shouldDeferBranchBackedCompleteCleanupUntilMerge(wi)) {
+          onMsg(`GC: skipping terminal worktree cleanup for WI#${wiId}; branch ${wi.branch_name} is pending merge review`);
+          continue;
+        }
         let holdsBench = false;
         try {
           holdsBench = await timing.step(`WI#${wiId} bench hold lookup`, () => workItemHoldsBench(wiId));

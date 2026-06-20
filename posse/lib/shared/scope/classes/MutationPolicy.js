@@ -32,6 +32,22 @@ function normalizeList(values = []) {
   return [...new Set((Array.isArray(values) ? values : []).filter(Boolean).map((value) => String(value)))];
 }
 
+function normalizeRoots(values = [], cwd = process.cwd()) {
+  const roots = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const raw = String(value || "").trim();
+    if (!raw) continue;
+    if (raw === "*") {
+      roots.push("*");
+      continue;
+    }
+    const relative = path.isAbsolute(raw) ? path.relative(cwd, raw) : raw;
+    const normalized = normalizeRel(relative).replace(/\/+$/, "");
+    if (normalized) roots.push(normalized);
+  }
+  return [...new Set(roots)];
+}
+
 function isPhpSyntaxLintCommand(command) {
   const text = String(command || "");
   return /^\s*php(?:\s|$)/i.test(text) && PHP_SYNTAX_LINT_FLAG_RE.test(text);
@@ -100,18 +116,18 @@ function normalizeAbs(value) {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-function isSystemOwnedExternalCreateRoot(absPath) {
+function isSystemOwnedExternalResourceRoot(absPath, allowedCategories = new Set(["artifacts", "workspace"])) {
   const parts = normalizeRel(absPath).split("/").filter(Boolean);
   const posseIndex = parts.lastIndexOf(".posse");
   if (posseIndex < 0) return false;
   if (parts[posseIndex + 1] !== "resources") return false;
   const category = parts[posseIndex + 2];
-  if (category !== "artifacts" && category !== "workspace") return false;
+  if (!allowedCategories.has(category)) return false;
   const scopeId = parts[posseIndex + 3] || "";
   return /^(?:wi-|run-)[^/]+$/i.test(scopeId);
 }
 
-function normalizeExternalCreateRoots(values = [], cwd = process.cwd()) {
+function normalizeExternalResourceRoots(values = [], cwd = process.cwd(), allowedCategories = new Set(["artifacts", "workspace"])) {
   const roots = [];
   for (const value of Array.isArray(values) ? values : []) {
     if (!value) continue;
@@ -120,13 +136,13 @@ function normalizeExternalCreateRoots(values = [], cwd = process.cwd()) {
     const rel = relFromCandidate(cwd, raw);
     if (isCwdOrDescendantRel(rel)) continue;
     const abs = normalizeAbs(raw);
-    if (!isSystemOwnedExternalCreateRoot(abs)) continue;
+    if (!isSystemOwnedExternalResourceRoot(abs, allowedCategories)) continue;
     roots.push(abs);
   }
   return [...new Set(roots)];
 }
 
-function matchesExternalCreateRoot(filePath, roots = []) {
+function matchesExternalRoot(filePath, roots = []) {
   if (!roots.length) return false;
   const abs = normalizeAbs(filePath);
   return roots.some((root) => {
@@ -321,7 +337,18 @@ export class MutationPolicy {
     const rawScope = scope instanceof Scope ? null : (scope || {});
     this.scope = scope instanceof Scope ? scope : new Scope(scope || {});
     this.cwd = path.resolve(cwd);
-    this.externalCreateRoots = Object.freeze(normalizeExternalCreateRoots(rawScope?.createRoots || rawScope?.create_roots || [], this.cwd));
+    const readRoots = rawScope?.readRoots || rawScope?.read_roots || rawScope?.inputRoots || rawScope?.input_roots || [];
+    this.readRoots = Object.freeze(normalizeRoots(readRoots, this.cwd));
+    this.externalCreateRoots = Object.freeze(normalizeExternalResourceRoots(
+      rawScope?.createRoots || rawScope?.create_roots || [],
+      this.cwd,
+      new Set(["artifacts", "workspace"]),
+    ));
+    this.externalReadRoots = Object.freeze(normalizeExternalResourceRoots(
+      readRoots,
+      this.cwd,
+      new Set(["artifacts", "workspace", "inputs"]),
+    ));
   }
 
   static fromJob(job = {}, payload = null, { cwd = process.cwd() } = {}) {
@@ -339,6 +366,7 @@ export class MutationPolicy {
         createFiles: scope?.createFiles || scope?.files_to_create || [],
         createRoots: scope?.createRoots || scope?.create_roots || [],
         deleteFiles: scope?.deleteFiles || scope?.files_to_delete || [],
+        readRoots: scope?.readRoots || scope?.read_roots || scope?.inputRoots || scope?.input_roots || [],
         cwd,
       },
       cwd,
@@ -375,7 +403,7 @@ export class MutationPolicy {
     return this.scope.modifyFiles.includes(rel)
       || this.scope.createFiles.includes(rel)
       || matchesCreateRoot(rel, this.scope.createRoots)
-      || matchesExternalCreateRoot(filePath, this.externalCreateRoots);
+      || matchesExternalRoot(filePath, this.externalCreateRoots);
   }
 
   canCreate(filePath) {
@@ -383,7 +411,7 @@ export class MutationPolicy {
     return this.scope.createFiles.includes(rel)
       || this.scope.modifyFiles.includes(rel)
       || matchesCreateRoot(rel, this.scope.createRoots)
-      || matchesExternalCreateRoot(filePath, this.externalCreateRoots);
+      || matchesExternalRoot(filePath, this.externalCreateRoots);
   }
 
   canDelete(filePath) {
@@ -394,7 +422,9 @@ export class MutationPolicy {
   isWithinScopeRoot(filePath) {
     const rel = relFromCandidate(this.cwd, filePath);
     return matchesCreateRoot(rel, this.scope.createRoots)
-      || matchesExternalCreateRoot(filePath, this.externalCreateRoots);
+      || matchesCreateRoot(rel, this.readRoots)
+      || matchesExternalRoot(filePath, this.externalCreateRoots)
+      || matchesExternalRoot(filePath, this.externalReadRoots);
   }
 
   toToolkitPredicates() {
@@ -403,7 +433,7 @@ export class MutationPolicy {
       canCreate: (absPath) => this.canCreate(absPath),
       canDelete: (absPath) => this.canDelete(absPath),
       isWithinScopeRoot: (absPath) => this.isWithinScopeRoot(absPath),
-      hasScope: !this.scope.isEmpty(),
+      hasScope: !this.scope.isEmpty() || this.readRoots.length > 0 || this.externalReadRoots.length > 0,
       policy: this,
     };
   }

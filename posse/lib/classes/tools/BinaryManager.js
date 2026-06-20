@@ -55,8 +55,8 @@ export class BinaryManager {
     // Lazily falls back to the shared singleton (see the nativeAuthManager
     // getter): referencing it here would hit a temporal-dead-zone error during
     // the BinaryManager <-> HeartbeatAuthManager <-> remote-client import cycle
-    // at module load. The MCP sidecar swaps in a keyless, capability-seeded
-    // manager via setNativeAuthManager().
+    // at module load. Child runtimes swap in a capability-seeded manager via
+    // setNativeAuthManager().
     this._nativeAuthManager = opts.nativeAuthManager || null;
     /** @type {Map<string, NativeBinary>} */
     this._handles = new Map();
@@ -86,9 +86,9 @@ export class BinaryManager {
 
   /**
    * Replace the native-auth authority and propagate it to already-created
-   * handles. The MCP sidecar calls this at boot with a keyless manager rebuilt
-   * from the parent's non-secret capability, so its native calls never need a
-   * raw POSSE_KEY.
+   * handles. Child runtimes call this at boot with a manager rebuilt from the
+   * parent's non-secret capability, so native calls use the same heartbeat
+   * envelope everywhere.
    *
    * @param {import("../../shared/native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager} manager
    * @returns {void}

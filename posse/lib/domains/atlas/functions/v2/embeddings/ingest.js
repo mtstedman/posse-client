@@ -14,11 +14,7 @@ import path from "path";
 import { performance } from "node:perf_hooks";
 
 import { hasLanguageSemantics } from "../resolver/adapters/registry.js";
-import {
-  LocalOnnxEncodePool,
-  normalizeEmbeddingThreads,
-  shouldUseLocalOnnxEncodePool,
-} from "./local-onnx-encode-pool.js";
+import { normalizeEmbeddingThreads } from "./onnx-daemon.js";
 import {
   errorForTelemetry,
   recordEmbeddingForensics,
@@ -169,19 +165,10 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
   let currentBatchTiming = null;
   emitProgress(true);
 
-  /** @type {LocalOnnxEncodePool | null} */
-  let localOnnxPool = null;
-  /** @type {Record<string, any>[]} */
-  const pendingPoolTimings = [];
-  const encodeTexts = async (texts) => {
-    if (workerCount > 1 && texts.length > 1 && shouldUseLocalOnnxEncodePool(encoder, workerCount)) {
-      localOnnxPool ||= new LocalOnnxEncodePool(encoder, workerCount, {
-        onTiming: (event) => pendingPoolTimings.push(event),
-      });
-      return await localOnnxPool.encode(texts, signal);
-    }
-    return await encoder.encode(texts, signal);
-  };
+  // Bulk encode fans out across the shared warm ONNX worker set (one model per
+  // worker, persistent across warms); width 1 takes the whole batch on one
+  // worker. The daemon-backed encoder forwards `workers` to the set.
+  const encodeTexts = async (texts) => encoder.encode(texts, signal, { workers: workerCount });
 
   // Per-ingest source cache keyed by repo_rel_path. Values are the full
   // file text (or null when the read failed). Symbols arrive grouped by
@@ -218,7 +205,6 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
     return content.slice(start, Math.min(end, start + BODY_LEAD_BYTES));
   }
 
-  let poolCloseError = null;
   try {
     for (let i = 0; i < symbols.length; i += size) {
       const batchStartedAt = performance.now();
@@ -307,7 +293,6 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         emitProgress(true);
         continue;
       }
-      pendingPoolTimings.length = 0;
       // Durable breadcrumb: record the batch about to be encoded BEFORE the
       // expensive encode + atomic keys.db commit, so a crash mid-encode leaves a
       // known (not silent) gap for reconciliation. Cleared after add() commits.
@@ -347,7 +332,6 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         throw err;
       }
       currentBatchTiming.encodeMs += elapsedSince(encodeStartedAt);
-      currentBatchTiming.poolEvents = pendingPoolTimings.splice(0);
       timings.encodeMs += currentBatchTiming.encodeMs;
       recordEmbeddingForensics("ingest.batch.encode.done", {
         view_path: viewPathForTelemetry(view),
@@ -356,7 +340,6 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         expected_count: expectedCount,
         vector_count: Array.isArray(vectors) ? vectors.length : null,
         elapsed_ms: roundMs(currentBatchTiming.encodeMs),
-        pool_events: currentBatchTiming.poolEvents,
       });
       if (!Array.isArray(vectors) || vectors.length !== expectedCount) {
         throw new Error(
@@ -413,38 +396,12 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
       emitProgress(true);
     }
   } finally {
-    const closeStartedAt = performance.now();
-    if (localOnnxPool) {
-      recordEmbeddingForensics("ingest.pool.close.start", {
-        view_path: viewPathForTelemetry(view),
-        encoder: encoderTelemetry(encoder),
-      });
-    }
-    try {
-      await localOnnxPool?.close?.();
-    } catch (err) {
-      recordEmbeddingForensics("ingest.pool.close.error", {
-        view_path: viewPathForTelemetry(view),
-        elapsed_ms: roundMs(elapsedSince(closeStartedAt)),
-        error: errorForTelemetry(err),
-      });
-      // Deferred past the finally: throwing here would mask an in-flight
-      // encode/index failure with the (secondary) close failure.
-      poolCloseError = err;
-    } finally {
-      timings.poolCloseMs += elapsedSince(closeStartedAt);
-      if (localOnnxPool) {
-        recordEmbeddingForensics("ingest.pool.close.done", {
-          view_path: viewPathForTelemetry(view),
-          elapsed_ms: roundMs(timings.poolCloseMs),
-        });
-      }
-    }
+    // Reset the per-batch timing scratch on every exit path. Encode now runs on
+    // the process-global warm ONNX worker set, so there is no per-ingest pool to
+    // tear down here.
+    currentBatchTiming = null;
   }
 
-  if (poolCloseError) throw poolCloseError;
-
-  currentBatchTiming = null;
   emitProgress(true);
   // Reached only on full success (a throw/abort skips this and the finally above
   // re-throws), so the in-flight breadcrumb should be clear. Belt-and-suspenders
@@ -467,7 +424,6 @@ function createEmbeddingIngestTimings() {
     textBuildMs: 0,
     encodeMs: 0,
     indexAddMs: 0,
-    poolCloseMs: 0,
   };
 }
 
@@ -483,7 +439,6 @@ function createEmbeddingBatchTimings(batch) {
     encodeMs: 0,
     indexAddMs: 0,
     totalMs: 0,
-    poolEvents: [],
   };
 }
 
@@ -604,7 +559,9 @@ export function resolveEmbeddingIngestBatchSize({ batchSize, encoder, workerCoun
   if (Number.isInteger(batchSize)) {
     return Math.max(1, Math.min(/** @type {number} */ (batchSize), 512));
   }
-  if (shouldUseLocalOnnxEncodePool(encoder, workerCount)) {
+  // Only the local-ONNX encoder fans a batch across the warm worker set; remote
+  // encoders ignore `workers`, so a bigger batch would not parallelize.
+  if (normalizeEmbeddingThreads(workerCount, 1) > 1 && /** @type {any} */ (encoder)?.model === "local-onnx") {
     const encoderBatchSize = Number.isInteger(/** @type {any} */ (encoder)?.batchSize)
       ? /** @type {number} */ (/** @type {any} */ (encoder).batchSize)
       : DEFAULT_BATCH_SIZE;

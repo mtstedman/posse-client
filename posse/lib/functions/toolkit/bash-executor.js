@@ -1,5 +1,5 @@
-// The `bash` tool used by the worker. Wraps spawnSync (preferred —
-// argv-form, no shell injection surface) with an execSync fallback
+// The `bash` tool used by the worker. Wraps spawnSync (preferred -
+// argv-form, no shell injection surface) with a shell fallback
 // for commands that genuinely need shell features (pipes,
 // redirection, &&) or fall through ENOENT on Windows where PATH
 // resolution behaves differently than on POSIX. Windows fallback runs
@@ -8,7 +8,7 @@
 // every invocation against the job's allowed scope before the
 // process is spawned.
 
-import { execSync, spawnSync } from "child_process";
+import { execFileSync, execSync, spawnSync } from "child_process";
 import { MutationPolicy } from "../../shared/scope/classes/MutationPolicy.js";
 
 const SHELL_OPERATOR_RE = /[;&|<>]/;
@@ -223,8 +223,11 @@ function numberedContentCommand(file) {
 function catFilesFromTokens(tokens) {
   if (!Array.isArray(tokens) || (tokens[0] !== "cat" && tokens[0] !== "type")) return null;
   if (tokens[1] === "-n") return null;
+  if (tokens.slice(1).some((token) => /^(?:\||\|\||&&|;|>|>>|<|2>&1|\d?>&\d?)$/.test(String(token || "")))) {
+    return null;
+  }
   const files = tokens.slice(1).filter(Boolean);
-  return files.length > 1 ? files : null;
+  return files.length > 0 ? files : null;
 }
 
 function contentCommandForFiles(files = []) {
@@ -259,7 +262,7 @@ function normalizePipedWindowsCommand(command) {
     const prefix = parts.slice(0, -1).map(normalizeStandaloneWindowsCommand).join(" | ");
     return `${prefix} | ${selectStringCommand(grep)}`;
   }
-  return command;
+  return parts.map(normalizeStandaloneWindowsCommand).join(" | ");
 }
 
 function normalizeStandaloneWindowsCommand(command) {
@@ -316,12 +319,34 @@ function powershellFallbackCommand(command) {
   return `$ProgressPreference = 'SilentlyContinue'; $InformationPreference = 'SilentlyContinue'; ${normalized}`;
 }
 
-function execBashWithShell(command, { cwd, timeout, maxBuffer, env, platform = process.platform, execSyncImpl }) {
+function execBashWithShell(command, {
+  cwd,
+  timeout,
+  maxBuffer,
+  env,
+  platform = process.platform,
+  execSyncImpl,
+  execFileSyncImpl,
+}) {
   const shellBody = platform === "win32" ? powershellFallbackCommand(command) : command;
-  const shellCommand = platform === "win32"
-    ? `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${powershellEncodedCommand(shellBody)}`
-    : shellBody;
-  return execSyncImpl(shellCommand, {
+  if (platform === "win32") {
+    return execFileSyncImpl("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-EncodedCommand",
+      powershellEncodedCommand(shellBody),
+    ], {
+      cwd,
+      env,
+      encoding: "utf-8",
+      timeout,
+      maxBuffer,
+      windowsHide: true,
+    });
+  }
+  return execSyncImpl(shellBody, {
     cwd,
     env,
     encoding: "utf-8",
@@ -339,6 +364,7 @@ function execBashCommand(command, {
   platform = process.platform,
   spawnSyncImpl = spawnSync,
   execSyncImpl = execSync,
+  execFileSyncImpl = execFileSync,
 }) {
   if (canUseArgvExecution(command)) {
     const tokens = parseCommandLine(command);
@@ -354,7 +380,7 @@ function execBashCommand(command, {
       });
       if (result.error) {
         if (isMissingExecutableOnWindows(platform, result.error)) {
-          return execBashWithShell(command, { cwd, timeout, maxBuffer, env, platform, execSyncImpl });
+          return execBashWithShell(command, { cwd, timeout, maxBuffer, env, platform, execSyncImpl, execFileSyncImpl });
         }
         const err = result.error;
         err.stdout = result.stdout;
@@ -373,7 +399,7 @@ function execBashCommand(command, {
     }
   }
 
-  return execBashWithShell(command, { cwd, timeout, maxBuffer, env, platform, execSyncImpl });
+  return execBashWithShell(command, { cwd, timeout, maxBuffer, env, platform, execSyncImpl, execFileSyncImpl });
 }
 
 export function createBashExecutor({
@@ -381,6 +407,7 @@ export function createBashExecutor({
   platform = process.platform,
   spawnSyncImpl = spawnSync,
   execSyncImpl = execSync,
+  execFileSyncImpl = execFileSync,
 } = {}) {
   return function execBash(args, cwd) {
     const cmd = args.command;
@@ -397,6 +424,7 @@ export function createBashExecutor({
         platform,
         spawnSyncImpl,
         execSyncImpl,
+        execFileSyncImpl,
       });
       const output = result.trim();
       return output.length > 50000

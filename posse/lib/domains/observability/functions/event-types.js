@@ -26,6 +26,7 @@ import { EVENT_TYPES } from "../../../catalog/event.js";
 
 export const KNOWN_EVENT_NAMESPACES = Object.freeze(new Set([
   // Active namespaces observed in the codebase
+  "agent_call",
   "artifacts",
   "attempt",
   "bridge",

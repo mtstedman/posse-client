@@ -50,6 +50,9 @@ export const EVENT_TYPES = Object.freeze({
   // ── attempt ─────────────────────────────────────────────────────────────
   ATTEMPT_ORPHAN_RECONCILED: "attempt.orphan_reconciled",
 
+  // ── agent_call ──────────────────────────────────────────────────────────
+  AGENT_CALL_ORPHAN_RECONCILED: "agent_call.orphan_reconciled",
+
   // ── cleanup ─────────────────────────────────────────────────────────────
   CLEANUP_BRANCH_DISCARDED: "cleanup.branch_discarded",
   CLEANUP_BRANCH_SNAPSHOT_RESTORED: "cleanup.branch_snapshot_restored",

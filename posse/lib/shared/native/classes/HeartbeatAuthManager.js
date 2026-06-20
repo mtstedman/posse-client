@@ -3,25 +3,24 @@
 // HeartbeatAuthManager — the single authority for native-binary authentication.
 //
 // The key-gated Rust binaries (posse-atlas / posse-git / posse-remote) authenticate
-// against the central heartbeat endpoint. Two pieces of material reach them:
+// against the central heartbeat endpoint. Native auth has one owner here:
 //
-//   1. The heartbeat AUTH ENVELOPE — non-secret config: the heartbeat URL, the
-//      PINNED PUBLIC verification key (+ its sha256), and the JWT audience. A
-//      binary needs this to validate the signed heartbeat it fetches; it carries
-//      NO secret and is safe to embed in a child boot payload or process argv.
-//   2. The legacy POSSE_KEY identity — historically passed as `--posse-key`. The
-//      binaries now authenticate from the heartbeat envelope; the key is a
-//      transitional compatibility path. In a "keyless" context (e.g. the MCP
-//      sidecar, which never receives POSSE_KEY) the binary authenticates from
-//      the envelope alone.
+//   The heartbeat AUTH ENVELOPE — non-secret config: the heartbeat URL, the
+//   PINNED PUBLIC verification key (+ its sha256), and the JWT audience. A
+//   binary needs this to validate the signed heartbeat it fetches; it carries
+//   NO secret and is safe to embed in a child boot payload.
+//
+// Current compiled helpers still require the raw remote API key as their
+// `--posse-key` launch credential. This class owns that compatibility key too,
+// so legacy leaf paths (`opts.key`, ad hoc env reads, per-call resolvers) stay
+// deleted while the native wrapper has one authority to consume.
 //
 // Before this class, every leaf call site resolved both pieces independently
-// (resolvePosseKey + nativeAuthFromSettings), so one logical retrieval spawned
-// several differently-authenticated processes, each re-reading settings, and the
-// MCP sidecar silently re-derived (and degraded) its own auth. This class owns
-// resolution once, caches the envelope, and hands DERIVED material to consumers.
-// Leaf call sites ask the manager; they never call resolvePosseKey() or
-// nativeAuthFromSettings() directly.
+// (resolvePosseKey + nativeAuthFromSettings), so one logical retrieval could
+// spawn several differently-authenticated processes. This class owns resolution
+// once, caches the envelope, and hands DERIVED material to consumers. Leaf call
+// sites ask the manager; they never call nativeHeartbeatAuthFromSettings()
+// directly.
 
 import { nativeHeartbeatAuthFromSettings } from "../functions/auth.js";
 import { resolvePosseKey } from "../../../domains/remote/functions/client.js";
@@ -30,31 +29,25 @@ export class HeartbeatAuthManager {
   /**
    * @param {{
    *   env?: NodeJS.ProcessEnv | null,
-   *   keyless?: boolean,
-   *   posseKey?: string | null,
-   *   keyResolver?: (() => string | null) | null,
    *   envelope?: Record<string, unknown> | null,
    *   envelopeResolver?: (() => (Record<string, unknown> | null)) | null,
    *   getSettingFn?: (key: string) => unknown,
+   *   posseKey?: string | null,
    * }} [opts]
    */
   constructor({
     env = null,
-    keyless = false,
-    posseKey = null,
-    keyResolver = null,
     envelope = undefined,
     envelopeResolver = null,
     getSettingFn = undefined,
+    posseKey = undefined,
   } = {}) {
     this._env = env || null;
-    // Keyless: never resolve or emit a raw POSSE_KEY. The binary authenticates
-    // from the heartbeat envelope alone.
-    this._keyless = keyless === true;
-    this._posseKey = posseKey || null;
-    this._keyResolver = keyResolver || null;
     this._envelopeResolver = envelopeResolver || null;
     this._getSettingFn = getSettingFn || null;
+    this._fixedLaunchKey = posseKey !== undefined ? (String(posseKey || "").trim() || null) : undefined;
+    /** @type {string | null | undefined} */
+    this._cachedLaunchKey = undefined;
     // A pre-resolved, authoritative envelope (e.g. reconstructed from a child
     // capability). When provided it is used verbatim and never re-derived;
     // `undefined` means "derive from settings/env and cache".
@@ -90,27 +83,19 @@ export class HeartbeatAuthManager {
   }
 
   /**
-   * Resolve the legacy POSSE_KEY for the optional `--posse-key` compatibility
-   * arg. This is the ONLY place a native launch resolves the key. Precedence:
-   * an explicit per-call key (e.g. the remote binary's API key) always wins;
-   * otherwise, in keyless mode return null so the binary authenticates from the
-   * envelope alone; otherwise a constructor-pinned key, then an injected
-   * resolver, then POSSE_KEY (env, then Windows-persisted).
+   * Current compiled native helpers still accept their remote API credential
+   * only as `--posse-key`. Resolve it here, once, so all native launch auth is
+   * manager-owned and leaf call sites never read env or pass ad hoc keys.
    *
-   * @param {{ optKey?: string, env?: NodeJS.ProcessEnv }} [opts]
+   * @param {{ refresh?: boolean }} [opts]
    * @returns {string | null}
    */
-  getLaunchKey({ optKey, env } = {}) {
-    if (optKey) return optKey;
-    if (this._keyless) return null;
-    if (this._posseKey) return this._posseKey;
-    if (this._keyResolver) return this._keyResolver() || null;
-    return resolvePosseKey(env || this._env || process.env) || null;
-  }
-
-  /** @returns {boolean} */
-  get keyless() {
-    return this._keyless;
+  getLaunchKey({ refresh = false } = {}) {
+    if (this._fixedLaunchKey !== undefined) return this._fixedLaunchKey;
+    if (refresh || this._cachedLaunchKey === undefined) {
+      this._cachedLaunchKey = resolvePosseKey(this._env || process.env) || null;
+    }
+    return this._cachedLaunchKey;
   }
 
   /**
@@ -126,23 +111,21 @@ export class HeartbeatAuthManager {
 
   /**
    * Reconstruct a child-scoped manager from a capability produced by
-   * {@link getCapability}. Keyless by default: a child must authenticate from
-   * the passed envelope and never resolve a raw POSSE_KEY. A missing/empty
-   * envelope falls back to settings/env derivation (still keyless), so a child
-   * is never left with no auth.
+   * {@link getCapability}. A child authenticates from the passed envelope. A
+   * missing/empty envelope falls back to settings/env derivation, so a child is
+   * never left with no auth.
    *
    * @param {{ envelope?: Record<string, unknown> | null } | null | undefined} capability
-   * @param {{ keyless?: boolean }} [opts]
    * @returns {HeartbeatAuthManager}
    */
-  static fromCapability(capability, { keyless = true } = {}) {
+  static fromCapability(capability) {
     const envelope = capability && typeof capability === "object"
       && capability.envelope && typeof capability.envelope === "object"
       && Object.keys(capability.envelope).length > 0
       ? /** @type {Record<string, unknown>} */ (capability.envelope)
       : undefined;
     return new HeartbeatAuthManager(
-      envelope !== undefined ? { envelope, keyless } : { keyless },
+      envelope !== undefined ? { envelope } : {},
     );
   }
 }

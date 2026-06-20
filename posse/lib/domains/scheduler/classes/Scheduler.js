@@ -1150,7 +1150,7 @@ export class Scheduler {
    * worktree state.
    *
    * @param {{ onBootEvent?: ((evt: any) => void) | null }} opts
-   * @returns {Promise<{orphaned: number, reconciledAttempts: number, staleLocks: Record<string,number>, awaitingAssessmentCount: number} | null>}
+   * @returns {Promise<{orphaned: number, reconciledAttempts: number, reconciledAgentCalls: number, staleLocks: Record<string,number>, awaitingAssessmentCount: number} | null>}
    */
   async recoverOrphans({ onBootEvent = null } = {}) {
     const emitBootEvent = (label, patch) => {
@@ -1185,6 +1185,11 @@ export class Scheduler {
       this._log(`Boot: reconciled ${reconciledAttempts} orphaned running attempt(s)`);
     }
 
+    const reconciledAgentCalls = Number(bootMaintenance?.reconciledAgentCalls || 0);
+    if (reconciledAgentCalls > 0) {
+      this._log(`Boot: reconciled ${reconciledAgentCalls} orphaned running agent call(s)`);
+    }
+
     const staleLocks = bootMaintenance?.staleLocks || {};
     if (staleLocks.job_locks_released > 0 || staleLocks.wi_locks_released > 0) {
       this._log(`Boot: released ${staleLocks.job_locks_released} stale job lock(s), ${staleLocks.wi_locks_released} stale WI lock(s)`);
@@ -1203,6 +1208,7 @@ export class Scheduler {
     return {
       orphaned,
       reconciledAttempts,
+      reconciledAgentCalls,
       staleLocks,
       awaitingAssessmentCount: assessingJobs,
     };

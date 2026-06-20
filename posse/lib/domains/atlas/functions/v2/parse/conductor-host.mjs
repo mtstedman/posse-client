@@ -21,10 +21,10 @@ import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
 import { SCIP_INDEXER_COUNT } from "../scip/indexers.js";
-import { setOnnxDaemonKeepWarm } from "../embeddings/onnx-daemon.js";
+import { setOnnxDaemonKeepWarm, closeSharedOnnxDaemon } from "../embeddings/onnx-daemon.js";
 
 if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
-  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { keyless: false }));
+  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
 }
 installNativeThreadBridge(workerData?.nativeBridgePort);
 
@@ -208,8 +208,12 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       }
       handles.clear();
       // This thread's module graph owns any native daemon hosts it spawned
-      // (posse-atlas via the parser adapter); dispose them before the parent
-      // terminates the thread or they outlive it as orphaned processes.
+      // (posse-atlas via the parser adapter) and the nested warm ONNX encoder
+      // worker set used by embeddings ingest; dispose them before the parent
+      // terminates the thread or they outlive it as orphaned threads/processes.
+      try {
+        await closeSharedOnnxDaemon();
+      } catch { /* best effort */ }
       try {
         await nativeBinaries.disposeAll();
       } catch { /* best effort */ }

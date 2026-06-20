@@ -11,6 +11,7 @@ import {
   cleanupStaleFileLocks,
   expireStaleSessionLeases,
   listJobs,
+  reconcileOrphanedAgentCalls,
   reconcileOrphanedAttempts,
   requeueOrphanedJobs,
 } from "../../queue/functions/index.js";
@@ -34,6 +35,9 @@ async function main() {
 
   const orphaned = requeueOrphanedJobs({ force: true });
   const reconciledAttempts = reconcileOrphanedAttempts();
+  // Runs after job/attempt reconciliation so requeued jobs have already shed
+  // their leases — any agent_call still 'running' is now a confirmed orphan.
+  const reconciledAgentCalls = reconcileOrphanedAgentCalls();
   const staleLocks = cleanupStaleFileLocks();
   const staleSessionLeases = expireStaleSessionLeases();
   const awaitingAssessmentCount = listJobs(["awaiting_assessment"]).length;
@@ -43,6 +47,7 @@ async function main() {
     result: {
       orphaned,
       reconciledAttempts,
+      reconciledAgentCalls,
       staleLocks,
       staleSessionLeases,
       awaitingAssessmentCount,

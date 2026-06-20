@@ -473,6 +473,7 @@ export async function callProvider(promptText, {
   scopedFiles = null,   // files_to_modify
   createFiles = null,   // files_to_create
   createRoots = null,   // create_roots directories
+  readRoots = null,     // read-only input roots
   deleteFiles = null,   // files_to_delete
   stableContext = null,
   remoteSystemPrompt = null,
@@ -574,6 +575,7 @@ export async function callProvider(promptText, {
     scopedFiles,
     createFiles,
     createRoots,
+    readRoots,
     deleteFiles,
     fallbackReads,
     platform: process.platform,
@@ -595,6 +597,7 @@ export async function callProvider(promptText, {
     createFiles: createFiles || [],
     deleteFiles: deleteFiles || [],
     createRoots: createRoots || [],
+    readRoots: readRoots || [],
   };
   const scopePredicates = sharedBuildScopePredicates(workingDir, declaredScope);
 

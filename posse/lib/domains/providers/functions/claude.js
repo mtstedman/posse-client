@@ -159,6 +159,7 @@ function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
   createFiles = [],
   deleteFiles = [],
   createRoots = [],
+  readRoots = [],
   needsImageGeneration = false,
   disableSystemTools = false,
   jobId = null,
@@ -178,6 +179,7 @@ function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
     createFiles,
     deleteFiles,
     createRoots,
+    readRoots,
     needsImageGeneration,
     providerName: "claude",
     disableSystemTools,
@@ -223,6 +225,7 @@ async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cwd, {
   createFiles = [],
   deleteFiles = [],
   createRoots = [],
+  readRoots = [],
   needsImageGeneration = false,
   disableSystemTools = false,
   jobId = null,
@@ -242,6 +245,7 @@ async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cwd, {
     createFiles,
     deleteFiles,
     createRoots,
+    readRoots,
     needsImageGeneration,
     providerName: "claude",
     disableSystemTools,
@@ -2464,6 +2468,7 @@ export async function callProvider(promptText, {
   scopedFiles = null,  // string[] — files_to_modify: Write/Edit scoped to these exact paths
   createFiles = null,  // string[] — files_to_create: Write scoped to these exact new file paths
   createRoots = null,  // string[] — directories where Write is allowed for any path under them
+  readRoots = null,    // string[] — directories readable outside cwd, never writable
   deleteFiles = null,
   stableContext = null,
   remoteSystemPrompt = null,
@@ -2576,6 +2581,7 @@ export async function callProvider(promptText, {
       createFiles,
       deleteFiles,
       createRoots,
+      readRoots,
       needsImageGeneration,
       disableSystemTools: disableSystemToolsResolved,
       jobId,
@@ -2620,6 +2626,7 @@ export async function callProvider(promptText, {
       createFiles,
       createRoots,
       deleteFiles,
+      readRoots,
       needsImageGeneration,
       platform: process.platform,
       includeBaseTools: !(deterministicReadMcp.active || disableSystemToolsResolved),
@@ -2631,6 +2638,7 @@ export async function callProvider(promptText, {
       scopedFiles,
       createFiles,
       createRoots,
+      readRoots,
       scopeCwd: mcpWorkspaceCwd,
       deterministicReadMcpActive: deterministicReadMcp.active,
       disableSystemTools: disableSystemToolsResolved,

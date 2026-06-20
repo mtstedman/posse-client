@@ -448,7 +448,7 @@ export class ReviewSession {
   // review so the user knows how to recover during the upcoming approval flow.
   await this._announceDirtyTargetBeforeAutoMerge();
 
-  const wrapUpAutoMerge = await withMergeLock(() => autoMergeCompletedWorkItems({ reason: "run wrap-up" }));
+  const wrapUpAutoMerge = await withMergeLock(() => autoMergeCompletedWorkItems({ reason: "run wrap-up", runGc: false }));
   if (!wrapUpAutoMerge.acquired) {
     console.log(`  ${C.yellow}Auto-merge skipped: another merge is already in progress.${C.reset}`);
   }
@@ -1851,7 +1851,7 @@ export class ReviewSession {
   });
 
   const autoMergedNow = await wrapUp.run("auto-merge", async () => {
-    const outcome = await withMergeLock(() => autoMergeCompletedWorkItems({ display, reason: "TUI wrap-up" }));
+    const outcome = await withMergeLock(() => autoMergeCompletedWorkItems({ display, reason: "TUI wrap-up", runGc: false }));
     if (!outcome.acquired) {
       display.addEvent(`${C.yellow}Auto-merge skipped: another merge is already in progress.${C.reset}`);
       return 0;

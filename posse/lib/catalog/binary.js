@@ -46,7 +46,8 @@ function defineBinary(pkg, files, { macosUniversal = true, keyGated = true } = {
     package: pkg,
     // Posse method binaries are gated on native heartbeat auth: when true the
     // runtime wrapper supplies the heartbeat envelope (URL + pinned public key
-    // + audience) and, for compatibility, the legacy POSSE_KEY via --posse-key.
+    // + audience) in the native JSON request. Raw Posse keys must never travel
+    // in native process argv.
     keyGated,
     platforms: Object.freeze({
       windows: Object.freeze({
@@ -118,8 +119,8 @@ export function nativeBinaryIsUniversal(name, os) {
 
 /**
  * Whether a tool is gated on native heartbeat auth. The runtime wrapper supplies
- * the heartbeat envelope for these (and, transitionally, the legacy POSSE_KEY
- * via --posse-key). The name stays `keyGated` for catalog/back-compat reasons.
+ * the heartbeat envelope for these. The name stays `keyGated` for catalog/back-
+ * compat reasons.
  *
  * @param {string} name
  * @returns {boolean}

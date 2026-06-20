@@ -173,6 +173,7 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}, {
     POSSE_DETERMINISTIC_MCP_SCOPE_CREATE_FILES: JSON.stringify(Array.isArray(payload.createFiles) ? payload.createFiles : []),
     POSSE_DETERMINISTIC_MCP_SCOPE_DELETE_FILES: JSON.stringify(Array.isArray(payload.deleteFiles) ? payload.deleteFiles : []),
     POSSE_DETERMINISTIC_MCP_SCOPE_CREATE_ROOTS: JSON.stringify(Array.isArray(payload.createRoots) ? payload.createRoots : []),
+    POSSE_DETERMINISTIC_MCP_SCOPE_READ_ROOTS: JSON.stringify(Array.isArray(payload.readRoots) ? payload.readRoots : []),
     POSSE_DETERMINISTIC_MCP_ATLAS_AVAILABLE: boolEnv(payload.atlasAvailable === true),
     POSSE_DETERMINISTIC_MCP_ATLAS_GATE_ENABLED: boolEnv(payload.atlasGateEnabled === true),
     POSSE_DETERMINISTIC_MCP_ATLAS_REPO_PATH: String(payload.atlas?.repoPath || ""),
@@ -233,6 +234,7 @@ function buildDeterministicMcpBootPayload(role, {
   createFiles = [],
   deleteFiles = [],
   createRoots = [],
+  readRoots = [],
   needsImageGeneration = false,
   providerName = null,
   disableSystemTools = false,
@@ -257,6 +259,7 @@ function buildDeterministicMcpBootPayload(role, {
       createFiles: Array.isArray(createFiles) ? createFiles : [],
       deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
       createRoots: Array.isArray(createRoots) ? createRoots : [],
+      readRoots: Array.isArray(readRoots) ? readRoots : [],
       allowWrite: roleUsesDeterministicWriteMcp(role),
       allowImageHelpers: roleUsesDeterministicImageHelpers(role),
       allowImageGeneration,
@@ -305,9 +308,8 @@ function buildDeterministicMcpBootPayload(role, {
       dbPath: getRuntimeDbPath(),
       // Native-binary auth as a parent-minted, NON-SECRET capability (heartbeat
       // URL + pinned public verification key + audience — no POSSE_KEY). The
-      // sidecar reconstructs a keyless child-scoped auth manager from this and
-      // authenticates ATLAS/git native calls from the envelope alone, so the
-      // child never needs the raw key for native work.
+      // sidecar reconstructs a child-scoped auth manager from this; the same
+      // manager separately owns the current binary compatibility launch key.
       nativeAuth: heartbeatAuthManager.getCapability(),
     },
     resolvedAtlasConfig,
@@ -341,6 +343,7 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
     createFiles: [],
     deleteFiles: [],
     createRoots: [],
+    readRoots: [],
     allowWrite: true,
     allowImageHelpers: true,
     allowImageGeneration: true,
@@ -453,6 +456,7 @@ export class McpServerConfig {
     createFiles = [],
     deleteFiles = [],
     createRoots = [],
+    readRoots = [],
     needsImageGeneration = false,
     providerName = null,
     disableSystemTools = false,
@@ -479,6 +483,7 @@ export class McpServerConfig {
       createFiles,
       deleteFiles,
       createRoots,
+      readRoots,
       needsImageGeneration,
       providerName,
       disableSystemTools,

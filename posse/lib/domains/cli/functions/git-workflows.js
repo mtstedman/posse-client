@@ -1366,7 +1366,13 @@ export function createGitWorkflowHelpers({
    * The worker-owned GC path is the source of truth for preserving dirty state
    * before cleaning startup worktrees.
    */
-  async function startupWorktreeCleanup({ signal = null, onMsg = null, skipDirtyTreeGuard = false } = {}) {
+  async function startupWorktreeCleanup({
+    signal = null,
+    onMsg = null,
+    skipDirtyTreeGuard = false,
+    recoveryPruneMinIntervalMs = undefined,
+    forceRecoveryPrune = false,
+  } = {}) {
     if (!skipDirtyTreeGuard) {
       await guardStartupDirtyTreeAsync({
         reason: "startup cleanup",
@@ -1377,13 +1383,16 @@ export function createGitWorkflowHelpers({
       });
       throwIfAborted(signal);
     }
+    const gcOptions = { signal };
+    if (recoveryPruneMinIntervalMs !== undefined) gcOptions.recoveryPruneMinIntervalMs = recoveryPruneMinIntervalMs;
+    if (forceRecoveryPrune) gcOptions.forceRecoveryPrune = true;
     await gcWorktreesAsync(projectDir, (msg) => {
       if (typeof onMsg === "function") {
         onMsg(msg);
       } else {
         console.log(`  ${C.yellow}${msg}${C.reset}`);
       }
-    }, { signal });
+    }, gcOptions);
   }
 
   function gitDiffStat(mergeBase, branch, cwd) {

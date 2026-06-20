@@ -308,7 +308,7 @@ function buildImageSplitPieces(task, imageFiles, artifactDirAbs, sourceTaskIndex
 export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMode, normalizedJobType } = {}) {
   if (!task || task._file_kind_split_done || task.job_type === "human_input" || task.job_type === "promote") return null;
   const summary = getCreateFileKindSummary(task, artifactDirAbs);
-  const pathOnlyIsIntent = taskMode === "image" || normalizedJobType === "artificer" || !!task.needs_image_generation;
+  const pathOnlyIsIntent = taskMode === "image" || !!task.needs_image_generation;
   const requestedImageGenerationOutput = hasRequestedImageGenerationOutput(task, { pathOnlyIsIntent });
   const requestedImageOutputs = requestedImageGenerationOutput ? collectRequestedImageOutputs(task) : [];
   if (summary.createFiles.length === 0 && !requestedImageGenerationOutput) return null;

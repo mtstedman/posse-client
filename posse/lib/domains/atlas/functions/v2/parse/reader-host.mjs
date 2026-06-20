@@ -27,10 +27,10 @@ import { runDaemonThread } from "../../../../../classes/tools/daemon/thread-host
 import { installNativeThreadBridge } from "../../../../../classes/tools/daemon/native-thread-bridge.js";
 import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
-import { setOnnxDaemonKeepWarm } from "../embeddings/onnx-daemon.js";
+import { setOnnxDaemonKeepWarm, closeSharedOnnxDaemon } from "../embeddings/onnx-daemon.js";
 
 if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
-  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { keyless: false }));
+  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
 }
 installNativeThreadBridge(workerData?.nativeBridgePort);
 
@@ -94,8 +94,12 @@ runDaemonThread(async (payload) => {
         await disposeConductorRetrieveResources();
       } catch { /* best effort */ }
       // Safety net for any native daemon hosts this thread's module graph
-      // spawned (ANN children); dispose before the parent terminates the
-      // thread or they outlive it as orphaned processes.
+      // spawned (ANN children) and the nested warm ONNX encoder used to encode
+      // query text; dispose before the parent terminates the thread or they
+      // outlive it as orphaned threads/processes.
+      try {
+        await closeSharedOnnxDaemon();
+      } catch { /* best effort */ }
       try {
         await nativeBinaries.disposeAll();
       } catch { /* best effort */ }

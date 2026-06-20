@@ -27,9 +27,9 @@ const MODEL_TIER_DEFAULTS = Object.freeze({
     strong: Object.freeze({ model: "gpt-4.1" }),
   }),
   codex: Object.freeze({
-    cheap: Object.freeze({ model: "gpt-5.3-codex" }),
+    cheap: Object.freeze({ model: "gpt-5.4-mini" }),
     standard: Object.freeze({ model: "gpt-5.4" }),
-    strong: Object.freeze({ model: "gpt-5.4" }),
+    strong: Object.freeze({ model: "gpt-5.5" }),
   }),
   grok: Object.freeze({
     cheap: Object.freeze({ model: "grok-3-mini" }),
@@ -121,10 +121,14 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "gpt-5.4-codex",
   ]),
   codex: Object.freeze([
-    "gpt-5.3-codex",
+    "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
-    "gpt-5.5",
+    // ChatGPT Pro research preview; OAuth-only (no API support).
+    "gpt-5.3-codex-spark",
+    // Retired for ChatGPT sign-in (2026-06); kept for validation/back-compat
+    // and flagged deprecated in the remote catalog so it drops out of pickers.
+    "gpt-5.3-codex",
   ]),
   grok: Object.freeze([
     "grok-3-mini",
@@ -284,9 +288,11 @@ export const MODEL_SETTING_DEFS = Object.freeze([
 ]);
 
 export const CODEX_OAUTH_SUPPORTED_MODELS = Object.freeze([
+  "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
-  "gpt-5.5",
+  // OAuth-only model (no API path); usable solely under ChatGPT sign-in.
+  "gpt-5.3-codex-spark",
 ]);
 
 export const CODEX_VALIDATION_KNOWN_MODELS = Object.freeze([

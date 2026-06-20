@@ -9,7 +9,7 @@ import path from "path";
 import { Worker as NodeWorker } from "worker_threads";
 import { runHook } from "../../worker/functions/helpers/hooks.js";
 import { gitExec, gitCurrentHash } from "./utils.js";
-import { preserveDirtyWorktreeSnapshot, withWorktreeLock } from "./worktree.js";
+import { withWorktreeLock } from "./worktree.js";
 import { withBranchLock } from "./worktree-locks.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { listActiveFileLocks } from "../../queue/functions/file-locks.js";
@@ -217,45 +217,6 @@ function firstValueByFold(paths, foldPath) {
   return map;
 }
 
-function isDisposableGeneratedPath(file) {
-  const normalized = String(file || "").replace(/\\/g, "/").replace(/^\.\//, "").trim();
-  if (!normalized || normalized === "." || normalized.startsWith("../") || path.posix.isAbsolute(normalized)) return false;
-  const parts = normalized.split("/").filter(Boolean);
-  if (parts.some((part) =>
-    part === "__pycache__"
-    || part === ".pytest_cache"
-    || part === ".mypy_cache"
-    || part === ".ruff_cache"
-  )) {
-    return true;
-  }
-  const base = parts.at(-1) || "";
-  return base === ".coverage"
-    || base.startsWith(".coverage.")
-    || base.endsWith(".pyc")
-    || base.endsWith(".pyo");
-}
-
-function removeDisposableGeneratedPath(cwd, file) {
-  const normalized = String(file || "").replace(/\\/g, "/").replace(/^\.\//, "").trim();
-  if (!isDisposableGeneratedPath(normalized)) return false;
-
-  const root = path.resolve(cwd);
-  const target = path.resolve(root, normalized);
-  if (!isInsideRoot(target, root, { allowEqual: false, followSymlinks: false })) return false;
-
-  try {
-    fs.rmSync(target, { recursive: true, force: true });
-    return true;
-  } catch (err) {
-    log.warn("git-commit-scope", "Failed to remove generated untracked artifact", {
-      file: normalized,
-      error: err?.message || String(err),
-    });
-    return false;
-  }
-}
-
 export function repairWebAssetCreateScope(task = {}, nativeParity = {}) {
   const native = runGitNativeMethod(
     "git.repairWebAssetCreateScope",
@@ -359,6 +320,8 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const skippedIgnoredCreateFiles = [];
   const skippedStaleModifyFiles = [];
   const discardedGeneratedFiles = [];
+  const outOfScopeDirtySkipped = [];
+  const outOfScopeStagingSkipped = [];
   const siblingDirtySkipped = [];
   const siblingUntrackedSkipped = [];
   const siblingStagingSkipped = [];
@@ -386,15 +349,11 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     const prefix = `${nestedRepoPrefix}/`;
     return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
   };
-  const projectDir = opts?.projectDir || cwd;
-  const snapshotReason = opts?.snapshotReason || "scope-enforcement-revert";
-  const branchName = opts?.branchName || null;
   const wiId = opts?.wiId || null;
   const jobId = opts?.jobId || null;
   const activeFileLocks = activeFileLocksForCommit(opts);
   let headAtScopeStart = null;
   try { headAtScopeStart = gitCurrentHash(cwd); } catch { headAtScopeStart = null; }
-  let preservedSnapshotRel = null;
   let snapshotRestoreFailed = false;
   let snapshotRestoreError = null;
   let snapshotRestoreRef = null;
@@ -440,9 +399,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     createRoots,
     deleteFiles,
   }, { cwd });
-  const isSnapshotPath = (nf) =>
-    preservedSnapshotRel
-    && (nf === preservedSnapshotRel || nf.startsWith(`${preservedSnapshotRel}/`));
+  const isSnapshotPath = () => false;
   const siblingLockFor = (nf) => findActiveSiblingLockForPath(nf, {
     id: jobId,
     work_item_id: wiId,
@@ -454,6 +411,9 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       path: lock?.path || null,
       lock_kind: lock?.lock_kind || null,
     });
+  };
+  const rememberUnique = (target, file) => {
+    if (!target.includes(file)) target.push(file);
   };
   const canEdit = (nf) => policy.canEdit(nf);
   const canCreate = (nf) => {
@@ -628,34 +588,6 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   };
 
   if (hasScope && !mergeInProgress) {
-    // Scope cleanup can discard edits; preserve a best-effort recovery snapshot first.
-    const snapshotDir = preserveDirtyWorktreeSnapshot(cwd, projectDir, {
-      reason: snapshotReason,
-      branchName,
-      wiId,
-      onMsg: (msg) => log.warn("git-commit-scope", "Dirty worktree snapshot warning", { message: msg }),
-    });
-    // A failed restore after stashing parks the dirty work in the snapshot ref
-    // and leaves the worktree clean; surface that so the caller does not read
-    // the resulting empty diff as "the dev made no changes".
-    if (snapshotDir?.metadata?.restoreFailed) {
-      snapshotRestoreFailed = true;
-      snapshotRestoreError = snapshotDir.metadata.restoreError || null;
-      snapshotRestoreRef = String(snapshotDir);
-      log.warn("git-commit-scope", "Snapshot restore failed before scoped commit; dirty work parked in snapshot", {
-        snapshotRef: snapshotRestoreRef,
-        error: snapshotRestoreError,
-      });
-    }
-    if (snapshotDir?.isDirectory?.()) {
-      const snapshotPath = String(snapshotDir);
-      const rel = norm(path.relative(cwd, snapshotPath));
-      if (rel && rel !== "." && isInsideRoot(snapshotPath, cwd, { allowEqual: false, followSymlinks: false })) {
-        preservedSnapshotRel = rel;
-      }
-    }
-
-    const failedReverts = [];
     const deletedTracked = collectDeletedTracked();
     const allDirty = `${gitNameList("diff", "--name-only")}\n${gitNameList("diff", "--name-only", "--cached")}`;
     const dirtyFiles = [
@@ -701,37 +633,17 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
         const siblingLock = siblingLockFor(normalized);
         if (siblingLock) {
           rememberSiblingSkipped(siblingDirtySkipped, f, siblingLock);
-          continue;
+        } else {
+          rememberUnique(outOfScopeDirtySkipped, f);
         }
-        try {
-          gitExec(["checkout", "--", f], cwd);
-          reverted.push(f);
-        } catch {
-          // A staged deletion (e.g. the source of a staged rename) is absent
-          // from the index, so plain `checkout --` has nothing to restore.
-          // Restore index + worktree from HEAD instead.
-          try {
-            gitExec(["checkout", "HEAD", "--", f], cwd);
-            reverted.push(f);
-          } catch {
-            failedReverts.push(f);
-          }
-        }
+        continue;
       }
-    }
-
-    if (failedReverts.length > 0) {
-      throw new Error(`Failed to revert out-of-scope file(s): ${failedReverts.join(", ")}`);
     }
 
     if (untrackedFiles.length > 0) {
       for (const u of untrackedFiles) {
         const normalized = norm(u);
         if (isSnapshotPath(normalized)) continue;
-        if (isDisposableGeneratedPath(u) && removeDisposableGeneratedPath(cwd, u)) {
-          discardedGeneratedFiles.push(u);
-          continue;
-        }
         if (!canCreate(normalized)) {
           const siblingLock = siblingLockFor(normalized);
           if (siblingLock) {
@@ -774,10 +686,6 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       const postUntracked = gitNameList("ls-files", "--others", "--exclude-standard");
       if (postUntracked) {
         for (const u of postUntracked.split("\n").filter(Boolean)) {
-          if (isDisposableGeneratedPath(u) && removeDisposableGeneratedPath(cwd, u)) {
-            discardedGeneratedFiles.push(u);
-            continue;
-          }
           const siblingLock = siblingLockFor(norm(u));
           if (siblingLock) {
             rememberSiblingSkipped(siblingStagingSkipped, u, siblingLock);
@@ -825,6 +733,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       if (!allowedStaged) {
         try {
           gitExec(["reset", "HEAD", "--", f], cwd);
+          rememberUnique(outOfScopeStagingSkipped, f);
         } catch {
           const err = new Error(`Failed to unstage out-of-scope path "${f}" before scoped commit`);
           err.gitAddWarnings = gitAddWarnings;
@@ -845,7 +754,6 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     for (const u of untrackedFiles) {
       const normalized = norm(u);
       if (isSnapshotPath(normalized)) continue;
-      if (discardedGeneratedFiles.includes(u)) continue;
       if (siblingLockFor(normalized)) continue;
       if (canCreate(normalized)) expectedStaged.add(normalized);
     }
@@ -898,7 +806,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   // the next job's commit.
   if (!staged && !mergeInProgress) {
     const scopeCleanedNoOp = hasScope && reverted.length > 0;
-    return { hash: gitCurrentHash(cwd), reverted, createdViaModifyScope, createdOutOfScope, skippedIgnoredCreateFiles, skippedStaleModifyFiles, discardedGeneratedFiles, siblingDirtySkipped, siblingUntrackedSkipped, siblingStagingSkipped, gitAddWarnings, scopeCleanedNoOp, snapshotRestoreFailed, snapshotRestoreError, snapshotRestoreRef };
+    return { hash: gitCurrentHash(cwd), reverted, createdViaModifyScope, createdOutOfScope, skippedIgnoredCreateFiles, skippedStaleModifyFiles, discardedGeneratedFiles, outOfScopeDirtySkipped, outOfScopeStagingSkipped, siblingDirtySkipped, siblingUntrackedSkipped, siblingStagingSkipped, gitAddWarnings, scopeCleanedNoOp, snapshotRestoreFailed, snapshotRestoreError, snapshotRestoreRef };
   }
 
   // When completing a merge, verify the dev actually resolved the conflicts
@@ -1023,6 +931,8 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     skippedIgnoredCreateFiles,
     skippedStaleModifyFiles,
     discardedGeneratedFiles,
+    outOfScopeDirtySkipped,
+    outOfScopeStagingSkipped,
     siblingDirtySkipped,
     siblingUntrackedSkipped,
     siblingStagingSkipped,

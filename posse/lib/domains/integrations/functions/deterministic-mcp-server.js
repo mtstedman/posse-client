@@ -143,6 +143,7 @@ function envBootConfig(env = process.env) {
     createFiles: parseScopeEnvArray(env, "POSSE_DETERMINISTIC_MCP_SCOPE_CREATE_FILES"),
     deleteFiles: parseScopeEnvArray(env, "POSSE_DETERMINISTIC_MCP_SCOPE_DELETE_FILES"),
     createRoots: parseScopeEnvArray(env, "POSSE_DETERMINISTIC_MCP_SCOPE_CREATE_ROOTS"),
+    readRoots: parseScopeEnvArray(env, "POSSE_DETERMINISTIC_MCP_SCOPE_READ_ROOTS"),
     allowWrite: parseEnvBool(env.POSSE_DETERMINISTIC_MCP_ALLOW_WRITE),
     allowImageHelpers: parseEnvBool(env.POSSE_DETERMINISTIC_MCP_ALLOW_IMAGE_HELPERS),
     allowImageGeneration: parseEnvBool(env.POSSE_DETERMINISTIC_MCP_ALLOW_IMAGE_GENERATION),
@@ -222,6 +223,7 @@ function bootConfigFromOAuthToken(config = {}) {
       createFiles: [],
       deleteFiles: [],
       createRoots: [],
+      readRoots: [],
       allowWrite: false,
       allowImageHelpers: false,
       allowImageGeneration: false,
@@ -299,11 +301,10 @@ if (mcpDbPath) {
 }
 
 // Native-binary auth: when the parent supplied a non-secret heartbeat capability
-// (config-json boots), install it as this child's KEYLESS auth authority so
-// ATLAS/git native calls authenticate from the heartbeat envelope alone — no raw
-// POSSE_KEY in this sandboxed child (it is scrubbed from the env), and no per-call
-// PowerShell key lookup. Env-only boots carry no capability and keep the default
-// manager (which still resolves POSSE_KEY from the inherited env) untouched.
+// (config-json boots), install it as this child's auth authority so ATLAS/git
+// native calls share the parent's heartbeat envelope. Current compiled helpers
+// still need the manager-owned compatibility launch key; raw POSSE_KEY is
+// scrubbed from native child env and never resolved per leaf call.
 if (!ownerHotProcess && bootConfig.nativeAuth && typeof bootConfig.nativeAuth === "object") {
   try {
     nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(bootConfig.nativeAuth));
@@ -320,12 +321,14 @@ let scopePredicates = buildScopePredicates(workspaceCwd, {
   createFiles: Array.isArray(bootConfig.createFiles) ? bootConfig.createFiles : [],
   deleteFiles: Array.isArray(bootConfig.deleteFiles) ? bootConfig.deleteFiles : [],
   createRoots: Array.isArray(bootConfig.createRoots) ? bootConfig.createRoots : [],
+  readRoots: Array.isArray(bootConfig.readRoots) ? bootConfig.readRoots : [],
 });
 let declaredJobScope = Object.freeze({
   modifyFiles: Array.isArray(bootConfig.scopedFiles) ? [...bootConfig.scopedFiles] : [],
   createFiles: Array.isArray(bootConfig.createFiles) ? [...bootConfig.createFiles] : [],
   deleteFiles: Array.isArray(bootConfig.deleteFiles) ? [...bootConfig.deleteFiles] : [],
   createRoots: Array.isArray(bootConfig.createRoots) ? [...bootConfig.createRoots] : [],
+  readRoots: Array.isArray(bootConfig.readRoots) ? [...bootConfig.readRoots] : [],
 });
 if (scopeParseState.invalid) {
   appendToolLog({
@@ -2142,12 +2145,14 @@ function applyRuntimeBootConfig(nextConfig = {}) {
     createFiles: Array.isArray(bootConfig.createFiles) ? bootConfig.createFiles : [],
     deleteFiles: Array.isArray(bootConfig.deleteFiles) ? bootConfig.deleteFiles : [],
     createRoots: Array.isArray(bootConfig.createRoots) ? bootConfig.createRoots : [],
+    readRoots: Array.isArray(bootConfig.readRoots) ? bootConfig.readRoots : [],
   });
   declaredJobScope = Object.freeze({
     modifyFiles: Array.isArray(bootConfig.scopedFiles) ? [...bootConfig.scopedFiles] : [],
     createFiles: Array.isArray(bootConfig.createFiles) ? [...bootConfig.createFiles] : [],
     deleteFiles: Array.isArray(bootConfig.deleteFiles) ? [...bootConfig.deleteFiles] : [],
     createRoots: Array.isArray(bootConfig.createRoots) ? [...bootConfig.createRoots] : [],
+    readRoots: Array.isArray(bootConfig.readRoots) ? [...bootConfig.readRoots] : [],
   });
   writeEnabled = allowWrite && !scopeParseState.invalid;
   effectiveScopePredicates = scopeParseState.invalid

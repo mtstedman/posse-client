@@ -239,6 +239,75 @@ function _writeStreamEntry(entry, phase = "write") {
   }
 }
 
+function _isForeignKeyConstraintError(err) {
+  return /FOREIGN KEY constraint failed/i.test(String(err?.message || err || ""));
+}
+
+function _nullableIntegerId(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+function _insertObservationRow(db, {
+  work_item_id,
+  job_id,
+  attempt_id,
+  observation_type,
+  summary,
+  detailJson,
+  createdAt,
+}) {
+  return db.prepare(`
+    INSERT INTO job_observations (work_item_id, job_id, attempt_id, observation_type, summary, detail_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(work_item_id, job_id, attempt_id, observation_type, summary, detailJson, createdAt);
+}
+
+function _resolveObservationScopeForInsert(db, {
+  work_item_id = null,
+  job_id = null,
+  attempt_id = null,
+} = {}) {
+  let workItemId = _nullableIntegerId(work_item_id);
+  let jobId = _nullableIntegerId(job_id);
+  let attemptId = _nullableIntegerId(attempt_id);
+
+  if (attemptId != null) {
+    const attemptRow = db.prepare(`SELECT id, job_id FROM job_attempts WHERE id = ?`).get(attemptId);
+    if (!attemptRow) {
+      attemptId = null;
+    } else if (jobId == null) {
+      jobId = Number(attemptRow.job_id);
+    } else if (Number(attemptRow.job_id) !== jobId) {
+      attemptId = null;
+    }
+  }
+
+  if (jobId != null) {
+    const jobRow = db.prepare(`SELECT id, work_item_id FROM jobs WHERE id = ?`).get(jobId);
+    if (!jobRow) {
+      jobId = null;
+      attemptId = null;
+    } else if (workItemId == null) {
+      workItemId = Number(jobRow.work_item_id);
+    } else if (Number(jobRow.work_item_id) !== workItemId) {
+      workItemId = Number(jobRow.work_item_id);
+    }
+  }
+
+  if (workItemId != null) {
+    const wiRow = db.prepare(`SELECT id FROM work_items WHERE id = ?`).get(workItemId);
+    if (!wiRow) workItemId = null;
+  }
+
+  return {
+    work_item_id: workItemId,
+    job_id: jobId,
+    attempt_id: attemptId,
+  };
+}
+
 export function recordObservation({
   work_item_id = null,
   job_id = null,
@@ -253,17 +322,22 @@ export function recordObservation({
     const db = getDb();
     const detailJson = normalizeJsonText(detail);
     const createdAt = nowIso();
+    let scope = { work_item_id, job_id, attempt_id };
 
-    const info = db.prepare(`
-      INSERT INTO job_observations (work_item_id, job_id, attempt_id, observation_type, summary, detail_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(work_item_id, job_id, attempt_id, observation_type, summary, detailJson, createdAt);
+    let info;
+    try {
+      info = _insertObservationRow(db, { ...scope, observation_type, summary, detailJson, createdAt });
+    } catch (err) {
+      if (!_isForeignKeyConstraintError(err)) throw err;
+      scope = _resolveObservationScopeForInsert(db, scope);
+      info = _insertObservationRow(db, { ...scope, observation_type, summary, detailJson, createdAt });
+    }
 
     const row = {
       id: Number(info.lastInsertRowid),
-      work_item_id,
-      job_id,
-      attempt_id,
+      work_item_id: scope.work_item_id,
+      job_id: scope.job_id,
+      attempt_id: scope.attempt_id,
       observation_type,
       summary,
       detail_json: detailJson,
@@ -278,9 +352,9 @@ export function recordObservation({
     _writeStreamEntry({
       id: row.id,
       t: createdAt,
-      wi: work_item_id,
-      job: job_id,
-      attempt: attempt_id,
+      wi: row.work_item_id,
+      job: row.job_id,
+      attempt: row.attempt_id,
       type: observation_type,
       summary,
       detail,

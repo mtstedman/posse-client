@@ -107,20 +107,11 @@ function usearchPackageResolvable() {
 // Encode placement. Local-ONNX inference is transformers.js: tokenization and
 // pooling are synchronous JS, so calling encoder.encode() inline pins whatever
 // thread asked for vectors — the main loop on the in-process retrieval path,
-// the conductor thread during warms/retrieves. Production opens therefore wrap
-// the encoder so encode() delegates to the shared persistent ONNX daemon (its
-// own worker thread, one warm model per process). The wrapper preserves the
-// encoder's full identity (model/model_version/dim drive index dir naming and
-// pool eligibility), so the per-ingest worker pool still activates for bulk
-// warm ingests when embeddingThreads > 1.
-const ONNX_DAEMON_OFF_VALUES = new Set(["off", "false", "0", "no"]);
-
-function onnxDaemonEnabled(config = {}) {
-  const raw = String(process.env.POSSE_ATLAS_ONNX_DAEMON ?? "").trim().toLowerCase();
-  if (raw && ONNX_DAEMON_OFF_VALUES.has(raw)) return false;
-  if (config?.onnxDaemonEnabled === false) return false;
-  return true;
-}
+// the conductor thread during warms/retrieves. Local-ONNX opens therefore wrap
+// the encoder so encode() delegates to the shared persistent ONNX worker set
+// (one warm model per worker). The wrapper preserves the encoder's full identity
+// (model/model_version/dim drive index dir naming), and forwards `workers` so
+// bulk ingest gets data-parallel encode across the warm set.
 
 /**
  * @param {any} encoder  a LocalOnnxEmbeddingEncoder instance
@@ -156,8 +147,8 @@ function daemonBackedLocalOnnxEncoder(encoder) {
     localFilesOnly: encoder.localFilesOnly,
     daemonBacked: true,
     buildSymbolText: (/** @type {any} */ symbol) => encoder.buildSymbolText(symbol),
-    encode: (/** @type {string[]} */ texts, /** @type {AbortSignal} */ signal) =>
-      encodeViaSharedOnnxDaemon(texts, daemonConfig, { signal }),
+    encode: (/** @type {string[]} */ texts, /** @type {AbortSignal} */ signal, /** @type {{ workers?: number }} */ opts = {}) =>
+      encodeViaSharedOnnxDaemon(texts, daemonConfig, { signal, workers: opts?.workers ?? 1 }),
     // Dispose the wrapped inline encoder only (it never loaded a model — encode
     // is delegated). The shared daemon outlives any one open and is reclaimed
     // by its own idle eviction / session cleanup.
@@ -167,10 +158,6 @@ function daemonBackedLocalOnnxEncoder(encoder) {
 
 export function __testDaemonBackedLocalOnnxEncoder(encoder) {
   return daemonBackedLocalOnnxEncoder(encoder);
-}
-
-export function __testOnnxDaemonEnabled(config = {}) {
-  return onnxDaemonEnabled(config);
 }
 
 /**
@@ -221,7 +208,7 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {} }) {
 
   try {
     let encoder = resolveConfiguredEncoder(effectiveConfig, env);
-    if (encoder?.model === "local-onnx" && onnxDaemonEnabled(effectiveConfig)) {
+    if (encoder?.model === "local-onnx") {
       encoder = daemonBackedLocalOnnxEncoder(encoder);
     }
     const result = openIndexForBackend({

@@ -27,7 +27,7 @@ function errorPayload(err) {
 
 async function main() {
   if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
-    nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { keyless: false }));
+    nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
   }
   const {
     task,

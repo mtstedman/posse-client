@@ -1715,6 +1715,7 @@ export {
   getResearcherGuardrailStats,
   getScopeContextHealthMetrics,
   cleanupRunningAgentCalls,
+  reconcileOrphanedAgentCalls,
   listAgentCalls,
   listWorkItemsWithCallRollups,
   getAgentCallsWithToolCountsByWorkItem,

@@ -272,6 +272,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       const promoteClaimsByJobId = new Map(); // promote job id -> claim group
       const rawMaxTasks = getIntSetting(SETTING_KEYS.PLANNER_MAX_TASKS, 50);
       const maxTasks = Number.isFinite(rawMaxTasks) && rawMaxTasks > 0 ? rawMaxTasks : 50;
+      const artifactDirAbs = workItemArtifactRoot(planJob.work_item_id, worker.projectDir).replace(/\\/g, "/");
       if (Array.isArray(tasks) && tasks.length > maxTasks) {
         worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: planner emitted ${tasks.length} tasks — capping to ${maxTasks}`);
         logEvent({
@@ -513,6 +514,24 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           dependsOnIndexes: [...task.depends_on_index],
         });
       };
+      const normalizeArtifactRoot = (root) => path.resolve(worker.projectDir, String(root || "")).replace(/\\/g, "/").replace(/\/+$/, "");
+      const wiArtifactRoot = artifactDirAbs.replace(/\/+$/, "");
+      const derivePriorArtifactInputRoots = (task, taskIndex) => {
+        if (!Array.isArray(task?.depends_on_index) || task.depends_on_index.length === 0) return [];
+        const currentOutputRoot = task.output_root ? normalizeArtifactRoot(task.output_root) : null;
+        const roots = [];
+        for (const depIdx of task.depends_on_index) {
+          if (!Number.isInteger(depIdx) || depIdx < 0 || depIdx >= taskIndex) continue;
+          if (droppedTaskIndexes.has(depIdx)) continue;
+          const sourceTask = tasks[depIdx];
+          if (!sourceTask?.output_root) continue;
+          const sourceOutputRoot = normalizeArtifactRoot(sourceTask.output_root);
+          if (!sourceOutputRoot || sourceOutputRoot === currentOutputRoot) continue;
+          roots.push(sourceOutputRoot);
+          if (sourceOutputRoot.startsWith(`${wiArtifactRoot}/`)) roots.push(wiArtifactRoot);
+        }
+        return [...new Set(roots)];
+      };
       const rewritePendingDependenciesAfterSplit = (splitIndex, splitTaskCount, finalIndex) => {
         const offset = splitTaskCount - 1;
         if (offset <= 0) return;
@@ -634,6 +653,29 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         if (!t || !t.title) {
           droppedTaskIndexes.add(i);
           continue;
+        }
+        const preValidationWi = getWorkItem(planJob.work_item_id);
+        const preValidationWiMode = preValidationWi?.mode || "build";
+        const preValidationArtifactPathRe = /(?:^|\/)\.posse\/resources\/artifacts(?:\/|$)/;
+        const isPreValidationArtifactPath = (value) => {
+          const normalized = String(value || "").replace(/\\/g, "/").replace(/\/+$/, "");
+          const artifactRoot = artifactDirAbs.replace(/\/+$/, "");
+          return normalized === artifactRoot
+            || normalized.startsWith(`${artifactRoot}/`)
+            || preValidationArtifactPathRe.test(normalized);
+        };
+        const hasPreValidationArtifactScope =
+          isPreValidationArtifactPath(t.output_root)
+          || (Array.isArray(t.create_roots) && t.create_roots.some(isPreValidationArtifactPath))
+          || (Array.isArray(t.files_to_create) && t.files_to_create.some(isPreValidationArtifactPath));
+        if (
+          preValidationWiMode !== "build"
+          && (t.job_type === "dev" || !t.job_type)
+          && (!Array.isArray(t.files_to_modify) || t.files_to_modify.length === 0)
+          && (!Array.isArray(t.files_to_delete) || t.files_to_delete.length === 0)
+          && hasPreValidationArtifactScope
+        ) {
+          t.job_type = "artificer";
         }
         const validationErrors = validatePlannedTaskFromModule(t, i, tasks.length);
         if (validationErrors.length > 0) {
@@ -842,7 +884,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         // ── WI-mode enforcement ──
         // If the WI has a non-build mode, force artifact task modes regardless
         // of what the planner emitted. This is the deterministic guardrail.
-        const artifactDirAbs = workItemArtifactRoot(planJob.work_item_id, worker.projectDir).replace(/\\/g, "/");
         const inferredPromote = inferPromoteTaskFromModule(t, artifactDirAbs);
         if (inferredPromote) {
           t = inferredPromote;
@@ -1162,15 +1203,24 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             worker.emit(planJob.id, `${C.cyan}[plan-validate]${C.reset} WI#${planJob.work_item_id}: scoped artifact task "${t.title}" to ${scopedRoot}`);
           }
 
+          const priorArtifactInputRoots = derivePriorArtifactInputRoots(t, i);
+          if (priorArtifactInputRoots.length > 0) {
+            const existingInputRoots = Array.isArray(t.input_roots) ? t.input_roots : [];
+            t.input_roots = [...new Set([...existingInputRoots, ...priorArtifactInputRoots])];
+            worker.emit(planJob.id, `${C.cyan}[plan-validate]${C.reset} WI#${planJob.work_item_id}: added ${priorArtifactInputRoots.length} prior artifact input root(s) for task "${t.title}"`);
+          }
+
           if (taskMode === "report" && (!Array.isArray(t.files_to_create) || t.files_to_create.length === 0)) {
             t.files_to_create = ["report.md"];
             worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: synthesized report deliverable file for task "${t.title}"`);
           }
 
-          const normalizedFilesToCreate = normalizeArtifactCreateFiles(t.files_to_create || [], t.output_root || defaultRoot);
-          if (JSON.stringify(normalizedFilesToCreate) !== JSON.stringify(t.files_to_create || [])) {
-            t.files_to_create = normalizedFilesToCreate;
-            worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: rebased artifact files_to_create into output_root for task "${t.title}"`);
+          if (taskMode !== "content") {
+            const normalizedFilesToCreate = normalizeArtifactCreateFiles(t.files_to_create || [], t.output_root || defaultRoot);
+            if (JSON.stringify(normalizedFilesToCreate) !== JSON.stringify(t.files_to_create || [])) {
+              t.files_to_create = normalizedFilesToCreate;
+              worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: rebased artifact files_to_create into output_root for task "${t.title}"`);
+            }
           }
 
           const reusePlan = planArtifactReuseFromModule({ ...t, task_mode: taskMode }, worker.projectDir);

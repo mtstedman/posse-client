@@ -67,7 +67,10 @@ export async function runRemoteNativeRequestJson(request, opts = {}) {
   if (!apiKey) {
     throw new Error("remote native client requires a Posse key");
   }
-  const envelope = buildRemoteNativeRequest("request-json", request);
+  const envelope = buildRemoteNativeRequest("request-json", {
+    ...request,
+    apiKey,
+  });
   // Heartbeat envelope from the manager's single auth authority (cached) when
   // available; an explicit caller `auth` wins, and settings is only a defensive
   // fallback for stub managers.
@@ -86,7 +89,6 @@ export async function runRemoteNativeRequestJson(request, opts = {}) {
       input: `${JSON.stringify(envelope)}\n`,
       json: true,
       timeoutMs: request.timeoutMs,
-      key: apiKey,
     },
   );
   if (!res.ok) {

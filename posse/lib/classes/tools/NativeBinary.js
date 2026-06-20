@@ -75,24 +75,21 @@ export class NativeBinary {
    *   binRoot?: string,
    *   platform?: NodeJS.Platform,
    *   arch?: string,
-   *   posseKey?: string,
    *   env?: NodeJS.ProcessEnv,
-   *   keyResolver?: () => string | null,
    *   nativeAuthManager?: import("../../shared/native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
    *   spawnImpl?: typeof spawn,
    *   spawnSyncImpl?: typeof spawnSync,
    * }} args
    */
-  constructor({ name, binRoot, platform, arch, posseKey, env, keyResolver, nativeAuthManager, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
+  constructor({ name, binRoot, platform, arch, env, nativeAuthManager, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
     if (!name) throw new TypeError("NativeBinary: name is required");
     this.name = name;
     this._binRoot = binRoot || null;
-    this._posseKey = posseKey || null;
     this._env = env || null;
-    this._keyResolver = keyResolver || null;
     // Single native-auth authority. Production injects the shared manager via
-    // BinaryManager; standalone construction (tests) lazily derives one from the
-    // legacy posseKey/keyResolver/env so key resolution stays in one place.
+    // BinaryManager; standalone construction (tests) lazily derives one from
+    // settings/env for the heartbeat envelope and the compiled-binary
+    // compatibility launch key. Leaf call sites never supply native keys.
     this._nativeAuthManager = nativeAuthManager || null;
     this.keyGated = nativeBinaryIsKeyGated(name);
     // posse-git and posse-atlas implement the `worker --stdio` persistent loop.
@@ -118,13 +115,11 @@ export class NativeBinary {
   /** Distinguishes supervisor identities across instances (tests construct many). */
   static _nextInstanceSeq = 1;
 
-  /** Args to launch this binary's `worker --stdio` host (key first, like #buildArgs). */
+  /** Args to launch this binary's `worker --stdio` host. */
   #buildWorkerArgs() {
     const out = [];
-    if (this.keyGated) {
-      const key = this.#resolveKey();
-      if (key) out.push("--posse-key", key);
-    }
+    const key = this.keyGated ? this.#authManager().getLaunchKey() : null;
+    if (key) out.push("--posse-key", key);
     out.push("worker", "--stdio");
     return out;
   }
@@ -206,7 +201,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {{ input?: Buffer | string, json?: boolean, timeoutMs?: number, key?: string, signal?: AbortSignal }} opts
+   * @param {{ input?: Buffer | string, json?: boolean, timeoutMs?: number, signal?: AbortSignal }} opts
    * @returns {Promise<RunResult>}
    */
   async #runViaWorker(subcommand, args, opts) {
@@ -370,13 +365,13 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number }} [opts]
    * @returns {RunResult}
    */
   #runSyncPerCall(subcommand, args = [], opts = {}) {
     const bin = this.resolvePath();
     if (!bin) return this.#unavailableResult();
-    const fullArgs = this.#buildArgs(subcommand, args, opts.key);
+    const fullArgs = this.#buildArgs(subcommand, args);
     const res = this._spawnSync(bin, fullArgs, {
       cwd: opts.cwd || process.cwd(),
       env: this.#childEnv(opts.env),
@@ -400,19 +395,11 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string, signal?: AbortSignal, worker?: boolean }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, worker?: boolean }} [opts]
    * @returns {Promise<RunResult>}
    */
   run(subcommand, args = [], opts = {}) {
     if (this.workerCapable && opts.worker === true) {
-      if (this.keyGated && (opts.key || !this.#resolveKey())) {
-        // The persistent worker authenticates at process launch. Keyless
-        // contexts can still authenticate per request through the JSON auth
-        // envelope, but only the per-call spawn path can carry that envelope
-        // before the binary starts handling work.
-        this.#noteWorkerFallback(opts.key ? "per_call_key" : "missing_launch_key");
-        return this.#runPerCall(subcommand, args, opts);
-      }
       return this.#runViaWorker(subcommand, args, opts);
     }
     return this.#runPerCall(subcommand, args, opts);
@@ -423,7 +410,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string, signal?: AbortSignal }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal }} [opts]
    * @returns {Promise<RunResult>}
    */
   #runPerCall(subcommand, args = [], opts = {}) {
@@ -438,7 +425,7 @@ export class NativeBinary {
         error: signalAbortError(opts.signal),
       }, opts.json === true));
     }
-    const fullArgs = this.#buildArgs(subcommand, args, opts.key);
+    const fullArgs = this.#buildArgs(subcommand, args);
     const input = this.#inputWithNativeAuth(opts.input);
     return new Promise((resolve) => {
       let settled = false;
@@ -512,8 +499,7 @@ export class NativeBinary {
   /**
    * The native-auth authority for this handle. Production injects the shared
    * HeartbeatAuthManager through BinaryManager; a standalone handle lazily
-   * derives one from its own posseKey/keyResolver/env so the `--posse-key`
-   * legacy path is produced in exactly one place.
+   * derives one for heartbeat-envelope resolution.
    *
    * @returns {HeartbeatAuthManager}
    */
@@ -521,43 +507,26 @@ export class NativeBinary {
     if (!this._nativeAuthManager) {
       this._nativeAuthManager = new HeartbeatAuthManager({
         env: this._env,
-        posseKey: this._posseKey,
-        keyResolver: this._keyResolver,
       });
     }
     return this._nativeAuthManager;
   }
 
   /**
-   * Resolve the optional legacy `--posse-key` for a key-gated invocation via the
-   * auth manager (the single owner of key resolution). Returns null in keyless
-   * contexts, where the binary authenticates from the heartbeat envelope alone.
-   *
-   * @param {string} [optKey]
-   * @returns {string | null}
-   */
-  #resolveKey(optKey) {
-    return this.#authManager().getLaunchKey({ optKey, env: this._env || undefined }) || null;
-  }
-
-  /**
-   * Build the argv: for key-gated binaries, inject `--posse-key <key>` BEFORE
-   * the positional command (clap consumes options ahead of the subcommand),
-   * when a key is available. Stdin payloads are passed via spawn `input`, which
-   * matches the binaries' default `-i -`.
+   * Build the argv. Native auth is carried only in the JSON request envelope;
+   * current compiled binaries also require the manager-owned compatibility
+   * `--posse-key` launch credential. Stdin payloads are passed via spawn
+   * `input`, which matches the binaries' default `-i -`.
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {string} [optKey]
    * @returns {string[]}
    */
-  #buildArgs(subcommand, args, optKey) {
+  #buildArgs(subcommand, args) {
     /** @type {string[]} */
     const out = [];
-    if (this.keyGated) {
-      const key = this.#resolveKey(optKey);
-      if (key) out.push("--posse-key", key);
-    }
+    const key = this.keyGated ? this.#authManager().getLaunchKey() : null;
+    if (key) out.push("--posse-key", key);
     if (subcommand) out.push(subcommand);
     for (const a of args) out.push(a);
     return out;
@@ -622,9 +591,14 @@ export class NativeBinary {
   #childEnv(optsEnv) {
     const base = optsEnv || buildRuntimeEnv();
     if (!this.keyGated) return base;
-    if (String(base.POSSE_HEARTBEAT_URL || "").trim()) return base;
-    const url = resolveHeartbeatUrl(base);
-    return url ? { ...base, POSSE_HEARTBEAT_URL: url } : base;
+    const env = { ...base };
+    // Legacy native helpers used to discover the raw Posse API key from argv
+    // or ambient env. The heartbeat envelope is now the only native auth path,
+    // so do not let key-gated binaries silently fall back to POSSE_KEY.
+    delete env.POSSE_KEY;
+    if (String(env.POSSE_HEARTBEAT_URL || "").trim()) return env;
+    const url = resolveHeartbeatUrl(env);
+    return url ? { ...env, POSSE_HEARTBEAT_URL: url } : env;
   }
 
   /** @returns {RunResult} */
