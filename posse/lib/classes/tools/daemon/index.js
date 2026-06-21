@@ -15,7 +15,9 @@ export {
   forgetDaemonSpawn,
   reapOrphanedDaemons,
   reapOwnDaemonSpawns,
+  reapOwnDaemonSpawnsForCwd,
   listOwnDaemonSpawns,
+  listOwnDaemonSpawnsForCwd,
   cleanupOwnDaemonLedger,
   setDaemonLedgerDirForTests,
 } from "./process-ledger.js";

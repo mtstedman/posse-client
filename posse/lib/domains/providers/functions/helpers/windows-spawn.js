@@ -5,6 +5,7 @@
 // Windows and terminate spawned process trees cross-platform.
 
 import { spawn } from "child_process";
+import { recordDaemonSpawn, forgetDaemonSpawn } from "../../../../classes/tools/daemon/process-ledger.js";
 
 export function quoteWindowsArg(arg) {
   const value = String(arg == null ? "" : arg);
@@ -58,4 +59,20 @@ export function terminateSpawnedProcess(proc, { force = false } = {}) {
     }
   }
   try { proc.kill(force ? "SIGKILL" : "SIGTERM"); } catch {}
+}
+
+export function trackSpawnedProcess(proc, bin, context = {}) {
+  const pid = Number(proc?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return () => {};
+  recordDaemonSpawn(pid, bin, context);
+  let done = false;
+  const forget = () => {
+    if (done) return;
+    done = true;
+    forgetDaemonSpawn(pid);
+  };
+  try { proc.once?.("close", forget); } catch {}
+  try { proc.once?.("exit", forget); } catch {}
+  try { proc.once?.("error", forget); } catch {}
+  return forget;
 }

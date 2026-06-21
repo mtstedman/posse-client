@@ -16,6 +16,7 @@ import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { ensurePosseGitInfoExclude } from "../../runtime/functions/ignore.js";
 import { isAbortError, signalAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
+import { reapOwnDaemonSpawnsForCwd } from "../../../classes/tools/daemon/index.js";
 import { jobNeedsGitWorktree } from "./policy.js";
 import { FORCE_REMOVE_OPTIONS, isWorktreeInUseError } from "./worktree-remove-options.js";
 import { contextDir, wiScopeId } from "../../artifacts/functions/index.js";
@@ -1155,9 +1156,30 @@ function notifySafeRemoveFailure(onFailure, detail) {
   try { onFailure(detail); } catch { /* cleanup failure callbacks are best-effort */ }
 }
 
+function notifySafeRemoveMessage(onMsg, message) {
+  if (typeof onMsg !== "function") return;
+  try { onMsg(message); } catch { /* cleanup messages are best-effort */ }
+}
+
 function notifySafeRemoveSnapshot(onSnapshot, detail) {
   if (typeof onSnapshot !== "function") return;
   try { onSnapshot(detail); } catch { /* snapshot callbacks are best-effort */ }
+}
+
+function reapRecordedWorktreeProcessHolders(wtPath, { onMsg = null } = {}) {
+  let result = { killed: 0, skipped: 0, matched: 0 };
+  try {
+    result = reapOwnDaemonSpawnsForCwd(wtPath, { force: true, tree: true });
+  } catch {
+    result = { killed: 0, skipped: 0, matched: 0 };
+  }
+  if (result.matched > 0 || result.killed > 0 || result.skipped > 0) {
+    notifySafeRemoveMessage(
+      onMsg,
+      `Worktree in-use cleanup checked ${result.matched} recorded child process(es); killed ${result.killed}, skipped ${result.skipped}`,
+    );
+  }
+  return result;
 }
 
 function safeRemoveBaseResult(wtPath, overrides = {}) {
@@ -1383,6 +1405,13 @@ export function safeSnapshotAndRemoveWorktree(
         snapshotSucceeded,
         verifiedClean,
       });
+      if (deferredInUse) {
+        const reaped = reapRecordedWorktreeProcessHolders(wtPath, { onMsg });
+        if (reaped.killed > 0) {
+          sleepSyncMs(250);
+          deferredInUse = false;
+        }
+      }
     }
 
     let removed = !fs.existsSync(wtPath);
@@ -1651,6 +1680,13 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
         snapshotSucceeded,
         verifiedClean,
       });
+      if (deferredInUse) {
+        const reaped = reapRecordedWorktreeProcessHolders(wtPath, { onMsg });
+        if (reaped.killed > 0) {
+          await sleepMs(250, { signal });
+          deferredInUse = false;
+        }
+      }
     }
 
     let removed = !fs.existsSync(wtPath);

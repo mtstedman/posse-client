@@ -1,6 +1,7 @@
 import { getWorkItem } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
-import { isUnderRoot, normPath, normalizeRoots, rootsOverlap } from "../../worker/functions/helpers/scope.js";
+import { Scope } from "../../../shared/scope/classes/Scope.js";
+import { isUnderRoot, normPath, rootsOverlap } from "../../worker/functions/helpers/scope.js";
 
 export function normalizeSchedulerPath(p) {
   const normalized = normPath(p);
@@ -9,11 +10,8 @@ export function normalizeSchedulerPath(p) {
 
 export function parseFileScope(job) {
   const payload = parseJobPayload(job);
-  const modify = Array.isArray(payload?.files_to_modify) ? payload.files_to_modify.map(normalizeSchedulerPath) : [];
-  const create = Array.isArray(payload?.files_to_create) ? payload.files_to_create.map(normalizeSchedulerPath) : [];
-  const remove = Array.isArray(payload?.files_to_delete) ? payload.files_to_delete.map(normalizeSchedulerPath) : [];
-  const roots = normalizeRoots(payload?.create_roots || [], process.cwd()).map(normalizeSchedulerPath);
-  return { files: [...new Set([...modify, ...create, ...remove])], createRoots: roots, workItemId: job.work_item_id, jobId: job.id };
+  const scope = Scope.fromPayload(payload, { cwd: process.cwd() });
+  return { files: scope.allFiles(), createRoots: [...scope.createRoots], workItemId: job.work_item_id, jobId: job.id };
 }
 
 export function scopeToSchedulerLocks(jobScope, job = null) {

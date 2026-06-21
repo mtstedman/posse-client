@@ -22,7 +22,7 @@ import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerC
 import { resolveAtlasToolGateEnabled } from "../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME, stripPosseMcpGatewayPrefix } from "../../integrations/functions/mcp-gateway.js";
 import { summarizeObservedToolUse } from "./helpers/tool-runtime.js";
-import { buildWindowsSpawn, terminateSpawnedProcess } from "./helpers/windows-spawn.js";
+import { buildWindowsSpawn, terminateSpawnedProcess, trackSpawnedProcess } from "./helpers/windows-spawn.js";
 import { discoverCommandCandidates } from "./helpers/cli-discovery.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
 import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry, logProviderMcpAttachProofTelemetry } from "./helpers/mcp-telemetry.js";
@@ -3020,6 +3020,10 @@ export async function callProvider(promptText, {
         env: childEnv,
         windowsHide: true,
         windowsVerbatimArguments: launch.windowsVerbatimArguments,
+      });
+      trackSpawnedProcess(proc, launch.command, {
+        label: `claude:${role || "provider"}`,
+        cwd: spawnCwd,
       });
     } catch (spawnErr) {
       cleanupSetupFiles();

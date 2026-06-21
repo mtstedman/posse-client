@@ -26,7 +26,7 @@ import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { CODEX_OAUTH_SUPPORTED_MODELS, getProviderTierDefaults } from "./model-catalog.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
 import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry, logProviderMcpAttachProofTelemetry } from "./helpers/mcp-telemetry.js";
-import { buildWindowsSpawn, terminateSpawnedProcess } from "./helpers/windows-spawn.js";
+import { buildWindowsSpawn, terminateSpawnedProcess, trackSpawnedProcess } from "./helpers/windows-spawn.js";
 import { discoverCommandCandidates } from "./helpers/cli-discovery.js";
 import { selectExecutionModel } from "./helpers/model-selection.js";
 import {
@@ -2794,6 +2794,10 @@ export async function callProvider(promptText, {
         env: childEnv,
         windowsHide: true,
         windowsVerbatimArguments: launch.windowsVerbatimArguments,
+      });
+      trackSpawnedProcess(proc, launch.command, {
+        label: `codex:${role || "provider"}`,
+        cwd: spawnCwd,
       });
     } catch (err) {
       clearExitCleanup();

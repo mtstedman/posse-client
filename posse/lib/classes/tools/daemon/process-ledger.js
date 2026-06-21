@@ -154,7 +154,7 @@ function withLedgerLock(file, fn) {
   }
 }
 
-/** @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string }>} */
+/** @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string, cwd?: string }>} */
 function readLedger(file) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -212,13 +212,52 @@ function imageMatches(pid, binBase) {
   }
 }
 
+function normalizedFsPath(value) {
+  if (!value) return "";
+  try {
+    const resolved = path.resolve(String(value));
+    const normalized = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  } catch {
+    return "";
+  }
+}
+
+function cwdIsInside(entryCwd, rootCwd) {
+  const cwd = normalizedFsPath(entryCwd);
+  const root = normalizedFsPath(rootCwd);
+  if (!cwd || !root) return false;
+  return cwd === root || cwd.startsWith(`${root}/`);
+}
+
+function killLedgeredProcess(entry, { force = true, tree = false } = {}) {
+  const pid = Number(entry?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (process.platform === "win32" && tree) {
+    try {
+      const args = ["/pid", String(pid), "/T"];
+      if (force) args.push("/F");
+      execFileSync("taskkill", args, { stdio: "ignore", timeout: 5000, windowsHide: true });
+      return true;
+    } catch {
+      // Fall through to process.kill best-effort.
+    }
+  }
+  try {
+    process.kill(pid, force ? "SIGKILL" : "SIGTERM");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Record a freshly spawned daemon child in this process's ledger. The entry
  * carries owner attribution (spawning thread id + creator label) so a leaked
  * host is identifiable by lookup instead of forensic reconstruction.
  * @param {number | null | undefined} pid
  * @param {string | null | undefined} bin resolved binary path (basename is stored)
- * @param {{ label?: string }} [context]
+ * @param {{ label?: string, cwd?: string }} [context]
  */
 export function recordDaemonSpawn(pid, bin, context = {}) {
   if (!Number.isInteger(pid) || /** @type {number} */ (pid) <= 0) return;
@@ -233,6 +272,7 @@ export function recordDaemonSpawn(pid, bin, context = {}) {
         startedAt: Date.now(),
         threadId,
         label: String(context?.label || "") || undefined,
+        cwd: context?.cwd ? path.resolve(String(context.cwd)) : undefined,
       });
       writeLedger(file, entries);
     });
@@ -243,10 +283,20 @@ export function recordDaemonSpawn(pid, bin, context = {}) {
 
 /**
  * Snapshot of this process's recorded daemon children across all thread shards.
- * @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string }>}
+ * @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string, cwd?: string }>}
  */
 export function listOwnDaemonSpawns() {
   return ownLedgerFiles().flatMap((file) => withLedgerLock(file, () => readLedger(file)) || []);
+}
+
+/**
+ * Snapshot this process's recorded child processes that were spawned from a cwd
+ * at or inside `cwd`. Used by worktree GC to explain live Windows handles.
+ * @param {string} cwd
+ * @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string, cwd?: string }>}
+ */
+export function listOwnDaemonSpawnsForCwd(cwd) {
+  return listOwnDaemonSpawns().filter((entry) => cwdIsInside(entry.cwd, cwd));
 }
 
 /**
@@ -274,7 +324,8 @@ export function reapOwnDaemonSpawns(opts = {}) {
           if (except.has(entry.pid)) { remaining.push(entry); continue; }
           if (isAlive(entry.pid)) {
             if (imageMatches(entry.pid, entry.bin)) {
-              try { process.kill(entry.pid, "SIGKILL"); killed++; } catch { skipped++; remaining.push(entry); continue; }
+              if (killLedgeredProcess(entry, { force: true })) killed++;
+              else { skipped++; remaining.push(entry); continue; }
             } else {
               // Alive but not our binary (recycled pid) — drop the stale entry.
               skipped++;
@@ -289,6 +340,54 @@ export function reapOwnDaemonSpawns(opts = {}) {
     /* best effort */
   }
   return { killed, skipped };
+}
+
+/**
+ * Kill this process's recorded child processes whose recorded cwd is at or
+ * inside `cwd`. This is deliberately narrower than `reapOwnDaemonSpawns()`:
+ * terminal worktree cleanup may call it after the queue says no job owns the
+ * worktree, and it must never touch unrelated live children.
+ * @param {string} cwd
+ * @param {{ exceptPids?: Iterable<number>, force?: boolean, tree?: boolean }} [opts]
+ * @returns {{ killed: number, skipped: number, matched: number }}
+ */
+export function reapOwnDaemonSpawnsForCwd(cwd, opts = {}) {
+  let killed = 0;
+  let skipped = 0;
+  let matched = 0;
+  const except = new Set(opts.exceptPids || []);
+  try {
+    for (const file of ownLedgerFiles()) {
+      withLedgerLock(file, () => {
+        const entries = readLedger(file);
+        if (!entries.length) return;
+        /** @type {typeof entries} */
+        const remaining = [];
+        for (const entry of entries) {
+          if (!cwdIsInside(entry.cwd, cwd)) {
+            remaining.push(entry);
+            continue;
+          }
+          matched++;
+          if (except.has(entry.pid)) { remaining.push(entry); continue; }
+          if (isAlive(entry.pid)) {
+            if (imageMatches(entry.pid, entry.bin)) {
+              if (killLedgeredProcess(entry, { force: opts.force !== false, tree: opts.tree !== false })) killed++;
+              else { skipped++; remaining.push(entry); continue; }
+            } else {
+              skipped++;
+              continue;
+            }
+          }
+          // Dead or killed entries are dropped from the ledger.
+        }
+        writeLedger(file, remaining);
+      });
+    }
+  } catch {
+    /* best effort */
+  }
+  return { killed, skipped, matched };
 }
 
 /**
@@ -342,8 +441,8 @@ export function reapOrphanedDaemons() {
       if (!isAlive(entry.pid)) continue;
       if (!imageMatches(entry.pid, entry.bin)) { skipped++; continue; }
       try {
-        process.kill(entry.pid, "SIGKILL");
-        killed++;
+        if (killLedgeredProcess(entry, { force: true })) killed++;
+        else skipped++;
       } catch {
         skipped++;
       }

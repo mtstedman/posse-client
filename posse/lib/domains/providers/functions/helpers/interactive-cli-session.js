@@ -1,5 +1,6 @@
 import { createRequire } from "module";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
+import { trackSpawnedProcess } from "./windows-spawn.js";
 
 const require = createRequire(import.meta.url);
 const OPTIONAL_PTY_PACKAGES = [
@@ -71,7 +72,12 @@ export function createNodePtyBackend({ ptyModule = null } = {}) {
       const exitPromise = new Promise((resolve) => {
         resolveExit = resolve;
       });
+      const forgetTrackedProcess = trackSpawnedProcess(proc, command, {
+        label: `interactive-cli:${command}`,
+        cwd: opts.cwd || process.cwd(),
+      });
       proc.onExit?.((event) => {
+        forgetTrackedProcess();
         resolveExit({
           exitCode: event?.exitCode ?? null,
           signal: event?.signal ?? null,
