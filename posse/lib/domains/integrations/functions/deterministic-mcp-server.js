@@ -42,9 +42,6 @@ import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.
 import { resolveAtlasRepoTarget } from "./atlas/repo.js";
 import { shouldUseAtlasV2 } from "./atlas-v2-mode.js";
 import { atlasBackendLabel } from "./atlas-label.js";
-import { refresh as systemAtlasRefresh } from "../../system/functions/atlas.js";
-import { Ledger } from "../../atlas/classes/v2/Ledger.js";
-import { ledgerDbPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import {
@@ -58,14 +55,6 @@ import {
   isFallbackAtlasPrefetchStatus,
 } from "./deterministic-mcp/gate.js";
 import {
-  configureAtlasProxy,
-  isConfigured as isAtlasProxyConfigured,
-  getAtlasToolSchemas,
-  isAtlasToolName,
-  forwardAtlasCall,
-  shutdown as shutdownAtlasProxy,
-} from "./deterministic-mcp/atlas-proxy.js";
-import {
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
   MCP_OAUTH_AUDIENCE,
   MCP_OAUTH_TOKEN_TYPE,
@@ -78,6 +67,7 @@ import {
   DETERMINISTIC_IMAGE_TOOLS,
   DETERMINISTIC_OCR_TOOLS,
   DETERMINISTIC_WRITE_TOOLS,
+  SURFACED_ATLAS_TOOL_DEFS,
   buildFoldedAtlasToolDescriptor,
   buildNativeToolDescriptor,
   getDeterministicMcpToolNames,
@@ -506,15 +496,6 @@ function getDeterministicAtlasRepoTarget(atlasCfg = getDeterministicAtlasConfig(
   }
 }
 
-function getDeterministicAtlasCanonicalRepoPath(atlasCfg = getDeterministicAtlasConfig()) {
-  return getDeterministicAtlasRepoTarget(atlasCfg)?.repoPath || atlasCfg?.requestedRepoPath || workspaceCwd;
-}
-
-function getDeterministicAtlasLedgerPath(atlasCfg = getDeterministicAtlasConfig()) {
-  const repoPath = getDeterministicAtlasCanonicalRepoPath(atlasCfg);
-  return repoPath ? ledgerDbPath(repoPath) : null;
-}
-
 function nonNegativeIntegerOrNull(value) {
   if (value == null || value === "") return null;
   const parsed = Number(value);
@@ -539,31 +520,10 @@ function getAtlasMemoryCountForRemoteCatalog() {
     return _atlasMemoryCount;
   }
 
-  if (!atlasAvailable) return null;
-
-  let ledger = null;
-  try {
-    const atlasLedgerPath = getDeterministicAtlasLedgerPath();
-    if (!atlasLedgerPath) return null;
-    if (!fs.existsSync(atlasLedgerPath)) return null;
-    ledger = Ledger.open({ dbPath: atlasLedgerPath });
-    const db = typeof ledger?._unsafeDb === "function" ? ledger._unsafeDb() : null;
-    if (!db) return null;
-    const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get("memories");
-    if (!table) {
-      _atlasMemoryCount = 0;
-      return _atlasMemoryCount;
-    }
-    const row = db.prepare("SELECT COUNT(*) AS cnt FROM memories").get();
-    _atlasMemoryCount = nonNegativeIntegerOrNull(row?.cnt);
-    return _atlasMemoryCount;
-  } catch {
-    return null;
-  } finally {
-    try {
-      ledger?.close?.();
-    } catch { /* best effort */ }
-  }
+  // ATLAS storage reads belong to the owner/conductor lane. The MCP gateway can
+  // surface explicit boot metadata, but should not open the ledger for catalog
+  // decoration.
+  return null;
 }
 
 function getDeterministicAtlasBranch() {
@@ -591,6 +551,24 @@ function _normalizeAtlasToolRequestName(name) {
 function _normalizeGatewayToolRequestName(name) {
   const stripped = stripPosseMcpGatewayPrefix(name);
   return _normalizeAtlasToolRequestName(stripped);
+}
+
+const STATIC_ATLAS_TOOL_SCHEMAS = Object.freeze(Object.entries(SURFACED_ATLAS_TOOL_DEFS)
+  .filter(([action]) => ATLAS_TOOL_ACTIONS.includes(/** @type {any} */ (action)))
+  .map(([action, def]) => Object.freeze({
+    name: `atlas.${action}`,
+    description: def.description,
+    inputSchema: def.parameters || { type: "object", properties: {}, additionalProperties: false },
+    annotations: { title: `ATLAS ${action}` },
+  })));
+const STATIC_ATLAS_TOOL_NAMES = new Set(STATIC_ATLAS_TOOL_SCHEMAS.map((tool) => tool.name));
+
+function getStaticAtlasToolSchemas() {
+  return STATIC_ATLAS_TOOL_SCHEMAS.map((schema) => ({ ...schema, annotations: { ...(schema.annotations || {}) } }));
+}
+
+function isStaticAtlasToolName(toolName) {
+  return STATIC_ATLAS_TOOL_NAMES.has(String(toolName || ""));
 }
 
 const ATLAS_GATEWAY_TOOL_NAMES = new Set(["query", "code", "repo", "agent"]);
@@ -886,89 +864,6 @@ async function resolveAtlasAllowedActions() {
   if (catalog && Array.isArray(catalog.tools)) return new Set(remoteAtlasRouteTools(catalog));
   if (remoteToolCatalogRequired()) throw remoteToolCatalogUnavailableError();
   return _atlasAllowedActions;
-}
-
-let _atlasProxyConfigurePromise = null;
-
-async function ensureAtlasProxyReady() {
-  if (!atlasAvailable || (!roleName && !ownerHotGateway)) return false;
-  if (!remoteToolCatalogEnabled() && _atlasAllowedActions && _atlasAllowedActions.size === 0) return false;
-  if (isAtlasProxyConfigured()) return true;
-  if (_atlasProxyConfigurePromise) return await _atlasProxyConfigurePromise;
-  _atlasProxyConfigurePromise = (async () => {
-    try {
-      const atlasCfg = getDeterministicAtlasConfig();
-      const atlasRepoPath = getDeterministicAtlasCanonicalRepoPath(atlasCfg);
-      const atlasLedgerPath = getDeterministicAtlasLedgerPath(atlasCfg);
-      if (shouldUseAtlasV2({ config: atlasCfg })) {
-        configureAtlasProxy({
-          transport: "v2",
-          cwd: workspaceCwd,
-          repoRoot: atlasRepoPath || workspaceCwd,
-          ledgerDbPath: atlasCfg.atlasV2LedgerDbPath || atlasLedgerPath || null,
-          viewDbPath: atlasCfg.atlasV2ViewDbPath || null,
-          atlasV2Mode: atlasCfg.atlasV2Mode || "v2",
-          semanticEnabled: atlasCfg.semanticEnabled === true,
-          vectorBackend: atlasCfg.vectorBackend || null,
-          viewWaitMs: atlasCfg.viewWaitMs ?? null,
-          autoRefreshStale: atlasCfg.autoRefreshStale ?? null,
-          embeddingProvider: atlasCfg.embeddingProvider || atlasCfg.atlasEmbeddingProvider || null,
-          atlasEmbeddingProvider: atlasCfg.atlasEmbeddingProvider || atlasCfg.embeddingProvider || null,
-          embeddingEndpoint: atlasCfg.embeddingEndpoint || null,
-          embeddingModel: atlasCfg.embeddingModel || null,
-          embeddingDim: atlasCfg.embeddingDim ?? null,
-          embeddingApiKey: atlasCfg.embeddingApiKey || null,
-          embeddingModelVersion: atlasCfg.embeddingModelVersion || null,
-          embeddingTimeoutMs: atlasCfg.embeddingTimeoutMs ?? null,
-          embeddingHeaders: atlasCfg.embeddingHeaders || null,
-          embeddingSendDimensions: atlasCfg.embeddingSendDimensions ?? null,
-          remoteEncoderMode: atlasCfg.remoteEncoderMode || "off",
-          remoteEncoderUrl: atlasCfg.remoteEncoderUrl || null,
-          remoteEncoderModel: atlasCfg.remoteEncoderModel || null,
-          remoteEncoderDim: atlasCfg.remoteEncoderDim ?? null,
-          remoteEncoderModelVersion: atlasCfg.remoteEncoderModelVersion || null,
-          remoteEncoderTimeoutMs: atlasCfg.remoteEncoderTimeoutMs ?? null,
-          serverName: "atlas-v2",
-          repoId: atlasCfg.requestedRepoId || null,
-          jobId: mcpJobId,
-          workItemId: mcpWorkItemId,
-          role: roleName,
-          gateScopeKey,
-          logger: (entry) => appendToolLog({ scope: "atlas-proxy", ...entry }),
-        });
-        appendToolLog({
-          event: "atlas_proxy_configured",
-          backend: "atlas-v2",
-          transport: "v2",
-          cwd: workspaceCwd,
-          repoRoot: atlasRepoPath || workspaceCwd,
-          ledgerDbPath: atlasCfg.atlasV2LedgerDbPath || atlasLedgerPath || null,
-        });
-        return true;
-      }
-      const reason = "atlas_v2_disabled";
-      unlockForAtlasUnavailable({ reason, scopeKey: gateScopeKey });
-      appendToolLog({
-        event: "atlas_proxy_not_ready",
-        reason,
-        status: null,
-        ready: false,
-        transport: null,
-        hasCommand: false,
-      });
-      return false;
-    } catch (err) {
-      unlockForAtlasUnavailable({ reason: "atlas_proxy_configure_error", scopeKey: gateScopeKey });
-      appendToolLog({
-        event: "atlas_proxy_configure_error",
-        error: String(err?.message || err),
-      });
-      return false;
-    } finally {
-      _atlasProxyConfigurePromise = null;
-    }
-  })();
-  return await _atlasProxyConfigurePromise;
 }
 
 function capString(value, max = 240) {
@@ -2189,12 +2084,10 @@ function applyRuntimeBootConfig(nextConfig = {}) {
   _atlasMemoryCount = null;
   _remoteToolSurfaceRequest = null;
   _remoteToolCatalogPromise = null;
-  _atlasProxyConfigurePromise = null;
   if (sessionChanged) {
     gateBootedAtMs = Date.now();
     imageGenerationCallCount = 0;
     _lastReadMeta = null;
-    try { configureAtlasProxy({ transport: "" }); } catch { /* best effort */ }
     activeRuntimeSessionKey = nextSessionKey;
   }
   rebuildNativeToolSchemas();
@@ -2276,117 +2169,20 @@ function atlasLiveBufferMode() {
 }
 
 async function maybePushAtlasLiveBuffer({ toolName, args } = {}) {
-  if (atlasLiveBufferMode() !== "deterministic-writes") return;
-  if (toolName !== "write_file" && toolName !== "edit_file") return;
-  if (!atlasAvailable) return;
-  const mode = atlasLiveBufferMode();
-  const source = {
-    kind: "deterministic_write",
+  const queued = buildQueuedAtlasLiveBufferDetail({ toolName, args, reason: "owner_executor" });
+  if (!queued) return null;
+  appendToolLog({
+    event: "atlas_live_buffer_deferred_to_owner",
     tool: toolName,
-    mode,
+    path: queued.path || null,
+    reason: "owner_executor",
+  });
+  return {
+    ...queued,
+    attempted: false,
+    queued: true,
+    ok: null,
   };
-  const ready = await ensureAtlasProxyReady();
-  if (!ready || !isAtlasProxyConfigured()) {
-    return {
-      ...source,
-      action: "buffer.push",
-      attempted: false,
-      ok: false,
-      reason: "atlas_proxy_not_ready",
-    };
-  }
-
-  let absPath = null;
-  try {
-    absPath = safePath(workspaceCwd, args?.path, effectiveScopePredicates);
-  } catch {
-    return;
-  }
-  if (!absPath) return;
-
-  const relPath = path.relative(workspaceCwd, absPath).replace(/\\/g, "/");
-  const read = await readAtlasLiveBufferContent({ absPath, relPath, toolName });
-  if (!read.ok) {
-    if (!["missing", "not_file"].includes(read.reason)) {
-      appendToolLog({
-        event: "atlas_live_buffer_skipped",
-        tool: toolName,
-        path: relPath,
-        reason: read.reason,
-        ...(read.size == null ? {} : { size: read.size }),
-        ...(read.error ? { error: read.error } : {}),
-      });
-    }
-    return {
-      ...source,
-      action: "buffer.push",
-      path: relPath,
-      attempted: false,
-      ok: false,
-      reason: read.reason,
-      ...(read.size == null ? {} : { size: read.size }),
-      ...(read.error ? { error: read.error } : {}),
-    };
-  }
-
-  const content = read.content;
-
-  const start = Date.now();
-  try {
-    const result = await forwardAtlasCall({
-      toolName: "atlas.buffer.push",
-      args: {
-        filePath: relPath,
-        content,
-        sessionId: mcpJobId != null ? `job-${mcpJobId}` : "deterministic-write",
-      },
-      source: {
-        ...source,
-        path: relPath,
-      },
-    });
-    const text = Array.isArray(result?.content)
-      ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("")
-      : "";
-    appendToolLog({
-      event: "atlas_live_buffer_push",
-      tool: toolName,
-      path: relPath,
-      ok: !result?.isError,
-    });
-    const refresh = !result?.isError
-      ? await maybeRefreshAtlasIndexAfterLiveWrite({ relPath, toolName, source })
-      : null;
-    return {
-      ...source,
-      action: "buffer.push",
-      path: relPath,
-      attempted: true,
-      ok: !result?.isError,
-      duration_ms: Date.now() - start,
-      ...(result?.isError && text ? { error: capString(text, 240) } : {}),
-      ...(refresh ? { refresh } : {}),
-      observation_type: "atlas.buffer_push",
-    };
-  } catch (err) {
-    appendToolLog({
-      event: "atlas_live_buffer_push",
-      tool: toolName,
-      path: relPath,
-      ok: false,
-      error: capString(err?.message || String(err), 300),
-    });
-    return {
-      ...source,
-      action: "buffer.push",
-      path: relPath,
-      attempted: true,
-      ok: false,
-      duration_ms: Date.now() - start,
-      error: capString(err?.message || String(err), 240),
-      observation_type: "atlas.buffer_push",
-    };
-  }
 }
 
 function buildQueuedAtlasLiveBufferDetail({ toolName, args, reason = "timeout", timeoutMs = null } = {}) {
@@ -2417,133 +2213,40 @@ function buildQueuedAtlasLiveBufferDetail({ toolName, args, reason = "timeout", 
 }
 
 async function maybePushAtlasLiveBufferForToolObservation({ toolName, args } = {}) {
-  const queued = buildQueuedAtlasLiveBufferDetail({ toolName, args, reason: "queued" });
+  const queued = buildQueuedAtlasLiveBufferDetail({ toolName, args, reason: "owner_executor" });
   if (!queued) return null;
-
-  const background = maybePushAtlasLiveBuffer({ toolName, args })
-    .catch((err) => ({
-      ...queued,
-      queued: false,
-      ok: false,
-      error: capString(err?.message || String(err), 240),
-    }));
-
-  const waitMs = DEFAULT_ATLAS_LIVE_BUFFER_TOOL_WAIT_MS;
-  if (waitMs <= 0) {
-    void background.then((result) => {
-      appendToolLog({
-        event: "atlas_live_buffer_background_result",
-        tool: toolName,
-        path: result?.path || queued.path || null,
-        ok: result?.ok ?? null,
-        queued: false,
-      });
-    });
-    return { ...queued, reason: "background", timeout_ms: 0 };
-  }
-
-  let timer = null;
-  let timedOut = false;
-  const timeout = new Promise((resolve) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      resolve(buildQueuedAtlasLiveBufferDetail({ toolName, args, reason: "timeout", timeoutMs: waitMs }) || queued);
-    }, waitMs);
-    timer.unref?.();
+  appendToolLog({
+    event: "atlas_live_buffer_deferred_to_owner",
+    tool: toolName,
+    path: queued.path || null,
+    reason: "owner_executor",
   });
-
-  const result = await Promise.race([background, timeout]);
-  if (timer) clearTimeout(timer);
-  if (timedOut) {
-    void background.then((finished) => {
-      appendToolLog({
-        event: "atlas_live_buffer_background_result",
-        tool: toolName,
-        path: finished?.path || queued.path || null,
-        ok: finished?.ok ?? null,
-        queued: false,
-      });
-    });
-  }
-  return result;
+  return {
+    ...queued,
+    attempted: false,
+    queued: true,
+    ok: null,
+  };
 }
 
 async function maybeRefreshAtlasIndexAfterLiveWrite({ relPath, toolName, source }) {
-  const start = Date.now();
-  let ledger = null;
-  try {
-    const atlasCfg = getDeterministicAtlasConfig();
-    const atlasLedgerPath = getDeterministicAtlasLedgerPath(atlasCfg);
-    const branch = getDeterministicAtlasBranch();
-    if (atlasLedgerPath) {
-      ledger = Ledger.open({ dbPath: atlasLedgerPath });
-    }
-    const result = await systemAtlasRefresh({
-      reason: "write",
-      repoRoot: workspaceCwd,
-      ...(branch ? { branch } : {}),
-      ...(ledger ? { ledger } : {}),
-      mode: "incremental",
-      paths: [relPath],
-      wait: true,
-      config: atlasCfg,
-      onProgress: (event) => appendToolLog({
-        event: "atlas_live_index_refresh_progress",
-        tool: toolName,
-        path: relPath,
-        atlas_event: event,
-      }),
-    });
-    appendToolLog({
-      event: "atlas_live_index_refresh",
-      tool: toolName,
-      path: relPath,
-      ok: result?.ok !== false,
-    });
-    const observation = {
-      action: "index.refresh",
-      path: relPath,
-      attempted: true,
-      ok: result?.ok !== false,
-      duration_ms: Date.now() - start,
-      via: "system.atlas.refresh",
-      versionId: result?.versionId || null,
-      branch: result?.branch || branch || null,
-      ledgerDbPath: atlasLedgerPath || null,
-      observation_type: "atlas.index_refresh",
-    };
-    recordAtlasLiveObservation({
-      ...observation,
-      summary: `ATLAS index.refresh (${relPath})`,
-      detail: observation,
-    });
-    return observation;
-  } catch (err) {
-    appendToolLog({
-      event: "atlas_live_index_refresh",
-      tool: toolName,
-      path: relPath,
-      ok: false,
-      error: capString(err?.message || String(err), 300),
-    });
-    const observation = {
-      action: "index.refresh",
-      path: relPath,
-      attempted: true,
-      ok: false,
-      duration_ms: Date.now() - start,
-      error: capString(err?.message || String(err), 240),
-      observation_type: "atlas.index_refresh",
-    };
-    recordAtlasLiveObservation({
-      ...observation,
-      summary: `ATLAS index.refresh (${relPath}) failed`,
-      detail: observation,
-    });
-    return observation;
-  } finally {
-    try { ledger?.close?.(); } catch { /* ignore */ }
-  }
+  const observation = {
+    action: "index.refresh",
+    path: relPath,
+    attempted: false,
+    ok: null,
+    via: "AtlasToolExecutor",
+    reason: "owner_executor",
+    tool: toolName,
+    source,
+    observation_type: "atlas.index_refresh",
+  };
+  recordAtlasLiveObservation({
+    ...observation,
+    summary: `ATLAS index.refresh (${relPath}) deferred to owner executor`,
+    detail: observation,
+  });
+  return observation;
 }
 
 async function readAtlasLiveBufferContent({ absPath, relPath, toolName }) {
@@ -2627,31 +2330,15 @@ async function handleRequest(msg) {
     const nativeToolSchemas = [...TOOL_SCHEMA_MAP.values()]
       .filter((schema) => !nativeAllowedToolNames || nativeAllowedToolNames.has(schema.name));
     const nativeTools = nativeToolSchemas.map(buildGatewayNativeToolDescriptor);
-    let atlasTools = [];
-    let atlasToolsRawCount = 0;
-    await ensureAtlasProxyReady();
-    if (isAtlasProxyConfigured()) {
-      try {
-        const schemas = await getAtlasToolSchemas();
-        // The v2 proxy already returns MCP tool descriptors ({ name,
-        // description, inputSchema, ... }). Pass through as-is; re-annotating
-        // would fight with the generated v2 schema.
-        const allAtlasTools = Array.isArray(schemas) ? schemas : [];
-        atlasToolsRawCount = allAtlasTools.length;
-        // Filter to the per-role allowlist so the LLM physically can't see
-        // ATLAS tools its role isn't routed to. Routes are generated from the
-        // shared tool catalog so prompt contracts and MCP grants do not drift.
-        atlasTools = allAtlasTools
-          .filter((tool) => atlasAllowedActions?.has(_stripAtlasPrefix(tool?.name)))
-          .filter((tool) => isExternallyRoutedAtlasTool(tool?.name))
-          .map(buildFoldedAtlasToolDescriptor);
-      } catch (err) {
-        appendToolLog({
-          event: "atlas_tools_list_error",
-          error: String(err?.message || err),
-        });
-      }
-    }
+    const allAtlasTools = atlasAvailable ? getStaticAtlasToolSchemas() : [];
+    const atlasToolsRawCount = allAtlasTools.length;
+    // Filter to the per-role allowlist so the LLM physically can't see ATLAS
+    // tools its role isn't routed to. Actual execution is intercepted by the
+    // parent MCP owner and routed through AtlasToolExecutor/conductor.
+    const atlasTools = allAtlasTools
+      .filter((tool) => atlasAllowedActions?.has(_stripAtlasPrefix(tool?.name)))
+      .filter((tool) => isExternallyRoutedAtlasTool(tool?.name))
+      .map(buildFoldedAtlasToolDescriptor);
     if (isGateActive({ scopeKey: gateScopeKey }) && atlasTools.length === 0) {
       unlockForAtlasUnavailable({ reason: "atlas_tools_unavailable", scopeKey: gateScopeKey });
       appendToolLog({
@@ -2697,9 +2384,6 @@ async function handleRequest(msg) {
       sendRemoteToolCatalogError(id, err, "tools/call");
       return;
     }
-    if (!isAtlasProxyConfigured() && (isGateActive({ scopeKey: gateScopeKey }) || requestedAtlasTool)) {
-      await ensureAtlasProxyReady();
-    }
     appendToolLog({
       event: "tool_call",
       requestId: id ?? null,
@@ -2725,17 +2409,12 @@ async function handleRequest(msg) {
       return;
     }
 
-    // Route 1: ATLAS tool names -> native v2 proxy. The proxy records the
-    // observation and notifies the gate (ok/empty both unlock on meaningful
-    // retrieval actions). The role allowlist is enforced here too so a
-    // disallowed ATLAS call cannot succeed even if the LLM bypassed the
-    // filtered tools/list (e.g. by calling a tool name it remembered from a
-    // prior turn).
-    if (isAtlasProxyConfigured() && requestedAtlasTool) {
-      if (!isAtlasToolName(toolName)) {
-        try { await getAtlasToolSchemas(); } catch { /* fall through to unknown below */ }
-      }
-      if (!isAtlasToolName(toolName)) {
+    // Route 1: ATLAS tool names should be intercepted by the parent MCP owner
+    // and executed via AtlasToolExecutor/conductor. If a direct legacy call
+    // reaches this hot gateway process, enforce the same allowlist and fail
+    // loudly instead of running ATLAS runtime work inside MCP.
+    if (requestedAtlasTool) {
+      if (!isStaticAtlasToolName(toolName)) {
         appendToolLog({
           event: "atlas_call_denied",
           requestId: id ?? null,
@@ -2807,20 +2486,22 @@ async function handleRequest(msg) {
         return;
       }
       try {
-        const result = await forwardAtlasCall({ toolName, args });
-        if (!result?.isError) {
-          noteResearchExplorationStep({ toolName, requestedAtlasTool: true });
-        }
         appendToolLog({
-          event: "tool_result",
+          event: "atlas_call_deferred_to_owner_required",
           requestId: id ?? null,
           tool: requestedToolName,
           canonicalTool: toolName,
-          via: "atlas-proxy",
-          ok: !result?.isError,
+          via: "atlas-tool-executor",
+          ok: false,
           durationMs: Date.now() - start,
         });
-        sendMessage(jsonRpcSuccess(id, result));
+        sendMessage(jsonRpcSuccess(id, {
+          content: [{
+            type: "text",
+            text: `ATLAS tool ${requestedToolName} must be executed by the Posse MCP owner through AtlasToolExecutor; direct gateway execution is disabled.`,
+          }],
+          isError: true,
+        }));
       } catch (err) {
         const safeError = capString(err?.message || String(err), 300);
         appendToolLog({
@@ -2828,7 +2509,7 @@ async function handleRequest(msg) {
           requestId: id ?? null,
           tool: requestedToolName,
           canonicalTool: toolName,
-          via: "atlas-proxy",
+          via: "atlas-tool-executor",
           ok: false,
           durationMs: Date.now() - start,
           error: safeError,
@@ -3113,7 +2794,6 @@ async function shutdownAndExit(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   try { await requestQueue; } catch { /* requestQueue is best-effort guarded */ }
-  try { await shutdownAtlasProxy(); } catch { /* best effort */ }
   process.exit(code);
 }
 

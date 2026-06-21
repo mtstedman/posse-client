@@ -838,7 +838,23 @@ export class Scheduler {
   _startLockRenewal() {
     if (this._lockInterval) return true;
     if (!this._renewSchedulerLock()) return false;
+    this._lockRenewalExpectedAtMs = Date.now() + LOCK_RENEW_SEC * 1000;
     this._lockInterval = setInterval(() => {
+      // If this timer fired a full interval+ late, the main-thread event loop
+      // was blocked (synchronous file I/O in a worker handoff, or a contended
+      // synchronous DB write) — the actual cause behind "lock renewal starved".
+      // Surface it so starvation can be attributed to an event-loop block vs a
+      // DB-busy stall in future incidents.
+      const nowMs = Date.now();
+      const lateMs = nowMs - this._lockRenewalExpectedAtMs;
+      if (lateMs > LOCK_RENEW_SEC * 1000) {
+        this._log(`Lock renewal timer fired ${Math.round(lateMs / 1000)}s late — main thread was blocked`, "yellow");
+        log.warn("scheduler", "lock renewal timer fired late (event loop blocked)", {
+          lateMs,
+          intervalMs: LOCK_RENEW_SEC * 1000,
+        });
+      }
+      this._lockRenewalExpectedAtMs = nowMs + LOCK_RENEW_SEC * 1000;
       this._renewSchedulerLock();
     }, LOCK_RENEW_SEC * 1000);
     return true;

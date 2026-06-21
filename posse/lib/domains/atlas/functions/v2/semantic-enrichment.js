@@ -98,7 +98,7 @@ function providerRows({ edgeSources, externalEdges, scipEdges }) {
  */
 function countEdgesBySource(db) {
   try {
-    const rows = db.prepare("SELECT COALESCE(source, 'treesitter') AS source, COUNT(*) AS cnt FROM edges GROUP BY COALESCE(source, 'treesitter')").all();
+    const rows = db.prepare("SELECT source, COUNT(*) AS cnt FROM edges GROUP BY source ORDER BY source").all();
     /** @type {Record<string, number>} */
     const out = {};
     for (const row of rows) out[String(row.source || "treesitter")] = Number(row.cnt || 0);

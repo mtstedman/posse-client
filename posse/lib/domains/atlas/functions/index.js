@@ -18,5 +18,6 @@ export * from "./v2/self-repair.js";
 export * from "./v2/signal-extraction.js";
 export * from "./v2/symbol-id.js";
 export * from "./v2/tree-compression.js";
+export * from "./v2/tools/executor.js";
 export * from "./v2/verbose-errors.js";
 export * from "./v2/view-health.js";

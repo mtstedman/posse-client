@@ -33,6 +33,30 @@ function runDdl(db, sql) {
   db["exec"](sql);
 }
 
+const VIEW_INDEXES = Object.freeze([
+  {
+    name: "idx_symbols_path",
+    sql: "CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(repo_rel_path, range_start, global_id)",
+  },
+  {
+    name: "idx_symbols_lang",
+    sql: "CREATE INDEX IF NOT EXISTS idx_symbols_lang ON symbols(lang)",
+  },
+  {
+    name: "idx_edges_from",
+    sql: "CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_global_id, range_start)",
+  },
+  {
+    name: "idx_edges_to",
+    sql: `CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_global_id, from_global_id)
+      WHERE to_global_id IS NOT NULL`,
+  },
+  {
+    name: "idx_edges_source",
+    sql: "CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source)",
+  },
+]);
+
 /**
  * @param {string} dbPath
  * @returns {Database.Database}
@@ -87,6 +111,7 @@ function openDbReadWrite(dbPath) {
   ensureColumn(db, "edges", "to_external_id", "INTEGER");
   ensureColumn(db, "edges", "external_descriptor", "TEXT");
   ensureColumn(db, "edges", "source", "TEXT NOT NULL DEFAULT 'treesitter'");
+  ensureViewIndexes(db);
   ensureGraphDerivedTables(db);
   return db;
 }
@@ -149,6 +174,59 @@ function ensureColumn(db, table, column, sqlType) {
   );
   if (cols.some((c) => c.name === column)) return;
   runDdl(db, `ALTER TABLE ${table} ADD COLUMN ${column} ${sqlType}`);
+}
+
+/**
+ * Keep additive/replacement index upgrades compatible with existing view DBs.
+ * Views are rebuildable caches, but replacing the known index definitions here
+ * avoids forcing a schema-version bump just to improve planner choices.
+ *
+ * @param {Database.Database} db
+ */
+function ensureViewIndexes(db) {
+  for (const index of VIEW_INDEXES) {
+    ensureIndex(db, index.name, index.sql);
+  }
+}
+
+/**
+ * @param {Database.Database} db
+ * @param {string} name
+ * @param {string} sql
+ */
+function ensureIndex(db, name, sql) {
+  const row = /** @type {{ sql: string | null } | undefined} */ (
+    db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?").get(name)
+  );
+  if (row && normalizeIndexSql(row.sql) !== normalizeIndexSql(sql)) {
+    runDdl(db, `DROP INDEX IF EXISTS ${name}`);
+  }
+  runDdl(db, sql);
+}
+
+/**
+ * @param {string | null | undefined} sql
+ */
+function normalizeIndexSql(sql) {
+  return String(sql || "")
+    .replace(/\s+/g, " ")
+    .replace(/;$/, "")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * @param {string} prefix
+ */
+function pathPrefixBounds(prefix) {
+  const normalized = String(prefix || "").replace(/\/+$/, "");
+  return {
+    exact: normalized,
+    lower: `${normalized}/`,
+    // Repo paths use forward slashes; "0" is the next ASCII code point after
+    // "/". This bounds descendants without matching sibling prefixes.
+    upper: `${normalized}0`,
+  };
 }
 
 /** @implements {ViewContract} */
@@ -368,7 +446,7 @@ export class View {
     );
     const stmtGetSymbol = db.prepare("SELECT * FROM symbols WHERE global_id = ?");
     const stmtSymbolsInFile = db.prepare(
-      "SELECT * FROM symbols WHERE repo_rel_path = ? ORDER BY range_start ASC",
+      "SELECT * FROM symbols WHERE repo_rel_path = ? ORDER BY range_start ASC, global_id ASC",
     );
     const stmtCallers = db.prepare(
       `SELECT from_global_id, to_global_id, to_name, to_module,
@@ -406,7 +484,8 @@ export class View {
     );
     const stmtAllSymbolsPrefixed = db.prepare(
       `SELECT * FROM symbols
-       WHERE repo_rel_path = ? OR repo_rel_path LIKE ? ESCAPE '\\'
+       WHERE repo_rel_path = ?
+          OR (repo_rel_path >= ? AND repo_rel_path < ?)
        ORDER BY global_id ASC LIMIT ?`,
     );
 
@@ -549,10 +628,9 @@ export class View {
               throw new RangeError(`allSymbols: invalid pathPrefix '${opts.pathPrefix}'`);
             }
           }
-          const prefix = String(opts.pathPrefix).replace(/\/+$/, "");
-          const escaped = prefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+          const bounds = pathPrefixBounds(String(opts.pathPrefix));
           const rows = /** @type {any[]} */ (
-            stmtAllSymbolsPrefixed.all(prefix, `${escaped}/%`, limit)
+            stmtAllSymbolsPrefixed.all(bounds.exact, bounds.lower, bounds.upper, limit)
           );
           return rows.map(hydrateSymbol);
         }

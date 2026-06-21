@@ -1,22 +1,23 @@
-// ATLAS MCP proxy.
+// Legacy ATLAS v2 proxy adapter.
 //
-// The deterministic MCP server exposes ATLAS tool schemas and forwards calls
-// into the in-process ATLAS v2 ledger/view backend. This proxy is now a native
-// v2 adapter only.
+// The deterministic MCP gateway no longer imports this module; active MCP
+// atlas.* calls are intercepted by the owner and routed through
+// AtlasToolExecutor/conductor. This file remains as a compatibility adapter for
+// older focused tests and embedded migration coverage.
 
 import fs from "fs";
 import path from "path";
-import { recordObservation, atlasSummaryHint, getObservationContext } from "../../../observability/functions/observations.js";
-import { noteAtlasCall, unlockGateForDeadAtlasResult } from "./gate.js";
-import { SURFACED_ATLAS_TOOL_DEFS } from "./tool-descriptors.js";
-import { coerceLooseAtlasSymbolArgs, extractAtlasResponseTelemetry, extractAtlasResultArtifacts, validateAtlasPayloadSymbolIds } from "../../../atlas/functions/v2/signal-extraction.js";
-import { ATLAS_TOOL_ACTIONS } from "../../../atlas/functions/v2/contracts/tool-params.js";
-import { ATLAS_TOOL_PARAM_SCHEMAS, MEMORY_TYPES } from "../../../atlas/functions/v2/contracts/tool-schemas.js";
-import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../../atlas/functions/v2/runtime-paths.js";
-import { viewFreshness, waitForCurrentView } from "../../../atlas/functions/v2/view-health.js";
-import { AsyncResourceGate } from "../../../../shared/concurrency/functions/async-gate.js";
-import { resolveTargetBranch } from "../../../git/functions/target-branch.js";
-import { canonicalAtlasActionName, formatAtlasToolDisplayName } from "../../../../functions/tools/mcp-surface.js";
+import { recordObservation, atlasSummaryHint, getObservationContext } from "../../observability/functions/observations.js";
+import { noteAtlasCall, unlockGateForDeadAtlasResult } from "./deterministic-mcp/gate.js";
+import { SURFACED_ATLAS_TOOL_DEFS } from "./deterministic-mcp/tool-descriptors.js";
+import { coerceLooseAtlasSymbolArgs, extractAtlasResponseTelemetry, extractAtlasResultArtifacts, validateAtlasPayloadSymbolIds } from "../../atlas/functions/v2/signal-extraction.js";
+import { ATLAS_TOOL_ACTIONS } from "../../atlas/functions/v2/contracts/tool-params.js";
+import { ATLAS_TOOL_PARAM_SCHEMAS, MEMORY_TYPES } from "../../atlas/functions/v2/contracts/tool-schemas.js";
+import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functions/v2/runtime-paths.js";
+import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
+import { AsyncResourceGate } from "../../../shared/concurrency/functions/async-gate.js";
+import { resolveTargetBranch } from "../../git/functions/target-branch.js";
+import { canonicalAtlasActionName, formatAtlasToolDisplayName } from "../../../functions/tools/mcp-surface.js";
 
 const REQUEST_TIMEOUT_MS = 120_000;
 const ATLAS_DEDUPE_WINDOW_MS = 1500;
@@ -827,11 +828,11 @@ async function _loadV2Modules() {
   }
   try {
     const [dispatchMod, ledgerMod, viewMod, embeddingResourcesMod, queryPlannerMod] = await Promise.all([
-      import("../../../atlas/functions/v2/retrieval/dispatch.js"),
-      import("../../../atlas/classes/v2/Ledger.js"),
-      import("../../../atlas/classes/v2/View.js"),
-      import("../../../atlas/functions/v2/embeddings/resources.js"),
-      import("../../../atlas/functions/v2/retrieval/orchestrator/query-planner.js"),
+      import("../../atlas/functions/v2/retrieval/dispatch.js"),
+      import("../../atlas/classes/v2/Ledger.js"),
+      import("../../atlas/classes/v2/View.js"),
+      import("../../atlas/functions/v2/embeddings/resources.js"),
+      import("../../atlas/functions/v2/retrieval/orchestrator/query-planner.js"),
     ]);
     _v2DispatchModule = dispatchMod;
     _v2ClassesModule = { Ledger: ledgerMod.Ledger, View: viewMod.View };
@@ -1202,71 +1203,32 @@ function _isMainViewPath(candidate, configuredRepoRoot) {
   return path.resolve(candidate) === path.resolve(mainViewPath(configuredRepoRoot));
 }
 
-function _asyncTurn() {
-  return new Promise((resolve) => {
-    if (typeof setImmediate === "function") setImmediate(resolve);
-    else setTimeout(resolve, 0);
-  });
-}
-
-function _queueV2Refresh({ queueKey, head = 0, target, action, work }) {
+function _recordV2RefreshDeferred({ queueKey, head = 0, target, action }) {
   const existing = _v2RefreshQueue.get(queueKey);
-  // Coalesce concurrent stale reads that target the same head sequence onto a
-  // single refresh. The settled entry is retained until a newer head
-  // supersedes it (see below), so a sibling reader joins deterministically
-  // even if it arrives *after* the refresh resolves — the coalescing no longer
-  // depends on the two readers overlapping in wall-clock time.
   if (existing && existing.head === head) {
     _log({
-      event: "atlas_v2_auto_refresh_joined",
+      event: "atlas_v2_auto_refresh_deferred_joined",
       path: target,
       action,
+      reason: "mcp_gateway_no_inline_refresh",
     });
-    return existing.job;
+    return false;
   }
-  const job = (async () => {
-    await _asyncTurn();
-    try {
-      const ok = await work();
-      _log({
-        event: "atlas_v2_auto_refresh_completed",
-        path: target,
-        action,
-        ok,
-      });
-      return !!ok;
-    } catch (err) {
-      _log({
-        event: "atlas_v2_auto_refresh_completed",
-        path: target,
-        action,
-        ok: false,
-        error: String(err?.message || err),
-      });
-      // A failed refresh must not linger as the coalescing target — drop it so
-      // the next stale read retries instead of joining a dead result.
-      if (_v2RefreshQueue.get(queueKey)?.job === job) _v2RefreshQueue.delete(queueKey);
-      return false;
-    }
-  })();
-  // Record the head this refresh targets. A later stale read at a newer head
-  // overwrites this entry (forcing a fresh refresh); a successful refresh's
-  // entry is intentionally NOT deleted on completion so same-head siblings
-  // still coalesce.
-  _v2RefreshQueue.set(queueKey, { job, head });
+  // MCP is a protocol gateway, not an indexer. Record the stale read so the
+  // conductor/scheduler can decide how to refresh, but do not run index.refresh
+  // in this owner-hot gateway process.
+  _v2RefreshQueue.set(queueKey, { head });
   _log({
-    event: "atlas_v2_auto_refresh_queued",
+    event: "atlas_v2_auto_refresh_deferred",
     path: target,
     action,
+    reason: "mcp_gateway_no_inline_refresh",
   });
-  return job;
+  return false;
 }
 
 async function _awaitQueuedAutoRefreshStaleView({
-  dispatch,
-  Ledger,
   ledger,
-  ledgerReadOnly = false,
   configuredRepoRoot,
   probe,
   viewCandidates,
@@ -1286,56 +1248,11 @@ async function _awaitQueuedAutoRefreshStaleView({
   // Head the refresh is targeting: keys coalescing so concurrent stale reads
   // collapse onto one refresh while new commits still force a fresh one.
   const targetHead = typeof ledger.headSeq === "function" ? ledger.headSeq(branch) : 0;
-  return _queueV2Refresh({
+  return _recordV2RefreshDeferred({
     queueKey,
     head: targetHead,
     target,
     action,
-    work: async () => {
-      let refreshLedger = ledger;
-      let refreshLease = null;
-      if (ledgerReadOnly && Ledger) {
-        const opened = _openV2LedgerForView({
-          Ledger,
-          configuredRepoRoot,
-          viewMeta: { branch },
-          readOnly: false,
-        });
-        if (opened.ledger) {
-          refreshLedger = opened.ledger;
-          refreshLease = opened.lease;
-        }
-      }
-      try {
-        const head = typeof refreshLedger.headSeq === "function" ? refreshLedger.headSeq(branch) : 0;
-        const call = { action: "index.refresh", mode: "smart", branch };
-        const envelope = await _dispatchV2ThroughGate({
-          dispatch,
-          call,
-          context: {
-            versionId: `${branch}@${head}`,
-            repoRoot: configuredRepoRoot,
-            ledger: refreshLedger,
-          },
-          action: "index.refresh",
-          configuredRepoRoot,
-          ledger: refreshLedger,
-          viewPath: target,
-        });
-        const ok = envelope?.ok !== false && !envelope?.error;
-        if (!ok) {
-          _log({
-            event: "atlas_v2_auto_refresh_error",
-            path: target,
-            action,
-            error: envelope?.error?.message || envelope?.error?.code || "index.refresh failed",
-          });
-        }
-        return ok;
-      } finally {
-        _releaseAtlasProxyResourceLease(refreshLease);
-      }
-    },
   });
 }
 

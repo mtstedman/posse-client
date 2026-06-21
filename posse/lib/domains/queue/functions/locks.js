@@ -29,17 +29,33 @@ export function acquireSchedulerLock(lockName, ownerId, durationSec = 60) {
   }
 }
 
+// The scheduler renews this lock on the MAIN thread every LOCK_RENEW_SEC. With
+// synchronous better-sqlite3 under the orchestrator DB's default 10s
+// busy_timeout, a contended renewal UPDATE would freeze the event loop — and the
+// renewal timer that lives on it — for the full 10s, then throw SQLITE_BUSY
+// (measured ~11s). Cap the renewal's busy budget so a contended renew fails fast
+// and retries next interval instead of stalling the loop; the LOCK_RENEW_SEC*2
+// TTL leaves slack for a single missed renewal.
+const SCHEDULER_LOCK_RENEW_BUSY_MS = 2000;
+
 export function renewSchedulerLock(lockName, ownerId, durationSec = 60) {
   const db = getDb();
   const expiresAt = new Date(Date.now() + durationSec * 1000).toISOString();
   // Update acquired_at on each renewal so it acts as a heartbeat timestamp.
   // Stale-lock detection checks acquired_at age to determine if the holder is alive.
-  const result = db.prepare(`
-    UPDATE scheduler_locks
-    SET expires_at = ?, acquired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-    WHERE lock_name = ? AND owner_id = ?
-  `).run(expiresAt, lockName, ownerId);
-  return result.changes > 0;
+  const prevBusyMs = Number(db.pragma("busy_timeout", { simple: true })) || 10000;
+  try {
+    db.pragma(`busy_timeout = ${SCHEDULER_LOCK_RENEW_BUSY_MS}`);
+    const result = db.prepare(`
+      UPDATE scheduler_locks
+      SET expires_at = ?, acquired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE lock_name = ? AND owner_id = ?
+    `).run(expiresAt, lockName, ownerId);
+    return result.changes > 0;
+  } finally {
+    // Restore the connection's default budget for every other (non-renewal) write.
+    db.pragma(`busy_timeout = ${prevBusyMs}`);
+  }
 }
 
 export function releaseSchedulerLock(lockName, ownerId) {

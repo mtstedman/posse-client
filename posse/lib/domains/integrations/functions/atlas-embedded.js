@@ -35,6 +35,7 @@ import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { resolveTargetBranch } from "../../git/functions/target-branch.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
+import { getSharedAtlasToolExecutor } from "../../atlas/functions/v2/tools/executor.js";
 import {
   getAtlasEmbeddedQueueWaitMs,
   getAtlasEmbeddedTimeoutMs,
@@ -1007,6 +1008,83 @@ function formatAtlasV2EmbeddedError(action, err) {
   }
 }
 
+function canUseAtlasToolExecutor(action, payload, config = {}) {
+  if ((config?.embeddedDispatch || "conductor") === "in-process") return false;
+  if (ATLAS_V2_GATEWAY_ACTIONS.has(action)) return false;
+  if (ATLAS_V2_BLOCKING_ACTIONS.has(action)) return false;
+  if (isBlockingAction(action, payload)) return false;
+  if (action.startsWith("buffer.") || action.startsWith("runtime.")) return false;
+  if (action === "memory.store" || action === "memory.remove" || action === "memory.flag") return false;
+  if (action === "policy.set" || action === "agent.feedback") return false;
+  return true;
+}
+
+function mcpResultText(result) {
+  if (!result || typeof result !== "object") return "";
+  if (Array.isArray(result.content)) {
+    return result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("");
+  }
+  try { return JSON.stringify(result, null, 2); } catch { return String(result); }
+}
+
+async function executeEmbeddedAtlasViaExecutor({
+  action,
+  payload,
+  cwd,
+  config,
+  repo,
+  startedAt,
+  origin,
+  queueInfo = null,
+}) {
+  const repoRoot = repo?.repoPath || config?.requestedRepoPath || cwd || process.cwd();
+  const executor = getSharedAtlasToolExecutor();
+  const executed = await executor.executeTool({
+    toolName: action,
+    args: payload && typeof payload === "object" ? payload : {},
+    config: {
+      ...(config && typeof config === "object" ? config : {}),
+      cwd: cwd || repoRoot,
+      repoRoot,
+      repoId: repo?.repoId || config?.requestedRepoId || null,
+    },
+    session: {
+      bootConfig: {
+        cwd: cwd || repoRoot,
+        atlas: {
+          ...(config && typeof config === "object" ? config : {}),
+          repoPath: repoRoot,
+          repoId: repo?.repoId || config?.requestedRepoId || null,
+        },
+      },
+    },
+    source: {
+      kind: "embedded",
+      origin,
+    },
+    waitMs: Math.max(5000, Number(config?.embeddedTimeoutMs) || getAtlasEmbeddedTimeoutMs()),
+  });
+  const text = mcpResultText(executed?.result);
+  const ok = !!executed?.result && executed.result.isError !== true && !/^Error:/i.test(text);
+  recordAtlasToolObservation({
+    action,
+    invocation: { source: "atlas-tool-executor", command: null },
+    args: payload,
+    ok,
+    durationMs: Date.now() - startedAt,
+    origin,
+    queueInfo,
+    resultChars: text.length,
+    ...(ok ? {
+      artifacts: extractAtlasResultArtifacts(text, { action, args: payload }),
+      responseTelemetry: extractAtlasResponseTelemetry(text),
+    } : {
+      error: text || "ATLAS executor returned no result",
+    }),
+  });
+  return text || `Error: ATLAS tool ${action} failed via AtlasToolExecutor: empty result`;
+}
+
 /**
  * @param {any} args
  */
@@ -1440,16 +1518,22 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
       work_item_id: obsCtx.work_item_id ?? null,
       job_id: obsCtx.job_id ?? null,
     });
-    const runGatedCall = () => withProtectedAtlasGate((queueInfo) => executeEmbeddedAtlasV2Tool({
-      action: prepared.action,
-      payload: prepared.payload,
-      cwd,
-      config,
-      repo,
-      startedAt,
-      origin,
-      queueInfo,
-    }), {
+    const useToolExecutor = canUseAtlasToolExecutor(prepared.action, prepared.payload, config);
+    const runGatedCall = () => withProtectedAtlasGate((queueInfo) => {
+      const runArgs = {
+        action: prepared.action,
+        payload: prepared.payload,
+        cwd,
+        config,
+        repo,
+        startedAt,
+        origin,
+        queueInfo,
+      };
+      return useToolExecutor
+        ? executeEmbeddedAtlasViaExecutor(runArgs)
+        : executeEmbeddedAtlasV2Tool(runArgs);
+    }, {
       action: prepared.action,
       payload: prepared.payload,
       origin,

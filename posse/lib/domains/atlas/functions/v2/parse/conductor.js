@@ -44,7 +44,7 @@ function registerAtlasThreadDaemon(kind, daemon, label) {
   return daemon;
 }
 
-/** @returns {{ stage, ingest, warm, merge, retrieve, reindex, reindexLanguage, info, readerInfo, close, daemon: Daemon }} */
+/** @returns {{ stage, ingest, warm, merge, retrieve, executeTool, reindex, reindexLanguage, info, readerInfo, close, daemon: Daemon }} */
 export function createConductorDaemon() {
   const nativeAuth = heartbeatAuthManager.getCapability();
   const daemon = registerAtlasThreadDaemon("atlas-conductor", new Daemon({
@@ -204,6 +204,7 @@ export function createConductorDaemon() {
   const warm = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts), { holdEmbeddings: true });
   const merge = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "merge", ...opts }, reqOpts));
   const retrieve = (opts, reqOpts) => call(getReaderDaemon(), { op: "retrieve", ...opts }, reqOpts);
+  const executeTool = (opts, reqOpts) => call(getReaderDaemon(), { op: "executeTool", ...opts }, reqOpts);
 
   return {
     daemon,
@@ -212,6 +213,7 @@ export function createConductorDaemon() {
     warm,
     merge,
     retrieve,
+    executeTool,
     info: async () => {
       const data = await call(daemon, { op: "info" });
       return { ...data, readerAlive: readerDaemon?.isHostAlive() ?? false };
@@ -434,6 +436,7 @@ export function getSharedConductor() {
       reindex: _indexTracked(base.reindex),
       reindexLanguage: _indexTracked(base.reindexLanguage),
       retrieve: _tracked(base.retrieve),
+      executeTool: _tracked(base.executeTool),
     };
   }
   return _sharedConductor;

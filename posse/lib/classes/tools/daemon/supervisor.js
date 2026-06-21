@@ -88,6 +88,11 @@ export class DaemonSupervisor {
       if (prior) { try { prior(event); } catch { /* observational */ } }
       this.#emit(event);
     };
+    // This supervisor owns the single process-exit hook for the whole registry
+    // (#installExitHook below), so the daemon must drop its own per-instance
+    // hook — otherwise long-lived daemons accumulate one "exit" listener each
+    // and trip MaxListenersExceededWarning.
+    daemon.delegateExitCleanup?.();
     this.#installExitHook();
   }
 

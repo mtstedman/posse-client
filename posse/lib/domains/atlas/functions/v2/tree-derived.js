@@ -63,6 +63,11 @@ export function ensureTreeDerivedTables(db) {
     CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_symbol
       ON atlas_tree_nodes(symbol_global_id)
       WHERE symbol_global_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_symbol_ref
+      ON atlas_tree_nodes(symbol_ref)
+      WHERE symbol_ref IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_kind
+      ON atlas_tree_nodes(kind);
 
     CREATE TABLE IF NOT EXISTS atlas_tree_refs (
       node_id  TEXT NOT NULL,

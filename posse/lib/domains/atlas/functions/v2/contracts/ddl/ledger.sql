@@ -247,6 +247,9 @@ CREATE TABLE IF NOT EXISTS blob_layer_edges (
 CREATE INDEX IF NOT EXISTS blob_layers_lookup
   ON blob_layers (content_hash, source, lang, status);
 
+CREATE INDEX IF NOT EXISTS idx_blob_layers_merge_read
+  ON blob_layers(content_hash, lang, status, indexed_at DESC, id DESC);
+
 -- -----------------------------------------------------------------------------
 -- Branch lineage. main is the root; every other branch is forked at a
 -- specific parent seq. Forks are free — they just record lineage.
@@ -327,6 +330,9 @@ CREATE INDEX IF NOT EXISTS idx_feedback_signals_symbol
 
 CREATE INDEX IF NOT EXISTS idx_feedback_signals_ts
   ON feedback_signals(ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_signals_task_ts
+  ON feedback_signals(task_type, ts DESC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS feedback_fts USING fts5 (
   task_text,

@@ -86,6 +86,10 @@ export class Daemon {
     this._exitHookInstalled = false;
     /** @type {(() => void) | null} the process-exit cleanup handler, kept so it can be removed on stop/dispose */
     this._exitHandler = null;
+    /** When registered with a DaemonSupervisor, that supervisor owns the single
+     * process-exit hook for the whole registry, so this daemon must not install
+     * its own (avoids one-listener-per-daemon MaxListenersExceededWarning). */
+    this._exitHookDelegated = false;
   }
 
   /** @param {string} kind @param {Record<string, unknown>} [detail] */
@@ -106,6 +110,20 @@ export class Daemon {
       this._exitHandler = null;
     }
     this._exitHookInstalled = false;
+  }
+
+  /**
+   * Called by DaemonSupervisor.register(): the supervisor installs ONE
+   * process-exit hook for the whole registry that stop()s every registered
+   * daemon, so a registered daemon must relinquish its own per-instance hook.
+   * Without this, each long-lived daemon's `process.once("exit")` persists for
+   * the whole run and they accumulate past Node's default 10-listener limit
+   * (MaxListenersExceededWarning). Removes any installed hook and suppresses
+   * future installs. Unregistered/standalone daemons keep their own hook.
+   */
+  delegateExitCleanup() {
+    this._exitHookDelegated = true;
+    this.#removeExitHook();
   }
 
   /**
@@ -190,7 +208,7 @@ export class Daemon {
       });
       this._transport = transport;
       this._runningKey = desiredKey;
-      if (!this._exitHookInstalled) {
+      if (!this._exitHookInstalled && !this._exitHookDelegated) {
         this._exitHookInstalled = true;
         this._exitHandler = () => this.stop();
         process.once("exit", this._exitHandler);

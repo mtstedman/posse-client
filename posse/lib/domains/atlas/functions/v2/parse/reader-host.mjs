@@ -57,6 +57,12 @@ runDaemonThread(async (payload) => {
       return runConductorRetrieve(/** @type {any} */ (payload));
     }
 
+    case "executeTool": {
+      retrieves++;
+      const { runConductorToolExecution } = await import("./retrieve-runner.js");
+      return runConductorToolExecution(/** @type {any} */ (payload));
+    }
+
     case "invalidate": {
       // An indexing op rewrote the on-disk ANN; drop cached embedding
       // resources so the next semantic retrieve reopens the fresh index.

@@ -75,8 +75,9 @@ CREATE TABLE IF NOT EXISTS symbols (
 CREATE INDEX IF NOT EXISTS idx_symbols_name           ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_qualified_name ON symbols(qualified_name)
   WHERE qualified_name IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_symbols_path           ON symbols(repo_rel_path);
+CREATE INDEX IF NOT EXISTS idx_symbols_path           ON symbols(repo_rel_path, range_start, global_id);
 CREATE INDEX IF NOT EXISTS idx_symbols_kind           ON symbols(kind);
+CREATE INDEX IF NOT EXISTS idx_symbols_lang           ON symbols(lang);
 CREATE INDEX IF NOT EXISTS idx_symbols_content_local  ON symbols(content_hash, local_id);
 
 -- Full-text search over symbol names + qualified names. External-content
@@ -135,11 +136,12 @@ CREATE TABLE IF NOT EXISTS edges (
   FOREIGN KEY (to_global_id)   REFERENCES symbols(global_id) ON DELETE SET NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_edges_from    ON edges(from_global_id);
-CREATE INDEX IF NOT EXISTS idx_edges_to      ON edges(to_global_id)
+CREATE INDEX IF NOT EXISTS idx_edges_from    ON edges(from_global_id, range_start);
+CREATE INDEX IF NOT EXISTS idx_edges_to      ON edges(to_global_id, from_global_id)
   WHERE to_global_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_edges_to_name ON edges(to_name);
 CREATE INDEX IF NOT EXISTS idx_edges_kind    ON edges(kind);
+CREATE INDEX IF NOT EXISTS idx_edges_source  ON edges(source);
 CREATE INDEX IF NOT EXISTS idx_edges_external ON edges(to_external_id)
   WHERE to_external_id IS NOT NULL;
 
@@ -243,6 +245,13 @@ CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_path
 CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_symbol
   ON atlas_tree_nodes(symbol_global_id)
   WHERE symbol_global_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_symbol_ref
+  ON atlas_tree_nodes(symbol_ref)
+  WHERE symbol_ref IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_kind
+  ON atlas_tree_nodes(kind);
 
 CREATE TABLE IF NOT EXISTS atlas_tree_refs (
   node_id  TEXT NOT NULL,

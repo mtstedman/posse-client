@@ -18,6 +18,7 @@ import {
   bootConfigFromMcpOAuthClaims,
   verifyMcpOAuthToken,
 } from "../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
+import { getSharedAtlasToolExecutor } from "../../domains/atlas/functions/v2/tools/executor.js";
 import {
   getAtlasRouteDefinitionForRole,
   getDeterministicMcpToolNames,
@@ -294,6 +295,50 @@ function deniedToolCallMessage(message, toolName, policy) {
       isError: true,
     },
   };
+}
+
+function mcpToolErrorPayload(message, error = null) {
+  const text = String(message || "ATLAS tool execution failed");
+  const structured = error && typeof error === "object"
+    ? {
+        code: error.code ? String(error.code) : "atlas_tool_error",
+        message: error.message ? String(error.message) : text,
+        ...(error.details === undefined ? {} : { details: error.details }),
+      }
+    : null;
+  return {
+    content: [{ type: "text", text: `Error: ${text}` }],
+    isError: true,
+    ...(structured ? { structuredContent: { error: structured }, _meta: { atlasError: structured } } : {}),
+  };
+}
+
+function mcpToolResultMessage(message, result) {
+  const id = message && Object.prototype.hasOwnProperty.call(message, "id") ? message.id : null;
+  if (id == null) return null;
+  return {
+    jsonrpc: "2.0",
+    id,
+    result,
+  };
+}
+
+function atlasExecutorSessionContext(session) {
+  return {
+    id: session?.id || null,
+    bootConfig: stripGatewaySessionTokenFields(session?.bootConfig || {}),
+    tokenSource: session?.tokenSource || null,
+    tokenVerified: session?.tokenVerified === true,
+  };
+}
+
+function mcpToolCallSuccess(response = null) {
+  const result = response?.result;
+  if (!result || result.isError === true) return false;
+  const text = Array.isArray(result?.content)
+    ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("")
+    : "";
+  return !/^(?:Error:|AUDIT ERROR:)/i.test(String(text || ""));
 }
 
 function jsonlParseBuffer(buffer, onMessage) {
@@ -933,6 +978,7 @@ export class PersistentMcpOwner {
       const policy = sessionToolPolicy(session);
       if (message.method === "tools/call") {
         const toolName = String(message?.params?.name || "");
+        const toolArgs = message?.params?.arguments || {};
         if (!toolAllowedByPolicy(policy, toolName, message?.params?.arguments || {})) {
           sendJson(res, 200, {
             ok: true,
@@ -942,8 +988,30 @@ export class PersistentMcpOwner {
           });
           return;
         }
+        const requested = requestedToolPolicyName(toolName, toolArgs);
+        if (requested.suite === "atlas") {
+          const response = await this._executeAtlasToolCall({ message, session, toolName, toolArgs });
+          sendJson(res, 200, {
+            ok: true,
+            bootId: this.bootId,
+            sessionId: id,
+            message: response,
+          });
+          return;
+        }
       }
       let response = await this._gatewaySession.request(injectSessionContext(message, session));
+      if (message.method === "tools/call" && mcpToolCallSuccess(response)) {
+        void this._scheduleAtlasWriteRefresh({ message, session, response }).catch((err) => {
+          appendRunTelemetry("diagnostics", {
+            kind: "mcp.owner.atlas_write_refresh",
+            ...attachTelemetryContext(session, this.bootId),
+            outcome: "error",
+            duration_ms: 0,
+            error: ownerErrorSummary(err),
+          });
+        });
+      }
       if (message.method === "tools/list") {
         response = filterToolsListMessage(response, policy);
         const count = session.noteToolsList(response);
@@ -973,6 +1041,87 @@ export class PersistentMcpOwner {
         error: String(err?.message || err),
       });
     }
+  }
+
+  async _executeAtlasToolCall({ message, session, toolName, toolArgs }) {
+    const startedAt = Date.now();
+    const context = attachTelemetryContext(session, this.bootId);
+    try {
+      const executor = getSharedAtlasToolExecutor();
+      const executed = await executor.executeTool({
+        toolName,
+        args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
+        session: atlasExecutorSessionContext(session),
+        source: {
+          kind: "mcp_owner",
+          ownerBootId: this.bootId,
+          sessionId: session?.id || null,
+        },
+      });
+      const result = executed?.result && typeof executed.result === "object"
+        ? executed.result
+        : mcpToolErrorPayload("ATLAS executor returned no MCP result");
+      appendRunTelemetry("diagnostics", {
+        kind: "mcp.owner.atlas_tool_call",
+        ...context,
+        outcome: result?.isError ? "tool_error" : "ok",
+        tool_name: toolName,
+        duration_ms: Date.now() - startedAt,
+        executor: executed?.executor || null,
+      });
+      return mcpToolResultMessage(message, result);
+    } catch (err) {
+      appendRunTelemetry("diagnostics", {
+        kind: "mcp.owner.atlas_tool_call",
+        ...context,
+        outcome: "error",
+        tool_name: toolName,
+        duration_ms: Date.now() - startedAt,
+        error: ownerErrorSummary(err),
+      });
+      return mcpToolResultMessage(
+        message,
+        mcpToolErrorPayload(String(err?.message || err || "ATLAS tool execution failed"), err),
+      );
+    }
+  }
+
+  async _scheduleAtlasWriteRefresh({ message, session, response }) {
+    const toolName = String(message?.params?.name || "");
+    const toolArgs = message?.params?.arguments || {};
+    const requested = requestedToolPolicyName(toolName, toolArgs);
+    if (requested.suite !== "tools") return null;
+    if (requested.name !== "write_file" && requested.name !== "edit_file") return null;
+    const startedAt = Date.now();
+    const executor = getSharedAtlasToolExecutor();
+    const scheduled = await executor.scheduleDeterministicWriteRefresh({
+      toolName: requested.name,
+      args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
+      session: atlasExecutorSessionContext(session),
+      source: {
+        kind: "mcp_owner_deterministic_write",
+        ownerBootId: this.bootId,
+        sessionId: session?.id || null,
+        originalToolName: toolName,
+      },
+      result: response?.result || null,
+    });
+    appendRunTelemetry("diagnostics", {
+      kind: "mcp.owner.atlas_write_refresh",
+      ...attachTelemetryContext(session, this.bootId),
+      outcome: scheduled ? (scheduled.ok === false ? "tool_error" : "ok") : "skipped",
+      tool_name: requested.name,
+      path: typeof toolArgs?.path === "string" ? capString(toolArgs.path, 240) : null,
+      duration_ms: Date.now() - startedAt,
+      scheduled: !!scheduled,
+      detail: scheduled ? {
+        action: scheduled.action || null,
+        via: scheduled.via || null,
+        branch: scheduled.branch || null,
+        queue: scheduled.queue || null,
+      } : null,
+    });
+    return scheduled;
   }
 
   _authorized(req) {

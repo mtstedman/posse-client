@@ -953,39 +953,47 @@ async function _prefetchExactScopedFiles(filePaths, {
   if (targets.length === 0) return [];
   const tools = new Set(Array.isArray(toolsAvailable) ? toolsAvailable : []);
 
-  const readFile = (file) => Promise.resolve().then(() => {
-    // Realpath-based containment (symlink-safe) + sensitive-env skip, matching
-    // the guards every other handoff read path enforces (see file-attach.js).
-    const absolute = resolvePathWithin(packet.cwd || ".", file, { allowEqual: false });
-    if (!absolute) {
-      return { file, ok: false, kind: "read_file", error: "path escaped repository root" };
+  const readFile = async (file) => {
+    try {
+      // Realpath-based containment (symlink-safe) + sensitive-env skip, matching
+      // the guards every other handoff read path enforces (see file-attach.js).
+      const absolute = resolvePathWithin(packet.cwd || ".", file, { allowEqual: false });
+      if (!absolute) {
+        return { file, ok: false, kind: "read_file", error: "path escaped repository root" };
+      }
+      if (isSensitiveEnvFileOrTargetPath(absolute)) {
+        return { file, ok: false, kind: "read_file", error: "sensitive_env file skipped" };
+      }
+      // Async read: keeps the disk wait on the libuv threadpool so the worker's
+      // event loop — which the scheduler's lock-renewal timer shares — is not
+      // blocked. The previous readFileSync froze the loop ~2-3s per prefetch
+      // batch (measured), stacking into the lock-renewal "starved" warnings.
+      const source = await fs.promises.readFile(absolute, "utf8");
+      const totalBytes = Buffer.byteLength(source, "utf8");
+      const allLines = source.split(/\r?\n/);
+      const limitedLines = allLines.slice(0, ATLAS_EXACT_PREFETCH_MAX_LINES);
+      let content = limitedLines.join("\n");
+      let truncated = limitedLines.length < allLines.length;
+      const buf = Buffer.from(content, "utf8");
+      if (buf.length > ATLAS_EXACT_PREFETCH_MAX_BYTES) {
+        content = buf.subarray(0, ATLAS_EXACT_PREFETCH_MAX_BYTES).toString("utf8");
+        truncated = true;
+      }
+      return {
+        file,
+        ok: true,
+        kind: "read_file",
+        content,
+        bytes: totalBytes,
+        totalBytes,
+        totalLines: allLines.length,
+        returnedLines: limitedLines.length,
+        truncated,
+      };
+    } catch (err) {
+      return { file, ok: false, kind: "read_file", error: String(err?.message || err).slice(0, 240) };
     }
-    if (isSensitiveEnvFileOrTargetPath(absolute)) {
-      return { file, ok: false, kind: "read_file", error: "sensitive_env file skipped" };
-    }
-    const source = fs.readFileSync(absolute, "utf8");
-    const totalBytes = Buffer.byteLength(source, "utf8");
-    const allLines = source.split(/\r?\n/);
-    const limitedLines = allLines.slice(0, ATLAS_EXACT_PREFETCH_MAX_LINES);
-    let content = limitedLines.join("\n");
-    let truncated = limitedLines.length < allLines.length;
-    const buf = Buffer.from(content, "utf8");
-    if (buf.length > ATLAS_EXACT_PREFETCH_MAX_BYTES) {
-      content = buf.subarray(0, ATLAS_EXACT_PREFETCH_MAX_BYTES).toString("utf8");
-      truncated = true;
-    }
-    return {
-      file,
-      ok: true,
-      kind: "read_file",
-      content,
-      bytes: totalBytes,
-      totalBytes,
-      totalLines: allLines.length,
-      returnedLines: limitedLines.length,
-      truncated,
-    };
-  }).catch((err) => ({ file, ok: false, kind: "read_file", error: String(err?.message || err).slice(0, 240) }));
+  };
 
   const readSkeleton = (file) => _memoizedSkeletonFetch(packet, file, perFileTimeoutMs).then(
     (raw) => {

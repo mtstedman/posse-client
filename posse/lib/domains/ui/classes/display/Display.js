@@ -2581,9 +2581,9 @@ export class Display {
 
     // ── ONNX encoder warm state ──
     // The encoder warm no longer rides as a stray chip in the workers list —
-    // it's reported in the bottom context status bar (_buildContextStatusBar)
-    // alongside the graph-warm verdict, so the whole code-intelligence picture
-    // reads in one place.
+    // it's reported by the ATLAS/ONNX readiness bars below (see
+    // _buildAtlasReadinessLines), alongside the graph-warm verdict, so the whole
+    // code-intelligence picture reads in one place.
 
     // ── Queue (fills remaining space) ──
     const footerLineBudget = Math.min(Math.max(0, maxLines - workers.length - 3), 9);
@@ -2703,8 +2703,10 @@ export class Display {
 
     try {
       const { workItems, jobs: allJobs, dirtyState = null } = this._getQueueData();
+      // Background ATLAS warm jobs are reported by the context-health readiness
+      // bars (see _buildAtlasReadinessLines), not as queue rows, so the queue
+      // shows only normal work-item jobs.
       const normalJobs = allJobs.filter((job) => !jobIsBackgroundAtlasWarm(job));
-      const warmJobs = allJobs.filter((job) => jobIsBackgroundAtlasWarm(job));
       const jobsByWi = new Map();
       for (const job of normalJobs) {
         if (!jobsByWi.has(job.work_item_id)) jobsByWi.set(job.work_item_id, []);
@@ -2798,6 +2800,11 @@ export class Display {
         const dirtyReview = dirtyReviewByWi.get(Number(wi.id)) || null;
         if (lines.length >= maxLines - 1) {
           const remaining = visibleItems.length - wiIdx;
+          // A prior work-item block can push us to (or past) the budget, so drop
+          // any trailing detail rows before appending the tally. Otherwise the
+          // "... N more" line overruns maxLines and the panel assembler clips a
+          // line off the bottom — which is the pinned provider/codex usage footer.
+          while (lines.length > maxLines - 1) lines.pop();
           lines.push(` ${C.dim}... ${remaining} more${C.reset}`);
           break;
         }
@@ -2874,6 +2881,12 @@ export class Display {
     } catch {
       lines.push(` ${C.dim}(loading...)${C.reset}`);
     }
+
+    // Honor the budget unconditionally: the per-work-item body pushes a few rows
+    // ("+N hidden", done summaries) without re-checking, so the last block can
+    // overshoot. Returning more than maxLines lets the assembler clip the pinned
+    // footer off the bottom of the panel.
+    if (lines.length > maxLines) lines.length = maxLines;
 
     return lines;
   }

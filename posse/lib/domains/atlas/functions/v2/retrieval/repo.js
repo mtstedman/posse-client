@@ -635,13 +635,13 @@ function readAllSymbols(view, opts = {}) {
       /** @type {any[]} */
       let rows;
       if (opts.pathPrefix) {
-        const prefix = String(opts.pathPrefix).replace(/\/+$/, "");
-        const escaped = prefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+        const bounds = pathPrefixBounds(String(opts.pathPrefix));
         rows = db.prepare(
           `SELECT * FROM symbols
-           WHERE repo_rel_path = ? OR repo_rel_path LIKE ? ESCAPE '\\'
+           WHERE repo_rel_path = ?
+              OR (repo_rel_path >= ? AND repo_rel_path < ?)
            ORDER BY global_id ASC`,
-        ).all(prefix, `${escaped}/%`);
+        ).all(bounds.exact, bounds.lower, bounds.upper);
       } else {
         rows = db.prepare("SELECT * FROM symbols ORDER BY global_id ASC").all();
       }
@@ -654,6 +654,18 @@ function readAllSymbols(view, opts = {}) {
     limit: Number.MAX_SAFE_INTEGER,
     ...(opts.pathPrefix ? { pathPrefix: opts.pathPrefix } : {}),
   });
+}
+
+/**
+ * @param {string} prefix
+ */
+function pathPrefixBounds(prefix) {
+  const normalized = String(prefix || "").replace(/\/+$/, "");
+  return {
+    exact: normalized,
+    lower: `${normalized}/`,
+    upper: `${normalized}0`,
+  };
 }
 
 /**
