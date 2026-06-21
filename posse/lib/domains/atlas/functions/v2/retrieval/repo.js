@@ -107,7 +107,7 @@ export async function repoRegister({ versionId, params, repoRoot, repoId = "defa
         branch,
         atSeq: seq,
         outPath: viewPath,
-        options: { repoRoot: root },
+        options: { repoRoot: root, layerMerge: true },
       }, {
         label: "repo.register.buildEmptyView",
       });

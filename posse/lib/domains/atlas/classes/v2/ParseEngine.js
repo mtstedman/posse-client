@@ -319,10 +319,14 @@ function patchViewBranchMeta(viewPath, meta) {
 }
 
 /**
- * @param {{ meta: any, ledger: Ledger, branch: string, allowParentBranchAtSeq?: number | null, parentBranch?: string }} args
+ * @param {{ meta: any, ledger: Ledger, branch: string, allowParentBranchAtSeq?: number | null, parentBranch?: string, layerMerge?: boolean | null }} args
  * @returns {{ ok: boolean, reason?: string }}
  */
-function viewCanServeBranch({ meta, ledger, branch, allowParentBranchAtSeq = null, parentBranch = "main" }) {
+function viewCanServeBranch({ meta, ledger, branch, allowParentBranchAtSeq = null, parentBranch = "main", layerMerge = null }) {
+  const modeFreshness = viewFreshness(meta, null, { layerMerge });
+  if (!modeFreshness.current) {
+    return { ok: false, reason: modeFreshness.reason || "view build mode is stale" };
+  }
   if (allowParentBranchAtSeq != null && meta?.branch === parentBranch) {
     return Number(meta.ledger_seq) === allowParentBranchAtSeq
       ? { ok: true }
@@ -331,7 +335,7 @@ function viewCanServeBranch({ meta, ledger, branch, allowParentBranchAtSeq = nul
   if (!meta || meta.branch !== branch) {
     return { ok: false, reason: `view branch '${meta?.branch || "unknown"}' does not match '${branch}'` };
   }
-  const freshness = viewFreshness(meta, ledger);
+  const freshness = viewFreshness(meta, ledger, { layerMerge });
   return freshness.current ? { ok: true } : { ok: false, reason: freshness.reason || "view is stale" };
 }
 
@@ -434,6 +438,10 @@ export class ParseEngine {
       treeCompressionMode: this.#treeCompressionMode,
       treeCompressionMaxSeeds: this.#treeCompressionMaxSeeds,
     };
+  }
+
+  #viewMetaMatchesBuildMode(meta) {
+    return viewFreshness(meta, null, { layerMerge: this.#viewLayerMerge }).current === true;
   }
 
   #emitProgress(event) {
@@ -913,6 +921,7 @@ export class ParseEngine {
             branch: targetBranch,
             allowParentBranchAtSeq: branchRec?.parent_seq ?? null,
             parentBranch: branchRec?.parent_branch || this.#defaultBranch,
+            layerMerge: this.#viewLayerMerge,
           })
         : { ok: false };
       try { if (warmedProbe.ok) warmedProbe.view.close(); } catch { /* ignore */ }
@@ -941,6 +950,7 @@ export class ParseEngine {
             branch: targetBranch,
             allowParentBranchAtSeq: branchRec?.parent_seq ?? null,
             parentBranch: branchRec?.parent_branch || this.#defaultBranch,
+            layerMerge: this.#viewLayerMerge,
           })
         : { ok: false };
       if (mainProbe.ok) {
@@ -1292,7 +1302,8 @@ export class ParseEngine {
         }
         const stale = !existingMeta
           || existingMeta.branch !== checkBranch
-          || existingMeta.ledger_seq !== headSeqNow;
+          || existingMeta.ledger_seq !== headSeqNow
+          || !this.#viewMetaMatchesBuildMode(existingMeta);
         if (!stale && existingMeta) {
           base.view_written = outPath;
           base.view_etag = existingMeta.built_at;
@@ -1330,6 +1341,7 @@ export class ParseEngine {
               branch: targetBranch,
               allowParentBranchAtSeq: parentCloneSeq,
               parentBranch: branchRec?.parent_branch || this.#defaultBranch,
+              layerMerge: this.#viewLayerMerge,
             })
           : { ok: false };
         if (mainProbe.ok) {
@@ -1712,6 +1724,11 @@ export class ParseEngine {
         const meta = view.meta();
         if (meta.branch !== branch) {
           // Branch swap — incremental is unsafe across branches; do a full rebuild.
+          try { view.close(); } catch { /* ignore */ }
+          view = null;
+          return { fallback: true, result: base };
+        }
+        if (!this.#viewMetaMatchesBuildMode(meta)) {
           try { view.close(); } catch { /* ignore */ }
           view = null;
           return { fallback: true, result: base };

@@ -46,12 +46,14 @@ export function classifyBlockedRecoveryAnswer(answer) {
   const text = String(answer || "").trim().toLowerCase();
   if (!text || text === "(skipped)") return "unknown";
   const negated = (wordPattern) => new RegExp(`\\b(do not|don't|dont|not|never)\\s+(?:want\\s+to\\s+)?(?:${wordPattern})\\b`, "i").test(text);
+  const hasActionWord = /\b(replan|re-plan|split|narrow|change plan|skip|skipped|ignore|bypass|cancel|canceled|cancelled|retry|re-try|rerun|re-run|try again|continue|unblock|resume|pass|passed|approve|approved|accept|accepted|mark done|succeed|succeeded|fail|failed|reject|rejected|dead[- ]?letter|deadletter|abandon|stop)\b/.test(text);
   if (/\b(replan|re-plan|split|narrow|change plan)\b/.test(text) && !negated("replan|re-plan|split|narrow")) return "replan";
   if (/\b(skip|skipped|ignore|bypass|cancel|canceled|cancelled)\b/.test(text) && !negated("skip|ignore|bypass|cancel|canceled|cancelled")) return "skip";
   if (/\b(retry|re-try|rerun|re-run|try again|continue|unblock|resume)\b/.test(text) && !negated("retry|re-try|rerun|re-run|try again|continue|unblock|resume")) return "retry";
   if (/\b(pass|passed|approve|approved|accept|accepted|mark done|succeed|succeeded)\b/.test(text) && !negated("pass|approve|accept|mark done|succeed")) return "pass";
   if (/\b(fail|failed|reject|rejected|dead[- ]?letter|deadletter|abandon|stop)\b/.test(text) && !negated("fail|reject|dead[- ]?letter|deadletter|abandon|stop")) return "fail";
-  return "unknown";
+  if (hasActionWord) return "unknown";
+  return "retry";
 }
 
 function providerFromRecoveryAnswer(answer) {

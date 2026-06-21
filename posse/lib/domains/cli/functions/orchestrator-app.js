@@ -60,9 +60,6 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 import { editorCommandLabel, parseEditorCommand, resolveEditorCommand } from "./editor.js";
-import {
-  runAuditCommand as runAuditCommandFromModule,
-} from "./audit-command.js";
 import { initArtifactRootsAsync, ensureArtifactDirs, wiScopeId, contextDir, isArtifactMode, getArtifactProtocol, getConfiguredImageProviders, getResolvedImageProtocol, artifactsDir, pruneEmptyArtifactDirsAsync } from "../../artifacts/functions/index.js";
 import {
   createWorkItem,
@@ -147,36 +144,9 @@ import {
   resolveInputContextSelection,
   resolveResearchBudgetForDeepthink,
 } from "./flags.js";
-import {
-  buildReviewReportData as buildReviewReportDataFromModule,
-  listReviewableWorkItemsForApproval as listReviewableWorkItemsForApprovalFromModule,
-  saveReport as saveReportFromModule,
-} from "./review-report.js";
-import {
-  runCostCommand as runCostCommandFromModule,
-  runFanoutCommand as runFanoutCommandFromModule,
-  runSessionsCommand as runSessionsCommandFromModule,
-  runTimelineCommand as runTimelineCommandFromModule,
-} from "./report-commands.js";
-import { runMemoryAdminCommand } from "./memory-commands.js";
 import { atlasV2UsageSummary } from "./atlas-v2-help.js";
-import { cmdDoctor as cmdDoctorImpl } from "./doctor-command.js";
 import { buildRuntimeEnv, getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { clearColdIndex as clearColdIndexImpl } from "./cold-index.js";
-import { cmdAdminWorktrees as cmdAdminWorktreesImpl } from "./admin-worktrees.js";
-import { runServeCommand } from "./commands/serve.js";
-import {
-  cmdCalls as cmdCallsImpl,
-  cmdPrompts as cmdPromptsImpl,
-  cmdReplay as cmdReplayImpl,
-  cmdUsage as cmdUsageImpl,
-  cmdAtlasSmoke as cmdAtlasSmokeImpl,
-  cmdAtlas as cmdAtlasImpl,
-  cmdAtlasV2 as cmdAtlasV2Impl,
-  cmdCodexModels as cmdCodexModelsImpl,
-  cmdMcpStatus as cmdMcpStatusImpl,
-  cmdWindowsEvents as cmdWindowsEventsImpl,
-} from "./diagnostic-commands.js";
 import {
   createReviewSession as createReviewSessionImpl,
   createReviewSessionDeps as createReviewSessionDepsImpl,
@@ -228,7 +198,7 @@ import { closePromptLog, readRecentPrompts } from "../../../shared/telemetry/fun
 import { loadRemotePromptBundle } from "../../remote/functions/prompt-bundle.js";
 import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
 import { resolveTargetBranch } from "../../git/functions/target-branch.js";
-import { ensureRestrictivePushRefspecs } from "../../git/functions/push-guard.js";
+import { ensureRestrictivePushRefspecsAsync, remotePushConfigsAreClearlyRestrictive } from "../../git/functions/push-guard.js";
 import { normalizeIntakeHints } from "../../worker/functions/helpers/intake-hints.js";
 import {
   collectHandledSuggestionKeys,
@@ -389,9 +359,20 @@ async function posseAliasDiagnostic() {
   return `  ${C.yellow}Alias notice:${C.reset} legacy command ${C.cyan}claude-org${C.reset} is on PATH, but ${C.cyan}posse${C.reset} is not. Re-run the installer or npm link this package to add the alias.\n`;
 }
 
-function ensureSnapshotPushRefsGuarded({ verbose = false } = {}) {
+const BOOT_GIT_PROBE_TIMEOUT_MS = 5_000;
+const BOOT_PUSH_GUARD_TIMEOUT_MS = 2_500;
+
+async function ensureSnapshotPushRefsGuarded({ verbose = false, timeoutMs = BOOT_PUSH_GUARD_TIMEOUT_MS } = {}) {
+  if (await remotePushConfigsAreClearlyRestrictive(PROJECT_DIR, {
+    timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
+  })) {
+    return;
+  }
   try {
-    const changed = ensureRestrictivePushRefspecs(PROJECT_DIR);
+    const changed = await ensureRestrictivePushRefspecsAsync(PROJECT_DIR, {
+      timeoutMs,
+      bypassNativeBridge: true,
+    });
     if (verbose && changed.length > 0) {
       console.log(`  ${C.dim}Restricted git push refspecs to protect Posse recovery snapshots.${C.reset}`);
     }
@@ -414,7 +395,7 @@ function ensureSnapshotPushRefsGuarded({ verbose = false } = {}) {
  * total wall-clock cost drops to roughly the slowest single git call.
  */
 async function ensureGitReady() {
-  const gitOpts = { cwd: PROJECT_DIR, encoding: "utf-8" };
+  const gitOpts = { cwd: PROJECT_DIR, encoding: "utf-8", timeout: BOOT_GIT_PROBE_TIMEOUT_MS, windowsHide: true };
   const tryGit = async (args) => {
     try {
       const { stdout } = await execFileAsync("git", args, gitOpts);
@@ -455,7 +436,7 @@ async function ensureGitReady() {
     }
     console.log(`  ${C.green}Initial commit created.${C.reset}\n`);
   }
-  ensureSnapshotPushRefsGuarded();
+  await ensureSnapshotPushRefsGuarded();
 }
 
 /**
@@ -468,7 +449,12 @@ async function ensureGitReady() {
 async function ensureRepoSetupConfirmed() {
   // Async so the boot event loop isn't blocked on git between the interactive
   // prompts (the broader boot orchestration requires every task be off-loop).
-  const runGit = async (args) => (await execFileAsync("git", args, { cwd: PROJECT_DIR, encoding: "utf-8" })).stdout;
+  const runGit = async (args) => (await execFileAsync("git", args, {
+    cwd: PROJECT_DIR,
+    encoding: "utf-8",
+    timeout: BOOT_GIT_PROBE_TIMEOUT_MS,
+    windowsHide: true,
+  })).stdout;
 
   let isRepo = true;
   try { await runGit(["rev-parse", "--git-dir"]); } catch { isRepo = false; }
@@ -487,11 +473,15 @@ async function ensureRepoSetupConfirmed() {
     }
   }
 
-  let name = "", email = "", globalName = "", globalEmail = "";
-  try { name = (await runGit(["config", "user.name"])).trim(); } catch { /* unset */ }
-  try { email = (await runGit(["config", "user.email"])).trim(); } catch { /* unset */ }
-  try { globalName = (await runGit(["config", "--global", "user.name"])).trim(); } catch { /* unset */ }
-  try { globalEmail = (await runGit(["config", "--global", "user.email"])).trim(); } catch { /* unset */ }
+  const configValue = async (args) => {
+    try { return (await runGit(args)).trim(); } catch { return ""; }
+  };
+  const [name, email, globalName, globalEmail] = await Promise.all([
+    configValue(["config", "user.name"]),
+    configValue(["config", "user.email"]),
+    configValue(["config", "--global", "user.name"]),
+    configValue(["config", "--global", "user.email"]),
+  ]);
   if (!name || !email) {
     console.log(`\n  ${C.yellow}Git user identity not configured for ${PROJECT_DIR}.${C.reset}`);
     console.log(`  Posse commits changes in worktrees and needs a name + email.`);
@@ -529,7 +519,7 @@ async function ensureRepoSetupConfirmed() {
     }
   }
 
-  ensureSnapshotPushRefsGuarded({ verbose: true });
+  await ensureSnapshotPushRefsGuarded({ verbose: true });
   return true;
 }
 
@@ -547,6 +537,13 @@ let _adminTuiModulePromise = null;
 let _adminSettingsModulePromise = null;
 let _adminCatalogModulePromise = null;
 let _providerCliInitModulePromise = null;
+let _auditCommandModulePromise = null;
+let _reportCommandsModulePromise = null;
+let _memoryCommandsModulePromise = null;
+let _doctorCommandModulePromise = null;
+let _adminWorktreesModulePromise = null;
+let _serveCommandModulePromise = null;
+let _diagnosticCommandsModulePromise = null;
 let _concurrency = null;
 let _stallTimeout = undefined;
 
@@ -566,6 +563,42 @@ async function loadProviderCliInitModule() {
   _providerCliInitModulePromise ||= import("../../providers/functions/provider-cli-init.js");
   return _providerCliInitModulePromise;
 }
+
+async function loadAuditCommandModule() {
+  _auditCommandModulePromise ||= import("./audit-command.js");
+  return _auditCommandModulePromise;
+}
+
+async function loadReportCommandsModule() {
+  _reportCommandsModulePromise ||= import("./report-commands.js");
+  return _reportCommandsModulePromise;
+}
+
+async function loadMemoryCommandsModule() {
+  _memoryCommandsModulePromise ||= import("./memory-commands.js");
+  return _memoryCommandsModulePromise;
+}
+
+async function loadDoctorCommandModule() {
+  _doctorCommandModulePromise ||= import("./doctor-command.js");
+  return _doctorCommandModulePromise;
+}
+
+async function loadAdminWorktreesModule() {
+  _adminWorktreesModulePromise ||= import("./admin-worktrees.js");
+  return _adminWorktreesModulePromise;
+}
+
+async function loadServeCommandModule() {
+  _serveCommandModulePromise ||= import("./commands/serve.js");
+  return _serveCommandModulePromise;
+}
+
+async function loadDiagnosticCommandsModule() {
+  _diagnosticCommandsModulePromise ||= import("./diagnostic-commands.js");
+  return _diagnosticCommandsModulePromise;
+}
+
 async function loadAtlasModule() {
   _atlasModulePromise ||= import("../../integrations/functions/atlas.js");
   return _atlasModulePromise;
@@ -1528,7 +1561,14 @@ function clearColdIndexFromCliFlagOnce() {
 
 async function cmdRun() {
   clearColdIndexFromCliFlagOnce();
-  const { RunSession, ...deps } = await createRunSessionDeps();
+  const readiness = createStartupReadiness({ enabled: !!process.stdout?.isTTY });
+  let sessionDeps;
+  try {
+    sessionDeps = await readiness.step("Run modules", () => createRunSessionDeps());
+  } finally {
+    readiness.finish();
+  }
+  const { RunSession, ...deps } = sessionDeps;
   return new RunSession(deps).run();
 }
 
@@ -1671,20 +1711,24 @@ async function cmdReview() {
 // COMMAND: events
 // ═════════════════════════════════════════════════════════════════════════════
 
-function cmdTimeline() {
-  return runTimelineCommandFromModule(process.argv.slice(3));
+async function cmdTimeline() {
+  const { runTimelineCommand } = await loadReportCommandsModule();
+  return runTimelineCommand(process.argv.slice(3));
 }
 
-function cmdCost() {
-  return runCostCommandFromModule(process.argv.slice(3));
+async function cmdCost() {
+  const { runCostCommand } = await loadReportCommandsModule();
+  return runCostCommand(process.argv.slice(3));
 }
 
-function cmdFanout() {
-  return runFanoutCommandFromModule(process.argv.slice(3));
+async function cmdFanout() {
+  const { runFanoutCommand } = await loadReportCommandsModule();
+  return runFanoutCommand(process.argv.slice(3));
 }
 
-function cmdSessions() {
-  return runSessionsCommandFromModule(process.argv.slice(3));
+async function cmdSessions() {
+  const { runSessionsCommand } = await loadReportCommandsModule();
+  return runSessionsCommand(process.argv.slice(3));
 }
 
 function cmdEvents() {
@@ -1725,7 +1769,8 @@ function cmdEvents() {
 }
 
 async function cmdAudit() {
-  return runAuditCommandFromModule(process.argv.slice(3), {
+  const { runAuditCommand } = await loadAuditCommandModule();
+  return runAuditCommand(process.argv.slice(3), {
     projectDir: PROJECT_DIR,
     targetBranch: await getTargetBranch(),
   });
@@ -1889,48 +1934,64 @@ async function cmdCleanup() {
 // COMMAND: calls — Agent call performance stats
 // ═════════════════════════════════════════════════════════════════════════════
 
-function cmdCalls() {
+async function cmdCalls() {
+  const { cmdCalls: cmdCallsImpl } = await loadDiagnosticCommandsModule();
   return cmdCallsImpl({ tierModelName });
 }
 
-function cmdPrompts() {
+async function cmdPrompts() {
+  const { cmdPrompts: cmdPromptsImpl } = await loadDiagnosticCommandsModule();
   return cmdPromptsImpl();
 }
 
-function cmdReplay() {
+async function cmdReplay() {
+  const { cmdReplay: cmdReplayImpl } = await loadDiagnosticCommandsModule();
   return cmdReplayImpl();
 }
 
 async function cmdUsage() {
+  const { cmdUsage: cmdUsageImpl } = await loadDiagnosticCommandsModule();
   return cmdUsageImpl({ projectDir: PROJECT_DIR, loadProviderModule });
 }
 
 async function cmdAtlasSmoke() {
+  const { cmdAtlasSmoke: cmdAtlasSmokeImpl } = await loadDiagnosticCommandsModule();
   return cmdAtlasSmokeImpl({ projectDir: PROJECT_DIR });
 }
 
 async function cmdAtlas() {
+  const { cmdAtlas: cmdAtlasImpl } = await loadDiagnosticCommandsModule();
   return cmdAtlasImpl({ projectDir: PROJECT_DIR });
 }
 
 async function cmdAtlasV2() {
+  const { cmdAtlasV2: cmdAtlasV2Impl } = await loadDiagnosticCommandsModule();
   return cmdAtlasV2Impl({ projectDir: PROJECT_DIR });
 }
 
 async function cmdCodexModels() {
+  const { cmdCodexModels: cmdCodexModelsImpl } = await loadDiagnosticCommandsModule();
   return cmdCodexModelsImpl({ projectDir: PROJECT_DIR });
 }
 
 async function cmdMcpStatus() {
+  const { cmdMcpStatus: cmdMcpStatusImpl } = await loadDiagnosticCommandsModule();
   return cmdMcpStatusImpl({ projectDir: PROJECT_DIR, loadAtlasModule });
 }
 
-function cmdWindowsEvents() {
+async function cmdWindowsEvents() {
+  const { cmdWindowsEvents: cmdWindowsEventsImpl } = await loadDiagnosticCommandsModule();
   return cmdWindowsEventsImpl();
 }
 
-function cmdAdminWorktrees() {
+async function cmdAdminWorktrees() {
+  const { cmdAdminWorktrees: cmdAdminWorktreesImpl } = await loadAdminWorktreesModule();
   return cmdAdminWorktreesImpl(PROJECT_DIR);
+}
+
+async function cmdDoctor() {
+  const { cmdDoctor: cmdDoctorImpl } = await loadDoctorCommandModule();
+  return cmdDoctorImpl({ projectDir: PROJECT_DIR });
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2082,11 +2143,12 @@ async function cmdAdmin() {
   }
 
   if (adminAction === "worktrees") {
-    cmdAdminWorktrees();
+    await cmdAdminWorktrees();
     return;
   }
 
   if (adminAction === "memory") {
+    const { runMemoryAdminCommand } = await loadMemoryCommandsModule();
     const ok = await runMemoryAdminCommand(adminArgs.slice(1), { cwd: PROJECT_DIR, C });
     if (!ok) process.exitCode = 2;
     return;
@@ -2114,6 +2176,7 @@ async function cmdAdmin() {
 }
 
 async function cmdServe() {
+  const { runServeCommand } = await loadServeCommandModule();
   return runServeCommand(process.argv.slice(3), { projectDir: PROJECT_DIR, C });
 }
 
@@ -2259,7 +2322,7 @@ ${aliasDiagnostic}
     serve: cmdServe,
     health: cmdHealth,
     dashboard: cmdDashboard,
-    doctor: () => cmdDoctorImpl({ projectDir: PROJECT_DIR }),
+    doctor: cmdDoctor,
     review: cmdReview,
     inject: cmdInject,
     ask: cmdAsk,

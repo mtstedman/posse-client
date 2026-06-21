@@ -1296,6 +1296,7 @@ async function _executeV2Call(toolName, args) {
   const readOnlyLedger = !_isV2BlockingAction(action, args);
   try {
     let meta = null;
+    const expectedLayerMerge = _config?.viewLayerMerge === true;
     const initialLedgerPath = _existingFilePath(_config?.ledgerDbPath);
     if (initialLedgerPath) {
       ledgerLease = _acquireV2Ledger(Ledger, initialLedgerPath, { readOnly: readOnlyLedger, cache: readOnlyLedger });
@@ -1308,6 +1309,7 @@ async function _executeV2Call(toolName, args) {
         ViewClass: View,
         ledger,
         timeoutMs: waitMs,
+        layerMerge: expectedLayerMerge,
       });
       if (probe.ok) {
         view = probe.view;
@@ -1345,6 +1347,7 @@ async function _executeV2Call(toolName, args) {
               ViewClass: View,
               ledger,
               timeoutMs: waitMs,
+              layerMerge: expectedLayerMerge,
             });
             if (retry.ok) {
               view = retry.view;
@@ -1381,6 +1384,7 @@ async function _executeV2Call(toolName, args) {
               ViewClass: View,
               ledger,
               timeoutMs: waitMs,
+              layerMerge: expectedLayerMerge,
             });
             if (retry.ok) {
               view = retry.view;
@@ -1413,7 +1417,7 @@ async function _executeV2Call(toolName, args) {
     }
     if (!ledger && !ATLAS_V2_VIEW_OPTIONAL_ACTIONS.has(action)) return null;
     if (view && meta && ledger) {
-      const freshness = viewFreshness(meta, ledger);
+      const freshness = viewFreshness(meta, ledger, { layerMerge: expectedLayerMerge });
       if (!freshness.current) {
         try { view.close(); } catch { /* ignore stale view close */ }
         view = null;
@@ -1423,6 +1427,7 @@ async function _executeV2Call(toolName, args) {
           ViewClass: View,
           ledger,
           timeoutMs: waitMs,
+          layerMerge: expectedLayerMerge,
         });
         if (!probe.ok) {
           const refreshed = await _awaitQueuedAutoRefreshStaleView({
@@ -1441,6 +1446,7 @@ async function _executeV2Call(toolName, args) {
               ViewClass: View,
               ledger,
               timeoutMs: waitMs,
+              layerMerge: expectedLayerMerge,
             });
             if (!retry.ok) return _viewNotReadyOutcome({ toolName, probe: retry, waitMs });
             view = retry.view;
@@ -1475,6 +1481,7 @@ async function _executeV2Call(toolName, args) {
                 ViewClass: View,
                 ledger,
                 timeoutMs: waitMs,
+                layerMerge: expectedLayerMerge,
               });
               if (!retry.ok) return _viewNotReadyOutcome({ toolName, probe: retry, waitMs });
               view = retry.view;

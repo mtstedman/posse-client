@@ -317,11 +317,19 @@ export function listSnapshotRefs(projectDir, nativeParity = {}) {
 }
 
 export async function listSnapshotRefsAsync(projectDir, options = {}) {
-  return await runGitNativeMethodAsync(
-    "git.snapshot.listRefs",
-    { projectDir: path.resolve(projectDir) },
-    nativeAsyncOptions(options),
-  );
+  if (options?.disabled === true || options?.nativeParity?.disabled === true) {
+    return await listSnapshotRefsNodeAsync(projectDir, options);
+  }
+  try {
+    return await runGitNativeMethodAsync(
+      "git.snapshot.listRefs",
+      { projectDir: path.resolve(projectDir) },
+      nativeAsyncOptions(options),
+    );
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    return await listSnapshotRefsNodeAsync(projectDir, options);
+  }
 }
 
 function listSnapshotRefsNode(projectDir) {
@@ -619,7 +627,7 @@ export async function pruneRecoveredWorktreeSnapshotsAsync(projectDir, onMsg = (
   const maxBytes = parsePositiveIntSetting("snapshot_max_bytes", DEFAULT_SNAPSHOT_MAX_BYTES);
   const maxRefs = parsePositiveIntSetting("snapshot_max_refs", DEFAULT_SNAPSHOT_MAX_REFS);
 
-  const refs = await listSnapshotRefsAsync(projectDir, { signal });
+  const refs = await listSnapshotRefsAsync(projectDir, { signal, nativeParity: { disabled: true } });
   const refToRemove = [];
   if (refs.length > 0) {
     if (retentionDays > 0) {

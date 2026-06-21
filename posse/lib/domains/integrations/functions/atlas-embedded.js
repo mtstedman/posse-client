@@ -35,7 +35,7 @@ import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { resolveTargetBranch } from "../../git/functions/target-branch.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
-import { getSharedAtlasToolExecutor } from "../../atlas/functions/v2/tools/executor.js";
+import { clearSharedAtlasToolExecutorReadContexts, getSharedAtlasToolExecutor } from "../../atlas/functions/v2/tools/executor.js";
 import {
   getAtlasEmbeddedQueueWaitMs,
   getAtlasEmbeddedTimeoutMs,
@@ -111,6 +111,7 @@ export async function invalidateAtlasEmbeddedResourceCache() {
 
 onConductorIndexingSuccess(() => {
   invalidateAtlasSharedReadCache();
+  clearSharedAtlasToolExecutorReadContexts();
   void invalidateAtlasEmbeddedResourceCache();
 });
 
@@ -1027,6 +1028,123 @@ function mcpResultText(result) {
   try { return JSON.stringify(result, null, 2); } catch { return String(result); }
 }
 
+function embeddedWorkItemId(obsCtx = {}, config = {}) {
+  return obsCtx?.work_item_id
+    ?? obsCtx?.workItemId
+    ?? config?.work_item_id
+    ?? config?.workItemId
+    ?? null;
+}
+
+function atlasExecutorReadScope(workItemId, repoRoot) {
+  return workItemId != null ? { workItemId } : { location: repoRoot };
+}
+
+async function resolveEmbeddedAtlasV2ReadContext({
+  action,
+  payload,
+  cwd,
+  config,
+  repo,
+}) {
+  if (!canUseAtlasToolExecutor(action, payload, config)) return null;
+  const repoRoot = repo?.repoPath || config?.requestedRepoPath || cwd || process.cwd();
+  const optionalView = ATLAS_V2_VIEW_OPTIONAL_ACTIONS.has(action);
+  const freshnessExempt = ATLAS_V2_VIEW_FRESHNESS_EXEMPT_ACTIONS.has(action);
+  const preferredViewPath = preferredEmbeddedV2ViewPath({ cwd: cwd || repoRoot });
+  const viewCandidates = preferredViewPath
+    ? [preferredViewPath]
+    : candidateEmbeddedV2ViewPaths({ cwd: cwd || repoRoot, repoRoot });
+  if (viewCandidates.length === 0 && !optionalView) return null;
+
+  let view = null;
+  let ledger = null;
+  let ledgerLease = null;
+  let viewPath = null;
+  try {
+    let meta = null;
+    const expectedLayerMerge = config?.viewLayerMerge === true;
+    const configuredLedgerPath = existingFilePath(config?.atlasV2LedgerDbPath || config?.ledgerDbPath || null);
+    if (configuredLedgerPath) {
+      ledgerLease = acquireEmbeddedLedger(configuredLedgerPath, { readOnly: true, cache: true });
+      ledger = ledgerLease.ledger;
+    }
+    const waitMs = atlasV2ViewWaitMs(config);
+    if (viewCandidates.length > 0) {
+      const probe = await waitForCurrentView({
+        viewPaths: viewCandidates,
+        ViewClass: View,
+        ledger,
+        timeoutMs: freshnessExempt ? 0 : waitMs,
+        layerMerge: expectedLayerMerge,
+        allowStale: freshnessExempt,
+      });
+      if (probe.ok) {
+        view = probe.view;
+        meta = probe.meta;
+        viewPath = probe.dbPath;
+      }
+    }
+    if ((!view || !meta) && !optionalView) return null;
+    if (ledger && meta && !embeddedLedgerSupportsViewMeta(ledger, meta)) {
+      try { releaseEmbeddedResourceLease(ledgerLease); } catch { /* ignore */ }
+      ledger = null;
+      ledgerLease = null;
+    }
+    let ledgerPath = configuredLedgerPath
+      || resolveEmbeddedV2LedgerPath({ repoRoot, viewMeta: meta, cwd, config });
+    if (!ledger && ledgerPath) {
+      const opened = openEmbeddedLedgerForView({
+        repoRoot,
+        viewMeta: meta,
+        cwd,
+        config,
+        readOnly: true,
+      });
+      ledger = opened.ledger;
+      ledgerLease = opened.lease;
+      ledgerPath = opened.dbPath || ledgerPath;
+    }
+    if (!ledgerPath && !optionalView) return null;
+    if (view && meta && ledger && !freshnessExempt) {
+      const freshness = viewFreshness(meta, ledger, { layerMerge: expectedLayerMerge });
+      if (!freshness.current) {
+        try { view.close(); } catch { /* ignore */ }
+        view = null;
+        const secondProbe = await waitForCurrentView({
+          viewPaths: viewCandidates,
+          ViewClass: View,
+          ledger,
+          timeoutMs: waitMs,
+          layerMerge: expectedLayerMerge,
+        });
+        if (!secondProbe.ok) return null;
+        view = secondProbe.view;
+        meta = secondProbe.meta;
+        viewPath = secondProbe.dbPath;
+      }
+    }
+    const branch = meta?.branch || baselineBranchForRepo(repoRoot);
+    const ledgerSeq = freshnessExempt && ledger && typeof ledger.headSeq === "function"
+      ? ledger.headSeq(branch)
+      : (meta?.ledger_seq ?? (ledger && typeof ledger.headSeq === "function" ? ledger.headSeq(branch) : 0));
+    const readRoot = resolveEmbeddedV2ReadRoot({ cwd: cwd || null, repoRoot, viewPath, viewMeta: meta });
+    let conductorConfig = {};
+    try { conductorConfig = JSON.parse(JSON.stringify(config || {})); } catch { conductorConfig = {}; }
+    return {
+      viewPath: viewPath || null,
+      ledgerPath: ledgerPath || null,
+      versionId: `${branch}@${ledgerSeq}`,
+      readRoot,
+      repoId: repo?.repoId || config?.requestedRepoId || null,
+      config: conductorConfig,
+    };
+  } finally {
+    try { view?.close?.(); } catch { /* ignore */ }
+    try { releaseEmbeddedResourceLease(ledgerLease); } catch { /* ignore */ }
+  }
+}
+
 async function executeEmbeddedAtlasViaExecutor({
   action,
   payload,
@@ -1036,21 +1154,30 @@ async function executeEmbeddedAtlasViaExecutor({
   startedAt,
   origin,
   queueInfo = null,
+  workItemId = null,
 }) {
   const repoRoot = repo?.repoPath || config?.requestedRepoPath || cwd || process.cwd();
   const executor = getSharedAtlasToolExecutor();
+  const scope = atlasExecutorReadScope(workItemId, repoRoot);
+  if (!executor.hasReadContext(scope)) {
+    const context = await resolveEmbeddedAtlasV2ReadContext({ action, payload, cwd, config, repo });
+    if (context) executor.setReadContext(scope, context);
+  }
   const executed = await executor.executeTool({
     toolName: action,
     args: payload && typeof payload === "object" ? payload : {},
+    workItemId,
     config: {
       ...(config && typeof config === "object" ? config : {}),
       cwd: cwd || repoRoot,
       repoRoot,
       repoId: repo?.repoId || config?.requestedRepoId || null,
+      workItemId,
     },
     session: {
       bootConfig: {
         cwd: cwd || repoRoot,
+        workItemId,
         atlas: {
           ...(config && typeof config === "object" ? config : {}),
           repoPath: repoRoot,
@@ -1061,6 +1188,7 @@ async function executeEmbeddedAtlasViaExecutor({
     source: {
       kind: "embedded",
       origin,
+      workItemId,
     },
     waitMs: Math.max(5000, Number(config?.embeddedTimeoutMs) || getAtlasEmbeddedTimeoutMs()),
   });
@@ -1127,6 +1255,7 @@ async function executeEmbeddedAtlasV2Tool({
   let viewPath = null;
   try {
     let meta = null;
+    const expectedLayerMerge = config?.viewLayerMerge === true;
     const configuredLedgerPath = existingFilePath(config?.atlasV2LedgerDbPath || config?.ledgerDbPath || null);
     if (configuredLedgerPath) {
       const readOnlyLedger = !isBlockingAction(action, payload);
@@ -1142,6 +1271,7 @@ async function executeEmbeddedAtlasV2Tool({
         // Freshness-exempt actions never wait on view currency — take the
         // view as it is right now (stale included) or run ledger-only.
         timeoutMs: freshnessExempt ? 0 : waitMs,
+        layerMerge: expectedLayerMerge,
         allowStale: freshnessExempt,
       });
       if (probe.ok) {
@@ -1176,7 +1306,7 @@ async function executeEmbeddedAtlasV2Tool({
       ledgerLease = opened.lease;
     }
     if (view && meta && ledger && !freshnessExempt) {
-      const freshness = viewFreshness(meta, ledger);
+      const freshness = viewFreshness(meta, ledger, { layerMerge: expectedLayerMerge });
       if (!freshness.current) {
         try { view.close(); } catch { /* ignore stale view close */ }
         view = null;
@@ -1185,6 +1315,7 @@ async function executeEmbeddedAtlasV2Tool({
           ViewClass: View,
           ledger,
           timeoutMs: waitMs,
+          layerMerge: expectedLayerMerge,
         });
         if (!secondProbe.ok) {
           throw new Error(`ATLAS v2 view is not current: ${secondProbe.error?.message || "view is stale"}`);
@@ -1519,6 +1650,7 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
       job_id: obsCtx.job_id ?? null,
     });
     const useToolExecutor = canUseAtlasToolExecutor(prepared.action, prepared.payload, config);
+    const workItemId = embeddedWorkItemId(obsCtx, config);
     const runGatedCall = () => withProtectedAtlasGate((queueInfo) => {
       const runArgs = {
         action: prepared.action,
@@ -1529,6 +1661,7 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
         startedAt,
         origin,
         queueInfo,
+        workItemId,
       };
       return useToolExecutor
         ? executeEmbeddedAtlasViaExecutor(runArgs)

@@ -111,12 +111,12 @@ const ATLAS_V2_BOOT_WORKER_STOP_GRACE_MS = 10_000;
  * @param {any} [args]
  * @returns {Promise<{ exists: boolean, readable: boolean, branchMatches: boolean, current: boolean, error: string | null }>}
  */
-function inspectMainViewForBootInWorker({ viewPath, branch, ledgerDbPath = null, timeoutMs = 120_000, signal = null } = {}) {
+function inspectMainViewForBootInWorker({ viewPath, branch, ledgerDbPath = null, timeoutMs = 120_000, signal = null, layerMerge = null } = {}) {
   return ATLAS_BOOT_THREAD_MANAGER.run(VIEW_INSPECT_WORKER_URL, {
     label: "ATLAS boot view inspect",
     timeoutMs,
     signal,
-    workerData: { viewPath, branch, ledgerDbPath },
+    workerData: { viewPath, branch, ledgerDbPath, layerMerge },
   });
 }
 
@@ -545,7 +545,7 @@ export async function checkAtlasMainFreshnessGate({
   };
 }
 
-function inspectMainViewForBoot(viewPath, branch, ledgerDbPath = null) {
+function inspectMainViewForBoot(viewPath, branch, ledgerDbPath = null, { layerMerge = null } = {}) {
   const status = {
     exists: false,
     readable: false,
@@ -573,7 +573,7 @@ function inspectMainViewForBoot(viewPath, branch, ledgerDbPath = null) {
     let ledger = null;
     try {
       ledger = Ledger.openReadOnly({ dbPath: ledgerDbPath });
-      status.freshness = viewFreshness(probe.meta, ledger);
+      status.freshness = viewFreshness(probe.meta, ledger, { layerMerge });
       status.current = status.freshness.current === true;
     } catch (err) {
       status.error = err?.message || String(err);
@@ -856,7 +856,12 @@ function runAtlasV2BootWarmInWorker(args) {
     const ledgerPresent = fs.existsSync(args.ledgerDbPath);
     const mainViewPresent = fs.existsSync(args.mainViewDbPath);
     const viewStatus = ledgerPresent && mainViewPresent
-      ? await inspectMainViewForBootInWorker({ viewPath: args.mainViewDbPath, branch: args.defaultBranch, ledgerDbPath: args.ledgerDbPath })
+      ? await inspectMainViewForBootInWorker({
+          viewPath: args.mainViewDbPath,
+          branch: args.defaultBranch,
+          ledgerDbPath: args.ledgerDbPath,
+          layerMerge: args?.config?.viewLayerMerge === true,
+        })
       : null;
     const indexCurrent = !!(ledgerPresent && mainViewPresent && viewStatus?.branchMatches && viewStatus?.current);
     const canUseIncremental = !!(
@@ -1393,7 +1398,7 @@ export function probeAtlasGraphReadiness(opts = {}) {
     let ledger = null;
     try {
       ledger = Ledger.open({ dbPath: graphDbPath });
-      freshness = viewFreshness(meta, ledger);
+      freshness = viewFreshness(meta, ledger, { layerMerge: config?.viewLayerMerge === true });
     } catch (err) {
       freshness = {
         current: false,
@@ -1511,7 +1516,12 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
   ]);
   const bootReindexPolicy = normalizeAtlasBootReindexPolicy(config?.bootReindexPolicy);
   const viewStatus = ledgerPresent && mainViewPresent
-    ? await inspectMainViewForBootInWorker({ viewPath: storage.mainViewDbPath, branch: baselineBranch, ledgerDbPath: storage.ledgerDbPath })
+    ? await inspectMainViewForBootInWorker({
+        viewPath: storage.mainViewDbPath,
+        branch: baselineBranch,
+        ledgerDbPath: storage.ledgerDbPath,
+        layerMerge: config?.viewLayerMerge === true,
+      })
     : null;
   const indexPresent = !!(ledgerPresent && mainViewPresent && viewStatus?.branchMatches && viewStatus?.current);
   const canUseExistingIndex = indexPresent && bootReindexPolicy !== "always";
@@ -1629,6 +1639,7 @@ export async function startAtlasPreflightIndex(opts = {}) {
         viewPath: storage.mainViewDbPath,
         branch: baselineBranch,
         ledgerDbPath: storage.ledgerDbPath,
+        layerMerge: config?.viewLayerMerge === true,
       });
       viewCurrent = !!(status?.branchMatches && status?.current);
     } catch {

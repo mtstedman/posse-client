@@ -307,6 +307,7 @@ export class View {
       prefetched_symbols: map.prefetched_symbols != null ? Number(map.prefetched_symbols) : null,
       prefetched_edges: map.prefetched_edges != null ? Number(map.prefetched_edges) : null,
       repo_root: map.repo_root ?? null,
+      layer_merge: map.layer_merge === "on" || map.layer_merge === "true" || map.layer_merge === "1",
     };
   }
 

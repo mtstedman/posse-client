@@ -20,7 +20,7 @@ PRAGMA foreign_keys = ON;
 -- -----------------------------------------------------------------------------
 -- Schema versioning + the ViewMeta payload (see schemas.js).
 -- Keys: "schema_version", "branch", "parent_branch", "parent_seq",
---       "ledger_seq", "built_at", "warmed_for_files" (JSON), "repo_root".
+--       "ledger_seq", "built_at", "warmed_for_files" (JSON), "repo_root", "layer_merge".
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS meta (

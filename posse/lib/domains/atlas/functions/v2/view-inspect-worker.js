@@ -20,9 +20,9 @@ function post(message) {
 }
 
 /**
- * @param {{ viewPath?: string, branch?: string, ledgerDbPath?: string | null }} [args]
+ * @param {{ viewPath?: string, branch?: string, ledgerDbPath?: string | null, layerMerge?: boolean | null }} [args]
  */
-function inspect({ viewPath, branch, ledgerDbPath = null } = {}) {
+function inspect({ viewPath, branch, ledgerDbPath = null, layerMerge = null } = {}) {
   const status = { exists: false, readable: false, branchMatches: false, current: false, error: null };
   const probe = openViewWithMeta(viewPath, AtlasView);
   try {
@@ -41,7 +41,7 @@ function inspect({ viewPath, branch, ledgerDbPath = null } = {}) {
     let ledger = null;
     try {
       ledger = Ledger.openReadOnly({ dbPath: ledgerDbPath });
-      status.current = viewFreshness(probe.meta, ledger).current === true;
+      status.current = viewFreshness(probe.meta, ledger, { layerMerge }).current === true;
     } catch (err) {
       status.error = err?.message || String(err);
       status.current = false;

@@ -187,6 +187,7 @@
  * @property {number | null} prefetched_symbols Count of symbols visited during hint-driven neighborhood prefetch. Null when no hint was supplied at build time.
  * @property {number | null} prefetched_edges  Count of edges traversed during hint-driven neighborhood prefetch. Null when no hint was supplied at build time.
  * @property {string | null} repo_root        Absolute path to the repo at build time. Informational only — never used as a key.
+ * @property {boolean} layer_merge             True when the view was materialized from merged tree-sitter/SCIP layers.
  */
 
 /**

@@ -147,6 +147,7 @@ export class ViewBuilder {
           prefetched_symbols: prefetchedSymbols,
           prefetched_edges: prefetchedEdges,
           repo_root: options.repoRoot ?? null,
+          layer_merge: options.layerMerge === true,
         });
       })();
       emitPhase("done", 1, 1);
@@ -459,9 +460,43 @@ function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMerge = f
   // the symbol and edge passes share one merge. When off, read flat tables.
   /** @type {Map<string, { symbols: any[], edges: any[] }>} */
   const mergeCache = new Map();
+  // Rollout safety net: the per-source layer tables are backfilled lazily (only
+  // a (re)parsed blob writes its layer; a SCIP index ingested before the layer
+  // rollout never wrote SCIP layers). A layer-merge build must never drop
+  // symbols a blob still has in the legacy flat tables, so for each blob we fall
+  // back to the legacy rows when it has NO layers yet, OR when its layer set is
+  // missing a source the legacy rows still carry (e.g. a tree-sitter layer
+  // exists but the SCIP layer was never written). The per-blob choice covers
+  // symbols AND edges together so local ids stay in one id space.
+  /** @type {Map<string, Set<string>>} */
+  const legacySourcesByHash = new Map();
+  if (useLayerMerge) {
+    try {
+      for (const row of /** @type {Array<{ content_hash: string, source: string | null }>} */ (
+        ledgerDb.prepare("SELECT DISTINCT content_hash, source FROM blob_symbols").all()
+      )) {
+        let set = legacySourcesByHash.get(row.content_hash);
+        if (!set) { set = new Set(); legacySourcesByHash.set(row.content_hash, set); }
+        set.add(String(row.source || "treesitter"));
+      }
+    } catch { /* no legacy rows / no source column — fall back only on empty layers */ }
+  }
+  const legacyRowsFor = (content_hash) => ({
+    symbols: /** @type {any[]} */ (symbolReadStmt.all(content_hash)),
+    edges: /** @type {any[]} */ (edgeReadStmt.all(content_hash)),
+  });
   const mergedFor = (content_hash) => {
     let m = mergeCache.get(content_hash);
-    if (!m) { m = mergeLayerRows(ledgerDb, content_hash); mergeCache.set(content_hash, m); }
+    if (m) return m;
+    const merged = mergeLayerRows(ledgerDb, content_hash);
+    const legacySources = legacySourcesByHash.get(content_hash);
+    const layerSources = new Set(merged.sources || []);
+    const layersCoverLegacy = !legacySources
+      || [...legacySources].every((source) => layerSources.has(source));
+    m = merged.symbols.length > 0 && layersCoverLegacy
+      ? merged
+      : legacyRowsFor(content_hash);
+    mergeCache.set(content_hash, m);
     return m;
   };
   const readSymbols = (content_hash) => (useLayerMerge
@@ -905,6 +940,7 @@ function writeMeta(viewDb, meta) {
     meta.prefetched_edges != null ? String(meta.prefetched_edges) : null,
   );
   put("repo_root", meta.repo_root ?? null);
+  put("layer_merge", meta.layer_merge === true ? "on" : "off");
 }
 
 /**

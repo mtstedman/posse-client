@@ -20,6 +20,12 @@ export async function closeSharedAtlasToolExecutor() {
   if (current) await current.close();
 }
 
+export function clearSharedAtlasToolExecutorReadContexts(scope = null) {
+  if (!sharedExecutor) return;
+  if (scope == null) sharedExecutor.clearReadContexts();
+  else sharedExecutor.clearReadContext(scope);
+}
+
 export function __testSetSharedAtlasToolExecutor(executor) {
   sharedExecutor = executor || null;
 }

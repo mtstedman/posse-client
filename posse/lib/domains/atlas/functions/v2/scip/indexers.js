@@ -70,18 +70,18 @@ const SCIP_INDEXERS = Object.freeze([
     args: ["index", "--output", "{output}"],
   }),
   // requiresMarker: these indexers need their project metadata at the repo
-  // root to run at all (composer autoload, go.mod, cargo workspace, compdb).
-  // Without it the launch deterministically fails — e.g. a single vendored
-  // .rs file used to summon scip-rust, which died with "no projects" on
-  // every warm. typescript/python stay extension-only: they can infer a
-  // project (--infer-tsconfig / bare sources) and must keep indexing
-  // marker-less repos.
+  // root to run at all (go.mod, cargo workspace, compdb). Without it the launch
+  // deterministically fails — e.g. a single vendored .rs file used to summon
+  // scip-rust, which died with "no projects" on every warm. typescript/python
+  // stay extension-only: they can infer a project (--infer-tsconfig / bare
+  // sources) and must keep indexing marker-less repos. PHP also stays
+  // extension-only because Posse's scip-php wrapper bootstraps a minimal
+  // Composer project when the target repo has no root composer.json.
   Object.freeze({
     id: "php",
     command: "scip-php",
     outputName: "php.scip",
     markers: ["composer.json"],
-    requiresMarker: true,
     sourceExtensions: [".php"],
     args: ["index", "--output", "{output}"],
   }),

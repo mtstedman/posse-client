@@ -108,6 +108,7 @@ export async function scipIngest({ versionId, params, ledger, repoRoot }) {
       branch,
       appendLedgerEntries: true,
       force: params.force === true,
+      layerOnly: true,
       onEvent: (event) => events.push(event),
     });
     const headSeq = typeof /** @type {any} */ (ledger).headSeq === "function"
@@ -124,7 +125,7 @@ export async function scipIngest({ versionId, params, ledger, repoRoot }) {
           branch,
           atSeq: headSeq,
           outPath: viewPath,
-          options: { repoRoot: root },
+          options: { repoRoot: root, layerMerge: true },
         });
       }, { label: "scip.ingest.rebuildView" });
     }

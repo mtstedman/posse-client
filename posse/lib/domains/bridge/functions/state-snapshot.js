@@ -221,9 +221,7 @@ export function collectStateSnapshot({ limit = DEFAULT_LIMIT, eventLimit = 50, h
   const workItems = listWorkItems().slice(0, capped).map(summarizeWorkItem);
   const activeJobs = listJobs().filter((job) => !TERMINAL_JOB_STATUS_SET.has(job.status));
   const jobs = activeJobs.slice(0, capped).map(normalizeJob);
-  const pendingHumanInputJobs = activeJobs.filter((job) => (
-    job.job_type === "human_input" && job.status === "waiting_on_human"
-  ));
+  const pendingHumanInputJobs = activeJobs.filter(isOpenGateJob);
   const pendingHumanInput = pendingHumanInputJobs.slice(0, capped).map(normalizeJob);
   const pendingPlanGates = pendingHumanInputJobs
     .filter((job) => parseJobPayload(job)?.subtype === "plan_approval")

@@ -105,7 +105,7 @@ export async function createReviewSessionDeps(bootDeps) {
     gitMergeToTargetAsync: helpers.gitMergeToTargetAsync,
     PROJECT_DIR: projectDir,
     execSync,
-    TARGET_BRANCH: await getTargetBranch(),
+    TARGET_BRANCH: null,
     getTargetBranch,
     setMergeState,
     cleanupWiBranch: helpers.cleanupWiBranch,

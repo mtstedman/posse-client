@@ -106,11 +106,22 @@ export function openViewWithMeta(dbPath, ViewClass, options = {}) {
 /**
  * @param {any} meta
  * @param {any} ledger
+ * @param {{ layerMerge?: boolean | null }} [options]
  * @returns {{ current: boolean, branch: string | null, ledgerSeq: number, headSeq: number | null, reason: string | null }}
  */
-export function viewFreshness(meta, ledger) {
+export function viewFreshness(meta, ledger, options = {}) {
   const branch = typeof meta?.branch === "string" && meta.branch ? meta.branch : null;
   const ledgerSeq = Number(meta?.ledger_seq);
+  const modeMismatch = viewLayerMergeMismatch(meta, options.layerMerge);
+  if (modeMismatch) {
+    return {
+      current: false,
+      branch,
+      ledgerSeq: Number.isInteger(ledgerSeq) ? ledgerSeq : 0,
+      headSeq: null,
+      reason: modeMismatch,
+    };
+  }
   if (!ledger || !branch || !Number.isInteger(ledgerSeq)) {
     return {
       current: true,
@@ -170,6 +181,18 @@ export function viewFreshness(meta, ledger) {
   }
 }
 
+function viewLayerMergeMismatch(meta, expected) {
+  if (expected == null) return null;
+  const actual = meta?.layer_merge === true;
+  if (expected === true && actual !== true) {
+    return "view was built without layer-merge symbols";
+  }
+  if (expected === false && actual === true) {
+    return "view was built with layer-merge symbols";
+  }
+  return null;
+}
+
 /**
  * Wait briefly for one of the candidate view DBs to be mountable and caught up
  * to its ledger branch. This covers races where a worker sees a file before
@@ -181,6 +204,7 @@ export function viewFreshness(meta, ledger) {
  *   ledger?: any,
  *   timeoutMs?: number,
  *   intervalMs?: number,
+ *   layerMerge?: boolean | null,
  * }} args
  * @returns {Promise<ReturnType<typeof openViewWithMeta> & { freshness?: ReturnType<typeof viewFreshness>, attempts?: number }>}
  */
@@ -190,6 +214,7 @@ export async function waitForCurrentView({
   ledger = null,
   timeoutMs = 0,
   intervalMs = 75,
+  layerMerge = null,
   // Ledger-only callers (memory, policy, usage, status reporting) accept a
   // stale view rather than waiting or failing: they only need meta/branch,
   // and view currency says nothing about ledger-backed state.
@@ -222,7 +247,7 @@ export async function waitForCurrentView({
         last = { ...probe, attempts: last.attempts };
         continue;
       }
-      const freshness = viewFreshness(probe.meta, ledger);
+      const freshness = viewFreshness(probe.meta, ledger, { layerMerge });
       if (freshness.current) return { ...probe, freshness, attempts: last.attempts };
       if (allowStale) return { ...probe, freshness, stale: true, attempts: last.attempts };
       try { probe.view.close(); } catch { /* ignore stale probe close */ }
