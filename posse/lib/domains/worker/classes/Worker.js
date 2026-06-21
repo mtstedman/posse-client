@@ -1101,6 +1101,50 @@ export class Worker {
     }
   }
 
+  _invalidatePendingSessionRecycleForMcpInfra(job, reason = "mcp_attach_failure") {
+    const jobId = Number(job?.id);
+    const pending = this._pendingSessionRecycles.get(jobId);
+    if (!pending) return null;
+    let sessionInvalidated = false;
+    let laneInvalidated = false;
+    let sessionId = null;
+    let laneId = null;
+    try {
+      const session = pending.decision?.session || null;
+      sessionId = session?.id || null;
+      laneId = pending.decision?.lane?.id || session?.lane_id || null;
+      if (sessionId) {
+        pending.manager?.markExpired?.(sessionId, reason);
+        sessionInvalidated = true;
+      }
+      if (laneId) {
+        pending.manager?.invalidateLane?.(laneId, reason);
+        laneInvalidated = true;
+      }
+      recordObservation({
+        work_item_id: job?.work_item_id ?? pending.workItemId ?? null,
+        job_id: job?.id ?? pending.jobId ?? null,
+        attempt_id: pending.attemptId ?? null,
+        observation_type: "session.recycle_invalidated",
+        summary: `session recycle invalidated: ${reason}`,
+        detail: {
+          reason,
+          provider: pending.providerName || null,
+          role: pending.role || job?.job_type || null,
+          lane_id: laneId,
+          session_id: sessionId,
+          session_invalidated: sessionInvalidated,
+          lane_invalidated: laneInvalidated,
+        },
+      });
+      return { sessionInvalidated, laneInvalidated, sessionId, laneId };
+    } catch {
+      return { sessionInvalidated, laneInvalidated, sessionId, laneId };
+    } finally {
+      this._pendingSessionRecycles.delete(jobId);
+    }
+  }
+
   _finalizeSessionRecycleForJob(job, attempt = null) {
     const pending = this._pendingSessionRecycles.get(Number(job?.id));
     if (!pending || !pending.newHandle) return null;
@@ -1740,6 +1784,7 @@ export class Worker {
           // of escalating to a human (capped, so a persistently broken gateway
           // still escalates).
           if (isTransientMcpInfraBlock(blockReason)) {
+            this._invalidatePendingSessionRecycleForMcpInfra(job, "mcp_infra_block");
             const infraRetries = allAttempts.filter(
               (a) => a.status === "blocked" && isTransientMcpInfraBlock(a.error_text),
             ).length;
@@ -2635,6 +2680,7 @@ export class Worker {
             // block — auto-requeue with backoff instead of escalating to a human
             // (capped, so a persistently broken gateway still escalates).
             if (isTransientMcpInfraBlock(blockReason)) {
+              this._invalidatePendingSessionRecycleForMcpInfra(job, "mcp_infra_block");
               const infraRetries = allAttempts.filter(
                 (a) => a.status === "blocked" && isTransientMcpInfraBlock(a.error_text),
               ).length;

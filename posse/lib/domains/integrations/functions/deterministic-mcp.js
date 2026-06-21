@@ -102,3 +102,7 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
     remoteToolSurfaceOptions,
   })).toSpawnArgs();
 }
+
+export function releaseDeterministicMcpServerSession(serverConfig = null, opts = {}) {
+  return McpServerConfig.releaseOwnerSession(serverConfig?.ownerSession || null, opts);
+}

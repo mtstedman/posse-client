@@ -56,6 +56,7 @@ const DEFAULT_PROVIDER_ERROR_PATTERNS = [
   /claude exited via signal/i,
   /socket connection was closed unexpectedly/i,
   /^Codex CLI exited with code 1\s*$/i,
+  /MCP_ATTACH_PROOF_MISSING|MCP attach proof missing|deterministic MCP attach proof missing/i,
   /ECONNREFUSED|ECONNRESET|ETIMEDOUT/i,
   /connection error/i,
   /circuit breaker open/i,
@@ -744,19 +745,28 @@ export class TrackedProviderClient {
         session_handle: stats.sessionHandle || stats.responseId || null,
       });
 
-      if (opts._sessionRecycle?.decision?.session?.id) {
-        if (err.sessionExpired || stats.sessionExpired) {
-          opts._sessionRecycle.manager?.markExpired?.(opts._sessionRecycle.decision.session.id, "provider_session_expired");
-          if (opts._sessionRecycle.decision.lane?.id) {
+      const recycleDecision = opts._sessionRecycle?.decision || null;
+      const recycleSession = recycleDecision?.session || null;
+      const recycleLaneId = recycleDecision?.lane?.id || recycleSession?.lane_id || null;
+      const mcpAttachMissingProof = err.mcpAttachMissingProof || stats.mcpAttachMissingProof;
+      if (recycleSession?.id || (mcpAttachMissingProof && recycleLaneId)) {
+        if (err.sessionExpired || stats.sessionExpired || mcpAttachMissingProof) {
+          const recycleInvalidationReason = (err.mcpAttachMissingProof || stats.mcpAttachMissingProof)
+            ? "mcp_attach_missing_proof"
+            : "provider_session_expired";
+          if (recycleSession?.id) {
+            opts._sessionRecycle.manager?.markExpired?.(recycleSession.id, recycleInvalidationReason);
+          }
+          if (recycleLaneId) {
             opts._sessionRecycle.manager?.invalidateLane?.(
-              opts._sessionRecycle.decision.lane.id,
-              "provider_session_expired",
+              recycleLaneId,
+              recycleInvalidationReason,
             );
           }
-        } else {
+        } else if (recycleSession?.id) {
           opts._sessionRecycle.manager?.releaseSession?.(
-            opts._sessionRecycle.decision.session.id,
-            opts._sessionRecycle.decision.session.leaseToken,
+            recycleSession.id,
+            recycleSession.leaseToken,
           );
         }
       }

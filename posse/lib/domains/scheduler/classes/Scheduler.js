@@ -244,25 +244,6 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   const sourceBranch = String(sourceWi?.branch_name || "").trim();
   if (!sourceWi || !sourceBranch) return false;
 
-  const mergeOrderCheck = crossWiMergeDependencyWouldCycle(job.work_item_id, sourceWiId);
-  if (mergeOrderCheck.wouldCycle) {
-    logEvent({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_BLOCKED,
-      actor_type: EVENT_ACTORS.SCHEDULER,
-      actor_id: ownerId,
-      message: `Cross-WI handoff skipped for ${path}; merge order would become cyclic`,
-      event_json: JSON.stringify({
-        source_work_item_id: sourceWiId,
-        path,
-        reason: mergeOrderCheck.reason,
-        merge_order_path: mergeOrderCheck.path,
-      }),
-    });
-    return false;
-  }
-
   const releaseCheck = workItemCanReleaseFileLock(sourceWiId, path, "file");
   if (!releaseCheck.ok) {
     logEvent({
@@ -282,6 +263,70 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
           job_type: blocker.job_type ?? null,
           path: blocker.path ?? null,
         })),
+      }),
+    });
+    return false;
+  }
+
+  const mergeOrderCheck = crossWiMergeDependencyWouldCycle(job.work_item_id, sourceWiId);
+  if (mergeOrderCheck.wouldCycle) {
+    if (mergeOrderCheck.reason === "merge_order_cycle") {
+      const released = releaseWorkItemFileLockForPath(
+        sourceWiId,
+        path,
+        "file",
+        `cross_wi_existing_order_to_wi_${job.work_item_id}_job_${job.id}`,
+      );
+      if (released <= 0) {
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_BLOCKED,
+          actor_type: EVENT_ACTORS.SCHEDULER,
+          actor_id: ownerId,
+          message: `Cross-WI handoff skipped for ${path}; existing-order lock release found no active lock`,
+          event_json: JSON.stringify({
+            source_work_item_id: sourceWiId,
+            path,
+            reason: "lock_release_failed",
+            existing_merge_order: true,
+            merge_order_path: mergeOrderCheck.path,
+          }),
+        });
+        return false;
+      }
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_PREPARED,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        actor_id: ownerId,
+        message: `Released downstream lock for ${path}; WI#${sourceWiId} is already ordered after WI#${job.work_item_id}`,
+        event_json: JSON.stringify({
+          source_work_item_id: sourceWiId,
+          source_branch: sourceBranch,
+          path,
+          released,
+          merge_dependency_added: false,
+          existing_merge_order: true,
+          merge_order_path: mergeOrderCheck.path,
+        }),
+      });
+      return true;
+    }
+
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_BLOCKED,
+      actor_type: EVENT_ACTORS.SCHEDULER,
+      actor_id: ownerId,
+      message: `Cross-WI handoff skipped for ${path}; merge order would become cyclic`,
+      event_json: JSON.stringify({
+        source_work_item_id: sourceWiId,
+        path,
+        reason: mergeOrderCheck.reason,
+        merge_order_path: mergeOrderCheck.path,
       }),
     });
     return false;

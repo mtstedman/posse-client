@@ -27,6 +27,8 @@ import { appendRunTelemetry } from "../../shared/telemetry/functions/run-telemet
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
+const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
+const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
 
 function randomToken() {
   return crypto.randomBytes(32).toString("base64url");
@@ -245,6 +247,25 @@ function filterToolsListMessage(message, policy) {
   };
 }
 
+function toolsListCount(message) {
+  const tools = message?.result?.tools;
+  return Array.isArray(tools) ? tools.length : null;
+}
+
+function attachTelemetryContext(session, ownerBootId) {
+  const boot = session?.bootConfig || {};
+  return {
+    component: "deterministic_mcp",
+    owner_boot_id: ownerBootId || null,
+    session_id: session?.id || null,
+    provider: boot.providerName || null,
+    role: boot.role || null,
+    work_item_id: boot.workItemId ?? null,
+    job_id: boot.jobId ?? null,
+    attempt_id: boot.attemptId ?? null,
+  };
+}
+
 function injectSessionContext(message, session) {
   const outbound = cloneJson(message);
   const params = outbound.params && typeof outbound.params === "object" && !Array.isArray(outbound.params)
@@ -317,6 +338,26 @@ class PersistentMcpSession {
     this._prewarmPromise = null;
     this.tokenVerified = !!claims?.__verified;
     this.tokenSource = claims?.__source || (this.tokenVerified ? "local" : "registered");
+    const now = Date.now();
+    this.registeredAt = now;
+    this.updatedAt = now;
+    this.lastSeenAt = now;
+    this.expiresAt = Number.isFinite(Number(claims?.exp)) ? Number(claims.exp) * 1000 : null;
+    this.attachProof = this._newAttachProof();
+  }
+
+  _newAttachProof() {
+    return {
+      initializeSeenAt: null,
+      toolsListSeenAt: null,
+      toolsListCount: null,
+      firstToolCallSeenAt: null,
+      firstToolName: null,
+      requestCount: 0,
+      lastRequestAt: null,
+      lastMethod: null,
+      lastOwnerError: null,
+    };
   }
 
   update({ token, claims, bootConfig, serverSpec } = {}) {
@@ -325,9 +366,71 @@ class PersistentMcpSession {
       this.claims = claims;
       this.tokenVerified = !!claims.__verified;
       this.tokenSource = claims.__source || (this.tokenVerified ? "local" : "registered");
+      this.expiresAt = Number.isFinite(Number(claims?.exp)) ? Number(claims.exp) * 1000 : this.expiresAt;
     }
     if (bootConfig) this.bootConfig = bootConfig;
     if (serverSpec) this.serverSpec = serverSpec;
+    this.updatedAt = Date.now();
+    this.attachProof = this._newAttachProof();
+    this.touch();
+  }
+
+  touch(now = Date.now()) {
+    this.lastSeenAt = now;
+  }
+
+  snapshotAttachProof() {
+    return {
+      initializeSeenAt: this.attachProof.initializeSeenAt || null,
+      toolsListSeenAt: this.attachProof.toolsListSeenAt || null,
+      toolsListCount: this.attachProof.toolsListCount ?? null,
+      firstToolCallSeenAt: this.attachProof.firstToolCallSeenAt || null,
+      firstToolName: this.attachProof.firstToolName || null,
+      requestCount: this.attachProof.requestCount || 0,
+      lastRequestAt: this.attachProof.lastRequestAt || null,
+      lastMethod: this.attachProof.lastMethod || null,
+      lastOwnerError: this.attachProof.lastOwnerError || null,
+    };
+  }
+
+  noteRequest(message = {}, now = Date.now()) {
+    const method = String(message?.method || "").trim();
+    this.attachProof.requestCount += 1;
+    this.attachProof.lastRequestAt = now;
+    this.attachProof.lastMethod = method || null;
+    if (method === "initialize" && !this.attachProof.initializeSeenAt) {
+      this.attachProof.initializeSeenAt = now;
+      return "initialize";
+    }
+    if (method === "tools/call" && !this.attachProof.firstToolCallSeenAt) {
+      this.attachProof.firstToolCallSeenAt = now;
+      this.attachProof.firstToolName = String(message?.params?.name || "").trim() || null;
+      return "tools/call";
+    }
+    return null;
+  }
+
+  noteToolsList(response = null, now = Date.now()) {
+    const count = toolsListCount(response);
+    this.attachProof.toolsListSeenAt = this.attachProof.toolsListSeenAt || now;
+    this.attachProof.toolsListCount = count;
+    return count;
+  }
+
+  noteOwnerError(err, method = null, now = Date.now()) {
+    this.attachProof.lastOwnerError = {
+      at: now,
+      method: method || this.attachProof.lastMethod || null,
+      error: ownerErrorSummary(err),
+    };
+  }
+
+  isExpired(now = Date.now()) {
+    const idleMs = now - (this.lastSeenAt || this.registeredAt || now);
+    if (this.expiresAt && now > this.expiresAt + SESSION_TOKEN_EXPIRY_GRACE_MS) {
+      return idleMs > SESSION_TOKEN_EXPIRY_GRACE_MS;
+    }
+    return idleMs > SESSION_ORPHAN_TTL_MS;
   }
 
   ensureStarted() {
@@ -543,6 +646,7 @@ export class PersistentMcpOwner {
   }
 
   registerSession({ token, bootConfig = {}, serverSpec = null, prewarm = true, trustedRemoteIssued = false } = {}) {
+    this.pruneExpiredSessions({ reason: "register_prune" });
     let claims = null;
     let verified = false;
     try {
@@ -590,6 +694,70 @@ export class PersistentMcpOwner {
     this._ensureGatewaySession({ serverSpec, prewarm });
     this._sessionIdsByTokenHash.set(tokenHash(token), id);
     return { sessionId: id, ...this.endpoint() };
+  }
+
+  _logAttachProof(session, kind, fields = {}) {
+    try {
+      appendRunTelemetry("diagnostics", {
+        kind,
+        ...attachTelemetryContext(session, this.bootId),
+        ...fields,
+      });
+    } catch {
+      // Telemetry must not affect MCP request handling.
+    }
+  }
+
+  _removeSession(id, { reason = "released", context = null, telemetry = true } = {}) {
+    const session = id ? this._sessions.get(id) : null;
+    if (!session) return { released: false, reason: "not_found", sessionCount: this._sessions.size };
+    const attachProof = session.snapshotAttachProof();
+    this._sessions.delete(id);
+    this._sessionIdsByTokenHash.delete(tokenHash(session.token));
+    if (telemetry) {
+      appendRunTelemetry("diagnostics", {
+        kind: "mcp.owner.unregister_session",
+        component: "deterministic_mcp",
+        outcome: "released",
+        owner_boot_id: this.bootId,
+        session_id: id,
+        reason,
+        session_count: this._sessions.size,
+        registered_at: session.registeredAt || null,
+        last_seen_at: session.lastSeenAt || null,
+        expires_at: session.expiresAt || null,
+        attach_proof: attachProof,
+        context: context && typeof context === "object" ? context : null,
+      });
+    }
+    return { released: true, sessionId: id, reason, sessionCount: this._sessions.size, attachProof };
+  }
+
+  unregisterSession({ sessionId = null, token = null, expectedBootId = null, reason = "provider_exit", context = null } = {}) {
+    if (expectedBootId && expectedBootId !== this.bootId) {
+      return { released: false, reason: "owner_mismatch", sessionCount: this._sessions.size };
+    }
+    const id = String(sessionId || (token ? this._sessionIdsByTokenHash.get(tokenHash(token)) : "") || "");
+    const session = id ? this._sessions.get(id) : null;
+    if (!session) return { released: false, reason: "not_found", sessionCount: this._sessions.size };
+    if (token && !tokenEqual(session.token, token)) {
+      return { released: false, reason: "token_session_mismatch", sessionCount: this._sessions.size };
+    }
+    return this._removeSession(id, { reason, context, telemetry: true });
+  }
+
+  pruneExpiredSessions({ now = Date.now(), reason = "expired" } = {}) {
+    let released = 0;
+    for (const session of [...this._sessions.values()]) {
+      if (!session.isExpired(now)) continue;
+      const result = this._removeSession(session.id, {
+        reason,
+        context: { expired: true },
+        telemetry: true,
+      });
+      if (result.released) released += 1;
+    }
+    return { released, sessionCount: this._sessions.size };
   }
 
   _ensureGatewaySession({ serverSpec = null, prewarm = true } = {}) {
@@ -667,6 +835,7 @@ export class PersistentMcpOwner {
         lastExit: session.lastExit,
         tokenVerified: session.tokenVerified,
         tokenSource: session.tokenSource,
+        attachProof: session.snapshotAttachProof(),
       })),
     };
   }
@@ -742,6 +911,21 @@ export class PersistentMcpOwner {
       this._sessions.set(id, session);
       this._sessionIdsByTokenHash.set(tokenHash(token), id);
     }
+    session.touch();
+    const method = String(message?.method || "").trim();
+    const proofEvent = session.noteRequest(message);
+    if (proofEvent === "initialize") {
+      this._logAttachProof(session, "mcp.attach.initialize_seen", {
+        method,
+        request_count: session.attachProof.requestCount,
+      });
+    } else if (proofEvent === "tools/call") {
+      this._logAttachProof(session, "mcp.attach.first_tool_call", {
+        method,
+        tool_name: session.attachProof.firstToolName || null,
+        request_count: session.attachProof.requestCount,
+      });
+    }
     try {
       if (!this._gatewaySession) {
         throw new Error("MCP hot gateway has not been registered");
@@ -762,6 +946,12 @@ export class PersistentMcpOwner {
       let response = await this._gatewaySession.request(injectSessionContext(message, session));
       if (message.method === "tools/list") {
         response = filterToolsListMessage(response, policy);
+        const count = session.noteToolsList(response);
+        this._logAttachProof(session, "mcp.attach.tools_list_seen", {
+          method,
+          tool_count: count,
+          request_count: session.attachProof.requestCount,
+        });
       }
       sendJson(res, 200, {
         ok: true,
@@ -770,6 +960,12 @@ export class PersistentMcpOwner {
         message: response,
       });
     } catch (err) {
+      session.noteOwnerError(err, method);
+      this._logAttachProof(session, "mcp.attach.owner_error", {
+        method,
+        request_count: session.attachProof.requestCount,
+        error: ownerErrorSummary(err),
+      });
       sendJson(res, 500, {
         ok: false,
         bootId: this.bootId,

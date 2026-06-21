@@ -142,3 +142,48 @@ export function logProviderMcpSurfaceTelemetry({
     ...extra,
   });
 }
+
+export function logProviderMcpAttachProofTelemetry({
+  providerName,
+  role,
+  workItemId = null,
+  jobId = null,
+  attemptId = null,
+  exitCode = null,
+  deterministicReadMcp = null,
+  releaseResult = null,
+  phase = "provider_cleanup",
+  extra = {},
+} = {}) {
+  const proof = releaseResult?.attachProof || null;
+  const deterministicActive = deterministicReadMcp?.active === true;
+  const initializeSeen = !!proof?.initializeSeenAt;
+  const toolsListSeen = !!proof?.toolsListSeenAt;
+  const missingProof = deterministicActive && (!initializeSeen || !toolsListSeen);
+  appendRunTelemetry("diagnostics", {
+    kind: missingProof ? "mcp.attach.missing_proof" : "mcp.attach.proof",
+    component: "provider_tool_surface",
+    phase,
+    provider: providerName || null,
+    role: role || null,
+    work_item_id: workItemId ?? null,
+    job_id: jobId ?? null,
+    attempt_id: attemptId ?? null,
+    exit_code: exitCode ?? null,
+    deterministic_active: deterministicActive,
+    deterministic_server_name: deterministicReadMcp?.serverName || deterministicReadMcp?.serverKey || null,
+    owner_session_released: releaseResult?.released === true,
+    owner_release_reason: releaseResult?.reason || null,
+    initialize_seen: initializeSeen,
+    tools_list_seen: toolsListSeen,
+    tools_list_count: proof?.toolsListCount ?? null,
+    first_tool_call_seen: !!proof?.firstToolCallSeenAt,
+    first_tool_name: proof?.firstToolName || null,
+    owner_request_count: proof?.requestCount ?? null,
+    owner_last_method: proof?.lastMethod || null,
+    owner_last_error: proof?.lastOwnerError || null,
+    missing_attach_proof: missingProof,
+    ...extra,
+  });
+  return { missingProof, proof };
+}

@@ -480,8 +480,9 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
     ...(ownerHotPosseKey ? { POSSE_KEY: ownerHotPosseKey } : {}),
   };
   const registerAt = Date.now();
+  let registration = null;
   try {
-    const registration = persistentMcpOwner.registerSession({
+    registration = persistentMcpOwner.registerSession({
       token: bootPayload.mcpOAuthToken,
       bootConfig: bootPayload,
       serverSpec: {
@@ -546,6 +547,11 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
       ...deterministicMcpBaseEnv(process.env),
       ...deterministicMcpShimMetadataEnv(bootPayload, resolvedAtlasConfig),
     },
+    ownerSession: registration?.sessionId ? {
+      sessionId: registration.sessionId,
+      ownerBootId: registration.bootId || ownerEndpoint?.bootId || null,
+      ownerTransport: registration.transport || ownerEndpoint?.transport || null,
+    } : null,
   });
 }
 
@@ -612,6 +618,7 @@ export class McpServerConfig {
     args = [],
     cwd = process.cwd(),
     env = {},
+    ownerSession = null,
   } = {}) {
     this.ready = !!ready;
     this.reason = reason || null;
@@ -621,6 +628,13 @@ export class McpServerConfig {
     this.args = Array.isArray(args) ? [...args] : [];
     this.cwd = cwd || process.cwd();
     this.env = normalizedEnv(env);
+    this.ownerSession = ownerSession && typeof ownerSession === "object"
+      ? {
+          sessionId: ownerSession.sessionId || null,
+          ownerBootId: ownerSession.ownerBootId || null,
+          ownerTransport: ownerSession.ownerTransport || null,
+        }
+      : null;
   }
 
   toEnv() {
@@ -637,11 +651,25 @@ export class McpServerConfig {
       args: [...this.args],
       cwd: this.cwd,
       env: this.toEnv(),
+      ownerSession: this.ownerSession ? { ...this.ownerSession } : null,
     };
   }
 
   spawn(opts = {}) {
     return new McpServer({ config: this, ...opts });
+  }
+
+  static releaseOwnerSession(ownerSession = null, opts = {}) {
+    const session = ownerSession && typeof ownerSession === "object" ? ownerSession : null;
+    if (!session?.sessionId) {
+      return { released: false, reason: "missing_session" };
+    }
+    return persistentMcpOwner.unregisterSession({
+      sessionId: session.sessionId,
+      expectedBootId: session.ownerBootId || null,
+      reason: opts.reason || "provider_exit",
+      context: opts.context || null,
+    });
   }
 
   static forDeterministicRead(role, {

@@ -14,7 +14,7 @@ import { adaptExecutionContractForProvider, appendExecutionTools, buildExecution
 import { buildMcpAtlasSurfaceToolDescriptors, buildMcpSurfaceToolDescriptors, buildSurfaceNameMap } from "../../../functions/tools/mcp-surface.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, logAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment } from "../../integrations/functions/atlas.js";
 import { atlasBackendLabel } from "../../integrations/functions/atlas-label.js";
-import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, getDeterministicMcpToolNames, roleUsesDeterministicReadMcp } from "../../integrations/functions/deterministic-mcp.js";
+import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, getDeterministicMcpToolNames, releaseDeterministicMcpServerSession, roleUsesDeterministicReadMcp } from "../../integrations/functions/deterministic-mcp.js";
 import { isFallbackAtlasPrefetchStatus } from "../../integrations/functions/deterministic-mcp/gate.js";
 import { resolveAtlasToolGateEnabled } from "../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../integrations/functions/mcp-gateway.js";
@@ -25,7 +25,7 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { CODEX_OAUTH_SUPPORTED_MODELS, getProviderTierDefaults } from "./model-catalog.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
-import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry } from "./helpers/mcp-telemetry.js";
+import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry, logProviderMcpAttachProofTelemetry } from "./helpers/mcp-telemetry.js";
 import { buildWindowsSpawn, terminateSpawnedProcess } from "./helpers/windows-spawn.js";
 import { discoverCommandCandidates } from "./helpers/cli-discovery.js";
 import { selectExecutionModel } from "./helpers/model-selection.js";
@@ -1842,6 +1842,7 @@ async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd, {
   disableSystemTools = false,
   jobId = null,
   workItemId = null,
+  attemptId = null,
   atlasPrefetchStatus = null,
   atlasAvailable = null,
   atlasGateEnabled = false,
@@ -1870,6 +1871,7 @@ async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd, {
     disableSystemTools,
     jobId,
     workItemId,
+    attemptId,
     atlasPrefetchStatus,
     atlasAvailable,
     atlasGateEnabled,
@@ -2539,6 +2541,28 @@ export async function callProvider(promptText, {
       atlasGateEnabled: atlasToolGateEnabled,
       atlasConfig,
     });
+    let deterministicMcpSessionReleased = false;
+    const cleanupDeterministicMcpSession = () => {
+      if (!deterministicReadMcp.serverConfig?.ownerSession) {
+        return { released: false, reason: "missing_session" };
+      }
+      if (deterministicMcpSessionReleased) {
+        return { released: false, reason: "already_released" };
+      }
+      deterministicMcpSessionReleased = true;
+      try {
+        return releaseDeterministicMcpServerSession(deterministicReadMcp.serverConfig, {
+          reason: "provider_cleanup",
+          context: { provider: "codex", role, jobId, workItemId, attemptId },
+        });
+      } catch (err) {
+        return {
+          released: false,
+          reason: "release_error",
+          error: { message: String(err?.message || err) },
+        };
+      }
+    };
     const atlasServerName = deterministicReadMcp.active
       ? deterministicReadMcp.serverKey
       : atlasMcpServerKey;
@@ -2636,9 +2660,29 @@ export async function callProvider(promptText, {
       authMode: preferredAuthMode,
     });
     const temp = makeTempOutputFile();
-    const cleanupRunTemps = () => {
+    const cleanupRunTemps = (mcpAttachProofContext = null) => {
+      const releaseResult = cleanupDeterministicMcpSession();
+      let attachProofResult = null;
+      if (mcpAttachProofContext) {
+        try {
+          attachProofResult = logProviderMcpAttachProofTelemetry({
+            providerName: "codex",
+            role,
+            workItemId,
+            jobId,
+            attemptId,
+            deterministicReadMcp: mcpAttachProofContext.deterministicReadMcp || deterministicReadMcp,
+            releaseResult,
+            exitCode: mcpAttachProofContext.exitCode ?? null,
+            phase: mcpAttachProofContext.phase || "provider_cleanup",
+          });
+        } catch {
+          attachProofResult = null;
+        }
+      }
       cleanupTempDir(temp.dir);
       configRoute.cleanup();
+      return { releaseResult, attachProofResult };
     };
     const clearExitCleanup = registerCodexExitCleanup(cleanupRunTemps);
     const forceReadOnlySandbox = !!(deterministicReadMcp.active && allowWrite);
@@ -2896,7 +2940,7 @@ export async function callProvider(promptText, {
       clearInterval(heartbeat);
       clearForceKillTimers();
       clearExitCleanup();
-      cleanupRunTemps();
+      cleanupRunTemps({ deterministicReadMcp, exitCode: null, phase: "provider_error" });
       reject(buildSpawnError(err));
     });
 
@@ -2910,12 +2954,13 @@ export async function callProvider(promptText, {
         stdoutLineBuffer = "";
       }
       let finalOutput = "";
+      let mcpCleanup = null;
       try {
         finalOutput = fs.existsSync(temp.file) ? fs.readFileSync(temp.file, "utf-8").trim() : "";
       } catch {
         finalOutput = "";
       } finally {
-        cleanupRunTemps();
+        mcpCleanup = cleanupRunTemps({ deterministicReadMcp, exitCode: code, phase: "provider_close" });
       }
 
       const stats = __testBuildCloseStats({
@@ -2936,6 +2981,8 @@ export async function callProvider(promptText, {
         sessionHandle: latestSessionHandle,
         priorSessionHandle: resumeSessionHandle,
       });
+      stats.mcpAttachProof = mcpCleanup?.attachProofResult?.proof || null;
+      stats.mcpAttachMissingProof = mcpCleanup?.attachProofResult?.missingProof === true;
 
       // Persist MCP-relevant CLI stderr (only when present) so a gateway
       // attach-under-load failure leaves a trace even on a clean exit.
@@ -2952,6 +2999,19 @@ export async function callProvider(promptText, {
       } catch { /* telemetry only */ }
 
       if (code === 0) {
+        if (stats.mcpAttachMissingProof) {
+          const err = new Error("Codex deterministic MCP attach proof missing: provider exited without owner-observed initialize/tools-list.");
+          err.code = "MCP_ATTACH_PROOF_MISSING";
+          err.stats = stats;
+          err.stdout = stdout;
+          err.stderr = stderr;
+          err.output = finalOutput || stdout.trim() || null;
+          err.partialOutput = err.output;
+          err.toolUses = toolUses;
+          err.mcpAttachMissingProof = true;
+          reject(err);
+          return;
+        }
         resolve({ output: finalOutput || stdout.trim(), stats });
         return;
       }
@@ -2969,7 +3029,10 @@ export async function callProvider(promptText, {
       if (err.sessionExpired) err.stats.sessionExpired = true;
       err.stdout = stdout;
       err.stderr = stderr;
+      err.output = finalOutput || stdout.trim() || null;
+      err.partialOutput = err.output;
       err.toolUses = toolUses;
+      err.mcpAttachMissingProof = stats.mcpAttachMissingProof;
       reject(err);
     });
     } catch (err) {

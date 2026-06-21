@@ -80,6 +80,71 @@ export function loadCheckpoint(jobId, getArtifacts) {
   return checkpoint ? checkpoint.content_long.slice("checkpoint:".length).trim() : null;
 }
 
+const COMPLETION_LOG_FIELD_RE = /^\s*[A-Za-z0-9_-][A-Za-z0-9_ -]*\s*:/;
+const MCP_INFRA_SIGNAL_RE = /(mcp__posse[-_]?gateway|posse[-_\s]?gateway|No such tool available|not connected to this session|MCP gateway)/i;
+
+function escapeRegexText(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isUsefulCompletionLogValue(value) {
+  const text = String(value || "").trim();
+  return !!text && !/^[>|][+-]?$/.test(text);
+}
+
+function extractCompletionLogField(body, fieldName) {
+  const lines = String(body || "").split(/\r?\n/);
+  const keyRe = new RegExp(`^(\\s*)${escapeRegexText(fieldName)}\\s*:\\s*(.*)$`, "i");
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = lines[i].match(keyRe);
+    if (!match) continue;
+    const baseIndent = match[1].length;
+    const inlineValue = String(match[2] || "").trim();
+    if (isUsefulCompletionLogValue(inlineValue)) return inlineValue;
+
+    const collected = [];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const raw = lines[j];
+      const trimmed = raw.trim();
+      if (!trimmed) {
+        if (collected.length > 0) collected.push("");
+        continue;
+      }
+      const indent = raw.match(/^\s*/)?.[0]?.length || 0;
+      if (indent <= baseIndent && COMPLETION_LOG_FIELD_RE.test(raw)) break;
+      if (indent <= baseIndent && collected.length > 0) break;
+      collected.push(raw.slice(Math.min(raw.length, baseIndent + 2)).trimEnd());
+    }
+    return collected.join("\n").trim() || null;
+  }
+  return null;
+}
+
+function hasMcpInfraSignal(value) {
+  return MCP_INFRA_SIGNAL_RE.test(String(value || ""));
+}
+
+function firstMcpInfraSignalLine(value) {
+  for (const raw of String(value || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line && hasMcpInfraSignal(line)) return line;
+  }
+  return null;
+}
+
+function chooseAgentBlockReason(body) {
+  const notes = extractCompletionLogField(body, "notes");
+  const summary = extractCompletionLogField(body, "summary");
+  for (const candidate of [notes, summary]) {
+    if (isUsefulCompletionLogValue(candidate) && hasMcpInfraSignal(candidate)) {
+      return firstMcpInfraSignalLine(candidate) || String(candidate).trim();
+    }
+  }
+  if (isUsefulCompletionLogValue(notes)) return notes;
+  if (isUsefulCompletionLogValue(summary)) return summary;
+  return firstMcpInfraSignalLine(body);
+}
+
 export function parseAgentCompletionLog(output = "") {
   const text = String(output || "");
   const match = text.match(/---\s*(DEV|ARTIFICER) LOG START\s*---\s*([\s\S]*?)---\s*(?:DEV|ARTIFICER) LOG END\s*---/i);
@@ -101,9 +166,7 @@ export function parseAgentCompletionLog(output = "") {
     ? statusMatch[1].trim().toUpperCase().replace(/[\s-]+/g, "_")
     : null;
   const status = rawStatus === "NO_CHANGE" ? "VERIFIED_NO_CHANGE" : rawStatus;
-  const blockReason = body.match(/^\s*notes:\s*(.+)$/im)?.[1]?.trim()
-    || body.match(/^\s*summary:\s*(.+)$/im)?.[1]?.trim()
-    || null;
+  const blockReason = chooseAgentBlockReason(body);
   const verifiedNoChange = status === "VERIFIED_NO_CHANGE"
     || /^\s*verified_no_change:\s*(?:true|yes|1)\s*$/im.test(body)
     || /\bverified no(?: |-)?change\b/i.test(body);

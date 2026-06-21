@@ -18,14 +18,14 @@ import { appendExecutionTools, buildClaudeCliToolConfig, buildExecutionContract,
 import { buildMcpAtlasSurfaceToolDescriptors, buildMcpSurfaceToolDescriptors, buildSurfaceNameMap, formatAtlasToolUseDisplayName } from "../../../functions/tools/mcp-surface.js";
 import { buildRuntimeEnv, normalizeProviderPaths } from "../../runtime/functions/paths.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, logAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment } from "../../integrations/functions/atlas.js";
-import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, getDeterministicMcpToolNames, roleUsesDeterministicReadMcp } from "../../integrations/functions/deterministic-mcp.js";
+import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, getDeterministicMcpToolNames, releaseDeterministicMcpServerSession, roleUsesDeterministicReadMcp } from "../../integrations/functions/deterministic-mcp.js";
 import { resolveAtlasToolGateEnabled } from "../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME, stripPosseMcpGatewayPrefix } from "../../integrations/functions/mcp-gateway.js";
 import { summarizeObservedToolUse } from "./helpers/tool-runtime.js";
 import { buildWindowsSpawn, terminateSpawnedProcess } from "./helpers/windows-spawn.js";
 import { discoverCommandCandidates } from "./helpers/cli-discovery.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
-import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry } from "./helpers/mcp-telemetry.js";
+import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry, logProviderMcpAttachProofTelemetry } from "./helpers/mcp-telemetry.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { stripAnsi } from "../../../shared/format/functions/ansi.js";
 import { extractJson } from "../../../shared/format/functions/json.js";
@@ -203,6 +203,8 @@ function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
     active: true,
     tools: toolNames,
     serverName,
+    serverConfig: server,
+    ownerSession: server.ownerSession || null,
     contractTools: buildMcpSurfaceToolDescriptors(toolNames, {
       providerName: "claude",
       serverName,
@@ -271,6 +273,8 @@ async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cwd, {
     active: true,
     tools: toolNames,
     serverName,
+    serverConfig: server,
+    ownerSession: server.ownerSession || null,
     contractTools: buildMcpSurfaceToolDescriptors(toolNames, {
       providerName: "claude",
       serverName,
@@ -2538,14 +2542,35 @@ export async function callProvider(promptText, {
   return new Promise((resolve, reject) => {
     void (async () => {
     let cleanupAtlasMcpConfig = () => {};
+    let cleanupDeterministicMcpSession = () => null;
     let cleanupRolePromptFile = () => {};
     let cleanupStablePromptFile = () => {};
     let cleanupSystemPromptFile = () => {};
-    const cleanupSetupFiles = () => {
+    const cleanupSetupFiles = (mcpAttachProofContext = null) => {
+      const releaseResult = cleanupDeterministicMcpSession();
+      let attachProofResult = null;
+      if (mcpAttachProofContext) {
+        try {
+          attachProofResult = logProviderMcpAttachProofTelemetry({
+            providerName: "claude",
+            role,
+            workItemId,
+            jobId,
+            attemptId,
+            deterministicReadMcp: mcpAttachProofContext.deterministicReadMcp || null,
+            releaseResult,
+            exitCode: mcpAttachProofContext.exitCode ?? null,
+            phase: mcpAttachProofContext.phase || "provider_cleanup",
+          });
+        } catch {
+          attachProofResult = null;
+        }
+      }
       cleanupAtlasMcpConfig();
       cleanupRolePromptFile();
       cleanupStablePromptFile();
       cleanupSystemPromptFile();
+      return { releaseResult, attachProofResult };
     };
     try {
     const args = [];
@@ -2618,6 +2643,25 @@ export async function callProvider(promptText, {
       atlasGateEnabled: atlasToolGateEnabled,
       atlasConfig,
     });
+    if (deterministicReadMcp.serverConfig?.ownerSession) {
+      let released = false;
+      cleanupDeterministicMcpSession = () => {
+        if (released) return { released: false, reason: "already_released" };
+        released = true;
+        try {
+          return releaseDeterministicMcpServerSession(deterministicReadMcp.serverConfig, {
+            reason: "provider_cleanup",
+            context: { provider: "claude", role, jobId, workItemId, attemptId },
+          });
+        } catch (err) {
+          return {
+            released: false,
+            reason: "release_error",
+            error: { message: String(err?.message || err) },
+          };
+        }
+      };
+    }
     const atlasServerName = deterministicReadMcp.active
       ? deterministicReadMcp.serverName
       : atlasMcpPayload?.serverName;
@@ -2850,7 +2894,12 @@ export async function callProvider(promptText, {
             color,
             startTime,
           });
-          cleanupSetupFiles();
+          const mcpCleanup = cleanupSetupFiles({
+            deterministicReadMcp,
+            exitCode: result.exitCode,
+            phase: "provider_close",
+          });
+          const enforceMcpAttachProof = !interactiveBackend;
           const durationMs = result.durationMs ?? (Date.now() - startTime);
           const output = String(result.output || "").trim();
           const interactiveUsage = result.usage && typeof result.usage === "object" ? result.usage : {};
@@ -2874,39 +2923,54 @@ export async function callProvider(promptText, {
           if (onLine) {
             onLine(`${C.dim}completed: ${(durationMs / 1000).toFixed(1)}s | ${output.length} chars via interactive session${C.reset}`);
           }
-          resolve({
-            output,
-            stats: {
-              role,
-              modelTier,
-              reasoningEffort,
-              modelName: modelToUse,
-              promptChars: finalPrompt.length,
-              outputChars: output.length,
-              inputTokens: estimatedInputTokens,
-              outputTokens: estimatedOutputTokens,
-              cacheCreationInputTokens: _usageNumberOrNull(interactiveUsage.cache_creation_input_tokens),
-              cacheReadInputTokens: _usageNumberOrNull(interactiveUsage.cache_read_input_tokens),
-              cachedInputTokens: _usageNumberOrNull(interactiveUsage.cache_read_input_tokens),
-              reasoningOutputTokens: _usageNumberOrNull(interactiveUsage.thinking_tokens ?? interactiveUsage.reasoning_output_tokens),
-              costUsd: apiEquivalentCostUsd,
-              totalCostUsd: null,
-              numTurns: null,
-              durationMs,
-              exitCode: result.exitCode,
-              maxTurns: turns,
-              toolUses: null,
-              atlasMethod: atlasMethodForStats,
-              sessionHandle: result.sessionHandle || null,
-              priorSessionHandle: priorSessionHandle || null,
-              sessionExpired: false,
-              executionMode: CLAUDE_EXECUTION_MODE_INTERACTIVE,
-              usageEstimated: !hasInteractiveUsage,
-              interactiveCompletedBy: result.completedBy || null,
-            },
-          });
+          const stats = {
+            role,
+            modelTier,
+            reasoningEffort,
+            modelName: modelToUse,
+            promptChars: finalPrompt.length,
+            outputChars: output.length,
+            inputTokens: estimatedInputTokens,
+            outputTokens: estimatedOutputTokens,
+            cacheCreationInputTokens: _usageNumberOrNull(interactiveUsage.cache_creation_input_tokens),
+            cacheReadInputTokens: _usageNumberOrNull(interactiveUsage.cache_read_input_tokens),
+            cachedInputTokens: _usageNumberOrNull(interactiveUsage.cache_read_input_tokens),
+            reasoningOutputTokens: _usageNumberOrNull(interactiveUsage.thinking_tokens ?? interactiveUsage.reasoning_output_tokens),
+            costUsd: apiEquivalentCostUsd,
+            totalCostUsd: null,
+            numTurns: null,
+            durationMs,
+            exitCode: result.exitCode,
+            maxTurns: turns,
+            toolUses: null,
+            atlasMethod: atlasMethodForStats,
+            sessionHandle: result.sessionHandle || null,
+            priorSessionHandle: priorSessionHandle || null,
+            sessionExpired: false,
+            executionMode: CLAUDE_EXECUTION_MODE_INTERACTIVE,
+            usageEstimated: !hasInteractiveUsage,
+            interactiveCompletedBy: result.completedBy || null,
+            mcpAttachProof: mcpCleanup.attachProofResult?.proof || null,
+            mcpAttachMissingProof: enforceMcpAttachProof && mcpCleanup.attachProofResult?.missingProof === true,
+          };
+          if (stats.mcpAttachMissingProof) {
+            const err = new Error("Claude deterministic MCP attach proof missing: provider exited without owner-observed initialize/tools-list.");
+            err.code = "MCP_ATTACH_PROOF_MISSING";
+            err.stats = stats;
+            err.stdout = output || null;
+            err.output = output || null;
+            err.partialOutput = output || null;
+            err.mcpAttachMissingProof = true;
+            reject(err);
+            return;
+          }
+          resolve({ output, stats });
         } catch (err) {
-          cleanupSetupFiles();
+          cleanupSetupFiles({
+            deterministicReadMcp,
+            exitCode: null,
+            phase: "provider_error",
+          });
           const transcript = err?.transcript ? stripTerminalControls(err.transcript) : "";
           const timeoutText = /timed out/i.test(String(err?.message || ""));
           const preserveError = err?.name === "AbortError"
@@ -3280,7 +3344,11 @@ export async function callProvider(promptText, {
     });
 
     proc.on("close", (code, signal) => {
-      cleanupSetupFiles();
+      const mcpCleanup = cleanupSetupFiles({
+        deterministicReadMcp,
+        exitCode: code,
+        phase: "provider_close",
+      });
       if (heartbeat) clearInterval(heartbeat);
       clearForceKillTimers();
       const durationMs = Date.now() - startTime;
@@ -3384,6 +3452,8 @@ export async function callProvider(promptText, {
         priorSessionHandle: priorSessionHandle || null,
         sessionExpired: false,
         executionMode: CLAUDE_EXECUTION_MODE_PRINT,
+        mcpAttachProof: mcpCleanup.attachProofResult?.proof || null,
+        mcpAttachMissingProof: mcpCleanup.attachProofResult?.missingProof === true,
       };
 
       // Persist MCP-relevant CLI stderr (only when present) so a gateway
@@ -3429,12 +3499,26 @@ export async function callProvider(promptText, {
         err.stallKill = killedByStallDetector;
         err.stderr = stderr || null;
         err.stdout = fullOutput || null;
+        err.output = fullOutput || null;
         err.partialOutput = fullOutput || null;
         err.toolUses = toolUses.length > 0 ? toolUses : null;
         err.sessionExpired = !!priorSessionHandle && isClaudeResumeHandleExpiredError(`${stderr}\n${fullOutput}\n${prefix}`);
         if (err.sessionExpired) err.stats.sessionExpired = true;
         reject(err);
       } else {
+        if (stats.mcpAttachMissingProof) {
+          const err = new Error("Claude deterministic MCP attach proof missing: provider exited without owner-observed initialize/tools-list.");
+          err.code = "MCP_ATTACH_PROOF_MISSING";
+          err.stats = stats;
+          err.stderr = stderr || null;
+          err.stdout = fullOutput || null;
+          err.output = fullOutput || null;
+          err.partialOutput = fullOutput || null;
+          err.toolUses = toolUses.length > 0 ? toolUses : null;
+          err.mcpAttachMissingProof = true;
+          reject(err);
+          return;
+        }
         // Detect empty output — likely the model exhausted its turn budget on
         // tool calls and never produced a final text response.
         if (!fullOutput.trim() && turns) {
