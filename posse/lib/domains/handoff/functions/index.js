@@ -65,6 +65,7 @@ import {
   detectPendingMerge as detectPendingMergeFromModule,
 } from "./helpers/merge-state.js";
 import {
+  buildMemoryPrefetchNotice as buildMemoryPrefetchNoticeFromModule,
   buildStep0Context as buildStep0ContextFromModule,
   loadRelevantInsightsAsync as loadRelevantInsightsAsyncFromModule,
   loadRelevantInsights as loadRelevantInsightsFromModule,
@@ -978,6 +979,13 @@ function _buildStep0Context(role, payload) {
   return buildStep0ContextFromModule(role, payload);
 }
 
+function _applyMemoryPrefetchNotice(packet) {
+  const notice = buildMemoryPrefetchNoticeFromModule(packet?.run_insights || []);
+  packet.memory_prefetch_context = notice || null;
+  if (!notice) return;
+  packet.step0_context = [packet.step0_context, notice].filter(Boolean).join("\n");
+}
+
 function _logSurfacedInsights(packet, role, telemetry = null) {
   const insights = Array.isArray(packet?.run_insights) ? packet.run_insights : [];
   const staleDropped = Number(telemetry?.stale_dropped || 0);
@@ -1579,6 +1587,7 @@ export async function handoff(input) {
   // fallback can reveal additional files where file-linked insights apply.
   const kaizenTelemetry = {};
   packet.run_insights = await timeHandoffStep(packet, "insights.load", () => _loadRelevantInsightsAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry }));
+  await timeHandoffStep(packet, "insights.memory_prefetch_notice", () => _applyMemoryPrefetchNotice(packet));
   await timeHandoffStep(packet, "insights.log", () => _logSurfacedInsights(packet, recipient, kaizenTelemetry));
 
   // Step 7: Tool policy + budgets

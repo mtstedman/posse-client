@@ -673,6 +673,10 @@ export class Display {
     this._approvalTab = 0;      // 0=Tasks, 1=Tokens, 2=Research, 3=Details
     this._approvalTabScrolls = [0, 0, 0, 0]; // per-tab scroll positions
     this._approvalPicker = null; // {itemId, candidates, selected:Set, cursor} when picking files to discard
+    this._approvalMemoryPicker = null; // {itemId, memories, cursor, textEntry} while reviewing surfaced memories
+    this._approvalActionBusy = false;
+    this._approvalExitConfirm = false;
+    this._approvalFlash = null;
 
     this.cols = process.stdout.columns || 120;
     this.rows = process.stdout.rows || 40;
@@ -1609,14 +1613,26 @@ export class Display {
   }
 
   _cancelApprovalMode() {
-    if (!this._approvalDone) return false;
     const done = this._approvalDone;
-    this._approvalDone = null;
-    this._approvalPicker = null;
-    this._approvalExitConfirm = false;
-    this._approvalFlash = null;
+    this._resetApprovalState();
+    if (!done) return false;
     try { done({ canceled: true }); } catch { /* resolver should not throw */ }
     return true;
+  }
+
+  _resetApprovalState({ mode = "normal" } = {}) {
+    this._mode = mode;
+    this._approvalData = null;
+    this._approvalIdx = 0;
+    this._approvalScroll = 0;
+    this._approvalDone = null;
+    this._approvalTab = 0;
+    this._approvalTabScrolls = [0, 0, 0, 0];
+    this._approvalPicker = null;
+    this._approvalMemoryPicker = null;
+    this._approvalActionBusy = false;
+    this._approvalExitConfirm = false;
+    this._approvalFlash = null;
   }
 
   get hasQuestions() {
@@ -1680,12 +1696,22 @@ export class Display {
       // it { canceled: true }) so overwriting _approvalDone can never strand
       // an earlier session's awaiter.
       this._cancelApprovalMode();
+      const data = Array.isArray(reportData) ? reportData : [];
+      if (data.length === 0) {
+        this._resetApprovalState();
+        resolve({ canceled: false });
+        this.requestRender({ force: true });
+        return;
+      }
       this._mode = "approval";
-      this._approvalData = reportData;
-      this._approvalIdx = initialIdx >= 0 && initialIdx < reportData.length ? initialIdx : 0;
+      this._approvalData = data;
+      this._approvalIdx = initialIdx >= 0 && initialIdx < data.length ? initialIdx : 0;
       this._approvalScroll = 0;
       this._approvalTab = 0;
       this._approvalTabScrolls = [0, 0, 0, 0];
+      this._approvalPicker = null;
+      this._approvalMemoryPicker = null;
+      this._approvalActionBusy = false;
       this._approvalExitConfirm = false;
       this._approvalFlash = null;
       this._approvalDone = resolve;
@@ -2719,13 +2745,17 @@ export class Display {
 
       const TERMINAL = new Set(TERMINAL_JOB_STATUSES);
       const dirtyReviewByWi = this._dirtyReviewIssuesByWi(dirtyState);
+      const dirtyReviewForWi = (wi) => {
+        if (String(wi?.merge_state || "").toLowerCase() === "merged") return null;
+        return dirtyReviewByWi.get(Number(wi?.id)) || null;
+      };
 
       // Hide only truly finished WIs. If a follow-up recommendation job was
       // queued against a previously-complete WI, trust live job state here
       // rather than stale work_item.status so it still shows in the queue.
       const visible = workItems.filter(wi => {
         const jobs = jobsByWi.get(wi.id) || [];
-        if (dirtyReviewByWi.has(Number(wi.id))) return true;
+        if (dirtyReviewForWi(wi)) return true;
         const displayStatus = workItemDisplayStatus(wi, jobs);
         if (displayStatus === "canceled") return false;
         if (jobs.length === 0) return displayStatus !== "complete";
@@ -2739,6 +2769,7 @@ export class Display {
 
       const visibleItems = visible.map((wi) => {
         const jobs = jobsByWi.get(wi.id) || [];
+        const dirtyReview = dirtyReviewForWi(wi);
         const done = jobs.filter(j => TERMINAL.has(j.status)).length;
         const wiFailed = jobs.filter(j => jobIsDisplayFailure(j, jobs)).length;
         const allDone = jobs.length > 0 && done === jobs.length;
@@ -2775,6 +2806,7 @@ export class Display {
           queueJobLabels: jobs.map((job) => jobLabel(job.job_type, job.title)),
           doneCount,
           failedCount,
+          dirtyReview,
         };
       });
       const pendingJobCap = queuePendingCapForVisibleItems(
@@ -2796,8 +2828,8 @@ export class Display {
           queueJobLabels,
           doneCount,
           failedCount,
+          dirtyReview,
         } = visibleItems[wiIdx];
-        const dirtyReview = dirtyReviewByWi.get(Number(wi.id)) || null;
         if (lines.length >= maxLines - 1) {
           const remaining = visibleItems.length - wiIdx;
           // A prior work-item block can push us to (or past) the budget, so drop

@@ -3319,7 +3319,11 @@ export class RunSession {
       }
       liveReviewPromise = runLiveReview(display)
         .catch((err) => {
-          display._mode = "normal";
+          if (typeof display._resetApprovalState === "function") {
+            display._resetApprovalState();
+          } else {
+            display._mode = "normal";
+          }
           display.addEvent(`${C.red}Review failed: ${err.message}${C.reset}`);
           display.requestRender({ force: true });
         })

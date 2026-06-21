@@ -673,8 +673,14 @@ function isBlockingAction(action, payload = {}) {
   return ATLAS_V2_BLOCKING_ACTIONS.has(effective);
 }
 
+const ATLAS_PREFETCH_ORIGINS = new Set(["prefetch", "handoff_memory_prefetch"]);
+
+function isAtlasPrefetchOrigin(origin) {
+  return ATLAS_PREFETCH_ORIGINS.has(String(origin || ""));
+}
+
 function atlasGateMode(action, payload = {}, origin = "agent") {
-  if (origin === "prefetch") return "non-blocking";
+  if (isAtlasPrefetchOrigin(origin)) return "non-blocking";
   return isBlockingAction(action, payload) ? "blocking" : "non-blocking";
 }
 
@@ -722,6 +728,18 @@ function withProtectedAtlasGate(fn, {
 function truncateForObservation(value, max = 240) {
   const text = String(value == null ? "" : value);
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+function atlasObservationTypeForOrigin(origin = "agent") {
+  if (origin === "prefetch") return "tool.atlas.prefetch";
+  if (origin === "handoff_memory_prefetch") return "atlas.prefetch.memory";
+  return "tool.atlas";
+}
+
+function atlasOriginTag(origin = "agent", cacheHit = false) {
+  if (origin === "prefetch") return " [prefetch]";
+  if (origin === "handoff_memory_prefetch") return " [memory prefetch]";
+  return cacheHit ? " [cache]" : "";
 }
 
 export function classifyAtlasFailure(message) {
@@ -819,7 +837,7 @@ function recordAtlasToolObservation({
   try {
     const rawContext = getObservationContext();
     const context = rawContext || {};
-    const originTag = origin === "prefetch" ? " [prefetch]" : cacheHit ? " [cache]" : "";
+    const originTag = atlasOriginTag(origin, cacheHit);
     const hint = atlasSummaryHint(args, action);
     const displayName = formatAtlasToolDisplayName(action) || `atlas ${action}`;
     const failureKind = ok ? null : classifyAtlasFailure(error);
@@ -829,7 +847,7 @@ function recordAtlasToolObservation({
       work_item_id: context.work_item_id ?? null,
       job_id: context.job_id ?? null,
       attempt_id: context.attempt_id ?? null,
-      observation_type: origin === "prefetch" ? "tool.atlas.prefetch" : "tool.atlas",
+      observation_type: atlasObservationTypeForOrigin(origin),
       summary: `${displayName}${hint ? ` (${hint})` : ""}${originTag} ${statusText}${durationMs != null ? ` (${durationMs}ms)` : ""}`,
       detail: {
         kind: "atlas",
@@ -1603,8 +1621,9 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
   }
 
   const obsCtx = getObservationContext() || {};
-  const prefetchScope = origin === "prefetch" ? prefetchScopeId(obsCtx, repo) : null;
-  const prefetchVersion = origin === "prefetch" ? await prefetchVersionId(cwd, repo) : null;
+  const prefetchLike = isAtlasPrefetchOrigin(origin);
+  const prefetchScope = prefetchLike ? prefetchScopeId(obsCtx, repo) : null;
+  const prefetchVersion = prefetchLike ? await prefetchVersionId(cwd, repo) : null;
   const jobVersion = origin === "agent" ? await prefetchVersionId(cwd || repo.repoPath, repo) : null;
   const jobCacheEnabled = atlasJobCacheEnabled(config);
   if (origin === "agent") {
@@ -1623,7 +1642,7 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
       });
       return cached;
     }
-  } else if (origin === "prefetch") {
+  } else if (prefetchLike) {
     const cached = prefetchCacheGet(prefetchScope, prepared.action, prepared.payload, prefetchVersion);
     if (cached != null) {
       recordAtlasToolObservation({
@@ -1759,7 +1778,7 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
           versionId: jobVersion,
           ttlMs: config?.jobCacheTtlMs,
         });
-      } else if (origin === "prefetch") {
+      } else if (prefetchLike) {
         prefetchCacheSet(prefetchScope, prepared.action, prepared.payload, output, prefetchVersion, config?.prefetchCacheTtlMs);
       }
     }

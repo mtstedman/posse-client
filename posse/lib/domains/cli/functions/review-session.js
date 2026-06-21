@@ -1387,15 +1387,23 @@ export class ReviewSession {
     const approved = reportData.filter(d => d._decision === "approved").length;
     await closeout.run("return", () => {
       if (approvalCanceled) return;
-      display._mode = "normal";
-      display._approvalData = [];
-      display._approvalDone = null;
+      if (typeof display._resetApprovalState === "function") {
+        display._resetApprovalState();
+      } else {
+        display._mode = "normal";
+        display._approvalData = [];
+        display._approvalDone = null;
+      }
       display.addEvent(`${C.green}Review closed${approved > 0 ? ` - ${approved} approved/merged` : ""}${C.reset}`);
       display.requestRender({ force: true });
     });
   } finally {
-    if (!approvalCanceled && typeof display._mode === "string" && display._mode !== "normal") {
-      display._mode = "normal";
+    if (!approvalCanceled) {
+      if (typeof display._resetApprovalState === "function") {
+        display._resetApprovalState();
+      } else if (typeof display._mode === "string" && display._mode !== "normal") {
+        display._mode = "normal";
+      }
     }
     closeout.clear();
     display.requestRender({ force: true });
@@ -1951,13 +1959,19 @@ export class ReviewSession {
     });
     await closeout.run("report", () => this.saveReport(reportData));
     await closeout.run("terminal", () => {
-      display._mode = "normal";
-      display._approvalData = [];
-      display._approvalDone = null;
+      if (typeof display._resetApprovalState === "function") {
+        display._resetApprovalState();
+      } else {
+        display._mode = "normal";
+        display._approvalData = [];
+        display._approvalDone = null;
+      }
       display.requestRender?.({ force: true });
     });
   } finally {
-    if (typeof display._mode === "string" && display._mode !== "normal") {
+    if (typeof display._resetApprovalState === "function") {
+      display._resetApprovalState();
+    } else if (typeof display._mode === "string" && display._mode !== "normal") {
       display._mode = "normal";
     }
     closeout.clear();

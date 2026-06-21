@@ -4,6 +4,8 @@ import {
 } from "./atlas.js";
 import { executeEmbeddedAtlasTool } from "./atlas-embedded.js";
 
+export const HANDOFF_MEMORY_PREFETCH_ORIGIN = "handoff_memory_prefetch";
+
 function parseToolResultJson(result) {
   const text = Array.isArray(result?.content)
     ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("")
@@ -12,7 +14,7 @@ function parseToolResultJson(result) {
   try { return JSON.parse(text); } catch { return null; }
 }
 
-export async function getAtlasMemoryClient({ cwd = process.cwd(), config = getAtlasIntegrationConfig() } = {}) {
+export async function getAtlasMemoryClient({ cwd = process.cwd(), config = getAtlasIntegrationConfig(), origin = "agent" } = {}) {
   if (!config?.enabled) return { ok: false, skipped: "atlas_disabled" };
   const repo = resolveAtlasRepoTarget({ cwd, config });
   if (!repo?.repoId) return { ok: false, skipped: "repo_not_ready" };
@@ -23,7 +25,7 @@ export async function getAtlasMemoryClient({ cwd = process.cwd(), config = getAt
     const text = await executeEmbeddedAtlasTool(action, { repoId: repo.repoId, ...args }, {
       cwd,
       config,
-      origin: "agent",
+      origin,
     });
     return {
       isError: /^Error:/i.test(String(text || "")),

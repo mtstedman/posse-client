@@ -9,7 +9,10 @@ import {
   getRecentWorkItemSummaries,
   hasPromotedInsightMemories,
 } from "../../../queue/functions/index.js";
-import { callAtlasMemoryAction } from "../../../integrations/functions/atlas-memory.js";
+import {
+  HANDOFF_MEMORY_PREFETCH_ORIGIN,
+  callAtlasMemoryAction,
+} from "../../../integrations/functions/atlas-memory.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 
 function collectInsightFilePaths(payload) {
@@ -93,6 +96,7 @@ function normalizeSurfaceMemory(memory = {}) {
     ]),
     file_paths: null,
     surfaced_memory: true,
+    prefetch_origin: HANDOFF_MEMORY_PREFETCH_ORIGIN,
     why_surface: memory.score != null ? `ATLAS memory.surface score ${memory.score}` : "ATLAS memory.surface",
     stale: !!memory.stale,
   };
@@ -100,6 +104,25 @@ function normalizeSurfaceMemory(memory = {}) {
 
 function nonStaleSurfaceMemories(memories = []) {
   return memories.filter((memory) => !memory?.stale);
+}
+
+function surfacedAtlasMemoryInsights(rows = []) {
+  return rows.filter((row) =>
+    row?.surfaced_memory === true
+    || row?.insight_type === "atlas_memory"
+    || String(row?.source || "").startsWith("memory:")
+  );
+}
+
+export function buildMemoryPrefetchNotice(rows = []) {
+  const count = surfacedAtlasMemoryInsights(rows).length;
+  if (count <= 0) return null;
+  return [
+    "ATLAS MEMORY PREFETCH:",
+    `${count} relevant promoted memory item(s) were surfaced during handoff.`,
+    "Treat those historical insight entries as the first memory pass; do not run another broad memory lookup just to rediscover them.",
+    "Query ATLAS memory again only for a specific missing-memory question.",
+  ].join("\n");
 }
 
 function currentWorkItemLocalInsights(rows = [], payload = {}, limit = 6) {
@@ -205,7 +228,7 @@ export async function loadRelevantInsightsAsync(role, payload, { cwd = process.c
       symbolIds,
       fileRelPaths,
       limit,
-    }), { cwd });
+    }), { cwd, origin: HANDOFF_MEMORY_PREFETCH_ORIGIN });
     const rawMemories = Array.isArray(result?.json?.memories) ? result.json.memories.map(normalizeSurfaceMemory) : [];
     const memories = nonStaleSurfaceMemories(rawMemories);
     recordTelemetry(telemetry, {
@@ -277,6 +300,7 @@ export const __test = {
   collectInsightFilePaths,
   collectInsightSymbolIds,
   currentWorkItemLocalInsights,
+  buildMemoryPrefetchNotice,
   memorySurfaceArgs,
   memorySurfaceEnabled,
   nonStaleSurfaceMemories,
