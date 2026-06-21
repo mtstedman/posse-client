@@ -19,6 +19,22 @@ function normalizeRoot(values = [], cwd = process.cwd()) {
   return [...new Set(normalized)];
 }
 
+function hasMappings(mappings) {
+  return Array.isArray(mappings) && mappings.length > 0;
+}
+
+function promotedScopeFromMappings(mappings, { cwd = process.cwd() } = {}) {
+  return hasMappings(mappings)
+    ? CommitScope.fromPayload({ mappings }, { cwd })
+    : new CommitScope();
+}
+
+async function promotedScopeFromMappingsAsync(mappings, { cwd = process.cwd() } = {}) {
+  return hasMappings(mappings)
+    ? await CommitScope.fromPayloadAsync({ mappings }, { cwd })
+    : new CommitScope();
+}
+
 export class Scope {
   constructor({
     modifyFiles = [],
@@ -36,7 +52,7 @@ export class Scope {
 
   static fromPayload(payload = {}, { cwd = process.cwd() } = {}) {
     const parsed = parseJsonObject(payload);
-    const promoted = CommitScope.fromPayload({ mappings: parsed.mappings || [] }, { cwd });
+    const promoted = promotedScopeFromMappings(parsed.mappings, { cwd });
     return new Scope({
       modifyFiles: parsed.files_to_modify || [],
       createFiles: [...(parsed.files_to_create || []), ...promoted.files],
@@ -48,7 +64,7 @@ export class Scope {
 
   static async fromPayloadAsync(payload = {}, { cwd = process.cwd() } = {}) {
     const parsed = parseJsonObject(payload);
-    const promoted = await CommitScope.fromPayloadAsync({ mappings: parsed.mappings || [] }, { cwd });
+    const promoted = await promotedScopeFromMappingsAsync(parsed.mappings, { cwd });
     return new Scope({
       modifyFiles: parsed.files_to_modify || [],
       createFiles: [...(parsed.files_to_create || []), ...promoted.files],
@@ -59,8 +75,7 @@ export class Scope {
   }
 
   static fromMappings(mappings = [], { cwd = process.cwd() } = {}) {
-    const payload = { mappings };
-    const commitScope = CommitScope.fromPayload(payload, { cwd });
+    const commitScope = promotedScopeFromMappings(mappings, { cwd });
     return new Scope({
       modifyFiles: [],
       createFiles: [...commitScope.files],
@@ -71,8 +86,7 @@ export class Scope {
   }
 
   static async fromMappingsAsync(mappings = [], { cwd = process.cwd() } = {}) {
-    const payload = { mappings };
-    const commitScope = await CommitScope.fromPayloadAsync(payload, { cwd });
+    const commitScope = await promotedScopeFromMappingsAsync(mappings, { cwd });
     return new Scope({
       modifyFiles: [],
       createFiles: [...commitScope.files],

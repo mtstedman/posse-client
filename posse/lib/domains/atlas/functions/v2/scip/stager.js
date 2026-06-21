@@ -15,6 +15,7 @@ import { computeScipPlanFilesetHash, countSourceFilesByExtensions, describeScipI
 import { normalizeAtlasScipMode, shouldRunScipPhase } from "../../../../integrations/functions/atlas-v2-mode.js";
 import { formatAtlasError } from "../verbose-errors.js";
 import { createProtoReader } from "./proto-reader.js";
+import { sanitizeScipOutputFileNative } from "./sanitizer.js";
 import {
   buildFailedStagerMeta,
   buildRecoveredStagerMeta,
@@ -700,6 +701,7 @@ async function stagePlanThroughGate(plan, { cwd, policy, currentHead, maxAgeHour
         error: message,
         previousMeta: meta,
         durationMs: stageDurationMs,
+        sanitizer: run.sanitizer || null,
       }));
       emit(onProgress, `SCIP restage failed for ${plan.indexerId || plan.label}: ${run.error || `exit ${run.status ?? "unknown"}`}`, {
         kind: "atlas.scip.restage_failed",
@@ -718,6 +720,7 @@ async function stagePlanThroughGate(plan, { cwd, policy, currentHead, maxAgeHour
       commandArgsHash: computeCommandArgsHash(plan),
       filesetHash: fileset.currentHash,
       durationMs: stageDurationMs,
+      sanitizer: run.sanitizer || null,
     }));
     if (!metaResult.ok) {
       emit(onProgress, `SCIP restage metadata write failed for ${path.basename(plan.outputPath)}: ${metaResult.error || "unknown"}`, {
@@ -737,6 +740,7 @@ async function stagePlanThroughGate(plan, { cwd, policy, currentHead, maxAgeHour
       source_languages: sourceLanguages,
       timeoutMs: plan.timeoutMs,
       cold: Boolean(plan.runtimeColdTimeout),
+      sanitizer: run.sanitizer || null,
     });
     return { ...run, fileset };
   }, { label: `SCIP stage ${plan.indexerId || plan.label}`, waitMs });
@@ -783,9 +787,22 @@ async function runScipIndexerAtomic(plan, { cwd, onProgress = null }) {
       if (!(await fileExists(plan.outputPath))) {
         return { ok: false, error: `indexer completed but did not produce ${path.basename(plan.outputPath)}` };
       }
-      const validation = validateScipOutputFile(plan.outputPath, run.sourceFiles);
-      if (!validation.ok) return { ...run, ok: false, error: validation.error, scipDocuments: validation.documents };
-      return { ...run, scipDocuments: validation.documents };
+      const sanitizedPath = tempOutputPath(plan.outputPath);
+      const sanitize = await sanitizeScipOutputOrValidationError({
+        inputPath: plan.outputPath,
+        outputPath: sanitizedPath,
+        repoRoot: cwd,
+        plan,
+        run,
+        onProgress,
+      });
+      try {
+        if (!sanitize.ok) return { ...run, ok: false, error: sanitize.error, scipDocuments: sanitize.scipDocuments, sanitizer: sanitize.metrics || null };
+        await replaceFile(sanitizedPath, plan.outputPath);
+        return { ...run, scipDocuments: sanitize.scipDocuments, sanitizer: sanitize.metrics };
+      } finally {
+        try { await fs.promises.rm(sanitizedPath, { force: true }); } catch { /* best effort */ }
+      }
     } finally {
       await cleanupGeneratedTsconfig(inferredTsconfig, hadTsconfig);
     }
@@ -797,14 +814,61 @@ async function runScipIndexerAtomic(plan, { cwd, onProgress = null }) {
     if (!(await fileExists(tempPath))) {
       return { ok: false, error: `indexer completed but did not produce ${path.basename(tempPath)}` };
     }
-    const validation = validateScipOutputFile(tempPath, run.sourceFiles);
-    if (!validation.ok) return { ...run, ok: false, error: validation.error, scipDocuments: validation.documents };
-    await replaceFile(tempPath, plan.outputPath);
-    return { ...run, scipDocuments: validation.documents };
+    const sanitizedPath = tempOutputPath(plan.outputPath);
+    const sanitize = await sanitizeScipOutputOrValidationError({
+      inputPath: tempPath,
+      outputPath: sanitizedPath,
+      repoRoot: cwd,
+      plan,
+      run,
+      onProgress,
+    });
+    try {
+      if (!sanitize.ok) return { ...run, ok: false, error: sanitize.error, scipDocuments: sanitize.scipDocuments, sanitizer: sanitize.metrics || null };
+      await replaceFile(sanitizedPath, plan.outputPath);
+      return { ...run, scipDocuments: sanitize.scipDocuments, sanitizer: sanitize.metrics };
+    } finally {
+      try { await fs.promises.rm(sanitizedPath, { force: true }); } catch { /* best effort */ }
+    }
   } finally {
     try { await fs.promises.rm(tempPath, { force: true }); } catch { /* best effort */ }
     await cleanupGeneratedTsconfig(inferredTsconfig, hadTsconfig);
   }
+}
+
+async function sanitizeScipOutputOrValidationError({ inputPath, outputPath, repoRoot, plan, run, onProgress }) {
+  const rawValidation = validateScipOutputFile(inputPath, run?.sourceFiles);
+  if (!rawValidation.ok) {
+    return {
+      ok: false,
+      error: rawValidation.error,
+      scipDocuments: rawValidation.documents,
+    };
+  }
+  let sanitize;
+  try {
+    sanitize = await sanitizeScipOutputFileNative({ inputPath, outputPath, repoRoot, plan, onProgress });
+  } catch (err) {
+    return {
+      ok: false,
+      error: `SCIP sanitizer failed for ${path.basename(inputPath)}: ${formatAtlasError(err)}`,
+      scipDocuments: rawValidation.documents,
+    };
+  }
+  const sanitizedValidation = validateSanitizedScipOutputFile(outputPath);
+  if (!sanitizedValidation.ok) {
+    return {
+      ok: false,
+      error: sanitizedValidation.error,
+      scipDocuments: sanitizedValidation.documents,
+      metrics: sanitize.metrics,
+    };
+  }
+  return {
+    ok: true,
+    ...sanitize,
+    scipDocuments: sanitizedValidation.documents,
+  };
 }
 
 function normalizeScipRestagePolicy(value) {
@@ -927,6 +991,7 @@ function stageOutcomeForRun(row, run = {}) {
     error: message || undefined,
     status: run.status ?? null,
     signal: run.signal ?? null,
+    sanitizer: run.sanitizer || undefined,
   };
 }
 
@@ -1379,6 +1444,18 @@ function validateScipOutputFile(filePath, sourceFiles) {
       ok: false,
       documents,
       error: `indexer produced empty .scip output for ${Math.round(totalSources)} source file${Math.round(totalSources) === 1 ? "" : "s"}`,
+    };
+  }
+  return { ok: true, documents };
+}
+
+function validateSanitizedScipOutputFile(filePath) {
+  const documents = countScipDocumentsInFile(filePath);
+  if (!Number.isFinite(documents)) {
+    return {
+      ok: false,
+      documents: null,
+      error: `SCIP sanitizer produced corrupt .scip output for ${path.basename(filePath)}`,
     };
   }
   return { ok: true, documents };

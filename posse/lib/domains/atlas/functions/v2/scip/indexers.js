@@ -514,6 +514,50 @@ export function computeScipPlanFilesetHash({ repoRoot, plan, ref = null } = {}) 
   };
 }
 
+/**
+ * Build the repo-aware manifest a staged SCIP artifact is allowed to contain.
+ * This deliberately shares the fileset source with computeScipPlanFilesetHash:
+ * gitignore-aware worktree entries first, filesystem scan only as a fallback.
+ *
+ * @param {{ repoRoot: string, plan: ScipStagePlan, ref?: string | null }} input
+ * @returns {{ ok: boolean, paths: string[], files: number, source: string, ref: string | null, reason?: string }}
+ */
+export function computeScipPlanFilesetManifest({ repoRoot, plan, ref = null } = {}) {
+  const root = path.resolve(String(repoRoot || process.cwd()));
+  const spec = filesetSpecForPlan(plan);
+  if (!spec) {
+    return { ok: false, paths: [], files: 0, source: "unsupported", ref: ref || null, reason: "fileset_unsupported" };
+  }
+
+  const gitRef = String(ref || "").trim();
+  if (gitRef) {
+    const fromTree = gitTreeFilesetEntries(root, gitRef, spec);
+    if (fromTree.ok) {
+      return filesetManifestResult(fromTree.entries, { source: "git-tree", ref: gitRef });
+    }
+    return { ok: false, paths: [], files: 0, source: "git-tree", ref: gitRef, reason: fromTree.reason || "git_tree_failed" };
+  }
+
+  const fromGitWorktree = gitWorktreeFilesetPathEntries(root, spec);
+  if (fromGitWorktree.ok) {
+    return filesetManifestResult(fromGitWorktree.entries, { source: "git-worktree", ref: null });
+  }
+
+  const fromFilesystem = filesystemFilesetPathEntries(root, spec);
+  if (fromFilesystem.ok) {
+    return filesetManifestResult(fromFilesystem.entries, { source: "filesystem", ref: null });
+  }
+
+  return {
+    ok: false,
+    paths: [],
+    files: 0,
+    source: "filesystem",
+    ref: null,
+    reason: fromFilesystem.reason || fromGitWorktree.reason || "fileset_scan_failed",
+  };
+}
+
 function filesetSpecForPlan(plan = {}) {
   const extensions = uniqueNonEmptyStrings(plan.sourceExtensions || [])
     .map((ext) => ext.startsWith(".") ? ext.toLowerCase() : `.${ext.toLowerCase()}`);
@@ -591,6 +635,34 @@ function gitWorktreeFilesetEntries(repoRoot, spec) {
   return { ok: true, entries };
 }
 
+function gitWorktreeFilesetPathEntries(repoRoot, spec) {
+  let buf;
+  try {
+    buf = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+      cwd: repoRoot,
+      encoding: "buffer",
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch (err) {
+    return { ok: false, entries: [], reason: err?.message || "git_ls_files_failed" };
+  }
+  const entries = [];
+  for (const raw of buf.toString("utf8").split("\0")) {
+    const rel = normalizeRepoRel(raw);
+    if (!rel || !pathMatchesFilesetSpec(rel, spec)) continue;
+    const abs = path.join(repoRoot, rel);
+    try {
+      const st = fs.statSync(abs);
+      if (!st.isFile()) continue;
+      entries.push({ path: rel, kind: "worktree-file" });
+    } catch {
+      // Deleted paths are not current manifest inputs.
+    }
+  }
+  return { ok: true, entries };
+}
+
 function filesystemFilesetEntries(repoRoot, spec) {
   const entries = [];
   const stack = [repoRoot];
@@ -631,6 +703,42 @@ function filesystemFilesetEntries(repoRoot, spec) {
   return { ok: true, entries };
 }
 
+function filesystemFilesetPathEntries(repoRoot, spec) {
+  const entries = [];
+  const stack = [repoRoot];
+  let dirsSeen = 0;
+  let filesSeen = 0;
+  while (stack.length > 0) {
+    if (dirsSeen >= SOURCE_SCAN_MAX_DIRS || filesSeen >= SOURCE_SCAN_MAX_FILES) {
+      return { ok: false, entries, reason: "fileset_scan_capped" };
+    }
+    const dir = stack.pop();
+    if (!dir) continue;
+    dirsSeen++;
+    let dirEntries;
+    try {
+      dirEntries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of dirEntries) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!SOURCE_SCAN_IGNORED_DIRS.has(entry.name)) stack.push(abs);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      filesSeen++;
+      const rel = normalizeRepoRel(path.relative(repoRoot, abs));
+      if (pathMatchesFilesetSpec(rel, spec)) {
+        entries.push({ path: rel, kind: "filesystem-file" });
+      }
+      if (filesSeen >= SOURCE_SCAN_MAX_FILES) break;
+    }
+  }
+  return { ok: true, entries };
+}
+
 function filesetHashResult(entries, spec, { source, ref }) {
   const sorted = [...entries].sort((a, b) => a.path.localeCompare(b.path));
   const h = createHash("sha256");
@@ -654,6 +762,24 @@ function filesetHashResult(entries, spec, { source, ref }) {
     ok: true,
     hash: `sha256:${h.digest("hex")}`,
     files: sorted.length,
+    source,
+    ref,
+  };
+}
+
+function filesetManifestResult(entries, { source, ref }) {
+  const paths = [];
+  const seen = new Set();
+  for (const entry of [...entries].sort((a, b) => a.path.localeCompare(b.path))) {
+    const rel = normalizeRepoRel(entry.path);
+    if (!rel || seen.has(rel)) continue;
+    seen.add(rel);
+    paths.push(rel);
+  }
+  return {
+    ok: true,
+    paths,
+    files: paths.length,
     source,
     ref,
   };

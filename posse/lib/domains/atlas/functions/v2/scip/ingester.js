@@ -13,9 +13,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeScipIndex } from "./decode.js";
-import { buildScipIndexCache } from "./cache.js";
-import { ATLAS_SCIP_ROWS_SPEC_VERSION, normalizeLangFromScip, scipDocumentToParseResult } from "./to-rows.js";
-import { monikerFromParsedSymbol } from "./moniker.js";
+import { scipIndexToRowsNative } from "./native-rows.js";
+import { ATLAS_SCIP_ROWS_SPEC_VERSION, normalizeLangFromScip } from "./to-rows.js";
 import { sha256Hex } from "../hash.js";
 import { normalizeRepoPath, repoRelativeFromAbsolute } from "../paths.js";
 import { languageForPath } from "../parse/language-buckets.js";
@@ -23,7 +22,6 @@ import { inspectSampleForMinified, isLikelyMinifiedPath, MINIFIED_SAMPLE_BYTES }
 import { runSqliteWrite } from "../../../../../shared/concurrency/functions/sqlite-gate.js";
 
 /** @typedef {import("../../../classes/v2/Ledger.js").Ledger} Ledger */
-/** @typedef {import("./cache.js").ScipIndexCache} ScipIndexCache */
 
 /**
  * @typedef {Object} ScipIngestResult
@@ -128,10 +126,11 @@ export async function ingestScipFile({
   // files from TS files.
   const language = String(scheme || "").replace(/^scip-/, "").toLowerCase() || null;
   await prepareAndMutateDocumentText(index, repoRoot);
-  const cache = buildScipIndexCache(index);
-  const totalDocuments = countDocuments(cache);
-  let sourceLanguages = collectSourceLanguages(cache);
-  let sourceLanguageTotals = collectSourceLanguageCounts(cache);
+  const nativeRows = await scipIndexToRowsNative({ index });
+  const rowDocuments = normalizeNativeRowDocuments(nativeRows?.documents);
+  const totalDocuments = rowDocuments.length;
+  let sourceLanguages = collectSourceLanguages(rowDocuments);
+  let sourceLanguageTotals = collectSourceLanguageCounts(rowDocuments);
   const sourceLanguageCurrent = zeroCountsFromTotals(sourceLanguageTotals);
   emit(onEvent, {
     kind: "atlas.scip.ingest.started",
@@ -163,13 +162,13 @@ export async function ingestScipFile({
       message: "SCIP Metadata.ToolInfo.version is absent; using 'unknown'",
     });
   }
-  const filesetHash = cache.filesetHash();
+  const filesetHash = String(nativeRows?.fileset_hash || nativeRows?.filesetHash || "");
   const indexerVersion = index.metadata.tool_info.version || "unknown";
   const toolName = index.metadata.tool_info.name || scheme;
 
   // Already ingested? recordScipIndex returns null when the bookkeeping
   // row's UNIQUE key matched — short-circuit the row work entirely.
-  const langs = collectLangs(cache);
+  const langs = collectLangs(rowDocuments);
   resetCounts(sourceLanguageCurrent, sourceLanguageTotals);
 
   const indexRecord = {
@@ -183,7 +182,7 @@ export async function ingestScipFile({
     config_hash: effectiveConfigHash,
     deps_hash: depsHash || "",
     document_count: totalDocuments,
-    occurrence_count: countOccurrences(cache),
+    occurrence_count: nativeRowsNumber(nativeRows, "occurrence_count", "occurrenceCount"),
     external_symbol_count: index.external_symbols.length,
     produced_at: effectiveProducedAt,
   };
@@ -293,7 +292,7 @@ export async function ingestScipFile({
       });
       return { status: "partial", recordedId };
     }
-    const bindExternal = makeExternalBinder(ledger, () => { externalsBound++; });
+    const externalIdMap = bindNativeExternalMonikers(ledger, nativeRows, () => { externalsBound++; });
 
     // Throttle per-document progress to ~1% steps (min every 5 docs) so the
     // display can update a real % bar without flooding the event channel.
@@ -326,11 +325,11 @@ export async function ingestScipFile({
         });
       }
     };
-    for (const document of cache.documents()) {
-      const repoRelPath = document.relative_path || "";
+    for (const document of rowDocuments) {
+      const repoRelPath = document.repo_rel_path || "";
       try {
         if (!repoRelPath) {
-          throw new RangeError(`SCIP document path is not canonical repo-relative: ${document.relative_path || "(empty)"}`);
+          throw new RangeError(`SCIP document path is not canonical repo-relative: ${document.repo_rel_path || "(empty)"}`);
         }
         if (document.skip_reason === "minified_skip") {
           documentsSkipped++;
@@ -365,13 +364,7 @@ export async function ingestScipFile({
           ledger.reingestBlobWithBackend({ content_hash: document.content_hash });
         }
 
-        const parseResult = scipDocumentToParseResult({
-          cache,
-          document,
-          repo_rel_path: repoRelPath,
-          bindExternal,
-          lang: sourceLanguageForDocument(document) || "unknown",
-        });
+        const parseResult = bindNativeParseResult(document, externalIdMap);
 
         if (layerOnly && typeof ledger.ingestBlobLayer === "function") {
           // Layer cutover: SCIP always writes its own layer (incl. new blobs),
@@ -713,27 +706,6 @@ function normalizeProjectRoot(projectRoot) {
 }
 
 /**
- * @param {Ledger} ledger
- * @param {() => void} onBind
- * @returns {(parsed: import("./symbol-parser.js").ScipParsedSymbol) => number}
- */
-function makeExternalBinder(ledger, onBind) {
-  return (parsed) => {
-    const moniker = monikerFromParsedSymbol(parsed);
-    const id = ledger.upsertExternalSymbol({
-      scheme: moniker.scheme,
-      manager: moniker.manager,
-      package_name: moniker.package_name,
-      package_version: moniker.package_version,
-      descriptor: moniker.descriptor,
-      display_name: moniker.display_name || null,
-    });
-    onBind();
-    return id;
-  };
-}
-
-/**
  * @param {import("./decode.js").ScipIndex} index
  * @returns {string}
  */
@@ -771,13 +743,121 @@ function schemeFromSymbol(symbol) {
   return space > 0 ? raw.slice(0, space) : "";
 }
 
+function normalizeNativeRowDocuments(documents) {
+  return (Array.isArray(documents) ? documents : []).map((doc) => ({
+    repo_rel_path: String(doc?.repo_rel_path ?? doc?.repoRelPath ?? ""),
+    content_hash: String(doc?.content_hash ?? doc?.contentHash ?? ""),
+    byte_size: nativeRowsNumber(doc, "byte_size", "byteSize"),
+    range_clamp_count: nativeRowsNumber(doc, "range_clamp_count", "rangeClampCount"),
+    lang: String(doc?.lang || ""),
+    symbols: Array.isArray(doc?.symbols) ? doc.symbols : [],
+    edges: Array.isArray(doc?.edges) ? doc.edges : [],
+    skip_reason: doc?.skip_reason ?? doc?.skipReason ?? null,
+    skip_message: doc?.skip_message ?? doc?.skipMessage ?? null,
+  }));
+}
+
+function nativeRowsNumber(value, snake, camel) {
+  const n = Number(value?.[snake] ?? value?.[camel] ?? 0);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+}
+
+function bindNativeExternalMonikers(ledger, nativeRows, onBind) {
+  const externalIds = plainObject(nativeRows?.external_ids ?? nativeRows?.externalIds) || {};
+  const externalMonikers = plainObject(nativeRows?.external_monikers ?? nativeRows?.externalMonikers) || {};
+  const byNativeId = new Map();
+  for (const [rawSymbol, nativeIdRaw] of Object.entries(externalIds)) {
+    const nativeId = Number(nativeIdRaw);
+    const moniker = plainObject(externalMonikers[rawSymbol]);
+    if (!Number.isFinite(nativeId) || !moniker) continue;
+    const id = ledger.upsertExternalSymbol({
+      scheme: String(moniker.scheme || ""),
+      manager: String(moniker.manager || ""),
+      package_name: String(moniker.package_name ?? moniker.packageName ?? ""),
+      package_version: String(moniker.package_version ?? moniker.packageVersion ?? ""),
+      descriptor: String(moniker.descriptor || ""),
+      display_name: String(moniker.display_name ?? moniker.displayName ?? "") || null,
+    });
+    byNativeId.set(nativeId, id);
+    onBind();
+  }
+  return byNativeId;
+}
+
+function bindNativeParseResult(document, externalIdMap) {
+  return {
+    repo_rel_path: document.repo_rel_path,
+    content_hash: document.content_hash,
+    lang: document.lang || sourceLanguageForDocument(document) || "unknown",
+    symbols: document.symbols.map(normalizeNativeSymbol),
+    edges: document.edges.map((edge) => normalizeNativeEdge(edge, externalIdMap)),
+  };
+}
+
+function normalizeNativeSymbol(symbol) {
+  return {
+    ...symbol,
+    content_hash: String(symbol?.content_hash ?? symbol?.contentHash ?? ""),
+    local_id: Number(symbol?.local_id ?? symbol?.localId ?? 0),
+    qualified_name: symbol?.qualified_name ?? symbol?.qualifiedName ?? null,
+    parent_local_id: symbol?.parent_local_id ?? symbol?.parentLocalId ?? null,
+    repo_rel_path: String(symbol?.repo_rel_path ?? symbol?.repoRelPath ?? ""),
+    range_start: nullableNumber(symbol?.range_start ?? symbol?.rangeStart),
+    range_end: nullableNumber(symbol?.range_end ?? symbol?.rangeEnd),
+    range_start_line: nullableNumber(symbol?.range_start_line ?? symbol?.rangeStartLine),
+    range_end_line: nullableNumber(symbol?.range_end_line ?? symbol?.rangeEndLine),
+    signature_hash: symbol?.signature_hash ?? symbol?.signatureHash ?? null,
+    signature_text: symbol?.signature_text ?? symbol?.signatureText ?? null,
+    body_identifiers: symbol?.body_identifiers ?? symbol?.bodyIdentifiers ?? null,
+    source: "scip",
+  };
+}
+
+function normalizeNativeEdge(edge, externalIdMap) {
+  const out = {
+    ...edge,
+    from_content_hash: String(edge?.from_content_hash ?? edge?.fromContentHash ?? ""),
+    from_local_id: Number(edge?.from_local_id ?? edge?.fromLocalId ?? 0),
+    edge_id: Number(edge?.edge_id ?? edge?.edgeId ?? 0),
+    to_content_hash: edge?.to_content_hash ?? edge?.toContentHash ?? null,
+    to_local_id: nullableNumber(edge?.to_local_id ?? edge?.toLocalId),
+    to_external_id: null,
+    to_name: String(edge?.to_name ?? edge?.toName ?? ""),
+    range_start: Number(edge?.range_start ?? edge?.rangeStart ?? 0),
+    range_end: Number(edge?.range_end ?? edge?.rangeEnd ?? 0),
+    range_start_line: Number(edge?.range_start_line ?? edge?.rangeStartLine ?? 1),
+    range_end_line: Number(edge?.range_end_line ?? edge?.rangeEndLine ?? 1),
+    confidence: Number(edge?.confidence ?? 98),
+    source: "scip",
+  };
+  const nativeExternalId = edge?.to_external_id ?? edge?.toExternalId;
+  if (nativeExternalId != null) {
+    const realId = externalIdMap.get(Number(nativeExternalId));
+    if (realId == null) {
+      throw new Error(`native SCIP external id ${nativeExternalId} was not bound`);
+    }
+    out.to_external_id = realId;
+  }
+  return out;
+}
+
+function nullableNumber(value) {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function plainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
 /**
- * @param {ScipIndexCache} cache
+ * @param {Array<Record<string, any>>} documents
  * @returns {string}
  */
-function collectLangs(cache) {
+function collectLangs(documents) {
   const set = new Set();
-  for (const doc of cache.documents()) {
+  for (const doc of documents || []) {
     const lang = sourceLanguageForDocument(doc);
     if (lang) set.add(lang);
   }
@@ -785,12 +865,12 @@ function collectLangs(cache) {
 }
 
 /**
- * @param {ScipIndexCache} cache
+ * @param {Array<Record<string, any>>} documents
  * @returns {string[]}
  */
-function collectSourceLanguages(cache) {
+function collectSourceLanguages(documents) {
   const set = new Set();
-  for (const doc of cache.documents()) {
+  for (const doc of documents || []) {
     const lang = sourceLanguageForDocument(doc);
     if (lang) set.add(lang);
   }
@@ -798,13 +878,13 @@ function collectSourceLanguages(cache) {
 }
 
 /**
- * @param {ScipIndexCache} cache
+ * @param {Array<Record<string, any>>} documents
  * @returns {Record<string, number>}
  */
-function collectSourceLanguageCounts(cache) {
+function collectSourceLanguageCounts(documents) {
   /** @type {Record<string, number>} */
   const counts = {};
-  for (const doc of cache.documents()) {
+  for (const doc of documents || []) {
     const lang = sourceLanguageForDocument(doc);
     if (lang) counts[lang] = (counts[lang] || 0) + 1;
   }
@@ -828,13 +908,13 @@ function resetCounts(target, totals) {
  * multi-extension indexer. Prefer the source path so scip-typescript indexes
  * `.js`/`.mjs` as `js` and `.ts`/`.tsx` as `ts`.
  *
- * @param {{ relative_path?: string, language?: string }} doc
+ * @param {{ relative_path?: string, repo_rel_path?: string, language?: string, lang?: string }} doc
  * @returns {string}
  */
 function sourceLanguageForDocument(doc) {
-  const fromPath = languageForPath(doc?.relative_path || "");
+  const fromPath = languageForPath(doc?.relative_path || doc?.repo_rel_path || "");
   if (fromPath && fromPath !== "unknown") return fromPath;
-  const rawDocLang = String(doc?.language || "").trim();
+  const rawDocLang = String(doc?.lang || doc?.language || "").trim();
   return rawDocLang ? normalizeLangFromScip(rawDocLang) : "";
 }
 
@@ -859,26 +939,6 @@ function sortCountRecord(counts) {
     sorted[lang] = counts[lang];
   }
   return sorted;
-}
-
-/**
- * @param {ScipIndexCache} cache
- * @returns {number}
- */
-function countOccurrences(cache) {
-  let n = 0;
-  for (const doc of cache.documents()) n += doc.occurrences.length;
-  return n;
-}
-
-/**
- * @param {ScipIndexCache} cache
- * @returns {number}
- */
-function countDocuments(cache) {
-  let n = 0;
-  for (const _doc of cache.documents()) n++;
-  return n;
 }
 
 /**

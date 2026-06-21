@@ -7,6 +7,7 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { SCIP_SANITIZER_POLICY_VERSION } from "./sanitizer-policy.js";
 
 export const SCIP_STAGER_META_SCHEMA_VERSION = 1;
 const LEGACY_TIMEOUT_HASH_VALUES = Object.freeze([
@@ -139,10 +140,10 @@ function commandArgsHashMatches(metaHash, plan) {
 
 /**
  * @param {{ indexerId?: string, label?: string, command?: string, commandSource?: string }} plan
- * @param {{ head?: string | null, commandArgsHash?: string | null, filesetHash?: string | null, durationMs?: number | null }} input
+ * @param {{ head?: string | null, commandArgsHash?: string | null, filesetHash?: string | null, durationMs?: number | null, sanitizer?: Record<string, any> | null }} input
  * @returns {Record<string, any>}
  */
-export function buildStagerMeta(plan, { head = null, commandArgsHash = null, filesetHash = null, durationMs = null } = {}) {
+export function buildStagerMeta(plan, { head = null, commandArgsHash = null, filesetHash = null, durationMs = null, sanitizer = null } = {}) {
   const language = String(plan?.indexerId || "configured").trim() || "configured";
   const duration = Number(durationMs);
   return {
@@ -160,6 +161,8 @@ export function buildStagerMeta(plan, { head = null, commandArgsHash = null, fil
     // language whose full index is known to take minutes is never killed by a
     // generic default. null when the meta was refreshed without a run.
     staged_duration_ms: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null,
+    sanitizer_policy_version: SCIP_SANITIZER_POLICY_VERSION,
+    sanitizer: normalizeSanitizerMeta(sanitizer),
   };
 }
 
@@ -186,12 +189,13 @@ export function buildRecoveredStagerMeta(plan, { head = null, commandArgsHash = 
     command_args_hash: commandArgsHash || computeCommandArgsHash(plan),
     fileset_hash: null,
     recovery_reason: "orphan_staging",
+    sanitizer_policy_version: null,
   };
 }
 
 /**
  * @param {{ indexerId?: string, label?: string, command?: string, commandSource?: string }} plan
- * @param {{ head?: string | null, commandArgsHash?: string | null, filesetHash?: string | null, error?: string | null, reason?: string | null, previousMeta?: Record<string, any> | null, durationMs?: number | null }} input
+ * @param {{ head?: string | null, commandArgsHash?: string | null, filesetHash?: string | null, error?: string | null, reason?: string | null, previousMeta?: Record<string, any> | null, durationMs?: number | null, sanitizer?: Record<string, any> | null }} input
  * @returns {Record<string, any>}
  */
 export function buildFailedStagerMeta(plan, {
@@ -202,6 +206,7 @@ export function buildFailedStagerMeta(plan, {
   reason = null,
   previousMeta = null,
   durationMs = null,
+  sanitizer = null,
 } = {}) {
   const language = String(plan?.indexerId || "configured").trim() || "configured";
   const previousAttempts = Number(previousMeta?.attempt_count || 0);
@@ -223,6 +228,8 @@ export function buildFailedStagerMeta(plan, {
     error: error || null,
     failed_after_ms: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null,
     previous_staged: previousStaged,
+    sanitizer_policy_version: SCIP_SANITIZER_POLICY_VERSION,
+    sanitizer: normalizeSanitizerMeta(sanitizer),
   };
 }
 
@@ -248,6 +255,9 @@ export function metaIsCurrent(meta, { head = null, filesetHash = null, previousF
   if (status && status !== "staged") return { current: false, reason: `status_${status}` };
   if (!commandArgsHashMatches(meta.command_args_hash, plan)) {
     return { current: false, reason: "command_changed" };
+  }
+  if (String(meta.sanitizer_policy_version || "") !== SCIP_SANITIZER_POLICY_VERSION) {
+    return { current: false, reason: "sanitizer_policy_changed" };
   }
   const currentFilesetHash = String(filesetHash || "");
   if (currentFilesetHash) {
@@ -289,5 +299,28 @@ function stagedSnapshotFromMeta(meta) {
     command_args_hash: meta.command_args_hash || null,
     fileset_hash: meta.fileset_hash || null,
     staged_duration_ms: Number(meta.staged_duration_ms) > 0 ? Math.round(Number(meta.staged_duration_ms)) : null,
+    sanitizer_policy_version: meta.sanitizer_policy_version || null,
+    sanitizer: normalizeSanitizerMeta(meta.sanitizer),
   };
+}
+
+function normalizeSanitizerMeta(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    raw_documents: sanitizerNumber(value.raw_documents ?? value.rawDocuments),
+    kept_documents: sanitizerNumber(value.kept_documents ?? value.keptDocuments),
+    dropped_documents: sanitizerNumber(value.dropped_documents ?? value.droppedDocuments),
+    dropped_by_reason: sanitizerObject(value.dropped_by_reason ?? value.droppedByReason),
+    bytes_before: sanitizerNumber(value.bytes_before ?? value.bytesBefore),
+    bytes_after: sanitizerNumber(value.bytes_after ?? value.bytesAfter),
+  };
+}
+
+function sanitizerNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+}
+
+function sanitizerObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }

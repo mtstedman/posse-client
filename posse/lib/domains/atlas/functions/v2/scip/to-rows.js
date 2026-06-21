@@ -36,7 +36,9 @@ import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
 //   v2: suppress SCIP `local N` symbols (and their graph refs); strip the
 //       file-path descriptor prefix from qualified names so they unify with
 //       tree-sitter-derived qualified names instead of duplicating.
-export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v2";
+//   v3: production ingest uses the Rust native SCIP row converter; JS remains
+//       only as a parity oracle/reference implementation.
+export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v3-native";
 
 /** @typedef {import("./cache.js").CachedDocument} CachedDocument */
 /** @typedef {import("./cache.js").CachedOccurrence} CachedOccurrence */
