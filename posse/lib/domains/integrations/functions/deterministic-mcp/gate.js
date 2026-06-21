@@ -144,7 +144,7 @@ export function unlockGateForDeadAtlasResult(resultText, { scopeKey = null, reas
   const label = gate.atlasLabel || "ATLAS";
   return [
     `[${label}-first] ${label} is unavailable, so the ${label}-first gate has been unlocked for this job.`,
-    `Standard tools (read_file, search_files, list_files, edit_file, write_file, bash, ...) are available now,`,
+    `Native research fallback tools (read_file, search_files, list_files, inspect_file, ...) are available now,`,
     `including reads of files that had no prior ${label} discovery. Use them directly; ${label} calls are not required first.`,
   ].join(" ");
 }

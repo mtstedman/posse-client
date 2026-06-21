@@ -345,9 +345,10 @@ let _lastReadMeta = null;
 // This single MCP process is a neutral gateway: native deterministic tools and
 // ATLAS tools are separate suites on one transport. When ATLAS is available,
 // the gateway forwards atlas.* calls to the native v2 ledger/view backend. The
-// proxy notifies the gate, which locks deterministic read/write/shell tools
+// proxy notifies the gate, which locks deterministic research fallback tools
 // until the agent makes the required real ATLAS retrieval calls after prefetch,
-// or until ATLAS is unavailable.
+// or until ATLAS is unavailable. Scoped write, shell, verification, and artifact
+// tools keep their normal scope/security checks but are not ATLAS-gated.
 // Researcher, planner, dev, and assessor are all gated; artificer/delegator
 // are exempt. Both modules live under ./deterministic-mcp/.
 let gateScopeKey = configureGate({
@@ -2171,18 +2172,24 @@ function atlasLiveBufferMode() {
 async function maybePushAtlasLiveBuffer({ toolName, args } = {}) {
   const queued = buildQueuedAtlasLiveBufferDetail({ toolName, args, reason: "owner_executor" });
   if (!queued) return null;
+  const detail = {
+    ...queued,
+    attempted: false,
+    queued: true,
+    ok: null,
+  };
+  recordAtlasLiveObservation({
+    ...detail,
+    summary: `ATLAS buffer.push (${detail.path || "unknown path"}) deferred to owner executor`,
+    detail,
+  });
   appendToolLog({
     event: "atlas_live_buffer_deferred_to_owner",
     tool: toolName,
     path: queued.path || null,
     reason: "owner_executor",
   });
-  return {
-    ...queued,
-    attempted: false,
-    queued: true,
-    ok: null,
-  };
+  return detail;
 }
 
 function buildQueuedAtlasLiveBufferDetail({ toolName, args, reason = "timeout", timeoutMs = null } = {}) {
@@ -2215,6 +2222,20 @@ function buildQueuedAtlasLiveBufferDetail({ toolName, args, reason = "timeout", 
 async function maybePushAtlasLiveBufferForToolObservation({ toolName, args } = {}) {
   const queued = buildQueuedAtlasLiveBufferDetail({ toolName, args, reason: "owner_executor" });
   if (!queued) return null;
+  const detail = {
+    ...queued,
+    attempted: false,
+    queued: true,
+    ok: null,
+  };
+  recordAtlasLiveObservation({
+    ...detail,
+    summary: `ATLAS buffer.push (${detail.path || "unknown path"}) deferred to owner executor`,
+    detail,
+  });
+  const refresh = detail.path
+    ? await maybeRefreshAtlasIndexAfterLiveWrite({ relPath: detail.path, toolName, source: "deterministic_write" })
+    : null;
   appendToolLog({
     event: "atlas_live_buffer_deferred_to_owner",
     tool: toolName,
@@ -2222,10 +2243,8 @@ async function maybePushAtlasLiveBufferForToolObservation({ toolName, args } = {
     reason: "owner_executor",
   });
   return {
-    ...queued,
-    attempted: false,
-    queued: true,
-    ok: null,
+    ...detail,
+    ...(refresh ? { refresh } : {}),
   };
 }
 

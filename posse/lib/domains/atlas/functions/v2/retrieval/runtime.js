@@ -7,6 +7,7 @@ import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
 import { randomBytes, createHash } from "crypto";
+import { fileURLToPath } from "url";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { getEffectivePolicy } from "./policy.js";
 import { redactSecretsAsync } from "./redaction.js";
@@ -23,6 +24,9 @@ const MAX_RESPONSE_LINES = 1000;
 const MAX_EXCERPTS = 50;
 const MAX_CONTEXT_LINES = 10;
 const IS_WINDOWS = process.platform === "win32";
+const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
+const POSSE_ROOT = path.resolve(THIS_DIR, "..", "..", "..", "..", "..", "..");
+const POSSE_NODE_BIN = path.join(POSSE_ROOT, "node_modules", ".bin");
 const RUNTIME_ENV_ALLOWLIST = Object.freeze([
   "PATH",
   "PATHEXT",
@@ -411,6 +415,11 @@ function scrubbedRuntimeEnv(source = process.env) {
   for (const [key, value] of Object.entries(source || {})) {
     if (!allowed.has(key.toLowerCase()) || value == null) continue;
     env[key] = String(value);
+  }
+  if (fs.existsSync(POSSE_NODE_BIN)) {
+    const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
+    const currentPath = env[pathKey] || "";
+    env[pathKey] = currentPath ? `${POSSE_NODE_BIN}${path.delimiter}${currentPath}` : POSSE_NODE_BIN;
   }
   return env;
 }

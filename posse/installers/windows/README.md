@@ -14,19 +14,19 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
   only a fallback for standalone use.
 - Installs host CLI dependencies used by Posse helper tools when they are
   missing: ripgrep (`rg`), Tesseract OCR (`tesseract`), ImageMagick (`magick`),
-  and FFmpeg (`ffmpeg`).
+  FFmpeg (`ffmpeg`), Python, PHP, and Composer support for PHP SCIP.
 - Installs posse npm dependencies with optional packages explicitly included
   (skipped when `node_modules` is fresh).
 - Installs Posse Python helper dependencies from `requirements.txt` when
   Python 3.9+ is available.
-- Installs all Posse-managed SCIP indexer environments
-  (`typescript,python,php,go,rust`) and reports any missing host toolchains.
+- Installs the default Posse-managed SCIP/lint language environments
+  (`typescript,python,php`) and reports any missing host toolchains.
 - Writes PATH wiring to `%USERPROFILE%\.config\posse\atlas.env.ps1` as a
   PowerShell snippet.
 - Installs `posse.cmd` and `posse.ps1` shims in
   `%USERPROFILE%\.local\bin` and adds that directory to the user `PATH`.
 - Seeds missing rows in `~\.posse\account.db` (ATLAS mode/phases plus
-  `atlas_scip_mode=on` and all SCIP languages) so the admin TUI and in-process
+  `atlas_scip_mode=on` and default enabled languages) so the admin TUI and in-process
   callers pick it up. Existing user values are preserved -- never overwritten.
 - Runs `posse admin init --non-interactive` to detect `claude` and `codex` CLI
   paths when possible.
@@ -48,7 +48,7 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
 - Git
 - winget is recommended so the installer can fetch host tools automatically
   (`BurntSushi.ripgrep.MSVC`, `UB-Mannheim.TesseractOCR`, `ImageMagick.Q16`,
-  `Gyan.FFmpeg`).
+  `Gyan.FFmpeg`, `Python.Python.3.13`, `PHP.PHP.8.4`).
 - Python 3.9+ is recommended for file/image helper tools.
 
 ## Run
@@ -80,7 +80,7 @@ If you omit `-RepoPath`, install still completes and the smoke test is skipped.
 | `-NoSmoke` | Skip the smoke test |
 | `-NoPersistEnv` | Don't wire atlas.env.ps1 into `$PROFILE` |
 | `-SkipSettings` | Don't seed `~\.posse\account.db` |
-| `-SkipHostTools` | Don't install/check host CLI tools (`rg`, `tesseract`, `magick`, `ffmpeg`) |
+| `-SkipHostTools` | Don't install/check host CLI tools (`rg`, `tesseract`, `magick`, `ffmpeg`, Python, PHP/Composer) |
 | `-ConfigureKeys` | Prompt for `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` / `CODEX_API_KEY` (hidden input via SecureString). Persists to `%USERPROFILE%\.config\posse\providers.env.ps1` with an NTFS ACL locked to the current user. Keys already set in your env are skipped. Offers to run `claude` / `codex login`. |
 | `-Force` | Re-run `npm install` even when `node_modules` looks fresh |
 | `-DryRun` | Print what would happen; make no changes |
@@ -94,12 +94,16 @@ The installer is idempotent:
   `-Force` to override.
 - Missing host CLI tools are installed with `winget`. If a tool installs but
   is not visible in the current shell yet, open a new terminal so PATH changes
-  can take effect.
+  can take effect. Composer is installed as a verified `composer.phar` under
+  Posse's `scip\bin` when a global `composer` command is unavailable and PHP
+  is visible on PATH.
 - Python helper deps are installed from `requirements.txt` with
   `python -m pip install --user -r requirements.txt`.
-- SCIP dependencies are installed for all managed languages. PHP, Go, and Rust
-  need their host toolchains available; if any are missing, the installer keeps
-  going and prints the follow-up `posse atlas-v2 scip install --all` command.
+- SCIP dependencies are installed for the default enabled languages
+  (`typescript,python,php`). Optional Go, Rust, and C/C++ SCIP support can be
+  enabled in admin or installed with `posse atlas-v2 scip install --all`; if a
+  default language host toolchain is missing, the installer keeps going and
+  prints a follow-up `posse atlas-v2 scip install ...` command.
 - `atlas.env.ps1` is rewritten each run.
 - `providers.env.ps1` is **only** touched when `-ConfigureKeys` is passed,
   and only the specific keys you enter are added or updated -- any other

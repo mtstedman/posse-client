@@ -15,18 +15,18 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
   only a fallback for standalone use.
 - Installs host CLI dependencies used by Posse helper tools when they are
   missing: ripgrep (`rg`), Tesseract OCR (`tesseract`), ImageMagick (`magick`),
-  and FFmpeg (`ffmpeg`).
+  FFmpeg (`ffmpeg`), Python, PHP, and Composer.
 - Installs posse npm dependencies with optional packages explicitly included
   (skipped when `node_modules` is fresh).
 - Installs Posse Python helper dependencies from `requirements.txt` when
   Python 3.9+ is available.
-- Installs all Posse-managed SCIP indexer environments
-  (`typescript,python,php,go,rust`) and reports any missing host toolchains.
+- Installs the default Posse-managed SCIP/lint language environments
+  (`typescript,python,php`) and reports any missing host toolchains.
 - Writes PATH wiring to `~/.config/posse/atlas.env`.
 - Installs a `posse` command shim in `~/.local/bin` and ensures the generated
   env file adds that directory to `PATH`.
 - Seeds missing rows in `~/.posse/account.db` (ATLAS mode/phases plus
-  `atlas_scip_mode=on` and all SCIP languages) so the admin TUI and in-process
+  `atlas_scip_mode=on` and default enabled languages) so the admin TUI and in-process
   callers pick it up. Existing user values are preserved — never overwritten.
 - Runs `posse admin init --non-interactive` to detect `claude` and `codex` CLI
   paths when possible.
@@ -72,7 +72,7 @@ If you omit `--repo-path`, install still completes and the smoke test is skipped
 | `--no-smoke` | Skip the smoke test |
 | `--no-persist-env` | Don't append the env sourcing line to rc files |
 | `--skip-settings` | Don't seed `~/.posse/account.db` |
-| `--skip-host-tools` | Don't install/check host CLI tools (`rg`, `tesseract`, `magick`, `ffmpeg`) |
+| `--skip-host-tools` | Don't install/check host CLI tools (`rg`, `tesseract`, `magick`, `ffmpeg`, Python, PHP/Composer) |
 | `--configure-keys` | Prompt for `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` / `CODEX_API_KEY` (hidden input). Persists to `~/.config/posse/providers.env` with `chmod 600`. Keys already set in your env are skipped. Offers to run `claude` / `codex login` interactively. |
 | `--force` | Re-run `npm install` even when `node_modules` looks fresh |
 | `--dry-run` | Print what would happen; make no changes |
@@ -87,12 +87,14 @@ The installer is idempotent:
   `--force` to override.
 - Missing host CLI tools are installed through the detected distro package
   manager. Package mappings are `ripgrep`, `tesseract-ocr`/`tesseract`,
-  `imagemagick`/`ImageMagick`, and `ffmpeg`.
+  `imagemagick`/`ImageMagick`, `ffmpeg`, Python, PHP, and Composer.
 - Python helper deps are installed from `requirements.txt` with
   `python -m pip install --user -r requirements.txt`.
-- SCIP dependencies are installed for all managed languages. PHP, Go, and Rust
-  need their host toolchains available; if any are missing, the installer keeps
-  going and prints the follow-up `posse atlas-v2 scip install --all` command.
+- SCIP dependencies are installed for the default enabled languages
+  (`typescript,python,php`). Optional Go, Rust, and C/C++ SCIP support can be
+  enabled in admin or installed with `posse atlas-v2 scip install --all`; if a
+  default language host toolchain is missing, the installer keeps going and
+  prints a follow-up `posse atlas-v2 scip install ...` command.
 - `atlas.env` is rewritten each run.
 - `providers.env` is **only** touched when `--configure-keys` is passed, and
   only the specific keys you enter are added or updated — any other lines in

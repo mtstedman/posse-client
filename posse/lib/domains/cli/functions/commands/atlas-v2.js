@@ -545,7 +545,7 @@ async function printScipStatus({ projectDir }) {
   const languages = normalizeScipLanguages(config.scipLanguages);
   console.log(`\n  ${C.bold}SCIP status${C.reset}`);
   console.log(`    Mode (atlas_scip_mode): ${C.cyan}${mode}${C.reset}`);
-  console.log(`    Languages (atlas_scip_languages): ${C.cyan}${languages.join(",")}${C.reset}`);
+  console.log(`    Languages enabled (atlas_scip_languages): ${C.cyan}${languages.join(",")}${C.reset}`);
   console.log(`    Restage policy (atlas_scip_restage_policy): ${C.cyan}${config.scipRestagePolicy || "missing"}${C.reset}`);
   console.log(`    Cold timeout: ${C.cyan}${config.scipColdIndexTimeoutMs ?? 600000}ms${C.reset}`);
   console.log(`    Smart max age: ${C.cyan}${config.scipMaxAgeHours ?? 24}h${C.reset}`);

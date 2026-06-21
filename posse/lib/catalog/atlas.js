@@ -71,7 +71,7 @@ export const VALID_ATLAS_SCIP_MODES = new Set(ATLAS_SCIP_MODE_VALUES);
 // Languages with centrally managed SCIP indexer entries. This list feeds both
 // the admin selector and the stager's auto-detection filter.
 export const ATLAS_SCIP_LANGUAGE_OPTIONS = Object.freeze([
-  Object.freeze({ value: "typescript", label: "TypeScript / JavaScript" }),
+  Object.freeze({ value: "typescript", label: "TypeScript / JavaScript / TSX" }),
   Object.freeze({ value: "python", label: "Python" }),
   Object.freeze({ value: "php", label: "PHP" }),
   Object.freeze({ value: "go", label: "Go" }),
@@ -83,6 +83,7 @@ export const ATLAS_SCIP_LANGUAGE_OPTIONS = Object.freeze([
   Object.freeze({ value: "clang", label: "C / C++ (scip-clang)" }),
 ]);
 export const ATLAS_SCIP_LANGUAGE_VALUES = Object.freeze(ATLAS_SCIP_LANGUAGE_OPTIONS.map((entry) => entry.value));
+export const ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES = Object.freeze(["typescript", "python", "php"]);
 export const VALID_ATLAS_SCIP_LANGUAGES = new Set(ATLAS_SCIP_LANGUAGE_VALUES);
 
 export const ATLAS_ROLE_ORDER = Object.freeze([

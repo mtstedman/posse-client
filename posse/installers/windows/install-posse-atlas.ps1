@@ -41,7 +41,7 @@
 
 .PARAMETER SkipHostTools
   Don't install/check host CLI tools used by Posse helpers (rg, tesseract,
-  ImageMagick, ffmpeg).
+  ImageMagick, ffmpeg, Python, PHP/Composer).
 
 .PARAMETER Force
   Re-run npm install / build even when node_modules looks fresh.
@@ -81,7 +81,7 @@ $PosseMode        = "preferred"
 $PossePhases      = "research,planning,assessment,dev"
 $PosseLiveFunnel  = "true"
 $PosseScipMode    = "on"
-$PosseScipLanguages = "typescript,python,php,go,rust"
+$PosseScipLanguages = "typescript,python,php"
 $NodeMinMajor     = 24
 
 # Step results, populated through the run and printed in the summary.
@@ -281,7 +281,7 @@ function Install-ScipDeps {
 import { installScipLanguageDependenciesSync } from "./lib/domains/atlas/functions/v2/scip/dependencies.js";
 
 const result = installScipLanguageDependenciesSync({
-  languages: process.env.POSSE_INSTALL_SCIP_LANGUAGES || "typescript,python,php,go,rust",
+  languages: process.env.POSSE_INSTALL_SCIP_LANGUAGES || "typescript,python,php",
   force: process.env.POSSE_INSTALL_SCIP_FORCE === "true",
   onProgress: (message) => console.log(`[scip-deps] ${message}`),
 });
@@ -303,7 +303,8 @@ if (!result.ok) process.exitCode = 2;
     }
     else {
       $script:Steps["posse SCIP deps"] = "partial"
-      Write-Warn "some SCIP language dependencies could not be installed automatically. Install the missing host toolchains and run: posse atlas-v2 scip install --all"
+      $retryLanguages = ($PosseScipLanguages -split ",") -join " "
+      Write-Warn "some SCIP language dependencies could not be installed automatically. Install the missing host toolchains and run: posse atlas-v2 scip install $retryLanguages"
     }
   }
   finally {
@@ -318,6 +319,14 @@ function Test-AnyCommandAvailable {
     if (Get-Command $name -ErrorAction SilentlyContinue) { return $true }
   }
   return $false
+}
+
+function Test-HostToolAvailable {
+  param([object]$Tool)
+  if ($Tool.Label -eq "Python 3") {
+    return $null -ne (Get-PythonRunner)
+  }
+  return Test-AnyCommandAvailable -Names $Tool.Commands
 }
 
 function Get-HostToolDefinitions {
@@ -345,6 +354,18 @@ function Get-HostToolDefinitions {
       Commands = @("ffmpeg")
       WingetIds = @("Gyan.FFmpeg")
       Reason = "image/video fallback conversion"
+    },
+    [PSCustomObject]@{
+      Label = "Python 3"
+      Commands = @("python", "python3", "py")
+      WingetIds = @("Python.Python.3.13", "Python.Python.3.12")
+      Reason = "Python runtime and scoped Python lint"
+    },
+    [PSCustomObject]@{
+      Label = "PHP"
+      Commands = @("php")
+      WingetIds = @("PHP.PHP.8.4", "PHP.PHP.NTS.8.4")
+      Reason = "PHP runtime, php -l, and SCIP PHP indexing"
     }
   )
 }
@@ -365,6 +386,56 @@ function Install-WingetPackage {
   return $false
 }
 
+function Test-ComposerForScip {
+  if (Get-Command composer -ErrorAction SilentlyContinue) { return $true }
+  if ([string]::IsNullOrWhiteSpace($PosseDir)) { return $false }
+  return Test-Path (Join-Path $PosseDir "scip\bin\composer.phar")
+}
+
+function Install-ComposerPhar {
+  if (Test-ComposerForScip) { return $true }
+  $php = Get-Command php -ErrorAction SilentlyContinue
+  if (-not $php) {
+    Write-Warn "Composer could not be installed because php is not visible on PATH."
+    return $false
+  }
+
+  $binDir = Join-Path $PosseDir "scip\bin"
+  $pharPath = Join-Path $binDir "composer.phar"
+  if ($DryRun) {
+    Write-Log "(dry-run) would download verified Composer phar to $pharPath"
+    return $true
+  }
+
+  $setupPath = Join-Path ([System.IO.Path]::GetTempPath()) ("composer-setup-" + [Guid]::NewGuid().ToString("N") + ".php")
+  try {
+    if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
+    $expected = (Invoke-RestMethod -Uri "https://composer.github.io/installer.sig").Trim()
+    Invoke-WebRequest -Uri "https://getcomposer.org/installer" -OutFile $setupPath
+    $env:POSSE_COMPOSER_SETUP = $setupPath
+    $actual = (& $php.Source -r 'echo hash_file("sha384", getenv("POSSE_COMPOSER_SETUP"));')
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($actual) -or ($actual.Trim().ToLowerInvariant() -ne $expected.ToLowerInvariant())) {
+      Write-Warn "Composer installer signature verification failed."
+      return $false
+    }
+    & $php.Source $setupPath "--install-dir=$binDir" "--filename=composer.phar" --quiet
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $pharPath)) {
+      Write-Warn "Composer installer did not produce $pharPath."
+      return $false
+    }
+    Write-Log "Installed Composer phar for SCIP PHP dependencies: $pharPath"
+    return $true
+  }
+  catch {
+    Write-Warn "Composer phar install failed: $_"
+    return $false
+  }
+  finally {
+    Remove-Item $setupPath -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:\POSSE_COMPOSER_SETUP -ErrorAction SilentlyContinue
+  }
+}
+
 function Install-HostToolDeps {
   if ($SkipHostTools) {
     $script:Steps["host tool deps"] = "skipped"
@@ -374,7 +445,7 @@ function Install-HostToolDeps {
   $tools = Get-HostToolDefinitions
   $missing = @()
   foreach ($tool in $tools) {
-    if (Test-AnyCommandAvailable -Names $tool.Commands) {
+    if (Test-HostToolAvailable -Tool $tool) {
       Write-Log "$($tool.Label) found for $($tool.Reason)"
     }
     else {
@@ -382,7 +453,8 @@ function Install-HostToolDeps {
     }
   }
 
-  if ($missing.Count -eq 0) {
+  $composerReady = Test-ComposerForScip
+  if ($missing.Count -eq 0 -and $composerReady) {
     $script:Steps["host tool deps"] = "ok"
     return
   }
@@ -391,26 +463,36 @@ function Install-HostToolDeps {
     foreach ($tool in $missing) {
       Write-Log "(dry-run) would install $($tool.Label) for $($tool.Reason) via winget package(s): $($tool.WingetIds -join ', ')"
     }
+    if (-not $composerReady) {
+      Write-Log "(dry-run) would install verified Composer phar for PHP SCIP dependencies"
+    }
     $script:Steps["host tool deps"] = "dry-run"
     return
   }
 
-  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+  $failed = @()
+  if ($missing.Count -gt 0 -and -not (Get-Command winget -ErrorAction SilentlyContinue)) {
     $labels = ($missing | ForEach-Object { $_.Label }) -join ", "
-    $script:Steps["host tool deps"] = "missing"
     Write-Warn "winget not found; cannot auto-install host CLI dependencies: $labels. Install them manually or re-run after installing winget."
-    return
+    $failed += ($missing | ForEach-Object { $_.Label })
   }
 
-  $failed = @()
-  foreach ($tool in $missing) {
-    if (Install-WingetPackage -Label $tool.Label -PackageIds $tool.WingetIds) {
-      if (-not (Test-AnyCommandAvailable -Names $tool.Commands)) {
-        Write-Warn "$($tool.Label) installed, but command '$($tool.Commands[0])' is not visible in this shell yet. Open a new terminal or update PATH before using related tools."
+  if ($missing.Count -gt 0 -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+    foreach ($tool in $missing) {
+      if (Install-WingetPackage -Label $tool.Label -PackageIds $tool.WingetIds) {
+        if (-not (Test-HostToolAvailable -Tool $tool)) {
+          Write-Warn "$($tool.Label) installed, but command '$($tool.Commands[0])' is not visible in this shell yet. Open a new terminal or update PATH before using related tools."
+        }
+      }
+      else {
+        $failed += $tool.Label
       }
     }
-    else {
-      $failed += $tool.Label
+  }
+
+  if (-not (Test-ComposerForScip)) {
+    if (-not (Install-ComposerPhar)) {
+      $failed += "Composer"
     }
   }
 

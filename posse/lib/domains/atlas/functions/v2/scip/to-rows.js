@@ -26,6 +26,18 @@ import {
 import { scipConfidence } from "./confidence.js";
 import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
 
+// Spec version for the SCIP→rows transformation. Bump this whenever a change
+// here or in symbol-parser.js (local-symbol suppression, qualified-name
+// derivation, kind mapping, …) alters the stored symbol/edge rows. The ingester
+// folds it into the SCIP index `config_hash`, so a bump invalidates
+// already-ingested SCIP indexes + layers and forces a re-ingest with the new
+// mapping — the SCIP analogue of ATLAS_PARSER_SPEC_VERSION for tree-sitter blobs.
+//
+//   v2: suppress SCIP `local N` symbols (and their graph refs); strip the
+//       file-path descriptor prefix from qualified names so they unify with
+//       tree-sitter-derived qualified names instead of duplicating.
+export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v2";
+
 /** @typedef {import("./cache.js").CachedDocument} CachedDocument */
 /** @typedef {import("./cache.js").CachedOccurrence} CachedOccurrence */
 /** @typedef {import("./symbol-parser.js").ScipParsedSymbol} ScipParsedSymbol */

@@ -4,17 +4,25 @@
 // and indexer registry.
 
 import {
+  ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES,
   ATLAS_SCIP_LANGUAGE_OPTIONS,
   ATLAS_SCIP_LANGUAGE_VALUES,
   VALID_ATLAS_SCIP_LANGUAGES,
 } from "../../../../../catalog/atlas.js";
 
-export { ATLAS_SCIP_LANGUAGE_OPTIONS, ATLAS_SCIP_LANGUAGE_VALUES, VALID_ATLAS_SCIP_LANGUAGES };
+export {
+  ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES,
+  ATLAS_SCIP_LANGUAGE_OPTIONS,
+  ATLAS_SCIP_LANGUAGE_VALUES,
+  VALID_ATLAS_SCIP_LANGUAGES,
+};
 
 const LANGUAGE_ALIASES = Object.freeze({
   js: "typescript",
+  jsx: "typescript",
   javascript: "typescript",
   ts: "typescript",
+  tsx: "typescript",
   typescript: "typescript",
   py: "python",
   python: "python",
@@ -34,15 +42,15 @@ const LANGUAGE_ALIASES = Object.freeze({
 });
 
 /**
- * Normalize user/admin-provided SCIP languages. Empty input means all
- * centrally-known languages, matching the historical "try every matching
- * indexer" behavior.
+ * Normalize user/admin-provided SCIP languages. Empty input means the default
+ * enabled language set; callers that need "no fallback" or "all languages"
+ * pass an explicit defaultLanguages list.
  *
  * @param {string[] | string | null | undefined} value
  * @param {{ defaultLanguages?: readonly string[] }} [opts]
  * @returns {string[]}
  */
-export function normalizeScipLanguages(value, { defaultLanguages = ATLAS_SCIP_LANGUAGE_VALUES } = {}) {
+export function normalizeScipLanguages(value, { defaultLanguages = ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES } = {}) {
   const raw = Array.isArray(value)
     ? value
     : String(value ?? "")

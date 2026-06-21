@@ -1,10 +1,24 @@
 import fs from "fs";
 import path from "path";
 import { spawnSync } from "child_process";
+import { resolveManagedPythonRuntimeForProject } from "../../domains/runtime/functions/python-runtime.js";
 
 const JS_SOURCE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"]);
 const PHP_SOURCE_EXTENSIONS = new Set([".php"]);
-const SOURCE_EXTENSIONS = new Set([...JS_SOURCE_EXTENSIONS, ...PHP_SOURCE_EXTENSIONS]);
+const PYTHON_SOURCE_EXTENSIONS = new Set([".py", ".pyi"]);
+const GO_SOURCE_EXTENSIONS = new Set([".go"]);
+const RUST_SOURCE_EXTENSIONS = new Set([".rs"]);
+const C_SOURCE_EXTENSIONS = new Set([".c", ".h"]);
+const CPP_SOURCE_EXTENSIONS = new Set([".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"]);
+const CLANG_SOURCE_EXTENSIONS = new Set([...C_SOURCE_EXTENSIONS, ...CPP_SOURCE_EXTENSIONS]);
+const SOURCE_EXTENSIONS = new Set([
+  ...JS_SOURCE_EXTENSIONS,
+  ...PHP_SOURCE_EXTENSIONS,
+  ...PYTHON_SOURCE_EXTENSIONS,
+  ...GO_SOURCE_EXTENSIONS,
+  ...RUST_SOURCE_EXTENSIONS,
+  ...CLANG_SOURCE_EXTENSIONS,
+]);
 const MAX_SCOPE_ROOT_FILES = 250;
 const MAX_FAILURES = 60;
 const MAX_OUTPUT_CHARS = 6000;
@@ -99,6 +113,26 @@ function phpLintableFiles(cwd, files = []) {
     .filter((file) => PHP_SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
 }
 
+function pythonLintableFiles(cwd, files = []) {
+  return existingFiles(cwd, files)
+    .filter((file) => PYTHON_SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
+}
+
+function goLintableFiles(cwd, files = []) {
+  return existingFiles(cwd, files)
+    .filter((file) => GO_SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
+}
+
+function rustLintableFiles(cwd, files = []) {
+  return existingFiles(cwd, files)
+    .filter((file) => RUST_SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
+}
+
+function clangLintableFiles(cwd, files = []) {
+  return existingFiles(cwd, files)
+    .filter((file) => CLANG_SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
+}
+
 function compact(value, max = MAX_OUTPUT_CHARS) {
   const text = String(value || "").trim();
   if (text.length <= max) return text;
@@ -162,6 +196,63 @@ function npmCommand() {
   return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
+function commandUnavailable(result) {
+  return !!result.error && /ENOENT|not found/i.test(result.error);
+}
+
+function fileExists(filePath) {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function pythonCommandCandidates(cwd) {
+  const candidates = [];
+  const managedRuntime = resolveManagedPythonRuntimeForProject({ projectDir: cwd });
+  if (managedRuntime?.ready && managedRuntime.python) {
+    candidates.push({ command: managedRuntime.python, args: [], display: managedRuntime.python });
+  }
+
+  const localVenvs = process.platform === "win32"
+    ? [path.join(cwd, ".venv", "Scripts", "python.exe"), path.join(cwd, "venv", "Scripts", "python.exe")]
+    : [path.join(cwd, ".venv", "bin", "python"), path.join(cwd, "venv", "bin", "python")];
+  for (const python of localVenvs) {
+    if (fileExists(python)) candidates.push({ command: python, args: [], display: python });
+  }
+
+  if (process.platform === "win32") {
+    candidates.push(
+      { command: "python", args: [], display: "python" },
+      { command: "py", args: ["-3"], display: "py -3" },
+      { command: "python3", args: [], display: "python3" },
+    );
+  } else {
+    candidates.push(
+      { command: "python3", args: [], display: "python3" },
+      { command: "python", args: [], display: "python" },
+    );
+  }
+
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = `${candidate.command}\0${candidate.args.join("\0")}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function resolvePythonCommand(cwd) {
+  const probe = "import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)";
+  for (const candidate of pythonCommandCandidates(cwd)) {
+    const result = runProcess(candidate.command, [...candidate.args, "-c", probe], cwd, { timeoutMs: 30000 });
+    if (result.exitCode === 0) return candidate;
+  }
+  return null;
+}
+
 function parseEslintFindings(stdout, stderr, cwd) {
   let parsed = null;
   try { parsed = JSON.parse(stdout || "[]"); } catch { parsed = null; }
@@ -214,6 +305,268 @@ function runScopedJsLint(cwd, targets) {
   };
 }
 
+function parsePythonLintFinding(result, cwd, file) {
+  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `python -m py_compile exited ${result.exitCode}`;
+  const lineMatch = text.match(/\bFile\s+"[^"]+",\s+line\s+(\d+)\b/i);
+  const errorMatch = text.match(/\b(?:SyntaxError|IndentationError|TabError):\s*([^\n]+)/i);
+  return {
+    file: relPath(cwd, file) || file,
+    line: lineMatch ? Number(lineMatch[1]) : null,
+    column: null,
+    rule: "python -m py_compile",
+    message: errorMatch ? errorMatch[0].trim() : text,
+    severity: "error",
+  };
+}
+
+function runScopedPythonLint(cwd, targets) {
+  if (targets.length === 0) {
+    return { name: "python-lint", status: "skipped", reason: "no Python lintable scoped files", targets: [] };
+  }
+
+  const python = resolvePythonCommand(cwd);
+  if (!python) {
+    return {
+      name: "python-lint",
+      status: "skipped",
+      reason: "python executable not available",
+      targets,
+    };
+  }
+
+  const failures = [];
+  let unavailable = false;
+  let durationMs = 0;
+  for (const file of targets) {
+    const result = runProcess(python.command, [...python.args, "-m", "py_compile", file], cwd);
+    durationMs += result.durationMs;
+    if (commandUnavailable(result)) {
+      unavailable = true;
+      break;
+    }
+    if (result.exitCode !== 0) {
+      failures.push(parsePythonLintFinding(result, cwd, file));
+      if (failures.length >= MAX_FAILURES) break;
+    }
+  }
+
+  if (unavailable) {
+    return {
+      name: "python-lint",
+      status: "skipped",
+      reason: "python executable not available",
+      targets,
+      durationMs,
+    };
+  }
+
+  return {
+    name: "python-lint",
+    status: failures.length === 0 ? "passed" : "failed",
+    targets,
+    command: `${python.display} -m py_compile ${targets.length === 1 ? targets[0] : "<scoped python files>"}`,
+    durationMs,
+    failures,
+  };
+}
+
+function parseGenericLintFinding({ result, cwd, file, rule, fallback }) {
+  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `${rule} exited ${result.exitCode}`;
+  const lineMatch = text.match(/(?:^|\b)(?:line\s+)?(\d+)(?::\d+)?(?::|\b)/i);
+  return {
+    file: relPath(cwd, file) || file,
+    line: lineMatch ? Number(lineMatch[1]) : null,
+    column: null,
+    rule,
+    message: text || fallback,
+    severity: "error",
+  };
+}
+
+function runScopedGoLint(cwd, targets) {
+  if (targets.length === 0) {
+    return { name: "go-lint", status: "skipped", reason: "no Go lintable scoped files", targets: [] };
+  }
+
+  const failures = [];
+  let unavailable = false;
+  let durationMs = 0;
+  for (const file of targets) {
+    const result = runProcess("gofmt", ["-e", "-l", file], cwd);
+    durationMs += result.durationMs;
+    if (commandUnavailable(result)) {
+      unavailable = true;
+      break;
+    }
+    if (result.exitCode !== 0) {
+      failures.push(parseGenericLintFinding({
+        result,
+        cwd,
+        file,
+        rule: "gofmt -e",
+        fallback: "Go syntax check failed",
+      }));
+      if (failures.length >= MAX_FAILURES) break;
+    }
+  }
+
+  if (unavailable) {
+    return {
+      name: "go-lint",
+      status: "skipped",
+      reason: "gofmt executable not available",
+      targets,
+      durationMs,
+    };
+  }
+
+  return {
+    name: "go-lint",
+    status: failures.length === 0 ? "passed" : "failed",
+    targets,
+    command: `gofmt -e -l ${targets.length === 1 ? targets[0] : "<scoped go files>"}`,
+    durationMs,
+    failures,
+  };
+}
+
+function runScopedRustLint(cwd, targets) {
+  if (targets.length === 0) {
+    return { name: "rust-lint", status: "skipped", reason: "no Rust lintable scoped files", targets: [] };
+  }
+
+  const failures = [];
+  let unavailable = false;
+  let durationMs = 0;
+  for (const file of targets) {
+    const result = runProcess("rustfmt", ["--check", "--edition", "2021", file], cwd);
+    durationMs += result.durationMs;
+    if (commandUnavailable(result)) {
+      unavailable = true;
+      break;
+    }
+    if (result.exitCode !== 0) {
+      failures.push(parseGenericLintFinding({
+        result,
+        cwd,
+        file,
+        rule: "rustfmt --check",
+        fallback: "Rust syntax/format check failed",
+      }));
+      if (failures.length >= MAX_FAILURES) break;
+    }
+  }
+
+  if (unavailable) {
+    return {
+      name: "rust-lint",
+      status: "skipped",
+      reason: "rustfmt executable not available",
+      targets,
+      durationMs,
+    };
+  }
+
+  return {
+    name: "rust-lint",
+    status: failures.length === 0 ? "passed" : "failed",
+    targets,
+    command: `rustfmt --check ${targets.length === 1 ? targets[0] : "<scoped rust files>"}`,
+    durationMs,
+    failures,
+  };
+}
+
+function clangCommandsForFile(file) {
+  const ext = path.extname(file).toLowerCase();
+  if (CPP_SOURCE_EXTENSIONS.has(ext)) {
+    const args = ext === ".hh" || ext === ".hpp" || ext === ".hxx"
+      ? ["-x", "c++-header", "-fsyntax-only", file]
+      : ["-fsyntax-only", file];
+    return [
+      { command: "clang++", args, display: "clang++ -fsyntax-only" },
+      { command: "g++", args, display: "g++ -fsyntax-only" },
+      { command: "c++", args, display: "c++ -fsyntax-only" },
+    ];
+  }
+  const args = ext === ".h"
+    ? ["-x", "c-header", "-fsyntax-only", file]
+    : ["-fsyntax-only", file];
+  return [
+    { command: "clang", args, display: "clang -fsyntax-only" },
+    { command: "gcc", args, display: "gcc -fsyntax-only" },
+    { command: "cc", args, display: "cc -fsyntax-only" },
+  ];
+}
+
+function runFirstAvailableSyntaxCommand(cwd, candidates) {
+  let unavailable = true;
+  let lastResult = null;
+  let used = null;
+  for (const candidate of candidates) {
+    const result = runProcess(candidate.command, candidate.args, cwd);
+    if (commandUnavailable(result)) {
+      lastResult = result;
+      continue;
+    }
+    unavailable = false;
+    lastResult = result;
+    used = candidate;
+    break;
+  }
+  return { unavailable, result: lastResult, used };
+}
+
+function runScopedClangLint(cwd, targets) {
+  if (targets.length === 0) {
+    return { name: "clang-lint", status: "skipped", reason: "no C/C++ lintable scoped files", targets: [] };
+  }
+
+  const failures = [];
+  let unavailable = false;
+  let durationMs = 0;
+  const usedCommands = new Set();
+  for (const file of targets) {
+    const probe = runFirstAvailableSyntaxCommand(cwd, clangCommandsForFile(file));
+    const result = probe.result;
+    durationMs += result?.durationMs || 0;
+    if (probe.unavailable) {
+      unavailable = true;
+      break;
+    }
+    if (probe.used?.display) usedCommands.add(probe.used.display);
+    if (result?.exitCode !== 0) {
+      failures.push(parseGenericLintFinding({
+        result,
+        cwd,
+        file,
+        rule: probe.used?.display || "C/C++ syntax check",
+        fallback: "C/C++ syntax check failed",
+      }));
+      if (failures.length >= MAX_FAILURES) break;
+    }
+  }
+
+  if (unavailable) {
+    return {
+      name: "clang-lint",
+      status: "skipped",
+      reason: "clang/gcc executable not available",
+      targets,
+      durationMs,
+    };
+  }
+
+  return {
+    name: "clang-lint",
+    status: failures.length === 0 ? "passed" : "failed",
+    targets,
+    command: usedCommands.size > 0 ? [...usedCommands].join(" && ") : "clang/gcc -fsyntax-only",
+    durationMs,
+    failures,
+  };
+}
+
 function parsePhpLintFinding(result, cwd, file) {
   const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `php -l exited ${result.exitCode}`;
   const lineMatch = text.match(/\bon\s+line\s+(\d+)\b/i);
@@ -238,7 +591,7 @@ function runScopedPhpLint(cwd, targets) {
   for (const file of targets) {
     const result = runProcess("php", ["-l", file], cwd);
     durationMs += result.durationMs;
-    if (result.error && /ENOENT|not found/i.test(result.error)) {
+    if (commandUnavailable(result)) {
       unavailable = true;
       break;
     }
@@ -276,7 +629,11 @@ function runScopedLint(cwd, files) {
 
   const subchecks = [
     runScopedJsLint(cwd, jsLintableFiles(cwd, files)),
+    runScopedPythonLint(cwd, pythonLintableFiles(cwd, files)),
     runScopedPhpLint(cwd, phpLintableFiles(cwd, files)),
+    runScopedGoLint(cwd, goLintableFiles(cwd, files)),
+    runScopedRustLint(cwd, rustLintableFiles(cwd, files)),
+    runScopedClangLint(cwd, clangLintableFiles(cwd, files)),
   ].filter((check) => check.targets?.length > 0);
   const failed = subchecks.filter((check) => check.status === "failed");
   const passed = subchecks.filter((check) => check.status === "passed");
@@ -290,8 +647,8 @@ function runScopedLint(cwd, files) {
     (check.failures || []).map((failure) => ({ ...failure, subcheck: check.name }))
   );
 
-  // A skipped subcheck alongside passes must stay visible at the top level:
-  // "passed" with php-lint silently skipped reads as full PHP coverage.
+  // A skipped language subcheck alongside passes must stay visible at the top
+  // level; otherwise "passed" can overstate scoped lint coverage.
   const skippedNote = skipped.length > 0 && status !== "skipped"
     ? skipped.map((check) => `${check.name} skipped: ${check.reason || "unknown reason"}`).join("; ")
     : null;

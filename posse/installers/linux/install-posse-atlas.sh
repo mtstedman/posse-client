@@ -12,7 +12,7 @@ POSSE_MODE="preferred"
 POSSE_PHASES="research,planning,assessment,dev"
 POSSE_LIVE_FUNNEL="true"
 POSSE_SCIP_MODE="on"
-POSSE_SCIP_LANGUAGES="typescript,python,php,go,rust"
+POSSE_SCIP_LANGUAGES="typescript,python,php"
 SMOKE_QUERY="auth"
 SMOKE_PROVIDER="openai"
 RUN_SMOKE="true"
@@ -63,7 +63,8 @@ Options:
   --no-persist-env        Do not append env sourcing to shell rc files
   --skip-settings         Do not seed ~/.posse/account.db
   --skip-host-tools       Do not install/check host CLI tools used by Posse
-                          helpers (rg, tesseract, ImageMagick, ffmpeg)
+                          helpers (rg, tesseract, ImageMagick, ffmpeg,
+                          Python, PHP/Composer)
   --configure-keys        Interactively prompt for provider API keys (stored in
                           ~/.config/posse/providers.env, chmod 600). Skipped
                           keys already set in your environment or providers.env.
@@ -76,7 +77,8 @@ Notes:
     is only a fallback.
   - ATLAS is built into Posse (no separate ATLAS checkout or build step).
   - It installs host CLI tools, posse npm deps including optional packages,
-    Python helper deps, all Posse-managed SCIP indexer environments, writes
+    Python helper deps, default SCIP/lint language environments
+    (typescript/python/php), writes
     ~/.config/posse/atlas.env (PATH wiring), seeds ~/.posse/account.db,
     validates the install, and optionally runs posse atlas-smoke.
   - Re-runs are safe: unchanged steps are skipped.
@@ -210,9 +212,12 @@ install_host_tool_deps() {
   command -v tesseract >/dev/null 2>&1 || missing+=("tesseract")
   command -v magick >/dev/null 2>&1 || missing+=("ImageMagick")
   command -v ffmpeg >/dev/null 2>&1 || missing+=("ffmpeg")
+  find_python >/dev/null 2>&1 || missing+=("python3")
+  command -v php >/dev/null 2>&1 || missing+=("php-cli")
+  command -v composer >/dev/null 2>&1 || missing+=("composer")
 
   if [[ ${#missing[@]} -eq 0 ]]; then
-    log "Host CLI dependencies found: rg, tesseract, magick, ffmpeg"
+    log "Host CLI dependencies found: rg, tesseract, magick, ffmpeg, python, php, composer"
     STEP_HOST_TOOLS="ok"
     return
   fi
@@ -221,19 +226,19 @@ install_host_tool_deps() {
   local manager=""
   if command -v apt-get >/dev/null 2>&1; then
     manager="apt-get"
-    packages=(ripgrep tesseract-ocr imagemagick ffmpeg)
+    packages=(ripgrep tesseract-ocr imagemagick ffmpeg python3 python3-pip php-cli composer)
   elif command -v dnf >/dev/null 2>&1; then
     manager="dnf"
-    packages=(ripgrep tesseract ImageMagick ffmpeg)
+    packages=(ripgrep tesseract ImageMagick ffmpeg python3 python3-pip php-cli composer)
   elif command -v yum >/dev/null 2>&1; then
     manager="yum"
-    packages=(ripgrep tesseract ImageMagick ffmpeg)
+    packages=(ripgrep tesseract ImageMagick ffmpeg python3 python3-pip php-cli composer)
   elif command -v pacman >/dev/null 2>&1; then
     manager="pacman"
-    packages=(ripgrep tesseract imagemagick ffmpeg)
+    packages=(ripgrep tesseract imagemagick ffmpeg python python-pip php composer)
   elif command -v zypper >/dev/null 2>&1; then
     manager="zypper"
-    packages=(ripgrep tesseract-ocr ImageMagick ffmpeg)
+    packages=(ripgrep tesseract-ocr ImageMagick ffmpeg python3 python3-pip php8 composer)
   fi
 
   if [[ -z "$manager" ]]; then
@@ -286,6 +291,9 @@ install_host_tool_deps() {
   command -v tesseract >/dev/null 2>&1 || still_missing+=("tesseract")
   command -v magick >/dev/null 2>&1 || still_missing+=("magick")
   command -v ffmpeg >/dev/null 2>&1 || still_missing+=("ffmpeg")
+  find_python >/dev/null 2>&1 || still_missing+=("python3")
+  command -v php >/dev/null 2>&1 || still_missing+=("php")
+  command -v composer >/dev/null 2>&1 || still_missing+=("composer")
 
   if [[ ${#still_missing[@]} -gt 0 ]]; then
     STEP_HOST_TOOLS="partial"
@@ -346,7 +354,7 @@ install_scip_deps() {
 import { installScipLanguageDependenciesSync } from "./lib/domains/atlas/functions/v2/scip/dependencies.js";
 
 const result = installScipLanguageDependenciesSync({
-  languages: process.env.POSSE_INSTALL_SCIP_LANGUAGES || "typescript,python,php,go,rust",
+  languages: process.env.POSSE_INSTALL_SCIP_LANGUAGES || "typescript,python,php",
   force: process.env.POSSE_INSTALL_SCIP_FORCE === "true",
   onProgress: (message) => console.log(`[scip-deps] ${message}`),
 });
@@ -362,7 +370,8 @@ NODESCIP
     STEP_POSSE_SCIP="done"
   else
     STEP_POSSE_SCIP="partial"
-    warn "some SCIP language dependencies could not be installed automatically. Install the missing host toolchains and run: posse atlas-v2 scip install --all"
+    local retry_languages="${POSSE_SCIP_LANGUAGES//,/ }"
+    warn "some SCIP language dependencies could not be installed automatically. Install the missing host toolchains and run: posse atlas-v2 scip install ${retry_languages}"
   fi
 }
 

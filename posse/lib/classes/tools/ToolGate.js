@@ -272,12 +272,12 @@ export class ToolGate {
       : null;
     const roleLabel = this.role || "this";
     const lines = [
-      `[${label}-first] Standard tools are fallback-only for the ${roleLabel} role while ${label} is available.`,
+      `[${label}-first] Native research fallback tools are fallback-only for the ${roleLabel} role while ${label} is available.`,
       "",
       `Always prefer ${label} over standard tools for discovery when possible.`,
-      `Use standard tools only after at least ${this._requiredMeaningfulAtlasCalls} real ${label} retrieval calls after prefetch, or when ${label} is unavailable.`,
+      `Use native research fallback tools only after at least ${this._requiredMeaningfulAtlasCalls} real ${label} retrieval calls after prefetch, or when ${label} is unavailable.`,
       `For indexable source file reads, the fallback is file-scoped: each source file must have its own ${label} discovery attempt before native read fallback.`,
-      `If those real ${label} calls only return empty/errors, standard tools become the fallback.`,
+      `If those real ${label} calls only return empty/errors, native research tools become the fallback.`,
       "",
       callLine,
     ];
@@ -299,9 +299,6 @@ export class ToolGate {
       search_files: `For semantic discovery, prefer ${formatTool("symbol.search")} or ${formatTool("context.summary")}.`,
       chain_read: `For research context, prefer ${formatTool("context.summary")} or ${formatTool("slice.build")}.`,
       git_history: `For assessment changes, prefer ${formatTool("pr.risk")} when version ids are known.`,
-      bash: `For verification, first gather ${label} evidence, then use bash only for checks ${label} cannot perform.`,
-      write_file: `Read through ${label} first; use the scoped write/edit tools shown in the runtime manifest only for scoped edits ${label} cannot perform.`,
-      edit_file: `Read through ${label} first; use the scoped write/edit tools shown in the runtime manifest only for scoped edits ${label} cannot perform.`,
     };
     const hint = replacementHints[String(toolName || "")] || `Use one of the role-routed ${label} tools below before retrying native fallback.`;
     lines.push(
@@ -313,7 +310,7 @@ export class ToolGate {
       "",
       `${label} prefetch and internal bookkeeping calls do NOT count - they are not active retrieval.`,
       "",
-      `Use ${label} evidence first; use standard tools only as fallback for work ${label} cannot cover.`,
+      `Use ${label} evidence first; use native research fallback tools only as fallback for context ${label} cannot cover.`,
       "",
       `Attempted tool: ${toolName}`,
     );
