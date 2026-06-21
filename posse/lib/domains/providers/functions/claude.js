@@ -28,6 +28,7 @@ import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
 import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry, logProviderMcpAttachProofTelemetry } from "./helpers/mcp-telemetry.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { stripAnsi } from "../../../shared/format/functions/ansi.js";
+import { appendBoundedText } from "../../../shared/format/functions/bounded-text.js";
 import { extractJson } from "../../../shared/format/functions/json.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { getProviderTierDefaults } from "./model-catalog.js";
@@ -917,8 +918,8 @@ function spawnClaudeWarmupAsync({ resolvedCwd, resolvedTimeoutMs, prompt }) {
     }, resolvedTimeoutMs);
     child.stdout?.setEncoding?.("utf8");
     child.stderr?.setEncoding?.("utf8");
-    child.stdout?.on("data", (chunk) => { stdout += chunk; });
-    child.stderr?.on("data", (chunk) => { stderr += chunk; });
+    child.stdout?.on("data", (chunk) => { stdout = appendBoundedText(stdout, chunk); });
+    child.stderr?.on("data", (chunk) => { stderr = appendBoundedText(stderr, chunk); });
     child.on("error", (error) => finish({ status: null, signal: null, error }));
     child.on("exit", (status, signal) => finish({ status, signal: signal || null, error: null }));
     child.stdin?.end(prompt);
@@ -3063,7 +3064,6 @@ export async function callProvider(promptText, {
     proc.stdin.write(finalPrompt);
     proc.stdin.end();
 
-    let rawStdout = "";
     let stderr = "";
     let lineCount = 0;
     let gotFirstOutput = false;
@@ -3236,7 +3236,6 @@ export async function callProvider(promptText, {
     proc.stdout.on("data", (chunk) => {
       try {
         const text = chunk.toString();
-        rawStdout += text;
         lastActivity = Date.now();
 
         // Parse stream-json JSONL — each complete line is a JSON message
@@ -3333,7 +3332,7 @@ export async function callProvider(promptText, {
     proc.stderr.on("data", (chunk) => {
       try {
         const text = chunk.toString();
-        stderr += text;
+        stderr = appendBoundedText(stderr, text);
         lastActivity = Date.now();
         if (directOutput && text.trim()) {
           process.stderr.write(`${color}|${C.reset} ${C.dim}${C.yellow}[stderr] ${text.trim()}${C.reset}\n`);

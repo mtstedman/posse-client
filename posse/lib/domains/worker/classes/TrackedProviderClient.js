@@ -33,7 +33,7 @@ import {
 } from "../functions/helpers/execution-routing.js";
 import { selectFallbackProvider } from "../functions/helpers/delegation-routing.js";
 import { buildResumeHandoff } from "../../handoff/functions/index.js";
-import { recordRecoveryCheckpoint, retainReplayOutput, retainReplayPrompt, retainReplayToolUses } from "../../observability/functions/recovery/job-replay.js";
+import { getReplayMemoryStats, recordRecoveryCheckpoint, retainReplayOutput, retainReplayPrompt, retainReplayToolUses } from "../../observability/functions/recovery/job-replay.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
 import { isAbortError } from "../../runtime/functions/yield.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
@@ -617,6 +617,7 @@ export class TrackedProviderClient {
         input_tokens: stats.inputTokens ?? null,
         output_tokens: stats.outputTokens ?? null,
         output_chars: stats.outputChars ?? (typeof output === "string" ? output.length : null),
+        replay_memory: getReplayMemoryStats(),
       });
       const accountingStats = {
         ...stats,
@@ -722,6 +723,7 @@ export class TrackedProviderClient {
         output_tokens: stats.outputTokens ?? null,
         error_name: err?.name || null,
         error_message: String(err?.message || err).slice(0, 1000),
+        replay_memory: getReplayMemoryStats(),
       });
       const accountingStats = {
         ...stats,

@@ -29,6 +29,8 @@ import { MessageChannel, Worker } from "node:worker_threads";
 import { recordDaemonSpawn, forgetDaemonSpawn } from "./process-ledger.js";
 import { attachNativeThreadBridge } from "./native-thread-bridge.js";
 
+const JSONL_BUFFER_MAX_CHARS = 16 * 1024 * 1024;
+
 /**
  * @typedef {Object} Transport
  * @property {() => boolean} start
@@ -119,6 +121,9 @@ export function ProcessTransport(opts) {
             continue;
           }
           for (const cb of messageHandlers) cb(message);
+        }
+        if (buffer.length > JSONL_BUFFER_MAX_CHARS) {
+          buffer = "";
         }
       });
       proc.stderr?.on("data", () => { /* host diagnostics; ignored */ });

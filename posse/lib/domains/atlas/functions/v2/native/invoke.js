@@ -140,7 +140,7 @@ export async function runAtlasNativeMethodAsync(method, payload, opts = {}) {
     if (auth && typeof auth === "object") {
       /** @type {Record<string, unknown>} */ (bridgeOpts).auth = auth;
     }
-    return nativeThreadBridgeRequest("atlas", method, payload, bridgeOpts);
+    return nativeThreadBridgeRequest("atlas", method, payload, bridgeOpts, { signal, timeoutMs: opts.timeoutMs });
   }
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("atlas")) {

@@ -39,6 +39,7 @@ import os from "os";
 import path from "path";
 import { getSetting } from "../../queue/functions/index.js";
 import { buildRuntimeEnv } from "../../runtime/functions/paths.js";
+import { appendBoundedText } from "../../../shared/format/functions/bounded-text.js";
 import {
   C,
   ask,
@@ -61,6 +62,8 @@ import {
 export { C, ask, askMultiline, extractJson, resolveDisableSystemTools, resolveWebToolsEnabled };
 
 export const capabilities = Object.freeze({ images: false, sessionResume: false, toolAttachment: "mcp" });
+
+const LINE_BUF_MAX = 16 * 1024 * 1024;
 
 export const MODEL_TIERS = {
   cheap: {
@@ -701,8 +704,13 @@ export function callProvider(promptText, opts = {}) {
 
     child.stdout.setEncoding("utf-8");
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
+      stdout = appendBoundedText(stdout, chunk);
       stdoutLineBuffer += chunk;
+      if (stdoutLineBuffer.length > LINE_BUF_MAX) {
+        stdoutLineBuffer = "";
+        resetStallTimer();
+        return;
+      }
       let idx;
       while ((idx = stdoutLineBuffer.indexOf("\n")) >= 0) {
         const line = stdoutLineBuffer.slice(0, idx).replace(/\r$/, "");
@@ -712,7 +720,7 @@ export function callProvider(promptText, opts = {}) {
     });
 
     child.stderr.setEncoding("utf-8");
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stderr.on("data", (chunk) => { stderr = appendBoundedText(stderr, chunk); });
 
     child.on("error", (err) => {
       if (stallTimer) clearTimeout(stallTimer);

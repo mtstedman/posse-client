@@ -28,6 +28,7 @@ import { appendRunTelemetry } from "../../shared/telemetry/functions/run-telemet
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
+const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
 const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
 
@@ -341,7 +342,7 @@ function mcpToolCallSuccess(response = null) {
   return !/^(?:Error:|AUDIT ERROR:)/i.test(String(text || ""));
 }
 
-function jsonlParseBuffer(buffer, onMessage) {
+function jsonlParseBuffer(buffer, onMessage, { onParseError = null, maxBufferBytes = JSONL_STDOUT_BUFFER_MAX_BYTES } = {}) {
   let next = buffer;
   while (next.length > 0) {
     const newlineIdx = next.indexOf(0x0a);
@@ -352,9 +353,22 @@ function jsonlParseBuffer(buffer, onMessage) {
     if (line.endsWith("\r")) line = line.slice(0, -1);
     line = line.trim();
     if (!line) continue;
-    onMessage(JSON.parse(line));
+    try {
+      onMessage(JSON.parse(line));
+    } catch (err) {
+      if (typeof onParseError === "function") onParseError(err, line);
+    }
+  }
+  if (next.length > maxBufferBytes) {
+    const err = new Error(`MCP session stdout JSONL buffer exceeded ${maxBufferBytes} bytes without newline`);
+    if (typeof onParseError === "function") onParseError(err, "");
+    return Buffer.alloc(0);
   }
   return next;
+}
+
+export function __testJsonlParseBuffer(buffer, onMessage, opts = {}) {
+  return jsonlParseBuffer(buffer, onMessage, opts);
 }
 
 class PersistentMcpSession {
@@ -584,15 +598,19 @@ class PersistentMcpSession {
 
   _handleStdout(chunk) {
     this._stdoutBuffer = Buffer.concat([this._stdoutBuffer, Buffer.from(chunk)]);
-    try {
-      this._stdoutBuffer = jsonlParseBuffer(this._stdoutBuffer, (message) => this._handleMessage(message));
-    } catch (err) {
-      try {
-        process.stderr.write(`[posse-mcp-owner:${this.id}] failed to parse session stdout: ${err?.message || err}\n`);
-      } catch {
-        // diagnostics only
-      }
-    }
+    this._stdoutBuffer = jsonlParseBuffer(
+      this._stdoutBuffer,
+      (message) => this._handleMessage(message),
+      {
+        onParseError: (err) => {
+          try {
+            process.stderr.write(`[posse-mcp-owner:${this.id}] failed to parse session stdout: ${err?.message || err}\n`);
+          } catch {
+            // diagnostics only
+          }
+        },
+      },
+    );
   }
 
   _handleMessage(message) {

@@ -24,6 +24,7 @@ import { nativeBinaryPlatform, nativeBinaryIsKeyGated } from "../../catalog/bina
 import { osKey, archKey } from "../../shared/platform/functions/native-platform.js";
 import { buildRuntimeEnv } from "../../domains/runtime/functions/paths.js";
 import { signalAbortError } from "../../domains/runtime/functions/yield.js";
+import { appendBoundedText } from "../../shared/format/functions/bounded-text.js";
 import { Daemon, ProcessTransport, daemonSupervisor } from "./daemon/index.js";
 import { HeartbeatAuthManager } from "../../shared/native/classes/HeartbeatAuthManager.js";
 import { POSSE_REMOTE_DEFAULT_URL } from "../../domains/remote/functions/mode.js";
@@ -395,7 +396,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, worker?: boolean }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, worker?: boolean, maxBuffer?: number }} [opts]
    * @returns {Promise<RunResult>}
    */
   run(subcommand, args = [], opts = {}) {
@@ -410,7 +411,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, maxBuffer?: number }} [opts]
    * @returns {Promise<RunResult>}
    */
   #runPerCall(subcommand, args = [], opts = {}) {
@@ -435,10 +436,11 @@ export class NativeBinary {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });
-      const stdoutChunks = [];
-      const stderrChunks = [];
-      child.stdout?.on("data", (d) => stdoutChunks.push(d));
-      child.stderr?.on("data", (d) => stderrChunks.push(d));
+      const captureMaxChars = opts.maxBuffer ?? DEFAULT_MAX_BUFFER;
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.on("data", (d) => { stdout = appendBoundedText(stdout, d, captureMaxChars); });
+      child.stderr?.on("data", (d) => { stderr = appendBoundedText(stderr, d, captureMaxChars); });
       child.stdin?.on?.("error", () => {});
 
       const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -460,8 +462,8 @@ export class NativeBinary {
         if (timer) clearTimeout(timer);
         if (opts.signal && onAbort) opts.signal.removeEventListener("abort", onAbort);
         resolve(this.#finishResult({
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: Buffer.concat(stderrChunks).toString("utf8"),
+          stdout,
+          stderr,
           code,
           signal,
           error,

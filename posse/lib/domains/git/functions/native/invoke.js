@@ -405,7 +405,7 @@ async function runGitNativeMethodAsyncOnce(method, payload, opts = {}) {
     const bridgeMethod = String(method || "").trim() || String(method || "");
     const workerEligible = WORKER_ELIGIBLE_METHODS.has(bridgeMethod);
     try {
-      return await nativeThreadBridgeRequest("git", method, payload, bridgeOpts);
+      return await nativeThreadBridgeRequest("git", method, payload, bridgeOpts, { signal, timeoutMs: opts.timeoutMs });
     } catch (err) {
       const detail = err?.message || String(err);
       if (isHeartbeatFailureText(detail)) {

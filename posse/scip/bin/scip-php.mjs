@@ -16,6 +16,15 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const scipRoot = path.resolve(here, "..");
 const upstream = path.join(scipRoot, "php", "vendor", "bin", "scip-php");
 const composerPhar = path.join(here, "composer.phar");
+const FALLBACK_IGNORED_DIRS = new Set([
+  ".git",
+  ".hg",
+  ".svn",
+  ".posse",
+  ".posse-worktrees",
+  "node_modules",
+  "vendor",
+]);
 
 const parsed = parseArgs(process.argv.slice(2));
 if (parsed.help) {
@@ -36,13 +45,18 @@ const output = path.resolve(parsed.output);
 const stagedVendorDir = path.join(path.dirname(output), "php-vendor");
 const targetVendor = path.join(cwd, "vendor", "autoload.php");
 const stagedVendor = path.join(stagedVendorDir, "autoload.php");
+const targetComposerJson = path.join(cwd, "composer.json");
 const hasTargetVendor = fs.existsSync(targetVendor);
 const useTargetVendor = hasTargetVendor && truthyEnv(process.env.POSSE_SCIP_USE_TARGET_VENDOR);
 if (!useTargetVendor && !fs.existsSync(stagedVendor)) {
   bootstrapComposerAutoload({ cwd, vendorDir: stagedVendorDir });
 }
 
-const localOutput = path.join(cwd, "index.scip");
+const fallbackProject = fs.existsSync(targetComposerJson)
+  ? null
+  : prepareFallbackPhpProject({ cwd, parentDir: path.dirname(output) });
+const indexCwd = fallbackProject?.dir || cwd;
+const localOutput = path.join(indexCwd, "index.scip");
 try {
   fs.rmSync(localOutput, { force: true });
 } catch {
@@ -51,8 +65,8 @@ try {
 
 const args = [];
 if (parsed.memoryLimit) args.push(`--memory-limit=${parsed.memoryLimit}`);
-const run = spawnSync("php", ["-d", "error_reporting=8191", upstream, ...args], {
-  cwd,
+const run = spawnSync("php", ["-d", "error_reporting=8191", "-d", "display_errors=stderr", upstream, ...args], {
+  cwd: indexCwd,
   stdio: "inherit",
   windowsHide: true,
   env: {
@@ -62,16 +76,22 @@ const run = spawnSync("php", ["-d", "error_reporting=8191", upstream, ...args], 
 });
 if (run.error) {
   console.error(run.error.message || String(run.error));
+  cleanupFallbackProject(fallbackProject);
   process.exit(1);
 }
-if (run.status !== 0) process.exit(run.status ?? 1);
+if (run.status !== 0) {
+  cleanupFallbackProject(fallbackProject);
+  process.exit(run.status ?? 1);
+}
 if (!fs.existsSync(localOutput)) {
   console.error(`scip-php completed but did not write ${localOutput}`);
+  cleanupFallbackProject(fallbackProject);
   process.exit(1);
 }
 
 fs.mkdirSync(path.dirname(output), { recursive: true });
 fs.renameSync(localOutput, output);
+cleanupFallbackProject(fallbackProject);
 
 function bootstrapComposerAutoload({ cwd, vendorDir }) {
   const composerJson = path.join(cwd, "composer.json");
@@ -123,6 +143,89 @@ function prepareMinimalComposerProject(parentDir) {
     "utf8",
   );
   return dir;
+}
+
+function prepareFallbackPhpProject({ cwd, parentDir }) {
+  const phpFiles = collectFallbackPhpFiles(cwd);
+  const usable = [];
+  const skippedEmpty = [];
+  for (const file of phpFiles) {
+    let stat;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      continue;
+    }
+    const rel = normalizeRepoRel(path.relative(cwd, file));
+    if (!rel) continue;
+    if (stat.size === 0) {
+      skippedEmpty.push(rel);
+      continue;
+    }
+    usable.push({ abs: file, rel });
+  }
+  if (skippedEmpty.length > 0) {
+    const sample = skippedEmpty.slice(0, 5).join(", ");
+    const suffix = skippedEmpty.length > 5 ? `, +${skippedEmpty.length - 5} more` : "";
+    console.error(`scip-php skipping ${skippedEmpty.length} empty PHP file${skippedEmpty.length === 1 ? "" : "s"}: ${sample}${suffix}`);
+  }
+  if (usable.length === 0) {
+    return null;
+  }
+  const dir = path.join(parentDir, `php-project-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  fs.mkdirSync(dir, { recursive: true });
+  for (const file of usable) {
+    const dest = path.join(dir, ...file.rel.split("/"));
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(file.abs, dest);
+  }
+  fs.writeFileSync(
+    path.join(dir, "composer.json"),
+    JSON.stringify({
+      name: "posse/scip-php-target",
+      autoload: { files: usable.map((file) => file.rel) },
+    }, null, 2) + "\n",
+    "utf8",
+  );
+  return { dir };
+}
+
+function collectFallbackPhpFiles(root) {
+  const out = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!FALLBACK_IGNORED_DIRS.has(entry.name)) stack.push(entryPath);
+        continue;
+      }
+      if (entry.isFile() && path.extname(entry.name).toLowerCase() === ".php") {
+        out.push(entryPath);
+      }
+    }
+  }
+  return out.sort((a, b) => normalizeRepoRel(path.relative(root, a)).localeCompare(normalizeRepoRel(path.relative(root, b))));
+}
+
+function cleanupFallbackProject(project) {
+  if (!project?.dir) return;
+  try { fs.rmSync(project.dir, { recursive: true, force: true }); } catch { /* best effort */ }
+}
+
+function normalizeRepoRel(value) {
+  return String(value || "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/u, "")
+    .replace(/^\/+/u, "")
+    .trim();
 }
 
 function parseArgs(argv) {

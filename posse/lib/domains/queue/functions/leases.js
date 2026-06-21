@@ -15,6 +15,7 @@ import {
   LEASE_HOLDING_STATUSES_SQL,
   TERMINAL_JOB_STATUSES_SQL,
   now,
+  runImmediateTransaction,
 } from "./common.js";
 import { logEvent } from "./events.js";
 import { isLeaseValid } from "./attempts.js";
@@ -147,13 +148,13 @@ function releaseLeaseInternal(db, jobId, leaseToken, finalStatus, { readyAt = nu
 
 export function releaseLease(jobId, leaseToken, finalStatus, { readyAt = null } = {}) {
   const db = getDb();
-  const tx = db.transaction(() => releaseLeaseInternal(db, jobId, leaseToken, finalStatus, { readyAt }));
-  return tx();
+  const execute = () => releaseLeaseInternal(db, jobId, leaseToken, finalStatus, { readyAt });
+  return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
 }
 
 export function releaseLeaseWithoutAttemptPenalty(jobId, leaseToken, finalStatus, { readyAt = null } = {}) {
   const db = getDb();
-  const tx = db.transaction(() => {
+  const execute = () => {
     const released = releaseLeaseInternal(db, jobId, leaseToken, finalStatus, { readyAt });
     if (released) {
       // Inline of decrementAttemptCount to keep this module free of an
@@ -162,8 +163,8 @@ export function releaseLeaseWithoutAttemptPenalty(jobId, leaseToken, finalStatus
         .run(now(), jobId);
     }
     return released;
-  });
-  return tx();
+  };
+  return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
 }
 
 export function getLeaseManager({ defaultDurationSec = 900 } = {}) {

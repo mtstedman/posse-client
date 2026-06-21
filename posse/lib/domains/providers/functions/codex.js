@@ -22,6 +22,7 @@ import { C, ask, askMultiline, extractJson as _extractJsonClaude, resolveDisable
 import { buildRuntimeEnv, normalizeProviderPaths } from "../../runtime/functions/paths.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
+import { appendBoundedText } from "../../../shared/format/functions/bounded-text.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { CODEX_OAUTH_SUPPORTED_MODELS, getProviderTierDefaults } from "./model-catalog.js";
 import { hasProviderVisibleAtlasMcpTools } from "./helpers/atlas-mcp.js";
@@ -196,9 +197,7 @@ function getMaxTurns(role, modelTier = "standard", complexity = null, filesToMod
 const CODEX_STREAM_CAPTURE_MAX_CHARS = 4 * 1024 * 1024;
 
 function appendBoundedCodexOutput(current, text, maxChars = CODEX_STREAM_CAPTURE_MAX_CHARS) {
-  const next = `${current || ""}${text || ""}`;
-  if (!Number.isFinite(maxChars) || maxChars <= 0 || next.length <= maxChars) return next;
-  return next.slice(next.length - maxChars);
+  return appendBoundedText(current, text, maxChars);
 }
 
 export function __testAppendBoundedCodexOutput(current, text, maxChars) {
@@ -503,8 +502,8 @@ function spawnProbeAsync(command, args, options = {}, timeoutMs = 3000) {
       });
       child.stdout?.setEncoding?.("utf8");
       child.stderr?.setEncoding?.("utf8");
-      child.stdout?.on("data", (chunk) => { stdout += chunk; });
-      child.stderr?.on("data", (chunk) => { stderr += chunk; });
+      child.stdout?.on("data", (chunk) => { stdout = appendBoundedText(stdout, chunk); });
+      child.stderr?.on("data", (chunk) => { stderr = appendBoundedText(stderr, chunk); });
       child.on("error", (error) => finish({ status: null, signal: null, error }));
       child.on("exit", (status, signal) => finish({ status, signal: signal || null, error: null }));
     } catch (error) {
@@ -1279,7 +1278,7 @@ async function fetchCodexRateLimitsViaAppServer({
       }
     });
     proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      stderr = appendBoundedText(stderr, chunk);
     });
     proc.on("error", (err) => finish(err));
     proc.on("close", (code) => {

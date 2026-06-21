@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { getDb } from "../../../../shared/storage/functions/index.js";
+import { retainBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { readRecentOutputs } from "../../../../shared/telemetry/functions/logging/output-log.js";
 import { promptPreviewText, readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
 import { recordObservation } from "../observations.js";
@@ -12,6 +13,9 @@ const CHECKPOINT_KIND = "recovery_checkpoint";
 const REPLAY_KIND = "agent_call_replay";
 const MEMORY_TTL_MS = 2 * 60 * 60 * 1000;
 const MEMORY_MAX_CALLS = 200;
+const MEMORY_MAX_TOTAL_CHARS = 8 * 1024 * 1024;
+const MEMORY_MAX_EXACT_PROMPT_CHARS = 512 * 1024;
+const MEMORY_MAX_EXACT_OUTPUT_CHARS = 512 * 1024;
 const MAX_OBJECT_KEYS = 32;
 const MAX_ARRAY_ITEMS = 24;
 const MAX_COMPACT_TEXT = 900;
@@ -43,6 +47,35 @@ function truncateOneLine(value, max = 160) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}...`;
+}
+
+function approxReplayEntryChars(entry = {}) {
+  let total = 0;
+  const prompt = entry.prompt || {};
+  const output = entry.output || {};
+  for (const value of [
+    prompt.prompt,
+    prompt.system_prompt,
+    prompt.prompt_preview,
+    prompt.system_prompt_preview,
+    output.output,
+    output.output_preview,
+    output.error_text,
+  ]) {
+    if (typeof value === "string") total += value.length;
+  }
+  return total;
+}
+
+export function getReplayMemoryStats() {
+  let chars = 0;
+  for (const entry of replayMemory.values()) chars += approxReplayEntryChars(entry);
+  return {
+    entries: replayMemory.size,
+    approx_chars: chars,
+    max_entries: MEMORY_MAX_CALLS,
+    max_chars: MEMORY_MAX_TOTAL_CHARS,
+  };
 }
 
 export function compactText(value, { max = MAX_COMPACT_TEXT } = {}) {
@@ -92,6 +125,11 @@ function pruneReplayMemory(nowMs = Date.now()) {
     if (oldest == null) break;
     replayMemory.delete(oldest);
   }
+  while (getReplayMemoryStats().approx_chars > MEMORY_MAX_TOTAL_CHARS && replayMemory.size > 0) {
+    const oldest = replayMemory.keys().next().value;
+    if (oldest == null) break;
+    replayMemory.delete(oldest);
+  }
 }
 
 function memoryEntry(agentCallId) {
@@ -115,9 +153,19 @@ export function retainReplayPrompt(agentCallId, {
   if (!entry) return false;
   const promptText = typeof prompt === "string" ? prompt : String(prompt ?? "");
   const systemPromptText = typeof systemPrompt === "string" ? systemPrompt : null;
+  const retainedPrompt = retainBoundedText(promptText, MEMORY_MAX_EXACT_PROMPT_CHARS);
+  const retainedSystemPrompt = systemPromptText == null
+    ? { text: null, retained: true, originalChars: null }
+    : retainBoundedText(systemPromptText, MEMORY_MAX_EXACT_PROMPT_CHARS);
   entry.prompt = {
-    prompt: promptText,
-    system_prompt: systemPromptText,
+    prompt: retainedPrompt.retained ? retainedPrompt.text : null,
+    prompt_preview: retainedPrompt.retained ? null : retainedPrompt.text,
+    prompt_retained_exact: retainedPrompt.retained,
+    prompt_truncated_from_memory: !retainedPrompt.retained,
+    system_prompt: retainedSystemPrompt.retained ? retainedSystemPrompt.text : null,
+    system_prompt_preview: retainedSystemPrompt.retained ? null : retainedSystemPrompt.text,
+    system_prompt_retained_exact: retainedSystemPrompt.retained,
+    system_prompt_truncated_from_memory: !retainedSystemPrompt.retained,
     system_prompt_files: Array.isArray(systemPromptFiles) ? systemPromptFiles.slice(0, 50) : null,
     prompt_chars: promptText.length,
     prompt_sha256: sha256(promptText),
@@ -125,6 +173,7 @@ export function retainReplayPrompt(agentCallId, {
     captured_at: nowIso(),
     meta: compactValue(meta || {}),
   };
+  pruneReplayMemory();
   return true;
 }
 
@@ -137,8 +186,12 @@ export function retainReplayOutput(agentCallId, {
   const entry = memoryEntry(agentCallId);
   if (!entry) return false;
   const outputText = typeof output === "string" ? output : String(output ?? "");
+  const retainedOutput = retainBoundedText(outputText, MEMORY_MAX_EXACT_OUTPUT_CHARS);
   entry.output = {
-    output: outputText,
+    output: retainedOutput.retained ? retainedOutput.text : null,
+    output_preview: retainedOutput.retained ? null : retainedOutput.text,
+    output_retained_exact: retainedOutput.retained,
+    output_truncated_from_memory: !retainedOutput.retained,
     output_chars: outputText.length,
     output_sha256: sha256(outputText),
     status,
@@ -146,6 +199,7 @@ export function retainReplayOutput(agentCallId, {
     error_text: errorText ? truncateOneLine(errorText, 500) : null,
     captured_at: nowIso(),
   };
+  pruneReplayMemory();
   return true;
 }
 
@@ -288,6 +342,8 @@ function promptSnapshot(agentCallId, { exactPrompt = false, call = null } = {}) 
     prompt_sha256: memoryPrompt?.prompt_sha256 || (persistedExact?.prompt ? sha256(persistedExact.prompt) : null),
     system_prompt_chars: systemPromptChars,
     prompt_log_preview: latestPrompt ? promptPreviewText(latestPrompt, { max: 240 }) : null,
+    prompt_truncated_from_memory: memoryPrompt?.prompt_truncated_from_memory === true,
+    system_prompt_truncated_from_memory: memoryPrompt?.system_prompt_truncated_from_memory === true,
     prompt_redacted_by_default: true,
     redaction_reason: exactPromptIncluded ? null : "prompt_content_requires_explicit_exact_replay_and_available_memory_or_persisted_prompt_log",
   };
@@ -305,7 +361,7 @@ function outputSnapshot(agentCallId, { includeOutput = true, outputMaxChars = MA
     .filter((record) => logRecordMatchesCall(record, call));
   const latestOutput = outputRecords[0] || null;
   const memoryOutput = memory?.output || null;
-  const outputText = memoryOutput?.output ?? latestOutput?.output ?? "";
+  const outputText = memoryOutput?.output ?? memoryOutput?.output_preview ?? latestOutput?.output ?? "";
   const snapshot = {
     status: memoryOutput?.status ?? latestOutput?.status ?? null,
     output_chars: memoryOutput?.output_chars ?? latestOutput?.output_chars ?? null,
@@ -316,6 +372,8 @@ function outputSnapshot(agentCallId, { includeOutput = true, outputMaxChars = MA
     exit_code: latestOutput?.exit_code ?? null,
     error_text: memoryOutput?.error_text ?? latestOutput?.error_text ?? null,
     output_available_in_memory: !!memoryOutput?.output,
+    output_preview_available_in_memory: !memoryOutput?.output && !!memoryOutput?.output_preview,
+    output_truncated_from_memory: memoryOutput?.output_truncated_from_memory === true,
     output_available_in_log: !!latestOutput?.output,
   };
   if (includeOutput && outputText) {

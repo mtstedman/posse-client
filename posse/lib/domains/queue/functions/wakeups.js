@@ -30,6 +30,14 @@ export function discardPendingWakeEmissions() {
   _pendingEmits = [];
 }
 
+export function getPendingWakeEmissionCount() {
+  return _pendingEmits.length;
+}
+
+export function __testPendingWakeEmissionCount() {
+  return getPendingWakeEmissionCount();
+}
+
 registerTransactionLifecycleHooks({
   onCommit: flushPendingWakeEmissions,
   onRollback: discardPendingWakeEmissions,

@@ -946,6 +946,7 @@ export class Worker {
     this._lastScratchGcAt = 0;
     this._providerCircuitOpen = new Map(); // provider -> { openedAt, trippedAt, ttlMs, reason }
     this._pendingSessionRecycles = new Map(); // jobId -> leased/fresh provider session result awaiting durable success
+    this._terminalCleanupByWorkItem = new Map(); // workItemId -> in-flight cleanup promise
     this.providerClient = opts.providerClient || new TrackedProviderClient({
       worker: this,
       isProviderError: _isProviderError,
@@ -3656,7 +3657,20 @@ export class Worker {
   primeCreatableFiles(...args) { return primeCreatableFilesFromModule(...args); }
 
   _cleanupWorktreeIfDone(...args) {
+    const workItemId = args[0];
+    const cleanupKey = workItemId == null ? null : Number(workItemId) || String(workItemId);
+    if (cleanupKey != null && this._terminalCleanupByWorkItem.has(cleanupKey)) {
+      return this._terminalCleanupByWorkItem.get(cleanupKey);
+    }
     const cleanup = cleanupWorktreeIfDoneAsyncFromModule(this, ...args);
+    if (cleanupKey != null && cleanup?.finally) {
+      this._terminalCleanupByWorkItem.set(cleanupKey, cleanup);
+      void cleanup.finally(() => {
+        if (this._terminalCleanupByWorkItem.get(cleanupKey) === cleanup) {
+          this._terminalCleanupByWorkItem.delete(cleanupKey);
+        }
+      }).catch(() => {});
+    }
     cleanup?.catch?.((err) => {
       try { this._logFinalizerFailure({ id: null }, "worktree_terminal_cleanup", err); } catch { /* ignore */ }
     });
