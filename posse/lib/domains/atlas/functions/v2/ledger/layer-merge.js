@@ -29,6 +29,19 @@ function mergeKey(kind, qualifiedOrName) {
   return `${String(kind || "")}\0${String(qualifiedOrName || "")}`;
 }
 
+function locationMergeKey(kind, name, rangeStart, rangeStartLine) {
+  return [
+    String(kind || ""),
+    String(name || ""),
+    String(rangeStart ?? ""),
+    String(rangeStartLine ?? ""),
+  ].join("\0");
+}
+
+function sourceLocalKey(source, localId) {
+  return `${String(source || "treesitter")}\0${String(localId)}`;
+}
+
 function num(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -137,13 +150,13 @@ function layerLangFor(ledgerDb, contentHash) {
  * @param {import("better-sqlite3").Database} ledgerDb
  * @param {string} contentHash
  * @param {string | null} [lang] - derived from the layers when omitted
- * @returns {{ symbols: any[], edges: any[], sources: string[] }}
+ * @returns {{ symbols: any[], edges: any[], sources: string[], sourceLocalToMerged: Map<string, number> }}
  */
 export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
   const resolvedLang = lang || layerLangFor(ledgerDb, contentHash);
-  if (!resolvedLang) return { symbols: [], edges: [], sources: [] };
+  if (!resolvedLang) return { symbols: [], edges: [], sources: [], sourceLocalToMerged: new Map() };
   const layers = latestLayers(ledgerDb, contentHash, resolvedLang);
-  if (layers.length === 0) return { symbols: [], edges: [], sources: [] };
+  if (layers.length === 0) return { symbols: [], edges: [], sources: [], sourceLocalToMerged: new Map() };
 
   const baseLayer = layers[0];
   const overlayLayer = layers[1] || null;
@@ -151,8 +164,12 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
   const symbols = [];
   /** mergeKey -> merged local_id (for overlay enrichment matching) */
   const keyToMerged = new Map();
+  /** locationMergeKey -> merged local_id|null, where null means ambiguous. */
+  const locationToMerged = new Map();
   /** "layerId:srcLocalId" -> merged local_id (parent + edge remap) */
   const remap = new Map();
+  /** "source\0srcLocalId" -> merged local_id for cross-blob target remap. */
+  const sourceLocalToMerged = new Map();
   /** merged local_id -> symbol row (for enrichment) */
   const byMerged = new Map();
   let nextLocalId = 0;
@@ -164,8 +181,11 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
     symbols.push(sym);
     byMerged.set(mergedId, sym);
     remap.set(`${baseLayer.id}:${row.local_id}`, mergedId);
+    sourceLocalToMerged.set(sourceLocalKey(baseLayer.source, row.local_id), mergedId);
     const key = mergeKey(sym.kind, sym.qualified_name || sym.name);
     if (!keyToMerged.has(key)) keyToMerged.set(key, mergedId);
+    const locKey = locationMergeKey(sym.kind, sym.name, sym.range_start, sym.range_start_line);
+    locationToMerged.set(locKey, locationToMerged.has(locKey) ? null : mergedId);
   }
 
   // Overlay: enrich matching base symbol, else add as new.
@@ -174,7 +194,14 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
       const detail = parseJson(row.detail_json) || {};
       const qualified = row.container ?? detail.qualified_name ?? null;
       const key = mergeKey(row.kind, qualified || row.name);
-      const matchId = keyToMerged.get(key);
+      const range = parseJson(row.range_json) || {};
+      const locKey = locationMergeKey(
+        row.kind,
+        row.name,
+        num(range.range_start, 0),
+        nullableInt(range.range_start_line),
+      );
+      const matchId = keyToMerged.get(key) ?? locationToMerged.get(locKey);
       if (matchId != null) {
         const base = byMerged.get(matchId);
         base.name = row.name || base.name;
@@ -184,6 +211,7 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
         base.visibility = detail.visibility ?? base.visibility;
         base.doc = row.doc ?? base.doc;
         remap.set(`${overlayLayer.id}:${row.local_id}`, matchId);
+        sourceLocalToMerged.set(sourceLocalKey(overlayLayer.source, row.local_id), matchId);
       } else {
         const mergedId = nextLocalId++;
         const sym = symbolRowFrom(contentHash, resolvedLang, mergedId, overlayLayer.id, row);
@@ -191,6 +219,7 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
         symbols.push(sym);
         byMerged.set(mergedId, sym);
         remap.set(`${overlayLayer.id}:${row.local_id}`, mergedId);
+        sourceLocalToMerged.set(sourceLocalKey(overlayLayer.source, row.local_id), mergedId);
         keyToMerged.set(key, mergedId);
       }
     }
@@ -253,5 +282,5 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
     }
   }
 
-  return { symbols, edges, sources: layers.map((l) => l.source) };
+  return { symbols, edges, sources: layers.map((l) => l.source), sourceLocalToMerged };
 }

@@ -31,6 +31,7 @@ import { normalizeTreeCompressionMode } from "../../functions/v2/tree-compressio
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
 import { normalizeLangFromScip } from "../../functions/v2/scip/to-rows.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
+import { languageForPath } from "../../functions/v2/parse/language-buckets.js";
 
 /** @typedef {import("../../functions/v2/contracts/schemas.js").ViewMeta} ViewMeta */
 /** @typedef {import("../../functions/v2/contracts/schemas.js").LedgerEntry} LedgerEntry */
@@ -241,7 +242,9 @@ export class ViewBuilder {
       let applied = 0;
       emitPhase("entries", 0, entries.length);
       for (const e of entries) {
-        const outcome = applyEntry(db, ledgerDb, e);
+        const outcome = applyEntry(db, ledgerDb, e, {
+          layerMerge: current.layer_merge === true || options.layerMerge === true,
+        });
         if (outcome && outcome.skipped) break;
         lastAppliedSeq = e.seq;
         applied++;
@@ -453,58 +456,7 @@ function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMerge = f
     blobToPaths.set(h, list);
   }
 
-  const symbolReadStmt = prepareLedgerSymbolReadStmt(ledgerDb);
-  const edgeReadStmt = prepareLedgerEdgeReadStmt(ledgerDb);
-  // Order-independent layer source: merge the per-blob tree-sitter+SCIP layers
-  // into the same flat row shape the legacy read returns, cached per blob so
-  // the symbol and edge passes share one merge. When off, read flat tables.
-  /** @type {Map<string, { symbols: any[], edges: any[] }>} */
-  const mergeCache = new Map();
-  // Rollout safety net: the per-source layer tables are backfilled lazily (only
-  // a (re)parsed blob writes its layer; a SCIP index ingested before the layer
-  // rollout never wrote SCIP layers). A layer-merge build must never drop
-  // symbols a blob still has in the legacy flat tables, so for each blob we fall
-  // back to the legacy rows when it has NO layers yet, OR when its layer set is
-  // missing a source the legacy rows still carry (e.g. a tree-sitter layer
-  // exists but the SCIP layer was never written). The per-blob choice covers
-  // symbols AND edges together so local ids stay in one id space.
-  /** @type {Map<string, Set<string>>} */
-  const legacySourcesByHash = new Map();
-  if (useLayerMerge) {
-    try {
-      for (const row of /** @type {Array<{ content_hash: string, source: string | null }>} */ (
-        ledgerDb.prepare("SELECT DISTINCT content_hash, source FROM blob_symbols").all()
-      )) {
-        let set = legacySourcesByHash.get(row.content_hash);
-        if (!set) { set = new Set(); legacySourcesByHash.set(row.content_hash, set); }
-        set.add(String(row.source || "treesitter"));
-      }
-    } catch { /* no legacy rows / no source column — fall back only on empty layers */ }
-  }
-  const legacyRowsFor = (content_hash) => ({
-    symbols: /** @type {any[]} */ (symbolReadStmt.all(content_hash)),
-    edges: /** @type {any[]} */ (edgeReadStmt.all(content_hash)),
-  });
-  const mergedFor = (content_hash) => {
-    let m = mergeCache.get(content_hash);
-    if (m) return m;
-    const merged = mergeLayerRows(ledgerDb, content_hash);
-    const legacySources = legacySourcesByHash.get(content_hash);
-    const layerSources = new Set(merged.sources || []);
-    const layersCoverLegacy = !legacySources
-      || [...legacySources].every((source) => layerSources.has(source));
-    m = merged.symbols.length > 0 && layersCoverLegacy
-      ? merged
-      : legacyRowsFor(content_hash);
-    mergeCache.set(content_hash, m);
-    return m;
-  };
-  const readSymbols = (content_hash) => (useLayerMerge
-    ? mergedFor(content_hash).symbols
-    : /** @type {any[]} */ (symbolReadStmt.all(content_hash)));
-  const readEdges = (content_hash) => (useLayerMerge
-    ? mergedFor(content_hash).edges
-    : /** @type {any[]} */ (edgeReadStmt.all(content_hash)));
+  const ledgerRows = createLedgerRowReader(ledgerDb, useLayerMerge);
   const symbolInsert = prepareViewSymbolInsert(viewDb);
   const updateParent = viewDb.prepare(
     "UPDATE symbols SET parent_global_id = ? WHERE global_id = ?",
@@ -526,7 +478,7 @@ function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMerge = f
   // iteration order; chunk boundaries don't change the order, so the result is
   // identical to the single-transaction build.
   const insertSymbolsForEntry = ([repo_rel_path, content_hash]) => {
-    const rows = readSymbols(content_hash);
+    const rows = ledgerRows.readSymbols(content_hash, repo_rel_path);
     for (const r of rows) {
       const info = symbolInsert.run(
         r.content_hash,
@@ -578,7 +530,7 @@ function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMerge = f
 
   // Pass 3: insert edges with best-effort resolution. Chunked like pass 1.
   const insertEdgesForEntry = ([repo_rel_path, content_hash]) => {
-    const rows = readEdges(content_hash);
+    const rows = ledgerRows.readEdges(content_hash, repo_rel_path);
     for (const r of rows) {
       const fromGid = localToGlobal.get(localKey(repo_rel_path, r.from_local_id));
       if (fromGid == null) continue; // edge references a symbol that didn't materialize
@@ -591,7 +543,10 @@ function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMerge = f
         if (candidatePaths && candidatePaths.length > 0) {
           const preferred =
             candidatePaths.find((p) => p === repo_rel_path) ?? candidatePaths[0];
-          const candidate = localToGlobal.get(localKey(preferred, r.to_local_id));
+          const targetLocalId = r.to_content_hash === content_hash
+            ? r.to_local_id
+            : ledgerRows.targetLocalId(r.to_content_hash, preferred, r.source, r.to_local_id);
+          const candidate = localToGlobal.get(localKey(preferred, targetLocalId));
           if (candidate != null) toGid = candidate;
         }
       }
@@ -642,6 +597,15 @@ function localKey(repo_rel_path, local_id) {
 }
 
 /**
+ * @param {string | null | undefined} source
+ * @param {number} local_id
+ * @returns {string}
+ */
+function sourceLocalKey(source, local_id) {
+  return `${String(source || "treesitter")}\x00${String(local_id)}`;
+}
+
+/**
  * Normalize legacy ledger language tags while materializing views. Older
  * SCIP PHP indexes wrote protobuf enum numbers (for example "19") into
  * blob.lang; keeping the normalization here lets full rebuilds heal those
@@ -652,6 +616,99 @@ function localKey(repo_rel_path, local_id) {
  */
 function normalizeLedgerLang(lang) {
   return normalizeLangFromScip(lang);
+}
+
+/**
+ * Layer rows are keyed by content hash AND language. A single empty content
+ * hash can legitimately appear at TS, PHP, etc. paths, so view materialization
+ * must resolve the language from the path before asking the layer merger which
+ * rows belong to this path.
+ *
+ * @param {string} repo_rel_path
+ * @returns {string | null}
+ */
+function layerMergeLangForPath(repo_rel_path) {
+  const lang = languageForPath(repo_rel_path);
+  return lang && lang !== "unknown" ? lang : null;
+}
+
+/**
+ * @param {import("better-sqlite3").Database} ledgerDb
+ * @param {boolean} useLayerMerge
+ * @returns {{
+ *   readSymbols: (content_hash: string, repo_rel_path?: string) => any[],
+ *   readEdges: (content_hash: string, repo_rel_path?: string) => any[],
+ *   targetLocalId: (content_hash: string, repo_rel_path: string, source: string | null | undefined, local_id: number) => number,
+ * }}
+ */
+function createLedgerRowReader(ledgerDb, useLayerMerge) {
+  const symbolReadStmt = prepareLedgerSymbolReadStmt(ledgerDb);
+  const edgeReadStmt = prepareLedgerEdgeReadStmt(ledgerDb);
+
+  const legacyRowsFor = (content_hash) => ({
+    symbols: /** @type {any[]} */ (symbolReadStmt.all(content_hash)),
+    edges: /** @type {any[]} */ (edgeReadStmt.all(content_hash)),
+  });
+
+  if (!useLayerMerge) {
+    return {
+      readSymbols: (content_hash) => legacyRowsFor(content_hash).symbols,
+      readEdges: (content_hash) => legacyRowsFor(content_hash).edges,
+      targetLocalId: (_content_hash, _repo_rel_path, _source, local_id) => local_id,
+    };
+  }
+
+  // Order-independent layer source: merge the per-blob tree-sitter+SCIP layers
+  // into the same flat row shape the legacy read returns, cached per blob so
+  // the symbol and edge passes share one merge.
+  /** @type {Map<string, { symbols: any[], edges: any[], sources?: string[], sourceLocalToMerged?: Map<string, number> }>} */
+  const mergeCache = new Map();
+
+  // Rollout safety net: the per-source layer tables are backfilled lazily (only
+  // a (re)parsed blob writes its layer; a SCIP index ingested before the layer
+  // rollout never wrote SCIP layers). A layer-merge build must never drop
+  // symbols a blob still has in the legacy flat tables, so for each blob we fall
+  // back to the legacy rows when it has NO layers yet, OR when its layer set is
+  // missing a source the legacy rows still carry (e.g. a tree-sitter layer
+  // exists but the SCIP layer was never written). The per-blob choice covers
+  // symbols AND edges together so local ids stay in one id space.
+  /** @type {Map<string, Set<string>>} */
+  const legacySourcesByHash = new Map();
+  try {
+    for (const row of /** @type {Array<{ content_hash: string, source: string | null }>} */ (
+      ledgerDb.prepare("SELECT DISTINCT content_hash, source FROM blob_symbols").all()
+    )) {
+      let set = legacySourcesByHash.get(row.content_hash);
+      if (!set) { set = new Set(); legacySourcesByHash.set(row.content_hash, set); }
+      set.add(String(row.source || "treesitter"));
+    }
+  } catch { /* no legacy rows / no source column — fall back only on empty layers */ }
+
+  const mergedFor = (content_hash, repo_rel_path = "") => {
+    const lang = layerMergeLangForPath(repo_rel_path);
+    const cacheKey = `${content_hash}\0${lang || ""}`;
+    let m = mergeCache.get(cacheKey);
+    if (m) return m;
+    const merged = mergeLayerRows(ledgerDb, content_hash, lang);
+    const legacySources = legacySourcesByHash.get(content_hash);
+    const layerSources = new Set(merged.sources || []);
+    const layersCoverLegacy = !legacySources
+      || [...legacySources].every((source) => layerSources.has(source));
+    m = merged.symbols.length > 0 && layersCoverLegacy
+      ? merged
+      : legacyRowsFor(content_hash);
+    mergeCache.set(cacheKey, m);
+    return m;
+  };
+
+  return {
+    readSymbols: (content_hash, repo_rel_path = "") => mergedFor(content_hash, repo_rel_path).symbols,
+    readEdges: (content_hash, repo_rel_path = "") => mergedFor(content_hash, repo_rel_path).edges,
+    targetLocalId: (content_hash, repo_rel_path, source, local_id) => {
+      const merged = mergedFor(content_hash, repo_rel_path);
+      return merged.sourceLocalToMerged?.get(sourceLocalKey(source, local_id)) ?? local_id;
+    },
+  };
 }
 
 /**
@@ -733,8 +790,9 @@ function prepareViewEdgeInsert(viewDb) {
  * @param {import("better-sqlite3").Database} viewDb
  * @param {import("better-sqlite3").Database} ledgerDb
  * @param {LedgerEntry} entry
+ * @param {{ layerMerge?: boolean }} [options]
  */
-function applyEntry(viewDb, ledgerDb, entry) {
+function applyEntry(viewDb, ledgerDb, entry, options = {}) {
   const updatePath = viewDb.prepare(
     "INSERT INTO path_to_blob(repo_rel_path, content_hash) VALUES(?, ?) " +
       "ON CONFLICT(repo_rel_path) DO UPDATE SET content_hash = excluded.content_hash",
@@ -785,7 +843,7 @@ function applyEntry(viewDb, ledgerDb, entry) {
 
   // We only want to insert the NEW path's symbols, but cross-blob
   // resolution needs to see the full map. Use a scoped helper.
-  populateSinglePath(viewDb, ledgerDb, fullMap, entry.repo_rel_path);
+  populateSinglePath(viewDb, ledgerDb, fullMap, entry.repo_rel_path, options.layerMerge === true);
 }
 
 /**
@@ -796,8 +854,9 @@ function applyEntry(viewDb, ledgerDb, entry) {
  * @param {import("better-sqlite3").Database} ledgerDb
  * @param {Map<string, string>} fullPathToBlob
  * @param {string} onlyPath
+ * @param {boolean} [useLayerMerge]
  */
-function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath) {
+function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath, useLayerMerge = false) {
   const content_hash = fullPathToBlob.get(onlyPath);
   if (!content_hash) return;
 
@@ -809,8 +868,7 @@ function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath) {
     blobToPaths.set(h, list);
   }
 
-  const symbolReadStmt = prepareLedgerSymbolReadStmt(ledgerDb);
-  const edgeReadStmt = prepareLedgerEdgeReadStmt(ledgerDb);
+  const ledgerRows = createLedgerRowReader(ledgerDb, useLayerMerge);
   const symbolInsert = prepareViewSymbolInsert(viewDb);
   const updateParent = viewDb.prepare(
     "UPDATE symbols SET parent_global_id = ? WHERE global_id = ?",
@@ -827,7 +885,7 @@ function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath) {
   /** @type {{ global_id: number, parent_local_id: number }[]} */
   const parentBackfill = [];
 
-  const symRows = /** @type {any[]} */ (symbolReadStmt.all(content_hash));
+  const symRows = /** @type {any[]} */ (ledgerRows.readSymbols(content_hash, onlyPath));
   for (const r of symRows) {
     const info = symbolInsert.run(
       r.content_hash,
@@ -858,7 +916,7 @@ function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath) {
     if (parentGid != null) updateParent.run(parentGid, pb.global_id);
   }
 
-  const edgeRows = /** @type {any[]} */ (edgeReadStmt.all(content_hash));
+  const edgeRows = /** @type {any[]} */ (ledgerRows.readEdges(content_hash, onlyPath));
   for (const r of edgeRows) {
     const fromGid = localToGlobal.get(String(r.from_local_id));
     if (fromGid == null) continue;
@@ -867,12 +925,15 @@ function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath) {
       const candidatePaths = blobToPaths.get(r.to_content_hash);
       if (candidatePaths && candidatePaths.length > 0) {
         const preferred = candidatePaths.find((p) => p === onlyPath) ?? candidatePaths[0];
+        const targetLocalId = r.to_content_hash === content_hash
+          ? r.to_local_id
+          : ledgerRows.targetLocalId(r.to_content_hash, preferred, r.source, r.to_local_id);
         if (preferred === onlyPath) {
-          const fresh = localToGlobal.get(String(r.to_local_id));
+          const fresh = localToGlobal.get(String(targetLocalId));
           if (fresh != null) toGid = fresh;
         } else {
           const existing = /** @type {{ global_id: number } | undefined} */ (
-            lookupExistingGlobal.get(preferred, r.to_local_id)
+            lookupExistingGlobal.get(preferred, targetLocalId)
           );
           if (existing) toGid = existing.global_id;
         }

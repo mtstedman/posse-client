@@ -6,6 +6,8 @@
 // authoritative read cache.
 
 import fs from "fs";
+import path from "path";
+import { languageForPath } from "./parse/language-buckets.js";
 
 /**
  * @param {number} ms
@@ -267,4 +269,206 @@ export async function waitForCurrentView({
     await sleep(Math.min(pause, remaining));
   } while (Date.now() <= deadline);
   return last;
+}
+
+/**
+ * Summarize quality problems inside a mounted ATLAS view. Unlike freshness,
+ * these checks do not decide whether the view is usable; they expose drift and
+ * noise patterns that should be visible in diagnostics.
+ *
+ * @param {import("better-sqlite3").Database} viewDb
+ * @param {{
+ *   ledgerDb?: import("better-sqlite3").Database | null,
+ *   repoRoot?: string | null,
+ *   sampleLimit?: number,
+ * }} [options]
+ * @returns {{
+ *   totals: { paths: number, symbols: number, edges: number },
+ *   missingPathsOnDisk: { count: number, sample: string[] },
+ *   currentPathsWithoutSymbols: { count: number, sample: Array<{ repo_rel_path: string, content_hash: string, layerSymbols: number | null }> },
+ *   sameStartDuplicates: { groups: number, extras: number, rows: number, byKind: Array<{ kind: string, groups: number, extras: number, rows: number }> },
+ *   localNamedSymbols: { count: number, ratio: number },
+ *   pathLikeQualifiedNames: { count: number, ratio: number },
+ *   danglingEdges: { count: number, bySourceKind: Array<{ source: string, kind: string, count: number }> },
+ *   resolvedEdgeNameMismatches: { count: number, bySource: Array<{ source: string, count: number }> },
+ *   warnings: Array<{ kind: string, count: number, detail: string }>,
+ * }}
+ */
+export function auditViewQuality(viewDb, options = {}) {
+  const sampleLimit = Math.max(1, Number(options.sampleLimit) || 20);
+  const ledgerDb = options.ledgerDb || null;
+  const repoRoot = typeof options.repoRoot === "string" && options.repoRoot
+    ? options.repoRoot
+    : null;
+
+  const count = (table) => {
+    if (!tableExists(viewDb, table)) return 0;
+    return Number(viewDb.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n || 0);
+  };
+  const totals = {
+    paths: count("path_to_blob"),
+    symbols: count("symbols"),
+    edges: count("edges"),
+  };
+
+  const pathRows = tableExists(viewDb, "path_to_blob")
+    ? /** @type {Array<{ repo_rel_path: string, content_hash: string }>} */ (
+      viewDb.prepare("SELECT repo_rel_path, content_hash FROM path_to_blob ORDER BY repo_rel_path").all()
+    )
+    : [];
+
+  const missingPathSample = [];
+  if (repoRoot) {
+    for (const row of pathRows) {
+      const abs = path.join(repoRoot, row.repo_rel_path.replace(/\//g, path.sep));
+      if (!fs.existsSync(abs)) missingPathSample.push(row.repo_rel_path);
+      if (missingPathSample.length >= sampleLimit) break;
+    }
+  }
+  const missingPathCount = repoRoot
+    ? pathRows.reduce((n, row) => {
+      const abs = path.join(repoRoot, row.repo_rel_path.replace(/\//g, path.sep));
+      return n + (fs.existsSync(abs) ? 0 : 1);
+    }, 0)
+    : 0;
+
+  const symbolCountForPath = tableExists(viewDb, "symbols")
+    ? viewDb.prepare("SELECT COUNT(*) AS n FROM symbols WHERE repo_rel_path = ? AND content_hash = ?")
+    : null;
+  const currentPathsWithoutSymbols = [];
+  if (symbolCountForPath) {
+    for (const row of pathRows) {
+      const viewSymbols = Number(symbolCountForPath.get(row.repo_rel_path, row.content_hash)?.n || 0);
+      if (viewSymbols > 0) continue;
+      const layerSymbols = ledgerDb ? countLayerSymbolsForPath(ledgerDb, row.content_hash, row.repo_rel_path) : null;
+      if (ledgerDb && Number(layerSymbols || 0) <= 0) continue;
+      currentPathsWithoutSymbols.push({
+        repo_rel_path: row.repo_rel_path,
+        content_hash: row.content_hash,
+        layerSymbols,
+      });
+    }
+  }
+
+  const duplicateByKind = tableExists(viewDb, "symbols")
+    ? /** @type {Array<{ kind: string, groups: number, extras: number, rows: number }>} */ (
+      viewDb.prepare(`
+        SELECT kind, COUNT(*) AS groups, SUM(c)-COUNT(*) AS extras, SUM(c) AS rows
+        FROM (
+          SELECT repo_rel_path, kind, name, range_start, range_start_line, COUNT(*) AS c
+          FROM symbols
+          GROUP BY repo_rel_path, kind, name, range_start, range_start_line
+          HAVING c > 1
+        )
+        GROUP BY kind
+        ORDER BY kind
+      `).all()
+    )
+    : [];
+  const sameStartDuplicates = duplicateByKind.reduce(
+    (acc, row) => ({
+      groups: acc.groups + Number(row.groups || 0),
+      extras: acc.extras + Number(row.extras || 0),
+      rows: acc.rows + Number(row.rows || 0),
+      byKind: acc.byKind,
+    }),
+    { groups: 0, extras: 0, rows: 0, byKind: duplicateByKind },
+  );
+
+  const localNamedCount = tableExists(viewDb, "symbols")
+    ? Number(viewDb.prepare("SELECT COUNT(*) AS n FROM symbols WHERE name GLOB 'local [0-9]*'").get()?.n || 0)
+    : 0;
+  const pathLikeQnames = tableExists(viewDb, "symbols")
+    ? Number(viewDb.prepare(`
+      SELECT COUNT(*) AS n
+      FROM symbols
+      WHERE qualified_name LIKE '%.ts.%'
+         OR qualified_name LIKE '%.tsx.%'
+         OR qualified_name LIKE '%.js.%'
+         OR qualified_name LIKE '%.jsx.%'
+         OR qualified_name LIKE '%.py.%'
+         OR qualified_name LIKE '%.php.%'
+    `).get()?.n || 0)
+    : 0;
+
+  const danglingBySourceKind = tableExists(viewDb, "edges")
+    ? /** @type {Array<{ source: string, kind: string, count: number }>} */ (
+      viewDb.prepare(`
+        SELECT source, kind, COUNT(*) AS count
+        FROM edges
+        WHERE to_global_id IS NULL AND to_external_id IS NULL
+        GROUP BY source, kind
+        ORDER BY count DESC, source, kind
+      `).all()
+    )
+    : [];
+  const danglingCount = danglingBySourceKind.reduce((sum, row) => sum + Number(row.count || 0), 0);
+
+  const mismatchBySource = tableExists(viewDb, "edges") && tableExists(viewDb, "symbols")
+    ? /** @type {Array<{ source: string, count: number }>} */ (
+      viewDb.prepare(`
+        SELECT e.source, COUNT(*) AS count
+        FROM edges e
+        JOIN symbols t ON t.global_id = e.to_global_id
+        WHERE e.to_global_id IS NOT NULL
+          AND e.to_name <> t.name
+          AND REPLACE(e.to_name, 'local-', 'local ') <> t.name
+        GROUP BY e.source
+        ORDER BY count DESC, e.source
+      `).all()
+    )
+    : [];
+  const mismatchCount = mismatchBySource.reduce((sum, row) => sum + Number(row.count || 0), 0);
+
+  const warnings = [];
+  if (missingPathCount > 0) warnings.push({ kind: "missing_paths_on_disk", count: missingPathCount, detail: "path_to_blob contains files that no longer exist" });
+  if (currentPathsWithoutSymbols.length > 0) warnings.push({ kind: "current_paths_without_symbols", count: currentPathsWithoutSymbols.length, detail: "current path hashes have indexed layer symbols but no view symbols" });
+  if (sameStartDuplicates.groups > 0) warnings.push({ kind: "same_start_duplicate_symbols", count: sameStartDuplicates.groups, detail: "symbols share path/kind/name/start and may indicate failed source unification" });
+  if (localNamedCount > 0) warnings.push({ kind: "local_named_symbols", count: localNamedCount, detail: "SCIP local temporaries leaked into the retrieval view" });
+  if (pathLikeQnames > 0) warnings.push({ kind: "path_like_qualified_names", count: pathLikeQnames, detail: "qualified names contain file-extension path segments" });
+  if (danglingCount > 0) warnings.push({ kind: "dangling_edges", count: danglingCount, detail: "edges have no resolved internal or external target" });
+  if (mismatchCount > 0) warnings.push({ kind: "resolved_edge_name_mismatches", count: mismatchCount, detail: "resolved edges point at symbols whose names do not match the edge target" });
+
+  return {
+    totals,
+    missingPathsOnDisk: { count: missingPathCount, sample: missingPathSample },
+    currentPathsWithoutSymbols: {
+      count: currentPathsWithoutSymbols.length,
+      sample: currentPathsWithoutSymbols.slice(0, sampleLimit),
+    },
+    sameStartDuplicates,
+    localNamedSymbols: { count: localNamedCount, ratio: totals.symbols > 0 ? localNamedCount / totals.symbols : 0 },
+    pathLikeQualifiedNames: { count: pathLikeQnames, ratio: totals.symbols > 0 ? pathLikeQnames / totals.symbols : 0 },
+    danglingEdges: { count: danglingCount, bySourceKind: danglingBySourceKind },
+    resolvedEdgeNameMismatches: { count: mismatchCount, bySource: mismatchBySource },
+    warnings,
+  };
+}
+
+function tableExists(db, table) {
+  try {
+    return !!db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type='table' AND name=?").get(table);
+  } catch {
+    return false;
+  }
+}
+
+function countLayerSymbolsForPath(ledgerDb, contentHash, repoRelPath) {
+  if (!tableExists(ledgerDb, "blob_layers") || !tableExists(ledgerDb, "blob_layer_symbols")) return null;
+  const lang = languageForPath(repoRelPath);
+  const params = [contentHash];
+  let langWhere = "";
+  if (lang && lang !== "unknown") {
+    langWhere = "AND bl.lang = ?";
+    params.push(lang);
+  }
+  const row = ledgerDb.prepare(`
+    SELECT COUNT(*) AS n
+    FROM blob_layers bl
+    JOIN blob_layer_symbols s ON s.layer_id = bl.id
+    WHERE bl.content_hash = ?
+      ${langWhere}
+      AND bl.status = 'indexed'
+  `).get(...params);
+  return Number(row?.n || 0);
 }

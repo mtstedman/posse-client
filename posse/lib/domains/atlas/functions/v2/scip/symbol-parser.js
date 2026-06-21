@@ -277,15 +277,45 @@ function consumeChar(cursor, ch) {
 }
 
 /**
- * Concatenate descriptors into a `qualified_name` suitable for the ATLAS
- * symbol row. We use the descriptor name only and join with '.' so the
- * format matches what tree-sitter-derived TS/JS qualified_names look like.
+ * Concatenate descriptors into a `qualified_name` suitable for an ATLAS symbol
+ * row. When the document path is known, strip the leading descriptor run that
+ * is just the file path; scip-typescript encodes path segments as descriptors,
+ * but ATLAS already stores the path separately on the row.
  *
  * @param {ScipDescriptor[]} descriptors
+ * @param {{ repoRelPath?: string }} [options]
  * @returns {string}
  */
-export function descriptorsToQualifiedName(descriptors) {
-  return descriptors.map((d) => d.name).join(".");
+export function descriptorsToQualifiedName(descriptors, options = {}) {
+  const offset = descriptorPathPrefixLength(descriptors, options.repoRelPath);
+  return descriptors.slice(offset).map((d) => d.name).join(".");
+}
+
+/**
+ * @param {ScipDescriptor[]} descriptors
+ * @param {string | undefined} repoRelPath
+ * @returns {number}
+ */
+function descriptorPathPrefixLength(descriptors, repoRelPath) {
+  if (!repoRelPath || descriptors.length === 0) return 0;
+  const names = descriptors.map((d) => d.name);
+  const pathParts = repoRelPath.replace(/\\/g, "/").split("/").filter(Boolean);
+  if (pathParts.length === 0) return 0;
+
+  let best = 0;
+  for (let i = 0; i < pathParts.length; i++) {
+    const suffix = pathParts.slice(i);
+    if (suffix.length > names.length) continue;
+    let matches = true;
+    for (let j = 0; j < suffix.length; j++) {
+      if (names[j] !== suffix[j]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches && suffix.length > best) best = suffix.length;
+  }
+  return best;
 }
 
 /**

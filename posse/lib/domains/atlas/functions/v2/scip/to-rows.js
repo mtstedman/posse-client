@@ -2,7 +2,7 @@
 //
 // SCIP cached document → ATLAS SymbolRow[] + EdgeRow[].
 //
-// Producer contract: for each SCIP occurrence in the document,
+// Producer contract: for each non-local SCIP occurrence in the document,
 //   - if the occurrence has Definition role, emit a SymbolRow with
 //     source='scip' (and reserve a local_id for that occurrence).
 //   - if the occurrence is a reference, emit an EdgeRow with source='scip'.
@@ -68,6 +68,7 @@ export function scipDocumentToParseResult({ cache, document, repo_rel_path, bind
   /** @type {Map<string, number>} */
   const symbolToLocalId = new Map(document.definitionLocalIds || []);
   const emittedSymbols = new Set();
+  const suppressedLocalIds = new Set();
 
   for (const occ of document.occurrences) {
     if (!occ.parsed) continue;
@@ -76,15 +77,21 @@ export function scipDocumentToParseResult({ cache, document, repo_rel_path, bind
     if (emittedSymbols.has(occ.raw.symbol)) continue;
 
     const parsed = occ.parsed;
+    const local_id = symbolToLocalId.get(occ.raw.symbol);
+    if (local_id == null) continue;
+    if (parsed.local) {
+      suppressedLocalIds.add(local_id);
+      emittedSymbols.add(occ.raw.symbol);
+      continue;
+    }
+
     const info = document.symbolsBySymbol.get(occ.raw.symbol);
     const displayName = info?.display_name || externalDisplayName(parsed) || lastDescriptorName(parsed);
     if (!displayName) continue;
 
-    const local_id = symbolToLocalId.get(occ.raw.symbol);
-    if (local_id == null) continue;
     emittedSymbols.add(occ.raw.symbol);
 
-    const qualified = descriptorsToQualifiedName(parsed.descriptors) || displayName;
+    const qualified = descriptorsToQualifiedName(parsed.descriptors, { repoRelPath: repo_rel_path }) || displayName;
     const sigSource = info?.display_name
       ? `${kindGuess(parsed)} ${qualified}`
       : qualified;
@@ -153,15 +160,15 @@ export function scipDocumentToParseResult({ cache, document, repo_rel_path, bind
     const parsed = occ.parsed;
     const isDef = scipRoleIsDefinition(occ.raw.symbol_roles);
     if (isDef && !scipRoleIsImport(occ.raw.symbol_roles)) continue;
-    if (parsed.local && !symbolToLocalId.has(occ.raw.symbol)) {
-      // Some SCIP indexers emit references to document-local temporaries
-      // without a matching definition occurrence. Suppress those graph-only
-      // refs for now; revisit synthetic local symbols if Atlas needs
-      // variable-level data-flow inside TS/TSX bodies.
+    if (parsed.local) {
+      // SCIP local symbols are document-scoped temporaries. They create a large
+      // amount of retrieval noise and are not stable navigation targets, so
+      // suppress both unresolved and resolved local-only graph refs.
       continue;
     }
 
     const fromLocalId = enclosingDefinitionLocalId(document, occ, symbolToLocalId) ?? ensureFileScopeSymbol();
+    if (suppressedLocalIds.has(fromLocalId)) continue;
 
     const refName = displayNameForRef(parsed);
     if (!refName) continue;
@@ -182,19 +189,6 @@ export function scipDocumentToParseResult({ cache, document, repo_rel_path, bind
       confidence: scipConfidence(false),
       source: "scip",
     };
-
-    // Same-document local binding: SCIP local-id symbols only live within
-    // their document, so we can resolve directly to our own assigned
-    // local_id table.
-    if (parsed.local) {
-      const lid = symbolToLocalId.get(occ.raw.symbol);
-      if (lid != null) {
-        edge.to_content_hash = content_hash;
-        edge.to_local_id = lid;
-      }
-      edges.push(edge);
-      continue;
-    }
 
     // Same-document global symbol — `local 0`-style bindings are local;
     // a global symbol defined in THIS document gets the in-blob local id.

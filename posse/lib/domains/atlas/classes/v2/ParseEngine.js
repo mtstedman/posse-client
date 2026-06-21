@@ -1749,7 +1749,10 @@ export class ParseEngine {
             progress_total: entries.length,
           });
           const updated = await this.#builder.incrementalApplyAsync({
-            view, ledger: this.#ledger, entries,
+            view,
+            ledger: this.#ledger,
+            entries,
+            options: { layerMerge: this.#viewLayerMerge },
           }, {
             onProgress: (e) => {
               if (e?.phase === "tree") {
