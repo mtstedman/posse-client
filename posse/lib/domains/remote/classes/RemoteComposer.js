@@ -1,4 +1,4 @@
-import { RemotePromptClient } from "../functions/client.js";
+import { RemotePromptClient } from "./RemotePromptClient.js";
 import {
   getPromptBundleVersion,
   loadRemotePromptBundle,

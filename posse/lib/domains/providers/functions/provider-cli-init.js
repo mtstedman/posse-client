@@ -1,8 +1,8 @@
 import path from "path";
 
 import { getSetting, setSetting } from "../../queue/functions/index.js";
-import { discoverClaudeCli } from "./claude.js";
-import { discoverCodexCli } from "./codex.js";
+import { discoverClaudeCli } from "./claude/cli-discovery.js";
+import { discoverCodexCli } from "./codex/index.js";
 
 function readSetting(key) {
   try {

@@ -24,13 +24,13 @@ import {
   logFanoutSkipped,
 } from "./fanout.js";
 import { createRedTeamPlanChain, redTeamPlanningPayload } from "../../planning/functions/red-team-plan.js";
-import { researchPayload } from "../../cli/functions/flags.js";
+import { researchPayload } from "./payload.js";
 import {
   defaultResearchModelTier,
   maxResearchBudget,
   normalizeResearchBudget,
   researchBudgetToReasoningEffort,
-} from "../../worker/functions/helpers/role-utils.js";
+} from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 export function getProjectMapForResearchRouting(projectDir) {

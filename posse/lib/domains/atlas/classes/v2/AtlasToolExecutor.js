@@ -4,7 +4,7 @@
 // providers, prefetch) should route ATLAS tool calls through this object so
 // queueing, dedupe, telemetry, and conductor ownership stay in one place.
 
-import { AsyncResourceGate } from "../../../../shared/concurrency/functions/async-gate.js";
+import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncGate.js";
 import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
 import { ledgerDbPath, mainViewPath } from "../../functions/v2/runtime-paths.js";

@@ -1,4 +1,4 @@
-// lib/worker/helpers/assessment-pipeline.js
+// lib/domains/worker/functions/helpers/assessment-pipeline.js
 //
 // Post-execution assessment pipeline extracted from worker.js.
 
@@ -43,8 +43,8 @@ import {
   snapshotAndResetDirtyWorktreeAsync,
   stashDirtyWorktreeAsync,
 } from "../../../git/functions/worktree.js";
-import { ASSESSABLE_JOB_TYPES } from "./job-type-sets.js";
-import { effectiveArtifactTaskMode } from "./execution-routing.js";
+import { ASSESSABLE_JOB_TYPES } from "../../../../catalog/job.js";
+import { effectiveArtifactTaskMode } from "../../../providers/functions/execution-routing.js";
 import {
   artifactOutputClaimsReusableComplete,
   filterNewOrChangedManifestFiles,
@@ -58,11 +58,11 @@ import {
 import {
   buildWorkflowModeBlock,
   getWorkItemWorkflowConfig,
-} from "./intake-hints.js";
-import { isInsideRoot, isUnderRoot, normPath, normalizeRoots } from "./scope.js";
+} from "../../../intake/functions/hints.js";
+import { isInsideRoot, isUnderRoot, normPath, normalizeRoots } from "../../../../shared/scope/functions/path.js";
 import { processVerdict } from "./process-verdict.js";
 import { normalizeAssessorConfidence } from "./verdict-shared.js";
-import { activeSiblingWriteLocks } from "./shared-worktree-locks.js";
+import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
 import {
   emitResearchComplete as emitAtlasV2ResearchComplete,
   isAtlasV2EmissionEnabled,

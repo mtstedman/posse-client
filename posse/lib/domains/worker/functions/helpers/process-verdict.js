@@ -18,7 +18,7 @@ import {
 } from "./verdicts/needs_review.js";
 import { handle as handleNeedsReplan } from "./verdicts/needs_replan.js";
 import { handle as handlePass } from "./verdicts/pass.js";
-import { spawnFromRole } from "../spawn-guard.js";
+import { spawnFromRole } from "../../../queue/functions/spawn-guard.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
 const ASSESSOR_SPAWN_ROLE = Object.freeze({

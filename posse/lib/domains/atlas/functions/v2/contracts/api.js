@@ -6,7 +6,7 @@
 //
 //   /** @typedef {import("./api.js").Ledger} Ledger */
 //   /** @implements {Ledger} */
-//   export class SqliteLedger { ... }
+//   implementation module: SqliteLedger
 //
 // These typedefs are the *only* coupling between Phase 1 workstreams.
 // Implementations may extend them with private surface, but the public

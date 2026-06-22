@@ -1,4 +1,4 @@
-// lib/worker/helpers/verdicts/fail.js
+// lib/domains/worker/functions/helpers/verdicts/fail.js
 
 import {
   addDependency,

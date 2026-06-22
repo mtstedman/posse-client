@@ -1,4 +1,4 @@
-// lib/worker/roles/summary.js
+// lib/domains/worker/classes/roles/summary.js
 //
 // Summary role that condenses prior work-item outputs into a single summary
 // artifact for later planning or review.
@@ -6,11 +6,11 @@
 import { BaseRole } from "../BaseRole.js";
 import { getArtifactsByWorkItem, storeArtifact } from "../../../queue/functions/index.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
-import { shortJobTitle as defaultShortJobTitle } from "../../functions/helpers/role-utils.js";
+import { shortJobTitle as defaultShortJobTitle } from "../../../../shared/policies/functions/role-utils.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
-} from "../../functions/helpers/role-spawn-policies.js";
+} from "../../../../shared/policies/functions/spawn-policy.js";
 
 const DEFAULT_DEPS = {
   currentExecutionProvider: defaultCurrentExecutionProvider,

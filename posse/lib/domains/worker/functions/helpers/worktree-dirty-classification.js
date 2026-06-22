@@ -1,4 +1,4 @@
-// lib/worker/helpers/worktree-dirty-classification.js
+// lib/domains/worker/functions/helpers/worktree-dirty-classification.js
 //
 // Porcelain parsing and the tolerable-dirty policy extracted from
 // worktree-lifecycle.js: normalizing repo paths, classifying which dirty

@@ -1,4 +1,4 @@
-// lib/worker/base-role.js
+// lib/domains/worker/classes/BaseRole.js
 //
 // Base class for the incremental role OOP migration. It owns the shared
 // provider-call template; role classes own context assembly and output handling.

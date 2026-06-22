@@ -1,4 +1,4 @@
-// lib/worker/helpers/agent-loader.js
+// lib/domains/worker/functions/helpers/agent-loader.js
 //
 // Provisions empty launch directories for sub-agents outside the target tree so
 // Claude/Codex CLI auto-discovery cannot parent-walk into project memory or git

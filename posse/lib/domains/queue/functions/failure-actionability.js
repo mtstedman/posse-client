@@ -1,4 +1,4 @@
-import { ASSESSABLE_JOB_TYPES } from "../../worker/functions/helpers/job-type-sets.js";
+import { ASSESSABLE_JOB_TYPES } from "../../../catalog/job.js";
 import { FAILED_JOB_STATUSES } from "./common.js";
 import { parseJobPayload } from "./payload.js";
 

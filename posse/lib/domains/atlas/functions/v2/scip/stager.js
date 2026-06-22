@@ -8,7 +8,7 @@ import fs from "fs";
 import path from "path";
 import { spawn, spawnSync } from "child_process";
 import { VALID_ATLAS_SCIP_RESTAGE_POLICIES, ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT } from "../../../../../catalog/atlas.js";
-import { KeyedAsyncGate } from "../../../../../shared/concurrency/functions/async-gate.js";
+import { KeyedAsyncGate } from "../../../../../shared/concurrency/classes/AsyncGate.js";
 import { getCurrentGitHeadAsync } from "../../../../integrations/functions/atlas/shared.js";
 import { listScipFiles } from "./ingester.js";
 import { computeScipPlanFilesetHash, countSourceFilesByExtensions, describeScipIndexerLookup, resolveScipStagePlans } from "./indexers.js";
@@ -1142,7 +1142,7 @@ function inferredTsconfigCleanupTarget(plan, cwd) {
 // WITHOUT excludes TypeScript pulls in all of node_modules + build output —
 // producing a 20MB+ .scip that jams ingest. exclude keeps it to repo source.
 // Keep isGeneratedInferTsconfig (here) and isGeneratedInferTsconfigContent (in
-// cli/git-workflows.js) in lockstep with this shape so cleanup still removes it.
+// git/functions/workflows.js) in lockstep with this shape so cleanup still removes it.
 const GENERATED_INFER_TSCONFIG = {
   compilerOptions: { allowJs: true },
   exclude: ["node_modules", "dist", "build", "out", "vendor", ".posse", "**/*.min.js"],

@@ -7,13 +7,11 @@
 // Multi-provider: settings support comma-separated lists (e.g. "claude,openai").
 // Execution treats the configured list as an equal-weight pool.
 
-import * as claude from "./claude.js";
 import { getArtifactProtocol, getConfiguredImageProviders } from "../../artifacts/functions/index.js";
 import { getAtlasIntegrationConfig, getAtlasProviderSupport } from "../../integrations/functions/atlas.js";
 import { getSetting, setSetting } from "../../queue/functions/index.js";
-import { C } from "../../../shared/format/functions/colors.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
-import { classifyProviderError } from "./helpers/api-resilience.js";
+import { classifyProviderError } from "./shared/api-resilience.js";
 import { providerRegistry } from "../classes/registry-singleton.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { getDefaultTierModel, PROVIDER_OPTIONS } from "./model-catalog.js";
@@ -214,8 +212,8 @@ function getEffectiveUsageProviderSet() {
 /**
  * Get the provider module for a given role (or explicit provider name).
  * If providerName is given, use it directly. Otherwise resolve from saved settings.
- * Returns the module object (claude.js, openai.js, or codex.js) which exports
- * callProvider, extractJson, escalateTier, C, MODEL_TIERS, etc.
+ * Returns the provider module object, which exports callProvider,
+ * extractJson, escalateTier, MODEL_TIERS, and provider lifecycle helpers.
  */
 export function getProvider(role = "dev", providerName = null) {
   const name = providerName || selectProviderName(role);
@@ -725,10 +723,3 @@ export function __testResetProviderUsageAuthPrime() {
   assertTestContext("__testResetProviderUsageAuthPrime");
   providerRuntimeState.resetUsageAuthPrime();
 }
-
-// Re-export UI/input utilities from claude.js — these are provider-agnostic
-// (terminal colors, interactive prompts). For provider-specific functions like
-// extractJson or getClaudeInfo, use getProvider(role).extractJson instead.
-export { C };
-export const ask = claude.ask;
-export const askMultiline = claude.askMultiline;

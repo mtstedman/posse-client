@@ -3,11 +3,11 @@
 // Registry for provider instances and provider-selection cursors.
 
 import { BaseProvider } from "./BaseProvider.js";
-import { ClaudeProvider } from "./ClaudeProvider.js";
-import { CodexProvider } from "./CodexProvider.js";
-import { OpenAIProvider } from "./OpenAIProvider.js";
-import { GrokProvider } from "./GrokProvider.js";
-import { CopilotProvider } from "./CopilotProvider.js";
+import { ClaudeProvider } from "./claude/ClaudeProvider.js";
+import { CodexProvider } from "./codex/CodexProvider.js";
+import { OpenAIProvider } from "./openai/OpenAIProvider.js";
+import { GrokProvider } from "./grok/GrokProvider.js";
+import { CopilotProvider } from "./copilot/CopilotProvider.js";
 
 const PROVIDER_CLASS_BY_NAME = Object.freeze({
   claude: ClaudeProvider,

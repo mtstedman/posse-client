@@ -1,6 +1,6 @@
 // lib/display/helpers/provider-usage.js
 
-import { C } from "../../../../providers/functions/claude.js";
+import { C } from "../../../../../shared/format/functions/colors.js";
 import {
   getConfiguredProviderUsage,
   getConfiguredProviderUsageAsync,

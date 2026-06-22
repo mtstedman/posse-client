@@ -1,4 +1,4 @@
-// lib/worker/helpers/worktree-sentinel.js
+// lib/domains/worker/functions/helpers/worktree-sentinel.js
 //
 // The `.posse` active-job sentinel concern extracted from
 // worktree-lifecycle.js: resolving the worktree repo root, locating and

@@ -8,7 +8,7 @@
  * concurrent reads/writes against the in-process index file.
  */
 
-import { AsyncResourceGate } from "../../../../shared/concurrency/functions/async-gate.js";
+import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncGate.js";
 import { errorForTelemetry, recordEmbeddingForensics } from "../../functions/v2/embeddings/forensics.js";
 
 /** @typedef {import("../../functions/v2/contracts/embeddings.js").EmbeddingIngest} EmbeddingIngest */

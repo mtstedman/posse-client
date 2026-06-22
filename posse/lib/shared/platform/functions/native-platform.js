@@ -15,15 +15,7 @@ import {
   VALID_BINARY_OS,
   VALID_BINARY_ARCH,
 } from "../../../catalog/binary.js";
-
-/** Thrown when the host OS/arch has no mapped native-binary token. */
-export class UnsupportedPlatformError extends Error {
-  /** @param {string} message */
-  constructor(message) {
-    super(message);
-    this.name = "UnsupportedPlatformError";
-  }
-}
+import { UnsupportedPlatformError } from "../classes/UnsupportedPlatformError.js";
 
 /**
  * Map a node `process.platform` value to our os token.

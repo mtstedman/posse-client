@@ -31,6 +31,7 @@ import {
   listWorkItems,
   logEvent,
   refreshWorkItemStatus,
+  requeueForShutdown,
   requeueWaitingHumanInputJobs,
   requeueWorkItemAfterRejection,
   setMergeState,
@@ -48,18 +49,19 @@ import {
   suggestionDecisionEventJson,
   suggestionDevJobDecision,
   suggestionReviewKey,
-} from "../../worker/functions/helpers/suggestions.js";
+} from "../../planning/functions/suggestions.js";
 import {
   buildReviewReportData as buildReviewReportDataFromModule,
   listReviewableWorkItemsForApproval as listReviewableWorkItemsForApprovalFromModule,
   saveReport as saveReportFromModule,
 } from "./review-report.js";
 import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
-import { inferWiMode, researchBudgetMetadata, researchPayload } from "./flags.js";
+import { inferWiMode } from "../../intake/functions/mode-inference.js";
+import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
 import {
   defaultResearchModelTier,
   researchBudgetToReasoningEffort,
-} from "../../worker/functions/helpers/role-utils.js";
+} from "../../../shared/policies/functions/role-utils.js";
 import {
   checkRemotePromptBundleReadiness,
   checkRemotePromptCompilerReadiness,
@@ -86,7 +88,7 @@ export async function createReviewSessionDeps(bootDeps) {
   ] = await Promise.all([
     loadDisplayModule(),
     getGitWorkflowHelpers(),
-    import("./worktree-status.js"),
+    import("../../git/functions/worktree-status.js"),
   ]);
   return {
     autoMergeCompletedWorkItems: helpers.autoMergeCompletedWorkItems,
@@ -249,6 +251,7 @@ export async function createRunSessionDeps(bootDeps) {
     Worker,
     AUTO_APPROVE,
     DRY_RUN,
+    requeueForShutdown,
     requeueWaitingHumanInputJobs,
     refreshWorkItemStatus,
     inferWiMode,

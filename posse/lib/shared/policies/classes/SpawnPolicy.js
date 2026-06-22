@@ -1,7 +1,7 @@
 import {
   normalizeSpawnRoleName,
   spawnPolicyForRoleName,
-} from "../../../domains/worker/functions/helpers/role-spawn-policies.js";
+} from "../functions/spawn-policy.js";
 
 export class SpawnPolicy {
   static for(roleName) {

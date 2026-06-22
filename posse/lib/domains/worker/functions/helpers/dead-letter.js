@@ -1,4 +1,4 @@
-// lib/worker/helpers/dead-letter.js
+// lib/domains/worker/functions/helpers/dead-letter.js
 //
 // Retry/dead-letter flow and fast-failure provider diagnostics extracted from
 // worker.js to keep execution orchestration focused.
@@ -33,7 +33,7 @@ import { refreshAndExtractInsights } from "./insights.js";
 import { spawnResearchAfterPreflight } from "./pipeline-continuation.js";
 import { RetryPolicy } from "../../../../shared/policies/classes/RetryPolicy.js";
 import { tierModelName } from "../../../providers/functions/provider.js";
-import { escalateModelTier } from "../../../providers/functions/helpers/turns.js";
+import { escalateModelTier } from "../../../providers/functions/shared/turns.js";
 import { providerRoleForJobType } from "../../../providers/functions/roles.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { isTransientCommitInfraFailure } from "./commit-infra.js";

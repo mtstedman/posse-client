@@ -1,4 +1,4 @@
-// lib/handoff/helpers/scope-preflight.js
+// lib/domains/handoff/functions/helpers/scope-preflight.js
 //
 // Deterministic scope preflight checks for handoff packets.
 

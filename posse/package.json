@@ -15,6 +15,7 @@
     "status": "node orchestrator.js status",
     "health": "node orchestrator.js health",
     "dashboard": "node orchestrator.js dashboard",
+    "update": "node orchestrator.js update",
     "review": "node orchestrator.js review",
     "inject": "node orchestrator.js inject",
     "go": "node orchestrator.js go",

@@ -1,4 +1,4 @@
-// lib/worker.js — Job execution engine
+// lib/domains/worker/classes/Worker.js — Job execution engine
 //
 // Dispatches jobs by type, manages attempts, model escalation on retry,
 // exponential backoff, artifact storage. Dev/fix jobs go through assessor
@@ -8,7 +8,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import crypto from "crypto";
-import { isInsideRoot, isUnderRoot, normPath, normalizeRoots, resolvePathWithin } from "../functions/helpers/scope.js";
+import { isInsideRoot, isUnderRoot, normPath, normalizeRoots, resolvePathWithin } from "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 
 import {
@@ -58,6 +58,7 @@ import { PlanSession } from "../../planning/classes/PlanSession.js";
 import { cleanupAgentLoaderAsync, loaderPathForJob } from "../functions/helpers/agent-loader.js";
 import { TrackedProviderClient } from "./TrackedProviderClient.js";
 import { RoleRegistry } from "./RoleRegistry.js";
+import { JobLease } from "./JobLease.js";
 import { runHumanInputHandler } from "../functions/helpers/human-input.js";
 import { ROLE_CLASSES_BY_JOB_TYPE } from "./role-classes.js";
 import { buildRoutingPacket, handoff, parseMissingContext, parseFileRequest, splitFileRequestsByRisk, parseResearcherStructuredOutput, researcherOutputNeedsHuman, _parseFunctions, applyDeterministicDeletes, attachAssessmentDiffContextAsync, hasWritableScope, renderAtlasHandoffSections } from "../../handoff/functions/index.js";
@@ -65,7 +66,7 @@ import { injectArtifactScope, normalizeArtifactCreateFiles, isArtifactMode, isVa
 import { C } from "../../../shared/format/functions/colors.js";
 import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
 import { extractJson } from "../../../shared/format/functions/json.js";
-import { runHookAsync } from "../functions/helpers/hooks.js";
+import { runHookAsync } from "../../git/functions/hooks.js";
 import { log, jobLog } from "../../../shared/telemetry/functions/logging/logger.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
@@ -78,7 +79,7 @@ import {
 } from "../../integrations/functions/atlas.js";
 import { clearAtlasJobCache } from "../../integrations/functions/atlas-embedded.js";
 import { emitAtlasAutoFeedbackForJob } from "../../integrations/functions/atlas-auto-feedback.js";
-import { getWorkItemIntakeHints, buildResearchIntakePreload, buildIntakeHintsBlock } from "../functions/helpers/intake-hints.js";
+import { getWorkItemIntakeHints, buildResearchIntakePreload, buildIntakeHintsBlock } from "../../intake/functions/hints.js";
 import {
   countInternalAssessmentRetries,
   getAssessmentInternalRetryLimit,
@@ -140,11 +141,11 @@ import {
 } from "../functions/helpers/assessment-pipeline.js";
 import {
   createJobsFromPlan as createJobsFromPlanFromModule,
-} from "../functions/helpers/plan-compiler.js";
+} from "../../planning/functions/plan-compiler.js";
 import {
   ASSESSABLE_JOB_TYPES,
   MUTATING_JOB_TYPES,
-} from "../functions/helpers/job-type-sets.js";
+} from "../../../catalog/job.js";
 import {
   effectiveArtifactTaskMode as effectiveArtifactTaskModeFromModule,
   isImageOnlyModelName as isImageOnlyModelNameFromModule,
@@ -154,17 +155,17 @@ import {
   resolvePrimaryExecutionModelName as resolvePrimaryExecutionModelNameFromModule,
   sanitizeExecutionHintsForRole as sanitizeExecutionHintsForRoleFromModule,
   shouldPreservePinnedProvider as shouldPreservePinnedProviderFromModule,
-} from "../functions/helpers/execution-routing.js";
+} from "../../providers/functions/execution-routing.js";
 import {
   buildDeterministicDelegations as buildDeterministicDelegationsFromModule,
   delegationRoleForJobType as delegationRoleForJobTypeFromModule,
   jobNeedsMlDelegation as jobNeedsMlDelegationFromModule,
   selectFallbackProvider as selectFallbackProviderFromModule,
-} from "../functions/helpers/delegation-routing.js";
+} from "../../providers/functions/delegation-routing.js";
 import {
   activeSiblingWriteLocks,
   findActiveSiblingLockForPath,
-} from "../functions/helpers/shared-worktree-locks.js";
+} from "../../queue/functions/sibling-locks.js";
 import {
   artifactOutputClaimsReusableComplete as artifactOutputClaimsReusableCompleteFromModule,
   filterNewOrChangedManifestFiles as filterNewOrChangedManifestFilesFromModule,
@@ -200,20 +201,19 @@ import {
   looksLikeStructuredDataRepoTransformTask as looksLikeStructuredDataRepoTransformTaskFromModule,
   normalizePromoteMappings as normalizePromoteMappingsFromModule,
   validatePlannedTask as validatePlannedTaskFromModule,
-} from "../functions/helpers/plan-routing.js";
+} from "../../planning/functions/plan-routing.js";
 import {
   extractCheckpointFromOutput as extractCheckpointFromOutputFromModule,
   inferDeletionTargets as inferDeletionTargetsFromModule,
   isDeleteNoopSatisfied as isDeleteNoopSatisfiedFromModule,
   isFilePlacementNoopSatisfied as isFilePlacementNoopSatisfiedFromModule,
   parseAgentCompletionLog as parseAgentCompletionLogFromModule,
-  planArtifactReuse as planArtifactReuseFromModule,
   scopedDeleteTargets as scopedDeleteTargetsFromModule,
 } from "../functions/helpers/mutation-guards.js";
 import {
   isDeepthinkTask as isDeepthinkTaskFromModule,
   shortJobTitle as shortJobTitleFromModule,
-} from "../functions/helpers/role-utils.js";
+} from "../../../shared/policies/functions/role-utils.js";
 import {
   buildDeadLetterRetryPayload as _buildDeadLetterRetryPayload,
   classifyApprovalAnswer as _classifyApprovalAnswer,
@@ -544,27 +544,11 @@ export function filterFileRequestsToOutOfScope(fileRequests, jobPayloadScope = {
   });
 }
 
-export function leaseRenewalIntervalMs(leaseSec) {
-  const leaseMs = Math.max(1000, Math.floor((Number(leaseSec) || 900) * 1000));
-  if (leaseMs <= 5000) return Math.max(250, Math.floor(leaseMs / 2));
-  return Math.max(5000, Math.floor(leaseMs / 3));
-}
-
-function isTransientLeaseRenewalError(err) {
-  const code = String(err?.code || err?.errno || "").toUpperCase();
-  const message = String(err?.message || err || "").toLowerCase();
-  return code === "SQLITE_BUSY"
-    || code === "SQLITE_LOCKED"
-    || /database is (?:busy|locked)/i.test(message)
-    || /sqlite_(?:busy|locked)/i.test(message);
-}
-
 const JOB_SCRATCH_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const JOB_SCRATCH_GC_INTERVAL_MS = 60 * 60 * 1000;
 const JOB_SCRATCH_ROOT_DIR = "posse-job-scratch";
 const JOB_SCRATCH_SENTINEL_FILE = ".posse-job-scratch.json";
 const JOB_SCRATCH_OWNER = "posse-worker-job-scratch";
-const DEFAULT_MAX_TRANSIENT_LEASE_RENEW_ERRORS = 2;
 
 function readIntegerSetting(key, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   try {
@@ -738,54 +722,6 @@ export async function cleanupOldJobScratchDirsAsync({
   return { removed, failed };
 }
 
-export function renewJobLeaseOrAbort({
-  worker,
-  job,
-  leaseToken,
-  leaseSec,
-  abortController = null,
-  renewLeaseFn = renewLease,
-  clearRenewal = () => {},
-  state = null,
-  maxTransientErrors = readIntegerSetting(
-    SETTING_KEYS.WORKER_LEASE_RENEW_MAX_TRANSIENT_ERRORS,
-    DEFAULT_MAX_TRANSIENT_LEASE_RENEW_ERRORS,
-    { min: 0 },
-  ),
-} = {}) {
-  if (abortController?.signal?.aborted) {
-    clearRenewal();
-    return "aborted";
-  }
-
-  try {
-    const renewed = renewLeaseFn(job.id, leaseToken, leaseSec);
-    if (renewed) {
-      if (state) state.transientErrors = 0;
-      return "renewed";
-    }
-    clearRenewal();
-    worker.emit(job.id, `${C.red}[lease] WI#${job.work_item_id} job #${job.id} - renewal failed, aborting to prevent double-execution${C.reset}`);
-    worker.killJob(job.id, "lease_expired");
-    return "failed";
-  } catch (err) {
-    if (isTransientLeaseRenewalError(err)) {
-      const nextErrors = (Number(state?.transientErrors) || 0) + 1;
-      if (state) state.transientErrors = nextErrors;
-      if (nextErrors <= maxTransientErrors) {
-        const message = err?.message || String(err || "unknown error");
-        worker.emit(job.id, `${C.yellow}[lease] WI#${job.work_item_id} job #${job.id} - transient renewal error (${nextErrors}/${maxTransientErrors}): ${message}; retrying${C.reset}`);
-        return "retrying";
-      }
-    }
-    clearRenewal();
-    const message = err?.message || String(err || "unknown error");
-    worker.emit(job.id, `${C.red}[lease] WI#${job.work_item_id} job #${job.id} - renewal threw: ${message}; aborting job${C.reset}`);
-    worker.killJob(job.id, "lease_renew_failed");
-    return "error";
-  }
-}
-
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",
   effort = "medium",
@@ -934,6 +870,9 @@ export class Worker {
     this.stallTimeout = opts.stallTimeout || null;
     this.leaseSec = opts.leaseSec || 900;
     this.renewLease = opts.renewLease || renewLease;
+    this.createJobLease = typeof opts.createJobLease === "function"
+      ? opts.createJobLease
+      : (leaseOptions) => new JobLease(leaseOptions);
     this.providerCircuitTtlMs = Number.isFinite(Number(opts.providerCircuitTtlMs))
       ? Math.max(1000, Number(opts.providerCircuitTtlMs))
       : null;
@@ -991,6 +930,17 @@ export class Worker {
       ? null
       : this.roleRegistry.get(job.job_type);
     return new Job({ row: job, agent, deps: this.jobDeps });
+  }
+
+  _createJobLease(job, leaseToken, abortController) {
+    return this.createJobLease({
+      worker: this,
+      job,
+      leaseToken,
+      leaseSec: this.leaseSec,
+      abortController,
+      renewLeaseFn: this.renewLease,
+    });
   }
 
   async _setJobRowStatus(jobRow, status) {
@@ -1202,53 +1152,16 @@ export class Worker {
 
   async execute(job) {
     const leaseToken = job._leaseToken;
-    let leaseRenewTimer = null;
-    let leaseRenewalStopped = false;
     let wtPath = null;
     let currentAttemptId = null;
     const executeAbortController = job.id ? this._registerAbortController(job.id) : null;
+    const jobLease = this._createJobLease(job, leaseToken, executeAbortController);
     const wrappedJob = this._wrapJob(job);
 
     try {
-      const startLeaseRenewal = () => {
-        if (leaseRenewTimer || leaseRenewalStopped) return;
-        const leaseRenewMs = leaseRenewalIntervalMs(this.leaseSec);
-        const renewalState = { transientErrors: 0 };
-        const clearRenewal = () => {
-          leaseRenewalStopped = true;
-          if (leaseRenewTimer) {
-            clearTimeout(leaseRenewTimer);
-            leaseRenewTimer = null;
-          }
-        };
-        const transientRetryMs = Math.max(500, Math.min(5000, Math.floor(leaseRenewMs / 4)));
-        const scheduleRenewal = (delayMs = leaseRenewMs) => {
-          if (leaseRenewalStopped || leaseRenewTimer) return;
-          leaseRenewTimer = setTimeout(() => {
-            leaseRenewTimer = null;
-            const result = renewJobLeaseOrAbort({
-              worker: this,
-              job,
-              leaseToken,
-              leaseSec: this.leaseSec,
-              abortController: executeAbortController,
-              renewLeaseFn: this.renewLease,
-              clearRenewal,
-              state: renewalState,
-            });
-            if (result === "retrying" && !leaseRenewalStopped) {
-              scheduleRenewal(transientRetryMs);
-            } else if (result === "renewed" && !leaseRenewalStopped) {
-              scheduleRenewal();
-            }
-          }, delayMs);
-        };
-        scheduleRenewal();
-      };
-
       // Lease renewal must start before async setup: setup can now spend real
       // wall-clock time awaiting worktree locks, git merges, or ATLAS graph prep.
-      startLeaseRenewal();
+      jobLease.start();
 
       const atlasFreshnessGate = await this._gateAtlasFreshnessBeforePlanningOrDev(job, leaseToken, {
         signal: executeAbortController?.signal || null,
@@ -2964,8 +2877,7 @@ export class Worker {
         outerErr,
       });
     } finally {
-      leaseRenewalStopped = true;
-      if (leaseRenewTimer) clearTimeout(leaseRenewTimer);
+      jobLease.stop();
       try {
         const cleanupWtPath = wtPath || job?._worktreePath || null;
         if (cleanupWtPath) clearActiveWorktreeSentinelFromModule(cleanupWtPath, { jobId: job.id ?? null });

@@ -177,6 +177,14 @@ export {
 } from "./file-locks.js";
 
 export {
+  activeLiveSiblingWriteLocks,
+  activeSiblingWriteLocks,
+  findActiveSiblingLockForPath,
+  hasActiveSiblingWriteLocks,
+  siblingLockSummary,
+} from "./sibling-locks.js";
+
+export {
   acquireMergeLock,
   acquireSchedulerLock,
   forceAcquireSchedulerLock,

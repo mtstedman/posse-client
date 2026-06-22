@@ -13,7 +13,7 @@ import {
   isResearchBudgetDeep,
   normalizeResearchBudget,
   researchBudgetToReasoningEffort,
-} from "../../worker/functions/helpers/role-utils.js";
+} from "../../../shared/policies/functions/role-utils.js";
 import {
   parseFanoutJobPayload,
 } from "./fanout-payload.js";

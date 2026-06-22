@@ -1,10 +1,10 @@
 // @ts-check
 //
-// ParserAdapter — the contract-conformant entry point for ATLAS v2 parsing.
+// Parser parse functions — the contract-conformant ATLAS v2 parsing core.
 //
 // The boundary between the rest of ATLAS v2 and per-language extraction.
 // Everything that needs to turn a file on disk (or a buffer in memory)
-// into a ParseResult goes through here.
+// into a ParseResult goes through these pure parsing functions.
 //
 // Load-bearing responsibilities:
 //   - Read file bytes (or accept them) and compute `content_hash`.
@@ -16,42 +16,25 @@
 //   - Dispatch to the appropriate language extractor via the registry.
 //   - Validate the output against the ParseResult contract.
 
-import fs from "fs";
-import path from "path";
 import { sha256Hex } from "../hash.js";
-import { canonicalRepoPathOrThrow, isCanonicalRepoPath } from "./normalize.js";
+import { isCanonicalRepoPath } from "./normalize.js";
 import {
   LANGUAGES,
   resolveLanguage,
-  supportedLanguageTags,
 } from "./languages/index.js";
 import { attachLineRanges } from "./languages/common.js";
-import { parserFor } from "./treesitter/loader.js";
 import { extractBodyIdentifiers } from "./body-identifiers.js";
 
-/** @typedef {import("../contracts/api.js").ParserAdapter} ParserAdapterContract */
 /** @typedef {import("../contracts/schemas.js").ParseResult} ParseResult */
 /** @typedef {import("../contracts/schemas.js").SymbolRow} SymbolRow */
 /** @typedef {import("../contracts/schemas.js").EdgeRow} EdgeRow */
 
 import { parseBufferNative } from "../native/parser.js";
-import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
-
-/** @type {boolean | null} Lazily probed nativeBinaries.shouldUse("atlas"). */
-let nativeParserUsable = null;
 
 export {
   diffParseBufferNativeParity,
   parseBufferNative,
 } from "../native/parser.js";
-
-/**
- * @param {string} absPath
- * @returns {string}
- */
-function extOf(absPath) {
-  return path.extname(absPath).toLowerCase();
-}
 
 /**
  * @param {SymbolRow[]} symbols
@@ -194,64 +177,6 @@ function inferLangFromPath(repo_rel_path) {
   }
   return descriptor.tag;
 }
-
-/**
- * @implements {ParserAdapterContract}
- */
-export class ParserAdapter {
-  /**
-   * @param {{ absPath: string, repoRoot: string }} args
-   * @returns {Promise<ParseResult>}
-   */
-  async parseFile({ absPath, repoRoot }) {
-    if (!absPath) throw new RangeError("parseFile: absPath is required");
-    if (!repoRoot) throw new RangeError("parseFile: repoRoot is required");
-    const repo_rel_path = canonicalRepoPathOrThrow(absPath, repoRoot);
-    const bytes = await fs.promises.readFile(absPath);
-    return parseBuffer({ bytes, repo_rel_path });
-  }
-
-  /**
-   * @param {{ bytes: Buffer | string, repo_rel_path: string, lang?: string }} args
-   * @returns {ParseResult}
-   */
-  parseBuffer(args) {
-    return parseBuffer(args);
-  }
-
-  /**
-   * @param {string} extOrLang
-   * @returns {boolean}
-   */
-  supports(extOrLang) {
-    const descriptor = resolveLanguage(extOrLang);
-    if (!descriptor || !descriptor.supported) return false;
-    // Native-owned languages need no JS grammar; the binary carries its
-    // grammars at compile time. But without a usable binary there is no
-    // parser at all — claiming support would queue every file just to fail
-    // it individually as a parse_error. Probed once: shouldUse stats the
-    // staged binary on every call and supports() runs per file in the
-    // ParseEngine filters; staging doesn't change within a process.
-    if (descriptor.native) {
-      if (nativeParserUsable == null) nativeParserUsable = nativeBinaries.shouldUse("atlas");
-      return nativeParserUsable;
-    }
-    return !!parserFor(descriptor.tag);
-  }
-
-  /**
-   * @returns {string[]}
-   */
-  languages() {
-    return supportedLanguageTags();
-  }
-}
-
-/**
- * Singleton convenience instance. Most callers want the shared adapter
- * since extraction state is purely a function of inputs.
- */
-export const sharedParserAdapter = new ParserAdapter();
 
 /**
  * Lower-level export for callers that want to inspect or extend the

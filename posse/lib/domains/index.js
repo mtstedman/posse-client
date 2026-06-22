@@ -8,6 +8,7 @@ export * as cli from "./cli/index.js";
 export * as git from "./git/index.js";
 export * as handoff from "./handoff/index.js";
 export * as integrations from "./integrations/index.js";
+export * as intake from "./intake/index.js";
 export * as observability from "./observability/index.js";
 export * as planning from "./planning/index.js";
 export * as project from "./project/index.js";

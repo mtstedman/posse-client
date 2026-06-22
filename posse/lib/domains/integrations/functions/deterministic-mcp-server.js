@@ -36,7 +36,7 @@ import {
 } from "../../../functions/toolkit/index.js";
 import { ToolRegistry } from "../../../classes/tools/ToolRegistry.js";
 import { declareToolSuites } from "../../../functions/tools/tool-suites.js";
-import { execGenerateImageInternal } from "../../providers/functions/helpers/image-generate-internal.js";
+import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, enterObservationContext, runWithObservationContext } from "../../observability/functions/observations.js";
 import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.js";
 import { resolveAtlasRepoTarget } from "./atlas/repo.js";
@@ -78,7 +78,7 @@ import {
 import { ATLAS_TOOL_ACTIONS } from "../../atlas/functions/v2/contracts/tool-params.js";
 import { POSSE_MCP_GATEWAY_SERVER_INFO_NAME, stripPosseMcpGatewayPrefix } from "./mcp-gateway.js";
 import { setRuntimePathOverrides } from "../../runtime/functions/paths.js";
-import { AsyncResourceGate } from "../../../shared/concurrency/functions/async-gate.js";
+import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { assertSafeRemoteAuthUrl, readResponseTextWithLimit, resolvePosseKey } from "../../remote/functions/client.js";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../runtime/functions/protected-paths.js";
 

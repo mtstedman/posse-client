@@ -1,4 +1,4 @@
-// lib/worker/role-contract-view.js
+// lib/domains/worker/functions/role-contract-view.js
 //
 // Small admin/debug helper for reconstructing the current role contract without
 // running context assembly or provider calls. The prompt log remains historical

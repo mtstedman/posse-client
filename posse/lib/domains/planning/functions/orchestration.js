@@ -36,13 +36,13 @@ import {
 } from "./state.js";
 import { classifyResearchForRouting } from "../../research/functions/intake-routing.js";
 import { createRedTeamPlanChain, redTeamPlanningPayload } from "./red-team-plan.js";
-import { normalizeIntakeHints } from "../../worker/functions/helpers/intake-hints.js";
-import { researchPayload } from "../../cli/functions/flags.js";
+import { normalizeIntakeHints } from "../../intake/functions/hints.js";
+import { researchPayload } from "../../research/functions/payload.js";
 import {
   defaultResearchModelTier,
   getResearchBudget,
   researchBudgetToReasoningEffort,
-} from "../../worker/functions/helpers/role-utils.js";
+} from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { ACTIVE_LEASE_STATUSES, DEADLOCK_TERMINAL_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 

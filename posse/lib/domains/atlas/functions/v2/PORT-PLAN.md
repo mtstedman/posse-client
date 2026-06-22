@@ -368,7 +368,7 @@ role-handler changes.
 **Owns:**
 - `lib/domains/cli/functions/commands/atlas-v2.js` (`status`, `rebuild`,
   `ledger tail`, `view info`, `warm-now`, `purge-views`).
-- Registration in `lib/domains/cli/functions/command-registry.js` AND
+- Registration in `lib/domains/cli/functions/command-bootstrap-policy.js` AND
   dispatch/help wiring in `lib/domains/cli/functions/orchestrator-app.js`
   (around line 2997 — the registry alone is not enough).
 - Metrics: ledger size, view freshness, warmer queue depth.

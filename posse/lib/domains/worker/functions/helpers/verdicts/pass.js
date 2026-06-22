@@ -1,4 +1,4 @@
-// lib/worker/helpers/verdicts/pass.js
+// lib/domains/worker/functions/helpers/verdicts/pass.js
 
 import { logEvent, storeArtifact, updateJobStatus } from "../../../../queue/functions/index.js";
 import { C } from "../../../../../shared/format/functions/colors.js";

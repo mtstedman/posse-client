@@ -4,7 +4,7 @@
 // Rust-owned; this class only normalizes returned values and dispatches native
 // methods.
 
-import { normPath, normalizeRoots } from "../../worker/functions/helpers/scope.js";
+import { normPath, normalizeRoots } from "../../../shared/scope/functions/path.js";
 import { runGitNativeMethod, runGitNativeMethodAsync } from "../functions/native/invoke.js";
 
 function normalizeLockPath(value) {

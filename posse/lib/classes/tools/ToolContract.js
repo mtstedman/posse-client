@@ -1,4 +1,4 @@
-import { normPath, normalizeRoots } from "../../domains/worker/functions/helpers/scope.js";
+import { normPath, normalizeRoots } from "../../shared/scope/functions/path.js";
 import { ToolCatalog } from "./ToolCatalog.js";
 
 const CLAUDE_AMBIENT_TOOLS = [

@@ -6,8 +6,8 @@
 
 import {
   DEFAULT_REMOTE_ATLAS_ENCODER_TIMEOUT_MS,
-  RemoteAtlasEncoderClient,
 } from "../../../remote/functions/atlas-encoder-client.js";
+import { RemoteAtlasEncoderClient } from "../../../remote/classes/RemoteAtlasEncoderClient.js";
 
 /** @typedef {import("../../functions/v2/contracts/embeddings.js").EmbeddingEncoder} EmbeddingEncoderContract */
 /** @typedef {import("../../functions/v2/contracts/embeddings.js").EmbeddingSymbolInput} EmbeddingSymbolInput */

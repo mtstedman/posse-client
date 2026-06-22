@@ -1,4 +1,4 @@
-export * from "./command-registry.js";
+export * from "./command-bootstrap-policy.js";
 export * from "./dispatch.js";
 export * from "./flags.js";
 export * from "./orchestrator-app.js";

@@ -36,7 +36,7 @@ import {
   gitStashLockPathAsync,
 } from "../../../git/functions/worktree-locks.js";
 import { MutationPolicy, scopedDeleteTargets } from "../../../../shared/scope/classes/MutationPolicy.js";
-import { findActiveSiblingLockForPath } from "./shared-worktree-locks.js";
+import { findActiveSiblingLockForPath } from "../../../queue/functions/sibling-locks.js";
 import { isTurnBudgetExhaustedDetails } from "./diagnostics.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";

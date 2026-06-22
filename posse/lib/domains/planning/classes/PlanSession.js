@@ -1,4 +1,4 @@
-import { createJobsFromPlan } from "../../worker/functions/helpers/plan-compiler.js";
+import { createJobsFromPlan } from "../functions/plan-compiler.js";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];

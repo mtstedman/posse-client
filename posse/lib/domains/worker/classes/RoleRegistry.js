@@ -1,4 +1,4 @@
-// lib/worker/role-registry.js
+// lib/domains/worker/classes/RoleRegistry.js
 //
 // Central construction point for role instances. Production workers register
 // roles here so helper code does not construct agents ad hoc.

@@ -1,4 +1,4 @@
-// lib/handoff/helpers/context-render.js
+// lib/domains/handoff/functions/helpers/context-render.js
 //
 // Prompt context rendering for handoff packets.
 

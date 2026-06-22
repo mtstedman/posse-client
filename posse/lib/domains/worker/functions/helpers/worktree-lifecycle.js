@@ -1,4 +1,4 @@
-// lib/worker/helpers/worktree-lifecycle.js
+// lib/domains/worker/functions/helpers/worktree-lifecycle.js
 //
 // Worktree lifecycle helpers extracted from worker.js: setup/recovery,
 // creatable-file priming, and terminal cleanup.
@@ -30,7 +30,7 @@ const MAX_SETUP_TRANSIENT_INFRA_RETRIES = 3;
 // evicts entries idle for 4× the notice interval. Stale entries are harmless
 // (a finished job's key is simply never consulted again).
 const setupDeferNoticeLastSeen = new Map();
-import { MUTATING_JOB_TYPES } from "./job-type-sets.js";
+import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
 import { jobNeedsGitWorktree } from "../../../git/functions/policy.js";
 import {
   disposeWorkItemAtlasGraph,
@@ -74,7 +74,7 @@ import { isIterativeWorkItemActive } from "../../../planning/functions/state.js"
 import {
   activeLiveSiblingWriteLocks,
   siblingLockSummary,
-} from "./shared-worktree-locks.js";
+} from "../../../queue/functions/sibling-locks.js";
 import { withBranchLockAsync } from "../../../git/functions/worktree-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import {

@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
-import { resolvePathWithin } from "../helpers/scope.js";
+import { resolvePathWithin } from "../../../../shared/scope/functions/path.js";
 import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { gitCommitAllAsync } from "../../../git/functions/commit-scope.js";
 import { gitHasChangesAsync } from "../../../git/functions/utils.js";
@@ -17,10 +17,10 @@ import {
   storeArtifact,
 } from "../../../queue/functions/index.js";
 import { refreshAndExtractInsights } from "../helpers/insights.js";
-import { looksLikeFileDestination, normalizeRootRelativePromoteDest, validatePromoteDestinationPath } from "../helpers/plan-routing.js";
+import { looksLikeFileDestination, normalizeRootRelativePromoteDest, validatePromoteDestinationPath } from "../../../planning/functions/plan-routing.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import { logBadInputFailure } from "./bad-input.js";
-import { activeSiblingWriteLocks } from "../helpers/shared-worktree-locks.js";
+import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
 function rootRelativePromoteDestHint(dest) {

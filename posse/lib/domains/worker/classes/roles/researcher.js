@@ -1,4 +1,4 @@
-// lib/worker/roles/researcher.js
+// lib/domains/worker/classes/roles/researcher.js
 //
 // Researcher role handler that gathers repo/project context into a structured
 // brief for planning without mutating repo state.
@@ -31,13 +31,13 @@ import {
 import {
   buildDiffNarrativeAsync,
   formatDiffNarrative,
-} from "../../functions/helpers/diff-narrator.js";
+} from "../../../git/functions/diff-narrator.js";
 import {
   buildResearchIntakePreload,
   getWorkItemIntakeHints,
   getWorkItemWorkflowConfig,
   buildWorkflowModeBlock,
-} from "../../functions/helpers/intake-hints.js";
+} from "../../../intake/functions/hints.js";
 import { currentExecutionProvider, extractResearchRetryContext } from "../../functions/helpers/diagnostics.js";
 import { getProviderName, isProviderReady } from "../../../providers/functions/provider.js";
 import { getDefaultImageModel } from "../../../providers/functions/model-catalog.js";
@@ -51,11 +51,11 @@ import {
   researchBudgetToMaxTurnsOverride as defaultResearchBudgetToMaxTurnsOverride,
   researchBudgetToReasoningEffort as defaultResearchBudgetToReasoningEffort,
   shortJobTitle as defaultShortJobTitle,
-} from "../../functions/helpers/role-utils.js";
+} from "../../../../shared/policies/functions/role-utils.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
-} from "../../functions/helpers/role-spawn-policies.js";
+} from "../../../../shared/policies/functions/spawn-policy.js";
 import { hasLineRef } from "../../../research/functions/line-refs.js";
 import { buildWebFetchCachePreload, cacheResearchWebFetches } from "../../../research/functions/web-cache.js";
 

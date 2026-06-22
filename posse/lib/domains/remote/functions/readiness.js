@@ -1,4 +1,4 @@
-import { RemotePromptClient } from "./client.js";
+import { RemotePromptClient } from "../classes/RemotePromptClient.js";
 import { getPosseRemoteTimeoutMs, getPosseRemoteUrl } from "./mode.js";
 import {
   loadRemotePromptBundle,

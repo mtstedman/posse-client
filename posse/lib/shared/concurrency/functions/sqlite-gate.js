@@ -6,7 +6,7 @@
 // file and gives async workers an awaitable contention point.
 
 import path from "path";
-import { AsyncResourceGate } from "./async-gate.js";
+import { SqliteResourceGate } from "../classes/SqliteResourceGate.js";
 
 function normalizeSqlitePath(dbPath) {
   const raw = String(dbPath || "default").trim() || "default";
@@ -22,12 +22,6 @@ function normalizeSqlitePath(dbPath) {
 
 export function sqliteGateKey(dbPath, scope = "sqlite") {
   return `${scope}:${normalizeSqlitePath(dbPath)}`;
-}
-
-class SqliteResourceGate extends AsyncResourceGate {
-  normalizeKey(dbPath) {
-    return sqliteGateKey(dbPath);
-  }
 }
 
 const SQLITE_GATE = new SqliteResourceGate({

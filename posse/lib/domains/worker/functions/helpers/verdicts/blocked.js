@@ -1,4 +1,4 @@
-// lib/worker/helpers/verdicts/blocked.js
+// lib/domains/worker/functions/helpers/verdicts/blocked.js
 
 import { updateJobStatus } from "../../../../queue/functions/index.js";
 import { C } from "../../../../../shared/format/functions/colors.js";

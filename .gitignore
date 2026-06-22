@@ -49,10 +49,10 @@ temp/
 AGENTS.md
 CLAUDE.md
 .claude/
-claude/
+/claude/
 posse/CLAUDE.md
 posse/.claude/
-posse/claude/
+/posse/claude/
 
 #Node
 posse/node-modules

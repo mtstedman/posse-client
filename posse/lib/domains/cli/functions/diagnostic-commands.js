@@ -533,7 +533,7 @@ export async function cmdCodexModels({ projectDir }) {
     validateCodexModels,
     formatCodexModelValidationReport,
     getCurrentCodexModels,
-  } = await import("../../providers/functions/helpers/codex-model-validator.js");
+  } = await import("../../providers/functions/codex/model-validator.js");
 
   if (subcommand === "list") {
     const models = getCurrentCodexModels({ includeKnown: true });

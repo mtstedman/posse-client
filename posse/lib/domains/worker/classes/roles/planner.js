@@ -1,4 +1,4 @@
-// lib/worker/roles/planner.js
+// lib/domains/worker/classes/roles/planner.js
 //
 // Planner role handler that builds per-work-item task plans, prepares planner
 // context bundles, and emits structured tasks for downstream lanes.
@@ -44,9 +44,9 @@ import {
   getWorkItemIntakeHints,
   getWorkItemWorkflowConfig,
   buildWorkflowModeBlock,
-} from "../../functions/helpers/intake-hints.js";
+} from "../../../intake/functions/hints.js";
 import { currentExecutionProvider } from "../../functions/helpers/diagnostics.js";
-import { getExplicitIntakeBindings } from "../../functions/helpers/plan-routing.js";
+import { getExplicitIntakeBindings } from "../../../planning/functions/plan-routing.js";
 import { getProviderName, isProviderReady } from "../../../providers/functions/provider.js";
 import { getDefaultImageModel } from "../../../providers/functions/model-catalog.js";
 import { getEnabledSkillsForRole } from "../../../../shared/skills/functions/registry.js";
@@ -66,11 +66,11 @@ import {
   researchBudgetToReasoningEffort as defaultResearchBudgetToReasoningEffort,
   shortJobTitle as defaultShortJobTitle,
   unwrapTaskArray as defaultUnwrapTaskArray,
-} from "../../functions/helpers/role-utils.js";
+} from "../../../../shared/policies/functions/role-utils.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
-} from "../../functions/helpers/role-spawn-policies.js";
+} from "../../../../shared/policies/functions/spawn-policy.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import {
   emit,
@@ -83,7 +83,7 @@ import {
   latestPlanArtifactText,
   buildPlanSynthesisArtifact,
   validatePlannerContextPreflight,
-} from "../../functions/helpers/planner-helpers.js";
+} from "../../../planning/functions/planner-helpers.js";
 
 const DEFAULT_DEPS = {
   classifyPlannerOutput: defaultClassifyPlannerOutput,

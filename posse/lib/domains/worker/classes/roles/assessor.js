@@ -1,4 +1,4 @@
-// lib/worker/roles/assessor.js - Verdict engine
+// lib/domains/worker/classes/roles/assessor.js - Verdict engine
 //
 // Evaluates job outputs against success criteria.
 // Returns structured verdicts and spawns follow-up jobs.
@@ -12,17 +12,17 @@ import { buildRoutingPacket, composePromptRemoteAware, handoff, renderAtlasHando
 import {
   buildIntakeHintsBlock,
   getWorkItemIntakeHints,
-} from "../../functions/helpers/intake-hints.js";
+} from "../../../intake/functions/hints.js";
 import { getAssessmentInternalRetryLimit } from "../../functions/helpers/assessment-shared.js";
 import { assessResult } from "../../functions/helpers/assessment-pipeline.js";
 import { isArtifactMode } from "../../../artifacts/functions/index.js";
 import { BaseRole } from "../BaseRole.js";
 import { currentExecutionProvider as currentExecutionProviderFromDiagnostics } from "../../functions/helpers/diagnostics.js";
-import { shortJobTitle as shortJobTitleFromModule } from "../../functions/helpers/role-utils.js";
+import { shortJobTitle as shortJobTitleFromModule } from "../../../../shared/policies/functions/role-utils.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
-} from "../../functions/helpers/role-spawn-policies.js";
+} from "../../../../shared/policies/functions/spawn-policy.js";
 import { processVerdict } from "../../functions/helpers/process-verdict.js";
 
 export {

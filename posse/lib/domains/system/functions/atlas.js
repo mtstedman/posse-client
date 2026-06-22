@@ -9,8 +9,8 @@ import path from "path";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { ParseEngine } from "../../atlas/classes/v2/ParseEngine.js";
 import { ViewBuilder } from "../../atlas/classes/v2/ViewBuilder.js";
+import { sharedParserAdapter } from "../../atlas/classes/v2/ParserAdapter.js";
 import { ledgerDbPath, mainViewPath, warmedViewPath } from "../../atlas/functions/v2/runtime-paths.js";
-import { sharedParserAdapter } from "../../atlas/functions/v2/parser/adapter.js";
 import { ingestScipFile } from "../../atlas/functions/v2/scip/ingester.js";
 import { resolveTargetBranch } from "../../git/functions/target-branch.js";
 

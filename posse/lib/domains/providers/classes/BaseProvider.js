@@ -1,6 +1,6 @@
 import { extractJson as defaultExtractJson } from "../../../shared/format/functions/json.js";
 
-import { classifyProviderError } from "../functions/helpers/api-resilience.js";
+import { classifyProviderError } from "../functions/shared/api-resilience.js";
 
 export class BaseProvider {
   static name = null;
@@ -30,18 +30,6 @@ export class BaseProvider {
 
   get capabilities() {
     return this.module.capabilities || this.constructor.capabilities || {};
-  }
-
-  get C() {
-    return this.module.C;
-  }
-
-  get ask() {
-    return this.module.ask;
-  }
-
-  get askMultiline() {
-    return this.module.askMultiline;
   }
 
   getModelTierConfig(tier = "standard") {

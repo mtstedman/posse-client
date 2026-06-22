@@ -1,4 +1,4 @@
-// lib/handoff/helpers/fn-index.js
+// lib/domains/handoff/functions/helpers/fn-index.js
 //
 // JS/TS function/class index parser and smart preload builder.
 

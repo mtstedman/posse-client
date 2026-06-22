@@ -48,6 +48,7 @@ export const SETTING_KEYS = Object.freeze({
   PLANNER_MAX_TASKS: "planner_max_tasks",
   PLANNER_UNDER_SCOPED_BROAD_GATE: "planner_under_scoped_broad_gate",
   POSSE_REMOTE_MODE: "posse_remote_mode",
+  POSSE_REMOTE_RESPONSE_SIGNING_SECRET: "posse_remote_response_signing_secret",
   POSSE_REMOTE_TIMEOUT_MS: "posse_remote_timeout_ms",
   POSSE_REMOTE_URL: "posse_remote_url",
   KAIZEN_TO_ATLAS: "posse_kaizen_to_atlas",
@@ -113,7 +114,7 @@ export const CODEX_AUTH_MODE_OPTIONS = Object.freeze([
 
 export const CLAUDE_EXECUTION_MODE_VALUES = Object.freeze(["print", "interactive"]);
 export const DELEGATION_MODE_VALUES = Object.freeze(["js", "ml"]);
-export const FIX_SCOPE_HANDOFF_GUARD_VALUES = Object.freeze(["off", "warn", "enforce"]);
+export const FIX_SCOPE_HANDOFF_GUARD_VALUES = Object.freeze(["off", "auto", "warn", "enforce"]);
 export const HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES = Object.freeze(["off", "small", "always"]);
 export const KAIZEN_TO_ATLAS_MODE_VALUES = Object.freeze(["off", "shadow", "write"]);
 export const LOG_LEVEL_VALUES = Object.freeze(["debug", "info", "warn", "error"]);

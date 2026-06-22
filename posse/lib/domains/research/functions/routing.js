@@ -1,4 +1,4 @@
-import { normalizeResearchBudget } from "../../worker/functions/helpers/role-utils.js";
+import { normalizeResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 
 const SIMPLE_NO_RESEARCH_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|rename|renaming|copy\s*edit|docs?\s+fix|formatting|whitespace)\b/i;
 const LOW_NO_LOGIC_RE = /\b(?:typo|spelling|comments?\s+fix|comment-only|rename|copy\s*edit|docs?|readme|formatting|whitespace|no\s+(?:logic|behavior|behaviour)\s+change)\b/i;

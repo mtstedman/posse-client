@@ -1,5 +1,5 @@
 import { Scope } from "./Scope.js";
-import { validateScopedPath } from "../../../domains/worker/functions/helpers/assessment-shared.js";
+import { validateScopedPath } from "../functions/validation.js";
 import path from "path";
 import { agentHiddenReadablePathReason } from "../functions/agent-hidden-paths.js";
 

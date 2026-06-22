@@ -35,7 +35,7 @@ import {
   getResearchBudget,
   isResearchBudgetDeep,
   researchBudgetToReasoningEffort,
-} from "../../worker/functions/helpers/role-utils.js";
+} from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 // Document allowed plan_approval_state values. The DB column is untyped for

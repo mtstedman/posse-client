@@ -9,7 +9,7 @@
 // Supports raw stdin keypress input for questions, inject, kill commands.
 
 import readline from "readline";
-import { C } from "../../../providers/functions/claude.js";
+import { C } from "../../../../shared/format/functions/colors.js";
 import { tierModelName } from "../../../providers/functions/provider.js";
 import { FAILED_JOB_STATUSES } from "../../../queue/functions/common.js";
 import {

@@ -8,7 +8,7 @@
 //   * `lib/domains/worker/classes/roles/atlas-warm.js`   — new AtlasWarmRole class
 //   * `lib/domains/worker/classes/role-classes.js`     — register AtlasWarmRole
 //   * `lib/domains/worker/classes/Worker.js`           — _dispatch switch + _workerTypeFor
-//   * `lib/domains/worker/functions/helpers/job-type-sets.js` — sets below
+//   * `lib/catalog/job.js` — sets below
 //   * Host schema migration: see ddl/host-migrations/001-add-atlas-warm-job-type.sql
 //
 // Status semantics (locked):

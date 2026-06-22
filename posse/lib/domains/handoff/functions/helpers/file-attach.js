@@ -1,4 +1,4 @@
-// lib/handoff/helpers/file-attach.js
+// lib/domains/handoff/functions/helpers/file-attach.js
 //
 // Deterministic file context attachment helpers for handoff packets.
 

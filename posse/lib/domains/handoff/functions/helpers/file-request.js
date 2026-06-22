@@ -1,4 +1,4 @@
-// lib/handoff/helpers/file-request.js
+// lib/domains/handoff/functions/helpers/file-request.js
 //
 // FILE_REQUEST block parsing and risk classification helpers.
 

@@ -1,4 +1,4 @@
-// lib/worker/helpers/verdict-shared.js
+// lib/domains/worker/functions/helpers/verdict-shared.js
 //
 // Shared helpers for assessor verdict handlers.
 
@@ -27,8 +27,8 @@ import { listUnresolvedActionableFailures } from "../../../queue/functions/failu
 import {
   countInternalAssessmentRetries,
   getAssessmentInternalRetryLimit,
-  validateScopedPath,
 } from "./assessment-shared.js";
+import { validateScopedPath } from "../../../../shared/scope/functions/validation.js";
 import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";

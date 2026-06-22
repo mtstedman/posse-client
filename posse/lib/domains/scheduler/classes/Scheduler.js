@@ -27,11 +27,6 @@ import {
   findRunnableJob,
   findRunnableJobsBatch,
   getLeaseManager,
-  acquireSchedulerLock,
-  forceAcquireSchedulerLock,
-  renewSchedulerLock,
-  releaseSchedulerLock,
-  getSchedulerLockInfo,
   cancelDeadlockedJobsAtomic,
   getSetting,
   listJobs,
@@ -59,7 +54,7 @@ import {
 } from "../../queue/functions/index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { reapOrphanedDaemons } from "../../../classes/tools/daemon/index.js";
-import { C } from "../../providers/functions/claude.js";
+import { C } from "../../../shared/format/functions/colors.js";
 import { primeProviderUsageAuthAsync } from "../../providers/functions/provider.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
@@ -86,7 +81,7 @@ import {
   providerAuthLivenessProbe,
   workspaceHealthProbeAsync,
 } from "../../system/functions/preflight-probes.js";
-import { QUEUE_LOCKING_JOB_TYPES } from "../../worker/functions/helpers/job-type-sets.js";
+import { QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import {
@@ -111,6 +106,7 @@ import {
   WORKTREE_TYPES,
   createHeldQueueLockIndex,
 } from "../functions/held-locks.js";
+import { SchedulerLockLease } from "./SchedulerLockLease.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 const SCHEDULER_BOOT_MAINTENANCE_WORKER_URL = new URL("../functions/boot-maintenance-worker.js", import.meta.url);
@@ -231,10 +227,13 @@ function handoffCandidateCoversPath(candidate, filePath) {
 
 function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   if (!job || conflict?.type !== "work_item") return false;
-  if (conflict.lock?.lock_kind !== "file") return false;
+  const lockKind = conflict.lock?.lock_kind;
+  if (lockKind !== "file" && lockKind !== "root") return false;
+  if (lockKind === "root" && conflict.candidate?.lock_kind !== "root") return false;
 
   const lockPath = normalizeHandoffPath(conflict.lock?.path);
   if (!lockPath || !handoffCandidateCoversPath(conflict.candidate, lockPath)) return false;
+  if (lockKind === "root" && (lockPath === "*" || lockPath === ".")) return false;
   const path = lockPath;
 
   const sourceWiId = Number(conflict.lock?.work_item_id);
@@ -244,7 +243,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   const sourceBranch = String(sourceWi?.branch_name || "").trim();
   if (!sourceWi || !sourceBranch) return false;
 
-  const releaseCheck = workItemCanReleaseFileLock(sourceWiId, path, "file");
+  const releaseCheck = workItemCanReleaseFileLock(sourceWiId, path, lockKind);
   if (!releaseCheck.ok) {
     logEvent({
       work_item_id: job.work_item_id,
@@ -256,6 +255,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       event_json: JSON.stringify({
         source_work_item_id: sourceWiId,
         path,
+        lock_kind: lockKind,
         reason: releaseCheck.reason,
         blockers: releaseCheck.blockers.slice(0, 10).map((blocker) => ({
           job_id: blocker.job_id ?? blocker.id ?? null,
@@ -274,7 +274,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       const released = releaseWorkItemFileLockForPath(
         sourceWiId,
         path,
-        "file",
+        lockKind,
         `cross_wi_existing_order_to_wi_${job.work_item_id}_job_${job.id}`,
       );
       if (released <= 0) {
@@ -288,6 +288,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
           event_json: JSON.stringify({
             source_work_item_id: sourceWiId,
             path,
+            lock_kind: lockKind,
             reason: "lock_release_failed",
             existing_merge_order: true,
             merge_order_path: mergeOrderCheck.path,
@@ -306,6 +307,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
           source_work_item_id: sourceWiId,
           source_branch: sourceBranch,
           path,
+          lock_kind: lockKind,
           released,
           merge_dependency_added: false,
           existing_merge_order: true,
@@ -325,6 +327,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       event_json: JSON.stringify({
         source_work_item_id: sourceWiId,
         path,
+        lock_kind: lockKind,
         reason: mergeOrderCheck.reason,
         merge_order_path: mergeOrderCheck.path,
       }),
@@ -334,7 +337,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
 
   const db = getDb();
   const applyHandoff = () => {
-    const currentReleaseCheck = workItemCanReleaseFileLock(sourceWiId, path, "file");
+    const currentReleaseCheck = workItemCanReleaseFileLock(sourceWiId, path, lockKind);
     if (!currentReleaseCheck.ok) {
       return { ok: false, released: 0, reason: currentReleaseCheck.reason };
     }
@@ -342,7 +345,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
     const released = releaseWorkItemFileLockForPath(
       sourceWiId,
       path,
-      "file",
+      lockKind,
       `cross_wi_sync_to_wi_${job.work_item_id}_job_${job.id}`,
     );
     if (released <= 0) return { ok: false, released: 0 };
@@ -368,6 +371,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
         ...existing,
         {
           path,
+          lock_kind: lockKind,
           source_work_item_id: sourceWiId,
           source_branch: sourceBranch,
           source_lock_id: conflict.lock?.id ?? null,
@@ -394,6 +398,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       event_json: JSON.stringify({
         source_work_item_id: sourceWiId,
         path,
+        lock_kind: lockKind,
         reason: "handoff_record_failed",
         error: err?.message || String(err),
       }),
@@ -411,6 +416,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       event_json: JSON.stringify({
         source_work_item_id: sourceWiId,
         path,
+        lock_kind: lockKind,
         reason: handoff.reason || "lock_release_failed",
       }),
     });
@@ -428,6 +434,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       source_work_item_id: sourceWiId,
       source_branch: sourceBranch,
       path,
+      lock_kind: lockKind,
       released: handoff.released,
       merge_dependency_added: handoff.dependency?.added === true,
     }),
@@ -450,7 +457,6 @@ export class Scheduler {
     this.leaseManager = opts.leaseManager || getLeaseManager({ defaultDurationSec: this.leaseSec });
     this._hasDisplay = !!opts.hasDisplay;
     this._running = false;
-    this._lockInterval = null;
     this._stopRunHeartbeat = null;
     this._stopRequested = false;
     this._stopMarked = false;
@@ -459,15 +465,24 @@ export class Scheduler {
     this._lockLossKillCallback = null;
     this._lockLost = false;
     this._lockLostKilledJobIds = new Set();
+    this.createSchedulerLockLease = typeof opts.createSchedulerLockLease === "function"
+      ? opts.createSchedulerLockLease
+      : (lockOptions) => new SchedulerLockLease({
+        ...lockOptions,
+        ...(opts.schedulerLockDeps || {}),
+      });
+    this.schedulerLock = opts.schedulerLock || this.createSchedulerLockLease({
+      ownerId: this.ownerId,
+      renewSec: LOCK_RENEW_SEC,
+      durationSec: LOCK_RENEW_SEC * 2,
+      lockStarvationThresholdMs: opts.lockStarvationThresholdMs || LOCK_RENEW_SEC * 1500,
+      lockRenewalErrorMaxMs: Math.max(1, Number(opts.lockRenewalErrorMaxMs) || LOCK_RENEW_SEC * 2 * 1000),
+      emit: (message, color) => this._log(message, color),
+      onLockLost: (message, options) => this._stopForSchedulerLockLoss(message, options),
+    });
     this._reconcileAtlasDriftIfIdle = opts.reconcileAtlasDriftIfIdle || reconcileAtlasDriftIfIdleAsync;
     this._atlasDriftCheckIntervalMs = opts.atlasDriftCheckIntervalMs || null;
     this._atlasDriftReindexFailsafeMs = opts.atlasDriftReindexFailsafeMs || null;
-    this._lastSchedulerLockRenewedAt = 0;
-    this._lastSchedulerLockStarvedAt = 0;
-    this._lockStarvationThresholdMs = opts.lockStarvationThresholdMs || LOCK_RENEW_SEC * 1500;
-    this._schedulerLockRenewalErrorCount = 0;
-    this._schedulerLockRenewalFirstErrorAt = 0;
-    this._lockRenewalErrorMaxMs = Math.max(1, Number(opts.lockRenewalErrorMaxMs) || LOCK_RENEW_SEC * 2 * 1000);
 
     // Job-dispatch gate. Holds leasing until the initial (cold) ATLAS index
     // build resolves, so the full index is built pre-flight — before the main
@@ -705,35 +720,14 @@ export class Scheduler {
   }
 
   _maybeLogSchedulerLockStarvation(nowMs = Date.now()) {
-    if (!this._lastSchedulerLockRenewedAt) return;
-    const elapsedMs = nowMs - this._lastSchedulerLockRenewedAt;
-    if (elapsedMs <= this._lockStarvationThresholdMs) return;
-    if (this._lastSchedulerLockStarvedAt >= this._lastSchedulerLockRenewedAt) return;
-
-    this._lastSchedulerLockStarvedAt = nowMs;
-    const message = `Scheduler lock renewal starved for ${Math.ceil(elapsedMs / 1000)}s`;
-    this._log(message, "yellow");
-    logEvent({
-      event_type: EVENT_TYPES.SCHEDULER_LOCK_STARVED,
-      actor_type: EVENT_ACTORS.SCHEDULER,
-      actor_id: this.ownerId,
-      message,
-      event_json: {
-        elapsed_ms: elapsedMs,
-        threshold_ms: this._lockStarvationThresholdMs,
-        lock_renew_sec: LOCK_RENEW_SEC,
-      },
-    });
+    this.schedulerLock.maybeLogStarvation(nowMs);
   }
 
   _stopForSchedulerLockLoss(message, { eventType = null, eventJson = null } = {}) {
     this._log(message, "red");
     this._lockLost = true;
     this._running = false;
-    if (this._lockInterval) {
-      clearInterval(this._lockInterval);
-      this._lockInterval = null;
-    }
+    this.schedulerLock.stopRenewal();
     if (eventType) {
       logEvent({
         event_type: eventType,
@@ -749,65 +743,7 @@ export class Scheduler {
 
   _renewSchedulerLock() {
     if (!this._running) return false;
-    const nowMs = Date.now();
-    let renewed;
-    try {
-      this._maybeLogSchedulerLockStarvation(nowMs);
-    } catch (err) {
-      const errorText = err?.message || String(err);
-      this._log(`Scheduler lock starvation telemetry failed: ${errorText}`, "yellow");
-      log.warn("scheduler", "scheduler lock starvation telemetry failed", { error: errorText });
-    }
-    try {
-      renewed = renewSchedulerLock("main", this.ownerId, LOCK_RENEW_SEC * 2);
-    } catch (err) {
-      // A transient DB error (e.g. SQLITE_BUSY from a concurrent maintenance
-      // connection) is NOT lock loss. This runs inside a bare setInterval with
-      // no catch, so a throw becomes an uncaughtException → recordFatalCrash →
-      // process.exit(1). Keep running and let the next interval retry; the lock
-      // is still valid for ~LOCK_RENEW_SEC after the last successful renew. (B2)
-      this._schedulerLockRenewalErrorCount += 1;
-      if (!this._schedulerLockRenewalFirstErrorAt) this._schedulerLockRenewalFirstErrorAt = nowMs;
-      const lastGoodMs = this._lastSchedulerLockRenewedAt || this._schedulerLockRenewalFirstErrorAt;
-      const elapsedSinceSuccessMs = nowMs - lastGoodMs;
-      const errorText = err?.message || String(err);
-      if (elapsedSinceSuccessMs >= this._lockRenewalErrorMaxMs) {
-        const message = `Scheduler lock renewal errored for ${Math.ceil(elapsedSinceSuccessMs / 1000)}s; treating scheduler lock as lost`;
-        log.warn("scheduler", "scheduler lock renewal errored past safety window", {
-          error: errorText,
-          errorCount: this._schedulerLockRenewalErrorCount,
-          elapsedSinceSuccessMs,
-          maxErrorMs: this._lockRenewalErrorMaxMs,
-        });
-        this._stopForSchedulerLockLoss(message, {
-          eventType: EVENT_TYPES.SCHEDULER_LOCK_RENEWAL_FAILED,
-          eventJson: {
-            error: errorText,
-            error_count: this._schedulerLockRenewalErrorCount,
-            elapsed_since_success_ms: elapsedSinceSuccessMs,
-            max_error_ms: this._lockRenewalErrorMaxMs,
-            lock_renew_sec: LOCK_RENEW_SEC,
-          },
-        });
-        return false;
-      }
-      this._log(`Scheduler lock renewal errored (transient - will retry next interval): ${errorText}`, "yellow");
-      log.warn("scheduler", "scheduler lock renewal errored (transient)", {
-        error: errorText,
-        errorCount: this._schedulerLockRenewalErrorCount,
-        elapsedSinceSuccessMs,
-        maxErrorMs: this._lockRenewalErrorMaxMs,
-      });
-      return true;
-    }
-    if (!renewed) {
-      this._stopForSchedulerLockLoss("Lock stolen by another scheduler - stopping");
-      return false;
-    }
-    this._schedulerLockRenewalErrorCount = 0;
-    this._schedulerLockRenewalFirstErrorAt = 0;
-    this._lastSchedulerLockRenewedAt = nowMs;
-    return true;
+    return this.schedulerLock.renewNow();
   }
 
   _abortActiveWorkersForLockLoss() {
@@ -836,28 +772,7 @@ export class Scheduler {
   }
 
   _startLockRenewal() {
-    if (this._lockInterval) return true;
-    if (!this._renewSchedulerLock()) return false;
-    this._lockRenewalExpectedAtMs = Date.now() + LOCK_RENEW_SEC * 1000;
-    this._lockInterval = setInterval(() => {
-      // If this timer fired a full interval+ late, the main-thread event loop
-      // was blocked (synchronous file I/O in a worker handoff, or a contended
-      // synchronous DB write) — the actual cause behind "lock renewal starved".
-      // Surface it so starvation can be attributed to an event-loop block vs a
-      // DB-busy stall in future incidents.
-      const nowMs = Date.now();
-      const lateMs = nowMs - this._lockRenewalExpectedAtMs;
-      if (lateMs > LOCK_RENEW_SEC * 1000) {
-        this._log(`Lock renewal timer fired ${Math.round(lateMs / 1000)}s late — main thread was blocked`, "yellow");
-        log.warn("scheduler", "lock renewal timer fired late (event loop blocked)", {
-          lateMs,
-          intervalMs: LOCK_RENEW_SEC * 1000,
-        });
-      }
-      this._lockRenewalExpectedAtMs = nowMs + LOCK_RENEW_SEC * 1000;
-      this._renewSchedulerLock();
-    }, LOCK_RENEW_SEC * 1000);
-    return true;
+    return this.schedulerLock.startRenewal();
   }
 
   _invokeCallback(name, fn, ...args) {
@@ -996,7 +911,7 @@ export class Scheduler {
     });
     emitBootEvent("lock acquired", { section: "scheduler", status: "running" });
 
-    let gotLock = acquireSchedulerLock("main", this.ownerId, LOCK_RENEW_SEC * 2);
+    let gotLock = this.schedulerLock.acquire();
     if (gotLock) {
       this._log("Boot: lock acquired (no contention)");
       recordSchedulerLockDiagnostic({
@@ -1006,7 +921,7 @@ export class Scheduler {
       });
       emitBootEvent("lock acquired", { section: "scheduler", status: "ok", detail: "no contention" });
     } else {
-      const lockInfo = getSchedulerLockInfo("main");
+      const lockInfo = this.schedulerLock.info();
       if (!lockInfo) {
         this._log("Boot: lock acquire failed but no lock row exists — aborting", "red");
         recordSchedulerLockDiagnostic({
@@ -1060,14 +975,14 @@ export class Scheduler {
           heartbeat_age_ms: heartbeatAge,
           stale_threshold_ms: STALE_THRESHOLD,
         });
-        gotLock = forceAcquireSchedulerLock("main", this.ownerId, LOCK_RENEW_SEC * 2);
+        gotLock = this.schedulerLock.forceAcquire();
         if (!gotLock) {
           this._log("Boot: decision=EXIT (lock heartbeat refreshed before force-steal — holder is alive)", "red");
           recordSchedulerLockDiagnostic({
             owner_id: this.ownerId,
             phase: "contention",
             decision: "exit_heartbeat_refreshed_before_force_steal",
-            lockInfo: getSchedulerLockInfo("main"),
+            lockInfo: this.schedulerLock.info(),
           });
           return false;
         }
@@ -1086,7 +1001,7 @@ export class Scheduler {
         });
         await this._interruptibleSleep(waitMs);
         if (this._stopRequested) return false;
-        gotLock = acquireSchedulerLock("main", this.ownerId, LOCK_RENEW_SEC * 2);
+        gotLock = this.schedulerLock.acquire();
         if (!gotLock) {
           // Lock was renewed — another scheduler is alive
           this._log("Boot: decision=EXIT (lock renewed during wait — another scheduler is alive)", "red");
@@ -1094,7 +1009,7 @@ export class Scheduler {
             owner_id: this.ownerId,
             phase: "contention",
             decision: "exit_lock_renewed_during_expiry_wait",
-            lockInfo: getSchedulerLockInfo("main"),
+            lockInfo: this.schedulerLock.info(),
           });
           return false;
         }
@@ -1118,13 +1033,13 @@ export class Scheduler {
         if (this._stopRequested) return false;
 
         // Re-check heartbeat after waiting
-        gotLock = acquireSchedulerLock("main", this.ownerId, LOCK_RENEW_SEC * 2);
+        gotLock = this.schedulerLock.acquire();
         if (gotLock) {
           this._log("Boot: lock acquired (expired during wait)");
         } else {
-          const updated = getSchedulerLockInfo("main");
+          const updated = this.schedulerLock.info();
           if (!updated) {
-            gotLock = acquireSchedulerLock("main", this.ownerId, LOCK_RENEW_SEC * 2);
+            gotLock = this.schedulerLock.acquire();
             this._log(gotLock ? "Boot: lock acquired (vanished, then claimed)" : "Boot: lock still unavailable", gotLock ? "yellow" : "red");
           } else {
             // Did the holder's heartbeat advance during our wait? Compare
@@ -1146,14 +1061,14 @@ export class Scheduler {
                 previous_heartbeat_age_ms: heartbeatAge,
                 heartbeat_age_ms: newAge,
               });
-              gotLock = forceAcquireSchedulerLock("main", this.ownerId, LOCK_RENEW_SEC * 2);
+              gotLock = this.schedulerLock.forceAcquire();
               if (!gotLock) {
                 this._log("Boot: decision=EXIT (lock heartbeat refreshed before force-steal — holder revived)", "red");
                 recordSchedulerLockDiagnostic({
                   owner_id: this.ownerId,
                   phase: "contention",
                   decision: "exit_holder_revived_before_force_steal",
-                  lockInfo: getSchedulerLockInfo("main"),
+                  lockInfo: this.schedulerLock.info(),
                 });
                 return false;
               }
@@ -1180,7 +1095,7 @@ export class Scheduler {
         owner_id: this.ownerId,
         phase: "acquire",
         decision: "failed",
-        lockInfo: getSchedulerLockInfo("main"),
+        lockInfo: this.schedulerLock.info(),
       });
       return false;
     }
@@ -1188,7 +1103,7 @@ export class Scheduler {
       owner_id: this.ownerId,
       phase: "acquire",
       decision: "held",
-      lockInfo: getSchedulerLockInfo("main"),
+      lockInfo: this.schedulerLock.info(),
     });
 
     // Some contention paths acquire the lock after waiting/stealing rather
@@ -1198,9 +1113,6 @@ export class Scheduler {
     emitBootEvent("lock acquired", { section: "scheduler", status: "ok", detail: "held" });
 
     this._running = true;
-    this._lastSchedulerLockRenewedAt = Date.now();
-    this._schedulerLockRenewalErrorCount = 0;
-    this._schedulerLockRenewalFirstErrorAt = 0;
     if (!this._startLockRenewal()) return false;
     return true;
   }
@@ -2345,10 +2257,7 @@ export class Scheduler {
     this._running = false;
     // Interrupt the poll sleep so the loop exits immediately
     this._wakeSleeps();
-    if (this._lockInterval) {
-      clearInterval(this._lockInterval);
-      this._lockInterval = null;
-    }
+    this.schedulerLock.stopRenewal();
   }
 
   /**
@@ -2373,7 +2282,7 @@ export class Scheduler {
         activeWorkers,
       });
     } catch { /* observational */ }
-    releaseSchedulerLock("main", this.ownerId);
+    this.schedulerLock.release();
 
     logEvent({
       event_type: EVENT_TYPES.SCHEDULER_STOPPED,
@@ -2425,6 +2334,10 @@ export class Scheduler {
 
 export function __testCollectStrictOnlyRootConflicts(jobScope, lockedRoots = new Set()) {
   return collectStrictOnlyRootConflicts(jobScope, lockedRoots);
+}
+
+export function __testPrepareCrossWiFileSyncHandoff(job, conflict, ownerId = "test-scheduler") {
+  return prepareCrossWiFileSyncHandoff(job, conflict, ownerId);
 }
 
 export function __testMaxJobRuntimeSecFor(job) {

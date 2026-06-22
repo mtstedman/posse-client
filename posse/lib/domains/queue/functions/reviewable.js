@@ -4,7 +4,7 @@
 // work items that are already merged from reappearing in review when branch
 // cleanup is intentionally preserved.
 
-import { QUEUE_LOCKING_JOB_TYPES } from "../../worker/functions/helpers/job-type-sets.js";
+import { QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
 import { UNMERGED_WORK_ITEM_MERGE_STATES } from "../../../catalog/work-item.js";
 
 const UNMERGED_WORK_ITEM_MERGE_STATE_SET = new Set(UNMERGED_WORK_ITEM_MERGE_STATES);

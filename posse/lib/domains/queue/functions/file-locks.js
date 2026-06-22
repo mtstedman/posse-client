@@ -5,8 +5,8 @@ import {
   UNMERGED_WORK_ITEM_MERGE_STATES_SQL,
 } from "../../../catalog/work-item.js";
 import { Scope } from "../../../shared/scope/classes/Scope.js";
-import { MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../worker/functions/helpers/job-type-sets.js";
-import { isUnderRoot, rootsOverlap } from "../../worker/functions/helpers/scope.js";
+import { MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
+import { isUnderRoot, rootsOverlap } from "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "./payload.js";
 import { LOCK_HOLDING_JOB_STATUSES, now, runImmediateTransaction, TERMINAL_JOB_STATUSES } from "./common.js";
 import { logEvent, flushEventsNow } from "./events.js";

@@ -7,7 +7,7 @@ import {
   isResearchBudgetDeep,
   normalizeResearchBudget,
   researchBudgetToReasoningEffort,
-} from "../../worker/functions/helpers/role-utils.js";
+} from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES } from "../../../catalog/event.js";
 
 export const RED_TEAM_PLANNING_MODE = "dual_redteam";

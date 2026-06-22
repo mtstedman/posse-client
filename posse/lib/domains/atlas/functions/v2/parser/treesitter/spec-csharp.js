@@ -120,7 +120,7 @@ function symbolOf(node) {
 function edgesOf(node, importedNames) {
   switch (node.type) {
     case "base_list": {
-      // class Foo : Bar, IBaz — C# doesn't lexically distinguish base
+      // C# base-list syntax like `Foo : Bar, IBaz` doesn't distinguish base
       // class from interfaces (a single `:` followed by a comma-separated
       // list of types). We emit every entry as `extends`. Downstream
       // consumers that need class-vs-interface can look at the target

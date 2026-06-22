@@ -1,4 +1,4 @@
-// lib/handoff/helpers/researcher-output.js
+// lib/domains/handoff/functions/helpers/researcher-output.js
 //
 // Researcher structured output parsing helpers.
 

@@ -1,6 +1,6 @@
 import { CommitScope } from "../../../domains/git/classes/CommitScope.js";
 import { parseJsonObject } from "../../../domains/queue/functions/payload.js";
-import { normPath, normalizeRoots, isUnderRoot, rootsOverlap } from "../../../domains/worker/functions/helpers/scope.js";
+import { normPath, normalizeRoots, isUnderRoot, rootsOverlap } from "../functions/path.js";
 
 function normalizeFile(values = []) {
   const list = Array.isArray(values) ? values : [];

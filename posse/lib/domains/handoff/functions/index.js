@@ -38,10 +38,10 @@ import {
   parseSkillIds,
   validateSkillIds,
 } from "../../../shared/skills/functions/registry.js";
-import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../worker/functions/helpers/job-type-sets.js";
-import { attachDiffNarrative, attachDiffNarrativeAsync } from "../../worker/functions/helpers/diff-narrator.js";
+import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../../catalog/job.js";
+import { attachDiffNarrative, attachDiffNarrativeAsync } from "../../git/functions/diff-narrator.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
-import { resolvePathWithin } from "../../worker/functions/helpers/scope.js";
+import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
 import {
   INDEXABLE_EXTENSIONS as INDEXABLE_EXTENSIONS_FROM_MODULE,
   buildSmartPreload as buildSmartPreloadFromModule,
@@ -85,7 +85,7 @@ import {
   resolveAtlasHandoffState as resolveAtlasHandoffStateFromModule,
 } from "./helpers/atlas-context.js";
 import { classifyAtlasFailure } from "../../integrations/functions/atlas-embedded.js";
-import { DEFAULT_DEV_MODE, DEFAULT_FIX_DEV_MODE, normalizeDevMode, renderSelectedDevModeContract } from "../../worker/functions/helpers/dev-modes.js";
+import { DEFAULT_DEV_MODE, DEFAULT_FIX_DEV_MODE, normalizeDevMode, renderSelectedDevModeContract } from "../../../shared/policies/functions/dev-modes.js";
 import { runWithObservationContext, getObservationContext, recordObservation } from "../../observability/functions/observations.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { createWorkspaceSkipDirs } from "../../runtime/functions/workspace-skip.js";
@@ -254,16 +254,31 @@ function _collectFixScopeCandidates(text = "") {
   return [...candidates];
 }
 
+function _looksLikeReadOnlyCopySourceMention(source, candidate) {
+  const haystack = String(source || "").toLowerCase();
+  const needle = String(candidate || "").toLowerCase();
+  if (!haystack || !needle) return false;
+  let index = haystack.indexOf(needle);
+  while (index >= 0) {
+    const before = haystack.slice(Math.max(0, index - 60), index);
+    if (/\b(?:copy|copies|copied|originals?|source)\s+(?:of|from)\s+[`"']?\s*$/.test(before)) return true;
+    if (/\bfrom\s+[`"']?\s*$/.test(before)) return true;
+    index = haystack.indexOf(needle, index + needle.length);
+  }
+  return false;
+}
+
 function _extractFixInstructionEditTargets(text = "") {
   const source = String(text || "");
   if (!source.trim()) return [];
   const lowerSource = source.toLowerCase();
   const targets = [];
-  const editWord = String.raw`(?:add|update|modify|edit|fix|implement|adjust|change|patch|repair|guard|harden)`;
+  const editWord = String.raw`(?:add|update|modify|edit|fix|implement|adjust|change|patch|repair|replace|overwrite|guard|harden)`;
   const deleteWord = String.raw`(?:delete|remove|rollback|revert|restore|drop|prune)`;
   const createWord = String.raw`(?:create|new file|write|generate|missing|does not exist)`;
 
   for (const candidate of _collectFixScopeCandidates(source)) {
+    if (_looksLikeReadOnlyCopySourceMention(source, candidate)) continue;
     const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const wrapped = `[\\s"'\\x60]*${escaped}[\\s"'\\x60]*`;
     const editBeforeRe = new RegExp(`${editWord}(?:\\s+(?:the\\s+file|file|target|module|tests?\\s+in|validation\\s+in))?\\s+${wrapped}`, "i");
@@ -411,7 +426,7 @@ function _editableFilePreloadMode() {
 // Tool policies per recipient. Controls context assembly decisions:
 //   allow_read=false  → preload source files for single-call/no-read roles
 //   allow_read=true   → skip bulk source preload (agent has read tools at runtime)
-// Must match actual runtime tool grants in claude.js / openai.js.
+// Must match actual runtime tool grants in the Claude and OpenAI providers.
 const TOOL_POLICIES = {
   researcher: { allow_read: true,  allow_write: false, allow_shell: false, fallback_reads: 0 },  // chain_read/chain_verdict
   planner:    { allow_read: true,  allow_write: false, allow_shell: false, fallback_reads: 0 },  // read-only deterministic tools

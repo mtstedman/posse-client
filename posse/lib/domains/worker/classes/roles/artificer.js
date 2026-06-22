@@ -1,4 +1,4 @@
-// lib/worker/roles/artificer.js
+// lib/domains/worker/classes/roles/artificer.js
 //
 // Artificer role handler for artifact-producing tasks such as reports,
 // generated content, and image outputs written into artifact roots.
@@ -32,17 +32,17 @@ import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { BaseRole } from "../BaseRole.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import { hasStructuredArtificerLog as defaultHasStructuredArtificerLog } from "../../functions/helpers/artifact-output.js";
-import { maxTurnsOverrideFromPayload } from "../../functions/helpers/role-utils.js";
+import { maxTurnsOverrideFromPayload } from "../../../../shared/policies/functions/role-utils.js";
 import {
   looksLikePermissionRequest as defaultLooksLikePermissionRequest,
 } from "../../functions/helpers/mutation-guards.js";
-import { selectFallbackProvider as defaultSelectFallbackProvider } from "../../functions/helpers/delegation-routing.js";
-import { shortJobTitle as defaultShortJobTitle } from "../../functions/helpers/role-utils.js";
+import { selectFallbackProvider as defaultSelectFallbackProvider } from "../../../providers/functions/delegation-routing.js";
+import { shortJobTitle as defaultShortJobTitle } from "../../../../shared/policies/functions/role-utils.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
-} from "../../functions/helpers/role-spawn-policies.js";
-import { validateArtifactRootPath } from "../../functions/helpers/plan-routing.js";
+} from "../../../../shared/policies/functions/spawn-policy.js";
+import { validateArtifactRootPath } from "../../../planning/functions/plan-routing.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 
 const DEFAULT_DEPS = {

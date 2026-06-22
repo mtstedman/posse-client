@@ -40,3 +40,7 @@ export function getPosseRemoteTimeoutMs() {
   return positiveInteger(settingValue(SETTING_KEYS.POSSE_REMOTE_TIMEOUT_MS))
     || POSSE_REMOTE_DEFAULT_TIMEOUT_MS;
 }
+
+export function getPosseRemoteResponseSigningSecret() {
+  return settingValue(SETTING_KEYS.POSSE_REMOTE_RESPONSE_SIGNING_SECRET);
+}

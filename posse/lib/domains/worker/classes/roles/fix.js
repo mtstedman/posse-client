@@ -1,4 +1,4 @@
-// lib/worker/roles/fix.js
+// lib/domains/worker/classes/roles/fix.js
 //
 // Recovery-oriented developer role used for assessor follow-up jobs. It runs
 // through BaseRole's hook pipeline while reusing the dev provider lane.
@@ -14,7 +14,7 @@ import {
   buildRoutingPacket,
   handoff,
 } from "../../../handoff/functions/index.js";
-import { resolvePathWithin } from "../../functions/helpers/scope.js";
+import { resolvePathWithin } from "../../../../shared/scope/functions/path.js";
 import { BaseRole } from "../BaseRole.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import {
@@ -28,12 +28,12 @@ import {
   maxTurnsOverrideFromPayload,
   shortJobTitle as defaultShortJobTitle,
   uniqueScopeFiles as defaultUniqueScopeFiles,
-} from "../../functions/helpers/role-utils.js";
+} from "../../../../shared/policies/functions/role-utils.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
-} from "../../functions/helpers/role-spawn-policies.js";
+} from "../../../../shared/policies/functions/spawn-policy.js";
 
 const DEFAULT_DEPS = {
   checkpointTokenThreshold: CHECKPOINT_TOKEN_THRESHOLD,

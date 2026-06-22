@@ -1,4 +1,4 @@
-// lib/worker/roles/preflight.js
+// lib/domains/worker/classes/roles/preflight.js
 //
 // Cheap routing-only role for ambiguous research requests. It receives the
 // deterministic project map and intake context, then returns strict JSON that
@@ -9,13 +9,13 @@ import { promptLiteral } from "../../../../shared/format/functions/prompt-litera
 import { getWorkItem } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { currentExecutionProvider } from "../../functions/helpers/diagnostics.js";
-import { getWorkItemIntakeHints } from "../../functions/helpers/intake-hints.js";
+import { getWorkItemIntakeHints } from "../../../intake/functions/hints.js";
 import { ensureProjectMap, getCachedProjectMap } from "../../../project/functions/map.js";
-import { normalizeResearchBudget } from "../../functions/helpers/role-utils.js";
+import { normalizeResearchBudget } from "../../../../shared/policies/functions/role-utils.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
-} from "../../functions/helpers/role-spawn-policies.js";
+} from "../../../../shared/policies/functions/spawn-policy.js";
 import { getProviderName } from "../../../providers/functions/provider.js";
 import { getPromptBundleRolePrompt } from "../../../remote/functions/prompt-bundle.js";
 

@@ -44,7 +44,7 @@ import path from "path";
 import { Worker } from "worker_threads";
 import { purgeRuntimeLogs } from "../../functions/admin/purge-runtime-logs.js";
 import { sanitizeWorkerExecArgv } from "../../../runtime/functions/worker-exec-argv.js";
-import { C } from "../../../providers/functions/claude.js";
+import { C } from "../../../../shared/format/functions/colors.js";
 import { AdminSettingsController } from "./settings-controller.js";
 import {
   extractAtlasTokenUsage,

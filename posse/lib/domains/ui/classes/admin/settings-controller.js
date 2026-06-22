@@ -39,7 +39,7 @@ import {
 } from "../../functions/admin/shared-helpers.js";
 import fs from "fs";
 import path from "path";
-import { C } from "../../../providers/functions/claude.js";
+import { C } from "../../../../shared/format/functions/colors.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import {

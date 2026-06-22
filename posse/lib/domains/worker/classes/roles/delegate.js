@@ -1,4 +1,4 @@
-// lib/worker/roles/delegate.js
+// lib/domains/worker/classes/roles/delegate.js
 //
 // Delegate role handler that assigns providers across queued jobs using
 // deterministic routing and provider-capacity context.
@@ -18,16 +18,16 @@ import {
   buildDeterministicDelegations as defaultBuildDeterministicDelegations,
   delegationRoleForJobType as defaultDelegationRoleForJobType,
   getDelegationMode as defaultGetDelegationMode,
-} from "../../functions/helpers/delegation-routing.js";
+} from "../../../providers/functions/delegation-routing.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import {
   shortJobTitle as defaultShortJobTitle,
   unwrapAssignmentArray as defaultUnwrapAssignmentArray,
-} from "../../functions/helpers/role-utils.js";
+} from "../../../../shared/policies/functions/role-utils.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
-} from "../../functions/helpers/role-spawn-policies.js";
+} from "../../../../shared/policies/functions/spawn-policy.js";
 
 const DEFAULT_DEPS = {
   buildDeterministicDelegations: defaultBuildDeterministicDelegations,

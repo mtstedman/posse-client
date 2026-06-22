@@ -1,7 +1,7 @@
 // lib/display/helpers/job-status.js
 
 import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../../queue/functions/common.js";
-import { MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../../worker/functions/helpers/job-type-sets.js";
+import { MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../../../catalog/job.js";
 
 export const JOB_TYPE_ABBR = {
   research: "R",

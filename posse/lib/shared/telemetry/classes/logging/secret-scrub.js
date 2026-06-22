@@ -1,6 +1,6 @@
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getSetting } from "../../../../domains/queue/functions/settings.js";
-import { SECRET_PATTERNS } from "../../../../domains/worker/functions/helpers/hooks.js";
+import { SECRET_PATTERNS } from "../../functions/logging/secret-patterns.js";
 import { redactString } from "../../../../domains/bridge/functions/redaction.js";
 
 // scrubSecrets runs on every log line; cache the synchronous SQLite setting

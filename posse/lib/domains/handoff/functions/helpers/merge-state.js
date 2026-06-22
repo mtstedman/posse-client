@@ -1,4 +1,4 @@
-// lib/handoff/helpers/merge-state.js
+// lib/domains/handoff/functions/helpers/merge-state.js
 //
 // Merge-state detection for worktrees.
 

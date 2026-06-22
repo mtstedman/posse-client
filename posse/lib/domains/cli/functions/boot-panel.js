@@ -107,7 +107,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   };
 
   /**
-   * Each step row: { status: 'pending'|'running'|'ok'|'failed'|'skipped'|'deferred',
+   * Each step row: { status: 'pending'|'running'|'ok'|'warning'|'failed'|'skipped'|'deferred',
    *                  detail: string, percent: number|null, section: string,
    *                  startedAt: number, finishedAt: number|null }
    * @type {Map<string, { status: string, detail: string, percent: number | null, section: string, startedAt: number, finishedAt: number | null }>}
@@ -165,6 +165,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
       merged.startedAt = Date.now();
     }
     const terminalStatus = rest.status === "ok"
+      || rest.status === "warning"
       || rest.status === "failed"
       || rest.status === "skipped"
       || rest.status === "deferred";
@@ -423,7 +424,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   // percentage lives on the atlas-ledger band below, where it actually means
   // something. A group = one rendered runtime row (scheduler / workspace /
   // providers).
-  const isStepResolved = (s) => s.status === "ok" || s.status === "skipped" || s.status === "deferred";
+  const isStepResolved = (s) => s.status === "ok" || s.status === "warning" || s.status === "skipped" || s.status === "deferred";
   const runtimeGroups = () => {
     const groups = [];
     for (const section of SECTION_ORDER) {
@@ -439,7 +440,9 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     if (groups.some((g) => g.some((s) => s.status === "failed"))) {
       return `${col("red")}needs attn${col("reset")}`;
     }
+    const hasWarning = groups.some((g) => g.some((s) => s.status === "warning"));
     const ready = groups.filter((g) => g.every(isStepResolved)).length;
+    if (ready === groups.length && hasWarning) return `${col("yellow")}warnings${col("reset")}`;
     if (ready === groups.length) return `${col("green")}ready${col("reset")}`;
     return `${col("dim")}${ready}/${groups.length}${col("reset")}`;
   };
@@ -464,6 +467,8 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   // ---- boot section: one collapsed row per readiness group ----
   const sectionGlyph = (stepList) => {
     if (stepList.some((s) => s.status === "failed")) return `${col("red")}✗${col("reset")}`;
+    if (stepList.some((s) => s.status === "running" || s.status === "pending")) return spinner();
+    if (stepList.some((s) => s.status === "warning")) return `${col("yellow")}!${col("reset")}`;
     if (stepList.length > 0 && stepList.every((s) => s.status === "ok")) return `${col("green")}✓${col("reset")}`;
     if (stepList.length > 0 && stepList.every((s) => s.status === "skipped")) return `${col("dim")}⊘${col("reset")}`;
     return spinner();
@@ -471,10 +476,11 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   const chipFor = (label, padTo = 0) => {
     const s = steps.get(label);
     const g = s.status === "ok" ? `${col("green")}✓${col("reset")}`
-      : s.status === "failed" ? `${col("red")}✗${col("reset")}`
-        : s.status === "skipped" ? `${col("dim")}⊘${col("reset")}`
-          : s.status === "deferred" ? `${col("yellow")}/${col("reset")}`
-            : `${col("dim")}…${col("reset")}`;
+      : s.status === "warning" ? `${col("yellow")}!${col("reset")}`
+        : s.status === "failed" ? `${col("red")}✗${col("reset")}`
+          : s.status === "skipped" ? `${col("dim")}⊘${col("reset")}`
+            : s.status === "deferred" ? `${col("yellow")}/${col("reset")}`
+              : `${col("dim")}…${col("reset")}`;
     const lbl = padTo > 0 ? padVisible(label, padTo) : label;
     return `${lbl} ${g}`;
   };
@@ -514,6 +520,8 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
       const glyph = sectionGlyph(stepList);
       const name = padVisible(SECTION_LABELS[section] || section, 10);
       const allOk = stepList.every((s) => s.status === "ok");
+      const allResolved = stepList.every(isStepResolved);
+      const hasWarning = stepList.some((s) => s.status === "warning");
       const allSkipped = stepList.every((s) => s.status === "skipped");
       if (section === "providers") {
         // All authed: a clean dotted name list — the row's own ✓ already
@@ -527,8 +535,9 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
           body = provs.map(([l]) => l).join(`${col("dim")} · ${col("reset")}`);
         } else {
           const rank = (status) => (status === "failed" ? 0
-            : status === "deferred" ? 1
-              : (status === "running" || status === "pending") ? 2 : 3);
+            : status === "warning" ? 1
+              : status === "deferred" ? 2
+                : (status === "running" || status === "pending") ? 3 : 4);
           body = provs
             .sort((a, b) => rank(a[1].status) - rank(b[1].status))
             .map(([l]) => chipFor(l))
@@ -541,6 +550,8 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
       if (allOk) {
         const el = sectionElapsed(stepList);
         body = `${col("dim")}ready${el ? ` · ${el}` : ""}${col("reset")}`;
+      } else if (hasWarning && allResolved) {
+        body = `${col("yellow")}warning${col("reset")}`;
       } else if (allSkipped) {
         body = `${col("dim")}skipped${col("reset")}`;
       } else {
@@ -649,8 +660,8 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   };
 
   // The notes section — error/warning explanations that can't ride inline
-  // without bouncing the fixed-width rows. Failed (✗, red) + skipped (⊘,
-  // yellow) only; cascade "blocked/not ready" reasons filtered (the root
+  // without bouncing the fixed-width rows. Failed (✗, red), warning (!,
+  // yellow), and skipped (⊘, yellow); cascade "blocked/not ready" reasons filtered (the root
   // failure already explains them).
   const renderNotes = () => {
     const w = innerWidth();
@@ -659,9 +670,13 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
       for (const label of (sectionOrder.get(section) || [])) {
         const step = steps.get(label);
         if (!step || !step.detail || isCascadeDetail(step.detail)) continue;
-        if (!["failed", "skipped"].includes(step.status)) continue;
+        if (!["failed", "warning", "skipped"].includes(step.status)) continue;
         const c = step.status === "failed" ? col("red") : col("yellow");
-        const ic = step.status === "failed" ? `${col("red")}✗${col("reset")}` : `${col("yellow")}⊘${col("reset")}`;
+        const ic = step.status === "failed"
+          ? `${col("red")}✗${col("reset")}`
+          : step.status === "warning"
+            ? `${col("yellow")}!${col("reset")}`
+            : `${col("yellow")}⊘${col("reset")}`;
         const body = `  ${ic} ${label} ${col("dim")}·${col("reset")} ${c}${step.detail}${col("reset")}`;
         noteLines.push(line(truncateVisible(body, w)));
       }

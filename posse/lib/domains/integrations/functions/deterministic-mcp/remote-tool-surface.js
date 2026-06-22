@@ -7,7 +7,8 @@
 // carries the returned catalog and optional remote-issued MCP bearer into the
 // persistent owner.
 
-import { RemotePromptClient, resolvePosseKey } from "../../../remote/functions/client.js";
+import { RemotePromptClient } from "../../../remote/classes/RemotePromptClient.js";
+import { resolvePosseKey } from "../../../remote/functions/client.js";
 import {
   getPosseRemoteTimeoutMs,
   getPosseRemoteUrl,

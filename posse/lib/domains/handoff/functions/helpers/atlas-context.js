@@ -1,4 +1,4 @@
-// lib/handoff/helpers/atlas-context.js
+// lib/domains/handoff/functions/helpers/atlas-context.js
 //
 // ATLAS handoff-state resolution, planner slice prefetch, and context rendering.
 

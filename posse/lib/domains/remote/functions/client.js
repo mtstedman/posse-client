@@ -1,231 +1,105 @@
 import { execFileSync } from "child_process";
-import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
-import { runRemoteNativeRequestJson } from "./native-client.js";
-import { nativeHeartbeatAuthFromSettings } from "./native-auth.js";
+import { createHash, createHmac, timingSafeEqual } from "crypto";
 
-const DEFAULT_REMOTE_PROMPT_TIMEOUT_MS = 60_000;
+export { RemotePromptClient } from "../classes/RemotePromptClient.js";
+
 export const POSSE_REMOTE_MAX_RESPONSE_BYTES = 1024 * 1024;
 
-export class RemotePromptClient {
-  constructor({
-    baseUrl,
-    timeoutMs = DEFAULT_REMOTE_PROMPT_TIMEOUT_MS,
-    maxRetries = 1,
-    retryDelayMs = 100,
-    maxResponseBytes = POSSE_REMOTE_MAX_RESPONSE_BYTES,
-    fetchImpl = globalThis.fetch,
-    apiKey = resolvePosseKey(),
-    nativeManager = nativeBinaries,
-    useNativeClient = true,
-    nativeAuth = null,
-  } = {}) {
-    if (!baseUrl) throw new Error("RemotePromptClient requires baseUrl");
-    if (typeof fetchImpl !== "function") throw new Error("RemotePromptClient requires fetch");
-    this.baseUrl = String(baseUrl).replace(/\/+$/, "");
-    this.timeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
-      ? Number(timeoutMs)
-      : DEFAULT_REMOTE_PROMPT_TIMEOUT_MS;
-    this.maxRetries = Number.isFinite(Number(maxRetries)) && Number(maxRetries) > 0 ? Math.floor(Number(maxRetries)) : 0;
-    this.retryDelayMs = Number.isFinite(Number(retryDelayMs)) && Number(retryDelayMs) > 0 ? Number(retryDelayMs) : 0;
-    this.maxResponseBytes = Number.isFinite(Number(maxResponseBytes)) && Number(maxResponseBytes) > 0
-      ? Math.floor(Number(maxResponseBytes))
-      : POSSE_REMOTE_MAX_RESPONSE_BYTES;
-    this.fetchImpl = fetchImpl;
-    this.usesDefaultFetch = fetchImpl === globalThis.fetch;
-    this.apiKey = apiKey == null ? "" : String(apiKey).trim();
-    this.nativeManager = nativeManager;
-    this.useNativeClient = useNativeClient !== false;
-    this.nativeAuth = nativeAuth;
-    this._resolvedNativeAuth = undefined;
-    assertSafeRemoteAuthUrl(this.baseUrl, this.apiKey, "remote prompt");
+const REMOTE_RESPONSE_SIGNATURE_DOMAINS = new Map([
+  ["/v1/prompts/compile", "compile"],
+  ["/v1/prompts/bundle", "bundle"],
+]);
+
+export function verifyRemoteResponseIntegrity(responseBody, {
+  path = "",
+  operation = "remote request",
+  signingSecret = "",
+} = {}) {
+  const domain = REMOTE_RESPONSE_SIGNATURE_DOMAINS.get(String(path || ""));
+  if (!domain || !String(signingSecret || "").trim()) return responseBody;
+
+  const metadata = responseBody && typeof responseBody === "object" && !Array.isArray(responseBody)
+    ? responseBody.metadata
+    : null;
+  const contentDigest = typeof metadata?.content_sha256 === "string" ? metadata.content_sha256.trim() : "";
+  const signature = typeof metadata?.response_signature === "string" ? metadata.response_signature.trim() : "";
+  if (!contentDigest || !signature) {
+    throwIntegrityError(
+      "POSSE_REMOTE_SIGNATURE_MISSING",
+      `${operation} response is missing required integrity metadata`,
+    );
   }
 
-  endpoint(path = "") {
-    return `${this.baseUrl}${path}`;
+  const unsigned = cloneJsonForIntegrity(responseBody);
+  if (unsigned?.metadata && typeof unsigned.metadata === "object" && !Array.isArray(unsigned.metadata)) {
+    delete unsigned.metadata.content_sha256;
+    delete unsigned.metadata.response_signature;
+  }
+  const canonical = stableJsonStringify(unsigned);
+  const actualDigest = createHash("sha256").update(canonical, "utf8").digest("hex");
+  if (!timingSafeEqualHex(actualDigest, contentDigest)) {
+    throwIntegrityError(
+      "POSSE_REMOTE_DIGEST_MISMATCH",
+      `${operation} response content digest mismatch`,
+    );
   }
 
-  async compile(request) {
-    return this.requestJsonWithRetries({
-      path: "/v1/prompts/compile",
-      method: "POST",
-      body: request,
-      operation: "remote prompt compile",
-    }, isRetryableRemoteRequestError);
+  const expectedSignature = createHmac("sha256", String(signingSecret || ""))
+    .update("posse-remote-response-v1\n")
+    .update(domain)
+    .update("\n")
+    .update(contentDigest)
+    .digest("hex");
+  if (!timingSafeEqualHex(expectedSignature, signature)) {
+    throwIntegrityError(
+      "POSSE_REMOTE_SIGNATURE_MISMATCH",
+      `${operation} response signature mismatch`,
+    );
   }
-
-  async compileOnce(request) {
-    return this.requestJsonOnce({
-      path: "/v1/prompts/compile",
-      method: "POST",
-      body: request,
-      operation: "remote prompt compile",
-    });
-  }
-
-  async getToolSuites() {
-    return this.requestJsonWithRetries({
-      path: "/v1/catalog/tool-suites",
-      method: "GET",
-      operation: "remote tool-suite catalog",
-    }, isRetryableRemoteRequestError);
-  }
-
-  async getPromptBundle() {
-    return this.requestJsonWithRetries({
-      path: "/v1/prompts/bundle",
-      method: "GET",
-      operation: "remote prompt bundle",
-    }, isRetryableRemoteRequestError);
-  }
-
-  async getModelCatalog() {
-    return this.requestJsonWithRetries({
-      path: "/v1/catalog/models",
-      method: "GET",
-      operation: "remote model catalog",
-    }, isRetryableRemoteRequestError);
-  }
-
-  async resolveToolSurface(request) {
-    return this.requestJsonWithRetries({
-      path: "/v1/catalog/tool-surface",
-      method: "POST",
-      body: request,
-      operation: "remote tool-surface catalog",
-    }, isRetryableRemoteRequestError);
-  }
-
-  async requestJsonWithRetries(options, isRetryableError = isRetryableRemoteRequestError) {
-    if (this.shouldUseNativeClient()) {
-      return await this.requestJsonNative(options, { maxRetries: this.maxRetries });
-    }
-    const attempts = this.maxRetries + 1;
-    let lastErr = null;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      try {
-        return await this.requestJsonOnce(options);
-      } catch (err) {
-        lastErr = err;
-        if (attempt >= attempts || !isRetryableError(err)) {
-          if (attempt > 1 && err instanceof Error) {
-            err.attempts = attempt;
-            err.message = `${err.message} (after ${attempt} attempts)`;
-          }
-          throw err;
-        }
-        if (this.retryDelayMs > 0) await sleep(this.retryDelayMs);
-      }
-    }
-    throw lastErr;
-  }
-
-  async requestJsonOnce({
-    path = "/",
-    method = "GET",
-    body = undefined,
-    operation = "remote request",
-  } = {}) {
-    if (this.shouldUseNativeClient()) {
-      return await this.requestJsonNative({ path, method, body, operation }, { maxRetries: 0 });
-    }
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), this.timeoutMs);
-    const url = this.endpoint(path);
-    try {
-      const headers = {};
-      if (body !== undefined) headers["content-type"] = "application/json";
-      if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
-      const response = await this.fetchImpl(url, {
-        method,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: ac.signal,
-      });
-      const text = await readResponseTextWithLimit(response, {
-        maxBytes: this.maxResponseBytes,
-        operation,
-        url,
-      });
-      let responseBody = null;
-      if (text) {
-        try {
-          responseBody = JSON.parse(text);
-        } catch {
-          responseBody = { raw: text };
-        }
-      }
-      if (!response.ok) {
-        const bodyDetail = formatBodyDetail(responseBody);
-        const err = new Error(`${operation} failed for ${url}: ${response.status} ${response.statusText}${bodyDetail ? ` - ${bodyDetail}` : ""}`);
-        err.status = response.status;
-        err.body = responseBody;
-        throw err;
-      }
-      return responseBody;
-    } catch (err) {
-      if (err?.name === "AbortError") {
-        const timeoutErr = new Error(`${operation} timed out after ${this.timeoutMs}ms for ${url}`);
-        timeoutErr.code = "POSSE_REMOTE_TIMEOUT";
-        throw timeoutErr;
-      }
-      if (err?.code === "POSSE_REMOTE_RESPONSE_TOO_LARGE") throw err;
-      if (err?.status) throw err;
-      const wrapped = new Error(`${operation} request failed for ${url}: ${formatFetchError(err)}`);
-      wrapped.code = "POSSE_REMOTE_FETCH_FAILED";
-      wrapped.cause = err;
-      throw wrapped;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  shouldUseNativeClient() {
-    if (!this.useNativeClient || !this.usesDefaultFetch || !this.apiKey) return false;
-    if (!this.nativeAuthEnvelope()) return false;
-    return this.nativeManager?.shouldUse?.("remote") === true;
-  }
-
-  nativeAuthEnvelope() {
-    if (this.nativeAuth && typeof this.nativeAuth === "object") {
-      return Object.keys(this.nativeAuth).length > 0 ? this.nativeAuth : null;
-    }
-    if (this._resolvedNativeAuth === undefined) {
-      this._resolvedNativeAuth = nativeHeartbeatAuthFromSettings();
-    }
-    return this._resolvedNativeAuth && typeof this._resolvedNativeAuth === "object"
-      && Object.keys(this._resolvedNativeAuth).length > 0
-      ? this._resolvedNativeAuth
-      : null;
-  }
-
-  async requestJsonNative({
-    path = "/",
-    method = "GET",
-    body = undefined,
-    operation = "remote request",
-  } = {}, {
-    maxRetries = 0,
-  } = {}) {
-    return await runRemoteNativeRequestJson({
-      baseUrl: this.baseUrl,
-      path,
-      method,
-      body: body === undefined ? null : body,
-      operation,
-      timeoutMs: this.timeoutMs,
-      maxRetries,
-      retryDelayMs: this.retryDelayMs,
-      maxResponseBytes: this.maxResponseBytes,
-    }, {
-      manager: this.nativeManager,
-      apiKey: this.apiKey,
-      auth: this.nativeAuthEnvelope(),
-    });
-  }
+  return responseBody;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function throwIntegrityError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  throw err;
+}
+
+function timingSafeEqualHex(actual, expected) {
+  if (!/^[0-9a-f]+$/i.test(actual) || !/^[0-9a-f]+$/i.test(expected)) return false;
+  const actualBuffer = Buffer.from(actual, "hex");
+  const expectedBuffer = Buffer.from(expected, "hex");
+  if (actualBuffer.length !== expectedBuffer.length) return false;
+  return timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function cloneJsonForIntegrity(value) {
+  if (value == null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(cloneJsonForIntegrity);
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry === undefined) continue;
+    out[key] = cloneJsonForIntegrity(entry);
+  }
+  return out;
+}
+
+function stableJsonStringify(value) {
+  if (value === null) return "null";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new Error("remote response integrity cannot canonicalize non-finite number");
+    }
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableJsonStringify(entry === undefined ? null : entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableJsonStringify(value[key])}`).join(",")}}`;
+  }
+  return "null";
 }
 
 function responseTooLargeError({ operation, url, maxBytes }) {
@@ -277,13 +151,6 @@ export async function readResponseTextWithLimit(response, {
     throw responseTooLargeError({ operation, url, maxBytes: limit });
   }
   return text;
-}
-
-function isRetryableRemoteRequestError(err) {
-  if (!err) return false;
-  if (err.code === "POSSE_REMOTE_TIMEOUT" || err.code === "POSSE_REMOTE_FETCH_FAILED") return true;
-  const status = Number(err.status);
-  return Number.isFinite(status) && status >= 500 && status < 600;
 }
 
 /**
@@ -346,26 +213,4 @@ function readWindowsPersistedEnv(name) {
   } catch {
     return "";
   }
-}
-
-function formatBodyDetail(body) {
-  if (!body) return "";
-  const detail = body.error || body.message || body.raw || "";
-  if (detail && typeof detail === "object") {
-    return [
-      detail.code,
-      detail.message,
-      detail.detail,
-    ].map((part) => String(part || "").trim()).filter(Boolean).join(": ").slice(0, 500);
-  }
-  return String(detail || "").replace(/\s+/g, " ").trim().slice(0, 500);
-}
-
-function formatFetchError(err) {
-  const parts = [
-    err?.message,
-    err?.cause?.code,
-    err?.cause?.name,
-  ].map((part) => String(part || "").trim()).filter(Boolean);
-  return parts.join(" ") || "fetch failed";
 }

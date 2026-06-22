@@ -1,4 +1,4 @@
-// lib/worker/helpers/artifact-output.js
+// lib/domains/worker/functions/helpers/artifact-output.js
 //
 // Helpers for artifact manifests, artificer log parsing, and fallback
 // artifact materialization when the model returns usable content without files.

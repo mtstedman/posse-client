@@ -1,7 +1,7 @@
 import fs from "fs";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getIntSetting } from "../../queue/functions/index.js";
-import { resolvePathWithin } from "../../worker/functions/helpers/scope.js";
+import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
 import { readFile } from "../../handoff/functions/helpers/file-attach.js";
 
 const DEFAULT_MAX_FILE_SIZE = 150000;

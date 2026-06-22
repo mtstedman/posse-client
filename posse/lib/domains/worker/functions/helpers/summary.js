@@ -1,4 +1,4 @@
-// lib/worker/helpers/summary.js
+// lib/domains/worker/functions/helpers/summary.js
 //
 // Compatibility re-export. The summary role implementation lives in
 // ../roles/summary.js.

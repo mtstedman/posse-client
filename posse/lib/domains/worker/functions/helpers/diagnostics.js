@@ -1,4 +1,4 @@
-// lib/worker/helpers/diagnostics.js
+// lib/domains/worker/functions/helpers/diagnostics.js
 //
 // Small diagnostics and formatting helpers for failure artifacts, retry
 // context, and execution-provider summaries.

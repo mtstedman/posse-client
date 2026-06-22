@@ -8,7 +8,7 @@
 
 import fs from "fs";
 import path from "path";
-import { C } from "../../../providers/functions/claude.js";
+import { C } from "../../../../shared/format/functions/colors.js";
 import { getRuntimeDbPath, getRuntimeReportsDir } from "../../../runtime/functions/paths.js";
 import { getProviderTierDefaults } from "../../../providers/functions/model-catalog.js";
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";

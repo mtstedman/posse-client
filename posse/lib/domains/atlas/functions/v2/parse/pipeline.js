@@ -7,8 +7,8 @@ import { startOnnxRefresh } from "./onnx-index-runner.js";
 
 /**
  * @param {{
- *   dbWriteSemaphore?: import("./semaphore.js").ParseSemaphore,
- *   scipStageSemaphore?: import("./semaphore.js").ParseSemaphore,
+ *   dbWriteSemaphore?: import("../../../classes/v2/ParseSemaphore.js").ParseSemaphore,
+ *   scipStageSemaphore?: import("../../../classes/v2/ParseSemaphore.js").ParseSemaphore,
  *   onEvent?: ((event: { kind: string, [k: string]: unknown }) => void) | null,
  * }} [opts]
  */
@@ -39,8 +39,8 @@ export function createParsePipeline({
  *   ingestScip?: (lang: string, staged: unknown) => Promise<unknown> | unknown,
  *   mergeLanguage?: (lang: string, sources: string[]) => Promise<unknown> | unknown,
  *   onnx?: Parameters<typeof startOnnxRefresh>[0] | null,
- *   dbWriteSemaphore?: import("./semaphore.js").ParseSemaphore,
- *   scipStageSemaphore?: import("./semaphore.js").ParseSemaphore,
+ *   dbWriteSemaphore?: import("../../../classes/v2/ParseSemaphore.js").ParseSemaphore,
+ *   scipStageSemaphore?: import("../../../classes/v2/ParseSemaphore.js").ParseSemaphore,
  *   onEvent?: (event: { kind: string, [k: string]: unknown }) => void,
  * }} opts
  */

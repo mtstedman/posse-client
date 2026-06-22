@@ -11,7 +11,7 @@
 import readline from "readline";
 import { DisplayInputController } from "./input-controller.js";
 import { DisplayApprovalRenderer } from "./approval-renderer.js";
-import { C } from "../../../providers/functions/claude.js";
+import { C } from "../../../../shared/format/functions/colors.js";
 import {
   statusColor,
   statusIcon as paletteStatusIcon,

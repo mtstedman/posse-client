@@ -73,7 +73,7 @@ import {
   getArtifactProtocol,
   validateManifestAgainstContract,
 } from "../../domains/artifacts/functions/index.js";
-import { normPath, resolvePathWithin } from "../../domains/worker/functions/helpers/scope.js";
+import { normPath, resolvePathWithin } from "../../shared/scope/functions/path.js";
 import { MutationPolicy, splitShellSubcommands as policySplitShellSubcommands } from "../../shared/scope/classes/MutationPolicy.js";
 import { agentHiddenReadablePathReason } from "../../shared/scope/functions/agent-hidden-paths.js";
 

@@ -1,4 +1,4 @@
-// lib/worker/helpers/insights.js
+// lib/domains/worker/functions/helpers/insights.js
 //
 // Insight extraction helpers that summarize failed work items into reusable
 // root-cause and kaizen records after terminal transitions.

@@ -1,4 +1,4 @@
-// lib/worker/provider-client.js
+// lib/domains/worker/classes/TrackedProviderClient.js
 //
 // Tracked provider-call orchestration extracted from Worker. The Worker still
 // owns lease and attempt lifecycle; this client owns model dispatch, call
@@ -30,8 +30,8 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import {
   resolvePrimaryExecutionModelName,
   sanitizeExecutionHintsForRole,
-} from "../functions/helpers/execution-routing.js";
-import { selectFallbackProvider } from "../functions/helpers/delegation-routing.js";
+} from "../../providers/functions/execution-routing.js";
+import { selectFallbackProvider } from "../../providers/functions/delegation-routing.js";
 import { buildResumeHandoff } from "../../handoff/functions/index.js";
 import { getReplayMemoryStats, recordRecoveryCheckpoint, retainReplayOutput, retainReplayPrompt, retainReplayToolUses } from "../../observability/functions/recovery/job-replay.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";

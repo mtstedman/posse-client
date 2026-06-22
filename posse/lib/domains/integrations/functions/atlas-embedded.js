@@ -5,7 +5,7 @@
 
 import fs from "fs";
 import crypto from "crypto";
-import { AsyncGateBusyError, AsyncResourceGate } from "../../../shared/concurrency/functions/async-gate.js";
+import { AsyncGateBusyError, AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import {
   buildAtlasProcessEnv,
   getAtlasIntegrationConfig,

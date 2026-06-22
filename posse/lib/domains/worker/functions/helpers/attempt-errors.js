@@ -1,4 +1,4 @@
-// lib/worker/helpers/attempt-errors.js
+// lib/domains/worker/functions/helpers/attempt-errors.js
 //
 // Execute-attempt error taxonomy extracted from worker.js:
 // deterministic interruptions, retryable interruptions, and catastrophic errors.
@@ -35,7 +35,7 @@ import {
 import {
   activeSiblingWriteLocks,
   siblingLockSummary,
-} from "./shared-worktree-locks.js";
+} from "../../../queue/functions/sibling-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
 function deferInterruptedCleanupIfSiblingLocks(job, label) {

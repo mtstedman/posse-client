@@ -7,7 +7,7 @@
 
 import { execFileSync } from "node:child_process";
 
-import { createGitWorkflowHelpers } from "../../cli/functions/git-workflows.js";
+import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
 import { resolveTargetBranch } from "../../git/functions/target-branch.js";
 import {
   acquireMergeLock,

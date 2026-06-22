@@ -1442,7 +1442,7 @@ export function prewarmAtlasV2BootDeps() {
   _atlasV2DepsPrewarmPromise = Promise.all([
     import("../../atlas/classes/v2/Ledger.js"),
     import("../../atlas/classes/v2/Warmer.js"),
-    import("../../atlas/functions/v2/parser/adapter.js"),
+    import("../../atlas/classes/v2/ParserAdapter.js"),
   ]).then(
     () => ({ ok: true }),
     (err) => ({ ok: false, error: err }),

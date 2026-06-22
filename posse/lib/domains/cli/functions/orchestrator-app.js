@@ -15,6 +15,7 @@ installCliWarningFilter();
 //   health              Show failure/stuck-job health signals
 //   dashboard           Visual job board
 //   review              Final report + approve/reject
+//   update              Pull latest Posse client + refresh dependencies
 //   inject <desc>       Quick-add a work item (also works mid-run)
 //   image <prompt>      Generate an image directly (skips research/plan)
 //   admin               Stats, session history, and settings management
@@ -52,7 +53,6 @@ installCliWarningFilter();
 import fs from "fs";
 import os from "os";
 import path from "path";
-import readline from "readline";
 import { getDb, closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
 import { execFile, execFileSync, execSync, spawnSync } from "child_process";
@@ -113,22 +113,16 @@ import { C } from "../../../shared/format/functions/colors.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
 import { providerRoleForJobType } from "../../providers/functions/roles.js";
 import {
-  getCommandDefinition,
+  getCommandBootstrapPolicy,
   isHelpCommand,
   normalizeCommandName,
   shouldRefreshContextAfterCommand,
-} from "./command-registry.js";
+} from "./command-bootstrap-policy.js";
 import { dispatchCommand } from "./dispatch.js";
 import {
-  defaultOutputModeForMode,
   getCommandPositionalArgs,
   hasArgFlag,
   hasIntakeHintFlags,
-  inferWiMode,
-  listInputContextDirectories,
-  mergeSuspectedDirsWithInputContexts,
-  normalizeIterativeWorkflowModeChoice,
-  normalizeRequestKindChoice,
   parseAutoMerge,
   parseConcurrency,
   parseFlagValue,
@@ -139,11 +133,20 @@ import {
   parseStallTimeout,
   parseTierFlagFromArgv,
   rejectUnknownFlags,
-  researchBudgetMetadata,
-  researchPayload,
-  resolveInputContextSelection,
   resolveResearchBudgetForDeepthink,
 } from "./flags.js";
+import {
+  defaultOutputModeForMode,
+  normalizeIterativeWorkflowModeChoice,
+  normalizeRequestKindChoice,
+} from "../../intake/functions/choices.js";
+import {
+  listInputContextDirectories,
+  mergeSuspectedDirsWithInputContexts,
+  resolveInputContextSelection,
+} from "../../intake/functions/input-contexts.js";
+import { inferWiMode } from "../../intake/functions/mode-inference.js";
+import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
 import { atlasV2UsageSummary } from "./atlas-v2-help.js";
 import { buildRuntimeEnv, getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { clearColdIndex as clearColdIndexImpl } from "./cold-index.js";
@@ -183,7 +186,7 @@ import {
   markIterativeFinished,
 } from "../../planning/functions/state.js";
 import { ensurePosseRuntimeIgnoresAsync } from "../../runtime/functions/ignore.js";
-import { runHook } from "../../worker/functions/helpers/hooks.js";
+import { runHook } from "../../git/functions/hooks.js";
 import { refreshProjectContextAsync } from "../../project/functions/context.js";
 import { ensureProjectMapAsync, ensureProjectMapRebuildHookAsync, getCachedProjectMap } from "../../project/functions/map.js";
 import { buildSyntheticResearchBrief, classifyResearchTask } from "../../research/functions/routing.js";
@@ -199,14 +202,14 @@ import { loadRemotePromptBundle } from "../../remote/functions/prompt-bundle.js"
 import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
 import { resolveTargetBranch } from "../../git/functions/target-branch.js";
 import { ensureRestrictivePushRefspecsAsync, remotePushConfigsAreClearlyRestrictive } from "../../git/functions/push-guard.js";
-import { normalizeIntakeHints } from "../../worker/functions/helpers/intake-hints.js";
+import { normalizeIntakeHints } from "../../intake/functions/hints.js";
 import {
   collectHandledSuggestionKeys,
   createApprovedSuggestionFollowUp,
   suggestionDecisionEventJson,
   suggestionDevJobDecision,
   suggestionReviewKey,
-} from "../../worker/functions/helpers/suggestions.js";
+} from "../../planning/functions/suggestions.js";
 import { approvePlan, rejectPlan, respawnAfterRejection, findPendingGate, isPlanApprovalEnabled, setPlanApprovalOverrideForRun } from "../../planning/functions/plan-approval.js";
 import {
   createRedTeamPlanChain,
@@ -220,8 +223,9 @@ import {
   normalizeResearchBudget,
   researchBudgetFromDeepthink,
   researchBudgetToReasoningEffort,
-} from "../../worker/functions/helpers/role-utils.js";
+} from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { ask, askMultiline } from "./input-prompts.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -254,7 +258,6 @@ export function clearColdIndex(projectDir = PROJECT_DIR) {
 
 let _autoMergeConfig = null;
 let _autoMergeSettingAnnounced = false;
-let _nonTtyInputLines = null;
 
 function getAutoMergeConfig() {
   if (!_autoMergeConfig) _autoMergeConfig = parseAutoMerge();
@@ -267,67 +270,6 @@ function maybeAnnounceAutoMergeSetting() {
   _autoMergeSettingAnnounced = true;
   console.log(`\n  ${C.yellow}Auto-merge is enabled by admin setting auto_merge_completed=true.${C.reset}`);
   console.log(`  ${C.dim}Completed WI branches will be merged during wrap-up unless that setting is disabled.${C.reset}\n`);
-}
-
-function ask(question) {
-  if (!process.stdin.isTTY) {
-    process.stdout.write(question);
-    if (_nonTtyInputLines == null) {
-      let raw = "";
-      try { raw = fs.readFileSync(0, "utf8"); } catch { raw = ""; }
-      _nonTtyInputLines = raw.split(/\r?\n/);
-    }
-    return Promise.resolve(String(_nonTtyInputLines.shift() || "").trim());
-  }
-  return new Promise((resolve) => {
-    // The TUI leaves stdin in raw/paused mode during wrap-up handoff; prime it
-    // before readline attaches so the first typed answer is not swallowed.
-    try { process.stdin.setRawMode(false); } catch { /* not in raw mode */ }
-    try { process.stdin.resume(); } catch { /* best effort */ }
-    setImmediate(() => {
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-      let resolved = false;
-      rl.question(question, (answer) => {
-        resolved = true;
-        rl.close();
-        resolve(answer.trim());
-      });
-      rl.on("close", () => {
-        if (!resolved) resolve("");
-      });
-    });
-  });
-}
-
-function askMultiline(prompt) {
-  if (!process.stdin.isTTY) {
-    console.log(prompt);
-    if (_nonTtyInputLines == null) {
-      let raw = "";
-      try { raw = fs.readFileSync(0, "utf8"); } catch { raw = ""; }
-      _nonTtyInputLines = raw.split(/\r?\n/);
-    }
-    return Promise.resolve(_nonTtyInputLines.join("\n").trim());
-  }
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    console.log(prompt);
-    console.log(`  ${C.dim}(enter a blank line when done)${C.reset}`);
-    const lines = [];
-    let resolved = false;
-    rl.on("line", (line) => {
-      if (line.trim() === "" && lines.length > 0) {
-        resolved = true;
-        rl.close();
-        resolve(lines.join("\n"));
-      } else {
-        lines.push(line);
-      }
-    });
-    rl.on("close", () => {
-      if (!resolved) resolve(lines.join("\n"));
-    });
-  });
 }
 
 // Per-process cache: a command's PATH location does not change mid-run,
@@ -541,6 +483,7 @@ let _auditCommandModulePromise = null;
 let _reportCommandsModulePromise = null;
 let _memoryCommandsModulePromise = null;
 let _doctorCommandModulePromise = null;
+let _updateCommandModulePromise = null;
 let _adminWorktreesModulePromise = null;
 let _serveCommandModulePromise = null;
 let _diagnosticCommandsModulePromise = null;
@@ -584,6 +527,11 @@ async function loadDoctorCommandModule() {
   return _doctorCommandModulePromise;
 }
 
+async function loadUpdateCommandModule() {
+  _updateCommandModulePromise ||= import("./update-command.js");
+  return _updateCommandModulePromise;
+}
+
 async function loadAdminWorktreesModule() {
   _adminWorktreesModulePromise ||= import("./admin-worktrees.js");
   return _adminWorktreesModulePromise;
@@ -607,7 +555,7 @@ async function loadAtlasModule() {
 async function getGitWorkflowHelpers() {
   if (!_gitWorkflowHelpersPromise) {
     _gitWorkflowHelpersPromise = (async () => {
-      const { createGitWorkflowHelpers } = await import("./git-workflows.js");
+      const { createGitWorkflowHelpers } = await import("../../git/functions/workflows.js");
       return createGitWorkflowHelpers({
         projectDir: PROJECT_DIR,
         getTargetBranch,
@@ -689,12 +637,12 @@ async function loadSchedulerModule() {
 }
 
 async function loadRunSessionModule() {
-  _runSessionModulePromise ||= import("./run-session.js");
+  _runSessionModulePromise ||= import("../classes/RunSession.js");
   return _runSessionModulePromise;
 }
 
 async function loadReviewSessionModule() {
-  _reviewSessionModulePromise ||= import("./review-session.js");
+  _reviewSessionModulePromise ||= import("../classes/ReviewSession.js");
   return _reviewSessionModulePromise;
 }
 
@@ -1994,6 +1942,28 @@ async function cmdDoctor() {
   return cmdDoctorImpl({ projectDir: PROJECT_DIR });
 }
 
+async function cmdUpdate() {
+  const { cmdUpdate: cmdUpdateImpl } = await loadUpdateCommandModule();
+  return cmdUpdateImpl();
+}
+
+async function maybeWarnPosseUpdateAvailable(commandPolicy) {
+  const commandName = commandPolicy?.name || "";
+  if (!commandPolicy?.known || ["help", "run", "go", "update"].includes(commandName) || process.argv.includes("--json")) return;
+  try {
+    const {
+      checkPosseUpdateAvailability,
+      formatPosseUpdateAvailableWarning,
+    } = await loadUpdateCommandModule();
+    const check = await checkPosseUpdateAvailability();
+    if (!check?.available) return;
+    console.warn(`\n  ${C.yellow}${formatPosseUpdateAvailableWarning(check)}${C.reset}\n`);
+  } catch {
+    // Update checks are advisory only; boot should never fail because the
+    // network, git remote, or install checkout is unavailable.
+  }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // COMMAND: admin — Admin dashboard for stats, reports, and settings
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2187,13 +2157,14 @@ async function cmdServe() {
 export async function main() {
   const command = normalizeCommandName((!COMMAND && ITERATE_FLAG) ? "add" : COMMAND);
   if (rejectUnknownFlags()) return;
-  const commandDefinition = getCommandDefinition(command);
-  const runBootPanelOwnsReadiness = commandDefinition.name === "run" || commandDefinition.name === "go";
+  const commandPolicy = getCommandBootstrapPolicy(command);
+  const runBootPanelOwnsReadiness = commandPolicy.name === "run" || commandPolicy.name === "go";
   await init({
-    requireWritableArtifacts: commandDefinition.requiresWritableArtifacts,
-    refreshStartupContext: commandDefinition.refreshContextAfter,
-    showReadiness: !runBootPanelOwnsReadiness && (commandDefinition.requiresProvider || commandDefinition.refreshContextAfter),
+    requireWritableArtifacts: commandPolicy.requiresWritableArtifacts,
+    refreshStartupContext: commandPolicy.refreshContextAfter,
+    showReadiness: !runBootPanelOwnsReadiness && (commandPolicy.requiresProvider || commandPolicy.refreshContextAfter),
   });
+  await maybeWarnPosseUpdateAvailable(commandPolicy);
 
   if (isHelpCommand(command)) {
     const aliasDiagnostic = await posseAliasDiagnostic();
@@ -2220,6 +2191,8 @@ ${aliasDiagnostic}
     ${C.cyan}dashboard${C.reset}  Visual job board
     ${C.cyan}doctor${C.reset}     Repair repo dependency/runtime requirements
     ${C.dim}             doctor [--dry-run] [--json]${C.reset}
+    ${C.cyan}update${C.reset}     Pull latest Posse client + refresh dependencies
+    ${C.dim}             update [--dry-run] [--json] [--branch main]${C.reset}
     ${C.cyan}review${C.reset}     Approve/reject completed work items
     ${C.cyan}events${C.reset}     Show event log (audit trail)
     ${C.dim}             events [jobId] [--session]${C.reset}
@@ -2323,6 +2296,7 @@ ${aliasDiagnostic}
     health: cmdHealth,
     dashboard: cmdDashboard,
     doctor: cmdDoctor,
+    update: cmdUpdate,
     review: cmdReview,
     inject: cmdInject,
     ask: cmdAsk,

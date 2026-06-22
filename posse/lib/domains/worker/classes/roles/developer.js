@@ -1,4 +1,4 @@
-// lib/worker/roles/developer.js
+// lib/domains/worker/classes/roles/developer.js
 //
 // Developer role handler for scoped repo mutations, checkpoint capture, and
 // one-shot context expansion during implementation work.
@@ -27,12 +27,12 @@ import {
   maxTurnsOverrideFromPayload,
   shortJobTitle as defaultShortJobTitle,
   uniqueScopeFiles as defaultUniqueScopeFiles,
-} from "../../functions/helpers/role-utils.js";
+} from "../../../../shared/policies/functions/role-utils.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
-} from "../../functions/helpers/role-spawn-policies.js";
+} from "../../../../shared/policies/functions/spawn-policy.js";
 
 const DEFAULT_DEPS = {
   checkpointTokenThreshold: CHECKPOINT_TOKEN_THRESHOLD,

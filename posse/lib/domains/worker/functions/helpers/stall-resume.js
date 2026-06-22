@@ -1,4 +1,4 @@
-// lib/worker/helpers/stall-resume.js
+// lib/domains/worker/functions/helpers/stall-resume.js
 //
 // Drift detection and stall-resume stash recovery helpers extracted from
 // worker.js to keep execute-path orchestration lean.

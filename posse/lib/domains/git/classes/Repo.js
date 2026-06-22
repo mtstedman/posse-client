@@ -5,7 +5,7 @@
 
 import { execFile as defaultExecFileAsync, execFileSync } from "node:child_process";
 import path from "node:path";
-import { AsyncGateBusyError, AsyncResourceGate } from "../../../shared/concurrency/functions/async-gate.js";
+import { AsyncGateBusyError, AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { runGitNativeMethod, runGitNativeMethodAsync } from "../functions/native/invoke.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;

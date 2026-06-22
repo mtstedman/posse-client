@@ -8,7 +8,7 @@
 // never clobbers the persisted cache — readers keep the last good catalog,
 // then the builtin lists.
 
-import { RemotePromptClient } from "./client.js";
+import { RemotePromptClient } from "../classes/RemotePromptClient.js";
 import { getPosseRemoteTimeoutMs, getPosseRemoteUrl } from "./mode.js";
 import {
   MODEL_CATALOG_FETCHED_AT_SETTING_KEY,

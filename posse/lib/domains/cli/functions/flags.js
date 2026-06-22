@@ -1,19 +1,20 @@
-import fs from "fs";
-import path from "path";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { WORK_ITEM_GOVERNANCE_TIERS } from "../../../catalog/work-item.js";
 import { C } from "../../../shared/format/functions/colors.js";
+import {
+  defaultOutputModeForMode,
+  normalizeRequestKindChoice,
+} from "../../intake/functions/choices.js";
+import { mergeSuspectedDirsWithInputContexts } from "../../intake/functions/input-contexts.js";
+import { normalizeIntakeHints } from "../../intake/functions/hints.js";
 import { getSetting } from "../../queue/functions/index.js";
-import { getRuntimeResourcesDir } from "../../runtime/functions/paths.js";
 import { getCatalogRuntimeFallbackInt } from "../../settings/functions/catalog.js";
 import { isValidWiMode } from "../../artifacts/functions/index.js";
-import { normalizeIntakeHints } from "../../worker/functions/helpers/intake-hints.js";
 import {
-  isResearchBudgetDeep,
   maxResearchBudget,
   normalizeResearchBudget,
   researchBudgetFromDeepthink,
-} from "../../worker/functions/helpers/role-utils.js";
+} from "../../../shared/policies/functions/role-utils.js";
 
 export function settingEnabled(value) {
   return /^(1|true|yes|on)$/i.test(String(value || ""));
@@ -95,37 +96,6 @@ export function parseStallTimeout(argv = process.argv) {
     }
   } catch { /* DB not ready */ }
   return null; // null = provider helper uses catalog-backed stall_timeout fallback
-}
-
-const IMAGE_MODE_ACTION_RE = /\b(generate|create|make|draw|design)\b/i;
-const IMAGE_MODE_NOUN_RE = /\b(image|photo|picture|illustration|banner|icon|logo|artwork|mermaid)\b/i;
-const IMAGE_MODE_DIRECT_RE = /\b(dall-?e|midjourney|stable.?diffusion|image.?gen)\b/i;
-const NEGATED_IMAGE_MODE_RE = /\b(?:not\s+(?:an?\s+)?|no\s+(?:new\s+)?|without\s+(?:an?\s+)?)(?:image|photo|picture|illustration|banner|icon|logo|artwork|mermaid|images|photos|pictures|illustrations|banners|icons|logos)\b|\b(?:do not|don't|no need to)\s+(?:generate|create|make|draw|design)\b[\s\S]{0,60}\b(?:image|photo|picture|illustration|banner|icon|logo|artwork|mermaid|images|photos|pictures|illustrations|banners|icons|logos)\b/i;
-
-function hasImageModeIntent(text) {
-  const source = String(text || "");
-  const sentences = source.match(/[^.!?\r\n]+[.!?\r\n]*/g) || [source];
-  for (const rawSentence of sentences) {
-    const sentence = rawSentence.trim();
-    if (!sentence || NEGATED_IMAGE_MODE_RE.test(sentence)) continue;
-    if (IMAGE_MODE_DIRECT_RE.test(sentence)) return true;
-    if (IMAGE_MODE_ACTION_RE.test(sentence) && IMAGE_MODE_NOUN_RE.test(sentence)) return true;
-  }
-  return false;
-}
-
-export function inferWiMode(text) {
-  const lower = text.toLowerCase();
-  if (hasImageModeIntent(lower)) return "image";
-  const reportAction = "\\b(write|prepare|draft|produce|create|generate|compile|export|deliver|analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\\b";
-  const reportObject = "\\b(report|summary|write[- ]?up|analysis|brief|csv|spreadsheet|analy[sz](?:e|ed|es|ing))\\b";
-  if (new RegExp(`${reportAction}[\\s\\S]{0,80}${reportObject}`, "i").test(lower)) return "report";
-  if (new RegExp(`${reportObject}[\\s\\S]{0,80}${reportAction}`, "i").test(lower)) return "report";
-  const directAnalysisIntent = /\b(summary|analysis|brief)\s+of\b/i.test(lower)
-    || /\b(analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\b/i.test(lower);
-  const mutationIntent = /\b(fix|implement|change|update|modify|edit|refactor|add|remove|delete|migrate|build)\b/i.test(lower);
-  if (directAnalysisIntent && !mutationIntent) return "report";
-  return null;
 }
 
 /** Parse --mode flag from argv. */
@@ -358,171 +328,6 @@ export function resolveResearchBudgetForDeepthink(deepthink, parsed = parseResea
     return deepthink ? maxResearchBudget(parsed.budget, "high") : parsed.budget;
   }
   return researchBudgetFromDeepthink(deepthink);
-}
-
-export function researchBudgetMetadata(metadata, budget) {
-  const deepthinkBudget = normalizeResearchBudget(budget);
-  return {
-    ...metadata,
-    deepthink_budget: deepthinkBudget,
-    deepthink: isResearchBudgetDeep(deepthinkBudget),
-  };
-}
-
-export function researchPayload(extra = {}, budget = "normal") {
-  const deepthinkBudget = normalizeResearchBudget(budget);
-  return {
-    ...extra,
-    deepthink_budget: deepthinkBudget,
-    deepthink: isResearchBudgetDeep(deepthinkBudget),
-  };
-}
-
-function _splitCsv(value) {
-  if (Array.isArray(value)) {
-    return value.map((item) => String(item || "").trim()).filter(Boolean);
-  }
-  return String(value || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-export function listInputContextDirectories(projectDir = process.cwd()) {
-  const root = path.join(getRuntimeResourcesDir(projectDir), "inputs");
-  let entries = [];
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
-  return entries
-    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
-    .map((entry) => ({
-      name: entry.name,
-      relativeDir: path.relative(projectDir, path.join(root, entry.name)).replace(/\\/g, "/"),
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-export function resolveInputContextSelection(rawSelection, availableDirs) {
-  const tokens = _splitCsv(rawSelection).map((token) => token.trim());
-  if (tokens.length === 0) return { selectedDirs: [], invalidTokens: [] };
-
-  const byName = new Map();
-  const byRelative = new Map();
-  availableDirs.forEach((entry) => {
-    byName.set(entry.name.toLowerCase(), { entry });
-    byRelative.set(entry.relativeDir.toLowerCase(), { entry });
-  });
-
-  const selected = [];
-  const seen = new Set();
-  const invalid = [];
-
-  for (const token of tokens) {
-    const normalized = token.toLowerCase();
-    if (!normalized) continue;
-    if (normalized === "none") continue;
-    if (normalized === "all") {
-      for (const entry of availableDirs) {
-        if (seen.has(entry.relativeDir)) continue;
-        seen.add(entry.relativeDir);
-        selected.push(entry.relativeDir);
-      }
-      continue;
-    }
-
-    if (/^\d+$/.test(normalized)) {
-      const idx = Number(normalized) - 1;
-      const target = Number.isInteger(idx) && idx >= 0 && idx < availableDirs.length
-        ? availableDirs[idx]
-        : null;
-      if (!target) {
-        invalid.push(token);
-        continue;
-      }
-      if (!seen.has(target.relativeDir)) {
-        seen.add(target.relativeDir);
-        selected.push(target.relativeDir);
-      }
-      continue;
-    }
-
-    const nameMatch = byName.get(normalized) || byRelative.get(normalized);
-    if (!nameMatch) {
-      invalid.push(token);
-      continue;
-    }
-    if (!seen.has(nameMatch.entry.relativeDir)) {
-      seen.add(nameMatch.entry.relativeDir);
-      selected.push(nameMatch.entry.relativeDir);
-    }
-  }
-
-  return { selectedDirs: selected, invalidTokens: invalid };
-}
-
-export function mergeSuspectedDirsWithInputContexts(baseSuspectedDirs, inputContextSelection, projectDir = process.cwd()) {
-  const base = _splitCsv(baseSuspectedDirs).map((item) => item.replace(/\\/g, "/"));
-  const available = listInputContextDirectories(projectDir);
-  if (!inputContextSelection || !String(inputContextSelection).trim() || available.length === 0) {
-    return {
-      merged: base,
-      selected: [],
-      invalidTokens: [],
-      available,
-    };
-  }
-  const { selectedDirs, invalidTokens } = resolveInputContextSelection(inputContextSelection, available);
-  const mergedSet = new Set(base.map((item) => item.trim()).filter(Boolean));
-  for (const dir of selectedDirs) mergedSet.add(dir);
-  return {
-    merged: [...mergedSet],
-    selected: selectedDirs,
-    invalidTokens,
-    available,
-  };
-}
-
-export function defaultOutputModeForMode(fallbackMode = "build") {
-  return "auto";
-}
-
-const REQUEST_KIND_CHOICES = Object.freeze([
-  { value: "task", aliases: ["t"] },
-  { value: "bugfix", aliases: ["b", "bug"] },
-  { value: "design", aliases: ["d", "ux", "ui"] },
-  { value: "context", aliases: ["c"] },
-  { value: "question", aliases: ["q"] },
-  { value: "image", aliases: ["i"] },
-  { value: "report", aliases: ["r"] },
-]);
-
-const ITERATIVE_WORKFLOW_CHOICES = Object.freeze([
-  { value: "bugfix", aliases: ["b", "bug"] },
-  { value: "ux", aliases: ["u", "d", "ui", "design"] },
-  { value: "refactor", aliases: ["r"] },
-  { value: "audit", aliases: ["a"] },
-  { value: "iterate", aliases: ["i"] },
-]);
-
-function normalizeChoice(value, choices, fallback) {
-  const raw = String(value || "").trim().toLowerCase();
-  if (!raw) return fallback;
-  for (const choice of choices) {
-    if (raw === choice.value || (choice.aliases || []).includes(raw)) return choice.value;
-  }
-  return fallback;
-}
-
-export function normalizeRequestKindChoice(value, fallback = "task") {
-  return normalizeChoice(value, REQUEST_KIND_CHOICES, fallback);
-}
-
-export function normalizeIterativeWorkflowModeChoice(value, fallback = "bugfix") {
-  return normalizeChoice(value, ITERATIVE_WORKFLOW_CHOICES, fallback);
 }
 
 export function parseIntakeHintsFromArgv(description, fallbackMode = "build") {

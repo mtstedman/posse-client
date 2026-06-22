@@ -15,7 +15,7 @@ import { ATLAS_TOOL_ACTIONS } from "../../atlas/functions/v2/contracts/tool-para
 import { ATLAS_TOOL_PARAM_SCHEMAS, MEMORY_TYPES } from "../../atlas/functions/v2/contracts/tool-schemas.js";
 import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
-import { AsyncResourceGate } from "../../../shared/concurrency/functions/async-gate.js";
+import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { resolveTargetBranch } from "../../git/functions/target-branch.js";
 import { canonicalAtlasActionName, formatAtlasToolDisplayName } from "../../../functions/tools/mcp-surface.js";
 

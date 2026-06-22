@@ -1,4 +1,4 @@
-// lib/handoff/helpers/insights-step0.js
+// lib/domains/handoff/functions/helpers/insights-step0.js
 //
 // Cross-run insight loading and step-0 context assembly.
 

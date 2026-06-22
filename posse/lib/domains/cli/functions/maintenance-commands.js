@@ -8,7 +8,8 @@ import { applyAction } from "../../cleanup/functions/actions.js";
 import { deleteBranchPreservingTip, snapshotAndResetDirtyWorktree } from "../../git/functions/worktree.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { clearAll, getLiveSchedulerBlockMessage, listWorkItems } from "../../queue/functions/index.js";
-import { C as defaultColors, ask as defaultAsk } from "../../providers/functions/claude.js";
+import { C as defaultColors } from "../../../shared/format/functions/colors.js";
+import { ask as defaultAsk } from "./input-prompts.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { worktreeRoot } from "../../worker/classes/Worker.js";
 

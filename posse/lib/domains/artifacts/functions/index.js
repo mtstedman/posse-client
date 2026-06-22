@@ -20,7 +20,7 @@ import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getRuntimeResourcesDir } from "../../runtime/functions/paths.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { getAccountSetting } from "../../settings/functions/account-settings.js";
-import { resolvePathWithin } from "../../worker/functions/helpers/scope.js";
+import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
 import {
   IMAGE_PROVIDER_OPTIONS,
   getDefaultImageModel,

@@ -1,4 +1,4 @@
-// lib/worker/helpers/human-input.js
+// lib/domains/worker/functions/helpers/human-input.js
 //
 // Human-input handler for interactive questions surfaced through the display.
 // Manages waiting state, timeout behavior, and abort-aware answer collection.

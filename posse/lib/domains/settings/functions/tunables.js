@@ -19,7 +19,7 @@ import { VALID_BINARY_NAMES } from "../../../catalog/binary.js";
 
 const TUNABLE_DEFAULTS = Object.freeze({
   git_atlas_post_commit_hook_timeout_ms: 600000,
-  fix_scope_handoff_guard: "enforce",
+  fix_scope_handoff_guard: "auto",
   posse_wi_failure_threshold: 5,
   posse_max_fix_chain_depth: 2,
   posse_max_replans: 3,
@@ -43,7 +43,7 @@ const TUNABLE_DEFAULTS = Object.freeze({
 });
 
 const LOG_LEVEL_VALUES = new Set(["debug", "info", "warn", "error"]);
-const FIX_SCOPE_HANDOFF_GUARD_VALUES = new Set(["off", "warn", "enforce"]);
+const FIX_SCOPE_HANDOFF_GUARD_VALUES = new Set(["off", "auto", "warn", "enforce"]);
 
 function readPositiveInt(key, fallback) {
   try {

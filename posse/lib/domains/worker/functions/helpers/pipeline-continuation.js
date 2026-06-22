@@ -1,4 +1,4 @@
-// lib/worker/helpers/pipeline-continuation.js
+// lib/domains/worker/functions/helpers/pipeline-continuation.js
 //
 // Research pipeline continuation helpers extracted from worker.js:
 // file-request follow-ups, research->plan chaining, and question extraction.
@@ -30,7 +30,7 @@ import {
   logFanoutSynthesisCompleted,
   normalizeFanoutBranches,
 } from "../../../research/functions/fanout.js";
-import { validateScopedPath } from "./assessment-shared.js";
+import { validateScopedPath } from "../../../../shared/scope/functions/validation.js";
 import {
   defaultResearchModelTier,
   getResearchBudget,
@@ -38,8 +38,8 @@ import {
   maxResearchBudget,
   normalizeResearchBudget,
   researchBudgetToReasoningEffort,
-} from "./role-utils.js";
-import { spawnFromRole } from "../spawn-guard.js";
+} from "../../../../shared/policies/functions/role-utils.js";
+import { spawnFromRole } from "../../../queue/functions/spawn-guard.js";
 import { ResearchSession } from "../../../research/classes/ResearchSession.js";
 import {
   createRedTeamPlanChain,
