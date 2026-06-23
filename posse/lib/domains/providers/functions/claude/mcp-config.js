@@ -123,7 +123,7 @@ export function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
 }
 
 export function __testBuildClaudeDeterministicReadMcpConfigPayload(role, cwd, options = {}) {
-  return buildClaudeDeterministicReadMcpConfigPayload(role, cwd, options);
+  return buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cwd, options);
 }
 
 export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cwd, {
@@ -141,6 +141,7 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
   atlasAvailable = null,
   atlasGateEnabled = false,
   atlasConfig = null,
+  remoteToolSurfaceOptions = null,
 } = {}) {
   const enabled = roleUsesDeterministicReadMcp(role);
   if (!enabled) {
@@ -163,6 +164,7 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
     atlasAvailable,
     atlasGateEnabled,
     atlasConfig,
+    remoteToolSurfaceOptions,
   });
   if (!server?.ready) {
     return { active: false, tools: [], payload: null };

@@ -385,6 +385,31 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "file.write": { access: "atlas", summary: "Intentionally not exposed in native ATLAS v2. Use scoped write_file/edit_file; those tools push ATLAS live buffers and trigger normal refresh paths." },
 });
 
+const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
+  "repo.status",
+  "repo.overview",
+  "tree.overview",
+  "tree.scope",
+  "tree.branch",
+  "tree.expand",
+  "symbol.search",
+  "symbol.card",
+  "symbol.overview",
+  "slice.build",
+  "slice.refresh",
+  "context",
+  "context.summary",
+  "code.skeleton",
+  "code.lens",
+  "code.window",
+  "review.delta",
+  "review.analyze",
+  "review.risk",
+  "memory.query",
+  "policy.get",
+  "usage.stats",
+]);
+
 export const TOOL_ROLE_LIBRARY = Object.freeze({
   baseToolAllowlists: Object.freeze({
     dev: Object.freeze({
@@ -430,21 +455,25 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     researcher: Object.freeze({
       phase: "research",
       tools: Object.freeze([]),
+      internalTools: REMOTE_ATLAS_INTERNAL_TOOLS,
       rationale: "Remote policy issues the researcher ATLAS surface for bounded investigation.",
     }),
     planner: Object.freeze({
       phase: "planning",
       tools: Object.freeze([]),
+      internalTools: REMOTE_ATLAS_INTERNAL_TOOLS,
       rationale: "Remote policy issues the planner ATLAS surface for scope narrowing and decomposition confidence.",
     }),
     assessor: Object.freeze({
       phase: "assessment",
       tools: Object.freeze([]),
+      internalTools: REMOTE_ATLAS_INTERNAL_TOOLS,
       rationale: "Remote policy issues the assessor ATLAS surface for review/risk and focused evidence.",
     }),
     dev: Object.freeze({
       phase: "dev",
       tools: Object.freeze([]),
+      internalTools: REMOTE_ATLAS_INTERNAL_TOOLS,
       rationale: "Remote policy issues the developer ATLAS surface for targeted retrieval.",
     }),
     artificer: Object.freeze({
@@ -697,17 +726,20 @@ export function getAtlasRouteDefinitionForRole(role) {
   const route = TOOL_ROLE_LIBRARY.atlasRoutes[normalizedRole] || Object.freeze({
     phase: null,
     tools: Object.freeze([]),
+    internalTools: Object.freeze([]),
     rationale: "No ATLAS route is defined for this role.",
   });
+  const externalTools = Array.isArray(route.tools) ? route.tools : [];
+  const internalTools = Array.isArray(route.internalTools) ? route.internalTools : externalTools;
   return {
     phase: route.phase,
     // Advertised to (and gate-callable by) the agent: prefetch-only actions
     // are excluded here on purpose.
-    tools: [...route.tools].filter(isExternallyRoutedAtlasTool),
+    tools: [...externalTools].filter(isExternallyRoutedAtlasTool),
     // Routed for the role at all — what the handoff prefetch may execute on
     // the agent's behalf. Prefetch-only actions (tree.scope) stay in THIS
     // list; only mutating and fallback-only actions are stripped.
-    internalTools: [...route.tools].filter((tool) => !isBlockedFoldedAtlasTool(tool) && !isFallbackOnlyAtlasTool(tool)),
+    internalTools: [...internalTools].filter((tool) => !isBlockedFoldedAtlasTool(tool) && !isFallbackOnlyAtlasTool(tool)),
     rationale: route.rationale,
   };
 }
@@ -894,9 +926,10 @@ function renderRouteUsageLines(role, tools, opts = {}) {
     lines.push(`${label} gateway/workflow tools may take nested action names; nested actions must also appear in this role route. Do not use a wrapper to bypass routing.`);
   }
   lines.push(`${label} symbolId values are opaque. Never invent them from file paths, names, or file:symbol pairs; use IDs returned by ATLAS results, or symbolRef/file inputs where the tool explicitly supports them.`);
+  lines.push(`Search ${label} for repo-defined symbols, not language/runtime/library functions such as date, gmdate, password_verify, json_decode, Math.floor, or console.log. If you need repo code that uses those runtime identifiers, treat them as identifier filters: use code.lens on known files, symbol.search with scope=\"body\", or deterministic content search after the ${label} policy allows it.`);
 
   const discovery = [];
-  pushAvailableToolLine(discovery, tools, "symbol.search", "best first call when you know a concept or name but not the exact symbol ID.", opts);
+  pushAvailableToolLine(discovery, tools, "symbol.search", "best first call when you know a repo-defined concept or symbol name but not the exact symbol ID.", opts);
   pushAvailableToolLine(discovery, tools, "tree.branch", "best first call when you know a path, symbol, or branch and need structure around it.", opts);
   pushAvailableToolLine(discovery, tools, "tree.expand", "best first call when you have seed files, symbols, or areas and need nearby structure, siblings, tests, or entrypoints.", opts);
   if (discovery.length) {

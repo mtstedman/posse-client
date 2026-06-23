@@ -71,6 +71,7 @@ import {
   _estimateClaudeApiEquivalentCostUsd,
   _extractClaudeToolUsesFromStreamMessage,
   _extractStreamUsage,
+  _normalizeClaudeToolUseBlock,
   _usageNumberOrNull,
   estimateTokensFromText,
   parseTokenUsage,
@@ -980,12 +981,11 @@ export async function callProvider(promptText, {
 
           // Track tool use — capture tool name on block start, accumulate
           // input JSON from deltas, finalize on block stop.
-          if (msg.type === "content_block_start" && msg.content_block?.type === "tool_use") {
-            _pendingToolUse = {
-              id: typeof msg.content_block.id === "string" ? msg.content_block.id : null,
-              tool: msg.content_block.name,
-              input: null,
-            };
+          const startedToolUse = msg.type === "content_block_start"
+            ? _normalizeClaudeToolUseBlock(msg.content_block)
+            : null;
+          if (startedToolUse) {
+            _pendingToolUse = startedToolUse;
             _pendingToolInput = "";
           }
           if (_pendingToolUse && msg.type === "content_block_delta" && msg.delta?.type === "input_json_delta") {
@@ -1074,12 +1074,11 @@ export async function callProvider(promptText, {
             fullOutput += msg.delta.text;
             emitTextLines(msg.delta.text);
           }
-          if (msg.type === "content_block_start" && msg.content_block?.type === "tool_use") {
-            _pendingToolUse = {
-              id: typeof msg.content_block.id === "string" ? msg.content_block.id : null,
-              tool: msg.content_block.name,
-              input: null,
-            };
+          const startedToolUse = msg.type === "content_block_start"
+            ? _normalizeClaudeToolUseBlock(msg.content_block)
+            : null;
+          if (startedToolUse) {
+            _pendingToolUse = startedToolUse;
             _pendingToolInput = "";
           }
           if (_pendingToolUse && msg.type === "content_block_delta" && msg.delta?.type === "input_json_delta") {

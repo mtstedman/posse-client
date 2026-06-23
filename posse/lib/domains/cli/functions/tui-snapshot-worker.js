@@ -82,7 +82,7 @@ async function buildToolData({ projectDir = null, dbPath = null } = {}) {
 
   return {
     jobs: getToolInvocationCountsByJob({ limit: 20 }),
-    recent: getRecentToolInvocations({ limit: 40 }),
+    recent: getRecentToolInvocations({ limit: 40, includeUnscoped: false, currentRunOnly: true }),
     activeLocks: listActiveFileLocks(),
   };
 }

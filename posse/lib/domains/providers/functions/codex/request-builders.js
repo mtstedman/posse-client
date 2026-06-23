@@ -220,7 +220,7 @@ export function buildCodexDeterministicReadConfigOverrides(role, cwd, {
 }
 
 export function __testBuildCodexDeterministicReadConfigOverrides(role, cwd, options = {}) {
-  return buildCodexDeterministicReadConfigOverrides(role, cwd, options);
+  return buildCodexDeterministicReadConfigOverridesAsync(role, cwd, options);
 }
 
 export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd, {
@@ -238,6 +238,7 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
   atlasAvailable = null,
   atlasGateEnabled = false,
   atlasConfig = null,
+  remoteToolSurfaceOptions = null,
 } = {}) {
   const enabled = roleUsesDeterministicReadMcp(role);
   if (!enabled) {
@@ -267,6 +268,7 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     atlasAvailable,
     atlasGateEnabled,
     atlasConfig,
+    remoteToolSurfaceOptions,
   });
   if (!serverConfig?.ready) {
     return {

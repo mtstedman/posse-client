@@ -124,6 +124,46 @@ function _compactObject(obj = {}) {
   return Object.fromEntries(Object.entries(obj).filter(([, value]) => value != null && value !== ""));
 }
 
+function _pickFirstString(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+function _extractCodexMcpToolUse(body = {}) {
+  const invocation = body.invocation || body.tool_call || body.toolCall || body.call || body;
+  const toolName = _pickFirstString(
+    invocation?.tool,
+    invocation?.name,
+    invocation?.tool_name,
+    invocation?.toolName,
+    invocation?.server_tool_name,
+    invocation?.serverToolName,
+    body.tool,
+    body.name,
+    body.tool_name,
+    body.toolName,
+    body.server_tool_name,
+    body.serverToolName,
+  );
+  if (!toolName) return null;
+  const args = invocation?.arguments
+    ?? invocation?.args
+    ?? invocation?.input
+    ?? body.arguments
+    ?? body.args
+    ?? body.input
+    ?? {};
+  return {
+    tool: toolName,
+    input: (args && typeof args === "object") ? args : _parseCodexToolArguments(args),
+    call_id: invocation?.call_id || invocation?.callId || invocation?.id || body.call_id || body.callId || body.id || null,
+  };
+}
+
 function _extractCodexWebToolUse(body = {}, type = "") {
   const action = body.action && typeof body.action === "object" ? body.action : {};
   const query = body.query || body.search_query || action.query || action.search_query || null;
@@ -194,12 +234,12 @@ export function _extractCodexToolUse(msg) {
     return _extractCodexWebToolUse(body, type);
   }
   if (type === "function_call" || type === "tool_call") {
-    const toolName = body.name || body.tool;
+    const toolName = body.name || body.tool || body.tool_name || body.toolName;
     if (!toolName) return null;
     return {
       tool: String(toolName),
-      input: _parseCodexToolArguments(body.arguments ?? body.args),
-      call_id: body.call_id || body.callId || null,
+      input: _parseCodexToolArguments(body.arguments ?? body.args ?? body.input),
+      call_id: body.call_id || body.callId || body.id || null,
     };
   }
   if (type === "function_call_output" || type === "tool_call_output") {
@@ -207,7 +247,7 @@ export function _extractCodexToolUse(msg) {
     if (/user cancelled MCP tool call/i.test(outputText)) {
       return {
         _codexToolOutput: true,
-        call_id: body.call_id || body.callId || null,
+        call_id: body.call_id || body.callId || body.id || null,
         status: "cancelled",
         error: "user cancelled MCP tool call",
         output: outputText,
@@ -215,16 +255,8 @@ export function _extractCodexToolUse(msg) {
     }
     return null;
   }
-  if (type === "mcp_tool_call_begin" || type === "mcp_tool_begin") {
-    const invocation = body.invocation || body.tool_call || body;
-    const toolName = invocation?.tool || invocation?.name;
-    if (!toolName) return null;
-    const args = invocation?.arguments ?? invocation?.args ?? {};
-    return {
-      tool: String(toolName),
-      input: (args && typeof args === "object") ? args : _parseCodexToolArguments(args),
-      call_id: invocation?.call_id || invocation?.callId || body.call_id || body.callId || null,
-    };
+  if (type === "mcp_tool_call" || type === "mcp_tool_call_begin" || type === "mcp_tool_begin") {
+    return _extractCodexMcpToolUse(body);
   }
   return null;
 }

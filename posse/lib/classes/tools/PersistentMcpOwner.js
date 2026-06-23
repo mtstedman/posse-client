@@ -19,6 +19,7 @@ import {
   verifyMcpOAuthToken,
 } from "../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { getSharedAtlasToolExecutor } from "../../domains/atlas/functions/v2/tools/executor.js";
+import { recordToolUseObservations } from "../../domains/observability/functions/observations.js";
 import { appendRunTelemetry } from "../../shared/telemetry/functions/run-telemetry.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
@@ -180,7 +181,7 @@ function suiteToolAllowlistPolicy(bootConfig = {}) {
   }
   return {
     suites,
-    source: source ? "remote-token" : "missing-token-allowlist",
+    source: source ? "token-allowlist" : "missing-token-allowlist",
   };
 }
 
@@ -311,6 +312,42 @@ function mcpToolCallSuccess(response = null) {
     ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("")
     : "";
   return !/^(?:Error:|AUDIT ERROR:)/i.test(String(text || ""));
+}
+
+function mcpToolResultErrorText(result = null) {
+  if (!result?.isError) return "";
+  const contentText = Array.isArray(result?.content)
+    ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").filter(Boolean).join("\n")
+    : "";
+  const structured = result?.structuredContent?.error?.message || result?._meta?.atlasError?.message || "";
+  return capString(contentText || structured || "ATLAS tool returned an error", 700);
+}
+
+function recordOwnerToolObservation({ session, toolName, toolArgs, result = null, error = null } = {}) {
+  const boot = session?.bootConfig || {};
+  const errorText = error
+    ? capString(error?.message || String(error), 700)
+    : mcpToolResultErrorText(result);
+  try {
+    recordToolUseObservations({
+      work_item_id: boot.workItemId ?? null,
+      job_id: boot.jobId ?? null,
+      attempt_id: boot.attemptId ?? null,
+      cwd: boot.cwd || null,
+      tool_uses: [{
+        tool: toolName,
+        input: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
+        ...(errorText ? { status: "error", error: errorText } : {}),
+      }],
+    });
+  } catch (recordErr) {
+    appendRunTelemetry("diagnostics", {
+      kind: "mcp.owner.tool_observation_failed",
+      ...attachTelemetryContext(session, null),
+      tool_name: toolName || null,
+      error: ownerErrorSummary(recordErr),
+    });
+  }
 }
 
 function jsonlParseBuffer(buffer, onMessage, { onParseError = null, maxBufferBytes = JSONL_STDOUT_BUFFER_MAX_BYTES } = {}) {
@@ -684,7 +721,7 @@ export class PersistentMcpOwner {
     const claims = verifyMcpOAuthToken(token);
     const verified = true;
     claims.__verified = verified;
-    if (!claims.__source) claims.__source = "remote";
+    if (!claims.__source) claims.__source = "local";
     const id = String(claims.jti || claims.sub || "");
     if (!id) throw new Error("MCP OAuth token is missing a session id");
     const sessionBootConfig = {
@@ -1046,6 +1083,7 @@ export class PersistentMcpOwner {
       const result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
+      recordOwnerToolObservation({ session, toolName, toolArgs, result });
       appendRunTelemetry("diagnostics", {
         kind: "mcp.owner.atlas_tool_call",
         ...context,
@@ -1064,6 +1102,7 @@ export class PersistentMcpOwner {
         duration_ms: Date.now() - startedAt,
         error: ownerErrorSummary(err),
       });
+      recordOwnerToolObservation({ session, toolName, toolArgs, error: err });
       return mcpToolResultMessage(
         message,
         mcpToolErrorPayload(String(err?.message || err || "ATLAS tool execution failed"), err),

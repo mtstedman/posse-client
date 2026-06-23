@@ -313,7 +313,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.search": {
     type: "function",
     name: "atlas_symbol_search",
-    description: "Discovery. Search ATLAS's indexed symbol graph for relevant symbols by name, concept, or semantic hint when you do not yet know the symbol ID.",
+    description: "Discovery. Search ATLAS's indexed repo-defined symbol graph for relevant project symbols by name, concept, or semantic hint when you do not yet know the symbol ID. Do not use this to resolve language/runtime/library functions such as date, gmdate, password_verify, json_decode, Math.floor, or console.log; use body/code lookup to find repo code that calls them.",
     parameters: {
       type: "object",
       properties: {

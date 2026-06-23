@@ -165,21 +165,28 @@ function readObservationFileRows({
   }).map(normalizeObservationRow).filter(Boolean);
 }
 
-function enrichToolInvocationRows(db, rows) {
-  const jobStmt = db.prepare(`SELECT job_type, provider, status FROM jobs WHERE id = ?`);
-  return rows.map((row) => {
+function enrichToolInvocationRows(db, rows, { includeUnscoped = true } = {}) {
+  const jobStmt = db.prepare(`SELECT job_type, provider, status, work_item_id FROM jobs WHERE id = ?`);
+  const workItemStmt = db.prepare(`SELECT id FROM work_items WHERE id = ?`);
+  const enriched = [];
+  for (const row of rows) {
     const job = row.job_id == null ? null : jobStmt.get(row.job_id);
-    return {
+    const resolvedWorkItemId = row.work_item_id ?? job?.work_item_id ?? null;
+    const hasLiveJob = row.job_id != null && !!job;
+    const hasLiveWorkItem = resolvedWorkItemId != null && !!workItemStmt.get(resolvedWorkItemId);
+    if (!includeUnscoped && !hasLiveJob && !hasLiveWorkItem) continue;
+    enriched.push({
       job_id: row.job_id,
-      work_item_id: row.work_item_id,
+      work_item_id: resolvedWorkItemId,
       observation_type: row.observation_type,
       summary: row.summary,
       created_at: row.created_at,
       job_type: job?.job_type ?? null,
       provider: job?.provider ?? null,
       status: job?.status ?? null,
-    };
-  });
+    });
+  }
+  return enriched;
 }
 
 function _closeStream() {
@@ -1031,24 +1038,26 @@ export function getObservationsByJob(jobId, limit = 100) {
   return mergeObservationRows([...fileRows, ...dbRows], "desc", cappedLimit);
 }
 
-export function getRecentToolInvocations({ limit = 200 } = {}) {
+export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, currentRunOnly = false } = {}) {
   // Both chain_read and chain_verdict live under "tool.*" now, so a single
   // prefix match is sufficient. The legacy "chain.%" branch was dropped after
   // the naming unification — historical rows are migrated in lib/db.js.
   const db = getDb();
   const cappedLimit = Math.max(0, Number(limit) || 0);
-  const fileRows = readObservationFileRows({ typePrefix: "tool.", limit: cappedLimit, order: "desc" });
-  const dbRows = db.prepare(`
+  const candidateLimit = includeUnscoped ? cappedLimit : Math.max(200, cappedLimit * 10);
+  const fileRows = readObservationFileRows({ typePrefix: "tool.", limit: candidateLimit, order: "desc" });
+  const dbRows = currentRunOnly ? [] : db.prepare(`
     SELECT o.*
     FROM job_observations o
     WHERE o.observation_type LIKE 'tool.%'
     ORDER BY o.id DESC
     LIMIT ?
-  `).all(cappedLimit);
+  `).all(candidateLimit);
   return enrichToolInvocationRows(
     db,
-    mergeObservationRows([...fileRows, ...dbRows], "desc", cappedLimit),
-  );
+    mergeObservationRows([...fileRows, ...dbRows], "desc", candidateLimit),
+    { includeUnscoped },
+  ).slice(0, cappedLimit);
 }
 
 export function getToolInvocationCountsByJob({ limit = 50 } = {}) {

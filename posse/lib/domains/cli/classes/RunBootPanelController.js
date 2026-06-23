@@ -174,6 +174,15 @@ export class RunBootPanelController {
     this.lastRenderAt = now;
   }
 
+  clearRenderedPanel() {
+    if (!process.stdout?.isTTY || this.renderedRows <= 0) return;
+    const up = Math.max(0, this.renderedRows - 1);
+    const buf = `${up > 0 ? `\x1b[${up}A` : ""}\r\x1b[J`;
+    this.terminalOutputIntercept.writeStdout(buf);
+    this.renderedRows = 0;
+    this.lastRenderAt = Date.now();
+  }
+
   ensureMonitor() {
     if (this.getDisplay() || this.monitorTimer || this.monitorDisposed) return;
     this.monitorTimer = setInterval(() => this.render({ force: true }), 120);
@@ -380,7 +389,7 @@ export class RunBootPanelController {
     }
   }
 
-  stop({ final = false } = {}) {
+  stop({ final = false, clear = false } = {}) {
     if (this.monitorTimer) {
       clearInterval(this.monitorTimer);
       this.monitorTimer = null;
@@ -391,7 +400,8 @@ export class RunBootPanelController {
         return;
       }
       this.releaseInput();
-      this.render({ final: true, force: true });
+      if (clear) this.clearRenderedPanel();
+      else this.render({ final: true, force: true });
       this.monitorDisposed = true;
       this.terminalOutputIntercept.release();
     }

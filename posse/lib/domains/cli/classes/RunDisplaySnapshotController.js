@@ -112,7 +112,7 @@ export class RunDisplaySnapshotController {
       catch (err) { this.log?.debug?.("display", "Local tool job-count fallback failed", { error: String(err?.message || err) }); }
     }
     if (typeof this.getRecentToolInvocations === "function") {
-      try { snapshot.recent = this.getRecentToolInvocations({ limit: 40 }); }
+      try { snapshot.recent = this.getRecentToolInvocations({ limit: 40, includeUnscoped: false, currentRunOnly: true }); }
       catch (err) { this.log?.debug?.("display", "Local recent-tool fallback failed", { error: String(err?.message || err) }); }
     }
     if (typeof this.listActiveFileLocks === "function") {

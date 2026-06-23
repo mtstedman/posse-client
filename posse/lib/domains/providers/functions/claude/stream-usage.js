@@ -68,17 +68,41 @@ export function estimateTokensFromText(text) {
   return Math.max(1, Math.ceil(length / 4));
 }
 
+const CLAUDE_TOOL_USE_BLOCK_TYPES = new Set(["tool_use", "server_tool_use", "mcp_tool_use"]);
+
+function _pickFirstString(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+export function _normalizeClaudeToolUseBlock(block) {
+  if (!block || typeof block !== "object") return null;
+  if (!CLAUDE_TOOL_USE_BLOCK_TYPES.has(String(block.type || ""))) return null;
+  const toolName = _pickFirstString(
+    block.name,
+    block.tool_name,
+    block.toolName,
+    block.mcp_tool_name,
+    block.mcpToolName,
+  );
+  if (!toolName) return null;
+  return {
+    id: _pickFirstString(block.id, block.tool_use_id, block.toolUseId),
+    tool: toolName,
+    input: block.input && typeof block.input === "object" ? block.input : null,
+  };
+}
+
 function _extractClaudeToolUsesFromContent(content) {
   if (!Array.isArray(content)) return [];
   const toolUses = [];
   for (const block of content) {
-    if (!block || typeof block !== "object") continue;
-    if (block.type !== "tool_use" || typeof block.name !== "string" || !block.name.trim()) continue;
-    toolUses.push({
-      id: typeof block.id === "string" && block.id.trim() ? block.id.trim() : null,
-      tool: block.name,
-      input: block.input && typeof block.input === "object" ? block.input : null,
-    });
+    const toolUse = _normalizeClaudeToolUseBlock(block);
+    if (toolUse) toolUses.push(toolUse);
   }
   return toolUses;
 }
@@ -86,9 +110,10 @@ function _extractClaudeToolUsesFromContent(content) {
 export function _extractClaudeToolUsesFromStreamMessage(msg) {
   if (!msg || typeof msg !== "object") return [];
   return [
+    _normalizeClaudeToolUseBlock(msg),
     ..._extractClaudeToolUsesFromContent(msg.content),
     ..._extractClaudeToolUsesFromContent(msg.message?.content),
-  ];
+  ].filter(Boolean);
 }
 
 export function __testExtractClaudeToolUsesFromStreamMessage(msg) {
@@ -107,4 +132,3 @@ export function _estimateClaudeApiEquivalentCostUsd({ modelName, modelTier, usag
   const cost = ((billableInputUnits * rates.inputPerM) + (output * rates.outputPerM)) / 1_000_000;
   return Number.isFinite(cost) ? cost : null;
 }
-
