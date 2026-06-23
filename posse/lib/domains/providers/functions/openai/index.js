@@ -35,6 +35,7 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import { extractJson } from "../../../../shared/format/functions/json.js";
 
 export { extractJson };
+export { getUsageSummary };
 
 function abortableThrottle(ms, signal = null) {
   if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));

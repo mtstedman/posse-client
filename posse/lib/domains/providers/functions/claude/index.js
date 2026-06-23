@@ -371,14 +371,17 @@ export async function callProvider(promptText, {
     const atlasServerName = deterministicReadMcp.active
       ? deterministicReadMcp.serverName
       : atlasMcpPayload?.serverName;
-    const atlasContractTools = atlasReadyForMcp
-      ? buildMcpAtlasSurfaceToolDescriptors(atlasAttachment.tools, {
+    const remoteAtlasToolNames = Array.isArray(deterministicReadMcp.atlasTools)
+      ? deterministicReadMcp.atlasTools
+      : [];
+    const atlasContractTools = atlasReadyForMcp && remoteAtlasToolNames.length > 0
+      ? buildMcpAtlasSurfaceToolDescriptors(remoteAtlasToolNames, {
         providerName: "claude",
         serverName: atlasServerName,
       })
       : [];
-    const promptAtlasAttachment = atlasReadyForMcp
-      ? { ...atlasAttachment, surfaceToolNames: buildSurfaceNameMap(atlasContractTools) }
+    const promptAtlasAttachment = atlasReadyForMcp && remoteAtlasToolNames.length > 0
+      ? { ...atlasAttachment, tools: remoteAtlasToolNames, surfaceToolNames: buildSurfaceNameMap(atlasContractTools) }
       : { ...atlasAttachment, active: false, tools: [] };
     if (remoteSystemPromptText) {
       try {

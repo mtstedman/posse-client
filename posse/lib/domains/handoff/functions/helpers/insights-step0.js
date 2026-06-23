@@ -58,11 +58,12 @@ function memorySurfaceEnabled({
   hasPromotedMemories = false,
   settingReader = getSetting,
 } = {}) {
-  const configured = settingValue(settingReader, SETTING_KEYS.ATLAS_MEMORY_SURFACE) ?? "auto";
+  const configured = settingValue(settingReader, SETTING_KEYS.ATLAS_MEMORY_SURFACE) ?? "on";
   const raw = String(configured).trim().toLowerCase();
   if (["1", "true", "on", "yes"].includes(raw)) return true;
   if (["0", "false", "off", "no"].includes(raw)) return false;
-  return !!hasPromotedMemories;
+  if (raw === "auto") return !!hasPromotedMemories;
+  return false;
 }
 
 function normalizeSurfaceMemory(memory = {}) {

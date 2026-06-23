@@ -1,6 +1,6 @@
 // @ts-check
 //
-// pr.risk.analyze + pr.risk handlers, plus delta.get.
+// review.analyze + review.risk handlers, plus review.delta.
 //
 // The PR-risk surface combines two pieces:
 //   1. A semantic delta between two versions (added/removed/modified
@@ -46,10 +46,10 @@ import { okEnvelope, errorEnvelope } from "./envelope.js";
 export function deltaGet({ view, versionId, params, ledger }) {
   if (!params.fromVersion || !params.toVersion) {
     return errorEnvelope({
-      action: "delta.get",
+      action: "review.delta",
       versionId,
       code: "invalid_params",
-      message: "delta.get requires fromVersion and toVersion",
+      message: "review.delta requires fromVersion and toVersion",
     });
   }
   const maxCards = typeof params.maxCards === "number" ? params.maxCards : 100;
@@ -78,10 +78,10 @@ export function deltaGet({ view, versionId, params, ledger }) {
           },
           truncated: result.cards.length > maxCards,
         };
-        return okEnvelope({ action: "delta.get", versionId, data });
+        return okEnvelope({ action: "review.delta", versionId, data });
       } catch (err) {
         return errorEnvelope({
-          action: "delta.get",
+          action: "review.delta",
           versionId,
           code: "ledger_walk_failed",
           message: String(/** @type {any} */ (err)?.message || err),
@@ -125,7 +125,7 @@ export function deltaGet({ view, versionId, params, ledger }) {
     },
     truncated: allSymbols.length > maxCards,
   };
-  return okEnvelope({ action: "delta.get", versionId, data });
+  return okEnvelope({ action: "review.delta", versionId, data });
 }
 
 /**
@@ -140,10 +140,10 @@ export function deltaGet({ view, versionId, params, ledger }) {
 export function prRiskAnalyze({ view, versionId, params, ledger }) {
   if (!params.fromVersion || !params.toVersion) {
     return errorEnvelope({
-      action: "pr.risk.analyze",
+      action: "review.analyze",
       versionId,
       code: "invalid_params",
-      message: "pr.risk.analyze requires fromVersion and toVersion",
+      message: "review.analyze requires fromVersion and toVersion",
     });
   }
 
@@ -185,7 +185,7 @@ export function prRiskAnalyze({ view, versionId, params, ledger }) {
       recommendedTests: [],
       riskScore: 0,
     };
-    return okEnvelope({ action: "pr.risk.analyze", versionId, data });
+    return okEnvelope({ action: "review.analyze", versionId, data });
   }
   if (touchedPaths.size === 0) {
     const all = collectAllSymbolsInView(view);
@@ -260,7 +260,7 @@ export function prRiskAnalyze({ view, versionId, params, ledger }) {
     })),
     riskScore,
   };
-  return okEnvelope({ action: "pr.risk.analyze", versionId, data });
+  return okEnvelope({ action: "review.analyze", versionId, data });
 }
 
 /**
@@ -296,18 +296,18 @@ export function prRisk({ view, versionId, params, ledger }) {
   });
   if (!delta.ok) {
     const err = /** @type {any} */ (delta).error;
-    return errorEnvelope({ ...err, action: "pr.risk", versionId });
+    return errorEnvelope({ ...err, action: "review.risk", versionId });
   }
   if (!risk.ok) {
     const err = /** @type {any} */ (risk).error;
-    return errorEnvelope({ ...err, action: "pr.risk", versionId });
+    return errorEnvelope({ ...err, action: "review.risk", versionId });
   }
   /** @type {PrRiskData} */
   const data = {
     delta: /** @type {any} */ (delta.data),
     risk: /** @type {any} */ (risk.data),
   };
-  return okEnvelope({ action: "pr.risk", versionId, data });
+  return okEnvelope({ action: "review.risk", versionId, data });
 }
 
 // ---------------------------------------------------------------------------

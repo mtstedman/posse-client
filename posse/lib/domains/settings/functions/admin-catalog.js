@@ -247,10 +247,8 @@ export const SETTINGS_GROUPS = Object.freeze([
   {
     id: "remote",
     pane: "general",
-    label: "remote & file requests",
+    label: "file requests",
     keys: Object.freeze([
-      "posse_remote_mode",
-      "posse_remote_url",
       "file_request_low_risk_extensions",
     ]),
   },

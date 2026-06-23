@@ -20,7 +20,7 @@ import { sliceBuild, sliceRefresh, sliceSpilloverGet } from "./slice.js";
 import { editPlan } from "./edit-plan.js";
 import { repoRegister, repoStatus, indexRefresh, repoOverview, repoQuality } from "./repo.js";
 import { bufferPush, bufferCheckpoint, bufferStatus, makeOverlayReadFile } from "./buffer.js";
-import { symbolGetCard, symbolGetCards } from "./symbol-card.js";
+import { symbolGetCard } from "./symbol-card.js";
 import { symbolUsages } from "./usages.js";
 import { treeGrow, treeOverview, treeScope, treeWalk } from "./tree.js";
 import {
@@ -59,7 +59,7 @@ import { workflowExecute } from "./workflow.js";
  * @typedef {Object} DispatchContext
  * @property {View} [view]
  * @property {string} versionId
- * @property {Ledger} [ledger]        Optional ledger for history-aware operations (delta.get, agent.feedback persistence, retrieval feedback boost).
+ * @property {Ledger} [ledger]        Optional ledger for history-aware operations (review.delta, agent.feedback persistence, retrieval feedback boost).
  * @property {ReadFile} [readFile]
  * @property {string} [repoRoot]      Filesystem root used to resolve repo-relative reads.
  * @property {string} [viewPath]
@@ -223,33 +223,22 @@ function dispatchImpl(call, ctx) {
         planner: ctx.planner,
         onDemandEmbeddingFill: ctx.config?.onDemandEmbeddingFill !== false,
       }));
-    case "symbol.getCard":
+    case "symbol.card":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      // Unified single/batch: symbolIds (or symbolRefs/cards arrays) answer in
-      // the batch shape under the requested action; symbol.getCards remains a
-      // legacy alias of the batch path.
-      if ((Array.isArray(call.symbolIds) && call.symbolIds.length > 0)
-        || (Array.isArray(call.symbolRefs) && call.symbolRefs.length > 0)
-        || (Array.isArray(call.cards) && call.cards.length > 0)) {
-        return /** @type {any} */ (symbolGetCards({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId, action: "symbol.getCard" }));
-      }
       return /** @type {any} */ (symbolGetCard({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
-    case "symbol.getCards":
-      if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (symbolGetCards({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
-    case "symbol.usages":
+    case "symbol.overview":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (symbolUsages({ view: ctx.view, versionId: ctx.versionId, params: call }));
     case "tree.overview":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (treeOverview({ view: ctx.view, versionId: ctx.versionId, params: call }));
-    case "tree.walk":
+    case "tree.branch":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (treeWalk({ view: ctx.view, versionId: ctx.versionId, params: call }));
     case "tree.scope":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (treeScope({ view: ctx.view, versionId: ctx.versionId, params: call }));
-    case "tree.grow":
+    case "tree.expand":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (treeGrow({ view: ctx.view, versionId: ctx.versionId, params: call }));
     case "slice.build":
@@ -276,13 +265,13 @@ function dispatchImpl(call, ctx) {
     case "edit.plan":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (editPlan({ view: ctx.view, versionId: ctx.versionId, params: call }));
-    case "code.getSkeleton":
+    case "code.skeleton":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeGetSkeletonAsync : codeGetSkeleton)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
-    case "code.getHotPath":
+    case "code.lens":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeGetHotPathAsync : codeGetHotPath)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
-    case "code.needWindow":
+    case "code.window":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeNeedWindowAsync : codeNeedWindow)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "context":
@@ -294,13 +283,13 @@ function dispatchImpl(call, ctx) {
     case "agent.feedback":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (agentFeedback({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger }));
-    case "delta.get":
+    case "review.delta":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (deltaGet({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger }));
-    case "pr.risk.analyze":
+    case "review.analyze":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (prRiskAnalyze({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger }));
-    case "pr.risk":
+    case "review.risk":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (prRisk({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger }));
     case "file.read":
@@ -364,31 +353,30 @@ function validationErrorCodeForAction(action, errors = []) {
 const GATEWAY_ACTIONS = Object.freeze({
   query: new Set([
     "symbol.search",
-    "symbol.getCard",
-    "symbol.getCards",
-    "symbol.usages",
+    "symbol.card",
+    "symbol.overview",
     "tree.overview",
-    "tree.walk",
+    "tree.branch",
     "tree.scope",
-    "tree.grow",
+    "tree.expand",
     "slice.build",
     "slice.refresh",
     "slice.spillover.get",
     "edit.plan",
     "context",
     "context.summary",
-    "delta.get",
-    "pr.risk.analyze",
-    "pr.risk",
+    "review.delta",
+    "review.analyze",
+    "review.risk",
     "repo.status",
     "repo.quality",
     "memory.query",
     "file.read",
   ]),
   code: new Set([
-    "code.getSkeleton",
-    "code.getHotPath",
-    "code.needWindow",
+    "code.skeleton",
+    "code.lens",
+    "code.window",
     "edit.plan",
     "file.read",
   ]),

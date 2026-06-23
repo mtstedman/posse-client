@@ -101,8 +101,9 @@ function scoreMappingForSource(mapping, source) {
 }
 
 function bestSourceForMapping(mapping, sources) {
+  if (!mappingBasename(mapping)) return sources[0] || null;
   let best = null;
-  let bestScore = -1;
+  let bestScore = 0;
   for (const source of sources) {
     const score = scoreMappingForSource(mapping, source);
     if (

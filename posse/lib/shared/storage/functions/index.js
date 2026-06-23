@@ -1196,8 +1196,8 @@ export function getDb() {
   }
 
   // ── Migration: atlas_prefetch_status on agent_calls (Plan 2) ──────────────
-  // Captures whether handoff ATLAS prefetch (repo.status, delta.get,
-  // pr.risk.analyze, slice.build) completed for this call. Values:
+  // Captures whether handoff ATLAS prefetch (repo.status, review.delta,
+  // review.analyze, slice.build) completed for this call. Values:
   //   'ok'      — all attached prefetches succeeded
   //   'partial' — some succeeded, some failed
   //   'failed'  — attached prefetches all failed

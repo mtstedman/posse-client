@@ -1,53 +1,37 @@
 // Runtime session orchestration for the run command.
 // Keeps the CLI entry point thin while preserving the existing command behavior.
 
-import readline from "readline";
-import { displayRoleForJobType } from "../../providers/functions/roles.js";
 import { ensureRemoteCatalogLoaded, getRemoteCatalog } from "../../providers/functions/model-catalog-store.js";
 import { describeModelCatalogWarning, validateConfiguredModels } from "../../providers/functions/model-catalog-validate.js";
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
 import { cancelOpenPushOfferGates } from "../../queue/functions/push-offer.js";
-import {
-  RUNTIME_STATUS_KEYS,
-  clearRuntimeStatus,
-  markCleanShutdown,
-  writeRuntimeStatus,
-} from "../../queue/functions/runtime-status.js";
-import { createBootPanel } from "../functions/boot-panel.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
 import { inspectLocalOnnxStatus } from "../../atlas/functions/v2/embeddings/local-onnx.js";
 import { setConductorKeepWarm, closeSharedConductor } from "../../atlas/functions/v2/parse/conductor.js";
 import { setOnnxDaemonKeepWarm, closeSharedOnnxDaemon } from "../../atlas/functions/v2/embeddings/onnx-daemon.js";
-import { renderNeuralNetworkBanner } from "../../ui/functions/display/neural-network-banner.js";
 import { getOnnxWarmState, resetOnnxWarmState, setOnnxWarmState } from "../../atlas/functions/v2/embeddings/onnx-warm-state.js";
 import { recordEmbeddingForensics } from "../../atlas/functions/v2/embeddings/forensics.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
-import { closeDb } from "../../../shared/storage/functions/index.js";
-import { flushEventsNow } from "../../queue/functions/events.js";
-import { closeLog } from "../../../shared/telemetry/functions/logging/logger.js";
-import { closeOutputLog } from "../../../shared/telemetry/functions/logging/output-log.js";
-import { closePromptLog } from "../../../shared/telemetry/functions/logging/prompt-log.js";
-import { closeObservationLog } from "../../observability/functions/observations.js";
 import { recordRunDiagnostic } from "../../../shared/telemetry/functions/run-diagnostics.js";
 import { ensureBootDependenciesInWorker, formatBootDependencySync } from "../../system/functions/dependency-sync.js";
-import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { ACTIVE_LEASE_STATUSES, LOCK_HOLDING_JOB_STATUSES } from "../../../catalog/job.js";
+import { LOCK_HOLDING_JOB_STATUSES } from "../../../catalog/job.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
-import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
-import { fit as fitAnsi } from "../../../shared/format/functions/ansi.js";
 import { nativeBinaries as defaultNativeBinaries } from "../../../classes/tools/BinaryManager.js";
 import { daemonSupervisor as defaultDaemonSupervisor } from "../../../classes/tools/daemon/index.js";
 import { persistentMcpOwner } from "../../../classes/tools/PersistentMcpOwner.js";
+import { RunBootPanelController } from "./RunBootPanelController.js";
+import { RunCloseoutController } from "./RunCloseoutController.js";
+import { RunDisplayActions } from "./RunDisplayActions.js";
+import { RunDisplaySnapshotController } from "./RunDisplaySnapshotController.js";
+import { RunIdleAutoMergeController } from "./RunIdleAutoMergeController.js";
+import { RunSchedulerLoopCallbacks } from "./RunSchedulerLoopCallbacks.js";
+import { RunShutdownController } from "./RunShutdownController.js";
 import {
   PROVIDER_AUTH_WARMUP_TIMEOUT_MS,
   PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS,
-  EMPTY_TOOL_SNAPSHOT,
-  buildImageInjectionPayload,
   closeRuntimeStateForExit,
-  createTerminalOutputIntercept,
+  firstLine,
   handleWrapUpSignal,
-  createAsyncSnapshotCache,
-  runTuiSnapshotTask,
   bootScipLangPatchFromEvent,
   scopeScipEventToSourceLanguage,
 } from "../functions/run-session.js";
@@ -176,150 +160,43 @@ export class RunSession {
   // indexing begins. Declared at function scope so the post-boot call site can
   // reach it regardless of the assembly block.
   let startAtlasWarmupPhase = null;
-  let displaySnapshotCaches = null;
-  const displaySnapshotTimers = new Set();
-  const trackDisplaySnapshotTimer = (timer) => {
-    if (!timer) return timer;
-    timer.unref?.();
-    displaySnapshotTimers.add(timer);
-    return timer;
-  };
-  const clearDisplaySnapshotTimers = () => {
-    for (const timer of displaySnapshotTimers) clearInterval(timer);
-    displaySnapshotTimers.clear();
-  };
-  const stopDisplaySnapshotCaches = () => {
-    clearDisplaySnapshotTimers();
-    displaySnapshotCaches?.dirty?.stop?.();
-    displaySnapshotCaches?.pipeline?.stop?.();
-    displaySnapshotCaches?.tools?.stop?.();
-    displaySnapshotCaches = null;
-  };
-  const refreshDisplaySnapshotsForQueue = () => {
-    if (!displaySnapshotCaches) return;
-    void displaySnapshotCaches.dirty.refresh();
-    if (display?._rightMode === "pipeline") void displaySnapshotCaches.pipeline.refresh();
-    if (display?._rightMode === "tools") void displaySnapshotCaches.tools.refresh();
-  };
-  const setupDisplaySnapshotCaches = () => {
-    if (!display || displaySnapshotCaches) return;
-    const snapshotArgs = {
-      projectDir: PROJECT_DIR,
-      dbPath: getRuntimeDbPath(PROJECT_DIR),
-    };
-    const requestPaneRender = (mode) => {
-      if (display?._rightMode === mode) display.requestRender?.({ reason: "queue-snapshot" });
-    };
-    const buildLocalToolSnapshot = () => {
-      const fallback = EMPTY_TOOL_SNAPSHOT;
-      const snapshot = { jobs: [], recent: [], activeLocks: fallback.activeLocks };
-      if (typeof getToolInvocationCountsByJob === "function") {
-        try { snapshot.jobs = getToolInvocationCountsByJob({ limit: 20 }); }
-        catch (err) { log?.debug?.("display", "Local tool job-count fallback failed", { error: String(err?.message || err) }); }
-      }
-      if (typeof getRecentToolInvocations === "function") {
-        try { snapshot.recent = getRecentToolInvocations({ limit: 40 }); }
-        catch (err) { log?.debug?.("display", "Local recent-tool fallback failed", { error: String(err?.message || err) }); }
-      }
-      if (typeof listActiveFileLocks === "function") {
-        try { snapshot.activeLocks = listActiveFileLocks(); }
-        catch (err) { log?.debug?.("display", "Local active-lock fallback failed", { error: String(err?.message || err) }); }
-      }
-      return snapshot;
-    };
-    const loadToolSnapshot = async () => {
-      try {
-        const snapshot = await runTuiSnapshotTask("tools", snapshotArgs);
-        if (snapshot?.activeLocks) return snapshot;
-        const local = buildLocalToolSnapshot();
-        return { ...local, ...(snapshot || {}), activeLocks: local.activeLocks };
-      } catch (err) {
-        log?.debug?.("display", "Tool snapshot worker failed; using local fallback", { error: String(err?.message || err) });
-        return buildLocalToolSnapshot();
-      }
-    };
-    const dirty = createAsyncSnapshotCache({
-      initialValue: null,
-      minIntervalMs: 2500,
-      load: typeof collectDirtyStateAsync === "function" ? () => collectDirtyStateAsync() : null,
-      onUpdate: (state) => display?.acceptDirtyStateSnapshot?.(state),
-      onError: (err) => {
-        log?.debug?.("display", "Dirty-state snapshot refresh failed", { error: String(err?.message || err) });
-      },
-    });
-    const pipeline = createAsyncSnapshotCache({
-      initialValue: [],
-      minIntervalMs: 750,
-      load: () => runTuiSnapshotTask("pipeline", snapshotArgs),
-      onUpdate: () => requestPaneRender("pipeline"),
-      onError: (err) => {
-        log?.debug?.("display", "Pipeline snapshot refresh failed", { error: String(err?.message || err) });
-      },
-    });
-    const tools = createAsyncSnapshotCache({
-      initialValue: buildLocalToolSnapshot(),
-      minIntervalMs: 750,
-      load: loadToolSnapshot,
-      onUpdate: () => requestPaneRender("tools"),
-      onError: (err) => {
-        log?.debug?.("display", "Tool snapshot refresh failed", { error: String(err?.message || err) });
-      },
-    });
-    displaySnapshotCaches = { dirty, pipeline, tools };
-    display.getDirtyState = () => dirty.get();
-    display.getPipelineData = () => pipeline.get();
-    display.getToolData = () => tools.get();
-    void dirty.refresh({ force: true });
-    void pipeline.refresh({ force: true });
-    void tools.refresh({ force: true });
-    trackDisplaySnapshotTimer(setInterval(() => void dirty.refresh(), 5000));
-    trackDisplaySnapshotTimer(setInterval(() => {
-      if (display?._rightMode === "pipeline") void pipeline.refresh();
-      if (display?._rightMode === "tools") void tools.refresh();
-    }, 1000));
-  };
+  let scheduler = null;
+  let worker = null;
+  const displaySnapshots = new RunDisplaySnapshotController({
+    getDisplay: () => display,
+    projectDir: PROJECT_DIR,
+    log,
+    collectDirtyStateAsync,
+    getToolInvocationCountsByJob,
+    getRecentToolInvocations,
+    listActiveFileLocks,
+  });
+  const stopDisplaySnapshotCaches = () => displaySnapshots.stop();
+  const refreshDisplaySnapshotsForQueue = () => displaySnapshots.refreshForQueue();
+  const setupDisplaySnapshotCaches = () => displaySnapshots.setup();
 
-  const hasLiveDisplay = () => !!(display && display._started !== false && typeof display.addEvent === "function");
-  const emitCloseoutStatus = (message, color = C.dim) => {
-    const line = `${color}${message}${C.reset}`;
-    if (hasLiveDisplay()) {
-      display.addEvent(line);
-      display.requestRender?.({ force: true });
-    } else {
-      console.log(`  ${line}`);
-    }
-  };
-  const flushCloseoutStatus = async () => {
-    if (hasLiveDisplay()) await new Promise((resolve) => setTimeout(resolve, 50));
-  };
-
-  const cleanupAtlasForSession = async ({ label = "Run wrap-up", announce = true } = {}) => {
-    const displayStatus = announce && hasLiveDisplay();
-    const startedAt = Date.now();
-    if (announce) {
-      if (displayStatus) {
-        display.setRunPhase?.("ATLAS cleanup");
-        display.setBlockingOverlay?.("ATLAS cleanup", "Closing ATLAS v2 resources.");
-      }
-      emitCloseoutStatus(`${label}: ATLAS cleanup...`, C.cyan);
-      await flushCloseoutStatus();
-    }
-    // Release the keep-warm pins and dispose the shared conductor + ONNX
-    // encoder daemons — each terminates a worker thread whose MessagePort pins
-    // the event loop on Node ≥22, so the process can drain and exit instead of
-    // waiting out the idle backstops.
-    try { setConductorKeepWarmForRun(false); await closeSharedConductorForRun(); } catch { /* best-effort */ }
-    try { setOnnxDaemonKeepWarmForRun(false); await closeSharedOnnxDaemonForRun(); } catch { /* best-effort */ }
-    if (announce) {
-      const elapsedSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-      emitCloseoutStatus(`${label}: ATLAS cleanup complete (${elapsedSec}s).`, C.green);
-    }
-    if (displayStatus) {
-      display.setBlockingOverlay?.(null);
-      display.setRunPhase?.(label);
-    }
-    if (announce) await flushCloseoutStatus();
-  };
+  const closeout = new RunCloseoutController({
+    getDisplay: () => display,
+    getScheduler: () => scheduler,
+    getWorker: () => worker,
+    C,
+    log,
+    projectDir: PROJECT_DIR,
+    listJobs,
+    startupWorktreeCleanup,
+    isAtlasRuntimeDisabled,
+    getAtlasRuntimeDisabledReason,
+    setConductorKeepWarm: setConductorKeepWarmForRun,
+    closeSharedConductor: closeSharedConductorForRun,
+    setOnnxDaemonKeepWarm: setOnnxDaemonKeepWarmForRun,
+    closeSharedOnnxDaemon: closeSharedOnnxDaemonForRun,
+  });
+  const emitCloseoutStatus = (message, color = C.dim) => closeout.emitStatus(message, color);
+  const flushCloseoutStatus = () => closeout.flushStatus();
+  const cleanupAtlasForSession = (opts) => closeout.cleanupAtlasForSession(opts);
+  const drainPendingAtlasWarmJobs = (opts) => closeout.drainPendingAtlasWarmJobs(opts);
+  const runBoundedCloseoutWorktreeCleanup = (opts) => closeout.runBoundedCloseoutWorktreeCleanup(opts);
+  const cleanupResidualWorktreesAfterAtlas = (opts) => closeout.cleanupResidualWorktreesAfterAtlas(opts);
 
   let schedulerStopPromise = null;
   const scheduleSchedulerStop = () => {
@@ -336,143 +213,9 @@ export class RunSession {
     return schedulerStopPromise;
   };
 
-  // Wrap-up merges enqueue atlas_warm follow-ups (wi-cleanup, then
-  // main-incremental, then a scip-restage) AFTER the scheduler loop has
-  // already drained, so nothing executes them — the session exits with a
-  // stale index and unresolved edges, and the next boot starts behind.
-  // Natural-completion wrap-up drains them here, bounded, before the
-  // conductor closes. Chained follow-ups (a merge warm enqueues the restage
-  // that lifts edge resolution) surface on re-poll, hence the loop.
-  // Graceful shutdown (Ctrl+C) intentionally skips this: the user asked out.
-  const ATLAS_WRAPUP_DRAIN_BUDGET_MS = 10 * 60 * 1000;
-  const ATLAS_WRAPUP_DRAIN_MAX_READY_WAIT_MS = 30 * 1000;
-  const WORKTREE_CLOSEOUT_CLEANUP_TIMEOUT_MS = 90 * 1000;
-  const wrapUpAtlasDrainEnabled = () => {
-    const raw = String(process.env.POSSE_WRAPUP_ATLAS_DRAIN ?? "").trim().toLowerCase();
-    return !(raw && ["off", "false", "0", "no"].includes(raw));
-  };
-  const drainPendingAtlasWarmJobs = async ({ label = "Run wrap-up" } = {}) => {
-    if (!wrapUpAtlasDrainEnabled()) return { ran: 0, remaining: 0 };
-    const atlasDisabledForRun = (() => {
-      // Pass the repo key: the owner-gone repair path disables per-repo, and a
-      // global lookup only sees the (never set here) global entry.
-      try { return typeof isAtlasRuntimeDisabled === "function" && isAtlasRuntimeDisabled(PROJECT_DIR); } catch { return false; }
-    })();
-    const queuedWarms = () => {
-      try {
-        return listJobs(["queued"]).filter((j) => j.job_type === "atlas_warm");
-      } catch {
-        return [];
-      }
-    };
-    if (atlasDisabledForRun) {
-      const remaining = queuedWarms().length;
-      if (remaining > 0) {
-        const reason = (() => {
-          try { return typeof getAtlasRuntimeDisabledReason === "function" ? getAtlasRuntimeDisabledReason(PROJECT_DIR) : null; } catch { return null; }
-        })();
-        const tail = reason ? ` (${reason})` : "";
-        emitCloseoutStatus(`${label}: ATLAS disabled for this run${tail}; leaving ${remaining} queued warm job(s) for next boot.`, C.yellow);
-        await flushCloseoutStatus();
-      }
-      return { ran: 0, remaining };
-    }
-    // Embeddings-resume warms are excluded: each slice re-enqueues the next
-    // while below parity, so draining them would chase the encode toward the
-    // full budget at exit. Their resume state is keys.db — the next boot's
-    // readiness pass picks the gap right back up.
-    const drainableWarm = (j) => String(parseJobPayload(j)?.purpose || "wi") !== "embeddings";
-    const deadline = Date.now() + ATLAS_WRAPUP_DRAIN_BUDGET_MS;
-    let ran = 0;
-    let announced = false;
-    try {
-      while (Date.now() < deadline) {
-        const pending = queuedWarms().filter(drainableWarm);
-        if (pending.length === 0) break;
-        if (!announced) {
-          announced = true;
-          if (hasLiveDisplay()) display.setRunPhase?.("ATLAS index finish");
-          emitCloseoutStatus(`${label}: finishing ${pending.length} queued ATLAS warm job(s) before exit...`, C.cyan);
-          await flushCloseoutStatus();
-        }
-        const now = Date.now();
-        const readyAtMs = (j) => (j.ready_at ? new Date(j.ready_at).getTime() : 0);
-        const job = pending.find((j) => readyAtMs(j) <= now);
-        if (!job) {
-          // Everything left is debounced into the future (e.g. a requeued
-          // failure backoff) — wait only for near-term ready times, otherwise
-          // leave them for the next boot instead of idling out the budget.
-          const earliest = Math.min(...pending.map(readyAtMs));
-          if (earliest - now > ATLAS_WRAPUP_DRAIN_MAX_READY_WAIT_MS) break;
-          await new Promise((resolve) => setTimeout(resolve, Math.min(1000, Math.max(100, earliest - now))));
-          continue;
-        }
-        const acquireWithLocks = typeof scheduler.leaseManager?.acquireWithLocksAsync === "function"
-          ? scheduler.leaseManager.acquireWithLocksAsync.bind(scheduler.leaseManager)
-          : scheduler.leaseManager?.acquireWithLocks?.bind(scheduler.leaseManager);
-        if (typeof acquireWithLocks !== "function") break;
-        const lease = await acquireWithLocks(job, scheduler.ownerId, null, scheduler.leaseSec);
-        if (!lease) break; // another owner holds it; don't fight at exit
-        const purpose = String(parseJobPayload(job)?.purpose || "wi");
-        emitCloseoutStatus(`${label}: ATLAS warm (${purpose})...`, C.cyan);
-        await flushCloseoutStatus();
-        try {
-          await worker.execute({ ...job, _leaseToken: lease.leaseToken });
-          ran += 1;
-        } catch (err) {
-          emitCloseoutStatus(`${label}: ATLAS warm (${purpose}) failed — ${String(err?.message || err).slice(0, 160)}`, C.yellow);
-          break; // don't grind a failing pipeline at exit; next boot retries
-        }
-      }
-    } catch { /* drain is best-effort; never block exit */ }
-    const remaining = queuedWarms().length;
-    if (announced) {
-      emitCloseoutStatus(
-        remaining === 0
-          ? `${label}: ATLAS index work finished (${ran} warm job(s)).`
-          : `${label}: ATLAS drain stopped — ${remaining} warm job(s) left for next boot.`,
-        remaining === 0 ? C.green : C.yellow,
-      );
-      await flushCloseoutStatus();
-    }
-    return { ran, remaining };
-  };
-
   maybeAnnounceAutoMergeSetting();
   const jobs = listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
   const needsGit = jobsNeedGitWorktree(jobs);
-
-  const runBoundedCloseoutWorktreeCleanup = async ({
-    label = "Run wrap-up",
-    failureText = "worktree cleanup skipped",
-  } = {}) => {
-    if (typeof startupWorktreeCleanup !== "function") return;
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      controller.abort(new Error(`worktree cleanup timed out after ${Math.ceil(WORKTREE_CLOSEOUT_CLEANUP_TIMEOUT_MS / 1000)}s`));
-    }, WORKTREE_CLOSEOUT_CLEANUP_TIMEOUT_MS);
-    timer.unref?.();
-    try {
-      await startupWorktreeCleanup({
-        signal: controller.signal,
-        skipDirtyTreeGuard: true,
-        onMsg: (msg) => emitCloseoutStatus(`${label}: ${msg}`, C.dim),
-      });
-      return true;
-    } catch (err) {
-      emitCloseoutStatus(`${label}: ${failureText} (${firstLine(err?.message || err)}).`, C.yellow);
-      await flushCloseoutStatus();
-      return false;
-    } finally {
-      clearTimeout(timer);
-    }
-  };
-  const cleanupResidualWorktreesAfterAtlas = async ({ label = "Run wrap-up" } = {}) => {
-    await runBoundedCloseoutWorktreeCleanup({
-      label,
-      failureText: "post-ATLAS worktree cleanup skipped",
-    });
-  };
 
   if (jobs.length === 0) {
     const iterateResult = await processIterativeWrapUp({
@@ -522,317 +265,32 @@ export class RunSession {
   }
 
   // ════════════════════════════════════════════════════════════════════════
-  // Boot panel — single instance, spans the entire boot lifecycle from the
-  // pre-scheduler readiness checks (repo setup, git ready, …) through the
-  // scheduler boot phases (lock, orphan, pre-loop, workspace health,
-  // provider auth liveness, complete) until display.start() attaches the
-  // alt-screen TUI. Every Boot: log site routes through updateBootStep so
-  // there's exactly one panel and no duplicated stdout lines.
+  // Boot panel — single instance, spans the entire boot lifecycle until the
+  // alt-screen TUI attaches. The controller owns terminal rendering, provider
+  // chips, language matrix state, boot input, and runtime-status mirroring.
   // ════════════════════════════════════════════════════════════════════════
-  const bootAbortController = new AbortController();
-  let bootMonitorTimer = null;
-  let bootMonitorDisposed = false;
-  let bootRenderedRows = 0;
-  let bootLastRenderAt = 0;
-  const bootSteps = new Map();
-  const BOOT_RENDER_MIN_MS = 90;
-  const BOOT_RENDER_GUTTER_COLUMNS = 3;
-  const bootTerminalColumns = () => {
-    const columns = Number(process.stdout?.columns);
-    if (Number.isFinite(columns) && columns > 1) return Math.max(1, Math.floor(columns));
-    return 120;
-  };
-  const bootRenderColumns = () => Math.max(1, bootTerminalColumns() - BOOT_RENDER_GUTTER_COLUMNS);
-  // Mirror boot step state into runtime_status (throttled, trailing-edge)
-  // so the bridge can stream instance_status boot progress to the phone.
-  let bootStatusTimer = null;
-  let bootStatusPending = null;
-  const bootStartedAtIso = new Date().toISOString();
-  const flushBootStatus = () => {
-    bootStatusTimer = null;
-    const steps = bootStatusPending;
-    bootStatusPending = null;
-    if (!steps) return;
-    try {
-      writeRuntimeStatus(RUNTIME_STATUS_KEYS.BOOT, {
-        steps: steps.slice(0, 30).map((step) => ({
-          ...step,
-          label: String(step.label || "").slice(0, 120),
-          ...(step.detail ? { detail: String(step.detail).slice(0, 200) } : {}),
-        })),
-        started_at: bootStartedAtIso,
-      });
-    } catch { /* status mirroring is best-effort */ }
-  };
-  const bootPanel = createBootPanel({
+  const boot = new RunBootPanelController({
     C,
-    columns: bootRenderColumns,
-    onChange: (steps) => {
-      bootStatusPending = steps;
-      if (bootStatusTimer) return;
-      bootStatusTimer = setTimeout(flushBootStatus, 500);
-      bootStatusTimer.unref?.();
-    },
+    log,
+    getDisplay: () => display,
   });
-  // Stale rows from a previous crash must not masquerade as a live boot.
-  try {
-    clearRuntimeStatus(RUNTIME_STATUS_KEYS.SHUTDOWN);
-    writeRuntimeStatus(RUNTIME_STATUS_KEYS.BOOT, { steps: [], started_at: bootStartedAtIso });
-  } catch { /* best-effort */ }
-  const STEP_SECTION_MAP = new Map([
-    ["repo setup", "scheduler"],
-    ["dependencies", "workspace"],
-    ["posse update", "workspace"],
-    ["startup work tree", "workspace"],
-    ["git ready", "workspace"],
-    ["worktree cleanup", "workspace"],
-    ["lock acquired", "scheduler"],
-    ["orphan recovery", "scheduler"],
-    ["pre-loop hooks", "scheduler"],
-    ["workspace health", "workspace"],
-  ]);
-  const shortBootText = (value, max = 34) => {
-    const text = String(value || "").replace(/\s+/g, " ").trim();
-    if (!text) return "";
-    return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text;
-  };
-  const bootMonitorRows = () => bootPanel.lines();
-  const bootMonitorRowWidth = () => bootRenderColumns();
-  const fitBootMonitorRow = (row) => fitAnsi(row, bootMonitorRowWidth(), { reset: C.reset }).trimEnd();
-  // ── terminal output interception during boot ──────────────────────────
-  // While the boot panel owns the terminal, ANY foreign TTY write (a subprocess
-  // inheriting the parent's streams, a third-party lib's console.log/error, a
-  // logger somewhere we don't control) would push the cursor below where the
-  // panel "thinks" it is. The next cursor-up calculation is then off and a
-  // fresh panel header stacks below the previous one.
-  //
-  // Solution: monkey-patch process stdout/stderr writes while they point at a
-  // TTY. Panel renders use the intercept's saved stdout write directly
-  // (bypass the patch).
-  // Everything else gets buffered and replayed verbatim once the panel tears
-  // down, so nothing is lost.
-  const terminalOutputIntercept = createTerminalOutputIntercept({
-    stdout: process.stdout,
-    stderr: process.stderr,
-  });
-
-  const renderBootMonitor = ({ final = false, force = false } = {}) => {
-    if (display || bootSteps.size === 0) return;
-    if (bootMonitorDisposed && !final) return;
-    // Skip rendering entirely under non-TTY (e.g. `node --test`, CI logs):
-    // the visual panel would just garble structured runner output and the
-    // intercept can't be installed safely without breaking IPC.
-    if (!process.stdout.isTTY) return;
-    const now = Date.now();
-    if (!final && !force && bootRenderedRows > 0 && now - bootLastRenderAt < BOOT_RENDER_MIN_MS) return;
-    terminalOutputIntercept.install();
-    const rows = bootMonitorRows().map(fitBootMonitorRow);
-    const rowsToWrite = Math.max(rows.length, bootRenderedRows || 1);
-    let buf = "";
-    if (bootRenderedRows > 0) {
-      const up = bootRenderedRows - 1;
-      if (up > 0) buf += `\x1b[${up}A`;
-      buf += "\r";
-    }
-    for (let i = 0; i < rowsToWrite; i += 1) {
-      if (i > 0) buf += "\n";
-      buf += `${rows[i] || ""}\x1b[K`;
-    }
-    if (final) buf += "\n";
-    // Use the saved original write directly so this render bypasses the
-    // intercept — panel rendering must always reach the terminal.
-    terminalOutputIntercept.writeStdout(buf);
-    bootRenderedRows = final ? 0 : rows.length;
-    bootLastRenderAt = now;
-  };
-  const ensureBootMonitor = () => {
-    if (display || bootMonitorTimer || bootMonitorDisposed) return;
-    bootMonitorTimer = setInterval(() => renderBootMonitor({ force: true }), 120);
-    bootMonitorTimer.unref?.();
-  };
-  const updateBootStep = (label, patch = {}) => {
-    const { force = false, ...stepPatch } = patch;
-    const previous = bootSteps.get(label) || { status: "running", detail: "", percent: null };
-    // Step-start diagnostic — fires when a step first appears in "running"
-    // state. Pairs with the existing "step complete"/"step failed" log lines
-    // so a frozen boot leaves a fingerprint: the most recent "step started"
-    // without a matching completion is the wedge.
-    const wasPending = bootSteps.get(label)?.status === "pending";
-    if ((!bootSteps.has(label) || wasPending) && (stepPatch.status === "running" || stepPatch.status == null)) {
-      log?.info?.("run", "Boot step started", { label, section: stepPatch.section || STEP_SECTION_MAP.get(label) || "internal" });
-    }
-    bootSteps.set(label, { ...previous, ...stepPatch, updatedAt: Date.now() });
-    const section = stepPatch.section || STEP_SECTION_MAP.get(label);
-    if (section && section !== "internal") {
-      // Surface a short "what it's doing right now" detail on the running step
-      // so the checklist shows live activity instead of a bare spinner. The
-      // panel is fixed-width and truncates, so streaming detail can't widen the
-      // layout; we keep the running detail tighter (28) than the terminal one
-      // (40) to leave room for it to sit beside the active label.
-      const resolvedStatus = stepPatch.status || previous.status || "running";
-      const terminalDetail = (stepPatch.showDetail || resolvedStatus === "failed") && resolvedStatus !== "running";
-      const panelDetail = terminalDetail
-        ? shortBootText(stepPatch.detail || "", 40)
-        : resolvedStatus === "running"
-          ? shortBootText(stepPatch.detail ?? previous.detail ?? "", 28)
-          : "";
-      bootPanel.updateStep(label, {
-        status: stepPatch.status || previous.status || "running",
-        detail: panelDetail,
-        percent: stepPatch.percent ?? null,
-        section,
-      });
-    }
-    if (display) return;
-    ensureBootMonitor();
-    renderBootMonitor({
-      force: force || bootRenderedRows === 0 || patch.status === "ok" || patch.status === "failed",
-    });
-  };
-  const providerBootSteps = new Map();
-  const normalizeProviderStepName = (value) => String(value || "").trim().toLowerCase();
-  // The providers row reports *readiness of the providers a user picks*, not
-  // per-capability variants or internal primes. `getProviderHealth()` tags
-  // image-capable providers with a "-images" suffix after the fact
-  // (grok → grok-images), so we fold that suffix back into the base name: the
-  // user reads "grok" as "is Grok ready", and a provider configured *only* for
-  // images must still surface under its real name rather than vanish. When a
-  // base chip already exists, the suffixed capability row must not override it
-  // (the base provider row is authoritative for "is this provider ready"); it
-  // only creates the chip when nothing else has. "usage" isn't a provider, so
-  // it never earns a chip.
-  const updateProviderBootStep = (label, patch = {}) => {
-    const rawName = normalizeProviderStepName(label);
-    if (!rawName || rawName === "usage") return;
-    const fromImageCapability = /-images?$/.test(rawName);
-    const providerName = rawName.replace(/-images?$/, "");
-    if (!providerName) return;
-    // Capability rows annotate an already-known provider — don't let them
-    // restate or downgrade the base chip; only let them seed a missing one.
-    if (fromImageCapability && providerBootSteps.has(providerName)) return;
-    const { force = false, ...stepPatch } = patch;
-    const previous = providerBootSteps.get(providerName) || { status: "running", detail: "" };
-    const next = {
-      ...previous,
-      ...stepPatch,
-      section: "providers",
-      detail: shortBootText(stepPatch.detail ?? previous.detail ?? "", 40),
-    };
-    providerBootSteps.set(providerName, next);
-    // Match the scheduler/workspace rows: don't widen the panel with the
-    // running "explanation" (OAuth/checking/…) detail — only surface detail on
-    // terminal/failed states. Keep the full detail in `providerBootSteps` for
-    // diagnostics and the text-monitor fallback.
-    const showPanelDetail = next.status === "ok"
-      || next.status === "failed"
-      || next.status === "skipped"
-      || next.status === "deferred";
-    bootPanel.updateStep(providerName, { ...next, detail: showPanelDetail ? next.detail : "" });
-    if (display) return;
-    ensureBootMonitor();
-    renderBootMonitor({
-      force: force || next.status === "ok" || next.status === "failed" || next.status === "deferred",
-    });
-  };
-  const providerStatusFromHealth = (status) => {
-    const value = String(status || "").trim().toLowerCase();
-    if (value === "available") return "ok";
-    if (value === "unavailable") return "failed";
-    return "deferred";
-  };
-  const finalizeRunningProviderBootSteps = (status, detail = "") => {
-    for (const [providerName, step] of providerBootSteps.entries()) {
-      if (step.status !== "running") continue;
-      updateProviderBootStep(providerName, {
-        status,
-        detail,
-        force: true,
-      });
-    }
-  };
-  const TERMINAL_BOOT_LANG_STATES = new Set(["done", "skipped", "deferred", "failed"]);
-  // Languages the matrix is allowed to show — the set we actually index for
-  // code intelligence: resolved SCIP plan source languages (e.g. ts + js from
-  // scip-typescript, php) plus detected-but-no-binary candidates. Populated
-  // during boot-matrix seeding below. ATLAS parses lots of incidental files
-  // (shell, markup, config like sh) that have no SCIP indexer; those would only
-  // ever read "parsed, never indexed", so we drop their rows. While the set is
-  // empty (SCIP off / pre-seed), don't filter — otherwise the matrix is blank.
-  const matrixLanguages = new Set();
-  const updateBootLang = (language, side, patch = {}) => {
-    const bootLanguageKey = String(language || "").trim().toLowerCase();
-    if (!bootLanguageKey || (side !== "atlas" && side !== "scip")) return;
-    if (matrixLanguages.size > 0 && !matrixLanguages.has(bootLanguageKey)) return;
-    bootPanel.updateLang(bootLanguageKey, side, patch);
-    refreshBootBanner();
-    if (display) return;
-    ensureBootMonitor();
-    renderBootMonitor({ force: patch.state === "done" || patch.state === "failed" });
-  };
-  let bootFooterText = "";
-  let bootEnterAction = null;
-  let bootInputInstalled = false;
-  let bootInputWasRaw = false;
-  let bootInputHandler = null;
-  const installBootInput = () => {
-    if (bootInputInstalled) return;
-    if (!process.stdin?.isTTY || !process.stdout?.isTTY) return;
-    if (typeof process.stdin.setRawMode !== "function") return;
-    try { readline.emitKeypressEvents(process.stdin); } catch { return; }
-    bootInputWasRaw = !!process.stdin.isRaw;
-    bootInputHandler = (str, key = {}) => {
-      if (key?.ctrl && key?.name === "c") {
-        process.emit("SIGINT");
-        return;
-      }
-      if (key?.name === "return" || key?.name === "enter" || str === "\r" || str === "\n") {
-        try { bootEnterAction?.(); } catch (err) {
-          log?.warn?.("run", "Boot footer action failed", { error: firstLine(err?.message || err) });
-        }
-      }
-    };
-    try { process.stdin.setRawMode(true); } catch { return; }
-    try { process.stdin.resume?.(); } catch { /* best effort */ }
-    process.stdin.on("keypress", bootInputHandler);
-    bootInputInstalled = true;
-  };
-  const releaseBootInput = () => {
-    if (!bootInputInstalled) {
-      bootEnterAction = null;
-      return;
-    }
-    if (bootInputHandler) process.stdin.off("keypress", bootInputHandler);
-    try { process.stdin.setRawMode(bootInputWasRaw); } catch { /* terminal may already be closed */ }
-    try { process.stdin.pause?.(); } catch { /* best effort */ }
-    bootInputInstalled = false;
-    bootInputHandler = null;
-    bootEnterAction = null;
-  };
-  const setBootEnterAction = (handler = null) => {
-    bootEnterAction = typeof handler === "function" ? handler : null;
-    if (bootEnterAction) installBootInput();
-    else releaseBootInput();
-  };
-  const updateBootFooter = (text) => {
-    const next = String(text || "").trim();
-    if (next === bootFooterText) return;
-    bootFooterText = next;
-    bootPanel.setFooter(next);
-    if (display) return;
-    ensureBootMonitor();
-    renderBootMonitor({ force: true });
-  };
-  // Whether boot can pause for an interactive "Enter to background" keypress.
-  // Mirrors installBootInput's requirements exactly (raw-mode TTY on both ends):
-  // if those hold the boot panel can capture Enter, so it's safe to hold the
-  // gate. When they don't there's nobody to press Enter, so callers must release
-  // the gate themselves instead of hanging a headless boot until the encode
-  // finishes on its own. Independent of useTui — the boot panel and its Enter
-  // handler run whenever stdin/stdout are TTYs, even under --no-tui.
-  const bootCanPromptForBackground = () =>
-    !!process.stdin?.isTTY &&
-    !!process.stdout?.isTTY &&
-    typeof process.stdin?.setRawMode === "function";
+  const bootAbortController = boot.abortController;
+  const bootPanel = boot.bootPanel;
+  const bootSteps = boot.bootSteps;
+  const TERMINAL_BOOT_LANG_STATES = boot.terminalLangStates;
+  const updateBootStep = (label, patch = {}) => boot.updateStep(label, patch);
+  const updateProviderBootStep = (label, patch = {}) => boot.updateProviderStep(label, patch);
+  const normalizeProviderStepName = (value) => boot.normalizeProviderStepName(value);
+  const providerStatusFromHealth = (status) => boot.providerStatusFromHealth(status);
+  const finalizeRunningProviderBootSteps = (status, detail = "") => boot.finalizeRunningProviderSteps(status, detail);
+  const updateBootLang = (language, side, patch = {}) => boot.updateLang(language, side, patch);
+  const matrixLanguages = { add: (language) => boot.addMatrixLanguage(language) };
+  const setBootEnterAction = (handler = null) => boot.setEnterAction(handler);
+  const updateBootFooter = (text) => boot.updateFooter(text);
+  const bootCanPromptForBackground = () => boot.canPromptForBackground();
+  const stopBootMonitor = (opts) => boot.stop(opts);
+  const runWithBootTerminalPassthrough = (fn) => boot.runWithTerminalPassthrough(fn);
+  const handleSchedulerBootEvent = (event = {}) => boot.handleSchedulerBootEvent(event);
   const requestAtlasBootBackground = (reason = "user-enter") => {
     if (atlasBootBackgroundRequested) return;
     atlasBootBackgroundRequested = true;
@@ -842,257 +300,6 @@ export class RunSession {
     setBootEnterAction(null);
     try { resolveAtlasBootBackgroundRequest?.({ kind: "background", reason }); } catch { /* best effort */ }
   };
-  // Banner progress tracking — three numbers that drive the negative-space
-  // "NEURAL NETWORK" banner colour (grey -> blue -> green). atlas/scip aggregate
-  // over per-language matrix entries; onnx flips on encoder warm completion.
-  const bannerState = { atlasPercent: 0, scipPercent: 0, onnxPercent: 0 };
-  const aggregatePanelProgress = () => {
-    let atlasSum = 0, atlasCounted = 0, atlasTotal = 0;
-    let scipSum = 0, scipCounted = 0, scipTotal = 0;
-    for (const [, entry] of bootPanel.languageEntries()) {
-      const sides = /** @type {[string, any][]} */ ([["atlas", entry?.atlas], ["scip", entry?.scip]]);
-      for (const [name, side] of sides) {
-        if (!side) continue;
-        const isAtlas = name === "atlas";
-        if (isAtlas) atlasTotal += 1; else scipTotal += 1;
-        // Terminal no-progress states contribute to "everything's done"
-        // arithmetic but don't count toward the running mean.
-        if (side.state === "skipped" || side.state === "failed" || side.state === "deferred") continue;
-        const percent = side.state === "done"
-          ? 100
-          : Number.isFinite(Number(side.percent)) ? Number(side.percent) : 0;
-        if (isAtlas) { atlasSum += percent; atlasCounted += 1; }
-        else { scipSum += percent; scipCounted += 1; }
-      }
-    }
-    // No registered languages at all -> 0% (haven't started yet). All entries
-    // skipped/disabled -> 100% (nothing to do, treat as done). Otherwise the
-    // mean of the actively-tracked sides.
-    bannerState.atlasPercent = atlasCounted > 0
-      ? atlasSum / atlasCounted
-      : (atlasTotal > 0 ? 100 : 0);
-    bannerState.scipPercent = scipCounted > 0
-      ? scipSum / scipCounted
-      : (scipTotal > 0 ? 100 : 0);
-  };
-  // Update the banner footer without triggering a separate render — callers
-  // already follow up with renderBootMonitor (or are inside a render path).
-  // Throttled to ~100ms because per-language indexer events can fire many
-  // times per second and re-rendering the banner allocates ~280 ANSI
-  // sequences each pass — wasted work since the visible render is throttled
-  // to ~90ms inside renderBootMonitor anyway.
-  const BANNER_REFRESH_MIN_MS = 100;
-  let lastBannerRefreshAt = 0;
-  const refreshBootBanner = () => {
-    const now = Date.now();
-    if (now - lastBannerRefreshAt < BANNER_REFRESH_MIN_MS) return;
-    lastBannerRefreshAt = now;
-    aggregatePanelProgress();
-    bootPanel.setFooter(renderNeuralNetworkBanner(bannerState));
-  };
-  // Initial paint so the banner appears in the footer slot from t=0, even
-  // before the first per-language event lands.
-  refreshBootBanner();
-  const stopBootMonitor = ({ final = false } = {}) => {
-    if (bootMonitorTimer) {
-      clearInterval(bootMonitorTimer);
-      bootMonitorTimer = null;
-    }
-    if (final) {
-      if (bootMonitorDisposed) {
-        terminalOutputIntercept.release();
-        return;
-      }
-      releaseBootInput();
-      renderBootMonitor({ final: true, force: true });
-      bootMonitorDisposed = true;
-      // Restore real process.stdout and replay anything that tried to write
-      // while the panel was up (subprocess output, third-party logs, etc.)
-      // — they appear as scrollback above where the TUI will attach.
-      terminalOutputIntercept.release();
-    }
-  };
-  const runWithBootTerminalPassthrough = async (fn) => {
-    const shouldResumeTimer = !!bootMonitorTimer;
-    if (bootMonitorTimer) {
-      clearInterval(bootMonitorTimer);
-      bootMonitorTimer = null;
-    }
-    releaseBootInput();
-
-    const passthroughStartsWithPanel = bootRenderedRows > 0 && !!process.stdout?.isTTY;
-    let passthroughWrote = false;
-    const breakBeforePassthroughOutput = (writeNewline) => {
-      if (!passthroughStartsWithPanel || passthroughWrote) return;
-      passthroughWrote = true;
-      try {
-        // Clear the in-place boot panel before passthrough output begins, rather
-        // than just pushing a newline. The old code left the panel orphaned above
-        // the output while the `finally` re-rendered a fresh one below → two
-        // identical "posse … boot · Ns" panels. Cursor → panel top, clear to end
-        // of screen, so the output (and the re-rendered panel) take its place.
-        const up = Math.max(0, bootRenderedRows - 1);
-        writeNewline(`\r${up > 0 ? `\x1b[${up}A` : ""}\x1b[J`);
-      } catch { /* observational */ }
-      bootRenderedRows = 0;
-    };
-
-    if (passthroughStartsWithPanel && terminalOutputIntercept.bufferedCount > 0) {
-      breakBeforePassthroughOutput(terminalOutputIntercept.writeStdout);
-    }
-    terminalOutputIntercept.release();
-
-    const restoreWrites = [];
-    const installLazyBreak = (stream) => {
-      if (!passthroughStartsWithPanel || !stream?.isTTY || typeof stream.write !== "function") return;
-      const originalWrite = stream.write;
-      stream.write = function passthroughWrite(...args) {
-        breakBeforePassthroughOutput((text) => originalWrite.call(stream, text));
-        return originalWrite.apply(stream, args);
-      };
-      restoreWrites.push(() => { stream.write = originalWrite; });
-    };
-
-    installLazyBreak(process.stdout);
-    installLazyBreak(process.stderr);
-
-    if (!passthroughStartsWithPanel && bootRenderedRows > 0) {
-      terminalOutputIntercept.writeStdout("\n");
-      bootRenderedRows = 0;
-    }
-    try {
-      return await fn();
-    } finally {
-      for (let i = restoreWrites.length - 1; i >= 0; i -= 1) {
-        try { restoreWrites[i](); } catch { /* observational */ }
-      }
-      if (!display && !bootMonitorDisposed) {
-        bootLastRenderAt = 0;
-        if (shouldResumeTimer) ensureBootMonitor();
-        renderBootMonitor({ force: true });
-      }
-    }
-  };
-  const handleSchedulerBootEvent = (event = {}) => {
-    if (!event.label) return;
-    updateBootStep(event.label, {
-      section: event.section,
-      status: event.status,
-      detail: event.detail || "",
-      force: true,
-    });
-  };
-
-  // ── track(): the universal boot/index task primitive ─────────────────────
-  // Every unit of boot work flows through this so the boot panel is a pure
-  // consumer of task lifecycle events: each task emits exactly one "start"
-  // (spinner on) and settles EXACTLY once to a terminal event (✓/✗/⊘/deferred).
-  // There is no fire-and-forget work and no detached continuation that mutates
-  // the panel after settle — a hard timeout settles terminally and (optionally)
-  // hands the still-pending promise off to the post-TUI app via `handoff`.
-  //
-  // CRITICAL: `fn` must already be truly async (off the main event loop — async
-  // I/O / child process / worker thread). track() cannot un-block synchronous
-  // work; a blocking fn would freeze the panel and stall lock renewal.
-  /** @type {Array<Promise<any>>} promises handed off to run past TUI attach */
-  const postTuiHandoffs = [];
-  const bootTaskEmitter = (section, label) => (
-    section === "providers"
-      ? (patch) => updateProviderBootStep(label, patch)
-      : (patch) => updateBootStep(label, { section, ...patch })
-  );
-  const track = (label, fn, {
-    section = "internal",
-    fatal = false,
-    start = "working",
-    done = () => "done",
-    isOk = () => true,
-    hardTimeoutMs = null,
-    onHardTimeout = "deferred", // "deferred" | "failed" — terminal, NOT a detach
-    handoff = null,             // (stillPending: Promise) => void
-  } = {}) => {
-    const startedAt = Date.now();
-    const emit = bootTaskEmitter(section, label);
-    log?.info?.("run", "Boot task start", { label, section, fatal, hardTimeoutMs });
-    emit({ status: "running", detail: `${start}...`, startedAt });
-
-    // No setImmediate "fake async" wrap — fn is expected to yield on its own.
-    const runTask = Promise.resolve().then(fn);
-    let timer = null;
-    const raced = hardTimeoutMs && hardTimeoutMs > 0
-      ? Promise.race([
-        runTask.then((result) => ({ kind: "result", result }), (error) => ({ kind: "error", error })),
-        new Promise((resolve) => {
-          timer = setTimeout(() => resolve({ kind: "timeout" }), hardTimeoutMs);
-          timer.unref?.();
-        }),
-      ])
-      : runTask.then((result) => ({ kind: "result", result }), (error) => ({ kind: "error", error }));
-
-    const settle = (status, detail, extra = {}) => {
-      if (timer) clearTimeout(timer);
-      emit({ status, detail });
-      const durationMs = Date.now() - startedAt;
-      log?.info?.("run", "Boot task settle", { label, status, duration_ms: durationMs, detail });
-      const ok = status === "ok";
-      if (!ok && fatal) {
-        try { bootAbortController.abort(extra.error || new Error(`${label} ${status}`)); } catch { /* observational */ }
-      }
-      return { label, ok, fatal, status, ...extra };
-    };
-
-    return raced.then((outcome) => {
-      if (outcome.kind === "timeout") {
-        // Settle terminally now; hand the still-pending work off cleanly. The
-        // continuation must NOT touch the panel after this point (logs only).
-        if (typeof handoff === "function") { try { handoff(runTask); } catch { /* observational */ } }
-        else runTask.catch(() => { /* swallow detached rejection */ });
-        const status = onHardTimeout === "failed" ? "failed" : "deferred";
-        return settle(status, `timed out after ${Math.round(hardTimeoutMs / 1000)}s`);
-      }
-      if (outcome.kind === "error") {
-        const error = outcome.error;
-        const errorId = `boot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-        log?.warn?.("run", "Boot task failed", {
-          errorId, label, fatal,
-          error: String(error?.message || error || "unknown"),
-          stack: error?.stack || null,
-        });
-        return settle("failed", `failed (${firstLine(error?.message || error)}; errorId=${errorId})`, { error });
-      }
-      const result = outcome.result;
-      if (result && (result.__track === "skipped" || result.__track === "deferred")) {
-        return settle(result.__track, result.detail || result.__track, { result });
-      }
-      const ok = isOk(result);
-      return settle(ok ? "ok" : "failed", done(result, ok), { result });
-    });
-  };
-  // settleAll: phase gate — wait for ALL tracked tasks to reach a terminal
-  // state (Promise.allSettled semantics). track() never rejects, so this
-  // returns the array of result objects; callers inspect for {fatal, ok:false}.
-  const settleAll = (tasks) => Promise.all(tasks.map((p) => Promise.resolve(p)));
-  bootAbortController.signal.addEventListener("abort", () => {
-    try {
-      for (const [label, step] of bootSteps.entries()) {
-        if (step.status === "running") {
-          updateBootStep(label, {
-            status: "failed",
-            detail: "aborted",
-            showDetail: true,
-            force: true,
-          });
-        }
-      }
-      stopBootMonitor({ final: true });
-    } catch { /* observational */ }
-  }, { once: true });
-
-  // (No global process listeners — they leak across test fixtures. Every
-  // boot exit path explicitly calls stopBootMonitor, which releases the
-  // intercept. The TTY guard inside createTerminalOutputIntercept().install()
-  // keeps it from firing under `node --test` anyway.)
-
   // ── Boot phase (panel-driven; alt-screen TUI takes over after display.start)
   // The TUI alt-screen buffer hides anything printed before display.stop(),
   // so all prompts, prerequisite checks, orphan recovery, provider health,
@@ -1100,15 +307,9 @@ export class RunSession {
   // through updateBootStep so the boot panel shows a single coherent view
   // instead of a stream of `Boot: …` log lines.
 
-  // Paint the full boot checklist up front — unstarted steps render as a dim
-  // "-" (pending) so the sections are visible from the start and fill in as
-  // each runs, instead of popping into view late as jobs start. Already-fired
-  // steps keep their status (the guard skips them).
-  for (const [stepLabel, stepSection] of STEP_SECTION_MAP) {
-    if (!bootSteps.has(stepLabel)) {
-      updateBootStep(stepLabel, { status: "pending", section: stepSection });
-    }
-  }
+  // Paint the full boot checklist up front so the sections are visible from
+  // the start and fill in as each step runs.
+  boot.seedChecklist();
 
   // Pre-populate the per-language matrix with `waiting` rows so the user
   // sees from t=0 which languages will be indexed once Phase 1 (git +
@@ -1229,7 +430,7 @@ export class RunSession {
     const usageFn = typeof getConfiguredProviderUsageAsync === "function"
       ? getConfiguredProviderUsageAsync
       : null;
-    if (providerBootSteps.has("claude")) {
+    if (boot.hasProviderStep("claude")) {
       updateProviderBootStep("claude", { status: "running", detail: "OAuth", force: true });
     }
     providerWarmups.push(Promise.race([
@@ -1337,7 +538,13 @@ export class RunSession {
 
   updateBootStep("posse update", { section: "workspace", status: "running", detail: "checking client", force: true });
   try {
-    const updateCheck = await checkPosseUpdateAvailabilityForRun({ timeoutMs: 2_000 });
+    const updateCheck = await Promise.race([
+      checkPosseUpdateAvailabilityForRun({ timeoutMs: 2_000 }),
+      new Promise((resolve) => {
+        const timer = setTimeout(() => resolve({ ok: false, skipped: "timeout" }), 1_000);
+        timer.unref?.();
+      }),
+    ]);
     if (updateCheck?.available) {
       updateBootStep("posse update", {
         section: "workspace",
@@ -1492,7 +699,7 @@ export class RunSession {
       if (accepted !== false) refreshDisplaySnapshotsForQueue();
     }
   };
-  const scheduler = new Scheduler({
+  scheduler = new Scheduler({
     concurrency: CONCURRENCY,
     hasDisplay: useTui,
     onQueueSnapshot: handleQueueSnapshot,
@@ -1509,61 +716,19 @@ export class RunSession {
     if (useTui && process.stdout.isTTY) return;
     console.log(`  ${C[color] || ""}[scheduler] ${msg}${C.reset}`);
   };
-  let lastPendingReviewBlockerMsg = null;
-  let idleAutoMergePromise = null;
-  const pendingReviewAutoMergeAttempts = new Set();
-
-  const startIdleAutoMerge = ({
-    reason = "scheduler idle",
-    runGc = false,
-    beforeStart = null,
-    afterMerged = null,
-    afterNoMerge = null,
-    onError = null,
-  } = {}) => {
-    if (!autoMergePendingReviewBlockers || typeof autoMergeCompletedWorkItems !== "function") return false;
-    if (idleAutoMergePromise) return false;
-    try { beforeStart?.(); } catch { /* display/log callback only */ }
-    idleAutoMergePromise = Promise.resolve()
-      .then(() => autoMergeCompletedWorkItems({ display, reason, runGc }))
-      .then((mergedCount) => {
-        if (mergedCount > 0) afterMerged?.(mergedCount);
-        else afterNoMerge?.();
-      })
-      .catch((err) => {
-        if (typeof onError === "function") onError(err);
-        else {
-          const errMsg = `Auto-merge during scheduler idle failed: ${err?.message || err}`;
-          if (display) display.addEvent(`${C.red}${errMsg}${C.reset}`);
-          else console.log(`\n  ${C.red}${errMsg}${C.reset}`);
-        }
-      })
-      .finally(() => {
-        idleAutoMergePromise = null;
-      });
-    return true;
-  };
-
-  const waitForIdleAutoMerge = async () => {
-    const pending = idleAutoMergePromise;
-    if (!pending) return;
-    if (display && typeof display.setRunPhase === "function") {
-      display.setRunPhase("Finishing pending auto-merge");
-    } else if (!display && !useTui) {
-      console.log(`\n  ${C.cyan}Finishing pending auto-merge before wrap-up...${C.reset}`);
-    }
-    await pending;
-  };
+  const idleAutoMerge = new RunIdleAutoMergeController({
+    getDisplay: () => display,
+    useTui,
+    C,
+    autoMergePendingReviewBlockers,
+    autoMergeCompletedWorkItems,
+  });
 
   // Pre-loop hook runs during scheduler.boot() — display is still null at that
   // point so all output routes to console.log (plain stdout, pre-TUI). The
   // panel + render helpers live in outer run-session scope (above) so they
   // span the entire boot lifecycle, not just pre-loop. This closure only
   // owns warmup-specific render state.
-  function firstLine(value) {
-    return String(value || "unknown").trim().split(/\r?\n/)[0] || "unknown";
-  }
-
   let bootAbortReason = null;
   const onBeforeLoop = async () => {
     let bootAtlasProgress = null;
@@ -1752,7 +917,6 @@ export class RunSession {
     const bootWarmups = [];
     const remotePromptBundleWarmupLabel = "Remote prompt bundle";
     const remotePromptWarmupLabel = "Remote prompt compiler";
-    const startupWorktreeCleanupLabel = "Startup worktree cleanup";
 
     if (typeof checkRemotePromptBundleReadiness === "function") {
       bootWarmups.push(bootWarmup(remotePromptBundleWarmupLabel, () => checkRemotePromptBundleReadiness(), {
@@ -2065,8 +1229,8 @@ export class RunSession {
           // headless/non-interactive boot can't take that keypress, so it
           // releases immediately and keeps encoding behind the run loop.
           if (bootCanPromptForBackground()) {
-            updateBootFooter("hit Enter to load ONNX in the background");
             setBootEnterAction(() => requestAtlasBootBackground("enter"));
+            updateBootFooter("hit Enter to load ONNX in the background");
           } else {
             requestAtlasBootBackground("non-interactive-views-ready");
           }
@@ -2235,8 +1399,8 @@ export class RunSession {
               // minutes-long ML labeling pass with an Enter escape, but release
               // immediately when there's no TTY to take the keypress.
               if (bootCanPromptForBackground()) {
-                updateBootFooter("ML tree labeling — hit Enter to continue in the background");
                 setBootEnterAction(() => requestAtlasBootBackground("tree-compression-enter"));
+                updateBootFooter("ML tree labeling — hit Enter to continue in the background");
               } else {
                 requestAtlasBootBackground("non-interactive-views-ready");
               }
@@ -2589,8 +1753,8 @@ export class RunSession {
       softTimeoutStatus: "running",
       onSoftTimeout: () => {
         if (atlasBootBackgroundRequested) return;
-        updateBootFooter("hit Enter to continue with ATLAS in the background");
         setBootEnterAction(() => requestAtlasBootBackground("atlas-soft-timeout-enter"));
+        updateBootFooter("hit Enter to continue with ATLAS in the background");
       },
     });
     };
@@ -2615,7 +1779,7 @@ export class RunSession {
       // log to diagnostics only; the banner phase-2 colour will animate via
       // the vector-DB-fill signal once it's wired.
       if (onnxStatusAtBoot && onnxStatusAtBoot.status === "ready") {
-        const onnxWorkerUrl = new URL("./onnx-warm-worker.js", import.meta.url);
+        const onnxWorkerUrl = new URL("../functions/onnx-warm-worker.js", import.meta.url);
         const onnxWarmManager = new RunThreadManager();
         setOnnxWarmState({ phase: "loading", startedAt: Date.now(), finishedAt: null, error: null });
         onnxWarmManager.run(onnxWorkerUrl, {
@@ -2896,7 +2060,7 @@ export class RunSession {
     display.addEvent(`${C.green}Boot complete — entering main loop${C.reset}`);
   }
 
-  const worker = new Worker({ autoApprove: AUTO_APPROVE, projectDir: PROJECT_DIR, display, dryRun: DRY_RUN, stallTimeout: STALL_TIMEOUT, leaseSec: scheduler.leaseSec });
+  worker = new Worker({ autoApprove: AUTO_APPROVE, projectDir: PROJECT_DIR, display, dryRun: DRY_RUN, stallTimeout: STALL_TIMEOUT, leaseSec: scheduler.leaseSec });
 
   if (display) {
     const revivedHumanJobs = requeueWaitingHumanInputJobs();
@@ -2908,356 +2072,55 @@ export class RunSession {
     }
   }
 
-  // Tracks an in-flight live review ('r' keybinding) so wrap-up can wait for
-  // its closeout instead of re-entering approval mode over a live session.
-  let liveReviewPromise = null;
-
-  // Wire inject keybinding — pressing 'i' in the TUI creates a work item + research/plan jobs
-  if (display) {
-    display.onInject = (description) => {
-      const title = description.split("\n")[0].slice(0, 100);
-      const mode = inferWiMode(description) || "build";
-      const deepthinkBudget = "normal";
-      const item = createWorkItem(title, description, "normal", {
-        source: "inject",
-        mode,
-        metadata: researchBudgetMetadata({}, deepthinkBudget),
-      });
-      updateWorkItemStatus(item.id, "planning");
-      createInitialResearchOrPlanJob(item, {
-        deepthinkBudget,
-        source: "tui_inject",
-        redTeamPlan: shouldUseRedTeamPlanForWorkItem(item),
-        routing: classifyResearchForRouting({ workItem: item, mode, source: "tui_inject", live: true }),
-      });
-    };
-
-    // Wire image keybinding — pressing 'g' generates an image directly
-    display.onImage = (prompt) => {
-      const title = prompt.split("\n")[0].slice(0, 100);
-      const item = createWorkItem(title, prompt, "normal", { source: "image", mode: "image" });
-      ensureArtifactDirs(wiScopeId(item.id), "image", PROJECT_DIR);
-      const outputRoot = artifactsDir(wiScopeId(item.id), PROJECT_DIR).replace(/\\/g, "/");
-      const protocol = getResolvedImageProtocol();
-      const imgProvider = protocol.provider || "openai";
-
-      updateWorkItemStatus(item.id, "running");
-      createJob({
-        work_item_id: item.id,
-        job_type: "artificer",
-        title: `Generate: ${title.slice(0, 70)}`,
-        priority: "normal",
-        model_tier: "standard",
-        reasoning_effort: "medium",
-        provider: imgProvider,
-        payload_json: JSON.stringify(buildImageInjectionPayload({ prompt, outputRoot })),
-      });
-    };
-
-    // Wire kill keybinding — pressing 'k' lets user kill a stuck worker
-    display.onKill = (jobId) => {
-      const killed = worker.killJob(jobId, "user_canceled");
-      if (killed) {
-        display.addEvent(`${C.red}\u26a1 Killed worker for job #${jobId} — will retry${C.reset}`);
-      } else {
-        display.addEvent(`${C.yellow}No active process found for job #${jobId}${C.reset}`);
-      }
-    };
-
-    // Wire nudge keybinding — pressing 'n' kills a running job and injects a correction
-    display.onNudge = (jobId, correction) => {
-      // Store the correction as a nudge artifact BEFORE killing, so it's
-      // available when the retry starts.
-      storeArtifact({
-        work_item_id: getJob(jobId)?.work_item_id,
-        job_id: jobId,
-        artifact_type: "nudge",
-        content_long: correction,
-      });
-
-      logEvent({
-        work_item_id: getJob(jobId)?.work_item_id,
-        job_id: jobId,
-        event_type: EVENT_TYPES.JOB_NUDGED,
-        actor_type: EVENT_ACTORS.HUMAN,
-        message: `Human correction: ${correction.slice(0, 200)}`,
-      });
-
-      const killed = worker.killJob(jobId, "user_nudge");
-      if (killed) {
-        display.addEvent(`${C.cyan}\u270e Nudged job #${jobId} — will retry with correction${C.reset}`);
-      } else {
-        display.addEvent(`${C.cyan}\u270e Correction stored for job #${jobId} (not currently running)${C.reset}`);
-      }
-    };
-
-    // Wire kill-WI keybinding — pressing 'x' cancels an entire work item
-    display.onKillWI = (wiId) => {
-      const wi = getWorkItem(wiId);
-      if (!wi) return;
-
-      // Kill any running workers for this WI
-      for (const [jobId, w] of display.workers) {
-        if (w.workItemId === wiId) {
-          worker.killJob(jobId, "work_item_canceled");
-        }
-      }
-
-      // Cancel all non-terminal jobs
-      const canceled = cancelWorkItemJobs(wiId);
-      updateWorkItemStatus(wiId, "canceled");
-
-      logEvent({
-        work_item_id: wiId,
-        event_type: EVENT_TYPES.WORK_ITEM_CANCELED,
-        actor_type: EVENT_ACTORS.HUMAN,
-        message: `Work item canceled by user (${canceled.length} job(s) canceled)`,
-      });
-
-      if (!wi.branch_name) {
-        display.addEvent(`${C.red}\u2717 WI#${wiId} canceled; ${canceled.length} job(s) stopped${C.reset}`);
-        return;
-      }
-
-      display.addEvent(`${C.red}\u2717 WI#${wiId} canceled; ${canceled.length} job(s) stopped, branch cleanup running${C.reset}`);
-      const cleanupRunner = typeof cleanupWiBranchAsync === "function"
-        ? cleanupWiBranchAsync
-        : null;
-      if (!cleanupRunner) {
-        display.addEvent(`${C.yellow}WI#${wiId} branch cleanup skipped: async cleanup unavailable${C.reset}`);
-        return;
-      }
-      void cleanupRunner(wi, { clearMergeState: true })
-        .then((cleanupOk) => {
-          if (!cleanupOk) {
-            display.addEvent(`${C.red}\u2717 WI#${wiId} branch cleanup failed${C.reset}`);
-            return;
-          }
-          display.addEvent(`${C.green}\u2713 WI#${wiId} branch/worktree cleaned up${C.reset}`);
-        })
-        .catch((err) => {
-          display.addEvent(`${C.red}\u2717 WI#${wiId} branch cleanup failed: ${String(err?.message || err)}${C.reset}`);
-        })
-        .finally(() => {
-          refreshDisplaySnapshotsForQueue();
-          display.requestRender?.({ reason: "event" });
-        });
-    };
-
-    // Wire skip-task keybinding — pressing 's' skips a queued/blocked job
-    display.onSkipJob = (jobId) => {
-      try {
-        const job = getJob(jobId);
-        if (!job) return;
-
-        const skipped = skipJob(jobId);
-        if (skipped) {
-          refreshWorkItemStatus(job.work_item_id);
-          display.addEvent(`${C.yellow}\u23ed Skipped job #${jobId}: ${job.title.slice(0, 50)} — downstream unblocked${C.reset}`);
-        } else {
-          display.addEvent(`${C.yellow}Cannot skip job #${jobId} (${job.status})${C.reset}`);
-        }
-      } catch (err) {
-        display.addEvent(`${C.red}Skip failed for job #${jobId}: ${err.message}${C.reset}`);
-      }
-    };
-
-    display.onReviewPending = () => {
-      if (liveReviewPromise) {
-        display.addEvent(`${C.dim}Review is already open/running${C.reset}`);
-        return;
-      }
-      liveReviewPromise = runLiveReview(display)
-        .catch((err) => {
-          if (typeof display._resetApprovalState === "function") {
-            display._resetApprovalState();
-          } else {
-            display._mode = "normal";
-          }
-          display.addEvent(`${C.red}Review failed: ${err.message}${C.reset}`);
-          display.requestRender({ force: true });
-        })
-        .finally(() => {
-          liveReviewPromise = null;
-        });
-    };
-
-    // Wire ask keybinding — pressing '?' creates a research-only WI
-    display.onAsk = (question) => {
-      const title = question.split("\n")[0].slice(0, 100);
-      const deepthinkBudget = "normal";
-      const item = createWorkItem(title, question, "normal", {
-        source: "ask",
-        metadata: researchBudgetMetadata({ mode: "question" }, deepthinkBudget),
-      });
-      updateWorkItemStatus(item.id, "planning");
-      classifyResearchForRouting({ workItem: item, mode: "question", source: "tui_ask", live: true });
-
-      createJob({
-        work_item_id: item.id,
-        job_type: "research",
-        title: `Ask: ${title.slice(0, 60)}`,
-        priority: "normal",
-        model_tier: defaultResearchModelTier(),
-        reasoning_effort: researchBudgetToReasoningEffort(deepthinkBudget, "medium"),
-        payload_json: JSON.stringify(researchPayload({}, deepthinkBudget)),
-      });
-    };
-  }
-
-  // Handle Ctrl+C gracefully — second press force-exits.
-  // IMPORTANT: signal handlers are synchronous entry points. Keep the handler's
-  // own stack non-blocking and queue any git/filesystem cleanup onto async work.
-  let sigintCount = 0;
-  let shutdownInProgress = false;
-  let shutdownForceExitTimer = null;
-  const emptyShutdownSweepSummary = () => ({
-    swept: 0,
-    snapshotted: 0,
-    skippedDueBudget: 0,
-    skippedActive: 0,
-    skippedLockTimeout: 0,
-    resetIncomplete: 0,
+  const displayActions = new RunDisplayActions({
+    display,
+    worker,
+    projectDir: PROJECT_DIR,
+    C,
+    inferWiMode,
+    researchBudgetMetadata,
+    createWorkItem,
+    updateWorkItemStatus,
+    createInitialResearchOrPlanJob,
+    shouldUseRedTeamPlanForWorkItem,
+    classifyResearchForRouting,
+    ensureArtifactDirs,
+    wiScopeId,
+    artifactsDir,
+    getResolvedImageProtocol,
+    createJob,
+    getJob,
+    getWorkItem,
+    storeArtifact,
+    logEvent,
+    cancelWorkItemJobs,
+    cleanupWiBranchAsync,
+    skipJob,
+    refreshWorkItemStatus,
+    runLiveReview,
+    defaultResearchModelTier,
+    researchBudgetToReasoningEffort,
+    researchPayload,
+    refreshDisplaySnapshotsForQueue,
+  }).wire();
+  const shutdown = new RunShutdownController({
+    getDisplay: () => display,
+    worker,
+    scheduler,
+    scheduleSchedulerStop,
+    stopDisplaySnapshotCaches,
+    cleanupAtlasForSession,
+    emitCloseoutStatus,
+    flushCloseoutStatus,
+    C,
+    listJobs,
+    requeueForShutdown,
+    refreshWorkItemStatus,
+    closeRuntimeState: closeRuntimeStateForExit,
+    exitProcess,
   });
-  let shutdownCleanupPromise = null;
-  let shutdownSweepSummary = emptyShutdownSweepSummary();
-  const normalizeShutdownSweepSummary = (swept) => ({
-    ...emptyShutdownSweepSummary(),
-    ...(swept || {}),
-  });
-  const shutdownSweepSummaryLine = (swept) => `Shutdown dirty sweep: ${swept.swept} active worktree(s), ${swept.snapshotted} snapshot(s)${swept.skippedDueBudget ? `, ${swept.skippedDueBudget} skipped (time budget)` : ""}${swept.skippedActive ? `, ${swept.skippedActive} skipped (active sentinel)` : ""}${swept.skippedLockTimeout ? `, ${swept.skippedLockTimeout} skipped (lock busy)` : ""}${swept.resetIncomplete ? `, ${swept.resetIncomplete} incomplete reset(s)` : ""}${swept.sweepFailed ? `, skipped (${swept.error})` : ""}`;
-  const reportShutdownSweep = (swept) => {
-    if (display) {
-      if (swept.swept > 0) {
-        display.addEvent(`${C.dim}${shutdownSweepSummaryLine(swept)}${C.reset}`);
-      } else if (swept.skippedLockTimeout > 0) {
-        display.addEvent(`${C.dim}Shutdown dirty sweep skipped ${swept.skippedLockTimeout} worktree(s): lock busy${C.reset}`);
-      } else if (swept.sweepFailed) {
-        display.addEvent(`${C.dim}Shutdown dirty sweep skipped: ${swept.error}${C.reset}`);
-      }
-      display.requestRender({ force: true });
-    } else if (swept.swept > 0 || swept.skippedLockTimeout > 0 || swept.sweepFailed) {
-      console.log(`  ${C.dim}${shutdownSweepSummaryLine(swept)}${C.reset}`);
-    }
-  };
-  const startShutdownDirtySweep = () => {
-    if (shutdownCleanupPromise) return shutdownCleanupPromise;
-    shutdownCleanupPromise = Promise.resolve()
-      .then(async () => {
-        if (typeof worker.sweepActiveDirtyWorktreesAsync !== "function") {
-          return {
-            ...emptyShutdownSweepSummary(),
-            sweepFailed: true,
-            error: "async dirty sweep unavailable",
-          };
-        }
-        return worker.sweepActiveDirtyWorktreesAsync("shutdown-signal", {
-          maxTotalMs: 2000,
-          worktreeLockWaitMs: 250,
-        });
-      })
-      .then((swept) => {
-        shutdownSweepSummary = normalizeShutdownSweepSummary(swept);
-        reportShutdownSweep(shutdownSweepSummary);
-        return shutdownSweepSummary;
-      })
-      .catch((err) => {
-        shutdownSweepSummary = {
-          ...emptyShutdownSweepSummary(),
-          sweepFailed: true,
-          error: err?.message || String(err),
-        };
-        reportShutdownSweep(shutdownSweepSummary);
-        return shutdownSweepSummary;
-      });
-    return shutdownCleanupPromise;
-  };
-  const requeueInterruptedShutdownJobs = () => {
-    if (typeof requeueForShutdown !== "function") return { active: 0, requeued: 0 };
-    let active = [];
-    try {
-      active = listJobs([...ACTIVE_LEASE_STATUSES]);
-    } catch {
-      return { active: 0, requeued: 0 };
-    }
-    let requeued = 0;
-    const affectedWorkItems = new Set();
-    for (const job of active) {
-      if (!job?.id) continue;
-      if (job.work_item_id != null) affectedWorkItems.add(job.work_item_id);
-      try {
-        if (requeueForShutdown(job.id)) requeued += 1;
-      } catch { /* best-effort; scheduler/boot repair remains the fallback */ }
-    }
-    for (const wiId of affectedWorkItems) {
-      try { refreshWorkItemStatus(wiId); } catch { /* best-effort */ }
-    }
-    return { active: active.length, requeued };
-  };
-  const messageCleanup = (msg) => { if (msg === "shutdown") cleanup(); };
-  const cleanup = () => {
-    sigintCount++;
-    if (sigintCount >= 2) {
-      // Force exit on second Ctrl+C. Do not run DB/git cleanup on the signal
-      // stack; the first Ctrl+C already queued lock release and cleanup.
-      stopDisplaySnapshotCaches();
-      if (display) display.stop();
-      try { scheduler.requestStop?.(); } catch { /* best-effort */ }
-      void cleanupAtlasForSession({ label: "Forced shutdown" });
-      closeRuntimeStateForExit();
-      process.exit(1);
-    }
-
-    if (shutdownInProgress) return;
-    shutdownInProgress = true;
-    worker.shuttingDown = true;
-    shutdownForceExitTimer = setTimeout(() => {
-      stopDisplaySnapshotCaches();
-      if (display) display.stop();
-      try { scheduler.requestStop?.(); } catch { /* best-effort */ }
-      void cleanupAtlasForSession({ label: "Shutdown watchdog" });
-      closeRuntimeStateForExit();
-      process.exit(1);
-    }, 45_000);
-    shutdownForceExitTimer.unref?.();
-
-    if (display) {
-      display.cancelAllQuestions();
-      display.addEvent(`${C.yellow}Graceful shutdown \u2014 killing workers, stashing work...${C.reset}`);
-      display.addEvent(`${C.dim}(Ctrl+C again to force-exit)${C.reset}`);
-      display.requestRender({ force: true });
-    } else {
-      console.log(`\n  ${C.yellow}Graceful shutdown \u2014 killing workers, stashing work...${C.reset}`);
-      console.log(`  ${C.dim}(Ctrl+C again to force-exit)${C.reset}`);
-    }
-
-    // Kill all running workers so they can stash work and release leases
-    const killed = worker.killAllJobs("shutdown");
-    const shutdownRequeue = requeueInterruptedShutdownJobs();
-    // Release the scheduler lock before best-effort local cleanup. The dirty
-    // sweep may touch git/worktree locks, so both pieces are queued off the
-    // signal handler stack.
-    void scheduleSchedulerStop().then(() => startShutdownDirtySweep());
-    if (display) {
-      display.addEvent(`${C.dim}Sent kill to ${killed} worker(s)${C.reset}`);
-      if (shutdownRequeue.requeued > 0) {
-        display.addEvent(`${C.dim}Requeued ${shutdownRequeue.requeued} interrupted job(s) for next run${C.reset}`);
-      } else if (shutdownRequeue.active > 0) {
-        display.addEvent(`${C.dim}Shutdown requeue deferred for ${shutdownRequeue.active} active job(s); boot repair will retry${C.reset}`);
-      }
-      display.requestRender({ force: true });
-    }
-  };
   removeBootSignalHandlers();
-  process.on("SIGINT", cleanup);
-  process.on("SIGTERM", cleanup);
-  // Windows: SIGTERM doesn't fire. SIGBREAK (Ctrl+Break) is the closest equivalent
-  // for external shutdown signals. Also handle 'message' for PM2/child_process.
-  if (process.platform === "win32") {
-    process.on("SIGBREAK", cleanup);
-    process.on("message", messageCleanup);
-  }
-
+  shutdown.install();
   try {
     recordRunDiagnostic("scheduler.run_loop_starting", {
       owner_id: scheduler.ownerId || null,
@@ -3271,196 +2134,42 @@ export class RunSession {
   try { setConductorKeepWarmForRun(true); } catch { /* best-effort */ }
   try { setOnnxDaemonKeepWarmForRun(true); } catch { /* best-effort */ }
 
+  const schedulerCallbacks = new RunSchedulerLoopCallbacks({
+    getDisplay: () => display,
+    C,
+    worker,
+    getJob,
+    idleAutoMerge,
+    hasAutoMergeableCompletedWorkItems,
+    autoMergePendingReviewBlockers,
+    describePendingReviewLockBlockers,
+  });
   await scheduler.runLoop(
     (job) => worker.execute(job),
-    {
-      onJobStart: (job) => {
-        if (display) {
-          const role = displayRoleForJobType(job.job_type);
-          // Strip redundant role prefix from title (e.g. "Research: Add JWT" → "Add JWT")
-          const titleClean = job.title.replace(/^(Research|Plan|Ask|Fix|Assess|Dev):\s*/i, "").slice(0, 50);
-          display.setWorker(job.id, {
-            role,
-            activity: titleClean,
-            tier: job.model_tier || "standard",
-            effort: job.reasoning_effort || "medium",
-            attempt: (job.attempt_count || 0) + 1,
-            workItemId: job.work_item_id,
-            provider: job.provider || null,
-            modelName: job.model_name || null,
-            emitStart: false,
-          });
-        }
-      },
-      onJobEnd: (job) => {
-        if (display) {
-          const freshJob = getJob(job.id);
-          display.removeWorker(job.id, freshJob?.status || "done");
-        }
-        const freshJob = getJob(job.id);
-        if (freshJob?.status === "succeeded") {
-          let hasMergeable = false;
-          try {
-            hasMergeable = typeof hasAutoMergeableCompletedWorkItems === "function"
-              && hasAutoMergeableCompletedWorkItems();
-          } catch {
-            hasMergeable = false;
-          }
-          if (hasMergeable) {
-            startIdleAutoMerge({
-              reason: "job completion",
-              runGc: false,
-              afterMerged: (mergedCount) => {
-                const mergedMsg = `Auto-merged ${mergedCount} completed work item${mergedCount === 1 ? "" : "s"} after job completion.`;
-                if (display) display.addEvent(`${C.green}${mergedMsg}${C.reset}`);
-                else console.log(`\n  ${C.green}${mergedMsg}${C.reset}`);
-              },
-              onError: (err) => {
-                const errMsg = `Auto-merge after job completion failed: ${err?.message || err}`;
-                if (display) display.addEvent(`${C.red}${errMsg}${C.reset}`);
-                else console.log(`\n  ${C.red}${errMsg}${C.reset}`);
-              },
-            });
-          }
-        }
-      },
-      onIdle: (activeJobs) => {
-        const pendingReviewBlocker = describePendingReviewLockBlockers();
-        if (pendingReviewBlocker && pendingReviewBlocker !== lastPendingReviewBlockerMsg) {
-          lastPendingReviewBlockerMsg = pendingReviewBlocker;
-          if (autoMergePendingReviewBlockers && typeof autoMergeCompletedWorkItems === "function") {
-            if (!idleAutoMergePromise && !pendingReviewAutoMergeAttempts.has(pendingReviewBlocker)) {
-              pendingReviewAutoMergeAttempts.add(pendingReviewBlocker);
-              startIdleAutoMerge({
-                reason: "pending-review blocker",
-                runGc: false,
-                beforeStart: () => {
-                  const msg = "Queued work is blocked by pending review; auto-merge is enabled, attempting merge.";
-                  if (display) display.addEvent(`${C.cyan}${msg}${C.reset}`);
-                  else console.log(`\n  ${C.cyan}${msg}${C.reset}`);
-                },
-                afterMerged: (mergedCount) => {
-                  if (mergedCount > 0) {
-                    lastPendingReviewBlockerMsg = null;
-                    pendingReviewAutoMergeAttempts.clear();
-                    const mergedMsg = `Auto-merged ${mergedCount} blocker work item${mergedCount === 1 ? "" : "s"}; queued work can continue.`;
-                    if (display) display.addEvent(`${C.green}${mergedMsg}${C.reset}`);
-                    else console.log(`\n  ${C.green}${mergedMsg}${C.reset}`);
-                  }
-                },
-                afterNoMerge: () => {
-                  if (display) display.addEvent(`${C.yellow}${pendingReviewBlocker}${C.reset}`);
-                  else console.log(`\n  ${C.yellow}${pendingReviewBlocker}${C.reset}`);
-                },
-                onError: (err) => {
-                  const errMsg = `Auto-merge for pending-review blocker failed: ${err?.message || err}`;
-                  if (display) display.addEvent(`${C.red}${errMsg}${C.reset}`);
-                  else console.log(`\n  ${C.red}${errMsg}${C.reset}`);
-                  if (display) display.addEvent(`${C.yellow}${pendingReviewBlocker}${C.reset}`);
-                  else console.log(`\n  ${C.yellow}${pendingReviewBlocker}${C.reset}`);
-                },
-              });
-            }
-          } else {
-            if (display) display.addEvent(`${C.yellow}${pendingReviewBlocker}${C.reset}`);
-            else console.log(`\n  ${C.yellow}${pendingReviewBlocker}${C.reset}`);
-          }
-        } else if (!pendingReviewBlocker) {
-          startIdleAutoMerge({
-            reason: "scheduler idle",
-            runGc: false,
-            afterMerged: (mergedCount) => {
-              const mergedMsg = `Auto-merged ${mergedCount} completed work item${mergedCount === 1 ? "" : "s"} during scheduler idle.`;
-              if (display) display.addEvent(`${C.green}${mergedMsg}${C.reset}`);
-              else console.log(`\n  ${C.green}${mergedMsg}${C.reset}`);
-            },
-          });
-        }
-        const blocked = activeJobs.filter((j) => j.status === "blocked" || j.status === "waiting_on_human" || j.status === "waiting_on_review");
-        if (blocked.length > 0 && blocked.length === activeJobs.length) {
-          const msg = `All ${activeJobs.length} remaining job(s) are blocked/waiting.`;
-          if (display) display.addEvent(`${C.yellow}${msg}${C.reset}`);
-          else console.log(`\n  ${C.yellow}${msg}${C.reset}`);
-        }
-      },
-      onDone: () => {
-        const msg = "All jobs complete.";
-        if (display) display.addEvent(`${C.green}${C.bold}${msg}${C.reset}`);
-        else console.log(`\n  ${C.green}${C.bold}${msg}${C.reset}`);
-      },
-      onSlotStatus: ({ blockedByLock, blockedLockDetails = [] }) => {
-        if (display) {
-          display._blockedByLock = blockedByLock;
-          display._blockedByLockDetails = blockedLockDetails;
-        }
-      },
-      onKillJob: (jobId, reason) => worker.killJob(jobId, reason),
-    },
+    schedulerCallbacks.callbacks(),
   );
   try {
     recordRunDiagnostic("scheduler.run_loop_returned", {
       owner_id: scheduler.ownerId || null,
-      shutdown_in_progress: !!shutdownInProgress,
+      shutdown_in_progress: !!shutdown.inProgress,
     });
   } catch { /* observational */ }
 
-  await waitForIdleAutoMerge();
+  await idleAutoMerge.wait();
 
   // ── Post-scheduler: clean up worktrees if shutdown was triggered ──
-  if (shutdownInProgress) {
-    emitCloseoutStatus("Graceful shutdown - run wrap-up: starting closeout.", C.yellow);
-    if (schedulerStopPromise) await schedulerStopPromise;
-    if (!shutdownCleanupPromise) startShutdownDirtySweep();
-    if (shutdownCleanupPromise) {
-      emitCloseoutStatus("Graceful shutdown - run wrap-up: finishing active worktree sweep...", C.cyan);
-      await flushCloseoutStatus();
-      await shutdownCleanupPromise;
-    }
-    if (needsGit) {
-      emitCloseoutStatus("Graceful shutdown - run wrap-up: cleaning worktrees...", C.cyan);
-      await flushCloseoutStatus();
-      const cleaned = await runBoundedCloseoutWorktreeCleanup({
-        label: "Graceful shutdown - run wrap-up",
-        failureText: "worktree cleanup skipped",
-      });
-      if (cleaned) emitCloseoutStatus("Graceful shutdown - run wrap-up: worktrees clean.", C.green);
-    }
-    await flushCloseoutStatus();
-    await cleanupAtlasForSession({ label: "Graceful shutdown - run wrap-up" });
-    await flushCloseoutStatus();
-    emitCloseoutStatus("Graceful shutdown - run wrap-up: done.", C.green);
-    await flushCloseoutStatus();
-    if (shutdownForceExitTimer) {
-      clearTimeout(shutdownForceExitTimer);
-      shutdownForceExitTimer = null;
-    }
-
-    // Swap signal handlers and exit — skip interactive wrap-up after shutdown
-    process.off("SIGINT", cleanup);
-    process.off("SIGTERM", cleanup);
-    if (process.platform === "win32") {
-      process.off("SIGBREAK", cleanup);
-      process.off("message", messageCleanup);
-    }
-    const hadDisplay = !!display;
-    stopDisplaySnapshotCaches();
-    if (display) display.stop();
-    if (hadDisplay) console.log(`\n  ${C.green}Graceful shutdown complete.${C.reset}\n`);
-    closeRuntimeStateForExit();
-    process.exitCode = 0;
-    exitProcess?.(0);
+  if (await shutdown.finishAfterScheduler({
+    needsGit,
+    schedulerStopPromise,
+    runBoundedCloseoutWorktreeCleanup,
+  })) {
     return;
   }
 
   // Replace scheduler cleanup handler with a simpler one for the wrap-up phase.
   // The display is still in raw mode, so Ctrl+C is intercepted by keypress and
   // emitted as process.emit("SIGINT") — without a handler, nothing happens.
-  process.off("SIGINT", cleanup);
-  process.off("SIGTERM", cleanup);
-  if (process.platform === "win32") {
-    process.off("SIGBREAK", cleanup);
-    process.off("message", messageCleanup);
-  }
+  shutdown.uninstall();
   const wrapUpSigintCleanup = () => handleWrapUpSignal({ signal: "SIGINT", display, cleanupAtlasForSession });
   const wrapUpSigtermCleanup = () => handleWrapUpSignal({ signal: "SIGTERM", display, cleanupAtlasForSession });
   process.on("SIGINT", wrapUpSigintCleanup);
@@ -3473,6 +2182,7 @@ export class RunSession {
   try {
     let nextAction = null;
     if (display) {
+      const liveReviewPromise = displayActions.getLiveReviewPromise();
       if (liveReviewPromise) {
         // The scheduler can drain and exit on its own while a live review is
         // still open. Wait for runLiveReview's closeout (merge-queue drain +

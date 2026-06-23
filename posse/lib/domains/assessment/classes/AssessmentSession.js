@@ -41,17 +41,6 @@ export class AssessmentSession {
     return this._history.length;
   }
 
-  budgetSpent() {
-    const spent = Number(this._last?.budget?.spent ?? this._last?.parseRetryBudget?.spent ?? 0);
-    return Number.isFinite(spent) ? spent : 0;
-  }
-
-  shouldRetryAtHigherTier() {
-    const verdict = String(this._last?.verdict || "").toLowerCase();
-    if (verdict === "parse_error") return true;
-    return !!this._last?._retryHigherTier;
-  }
-
   history() {
     return [...this._history];
   }

@@ -4,10 +4,10 @@
 // get policy signal without sudden hard failures.
 
 const RUNG_BY_ACTION = Object.freeze({
-  "symbol.getCard": 1,
-  "code.getSkeleton": 2,
-  "code.getHotPath": 3,
-  "code.needWindow": 4,
+  "symbol.card": 1,
+  "code.skeleton": 2,
+  "code.lens": 3,
+  "code.window": 4,
 });
 
 const LADDER_STATE_LIMIT = 5000;

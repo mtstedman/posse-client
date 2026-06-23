@@ -109,6 +109,34 @@ function responseTooLargeError({ operation, url, maxBytes }) {
   return err;
 }
 
+function responseHeader(response, name) {
+  const headers = response?.headers;
+  if (!headers) return "";
+  if (typeof headers.get === "function") return headers.get(name) || "";
+  return headers[name] || headers[String(name).toLowerCase()] || "";
+}
+
+function responseContentLength(response) {
+  const value = responseHeader(response, "content-length");
+  const parsed = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function normalizeResponseChunk(value) {
+  if (value instanceof Uint8Array) return value;
+  return new TextEncoder().encode(String(value ?? ""));
+}
+
+function decodeResponseChunks(chunks, total) {
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
 export async function readResponseTextWithLimit(response, {
   maxBytes = POSSE_REMOTE_MAX_RESPONSE_BYTES,
   operation = "remote request",
@@ -126,7 +154,7 @@ export async function readResponseTextWithLimit(response, {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = value instanceof Uint8Array ? value : new TextEncoder().encode(String(value ?? ""));
+        const chunk = normalizeResponseChunk(value);
         total += chunk.byteLength;
         if (total > limit) {
           try { await reader.cancel(); } catch { /* ignore */ }
@@ -137,13 +165,27 @@ export async function readResponseTextWithLimit(response, {
     } finally {
       try { reader.releaseLock?.(); } catch { /* ignore */ }
     }
-    const merged = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      merged.set(chunk, offset);
-      offset += chunk.byteLength;
+    return decodeResponseChunks(chunks, total);
+  }
+
+  if (response?.body && typeof response.body[Symbol.asyncIterator] === "function") {
+    const chunks = [];
+    let total = 0;
+    for await (const value of response.body) {
+      const chunk = normalizeResponseChunk(value);
+      total += chunk.byteLength;
+      if (total > limit) {
+        try { response.body.destroy?.(); } catch { /* ignore */ }
+        throw responseTooLargeError({ operation, url, maxBytes: limit });
+      }
+      chunks.push(chunk);
     }
-    return new TextDecoder().decode(merged);
+    return decodeResponseChunks(chunks, total);
+  }
+
+  const contentLength = responseContentLength(response);
+  if (contentLength != null && contentLength > limit) {
+    throw responseTooLargeError({ operation, url, maxBytes: limit });
   }
 
   const text = await response.text();

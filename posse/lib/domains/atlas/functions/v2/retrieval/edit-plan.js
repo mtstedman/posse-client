@@ -74,7 +74,7 @@ export function editPlan({ view, versionId, params }) {
         symbols: new Set(symbols.map((symbol) => symbol.global_id)).size,
       },
       warnings,
-      nextActions: ["code.getSkeleton", "code.getHotPath", "file.read"],
+      nextActions: ["code.skeleton", "code.lens", "file.read"],
     },
   });
 }

@@ -180,7 +180,7 @@ change.
 | `symbol.*` | `search`, `getCard` |
 | `slice.*` | `build`, `refresh`, `spillover.get` |
 | `code.*` | `getSkeleton`, `getHotPath`, `needWindow` |
-| (top-level) | `context`, `agent.feedback`, `delta.get`, `pr.risk.analyze`, `pr.risk`, `file.read` |
+| (top-level) | `context`, `agent.feedback`, `review.delta`, `review.analyze`, `review.risk`, `file.read` |
 
 ---
 

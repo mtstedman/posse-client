@@ -46,8 +46,15 @@ function registerAtlasThreadDaemon(kind, daemon, label) {
 }
 
 /** @returns {{ stage, ingest, warm, merge, retrieve, executeTool, reindex, reindexLanguage, info, readerInfo, close, daemon: Daemon }} */
-export function createConductorDaemon() {
+export function createConductorDaemon(opts = {}) {
   const nativeAuth = heartbeatAuthManager.getCapability();
+  const readerHostUrl = opts.readerHostUrl || READER_HOST_URL;
+  const readerOpTimeoutMs = Number.isFinite(Number(opts.readerOpTimeoutMs))
+    ? Math.max(1, Number(opts.readerOpTimeoutMs))
+    : READER_OP_TIMEOUT_MS;
+  const readerWriteOpTimeoutMs = Number.isFinite(Number(opts.readerWriteOpTimeoutMs))
+    ? Math.max(1, Number(opts.readerWriteOpTimeoutMs))
+    : READER_WRITE_OP_TIMEOUT_MS;
   const daemon = registerAtlasThreadDaemon("atlas-conductor", new Daemon({
     transportFactory: () => ThreadTransport({ moduleUrl: HOST_URL, workerData: { nativeAuth }, nativeBridge: true }),
     timeoutMs: STAGE_TIMEOUT_MS,
@@ -66,7 +73,7 @@ export function createConductorDaemon() {
     slot,
     inFlight: 0,
     daemon: registerAtlasThreadDaemon(`atlas-reader-${slot + 1}`, new Daemon({
-        transportFactory: () => ThreadTransport({ moduleUrl: READER_HOST_URL, workerData: { nativeAuth }, nativeBridge: true }),
+        transportFactory: () => ThreadTransport({ moduleUrl: readerHostUrl, workerData: { nativeAuth }, nativeBridge: true }),
         timeoutMs: RETRIEVE_TIMEOUT_MS,
         label: `atlas-reader-${slot + 1}`,
         onLifecycle: (event) => {
@@ -205,6 +212,30 @@ export function createConductorDaemon() {
     return targets;
   };
 
+  const releaseHeldReader = async (heldReader) => {
+    const entry = heldReader?.entry;
+    if (!entry?.daemon?.isHostAlive()) return false;
+    let failed = false;
+    const embRoot = heldReader.embRoot || null;
+    const dbTargets = Array.isArray(heldReader.dbTargets) ? heldReader.dbTargets : [];
+    if (embRoot) {
+      try { await call(entry.daemon, { op: "endEmbeddingWrite", readRoot: embRoot }, { timeoutMs: readerOpTimeoutMs }); } catch { failed = true; }
+    }
+    for (const target of [...dbTargets].reverse()) {
+      try {
+        await call(entry.daemon, { op: "endWrite", ...target }, { timeoutMs: readerOpTimeoutMs });
+      } catch {
+        failed = true;
+      }
+    }
+    if (failed) await disposeReaderEntry(entry);
+    return failed;
+  };
+
+  const releaseHeldReaders = async (heldReaders) => {
+    for (const heldReader of heldReaders) await releaseHeldReader(heldReader);
+  };
+
   /**
    * Drain the reader lane before a writer mutates ATLAS DB files. This is a
    * no-op until the lazy reader has actually spawned; if the reader wedges,
@@ -214,40 +245,52 @@ export function createConductorDaemon() {
    */
   const beginReaderWrite = async (opts = {}, { holdEmbeddings = false } = {}) => {
     noteReaderWriteStart();
-    const readers = aliveReaderEntries();
-    if (readers.length === 0) return { readers: [] };
-    const targets = readerWriteTargets(opts);
-    const embRoot = holdEmbeddings && opts?.repoRoot ? String(opts.repoRoot) : null;
-    if (targets.length === 0 && !embRoot) return { readers: [] };
     const heldReaders = [];
-    for (const entry of readers) {
-      const held = [];
-      let heldEmb = null;
-      try {
-        for (const target of targets) {
-          await call(entry.daemon, { op: "beginWrite", ...target }, { timeoutMs: READER_WRITE_OP_TIMEOUT_MS });
-          held.push(target);
+    try {
+      const readers = aliveReaderEntries();
+      if (readers.length === 0) return { readers: [] };
+      const targets = readerWriteTargets(opts);
+      const embRoot = holdEmbeddings && opts?.repoRoot ? String(opts.repoRoot) : null;
+      if (targets.length === 0 && !embRoot) return { readers: [] };
+      for (const entry of readers) {
+        const held = [];
+        let heldEmb = null;
+        let phase = "db";
+        try {
+          for (const target of targets) {
+            await call(entry.daemon, { op: "beginWrite", ...target }, { timeoutMs: readerWriteOpTimeoutMs });
+            held.push(target);
+          }
+          if (embRoot) {
+            // Confirmed-close barrier: drain semantic reads and close (confirmed)
+            // the reader's cached ANN child — releasing index.usearch — before the
+            // conductor renames it. A failed embedding barrier must abort the ANN
+            // writer instead of falling through to a Windows sharing violation.
+            phase = "embedding";
+            await call(entry.daemon, { op: "beginEmbeddingWrite", readRoot: embRoot }, { timeoutMs: readerWriteOpTimeoutMs });
+            heldEmb = embRoot;
+          }
+          heldReaders.push({ entry, dbTargets: held, embRoot: heldEmb });
+        } catch (err) {
+          if (heldEmb) {
+            try { await call(entry.daemon, { op: "endEmbeddingWrite", readRoot: heldEmb }, { timeoutMs: readerOpTimeoutMs }); } catch { /* best effort */ }
+          }
+          for (const target of held.reverse()) {
+            try { await call(entry.daemon, { op: "endWrite", ...target }, { timeoutMs: readerOpTimeoutMs }); } catch { /* best effort */ }
+          }
+          await disposeReaderEntry(entry);
+          if (embRoot && phase === "embedding") {
+            const message = String(err?.message || err || "unknown error");
+            throw new Error(`reader embedding write barrier failed before ANN write: ${message}`);
+          }
         }
-        if (embRoot) {
-          // Confirmed-close barrier: drain semantic reads and close (confirmed)
-          // the reader's cached ANN child — releasing index.usearch — before the
-          // conductor renames it. Keyed by repoRoot since the child is shared
-          // across the repo's views.
-          await call(entry.daemon, { op: "beginEmbeddingWrite", readRoot: embRoot }, { timeoutMs: READER_WRITE_OP_TIMEOUT_MS });
-          heldEmb = embRoot;
-        }
-        heldReaders.push({ entry, dbTargets: held, embRoot: heldEmb });
-      } catch {
-        if (heldEmb) {
-          try { await call(entry.daemon, { op: "endEmbeddingWrite", readRoot: heldEmb }, { timeoutMs: READER_OP_TIMEOUT_MS }); } catch { /* best effort */ }
-        }
-        for (const target of held.reverse()) {
-          try { await call(entry.daemon, { op: "endWrite", ...target }, { timeoutMs: READER_OP_TIMEOUT_MS }); } catch { /* best effort */ }
-        }
-        await disposeReaderEntry(entry);
       }
+      return { readers: heldReaders };
+    } catch (err) {
+      await releaseHeldReaders(heldReaders);
+      noteReaderWriteEnd();
+      throw err;
     }
-    return { readers: heldReaders };
   };
 
   /**
@@ -257,22 +300,7 @@ export function createConductorDaemon() {
     try {
       const readers = Array.isArray(held?.readers) ? held.readers : [];
       for (const heldReader of readers) {
-        const entry = heldReader?.entry;
-        if (!entry?.daemon?.isHostAlive()) continue;
-        let failed = false;
-        const embRoot = heldReader.embRoot || null;
-        const dbTargets = Array.isArray(heldReader.dbTargets) ? heldReader.dbTargets : [];
-        if (embRoot) {
-          try { await call(entry.daemon, { op: "endEmbeddingWrite", readRoot: embRoot }, { timeoutMs: READER_OP_TIMEOUT_MS }); } catch { failed = true; }
-        }
-        for (const target of [...dbTargets].reverse()) {
-          try {
-            await call(entry.daemon, { op: "endWrite", ...target }, { timeoutMs: READER_OP_TIMEOUT_MS });
-          } catch {
-            failed = true;
-          }
-        }
-        if (failed) await disposeReaderEntry(entry);
+        await releaseHeldReader(heldReader);
       }
     } finally {
       noteReaderWriteEnd();
@@ -299,7 +327,7 @@ export function createConductorDaemon() {
   const aggregateReaderInfo = async () => {
     const readers = aliveReaderEntries();
     if (readers.length === 0) return null;
-    const results = await Promise.allSettled(readers.map((entry) => call(entry.daemon, { op: "info" }, { timeoutMs: READER_OP_TIMEOUT_MS })));
+    const results = await Promise.allSettled(readers.map((entry) => call(entry.daemon, { op: "info" }, { timeoutMs: readerOpTimeoutMs })));
     const infos = [];
     for (let i = 0; i < results.length; i += 1) {
       const result = results[i];

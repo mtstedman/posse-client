@@ -1,6 +1,6 @@
 // @ts-check
 //
-// AST-backed code.getSkeleton renderer. It keeps declaration text and elides
+// AST-backed code.skeleton renderer. It keeps declaration text and elides
 // bodies so callers can inspect structure without escalating to raw windows.
 
 import {

@@ -255,7 +255,8 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
         if (!resolved.ok) return resolved;
         const note = String(args.note || args.response || "").trim();
         return answerHumanInput(reviewJobId, {
-          ...args,
+          job_id: reviewJobId,
+          lease_seconds: args.lease_seconds,
           answer: note ? `pass: ${note}` : "pass",
         }, context);
       }
@@ -272,7 +273,8 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
         const feedback = String(args.feedback ?? args.reason ?? args.response ?? "").trim();
         if (!feedback) return { ok: false, reason: "missing_feedback" };
         return answerHumanInput(reviewJobId, {
-          ...args,
+          job_id: reviewJobId,
+          lease_seconds: args.lease_seconds,
           answer: `fail: ${feedback}`,
         }, context);
       }

@@ -757,8 +757,8 @@ function guidanceFor({ cards }) {
     return ["Try symbol.search with a concrete identifier, context.summary with focusPaths, or slice.build with editedFiles."];
   }
   return [
-    "Use symbol.getCard for dependency/card details.",
-    "Use code.getSkeleton or code.getHotPath before requesting raw windows.",
+    "Use symbol.card for dependency/card details.",
+    "Use code.skeleton or code.lens before requesting raw windows.",
   ];
 }
 
@@ -769,8 +769,8 @@ function nextBestActionFor({ params, cards, memories }) {
   if (cards.length === 0 && memories.length === 0) {
     return "symbol.search";
   }
-  if (params.taskType === "review") return "pr.risk";
-  if (cards.length > 0) return "code.getSkeleton";
+  if (params.taskType === "review") return "review.risk";
+  if (cards.length > 0) return "code.skeleton";
   return "memory.query";
 }
 

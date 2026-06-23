@@ -369,14 +369,14 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
     };
   }
 
-  if (normalizedAction === "tree.grow") {
+  if (normalizedAction === "tree.expand") {
     const rawPaths = [
       ...sanitizeRelativePathList(payload.paths, 100),
       ...sanitizeRelativePathList(payload.editedFiles, 100),
     ];
-    if (payload.path != null) rawPaths.push(requireSafeRelativePath(payload.path, "tree.grow path"));
-    assertNoUnsafeRelativePaths(payload.paths, "tree.grow paths");
-    assertNoUnsafeRelativePaths(payload.editedFiles, "tree.grow editedFiles");
+    if (payload.path != null) rawPaths.push(requireSafeRelativePath(payload.path, "tree.expand path"));
+    assertNoUnsafeRelativePaths(payload.paths, "tree.expand paths");
+    assertNoUnsafeRelativePaths(payload.editedFiles, "tree.expand editedFiles");
     const refs = Array.isArray(payload.refs)
       ? payload.refs
         .map((ref) => ({
@@ -394,7 +394,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
         paths: [...new Set(rawPaths)].slice(0, 100),
-        symbolIds: sanitizeAtlasSymbolIdList(payload.symbolIds || (payload.symbolId ? [payload.symbolId] : []), 100, "tree.grow symbolIds"),
+        symbolIds: sanitizeAtlasSymbolIdList(payload.symbolIds || (payload.symbolId ? [payload.symbolId] : []), 100, "tree.expand symbolIds"),
         nodeIds: sanitizeShortStringList(payload.nodeIds, 100, 2000),
         refs,
         ...(payload.maxFiles == null ? {} : { maxFiles: clampInt(payload.maxFiles, 1, 500, DEFAULT_ATLAS_SCOPE_MAX_FILES) }),
@@ -496,9 +496,9 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
     };
   }
 
-  if (normalizedAction === "delta.get") {
+  if (normalizedAction === "review.delta") {
     if (!payload.fromVersion || !payload.toVersion) {
-      throw new Error("ATLAS delta.get requires fromVersion and toVersion.");
+      throw new Error("ATLAS review.delta requires fromVersion and toVersion.");
     }
     return {
       action: normalizedAction,
@@ -513,8 +513,8 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
     };
   }
 
-  if (normalizedAction === "symbol.getCard") {
-    const symbolId = optionalAtlasSymbolId(payload.symbolId, "symbol.getCard symbolId");
+  if (normalizedAction === "symbol.card") {
+    const symbolId = optionalAtlasSymbolId(payload.symbolId, "symbol.card symbolId");
     const symbolRef = payload.symbolRef && typeof payload.symbolRef === "object"
       ? {
         name: sanitizeString(payload.symbolRef.name, 256),
@@ -525,24 +525,8 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
         ...(payload.symbolRef.exportedOnly == null ? {} : { exportedOnly: !!payload.symbolRef.exportedOnly }),
       }
       : null;
-    // Batch mode: symbolIds answers in the symbol.getCards shape. One tool,
-    // single or batch by input.
-    const batchSymbolIds = sanitizeAtlasSymbolIdList(payload.symbolIds, 100, "symbol.getCard symbolIds");
-    if (batchSymbolIds.length > 0 || (Array.isArray(payload.symbolRefs) && payload.symbolRefs.length > 0)) {
-      return {
-        action: normalizedAction,
-        cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
-        payload: {
-          ...(batchSymbolIds.length > 0 ? { symbolIds: batchSymbolIds } : {}),
-          ...(Array.isArray(payload.symbolRefs) && payload.symbolRefs.length > 0 ? { symbolRefs: payload.symbolRefs.slice(0, 100) } : {}),
-          ...(payload.minCallConfidence == null ? {} : { minCallConfidence: Number(payload.minCallConfidence) }),
-          ...(payload.includeResolutionMetadata == null ? {} : { includeResolutionMetadata: !!payload.includeResolutionMetadata }),
-          ...(payload.repoId ? { repoId: payload.repoId } : {}),
-        },
-      };
-    }
     if (!symbolId && !symbolRef?.name) {
-      throw new Error("ATLAS symbol.getCard requires symbolId, symbolIds, or symbolRef.");
+      throw new Error("ATLAS symbol.card requires symbolId or symbolRef.");
     }
     return {
       action: normalizedAction,
@@ -557,15 +541,15 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
     };
   }
 
-  if (normalizedAction === "code.getSkeleton") {
+  if (normalizedAction === "code.skeleton") {
     if (payload.file != null && !isSafeRelativePath(payload.file)) {
-      throw new Error("ATLAS code.getSkeleton file must be a safe relative path.");
+      throw new Error("ATLAS code.skeleton file must be a safe relative path.");
     }
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        ...(payload.symbolId ? { symbolId: optionalAtlasSymbolId(payload.symbolId, "code.getSkeleton symbolId") } : {}),
+        ...(payload.symbolId ? { symbolId: optionalAtlasSymbolId(payload.symbolId, "code.skeleton symbolId") } : {}),
         ...(payload.file ? { file: sanitizeString(payload.file, 512) } : {}),
         ...(payload.exportedOnly == null ? {} : { exportedOnly: !!payload.exportedOnly }),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
@@ -573,15 +557,15 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
     };
   }
 
-  if (normalizedAction === "code.getHotPath") {
-    const symbolId = optionalAtlasSymbolId(payload.symbolId, "code.getHotPath symbolId");
+  if (normalizedAction === "code.lens") {
+    const symbolId = optionalAtlasSymbolId(payload.symbolId, "code.lens symbolId");
     const file = payload.file && isSafeRelativePath(payload.file)
       ? sanitizeString(payload.file, 512)
       : null;
-    if (!symbolId && !file) throw new Error("ATLAS code.getHotPath requires symbolId or file.");
+    if (!symbolId && !file) throw new Error("ATLAS code.lens requires symbolId or file.");
     const identifiersToFind = sanitizeIdentifierList(payload.identifiersToFind || payload.identifiers);
     if (identifiersToFind.length === 0) {
-      throw new Error("ATLAS code.getHotPath requires identifiersToFind.");
+      throw new Error("ATLAS code.lens requires identifiersToFind.");
     }
     return {
       action: normalizedAction,
@@ -595,14 +579,14 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
     };
   }
 
-  if (normalizedAction === "code.needWindow") {
+  if (normalizedAction === "code.window") {
     const reason = sanitizeString(payload.reason || payload.justification || "", ATLAS_MAX_QUERY_LENGTH);
-    const symbolId = optionalAtlasSymbolId(payload.symbolId, "code.needWindow symbolId");
+    const symbolId = optionalAtlasSymbolId(payload.symbolId, "code.window symbolId");
     const file = payload.file && isSafeRelativePath(payload.file)
       ? sanitizeString(payload.file, 512)
       : null;
-    if (!symbolId && !file) throw new Error("ATLAS code.needWindow requires symbolId or file.");
-    if (!reason) throw new Error("ATLAS code.needWindow requires reason.");
+    if (!symbolId && !file) throw new Error("ATLAS code.window requires symbolId or file.");
+    if (!reason) throw new Error("ATLAS code.window requires reason.");
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
@@ -637,9 +621,9 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
     };
   }
 
-  if (normalizedAction === "pr.risk.analyze") {
+  if (normalizedAction === "review.analyze") {
     if (!payload.fromVersion || !payload.toVersion) {
-      throw new Error("ATLAS pr.risk.analyze requires fromVersion and toVersion.");
+      throw new Error("ATLAS review.analyze requires fromVersion and toVersion.");
     }
     return {
       action: normalizedAction,
@@ -653,9 +637,9 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
     };
   }
 
-  if (normalizedAction === "pr.risk") {
+  if (normalizedAction === "review.risk") {
     if (!payload.fromVersion || !payload.toVersion) {
-      throw new Error("ATLAS pr.risk requires fromVersion and toVersion.");
+      throw new Error("ATLAS review.risk requires fromVersion and toVersion.");
     }
     return {
       action: normalizedAction,

@@ -11,7 +11,7 @@
 /** @type {import("node:worker_threads").MessagePort | null} */
 let workerBridgePort = null;
 let nextBridgeRequestId = 1;
-const DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS = 120000;
+export const DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS = 300_000;
 /** @type {Map<number, { resolve: (value: unknown) => void, reject: (err: Error) => void, timer: ReturnType<typeof setTimeout> | null, onAbort: (() => void) | null, signal: AbortSignal | null }>} */
 const pendingBridgeRequests = new Map();
 
@@ -35,8 +35,9 @@ export function installNativeThreadBridge(port) {
   if (workerBridgePort && workerBridgePort !== port) {
     rejectPendingBridgeRequests(new Error("native bridge port replaced"));
   }
-  workerBridgePort = /** @type {import("node:worker_threads").MessagePort} */ (port);
-  workerBridgePort.on("message", (message) => {
+  const installedPort = /** @type {import("node:worker_threads").MessagePort} */ (port);
+  workerBridgePort = installedPort;
+  installedPort.on("message", (message) => {
     const id = Number(/** @type {any} */ (message)?.id);
     const pending = pendingBridgeRequests.get(id);
     if (!pending) return;
@@ -49,16 +50,18 @@ export function installNativeThreadBridge(port) {
     }
     pending.resolve(/** @type {any} */ (message)?.data);
   });
-  workerBridgePort.on?.("close", () => {
+  installedPort.on?.("close", () => {
+    if (workerBridgePort !== installedPort) return;
     workerBridgePort = null;
     rejectPendingBridgeRequests(new Error("native bridge port closed"));
   });
-  workerBridgePort.on?.("error", (err) => {
+  installedPort.on?.("error", (err) => {
+    if (workerBridgePort !== installedPort) return;
     workerBridgePort = null;
     rejectPendingBridgeRequests(err instanceof Error ? err : new Error(String(err || "native bridge port error")));
   });
-  workerBridgePort.start?.();
-  workerBridgePort.unref?.();
+  installedPort.start?.();
+  installedPort.unref?.();
   return true;
 }
 

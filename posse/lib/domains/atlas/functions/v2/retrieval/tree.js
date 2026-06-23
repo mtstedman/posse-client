@@ -53,7 +53,7 @@ function treeFocusRequested(params = {}) {
 
 /**
  * Top-level tree orientation: the root view of the containment tree plus the
- * compressed-tree area map. Focused traversal belongs to tree.walk — a legacy
+ * compressed-tree area map. Focused traversal belongs to tree.branch — a legacy
  * focus param still works here (served by the same traversal) but earns a
  * pointer warning.
  *
@@ -80,13 +80,13 @@ export function treeOverview({ view, versionId, params = {} }) {
 export function treeWalk({ view, versionId, params = {} }) {
   if (!treeFocusRequested(params)) {
     return errorEnvelope({
-      action: "tree.walk",
+      action: "tree.branch",
       versionId,
       code: "invalid_params",
-      message: "tree.walk requires a focus: pass path, nodeId, symbolId, or refType+refId. Use tree.overview for the top-level view.",
+      message: "tree.branch requires a focus: pass path, nodeId, symbolId, or refType+refId. Use tree.overview for the top-level view.",
     });
   }
-  return treeTraversal({ view, versionId, params, action: "tree.walk" });
+  return treeTraversal({ view, versionId, params, action: "tree.branch" });
 }
 
 /**
@@ -94,7 +94,7 @@ export function treeWalk({ view, versionId, params = {} }) {
  *   view: import("../contracts/api.js").View,
  *   versionId: string,
  *   params?: import("../contracts/tool-params.js").TreeOverviewParams,
- *   action: "tree.overview" | "tree.walk",
+ *   action: "tree.overview" | "tree.branch",
  * }} args
  */
 function treeTraversal({ view, versionId, params = {}, action }) {
@@ -152,7 +152,7 @@ function treeTraversal({ view, versionId, params = {}, action }) {
   const warnings = [...focus.warnings];
   const focused = treeFocusRequested(params);
   if (action === "tree.overview" && focused) {
-    warnings.push("tree.overview is the top-level orientation view; use tree.walk for focused branch traversal.");
+    warnings.push("tree.overview is the top-level orientation view; use tree.branch for focused branch traversal.");
   }
   // The top-level view doubles as repo orientation: include the compressed
   // tree's labeled area map alongside the root page.
@@ -222,15 +222,15 @@ function treeGrowSeedsRequested(params = {}) {
 export function treeGrow({ view, versionId, params = {} }) {
   if (!treeGrowSeedsRequested(params)) {
     return errorEnvelope({
-      action: "tree.grow",
+      action: "tree.expand",
       versionId,
       code: "invalid_params",
-      message: "tree.grow requires at least one seed: paths, editedFiles, symbolIds, nodeIds, or refType+refId.",
+      message: "tree.expand requires at least one seed: paths, editedFiles, symbolIds, nodeIds, or refType+refId.",
     });
   }
   const { taskText, taskType, ...seedParams } = /** @type {any} */ (params);
   void taskText; void taskType;
-  return runTreeScope({ view, versionId, params: seedParams, action: "tree.grow" });
+  return runTreeScope({ view, versionId, params: seedParams, action: "tree.expand" });
 }
 
 /**
@@ -238,7 +238,7 @@ export function treeGrow({ view, versionId, params = {} }) {
  *   view: import("../contracts/api.js").View,
  *   versionId: string,
  *   params?: import("../contracts/tool-params.js").TreeScopeParams,
- *   action: "tree.scope" | "tree.grow",
+ *   action: "tree.scope" | "tree.expand",
  * }} args
  */
 function runTreeScope({ view, versionId, params = {}, action }) {

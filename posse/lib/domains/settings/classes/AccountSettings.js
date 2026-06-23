@@ -39,11 +39,33 @@ function resolveTestRedirectPath() {
   return _testRedirectPath;
 }
 
+// A process is "under test" when it is the test runner itself
+// (NODE_TEST_CONTEXT, set by `node --test`) OR any descendant of `npm test`
+// (POSSE_TEST_RUN, set by scripts/run-tests.mjs and inherited by every spawned
+// child/grandchild). Either way it must never touch the operator's real
+// ~/.posse/account.db — child processes that lack NODE_TEST_CONTEXT used to
+// fall through to it and clobber live settings.
+function isUnderTest() {
+  return Boolean(process.env.NODE_TEST_CONTEXT || process.env.POSSE_TEST_RUN);
+}
+
+function realDefaultAccountDbPath() {
+  return path.join(os.homedir(), ".posse", "account.db");
+}
+
 function resolveDefaultPath() {
   const envPath = normalizeDbPath(process.env.POSSE_ACCOUNT_DB_PATH);
   if (envPath) return envPath;
-  if (process.env.NODE_TEST_CONTEXT) return resolveTestRedirectPath();
-  return path.join(os.homedir(), ".posse", "account.db");
+  if (isUnderTest()) return resolveTestRedirectPath();
+  return realDefaultAccountDbPath();
+}
+
+// Eager isolation: pin the per-process redirect into the env at module load (in
+// any test process) so that a child process spawned BEFORE the first in-process
+// settings access still inherits a sandboxed account DB instead of resolving
+// the real ~/.posse/account.db.
+if (isUnderTest() && !normalizeDbPath(process.env.POSSE_ACCOUNT_DB_PATH)) {
+  resolveTestRedirectPath();
 }
 
 // ATLAS (and any future module that caches DB-backed config) registers an
@@ -79,6 +101,16 @@ export class AccountSettings {
 
   open() {
     const targetPath = this.resolvePath();
+    // Tripwire: never let a test (or a child/grandchild it spawned) open the
+    // operator's real account DB. The redirect in resolveDefaultPath makes this
+    // unreachable unless a test explicitly pointed POSSE_ACCOUNT_DB_PATH at the
+    // real path — in which case fail loudly instead of corrupting live settings.
+    if (isUnderTest() && normalizeDbPath(targetPath) === normalizeDbPath(realDefaultAccountDbPath())) {
+      throw new Error(
+        `Refusing to open the real account DB during tests: ${targetPath}. ` +
+        "Sandbox it via POSSE_ACCOUNT_DB_PATH or setAccountSettingsPathForTests().",
+      );
+    }
     if (this._db && this._openPath === targetPath) return this._db;
 
     if (this._db) {

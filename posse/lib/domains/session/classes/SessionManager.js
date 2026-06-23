@@ -101,6 +101,18 @@ export class SessionManager {
       skillKey: key.skillKey,
     });
     const effectiveProvider = normalizeProvider(activeLane?.provider || key.provider);
+    const providerLocked = Boolean(activeLane && normalizeProvider(activeLane.provider) !== key.provider);
+    if (providerLocked && sessionStrictProviderLockEnabled()) {
+      return {
+        ok: true,
+        key: { ...key, provider: effectiveProvider },
+        requestedProvider: key.provider,
+        activeLane,
+        providerLocked,
+        coverage: this.providerCoverage(key.provider),
+        skillPolicy,
+      };
+    }
     if (!this.providerHasResumeCapability(effectiveProvider)) {
       return {
         ok: false,
@@ -124,7 +136,7 @@ export class SessionManager {
       key: { ...key, provider: effectiveProvider },
       requestedProvider: key.provider,
       activeLane: activeLane || null,
-      providerLocked: Boolean(activeLane && normalizeProvider(activeLane.provider) !== key.provider),
+      providerLocked,
       coverage,
       skillPolicy,
     };

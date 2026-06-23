@@ -19,9 +19,16 @@ import {
   setJobResult,
 } from "./index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { PUSH_OFFER_SUBTYPE, TERMINAL_WORK_ITEM_STATUSES } from "./common.js";
+import { PUSH_OFFER_SUBTYPE, TERMINAL_WORK_ITEM_STATUSES, runImmediateTransaction } from "./common.js";
 
-const OPEN_GATE_STATUSES_SQL = `('queued', 'waiting_on_human')`;
+const OPEN_GATE_STATUSES = ["queued", "waiting_on_human"];
+const OPEN_GATE_STATUSES_SQL = `(${OPEN_GATE_STATUSES.map((status) => `'${status}'`).join(", ")})`;
+
+function closeOpenPushOfferGate(jobId, status, result) {
+  if (!forceUpdateJobStatus(jobId, status, { expectedStatuses: OPEN_GATE_STATUSES })) return false;
+  setJobResult(jobId, result);
+  return true;
+}
 
 /** Latest open push-offer gate job, or null. */
 export function findOpenPushOfferJob() {
@@ -46,20 +53,25 @@ export function findOpenPushOfferJob() {
  */
 export function cancelOpenPushOfferGates(reason = "superseded") {
   const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT id FROM jobs
-       WHERE job_type = 'human_input'
-         AND status IN ${OPEN_GATE_STATUSES_SQL}
-         AND payload_json LIKE '%"subtype":"${PUSH_OFFER_SUBTYPE}"%'`,
-    )
-    .all();
-  let canceled = 0;
-  for (const row of rows) {
-    setJobResult(row.id, { declined: false, superseded: true, reason });
-    if (forceUpdateJobStatus(row.id, "canceled")) canceled += 1;
-  }
-  return canceled;
+  const execute = () => {
+    const rows = db
+      .prepare(
+        `SELECT id FROM jobs
+         WHERE job_type = 'human_input'
+           AND status IN ${OPEN_GATE_STATUSES_SQL}
+           AND payload_json LIKE '%"subtype":"${PUSH_OFFER_SUBTYPE}"%'`,
+      )
+      .all();
+    let canceled = 0;
+    for (const row of rows) {
+      if (closeOpenPushOfferGate(row.id, "canceled", { declined: false, superseded: true, reason })) {
+        canceled += 1;
+      }
+    }
+    return canceled;
+  };
+  if (db.inTransaction) return execute();
+  return runImmediateTransaction(db, execute);
 }
 
 /**
@@ -67,11 +79,14 @@ export function cancelOpenPushOfferGates(reason = "superseded") {
  * outside the gate command (terminal 'y' at the wrap-up prompt).
  */
 export function markOpenPushOfferGatePushed(details = {}) {
-  const job = findOpenPushOfferJob();
-  if (!job) return false;
-  setJobResult(job.id, { pushed: true, ...details });
-  forceUpdateJobStatus(job.id, "succeeded");
-  return true;
+  const db = getDb();
+  const execute = () => {
+    const job = findOpenPushOfferJob();
+    if (!job) return false;
+    return closeOpenPushOfferGate(job.id, "succeeded", { pushed: true, ...details });
+  };
+  if (db.inTransaction) return execute();
+  return runImmediateTransaction(db, execute);
 }
 
 /**

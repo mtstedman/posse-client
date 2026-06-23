@@ -1,17 +1,16 @@
-import { SETTING_KEYS, POSSE_REMOTE_MODE_VALUES } from "../../../catalog/settings.js";
+import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getSetting } from "../../queue/functions/index.js";
 
-const VALID_MODES = new Set(POSSE_REMOTE_MODE_VALUES);
 export const POSSE_REMOTE_DEFAULT_URL = "https://api.yourposseai.com";
 export const POSSE_REMOTE_DEFAULT_TIMEOUT_MS = 60_000;
+export const POSSE_REMOTE_MODE = "required";
 
 export function normalizePosseRemoteMode(value) {
-  const mode = String(value || "required").trim().toLowerCase();
-  return VALID_MODES.has(mode) ? mode : "required";
+  return POSSE_REMOTE_MODE;
 }
 
 export function getPosseRemoteMode() {
-  return normalizePosseRemoteMode(getSetting(SETTING_KEYS.POSSE_REMOTE_MODE));
+  return POSSE_REMOTE_MODE;
 }
 
 function settingValue(key) {

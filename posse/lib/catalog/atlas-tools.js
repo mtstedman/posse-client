@@ -16,7 +16,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["symbol.search", "symbol.getCard", "symbol.getCards", "symbol.usages", "slice.build", "slice.refresh", "slice.spillover.get", "edit.plan", "context", "context.summary", "delta.get", "pr.risk.analyze", "pr.risk", "repo.status", "repo.quality", "memory.query"], description: "ATLAS action to route through this gateway." },
+        action: { type: "string", enum: ["symbol.search", "symbol.card", "symbol.overview", "slice.build", "slice.refresh", "slice.spillover.get", "edit.plan", "context", "context.summary", "review.delta", "review.analyze", "review.risk", "repo.status", "repo.quality", "memory.query"], description: "ATLAS action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -29,7 +29,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["code.getSkeleton", "code.getHotPath", "code.needWindow", "edit.plan"], description: "ATLAS code action to route through this gateway." },
+        action: { type: "string", enum: ["code.skeleton", "code.lens", "code.window", "edit.plan"], description: "ATLAS code action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -108,7 +108,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
             properties: {
               id: { type: "string", description: "Optional step id for later references like $search.items[0].symbolId." },
               fn: { type: "string", description: "CamelCase ATLAS function alias or transform name such as dataPick." },
-              action: { type: "string", description: "Canonical ATLAS action name such as symbol.search or code.getSkeleton." },
+              action: { type: "string", description: "Canonical ATLAS action name such as symbol.search or code.skeleton." },
               args: { type: "object", description: "Step arguments. Exact string refs like $0.items[0].symbolId are resolved before execution." },
               maxResponseTokens: { type: "integer", description: "Optional per-step response token cap." },
             },
@@ -331,15 +331,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "symbol.getCard": {
+  "symbol.card": {
     type: "function",
-    name: "atlas_symbol_get_card",
-    description: "Iris Rung 1 (~100 tokens). Fetch symbol card(s): pass symbolId (or symbolRef) for one card, or symbolIds for a batch answered as { cards, errors } with partial success. Signature, summary, callers/callees, and location.",
+    name: "atlas_symbol_card",
+    description: "Iris Rung 1 (~100 tokens). Fetch one compact symbol card by symbolId or symbolRef: signature, summary, callers/callees, relationship metrics, and location.",
     parameters: {
       type: "object",
       properties: {
-        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID returned by symbol.search, symbol.getCard, slice.build, skeleton, or hot path results. Do not construct this from file paths or names." },
-        symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Batch mode: fetch up to 100 cards in one call; the result is { cards, errors } with per-symbol partial success." },
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID returned by symbol.search, symbol.card, slice.build, code.skeleton, or code.lens results. Do not construct this from file paths or names." },
         symbolRef: {
           type: "object",
           description: "Fallback lookup when you do not have a symbolId. Prefer symbol.search first; use this for a concrete name plus optional file.",
@@ -355,38 +354,6 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         ifNoneMatch: { type: "string", description: "Optional ETag for conditional fetch." },
         minCallConfidence: { type: "number", description: "Minimum call-confidence threshold." },
         includeResolutionMetadata: { type: "boolean", description: "Include ATLAS resolution metadata." },
-      },
-      required: [],
-      additionalProperties: false,
-    },
-  },
-  "symbol.getCards": {
-    type: "function",
-    name: "atlas_symbol_get_cards",
-    description: "Iris Rung 1 batch. Fetch multiple ATLAS symbol cards by symbolIds or symbolRefs with partial-success errors.",
-    parameters: {
-      type: "object",
-      properties: {
-        symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Opaque ATLAS symbol IDs to hydrate." },
-        symbolRefs: {
-          type: "array",
-          description: "Natural symbol references to hydrate when IDs are not available.",
-          items: {
-            type: "object",
-            properties: {
-              name: { type: "string" },
-              file: { type: "string" },
-              kind: { type: "string" },
-              exportedOnly: { type: "boolean" },
-            },
-            required: ["name"],
-            additionalProperties: false,
-          },
-        },
-        cards: { type: "array", items: { type: "object" }, description: "Mixed entries with symbolId or symbolRef." },
-        minCallConfidence: { type: "number", description: "Minimum call-edge confidence from 0 to 1." },
-        includeResolutionMetadata: { type: "boolean", description: "Include resolution metadata when supported." },
-        sessionId: { type: "string", description: "Optional live-buffer overlay namespace." },
       },
       required: [],
       additionalProperties: false,
@@ -448,7 +415,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "symbol.usages": {
+  "symbol.overview": {
     type: "function",
     name: "atlas_symbol_usages",
     description: "Usage tracing. Return compact call/reference sites for an ATLAS symbolId without hydrating full caller cards.",
@@ -468,7 +435,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.overview": {
     type: "function",
     name: "atlas_tree_overview",
-    description: "Top-level code tree orientation. Returns the root page of the ATLAS containment tree plus the compressed-tree labeled area map. Use tree.walk to drill into a specific branch.",
+    description: "Top-level code tree orientation. Returns the root page of the ATLAS containment tree plus the compressed-tree labeled area map. Use tree.branch to drill into a specific branch.",
     parameters: {
       type: "object",
       properties: {
@@ -489,7 +456,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "tree.walk": {
+  "tree.branch": {
     type: "function",
     name: "atlas_tree_walk",
     description: "Walk a code-tree branch. Focus a path, nodeId, symbolId, or cluster/process ref and page through its descendants with aggregate counts and compressed-tree area labels.",
@@ -516,7 +483,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.scope": {
     type: "function",
     name: "atlas_tree_scope",
-    description: "Prefetch-only task scoping. The handoff runs this with the full task text; agents should use tree.grow (seed expansion), tree.walk, and symbol tools instead.",
+    description: "Prefetch-only task scoping. The handoff runs this with the full task text; agents should use tree.expand (seed expansion), tree.branch, and symbol tools instead.",
     parameters: {
       type: "object",
       properties: {
@@ -552,10 +519,10 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "tree.grow": {
+  "tree.expand": {
     type: "function",
     name: "atlas_tree_grow",
-    description: "Grow scope from validated seeds. Expand files/areas you already know matter into surrounding branches, sibling files, tests, and entrypoints, with deterministic scope/risk metrics. Use symbol.getCard/symbol.usages for symbol identity; use this for file/area breadth.",
+    description: "Grow scope from validated seeds. Expand files/areas you already know matter into surrounding branches, sibling files, tests, and entrypoints, with deterministic scope/risk metrics. Use symbol.card/symbol.overview for symbol identity; use this for file/area breadth.",
     parameters: {
       type: "object",
       properties: {
@@ -608,7 +575,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "code.getSkeleton": {
+  "code.skeleton": {
     type: "function",
     name: "atlas_code_get_skeleton",
     description: "Iris Rung 2 (~300 tokens). Fetch a deterministic code skeleton for a file or symbol without full raw bodies.",
@@ -623,7 +590,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "code.getHotPath": {
+  "code.lens": {
     type: "function",
     name: "atlas_code_get_hot_path",
     description: "Iris Rung 3 (~600 tokens). Fetch identifier-focused code lines with small context windows for an ATLAS symbol or a repo-relative file.",
@@ -639,14 +606,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "code.needWindow": {
+  "code.window": {
     type: "function",
     name: "atlas_code_need_window",
     description: "Iris Rung 4 (~2000 tokens). Request a policy-gated raw code window for one ATLAS symbol or file only after card, skeleton, or hot-path evidence is insufficient. Prefer expectedLines as a JSON number and identifiersToFind as a JSON array; legacy strings are normalized.",
     parameters: {
       type: "object",
       properties: {
-        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID from symbol.search, symbol.getCard, slice.build, skeleton, or hot path results. Do not pass a file path, symbol name, or file:symbol pair here." },
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID from symbol.search, symbol.card, slice.build, skeleton, or hot path results. Do not pass a file path, symbol name, or file:symbol pair here." },
         file: { type: "string", description: "Repository-relative file path fallback when you have a file but not an opaque symbolId." },
         reason: { type: "string", description: "Required proof-of-need justification for raw window escalation." },
         identifiersToFind: { type: "array", items: { type: "string" }, description: "Identifiers expected in the requested window, for example [\"generateMusic\",\"json_decode\"]. Prefer a JSON array; legacy scalar strings are normalized." },
@@ -731,7 +698,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "delta.get": {
+  "review.delta": {
     type: "function",
     name: "atlas_delta_get",
     description: "Review evidence. Fetch an ATLAS semantic diff and blast-radius delta between two ledger versions.",
@@ -747,7 +714,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "pr.risk.analyze": {
+  "review.analyze": {
     type: "function",
     name: "atlas_pr_risk_analyze",
     description: "Review evidence. Run ATLAS PR risk analysis with scored findings, blast-radius evidence, and test recommendations.",
@@ -762,7 +729,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "pr.risk": {
+  "review.risk": {
     type: "function",
     name: "atlas_pr_risk",
     description: "Assessor-first review. Fetch ATLAS semantic delta, blast radius, risk findings, and test recommendations in one combined call.",

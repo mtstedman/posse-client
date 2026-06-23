@@ -30,8 +30,7 @@ const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
   "manual",
   "info",
   "symbol.search",
-  "symbol.getcard",
-  "symbol.getcards",
+  "symbol.card",
   "slice.build",
   "context",
   "context.summary",
@@ -39,11 +38,11 @@ const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
   "repo.status",
   "repo.overview",
   "repo.quality",
-  "code.getskeleton",
-  "code.gethotpath",
-  "code.needwindow",
+  "code.skeleton",
+  "code.lens",
+  "code.window",
   "file.read",
-  "pr.risk",
+  "review.risk",
   "memory.query",
   "policy.get",
   "runtime.queryoutput",
@@ -658,7 +657,7 @@ function _normalizeToolArgs(toolName, args = {}) {
     delete input.path;
     delete input.file;
   }
-  if (action === "code.getSkeleton" || action === "code.getHotPath" || action === "code.needWindow") {
+  if (action === "code.skeleton" || action === "code.lens" || action === "code.window") {
     if (!input.file && typeof input.path === "string" && input.path.trim()) {
       input.file = input.path.trim();
     }
@@ -726,7 +725,7 @@ function coerceLooseSymbolsAlias(action, input) {
   if (!Object.prototype.hasOwnProperty.call(input, "symbols")) return;
   const parsed = parseStringifiedArray(input.symbols) || (Array.isArray(input.symbols) ? input.symbols : null);
   if (!parsed) return;
-  if ((action === "memory.store" || action === "memory.query" || action === "memory.surface" || action === "symbol.getCards") && !input.symbolIds) {
+  if ((action === "memory.store" || action === "memory.query" || action === "memory.surface") && !input.symbolIds) {
     input.symbolIds = parsed;
   } else if (action === "slice.build" && !input.entrySymbols) {
     input.entrySymbols = parsed;
@@ -769,7 +768,7 @@ function _resolveV2Action(toolName) {
   const raw = String(toolName || "").trim();
   if (!raw) return null;
   // Strip the "atlas." (mcp) or "atlas_" (provider-flat) prefixes; ATLAS_TOOL_ACTIONS
-  // entries are bare action names like "repo.status" / "code.getSkeleton".
+  // entries are bare action names like "repo.status" / "code.skeleton".
   let action = raw;
   if (action.startsWith("atlas.")) action = action.slice("atlas.".length);
   else if (action.startsWith("atlas_")) action = action.slice("atlas_".length).replace(/_/g, ".");

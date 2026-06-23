@@ -139,7 +139,7 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // the co-promise, internalized.
       const ledger = await getLedger(payload.ledgerPath, payload.dbPath);
       const { ParseEngine } = await import("../../../classes/v2/ParseEngine.js");
-      const { sharedParserAdapter } = await import("../parser/adapter.js");
+      const { sharedParserAdapter } = await import("../../../classes/v2/ParserAdapter.js");
       const engine = new ParseEngine({
         ledger,
         parserAdapter: sharedParserAdapter,

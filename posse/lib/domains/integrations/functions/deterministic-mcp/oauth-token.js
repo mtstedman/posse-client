@@ -132,6 +132,7 @@ export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
       atlasPrefetchStatus: stringOrNull(bootConfig.atlasPrefetchStatus) || "",
       atlas: plainObjectOrNull(bootConfig.atlas) || {},
       remoteCatalog: plainObjectOrNull(bootConfig.remoteCatalog) || {},
+      toolAllowlist: suiteToolAllowlist(bootConfig.toolAllowlist),
       nativeAuth: plainObjectOrNull(bootConfig.nativeAuth) || null,
     },
   };
@@ -203,6 +204,7 @@ export function bootConfigFromMcpOAuthClaims(claims = {}) {
     atlasPrefetchStatus: stringOrNull(capabilities.atlasPrefetchStatus) || "",
     atlas: plainObjectOrNull(capabilities.atlas) || {},
     remoteCatalog: plainObjectOrNull(capabilities.remoteCatalog) || {},
+    toolAllowlist: suiteToolAllowlist(capabilities.toolAllowlist || capabilities.tool_allowlist),
     nativeAuth: plainObjectOrNull(capabilities.nativeAuth) || null,
   };
 }
@@ -276,4 +278,20 @@ function plainObjectOrNull(value) {
   return value && typeof value === "object" && !Array.isArray(value)
     ? /** @type {Record<string, unknown>} */ (value)
     : null;
+}
+
+function suiteToolAllowlist(value) {
+  const source = plainObjectOrNull(value);
+  if (!source) return {};
+  const out = {};
+  for (const [suite, names] of Object.entries(source)) {
+    const suiteName = stringOrNull(suite);
+    if (!suiteName) continue;
+    const unique = [];
+    for (const name of stringArray(names)) {
+      if (!unique.includes(name)) unique.push(name);
+    }
+    out[suiteName] = unique;
+  }
+  return out;
 }

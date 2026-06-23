@@ -55,7 +55,10 @@ jobs:
           lib/domains/scheduler/functions/held-locks.js
           lib/domains/settings/functions/catalog.js
           test/core/suites/provider-aliases.test.js
-          test/test-atlas-v2-embeddings.test.js
+          test/test-atlas-v2-embeddings-resource-selection.test.js
+          test/test-atlas-v2-embeddings-index.test.js
+          test/test-atlas-v2-embeddings-e2e.test.js
+          test/test-atlas-v2-embeddings-fallback-ondemand.test.js
           test/test-posse-remote-composer.test.js
           test/test-posse-remote-parity.test.js
 
@@ -63,6 +66,6 @@ jobs:
         run: |
           node --test test/test-posse-remote-composer.test.js
           node --test test/test-posse-remote-parity.test.js
-          node --test test/test-atlas-v2-embeddings.test.js
+          node --test --test-concurrency=1 test/test-atlas-v2-embeddings-resource-selection.test.js test/test-atlas-v2-embeddings-index.test.js test/test-atlas-v2-embeddings-e2e.test.js test/test-atlas-v2-embeddings-fallback-ondemand.test.js
           node --test test/core/suites/provider-aliases.test.js
           npm run test:scheduler:fast

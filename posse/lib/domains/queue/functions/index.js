@@ -1096,13 +1096,14 @@ export function requeueWaitingHumanInputJobs() {
   const db = getDb();
   const execute = () => {
     const parked = db.prepare(`
-      SELECT id, work_item_id
+      SELECT id, work_item_id, job_type, payload_json
       FROM jobs
       WHERE status = 'waiting_on_human' AND job_type = 'human_input'
-    `).all();
+    `).all().filter((job) => !isPushOfferJob(job));
 
     if (parked.length === 0) return [];
 
+    const placeholders = parked.map(() => "?").join(",");
     db.prepare(`
       UPDATE jobs
       SET status = 'queued',
@@ -1112,8 +1113,10 @@ export function requeueWaitingHumanInputJobs() {
           started_at = NULL,
           finished_at = NULL,
           updated_at = ?
-      WHERE status = 'waiting_on_human' AND job_type = 'human_input'
-    `).run(now());
+      WHERE id IN (${placeholders})
+        AND status = 'waiting_on_human'
+        AND job_type = 'human_input'
+    `).run(now(), ...parked.map((job) => job.id));
 
     for (const job of parked) {
       releaseJobLocksForStatus(job.id, "queued");

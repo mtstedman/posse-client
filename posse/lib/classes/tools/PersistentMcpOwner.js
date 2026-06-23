@@ -19,11 +19,6 @@ import {
   verifyMcpOAuthToken,
 } from "../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { getSharedAtlasToolExecutor } from "../../domains/atlas/functions/v2/tools/executor.js";
-import {
-  getAtlasRouteDefinitionForRole,
-  getDeterministicMcpToolNames,
-  isExternallyRoutedAtlasTool,
-} from "../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { appendRunTelemetry } from "../../shared/telemetry/functions/run-telemetry.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
@@ -111,10 +106,6 @@ function isPowershellClixmlProgressNoise(chunk) {
   return /#<\s*CLIXML/i.test(text) && /Preparing modules for first use/i.test(text);
 }
 
-function remoteIssuedSessionId(value) {
-  return `remote:${tokenHash(value).slice(0, 32)}`;
-}
-
 function cloneJson(value) {
   return JSON.parse(JSON.stringify(value || {}));
 }
@@ -175,66 +166,46 @@ function requestedToolPolicyName(name, args = {}) {
   };
 }
 
-function remoteSurfacePolicy(surface = null) {
-  if (!surface || typeof surface !== "object" || !Array.isArray(surface.tools)) return null;
-  const native = new Set();
-  const atlas = new Set();
-  for (const entry of surface.tools) {
-    const suite = String(entry?.suite || "").trim().toLowerCase();
-    const name = String(entry?.local_name || entry?.name || "").trim();
-    if (!name) continue;
-    if (suite === "tools" || name.startsWith("tools.")) {
-      native.add(stripToolsPrefix(name));
-      continue;
-    }
-    if (suite === "atlas" || name.startsWith("atlas.") || name.startsWith("atlas_")) {
-      const action = normalizeAtlasActionName(name);
-      if (action && isExternallyRoutedAtlasTool(action)) atlas.add(action);
+function suiteToolAllowlistPolicy(bootConfig = {}) {
+  const source = bootConfig?.toolAllowlist && typeof bootConfig.toolAllowlist === "object" && !Array.isArray(bootConfig.toolAllowlist)
+    ? bootConfig.toolAllowlist
+    : null;
+  const suites = {};
+  if (source) {
+    for (const [suite, names] of Object.entries(source)) {
+      const suiteName = String(suite || "").trim().toLowerCase();
+      if (!suiteName || !Array.isArray(names)) continue;
+      suites[suiteName] = new Set(names.map((name) => String(name || "").trim()).filter(Boolean));
     }
   }
-  return { native, atlas, source: "remote" };
+  return {
+    suites,
+    source: source ? "remote-token" : "missing-token-allowlist",
+  };
 }
 
-function localSurfacePolicy(bootConfig = {}) {
-  const role = String(bootConfig.role || "").trim();
-  const native = new Set(getDeterministicMcpToolNames(role, {
-    needsImageGeneration: bootConfig.allowImageGeneration === true,
-  }));
-  const atlas = new Set();
-  if (bootConfig.atlasAvailable === true && role) {
-    const route = getAtlasRouteDefinitionForRole(role);
-    for (const tool of route.tools || []) {
-      const action = normalizeAtlasActionName(tool);
-      if (action && isExternallyRoutedAtlasTool(action)) atlas.add(action);
-    }
-  }
-  return { native, atlas, source: "local" };
+function hasSuiteToolAllowlist(bootConfig = {}) {
+  const source = bootConfig?.toolAllowlist;
+  return !!(source && typeof source === "object" && !Array.isArray(source));
 }
 
 function sessionToolPolicy(session) {
-  const bootConfig = session?.bootConfig || {};
-  const local = localSurfacePolicy(bootConfig);
-  const remote = remoteSurfacePolicy(bootConfig.remoteToolSurface);
-  if (!remote) return local;
-  return {
-    native: new Set([...local.native, ...remote.native]),
-    atlas: new Set([...local.atlas, ...remote.atlas]),
-    source: remote.source === "remote" ? "remote+local" : local.source,
-  };
+  return suiteToolAllowlistPolicy(session?.bootConfig || {});
 }
 
 function toolAllowedByPolicy(policy, toolName, args = {}) {
   const requested = requestedToolPolicyName(toolName, args);
+  const allowed = policy?.suites?.[requested.suite] || new Set();
   if (requested.suite === "atlas") {
     return !!(
       requested.name
       && (
-        policy.atlas.has(requested.name)
-        || (requested.nested && policy.atlas.has(requested.nested))
+        allowed.has(requested.name)
+        || (requested.nested && allowed.has(requested.nested))
       )
     );
   }
-  return !!requested.name && policy.native.has(requested.name);
+  return !!requested.name && allowed.has(requested.name);
 }
 
 function filterToolsListMessage(message, policy) {
@@ -708,23 +679,12 @@ export class PersistentMcpOwner {
     return this.endpoint();
   }
 
-  registerSession({ token, bootConfig = {}, serverSpec = null, prewarm = true, trustedRemoteIssued = false } = {}) {
+  registerSession({ token, bootConfig = {}, serverSpec = null, prewarm = true } = {}) {
     this.pruneExpiredSessions({ reason: "register_prune" });
-    let claims = null;
-    let verified = false;
-    try {
-      claims = verifyMcpOAuthToken(token);
-      verified = true;
-    } catch (err) {
-      if (!trustedRemoteIssued) throw err;
-      claims = {
-        jti: remoteIssuedSessionId(token),
-        sub: remoteIssuedSessionId(token),
-        __source: "remote",
-      };
-    }
+    const claims = verifyMcpOAuthToken(token);
+    const verified = true;
     claims.__verified = verified;
-    if (!claims.__source) claims.__source = verified ? "local" : "remote";
+    if (!claims.__source) claims.__source = "remote";
     const id = String(claims.jti || claims.sub || "");
     if (!id) throw new Error("MCP OAuth token is missing a session id");
     const sessionBootConfig = {
@@ -737,6 +697,9 @@ export class PersistentMcpOwner {
         source: claims.__source || (verified ? "local" : "remote"),
       },
     };
+    if (!hasSuiteToolAllowlist(sessionBootConfig)) {
+      throw new Error("MCP OAuth token is missing suite-scoped toolAllowlist");
+    }
     let session = this._sessions.get(id);
     if (session && !tokenEqual(session.token, token)) {
       throw new Error("MCP OAuth token session id collision");
@@ -963,6 +926,10 @@ export class PersistentMcpOwner {
           expiresAt: claims.exp || null,
         },
       };
+      if (!hasSuiteToolAllowlist(bootConfig)) {
+        sendJson(res, 403, { ok: false, error: "missing_token_tool_allowlist" });
+        return;
+      }
       session = new PersistentMcpSession({
         id,
         token,

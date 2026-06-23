@@ -114,7 +114,7 @@
 
 // ============================================================================
 // SymbolCard — the canonical "what is this symbol" shape, returned by
-// symbol.getCard, embedded in slice.build, delta.get, pr.risk results.
+// symbol.card, embedded in slice.build, review.delta, review.risk results.
 // ============================================================================
 
 /**
@@ -391,20 +391,10 @@
  */
 
 /**
- * symbol.getCard returns a single SymbolCard. The envelope's `data` is
+ * symbol.card returns a single SymbolCard. The envelope's `data` is
  * the card directly.
  *
  * @typedef {SymbolCard} SymbolGetCardData
- */
-
-/**
- * @typedef {Object} SymbolGetCardsData
- * @property {SymbolCard[]} cards
- * @property {Array<Record<string, unknown>>} errors
- * @property {number} total
- * @property {number} okCount
- * @property {number} errorCount
- * @property {boolean} partial
  */
 
 /**
@@ -815,7 +805,7 @@
  */
 
 // ============================================================================
-// delta.* / pr.risk.* result shapes
+// delta.* / review.risk.* result shapes
 // ============================================================================
 
 /**
@@ -875,7 +865,7 @@
  */
 
 /**
- * Combined delta + risk envelope returned by pr.risk.
+ * Combined delta + risk envelope returned by review.risk.
  *
  * @typedef {Object} PrRiskData
  * @property {DeltaData} delta
@@ -1125,27 +1115,26 @@
  *   | ToolResultEnvelope<BufferCheckpointData> & { action: "buffer.checkpoint" }
  *   | ToolResultEnvelope<BufferStatusData>     & { action: "buffer.status" }
  *   | ToolResultEnvelope<SymbolSearchData>     & { action: "symbol.search" }
- *   | ToolResultEnvelope<SymbolGetCardData>    & { action: "symbol.getCard" }
- *   | ToolResultEnvelope<SymbolGetCardsData>   & { action: "symbol.getCards" }
- *   | ToolResultEnvelope<SymbolUsagesData>     & { action: "symbol.usages" }
+ *   | ToolResultEnvelope<SymbolGetCardData>    & { action: "symbol.card" }
+ *   | ToolResultEnvelope<SymbolUsagesData>     & { action: "symbol.overview" }
  *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.overview" }
- *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.walk" }
+ *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.branch" }
  *   | ToolResultEnvelope<TreeScopeData>         & { action: "tree.scope" }
- *   | ToolResultEnvelope<TreeScopeData>         & { action: "tree.grow" }
+ *   | ToolResultEnvelope<TreeScopeData>         & { action: "tree.expand" }
  *   | ToolResultEnvelope<SliceData>            & { action: "slice.build" }
  *   | ToolResultEnvelope<SliceRefreshData>     & { action: "slice.refresh" }
  *   | ToolResultEnvelope<SliceSpilloverGetData> & { action: "slice.spillover.get" }
  *   | ToolResultEnvelope<EditPlanData>         & { action: "edit.plan" }
- *   | ToolResultEnvelope<CodeSkeletonData>     & { action: "code.getSkeleton" }
- *   | ToolResultEnvelope<CodeHotPathData>      & { action: "code.getHotPath" }
- *   | ToolResultEnvelope<CodeWindowData>       & { action: "code.needWindow" }
+ *   | ToolResultEnvelope<CodeSkeletonData>     & { action: "code.skeleton" }
+ *   | ToolResultEnvelope<CodeHotPathData>      & { action: "code.lens" }
+ *   | ToolResultEnvelope<CodeWindowData>       & { action: "code.window" }
  *   | ToolResultEnvelope<ContextData>          & { action: "context" }
  *   | ToolResultEnvelope<ContextSummaryData>   & { action: "context.summary" }
  *   | ToolResultEnvelope<AgentFeedbackData>    & { action: "agent.feedback" }
  *   | ToolResultEnvelope<AgentFeedbackQueryData> & { action: "agent.feedback.query" }
- *   | ToolResultEnvelope<DeltaData>            & { action: "delta.get" }
- *   | ToolResultEnvelope<PrRiskAnalyzeData>    & { action: "pr.risk.analyze" }
- *   | ToolResultEnvelope<PrRiskData>           & { action: "pr.risk" }
+ *   | ToolResultEnvelope<DeltaData>            & { action: "review.delta" }
+ *   | ToolResultEnvelope<PrRiskAnalyzeData>    & { action: "review.analyze" }
+ *   | ToolResultEnvelope<PrRiskData>           & { action: "review.risk" }
  *   | ToolResultEnvelope<FileReadData>         & { action: "file.read" }
  *   | ToolResultEnvelope<MemoryStoreData>      & { action: "memory.store" }
  *   | ToolResultEnvelope<MemoryQueryData>      & { action: "memory.query" }
@@ -1204,7 +1193,7 @@ export const ATLAS_TOOL_RESULT_FIELD_CATALOG = Object.freeze({
     nextOffset: "nextOffset",
     areaMap: "areaMap",
   }),
-  "tree.walk": Object.freeze({
+  "tree.branch": Object.freeze({
     root: "root",
     matches: "matches",
     nodes: "nodes",
@@ -1223,7 +1212,7 @@ export const ATLAS_TOOL_RESULT_FIELD_CATALOG = Object.freeze({
     compressionSeeds: "compression.matchedSeeds",
     compressionAreaMap: "compression.areaMap",
   }),
-  "tree.grow": Object.freeze({
+  "tree.expand": Object.freeze({
     candidateFiles: "candidateFiles",
     candidateDirs: "candidateDirs",
     refinementCandidates: "refinementCandidates",
@@ -1235,7 +1224,7 @@ export const ATLAS_TOOL_RESULT_FIELD_CATALOG = Object.freeze({
     compressionSeeds: "compression.matchedSeeds",
     compressionAreaMap: "compression.areaMap",
   }),
-  "code.getSkeleton": Object.freeze({
+  "code.skeleton": Object.freeze({
     symbolId: "symbolId",
     filePath: "repo_rel_path",
     content: "content",

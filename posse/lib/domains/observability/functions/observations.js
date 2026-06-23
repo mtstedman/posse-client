@@ -693,7 +693,7 @@ export function atlasSummaryHint(input = {}, action = null) {
     if (q) return _truncate(q, 80);
   }
 
-  if (a === "symbol.getcard") {
+  if (a === "symbol.card") {
     const ids = Array.isArray(args.symbolIds) ? args.symbolIds
       : (args.symbolId ? [args.symbolId] : []);
     if (ids.length > 0) {
@@ -724,7 +724,7 @@ export function atlasSummaryHint(input = {}, action = null) {
     return "";
   }
 
-  if (a === "tree.scope" || a === "tree.grow") {
+  if (a === "tree.scope" || a === "tree.expand") {
     // Seeds are the load-bearing input — show them, not the task text, so a
     // seeded scope never reads like a raw text search in the invocation log.
     const seeds = firstArrayEntry(args.paths && args.paths.length ? args.paths : args.editedFiles, 1);
@@ -735,12 +735,12 @@ export function atlasSummaryHint(input = {}, action = null) {
     return "";
   }
 
-  if (a === "tree.walk") {
+  if (a === "tree.branch") {
     const focus = args.path || args.nodeId || (args.symbolId ? `sym:${String(args.symbolId).slice(0, 8)}` : null);
     if (focus) return _truncate(String(focus), 80);
   }
 
-  if (a === "code.getskeleton" || a === "code.gethotpath" || a === "code.needwindow") {
+  if (a === "code.skeleton" || a === "code.lens" || a === "code.window") {
     const loc = args.file || (args.symbolId ? `sym:${String(args.symbolId).slice(0, 8)}` : null);
     const ids = firstArrayEntry(args.identifiersToFind, 3);
     const parts = [loc, ids].filter(Boolean);
@@ -758,7 +758,7 @@ export function atlasSummaryHint(input = {}, action = null) {
     if (parts.length > 0) return _truncate(parts.join(" "), 80);
   }
 
-  if (a === "delta.get" || a === "pr.risk.analyze") {
+  if (a === "review.delta" || a === "review.analyze") {
     if (args.fromVersion && args.toVersion) return `${args.fromVersion}->${args.toVersion}`;
     if (args.versionId) return _truncate(args.versionId, 40);
   }

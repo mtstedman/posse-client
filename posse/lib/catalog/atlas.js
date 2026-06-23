@@ -1,11 +1,8 @@
 // ATLAS-domain catalogue.
 //
-// Mode enums, phase names, transport choices, vector backends, role order,
-// server defaults, and the provider→transport map. Set forms are derived so
-// the value list cannot drift from the validator.
-
-export const ATLAS_MODE_VALUES = Object.freeze(["off", "on", "shadow", "preferred", "required", "split"]);
-export const VALID_ATLAS_MODES = new Set(ATLAS_MODE_VALUES);
+// Phase names, transport choices, vector backends, role order, server defaults,
+// and the provider→transport map. Set forms are derived so the value list
+// cannot drift from the validator.
 
 // ATLAS v2 has labeled options for the admin UI; the value-only Set is derived.
 //

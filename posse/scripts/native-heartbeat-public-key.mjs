@@ -10,7 +10,6 @@ const SETTING_KEYS = Object.freeze({
   publicKey: "posse_native_heartbeat_jwt_public_key",
   publicKeySha256: "posse_native_heartbeat_jwt_public_key_sha256",
   audience: "posse_native_heartbeat_jwt_audience",
-  remoteUrl: "posse_remote_url",
 });
 
 function settingText(value) {
@@ -40,7 +39,6 @@ export function deriveNativeHeartbeatPublicKeyUrl(heartbeatUrl) {
 export function nativeHeartbeatUrlsFromSettings({
   publicKeyUrl = "",
   heartbeatUrl = "",
-  remoteUrl = "",
   defaultRemoteUrl = POSSE_REMOTE_DEFAULT_URL,
 } = {}) {
   const configuredPublicKeyUrl = settingText(publicKeyUrl);
@@ -61,7 +59,11 @@ export function nativeHeartbeatUrlsFromSettings({
     };
   }
 
-  const remoteBase = urlBase(remoteUrl) || urlBase(defaultRemoteUrl);
+  // The domain is fixed, not a configurable knob: derive from the compiled
+  // default only. (The old `posse_remote_url` override was an early-testing
+  // artifact that could strand the deploy on a dead localhost endpoint — the
+  // runtime auth path in lib/shared/native/functions/auth.js already ignores it.)
+  const remoteBase = urlBase(defaultRemoteUrl);
   return {
     heartbeatUrl: `${remoteBase}/v1/native/heartbeat`,
     publicKeyUrl: `${remoteBase}/v1/native/public-key`,
@@ -155,7 +157,6 @@ export async function ensureNativeHeartbeatPublicKey({
   const urls = nativeHeartbeatUrlsFromSettings({
     publicKeyUrl: publicKeyUrl || current.publicKeyUrl,
     heartbeatUrl: current.heartbeatUrl,
-    remoteUrl: getSettingFn(SETTING_KEYS.remoteUrl),
     defaultRemoteUrl,
   });
 

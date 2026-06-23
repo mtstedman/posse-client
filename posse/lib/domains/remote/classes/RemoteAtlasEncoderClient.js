@@ -78,15 +78,22 @@ export class RemoteAtlasEncoderClient {
   }
 
   async encodeOnce(request, signal) {
+    const url = this.endpoint();
     const ac = new AbortController();
-    const onAbort = () => ac.abort(signal?.reason || new Error("remote ATLAS encode aborted"));
+    let abortKind = null;
+    const abortWith = (kind, reason) => {
+      if (ac.signal.aborted) return;
+      abortKind = kind;
+      ac.abort(reason);
+    };
+    const onAbort = () => abortWith("caller", signal?.reason || new Error("remote ATLAS encode aborted"));
     if (signal?.aborted) onAbort();
     else signal?.addEventListener?.("abort", onAbort, { once: true });
     const timer = setTimeout(() => {
-      ac.abort(new Error(`remote ATLAS encode timed out after ${this.timeoutMs}ms`));
+      abortWith("timeout", new Error(`remote ATLAS encode timed out after ${this.timeoutMs}ms`));
     }, this.timeoutMs);
-    const url = this.endpoint();
     try {
+      if (abortKind === "caller") throw remoteAtlasEncoderAbortedError(url, signal?.reason);
       const normalized = normalizeRemoteAtlasEncodeRequest(request);
       /** @type {Record<string, string>} */
       const headers = {
@@ -124,7 +131,11 @@ export class RemoteAtlasEncoderClient {
       }
       return body || {};
     } catch (err) {
-      if (err?.name === "AbortError") {
+      if (err?.code === "POSSE_REMOTE_ATLAS_ENCODER_ABORTED") throw err;
+      if (ac.signal.aborted && abortKind === "caller") {
+        throw remoteAtlasEncoderAbortedError(url, signal?.reason || err);
+      }
+      if (err?.name === "AbortError" || (ac.signal.aborted && abortKind === "timeout")) {
         const timeoutErr = new Error(`remote ATLAS encode timed out after ${this.timeoutMs}ms for ${url}`);
         /** @type {any} */ (timeoutErr).code = "POSSE_REMOTE_ATLAS_ENCODER_TIMEOUT";
         throw timeoutErr;
@@ -143,6 +154,13 @@ export class RemoteAtlasEncoderClient {
       signal?.removeEventListener?.("abort", onAbort);
     }
   }
+}
+
+function remoteAtlasEncoderAbortedError(url, cause = null) {
+  const err = new Error(`remote ATLAS encode aborted for ${url}`);
+  /** @type {any} */ (err).code = "POSSE_REMOTE_ATLAS_ENCODER_ABORTED";
+  if (cause) /** @type {any} */ (err).cause = cause;
+  return err;
 }
 
 function idempotencyKeyFor(request) {

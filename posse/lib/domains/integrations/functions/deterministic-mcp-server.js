@@ -81,6 +81,21 @@ import { setRuntimePathOverrides } from "../../runtime/functions/paths.js";
 import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { assertSafeRemoteAuthUrl, readResponseTextWithLimit, resolvePosseKey } from "../../remote/functions/client.js";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../runtime/functions/protected-paths.js";
+import {
+  parseEnvBool,
+  parseBoolOverride,
+  bootString,
+  bootHeadersOverride,
+  nonNegativeIntegerOrNull,
+} from "./deterministic-mcp/boot-config-parse.js";
+import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
+import {
+  jsonRpcSuccess,
+  jsonRpcError,
+  hiddenSessionFromParams,
+  stripHiddenSessionParam,
+  isSuccessfulNativeToolResult,
+} from "./deterministic-mcp/json-rpc.js";
 
 /** Safe wrapper — recording must never break tool execution in the MCP subprocess. */
 function recordToolInvocation(opts) {
@@ -108,10 +123,6 @@ const DEFAULT_ATLAS_LIVE_BUFFER_TOOL_WAIT_MS = (() => {
   const parsed = Number(process.env.POSSE_DETERMINISTIC_MCP_ATLAS_LIVE_BUFFER_TOOL_WAIT_MS);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2000;
 })();
-
-function parseEnvBool(value) {
-  return /^(1|true|yes|on)$/i.test(String(value || "").trim());
-}
 
 function parseScopeEnvArray(env, key) {
   const raw = env?.[key];
@@ -380,27 +391,6 @@ if (atlasAvailable && !atlasGateEnabled) {
   });
 }
 
-function parseBoolOverride(value) {
-  const raw = String(value ?? "").trim();
-  if (!raw) return null;
-  return /^(1|true|yes|on)$/i.test(raw);
-}
-
-function bootString(value) {
-  return String(value ?? "").trim();
-}
-
-function bootHeadersOverride(value) {
-  if (value == null) return null;
-  if (typeof value === "string") {
-    const text = value.trim();
-    return text === "" ? null : text;
-  }
-  if (typeof value === "object" && !Array.isArray(value)) return value;
-  const text = String(value).trim();
-  return text === "" ? null : text;
-}
-
 function getDeterministicAtlasConfig() {
   const base = getAtlasIntegrationConfig();
   const atlasConfig = bootConfig.atlas && typeof bootConfig.atlas === "object" ? bootConfig.atlas : {};
@@ -495,13 +485,6 @@ function getDeterministicAtlasRepoTarget(atlasCfg = getDeterministicAtlasConfig(
       ready: true,
     };
   }
-}
-
-function nonNegativeIntegerOrNull(value) {
-  if (value == null || value === "") return null;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) return null;
-  return Math.floor(parsed);
 }
 
 let _atlasMemoryCountResolved = false;
@@ -606,8 +589,23 @@ function _atlasCallAllowedByRoute(toolName, args, atlasAllowedActions) {
   };
 }
 
+function tokenToolAllowlistForSuite(suiteName) {
+  const suite = String(suiteName || "").trim();
+  const allowlist = bootConfig?.toolAllowlist;
+  if (!suite || !allowlist || typeof allowlist !== "object" || Array.isArray(allowlist)) return null;
+  const names = allowlist[suite];
+  if (!Array.isArray(names)) return new Set();
+  return new Set(names.map((name) => String(name || "").trim()).filter(Boolean));
+}
+
+function hasTokenToolAllowlist() {
+  return !!(bootConfig?.toolAllowlist && typeof bootConfig.toolAllowlist === "object" && !Array.isArray(bootConfig.toolAllowlist));
+}
+
 if (atlasAvailable && roleName) {
-  if (!remoteToolCatalogRequired()) {
+  if (hasTokenToolAllowlist()) {
+    _atlasAllowedActions = tokenToolAllowlistForSuite("atlas");
+  } else if (!remoteToolCatalogRequired()) {
     try {
       const route = getAtlasRouteForRole(roleName, { config: getDeterministicAtlasConfig() });
       if (route?.tools?.length > 0) {
@@ -849,6 +847,7 @@ function remoteAtlasRouteTools(catalog) {
 
 async function resolveNativeAllowedToolNames() {
   if (ownerHotGateway) return null;
+  if (hasTokenToolAllowlist()) return tokenToolAllowlistForSuite("tools");
   if (!remoteToolCatalogEnabled()) return null;
   const catalog = await fetchRemoteToolCatalog();
   if (catalog && Array.isArray(catalog.tools)) {
@@ -860,33 +859,12 @@ async function resolveNativeAllowedToolNames() {
 
 async function resolveAtlasAllowedActions() {
   if (ownerHotGateway && atlasAvailable) return new Set(ATLAS_TOOL_ACTIONS.filter(isExternallyRoutedAtlasTool));
+  if (hasTokenToolAllowlist()) return tokenToolAllowlistForSuite("atlas");
   if (!atlasAvailable || !roleName) return _atlasAllowedActions;
   const catalog = await fetchRemoteToolCatalog();
   if (catalog && Array.isArray(catalog.tools)) return new Set(remoteAtlasRouteTools(catalog));
   if (remoteToolCatalogRequired()) throw remoteToolCatalogUnavailableError();
   return _atlasAllowedActions;
-}
-
-function capString(value, max = 240) {
-  const raw = String(value == null ? "" : value);
-  if (raw.length <= max) return raw;
-  return `${raw.slice(0, max)}…`;
-}
-
-function sanitizeForLog(value, depth = 0) {
-  if (value == null) return value;
-  if (depth >= 3) return capString(value, 120);
-  if (typeof value === "string") return capString(value, 240);
-  if (typeof value === "number" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) return value.slice(0, 20).map((entry) => sanitizeForLog(entry, depth + 1));
-  if (typeof value === "object") {
-    const out = {};
-    for (const [key, entry] of Object.entries(value).slice(0, 40)) {
-      out[key] = sanitizeForLog(entry, depth + 1);
-    }
-    return out;
-  }
-  return capString(value, 240);
 }
 
 function appendToolLog(entry = {}) {
@@ -1077,9 +1055,11 @@ function runtimeToolAvailable(toolName) {
 
 let DECLARED_NATIVE_TOOL_NAMES = (ownerHotGateway
   ? [...ALL_NATIVE_TOOL_NAMES]
+  : (hasTokenToolAllowlist()
+    ? [...(tokenToolAllowlistForSuite("tools") || new Set())]
   : (roleName
     ? getDeterministicMcpToolNames(roleName, { needsImageGeneration: allowImageGeneration })
-    : legacyToolNamesForUnscopedRole())
+    : legacyToolNamesForUnscopedRole()))
 ).filter(runtimeToolAvailable);
 let DECLARED_NATIVE_TOOL_NAME_SET = new Set(DECLARED_NATIVE_TOOL_NAMES);
 
@@ -1850,9 +1830,11 @@ function gateScopeKeyForBootConfig(config = bootConfig) {
 function computeDeclaredNativeToolNamesForCurrentBoot() {
   return (ownerHotGateway
     ? [...ALL_NATIVE_TOOL_NAMES]
+    : (hasTokenToolAllowlist()
+      ? [...(tokenToolAllowlistForSuite("tools") || new Set())]
     : (roleName
       ? getDeterministicMcpToolNames(roleName, { needsImageGeneration: allowImageGeneration })
-      : legacyToolNamesForUnscopedRole())
+      : legacyToolNamesForUnscopedRole()))
   ).filter(runtimeToolAvailable);
 }
 
@@ -1971,6 +1953,9 @@ function rebuildToolExecutors() {
 function recomputeAtlasAllowedActionsForCurrentBoot() {
   if (ownerHotGateway && atlasAvailable) {
     return new Set(ATLAS_TOOL_ACTIONS.filter(isExternallyRoutedAtlasTool));
+  }
+  if (hasTokenToolAllowlist()) {
+    return tokenToolAllowlistForSuite("atlas");
   }
   if (!atlasAvailable || !roleName || remoteToolCatalogRequired()) return null;
   try {
@@ -2130,34 +2115,6 @@ async function runNativeToolThroughGate(toolName, args, handler) {
   return BLOCKING_NATIVE_TOOL_NAMES.has(toolName)
     ? await DETERMINISTIC_TOOL_GATE.write(key, run, { label, waitMs: 120000 })
     : await DETERMINISTIC_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
-}
-
-function jsonRpcSuccess(id, result) {
-  return { jsonrpc: "2.0", id, result };
-}
-
-function jsonRpcError(id, code, message, data = undefined) {
-  return { jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } };
-}
-
-function hiddenSessionFromParams(params = {}) {
-  const session = params && typeof params === "object" ? params._posseSession : null;
-  if (!session || typeof session !== "object") return null;
-  const boot = session.bootConfig && typeof session.bootConfig === "object" ? session.bootConfig : null;
-  return boot ? { bootConfig: boot } : null;
-}
-
-function stripHiddenSessionParam(params = {}) {
-  if (!params || typeof params !== "object" || !Object.prototype.hasOwnProperty.call(params, "_posseSession")) {
-    return params;
-  }
-  const out = { ...params };
-  delete out._posseSession;
-  return out;
-}
-
-function isSuccessfulNativeToolResult(text) {
-  return !/^(?:Error:|AUDIT ERROR:)/i.test(String(text || ""));
 }
 
 function atlasLiveBufferMode() {

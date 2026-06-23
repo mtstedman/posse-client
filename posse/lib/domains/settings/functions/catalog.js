@@ -36,7 +36,6 @@ import {
   LOG_LEVEL_VALUES,
   MODEL_CATALOG_ENFORCEMENT_VALUES,
   PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES,
-  POSSE_REMOTE_MODE_VALUES,
   RESEARCH_FANOUT_MODE_VALUES,
   ATLAS_MEMORY_SURFACE_MODE_VALUES,
   SESSION_RECYCLE_MODE_VALUES,
@@ -45,7 +44,6 @@ import {
 import {
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
-  ATLAS_MODE_VALUES,
   ATLAS_PHASE_VALUES,
   ATLAS_REMOTE_ENCODER_MODE_VALUES,
   ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
@@ -71,14 +69,12 @@ export {
   LOG_LEVEL_VALUES,
   MODEL_CATALOG_ENFORCEMENT_VALUES,
   PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES,
-  POSSE_REMOTE_MODE_VALUES,
   RESEARCH_FANOUT_MODE_VALUES,
   ATLAS_MEMORY_SURFACE_MODE_VALUES,
   SESSION_RECYCLE_MODE_VALUES,
   STARTUP_DIRTY_TREE_POLICY_VALUES,
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
-  ATLAS_MODE_VALUES,
   ATLAS_PHASE_VALUES,
   ATLAS_REMOTE_ENCODER_MODE_VALUES,
   ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
@@ -257,8 +253,9 @@ export const SETTINGS_CATALOG = [
   { key: "handoff_max_file_bytes", default: "150000", numeric: { integer: true, min: 1 }, description: "Maximum bytes to preload from a single handoff file" },
   { key: "handoff_max_preload_total_bytes", default: "80000", numeric: { integer: true, min: 1 }, description: "Maximum cumulative bytes to bulk-preload from source files for no-read handoffs" },
   { key: "handoff_max_related_files_total_bytes", default: "400000", numeric: { integer: true, min: 1 }, description: "Maximum cumulative bytes to preload from related handoff files" },
-  { key: "posse_remote_mode", default: "required", options: POSSE_REMOTE_MODE_VALUES, description: "Remote prompt compiler mode. Required is the only supported mode; local prompt generation fallback has been removed." },
-  { key: "posse_remote_url", default: "", description: "Remote prompt compiler base URL (empty = https://api.yourposseai.com)" },
+  // posse_remote_url is intentionally not a catalog setting: the remote domain is
+  // fixed (POSSE_REMOTE_DEFAULT_URL). It was an early-testing override that could
+  // strand the client and native heartbeat auth on a dead localhost endpoint.
   { key: "posse_remote_response_signing_secret", default: "", adminVisible: false, description: "Shared HMAC secret for verifying posse-remote prompt compile and bundle response integrity (empty = verification disabled)" },
   { key: "posse_remote_timeout_ms", default: "", runtimeFallback: "60000", numeric: { integer: true, min: 100 }, description: "Remote prompt compiler request timeout in milliseconds (empty = 60000)" },
   { key: "context_expand_max_steps", default: "2", numeric: { integer: true, min: 0 }, description: "Maximum in-attempt MISSING_CONTEXT expansion retries per agent call" },
@@ -275,7 +272,6 @@ export const SETTINGS_CATALOG = [
   { key: "max_turns_assessor",   default: "", numeric: { integer: true, min: 1 }, description: "Override base turn count for assessor" },
 
   // ── ATLAS integration ──────────────────────────────────────────────────────
-  { key: "atlas_mode",                    default: "preferred",          options: ATLAS_MODE_VALUES, adminVisible: false, description: "Legacy ATLAS authority mode. preferred is the default alias for ATLAS v2 on." },
   { key: "atlas_v2",                      default: "on",                 options: ATLAS_V2_MODE_VALUES, description: "ATLAS v2 backend mode. The pipeline contract (research seed handoffs, tree prefetch, symbol cards) assumes on; off is a degraded-compatibility escape hatch (broken native binary, CI, kill switch) where agents fall back to raw read/search tools." },
   { key: "atlas_parse_max_parallel",       default: "",                   numeric: { integer: true, min: 1 }, adminVisible: false, description: "Internal Atlas Parse maximum concurrent SCIP-stage subprocesses (empty = computed from languages and CPU)" },
   { key: "atlas_parse_per_lang_tandem",    default: "true",               valueType: "boolean", adminVisible: false, description: "Internal Atlas Parse tandem tree-sitter/SCIP staging flag" },
@@ -308,7 +304,7 @@ export const SETTINGS_CATALOG = [
   { key: "atlas_auto_feedback",           default: "write",              options: ATLAS_AUTO_FEEDBACK_VALUES, description: "Emit ATLAS agent.feedback at job end: off, dry-run, or write" },
   { key: "atlas_live_index",              default: "true",               valueType: "boolean", description: "Enable ATLAS live index overlays so long-running jobs see in-progress edits" },
   { key: "atlas_live_buffers",            default: "true",               valueType: "boolean", description: "Push deterministic write/edit buffers into ATLAS during dev jobs" },
-  { key: "atlas_memory_surface",          default: "auto",               options: ATLAS_MEMORY_SURFACE_MODE_VALUES, description: "Surface promoted ATLAS memories in handoffs. auto = on once at least one promoted memory exists in this project; off = never surface; on = always attempt to surface." },
+  { key: "atlas_memory_surface",          default: "on",                 options: ATLAS_MEMORY_SURFACE_MODE_VALUES, description: "Surface promoted ATLAS memories in handoffs. on = always attempt to surface; off = never surface; auto = on once at least one promoted memory exists in this project." },
   { key: "posse_kaizen_to_atlas",         default: "shadow",             options: KAIZEN_TO_ATLAS_MODE_VALUES, description: "Promote Posse Kaizen insights to ATLAS memory: off, shadow, or write" },
   { key: "atlas_semantic_enabled",        default: "true",               valueType: "boolean", description: "Enable ATLAS semantic search dispatch (default on, backed by the local ONNX jina-v2-code encoder; FTS remains the fallback when the encoder is unavailable)" },
   { key: "atlas_vector_backend",          default: "auto",               options: ATLAS_VECTOR_BACKEND_VALUES, description: "ATLAS embedding vector backend: auto, usearch, or off" },

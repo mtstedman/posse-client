@@ -8,7 +8,6 @@ import {
 import {
   buildDeterministicReadMcpServerConfig,
   buildDeterministicReadMcpServerConfigAsync,
-  getDeterministicMcpToolNames,
   roleUsesDeterministicReadMcp,
 } from "../../../integrations/functions/deterministic-mcp.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../integrations/functions/mcp-gateway.js";
@@ -98,10 +97,11 @@ export function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
     return { active: false, tools: [], payload: null };
   }
   const serverName = server.name || POSSE_MCP_GATEWAY_SERVER_NAME;
-  const toolNames = getDeterministicMcpToolNames(role, { needsImageGeneration });
+  const toolNames = Array.isArray(server.tools) ? server.tools : [];
   return {
     active: true,
     tools: toolNames,
+    atlasTools: Array.isArray(server.atlasTools) ? server.atlasTools : [],
     serverName,
     serverConfig: server,
     ownerSession: server.ownerSession || null,
@@ -168,10 +168,11 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
     return { active: false, tools: [], payload: null };
   }
   const serverName = server.name || POSSE_MCP_GATEWAY_SERVER_NAME;
-  const toolNames = getDeterministicMcpToolNames(role, { needsImageGeneration });
+  const toolNames = Array.isArray(server.tools) ? server.tools : [];
   return {
     active: true,
     tools: toolNames,
+    atlasTools: Array.isArray(server.atlasTools) ? server.atlasTools : [],
     serverName,
     serverConfig: server,
     ownerSession: server.ownerSession || null,
@@ -191,4 +192,3 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
     },
   };
 }
-

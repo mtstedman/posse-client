@@ -1,6 +1,6 @@
 // @ts-check
 //
-// symbol.getCard handler. Resolves the symbol by ID or ref and produces
+// symbol.card handler. Resolves the symbol by ID or ref and produces
 // a SymbolCard envelope.
 
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
@@ -14,7 +14,6 @@ import { recordCodeLadderStep } from "./code-ladder.js";
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
 /** @typedef {import("../contracts/tool-params.js").SymbolGetCardParams} SymbolGetCardParams */
-/** @typedef {import("../contracts/tool-params.js").SymbolGetCardsParams} SymbolGetCardsParams */
 /** @typedef {import("../contracts/tool-results.js").SymbolCard} SymbolCard */
 
 /**
@@ -38,7 +37,7 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
     const parsed = parseSymbolId(params.symbolId);
     if (!parsed) {
       return errorEnvelope({
-        action: "symbol.getCard",
+        action: "symbol.card",
         versionId,
         code: "invalid_symbol_id",
         message: `Malformed symbolId ${params.symbolId}`,
@@ -66,16 +65,16 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
     }
   } else {
     return errorEnvelope({
-      action: "symbol.getCard",
+      action: "symbol.card",
       versionId,
       code: "invalid_params",
-      message: "symbol.getCard requires symbolId or symbolRef",
+      message: "symbol.card requires symbolId or symbolRef",
     });
   }
 
   if (!target && !overlayTarget) {
     return errorEnvelope({
-      action: "symbol.getCard",
+      action: "symbol.card",
       versionId,
       code: "unresolved_symbol",
       message: "Symbol not found",
@@ -93,16 +92,16 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
     });
     const etag = etagOf(overlayTarget.symbol);
     recordCodeLadderStep({
-      action: "symbol.getCard",
+      action: "symbol.card",
       sessionId,
       symbolId: symbolIdOf(overlayTarget.symbol),
       file: overlayTarget.symbol.repo_rel_path,
     });
     if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-      return notModifiedEnvelope({ action: "symbol.getCard", versionId, etag });
+      return notModifiedEnvelope({ action: "symbol.card", versionId, etag });
     }
     return okEnvelope({
-      action: "symbol.getCard",
+      action: "symbol.card",
       versionId,
       data: card,
       meta: { etag },
@@ -115,7 +114,7 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
   const targetSymbol = /** @type {ViewSymbol} */ (target);
   const etag = etagOf(targetSymbol);
   recordCodeLadderStep({
-    action: "symbol.getCard",
+    action: "symbol.card",
     sessionId,
     symbolId: symbolIdOf(targetSymbol),
     file: targetSymbol.repo_rel_path,
@@ -133,10 +132,10 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
   recordPrefetchAccess({ kind: "card", key: cacheKey, hit: !!cachedCard });
   if (cachedCard) {
     if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-      return notModifiedEnvelope({ action: "symbol.getCard", versionId, etag });
+      return notModifiedEnvelope({ action: "symbol.card", versionId, etag });
     }
     return okEnvelope({
-      action: "symbol.getCard",
+      action: "symbol.card",
       versionId,
       data: cachedCard,
       meta: { etag },
@@ -153,144 +152,15 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
   cache.setCard(cacheKey, card);
 
   if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-    return notModifiedEnvelope({ action: "symbol.getCard", versionId, etag });
+    return notModifiedEnvelope({ action: "symbol.card", versionId, etag });
   }
 
   return okEnvelope({
-    action: "symbol.getCard",
+    action: "symbol.card",
     versionId,
     data: card,
     meta: { etag },
   });
-}
-
-/**
- * Batch card hydration. This deliberately reuses symbol.getCard behavior so
- * single-card and batch-card resolution cannot drift.
- *
- * @param {{
- *   view: View,
- *   versionId: string,
- *   params: SymbolGetCardsParams,
- *   repoRoot?: string,
- *   ledger?: import("../contracts/api.js").Ledger,
- *   repoId?: string | null,
- * }} args
- */
-export function symbolGetCards({ view, versionId, params, repoRoot, ledger, repoId, action = "symbol.getCards" }) {
-  const { requests, invalidRequests } = normalizeBatchRequests(params);
-  if (requests.length === 0) {
-    if (invalidRequests.length > 0) {
-      return okEnvelope({
-        action,
-        versionId,
-        data: {
-          cards: [],
-          errors: invalidRequests,
-          total: invalidRequests.length,
-          okCount: 0,
-          errorCount: invalidRequests.length,
-          partial: false,
-        },
-      });
-    }
-    return errorEnvelope({
-      action,
-      versionId,
-      code: "invalid_params",
-      message: `${action} requires symbolIds, symbolRefs, or cards`,
-    });
-  }
-  const cards = [];
-  const errors = [...invalidRequests];
-  for (let index = 0; index < requests.length; index += 1) {
-    const request = requests[index];
-    const result = /** @type {any} */ (symbolGetCard({
-      view,
-      versionId,
-      repoRoot,
-      ledger,
-      repoId,
-      params: {
-        ...request,
-        minCallConfidence: params.minCallConfidence,
-        includeResolutionMetadata: params.includeResolutionMetadata,
-        sessionId: /** @type {any} */ (params).sessionId,
-      },
-    }));
-    if (result.ok) {
-      cards.push(result.data);
-    } else {
-      errors.push({
-        index,
-        request,
-        code: result.error?.code || "unknown",
-        message: result.error?.message || "Unable to hydrate symbol card",
-      });
-    }
-  }
-  return okEnvelope({
-    action,
-    versionId,
-    data: {
-      cards,
-      errors,
-      total: requests.length + invalidRequests.length,
-      okCount: cards.length,
-      errorCount: errors.length,
-      partial: errors.length > 0 && cards.length > 0,
-    },
-  });
-}
-
-/**
- * @param {SymbolGetCardsParams} params
- * @returns {{ requests: SymbolGetCardParams[], invalidRequests: Array<Record<string, unknown>> }}
- */
-function normalizeBatchRequests(params) {
-  const out = [];
-  const invalidRequests = [];
-  const seen = new Set();
-  const add = (request) => {
-    const key = request.symbolId
-      ? `id:${request.symbolId}`
-      : `ref:${stableRefKey(request.symbolRef || {})}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push(request);
-  };
-  const addInvalid = (index, request, message) => {
-    invalidRequests.push({
-      index,
-      request,
-      code: "invalid_symbol_ref",
-      message,
-    });
-  };
-  for (const symbolId of Array.isArray(params.symbolIds) ? params.symbolIds : []) {
-    const text = String(symbolId || "").trim();
-    if (text) add({ symbolId: text });
-  }
-  const symbolRefs = Array.isArray(params.symbolRefs) ? params.symbolRefs : [];
-  for (let index = 0; index < symbolRefs.length; index += 1) {
-    const symbolRef = symbolRefs[index];
-    if (isValidSymbolRef(symbolRef)) {
-      add({ symbolRef });
-    } else if (symbolRef && typeof symbolRef === "object") {
-      addInvalid(index, { symbolRef }, "symbolRef must be a plain object with a string name");
-    }
-  }
-  const cards = Array.isArray(params.cards) ? params.cards : [];
-  for (let index = 0; index < cards.length; index += 1) {
-    const card = cards[index];
-    if (!card || typeof card !== "object") continue;
-    if (typeof card.symbolId === "string" && card.symbolId.trim()) add({ symbolId: card.symbolId.trim() });
-    else if (isValidSymbolRef(card.symbolRef)) add({ symbolRef: card.symbolRef });
-    else if (card.symbolRef && typeof card.symbolRef === "object") {
-      addInvalid(index, { symbolRef: card.symbolRef }, "card.symbolRef must be a plain object with a string name");
-    }
-  }
-  return { requests: out.slice(0, 100), invalidRequests };
 }
 
 /**
@@ -300,44 +170,6 @@ function normalizeBatchRequests(params) {
 function effectiveRepo(repoId) {
   const text = String(repoId || "default").trim();
   return text || "default";
-}
-
-function stableRefKey(value) {
-  if (value === undefined) return "null";
-  if (value == null) return "null";
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "string") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(stableRefKey).join(",")}]`;
-  if (typeof value === "object") {
-    if (!isPlainObject(value)) return JSON.stringify(`[nonPlain:${Object.prototype.toString.call(value)}]`);
-    return `{${Object.keys(value)
-      .filter((key) => value[key] !== undefined)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableRefKey(value[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(String(value));
-}
-
-function isValidSymbolRef(value) {
-  return isPlainObject(value)
-    && typeof value.name === "string"
-    && hasOnlyPlainRefValues(value);
-}
-
-function hasOnlyPlainRefValues(value) {
-  if (value === undefined || value == null) return true;
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "string") return true;
-  if (Array.isArray(value)) return value.every((entry) => hasOnlyPlainRefValues(entry));
-  if (!isPlainObject(value)) return false;
-  return Object.values(value).every((entry) => hasOnlyPlainRefValues(entry));
-}
-
-function isPlainObject(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
 }
 
 /**

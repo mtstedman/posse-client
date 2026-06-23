@@ -23,7 +23,7 @@
  */
 
 /**
- * Used by symbol.getCard when the caller doesn't have a symbol ID yet.
+ * Used by symbol.card when the caller doesn't have a symbol ID yet.
  * Exactly one of `symbolId` or `symbolRef` must be set.
  *
  * @typedef {Object} SymbolRef
@@ -235,21 +235,9 @@
 
 /**
  * @typedef {Object} SymbolGetCardParams
- * @property {string} [symbolId]              Required iff symbolRef/symbolIds are absent.
- * @property {SymbolRef} [symbolRef]          Required iff symbolId/symbolIds are absent.
- * @property {string[]} [symbolIds]           Batch mode: answers in the symbol.getCards shape ({ cards, errors }).
- * @property {SymbolRef[]} [symbolRefs]       Batch mode natural refs.
+ * @property {string} [symbolId]              Required iff symbolRef is absent.
+ * @property {SymbolRef} [symbolRef]          Required iff symbolId is absent.
  * @property {string} [ifNoneMatch]
- * @property {number} [minCallConfidence]     0..1
- * @property {boolean} [includeResolutionMetadata]
- * @property {string} [sessionId]             Optional live-buffer overlay namespace.
- */
-
-/**
- * @typedef {Object} SymbolGetCardsParams
- * @property {string[]} [symbolIds]           Opaque ATLAS symbol IDs, max 100.
- * @property {SymbolRef[]} [symbolRefs]       Natural refs for symbols without IDs, max 100.
- * @property {Array<{ symbolId?: string, symbolRef?: SymbolRef }>} [cards] Mixed batch entries.
  * @property {number} [minCallConfidence]     0..1
  * @property {boolean} [includeResolutionMetadata]
  * @property {string} [sessionId]             Optional live-buffer overlay namespace.
@@ -443,7 +431,7 @@
  */
 
 // ============================================================================
-// delta.* / pr.risk.* — Review-side semantic diff and risk
+// delta.* / review.risk.* — Review-side semantic diff and risk
 // ============================================================================
 
 /**
@@ -637,27 +625,26 @@
  *   | { action: "buffer.checkpoint" } & BufferCheckpointParams
  *   | { action: "buffer.status" } & BufferStatusParams
  *   | { action: "symbol.search" } & SymbolSearchParams
- *   | { action: "symbol.getCard" } & SymbolGetCardParams
- *   | { action: "symbol.getCards" } & SymbolGetCardsParams
- *   | { action: "symbol.usages" } & SymbolUsagesParams
+ *   | { action: "symbol.card" } & SymbolGetCardParams
+ *   | { action: "symbol.overview" } & SymbolUsagesParams
  *   | { action: "tree.overview" } & TreeOverviewParams
- *   | { action: "tree.walk" } & TreeOverviewParams
+ *   | { action: "tree.branch" } & TreeOverviewParams
  *   | { action: "tree.scope" } & TreeScopeParams
- *   | { action: "tree.grow" } & TreeScopeParams
+ *   | { action: "tree.expand" } & TreeScopeParams
  *   | { action: "slice.build" } & SliceBuildParams
  *   | { action: "slice.refresh" } & SliceRefreshParams
  *   | { action: "slice.spillover.get" } & SliceSpilloverGetParams
  *   | { action: "edit.plan" } & EditPlanParams
- *   | { action: "code.getSkeleton" } & CodeGetSkeletonParams
- *   | { action: "code.getHotPath" } & CodeGetHotPathParams
- *   | { action: "code.needWindow" } & CodeNeedWindowParams
+ *   | { action: "code.skeleton" } & CodeGetSkeletonParams
+ *   | { action: "code.lens" } & CodeGetHotPathParams
+ *   | { action: "code.window" } & CodeNeedWindowParams
  *   | { action: "context" } & ContextParams
  *   | { action: "context.summary" } & ContextSummaryParams
  *   | { action: "agent.feedback" } & AgentFeedbackParams
  *   | { action: "agent.feedback.query" } & AgentFeedbackQueryParams
- *   | { action: "delta.get" } & DeltaGetParams
- *   | { action: "pr.risk.analyze" } & PrRiskAnalyzeParams
- *   | { action: "pr.risk" } & PrRiskParams
+ *   | { action: "review.delta" } & DeltaGetParams
+ *   | { action: "review.analyze" } & PrRiskAnalyzeParams
+ *   | { action: "review.risk" } & PrRiskParams
  *   | { action: "file.read" } & FileReadParams
  *   | { action: "memory.store" } & MemoryStoreParams
  *   | { action: "memory.query" } & MemoryQueryParams
@@ -692,27 +679,26 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "buffer.checkpoint",
   "buffer.status",
   "symbol.search",
-  "symbol.getCard",
-  "symbol.getCards",
-  "symbol.usages",
+  "symbol.card",
+  "symbol.overview",
   "tree.overview",
-  "tree.walk",
+  "tree.branch",
   "tree.scope",
-  "tree.grow",
+  "tree.expand",
   "slice.build",
   "slice.refresh",
   "slice.spillover.get",
   "edit.plan",
-  "code.getSkeleton",
-  "code.getHotPath",
-  "code.needWindow",
+  "code.skeleton",
+  "code.lens",
+  "code.window",
   "context",
   "context.summary",
   "agent.feedback",
   "agent.feedback.query",
-  "delta.get",
-  "pr.risk.analyze",
-  "pr.risk",
+  "review.delta",
+  "review.analyze",
+  "review.risk",
   "file.read",
   "memory.store",
   "memory.query",

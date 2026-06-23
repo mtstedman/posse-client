@@ -39,3 +39,9 @@ data/
 
 # One-off local ATLAS probes against sibling repos.
 scripts/atlas-streaming-*.mjs
+
+# Local per-file test run-time ledger (scripts/run-tests.mjs + test-timings.mjs)
+.posse-test-timings.json
+
+# Windows device sink accidentally appears in untracked scans.
+/nul

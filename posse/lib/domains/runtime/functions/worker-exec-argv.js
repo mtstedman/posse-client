@@ -66,9 +66,8 @@ export function sanitizeWorkerExecArgv(execArgv = process.execArgv) {
       continue;
     }
     if (SAFE_FLAGS_WITH_VALUES.has(arg)) {
-      sanitized.push(execArgv[i]);
-      if (i + 1 < execArgv.length && !String(execArgv[i + 1] ?? "").startsWith("-")) {
-        sanitized.push(execArgv[++i]);
+      if (i + 1 < execArgv.length) {
+        sanitized.push(execArgv[i], execArgv[++i]);
       }
       continue;
     }

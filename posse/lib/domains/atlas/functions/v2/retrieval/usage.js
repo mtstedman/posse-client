@@ -269,7 +269,6 @@ function rawEquivalentMultiplier(action) {
   if (action === "workflow") return 4;
   if (action.startsWith("code.") || action === "file.read") return 4;
   if (action.startsWith("slice.") || action === "context" || action === "context.summary") return 3;
-  if (action === "symbol.getCards") return 3;
   if (action.startsWith("memory.")) return 2;
   return 2;
 }

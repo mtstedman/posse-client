@@ -15,17 +15,17 @@ export function normalizeAtlasActionName(value = "") {
   if (action.startsWith("atlas_")) action = action.slice("atlas_".length);
   action = action.replace(/_/g, ".");
   const aliases = {
-    "symbol.get.card": "symbol.getCard",
+    "symbol.get.card": "symbol.card",
     "slice.spillover.get": "slice.spillover.get",
-    "code.get.skeleton": "code.getSkeleton",
-    "code.get.hot.path": "code.getHotPath",
-    "code.need.window": "code.needWindow",
+    "code.get.skeleton": "code.skeleton",
+    "code.get.hot.path": "code.lens",
+    "code.need.window": "code.window",
     "agent.feedback": "agent.feedback",
     "agent.feedback.query": "agent.feedback.query",
     "repo.status": "repo.status",
     "repo.overview": "repo.overview",
-    "pr.risk": "pr.risk",
-    "pr.risk.analyze": "pr.risk.analyze",
+    "review.risk": "review.risk",
+    "review.analyze": "review.analyze",
   };
   return aliases[action] || action;
 }
@@ -34,8 +34,8 @@ export function validateAtlasPayloadSymbolIds(action, payload = {}) {
   const normalized = normalizeAtlasActionName(action);
   const input = /** @type {Record<string, any>} */ (payload && typeof payload === "object" ? payload : {});
 
-  if (normalized === "symbol.getCard" && input.symbolId != null) {
-    optionalAtlasSymbolId(input.symbolId, "symbol.getCard symbolId");
+  if (normalized === "symbol.card" && input.symbolId != null) {
+    optionalAtlasSymbolId(input.symbolId, "symbol.card symbolId");
   }
   if (normalized === "context") {
     sanitizeAtlasSymbolIdList(input.focusSymbols, 100, "context focusSymbols");
@@ -43,14 +43,14 @@ export function validateAtlasPayloadSymbolIds(action, payload = {}) {
   if (normalized === "slice.build") {
     sanitizeAtlasSymbolIdList(input.entrySymbols, 100, "slice.build entrySymbols");
   }
-  if (normalized === "code.getSkeleton" && input.symbolId != null) {
-    optionalAtlasSymbolId(input.symbolId, "code.getSkeleton symbolId");
+  if (normalized === "code.skeleton" && input.symbolId != null) {
+    optionalAtlasSymbolId(input.symbolId, "code.skeleton symbolId");
   }
-  if (normalized === "code.getHotPath" && input.symbolId != null) {
-    optionalAtlasSymbolId(input.symbolId, "code.getHotPath symbolId");
+  if (normalized === "code.lens" && input.symbolId != null) {
+    optionalAtlasSymbolId(input.symbolId, "code.lens symbolId");
   }
-  if (normalized === "code.needWindow" && input.symbolId != null) {
-    optionalAtlasSymbolId(input.symbolId, "code.needWindow symbolId");
+  if (normalized === "code.window" && input.symbolId != null) {
+    optionalAtlasSymbolId(input.symbolId, "code.window symbolId");
   }
   if (normalized === "agent.feedback") {
     sanitizeAtlasSymbolIdList(input.usefulSymbols, 40, "agent.feedback usefulSymbols");
@@ -65,13 +65,13 @@ export function coerceLooseAtlasSymbolArgs(action, payload = {}) {
   const normalized = normalizeAtlasActionName(action);
   const input = /** @type {Record<string, any>} */ (payload && typeof payload === "object" ? payload : {});
 
-  if (normalized === "symbol.getCard") {
+  if (normalized === "symbol.card") {
     coerceSymbolIdToSymbolRef(input);
-  } else if (normalized === "code.getSkeleton") {
+  } else if (normalized === "code.skeleton") {
     coerceSymbolIdToFile(input);
-  } else if (normalized === "code.getHotPath") {
+  } else if (normalized === "code.lens") {
     coerceSymbolIdToFile(input);
-  } else if (normalized === "code.needWindow") {
+  } else if (normalized === "code.window") {
     coerceSymbolIdToFile(input);
   } else if (normalized === "slice.build") {
     coerceSymbolListPaths(input, "entrySymbols", "editedFiles");

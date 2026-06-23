@@ -117,30 +117,29 @@ const CODE_SHARED_ACTIONS = Object.freeze(
 
 const QUERY_GATEWAY_ACTIONS = Object.freeze([
   "symbol.search",
-  "symbol.getCard",
-  "symbol.getCards",
-  "symbol.usages",
+  "symbol.card",
+  "symbol.overview",
   "tree.overview",
-  "tree.walk",
+  "tree.branch",
   "tree.scope",
-  "tree.grow",
+  "tree.expand",
   "slice.build",
   "slice.refresh",
   "slice.spillover.get",
   ...QUERY_SHARED_ACTIONS,
   "context",
   "context.summary",
-  "delta.get",
-  "pr.risk.analyze",
-  "pr.risk",
+  "review.delta",
+  "review.analyze",
+  "review.risk",
   "repo.status",
   "repo.quality",
   "memory.query",
 ]);
 const CODE_GATEWAY_ACTIONS = Object.freeze([
-  "code.getSkeleton",
-  "code.getHotPath",
-  "code.needWindow",
+  "code.skeleton",
+  "code.lens",
+  "code.window",
   ...CODE_SHARED_ACTIONS,
 ]);
 const REPO_GATEWAY_ACTIONS = Object.freeze([
@@ -337,28 +336,15 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     taskText: s({ maxLength: 20_000 }),
     taskType: s({ enum: TASK_TYPES }),
   }, ["query"]),
-  "symbol.getCard": o({
+  "symbol.card": o({
     symbolId: symbolId(),
     symbolRef: symbolRef(),
-    symbolIds: symbolIds(100),
-    symbolRefs: a(looseSymbolRef(), { maxItems: 100 }),
     ifNoneMatch: s({ maxLength: 512 }),
     minCallConfidence: n({ minimum: 0, maximum: 1 }),
     includeResolutionMetadata: b(),
     sessionId: s({ maxLength: 256 }),
   }),
-  "symbol.getCards": o({
-    symbolIds: symbolIds(100),
-    symbolRefs: a(looseSymbolRef(), { maxItems: 100 }),
-    cards: a(o({
-      symbolId: symbolId(),
-      symbolRef: looseSymbolRef(),
-    }), { maxItems: 100 }),
-    minCallConfidence: n({ minimum: 0, maximum: 1 }),
-    includeResolutionMetadata: b(),
-    sessionId: s({ maxLength: 256 }),
-  }),
-  "symbol.usages": o({
+  "symbol.overview": o({
     symbolId: symbolId(),
     kind: a(s({ enum: ["calls", "references", "reads", "writes", "uses_type", "imports", "extends", "implements"] }), { maxItems: 20 }),
     limit: i({ minimum: 1, maximum: 500 }),
@@ -379,7 +365,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     includeRefs: b(),
     includeLatestRun: b(),
   }),
-  "tree.walk": o({
+  "tree.branch": o({
     nodeId: s({ minLength: 1, maxLength: 2000 }),
     path: s({ minLength: 1, maxLength: 4000 }),
     symbolId: symbolId(),
@@ -413,7 +399,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     branchFileCap: i({ minimum: 1, maximum: 500 }),
     refMatchLimit: i({ minimum: 1, maximum: 500 }),
   }),
-  "tree.grow": o({
+  "tree.expand": o({
     paths: repoPaths(100),
     editedFiles: repoPaths(100),
     path: s({ minLength: 1, maxLength: 4000 }),
@@ -479,7 +465,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     maxEdits: i({ minimum: 1, maximum: 500 }),
   }),
 
-  "code.getSkeleton": o({
+  "code.skeleton": o({
     symbolId: symbolId(),
     file: s({ minLength: 1 }),
     exportedOnly: b(),
@@ -489,7 +475,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     ifNoneMatch: s({ maxLength: 512 }),
     sessionId: s({ maxLength: 256 }),
   }),
-  "code.getHotPath": o({
+  "code.lens": o({
     symbolId: symbolId(),
     file: s({ minLength: 1 }),
     identifiersToFind: identifierList({ minItems: 1, maxItems: 50 }),
@@ -499,7 +485,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     ifNoneMatch: s({ maxLength: 512 }),
     sessionId: s({ maxLength: 256 }),
   }, ["identifiersToFind"]),
-  "code.needWindow": o({
+  "code.window": o({
     symbolId: symbolId(),
     file: s({ minLength: 1 }),
     reason: s({ maxLength: 20_000 }),
@@ -549,18 +535,18 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     halfLifeDays: n({ minimum: 0.1, maximum: 3650 }),
   }),
 
-  "delta.get": o({
+  "review.delta": o({
     fromVersion: s({ minLength: 1, maxLength: 512 }),
     toVersion: s({ minLength: 1, maxLength: 512 }),
     maxCards: i({ minimum: 1, maximum: 500 }),
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
   }, ["fromVersion", "toVersion"]),
-  "pr.risk.analyze": o({
+  "review.analyze": o({
     fromVersion: s({ minLength: 1, maxLength: 512 }),
     toVersion: s({ minLength: 1, maxLength: 512 }),
     riskThreshold: n({ minimum: 0, maximum: 100 }),
   }, ["fromVersion", "toVersion"]),
-  "pr.risk": o({
+  "review.risk": o({
     fromVersion: s({ minLength: 1, maxLength: 512 }),
     toVersion: s({ minLength: 1, maxLength: 512 }),
     maxCards: i({ minimum: 1, maximum: 500 }),

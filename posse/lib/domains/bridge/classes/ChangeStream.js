@@ -19,6 +19,12 @@ const DEFAULT_TAIL_LIMIT = 100;
 const MAX_TAIL_LIMIT = 500;
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const OPEN_GATE_STATUSES = new Set(["queued", "waiting_on_human"]);
+const NONTERMINAL_GATE_CLOSE_STATUSES = new Set(["waiting_on_review"]);
+const PLAN_GATE_EVENT_TYPES = new Set([
+  EVENT_TYPES.PLAN_APPROVAL_GATE_CREATED,
+  EVENT_TYPES.PLAN_APPROVED,
+  EVENT_TYPES.PLAN_REJECTED,
+]);
 
 function boundedLimit(value, fallback = DEFAULT_TAIL_LIMIT) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -49,7 +55,12 @@ function resolutionForEventType(eventType) {
   return "answered";
 }
 
-function resolutionForJob(job) {
+function resolutionForJob(job, payload = {}) {
+  if (payload?.subtype === "plan_approval") {
+    if (job.status === "succeeded") return "approved";
+    if (job.status === "failed" || job.status === "canceled") return "rejected";
+    if (job.status === "dead_letter") return "abandoned";
+  }
   if (job.status === "succeeded") return "answered";
   if (job.status === "failed") return "rejected";
   if (job.status === "canceled" || job.status === "dead_letter") return "abandoned";
@@ -87,12 +98,18 @@ function gatePayloadForJob(job) {
 }
 
 function gateClosedPayloadForJob(job) {
+  const payload = parseJsonField(job.payload_json) || {};
   return {
     job_id: Number(job.id),
     work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),
-    resolution: resolutionForJob(job),
+    resolution: resolutionForJob(job, payload),
     closed_at: job.updated_at || new Date().toISOString(),
   };
+}
+
+function eventGateJobId(row) {
+  const event = parseJsonField(row.event_json);
+  return Number(event?.gate_job_id || row.job_id || 0) || null;
 }
 
 function payloadForDbEvent(row) {
@@ -453,7 +470,22 @@ export class ChangeStream extends EventEmitter {
     for (const row of rows) {
       this.dbEventCursor = Math.max(this.dbEventCursor, Number(row.id));
       const kind = eventKindForEventType(row.event_type);
-      if (kind) this.emitBridgeEvent(kind, payloadForDbEvent(row));
+      if (kind && !this.shouldSuppressDbGateEvent(row)) {
+        this.emitBridgeEvent(kind, payloadForDbEvent(row));
+      }
+    }
+  }
+
+  shouldSuppressDbGateEvent(row) {
+    if (!PLAN_GATE_EVENT_TYPES.has(row?.event_type)) return false;
+    const gateJobId = eventGateJobId(row);
+    if (!gateJobId) return false;
+    try {
+      const job = this.db.prepare(`SELECT job_type, payload_json FROM jobs WHERE id = ?`).get(gateJobId);
+      const payload = parseJsonField(job?.payload_json) || {};
+      return job?.job_type === "human_input" && payload?.subtype === "plan_approval";
+    } catch {
+      return false;
     }
   }
 
@@ -543,16 +575,19 @@ export class ChangeStream extends EventEmitter {
     const isOpen = OPEN_GATE_STATUSES.has(row.status);
     const wasTerminal = TERMINAL_JOB_STATUS_SET.has(previousStatus);
     const isTerminal = TERMINAL_JOB_STATUS_SET.has(row.status);
+    const closedByNonterminalStatus = wasOpen
+      && !isOpen
+      && NONTERMINAL_GATE_CLOSE_STATUSES.has(row.status);
 
     if (isOpen && !wasOpen) {
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.GATE_OPENED, gatePayloadForJob(row));
-    } else if (isTerminal && previousStatus !== undefined && !wasTerminal) {
+    } else if ((isTerminal && previousStatus !== undefined && !wasTerminal) || closedByNonterminalStatus) {
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.GATE_CLOSED, gateClosedPayloadForJob(row));
     }
     // Evict terminal gates instead of tracking them forever — human-input
     // jobs never leave a terminal status, and this map lives as long as the
     // daemon does.
-    if (isTerminal) {
+    if (isTerminal || closedByNonterminalStatus) {
       this.gateStatusByJobId.delete(jobId);
     } else {
       this.gateStatusByJobId.set(jobId, row.status);

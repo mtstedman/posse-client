@@ -102,6 +102,12 @@ function normalizeTier(value) {
   return raw === "cheap" || raw === "standard" || raw === "strong" ? raw : null;
 }
 
+function normalizeRequiredRate(value) {
+  if (value == null) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
 let _cachedDbRows = null;
 let _cachedDbSig = null;
 
@@ -113,18 +119,22 @@ function dbRows() {
     const sigKey = `${sig?.mx || ""}|${sig?.cnt || 0}`;
     if (_cachedDbRows && _cachedDbSig === sigKey) return _cachedDbRows;
     const rows = db.prepare(`SELECT provider, model_name, model_tier, input_per_million_usd, cached_input_per_million_usd, output_per_million_usd FROM provider_pricing`).all();
-    _cachedDbRows = rows.map((row) => ({
-      provider: normalizeProvider(row.provider),
-      modelName: normalizeModel(row.model_name),
-      modelTier: normalizeTier(row.model_tier),
-      inputPerM: Number(row.input_per_million_usd),
+    _cachedDbRows = rows.map((row) => {
+      const inputPerM = normalizeRequiredRate(row.input_per_million_usd);
+      const outputPerM = normalizeRequiredRate(row.output_per_million_usd);
+      if (inputPerM == null || outputPerM == null) return null;
       // NULL cached rate means the operator didn't specify one; fall back to
       // the uncached input rate (conservative — never under-reports).
-      cachedInputPerM: row.cached_input_per_million_usd != null && Number.isFinite(Number(row.cached_input_per_million_usd))
-        ? Number(row.cached_input_per_million_usd)
-        : Number(row.input_per_million_usd),
-      outputPerM: Number(row.output_per_million_usd),
-    }));
+      const cachedInputPerM = normalizeRequiredRate(row.cached_input_per_million_usd) ?? inputPerM;
+      return {
+        provider: normalizeProvider(row.provider),
+        modelName: normalizeModel(row.model_name),
+        modelTier: normalizeTier(row.model_tier),
+        inputPerM,
+        cachedInputPerM,
+        outputPerM,
+      };
+    }).filter(Boolean);
     _cachedDbSig = sigKey;
     return _cachedDbRows;
   } catch {

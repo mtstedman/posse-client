@@ -51,11 +51,11 @@ const ATLAS_JOB_CACHE_ACTIONS = new Set([
   "tree.overview",
   "context",
   "symbol.search",
-  "symbol.getCard",
+  "symbol.card",
   "slice.build",
   "slice.refresh",
-  "code.getSkeleton",
-  "code.getHotPath",
+  "code.skeleton",
+  "code.lens",
 ]);
 
 // Cross-agent read-through cache for the hot "shape of the repo" reads that

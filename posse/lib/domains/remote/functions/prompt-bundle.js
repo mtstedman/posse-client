@@ -119,7 +119,7 @@ export async function loadRemotePromptBundle({
   if (activeBundlePromise && !force) return activeBundlePromise;
 
   const promptClient = client || new RemotePromptClient({ baseUrl, timeoutMs });
-  activeBundlePromise = (async () => {
+  const loadPromise = (async () => {
     const raw = typeof promptClient.getPromptBundle === "function"
       ? await promptClient.getPromptBundle()
       : await promptClient.requestJsonOnce({
@@ -130,11 +130,12 @@ export async function loadRemotePromptBundle({
     activeBundle = normalizePromptBundle(raw);
     return activeBundle;
   })();
+  activeBundlePromise = loadPromise;
 
   try {
-    return await activeBundlePromise;
+    return await loadPromise;
   } finally {
-    activeBundlePromise = null;
+    if (activeBundlePromise === loadPromise) activeBundlePromise = null;
   }
 }
 

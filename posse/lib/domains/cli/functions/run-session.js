@@ -46,6 +46,10 @@ export const TUI_SNAPSHOT_WORKER_URL = new URL("./tui-snapshot-worker.js", impor
 export const TUI_SNAPSHOT_THREAD_MANAGER = new ThreadManager();
 export const EMPTY_TOOL_SNAPSHOT = { jobs: [], recent: [], activeLocks: { work_items: [], jobs: [] } };
 
+export function firstLine(value, fallback = "unknown") {
+  return String(value || fallback).trim().split(/\r?\n/)[0] || fallback;
+}
+
 /**
  * @param {{ stdout?: any, stderr?: any }} [input]
  */

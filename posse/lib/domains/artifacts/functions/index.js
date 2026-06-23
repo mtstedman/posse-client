@@ -214,13 +214,26 @@ export function validateManifestAgainstContract(manifest, taskMode) {
   const violations = [];
   const warnings = [];
   const validation = protocol.output_validation || {};
+  const manifestPatterns = (protocol.allowed_manifest_files || []).map((entry) => {
+    const str = String(entry || "");
+    if (!str.includes("*")) return { kind: "exact", value: str };
+    const escaped = str.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+    return { kind: "glob", value: new RegExp(`^${escaped}$`) };
+  });
+  const isManifestFile = (f) => {
+    const basename = String(f.path || "").split("/").pop();
+    for (const pat of manifestPatterns) {
+      if (pat.kind === "exact" ? pat.value === basename : pat.value.test(basename)) return true;
+    }
+    return false;
+  };
 
   if (validation.min_files && manifest.count < validation.min_files) {
     violations.push(`Expected at least ${validation.min_files} file(s), got ${manifest.count}`);
   }
 
   if (validation.min_bytes && manifest.count > 0) {
-    const tooSmall = manifest.files.filter(f => f.size < validation.min_bytes);
+    const tooSmall = manifest.files.filter(f => !isManifestFile(f) && f.size < validation.min_bytes);
     if (tooSmall.length > 0) {
       violations.push(`${tooSmall.length} file(s) below minimum size (${validation.min_bytes} bytes): ${tooSmall.map(f => f.path).join(", ")}`);
     }
@@ -236,19 +249,6 @@ export function validateManifestAgainstContract(manifest, taskMode) {
     // colliding when two jobs share an output_root. Manifest files still do
     // not satisfy the "must contain at least one allowed-format file"
     // requirement — a manifest-only output still fails.
-    const manifestPatterns = (protocol.allowed_manifest_files || []).map((entry) => {
-      const str = String(entry || "");
-      if (!str.includes("*")) return { kind: "exact", value: str };
-      const escaped = str.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-      return { kind: "glob", value: new RegExp(`^${escaped}$`) };
-    });
-    const isManifestFile = (f) => {
-      const basename = String(f.path || "").split("/").pop();
-      for (const pat of manifestPatterns) {
-        if (pat.kind === "exact" ? pat.value === basename : pat.value.test(basename)) return true;
-      }
-      return false;
-    };
     const nonManifestFiles = manifest.files.filter((f) => !isManifestFile(f));
     const disallowed = nonManifestFiles.filter((f) => !allowedSet.has(f.ext));
     const hasAllowed = nonManifestFiles.some((f) => allowedSet.has(f.ext));

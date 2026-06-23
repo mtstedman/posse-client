@@ -2,7 +2,7 @@
 //
 // Shared tree-sitter helpers for retrieval tools. Parser ingestion has its
 // own walker because it emits ledger rows; this module is for read-time tools
-// like code.getSkeleton and code.getHotPath that need AST structure plus
+// like code.skeleton and code.lens that need AST structure plus
 // source/line utilities.
 
 import fs from "fs";

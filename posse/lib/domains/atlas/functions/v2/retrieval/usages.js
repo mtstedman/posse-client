@@ -11,7 +11,7 @@ import { isDefaultVisibleSymbol } from "./hygiene.js";
 /** @typedef {import("../contracts/tool-results.js").SymbolUsagesData} SymbolUsagesData */
 
 /**
- * Compact "where is this symbol used?" surface. Unlike symbol.getCard callers,
+ * Compact "where is this symbol used?" surface. Unlike symbol.card callers,
  * this emits just edge sites and source symbols, which is the shape agents need
  * before deciding whether to spend tokens on full cards.
  *
@@ -22,16 +22,16 @@ export function symbolUsages({ view, versionId, params }) {
   const parsed = parseSymbolId(params.symbolId);
   if (!parsed) {
     return errorEnvelope({
-      action: "symbol.usages",
+      action: "symbol.overview",
       versionId,
       code: "invalid_symbol_id",
-      message: "symbol.usages requires a valid symbolId",
+      message: "symbol.overview requires a valid symbolId",
     });
   }
   const target = view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
   if (!target) {
     return errorEnvelope({
-      action: "symbol.usages",
+      action: "symbol.overview",
       versionId,
       code: "symbol_not_found",
       message: `No symbol found for ${params.symbolId}`,
@@ -70,7 +70,7 @@ export function symbolUsages({ view, versionId, params }) {
   const usages = rows.slice(0, limit);
   const warnings = usageWarnings(view, total);
   return okEnvelope({
-    action: "symbol.usages",
+    action: "symbol.overview",
     versionId,
     data: {
       symbolId: params.symbolId,

@@ -263,7 +263,7 @@ export function rejectPlan(wiId, { feedback = null, actor = "operator" } = {}) {
   const gate = findPendingGate(wiId);
   if (!gate) return { ok: false, reason: "no_pending_gate" };
 
-  // Mark the gate failed so dependents see a hard-dep failure (triggers the
+  // Cancel the gate so dependents see a hard-dep failure (triggers the
   // scheduler's deadlock cancellation). We still also explicitly cancel the
   // created jobs to avoid relying on the deadlock timing.
   updateJobStatus(gate.id, "canceled");

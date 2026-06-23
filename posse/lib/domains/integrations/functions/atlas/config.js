@@ -10,7 +10,6 @@ import { normalizeAbsolutePath } from "./shared.js";
 import {
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
-  ATLAS_MODE_VALUES,
   ATLAS_PHASE_VALUES,
   ATLAS_REMOTE_ENCODER_MODE_VALUES,
   ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
@@ -26,7 +25,6 @@ import {
   ATLAS_WI_EMBEDDINGS_VALUES,
   VALID_ATLAS_AUTO_FEEDBACK_MODES,
   VALID_ATLAS_BOOT_REINDEX_POLICIES,
-  VALID_ATLAS_MODES,
   VALID_ATLAS_PHASES,
   VALID_ATLAS_REMOTE_ENCODER_MODES,
   VALID_ATLAS_SCIP_LANGUAGES,
@@ -49,7 +47,6 @@ import { normalizeAtlasV2Mode } from "../atlas-v2-mode.js";
 export {
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
-  ATLAS_MODE_VALUES,
   ATLAS_PHASE_VALUES,
   ATLAS_REMOTE_ENCODER_MODE_VALUES,
   ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
@@ -65,7 +62,6 @@ export {
   ATLAS_WI_EMBEDDINGS_VALUES,
   VALID_ATLAS_AUTO_FEEDBACK_MODES,
   VALID_ATLAS_BOOT_REINDEX_POLICIES,
-  VALID_ATLAS_MODES,
   VALID_ATLAS_PHASES,
   VALID_ATLAS_REMOTE_ENCODER_MODES,
   VALID_ATLAS_SCIP_LANGUAGES,
@@ -638,7 +634,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     }
   }
 
-  const dbMode = useLiveSettings ? readDbSetting("atlas_mode") : null;
   const dbAtlasV2Mode = useLiveSettings ? readDbSetting("atlas_v2") : null;
   const dbScipMode = useLiveSettings ? readDbSetting("atlas_scip_mode") : null;
   const dbScipLanguages = useLiveSettings ? readDbSetting("atlas_scip_languages") : null;
@@ -697,8 +692,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbJobCache = useLiveSettings ? readDbSettingBool("atlas_job_cache") : null;
   const dbDriftCheck = useLiveSettings ? readDbSettingBool("atlas_drift_check") : null;
   const dbDriftCheckIntervalMs = useLiveSettings ? readDbSetting("atlas_drift_check_interval_ms") : null;
-  const rawMode = String(firstProvided(explicitValue("mode", "atlas_mode", "POSSE_ATLAS_MODE"), dbMode, "preferred")).trim().toLowerCase();
-  const mode = VALID_ATLAS_MODES.has(rawMode) ? rawMode : "off";
   const rawAtlasV2Mode = String(firstProvided(explicitValue("atlasV2Mode", "atlas_v2", "POSSE_ATLAS_V2"), dbAtlasV2Mode, "")).trim().toLowerCase();
   const atlasV2Mode = normalizeAtlasV2Mode(rawAtlasV2Mode);
   const rawScipMode = String(firstProvided(explicitValue("scipMode", "atlas_scip_mode", "POSSE_ATLAS_SCIP_MODE"), dbScipMode, "")).trim().toLowerCase();
@@ -725,16 +718,11 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const scipMaxAgeHours = parseIntOrNull(firstProvided(explicitValue("scipMaxAgeHours", "atlas_scip_max_age_hours", "POSSE_ATLAS_SCIP_MAX_AGE_HOURS"), dbScipMaxAgeHours)) ?? ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT;
   const explicitTelemetryOnly = explicitValue("telemetryOnly");
   const explicitAbEnabled = explicitValue("abEnabled");
-  const parsedModeState = getAtlasModeState(mode, {
+  const atlasV2Enabled = atlasV2Mode !== "off";
+  const modeState = getAtlasModeState(atlasV2Enabled ? (atlasV2Mode === "required" ? "required" : "on") : "off", {
     telemetryOnly: provided(explicitTelemetryOnly) && String(explicitTelemetryOnly).trim() !== "" ? parseBool(explicitTelemetryOnly) : false,
     abEnabled: provided(explicitAbEnabled) && String(explicitAbEnabled).trim() !== "" ? parseBool(explicitAbEnabled) : false,
   });
-  const atlasV2Enabled = atlasV2Mode !== "off";
-  const modeState = atlasV2Enabled
-    ? (parsedModeState.normalizedMode === "off"
-        ? getAtlasModeState(atlasV2Mode === "required" ? "required" : "on")
-        : parsedModeState)
-    : getAtlasModeState("off");
   const rawPhaseList = parseList(firstProvided(explicitValue("phases", "atlas_phases", "POSSE_ATLAS_PHASES"), dbPhases, ATLAS_PHASE_VALUES.join(","))).map((value) => value.toLowerCase());
   const phases = rawPhaseList
     .filter((value) => VALID_ATLAS_PHASES.has(value))
@@ -972,7 +960,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
 }
 
 export const ATLAS_BOOT_SETTING_MAP = Object.freeze({
-  POSSE_ATLAS_MODE: "mode",
   POSSE_ATLAS_V2: "atlasV2Mode",
   POSSE_ATLAS_SCIP_MODE: "scipMode",
   POSSE_ATLAS_SCIP_LANGUAGES: "scipLanguages",

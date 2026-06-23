@@ -7,10 +7,10 @@ import { isAtlasSymbolId } from "../../atlas/functions/v2/symbol-id.js";
 import { extractAtlasResultArtifacts, normalizeAtlasActionName } from "../../atlas/functions/v2/signal-extraction.js";
 
 const DIRECT_USEFUL_ACTIONS = new Set([
-  "symbol.getCard",
-  "code.getSkeleton",
-  "code.getHotPath",
-  "code.needWindow",
+  "symbol.card",
+  "code.skeleton",
+  "code.lens",
+  "code.window",
 ]);
 
 export function resolveAtlasAutoFeedbackMode(config = null) {
@@ -184,7 +184,7 @@ export function buildAtlasAutoFeedbackCandidate(observations = [], {
   if (useful.size === 0) return skipped("no_useful_symbols", useful, diagnostics);
 
   // No slice handle is normal under tree-first retrieval (tree.scope/
-  // tree.grow surface symbols without building a slice); the ledger stores
+  // tree.expand surface symbols without building a slice); the ledger stores
   // feedback per symbol with a nullable slice_handle, so emit regardless.
   const payload = {
     ...(sliceHandle ? { sliceHandle } : {}),
@@ -213,13 +213,13 @@ async function resolveRelevantPathSymbols(observations, { cwd, config, maxSymbol
   const out = [];
   for (const file of paths) {
     try {
-      const raw = await executeEmbeddedAtlasTool("code.getSkeleton", { file }, {
+      const raw = await executeEmbeddedAtlasTool("code.skeleton", { file }, {
         cwd,
         origin: "agent",
         ...(config ? { config } : {}),
       });
       if (String(raw || "").startsWith("Error:")) continue;
-      const artifacts = extractAtlasResultArtifacts(raw, { action: "code.getSkeleton", args: { file } });
+      const artifacts = extractAtlasResultArtifacts(raw, { action: "code.skeleton", args: { file } });
       const symbols = Array.isArray(artifacts?.symbols) ? artifacts.symbols : [];
       for (const sym of symbols.slice(0, maxSymbolsPerFile)) {
         if (isAtlasSymbolId(sym?.symbolId)) out.push(sym.symbolId);

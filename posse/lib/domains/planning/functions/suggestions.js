@@ -226,7 +226,7 @@ export function createApprovedSuggestionFollowUp({
     job_type: "dev",
     title: `Improvement: ${trimForTitle(suggestionText, 80)}`,
     parent_job_id: sourceJobId,
-    priority: "low",
+    priority,
     model_tier: "standard",
     reasoning_effort: "medium",
     payload_json: JSON.stringify(payload),

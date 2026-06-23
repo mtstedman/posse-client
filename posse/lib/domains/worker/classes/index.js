@@ -3,6 +3,7 @@ export * from "./JobLease.js";
 export * from "./RoleRegistry.js";
 export * from "./TrackedProviderClient.js";
 export * from "./Worker.js";
+export * from "./execution/index.js";
 export * from "./role-classes.js";
 export * from "./roles/artificer.js";
 export * from "./roles/assessor.js";

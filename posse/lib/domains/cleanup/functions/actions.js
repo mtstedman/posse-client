@@ -188,11 +188,30 @@ function actionablePorcelainPaths(repoDir) {
     .split("\n")
     .map((line) => String(line || ""))
     .filter(Boolean)
-    .map((line) => line.slice(3).trim())
+    .flatMap((line) => porcelainLinePaths(line))
     .filter((relPath) => relPath
       && !relPath.startsWith(".posse/")
       && !relPath.startsWith(".posse-worktrees/")
       && !relPath.startsWith(".posse-test-suites/"));
+}
+
+function unquotePorcelainPath(value) {
+  const trimmed = String(value || "").trim();
+  if (trimmed.length >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+    return trimmed.slice(1, -1).replace(/\\"/g, "\"").replace(/\\\\/g, "\\").replace(/\\/g, "/");
+  }
+  return trimmed.replace(/\\/g, "/");
+}
+
+function porcelainLinePaths(line) {
+  const token = String(line || "").slice(3).trim();
+  const renameSep = " -> ";
+  const sepIndex = token.indexOf(renameSep);
+  if (sepIndex === -1) return [unquotePorcelainPath(token)];
+  return [
+    unquotePorcelainPath(token.slice(0, sepIndex)),
+    unquotePorcelainPath(token.slice(sepIndex + renameSep.length)),
+  ];
 }
 
 function assertCleanForSnapshotDiff(repoDir) {
@@ -361,33 +380,58 @@ export function discardWorktree(worktree, projectDir, { force = false } = {}) {
 }
 
 export function dropStash(stash, projectDir) {
+  const ref = resolveCurrentStashRef(stash, projectDir, "drop");
   try {
-    gitExec(["stash", "drop", stash.ref], projectDir);
+    gitExec(["stash", "drop", ref], projectDir);
   } catch (err) {
-    throw new Error(`git stash drop ${stash.ref} failed: ${err.message.split("\n")[0]}`);
+    throw new Error(`git stash drop ${ref} failed: ${err.message.split("\n")[0]}`);
   }
   logEvent({
     event_type: EVENT_TYPES.CLEANUP_STASH_DROPPED,
     actor_type: EVENT_ACTORS.HUMAN,
-    message: `Dropped stash ${stash.ref}`,
-    event_json: JSON.stringify({ label: stash.label }),
+    message: `Dropped stash ${ref}`,
+    event_json: JSON.stringify({ label: stash.label, object_hash: stash.objectHash || null }),
   });
   return { ok: true };
 }
 
 export function restoreStash(stash, projectDir) {
+  const ref = resolveCurrentStashRef(stash, projectDir, "apply");
   try {
-    gitExec(["stash", "apply", stash.ref], projectDir);
+    gitExec(["stash", "apply", ref], projectDir);
   } catch (err) {
-    throw new Error(`git stash apply ${stash.ref} failed: ${err.message.split("\n")[0]}`);
+    throw new Error(`git stash apply ${ref} failed: ${err.message.split("\n")[0]}`);
   }
   logEvent({
     event_type: EVENT_TYPES.CLEANUP_STASH_APPLIED,
     actor_type: EVENT_ACTORS.HUMAN,
-    message: `Applied stash ${stash.ref} to working tree`,
-    event_json: JSON.stringify({ label: stash.label }),
+    message: `Applied stash ${ref} to working tree`,
+    event_json: JSON.stringify({ label: stash.label, object_hash: stash.objectHash || null }),
   });
   return { ok: true };
+}
+
+function listCurrentStashes(projectDir) {
+  const raw = gitExec(["stash", "list", "--format=%gd%x00%H"], projectDir);
+  return String(raw || "")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [ref, objectHash] = line.split("\0");
+      return { ref, objectHash };
+    })
+    .filter((entry) => entry.ref && entry.objectHash);
+}
+
+function resolveCurrentStashRef(stash, projectDir, actionLabel) {
+  const expectedHash = String(stash?.objectHash || "").trim();
+  if (!expectedHash) return stash?.ref;
+  const current = listCurrentStashes(projectDir);
+  const hit = current.find((entry) => entry.objectHash === expectedHash);
+  if (!hit) {
+    throw new Error(`git stash ${actionLabel} refused: surveyed stash ${stash.ref} no longer matches the current stash stack`);
+  }
+  return hit.ref;
 }
 
 export function applyAction({ kind, payload, action, projectDir, restoreDir = null, force = false }) {

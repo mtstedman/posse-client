@@ -1,6 +1,6 @@
 // @ts-check
 //
-// code.getSkeleton / code.getHotPath / code.needWindow handlers.
+// code.skeleton / code.lens / code.window handlers.
 //
 // All three operate on file content. The View knows about symbol byte
 // ranges; the actual source has to come from disk. Callers provide a
@@ -58,7 +58,7 @@ export async function codeGetSkeletonAsync({ view, versionId, params, readFile, 
 function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoRoot }, redactText) {
   const sessionId = /** @type {any} */ (params).sessionId;
   const ladder = validateCodeLadder({
-    action: "code.getSkeleton",
+    action: "code.skeleton",
     sessionId,
     symbolId: params.symbolId || null,
     file: params.file || null,
@@ -72,7 +72,7 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
     const resolved = resolveCodeSymbol({ view, symbolId: params.symbolId, repoRoot, sessionId });
     if (resolved.error === "invalid") {
       return errorEnvelope({
-        action: "code.getSkeleton",
+        action: "code.skeleton",
         versionId,
         code: "invalid_symbol_id",
         message: `Malformed symbolId ${params.symbolId}`,
@@ -81,7 +81,7 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
     const target = resolved.symbol;
     if (!target) {
       return errorEnvelope({
-        action: "code.getSkeleton",
+        action: "code.skeleton",
         versionId,
         code: "unresolved_symbol",
         message: "Symbol not found",
@@ -100,10 +100,10 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
     explicitFileRequest = true;
     if (!isCanonicalRepoPath(params.file)) {
       return errorEnvelope({
-        action: "code.getSkeleton",
+        action: "code.skeleton",
         versionId,
         code: "invalid_path",
-        message: `code.getSkeleton: file must be canonical, got ${params.file}`,
+        message: `code.skeleton: file must be canonical, got ${params.file}`,
       });
     }
     targetPath = params.file;
@@ -117,10 +117,10 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
       : view.query.symbolsInFile(params.file);
   } else {
     return errorEnvelope({
-      action: "code.getSkeleton",
+      action: "code.skeleton",
       versionId,
       code: "invalid_params",
-      message: "code.getSkeleton requires symbolId or file",
+      message: "code.skeleton requires symbolId or file",
     });
   }
 
@@ -141,7 +141,7 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
     if (astSkeleton.ok) {
       const etag = `sk:${targetPath}:${sha256Hex(source).slice(0, 16)}:${astSkeleton.etagSeed}`;
       if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-        return notModifiedEnvelope({ action: "code.getSkeleton", versionId, etag });
+        return notModifiedEnvelope({ action: "code.skeleton", versionId, etag });
       }
       return mapMaybePromise(redactText(astSkeleton.content), (content) => {
         /** @type {CodeSkeletonData} */
@@ -154,11 +154,11 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
           etag,
         };
         return annotateCodeLadder(okEnvelope({
-          action: "code.getSkeleton",
+          action: "code.skeleton",
           versionId,
           data,
           meta: { etag },
-        }), ladder, { action: "code.getSkeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
+        }), ladder, { action: "code.skeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
       });
     }
   }
@@ -166,7 +166,7 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
   const maxLines = params.maxLines || 200;
   if (source == null && explicitFileRequest) {
     return errorEnvelope({
-      action: "code.getSkeleton",
+      action: "code.skeleton",
       versionId,
       code: "file_unreadable",
       message: `Could not read ${targetPath}`,
@@ -186,7 +186,7 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
 
   const etag = `sk:${targetPath}:${fallbackSymbols.length}`;
   if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-    return notModifiedEnvelope({ action: "code.getSkeleton", versionId, etag });
+    return notModifiedEnvelope({ action: "code.skeleton", versionId, etag });
   }
 
   /** @type {CodeSkeletonData} */
@@ -199,11 +199,11 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
     etag,
   };
   return annotateCodeLadder(okEnvelope({
-    action: "code.getSkeleton",
+    action: "code.skeleton",
     versionId,
     data,
     meta: { etag },
-  }), ladder, { action: "code.getSkeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
+  }), ladder, { action: "code.skeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
 }
 
 /**
@@ -239,12 +239,12 @@ export async function codeGetHotPathAsync({ view, versionId, params, readFile, r
 }
 
 function codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRoot }, redaction) {
-  const resolved = resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.getHotPath" });
-  if (!resolved.ok) return errorEnvelope({ action: "code.getHotPath", versionId, code: resolved.code, message: resolved.message });
+  const resolved = resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.lens" });
+  if (!resolved.ok) return errorEnvelope({ action: "code.lens", versionId, code: resolved.code, message: resolved.message });
   const { source, targetPath, symbolId } = resolved;
   const sessionId = /** @type {any} */ (params).sessionId;
   const ladder = validateCodeLadder({
-    action: "code.getHotPath",
+    action: "code.lens",
     sessionId,
     symbolId: symbolId || null,
     file: targetPath,
@@ -283,7 +283,7 @@ function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, se
     const etagSeed = symbolId || `${targetPath}:${sha256Hex(source).slice(0, 16)}`;
     const etag = `hp:${etagSeed}:${idents.join(",")}:${astHotPath.etagSeed}`;
     if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-      return notModifiedEnvelope({ action: "code.getHotPath", versionId, etag });
+      return notModifiedEnvelope({ action: "code.lens", versionId, etag });
     }
     /** @type {CodeHotPathData} */
     const data = {
@@ -295,11 +295,11 @@ function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, se
       etag,
     };
     return annotateCodeLadder(okEnvelope({
-      action: "code.getHotPath",
+      action: "code.lens",
       versionId,
       data,
       meta: { etag },
-    }), ladder, { action: "code.getHotPath", sessionId, symbolId: symbolId || null, file: targetPath });
+    }), ladder, { action: "code.lens", sessionId, symbolId: symbolId || null, file: targetPath });
   }
   /** @type {Set<string>} */
   const found = new Set();
@@ -335,7 +335,7 @@ function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, se
     const etagSeed = symbolId || `${targetPath}:${sha256Hex(source).slice(0, 16)}`;
     const etag = `hp:${etagSeed}:${idents.join(",")}:${matches.length}`;
     if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-      return notModifiedEnvelope({ action: "code.getHotPath", versionId, etag });
+      return notModifiedEnvelope({ action: "code.lens", versionId, etag });
     }
     /** @type {CodeHotPathData} */
     const data = {
@@ -347,11 +347,11 @@ function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, se
       etag,
     };
     return annotateCodeLadder(okEnvelope({
-      action: "code.getHotPath",
+      action: "code.lens",
       versionId,
       data,
       meta: { etag },
-    }), ladder, { action: "code.getHotPath", sessionId, symbolId: symbolId || null, file: targetPath });
+    }), ladder, { action: "code.lens", sessionId, symbolId: symbolId || null, file: targetPath });
   });
 }
 
@@ -386,21 +386,21 @@ export async function codeNeedWindowAsync({ view, versionId, params, readFile, r
 }
 
 function codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRoot, ledger, repoId }, redactText) {
-  const resolved = resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.needWindow" });
-  if (!resolved.ok) return errorEnvelope({ action: "code.needWindow", versionId, code: resolved.code, message: resolved.message });
+  const resolved = resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.window" });
+  if (!resolved.ok) return errorEnvelope({ action: "code.window", versionId, code: resolved.code, message: resolved.message });
   const sessionId = /** @type {any} */ (params).sessionId;
   const ladder = validateCodeLadder({
-    action: "code.needWindow",
+    action: "code.window",
     sessionId,
     symbolId: resolved.symbolId || null,
     file: resolved.targetPath,
   });
   if (!params.reason || params.reason.trim().length < 3) {
     return errorEnvelope({
-      action: "code.needWindow",
+      action: "code.window",
       versionId,
       code: "missing_reason",
-      message: "code.needWindow requires a proof-of-need reason",
+      message: "code.window requires a proof-of-need reason",
     });
   }
   const policy = getEffectivePolicy(ledger, repoId);
@@ -408,10 +408,10 @@ function codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRo
   const { source, target, targetPath, symbolId } = resolved;
   if (policy.requireIdentifiers && identifiers.length === 0 && !target) {
     return errorEnvelope({
-      action: "code.needWindow",
+      action: "code.window",
       versionId,
       code: "missing_identifiers",
-      message: "code.needWindow requires identifiersToFind under the active ATLAS policy",
+      message: "code.window requires identifiersToFind under the active ATLAS policy",
     });
   }
   const window = target
@@ -441,9 +441,9 @@ function codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRo
   return mapMaybePromise(redactText(data.content), (content) => {
     data.content = content;
     return annotateCodeLadder(
-      okEnvelope({ action: "code.needWindow", versionId, data }),
+      okEnvelope({ action: "code.window", versionId, data }),
       ladder,
-      { action: "code.needWindow", sessionId, symbolId: resolved.symbolId || null, file: resolved.targetPath },
+      { action: "code.window", sessionId, symbolId: resolved.symbolId || null, file: resolved.targetPath },
     );
   });
 }

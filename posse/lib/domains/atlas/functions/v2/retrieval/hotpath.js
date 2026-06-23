@@ -1,6 +1,6 @@
 // @ts-check
 //
-// AST-backed code.getHotPath matcher. It scopes symbol requests to the target
+// AST-backed code.lens matcher. It scopes symbol requests to the target
 // declaration and ignores comments/strings so lexical noise does not look like
 // executable dependency evidence.
 

@@ -45,6 +45,15 @@ import { ATLAS_EMBEDDINGS_WARM_SLICE_SYMBOLS } from "../../functions/v2/contract
 import { errorForTelemetry, recordEmbeddingForensics } from "../../functions/v2/embeddings/forensics.js";
 import { cleanupStaleEmbeddingDirs, openEmbeddingResources } from "../../functions/v2/embeddings/resources.js";
 import { openViewWithMeta, removeSqliteFile, viewFreshness } from "../../functions/v2/view-health.js";
+import { viewCanServeBranch } from "../../functions/v2/view-can-serve.js";
+import { sourceStatRecord, sourceStatMatches } from "../../functions/v2/source-stats.js";
+import { languageTagForExtension } from "../../functions/v2/language-tag.js";
+import { isMergeAlreadyReflected } from "../../functions/v2/merge-reflection.js";
+import {
+  recordStaleEmbeddingHash,
+  pruneStaleEmbeddingHashes,
+  pruneEmbeddingIndexToCurrentView,
+} from "../../functions/v2/embeddings/stale-tracking.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
 import {
   inspectSampleForMinified,
@@ -60,7 +69,6 @@ import {
   normalizeAtlasScipMode,
   shouldRunScipPhase,
 } from "../../../integrations/functions/atlas-v2-mode.js";
-import { resolveLanguage } from "../../functions/v2/parser/languages/index.js";
 import {
   normalizedScipPath,
   scipEventToProgressText,
@@ -75,20 +83,6 @@ import { MAX_FULL_WARM_PATHS, walkRepoFilesAsync } from "../../functions/v2/warm
 // Re-exported for the warmer test suite, which imports this decision helper
 // from the engine's public surface.
 export { shouldRunMlTreeCompressionReseed };
-
-/**
- * Map a file extension (with leading dot, lowercased) to the source-language
- * tag used by ATLAS progress. These intentionally preserve JS vs TS (`js`
- * vs `ts`) even when a SCIP indexer process covers both.
- *
- * @param {string} ext
- * @returns {string | null}
- */
-function languageTagForExtension(ext) {
-  if (!ext) return null;
-  const descriptor = resolveLanguage(ext);
-  return descriptor?.tag || null;
-}
 
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmJobPayload} AtlasWarmJobPayload */
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmJobResult} AtlasWarmJobResult */
@@ -144,91 +138,6 @@ function shouldMergeTreeSitterRowsForScipBlob({ ledger, contentHash, repoRelPath
     return hasScip && !hasTreeSitter;
   } catch {
     return false;
-  }
-}
-
-/**
- * @param {AtlasWarmJobResult} base
- * @param {unknown} contentHash
- */
-function recordStaleEmbeddingHash(base, contentHash) {
-  const hash = String(contentHash || "").trim();
-  if (!hash) return;
-  const target = /** @type {any} */ (base);
-  if (!Array.isArray(target._staleEmbeddingHashes)) target._staleEmbeddingHashes = [];
-  target._staleEmbeddingHashes.push(hash);
-}
-
-/**
- * @param {AtlasWarmJobResult} base
- * @returns {string[]}
- */
-function staleEmbeddingHashes(base) {
-  const values = /** @type {any} */ (base)._staleEmbeddingHashes;
-  return Array.isArray(values) ? [...new Set(values.map((v) => String(v || "").trim()).filter(Boolean))] : [];
-}
-
-/**
- * @param {fs.Stats | null | undefined} stat
- * @returns {number}
- */
-function mtimeEpochMs(stat) {
-  return Math.max(0, Math.round(Number(stat?.mtimeMs || 0)));
-}
-
-/**
- * @param {{ branch: string, repo_rel_path: string, content_hash: string, stat: fs.Stats | null | undefined }} args
- */
-function sourceStatRecord({ branch, repo_rel_path, content_hash, stat }) {
-  return {
-    branch,
-    repo_rel_path,
-    content_hash,
-    size_bytes: Math.max(0, Number(stat?.size || 0)),
-    mtime_epoch_ms: mtimeEpochMs(stat),
-    indexed_at_epoch_ms: Date.now(),
-  };
-}
-
-/**
- * @param {any} stored
- * @param {fs.Stats} stat
- * @param {string} expectedHash
- * @returns {boolean}
- */
-function sourceStatMatches(stored, stat, expectedHash) {
-  if (!stored || !expectedHash) return false;
-  return String(stored.content_hash || "") === expectedHash
-    && Number(stored.size_bytes) === Number(stat.size)
-    && Number(stored.mtime_epoch_ms) === mtimeEpochMs(stat);
-}
-
-/**
- * @param {{ base: AtlasWarmJobResult, index: any }} args
- * @returns {Promise<void>}
- */
-async function pruneStaleEmbeddingHashes({ base, index }) {
-  const hashes = staleEmbeddingHashes(base);
-  if (hashes.length === 0 || typeof index?.removeByContentHash !== "function") return;
-  const removed = await index.removeByContentHash(hashes);
-  if (Number.isFinite(Number(removed)) && Number(removed) > 0) {
-    /** @type {any} */ (base).embeddings_pruned = Number(removed);
-  }
-}
-
-/**
- * @param {{ base: AtlasWarmJobResult, view: View, index: any }} args
- * @returns {Promise<void>}
- */
-async function pruneEmbeddingIndexToCurrentView({ base, view, index }) {
-  if (!view || typeof index?.pruneToKeys !== "function") return;
-  const symbols = view.query.allSymbols({ limit: 100_000 });
-  const removed = await index.pruneToKeys(symbols.map((symbol) => ({
-    content_hash: symbol.content_hash,
-    local_id: symbol.local_id,
-  })));
-  if (Number.isFinite(Number(removed)) && Number(removed) > 0) {
-    /** @type {any} */ (base).embeddings_orphans_pruned = Number(removed);
   }
 }
 
@@ -316,27 +225,6 @@ function patchViewBranchMeta(viewPath, meta) {
   } finally {
     view.close();
   }
-}
-
-/**
- * @param {{ meta: any, ledger: Ledger, branch: string, allowParentBranchAtSeq?: number | null, parentBranch?: string, layerMerge?: boolean | null }} args
- * @returns {{ ok: boolean, reason?: string }}
- */
-function viewCanServeBranch({ meta, ledger, branch, allowParentBranchAtSeq = null, parentBranch = "main", layerMerge = null }) {
-  const modeFreshness = viewFreshness(meta, null, { layerMerge });
-  if (!modeFreshness.current) {
-    return { ok: false, reason: modeFreshness.reason || "view build mode is stale" };
-  }
-  if (allowParentBranchAtSeq != null && meta?.branch === parentBranch) {
-    return Number(meta.ledger_seq) === allowParentBranchAtSeq
-      ? { ok: true }
-      : { ok: false, reason: `${parentBranch} view seq ${Number(meta.ledger_seq) || 0} does not match fork parent ${allowParentBranchAtSeq}` };
-  }
-  if (!meta || meta.branch !== branch) {
-    return { ok: false, reason: `view branch '${meta?.branch || "unknown"}' does not match '${branch}'` };
-  }
-  const freshness = viewFreshness(meta, ledger, { layerMerge });
-  return freshness.current ? { ok: true } : { ok: false, reason: freshness.reason || "view is stale" };
 }
 
 export class ParseEngine {
@@ -1200,7 +1088,8 @@ export class ParseEngine {
       base.paths_considered = out.entries.length;
       base.paths_indexed = out.entries.length;
     } catch (err) {
-      if (!this.#isMergeAlreadyReflected({
+      if (!isMergeAlreadyReflected({
+        ledger: this.#ledger,
         branch: sourceBranch,
         ontoBranch,
         fromSeq: Number(payload.from_seq || 0),
@@ -1229,26 +1118,6 @@ export class ParseEngine {
       branch: ontoBranch,
       base,
     });
-  }
-
-  /**
-   * @param {{ branch: string, ontoBranch: string, fromSeq: number }} args
-   * @returns {boolean}
-   */
-  #isMergeAlreadyReflected({ branch, ontoBranch, fromSeq }) {
-    const source = this.#ledger.tail(branch, fromSeq);
-    const destHead = this.#ledger.headSeq(ontoBranch);
-    const destPaths = this.#ledger.pathSnapshotAt(ontoBranch, destHead);
-    /** @type {Map<string, string | null>} */
-    const expected = new Map();
-    for (const entry of source) {
-      expected.set(entry.repo_rel_path, entry.after_content_hash ?? null);
-    }
-    for (const [repoRelPath, expectedAfter] of expected.entries()) {
-      const current = destPaths.get(repoRelPath) ?? null;
-      if (current !== expectedAfter) return false;
-    }
-    return source.length > 0;
   }
 
   /**

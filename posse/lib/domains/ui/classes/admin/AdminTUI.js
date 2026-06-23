@@ -18,7 +18,6 @@ import {
   formatProviderSettingValue,
   formatProviderUsageHeader,
   formatProviderUsageWindow,
-  getModelProviderDefaults,
   getPrintableInput,
   getProviderUsageSettingHint,
   isBackspaceKey,
@@ -35,7 +34,6 @@ import {
   parseProviderUsageSettingKey,
   parseReportTimestamp,
   renderUsageBar,
-  runtimeDbLooksBusyOrCorrupt,
   toDisplaySettingEntry,
   visibleLength,
 } from "../../functions/admin/shared-helpers.js";
@@ -47,12 +45,16 @@ import { sanitizeWorkerExecArgv } from "../../../runtime/functions/worker-exec-a
 import { C } from "../../../../shared/format/functions/colors.js";
 import { AdminSettingsController } from "./settings-controller.js";
 import {
-  extractAtlasTokenUsage,
-  foldAtlasRetention,
-  foldAtlasTokenSavings,
-  extractAtlasToolReliability,
-  foldAtlasToolReliability,
-} from "./admin-atlas-rollups.js";
+  normalizeAdminLine,
+  sanitizeAdminStatusText,
+  shortRunStartLabel,
+  providerDashboardLabel,
+  providerCostQualifier,
+  providerDailyBudgetSettingKey,
+  renderUsdUsageBar,
+  safeGetSetting,
+} from "./admin-tui-helpers.js";
+import { buildAtlasReport, queryAtlasReportRows } from "./admin-atlas-report.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import {
   listWorkItems,
@@ -61,9 +63,6 @@ import {
   findWriteLockConflict,
   getAgentCallStats,
   getScopeContextHealthMetrics,
-  listSettings,
-  getSetting,
-  setSetting,
   listActiveFileLocks,
   listWorkItemsWithCallRollups,
   getAgentCallsWithToolCountsByWorkItem,
@@ -78,11 +77,11 @@ import {
   getConfiguredImageProviders,
   getResolvedImageProtocol,
 } from "../../../artifacts/functions/index.js";
-import { getConfiguredProviderUsage, inferProviderWindowLimit, isProviderSelectable } from "../../../providers/functions/provider.js";
+import { getConfiguredProviderUsage, inferProviderWindowLimit } from "../../../providers/functions/provider.js";
 import { getRuntimeDbPath, getRuntimeLogDir, getRuntimeReportsDir } from "../../../runtime/functions/paths.js";
 import { jobReportStatus, workItemDisplayStatus } from "../display/Display.js";
 import { FAILED_JOB_STATUSES } from "../../../../catalog/job.js";
-import { getAccountSetting, getAccountSettingsPathForDisplay } from "../../../settings/functions/account-settings.js";
+import { getAccountSettingsPathForDisplay } from "../../../settings/functions/account-settings.js";
 import { closePromptLog, promptPreviewText, readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
 import { closeOutputLog, readRecentOutputs } from "../../../../shared/telemetry/functions/logging/output-log.js";
 import { closeLog } from "../../../../shared/telemetry/functions/logging/logger.js";
@@ -94,15 +93,6 @@ import {
   setSkillEnabled,
 } from "../../../../shared/skills/functions/registry.js";
 import {
-  IMAGE_PROVIDER_OPTIONS,
-  MODEL_SETTING_DEFS,
-  PROVIDER_OPTIONS,
-  getDefaultTierModel,
-  getImageModelOptions,
-  getProviderTierDefaults,
-  getTextModelOptions,
-} from "../../../providers/functions/model-catalog.js";
-import {
   getCurrentRunProviderUsage,
   getLatestRunStartedAtIso,
   getTodayProviderUsage,
@@ -110,7 +100,7 @@ import {
 import { roleBrandColor } from "../../functions/display/helpers/brand.js";
 import { statusColor as paletteStatusColor } from "../../functions/display/status-palette.js";
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
-import { _sanitizeDisplayLine, formatConsoleArg } from "../../functions/display/helpers/formatters.js";
+import { formatConsoleArg } from "../../functions/display/helpers/formatters.js";
 import {
   formatDuration as fmtDuration,
   formatRelativeTime as fmtRelativeTime,
@@ -139,12 +129,6 @@ import {
   toDisplaySettingKey,
   toStorageSettingKey,
 } from "../../../settings/functions/admin-catalog.js";
-const PROVIDER_USAGE_SETTING_DEFS = [
-  { provider: "claude", key: "claude_limit_tokens_session", label: "Claude session token limit", description: "Token cap for Claude's 5-hour rolling session window." },
-  { provider: "claude", key: "claude_limit_tokens_week", label: "Claude weekly token limit", description: "Token cap for Claude's 7-day rolling weekly window." },
-  { provider: "claude", key: "claude_observed_pct_session", label: "Claude session observed %", description: "Observed Claude session usage percent; saving this calibrates the 5-hour token cap." },
-  { provider: "claude", key: "claude_observed_pct_week", label: "Claude weekly observed %", description: "Observed Claude weekly usage percent; saving this calibrates the 7-day token cap." },
-];
 
 // Settings leads — it's the page admins reach for most often.
 const ADMIN_TABS = Object.freeze([
@@ -164,75 +148,6 @@ const ADMIN_LOG_SOURCES = Object.freeze([
 const SCIP_DEPENDENCY_SPINNER_FRAMES = ["|", "/", "-", "\\"];
 const SCIP_DEPENDENCY_ALERT_DISMISS_MS = 12_000;
 
-const MODEL_SETTING_KEYS = new Set(MODEL_SETTING_DEFS.map((def) => def.key));
-const PROVIDER_USAGE_SETTING_KEYS = new Set(PROVIDER_USAGE_SETTING_DEFS.map((def) => def.key));
-
-function setSettingWithRuntimeSync(settingKey, value) {
-  setSetting(settingKey, value);
-}
-
-function getHistoryJobPresentation(job, jobs = []) {
-  const rawStatus = job?.status || "unknown";
-  const attemptCount = Number(job?.attempts || job?.attempt_count || 0) || 0;
-  const displayStatus = jobReportStatus(job, jobs);
-
-  if ((rawStatus === "queued" || rawStatus === "leased" || rawStatus === "running") && attemptCount > 1) {
-    return {
-      displayStatus: "retrying",
-      icon: `${C.yellow}\u21bb`,
-      label: `retrying after ${attemptCount - 1} failed attempt${attemptCount - 1 === 1 ? "" : "s"}`,
-      attemptTag: `${attemptCount} attempts so far`,
-    };
-  }
-
-  if (rawStatus === "succeeded" && attemptCount > 1) {
-    return {
-      displayStatus: "recovered",
-      icon: `${C.yellow}\u21bb`,
-      label: `recovered after retry`,
-      attemptTag: `${attemptCount} attempts`,
-    };
-  }
-
-  if (displayStatus === "recovered") {
-    return {
-      displayStatus,
-      icon: `${C.yellow}\u21bb`,
-      label: "recovered",
-      attemptTag: attemptCount > 0 ? `${attemptCount} attempts` : null,
-    };
-  }
-
-  if (displayStatus === "succeeded") {
-    return {
-      displayStatus,
-      icon: `${C.green}\u2713`,
-      label: "succeeded",
-      attemptTag: attemptCount > 0 ? `${attemptCount} attempt${attemptCount === 1 ? "" : "s"}` : null,
-    };
-  }
-
-  if (FAILED_JOB_STATUSES.includes(displayStatus)) {
-    return {
-      displayStatus,
-      icon: `${C.red}\u2717`,
-      label: displayStatus,
-      attemptTag: attemptCount > 0 ? `${attemptCount} attempt${attemptCount === 1 ? "" : "s"}` : null,
-    };
-  }
-
-  if (rawStatus === "running") {
-    return { displayStatus: rawStatus, icon: `${C.yellow}\u25b6`, label: "running", attemptTag: attemptCount > 0 ? `${attemptCount} attempt${attemptCount === 1 ? "" : "s"}` : null };
-  }
-
-  return {
-    displayStatus: rawStatus,
-    icon: `${C.dim}\u00b7`,
-    label: rawStatus,
-    attemptTag: attemptCount > 0 ? `${attemptCount} attempt${attemptCount === 1 ? "" : "s"}` : null,
-  };
-}
-
 export function canUseAdminTui({ stdin = process.stdin, stdout = process.stdout } = {}) {
   return !!(
     stdin?.isTTY &&
@@ -246,159 +161,8 @@ export function canUseAdminTui({ stdin = process.stdin, stdout = process.stdout 
 
 export { purgeRuntimeLogs };
 
-function normalizeAdminLine(str) {
-  // Every tab line passes through here before rendering, so this is the choke
-  // point that keeps untrusted bodies (prompt/output logs, tool summaries,
-  // repo file contents) from injecting non-SGR terminal escapes.
-  return _sanitizeDisplayLine(String(str ?? "")
-    .replace(/\u00c3\u00a2\u201d\u20ac/g, "\u2500")
-    .replace(/\u00e2\u201d\u20ac/g, "\u2500")
-    .replace(/\u00e2\u20ac\u201d/g, "\u2014"));
-}
-
 // (Settings column-width helpers live in settings-controller.js, where the
 // only consumer — _buildSettings — also lives.)
-
-function sanitizeAdminStatusText(value) {
-  return stripAnsi(_sanitizeDisplayLine(value)).trim();
-}
-
-function getEffectiveModelSetting(def) {
-  const stored = safeGetSetting(def.key);
-  const providerDefaults = getModelProviderDefaults(def.provider);
-  const baseModel = def.tier ? providerDefaults?.[def.tier]?.model : null;
-
-  let effectiveModel = "";
-  let source = "default";
-  if (!def.tier && stored && String(stored).trim()) {
-    effectiveModel = String(stored).trim();
-    source = "global";
-  } else if (def.tier && stored && String(stored).trim()) {
-    effectiveModel = String(stored).trim();
-    source = "global";
-  } else if (!def.tier && def.provider === "claude") {
-    effectiveModel = stored || `${C.dim}tier-driven${C.reset}`;
-    source = stored ? "global" : "default";
-  } else if (baseModel != null) {
-    effectiveModel = baseModel || getDefaultTierModel(def.provider, def.tier) || "";
-    source = "default";
-  } else if (def.provider === "claude" && def.tier === "standard") {
-    effectiveModel = getDefaultTierModel("claude", "standard") || "sonnet";
-    source = "default";
-  }
-
-  return {
-    storedValue: stored || "",
-    effectiveModel: String(effectiveModel || "").trim() || (def.provider === "claude" && def.tier === "standard" ? (getDefaultTierModel("claude", "standard") || "sonnet") : ""),
-    source,
-  };
-}
-
-function getEffectiveImageModelSetting(def) {
-  const stored = safeGetSetting(def.key);
-  const choices = getImageModelOptions(def.provider, { currentValue: stored });
-  const effectiveModel = choices.some((choice) => choice.value === stored)
-    ? stored
-    : (choices[0]?.value || "");
-  return {
-    storedValue: stored || "",
-    effectiveModel,
-    source: stored ? "global" : "default",
-  };
-}
-
-function getModelChoicesForEntry(entry) {
-  if (!entry) return [{ value: "", label: "(default: tier model)" }];
-  const currentValue = safeGetSetting(entry.key);
-  if (entry.kind === "image") {
-    return getImageModelOptions(entry.provider, { currentValue }).slice();
-  }
-  const baseChoices = getTextModelOptions(entry.provider, { includeDefault: true, currentValue });
-  if (baseChoices.length === 0) return [{ value: "", label: "(default: tier model)" }];
-  if (entry.provider === "claude" && entry.tier === "standard") {
-    const defaultModel = getDefaultTierModel("claude", "standard") || "sonnet";
-    return [{ value: "", label: `(default: ${defaultModel})` }, ...baseChoices.slice(1)];
-  }
-  return baseChoices.slice();
-}
-
-function getSelectableImageProviders() {
-  return IMAGE_PROVIDER_OPTIONS.filter((option) => isProviderSelectable(option.value));
-}
-
-function providerDashboardLabel(provider) {
-  const value = String(provider || "").trim().toLowerCase();
-  if (value === "claude") return "Claude Agent";
-  if (value === "openai") return "OpenAI";
-  if (value === "codex") return "Codex";
-  if (value === "grok") return "Grok";
-  return value ? value.charAt(0).toUpperCase() + value.slice(1) : "Provider";
-}
-
-function providerCostQualifier(provider) {
-  const value = String(provider || "").trim().toLowerCase();
-  if (value === "claude") return "API-equivalent";
-  if (value === "codex") return "CLI estimate";
-  return "billed estimate";
-}
-
-function providerDailyBudgetSettingKey(provider) {
-  const value = String(provider || "").trim().toLowerCase();
-  if (value === "openai") return "openai_daily_budget_usd";
-  if (value === "grok") return "grok_daily_budget_usd";
-  return null;
-}
-
-function renderUsdUsageBar(usedUsd, budgetUsd, width = 18) {
-  const safeWidth = Math.max(8, width | 0);
-  if (!(budgetUsd > 0)) return `${C.dim}[${"?".repeat(safeWidth)}]${C.reset}`;
-  const ratio = Math.max(0, Math.min(1, usedUsd / budgetUsd));
-  const filled = Math.max(0, Math.min(safeWidth, Math.round(ratio * safeWidth)));
-  const empty = Math.max(0, safeWidth - filled);
-  const barColor = ratio >= 0.9 ? C.red : ratio >= 0.75 ? C.yellow : C.green;
-  return `${C.dim}[${C.reset}${barColor}${"#".repeat(filled)}${C.dim}${".".repeat(empty)}${C.reset}${C.dim}]${C.reset}`;
-}
-
-function shortRunStartLabel(iso) {
-  if (!iso) return "current scheduler";
-  const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) return iso;
-  const d = new Date(ms);
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function getProviderUsageStoredValue(settingKey) {
-  const globalValue = getAccountSetting(settingKey);
-  if (globalValue != null && String(globalValue).trim() !== "") return String(globalValue);
-  return safeGetSetting(settingKey);
-}
-
-function setProviderUsageStoredValue(settingKey, value) {
-  setSettingWithRuntimeSync(settingKey, value);
-}
-
-function safeGetSetting(key) {
-  if (runtimeDbLooksBusyOrCorrupt()) return null;
-  try {
-    return getSetting(key);
-  } catch {
-    return null;
-  }
-}
-
-function safeListSettings() {
-  if (runtimeDbLooksBusyOrCorrupt()) return [];
-  try {
-    return listSettings();
-  } catch {
-    return [];
-  }
-}
 
 // ─── Report File Reader ─────────────────────────────────────────────────────
 
@@ -2167,455 +1931,11 @@ export class AdminTUI {
   // ── Tab 3: Settings ───────────────────────────────────────────────────
 
   _queryAtlasReportRows() {
-    const db = getDb();
-    const byMethod = db.prepare(`
-      SELECT
-        COALESCE(ac.atlas_method, 'baseline') as atlas_method,
-        COUNT(*) as call_count,
-        SUM(CASE WHEN ac.status = 'succeeded' THEN 1 ELSE 0 END) as succeeded,
-        SUM(CASE WHEN ac.status = 'failed' THEN 1 ELSE 0 END) as failed,
-        SUM(CASE WHEN ac.status = 'timeout' THEN 1 ELSE 0 END) as timed_out,
-        SUM(COALESCE(ac.input_tokens, 0)) as input_tokens,
-        SUM(COALESCE(ac.output_tokens, 0)) as output_tokens,
-        SUM(COALESCE(ac.cost_estimate_usd, 0)) as total_cost_usd,
-        SUM(COALESCE(ac.duration_ms, 0)) as total_duration_ms,
-        CAST(AVG(COALESCE(ac.duration_ms, 0)) AS INTEGER) as avg_duration_ms,
-        SUM(CASE WHEN COALESCE(ja.attempt_number, 1) > 1 THEN 1 ELSE 0 END) as retry_calls,
-        COUNT(DISTINCT ac.work_item_id) as work_items,
-        COUNT(DISTINCT ac.job_id) as jobs,
-        COUNT(DISTINCT CASE WHEN j.assessor_verdict IS NOT NULL AND j.assessor_verdict != 'not_assessed' THEN ac.job_id END) as assessed_jobs,
-        COUNT(DISTINCT CASE WHEN j.assessor_verdict = 'pass' THEN ac.job_id END) as passed_jobs,
-        COUNT(DISTINCT CASE WHEN j.assessor_verdict = 'fail' THEN ac.job_id END) as failed_jobs,
-        COUNT(DISTINCT CASE WHEN j.assessor_verdict = 'needs_replan' THEN ac.job_id END) as replan_jobs,
-        COUNT(DISTINCT CASE WHEN j.assessor_verdict = 'blocked' THEN ac.job_id END) as blocked_jobs
-      FROM agent_calls ac
-      LEFT JOIN job_attempts ja ON ja.id = ac.attempt_id
-      LEFT JOIN jobs j ON j.id = ac.job_id
-      WHERE ac.atlas_method IS NOT NULL
-         OR ac.atlas_prefetch_status IS NOT NULL
-      GROUP BY COALESCE(ac.atlas_method, 'baseline')
-      ORDER BY call_count DESC, atlas_method ASC
-    `).all();
-
-    const byProviderMethod = db.prepare(`
-      SELECT
-        COALESCE(ac.provider, 'unknown') as provider,
-        COALESCE(ac.atlas_method, 'baseline') as atlas_method,
-        COUNT(*) as call_count,
-        SUM(CASE WHEN ac.status = 'succeeded' THEN 1 ELSE 0 END) as succeeded,
-        SUM(COALESCE(ac.input_tokens, 0) + COALESCE(ac.output_tokens, 0)) as total_tokens,
-        SUM(COALESCE(ac.cost_estimate_usd, 0)) as total_cost_usd,
-        CAST(AVG(COALESCE(ac.duration_ms, 0)) AS INTEGER) as avg_duration_ms,
-        SUM(CASE WHEN COALESCE(ja.attempt_number, 1) > 1 THEN 1 ELSE 0 END) as retry_calls
-      FROM agent_calls ac
-      LEFT JOIN job_attempts ja ON ja.id = ac.attempt_id
-      WHERE ac.atlas_method IS NOT NULL
-         OR ac.atlas_prefetch_status IS NOT NULL
-      GROUP BY COALESCE(ac.provider, 'unknown'), COALESCE(ac.atlas_method, 'baseline')
-      ORDER BY provider ASC, call_count DESC, atlas_method ASC
-    `).all();
-
-    const byWorkItemMethod = db.prepare(`
-      SELECT
-        ac.work_item_id as work_item_id,
-        COALESCE(wi.title, '(untitled)') as work_item_title,
-        COALESCE(ac.atlas_method, 'baseline') as atlas_method,
-        COUNT(*) as call_count,
-        SUM(CASE WHEN ac.status = 'succeeded' THEN 1 ELSE 0 END) as succeeded,
-        SUM(COALESCE(ac.input_tokens, 0) + COALESCE(ac.output_tokens, 0)) as total_tokens,
-        SUM(COALESCE(ac.cost_estimate_usd, 0)) as total_cost_usd,
-        CAST(AVG(COALESCE(ac.duration_ms, 0)) AS INTEGER) as avg_duration_ms,
-        SUM(CASE WHEN COALESCE(ja.attempt_number, 1) > 1 THEN 1 ELSE 0 END) as retry_calls
-      FROM agent_calls ac
-      LEFT JOIN job_attempts ja ON ja.id = ac.attempt_id
-      LEFT JOIN work_items wi ON wi.id = ac.work_item_id
-      WHERE ac.atlas_method IS NOT NULL
-         OR ac.atlas_prefetch_status IS NOT NULL
-      GROUP BY ac.work_item_id, COALESCE(wi.title, '(untitled)'), COALESCE(ac.atlas_method, 'baseline')
-      ORDER BY ac.work_item_id DESC, call_count DESC, atlas_method ASC
-      LIMIT 60
-    `).all();
-
-    const savingsRows = db.prepare(`
-      SELECT
-        o.observation_type,
-        o.detail_json,
-        COALESCE((
-          SELECT ac.atlas_method
-          FROM agent_calls ac
-          WHERE ac.job_id = o.job_id
-            AND o.attempt_id IS NOT NULL
-            AND ac.attempt_id = o.attempt_id
-          ORDER BY ac.id DESC
-          LIMIT 1
-        ), (
-          SELECT ac.atlas_method
-          FROM agent_calls ac
-          WHERE ac.job_id = o.job_id
-            AND o.created_at >= ac.started_at
-            AND (ac.finished_at IS NULL OR o.created_at <= ac.finished_at)
-          ORDER BY ac.id DESC
-          LIMIT 1
-        ), CASE WHEN o.observation_type = 'tool.atlas.prefetch' THEN 'prefetch' ELSE '' END) as atlas_method
-      FROM job_observations o
-      WHERE o.observation_type IN ('tool.atlas', 'tool.atlas.prefetch')
-        AND (o.detail_json LIKE '%token_usage%' OR o.detail_json LIKE '%tokenUsage%')
-      ORDER BY o.id DESC
-    `).all();
-
-    const reliabilityRows = db.prepare(`
-      SELECT
-        o.observation_type,
-        o.summary,
-        o.detail_json
-      FROM job_observations o
-      WHERE o.observation_type IN ('tool.atlas', 'tool.atlas.prefetch')
-        AND o.detail_json IS NOT NULL
-      ORDER BY o.id DESC
-    `).all();
-
-    const retentionRows = db.prepare(`
-      SELECT
-        o.id,
-        o.work_item_id,
-        o.job_id,
-        o.attempt_id,
-        o.observation_type,
-        o.detail_json
-      FROM job_observations o
-      WHERE o.observation_type IN ('tool.atlas.prefetch', 'tool.atlas', 'tool.search', 'tool.read', 'tool.list', 'tool.chain_read', 'tool.inspect', 'tool.git_history', 'tool.bash')
-        AND o.job_id IS NOT NULL
-      ORDER BY o.id ASC
-    `).all();
-
-    return {
-      byMethod,
-      byProviderMethod,
-      byWorkItemMethod,
-      tokenSavings: foldAtlasTokenSavings(savingsRows),
-      toolReliability: foldAtlasToolReliability(reliabilityRows),
-      atlasRetention: foldAtlasRetention(retentionRows),
-    };
+    return queryAtlasReportRows();
   }
 
   _buildAtlasReport(width) {
-    const lines = [];
-    const inner = width - 2;
-    lines.push("");
-    lines.push(` ${C.bold}${C.cyan}\u2550\u2550\u2550 ATLAS A/B REPORT \u2550\u2550\u2550${C.reset}`);
-    lines.push(` ${C.dim}Project:${C.reset} ${this.projectDir}`);
-    lines.push("");
-
-    try {
-      const indicators = loadAtlasV2ProcessIndicators({ projectDir: this.projectDir, limit: 6 });
-      lines.push(...renderAtlasV2ProcessIndicators(indicators, { colors: C, width: Math.max(60, inner), compact: false }));
-      lines.push("");
-    } catch (err) {
-      lines.push(` ${C.yellow}ATLAS v2 process indicators unavailable:${C.reset} ${err?.message || err}`);
-      lines.push("");
-    }
-
-    let report;
-    try {
-      report = this._queryAtlasReportRows();
-    } catch (err) {
-      lines.push(` ${C.red}Failed to query ATLAS report:${C.reset} ${err?.message || err}`);
-      lines.push("");
-      return lines;
-    }
-
-    const rows = report.byMethod || [];
-    if (rows.length === 0) {
-      lines.push(` ${C.dim}No ATLAS telemetry has been recorded yet. Run ATLAS-enabled work items, then reopen this tab.${C.reset}`);
-      lines.push("");
-      return lines;
-    }
-
-    const totalCalls = rows.reduce((sum, row) => sum + (row.call_count || 0), 0);
-    const totalTokens = rows.reduce((sum, row) => sum + (row.input_tokens || 0) + (row.output_tokens || 0), 0);
-    const totalRetries = rows.reduce((sum, row) => sum + (row.retry_calls || 0), 0);
-    const totalDuration = rows.reduce((sum, row) => sum + (row.total_duration_ms || 0), 0);
-    const totalCostUsd = rows.reduce((sum, row) => sum + (Number(row.total_cost_usd) || 0), 0);
-
-    lines.push(` ${C.bold}Method Summary${C.reset}`);
-    lines.push(` ${C.dim}${"─".repeat(Math.min(inner, 90))}${C.reset}`);
-    const hdr = `  ${"Method".padEnd(12)} ${"Calls".padStart(7)} ${"Share".padStart(7)} ${"Success".padStart(8)} ${"Retries".padStart(8)} ${"Avg Time".padStart(9)} ${"Avg Tok".padStart(9)} ${"Total Tok".padStart(10)} ${"Avg $".padStart(8)} ${"Total $".padStart(9)}`;
-    lines.push(` ${C.dim}${hdr}${C.reset}`);
-    lines.push(` ${C.dim}${"─".repeat(Math.min(inner, hdr.length + 2))}${C.reset}`);
-
-    for (const row of rows) {
-      const calls = row.call_count || 0;
-      const succeeded = row.succeeded || 0;
-      const successPct = calls > 0 ? `${Math.round((100 * succeeded) / calls)}%` : "—";
-      const sharePct = totalCalls > 0 ? `${Math.round((100 * calls) / totalCalls)}%` : "—";
-      const retries = row.retry_calls || 0;
-      const totalTok = (row.input_tokens || 0) + (row.output_tokens || 0);
-      const avgTok = calls > 0 ? Math.round(totalTok / calls) : 0;
-      const avgDur = row.avg_duration_ms || 0;
-      const totalCost = Number(row.total_cost_usd) || 0;
-      const avgCost = calls > 0 ? (totalCost / calls) : 0;
-      const method = String(row.atlas_method || "baseline");
-      const methodColor = method.includes("atlas") ? C.cyan : C.dim;
-      const successColor = succeeded === calls ? C.green : (successPct === "0%" ? C.red : C.yellow);
-      lines.push(
-        `  ${methodColor}${method.padEnd(12)}${C.reset} ` +
-        `${String(calls).padStart(7)} ` +
-        `${sharePct.padStart(7)} ` +
-        `${successColor}${successPct.padStart(8)}${C.reset} ` +
-        `${String(retries).padStart(8)} ` +
-        `${fmtDuration(avgDur).padStart(9)} ` +
-        `${fmtTokens(avgTok).padStart(9)} ` +
-        `${fmtTokens(totalTok).padStart(10)} ` +
-        `${fmtUsd(avgCost).padStart(8)} ` +
-        `${fmtUsd(totalCost).padStart(9)}`
-      );
-    }
-    lines.push(` ${C.dim}${"─".repeat(Math.min(inner, hdr.length + 2))}${C.reset}`);
-    lines.push(
-      `  ${C.bold}${"Total".padEnd(12)}${C.reset} ` +
-      `${String(totalCalls).padStart(7)} ` +
-      `${"100%".padStart(7)} ` +
-      `${"".padStart(8)} ` +
-      `${String(totalRetries).padStart(8)} ` +
-      `${fmtDuration(totalCalls > 0 ? Math.round(totalDuration / totalCalls) : 0).padStart(9)} ` +
-      `${fmtTokens(totalCalls > 0 ? Math.round(totalTokens / totalCalls) : 0).padStart(9)} ` +
-      `${fmtTokens(totalTokens).padStart(10)} ` +
-      `${fmtUsd(totalCalls > 0 ? totalCostUsd / totalCalls : 0).padStart(8)} ` +
-      `${fmtUsd(totalCostUsd).padStart(9)}`
-    );
-    lines.push("");
-
-    const savingsRows = report.tokenSavings || [];
-    if (savingsRows.length > 0) {
-      const savingsTotals = savingsRows.reduce((acc, row) => {
-        acc.measured_calls += row.measured_calls || 0;
-        acc.raw_equivalent += row.raw_equivalent || 0;
-        acc.atlas_tokens += row.atlas_tokens || 0;
-        acc.saved_tokens += row.saved_tokens || 0;
-        acc.negative_calls += row.negative_calls || 0;
-        return acc;
-      }, { measured_calls: 0, raw_equivalent: 0, atlas_tokens: 0, saved_tokens: 0, negative_calls: 0 });
-      lines.push(` ${C.bold}Tool Token Savings${C.reset}  ${C.dim}(from ATLAS token_usage observations)${C.reset}`);
-      lines.push(` ${C.dim}${"\u2500".repeat(Math.min(inner, 86))}${C.reset}`);
-      const sHdr = `  ${"Method".padEnd(12)} ${"Measured".padStart(8)} ${"Raw Eq".padStart(10)} ${"ATLAS Tok".padStart(10)} ${"Saved".padStart(10)} ${"Savings".padStart(8)} ${"Neg".padStart(5)}`;
-      lines.push(` ${C.dim}${sHdr}${C.reset}`);
-      lines.push(` ${C.dim}${"\u2500".repeat(Math.min(inner, sHdr.length + 2))}${C.reset}`);
-      for (const row of savingsRows) {
-        const rawEquivalent = Number(row.raw_equivalent || 0);
-        const savedTokens = Number(row.saved_tokens || 0);
-        const savingsPct = rawEquivalent > 0 ? `${Math.round((100 * savedTokens) / rawEquivalent)}%` : "\u2014";
-        const method = String(row.atlas_method || "unknown");
-        const methodColor = method.includes("atlas") || method === "prefetch" ? C.cyan : C.dim;
-        const savedColor = savedTokens < 0 ? C.red : C.green;
-        lines.push(
-          `  ${methodColor}${method.padEnd(12)}${C.reset} ` +
-          `${String(row.measured_calls || 0).padStart(8)} ` +
-          `${fmtTokens(Math.round(rawEquivalent)).padStart(10)} ` +
-          `${fmtTokens(Math.round(row.atlas_tokens || 0)).padStart(10)} ` +
-          `${savedColor}${fmtSignedTokens(savedTokens).padStart(10)}${C.reset} ` +
-          `${savingsPct.padStart(8)} ` +
-          `${String(row.negative_calls || 0).padStart(5)}`
-        );
-      }
-      const totalPct = savingsTotals.raw_equivalent > 0
-        ? `${Math.round((100 * savingsTotals.saved_tokens) / savingsTotals.raw_equivalent)}%`
-        : "\u2014";
-      const totalSavedColor = savingsTotals.saved_tokens < 0 ? C.red : C.green;
-      lines.push(` ${C.dim}${"\u2500".repeat(Math.min(inner, sHdr.length + 2))}${C.reset}`);
-      lines.push(
-        `  ${C.bold}${"Total".padEnd(12)}${C.reset} ` +
-        `${String(savingsTotals.measured_calls).padStart(8)} ` +
-        `${fmtTokens(Math.round(savingsTotals.raw_equivalent)).padStart(10)} ` +
-        `${fmtTokens(Math.round(savingsTotals.atlas_tokens)).padStart(10)} ` +
-        `${totalSavedColor}${fmtSignedTokens(savingsTotals.saved_tokens).padStart(10)}${C.reset} ` +
-        `${totalPct.padStart(8)} ` +
-        `${String(savingsTotals.negative_calls).padStart(5)}`
-      );
-      lines.push("");
-    }
-
-    const reliabilityRows = report.toolReliability || [];
-    if (reliabilityRows.length > 0) {
-      const reliabilityTotals = reliabilityRows.reduce((acc, row) => {
-        acc.calls += row.calls || 0;
-        acc.ok_calls += row.ok_calls || 0;
-        acc.failed_calls += row.failed_calls || 0;
-        acc.cancelled_calls += row.cancelled_calls || 0;
-        acc.empty_calls += row.empty_calls || 0;
-        acc.fallback_calls += row.fallback_calls || 0;
-        acc.duration_calls += row.duration_calls || 0;
-        acc.total_duration_ms += row.total_duration_ms || 0;
-        return acc;
-      }, { calls: 0, ok_calls: 0, failed_calls: 0, cancelled_calls: 0, empty_calls: 0, fallback_calls: 0, duration_calls: 0, total_duration_ms: 0 });
-
-      lines.push(` ${C.bold}ATLAS Tool Reliability${C.reset}  ${C.dim}(from tool.atlas observations)${C.reset}`);
-      lines.push(` ${C.dim}${"-".repeat(Math.min(inner, 102))}${C.reset}`);
-      const rHdr = `  ${"Action".padEnd(18)} ${"Origin".padEnd(9)} ${"Calls".padStart(7)} ${"OK".padStart(7)} ${"Fail".padStart(7)} ${"Cancel".padStart(7)} ${"Empty".padStart(7)} ${"Fallback".padStart(8)} ${"Avg Time".padStart(9)} ${"Avg Chars".padStart(9)}`;
-      lines.push(` ${C.dim}${rHdr}${C.reset}`);
-      lines.push(` ${C.dim}${"-".repeat(Math.min(inner, rHdr.length + 2))}${C.reset}`);
-      for (const row of reliabilityRows.slice(0, 16)) {
-        const calls = row.calls || 0;
-        const okPct = calls > 0 ? `${Math.round((100 * (row.ok_calls || 0)) / calls)}%` : "-";
-        const failPct = calls > 0 ? `${Math.round((100 * (row.failed_calls || 0)) / calls)}%` : "-";
-        const failColor = (row.cancelled_calls || 0) > 0 || (row.failed_calls || 0) > 0 ? C.red : C.green;
-        const emptyColor = (row.empty_calls || 0) > 0 ? C.yellow : C.dim;
-        const fallbackColor = (row.fallback_calls || 0) > 0 ? C.yellow : C.dim;
-        const action = String(row.action || "unknown").slice(0, 18);
-        const origin = String(row.origin || "agent").slice(0, 9);
-        const avgChars = row.avg_result_chars == null ? "-" : fmtTokens(row.avg_result_chars);
-        lines.push(
-          `  ${C.cyan}${action.padEnd(18)}${C.reset} ` +
-          `${origin.padEnd(9)} ` +
-          `${String(calls).padStart(7)} ` +
-          `${okPct.padStart(7)} ` +
-          `${failColor}${failPct.padStart(7)}${C.reset} ` +
-          `${failColor}${String(row.cancelled_calls || 0).padStart(7)}${C.reset} ` +
-          `${emptyColor}${String(row.empty_calls || 0).padStart(7)}${C.reset} ` +
-          `${fallbackColor}${String(row.fallback_calls || 0).padStart(8)}${C.reset} ` +
-          `${fmtDuration(row.avg_duration_ms || 0).padStart(9)} ` +
-          `${avgChars.padStart(9)}`
-        );
-      }
-      if (reliabilityRows.length > 16) {
-        lines.push(`  ${C.dim}... (${reliabilityRows.length - 16} more ATLAS action rows)${C.reset}`);
-      }
-      lines.push(` ${C.dim}${"-".repeat(Math.min(inner, rHdr.length + 2))}${C.reset}`);
-      lines.push(
-        `  ${C.bold}${"Total".padEnd(18)}${C.reset} ` +
-        `${"all".padEnd(9)} ` +
-        `${String(reliabilityTotals.calls).padStart(7)} ` +
-        `${(reliabilityTotals.calls > 0 ? `${Math.round((100 * reliabilityTotals.ok_calls) / reliabilityTotals.calls)}%` : "-").padStart(7)} ` +
-        `${(reliabilityTotals.calls > 0 ? `${Math.round((100 * reliabilityTotals.failed_calls) / reliabilityTotals.calls)}%` : "-").padStart(7)} ` +
-        `${String(reliabilityTotals.cancelled_calls).padStart(7)} ` +
-        `${String(reliabilityTotals.empty_calls).padStart(7)} ` +
-        `${String(reliabilityTotals.fallback_calls).padStart(8)} ` +
-        `${fmtDuration(reliabilityTotals.duration_calls > 0 ? Math.round(reliabilityTotals.total_duration_ms / reliabilityTotals.duration_calls) : 0).padStart(9)} ` +
-        `${"-".padStart(9)}`
-      );
-      lines.push("");
-    }
-
-    const retention = report.atlasRetention || null;
-    if (retention?.total?.measured_calls > 0) {
-      const total = retention.total;
-      lines.push(` ${C.bold}ATLAS Retention After Prefetch${C.reset}  ${C.dim}(agent ATLAS calls vs native discovery after prefetch)${C.reset}`);
-      lines.push(` ${C.dim}${"-".repeat(Math.min(inner, 82))}${C.reset}`);
-      const tHdr = `  ${"Scopes".padStart(7)} ${"ATLAS".padStart(7)} ${"Native".padStart(7)} ${"Measured".padStart(8)} ${"Retention".padStart(9)}`;
-      lines.push(` ${C.dim}${tHdr}${C.reset}`);
-      lines.push(
-        `  ${String(total.scopes || 0).padStart(7)} ` +
-        `${String(total.atlas_calls_after_prefetch || 0).padStart(7)} ` +
-        `${String(total.native_discovery_after_prefetch || 0).padStart(7)} ` +
-        `${String(total.measured_calls || 0).padStart(8)} ` +
-        `${String(total.retention_pct == null ? "-" : `${total.retention_pct}%`).padStart(9)}`
-      );
-      const examples = Array.isArray(retention.scopes) ? retention.scopes.slice(0, 6) : [];
-      for (const row of examples) {
-        const label = row.work_item_id ? `WI#${row.work_item_id}` : `job ${row.job_id || "?"}`;
-        const pct = row.retention_pct == null ? "-" : `${row.retention_pct}%`;
-        lines.push(
-          `  ${C.dim}${label.padEnd(12)}${C.reset} ` +
-          `${String(row.atlas_calls_after_prefetch || 0).padStart(5)} atlas  ` +
-          `${String(row.native_discovery_after_prefetch || 0).padStart(5)} native  ` +
-          `${pct.padStart(6)}`
-        );
-      }
-      if ((retention.scopes || []).length > examples.length) {
-        lines.push(`  ${C.dim}... (${retention.scopes.length - examples.length} more prefetched scopes)${C.reset}`);
-      }
-      lines.push("");
-    }
-
-    const outcomeRows = rows.filter((row) => (
-      row.assessed_jobs || row.passed_jobs || row.failed_jobs || row.replan_jobs || row.blocked_jobs
-    ));
-    if (outcomeRows.length > 0) {
-      lines.push(` ${C.bold}Assessor Outcome Signals${C.reset}  ${C.dim}(distinct jobs by method)${C.reset}`);
-      lines.push(` ${C.dim}${"\u2500".repeat(Math.min(inner, 78))}${C.reset}`);
-      const oHdr = `  ${"Method".padEnd(12)} ${"Jobs".padStart(6)} ${"Assessed".padStart(8)} ${"Pass".padStart(10)} ${"Fail".padStart(6)} ${"Replan".padStart(8)} ${"Blocked".padStart(8)}`;
-      lines.push(` ${C.dim}${oHdr}${C.reset}`);
-      lines.push(` ${C.dim}${"\u2500".repeat(Math.min(inner, oHdr.length + 2))}${C.reset}`);
-      for (const row of outcomeRows) {
-        const method = String(row.atlas_method || "baseline");
-        const assessed = row.assessed_jobs || 0;
-        const passed = row.passed_jobs || 0;
-        const passPct = assessed > 0 ? `${passed}/${assessed} ${Math.round((100 * passed) / assessed)}%` : "\u2014";
-        const methodColor = method.includes("atlas") ? C.cyan : C.dim;
-        const passColor = assessed > 0 && passed === assessed ? C.green : C.yellow;
-        lines.push(
-          `  ${methodColor}${method.padEnd(12)}${C.reset} ` +
-          `${String(row.jobs || 0).padStart(6)} ` +
-          `${String(assessed).padStart(8)} ` +
-          `${passColor}${passPct.padStart(10)}${C.reset} ` +
-          `${String(row.failed_jobs || 0).padStart(6)} ` +
-          `${String(row.replan_jobs || 0).padStart(8)} ` +
-          `${String(row.blocked_jobs || 0).padStart(8)}`
-        );
-      }
-      lines.push("");
-    }
-
-    const providerRows = report.byProviderMethod || [];
-    if (providerRows.length > 0) {
-      lines.push(` ${C.bold}Provider Breakdown${C.reset}`);
-      lines.push(` ${C.dim}${"─".repeat(Math.min(inner, 90))}${C.reset}`);
-      const pHdr = `  ${"Provider".padEnd(10)} ${"Method".padEnd(12)} ${"Calls".padStart(7)} ${"Success".padStart(8)} ${"Retries".padStart(8)} ${"Avg Time".padStart(9)} ${"Total Tok".padStart(10)} ${"Total $".padStart(9)}`;
-      lines.push(` ${C.dim}${pHdr}${C.reset}`);
-      lines.push(` ${C.dim}${"─".repeat(Math.min(inner, pHdr.length + 2))}${C.reset}`);
-      for (const row of providerRows) {
-        const calls = row.call_count || 0;
-        const successPct = calls > 0 ? `${Math.round((100 * (row.succeeded || 0)) / calls)}%` : "—";
-        const method = String(row.atlas_method || "baseline");
-        const methodColor = method.includes("atlas") ? C.cyan : C.dim;
-        lines.push(
-          `  ${String(row.provider || "unknown").padEnd(10)} ` +
-          `${methodColor}${method.padEnd(12)}${C.reset} ` +
-          `${String(calls).padStart(7)} ` +
-          `${successPct.padStart(8)} ` +
-          `${String(row.retry_calls || 0).padStart(8)} ` +
-          `${fmtDuration(row.avg_duration_ms || 0).padStart(9)} ` +
-          `${fmtTokens(row.total_tokens || 0).padStart(10)} ` +
-          `${fmtUsd(row.total_cost_usd || 0).padStart(9)}`
-        );
-      }
-      lines.push("");
-    }
-
-    const wiRows = report.byWorkItemMethod || [];
-    if (wiRows.length > 0) {
-      lines.push(` ${C.bold}Work Item Breakdown${C.reset}`);
-      lines.push(` ${C.dim}${"─".repeat(Math.min(inner, 90))}${C.reset}`);
-      const wHdr = `  ${"WI".padEnd(7)} ${"Title".padEnd(26)} ${"Method".padEnd(12)} ${"Calls".padStart(7)} ${"Success".padStart(8)} ${"Retries".padStart(8)} ${"Avg Time".padStart(9)} ${"Total Tok".padStart(10)} ${"Total $".padStart(9)}`;
-      lines.push(` ${C.dim}${wHdr}${C.reset}`);
-      lines.push(` ${C.dim}${"─".repeat(Math.min(inner, wHdr.length + 2))}${C.reset}`);
-      for (const row of wiRows) {
-        const calls = row.call_count || 0;
-        const successPct = calls > 0 ? `${Math.round((100 * (row.succeeded || 0)) / calls)}%` : "—";
-        const method = String(row.atlas_method || "baseline");
-        const methodColor = method.includes("atlas") ? C.cyan : C.dim;
-        const wiLabel = row.work_item_id ? `WI#${row.work_item_id}` : "WI#?";
-        const title = String(row.work_item_title || "(untitled)")
-          .replace(/\s+/g, " ")
-          .trim()
-          .slice(0, 26);
-        lines.push(
-          `  ${wiLabel.padEnd(7)} ` +
-          `${title.padEnd(26)} ` +
-          `${methodColor}${method.padEnd(12)}${C.reset} ` +
-          `${String(calls).padStart(7)} ` +
-          `${successPct.padStart(8)} ` +
-          `${String(row.retry_calls || 0).padStart(8)} ` +
-          `${fmtDuration(row.avg_duration_ms || 0).padStart(9)} ` +
-          `${fmtTokens(row.total_tokens || 0).padStart(10)} ` +
-          `${fmtUsd(row.total_cost_usd || 0).padStart(9)}`
-        );
-      }
-      lines.push("");
-    }
-
-    lines.push(` ${C.dim}Notes: retries = calls from attempt #2+; timing/token/cost metrics are from agent_calls; tool savings come from ATLAS token_usage and can be negative; reliability comes from tool.atlas observations.${C.reset}`);
-    lines.push("");
-    return lines;
+    return buildAtlasReport(width, { projectDir: this.projectDir });
   }
 
   _buildLogs(width) {

@@ -145,8 +145,8 @@ export function symbolHit(sym) {
 /**
  * Build the SymbolCard skeleton from either a ViewSymbol or a raw
  * SymbolRow. Used both by `buildSymbolCard` (the View-backed path)
- * and by handlers that only have ledger blob data (delta.get,
- * pr.risk.analyze).
+ * and by handlers that only have ledger blob data (review.delta,
+ * review.analyze).
  *
  * `path` overrides the symbol's own `repo_rel_path`. SymbolRow from
  * the Ledger carries an empty path (the ledger is path-agnostic per
@@ -167,7 +167,7 @@ export function bareSymbolCard({ symbol, detail = "compact", path }) {
   const repoRelPath = path ?? symbol.repo_rel_path;
   // SymbolRow from the Ledger carries `range_start_line` / `range_end_line`
   // when present; legacy rows default to 1. Honor the persisted values so
-  // ledger-driven callers (delta.get, pr.risk.analyze) emit accurate
+  // ledger-driven callers (review.delta, review.analyze) emit accurate
   // line anchors instead of the hard-coded (1, 1) placeholder.
   const persistedStart = Number.isInteger(/** @type {any} */ (symbol).range_start_line)
     && /** @type {any} */ (symbol).range_start_line > 0

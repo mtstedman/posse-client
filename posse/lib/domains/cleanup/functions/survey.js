@@ -210,13 +210,27 @@ function surveyMainTree(projectDir) {
 }
 
 function surveyStashes(projectDir) {
-  const raw = git(["stash", "list"], projectDir);
+  const raw = git(["stash", "list", "--format=%gd%x00%H%x00%gs"], projectDir);
   if (!raw) return [];
   return raw.split("\n").filter(Boolean).map((line, index) => {
-    const m = line.match(/^(stash@\{\d+\}):\s*(.*)$/);
-    const ref = m ? m[1] : `stash@{${index}}`;
-    const label = m ? m[2] : line;
-    return { ref, label, posseLabeled: /^(On\s+\S+:\s*)?posse:/.test(label) || label.includes("posse:") };
+    const parts = line.split("\0");
+    let ref = parts[0] || `stash@{${index}}`;
+    let objectHash = parts[1] || null;
+    let label = parts.slice(2).join("\0") || line;
+    if (parts.length < 3) {
+      const m = line.match(/^(stash@\{\d+\}):\s*(.*)$/);
+      ref = m ? m[1] : `stash@{${index}}`;
+      label = m ? m[2] : line;
+      objectHash = git(["rev-parse", ref], projectDir) || null;
+    }
+    const parsedIndex = Number((ref.match(/\{(\d+)\}/) || [])[1]);
+    return {
+      ref,
+      index: Number.isFinite(parsedIndex) ? parsedIndex : index,
+      objectHash,
+      label,
+      posseLabeled: /^(On\s+\S+:\s*)?posse:/.test(label) || label.includes("posse:"),
+    };
   }).filter((s) => s.posseLabeled);
 }
 

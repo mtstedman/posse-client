@@ -107,10 +107,17 @@ export const HIDDEN_ATLAS_SURFACE_ACTIONS = Object.freeze(new Set([
   "context",
   "info",
   "policy.get",
+  "repo.overview",
   "repo.quality",
   "repo.status",
+  "tree.overview",
+  "tree.scope",
+  "slice.build",
+  "slice.refresh",
+  "slice.spillover.get",
   "memory.surface",
   "runtime.queryOutput",
+  "context.summary",
   "usage.stats",
 ]));
 
@@ -344,26 +351,25 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "buffer.checkpoint": { access: "atlas", summary: "Clear or persist an ATLAS v2 editor buffer overlay." },
   "buffer.status": { access: "atlas", summary: "Inspect active ATLAS v2 editor buffer overlays." },
   "symbol.search": { access: "atlas", summary: "Search indexed symbols through ATLAS for targeted semantic discovery." },
-  "symbol.getCard": { access: "atlas", summary: "Fetch one symbol card (symbolId/symbolRef) or a batch (symbolIds) without loading whole files." },
-  "symbol.getCards": { access: "atlas", summary: "Batch fetch symbol cards through ATLAS with partial-success errors." },
-  "symbol.usages": { access: "atlas", summary: "List compact call/reference sites for a symbol without full caller cards." },
+  "symbol.card": { access: "atlas", summary: "Fetch one symbol card by symbolId or symbolRef without loading whole files." },
+  "symbol.overview": { access: "atlas", summary: "List compact call/reference sites for a symbol without full caller cards." },
   "tree.overview": { access: "atlas", summary: "Top-level code-tree orientation: root containment page plus the compressed-tree labeled area map." },
-  "tree.walk": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels." },
-  "tree.scope": { access: "atlas", summary: "Prefetch-only task scoping; agents use tree.grow for seed expansion instead." },
-  "tree.grow": { access: "atlas", summary: "Grow scope from validated seed files/areas: surrounding branches, siblings, tests, entrypoints, risk metrics." },
+  "tree.branch": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels." },
+  "tree.scope": { access: "atlas", summary: "Prefetch-only task scoping; agents use tree.expand for seed expansion instead." },
+  "tree.expand": { access: "atlas", summary: "Grow scope from validated seed files/areas: surrounding branches, siblings, tests, entrypoints, risk metrics." },
   "slice.build": { access: "atlas", summary: "Build a task-scoped ATLAS slice for bounded dependency context." },
   "slice.refresh": { access: "atlas", summary: "Refresh an ATLAS slice incrementally instead of rebuilding from scratch." },
   "edit.plan": { access: "atlas", summary: "Preview symbol/file-scoped edit candidates with preconditions before using write tools." },
-  "code.getSkeleton": { access: "atlas", summary: "Inspect signatures/control flow skeleton before escalating to raw code." },
-  "code.getHotPath": { access: "atlas", summary: "Inspect identifier-focused code excerpts with tight context windows." },
-  "code.needWindow": { access: "atlas", summary: "Request policy-gated raw code windows only when prior rungs are insufficient." },
+  "code.skeleton": { access: "atlas", summary: "Inspect signatures/control flow skeleton before escalating to raw code." },
+  "code.lens": { access: "atlas", summary: "Inspect identifier-focused code excerpts with tight context windows." },
+  "code.window": { access: "atlas", summary: "Request policy-gated raw code windows only when prior rungs are insufficient." },
   "context": { access: "atlas", summary: "Request generated ATLAS context (taskType + contextMode) for precise/broad retrieval." },
   "context.summary": { access: "atlas", summary: "Request compact ATLAS context with an answer, evidence list, and next action guidance." },
   "agent.feedback": { access: "atlas", summary: "Record useful/missing symbols to improve future ATLAS context quality." },
   "agent.feedback.query": { access: "atlas", summary: "Query useful/missing symbol feedback aggregates for retrieval tuning." },
-  "delta.get": { access: "atlas", summary: "Fetch ATLAS semantic diff and blast-radius context between versions." },
-  "pr.risk.analyze": { access: "atlas", summary: "Run ATLAS PR risk analysis with blast-radius evidence." },
-  "pr.risk": { access: "atlas", summary: "Fetch ATLAS semantic diff and risk analysis in one assessor call." },
+  "review.delta": { access: "atlas", summary: "Fetch ATLAS semantic diff and blast-radius context between versions." },
+  "review.analyze": { access: "atlas", summary: "Run ATLAS PR risk analysis with blast-radius evidence." },
+  "review.risk": { access: "atlas", summary: "Fetch ATLAS semantic diff and risk analysis in one assessor call." },
   "slice.spillover.get": { access: "atlas", summary: "Fetch deferred-edge spillover for an existing slice without rebuilding." },
   "file.read": { access: "atlas", summary: "Bounded file read via ATLAS: offset/limit, search+context, or jsonPath. Honors ETag (ifNoneMatch)." },
   "memory.store": { access: "atlas", summary: "Store or update a native ATLAS v2 development memory linked to symbols/files." },
@@ -423,129 +429,23 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
   atlasRoutes: Object.freeze({
     researcher: Object.freeze({
       phase: "research",
-      tools: Object.freeze([
-        "info",
-        "repo.status",
-        "repo.overview",
-        "tree.overview",
-        "tree.walk",
-        "tree.scope",
-        "tree.grow",
-        "repo.quality",
-        "buffer.status",
-        "symbol.search",
-        "symbol.getCard",
-        "symbol.usages",
-        "slice.build",
-        "slice.refresh",
-        "slice.spillover.get",
-        "code.getSkeleton",
-        "code.getHotPath",
-        "code.needWindow",
-        "context",
-        "context.summary",
-        "agent.feedback",
-        "agent.feedback.query",
-        "memory.query",
-        "policy.get",
-        "usage.stats",
-      ]),
-      rationale: "Use ATLAS-first laddered retrieval for bounded investigation, escalating from cards/slices to focused code views only when needed. Durable findings ride your structured appendix (memories field, max 5/round) and persist automatically — do not call memory.store/memory.remove; the harness also auto-promotes validated findings post-assessment.",
+      tools: Object.freeze([]),
+      rationale: "Remote policy issues the researcher ATLAS surface for bounded investigation.",
     }),
     planner: Object.freeze({
       phase: "planning",
-      tools: Object.freeze([
-        "info",
-        "repo.status",
-        "repo.overview",
-        "tree.overview",
-        "tree.walk",
-        "tree.scope",
-        "tree.grow",
-        "repo.quality",
-        "buffer.status",
-        "slice.build",
-        "slice.refresh",
-        "context",
-        "context.summary",
-        "symbol.search",
-        "symbol.getCard",
-        "symbol.usages",
-        "code.getSkeleton",
-        "code.getHotPath",
-        "agent.feedback",
-        "agent.feedback.query",
-        "memory.query",
-        "policy.get",
-        "usage.stats",
-      ]),
-      rationale: "Use ATLAS slices/context to narrow planning scope, then inspect only targeted structure/hot paths for decomposition confidence. Durable planning decisions are promoted to memory automatically by the harness; memory curation is the researcher's role.",
+      tools: Object.freeze([]),
+      rationale: "Remote policy issues the planner ATLAS surface for scope narrowing and decomposition confidence.",
     }),
     assessor: Object.freeze({
       phase: "assessment",
-      tools: Object.freeze([
-        "info",
-        "repo.status",
-        "repo.overview",
-        "tree.overview",
-        "tree.walk",
-        "tree.scope",
-        "tree.grow",
-        "repo.quality",
-        "buffer.status",
-        "symbol.search",
-        "pr.risk",
-        "pr.risk.analyze",
-        "delta.get",
-        "symbol.getCard",
-        "symbol.usages",
-        "slice.build",
-        "slice.refresh",
-        "slice.spillover.get",
-        "code.getSkeleton",
-        "code.getHotPath",
-        "code.needWindow",
-        "agent.feedback",
-        "agent.feedback.query",
-        "memory.query",
-        "memory.flag",
-        "policy.get",
-        "runtime.queryOutput",
-        "usage.stats",
-      ]),
-      rationale: "Use ATLAS versions/risk plus focused code evidence for blast-radius analysis; verdict authority remains assessor judgment. Post-verdict findings are promoted to durable memory automatically by the harness; memory curation is the researcher's role. memory.flag marks a surfaced memory the assessed work disproved (reason: contradicted) so it stops misleading future readers — flag, don't remove.",
+      tools: Object.freeze([]),
+      rationale: "Remote policy issues the assessor ATLAS surface for review/risk and focused evidence.",
     }),
     dev: Object.freeze({
       phase: "dev",
-      tools: Object.freeze([
-        "info",
-        "repo.status",
-        "repo.overview",
-        "tree.overview",
-        "tree.walk",
-        "tree.scope",
-        "tree.grow",
-        "repo.quality",
-        "buffer.status",
-        "symbol.search",
-        "symbol.getCard",
-        "symbol.usages",
-        "slice.build",
-        "slice.refresh",
-        "slice.spillover.get",
-        "code.getSkeleton",
-        "code.getHotPath",
-        "code.needWindow",
-        "context",
-        "context.summary",
-        "agent.feedback",
-        "agent.feedback.query",
-        "memory.query",
-        "policy.get",
-        "usage.stats",
-        "runtime.queryOutput",
-      ]),
-      rationale: "Developer routing uses ATLAS ladder/context for targeted retrieval; writes go through scoped write_file/edit_file so file scope and worktree isolation stay enforced. Durable bugfix and decision memories are promoted automatically by the harness; memory curation is the researcher's role.",
+      tools: Object.freeze([]),
+      rationale: "Remote policy issues the developer ATLAS surface for targeted retrieval.",
     }),
     artificer: Object.freeze({
       phase: null,
@@ -572,26 +472,18 @@ export const WEB_TOOL_ROLES = new Set(["researcher", "artificer"]);
 export const GATED_ROLES = new Set(["researcher", "planner", "dev", "assessor"]);
 
 export const MEANINGFUL_ATLAS_ACTIONS = new Set([
-  "repo.overview",
-  "tree.overview",
-  "tree.walk",
-  "tree.scope",
-  "tree.grow",
+  "tree.branch",
+  "tree.expand",
   "symbol.search",
-  "symbol.getCard",
-  "symbol.getCards",
-  "symbol.usages",
-  "slice.build",
-  "slice.refresh",
-  "slice.spillover.get",
+  "symbol.card",
+  "symbol.overview",
   "edit.plan",
-  "code.getSkeleton",
-  "code.getHotPath",
-  "code.needWindow",
-  "delta.get",
-  "pr.risk.analyze",
-  "pr.risk",
-  "context.summary",
+  "code.skeleton",
+  "code.lens",
+  "code.window",
+  "review.delta",
+  "review.analyze",
+  "review.risk",
   "memory.query",
 ]);
 
@@ -785,13 +677,13 @@ export function getAtlasToolNames() {
 
 export function getSyntheticAtlasToolSchemas(availableToolNames = []) {
   const available = new Set([...availableToolNames].map((name) => String(name || "")));
-  const hasDelta = available.has("atlas.delta.get") || available.has("delta.get");
-  const hasRisk = available.has("atlas.pr.risk.analyze") || available.has("pr.risk.analyze");
+  const hasDelta = available.has("atlas.review.delta") || available.has("review.delta");
+  const hasRisk = available.has("atlas.review.analyze") || available.has("review.analyze");
   const schemas = [];
   if (hasDelta && hasRisk) {
-    const def = ATLAS_TOOL_DEFS["pr.risk"];
+    const def = ATLAS_TOOL_DEFS["review.risk"];
     schemas.push({
-      name: "atlas.pr.risk",
+      name: "atlas.review.risk",
       description: def.description,
       inputSchema: def.parameters,
       annotations: { title: "ATLAS PR Risk" },
@@ -887,8 +779,10 @@ function atlasContractToolsForRoute(route, opts = {}) {
   const routeTools = (Array.isArray(route?.tools) ? [...route.tools] : [])
     .filter(isExternallyRoutedAtlasTool);
   const attached = normalizedAtlasActionSet(opts?.atlasAttachment?.tools);
-  if (attached.size === 0) return routeTools;
-  return routeTools.filter((tool) => attached.has(stripAtlasPrefix(tool)));
+  if (attached.size > 0) {
+    return [...attached].filter(isExternallyRoutedAtlasTool);
+  }
+  return routeTools;
 }
 
 function renderProviderNamingLine(opts = {}) {
@@ -923,11 +817,11 @@ function renderActiveAtlasFallbackLines(opts = {}) {
   if (atlasGateEnabledForContract(opts)) {
     const extensions = renderIndexableExtensionList();
     return [
-      `For indexable source files (${extensions}), native read_file/chain_read fallback unlocks file by file: before reading a given source file, attempt task-relevant ${label} discovery against that same file or a symbol/slice/summary result that returns that file.`,
-      `Good file-specific discovery calls include ${renderAtlasToolNameForContract("code.getSkeleton", opts)}, ${renderAtlasToolNameForContract("code.getHotPath", opts)}, ${renderAtlasToolNameForContract("code.needWindow", opts)}, ${renderAtlasToolNameForContract("symbol.search", opts)}, ${renderAtlasToolNameForContract("slice.build", opts)}, and ${renderAtlasToolNameForContract("context.summary", opts)}.`,
+      `For indexable source files (${extensions}), native read_file/chain_read fallback unlocks file by file: before reading a given source file, attempt task-relevant ${label} discovery against that same file or a symbol, tree, or code result that returns that file.`,
+      `Good file-specific discovery calls include ${renderAtlasToolNameForContract("code.skeleton", opts)}, ${renderAtlasToolNameForContract("code.lens", opts)}, ${renderAtlasToolNameForContract("code.window", opts)}, ${renderAtlasToolNameForContract("symbol.search", opts)}, ${renderAtlasToolNameForContract("tree.branch", opts)}, and ${renderAtlasToolNameForContract("tree.expand", opts)}.`,
       `Other indexable source files stay locked until separately discovered through ${label}.`,
       `For broad standard list/search/read fallback not tied to one source file, make the required real ${label} retrieval attempts only when broad native fallback is still needed; keep them targeted to the task and stop when the needed context or fallback unlock is obtained.`,
-      `For broad audits, sweeps, or unfamiliar repositories, start with ${renderAtlasToolNameForContract("repo.overview", opts)} or ${renderAtlasToolNameForContract("context.summary", opts)} in broad mode, then narrow with ${renderAtlasToolNameForContract("symbol.search", opts)} and ${renderAtlasToolNameForContract("slice.build", opts)}.`,
+      `For broad audits, sweeps, or unfamiliar repositories, start with ${renderAtlasToolNameForContract("tree.branch", opts)} or ${renderAtlasToolNameForContract("tree.expand", opts)}, then narrow with ${renderAtlasToolNameForContract("symbol.search", opts)} and ${renderAtlasToolNameForContract("code.skeleton", opts)}.`,
       `${label} prefetch and internal bookkeeping calls do not count toward file unlocks or broad fallback unlocks.`,
       "Use standard tools only when:",
       `- ${label} is unavailable,`,
@@ -941,7 +835,7 @@ function renderActiveAtlasFallbackLines(opts = {}) {
   const extensions = renderIndexableExtensionList();
   return [
     `For indexable source files (${extensions}), attempt task-relevant ${label} discovery against the file before native read_file/chain_read fallback whenever possible.`,
-    `For broad audits, sweeps, or unfamiliar repositories, start with ${renderAtlasToolNameForContract("repo.overview", opts)} or ${renderAtlasToolNameForContract("context.summary", opts)} in broad mode, then narrow with ${renderAtlasToolNameForContract("symbol.search", opts)} and ${renderAtlasToolNameForContract("slice.build", opts)}.`,
+    `For broad audits, sweeps, or unfamiliar repositories, start with ${renderAtlasToolNameForContract("tree.branch", opts)} or ${renderAtlasToolNameForContract("tree.expand", opts)}, then narrow with ${renderAtlasToolNameForContract("symbol.search", opts)} and ${renderAtlasToolNameForContract("code.skeleton", opts)}.`,
     "Use standard tools only when:",
     `- ${label} is unavailable,`,
     `- ${label} fails to answer the question after a relevant attempt,`,
@@ -1002,10 +896,9 @@ function renderRouteUsageLines(role, tools, opts = {}) {
   lines.push(`${label} symbolId values are opaque. Never invent them from file paths, names, or file:symbol pairs; use IDs returned by ATLAS results, or symbolRef/file inputs where the tool explicitly supports them.`);
 
   const discovery = [];
-  pushAvailableToolLine(discovery, tools, "repo.overview", "best first call for broad audits, bugsweeps, unfamiliar repositories, hotspots, and indexed coverage before narrowing.", opts);
   pushAvailableToolLine(discovery, tools, "symbol.search", "best first call when you know a concept or name but not the exact symbol ID.", opts);
-  pushAvailableToolLine(discovery, tools, "slice.build", "best first call for a bounded graph slice around a task or entry symbols.", opts);
-  pushAvailableToolLine(discovery, tools, "context.summary", "best first call for compact task-shaped evidence and next-action guidance.", opts);
+  pushAvailableToolLine(discovery, tools, "tree.branch", "best first call when you know a path, symbol, or branch and need structure around it.", opts);
+  pushAvailableToolLine(discovery, tools, "tree.expand", "best first call when you have seed files, symbols, or areas and need nearby structure, siblings, tests, or entrypoints.", opts);
   if (discovery.length) {
     lines.push("", "Discovery starters:");
     lines.push(...discovery);
@@ -1017,20 +910,20 @@ function renderRouteUsageLines(role, tools, opts = {}) {
   // and follow with the role-specific escalation constraint. The Rung 3
   // stop line goes here — directly after the definition — so a planner
   // reading the contract learns the constraint before scanning for Rung 4.
-  const LADDER_TOOLS = ["symbol.getCard", "code.getSkeleton", "code.getHotPath", "code.needWindow"];
+  const LADDER_TOOLS = ["symbol.card", "code.skeleton", "code.lens", "code.window"];
   const hasLadder = LADDER_TOOLS.some((tool) => tools.includes(tool));
   if (hasLadder) {
     lines.push(
       "",
       `Iris rungs are the ${label} evidence ladder, ordered by cost: Rung 1 (~100 token cards) -> Rung 2 (~300 token skeletons) -> Rung 3 (~600 token hot paths) -> Rung 4 (~2000 token raw windows). Escalate only as far as needed — prefer the cheapest rung that answers the question.`,
     );
-    if (role === "planner" && !tools.includes("code.needWindow")) {
+    if (role === "planner" && !tools.includes("code.window")) {
       lines.push("Planner routes stop at Rung 3 by design. If raw bodies are still required, name the exact missing symbols or files instead of making a raw-window call.");
     }
   }
 
-  if (tools.includes("pr.risk")) {
-    const riskName = renderAtlasToolNameForContract("pr.risk", opts);
+  if (tools.includes("review.risk")) {
+    const riskName = renderAtlasToolNameForContract("review.risk", opts);
     lines.push(
       "",
       "Assessor review path:",
@@ -1124,9 +1017,16 @@ const ATLAS_FALLBACK_ONLY_ACTIONS = new Set([
 // Actions the handoff prefetch runs on the agent's behalf with better input
 // (full task text) than the agent could reconstruct — kept in role routes so
 // the prefetch can use them, but never advertised to the agent. Agents get
-// tree.grow (seed expansion) instead.
+// tree.expand (seed expansion) instead.
 const ATLAS_PREFETCH_ONLY_ACTIONS = new Set([
+  "repo.overview",
+  "repo.status",
+  "tree.overview",
   "tree.scope",
+  "slice.build",
+  "slice.refresh",
+  "slice.spillover.get",
+  "context.summary",
 ]);
 
 export function isPrefetchOnlyAtlasTool(name) {

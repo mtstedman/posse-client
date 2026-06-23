@@ -251,8 +251,8 @@ export class ToolGate {
         "",
         `Target file still locked: ${target}`,
         "",
-        `Before reading this file with ${toolName}, attempt ${label} discovery against this same file or a symbol/slice/summary result that returns this file.`,
-        `Good first calls: ${formatTool("code.getSkeleton")}({ file: "${target}" }), ${formatTool("code.getHotPath")}, ${formatTool("code.needWindow")}, ${formatTool("symbol.search")}, ${formatTool("slice.build")}, or ${formatTool("context.summary")}.`,
+        `Before reading this file with ${toolName}, attempt ${label} discovery against this same file or a symbol, tree, or code result that returns this file.`,
+        `Good first calls: ${formatTool("code.skeleton")}({ file: "${target}" }), ${formatTool("code.lens")}, ${formatTool("code.window")}, ${formatTool("symbol.search")}, ${formatTool("tree.branch")}, or ${formatTool("tree.expand")}.`,
         "",
         `${label} prefetch and internal bookkeeping calls do NOT unlock file reads; they are not active file discovery.`,
         `A global ${label} unlock does not unlock other indexable source files; each source file needs its own ${label} discovery attempt before native read fallback.`,
@@ -293,12 +293,12 @@ export class ToolGate {
       ? routedMeaningfulTools
       : [...this._meaningfulAtlasActions].map(formatTool);
     const replacementHints = {
-      read_file: `For raw file reads, first use ${label} discovery tools such as ${formatTool("context.summary")}, ${formatTool("slice.build")}, ${formatTool("symbol.search")}, or ${formatTool("code.getSkeleton")}; native reads are fallback after discovery.`,
-      inspect_file: `For structure, prefer ${formatTool("symbol.getCard")} or ${formatTool("code.getSkeleton")}.`,
-      list_files: `For repo shape, prefer ${formatTool("context.summary")} or ${formatTool("symbol.search")}.`,
-      search_files: `For semantic discovery, prefer ${formatTool("symbol.search")} or ${formatTool("context.summary")}.`,
-      chain_read: `For research context, prefer ${formatTool("context.summary")} or ${formatTool("slice.build")}.`,
-      git_history: `For assessment changes, prefer ${formatTool("pr.risk")} when version ids are known.`,
+      read_file: `For raw file reads, first use ${label} discovery tools such as ${formatTool("symbol.search")}, ${formatTool("tree.branch")}, ${formatTool("tree.expand")}, or ${formatTool("code.skeleton")}; native reads are fallback after discovery.`,
+      inspect_file: `For structure, prefer ${formatTool("symbol.card")} or ${formatTool("code.skeleton")}.`,
+      list_files: `For repo shape, prefer ${formatTool("tree.branch")}, ${formatTool("tree.expand")}, or ${formatTool("symbol.search")}.`,
+      search_files: `For semantic discovery, prefer ${formatTool("symbol.search")} or ${formatTool("tree.expand")}.`,
+      chain_read: `For research context, prefer ${formatTool("symbol.search")}, ${formatTool("tree.branch")}, or ${formatTool("code.skeleton")}.`,
+      git_history: `For assessment changes, prefer ${formatTool("review.risk")} when version ids are known.`,
     };
     const hint = replacementHints[String(toolName || "")] || `Use one of the role-routed ${label} tools below before retrying native fallback.`;
     lines.push(

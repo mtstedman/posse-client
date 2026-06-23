@@ -68,7 +68,7 @@ function fileReadWithRedaction({ versionId, params, readFile, view }, redaction)
       code: "policy_downgrade",
       message: "file.read is limited for indexed source files; use ATLAS code tools for source bodies.",
       details: {
-        nextBestAction: "Use code.getSkeleton, code.getHotPath, or code.needWindow for this indexed source file.",
+        nextBestAction: "Use code.skeleton, code.lens, or code.window for this indexed source file.",
         filePath: params.filePath,
       },
     });
