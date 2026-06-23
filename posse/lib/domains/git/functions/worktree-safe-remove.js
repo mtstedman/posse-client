@@ -50,6 +50,7 @@ export async function forceRemoveWorktreePathAfterNativeAsync(wtPath, mainCwd, {
     await fs.promises.rm(wtPath, FORCE_REMOVE_OPTIONS);
   } catch (err) {
     if (isAbortError(err)) throw err;
+    throw err;
   }
   try { await gitExecAsync(["worktree", "prune"], mainCwd, { signal }); } catch (err) { if (isAbortError(err)) throw err; }
 }

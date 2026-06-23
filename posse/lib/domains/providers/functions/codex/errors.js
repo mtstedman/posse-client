@@ -24,6 +24,6 @@ export function parseErrorBackoff(err) {
 }
 
 export function isCodexResumeHandleExpiredError(text) {
-  return /(?:session|conversation|thread|resume).*(?:nots+found|unknown|invalid|expired|nos+such)|(?:nots+found|unknown|invalid|expired|nos+such).*(?:session|conversation|thread|resume)/i
+  return /no\s+(?:session|conversation|thread|resume)(?:\s+\w+)*\s+found|(?:session|conversation|thread|resume).*(?:not\b.*\bfound|unknown|invalid|expired|no\s+such)|(?:not\b.*\bfound|unknown|invalid|expired|no\s+such).*(?:session|conversation|thread|resume)/i
     .test(String(text || ""));
 }

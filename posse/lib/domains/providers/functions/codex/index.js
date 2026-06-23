@@ -57,4 +57,4 @@ export {
 } from "./request-builders.js";
 export { buildWindowsSpawn as __testBuildCodexSpawn, terminateSpawnedProcess as __testTerminateSpawnedProcess } from "../shared/windows-spawn.js";
 export { callProvider } from "./call-provider.js";
-export { escalateTier, extractJson, getRateLimitState, parseErrorBackoff, tripRateLimit } from "./errors.js";
+export { escalateTier, extractJson, getRateLimitState, isCodexResumeHandleExpiredError as __testIsCodexResumeHandleExpiredError, parseErrorBackoff, tripRateLimit } from "./errors.js";

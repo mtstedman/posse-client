@@ -42,9 +42,9 @@ export function buildWindowsSpawn(command, args) {
   };
 }
 
-export function terminateSpawnedProcess(proc, { force = false } = {}) {
-  if (!proc || proc.exitCode != null || proc.killed) return;
-  if (process.platform === "win32") {
+export function terminateSpawnedProcess(proc, { force = false, platform = process.platform } = {}) {
+  if (!proc || proc.exitCode != null || (proc.killed && !force)) return;
+  if (platform === "win32") {
     try {
       const taskkillArgs = ["/pid", String(proc.pid), "/T"];
       if (force) taskkillArgs.push("/F");

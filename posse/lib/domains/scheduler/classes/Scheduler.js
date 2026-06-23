@@ -96,6 +96,7 @@ import {
   readAtlasDriftCheckIntervalMs,
   readBoolSetting,
   readHeadlessHumanTimeoutSec,
+  readPositiveIntSetting,
 } from "../functions/config.js";
 import {
   collectStrictOnlyRootConflicts,
@@ -111,7 +112,6 @@ import {
   formatStaleHeartbeatReason,
   handoffCandidateCoversPath,
   normalizeHandoffPath,
-  readPositiveIntSetting,
   schedulerLockTiming,
 } from "../functions/lock-timing.js";
 import {
