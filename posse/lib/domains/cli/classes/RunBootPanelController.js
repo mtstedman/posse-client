@@ -467,7 +467,10 @@ export class RunBootPanelController {
       if (!this.getDisplay() && !this.monitorDisposed) {
         this.lastRenderAt = 0;
         if (shouldResumeTimer) this.ensureMonitor();
-        this.render({ force: true });
+        // When passthrough printed real terminal output, the caller normally
+        // follows with a boot-state update that repaints once. Rendering here
+        // too can strand a duplicate top border above that next frame.
+        if (!passthroughWrote) this.render({ force: true });
       }
     }
   }
