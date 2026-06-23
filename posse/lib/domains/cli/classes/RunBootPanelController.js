@@ -389,7 +389,14 @@ export class RunBootPanelController {
     }
   }
 
-  stop({ final = false, clear = false } = {}) {
+  preserveRenderedPanel() {
+    if (!process.stdout?.isTTY || this.renderedRows <= 0) return;
+    this.terminalOutputIntercept.writeStdout("\n");
+    this.renderedRows = 0;
+    this.lastRenderAt = Date.now();
+  }
+
+  stop({ final = false, clear = false, preserve = false } = {}) {
     if (this.monitorTimer) {
       clearInterval(this.monitorTimer);
       this.monitorTimer = null;
@@ -400,7 +407,8 @@ export class RunBootPanelController {
         return;
       }
       this.releaseInput();
-      if (clear) this.clearRenderedPanel();
+      if (preserve) this.preserveRenderedPanel();
+      else if (clear) this.clearRenderedPanel();
       else this.render({ final: true, force: true });
       this.monitorDisposed = true;
       this.terminalOutputIntercept.release();

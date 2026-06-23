@@ -19,6 +19,7 @@ logs/
 test/runtime-db-*/
 test-output.txt
 node_modules/
+package-lock.json
 
 # Posse-managed SCIP toolchain runtimes live under scip/. Keep manifests and
 # wrappers tracked, but not downloaded package trees or binary payloads.

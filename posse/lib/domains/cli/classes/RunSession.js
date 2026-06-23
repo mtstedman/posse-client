@@ -1940,10 +1940,10 @@ export class RunSession {
 
   // ── TUI attach — from here on, stdout goes to the alt-screen buffer ─────
   // Finalize the boot panel before the alt-screen takes over. For TTY/TUI runs,
-  // erase the main-buffer panel first so leaving the alt-screen later does not
-  // reveal a stale preboot frame; non-TUI runs keep the final boot frame in
-  // scrollback.
-  // stopBootMonitor → render/clear boot monitor(final) → terminalOutputIntercept.release()
+  // keep the already-rendered main-buffer panel and only move the cursor below
+  // it; repainting here can stamp a second "posse boot" header into scrollback
+  // before later terminal prompts (for example the post-run push offer).
+  // stopBootMonitor → preserve/render boot monitor(final) → terminalOutputIntercept.release()
   // replays anything that tried to write to stdout/stderr while the panel was up.
   // Pre-flight gate: wait for the ATLAS index to finish building before the
   // runtime UI attaches and workers start. The warm runs in the boot worker
@@ -2046,7 +2046,7 @@ export class RunSession {
     });
   } catch { /* observational */ }
 
-  stopBootMonitor({ final: true, clear: useTui });
+  stopBootMonitor({ final: true, preserve: useTui });
   if (useTui) {
     try { recordRunDiagnostic("display.starting", { concurrency: CONCURRENCY }); } catch { /* observational */ }
     display = new Display({ concurrency: CONCURRENCY });
