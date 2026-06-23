@@ -13,6 +13,7 @@ import {
 import {
   effectiveArtifactTaskMode as effectiveArtifactTaskModeFromModule,
   isImageOnlyModelName as isImageOnlyModelNameFromModule,
+  NO_IMAGE_PROVIDERS_AVAILABLE,
   resolveExecutionProviderFromSettings as resolveExecutionProviderFromModule,
   resolveImageExecutionProvider as resolveImageExecutionProviderFromModule,
 } from "../../../providers/functions/execution-routing.js";
@@ -42,9 +43,9 @@ export class ProviderAttemptLifecycle {
     const imageRoute = shouldValidateImageRoute
       ? resolveImageExecutionProviderFromModule(executionPayload)
       : { provider: null, model: null, readiness: { ready: true, reason: null } };
-    if (imageRoute.provider) {
+    if (shouldValidateImageRoute) {
       if (!imageRoute.readiness.ready) {
-        const errMsg = `Image generation requires an available image provider (${imageRoute.provider})${imageRoute.readiness.reason ? ` — ${imageRoute.readiness.reason}` : ""}`;
+        const errMsg = imageRoute.readiness.reason || NO_IMAGE_PROVIDERS_AVAILABLE;
         const routeAttempt = incrementAndCreateAttempt(job.id, leaseToken, role, null, job.reasoning_effort);
         if (!routeAttempt) {
           _logAttemptSkippedStaleLease(job, role, "Skipped image-route readiness failure because the lease was stale or expired");

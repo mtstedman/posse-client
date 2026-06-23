@@ -35,7 +35,6 @@ import { C } from "../../../shared/format/functions/colors.js";
 import {
   artifactTaskOutputRoot,
   contextDir,
-  getConfiguredImageProviders,
   getWiModeConfig,
   isValidTaskMode,
   normalizeArtifactCreateFiles,
@@ -63,6 +62,7 @@ import {
 import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
 import {
   effectiveArtifactTaskMode as effectiveArtifactTaskModeFromModule,
+  NO_IMAGE_PROVIDERS_AVAILABLE,
   resolveImageExecutionProvider as resolveImageExecutionProviderFromModule,
 } from "../../providers/functions/execution-routing.js";
 import { DEFAULT_DEV_MODE, isValidDevMode, normalizeDevMode } from "../../../shared/policies/functions/dev-modes.js";
@@ -1301,8 +1301,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             worker.emit(planJob.id, `${C.cyan}[plan-validate]${C.reset} WI#${planJob.work_item_id}: image task "${t.title}" will use generate_image via ${imageRoute.provider}/${imageRoute.model}`);
           } else {
             imageProviderUnavailable = true;
-            imageProviderUnavailableReason = imageRoute.readiness.reason || null;
-            worker.emit(planJob.id, `${C.red}[plan-validate]${C.reset} WI#${planJob.work_item_id}: task "${t.title}" requires image generation but providers "${getConfiguredImageProviders().join(", ")}" are not available — ${imageRoute.readiness.reason}`);
+            imageProviderUnavailableReason = imageRoute.readiness.reason || NO_IMAGE_PROVIDERS_AVAILABLE;
+            worker.emit(planJob.id, `${C.red}[plan-validate]${C.reset} WI#${planJob.work_item_id}: task "${t.title}" requires image generation — ${imageProviderUnavailableReason}`);
           }
         }
 
@@ -1651,7 +1651,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
 
         // Fail immediately if image generation was requested but no capable provider exists
         if (imageProviderUnavailable) {
-          const errMsg = `Image generation requires an available image provider (${getConfiguredImageProviders().join(", ") || "openai"})${imageProviderUnavailableReason ? ` — ${imageProviderUnavailableReason}` : ""}`;
+          const errMsg = imageProviderUnavailableReason || NO_IMAGE_PROVIDERS_AVAILABLE;
           updateJobStatus(job.id, "failed");
           setJobError(job.id, errMsg);
           worker.emit(planJob.id, `${C.red}[plan-validate]${C.reset} WI#${planJob.work_item_id}: job #${job.id} failed — ${errMsg}`);

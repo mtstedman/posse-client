@@ -6,6 +6,8 @@
 import { getProviderName, nextProviderSelectionCursor, selectProviderName, isProviderReady } from "./provider.js";
 import { getConfiguredImageProviders, getConfiguredImageModel, isArtifactMode } from "../../artifacts/functions/index.js";
 
+export const NO_IMAGE_PROVIDERS_AVAILABLE = "No image providers available";
+
 export function needsImageGeneration(payload = null) {
   const taskMode = payload?.task_mode || "code";
   return !!(payload?.needs_image_generation || taskMode === "image");
@@ -83,12 +85,25 @@ export function requiresGitNoopCheck(job, payload = null) {
 export function resolveImageExecutionProvider(payload = null) {
   if (!needsImageGeneration(payload)) return { provider: null, model: null, readiness: { ready: true, reason: null } };
   const providers = getConfiguredImageProviders();
-  const readyProviders = providers.filter((provider) => isProviderReady(provider, "images").ready);
-  const pool = readyProviders.length > 0 ? readyProviders : providers;
-  const cursor = nextProviderSelectionCursor("images");
-  const provider = pool[cursor % pool.length] || providers[0] || "openai";
-  if (readyProviders.length > 0) {
-    return { provider, model: getConfiguredImageModel(provider), readiness: isProviderReady(provider, "images") };
+  const readinessByProvider = new Map(providers.map((provider) => [provider, isProviderReady(provider, "images")]));
+  const readyProviders = providers.filter((provider) => readinessByProvider.get(provider)?.ready);
+  if (readyProviders.length === 0) {
+    return {
+      provider: null,
+      model: null,
+      readiness: {
+        ready: false,
+        reason: NO_IMAGE_PROVIDERS_AVAILABLE,
+        providers,
+        failures: providers.map((provider) => ({
+          provider,
+          reason: readinessByProvider.get(provider)?.reason || null,
+        })),
+      },
+    };
   }
-  return { provider, model: getConfiguredImageModel(provider), readiness: isProviderReady(provider, "images") };
+  const pool = readyProviders;
+  const cursor = nextProviderSelectionCursor("images");
+  const provider = pool[cursor % pool.length];
+  return { provider, model: getConfiguredImageModel(provider), readiness: readinessByProvider.get(provider) };
 }

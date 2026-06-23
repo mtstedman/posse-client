@@ -1,4 +1,5 @@
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
+import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../../providers/functions/execution-routing.js";
 import { buildImageInjectionPayload } from "../functions/run-session.js";
 
 export class RunDisplayActions {
@@ -101,12 +102,17 @@ export class RunDisplayActions {
   }
 
   image(prompt) {
+    const imageRoute = resolveImageExecutionProvider({ needs_image_generation: true });
+    if (!imageRoute.readiness.ready) {
+      this.display?.addEvent?.(`${this.C?.red || ""}${NO_IMAGE_PROVIDERS_AVAILABLE}${this.C?.reset || ""}`);
+      return null;
+    }
+
     const title = prompt.split("\n")[0].slice(0, 100);
     const item = this.createWorkItem(title, prompt, "normal", { source: "image", mode: "image" });
     this.ensureArtifactDirs(this.wiScopeId(item.id), "image", this.projectDir);
     const outputRoot = this.artifactsDir(this.wiScopeId(item.id), this.projectDir).replace(/\\/g, "/");
-    const protocol = this.getResolvedImageProtocol();
-    const imgProvider = protocol.provider || "openai";
+    const imgProvider = imageRoute.provider;
 
     this.updateWorkItemStatus(item.id, "running");
     this.createJob({

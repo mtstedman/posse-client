@@ -6,6 +6,7 @@ import { getDefaultImageModel, getDefaultImageProvider, normalizeGrokImageModelN
 export { TOOL_GENERATE_IMAGE } from "../../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 
 const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 600_000;
+const NO_IMAGE_PROVIDERS_AVAILABLE = "No image providers available";
 
 // Each image-capable provider owns construction of its OpenAI-shaped client
 // (env vars, baseURL, retry config). Import provider builders lazily so this
@@ -146,12 +147,23 @@ async function _generateImageWithTimeout(client, params, { timeoutMs = DEFAULT_I
   }
 }
 
+async function _resolveImageExecutionProvider(payload) {
+  const { resolveImageExecutionProvider } = await import("../execution-routing.js");
+  return resolveImageExecutionProvider(payload);
+}
+
+async function _isProviderReady(provider, capability) {
+  const { isProviderReady } = await import("../provider.js");
+  return isProviderReady(provider, capability);
+}
+
 export async function execGenerateImageInternal(args = {}, {
   cwd = process.cwd(),
   scopePredicates,
   safePathImpl,
   buildImageClient = _buildImageClient,
   imageTimeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
+  enforceProviderAvailability = buildImageClient === _buildImageClient,
 } = {}) {
   if (!args.prompt || typeof args.prompt !== "string") {
     return "Error: prompt is required and must be a string.";
@@ -173,11 +185,56 @@ export async function execGenerateImageInternal(args = {}, {
   }
 
   const providerOverride = args.provider ? String(args.provider).trim().toLowerCase() : null;
+  if (enforceProviderAvailability && !providerOverride) {
+    const imageRoute = await _resolveImageExecutionProvider({ needs_image_generation: true });
+    if (!imageRoute.readiness.ready) {
+      return `Error: ${NO_IMAGE_PROVIDERS_AVAILABLE}`;
+    }
+    const provider = imageRoute.provider;
+    const model = imageRoute.model || getDefaultImageModel(provider);
+    return await _executeGenerateImageWithRoute({
+      args,
+      ext,
+      outputPath,
+      provider,
+      model,
+      buildImageClient,
+      imageTimeoutMs,
+    });
+  }
+
   const resolved = getResolvedImageProtocol(providerOverride);
   const provider = String(resolved.provider || getDefaultImageProvider()).toLowerCase();
   const model = resolved.model
     || getDefaultImageModel(provider);
 
+  if (enforceProviderAvailability) {
+    const readiness = await _isProviderReady(provider, "images");
+    if (!readiness.ready) {
+      return `Error: ${NO_IMAGE_PROVIDERS_AVAILABLE}`;
+    }
+  }
+
+  return await _executeGenerateImageWithRoute({
+    args,
+    ext,
+    outputPath,
+    provider,
+    model,
+    buildImageClient,
+    imageTimeoutMs,
+  });
+}
+
+async function _executeGenerateImageWithRoute({
+  args,
+  ext,
+  outputPath,
+  provider,
+  model,
+  buildImageClient,
+  imageTimeoutMs,
+}) {
   try {
     const client = await buildImageClient(provider);
     const { params, quality } = provider === "grok"

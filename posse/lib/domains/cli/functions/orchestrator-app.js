@@ -60,7 +60,7 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 import { editorCommandLabel, parseEditorCommand, resolveEditorCommand } from "./editor.js";
-import { initArtifactRootsAsync, ensureArtifactDirs, wiScopeId, contextDir, isArtifactMode, getArtifactProtocol, getConfiguredImageProviders, getResolvedImageProtocol, artifactsDir, pruneEmptyArtifactDirsAsync } from "../../artifacts/functions/index.js";
+import { initArtifactRootsAsync, ensureArtifactDirs, wiScopeId, contextDir, isArtifactMode, getArtifactProtocol, getResolvedImageProtocol, artifactsDir, pruneEmptyArtifactDirsAsync } from "../../artifacts/functions/index.js";
 import {
   createWorkItem,
   getWorkItem,
@@ -111,6 +111,7 @@ import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
 import { getCatalogRuntimeFallbackInt } from "../../settings/functions/catalog.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
+import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../../providers/functions/execution-routing.js";
 import { providerRoleForJobType } from "../../providers/functions/roles.js";
 import {
   getCommandBootstrapPolicy,
@@ -1273,15 +1274,13 @@ async function cmdImage() {
 
   // Read protocol for provider routing; check readiness before creating the
   // work item so an unready provider does not leave a stale queued WI behind.
-  const protocol = getResolvedImageProtocol();
-  const provider = protocol.provider || "openai";
-  const { isProviderReady } = await loadProviderModule();
-  const readiness = isProviderReady(provider, "images");
-  if (!readiness.ready) {
-    console.log(`\n  ${C.red}Image provider unavailable:${C.reset} ${getConfiguredImageProviders().join(", ")}${readiness.reason ? ` — ${readiness.reason}` : ""}\n`);
+  const imageRoute = resolveImageExecutionProvider({ needs_image_generation: true });
+  if (!imageRoute.readiness.ready) {
+    console.log(`\n  ${C.red}${NO_IMAGE_PROVIDERS_AVAILABLE}${C.reset}\n`);
     process.exitCode = 1;
     return;
   }
+  const provider = imageRoute.provider;
 
   const title = prompt.split("\n")[0].slice(0, 100);
   const item = createWorkItem(title, prompt, "normal", { source: "image", mode: "image" });
