@@ -21,6 +21,7 @@ import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { persistResearcherMemories } from "../../functions/helpers/research-memories.js";
 import {
   contextDir,
+  describeArtifactRoutingForPrompt,
   getConfiguredImageProviders,
   getResolvedImageProtocol,
   wiScopeId,
@@ -439,7 +440,7 @@ export class ResearcherRole extends BaseRole {
     const intakeHints = getWorkItemIntakeHints(workItem, workItem?.mode || "build");
     const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(workItem), this.getRole());
     const webFetchCachePreload = buildWebFetchCachePreload(job.work_item_id);
-    const artifactConfigPath = path.join(projectDir, "config", "artifact-protocols.json").replace(/\\/g, "/");
+    const imageRoutingSummary = describeArtifactRoutingForPrompt("image");
     const imageProviders = getConfiguredImageProviders();
     const imageProtocol = getResolvedImageProtocol();
     const imageReadinessSummary = imageProviders
@@ -455,12 +456,12 @@ export class ResearcherRole extends BaseRole {
     };
     const routingContext = [
       "PIPELINE ROUTING CONTEXT (treat this as source-of-truth project configuration):",
-      `- Artifact protocol config: ${artifactConfigPath}`,
-      "- Image deliverables belong to the ARTIFICER role, not ad hoc repo scripts, unless the config explicitly says otherwise.",
-      `- Image protocol: providers=${imageProviders.join(", ")}, selected=${imageProtocol.provider}, model=${imageProtocol.model || getDefaultImageModel(imageProtocol.provider)}`,
+      "- Image deliverables belong to the ARTIFICER role, not ad hoc repo scripts, unless explicit task output binding says otherwise.",
+      `- ${imageRoutingSummary}`,
+      `- Image providers: available=${imageProviders.join(", ")}, selected=${imageProtocol.provider}, model=${imageProtocol.model || getDefaultImageModel(imageProtocol.provider)}`,
       `- Image provider readiness: ${imageReadinessSummary}`,
       `- Admin-backed provider selections: researcher=${roleProviders.researcher}, planner=${roleProviders.planner}, artificer=${roleProviders.artificer}`,
-      "- Do not claim the project has no image generation path without checking this config/routing context first.",
+      "- Do not claim the project has no image generation path when this routing context says image artifact routing is available.",
       "",
     ].join("\n");
 

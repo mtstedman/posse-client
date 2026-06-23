@@ -56,7 +56,7 @@ export function validateAtlasPayloadSymbolIds(action, payload = {}) {
     sanitizeAtlasSymbolIdList(input.usefulSymbols, 40, "agent.feedback usefulSymbols");
     sanitizeAtlasSymbolIdList(input.missingSymbols, 40, "agent.feedback missingSymbols");
   }
-  if (normalized === "memory.store" || normalized === "memory.query" || normalized === "memory.surface") {
+  if (normalized === "memory.store" || normalized === "memory.get" || normalized === "memory.feedback" || normalized === "memory.surface") {
     sanitizeAtlasSymbolIdList(input.symbolIds, 500, `${normalized} symbolIds`);
   }
 }
@@ -183,7 +183,7 @@ export function extractAtlasResponseTelemetry(value) {
   if (cardsReturned != null) out.cards_returned = cardsReturned;
   const cardsAvailable = finiteTelemetryNumber(budget?.cardsAvailable);
   if (cardsAvailable != null) out.cards_available = cardsAvailable;
-  const memoriesReturned = finiteTelemetryNumber(budget?.memoriesReturned) ?? arrayLength(data.memories);
+  const memoriesReturned = finiteTelemetryNumber(budget?.memoriesReturned) ?? arrayLength(data.memories) ?? memoryResultCount(data);
   if (memoriesReturned != null) out.memories_returned = memoriesReturned;
   const memoriesAvailable = finiteTelemetryNumber(budget?.memoriesAvailable);
   if (memoriesAvailable != null) out.memories_available = memoriesAvailable;
@@ -197,6 +197,23 @@ export function extractAtlasResponseTelemetry(value) {
     out.truncated = true;
   }
   return Object.keys(out).length > 0 ? out : null;
+}
+
+function memoryResultCount(data) {
+  const symbols = memoryBucketCount(data?.symbols);
+  const files = memoryBucketCount(data?.files);
+  const total = symbols + files;
+  return total > 0 ? total : null;
+}
+
+function memoryBucketCount(value) {
+  if (Array.isArray(value)) return value.length;
+  if (!value || typeof value !== "object") return 0;
+  let total = 0;
+  for (const entry of Object.values(value)) {
+    if (Array.isArray(entry)) total += entry.length;
+  }
+  return total;
 }
 
 /**

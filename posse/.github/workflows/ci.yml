@@ -28,39 +28,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint touched domains
-        run: >
-          npx eslint
-          lib/catalog/settings.js
-          lib/domains/atlas/classes/v2/RemoteAtlasEmbeddingEncoder.js
-          lib/domains/integrations/functions/deterministic-mcp/remote-tool-surface.js
-          lib/domains/providers/classes/ClaudeCliNotFoundError.js
-          lib/domains/providers/classes/InteractiveCliSession.js
-          lib/domains/providers/classes/index.js
-          lib/domains/providers/functions/claude.js
-          lib/domains/providers/functions/codex.js
-          lib/domains/providers/functions/helpers/interactive-cli-session.js
-          lib/domains/remote/classes/RemoteAtlasEncoderClient.js
-          lib/domains/remote/classes/RemoteComposer.js
-          lib/domains/remote/classes/RemotePromptClient.js
-          lib/domains/remote/classes/index.js
-          lib/domains/remote/functions/atlas-encoder-client.js
-          lib/domains/remote/functions/client.js
-          lib/domains/remote/functions/mode.js
-          lib/domains/remote/functions/model-catalog-refresh.js
-          lib/domains/remote/functions/prompt-bundle.js
-          lib/domains/remote/functions/readiness.js
-          lib/domains/scheduler/classes/HeldQueueLockIndex.js
-          lib/domains/scheduler/classes/index.js
-          lib/domains/scheduler/functions/held-locks.js
-          lib/domains/settings/functions/catalog.js
-          test/core/suites/provider-aliases.test.js
-          test/test-atlas-v2-embeddings-resource-selection.test.js
-          test/test-atlas-v2-embeddings-index.test.js
-          test/test-atlas-v2-embeddings-e2e.test.js
-          test/test-atlas-v2-embeddings-fallback-ondemand.test.js
-          test/test-posse-remote-composer.test.js
-          test/test-posse-remote-parity.test.js
+      - name: Lint
+        run: npm run lint
+
+      # Existing ATLAS/MCP JSDoc debt keeps the full typecheck from passing
+      # today. Keep it visible in CI, then remove continue-on-error once the
+      # baseline is paid down enough to become a required gate.
+      - name: Typecheck audit
+        continue-on-error: true
+        run: npm run typecheck
 
       - name: Run focused tests
         run: |

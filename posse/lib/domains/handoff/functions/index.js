@@ -67,6 +67,7 @@ import {
 import {
   buildMemoryPrefetchNotice as buildMemoryPrefetchNoticeFromModule,
   buildStep0Context as buildStep0ContextFromModule,
+  loadMemorySurfaceAsync as loadMemorySurfaceAsyncFromModule,
   loadRelevantInsightsAsync as loadRelevantInsightsAsyncFromModule,
   loadRelevantInsights as loadRelevantInsightsFromModule,
 } from "./helpers/insights-step0.js";
@@ -965,6 +966,7 @@ export function buildRoutingPacket(job, opts) {
 
     // ── Kaizen: cross-run insights ──
     run_insights: _loadRelevantInsights(resolvedRole, sanitizedPayload),
+    memory_surface: { symbols: [], files: [] },
 
     // ── Passthrough for worker ──
     context_hints: contextHints,
@@ -984,6 +986,10 @@ async function _loadRelevantInsightsAsync(role, payload, opts = {}) {
   return loadRelevantInsightsAsyncFromModule(role, payload, opts);
 }
 
+async function _loadMemorySurfaceAsync(role, payload, opts = {}) {
+  return loadMemorySurfaceAsyncFromModule(role, payload, opts);
+}
+
 /**
  * Build Step 0 context: silent pre-flight history compilation.
  * Returns a string (or null) summarizing what recently happened to the files
@@ -995,7 +1001,7 @@ function _buildStep0Context(role, payload) {
 }
 
 function _applyMemoryPrefetchNotice(packet) {
-  const notice = buildMemoryPrefetchNoticeFromModule(packet?.run_insights || []);
+  const notice = buildMemoryPrefetchNoticeFromModule(packet?.memory_surface || []);
   packet.memory_prefetch_context = notice || null;
   if (!notice) return;
   packet.step0_context = [packet.step0_context, notice].filter(Boolean).join("\n");
@@ -1003,19 +1009,23 @@ function _applyMemoryPrefetchNotice(packet) {
 
 function _logSurfacedInsights(packet, role, telemetry = null) {
   const insights = Array.isArray(packet?.run_insights) ? packet.run_insights : [];
+  const memorySurface = packet?.memory_surface || {};
+  const memoryAnchorCount = (Array.isArray(memorySurface.symbols) ? memorySurface.symbols.length : 0)
+    + (Array.isArray(memorySurface.files) ? memorySurface.files.length : 0);
   const staleDropped = Number(telemetry?.stale_dropped || 0);
-  if (insights.length === 0 && staleDropped === 0) return;
+  if (insights.length === 0 && staleDropped === 0 && memoryAnchorCount === 0) return;
   try {
     logEvent({
       work_item_id: packet.work_item_id || null,
       job_id: packet.job_id || null,
       event_type: EVENT_TYPES.KAIZEN_INSIGHTS_SURFACED,
       actor_type: EVENT_ACTORS.SYSTEM,
-      message: `Surfaced ${insights.length} memory/insight item(s) for ${role}${staleDropped > 0 ? ` (${staleDropped} stale dropped)` : ""}`,
+      message: `Surfaced ${memoryAnchorCount} memory-bearing anchor(s) and ${insights.length} insight item(s) for ${role}${staleDropped > 0 ? ` (${staleDropped} stale dropped)` : ""}`,
       event_json: JSON.stringify({
         role,
         review_visible: true,
         telemetry: telemetry || null,
+        memory_surface: memorySurface,
         insights: insights.map((item) => ({
           id: item.id || null,
           memory_id: item.memory_id || item.promoted_memory_id || null,
@@ -1597,11 +1607,12 @@ export async function handoff(input) {
     await timeHandoffStep(packet, "files.source_preload", () => _attachSourcePreload(packet));
   }
 
-  // Step 6: Refresh Kaizen selection after ATLAS/preload adds file context.
-  // Initial packet construction only knows declared scope; ATLAS cards and smart
-  // fallback can reveal additional files where file-linked insights apply.
+  // Step 6: Probe ATLAS memory presence after ATLAS/preload adds file context.
+  // Memory bodies are not prefetched; agents can call memory.get for exact
+  // anchors they are about to rely on.
   const kaizenTelemetry = {};
   packet.run_insights = await timeHandoffStep(packet, "insights.load", () => _loadRelevantInsightsAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry }));
+  packet.memory_surface = await timeHandoffStep(packet, "memory.surface", () => _loadMemorySurfaceAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry }));
   await timeHandoffStep(packet, "insights.memory_prefetch_notice", () => _applyMemoryPrefetchNotice(packet));
   await timeHandoffStep(packet, "insights.log", () => _logSurfacedInsights(packet, recipient, kaizenTelemetry));
 

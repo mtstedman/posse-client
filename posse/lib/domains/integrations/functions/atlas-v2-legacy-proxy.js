@@ -12,7 +12,7 @@ import { noteAtlasCall, unlockGateForDeadAtlasResult } from "./deterministic-mcp
 import { SURFACED_ATLAS_TOOL_DEFS } from "./deterministic-mcp/tool-descriptors.js";
 import { coerceLooseAtlasSymbolArgs, extractAtlasResponseTelemetry, extractAtlasResultArtifacts, validateAtlasPayloadSymbolIds } from "../../atlas/functions/v2/signal-extraction.js";
 import { ATLAS_TOOL_ACTIONS } from "../../atlas/functions/v2/contracts/tool-params.js";
-import { ATLAS_TOOL_PARAM_SCHEMAS, MEMORY_TYPES } from "../../atlas/functions/v2/contracts/tool-schemas.js";
+import { ATLAS_TOOL_PARAM_SCHEMAS } from "../../atlas/functions/v2/contracts/tool-schemas.js";
 import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
 import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
@@ -43,7 +43,7 @@ const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
   "code.window",
   "file.read",
   "review.risk",
-  "memory.query",
+  "memory.get",
   "policy.get",
   "runtime.queryoutput",
   "usage.stats",
@@ -64,8 +64,8 @@ const ATLAS_V2_VIEW_OPTIONAL_ACTIONS = new Set([
   "buffer.status",
   "agent.feedback.query",
   "memory.store",
-  "memory.query",
-  "memory.remove",
+  "memory.get",
+  "memory.feedback",
   "policy.get",
   "policy.set",
   "runtime.execute",
@@ -74,8 +74,6 @@ const ATLAS_V2_VIEW_OPTIONAL_ACTIONS = new Set([
   "scip.ingest",
 ]);
 const ATLAS_V2_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent"]);
-const MEMORY_SURFACE_TASK_TYPES = new Set(MEMORY_TYPES);
-
 let _config = null;           // v2 proxy config: cwd, ledger/view paths, role/job metadata, embedding settings
 let _initPromise = null;
 let _toolSchemas = [];
@@ -676,17 +674,9 @@ function _normalizeToolArgs(toolName, args = {}) {
 
 function sanitizeMemoryArgs(action, input) {
   if (!input || typeof input !== "object") return;
-  if (action === "memory.surface" && input.taskType != null) {
-    const taskType = String(input.taskType || "").trim();
-    if (MEMORY_SURFACE_TASK_TYPES.has(taskType)) input.taskType = taskType;
-    else delete input.taskType;
-  }
-  if ((action === "memory.surface" || action === "memory.query") && Array.isArray(input.types)) {
-    const types = input.types
-      .map((value) => String(value || "").trim())
-      .filter((value) => MEMORY_SURFACE_TASK_TYPES.has(value));
-    if (types.length > 0) input.types = [...new Set(types)];
-    else delete input.types;
+  if (action === "memory.surface") {
+    delete input.taskType;
+    delete input.types;
   }
 }
 
@@ -725,7 +715,7 @@ function coerceLooseSymbolsAlias(action, input) {
   if (!Object.prototype.hasOwnProperty.call(input, "symbols")) return;
   const parsed = parseStringifiedArray(input.symbols) || (Array.isArray(input.symbols) ? input.symbols : null);
   if (!parsed) return;
-  if ((action === "memory.store" || action === "memory.query" || action === "memory.surface") && !input.symbolIds) {
+  if ((action === "memory.store" || action === "memory.get" || action === "memory.surface") && !input.symbolIds) {
     input.symbolIds = parsed;
   } else if (action === "slice.build" && !input.entrySymbols) {
     input.entrySymbols = parsed;
@@ -1147,7 +1137,6 @@ function _isV2BlockingAction(action, call = null) {
     || effective === "buffer.checkpoint"
     || effective === "agent.feedback"
     || effective === "memory.store"
-    || effective === "memory.remove"
     || effective === "policy.set"
     || effective === "runtime.execute";
 }

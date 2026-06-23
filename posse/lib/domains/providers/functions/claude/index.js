@@ -84,7 +84,60 @@ export function scrubClaudeChildEnv(childEnv = {}) {
   delete childEnv.OPENAI_API_KEY;
   delete childEnv.XAI_API_KEY;
   delete childEnv.GITHUB_TOKEN;
+  // Force a blocking MCP attach so the gateway's tools are registered before
+  // the first inference turn. Claude 2.x connects --mcp-config servers async
+  // ("running fully async (nonblocking)") by default, so a fast first turn can
+  // be dispatched before tools/list completes — the attach-under-load race
+  // that surfaces as MCP_ATTACH_PROOF_MISSING / "No such tool available".
+  // MCP_CONNECTION_NONBLOCKING=0 makes the connection blocking. Respect an
+  // explicit operator override if one is already present.
+  // NOTE: we deliberately do NOT set ANTHROPIC_API_KEY here — the child must
+  // keep using the inherited OAuth credentials, not an API key.
+  if (childEnv.MCP_CONNECTION_NONBLOCKING === undefined) {
+    childEnv.MCP_CONNECTION_NONBLOCKING = "0";
+  }
   return childEnv;
+}
+
+// Translate a tool-contract decision + the attached MCP server names into the
+// CLI's positive permission flags ({ toolsArg, allowedToolsArg }). We never emit
+// --dangerously-skip-permissions (refused as root on Linux): --tools pins the
+// built-in surface positively and --allowedTools grants exactly the Posse-owned
+// MCP servers plus any surfaced read/web native tools.
+//
+// toClaudeCliFlags expresses the MCP-active branches as a blocklist
+// (tools === null = "all built-ins minus disallowedTools"). The only built-ins
+// meant to survive that blocklist are the web tools, and only for web-enabled
+// roles (researcher/artificer) — where toClaudeCliFlags strips WebFetch/WebSearch
+// out of disallowedTools. We reconstruct those survivors positively so --tools
+// never silently drops web access (the artificer+MCP+web case, whose null branch
+// precedes its web branch), while still disabling the rest of the native surface
+// (no DesignSync/Workflow/TaskCreate leak a raw blocklist would let through).
+export function buildClaudeToolPermissionArgs(cliToolConfig = {}, mcpServerNames = []) {
+  let toolsArg;
+  if (cliToolConfig.tools != null) {
+    toolsArg = cliToolConfig.tools;
+  } else {
+    const disallowed = new Set(
+      String(cliToolConfig.disallowedTools || "")
+        .split(",").map((t) => t.trim()).filter(Boolean),
+    );
+    toolsArg = ["WebFetch", "WebSearch"].filter((t) => !disallowed.has(t)).join(",");
+  }
+  const allowRules = [];
+  if (cliToolConfig.dangerouslySkipPermissions) {
+    // Previously-bypassed branches surface only read-only (Read/Glob/Grep), web
+    // (WebFetch/WebSearch), or — in the gateway-down fallback — operator-opted-in
+    // autoApprove tools. A bare allow of the surfaced set reproduces the prior
+    // permissiveness without the flag, and unlike the flag it runs as root.
+    if (toolsArg) allowRules.push(toolsArg);
+  } else if (cliToolConfig.allowedTools) {
+    // Scoped branches carry precise Write(...)/Edit(...)/Bash(...) rules; keep
+    // them verbatim so file scoping is preserved (do not widen with bare tools).
+    allowRules.push(cliToolConfig.allowedTools);
+  }
+  for (const name of (mcpServerNames || [])) allowRules.push(`mcp__${name}`);
+  return { toolsArg, allowedToolsArg: allowRules.filter(Boolean).join(",") };
 }
 
 const ISOLATED_SYSTEM_PROMPT = [
@@ -425,16 +478,23 @@ export async function callProvider(promptText, {
       disableSystemTools: disableSystemToolsResolved,
       webToolsEnabled: resolveWebToolsEnabled(),
     });
-    if (cliToolConfig.tools != null) {
-      args.push("--tools", cliToolConfig.tools);
-    }
-    if (cliToolConfig.disallowedTools) {
-      args.push("--disallowedTools", cliToolConfig.disallowedTools);
-    }
-    if (cliToolConfig.allowedTools) {
-      args.push("--allowedTools", cliToolConfig.allowedTools);
-    } else if (cliToolConfig.dangerouslySkipPermissions) {
-      args.push("--dangerously-skip-permissions");
+    // MCP servers are resolved here so their names can drive the permission
+    // allowlist below. The Posse MCP gateway exposes the deterministic and
+    // atlas.* suites from a single process, so do not attach a second ATLAS
+    // MCP server when the gateway is already active.
+    const atlasServedByGateway = !!deterministicReadMcp.active;
+    const mergedMcpServers = {
+      ...(deterministicReadMcp.payload?.mcpServers || {}),
+      ...(atlasServedByGateway || !atlasReadyForMcp ? {} : (atlasMcpPayload?.mcpServers || {})),
+    };
+    const mcpServerNames = Object.keys(mergedMcpServers);
+
+    // Permission route — single, platform-uniform path (never
+    // --dangerously-skip-permissions; see buildClaudeToolPermissionArgs).
+    const { toolsArg, allowedToolsArg } = buildClaudeToolPermissionArgs(cliToolConfig, mcpServerNames);
+    args.push("--tools", toolsArg);
+    if (allowedToolsArg) {
+      args.push("--allowedTools", allowedToolsArg);
     }
 
     if ((role === "dev" && allowWrite) && !cliToolConfig.allowedTools && !cliToolConfig.dangerouslySkipPermissions) {
@@ -448,14 +508,8 @@ export async function callProvider(promptText, {
     }
 
     try {
-      // The Posse MCP gateway exposes deterministic and atlas.* suites from a
-      // single process, so do not attach a second ATLAS MCP server when the
-      // gateway is already active.
-      const atlasServedByGateway = !!deterministicReadMcp.active;
-      const mergedMcpServers = {
-        ...(deterministicReadMcp.payload?.mcpServers || {}),
-        ...(atlasServedByGateway || !atlasReadyForMcp ? {} : (atlasMcpPayload?.mcpServers || {})),
-      };
+      // mergedMcpServers / mcpServerNames are computed above (they drive the
+      // --allowedTools rules); reuse them here to write the --mcp-config.
       logProviderMcpSurfaceTelemetry({
         providerName: "claude",
         role,
@@ -584,6 +638,14 @@ export async function callProvider(promptText, {
 
     const startTime = Date.now();
     const childEnv = scrubClaudeChildEnv(buildRuntimeEnv(providerPaths.projectDir, providerPaths.cwd, process.env));
+    // Clean, Posse-owned provider home from the MCP helper (generic + provider-
+    // keyed). No-op until a `claude` home profile is registered.
+    const providerHomeEnv = deterministicReadMcp.providerHomeEnv
+      || deterministicReadMcp.serverConfig?.providerHomeEnv
+      || null;
+    if (providerHomeEnv?.isolated && providerHomeEnv.envVar) {
+      childEnv[providerHomeEnv.envVar] = providerHomeEnv.home;
+    }
 
     if (selectedExecutionMode === CLAUDE_EXECUTION_MODE_INTERACTIVE) {
       void (async () => {

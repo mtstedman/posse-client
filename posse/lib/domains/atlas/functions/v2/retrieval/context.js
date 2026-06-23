@@ -771,7 +771,7 @@ function nextBestActionFor({ params, cards, memories }) {
   }
   if (params.taskType === "review") return "review.risk";
   if (cards.length > 0) return "code.skeleton";
-  return "memory.query";
+  return "memory.get";
 }
 
 function clampInt(value, min, max, fallback) {

@@ -115,7 +115,6 @@ export const HIDDEN_ATLAS_SURFACE_ACTIONS = Object.freeze(new Set([
   "slice.build",
   "slice.refresh",
   "slice.spillover.get",
-  "memory.surface",
   "runtime.queryOutput",
   "context.summary",
   "usage.stats",
@@ -372,10 +371,10 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "review.risk": { access: "atlas", summary: "Fetch ATLAS semantic diff and risk analysis in one assessor call." },
   "slice.spillover.get": { access: "atlas", summary: "Fetch deferred-edge spillover for an existing slice without rebuilding." },
   "file.read": { access: "atlas", summary: "Bounded file read via ATLAS: offset/limit, search+context, or jsonPath. Honors ETag (ifNoneMatch)." },
-  "memory.store": { access: "atlas", summary: "Store or update a native ATLAS v2 development memory linked to symbols/files." },
-  "memory.query": { access: "atlas", summary: "Search native ATLAS v2 memories by text, type, tags, linked symbols, or files." },
-  "memory.remove": { access: "atlas", summary: "Soft-delete a native ATLAS v2 memory." },
-  "memory.flag": { access: "atlas", summary: "Flag a native ATLAS v2 memory stale with an evidence reason (contradicted/anchors_missing/manual)." },
+  "memory.store": { access: "atlas", summary: "Store one rare, verified durable memory linked to exact symbols/files. Title <=120 chars; content <=1200 chars." },
+  "memory.surface": { access: "atlas", summary: "Probe exact symbols/files and return only which anchors have attached memory; no bodies or fuzzy search." },
+  "memory.get": { access: "atlas", summary: "Fetch memories attached to exact symbols or files, normally after memory.surface/prefetch shows those anchors have memory." },
+  "memory.feedback": { access: "atlas", summary: "Issue a simple enum verdict for an existing memory you actually used or checked: used, stale, wrong, or duplicate." },
   "policy.get": { access: "atlas", summary: "Fetch native ATLAS v2 policy for the current repository." },
   "policy.set": { access: "atlas", summary: "Patch native ATLAS v2 policy settings." },
   "usage.stats": { access: "atlas", summary: "Report native ATLAS v2 action usage and estimated token savings." },
@@ -404,7 +403,8 @@ const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
   "review.delta",
   "review.analyze",
   "review.risk",
-  "memory.query",
+  "memory.surface",
+  "memory.get",
   "policy.get",
   "usage.stats",
 ]);
@@ -512,7 +512,9 @@ export const MEANINGFUL_ATLAS_ACTIONS = new Set([
   "review.delta",
   "review.analyze",
   "review.risk",
-  "memory.query",
+  "memory.surface",
+  "memory.get",
+  "memory.feedback",
 ]);
 
 export const GATED_NATIVE_TOOLS = new Set([
@@ -1030,11 +1032,10 @@ const ATLAS_MUTATING_ACTIONS = new Set([
   "buffer.checkpoint",
   "file.write",
   "index.refresh",
-  "memory.remove",
-  // memory.store and memory.flag are intentionally NOT here: curating a
+  // memory.store and memory.feedback are intentionally NOT here: curating a
   // development memory is not a repo mutation (Posse `write` = repo write).
-  // They are surfaced per-route via the route tool-lists (store: researcher;
-  // flag: assessor) rather than blocked as mutating actions.
+  // They are surfaced per-route via the route tool-lists (store: assessor;
+  // feedback: assessor/dev/planner/research roles) rather than blocked as mutating actions.
   "policy.set",
   "repo.register",
   "runtime.execute",

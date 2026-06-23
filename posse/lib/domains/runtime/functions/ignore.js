@@ -142,6 +142,19 @@ export function ensurePosseRuntimeGitignore(projectDir, {
   return appendMissingLines(gitignorePath, entries);
 }
 
+export function isPosseRuntimeOnlyGitignoreContent(projectDir, content, {
+  anchorDir = projectDir,
+} = {}) {
+  const lines = String(content || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0 || !lines.includes(POSSE_RUNTIME_IGNORE_HEADER)) return false;
+
+  const allowed = new Set(buildPosseRuntimeIgnoreEntries(projectDir, { anchorDir }));
+  return lines.every((line) => allowed.has(line));
+}
+
 export async function ensurePosseRuntimeGitignoreAsync(projectDir, {
   updateManagedBlock = false,
 } = {}) {
@@ -181,6 +194,39 @@ async function gitOutputAsync(args, cwd) {
     windowsHide: true,
   });
   return String(stdout || "").trim();
+}
+
+export async function stagePosseRuntimeGitignoreForInitialCommit(projectDir, {
+  git = gitOutputAsync,
+} = {}) {
+  const projectRoot = path.resolve(projectDir || process.cwd());
+  try {
+    await git(["rev-parse", "--git-dir"], projectRoot);
+  } catch {
+    return { staged: false, skipped: "not_git_repo" };
+  }
+
+  try {
+    await git(["rev-parse", "HEAD"], projectRoot);
+    return { staged: false, skipped: "head_exists" };
+  } catch {
+    // No HEAD yet; this is the only state where bootstrap staging is needed.
+  }
+
+  const gitignorePath = path.join(projectRoot, ".gitignore");
+  let content;
+  try {
+    content = await fs.promises.readFile(gitignorePath, "utf-8");
+  } catch {
+    return { staged: false, skipped: "missing" };
+  }
+
+  if (!isPosseRuntimeOnlyGitignoreContent(projectRoot, content)) {
+    return { staged: false, skipped: "not_posse_runtime_only" };
+  }
+
+  await git(["add", "--", ".gitignore"], projectRoot);
+  return { staged: true };
 }
 
 function fastInfoExcludePath(projectRoot) {

@@ -14,6 +14,12 @@ import {
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { createEnrichmentCache, triggerInsightPromotion } from "./insight-promotion.js";
 
+const KAIZEN_RUN_INSIGHTS_ENABLED = false;
+
+export function kaizenRunInsightsEnabled() {
+  return KAIZEN_RUN_INSIGHTS_ENABLED;
+}
+
 function _safeParseJson(str) {
   if (!str) return null;
   try { return JSON.parse(str); } catch { return null; }
@@ -107,6 +113,7 @@ function _storeAndPromote(insight, { job, payload, attempts = [], verdicts = [],
 }
 
 export function extractWorkItemInsights(workItemId) {
+  if (!kaizenRunInsightsEnabled()) return;
   try {
     const workItemStatus = getWorkItem(workItemId)?.status || null;
     const enrichmentCache = createEnrichmentCache();
@@ -314,6 +321,7 @@ export function extractWorkItemInsights(workItemId) {
 export function refreshAndExtractInsights(workItemId) {
   const previousStatus = getWorkItem(workItemId)?.status || null;
   const refreshedStatus = refreshWorkItemStatus(workItemId);
+  if (!kaizenRunInsightsEnabled()) return;
   const currentStatus = refreshedStatus || getWorkItem(workItemId)?.status || null;
   if ((currentStatus === "complete" || currentStatus === "failed") && currentStatus !== previousStatus) {
     extractWorkItemInsights(workItemId);

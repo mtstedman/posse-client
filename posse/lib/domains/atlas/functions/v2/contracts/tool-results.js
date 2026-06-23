@@ -165,7 +165,7 @@
 
 /**
  * @typedef {Object} EntitySearchHit
- * @property {"memory" | "feedback"} entity
+ * @property {"feedback"} entity
  * @property {string} id
  * @property {string} title
  * @property {string} [snippet]
@@ -211,7 +211,7 @@
  * @property {number} [ledgerSeq]
  * @property {{ enabled: boolean, provider: string | null, backend?: string | null, indexedCount?: number, reason?: string | null }} [embeddings]
  * @property {{ warnings: string[] }} [diagnostics]
- * @property {RepoStatusMemoryHit[]} [surfacedMemories]
+ * @property {MemorySurfaceData} [surfacedMemories]
  * @property {{ healthScore: number, components: Record<string, number>, current: boolean, reason: string | null }} [health]
  * @property {{ byLang: Record<string, number>, byKind: Record<string, number>, tokenMetrics: Record<string, number> }} [index]
  * @property {{ total: number, resolved: number, unresolved: number, unresolvedRate: number, internal?: number, external?: number, runtimeExternal?: number, importScopedExternal?: number, dynamicReceiver?: number, localUnbound?: number, selfReceiver?: number, trueUnresolved?: number, callTotal?: number, callResolved?: number, callResolutionRate?: number, taxonomy?: Record<string, number> | null, taxonomyUnavailable?: string }} [edges]
@@ -253,13 +253,6 @@
  * @property {{ totalFeedback: number, usefulFeedback?: number, missingFeedback?: number, topMissingSymbols: { symbolId: SymbolId, count: number }[] } | undefined} feedback
  * @property {Record<string, unknown>} [dataQuality]
  * @property {{ warnings: string[] }} diagnostics
- */
-
-/**
- * @typedef {Object} RepoStatusMemoryHit
- * @property {string} id
- * @property {string} title
- * @property {string} summary
  */
 
 /**
@@ -385,7 +378,7 @@
 /**
  * @typedef {Object} SymbolSearchData
  * @property {SymbolHit[]} items
- * @property {EntitySearchHit[]} [entities]   Optional opt-in ledger entity hits.
+ * @property {EntitySearchHit[]} [entities]   Optional opt-in entity hits.
  * @property {number} total
  * @property {boolean} truncated
  */
@@ -597,7 +590,7 @@
  * @property {SliceWireFormat} wireFormat
  * @property {PackedSliceData} [packed]       Present when wireFormat.kind === "packed".
  * @property {SliceFrontierItem[]} [frontier] Top expansion candidates not returned in `cards`.
- * @property {SurfacedMemory[]} [memories]    Non-critical memory enrichment when native memory is available.
+ * @property {MemorySurfaceData} [memorySurface] Non-critical anchor-presence probe when native memory is available.
  */
 
 /**
@@ -902,31 +895,6 @@
 // ============================================================================
 
 /**
- * @typedef {Object} SurfacedMemory
- * @property {string} memoryId
- * @property {string} [memory_id]
- * @property {string} repoId
- * @property {string} type
- * @property {string} title
- * @property {string} content
- * @property {string[]} tags
- * @property {number} confidence
- * @property {string} createdAt
- * @property {string} updatedAt
- * @property {boolean} stale
- * @property {string | null} [staleReason]    'age' | 'anchors_missing' | 'contradicted' | 'manual' when stale.
- * @property {string | null} [contradictedAt]
- * @property {number} [contradictionCount]
- * @property {string[]} [missingAnchors]      Anchored files absent from the indexed tree (partial anchor loss).
- * @property {SymbolId[]} linkedSymbols
- * @property {SymbolId[]} symbolIds
- * @property {string[]} fileRelPaths
- * @property {number} score
- * @property {SymbolId[]} matchedSymbols
- * @property {string[]} matchedFiles
- */
-
-/**
  * @typedef {Object} MemoryStoreData
  * @property {boolean} ok
  * @property {string} memoryId
@@ -938,30 +906,41 @@
  */
 
 /**
- * @typedef {Object} MemoryQueryData
- * @property {string} repoId
- * @property {SurfacedMemory[]} memories
- * @property {number} total
- * @property {boolean} [hasMore]
- * @property {number | null} [nextOffset]
+ * @typedef {Object} MemorySurfaceData
+ * @property {SymbolId[]} symbols
+ * @property {string[]} files
  */
 
 /**
- * @typedef {Object} MemoryRemoveData
- * @property {boolean} ok
+ * @typedef {Object} MemoryGetRow
  * @property {string} memoryId
  * @property {string} [memory_id]
+ * @property {string} title
+ * @property {string} content
+ * @property {string} source
+ * @property {string} createdAt
+ * @property {string} updatedAt
+ * @property {SymbolId[]} symbolIds
+ * @property {string[]} fileRelPaths
  */
 
 /**
- * @typedef {Object} MemoryFlagData
+ * @typedef {Object} MemoryGetData
+ * @property {Record<string, MemoryGetRow[]>} symbols
+ * @property {Record<string, MemoryGetRow[]>} files
+ */
+
+/**
+ * @typedef {Object} MemoryFeedbackData
  * @property {boolean} ok
  * @property {string} memoryId
  * @property {string} [memory_id]
- * @property {boolean} stale
- * @property {"contradicted" | "anchors_missing" | "manual"} staleReason
- * @property {number} contradictionCount
+ * @property {"used" | "stale" | "wrong" | "duplicate"} verdict
  * @property {string} [detail]
+ * @property {boolean} [stale]
+ * @property {string} [staleReason]
+ * @property {boolean} [recorded]
+ * @property {number} [wrongCount]
  */
 
 /**
@@ -1137,10 +1116,9 @@
  *   | ToolResultEnvelope<PrRiskData>           & { action: "review.risk" }
  *   | ToolResultEnvelope<FileReadData>         & { action: "file.read" }
  *   | ToolResultEnvelope<MemoryStoreData>      & { action: "memory.store" }
- *   | ToolResultEnvelope<MemoryQueryData>      & { action: "memory.query" }
- *   | ToolResultEnvelope<MemoryRemoveData>     & { action: "memory.remove" }
- *   | ToolResultEnvelope<MemoryFlagData>       & { action: "memory.flag" }
- *   | ToolResultEnvelope<MemoryQueryData>      & { action: "memory.surface" }
+ *   | ToolResultEnvelope<MemoryGetData>        & { action: "memory.get" }
+ *   | ToolResultEnvelope<MemoryFeedbackData>   & { action: "memory.feedback" }
+ *   | ToolResultEnvelope<MemorySurfaceData>    & { action: "memory.surface" }
  *   | ToolResultEnvelope<PolicyData>           & { action: "policy.get" }
  *   | ToolResultEnvelope<PolicyData>           & { action: "policy.set" }
  *   | ToolResultEnvelope<UsageStatsData>       & { action: "usage.stats" }

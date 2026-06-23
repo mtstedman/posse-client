@@ -44,6 +44,7 @@ import { getAuthMethod, hasCredentials, resolveCopilotAuth } from "./auth-state.
 import { buildCopilotArgs, buildCopilotChildEnv, buildCopilotSpawn } from "./launch.js";
 import { classifyCopilotFailure, parseCopilotErrorBackoff } from "./failure-classification.js";
 import { buildCopilotCloseStats, resolveCopilotStallTimeoutMs } from "./close-stats.js";
+import { terminateSpawnedProcess, trackSpawnedProcess } from "../shared/windows-spawn.js";
 import {
   consumeCopilotLine,
   createAccumulator,
@@ -79,6 +80,12 @@ export function tripRateLimit(backoffSec = 60, reason = "") {
 export function parseErrorBackoff(err) {
   return parseCopilotErrorBackoff(err);
 }
+
+function requestCopilotChildTermination(proc, { platform = process.platform, scheduleForceKill = null } = {}) {
+  terminateSpawnedProcess(proc, { force: false, platform });
+  if (typeof scheduleForceKill === "function") scheduleForceKill();
+}
+
 // ---------------------------------------------------------------------------
 // callProvider
 // ---------------------------------------------------------------------------
@@ -157,6 +164,10 @@ export function callProvider(promptText, opts = {}) {
         windowsHide: true,
         windowsVerbatimArguments: launch.windowsVerbatimArguments,
       });
+      trackSpawnedProcess(child, launch.command, {
+        label: `copilot:${role || "provider"}`,
+        cwd: workingDir,
+      });
     } catch (spawnErr) {
       const err = new Error(`Failed to spawn copilot: ${spawnErr?.message || spawnErr}`);
       err.code = "COPILOT_SPAWN_FAILED";
@@ -165,6 +176,9 @@ export function callProvider(promptText, opts = {}) {
     }
 
     if (!child || !child.stdout || !child.stderr) {
+      requestCopilotChildTermination(child, {
+        scheduleForceKill: () => terminateSpawnedProcess(child, { force: true }),
+      });
       reject(new Error("Copilot child process did not start cleanly (no stdio handles)"));
       return;
     }
@@ -178,14 +192,27 @@ export function callProvider(promptText, opts = {}) {
     let killedByAbort = false;
     /** @type {NodeJS.Timeout | null} */
     let stallTimer = null;
+    const forceKillTimers = new Set();
     const stallTimeoutMs = resolveCopilotStallTimeoutMs(stallTimeout);
+    const scheduleForceKill = () => {
+      const timer = setTimeout(() => {
+        forceKillTimers.delete(timer);
+        terminateSpawnedProcess(child, { force: true });
+      }, 3000);
+      timer.unref?.();
+      forceKillTimers.add(timer);
+    };
+    const clearForceKillTimers = () => {
+      for (const timer of forceKillTimers) clearTimeout(timer);
+      forceKillTimers.clear();
+    };
 
     const resetStallTimer = () => {
       if (stallTimer) clearTimeout(stallTimer);
       if (stallTimeoutMs > 0) {
         stallTimer = setTimeout(() => {
           killedByStall = true;
-          try { child?.kill("SIGTERM"); } catch { /* ignore */ }
+          requestCopilotChildTermination(child, { scheduleForceKill });
         }, stallTimeoutMs);
       }
     };
@@ -193,7 +220,7 @@ export function callProvider(promptText, opts = {}) {
 
     const onAbort = () => {
       killedByAbort = true;
-      try { child?.kill("SIGTERM"); } catch { /* ignore */ }
+      requestCopilotChildTermination(child, { scheduleForceKill });
     };
     if (abortSignal) {
       if (abortSignal.aborted) onAbort();
@@ -231,6 +258,7 @@ export function callProvider(promptText, opts = {}) {
 
     child.on("error", (err) => {
       if (stallTimer) clearTimeout(stallTimer);
+      clearForceKillTimers();
       const wrapped = new Error(`Copilot child process error: ${err?.message || err}`);
       wrapped.code = "COPILOT_CHILD_ERROR";
       wrapped.stdout = stdout;
@@ -240,6 +268,7 @@ export function callProvider(promptText, opts = {}) {
 
     child.on("close", (code) => {
       if (stallTimer) clearTimeout(stallTimer);
+      clearForceKillTimers();
       if (abortSignal) {
         try { abortSignal.removeEventListener("abort", onAbort); } catch { /* ignore */ }
       }
@@ -321,3 +350,4 @@ export const __testBuildCopilotCloseStats = buildCopilotCloseStats;
 export const __testBuildCopilotChildEnv = buildCopilotChildEnv;
 export const __testBuildCopilotSpawn = buildCopilotSpawn;
 export const __testResolveCopilotStallTimeoutMs = resolveCopilotStallTimeoutMs;
+export const __testRequestCopilotChildTermination = requestCopilotChildTermination;

@@ -278,6 +278,12 @@ export async function callProvider(promptText, {
     const configRoute = prepareCodexConfigForSpawn(combinedConfigOverrides, {
       authMode: preferredAuthMode,
     });
+    // Clean, Posse-owned provider home computed generically by the MCP helper
+    // (so it applies to every provider). The Windows config-spill path already
+    // owns CODEX_HOME, so only apply the isolated home when it did not.
+    const providerHomeEnv = deterministicReadMcp.providerHomeEnv
+      || deterministicReadMcp.serverConfig?.providerHomeEnv
+      || null;
     const temp = makeTempOutputFile();
     const cleanupRunTemps = (mcpAttachProofContext = null) => {
       const releaseResult = cleanupDeterministicMcpSession();
@@ -375,6 +381,7 @@ export async function callProvider(promptText, {
     delete childEnv.XAI_API_KEY;
     delete childEnv.GITHUB_TOKEN;
     if (configRoute.codexHome) childEnv.CODEX_HOME = configRoute.codexHome;
+    else if (providerHomeEnv?.isolated && providerHomeEnv.envVar) childEnv[providerHomeEnv.envVar] = providerHomeEnv.home;
 
     const launch = buildWindowsSpawn(codexCmd, args);
     const startTime = Date.now();

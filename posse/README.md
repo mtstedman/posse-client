@@ -232,6 +232,13 @@ role prompts, shared contracts, role-contract mappings, and skill bodies are
 fetched at boot and kept in process memory only. Do not add a local
 `prompts/` mirror; edit `posse-remote/prompts/` when changing agent behavior.
 
+The remote prompt and compiler service is an intentional fail-closed boundary.
+`run` and `go` should not continue from a persisted "last good" prompt bundle
+when `posse-remote` is unavailable: paid prompt, skill, contract, and routing
+logic belongs behind the authenticated remote service or in native binaries.
+Persist only diagnostic metadata such as versions or timestamps, not reusable
+prompt/skill bodies that would let a run proceed offline.
+
 ## Task Modes And Artifacts
 
 Jobs default to `task_mode: "code"`. Non-code work uses scoped artifact roots

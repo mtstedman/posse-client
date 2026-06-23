@@ -34,7 +34,7 @@ import {
 import { contextBuild, contextSummary, agentFeedback, agentFeedbackQuery } from "./context.js";
 import { fileRead, fileReadAsync } from "./file-read.js";
 import { deltaGet, prRiskAnalyze, prRisk } from "./blast-radius.js";
-import { memoryStore, memoryQuery, memoryRemove, memorySurface, memoryFlag } from "./memory.js";
+import { memoryStore, memorySurface, memoryGet, memoryFeedback } from "./memory.js";
 import { policyGet, policySet } from "./policy.js";
 import { usageStats, recordAtlasUsageEvent } from "./usage.js";
 import { runtimeExecute, runtimeQueryOutput } from "./runtime.js";
@@ -296,12 +296,10 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ ((ctx.asyncNativeRedaction ? fileReadAsync : fileRead)({ versionId: ctx.versionId, params: call, readFile, view: ctx.view }));
     case "memory.store":
       return /** @type {any} */ (memoryStore({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
-    case "memory.query":
-      return /** @type {any} */ (memoryQuery({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
-    case "memory.remove":
-      return /** @type {any} */ (memoryRemove({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
-    case "memory.flag":
-      return /** @type {any} */ (memoryFlag({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
+    case "memory.get":
+      return /** @type {any} */ (memoryGet({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId, view: ctx.view }));
+    case "memory.feedback":
+      return /** @type {any} */ (memoryFeedback({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "memory.surface":
       // The view (when present) lets surfacing validate file anchors against
       // the indexed tree; surfacing still works ledger-only without it.
@@ -342,10 +340,13 @@ function dispatchImpl(call, ctx) {
 
 function validationErrorCodeForAction(action, errors = []) {
   if (
-    action === "memory.flag"
-    && errors.some((error) => error?.path === "$.reason" && ["enum", "required"].includes(String(error?.code || "")))
+    action === "memory.feedback"
+    && errors.some((error) =>
+      (error?.path === "$.reason" || error?.path === "$.verdict")
+      && ["enum", "required"].includes(String(error?.code || ""))
+    )
   ) {
-    return "invalid_flag_reason";
+    return "invalid_memory_feedback_verdict";
   }
   return "invalid_params";
 }
@@ -370,7 +371,8 @@ const GATEWAY_ACTIONS = Object.freeze({
     "review.risk",
     "repo.status",
     "repo.quality",
-    "memory.query",
+    "memory.surface",
+    "memory.get",
     "file.read",
   ]),
   code: new Set([
@@ -404,9 +406,7 @@ const GATEWAY_ACTIONS = Object.freeze({
     "buffer.checkpoint",
     "buffer.status",
     "memory.store",
-    "memory.query",
-    "memory.remove",
-    "memory.flag",
+    "memory.feedback",
   ]),
 });
 

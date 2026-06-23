@@ -7,13 +7,18 @@ import {
   getInsights,
   getRecentJobsByFiles,
   getRecentWorkItemSummaries,
-  hasPromotedInsightMemories,
 } from "../../../queue/functions/index.js";
 import {
   HANDOFF_MEMORY_PREFETCH_ORIGIN,
   callAtlasMemoryAction,
 } from "../../../integrations/functions/atlas-memory.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
+
+const KAIZEN_RUN_INSIGHTS_SURFACE_ENABLED = false;
+
+export function kaizenRunInsightsSurfaceEnabled() {
+  return KAIZEN_RUN_INSIGHTS_SURFACE_ENABLED;
+}
 
 function collectInsightFilePaths(payload) {
   const paths = [];
@@ -55,14 +60,13 @@ function settingValue(settingReader, key) {
 }
 
 function memorySurfaceEnabled({
-  hasPromotedMemories = false,
   settingReader = getSetting,
 } = {}) {
   const configured = settingValue(settingReader, SETTING_KEYS.ATLAS_MEMORY_SURFACE) ?? "on";
   const raw = String(configured).trim().toLowerCase();
   if (["1", "true", "on", "yes"].includes(raw)) return true;
   if (["0", "false", "off", "no"].includes(raw)) return false;
-  if (raw === "auto") return !!hasPromotedMemories;
+  if (raw === "auto") return true;
   return false;
 }
 
@@ -115,12 +119,36 @@ function surfacedAtlasMemoryInsights(rows = []) {
   );
 }
 
-export function buildMemoryPrefetchNotice(rows = []) {
+function normalizeMemorySurface(value = {}) {
+  const symbols = Array.isArray(value?.symbols) ? value.symbols.map(String).filter(Boolean) : [];
+  const files = Array.isArray(value?.files) ? value.files.map(String).filter(Boolean) : [];
+  return {
+    symbols: [...new Set(symbols)],
+    files: [...new Set(files)],
+  };
+}
+
+export function buildMemoryPrefetchNotice(surfaceOrRows = []) {
+  if (!Array.isArray(surfaceOrRows)) {
+    const surface = normalizeMemorySurface(surfaceOrRows);
+    const count = surface.symbols.length + surface.files.length;
+    if (count <= 0) return null;
+    const lines = [
+      "ATLAS MEMORY PREFETCH:",
+      `Memory is attached to ${count} scoped anchor(s).`,
+    ];
+    if (surface.symbols.length > 0) lines.push(`Symbols: ${surface.symbols.slice(0, 12).join(", ")}`);
+    if (surface.files.length > 0) lines.push(`Files: ${surface.files.slice(0, 12).join(", ")}`);
+    lines.push("Use memory.get only for anchors you are about to rely on; no memory bodies were prefetched.");
+    lines.push("Do not perform broad memory search, and do not fetch every listed anchor unless each is directly relevant.");
+    return lines.join("\n");
+  }
+  const rows = surfaceOrRows;
   const count = surfacedAtlasMemoryInsights(rows).length;
   if (count <= 0) return null;
   return [
     "ATLAS MEMORY PREFETCH:",
-    `${count} relevant promoted memory item(s) were surfaced during handoff.`,
+    `${count} relevant ATLAS memory item(s) were surfaced during handoff.`,
     "Treat those historical insight entries as the first memory pass; do not run another broad memory lookup just to rediscover them.",
     "Query ATLAS memory again only for a specific missing-memory question.",
   ].join("\n");
@@ -133,16 +161,48 @@ function currentWorkItemLocalInsights(rows = [], payload = {}, limit = 6) {
     .slice(0, limit);
 }
 
-function memorySurfaceArgs({ symbolIds = [], fileRelPaths = [], limit = 6 } = {}) {
-  const args = {
-    limit: Math.max(1, Math.min(5, limit)),
-  };
+function memorySurfaceArgs({ symbolIds = [], fileRelPaths = [] } = {}) {
+  const args = {};
   if (symbolIds.length > 0) args.symbolIds = symbolIds.slice(0, 100);
   if (fileRelPaths.length > 0) args.fileRelPaths = fileRelPaths.slice(0, 100);
   return args;
 }
 
+export async function loadMemorySurfaceAsync(role, payload, { cwd = process.cwd(), telemetry = null } = {}) {
+  const surfaceEnabled = memorySurfaceEnabled();
+  recordTelemetry(telemetry, {
+    surface_enabled: surfaceEnabled,
+    role_supported: ["planner", "researcher", "dev", "fix", "assessor"].includes(role),
+    memory_surface_symbols: 0,
+    memory_surface_files: 0,
+  });
+  if (!surfaceEnabled || !["planner", "researcher", "dev", "fix", "assessor"].includes(role)) {
+    return { symbols: [], files: [] };
+  }
+  const symbolIds = collectInsightSymbolIds(payload);
+  const fileRelPaths = collectInsightFilePaths(payload);
+  if (symbolIds.length === 0 && fileRelPaths.length === 0) {
+    return { symbols: [], files: [] };
+  }
+  try {
+    const result = await callAtlasMemoryAction("memory.surface", memorySurfaceArgs({
+      symbolIds,
+      fileRelPaths,
+    }), { cwd, origin: HANDOFF_MEMORY_PREFETCH_ORIGIN });
+    const surface = normalizeMemorySurface(result?.json?.data || result?.json || {});
+    recordTelemetry(telemetry, {
+      memory_surface_symbols: surface.symbols.length,
+      memory_surface_files: surface.files.length,
+    });
+    return surface;
+  } catch (err) {
+    recordTelemetry(telemetry, { error: String(err?.message || err || "memory_surface_failed").slice(0, 200) });
+    return { symbols: [], files: [] };
+  }
+}
+
 export function loadRelevantInsights(role, payload) {
+  if (!kaizenRunInsightsSurfaceEnabled()) return [];
   try {
     const filePaths = collectInsightFilePaths(payload);
 
@@ -202,58 +262,25 @@ function recordTelemetry(telemetry, patch) {
 }
 
 export async function loadRelevantInsightsAsync(role, payload, { cwd = process.cwd(), limit = 6, telemetry = null } = {}) {
+  if (!kaizenRunInsightsSurfaceEnabled()) {
+    recordTelemetry(telemetry, {
+      kaizen_run_insights_surface_enabled: false,
+      surfaced: 0,
+    });
+    return [];
+  }
+  void cwd;
   const local = loadRelevantInsights(role, payload);
   const scopedLocal = currentWorkItemLocalInsights(local, payload, limit);
-  const surfaceEnabled = memorySurfaceEnabled({
-    hasPromotedMemories: hasPromotedInsightMemories(),
-  });
   recordTelemetry(telemetry, {
-    surface_enabled: surfaceEnabled,
+    kaizen_run_insights_surface_enabled: kaizenRunInsightsSurfaceEnabled(),
+    surface_enabled: memorySurfaceEnabled(),
     role_supported: ["planner", "researcher", "dev", "fix", "assessor"].includes(role),
     atlas_returned: 0,
     stale_dropped: 0,
-    surfaced: 0,
+    surfaced: scopedLocal.length,
   });
-  if (!surfaceEnabled || !["planner", "researcher", "dev", "fix", "assessor"].includes(role)) {
-    recordTelemetry(telemetry, { surfaced: scopedLocal.length });
-    return scopedLocal;
-  }
-  const symbolIds = collectInsightSymbolIds(payload);
-  const fileRelPaths = collectInsightFilePaths(payload);
-  if (symbolIds.length === 0 && fileRelPaths.length === 0) {
-    recordTelemetry(telemetry, { surfaced: scopedLocal.length });
-    return scopedLocal;
-  }
-  try {
-    const result = await callAtlasMemoryAction("memory.surface", memorySurfaceArgs({
-      symbolIds,
-      fileRelPaths,
-      limit,
-    }), { cwd, origin: HANDOFF_MEMORY_PREFETCH_ORIGIN });
-    const rawMemories = Array.isArray(result?.json?.memories) ? result.json.memories.map(normalizeSurfaceMemory) : [];
-    const memories = nonStaleSurfaceMemories(rawMemories);
-    recordTelemetry(telemetry, {
-      atlas_returned: rawMemories.length,
-      stale_dropped: rawMemories.length - memories.length,
-    });
-    if (memories.length === 0) {
-      recordTelemetry(telemetry, { surfaced: scopedLocal.length });
-      return scopedLocal;
-    }
-    const combined = [...scopedLocal.slice(0, 2), ...memories];
-    const seen = new Set();
-    const dedup = combined.filter((row) => {
-      const key = row.memory_id ? `memory:${row.memory_id}` : `insight:${row.id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    }).slice(0, limit);
-    recordTelemetry(telemetry, { surfaced: dedup.length });
-    return dedup;
-  } catch (err) {
-    recordTelemetry(telemetry, { error: String(err?.message || err || "memory_surface_failed").slice(0, 200), surfaced: scopedLocal.length });
-    return scopedLocal;
-  }
+  return scopedLocal;
 }
 
 export function buildStep0Context(role, payload) {
@@ -301,6 +328,8 @@ export const __test = {
   collectInsightFilePaths,
   collectInsightSymbolIds,
   currentWorkItemLocalInsights,
+  kaizenRunInsightsSurfaceEnabled,
+  normalizeMemorySurface,
   buildMemoryPrefetchNotice,
   memorySurfaceArgs,
   memorySurfaceEnabled,

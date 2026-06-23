@@ -37,7 +37,7 @@ const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
   "code.window",
   "file.read",
   "review.risk",
-  "memory.query",
+  "memory.get",
   "policy.get",
   "runtime.queryoutput",
   "usage.stats",
@@ -52,7 +52,7 @@ const ATLAS_BLOCKING_ACTIONS = new Set([
   "buffer.checkpoint",
   "agent.feedback",
   "memory.store",
-  "memory.remove",
+  "memory.feedback",
   "policy.set",
   "runtime.execute",
 ]);
@@ -154,7 +154,7 @@ function directReadEligible(action, args = {}) {
   if (ATLAS_BLOCKING_ACTIONS.has(action)) return false;
   if (gatewayEffectiveAction(action, args) !== action) return false;
   if (String(action || "").startsWith("buffer.") || String(action || "").startsWith("runtime.")) return false;
-  if (action === "memory.store" || action === "memory.remove" || action === "memory.flag") return false;
+  if (action === "memory.store" || action === "memory.feedback") return false;
   if (action === "policy.set" || action === "agent.feedback") return false;
   return true;
 }

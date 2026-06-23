@@ -216,6 +216,7 @@ export function buildCodexDeterministicReadConfigOverrides(role, cwd, {
     configOverrides,
     serverConfig,
     serverKey,
+    providerHomeEnv: serverConfig.providerHomeEnv || null,
   };
 }
 
@@ -306,6 +307,7 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     configOverrides,
     serverConfig,
     serverKey,
+    providerHomeEnv: serverConfig.providerHomeEnv || null,
   };
 }
 

@@ -36,10 +36,31 @@ function safeIdPart(value) {
   return String(value || "").replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 
+// Unix domain socket paths are capped at ~108 bytes (sockaddr_un.sun_path). A
+// long TMPDIR (some systemd/CI/sandbox setups) can push the default path past
+// that and make listen() fail with ENAMETOOLONG. Keep the bound path short.
+const UNIX_SOCKET_PATH_MAX = 100;
+
+function shortenUnixSocketPath(candidate, suffix) {
+  if (Buffer.byteLength(candidate) <= UNIX_SOCKET_PATH_MAX) return candidate;
+  const shortId = crypto.createHash("sha1").update(String(suffix)).digest("hex").slice(0, 16);
+  // POSIX-only path (this branch never runs on win32); keep forward slashes
+  // regardless of the host so the bound socket path is deterministic.
+  for (const base of ["/tmp", "/var/tmp"]) {
+    const short = path.posix.join(base, `posse-mcp-${shortId}.sock`);
+    if (Buffer.byteLength(short) <= UNIX_SOCKET_PATH_MAX) return short;
+  }
+  return candidate; // best effort; listen() will surface any residual error
+}
+
+export function __testShortenUnixSocketPath(candidate, suffix) {
+  return shortenUnixSocketPath(candidate, suffix);
+}
+
 function defaultPipePath(bootId) {
   const suffix = `${process.pid}-${safeIdPart(bootId)}`;
   if (process.platform === "win32") return `\\\\.\\pipe\\posse-mcp-owner-${suffix}`;
-  return path.join(os.tmpdir(), `posse-mcp-owner-${suffix}.sock`);
+  return shortenUnixSocketPath(path.join(os.tmpdir(), `posse-mcp-owner-${suffix}.sock`), suffix);
 }
 
 function sendJson(res, status, body) {

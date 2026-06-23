@@ -15,7 +15,6 @@ export function agentHiddenReadablePathReason(value) {
   const normalized = normalizeAgentHiddenRelPath(value).toLowerCase();
   if (!normalized) return null;
   const parts = pathParts(normalized);
-  if (parts[0] === "config") return "config directory is hidden from agent file tools";
   if (parts.includes(".gitignore")) return ".gitignore files are hidden from agent file tools";
   return null;
 }

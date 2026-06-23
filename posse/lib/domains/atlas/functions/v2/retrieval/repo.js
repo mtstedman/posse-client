@@ -11,7 +11,7 @@ import { View as ViewClass } from "../../../classes/v2/View.js";
 import { ViewBuilder } from "../../../classes/v2/ViewBuilder.js";
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 import { childEmbeddingModelDirName } from "../../../classes/v2/ChildEmbeddingIndex.js";
-import { embeddingsRoot, ledgerDbPath, mainViewPath } from "../runtime-paths.js";
+import { embeddingsRoot, ledgerDbPath, mainViewPath, memoryDbPathForLedgerDb } from "../runtime-paths.js";
 import { refresh as systemAtlasRefresh } from "../../../../system/functions/atlas.js";
 import { knownLanguageTags, loadFailureFor, parserFor } from "../parser/treesitter/loader.js";
 import { openEmbeddingResources, semanticDispatchEnabled } from "../embeddings/resources.js";
@@ -224,14 +224,14 @@ export function repoStatus({ view, versionId, params, repoId = "default", repoRo
         versionId,
         ledger,
         repoId,
-        params: { limit: 5 },
+        params: {},
       });
-      data.surfacedMemories = surfaced?.ok ? surfaced.data.memories : [];
+      data.surfacedMemories = surfaced?.ok ? surfaced.data : { symbols: [], files: [] };
     } catch {
-      data.surfacedMemories = [];
+      data.surfacedMemories = { symbols: [], files: [] };
     }
   } else if (params.surfaceMemories) {
-    data.surfacedMemories = [];
+    data.surfacedMemories = { symbols: [], files: [] };
   }
   const warnings = data.diagnostics?.warnings || [];
   return okEnvelope({
@@ -294,9 +294,25 @@ function buildMemoryStats(ledger) {
   const db = typeof /** @type {any} */ (ledger)?._unsafeDb === "function"
     ? /** @type {any} */ (ledger)._unsafeDb()
     : null;
-  if (!db) return { memories: 0, feedbackSignals: 0 };
+  const ledgerPath = typeof /** @type {any} */ (ledger)?._dbPath === "function"
+    ? /** @type {any} */ (ledger)._dbPath()
+    : "";
+  const memoryPath = memoryDbPathForLedgerDb(ledgerPath);
+  let memories = db ? countSql(db, "SELECT COUNT(*) AS cnt FROM memories") : 0;
+  if (memoryPath && fs.existsSync(memoryPath)) {
+    let memoryDb = null;
+    try {
+      memoryDb = new Database(memoryPath, { readonly: true, fileMustExist: true });
+      memories = countSql(memoryDb, "SELECT COUNT(*) AS cnt FROM memories");
+    } catch {
+      // Keep repo.status best-effort; memory.surface/get are the source of truth.
+    } finally {
+      try { memoryDb?.close?.(); } catch { /* ignore */ }
+    }
+  }
+  if (!db) return { memories, feedbackSignals: 0 };
   return {
-    memories: countSql(db, "SELECT COUNT(*) AS cnt FROM memories"),
+    memories,
     feedbackSignals: countSql(db, "SELECT COUNT(*) AS cnt FROM feedback_signals"),
   };
 }

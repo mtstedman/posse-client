@@ -37,6 +37,7 @@ const BACKTICK_IDENT_SIGNAL = /`[A-Za-z_$][\w$]*`/;
 // Identifier in call syntax of length 5+ characters, e.g. validate(input). 5+ avoids matching keywords like if/for/do.
 const CALL_IDENT_SIGNAL = /\b[a-zA-Z_$][\w$]{4,}\s*\(/;
 const PROMOTION_TERMINAL_STATUSES = new Set(["promoted", "duplicate", "shadow", "rejected", "failed"]);
+const KAIZEN_TO_ATLAS_PROMOTION_ENABLED = false;
 
 function safeParseJson(value) {
   if (!value) return null;
@@ -290,6 +291,7 @@ function settingValue(settingReader, key) {
 }
 
 function promotionMode({ settingReader = getSetting } = {}) {
+  if (!KAIZEN_TO_ATLAS_PROMOTION_ENABLED) return "off";
   const configured = settingValue(settingReader, SETTING_KEYS.KAIZEN_TO_ATLAS) ?? "shadow";
   const raw = String(configured).trim().toLowerCase();
   if (["1", "true", "on", "write"].includes(raw)) return "write";
@@ -478,32 +480,15 @@ async function storeAtlasMemory(decision, {
     return { ok: false, skipped: client?.skipped || "memory_client_unavailable" };
   }
   decision = await enrichDecisionAnchorsWithAtlas2Slice(decision, { cwd, payload, atlasToolRunner, enrichmentCache });
-  const query = await callAtlasMemoryAction("memory.query", {
-    query: decision.futureAction.slice(0, 220),
-    types: [decision.atlasType],
-    tags: ["posse-kaizen"],
-    symbolIds: decision.anchors.symbolIds,
-    limit: 5,
-    sortBy: "confidence",
-  }, { memoryClient: client }).catch(() => null);
-  const queryJson = query?.json;
-  const duplicate = Array.isArray(queryJson?.memories)
-    ? queryJson.memories.find((memory) => cleanLine(memory?.content, 260).includes(cleanLine(decision.futureAction, 120)))
-    : null;
-  if (duplicate?.memoryId) {
-    return { ok: true, duplicate: true, memoryId: duplicate.memoryId };
-  }
   const stored = await callAtlasMemoryAction("memory.store", {
-    type: decision.atlasType,
     title: decision.title,
     content: decision.content,
-    tags: ["posse-kaizen", decision.memoryType, decision.gate],
-    confidence: decision.confidence,
     symbolIds: decision.anchors.symbolIds,
     fileRelPaths: decision.anchors.fileRelPaths,
   }, { memoryClient: client });
   const storedJson = stored?.json;
   const memoryId = storedJson?.memoryId || storedJson?.memory_id || null;
+  if (storedJson?.deduplicated === true) return { ok: true, duplicate: true, memoryId, raw: storedJson };
   return { ok: !!memoryId || storedJson?.ok === true, memoryId, raw: storedJson };
 }
 
@@ -592,6 +577,7 @@ export const __test = {
   futureActionFor,
   normalizeFileSetKey,
   promotionMode,
+  kaizenToAtlasPromotionEnabled: () => KAIZEN_TO_ATLAS_PROMOTION_ENABLED,
   resetSliceFailureLogCache,
   shouldSkipExistingPromotion,
   atlasTypeForMemoryType,

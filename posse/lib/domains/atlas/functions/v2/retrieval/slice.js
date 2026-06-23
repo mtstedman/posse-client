@@ -357,11 +357,12 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
           params: {
             symbolIds: [...new Set(returnedCards.map((card) => card.symbolId))],
             fileRelPaths: params.editedFiles || [],
-            limit: 5,
           },
         });
-        if (mem?.ok && Array.isArray(mem.data?.memories) && mem.data.memories.length > 0) {
-          data.memories = mem.data.memories;
+        const memoryAnchorCount = (Array.isArray(mem?.data?.symbols) ? mem.data.symbols.length : 0)
+          + (Array.isArray(mem?.data?.files) ? mem.data.files.length : 0);
+        if (mem?.ok && memoryAnchorCount > 0) {
+          data.memorySurface = mem.data;
         }
       } catch {
         // Memory enrichment is intentionally non-critical.

@@ -217,9 +217,9 @@
  * @property {string} query
  * @property {number} [limit]
  * @property {boolean} [semantic]             Enable semantic reranking (embeddings).
- * @property {("symbols" | "memories" | "feedback")[]} [entities]
+ * @property {("symbols" | "feedback")[]} [entities]
  *   Optional entity families to include. Default ["symbols"]; extra families
- *   are returned in SymbolSearchData.entities when ledger-backed FTS is available.
+ *   are returned in SymbolSearchData.entities when feedback FTS is available.
  * @property {"name" | "body" | "either"} [scope] Search symbol names, symbol-body identifier tokens, or both. Default "either".
  * @property {string} [sessionId]             Optional live-buffer overlay namespace.
  */
@@ -479,58 +479,32 @@
 // memory.* — Native development memories
 // ============================================================================
 
-/** @typedef {"decision" | "bugfix" | "task_context" | "pattern" | "convention" | "architecture" | "performance" | "security"} MemoryType */
-
 /**
  * @typedef {Object} MemoryStoreParams
- * @property {string} [repoId]
- * @property {MemoryType} type
  * @property {string} title
  * @property {string} content
- * @property {string[]} [tags]
- * @property {number} [confidence]
  * @property {string[]} [symbolIds]
  * @property {string[]} [fileRelPaths]
  * @property {string} [memoryId]
  */
 
 /**
- * @typedef {Object} MemoryQueryParams
- * @property {string} [repoId]
- * @property {string} [query]
- * @property {MemoryType[]} [types]
- * @property {string[]} [tags]
- * @property {string[]} [symbolIds]
- * @property {string[]} [fileRelPaths]
- * @property {boolean} [staleOnly]
- * @property {number} [limit]
- * @property {number} [offset]
- * @property {"recency" | "confidence" | "score"} [sortBy]
- */
-
-/**
- * @typedef {Object} MemoryRemoveParams
- * @property {string} [repoId]
+ * @typedef {Object} MemoryFeedbackParams
  * @property {string} memoryId
- * @property {boolean} [deleteFile]           Accepted for parity; native v2 has no memory sidecar file to delete.
- */
-
-/**
- * @typedef {Object} MemoryFlagParams
- * @property {string} [repoId]
- * @property {string} memoryId
- * @property {"contradicted" | "anchors_missing" | "manual"} reason
- * @property {string} [detail]                Short evidence note (logged, not stored on the row).
+ * @property {"used" | "stale" | "wrong" | "duplicate"} verdict
+ * @property {string} [detail]                Short evidence note.
  */
 
 /**
  * @typedef {Object} MemorySurfaceParams
- * @property {string} [repoId]
  * @property {string[]} [symbolIds]
  * @property {string[]} [fileRelPaths]
- * @property {MemoryType} [taskType]
- * @property {MemoryType[]} [types]
- * @property {number} [limit]
+ */
+
+/**
+ * @typedef {Object} MemoryGetParams
+ * @property {string[]} [symbolIds]
+ * @property {string[]} [fileRelPaths]
  */
 
 // ============================================================================
@@ -647,9 +621,8 @@
  *   | { action: "review.risk" } & PrRiskParams
  *   | { action: "file.read" } & FileReadParams
  *   | { action: "memory.store" } & MemoryStoreParams
- *   | { action: "memory.query" } & MemoryQueryParams
- *   | { action: "memory.remove" } & MemoryRemoveParams
- *   | { action: "memory.flag" } & MemoryFlagParams
+ *   | { action: "memory.get" } & MemoryGetParams
+ *   | { action: "memory.feedback" } & MemoryFeedbackParams
  *   | { action: "memory.surface" } & MemorySurfaceParams
  *   | { action: "policy.get" } & PolicyGetParams
  *   | { action: "policy.set" } & PolicySetParams
@@ -701,10 +674,9 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "review.risk",
   "file.read",
   "memory.store",
-  "memory.query",
+  "memory.get",
   "memory.surface",
-  "memory.remove",
-  "memory.flag",
+  "memory.feedback",
   "policy.get",
   "policy.set",
   "usage.stats",

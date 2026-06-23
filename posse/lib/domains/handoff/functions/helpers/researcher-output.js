@@ -4,7 +4,6 @@
 
 import { extractJsonResult } from "../../../../shared/format/functions/json.js";
 import { sanitizeAtlasSymbolIdList } from "../../../atlas/functions/v2/symbol-id.js";
-import { MEMORY_TYPES } from "../../../atlas/functions/v2/contracts/tool-schemas.js";
 
 /**
  * Extract the structured researcher appendix from output text.
@@ -33,9 +32,8 @@ export function parseResearcherStructuredOutput(output) {
   return null;
 }
 
-const RESEARCHER_MEMORY_TYPES = new Set(MEMORY_TYPES);
-const RESEARCHER_MEMORY_TITLE_MAX = 160;
-const RESEARCHER_MEMORY_CONTENT_MAX = 2000;
+const RESEARCHER_MEMORY_TITLE_MAX = 120;
+const RESEARCHER_MEMORY_CONTENT_MAX = 1200;
 
 function safeRelMemoryPath(value) {
   const raw = String(value || "").trim().replace(/\\/g, "/");
@@ -61,12 +59,12 @@ function resilientSymbolIdList(values, maxItems, fieldName) {
 /**
  * Normalize the researcher's `memories` appendix field: durable findings the
  * pipeline persists deterministically (no agent tool calls). Hard-capped per
- * round, type-whitelisted, length-bounded, deduped by title — the appendix is
+ * round, length-bounded, deduped by title — the appendix is
  * a seed contract, not free text.
  *
  * @param {any} parsed
  * @param {number} [maxItems]
- * @returns {Array<{ type: string, title: string, content: string, symbolIds: string[], fileRelPaths: string[] }>}
+ * @returns {Array<{ title: string, content: string, symbolIds: string[], fileRelPaths: string[] }>}
  */
 export function normalizeResearcherMemories(parsed, maxItems = 5) {
   const source = Array.isArray(parsed?.memories) ? parsed.memories : [];
@@ -74,8 +72,6 @@ export function normalizeResearcherMemories(parsed, maxItems = 5) {
   const seenTitles = new Set();
   for (const entry of source) {
     if (!entry || typeof entry !== "object") continue;
-    const type = String(entry.type || "").trim().toLowerCase();
-    if (!RESEARCHER_MEMORY_TYPES.has(type)) continue;
     const title = String(entry.title || "").trim().slice(0, RESEARCHER_MEMORY_TITLE_MAX);
     const content = String(entry.content || "").trim().slice(0, RESEARCHER_MEMORY_CONTENT_MAX);
     if (!title || !content) continue;
@@ -89,7 +85,6 @@ export function normalizeResearcherMemories(parsed, maxItems = 5) {
       if (fileRelPaths.length >= 12) break;
     }
     out.push({
-      type,
       title,
       content,
       symbolIds: resilientSymbolIdList(entry.key_symbols ?? entry.symbolIds, 12, "researcher memory symbolIds"),

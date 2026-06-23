@@ -189,19 +189,23 @@ function insightForRemote(item) {
 
 function memoryPrefetchForRemote(packet = {}) {
   const insights = Array.isArray(packet?.run_insights) ? packet.run_insights : [];
-  const count = insights.filter((item) =>
+  const memorySurface = packet?.memory_surface || {};
+  const surfaceCount = (Array.isArray(memorySurface.symbols) ? memorySurface.symbols.length : 0)
+    + (Array.isArray(memorySurface.files) ? memorySurface.files.length : 0);
+  const legacyCount = insights.filter((item) =>
     item?.surfaced_memory === true
     || item?.insight_type === "atlas_memory"
     || String(item?.source || "").startsWith("memory:")
   ).length;
   const notice = packet?.memory_prefetch_context || null;
+  const count = surfaceCount || legacyCount;
   if (count <= 0 && !notice) return null;
   return {
     supplied: true,
     origin: "handoff_memory_prefetch",
     action: "memory.surface",
     count,
-    notice: _capInsightText(notice || "ATLAS memory context was prefetched during handoff; use surfaced memory insights before making additional memory calls."),
+    notice: _capInsightText(notice || "ATLAS memory anchor presence was prefetched during handoff; call memory.get only for anchors you will rely on."),
   };
 }
 
@@ -256,6 +260,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
       atlas_summary: atlasSummary,
       step0_context: packet?.step0_context || null,
       memory_prefetch: memoryPrefetchForRemote(packet),
+      memory_surface: packet?.memory_surface || null,
       file_snippets: readOnlyFileSnippets(packet),
       insights: Array.isArray(packet?.run_insights) ? packet.run_insights.map(insightForRemote) : [],
     },

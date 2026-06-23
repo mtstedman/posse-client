@@ -286,7 +286,6 @@ export function addRipgrepSkipGlobs(rgArgs, skipDirs) {
 }
 
 export function addAgentHiddenRipgrepGlobs(rgArgs) {
-  rgArgs.push("--glob", "!config/**");
   rgArgs.push("--glob", "!.gitignore");
   rgArgs.push("--glob", "!**/.gitignore");
 }

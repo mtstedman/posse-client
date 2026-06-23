@@ -185,7 +185,10 @@ import {
   iterativeFollowUpJobsAfter,
   markIterativeFinished,
 } from "../../planning/functions/state.js";
-import { ensurePosseRuntimeIgnoresAsync } from "../../runtime/functions/ignore.js";
+import {
+  ensurePosseRuntimeIgnoresAsync,
+  stagePosseRuntimeGitignoreForInitialCommit,
+} from "../../runtime/functions/ignore.js";
 import { runHook } from "../../git/functions/hooks.js";
 import { refreshProjectContextAsync } from "../../project/functions/context.js";
 import { ensureProjectMapAsync, ensureProjectMapRebuildHookAsync, getCachedProjectMap } from "../../project/functions/map.js";
@@ -304,6 +307,41 @@ async function posseAliasDiagnostic() {
 const BOOT_GIT_PROBE_TIMEOUT_MS = 5_000;
 const BOOT_PUSH_GUARD_TIMEOUT_MS = 2_500;
 
+function firstGitErrorLine(err) {
+  return String(err?.stderr || err?.message || err || "unknown")
+    .split(/\r?\n/)
+    .find((line) => line.trim()) || "unknown";
+}
+
+async function ensureGitRepositoryInitialized({ verbose = false } = {}) {
+  const gitOpts = {
+    cwd: PROJECT_DIR,
+    encoding: "utf-8",
+    timeout: BOOT_GIT_PROBE_TIMEOUT_MS,
+    windowsHide: true,
+  };
+  try {
+    await execFileAsync("git", ["rev-parse", "--git-dir"], gitOpts);
+    return { initialized: false };
+  } catch {
+    // First run in a fresh directory: create the local repository before
+    // writing Posse runtime files so ignore rules can be staged for HEAD.
+  }
+
+  if (verbose) {
+    console.log(`\n  ${C.yellow}${PROJECT_DIR} is not a git repository — initializing one.${C.reset}`);
+  }
+  try {
+    await execFileAsync("git", ["init"], gitOpts);
+  } catch (err) {
+    throw new Error(`failed to git init: ${firstGitErrorLine(err)}`);
+  }
+  if (verbose) {
+    console.log(`  ${C.green}Initialized git repo.${C.reset}`);
+  }
+  return { initialized: true };
+}
+
 async function ensureSnapshotPushRefsGuarded({ verbose = false, timeoutMs = BOOT_PUSH_GUARD_TIMEOUT_MS } = {}) {
   if (await remotePushConfigsAreClearlyRestrictive(PROJECT_DIR, {
     timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
@@ -331,10 +369,9 @@ async function ensureSnapshotPushRefsGuarded({ verbose = false, timeoutMs = BOOT
  * if the repo is unusable, or auto-creates an initial commit if the repo
  * exists but is empty (no commits yet).
  *
- * Runs the three independent probes (repo presence + HEAD, user.name,
- * user.email) in parallel so the boot spinner isn't blocked waiting on
- * git serially. Each call returns immediately and is yieldable; the
- * total wall-clock cost drops to roughly the slowest single git call.
+ * Initializes a missing repo before probing HEAD and user identity. The HEAD
+ * and identity checks still run in parallel so the boot spinner is not blocked
+ * by serial git calls once repository presence is settled.
  */
 async function ensureGitReady() {
   const gitOpts = { cwd: PROJECT_DIR, encoding: "utf-8", timeout: BOOT_GIT_PROBE_TIMEOUT_MS, windowsHide: true };
@@ -347,26 +384,34 @@ async function ensureGitReady() {
     }
   };
 
-  // rev-parse --git-dir confirms the repo; rev-parse HEAD confirms HEAD exists.
-  // Run these in parallel with the user.name / user.email probes.
-  const [repoCheck, headCheck, nameCheck, emailCheck] = await Promise.all([
-    tryGit(["rev-parse", "--git-dir"]),
+  const repoCheck = await tryGit(["rev-parse", "--git-dir"]);
+  if (!repoCheck.ok) {
+    const initCheck = await tryGit(["init"]);
+    if (!initCheck.ok) {
+      throw new Error(`could not initialize git repository: ${firstGitErrorLine(initCheck.error)}`);
+    }
+    await ensurePosseRuntimeIgnoresAsync(PROJECT_DIR);
+  }
+
+  // rev-parse HEAD confirms HEAD exists. Run this in parallel with the
+  // user.name / user.email probes.
+  const [headCheck, nameCheck, emailCheck] = await Promise.all([
     tryGit(["rev-parse", "HEAD"]),
     tryGit(["config", "user.name"]),
     tryGit(["config", "user.email"]),
   ]);
-
-  if (!repoCheck.ok) {
-    // Throw rather than process.exit so runOrchestratorCli's .finally still
-    // flushes logs and closes the SQLite WAL on shutdown.
-    throw new Error(`${PROJECT_DIR} is not a git repository. Posse needs a git repo to create worktrees — run 'git init' first.`);
-  }
   if (!nameCheck.ok || !emailCheck.ok || !nameCheck.stdout || !emailCheck.stdout) {
     throw new Error('git user identity not configured. Posse needs this to commit changes in worktrees. Run: git config user.name "Your Name" && git config user.email "you@example.com"');
   }
   if (!headCheck.ok) {
     // Repo exists but has no commits — create an initial empty commit so HEAD is valid
     console.log(`\n  ${C.yellow}Git repo has no commits. Creating initial commit so worktrees can branch from HEAD...${C.reset}`);
+    const git = async (args) => {
+      const result = await tryGit(args);
+      if (!result.ok) throw result.error;
+      return result.stdout;
+    };
+    await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR, { git });
     const commitResult = await tryGit([
       "commit",
       "--allow-empty",
@@ -398,21 +443,13 @@ async function ensureRepoSetupConfirmed() {
     windowsHide: true,
   })).stdout;
 
-  let isRepo = true;
-  try { await runGit(["rev-parse", "--git-dir"]); } catch { isRepo = false; }
-
-  if (!isRepo) {
-    // First run in a fresh directory: auto-initialize the repo rather than
-    // gating boot on a manual confirmation. git init is local and reversible,
-    // and posse can't do anything useful without a repo to branch worktrees from.
-    console.log(`\n  ${C.yellow}${PROJECT_DIR} is not a git repository — initializing one.${C.reset}`);
-    try {
-      await runGit(["init"]);
-      console.log(`  ${C.green}Initialized git repo.${C.reset}`);
-    } catch (err) {
-      console.error(`  ${C.red}Failed to git init: ${err.message.split("\n")[0]}${C.reset}\n`);
-      return false;
-    }
+  try {
+    await ensureGitRepositoryInitialized({ verbose: true });
+    await ensurePosseRuntimeIgnoresAsync(PROJECT_DIR);
+    await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR);
+  } catch (err) {
+    console.error(`  ${C.red}${firstGitErrorLine(err)}${C.reset}\n`);
+    return false;
   }
 
   const configValue = async (args) => {
@@ -453,6 +490,7 @@ async function ensureRepoSetupConfirmed() {
     // instead of prompting.
     console.log(`\n  ${C.yellow}Repo has no commits yet — creating an initial commit so worktrees can branch from HEAD.${C.reset}`);
     try {
+      await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR);
       await runGit(["commit", "--allow-empty", "-m", "chore: initial commit (posse bootstrap)"]);
       console.log(`  ${C.green}Initial commit created.${C.reset}\n`);
     } catch (err) {
@@ -763,6 +801,9 @@ async function init({ requireWritableArtifacts = true, refreshStartupContext = f
   configureRuntimeEnv(PROJECT_DIR);
   const readiness = createStartupReadiness({ enabled: showReadiness });
   try {
+    if (requireWritableArtifacts) {
+      await readiness.step("Git repository", () => ensureGitRepositoryInitialized({ verbose: !showReadiness }));
+    }
     // Ensure the DB connection works — schema is bootstrapped by db.js. This is
     // still sync inside better-sqlite3, so render the readiness label first.
     await readiness.step("Database", async () => getDb());
@@ -770,7 +811,11 @@ async function init({ requireWritableArtifacts = true, refreshStartupContext = f
       await readiness.step("Artifact roots", () => initArtifactRootsAsync(PROJECT_DIR));
       const tasks = [
         readiness.step("Artifact cleanup", () => pruneEmptyArtifactDirsAsync(PROJECT_DIR)),
-        readiness.step("Runtime ignores", () => ensurePosseRuntimeIgnoresAsync(PROJECT_DIR)),
+        readiness.step("Runtime ignores", async () => {
+          const result = await ensurePosseRuntimeIgnoresAsync(PROJECT_DIR);
+          result.gitignoreInitialCommit = await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR);
+          return result;
+        }),
         readiness.step("Project map", () => ensureProjectMapAsync(PROJECT_DIR)),
         readiness.step("Project map hook", () => ensureProjectMapRebuildHookAsync({ cwd: PROJECT_DIR })),
       ];

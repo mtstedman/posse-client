@@ -200,7 +200,7 @@ function actionTags(action) {
   const ns = namespaceOf(action);
   const tags = new Set([ns]);
   if (["symbol.search", "symbol.card", "symbol.overview", "tree.overview", "tree.branch", "tree.scope", "tree.expand", "slice.build", "edit.plan", "context"].includes(action)) tags.add("query");
-  if (["buffer.push", "buffer.checkpoint", "memory.store", "memory.remove", "policy.set", "agent.feedback", "index.refresh", "scip.ingest"].includes(action)) tags.add("mutates");
+  if (["buffer.push", "buffer.checkpoint", "memory.store", "policy.set", "agent.feedback", "index.refresh", "scip.ingest"].includes(action)) tags.add("mutates");
   if (action === "workflow" || action.startsWith("runtime.")) tags.add("orchestration");
   return [...tags].filter(Boolean);
 }
@@ -219,7 +219,7 @@ function examplesFor(action) {
     "code.window": [{ action, symbolId: "<symbolId>", reason: "Need implementation details after card/skeleton", identifiersToFind: ["handler"], expectedLines: 80 }],
     "repo.overview": [{ action, level: "full", includeHotspots: true }],
     "workflow": [{ action, steps: [{ id: "search", action: "symbol.search", args: { query: "Greeter", limit: 1 } }] }],
-    "memory.store": [{ action, type: "decision", title: "Why", content: "Decision details", symbolIds: ["<symbolId>"] }],
+    "memory.store": [{ action, title: "Why", content: "Decision details", symbolIds: ["<symbolId>"] }],
   };
   return examples[action] || [{ action }];
 }
@@ -252,7 +252,7 @@ function nextActionsFor(action) {
     "repo.register": ["index.refresh", "repo.status"],
     "index.refresh": ["repo.status", "symbol.search"],
     "buffer.push": ["symbol.search", "buffer.checkpoint", "buffer.status"],
-    "memory.store": ["memory.query"],
+    "memory.store": ["memory.surface", "memory.get"],
     "runtime.execute": ["runtime.queryOutput"],
   };
   return next[action] || [];

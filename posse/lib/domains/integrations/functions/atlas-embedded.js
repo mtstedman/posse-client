@@ -147,9 +147,8 @@ const ATLAS_V2_VIEW_OPTIONAL_ACTIONS = new Set([
   "buffer.status",
   "agent.feedback.query",
   "memory.store",
-  "memory.query",
-  "memory.remove",
-  "memory.flag",
+  "memory.get",
+  "memory.feedback",
   "memory.surface",
   "policy.get",
   "policy.set",
@@ -165,9 +164,8 @@ const ATLAS_V2_VIEW_OPTIONAL_ACTIONS = new Set([
 // view's meta for branch resolution only.
 const ATLAS_V2_VIEW_FRESHNESS_EXEMPT_ACTIONS = new Set([
   "memory.store",
-  "memory.query",
-  "memory.remove",
-  "memory.flag",
+  "memory.get",
+  "memory.feedback",
   "memory.surface",
   "agent.feedback.query",
   "policy.get",
@@ -188,8 +186,7 @@ const ATLAS_V2_BLOCKING_ACTIONS = new Set([
   "buffer.checkpoint",
   "agent.feedback",
   "memory.store",
-  "memory.remove",
-  "memory.flag",
+  "memory.feedback",
   "policy.set",
   "runtime.execute",
 ]);
@@ -1033,7 +1030,7 @@ function canUseAtlasToolExecutor(action, payload, config = {}) {
   if (ATLAS_V2_BLOCKING_ACTIONS.has(action)) return false;
   if (isBlockingAction(action, payload)) return false;
   if (action.startsWith("buffer.") || action.startsWith("runtime.")) return false;
-  if (action === "memory.store" || action === "memory.remove" || action === "memory.flag") return false;
+  if (action === "memory.store" || action === "memory.feedback") return false;
   if (action === "policy.set" || action === "agent.feedback") return false;
   return true;
 }
@@ -1372,7 +1369,7 @@ async function executeEmbeddedAtlasV2Tool({
       && !isBlockingAction(action, payload)
       && !action.startsWith("buffer.")
       && !action.startsWith("runtime.")
-      && action !== "memory.store" && action !== "memory.remove" && action !== "memory.flag"
+      && action !== "memory.store"
       && action !== "policy.set" && action !== "agent.feedback";
     let envelope = null;
     let conductorFellBack = false;
@@ -1697,7 +1694,6 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
     // surfacing one-off errors (which downstream treats as fallback signals).
     const transientRetryable = !isBlockingAction(prepared.action, prepared.payload)
       && prepared.action !== "memory.store"
-      && prepared.action !== "memory.remove"
       && prepared.action !== "policy.set";
     const runWithTransientRetries = async () => {
       let result = await runGatedCall();

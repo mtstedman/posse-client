@@ -219,7 +219,7 @@ export function isAgentHiddenReadCommand(command) {
 }
 
 export function agentHiddenReadCommandError() {
-  return "Error: Access to config/ and .gitignore is blocked. Use documented config examples or explicit task context instead.";
+  return "Error: Access to .gitignore is blocked. Use documented ignore examples or explicit task context instead.";
 }
 
 export function isRemovalTask(job, payload) {

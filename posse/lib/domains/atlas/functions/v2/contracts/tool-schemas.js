@@ -11,16 +11,6 @@ import { ATLAS_RUNTIME_INPUTS } from "./runtimes.js";
 
 const ATLAS_SYMBOL_ID_PATTERN = "^[0-9a-f]{64}:[0-9]+$";
 const TASK_TYPES = Object.freeze(["debug", "review", "implement", "explain"]);
-export const MEMORY_TYPES = Object.freeze([
-  "decision",
-  "bugfix",
-  "task_context",
-  "pattern",
-  "convention",
-  "architecture",
-  "performance",
-  "security",
-]);
 const CARD_DETAILS = Object.freeze(["minimal", "signature", "deps", "compact", "full"]);
 const WIRE_FORMATS = Object.freeze(["standard", "compact", "agent", "packed"]);
 const CODE_GRANULARITIES = Object.freeze(["symbol", "block", "fileWindow"]);
@@ -135,7 +125,8 @@ const QUERY_GATEWAY_ACTIONS = Object.freeze([
   "review.risk",
   "repo.status",
   "repo.quality",
-  "memory.query",
+  "memory.surface",
+  "memory.get",
 ]);
 const CODE_GATEWAY_ACTIONS = Object.freeze([
   "code.skeleton",
@@ -167,9 +158,7 @@ const AGENT_GATEWAY_ACTIONS = Object.freeze([
   "buffer.checkpoint",
   "buffer.status",
   "memory.store",
-  "memory.query",
-  "memory.remove",
-  "memory.flag",
+  "memory.feedback",
 ]);
 
 export const ATLAS_GATEWAY_ACTIONS = Object.freeze({
@@ -331,7 +320,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     query: s({ minLength: 1, maxLength: 20_000 }),
     limit: i({ minimum: 1, maximum: 500 }),
     semantic: b(),
-    entities: a(s({ enum: ["symbols", "memories", "feedback"] }), { maxItems: 3 }),
+    entities: a(s({ enum: ["symbols", "feedback"] }), { maxItems: 2 }),
     scope: s({ enum: ["name", "body", "either"], default: "either" }),
     sessionId: s({ maxLength: 256 }),
     taskText: s({ maxLength: 20_000 }),
@@ -566,46 +555,24 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   }, ["filePath"]),
 
   "memory.store": o({
-    repoId: s({ maxLength: 256 }),
-    type: s({ enum: MEMORY_TYPES }),
-    title: s({ minLength: 1, maxLength: 500 }),
-    content: s({ minLength: 1, maxLength: 200_000 }),
-    tags: a(s({ minLength: 1, maxLength: 256 }), { maxItems: 100 }),
-    confidence: n({ minimum: 0, maximum: 1 }),
+    title: s({ minLength: 1, maxLength: 120 }),
+    content: s({ minLength: 1, maxLength: 1200 }),
     symbolIds: symbolIds(1000),
     fileRelPaths: repoPaths(1000),
     memoryId: s({ maxLength: 256 }),
-  }, ["type", "title", "content"]),
-  "memory.query": o({
-    repoId: s({ maxLength: 256 }),
-    query: s({ maxLength: 20_000 }),
-    types: a(s({ enum: MEMORY_TYPES }), { maxItems: MEMORY_TYPES.length }),
-    tags: a(s({ minLength: 1, maxLength: 256 }), { maxItems: 100 }),
+  }, ["title", "content"]),
+  "memory.get": o({
     symbolIds: symbolIds(1000),
     fileRelPaths: repoPaths(1000),
-    staleOnly: b(),
-    limit: i({ minimum: 1, maximum: 1000 }),
-    offset: i({ minimum: 0, maximum: 100_000 }),
-    sortBy: s({ enum: ["recency", "confidence", "score"] }),
   }),
-  "memory.remove": o({
-    repoId: s({ maxLength: 256 }),
+  "memory.feedback": o({
     memoryId: s({ minLength: 1, maxLength: 256 }),
-    deleteFile: b(),
-  }, ["memoryId"]),
-  "memory.flag": o({
-    repoId: s({ maxLength: 256 }),
-    memoryId: s({ minLength: 1, maxLength: 256 }),
-    reason: s({ enum: ["contradicted", "anchors_missing", "manual"] }),
+    verdict: s({ enum: ["used", "stale", "wrong", "duplicate"] }),
     detail: s({ maxLength: 500 }),
-  }, ["memoryId", "reason"]),
+  }, ["memoryId", "verdict"]),
   "memory.surface": o({
-    repoId: s({ maxLength: 256 }),
     symbolIds: symbolIds(1000),
     fileRelPaths: repoPaths(1000),
-    taskType: s({ enum: MEMORY_TYPES }),
-    types: a(s({ enum: MEMORY_TYPES }), { maxItems: MEMORY_TYPES.length }),
-    limit: i({ minimum: 1, maximum: 1000 }),
   }),
 
   "policy.get": o({
@@ -738,7 +705,22 @@ export function atlasDescriptorSchemaForAction(action) {
     }, ["action"], { additionalProperties: true });
   }
   const schema = ATLAS_TOOL_PARAM_SCHEMAS[action];
-  return schema ? cloneJsonSchema(schema) : null;
+  return schema ? stripProviderInjectedFields(action, cloneJsonSchema(schema)) : null;
+}
+
+/**
+ * Provider-visible schemas should not ask agents for runtime context that the
+ * ATLAS executor already supplies.
+ *
+ * @param {string} action
+ * @param {JsonSchema} schema
+ * @returns {JsonSchema}
+ */
+function stripProviderInjectedFields(action, schema) {
+  if (String(action || "").startsWith("memory.") && schema?.properties) {
+    delete schema.properties.repoId;
+  }
+  return schema;
 }
 
 /**

@@ -14,9 +14,8 @@
 
 import fs from "fs";
 import path from "path";
-import crypto from "crypto";
-import { fileURLToPath } from "url";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { ARTIFACT_PROTOCOLS } from "../../../catalog/artifact-protocols.js";
 import { getRuntimeResourcesDir } from "../../runtime/functions/paths.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { getAccountSetting } from "../../settings/functions/account-settings.js";
@@ -48,70 +47,28 @@ export function getWiModeConfig(mode) {
   return WI_MODES[mode] || WI_MODES.build;
 }
 
-// ─── Artifact Protocols (config-driven) ─────────────────────────────────────
+// ─── Artifact Protocols (catalog-driven) ────────────────────────────────────
 
-/** Load artifact protocols from config/artifact-protocols.json. */
 let _protocols = null;
-let _protocolsSignature = null;
-let _protocolsStatKey = null;
-let _protocolsWarned = false;
 let _protocolsOverrideForTests = null;
 const _invalidImageProviderWarnings = new Set();
 const DEFAULT_MANIFEST_MAX_DEPTH = 64;
 const DEFAULT_MANIFEST_MAX_FILES = 10000;
 const DEFAULT_MANIFEST_MAX_ERRORS = 200;
-const ARTIFACT_PROTOCOLS_PATH = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "..",
-  "config",
-  "artifact-protocols.json",
-);
 
-function warnProtocolLoadFailure(err, { usingCache = false } = {}) {
-  if (_protocolsWarned) return;
-  _protocolsWarned = true;
-  const reason = err?.code === "ENOENT" ? "file not found" : err?.message?.split("\n")[0] || "unknown error";
-  const suffix = usingCache ? "; using last known protocols" : " — image routing may use defaults";
-  console.error(`[artifacts] Warning: config/artifact-protocols.json not loaded (${reason})${suffix}`);
+function cloneArtifactProtocols(protocols = ARTIFACT_PROTOCOLS) {
+  return JSON.parse(JSON.stringify(protocols));
 }
 
 export function getArtifactProtocols() {
   if (_protocolsOverrideForTests) return _protocolsOverrideForTests;
-  try {
-    const stat = fs.statSync(ARTIFACT_PROTOCOLS_PATH);
-    const statKey = `${stat.size}:${stat.mtimeMs}`;
-    if (_protocols && _protocolsStatKey === statKey) return _protocols;
-
-    const raw = fs.readFileSync(ARTIFACT_PROTOCOLS_PATH, "utf-8");
-    const signature = crypto.createHash("sha256").update(raw).digest("hex");
-    if (!_protocols || _protocolsSignature !== signature) {
-      _protocols = JSON.parse(raw);
-      _protocolsSignature = signature;
-      _protocolsWarned = false;
-    }
-    _protocolsStatKey = statKey;
-  } catch (err) {
-    if (!_protocols) {
-      _protocols = {};
-      _protocolsSignature = null;
-      _protocolsStatKey = null;
-      warnProtocolLoadFailure(err);
-    } else {
-      warnProtocolLoadFailure(err, { usingCache: true });
-    }
-  }
+  if (!_protocols) _protocols = cloneArtifactProtocols();
   return _protocols;
 }
 
-/** Clear cached protocols — forces reload on next access. */
+/** Clear cached protocols — re-clones catalog defaults on next access. */
 export function reloadArtifactProtocols() {
   _protocols = null;
-  _protocolsSignature = null;
-  _protocolsStatKey = null;
-  _protocolsWarned = false;
   _invalidImageProviderWarnings.clear();
 }
 
@@ -126,6 +83,29 @@ export function setArtifactProtocolsForTests(protocols = null) {
 /** Get the protocol for a specific artifact type (task_mode). */
 export function getArtifactProtocol(taskMode) {
   return getArtifactProtocols()[taskMode] || null;
+}
+
+export function describeArtifactRoutingForPrompt(taskMode = "image") {
+  const mode = String(taskMode || "image");
+  const protocol = mode === "image" ? getResolvedImageProtocol() : getArtifactProtocol(mode);
+  if (!protocol) return `Artifact routing: task_mode "${mode}" is unavailable; treat this as a Posse runtime/admin issue, not a repo file to edit.`;
+
+  const pieces = [mode === "image" ? "Image artifact routing" : `Artifact routing: task_mode "${mode}"`];
+  if (mode === "image") {
+    pieces.push("job_type=artificer");
+    pieces.push(`provider=${protocol.provider || "default"}`);
+    pieces.push(`model=${protocol.model || getDefaultImageModel(protocol.provider)}`);
+  } else {
+    pieces.push("job_type=artificer");
+  }
+  if (Array.isArray(protocol.allowed_formats) && protocol.allowed_formats.length > 0) {
+    pieces.push(`allowed_formats=${protocol.allowed_formats.join(",")}`);
+  } else if (Array.isArray(protocol.warn_formats) && protocol.warn_formats.length > 0) {
+    pieces.push(`warn_formats=${protocol.warn_formats.join(",")}`);
+  }
+  if (protocol.default_format) pieces.push(`default_format=${protocol.default_format}`);
+  if (protocol.max_outputs) pieces.push(`max_outputs=${protocol.max_outputs}`);
+  return `${pieces.join("; ")}.`;
 }
 
 function normalizeImageModelForProvider(provider, model) {
@@ -194,7 +174,7 @@ export function getResolvedImageProtocol(providerOverride = null) {
 
 /**
  * Validate a manifest against the artifact protocol for a task mode.
- * Driven by config/artifact-protocols.json — no hardcoded rules.
+ * Driven by the artifact protocol catalog and admin/account settings.
  *
  * @param {{ files: Array<{path, size, ext}>, count: number }} manifest
  * @param {string} taskMode
@@ -206,7 +186,7 @@ export function validateManifestAgainstContract(manifest, taskMode) {
     if (!taskMode || taskMode === "code") return { valid: true, violations: [], warnings: [] };
     return {
       valid: false,
-      violations: [`No artifact protocol configured for task_mode "${taskMode}"`],
+      violations: [`Artifact routing unavailable for task_mode "${taskMode}"`],
       warnings: [],
     };
   }

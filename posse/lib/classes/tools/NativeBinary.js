@@ -40,6 +40,22 @@ const DEFAULT_TIMEOUT_MS = 120000;
 // timeout, short enough that a truly wedged host is replaced within minutes.
 const WORKER_WEDGE_SILENCE_MS = 120_000;
 
+function hasNativeAuthEnvelope(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) return false;
+  const auth = request.auth;
+  return !!auth && typeof auth === "object" && !Array.isArray(auth) && Object.keys(auth).length > 0;
+}
+
+function isNativeProtocolRequest(request) {
+  return !!request && typeof request === "object" && !Array.isArray(request)
+    && Object.prototype.hasOwnProperty.call(request, "protocol")
+    && Object.prototype.hasOwnProperty.call(request, "method");
+}
+
+function isNativeHeartbeatAuthFailure(value) {
+  return /heartbeat|posse_key|pulse[\s_-]?token|identity[\s_-]?heartbeat/i.test(String(value || ""));
+}
+
 /**
  * Resolve the heartbeat URL the key-gated Posse binaries authenticate against.
  * They all talk to the same central server, so default to it. Precedence (from
@@ -207,6 +223,10 @@ export class NativeBinary {
    */
   async #runViaWorker(subcommand, args, opts) {
     const inputWithAuth = this.#inputWithNativeAuthDetails(opts.input);
+    if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
+      this.#retireWorkerAfterAuthFailure();
+      return this.#nativeAuthUnavailableResult();
+    }
     const requestOpts = {
       ...opts,
       input: inputWithAuth.input,
@@ -255,6 +275,9 @@ export class NativeBinary {
         ok: false, code: null, signal: null, stdout: "", stderr: "aborted",
         error: requestOpts.signal ? signalAbortError(requestOpts.signal) : new Error("aborted"),
       };
+    }
+    if (response?.ok === false && isNativeHeartbeatAuthFailure(response?.error?.message || response?.message)) {
+      this.#retireWorkerAfterAuthFailure();
     }
     return {
       ok: true,
@@ -373,10 +396,15 @@ export class NativeBinary {
     const bin = this.resolvePath();
     if (!bin) return this.#unavailableResult();
     const fullArgs = this.#buildArgs(subcommand, args);
+    const inputWithAuth = this.#inputWithNativeAuthDetails(opts.input);
+    if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
+      this.#retireWorkerAfterAuthFailure();
+      return this.#nativeAuthUnavailableResult();
+    }
     const res = this._spawnSync(bin, fullArgs, {
       cwd: opts.cwd || process.cwd(),
       env: this.#childEnv(opts.env),
-      input: this.#inputWithNativeAuth(opts.input),
+      input: inputWithAuth.input,
       encoding: "utf8",
       windowsHide: true,
       timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -427,7 +455,12 @@ export class NativeBinary {
       }, opts.json === true));
     }
     const fullArgs = this.#buildArgs(subcommand, args);
-    const input = this.#inputWithNativeAuth(opts.input);
+    const inputWithAuth = this.#inputWithNativeAuthDetails(opts.input);
+    if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
+      this.#retireWorkerAfterAuthFailure();
+      return Promise.resolve(this.#nativeAuthUnavailableResult());
+    }
+    const input = inputWithAuth.input;
     return new Promise((resolve) => {
       let settled = false;
       const child = this._spawn(bin, fullArgs, {
@@ -548,6 +581,14 @@ export class NativeBinary {
   }
 
   /**
+   * @param {Record<string, unknown> | null} request
+   * @returns {boolean}
+   */
+  #shouldFailMissingNativeAuth(request) {
+    return this.keyGated && isNativeProtocolRequest(request) && !hasNativeAuthEnvelope(request);
+  }
+
+  /**
    * @param {Buffer | string | undefined} input
    * @returns {{ input: Buffer | string | undefined, request: Record<string, unknown> | null }}
    */
@@ -581,6 +622,12 @@ export class NativeBinary {
     };
   }
 
+  #retireWorkerAfterAuthFailure() {
+    try {
+      if (this._daemon?.isHostAlive?.()) this._daemon.retire({ graceMs: 0 });
+    } catch { /* best effort */ }
+  }
+
   /**
    * Build the child env. Starts from the caller's env or the runtime env, and
    * for key-gated Posse binaries injects POSSE_HEARTBEAT_URL (canonical native
@@ -601,6 +648,20 @@ export class NativeBinary {
     if (String(env.POSSE_HEARTBEAT_URL || "").trim()) return env;
     const url = resolveHeartbeatUrl(env);
     return url ? { ...env, POSSE_HEARTBEAT_URL: url } : env;
+  }
+
+  /** @returns {RunResult} */
+  #nativeAuthUnavailableResult() {
+    const error = new Error(`native heartbeat auth unavailable for ${this.name}; refusing to start key-gated binary`);
+    error.code = "POSSE_NATIVE_HEARTBEAT_UNAVAILABLE";
+    return {
+      ok: false,
+      code: null,
+      signal: null,
+      stdout: "",
+      stderr: error.message,
+      error,
+    };
   }
 
   /** @returns {RunResult} */

@@ -10,6 +10,10 @@ import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { SETTING_KEYS, STARTUP_DIRTY_TREE_POLICY_VALUES } from "../../../catalog/settings.js";
 import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
+import {
+  buildPosseRuntimeIgnoreEntries,
+  isPosseRuntimeOnlyGitignoreContent,
+} from "../../runtime/functions/ignore.js";
 import { GIT_OPERATION_TIMEOUT_MS } from "./utils.js";
 import { snapshotAndResetDirtyWorktree } from "./worktree.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
@@ -92,7 +96,7 @@ export function createStartupDirtyGuardHelpers(context) {
     if (code.startsWith("??")) {
       try {
         const content = fs.readFileSync(path.join(cwd, ".gitignore"), "utf-8");
-        return content.includes("# Posse runtime (auto-added)") && content.includes(".posse/");
+        return isPosseRuntimeOnlyGitignoreContent(cwd, content);
       } catch {
         return false;
       }
@@ -118,7 +122,7 @@ export function createStartupDirtyGuardHelpers(context) {
       try {
         const content = await fs.promises.readFile(path.join(cwd, ".gitignore"), "utf-8");
         throwIfAborted(signal);
-        return content.includes("# Posse runtime (auto-added)") && content.includes(".posse/");
+        return isPosseRuntimeOnlyGitignoreContent(cwd, content);
       } catch (err) {
         if (isAbortError(err)) throw err;
         return false;
@@ -130,25 +134,9 @@ export function createStartupDirtyGuardHelpers(context) {
     return false;
   }
 
-  // Patterns the posse runtime adds to .gitignore. The set must stay in
-  // lockstep with whatever writes "# Posse runtime (auto-added)" entries
-  // — add new patterns here when they're added there. Conservative by
-  // design: an unrecognized addition causes the diff check to fail and
-  // the merge to surface the dirty .gitignore as expected.
-  const RUNTIME_GITIGNORE_PATTERNS = new Set([
-    ".posse/",
-    ".posse-worktrees/",
-    ".posse-test-suites/",
-    "logs/",
-    "*.db",
-    "*.db-shm",
-    "*.db-wal",
-    "*.db-journal",
-    "*.sqlite",
-    "*.sqlite-shm",
-    "*.sqlite-wal",
-    "*.sqlite-journal",
-  ]);
+  function runtimeGitignorePatterns(cwd) {
+    return new Set(buildPosseRuntimeIgnoreEntries(cwd, { anchorDir: cwd }));
+  }
 
   function gitignoreDiffIsRuntimeOnly(cwd) {
     let diff;
@@ -167,6 +155,7 @@ export function createStartupDirtyGuardHelpers(context) {
     // Any deletion fails the check immediately — a real user edit might
     // remove a runtime entry, but we don't try to be clever about that.
     let sawRuntimeAddition = false;
+    const allowedRuntimePatterns = runtimeGitignorePatterns(cwd);
     for (const rawLine of diff.split("\n")) {
       if (!rawLine || rawLine.startsWith("diff ") || rawLine.startsWith("index ")
         || rawLine.startsWith("@@") || rawLine.startsWith("+++") || rawLine.startsWith("---")) {
@@ -177,7 +166,7 @@ export function createStartupDirtyGuardHelpers(context) {
       const addition = rawLine.slice(1).trim();
       if (!addition) continue;                                  // blank line
       if (addition.startsWith("#")) continue;                    // any comment is fine
-      if (RUNTIME_GITIGNORE_PATTERNS.has(addition)) {
+      if (allowedRuntimePatterns.has(addition)) {
         sawRuntimeAddition = true;
         continue;
       }
@@ -202,6 +191,7 @@ export function createStartupDirtyGuardHelpers(context) {
     }
     if (!diff || !diff.trim()) return false;
     let sawRuntimeAddition = false;
+    const allowedRuntimePatterns = runtimeGitignorePatterns(cwd);
     for (const rawLine of diff.split("\n")) {
       throwIfAborted(signal);
       if (!rawLine || rawLine.startsWith("diff ") || rawLine.startsWith("index ")
@@ -213,7 +203,7 @@ export function createStartupDirtyGuardHelpers(context) {
       const addition = rawLine.slice(1).trim();
       if (!addition) continue;
       if (addition.startsWith("#")) continue;
-      if (RUNTIME_GITIGNORE_PATTERNS.has(addition)) {
+      if (allowedRuntimePatterns.has(addition)) {
         sawRuntimeAddition = true;
         continue;
       }

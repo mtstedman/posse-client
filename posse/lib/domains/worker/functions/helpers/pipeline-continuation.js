@@ -6,6 +6,7 @@
 import fs from "fs";
 import path from "path";
 import { isRepoFileAccessQuestion } from "./human-question-classifier.js";
+import { kaizenRunInsightsEnabled } from "./insights.js";
 import {
   addDependency,
   createJob,
@@ -689,16 +690,18 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
     // Self-resolution failed, so now escalate to human and remember the
     // information gap for future runs.
     const questions = extractedQuestions;
-    try {
-      storeInsight({
-        work_item_id: researchJob.work_item_id,
-        job_id: researchJob.id,
-        insight_type: "information_request",
-        summary: `Human clarification needed for "${wiTitle}"`,
-        detail: questions.slice(0, 5).map((q, i) => `${i + 1}. ${q}`).join("\n").slice(0, 1000),
-        file_paths: null,
-      });
-    } catch { /* best effort */ }
+    if (kaizenRunInsightsEnabled()) {
+      try {
+        storeInsight({
+          work_item_id: researchJob.work_item_id,
+          job_id: researchJob.id,
+          insight_type: "information_request",
+          summary: `Human clarification needed for "${wiTitle}"`,
+          detail: questions.slice(0, 5).map((q, i) => `${i + 1}. ${q}`).join("\n").slice(0, 1000),
+          file_paths: null,
+        });
+      } catch { /* best effort */ }
+    }
     const humanJob = createJob({
       work_item_id: researchJob.work_item_id,
       job_type: "human_input",

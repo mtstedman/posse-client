@@ -23,6 +23,7 @@ import { parseJobPayload } from "../../../queue/functions/payload.js";
 import {
   artifactsDir,
   contextDir,
+  describeArtifactRoutingForPrompt,
   getConfiguredImageProviders,
   getResolvedImageProtocol,
   inputsDir,
@@ -402,7 +403,7 @@ export class PlannerRole extends BaseRole {
       image: [
         "==== WORK ITEM MODE: image ====",
         "This WI produces IMAGE ARTIFACTS, NOT repo code changes.",
-        "The artificer agent has a built-in generate_image tool (OpenAI or Grok, depending on image protocol config) - it does NOT need to write scripts, install packages, or call APIs manually.",
+        "The artificer agent has a built-in generate_image tool (OpenAI or Grok, selected by Posse image routing) - it does NOT need to write scripts, install packages, or call APIs manually.",
         "",
         "PLANNING RULES:",
         "- Each image task should be ONE task: \"Generate [description]\"",
@@ -427,7 +428,7 @@ export class PlannerRole extends BaseRole {
       ],
     };
 
-    const plannerArtifactConfigPath = path.join(worker.projectDir, "config", "artifact-protocols.json").replace(/\\/g, "/");
+    const plannerImageRoutingSummary = describeArtifactRoutingForPrompt("image");
     const plannerImageProviders = getConfiguredImageProviders();
     const plannerImageProtocol = getResolvedImageProtocol();
     const explicitBindings = getExplicitIntakeBindings(workItem);
@@ -481,9 +482,9 @@ export class PlannerRole extends BaseRole {
       : "";
     const plannerRoutingContext = [
       "PIPELINE ROUTING CONTEXT (treat this as source-of-truth project configuration):",
-      `- Artifact protocol config: ${plannerArtifactConfigPath}`,
       "- Non-code deliverables belong to the ARTIFICER role unless the task is a deterministic promote copy step.",
-      `- Image protocol: providers=${plannerImageProviders.join(", ")}, selected=${plannerImageProtocol.provider}, model=${plannerImageProtocol.model || getDefaultImageModel(plannerImageProtocol.provider)}`,
+      `- ${plannerImageRoutingSummary}`,
+      `- Image providers: available=${plannerImageProviders.join(", ")}, selected=${plannerImageProtocol.provider}, model=${plannerImageProtocol.model || getDefaultImageModel(plannerImageProtocol.provider)}`,
       `- Image provider readiness: ${plannerImageReadinessSummary}`,
       `- Admin-backed provider selections: planner=${job.provider || getProviderName("planner")}, artificer=${getProviderName("artificer")}, dev=${getProviderName("dev")}`,
       availableSkillsBlock,

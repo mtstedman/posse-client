@@ -1,13 +1,17 @@
 // @ts-check
 //
 // Native ATLAS v2 memory handlers. These replace the original ATLAS-MCP memory
-// graph with ledger-owned storage while keeping the public action names stable.
+// graph with a durable ATLAS memory store while keeping public action names stable.
 
+import fs from "fs";
+import path from "path";
 import { randomUUID } from "crypto";
+import Database from "better-sqlite3";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { sha256Hex } from "../hash.js";
 import { normalizeRepoPath } from "../paths.js";
 import { parseAtlasSymbolId, sanitizeAtlasSymbolIdList } from "../symbol-id.js";
+import { memoryDbPathForLedgerDb } from "../runtime-paths.js";
 import { getEffectivePolicy } from "./policy.js";
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 
@@ -22,6 +26,78 @@ const MEMORY_TYPES = new Set([
   "security",
 ]);
 
+const MEMORY_SCHEMA_VERSION = 1;
+
+const MEMORY_DDL = `
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS memory_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+INSERT INTO memory_meta(key, value)
+VALUES ('schema_version', '${MEMORY_SCHEMA_VERSION}')
+ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+
+CREATE TABLE IF NOT EXISTS memories (
+  memory_id       TEXT PRIMARY KEY,
+  repo_id         TEXT,
+  type            TEXT NOT NULL CHECK (type IN (
+                    'decision','bugfix','task_context','pattern',
+                    'convention','architecture','performance','security'
+                  )),
+  title           TEXT NOT NULL,
+  content         TEXT NOT NULL,
+  tags_json       TEXT NOT NULL DEFAULT '[]',
+  confidence      REAL NOT NULL DEFAULT 0.5,
+  content_hash    TEXT NOT NULL,
+  stale           INTEGER NOT NULL DEFAULT 0,
+  stale_reason    TEXT,
+  wrong_at        TEXT,
+  wrong_count     INTEGER NOT NULL DEFAULT 0,
+  deleted         INTEGER NOT NULL DEFAULT 0,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  deleted_at      TEXT,
+  source          TEXT NOT NULL DEFAULT 'agent'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash_active
+  ON memories(repo_id, content_hash)
+  WHERE deleted = 0;
+
+CREATE INDEX IF NOT EXISTS idx_memories_repo_type_updated
+  ON memories(repo_id, type, updated_at DESC)
+  WHERE deleted = 0;
+
+CREATE INDEX IF NOT EXISTS idx_memories_updated
+  ON memories(updated_at DESC)
+  WHERE deleted = 0;
+
+CREATE TABLE IF NOT EXISTS memory_symbol_links (
+  memory_id       TEXT NOT NULL,
+  content_hash    TEXT NOT NULL,
+  local_id        INTEGER NOT NULL,
+  PRIMARY KEY(memory_id, content_hash, local_id),
+  FOREIGN KEY(memory_id) REFERENCES memories(memory_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_symbol_links_symbol
+  ON memory_symbol_links(content_hash, local_id);
+
+CREATE TABLE IF NOT EXISTS memory_file_links (
+  memory_id       TEXT NOT NULL,
+  repo_rel_path   TEXT NOT NULL,
+  PRIMARY KEY(memory_id, repo_rel_path),
+  FOREIGN KEY(memory_id) REFERENCES memories(memory_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_file_links_path
+  ON memory_file_links(repo_rel_path);
+`;
+
 /**
  * @param {{
  *   versionId: string,
@@ -31,59 +107,56 @@ const MEMORY_TYPES = new Set([
  * }} args
  */
 export function memoryStore({ versionId, params, ledger, repoId }) {
-  const db = ledgerDb(ledger);
-  if (!db) return ledgerUnavailable("memory.store", versionId);
+  const opened = openMemoryActionDb({ ledger, action: "memory.store", versionId });
+  if (opened.error) return opened.error;
+  const db = opened.db;
+  const finish = (result) => {
+    closeMemoryDb(db);
+    return result;
+  };
   const policy = getEffectivePolicy(ledger, effectiveRepo(repoId, params.repoId));
   if (!policy.memoryEnabled) {
-    return memoryDisabled("memory.store", versionId);
+    return finish(memoryDisabled("memory.store", versionId));
   }
 
-  const type = normalizeMemoryType(params.type);
-  if (!type) {
-    return errorEnvelope({
-      action: "memory.store",
-      versionId,
-      code: "invalid_memory_type",
-      message: "memory.store requires a supported memory type",
-    });
-  }
+  const type = normalizeMemoryType(params.type) || "task_context";
   const title = cleanString(params.title, 120);
-  const content = cleanString(params.content, 50_000);
+  const content = cleanString(params.content, 1200);
   if (!title || !content) {
-    return errorEnvelope({
+    return finish(errorEnvelope({
       action: "memory.store",
       versionId,
       code: "invalid_memory",
       message: "memory.store requires non-empty title and content",
-    });
+    }));
   }
 
   const effectiveRepoId = effectiveRepo(repoId, params.repoId);
-  const tags = normalizeTags(params.tags);
+  const tags = [];
   let symbolIds;
   try {
     symbolIds = sanitizeAtlasSymbolIdList(params.symbolIds || [], 100, "memory.store symbolIds");
   } catch (err) {
-    return errorEnvelope({
+    return finish(errorEnvelope({
       action: "memory.store",
       versionId,
       code: "invalid_symbol_id",
       message: err?.message || String(err),
-    });
+    }));
   }
   const fileRelPaths = normalizePaths(params.fileRelPaths || []);
-  const confidence = clampNumber(params.confidence, 0, 1, 0.5);
+  const confidence = 1;
   const providedId = cleanMemoryId(params.memoryId);
   const contentHash = memoryContentHash({ type, title, content, tags, symbolIds, fileRelPaths });
   const memoryId = providedId || `mem_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const existing = providedId ? findMemoryById(db, memoryId) : null;
   if (existing && existing.repo_id !== effectiveRepoId) {
-    return errorEnvelope({
+    return finish(errorEnvelope({
       action: "memory.store",
       versionId,
       code: "memory_id_conflict",
       message: `Memory ${memoryId} already belongs to a different repository`,
-    });
+    }));
   }
   const sameIdSameContent = !!(existing && existing.content_hash === contentHash);
   const existingByHash = sameIdSameContent ? null : findActiveMemoryByHash(db, effectiveRepoId, contentHash);
@@ -92,24 +165,27 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
     : null;
   if (existingByHash && existingByHash.memory_id !== memoryId) {
     if (providedId && !existing) {
-      return errorEnvelope({
+      return finish(errorEnvelope({
         action: "memory.store",
         versionId,
         code: "duplicate_memory_content",
         message: `Memory content already exists as ${existingByHash.memory_id}`,
-      });
+      }));
     }
-    if (!providedId) return okEnvelope({
-      action: "memory.store",
-      versionId,
-      data: {
-        ok: true,
-        memoryId: existingByHash.memory_id,
-        memory_id: existingByHash.memory_id,
-        created: false,
-        deduplicated: true,
-      },
-    });
+    if (!providedId) {
+      reviveMemory(db, existingByHash.memory_id, new Date().toISOString());
+      return finish(okEnvelope({
+        action: "memory.store",
+        versionId,
+        data: {
+          ok: true,
+          memoryId: existingByHash.memory_id,
+          memory_id: existingByHash.memory_id,
+          created: false,
+          deduplicated: true,
+        },
+      }));
+    }
   }
 
   // Exact-hash dedupe misses rewordings of the same knowledge. For
@@ -120,7 +196,8 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
   if (!providedId && !existing) {
     const nearDuplicate = findNearDuplicateMemory(db, effectiveRepoId, type, title, content);
     if (nearDuplicate) {
-      return okEnvelope({
+      reviveMemory(db, nearDuplicate.memory_id, new Date().toISOString());
+      return finish(okEnvelope({
         action: "memory.store",
         versionId,
         data: {
@@ -131,7 +208,7 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
           deduplicated: true,
           nearDuplicate: true,
         },
-      });
+      }));
     }
   }
 
@@ -156,6 +233,8 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
           content_hash = excluded.content_hash,
           stale = 0,
           stale_reason = NULL,
+          wrong_at = NULL,
+          wrong_count = 0,
           deleted = 0,
           updated_at = excluded.updated_at,
           deleted_at = NULL`,
@@ -176,18 +255,18 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
   try {
     txn();
   } catch (err) {
-    return errorEnvelope({
+    return finish(errorEnvelope({
       action: "memory.store",
       versionId,
       code: "memory_store_failed",
       message: err?.message || String(err),
-    });
+    }));
   }
   sweepStaleMemories(db, effectiveRepoId, policy);
   enforceMemoryCap(db, effectiveRepoId, policy, now);
   getRetrievalCache().invalidateAll();
 
-  return okEnvelope({
+  return finish(okEnvelope({
     action: "memory.store",
     versionId,
     data: {
@@ -198,152 +277,70 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
       deduplicated: false,
       ...(duplicateToReplace ? { mergedDuplicateMemoryId: duplicateToReplace } : {}),
     },
-  });
-}
-
-/**
- * @param {{
- *   versionId: string,
- *   params: import("../contracts/tool-params.js").MemoryQueryParams,
- *   ledger?: import("../contracts/api.js").Ledger,
- *   repoId?: string | null,
- * }} args
- */
-export function memoryQuery({ versionId, params, ledger, repoId }) {
-  const db = ledgerDb(ledger);
-  if (!db) return ledgerUnavailable("memory.query", versionId);
-  const effectiveRepoId = effectiveRepo(repoId, params.repoId);
-  const policy = getEffectivePolicy(ledger, effectiveRepoId);
-  if (!policy.memoryEnabled) {
-    return memoryDisabled("memory.query", versionId);
-  }
-  sweepStaleMemories(db, effectiveRepoId, policy);
-  const limit = clampInt(params.limit, 1, 100, 20);
-  const offset = clampInt(params.offset, 0, 10_000, 0);
-  const rows = candidateRows(db, effectiveRepoId, {
-    includeDeleted: false,
-    query: params.query,
-  });
-  const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
-  const filtered = filterRows(rows, params, links, { anchorMode: "all" });
-  const scored = filtered.map((row) => hydrateMemory(row, links, {
-    query: params.query,
-    symbolIds: params.symbolIds,
-    fileRelPaths: params.fileRelPaths,
   }));
-  sortMemories(scored, params.sortBy || (params.query ? "score" : "recency"));
-  const page = scored.slice(offset, offset + limit);
-  return okEnvelope({
-    action: "memory.query",
-    versionId,
-    data: {
-      repoId: effectiveRepoId,
-      memories: page,
-      total: scored.length,
-      hasMore: offset + limit < scored.length,
-      nextOffset: offset + limit < scored.length ? offset + limit : null,
-    },
-  });
 }
 
-/**
- * @param {{
- *   versionId: string,
- *   params: import("../contracts/tool-params.js").MemoryRemoveParams,
- *   ledger?: import("../contracts/api.js").Ledger,
- *   repoId?: string | null,
- * }} args
- */
-export function memoryRemove({ versionId, params, ledger, repoId }) {
-  const db = ledgerDb(ledger);
-  if (!db) return ledgerUnavailable("memory.remove", versionId);
-  if (!getEffectivePolicy(ledger, effectiveRepo(repoId, params.repoId)).memoryEnabled) {
-    return memoryDisabled("memory.remove", versionId);
-  }
-  const memoryId = cleanMemoryId(params.memoryId);
-  if (!memoryId) {
-    return errorEnvelope({
-      action: "memory.remove",
-      versionId,
-      code: "invalid_memory_id",
-      message: "memory.remove requires memoryId",
-    });
-  }
-  const row = findMemoryById(db, memoryId);
-  if (!row || Number(row.deleted || 0) === 1 || row.repo_id !== effectiveRepo(repoId, params.repoId)) {
-    return errorEnvelope({
-      action: "memory.remove",
-      versionId,
-      code: "memory_not_found",
-      message: `Memory ${memoryId} was not found`,
-    });
-  }
-  const now = new Date().toISOString();
-  db.prepare("UPDATE memories SET deleted = 1, deleted_at = ?, updated_at = ? WHERE memory_id = ?").run(now, now, memoryId);
-  getRetrievalCache().invalidateAll();
-  return okEnvelope({
-    action: "memory.remove",
-    versionId,
-    data: { ok: true, memoryId, memory_id: memoryId },
-  });
-}
-
-const MEMORY_FLAG_REASONS = new Set(["contradicted", "anchors_missing", "manual"]);
+const MEMORY_FLAG_REASONS = new Set(["wrong", "anchors_missing", "manual", "duplicate"]);
 
 /**
  * Evidence-based staleness: flag a memory stale WITH a reason instead of
- * deleting it. 'contradicted' (assessment/work proved it wrong) also stamps
- * contradicted_at and bumps contradiction_count. Flagged memories stop
- * surfacing proactively but stay queryable and correctable — suppression
- * stays a deliberate memory.remove.
+ * deleting it. 'wrong' (assessment/work proved it wrong) also stamps
+ * wrong_at and bumps wrong_count. Flagged memories stop
+ * surfacing proactively but stay correctable — suppression
+ * stays a deliberate GC decision.
  *
  * @param {{
  *   versionId: string,
- *   params: import("../contracts/tool-params.js").MemoryFlagParams,
+ *   params: { repoId?: string, memoryId: string, reason: string, detail?: string },
  *   ledger?: import("../contracts/api.js").Ledger,
  *   repoId?: string | null,
  * }} args
  */
-export function memoryFlag({ versionId, params, ledger, repoId }) {
-  const db = ledgerDb(ledger);
-  if (!db) return ledgerUnavailable("memory.flag", versionId);
+function memoryFlagInternal({ versionId, params, ledger, repoId }) {
+  const opened = openMemoryActionDb({ ledger, action: "memory.feedback", versionId });
+  if (opened.error) return opened.error;
+  const db = opened.db;
+  const finish = (result) => {
+    closeMemoryDb(db);
+    return result;
+  };
   const effectiveRepoId = effectiveRepo(repoId, params.repoId);
   if (!getEffectivePolicy(ledger, effectiveRepoId).memoryEnabled) {
-    return memoryDisabled("memory.flag", versionId);
+    return finish(memoryDisabled("memory.feedback", versionId));
   }
   const memoryId = cleanMemoryId(params.memoryId);
   if (!memoryId) {
-    return errorEnvelope({
-      action: "memory.flag",
+    return finish(errorEnvelope({
+      action: "memory.feedback",
       versionId,
       code: "invalid_memory_id",
-      message: "memory.flag requires memoryId",
-    });
+      message: "memory.feedback requires memoryId",
+    }));
   }
   const reason = String(params.reason || "").trim().toLowerCase();
   if (!MEMORY_FLAG_REASONS.has(reason)) {
-    return errorEnvelope({
-      action: "memory.flag",
+    return finish(errorEnvelope({
+      action: "memory.feedback",
       versionId,
       code: "invalid_flag_reason",
-      message: `memory.flag reason must be one of: ${[...MEMORY_FLAG_REASONS].join(", ")}`,
-    });
+      message: `memory.feedback stale reason must be one of: ${[...MEMORY_FLAG_REASONS].join(", ")}`,
+    }));
   }
   const row = findMemoryById(db, memoryId);
   if (!row || Number(row.deleted || 0) === 1 || row.repo_id !== effectiveRepoId) {
-    return errorEnvelope({
-      action: "memory.flag",
+    return finish(errorEnvelope({
+      action: "memory.feedback",
       versionId,
       code: "memory_not_found",
       message: `Memory ${memoryId} was not found`,
-    });
+    }));
   }
   const now = new Date().toISOString();
   flagMemoryStale(db, memoryId, reason, now);
   getRetrievalCache().invalidateAll();
   const updated = findMemoryById(db, memoryId);
-  return okEnvelope({
-    action: "memory.flag",
+  return finish(okEnvelope({
+    action: "memory.feedback",
     versionId,
     data: {
       ok: true,
@@ -351,10 +348,109 @@ export function memoryFlag({ versionId, params, ledger, repoId }) {
       memory_id: memoryId,
       stale: true,
       staleReason: reason,
-      contradictionCount: Number(updated?.contradiction_count || 0),
+      wrongCount: Number(updated?.wrong_count || 0),
       detail: cleanString(params.detail, 500) || undefined,
     },
-  });
+  }));
+}
+
+const MEMORY_FEEDBACK_VERDICTS = new Set(["used", "stale", "wrong", "duplicate"]);
+
+/**
+ * First-pass memory feedback surface. Negative freshness verdicts suppress the
+ * memory until it is refreshed; positive feedback resets the recency head.
+ *
+ * @param {{
+ *   versionId: string,
+ *   params: import("../contracts/tool-params.js").MemoryFeedbackParams,
+ *   ledger?: import("../contracts/api.js").Ledger,
+ *   repoId?: string | null,
+ * }} args
+ */
+export function memoryFeedback({ versionId, params, ledger, repoId }) {
+  const verdict = String(params.verdict || "").trim().toLowerCase();
+  if (!MEMORY_FEEDBACK_VERDICTS.has(verdict)) {
+    return errorEnvelope({
+      action: "memory.feedback",
+      versionId,
+      code: "invalid_memory_feedback_verdict",
+      message: "memory.feedback verdict must be one of: used, stale, wrong, duplicate",
+    });
+  }
+  if (verdict === "stale" || verdict === "wrong" || verdict === "duplicate") {
+    const flagged = memoryFlagInternal({
+      versionId,
+      params: {
+        repoId: params.repoId,
+        memoryId: params.memoryId,
+        reason: verdict === "wrong" ? "wrong" : verdict === "duplicate" ? "duplicate" : "manual",
+        detail: params.detail,
+      },
+      ledger,
+      repoId,
+    });
+    if (!flagged?.ok) return flagged;
+    return okEnvelope({
+      action: "memory.feedback",
+      versionId,
+      data: {
+        ok: true,
+        memoryId: flagged.data.memoryId,
+        memory_id: flagged.data.memory_id,
+        verdict,
+        stale: true,
+        staleReason: flagged.data.staleReason,
+        wrongCount: flagged.data.wrongCount,
+        ...(params.detail ? { detail: cleanString(params.detail, 500) } : {}),
+      },
+    });
+  }
+
+  const opened = openMemoryActionDb({ ledger, action: "memory.feedback", versionId });
+  if (opened.error) return opened.error;
+  const db = opened.db;
+  const finish = (result) => {
+    closeMemoryDb(db);
+    return result;
+  };
+  const effectiveRepoId = effectiveRepo(repoId, params.repoId);
+  if (!getEffectivePolicy(ledger, effectiveRepoId).memoryEnabled) {
+    return finish(memoryDisabled("memory.feedback", versionId));
+  }
+  const memoryId = cleanMemoryId(params.memoryId);
+  const row = memoryId ? findMemoryById(db, memoryId) : null;
+  if (!row || Number(row.deleted || 0) === 1 || row.repo_id !== effectiveRepoId) {
+    return finish(errorEnvelope({
+      action: "memory.feedback",
+      versionId,
+      code: "memory_not_found",
+      message: `Memory ${memoryId || "(missing)"} was not found`,
+    }));
+  }
+  const now = new Date().toISOString();
+  if (verdict === "used") {
+    db.prepare(
+      `UPDATE memories
+       SET stale = 0,
+           stale_reason = NULL,
+           wrong_at = NULL,
+           updated_at = ?
+       WHERE memory_id = ?`,
+    ).run(now, memoryId);
+    getRetrievalCache().invalidateAll();
+  }
+  return finish(okEnvelope({
+    action: "memory.feedback",
+    versionId,
+    data: {
+      ok: true,
+      memoryId,
+      memory_id: memoryId,
+      verdict,
+      recorded: verdict === "used",
+      ...(params.detail ? { detail: cleanString(params.detail, 500) } : {}),
+    },
+  }));
 }
 
 /**
@@ -366,11 +462,11 @@ export function memoryFlag({ versionId, params, ledger, repoId }) {
 function flagMemoryStale(db, memoryId, reason, now) {
   // updated_at is deliberately NOT bumped: it drives the recency score and
   // the age sweep, and flagging a memory must not make it look fresher.
-  if (reason === "contradicted") {
+  if (reason === "wrong") {
     db.prepare(
       `UPDATE memories
-       SET stale = 1, stale_reason = ?, contradicted_at = ?,
-           contradiction_count = contradiction_count + 1
+       SET stale = 1, stale_reason = ?, wrong_at = ?,
+           wrong_count = wrong_count + 1
        WHERE memory_id = ?`,
     ).run(reason, now, memoryId);
   } else {
@@ -390,51 +486,191 @@ function flagMemoryStale(db, memoryId, reason, now) {
  * }} args
  */
 export function memorySurface({ versionId, params, ledger, repoId, view = null }) {
-  const db = ledgerDb(ledger);
-  if (!db) return ledgerUnavailable("memory.surface", versionId);
   const effectiveRepoId = effectiveRepo(repoId, params.repoId);
   const policy = getEffectivePolicy(ledger, effectiveRepoId);
   if (!policy.memoryEnabled) {
     return memoryDisabled("memory.surface", versionId);
   }
-  sweepStaleMemories(db, effectiveRepoId, policy);
-  const limit = clampInt(params.limit, 1, 50, 6);
-  const rows = candidateRows(db, effectiveRepoId, { includeDeleted: false });
-  const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
-  // Surfacing is proactive: a memory anchored to any of the provided symbols
-  // OR files is relevant, and stale memories never surface on their own.
-  let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true });
-  filtered = applyAnchorEvidence(db, view, filtered, links);
-  const surfaced = filtered.map((row) => hydrateMemory(row, links, {
-    symbolIds: params.symbolIds,
-    fileRelPaths: params.fileRelPaths,
-    taskType: params.taskType,
-  }));
-  sortMemories(surfaced, "score");
-  return okEnvelope({
-    action: "memory.surface",
-    versionId,
-    data: {
-      repoId: effectiveRepoId,
-      memories: surfaced.slice(0, limit),
-      total: surfaced.length,
-    },
-  });
+  const requested = {
+    symbolIds: safeSymbolIds(params.symbolIds || [], "memory.surface symbolIds"),
+    fileRelPaths: normalizePaths(params.fileRelPaths || []),
+  };
+  if (requested.symbolIds.length === 0 && requested.fileRelPaths.length === 0) {
+    return okEnvelope({
+      action: "memory.surface",
+      versionId,
+      data: { symbols: [], files: [] },
+    });
+  }
+  const opened = openMemoryReadDb({ ledger, action: "memory.surface", versionId });
+  if (opened.error) return opened.error;
+  if (opened.missing) {
+    return okEnvelope({ action: "memory.surface", versionId, data: { symbols: [], files: [] } });
+  }
+  const db = opened.db;
+  const finish = (result) => {
+    closeMemoryDb(db);
+    return result;
+  };
+  try {
+    const rows = candidateRows(db, effectiveRepoId, { includeDeleted: false });
+    const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
+    let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true, policy });
+    filtered = applyAnchorEvidence(view, filtered, links);
+    const presence = memoryAnchorPresence(filtered, links, requested);
+    return finish(okEnvelope({
+      action: "memory.surface",
+      versionId,
+      data: presence,
+    }));
+  } catch (err) {
+    return finish(errorEnvelope({
+      action: "memory.surface",
+      versionId,
+      code: "memory_surface_failed",
+      message: err?.message || String(err),
+    }));
+  }
 }
 
-function ledgerDb(ledger) {
-  return typeof /** @type {any} */ (ledger)?._unsafeDb === "function"
-    ? /** @type {any} */ (ledger)._unsafeDb()
-    : null;
+/**
+ * @param {{
+ *   versionId: string,
+ *   params: import("../contracts/tool-params.js").MemoryGetParams,
+ *   ledger?: import("../contracts/api.js").Ledger,
+ *   repoId?: string | null,
+ *   view?: import("../contracts/api.js").View | null,
+ * }} args
+ */
+export function memoryGet({ versionId, params, ledger, repoId, view = null }) {
+  const effectiveRepoId = effectiveRepo(repoId, params.repoId);
+  const policy = getEffectivePolicy(ledger, effectiveRepoId);
+  if (!policy.memoryEnabled) {
+    return memoryDisabled("memory.get", versionId);
+  }
+  const requested = {
+    symbolIds: safeSymbolIds(params.symbolIds || [], "memory.get symbolIds"),
+    fileRelPaths: normalizePaths(params.fileRelPaths || []),
+  };
+  if (requested.symbolIds.length === 0 && requested.fileRelPaths.length === 0) {
+    return okEnvelope({
+      action: "memory.get",
+      versionId,
+      data: { symbols: {}, files: {} },
+    });
+  }
+  const opened = openMemoryReadDb({ ledger, action: "memory.get", versionId });
+  if (opened.error) return opened.error;
+  if (opened.missing) {
+    return okEnvelope({ action: "memory.get", versionId, data: { symbols: {}, files: {} } });
+  }
+  const db = opened.db;
+  const finish = (result) => {
+    closeMemoryDb(db);
+    return result;
+  };
+  try {
+    const rows = candidateRows(db, effectiveRepoId, { includeDeleted: false });
+    const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
+    let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true, policy });
+    filtered = applyAnchorEvidence(view, filtered, links);
+    return finish(okEnvelope({
+      action: "memory.get",
+      versionId,
+      data: memoryContentByAnchor(filtered, links, requested),
+    }));
+  } catch (err) {
+    return finish(errorEnvelope({
+      action: "memory.get",
+      versionId,
+      code: "memory_get_failed",
+      message: err?.message || String(err),
+    }));
+  }
 }
 
-function ledgerUnavailable(action, versionId) {
-  return errorEnvelope({
-    action: /** @type {any} */ (action),
-    versionId,
-    code: "ledger_unavailable",
-    message: `${action} requires a ledger-backed ATLAS context`,
-  });
+function ledgerDbPathFromHandle(ledger) {
+  return typeof /** @type {any} */ (ledger)?._dbPath === "function"
+    ? /** @type {any} */ (ledger)._dbPath()
+    : "";
+}
+
+function memoryDbPathForLedger(ledger) {
+  const ledgerPath = ledgerDbPathFromHandle(ledger);
+  return memoryDbPathForLedgerDb(ledgerPath);
+}
+
+function openMemoryDbForLedger(ledger) {
+  const dbPath = memoryDbPathForLedger(ledger);
+  if (!dbPath) return null;
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  db.pragma("busy_timeout = 5000");
+  db.exec(MEMORY_DDL);
+  upgradeMemorySchema(db);
+  db.pragma("foreign_keys = ON");
+  return db;
+}
+
+function openMemoryReadDbForLedger(ledger) {
+  const dbPath = memoryDbPathForLedger(ledger);
+  if (!dbPath) return { db: null, missing: false };
+  if (!fs.existsSync(dbPath)) return { db: null, missing: true };
+  try {
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    db.pragma("busy_timeout = 5000");
+    db.pragma("foreign_keys = ON");
+    return { db, missing: false };
+  } catch {
+    return { db: null, missing: true };
+  }
+}
+
+function closeMemoryDb(db) {
+  try { db?.close?.(); } catch { /* ignore */ }
+}
+
+function openMemoryActionDb({ ledger, action, versionId }) {
+  const db = openMemoryDbForLedger(ledger);
+  if (!db) {
+    return {
+      error: errorEnvelope({
+        action: /** @type {any} */ (action),
+        versionId,
+        code: "memory_store_unavailable",
+        message: "ATLAS memory requires an ATLAS repository context",
+      }),
+      db: null,
+    };
+  }
+  return { db, error: null };
+}
+
+function openMemoryReadDb({ ledger, action, versionId }) {
+  const opened = openMemoryReadDbForLedger(ledger);
+  if (opened.db || opened.missing) return { db: opened.db, missing: opened.missing, error: null };
+  return {
+    db: null,
+    missing: false,
+    error: errorEnvelope({
+      action: /** @type {any} */ (action),
+      versionId,
+      code: "memory_store_unavailable",
+      message: "ATLAS memory requires an ATLAS repository context",
+    }),
+  };
+}
+
+function upgradeMemorySchema(db) {
+  const columns = new Set(
+    db.prepare("PRAGMA table_info(memories)").all().map((row) => String(row.name || "")),
+  );
+  if (!columns.has("wrong_at")) {
+    db.prepare("ALTER TABLE memories ADD COLUMN wrong_at TEXT").run();
+  }
+  if (!columns.has("wrong_count")) {
+    db.prepare("ALTER TABLE memories ADD COLUMN wrong_count INTEGER NOT NULL DEFAULT 0").run();
+  }
 }
 
 function memoryDisabled(action, versionId) {
@@ -463,17 +699,6 @@ function cleanMemoryId(value) {
   const text = cleanString(value, 120);
   if (!text) return "";
   return /^[A-Za-z0-9_.:-]+$/.test(text) ? text : "";
-}
-
-function normalizeTags(values) {
-  const out = [];
-  for (const raw of Array.isArray(values) ? values : []) {
-    const tag = cleanString(raw, 64).toLowerCase();
-    if (!tag || out.includes(tag)) continue;
-    out.push(tag);
-    if (out.length >= 20) break;
-  }
-  return out;
 }
 
 function normalizePaths(values) {
@@ -572,6 +797,19 @@ function enforceMemoryCap(db, repoId, policy, now) {
   for (const victim of victims) evict.run(now, now, victim.memory_id);
 }
 
+function reviveMemory(db, memoryId, now) {
+  db.prepare(
+    `UPDATE memories
+     SET stale = 0,
+         stale_reason = NULL,
+         wrong_at = NULL,
+         wrong_count = 0,
+         updated_at = ?
+     WHERE memory_id = ?`,
+  ).run(now, memoryId);
+  getRetrievalCache().invalidateAll();
+}
+
 function replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths) {
   db.prepare("DELETE FROM memory_symbol_links WHERE memory_id = ?").run(memoryId);
   db.prepare("DELETE FROM memory_file_links WHERE memory_id = ?").run(memoryId);
@@ -589,9 +827,7 @@ function replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths) {
   for (const repoRelPath of fileRelPaths) fileIns.run(memoryId, repoRelPath);
 }
 
-function candidateRows(db, repoId, { includeDeleted = false, query = "" } = {}) {
-  const ftsRows = query ? candidateRowsByFts(db, repoId, { query, includeDeleted }) : null;
-  if (ftsRows) return ftsRows;
+function candidateRows(db, repoId, { includeDeleted = false } = {}) {
   const deletedSql = includeDeleted ? "" : "AND deleted = 0";
   return db.prepare(
     `SELECT * FROM memories
@@ -599,27 +835,6 @@ function candidateRows(db, repoId, { includeDeleted = false, query = "" } = {}) 
      ORDER BY updated_at DESC
      LIMIT 5000`,
   ).all(repoId);
-}
-
-function candidateRowsByFts(db, repoId, { query, includeDeleted }) {
-  if (!tableExists(db, "memories_fts")) return null;
-  const match = ftsMatchQuery(query);
-  if (!match) return null;
-  const deletedSql = includeDeleted ? "" : "AND m.deleted = 0";
-  try {
-    return db.prepare(
-      `SELECT m.*, bm25(memories_fts, 4.0, 3.0, 1.0) AS _fts_rank, 1 AS _fts_match
-       FROM memories_fts
-       JOIN memories m ON m.rowid = memories_fts.rowid
-       WHERE memories_fts MATCH ?
-         AND m.repo_id = ?
-         ${deletedSql}
-       ORDER BY _fts_rank ASC, m.updated_at DESC
-       LIMIT 5000`,
-    ).all(match, repoId);
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -655,25 +870,11 @@ function fetchMemoryLinks(db, memoryIds) {
   return { symbolsById, filesById };
 }
 
-function filterRows(rows, params = {}, links, { anchorMode = "all", excludeStale = false } = {}) {
-  const types = new Set((Array.isArray(params.types) ? params.types : [])
-    .map((t) => normalizeMemoryType(t))
-    .filter(Boolean));
-  const tags = normalizeTags(params.tags || []);
+function filterRows(rows, params = {}, links, { anchorMode = "all", excludeStale = false, policy = null } = {}) {
   const symbols = safeSymbolIds(params.symbolIds || []);
   const files = normalizePaths(params.fileRelPaths || []);
-  const query = cleanString(params.query, 1000).toLowerCase();
-  const queryTokens = tokenize(query);
   return rows.filter((row) => {
-    if (types.size > 0 && !types.has(row.type)) return false;
-    if (excludeStale && Number(row.stale || 0) === 1) return false;
-    if (params.staleOnly && Number(row.stale || 0) !== 1) return false;
-    const rowTags = parseJsonArray(row.tags_json);
-    if (tags.length > 0 && !tags.every((tag) => rowTags.includes(tag))) return false;
-    if (query && Number(row._fts_match || 0) !== 1) {
-      const text = memorySearchText(row, rowTags);
-      if (!queryTokens.every((token) => text.includes(token))) return false;
-    }
+    if (excludeStale && memoryIsStaleForRead(row, policy)) return false;
     const linkedSymbols = links.symbolsById.get(row.memory_id) || [];
     const linkedFiles = links.filesById.get(row.memory_id) || [];
     const symbolHit = symbols.length > 0 && symbols.some((s) => linkedSymbols.includes(s));
@@ -689,71 +890,115 @@ function filterRows(rows, params = {}, links, { anchorMode = "all", excludeStale
   });
 }
 
-function safeSymbolIds(values) {
+function memoryIsStaleForRead(row, policy) {
+  if (Number(row.stale || 0) === 1) return true;
+  const days = clampInt(policy?.memoryStaleAfterDays, 0, 3650, 0);
+  if (days <= 0) return false;
+  const updatedAt = Date.parse(String(row.updated_at || ""));
+  if (!Number.isFinite(updatedAt)) return false;
+  return updatedAt < Date.now() - days * 86_400_000;
+}
+
+function safeSymbolIds(values, label = "memory symbolIds") {
   try {
-    return sanitizeAtlasSymbolIdList(values, 500, "memory.surface symbolIds");
+    return sanitizeAtlasSymbolIdList(values, 500, label);
   } catch {
     return [];
   }
 }
 
-function hydrateMemory(row, links, criteria = {}) {
-  const tags = parseJsonArray(row.tags_json);
-  const linkedSymbols = links.symbolsById.get(row.memory_id) || [];
-  const fileRelPaths = links.filesById.get(row.memory_id) || [];
-  const matchedSymbols = (safeSymbolIds(criteria.symbolIds || [])).filter((s) => linkedSymbols.includes(s));
-  const matchedFiles = normalizePaths(criteria.fileRelPaths || []).filter((f) => fileRelPaths.includes(f));
-  const score = memoryScore(row, {
-    tags,
-    linkedSymbols,
-    fileRelPaths,
-    matchedSymbols,
-    matchedFiles,
-    query: criteria.query,
-    taskType: criteria.taskType,
-  });
+function memoryAnchorPresence(rows, links, params = {}) {
+  const requestedSymbols = safeSymbolIds(params.symbolIds || [], "memory.surface symbolIds");
+  const requestedFiles = normalizePaths(params.fileRelPaths || []);
+  const symbols = new Set();
+  const files = new Set();
+  for (const row of rows) {
+    const linkedSymbols = links.symbolsById.get(row.memory_id) || [];
+    const linkedFiles = activeMemoryFileLinks(row, links);
+    for (const symbolId of requestedSymbols) {
+      if (linkedSymbols.includes(symbolId)) symbols.add(symbolId);
+    }
+    for (const fileRelPath of requestedFiles) {
+      if (linkedFiles.includes(fileRelPath)) files.add(fileRelPath);
+    }
+  }
   return {
-    memoryId: row.memory_id,
-    memory_id: row.memory_id,
-    repoId: row.repo_id,
-    type: row.type,
-    title: row.title,
-    content: row.content,
-    tags,
-    confidence: Number(row.confidence || 0),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    stale: Number(row.stale || 0) === 1,
-    staleReason: row.stale_reason || null,
-    source: row.source || "agent",
-    contradictedAt: row.contradicted_at || null,
-    contradictionCount: Number(row.contradiction_count || 0),
-    ...(Array.isArray(row._missingAnchors) && row._missingAnchors.length > 0
-      ? { missingAnchors: row._missingAnchors }
-      : {}),
-    linkedSymbols,
-    symbolIds: linkedSymbols,
-    fileRelPaths,
-    score,
-    matchedSymbols,
-    matchedFiles,
+    symbols: requestedSymbols.filter((symbolId) => symbols.has(symbolId)),
+    files: requestedFiles.filter((fileRelPath) => files.has(fileRelPath)),
   };
 }
 
+function memoryContentByAnchor(rows, links, params = {}) {
+  const requestedSymbols = safeSymbolIds(params.symbolIds || [], "memory.get symbolIds");
+  const requestedFiles = normalizePaths(params.fileRelPaths || []);
+  const symbols = Object.fromEntries(requestedSymbols.map((symbolId) => [symbolId, []]));
+  const files = Object.fromEntries(requestedFiles.map((fileRelPath) => [fileRelPath, []]));
+  const sorted = [...rows].sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+  for (const row of sorted) {
+    const linkedSymbols = links.symbolsById.get(row.memory_id) || [];
+    const linkedFiles = activeMemoryFileLinks(row, links);
+    const memory = memoryForAnchorGet(row, links);
+    for (const symbolId of requestedSymbols) {
+      if (linkedSymbols.includes(symbolId)) symbols[symbolId].push(memory);
+    }
+    for (const fileRelPath of requestedFiles) {
+      if (linkedFiles.includes(fileRelPath)) files[fileRelPath].push(memory);
+    }
+  }
+  for (const key of Object.keys(symbols)) {
+    if (symbols[key].length === 0) delete symbols[key];
+  }
+  for (const key of Object.keys(files)) {
+    if (files[key].length === 0) delete files[key];
+  }
+  return { symbols, files };
+}
+
+function memoryForAnchorGet(row, links) {
+  return {
+    memoryId: row.memory_id,
+    memory_id: row.memory_id,
+    title: row.title,
+    content: row.content,
+    source: row.source || "agent",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    symbolIds: links.symbolsById.get(row.memory_id) || [],
+    fileRelPaths: activeMemoryFileLinks(row, links),
+    ...(missingMemoryFileAnchors(row).length > 0
+      ? { missingAnchors: missingMemoryFileAnchors(row) }
+      : {}),
+  };
+}
+
+function missingMemoryFileAnchors(row) {
+  return Array.isArray(row?._missingAnchors)
+    ? row._missingAnchors.map(String).filter(Boolean)
+    : [];
+}
+
+function activeMemoryFileLinks(row, links) {
+  const linkedFiles = links.filesById.get(row.memory_id) || [];
+  const missing = new Set(missingMemoryFileAnchors(row));
+  if (missing.size === 0) return linkedFiles;
+  return linkedFiles.filter((fileRelPath) => !missing.has(fileRelPath));
+}
+
 function memoryScore(row, detail) {
+  const matchedSymbols = Array.isArray(detail?.matchedSymbols) ? detail.matchedSymbols : [];
+  const matchedFiles = Array.isArray(detail?.matchedFiles) ? detail.matchedFiles : [];
   let score = 0;
   score += Number(row.confidence || 0) || 0;
-  score += recencyScore(row.updated_at, detail.nowMs ?? Date.now());
-  score += detail.matchedSymbols.length * 2;
-  score += detail.matchedFiles.length;
-  if (detail.taskType && row.type === detail.taskType) score += 0.75;
-  const query = cleanString(detail.query, 1000).toLowerCase();
+  score += recencyScore(row.updated_at, detail?.nowMs ?? Date.now());
+  score += matchedSymbols.length * 2;
+  score += matchedFiles.length;
+  if (detail?.taskType && row.type === detail.taskType) score += 0.75;
+  const query = cleanString(detail?.query, 1000).toLowerCase();
   if (query) {
-    const text = memorySearchText(row, detail.tags);
+    const text = memorySearchText(row, Array.isArray(detail?.tags) ? detail.tags : []);
     for (const token of tokenize(query)) {
       if (text.includes(token)) score += 0.5;
     }
-    if (Number(row._fts_match || 0) === 1) score += 1.25;
   }
   return Math.round(score * 1000) / 1000;
 }
@@ -773,70 +1018,31 @@ function tokenize(text) {
   return String(text || "").toLowerCase().split(/[^a-z0-9_]+/).filter((t) => t.length >= 2);
 }
 
-function ftsMatchQuery(text) {
-  const tokens = tokenize(text).slice(0, 12);
-  if (tokens.length === 0) return "";
-  return tokens.map((token) => `${token.replace(/"/g, "\"\"")}*`).join(" OR ");
-}
-
-function tableExists(db, table) {
-  try {
-    return !!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
-  } catch {
-    return false;
-  }
-}
-
-function parseJsonArray(value) {
-  try {
-    const parsed = JSON.parse(String(value || "[]"));
-    return Array.isArray(parsed) ? parsed.map((v) => String(v)).filter(Boolean) : [];
-  } catch {
-    return [];
-  }
-}
-
 // Deterministic method core, exported for parity fixtures and the Rust port
 // (posse-encoder-rust atlas_core::memory_rank). Keep these pure.
 export {
   tokenize as memoryRankTokenize,
-  ftsMatchQuery as memoryFtsMatchQuery,
   recencyScore as memoryRecencyScore,
   memoryScore as memoryRankScore,
   jaccardSimilarity as memoryJaccardSimilarity,
   NEAR_DUPLICATE_JACCARD as MEMORY_NEAR_DUPLICATE_JACCARD,
 };
 
-function sortMemories(memories, sortBy) {
-  memories.sort((a, b) => {
-    if (sortBy === "confidence") {
-      return (Number(b.confidence || 0) - Number(a.confidence || 0))
-        || String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
-    }
-    if (sortBy === "recency") {
-      return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
-    }
-    return (Number(b.score || 0) - Number(a.score || 0))
-      || String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
-  });
-}
-
 /**
  * Deterministic anchor evidence: a memory whose EVERY anchored file has
- * vanished from the indexed tree describes code that no longer exists. Flag
- * it stale ('anchors_missing') and stop surfacing it; partial loss only
- * decorates the surfaced memory with the missing paths. Guards:
+ * vanished from the indexed tree describes code that no longer exists, so
+ * read paths skip it without mutating memory.db. Partial loss only decorates
+ * the surfaced memory with the missing paths. Guards:
  * - needs an open view (ledger-only surfacing skips the check),
  * - only memories created BEFORE the view was built can be flagged — the
  *   surface route is freshness-exempt, so a fresh memory anchored to a file
  *   newer than a stale view must not be punished for the view's lag.
  *
- * @param {import("better-sqlite3").Database} db
  * @param {import("../contracts/api.js").View | null | undefined} view
  * @param {any[]} rows
  * @param {{ filesById: Map<string, string[]> }} links
  */
-function applyAnchorEvidence(db, view, rows, links) {
+function applyAnchorEvidence(view, rows, links) {
   const viewDb = typeof /** @type {any} */ (view)?._unsafeDb === "function"
     ? /** @type {any} */ (view)._unsafeDb()
     : null;
@@ -869,7 +1075,6 @@ function applyAnchorEvidence(db, view, rows, links) {
     const olderThanView = !viewBuiltAt
       || String(row.created_at || "") < viewBuiltAt;
     if (missing.length === files.length && olderThanView) {
-      try { flagMemoryStale(db, row.memory_id, "anchors_missing", new Date().toISOString()); } catch { /* advisory */ }
       continue; // every anchor gone: do not surface
     }
     row._missingAnchors = missing;
@@ -881,8 +1086,7 @@ function applyAnchorEvidence(db, view, rows, links) {
 /**
  * Opportunistic staleness sweep: memories untouched for longer than the policy
  * window are flagged stale so proactive surfacing skips them. memory.store
- * resets the flag when a memory is refreshed, and memory.query still returns
- * stale rows (flagged) so they stay discoverable and correctable.
+ * resets the flag when a memory is refreshed.
  */
 function sweepStaleMemories(db, repoId, policy) {
   const days = clampInt(policy?.memoryStaleAfterDays, 0, 3650, 0);

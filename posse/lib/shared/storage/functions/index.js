@@ -710,6 +710,11 @@ function quarantineStaleIncompleteDb(dbPath, { force = false, ignoreAge = false 
   return quarantined;
 }
 
+function ensureRuntimeDbDir(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(dir, 0o700); } catch { /* Windows/best-effort */ }
+}
+
 export function getDb() {
   if (_db) return _db;
 
@@ -717,7 +722,7 @@ export function getDb() {
 
   // Ensure parent directory exists
   const dir = path.dirname(dbPath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  ensureRuntimeDbDir(dir);
 
   quarantineStaleIncompleteDb(dbPath);
 

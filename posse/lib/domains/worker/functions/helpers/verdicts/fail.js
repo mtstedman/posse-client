@@ -32,8 +32,6 @@ import {
 } from "../verdict-shared.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 
-const ARTIFACT_PROTOCOL_CONFIG_PATH = "config/artifact-protocols.json";
-
 function _positiveFixEditTargets(instructions = "", paths = []) {
   const source = String(instructions || "").toLowerCase();
   const editRe = /\b(add|update|modify|edit|fix|implement|adjust|change|patch|repair|guard|harden)\b/i;
@@ -74,51 +72,39 @@ function _artifactProtocolConfigText({ fixInstructions = "", assessorFeedback = 
   ].filter(Boolean).join("\n").replace(/\\/g, "/").toLowerCase();
 }
 
-function _looksLikeArtifactProtocolConfigFix({ fixInstructions = "", assessorFeedback = [], specPayload = {} } = {}) {
+function _looksLikeArtifactRoutingAdminIssue({ fixInstructions = "", assessorFeedback = [], specPayload = {} } = {}) {
   const text = _artifactProtocolConfigText({ fixInstructions, assessorFeedback, specPayload });
   if (!text) return false;
-  const mentionsArtifactProtocol = /no artifact protocol configured|artifact protocol|artifact-protocols\.json|allowed_extensions|allowed_formats|task_mode\s*["'`:= -]*image/.test(text);
-  const asksForConfigChange = /no artifact protocol configured|config\/artifact-protocols\.json|artifact-protocols\.json|add(?:ing)?\s+(?:an?\s+)?["'`]?image["'`]?\s+entry|configure(?:d|s|ing)?\s+.*artifact protocol|protocol config/.test(text);
-  return mentionsArtifactProtocol && asksForConfigChange;
+  const mentionsArtifactRouting = /artifact routing unavailable|no artifact protocol configured|artifact protocol|allowed_extensions|allowed_formats|task_mode\s*["'`:= -]*image/.test(text);
+  const asksForRoutingRepair = /artifact routing unavailable|no artifact protocol configured|add(?:ing)?\s+(?:an?\s+)?["'`]?image["'`]?\s+entry|configure(?:d|s|ing)?\s+.*artifact|protocol config/.test(text);
+  return mentionsArtifactRouting && asksForRoutingRepair;
 }
 
-function _buildArtifactProtocolConfigFixPayload({
+function _buildArtifactRoutingAdminPayload({
   job,
   fixInstructions,
   assessorFeedback,
   originalTaskMode,
-  originalSuccessCriteria,
   originalTaskSpec,
 }) {
   const safeFeedback = Array.isArray(assessorFeedback) ? assessorFeedback : [];
   const modeLabel = String(originalTaskMode || "artifact");
-  const safeInstructions = String(fixInstructions || safeFeedback.join("\n") || `Configure the artifact protocol for ${modeLabel} outputs.`);
+  const safeInstructions = String(fixInstructions || safeFeedback.join("\n") || `Review Posse artifact routing for ${modeLabel} outputs.`);
   return {
-    original_job_id: job.id,
-    original_title: job.title,
-    task_mode: "code",
-    output_root: null,
-    needs_image_generation: false,
-    task_spec: [
-      "Repair the repository configuration for artifact validation.",
-      `Edit ${ARTIFACT_PROTOCOL_CONFIG_PATH} so ${modeLabel}-mode artifact outputs have a valid protocol.`,
-      "",
-      originalTaskSpec ? `ORIGINAL TASK:\n${originalTaskSpec}` : null,
-      `REPAIR INSTRUCTIONS:\n${safeInstructions}`,
-      safeFeedback.length > 0 ? `ASSESSOR FEEDBACK:\n${safeFeedback.join("\n")}` : null,
-    ].filter(Boolean).join("\n"),
-    fix_instructions: safeInstructions,
-    assessor_feedback: safeFeedback,
-    files_to_modify: [ARTIFACT_PROTOCOL_CONFIG_PATH],
-    files_to_create: [ARTIFACT_PROTOCOL_CONFIG_PATH],
-    files_to_delete: [],
-    create_roots: ["config"],
-    success_criteria: Array.isArray(originalSuccessCriteria) && originalSuccessCriteria.length > 0
-      ? originalSuccessCriteria
-      : [`${ARTIFACT_PROTOCOL_CONFIG_PATH} defines a valid ${modeLabel} artifact protocol.`],
-    _planner_set_files: true,
-    declared_output_contract: false,
-    _artifact_protocol_config_recovery: true,
+    questions: [
+      [
+        `Job #${job.id} ("${job.title}") failed because Posse artifact routing for task_mode "${modeLabel}" appears unavailable or inconsistent.`,
+        "",
+        originalTaskSpec ? `Original task:\n${originalTaskSpec}` : null,
+        `Assessor/routing feedback:\n${safeInstructions}`,
+        safeFeedback.length > 0 ? `Additional assessor reasons:\n${safeFeedback.join("\n")}` : null,
+        "",
+        "This is Posse runtime/admin state, not a target-repo file. Adjust Posse artifact routing or choose a different task mode, then rerun the work item.",
+      ].filter(Boolean).join("\n"),
+    ],
+    context: `Artifact routing admin review for failed job #${job.id}; repo mutation is intentionally blocked for this recovery path.`,
+    review_type: "artifact_routing_admin",
+    _artifact_routing_admin_review: true,
   };
 }
 
@@ -504,38 +490,34 @@ function _spawnRecoveryJobsForVerdict({
       continue;
     }
 
-    if (_looksLikeArtifactProtocolConfigFix({
+    if (_looksLikeArtifactRoutingAdminIssue({
       fixInstructions,
       assessorFeedback: verdict.reasons,
       specPayload: spec.payload || {},
     })) {
-      const protocolPayload = _buildArtifactProtocolConfigFixPayload({
+      const routingPayload = _buildArtifactRoutingAdminPayload({
         job,
         fixInstructions,
         assessorFeedback: verdict.reasons,
         originalTaskMode: origTaskMode,
-        originalSuccessCriteria,
         originalTaskSpec,
       });
-      const protocolJob = spawnFromAssessor("failed", "fix", {
+      const routingJob = spawnFromAssessor("failed", "human_input", {
         work_item_id: job.work_item_id,
-        title: _normalizeFixTitle(spec.title || `Configure artifact protocol for ${job.title}`),
+        title: `Artifact routing review: ${job.title.slice(0, 70)}`,
         parent_job_id: job.id,
-        priority: job.priority,
-        provider: null,
-        model_tier: job.model_tier,
-        reasoning_effort: job.reasoning_effort,
-        skills: job.skills || null,
-        payload_json: JSON.stringify(protocolPayload),
+        priority: "high",
+        model_tier: "cheap",
+        payload_json: JSON.stringify(routingPayload),
       });
-      spawnedJobs.push(protocolJob);
-      dependencyReplacementJobs.push({ job: protocolJob, label: "protocol config fix" });
+      spawnedJobs.push(routingJob);
+      dependencyReplacementJobs.push({ job: routingJob, label: "artifact routing review" });
 
-      log(`${C.yellow}[assessor]${C.reset} spawned artifact protocol config fix #${protocolJob.id}: ${protocolJob.title.slice(0, 60)}`);
+      log(`${C.yellow}[assessor]${C.reset} spawned artifact routing human review #${routingJob.id}: ${routingJob.title.slice(0, 60)}`);
       jobLog("FIX_SPAWNED", {
         wi: job.work_item_id,
-        job: protocolJob.id,
-        detail: `artifact protocol config recovery for failed #${job.id}`,
+        job: routingJob.id,
+        detail: `artifact routing admin review for failed #${job.id}`,
       });
       continue;
     }

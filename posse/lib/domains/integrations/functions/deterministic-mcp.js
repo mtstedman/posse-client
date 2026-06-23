@@ -1,4 +1,5 @@
 import { McpServerConfig } from "../../../classes/tools/McpServerConfig.js";
+import { prepareIsolatedProviderHome } from "./isolated-provider-home.js";
 import {
   getDeterministicMcpToolNames,
   roleUsesDeterministicImageHelpers,
@@ -82,7 +83,7 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
   atlasConfig = null,
   remoteToolSurfaceOptions = null,
 } = {}) {
-  return (await McpServerConfig.forDeterministicReadAsync(role, {
+  const spawnArgs = (await McpServerConfig.forDeterministicReadAsync(role, {
     cwd,
     scopedFiles,
     createFiles,
@@ -101,6 +102,11 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
     atlasConfig,
     remoteToolSurfaceOptions,
   })).toSpawnArgs();
+  // Running MCP-only means Posse is the sole source of context, so isolate the
+  // provider CLI's home from its global memory/config. Generic + provider-keyed:
+  // unprofiled providers are a no-op.
+  spawnArgs.providerHomeEnv = prepareIsolatedProviderHome(providerName);
+  return spawnArgs;
 }
 
 export function releaseDeterministicMcpServerSession(serverConfig = null, opts = {}) {

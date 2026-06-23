@@ -105,6 +105,7 @@ export function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
     serverName,
     serverConfig: server,
     ownerSession: server.ownerSession || null,
+    providerHomeEnv: server.providerHomeEnv || null,
     contractTools: buildMcpSurfaceToolDescriptors(toolNames, {
       providerName: "claude",
       serverName,
@@ -178,6 +179,7 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
     serverName,
     serverConfig: server,
     ownerSession: server.ownerSession || null,
+    providerHomeEnv: server.providerHomeEnv || null,
     contractTools: buildMcpSurfaceToolDescriptors(toolNames, {
       providerName: "claude",
       serverName,
