@@ -242,6 +242,12 @@ export class RunSession {
     return;
   }
 
+  // First-run git initialization, identity prompts, and the bootstrap commit
+  // must happen on plain stdout before the session banner and boot panel/TUI.
+  if (typeof ensureRepoSetupConfirmed === "function" && !(await ensureRepoSetupConfirmed())) {
+    return;
+  }
+
   // ── Session-state detection ──
   // Categorise jobs to tell the user whether we're resuming or starting fresh.
   const resumed   = jobs.filter(j => j.status === "leased" || j.status === "running");
@@ -289,7 +295,6 @@ export class RunSession {
   const updateBootFooter = (text) => boot.updateFooter(text);
   const bootCanPromptForBackground = () => boot.canPromptForBackground();
   const stopBootMonitor = (opts) => boot.stop(opts);
-  const runWithBootTerminalPassthrough = (fn) => boot.runWithTerminalPassthrough(fn);
   const handleSchedulerBootEvent = (event = {}) => boot.handleSchedulerBootEvent(event);
   const requestAtlasBootBackground = (reason = "user-enter") => {
     if (atlasBootBackgroundRequested) return;
@@ -478,11 +483,6 @@ export class RunSession {
   // through the git workflow worker so slow Windows status scans cannot freeze
   // the boot renderer. Worktree cleanup still gates scheduler boot because
   // orphan recovery must requeue onto validated worktree state.
-  updateBootStep("repo setup", { section: "scheduler", status: "running", force: true });
-  if (!(await runWithBootTerminalPassthrough(() => ensureRepoSetupConfirmed()))) {
-    updateBootStep("repo setup", { section: "scheduler", status: "failed", detail: "user declined", showDetail: true, force: true });
-    return;
-  }
   updateBootStep("repo setup", { section: "scheduler", status: "ok", force: true });
 
   updateBootStep("dependencies", { section: "workspace", status: "running", detail: "checking packages", force: true });

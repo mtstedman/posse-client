@@ -455,27 +455,42 @@ async function ensureRepoSetupConfirmed() {
   const configValue = async (args) => {
     try { return (await runGit(args)).trim(); } catch { return ""; }
   };
-  const [name, email, globalName, globalEmail] = await Promise.all([
-    configValue(["config", "user.name"]),
-    configValue(["config", "user.email"]),
-    configValue(["config", "--global", "user.name"]),
-    configValue(["config", "--global", "user.email"]),
-  ]);
-  if (!name || !email) {
+  const readIdentity = async () => {
+    const [name, email, globalName, globalEmail] = await Promise.all([
+      configValue(["config", "user.name"]),
+      configValue(["config", "user.email"]),
+      configValue(["config", "--global", "user.name"]),
+      configValue(["config", "--global", "user.email"]),
+    ]);
+    return { name, email, globalName, globalEmail };
+  };
+  let identity = await readIdentity();
+  if (!identity.name || !identity.email) {
+    const canPromptForIdentity = !NON_INTERACTIVE && !!process.stdin?.isTTY && !!process.stdout?.isTTY;
+    if (!canPromptForIdentity) {
+      console.error(`\n  ${C.red}Git user identity not configured for ${PROJECT_DIR}.${C.reset}`);
+      console.error(`  Posse needs both user.name and user.email before it can create the initial commit.`);
+      console.error(`  Run: git config --global user.name "Your Name" && git config --global user.email "you@example.com"\n`);
+      return false;
+    }
     console.log(`\n  ${C.yellow}Git user identity not configured for ${PROJECT_DIR}.${C.reset}`);
     console.log(`  Posse commits changes in worktrees and needs a name + email.`);
-    const nameDefault = name || globalName || "";
-    const emailDefault = email || globalEmail || "";
+    const nameDefault = identity.name || identity.globalName || "";
+    const emailDefault = identity.email || identity.globalEmail || "";
     const nameIn = (await ask(`  Name${nameDefault ? ` [${nameDefault}]` : ""}: `)).trim() || nameDefault;
-    if (!nameIn) { console.log(`  ${C.red}Aborted — name is required.${C.reset}\n`); return false; }
+    if (!nameIn) { console.log(`  ${C.red}Aborted - name is required.${C.reset}\n`); return false; }
     const emailIn = (await ask(`  Email${emailDefault ? ` [${emailDefault}]` : ""}: `)).trim() || emailDefault;
-    if (!emailIn) { console.log(`  ${C.red}Aborted — email is required.${C.reset}\n`); return false; }
+    if (!emailIn) { console.log(`  ${C.red}Aborted - email is required.${C.reset}\n`); return false; }
     const scopeAns = (await ask(`  Save globally (so all repos use this)? [Y/n]: `)).trim().toLowerCase();
     const scopeArgs = (scopeAns === "n" || scopeAns === "no") ? [] : ["--global"];
     try {
       await runGit(["config", ...scopeArgs, "user.name", nameIn]);
       await runGit(["config", ...scopeArgs, "user.email", emailIn]);
-      console.log(`  ${C.green}Git identity saved (${scopeArgs.length > 0 ? "global" : "local"}).${C.reset}`);
+      identity = await readIdentity();
+      if (!identity.name || !identity.email) {
+        throw new Error("git config did not return both user.name and user.email after saving");
+      }
+      console.log(`  ${C.green}Git identity saved and verified (${scopeArgs.length > 0 ? "global" : "local"}).${C.reset}`);
     } catch (err) {
       console.error(`  ${C.red}Failed to save git identity: ${err.message.split("\n")[0]}${C.reset}\n`);
       return false;
@@ -2082,13 +2097,12 @@ async function cmdAdmin() {
 
     console.log(`\n${C.bold}Posse admin init${C.reset}`);
     if (nonInteractive) {
-      console.log(`  ${C.dim}Non-interactive mode: skipping prompt-based repo repair.${C.reset}`);
-    } else {
-      const repoReady = await ensureRepoSetupConfirmed();
-      if (!repoReady) {
-        process.exitCode = 2;
-        return;
-      }
+      console.log(`  ${C.dim}Non-interactive mode: prompt-free repo repair only.${C.reset}`);
+    }
+    const repoReady = await ensureRepoSetupConfirmed();
+    if (!repoReady) {
+      process.exitCode = 2;
+      return;
     }
 
     const { initializeProviderCliSettings } = await loadProviderCliInitModule();
