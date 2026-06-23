@@ -10,7 +10,7 @@ import { canonicalAtlasToolUseActionName, formatAtlasToolDisplayName } from "../
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
 import { markTelemetryRowsMirrored, pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
-import { appendRunTelemetry, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
+import { appendRunTelemetry, getRunTelemetryStartedAt, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
 
 let _fd = null;
 let _currentDate = "";
@@ -1046,7 +1046,14 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
   const cappedLimit = Math.max(0, Number(limit) || 0);
   const candidateLimit = includeUnscoped ? cappedLimit : Math.max(200, cappedLimit * 10);
   const fileRows = readObservationFileRows({ typePrefix: "tool.", limit: candidateLimit, order: "desc" });
-  const dbRows = currentRunOnly ? [] : db.prepare(`
+  const dbRows = currentRunOnly ? db.prepare(`
+    SELECT o.*
+    FROM job_observations o
+    WHERE o.observation_type LIKE 'tool.%'
+      AND o.created_at >= ?
+    ORDER BY o.id DESC
+    LIMIT ?
+  `).all(getRunTelemetryStartedAt(), candidateLimit) : db.prepare(`
     SELECT o.*
     FROM job_observations o
     WHERE o.observation_type LIKE 'tool.%'

@@ -684,10 +684,20 @@ export class Display {
       || /^atlas\b.*\breindex\b/i.test(clean)
       || /^atlas background reindex\b/i.test(clean);
     if (!isSystem) return "log";
-    if (/\b(?:fail(?:ed|ure)?|error|conflict|stale|blocked|lost|missing|denied|unauthorized|timeout|interrupted|abort(?:ed)?|cancell?ed|warn(?:ing)?)\b/i.test(clean)) {
+    const alertText = this._eventLaneAlertText(clean);
+    if (/\b(?:fail(?:ed|ure)?|error|conflict|stale|blocked|lost|missing|denied|unauthorized|timeout|interrupted|abort(?:ed)?|cancell?ed|warn(?:ing)?)\b/i.test(alertText)) {
       return "log";
     }
     return "system";
+  }
+
+  _eventLaneAlertText(clean) {
+    const text = String(clean || "");
+    if (!/(?:^\[atlas(?:[^\]]*)?\]|\batlas\b|\bscip\b)/i.test(text)) return text;
+    return text
+      .replace(/\b0\s+(?:fail(?:ed|ure)?|errors?|conflicts?|blocked|lost|denied|unauthorized|timeouts?|interrupted|aborted|cancel(?:led|ed)?|warnings?)\b/gi, "")
+      .replace(/\bstaging\s+\d+\s+missing\s+SCIP\s+index(?:es)?\b/gi, "")
+      .replace(/\b\d+\s+missing\s+SCIP\s+index(?:es)?\b/gi, "");
   }
 
   _flushDroppedEvents() {

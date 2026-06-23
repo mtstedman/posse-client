@@ -386,7 +386,6 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
 });
 
 const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
-  "repo.status",
   "repo.overview",
   "tree.overview",
   "tree.scope",
