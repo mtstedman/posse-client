@@ -433,13 +433,11 @@ function codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRo
     policy.maxWindowTokens,
   );
   if (data.estimatedTokens > maxTokens) {
-    const sliceLen = maxTokens * 4;
-    data.content = data.content.slice(0, sliceLen);
-    data.estimatedTokens = Math.ceil(data.content.length / 4);
-    data.truncated = true;
+    applyCodeWindowTokenBudget(data, maxTokens);
   }
   return mapMaybePromise(redactText(data.content), (content) => {
     data.content = content;
+    refreshCodeWindowLineMetadata(data);
     return annotateCodeLadder(
       okEnvelope({ action: "code.window", versionId, data }),
       ladder,
@@ -453,6 +451,49 @@ function mapMaybePromise(value, map) {
     return /** @type {any} */ (value).then(map);
   }
   return map(value);
+}
+
+/**
+ * @param {CodeWindowData} data
+ * @param {number} maxTokens
+ */
+function applyCodeWindowTokenBudget(data, maxTokens) {
+  const maxChars = Math.max(1, Math.floor(Number(maxTokens) || 1) * 4);
+  if (String(data.content || "").length <= maxChars) return;
+  data.content = truncateTextAtLineBoundary(String(data.content || ""), maxChars);
+  data.truncated = true;
+  refreshCodeWindowLineMetadata(data);
+}
+
+/**
+ * Prefer returning complete lines so `endLine` and `content` stay in sync. If a
+ * single long first line exceeds the budget, fall back to a character cap.
+ *
+ * @param {string} text
+ * @param {number} maxChars
+ */
+function truncateTextAtLineBoundary(text, maxChars) {
+  const slice = text.slice(0, maxChars);
+  const lastNewline = slice.lastIndexOf("\n");
+  if (lastNewline > 0) return slice.slice(0, lastNewline).replace(/\r$/u, "");
+  return slice;
+}
+
+/**
+ * @param {CodeWindowData} data
+ */
+function refreshCodeWindowLineMetadata(data) {
+  const lineCount = countReturnedLines(data.content);
+  data.endLine = data.startLine + Math.max(1, lineCount) - 1;
+  data.estimatedTokens = Math.ceil(String(data.content || "").length / 4);
+}
+
+/**
+ * @param {string} content
+ */
+function countReturnedLines(content) {
+  if (content === "") return 0;
+  return String(content).split(/\r?\n/u).length;
 }
 
 function limitWindowLines(window, maxLines) {

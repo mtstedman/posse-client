@@ -102,6 +102,7 @@ const gatewaySchema = () => o({
 // either direction.
 export const ATLAS_MULTI_GATEWAY_ACTIONS = Object.freeze({
   "edit.plan": Object.freeze(["query", "code"]),
+  "file.read": Object.freeze(["query", "code"]),
 });
 
 const QUERY_SHARED_ACTIONS = Object.freeze(

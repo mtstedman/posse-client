@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { isMainThread, threadId } from "node:worker_threads";
 
-import { getRuntimeLogDir, getRuntimeResourcesDir } from "../../../domains/runtime/functions/paths.js";
+import { getRuntimeLogDir, getRuntimeResourcesDir, safeProcessCwd } from "../../../domains/runtime/functions/paths.js";
 
 const GENERATED_RUN_STARTED_AT = new Date().toISOString();
 const RUN_STARTED_AT = String(process.env.POSSE_RUN_STARTED_AT || GENERATED_RUN_STARTED_AT);
@@ -98,7 +98,7 @@ function ensureManifest(runDir) {
       pid: process.pid,
       thread_id: threadId,
       is_main_thread: isMainThread,
-      cwd: process.cwd(),
+      cwd: safeProcessCwd(),
       streams: STREAM_FILES,
       clean_exit: false,
     };
@@ -120,7 +120,7 @@ function updateManifest(runDir, patch = {}) {
       pid: process.pid,
       thread_id: threadId,
       is_main_thread: isMainThread,
-      cwd: process.cwd(),
+      cwd: safeProcessCwd(),
       streams: STREAM_FILES,
     };
   }

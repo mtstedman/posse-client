@@ -9,8 +9,6 @@
 // don't want embedding work blocking the view path). Callers that want
 // embeddings invoke `ingestView` after the view has been built.
 
-import fs from "fs";
-import path from "path";
 import { performance } from "node:perf_hooks";
 
 import { hasLanguageSemantics } from "../resolver/adapters/registry.js";
@@ -30,7 +28,6 @@ import {
 /** @typedef {import("../contracts/embeddings.js").EmbeddingIngest} EmbeddingIngest */
 
 const DEFAULT_BATCH_SIZE = 64;
-const BODY_LEAD_BYTES = 400;
 
 /**
  * @typedef {Object} IngestReport
@@ -170,41 +167,6 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
   // worker. The daemon-backed encoder forwards `workers` to the set.
   const encodeTexts = async (texts) => encoder.encode(texts, signal, { workers: workerCount });
 
-  // Per-ingest source cache keyed by repo_rel_path. Values are the full
-  // file text (or null when the read failed). Symbols arrive grouped by
-  // file, so a small LRU keeps re-reads rare while bounding memory on cold
-  // full ingests — nothing upstream caps per-file text size here (the
-  // minified-content heuristics and parse ceiling filter what gets
-  // *parsed*, not what this cache holds).
-  const SOURCE_CACHE_MAX_FILES = 64;
-  /** @type {Map<string, string | null>} */
-  const sourceCache = new Map();
-  async function readBodyLead(symbol) {
-    if (!repoRoot || !symbol?.repo_rel_path) return null;
-    if (!Number.isInteger(symbol.range_start) || !Number.isInteger(symbol.range_end)) return null;
-    let content = sourceCache.get(symbol.repo_rel_path);
-    if (content === undefined) {
-      try {
-        content = await fs.promises.readFile(
-          path.join(repoRoot, symbol.repo_rel_path), "utf8",
-        );
-      } catch {
-        content = null;
-      }
-    } else {
-      sourceCache.delete(symbol.repo_rel_path);
-    }
-    sourceCache.set(symbol.repo_rel_path, content);
-    if (sourceCache.size > SOURCE_CACHE_MAX_FILES) {
-      const oldest = sourceCache.keys().next().value;
-      if (oldest !== undefined) sourceCache.delete(oldest);
-    }
-    if (!content) return null;
-    const start = Math.max(0, symbol.range_start);
-    const end = Math.min(content.length, Math.max(start, symbol.range_end));
-    return content.slice(start, Math.min(end, start + BODY_LEAD_BYTES));
-  }
-
   try {
     for (let i = 0; i < symbols.length; i += size) {
       const batchStartedAt = performance.now();
@@ -241,17 +203,13 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
           batchAlreadyIndexed++;
           continue;
         }
-        const sourceReadStartedAt = performance.now();
-        const body_lead = await readBodyLead(s);
-        currentBatchTiming.sourceReadMs += elapsedSince(sourceReadStartedAt);
-        const enriched = body_lead ? { ...s, body_lead } : s;
         if (supportsStructuredSymbols) {
           kept.push(s);
-          symbolPayloads.push(enriched);
+          symbolPayloads.push(s);
           continue;
         }
         const textStartedAt = performance.now();
-        const text = encoder.buildSymbolText(enriched);
+        const text = encoder.buildSymbolText(s);
         currentBatchTiming.textBuildMs += elapsedSince(textStartedAt);
         if (!text || text.length === 0) {
           report.skipped++;

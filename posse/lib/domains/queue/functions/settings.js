@@ -1,9 +1,8 @@
 import path from "path";
 import { execFileSync } from "child_process";
 
-import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { normalizeProjectDir } from "../../runtime/functions/paths.js";
-import { getCatalogEntry } from "../../settings/functions/catalog.js";
+import { SETTINGS_CATALOG, getCatalogEntry } from "../../settings/functions/catalog.js";
 import {
   getAccountRepoSetting,
   getAccountSetting,
@@ -14,7 +13,11 @@ import {
   setAccountSetting,
 } from "../../settings/functions/account-settings.js";
 
-export const REPO_SCOPED_SETTING_KEYS = new Set([SETTING_KEYS.TARGET_BRANCH]);
+export const REPO_SCOPED_SETTING_KEYS = new Set(
+  SETTINGS_CATALOG
+    .filter((entry) => entry.scope === "repo")
+    .map((entry) => entry.key),
+);
 
 function normalizeOptions(options = {}) {
   if (typeof options === "string") return { projectDir: options };

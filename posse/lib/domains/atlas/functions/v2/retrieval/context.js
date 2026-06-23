@@ -195,9 +195,8 @@ function finishContextSummary({ contextEnv, versionId, params }) {
 /**
  * agent.feedback persists useful/missing signals into the ledger so the
  * retrieval orchestrator's feedback-boost pass can pick them up on
- * future searches. When no ledger is provided (e.g. unit tests that
- * don't wire one) the handler degrades to an in-memory acknowledgement
- * — the response shape is unchanged.
+ * future searches. When no ledger is provided, the handler returns the same
+ * count summary with recorded=false and avoids invalidating persisted caches.
  *
  * @param {{
  *   view: View,
@@ -209,7 +208,7 @@ function finishContextSummary({ contextEnv, versionId, params }) {
 export async function agentFeedback({ view, versionId, params, ledger }) {
   const useful = params.usefulSymbols || [];
   const missing = params.missingSymbols || [];
-  let recorded = true;
+  let recorded = false;
   /** @type {string | null} */
   let errorMessage = null;
   const ledgerApi = /** @type {any} */ (ledger);
@@ -227,6 +226,7 @@ export async function agentFeedback({ view, versionId, params, ledger }) {
       } else {
         ledgerApi.recordFeedback(input);
       }
+      recorded = true;
     } catch (err) {
       // A persistence failure shouldn't break the agent's request flow —
       // surface that it wasn't recorded but keep the envelope ok=true so

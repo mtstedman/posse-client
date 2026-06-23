@@ -1561,9 +1561,9 @@ export async function handoff(input) {
         ? "ok_relevant"
         : "ok_unhelpful";
     } else if (researchAttempted) {
-      status = researchError || sliceError
+      status = researchError
         ? "failed"
-        : (classifyAtlasPrefetchRelevanceFromModule(packet, recipient) ? "ok_relevant" : "ok_unhelpful");
+        : (sliceError ? "partial" : (classifyAtlasPrefetchRelevanceFromModule(packet, recipient) ? "ok_relevant" : "ok_unhelpful"));
     } else if (sliceAttempted && baselineAttempted && sliceError && baselineError) {
       status = "failed";
     } else if (sliceAttempted && !baselineAttempted) {

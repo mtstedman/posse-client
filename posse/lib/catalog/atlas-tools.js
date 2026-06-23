@@ -16,7 +16,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["symbol.search", "symbol.card", "symbol.overview", "slice.build", "slice.refresh", "slice.spillover.get", "edit.plan", "context", "context.summary", "review.delta", "review.analyze", "review.risk", "repo.status", "repo.quality", "memory.query"], description: "ATLAS action to route through this gateway." },
+        action: { type: "string", enum: ["symbol.search", "symbol.card", "symbol.overview", "slice.build", "slice.refresh", "slice.spillover.get", "edit.plan", "file.read", "context", "context.summary", "review.delta", "review.analyze", "review.risk", "repo.status", "repo.quality", "memory.query"], description: "ATLAS action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -29,7 +29,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["code.skeleton", "code.lens", "code.window", "edit.plan"], description: "ATLAS code action to route through this gateway." },
+        action: { type: "string", enum: ["code.skeleton", "code.lens", "code.window", "edit.plan", "file.read"], description: "ATLAS code action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,

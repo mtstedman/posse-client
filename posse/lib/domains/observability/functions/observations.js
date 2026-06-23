@@ -5,6 +5,7 @@ import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { TOOL_CATALOG, TOOL_OBSERVATION_ALIASES } from "../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { isPosseMcpGatewaySurfaceName, stripPosseMcpGatewayPrefix } from "../../integrations/functions/mcp-gateway.js";
+import { redactBridgeValue, redactString } from "../../bridge/functions/redaction.js";
 import { canonicalAtlasToolUseActionName, formatAtlasToolDisplayName } from "../../../functions/tools/mcp-surface.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
@@ -412,7 +413,7 @@ export function getObservationContext() {
 }
 
 function _truncate(value, max = 120) {
-  const text = String(value || "").trim();
+  const text = redactString(String(value || "")).trim();
   if (!text) return "";
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
@@ -656,10 +657,11 @@ function _isPosseGatewayMcpTool(toolName = "") {
 
 function _summarizeAtlasArgs(input = {}) {
   if (!input || typeof input !== "object") return {};
+  const redactedInput = redactBridgeValue(input);
   const out = {};
-  const keys = Object.keys(input).slice(0, 8);
+  const keys = Object.keys(redactedInput || {}).slice(0, 8);
   for (const key of keys) {
-    const value = input[key];
+    const value = redactedInput[key];
     if (value == null) out[key] = null;
     else if (typeof value === "string") out[key] = _truncate(value, 160);
     else if (typeof value === "number" || typeof value === "boolean") out[key] = value;

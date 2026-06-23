@@ -112,11 +112,10 @@ function fileReadWithRedaction({ versionId, params, readFile, view }, redaction)
   return mapMaybePromise(redaction.redactText(lines.join("\n")), (redactedContent) => {
     let content = redactedContent;
     let truncated = offset + lines.length < totalLines;
-    const buf = Buffer.from(content, "utf8");
-    if (buf.length > requestedMaxBytes) {
-      content = buf.subarray(0, requestedMaxBytes).toString("utf8");
-      truncated = true;
-    }
+    const capped = truncateUtf8AtLineBoundary(content, requestedMaxBytes);
+    content = capped.content;
+    if (capped.truncated) truncated = true;
+    const returnedLines = countReturnedLines(content, lines.length);
 
     /** @type {FileReadData} */
     const data = {
@@ -124,7 +123,7 @@ function fileReadWithRedaction({ versionId, params, readFile, view }, redaction)
       content,
       totalBytes,
       totalLines,
-      returnedLines: lines.length,
+      returnedLines,
       startLine: offset + 1,
       truncated,
     };
@@ -177,14 +176,17 @@ function fileReadWithRedaction({ versionId, params, readFile, view }, redaction)
       // matched line plus one per context line (each sync call is a spawn).
       const redactedLines = matchLines.length > 0 ? redaction.redactLines(lines) : lines;
       return mapMaybePromise(redactedLines, (resolvedLines) => {
-        data.matches = matchLines.map((li) => ({
-          line: offset + li + 1,
-          text: resolvedLines[li],
-          context: {
-            before: resolvedLines.slice(Math.max(0, li - ctxLines), li),
-            after: resolvedLines.slice(li + 1, Math.min(lines.length, li + 1 + ctxLines)),
-          },
-        }));
+        data.truncated = truncated;
+        data.matches = matchLines
+          .filter((li) => li < returnedLines)
+          .map((li) => ({
+            line: offset + li + 1,
+            text: resolvedLines[li],
+            context: {
+              before: resolvedLines.slice(Math.max(0, li - ctxLines), li),
+              after: resolvedLines.slice(li + 1, Math.min(lines.length, li + 1 + ctxLines)),
+            },
+          }));
         return finishFileRead({ params, source, versionId, data });
       });
     }
@@ -211,6 +213,61 @@ function mapMaybePromise(value, map) {
     return /** @type {any} */ (value).then(map);
   }
   return map(value);
+}
+
+/**
+ * @param {string} content
+ * @param {number} maxBytes
+ * @returns {{ content: string, truncated: boolean }}
+ */
+function truncateUtf8AtLineBoundary(content, maxBytes) {
+  const text = String(content || "");
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) {
+    return { content: text, truncated: false };
+  }
+  const lines = text.split(/\r?\n/u);
+  /** @type {string[]} */
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    const prefix = kept.length > 0 ? "\n" : "";
+    const nextBytes = Buffer.byteLength(prefix + line, "utf8");
+    if (used + nextBytes <= maxBytes) {
+      kept.push(line);
+      used += nextBytes;
+      continue;
+    }
+    if (kept.length === 0) {
+      return { content: truncateUtf8String(line, maxBytes), truncated: true };
+    }
+    break;
+  }
+  return { content: kept.join("\n"), truncated: true };
+}
+
+/**
+ * @param {string} text
+ * @param {number} maxBytes
+ */
+function truncateUtf8String(text, maxBytes) {
+  let used = 0;
+  let out = "";
+  for (const char of String(text || "")) {
+    const next = Buffer.byteLength(char, "utf8");
+    if (used + next > maxBytes) break;
+    out += char;
+    used += next;
+  }
+  return out;
+}
+
+/**
+ * @param {string} content
+ * @param {number} requestedLines
+ */
+function countReturnedLines(content, requestedLines) {
+  if (content === "") return requestedLines > 0 ? 1 : 0;
+  return String(content).split(/\r?\n/u).length;
 }
 
 /**

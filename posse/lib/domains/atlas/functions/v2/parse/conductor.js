@@ -601,10 +601,10 @@ export async function closeSharedConductor() {
   if (_sharedClosing) return _sharedClosing;
   _disarmIdle();
   const conductor = _sharedConductor;
-  _sharedConductor = null;
   if (!conductor) return;
   _sharedClosing = (async () => {
     await _waitForSharedIdle();
+    if (_sharedConductor === conductor) _sharedConductor = null;
     try { await conductor.close(); } catch { /* best effort */ }
     // Await full transport termination — `stop()`/unref leaves the worker's
     // MessagePort as an active handle, so a short-lived process wouldn't exit.

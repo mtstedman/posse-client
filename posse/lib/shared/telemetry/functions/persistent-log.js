@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { isMainThread, threadId } from "node:worker_threads";
 
-import { getRuntimeLogDir } from "../../../domains/runtime/functions/paths.js";
+import { getRuntimeLogDir, safeProcessCwd } from "../../../domains/runtime/functions/paths.js";
 import { getRunTelemetryId } from "./run-telemetry.js";
 
 const MAX_PERSISTENT_LOG_BYTES = 50 * 1024 * 1024;
@@ -52,7 +52,7 @@ export function appendPersistentTelemetry(stream, entry = {}) {
       pid: process.pid,
       thread_id: threadId,
       is_main_thread: isMainThread,
-      cwd: process.cwd(),
+      cwd: safeProcessCwd(),
       ...entry,
     })}\n`;
     try {

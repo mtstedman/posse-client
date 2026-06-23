@@ -1,3 +1,4 @@
+import os from "os";
 import path from "path";
 import { resolveManagedPythonRuntimeForProject } from "./python-runtime.js";
 
@@ -9,14 +10,22 @@ function overridePath(key) {
 }
 
 export function normalizeCwd(cwd = null) {
-  return path.resolve(cwd || process.cwd());
+  return path.resolve(cwd || safeProcessCwd());
 }
 
 export function normalizeProjectDir(projectDir = null, cwd = null) {
   return path.resolve(overridePath("projectDir")
     || projectDir
     || cwd
-    || process.cwd());
+    || safeProcessCwd());
+}
+
+export function safeProcessCwd() {
+  try {
+    return process.cwd();
+  } catch {
+    return os.tmpdir();
+  }
 }
 
 export function getRuntimeRoot(projectDir = null, cwd = null) {
