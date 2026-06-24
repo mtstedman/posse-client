@@ -4,6 +4,18 @@ import { logEvent, storeArtifact, updateJobStatus } from "../../../../queue/func
 import { C } from "../../../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 
+function coerceSuggestionText(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  try {
+    const json = JSON.stringify(value);
+    if (json != null) return json.trim();
+  } catch {
+    // Fall through to String() for unusual in-process test values.
+  }
+  return String(value).trim();
+}
+
 export function handle(job, verdict, ctx) {
   const { emitLog: log, isFromSuggestion } = ctx;
 
@@ -18,7 +30,11 @@ export function handle(job, verdict, ctx) {
   const MAX_SUGGESTIONS = 2;
   if (!verdict.suggestions || verdict.suggestions.length === 0 || isFromSuggestion) return;
 
-  const capped = verdict.suggestions.slice(0, MAX_SUGGESTIONS);
+  const capped = verdict.suggestions
+    .slice(0, MAX_SUGGESTIONS)
+    .map(coerceSuggestionText)
+    .filter(Boolean);
+  if (capped.length === 0) return;
   if (verdict.suggestions.length > MAX_SUGGESTIONS) {
     log(`${C.dim}[assessor] WI#${job.work_item_id} capped suggestions: ${verdict.suggestions.length} -> ${MAX_SUGGESTIONS}${C.reset}`);
   }

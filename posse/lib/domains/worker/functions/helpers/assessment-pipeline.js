@@ -338,17 +338,38 @@ export function _normalizeAssessorVerdictShape(verdict, raw = "") {
     verdict: normalizedVerdict,
     confidence: normalizeAssessorConfidence(verdict.confidence, { fallback: "medium", allowNone: true }) || "none",
   };
+  if (Array.isArray(normalized.reasons)) normalized.reasons = _normalizeAssessmentTextList(normalized.reasons);
   if (!Array.isArray(normalized.reasons) || normalized.reasons.length === 0) {
     const fallbackReason = normalized.summary || normalized.reason || normalized.notes;
     if (fallbackReason) {
-      normalized.reasons = [String(fallbackReason)];
+      normalized.reasons = [_stringifyAssessmentText(fallbackReason)].filter(Boolean);
     }
   }
   if (!Array.isArray(normalized.spawn_jobs)) normalized.spawn_jobs = [];
-  if (!Array.isArray(normalized.human_questions)) normalized.human_questions = [];
-  if (!Array.isArray(normalized.suggestions)) normalized.suggestions = [];
+  normalized.human_questions = _normalizeAssessmentTextList(normalized.human_questions);
+  normalized.suggestions = _normalizeAssessmentTextList(normalized.suggestions);
   if (!normalized.raw && raw) normalized.raw = raw;
   return normalized;
+}
+
+function _stringifyAssessmentText(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try {
+    const json = JSON.stringify(value);
+    if (json != null) return json;
+  } catch {
+    // Fall through to String() for unusual in-process test values.
+  }
+  return String(value);
+}
+
+function _normalizeAssessmentTextList(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(_stringifyAssessmentText)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function _normalizeAssessmentScopePath(value, cwd = null, nestedRepoPrefix = null) {
@@ -1275,17 +1296,16 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     };
   }
 
-  // Coerce reasons to strings — LLMs may return numbers, objects, or null
-  const rawReasons = Array.isArray(verdict.reasons) ? verdict.reasons : [];
-  const reasons = rawReasons.map(r => (r == null ? "" : typeof r === "string" ? r : JSON.stringify(r))).filter(Boolean);
+  // Coerce text arrays — LLMs may return numbers, objects, or null.
+  const reasons = _normalizeAssessmentTextList(verdict.reasons);
 
   return {
     verdict: parsedVerdict,
     confidence: normalizeAssessorConfidence(verdict.confidence, { fallback: "medium", allowNone: true }) || "none",
     reasons,
     spawn_jobs: Array.isArray(verdict.spawn_jobs) ? verdict.spawn_jobs : [],
-    human_questions: (Array.isArray(verdict.human_questions) ? verdict.human_questions : []).map(q => typeof q === "string" ? q : String(q)),
-    suggestions: Array.isArray(verdict.suggestions) ? verdict.suggestions : [],
+    human_questions: _normalizeAssessmentTextList(verdict.human_questions),
+    suggestions: _normalizeAssessmentTextList(verdict.suggestions),
     raw: response,
     ...(verdict._disable_internal_retry ? { _disable_internal_retry: true } : {}),
   };

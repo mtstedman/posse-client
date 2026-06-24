@@ -389,6 +389,14 @@ export class DisplayInputController {
     }
 
     if (this._blockingOverlay) {
+      if (
+        this._blockingOverlay.kind === "wrapup"
+        && this._blockingOverlay.allowEarlyExit === true
+        && isEnterKey(str, key)
+      ) {
+        this.requestWrapUpEarlyExit?.();
+        return;
+      }
       this.requestRender({ force: true });
       return;
     }

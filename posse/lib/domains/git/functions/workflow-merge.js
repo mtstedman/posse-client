@@ -9,6 +9,7 @@ import { C } from "../../../shared/format/functions/colors.js";
 import { runHook } from "./hooks.js";
 import { warmAtlasMergedToMainNow } from "../../integrations/functions/atlas.js";
 import {
+  emitEmbeddingsResume as emitAtlasV2EmbeddingsResume,
   emitMainAdvanced as emitAtlasV2MainAdvanced,
   emitMergedToMain as emitAtlasV2MergedToMain,
   isAtlasV2EmissionEnabled,
@@ -179,7 +180,16 @@ export function createMergeWorkflowHelpers(context, {
     }
   }
 
-  async function refreshAtlasMainAfterMerge({ wiId, branchName, targetBranch, mergeHash, onPhase = null, source = "merge" } = {}) {
+  async function refreshAtlasMainAfterMerge({
+    wiId,
+    branchName,
+    targetBranch,
+    mergeHash,
+    onPhase = null,
+    onProgress = null,
+    signal = null,
+    source = "merge",
+  } = {}) {
     if (!wiId || !mergeHash || mergeHash === "(unknown)") return { attempted: false, skipped: "missing_merge_metadata" };
     emitMergePhase(onPhase, "atlas-indexing", `ATLAS finalizing ${branchName || `WI#${wiId}`}`, {
       branch: branchName,
@@ -187,22 +197,43 @@ export function createMergeWorkflowHelpers(context, {
       mergeHash,
       source,
     });
+    const forwardProgress = (event = {}) => {
+      try { onProgress?.(event); } catch { /* display callback only */ }
+      emitMergePhase(onPhase, "atlas-progress", event.text || event.stage || "ATLAS finalizing", {
+        branch: branchName,
+        target: targetBranch,
+        mergeHash,
+        source,
+        atlasEvent: event,
+      });
+    };
     const replay = await warmAtlasMergedToMainNow({
       cwd: projectDir,
       workItemId: wiId,
       targetBranch,
       mergeHash,
       triggerEvent: "atlas.merged_to_main",
+      onProgress: forwardProgress,
+      signal,
+      deferEmbeddings: true,
+      flushDeferredEmbeddings: false,
     });
     if (replay.attempted) {
       const result = replay.result || {};
+      const eventType = replay.ok === false
+        ? (replay.aborted ? EVENT_TYPES.ATLAS_REINDEX_SKIPPED : EVENT_TYPES.ATLAS_REINDEX_FAILED)
+        : EVENT_TYPES.ATLAS_WARM_COMPLETED;
       logEvent({
         work_item_id: wiId,
-        event_type: replay.ok === false ? EVENT_TYPES.ATLAS_REINDEX_FAILED : EVENT_TYPES.ATLAS_WARM_COMPLETED,
+        event_type: eventType,
         actor_type: EVENT_ACTORS.ATLAS,
         message: replay.ok === false
-          ? `ATLAS merge warm failed for ${branchName || `WI#${wiId}`}: ${replay.error || "unknown error"}`
-          : `ATLAS warm (main-merge) completed: considered=${result.paths_considered ?? 0} branch=${targetBranch}`,
+          ? (replay.aborted
+            ? `ATLAS merge warm deferred for ${branchName || `WI#${wiId}`}: operator exited wrap-up early`
+            : `ATLAS merge warm failed for ${branchName || `WI#${wiId}`}: ${replay.error || "unknown error"}`)
+          : result.embeddings_deferred === true
+            ? `ATLAS warm (main-merge) completed; embeddings queued: considered=${result.paths_considered ?? 0} branch=${targetBranch}`
+            : `ATLAS warm (main-merge) completed: considered=${result.paths_considered ?? 0} branch=${targetBranch}`,
         event_json: JSON.stringify({
           purpose: "main-merge",
           branch: targetBranch,
@@ -217,6 +248,17 @@ export function createMergeWorkflowHelpers(context, {
           result,
         }),
       });
+      if (replay.ok !== false && result.embeddings_deferred === true && isAtlasV2EmissionEnabled()) {
+        try {
+          emitAtlasV2EmbeddingsResume({
+            payload: {
+              target_branch: String(targetBranch || "main"),
+              reason: "main_merge_deferred",
+            },
+            jobId: null,
+          });
+        } catch { /* best effort; boot readiness can rediscover the gap */ }
+      }
     }
     if (isAtlasV2EmissionEnabled() && (replay.ok === false || replay.skipped === "source_branch_missing")) {
       emitAtlasV2MergedToMain({

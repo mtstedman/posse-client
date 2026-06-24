@@ -33,8 +33,27 @@ import { DEFAULT_FALLBACK_READS, createOpenAiCompatibleTooling } from "../shared
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { extractJson } from "../../../../shared/format/functions/json.js";
+import { signalAbortError } from "../../../runtime/functions/yield.js";
 
 export { extractJson };
+
+function abortableThrottle(ms, signal = null) {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) {
+    throw signalAbortError(signal, "Grok throttle aborted");
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener?.("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signalAbortError(signal, "Grok throttle aborted"));
+    };
+    signal.addEventListener?.("abort", onAbort, { once: true });
+  });
+}
 
 // --- Lazy Client -------------------------------------------------------------
 // Don't create the client at import time - only when actually making a call.
@@ -512,7 +531,7 @@ export async function callProvider(promptText, {
       // Check abort
       if (abortSignal?.aborted) {
         emit(`${C.red}[aborted] Signal received, stopping.${C.reset}`);
-        break;
+        throw signalAbortError(abortSignal, "Grok provider aborted");
       }
 
       // Collect text output from this turn (don't dump to log - only tool calls & status)
@@ -551,7 +570,7 @@ export async function callProvider(promptText, {
         };
         if (canSetReasoningEffort) finalOpts.reasoning = { effort };
 
-        await new Promise(r => setTimeout(r, THROTTLE_MS));
+        await abortableThrottle(THROTTLE_MS, abortSignal);
         const finalResponse = await createWithReasoningFallback(finalOpts, "final answer");
         addUsage(finalResponse.usage);
         const finalText = finalResponse.output_text || "";
@@ -613,7 +632,7 @@ export async function callProvider(promptText, {
       }
 
       // Throttle before next API call
-      await new Promise(r => setTimeout(r, THROTTLE_MS));
+      await abortableThrottle(THROTTLE_MS, abortSignal);
 
           // Send tool results back to Grok
       const nextOpts = {
@@ -668,6 +687,10 @@ export async function callProvider(promptText, {
     throw wrapped;
   } finally {
     releaseGate({ scopeKey: gateScopeKey });
+  }
+
+  if (abortSignal?.aborted) {
+    throw signalAbortError(abortSignal, "Grok provider aborted");
   }
 
   const durationMs = Date.now() - start;

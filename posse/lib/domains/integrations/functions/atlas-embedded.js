@@ -1209,6 +1209,10 @@ async function executeEmbeddedAtlasViaExecutor({
   });
   const text = mcpResultText(executed?.result);
   const ok = !!executed?.result && executed.result.isError !== true && !/^Error:/i.test(text);
+  const executorCacheHit = executed?.executor?.cache?.hit === true
+    || executed?.executor?.deduped === "cache"
+    || executed?.executor?.deduped === "inflight"
+    || executed?.executor?.deduped === "waiting";
   recordAtlasToolObservation({
     action,
     invocation: { source: "atlas-tool-executor", command: null },
@@ -1217,6 +1221,7 @@ async function executeEmbeddedAtlasViaExecutor({
     durationMs: Date.now() - startedAt,
     origin,
     queueInfo,
+    cacheHit: executorCacheHit,
     resultChars: text.length,
     ...(ok ? {
       artifacts: extractAtlasResultArtifacts(text, { action, args: payload }),

@@ -35,7 +35,7 @@ import { selectFallbackProvider } from "../../providers/functions/delegation-rou
 import { buildResumeHandoff } from "../../handoff/functions/index.js";
 import { getReplayMemoryStats, recordRecoveryCheckpoint, retainReplayOutput, retainReplayPrompt, retainReplayToolUses } from "../../observability/functions/recovery/job-replay.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
-import { isAbortError } from "../../runtime/functions/yield.js";
+import { isAbortError, signalAbortError } from "../../runtime/functions/yield.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
 import {
   getSessionManager,
@@ -68,6 +68,13 @@ const RUNTIME_MODEL_ERROR_PATTERNS = [
   /\b(?:do\s+not|don't|does\s+not)\s+have\s+access\b[^\n]{0,100}\bmodel\b/i,
 ];
 const SLOW_PROVIDER_SETUP_PHASE_MS = 1000;
+
+function providerCallAbortedError(abortSignal, worker, jobId) {
+  const err = signalAbortError(abortSignal, "Provider call aborted");
+  const killReason = jobId != null ? worker?._killReasons?.get?.(jobId) : null;
+  if (killReason) err._killReason = killReason;
+  return err;
+}
 
 async function timeProviderSetupPhase(label, meta, fn, { warnMs = SLOW_PROVIDER_SETUP_PHASE_MS } = {}) {
   const startedAt = Date.now();
@@ -605,6 +612,9 @@ export class TrackedProviderClient {
         observationContext,
         () => provider.call(prompt, attemptOpts),
       );
+      if (abortSignal?.aborted) {
+        throw providerCallAbortedError(abortSignal, this.worker, job_id);
+      }
       recordMemorySample("provider.call.after_success", {
         agent_call_id: agentCallId,
         work_item_id,

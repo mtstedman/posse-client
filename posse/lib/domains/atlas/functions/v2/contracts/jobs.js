@@ -82,6 +82,7 @@
  * @property {string} [embeddings_error]      Best-effort ingest error; view warming still succeeds.
  * @property {number} [embeddings_remaining]  For purpose === "embeddings": symbols still missing vectors after this slice.
  * @property {boolean} [embeddings_complete]  For purpose === "embeddings": true once the index reached parity (no missing symbols).
+ * @property {boolean} [embeddings_deferred]  True when the warm produced the view but intentionally left vector parity for a later embeddings job.
  * @property {boolean} [scip_staged_fresh]    For purpose === "scip-restage": true when the restage staged fresh artifacts (not already-staged/no-op), so the executor can enqueue the main-incremental intake that consumes them.
  * @property {boolean} [truncated]            True when a hard warmer cap limited the scan.
  * @property {string} [truncation_reason]

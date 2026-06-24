@@ -6,6 +6,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { getJob } from "../../queue/functions/index.js";
 import { now } from "../../queue/functions/common.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
+import { isReviewGateJob } from "./review-decision.js";
 
 const DEFAULT_BRIDGE_LEASE_SECONDS = 300;
 
@@ -47,7 +48,7 @@ function claimHumanInputJob(jobId, { leaseSeconds = DEFAULT_BRIDGE_LEASE_SECONDS
   return { leaseToken, job: getJob(jobId) };
 }
 
-export async function answerHumanInput(jobId, args = {}, { projectDir = process.cwd() } = {}) {
+export async function answerHumanInput(jobId, args = {}, { projectDir = process.cwd(), allowReviewGateAnswer = false } = {}) {
   const id = Number(jobId ?? args.job_id ?? args.jobId);
   if (!Number.isInteger(id) || id <= 0) return { ok: false, reason: "invalid_job_id" };
 
@@ -61,6 +62,9 @@ export async function answerHumanInput(jobId, args = {}, { projectDir = process.
   }
   if (payload?.subtype === "push_offer") {
     return { ok: false, reason: "use_git_push" };
+  }
+  if (!allowReviewGateAnswer && isReviewGateJob(current, payload)) {
+    return { ok: false, reason: "use_review_approve_or_reject" };
   }
   const questions = Array.isArray(payload?.questions) && payload.questions.length > 0
     ? payload.questions

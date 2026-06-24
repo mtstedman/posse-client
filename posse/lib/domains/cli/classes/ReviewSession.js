@@ -1732,12 +1732,19 @@ export class ReviewSession {
 
   const wrapUp = createTuiWrapUpTracker(display, {
     title: "Run wrap-up",
-    subtitle: "Still winding down. Please wait before exiting.",
+    subtitle: "Closing the run. Merge state is finished here; ATLAS/ONNX catch-up can be left queued.",
+    layout: "screen",
+    allowEarlyExit: true,
     steps: [
       { id: "agents", label: "Settle agent call state" },
       { id: "iterate", label: "Process iterative follow-ups" },
       { id: "target", label: "Check target branch" },
       { id: "auto-merge", label: "Auto-merge completed work items" },
+      { id: "merge", label: "Merge status" },
+      { id: "atlas", label: "ATLAS replay and main view" },
+      { id: "tree", label: "ATLAS tree work" },
+      { id: "onnx", label: "ONNX vector catch-up" },
+      { id: "cleanup", label: "Branch and worktree cleanup" },
       { id: "review-data", label: "Check manual review items" },
       { id: "review-report", label: "Build review reports" },
     ],

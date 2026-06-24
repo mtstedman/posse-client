@@ -28,7 +28,10 @@ export class DisplayOverlayRenderer {
     }
     const key = `${this._mode}:${this.cols}x${this.rows}`;
     if (!this._blockingOverlayBaseFrame || this._blockingOverlayBaseKey !== key) {
-      this._blockingOverlayBaseFrame = buf;
+      this._blockingOverlayBaseFrame = this._blockingOverlay.kind === "wrapup"
+        && this._blockingOverlay.layout === "screen"
+        ? "\x1b[1;1H\x1b[2J"
+        : buf;
       this._blockingOverlayBaseKey = key;
     }
     return this._blockingOverlayBaseFrame;
@@ -82,6 +85,7 @@ export class DisplayOverlayRenderer {
 
   _applyWrapUpOverlay(buf) {
     const overlay = this._blockingOverlay || {};
+    if (overlay.layout === "screen") return this._applyWrapUpScreen(buf);
     const title = overlay.title || "Wrapping up";
     const subtitle = overlay.subtitle || "Finishing closeout work. Please wait.";
     const steps = Array.isArray(overlay.steps) ? overlay.steps : [];
@@ -102,12 +106,18 @@ export class DisplayOverlayRenderer {
       stepLines.push(` ${C.dim}\u00b7 ${hiddenCount} more step${hiddenCount === 1 ? "" : "s"}${C.reset}`);
     }
 
+    const earlyExitHint = overlay.exitHint || "leave remaining ATLAS/ONNX work queued; Ctrl+C interrupts.";
+    const exitLine = overlay.allowEarlyExit
+      ? (overlay.earlyExitRequested
+        ? `${C.yellow}Exit requested${C.reset}${C.dim} - remaining ATLAS work will stay queued for next run.${C.reset}`
+        : `${C.yellow}[Enter] exit early${C.reset}${C.dim} - ${earlyExitHint}${C.reset}`)
+      : `${C.dim}Progress only - no choice needed here; Ctrl+C interrupts.${C.reset}`;
     const content = [
       "",
       `${C.yellow}${C.bold}! ${title}${C.reset}`,
       subtitle ? `${C.dim}${subtitle}${C.reset}` : "",
       `${C.cyan}heartbeat${C.reset} ${elapsed}${runningStep ? `${C.dim} - ${runningStep.label}${C.reset}` : ""}`,
-      `${C.dim}Progress only - no choice needed here; Ctrl+C interrupts.${C.reset}`,
+      exitLine,
       "",
       ...stepLines,
       "",
@@ -120,7 +130,9 @@ export class DisplayOverlayRenderer {
     const widthBasis = [
       `${C.yellow}${C.bold}! ${title}${C.reset}`,
       subtitle ? `${C.dim}${subtitle}${C.reset}` : "",
-      `${C.dim}Progress only - no choice needed here; Ctrl+C interrupts.${C.reset}`,
+      overlay.allowEarlyExit
+        ? `${C.yellow}[Enter] exit early${C.reset}${C.dim} - ${earlyExitHint}${C.reset}`
+        : `${C.dim}Progress only - no choice needed here; Ctrl+C interrupts.${C.reset}`,
       ...visibleSteps.map((step) => ` ${this._wrapUpStepIcon(step.status, 0)} ${step.label}`),
     ];
     const rawWidth = Math.max(34, ...widthBasis.map((line) => displayColumnWidth(line)));
@@ -135,6 +147,57 @@ export class DisplayOverlayRenderer {
       out += `\x1b[${row + i + 1};${col}H${C.yellow}${C.bold}\u2502${C.reset}${fit(content[i], innerW)}${C.yellow}${C.bold}\u2502${C.reset}`;
     }
     out += `\x1b[${row + boxH - 1};${col}H${C.yellow}${C.bold}\u2514${"\u2500".repeat(innerW)}\u2518${C.reset}`;
+    return out;
+  }
+
+  _applyWrapUpScreen(buf) {
+    const overlay = this._blockingOverlay || {};
+    const title = overlay.title || "Run wrap-up";
+    const subtitle = overlay.subtitle || "Finishing closeout work.";
+    const steps = Array.isArray(overlay.steps) ? overlay.steps : [];
+    const nowMs = Date.now();
+    const startedAt = Number(overlay.startedAt || nowMs);
+    const elapsedMs = Math.max(0, nowMs - startedAt);
+    const elapsed = formatOverlayElapsed(elapsedMs);
+    const progressTick = Math.floor(elapsedMs / 250);
+    const runningStep = steps.find((step) => step.status === "running");
+    const innerW = Math.max(30, this.cols - 8);
+    const col = 5;
+    let row = Math.max(2, Math.floor(this.rows * 0.12));
+    const rule = "\u2500".repeat(innerW);
+    const earlyExitHint = overlay.exitHint || "leave remaining ATLAS/ONNX work queued; Ctrl+C interrupts.";
+    const exitLine = overlay.allowEarlyExit
+      ? (overlay.earlyExitRequested
+        ? `${C.yellow}Exit requested${C.reset}${C.dim} - leaving queued ATLAS/ONNX work for next run.${C.reset}`
+        : `${C.yellow}[Enter] exit early${C.reset}${C.dim} - ${earlyExitHint}${C.reset}`)
+      : `${C.dim}Progress only - no choice needed here; Ctrl+C interrupts.${C.reset}`;
+    const header = [
+      `${C.cyan}${C.bold}POSSE WRAP-UP${C.reset}`,
+      `${C.bold}${title}${C.reset}`,
+      subtitle ? `${C.dim}${subtitle}${C.reset}` : "",
+      `${C.cyan}heartbeat${C.reset} ${elapsed}${runningStep ? `${C.dim} - ${runningStep.label}${C.reset}` : ""}`,
+      exitLine,
+    ].filter((line) => line !== "");
+    let out = buf;
+    for (const line of header) {
+      out += `\x1b[${row};${col}H${fit(line, innerW)}\x1b[K`;
+      row++;
+    }
+    row++;
+    out += `\x1b[${row};${col}H${C.dim}${rule}${C.reset}\x1b[K`;
+    row += 2;
+    const maxStepLines = Math.max(1, this.rows - row - 2);
+    const visibleSteps = steps.slice(0, maxStepLines);
+    for (const step of visibleSteps) {
+      const detail = step.detail ? `${C.dim} - ${step.detail}${C.reset}` : "";
+      const line = ` ${this._wrapUpStepIcon(step.status, progressTick)} ${step.label}${detail}`;
+      out += `\x1b[${row};${col}H${fit(line, innerW)}\x1b[K`;
+      row++;
+    }
+    const hiddenCount = Math.max(0, steps.length - visibleSteps.length);
+    if (hiddenCount > 0 && row <= this.rows - 1) {
+      out += `\x1b[${row};${col}H${C.dim}\u00b7 ${hiddenCount} more step${hiddenCount === 1 ? "" : "s"}${C.reset}\x1b[K`;
+    }
     return out;
   }
 }

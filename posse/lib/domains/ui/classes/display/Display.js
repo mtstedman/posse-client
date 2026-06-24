@@ -220,6 +220,7 @@ export class Display {
     this.onImage = null;        // (prompt: string) => void
     this.onReviewPending = null; // () => void
     this.onApprovalAction = null; // (wiId: number, action: string) => void
+    this.onWrapUpEarlyExit = null; // () => void
     this.getPipelineData = null;  // () => [{ wi, jobs, artifacts }] — for pipeline view
     this.getToolData = null;      // () => { jobs, recent, activeLocks } — for tool view
     this.getDirtyState = null;    // () => { targetDirty, dirtyItems } — for queue review flags
@@ -240,6 +241,7 @@ export class Display {
     this._blockedByLockDetails = [];
     this._runPhaseMessage = null;
     this._blockingOverlay = null;
+    this._wrapUpEarlyExitRequested = false;
     this._inputController = new DisplayInputController();
     // DisplayInputController is intentionally used as a Display-state mixin:
     // wrapper methods below invoke controller methods with the Display as `this`.
@@ -587,7 +589,15 @@ export class Display {
     this.requestRender({ force: true });
   }
 
-  setWrapUpOverlay({ title = "Wrapping up", subtitle = "", steps = [] } = {}) {
+  setWrapUpOverlay({
+    title = "Wrapping up",
+    subtitle = "",
+    steps = [],
+    layout = "overlay",
+    allowEarlyExit = false,
+    exitHint = "",
+    earlyExitRequested = false,
+  } = {}) {
     const normalizedSteps = (Array.isArray(steps) ? steps : [])
       .map((step, idx) => ({
         id: step?.id ?? `step-${idx}`,
@@ -601,8 +611,13 @@ export class Display {
       title: String(title || "Wrapping up"),
       subtitle: String(subtitle || ""),
       steps: normalizedSteps,
+      layout: layout === "screen" ? "screen" : "overlay",
+      allowEarlyExit: allowEarlyExit === true,
+      exitHint: String(exitHint || ""),
+      earlyExitRequested: earlyExitRequested === true,
       startedAt: Date.now(),
     };
+    this._wrapUpEarlyExitRequested = earlyExitRequested === true;
     this.requestRender({ force: true });
   }
 
@@ -623,6 +638,23 @@ export class Display {
     this._resetBlockingOverlayBaseFrame();
     this.requestRender({ force: true });
   }
+
+  requestWrapUpEarlyExit() {
+    const overlay = this._blockingOverlay;
+    if (!overlay || overlay.kind !== "wrapup" || overlay.allowEarlyExit !== true) return false;
+    if (overlay.earlyExitRequested || this._wrapUpEarlyExitRequested) return true;
+    overlay.earlyExitRequested = true;
+    this._wrapUpEarlyExitRequested = true;
+    this.requestRender({ force: true });
+    try { this.onWrapUpEarlyExit?.(); } catch { /* display callback only */ }
+    return true;
+  }
+
+  isWrapUpEarlyExitRequested() {
+    return this._wrapUpEarlyExitRequested === true
+      || (this._blockingOverlay?.kind === "wrapup"
+        && this._blockingOverlay.earlyExitRequested === true);
+  }
   _resetBlockingOverlayBaseFrame(...args) {
     return this._overlayRenderer._resetBlockingOverlayBaseFrame.call(this, ...args);
   }
@@ -637,6 +669,9 @@ export class Display {
   }
   _applyWrapUpOverlay(...args) {
     return this._overlayRenderer._applyWrapUpOverlay.call(this, ...args);
+  }
+  _applyWrapUpScreen(...args) {
+    return this._overlayRenderer._applyWrapUpScreen.call(this, ...args);
   }
 
   _normalizeAtlasEventText(text) {

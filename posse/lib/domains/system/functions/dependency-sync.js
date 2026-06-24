@@ -21,6 +21,8 @@ const DEPENDENCY_SYNC_WORKER_URL = new URL("./dependency-sync-worker.js", import
 const DEPENDENCY_SYNC_THREAD_MANAGER = new ThreadManager();
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
+const COMMAND_TIMEOUT_FORCE_KILL_GRACE_MS = 1000;
+const COMMAND_TIMEOUT_SETTLE_GRACE_MS = 1000;
 const NODE_MANIFEST_STAMP_NAME = ".posse-manifest.sha256";
 const COMPOSER_MANIFEST_STAMP_NAME = ".posse-manifest.sha256";
 const UNBOUNDED_TIMEOUT_VALUES = new Set(["", "0", "false", "none", "off", "unbounded", "unlimited", "infinite"]);
@@ -393,6 +395,35 @@ function spawnSpecForCommand(command, args = []) {
   return { command, args };
 }
 
+function terminateDependencyCommand(child, { force = false } = {}) {
+  if (!child || child.exitCode != null || (!force && child.killed)) return false;
+  if (process.platform === "win32" && child.pid) {
+    try {
+      const killed = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+        timeout: 5000,
+      });
+      if (killed.status === 0) return true;
+    } catch {
+      // Fall through to child.kill best effort.
+    }
+  }
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
+      return true;
+    } catch {
+      // Fall through to child.kill best effort.
+    }
+  }
+  try {
+    return child.kill(force ? "SIGKILL" : "SIGTERM");
+  } catch {
+    return false;
+  }
+}
+
 function inspectNodeProject(root) {
   const packageJson = path.join(root, "package.json");
   const pkg = readJson(packageJson);
@@ -603,10 +634,16 @@ async function runCommand(command, args, {
     let finished = false;
     let timedOut = false;
     let child;
+    let timer = null;
+    let forceTimer = null;
+    let settleTimer = null;
     const spawnSpec = spawnSpecForCommand(command, args);
     const finish = (result) => {
       if (finished) return;
       finished = true;
+      if (timer) clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
+      if (settleTimer) clearTimeout(settleTimer);
       resolve(result);
     };
     try {
@@ -615,6 +652,7 @@ async function runCommand(command, args, {
         env: dependencyInstallEnv(),
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        detached: process.platform !== "win32",
       });
     } catch (err) {
       finish({ ok: false, message: err?.message || String(err), stdout: "", stderr: "" });
@@ -622,9 +660,24 @@ async function runCommand(command, args, {
     }
 
     const effectiveTimeoutMs = normalizeCommandTimeoutMs(timeoutMs, null);
-    const timer = effectiveTimeoutMs == null ? null : setTimeout(() => {
+    timer = effectiveTimeoutMs == null ? null : setTimeout(() => {
       timedOut = true;
-      try { child.kill("SIGTERM"); } catch { /* best effort */ }
+      terminateDependencyCommand(child, { force: false });
+      forceTimer = setTimeout(() => {
+        terminateDependencyCommand(child, { force: true });
+        settleTimer = setTimeout(() => {
+          finish({
+            ok: false,
+            code: null,
+            signal: null,
+            stdout,
+            stderr,
+            message: `timed out after ${effectiveTimeoutMs}ms`,
+          });
+        }, COMMAND_TIMEOUT_SETTLE_GRACE_MS);
+        settleTimer?.unref?.();
+      }, COMMAND_TIMEOUT_FORCE_KILL_GRACE_MS);
+      forceTimer?.unref?.();
     }, effectiveTimeoutMs);
     timer?.unref?.();
 
@@ -642,11 +695,9 @@ async function runCommand(command, args, {
     if (stdoutStream) stdoutStream.on("data", (chunk) => onData("stdout", chunk));
     if (stderrStream) stderrStream.on("data", (chunk) => onData("stderr", chunk));
     child.on("error", (err) => {
-      if (timer) clearTimeout(timer);
       finish({ ok: false, message: err?.message || String(err), stdout, stderr });
     });
     child.on("close", (code, signal) => {
-      if (timer) clearTimeout(timer);
       const ok = !timedOut && code === 0;
       const message = timedOut
         ? `timed out after ${effectiveTimeoutMs}ms`

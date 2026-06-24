@@ -8,7 +8,15 @@ import { applyMemoryReviewAction } from "./memory-feedback.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { FAILED_JOB_STATUSES } from "../../../catalog/job.js";
 
-export function createTuiWrapUpTracker(display, { title = "Review closeout", subtitle = "", steps = [] } = {}) {
+export function createTuiWrapUpTracker(display, {
+  title = "Review closeout",
+  subtitle = "",
+  steps = [],
+  layout = "overlay",
+  allowEarlyExit = false,
+  exitHint = "",
+  onExitEarly = null,
+} = {}) {
   const hasOverlay = !!display && typeof display.setWrapUpOverlay === "function";
   const normalizedSteps = (Array.isArray(steps) ? steps : [])
     .map((step, idx) => ({
@@ -22,7 +30,13 @@ export function createTuiWrapUpTracker(display, { title = "Review closeout", sub
       title,
       subtitle,
       steps: normalizedSteps,
+      layout,
+      allowEarlyExit,
+      exitHint,
     });
+  }
+  if (hasOverlay && typeof onExitEarly === "function") {
+    display.onWrapUpEarlyExit = onExitEarly;
   }
 
   const update = (id, status, detail = "") => {
@@ -51,7 +65,10 @@ export function createTuiWrapUpTracker(display, { title = "Review closeout", sub
       }
     },
     clear() {
-      if (hasOverlay) display.clearWrapUpOverlay?.();
+      if (hasOverlay) {
+        if (display.onWrapUpEarlyExit === onExitEarly) display.onWrapUpEarlyExit = null;
+        display.clearWrapUpOverlay?.();
+      }
     },
   };
 }

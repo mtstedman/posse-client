@@ -34,8 +34,8 @@ function assertSafeWorkItemDiscard(payload = {}, kind, { force = false } = {}) {
   let jobs = [];
   try {
     jobs = listJobsByWorkItem(wiId);
-  } catch {
-    jobs = [];
+  } catch (err) {
+    throw new Error(`${kind} discard refused: unable to verify WI#${wiId} job state (${err?.message || err}); pass --force to override`);
   }
   const active = jobs.filter((job) => !TERMINAL_JOB_STATUS_SET.has(job.status));
   if (active.length > 0) {

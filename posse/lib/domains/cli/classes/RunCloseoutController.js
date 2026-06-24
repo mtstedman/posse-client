@@ -88,7 +88,11 @@ export class RunCloseoutController {
     return !(raw && ["off", "false", "0", "no"].includes(raw));
   }
 
-  async drainPendingAtlasWarmJobs({ label = "Run wrap-up" } = {}) {
+  async drainPendingAtlasWarmJobs({
+    label = "Run wrap-up",
+    shouldExitEarly = null,
+    includeEmbeddings = false,
+  } = {}) {
     if (!this.wrapUpAtlasDrainEnabled()) return { ran: 0, remaining: 0 };
     const atlasDisabledForRun = (() => {
       try { return typeof this.isAtlasRuntimeDisabled === "function" && this.isAtlasRuntimeDisabled(this.projectDir); } catch { return false; }
@@ -112,12 +116,16 @@ export class RunCloseoutController {
       }
       return { ran: 0, remaining };
     }
-    const drainableWarm = (j) => String(parseJobPayload(j)?.purpose || "wi") !== "embeddings";
+    const exitRequested = () => {
+      try { return typeof shouldExitEarly === "function" && shouldExitEarly() === true; } catch { return false; }
+    };
+    const drainableWarm = (j) => includeEmbeddings || String(parseJobPayload(j)?.purpose || "wi") !== "embeddings";
     const deadline = Date.now() + ATLAS_WRAPUP_DRAIN_BUDGET_MS;
     let ran = 0;
     let announced = false;
     try {
       while (Date.now() < deadline) {
+        if (exitRequested()) break;
         const pending = queuedWarms().filter(drainableWarm);
         if (pending.length === 0) break;
         if (!announced) {
@@ -135,6 +143,7 @@ export class RunCloseoutController {
           await new Promise((resolve) => setTimeout(resolve, Math.min(1000, Math.max(100, earliest - now))));
           continue;
         }
+        if (exitRequested()) break;
         const scheduler = this.getScheduler();
         const worker = this.getWorker();
         const acquireWithLocks = typeof scheduler?.leaseManager?.acquireWithLocksAsync === "function"
@@ -158,10 +167,12 @@ export class RunCloseoutController {
     const remaining = queuedWarms().length;
     if (announced) {
       this.emitStatus(
-        remaining === 0
+        exitRequested()
+          ? `${label}: ATLAS drain skipped by operator — ${remaining} warm job(s) left for next boot.`
+          : remaining === 0
           ? `${label}: ATLAS index work finished (${ran} warm job(s)).`
           : `${label}: ATLAS drain stopped — ${remaining} warm job(s) left for next boot.`,
-        remaining === 0 ? this.C.green : this.C.yellow,
+        !exitRequested() && remaining === 0 ? this.C.green : this.C.yellow,
       );
       await this.flushStatus();
     }

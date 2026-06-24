@@ -7,6 +7,7 @@
 
 import http from "node:http";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 const MAX_STDIN_CONTENT_LENGTH_BYTES = 16 * 1024 * 1024;
 const MAX_STDIN_BUFFER_BYTES = MAX_STDIN_CONTENT_LENGTH_BYTES * 2;
@@ -24,9 +25,11 @@ const OWNER_HANDSHAKE_RETRY_DEADLINE_MS = 30000;
 // long-running tool call (e.g. a slow test run).
 const OWNER_HANDSHAKE_REQUEST_TIMEOUT_MS = 30000;
 const OWNER_DEFAULT_REQUEST_TIMEOUT_MS = 150000;
-// Connection-level errors are safe to retry for any method (the request never
-// reached the owner). Timeouts and 5xx are only replayed for idempotent methods.
-const CONNECTION_RETRY_CODES = ["ENOENT", "ECONNREFUSED", "EPIPE", "ECONNRESET"];
+// Pre-connect errors are safe to retry for any method. Mid-stream connection
+// errors may occur after the owner started executing the request, so replay
+// them only for idempotent methods.
+const PRE_CONNECT_RETRY_CODES = ["ENOENT", "ECONNREFUSED"];
+const MAYBE_SIDE_EFFECT_RETRY_CODES = ["EPIPE", "ECONNRESET"];
 const IDEMPOTENT_METHODS = new Set([
   "initialize",
   "tools/list",
@@ -41,17 +44,26 @@ function isIdempotentMethod(message) {
   return IDEMPOTENT_METHODS.has(method) || method.startsWith("notifications/");
 }
 
+export function shouldRetryOwnerForwardError(err, { idempotent }) {
+  const code = String(err?.code || "");
+  if (PRE_CONNECT_RETRY_CODES.includes(code)) return true;
+  if (idempotent && MAYBE_SIDE_EFFECT_RETRY_CODES.includes(code)) return true;
+  return idempotent && (code === "ETIMEDOUT" || err?.transient === true);
+}
+
 function argValue(name) {
   const index = process.argv.indexOf(name);
   if (index < 0 || !process.argv[index + 1]) return "";
   return String(process.argv[index + 1]);
 }
 
+const IS_MAIN = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
 const ownerPipe = argValue("--owner-pipe");
 const ownerToken = argValue("--owner-token");
 const mcpOAuthToken = argValue("--mcp-oauth-token");
 
-if (!ownerPipe || !ownerToken || !mcpOAuthToken) {
+if (IS_MAIN && (!ownerPipe || !ownerToken || !mcpOAuthToken)) {
   process.stderr.write("[posse-mcp-shim] missing --owner-pipe, --owner-token, or --mcp-oauth-token\n");
   process.exit(2);
 }
@@ -139,13 +151,10 @@ async function forwardToOwner(message) {
       return await ownerRequest(message, { timeoutMs });
     } catch (err) {
       lastErr = err;
-      const code = String(err?.code || "");
-      const isConnError = CONNECTION_RETRY_CODES.includes(code);
       // Timeouts and transient owner 5xx are only replayed for idempotent
       // handshake methods — never auto-replay a tools/call that may have
       // partially executed.
-      const isRetryableIdempotent = idempotent && (code === "ETIMEDOUT" || err?.transient === true);
-      if (!isConnError && !isRetryableIdempotent) throw err;
+      if (!shouldRetryOwnerForwardError(err, { idempotent })) throw err;
       await sleep(OWNER_RETRY_MS);
     }
   }
@@ -234,20 +243,22 @@ function processInputBuffer() {
   }
 }
 
-process.stdin.on("data", (chunk) => {
-  inputBuffer = Buffer.concat([inputBuffer, Buffer.from(chunk)]);
-  processInputBuffer();
-  if (inputBuffer.length > MAX_STDIN_BUFFER_BYTES) {
-    reportParseError(
-      "stream",
-      new Error(`stdin buffered ${inputBuffer.length} bytes without a complete frame (max ${MAX_STDIN_BUFFER_BYTES})`),
-      inputBuffer.length,
-    );
-    inputBuffer = Buffer.alloc(0);
-  }
-});
+if (IS_MAIN) {
+  process.stdin.on("data", (chunk) => {
+    inputBuffer = Buffer.concat([inputBuffer, Buffer.from(chunk)]);
+    processInputBuffer();
+    if (inputBuffer.length > MAX_STDIN_BUFFER_BYTES) {
+      reportParseError(
+        "stream",
+        new Error(`stdin buffered ${inputBuffer.length} bytes without a complete frame (max ${MAX_STDIN_BUFFER_BYTES})`),
+        inputBuffer.length,
+      );
+      inputBuffer = Buffer.alloc(0);
+    }
+  });
 
-process.stdin.on("end", () => {
-  requestQueue.finally(() => process.exit(0));
-});
-process.stdin.on("error", () => process.exit(0));
+  process.stdin.on("end", () => {
+    requestQueue.finally(() => process.exit(0));
+  });
+  process.stdin.on("error", () => process.exit(0));
+}

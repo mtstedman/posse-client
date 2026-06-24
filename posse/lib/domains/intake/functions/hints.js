@@ -54,7 +54,7 @@ function _normPath(value) {
 }
 
 function _isWindowsDrivePath(value) {
-  return /^[a-zA-Z]:\//.test(String(value || ""));
+  return /^[a-zA-Z]:/.test(String(value || ""));
 }
 
 function _hasParentTraversal(value) {
@@ -64,7 +64,12 @@ function _hasParentTraversal(value) {
 }
 
 function _isSafeHintPath(value) {
-  const normalized = _normPath(value);
+  const raw = String(value || "").trim().replace(/\\/g, "/");
+  if (!raw) return false;
+  if (path.posix.isAbsolute(raw)) return false;
+  if (raw.startsWith("//")) return false;
+  if (_isWindowsDrivePath(raw)) return false;
+  const normalized = _normPath(raw);
   if (!normalized) return false;
   if (path.posix.isAbsolute(normalized)) return false;
   if (_isWindowsDrivePath(normalized)) return false;
@@ -198,14 +203,14 @@ export function normalizeIntakeHints(input = {}, { requestText = "", fallbackMod
   );
   const suspectedFiles = _dedupe(
     _splitList(input.suspected_files)
-      .map(_normPath)
-      .filter(_isSafeHintPath),
+      .filter(_isSafeHintPath)
+      .map(_normPath),
     (v) => v.toLowerCase(),
   );
   const suspectedDirs = _dedupe(
     _splitList(input.suspected_dirs)
-      .map((item) => _normPath(item).replace(/\/+$/, ""))
-      .filter(_isSafeHintPath),
+      .filter(_isSafeHintPath)
+      .map((item) => _normPath(item).replace(/\/+$/, "")),
     (v) => v.toLowerCase(),
   );
   const subtasks = _dedupe(_splitList(input.subtasks).map((item) => item.trim()), (v) => v.toLowerCase());

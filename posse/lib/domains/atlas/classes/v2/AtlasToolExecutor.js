@@ -9,11 +9,14 @@ import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
 import { ledgerDbPath, mainViewPath } from "../../functions/v2/runtime-paths.js";
 import { resolveTargetBranch } from "../../../git/functions/target-branch.js";
+import { AtlasToolDispatchCache } from "./AtlasToolDispatchCache.js";
 import path from "node:path";
 
 const DEFAULT_DEDUPE_WINDOW_MS = 1500;
 const DEFAULT_WAIT_MS = 120_000;
 const DEFAULT_DEDUPE_MAX = 256;
+const DEFAULT_DISPATCH_CACHE_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_DISPATCH_CACHE_MAX = 256;
 
 const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
   "query",
@@ -58,6 +61,37 @@ const ATLAS_BLOCKING_ACTIONS = new Set([
 ]);
 
 const ATLAS_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent"]);
+
+const DISPATCH_CACHE_POLICIES = Object.freeze({
+  NEVER: "never",
+  INFLIGHT_ONLY: "inflightOnly",
+  VERSIONED: "versioned",
+  GIT_STATE: "gitState",
+});
+
+const ATLAS_DISPATCH_CACHE_POLICIES = new Map([
+  ["action.search", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["manual", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["info", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["symbol.search", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["symbol.card", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["slice.build", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["slice.refresh", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["context", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["context.summary", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["repo.status", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["repo.overview", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["repo.quality", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["tree.overview", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["tree.branch", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["tree.scope", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["tree.expand", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["code.skeleton", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["code.lens", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["review.delta", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["review.analyze", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["review.risk", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+]);
 
 function stableStringify(value) {
   if (value === undefined || value == null) return "null";
@@ -116,6 +150,40 @@ function withDedupeMarker(value, mode) {
   };
 }
 
+function withDispatchCacheMarker(value) {
+  const cloned = withDedupeMarker(value, "cache");
+  if (!cloned || typeof cloned !== "object" || Array.isArray(cloned)) return cloned;
+  return {
+    ...cloned,
+    executor: {
+      ...(cloned.executor || {}),
+      cache: {
+        ...(cloned.executor?.cache || {}),
+        hit: true,
+        source: "dispatch",
+        state: "ready",
+      },
+    },
+  };
+}
+
+function withDispatchWaitingMarker(value) {
+  const cloned = withDedupeMarker(value, "waiting");
+  if (!cloned || typeof cloned !== "object" || Array.isArray(cloned)) return cloned;
+  return {
+    ...cloned,
+    executor: {
+      ...(cloned.executor || {}),
+      cache: {
+        ...(cloned.executor?.cache || {}),
+        hit: true,
+        source: "dispatch",
+        state: "waiting",
+      },
+    },
+  };
+}
+
 function stripAtlasPrefix(name = "") {
   const raw = String(name || "").trim();
   if (raw.startsWith("atlas.")) return raw.slice("atlas.".length);
@@ -145,8 +213,17 @@ function gatewayEffectiveAction(action, args = {}) {
   return target || action;
 }
 
-function effectiveAction(toolName, args = {}) {
-  return gatewayEffectiveAction(resolveAtlasAction(toolName), args);
+function dispatchCachePolicyFor(action) {
+  return ATLAS_DISPATCH_CACHE_POLICIES.get(String(action || "").toLowerCase()) || DISPATCH_CACHE_POLICIES.NEVER;
+}
+
+function gatewaySelectorKeysFor(action, args = {}) {
+  if (!ATLAS_GATEWAY_ACTIONS.has(action) || !args || typeof args !== "object") return [];
+  const keys = [];
+  for (const key of ["gatewayAction", "targetAction", "actionName", "action"]) {
+    if (Object.prototype.hasOwnProperty.call(args, key)) keys.push(key);
+  }
+  return keys;
 }
 
 function directReadEligible(action, args = {}) {
@@ -211,6 +288,38 @@ function readContextKeyFor(scope) {
   return wiKey || normalizeRepoKey(scope);
 }
 
+function dispatchCacheEnabledFor(request = {}) {
+  const config = request.config || {};
+  const session = request.session || {};
+  const boot = session.bootConfig || session || {};
+  const atlas = boot.atlas && typeof boot.atlas === "object" ? boot.atlas : {};
+  const explicit = config.dispatchCacheEnabled
+    ?? config.gatewayDispatchCacheEnabled
+    ?? config.jobCacheEnabled
+    ?? atlas.dispatchCacheEnabled
+    ?? atlas.gatewayDispatchCacheEnabled
+    ?? atlas.jobCacheEnabled
+    ?? false;
+  return explicit === true;
+}
+
+function dispatchCacheTtlFor(request = {}) {
+  const config = request.config || {};
+  const session = request.session || {};
+  const boot = session.bootConfig || session || {};
+  const atlas = boot.atlas && typeof boot.atlas === "object" ? boot.atlas : {};
+  const ttlMs = Number(
+    config.dispatchCacheTtlMs
+    ?? config.gatewayDispatchCacheTtlMs
+    ?? config.jobCacheTtlMs
+    ?? atlas.dispatchCacheTtlMs
+    ?? atlas.gatewayDispatchCacheTtlMs
+    ?? atlas.jobCacheTtlMs
+    ?? DEFAULT_DISPATCH_CACHE_TTL_MS,
+  );
+  return Number.isFinite(ttlMs) ? Math.max(0, ttlMs) : DEFAULT_DISPATCH_CACHE_TTL_MS;
+}
+
 /**
  * @typedef {{
  *   toolName: string,
@@ -230,6 +339,7 @@ export class AtlasToolExecutor {
   #dedupeWindowMs;
   #waitMs;
   #dedupeMax;
+  #dispatchCache;
   /** @type {Map<string, Promise<any>>} */
   #inflightDedupe = new Map();
   /** @type {Map<string, { atMs: number, payload: any }>} */
@@ -246,6 +356,9 @@ export class AtlasToolExecutor {
     dedupeWindowMs = DEFAULT_DEDUPE_WINDOW_MS,
     waitMs = DEFAULT_WAIT_MS,
     dedupeMax = DEFAULT_DEDUPE_MAX,
+    dispatchCache = null,
+    dispatchCacheTtlMs = DEFAULT_DISPATCH_CACHE_TTL_MS,
+    dispatchCacheMax = DEFAULT_DISPATCH_CACHE_MAX,
     readContexts = null,
     now = Date.now,
   } = {}) {
@@ -255,6 +368,16 @@ export class AtlasToolExecutor {
     this.#waitMs = Math.max(0, Number(waitMs) || DEFAULT_WAIT_MS);
     this.#dedupeMax = Math.max(1, Number(dedupeMax) || DEFAULT_DEDUPE_MAX);
     this.#now = now;
+    if (dispatchCache === true) {
+      this.#dispatchCache = new AtlasToolDispatchCache({
+        actions: ATLAS_DISPATCH_CACHE_POLICIES.keys(),
+        ttlMs: dispatchCacheTtlMs,
+        maxEntries: dispatchCacheMax,
+        now,
+      });
+    } else {
+      this.#dispatchCache = dispatchCache instanceof AtlasToolDispatchCache ? dispatchCache : null;
+    }
     if (readContexts && typeof readContexts === "object") {
       for (const [repoKey, context] of Object.entries(readContexts)) {
         this.setReadContext(repoKey, context);
@@ -271,8 +394,35 @@ export class AtlasToolExecutor {
     const toolName = String(request.toolName || "").trim();
     if (!toolName) throw new Error("AtlasToolExecutor.executeTool requires toolName");
     const args = request.args && typeof request.args === "object" ? request.args : {};
-    const action = effectiveAction(toolName, args);
+    const baseAction = resolveAtlasAction(toolName);
+    const action = gatewayEffectiveAction(baseAction, args);
     const repoKey = this.#repoKeyFor(request);
+    const dispatchCachePolicy = dispatchCachePolicyFor(action);
+    const dispatchKeyParts = this.#dispatchCacheKeyParts({ policy: dispatchCachePolicy, repoKey });
+    const dispatchCacheKey = dispatchCacheEnabledFor(request) && dispatchKeyParts
+      ? this.#dispatchCache?.keyFor({
+        repoKey,
+        action,
+        args,
+        selectorKeys: gatewaySelectorKeysFor(baseAction, args),
+        keyParts: dispatchKeyParts,
+      })
+      : null;
+    const dispatchCacheTtlMs = dispatchCacheKey ? dispatchCacheTtlFor(request) : 0;
+    const dispatchCacheReady = this.#dispatchCacheReady({ policy: dispatchCachePolicy, keyParts: dispatchKeyParts });
+    const run = () => this.#runThroughGate({ ...request, toolName, args, action, repoKey });
+    if (dispatchCacheKey) {
+      const result = await this.#dispatchCache.getOrRun(dispatchCacheKey, async () => {
+        const value = await run();
+        const dedupeEligible = ATLAS_READONLY_DEDUPE_ACTIONS.has(String(action).toLowerCase());
+        const dedupeKey = dedupeEligible ? this.#dedupeKey({ toolName, args, repoKey }) : null;
+        if (dedupeKey) this.#rememberDedupe(dedupeKey, value);
+        return value;
+      }, { ttlMs: dispatchCacheTtlMs, cacheReady: dispatchCacheReady, repoKey });
+      if (result.state === "hit") return withDispatchCacheMarker(result.value);
+      if (result.state === "waiting") return withDispatchWaitingMarker(result.value);
+      return result.value;
+    }
     const dedupeEligible = ATLAS_READONLY_DEDUPE_ACTIONS.has(String(action).toLowerCase());
     const dedupeKey = dedupeEligible ? this.#dedupeKey({ toolName, args, repoKey }) : null;
     if (dedupeKey) {
@@ -287,7 +437,6 @@ export class AtlasToolExecutor {
       }
     }
 
-    const run = () => this.#runThroughGate({ ...request, toolName, args, action, repoKey });
     if (!dedupeKey) return run();
 
     const promise = run()
@@ -325,6 +474,16 @@ export class AtlasToolExecutor {
     const relPath = path.relative(cwd, absPath).replace(/\\/g, "/");
     if (!relPath || relPath.startsWith("..") || path.isAbsolute(relPath)) return null;
     const repoKey = normalizeRepoKey(repoRoot);
+    const requestRepoKey = this.#repoKeyFor({
+      ...request,
+      args,
+      config: {
+        ...(request.config && typeof request.config === "object" ? request.config : {}),
+        repoRoot,
+      },
+    });
+    this.#clearRecentDedupeForRepo(repoKey);
+    if (requestRepoKey !== repoKey) this.#clearRecentDedupeForRepo(requestRepoKey);
     const branch = this.#branchForRepo(repoRoot);
     const config = {
       ...(atlas && typeof atlas === "object" ? atlas : {}),
@@ -348,6 +507,8 @@ export class AtlasToolExecutor {
             out_view_path: mainViewPath(repoRoot),
           },
         }, { timeoutMs: request.waitMs || this.#waitMs });
+        this.#clearRecentDedupeForRepo(repoKey);
+        if (requestRepoKey !== repoKey) this.#clearRecentDedupeForRepo(requestRepoKey);
         return {
           ok: result?.ok !== false,
           action: "index.refresh",
@@ -396,6 +557,7 @@ export class AtlasToolExecutor {
     this.#readContexts.clear();
     this.#readContextVersions.clear();
     this.#recentDedupe.clear();
+    this.#dispatchCache?.clear?.();
   }
 
   snapshot() {
@@ -403,6 +565,7 @@ export class AtlasToolExecutor {
       gate: this.#gate.snapshot?.() || null,
       inflightDedupe: this.#inflightDedupe.size,
       recentDedupe: this.#recentDedupe.size,
+      dispatchCache: this.#dispatchCache?.snapshot?.() || null,
       readContexts: this.#readContexts.size,
       dedupeWindowMs: this.#dedupeWindowMs,
       waitMs: this.#waitMs,
@@ -412,8 +575,31 @@ export class AtlasToolExecutor {
   async close() {
     this.#inflightDedupe.clear();
     this.#recentDedupe.clear();
+    this.#dispatchCache?.clear?.();
     this.#readContexts.clear();
     this.#readContextVersions.clear();
+  }
+
+  #dispatchCacheKeyParts({ policy, repoKey }) {
+    if (policy === DISPATCH_CACHE_POLICIES.NEVER) return null;
+    if (policy === DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY) {
+      return { policyVersion: 1, policy };
+    }
+    if (policy === DISPATCH_CACHE_POLICIES.VERSIONED) {
+      const readContextVersion = this.#readContextVersions.get(repoKey);
+      return readContextVersion ? { policyVersion: 1, policy, readContextVersion } : { policyVersion: 1, policy, unversioned: true };
+    }
+    if (policy === DISPATCH_CACHE_POLICIES.GIT_STATE) {
+      return { policyVersion: 1, policy, missingGitState: true };
+    }
+    return null;
+  }
+
+  #dispatchCacheReady({ policy, keyParts }) {
+    if (!keyParts) return false;
+    if (policy === DISPATCH_CACHE_POLICIES.VERSIONED) return !keyParts.unversioned && !!keyParts.readContextVersion;
+    if (policy === DISPATCH_CACHE_POLICIES.GIT_STATE) return !keyParts.missingGitState && !!keyParts.gitState;
+    return false;
   }
 
   #runThroughGate(request) {
@@ -537,6 +723,7 @@ export class AtlasToolExecutor {
     for (const key of [...this.#recentDedupe.keys()]) {
       if (String(key).startsWith(prefix)) this.#recentDedupe.delete(key);
     }
+    this.#dispatchCache?.clearRepo?.(repoKey);
   }
 
   #rememberDedupe(key, payload) {

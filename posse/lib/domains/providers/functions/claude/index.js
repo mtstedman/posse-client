@@ -1157,6 +1157,9 @@ export async function callProvider(promptText, {
           }
           if (msg.type === "result") {
             resultData = msg;
+            if (msg.result && typeof msg.result === "string" && msg.result.length > fullOutput.length) {
+              fullOutput = msg.result;
+            }
           }
         } catch {
           // Not valid JSON — treat as raw text

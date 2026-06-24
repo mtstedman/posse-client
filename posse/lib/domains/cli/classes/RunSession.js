@@ -2211,7 +2211,10 @@ export class RunSession {
     }
     // Wrap-up merges queued ATLAS follow-up work; finish it while the
     // conductor is still alive so the next boot opens on a current index.
-    await drainPendingAtlasWarmJobs({ label: "Run wrap-up" });
+    await drainPendingAtlasWarmJobs({
+      label: "Run wrap-up",
+      shouldExitEarly: () => display?.isWrapUpEarlyExitRequested?.() === true,
+    });
     // Daemon-layer health: the worker→per-call fallback is transparent by
     // design, which means a broken bridge/host is invisible unless reported.
     const fallbackStats = nativeBinariesForRun?.workerFallbackStats?.() || { total: 0, byBinary: {} };

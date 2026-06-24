@@ -1786,6 +1786,8 @@ export async function warmAtlasMergedToMainNow(opts = {}) {
       defaultBranch: targetBranch,
       config,
       onProgress: typeof opts?.onProgress === "function" ? opts.onProgress : null,
+      deferEmbeddings: opts?.deferEmbeddings === true,
+      signal: opts?.signal || null,
     });
     const result = await warmer.handleWarmJob({
       purpose: "main-merge",
@@ -1795,6 +1797,9 @@ export async function warmAtlasMergedToMainNow(opts = {}) {
       out_view_path: storage.mainViewDbPath,
       trigger_event: opts?.triggerEvent || "merge_wrapup",
     });
+    if (opts?.deferEmbeddings === true && opts?.flushDeferredEmbeddings !== false) {
+      await warmer.flushDeferredEmbeddings();
+    }
     return {
       attempted: true,
       ok: true,
@@ -1810,12 +1815,14 @@ export async function warmAtlasMergedToMainNow(opts = {}) {
     };
   } catch (err) {
     logAtlasError(`[atlas] warmAtlasMergedToMainNow (repoRoot=${storage.repoRoot}, wi=${workItemId}):`, err);
+    const aborted = isAbortLikeAtlasError(err);
     if (isVerboseAtlasErrors()) throw err;
     return {
       attempted: true,
       ok: false,
+      aborted,
       backend: "atlas-v2",
-      error: formatAtlasError(err),
+      error: aborted ? "aborted" : formatAtlasError(err),
       ledgerDbPath: storage.ledgerDbPath,
       viewDbPath: storage.mainViewDbPath,
       graphDbPath: storage.ledgerDbPath,
@@ -1827,6 +1834,14 @@ export async function warmAtlasMergedToMainNow(opts = {}) {
   } finally {
     try { ledger?.close?.(); } catch { /* ignore */ }
   }
+}
+
+function isAbortLikeAtlasError(err) {
+  if (!err) return false;
+  const anyErr = /** @type {any} */ (err);
+  return anyErr.name === "AbortError"
+    || anyErr.code === "ABORT_ERR"
+    || anyErr.code === "DAEMON_ABORTED";
 }
 
 function shouldAutoRestageScip(config = {}) {

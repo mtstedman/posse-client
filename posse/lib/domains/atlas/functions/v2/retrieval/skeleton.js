@@ -449,11 +449,16 @@ function limitSkeleton(args) {
     ok: true,
     content,
     startLine: args.startLine,
-    endLine: truncated ? args.startLine + Math.max(0, lines.length - 1) : args.endLine,
+    endLine: truncated ? args.startLine + Math.max(1, countReturnedLines(content)) - 1 : args.endLine,
     truncated,
     selectedSymbols: args.selectedSymbols,
     etagSeed: args.etagSeed,
   };
+}
+
+function countReturnedLines(content) {
+  if (content === "") return 0;
+  return String(content || "").split(/\r?\n/).length;
 }
 
 /**

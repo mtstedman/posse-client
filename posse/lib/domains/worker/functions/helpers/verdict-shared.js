@@ -324,6 +324,7 @@ export function prepareVerdictForDispatch(job, verdict) {
     prepared = {
       ...prepared,
       verdict: "needs_review",
+      _disable_internal_retry: true,
       reasons: [
         "Likely route mismatch: this task was enforced as image artifact mode, but the scoped outputs and task spec look like repo/frontend code deliverables.",
         ...(prepared.reasons || []),

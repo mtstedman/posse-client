@@ -337,6 +337,15 @@ export class ParseEngine {
     try { this.#onProgress(event); } catch { /* progress callbacks are observational */ }
   }
 
+  #throwIfAborted() {
+    if (!this.#signal?.aborted) return;
+    const reason = this.#signal.reason;
+    const err = reason instanceof Error ? reason : new Error(String(reason || "ATLAS warm aborted"));
+    if (!err.name || err.name === "Error") err.name = "AbortError";
+    try { /** @type {any} */ (err).code ||= "ABORT_ERR"; } catch { /* best effort */ }
+    throw err;
+  }
+
   /**
    * Forward a ViewBuilder `phase:"tree"` event as a `stage:"tree"` progress
    * line. The tree refresh (tree-derived + compression seeds) drives its own
@@ -370,6 +379,7 @@ export class ParseEngine {
    * @returns {Promise<void>}
    */
   async #emitStage(stage, text, extra = {}) {
+    this.#throwIfAborted();
     this.#emitProgress({
       kind: "line",
       stream: "system",
@@ -378,6 +388,7 @@ export class ParseEngine {
       ...extra,
     });
     await this.#yieldForProgress();
+    this.#throwIfAborted();
   }
 
   /**
@@ -727,6 +738,7 @@ export class ParseEngine {
           return finalize(base, start);
       }
     } catch (err) {
+      if (isAbortLikeError(err)) throw err;
       // Treat any unexpected exception as "warming failed" — surface in
       // result rather than throwing. Callers (the executor) decide
       // whether to log as info or escalate.
@@ -2132,6 +2144,9 @@ export class ParseEngine {
         // the serial write queue, so merges and queued warms aren't held
         // behind vector encoding. `base` is captured by reference — the flush
         // fills the same result object the warm returns.
+        base.embeddings_deferred = true;
+        base.embeddings_complete = false;
+        base.embeddings_skipped_reason = "deferred";
         this.#pendingEmbeddingIngests.push({ viewPath, base });
         return;
       }
@@ -2569,4 +2584,12 @@ export class ParseEngine {
 function finalize(result, start) {
   result.duration_ms = nowMs() - start;
   return result;
+}
+
+function isAbortLikeError(err) {
+  if (!err) return false;
+  const anyErr = /** @type {any} */ (err);
+  return anyErr.name === "AbortError"
+    || anyErr.code === "ABORT_ERR"
+    || anyErr.code === "DAEMON_ABORTED";
 }

@@ -409,6 +409,8 @@ function buildDeterministicMcpBootPayload(role, {
         semanticEnabled: resolvedAtlasConfig?.semanticEnabled === true,
         vectorBackend: resolvedAtlasConfig?.vectorBackend || "auto",
         viewWaitMs: resolvedAtlasConfig?.viewWaitMs ?? null,
+        jobCacheEnabled: resolvedAtlasConfig?.jobCacheEnabled === true,
+        jobCacheTtlMs: resolvedAtlasConfig?.jobCacheTtlMs ?? null,
         autoRefreshStale: resolvedAtlasConfig?.autoRefreshStale ?? null,
         embeddingProvider: resolvedAtlasConfig?.embeddingProvider || resolvedAtlasConfig?.atlasEmbeddingProvider || "",
         embeddingEndpoint: resolvedAtlasConfig?.embeddingEndpoint || "",

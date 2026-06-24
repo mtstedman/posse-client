@@ -127,7 +127,7 @@ function renderJob(job, { verbose = false } = {}) {
 function renderWiEvents(events, { verbose = false } = {}) {
   if (!events || events.length === 0) return null;
   const limit = verbose ? events.length : 20;
-  const chosen = events.slice(-limit);
+  const chosen = events.slice(0, limit);
   const lines = [`\n  ${C.bold}WI Events${C.reset} ${C.dim}(${chosen.length}/${events.length})${C.reset}`];
   for (const ev of chosen) {
     lines.push(`    ${C.dim}${shortTime(ev.createdAt)}${C.reset}  ${C.cyan}${ev.eventType}${C.reset}  ${truncate(ev.message, 120)}`);

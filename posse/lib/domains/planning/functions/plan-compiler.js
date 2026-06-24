@@ -268,6 +268,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       const pendingDependencyLinks = [];
       const duplicateTaskClaims = new Map(); // semantic planner task -> first job created for it
       const allCreatedJobIds = new Set(); // every job spawned by this compilation
+      const compiledTaskJobIds = new Map(); // planner task index -> spawned job ids
       const promoteDestinationClaims = new Map(); // repo file -> promote claim record
       const promoteClaimsByJobId = new Map(); // promote job id -> claim group
       const rawMaxTasks = getIntSetting(SETTING_KEYS.PLANNER_MAX_TASKS, 50);
@@ -514,6 +515,12 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           dependsOnIndexes: [...task.depends_on_index],
         });
       };
+      const recordCompiledTaskJob = (taskIndex, jobId) => {
+        if (!Number.isInteger(taskIndex) || jobId == null) return;
+        const ids = compiledTaskJobIds.get(taskIndex) || new Set();
+        ids.add(jobId);
+        compiledTaskJobIds.set(taskIndex, ids);
+      };
       const normalizeArtifactRoot = (root) => path.resolve(worker.projectDir, String(root || "")).replace(/\\/g, "/").replace(/\/+$/, "");
       const wiArtifactRoot = artifactDirAbs.replace(/\/+$/, "");
       const derivePriorArtifactInputRoots = (task, taskIndex) => {
@@ -646,6 +653,55 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           created_jobs: createdCount,
         });
         return false;
+      };
+
+      const cancelCompiledTaskForDroppedDependency = (taskIndex, blockedDeps) => {
+        if (droppedTaskIndexes.has(taskIndex)) return false;
+        const title = taskTitleForLog(tasks[taskIndex], taskIndex);
+        const blockedLabels = blockedDeps.map((idx) => idx + 1).join(", ");
+        droppedTaskIndexes.add(taskIndex);
+        const jobIds = compiledTaskJobIds.get(taskIndex) || new Set();
+        const targetJobId = jobMap.get(taskIndex);
+        if (targetJobId != null) jobIds.add(targetJobId);
+
+        for (const jobId of jobIds) {
+          releasePromoteClaimsForJob(jobId);
+          if (allCreatedJobIds.delete(jobId) && createdCount > 0) createdCount--;
+          updateJobStatus(jobId, "canceled", { expectedStatuses: ["queued"] });
+          setJobError(jobId, `Dropped dependent planned task "${title}": prerequisite task(s) ${blockedLabels} were dropped`);
+        }
+        jobMap.delete(taskIndex);
+
+        worker.emit(planJob.id, `${C.red}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dropped dependent task "${title}" — prerequisite task(s) ${blockedLabels} were dropped`);
+        logEvent({
+          work_item_id: planJob.work_item_id,
+          job_id: planJob.id,
+          event_type: EVENT_TYPES.PLAN_TASK_INVALID,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Dropped dependent planned task "${title}": prerequisite task(s) ${blockedLabels} were dropped`,
+          event_json: JSON.stringify({
+            reason: "dropped_dependency",
+            task_index: taskIndex,
+            dropped_dependencies: blockedDeps,
+            canceled_job_ids: [...jobIds],
+          }),
+        });
+        return true;
+      };
+
+      const propagateDroppedPlannerDependencies = () => {
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (const link of pendingDependencyLinks) {
+            if (droppedTaskIndexes.has(link.taskIndex)) continue;
+            if (!allCreatedJobIds.has(link.jobId)) continue;
+            const blockedDeps = link.dependsOnIndexes
+              .filter((depIdx) => Number.isInteger(depIdx) && droppedTaskIndexes.has(depIdx));
+            if (blockedDeps.length === 0) continue;
+            changed = cancelCompiledTaskForDroppedDependency(link.taskIndex, [...new Set(blockedDeps)]) || changed;
+          }
+        }
       };
 
       for (let i = 0; i < tasks.length; i++) {
@@ -1542,6 +1598,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           skills: taskSkillIds,
         });
         allCreatedJobIds.add(job.id);
+        recordCompiledTaskJob(i, job.id);
         if (finalJobType === "promote") {
           recordPromoteDestinationClaim(job, normalizedPromotePayload, {
             files: promoteClaim?.files || null,
@@ -1624,6 +1681,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
                 payload_json: promotePayloadJson,
               });
               allCreatedJobIds.add(promoteJob.id);
+              recordCompiledTaskJob(i, promoteJob.id);
               recordPromoteDestinationClaim(promoteJob, normalizedPromotePayload, {
                 files: promoteClaim.files,
                 taskIndex: i,
@@ -1709,6 +1767,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       // ── Spawn delegator if multi-provider is configured ──
       // Only include jobs that actually need provider assignment (dev/fix/artificer).
       // Promote and human_input are deterministic — no provider needed.
+      propagateDroppedPlannerDependencies();
+
       if (createdCount === 0) {
         if (underScopedDroppedTitles.length > 0) {
           const plannerPayload = worker.parsePayload(planJob);

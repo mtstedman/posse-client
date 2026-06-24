@@ -33,6 +33,7 @@ import { getUsageSummary } from "./usage-summary.js";
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { extractJson } from "../../../../shared/format/functions/json.js";
+import { signalAbortError } from "../../../runtime/functions/yield.js";
 
 export { extractJson };
 export { getUsageSummary };
@@ -543,7 +544,7 @@ export async function callProvider(promptText, {
       // Check abort
       if (abortSignal?.aborted) {
         emit(`${C.red}[aborted] Signal received, stopping.${C.reset}`);
-        break;
+        throw signalAbortError(abortSignal, "OpenAI provider aborted");
       }
 
       // Collect text output from this turn (don't dump to log - only tool calls & status)
@@ -708,6 +709,10 @@ export async function callProvider(promptText, {
     throw wrapped;
   } finally {
     releaseGate({ scopeKey: gateScopeKey });
+  }
+
+  if (abortSignal?.aborted) {
+    throw signalAbortError(abortSignal, "OpenAI provider aborted");
   }
 
   const durationMs = Date.now() - start;

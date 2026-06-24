@@ -258,7 +258,7 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
           job_id: reviewJobId,
           lease_seconds: args.lease_seconds,
           answer: note ? `pass: ${note}` : "pass",
-        }, context);
+        }, { ...context, allowReviewGateAnswer: true });
       }
       const wiId = workItemIdArg(args);
       if (!wiId) return { ok: false, reason: "invalid_work_item_id" };
@@ -276,7 +276,7 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
           job_id: reviewJobId,
           lease_seconds: args.lease_seconds,
           answer: `fail: ${feedback}`,
-        }, context);
+        }, { ...context, allowReviewGateAnswer: true });
       }
       const wiId = workItemIdArg(args);
       if (!wiId) return { ok: false, reason: "invalid_work_item_id" };

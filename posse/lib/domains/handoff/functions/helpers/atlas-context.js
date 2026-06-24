@@ -13,6 +13,7 @@ import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/det
 import { isIndexableSourcePath } from "../../../integrations/functions/deterministic-mcp/source-file-gate.js";
 import { resolvePathWithin } from "../../../runtime/functions/fs-safety.js";
 import { isSensitiveEnvFileOrTargetPath } from "../../../runtime/functions/sensitive-paths.js";
+import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { formatAtlasBackendText, atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 import { isExternallyRoutedAtlasTool } from "../../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { semanticDispatchEnabled } from "../../../atlas/functions/v2/embeddings/resources.js";
@@ -943,6 +944,47 @@ async function _prefetchSliceSkeletons(filePaths, {
   return results;
 }
 
+function _truncateUtf8String(text, maxBytes) {
+  let used = 0;
+  let out = "";
+  for (const char of String(text || "")) {
+    const next = Buffer.byteLength(char, "utf8");
+    if (used + next > maxBytes) break;
+    out += char;
+    used += next;
+  }
+  return out;
+}
+
+function _truncateUtf8AtLineBoundary(content, maxBytes) {
+  const text = String(content || "");
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) {
+    return { content: text, truncated: false };
+  }
+  const lines = text.split(/\r?\n/u);
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    const prefix = kept.length > 0 ? "\n" : "";
+    const nextBytes = Buffer.byteLength(prefix + line, "utf8");
+    if (used + nextBytes <= maxBytes) {
+      kept.push(line);
+      used += nextBytes;
+      continue;
+    }
+    if (kept.length === 0) {
+      return { content: _truncateUtf8String(line, maxBytes), truncated: true };
+    }
+    break;
+  }
+  return { content: kept.join("\n"), truncated: true };
+}
+
+function _countReturnedLines(content, requestedLines) {
+  if (content === "") return requestedLines > 0 ? 1 : 0;
+  return String(content).split(/\r?\n/u).length;
+}
+
 async function _prefetchExactScopedFiles(filePaths, {
   packet,
   toolsAvailable,
@@ -974,20 +1016,20 @@ async function _prefetchExactScopedFiles(filePaths, {
       const limitedLines = allLines.slice(0, ATLAS_EXACT_PREFETCH_MAX_LINES);
       let content = limitedLines.join("\n");
       let truncated = limitedLines.length < allLines.length;
-      const buf = Buffer.from(content, "utf8");
-      if (buf.length > ATLAS_EXACT_PREFETCH_MAX_BYTES) {
-        content = buf.subarray(0, ATLAS_EXACT_PREFETCH_MAX_BYTES).toString("utf8");
-        truncated = true;
-      }
+      const capped = _truncateUtf8AtLineBoundary(content, ATLAS_EXACT_PREFETCH_MAX_BYTES);
+      content = capped.content;
+      if (capped.truncated) truncated = true;
+      const bytes = Buffer.byteLength(content, "utf8");
+      const returnedLines = _countReturnedLines(content, limitedLines.length);
       return {
         file,
         ok: true,
         kind: "read_file",
         content,
-        bytes: totalBytes,
+        bytes,
         totalBytes,
         totalLines: allLines.length,
-        returnedLines: limitedLines.length,
+        returnedLines,
         truncated,
       };
     } catch (err) {
@@ -1035,6 +1077,11 @@ async function _prefetchExactScopedFiles(filePaths, {
       error: "required ATLAS exact-file tool is not routed to this role",
     };
   }));
+}
+
+export async function __testPrefetchExactScopedFiles(filePaths, opts = {}) {
+  assertTestContext("__testPrefetchExactScopedFiles");
+  return await _prefetchExactScopedFiles(filePaths, opts);
 }
 
 export function atlasSliceSkeletonPrefetchLimit(recipient) {

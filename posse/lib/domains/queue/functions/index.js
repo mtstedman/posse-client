@@ -1245,6 +1245,7 @@ export function requeueOrphanedJobs({ force = false } = {}) {
   const assessOnlyIds = orphaned
     .filter((row) => row.job_type !== "atlas_warm" && row.status === "awaiting_assessment")
     .map((row) => row.id);
+  const requeuedAssessOnlyIds = [];
   const chunkSize = 200;
   const chunked = (values, fn) => {
     for (let i = 0; i < values.length; i += chunkSize) {
@@ -1297,10 +1298,21 @@ export function requeueOrphanedJobs({ force = false } = {}) {
           AND status IN (${ACTIVE_LEASE_STATUSES_SQL})
       `).run(ts, ts, ...ids);
       requeuedCount += res?.changes || 0;
+      if ((res?.changes || 0) > 0) {
+        const changedRows = db.prepare(`
+          SELECT id
+          FROM jobs
+          WHERE id IN (${placeholders})
+            AND status = 'queued'
+        `).all(...ids);
+        for (const row of changedRows) {
+          if (assessOnlyIds.includes(row.id)) requeuedAssessOnlyIds.push(row.id);
+        }
+      }
     });
 
-    if (assessOnlyIds.length > 0) {
-      chunked(assessOnlyIds, (ids) => {
+    if (requeuedAssessOnlyIds.length > 0) {
+      chunked(requeuedAssessOnlyIds, (ids) => {
         const placeholders = ids.map(() => "?").join(",");
         db.prepare(`
           UPDATE jobs

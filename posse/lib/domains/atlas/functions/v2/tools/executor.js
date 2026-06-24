@@ -10,7 +10,7 @@ import { AtlasToolExecutor } from "../../../classes/v2/AtlasToolExecutor.js";
 let sharedExecutor = null;
 
 export function getSharedAtlasToolExecutor() {
-  if (!sharedExecutor) sharedExecutor = new AtlasToolExecutor();
+  if (!sharedExecutor) sharedExecutor = new AtlasToolExecutor({ dispatchCache: true });
   return sharedExecutor;
 }
 
