@@ -51,6 +51,7 @@ import { languageTagForExtension } from "../../functions/v2/language-tag.js";
 import { isMergeAlreadyReflected } from "../../functions/v2/merge-reflection.js";
 import {
   recordStaleEmbeddingHash,
+  staleEmbeddingHashes,
   pruneStaleEmbeddingHashes,
   pruneEmbeddingIndexToCurrentView,
 } from "../../functions/v2/embeddings/stale-tracking.js";
@@ -88,6 +89,16 @@ export { shouldRunMlTreeCompressionReseed };
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmJobResult} AtlasWarmJobResult */
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmPurpose} AtlasWarmPurpose */
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmSkip} AtlasWarmSkip */
+/** @typedef {import("../../functions/v2/contracts/api.js").ViewSymbol} ViewSymbol */
+
+/**
+ * @typedef {Object} EmbeddingIngestScope
+ * @property {"incremental"} kind
+ * @property {number} previousLedgerSeq
+ * @property {number} nextLedgerSeq
+ * @property {string[]} touchedPaths
+ * @property {ViewSymbol[]} onlySymbols
+ */
 /** @typedef {import("../../functions/v2/contracts/schemas.js").LedgerEntry} LedgerEntry */
 /** @typedef {import("../../functions/v2/contracts/schemas.js").ParseResult} ParseResult */
 /** @typedef {import("../../functions/v2/contracts/api.js").ParserAdapter} ParserAdapter */
@@ -258,7 +269,7 @@ export class ParseEngine {
   #deferEmbeddings;
   /** @type {AbortSignal | null} */
   #signal;
-  /** @type {Array<{ viewPath: string, base: AtlasWarmJobResult }>} */
+  /** @type {Array<{ viewPath: string, base: AtlasWarmJobResult, embeddingScope?: EmbeddingIngestScope | null, run?: () => Promise<void> }>} */
   #pendingEmbeddingIngests = [];
 
   /**
@@ -1619,10 +1630,19 @@ export class ParseEngine {
           view = null;
           return { fallback: true, result: base };
         }
-        const entries = this.#ledger.tail(branch, meta.ledger_seq);
+        const previousLedgerSeq = Number.isInteger(meta.ledger_seq) ? meta.ledger_seq : 0;
+        const entries = this.#ledger.tail(branch, previousLedgerSeq);
+        /** @type {EmbeddingIngestScope | null} */
+        let embeddingScope = null;
         if (entries.length === 0) {
           base.view_written = outPath;
           base.view_etag = meta.built_at;
+          embeddingScope = this.#embeddingScopeForEntries({
+            view,
+            entries,
+            previousLedgerSeq,
+            nextLedgerSeq: previousLedgerSeq,
+          });
         } else {
           await this.#emitStage("view", `applying ${entries.length} ledger entr${entries.length === 1 ? "y" : "ies"}`, {
             percent: 0,
@@ -1665,6 +1685,12 @@ export class ParseEngine {
           }
           base.view_written = outPath;
           base.view_etag = updated.built_at;
+          embeddingScope = this.#embeddingScopeForEntries({
+            view,
+            entries,
+            previousLedgerSeq,
+            nextLedgerSeq: updated.ledger_seq,
+          });
         }
         try { view.close(); } catch { /* ignore */ }
         view = null;
@@ -1674,7 +1700,7 @@ export class ParseEngine {
           progress_total: 1,
         });
         await this.#emitStage("embeddings", `checking embeddings for ${path.basename(outPath)}`);
-        await this.#maybeIngestEmbeddings({ viewPath: outPath, base, purpose: payload.purpose });
+        await this.#maybeIngestEmbeddings({ viewPath: outPath, base, purpose: payload.purpose, embeddingScope });
         await this.#maybeReseedTreeCompression({ viewPath: outPath, base, purpose: payload.purpose, triggerEvent: payload?.trigger_event ?? null });
         return { fallback: false, result: base };
       } catch (err) {
@@ -2122,10 +2148,50 @@ export class ParseEngine {
   }
 
   /**
-   * @param {{ viewPath: string, base: AtlasWarmJobResult, purpose: AtlasWarmPurpose }} args
+   * Build the symbol subset that changed between two ledger positions. The
+   * caller has already applied the entries to `view`, so removed paths simply
+   * produce no symbols here and are handled by stale-hash pruning.
+   *
+   * @param {{ view: View, entries: any[], previousLedgerSeq: number, nextLedgerSeq: number }} args
+   * @returns {EmbeddingIngestScope}
+   */
+  #embeddingScopeForEntries({ view, entries, previousLedgerSeq, nextLedgerSeq }) {
+    /** @type {Map<string, string | null>} */
+    const latestAfterByPath = new Map();
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      const repoRelPath = String(entry?.repo_rel_path || "").trim();
+      if (!isCanonicalRepoPath(repoRelPath)) continue;
+      latestAfterByPath.set(repoRelPath, entry?.after_content_hash ? String(entry.after_content_hash) : null);
+    }
+
+    /** @type {ViewSymbol[]} */
+    const onlySymbols = [];
+    const seen = new Set();
+    for (const [repoRelPath, contentHash] of latestAfterByPath.entries()) {
+      if (!contentHash) continue;
+      const symbols = view.query.symbolsInFile(repoRelPath)
+        .filter((symbol) => symbol.content_hash === contentHash);
+      for (const symbol of symbols) {
+        const key = `${symbol.content_hash}\0${symbol.local_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        onlySymbols.push(symbol);
+      }
+    }
+    return {
+      kind: "incremental",
+      previousLedgerSeq,
+      nextLedgerSeq,
+      touchedPaths: [...latestAfterByPath.keys()],
+      onlySymbols,
+    };
+  }
+
+  /**
+   * @param {{ viewPath: string, base: AtlasWarmJobResult, purpose: AtlasWarmPurpose, embeddingScope?: EmbeddingIngestScope | null }} args
    * @returns {Promise<void>}
    */
-  async #maybeIngestEmbeddings({ viewPath, base, purpose }) {
+  async #maybeIngestEmbeddings({ viewPath, base, purpose, embeddingScope = null }) {
     const rawMode = String(
       /** @type {any} */ (this.#runtimeConfig)?.wiEmbeddings
         || /** @type {any} */ (this.#runtimeConfig)?.atlasWiEmbeddings
@@ -2147,10 +2213,10 @@ export class ParseEngine {
         base.embeddings_deferred = true;
         base.embeddings_complete = false;
         base.embeddings_skipped_reason = "deferred";
-        this.#pendingEmbeddingIngests.push({ viewPath, base });
+        this.#pendingEmbeddingIngests.push({ viewPath, base, embeddingScope });
         return;
       }
-      await this.#ingestEmbeddingsForView({ viewPath, base });
+      await this.#ingestEmbeddingsForView({ viewPath, base, embeddingScope });
       return;
     }
     if (purpose === "wi") {
@@ -2359,15 +2425,96 @@ export class ParseEngine {
   }
 
   /**
+   * @param {string} viewPath
+   * @returns {string}
+   */
+  #embeddingWatermarkKey(viewPath) {
+    return `view:${sha256Hex(path.resolve(viewPath))}`;
+  }
+
+  /**
+   * @param {{ index: any, viewPath: string, embeddingScope?: EmbeddingIngestScope | null }} args
+   * @returns {Promise<{ mode: "incremental" | "full", key: string, reason: string, watermark: Record<string, any> | null }>}
+   */
+  async #embeddingScopeDecision({ index, viewPath, embeddingScope = null }) {
+    const key = this.#embeddingWatermarkKey(viewPath);
+    if (!embeddingScope || embeddingScope.kind !== "incremental") {
+      return { mode: "full", key, reason: "scope_unavailable", watermark: null };
+    }
+    if (typeof index?.getEmbeddingWatermark !== "function" || typeof index?.setEmbeddingWatermark !== "function") {
+      return { mode: "full", key, reason: "watermark_unavailable", watermark: null };
+    }
+    try {
+      const watermark = await index.getEmbeddingWatermark(key);
+      if (Number(watermark?.ledger_seq) === embeddingScope.previousLedgerSeq) {
+        return { mode: "incremental", key, reason: "watermark_match", watermark: watermark || null };
+      }
+      return {
+        mode: "full",
+        key,
+        reason: watermark ? "watermark_mismatch" : "watermark_missing",
+        watermark: watermark || null,
+      };
+    } catch (err) {
+      recordEmbeddingForensics("warmer.embeddings.watermark.read_error", {
+        view_path: viewPath,
+        key,
+        error: errorForTelemetry(err),
+      });
+      return { mode: "full", key, reason: "watermark_read_error", watermark: null };
+    }
+  }
+
+  /**
+   * @param {{ index: any, view: View, viewPath: string, key: string }} args
+   * @returns {Promise<void>}
+   */
+  async #writeEmbeddingWatermark({ index, view, viewPath, key }) {
+    if (typeof index?.setEmbeddingWatermark !== "function") return;
+    try {
+      const meta = view.meta();
+      await index.setEmbeddingWatermark(key, {
+        view_path: path.resolve(viewPath),
+        branch: meta.branch,
+        ledger_seq: Number.isInteger(meta.ledger_seq) ? meta.ledger_seq : 0,
+        view_built_at: meta.built_at ?? null,
+        updated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      recordEmbeddingForensics("warmer.embeddings.watermark.write_error", {
+        view_path: viewPath,
+        key,
+        error: errorForTelemetry(err),
+      });
+    }
+  }
+
+  /**
+   * @param {{ view: View, base: AtlasWarmJobResult }} args
+   * @returns {string[]}
+   */
+  #staleHashesSafeToPrune({ view, base }) {
+    const hasContentHash = /** @type {any} */ (view.query).hasContentHash;
+    if (typeof hasContentHash !== "function") return [];
+    return staleEmbeddingHashes(base).filter((hash) => {
+      try {
+        return !hasContentHash.call(view.query, hash);
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /**
    * Best-effort semantic index refresh. A failed encoder/API/native ANN
    * dependency must never make the warm job fail; the view is still the
    * primary cache. Operators get a structured error in result_json and,
    * under verbose logging, a one-line warning.
    *
-   * @param {{ viewPath: string, base: AtlasWarmJobResult }} args
+   * @param {{ viewPath: string, base: AtlasWarmJobResult, embeddingScope?: EmbeddingIngestScope | null }} args
    * @returns {Promise<void>}
    */
-  async #ingestEmbeddingsForView({ viewPath, base }) {
+  async #ingestEmbeddingsForView({ viewPath, base, embeddingScope = null }) {
     await this.#emitStage("embeddings", `opening embedding resources for ${path.basename(viewPath)}`);
     recordEmbeddingForensics("warmer.embeddings.start", {
       view_path: viewPath,
@@ -2404,11 +2551,26 @@ export class ParseEngine {
       await this.#emitStage("embeddings", `encoding symbols for ${path.basename(viewPath)}`);
       view = View.mount({ dbPath: viewPath, mode: "readonly" });
       await this.#reconcileInterruptedEmbeddings({ view, resources, base, viewPath });
+      const scopeDecision = await this.#embeddingScopeDecision({
+        index: resources.index,
+        viewPath,
+        embeddingScope,
+      });
+      const useIncrementalScope = scopeDecision.mode === "incremental";
+      /** @type {any} */ (base).embeddings_scope = useIncrementalScope ? "incremental" : "full";
+      /** @type {any} */ (base).embeddings_watermark_reason = scopeDecision.reason;
+      if (useIncrementalScope) {
+        /** @type {any} */ (base).embeddings_touched_paths = embeddingScope?.touchedPaths?.length ?? 0;
+      }
       const report = await ingestView({
         view,
         index: /** @type {any} */ (resources.index),
         encoder: /** @type {any} */ (resources.encoder),
         repoRoot: this.#repoRoot,
+        onlySymbols: useIncrementalScope ? embeddingScope?.onlySymbols || [] : undefined,
+        limit: useIncrementalScope
+          ? Math.max(1, Number(embeddingScope?.onlySymbols?.length || 0))
+          : undefined,
         embeddingThreads: /** @type {any} */ (this.#runtimeConfig)?.embeddingThreads
           ?? /** @type {any} */ (this.#runtimeConfig)?.atlasEmbeddingThreads
           ?? /** @type {any} */ (this.#runtimeConfig)?.atlas_embedding_threads
@@ -2487,15 +2649,36 @@ export class ParseEngine {
       base.embeddings_indexed = report.indexed;
       /** @type {any} */ (base).embeddings_skipped_unsupported_language = report.skippedUnsupportedLanguage || 0;
       /** @type {any} */ (base).embeddings_already_indexed = report.alreadyIndexed || 0;
-      await pruneStaleEmbeddingHashes({ base, index: resources.index });
+      await pruneStaleEmbeddingHashes({
+        base,
+        index: resources.index,
+        hashes: useIncrementalScope ? this.#staleHashesSafeToPrune({ view, base }) : null,
+      });
       recordEmbeddingForensics("warmer.embeddings.prune_stale_hashes.done", {
         view_path: viewPath,
+        scope: useIncrementalScope ? "incremental" : "full",
         base,
       });
-      await pruneEmbeddingIndexToCurrentView({ base, view, index: resources.index });
-      recordEmbeddingForensics("warmer.embeddings.prune_to_view.done", {
-        view_path: viewPath,
-        base,
+      if (useIncrementalScope) {
+        /** @type {any} */ (base).embeddings_prune_scope = "incremental";
+        recordEmbeddingForensics("warmer.embeddings.prune_to_view.skipped", {
+          view_path: viewPath,
+          reason: "incremental_scope",
+          base,
+        });
+      } else {
+        await pruneEmbeddingIndexToCurrentView({ base, view, index: resources.index });
+        /** @type {any} */ (base).embeddings_prune_scope = "full";
+        recordEmbeddingForensics("warmer.embeddings.prune_to_view.done", {
+          view_path: viewPath,
+          base,
+        });
+      }
+      await this.#writeEmbeddingWatermark({
+        index: resources.index,
+        view,
+        viewPath,
+        key: scopeDecision.key,
       });
       const cleanup = cleanupStaleEmbeddingDirs({
         repoRoot: this.#repoRoot,

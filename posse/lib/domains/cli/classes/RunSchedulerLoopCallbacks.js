@@ -1,4 +1,6 @@
 import { displayRoleForJobType } from "../../providers/functions/roles.js";
+import { parseJobPayload } from "../../queue/functions/payload.js";
+import { createRunWrapUpTracker } from "../functions/review-session.js";
 
 export class RunSchedulerLoopCallbacks {
   constructor({
@@ -21,6 +23,7 @@ export class RunSchedulerLoopCallbacks {
     this.describePendingReviewLockBlockers = describePendingReviewLockBlockers;
     this.lastPendingReviewBlockerMsg = null;
     this.pendingReviewAutoMergeAttempts = new Set();
+    this.backgroundWrapUp = null;
   }
 
   callbacks() {
@@ -29,6 +32,7 @@ export class RunSchedulerLoopCallbacks {
       onJobEnd: (job) => this.onJobEnd(job),
       onIdle: (activeJobs) => this.onIdle(activeJobs),
       onDone: () => this.onDone(),
+      onBackgroundOnly: (state) => this.onBackgroundOnly(state),
       onSlotStatus: (status) => this.onSlotStatus(status),
       onKillJob: (jobId, reason) => this.worker.killJob(jobId, reason),
     };
@@ -150,6 +154,53 @@ export class RunSchedulerLoopCallbacks {
     const msg = "All jobs complete.";
     if (display) display.addEvent(`${this.C.green}${this.C.bold}${msg}${this.C.reset}`);
     else console.log(`\n  ${this.C.green}${this.C.bold}${msg}${this.C.reset}`);
+  }
+
+  onBackgroundOnly({ activeJobs = [], queuedJobs = [] } = {}) {
+    const display = this.getDisplay();
+    if (!display) return;
+    if (!this.backgroundWrapUp) {
+      this.backgroundWrapUp = createRunWrapUpTracker(display, {
+        subtitle: "All visible jobs are done. Finishing ATLAS background work; Enter leaves remaining ATLAS/ONNX work queued.",
+      });
+      this.backgroundWrapUp.done("agents");
+      this.backgroundWrapUp.done("iterate");
+      this.backgroundWrapUp.done("target");
+      this.backgroundWrapUp.done("auto-merge", "visible jobs drained");
+    }
+
+    const byPurpose = new Map();
+    for (const job of [...activeJobs, ...queuedJobs]) {
+      const purpose = String(parseJobPayload(job)?.purpose || "wi");
+      if (!byPurpose.has(purpose)) byPurpose.set(purpose, { active: 0, queued: 0 });
+      const bucket = byPurpose.get(purpose);
+      if (activeJobs.some((active) => Number(active?.id) === Number(job?.id))) bucket.active++;
+      else bucket.queued++;
+    }
+    const activeCount = activeJobs.length;
+    const queuedCount = queuedJobs.length;
+    const detail = activeCount > 0
+      ? `${activeCount} running${queuedCount > 0 ? `, ${queuedCount} queued` : ""}`
+      : `${queuedCount} queued for next run`;
+    const embeddings = byPurpose.get("embeddings") || { active: 0, queued: 0 };
+    const nonEmbeddingActive = activeJobs.length - embeddings.active;
+    const nonEmbeddingQueued = queuedJobs.length - embeddings.queued;
+
+    if (nonEmbeddingActive > 0) this.backgroundWrapUp.start("atlas", detail);
+    else if (nonEmbeddingQueued > 0) this.backgroundWrapUp.skip("atlas", `${nonEmbeddingQueued} queued for next run`);
+    else this.backgroundWrapUp.done("atlas");
+
+    if (embeddings.active > 0) this.backgroundWrapUp.start("onnx", `${embeddings.active} running${embeddings.queued > 0 ? `, ${embeddings.queued} queued` : ""}`);
+    else if (embeddings.queued > 0) this.backgroundWrapUp.skip("onnx", `${embeddings.queued} queued for next run`);
+    else this.backgroundWrapUp.done("onnx");
+
+    if (display.isWrapUpEarlyExitRequested?.() === true) {
+      for (const job of activeJobs) {
+        try { this.worker.killJob(job.id, "shutdown"); } catch { /* best effort */ }
+      }
+      this.backgroundWrapUp.skip("atlas", "queued for next run");
+      this.backgroundWrapUp.skip("onnx", "queued for next run");
+    }
   }
 
   onSlotStatus({ blockedByLock, blockedLockDetails = [] }) {

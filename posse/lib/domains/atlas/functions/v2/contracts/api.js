@@ -260,6 +260,9 @@
  *   `"<content_hash>:<local_id>"` — use this to resolve back to a
  *   ViewSymbol regardless of which view was queried last.
  *
+ * @property {(content_hash: string) => boolean} [hasContentHash]
+ *   Fast liveness check for a source blob represented in the current view.
+ *
  * @property {(opts?: { limit?: number, pathPrefix?: string }) => ViewSymbol[]} allSymbols
  *   Enumerate every symbol in the view. Used by stats, overview, and
  *   delta computation where FTS-based search cannot guarantee full

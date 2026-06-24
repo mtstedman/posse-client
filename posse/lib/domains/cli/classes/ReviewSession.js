@@ -9,6 +9,7 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { FAILED_JOB_STATUSES } from "../../../catalog/job.js";
 import {
   askSingleKeyChoice,
+  createRunWrapUpTracker,
   createTuiWrapUpTracker,
 } from "../functions/review-session.js";
 
@@ -1730,25 +1731,7 @@ export class ReviewSession {
       updateJobPayload,
     } = this;
 
-  const wrapUp = createTuiWrapUpTracker(display, {
-    title: "Run wrap-up",
-    subtitle: "Closing the run. Merge state is finished here; ATLAS/ONNX catch-up can be left queued.",
-    layout: "screen",
-    allowEarlyExit: true,
-    steps: [
-      { id: "agents", label: "Settle agent call state" },
-      { id: "iterate", label: "Process iterative follow-ups" },
-      { id: "target", label: "Check target branch" },
-      { id: "auto-merge", label: "Auto-merge completed work items" },
-      { id: "merge", label: "Merge status" },
-      { id: "atlas", label: "ATLAS replay and main view" },
-      { id: "tree", label: "ATLAS tree work" },
-      { id: "onnx", label: "ONNX vector catch-up" },
-      { id: "cleanup", label: "Branch and worktree cleanup" },
-      { id: "review-data", label: "Check manual review items" },
-      { id: "review-report", label: "Build review reports" },
-    ],
-  });
+  const wrapUp = createRunWrapUpTracker(display);
 
   // Clean up any agent calls left in 'running' state from killed/crashed workers
   await wrapUp.run("agents", () => cleanupRunningAgentCalls());

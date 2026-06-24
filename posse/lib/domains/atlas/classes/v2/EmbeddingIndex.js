@@ -147,6 +147,16 @@ function pathsFor(modelDir) {
 }
 
 /**
+ * @param {string} key
+ * @returns {string}
+ */
+function embeddingWatermarkMetaKey(key) {
+  const value = String(key || "").trim();
+  if (!value) throw new TypeError("EmbeddingIndex watermark key is required");
+  return `embedding_watermark:${value}`;
+}
+
+/**
  * @param {number} dim
  */
 function newNativeIndex(dim) {
@@ -572,6 +582,37 @@ export class EmbeddingIndex {
    */
   getLastAddTiming() {
     return this.#lastAddTiming ? { ...this.#lastAddTiming } : null;
+  }
+
+  /**
+   * @param {string} key
+   * @returns {Record<string, any> | null}
+   */
+  getEmbeddingWatermark(key) {
+    const metaKey = embeddingWatermarkMetaKey(key);
+    const row = /** @type {{ value: string | null } | undefined} */ (
+      this.#db.prepare("SELECT value FROM meta WHERE key = ?").get(metaKey)
+    );
+    if (!row?.value) return null;
+    try {
+      const parsed = JSON.parse(row.value);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * @param {string} key
+   * @param {Record<string, any>} watermark
+   * @returns {void}
+   */
+  setEmbeddingWatermark(key, watermark) {
+    const metaKey = embeddingWatermarkMetaKey(key);
+    const payload = watermark && typeof watermark === "object" ? { ...watermark } : {};
+    this.#db.prepare(
+      "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    ).run(metaKey, JSON.stringify(payload));
   }
 
   /**

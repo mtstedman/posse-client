@@ -30,6 +30,8 @@ const ANN_SAFE_OPS = new Set([
   "contains",
   "containsMany",
   "getLastAddTiming",
+  "getEmbeddingWatermark",
+  "setEmbeddingWatermark",
   "markEncoding",
   "clearEncoding",
   "readInflight",
@@ -583,6 +585,28 @@ export class ChildEmbeddingIndex {
   }
 
   /**
+   * @param {string} key
+   * @returns {Promise<Record<string, any> | null>}
+   */
+  getEmbeddingWatermark(key) {
+    return this.#guarded(this.#request("getEmbeddingWatermark", { key: String(key || "") }).then((value) => value ?? null));
+  }
+
+  /**
+   * @param {string} key
+   * @param {Record<string, any>} watermark
+   * @returns {Promise<void>}
+   */
+  setEmbeddingWatermark(key, watermark) {
+    return this.#guarded(
+      this.#request("setEmbeddingWatermark", {
+        key: String(key || ""),
+        watermark: watermark && typeof watermark === "object" ? watermark : {},
+      }).then(() => undefined),
+    );
+  }
+
+  /**
    * @param {Float32Array} vector
    * @param {EmbeddingSearchOptions} [opts]
    * @returns {Promise<EmbeddingHit[]>}
@@ -698,6 +722,12 @@ function summarizeChildArgs(op, args = {}) {
       keys: keys.length,
       first: keyIdentity(keys[0]),
       last: keyIdentity(keys[keys.length - 1]),
+    };
+  }
+  if (op === "getEmbeddingWatermark" || op === "setEmbeddingWatermark") {
+    return {
+      key: String(args?.key || "").slice(0, 80),
+      ledger_seq: Number.isInteger(args?.watermark?.ledger_seq) ? args.watermark.ledger_seq : null,
     };
   }
   if (op === "removeByContentHash") {

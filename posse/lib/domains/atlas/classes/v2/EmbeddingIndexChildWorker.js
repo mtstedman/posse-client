@@ -127,6 +127,18 @@ async function handle(op, args = {}) {
       if (!index) throw new Error("EmbeddingIndex child: not initialized");
       return index.getLastAddTiming?.() || null;
     }
+    case "getEmbeddingWatermark": {
+      if (!index) throw new Error("EmbeddingIndex child: not initialized");
+      return index.getEmbeddingWatermark?.(String(args.key || "")) || null;
+    }
+    case "setEmbeddingWatermark": {
+      if (!index) throw new Error("EmbeddingIndex child: not initialized");
+      index.setEmbeddingWatermark?.(
+        String(args.key || ""),
+        args.watermark && typeof args.watermark === "object" ? args.watermark : {},
+      );
+      return true;
+    }
     case "markEncoding": {
       if (!index) throw new Error("EmbeddingIndex child: not initialized");
       index.markEncoding(Array.isArray(args.keys) ? args.keys : [], args.meta || {});
@@ -222,6 +234,12 @@ function summarizeArgs(op, args = {}) {
   }
   if (op === "removeByContentHash") {
     return { content_hashes: Array.isArray(args?.content_hashes) ? args.content_hashes.length : 0 };
+  }
+  if (op === "getEmbeddingWatermark" || op === "setEmbeddingWatermark") {
+    return {
+      key: String(args?.key || "").slice(0, 80),
+      ledger_seq: Number.isInteger(args?.watermark?.ledger_seq) ? args.watermark.ledger_seq : null,
+    };
   }
   if (op === "nearest") {
     return { vector_dim: Number.isInteger(args?.vector?.length) ? args.vector.length : null };

@@ -97,6 +97,12 @@
  *   Optional diagnostic metadata for the most recent add call. Used only for
  *   boot/intake telemetry.
  *
+ * @property {(key: string) => Record<string, any> | null | Promise<Record<string, any> | null>} [getEmbeddingWatermark]
+ *   Optional per-view parity watermark stored with the embedding sidecar.
+ *
+ * @property {(key: string, watermark: Record<string, any>) => void | Promise<void>} [setEmbeddingWatermark]
+ *   Persist a per-view parity watermark after successful ingest/prune.
+ *
  * @property {(keys: Array<{ content_hash: string, local_id: number }>) => number | Promise<number>} [pruneToKeys]
  *   Drop rows not present in the supplied current-view key set. Used after a
  *   successful warm to self-heal orphan rows left by interrupted or rebuilt

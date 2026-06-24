@@ -31,13 +31,14 @@ export function staleEmbeddingHashes(base) {
 }
 
 /**
- * @param {{ base: AtlasWarmJobResult, index: any }} args
+ * @param {{ base: AtlasWarmJobResult, index: any, hashes?: string[] | null }} args
  * @returns {Promise<void>}
  */
-export async function pruneStaleEmbeddingHashes({ base, index }) {
-  const hashes = staleEmbeddingHashes(base);
-  if (hashes.length === 0 || typeof index?.removeByContentHash !== "function") return;
-  const removed = await index.removeByContentHash(hashes);
+export async function pruneStaleEmbeddingHashes({ base, index, hashes = null }) {
+  const candidates = Array.isArray(hashes) ? hashes : staleEmbeddingHashes(base);
+  const unique = [...new Set(candidates.map((v) => String(v || "").trim()).filter(Boolean))];
+  if (unique.length === 0 || typeof index?.removeByContentHash !== "function") return;
+  const removed = await index.removeByContentHash(unique);
   if (Number.isFinite(Number(removed)) && Number(removed) > 0) {
     /** @type {any} */ (base).embeddings_pruned = Number(removed);
   }

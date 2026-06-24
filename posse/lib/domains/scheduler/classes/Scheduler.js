@@ -143,6 +143,11 @@ function runSchedulerBootMaintenanceInWorker() {
 const ATLAS_INDEXING_HOLD_MAX_MS = 30 * 1000;
 const ATLAS_INDEXING_PAUSE_OFF_VALUES = new Set(["off", "false", "0", "no"]);
 const ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES = new Set(["atlas_warm", "human_input"]);
+const RUN_BACKGROUND_JOB_TYPES = new Set(["atlas_warm"]);
+
+function isRunBackgroundJob(job) {
+  return RUN_BACKGROUND_JOB_TYPES.has(job?.job_type);
+}
 
 function atlasIndexingPauseEnabledFromEnv() {
   const raw = String(process.env.POSSE_SCHEDULER_PAUSE_ON_ATLAS_INDEXING ?? "").trim().toLowerCase();
@@ -1348,7 +1353,7 @@ export class Scheduler {
    * @param {function} workerCallback - async job executor
    * @param {object} opts
    */
-  async runLoop(workerCallback, { onIdle, onDone, onJobStart, onJobEnd, onSlotStatus, onKillJob } = {}) {
+  async runLoop(workerCallback, { onIdle, onDone, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob } = {}) {
     // boot() starts renewal immediately after lock acquisition so long
     // pre-loop hooks cannot let the scheduler lock expire.
     if (!this._running) {
@@ -1563,6 +1568,39 @@ export class Scheduler {
         });
 
         this._cancelDeadlockedJobs();
+
+        const trackedStatusesForCloseout = ["queued", ...LOCK_HOLDING_JOB_STATUSES];
+        const trackedJobsForCloseout = listJobs(trackedStatusesForCloseout);
+        const activeBackgroundJobs = [...activeWorkers.values()]
+          .map((entry) => entry.job)
+          .filter(isRunBackgroundJob);
+        const activeForegroundJobs = [...activeWorkers.values()]
+          .map((entry) => entry.job)
+          .filter((job) => !isRunBackgroundJob(job));
+        const foregroundTrackedJobs = trackedJobsForCloseout.filter((job) => !isRunBackgroundJob(job));
+        const backgroundTrackedJobs = trackedJobsForCloseout.filter(isRunBackgroundJob);
+        if (
+          activeForegroundJobs.length === 0
+          && foregroundTrackedJobs.length === 0
+          && (activeBackgroundJobs.length > 0 || backgroundTrackedJobs.length > 0)
+        ) {
+          this._invokeCallback("onBackgroundOnly", onBackgroundOnly, {
+            activeJobs: activeBackgroundJobs,
+            queuedJobs: backgroundTrackedJobs.filter((job) => job.status === "queued"),
+            trackedJobs: backgroundTrackedJobs,
+          });
+          if (activeBackgroundJobs.length === 0) {
+            this._invokeCallback("onDone", onDone);
+            break;
+          }
+          this._invokeCallback("onSlotStatus", onSlotStatus, {
+            idle: Math.max(0, this.concurrency - activeBackgroundJobs.length),
+            blockedByLock: 0,
+            blockedLockDetails: [{ message: "ATLAS background work is finishing" }],
+          });
+          await this._interruptibleSleep(this.pollMs, { requireRunning: true });
+          continue;
+        }
 
         const atlasDriftReindexFailsafeMs = this._atlasDriftReindexFailsafeMs
           || Math.max(15 * 60 * 1000, (this._atlasDriftCheckIntervalMs || readAtlasDriftCheckIntervalMs()) * 2);

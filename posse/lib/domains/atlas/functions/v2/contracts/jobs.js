@@ -77,6 +77,9 @@
  * @property {number} [embeddings_candidates] Symbols considered for vector ingest.
  * @property {number} [embeddings_indexed]    Symbols submitted to the embedding index.
  * @property {number} [embeddings_pruned]      Stale vector rows removed after modify/remove deltas.
+ * @property {"full" | "incremental"} [embeddings_scope] Symbol scope used for ride-along embedding ingest.
+ * @property {"full" | "incremental"} [embeddings_prune_scope] Orphan-prune mode used after ingest.
+ * @property {string} [embeddings_watermark_reason] Watermark decision behind full vs incremental ingest.
  * @property {number} [embeddings_stale_dirs_removed] Old embedding index directories removed.
  * @property {string} [embeddings_skipped_reason] Reason embeddings were intentionally skipped.
  * @property {string} [embeddings_error]      Best-effort ingest error; view warming still succeeds.

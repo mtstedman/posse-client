@@ -480,6 +480,12 @@ export class View {
        WHERE content_hash = ? AND local_id = ?
        LIMIT 1`,
     );
+    const stmtHasContentHash = db.prepare(
+      `SELECT 1 AS present
+       FROM symbols
+       WHERE content_hash = ?
+       LIMIT 1`,
+    );
     const stmtAllSymbols = db.prepare(
       `SELECT * FROM symbols ORDER BY global_id ASC LIMIT ?`,
     );
@@ -618,6 +624,11 @@ export class View {
       getByContentLocal: (content_hash, local_id) => {
         const row = /** @type {any} */ (stmtGetByContentLocal.get(content_hash, local_id));
         return row ? hydrateSymbol(row) : null;
+      },
+
+      hasContentHash: (content_hash) => {
+        if (typeof content_hash !== "string" || content_hash.length === 0) return false;
+        return !!stmtHasContentHash.get(content_hash);
       },
 
       allSymbols: (opts = {}) => {

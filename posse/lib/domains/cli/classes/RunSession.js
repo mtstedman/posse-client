@@ -39,6 +39,7 @@ import {
   checkPosseUpdateAvailability,
   formatPosseUpdateAvailableWarning,
 } from "../functions/update-command.js";
+import { createRunWrapUpTracker } from "../functions/review-session.js";
 
 export class RunSession {
   constructor(deps = {}) {
@@ -2157,7 +2158,16 @@ export class RunSession {
     });
   } catch { /* observational */ }
 
-  await idleAutoMerge.wait();
+  if (display && idleAutoMerge.isRunning()) {
+    const pendingAutoMergeWrapUp = createRunWrapUpTracker(display, {
+      subtitle: "All jobs are done. Finishing pending merge and ATLAS closeout; Enter leaves remaining ATLAS/ONNX work queued.",
+    });
+    pendingAutoMergeWrapUp.start("auto-merge", "finishing pending merge");
+    await idleAutoMerge.wait();
+    pendingAutoMergeWrapUp.done("auto-merge", "finished");
+  } else {
+    await idleAutoMerge.wait();
+  }
 
   // ── Post-scheduler: clean up worktrees if shutdown was triggered ──
   if (await shutdown.finishAfterScheduler({

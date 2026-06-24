@@ -149,6 +149,34 @@ export class AsyncEmbeddingIndex {
   }
 
   /**
+   * @param {string} key
+   * @returns {Promise<Record<string, any> | null>}
+   */
+  async getEmbeddingWatermark(key) {
+    const fn = /** @type {any} */ (this.#inner).getEmbeddingWatermark;
+    if (typeof fn !== "function") return null;
+    return await EMBEDDING_INDEX_GATE.read(
+      this.#gateKey,
+      () => fn.call(this.#inner, key) || null,
+      { label: `embedding.${this.backend}.getEmbeddingWatermark`, waitMs: this.#waitMs },
+    );
+  }
+
+  /**
+   * @param {string} key
+   * @param {Record<string, any>} watermark
+   * @returns {Promise<void>}
+   */
+  async setEmbeddingWatermark(key, watermark) {
+    const fn = /** @type {any} */ (this.#inner).setEmbeddingWatermark;
+    if (typeof fn !== "function") return;
+    await this.#write("setEmbeddingWatermark", () => fn.call(this.#inner, key, watermark), {
+      key,
+      ledger_seq: Number.isInteger(watermark?.ledger_seq) ? watermark.ledger_seq : null,
+    });
+  }
+
+  /**
    * @param {Float32Array} vector
    * @param {EmbeddingSearchOptions} [opts]
    * @returns {Promise<EmbeddingHit[]>}
