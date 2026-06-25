@@ -1,4 +1,5 @@
 import { normalizeResearchBudget } from "../../../shared/policies/functions/role-utils.js";
+import { slugify } from "../../../shared/format/functions/slug.js";
 
 const SIMPLE_NO_RESEARCH_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|rename|renaming|copy\s*edit|docs?\s+fix|formatting|whitespace)\b/i;
 const LOW_NO_LOGIC_RE = /\b(?:typo|spelling|comments?\s+fix|comment-only|rename|copy\s*edit|docs?|readme|formatting|whitespace|no\s+(?:logic|behavior|behaviour)\s+change)\b/i;
@@ -116,16 +117,20 @@ function vendorLabelFromDomain(domain) {
 
 function webBranch(label, scopeHints) {
   return {
-    label: String(label || "web").trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "web",
+    label: normalizeWebBranchLabel(label),
     kind: "web",
     scope_hints: unique(scopeHints.map((hint) => String(hint || "").trim()).filter(Boolean)).slice(0, 5),
   };
 }
 
+function normalizeWebBranchLabel(label) {
+  return slugify(label || "web", { fallback: "web", maxLength: 60 });
+}
+
 function extractWebBranches(text, intakeHints = {}) {
   const branches = [];
   const addBranch = (label, hints) => {
-    const normalizedLabel = String(label || "").trim().toLowerCase();
+    const normalizedLabel = normalizeWebBranchLabel(label);
     if (!normalizedLabel) return;
     const existing = branches.find((branch) => branch.label === normalizedLabel);
     if (existing) {

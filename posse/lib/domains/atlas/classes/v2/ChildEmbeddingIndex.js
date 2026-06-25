@@ -533,7 +533,12 @@ export class ChildEmbeddingIndex {
    * @returns {Promise<T>}
    */
   #guarded(promise) {
-    promise.catch(() => { /* abandoned-op close race — see #guarded */ });
+    promise.catch((err) => {
+      this.#log("child.guarded_rejection", {
+        error: err?.message || String(err),
+        code: /** @type {any} */ (err)?.code || null,
+      });
+    });
     return promise;
   }
 

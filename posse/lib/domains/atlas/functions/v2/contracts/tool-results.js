@@ -385,9 +385,29 @@
 
 /**
  * symbol.card returns a single SymbolCard. The envelope's `data` is
- * the card directly.
+ * the card directly, unless called with batch fields (`symbolIds` /
+ * `symbolRefs`), where it returns the same shape as symbol.cards.
  *
  * @typedef {SymbolCard} SymbolGetCardData
+ */
+
+/**
+ * @typedef {Object} SymbolCardError
+ * @property {number} index
+ * @property {string} code
+ * @property {string} message
+ * @property {string} [symbolId]
+ * @property {Record<string, unknown>} [symbolRef]
+ */
+
+/**
+ * @typedef {Object} SymbolCardsData
+ * @property {SymbolCard[]} cards
+ * @property {SymbolCardError[]} errors
+ * @property {number} total
+ * @property {number} okCount
+ * @property {number} errorCount
+ * @property {boolean} partial
  */
 
 /**
@@ -1094,7 +1114,8 @@
  *   | ToolResultEnvelope<BufferCheckpointData> & { action: "buffer.checkpoint" }
  *   | ToolResultEnvelope<BufferStatusData>     & { action: "buffer.status" }
  *   | ToolResultEnvelope<SymbolSearchData>     & { action: "symbol.search" }
- *   | ToolResultEnvelope<SymbolGetCardData>    & { action: "symbol.card" }
+ *   | ToolResultEnvelope<SymbolGetCardData | SymbolCardsData> & { action: "symbol.card" }
+ *   | ToolResultEnvelope<SymbolCardsData>      & { action: "symbol.cards" }
  *   | ToolResultEnvelope<SymbolUsagesData>     & { action: "symbol.overview" }
  *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.overview" }
  *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.branch" }

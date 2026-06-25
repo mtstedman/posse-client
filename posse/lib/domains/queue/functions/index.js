@@ -215,6 +215,7 @@ export {
   recordInitialSessionHandle,
   recordSessionRecycleSavings,
   releaseSessionHandle,
+  renewSessionHandleLease,
   sessionLeaseTtlSec,
 } from "./sessions.js";
 
@@ -1781,6 +1782,22 @@ export {
   getAgentCallById,
   getToolInvocationsForAgentCall,
 } from "./agent-calls.js";
+
+export {
+  acknowledgeOperatorFeedback,
+  answerAgentQuestion,
+  applyActiveAgentInteractionsForAttempt,
+  buildOperatorGuidanceForAttempt,
+  countPendingOperatorFeedbackForJob,
+  createAgentInteraction,
+  createAgentQuestion,
+  createOperatorNudge,
+  getOperatorFeedbackForJob,
+  hasPendingOperatorFeedbackForJob,
+  listActiveAgentGuidanceForJob,
+  listAgentInteractions,
+  recordAgentActivity,
+} from "./agent-interactions.js";
 
 
 // ═════════════════════════════════════════════════════════════════════════════

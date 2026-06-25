@@ -413,6 +413,85 @@ export const TOOL_EXTRACT_IMAGE_TEXT = {
   },
 };
 
+export const TOOL_AGENT_FEEDBACK = {
+  type: "function",
+  name: "agent_feedback",
+  description:
+    "Send a short operational update to the human operator for Monitor Agents. " +
+    "Use only for visible state: current phase, gear changes, blockers, verification transitions, or finalization status. " +
+    "Do not include hidden reasoning or private chain-of-thought.",
+  parameters: {
+    type: "object",
+    properties: {
+      phase: {
+        type: "string",
+        enum: ["reading", "planning", "editing", "testing", "verifying", "blocked", "finalizing", "handoff"],
+        description: "Current operational phase.",
+      },
+      status: {
+        type: "string",
+        enum: ["running", "blocked", "waiting", "verifying", "done"],
+        description: "Current visible status.",
+      },
+      summary: {
+        type: "string",
+        description: "One short operator-facing update, no hidden reasoning. Keep under 240 characters.",
+      },
+    },
+    required: ["phase", "summary"],
+    additionalProperties: false,
+  },
+};
+
+export const TOOL_GET_OPERATOR_FEEDBACK = {
+  type: "function",
+  name: "get_operator_feedback",
+  description:
+    "Retrieve pending live operator feedback for the current job after a tool result signals operator_feedback_available. " +
+    "This is the only channel that delivers operator nudge text; do not expect nudge text in the assembled prompt. " +
+    "Every returned item must be acknowledged with ack_operator_feedback before normal task work continues.",
+  parameters: {
+    type: "object",
+    properties: {
+      limit: {
+        type: "integer",
+        description: "Maximum feedback items to retrieve. Default: 20.",
+      },
+    },
+    required: [],
+    additionalProperties: false,
+  },
+};
+
+export const TOOL_ACK_OPERATOR_FEEDBACK = {
+  type: "function",
+  name: "ack_operator_feedback",
+  description:
+    "Acknowledge one retrieved operator feedback item. " +
+    "The default decision is accepted, so the usual case only needs interaction_id. " +
+    "Use rejected or deferred only when you cannot apply the feedback now; those decisions require a short reason.",
+  parameters: {
+    type: "object",
+    properties: {
+      interaction_id: {
+        type: "integer",
+        description: "The id returned by get_operator_feedback.",
+      },
+      decision: {
+        type: "string",
+        enum: ["accepted", "rejected", "deferred"],
+        description: "Acknowledgement decision. Defaults to accepted.",
+      },
+      reason: {
+        type: "string",
+        description: "Required for rejected or deferred; optional for accepted.",
+      },
+    },
+    required: ["interaction_id"],
+    additionalProperties: false,
+  },
+};
+
 export const TOOL_BASH = {
   type: "function",
   name: "bash",

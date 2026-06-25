@@ -31,6 +31,25 @@ import { attachNativeThreadBridge } from "./native-thread-bridge.js";
 
 const JSONL_BUFFER_MAX_CHARS = 16 * 1024 * 1024;
 
+function killProcessTree(proc, { force = true, platform = process.platform, spawnImpl = spawn } = {}) {
+  if (!proc || proc.exitCode != null || proc.killed) return false;
+  if (platform === "win32" && proc.pid) {
+    try {
+      const args = ["/pid", String(proc.pid), "/T"];
+      if (force) args.push("/F");
+      const killer = spawnImpl("taskkill", args, {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      killer.unref?.();
+      return true;
+    } catch {
+      // Fall through to child.kill best-effort.
+    }
+  }
+  try { return !!proc.kill(force ? "SIGKILL" : "SIGTERM"); } catch { return false; }
+}
+
 /**
  * @typedef {Object} Transport
  * @property {() => boolean} start
@@ -54,11 +73,13 @@ const JSONL_BUFFER_MAX_CHARS = 16 * 1024 * 1024;
  *   env?: () => NodeJS.ProcessEnv,
  *   spawnImpl?: typeof spawn,
  *   label?: string,
+ *   platform?: NodeJS.Platform,
  * }} opts
  * @returns {Transport}
  */
 export function ProcessTransport(opts) {
   const spawnImpl = opts.spawnImpl || spawn;
+  const platform = opts.platform || process.platform;
   /** @type {import("node:child_process").ChildProcess | null} */
   let proc = null;
   /** Last spawned child pid, for the process ledger (orphan reaping). */
@@ -141,7 +162,7 @@ export function ProcessTransport(opts) {
       proc = null;
       if (spawnedPid != null) { forgetDaemonSpawn(spawnedPid); spawnedPid = null; }
       try { p?.stdin?.end(); } catch { /* ignore */ }
-      try { p?.kill(); } catch { /* ignore */ }
+      killProcessTree(p, { force: true, platform, spawnImpl });
     },
     /**
      * Graceful stop. EOF on stdin is the stdio-host stop signal: the worker
@@ -161,9 +182,7 @@ export function ProcessTransport(opts) {
       spawnedPid = null;
       try { p.stdin?.end(); } catch { /* ignore */ }
       const timer = setTimeout(() => {
-        try {
-          if (p.exitCode == null && !p.killed) p.kill();
-        } catch { /* ignore */ }
+        killProcessTree(p, { force: true, platform, spawnImpl });
       }, Math.max(0, graceMs));
       // Never hold the loop open for a draining host.
       if (typeof timer.unref === "function") timer.unref();

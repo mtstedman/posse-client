@@ -89,6 +89,7 @@ export function cmdCalls({ tierModelName }) {
     acc.total_prompt_chars += row.total_prompt_chars || 0;
     acc.total_output_chars += row.total_output_chars || 0;
     acc.total_input_tokens += row.total_input_tokens || 0;
+    acc.total_cached_input_tokens += row.total_cached_input_tokens || 0;
     acc.total_output_tokens += row.total_output_tokens || 0;
     return acc;
   }, {
@@ -97,6 +98,7 @@ export function cmdCalls({ tierModelName }) {
     total_prompt_chars: 0,
     total_output_chars: 0,
     total_input_tokens: 0,
+    total_cached_input_tokens: 0,
     total_output_tokens: 0,
   });
 
@@ -119,10 +121,10 @@ export function cmdCalls({ tierModelName }) {
   console.log(`\n  ${C.bold}Agent Call Performance${C.reset}\n`);
 
   // Summary table
-  let totalCalls = 0, totalMs = 0, totalPrompt = 0, totalOutput = 0, totalInTok = 0, totalOutTok = 0;
+  let totalCalls = 0, totalMs = 0, totalPrompt = 0, totalOutput = 0, totalInTok = 0, totalCachedInTok = 0, totalOutTok = 0;
 
-  console.log(`  ${C.dim}${"Role".padEnd(12)} ${"Tier".padEnd(10)} ${"Calls".padStart(6)} ${"Succeeded".padStart(10)} ${"Failed".padStart(7)} ${"Total Time".padStart(11)} ${"Avg Time".padStart(9)} ${"Prompt KB".padStart(10)} ${"Output KB".padStart(10)} ${"In Tok".padStart(9)} ${"Out Tok".padStart(9)}${C.reset}`);
-  console.log(`  ${C.dim}${"─".repeat(113)}${C.reset}`);
+  console.log(`  ${C.dim}${"Role".padEnd(12)} ${"Tier".padEnd(10)} ${"Calls".padStart(6)} ${"Succeeded".padStart(10)} ${"Failed".padStart(7)} ${"Total Time".padStart(11)} ${"Avg Time".padStart(9)} ${"Prompt KB".padStart(10)} ${"Output KB".padStart(10)} ${"In Tok".padStart(9)} ${"Cached".padStart(9)} ${"Out Tok".padStart(9)}${C.reset}`);
+  console.log(`  ${C.dim}${"─".repeat(123)}${C.reset}`);
 
   for (const row of stats) {
     const color = roleBrandColor(row.role);
@@ -131,6 +133,7 @@ export function cmdCalls({ tierModelName }) {
     const promptKb = row.total_prompt_chars ? (row.total_prompt_chars / 1024).toFixed(1) : "0";
     const outputKb = row.total_output_chars ? (row.total_output_chars / 1024).toFixed(1) : "0";
     const inTok = row.total_input_tokens ? fmtTok(row.total_input_tokens) : "—";
+    const cachedTok = row.total_cached_input_tokens ? fmtTok(row.total_cached_input_tokens) : "—";
     const outTok = row.total_output_tokens ? fmtTok(row.total_output_tokens) : "—";
 
     console.log(
@@ -143,6 +146,7 @@ export function cmdCalls({ tierModelName }) {
       `${promptKb.padStart(10)} ` +
       `${outputKb.padStart(10)} ` +
       `${inTok.padStart(9)} ` +
+      `${cachedTok.padStart(9)} ` +
       `${outTok.padStart(9)}`
     );
 
@@ -151,10 +155,11 @@ export function cmdCalls({ tierModelName }) {
     totalPrompt += row.total_prompt_chars || 0;
     totalOutput += row.total_output_chars || 0;
     totalInTok += row.total_input_tokens || 0;
+    totalCachedInTok += row.total_cached_input_tokens || 0;
     totalOutTok += row.total_output_tokens || 0;
   }
 
-  console.log(`  ${C.dim}${"─".repeat(113)}${C.reset}`);
+  console.log(`  ${C.dim}${"─".repeat(123)}${C.reset}`);
   console.log(
     `  ${C.bold}${"TOTAL".padEnd(23)}${C.reset} ` +
     `${String(totalCalls).padStart(6)} ` +
@@ -164,6 +169,7 @@ export function cmdCalls({ tierModelName }) {
     `${(totalPrompt / 1024).toFixed(1).padStart(10)} ` +
     `${(totalOutput / 1024).toFixed(1).padStart(10)} ` +
     `${fmtTok(totalInTok).padStart(9)} ` +
+    `${fmtTok(totalCachedInTok).padStart(9)} ` +
     `${fmtTok(totalOutTok).padStart(9)}`
   );
 

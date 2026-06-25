@@ -721,19 +721,26 @@ export class PersistentMcpOwner {
     if (process.platform !== "win32") {
       try { fs.rmSync(this.pipePath, { force: true }); } catch { /* best effort */ }
     }
-    this._server = http.createServer((req, res) => {
+    const server = http.createServer((req, res) => {
       this._handleRequest(req, res).catch((err) => {
         const status = err?.message === "request_body_too_large" ? 413 : 500;
         sendJson(res, status, { ok: false, error: status === 500 ? "internal" : err.message });
       });
     });
-    this._server.on("error", (err) => {
+    this._server = server;
+    server.on("error", (err) => {
       this._listenError = err;
+      if (this._server === server) {
+        this._server = null;
+        this._startedAt = null;
+      }
+      try { server.close(); } catch { /* best effort */ }
     });
-    this._server.listen(this.pipePath, () => {
+    server.listen(this.pipePath, () => {
+      this._listenError = null;
       this._startedAt = Date.now();
     });
-    this._server.unref?.();
+    server.unref?.();
     return this.endpoint();
   }
 

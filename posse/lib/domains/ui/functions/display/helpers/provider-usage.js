@@ -18,7 +18,7 @@ import {
   brandRule,
   providerBrandColor,
 } from "./brand.js";
-import { estimateCallCost } from "../../../../billing/functions/pricing.js";
+import { estimateBillableInputTokens, estimateCallCost } from "../../../../billing/functions/pricing.js";
 import { EVENT_TYPES } from "../../../../../catalog/event.js";
 
 export const PROVIDER_USAGE_REFRESH_MS = 2 * 60 * 1000;
@@ -122,9 +122,24 @@ function _estimateRunCallCost(row) {
     inputTokens: row?.input_tokens,
     outputTokens: row?.output_tokens,
     cachedInputTokens: row?.cached_input_tokens,
+    cacheCreationInputTokens: row?.cache_creation_input_tokens,
     knownCostUsd: useKnownCost ? row?.cost_estimate_usd : null,
   });
   return Number.isFinite(est.costUsd) ? Math.max(0, est.costUsd) : 0;
+}
+
+function _estimateRunBillableInputTokens(row) {
+  const est = estimateBillableInputTokens({
+    provider: row?.provider,
+    modelName: row?.model_name,
+    modelTier: row?.model_tier,
+    inputTokens: row?.input_tokens,
+    cachedInputTokens: row?.cached_input_tokens,
+    cacheCreationInputTokens: row?.cache_creation_input_tokens,
+  });
+  return Number.isFinite(est.billableInputTokens)
+    ? Math.max(0, est.billableInputTokens)
+    : Math.max(0, Number(row?.input_tokens) || 0);
 }
 
 function _aggregateProviderUsageRows(rows = []) {
@@ -134,20 +149,28 @@ function _aggregateProviderUsageRows(rows = []) {
     if (!provider) continue;
     const inputTokens = Math.max(0, Number(row?.input_tokens) || 0);
     const outputTokens = Math.max(0, Number(row?.output_tokens) || 0);
+    const cachedInputTokens = Math.min(inputTokens, Math.max(0, Number(row?.cached_input_tokens) || 0));
+    const billableInputTokens = _estimateRunBillableInputTokens({ ...row, provider });
     const usedTokens = inputTokens + outputTokens;
     if (usedTokens <= 0) continue;
     const existing = byProvider.get(provider) || {
       provider,
       usedInputTokens: 0,
+      usedCachedInputTokens: 0,
+      usedBillableInputTokens: 0,
       usedOutputTokens: 0,
       usedTokens: 0,
+      usedBillableTokens: 0,
       costUsd: 0,
       callCount: 0,
       firstSeen: row?.created_at || null,
     };
     existing.usedInputTokens += inputTokens;
+    existing.usedCachedInputTokens += cachedInputTokens;
+    existing.usedBillableInputTokens += billableInputTokens;
     existing.usedOutputTokens += outputTokens;
     existing.usedTokens += usedTokens;
+    existing.usedBillableTokens += billableInputTokens + outputTokens;
     existing.costUsd += _estimateRunCallCost({ ...row, provider });
     existing.callCount += 1;
     if (!existing.firstSeen || (row?.created_at && row.created_at < existing.firstSeen)) {
@@ -186,6 +209,7 @@ export function getProviderUsageSince({ sinceIso = null, untilIso = null } = {})
         input_tokens,
         output_tokens,
         cached_input_tokens,
+        cache_creation_input_tokens,
         cost_estimate_usd,
         created_at
       FROM agent_calls
@@ -237,15 +261,24 @@ function _providerLabel(provider) {
 function _normalizeRunUsage(value) {
   if (!Array.isArray(value)) return [];
   return value
-    .map((entry) => ({
-      provider: String(entry?.provider || "").trim().toLowerCase(),
-      usedTokens: Number(entry?.usedTokens ?? entry?.tokens ?? 0) || 0,
-      usedInputTokens: Number(entry?.usedInputTokens ?? entry?.inputTokens ?? 0) || 0,
-      usedOutputTokens: Number(entry?.usedOutputTokens ?? entry?.outputTokens ?? 0) || 0,
-      costUsd: Number(entry?.costUsd ?? entry?.cost_usd ?? 0) || 0,
-      callCount: Number(entry?.callCount ?? entry?.call_count ?? 0) || 0,
-      firstSeen: entry?.firstSeen || null,
-    }))
+    .map((entry) => {
+      const usedInputTokens = Number(entry?.usedInputTokens ?? entry?.inputTokens ?? 0) || 0;
+      const usedOutputTokens = Number(entry?.usedOutputTokens ?? entry?.outputTokens ?? 0) || 0;
+      const usedBillableInputTokens = Number(entry?.usedBillableInputTokens ?? entry?.billableInputTokens ?? 0) || 0;
+      const usedBillableTokens = Number(entry?.usedBillableTokens ?? entry?.billableTokens ?? 0) || 0;
+      return {
+        provider: String(entry?.provider || "").trim().toLowerCase(),
+        usedTokens: Number(entry?.usedTokens ?? entry?.tokens ?? 0) || 0,
+        usedInputTokens,
+        usedCachedInputTokens: Number(entry?.usedCachedInputTokens ?? entry?.cachedInputTokens ?? 0) || 0,
+        usedBillableInputTokens,
+        usedOutputTokens,
+        usedBillableTokens: usedBillableTokens || (usedBillableInputTokens > 0 ? usedBillableInputTokens + usedOutputTokens : 0),
+        costUsd: Number(entry?.costUsd ?? entry?.cost_usd ?? 0) || 0,
+        callCount: Number(entry?.callCount ?? entry?.call_count ?? 0) || 0,
+        firstSeen: entry?.firstSeen || null,
+      };
+    })
     .filter((entry) => entry.provider && entry.usedTokens > 0);
 }
 
@@ -305,8 +338,11 @@ function _includeActiveProviderPlaceholders(runUsage, summariesByProvider, activ
       provider,
       usedTokens: 0,
       usedInputTokens: 0,
+      usedCachedInputTokens: 0,
+      usedBillableInputTokens: 0,
       usedOutputTokens: 0,
       costUsd: 0,
+      usedBillableTokens: 0,
       callCount: 0,
       firstSeen: null,
     });
@@ -384,10 +420,25 @@ export function _buildQueueProviderUsageLines(width, maxLines, summaries = [], o
     block.push(brandRule({ label: _providerLabel(usage.provider), color: brand, width: ruleWidth }));
 
     const tokens = _fmtTokens(usage.usedTokens);
+    const cachedInputTokens = Math.min(
+      Math.max(0, Number(usage.usedInputTokens) || 0),
+      Math.max(0, Number(usage.usedCachedInputTokens) || 0),
+    );
+    const billableTokens = Math.max(0, Number(usage.usedBillableTokens) || 0);
+    const rawTokens = Math.max(0, Number(usage.usedTokens) || 0);
+    const showBillable = billableTokens > 0
+      && Math.round(billableTokens) !== Math.round(rawTokens)
+      && width >= 72;
+    const cacheParts = [];
+    if (cachedInputTokens > 0) cacheParts.push(`${_fmtTokens(cachedInputTokens)} cached input`);
+    if (showBillable) cacheParts.push(`${_fmtTokens(billableTokens)} billable`);
+    const cacheSuffix = cacheParts.length > 0 && width >= 64
+      ? `  ${C.dim}(${cacheParts.join(", ")})${C.reset}`
+      : "";
     const costSuffix = usage.costUsd > 0
       ? `  ${C.dim}·${C.reset}  ${C.dim}${_fmtUsd(usage.costUsd)} ${_providerCostQualifier(usage.provider)}${C.reset}`
       : "";
-    block.push(fit(`   ${C.bold}${brand}${tokens}${C.reset} ${C.dim}tok${C.reset}${costSuffix}`, Math.max(1, width - 1)));
+    block.push(fit(`   ${C.bold}${brand}${tokens}${C.reset} ${C.dim}tok${C.reset}${cacheSuffix}${costSuffix}`, Math.max(1, width - 1)));
 
     if (usage.provider === "claude" || usage.provider === "codex") {
       let summary = summariesByProvider.get(usage.provider);

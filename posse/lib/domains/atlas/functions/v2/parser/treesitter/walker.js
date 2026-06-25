@@ -14,6 +14,13 @@ import { parserFor } from "./loader.js";
 import { createExtractor } from "../languages/common.js";
 import { logAtlasError } from "../../verbose-errors.js";
 
+// Narrow diagnostic rate-limit cache: a broken grammar/spec callback can throw
+// for thousands of same-shaped nodes in one file. Log a few samples per
+// lang/callback/node type, then stay quiet.
+const SPEC_CALLBACK_ERROR_LOG_LIMIT = 3;
+/** @type {Map<string, number>} */
+const specCallbackErrorCounts = new Map();
+
 /** @typedef {import("../../contracts/schemas.js").SymbolRow} SymbolRow */
 /** @typedef {import("../../contracts/schemas.js").EdgeRow} EdgeRow */
 /** @typedef {import("../../contracts/schemas.js").SymbolKind} SymbolKind */
@@ -176,7 +183,7 @@ export function extractWithTreeSitter(args) {
   /**
    * @param {TsNode} node
    */
-  const visit = (node) => {
+  const visitNode = (node) => {
     // Pop containers we have walked past.
     while (containerStack.length > 0 && node.startIndex >= containerStack[containerStack.length - 1].bodyEnd) {
       containerStack.pop();
@@ -185,7 +192,8 @@ export function extractWithTreeSitter(args) {
     let symMatch = null;
     try {
       symMatch = spec.symbolOf(node, source);
-    } catch {
+    } catch (err) {
+      logSpecCallbackError(spec, "symbolOf", node, err);
       symMatch = null;
     }
     /** @type {SymbolRow | null} */
@@ -246,7 +254,8 @@ export function extractWithTreeSitter(args) {
       let edgeMatches = null;
       try {
         edgeMatches = spec.edgesOf(node, source);
-      } catch {
+      } catch (err) {
+        logSpecCallbackError(spec, "edgesOf", node, err);
         edgeMatches = null;
       }
       if (edgeMatches && edgeMatches.length > 0) {
@@ -262,10 +271,18 @@ export function extractWithTreeSitter(args) {
     }
 
     if (spec.skipChildrenOfTypes?.has(node.type)) return;
-    for (const child of node.children) visit(child);
+    return node.children || [];
   };
 
-  visit(tree.rootNode);
+  /** @type {TsNode[]} */
+  const stack = [tree.rootNode];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node) continue;
+    const children = visitNode(node);
+    if (!children) continue;
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+  }
 
   for (const pending of pendingParentNames) {
     const found = symbolsByName.get(pending.parentName);
@@ -297,6 +314,23 @@ function isContainerKind(kind) {
     kind === "enum" ||
     kind === "namespace" ||
     kind === "module"
+  );
+}
+
+/**
+ * @param {LanguageSpec} spec
+ * @param {"symbolOf" | "edgesOf"} callbackName
+ * @param {TsNode} node
+ * @param {unknown} err
+ */
+function logSpecCallbackError(spec, callbackName, node, err) {
+  const key = `${spec.lang || "?"}:${callbackName}:${node?.type || "?"}`;
+  const count = specCallbackErrorCounts.get(key) || 0;
+  if (count >= SPEC_CALLBACK_ERROR_LOG_LIMIT) return;
+  specCallbackErrorCounts.set(key, count + 1);
+  logAtlasError(
+    `[atlas-v2 parser] ${callbackName} failed for lang=${spec.lang || "?"} node=${node?.type || "?"}`,
+    err,
   );
 }
 

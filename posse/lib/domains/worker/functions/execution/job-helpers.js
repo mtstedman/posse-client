@@ -1,6 +1,6 @@
 import path from "path";
 import {
-  getArtifacts,
+  buildOperatorGuidanceForAttempt,
 } from "../../../queue/functions/index.js";
 import { slugify } from "../../../../shared/format/functions/slug.js";
 import { estimateCallCost } from "../../../billing/functions/pricing.js";
@@ -24,11 +24,12 @@ const PROVIDER_ERROR_PATTERNS = [
   /circuit breaker open/i,
 ];
 
-export function loadNudges(jobId) {
-  const nudges = getArtifacts(jobId, "nudge");
-  if (nudges.length === 0) return "";
-  const lines = nudges.map((a) => a.content_long).filter(Boolean);
-  return `HUMAN CORRECTION (you were going in the wrong direction - follow this guidance):\n${lines.join("\n")}\n`;
+export function loadNudges(jobId, { attemptId = null, agentCallId = null } = {}) {
+  return buildOperatorGuidanceForAttempt({
+    job_id: jobId,
+    attempt_id: attemptId,
+    agent_call_id: agentCallId,
+  });
 }
 
 export function isProcessAlive(pid) {
@@ -96,6 +97,7 @@ export function resolveCallCostEstimate(stats) {
     inputTokens: stats?.inputTokens ?? stats?.input_tokens ?? 0,
     outputTokens: stats?.outputTokens ?? stats?.output_tokens ?? 0,
     cachedInputTokens: stats?.cachedInputTokens ?? stats?.cached_input_tokens ?? 0,
+    cacheCreationInputTokens: stats?.cacheCreationInputTokens ?? stats?.cache_creation_input_tokens ?? 0,
     longContextInputTokens: stats?.longContextInputTokens ?? stats?.long_context_input_tokens ?? null,
   });
   return estimated?.costUsd ?? null;

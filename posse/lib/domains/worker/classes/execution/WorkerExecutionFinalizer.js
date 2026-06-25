@@ -31,6 +31,7 @@ export class WorkerExecutionFinalizer {
       worker._logFinalizerFailure(job, "worktree_sentinel", err);
     }
     if (job.id) {
+      worker._stopSessionRecycleLeaseRenewal?.(job.id);
       worker._releasePendingSessionRecycleForJob(job.id);
       worker._abortControllers.delete(job.id);
       worker._killReasons.delete(job.id);

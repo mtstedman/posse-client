@@ -269,6 +269,29 @@ export function releaseSessionHandle(sessionId, leaseToken) {
   `).run(now(), Number(sessionId), String(leaseToken || "")).changes;
 }
 
+export function renewSessionHandleLease(sessionId, leaseToken, {
+  jobId = null,
+  leaseTtlSec = sessionLeaseTtlSec(),
+} = {}) {
+  const db = getDb();
+  const ts = now();
+  const leaseExpiresAt = new Date(Date.now() + Math.max(1, Number(leaseTtlSec || 300)) * 1000).toISOString();
+  const params = [
+    leaseExpiresAt,
+    ts,
+    Number(sessionId),
+    String(leaseToken || ""),
+  ];
+  const jobClause = jobId == null ? "" : " AND leased_by = ?";
+  if (jobId != null) params.push(Number(jobId));
+  const result = db.prepare(`
+    UPDATE job_sessions
+    SET lease_expires_at = ?, last_used_at = ?
+    WHERE id = ? AND lease_token = ? AND status = 'active'${jobClause}
+  `).run(...params);
+  return result.changes > 0;
+}
+
 export function advanceSessionHandle({
   sessionId,
   leaseToken,

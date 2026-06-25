@@ -86,6 +86,21 @@ function findExistingPlanForResearch(researchJob) {
     .sort((a, b) => a.id - b.id)[0] || null;
 }
 
+// Symmetric to findExistingPlanForResearch: detect a research continuation that
+// already follows this preflight so a lease-loss re-lease (two workers reaching
+// the success tail) can't double-spawn the research+plan subtree. Solo, active
+// fanout (children + synth), and shadow fanout all create `research` jobs
+// parented to the preflight, so a single type/parent check covers every route.
+function findExistingResearchForPreflight(preflightJob) {
+  return listJobsByWorkItem(preflightJob.work_item_id)
+    .filter((job) =>
+      job.job_type === "research"
+      && job.parent_job_id === preflightJob.id
+      && job.status !== "canceled"
+    )
+    .sort((a, b) => a.id - b.id)[0] || null;
+}
+
 function replanPayloadFields(payload = {}) {
   const fields = {};
   if (payload.replan_reason) fields.replan_reason = payload.replan_reason;
@@ -363,6 +378,24 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
 }
 
 export function spawnResearchAfterPreflight(worker, preflightJob, output, { fallbackReason = null } = {}) {
+  const existingResearch = findExistingResearchForPreflight(preflightJob);
+  if (existingResearch) {
+    worker?.emit?.(preflightJob.id,
+      `${C.cyan}[preflight]${C.reset} WI#${preflightJob.work_item_id}: existing research #${existingResearch.id} already follows preflight #${preflightJob.id} - skipping duplicate spawn`);
+    logEvent({
+      work_item_id: preflightJob.work_item_id,
+      job_id: existingResearch.id,
+      event_type: EVENT_TYPES.PIPELINE_DUPLICATE_RESEARCH_SKIPPED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Skipped duplicate research spawn after preflight #${preflightJob.id}; existing research #${existingResearch.id} already follows it`,
+      event_json: JSON.stringify({
+        preflight_job_id: preflightJob.id,
+        existing_research_job_id: existingResearch.id,
+      }),
+    });
+    return existingResearch;
+  }
+
   const wi = getWorkItem(preflightJob.work_item_id);
   const preflightPayload = parsePayload(worker, preflightJob);
   const planningPayload = redTeamPlanningPayload(isRedTeamPlanningPayload(preflightPayload));

@@ -18,6 +18,15 @@ const BLOCKED_MUTATING_COMMAND = new RegExp(
 const BLOCKED_INLINE_SCRIPT_WRITE = /\b(?:node\s+-e|python3?\s+-c)\b[\s\S]*(?:writeFile|appendFile|createWriteStream|fs\.(?:rm|unlink|mkdir|rename|copyFile)|open\s*\(|Path\s*\([^)]*\)\.write|shutil\.|os\.(?:remove|unlink|mkdir|rmdir|rename))/i;
 const READONLY_BASH_ALLOWLIST = /^\s*(npm\s+test|npm\s+run|npx\s+(?:tsc|eslint|prettier|jest|vitest|mocha)\b|pnpm\s+(test|run|exec)|yarn\s+(test|run)|tsc\s|eslint\s|prettier\s|jest\s|vitest\s|mocha\s|pip\s+show|python3?\s+-m\s+(?:pytest|unittest|build)\b|pytest\s|ruff\s|mypy\s|flake8\s|black\s+--check|php\s|composer\s+(test|run)|phpunit\s|cargo\s+(test|check|build|clippy)|rustfmt\s+--check|go\s+(test|vet|build)|make\s|cmake\s|gradle\s|mvn\s|dotnet\s+(test|build)|cat\s|head\s|tail\s|ls\s|find\s|wc\s|file\s|du\s|diff\s|sort\s|uniq\s|grep\s|rg\s|git\s+diff|git\s+log|git\s+status|git\s+show|echo\s|pwd|whoami)/i;
 const PHP_SYNTAX_LINT_FLAG_RE = /(?:^|\s)(?:-l|--syntax-check)(?:\s|$)/i;
+const FIND_MUTATING_FLAGS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir"]);
+const GO_OUTPUT_FLAGS = new Set(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"]);
+const CARGO_OUTPUT_FLAGS = new Set(["--target-dir", "--out-dir"]);
+const DOTNET_OUTPUT_FLAGS = new Set(["-o", "--output"]);
+const TSC_OUTPUT_FLAGS = new Set(["--outdir", "--outfile", "--tsbuildinfofile"]);
+const TEST_OUTPUT_FLAGS = new Set(["--junitxml", "--html", "--self-contained-html", "--cov-report", "--basetemp", "--result-log", "--report-log"]);
+const PYTHON_BUILD_OUTPUT_FLAGS = new Set(["--outdir"]);
+const SORT_OUTPUT_FLAGS = new Set(["-o", "--output"]);
+const FIXER_FLAGS = new Set(["--fix", "--write"]);
 const SENSITIVE_ENV_BASENAME_RE = /^\.env(?:\.|$)/i;
 const SHELL_VARIABLE_EXPANSION_RE = /(?:%[A-Za-z_][A-Za-z0-9_]*%|\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*))/;
 const INFERRED_DELETE_FILE_EXTENSIONS = new Set([
@@ -51,6 +60,105 @@ function normalizeRoots(values = [], cwd = process.cwd()) {
 function isPhpSyntaxLintCommand(command) {
   const text = String(command || "");
   return /^\s*php(?:\s|$)/i.test(text) && PHP_SYNTAX_LINT_FLAG_RE.test(text);
+}
+
+function shellWords(command) {
+  const tokens = [];
+  let current = "";
+  let quote = null;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (ch === "\\" && quote !== "'") {
+      const next = command[i + 1];
+      if (next === "'" || next === '"' || next === "\\" || (next !== undefined && /\s/.test(next))) {
+        current += next;
+        i += 1;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function tokenFlagName(token) {
+  const text = String(token || "").toLowerCase();
+  if (!text.startsWith("-")) return "";
+  const equalsIndex = text.indexOf("=");
+  if (equalsIndex > 0) return text.slice(0, equalsIndex);
+  if (/^-[A-Za-z][^A-Za-z]?/.test(text)) return text.length > 2 ? text.slice(0, 2) : text;
+  return text;
+}
+
+function hasFlag(tokens, flags) {
+  return tokens.some((token) => flags.has(tokenFlagName(token)) || flags.has(String(token || "").toLowerCase()));
+}
+
+function blockedBashArgumentReason(command) {
+  const tokens = shellWords(command);
+  if (tokens.length === 0) return null;
+  const commandName = shellCommandName(tokens[0]);
+  const lower = tokens.map((token) => String(token || "").toLowerCase());
+  const delegatedTool = commandName === "npx"
+    ? { name: lower[1], args: lower.slice(2) }
+    : (commandName === "pnpm" && lower[1] === "exec")
+      ? { name: lower[2], args: lower.slice(3) }
+      : null;
+  if (delegatedTool?.name && (delegatedTool.name === "eslint" || delegatedTool.name === "prettier" || delegatedTool.name === "ruff") && hasFlag(delegatedTool.args, FIXER_FLAGS)) {
+    return `${delegatedTool.name} fixer flag`;
+  }
+  if (commandName === "find" && lower.some((token) => FIND_MUTATING_FLAGS.has(tokenFlagName(token)) || FIND_MUTATING_FLAGS.has(token))) {
+    return "find mutating action";
+  }
+  if (commandName === "go" && (lower[1] === "build" || lower[1] === "test") && hasFlag(lower.slice(2), GO_OUTPUT_FLAGS)) {
+    return "go explicit output path";
+  }
+  if (commandName === "cargo" && hasFlag(lower.slice(2), CARGO_OUTPUT_FLAGS)) {
+    return "cargo explicit output directory";
+  }
+  if (commandName === "dotnet" && (lower[1] === "build" || lower[1] === "test") && hasFlag(lower.slice(2), DOTNET_OUTPUT_FLAGS)) {
+    return "dotnet explicit output directory";
+  }
+  if ((commandName === "tsc" || commandName === "prettier") && hasFlag(lower.slice(1), TSC_OUTPUT_FLAGS)) {
+    return `${commandName} explicit output path`;
+  }
+  if ((commandName === "eslint" || commandName === "prettier" || commandName === "ruff") && hasFlag(lower.slice(1), FIXER_FLAGS)) {
+    return `${commandName} fixer flag`;
+  }
+  if ((commandName === "pytest" || commandName === "ruff" || commandName === "mypy" || commandName === "flake8") && hasFlag(lower.slice(1), TEST_OUTPUT_FLAGS)) {
+    return `${commandName} explicit output path`;
+  }
+  if ((commandName === "python" || commandName === "python3") && lower[1] === "-m") {
+    if (lower[2] === "pytest" && hasFlag(lower.slice(3), TEST_OUTPUT_FLAGS)) {
+      return "pytest explicit output path";
+    }
+    if (lower[2] === "build" && hasFlag(lower.slice(3), PYTHON_BUILD_OUTPUT_FLAGS)) {
+      return "python build explicit output directory";
+    }
+  }
+  if (commandName === "sort" && hasFlag(lower.slice(1), SORT_OUTPUT_FLAGS)) {
+    return "sort explicit output path";
+  }
+  return null;
 }
 
 function normalizeRel(value) {
@@ -470,6 +578,10 @@ export class MutationPolicy {
     }
 
     for (const sub of subcommands) {
+      const blockedArgReason = blockedBashArgumentReason(sub);
+      if (blockedArgReason) {
+        return { ok: false, error: `Error: Mutating bash argument blocked (${blockedArgReason}) - bash is limited to read-only inspection and test/build runners. Use scoped file tools for workspace changes: ${sub.slice(0, 100)}` };
+      }
       if (isPhpSyntaxLintCommand(sub)) {
         return { ok: false, error: "Error: PHP syntax lint must use run_scoped_checks with checks:[\"lint\"] for the declared scope instead of bash/php -l." };
       }

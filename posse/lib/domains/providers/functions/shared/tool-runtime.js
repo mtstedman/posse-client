@@ -8,6 +8,13 @@ import { declareToolSuites } from "../../../../functions/tools/tool-suites.js";
 import { assertAdvertisedHaveExecutors } from "../../../../functions/tools/tool-parity.js";
 import { createChainLedger } from "../../../../functions/tools/chain-ledger.js";
 import { formatAtlasToolUseDisplayName } from "../../../../functions/tools/mcp-surface.js";
+import { getObservationContext } from "../../../observability/functions/observations.js";
+import {
+  acknowledgeOperatorFeedback,
+  countPendingOperatorFeedbackForJob,
+  getOperatorFeedbackForJob,
+  recordAgentActivity,
+} from "../../../queue/functions/index.js";
 
 const PROVIDER_TOOL_GATE = new AsyncResourceGate({ name: "provider native tool" });
 const BLOCKING_NATIVE_TOOL_NAMES = new Set([
@@ -29,6 +36,11 @@ const BLOCKING_NATIVE_TOOL_NAMES = new Set([
   "resize_image",
   "write_file",
 ]);
+const LIVE_CHANNEL_TOOL_NAMES = new Set([
+  "agent_feedback",
+  "get_operator_feedback",
+  "ack_operator_feedback",
+]);
 
 function nativeToolGateKey(cwd) {
   const normalized = path.resolve(String(cwd || process.cwd())).replace(/\\/g, "/");
@@ -37,6 +49,30 @@ function nativeToolGateKey(cwd) {
 
 function isAsyncGateError(err) {
   return err?.code === "ASYNC_GATE_BUSY" || err?.code === "ASYNC_GATE_TIMEOUT";
+}
+
+function liveChannelSignalForAmbient(toolName) {
+  if (LIVE_CHANNEL_TOOL_NAMES.has(toolName)) return "";
+  const ambient = getObservationContext() || {};
+  if (ambient.job_id == null) return "";
+  const pendingCount = countPendingOperatorFeedbackForJob(ambient.job_id);
+  if (pendingCount <= 0) return "";
+  return [
+    "",
+    "OPERATOR_FEEDBACK_SIGNAL:",
+    JSON.stringify({
+      operator_feedback_available: true,
+      pending_count: pendingCount,
+      next_tool: "get_operator_feedback",
+      ack_tool: "ack_operator_feedback",
+    }),
+  ].join("\n");
+}
+
+function appendLiveChannelSignal(result, toolName) {
+  const signal = liveChannelSignalForAmbient(toolName);
+  if (!signal) return result;
+  return `${typeof result === "string" ? result : String(result ?? "")}${signal}`;
 }
 
 export function parseToolArgs(argsStr) {
@@ -84,6 +120,15 @@ const OBSERVED_TOOL_FORMATTERS = {
   chain_verdict(input = {}) {
     const verdict = String(input.verdict || "").slice(0, 20);
     return { target: input.path || "", summary: `ChainVerdict: ${input.path || "?"} → ${verdict}` };
+  },
+  agent_feedback(input = {}) {
+    return { target: input.phase || "", summary: `AgentFeedback: ${input.summary || input.phase || "update"}` };
+  },
+  get_operator_feedback(input = {}) {
+    return { target: "", summary: `GetFeedback: limit ${input.limit || 20}` };
+  },
+  ack_operator_feedback(input = {}) {
+    return { target: String(input.interaction_id || ""), summary: `AckFeedback: #${input.interaction_id || "?"} ${input.decision || "accepted"}` };
   },
   read_file(input = {}) {
     return { target: input.path || "", summary: `Read: ${input.path || "?"}` };
@@ -206,6 +251,58 @@ export function createStandardToolHandlerMap({
     },
     chain_verdict(args, ctx) {
       return embeddedChainLedger(ctx).chainVerdict(args);
+    },
+    agent_feedback(args) {
+      const ambient = getObservationContext() || {};
+      if (ambient.job_id == null) return "No active job context is available for agent_feedback.";
+      recordAgentActivity({
+        work_item_id: ambient.work_item_id ?? null,
+        job_id: ambient.job_id,
+        attempt_id: ambient.attempt_id ?? null,
+        phase: args.phase,
+        action: args.status,
+        body: args.summary,
+        source: "embedded_tool",
+        metadata_json: { status: args.status || null },
+      });
+      return "Agent feedback recorded for Monitor Agents.";
+    },
+    get_operator_feedback(args) {
+      const ambient = getObservationContext() || {};
+      if (ambient.job_id == null) return "No active job context is available for get_operator_feedback.";
+      const feedback = getOperatorFeedbackForJob({
+        job_id: ambient.job_id,
+        attempt_id: ambient.attempt_id ?? null,
+        agent_call_id: ambient.agent_call_id ?? null,
+        limit: args.limit,
+      });
+      return JSON.stringify({
+        ok: true,
+        acknowledgement_required: feedback.length > 0,
+        default_ack_decision: "accepted",
+        ack_tool: "ack_operator_feedback",
+        feedback,
+      }, null, 2);
+    },
+    ack_operator_feedback(args) {
+      const ambient = getObservationContext() || {};
+      if (ambient.job_id == null) return "No active job context is available for ack_operator_feedback.";
+      const row = acknowledgeOperatorFeedback({
+        interaction_id: args.interaction_id,
+        job_id: ambient.job_id,
+        attempt_id: ambient.attempt_id ?? null,
+        agent_call_id: ambient.agent_call_id ?? null,
+        decision: args.decision || "accepted",
+        reason: args.reason || "",
+      });
+      if (!row) return `No operator feedback item found for id ${args.interaction_id}.`;
+      return JSON.stringify({
+        ok: true,
+        interaction_id: row.id,
+        decision: row.ack_decision || "accepted",
+        reason: row.ack_reason || null,
+        acknowledged_at: row.acknowledged_at || null,
+      }, null, 2);
     },
     read_file(args, ctx) {
       return deterministicReadFile(args, ctx.cwd, ctx.scopePredicates);
@@ -343,12 +440,14 @@ export async function executeToolWithMap(name, argsStr, context, {
       const run = () => handler(args, context);
       const label = `tool.${name}`;
       const key = nativeToolGateKey(context?.cwd);
-      return BLOCKING_NATIVE_TOOL_NAMES.has(name)
+      const result = BLOCKING_NATIVE_TOOL_NAMES.has(name)
         ? await PROVIDER_TOOL_GATE.write(key, run, { label, waitMs: 120000, barrierName: label })
         : await PROVIDER_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
+      return appendLiveChannelSignal(result, name);
     }
     if (typeof onUnknown === "function") {
-      return await onUnknown(name, args, context);
+      const result = await onUnknown(name, args, context);
+      return appendLiveChannelSignal(result, name);
     }
     return `Error: Unknown tool "${name}"`;
   } catch (err) {

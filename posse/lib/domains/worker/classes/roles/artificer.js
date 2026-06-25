@@ -193,7 +193,7 @@ export class ArtificerRole extends BaseRole {
 
     const outputRootDisplay = outputRoot || "(not set - check task spec)";
     const buildArtificerPrompt = async (extraSections = []) => buildPromptAsync(packet, [
-      loadNudges(job.id),
+      loadNudges(job.id, { attemptId: ctx.attemptId }),
       "Produce the deliverables described below.",
       "Your working directory IS the output folder. Use plain filenames (e.g. \"image.png\", \"report.md\") - they will land in the correct output directory.",
       "Do not edit repo source files.",

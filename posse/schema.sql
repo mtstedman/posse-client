@@ -520,6 +520,7 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   input_tokens INTEGER,
   output_tokens INTEGER,
   cached_input_tokens INTEGER,
+  cache_creation_input_tokens INTEGER,
 
   max_turns_configured INTEGER,
 
@@ -559,6 +560,81 @@ CREATE INDEX IF NOT EXISTS idx_agent_calls_work_item
 
 CREATE INDEX IF NOT EXISTS idx_agent_calls_atlas_prefetch
   ON agent_calls(role, atlas_prefetch_status);
+
+CREATE TABLE IF NOT EXISTS agent_interactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_item_id INTEGER,
+  job_id INTEGER,
+  attempt_id INTEGER,
+  agent_call_id INTEGER,
+  parent_id INTEGER,
+
+  direction TEXT NOT NULL CHECK (direction IN ('user_to_agent','agent_to_user','system_to_agent')),
+  kind TEXT NOT NULL CHECK (kind IN ('nudge','question','answer','activity','status_request','scope_request','approval')),
+  blocking_policy TEXT NOT NULL DEFAULT 'none' CHECK (blocking_policy IN ('none','checkpoint','wait')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','applied','answered','canceled','expired','superseded')),
+  source TEXT,
+  author TEXT,
+  body TEXT,
+  metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+  ack_state TEXT NOT NULL DEFAULT 'pending' CHECK (ack_state IN ('pending','acknowledged','not_applicable')),
+  ack_decision TEXT CHECK (ack_decision IS NULL OR ack_decision IN ('accepted','rejected','deferred')),
+  ack_reason TEXT,
+  acknowledged_at TEXT,
+
+  first_applied_at TEXT,
+  last_applied_at TEXT,
+  answered_at TEXT,
+  expires_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL,
+  FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE SET NULL,
+  FOREIGN KEY (parent_id) REFERENCES agent_interactions(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_interactions_job_status
+  ON agent_interactions(job_id, status, blocking_policy);
+
+CREATE INDEX IF NOT EXISTS idx_agent_interactions_work_item_created
+  ON agent_interactions(work_item_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_agent_interactions_agent_call_created
+  ON agent_interactions(agent_call_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_agent_interactions_parent
+  ON agent_interactions(parent_id);
+
+CREATE INDEX IF NOT EXISTS idx_agent_interactions_kind_status
+  ON agent_interactions(kind, status, created_at);
+
+CREATE TABLE IF NOT EXISTS agent_interaction_applications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  interaction_id INTEGER NOT NULL,
+  work_item_id INTEGER,
+  job_id INTEGER,
+  attempt_id INTEGER,
+  agent_call_id INTEGER,
+  applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  result TEXT NOT NULL DEFAULT 'included' CHECK (result IN ('included','skipped','expired')),
+  metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+
+  FOREIGN KEY (interaction_id) REFERENCES agent_interactions(id) ON DELETE CASCADE,
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL,
+  FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE SET NULL,
+  UNIQUE(interaction_id, attempt_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_interaction_applications_attempt
+  ON agent_interaction_applications(attempt_id, applied_at);
+
+CREATE INDEX IF NOT EXISTS idx_agent_interaction_applications_interaction
+  ON agent_interaction_applications(interaction_id, applied_at);
 
 
 -- ═════════════════════════════════════════════════════════════════════════════

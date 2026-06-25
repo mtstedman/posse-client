@@ -127,6 +127,7 @@ const JSON_VALIDITY_COLUMN_KEYS = new Set(
 );
 
 let _db = null;
+let _dbPath = null;
 
 function isRecoverableDbError(err) {
   const msg = err?.message || String(err || "");
@@ -541,6 +542,74 @@ export function createAgentCallsIndexes(db) {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_calls_atlas_prefetch ON agent_calls(role, atlas_prefetch_status)`);
 }
 
+export function agentInteractionsCreateSql(tableName = "agent_interactions") {
+  return `
+        CREATE TABLE ${quoteIdent(tableName)} (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          work_item_id INTEGER,
+          job_id INTEGER,
+          attempt_id INTEGER,
+          agent_call_id INTEGER,
+          parent_id INTEGER,
+          direction TEXT NOT NULL CHECK (direction IN ('user_to_agent','agent_to_user','system_to_agent')),
+          kind TEXT NOT NULL CHECK (kind IN ('nudge','question','answer','activity','status_request','scope_request','approval')),
+          blocking_policy TEXT NOT NULL DEFAULT 'none' CHECK (blocking_policy IN ('none','checkpoint','wait')),
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','applied','answered','canceled','expired','superseded')),
+          source TEXT,
+          author TEXT,
+          body TEXT,
+          metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+          ack_state TEXT NOT NULL DEFAULT 'pending' CHECK (ack_state IN ('pending','acknowledged','not_applicable')),
+          ack_decision TEXT CHECK (ack_decision IS NULL OR ack_decision IN ('accepted','rejected','deferred')),
+          ack_reason TEXT,
+          acknowledged_at TEXT,
+          first_applied_at TEXT,
+          last_applied_at TEXT,
+          answered_at TEXT,
+          expires_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+          FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL,
+          FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE SET NULL,
+          FOREIGN KEY (parent_id) REFERENCES agent_interactions(id) ON DELETE SET NULL
+        )
+      `;
+}
+
+export function agentInteractionApplicationsCreateSql(tableName = "agent_interaction_applications") {
+  return `
+        CREATE TABLE ${quoteIdent(tableName)} (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          interaction_id INTEGER NOT NULL,
+          work_item_id INTEGER,
+          job_id INTEGER,
+          attempt_id INTEGER,
+          agent_call_id INTEGER,
+          applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          result TEXT NOT NULL DEFAULT 'included' CHECK (result IN ('included','skipped','expired')),
+          metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+          FOREIGN KEY (interaction_id) REFERENCES agent_interactions(id) ON DELETE CASCADE,
+          FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+          FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL,
+          FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE SET NULL,
+          UNIQUE(interaction_id, attempt_id)
+        )
+      `;
+}
+
+export function createAgentInteractionIndexes(db) {
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interactions_job_status ON agent_interactions(job_id, status, blocking_policy)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interactions_work_item_created ON agent_interactions(work_item_id, created_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interactions_agent_call_created ON agent_interactions(agent_call_id, created_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interactions_parent ON agent_interactions(parent_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interactions_kind_status ON agent_interactions(kind, status, created_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interaction_applications_attempt ON agent_interaction_applications(attempt_id, applied_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interaction_applications_interaction ON agent_interaction_applications(interaction_id, applied_at)`);
+}
+
 export function createRunInsightsIndexes(db) {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_run_insights_type ON run_insights(insight_type, created_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_run_insights_work_item ON run_insights(work_item_id, created_at)`);
@@ -716,9 +785,11 @@ function ensureRuntimeDbDir(dir) {
 }
 
 export function getDb() {
-  if (_db) return _db;
-
-  const dbPath = getRuntimeDbPath();
+  const dbPath = path.resolve(getRuntimeDbPath());
+  if (_db) {
+    if (_dbPath === dbPath) return _db;
+    closeDb();
+  }
 
   // Ensure parent directory exists
   const dir = path.dirname(dbPath);
@@ -727,6 +798,7 @@ export function getDb() {
   quarantineStaleIncompleteDb(dbPath);
 
   _db = new Database(dbPath);
+  _dbPath = dbPath;
 
   // Performance pragmas
   try {
@@ -734,8 +806,10 @@ export function getDb() {
   } catch (err) {
     try { _db.close(); } catch {}
     _db = null;
+    _dbPath = null;
     if (!quarantineStaleIncompleteDb(dbPath, { force: true, ignoreAge: true })) throw err;
     _db = new Database(dbPath);
+    _dbPath = dbPath;
     applyDbPragmas(_db, dbPath);
   }
 
@@ -747,10 +821,12 @@ export function getDb() {
   } catch (err) {
     try { _db.close(); } catch {}
     _db = null;
+    _dbPath = null;
     if (!isRecoverableDbError(err) || !quarantineStaleIncompleteDb(dbPath, { force: true, ignoreAge: true })) {
       throw err;
     }
     _db = new Database(dbPath);
+    _dbPath = dbPath;
     applyDbPragmas(_db, dbPath);
   }
 
@@ -780,6 +856,64 @@ export function getDb() {
   if (!hasAgentCalls) {
     _db.exec(agentCallsCreateSql("agent_calls"));
     createAgentCallsIndexes(_db);
+  }
+
+  const hasAgentInteractions = _db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='agent_interactions'`
+  ).get();
+  if (!hasAgentInteractions) {
+    _db.exec(agentInteractionsCreateSql("agent_interactions"));
+  }
+  const agentInteractionColumns = new Set(_db.pragma("table_info(agent_interactions)").map((col) => col.name));
+  if (!agentInteractionColumns.has("ack_decision")) {
+    _db.exec(`ALTER TABLE agent_interactions ADD COLUMN ack_decision TEXT CHECK (ack_decision IS NULL OR ack_decision IN ('accepted','rejected','deferred'))`);
+  }
+  if (!agentInteractionColumns.has("ack_reason")) {
+    _db.exec(`ALTER TABLE agent_interactions ADD COLUMN ack_reason TEXT`);
+  }
+  if (!agentInteractionColumns.has("acknowledged_at")) {
+    _db.exec(`ALTER TABLE agent_interactions ADD COLUMN acknowledged_at TEXT`);
+  }
+  const hasAgentInteractionApplications = _db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='agent_interaction_applications'`
+  ).get();
+  if (!hasAgentInteractionApplications) {
+    _db.exec(agentInteractionApplicationsCreateSql("agent_interaction_applications"));
+  }
+  createAgentInteractionIndexes(_db);
+  try {
+    _db.exec(`
+      INSERT INTO agent_interactions (
+        work_item_id, job_id, direction, kind, blocking_policy, status,
+        source, author, body, metadata_json, created_at, updated_at
+      )
+      SELECT
+        a.work_item_id,
+        a.job_id,
+        'user_to_agent',
+        'nudge',
+        'checkpoint',
+        'active',
+        'legacy_artifact',
+        'operator',
+        a.content_long,
+        json_object('legacy_artifact_id', a.id),
+        COALESCE(a.created_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      FROM artifacts a
+      WHERE a.artifact_type = 'nudge'
+        AND a.content_long IS NOT NULL
+        AND trim(a.content_long) != ''
+        AND NOT EXISTS (
+          SELECT 1
+          FROM agent_interactions ai
+          WHERE ai.source = 'legacy_artifact'
+            AND json_valid(COALESCE(ai.metadata_json, '{}')) = 1
+            AND json_extract(ai.metadata_json, '$.legacy_artifact_id') = a.id
+        )
+    `);
+  } catch {
+    // Best-effort compatibility migration; the live path no longer depends on artifacts.
   }
 
   // Legacy per-repo settings are deprecated in favor of global account settings.
@@ -1239,6 +1373,13 @@ export function getDb() {
     _db.exec(`ALTER TABLE agent_calls ADD COLUMN cached_input_tokens INTEGER`);
   }
 
+  const hasAgentCallCacheCreationInputTokens = _db.prepare(
+    `SELECT COUNT(*) as cnt FROM pragma_table_info('agent_calls') WHERE name='cache_creation_input_tokens'`
+  ).get();
+  if (hasAgentCallCacheCreationInputTokens.cnt === 0) {
+    _db.exec(`ALTER TABLE agent_calls ADD COLUMN cache_creation_input_tokens INTEGER`);
+  }
+
   // ── Migration: project_context snapshot table ─────────────────────────────
   const hasProjectContext = _db.prepare(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='project_context'`
@@ -1562,6 +1703,19 @@ export function getDb() {
         `CREATE INDEX IF NOT EXISTS idx_agent_calls_role ON agent_calls(role, created_at)`,
         `CREATE INDEX IF NOT EXISTS idx_agent_calls_work_item ON agent_calls(work_item_id, created_at)`,
         `CREATE INDEX IF NOT EXISTS idx_agent_calls_atlas_prefetch ON agent_calls(role, atlas_prefetch_status)`,
+      ]);
+
+      fixTable("agent_interactions", agentInteractionsCreateSql("agent_interactions"), [
+        `CREATE INDEX IF NOT EXISTS idx_agent_interactions_job_status ON agent_interactions(job_id, status, blocking_policy)`,
+        `CREATE INDEX IF NOT EXISTS idx_agent_interactions_work_item_created ON agent_interactions(work_item_id, created_at)`,
+        `CREATE INDEX IF NOT EXISTS idx_agent_interactions_agent_call_created ON agent_interactions(agent_call_id, created_at)`,
+        `CREATE INDEX IF NOT EXISTS idx_agent_interactions_parent ON agent_interactions(parent_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_agent_interactions_kind_status ON agent_interactions(kind, status, created_at)`,
+      ]);
+
+      fixTable("agent_interaction_applications", agentInteractionApplicationsCreateSql("agent_interaction_applications"), [
+        `CREATE INDEX IF NOT EXISTS idx_agent_interaction_applications_attempt ON agent_interaction_applications(attempt_id, applied_at)`,
+        `CREATE INDEX IF NOT EXISTS idx_agent_interaction_applications_interaction ON agent_interaction_applications(interaction_id, applied_at)`,
       ]);
 
     })());
@@ -2173,5 +2327,6 @@ export function closeDb() {
     _db.close();
     _db = null;
   }
+  _dbPath = null;
   bumpRunTelemetryEpoch();
 }

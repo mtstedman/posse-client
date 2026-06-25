@@ -200,6 +200,11 @@ function installRustScipDeps({ posseRoot, force, dryRun, timeoutMs, onProgress }
   const binDir = path.join(posseRoot, "scip", "bin");
   const wrapper = commandPath(posseRoot, ["scip", "bin"], "scip-rust");
   if (!force && fileExists(wrapper)) {
+    // Boot runs this in dryRun (check-only) mode. There the wrapper's presence
+    // is sufficient — skip the rust-analyzer --version probe, which launched a
+    // ~100MB binary on EVERY boot (bounded 30s, but real cost on Windows). Full
+    // runtime validation still runs under `posse doctor` (non-dry).
+    if (dryRun) return ok("rust", "ok", "scip-rust wrapper present");
     const validation = validateRustAnalyzer({ timeoutMs, onProgress });
     if (!validation.ok) return failed("rust", `scip-rust wrapper exists, but ${validation.message}`);
     return ok("rust", "ok", "scip-rust wrapper already installed");

@@ -103,7 +103,7 @@ export class AssessorRole extends BaseRole {
     return [
       atlasBlock ? `${atlasBlock}\n` : "",
       intakeHintsBlock ? `${intakeHintsBlock}\n` : "",
-      loadNudges(job.id),
+      loadNudges(job.id, { attemptId: ctx.attemptId }),
       promptLiteral("ASSESSMENT REQUEST", payload.task_spec || payload.instructions || job.title),
     ].filter((part) => part !== "").join("\n");
   }

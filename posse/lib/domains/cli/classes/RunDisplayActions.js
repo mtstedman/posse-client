@@ -1,5 +1,6 @@
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../../providers/functions/execution-routing.js";
+import { createOperatorNudge } from "../../queue/functions/index.js";
 import { buildImageInjectionPayload } from "../functions/run-session.js";
 
 export class RunDisplayActions {
@@ -137,27 +138,15 @@ export class RunDisplayActions {
   }
 
   nudge(jobId, correction) {
-    this.storeArtifact({
-      work_item_id: this.getJob(jobId)?.work_item_id,
+    const job = this.getJob(jobId);
+    createOperatorNudge({
+      work_item_id: job?.work_item_id,
       job_id: jobId,
-      artifact_type: "nudge",
-      content_long: correction,
+      body: correction,
+      source: "terminal",
     });
 
-    this.logEvent({
-      work_item_id: this.getJob(jobId)?.work_item_id,
-      job_id: jobId,
-      event_type: EVENT_TYPES.JOB_NUDGED,
-      actor_type: EVENT_ACTORS.HUMAN,
-      message: `Human correction: ${correction.slice(0, 200)}`,
-    });
-
-    const killed = this.worker.killJob(jobId, "user_nudge");
-    if (killed) {
-      this.display.addEvent(`${this.C.cyan}✎ Nudged job #${jobId} — will retry with correction${this.C.reset}`);
-    } else {
-      this.display.addEvent(`${this.C.cyan}✎ Correction stored for job #${jobId} (not currently running)${this.C.reset}`);
-    }
+    this.display.addEvent(`${this.C.cyan}✎ Feedback queued for job #${jobId} — agent will retrieve it live${this.C.reset}`);
   }
 
   killWorkItem(wiId) {

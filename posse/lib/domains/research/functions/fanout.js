@@ -169,111 +169,113 @@ export function createResearchFanoutJobs({
   const shadow = fanoutMode === "shadow";
   const inheritedPreflightJobId = preflightJobId || (parentJob?.job_type === "preflight" ? parentJob.id : null);
 
-  const childJobs = normalizedBranches.map((branch, index) => createJob({
-    work_item_id: workItem.id,
-    job_type: "research",
-    title: `Research (${branch.label}): ${wiTitle}`,
-    parent_job_id: parentJob?.id || null,
-    priority: shadow ? "low" : (workItem.priority || parentJob?.priority || "normal"),
-    model_tier: defaultResearchModelTier(),
-    reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
-    payload_json: JSON.stringify(fanoutPayload({
-      ...extraPayload,
-      role_mode: "child",
-      fanout_mode: fanoutMode,
-      fanout_shadow: shadow,
-      fanout_run_id: fanoutRunId,
-      fanout_source: source,
-      fanout_reason: reason || null,
-      fanout_branch_index: index,
-      fanout_branch: branch,
-      fanout_scope_hints: branch.scope_hints,
-      preflight_job_id: inheritedPreflightJobId,
-      instructions: [
-        `Fanout child branch: ${branch.label}`,
-        `Branch kind: ${branch.kind}`,
-        "",
-        branch.kind === "web" ? "Domain/URL hints:" : "Scope hints:",
-        ...(branch.scope_hints.length > 0 ? branch.scope_hints.map((hint) => `- ${hint}`) : ["- (none provided)"]),
-        "",
-        branch.kind === "web"
-          ? "Investigate only this external-source branch unless a direct code connection is required to verify a claim."
-          : "Investigate only this branch unless a direct dependency is required to verify a claim.",
-        branch.kind === "web"
-          ? "Emit exact URLs for external-source findings and path:line citations only when you connect the docs back to repository code."
-          : "Emit exact file paths and line-number citations for important findings.",
-        "Surface uncertainty and contradictions instead of filling gaps with guesses.",
-      ].join("\n"),
-    }, researchBudget)),
-  }));
+  return runInTransaction(() => {
+    const childJobs = normalizedBranches.map((branch, index) => createJob({
+      work_item_id: workItem.id,
+      job_type: "research",
+      title: `Research (${branch.label}): ${wiTitle}`,
+      parent_job_id: parentJob?.id || null,
+      priority: shadow ? "low" : (workItem.priority || parentJob?.priority || "normal"),
+      model_tier: defaultResearchModelTier(),
+      reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
+      payload_json: JSON.stringify(fanoutPayload({
+        ...extraPayload,
+        role_mode: "child",
+        fanout_mode: fanoutMode,
+        fanout_shadow: shadow,
+        fanout_run_id: fanoutRunId,
+        fanout_source: source,
+        fanout_reason: reason || null,
+        fanout_branch_index: index,
+        fanout_branch: branch,
+        fanout_scope_hints: branch.scope_hints,
+        preflight_job_id: inheritedPreflightJobId,
+        instructions: [
+          `Fanout child branch: ${branch.label}`,
+          `Branch kind: ${branch.kind}`,
+          "",
+          branch.kind === "web" ? "Domain/URL hints:" : "Scope hints:",
+          ...(branch.scope_hints.length > 0 ? branch.scope_hints.map((hint) => `- ${hint}`) : ["- (none provided)"]),
+          "",
+          branch.kind === "web"
+            ? "Investigate only this external-source branch unless a direct code connection is required to verify a claim."
+            : "Investigate only this branch unless a direct dependency is required to verify a claim.",
+          branch.kind === "web"
+            ? "Emit exact URLs for external-source findings and path:line citations only when you connect the docs back to repository code."
+            : "Emit exact file paths and line-number citations for important findings.",
+          "Surface uncertainty and contradictions instead of filling gaps with guesses.",
+        ].join("\n"),
+      }, researchBudget)),
+    }));
 
-  const synthJob = createJob({
-    work_item_id: workItem.id,
-    job_type: "research",
-    title: `Research synthesis: ${wiTitle}`,
-    parent_job_id: parentJob?.id || null,
-    priority: shadow ? "low" : (workItem.priority || parentJob?.priority || "normal"),
-    model_tier: defaultResearchModelTier(),
-    reasoning_effort: researchBudgetToReasoningEffort(synthBudget, synthReasoningFallback(synthBudget)),
-    payload_json: JSON.stringify(fanoutPayload({
-      ...extraPayload,
-      role_mode: "synth",
-      fanout_mode: fanoutMode,
-      fanout_shadow: shadow,
-      fanout_run_id: fanoutRunId,
-      fanout_source: source,
-      fanout_reason: reason || null,
-      fanout_branches: normalizedBranches,
-      child_job_ids: childJobs.map((job) => job.id),
-      solo_job_id: soloJob?.id || null,
-      preflight_job_id: inheritedPreflightJobId,
-      instructions: [
-        "Synthesize the child research briefs into one planner-ready research brief.",
-        "Compare cited claims across children and preserve code citations and URL citations as distinct evidence classes.",
-        "Re-read cited files/lines before relying on a disputed code claim; preserve exact URLs for external documentation claims.",
-        "If child briefs contradict each other and the contradiction cannot be resolved, include needs_review with the conflicting evidence.",
-      ].join("\n"),
-    }, synthBudget)),
-  });
+    const synthJob = createJob({
+      work_item_id: workItem.id,
+      job_type: "research",
+      title: `Research synthesis: ${wiTitle}`,
+      parent_job_id: parentJob?.id || null,
+      priority: shadow ? "low" : (workItem.priority || parentJob?.priority || "normal"),
+      model_tier: defaultResearchModelTier(),
+      reasoning_effort: researchBudgetToReasoningEffort(synthBudget, synthReasoningFallback(synthBudget)),
+      payload_json: JSON.stringify(fanoutPayload({
+        ...extraPayload,
+        role_mode: "synth",
+        fanout_mode: fanoutMode,
+        fanout_shadow: shadow,
+        fanout_run_id: fanoutRunId,
+        fanout_source: source,
+        fanout_reason: reason || null,
+        fanout_branches: normalizedBranches,
+        child_job_ids: childJobs.map((job) => job.id),
+        solo_job_id: soloJob?.id || null,
+        preflight_job_id: inheritedPreflightJobId,
+        instructions: [
+          "Synthesize the child research briefs into one planner-ready research brief.",
+          "Compare cited claims across children and preserve code citations and URL citations as distinct evidence classes.",
+          "Re-read cited files/lines before relying on a disputed code claim; preserve exact URLs for external documentation claims.",
+          "If child briefs contradict each other and the contradiction cannot be resolved, include needs_review with the conflicting evidence.",
+        ].join("\n"),
+      }, synthBudget)),
+    });
 
-  for (const childJob of childJobs) {
-    // Fanout synthesis is intentionally all-or-nothing: every branch brief must
-    // complete before the planner sees a merged research artifact.
-    addDependency(synthJob.id, childJob.id, "hard");
-  }
+    for (const childJob of childJobs) {
+      // Fanout synthesis is intentionally all-or-nothing: every branch brief must
+      // complete before the planner sees a merged research artifact.
+      addDependency(synthJob.id, childJob.id, "hard");
+    }
 
-  logEvent({
-    work_item_id: workItem.id,
-    job_id: synthJob.id,
-    event_type: shadow ? EVENT_TYPES.RESEARCH_FANOUT_SHADOWED : EVENT_TYPES.RESEARCH_FANOUT_STARTED,
-    actor_type: actorType,
-    message: `${shadow ? "Shadow" : "Active"} fanout created ${childJobs.length} child researcher(s) and synthesis #${synthJob.id}`,
-    event_json: {
-      version: 1,
+    logEvent({
+      work_item_id: workItem.id,
+      job_id: synthJob.id,
+      event_type: shadow ? EVENT_TYPES.RESEARCH_FANOUT_SHADOWED : EVENT_TYPES.RESEARCH_FANOUT_STARTED,
+      actor_type: actorType,
+      message: `${shadow ? "Shadow" : "Active"} fanout created ${childJobs.length} child researcher(s) and synthesis #${synthJob.id}`,
+      event_json: {
+        version: 1,
+        mode: fanoutMode,
+        source,
+        budget: researchBudget,
+        synth_budget: synthBudget,
+        reason: reason || null,
+        fanout_run_id: fanoutRunId,
+        branch_count: normalizedBranches.length,
+        branches: normalizedBranches,
+        child_job_ids: childJobs.map((job) => job.id),
+        synth_job_id: synthJob.id,
+        solo_job_id: soloJob?.id || null,
+        preflight_job_id: inheritedPreflightJobId,
+      },
+    });
+
+    return {
       mode: fanoutMode,
-      source,
-      budget: researchBudget,
-      synth_budget: synthBudget,
-      reason: reason || null,
-      fanout_run_id: fanoutRunId,
-      branch_count: normalizedBranches.length,
+      shadow,
+      fanoutRunId,
       branches: normalizedBranches,
-      child_job_ids: childJobs.map((job) => job.id),
-      synth_job_id: synthJob.id,
-      solo_job_id: soloJob?.id || null,
-      preflight_job_id: inheritedPreflightJobId,
-    },
+      childJobs,
+      synthJob,
+      synthBudget,
+    };
   });
-
-  return {
-    mode: fanoutMode,
-    shadow,
-    fanoutRunId,
-    branches: normalizedBranches,
-    childJobs,
-    synthJob,
-    synthBudget,
-  };
 }
 
 function fanoutOutputMetrics(output) {

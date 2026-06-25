@@ -7,6 +7,7 @@
 
 import { sha256Hex } from "./hash.js";
 import { isGeneratedPath } from "./path-hygiene.js";
+import { normalizeRepoPath } from "./paths.js";
 
 const TREE_RUN_KIND = "tree-derived";
 const ROOT_NODE_ID = "root";
@@ -555,7 +556,7 @@ function writeTree(db, tree) {
       numberOr(/** @type {any} */ (node.aggregates).descendantSymbolCount, 0),
       numberOr(/** @type {any} */ (node.aggregates).descendantFileCount, 0),
       JSON.stringify(node.aggregates),
-      JSON.stringify([...node.terms].sort()),
+      JSON.stringify([...node.terms].sort(compareStrings)),
     );
     nodeCount += 1;
   }
@@ -602,8 +603,8 @@ function writeScopeSidecar(db, tree) {
     if (node.kind !== "file" && node.kind !== "dir") continue;
     const repoRelPath = normalizeRepoPath(node.repoRelPath);
     if (!repoRelPath) continue;
-    const directTerms = [...node.terms].sort();
-    const projected = [...(projectedTerms.get(node.nodeId) || node.terms)].sort();
+    const directTerms = [...node.terms].sort(compareStrings);
+    const projected = [...(projectedTerms.get(node.nodeId) || node.terms)].sort(compareStrings);
     nodeInsert.run(
       node.nodeId,
       scopeParentNodeId(tree.nodes, node),
@@ -781,7 +782,7 @@ function readPaths(db, symbols) {
   } catch {
     // Fresh unit-test views can seed symbols directly without path rows.
   }
-  return [...paths].sort();
+  return [...paths].sort(compareStrings);
 }
 
 /**
@@ -908,11 +909,17 @@ function mergeCounts(target, source) {
 function compareNodes(a, b) {
   const kindDelta = kindOrder(a.kind) - kindOrder(b.kind);
   if (kindDelta !== 0) return kindDelta;
-  const pathDelta = String(a.repoRelPath || "").localeCompare(String(b.repoRelPath || ""));
+  const pathDelta = compareStrings(a.repoRelPath, b.repoRelPath);
   if (pathDelta !== 0) return pathDelta;
-  const labelDelta = String(a.label || "").localeCompare(String(b.label || ""));
+  const labelDelta = compareStrings(a.label, b.label);
   if (labelDelta !== 0) return labelDelta;
-  return String(a.nodeId).localeCompare(String(b.nodeId));
+  return compareStrings(a.nodeId, b.nodeId);
+}
+
+function compareStrings(a, b) {
+  const left = String(a || "");
+  const right = String(b || "");
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function kindOrder(kind) {
@@ -947,14 +954,6 @@ function dirNodeId(repoRelPath) {
 
 function fileNodeId(repoRelPath) {
   return `file:${normalizeRepoPath(repoRelPath)}`;
-}
-
-function normalizeRepoPath(value) {
-  return String(value || "")
-    .replace(/\\/g, "/")
-    .replace(/^\.\/+/, "")
-    .replace(/\/+/g, "/")
-    .replace(/^\/+|\/+$/g, "");
 }
 
 function isTestPath(value) {

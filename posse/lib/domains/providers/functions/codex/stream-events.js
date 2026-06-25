@@ -21,6 +21,7 @@ export function __testBuildCloseStats({
   modelName,
   totalInputTokens,
   totalOutputTokens,
+  totalCachedInputTokens = null,
   longContextInputTokens = null,
   durationMs,
   finalOutput,
@@ -41,6 +42,7 @@ export function __testBuildCloseStats({
     provider: "codex",
     inputTokens: totalInputTokens,
     outputTokens: totalOutputTokens,
+    cachedInputTokens: totalCachedInputTokens,
     longContextInputTokens,
     durationMs,
     outputChars: (finalOutput || stdout.trim()).length,
@@ -356,15 +358,30 @@ export function extractUsageFromEvent(msg) {
       ["output_tokens_delta", "delta_output_tokens", "outputTokensDelta", "output_delta_tokens", "completion_tokens_delta", "delta_completion_tokens", "completionTokensDelta"],
       ["output_tokens", "outputTokens", "completion_tokens", "completionTokens"]
     );
+    const cachedInput = pickUsageMetric(
+      c,
+      ["total_cached_input_tokens", "cached_input_tokens_total", "totalCachedInputTokens", "cachedInputTokensTotal", "total_cached_prompt_tokens", "cached_prompt_tokens_total", "cachedPromptTokensTotal"],
+      ["cached_input_tokens_delta", "delta_cached_input_tokens", "cachedInputTokensDelta", "cached_input_delta_tokens", "cached_prompt_tokens_delta", "delta_cached_prompt_tokens", "cachedPromptTokensDelta"],
+      ["cached_input_tokens", "cachedInputTokens", "cached_prompt_tokens", "cachedPromptTokens", "cache_read_input_tokens", "cacheReadInputTokens"]
+    );
     const inputTokens = input.value;
     const outputTokens = output.value;
-    if (inputTokens != null || outputTokens != null) {
-      return {
+    const cachedInputTokens = cachedInput.value ?? pickUsageValue(
+      c?.input_tokens_details || c?.prompt_tokens_details,
+      ["cached_tokens", "cachedTokens"],
+    );
+    if (inputTokens != null || outputTokens != null || cachedInputTokens != null) {
+      const usage = {
         inputTokens,
         outputTokens,
         inputKind: input.kind,
         outputKind: output.kind,
       };
+      if (cachedInputTokens != null) {
+        usage.cachedInputTokens = cachedInputTokens;
+        usage.cachedInputKind = cachedInput.kind || "ambiguous";
+      }
+      return usage;
     }
   }
   return { inputTokens: null, outputTokens: null, inputKind: null, outputKind: null };
@@ -466,16 +483,18 @@ function createTokenUsageFieldAccumulator() {
 export function createCodexUsageAccumulator() {
   const input = createTokenUsageFieldAccumulator();
   const output = createTokenUsageFieldAccumulator();
+  const cachedInput = createTokenUsageFieldAccumulator();
   const seenUsageEvents = new Set();
   const snapshot = () => ({
     inputTokens: input.value(),
     outputTokens: output.value(),
+    cachedInputTokens: cachedInput.value(),
     longContextInputTokens: input.maxSegment(),
   });
   return {
     add(usage, options = {}) {
       if (!usage || typeof usage !== "object") return snapshot();
-      if (usage.inputTokens == null && usage.outputTokens == null) return snapshot();
+      if (usage.inputTokens == null && usage.outputTokens == null && usage.cachedInputTokens == null) return snapshot();
       const eventKey = typeof options === "string" ? options : options?.eventKey;
       const normalizedKey = eventKey == null ? "" : String(eventKey).trim();
       if (normalizedKey) {
@@ -484,6 +503,7 @@ export function createCodexUsageAccumulator() {
       }
       input.add(usage.inputTokens, usage.inputKind || "ambiguous");
       output.add(usage.outputTokens, usage.outputKind || "ambiguous");
+      cachedInput.add(usage.cachedInputTokens, usage.cachedInputKind || "ambiguous");
       return snapshot();
     },
     snapshot,
@@ -492,6 +512,9 @@ export function createCodexUsageAccumulator() {
     },
     get outputTokens() {
       return output.value();
+    },
+    get cachedInputTokens() {
+      return cachedInput.value();
     },
     get longContextInputTokens() {
       return input.maxSegment();

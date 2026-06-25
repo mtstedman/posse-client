@@ -101,6 +101,7 @@ export function registerTransactionLifecycleHooks({ onCommit = null, onRollback 
 }
 
 export function runImmediateTransaction(db, fn) {
+  if (db.inTransaction) return fn();
   db.exec("BEGIN IMMEDIATE");
   let committed = false;
   try {

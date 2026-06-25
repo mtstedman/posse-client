@@ -37,6 +37,10 @@ import {
   toDisplaySettingEntry,
   visibleLength,
 } from "../../functions/admin/shared-helpers.js";
+import {
+  buildAdminGitDiffFileDetail,
+  buildAdminGitDiffSnapshot,
+} from "../../functions/admin/git-diff-review.js";
 import fs from "fs";
 import path from "path";
 import { Worker } from "worker_threads";
@@ -130,17 +134,20 @@ import {
   toStorageSettingKey,
 } from "../../../settings/functions/admin-catalog.js";
 
-// Settings leads — it's the page admins reach for most often.
+// Keep Settings on shortcut 1, but start on Overview so the first screen shows
+// the operational agent/work summary instead of configuration controls.
 const ADMIN_TABS = Object.freeze([
   Object.freeze({ id: "settings", name: "Settings" }),
   Object.freeze({ id: "overview", name: "Overview" }),
   Object.freeze({ id: "work_items", name: "Work Items" }),
+  Object.freeze({ id: "diff_review", name: "Diff Review" }),
   Object.freeze({ id: "logs", name: "Logs" }),
   Object.freeze({ id: "atlas_report", name: "ATLAS Report" }),
 ]);
 const ADMIN_TAB_COUNT = ADMIN_TABS.length;
 const ADMIN_TAB_KEYS = new Set(ADMIN_TABS.map((_, index) => String(index + 1)));
 const ADMIN_TAB_NAV_LABEL = `Tab/1-${ADMIN_TAB_COUNT}`;
+const ADMIN_INITIAL_TAB_INDEX = Math.max(0, ADMIN_TABS.findIndex((tab) => tab.id === "overview"));
 const ADMIN_LOG_SOURCES = Object.freeze([
   Object.freeze({ id: "prompts", label: "Prompts" }),
   Object.freeze({ id: "outputs", label: "Outputs" }),
@@ -171,7 +178,7 @@ export { purgeRuntimeLogs };
 export class AdminTUI {
   constructor({ projectDir }) {
     this.projectDir = projectDir;
-    this._tab = 0;        // index into ADMIN_TABS — starts on Settings
+    this._tab = ADMIN_INITIAL_TAB_INDEX; // index into ADMIN_TABS — starts on Overview
     this._scroll = 0;
     this._tabScrolls = Array.from({ length: ADMIN_TAB_COUNT }, () => 0);
     this._logSource = "prompts"; // see ADMIN_LOG_SOURCES
@@ -213,6 +220,19 @@ export class AdminTUI {
     this._wiCallsCache = null;
     this._wiCallsCacheFor = null;
     this._wiCallsCacheAt = 0;
+    this._diffFocus = "nav";
+    this._diffListIndex = 0;
+    this._diffNavScroll = 0;
+    this._diffPaneScroll = 0;
+    this._diffNavRowMap = new Map();
+    this._diffSnapshotCache = null;
+    this._diffSnapshotCacheAt = 0;
+    this._diffSnapshotBuilding = false;
+    this._diffDetailCache = null;
+    this._diffDetailCacheKey = "";
+    this._diffDetailCacheFileKey = "";
+    this._diffDetailCacheAt = 0;
+    this._diffDetailBuildingKey = null;
     this._lastInputSig = null;
     this._lastInputAt = 0;
     this._renderScheduled = false;
@@ -274,10 +294,11 @@ export class AdminTUI {
       const provider = String(usage.provider || "").trim().toLowerCase();
       const tokens = Number(usage.usedTokens) || 0;
       const input = Number(usage.usedInputTokens) || 0;
+      const cachedInput = Math.min(input, Math.max(0, Number(usage.usedCachedInputTokens) || 0));
       const output = Number(usage.usedOutputTokens) || 0;
       const cost = Number(usage.costUsd) || 0;
       const tokenBreakdown = input > 0 || output > 0
-        ? ` ${C.dim}(${fmtTokens(input)} in + ${fmtTokens(output)} out)${C.reset}`
+        ? ` ${C.dim}(${fmtTokens(input)} in${cachedInput > 0 ? `, ${fmtTokens(cachedInput)} cached` : ""} + ${fmtTokens(output)} out)${C.reset}`
         : "";
       const costText = cost > 0
         ? `${fmtUsd(cost)} ${C.dim}${providerCostQualifier(provider)}${C.reset}`
@@ -316,6 +337,7 @@ export class AdminTUI {
     const providerUsage = getConfiguredProviderUsage();
     const totalCalls = callStats.reduce((sum, stat) => sum + (stat.call_count || 0), 0);
     const totalInputTokens = callStats.reduce((sum, stat) => sum + (stat.total_input_tokens || 0), 0);
+    const totalCachedInputTokens = callStats.reduce((sum, stat) => sum + (stat.total_cached_input_tokens || 0), 0);
     const totalOutputTokens = callStats.reduce((sum, stat) => sum + (stat.total_output_tokens || 0), 0);
     const totalDurationMs = callStats.reduce((sum, stat) => sum + (stat.total_duration_ms || 0), 0);
     const lockSnapshot = this._getAdminLockSnapshot();
@@ -343,7 +365,7 @@ export class AdminTUI {
       `- Jobs: ${allJobs.length}`,
       `- Reports: ${reports.length}`,
       `- Agent calls: ${totalCalls}`,
-      `- Tokens: ${fmtTokens(totalInputTokens + totalOutputTokens)} (${fmtTokens(totalInputTokens)} in + ${fmtTokens(totalOutputTokens)} out)`,
+      `- Tokens: ${fmtTokens(totalInputTokens + totalOutputTokens)} (${fmtTokens(totalInputTokens)} in${totalCachedInputTokens > 0 ? `, ${fmtTokens(totalCachedInputTokens)} cached` : ""} + ${fmtTokens(totalOutputTokens)} out)`,
       `- Agent runtime: ${fmtDuration(totalDurationMs)}`,
       "",
       "Locks",
@@ -843,7 +865,9 @@ export class AdminTUI {
 
     const tabId = this._tabId();
     if (key && key.name === "escape") {
-      if (tabId === "work_items" && this._selectedCall != null) {
+      if (tabId === "diff_review" && this._diffFocus === "diff") {
+        this._diffFocus = "nav";
+      } else if (tabId === "work_items" && this._selectedCall != null) {
         this._selectedCall = null;
         this._scroll = 0;
       } else if (tabId === "work_items" && this._selectedWi != null) {
@@ -882,6 +906,8 @@ export class AdminTUI {
           this._selectedCall = calls[this._callListIndex].id;
           this._scroll = 0;
         }
+      } else if (tabId === "diff_review") {
+        this._enterGitDiffPane();
       } else if (tabId === "settings") {
         this._startEdit();
         return;
@@ -893,6 +919,21 @@ export class AdminTUI {
           this._scroll = 0;
         }
       }
+    } else if (tabId === "diff_review" && matchesHotkey(str, key, "r")) {
+      this._invalidateGitDiffReview();
+    } else if (tabId === "diff_review" && (matchesHotkey(str, key, "j") || matchesHotkey(str, key, "k"))) {
+      if (this._diffFocus === "diff") this._scrollGitDiffPane(matchesHotkey(str, key, "j") ? 1 : -1);
+      else this._moveGitDiffSelection(matchesHotkey(str, key, "j") ? 1 : -1);
+    } else if (tabId === "diff_review" && (
+      matchesHotkey(str, key, "n")
+      || matchesHotkey(str, key, "p")
+      || str === "]"
+      || str === "["
+      || key?.name === "]"
+      || key?.name === "["
+    )) {
+      const forward = matchesHotkey(str, key, "n") || str === "]" || key?.name === "]";
+      this._jumpGitDiffHunk(forward ? 1 : -1);
     } else if (tabId === "logs" && (matchesHotkey(str, key, "j") || matchesHotkey(str, key, "k"))) {
       const delta = matchesHotkey(str, key, "j") ? 1 : -1;
       const maxPrompt = Math.max(0, Number(this._promptCount || 0) - 1);
@@ -911,10 +952,17 @@ export class AdminTUI {
       this._purgeLogsMessage = "";
     } else if (tabId === "logs" && (key?.name === "left" || key?.name === "right")) {
       this._cycleLogSource(key.name === "right" ? 1 : -1);
+    } else if (tabId === "diff_review" && key?.name === "right") {
+      this._enterGitDiffPane();
+    } else if (tabId === "diff_review" && key?.name === "left") {
+      this._diffFocus = "nav";
     } else if (tabId === "settings" && (key?.name === "left" || key?.name === "right")) {
       this._cycleSettingsPane(key.name === "right" ? 1 : -1);
     } else if (key && key.name === "up") {
-      if (tabId === "settings") {
+      if (tabId === "diff_review") {
+        if (this._diffFocus === "diff") this._scrollGitDiffPane(-1);
+        else this._moveGitDiffSelection(-1);
+      } else if (tabId === "settings") {
         const selectedRow = this._settingsRowMap.get(this._getSelectedEditableSetting()?.setting_key);
         if (typeof selectedRow === "number" && this._scroll > selectedRow) {
           this._scroll--;
@@ -942,7 +990,10 @@ export class AdminTUI {
       }
       this._tabScrolls[this._tab] = this._scroll;
     } else if (key && key.name === "down") {
-      if (tabId === "settings") {
+      if (tabId === "diff_review") {
+        if (this._diffFocus === "diff") this._scrollGitDiffPane(1);
+        else this._moveGitDiffSelection(1);
+      } else if (tabId === "settings") {
         const settingsList = this._getEditableSettings();
         if (settingsList.length > 0 && this._settingsIndex >= settingsList.length - 1) {
           this._scroll++;
@@ -969,6 +1020,10 @@ export class AdminTUI {
         this._scroll++;
       }
       this._tabScrolls[this._tab] = this._scroll;
+    } else if (tabId === "diff_review" && (key?.name === "pageup" || key?.name === "pagedown")) {
+      const direction = key.name === "pagedown" ? 1 : -1;
+      if (this._diffFocus === "diff") this._scrollGitDiffPane(direction * this._diffPanelRows());
+      else this._moveGitDiffSelection(direction * Math.max(1, this._diffPanelRows() - 2));
     } else if (key && key.name === "tab") {
       this._resetEditState();
       this._selectedWi = null;
@@ -1166,6 +1221,7 @@ export class AdminTUI {
       settings: () => this._buildSettings(fullW),
       overview: () => this._buildOverview(fullW),
       work_items: () => this._buildWorkItemsTab(fullW),
+      diff_review: () => this._buildGitDiffReview(fullW),
       logs: () => this._buildLogs(fullW),
       atlas_report: () => this._buildAtlasReport(fullW),
     };
@@ -1233,6 +1289,12 @@ export class AdminTUI {
       navLines.push(` ${C.dim}[↑↓] Select call  [Enter] Open call  [Esc/Bksp] Back to list  [${ADMIN_TAB_NAV_LABEL}] Section${C.reset}`);
     } else if (tabId === "work_items") {
       navLines.push(` ${C.dim}[↑↓] Select WI  [Enter] Open WI  [${ADMIN_TAB_NAV_LABEL}] Section  [q/Esc] Exit${C.reset}`);
+    } else if (tabId === "diff_review") {
+      if (this._diffFocus === "diff") {
+        navLines.push(` ${C.dim}[↑↓/PgUp/PgDn] Scroll diff  [n/p] Hunk  [←/Esc] Files  [r] Refresh  [${ADMIN_TAB_NAV_LABEL}] Section${C.reset}`);
+      } else {
+        navLines.push(` ${C.dim}[↑↓] Select file  [→/Enter] Diff pane  [PgUp/PgDn] Page files  [r] Refresh  [${ADMIN_TAB_NAV_LABEL}] Section  [q/Esc] Exit${C.reset}`);
+      }
     } else if (tabId === "settings") {
       const selected = this._getSelectedEditableSetting();
       navLines.push(` ${C.dim}[←→] Pane  [↑↓] Select  [PgUp/PgDn] Jump section  [Enter/e/type] Edit highlighted item  [${ADMIN_TAB_NAV_LABEL}] Section  [Esc] Exit${C.reset}`);
@@ -1501,13 +1563,14 @@ export class AdminTUI {
     const callStats = getAgentCallStats();
     const providerUsage = getConfiguredProviderUsage();
     let totalCalls = 0, totalSucceeded = 0, totalFailed = 0;
-    let totalInTok = 0, totalOutTok = 0, totalDurMs = 0;
+    let totalInTok = 0, totalCachedInTok = 0, totalOutTok = 0, totalDurMs = 0;
 
     for (const s of callStats) {
       totalCalls += s.call_count;
       totalSucceeded += s.succeeded;
       totalFailed += s.failed;
       totalInTok += (s.total_input_tokens || 0);
+      totalCachedInTok += (s.total_cached_input_tokens || 0);
       totalOutTok += (s.total_output_tokens || 0);
       totalDurMs += (s.total_duration_ms || 0);
     }
@@ -1517,7 +1580,7 @@ export class AdminTUI {
     lines.push(` ${C.bold}Token Usage${C.reset}  ${C.dim}(all time)${C.reset}`);
     lines.push(` ${C.dim}${"─".repeat(Math.min(inner, 60))}${C.reset}`);
     lines.push(` ${C.bold}\u250c${"─".repeat(Math.min(inner - 4, 66))}\u2510${C.reset}`);
-    lines.push(` ${C.bold}\u2502${C.reset}  ${C.bold}Total Tokens:${C.reset}    ${fmtTokens(totalTok)}  ${C.dim}(${fmtTokens(totalInTok)} in + ${fmtTokens(totalOutTok)} out)${C.reset}`);
+    lines.push(` ${C.bold}\u2502${C.reset}  ${C.bold}Total Tokens:${C.reset}    ${fmtTokens(totalTok)}  ${C.dim}(${fmtTokens(totalInTok)} in${totalCachedInTok > 0 ? `, ${fmtTokens(totalCachedInTok)} cached` : ""} + ${fmtTokens(totalOutTok)} out)${C.reset}`);
     lines.push(` ${C.bold}\u2502${C.reset}  ${C.bold}Total Duration:${C.reset}  ${fmtDuration(totalDurMs)}`);
     lines.push(` ${C.bold}\u2502${C.reset}  ${C.bold}Agent Calls:${C.reset}     ${totalCalls}  ${C.green}${totalSucceeded} ok${C.reset}${totalFailed > 0 ? `  ${C.red}${totalFailed} failed${C.reset}` : ""}`);
     if (totalCalls > 0) {
@@ -1608,6 +1671,7 @@ export class AdminTUI {
         SELECT COALESCE(model_name, model_tier, 'unknown') as model,
                COUNT(*) as calls,
                SUM(input_tokens) as input_tokens,
+               SUM(cached_input_tokens) as cached_input_tokens,
                SUM(output_tokens) as output_tokens,
                SUM(duration_ms) as duration_ms,
                SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succeeded
@@ -1619,7 +1683,7 @@ export class AdminTUI {
     if (modelMap.size > 0) {
       lines.push(` ${C.bold}Model Usage${C.reset}`);
       lines.push(` ${C.dim}${"─".repeat(Math.min(inner, 60))}${C.reset}`);
-      const hdr = `  ${"Model".padEnd(20)} ${"Calls".padStart(7)} ${"Tokens".padStart(10)} ${"Duration".padStart(10)} ${"Success".padStart(8)}`;
+      const hdr = `  ${"Model".padEnd(20)} ${"Calls".padStart(7)} ${"Tokens".padStart(10)} ${"Cached".padStart(9)} ${"Duration".padStart(10)} ${"Success".padStart(8)}`;
       lines.push(` ${C.dim}${hdr}${C.reset}`);
       lines.push(` ${C.dim}${"─".repeat(Math.min(hdr.length + 2, inner))}${C.reset}`);
 
@@ -1630,6 +1694,7 @@ export class AdminTUI {
           `  ${C.bold}${model.padEnd(20)}${C.reset} ` +
           `${String(m.calls).padStart(7)} ` +
           `${fmtTokens(tok).padStart(10)} ` +
+          `${fmtTokens(m.cached_input_tokens || 0).padStart(9)} ` +
           `${fmtDuration(m.duration_ms).padStart(10)} ` +
           `${(m.succeeded === m.calls ? C.green : C.yellow)}${rate.padStart(8)}${C.reset}`
         );
@@ -1644,17 +1709,18 @@ export class AdminTUI {
 
       const roleAgg = new Map();
       for (const s of callStats) {
-        if (!roleAgg.has(s.role)) roleAgg.set(s.role, { calls: 0, inTok: 0, outTok: 0, dur: 0, ok: 0, fail: 0 });
+        if (!roleAgg.has(s.role)) roleAgg.set(s.role, { calls: 0, inTok: 0, cachedInTok: 0, outTok: 0, dur: 0, ok: 0, fail: 0 });
         const r = roleAgg.get(s.role);
         r.calls += s.call_count;
         r.inTok += (s.total_input_tokens || 0);
+        r.cachedInTok += (s.total_cached_input_tokens || 0);
         r.outTok += (s.total_output_tokens || 0);
         r.dur += (s.total_duration_ms || 0);
         r.ok += s.succeeded;
         r.fail += s.failed;
       }
 
-      const hdr2 = `  ${"Role".padEnd(14)} ${"Calls".padStart(7)} ${"In Tok".padStart(9)} ${"Out Tok".padStart(9)} ${"Duration".padStart(10)} ${"% Share".padStart(8)}`;
+      const hdr2 = `  ${"Role".padEnd(14)} ${"Calls".padStart(7)} ${"In Tok".padStart(9)} ${"Cached".padStart(9)} ${"Out Tok".padStart(9)} ${"Duration".padStart(10)} ${"% Share".padStart(8)}`;
       lines.push(` ${C.dim}${hdr2}${C.reset}`);
       lines.push(` ${C.dim}${"─".repeat(Math.min(hdr2.length + 2, inner))}${C.reset}`);
 
@@ -1666,6 +1732,7 @@ export class AdminTUI {
           `  ${color}${role.padEnd(14)}${C.reset} ` +
           `${String(r.calls).padStart(7)} ` +
           `${fmtTokens(r.inTok).padStart(9)} ` +
+          `${fmtTokens(r.cachedInTok).padStart(9)} ` +
           `${fmtTokens(r.outTok).padStart(9)} ` +
           `${fmtDuration(r.dur).padStart(10)} ` +
           `${pct.padStart(8)}`
@@ -1703,6 +1770,306 @@ export class AdminTUI {
     const visibleRows = Math.max(this.rows - 6, 5);
     if (row < this._scroll) this._scroll = row;
     else if (row >= this._scroll + visibleRows) this._scroll = Math.max(0, row - visibleRows + 1);
+  }
+
+  _diffPanelRows() {
+    return Math.max(8, this.rows - 11);
+  }
+
+  _invalidateGitDiffReview() {
+    this._diffSnapshotCache = null;
+    this._diffSnapshotCacheAt = 0;
+    this._diffDetailCache = null;
+    this._diffDetailCacheKey = "";
+    this._diffDetailCacheFileKey = "";
+    this._diffDetailCacheAt = 0;
+    this._diffDetailBuildingKey = null;
+    this._diffPaneScroll = 0;
+  }
+
+  // The git diff snapshot fans out many git spawns; building it inline would
+  // freeze the keypress/render thread. Instead this returns the cached snapshot
+  // synchronously (or a "loading" placeholder on first paint) and kicks off the
+  // build in the background, re-rendering when it lands. A stale-but-present
+  // cache keeps showing while a refresh runs, so there is no flash to "loading".
+  _getGitDiffSnapshot() {
+    const fresh = this._diffSnapshotCache && (Date.now() - this._diffSnapshotCacheAt) < 3000;
+    if (!fresh) this._startGitDiffSnapshotBuild();
+    return this._diffSnapshotCache || this._gitDiffPlaceholderSnapshot();
+  }
+
+  _gitDiffPlaceholderSnapshot() {
+    return {
+      targetBranch: "main",
+      generatedAt: 0,
+      items: [],
+      files: [],
+      workItemCount: 0,
+      fileCount: 0,
+      additions: 0,
+      deletions: 0,
+      loading: true,
+    };
+  }
+
+  _startGitDiffSnapshotBuild() {
+    if (this._diffSnapshotBuilding) return;
+    this._diffSnapshotBuilding = true;
+    const rows = this._getWiRows();
+    Promise.resolve()
+      .then(() => buildAdminGitDiffSnapshot({ projectDir: this.projectDir, workItems: rows }))
+      .then((snapshot) => {
+        this._diffSnapshotCache = snapshot;
+      })
+      .catch((err) => {
+        this._diffSnapshotCache = {
+          targetBranch: "main",
+          generatedAt: Date.now(),
+          items: [{ wiId: null, title: "Diff snapshot failed", status: "error", files: [], errors: [err?.message || String(err)] }],
+          files: [],
+          workItemCount: 0,
+          fileCount: 0,
+          additions: 0,
+          deletions: 0,
+        };
+      })
+      .finally(() => {
+        this._diffSnapshotCacheAt = Date.now();
+        this._diffSnapshotBuilding = false;
+        this.requestRender({ force: true });
+      });
+  }
+
+  _getSelectedGitDiffFile() {
+    const snapshot = this._getGitDiffSnapshot();
+    const files = snapshot.files || [];
+    if (files.length === 0) {
+      this._diffListIndex = 0;
+      return null;
+    }
+    this._diffListIndex = Math.max(0, Math.min(this._diffListIndex, files.length - 1));
+    return files[this._diffListIndex];
+  }
+
+  _buildGitDiffNavRows(snapshot = this._getGitDiffSnapshot()) {
+    const rows = [];
+    const fileRowMap = new Map();
+    let fileIndex = 0;
+    for (const item of snapshot.items || []) {
+      const fileCount = item.files?.length || 0;
+      const countText = fileCount === 1 ? "1 file" : `${fileCount} files`;
+      const errorText = item.errors?.length ? ` ${C.red}!${C.reset}` : "";
+      const status = item.status ? ` ${paletteStatusColor(item.status, C)}${item.status}${C.reset}` : "";
+      rows.push({
+        type: "wi",
+        text: `${C.bold}WI#${item.wiId ?? "?"}${C.reset}${status} ${C.dim}${countText}${errorText}${C.reset}`,
+      });
+      if (item.errors?.length && fileCount === 0) {
+        for (const error of item.errors.slice(0, 3)) {
+          rows.push({ type: "error", text: `  ${C.red}!${C.reset} ${C.dim}${String(error).slice(0, 80)}${C.reset}` });
+        }
+      }
+      for (const file of item.files || []) {
+        const selected = fileIndex === this._diffListIndex;
+        const pointer = selected ? `${C.yellow}>${C.reset}` : " ";
+        const name = selected ? `${C.bold}${file.path}${C.reset}` : file.path;
+        const badge = this._formatGitDiffBadge(file);
+        const stats = this._formatGitDiffStats(file);
+        fileRowMap.set(fileIndex, rows.length);
+        rows.push({
+          type: "file",
+          fileIndex,
+          text: `${pointer} ${badge} ${name}${stats ? ` ${C.dim}${stats}${C.reset}` : ""}`,
+        });
+        fileIndex++;
+      }
+    }
+    this._diffNavRowMap = fileRowMap;
+    return { rows, fileRowMap };
+  }
+
+  _syncGitDiffNavScroll(snapshot = this._getGitDiffSnapshot()) {
+    const { rows, fileRowMap } = this._buildGitDiffNavRows(snapshot);
+    const panelRows = this._diffPanelRows();
+    const maxScroll = Math.max(0, rows.length - panelRows);
+    const selectedRow = fileRowMap.get(this._diffListIndex);
+    if (typeof selectedRow === "number") {
+      if (selectedRow < this._diffNavScroll) this._diffNavScroll = selectedRow;
+      else if (selectedRow >= this._diffNavScroll + panelRows) this._diffNavScroll = selectedRow - panelRows + 1;
+    }
+    this._diffNavScroll = Math.max(0, Math.min(this._diffNavScroll, maxScroll));
+    return { rows, fileRowMap };
+  }
+
+  _moveGitDiffSelection(delta) {
+    const snapshot = this._getGitDiffSnapshot();
+    const files = snapshot.files || [];
+    if (files.length === 0) return;
+    this._diffListIndex = Math.max(0, Math.min(files.length - 1, this._diffListIndex + delta));
+    this._diffPaneScroll = 0;
+    this._syncGitDiffNavScroll(snapshot);
+  }
+
+  _enterGitDiffPane() {
+    if (!this._getSelectedGitDiffFile()) return;
+    this._diffFocus = "diff";
+  }
+
+  // Mirror of _getGitDiffSnapshot for the per-file diff text: build off the
+  // render thread, return the cached detail (or a "loading" line) synchronously.
+  _getGitDiffFileDetail(file = this._getSelectedGitDiffFile()) {
+    if (!file) return { lines: ["No file selected."], hunkLineIndexes: [] };
+    const key = `${this._diffSnapshotCache?.generatedAt || 0}:${file.key}`;
+    const fresh = this._diffDetailCache && this._diffDetailCacheKey === key
+      && (Date.now() - this._diffDetailCacheAt) < 3000;
+    if (!fresh) this._startGitDiffFileDetailBuild(file, key);
+    // Serve the cached detail while a refresh runs, but only when it is for the
+    // SAME file — a snapshot refresh (new generatedAt) must not flash to
+    // "loading", while switching files must not briefly show the prior file.
+    if (this._diffDetailCache && this._diffDetailCacheFileKey === file.key) return this._diffDetailCache;
+    return { lines: ["Loading diff…"], hunkLineIndexes: [] };
+  }
+
+  _startGitDiffFileDetailBuild(file, key) {
+    if (this._diffDetailBuildingKey === key) return;
+    this._diffDetailBuildingKey = key;
+    Promise.resolve()
+      .then(() => buildAdminGitDiffFileDetail({ projectDir: this.projectDir, file }))
+      .then((detail) => {
+        if (this._diffDetailBuildingKey !== key) return; // a newer selection won
+        this._diffDetailCache = detail;
+        this._diffDetailCacheKey = key;
+        this._diffDetailCacheFileKey = file.key;
+        this._diffDetailCacheAt = Date.now();
+      })
+      .catch((err) => {
+        if (this._diffDetailBuildingKey !== key) return;
+        this._diffDetailCache = { lines: [`Diff load failed: ${err?.message || err}`], hunkLineIndexes: [] };
+        this._diffDetailCacheKey = key;
+        this._diffDetailCacheFileKey = file.key;
+        this._diffDetailCacheAt = Date.now();
+      })
+      .finally(() => {
+        if (this._diffDetailBuildingKey === key) this._diffDetailBuildingKey = null;
+        this.requestRender({ force: true });
+      });
+  }
+
+  _scrollGitDiffPane(delta) {
+    const detail = this._getGitDiffFileDetail();
+    const maxScroll = Math.max(0, (detail.lines?.length || 0) - this._diffPanelRows());
+    this._diffPaneScroll = Math.max(0, Math.min(maxScroll, this._diffPaneScroll + delta));
+  }
+
+  _jumpGitDiffHunk(direction) {
+    const detail = this._getGitDiffFileDetail();
+    const hunks = detail.hunkLineIndexes || [];
+    if (hunks.length === 0) return;
+    const current = this._diffPaneScroll;
+    let next = null;
+    if (direction > 0) {
+      next = hunks.find((line) => line > current);
+      if (next == null) next = hunks[0];
+    } else {
+      for (let i = hunks.length - 1; i >= 0; i--) {
+        if (hunks[i] < current) {
+          next = hunks[i];
+          break;
+        }
+      }
+      if (next == null) next = hunks[hunks.length - 1];
+    }
+    this._diffPaneScroll = Math.max(0, Math.min(next, Math.max(0, (detail.lines?.length || 0) - this._diffPanelRows())));
+    this._diffFocus = "diff";
+  }
+
+  _formatGitDiffBadge(file) {
+    const status = String(file.worktreeStatus || file.branchStatus || "?").slice(0, 3);
+    const source = file.hasBranchDiff && file.hasWorktreeDiff
+      ? "B+W"
+      : file.hasBranchDiff ? "BR" : "WT";
+    const color = file.untracked || status.startsWith("?")
+      ? C.yellow
+      : status.startsWith("A") ? C.green
+        : status.startsWith("D") ? C.red
+          : status.startsWith("R") ? C.cyan
+            : C.yellow;
+    return `${color}${status.padEnd(3)}${C.reset}${C.dim}/${source.padEnd(3)}${C.reset}`;
+  }
+
+  _formatGitDiffStats(file) {
+    if (!file) return "";
+    if (file.binary) return "binary";
+    if (!Number.isFinite(file.additions) || !Number.isFinite(file.deletions)) return "";
+    return `+${file.additions}/-${file.deletions}`;
+  }
+
+  _colorizeGitDiffLine(line) {
+    const text = String(line ?? "");
+    if (text.startsWith("# ")) return `${C.bold}${C.cyan}${text}${C.reset}`;
+    if (text.startsWith("diff --git")) return `${C.bold}${text}${C.reset}`;
+    if (text.startsWith("@@")) return `${C.cyan}${text}${C.reset}`;
+    if (text.startsWith("+++") || text.startsWith("---")) return `${C.dim}${text}${C.reset}`;
+    if (text.startsWith("+")) return `${C.green}${text}${C.reset}`;
+    if (text.startsWith("-")) return `${C.red}${text}${C.reset}`;
+    return text;
+  }
+
+  _buildGitDiffReview(width) {
+    this._scroll = 0;
+    this._tabScrolls[this._tab] = 0;
+    const lines = [];
+    const inner = Math.max(40, width - 2);
+    const snapshot = this._getGitDiffSnapshot();
+    const files = snapshot.files || [];
+
+    lines.push("");
+    lines.push(` ${C.bold}${C.cyan}═══ DIFF REVIEW ═══${C.reset}  ${C.dim}target ${snapshot.targetBranch || "main"} · ${snapshot.workItemCount || 0} WI · ${files.length} file${files.length === 1 ? "" : "s"} · +${snapshot.additions || 0}/-${snapshot.deletions || 0}${C.reset}`);
+    lines.push("");
+
+    if (files.length === 0) {
+      if (snapshot.loading) {
+        lines.push(`  ${C.dim}Loading diff review…${C.reset}`);
+        lines.push("");
+        return lines;
+      }
+      const errors = (snapshot.items || []).flatMap((item) => item.errors || []);
+      lines.push(`  ${C.dim}No active WI branch or worktree diffs found.${C.reset}`);
+      for (const error of errors.slice(0, 6)) {
+        lines.push(`  ${C.red}!${C.reset} ${String(error).slice(0, inner - 5)}`);
+      }
+      lines.push("");
+      return lines;
+    }
+
+    this._diffListIndex = Math.max(0, Math.min(this._diffListIndex, files.length - 1));
+    const selected = files[this._diffListIndex];
+    const detail = this._getGitDiffFileDetail(selected);
+    const panelRows = this._diffPanelRows();
+    const leftWidth = Math.max(28, Math.min(52, Math.floor(inner * 0.36)));
+    const rightWidth = Math.max(20, inner - leftWidth - 3);
+    const { rows: navRows } = this._syncGitDiffNavScroll(snapshot);
+    const maxPaneScroll = Math.max(0, (detail.lines?.length || 0) - panelRows);
+    this._diffPaneScroll = Math.max(0, Math.min(this._diffPaneScroll, maxPaneScroll));
+    const maxNavScroll = Math.max(0, navRows.length - panelRows);
+    this._diffNavScroll = Math.max(0, Math.min(this._diffNavScroll, maxNavScroll));
+
+    const leftTitle = this._diffFocus === "nav" ? `${C.yellow}WI / files${C.reset}` : `${C.dim}WI / files${C.reset}`;
+    const rightTitle = this._diffFocus === "diff"
+      ? `${C.yellow}${selected.path}${C.reset}`
+      : `${C.bold}${selected.path}${C.reset}`;
+    const selectedStats = this._formatGitDiffStats(selected);
+    const rightMeta = selectedStats ? ` ${C.dim}${selectedStats}${C.reset}` : "";
+    lines.push(` ${fit(leftTitle, leftWidth)} ${C.dim}|${C.reset} ${fit(`${rightTitle}${rightMeta}`, rightWidth)}`);
+    lines.push(` ${C.dim}${"-".repeat(leftWidth)}-+-${"-".repeat(rightWidth)}${C.reset}`);
+
+    for (let i = 0; i < panelRows; i++) {
+      const navLine = navRows[this._diffNavScroll + i]?.text || "";
+      const diffLine = detail.lines?.[this._diffPaneScroll + i] || "";
+      lines.push(` ${fit(navLine, leftWidth)} ${C.dim}|${C.reset} ${fit(this._colorizeGitDiffLine(diffLine), rightWidth)}`);
+    }
+
+    return lines;
   }
 
   _buildWorkItemsTab(width) {
@@ -1806,7 +2173,7 @@ export class AdminTUI {
     const tok = (wi.input_tokens || 0) + (wi.output_tokens || 0);
     lines.push(`  ${C.bold}Totals${C.reset}`);
     lines.push(`    Agent Calls: ${C.bold}${wi.call_count || 0}${C.reset}  ${C.dim}(${wi.succeeded_calls || 0} ok / ${wi.failed_calls || 0} failed / ${wi.running_calls || 0} running)${C.reset}`);
-    lines.push(`    Tokens:      ${C.bold}${fmtTokens(tok)}${C.reset}  ${C.dim}(${fmtTokens(wi.input_tokens || 0)} in + ${fmtTokens(wi.output_tokens || 0)} out)${C.reset}`);
+    lines.push(`    Tokens:      ${C.bold}${fmtTokens(tok)}${C.reset}  ${C.dim}(${fmtTokens(wi.input_tokens || 0)} in${wi.cached_input_tokens > 0 ? `, ${fmtTokens(wi.cached_input_tokens || 0)} cached` : ""} + ${fmtTokens(wi.output_tokens || 0)} out)${C.reset}`);
     lines.push(`    Tool Calls:  ${C.bold}${wi.tool_calls || 0}${C.reset}`);
     lines.push(`    Duration:    ${C.bold}${fmtDuration(wi.total_duration_ms || 0)}${C.reset}`);
     lines.push(`    Cost:        ${C.bold}${fmtUsd(wi.cost_usd || 0)}${C.reset}`);
@@ -1871,7 +2238,7 @@ export class AdminTUI {
     lines.push("");
 
     lines.push(`  ${C.bold}Telemetry${C.reset}`);
-    lines.push(`    Tokens:    ${C.bold}${fmtTokens(tok)}${C.reset}  ${C.dim}(${fmtTokens(call.input_tokens || 0)} in + ${fmtTokens(call.output_tokens || 0)} out)${C.reset}`);
+    lines.push(`    Tokens:    ${C.bold}${fmtTokens(tok)}${C.reset}  ${C.dim}(${fmtTokens(call.input_tokens || 0)} in${call.cached_input_tokens > 0 ? `, ${fmtTokens(call.cached_input_tokens || 0)} cached` : ""} + ${fmtTokens(call.output_tokens || 0)} out)${C.reset}`);
     lines.push(`    Chars:     in=${C.bold}${call.prompt_chars || 0}${C.reset}  out=${C.bold}${call.output_chars || 0}${C.reset}`);
     lines.push(`    Duration:  ${C.bold}${fmtDuration(call.duration_ms || 0)}${C.reset}`);
     lines.push(`    Cost:      ${C.bold}${fmtUsd(call.cost_estimate_usd || 0)}${C.reset}`);

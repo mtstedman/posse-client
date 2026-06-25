@@ -770,7 +770,20 @@ function _resolveV2Action(toolName) {
   for (const candidate of ATLAS_TOOL_ACTIONS) {
     if (candidate.toLowerCase() === lowered) return candidate;
   }
+  const alias = V2_ACTION_ALIASES.get(_actionKey(action));
+  if (alias && ATLAS_TOOL_ACTIONS.includes(/** @type {any} */ (alias))) return alias;
   return null;
+}
+
+const V2_ACTION_ALIASES = new Map([
+  ["symbolgetcard", "symbol.card"],
+  ["symbolgetcards", "symbol.cards"],
+  ["symbolcards", "symbol.cards"],
+  ["treewalk", "tree.branch"],
+]);
+
+function _actionKey(action) {
+  return String(action || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
 }
 
 function _v2EnvelopeToMcp(envelope) {

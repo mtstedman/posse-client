@@ -1,13 +1,122 @@
 import { C } from "../../../../shared/format/functions/colors.js";
 import { statusIcon as paletteStatusIcon } from "../../functions/display/status-palette.js";
-import { stripAnsi, _sanitizeDisplayLine } from "../../functions/display/helpers/formatters.js";
+import { fit, stripAnsi, _sanitizeDisplayLine } from "../../functions/display/helpers/formatters.js";
 import { roleBrandColor, roleBrandIcon } from "../../functions/display/helpers/brand.js";
 import { jobLabel, jobDisplayStatus } from "../../functions/display/helpers/job-status.js";
 import { renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
 import { canonicalAtlasActionName } from "../../../../functions/tools/mcp-surface.js";
+import { listActiveAgentGuidanceForJob, listAgentInteractions } from "../../../queue/functions/index.js";
+import { readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
 
-const POSSE_HEADER_WIDTH = 45;
+const POSSE_HEADER_WIDTH = 16;
 const POSSE_HEADER_MASCOT_GAP = 2;
+const POSSE_MARK = "\u259f";
+const LIVE_CHANNEL_TOOL_TYPES = new Set([
+  "tool.agent_feedback",
+  "tool.get_operator_feedback",
+  "tool.ack_operator_feedback",
+]);
+
+
+
+function posseWordmark() {
+  return `${C.green}${C.bold}${POSSE_MARK}${C.reset} ${C.brightWhite}${C.bold}POSSE${C.reset}`;
+}
+
+
+
+function visiblePad(text, width) {
+  const safeWidth = Math.max(0, width | 0);
+  const fitted = fit(String(text || ""), safeWidth);
+  const visible = stripAnsi(fitted).length;
+  return `${fitted}${" ".repeat(Math.max(0, safeWidth - visible))}`;
+}
+
+
+
+function clamp(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+
+
+
+function formatElapsed(startTime) {
+  const elapsed = Math.max(0, Math.floor((Date.now() - Number(startTime || Date.now())) / 1000));
+  if (elapsed < 60) return `${elapsed}s`;
+  const minutes = Math.floor(elapsed / 60);
+  const seconds = elapsed % 60;
+  return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+}
+
+
+
+function compactTime(value) {
+  return String(value || "").slice(11, 19) || "--:--:--";
+}
+
+
+
+function roleLabel(role) {
+  return String(role || "agent").replace(/^developer$/, "dev");
+}
+
+
+
+function monitorStateMeta(state) {
+  if (state === "ask") return { label: "ASK", color: C.red, rail: C.red };
+  if (state === "nudge") return { label: "nudge", color: C.yellow, rail: C.yellow };
+  if (state === "idle") return { label: "idle", color: C.dim, rail: C.dim };
+  return { label: "live", color: C.green, rail: C.green };
+}
+
+
+
+function monitorFeedbackMeta(row = {}) {
+  const kind = String(row.kind || "").toLowerCase();
+  const direction = String(row.direction || "").toLowerCase();
+  if (row._kind === "coordination") return { label: row.label || "coord", glyph: "\u25c7", color: C.blue };
+  if (kind === "activity") return { label: "agent", glyph: "\u25e6", color: C.cyan };
+  if (kind === "answer") return { label: "answer", glyph: "\u2713", color: C.green };
+  if (kind === "scope_request") return { label: "scope", glyph: "\u25b3", color: C.magenta };
+  if (kind === "status_request") return { label: "status", glyph: "?", color: C.blue };
+  if (kind === "nudge") return { label: "nudge", glyph: "\u203a", color: C.yellow };
+  if (direction === "user_to_agent") return { label: "input", glyph: "\u203a", color: C.yellow };
+  return { label: "feedback", glyph: "\u25e6", color: C.cyan };
+}
+
+
+
+function monitorFeedbackSuffix(row = {}) {
+  const direction = String(row.direction || "").toLowerCase();
+  if (row._kind === "coordination") return "";
+  if (direction !== "user_to_agent") return "";
+  const decision = String(row.ack_decision || "").trim();
+  if (decision) {
+    if (decision === "accepted") return `${C.green}accepted${C.reset}`;
+    if (decision === "rejected") return `${C.red}rejected${C.reset}`;
+    if (decision === "deferred") return `${C.yellow}deferred${C.reset}`;
+    return `${C.dim}${decision}${C.reset}`;
+  }
+  if (row.ack_state === "acknowledged") return `${C.green}acked${C.reset}`;
+  return `${C.yellow}pending${C.reset}`;
+}
+
+
+
+function monitorToolMeta(row = {}) {
+  const text = `${row.observation_type || ""} ${row.summary || ""}`.toLowerCase();
+  if (/\b(error|failed|fail|denied|cancelled|canceled)\b/.test(text)) return { glyph: "\u2715", color: C.red, label: "err" };
+  if (/\b(pass|passed|ok|succeeded|complete)\b/.test(text)) return { glyph: "\u2713", color: C.green, label: "ok" };
+  return { glyph: "\u25cf", color: C.cyan, label: "call" };
+}
+
+
+
+function stripToolPrefix(value) {
+  return String(value || "tool.?").replace(/^tool\./, "");
+}
 
 
 
@@ -87,7 +196,7 @@ export class DisplayRightPanelRenderer {
     if (!mascot) return headerLines;
 
     const gap = " ".repeat(POSSE_HEADER_MASCOT_GAP);
-    return headerLines.map((line, idx) => `${line}${gap}${mascot[idx] || ""}`);
+    return headerLines.map((line, idx) => `${visiblePad(line, POSSE_HEADER_WIDTH)}${gap}${mascot[idx] || ""}`);
   }
 
 
@@ -97,26 +206,23 @@ export class DisplayRightPanelRenderer {
   _buildRight(width, maxLines) {
     const lines = [];
 
-    // ── ASCII art header (side-by-side box-drawing) ──
-    //   MASONS (dim) + gap + POSSE (cyan)
-    //   Each letter is 3 chars wide, 1-char space between letters, 2-char gap between words
-    //   Total visible: 23 + 2 + 19 = 44 chars + 1 leading space = 45
+    // ── Compact wordmark header ──
     if (width >= 46) {
       lines.push(...this._withPosseMascot([
-        ` ${C.dim}\u250f\u2533\u2513 \u250f\u2501\u2513 \u250f\u2501\u2513 \u250f\u2501\u2513 \u250f\u2513\u257b \u250f\u2501\u2513${C.reset}  ${C.cyan}\u250f\u2501\u2513 \u250f\u2501\u2513 \u250f\u2501\u2513 \u250f\u2501\u2513 \u250f\u2501\u2578${C.reset}`,
-        ` ${C.dim}\u2503\u2503\u2503 \u2523\u2501\u252b \u2517\u2501\u2513 \u2503 \u2503 \u2503\u2517\u252b \u2517\u2501\u2513${C.reset}  ${C.cyan}\u2523\u2501\u251b \u2503 \u2503 \u2517\u2501\u2513 \u2517\u2501\u2513 \u2523\u2501\u2578${C.reset}`,
-        ` ${C.dim}\u2579 \u2579 \u2579 \u2579 \u2517\u2501\u251b \u2517\u2501\u251b \u2579 \u2579 \u2517\u2501\u251b${C.reset}  ${C.cyan}\u2579   \u2517\u2501\u251b \u2517\u2501\u251b \u2517\u2501\u251b \u2517\u2501\u2578${C.reset}`,
+        ` ${posseWordmark()}`,
+        "",
+        "",
       ], width));
       const clock = this._buildRunClockLine(width);
       if (clock) lines.push(clock);
       lines.push(` ${C.dim}${"\u2500".repeat(Math.min(width - 2, 44))}${C.reset}`);
     } else if (width >= 20) {
-      lines.push(` ${C.dim}Mason's${C.reset} ${C.cyan}${C.bold}Posse${C.reset}`);
+      lines.push(` ${posseWordmark()}`);
       const clock = this._buildRunClockLine(width);
       if (clock) lines.push(clock);
       lines.push(` ${C.dim}${"\u2500".repeat(Math.min(width - 2, 16))}${C.reset}`);
     } else {
-      lines.push(` ${C.cyan}${C.bold}Mason's Posse${C.reset}`);
+      lines.push(` ${posseWordmark()}`);
     }
 
     if (this._rightMode === "pipeline" && this.getPipelineData) {
@@ -158,6 +264,438 @@ export class DisplayRightPanelRenderer {
     }
 
     return lines;
+  }
+
+
+
+  // ── Monitor Agents View ───────────────────────────────────────────────
+
+  _buildMonitor(width, maxLines) {
+    const lines = [];
+    const agents = this._collectMonitorAgents();
+    const running = agents.filter((agent) => agent.state === "live" || agent.state === "nudge").length;
+    const waiting = agents.filter((agent) => agent.state === "ask").length;
+    const selected = this._selectMonitorAgent(agents);
+
+    const status = [
+      `${C.brightWhite}${String(running).padStart(2, "0")}${C.reset}${C.dim} running${C.reset}`,
+      waiting > 0
+        ? `${C.red}${C.bold}${String(waiting).padStart(2, "0")} waiting on you${C.reset}`
+        : `${C.dim}00 waiting on you${C.reset}`,
+      `${C.dim}${Math.max(0, this.concurrency - this.workers.size)} idle slots${C.reset}`,
+    ].join(` ${C.dim}\u00b7${C.reset} `);
+
+    const mastheadLeft = ` ${posseWordmark()} ${C.dim}/${C.reset} ${C.brightWhite}${C.bold}monitor agents${C.reset} ${C.dim}[operator console]${C.reset}`;
+    lines.push(`${visiblePad(mastheadLeft, Math.max(20, width - stripAnsi(status).length - 1))}${status}`);
+    lines.push(` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`);
+
+    if (agents.length === 0) {
+      lines.push("");
+      lines.push(` ${C.dim}No live agents right now.${C.reset}`);
+      lines.push(` ${C.dim}Monitor Agents will show running workers, questions, nudges, prompt lens snapshots, and tool history here.${C.reset}`);
+      return lines.slice(0, maxLines);
+    }
+
+    const leftW = clamp(Math.floor(width * 0.34), 28, Math.min(42, width - 32));
+    const rightW = Math.max(20, width - leftW - 1);
+    const divider = `${C.dim}\u2502${C.reset}`;
+    const leftHead = ` ${C.dim}FLEET${C.reset}${" ".repeat(Math.max(1, leftW - 19))}${C.dim}< > cycle${C.reset}`;
+    const rightHead = selected
+      ? ` ${C.brightWhite}${C.bold}[${selected.index}] ${selected.role} #${selected.jobId}${C.reset}${C.dim} \u00b7 ${selected.wiLabel} \u00b7 attempt ${selected.attempt}${C.reset}`
+      : "";
+    lines.push(`${visiblePad(leftHead, leftW)}${divider}${fit(rightHead, rightW)}`);
+    lines.push(`${C.dim}${"\u2500".repeat(leftW)}\u253c${"\u2500".repeat(rightW)}${C.reset}`);
+
+    const fleetLines = this._buildMonitorFleetLines(agents, selected, leftW);
+    const focusLines = selected ? this._buildMonitorFocusLines(selected, rightW) : [];
+    const bodyRows = Math.max(0, maxLines - lines.length - 1);
+    const rows = Math.min(bodyRows, Math.max(fleetLines.length, focusLines.length));
+    for (let idx = 0; idx < rows; idx++) {
+      lines.push(`${visiblePad(fleetLines[idx] || "", leftW)}${divider}${fit(focusLines[idx] || "", rightW)}`);
+    }
+
+    while (lines.length < maxLines - 1) {
+      lines.push(`${" ".repeat(leftW)}${divider}`);
+    }
+    const selectedHint = selected ? `selected job #${selected.jobId}` : "no selection";
+    lines.push(` ${C.dim}[1-${Math.min(agents.length, 9)}] jump  [< >] cycle  [n] nudge ${selectedHint}  [q/m] log${C.reset}`);
+    return lines.slice(0, maxLines);
+  }
+
+
+
+  _collectMonitorAgents() {
+    const queueData = this._getQueueData?.({ maxAgeMs: 1000 }) || {};
+    const jobsById = new Map((queueData.jobs || []).map((job) => [Number(job.id), job]));
+    const questionJobIds = new Set((this._questionQueue || []).map((q) => Number(q.jobId)).filter(Number.isFinite));
+    const agents = [...this.workers.entries()].map(([jobId, worker], idx) => {
+      const numericJobId = Number(jobId);
+      const job = jobsById.get(numericJobId) || {};
+      let guidance = [];
+      let interactionRows = [];
+      let activityRows = [];
+      try {
+        guidance = listActiveAgentGuidanceForJob(numericJobId, { limit: 3 });
+      } catch {
+        guidance = [];
+      }
+      try {
+        interactionRows = listAgentInteractions({ job_id: numericJobId, limit: 14 });
+        activityRows = interactionRows
+          .filter((row) => row.direction === "agent_to_user" && row.kind === "activity");
+      } catch {
+        interactionRows = [];
+        activityRows = [];
+      }
+      // Pending = not yet acknowledged by an attempt. Acknowledged guidance is
+      // still durable (shown in the focus pane), but it must not keep the fleet
+      // rail stuck on "nudge" forever after the agent has already consumed it.
+      const pendingGuidance = guidance.filter((row) => row.ack_state !== "acknowledged");
+      const state = questionJobIds.has(numericJobId) ? "ask" : (pendingGuidance.length > 0 ? "nudge" : "live");
+      const activity = _sanitizeDisplayLine(activityRows[0]?.body || worker?.activity || job.title || worker?.role || "running");
+      return {
+        index: idx + 1,
+        jobId: numericJobId,
+        workItemId: worker?.workItemId ?? job.work_item_id ?? null,
+        wiLabel: (worker?.workItemId ?? job.work_item_id) ? `WI#${worker?.workItemId ?? job.work_item_id}` : "WI?",
+        role: roleLabel(worker?.role || job.job_type || "agent"),
+        state,
+        activity,
+        attempt: worker?.attempt || 1,
+        provider: worker?.provider || null,
+        modelName: worker?.modelName || null,
+        tier: worker?.tier || job.model_tier || "standard",
+        effort: worker?.effort || "medium",
+        elapsed: formatElapsed(worker?.startTime),
+        interactionRows,
+        activityRows,
+        guidance,
+        pendingGuidance,
+        status: job.status || "running",
+      };
+    });
+    const seen = new Set(agents.map((agent) => agent.jobId));
+    for (const job of queueData.jobs || []) {
+      const numericJobId = Number(job.id);
+      if (!Number.isFinite(numericJobId) || seen.has(numericJobId)) continue;
+      const status = String(job.status || "").toLowerCase();
+      const isHumanWait = status === "waiting_on_human"
+        || (job.job_type === "human_input" && status !== "succeeded" && status !== "canceled");
+      if (!isHumanWait) continue;
+      let guidance = [];
+      let interactionRows = [];
+      try {
+        guidance = listActiveAgentGuidanceForJob(numericJobId, { limit: 3 });
+        interactionRows = listAgentInteractions({ job_id: numericJobId, limit: 14 });
+      } catch {
+        guidance = [];
+        interactionRows = [];
+      }
+      agents.push({
+        index: agents.length + 1,
+        jobId: numericJobId,
+        workItemId: job.work_item_id ?? null,
+        wiLabel: job.work_item_id ? `WI#${job.work_item_id}` : "WI?",
+        role: roleLabel(job.job_type || "human"),
+        state: "ask",
+        activity: _sanitizeDisplayLine(job.title || "waiting on human input"),
+        attempt: job.attempt_count || 1,
+        provider: null,
+        modelName: null,
+        tier: job.model_tier || "standard",
+        effort: job.reasoning_effort || "medium",
+        elapsed: formatElapsed(Date.parse(job.updated_at || job.created_at || "") || Date.now()),
+        interactionRows,
+        activityRows: [],
+        guidance,
+        pendingGuidance: guidance.filter((row) => row.ack_state !== "acknowledged"),
+        status: job.status || "waiting_on_human",
+      });
+      seen.add(numericJobId);
+    }
+    agents.forEach((agent, idx) => { agent.index = idx + 1; });
+    return agents;
+  }
+
+
+
+  _selectMonitorAgent(agents) {
+    if (!Array.isArray(agents) || agents.length === 0) {
+      this._monitorSelectedJobId = null;
+      return null;
+    }
+    let selected = agents.find((agent) => agent.jobId === this._monitorSelectedJobId);
+    if (!selected) {
+      selected = agents[0];
+      this._monitorSelectedJobId = selected.jobId;
+    }
+    return selected;
+  }
+
+
+
+  _buildMonitorFleetLines(agents, selected, width) {
+    const lines = [];
+    for (const agent of agents.slice(0, 9)) {
+      const meta = monitorStateMeta(agent.state);
+      const isSelected = selected?.jobId === agent.jobId;
+      const selector = isSelected ? `${C.cyan}\u258c${C.reset}` : " ";
+      const rail = `${meta.rail}\u2503${C.reset}`;
+      const title = `${selector}${rail} ${C.brightWhite}${C.bold}[${agent.index}] ${agent.role}${C.reset} ${C.dim}#${agent.jobId} ${agent.wiLabel}${C.reset}`;
+      const tag = `${meta.color}${meta.label}${C.reset}`;
+      lines.push(`${visiblePad(title, Math.max(0, width - stripAnsi(tag).length - 1))}${tag}`);
+      lines.push(`   ${C.dim}${fit(agent.activity, Math.max(8, width - 5))}${C.reset}`);
+      if (agent.pendingGuidance?.length > 0) {
+        const latest = agent.pendingGuidance[0];
+        lines.push(`   ${C.yellow}${fit(`nudge queued: ${latest.body || ""}`, Math.max(8, width - 5))}${C.reset}`);
+      } else if (agent.guidance?.length > 0) {
+        const latest = agent.guidance[0];
+        lines.push(`   ${C.dim}${fit(`guidance active: ${latest.body || ""}`, Math.max(8, width - 5))}${C.reset}`);
+      }
+      lines.push("");
+    }
+    lines.push(`${C.dim}live steering on tool results${C.reset}`);
+    lines.push(`${C.dim}blocking questions will park here, not die in logs${C.reset}`);
+    return lines;
+  }
+
+
+
+  _monitorToolActivityForJob(jobId, { limit = 8 } = {}) {
+    let data = null;
+    try { data = typeof this.getToolData === "function" ? this.getToolData() : null; } catch { data = null; }
+    const recent = Array.isArray(data?.recent) ? data.recent : [];
+    const allRows = recent
+      .filter((row) => Number(row.job_id) === Number(jobId));
+    return {
+      toolRows: allRows
+        .filter((row) => !LIVE_CHANNEL_TOOL_TYPES.has(String(row.observation_type || "")))
+        .slice(0, Math.max(1, limit)),
+      feedbackToolRows: allRows
+        .filter((row) => LIVE_CHANNEL_TOOL_TYPES.has(String(row.observation_type || "")))
+        .slice(0, Math.max(1, limit)),
+    };
+  }
+
+
+
+  _monitorFeedbackEntries(agent, feedbackToolRows = [], { limit = 8 } = {}) {
+    const rows = [];
+    const seen = new Set();
+    const addInteraction = (row) => {
+      if (!row) return;
+      const key = row.id != null ? `i:${row.id}` : `i:${row.created_at || ""}:${row.kind || ""}:${row.body || ""}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      rows.push(row);
+    };
+
+    for (const row of agent.interactionRows || []) addInteraction(row);
+    for (const row of agent.guidance || []) addInteraction(row);
+    for (const row of agent.activityRows || []) addInteraction(row);
+
+    for (const row of feedbackToolRows || []) {
+      const tool = stripToolPrefix(row.observation_type);
+      const label = tool === "get_operator_feedback"
+        ? "retrieved"
+        : (tool === "ack_operator_feedback" ? "ack" : "status");
+      rows.push({
+        _kind: "coordination",
+        created_at: row.created_at,
+        label,
+        body: stripRedundantToolSummaryLabel(tool, row.summary) || tool,
+      });
+    }
+
+    rows.sort((a, b) => (Date.parse(a.created_at || "") || 0) - (Date.parse(b.created_at || "") || 0));
+    return rows.slice(-Math.max(1, limit));
+  }
+
+
+
+  _monitorBoxLine(content, width) {
+    const safeWidth = Math.max(18, width | 0);
+    return `${C.dim}\u2502${C.reset}${visiblePad(content, safeWidth - 2)}${C.dim}\u2502${C.reset}`;
+  }
+
+
+
+  _monitorBoxedLane({ title, count = 0, color = C.cyan, width, rows = [], emptyText = "waiting" } = {}) {
+    const safeWidth = Math.max(18, width | 0);
+    const inner = Math.max(8, safeWidth - 2);
+    const lines = [
+      `${C.dim}\u256d${"\u2500".repeat(inner)}\u256e${C.reset}`,
+      this._monitorBoxLine(` ${color}${C.bold}${String(title || "").toUpperCase()}${C.reset} ${C.dim}${String(count).padStart(2, "0")}${C.reset}`, safeWidth),
+      `${C.dim}\u251c${"\u2500".repeat(inner)}\u2524${C.reset}`,
+    ];
+
+    const visibleRows = rows.length > 0 ? rows : [` ${C.dim}\u00b7 ${emptyText}${C.reset}`];
+    for (const row of visibleRows) {
+      lines.push(this._monitorBoxLine(row, safeWidth));
+    }
+    lines.push(`${C.dim}\u2570${"\u2500".repeat(inner)}\u256f${C.reset}`);
+    return lines;
+  }
+
+
+
+  _formatMonitorFeedbackRow(row, width) {
+    const safeWidth = Math.max(18, width | 0);
+    const meta = monitorFeedbackMeta(row);
+    const suffix = monitorFeedbackSuffix(row);
+    const time = compactTime(row.created_at);
+    const body = _sanitizeDisplayLine(row.body || row.summary || "");
+    const prefix = ` ${C.dim}${time}${C.reset} ${meta.color}${meta.glyph}${C.reset} ${meta.color}${meta.label}${C.reset} `;
+    const suffixText = suffix ? ` ${suffix}` : "";
+    const suffixLen = suffix ? stripAnsi(suffixText).length : 0;
+    const budget = Math.max(8, safeWidth - stripAnsi(prefix).length - suffixLen - 3);
+    return `${prefix}${fit(body, budget)}${suffixText}`;
+  }
+
+
+
+  _formatMonitorToolRow(row, width) {
+    const safeWidth = Math.max(18, width | 0);
+    const tool = stripToolPrefix(row.observation_type);
+    const meta = monitorToolMeta(row);
+    const summary = _sanitizeDisplayLine(stripRedundantToolSummaryLabel(tool, row.summary));
+    const time = compactTime(row.created_at);
+    const prefix = ` ${C.dim}${time}${C.reset} ${meta.color}${meta.glyph}${C.reset} ${C.cyan}${tool}${C.reset} `;
+    const budget = Math.max(8, safeWidth - stripAnsi(prefix).length - 3);
+    return `${prefix}${fit(summary || meta.label, budget)}`;
+  }
+
+
+
+  _buildMonitorFeedbackToolLanes(agent, width) {
+    const toolActivity = this._monitorToolActivityForJob(agent.jobId, { limit: 8 });
+    const feedbackEntries = this._monitorFeedbackEntries(agent, toolActivity.feedbackToolRows, { limit: 7 });
+    const toolRows = toolActivity.toolRows.slice(0, 7).reverse();
+    const feedbackLines = feedbackEntries.map((row) => this._formatMonitorFeedbackRow(row, Math.floor(width / 2) - 2));
+    const toolLines = toolRows.map((row) => this._formatMonitorToolRow(row, Math.floor(width / 2) - 2));
+
+    const narrow = width < 72;
+    if (narrow) {
+      const feedbackBox = this._monitorBoxedLane({
+        title: "feedback",
+        count: feedbackEntries.length,
+        color: C.yellow,
+        width,
+        rows: feedbackEntries.map((row) => this._formatMonitorFeedbackRow(row, width)),
+        emptyText: `current: ${agent.activity}`,
+      });
+      const toolBox = this._monitorBoxedLane({
+        title: "tools",
+        count: toolRows.length,
+        color: C.cyan,
+        width,
+        rows: toolRows.map((row) => this._formatMonitorToolRow(row, width)),
+        emptyText: "no normal tool calls yet",
+      });
+      return [...feedbackBox, ...toolBox];
+    }
+
+    const gap = `${C.dim}\u2502${C.reset}`;
+    const laneWidth = Math.floor((width - 1) / 2);
+    const rightWidth = Math.max(18, width - laneWidth - 1);
+    const feedbackBox = this._monitorBoxedLane({
+      title: "feedback",
+      count: feedbackEntries.length,
+      color: C.yellow,
+      width: laneWidth,
+      rows: feedbackLines,
+      emptyText: `current: ${agent.activity}`,
+    });
+    const toolBox = this._monitorBoxedLane({
+      title: "tools",
+      count: toolRows.length,
+      color: C.cyan,
+      width: rightWidth,
+      rows: toolLines,
+      emptyText: "no normal tool calls yet",
+    });
+    const rows = Math.max(feedbackBox.length, toolBox.length);
+    const lines = [];
+    for (let idx = 0; idx < rows; idx++) {
+      lines.push(`${visiblePad(feedbackBox[idx] || "", laneWidth)}${gap}${fit(toolBox[idx] || "", rightWidth)}`);
+    }
+    return lines;
+  }
+
+
+
+  _buildMonitorFocusLines(agent, width) {
+    const lines = [];
+    const meta = monitorStateMeta(agent.state);
+    const provider = agent.provider
+      ? `${agent.provider}${agent.modelName ? `/${agent.modelName}` : ""}`
+      : `tier/${agent.tier}`;
+    lines.push(` ${meta.color}\u25cf${C.reset} ${agent.status}  ${C.dim}${provider}  elapsed ${agent.elapsed}  phase${C.reset} ${C.brightWhite}${fit(agent.activity, Math.max(8, width - 54))}${C.reset}`);
+    lines.push(` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`);
+
+    if (this._monitorPromptLens) {
+      lines.push(...this._buildMonitorPromptLens(agent, width));
+      lines.push("");
+    }
+
+    lines.push(...this._buildMonitorFeedbackToolLanes(agent, width));
+
+    const remaining = Math.max(0, width - 2);
+    lines.push("");
+    lines.push(` ${C.dim}${"\u2500".repeat(Math.max(8, remaining))}${C.reset}`);
+    if (agent.state === "ask") {
+      lines.push(` ${C.red}${C.bold}ASK${C.reset} ${C.dim}answer is blocking; this job should be exempt from stall/lease reaping${C.reset}`);
+      lines.push(` ${C.green}[a] answer${C.reset}  ${C.yellow}[n] nudge${C.reset}  ${C.blue}[t] prompt lens${C.reset}  ${C.red}[!] interrupt + requeue${C.reset}`);
+    } else {
+      lines.push(` ${C.cyan}${C.bold}suggestion${C.reset} ${C.dim}| correction | scope-request | status-request${C.reset}`);
+      lines.push(` ${C.yellow}[n] nudge selected agent${C.reset}  ${C.blue}[t] prompt lens${C.reset}  ${C.dim}delivery: next safe checkpoint/tool result${C.reset}`);
+    }
+    return lines;
+  }
+
+
+
+  _buildMonitorPromptLens(agent, width) {
+    const lines = [];
+    let prompt = null;
+    try {
+      prompt = readRecentPrompts({ limit: 1, jobId: agent.jobId })[0] || null;
+    } catch {
+      prompt = null;
+    }
+    lines.push(` ${C.blue}${C.bold}prompt lens${C.reset} ${C.dim}read-only latest captured prompt${C.reset}`);
+    if (!prompt) {
+      lines.push(`   ${C.dim}No prompt captured yet for job #${agent.jobId}.${C.reset}`);
+      return lines;
+    }
+    const stamp = [prompt.role, prompt.provider, prompt.model].filter(Boolean).join("/");
+    lines.push(`   ${C.dim}${stamp || "agent"} · ${prompt.prompt_chars || 0} chars · ${prompt.ts || ""}${C.reset}`);
+    const promptLines = String(prompt.prompt || "")
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter((line) => line.trim() !== "")
+      .slice(0, 9);
+    for (const line of promptLines) {
+      lines.push(`   ${C.dim}${fit(line, Math.max(8, width - 5))}${C.reset}`);
+    }
+    const total = String(prompt.prompt || "").split("\n").filter((line) => line.trim() !== "").length;
+    if (total > promptLines.length) {
+      lines.push(`   ${C.dim}+${total - promptLines.length} more prompt lines in prompt log${C.reset}`);
+    }
+    return lines;
+  }
+
+
+
+  _monitorRecentEventsForJob(jobId, width) {
+    const rows = [];
+    const needle = `#${jobId}`;
+    const source = (this.events || []).filter((event) => stripAnsi(event.text || "").includes(needle)).slice(-8);
+    for (const event of source) {
+      const clean = _sanitizeDisplayLine(event.text || "");
+      rows.push(` ${C.dim}${event.time || ""}${C.reset}  ${C.dim}\u25e6${C.reset} ${fit(clean, Math.max(8, width - 16))}`);
+    }
+    return rows;
   }
 
 

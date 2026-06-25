@@ -20,6 +20,8 @@ if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope ==
 
 /** @type {Promise<any> | null} */
 let encoderPromise = null;
+/** @type {Map<string, AbortController>} */
+const activeEncodeAborts = new Map();
 
 function loadEncoder() {
   if (!encoderPromise) {
@@ -47,12 +49,29 @@ runDaemonThread(async (payload) => {
       await loadEncoder();
       return { ready: true };
     case "encode": {
-      const encoder = await loadEncoder();
       const texts = Array.isArray(payload.texts) ? payload.texts : [];
+      const abortId = typeof payload.abortId === "string" && payload.abortId ? payload.abortId : null;
+      const abortController = abortId ? new AbortController() : null;
+      if (abortId && abortController) activeEncodeAborts.set(abortId, abortController);
       // Float32Array[] survives structured clone as typed arrays — no copy to
       // plain arrays needed.
-      const vectors = await encoder.encode(texts);
-      return { vectors };
+      try {
+        throwIfAborted(abortController?.signal);
+        const encoder = await loadEncoder();
+        throwIfAborted(abortController?.signal);
+        const vectors = await encoder.encode(texts, abortController?.signal);
+        return { vectors };
+      } finally {
+        if (abortId) activeEncodeAborts.delete(abortId);
+      }
+    }
+    case "abort": {
+      const abortId = typeof payload.abortId === "string" && payload.abortId ? payload.abortId : null;
+      const controller = abortId ? activeEncodeAborts.get(abortId) : null;
+      if (controller && !controller.signal.aborted) {
+        controller.abort(new Error("encode aborted"));
+      }
+      return { aborted: !!controller };
     }
     case "dispose": {
       if (encoderPromise) {
@@ -66,3 +85,11 @@ runDaemonThread(async (payload) => {
       throw new Error(`unknown onnx op: ${op || "(none)"}`);
   }
 });
+
+/**
+ * @param {AbortSignal | undefined} signal
+ */
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? new Error("encode aborted");
+}

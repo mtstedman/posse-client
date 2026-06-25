@@ -20,18 +20,18 @@ export function normalizeRepoPath(value) {
   if (!trimmed) return "";
   // Convert backslashes to forward slashes first so Windows-style inputs work.
   const slashed = trimmed.replace(/\\/g, "/");
-  // Strip leading "./" repeatedly.
-  let stripped = slashed;
-  while (stripped.startsWith("./")) stripped = stripped.slice(2);
-  // Collapse trailing slashes.
-  stripped = stripped.replace(/\/+$/, "");
+  // Strip leading "./" repeatedly, accepting repeated slashes in that prefix.
+  let stripped = slashed.replace(/^(?:\.\/+)+/, "");
+  if (path.posix.isAbsolute(stripped)) return "";
+  // Collapse repeated/trailing slashes after absolute-path detection so
+  // network-style "//server" inputs cannot become a relative "server" path.
+  stripped = stripped.replace(/\/+/g, "/").replace(/\/+$/, "");
   if (!stripped || stripped === "." || stripped === "..") return "";
   if (stripped.startsWith("../")) return "";
-  if (path.posix.isAbsolute(stripped)) return "";
   // Detect Windows-absolute even after slash conversion (e.g. "C:/...").
   if (/^[a-zA-Z]:\//.test(stripped)) return "";
-  // No interior "/.." segments.
-  if (stripped.split("/").some((seg) => seg === "..")) return "";
+  // No interior "." or ".." segments.
+  if (stripped.split("/").some((seg) => seg === "." || seg === "..")) return "";
   return stripped;
 }
 

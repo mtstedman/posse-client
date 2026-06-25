@@ -20,7 +20,7 @@ import { sliceBuild, sliceRefresh, sliceSpilloverGet } from "./slice.js";
 import { editPlan } from "./edit-plan.js";
 import { repoRegister, repoStatus, indexRefresh, repoOverview, repoQuality } from "./repo.js";
 import { bufferPush, bufferCheckpoint, bufferStatus, makeOverlayReadFile } from "./buffer.js";
-import { symbolGetCard } from "./symbol-card.js";
+import { symbolGetCard, symbolGetCards } from "./symbol-card.js";
 import { symbolUsages } from "./usages.js";
 import { treeGrow, treeOverview, treeScope, treeWalk } from "./tree.js";
 import {
@@ -226,6 +226,9 @@ function dispatchImpl(call, ctx) {
     case "symbol.card":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (symbolGetCard({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
+    case "symbol.cards":
+      if (!ctx.view) return notIndexed(action, ctx.versionId);
+      return /** @type {any} */ (symbolGetCards({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId, action: "symbol.cards" }));
     case "symbol.overview":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (symbolUsages({ view: ctx.view, versionId: ctx.versionId, params: call }));
@@ -355,6 +358,7 @@ const GATEWAY_ACTIONS = Object.freeze({
   query: new Set([
     "symbol.search",
     "symbol.card",
+    "symbol.cards",
     "symbol.overview",
     "tree.overview",
     "tree.branch",
@@ -413,6 +417,13 @@ const GATEWAY_ACTIONS = Object.freeze({
 const ACTION_BY_NORMALIZED_KEY = new Map(
   ATLAS_TOOL_ACTIONS.map((action) => [actionKey(action), action]),
 );
+
+const ACTION_ALIAS_BY_NORMALIZED_KEY = new Map([
+  ["symbolgetcard", "symbol.card"],
+  ["symbolgetcards", "symbol.cards"],
+  ["symbolcards", "symbol.cards"],
+  ["treewalk", "tree.branch"],
+]);
 
 const FIELD_ALIASES = Object.freeze({
   action_name: "actionName",
@@ -604,7 +615,8 @@ function normalizeActionName(value) {
   const stripped = raw
     .replace(/^atlas[._-]/i, "")
     .replace(/^atlas_/i, "");
-  return ACTION_BY_NORMALIZED_KEY.get(actionKey(stripped)) || stripped;
+  const key = actionKey(stripped);
+  return ACTION_ALIAS_BY_NORMALIZED_KEY.get(key) || ACTION_BY_NORMALIZED_KEY.get(key) || stripped;
 }
 
 /**

@@ -145,6 +145,7 @@ function resolvedCallCostUsd(call) {
     inputTokens: call?.input_tokens,
     outputTokens: call?.output_tokens,
     cachedInputTokens: call?.cached_input_tokens,
+    cacheCreationInputTokens: call?.cache_creation_input_tokens,
     knownCostUsd: call?.cost_estimate_usd,
   });
   return Number.isFinite(est.costUsd) ? est.costUsd : 0;

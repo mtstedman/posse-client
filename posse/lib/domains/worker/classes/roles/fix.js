@@ -263,7 +263,7 @@ export class FixRole extends BaseRole {
     }
 
     const fixDriftContext = worker.detectDrift(job, fixFiles, fixCwd);
-    const fixNudgeContext = loadNudges(job.id);
+    const fixNudgeContext = loadNudges(job.id, { attemptId: ctx.attemptId });
     const fixText = [
       payload.task_spec || "",
       payload.fix_instructions || "",

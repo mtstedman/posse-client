@@ -33,8 +33,8 @@ export class RunDisplaySnapshotController {
       projectDir: this.projectDir,
       dbPath: getRuntimeDbPath(this.projectDir),
     };
-    const requestPaneRender = (mode) => {
-      if (this.getDisplay()?._rightMode === mode) {
+    const requestPaneRender = (...modes) => {
+      if (modes.includes(this.getDisplay()?._rightMode)) {
         this.getDisplay()?.requestRender?.({ reason: "queue-snapshot" });
       }
     };
@@ -60,7 +60,7 @@ export class RunDisplaySnapshotController {
       initialValue: this.buildLocalToolSnapshot(),
       minIntervalMs: 750,
       load: () => this.loadToolSnapshot(snapshotArgs),
-      onUpdate: () => requestPaneRender("tools"),
+      onUpdate: () => requestPaneRender("tools", "monitor"),
       onError: (err) => {
         this.log?.debug?.("display", "Tool snapshot refresh failed", { error: String(err?.message || err) });
       },
@@ -76,7 +76,7 @@ export class RunDisplaySnapshotController {
     this.trackTimer(setInterval(() => {
       const currentDisplay = this.getDisplay();
       if (currentDisplay?._rightMode === "pipeline") void pipeline.refresh();
-      if (currentDisplay?._rightMode === "tools") void tools.refresh();
+      if (currentDisplay?._rightMode === "tools" || currentDisplay?._rightMode === "monitor") void tools.refresh();
     }, 1000));
   }
 
@@ -85,7 +85,7 @@ export class RunDisplaySnapshotController {
     const display = this.getDisplay();
     void this.caches.dirty.refresh();
     if (display?._rightMode === "pipeline") void this.caches.pipeline.refresh();
-    if (display?._rightMode === "tools") void this.caches.tools.refresh();
+    if (display?._rightMode === "tools" || display?._rightMode === "monitor") void this.caches.tools.refresh();
   }
 
   stop() {

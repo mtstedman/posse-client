@@ -266,7 +266,6 @@ function buildImageSplitPieces(task, imageFiles, artifactDirAbs, sourceTaskIndex
   const imageOutputLines = imageLines.length > 0
     ? imageLines
     : ["- Generate the requested image deliverable(s), write them under output_root, and manifest the file names."];
-
   const imageTask = {
     ...task,
     title: `Generate images for: ${task.title}`.slice(0, 120),
@@ -367,6 +366,12 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
   }
 
   const { imageTask, promoteTask } = buildImageSplitPieces(task, imageFilesForSplit, artifactDirAbs, index);
+  const hasDownstreamCodeSplit = hasCodeOutputs || hasRepoEdits || nonImageCreateFiles.length > 0;
+  if (!hasDownstreamCodeSplit) {
+    imageTask.depends_on_index = Array.isArray(task.depends_on_index)
+      ? task.depends_on_index.filter(Number.isInteger)
+      : [];
+  }
   const splitTasks = [imageTask];
   const imageDependencyIndex = index;
   let finalDependencyIndex = imageDependencyIndex;
@@ -376,7 +381,7 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
     finalDependencyIndex = index + splitTasks.length - 1;
   }
 
-  if (hasCodeOutputs || hasRepoEdits || nonImageCreateFiles.length > 0) {
+  if (hasDownstreamCodeSplit) {
     const devCreateFiles = nonImageCreateFiles;
     const originalDependencies = Array.isArray(task.depends_on_index) ? task.depends_on_index : [];
     const devTask = {

@@ -109,6 +109,7 @@ const CODE_SHARED_ACTIONS = Object.freeze(
 const QUERY_GATEWAY_ACTIONS = Object.freeze([
   "symbol.search",
   "symbol.card",
+  "symbol.cards",
   "symbol.overview",
   "tree.overview",
   "tree.branch",
@@ -329,7 +330,16 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   "symbol.card": o({
     symbolId: symbolId(),
     symbolRef: symbolRef(),
+    symbolIds: symbolIds(100),
+    symbolRefs: a(looseSymbolRef(), { maxItems: 100 }),
     ifNoneMatch: s({ maxLength: 512 }),
+    minCallConfidence: n({ minimum: 0, maximum: 1 }),
+    includeResolutionMetadata: b(),
+    sessionId: s({ maxLength: 256 }),
+  }),
+  "symbol.cards": o({
+    symbolIds: symbolIds(100),
+    symbolRefs: a(looseSymbolRef(), { maxItems: 100 }),
     minCallConfidence: n({ minimum: 0, maximum: 1 }),
     includeResolutionMetadata: b(),
     sessionId: s({ maxLength: 256 }),
@@ -555,6 +565,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   }, ["filePath"]),
 
   "memory.store": o({
+    type: s({ enum: ["decision", "bugfix", "task_context", "pattern", "convention", "architecture", "performance", "security"] }),
     title: s({ minLength: 1, maxLength: 120 }),
     content: s({ minLength: 1, maxLength: 1200 }),
     symbolIds: symbolIds(1000),

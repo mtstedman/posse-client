@@ -491,8 +491,17 @@ export class RunSession {
     const dependencyConfig = typeof getAtlasIntegrationConfig === "function"
       ? getAtlasIntegrationConfig()
       : null;
+    // CHECK-ONLY at boot (dryRun): probe for managed indexer + package presence
+    // but NEVER install on the critical path. Installs — especially `rustup
+    // component add rust-analyzer`, a multi-minute network download — previously
+    // ran here before the lock and ATLAS, freezing the whole boot for minutes.
+    // Anything missing is now a non-fatal warning that points at `posse doctor`
+    // (which runs the same checks in install mode); SCIP generation already
+    // degrades gracefully when an indexer is absent (the language is skipped
+    // this warm and caught up once the indexer is installed).
     const dependencyResult = await runBootDependencySync({
       projectDir: PROJECT_DIR,
+      dryRun: true,
       scipMode: dependencyConfig?.enabled === false
         ? "off"
         : (dependencyConfig?.scipMode ?? dependencyConfig?.atlas_scip_mode ?? null),
@@ -511,30 +520,29 @@ export class RunSession {
         });
       },
     });
+    const depCounts = dependencyResult?.counts || {};
+    const depNeedsInstall = (depCounts.dry_run || 0) + (depCounts.failed || 0);
     updateBootStep("dependencies", {
       section: "workspace",
-      status: dependencyResult.ok ? "ok" : "failed",
-      detail: formatBootDependencySyncForRun(dependencyResult),
-      showDetail: !dependencyResult.ok,
+      status: depNeedsInstall > 0 ? "warning" : "ok",
+      detail: depNeedsInstall > 0
+        ? `${formatBootDependencySyncForRun(dependencyResult)} — run "posse doctor" to install`
+        : formatBootDependencySyncForRun(dependencyResult),
+      showDetail: depNeedsInstall > 0,
       force: true,
     });
-    if (!dependencyResult.ok) {
-      // Boot already attempted the repair itself (dependency sync runs in
-      // install mode); a failure here means a needed dependency could not be
-      // installed automatically. Point at doctor, which reruns the same
-      // repair with unbounded timeouts and a full per-dependency report.
-      throw new Error(`Boot dependency sync failed: ${formatBootDependencySyncForRun(dependencyResult)} — run "posse doctor" to repair`);
-    }
   } catch (err) {
+    // The boot dependency CHECK never blocks the run: a probe error degrades to
+    // a warning row rather than aborting boot. Deterministic indexing and the
+    // rest of boot do not depend on these installs, so the run proceeds and the
+    // operator can repair with `posse doctor`.
     updateBootStep("dependencies", {
       section: "workspace",
-      status: "failed",
-      detail: err?.message || String(err),
+      status: "warning",
+      detail: `dependency check skipped: ${firstLine(err?.message || String(err))} — run "posse doctor"`,
       showDetail: true,
       force: true,
     });
-    try { stopBootMonitor({ final: true }); } catch { /* observational */ }
-    throw err;
   }
 
   updateBootStep("posse update", { section: "workspace", status: "running", detail: "checking client", force: true });
@@ -1923,11 +1931,13 @@ export class RunSession {
     return;
   }
 
-  // Settle the top-level provider warmups before the TUI attaches so their
-  // chips show a final terminal state. The auth/usage primes are internally
-  // bounded, so this waits only as long as the bounded warm — gating the index
-  // phase until provider auth resolves.
-  await Promise.allSettled(providerWarmups);
+  // Let the top-level provider warmups settle in the BACKGROUND — they must
+  // never gate the index phase. The deterministic ATLAS/SCIP warm never calls a
+  // provider, so blocking the index behind provider auth (as this previously
+  // did) only delayed indexing for no benefit. Each prime updates its own chip
+  // as it resolves; allSettled never rejects, so a plain fire-and-forget is
+  // safe.
+  void Promise.allSettled(providerWarmups);
 
   // ── Indexing phase ─────────────────────────────────────────────────────
   // The entire upper boot section has settled (warmups + providers + scheduler
@@ -2050,7 +2060,7 @@ export class RunSession {
   stopBootMonitor({ final: true, preserve: useTui });
   if (useTui) {
     try { recordRunDiagnostic("display.starting", { concurrency: CONCURRENCY }); } catch { /* observational */ }
-    display = new Display({ concurrency: CONCURRENCY });
+    display = new Display({ concurrency: CONCURRENCY, rightMode: "monitor" });
     // Replay the most recent queue snapshot the scheduler has emitted so
     // the display opens with a fully populated view instead of a blank
     // frame that waits for the next state change.

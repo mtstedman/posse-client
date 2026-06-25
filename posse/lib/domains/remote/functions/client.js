@@ -8,6 +8,7 @@ export const POSSE_REMOTE_MAX_RESPONSE_BYTES = 1024 * 1024;
 const REMOTE_RESPONSE_SIGNATURE_DOMAINS = new Map([
   ["/v1/prompts/compile", "compile"],
   ["/v1/prompts/bundle", "bundle"],
+  ["/v1/catalog/models", "model_catalog"],
 ]);
 
 export function verifyRemoteResponseIntegrity(responseBody, {

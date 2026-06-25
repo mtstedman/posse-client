@@ -19,7 +19,14 @@ function normalizeAnswers(questions, args = {}) {
     }));
   }
   const answer = String(args.answer ?? args.response ?? "").trim();
-  return questions.map((question) => ({ question, answer }));
+  const metadata = args.answer_metadata && typeof args.answer_metadata === "object" && !Array.isArray(args.answer_metadata)
+    ? args.answer_metadata
+    : null;
+  return questions.map((question) => ({
+    question,
+    answer,
+    ...(metadata ? { metadata } : {}),
+  }));
 }
 
 function leaseExpiry(seconds = DEFAULT_BRIDGE_LEASE_SECONDS) {

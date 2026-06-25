@@ -607,7 +607,7 @@ export class ResearcherRole extends BaseRole {
       humanAnswers ? `HUMAN ANSWERS (to your previous questions):\n${humanAnswers}\n` : "",
       priorAttemptLogs ? `PRIOR ATTEMPT (ran out of turns - do NOT repeat these reads, summarize your findings promptly):\n${priorAttemptLogs}\n` : "",
       retrySalvageBlock ? `${retrySalvageBlock}\n` : "",
-      loadNudges(job.id),
+      loadNudges(job.id, { attemptId: ctx.attemptId }),
       promptLiteral("RESEARCH REQUEST", payload.instructions || payload.task_spec || job.title),
     ].filter(Boolean).join("\n");
   }

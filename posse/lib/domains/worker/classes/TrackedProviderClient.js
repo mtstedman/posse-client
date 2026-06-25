@@ -597,6 +597,7 @@ export class TrackedProviderClient {
     };
 
     try {
+      this.worker._startSessionRecycleLeaseRenewal?.(opts._sessionRecycle);
       recordMemorySample("provider.call.before", {
         agent_call_id: agentCallId,
         work_item_id,
@@ -642,6 +643,7 @@ export class TrackedProviderClient {
         input_tokens: stats.inputTokens ?? null,
         output_tokens: stats.outputTokens ?? null,
         cached_input_tokens: stats.cachedInputTokens ?? null,
+        cache_creation_input_tokens: stats.cacheCreationInputTokens ?? null,
         model_name: stats.modelName || null,
         duration_ms: stats.durationMs,
         exit_code: stats.exitCode,
@@ -747,6 +749,7 @@ export class TrackedProviderClient {
         input_tokens: stats.inputTokens ?? null,
         output_tokens: stats.outputTokens ?? null,
         cached_input_tokens: stats.cachedInputTokens ?? null,
+        cache_creation_input_tokens: stats.cacheCreationInputTokens ?? null,
         duration_ms: stats.durationMs || 0,
         exit_code: stats.exitCode,
         error_text: err.message?.slice(0, 2000),
@@ -761,6 +764,7 @@ export class TrackedProviderClient {
       const recycleSession = recycleDecision?.session || null;
       const recycleLaneId = recycleDecision?.lane?.id || recycleSession?.lane_id || null;
       const mcpAttachMissingProof = err.mcpAttachMissingProof || stats.mcpAttachMissingProof;
+      this.worker._stopSessionRecycleLeaseRenewal?.(job_id);
       if (recycleSession?.id || (mcpAttachMissingProof && recycleLaneId)) {
         if (err.sessionExpired || stats.sessionExpired || mcpAttachMissingProof) {
           const recycleInvalidationReason = (err.mcpAttachMissingProof || stats.mcpAttachMissingProof)

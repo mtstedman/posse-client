@@ -634,10 +634,10 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
   if (status) {
     const relevantStatus = status
       .split("\n")
-      .map((line) => line.trim())
+      .map((line) => line.trimEnd())
       .filter(Boolean)
       .filter((line) => {
-        const file = _normalizeRepoPath(line.slice(3));
+        const file = _normalizeRepoPath(line.slice(3).trim());
         return !_isRuntimePath(file);
       });
     if (relevantStatus.length > 0) {

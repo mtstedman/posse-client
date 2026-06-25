@@ -22,6 +22,9 @@ import {
   TOOL_GIT_HISTORY,
   TOOL_INSPECT_FILE,
   TOOL_BASH,
+  TOOL_AGENT_FEEDBACK,
+  TOOL_GET_OPERATOR_FEEDBACK,
+  TOOL_ACK_OPERATOR_FEEDBACK,
   TOOL_MOVE_FILE,
   TOOL_COPY_FILE,
   TOOL_MAKE_DIR,
@@ -38,6 +41,12 @@ import { ToolRegistry } from "../../../classes/tools/ToolRegistry.js";
 import { declareToolSuites } from "../../../functions/tools/tool-suites.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, enterObservationContext, runWithObservationContext } from "../../observability/functions/observations.js";
+import {
+  acknowledgeOperatorFeedback,
+  countPendingOperatorFeedbackForJob,
+  getOperatorFeedbackForJob,
+  recordAgentActivity,
+} from "../../queue/functions/index.js";
 import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.js";
 import { resolveAtlasRepoTarget } from "./atlas/repo.js";
 import { shouldUseAtlasV2 } from "./atlas-v2-mode.js";
@@ -1088,6 +1097,9 @@ if (ownerHotGateway) {
 for (const schema of [TOOL_LIST_FILES, TOOL_SEARCH_FILES, TOOL_GIT_HISTORY, TOOL_INSPECT_FILE, TOOL_HASH_FILE]) {
   addToolSchema(schema);
 }
+addToolSchema(TOOL_AGENT_FEEDBACK);
+addToolSchema(TOOL_GET_OPERATOR_FEEDBACK);
+addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
 if (writeEnabled) {
   for (const schema of [TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
     addToolSchema(schema);
@@ -1734,6 +1746,77 @@ function recordResearchEvidenceObservation({
 
 // ── Standard tool executors ────────────────────────────────────────────────
 
+function agentFeedback(args = {}) {
+  if (!mcpJobId) return "No active job context is available for agent_feedback.";
+  recordAgentActivity({
+    work_item_id: mcpWorkItemId,
+    job_id: mcpJobId,
+    phase: args.phase,
+    action: args.status,
+    body: args.summary,
+    source: "mcp_tool",
+    metadata_json: { status: args.status || null, role: roleName || null },
+  });
+  return "Agent feedback recorded for Monitor Agents.";
+}
+
+const LIVE_CHANNEL_TOOL_NAMES = new Set(["agent_feedback", "get_operator_feedback", "ack_operator_feedback"]);
+
+function operatorFeedbackSignalText(toolName) {
+  if (LIVE_CHANNEL_TOOL_NAMES.has(toolName)) return "";
+  if (!mcpJobId) return "";
+  const pendingCount = countPendingOperatorFeedbackForJob(mcpJobId);
+  if (pendingCount <= 0) return "";
+  return [
+    "",
+    "OPERATOR_FEEDBACK_SIGNAL:",
+    JSON.stringify({
+      operator_feedback_available: true,
+      pending_count: pendingCount,
+      next_tool: "get_operator_feedback",
+      ack_tool: "ack_operator_feedback",
+    }),
+  ].join("\n");
+}
+
+function appendOperatorFeedbackSignal(text, toolName) {
+  const signal = operatorFeedbackSignalText(toolName);
+  return signal ? `${text}${signal}` : text;
+}
+
+function getOperatorFeedback(args = {}) {
+  if (!mcpJobId) return "No active job context is available for get_operator_feedback.";
+  const feedback = getOperatorFeedbackForJob({
+    job_id: mcpJobId,
+    limit: args.limit,
+  });
+  return JSON.stringify({
+    ok: true,
+    acknowledgement_required: feedback.length > 0,
+    default_ack_decision: "accepted",
+    ack_tool: "ack_operator_feedback",
+    feedback,
+  }, null, 2);
+}
+
+function ackOperatorFeedback(args = {}) {
+  if (!mcpJobId) return "No active job context is available for ack_operator_feedback.";
+  const row = acknowledgeOperatorFeedback({
+    interaction_id: args.interaction_id,
+    job_id: mcpJobId,
+    decision: args.decision || "accepted",
+    reason: args.reason || "",
+  });
+  if (!row) return `No operator feedback item found for id ${args.interaction_id}.`;
+  return JSON.stringify({
+    ok: true,
+    interaction_id: row.id,
+    decision: row.ack_decision || "accepted",
+    reason: row.ack_reason || null,
+    acknowledged_at: row.acknowledged_at || null,
+  }, null, 2);
+}
+
 // Attach this server's executors to a ToolRegistry seeded with the shared suite
 // metadata, so the MCP runtime's handler set flows through the same registry the
 // embedded OpenAI/Grok runtime builds from. Executors and role gating are
@@ -1745,6 +1828,9 @@ mcpToolRegistry.attach("search_files", (args) => execSearchFiles(args || {}, wor
 mcpToolRegistry.attach("git_history", (args) => execGitHistory(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("inspect_file", (args) => execInspectFile(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("hash_file", (args) => execHashFile(args || {}, workspaceCwd, effectiveScopePredicates));
+mcpToolRegistry.attach("agent_feedback", (args) => agentFeedback(args || {}));
+mcpToolRegistry.attach("get_operator_feedback", (args) => getOperatorFeedback(args || {}));
+mcpToolRegistry.attach("ack_operator_feedback", (args) => ackOperatorFeedback(args || {}));
 
 if (writeEnabled) {
   mcpToolRegistry.attach("write_file", (args) => writeFileWithinScope(args || {}));
@@ -1855,6 +1941,9 @@ function rebuildNativeToolSchemas() {
   for (const schema of [TOOL_LIST_FILES, TOOL_SEARCH_FILES, TOOL_GIT_HISTORY, TOOL_INSPECT_FILE, TOOL_HASH_FILE]) {
     addToolSchema(schema);
   }
+  addToolSchema(TOOL_AGENT_FEEDBACK);
+  addToolSchema(TOOL_GET_OPERATOR_FEEDBACK);
+  addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
   if (writeEnabled) {
     for (const schema of [TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
       addToolSchema(schema);
@@ -1885,6 +1974,9 @@ function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry.attach("git_history", (args) => execGitHistory(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("inspect_file", (args) => execInspectFile(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("hash_file", (args) => execHashFile(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("agent_feedback", (args) => agentFeedback(args || {}));
+  mcpToolRegistry.attach("get_operator_feedback", (args) => getOperatorFeedback(args || {}));
+  mcpToolRegistry.attach("ack_operator_feedback", (args) => ackOperatorFeedback(args || {}));
 
   if (writeEnabled) {
     mcpToolRegistry.attach("write_file", (args) => writeFileWithinScope(args || {}));
@@ -2585,6 +2677,7 @@ async function handleRequest(msg) {
     try {
       const result = await handler(args);
       const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
+      const responseText = appendOperatorFeedbackSignal(text, toolName);
       const ok = isSuccessfulNativeToolResult(text);
       if (ok) {
         if (toolName !== "chain_verdict") {
@@ -2607,7 +2700,7 @@ async function handleRequest(msg) {
         durationMs: Date.now() - start,
         resultPreview: capString(text, 300),
       });
-      sendMessage(jsonRpcSuccess(id, { content: [{ type: "text", text }] }));
+      sendMessage(jsonRpcSuccess(id, { content: [{ type: "text", text: responseText }] }));
     } catch (err) {
       const safeError = capString(err?.message || String(err), 300);
       appendToolLog({

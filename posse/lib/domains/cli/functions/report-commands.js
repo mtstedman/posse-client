@@ -23,6 +23,19 @@ import {
 } from "../../billing/functions/pricing.js";
 import { buildResearchFanoutReport } from "../../research/functions/fanout-report.js";
 
+function formatCostTokenBreakdown(inputTokens, outputTokens, cachedInputTokens = 0, billableTokens = null) {
+  const base = `${formatCostTokens(inputTokens)}/${formatCostTokens(outputTokens)} tok`;
+  const parts = [base];
+  const cached = Math.min(Math.max(0, Number(inputTokens) || 0), Math.max(0, Number(cachedInputTokens) || 0));
+  if (cached > 0) parts.push(`${formatCostTokens(cached)} cached in`);
+  const rawTotal = (Number(inputTokens) || 0) + (Number(outputTokens) || 0);
+  const billable = Number(billableTokens);
+  if (Number.isFinite(billable) && Math.round(billable) !== Math.round(rawTotal)) {
+    parts.push(`${formatCostTokens(billable)} billable total`);
+  }
+  return parts.join(", ");
+}
+
 export function runTimelineCommand(args = []) {
   const wiArg = String(args[0] || "").trim();
   if (!wiArg || wiArg === "--help" || wiArg === "-h") {
@@ -282,13 +295,18 @@ export function runCostCommand(args = []) {
       return;
     }
     console.log(`\n  ${C.bold}Cost for WI#${wi.id}${C.reset}  ${wi.title}`);
-    console.log(`  ${C.dim}Status:${C.reset} ${wi.status}  ${C.dim}Calls:${C.reset} ${totals.callCount}  ${C.dim}Tokens:${C.reset} ${formatCostTokens(totals.inputTokens)} in / ${formatCostTokens(totals.outputTokens)} out  ${C.dim}Total:${C.reset} ${C.bold}${formatUsd(totals.totalCostUsd)}${C.reset}`);
+    const tokenSummary = `${formatCostTokens(totals.inputTokens)} in${totals.cachedInputTokens > 0 ? ` (${formatCostTokens(totals.cachedInputTokens)} cached)` : ""} / ${formatCostTokens(totals.outputTokens)} out`;
+    const billableSummary = Number.isFinite(Number(totals.billableTokens))
+      && Math.round(Number(totals.billableTokens)) !== Math.round((Number(totals.inputTokens) || 0) + (Number(totals.outputTokens) || 0))
+      ? `  ${C.dim}Billable:${C.reset} ${formatCostTokens(totals.billableTokens)} total`
+      : "";
+    console.log(`  ${C.dim}Status:${C.reset} ${wi.status}  ${C.dim}Calls:${C.reset} ${totals.callCount}  ${C.dim}Tokens:${C.reset} ${tokenSummary}${billableSummary}  ${C.dim}Total:${C.reset} ${C.bold}${formatUsd(totals.totalCostUsd)}${C.reset}`);
     if (totals.unknownCostCalls > 0) {
       console.log(`  ${C.yellow}!${C.reset}  ${totals.unknownCostCalls} call(s) had unknown pricing - edit with ${C.cyan}posse cost pricing set${C.reset}`);
     }
     console.log(`\n  ${C.bold}By ${groupBy}${C.reset}`);
     for (const row of grouped.groups) {
-      console.log(`  ${row.key.padEnd(20)}  ${formatUsd(row.costUsd).padStart(9)}  ${C.dim}${formatCostTokens(row.inputTokens)}/${formatCostTokens(row.outputTokens)} tok  ${row.callCount} calls${row.unknownCostCalls > 0 ? `  ${C.yellow}${row.unknownCostCalls} unknown${C.reset}` : ""}${C.reset}`);
+      console.log(`  ${row.key.padEnd(20)}  ${formatUsd(row.costUsd).padStart(9)}  ${C.dim}${formatCostTokenBreakdown(row.inputTokens, row.outputTokens, row.cachedInputTokens, row.billableTokens)}  ${row.callCount} calls${row.unknownCostCalls > 0 ? `  ${C.yellow}${row.unknownCostCalls} unknown${C.reset}` : ""}${C.reset}`);
     }
     console.log();
     return;
@@ -299,11 +317,16 @@ export function runCostCommand(args = []) {
     process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
     return;
   }
-  console.log(`\n  ${C.bold}Top Work Items by Cost${C.reset}  ${C.dim}(grand total: ${formatUsd(summary.totalCostUsd)}${summary.truncated ? "; more below the cutoff" : ""})${C.reset}\n`);
+  const rawSummaryTokens = (Number(summary.inputTokens) || 0) + (Number(summary.outputTokens) || 0);
+  const billableSummary = Number.isFinite(Number(summary.billableTokens))
+    && Math.round(Number(summary.billableTokens)) !== Math.round(rawSummaryTokens)
+    ? `, ${formatCostTokens(summary.billableTokens)} billable total`
+    : "";
+  console.log(`\n  ${C.bold}Top Work Items by Cost${C.reset}  ${C.dim}(grand total: ${formatUsd(summary.totalCostUsd)}${billableSummary}${summary.truncated ? "; more below the cutoff" : ""})${C.reset}\n`);
   for (const row of summary.workItems) {
     const wi = getWorkItem(row.wiId);
     const title = wi ? wi.title.slice(0, 60) : "(missing)";
-    console.log(`  WI#${String(row.wiId).padEnd(4)}  ${formatUsd(row.totalCostUsd).padStart(9)}  ${C.dim}${formatCostTokens(row.inputTokens)}/${formatCostTokens(row.outputTokens)} tok  ${row.callCount} calls${row.unknownCostCalls > 0 ? `  ${C.yellow}${row.unknownCostCalls} unknown${C.reset}` : ""}${C.reset}  ${title}`);
+    console.log(`  WI#${String(row.wiId).padEnd(4)}  ${formatUsd(row.totalCostUsd).padStart(9)}  ${C.dim}${formatCostTokenBreakdown(row.inputTokens, row.outputTokens, row.cachedInputTokens, row.billableTokens)}  ${row.callCount} calls${row.unknownCostCalls > 0 ? `  ${C.yellow}${row.unknownCostCalls} unknown${C.reset}` : ""}${C.reset}  ${title}`);
   }
   console.log();
 }

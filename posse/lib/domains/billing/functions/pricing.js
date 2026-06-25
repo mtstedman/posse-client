@@ -15,6 +15,12 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getRemotePricingMap } from "../../providers/functions/model-catalog-store.js";
 
+// Anthropic prompt-caching: writing to the cache costs 1.25x the base input
+// rate (5-minute TTL, Posse's default). Mirrors the authoritative Claude cost
+// path (providers/claude/stream-usage.js). Only Claude reports cache-creation
+// tokens, so this premium is a no-op for other providers.
+const CACHE_CREATION_MULTIPLIER = 1.25;
+
 // Defaults as of May 2026. Rates in USD per million input/output tokens.
 // Operators can override any row via the provider_pricing table (admin CLI).
 // These are best-effort — keep them conservative so we don't under-report.
@@ -296,7 +302,7 @@ export function resolvePricing({ provider, modelName, modelTier } = {}) {
  * already carries cost_estimate_usd and it's non-negative, we prefer that value
  * (the provider may have reported a more authoritative figure at call time).
  */
-export function estimateCallCost({ provider, modelName, modelTier, inputTokens = 0, outputTokens = 0, cachedInputTokens = 0, knownCostUsd = null, longContextInputTokens = null } = {}) {
+export function estimateCallCost({ provider, modelName, modelTier, inputTokens = 0, outputTokens = 0, cachedInputTokens = 0, cacheCreationInputTokens = 0, knownCostUsd = null, longContextInputTokens = null } = {}) {
   if (knownCostUsd != null && Number.isFinite(Number(knownCostUsd)) && Number(knownCostUsd) >= 0) {
     return { costUsd: Number(knownCostUsd), source: "known" };
   }
@@ -305,7 +311,15 @@ export function estimateCallCost({ provider, modelName, modelTier, inputTokens =
     ? input
     : Math.max(0, Number(longContextInputTokens) || 0);
   const cachedInput = Math.min(input, Math.max(0, Number(cachedInputTokens) || 0));
-  const uncachedInput = Math.max(0, input - cachedInput);
+  // Cache-creation (write) tokens are part of inputTokens but carry the
+  // Anthropic cache-write premium over the base rate, so carve them out of the
+  // uncached remainder and bill the premium. Only Claude reports these, so the
+  // multiplier is a no-op for other providers (the field stays 0).
+  const cacheCreationInput = Math.min(
+    Math.max(0, input - cachedInput),
+    Math.max(0, Number(cacheCreationInputTokens) || 0),
+  );
+  const uncachedInput = Math.max(0, input - cachedInput - cacheCreationInput);
   const output = Math.max(0, Number(outputTokens) || 0);
   const rates = applyUsageRateAdjustments(
     resolvePricing({ provider, modelName, modelTier }),
@@ -313,10 +327,51 @@ export function estimateCallCost({ provider, modelName, modelTier, inputTokens =
   );
   const cost = (
     (uncachedInput * rates.inputPerM)
+    + (cacheCreationInput * rates.inputPerM * CACHE_CREATION_MULTIPLIER)
     + (cachedInput * rates.cachedInputPerM)
     + (output * rates.outputPerM)
   ) / 1_000_000;
   return { costUsd: cost, source: rates.source };
+}
+
+/**
+ * Convert cached input into uncached-input-equivalent billing units.
+ *
+ * This is a reporting figure, not a replacement for raw token accounting:
+ * raw input/output tokens remain the provider-reported counts, while
+ * billableInputTokens shows the cached-input discount in token units.
+ */
+export function estimateBillableInputTokens({ provider, modelName, modelTier, inputTokens = 0, cachedInputTokens = 0, cacheCreationInputTokens = 0, longContextInputTokens = null } = {}) {
+  const input = Math.max(0, Number(inputTokens) || 0);
+  const rateInput = longContextInputTokens == null
+    ? input
+    : Math.max(0, Number(longContextInputTokens) || 0);
+  const cachedInput = Math.min(input, Math.max(0, Number(cachedInputTokens) || 0));
+  const cacheCreationInput = Math.min(
+    Math.max(0, input - cachedInput),
+    Math.max(0, Number(cacheCreationInputTokens) || 0),
+  );
+  const uncachedInput = Math.max(0, input - cachedInput - cacheCreationInput);
+  const rates = applyUsageRateAdjustments(
+    resolvePricing({ provider, modelName, modelTier }),
+    { provider, modelName, inputTokens: rateInput }
+  );
+  const inputPerM = Math.max(0, Number(rates.inputPerM) || 0);
+  const cachedInputPerM = Math.max(0, Number(rates.cachedInputPerM) || 0);
+  const cacheDiscountRatio = inputPerM > 0 ? cachedInputPerM / inputPerM : 1;
+  // Cache-write tokens bill at a premium; reflect that in billable units so the
+  // displayed figure tracks estimateCallCost.
+  const billableInputTokens = uncachedInput
+    + (cacheCreationInput * CACHE_CREATION_MULTIPLIER)
+    + (cachedInput * cacheDiscountRatio);
+  return {
+    billableInputTokens,
+    uncachedInputTokens: uncachedInput,
+    cachedInputTokens: cachedInput,
+    cacheCreationInputTokens: cacheCreationInput,
+    cacheDiscountRatio,
+    source: rates.source,
+  };
 }
 
 /**

@@ -1234,11 +1234,19 @@ export class Scheduler {
    */
   async runHealthChecks({ onBootEvent = null } = {}) {
     const workspaceHealth = await this.probeWorkspaceHealth({ onBootEvent });
-    // Prime provider auth on the ASYNC path so the Claude OAuth warm runs off
-    // the event loop, then read liveness WITHOUT re-priming.
-    try {
-      await primeProviderUsageAuthAsync({ cwd: this.projectDir });
-    } catch { /* prime failure is non-fatal; the liveness read still proceeds */ }
+    // Prime provider auth/usage in the BACKGROUND — never block boot on it. The
+    // OAuth/usage warm can take 10-20s (longer against unreachable or
+    // placeholder provider creds), and AWAITING it here stalled the entire
+    // scheduler boot behind the "workspace health" row (the probe itself is
+    // ~5ms; the wall time was all this prime). The liveness read below reports
+    // whatever is already warm; the prime keeps filling the cache off the event
+    // loop for when jobs actually need it. Provider warm is independent of the
+    // deterministic index, so nothing downstream of boot waits on it.
+    if (typeof primeProviderUsageAuthAsync === "function") {
+      Promise.resolve()
+        .then(() => primeProviderUsageAuthAsync({ cwd: this.projectDir }))
+        .catch(() => { /* non-fatal; liveness read already proceeded */ });
+    }
     const providerLiveness = await this.probeProviderLiveness({ onBootEvent });
     return { workspaceHealth, providerLiveness };
   }
@@ -1319,6 +1327,7 @@ export class Scheduler {
         this.stop();
         return false;
       }
+      this.stop();
       throw err;
     }
     if (bootTimeoutTimer) clearTimeout(bootTimeoutTimer);

@@ -29,10 +29,11 @@ export class ToolRegistry {
    * @param {string} meta.name       - bare tool name (dispatch key)
    * @param {string[]} [meta.roles]  - roles allowed to use the tool
    * @param {boolean} [meta.mutatesWorktree] - can mutate the working tree
+   * @param {boolean} [meta.budgetExempt] - live coordination tool, excluded from Posse-side work budgets
    * @param {string[]} [meta.advertise] - transports the tool is offered on
    *        as a callable schema (subset of {"function","mcp"})
    */
-  declare({ suite, name, roles = [], mutatesWorktree = false, advertise = [] } = {}) {
+  declare({ suite, name, roles = [], mutatesWorktree = false, budgetExempt = false, advertise = [] } = {}) {
     const s = String(suite || "").trim();
     const n = String(name || "").trim();
     if (!s || !n) throw new Error("ToolRegistry.declare requires suite and name");
@@ -47,6 +48,7 @@ export class ToolRegistry {
       name: n,
       roles: [...roles].map(String).sort(),
       mutatesWorktree: !!mutatesWorktree,
+      budgetExempt: !!budgetExempt,
       advertise: [...new Set(advertise)],
       execute: existing.execute || null,
     });

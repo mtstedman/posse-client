@@ -132,7 +132,7 @@ export class DeveloperRole extends BaseRole {
       worker.emit(job.id, `${C.green}[new]${C.reset} WI#${job.work_item_id} job #${job.id}: first attempt`);
     }
 
-    const nudgeContext = loadNudges(job.id);
+    const nudgeContext = loadNudges(job.id, { attemptId: ctx.attemptId });
     const fallbackReads = packet.budgets?.fallback_reads_remaining ?? null;
     const taskMode = payload.task_mode || "code";
     const needsImageGeneration = !!payload.needs_image_generation;

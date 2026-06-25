@@ -15,7 +15,15 @@ const HOST_URL = new URL("./onnx-host.mjs", import.meta.url);
 // Generous ceiling: first request pays the ~6s model load, and a big batch can
 // take a while. A wedged encode still can't hang forever.
 const ENCODE_TIMEOUT_MS = 300_000;
+const ABORT_SIGNAL_TIMEOUT_MS = 5_000;
+// Teardown is awaited by the parent before it terminates the worker thread, so
+// the close path must not inherit the full encode timeout: a drain bounded to a
+// few seconds keeps a worst-case shutdown short, then we force-dispose even if an
+// encode is still in flight. The idle-evict path only ever fires at 0 in-flight,
+// so this bound never delays normal eviction.
+const SHARED_CLOSE_DRAIN_MS = 10_000;
 let ONNX_SUPERVISOR_SEQ = 0;
+let ONNX_ABORT_SEQ = 0;
 
 function registerOnnxThreadDaemon(daemon) {
   const key = `atlas-onnx#${++ONNX_SUPERVISOR_SEQ}`;
@@ -45,7 +53,7 @@ export function onnxModelKey(config = {}) {
 /**
  * @param {() => Record<string, any>} getConfig  current encoder config (live, so
  *   a settings change is observed on the next request and triggers a recycle).
- * @returns {{ encode: (texts: string[], opts?: { signal?: AbortSignal }) => Promise<Float32Array[]>, warm: () => Promise<void>, info: () => Promise<any>, dispose: () => Promise<void>, daemon: Daemon }}
+ * @returns {{ encode: (texts: string[], opts?: { signal?: AbortSignal, timeoutMs?: number }) => Promise<Float32Array[]>, warm: () => Promise<void>, info: () => Promise<any>, dispose: () => Promise<void>, daemon: Daemon }}
  */
 export function createOnnxDaemon(getConfig) {
   const nativeAuth = heartbeatAuthManager.getCapability();
@@ -65,8 +73,24 @@ export function createOnnxDaemon(getConfig) {
   return {
     daemon,
     async encode(texts, opts = {}) {
-      const data = await call({ op: "encode", texts }, opts);
-      return /** @type {Float32Array[]} */ (data?.vectors || []);
+      throwIfAborted(opts.signal);
+      const abortId = opts.signal ? `encode-${process.pid}-${Date.now()}-${++ONNX_ABORT_SEQ}` : null;
+      const onAbort = abortId
+        ? () => {
+            void call({ op: "abort", abortId }, { timeoutMs: ABORT_SIGNAL_TIMEOUT_MS })
+              .catch(() => { /* best-effort cooperative abort signal */ });
+          }
+        : null;
+      if (opts.signal && onAbort) opts.signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        const data = await call(
+          { op: "encode", texts, ...(abortId ? { abortId } : {}) },
+          { timeoutMs: opts.timeoutMs ?? ENCODE_TIMEOUT_MS },
+        );
+        return /** @type {Float32Array[]} */ (data?.vectors || []);
+      } finally {
+        if (opts.signal && onAbort) opts.signal.removeEventListener("abort", onAbort);
+      }
     },
     async warm() { await call({ op: "warm" }); },
     info() { return call({ op: "info" }); },
@@ -90,7 +114,6 @@ export function createOnnxDaemon(getConfig) {
 // session per worker, not once per quiet gap.
 const DEFAULT_IDLE_MS = 30_000;
 const KEEPWARM_IDLE_MS = 900_000; // 15 min backstop while pinned
-const SHARED_CLOSE_DRAIN_MS = 10_000;
 const MAX_ENCODE_WORKERS = 8;
 let _idleMs = DEFAULT_IDLE_MS;
 let _keepWarm = false;
@@ -117,6 +140,23 @@ export function normalizeEmbeddingThreads(value, fallback = 2) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   const base = Number.isFinite(parsed) ? parsed : fallback;
   return Math.max(1, Math.min(MAX_ENCODE_WORKERS, base));
+}
+
+/**
+ * @param {AbortSignal | undefined} signal
+ */
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  throw /** @type {any} */ (signal).reason ?? new Error("onnx encode aborted");
+}
+
+/**
+ * @param {unknown[]} vectors
+ * @param {number} expected
+ */
+function assertVectorCount(vectors, expected) {
+  if (vectors.length === expected) return;
+  throw new Error(`onnx daemon returned ${vectors.length} vectors for ${expected} texts`);
 }
 
 // Indirection so tests can seed fake workers (no ~6s model load / real thread).
@@ -149,10 +189,18 @@ function delay(ms) {
 }
 
 async function _waitForSharedIdle(maxMs = SHARED_CLOSE_DRAIN_MS) {
-  const deadline = Date.now() + Math.max(0, Number(maxMs) || 0);
-  while (_sharedInflight > 0 && Date.now() < deadline) {
-    await delay(Math.min(100, Math.max(1, deadline - Date.now())));
+  const deadline = Number.isFinite(Number(maxMs)) && Number(maxMs) > 0
+    ? Date.now() + Number(maxMs)
+    : Infinity;
+  while (_sharedInflight > 0) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await delay(Math.min(100, Math.max(1, remaining)));
   }
+}
+
+async function _awaitSharedClosing() {
+  while (_sharedClosing) await _sharedClosing;
 }
 
 /** Wrap an op so the idle timer is held off while it runs. */
@@ -179,10 +227,15 @@ function _tracked(fn) {
  */
 async function _encode(texts, opts = {}) {
   if (!Array.isArray(texts) || texts.length === 0) return [];
+  await _awaitSharedClosing();
   _ensureWorkers(opts.workers ?? 1);
   const reqOpts = { signal: opts.signal };
   const n = Math.min(normalizeEmbeddingThreads(opts.workers ?? 1, 1), texts.length, _workers.length);
-  if (n <= 1) return _workers[0].encode(texts, reqOpts);
+  if (n <= 1) {
+    const out = await _workers[0].encode(texts, reqOpts);
+    assertVectorCount(out, texts.length);
+    return out;
+  }
   const chunkSize = Math.ceil(texts.length / n);
   /** @type {Promise<Float32Array[]>[]} */
   const jobs = [];
@@ -195,10 +248,12 @@ async function _encode(texts, opts = {}) {
   /** @type {Float32Array[]} */
   const out = [];
   for (const vecs of results) for (const v of vecs) out.push(v);
+  assertVectorCount(out, texts.length);
   return out;
 }
 
 async function _warm(opts = {}) {
+  await _awaitSharedClosing();
   _ensureWorkers(opts.workers ?? 1);
   const n = Math.min(normalizeEmbeddingThreads(opts.workers ?? 1, 1), _workers.length);
   await Promise.all(_workers.slice(0, n).map((w) => w.warm()));
@@ -249,14 +304,14 @@ export function __setOnnxEncoderWorkerFactoryForTests(factory = null) {
  */
 export function getSharedOnnxDaemon(config = {}, opts = {}) {
   _sharedConfig = config;
-  _ensureWorkers(opts.workers ?? 1);
+  if (!_sharedClosing) _ensureWorkers(opts.workers ?? 1);
   if (!_client) {
     _client = {
       encode: _tracked(_encode),
       warm: _tracked(_warm),
       info: _info,
     };
-    _armIdle();
+    if (!_sharedClosing) _armIdle();
   }
   return _client;
 }
@@ -274,7 +329,7 @@ export async function closeSharedOnnxDaemon() {
   _client = null;
   if (workers.length === 0) return;
   _sharedClosing = (async () => {
-    await _waitForSharedIdle();
+    await _waitForSharedIdle(SHARED_CLOSE_DRAIN_MS);
     await Promise.all(workers.map(async (w) => {
       try { await w.dispose?.(); } catch { /* best effort */ }
       try { await w.daemon.dispose(); } catch { /* best effort */ }

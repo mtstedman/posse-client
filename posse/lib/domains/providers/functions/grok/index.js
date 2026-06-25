@@ -37,6 +37,9 @@ import { signalAbortError } from "../../../runtime/functions/yield.js";
 
 export { extractJson };
 
+const LIVE_CHANNEL_TOOL_NAMES = new Set(["agent_feedback", "get_operator_feedback", "ack_operator_feedback"]);
+const LIVE_CHANNEL_TURN_LIMIT = 12;
+
 function abortableThrottle(ms, signal = null) {
   if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
   if (signal.aborted) {
@@ -443,6 +446,7 @@ export async function callProvider(promptText, {
   let totalCachedInputTokens = 0;
   let totalReasoningOutputTokens = 0;
   let turnCount = 0;
+  let liveChannelTurnCount = 0;
   let readCount = 0;
   const maxReads = fallbackReads ?? DEFAULT_FALLBACK_READS;
   let allText = "";
@@ -547,9 +551,41 @@ export async function callProvider(promptText, {
 
       // No function calls ? model is done
       if (functionCalls.length === 0) break;
+      const countsAgainstTurnBudget = functionCalls.some((call) => !LIVE_CHANNEL_TOOL_NAMES.has(call.name));
+      if (!countsAgainstTurnBudget) {
+        liveChannelTurnCount++;
+      } else {
+        liveChannelTurnCount = 0;
+      }
+
+      if (!countsAgainstTurnBudget && liveChannelTurnCount > LIVE_CHANNEL_TURN_LIMIT) {
+        emit(`${C.yellow}[cap] Reached ${LIVE_CHANNEL_TURN_LIMIT} live-channel turns - forcing final answer${C.reset}`);
+        const stubResults = functionCalls.map(call => ({
+          type: "function_call_output",
+          call_id: call.call_id,
+          output: "(live coordination limit reached - tool call skipped)",
+        }));
+        const finalOpts = {
+          model: modelToUse,
+          previous_response_id: response.id,
+          input: [
+            ...stubResults,
+            { role: "user", content: [{ type: "input_text", text:
+              "SYSTEM: Live coordination limit reached. Do not call more tools. Produce your final answer from the current state." }] },
+          ],
+        };
+        if (canSetReasoningEffort) finalOpts.reasoning = { effort };
+
+        await abortableThrottle(THROTTLE_MS, abortSignal);
+        const finalResponse = await createWithReasoningFallback(finalOpts, "final answer");
+        addUsage(finalResponse.usage);
+        const finalText = finalResponse.output_text || "";
+        if (finalText) allText += (allText ? "\n" : "") + finalText;
+        break;
+      }
 
       // Hard turn cap - system decides when to stop, not the model
-      if (turnCount >= turnLimit) {
+      if (countsAgainstTurnBudget && turnCount >= turnLimit) {
         emit(`${C.yellow}[cap] Reached ${turnLimit} tool turns - forcing final answer${C.reset}`);
 
         // Send tool results + force-stop instruction so model wraps up
@@ -578,9 +614,9 @@ export async function callProvider(promptText, {
         break;
       }
 
-      turnCount++;
+      if (countsAgainstTurnBudget) turnCount++;
       emit(
-        `${C.dim}-- turn ${turnCount}/${turnLimit}: ` +
+        `${C.dim}-- ${countsAgainstTurnBudget ? `turn ${turnCount}/${turnLimit}` : `live channel ${liveChannelTurnCount}/${LIVE_CHANNEL_TURN_LIMIT}`}: ` +
         `${functionCalls.length} tool call(s) --${C.reset}`
       );
 

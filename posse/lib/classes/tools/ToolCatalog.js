@@ -17,6 +17,7 @@ function freezeEntry(entry = {}) {
     schema: entry.schema || null,
     access: String(entry.access || "unknown"),
     summary: String(entry.summary || ""),
+    budgetExempt: !!entry.budgetExempt,
     roleAllowlist: entry.roleAllowlist instanceof Set
       ? new Set(entry.roleAllowlist)
       : new Set(Array.isArray(entry.roleAllowlist) ? entry.roleAllowlist : []),
@@ -60,6 +61,7 @@ export class ToolCatalog {
       return {
         access: entry.access || "unknown",
         summary: entry.summary || "",
+        budgetExempt: !!entry.budgetExempt,
       };
     }
     const spec = getToolExecutionSpec(name);
@@ -120,6 +122,7 @@ export class ToolCatalog {
       schema: descriptor.schema || null,
       access,
       summary,
+      budgetExempt: !!descriptor.budgetExempt,
       roleAllowlist,
       gateTier,
       capabilityFlags: descriptor.capabilityFlags || deriveCapabilityFlags(access),

@@ -27,6 +27,9 @@ import { EVENT_TYPES } from "../../../catalog/event.js";
 export const KNOWN_EVENT_NAMESPACES = Object.freeze(new Set([
   // Active namespaces observed in the codebase
   "agent_call",
+  "agent",
+  "agent_interaction",
+  "agent_question",
   "artifacts",
   "attempt",
   "bridge",
@@ -41,6 +44,7 @@ export const KNOWN_EVENT_NAMESPACES = Object.freeze(new Set([
   "preflight",
   "research",
   "scheduler",
+  "operator_nudge",
   "atlas",
   "wi",
   "work_item",

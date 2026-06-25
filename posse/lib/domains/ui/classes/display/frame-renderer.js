@@ -41,13 +41,23 @@ export class DisplayFrameRenderer {
     const overhead = 2 + progressLines.length + 1 + 1 + contextBarLines.length + inputLines.length;
     const middleRows = Math.max(this.rows - overhead, 5);
 
-    let left = this._buildLeft(leftW, middleRows);
-    let right = this._buildRight(rightW, middleRows);
+    const monitorMode = this._rightMode === "monitor";
+    let middleFull = null;
+    let left = [];
+    let right = [];
+    if (monitorMode) {
+      middleFull = this._buildMonitor(fullW, middleRows);
+      if (middleFull.length > middleRows) middleFull.length = middleRows;
+      while (middleFull.length < middleRows) middleFull.push("");
+    } else {
+      left = this._buildLeft(leftW, middleRows);
+      right = this._buildRight(rightW, middleRows);
 
-    if (left.length > middleRows) left.length = middleRows;
-    if (right.length > middleRows) right.length = middleRows;
-    while (left.length < middleRows) left.push("");
-    while (right.length < middleRows) right.push("");
+      if (left.length > middleRows) left.length = middleRows;
+      if (right.length > middleRows) right.length = middleRows;
+      while (left.length < middleRows) left.push("");
+      while (right.length < middleRows) right.push("");
+    }
 
     // ── Compose frame with absolute cursor positioning ──
     let buf = "";
@@ -63,18 +73,29 @@ export class DisplayFrameRenderer {
       row++;
     }
 
-    // Divider: progress → split panels
-    buf += `\x1b[${row};1H${C.dim}\u251c${"\u2500".repeat(leftW)}\u252c${"\u2500".repeat(rightW)}\u2524${C.reset}\x1b[K`;
+    // Divider: progress → middle
+    buf += monitorMode
+      ? `\x1b[${row};1H${C.dim}\u251c${"\u2500".repeat(fullW)}\u2524${C.reset}\x1b[K`
+      : `\x1b[${row};1H${C.dim}\u251c${"\u2500".repeat(leftW)}\u252c${"\u2500".repeat(rightW)}\u2524${C.reset}\x1b[K`;
     row++;
 
-    // Middle: split panels
-    for (let i = 0; i < middleRows; i++) {
-      buf += `\x1b[${row};1H${C.dim}\u2502${C.reset}${fit(left[i], leftW)}${C.dim}\u2502${C.reset}${fit(right[i], rightW)}${C.dim}\u2502${C.reset}\x1b[K`;
-      row++;
+    // Middle
+    if (monitorMode) {
+      for (let i = 0; i < middleRows; i++) {
+        buf += `\x1b[${row};1H${C.dim}\u2502${C.reset}${fit(middleFull[i], fullW)}${C.dim}\u2502${C.reset}\x1b[K`;
+        row++;
+      }
+    } else {
+      for (let i = 0; i < middleRows; i++) {
+        buf += `\x1b[${row};1H${C.dim}\u2502${C.reset}${fit(left[i], leftW)}${C.dim}\u2502${C.reset}${fit(right[i], rightW)}${C.dim}\u2502${C.reset}\x1b[K`;
+        row++;
+      }
     }
 
     // Divider: split panels → bottom input
-    buf += `\x1b[${row};1H${C.dim}\u251c${"\u2500".repeat(leftW)}\u2534${"\u2500".repeat(rightW)}\u2524${C.reset}\x1b[K`;
+    buf += monitorMode
+      ? `\x1b[${row};1H${C.dim}\u251c${"\u2500".repeat(fullW)}\u2524${C.reset}\x1b[K`
+      : `\x1b[${row};1H${C.dim}\u251c${"\u2500".repeat(leftW)}\u2534${"\u2500".repeat(rightW)}\u2524${C.reset}\x1b[K`;
     row++;
 
     // Context status bar (thin, full width) \u2014 a vim/tmux-style status line

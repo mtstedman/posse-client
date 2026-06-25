@@ -76,6 +76,7 @@ export function completeAgentCall(id, {
   input_tokens = null,
   output_tokens = null,
   cached_input_tokens = null,
+  cache_creation_input_tokens = null,
   model_name = null,
   duration_ms = null,
   exit_code = null,
@@ -91,6 +92,7 @@ export function completeAgentCall(id, {
     UPDATE agent_calls
     SET status = ?, finished_at = ?, duration_ms = ?,
         output_chars = ?, input_tokens = ?, output_tokens = ?, cached_input_tokens = ?,
+        cache_creation_input_tokens = ?,
         model_name = COALESCE(?, model_name),
         exit_code = ?, error_text = ?,
         atlas_method = COALESCE(?, atlas_method),
@@ -102,6 +104,7 @@ export function completeAgentCall(id, {
   `).run(
     status, now(), duration_ms,
     output_chars, input_tokens, output_tokens, cached_input_tokens,
+    cache_creation_input_tokens,
     model_name,
     exit_code, error_text,
     atlas_method,
@@ -146,6 +149,7 @@ export function getAgentCallStats() {
       SUM(prompt_chars) as total_prompt_chars,
       SUM(output_chars) as total_output_chars,
       SUM(input_tokens) as total_input_tokens,
+      SUM(cached_input_tokens) as total_cached_input_tokens,
       SUM(output_tokens) as total_output_tokens,
       SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succeeded,
       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
@@ -446,6 +450,7 @@ export function listWorkItemsWithCallRollups({ limit = 200 } = {}) {
       COALESCE(ac.failed_calls, 0)     AS failed_calls,
       COALESCE(ac.running_calls, 0)    AS running_calls,
       COALESCE(ac.input_tokens, 0)     AS input_tokens,
+      COALESCE(ac.cached_input_tokens, 0) AS cached_input_tokens,
       COALESCE(ac.output_tokens, 0)    AS output_tokens,
       COALESCE(ac.total_duration_ms, 0) AS total_duration_ms,
       COALESCE(ac.cost_usd, 0)         AS cost_usd,
@@ -460,6 +465,7 @@ export function listWorkItemsWithCallRollups({ limit = 200 } = {}) {
         SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END) AS failed_calls,
         SUM(CASE WHEN status = 'running'   THEN 1 ELSE 0 END) AS running_calls,
         SUM(COALESCE(input_tokens, 0))                    AS input_tokens,
+        SUM(COALESCE(cached_input_tokens, 0))             AS cached_input_tokens,
         SUM(COALESCE(output_tokens, 0))                   AS output_tokens,
         SUM(COALESCE(duration_ms, 0))                     AS total_duration_ms,
         SUM(COALESCE(cost_estimate_usd, 0))               AS cost_usd

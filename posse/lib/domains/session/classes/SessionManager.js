@@ -9,6 +9,7 @@ import {
   recordInitialSessionHandle,
   recordSessionRecycleSavings,
   releaseSessionHandle,
+  renewSessionHandleLease,
 } from "../../queue/functions/sessions.js";
 import { deriveSessionKey, isRecyclableLane } from "../functions/keys.js";
 import {
@@ -296,6 +297,10 @@ export class SessionManager {
 
   releaseSession(sessionId, leaseToken) {
     return releaseSessionHandle(sessionId, leaseToken);
+  }
+
+  renewSession(sessionId, leaseToken, { jobId = null, leaseTtlSec = undefined } = {}) {
+    return renewSessionHandleLease(sessionId, leaseToken, { jobId, leaseTtlSec });
   }
 
   invalidateLane(laneId, reason = "invalidated", opts = {}) {

@@ -34,6 +34,15 @@ export function classifyApprovalAnswer(answer) {
 export function classifyReviewAnswer(answer) {
   const text = String(answer || "").trim().toLowerCase();
   if (!text || text === "(skipped)") return "unknown";
+  const prefixed = text.match(/^(retry|re-run|rerun|reassess|re-assess|try again|replan|skip|skipped|pass|passed|approve|approved|yes|y|fail|failed|reject|rejected|no|n)\s*:/);
+  if (prefixed) {
+    const verb = prefixed[1];
+    if (/^(retry|re-run|rerun|reassess|re-assess|try again)$/.test(verb)) return "retry";
+    if (verb === "replan") return "replan";
+    if (/^(skip|skipped)$/.test(verb)) return "skip";
+    if (/^(pass|passed|approve|approved|yes|y)$/.test(verb)) return "pass";
+    if (/^(fail|failed|reject|rejected|no|n)$/.test(verb)) return "fail";
+  }
   if (/\b(retry|re-run|rerun|reassess|re-assess|try again)\b/.test(text)) return "retry";
   if (/\b(replan)\b/.test(text)) return "replan";
   if (/\b(skip|skipped)\b/.test(text)) return "skip";

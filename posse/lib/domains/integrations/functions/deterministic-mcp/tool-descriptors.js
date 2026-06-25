@@ -54,6 +54,9 @@ import {
   TOOL_CLEAN_IMAGE,
   TOOL_EXTRACT_IMAGE_TEXT,
   TOOL_BASH,
+  TOOL_AGENT_FEEDBACK,
+  TOOL_GET_OPERATOR_FEEDBACK,
+  TOOL_ACK_OPERATOR_FEEDBACK,
   TOOL_RUN_SCOPED_CHECKS,
   TOOL_CREATE_TEST_SUITE,
   TOOL_CREATE_TEST,
@@ -84,6 +87,9 @@ export {
   TOOL_CLEAN_IMAGE,
   TOOL_EXTRACT_IMAGE_TEXT,
   TOOL_BASH,
+  TOOL_AGENT_FEEDBACK,
+  TOOL_GET_OPERATOR_FEEDBACK,
+  TOOL_ACK_OPERATOR_FEEDBACK,
   TOOL_RUN_SCOPED_CHECKS,
   TOOL_CREATE_TEST_SUITE,
   TOOL_CREATE_TEST,
@@ -333,6 +339,27 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
     summary: "Run guarded shell commands only when deterministic tools cannot satisfy the task; do not bypass run_scoped_checks for lint/typecheck.",
     observation: { type: "tool.bash", label: "Bash", format: "command", commandKey: "command", kind: "system_call" },
   },
+  agent_feedback: {
+    // "read" = no workspace/file writes, so it stays available to read-only
+    // roles (planner/researcher/assessor). It does record to the Monitor Agents
+    // interaction channel; that is intentional and not a workspace mutation.
+    access: "read",
+    summary: "Send a short visible operational update to Monitor Agents.",
+    observation: { type: "tool.agent_feedback", label: "AgentFeedback", format: "generic", targetKeys: ["phase", "status", "summary"] },
+    budgetExempt: true,
+  },
+  get_operator_feedback: {
+    access: "read",
+    summary: "Retrieve pending live operator feedback after a tool result signals availability.",
+    observation: { type: "tool.get_operator_feedback", label: "GetFeedback", format: "generic", targetKeys: ["limit"] },
+    budgetExempt: true,
+  },
+  ack_operator_feedback: {
+    access: "read",
+    summary: "Acknowledge retrieved operator feedback as accepted, rejected, or deferred.",
+    observation: { type: "tool.ack_operator_feedback", label: "AckFeedback", format: "generic", targetKeys: ["interaction_id", "decision"] },
+    budgetExempt: true,
+  },
   "query": { access: "atlas", summary: "Compact gateway for native ATLAS v2 retrieval actions." },
   "code": { access: "atlas", summary: "Compact gateway for native ATLAS v2 code-inspection actions." },
   "repo": { access: "atlas", summary: "Compact gateway for native ATLAS v2 repository, policy, usage, and diagnostics actions." },
@@ -351,6 +378,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "buffer.status": { access: "atlas", summary: "Inspect active ATLAS v2 editor buffer overlays." },
   "symbol.search": { access: "atlas", summary: "Search indexed symbols through ATLAS for targeted semantic discovery." },
   "symbol.card": { access: "atlas", summary: "Fetch one symbol card by symbolId or symbolRef without loading whole files." },
+  "symbol.cards": { access: "atlas", summary: "Fetch multiple symbol cards by symbolIds or symbolRefs with per-item errors." },
   "symbol.overview": { access: "atlas", summary: "List compact call/reference sites for a symbol without full caller cards." },
   "tree.overview": { access: "atlas", summary: "Top-level code-tree orientation: root containment page plus the compressed-tree labeled area map." },
   "tree.branch": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels." },
@@ -392,6 +420,7 @@ const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
   "tree.expand",
   "symbol.search",
   "symbol.card",
+  "symbol.cards",
   "symbol.overview",
   "slice.build",
   "slice.refresh",
@@ -412,25 +441,25 @@ const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
 export const TOOL_ROLE_LIBRARY = Object.freeze({
   baseToolAllowlists: Object.freeze({
     dev: Object.freeze({
-      read: [],
-      write: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash"],
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash"],
     }),
     artificer: Object.freeze({
-      read: [],
-      write: ["read_file", "list_files", "search_files", "inspect_file", "write_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash"],
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "inspect_file", "write_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash"],
       imageGeneration: ["generate_image"],
     }),
     assessor: Object.freeze({
-      read: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash"],
-      write: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash"],
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash"],
     }),
     researcher: Object.freeze({
-      read: ["chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
-      write: ["chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
     }),
     planner: Object.freeze({
-      read: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
-      write: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
     }),
     preflight: Object.freeze({ read: [], write: [] }),
     delegator: Object.freeze({ read: [], write: [] }),
@@ -440,7 +469,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     }),
   }),
   deterministicMcp: Object.freeze({
-    read: Object.freeze(["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"]),
+    read: Object.freeze(["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"]),
     write: Object.freeze(["write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output"]),
     imageHelpers: Object.freeze(["read_image_metadata", "validate_artifact_output", "clean_image"]),
     imageGeneration: Object.freeze(["generate_image"]),
@@ -548,6 +577,9 @@ const NATIVE_SCHEMAS = Object.freeze({
   git_history: TOOL_GIT_HISTORY,
   inspect_file: TOOL_INSPECT_FILE,
   hash_file: TOOL_HASH_FILE,
+  agent_feedback: TOOL_AGENT_FEEDBACK,
+  get_operator_feedback: TOOL_GET_OPERATOR_FEEDBACK,
+  ack_operator_feedback: TOOL_ACK_OPERATOR_FEEDBACK,
   resize_image: TOOL_RESIZE_IMAGE,
   read_image_metadata: TOOL_READ_IMAGE_METADATA,
   validate_artifact_output: TOOL_VALIDATE_ARTIFACT_OUTPUT,
@@ -616,6 +648,7 @@ export const TOOL_CATALOG = Object.freeze({
       roleAllowlist: roleAllowlistForTool(name),
       gateTier: GATED_NATIVE_TOOLS.has(name) ? "native-atlas-gated" : "native",
       capabilityFlags: capabilityFlagsFor(spec.access),
+      budgetExempt: !!spec.budgetExempt,
     })];
   })),
   ...Object.fromEntries(Object.entries(SURFACED_ATLAS_TOOL_DEFS).map(([name, schema]) => {

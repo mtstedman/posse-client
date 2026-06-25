@@ -223,6 +223,8 @@ export class EmbeddingIndex {
   #lastAnnSaveAt = Date.now();
   /** @type {boolean} */
   #annSaveFailureLogged = false;
+  /** @type {boolean} */
+  #lastSaveDurable = true;
 
   /**
    * @param {{
@@ -927,7 +929,7 @@ export class EmbeddingIndex {
    * @returns {void}
    */
   save(timing = null, { durable = true } = {}) {
-    if (!this.#dirty && fs.existsSync(this.#usearchPath)) return;
+    if (!this.#dirty && fs.existsSync(this.#usearchPath) && (!durable || this.#lastSaveDurable)) return;
     ensureDir(path.dirname(this.#usearchPath));
     const tmpPath = uniqueTempPath(this.#usearchPath);
     try {
@@ -941,6 +943,7 @@ export class EmbeddingIndex {
         manifest_path: this.#manifestPath,
         vector_count: this.#vectorCount(),
         native_stats: nativeIndexStats(this.#usearch),
+        durable,
       });
       this.#usearch.save(tmpPath);
       if (timing) timing.annSaveMs += elapsedSince(saveStartedAt);
@@ -1012,6 +1015,7 @@ export class EmbeddingIndex {
         save_ms: timing ? roundMs(timing.annSaveMs) : null,
         hash_ms: timing ? roundMs(timing.annHashMs) : null,
         manifest_ms: timing ? roundMs(timing.annManifestMs) : null,
+        durable,
       });
       if (timing) {
         timing.annDeferred = false;
@@ -1031,6 +1035,7 @@ export class EmbeddingIndex {
       throw err;
     }
     this.#dirty = false;
+    this.#lastSaveDurable = !!durable;
     this.#annDirtyBatches = 0;
     this.#lastAnnSaveAt = Date.now();
   }
@@ -1042,9 +1047,10 @@ export class EmbeddingIndex {
       model_version: this.model_version,
       dim: this.dim,
       dirty: this.#dirty,
+      last_save_durable: this.#lastSaveDurable,
       vector_count: this.#safeVectorCount(),
     });
-    try { if (this.#dirty) this.save(); } catch (err) {
+    try { if (this.#dirty || !this.#lastSaveDurable) this.save(null, { durable: true }); } catch (err) {
       recordEmbeddingForensics("embedding_index.close.save_error", {
         model: this.model,
         model_version: this.model_version,

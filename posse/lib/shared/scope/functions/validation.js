@@ -8,7 +8,7 @@ export function validateScopedPath(value, label) {
   const trimmed = raw.trim();
   if (!trimmed) return `${label} must not be empty`;
   if (trimmed !== raw) return `${label} must not have leading/trailing whitespace`;
-  if (path.isAbsolute(trimmed) || /^[A-Za-z]:[\\/]/.test(trimmed)) {
+  if (path.isAbsolute(trimmed) || /^[A-Za-z]:/.test(trimmed)) {
     return `${label} must be repo-relative, not absolute`;
   }
   if (/[\r\n\t]/.test(trimmed)) return `${label} must be a single-line path`;
@@ -38,7 +38,7 @@ export function validateCreateRootPath(value, label) {
   if (trimmed === "*" || trimmed === "." || trimmed === "./" || trimmed === ".\\") {
     return `${label} must not grant repo-wide write scope`;
   }
-  if (path.isAbsolute(trimmed) || /^[A-Za-z]:[\\/]/.test(trimmed)) {
+  if (path.isAbsolute(trimmed) || /^[A-Za-z]:/.test(trimmed)) {
     return `${label} must be repo-relative, not absolute`;
   }
   if (/[\r\n\t]/.test(trimmed)) return `${label} must be a single-line path`;

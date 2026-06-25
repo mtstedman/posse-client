@@ -53,6 +53,17 @@ export const EVENT_TYPES = Object.freeze({
   // ── agent_call ──────────────────────────────────────────────────────────
   AGENT_CALL_ORPHAN_RECONCILED: "agent_call.orphan_reconciled",
 
+  // ── agent interaction / monitor agents ─────────────────────────────────
+  AGENT_ACTIVITY: "agent.activity",
+  AGENT_INTERACTION_APPLIED: "agent_interaction.applied",
+  AGENT_INTERACTION_CREATED: "agent_interaction.created",
+  AGENT_QUESTION_ANSWERED: "agent_question.answered",
+  AGENT_QUESTION_CREATED: "agent_question.created",
+  OPERATOR_NUDGE_APPLIED: "operator_nudge.applied",
+  OPERATOR_NUDGE_CREATED: "operator_nudge.created",
+  OPERATOR_NUDGE_EXPIRED: "operator_nudge.expired",
+  OPERATOR_NUDGE_REQUEUED: "operator_nudge.requeued",
+
   // ── cleanup ─────────────────────────────────────────────────────────────
   CLEANUP_BRANCH_DISCARDED: "cleanup.branch_discarded",
   CLEANUP_BRANCH_SNAPSHOT_RESTORED: "cleanup.branch_snapshot_restored",
@@ -205,6 +216,7 @@ export const EVENT_TYPES = Object.freeze({
 
   // ── pipeline ────────────────────────────────────────────────────────────
   PIPELINE_DUPLICATE_PLAN_SKIPPED: "pipeline.duplicate_plan_skipped",
+  PIPELINE_DUPLICATE_RESEARCH_SKIPPED: "pipeline.duplicate_research_skipped",
 
   // ── packet ──────────────────────────────────────────────────────────────
   PACKET_CONTEXT_TRIMMED: "packet.context_trimmed",

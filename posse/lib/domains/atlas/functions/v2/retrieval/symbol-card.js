@@ -27,6 +27,10 @@ import { recordCodeLadderStep } from "./code-ladder.js";
  * }} args
  */
 export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoId }) {
+  if (hasBatchCardParams(params)) {
+    return symbolGetCards({ view, versionId, params, repoRoot, ledger, repoId, action: "symbol.card" });
+  }
+
   /** @type {ViewSymbol | null} */
   let target = null;
   /** @type {{ entry: any, symbol: ViewSymbol } | null} */
@@ -161,6 +165,190 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
     data: card,
     meta: { etag },
   });
+}
+
+/**
+ * @param {{
+ *   view: View,
+ *   versionId: string,
+ *   params: SymbolGetCardParams,
+ *   repoRoot?: string,
+ *   ledger?: import("../contracts/api.js").Ledger,
+ *   repoId?: string | null,
+ *   action?: "symbol.card" | "symbol.cards",
+ * }} args
+ */
+export function symbolGetCards({ view, versionId, params, repoRoot, ledger, repoId, action = "symbol.cards" }) {
+  const requests = collectCardRequests(params);
+  if (requests.length === 0) {
+    return errorEnvelope({
+      action,
+      versionId,
+      code: "invalid_params",
+      message: "symbol.cards requires symbolIds or symbolRefs",
+    });
+  }
+
+  const cards = [];
+  const errors = [];
+  for (const request of requests) {
+    if (request.error) {
+      errors.push(request.error);
+      continue;
+    }
+    const childParams = {
+      minCallConfidence: params.minCallConfidence,
+      includeResolutionMetadata: params.includeResolutionMetadata,
+      sessionId: /** @type {any} */ (params).sessionId,
+      ...(request.symbolId ? { symbolId: request.symbolId } : {}),
+      ...(request.symbolRef ? { symbolRef: request.symbolRef } : {}),
+    };
+    const result = symbolGetCard({ view, versionId, params: /** @type {SymbolGetCardParams} */ (childParams), repoRoot, ledger, repoId });
+    if (result.ok) {
+      cards.push(result.data);
+    } else {
+      errors.push({
+        index: request.index,
+        code: result.error?.code || "symbol_card_error",
+        message: result.error?.message || "Could not hydrate symbol card",
+        ...(request.symbolId ? { symbolId: request.symbolId } : {}),
+        ...(request.symbolRef ? { symbolRef: request.symbolRef } : {}),
+      });
+    }
+  }
+
+  return okEnvelope({
+    action,
+    versionId,
+    data: {
+      cards,
+      errors,
+      total: requests.length,
+      okCount: cards.length,
+      errorCount: errors.length,
+      partial: cards.length > 0 && errors.length > 0,
+    },
+  });
+}
+
+/**
+ * @param {SymbolGetCardParams} params
+ */
+function hasBatchCardParams(params) {
+  return Array.isArray(/** @type {any} */ (params).symbolIds)
+    || Array.isArray(/** @type {any} */ (params).symbolRefs);
+}
+
+/**
+ * @param {SymbolGetCardParams} params
+ * @returns {Array<{ index: number, symbolId?: string, symbolRef?: any, error?: any }>}
+ */
+function collectCardRequests(params) {
+  const requests = [];
+  const seen = new Set();
+  let index = 0;
+
+  const addSymbolId = (value) => {
+    const symbolId = String(value || "").trim();
+    if (!symbolId) return;
+    const key = `id:${symbolId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    requests.push({ index: index++, symbolId });
+  };
+
+  if (params.symbolId) addSymbolId(params.symbolId);
+  for (const symbolId of arrayParam(/** @type {any} */ (params).symbolIds)) addSymbolId(symbolId);
+
+  const addSymbolRef = (value) => {
+    const normalized = normalizeBatchSymbolRef(value);
+    if (!normalized.ok) {
+      const requestIndex = index++;
+      requests.push({
+        index: requestIndex,
+        error: {
+          index: requestIndex,
+          code: "invalid_symbol_ref",
+          message: normalized.message,
+        },
+      });
+      return;
+    }
+    const key = `ref:${stableRefKey(normalized.ref)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    requests.push({ index: index++, symbolRef: normalized.ref });
+  };
+
+  if (params.symbolRef) addSymbolRef(params.symbolRef);
+  for (const symbolRef of arrayParam(/** @type {any} */ (params).symbolRefs)) addSymbolRef(symbolRef);
+
+  return requests;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {unknown[]}
+ */
+function arrayParam(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+/**
+ * @param {unknown} value
+ * @returns {{ ok: true, ref: any } | { ok: false, message: string }}
+ */
+function normalizeBatchSymbolRef(value) {
+  if (!isPlainRecord(value)) {
+    return { ok: false, message: "symbolRef must be a plain object" };
+  }
+  const validKeys = new Set(["name", "file", "kind", "exportedOnly"]);
+  for (const [key, child] of Object.entries(value)) {
+    if (!validKeys.has(key) && child !== undefined) {
+      return { ok: false, message: `symbolRef contains unsupported field ${key}` };
+    }
+    if (containsNonPlainObject(child)) {
+      return { ok: false, message: `symbolRef field ${key} must be JSON-plain` };
+    }
+  }
+  const record = /** @type {Record<string, unknown>} */ (value);
+  const name = typeof record.name === "string" ? record.name.trim() : "";
+  if (!name) return { ok: false, message: "symbolRef.name is required" };
+  const ref = { name };
+  if (typeof record.file === "string" && record.file.trim()) ref.file = record.file.trim();
+  if (typeof record.kind === "string" && record.kind.trim()) ref.kind = record.kind.trim();
+  if (typeof record.exportedOnly === "boolean") ref.exportedOnly = record.exportedOnly;
+  return { ok: true, ref };
+}
+
+/**
+ * @param {unknown} value
+ */
+function isPlainRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * @param {unknown} value
+ */
+function containsNonPlainObject(value) {
+  if (value == null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((item) => containsNonPlainObject(item));
+  if (!isPlainRecord(value)) return true;
+  return Object.values(value).some((item) => containsNonPlainObject(item));
+}
+
+/**
+ * @param {any} ref
+ */
+function stableRefKey(ref) {
+  const out = {};
+  for (const key of ["name", "file", "kind", "exportedOnly"]) {
+    if (ref[key] !== undefined) out[key] = ref[key];
+  }
+  return JSON.stringify(out);
 }
 
 /**

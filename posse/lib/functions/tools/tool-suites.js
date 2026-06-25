@@ -22,6 +22,9 @@ import { assertMutationRoleSafety } from "./tool-parity.js";
 const TOOLS_SUITE = [
   // Shared by both runtimes (function + mcp transports).
   { name: "read_file", mutatesWorktree: false, advertise: ["function", "mcp"] },
+  { name: "agent_feedback", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
+  { name: "get_operator_feedback", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
+  { name: "ack_operator_feedback", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
   { name: "write_file", mutatesWorktree: true, advertise: ["function", "mcp"] },
   { name: "edit_file", mutatesWorktree: true, advertise: ["function", "mcp"] },
   { name: "list_files", mutatesWorktree: false, advertise: ["function", "mcp"] },
@@ -65,6 +68,7 @@ export function declareToolSuites(registry) {
       name: t.name,
       roles,
       mutatesWorktree: t.mutatesWorktree,
+      budgetExempt: !!t.budgetExempt,
       advertise: t.advertise,
     });
   }

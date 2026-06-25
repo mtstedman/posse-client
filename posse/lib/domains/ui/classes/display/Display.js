@@ -68,6 +68,7 @@ const WORKER_BOOT_STALLED_MS = 45_000;
 const DEFAULT_DISPLAY_CONCURRENCY = getCatalogRuntimeFallbackInt("scheduler_concurrency", 3);
 const PROVIDER_USAGE_REFRESH_TIMEOUT_MS = Math.min(15_000, Math.max(1_000, PROVIDER_USAGE_REFRESH_MS - 1_000));
 const PROVIDER_USAGE_REFRESH_ERROR_MIN_MS = 60_000;
+const RIGHT_PANEL_MODES = new Set(["log", "pipeline", "tools", "monitor"]);
 
 function rawInputKey(name, sequence, patch = {}) {
   return {
@@ -156,6 +157,7 @@ export class Display {
   constructor({
     concurrency = DEFAULT_DISPLAY_CONCURRENCY,
     runStartedAtIso = null,
+    rightMode = "log",
     providerUsageRefresh = _refreshProviderUsageSummaryCacheIfChanged,
   } = {}) {
     this.concurrency = concurrency;
@@ -226,11 +228,13 @@ export class Display {
     this.getDirtyState = null;    // () => { targetDirty, dirtyItems } — for queue review flags
 
     // ── Right panel mode ──
-    this._rightMode = "log";    // "log" | "pipeline" | "tools"
+    this._rightMode = RIGHT_PANEL_MODES.has(rightMode) ? rightMode : "log"; // "log" | "pipeline" | "tools" | "monitor"
     this._pipelineScroll = 0;
     this._toolScroll = 0;
     this._toolsTab = 0;         // 0=tools, 1=roles, 2=locks
     this._toolsTabScrolls = [0, 0, 0];
+    this._monitorSelectedJobId = null;
+    this._monitorPromptLens = false;
     this._providerUsageRefreshTimer = null;
     this._lastProviderUsageRefreshErrorAt = 0;
     this._providerUsageRefresh = typeof providerUsageRefresh === "function"
@@ -1263,6 +1267,10 @@ export class Display {
     return this._inputController._startAnsweringAt.call(this, ...args);
   }
 
+  _startAnsweringForJob(...args) {
+    return this._inputController._startAnsweringForJob.call(this, ...args);
+  }
+
   _startInject(...args) {
     return this._inputController._startInject.call(this, ...args);
   }
@@ -1539,6 +1547,45 @@ export class Display {
   }
   _buildRight(...args) {
     return this._rightPanelRenderer._buildRight.call(this, ...args);
+  }
+  _buildMonitor(...args) {
+    return this._rightPanelRenderer._buildMonitor.call(this, ...args);
+  }
+  _collectMonitorAgents(...args) {
+    return this._rightPanelRenderer._collectMonitorAgents.call(this, ...args);
+  }
+  _selectMonitorAgent(...args) {
+    return this._rightPanelRenderer._selectMonitorAgent.call(this, ...args);
+  }
+  _buildMonitorFleetLines(...args) {
+    return this._rightPanelRenderer._buildMonitorFleetLines.call(this, ...args);
+  }
+  _monitorToolActivityForJob(...args) {
+    return this._rightPanelRenderer._monitorToolActivityForJob.call(this, ...args);
+  }
+  _monitorFeedbackEntries(...args) {
+    return this._rightPanelRenderer._monitorFeedbackEntries.call(this, ...args);
+  }
+  _monitorBoxLine(...args) {
+    return this._rightPanelRenderer._monitorBoxLine.call(this, ...args);
+  }
+  _monitorBoxedLane(...args) {
+    return this._rightPanelRenderer._monitorBoxedLane.call(this, ...args);
+  }
+  _formatMonitorFeedbackRow(...args) {
+    return this._rightPanelRenderer._formatMonitorFeedbackRow.call(this, ...args);
+  }
+  _formatMonitorToolRow(...args) {
+    return this._rightPanelRenderer._formatMonitorToolRow.call(this, ...args);
+  }
+  _buildMonitorFeedbackToolLanes(...args) {
+    return this._rightPanelRenderer._buildMonitorFeedbackToolLanes.call(this, ...args);
+  }
+  _buildMonitorFocusLines(...args) {
+    return this._rightPanelRenderer._buildMonitorFocusLines.call(this, ...args);
+  }
+  _monitorRecentEventsForJob(...args) {
+    return this._rightPanelRenderer._monitorRecentEventsForJob.call(this, ...args);
   }
   _classifyEvent(...args) {
     return this._rightPanelRenderer._classifyEvent.call(this, ...args);

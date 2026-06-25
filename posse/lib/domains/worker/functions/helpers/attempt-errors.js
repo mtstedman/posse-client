@@ -147,6 +147,10 @@ function killReasonForPreAttemptError(worker, job, err) {
   return killReason;
 }
 
+function isNudgeKillReason(reason) {
+  return reason === "operator_nudge" || reason === "user_nudge";
+}
+
 function handlePreAttemptInterruption(worker, { job, leaseToken, outerErr }) {
   const killReason = killReasonForPreAttemptError(worker, job, outerErr);
   if (!killReason) return false;
@@ -183,17 +187,17 @@ function handlePreAttemptInterruption(worker, { job, leaseToken, outerErr }) {
     return true;
   }
 
-  if (killReason === "user_nudge") {
+  if (isNudgeKillReason(killReason)) {
     logEvent({
       work_item_id: job.work_item_id,
       job_id: job.id,
       attempt_id: null,
-      event_type: EVENT_TYPES.JOB_NUDGE_REQUEUED,
+      event_type: EVENT_TYPES.OPERATOR_NUDGE_REQUEUED,
       actor_type: EVENT_ACTORS.HUMAN,
-      message: "Human nudged job during setup - requeuing immediately",
+      message: "Operator nudged job during setup - requeuing immediately",
     });
     worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
-    worker.emit(job.id, `${C.cyan}[worker] WI#${job.work_item_id} job #${job.id} nudged by user during setup - requeuing${C.reset}`);
+    worker.emit(job.id, `${C.cyan}[worker] WI#${job.work_item_id} job #${job.id} nudged by operator during setup - requeuing${C.reset}`);
     return true;
   }
 
@@ -310,11 +314,11 @@ export async function handleExecuteAttemptError(worker, {
 
   // When the stall detector kills a healthy process (no output != no progress),
   // treat it as an interruption, not a failure.
-  if (err._killReason === "user_nudge") {
+  if (isNudgeKillReason(err._killReason)) {
     completeAttempt(attempt.id, {
       status: "interrupted",
       duration_ms: Date.now() - startTime,
-      error_text: "Nudged by user",
+      error_text: "Nudged by operator",
     });
 
     const hasStash = await stashInterruptedWork(job, wtPath, "nudged", worker?.projectDir);
@@ -322,13 +326,13 @@ export async function handleExecuteAttemptError(worker, {
       work_item_id: job.work_item_id,
       job_id: job.id,
       attempt_id: attempt.id,
-      event_type: EVENT_TYPES.JOB_NUDGE_REQUEUED,
+      event_type: EVENT_TYPES.OPERATOR_NUDGE_REQUEUED,
       actor_type: EVENT_ACTORS.HUMAN,
-      message: `Human nudged job - requeuing immediately${hasStash ? " (partial work stashed for resume)" : ""}`,
+      message: `Operator nudged job - requeuing immediately${hasStash ? " (partial work stashed for resume)" : ""}`,
     });
 
     worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
-    worker.emit(job.id, `${C.cyan}[worker] WI#${job.work_item_id} job #${job.id} nudged by user - requeuing${hasStash ? " (will resume from stash)" : ""}${C.reset}`);
+    worker.emit(job.id, `${C.cyan}[worker] WI#${job.work_item_id} job #${job.id} nudged by operator - requeuing${hasStash ? " (will resume from stash)" : ""}${C.reset}`);
     return;
   }
 

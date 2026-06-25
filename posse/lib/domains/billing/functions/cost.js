@@ -7,7 +7,7 @@
 // the fly with token × rate math.
 
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { estimateCallCost } from "./pricing.js";
+import { estimateBillableInputTokens, estimateCallCost } from "./pricing.js";
 
 const GROUP_FIELDS = Object.freeze({
   provider: (call) => call.provider || "unknown",
@@ -34,7 +34,12 @@ function buildWhere({ wiId = null, since = null } = {}) {
 function enrichCall(call) {
   const inputTokens = Number(call.input_tokens) || 0;
   const outputTokens = Number(call.output_tokens) || 0;
-  const cachedInputTokens = Number(call.cached_input_tokens) || 0;
+  const cachedInputTokens = Math.min(inputTokens, Math.max(0, Number(call.cached_input_tokens) || 0));
+  const uncachedInputTokens = Math.max(0, inputTokens - cachedInputTokens);
+  const cacheCreationInputTokens = Math.min(
+    uncachedInputTokens,
+    Math.max(0, Number(call.cache_creation_input_tokens) || 0),
+  );
   const est = estimateCallCost({
     provider: call.provider,
     modelName: call.model_name,
@@ -42,13 +47,27 @@ function enrichCall(call) {
     inputTokens,
     outputTokens,
     cachedInputTokens,
+    cacheCreationInputTokens,
     knownCostUsd: call.cost_estimate_usd,
   });
+  const billable = estimateBillableInputTokens({
+    provider: call.provider,
+    modelName: call.model_name,
+    modelTier: call.model_tier,
+    inputTokens,
+    cachedInputTokens,
+    cacheCreationInputTokens,
+  });
+  const billableInputTokens = Math.max(0, Number(billable.billableInputTokens) || 0);
   return {
     ...call,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     cached_input_tokens: cachedInputTokens,
+    uncached_input_tokens: uncachedInputTokens,
+    billable_input_tokens: billableInputTokens,
+    billable_tokens: billableInputTokens + outputTokens,
+    cache_discount_ratio: billable.cacheDiscountRatio,
     resolved_cost_usd: est.costUsd,
     cost_source: est.source,
   };
@@ -56,7 +75,7 @@ function enrichCall(call) {
 
 /**
  * Total cost for a single work item.
- * Returns { wiId, totalCostUsd, inputTokens, outputTokens, callCount, costSourceCounts, unknownCostCalls }.
+ * Returns { wiId, totalCostUsd, inputTokens, cachedInputTokens, uncachedInputTokens, outputTokens, callCount, costSourceCounts, unknownCostCalls }.
  * Pass `db` to compute on an alternate handle (the bridge ChangeStream uses
  * its readonly connection instead of the shared write handle).
  */
@@ -66,13 +85,15 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
   const { where, params } = buildWhere({ wiId, since });
   const rows = db.prepare(`
     SELECT work_item_id, job_id, role, provider, model_tier, model_name,
-           input_tokens, output_tokens, cached_input_tokens, cost_estimate_usd, status
+           input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, cost_estimate_usd, status
     FROM agent_calls
     ${where}
   `).all(...params);
 
   let totalCost = 0;
   let totalInput = 0;
+  let totalCachedInput = 0;
+  let totalBillableInput = 0;
   let totalOutput = 0;
   const sourceCounts = {};
   let unknownCostCalls = 0;
@@ -80,6 +101,8 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
     const call = enrichCall(raw);
     totalCost += call.resolved_cost_usd || 0;
     totalInput += call.input_tokens || 0;
+    totalCachedInput += call.cached_input_tokens || 0;
+    totalBillableInput += call.billable_input_tokens || 0;
     totalOutput += call.output_tokens || 0;
     sourceCounts[call.cost_source] = (sourceCounts[call.cost_source] || 0) + 1;
     if (call.cost_source === "none") unknownCostCalls += 1;
@@ -89,6 +112,10 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
     wiId: Number(wiId),
     totalCostUsd: totalCost,
     inputTokens: totalInput,
+    cachedInputTokens: totalCachedInput,
+    uncachedInputTokens: Math.max(0, totalInput - totalCachedInput),
+    billableInputTokens: totalBillableInput,
+    billableTokens: totalBillableInput + totalOutput,
     outputTokens: totalOutput,
     callCount: rows.length,
     costSourceCounts: sourceCounts,
@@ -106,13 +133,17 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
   const { where, params } = buildWhere({ wiId, since });
   const rows = db.prepare(`
     SELECT work_item_id, job_id, role, provider, model_tier, model_name,
-           input_tokens, output_tokens, cached_input_tokens, cost_estimate_usd, status
+           input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, cost_estimate_usd, status
     FROM agent_calls
     ${where}
   `).all(...params);
 
   const groups = new Map();
   let grandCost = 0;
+  let totalInput = 0;
+  let totalCachedInput = 0;
+  let totalBillableInput = 0;
+  let totalOutput = 0;
   for (const raw of rows) {
     const call = enrichCall(raw);
     const key = keyFn(call);
@@ -121,6 +152,8 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
         key,
         callCount: 0,
         inputTokens: 0,
+        cachedInputTokens: 0,
+        billableInputTokens: 0,
         outputTokens: 0,
         costUsd: 0,
         unknownCostCalls: 0,
@@ -129,16 +162,32 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     const entry = groups.get(key);
     entry.callCount += 1;
     entry.inputTokens += call.input_tokens || 0;
+    entry.cachedInputTokens += call.cached_input_tokens || 0;
+    entry.billableInputTokens += call.billable_input_tokens || 0;
     entry.outputTokens += call.output_tokens || 0;
     entry.costUsd += call.resolved_cost_usd || 0;
     if (call.cost_source === "none") entry.unknownCostCalls += 1;
     grandCost += call.resolved_cost_usd || 0;
+    totalInput += call.input_tokens || 0;
+    totalCachedInput += call.cached_input_tokens || 0;
+    totalBillableInput += call.billable_input_tokens || 0;
+    totalOutput += call.output_tokens || 0;
   }
 
   const out = [...groups.values()].sort((a, b) => b.costUsd - a.costUsd);
+  for (const entry of out) {
+    entry.uncachedInputTokens = Math.max(0, entry.inputTokens - entry.cachedInputTokens);
+    entry.billableTokens = entry.billableInputTokens + entry.outputTokens;
+  }
   return {
     groupBy,
     totalCostUsd: grandCost,
+    inputTokens: totalInput,
+    cachedInputTokens: totalCachedInput,
+    uncachedInputTokens: Math.max(0, totalInput - totalCachedInput),
+    billableInputTokens: totalBillableInput,
+    billableTokens: totalBillableInput + totalOutput,
+    outputTokens: totalOutput,
     groups: out,
   };
 }
@@ -155,7 +204,7 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
   // re-querying agent_calls per work item.
   const rows = db.prepare(`
     SELECT work_item_id, job_id, role, provider, model_tier, model_name,
-           input_tokens, output_tokens, cached_input_tokens, cost_estimate_usd, status
+           input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, cost_estimate_usd, status
     FROM agent_calls
     ${where}
   `).all(...params);
@@ -170,6 +219,8 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
         wiId: call.work_item_id,
         callCount: 0,
         inputTokens: 0,
+        cachedInputTokens: 0,
+        billableInputTokens: 0,
         outputTokens: 0,
         totalCostUsd: 0,
         unknownCostCalls: 0,
@@ -178,17 +229,33 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
     }
     entry.callCount += 1;
     entry.inputTokens += call.input_tokens || 0;
+    entry.cachedInputTokens += call.cached_input_tokens || 0;
+    entry.billableInputTokens += call.billable_input_tokens || 0;
     entry.outputTokens += call.output_tokens || 0;
     entry.totalCostUsd += call.resolved_cost_usd || 0;
     if (call.cost_source === "none") entry.unknownCostCalls += 1;
   }
 
   const enriched = [...byWi.values()];
+  for (const entry of enriched) {
+    entry.uncachedInputTokens = Math.max(0, entry.inputTokens - entry.cachedInputTokens);
+    entry.billableTokens = entry.billableInputTokens + entry.outputTokens;
+  }
   enriched.sort((a, b) => b.totalCostUsd - a.totalCostUsd);
   const trimmed = enriched.slice(0, limit);
   const grandCost = enriched.reduce((acc, e) => acc + e.totalCostUsd, 0);
+  const totalInput = enriched.reduce((acc, e) => acc + e.inputTokens, 0);
+  const totalCachedInput = enriched.reduce((acc, e) => acc + e.cachedInputTokens, 0);
+  const totalBillableInput = enriched.reduce((acc, e) => acc + e.billableInputTokens, 0);
+  const totalOutput = enriched.reduce((acc, e) => acc + e.outputTokens, 0);
   return {
     totalCostUsd: grandCost,
+    inputTokens: totalInput,
+    cachedInputTokens: totalCachedInput,
+    uncachedInputTokens: Math.max(0, totalInput - totalCachedInput),
+    billableInputTokens: totalBillableInput,
+    billableTokens: totalBillableInput + totalOutput,
+    outputTokens: totalOutput,
     workItems: trimmed,
     truncated: enriched.length > limit,
   };

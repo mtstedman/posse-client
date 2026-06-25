@@ -257,7 +257,8 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
         return answerHumanInput(reviewJobId, {
           job_id: reviewJobId,
           lease_seconds: args.lease_seconds,
-          answer: note ? `pass: ${note}` : "pass",
+          answer: "pass",
+          ...(note ? { answer_metadata: { operator_note: note } } : {}),
         }, { ...context, allowReviewGateAnswer: true });
       }
       const wiId = workItemIdArg(args);
@@ -275,7 +276,8 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
         return answerHumanInput(reviewJobId, {
           job_id: reviewJobId,
           lease_seconds: args.lease_seconds,
-          answer: `fail: ${feedback}`,
+          answer: "fail",
+          answer_metadata: { operator_feedback: feedback },
         }, { ...context, allowReviewGateAnswer: true });
       }
       const wiId = workItemIdArg(args);

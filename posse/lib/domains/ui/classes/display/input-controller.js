@@ -70,6 +70,7 @@ function resolvedCallCostUsd(call) {
     inputTokens: call?.input_tokens,
     outputTokens: call?.output_tokens,
     cachedInputTokens: call?.cached_input_tokens,
+    cacheCreationInputTokens: call?.cache_creation_input_tokens,
     knownCostUsd: call?.cost_estimate_usd,
   });
   return Number.isFinite(est.costUsd) ? est.costUsd : 0;
@@ -162,6 +163,17 @@ export class DisplayInputController {
     this._startAnswering();
   }
 
+  _startAnsweringForJob(jobId) {
+    const targetJobId = Number(jobId);
+    if (!Number.isFinite(targetJobId)) return false;
+    const qSet = this._questionQueue.find((entry) => Number(entry.jobId) === targetJobId);
+    if (!qSet) return false;
+    this._inputMode = "question";
+    this._activeQ = qSet;
+    this._inputBuf = "";
+    return true;
+  }
+
   _startInject() {
     this._inputMode = "inject";
     this._activeQ = null;
@@ -171,6 +183,29 @@ export class DisplayInputController {
   _getNudgeWorkers() {
     const nudgeableRoles = new Set(["researcher", "planner", "dev", "assessor", "artificer"]);
     return [...this.workers.entries()].filter(([, w]) => nudgeableRoles.has(w.role));
+  }
+
+  _getMonitorAgents() {
+    if (typeof this._collectMonitorAgents !== "function") return [];
+    try { return this._collectMonitorAgents(); } catch { return []; }
+  }
+
+  _setMonitorSelectionByIndex(index) {
+    const agents = this._getMonitorAgents();
+    if (agents.length === 0) return false;
+    const idx = Math.max(0, Math.min(agents.length - 1, Number(index) || 0));
+    this._monitorSelectedJobId = agents[idx].jobId;
+    return true;
+  }
+
+  _cycleMonitorSelection(delta) {
+    const agents = this._getMonitorAgents();
+    if (agents.length === 0) return false;
+    const current = agents.findIndex((agent) => agent.jobId === this._monitorSelectedJobId);
+    const base = current >= 0 ? current : 0;
+    const next = (base + delta + agents.length) % agents.length;
+    this._monitorSelectedJobId = agents[next].jobId;
+    return true;
   }
 
   _removeQuestionSet(q) {
@@ -518,7 +553,36 @@ export class DisplayInputController {
     } else {
       // Not in input mode
       const digit = digitInput(str, key);
-      if (isEnterKey(str, key) && this._questionQueue.length > 0) {
+      if (matchesHotkey(str, key, "m")) {
+        this._rightMode = this._rightMode === "monitor" ? "log" : "monitor";
+        if (this._rightMode === "monitor" && !this._monitorSelectedJobId) {
+          this._setMonitorSelectionByIndex(0);
+        }
+        this.requestRender({ force: true });
+      } else if (matchesHotkey(str, key, "q") && this._rightMode === "monitor") {
+        this._rightMode = "log";
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && digit != null) {
+        this._setMonitorSelectionByIndex(digit - 1);
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && (matchesHotkey(str, key, "<") || keyName(key) === "left")) {
+        this._cycleMonitorSelection(-1);
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && (matchesHotkey(str, key, ">") || keyName(key) === "right")) {
+        this._cycleMonitorSelection(1);
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "n") && this.onNudge && this._monitorSelectedJobId) {
+        this._inputMode = "nudge_text";
+        this._nudgeJobId = this._monitorSelectedJobId;
+        this._nudgeJobIds = null;
+        this._inputBuf = "";
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "t")) {
+        this._monitorPromptLens = !this._monitorPromptLens;
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "a") && this._startAnsweringForJob(this._monitorSelectedJobId)) {
+        this.requestRender({ force: true });
+      } else if (isEnterKey(str, key) && this._questionQueue.length > 0) {
         this._startAnswering();
         this.requestRender({ force: true });
       } else if (matchesHotkey(str, key, "q") && this._questionQueue.length > 0) {

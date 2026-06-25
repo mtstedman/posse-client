@@ -237,6 +237,8 @@
  * @typedef {Object} SymbolGetCardParams
  * @property {string} [symbolId]              Required iff symbolRef is absent.
  * @property {SymbolRef} [symbolRef]          Required iff symbolId is absent.
+ * @property {string[]} [symbolIds]           Batch form; returns symbol.cards-shaped data.
+ * @property {SymbolRef[]} [symbolRefs]       Batch form; returns symbol.cards-shaped data.
  * @property {string} [ifNoneMatch]
  * @property {number} [minCallConfidence]     0..1
  * @property {boolean} [includeResolutionMetadata]
@@ -600,6 +602,7 @@
  *   | { action: "buffer.status" } & BufferStatusParams
  *   | { action: "symbol.search" } & SymbolSearchParams
  *   | { action: "symbol.card" } & SymbolGetCardParams
+ *   | { action: "symbol.cards" } & SymbolGetCardParams
  *   | { action: "symbol.overview" } & SymbolUsagesParams
  *   | { action: "tree.overview" } & TreeOverviewParams
  *   | { action: "tree.branch" } & TreeOverviewParams
@@ -653,6 +656,7 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "buffer.status",
   "symbol.search",
   "symbol.card",
+  "symbol.cards",
   "symbol.overview",
   "tree.overview",
   "tree.branch",

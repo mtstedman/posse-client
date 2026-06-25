@@ -389,6 +389,7 @@ export async function callProvider(promptText, {
     let stderr = "";
     let totalInputTokens = null;
     let totalOutputTokens = null;
+    let totalCachedInputTokens = null;
     let longContextInputTokens = null;
     let latestSessionHandle = resumeSessionHandle || null;
     const buildSpawnError = (err) => {
@@ -405,6 +406,7 @@ export async function callProvider(promptText, {
         provider: "codex",
         inputTokens: totalInputTokens,
         outputTokens: totalOutputTokens,
+        cachedInputTokens: totalCachedInputTokens,
         longContextInputTokens,
         durationMs,
       };
@@ -483,6 +485,7 @@ export async function callProvider(promptText, {
         const totals = usageAccumulator.add(usage, { eventKey: codexUsageEventDedupeKey(msg) });
         if (totals.inputTokens != null) totalInputTokens = totals.inputTokens;
         if (totals.outputTokens != null) totalOutputTokens = totals.outputTokens;
+        if (totals.cachedInputTokens != null) totalCachedInputTokens = totals.cachedInputTokens;
         if (totals.longContextInputTokens != null) longContextInputTokens = totals.longContextInputTokens;
         const extracted = _extractCodexToolUse(msg);
         const extractedEntries = Array.isArray(extracted) ? extracted : (extracted ? [extracted] : []);
@@ -601,6 +604,7 @@ export async function callProvider(promptText, {
         modelName: modelToUse,
         totalInputTokens,
         totalOutputTokens,
+        totalCachedInputTokens,
         longContextInputTokens,
         durationMs,
         finalOutput,

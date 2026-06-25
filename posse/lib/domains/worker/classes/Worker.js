@@ -47,6 +47,7 @@ import {
   getEventsByWorkItem,
   getSetting,
   listActiveFileLocks,
+  sessionLeaseTtlSec,
 } from "../../queue/functions/index.js";
 
 import { getProvider, getProviderName, getAvailableProviders, isProviderReady, tierModelName } from "../../providers/functions/provider.js";
@@ -434,6 +435,7 @@ export class Worker {
     this._lastScratchGcAt = 0;
     this._providerCircuitOpen = new Map(); // provider -> { openedAt, trippedAt, ttlMs, reason }
     this._pendingSessionRecycles = new Map(); // jobId -> leased/fresh provider session result awaiting durable success
+    this._pendingSessionRecycleRenewals = new Map(); // jobId -> session lease renewal timer
     this._terminalCleanupByWorkItem = new Map(); // workItemId -> in-flight cleanup promise
     this.providerClient = opts.providerClient || new TrackedProviderClient({
       worker: this,
@@ -588,7 +590,69 @@ export class Worker {
     this._pendingSessionRecycles.set(Number(result.jobId), result);
   }
 
+  _startSessionRecycleLeaseRenewal(meta = {}) {
+    const jobId = Number(meta.jobId);
+    const session = meta.decision?.session || null;
+    if (!Number.isFinite(jobId) || !session?.id || !session?.leaseToken || !meta.manager?.renewSession) return null;
+    this._stopSessionRecycleLeaseRenewal(jobId);
+
+    const leaseSec = sessionLeaseTtlSec();
+    const renewMs = JobLease.renewalIntervalMs(leaseSec);
+    const entry = {
+      timer: null,
+      stopped: false,
+      stop: () => {
+        entry.stopped = true;
+        if (entry.timer) {
+          clearTimeout(entry.timer);
+          entry.timer = null;
+        }
+      },
+      renewNow: () => {
+        if (entry.stopped) return "stopped";
+        try {
+          const renewed = meta.manager.renewSession(session.id, session.leaseToken, {
+            jobId,
+            leaseTtlSec: leaseSec,
+          });
+          if (renewed) return "renewed";
+          entry.stop();
+          this._invalidatePendingSessionRecycleForJob({ id: jobId, work_item_id: meta.workItemId }, "session_lease_expired");
+          this.killJob(jobId, "session_lease_expired");
+          return "failed";
+        } catch (err) {
+          entry.stop();
+          const message = err?.message || String(err || "unknown error");
+          this.emit(jobId, `${C.red}[session]${C.reset} WI#${meta.workItemId ?? "?"} job #${jobId}: session lease renewal threw: ${message}`);
+          this.killJob(jobId, "session_lease_renew_failed");
+          return "error";
+        }
+      },
+      schedule: () => {
+        if (entry.stopped || entry.timer) return;
+        entry.timer = setTimeout(() => {
+          entry.timer = null;
+          if (entry.renewNow() === "renewed") entry.schedule();
+        }, renewMs);
+        entry.timer?.unref?.();
+      },
+    };
+    this._pendingSessionRecycleRenewals.set(jobId, entry);
+    entry.schedule();
+    return entry;
+  }
+
+  _stopSessionRecycleLeaseRenewal(jobId) {
+    const normalizedJobId = Number(jobId);
+    const entry = this._pendingSessionRecycleRenewals.get(normalizedJobId);
+    if (!entry) return false;
+    entry.stop?.();
+    this._pendingSessionRecycleRenewals.delete(normalizedJobId);
+    return true;
+  }
+
   _releasePendingSessionRecycleForJob(jobId) {
+    this._stopSessionRecycleLeaseRenewal(jobId);
     const pending = this._pendingSessionRecycles.get(Number(jobId));
     if (!pending) return;
     try {
@@ -603,8 +667,9 @@ export class Worker {
     }
   }
 
-  _invalidatePendingSessionRecycleForMcpInfra(job, reason = "mcp_attach_failure") {
+  _invalidatePendingSessionRecycleForJob(job, reason = "invalidated") {
     const jobId = Number(job?.id);
+    this._stopSessionRecycleLeaseRenewal(jobId);
     const pending = this._pendingSessionRecycles.get(jobId);
     if (!pending) return null;
     let sessionInvalidated = false;
@@ -647,7 +712,12 @@ export class Worker {
     }
   }
 
+  _invalidatePendingSessionRecycleForMcpInfra(job, reason = "mcp_attach_failure") {
+    return this._invalidatePendingSessionRecycleForJob(job, reason);
+  }
+
   _finalizeSessionRecycleForJob(job, attempt = null) {
+    this._stopSessionRecycleLeaseRenewal(job?.id);
     const pending = this._pendingSessionRecycles.get(Number(job?.id));
     if (!pending || !pending.newHandle) return null;
     try {
@@ -675,6 +745,9 @@ export class Worker {
             tokensFreshEstimate: pending.tokensFreshEstimate || 0,
             estimateMethod: "prompt_chars_div4",
           });
+        } else {
+          this._invalidatePendingSessionRecycleForJob(job, "session_advance_lost_lease");
+          return null;
         }
       } else {
         const recorded = pending.manager?.recordFreshHandleForJob?.(job, {

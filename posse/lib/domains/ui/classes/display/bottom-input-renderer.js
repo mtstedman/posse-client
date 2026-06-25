@@ -320,6 +320,7 @@ export class DisplayBottomInputRenderer {
     if (this.getPipelineData) inspect.push(hint("p", this._rightMode === "pipeline" ? "log" : "pipeline", C.blue));
     if (this.onReviewPending) inspect.push(hint("r", "review", C.magenta));
     if (this.getToolData) inspect.push(hint("t", this._rightMode === "tools" ? "log" : "tools", C.blue));
+    inspect.push(hint("m", this._rightMode === "monitor" ? "log" : "monitor", C.blue));
 
     if (this.onNudge && this.workers.size > 0) control.push(hint("n", "nudge", C.yellow));
     if (this.onSkipJob) control.push(hint("s", "skip task", C.yellow));

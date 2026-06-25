@@ -134,6 +134,7 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
           inputTokens: call.input_tokens,
           outputTokens: call.output_tokens,
           cachedInputTokens: call.cached_input_tokens,
+          cacheCreationInputTokens: call.cache_creation_input_tokens,
           knownCostUsd: call.cost_estimate_usd,
         });
         if (Number.isFinite(est.costUsd) && est.costUsd > 0) {
@@ -215,6 +216,7 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
         inputTokens: call.input_tokens,
         outputTokens: call.output_tokens,
         cachedInputTokens: call.cached_input_tokens,
+        cacheCreationInputTokens: call.cache_creation_input_tokens,
         knownCostUsd: call.cost_estimate_usd,
       });
       totalInput += Number(call.input_tokens) || 0;

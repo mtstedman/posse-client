@@ -6,6 +6,7 @@
 import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { isGeneratedPath } from "./hygiene.js";
 import { readLatestTreeCompressionSnapshot } from "../tree-compression.js";
+import { normalizeRepoPath } from "../paths.js";
 
 const TREE_RUN_KIND = "tree-derived";
 const INVALID_PATH_WARNING = "path must be a canonical repo-relative path.";
@@ -297,6 +298,7 @@ function runTreeScope({ view, versionId, params = {}, action }) {
   const rejectedBroadDirs = [];
   /** @type {Array<Record<string, unknown>>} */
   const rejectedBroadRefs = [];
+  const traversalCache = createScopeTraversalCache();
   const seedSummary = collectScopeSeeds({
     db,
     model,
@@ -316,6 +318,7 @@ function runTreeScope({ view, versionId, params = {}, action }) {
       score,
       reason,
       branchFileCap: opts.branchFileCap,
+      traversalCache,
     }),
   });
 
@@ -328,6 +331,7 @@ function runTreeScope({ view, versionId, params = {}, action }) {
       branchScores,
       rejectedBroadDirs,
       refinementCandidateMap,
+      traversalCache,
     });
   }
 
@@ -340,6 +344,7 @@ function runTreeScope({ view, versionId, params = {}, action }) {
     branchScores,
     rejectedBroadDirs,
     refinementCandidateMap,
+    traversalCache,
   });
 
   const scope = selectScope({
@@ -347,6 +352,7 @@ function runTreeScope({ view, versionId, params = {}, action }) {
     fileScores,
     branchScores,
     opts,
+    traversalCache,
   });
   const metrics = scopeMetrics({
     model,
@@ -1083,7 +1089,7 @@ function collectScopeSeeds(args) {
   return summary;
 }
 
-function scoreTaskText({ model, queryTerms, opts, fileScores, branchScores, rejectedBroadDirs, refinementCandidateMap }) {
+function scoreTaskText({ model, queryTerms, opts, fileScores, branchScores, rejectedBroadDirs, refinementCandidateMap, traversalCache }) {
   const qtf = termFrequency(queryTerms);
   const topFiles = model.fileNodes
     .map((file) => ({ file, score: lexicalScopeFileScore(file, qtf, model) }))
@@ -1114,6 +1120,7 @@ function scoreTaskText({ model, queryTerms, opts, fileScores, branchScores, reje
       score: entry.score,
       reason: "task:dir",
       branchFileCap: opts.branchFileCap,
+      traversalCache,
     });
   }
 }
@@ -1136,7 +1143,7 @@ function confidenceBand(value) {
   if (n >= 0.45) return "medium";
   return "low";
 }
-function scoreCompressionSeeds({ db, model, queryTerms, opts, fileScores, branchScores, rejectedBroadDirs, refinementCandidateMap }) {
+function scoreCompressionSeeds({ db, model, queryTerms, opts, fileScores, branchScores, rejectedBroadDirs, refinementCandidateMap, traversalCache }) {
   let snapshot;
   try {
     snapshot = readLatestTreeCompressionSnapshot(db, { seedLimit: COMPRESSION_SEED_READ_LIMIT, withStaleness: true });
@@ -1201,6 +1208,7 @@ function scoreCompressionSeeds({ db, model, queryTerms, opts, fileScores, branch
           score,
           reason: `compression:${seed.path}`,
           branchFileCap: opts.branchFileCap,
+          traversalCache,
         });
       }
       for (const entry of entrypoints) {
@@ -1311,9 +1319,9 @@ function addFileScore(fileScores, file, score, reason, exactSeed = false) {
   fileScores.set(file.repoRelPath, existing);
 }
 
-function addBranchScore({ model, fileScores, branchScores, rejectedBroadDirs, refinementCandidateMap, branch, score, reason, branchFileCap }) {
+function addBranchScore({ model, fileScores, branchScores, rejectedBroadDirs, refinementCandidateMap, branch, score, reason, branchFileCap, traversalCache }) {
   if (!branch?.repoRelPath || score <= 0) return;
-  const files = descendantFiles(branch);
+  const files = descendantFiles(branch, traversalCache);
   const fileCount = files.length;
   if (fileCount === 0) return;
   if (fileCount > branchFileCap) {
@@ -1340,7 +1348,7 @@ function addBranchScore({ model, fileScores, branchScores, rejectedBroadDirs, re
   }
 }
 
-function selectScope({ model, fileScores, branchScores, opts }) {
+function selectScope({ model, fileScores, branchScores, opts, traversalCache }) {
   const ranked = [...fileScores.values()]
     .sort((a, b) => Number(b.exactSeed) - Number(a.exactSeed) || b.score - a.score || String(a.file.repoRelPath || "").localeCompare(String(b.file.repoRelPath || "")));
   const topNonSeed = ranked.find((entry) => !entry.exactSeed)?.score || 0;
@@ -1353,9 +1361,9 @@ function selectScope({ model, fileScores, branchScores, opts }) {
   for (const entry of ranked) {
     if (selectedFiles.size >= opts.maxFiles) break;
     if (!entry.exactSeed && entry.score < scoreFloor) continue;
-    const branch = chooseBranchForFile(entry.file, model, opts.branchFileCap);
+    const branch = chooseBranchForFile(entry.file, model, opts.branchFileCap, traversalCache);
     const branchEntry = branch ? branchScores.get(branch.nodeId) : null;
-    const branchFiles = branch ? descendantFiles(branch) : [entry.file];
+    const branchFiles = branch ? descendantFiles(branch, traversalCache) : [entry.file];
     const newFiles = branchFiles.filter((file) => file?.repoRelPath && !selectedFiles.has(file.repoRelPath));
     const canAddBranch = branch
       && branch.kind !== "file"
@@ -1544,28 +1552,51 @@ function normalizeScopeRefs(params) {
     .filter((ref, idx, arr) => arr.findIndex((item) => item.refType === ref.refType && item.refId === ref.refId) === idx);
 }
 
-function chooseBranchForFile(file, model, branchFileCap) {
+function createScopeTraversalCache() {
+  return {
+    branchForFile: new Map(),
+    descendantFiles: new Map(),
+  };
+}
+
+function chooseBranchForFile(file, model, branchFileCap, traversalCache = null) {
+  const cacheKey = file?.nodeId ? `${file.nodeId}\0${branchFileCap}` : null;
+  if (cacheKey && traversalCache?.branchForFile.has(cacheKey)) {
+    return traversalCache.branchForFile.get(cacheKey);
+  }
   let current = file;
   let best = file;
+  const visited = new Set();
   while (current?.parentNodeId) {
+    if (current.nodeId && visited.has(current.nodeId)) break;
+    if (current.nodeId) visited.add(current.nodeId);
     const parent = model.byId.get(current.parentNodeId);
     if (!parent || parent.kind === "root") break;
     const count = parent.kind === "file" ? 1 : Number(parent.descendantFileCount || 0);
     if (count > 0 && count <= branchFileCap) best = parent;
     current = parent;
   }
+  if (cacheKey) traversalCache?.branchForFile.set(cacheKey, best);
   return best;
 }
 
-function descendantFiles(node) {
+function descendantFiles(node, traversalCache = null) {
+  const cacheKey = node?.nodeId || null;
+  if (cacheKey && traversalCache?.descendantFiles.has(cacheKey)) {
+    return traversalCache.descendantFiles.get(cacheKey);
+  }
   const out = [];
   const queue = [node];
+  const visited = new Set();
   while (queue.length > 0) {
     const current = queue.shift();
     if (!current) continue;
+    if (current.nodeId && visited.has(current.nodeId)) continue;
+    if (current.nodeId) visited.add(current.nodeId);
     if (current.kind === "file" && current.repoRelPath) out.push(current);
     for (const child of current.children || []) queue.push(child);
   }
+  if (cacheKey) traversalCache?.descendantFiles.set(cacheKey, out);
   return out;
 }
 
@@ -1574,7 +1605,10 @@ function fileForNode(model, node) {
   if (node.kind === "file" && node.repoRelPath) return node;
   if (node.repoRelPath && model.fileByPath.has(node.repoRelPath)) return model.fileByPath.get(node.repoRelPath);
   let current = node;
+  const visited = new Set();
   while (current) {
+    if (current.nodeId && visited.has(current.nodeId)) return null;
+    if (current.nodeId) visited.add(current.nodeId);
     if (current.kind === "file" && current.repoRelPath) return current;
     current = current.parentNodeId ? model.byId.get(current.parentNodeId) : null;
   }
@@ -1736,19 +1770,6 @@ function focusDescriptor(params) {
   if (params.symbolId) return { type: "symbolId", value: params.symbolId, path: params.path || null };
   if (params.path) return { type: "path", value: params.path };
   return { type: "root", value: "root" };
-}
-
-function normalizeRepoPath(value) {
-  const text = stringParam(value)
-    .replace(/\\/g, "/")
-    .replace(/^\/+|\/+$/g, "");
-  if (!text || text.includes("..") || pathLooksAbsolute(text)) return "";
-  if (text.split("/").some((part) => part === "." || part === "..")) return "";
-  return text;
-}
-
-function pathLooksAbsolute(value) {
-  return /^[A-Za-z]:\//.test(value) || value.startsWith("//");
 }
 
 function stringParam(value) {
