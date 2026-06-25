@@ -110,6 +110,7 @@ export class BlobStore {
     this.#interner = interner;
     const blobColumns = tableExists(db, "blobs") ? tableColumnSet(db, "blobs") : new Set();
     const blobSymbolColumns = tableExists(db, "blob_symbols") ? tableColumnSet(db, "blob_symbols") : new Set();
+    const hasBlobLayers = tableExists(db, "blob_layers");
     const hasBlobParserVersion = blobColumns.has("parser_version") && blobColumns.has("parser_spec_version");
     const hasBodyIdentifiers = blobSymbolColumns.has("body_identifiers");
     this.#stmt = {
@@ -256,6 +257,18 @@ export class BlobStore {
         hasBlobParserVersion
           ? "UPDATE blobs SET parser_version = NULL, parser_spec_version = NULL WHERE content_hash = ?"
           : "SELECT 0 WHERE ? IS NOT NULL",
+      ),
+      currentTreeSitterLayer: db.prepare(
+        hasBlobLayers
+          ? `SELECT 1 AS one
+             FROM blob_layers
+             WHERE content_hash = ?
+               AND source = 'treesitter'
+               AND tool_version = ?
+               AND parser_spec_version = ?
+               AND status = 'indexed'
+             LIMIT 1`
+          : "SELECT 1 AS one WHERE 0 AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL",
       ),
     };
   }
@@ -662,6 +675,19 @@ export class BlobStore {
     );
     return row?.parser_version === ATLAS_PARSER_VERSION
       && row?.parser_spec_version === ATLAS_PARSER_SPEC_VERSION;
+  }
+
+  /**
+   * @param {string} content_hash
+   * @returns {boolean}
+   */
+  hasCurrentTreeSitterLayer(content_hash) {
+    if (!isContentHash(content_hash)) return false;
+    return !!this.#stmt.currentTreeSitterLayer.get(
+      content_hash,
+      ATLAS_PARSER_VERSION,
+      ATLAS_PARSER_SPEC_VERSION,
+    );
   }
 
   /**

@@ -13,6 +13,7 @@ import {
 } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { workItemCost } from "../../billing/functions/cost.js";
+import { estimateBillableInputTokens } from "../../billing/functions/pricing.js";
 import { jobIsBackgroundIndex, jobIsDisplayFailure, jobIsWriteStep, reviewVisibleJobs } from "../../ui/functions/display/helpers/job-status.js";
 import { FAILED_JOB_STATUSES } from "../../../catalog/job.js";
 
@@ -73,6 +74,32 @@ function collectProposedMemories(workItemId) {
   } catch {
     return [];
   }
+}
+
+function nonNegativeNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, n) : 0;
+}
+
+function optionalNonNegativeNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, n) : null;
+}
+
+function callBillableInputTokens(call = {}) {
+  const inputTokens = nonNegativeNumber(call.input_tokens);
+  const cachedInputTokens = Math.min(inputTokens, nonNegativeNumber(call.cached_input_tokens));
+  const billable = estimateBillableInputTokens({
+    provider: call.provider,
+    modelName: call.model_name,
+    modelTier: call.model_tier,
+    inputTokens,
+    cachedInputTokens,
+    cacheCreationInputTokens: call.cache_creation_input_tokens,
+  });
+  return Number.isFinite(billable.billableInputTokens)
+    ? Math.max(0, billable.billableInputTokens)
+    : inputTokens;
 }
 
 function dirtyTreeReview(worktreeStatus = null) {
@@ -253,27 +280,45 @@ export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
           startedAt: j.started_at,
           finishedAt: j.finished_at,
         })),
-        agentCalls: (d.agentCalls || []).map((c) => ({
-          role: c.role,
-          model: c.model_name || c.model_tier,
-          tier: c.model_tier,
-          status: c.status,
-          durationMs: c.duration_ms,
-          inputTokens: c.input_tokens,
-          outputTokens: c.output_tokens,
-          effort: c.reasoning_effort,
-          provider: c.provider,
-          costUsd: c.cost_estimate_usd ?? null,
-        })),
-        totals: {
-          durationMs: d.totalDuration,
-          inputTokens: d.totalInputTokens,
-          outputTokens: d.totalOutputTokens,
-          promptChars: d.totalPrompt,
-          outputChars: d.totalOutput,
-          costUsd: d.totalCostUsd || 0,
-          toolCalls: d.totalToolCalls || 0,
-        },
+        agentCalls: (d.agentCalls || []).map((c) => {
+          const billableInputTokens = callBillableInputTokens(c);
+          return {
+            role: c.role,
+            model: c.model_name || c.model_tier,
+            tier: c.model_tier,
+            status: c.status,
+            durationMs: c.duration_ms,
+            inputTokens: c.input_tokens,
+            cachedInputTokens: c.cached_input_tokens || 0,
+            cacheCreationInputTokens: c.cache_creation_input_tokens || 0,
+            outputTokens: c.output_tokens,
+            billableInputTokens,
+            billableTokens: billableInputTokens + nonNegativeNumber(c.output_tokens),
+            effort: c.reasoning_effort,
+            provider: c.provider,
+            costUsd: c.cost_estimate_usd ?? null,
+          };
+        }),
+        totals: (() => {
+          const inputTokens = nonNegativeNumber(d.totalInputTokens);
+          const outputTokens = nonNegativeNumber(d.totalOutputTokens);
+          const cachedInputTokens = Math.min(inputTokens, nonNegativeNumber(d.totalCachedInputTokens));
+          const billableInputTokens = optionalNonNegativeNumber(d.totalBillableInputTokens) ?? inputTokens;
+          const billableTokens = optionalNonNegativeNumber(d.totalBillableTokens) ?? (billableInputTokens + outputTokens);
+          return {
+            durationMs: d.totalDuration,
+            inputTokens,
+            cachedInputTokens,
+            uncachedInputTokens: optionalNonNegativeNumber(d.totalUncachedInputTokens) ?? Math.max(0, inputTokens - cachedInputTokens),
+            billableInputTokens,
+            billableTokens,
+            outputTokens,
+            promptChars: d.totalPrompt,
+            outputChars: d.totalOutput,
+            costUsd: d.totalCostUsd || 0,
+            toolCalls: d.totalToolCalls || 0,
+          };
+        })(),
         toolUsageSummary: Array.isArray(d.toolUsageSummary) ? d.toolUsageSummary : [],
         finalAssessment: d.finalAssessment || null,
         memoriesSurfaced: d.memoriesSurfaced || [],
@@ -353,8 +398,15 @@ export function buildReviewReportData(reviewable, {
     const totalPrompt = agentCalls.reduce((sum, call) => sum + (call.prompt_chars || 0), 0);
     const totalOutput = agentCalls.reduce((sum, call) => sum + (call.output_chars || 0), 0);
     const totalInputTokens = agentCalls.reduce((sum, call) => sum + (call.input_tokens || 0), 0);
+    const totalCachedInputTokens = agentCalls.reduce((sum, call) => sum + Math.min(nonNegativeNumber(call.input_tokens), nonNegativeNumber(call.cached_input_tokens)), 0);
     const totalOutputTokens = agentCalls.reduce((sum, call) => sum + (call.output_tokens || 0), 0);
     const wiCost = workItemCost(wi.id);
+    const totalBillableInputTokens = Number.isFinite(Number(wiCost?.billableInputTokens))
+      ? Math.max(0, Number(wiCost.billableInputTokens))
+      : agentCalls.reduce((sum, call) => sum + callBillableInputTokens(call), 0);
+    const totalBillableTokens = Number.isFinite(Number(wiCost?.billableTokens))
+      ? Math.max(0, Number(wiCost.billableTokens))
+      : totalBillableInputTokens + totalOutputTokens;
     const totalCostUsd = Number(wiCost?.totalCostUsd ?? 0)
       || agentCalls.reduce((sum, call) => sum + (Number(call.cost_estimate_usd) || 0), 0);
     const toolUsageSummary = toolUsageByWorkItem.get(wi.id) || [];
@@ -431,6 +483,10 @@ export function buildReviewReportData(reviewable, {
       totalPrompt,
       totalOutput,
       totalInputTokens,
+      totalCachedInputTokens,
+      totalUncachedInputTokens: Math.max(0, totalInputTokens - totalCachedInputTokens),
+      totalBillableInputTokens,
+      totalBillableTokens,
       totalOutputTokens,
       totalCostUsd,
       toolUsageSummary,

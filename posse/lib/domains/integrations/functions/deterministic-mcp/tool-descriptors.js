@@ -546,6 +546,16 @@ export const MEANINGFUL_ATLAS_ACTIONS = new Set([
   "memory.feedback",
 ]);
 
+// The ATLAS-first gate covers ONLY non-ATLAS read/discovery tools: it forces a
+// role to attempt ATLAS retrieval before falling back to raw reads/listings for
+// context discovery. It deliberately does NOT gate:
+//   - write tools (write_file, edit_file, move/copy/make_dir, bash) — mutation
+//     is governed by scope/policy, never by ATLAS-first ordering, and
+//   - agent/coordination tools (agent_feedback, get_operator_feedback,
+//     ack_operator_feedback) — the live operator channel must stay reachable
+//     regardless of ATLAS readiness, so an agent can always report status even
+//     while ATLAS is warming or unavailable.
+// Only the read/discovery tools below are gated.
 export const GATED_NATIVE_TOOLS = new Set([
   "chain_read",
   "chain_verdict",

@@ -111,9 +111,13 @@ function nowMs() {
 /**
  * @param {Ledger} ledger
  * @param {string} contentHash
+ * @param {{ layerMerge?: boolean }} [options]
  * @returns {boolean}
  */
-function ledgerHasCurrentParsedBlob(ledger, contentHash) {
+function ledgerHasCurrentParsedBlob(ledger, contentHash, options = {}) {
+  if (options.layerMerge === true && typeof /** @type {any} */ (ledger).hasCurrentTreeSitterLayer === "function") {
+    return /** @type {any} */ (ledger).hasCurrentTreeSitterLayer(contentHash);
+  }
   if (typeof /** @type {any} */ (ledger).hasCurrentParsedBlob === "function") {
     return /** @type {any} */ (ledger).hasCurrentParsedBlob(contentHash);
   }
@@ -1466,7 +1470,7 @@ export class ParseEngine {
       const expectedHash = snapshot.get(repoRelPath) || "";
       const stored = sourceStats.get(repoRelPath);
       if (expectedHash && sourceStatMatches(stored, stat, expectedHash)) {
-        if (!ledgerHasCurrentParsedBlob(this.#ledger, expectedHash)) {
+        if (!ledgerHasCurrentParsedBlob(this.#ledger, expectedHash, { layerMerge: this.#viewLayerMerge })) {
           rememberChanged(repoRelPath);
           await report(repoRelPath, scanned === 1 || scanned === total);
           continue;
@@ -1484,7 +1488,7 @@ export class ParseEngine {
       hashed++;
       const contentHash = sha256Hex(fileBytes);
       if (expectedHash && contentHash === expectedHash) {
-        if (ledgerHasCurrentParsedBlob(this.#ledger, contentHash)) {
+        if (ledgerHasCurrentParsedBlob(this.#ledger, contentHash, { layerMerge: this.#viewLayerMerge })) {
           statRefreshes.push(sourceStatRecord({
             branch,
             repo_rel_path: repoRelPath,
@@ -1992,8 +1996,9 @@ export class ParseEngine {
         const beforeHash = snapshot.get(repo_rel_path) || null;
         const currentParsedBlob = contentHash
           && beforeHash === contentHash
-          && ledgerHasCurrentParsedBlob(this.#ledger, contentHash);
-        const mergeExistingScipRows = currentParsedBlob
+          && ledgerHasCurrentParsedBlob(this.#ledger, contentHash, { layerMerge: this.#viewLayerMerge });
+        const mergeExistingScipRows = !this.#viewLayerMerge
+          && currentParsedBlob
           && shouldMergeTreeSitterRowsForScipBlob({
             ledger: this.#ledger,
             contentHash,
@@ -2057,7 +2062,7 @@ export class ParseEngine {
           });
           base.blobs_ingested++;
         } else {
-        if (before === parsed.content_hash && ledgerHasCurrentParsedBlob(this.#ledger, parsed.content_hash)) {
+        if (before === parsed.content_hash && ledgerHasCurrentParsedBlob(this.#ledger, parsed.content_hash, { layerMerge: this.#viewLayerMerge })) {
           if (mergeExistingScipRows && typeof /** @type {any} */ (this.#ledger).mergeBlobParseRowsAsync === "function") {
             await reportIndexProgress(repo_rel_path, {
               force: true,
@@ -2088,7 +2093,7 @@ export class ParseEngine {
           catch { byte_size = 0; }
         }
 
-        if (ledgerHasCurrentParsedBlob(this.#ledger, parsed.content_hash)) {
+        if (ledgerHasCurrentParsedBlob(this.#ledger, parsed.content_hash, { layerMerge: this.#viewLayerMerge })) {
           await reportIndexProgress(repo_rel_path, {
             force: true,
             stage: "writing ledger",

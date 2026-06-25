@@ -8,9 +8,38 @@ import { canonicalAtlasActionName } from "../../../../functions/tools/mcp-surfac
 import { listActiveAgentGuidanceForJob, listAgentInteractions } from "../../../queue/functions/index.js";
 import { readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
 
-const POSSE_HEADER_WIDTH = 16;
+const POSSE_HEADER_WIDTH = 25;
 const POSSE_HEADER_MASCOT_GAP = 2;
 const POSSE_MARK = "\u259f";
+
+// The brand mark: the original \u259f (U+259F) reverse-L / "_|" corner, aligned to the
+// POSSE *letters*, not the cell grid. Box-drawing strokes are centered in their
+// cell, so POSSE's cap sits at the middle of row 0 and its baseline at the middle
+// of row 2 \u2014 the ink spans only mid-row-0 \u2192 mid-row-2 (two cells, centered). A
+// solid \u2588 filling whole cells runs taller than that, so the upright is inset: a
+// lower-half block (\u2584) starts it on the cap line, and the foot's bottom lands on
+// the baseline. The foot is pulled in a half-cell on its free (left) end (\u259d, an
+// upper-right quadrant) so it reads a touch narrower than the banner letters, and
+// nudged a quarter-cell taller toward the post (\u2582) \u2014 both at the block grid's
+// finest step. One-column post (mark stays 3 wide). Where "MASONS" used to be.
+const POSSE_LOGO_ROWS = Object.freeze([
+  "  \u2584",
+  " \u2582\u2588",
+  "\u259d\u2580\u2580",
+]);
+// "POSSE" in 3-row heavy box-drawing block letters (each glyph 3 cols wide, a
+// 1-col gap between them). Restored from the original masthead \u2014 the only
+// change is dropping the leading "MASONS" word in favour of the boxy mark.
+const POSSE_BANNER_ROWS = Object.freeze([
+  "\u250f\u2501\u2513 \u250f\u2501\u2513 \u250f\u2501\u2513 \u250f\u2501\u2513 \u250f\u2501\u2578",
+  "\u2523\u2501\u251b \u2503 \u2503 \u2517\u2501\u2513 \u2517\u2501\u2513 \u2523\u2501\u2578",
+  "\u2579   \u2517\u2501\u251b \u2517\u2501\u251b \u2517\u2501\u251b \u2517\u2501\u2578",
+]);
+// Truecolor (24-bit) brand colours for the masthead so the mark and the word stay
+// visibly distinct even on terminal themes that flatten the 16 named ANSI colours
+// toward white. Mark = green, POSSE = cyan.
+const MASTHEAD_LOGO_FG = "\x1b[38;2;106;214;128m";
+const MASTHEAD_WORD_FG = "\x1b[38;2;96;200;236m";
 const LIVE_CHANNEL_TOOL_TYPES = new Set([
   "tool.agent_feedback",
   "tool.get_operator_feedback",
@@ -21,6 +50,15 @@ const LIVE_CHANNEL_TOOL_TYPES = new Set([
 
 function posseWordmark() {
   return `${C.green}${C.bold}${POSSE_MARK}${C.reset} ${C.brightWhite}${C.bold}POSSE${C.reset}`;
+}
+
+
+
+// The full 3-row masthead: the boxy brand mark (green) beside the POSSE banner
+// (cyan) — two distinct colours so the mark reads as a logo, not a letter.
+function posseMastheadRows() {
+  return POSSE_LOGO_ROWS.map((logo, i) =>
+    ` ${C.bold}${MASTHEAD_LOGO_FG}${logo}${C.reset}  ${MASTHEAD_WORD_FG}${POSSE_BANNER_ROWS[i]}${C.reset}`);
 }
 
 
@@ -206,13 +244,12 @@ export class DisplayRightPanelRenderer {
   _buildRight(width, maxLines) {
     const lines = [];
 
-    // ── Compact wordmark header ──
-    if (width >= 46) {
-      lines.push(...this._withPosseMascot([
-        ` ${posseWordmark()}`,
-        "",
-        "",
-      ], width));
+    // ── Masthead: boxy brand mark + POSSE banner ──
+    // Wide panes get the full 3-row banner (with the mascot trotting alongside
+    // once there's lane room); _withPosseMascot no-ops the mascot when narrow,
+    // so the banner still shows on its own down to ~28 cols.
+    if (width >= 28) {
+      lines.push(...this._withPosseMascot(posseMastheadRows(), width));
       const clock = this._buildRunClockLine(width);
       if (clock) lines.push(clock);
       lines.push(` ${C.dim}${"\u2500".repeat(Math.min(width - 2, 44))}${C.reset}`);

@@ -1411,6 +1411,18 @@ export class Display {
     return this._inputController._getNudgeWorkers.call(this, ...args);
   }
 
+  _getMonitorAgents(...args) {
+    return this._inputController._getMonitorAgents.call(this, ...args);
+  }
+
+  _setMonitorSelectionByIndex(...args) {
+    return this._inputController._setMonitorSelectionByIndex.call(this, ...args);
+  }
+
+  _cycleMonitorSelection(...args) {
+    return this._inputController._cycleMonitorSelection.call(this, ...args);
+  }
+
   _submitAnswer(...args) {
     return this._inputController._submitAnswer.call(this, ...args);
   }
@@ -1583,6 +1595,9 @@ export class Display {
   }
   _buildMonitorFocusLines(...args) {
     return this._rightPanelRenderer._buildMonitorFocusLines.call(this, ...args);
+  }
+  _buildMonitorPromptLens(...args) {
+    return this._rightPanelRenderer._buildMonitorPromptLens.call(this, ...args);
   }
   _monitorRecentEventsForJob(...args) {
     return this._rightPanelRenderer._monitorRecentEventsForJob.call(this, ...args);

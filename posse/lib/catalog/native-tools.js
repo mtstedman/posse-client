@@ -447,7 +447,7 @@ export const TOOL_GET_OPERATOR_FEEDBACK = {
   type: "function",
   name: "get_operator_feedback",
   description:
-    "Retrieve pending live operator feedback for the current job after a tool result signals operator_feedback_available. " +
+    "Retrieve pending live operator feedback for the current job at startup or after a tool result signals operator_feedback_available. " +
     "This is the only channel that delivers operator nudge text; do not expect nudge text in the assembled prompt. " +
     "Every returned item must be acknowledged with ack_operator_feedback before normal task work continues.",
   parameters: {

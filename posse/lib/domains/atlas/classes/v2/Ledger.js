@@ -468,6 +468,14 @@ export class Ledger {
   }
 
   /**
+   * @param {string} content_hash
+   * @returns {boolean}
+   */
+  hasCurrentTreeSitterLayer(content_hash) {
+    return this.#blob.hasCurrentTreeSitterLayer(content_hash);
+  }
+
+  /**
    * @param {string} branch
    * @param {number} fromSeq
    * @param {{ limit?: number, upToSeq?: number } | number} [options]
