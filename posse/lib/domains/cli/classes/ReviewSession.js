@@ -102,7 +102,7 @@ export class ReviewSession {
   // Use TUI approval mode with full reports when possible
   const useTui = !NO_TUI && process.stdout.isTTY;
   if (useTui) {
-    const display = new Display({ concurrency: 0 });
+    const display = new Display({ concurrency: 0, projectDir: PROJECT_DIR });
     try {
       display.start();
       await this.wrapUpTui(display);

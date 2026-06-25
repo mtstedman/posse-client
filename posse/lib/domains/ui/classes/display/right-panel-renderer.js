@@ -5,8 +5,10 @@ import { roleBrandColor, roleBrandIcon } from "../../functions/display/helpers/b
 import { jobLabel, jobDisplayStatus } from "../../functions/display/helpers/job-status.js";
 import { renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
 import { canonicalAtlasActionName } from "../../../../functions/tools/mcp-surface.js";
-import { listActiveAgentGuidanceForJob, listAgentInteractions } from "../../../queue/functions/index.js";
+import { listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
 import { readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
+import { _buildQueueProviderUsageLines, getProviderUsageSummaryCache } from "../../functions/display/helpers/provider-usage.js";
+import { buildAdminGitDiffSnapshot, buildAdminGitDiffFileDetail } from "../../functions/admin/git-diff-review.js";
 
 const POSSE_HEADER_WIDTH = 25;
 const POSSE_HEADER_MASCOT_GAP = 2;
@@ -77,6 +79,24 @@ function clamp(value, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return min;
   return Math.max(min, Math.min(max, n));
+}
+
+// Greedy word-wrap with a hanging indent: the first line may use a different
+// (usually narrower) width than the continuation lines. Hard-breaks any single
+// word longer than the available width so nothing overflows the box.
+function wrapHanging(text, firstWidth, restWidth) {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let cur = "";
+  const cap = () => Math.max(4, lines.length === 0 ? firstWidth : restWidth);
+  for (const word of words) {
+    if (!cur) cur = word;
+    else if (cur.length + 1 + word.length <= cap()) cur = `${cur} ${word}`;
+    else { lines.push(cur); cur = word; }
+    while (cur.length > cap()) { lines.push(cur.slice(0, cap())); cur = cur.slice(cap()); }
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [""];
 }
 
 
@@ -344,9 +364,12 @@ export class DisplayRightPanelRenderer {
     lines.push(`${visiblePad(leftHead, leftW)}${divider}${fit(rightHead, rightW)}`);
     lines.push(`${C.dim}${"\u2500".repeat(leftW)}\u253c${"\u2500".repeat(rightW)}${C.reset}`);
 
-    const fleetLines = this._buildMonitorFleetLines(agents, selected, leftW);
-    const focusLines = selected ? this._buildMonitorFocusLines(selected, rightW) : [];
     const bodyRows = Math.max(0, maxLines - lines.length - 1);
+    // Both columns fill the whole body height (the fleet rail tails into a live
+    // event feed, the focus pane pads its own boxes), so neither side leaves a
+    // trailing whitespace gap below its content.
+    const fleetLines = this._buildMonitorFleetLines(agents, selected, leftW, bodyRows);
+    const focusLines = selected ? this._buildMonitorFocusLines(selected, rightW, bodyRows) : [];
     const rows = Math.min(bodyRows, Math.max(fleetLines.length, focusLines.length));
     for (let idx = 0; idx < rows; idx++) {
       lines.push(`${visiblePad(fleetLines[idx] || "", leftW)}${divider}${fit(focusLines[idx] || "", rightW)}`);
@@ -472,7 +495,7 @@ export class DisplayRightPanelRenderer {
 
 
 
-  _buildMonitorFleetLines(agents, selected, width) {
+  _buildMonitorFleetLines(agents, selected, width, height = 0) {
     const lines = [];
     for (const agent of agents.slice(0, 9)) {
       const meta = monitorStateMeta(agent.state);
@@ -492,8 +515,43 @@ export class DisplayRightPanelRenderer {
       }
       lines.push("");
     }
-    lines.push(`${C.dim}live steering on tool results${C.reset}`);
-    lines.push(`${C.dim}blocking questions will park here, not die in logs${C.reset}`);
+    // Provider usage widget tucked against the bottom of the rail — the same
+    // widget the main queue page shows (run tokens/cost + session/week pressure
+    // gauges). The fleet rail intentionally does NOT mirror the event log here.
+    let usageLines = [];
+    try {
+      const cache = getProviderUsageSummaryCache();
+      const activeProviders = new Set(
+        [...this.workers.values()].map((w) => String(w?.provider || "").trim().toLowerCase()).filter(Boolean),
+      );
+      const usageBudget = Math.max(0, (height || 0) - lines.length);
+      if (usageBudget >= 4) {
+        usageLines = _buildQueueProviderUsageLines(width, usageBudget, cache.summaries || [], {
+          activeProviders,
+          currentRunProviderUsage: cache.currentRunProviderUsage || [],
+          runStartedAtIso: this._runStartedAtIso,
+        });
+      }
+    } catch { usageLines = []; }
+
+    // Usage sits directly under the fleet list (no gap between them). Stretch the
+    // per-provider blocks apart so they span down to the bottom of the rail
+    // rather than leaving a blank band beneath.
+    const blocks = [];
+    for (const line of usageLines) {
+      if (blocks.length === 0 || stripAnsi(line).trimStart().startsWith("╶")) blocks.push([]);
+      blocks[blocks.length - 1].push(line);
+    }
+    const slack = Math.max(0, (height || 0) - lines.length - usageLines.length);
+    const gaps = Math.max(1, blocks.length - 1);
+    // Cap per-gap spacing so two small blocks don't get a cavernous gap; any
+    // remainder tails at the bottom.
+    const per = Math.min(2, Math.floor(slack / gaps));
+    for (let b = 0; b < blocks.length; b++) {
+      lines.push(...blocks[b]);
+      if (b < blocks.length - 1) for (let g = 0; g < per; g++) lines.push("");
+    }
+    while (lines.length < (height || 0)) lines.push("");
     return lines;
   }
 
@@ -531,19 +589,11 @@ export class DisplayRightPanelRenderer {
     for (const row of agent.interactionRows || []) addInteraction(row);
     for (const row of agent.guidance || []) addInteraction(row);
     for (const row of agent.activityRows || []) addInteraction(row);
-
-    for (const row of feedbackToolRows || []) {
-      const tool = stripToolPrefix(row.observation_type);
-      const label = tool === "get_operator_feedback"
-        ? "retrieved"
-        : (tool === "ack_operator_feedback" ? "ack" : "status");
-      rows.push({
-        _kind: "coordination",
-        created_at: row.created_at,
-        label,
-        body: stripRedundantToolSummaryLabel(tool, row.summary) || tool,
-      });
-    }
+    // Intentionally NOT surfacing the live-channel tool observations
+    // (feedbackToolRows: get/ack/status markers). The feedback panel shows the
+    // agent's own update text and operator messages — not the mechanical
+    // "status change" coordination markers, which only added noise.
+    void feedbackToolRows;
 
     rows.sort((a, b) => (Date.parse(a.created_at || "") || 0) - (Date.parse(b.created_at || "") || 0));
     return rows.slice(-Math.max(1, limit));
@@ -558,7 +608,7 @@ export class DisplayRightPanelRenderer {
 
 
 
-  _monitorBoxedLane({ title, count = 0, color = C.cyan, width, rows = [], emptyText = "waiting" } = {}) {
+  _monitorBoxedLane({ title, count = 0, color = C.cyan, width, rows = [], emptyText = "waiting", fixedRows = null } = {}) {
     const safeWidth = Math.max(18, width | 0);
     const inner = Math.max(8, safeWidth - 2);
     const lines = [
@@ -567,7 +617,13 @@ export class DisplayRightPanelRenderer {
       `${C.dim}\u251c${"\u2500".repeat(inner)}\u2524${C.reset}`,
     ];
 
-    const visibleRows = rows.length > 0 ? rows : [` ${C.dim}\u00b7 ${emptyText}${C.reset}`];
+    let visibleRows = rows.length > 0 ? rows : [` ${C.dim}\u00b7 ${emptyText}${C.reset}`];
+    // fixedRows makes the box a constant height: truncate overflow and pad short
+    // content with blank lines so stacked boxes tile the pane with no gap.
+    if (Number.isFinite(fixedRows) && fixedRows > 0) {
+      visibleRows = visibleRows.slice(0, fixedRows);
+      while (visibleRows.length < fixedRows) visibleRows.push("");
+    }
     for (const row of visibleRows) {
       lines.push(this._monitorBoxLine(row, safeWidth));
     }
@@ -605,90 +661,269 @@ export class DisplayRightPanelRenderer {
 
 
 
-  _buildMonitorFeedbackToolLanes(agent, width) {
-    const toolActivity = this._monitorToolActivityForJob(agent.jobId, { limit: 8 });
-    const feedbackEntries = this._monitorFeedbackEntries(agent, toolActivity.feedbackToolRows, { limit: 7 });
-    const toolRows = toolActivity.toolRows.slice(0, 7).reverse();
-    const feedbackLines = feedbackEntries.map((row) => this._formatMonitorFeedbackRow(row, Math.floor(width / 2) - 2));
-    const toolLines = toolRows.map((row) => this._formatMonitorToolRow(row, Math.floor(width / 2) - 2));
+  _buildMonitorFeedbackToolLanes(agent, width, height) {
+    const toolActivity = this._monitorToolActivityForJob(agent.jobId, { limit: 60 });
+    const feedbackEntries = this._monitorFeedbackEntries(agent, toolActivity.feedbackToolRows, { limit: 60 });
+    const toolRows = [...toolActivity.toolRows]
+      .sort((a, b) => (Date.parse(b.created_at || "") || 0) - (Date.parse(a.created_at || "") || 0));
 
-    const narrow = width < 72;
-    if (narrow) {
-      const feedbackBox = this._monitorBoxedLane({
+    // Two full-width boxes stacked to tile the pane: FEEDBACK on top (the larger
+    // share) and TOOLS below. Box chrome is 4 lines (top, title, mid, bottom), so
+    // content rows = boxHeight - 4. They are sized to exactly fill `height`.
+    const total = Math.max(5, height | 0);
+    const inner = Math.max(8, width - 4);
+
+    // An open file diff takes the whole focus pane for maximum room.
+    if (this._monitorChangesMode && this._monitorDiffOpen) {
+      return this._buildMonitorChangesBox(agent, width, total);
+    }
+
+    // Feedback: newest-first, word-wrapped across the full width (no truncation),
+    // filling the box top-down until it is full.
+    const buildFeedback = (content) => {
+      const lines = [];
+      const ordered = [...feedbackEntries].reverse();
+      for (let e = 0; e < ordered.length && lines.length < content; e++) {
+        if (e > 0) lines.push(""); // blank delimiter between messages
+        for (const line of this._monitorFeedbackEntryLines(ordered[e], inner)) {
+          if (lines.length >= content) break;
+          lines.push(line);
+        }
+      }
+      return this._monitorBoxedLane({
         title: "feedback",
         count: feedbackEntries.length,
         color: C.yellow,
         width,
-        rows: feedbackEntries.map((row) => this._formatMonitorFeedbackRow(row, width)),
-        emptyText: `current: ${agent.activity}`,
+        rows: lines,
+        emptyText: `no updates yet \u2014 current: ${agent.activity}`,
+        fixedRows: content,
       });
-      const toolBox = this._monitorBoxedLane({
+    };
+
+    // A short pane only has room for one box.
+    if (total < 11) {
+      if (this._monitorChangesMode) return this._buildMonitorChangesBox(agent, width, total);
+      return buildFeedback(Math.max(1, total - 4));
+    }
+
+    let feedbackBoxH = Math.max(6, Math.round(total * 0.58));
+    let toolBoxH = total - feedbackBoxH;
+    if (toolBoxH < 5) { toolBoxH = 5; feedbackBoxH = total - toolBoxH; }
+    const feedbackContent = Math.max(1, feedbackBoxH - 4);
+    const toolContent = Math.max(1, toolBoxH - 4);
+
+    // Bottom box: tool calls by default, or the CHANGES (git-diff) view when the
+    // operator pressed [d]. Tools: newest-first, one full-width line each.
+    const bottomBox = this._monitorChangesMode
+      ? this._buildMonitorChangesBox(agent, width, toolBoxH)
+      : this._monitorBoxedLane({
         title: "tools",
         count: toolRows.length,
         color: C.cyan,
         width,
-        rows: toolRows.map((row) => this._formatMonitorToolRow(row, width)),
-        emptyText: "no normal tool calls yet",
+        rows: toolRows.slice(0, toolContent).map((row) => this._formatMonitorToolRow(row, width)),
+        emptyText: "no tool calls yet",
+        fixedRows: toolContent,
       });
-      return [...feedbackBox, ...toolBox];
-    }
 
-    const gap = `${C.dim}\u2502${C.reset}`;
-    const laneWidth = Math.floor((width - 1) / 2);
-    const rightWidth = Math.max(18, width - laneWidth - 1);
-    const feedbackBox = this._monitorBoxedLane({
-      title: "feedback",
-      count: feedbackEntries.length,
-      color: C.yellow,
-      width: laneWidth,
-      rows: feedbackLines,
-      emptyText: `current: ${agent.activity}`,
-    });
-    const toolBox = this._monitorBoxedLane({
-      title: "tools",
-      count: toolRows.length,
-      color: C.cyan,
-      width: rightWidth,
-      rows: toolLines,
-      emptyText: "no normal tool calls yet",
-    });
-    const rows = Math.max(feedbackBox.length, toolBox.length);
-    const lines = [];
-    for (let idx = 0; idx < rows; idx++) {
-      lines.push(`${visiblePad(feedbackBox[idx] || "", laneWidth)}${gap}${fit(toolBox[idx] || "", rightWidth)}`);
+    return [...buildFeedback(feedbackContent), ...bottomBox];
+  }
+
+  _monitorFeedbackEntryLines(row, inner) {
+    const meta = monitorFeedbackMeta(row);
+    const suffix = monitorFeedbackSuffix(row);
+    const time = compactTime(row.created_at);
+    const body = _sanitizeDisplayLine(row.body || row.summary || "");
+    const suffixText = suffix ? `  ${suffix}` : "";
+    // Render each update as a message: a colored sender/time header, then the
+    // body wrapped under a thin accent rail in the same colour (NOT dim, so the
+    // wrapped continuation reads as part of the message, not faded log noise).
+    const lines = [` ${meta.color}${meta.glyph} ${meta.label}${C.reset}  ${C.dim}${time}${C.reset}${suffixText}`];
+    const bodyWidth = Math.max(8, inner - 3);
+    for (const chunk of wrapHanging(body, bodyWidth, bodyWidth)) {
+      lines.push(` ${meta.color}▏${C.reset} ${chunk}`);
     }
     return lines;
   }
 
 
 
-  _buildMonitorFocusLines(agent, width) {
-    const lines = [];
+  // ── Changes / git-diff view (toggled with [d] on the selected agent) ──
+  _monitorDiffFilesForAgent(agent) {
+    const wiId = agent?.workItemId;
+    if (wiId == null) return { files: [], loading: false };
+    const fresh = this._monitorDiffSnapshotCache && this._monitorDiffSnapshotWi === wiId
+      && (Date.now() - (this._monitorDiffSnapshotAt || 0)) < 3000;
+    if (!fresh && !this._monitorDiffSnapshotBuilding) {
+      this._monitorDiffSnapshotBuilding = true;
+      const projectDir = this.projectDir || process.cwd();
+      Promise.resolve()
+        .then(() => {
+          const wi = (listWorkItems() || []).find((w) => Number(w.id) === Number(wiId));
+          return wi ? buildAdminGitDiffSnapshot({ projectDir, workItems: [wi], limit: 1 }) : { files: [] };
+        })
+        .then((snapshot) => { this._monitorDiffSnapshotCache = snapshot; this._monitorDiffSnapshotWi = wiId; this._monitorDiffSnapshotAt = Date.now(); })
+        .catch((err) => { this._monitorDiffSnapshotCache = { files: [], error: err?.message || String(err) }; this._monitorDiffSnapshotWi = wiId; this._monitorDiffSnapshotAt = Date.now(); })
+        .finally(() => { this._monitorDiffSnapshotBuilding = false; try { this.requestRender?.({ force: true }); } catch { /* best effort */ } });
+    }
+    if (this._monitorDiffSnapshotCache && this._monitorDiffSnapshotWi === wiId) {
+      return { files: this._monitorDiffSnapshotCache.files || [], error: this._monitorDiffSnapshotCache.error };
+    }
+    return { files: [], loading: true };
+  }
+
+  _monitorDiffDetailForFile(file) {
+    if (!file) return { lines: ["No file selected."] };
+    const key = `${file.wiId}:${file.key || file.path}`;
+    const fresh = this._monitorDiffDetailCache && this._monitorDiffDetailKey === key
+      && (Date.now() - (this._monitorDiffDetailAt || 0)) < 3000;
+    if (!fresh && this._monitorDiffDetailBuilding !== key) {
+      this._monitorDiffDetailBuilding = key;
+      const projectDir = this.projectDir || process.cwd();
+      Promise.resolve()
+        .then(() => buildAdminGitDiffFileDetail({ projectDir, file }))
+        .then((detail) => { this._monitorDiffDetailCache = detail; this._monitorDiffDetailKey = key; this._monitorDiffDetailAt = Date.now(); })
+        .catch((err) => { this._monitorDiffDetailCache = { lines: [`Diff load failed: ${err?.message || err}`] }; this._monitorDiffDetailKey = key; this._monitorDiffDetailAt = Date.now(); })
+        .finally(() => { this._monitorDiffDetailBuilding = null; try { this.requestRender?.({ force: true }); } catch { /* best effort */ } });
+    }
+    if (this._monitorDiffDetailCache && this._monitorDiffDetailKey === key) return this._monitorDiffDetailCache;
+    return { lines: ["Loading diff…"] };
+  }
+
+  // Render raw `git diff` lines with an old/new line-number gutter and the usual
+  // red `-` / green `+` / cyan `@@` colouring, deriving line numbers from the
+  // hunk headers.
+  _monitorDiffBodyLines(lines, inner) {
+    const out = [];
+    const bodyW = Math.max(8, inner - 7);
+    let oldNo = 0;
+    let newNo = 0;
+    // Track whether we are inside a hunk. The ---/+++ file headers (and the
+    // diff/index/section preamble) only appear BEFORE the first @@ of a file;
+    // once a hunk starts, every +/- line is diff CONTENT — including code lines
+    // that legitimately begin with ++ or -- (`--count;`, a `-- sql comment`),
+    // which a naive prefix test would misclassify as the ---/+++ headers and
+    // mis-paint while drifting the gutter line numbers for the rest of the file.
+    let inHunk = false;
+    for (const raw of (lines || [])) {
+      const text = String(raw ?? "");
+      if (text.startsWith("@@")) {
+        const m = text.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (m) { oldNo = parseInt(m[1], 10); newNo = parseInt(m[2], 10); }
+        inHunk = true;
+        out.push(`${C.dim}  ···${C.reset} ${C.cyan}${fit(text, bodyW)}${C.reset}`);
+        continue;
+      }
+      // A new file's "diff --git" / "# SECTION" title closes the previous hunk so
+      // its header block is recognised as a header again.
+      if (text.startsWith("diff --git") || text.startsWith("# ")) inHunk = false;
+      const isHeader = !inHunk && (
+        text.startsWith("diff --git") || text.startsWith("index ")
+        || text.startsWith("+++") || text.startsWith("---")
+        || text.startsWith("# ") || text.startsWith("new file")
+        || text.startsWith("deleted file") || text.startsWith("rename ")
+        || text.startsWith("similarity ") || text.startsWith("Binary files")
+      );
+      if (isHeader) {
+        out.push(`      ${C.dim}${fit(text, bodyW)}${C.reset}`);
+      } else if (text.startsWith("+")) {
+        out.push(`${C.green}${String(newNo++).padStart(5)}${C.reset} ${C.green}${fit(text, bodyW)}${C.reset}`);
+      } else if (text.startsWith("-")) {
+        out.push(`${C.red}${String(oldNo++).padStart(5)}${C.reset} ${C.red}${fit(text, bodyW)}${C.reset}`);
+      } else {
+        out.push(`${C.dim}${String(newNo++).padStart(5)}${C.reset} ${fit(text, bodyW)}`);
+        oldNo++;
+      }
+    }
+    return out;
+  }
+
+  _buildMonitorChangesBox(agent, width, height) {
+    const content = Math.max(1, (height | 0) - 4);
+    const inner = Math.max(8, width - 4);
+    const snap = this._monitorDiffFilesForAgent(agent);
+    const files = snap.files || [];
+    this._monitorDiffFileIndex = files.length ? Math.max(0, Math.min(this._monitorDiffFileIndex || 0, files.length - 1)) : 0;
+
+    if (!this._monitorDiffOpen) {
+      const rows = [];
+      if (snap.loading) rows.push(` ${C.dim}· loading changes…${C.reset}`);
+      else if (snap.error) rows.push(` ${C.red}· ${fit(snap.error, inner - 3)}${C.reset}`);
+      else if (files.length === 0) rows.push(` ${C.dim}· no file changes yet${C.reset}`);
+      else {
+        const start = Math.max(0, Math.min(this._monitorDiffFileIndex - Math.floor(content / 2), Math.max(0, files.length - content)));
+        for (let i = start; i < files.length && rows.length < content; i++) {
+          const f = files[i];
+          const sel = i === this._monitorDiffFileIndex;
+          const counts = `${C.green}+${f.additions || 0}${C.reset} ${C.red}-${f.deletions || 0}${C.reset}`;
+          const pathTxt = fit(f.path || "?", Math.max(8, inner - 16));
+          const marker = sel ? `${C.cyan}▸${C.reset}` : " ";
+          const name = sel ? `${C.brightWhite}${pathTxt}${C.reset}` : pathTxt;
+          rows.push(`${marker} ${name}  ${counts}`);
+        }
+      }
+      return this._monitorBoxedLane({
+        title: files.length ? `changes ${this._monitorDiffFileIndex + 1}/${files.length}  [↑↓ select · enter open]` : "changes",
+        count: files.length,
+        color: C.magenta,
+        width,
+        rows,
+        emptyText: "no changes",
+        fixedRows: content,
+      });
+    }
+
+    const file = files[this._monitorDiffFileIndex] || null;
+    const detail = this._monitorDiffDetailForFile(file);
+    const body = this._monitorDiffBodyLines(detail.lines || [], inner);
+    const maxScroll = Math.max(0, body.length - content);
+    this._monitorDiffScroll = Math.max(0, Math.min(this._monitorDiffScroll || 0, maxScroll));
+    const view = body.slice(this._monitorDiffScroll, this._monitorDiffScroll + content);
+    const span = maxScroll > 0
+      ? ` ${this._monitorDiffScroll + 1}-${Math.min(body.length, this._monitorDiffScroll + content)}/${body.length}`
+      : "";
+    return this._monitorBoxedLane({
+      title: `diff${span}  [↑↓ scroll · esc files]`,
+      count: file ? (file.additions || 0) + (file.deletions || 0) : 0,
+      color: C.magenta,
+      width,
+      rows: view,
+      emptyText: "empty diff",
+      fixedRows: content,
+    });
+  }
+
+  _buildMonitorFocusLines(agent, width, height = 18) {
     const meta = monitorStateMeta(agent.state);
     const provider = agent.provider
       ? `${agent.provider}${agent.modelName ? `/${agent.modelName}` : ""}`
       : `tier/${agent.tier}`;
-    lines.push(` ${meta.color}\u25cf${C.reset} ${agent.status}  ${C.dim}${provider}  elapsed ${agent.elapsed}  phase${C.reset} ${C.brightWhite}${fit(agent.activity, Math.max(8, width - 54))}${C.reset}`);
-    lines.push(` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`);
+    const top = [
+      ` ${meta.color}\u25cf${C.reset} ${agent.status}  ${C.dim}${provider}  elapsed ${agent.elapsed}  phase${C.reset} ${C.brightWhite}${fit(agent.activity, Math.max(8, width - 54))}${C.reset}`,
+      ` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`,
+    ];
 
-    if (this._monitorPromptLens) {
-      lines.push(...this._buildMonitorPromptLens(agent, width));
-      lines.push("");
-    }
-
-    lines.push(...this._buildMonitorFeedbackToolLanes(agent, width));
-
-    const remaining = Math.max(0, width - 2);
-    lines.push("");
-    lines.push(` ${C.dim}${"\u2500".repeat(Math.max(8, remaining))}${C.reset}`);
+    const footer = [` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`];
     if (agent.state === "ask") {
-      lines.push(` ${C.red}${C.bold}ASK${C.reset} ${C.dim}answer is blocking; this job should be exempt from stall/lease reaping${C.reset}`);
-      lines.push(` ${C.green}[a] answer${C.reset}  ${C.yellow}[n] nudge${C.reset}  ${C.blue}[t] prompt lens${C.reset}  ${C.red}[!] interrupt + requeue${C.reset}`);
+      footer.push(` ${C.red}${C.bold}ASK${C.reset} ${C.green}[a] answer${C.reset}  ${C.yellow}[n] nudge${C.reset}  ${C.blue}[t] prompt lens${C.reset}  ${C.red}[!] interrupt + requeue${C.reset}`);
     } else {
-      lines.push(` ${C.cyan}${C.bold}suggestion${C.reset} ${C.dim}| correction | scope-request | status-request${C.reset}`);
-      lines.push(` ${C.yellow}[n] nudge selected agent${C.reset}  ${C.blue}[t] prompt lens${C.reset}  ${C.dim}delivery: next safe checkpoint/tool result${C.reset}`);
+      footer.push(` ${C.yellow}[n] nudge${C.reset}  ${C.blue}[t] prompt lens${C.reset}  ${C.magenta}[d] changes${C.reset}  ${C.dim}delivery: next safe checkpoint/tool result${C.reset}`);
     }
-    return lines;
+
+    const bodyH = Math.max(0, height - top.length - footer.length);
+    const body = [];
+    if (this._monitorPromptLens) {
+      body.push(...this._buildMonitorPromptLens(agent, width).slice(0, Math.max(3, Math.floor(bodyH * 0.45))), "");
+    }
+    const lanesH = Math.max(0, bodyH - body.length);
+    if (lanesH >= 5) {
+      body.push(...this._buildMonitorFeedbackToolLanes(agent, width, lanesH));
+    }
+
+    const out = [...top, ...body.slice(0, bodyH), ...footer];
+    while (out.length < height) out.push("");
+    return out.slice(0, height);
   }
 
 

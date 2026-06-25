@@ -582,6 +582,42 @@ export class DisplayInputController {
         this.requestRender({ force: true });
       } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "a") && this._startAnsweringForJob(this._monitorSelectedJobId)) {
         this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "d")) {
+        // Toggle the CHANGES (git-diff) view for the selected agent.
+        if (this._monitorChangesMode) {
+          this._monitorChangesMode = false;
+          this._monitorDiffOpen = false;
+        } else {
+          this._monitorChangesMode = true;
+          this._monitorDiffOpen = false;
+          this._monitorDiffFileIndex = 0;
+          this._monitorDiffScroll = 0;
+        }
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && this._monitorChangesMode && (keyName(key) === "up" || matchesHotkey(str, key, "k"))) {
+        if (this._monitorDiffOpen) this._monitorDiffScroll = Math.max(0, (this._monitorDiffScroll || 0) - 1);
+        else this._monitorDiffFileIndex = Math.max(0, (this._monitorDiffFileIndex || 0) - 1);
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && this._monitorChangesMode && (keyName(key) === "down" || matchesHotkey(str, key, "j"))) {
+        if (this._monitorDiffOpen) this._monitorDiffScroll = (this._monitorDiffScroll || 0) + 1;
+        else this._monitorDiffFileIndex = (this._monitorDiffFileIndex || 0) + 1;
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && this._monitorChangesMode && this._monitorDiffOpen && keyName(key) === "pageup") {
+        this._monitorDiffScroll = Math.max(0, (this._monitorDiffScroll || 0) - 10);
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && this._monitorChangesMode && this._monitorDiffOpen && keyName(key) === "pagedown") {
+        this._monitorDiffScroll = (this._monitorDiffScroll || 0) + 10;
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && this._monitorChangesMode && !this._monitorDiffOpen && isEnterKey(str, key)) {
+        this._monitorDiffOpen = true;
+        this._monitorDiffScroll = 0;
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && this._monitorChangesMode && this._monitorDiffOpen && keyName(key) === "escape") {
+        this._monitorDiffOpen = false;
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && this._monitorChangesMode && keyName(key) === "escape") {
+        this._monitorChangesMode = false;
+        this.requestRender({ force: true });
       } else if (isEnterKey(str, key) && this._questionQueue.length > 0) {
         this._startAnswering();
         this.requestRender({ force: true });
@@ -826,25 +862,25 @@ export class DisplayInputController {
       if (this._approvalIdx > 0) {
         this._approvalIdx--;
         this._approvalTab = 0;
-        this._approvalTabScrolls = [0, 0, 0, 0];
+        this._approvalTabScrolls = [0, 0, 0, 0, 0];
         this._approvalScroll = 0;
       }
     } else if (key && key.name === "right") {
       if (this._approvalIdx < this._approvalData.length - 1) {
         this._approvalIdx++;
         this._approvalTab = 0;
-        this._approvalTabScrolls = [0, 0, 0, 0];
+        this._approvalTabScrolls = [0, 0, 0, 0, 0];
         this._approvalScroll = 0;
       }
     } else if (key && key.name === "tab") {
       // Cycle tabs forward (Shift+Tab for backward)
       if (key.shift) {
-        this._approvalTab = (this._approvalTab + 3) % 4;
+        this._approvalTab = (this._approvalTab + 4) % 5;
       } else {
-        this._approvalTab = (this._approvalTab + 1) % 4;
+        this._approvalTab = (this._approvalTab + 1) % 5;
       }
       this._approvalScroll = this._approvalTabScrolls[this._approvalTab];
-    } else if (digit != null && digit >= 1 && digit <= 4) {
+    } else if (digit != null && digit >= 1 && digit <= 5) {
       this._approvalTab = digit - 1;
       this._approvalScroll = this._approvalTabScrolls[this._approvalTab];
     } else if (matchesHotkey(str, key, "a")) {
@@ -939,7 +975,7 @@ export class DisplayInputController {
         this._approvalIdx = nextIdx;
         this._approvalScroll = 0;
         this._approvalTab = 0;
-        this._approvalTabScrolls = [0, 0, 0, 0];
+        this._approvalTabScrolls = [0, 0, 0, 0, 0];
         if (movingTo) {
           // Transient nav-bar cue so a rapid decision doesn't silently jump
           // the cursor to another work item under the user's fingers.

@@ -13,6 +13,7 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import { statusColor as paletteStatusColor } from "../../functions/display/status-palette.js";
 import { tierModelName } from "../../../providers/functions/provider.js";
 import { FAILED_JOB_STATUSES } from "../../../queue/functions/common.js";
+import { buildAdminGitDiffSnapshot, buildAdminGitDiffFileDetail } from "../../functions/admin/git-diff-review.js";
 import {
   listWorkItems,
   listJobs,
@@ -244,12 +245,13 @@ export class DisplayApprovalRenderer {
       ? this._normalizeApprovalViewState()
       : this._approvalData[this._approvalIdx];
     if (!current) return;
-    const TAB_NAMES = ["Tasks", "Tokens", "Research", "Details"];
+    const TAB_NAMES = ["Tasks", "Tokens", "Research", "Details", "Changes"];
     const builders = [
       () => this._buildTabTasks(current, fullW),
       () => this._buildTabTokens(current, fullW),
       () => this._buildTabResearch(current, fullW),
       () => this._buildTabDetails(current, fullW),
+      () => this._buildTabChanges(current, fullW),
     ];
     const content = builders[this._approvalTab]();
 
@@ -285,9 +287,9 @@ export class DisplayApprovalRenderer {
       const undecided = this._approvalData.filter((d) => !d._decision && !d._isInfo).length;
       navLines.push(` ${C.yellow}${C.bold}Leave review?${C.reset} ${C.yellow}${undecided} undecided item${undecided === 1 ? "" : "s"} will stay pending.${C.reset}  ${C.dim}[Enter/y] Leave  [Esc/n] Keep reviewing${C.reset}`);
     } else if (current._isInfo) {
-      navLines.push(` ${C.cyan}[INFO]${C.reset} ${C.dim}Research-only \u2014 no action needed.  [\u2190\u2192] WI  [Tab/1-4] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
+      navLines.push(` ${C.cyan}[INFO]${C.reset} ${C.dim}Research-only \u2014 no action needed.  [\u2190\u2192] WI  [Tab/1-5] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
     } else {
-      navLines.push(` ${C.green}[a]${C.reset} Approve  ${C.red}[r]${C.reset} Re-queue  ${C.red}[d]${C.reset} Delete  ${C.green}[c]${C.reset} Commit  ${C.yellow}[t]${C.reset} Stash tgt  ${C.red}[x]${C.reset} Discard\u2026  ${C.cyan}[m]${C.reset} Memories  ${C.dim}[s] Skip  [\u2190\u2192] WI  [Tab/1-4] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
+      navLines.push(` ${C.green}[a]${C.reset} Approve  ${C.red}[r]${C.reset} Re-queue  ${C.red}[d]${C.reset} Delete  ${C.green}[c]${C.reset} Commit  ${C.yellow}[t]${C.reset} Stash tgt  ${C.red}[x]${C.reset} Discard\u2026  ${C.cyan}[m]${C.reset} Memories  ${C.dim}[s] Skip  [\u2190\u2192] WI  [Tab/1-5] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
     }
 
     // Always-visible action feedback: the in-flight/most-recent git action and
@@ -485,6 +487,58 @@ export class DisplayApprovalRenderer {
         }
       }
     }
+    return lines;
+  }
+
+  // ── Changes tab: the actual file diffs the operator is approving ──
+  _approvalChangesLines(wi, width) {
+    const inner = Math.max(20, width - 2);
+    const wiId = wi?.id;
+    if (wiId == null) return ["", "  No work item selected."];
+    const key = `${wiId}:${wi.branch_name || ""}`;
+    // A work item under review has a static branch/worktree, so its diff does not
+    // change while the operator reads it. Cache it by WI key and rebuild ONLY when
+    // the selected WI (or branch) changes — never on a timer, which otherwise re-ran
+    // the whole per-file `git diff` fan-out (~6 + 2·files spawns) every few seconds
+    // for as long as the tab stayed open. A failed build is still retried on a short
+    // window so a transient git error does not stick until the operator navigates away.
+    const fresh = this._approvalDiffCache && this._approvalDiffKey === key
+      && (!this._approvalDiffError || (Date.now() - (this._approvalDiffAt || 0)) < 5000);
+    if (!fresh && this._approvalDiffBuilding !== key) {
+      this._approvalDiffBuilding = key;
+      const projectDir = this.projectDir || process.cwd();
+      Promise.resolve()
+        .then(async () => {
+          const snapshot = await buildAdminGitDiffSnapshot({ projectDir, workItems: [wi], limit: 1 });
+          const files = snapshot.files || [];
+          if (files.length === 0) return ["", "  No file changes on this work item's branch yet."];
+          const add = files.reduce((s, f) => s + (f.additions || 0), 0);
+          const del = files.reduce((s, f) => s + (f.deletions || 0), 0);
+          const out = ["", ` ${C.bold}${files.length} file${files.length === 1 ? "" : "s"} changed${C.reset}  ${C.green}+${add}${C.reset} ${C.red}-${del}${C.reset}`, ""];
+          for (const f of files) {
+            out.push(` ${C.dim}${"─".repeat(Math.max(8, inner - 2))}${C.reset}`);
+            out.push(` ${C.cyan}${C.bold}${fit(f.path || "?", Math.max(8, inner - 16))}${C.reset}  ${C.green}+${f.additions || 0}${C.reset} ${C.red}-${f.deletions || 0}${C.reset}`);
+            const detail = await buildAdminGitDiffFileDetail({ projectDir, file: f });
+            out.push(...this._monitorDiffBodyLines(detail.lines || [], inner));
+            out.push("");
+          }
+          return out;
+        })
+        .then((lines) => { this._approvalDiffCache = lines; this._approvalDiffKey = key; this._approvalDiffError = false; this._approvalDiffAt = Date.now(); })
+        .catch((err) => { this._approvalDiffCache = ["", `  ${C.red}Diff load failed: ${err?.message || err}${C.reset}`]; this._approvalDiffKey = key; this._approvalDiffError = true; this._approvalDiffAt = Date.now(); })
+        .finally(() => { this._approvalDiffBuilding = null; try { this.requestRender?.({ force: true }); } catch { /* best effort */ } });
+    }
+    if (this._approvalDiffCache && this._approvalDiffKey === key) return this._approvalDiffCache;
+    return ["", "  Loading changes…"];
+  }
+
+  _buildTabChanges(data, width) {
+    const wi = data.wi;
+    const lines = [];
+    lines.push("");
+    lines.push(` ${C.bold}${C.cyan}═══ CHANGES ═══${C.reset}  ${C.dim}WI#${wi.id}: ${String(wi.title || "").slice(0, 50)}${C.reset}`);
+    lines.push(` ${C.dim}Branch:${C.reset} ${wi.branch_name || "(none)"}  ${C.dim}· the actual file changes you are approving${C.reset}`);
+    lines.push(...this._approvalChangesLines(wi, width));
     return lines;
   }
 

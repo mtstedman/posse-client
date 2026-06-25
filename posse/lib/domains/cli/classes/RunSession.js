@@ -486,64 +486,75 @@ export class RunSession {
   // orphan recovery must requeue onto validated worktree state.
   updateBootStep("repo setup", { section: "scheduler", status: "ok", force: true });
 
+  // The dependency CHECK is advisory and must NOT gate boot. It is check-only
+  // (dryRun) and nothing downstream consumes its result — it only paints the
+  // "dependencies" chip. Awaiting it here used to block the whole boot: on a
+  // cold boot the per-language indexer version probes (a spawnSync child-process
+  // storm inside the dep worker) run ~15s, and the boot panel sat frozen on this
+  // step before the scheduler/ATLAS phase even began. Run it in the BACKGROUND
+  // instead — the chip stays "running" and flips to ok/warning when the probe
+  // resolves, while boot proceeds straight on. Errors degrade to a warning row,
+  // never aborting; the abort signal still cancels it if boot is torn down.
   updateBootStep("dependencies", { section: "workspace", status: "running", detail: "checking packages", force: true });
-  try {
-    const dependencyConfig = typeof getAtlasIntegrationConfig === "function"
-      ? getAtlasIntegrationConfig()
-      : null;
-    // CHECK-ONLY at boot (dryRun): probe for managed indexer + package presence
-    // but NEVER install on the critical path. Installs — especially `rustup
-    // component add rust-analyzer`, a multi-minute network download — previously
-    // ran here before the lock and ATLAS, freezing the whole boot for minutes.
-    // Anything missing is now a non-fatal warning that points at `posse doctor`
-    // (which runs the same checks in install mode); SCIP generation already
-    // degrades gracefully when an indexer is absent (the language is skipped
-    // this warm and caught up once the indexer is installed).
-    const dependencyResult = await runBootDependencySync({
-      projectDir: PROJECT_DIR,
-      dryRun: true,
-      scipMode: dependencyConfig?.enabled === false
-        ? "off"
-        : (dependencyConfig?.scipMode ?? dependencyConfig?.atlas_scip_mode ?? null),
-      scipLanguages: dependencyConfig?.scipLanguages ?? dependencyConfig?.atlas_scip_languages ?? null,
-    }, {
-      signal: bootAbortController.signal,
-      onProgress: (event = {}) => {
-        const msg = firstLine(event.message || "");
-        if (!msg) return;
-        updateBootStep("dependencies", {
-          section: "workspace",
-          status: "running",
-          detail: msg,
-          showDetail: true,
-          force: true,
-        });
-      },
-    });
-    const depCounts = dependencyResult?.counts || {};
-    const depNeedsInstall = (depCounts.dry_run || 0) + (depCounts.failed || 0);
-    updateBootStep("dependencies", {
-      section: "workspace",
-      status: depNeedsInstall > 0 ? "warning" : "ok",
-      detail: depNeedsInstall > 0
-        ? `${formatBootDependencySyncForRun(dependencyResult)} — run "posse doctor" to install`
-        : formatBootDependencySyncForRun(dependencyResult),
-      showDetail: depNeedsInstall > 0,
-      force: true,
-    });
-  } catch (err) {
-    // The boot dependency CHECK never blocks the run: a probe error degrades to
-    // a warning row rather than aborting boot. Deterministic indexing and the
-    // rest of boot do not depend on these installs, so the run proceeds and the
-    // operator can repair with `posse doctor`.
-    updateBootStep("dependencies", {
-      section: "workspace",
-      status: "warning",
-      detail: `dependency check skipped: ${firstLine(err?.message || String(err))} — run "posse doctor"`,
-      showDetail: true,
-      force: true,
-    });
-  }
+  void (async () => {
+    try {
+      const dependencyConfig = typeof getAtlasIntegrationConfig === "function"
+        ? getAtlasIntegrationConfig()
+        : null;
+      // CHECK-ONLY at boot (dryRun): probe for managed indexer + package presence
+      // but NEVER install on the critical path. Installs — especially `rustup
+      // component add rust-analyzer`, a multi-minute network download — previously
+      // ran here before the lock and ATLAS, freezing the whole boot for minutes.
+      // Anything missing is now a non-fatal warning that points at `posse doctor`
+      // (which runs the same checks in install mode); SCIP generation already
+      // degrades gracefully when an indexer is absent (the language is skipped
+      // this warm and caught up once the indexer is installed).
+      const dependencyResult = await runBootDependencySync({
+        projectDir: PROJECT_DIR,
+        dryRun: true,
+        scipMode: dependencyConfig?.enabled === false
+          ? "off"
+          : (dependencyConfig?.scipMode ?? dependencyConfig?.atlas_scip_mode ?? null),
+        scipLanguages: dependencyConfig?.scipLanguages ?? dependencyConfig?.atlas_scip_languages ?? null,
+      }, {
+        signal: bootAbortController.signal,
+        onProgress: (event = {}) => {
+          const msg = firstLine(event.message || "");
+          if (!msg) return;
+          updateBootStep("dependencies", {
+            section: "workspace",
+            status: "running",
+            detail: msg,
+            showDetail: true,
+            force: true,
+          });
+        },
+      });
+      const depCounts = dependencyResult?.counts || {};
+      const depNeedsInstall = (depCounts.dry_run || 0) + (depCounts.failed || 0);
+      updateBootStep("dependencies", {
+        section: "workspace",
+        status: depNeedsInstall > 0 ? "warning" : "ok",
+        detail: depNeedsInstall > 0
+          ? `${formatBootDependencySyncForRun(dependencyResult)} — run "posse doctor" to install`
+          : formatBootDependencySyncForRun(dependencyResult),
+        showDetail: depNeedsInstall > 0,
+        force: true,
+      });
+    } catch (err) {
+      // The boot dependency CHECK never blocks the run: a probe error degrades to
+      // a warning row rather than aborting boot. Deterministic indexing and the
+      // rest of boot do not depend on these installs, so the run proceeds and the
+      // operator can repair with `posse doctor`.
+      updateBootStep("dependencies", {
+        section: "workspace",
+        status: "warning",
+        detail: `dependency check skipped: ${firstLine(err?.message || String(err))} — run "posse doctor"`,
+        showDetail: true,
+        force: true,
+      });
+    }
+  })();
 
   updateBootStep("posse update", { section: "workspace", status: "running", detail: "checking client", force: true });
   try {
@@ -2060,7 +2071,7 @@ export class RunSession {
   stopBootMonitor({ final: true, preserve: useTui });
   if (useTui) {
     try { recordRunDiagnostic("display.starting", { concurrency: CONCURRENCY }); } catch { /* observational */ }
-    display = new Display({ concurrency: CONCURRENCY, rightMode: "monitor" });
+    display = new Display({ concurrency: CONCURRENCY, rightMode: "monitor", projectDir: PROJECT_DIR });
     // Replay the most recent queue snapshot the scheduler has emitted so
     // the display opens with a fully populated view instead of a blank
     // frame that waits for the next state change.

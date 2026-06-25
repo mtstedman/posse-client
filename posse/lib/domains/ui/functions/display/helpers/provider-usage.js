@@ -419,26 +419,29 @@ export function _buildQueueProviderUsageLines(width, maxLines, summaries = [], o
     const brand = providerBrandColor(usage.provider);
     block.push(brandRule({ label: _providerLabel(usage.provider), color: brand, width: ruleWidth }));
 
-    const tokens = _fmtTokens(usage.usedTokens);
     const cachedInputTokens = Math.min(
       Math.max(0, Number(usage.usedInputTokens) || 0),
       Math.max(0, Number(usage.usedCachedInputTokens) || 0),
     );
     const billableTokens = Math.max(0, Number(usage.usedBillableTokens) || 0);
     const rawTokens = Math.max(0, Number(usage.usedTokens) || 0);
-    const showBillable = billableTokens > 0
-      && Math.round(billableTokens) !== Math.round(rawTokens)
-      && width >= 72;
+    // When billing differs from the raw input+output sum (cached reads netted,
+    // cache-creation charged), the single headline number is the BILLABLE total —
+    // the raw sum double-counts cached reads and reads as an inflated, confusing
+    // figure. With no caching the two match, so the plain "tok" label is kept.
+    const usesBillable = billableTokens > 0 && Math.round(billableTokens) !== Math.round(rawTokens);
+    const tokens = _fmtTokens(usesBillable ? billableTokens : rawTokens);
+    const tokenLabel = usesBillable ? "billable" : "tok";
     const cacheParts = [];
-    if (cachedInputTokens > 0) cacheParts.push(`${_fmtTokens(cachedInputTokens)} cached input`);
-    if (showBillable) cacheParts.push(`${_fmtTokens(billableTokens)} billable`);
+    if (cachedInputTokens > 0) cacheParts.push(`${_fmtTokens(cachedInputTokens)} cached`);
+    if (usesBillable && width >= 64) cacheParts.push(`${_fmtTokens(rawTokens)} raw`);
     const cacheSuffix = cacheParts.length > 0 && width >= 64
       ? `  ${C.dim}(${cacheParts.join(", ")})${C.reset}`
       : "";
     const costSuffix = usage.costUsd > 0
       ? `  ${C.dim}·${C.reset}  ${C.dim}${_fmtUsd(usage.costUsd)} ${_providerCostQualifier(usage.provider)}${C.reset}`
       : "";
-    block.push(fit(`   ${C.bold}${brand}${tokens}${C.reset} ${C.dim}tok${C.reset}${cacheSuffix}${costSuffix}`, Math.max(1, width - 1)));
+    block.push(fit(`   ${C.bold}${brand}${tokens}${C.reset} ${C.dim}${tokenLabel}${C.reset}${cacheSuffix}${costSuffix}`, Math.max(1, width - 1)));
 
     if (usage.provider === "claude" || usage.provider === "codex") {
       let summary = summariesByProvider.get(usage.provider);

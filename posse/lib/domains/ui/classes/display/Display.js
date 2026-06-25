@@ -158,9 +158,14 @@ export class Display {
     concurrency = DEFAULT_DISPLAY_CONCURRENCY,
     runStartedAtIso = null,
     rightMode = "log",
+    projectDir = null,
     providerUsageRefresh = _refreshProviderUsageSummaryCacheIfChanged,
   } = {}) {
     this.concurrency = concurrency;
+    // Root the git-diff views (monitor [d] changes view, approval Changes tab)
+    // explicitly instead of leaning on process.cwd(); callers pass the resolved
+    // project dir. Falls back to cwd at the read sites when not supplied.
+    this.projectDir = projectDir || null;
     this.workers = new Map();   // jobId -> { role, activity, startTime, tier, attempt }
     this.events = [];           // { time, text } — main job/work-item log lane
     // System lane: git / ATLAS reindex chatter, kept out of the scrolling log
@@ -263,7 +268,7 @@ export class Display {
     this._approvalScroll = 0;   // scroll offset
     this._approvalDone = null;  // resolve fn for the promise
     this._approvalTab = 0;      // 0=Tasks, 1=Tokens, 2=Research, 3=Details
-    this._approvalTabScrolls = [0, 0, 0, 0]; // per-tab scroll positions
+    this._approvalTabScrolls = [0, 0, 0, 0, 0]; // per-tab scroll positions
     this._approvalPicker = null; // {itemId, candidates, selected:Set, cursor} when picking files to discard
     this._approvalMemoryPicker = null; // {itemId, memories, cursor, textEntry} while reviewing surfaced memories
     this._approvalActionBusy = false;
@@ -1160,7 +1165,7 @@ export class Display {
     this._approvalScroll = 0;
     this._approvalDone = null;
     this._approvalTab = 0;
-    this._approvalTabScrolls = [0, 0, 0, 0];
+    this._approvalTabScrolls = [0, 0, 0, 0, 0];
     this._approvalPicker = null;
     this._approvalMemoryPicker = null;
     this._approvalActionBusy = false;
@@ -1183,14 +1188,14 @@ export class Display {
    */
   _normalizeApprovalViewState() {
     const data = Array.isArray(this._approvalData) ? this._approvalData : [];
-    const tabCount = 4;
+    const tabCount = 5;
     const toNonNegativeInt = (value) => {
       const n = Number(value);
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
     };
 
     if (!Array.isArray(this._approvalTabScrolls)) {
-      this._approvalTabScrolls = [0, 0, 0, 0];
+      this._approvalTabScrolls = [0, 0, 0, 0, 0];
     } else {
       this._approvalTabScrolls = Array.from(
         { length: tabCount },
@@ -1214,7 +1219,7 @@ export class Display {
     const nextIdx = Math.min(Math.max(currentIdx, 0), data.length - 1);
     if (nextIdx !== currentIdx) {
       this._approvalScroll = 0;
-      this._approvalTabScrolls = [0, 0, 0, 0];
+      this._approvalTabScrolls = [0, 0, 0, 0, 0];
     } else {
       this._approvalScroll = toNonNegativeInt(this._approvalScroll);
     }
@@ -1241,7 +1246,7 @@ export class Display {
       this._approvalIdx = initialIdx >= 0 && initialIdx < data.length ? initialIdx : 0;
       this._approvalScroll = 0;
       this._approvalTab = 0;
-      this._approvalTabScrolls = [0, 0, 0, 0];
+      this._approvalTabScrolls = [0, 0, 0, 0, 0];
       this._approvalPicker = null;
       this._approvalMemoryPicker = null;
       this._approvalActionBusy = false;
@@ -1593,6 +1598,21 @@ export class Display {
   _buildMonitorFeedbackToolLanes(...args) {
     return this._rightPanelRenderer._buildMonitorFeedbackToolLanes.call(this, ...args);
   }
+  _monitorFeedbackEntryLines(...args) {
+    return this._rightPanelRenderer._monitorFeedbackEntryLines.call(this, ...args);
+  }
+  _buildMonitorChangesBox(...args) {
+    return this._rightPanelRenderer._buildMonitorChangesBox.call(this, ...args);
+  }
+  _monitorDiffFilesForAgent(...args) {
+    return this._rightPanelRenderer._monitorDiffFilesForAgent.call(this, ...args);
+  }
+  _monitorDiffDetailForFile(...args) {
+    return this._rightPanelRenderer._monitorDiffDetailForFile.call(this, ...args);
+  }
+  _monitorDiffBodyLines(...args) {
+    return this._rightPanelRenderer._monitorDiffBodyLines.call(this, ...args);
+  }
   _buildMonitorFocusLines(...args) {
     return this._rightPanelRenderer._buildMonitorFocusLines.call(this, ...args);
   }
@@ -1667,6 +1687,12 @@ export class Display {
 
   _buildTabDetails(...args) {
     return this._approvalRenderer._buildTabDetails.call(this, ...args);
+  }
+  _buildTabChanges(...args) {
+    return this._approvalRenderer._buildTabChanges.call(this, ...args);
+  }
+  _approvalChangesLines(...args) {
+    return this._approvalRenderer._approvalChangesLines.call(this, ...args);
   }
 
   // ── Discard-files picker overlay ────────────────────────────────────
