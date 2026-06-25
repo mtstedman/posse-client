@@ -417,8 +417,8 @@ export const TOOL_AGENT_FEEDBACK = {
   type: "function",
   name: "agent_feedback",
   description:
-    "Send a short operational update to the human operator for Monitor Agents. " +
-    "Use only for visible state: current phase, gear changes, blockers, verification transitions, or finalization status. " +
+    "Live status-update tool for the Monitor Agents channel. " +
+    "Send a short operator-facing update on visible state: current phase, decision or strategy change, blocker, verification transition, or finalization status. " +
     "Do not include hidden reasoning or private chain-of-thought.",
   parameters: {
     type: "object",

@@ -18,14 +18,15 @@ const POSSE_MARK = "\u259f";
 // of row 2 \u2014 the ink spans only mid-row-0 \u2192 mid-row-2 (two cells, centered). A
 // solid \u2588 filling whole cells runs taller than that, so the upright is inset: a
 // lower-half block (\u2584) starts it on the cap line, and the foot's bottom lands on
-// the baseline. The foot is pulled in a half-cell on its free (left) end (\u259d, an
-// upper-right quadrant) so it reads a touch narrower than the banner letters, and
-// nudged a quarter-cell taller toward the post (\u2582) \u2014 both at the block grid's
-// finest step. One-column post (mark stays 3 wide). Where "MASONS" used to be.
+// the baseline. The foot is a uniform two-cell bar (one cell narrower than the
+// banner letters) \u2014 block glyphs can't shave a partial width off a half-height
+// bar without stepping the bottom edge to two widths, so it stays on whole cells \u2014
+// nudged a quarter-cell taller toward the post (\u2582). One-column post (mark stays
+// 3 wide). Where "MASONS" used to be, left of POSSE.
 const POSSE_LOGO_ROWS = Object.freeze([
   "  \u2584",
   " \u2582\u2588",
-  "\u259d\u2580\u2580",
+  " \u2580\u2580",
 ]);
 // "POSSE" in 3-row heavy box-drawing block letters (each glyph 3 cols wide, a
 // 1-col gap between them). Restored from the original masthead \u2014 the only

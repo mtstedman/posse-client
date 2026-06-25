@@ -1018,6 +1018,13 @@ const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "git_history",
   "inspect_file",
   "hash_file",
+  // Monitor Agents live-channel coordination tools. These are always-present,
+  // budget-exempt tools the owner-hot gateway must advertise so every role can
+  // actually CALL them — without this they are attached as executors but never
+  // declared, so tools/list omits them and the agent gets "No such tool available".
+  "agent_feedback",
+  "get_operator_feedback",
+  "ack_operator_feedback",
   "write_file",
   "edit_file",
   "prune_artifact_output",
@@ -1045,6 +1052,9 @@ function legacyToolNamesForUnscopedRole() {
     "git_history",
     "inspect_file",
     "hash_file",
+    "agent_feedback",
+    "get_operator_feedback",
+    "ack_operator_feedback",
     ...(writeEnabled ? [...WRITE_TOOL_NAMES] : []),
     ...(allowBash ? ["bash"] : []),
     ...(allowImageHelpers ? [...IMAGE_HELPER_TOOL_NAMES] : []),
