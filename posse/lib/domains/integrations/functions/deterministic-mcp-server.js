@@ -31,6 +31,7 @@ import {
   TOOL_CHAIN_READ,
   TOOL_CHAIN_VERDICT,
   TOOL_GENERATE_IMAGE,
+  TOOL_GET_BRIEF,
   buildScopePredicates,
   createDeterministicToolkit,
   createBashExecutor,
@@ -40,7 +41,7 @@ import {
 import { ToolRegistry } from "../../../classes/tools/ToolRegistry.js";
 import { declareToolSuites } from "../../../functions/tools/tool-suites.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
-import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, enterObservationContext, runWithObservationContext } from "../../observability/functions/observations.js";
+import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, runWithObservationContext } from "../../observability/functions/observations.js";
 import {
   acknowledgeOperatorFeedback,
   countPendingOperatorFeedbackForJob,
@@ -110,6 +111,26 @@ import {
 function recordToolInvocation(opts) {
   try {
     _recordToolInvocation({
+      ...opts,
+      job_id: opts.job_id ?? mcpJobId ?? undefined,
+      work_item_id: opts.work_item_id ?? mcpWorkItemId ?? undefined,
+    });
+  } catch { /* best effort */ }
+}
+
+/** Safe wrappers for the start/finish invocation pair (see observations.js). */
+function beginToolInvocation(opts) {
+  try {
+    return _beginToolInvocation({
+      ...opts,
+      job_id: opts.job_id ?? mcpJobId ?? undefined,
+      work_item_id: opts.work_item_id ?? mcpWorkItemId ?? undefined,
+    });
+  } catch { return null; }
+}
+function finishToolInvocation(invocation, opts) {
+  try {
+    _finishToolInvocation(invocation, {
       ...opts,
       job_id: opts.job_id ?? mcpJobId ?? undefined,
       work_item_id: opts.work_item_id ?? mcpWorkItemId ?? undefined,
@@ -931,6 +952,7 @@ const {
   execCreateTest,
   execRunTest,
   execRunTestSuite,
+  execGetBrief,
 } = createDeterministicToolkit({ safePath, skipObservationLogging: true });
 
 function _normalizeReadRange(argVal, fallback) {
@@ -1110,6 +1132,7 @@ for (const schema of [TOOL_LIST_FILES, TOOL_SEARCH_FILES, TOOL_GIT_HISTORY, TOOL
 addToolSchema(TOOL_AGENT_FEEDBACK);
 addToolSchema(TOOL_GET_OPERATOR_FEEDBACK);
 addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
+addToolSchema(TOOL_GET_BRIEF);
 if (writeEnabled) {
   for (const schema of [TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
     addToolSchema(schema);
@@ -1833,6 +1856,7 @@ function ackOperatorFeedback(args = {}) {
 // unchanged; the registry is the single declaration both runtimes share.
 let mcpToolRegistry = declareToolSuites(new ToolRegistry());
 mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
+mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("search_files", (args) => execSearchFiles(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("git_history", (args) => execGitHistory(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -1954,6 +1978,7 @@ function rebuildNativeToolSchemas() {
   addToolSchema(TOOL_AGENT_FEEDBACK);
   addToolSchema(TOOL_GET_OPERATOR_FEEDBACK);
   addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
+  addToolSchema(TOOL_GET_BRIEF);
   if (writeEnabled) {
     for (const schema of [TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
       addToolSchema(schema);
@@ -1979,6 +2004,7 @@ function rebuildNativeToolSchemas() {
 function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry = declareToolSuites(new ToolRegistry());
   mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
+mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("search_files", (args) => execSearchFiles(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("git_history", (args) => execGitHistory(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -2684,23 +2710,26 @@ async function handleRequest(msg) {
     const recordInput = (toolName === "chain_verdict" && researchState?.currentlyReading?.path)
       ? { ...args, path: researchState.currentlyReading.path }
       : args;
+    // Record the request the moment it's made (append-only "<type>.started"),
+    // then close it with the completion row on every exit path so duration and
+    // success/failure are captured — not just successful completions.
+    const toolInvocation = beginToolInvocation({ tool: toolName, input: recordInput, cwd: workspaceCwd });
     try {
       const result = await handler(args);
       const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
       const responseText = appendOperatorFeedbackSignal(text, toolName);
       const ok = isSuccessfulNativeToolResult(text);
-      if (ok) {
-        if (toolName !== "chain_verdict") {
-          noteResearchExplorationStep({ toolName });
-        }
-        const atlasLiveBuffer = await maybePushAtlasLiveBufferForToolObservation({ toolName, args });
-        recordToolInvocation({
-          tool: toolName,
-          input: recordInput,
-          cwd: workspaceCwd,
-          ...(atlasLiveBuffer ? { extraDetail: { atlas_live_buffer: atlasLiveBuffer } } : {}),
-        });
+      if (ok && toolName !== "chain_verdict") {
+        noteResearchExplorationStep({ toolName });
       }
+      const atlasLiveBuffer = ok ? await maybePushAtlasLiveBufferForToolObservation({ toolName, args }) : null;
+      finishToolInvocation(toolInvocation, {
+        tool: toolName,
+        input: recordInput,
+        cwd: workspaceCwd,
+        ok,
+        ...(atlasLiveBuffer ? { extraDetail: { atlas_live_buffer: atlasLiveBuffer } } : {}),
+      });
       appendToolLog({
         event: "tool_result",
         requestId: id ?? null,
@@ -2713,6 +2742,13 @@ async function handleRequest(msg) {
       sendMessage(jsonRpcSuccess(id, { content: [{ type: "text", text: responseText }] }));
     } catch (err) {
       const safeError = capString(err?.message || String(err), 300);
+      finishToolInvocation(toolInvocation, {
+        tool: toolName,
+        input: recordInput,
+        cwd: workspaceCwd,
+        ok: false,
+        error: safeError,
+      });
       appendToolLog({
         event: "tool_result",
         requestId: id ?? null,

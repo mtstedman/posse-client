@@ -4,8 +4,19 @@ import { execFileSync } from "child_process";
 import { TOOL_BRIEF_DEFAULT_EXTENSIONS } from "../../catalog/files.js";
 import { createWorkspaceSkipDirs } from "../../domains/runtime/functions/workspace-skip.js";
 import { isSensitiveEnvFileOrTargetPath } from "../../domains/runtime/functions/sensitive-paths.js";
+import { getObservationContext } from "../../domains/observability/functions/observations.js";
+import { contextDir, wiScopeId } from "../../domains/artifacts/functions/index.js";
 
 export { TOOL_PULL_BRIEF } from "../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
+
+// fast/ bundle files staged by the planner role (see PlannerRole.assembleContext).
+// `parse` JSON-decodes the file; everything else is returned as raw text.
+const GET_BRIEF_FAST_FILES = [
+  { key: "brief", file: "brief.md", parse: false },
+  { key: "research", file: "research.json", parse: true },
+  { key: "file_priorities", file: "file-priorities.md", parse: false },
+  { key: "functions_index", file: "functions.md", parse: false },
+];
 
 const DEFAULT_SKIP_DIRS = createWorkspaceSkipDirs(["vendor"]);
 
@@ -313,6 +324,101 @@ export function createPullBriefExecutor(safePathImpl, { skipDirs = DEFAULT_SKIP_
       },
     };
     return JSON.stringify(response, null, 2);
+  };
+}
+
+function listStagedFullSources(fullDir) {
+  const paths = [];
+  const walk = (dir, rel) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      const childAbs = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(childAbs, childRel);
+      else if (entry.isFile()) paths.push(childRel);
+    }
+  };
+  walk(fullDir, "");
+  paths.sort();
+  return paths;
+}
+
+// Returns the pre-staged research brief bundle for the active work item in one
+// call. Resolves the work item + role from the ambient observation context
+// (set per job around every provider call), so the agent needs no arguments and
+// never has to know the on-disk context layout. Source-file bodies are returned
+// only as a manifest of paths — not inlined — to keep the payload bounded.
+export function createGetBriefExecutor() {
+  return function execGetBrief(_args = {}, _cwd, _scopePredicates) {
+    const ambient = getObservationContext() || {};
+    const workItemId = ambient.work_item_id;
+    if (workItemId == null) {
+      return "Error: get_brief has no active work item context.";
+    }
+    const role = String(ambient.role || "planner").trim() || "planner";
+
+    let baseDir;
+    try {
+      baseDir = contextDir(wiScopeId(workItemId));
+    } catch (err) {
+      return `Error: get_brief could not resolve the context directory: ${err?.message || String(err)}`;
+    }
+
+    const candidateRoles = role === "planner" ? ["planner"] : [role, "planner"];
+    let usedRole = null;
+    let fastDir = null;
+    for (const candidate of candidateRoles) {
+      const dir = path.join(baseDir, candidate, "fast");
+      if (fs.existsSync(dir)) {
+        usedRole = candidate;
+        fastDir = dir;
+        break;
+      }
+    }
+    if (!fastDir) {
+      return `Error: get_brief found no staged research brief for work item ${workItemId}. `
+        + "Plan from the work item description and use read_file/search_files for additional context.";
+    }
+
+    const sections = {};
+    for (const spec of GET_BRIEF_FAST_FILES) {
+      let raw;
+      try {
+        raw = fs.readFileSync(path.join(fastDir, spec.file), "utf-8");
+      } catch {
+        sections[spec.key] = null;
+        continue;
+      }
+      if (spec.parse) {
+        try {
+          sections[spec.key] = JSON.parse(raw);
+        } catch {
+          sections[spec.key] = raw;
+        }
+      } else {
+        sections[spec.key] = raw;
+      }
+    }
+
+    const fullPaths = listStagedFullSources(path.join(baseDir, usedRole, "full"));
+    return JSON.stringify({
+      ok: true,
+      work_item_id: workItemId,
+      role: usedRole,
+      sections,
+      full_sources: {
+        count: fullPaths.length,
+        paths: fullPaths,
+        note: fullPaths.length
+          ? "Source bodies are NOT included here. Call read_file on one of these paths only when you need a specific implementation; otherwise plan from the brief above."
+          : "No full source files were staged for this work item.",
+      },
+    }, null, 2);
   };
 }
 

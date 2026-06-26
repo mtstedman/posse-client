@@ -199,3 +199,9 @@ export const ROLE_DRIVEN_JOB_TYPES = new Set(["research", "plan", "preflight"]);
 // MUTATING_JOB_TYPES — artificer writes only to artifact dirs and does not
 // need the worktree).
 export const WORKTREE_JOB_TYPES = new Set(["dev", "fix", "promote"]);
+
+// Background maintenance work, NOT agent work. These run on a separate scheduler
+// budget so they never consume one of the N agent compute slots, and they are
+// kept out of the agent pipeline/fleet/lock views. `atlas_warm` is the only one
+// today: deterministic, non-provider, fail-silent index warming.
+export const BACKGROUND_JOB_TYPES = new Set(["atlas_warm"]);

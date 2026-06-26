@@ -565,7 +565,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   }, ["filePath"]),
 
   "memory.store": o({
-    type: s({ enum: ["decision", "bugfix", "task_context", "pattern", "convention", "architecture", "performance", "security"] }),
+    domains: a(s({ enum: ["ux", "schema", "security", "performance"] }), { maxItems: 4 }),
     title: s({ minLength: 1, maxLength: 120 }),
     content: s({ minLength: 1, maxLength: 1200 }),
     symbolIds: symbolIds(1000),
@@ -575,6 +575,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   "memory.get": o({
     symbolIds: symbolIds(1000),
     fileRelPaths: repoPaths(1000),
+    domains: a(s({ enum: ["general", "ux", "schema", "security", "performance"] }), { maxItems: 5 }),
   }),
   "memory.feedback": o({
     memoryId: s({ minLength: 1, maxLength: 256 }),
@@ -584,6 +585,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   "memory.surface": o({
     symbolIds: symbolIds(1000),
     fileRelPaths: repoPaths(1000),
+    domains: a(s({ enum: ["general", "ux", "schema", "security", "performance"] }), { maxItems: 5 }),
   }),
 
   "policy.get": o({

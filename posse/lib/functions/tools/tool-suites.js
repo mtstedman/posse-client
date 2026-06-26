@@ -22,6 +22,7 @@ import { assertMutationRoleSafety } from "./tool-parity.js";
 const TOOLS_SUITE = [
   // Shared by both runtimes (function + mcp transports).
   { name: "read_file", mutatesWorktree: false, advertise: ["function", "mcp"] },
+  { name: "get_brief", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "agent_feedback", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
   { name: "get_operator_feedback", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
   { name: "ack_operator_feedback", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },

@@ -532,23 +532,14 @@ export class PlannerRole extends BaseRole {
     const atlasHandoffBlock = renderAtlasHandoffSections(plannerPacket);
 
     const contextDirsBlock = fastFileCount > 0 || fullCount > 0 ? [
-      "CONTEXT DIRECTORIES (pre-staged from research - read these before planning):",
-      `  fast/ (curated reference): ${fastDir.replace(/\\/g, "/")}`,
-      "    - brief.md      - researcher's full analysis",
-      "    - research.json  - structured data (key_files, patterns, constraints)",
-      plannerFilePriorities.length > 0 ? "    - file-priorities.md - researcher-ranked file order for planning" : "",
-      funcLines.length > 0 ? "    - functions.md   - function/class index with signatures and line ranges" : "",
-      fullCount > 0 ? `  full/ (source files):  ${fullDir.replace(/\\/g, "/")}` : "",
+      "RESEARCH CONTEXT:",
+      "  Call the get_brief tool ONCE before planning. In a single response it returns the researcher's full",
+      "  analysis, the structured research data (key files, patterns, constraints), the ranked file-priority list,",
+      "  a function/class index for the key files, and a manifest of staged source files.",
+      "  Start from get_brief. Read a path from its full_sources manifest only when you need a specific function",
+      "  body or pattern the brief does not cover; fall back to the project root only as a last resort.",
       "",
-      plannerFilePriorities.length > 0
-        ? "  START by reading fast/file-priorities.md and fast/brief.md, then fast/functions.md when present."
-        : funcLines.length > 0
-          ? "  START by reading fast/brief.md and fast/functions.md - they have everything you need to plan."
-          : "  START by reading fast/brief.md - it has the research context you need to plan.",
-      "  Only read from full/ if the reference files lack detail on a specific function body or pattern.",
-      "  Only read from the project root as a last resort for files not in full/.",
-      "",
-    ].filter(Boolean).join("\n") : "";
+    ].join("\n") : "";
 
     const contextText = [
       promptLiteral("WORK ITEM", workItem.title),

@@ -88,7 +88,8 @@ function normalizeSurfaceMemory(memory = {}) {
     detail: content,
     insight_kind: kind,
     action: firstLine,
-    confidence: memory.confidence != null ? String(memory.confidence) : null,
+    // Memory confidence is an internal-only ordering/pruning signal and is never
+    // surfaced to agents; it is deliberately not carried onto the insight.
     // Provenance: who originally wrote this memory (agent, human, kaizen, ...),
     // carried from the memories.source column; insight_type already marks the
     // surfacing path as atlas_memory.

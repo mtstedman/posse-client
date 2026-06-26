@@ -482,9 +482,16 @@
 // ============================================================================
 
 /**
+ * @typedef {"ux" | "schema" | "security" | "performance"} MemoryDomain
+ *   Specific filterable domains. Omitting them files the memory under the
+ *   `general` catch-all (the default, not a selectable value).
+ */
+
+/**
  * @typedef {Object} MemoryStoreParams
  * @property {string} title
  * @property {string} content
+ * @property {MemoryDomain[]} [domains]   Logical domain tags for filtering; default general.
  * @property {string[]} [symbolIds]
  * @property {string[]} [fileRelPaths]
  * @property {string} [memoryId]
@@ -501,12 +508,14 @@
  * @typedef {Object} MemorySurfaceParams
  * @property {string[]} [symbolIds]
  * @property {string[]} [fileRelPaths]
+ * @property {Array<"general" | MemoryDomain>} [domains]   Whitelist filter; omit for all.
  */
 
 /**
  * @typedef {Object} MemoryGetParams
  * @property {string[]} [symbolIds]
  * @property {string[]} [fileRelPaths]
+ * @property {Array<"general" | MemoryDomain>} [domains]   Whitelist filter; omit for all.
  */
 
 // ============================================================================

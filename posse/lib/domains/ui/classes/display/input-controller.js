@@ -577,9 +577,6 @@ export class DisplayInputController {
         this._nudgeJobIds = null;
         this._inputBuf = "";
         this.requestRender({ force: true });
-      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "t")) {
-        this._monitorPromptLens = !this._monitorPromptLens;
-        this.requestRender({ force: true });
       } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "a") && this._startAnsweringForJob(this._monitorSelectedJobId)) {
         this.requestRender({ force: true });
       } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "d")) {

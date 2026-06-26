@@ -80,7 +80,7 @@ import {
   providerAuthLivenessProbe,
   workspaceHealthProbeAsync,
 } from "../../system/functions/preflight-probes.js";
-import { QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
+import { BACKGROUND_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import {
@@ -143,7 +143,18 @@ function runSchedulerBootMaintenanceInWorker() {
 const ATLAS_INDEXING_HOLD_MAX_MS = 30 * 1000;
 const ATLAS_INDEXING_PAUSE_OFF_VALUES = new Set(["off", "false", "0", "no"]);
 const ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES = new Set(["atlas_warm", "human_input"]);
-const RUN_BACKGROUND_JOB_TYPES = new Set(["atlas_warm"]);
+const RUN_BACKGROUND_JOB_TYPES = BACKGROUND_JOB_TYPES;
+const RUN_BACKGROUND_JOB_TYPES_LIST = [...RUN_BACKGROUND_JOB_TYPES];
+
+// Background maintenance runs on its own small budget so it never consumes one
+// of the N agent compute slots. Warm is fail-silent, per-key serialized, and
+// deterministic, so a single background slot bounds its CPU without starving
+// agent work. A constant, derived from runtime state — NOT a user setting.
+const BACKGROUND_JOB_CONCURRENCY = 1;
+
+// Holder types that represent SYSTEM holds, not agent-vs-agent contention.
+// They must never be counted as the agent pipeline being "on lock".
+const SYSTEM_HOLD_HOLDER_TYPES = new Set(["atlas_indexing", "atlas_warm"]);
 
 function isRunBackgroundJob(job) {
   return RUN_BACKGROUND_JOB_TYPES.has(job?.job_type);
@@ -1603,7 +1614,9 @@ export class Scheduler {
             break;
           }
           this._invokeCallback("onSlotStatus", onSlotStatus, {
-            idle: Math.max(0, this.concurrency - activeBackgroundJobs.length),
+            // Background work runs off the agent budget, so every agent slot is
+            // idle while only ATLAS warming remains.
+            idle: this.concurrency,
             blockedByLock: 0,
             blockedLockDetails: [{ message: "ATLAS background work is finishing" }],
           });
@@ -1674,8 +1687,14 @@ export class Scheduler {
 
         const skipJobIds = new Set();
         let launched = false;
-        // human_input jobs just wait for user I/O — don't count them against concurrency
-        let computeWorkerCount = [...activeWorkers.values()].filter(e => e.job.job_type !== "human_input").length;
+        // Lane accounting. Agent compute jobs are metered against this.concurrency.
+        // human_input only waits on user I/O (unmetered). Background maintenance
+        // (atlas_warm) runs on its own BACKGROUND_JOB_CONCURRENCY budget so it
+        // never consumes one of the N agent slots.
+        let computeWorkerCount = [...activeWorkers.values()]
+          .filter(e => e.job.job_type !== "human_input" && !isRunBackgroundJob(e.job)).length;
+        let backgroundWorkerCount = [...activeWorkers.values()]
+          .filter(e => isRunBackgroundJob(e.job)).length;
 
         // Batched lookahead keeps each query bounded while allowing the
         // scheduler to scan past a blocked head-of-queue batch.
@@ -1695,10 +1714,18 @@ export class Scheduler {
         };
         while (!stopCandidateScan && candidateCount < maxCandidateScan) {
           const fetchLimit = Math.min(MAX_RUNNABLE_SCAN_PER_TICK, maxCandidateScan - candidateCount);
-          const scanHumanOnly = computeWorkerCount >= this.concurrency;
+          // When agent compute slots are full, only scan the lanes that can still
+          // launch: human gates (always) and background warm (if its own budget
+          // has room). This keeps a full agent pool from starving the background
+          // lane — and vice versa.
+          const computeFull = computeWorkerCount >= this.concurrency;
+          const backgroundFull = backgroundWorkerCount >= BACKGROUND_JOB_CONCURRENCY;
+          const onlyJobTypes = computeFull
+            ? ["human_input", ...(backgroundFull ? [] : RUN_BACKGROUND_JOB_TYPES_LIST)]
+            : [];
           const candidates = findRunnableJobsBatch(fetchLimit, {
             excludeJobIds: [...scanExcludeJobIds],
-            onlyJobTypes: scanHumanOnly ? ["human_input"] : [],
+            onlyJobTypes,
           });
           if (candidates.length === 0) break;
 
@@ -1735,12 +1762,20 @@ export class Scheduler {
               skipJobIds.add(job.id);
               continue;
             }
-            // Enforce concurrency for compute jobs; human_input always passes through
-            // since they only wait for user I/O and don't consume CPU/memory.
-            if (job.job_type !== "human_input") {
+            // Lane-based concurrency. Background maintenance (atlas_warm) runs on
+            // its own budget so it never takes an agent slot; agent compute jobs
+            // are metered against this.concurrency; human_input always passes
+            // through since it only waits for user I/O.
+            const isBackground = isRunBackgroundJob(job);
+            if (isBackground) {
+              if (backgroundWorkerCount >= BACKGROUND_JOB_CONCURRENCY) {
+                skipJobIds.add(job.id);
+                continue;
+              }
+            } else if (job.job_type !== "human_input") {
               if (computeWorkerCount >= this.concurrency) {
-                // All compute slots are full. The next outer scan switches to a
-                // human_input-only query so human gates surface even behind a long
+                // All agent compute slots are full. The next outer scan narrows
+                // to human gates + background so they still surface behind a long
                 // compute tail.
                 skipJobIds.add(job.id);
                 break;
@@ -1906,7 +1941,8 @@ export class Scheduler {
             });
 
           activeWorkers.set(job.id, { promise: workerPromise, job: leasedJob, startTime: Date.now() });
-          if (job.job_type !== "human_input") computeWorkerCount++;
+          if (isBackground) backgroundWorkerCount++;
+          else if (job.job_type !== "human_input") computeWorkerCount++;
           if (computeWorkerCount >= this.concurrency) {
             await yieldNow();
           }
@@ -1914,13 +1950,20 @@ export class Scheduler {
           if (candidates.length < fetchLimit) break;
         }
 
-        // Report idle slot breakdown to display
+        // Report idle slot breakdown to display. openSlots is agent slots only
+        // (computeWorkerCount excludes background + human_input). The agent
+        // "on lock" line reflects agent-vs-agent contention ONLY — system holds
+        // (ATLAS indexing/warm) are filtered out so harness work never reads as
+        // the agent pipeline being lock-blocked.
         const openSlots = this.concurrency - computeWorkerCount;
-        const blockedByLock = Math.min(blockedLockDetails.length, openSlots);
+        const agentLockDetails = blockedLockDetails.filter(
+          (detail) => !SYSTEM_HOLD_HOLDER_TYPES.has(detail?.holder_type),
+        );
+        const blockedByLock = Math.min(agentLockDetails.length, openSlots);
         this._invokeCallback("onSlotStatus", onSlotStatus, {
           idle: openSlots - blockedByLock,
           blockedByLock,
-          blockedLockDetails: blockedLockDetails.slice(0, 5),
+          blockedLockDetails: agentLockDetails.slice(0, 5),
         });
 
         if (!launched && activeWorkers.size === 0) {

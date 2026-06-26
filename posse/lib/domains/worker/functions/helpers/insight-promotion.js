@@ -154,6 +154,22 @@ function atlasTypeForMemoryType(memoryType) {
   return "task_context";
 }
 
+// Map a kaizen insight onto the memory `domains` filter axis. The insight
+// taxonomy only cleanly distinguishes performance; everything else stays
+// `general` (the default), so tag conservatively and let agents/users refine.
+// An empty result lets memory.store file it under `general`.
+function domainsForInsight(insight = {}) {
+  const text = `${insight?.summary || ""} ${insight?.detail || ""} ${insight?.action || ""}`.toLowerCase();
+  const domains = [];
+  if (insight?.insight_type === "performance" || /\b(performance|latency|throughput|hot ?path|n\+1)\b/.test(text)) {
+    domains.push("performance");
+  }
+  if (/\b(auth|authn|authz|csrf|xss|injection|crypto|secret|password|credential|vulnerab)\b/.test(text)) {
+    domains.push("security");
+  }
+  return [...new Set(domains)];
+}
+
 function futureActionFor({ insight = {}, memoryType, job = {} } = {}) {
   if (insight.insight_type === "human_override" || insight.insight_type === "information_request") {
     const answer = String(insight.detail || "")
@@ -273,6 +289,7 @@ export function evaluateInsightPromotion({
     gate,
     memoryType,
     atlasType: atlasTypeForMemoryType(memoryType),
+    domains: domainsForInsight(insight),
     confidence,
     anchors,
     futureAction,
@@ -483,6 +500,7 @@ async function storeAtlasMemory(decision, {
   const stored = await callAtlasMemoryAction("memory.store", {
     title: decision.title,
     content: decision.content,
+    domains: Array.isArray(decision.domains) ? decision.domains : [],
     symbolIds: decision.anchors.symbolIds,
     fileRelPaths: decision.anchors.fileRelPaths,
   }, { memoryClient: client });

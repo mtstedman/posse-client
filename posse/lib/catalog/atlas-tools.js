@@ -749,12 +749,13 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "memory.store": {
     type: "function",
     name: "atlas_memory_store",
-    description: "Memory. Store one rare, verified, durable repo lesson linked to exact symbols/files. Skip the write when an anchor already has sufficient memory or the finding is obvious from code. Title max 120 chars; content max 1200 chars.",
+    description: "Memory. Store one rare, verified repo lesson linked to exact symbols/files. Skip the write when an anchor already has sufficient memory or the finding is obvious from code. Title max 120 chars; content max 1200 chars.",
     parameters: {
       type: "object",
       properties: {
         title: { type: "string", description: "Short memory title, max 120 chars." },
         content: { type: "string", description: "Memory content, max 1200 chars. Capture why the decision/context matters." },
+        domains: { type: "array", items: { type: "string", enum: ["ux", "schema", "security", "performance"] }, description: "Optional domain tags for scoped retrieval. Omit unless the memory's PRIMARY concern is one of these (omitting files it under the general catch-all)." },
         symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Optional linked ATLAS symbol IDs." },
         fileRelPaths: { type: "array", items: { type: "string" }, description: "Optional linked repo-relative files." },
         memoryId: { type: "string", description: "Optional existing memory ID to update." },

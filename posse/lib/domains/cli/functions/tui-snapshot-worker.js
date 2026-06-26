@@ -18,10 +18,14 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
   const { listWorkItems, listJobsByWorkItem } = await import("../../queue/functions/index.js");
   const { getArtifacts } = await import("../../queue/functions/artifacts.js");
   const { parseJobPayload } = await import("../../queue/functions/payload.js");
+  const { BACKGROUND_JOB_TYPES } = await import("../../../catalog/job.js");
 
   const active = listWorkItems(["planning", "running", "complete", "failed"]);
   return active.slice(0, 20).map((wi) => {
-    const jobs = listJobsByWorkItem(wi.id);
+    // The pipeline is agent work only — background maintenance (atlas_warm)
+    // never appears here even when it is scoped to this work item.
+    const jobs = listJobsByWorkItem(wi.id)
+      .filter((job) => !BACKGROUND_JOB_TYPES.has(job.job_type));
     jobs.sort((a, b) => a.id - b.id);
 
     const enriched = jobs.map((job) => {

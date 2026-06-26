@@ -68,6 +68,7 @@ import {
   TOOL_CHAIN_READ,
   TOOL_CHAIN_VERDICT,
   TOOL_PULL_BRIEF,
+  TOOL_GET_BRIEF,
   TOOL_GENERATE_IMAGE,
 } from "../../../../catalog/native-tools.js";
 
@@ -101,6 +102,7 @@ export {
   TOOL_CHAIN_READ,
   TOOL_CHAIN_VERDICT,
   TOOL_PULL_BRIEF,
+  TOOL_GET_BRIEF,
   TOOL_GENERATE_IMAGE,
 } from "../../../../catalog/native-tools.js";
 
@@ -213,6 +215,11 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
     access: "read",
     summary: "Build a bounded deterministic file brief for targeted context retrieval.",
     observation: { type: "tool.pull_brief", label: "PullBrief", format: "generic", targetKeys: ["query", "mode"] },
+  },
+  get_brief: {
+    access: "read",
+    summary: "Load the pre-staged research brief bundle (analysis, structured data, file priorities, function index, source manifest) for this work item in one call.",
+    observation: { type: "tool.get_brief", label: "GetBrief", format: "generic", targetKeys: [] },
   },
   list_files: {
     access: "read",
@@ -458,8 +465,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
     }),
     planner: Object.freeze({
-      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
     }),
     preflight: Object.freeze({ read: [], write: [] }),
     delegator: Object.freeze({ read: [], write: [] }),
@@ -610,6 +617,7 @@ const NATIVE_SCHEMAS = Object.freeze({
   chain_read: TOOL_CHAIN_READ,
   chain_verdict: TOOL_CHAIN_VERDICT,
   pull_brief: TOOL_PULL_BRIEF,
+  get_brief: TOOL_GET_BRIEF,
   generate_image: TOOL_GENERATE_IMAGE,
 });
 
@@ -736,6 +744,7 @@ export function getDeterministicMcpToolNames(role, {
     "run_test_suite",
   );
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push("bash");
+  if (role === "planner") tools.push("get_brief");
   if (role === "researcher") {
     const readIdx = tools.indexOf("read_file");
     if (readIdx !== -1) tools.splice(readIdx, 1);

@@ -14,6 +14,8 @@ import { recordEmbeddingForensics } from "../../atlas/functions/v2/embeddings/fo
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { recordRunDiagnostic } from "../../../shared/telemetry/functions/run-diagnostics.js";
 import { ensureBootDependenciesInWorker, formatBootDependencySync } from "../../system/functions/dependency-sync.js";
+import { repairMissingProviderDependencies, getProvidersNeedingDependencyRepair } from "../../providers/functions/provider.js";
+import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 import { LOCK_HOLDING_JOB_STATUSES } from "../../../catalog/job.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { nativeBinaries as defaultNativeBinaries } from "../../../classes/tools/BinaryManager.js";
@@ -67,6 +69,8 @@ export class RunSession {
       formatPosseUpdateAvailableWarning: formatPosseUpdateAvailableWarningForRun = formatPosseUpdateAvailableWarning,
       ensureBootDependenciesInWorker: runBootDependencySync = ensureBootDependenciesInWorker,
       formatBootDependencySync: formatBootDependencySyncForRun = formatBootDependencySync,
+      repairMissingProviderDependencies: repairMissingProviderDependenciesForRun = repairMissingProviderDependencies,
+      getProvidersNeedingDependencyRepair: getProvidersNeedingDependencyRepairForRun = getProvidersNeedingDependencyRepair,
       NO_TUI,
       Scheduler,
       primeProviderUsageAuth,
@@ -410,6 +414,89 @@ export class RunSession {
     } catch (err) {
       log?.warn?.("run", "Provider boot health check failed", { error: firstLine(err?.message || err) });
     }
+  }
+
+  // ── Provider dependency self-heal (OFF the critical path) ──────────────────
+  // A provider whose optional SDK lost a transitive shim dep — the recurring
+  // case is the openai SDK's `agentkeepalive`, which npm prune/partial-installs
+  // intermittently drop — fails to LOAD and paints a hard ✗ "needs attn" chip
+  // on EVERY boot, because the boot dependency check is dryRun and never repairs
+  // it. Detect that ONE recoverable condition (ERR_MODULE_NOT_FOUND) and run a
+  // scoped, node-only install against the posse install root in the background;
+  // on success the provider module is re-imported in-process and the chip flips
+  // ✗ → ✓ with no restart. Never blocks boot; the abort signal tears it down.
+  const providersNeedingRepair = typeof getProvidersNeedingDependencyRepairForRun === "function"
+    ? (getProvidersNeedingDependencyRepairForRun() || [])
+    : [];
+  if (providersNeedingRepair.length > 0 && typeof repairMissingProviderDependenciesForRun === "function") {
+    for (const name of providersNeedingRepair) {
+      updateProviderBootStep(name, { status: "running", detail: "installing missing dependency", force: true });
+    }
+    void (async () => {
+      try {
+        const result = await repairMissingProviderDependenciesForRun({
+          signal: bootAbortController.signal,
+          runNodeDependencySync: ({ signal } = {}) => runBootDependencySync({
+            // Target the posse INSTALL root (where the provider modules resolve
+            // their node_modules), node-only — no SCIP/python/composer/native
+            // probes, and NOT dryRun: this is the repair the boot check skips.
+            projectDir: DEFAULT_POSSE_ROOT,
+            posseRoot: DEFAULT_POSSE_ROOT,
+            includePython: false,
+            includeComposer: false,
+            includeGo: false,
+            includeCargo: false,
+            includeScip: false,
+            includeTestTools: false,
+            dryRun: false,
+          }, {
+            signal,
+            onProgress: (event = {}) => {
+              const msg = firstLine(event.message || "");
+              if (!msg) return;
+              for (const name of providersNeedingRepair) {
+                updateProviderBootStep(name, { status: "running", detail: msg, showDetail: true, force: true });
+              }
+            },
+          }),
+        });
+        // Repaint each repaired provider from its now-live health row.
+        const healthByName = new Map();
+        if (typeof getProviderHealth === "function") {
+          for (const row of getProviderHealth() || []) {
+            healthByName.set(normalizeProviderStepName(row?.provider || row?.name), row);
+          }
+        }
+        for (const name of result.repaired) {
+          const row = healthByName.get(normalizeProviderStepName(name));
+          updateProviderBootStep(name, {
+            status: row ? providerStatusFromHealth(row.status) : "ok",
+            detail: row?.detail || "",
+            force: true,
+          });
+        }
+        for (const name of result.stillBroken) {
+          const row = healthByName.get(normalizeProviderStepName(name));
+          updateProviderBootStep(name, {
+            status: "failed",
+            detail: firstLine(row?.detail || "dependency still missing"),
+            showDetail: true,
+            force: true,
+          });
+        }
+        if (result.repaired.length > 0) {
+          log?.info?.("run", "Provider dependency self-heal repaired providers", { providers: result.repaired });
+        }
+        if (result.stillBroken.length > 0) {
+          log?.warn?.("run", "Provider dependency self-heal incomplete", {
+            providers: result.stillBroken,
+            install: firstLine(result.install?.error || ""),
+          });
+        }
+      } catch (err) {
+        log?.warn?.("run", "Provider dependency self-heal failed", { error: firstLine(err?.message || err) });
+      }
+    })();
   }
   {
     // Each warmup races its (internally-bounded) prime against a soft-timeout:

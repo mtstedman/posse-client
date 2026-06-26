@@ -75,6 +75,7 @@ export class ToolExecutor {
       inspect_file: (args) => toolkit.execInspectFile(args, ctx.cwd, ctx.scopePredicates),
       hash_file: (args) => toolkit.execHashFile(args, ctx.cwd, ctx.scopePredicates),
       pull_brief: (args) => toolkit.execPullBrief(args, ctx.cwd, ctx.scopePredicates),
+      get_brief: (args) => toolkit.execGetBrief(args, ctx.cwd, ctx.scopePredicates),
       validate_artifact_output: (args) => this._invokeOptional(toolkit.execValidateArtifactOutput, "validate_artifact_output", args, ctx),
       prune_artifact_output: (args) => this._invokeOptional(toolkit.execPruneArtifactOutput, "prune_artifact_output", args, ctx),
       resize_image: (args) => this._imageWrite("resize_image", args, toolkit.execResizeImage, ctx),

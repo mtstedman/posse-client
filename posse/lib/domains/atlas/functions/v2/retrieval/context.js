@@ -647,10 +647,11 @@ function compactContextHit(card) {
 function compactContextMemory(memory) {
   return {
     memoryId: memory?.memoryId || memory?.memory_id || memory?.id || null,
-    type: memory?.type || null,
+    // `domains` is the filter axis (replaces the dropped `type`). `confidence`
+    // is intentionally NOT surfaced — it is an internal ordering/pruning signal.
+    domains: Array.isArray(memory?.domains) ? memory.domains : null,
     title: truncateOneLine(memory?.title, 160),
     content: truncateOneLine(memory?.content, 400),
-    confidence: memory?.confidence,
   };
 }
 

@@ -298,7 +298,10 @@ function dispatchImpl(call, ctx) {
     case "file.read":
       return /** @type {any} */ ((ctx.asyncNativeRedaction ? fileReadAsync : fileRead)({ versionId: ctx.versionId, params: call, readFile, view: ctx.view }));
     case "memory.store":
-      return /** @type {any} */ (memoryStore({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
+      // The view (when present) lets the write reconcile every memory's
+      // confidence against current code (anchor-drift decay); storing still
+      // works ledger-only without it.
+      return /** @type {any} */ (memoryStore({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId, view: ctx.view }));
     case "memory.get":
       return /** @type {any} */ (memoryGet({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId, view: ctx.view }));
     case "memory.feedback":

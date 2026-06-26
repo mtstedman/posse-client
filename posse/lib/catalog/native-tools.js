@@ -808,6 +808,22 @@ export const TOOL_PULL_BRIEF = {
   },
 };
 
+export const TOOL_GET_BRIEF = {
+  type: "function",
+  name: "get_brief",
+  description:
+    "Load the research brief already prepared for this work item in one call: the researcher's full analysis, " +
+    "structured data (key files, patterns, constraints), the ranked file-priority list, the function/class index, " +
+    "plus a manifest of staged source files. Call this once at the start of planning instead of reading the " +
+    "staged context files one by one. Note: this returns PRE-STAGED handoff context; it does not scan the " +
+    "repository the way pull_brief does.",
+  parameters: {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  },
+};
+
 export const TOOL_GENERATE_IMAGE = {
   type: "function",
   name: "generate_image",

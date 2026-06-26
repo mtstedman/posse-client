@@ -12,7 +12,7 @@ import { getAtlasIntegrationConfig, getAtlasProviderSupport } from "../../integr
 import { getSetting, setSetting } from "../../queue/functions/index.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { classifyProviderError } from "./shared/api-resilience.js";
-import { providerRegistry } from "../classes/registry-singleton.js";
+import { providerRegistry, optionalProvidersMissingModule, reloadOptionalProvider } from "../classes/registry-singleton.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { getDefaultTierModel, PROVIDER_OPTIONS } from "./model-catalog.js";
 import { resolveEffectiveTierModel } from "./model-catalog-validate.js";
@@ -346,6 +346,99 @@ export function tierModelName(tier, { providerName, role, jobType } = {}) {
 
 // ─── Provider Readiness ─────────────────────────────────────────────────────
 
+// Node raises ERR_MODULE_NOT_FOUND when a provider's import graph can't be
+// resolved. The message names the unresolved specifier — e.g. "Cannot find
+// package 'agentkeepalive' imported from ...". That specifier is the real
+// culprit, which may be the optional `openai` SDK itself or one of its
+// transitive deps (as happens with a partially-installed node_modules).
+function missingModuleSpecifier(loadErr) {
+  const match = /Cannot find (?:package|module) ['"]([^'"]+)['"]/.exec(loadErr?.message || "");
+  return match ? match[1] : null;
+}
+
+// Translate a provider module's load error into an actionable reason. For
+// ERR_MODULE_NOT_FOUND we name the actual missing dependency rather than
+// blaming `openai` unconditionally — otherwise a missing transitive dep sends
+// the user to run `npm install openai`, which is already installed and won't help.
+function providerLoadErrorReason(canonicalName, loadErr) {
+  if (!loadErr) return `provider module "${canonicalName}" not loaded`;
+  if (loadErr.code !== "ERR_MODULE_NOT_FOUND") {
+    return loadErr.message?.split("\n")[0] || String(loadErr);
+  }
+  const missing = missingModuleSpecifier(loadErr);
+  if (missing && missing !== "openai") {
+    return `${canonicalName} provider dependency "${missing}" not installed (run npm install)`;
+  }
+  // The openai SDK itself is missing (or the specifier was unparseable).
+  return canonicalName === "codex"
+    ? "codex provider dependencies not available"
+    : "openai package not installed (npm install openai)";
+}
+
+// ─── Provider Dependency Self-Heal ──────────────────────────────────────────
+
+/**
+ * Optional providers that failed to LOAD at boot because of a missing module
+ * (ERR_MODULE_NOT_FOUND) — the one provider-load failure that a dependency
+ * install can recover. The common case is the openai SDK's transitive
+ * `agentkeepalive` shim being dropped from node_modules by an npm prune/partial
+ * install, which hard-fails grok/openai/codex at boot on EVERY boot because the
+ * boot dependency check is dryRun and never installs.
+ *
+ * @returns {string[]} canonical provider names
+ */
+export function getProvidersNeedingDependencyRepair() {
+  return optionalProvidersMissingModule();
+}
+
+/**
+ * Self-heal optional providers whose missing module is install-recoverable: run
+ * a (caller-supplied) scoped node dependency install, then re-import each
+ * affected provider in-process so its chip flips ✗ → ✓ with no restart. The
+ * install runner is injected so this stays decoupled from the dependency-sync
+ * worker (and is trivially mockable in tests). Always best-effort: a failed
+ * install or a still-broken re-import is reported, never thrown.
+ *
+ * @param {{
+ *   runNodeDependencySync?: (opts: { signal?: AbortSignal|null, onProgress?: ((message: string) => void)|null }) => Promise<any>,
+ *   onProgress?: ((message: string) => void) | null,
+ *   signal?: AbortSignal | null,
+ * }} [input]
+ * @returns {Promise<{ attempted: boolean, missing: string[], repaired: string[], stillBroken: string[], install: any }>}
+ */
+export async function repairMissingProviderDependencies({
+  runNodeDependencySync,
+  onProgress = null,
+  signal = null,
+} = {}) {
+  const firstErrLine = (value) => String(value?.message || value || "").split("\n")[0];
+  const missing = getProvidersNeedingDependencyRepair();
+  if (missing.length === 0) {
+    return { attempted: false, missing: [], repaired: [], stillBroken: [], install: null };
+  }
+  if (typeof runNodeDependencySync !== "function") {
+    return { attempted: false, missing, repaired: [], stillBroken: missing, install: null };
+  }
+  onProgress?.(`repairing provider dependencies: ${missing.join(", ")}`);
+  let install = null;
+  try {
+    install = await runNodeDependencySync({ signal, onProgress });
+  } catch (err) {
+    return { attempted: true, missing, repaired: [], stillBroken: missing, install: { ok: false, error: firstErrLine(err) } };
+  }
+  if (signal?.aborted) {
+    return { attempted: true, missing, repaired: [], stillBroken: missing, install };
+  }
+  const repaired = [];
+  const stillBroken = [];
+  for (const name of missing) {
+    // eslint-disable-next-line no-await-in-loop -- re-imports are cheap and serialized to keep registry writes ordered
+    const ok = await reloadOptionalProvider(name);
+    (ok ? repaired : stillBroken).push(name);
+  }
+  return { attempted: true, missing, repaired, stillBroken, install };
+}
+
 /**
  * Check whether a provider is operationally ready (module loaded + credentials present).
  * Use this during plan validation to reject jobs early rather than failing at execution time.
@@ -358,14 +451,7 @@ export function isProviderReady(providerName, capability = null) {
   const canonicalName = canonicalProviderName(providerName);
   if (!providerRegistry.has(canonicalName)) {
     const loadErr = providerRegistry.getLoadError(canonicalName);
-    const reason = loadErr
-      ? loadErr.code === "ERR_MODULE_NOT_FOUND"
-        ? canonicalName === "codex"
-          ? "codex provider dependencies not available"
-          : "openai package not installed (npm install openai)"
-        : loadErr.message?.split("\n")[0] || String(loadErr)
-      : `provider module "${providerName}" not loaded`;
-    return { ready: false, reason };
+    return { ready: false, reason: providerLoadErrorReason(canonicalName, loadErr) };
   }
   if (capability === "images" && !isImageCapableProvider(canonicalName)) {
     return { ready: false, reason: `provider "${providerName}" does not support image generation` };

@@ -1,6 +1,7 @@
 import { displayRoleForJobType } from "../../providers/functions/roles.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { createRunWrapUpTracker } from "../functions/review-session.js";
+import { BACKGROUND_JOB_TYPES } from "../../../catalog/job.js";
 
 export class RunSchedulerLoopCallbacks {
   constructor({
@@ -41,6 +42,10 @@ export class RunSchedulerLoopCallbacks {
   onJobStart(job) {
     const display = this.getDisplay();
     if (!display) return;
+    // Background maintenance (atlas_warm) is not agent work — keep it out of the
+    // Workers list and the monitor fleet. It runs on its own scheduler budget and
+    // remains visible in the queue job list and the ATLAS readiness bars.
+    if (BACKGROUND_JOB_TYPES.has(job.job_type)) return;
     const role = displayRoleForJobType(job.job_type);
     const titleClean = job.title.replace(/^(Research|Plan|Ask|Fix|Assess|Dev):\s*/i, "").slice(0, 50);
     display.setWorker(job.id, {

@@ -6,7 +6,6 @@ import { jobLabel, jobDisplayStatus } from "../../functions/display/helpers/job-
 import { renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
 import { canonicalAtlasActionName } from "../../../../functions/tools/mcp-surface.js";
 import { listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
-import { readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
 import { _buildQueueProviderUsageLines, getProviderUsageSummaryCache } from "../../functions/display/helpers/provider-usage.js";
 import { buildAdminGitDiffSnapshot, buildAdminGitDiffFileDetail } from "../../functions/admin/git-diff-review.js";
 
@@ -130,6 +129,52 @@ function monitorStateMeta(state) {
   return { label: "live", color: C.green, rail: C.green };
 }
 
+// A two-frame breathing dot driven by the render tick (_spinIdx advances every
+// ~120ms repaint). It is the proof-of-life: while the UI loop runs it pulses,
+// and if the process hangs it freezes — so a frozen monitor is visibly frozen.
+const MONITOR_PULSE_FRAMES = ["●", "○"]; // ● ○
+function monitorPulse(spinIdx) {
+  return MONITOR_PULSE_FRAMES[Math.abs(spinIdx | 0) % MONITOR_PULSE_FRAMES.length];
+}
+
+function fmtAgo(ms) {
+  const s = Math.max(0, Math.floor((ms || 0) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h`;
+}
+
+function fmtDur(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1000) return `${Math.round(n)}ms`;
+  if (n < 60000) return `${(n / 1000).toFixed(1)}s`;
+  return `${Math.floor(n / 60000)}m${Math.round((n % 60000) / 1000)}s`;
+}
+
+function latestStamp(rows) {
+  let max = 0;
+  for (const row of rows || []) {
+    const t = Date.parse(row?.created_at || "") || 0;
+    if (t > max) max = t;
+  }
+  return max;
+}
+
+// What an OCCUPIED slot's agent is doing right now, for the fleet rail tag.
+// "waiting" = blocked on the operator (ask); "nudge" = a redirect is queued;
+// otherwise the most recent observed event decides "tool call" vs "thinking".
+// The two live states breathe (glyph pulses off the render tick); waiting and
+// nudge sit still so a parked agent reads as parked at a glance.
+function monitorActivityState(agent, spinIdx) {
+  if (agent.state === "ask") return { label: "waiting", color: C.red, glyph: "◉" };
+  if (agent.state === "nudge") return { label: "nudge", color: C.yellow, glyph: "◆" };
+  if (agent.lastEventKind === "tool") {
+    return { label: "tool call", color: C.cyan, glyph: monitorPulse(spinIdx) };
+  }
+  return { label: "thinking", color: C.green, glyph: monitorPulse(spinIdx) };
+}
+
 
 
 function monitorFeedbackMeta(row = {}) {
@@ -164,11 +209,21 @@ function monitorFeedbackSuffix(row = {}) {
 
 
 
+// Glyph for a COMPLETED tool row. In-flight rows are detected separately by the
+// caller (they pulse \u25cf \u25cb in cyan), so this only decides done-vs-failed. We no
+// longer sniff the summary for "ok"/"pass": a recorded invocation that didn't
+// fail simply finished, so every completed call gets one consistent \u2713. Only a
+// failure keyword in the type/summary (or an explicit ok:false) downgrades it to
+// a red \u2717. (Previously only rows whose summary literally carried "ok" \u2014 e.g.
+// ATLAS "\u2026 ok (327ms)" \u2014 got the check, so plain reads/searches/atlas calls fell
+// through to a neutral \u25cf dot and the lane looked half-finished even when every
+// call had already succeeded.)
 function monitorToolMeta(row = {}) {
   const text = `${row.observation_type || ""} ${row.summary || ""}`.toLowerCase();
-  if (/\b(error|failed|fail|denied|cancelled|canceled)\b/.test(text)) return { glyph: "\u2715", color: C.red, label: "err" };
-  if (/\b(pass|passed|ok|succeeded|complete)\b/.test(text)) return { glyph: "\u2713", color: C.green, label: "ok" };
-  return { glyph: "\u25cf", color: C.cyan, label: "call" };
+  if (row.ok === false || /\b(error|failed|fail|denied|cancelled|canceled)\b/.test(text)) {
+    return { glyph: "\u2715", color: C.red, label: "err" };
+  }
+  return { glyph: "\u2713", color: C.green, label: "done" };
 }
 
 
@@ -240,6 +295,39 @@ function stripRedundantToolSummaryLabel(tool, summary) {
   }
 
   return isAtlasTool ? stripAtlasSummaryActionPrefix(text) : text;
+}
+
+
+
+function splitAtlasActionFromSummary(summary) {
+  const text = String(summary || "").trimStart();
+  const match = text.match(/^((?:atlas\s+|atlas[._-]){0,4}[A-Za-z][A-Za-z0-9_.-]*)(.*)$/i);
+  if (!match) return { action: null, rest: text };
+  const action = canonicalAtlasActionName(match[1]);
+  if (!action) return { action: null, rest: text };
+  return { action, rest: String(match[2] || "").trim() };
+}
+
+
+
+// Split a tool observation into the three columns the monitor log renders:
+//   module  — "atlas" or "tool" (which subsystem ran the call)
+//   command — the action/tool name (memory.get, read_file, …)
+//   info    — the remaining call detail (anchors, path, query, …)
+// ATLAS rows carry the action inside the summary ("atlas memory.get (…)"), so
+// the action is peeled off into its own command column; deterministic rows put
+// the tool name in observation_type and the detail in the summary.
+function monitorToolRowParts(row = {}) {
+  const tool = stripToolPrefix(row.observation_type);
+  const normalizedTool = normalizeToolSummaryLabel(tool);
+  const isAtlas = normalizedTool === "atlas" || normalizedTool.startsWith("atlas");
+  const summary = _sanitizeDisplayLine(stripRedundantToolSummaryLabel(tool, row.summary));
+  if (isAtlas) {
+    const { action, rest } = splitAtlasActionFromSummary(summary);
+    if (action) return { module: "atlas", command: action, info: rest };
+    return { module: "atlas", command: "", info: summary };
+  }
+  return { module: "tool", command: tool, info: summary };
 }
 
 export class DisplayRightPanelRenderer {
@@ -335,12 +423,24 @@ export class DisplayRightPanelRenderer {
     const waiting = agents.filter((agent) => agent.state === "ask").length;
     const selected = this._selectMonitorAgent(agents);
 
+    // Heartbeat: the pulse breathes off the render tick (proof the UI loop is
+    // alive); the clock is global data-freshness \u2014 seconds since the newest event
+    // of any agent. Fresh reads green "live", stale reads dim "quiet".
+    const now = Date.now();
+    const globalLast = agents.reduce((m, a) => Math.max(m, a.lastActivityAt || 0), 0);
+    const fresh = globalLast > 0 && (now - globalLast) < 6000;
+    const heartbeat = `${fresh ? C.green : C.dim}${monitorPulse(this._spinIdx)} ${fresh ? "live" : "quiet"}${C.reset}${C.dim} \u00b7 ${globalLast ? fmtAgo(now - globalLast) : "--"}${C.reset}`;
+    const openSlots = Math.max(0, (this.concurrency || 0) - (this.workers?.size || 0));
+    const blockedByLock = Math.min(this._blockedByLock || 0, openSlots);
+
     const status = [
+      heartbeat,
       `${C.brightWhite}${String(running).padStart(2, "0")}${C.reset}${C.dim} running${C.reset}`,
       waiting > 0
         ? `${C.red}${C.bold}${String(waiting).padStart(2, "0")} waiting on you${C.reset}`
         : `${C.dim}00 waiting on you${C.reset}`,
-      `${C.dim}${Math.max(0, this.concurrency - this.workers.size)} idle slots${C.reset}`,
+      ...(blockedByLock > 0 ? [`${C.yellow}${String(blockedByLock).padStart(2, "0")} on lock${C.reset}`] : []),
+      `${C.dim}${Math.max(0, openSlots - blockedByLock)} idle${C.reset}`,
     ].join(` ${C.dim}\u00b7${C.reset} `);
 
     const mastheadLeft = ` ${posseWordmark()} ${C.dim}/${C.reset} ${C.brightWhite}${C.bold}monitor agents${C.reset} ${C.dim}[operator console]${C.reset}`;
@@ -350,7 +450,7 @@ export class DisplayRightPanelRenderer {
     if (agents.length === 0) {
       lines.push("");
       lines.push(` ${C.dim}No live agents right now.${C.reset}`);
-      lines.push(` ${C.dim}Monitor Agents will show running workers, questions, nudges, prompt lens snapshots, and tool history here.${C.reset}`);
+      lines.push(` ${C.dim}Monitor Agents will show running workers, questions, nudges, and tool history here.${C.reset}`);
       return lines.slice(0, maxLines);
     }
 
@@ -378,8 +478,21 @@ export class DisplayRightPanelRenderer {
     while (lines.length < maxLines - 1) {
       lines.push(`${" ".repeat(leftW)}${divider}`);
     }
-    const selectedHint = selected ? `selected job #${selected.jobId}` : "no selection";
-    lines.push(` ${C.dim}[1-${Math.min(agents.length, 9)}] jump  [< >] cycle  [n] nudge ${selectedHint}  [q/m] log${C.reset}`);
+    // The single agent-controls bar lives UNDER the focus pane (right column):
+    // every control here acts on the selected agent shown to the right, so the
+    // fleet rail + usage column on the left stays uncluttered. The column divider
+    // runs straight down into the bar. (state-aware actions · fleet navigation)
+    const nav = `${C.dim}[1-${Math.min(agents.length, 9)}] jump  [< >] cycle  [m] log${C.reset}`;
+    let actions;
+    if (selected?.state === "ask") {
+      actions = `${C.green}[a] answer${C.reset}  ${C.yellow}[n] nudge${C.reset}  ${C.red}[!] interrupt${C.reset}`;
+    } else if (selected) {
+      actions = `${C.yellow}[n] nudge${C.reset}  ${C.magenta}[d] changes${C.reset}`;
+    } else {
+      actions = `${C.dim}no agent selected${C.reset}`;
+    }
+    const controls = `${actions}  ${C.dim}·${C.reset}  ${nav}`;
+    lines.push(`${" ".repeat(leftW)}${divider}${fit(` ${controls}`, rightW)}`);
     return lines.slice(0, maxLines);
   }
 
@@ -389,6 +502,21 @@ export class DisplayRightPanelRenderer {
     const queueData = this._getQueueData?.({ maxAgeMs: 1000 }) || {};
     const jobsById = new Map((queueData.jobs || []).map((job) => [Number(job.id), job]));
     const questionJobIds = new Set((this._questionQueue || []).map((q) => Number(q.jobId)).filter(Number.isFinite));
+    // Pull tool observations once and bucket the newest non-coordination call
+    // per job so each agent's "thinking vs tool call" state is one cheap lookup.
+    let toolRecent = [];
+    try { toolRecent = (typeof this.getToolData === "function" ? this.getToolData()?.recent : null) || []; } catch { toolRecent = []; }
+    const liveness = (numericJobId, activityRows, interactionRows, fallbackTs) => {
+      const jobToolRows = toolRecent.filter((row) => Number(row.job_id) === numericJobId
+        && !LIVE_CHANNEL_TOOL_TYPES.has(String(row.observation_type || "")));
+      const latestToolTs = latestStamp(jobToolRows);
+      const latestTalkTs = Math.max(latestStamp(activityRows), latestStamp(interactionRows));
+      const lastEventKind = latestToolTs > 0 && latestToolTs >= latestTalkTs ? "tool" : "activity";
+      return {
+        lastActivityAt: Math.max(latestToolTs, latestTalkTs, fallbackTs || 0),
+        lastEventKind,
+      };
+    };
     const agents = [...this.workers.entries()].map(([jobId, worker], idx) => {
       const numericJobId = Number(jobId);
       const job = jobsById.get(numericJobId) || {};
@@ -433,6 +561,7 @@ export class DisplayRightPanelRenderer {
         guidance,
         pendingGuidance,
         status: job.status || "running",
+        ...liveness(numericJobId, activityRows, interactionRows, worker?.startTime),
       };
     });
     const seen = new Set(agents.map((agent) => agent.jobId));
@@ -471,6 +600,7 @@ export class DisplayRightPanelRenderer {
         guidance,
         pendingGuidance: guidance.filter((row) => row.ack_state !== "acknowledged"),
         status: job.status || "waiting_on_human",
+        ...liveness(numericJobId, [], interactionRows, Date.parse(job.updated_at || job.created_at || "") || 0),
       });
       seen.add(numericJobId);
     }
@@ -497,23 +627,54 @@ export class DisplayRightPanelRenderer {
 
   _buildMonitorFleetLines(agents, selected, width, height = 0) {
     const lines = [];
-    for (const agent of agents.slice(0, 9)) {
-      const meta = monitorStateMeta(agent.state);
-      const isSelected = selected?.jobId === agent.jobId;
-      const selector = isSelected ? `${C.cyan}\u258c${C.reset}` : " ";
-      const rail = `${meta.rail}\u2503${C.reset}`;
-      const title = `${selector}${rail} ${C.brightWhite}${C.bold}[${agent.index}] ${agent.role}${C.reset} ${C.dim}#${agent.jobId} ${agent.wiLabel}${C.reset}`;
-      const tag = `${meta.color}${meta.label}${C.reset}`;
-      lines.push(`${visiblePad(title, Math.max(0, width - stripAnsi(tag).length - 1))}${tag}`);
-      lines.push(`   ${C.dim}${fit(agent.activity, Math.max(8, width - 5))}${C.reset}`);
-      if (agent.pendingGuidance?.length > 0) {
-        const latest = agent.pendingGuidance[0];
-        lines.push(`   ${C.yellow}${fit(`nudge queued: ${latest.body || ""}`, Math.max(8, width - 5))}${C.reset}`);
-      } else if (agent.guidance?.length > 0) {
-        const latest = agent.guidance[0];
-        lines.push(`   ${C.dim}${fit(`guidance active: ${latest.body || ""}`, Math.max(8, width - 5))}${C.reset}`);
+    const spin = this._spinIdx | 0;
+    const shown = agents.slice(0, 9);
+
+    // Group occupied slots by work item so the rail reads "what is working on
+    // what": one WI header, then its agents, then the next WI.
+    const groups = new Map();
+    for (const agent of shown) {
+      const key = agent.workItemId == null ? "_none" : String(agent.workItemId);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(agent);
+    }
+    let firstGroup = true;
+    for (const [key, groupAgents] of groups) {
+      if (!firstGroup) lines.push("");
+      firstGroup = false;
+      // Just the WI id \u2014 the title only gets cut off at this width.
+      lines.push(key === "_none"
+        ? ` ${C.dim}\u00b7 no work item${C.reset}`
+        : ` ${C.blue}${C.bold}WI#${key}${C.reset}`);
+      for (const agent of groupAgents) {
+        const meta = monitorActivityState(agent, spin);
+        const isSelected = selected?.jobId === agent.jobId;
+        const selector = isSelected ? `${C.cyan}\u258c${C.reset}` : " ";
+        const rail = `${monitorStateMeta(agent.state).rail}\u2503${C.reset}`;
+        const title = `${selector}${rail} ${C.brightWhite}${C.bold}[${agent.index}] ${agent.role}${C.reset} ${C.dim}#${agent.jobId}${C.reset}`;
+        const tag = `${meta.color}${meta.glyph} ${meta.label}${C.reset}`;
+        lines.push(`${visiblePad(title, Math.max(0, width - stripAnsi(tag).length - 1))}${tag}`);
+        lines.push(`   ${C.dim}${fit(agent.activity, Math.max(8, width - 5))}${C.reset}`);
+        if (agent.pendingGuidance?.length > 0) {
+          lines.push(`   ${C.yellow}${fit(`nudge queued: ${agent.pendingGuidance[0].body || ""}`, Math.max(8, width - 5))}${C.reset}`);
+        }
       }
-      lines.push("");
+    }
+
+    // Open slots \u2014 surfaced like the main queue panel: file-lock-blocked first
+    // (yellow, same lock-summary labels), then truly-idle/available slots.
+    const openSlots = Math.max(0, (this.concurrency || 0) - (this.workers?.size || 0));
+    const blockedByLock = Math.min(this._blockedByLock || 0, openSlots);
+    const trulyIdle = openSlots - blockedByLock;
+    if (blockedByLock > 0 || trulyIdle > 0) {
+      if (lines.length > 0) lines.push("");
+      if (blockedByLock > 0) {
+        const labels = this._blockedLockSummaryLabels(blockedByLock);
+        lines.push(`  ${C.yellow}\u00b7 ${fit(labels.join(", "), Math.max(8, width - 4))}${C.reset}`);
+      }
+      if (trulyIdle > 0) {
+        lines.push(`  ${C.dim}\u00b7 ${trulyIdle} idle slot${trulyIdle === 1 ? "" : "s"} available${C.reset}`);
+      }
     }
     // Provider usage widget tucked against the bottom of the rail — the same
     // widget the main queue page shows (run tokens/cost + session/week pressure
@@ -534,22 +695,12 @@ export class DisplayRightPanelRenderer {
       }
     } catch { usageLines = []; }
 
-    // Usage sits directly under the fleet list (no gap between them). Stretch the
-    // per-provider blocks apart so they span down to the bottom of the rail
-    // rather than leaving a blank band beneath.
-    const blocks = [];
-    for (const line of usageLines) {
-      if (blocks.length === 0 || stripAnsi(line).trimStart().startsWith("╶")) blocks.push([]);
-      blocks[blocks.length - 1].push(line);
-    }
-    const slack = Math.max(0, (height || 0) - lines.length - usageLines.length);
-    const gaps = Math.max(1, blocks.length - 1);
-    // Cap per-gap spacing so two small blocks don't get a cavernous gap; any
-    // remainder tails at the bottom.
-    const per = Math.min(2, Math.floor(slack / gaps));
-    for (let b = 0; b < blocks.length; b++) {
-      lines.push(...blocks[b]);
-      if (b < blocks.length - 1) for (let g = 0; g < per; g++) lines.push("");
+    // Usage pinned FLUSH to the bottom of the rail: pad with blank lines above so
+    // the block rests at the foot of the pane instead of floating mid-rail.
+    if (usageLines.length > 0) {
+      const pad = Math.max(0, (height || 0) - lines.length - usageLines.length);
+      for (let i = 0; i < pad; i++) lines.push("");
+      lines.push(...usageLines);
     }
     while (lines.length < (height || 0)) lines.push("");
     return lines;
@@ -650,13 +801,26 @@ export class DisplayRightPanelRenderer {
 
   _formatMonitorToolRow(row, width) {
     const safeWidth = Math.max(18, width | 0);
-    const tool = stripToolPrefix(row.observation_type);
     const meta = monitorToolMeta(row);
-    const summary = _sanitizeDisplayLine(stripRedundantToolSummaryLabel(tool, row.summary));
-    const time = compactTime(row.created_at);
-    const prefix = ` ${C.dim}${time}${C.reset} ${meta.color}${meta.glyph}${C.reset} ${C.cyan}${tool}${C.reset} `;
-    const budget = Math.max(8, safeWidth - stripAnsi(prefix).length - 3);
-    return `${prefix}${fit(summary || meta.label, budget)}`;
+    const { module, command, info } = monitorToolRowParts(row);
+    const inFlight = !!row.in_flight;
+    // Glyph pulses (● ○, cyan) while a call is in flight (a "started" row with no
+    // finish yet); once it completes it settles to the done/failed meta glyph.
+    const glyph = inFlight ? monitorPulse(this._spinIdx | 0) : meta.glyph;
+    const glyphColor = inFlight ? C.cyan : meta.color;
+    // In-flight rows read as "running"; completed ones show their measured
+    // duration (both come from the start/finish pair collapsed upstream).
+    const status = inFlight
+      ? `${C.cyan}running${C.reset}`
+      : (Number.isFinite(row.duration_ms) ? `${C.dim}${fmtDur(row.duration_ms)}${C.reset}` : "");
+    // No timestamp: glyph → module → command → info, status pinned at the end.
+    const moduleColor = module === "atlas" ? C.magenta : C.blue;
+    const commandText = command ? `${C.cyan}${command}${C.reset} ` : "";
+    const prefix = ` ${glyphColor}${glyph}${C.reset} ${moduleColor}${module}${C.reset} ${commandText}`;
+    const statusLen = status ? stripAnsi(status).length + 1 : 0;
+    const budget = Math.max(8, safeWidth - stripAnsi(prefix).length - statusLen - 3);
+    const body = command ? info : (info || meta.label);
+    return `${prefix}${fit(body, budget)}${status ? ` ${status}` : ""}`;
   }
 
 
@@ -678,27 +842,48 @@ export class DisplayRightPanelRenderer {
       return this._buildMonitorChangesBox(agent, width, total);
     }
 
-    // Feedback: newest-first, word-wrapped across the full width (no truncation),
-    // filling the box top-down until it is full.
+    // Feedback reads like a chat: the live (newest) message is pinned to the
+    // FLOOR of the box, older history stacks above it (dimmed, so it reads as
+    // back-scroll), and a thin delimiter rule separates the live turn from the
+    // history. Overflow clips the OLDEST lines from the top; a short conversation
+    // pads the top so it still rests on the floor.
     const buildFeedback = (content) => {
-      const lines = [];
-      const ordered = [...feedbackEntries].reverse();
-      for (let e = 0; e < ordered.length && lines.length < content; e++) {
-        if (e > 0) lines.push(""); // blank delimiter between messages
-        for (const line of this._monitorFeedbackEntryLines(ordered[e], inner)) {
-          if (lines.length >= content) break;
-          lines.push(line);
-        }
-      }
-      return this._monitorBoxedLane({
+      const boxedFeedback = (rows) => this._monitorBoxedLane({
         title: "feedback",
         count: feedbackEntries.length,
         color: C.yellow,
         width,
-        rows: lines,
+        rows,
         emptyText: `no updates yet \u2014 current: ${agent.activity}`,
         fixedRows: content,
       });
+      if (feedbackEntries.length === 0) return boxedFeedback([]);
+
+      const ordered = feedbackEntries; // oldest \u2192 newest
+      const active = ordered[ordered.length - 1];
+      const history = ordered.slice(0, -1);
+
+      const historyLines = [];
+      for (const row of history) {
+        for (const line of this._monitorFeedbackEntryLines(row, inner, { dim: true })) {
+          historyLines.push(line);
+        }
+        historyLines.push(""); // blank gap between historical messages
+      }
+      const activeLines = this._monitorFeedbackEntryLines(active, inner);
+
+      let rows;
+      if (history.length > 0) {
+        const rule = ` ${C.dim}${"\u254c".repeat(Math.max(3, inner - 1))}${C.reset}`;
+        rows = [...historyLines, rule, ...activeLines];
+      } else {
+        rows = activeLines;
+      }
+      // Anchor to the bottom: drop oldest lines from the top, pad short content
+      // at the top so the live message always lands on the floor.
+      if (rows.length > content) rows = rows.slice(rows.length - content);
+      while (rows.length < content) rows.unshift("");
+      return boxedFeedback(rows);
     };
 
     // A short pane only has room for one box.
@@ -730,17 +915,29 @@ export class DisplayRightPanelRenderer {
     return [...buildFeedback(feedbackContent), ...bottomBox];
   }
 
-  _monitorFeedbackEntryLines(row, inner) {
+  _monitorFeedbackEntryLines(row, inner, { dim = false } = {}) {
     const meta = monitorFeedbackMeta(row);
     const suffix = monitorFeedbackSuffix(row);
     const time = compactTime(row.created_at);
     const body = _sanitizeDisplayLine(row.body || row.summary || "");
+    const bodyWidth = Math.max(8, inner - 3);
+    // History (back-scroll) messages render fully dimmed — sender, rail and body
+    // — so only the live message at the floor of the box reads as active. The
+    // suffix chips (acked/pending, etc.) are flattened to dim too (their own
+    // colour stripped) so nothing in a past turn competes with the live one.
+    if (dim) {
+      const suffixText = suffix ? `  ${stripAnsi(suffix)}` : "";
+      const lines = [` ${C.dim}${meta.glyph} ${meta.label}  ${time}${suffixText}${C.reset}`];
+      for (const chunk of wrapHanging(body, bodyWidth, bodyWidth)) {
+        lines.push(` ${C.dim}▏ ${chunk}${C.reset}`);
+      }
+      return lines;
+    }
     const suffixText = suffix ? `  ${suffix}` : "";
     // Render each update as a message: a colored sender/time header, then the
     // body wrapped under a thin accent rail in the same colour (NOT dim, so the
     // wrapped continuation reads as part of the message, not faded log noise).
     const lines = [` ${meta.color}${meta.glyph} ${meta.label}${C.reset}  ${C.dim}${time}${C.reset}${suffixText}`];
-    const bodyWidth = Math.max(8, inner - 3);
     for (const chunk of wrapHanging(body, bodyWidth, bodyWidth)) {
       lines.push(` ${meta.color}▏${C.reset} ${chunk}`);
     }
@@ -904,18 +1101,13 @@ export class DisplayRightPanelRenderer {
       ` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`,
     ];
 
+    // No control bar here: the single agent-controls bar lives at the foot of the
+    // monitor view (state-aware), so the focus pane just caps its content with a
+    // thin rule and hands the full height to the feedback/tools boxes.
     const footer = [` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`];
-    if (agent.state === "ask") {
-      footer.push(` ${C.red}${C.bold}ASK${C.reset} ${C.green}[a] answer${C.reset}  ${C.yellow}[n] nudge${C.reset}  ${C.blue}[t] prompt lens${C.reset}  ${C.red}[!] interrupt + requeue${C.reset}`);
-    } else {
-      footer.push(` ${C.yellow}[n] nudge${C.reset}  ${C.blue}[t] prompt lens${C.reset}  ${C.magenta}[d] changes${C.reset}  ${C.dim}delivery: next safe checkpoint/tool result${C.reset}`);
-    }
 
     const bodyH = Math.max(0, height - top.length - footer.length);
     const body = [];
-    if (this._monitorPromptLens) {
-      body.push(...this._buildMonitorPromptLens(agent, width).slice(0, Math.max(3, Math.floor(bodyH * 0.45))), "");
-    }
     const lanesH = Math.max(0, bodyH - body.length);
     if (lanesH >= 5) {
       body.push(...this._buildMonitorFeedbackToolLanes(agent, width, lanesH));
@@ -924,38 +1116,6 @@ export class DisplayRightPanelRenderer {
     const out = [...top, ...body.slice(0, bodyH), ...footer];
     while (out.length < height) out.push("");
     return out.slice(0, height);
-  }
-
-
-
-  _buildMonitorPromptLens(agent, width) {
-    const lines = [];
-    let prompt = null;
-    try {
-      prompt = readRecentPrompts({ limit: 1, jobId: agent.jobId })[0] || null;
-    } catch {
-      prompt = null;
-    }
-    lines.push(` ${C.blue}${C.bold}prompt lens${C.reset} ${C.dim}read-only latest captured prompt${C.reset}`);
-    if (!prompt) {
-      lines.push(`   ${C.dim}No prompt captured yet for job #${agent.jobId}.${C.reset}`);
-      return lines;
-    }
-    const stamp = [prompt.role, prompt.provider, prompt.model].filter(Boolean).join("/");
-    lines.push(`   ${C.dim}${stamp || "agent"} · ${prompt.prompt_chars || 0} chars · ${prompt.ts || ""}${C.reset}`);
-    const promptLines = String(prompt.prompt || "")
-      .split("\n")
-      .map((line) => line.trimEnd())
-      .filter((line) => line.trim() !== "")
-      .slice(0, 9);
-    for (const line of promptLines) {
-      lines.push(`   ${C.dim}${fit(line, Math.max(8, width - 5))}${C.reset}`);
-    }
-    const total = String(prompt.prompt || "").split("\n").filter((line) => line.trim() !== "").length;
-    if (total > promptLines.length) {
-      lines.push(`   ${C.dim}+${total - promptLines.length} more prompt lines in prompt log${C.reset}`);
-    }
-    return lines;
   }
 
 

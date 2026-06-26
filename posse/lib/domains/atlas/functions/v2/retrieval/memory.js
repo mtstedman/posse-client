@@ -15,18 +15,107 @@ import { memoryDbPathForLedgerDb } from "../runtime-paths.js";
 import { getEffectivePolicy } from "./policy.js";
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 
-const MEMORY_TYPES = new Set([
-  "decision",
-  "bugfix",
-  "task_context",
-  "pattern",
-  "convention",
-  "architecture",
-  "performance",
+// Domain is the retrieval FILTER axis: which area of concern a memory is about.
+// `general` is the default catch-all bucket — NOT a wildcard. A scoped search
+// whitelists its requested domains and never auto-pulls `general`, so a security
+// sweep gets security memories only (no design noise, and not flooded by the
+// catch-all). The four specific domains are exactly the ones where hiding them
+// when out-of-domain is safe; everything broadly-relevant (infra, reliability,
+// api, conventions, gotchas) stays `general`.
+const MEMORY_DOMAIN_DEFAULT = "general";
+const MEMORY_DOMAINS = new Set([
+  "general",
+  "ux",
+  "schema",
   "security",
+  "performance",
 ]);
 
+// Lifespan is the pruning tenure axis (internal, never agent-set). A memory is
+// born `ephemeral` and earns `durable` by corroboration (independent
+// re-derivation, or an explicit `used` verdict). Pruning is usage-based, never
+// time-based: an ephemeral memory is retired once it has been surfaced enough
+// times without earning promotion; a dormant memory is never retired by age.
+// String enum, future-proofed (room for a `pinned` tier later).
+const MEMORY_LIFESPANS = new Set(["ephemeral", "durable"]);
+const MEMORY_LIFESPAN = Object.freeze({
+  default: "ephemeral",
+  durable: "durable",
+  surfacedRetireCount: 4,        // ephemeral + surfaced >= this w/o promotion -> pruned
+  offerThrottleMs: 15 * 60_000,  // count at most one "offered" per memory per window
+});
+
+/**
+ * Canonical domain tag list for a memory. Unknown values and the implicit
+ * default are dropped; an empty result collapses to the catch-all bucket so a
+ * memory is always either ["general"] or one+ specific domains (never both).
+ * @param {unknown} values
+ * @returns {string[]}
+ */
+function normalizeDomains(values) {
+  const out = [];
+  for (const raw of Array.isArray(values) ? values : []) {
+    const d = String(raw ?? "").trim().toLowerCase();
+    if (d && d !== MEMORY_DOMAIN_DEFAULT && MEMORY_DOMAINS.has(d) && !out.includes(d)) {
+      out.push(d);
+    }
+  }
+  return out.length > 0 ? out : [MEMORY_DOMAIN_DEFAULT];
+}
+
+/**
+ * Domain filter request (read side). Unlike the write normalizer, an empty list
+ * stays empty (= no filtering, return everything), and `general` is honored only
+ * when explicitly asked for — it is never an implicit default here.
+ * @param {unknown} values
+ * @returns {string[]}
+ */
+function normalizeRequestedDomains(values) {
+  const out = [];
+  for (const raw of Array.isArray(values) ? values : []) {
+    const d = String(raw ?? "").trim().toLowerCase();
+    if (d && MEMORY_DOMAINS.has(d) && !out.includes(d)) out.push(d);
+  }
+  return out;
+}
+
 const MEMORY_SCHEMA_VERSION = 1;
+
+// Confidence is an INTERNAL-ONLY signal: it is never surfaced to agents (it is
+// meaningless as a number to read). It exists to (a) order which memories
+// surface first as a repo's table grows and (b) drive pruning as it drops. A
+// memory therefore starts at a moderate base with headroom to rise (it is
+// independently re-derived, or an agent reports it as used) and to fall (it is
+// proven wrong, or — Phase 2 — the code it is anchored to changes underneath
+// it). Pinning every write to 1.0 made the column dead weight; these are the
+// knobs that bring it to life. Thresholds live here, not in settings, on
+// purpose: this is behaviour derived from runtime state, not a user toggle.
+const MEMORY_CONFIDENCE = Object.freeze({
+  base: 0.6,            // unanchored write
+  anchoredBonus: 0.1,   // has file/symbol anchors -> more verifiable
+  max: 1,
+  reviveBump: 0.1,      // automatic corroboration: independently re-derived
+  usedBump: 0.15,       // explicit verdict=used
+  wrongFactor: 0.4,     // proven wrong: sharp multiplicative drop
+  softFactor: 0.8,      // duplicate/stale verdict: gentle drop
+  driftWeight: 0.5,     // anchored code changed: erosion per drifted-anchor fraction
+  floor: 0.15,          // at/below this a memory is pruned from the active set
+});
+
+// memory.get groups bodies by anchor; cap how many surface per anchor so a
+// bloated table cannot dump every historical note about one file on the agent.
+// Ordering (confidence + recency) decides which ones win the slots.
+const MEMORY_GET_PER_ANCHOR_LIMIT = 8;
+
+/**
+ * @param {number} value
+ * @returns {number}
+ */
+function clampConfidence(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return MEMORY_CONFIDENCE.base;
+  return Math.max(0, Math.min(MEMORY_CONFIDENCE.max, Math.round(n * 1000) / 1000));
+}
 
 const MEMORY_DDL = `
 PRAGMA journal_mode = WAL;
@@ -44,10 +133,8 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value;
 CREATE TABLE IF NOT EXISTS memories (
   memory_id       TEXT PRIMARY KEY,
   repo_id         TEXT,
-  type            TEXT NOT NULL CHECK (type IN (
-                    'decision','bugfix','task_context','pattern',
-                    'convention','architecture','performance','security'
-                  )),
+  domains_json    TEXT NOT NULL DEFAULT '["general"]',
+  lifespan        TEXT NOT NULL DEFAULT 'ephemeral',
   title           TEXT NOT NULL,
   content         TEXT NOT NULL,
   tags_json       TEXT NOT NULL DEFAULT '[]',
@@ -57,6 +144,8 @@ CREATE TABLE IF NOT EXISTS memories (
   stale_reason    TEXT,
   wrong_at        TEXT,
   wrong_count     INTEGER NOT NULL DEFAULT 0,
+  offered_count   INTEGER NOT NULL DEFAULT 0,
+  last_offered_at TEXT,
   deleted         INTEGER NOT NULL DEFAULT 0,
   created_at      TEXT NOT NULL,
   updated_at      TEXT NOT NULL,
@@ -68,9 +157,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash_active
   ON memories(repo_id, content_hash)
   WHERE deleted = 0;
 
-CREATE INDEX IF NOT EXISTS idx_memories_repo_type_updated
-  ON memories(repo_id, type, updated_at DESC)
-  WHERE deleted = 0;
+-- NOTE: the lifespan index is created in upgradeMemorySchema, AFTER the column
+-- is guaranteed; a legacy table lacks the lifespan column when this DDL runs.
 
 CREATE INDEX IF NOT EXISTS idx_memories_updated
   ON memories(updated_at DESC)
@@ -90,6 +178,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_symbol_links_symbol
 CREATE TABLE IF NOT EXISTS memory_file_links (
   memory_id       TEXT NOT NULL,
   repo_rel_path   TEXT NOT NULL,
+  content_hash    TEXT,           -- file blob hash when the link was last reconciled; NULL until first seen
   PRIMARY KEY(memory_id, repo_rel_path),
   FOREIGN KEY(memory_id) REFERENCES memories(memory_id) ON DELETE CASCADE
 );
@@ -104,9 +193,10 @@ CREATE INDEX IF NOT EXISTS idx_memory_file_links_path
  *   params: import("../contracts/tool-params.js").MemoryStoreParams,
  *   ledger?: import("../contracts/api.js").Ledger,
  *   repoId?: string | null,
+ *   view?: import("../contracts/api.js").View | null,
  * }} args
  */
-export function memoryStore({ versionId, params, ledger, repoId }) {
+export function memoryStore({ versionId, params, ledger, repoId, view = null }) {
   const opened = openMemoryActionDb({ ledger, action: "memory.store", versionId });
   if (opened.error) return opened.error;
   const db = opened.db;
@@ -119,7 +209,7 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
     return finish(memoryDisabled("memory.store", versionId));
   }
 
-  const type = normalizeMemoryType(params.type) || "task_context";
+  const domains = normalizeDomains(params.domains);
   const title = cleanString(params.title, 120);
   const content = cleanString(params.content, 1200);
   if (!title || !content) {
@@ -145,9 +235,12 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
     }));
   }
   const fileRelPaths = normalizePaths(params.fileRelPaths || []);
-  const confidence = 1;
+  const hasAnchors = symbolIds.length > 0 || fileRelPaths.length > 0;
+  const confidence = clampConfidence(
+    MEMORY_CONFIDENCE.base + (hasAnchors ? MEMORY_CONFIDENCE.anchoredBonus : 0),
+  );
   const providedId = cleanMemoryId(params.memoryId);
-  const contentHash = memoryContentHash({ type, title, content, tags, symbolIds, fileRelPaths });
+  const contentHash = memoryContentHash({ title, content, tags, symbolIds, fileRelPaths });
   const memoryId = providedId || `mem_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const existing = providedId ? findMemoryById(db, memoryId) : null;
   if (existing && existing.repo_id !== effectiveRepoId) {
@@ -188,13 +281,37 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
     }
   }
 
+  // Resurrection: the exact content was written before but later pruned
+  // (soft-deleted) as confidence fell. Re-deriving it now is proof it still
+  // matters, so bring the original row back rather than minting a new id — the
+  // active unique index is deleted=0, so the soft-deleted twin is invisible to
+  // findActiveMemoryByHash and would otherwise be silently duplicated.
+  if (!providedId && !existing && !existingByHash) {
+    const resurrected = findDeletedMemoryByHash(db, effectiveRepoId, contentHash);
+    if (resurrected) {
+      reviveMemory(db, resurrected.memory_id, new Date().toISOString());
+      return finish(okEnvelope({
+        action: "memory.store",
+        versionId,
+        data: {
+          ok: true,
+          memoryId: resurrected.memory_id,
+          memory_id: resurrected.memory_id,
+          created: false,
+          deduplicated: true,
+          resurrected: true,
+        },
+      }));
+    }
+  }
+
   // Exact-hash dedupe misses rewordings of the same knowledge. For
   // auto-generated ids (agent "just remember this" writes) a conservative
   // near-duplicate check folds the write into the existing memory instead of
   // accumulating parallel variants. Explicit ids are intentional updates and
   // are never redirected.
   if (!providedId && !existing) {
-    const nearDuplicate = findNearDuplicateMemory(db, effectiveRepoId, type, title, content);
+    const nearDuplicate = findNearDuplicateMemory(db, effectiveRepoId, title, content);
     if (nearDuplicate) {
       reviveMemory(db, nearDuplicate.memory_id, new Date().toISOString());
       return finish(okEnvelope({
@@ -213,6 +330,10 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
   }
 
   const now = new Date().toISOString();
+  // Snapshot the current blob hash of each anchored file so a later edit (a
+  // different hash) is detectable as drift. No view -> NULL baselines, adopted
+  // without penalty on the first reconcile that does see a view.
+  const fileBaselines = viewFilePathHashes(view, fileRelPaths);
   const txn = db.transaction(() => {
     if (duplicateToReplace) {
       db.prepare(
@@ -221,15 +342,18 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
     }
     db.prepare(
       `INSERT INTO memories
-         (memory_id, repo_id, type, title, content, tags_json, confidence,
+         (memory_id, repo_id, domains_json, lifespan, title, content, tags_json, confidence,
           content_hash, stale, deleted, created_at, updated_at, deleted_at, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, NULL, 'agent')
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, NULL, 'agent')
        ON CONFLICT(memory_id) DO UPDATE SET
-          type = excluded.type,
+          domains_json = excluded.domains_json,
           title = excluded.title,
           content = excluded.content,
           tags_json = excluded.tags_json,
-          confidence = excluded.confidence,
+          -- Keep any confidence the memory has earned; a corrective refresh of a
+          -- wrong memory already had its confidence knocked down, so max() lands
+          -- back at base, while a re-asserted healthy memory keeps its standing.
+          confidence = MAX(memories.confidence, excluded.confidence),
           content_hash = excluded.content_hash,
           stale = 0,
           stale_reason = NULL,
@@ -237,11 +361,15 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
           wrong_count = 0,
           deleted = 0,
           updated_at = excluded.updated_at,
-          deleted_at = NULL`,
+          deleted_at = NULL
+          -- lifespan and offered_count are intentionally NOT reset: an explicit
+          -- refresh must not demote a memory that earned durable, nor wipe its
+          -- surfaced history.`,
     ).run(
       memoryId,
       effectiveRepoId,
-      type,
+      JSON.stringify(domains),
+      MEMORY_LIFESPAN.default,
       title,
       content,
       JSON.stringify(tags),
@@ -250,7 +378,7 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
       existing?.created_at || now,
       now,
     );
-    replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths);
+    replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths, fileBaselines);
   });
   try {
     txn();
@@ -262,7 +390,13 @@ export function memoryStore({ versionId, params, ledger, repoId }) {
       message: err?.message || String(err),
     }));
   }
+  // Anchor-drift decay: reconcile every memory's confidence against the code it
+  // points at, once per view rebuild. Runs before the cap so drift-pruned rows
+  // free their slots first. Only possible with a view (the write path is
+  // otherwise blind to code state).
+  if (view) reconcileAnchorConfidence(db, view, effectiveRepoId, now);
   sweepStaleMemories(db, effectiveRepoId, policy);
+  pruneSurfacedEphemeral(db, effectiveRepoId, now);
   enforceMemoryCap(db, effectiveRepoId, policy, now);
   getRetrievalCache().invalidateAll();
 
@@ -429,14 +563,20 @@ export function memoryFeedback({ versionId, params, ledger, repoId }) {
   }
   const now = new Date().toISOString();
   if (verdict === "used") {
+    // An agent reporting a memory materially informed the work is the explicit
+    // positive signal: clear suppression, raise confidence toward proven, and
+    // promote it to durable — being used is exactly what earns durable tenure
+    // and takes it out of the usage-based prune path.
     db.prepare(
       `UPDATE memories
        SET stale = 0,
            stale_reason = NULL,
            wrong_at = NULL,
+           confidence = MIN(?, confidence + ?),
+           lifespan = 'durable',
            updated_at = ?
        WHERE memory_id = ?`,
-    ).run(now, memoryId);
+    ).run(MEMORY_CONFIDENCE.max, MEMORY_CONFIDENCE.usedBump, now, memoryId);
     getRetrievalCache().invalidateAll();
   }
   return finish(okEnvelope({
@@ -462,17 +602,25 @@ export function memoryFeedback({ versionId, params, ledger, repoId }) {
 function flagMemoryStale(db, memoryId, reason, now) {
   // updated_at is deliberately NOT bumped: it drives the recency score and
   // the age sweep, and flagging a memory must not make it look fresher.
+  // Confidence DOES drop, multiplicatively, so repeated negative evidence
+  // compounds toward the prune floor. The row is left soft-flagged (not
+  // deleted) so the deliberate refresh-by-id recovery route still works; only
+  // anchor-drift reconciliation and the cap actually soft-delete.
   if (reason === "wrong") {
     db.prepare(
       `UPDATE memories
        SET stale = 1, stale_reason = ?, wrong_at = ?,
-           wrong_count = wrong_count + 1
+           wrong_count = wrong_count + 1,
+           confidence = MAX(0, confidence * ?)
        WHERE memory_id = ?`,
-    ).run(reason, now, memoryId);
+    ).run(reason, now, MEMORY_CONFIDENCE.wrongFactor, memoryId);
   } else {
     db.prepare(
-      "UPDATE memories SET stale = 1, stale_reason = ? WHERE memory_id = ?",
-    ).run(reason, memoryId);
+      `UPDATE memories
+       SET stale = 1, stale_reason = ?,
+           confidence = MAX(0, confidence * ?)
+       WHERE memory_id = ?`,
+    ).run(reason, MEMORY_CONFIDENCE.softFactor, memoryId);
   }
 }
 
@@ -574,11 +722,13 @@ export function memoryGet({ versionId, params, ledger, repoId, view = null }) {
     const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
     let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true, policy });
     filtered = applyAnchorEvidence(view, filtered, links);
-    return finish(okEnvelope({
-      action: "memory.get",
-      versionId,
-      data: memoryContentByAnchor(filtered, links, requested),
-    }));
+    const data = memoryContentByAnchor(filtered, links, requested);
+    // Pulling a memory body IS the "surfaced" event that the usage-based prune
+    // counts. Record it after the read connection closes (best-effort, throttled,
+    // its own RW connection) so a write hiccup never fails the get.
+    const result = finish(okEnvelope({ action: "memory.get", versionId, data }));
+    recordMemoriesOffered(ledger, collectOfferedMemoryIds(data));
+    return result;
   } catch (err) {
     return finish(errorEnvelope({
       action: "memory.get",
@@ -671,6 +821,47 @@ function upgradeMemorySchema(db) {
   if (!columns.has("wrong_count")) {
     db.prepare("ALTER TABLE memories ADD COLUMN wrong_count INTEGER NOT NULL DEFAULT 0").run();
   }
+  // Domain (filter) + lifespan (pruning tenure) replace the dead `type` enum.
+  // Add the new columns (ALTER-ADD backfills existing rows to the defaults:
+  // domains=["general"], lifespan='ephemeral'), then retire `type`. Its partial
+  // index references the column, so drop the index before the column.
+  if (!columns.has("domains_json")) {
+    db.prepare("ALTER TABLE memories ADD COLUMN domains_json TEXT NOT NULL DEFAULT '[\"general\"]'").run();
+  }
+  if (!columns.has("lifespan")) {
+    db.prepare("ALTER TABLE memories ADD COLUMN lifespan TEXT NOT NULL DEFAULT 'ephemeral'").run();
+  }
+  if (!columns.has("offered_count")) {
+    db.prepare("ALTER TABLE memories ADD COLUMN offered_count INTEGER NOT NULL DEFAULT 0").run();
+  }
+  if (!columns.has("last_offered_at")) {
+    db.prepare("ALTER TABLE memories ADD COLUMN last_offered_at TEXT").run();
+  }
+  if (columns.has("type")) {
+    db.prepare("DROP INDEX IF EXISTS idx_memories_repo_type_updated").run();
+    try {
+      db.prepare("ALTER TABLE memories DROP COLUMN type").run();
+    } catch {
+      // Older SQLite without DROP COLUMN: leave the dormant column in place. It
+      // is no longer read or written; new inserts never name it.
+    }
+  }
+  // Created here (not in the DDL) so it lands only after `lifespan` exists — a
+  // legacy table acquires the column above, a fresh table already has it.
+  db.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_memories_repo_lifespan_updated
+       ON memories(repo_id, lifespan, updated_at DESC)
+       WHERE deleted = 0`,
+  ).run();
+  const fileLinkColumns = new Set(
+    db.prepare("PRAGMA table_info(memory_file_links)").all().map((row) => String(row.name || "")),
+  );
+  if (!fileLinkColumns.has("content_hash")) {
+    // Existing file links predate anchor-drift tracking; NULL baseline means
+    // "not yet seen", and the first reconcile adopts the current hash without
+    // penalty rather than retroactively condemning old memories.
+    db.prepare("ALTER TABLE memory_file_links ADD COLUMN content_hash TEXT").run();
+  }
 }
 
 function memoryDisabled(action, versionId) {
@@ -680,11 +871,6 @@ function memoryDisabled(action, versionId) {
     code: "memory_disabled",
     message: "Native ATLAS v2 memory is disabled by policy",
   });
-}
-
-function normalizeMemoryType(value) {
-  const raw = String(value || "").trim().toLowerCase();
-  return MEMORY_TYPES.has(raw) ? raw : null;
 }
 
 function effectiveRepo(ctxRepoId, paramRepoId) {
@@ -724,9 +910,11 @@ function clampInt(value, min, max, fallback) {
   return Math.max(min, Math.min(max, n));
 }
 
-function memoryContentHash({ type, title, content, tags, symbolIds, fileRelPaths }) {
+// Identity hash. Domain/lifespan are mutable policy (filter + tenure), not
+// identity, so the same knowledge re-derived with different domain tags still
+// dedupes. `type` was dropped from the model, so it is gone from the hash too.
+function memoryContentHash({ title, content, tags, symbolIds, fileRelPaths }) {
   return sha256Hex(JSON.stringify({
-    type,
     title,
     content,
     tags: [...tags].sort(),
@@ -741,6 +929,17 @@ function findActiveMemoryByHash(db, repoId, contentHash) {
   ).get(repoId, contentHash);
 }
 
+// Most-recently pruned soft-deleted twin for a content hash. Drives
+// resurrection: re-deriving pruned content revives the original row.
+function findDeletedMemoryByHash(db, repoId, contentHash) {
+  return db.prepare(
+    `SELECT * FROM memories
+     WHERE repo_id = ? AND content_hash = ? AND deleted = 1
+     ORDER BY deleted_at DESC
+     LIMIT 1`,
+  ).get(repoId, contentHash);
+}
+
 function findMemoryById(db, memoryId) {
   return db.prepare("SELECT * FROM memories WHERE memory_id = ? LIMIT 1").get(memoryId);
 }
@@ -749,15 +948,15 @@ function findMemoryById(db, memoryId) {
 // memory. Distinct lessons that merely share vocabulary must stay separate.
 const NEAR_DUPLICATE_JACCARD = 0.9;
 
-function findNearDuplicateMemory(db, repoId, type, title, content) {
+function findNearDuplicateMemory(db, repoId, title, content) {
   const target = new Set(tokenize(`${title}\n${content}`));
   if (target.size === 0) return null;
   const rows = db.prepare(
     `SELECT memory_id, title, content FROM memories
-     WHERE repo_id = ? AND type = ? AND deleted = 0
+     WHERE repo_id = ? AND deleted = 0
      ORDER BY updated_at DESC
      LIMIT 200`,
-  ).all(repoId, type);
+  ).all(repoId);
   for (const row of rows) {
     const candidate = new Set(tokenize(`${row.title || ""}\n${row.content || ""}`));
     if (jaccardSimilarity(target, candidate) >= NEAR_DUPLICATE_JACCARD) return row;
@@ -773,10 +972,33 @@ function jaccardSimilarity(a, b) {
 }
 
 /**
+ * Usage-based ephemeral prune (NOT time-based): an ephemeral memory that has
+ * been surfaced to agents enough times without earning promotion to durable has
+ * had its chance and is dead weight, so soft-delete it. Because corroboration
+ * promotes to durable, `ephemeral` already implies `uncorroborated` — the rule
+ * is simply ephemeral AND offered_count >= K. A dormant memory (never surfaced)
+ * is never touched, no matter how old. Soft-delete is recoverable: re-derivation
+ * resurrects and promotes it.
+ */
+function pruneSurfacedEphemeral(db, repoId, now) {
+  try {
+    db.prepare(
+      `UPDATE memories
+       SET deleted = 1, deleted_at = ?, updated_at = ?
+       WHERE repo_id = ? AND deleted = 0
+         AND lifespan = 'ephemeral' AND offered_count >= ?`,
+    ).run(now, now, repoId, MEMORY_LIFESPAN.surfacedRetireCount);
+  } catch {
+    // Pruning is best-effort; never fail a write because the sweep could not run.
+  }
+}
+
+/**
  * Keep each repo's active memory count under policy.memoryMaxPerRepo by
- * soft-deleting the least valuable rows (stale first, then lowest confidence,
- * then oldest). The just-written memory has the newest updated_at, so it is
- * only evicted if everything else outranks it.
+ * soft-deleting the least valuable rows. Order: stale first, then ephemeral
+ * (transient) over durable, then the more-surfaced-yet-still-ephemeral (clearer
+ * noise), then lowest confidence, then oldest. The just-written memory has the
+ * newest updated_at, so it is only evicted if everything else outranks it.
  */
 function enforceMemoryCap(db, repoId, policy, now) {
   const cap = clampInt(policy?.memoryMaxPerRepo, 0, 100_000, 0);
@@ -788,7 +1010,11 @@ function enforceMemoryCap(db, repoId, policy, now) {
   const victims = db.prepare(
     `SELECT memory_id FROM memories
      WHERE repo_id = ? AND deleted = 0
-     ORDER BY stale DESC, confidence ASC, updated_at ASC
+     ORDER BY stale DESC,
+              (lifespan = 'ephemeral') DESC,
+              offered_count DESC,
+              confidence ASC,
+              updated_at ASC
      LIMIT ?`,
   ).all(repoId, count - cap);
   const evict = db.prepare(
@@ -798,19 +1024,29 @@ function enforceMemoryCap(db, repoId, policy, now) {
 }
 
 function reviveMemory(db, memoryId, now) {
+  // Independent re-derivation is the strongest automatic signal a memory is
+  // still true: clear any suppression, bump confidence toward corroborated,
+  // promote it to durable (corroboration is exactly what earns durable tenure),
+  // and resurrect it if a prior prune had soft-deleted it. Resurrection IS the
+  // recovery route that keeps usage-driven pruning from being a one-way door —
+  // a wrongly-dropped fact comes back the moment it is rediscovered.
   db.prepare(
     `UPDATE memories
      SET stale = 0,
          stale_reason = NULL,
          wrong_at = NULL,
          wrong_count = 0,
+         confidence = MIN(?, confidence + ?),
+         lifespan = 'durable',
+         deleted = 0,
+         deleted_at = NULL,
          updated_at = ?
      WHERE memory_id = ?`,
-  ).run(now, memoryId);
+  ).run(MEMORY_CONFIDENCE.max, MEMORY_CONFIDENCE.reviveBump, now, memoryId);
   getRetrievalCache().invalidateAll();
 }
 
-function replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths) {
+function replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths, fileBaselines = new Map()) {
   db.prepare("DELETE FROM memory_symbol_links WHERE memory_id = ?").run(memoryId);
   db.prepare("DELETE FROM memory_file_links WHERE memory_id = ?").run(memoryId);
   const symIns = db.prepare(
@@ -822,9 +1058,90 @@ function replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths) {
     symIns.run(memoryId, parsed.content_hash, parsed.local_id);
   }
   const fileIns = db.prepare(
-    "INSERT OR IGNORE INTO memory_file_links(memory_id, repo_rel_path) VALUES(?, ?)",
+    "INSERT OR IGNORE INTO memory_file_links(memory_id, repo_rel_path, content_hash) VALUES(?, ?, ?)",
   );
-  for (const repoRelPath of fileRelPaths) fileIns.run(memoryId, repoRelPath);
+  for (const repoRelPath of fileRelPaths) {
+    fileIns.run(memoryId, repoRelPath, fileBaselines.get(repoRelPath) ?? null);
+  }
+}
+
+/**
+ * Current blob hash for each anchored file, read from the view's path_to_blob.
+ * The baseline that anchor-drift reconciliation later compares against. Returns
+ * an empty map when there is no view (baselines stay NULL until first reconcile).
+ *
+ * @param {import("../contracts/api.js").View | null | undefined} view
+ * @param {string[]} fileRelPaths
+ * @returns {Map<string, string>}
+ */
+function viewFilePathHashes(view, fileRelPaths) {
+  const out = new Map();
+  const viewDb = unsafeViewDb(view);
+  if (!viewDb || fileRelPaths.length === 0) return out;
+  try {
+    const stmt = viewDb.prepare("SELECT content_hash FROM path_to_blob WHERE repo_rel_path = ? LIMIT 1");
+    for (const repoRelPath of fileRelPaths) {
+      const hash = stmt.get(repoRelPath)?.content_hash;
+      if (hash) out.set(repoRelPath, String(hash));
+    }
+  } catch {
+    return out; // baseline capture is best-effort
+  }
+  return out;
+}
+
+/**
+ * @param {import("../contracts/api.js").View | null | undefined} view
+ * @returns {import("better-sqlite3").Database | null}
+ */
+function unsafeViewDb(view) {
+  return typeof /** @type {any} */ (view)?._unsafeDb === "function"
+    ? /** @type {any} */ (view)._unsafeDb()
+    : null;
+}
+
+/** Memory ids actually returned (surfaced) by a memory.get response. */
+function collectOfferedMemoryIds(data) {
+  const ids = new Set();
+  for (const group of [data?.symbols, data?.files]) {
+    if (!group || typeof group !== "object") continue;
+    for (const list of Object.values(group)) {
+      for (const memory of Array.isArray(list) ? list : []) {
+        if (memory?.memoryId) ids.add(memory.memoryId);
+      }
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Record that memories were surfaced to an agent (the signal the usage-based
+ * prune counts). Opens its own brief read-write connection so the read path
+ * stays read-only, throttles to at most one count per memory per window, and is
+ * fully best-effort — a failure here must never affect the get it accompanies.
+ */
+function recordMemoriesOffered(ledger, memoryIds) {
+  if (!Array.isArray(memoryIds) || memoryIds.length === 0) return;
+  let db = null;
+  try {
+    db = openMemoryDbForLedger(ledger);
+    if (!db) return;
+    const now = new Date().toISOString();
+    const throttleCutoff = new Date(Date.now() - MEMORY_LIFESPAN.offerThrottleMs).toISOString();
+    const stmt = db.prepare(
+      `UPDATE memories
+       SET offered_count = offered_count + 1, last_offered_at = ?
+       WHERE memory_id = ? AND deleted = 0
+         AND (last_offered_at IS NULL OR last_offered_at < ?)`,
+    );
+    db.transaction(() => {
+      for (const id of memoryIds) stmt.run(now, id, throttleCutoff);
+    })();
+  } catch {
+    // Best-effort surfacing accounting; never break a read.
+  } finally {
+    try { db?.close?.(); } catch { /* ignore */ }
+  }
 }
 
 function candidateRows(db, repoId, { includeDeleted = false } = {}) {
@@ -870,11 +1187,32 @@ function fetchMemoryLinks(db, memoryIds) {
   return { symbolsById, filesById };
 }
 
+// Domains a memory carries, parsed from domains_json. Legacy/empty rows read as
+// the catch-all bucket.
+function memoryRowDomains(row) {
+  try {
+    const parsed = JSON.parse(String(row?.domains_json || "[]"));
+    const out = Array.isArray(parsed) ? parsed.map((d) => String(d || "").toLowerCase()).filter(Boolean) : [];
+    return out.length > 0 ? out : [MEMORY_DOMAIN_DEFAULT];
+  } catch {
+    return [MEMORY_DOMAIN_DEFAULT];
+  }
+}
+
 function filterRows(rows, params = {}, links, { anchorMode = "all", excludeStale = false, policy = null } = {}) {
   const symbols = safeSymbolIds(params.symbolIds || []);
   const files = normalizePaths(params.fileRelPaths || []);
+  // Domain filter is a strict whitelist: a scoped request returns only memories
+  // tagged with one of the requested domains. `general` is its own bucket, not a
+  // wildcard, so it is excluded unless explicitly requested. No request = no
+  // domain filtering (the normal anchor-only path).
+  const requestedDomains = normalizeRequestedDomains(params.domains);
   return rows.filter((row) => {
     if (excludeStale && memoryIsStaleForRead(row, policy)) return false;
+    if (requestedDomains.length > 0) {
+      const rowDomains = memoryRowDomains(row);
+      if (!rowDomains.some((d) => requestedDomains.includes(d))) return false;
+    }
     const linkedSymbols = links.symbolsById.get(row.memory_id) || [];
     const linkedFiles = links.filesById.get(row.memory_id) || [];
     const symbolHit = symbols.length > 0 && symbols.some((s) => linkedSymbols.includes(s));
@@ -933,16 +1271,29 @@ function memoryContentByAnchor(rows, links, params = {}) {
   const requestedFiles = normalizePaths(params.fileRelPaths || []);
   const symbols = Object.fromEntries(requestedSymbols.map((symbolId) => [symbolId, []]));
   const files = Object.fromEntries(requestedFiles.map((fileRelPath) => [fileRelPath, []]));
-  const sorted = [...rows].sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+  // Confidence-aware ordering: the strongest, freshest memories win the limited
+  // per-anchor slots as a repo's table grows. Ties fall back to recency so the
+  // ordering stays deterministic. memoryScore folds confidence + recency and is
+  // the same scorer mirrored by the Rust port, so JS and native agree.
+  const nowMs = Date.now();
+  const sorted = [...rows].sort((a, b) => {
+    const delta = memoryScore(b, { nowMs }) - memoryScore(a, { nowMs });
+    if (delta !== 0) return delta;
+    return String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+  });
   for (const row of sorted) {
     const linkedSymbols = links.symbolsById.get(row.memory_id) || [];
     const linkedFiles = activeMemoryFileLinks(row, links);
     const memory = memoryForAnchorGet(row, links);
     for (const symbolId of requestedSymbols) {
-      if (linkedSymbols.includes(symbolId)) symbols[symbolId].push(memory);
+      if (linkedSymbols.includes(symbolId) && symbols[symbolId].length < MEMORY_GET_PER_ANCHOR_LIMIT) {
+        symbols[symbolId].push(memory);
+      }
     }
     for (const fileRelPath of requestedFiles) {
-      if (linkedFiles.includes(fileRelPath)) files[fileRelPath].push(memory);
+      if (linkedFiles.includes(fileRelPath) && files[fileRelPath].length < MEMORY_GET_PER_ANCHOR_LIMIT) {
+        files[fileRelPath].push(memory);
+      }
     }
   }
   for (const key of Object.keys(symbols)) {
@@ -960,6 +1311,7 @@ function memoryForAnchorGet(row, links) {
     memory_id: row.memory_id,
     title: row.title,
     content: row.content,
+    domains: memoryRowDomains(row),
     source: row.source || "agent",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -992,7 +1344,13 @@ function memoryScore(row, detail) {
   score += recencyScore(row.updated_at, detail?.nowMs ?? Date.now());
   score += matchedSymbols.length * 2;
   score += matchedFiles.length;
-  if (detail?.taskType && row.type === detail.taskType) score += 0.75;
+  // Domain-relevance bonus: when the caller scopes to domains, a memory tagged
+  // with one of them ranks above the rest within the (already domain-filtered)
+  // set. Replaces the old type===taskType bonus, whose taxonomies never matched.
+  const scopeDomains = Array.isArray(detail?.domains) ? detail.domains.map((d) => String(d).toLowerCase()) : [];
+  if (scopeDomains.length > 0 && memoryRowDomains(row).some((d) => scopeDomains.includes(d))) {
+    score += 0.75;
+  }
   const query = cleanString(detail?.query, 1000).toLowerCase();
   if (query) {
     const text = memorySearchText(row, Array.isArray(detail?.tags) ? detail.tags : []);
@@ -1098,5 +1456,137 @@ function sweepStaleMemories(db, repoId, policy) {
     ).run(repoId, cutoff);
   } catch {
     // Staleness is best-effort; never fail a read because the sweep could not run.
+  }
+}
+
+// Baseline marker for a file link already counted once as deleted, so the same
+// deletion does not re-penalize a partially-surviving memory on every rebuild.
+const ANCHOR_DELETED_TOMBSTONE = "";
+
+/**
+ * Anchor-drift decay: confidence falls when the CODE a memory is anchored to
+ * changes underneath it — the signal the model is built on, not a clock. Runs
+ * at most once per view rebuild (gated by built_at recorded in memory_meta) so
+ * each real code change is accounted exactly once. A file's blob content_hash
+ * subsumes symbol-level change: edit any symbol and the file hash moves.
+ *
+ * Per active anchored memory:
+ *   - file link missing from path_to_blob          -> DELETED (tombstoned)
+ *   - file link present, blob hash != baseline      -> CHANGED (re-baselined)
+ *   - symbol link's blob hash gone from path_to_blob -> DRIFTED (dead link dropped)
+ * Every anchor gone -> soft-deleted (resurrectable on re-derivation). Partial
+ * drift -> confidence *= (1 - driftWeight * driftedFraction); crossing the floor
+ * soft-deletes. Intact anchors are never touched.
+ *
+ * @param {import("better-sqlite3").Database} db
+ * @param {import("../contracts/api.js").View | null | undefined} view
+ * @param {string} repoId
+ * @param {string} now
+ */
+function reconcileAnchorConfidence(db, view, repoId, now) {
+  const viewDb = unsafeViewDb(view);
+  if (!viewDb) return;
+  const builtAt = String(/** @type {any} */ (view)?.meta?.()?.built_at || "");
+  if (!builtAt) return;
+  // Per-repo gate: one memory.db can hold several repos, each with its own code
+  // state, so a global gate would let the first repo's store starve the rest.
+  const metaKey = `last_anchor_reconcile_built_at:${repoId}`;
+  const seen = db.prepare("SELECT value FROM memory_meta WHERE key = ?").get(metaKey)?.value;
+  if (seen === builtAt) return; // this view rebuild was already reconciled for this repo
+
+  let pathStmt;
+  let blobStmt;
+  try {
+    pathStmt = viewDb.prepare("SELECT content_hash FROM path_to_blob WHERE repo_rel_path = ? LIMIT 1");
+    blobStmt = viewDb.prepare("SELECT 1 AS hit FROM path_to_blob WHERE content_hash = ? LIMIT 1");
+  } catch {
+    return; // reconciliation is advisory; never fail a write because of it
+  }
+  const pathHashCache = new Map();
+  const pathHash = (p) => {
+    if (!pathHashCache.has(p)) pathHashCache.set(p, pathStmt.get(p)?.content_hash ?? null);
+    return pathHashCache.get(p);
+  };
+  const blobAliveCache = new Map();
+  const blobAlive = (h) => {
+    if (!blobAliveCache.has(h)) blobAliveCache.set(h, !!blobStmt.get(h));
+    return blobAliveCache.get(h);
+  };
+
+  const memories = db.prepare(
+    "SELECT memory_id, confidence FROM memories WHERE repo_id = ? AND deleted = 0",
+  ).all(repoId);
+  const fileLinksStmt = db.prepare("SELECT repo_rel_path, content_hash FROM memory_file_links WHERE memory_id = ?");
+  const symLinksStmt = db.prepare("SELECT content_hash, local_id FROM memory_symbol_links WHERE memory_id = ?");
+  const rebaseFile = db.prepare("UPDATE memory_file_links SET content_hash = ? WHERE memory_id = ? AND repo_rel_path = ?");
+  const dropSym = db.prepare("DELETE FROM memory_symbol_links WHERE memory_id = ? AND content_hash = ? AND local_id = ?");
+  const setConf = db.prepare("UPDATE memories SET confidence = ? WHERE memory_id = ?");
+  const softDelete = db.prepare("UPDATE memories SET deleted = 1, deleted_at = ?, updated_at = ? WHERE memory_id = ?");
+
+  const run = db.transaction(() => {
+    for (const mem of memories) {
+      const fileLinks = fileLinksStmt.all(mem.memory_id);
+      const symLinks = symLinksStmt.all(mem.memory_id);
+      const total = fileLinks.length + symLinks.length;
+      if (total === 0) continue; // unanchored memories have no drift signal
+
+      let drifted = 0;
+      let filesDeleted = 0;
+      for (const link of fileLinks) {
+        const current = pathHash(link.repo_rel_path);
+        const baseline = link.content_hash;
+        if (current === null) {
+          // Only a previously-known file (a real captured baseline that is now
+          // gone) counts as deleted. A NULL baseline means the path was never
+          // indexed — newer than the view or outside its scope — so we must not
+          // condemn the memory for the view's blind spot.
+          if (baseline && baseline !== ANCHOR_DELETED_TOMBSTONE) {
+            drifted += 1;
+            filesDeleted += 1;
+            rebaseFile.run(ANCHOR_DELETED_TOMBSTONE, mem.memory_id, link.repo_rel_path);
+          } else if (baseline === ANCHOR_DELETED_TOMBSTONE) {
+            filesDeleted += 1; // already counted once on a prior reconcile
+          }
+        } else if (!baseline || baseline === ANCHOR_DELETED_TOMBSTONE) {
+          // First sight, or a deleted file that returned: adopt as baseline.
+          rebaseFile.run(current, mem.memory_id, link.repo_rel_path);
+        } else if (baseline !== current) {
+          drifted += 1;
+          rebaseFile.run(current, mem.memory_id, link.repo_rel_path);
+        }
+      }
+      let symbolsDrifted = 0;
+      for (const link of symLinks) {
+        if (!blobAlive(link.content_hash)) {
+          drifted += 1;
+          symbolsDrifted += 1;
+          dropSym.run(mem.memory_id, link.content_hash, link.local_id);
+        }
+      }
+
+      const everyFileGone = fileLinks.length === 0 || filesDeleted === fileLinks.length;
+      const everySymbolGone = symLinks.length === 0 || symbolsDrifted === symLinks.length;
+      if (everyFileGone && everySymbolGone && (filesDeleted > 0 || symbolsDrifted > 0)) {
+        softDelete.run(now, now, mem.memory_id);
+        continue;
+      }
+      if (drifted > 0) {
+        const factor = 1 - MEMORY_CONFIDENCE.driftWeight * (drifted / total);
+        const next = clampConfidence(Number(mem.confidence || 0) * factor);
+        if (next <= MEMORY_CONFIDENCE.floor) {
+          softDelete.run(now, now, mem.memory_id);
+        } else {
+          setConf.run(next, mem.memory_id);
+        }
+      }
+    }
+    db.prepare(
+      "INSERT INTO memory_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    ).run(metaKey, builtAt);
+  });
+  try {
+    run();
+  } catch {
+    // Advisory: a reconciliation failure must never break a memory write.
   }
 }

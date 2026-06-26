@@ -209,6 +209,7 @@ export function createStandardToolHandlerMap({
   deterministicInspectFile,
   deterministicHashFile,
   deterministicPullBrief,
+  deterministicGetBrief,
   deterministicResizeImage,
   deterministicValidateArtifactOutput,
   deterministicPruneArtifactOutput,
@@ -344,6 +345,12 @@ export function createStandardToolHandlerMap({
     },
     pull_brief(args, ctx) {
       return deterministicPullBrief(args, ctx.cwd, ctx.scopePredicates);
+    },
+    get_brief(args, ctx) {
+      if (typeof deterministicGetBrief !== "function") {
+        return "Error: get_brief is not wired into this provider runtime.";
+      }
+      return deterministicGetBrief(args, ctx.cwd, ctx.scopePredicates);
     },
     resize_image(args, ctx) {
       return deterministicResizeImage(args, ctx.cwd, ctx.scopePredicates);

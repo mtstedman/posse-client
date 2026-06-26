@@ -239,7 +239,6 @@ export class Display {
     this._toolsTab = 0;         // 0=tools, 1=roles, 2=locks
     this._toolsTabScrolls = [0, 0, 0];
     this._monitorSelectedJobId = null;
-    this._monitorPromptLens = false;
     this._providerUsageRefreshTimer = null;
     this._lastProviderUsageRefreshErrorAt = 0;
     this._providerUsageRefresh = typeof providerUsageRefresh === "function"
@@ -1615,9 +1614,6 @@ export class Display {
   }
   _buildMonitorFocusLines(...args) {
     return this._rightPanelRenderer._buildMonitorFocusLines.call(this, ...args);
-  }
-  _buildMonitorPromptLens(...args) {
-    return this._rightPanelRenderer._buildMonitorPromptLens.call(this, ...args);
   }
   _monitorRecentEventsForJob(...args) {
     return this._rightPanelRenderer._monitorRecentEventsForJob.call(this, ...args);

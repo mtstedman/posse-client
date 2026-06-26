@@ -11,7 +11,7 @@ import {
 } from "../../domains/runtime/functions/sensitive-paths.js";
 import { createInspectFileExecutor } from "../../domains/worker/functions/helpers/file-inspector.js";
 import { createGitHistoryExecutor } from "../../domains/git/functions/history.js";
-import { createPullBriefExecutor } from "./brief.js";
+import { createPullBriefExecutor, createGetBriefExecutor } from "./brief.js";
 import { createBashExecutor } from "./bash-executor.js";
 import {
   convertImageToPng,
@@ -390,6 +390,7 @@ export {
   TOOL_EDIT_FILE,
   TOOL_EXTRACT_IMAGE_TEXT,
   TOOL_GENERATE_IMAGE,
+  TOOL_GET_BRIEF,
   TOOL_GET_OPERATOR_FEEDBACK,
   TOOL_GIT_HISTORY,
   TOOL_HASH_FILE,
@@ -2092,5 +2093,6 @@ export function createDeterministicToolkit({
     execRunTest: wrapDeterministicExecutor("run_test", execRunTest),
     execRunTestSuite: wrapDeterministicExecutor("run_test_suite", execRunTestSuite),
     execPullBrief: wrapDeterministicExecutor("pull_brief", createPullBriefExecutor(safePathImpl, { skipDirs })),
+    execGetBrief: wrapDeterministicExecutor("get_brief", createGetBriefExecutor()),
   };
 }

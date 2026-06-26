@@ -149,6 +149,7 @@ function readObservationFileRows({
   jobId = null,
   workItemId = null,
   typePrefix = null,
+  excludeTypeSuffix = null,
   limit = 100,
   order = "desc",
 } = {}) {
@@ -160,9 +161,55 @@ function readObservationFileRows({
       if (!matchesNumber(entry.job_id ?? entry.job, jobId)) return false;
       if (!matchesNumber(entry.work_item_id ?? entry.wi, workItemId)) return false;
       if (typePrefix && !type.startsWith(typePrefix)) return false;
+      if (excludeTypeSuffix && type.endsWith(excludeTypeSuffix)) return false;
       return true;
     },
   }).map(normalizeObservationRow).filter(Boolean);
+}
+
+// Harness-origin ATLAS prefetch (tool.atlas.prefetch) is recorded with the
+// agent's job_id so operator analytics can join it to the call it warms — but it
+// is NOT an agent tool invocation, it's handoff/prefetch behavior. Keep it out of
+// the agent-facing tool feed and per-job tool counts. (The admin ATLAS report
+// still queries job_observations directly by that type, so analytics are intact.)
+const HARNESS_PREFETCH_TYPE_SUFFIX = ".prefetch";
+
+function _rowDetailObject(row) {
+  if (row && row.detail && typeof row.detail === "object") return row.detail;
+  const json = row?.detail_json;
+  if (typeof json === "string" && json) {
+    try { return JSON.parse(json); } catch { return null; }
+  }
+  return null;
+}
+
+// Collapse the start/finish invocation pair (two append-only rows correlated by
+// `inv` in detail) into one display row. A "<type>.started" row whose `inv` also
+// has a finish row is dropped (the finish wins, carrying the measured duration);
+// a started row with no finish yet is kept and surfaced as in-flight, with its
+// type normalized back to the base "<type>" so it reads as the running tool.
+// Rows with no `inv` (uninstrumented tools, atlas, etc.) pass straight through.
+function _collapseToolInvocationRows(rows) {
+  const finishedInv = new Set();
+  for (const row of rows) {
+    const type = String(row?.observation_type || "");
+    if (type.endsWith(".started")) continue;
+    const inv = _rowDetailObject(row)?.inv;
+    if (inv) finishedInv.add(String(inv));
+  }
+  const out = [];
+  for (const row of rows) {
+    const type = String(row?.observation_type || "");
+    const detail = _rowDetailObject(row);
+    const inv = detail?.inv != null ? String(detail.inv) : null;
+    if (type.endsWith(".started")) {
+      if (inv && finishedInv.has(inv)) continue; // finish row supersedes it
+      out.push({ ...row, observation_type: type.slice(0, -".started".length), _inFlight: true, _durationMs: null });
+    } else {
+      out.push({ ...row, _inFlight: false, _durationMs: Number.isFinite(detail?.duration_ms) ? detail.duration_ms : null });
+    }
+  }
+  return out;
 }
 
 function enrichToolInvocationRows(db, rows, { includeUnscoped = true } = {}) {
@@ -184,6 +231,8 @@ function enrichToolInvocationRows(db, rows, { includeUnscoped = true } = {}) {
       job_type: job?.job_type ?? null,
       provider: job?.provider ?? null,
       status: job?.status ?? null,
+      in_flight: !!row._inFlight,
+      duration_ms: row._durationMs ?? null,
     });
   }
   return enriched;
@@ -776,6 +825,37 @@ export function atlasSummaryHint(input = {}, action = null) {
     if (args.repoId) return _truncate(args.repoId, 80);
   }
 
+  if (a === "memory.store") {
+    if (args.title) return _truncate(String(args.title), 80);
+    const anchors = firstArrayEntry(args.fileRelPaths, 1)
+      || (Array.isArray(args.symbolIds) && args.symbolIds.length
+        ? `${args.symbolIds.length} symbol${args.symbolIds.length === 1 ? "" : "s"}`
+        : null);
+    if (anchors) return _truncate(anchors, 80);
+  }
+
+  if (a === "memory.feedback") {
+    const parts = [];
+    if (args.verdict) parts.push(String(args.verdict));
+    if (args.memoryId) parts.push(_truncate(String(args.memoryId), 24));
+    if (parts.length > 0) return parts.join(" ");
+  }
+
+  if (a === "memory.get" || a === "memory.surface") {
+    // Memory retrieval is anchored on exact files/symbols (and optional domain
+    // filters) — surface those so the log shows WHAT was probed, not a bare
+    // "memory.get". The generic fallback below only knows singular query/file
+    // keys, so these array-shaped anchors would otherwise read as no detail.
+    const files = firstArrayEntry(args.fileRelPaths, 2);
+    const symbolCount = Array.isArray(args.symbolIds) ? args.symbolIds.length : 0;
+    const domains = firstArrayEntry(args.domains, 3);
+    const parts = [];
+    if (files) parts.push(files);
+    else if (symbolCount > 0) parts.push(`${symbolCount} symbol${symbolCount === 1 ? "" : "s"}`);
+    if (domains) parts.push(`[${domains}]`);
+    if (parts.length > 0) return _truncate(parts.join(" "), 80);
+  }
+
   // Generic fallback — mirrors the original priority order but ordered so
   // action-specific hints above run first.
   const candidates = [
@@ -938,6 +1018,83 @@ export function recordToolInvocation({
   });
 }
 
+let _toolInvocationSeq = 0;
+
+// Begin a tool invocation: write an append-only "<type>.started" observation the
+// moment the request is made (not just when it finishes), so the telemetry — and
+// the live monitor — can see in-flight tools. Returns a correlation token to pass
+// to finishToolInvocation; null when the tool isn't summarizable. Recording must
+// never break tool execution, so this is fully guarded.
+export function beginToolInvocation({
+  tool = null,
+  input = null,
+  cwd = null,
+  work_item_id = undefined,
+  job_id = undefined,
+  attempt_id = undefined,
+} = {}) {
+  try {
+    const summary = _summarizeToolUse({ tool, input }, cwd);
+    if (!summary) return null;
+    const context = getObservationContext() || {};
+    const resolvedJobId = job_id ?? context.job_id ?? null;
+    const startedAtMs = Date.now();
+    const inv = `${resolvedJobId ?? "g"}-${startedAtMs}-${++_toolInvocationSeq}`;
+    recordObservation({
+      work_item_id: work_item_id ?? context.work_item_id ?? null,
+      job_id: resolvedJobId,
+      attempt_id: attempt_id ?? context.attempt_id ?? null,
+      observation_type: `${summary.observation_type}.started`,
+      summary: summary.summary,
+      detail: { ...(summary.detail && typeof summary.detail === "object" ? summary.detail : {}), inv, phase: "start" },
+    });
+    return { inv, startedAtMs };
+  } catch {
+    return null;
+  }
+}
+
+// Complete an invocation opened by beginToolInvocation: writes the normal
+// completion observation (same "<type>" as before, so existing consumers are
+// unchanged) correlated by `inv`, carrying ok/status and the measured duration.
+// Recorded on success AND failure so an in-flight "started" row is always closed.
+export function finishToolInvocation(invocation, {
+  tool = null,
+  input = null,
+  cwd = null,
+  ok = true,
+  error = null,
+  work_item_id = undefined,
+  job_id = undefined,
+  attempt_id = undefined,
+  extraDetail = null,
+} = {}) {
+  try {
+    const summary = _summarizeToolUse({ tool, input }, cwd);
+    if (!summary) return;
+    const context = getObservationContext() || {};
+    const inv = invocation?.inv ?? null;
+    const durationMs = invocation?.startedAtMs ? Math.max(0, Date.now() - invocation.startedAtMs) : null;
+    const detail = {
+      ...(summary.detail && typeof summary.detail === "object" ? summary.detail : {}),
+      ...(extraDetail && typeof extraDetail === "object" ? extraDetail : {}),
+      ...(inv ? { inv } : {}),
+      phase: "finish",
+      ok: !!ok,
+      ...(durationMs != null ? { duration_ms: durationMs } : {}),
+      ...(error ? { error: String(error).slice(0, 200) } : {}),
+    };
+    recordObservation({
+      work_item_id: work_item_id ?? context.work_item_id ?? null,
+      job_id: job_id ?? context.job_id ?? null,
+      attempt_id: attempt_id ?? context.attempt_id ?? null,
+      observation_type: summary.observation_type,
+      summary: ok ? summary.summary : `${summary.summary} — failed`,
+      detail,
+    });
+  } catch { /* best effort */ }
+}
+
 export function filterProviderToolUseReplay(toolUses = [], { skipToolkitDeterministic = false } = {}) {
   if (!Array.isArray(toolUses) || toolUses.length === 0) return [];
   if (!skipToolkitDeterministic) return toolUses;
@@ -1045,11 +1202,12 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
   const db = getDb();
   const cappedLimit = Math.max(0, Number(limit) || 0);
   const candidateLimit = includeUnscoped ? cappedLimit : Math.max(200, cappedLimit * 10);
-  const fileRows = readObservationFileRows({ typePrefix: "tool.", limit: candidateLimit, order: "desc" });
+  const fileRows = readObservationFileRows({ typePrefix: "tool.", excludeTypeSuffix: HARNESS_PREFETCH_TYPE_SUFFIX, limit: candidateLimit, order: "desc" });
   const dbRows = currentRunOnly ? db.prepare(`
     SELECT o.*
     FROM job_observations o
     WHERE o.observation_type LIKE 'tool.%'
+      AND o.observation_type NOT LIKE '%.prefetch'
       AND o.created_at >= ?
     ORDER BY o.id DESC
     LIMIT ?
@@ -1057,12 +1215,13 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
     SELECT o.*
     FROM job_observations o
     WHERE o.observation_type LIKE 'tool.%'
+      AND o.observation_type NOT LIKE '%.prefetch'
     ORDER BY o.id DESC
     LIMIT ?
   `).all(candidateLimit);
   return enrichToolInvocationRows(
     db,
-    mergeObservationRows([...fileRows, ...dbRows], "desc", candidateLimit),
+    _collapseToolInvocationRows(mergeObservationRows([...fileRows, ...dbRows], "desc", candidateLimit)),
     { includeUnscoped },
   ).slice(0, cappedLimit);
 }
@@ -1074,17 +1233,20 @@ export function getToolInvocationCountsByJob({ limit = 50 } = {}) {
   const db = getDb();
   const cappedLimit = Math.max(0, Number(limit) || 0);
   const candidateLimit = Math.max(1000, cappedLimit * 200);
-  const fileRows = readObservationFileRows({ typePrefix: "tool.", limit: candidateLimit, order: "desc" });
+  const fileRows = readObservationFileRows({ typePrefix: "tool.", excludeTypeSuffix: HARNESS_PREFETCH_TYPE_SUFFIX, limit: candidateLimit, order: "desc" });
   const dbRows = db.prepare(`
     SELECT *
     FROM job_observations
     WHERE observation_type LIKE 'tool.%'
+      AND observation_type NOT LIKE '%.prefetch'
     ORDER BY id DESC
     LIMIT ?
   `).all(candidateLimit);
   const rows = mergeObservationRows([...fileRows, ...dbRows], "desc", candidateLimit)
     .filter((row) => row.job_id != null
       && row.observation_type !== "tool.chain_read"
+      && !String(row.observation_type || "").endsWith(".started")
+      && !String(row.observation_type || "").endsWith(HARNESS_PREFETCH_TYPE_SUFFIX)
       && String(row.observation_type || "").startsWith("tool."));
 
   const groups = new Map();
