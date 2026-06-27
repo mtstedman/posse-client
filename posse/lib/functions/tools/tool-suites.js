@@ -40,6 +40,9 @@ const TOOLS_SUITE = [
   { name: "extract_image_text", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "bash", mutatesWorktree: true, advertise: ["function", "mcp"] },
   { name: "generate_image", mutatesWorktree: false, advertise: ["function", "mcp"] },
+  // Opt-in project DB access. mutatesWorktree:false — DB writes (when granted)
+  // don't touch the git working tree; capability is gated by per-repo config.
+  { name: "project_db_query", mutatesWorktree: false, advertise: ["function", "mcp"] },
   // Researcher chain-read tools: offered on both transports now.
   { name: "chain_read", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "chain_verdict", mutatesWorktree: false, advertise: ["function", "mcp"] },

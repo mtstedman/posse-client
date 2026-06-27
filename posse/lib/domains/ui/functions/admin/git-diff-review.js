@@ -19,6 +19,13 @@ const GIT_TIMEOUT_MS = 10000;
 const MAX_BUFFER = 1024 * 1024 * 8;
 const MAX_UNTRACKED_BYTES = 256 * 1024;
 const MAX_UNTRACKED_LINES = 500;
+// Lines of unchanged context kept around each hunk in the file-detail diff. We
+// want the review/TUI panes to show only the changed code with enough
+// surrounding lines to orient — not the whole file. A wide context (this used to
+// be 80) folds every hunk's window into one another on all but the largest
+// files, so the pane effectively reprinted the entire file plus the edits; the
+// git default of 3 keeps it to just the modified regions.
+const DIFF_CONTEXT_LINES = 3;
 
 function normalizePath(value) {
   return String(value || "")
@@ -383,7 +390,7 @@ export async function buildAdminGitDiffFileDetail({ projectDir, file } = {}) {
         "--find-renames",
         "--no-ext-diff",
         "--color=never",
-        "--unified=80",
+        `--unified=${DIFF_CONTEXT_LINES}`,
         `${file.targetBranch || "main"}...${file.branchName}`,
         "--",
         file.path,
@@ -404,7 +411,7 @@ export async function buildAdminGitDiffFileDetail({ projectDir, file } = {}) {
           "--find-renames",
           "--no-ext-diff",
           "--color=never",
-          "--unified=80",
+          `--unified=${DIFF_CONTEXT_LINES}`,
           "HEAD",
           "--",
           file.path,

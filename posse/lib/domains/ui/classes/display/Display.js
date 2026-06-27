@@ -1597,6 +1597,9 @@ export class Display {
   _buildMonitorFeedbackToolLanes(...args) {
     return this._rightPanelRenderer._buildMonitorFeedbackToolLanes.call(this, ...args);
   }
+  _buildMonitorAgentCard(...args) {
+    return this._rightPanelRenderer._buildMonitorAgentCard.call(this, ...args);
+  }
   _monitorFeedbackEntryLines(...args) {
     return this._rightPanelRenderer._monitorFeedbackEntryLines.call(this, ...args);
   }

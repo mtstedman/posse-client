@@ -70,6 +70,7 @@ import {
   TOOL_PULL_BRIEF,
   TOOL_GET_BRIEF,
   TOOL_GENERATE_IMAGE,
+  TOOL_PROJECT_DB_QUERY,
 } from "../../../../catalog/native-tools.js";
 
 export {
@@ -104,6 +105,7 @@ export {
   TOOL_PULL_BRIEF,
   TOOL_GET_BRIEF,
   TOOL_GENERATE_IMAGE,
+  TOOL_PROJECT_DB_QUERY,
 } from "../../../../catalog/native-tools.js";
 
 import { ATLAS_TOOL_DEFS_RAW } from "../../../../catalog/atlas-tools.js";
@@ -220,6 +222,11 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
     access: "read",
     summary: "Load the pre-staged research brief bundle (analysis, structured data, file priorities, function index, source manifest) for this work item in one call.",
     observation: { type: "tool.get_brief", label: "GetBrief", format: "generic", targetKeys: [] },
+  },
+  project_db_query: {
+    access: "read",
+    summary: "Run a single SQL statement against the project's configured application database; allowed statement types follow the operator-granted permissions.",
+    observation: { type: "tool.project_db_query", label: "ProjectDbQuery", format: "generic", targetKeys: ["query"] },
   },
   list_files: {
     access: "read",
@@ -449,7 +456,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
   baseToolAllowlists: Object.freeze({
     dev: Object.freeze({
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash", "project_db_query"],
     }),
     artificer: Object.freeze({
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback"],
@@ -472,7 +479,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     delegator: Object.freeze({ read: [], write: [] }),
     default: Object.freeze({
       read: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
-      write: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "bash"],
+      write: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "bash", "project_db_query"],
     }),
   }),
   deterministicMcp: Object.freeze({
@@ -619,6 +626,7 @@ const NATIVE_SCHEMAS = Object.freeze({
   pull_brief: TOOL_PULL_BRIEF,
   get_brief: TOOL_GET_BRIEF,
   generate_image: TOOL_GENERATE_IMAGE,
+  project_db_query: TOOL_PROJECT_DB_QUERY,
 });
 
 function roleAllowlistForTool(toolName) {

@@ -1949,6 +1949,29 @@ export function getDb() {
     migrate: repairWorkItemsGovernanceTierSchema,
   });
 
+  // Migration: project_db_config table (opt-in project database access tool).
+  // Single-row store of the per-repo project DB connection + granular grants.
+  const hasProjectDbConfig = _db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='project_db_config'`
+  ).get();
+  if (!hasProjectDbConfig) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS project_db_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+        db_type TEXT CHECK (db_type IS NULL OR db_type IN ('sqlite', 'postgres', 'mysql')),
+        host TEXT,
+        port INTEGER,
+        database TEXT,
+        username TEXT,
+        password TEXT,
+        permissions TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      );
+    `);
+  }
+
   // Migration: research skip fields on work_items.
   const workItemColumns = new Set(_db.pragma("table_info(work_items)").map((col) => col.name));
   if (!workItemColumns.has("research_skipped")) {

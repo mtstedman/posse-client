@@ -13,6 +13,32 @@ export const SYNTHETIC_SETTING_KEYS = new Set(["delegation_mode"]);
 export const ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS = new Set(["artifact_image_provider"]);
 export const SKILL_SETTING_PREFIX = "skill_enabled:";
 
+// ── Project database (opt-in agent SQL access) ──────────────────────────────
+// These are synthetic settings rows: they render in the admin settings UI but
+// persist to the per-repo orchestrator.db (via the project-db accessor), NOT to
+// the account.db settings catalog. The password row is masked and never shown.
+export const PROJECT_DB_SETTING_KEYS = new Set([
+  "project_db_enabled",
+  "project_db_type",
+  "project_db_permissions",
+  "project_db_database",
+  "project_db_host",
+  "project_db_port",
+  "project_db_username",
+  "project_db_password",
+]);
+export const PROJECT_DB_TYPE_OPTIONS = Object.freeze([
+  Object.freeze({ value: "sqlite", label: "sqlite" }),
+  Object.freeze({ value: "postgres", label: "postgres" }),
+  Object.freeze({ value: "mysql", label: "mysql" }),
+]);
+export const PROJECT_DB_PERMISSION_OPTIONS = Object.freeze([
+  Object.freeze({ value: "read", label: "read (SELECT)" }),
+  Object.freeze({ value: "write", label: "write (UPDATE)" }),
+  Object.freeze({ value: "insert", label: "insert (INSERT)" }),
+  Object.freeze({ value: "delete", label: "delete (DELETE)" }),
+]);
+
 export const BOOLEAN_SETTING_KEYS = new Set(
   SETTINGS_CATALOG
     .filter((entry) => isCatalogBooleanSetting(entry.key))

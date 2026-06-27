@@ -29,8 +29,8 @@
     "rebuild:rust-binaries:all": "node scripts/rebuild-rust-binaries.mjs --platform all"
   },
   "dependencies": {
-    "agentkeepalive": "^4.2.1",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1-beta.2",
+    "agentkeepalive": "^4.2.1",
     "better-sqlite3": "12.8.0",
     "node-pty": "^1.1.0",
     "openai": "^4.104.0",
@@ -42,6 +42,8 @@
   },
   "optionalDependencies": {
     "@huggingface/transformers": "4.2.0",
+    "mysql2": "^3.22.5",
+    "pg": "^8.13.0",
     "tree-sitter-bash": "0.25.1",
     "tree-sitter-c": "0.24.1",
     "tree-sitter-c-sharp": "0.23.1",

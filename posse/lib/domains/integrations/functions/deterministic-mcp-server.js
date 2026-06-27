@@ -38,6 +38,9 @@ import {
   isSensitiveEnvFileOrTargetPath,
   safePath,
 } from "../../../functions/toolkit/index.js";
+import { TOOL_PROJECT_DB_QUERY } from "../../../catalog/native-tools.js";
+import { execProjectDbQuery } from "../../../functions/toolkit/project-db/query.js";
+import { readProjectDbConfig } from "../../../functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../classes/tools/ToolRegistry.js";
 import { declareToolSuites } from "../../../functions/tools/tool-suites.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
@@ -1026,6 +1029,17 @@ function dedupeReadFile(args = {}) {
 
 let allowBash = ownerHotGateway || ["dev", "artificer", "assessor"].includes(roleName);
 let execBash = allowBash ? createBashExecutor() : null;
+// Opt-in project DB access: advertised + attached only when this repo has it
+// configured (a db type + at least one granted permission). Off by default.
+function computeProjectDbAccessEnabled() {
+  try {
+    const cfg = readProjectDbConfig({ projectDir: workspaceCwd });
+    return !!cfg.enabled && Array.isArray(cfg.permissions) && cfg.permissions.length > 0;
+  } catch {
+    return false;
+  }
+}
+let projectDbAccessEnabled = computeProjectDbAccessEnabled();
 const WRITE_TOOL_NAMES = new Set(DETERMINISTIC_WRITE_TOOLS);
 const IMAGE_HELPER_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_HELPER_TOOLS);
 const IMAGE_GENERATION_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_TOOLS);
@@ -1064,6 +1078,9 @@ const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "clean_image",
   "extract_image_text",
   "generate_image",
+  // Opt-in; runtimeToolAvailable() keeps it filtered out unless this repo has
+  // project DB access configured.
+  "project_db_query",
 ]);
 
 function legacyToolNamesForUnscopedRole() {
@@ -1082,6 +1099,7 @@ function legacyToolNamesForUnscopedRole() {
     ...(allowImageHelpers ? [...IMAGE_HELPER_TOOL_NAMES] : []),
     ...(allowImageHelpers ? [...OCR_TOOL_NAMES] : []),
     ...(allowImageGeneration ? [...IMAGE_GENERATION_TOOL_NAMES] : []),
+    ...(projectDbAccessEnabled ? ["project_db_query"] : []),
   ];
 }
 
@@ -1091,6 +1109,7 @@ function runtimeToolAvailable(toolName) {
   if (OCR_TOOL_NAMES.has(toolName)) return allowImageHelpers;
   if (IMAGE_GENERATION_TOOL_NAMES.has(toolName)) return allowImageGeneration;
   if (toolName === "bash") return allowBash;
+  if (toolName === "project_db_query") return projectDbAccessEnabled;
   return true;
 }
 
@@ -1133,6 +1152,7 @@ addToolSchema(TOOL_AGENT_FEEDBACK);
 addToolSchema(TOOL_GET_OPERATOR_FEEDBACK);
 addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
 addToolSchema(TOOL_GET_BRIEF);
+addToolSchema(TOOL_PROJECT_DB_QUERY);
 if (writeEnabled) {
   for (const schema of [TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
     addToolSchema(schema);
@@ -1912,6 +1932,9 @@ if (ownerHotGateway || isResearcherRole) {
   mcpToolRegistry.attach("chain_read", (args) => chainRead(args || {}));
   mcpToolRegistry.attach("chain_verdict", (args) => chainVerdict(args || {}));
 }
+if (projectDbAccessEnabled) {
+  mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd }));
+}
 
 let TOOL_EXECUTORS = new Map(Object.entries(mcpToolRegistry.handlerMap()));
 for (const toolName of [...TOOL_EXECUTORS.keys()]) {
@@ -1979,6 +2002,7 @@ function rebuildNativeToolSchemas() {
   addToolSchema(TOOL_GET_OPERATOR_FEEDBACK);
   addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
   addToolSchema(TOOL_GET_BRIEF);
+  addToolSchema(TOOL_PROJECT_DB_QUERY);
   if (writeEnabled) {
     for (const schema of [TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
       addToolSchema(schema);
@@ -2059,6 +2083,9 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
   if (ownerHotGateway || isResearcherRole) {
     mcpToolRegistry.attach("chain_read", (args) => chainRead(args || {}));
     mcpToolRegistry.attach("chain_verdict", (args) => chainVerdict(args || {}));
+  }
+  if (projectDbAccessEnabled) {
+    mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd }));
   }
 }
 
@@ -2149,6 +2176,7 @@ function applyRuntimeBootConfig(nextConfig = {}) {
     : null;
   allowBash = ownerHotGateway || ["dev", "artificer", "assessor"].includes(roleName);
   execBash = allowBash ? createBashExecutor() : null;
+  projectDbAccessEnabled = computeProjectDbAccessEnabled();
   scopePredicates = buildScopePredicates(workspaceCwd, {
     modifyFiles: Array.isArray(bootConfig.scopedFiles) ? bootConfig.scopedFiles : [],
     createFiles: Array.isArray(bootConfig.createFiles) ? bootConfig.createFiles : [],

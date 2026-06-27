@@ -9,6 +9,7 @@ import { assertAdvertisedHaveExecutors } from "../../../../functions/tools/tool-
 import { createChainLedger } from "../../../../functions/tools/chain-ledger.js";
 import { formatAtlasToolUseDisplayName } from "../../../../functions/tools/mcp-surface.js";
 import { getObservationContext } from "../../../observability/functions/observations.js";
+import { execProjectDbQuery } from "../../../../functions/toolkit/project-db/query.js";
 import {
   acknowledgeOperatorFeedback,
   countPendingOperatorFeedbackForJob,
@@ -408,6 +409,11 @@ export function createStandardToolHandlerMap({
     },
     async generate_image(args, ctx) {
       return execGenerateImage(args, ctx.cwd, ctx.scopePredicates);
+    },
+    // Opt-in project DB access. Capability is gated by per-repo config; when the
+    // repo hasn't enabled it the handler returns a clear "not enabled" error.
+    project_db_query(args, ctx) {
+      return execProjectDbQuery(args, { projectDir: ctx.cwd });
     },
   };
   // Attach the embedded executors to a ToolRegistry seeded with the shared

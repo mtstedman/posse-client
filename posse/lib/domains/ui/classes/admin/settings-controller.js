@@ -104,6 +104,9 @@ import {
   MULTI_SETTING_VALUES,
   NUMERIC_SETTING_RULES,
   PROVIDER_SETTING_KEYS,
+  PROJECT_DB_SETTING_KEYS,
+  PROJECT_DB_TYPE_OPTIONS,
+  PROJECT_DB_PERMISSION_OPTIONS,
   SETTINGS_GROUPS,
   SETTINGS_PANES,
   settingsPaneForKey,
@@ -112,6 +115,12 @@ import {
   toDisplaySettingKey,
   toStorageSettingKey,
 } from "../../../settings/functions/admin-catalog.js";
+import {
+  readProjectDbConfig,
+  writeProjectDbConfig,
+  normalizePermissions as normalizeProjectDbPermissions,
+  PROJECT_DB_TYPES,
+} from "../../../../functions/toolkit/project-db/config.js";
 import { installScipLanguageDependenciesSync } from "../../../atlas/functions/v2/scip/dependencies.js";
 import { brandRule } from "../../functions/display/helpers/brand.js";
 const PROVIDER_USAGE_SETTING_DEFS = [
@@ -487,6 +496,30 @@ export function validateAdminSettingValue(settingKey, value) {
   const rawValue = String(value ?? "");
   const trimmed = rawValue.trim();
 
+  if (PROJECT_DB_SETTING_KEYS.has(storageKey)) {
+    if (storageKey === "project_db_enabled") {
+      const lower = trimmed.toLowerCase();
+      if (lower !== "true" && lower !== "false") return { ok: false, error: "project_db_enabled must be true or false." };
+      return { ok: true, storageKey, value: lower };
+    }
+    if (storageKey === "project_db_type") {
+      if (trimmed === "") return { ok: true, storageKey, value: "" };
+      const lower = trimmed.toLowerCase();
+      if (!PROJECT_DB_TYPES.includes(lower)) return { ok: false, error: `project_db_type must be one of: ${PROJECT_DB_TYPES.join(", ")}` };
+      return { ok: true, storageKey, value: lower };
+    }
+    if (storageKey === "project_db_permissions") {
+      return { ok: true, storageKey, value: normalizeProjectDbPermissions(trimmed).join(",") };
+    }
+    if (storageKey === "project_db_port") {
+      if (trimmed === "") return { ok: true, storageKey, value: "" };
+      if (!/^\d+$/.test(trimmed)) return { ok: false, error: "project_db_port must be a number." };
+      return { ok: true, storageKey, value: trimmed };
+    }
+    // host / database / username / password: free text (password kept verbatim).
+    return { ok: true, storageKey, value: rawValue };
+  }
+
   if (storageKey.startsWith(SKILL_SETTING_PREFIX)) {
     const lower = trimmed.toLowerCase();
     if (lower !== "true" && lower !== "false") {
@@ -652,6 +685,34 @@ export class AdminSettingsController {
     }));
   }
 
+  _getProjectDbSettingEntries() {
+    let cfg;
+    try {
+      cfg = readProjectDbConfig({ projectDir: this.projectDir });
+    } catch {
+      cfg = { enabled: false, dbType: null, host: null, port: null, database: null, username: null, hasPassword: false, permissions: [] };
+    }
+    const row = (key, value, description) => ({
+      setting_key: key,
+      storage_key: key,
+      setting_value: value,
+      updated_at: null,
+      description,
+      source: "project_db",
+      projectDb: true,
+    });
+    return [
+      row("project_db_enabled", cfg.enabled ? "true" : "false", "Enable the opt-in project_db_query agent tool for this repo."),
+      row("project_db_type", cfg.dbType || "", "Project database engine: sqlite, postgres, or mysql."),
+      row("project_db_permissions", (cfg.permissions || []).join(","), "Granted SQL ops: read, write, insert, delete (DDL never allowed)."),
+      row("project_db_database", cfg.database || "", "sqlite: file path (relative to repo). postgres/mysql: database name."),
+      row("project_db_host", cfg.host || "", "postgres/mysql host (ignored for sqlite)."),
+      row("project_db_port", cfg.port != null ? String(cfg.port) : "", "postgres/mysql port (ignored for sqlite)."),
+      row("project_db_username", cfg.username || "", "postgres/mysql username (ignored for sqlite)."),
+      row("project_db_password", cfg.hasPassword ? "********" : "", "postgres/mysql password — stored in .posse/db; never displayed. Blank = unchanged."),
+    ];
+  }
+
   _getSettingsSnapshot({ maxAgeMs = 2000 } = {}) {
     const now = Date.now();
     if (this._settingsCache && now - this._settingsCacheAt <= maxAgeMs) {
@@ -705,6 +766,7 @@ export class AdminSettingsController {
     const providerSettings = this._getProviderSettingEntries();
     const delegationSettings = this._getDelegationSettingEntries();
     const skillSettings = this._getSkillSettingEntries();
+    const projectDbSettings = this._getProjectDbSettingEntries();
     // Per-pane editable lists. Order here MUST match the visual row order
     // _buildSettings renders for that pane — ↑/↓ selection walks this list.
     const paneEditableSettings = {
@@ -722,6 +784,7 @@ export class AdminSettingsController {
       general: [
         ...dbSettingsByPane.general,
         ...skillSettings,
+        ...projectDbSettings,
       ],
       debug: [
         ...dbSettingsByPane.debug,
@@ -742,6 +805,7 @@ export class AdminSettingsController {
       providerSettings,
       delegationSettings,
       skillSettings,
+      projectDbSettings,
       editableSettings,
       paneEditableSettings,
     };
@@ -904,6 +968,10 @@ export class AdminSettingsController {
     if (!selected) return;
     this._editError = "";
     const storageKey = selected.storage_key || toStorageSettingKey(selected.setting_key);
+    if (PROJECT_DB_SETTING_KEYS.has(storageKey)) {
+      this._startProjectDbEdit(selected, storageKey, initialValue);
+      return;
+    }
     if (storageKey.startsWith("provider_") || ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS.has(storageKey)) {
       const allowed = storageKey.startsWith("provider_")
         ? this._getSelectableProviders()
@@ -1012,6 +1080,66 @@ export class AdminSettingsController {
     this.requestRender({ force: true });
   }
 
+  _startProjectDbEdit(selected, storageKey, initialValue = null) {
+    const currentValue = selected.setting_value || "";
+    this._editKey = selected.setting_key;
+    this._editStorageKey = storageKey;
+    if (storageKey === "project_db_enabled") {
+      this._editing = "editBoolean";
+      this._editBooleanChoices = ["true", "false"];
+      this._editBooleanIndex = currentValue === "true" ? 0 : 1;
+      process.stdout.write("\x1b[?25l");
+      this.requestRender({ force: true });
+      return;
+    }
+    if (storageKey === "project_db_type") {
+      this._editing = "editModel";
+      this._editModelChoices = PROJECT_DB_TYPE_OPTIONS.map((o) => ({ value: o.value, label: o.label }));
+      const idx = this._editModelChoices.findIndex((c) => c.value === currentValue);
+      this._editModelIndex = idx >= 0 ? idx : 0;
+      process.stdout.write("\x1b[?25l");
+      this.requestRender({ force: true });
+      return;
+    }
+    if (storageKey === "project_db_permissions") {
+      const enabled = new Set(currentValue.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean));
+      this._editing = "editPhases";
+      this._editPhaseChoices = PROJECT_DB_PERMISSION_OPTIONS.map((o) => ({ value: o.value, label: o.label, enabled: enabled.has(o.value) }));
+      this._editPhaseIndex = 0;
+      process.stdout.write("\x1b[?25l");
+      this.requestRender({ force: true });
+      return;
+    }
+    // Free-text fields. The password starts empty (so a blank save means
+    // "leave unchanged") and is masked while typing.
+    this._editing = "editValue";
+    this._editBuf = storageKey === "project_db_password"
+      ? ""
+      : (initialValue == null ? currentValue : String(initialValue));
+    this._editCursor = this._editBuf.length;
+    process.stdout.write("\x1b[?25h");
+    this.requestRender({ force: true });
+  }
+
+  _saveProjectDbSetting(storageKey, value) {
+    const patch = {};
+    switch (storageKey) {
+      case "project_db_enabled": patch.enabled = String(value).toLowerCase() === "true"; break;
+      case "project_db_type": patch.dbType = value || null; break;
+      case "project_db_permissions": patch.permissions = value; break;
+      case "project_db_database": patch.database = value || null; break;
+      case "project_db_host": patch.host = value || null; break;
+      case "project_db_port": patch.port = value === "" ? null : Number(value); break;
+      case "project_db_username": patch.username = value || null; break;
+      case "project_db_password":
+        if (String(value) === "") return; // blank = leave the stored password unchanged
+        patch.password = value;
+        break;
+      default: throw new Error(`Unknown project DB setting: ${storageKey}`);
+    }
+    writeProjectDbConfig(patch, { projectDir: this.projectDir });
+  }
+
   _resetEditState() {
     const hadEditing = !!this._editing;
     this._editing = false;
@@ -1034,6 +1162,11 @@ export class AdminSettingsController {
 
   _saveSettingValue(storageKey, value, { providerUsage = false } = {}) {
     try {
+      if (PROJECT_DB_SETTING_KEYS.has(storageKey)) {
+        this._saveProjectDbSetting(storageKey, value);
+        this._settingsSavedFlash = { text: `Saved ${storageKey}`, at: Date.now() };
+        return true;
+      }
       if (storageKey.startsWith(SKILL_SETTING_PREFIX)) {
         setSkillEnabled(storageKey.slice(SKILL_SETTING_PREFIX.length), String(value).trim().toLowerCase() === "true");
       } else if (providerUsage) {
@@ -1270,7 +1403,10 @@ export class AdminSettingsController {
     const instructions = `${C.dim}[Enter] Save  [Esc] Cancel${C.reset}`;
     const prefixText = ` Editing ${this._editKey}: `;
     const available = Math.max(8, fullW - stripAnsi(prefixText).length - stripAnsi(instructions).length - 2);
-    const visibleValue = clipPlainTail(this._editBuf, available);
+    const editBuf = this._editStorageKey === "project_db_password"
+      ? "*".repeat(this._editBuf.length)
+      : this._editBuf;
+    const visibleValue = clipPlainTail(editBuf, available);
     const clipped = visibleValue.startsWith("\u2026");
     const lines = [
       ` ${C.yellow}Editing ${this._editKey}:${C.reset} ${C.bold}${visibleValue}${C.reset}  ${instructions}`,
@@ -1288,7 +1424,10 @@ export class AdminSettingsController {
     const instructions = `${C.dim}[Enter] Save  [Esc] Cancel${C.reset}`;
     const prefixText = ` Editing ${this._editKey}: `;
     const available = Math.max(8, fullW - stripAnsi(prefixText).length - stripAnsi(instructions).length - 2);
-    const visibleValue = clipPlainTail(this._editBuf, available);
+    const editBuf = this._editStorageKey === "project_db_password"
+      ? "*".repeat(this._editBuf.length)
+      : this._editBuf;
+    const visibleValue = clipPlainTail(editBuf, available);
     const cursorCol = 2 + visibleLength(prefixText) + visibleLength(visibleValue);
     return { row: navStartRow, col: cursorCol };
   }
@@ -1352,6 +1491,7 @@ export class AdminSettingsController {
     const providerUsageSettings = settingsSnapshot.providerUsageSettings || [];
     const delegationSettings = settingsSnapshot.delegationSettings || [];
     const skillSettings = settingsSnapshot.skillSettings || [];
+    const projectDbSettings = settingsSnapshot.projectDbSettings || [];
     const providerUsageWindowMap = providerUsageSettings.length > 0
       ? buildProviderUsageWindowMap(getConfiguredProviderUsage())
       : new Map();
@@ -1540,6 +1680,13 @@ export class AdminSettingsController {
         for (const s of skillSettings) {
           pushEditableRow(s.setting_key, s.setting_value || "", s.description || "");
         }
+      }
+      lines.push("");
+
+      pushSection("Project Database", "(opt-in agent SQL access; press 'e' to edit)");
+      pushTableHeader();
+      for (const s of projectDbSettings) {
+        pushEditableRow(s.setting_key, s.setting_value || "", s.description || "");
       }
       lines.push("");
 

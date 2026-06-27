@@ -858,3 +858,30 @@ export const TOOL_GENERATE_IMAGE = {
     additionalProperties: false,
   },
 };
+
+export const TOOL_PROJECT_DB_QUERY = {
+  type: "function",
+  name: "project_db_query",
+  description:
+    "Run a single SQL statement against this project's configured application database " +
+    "(sqlite/postgres/mysql). Opt-in and operator-configured per repository: the statement " +
+    "types you may run depend on the granted permissions (READ→SELECT, WRITE→UPDATE, " +
+    "INSERT, DELETE) plus read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE). Anything outside " +
+    "the grant is rejected and DDL (CREATE/DROP/ALTER) is never allowed. One statement per call; " +
+    "read results are row- and byte-capped.",
+  parameters: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "A single SQL statement to execute.",
+      },
+      maxRows: {
+        type: "integer",
+        description: "Maximum rows to return for read queries. Default: 200, max: 1000.",
+      },
+    },
+    required: ["query"],
+    additionalProperties: false,
+  },
+};

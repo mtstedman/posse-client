@@ -204,9 +204,17 @@ function _collapseToolInvocationRows(rows) {
     const inv = detail?.inv != null ? String(detail.inv) : null;
     if (type.endsWith(".started")) {
       if (inv && finishedInv.has(inv)) continue; // finish row supersedes it
-      out.push({ ...row, observation_type: type.slice(0, -".started".length), _inFlight: true, _durationMs: null });
+      out.push({ ...row, observation_type: type.slice(0, -".started".length), _inFlight: true, _durationMs: null, _ok: null });
     } else {
-      out.push({ ...row, _inFlight: false, _durationMs: Number.isFinite(detail?.duration_ms) ? detail.duration_ms : null });
+      out.push({
+        ...row,
+        _inFlight: false,
+        _durationMs: Number.isFinite(detail?.duration_ms) ? detail.duration_ms : null,
+        // finishToolInvocation persists the real outcome in detail.ok; surface it
+        // so consumers don't have to sniff the summary text for "failed". Absent
+        // (null) means the row never recorded an outcome (legacy/replay row).
+        _ok: typeof detail?.ok === "boolean" ? detail.ok : null,
+      });
     }
   }
   return out;
@@ -233,6 +241,7 @@ function enrichToolInvocationRows(db, rows, { includeUnscoped = true } = {}) {
       status: job?.status ?? null,
       in_flight: !!row._inFlight,
       duration_ms: row._durationMs ?? null,
+      ok: typeof row._ok === "boolean" ? row._ok : null,
     });
   }
   return enriched;

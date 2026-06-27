@@ -42,6 +42,10 @@ const POSSE_BANNER_ROWS = Object.freeze([
 // toward white. Mark = green, POSSE = cyan.
 const MASTHEAD_LOGO_FG = "\x1b[38;2;106;214;128m";
 const MASTHEAD_WORD_FG = "\x1b[38;2;96;200;236m";
+// Saddle-tan for the focus-pane mascot so the horse reads as leather/dust, not
+// the green/cyan brand marks. Truecolor so it survives themes that flatten the
+// 16 named colours toward white.
+const MASCOT_FG = "\x1b[38;2;201;148;92m";
 const LIVE_CHANNEL_TOOL_TYPES = new Set([
   "tool.agent_feedback",
   "tool.get_operator_feedback",
@@ -129,6 +133,22 @@ function monitorStateMeta(state) {
   return { label: "live", color: C.green, rail: C.green };
 }
 
+// Short WI state chip for the focus-pane agent card. Mirrors the locks-pane
+// state logic: the merge_state explains why a finished WI still holds work
+// (pending review / merge failed), otherwise the live status. Returns
+// { text, color } or null when "running" (the card header already says so).
+function monitorWiStateChip(agent = {}) {
+  const merge = String(agent.wiMergeState || "").toLowerCase();
+  const status = String(agent.wiStatus || agent.status || "").toLowerCase();
+  if (merge === "pending_review") return { label: "pending review", color: C.yellow };
+  if (merge === "merge_failed") return { label: "merge failed", color: C.yellow };
+  if (merge === "merged") return { label: "merged", color: C.green };
+  if (status && status !== "running") return { label: status, color: C.dim };
+  return null;
+}
+
+
+
 // A two-frame breathing dot driven by the render tick (_spinIdx advances every
 // ~120ms repaint). It is the proof-of-life: while the UI loop runs it pulses,
 // and if the process hangs it freezes — so a frozen monitor is visibly frozen.
@@ -163,13 +183,17 @@ function latestStamp(rows) {
 
 // What an OCCUPIED slot's agent is doing right now, for the fleet rail tag.
 // "waiting" = blocked on the operator (ask); "nudge" = a redirect is queued;
-// otherwise the most recent observed event decides "tool call" vs "thinking".
+// otherwise an IN-FLIGHT tool call reads as "tool call" and anything else as
+// "thinking". We key off whether a tool is *currently running* (an in-flight
+// observation), NOT whether the last recorded event happened to be a tool —
+// tool rows dominate the stream and never get a "thinking" counter-event, so
+// last-event logic stuck the tag on "tool call" forever after the first call.
 // The two live states breathe (glyph pulses off the render tick); waiting and
 // nudge sit still so a parked agent reads as parked at a glance.
 function monitorActivityState(agent, spinIdx) {
   if (agent.state === "ask") return { label: "waiting", color: C.red, glyph: "◉" };
   if (agent.state === "nudge") return { label: "nudge", color: C.yellow, glyph: "◆" };
-  if (agent.lastEventKind === "tool") {
+  if (agent.inFlightTool) {
     return { label: "tool call", color: C.cyan, glyph: monitorPulse(spinIdx) };
   }
   return { label: "thinking", color: C.green, glyph: monitorPulse(spinIdx) };
@@ -210,17 +234,20 @@ function monitorFeedbackSuffix(row = {}) {
 
 
 // Glyph for a COMPLETED tool row. In-flight rows are detected separately by the
-// caller (they pulse \u25cf \u25cb in cyan), so this only decides done-vs-failed. We no
-// longer sniff the summary for "ok"/"pass": a recorded invocation that didn't
-// fail simply finished, so every completed call gets one consistent \u2713. Only a
-// failure keyword in the type/summary (or an explicit ok:false) downgrades it to
-// a red \u2717. (Previously only rows whose summary literally carried "ok" \u2014 e.g.
-// ATLAS "\u2026 ok (327ms)" \u2014 got the check, so plain reads/searches/atlas calls fell
-// through to a neutral \u25cf dot and the lane looked half-finished even when every
-// call had already succeeded.)
+// caller (they pulse \u25cf \u25cb in cyan), so this only decides done-vs-failed.
+// The recorded outcome (row.ok, lifted from finishToolInvocation's detail.ok by
+// getRecentToolInvocations) is authoritative: a real boolean settles it with no
+// string-sniffing. That fixes both failure modes of the old keyword scan \u2014 a
+// successful `grep "error" file` (the word is the search term, not a failure) no
+// longer reads as a false \u2717, and a genuine failure whose summary carries no
+// failure keyword no longer reads as a false \u2713. The keyword scan survives only
+// as a fallback for rows that never recorded an outcome (ok == null): legacy
+// observation logs and replay rows, where the summary text is the only signal.
 function monitorToolMeta(row = {}) {
+  if (row.ok === false) return { glyph: "\u2715", color: C.red, label: "err" };
+  if (row.ok === true) return { glyph: "\u2713", color: C.green, label: "done" };
   const text = `${row.observation_type || ""} ${row.summary || ""}`.toLowerCase();
-  if (row.ok === false || /\b(error|failed|fail|denied|cancelled|canceled)\b/.test(text)) {
+  if (/\b(error|failed|fail|denied|cancelled|canceled)\b/.test(text)) {
     return { glyph: "\u2715", color: C.red, label: "err" };
   }
   return { glyph: "\u2713", color: C.green, label: "done" };
@@ -501,6 +528,9 @@ export class DisplayRightPanelRenderer {
   _collectMonitorAgents() {
     const queueData = this._getQueueData?.({ maxAgeMs: 1000 }) || {};
     const jobsById = new Map((queueData.jobs || []).map((job) => [Number(job.id), job]));
+    // WI rows (already fetched + cached in queueData) so the focus-pane agent
+    // card can show the work-item title and merge state without a fresh query.
+    const wiById = new Map((queueData.workItems || []).map((wi) => [Number(wi.id), wi]));
     const questionJobIds = new Set((this._questionQueue || []).map((q) => Number(q.jobId)).filter(Number.isFinite));
     // Pull tool observations once and bucket the newest non-coordination call
     // per job so each agent's "thinking vs tool call" state is one cheap lookup.
@@ -509,17 +539,27 @@ export class DisplayRightPanelRenderer {
     const liveness = (numericJobId, activityRows, interactionRows, fallbackTs) => {
       const jobToolRows = toolRecent.filter((row) => Number(row.job_id) === numericJobId
         && !LIVE_CHANNEL_TOOL_TYPES.has(String(row.observation_type || "")));
-      const latestToolTs = latestStamp(jobToolRows);
+      // Track the agent's NEWEST tool observation alongside the latest timestamp:
+      // "in a tool call" means that newest row is a started-but-unfinished
+      // (in_flight) call. Reading the newest row (not "any in_flight row") keeps
+      // it self-healing — if a finish observation is ever lost, the next tool the
+      // agent starts becomes the newest row and clears the stale flag.
+      let latestToolTs = 0;
+      let newestToolRow = null;
+      for (const row of jobToolRows) {
+        const ts = Date.parse(row?.created_at || "") || 0;
+        if (ts >= latestToolTs) { latestToolTs = ts; newestToolRow = row; }
+      }
       const latestTalkTs = Math.max(latestStamp(activityRows), latestStamp(interactionRows));
-      const lastEventKind = latestToolTs > 0 && latestToolTs >= latestTalkTs ? "tool" : "activity";
       return {
         lastActivityAt: Math.max(latestToolTs, latestTalkTs, fallbackTs || 0),
-        lastEventKind,
+        inFlightTool: !!newestToolRow?.in_flight,
       };
     };
     const agents = [...this.workers.entries()].map(([jobId, worker], idx) => {
       const numericJobId = Number(jobId);
       const job = jobsById.get(numericJobId) || {};
+      const wiRow = wiById.get(Number(worker?.workItemId ?? job.work_item_id)) || {};
       let guidance = [];
       let interactionRows = [];
       let activityRows = [];
@@ -547,6 +587,9 @@ export class DisplayRightPanelRenderer {
         jobId: numericJobId,
         workItemId: worker?.workItemId ?? job.work_item_id ?? null,
         wiLabel: (worker?.workItemId ?? job.work_item_id) ? `WI#${worker?.workItemId ?? job.work_item_id}` : "WI?",
+        wiTitle: wiRow.title || job.title || null,
+        wiStatus: wiRow.status || null,
+        wiMergeState: wiRow.merge_state || null,
         role: roleLabel(worker?.role || job.job_type || "agent"),
         state,
         activity,
@@ -581,11 +624,15 @@ export class DisplayRightPanelRenderer {
         guidance = [];
         interactionRows = [];
       }
+      const wiRow = wiById.get(Number(job.work_item_id)) || {};
       agents.push({
         index: agents.length + 1,
         jobId: numericJobId,
         workItemId: job.work_item_id ?? null,
         wiLabel: job.work_item_id ? `WI#${job.work_item_id}` : "WI?",
+        wiTitle: wiRow.title || job.title || null,
+        wiStatus: wiRow.status || null,
+        wiMergeState: wiRow.merge_state || null,
         role: roleLabel(job.job_type || "human"),
         state: "ask",
         activity: _sanitizeDisplayLine(job.title || "waiting on human input"),
@@ -649,8 +696,13 @@ export class DisplayRightPanelRenderer {
       for (const agent of groupAgents) {
         const meta = monitorActivityState(agent, spin);
         const isSelected = selected?.jobId === agent.jobId;
-        const selector = isSelected ? `${C.cyan}\u258c${C.reset}` : " ";
-        const rail = `${monitorStateMeta(agent.state).rail}\u2503${C.reset}`;
+        // Green selector cursor marks the focused row; the rail bar is tinted by
+        // ROLE (researcher purple, dev green, planner cyan, \u2026) so the roster
+        // reads as "who is who" at a glance. Agent STATE isn't lost \u2014 it still
+        // shows in the activity tag on the right (waiting/nudge/tool/thinking)
+        // and the "waiting on you" header count.
+        const selector = isSelected ? `${C.green}\u258c${C.reset}` : " ";
+        const rail = `${roleBrandColor(agent.role)}\u2503${C.reset}`;
         const title = `${selector}${rail} ${C.brightWhite}${C.bold}[${agent.index}] ${agent.role}${C.reset} ${C.dim}#${agent.jobId}${C.reset}`;
         const tag = `${meta.color}${meta.glyph} ${meta.label}${C.reset}`;
         lines.push(`${visiblePad(title, Math.max(0, width - stripAnsi(tag).length - 1))}${tag}`);
@@ -762,9 +814,11 @@ export class DisplayRightPanelRenderer {
   _monitorBoxedLane({ title, count = 0, color = C.cyan, width, rows = [], emptyText = "waiting", fixedRows = null } = {}) {
     const safeWidth = Math.max(18, width | 0);
     const inner = Math.max(8, safeWidth - 2);
+    // count == null omits the "NN" tally chip (the agent card has no count).
+    const countChip = count == null ? "" : ` ${C.dim}${String(count).padStart(2, "0")}${C.reset}`;
     const lines = [
       `${C.dim}\u256d${"\u2500".repeat(inner)}\u256e${C.reset}`,
-      this._monitorBoxLine(` ${color}${C.bold}${String(title || "").toUpperCase()}${C.reset} ${C.dim}${String(count).padStart(2, "0")}${C.reset}`, safeWidth),
+      this._monitorBoxLine(` ${color}${C.bold}${String(title || "").toUpperCase()}${C.reset}${countChip}`, safeWidth),
       `${C.dim}\u251c${"\u2500".repeat(inner)}\u2524${C.reset}`,
     ];
 
@@ -845,8 +899,26 @@ export class DisplayRightPanelRenderer {
     // Feedback reads like a chat: the live (newest) message is pinned to the
     // FLOOR of the box, older history stacks above it (dimmed, so it reads as
     // back-scroll), and a thin delimiter rule separates the live turn from the
-    // history. Overflow clips the OLDEST lines from the top; a short conversation
-    // pads the top so it still rests on the floor.
+    // history. Build the natural (unclipped) rows ONCE so the box can be sized to
+    // its CONTENT rather than a fixed share \u2014 a short feed gets a short box and
+    // the reclaimed rows go to the agent card + tools below.
+    const feedbackRows = (() => {
+      if (feedbackEntries.length === 0) return [];
+      const ordered = feedbackEntries; // oldest \u2192 newest
+      const active = ordered[ordered.length - 1];
+      const history = ordered.slice(0, -1);
+      const out = [];
+      for (const row of history) {
+        for (const line of this._monitorFeedbackEntryLines(row, inner, { dim: true })) out.push(line);
+        out.push(""); // blank gap between historical messages
+      }
+      if (history.length > 0) {
+        out.push(` ${C.dim}${"\u254c".repeat(Math.max(3, inner - 1))}${C.reset}`);
+      }
+      out.push(...this._monitorFeedbackEntryLines(active, inner));
+      return out;
+    })();
+
     const buildFeedback = (content) => {
       const boxedFeedback = (rows) => this._monitorBoxedLane({
         title: "feedback",
@@ -857,30 +929,10 @@ export class DisplayRightPanelRenderer {
         emptyText: `no updates yet \u2014 current: ${agent.activity}`,
         fixedRows: content,
       });
-      if (feedbackEntries.length === 0) return boxedFeedback([]);
-
-      const ordered = feedbackEntries; // oldest \u2192 newest
-      const active = ordered[ordered.length - 1];
-      const history = ordered.slice(0, -1);
-
-      const historyLines = [];
-      for (const row of history) {
-        for (const line of this._monitorFeedbackEntryLines(row, inner, { dim: true })) {
-          historyLines.push(line);
-        }
-        historyLines.push(""); // blank gap between historical messages
-      }
-      const activeLines = this._monitorFeedbackEntryLines(active, inner);
-
-      let rows;
-      if (history.length > 0) {
-        const rule = ` ${C.dim}${"\u254c".repeat(Math.max(3, inner - 1))}${C.reset}`;
-        rows = [...historyLines, rule, ...activeLines];
-      } else {
-        rows = activeLines;
-      }
+      if (feedbackRows.length === 0) return boxedFeedback([]);
       // Anchor to the bottom: drop oldest lines from the top, pad short content
       // at the top so the live message always lands on the floor.
+      let rows = feedbackRows.slice();
       if (rows.length > content) rows = rows.slice(rows.length - content);
       while (rows.length < content) rows.unshift("");
       return boxedFeedback(rows);
@@ -892,27 +944,141 @@ export class DisplayRightPanelRenderer {
       return buildFeedback(Math.max(1, total - 4));
     }
 
-    let feedbackBoxH = Math.max(6, Math.round(total * 0.58));
-    let toolBoxH = total - feedbackBoxH;
-    if (toolBoxH < 5) { toolBoxH = 5; feedbackBoxH = total - toolBoxH; }
-    const feedbackContent = Math.max(1, feedbackBoxH - 4);
+    const FEEDBACK_MAX = 8;     // cap so a chatty feed can't dominate the pane
+    const CARD_BOX_H = 7;       // 3 dossier rows + 4 chrome
+    const MIN_TOOLS_H = 5;
+
+    // CHANGES mode keeps the two-box feedback+diff split (no card \u2014 the git-diff
+    // browser wants the height). Feedback is still compressed to its content so
+    // the reclaimed rows go to the diff instead of padding an empty feedback box.
+    if (this._monitorChangesMode) {
+      const fbContent = Math.max(2, Math.min(Math.max(1, feedbackRows.length), FEEDBACK_MAX));
+      let feedbackBoxH = fbContent + 4;
+      let diffBoxH = total - feedbackBoxH;
+      if (diffBoxH < 6) { diffBoxH = 6; feedbackBoxH = total - diffBoxH; }
+      return [
+        ...buildFeedback(Math.max(1, feedbackBoxH - 4)),
+        ...this._buildMonitorChangesBox(agent, width, diffBoxH),
+      ];
+    }
+
+    // Normal mode: agent card (top) + feedback (middle) + tools (bottom). The
+    // agent dossier leads so its WI/diff/tool stats and the trotting horse sit at
+    // the top of the focus pane, with the conversation and tool log stacked below.
+    const showCard = total >= 18; // only seat the card when there's room for all three
+    const cardH = showCard ? CARD_BOX_H : 0;
+
+    // Feedback is sized to its own content (capped); tools then claims ALL the
+    // remaining height up front and holds it. We deliberately do NOT shrink tools
+    // to its current row count — that is what used to make the box grow downward as
+    // calls accumulated and shove feedback/the card around. Instead tools stands at
+    // its full height from the first paint and pads with blank rows, so a growing
+    // tool log fills the box in place rather than moving the rest of the pane.
+    const rest = total - cardH;
+    const feedbackContentCap = Math.max(2, Math.floor(rest / 2) - 2);
+    const feedbackContent = Math.max(2, Math.min(Math.max(1, feedbackRows.length), FEEDBACK_MAX, feedbackContentCap));
+    let feedbackBoxH = feedbackContent + 4;
+    let toolBoxH = rest - feedbackBoxH;
+    if (toolBoxH < MIN_TOOLS_H) { toolBoxH = MIN_TOOLS_H; feedbackBoxH = rest - MIN_TOOLS_H; }
     const toolContent = Math.max(1, toolBoxH - 4);
 
-    // Bottom box: tool calls by default, or the CHANGES (git-diff) view when the
-    // operator pressed [d]. Tools: newest-first, one full-width line each.
-    const bottomBox = this._monitorChangesMode
-      ? this._buildMonitorChangesBox(agent, width, toolBoxH)
-      : this._monitorBoxedLane({
-        title: "tools",
-        count: toolRows.length,
-        color: C.cyan,
-        width,
-        rows: toolRows.slice(0, toolContent).map((row) => this._formatMonitorToolRow(row, width)),
-        emptyText: "no tool calls yet",
-        fixedRows: toolContent,
-      });
+    const toolsBox = this._monitorBoxedLane({
+      title: "tools",
+      count: toolRows.length,
+      color: C.cyan,
+      width,
+      rows: toolRows.slice(0, toolContent).map((row) => this._formatMonitorToolRow(row, width)),
+      emptyText: "no tool calls yet",
+      fixedRows: toolContent,
+    });
 
-    return [...buildFeedback(feedbackContent), ...bottomBox];
+    return [
+      ...(showCard ? this._buildMonitorAgentCard(agent, width, cardH) : []),
+      ...buildFeedback(Math.max(1, feedbackBoxH - 4)),
+      ...toolsBox,
+    ];
+  }
+
+  // \u2500\u2500 Focus-pane agent card \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // A compact WI + diff/tool dossier with the Posse mascot trotting in a lane on
+  // the right. Everything here is free at render time: the WI title/state ride
+  // the cached queue snapshot, the +/\u2212 counts come from the same git-diff
+  // snapshot the [d] changes view already builds (warming it here means [d]
+  // opens instantly), and the tool tally is the per-job observation count. No
+  // per-agent token plumbing \u2014 run-level token/cost already shows on the left
+  // fleet rail, so repeating it here would just duplicate.
+  _buildMonitorAgentCard(agent, width, height) {
+    const content = Math.max(1, (height | 0) - 4);
+    const boxInner = Math.max(8, width - 2); // content width between the box borders
+
+    // The horse gallops across HALF the card row; the dossier text takes the other
+    // half. renderPosseMascotFrame needs a lane of ~19 cells to draw and returns
+    // null below that, so on a narrow card it drops out and the text spans the full
+    // width.
+    const horseLane = Math.floor(boxInner / 2);
+    const horse = renderPosseMascotFrame({ tick: this._spinIdx, laneWidth: horseLane, colors: { ...C, orange: MASCOT_FG } }) || [];
+    const horseW = horse.length ? horseLane : 0;
+    const textW = Math.max(8, boxInner - (horseW ? horseW + 1 : 0));
+
+    // Diff stats from the cached snapshot (same source/cache as the [d] view).
+    const diff = this._monitorDiffFilesForAgent(agent);
+    const files = Array.isArray(diff.files) ? diff.files : [];
+    let add = 0;
+    let del = 0;
+    for (const f of files) {
+      if (Number.isFinite(f.additions)) add += f.additions;
+      if (Number.isFinite(f.deletions)) del += f.deletions;
+    }
+    const toolCount = this._monitorToolActivityForJob(agent.jobId, { limit: 500 }).toolRows.length;
+    const nudges = agent.pendingGuidance?.length || 0;
+    const ago = agent.lastActivityAt ? `${fmtAgo(Date.now() - agent.lastActivityAt)} ago` : "idle";
+
+    // Row 1 \u2014 WI id + title + state chip.
+    const wiLabel = agent.wiLabel || "WI?";
+    const chip = monitorWiStateChip(agent);
+    const chipText = chip ? ` ${chip.color}${chip.label}${C.reset}` : "";
+    const wiTitle = _sanitizeDisplayLine(agent.wiTitle || "");
+    const titleBudget = Math.max(6, textW - wiLabel.length - stripAnsi(chipText).length - 3);
+    const row1 = ` ${C.blue}${C.bold}${wiLabel}${C.reset}${wiTitle ? ` ${C.brightWhite}${fit(wiTitle, titleBudget)}${C.reset}` : ""}${chipText}`;
+
+    // Row 2 \u2014 change + tool tally.
+    const tally = `${toolCount} tool call${toolCount === 1 ? "" : "s"}`;
+    let row2;
+    if (diff.loading) {
+      row2 = ` ${C.dim}changes computing\u2026 \u00b7 ${tally}${C.reset}`;
+    } else if (diff.error) {
+      row2 = ` ${C.dim}changes ${fit(diff.error, Math.max(8, textW - 10))}${C.reset}`;
+    } else if (files.length === 0) {
+      row2 = ` ${C.dim}changes none yet \u00b7 ${tally}${C.reset}`;
+    } else {
+      row2 = ` ${C.dim}changes${C.reset} ${C.green}+${add}${C.reset} ${C.red}\u2212${del}${C.reset} ${C.dim}\u00b7 ${files.length} file${files.length === 1 ? "" : "s"} \u00b7 ${tally}${C.reset}`;
+    }
+
+    // Row 3 \u2014 pending nudges, model/effort, freshness.
+    const modelChip = agent.provider
+      ? `${agent.provider}${agent.modelName ? `/${agent.modelName}` : ""}`
+      : `tier/${agent.tier || "standard"}`;
+    const nudgeChip = nudges > 0
+      ? `${C.yellow}${nudges} nudge${nudges === 1 ? "" : "s"} queued${C.reset}${C.dim} \u00b7 ${C.reset}`
+      : "";
+    const row3 = ` ${nudgeChip}${C.dim}${modelChip} \u00b7 ${agent.effort || "medium"} \u00b7 ${ago}${C.reset}`;
+
+    const textRows = [row1, row2, row3].slice(0, content);
+    while (textRows.length < content) textRows.push("");
+
+    // Seat the horse flush against the right border: pad the text to textW, one
+    // gap, then the half-row braille lane (visible width textW + 1 + horseW == boxInner).
+    const rows = textRows.map((t, i) => (horseW ? `${visiblePad(t, textW)} ${horse[i] || ""}` : t));
+
+    return this._monitorBoxedLane({
+      title: "agent",
+      count: null,
+      color: C.cyan,
+      width,
+      rows,
+      emptyText: "agent",
+      fixedRows: content,
+    });
   }
 
   _monitorFeedbackEntryLines(row, inner, { dim = false } = {}) {

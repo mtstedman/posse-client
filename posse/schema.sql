@@ -807,3 +807,21 @@ CREATE INDEX IF NOT EXISTS idx_posse_test_runs_suite
 
 CREATE INDEX IF NOT EXISTS idx_posse_test_runs_test
   ON posse_test_runs(test_id, created_at);
+
+-- Opt-in "project database" access tool: per-repo connection + granular grants
+-- for the developer's OWN application DB (sqlite/postgres/mysql). Single row.
+-- The password is stored here by deliberate operator choice; it is scrubbed
+-- from observations/telemetry/logs and never rendered in the settings UI.
+CREATE TABLE IF NOT EXISTS project_db_config (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  db_type TEXT CHECK (db_type IS NULL OR db_type IN ('sqlite', 'postgres', 'mysql')),
+  host TEXT,
+  port INTEGER,
+  database TEXT,
+  username TEXT,
+  password TEXT,
+  permissions TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);

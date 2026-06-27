@@ -263,8 +263,42 @@ function matchesExternalRoot(filePath, roots = []) {
   });
 }
 
+// Split a command line into the chained subcommands the allowlist must vet
+// individually (each side of a `;`, `&&`, `||`, or `|`). This MUST be
+// quote/escape aware: a naive `.split(/.../)` on the raw string also breaks on
+// operators that live INSIDE a quoted argument — most importantly the `\|`
+// alternation in a read-only `grep -n "a\|b\|c" file`, which a real shell treats
+// as one command but the naive split shredded into bogus pieces ("b\", "c\")
+// that fail the allowlist, so legitimate greps were blocked before they ran.
+// Operators are separators only at the top level (outside single/double quotes
+// and not backslash-escaped); a real pipe to a dangerous command stays outside
+// quotes and is still split out for vetting.
 export function splitShellSubcommands(command) {
-  return String(command || "").split(/\s*(?:;|&&|\|\||\|)\s*/).map((segment) => segment.trim()).filter(Boolean);
+  const text = String(command || "");
+  const segments = [];
+  let current = "";
+  let quote = null; // "'" or '"' while inside a quoted span
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      current += ch;
+      // Inside double quotes a backslash escapes the next char (so an escaped
+      // closing quote does not end the span); single quotes take everything
+      // literally, including backslashes.
+      if (ch === "\\" && quote === "\"" && i + 1 < text.length) current += text[++i];
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === "\"") { quote = ch; current += ch; continue; }
+    if (ch === "\\" && i + 1 < text.length) { current += ch + text[++i]; continue; }
+    if (ch === ";") { segments.push(current); current = ""; continue; }
+    if (ch === "&" && text[i + 1] === "&") { segments.push(current); current = ""; i++; continue; }
+    if (ch === "|" && text[i + 1] === "|") { segments.push(current); current = ""; i++; continue; }
+    if (ch === "|") { segments.push(current); current = ""; continue; }
+    current += ch;
+  }
+  segments.push(current);
+  return segments.map((segment) => segment.trim()).filter(Boolean);
 }
 
 export function isSensitiveEnvCommand(command) {
