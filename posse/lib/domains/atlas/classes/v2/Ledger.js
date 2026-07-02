@@ -74,6 +74,22 @@ export class Ledger {
     this.#dbPath = path.resolve(dbPath);
     const readOnly = mode === "readonly";
     this.#db = readOnly ? openLedgerDbReadOnly(this.#dbPath) : openLedgerDb(this.#dbPath);
+    // Any bootstrap throw after the open (schema-version mismatch, stale
+    // read-only format, migration race) must close the connection: a leaked
+    // handle blocks the very removeSqliteFile reset that would repair the
+    // mismatch on Windows — a self-sustaining failure loop until restart.
+    try {
+      this.#bootstrap(readOnly);
+    } catch (err) {
+      try { this.#db.close(); } catch { /* preserve the bootstrap error */ }
+      throw err;
+    }
+  }
+
+  /**
+   * @param {boolean} readOnly
+   */
+  #bootstrap(readOnly) {
     if (readOnly) {
       this.#db.pragma("foreign_keys = ON");
       this.#stmt = this.#prepareAll();
@@ -343,7 +359,7 @@ export class Ledger {
         parent_seq: parentSeq,
       });
     });
-    return txn();
+    return txn.immediate();
   }
 
   /**
@@ -688,7 +704,7 @@ export class Ledger {
         }
       }
     });
-    txn();
+    txn.immediate();
     return replayed;
   }
 

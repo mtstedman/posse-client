@@ -7,8 +7,9 @@
 import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncGate.js";
 import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
+import { normalizeActionName } from "../../functions/v2/retrieval/dispatch.js";
 import { ledgerDbPath, mainViewPath } from "../../functions/v2/runtime-paths.js";
-import { resolveTargetBranch } from "../../../git/functions/target-branch.js";
+import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.js";
 import { AtlasToolDispatchCache } from "./AtlasToolDispatchCache.js";
 import path from "node:path";
 
@@ -46,7 +47,12 @@ const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
   "usage.stats",
 ]);
 
-const ATLAS_BLOCKING_ACTIONS = new Set([
+// Process-level write gate: these actions take the write slot on this
+// executor's per-repo gate. Broader than the conductor's ledger-mutation set
+// (memory.feedback belongs here — it serializes in-process — but is lane-safe
+// on the reader thread). Every entry must be a registered action (pinned by
+// the parity suite).
+export const ATLAS_BLOCKING_ACTIONS = new Set([
   "repo.register",
   "index.refresh",
   "scip.ingest",
@@ -65,8 +71,6 @@ const ATLAS_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent"]);
 const DISPATCH_CACHE_POLICIES = Object.freeze({
   NEVER: "never",
   INFLIGHT_ONLY: "inflightOnly",
-  VERSIONED: "versioned",
-  GIT_STATE: "gitState",
 });
 
 const ATLAS_DISPATCH_CACHE_POLICIES = new Map([
@@ -210,7 +214,10 @@ function gatewayEffectiveAction(action, args = {}) {
     || args?.action
     || "",
   ).trim();
-  return target || action;
+  // Normalize alias spellings so the blocking/dedupe gates classify the SAME
+  // action dispatch will execute (raw-string checks let a variant spelling
+  // slip a mutation through the read path).
+  return target ? normalizeActionName(target) : action;
 }
 
 function dispatchCachePolicyFor(action) {
@@ -237,7 +244,13 @@ function directReadEligible(action, args = {}) {
 }
 
 function normalizeRepoKey(value) {
-  const text = String(value || "global").replace(/\\/g, "/").trim();
+  let text = String(value || "global").replace(/\\/g, "/").trim();
+  // Windows paths are case-insensitive but drive-letter casing varies between
+  // process.cwd(), settings, and MCP boot config — `C:/repo` vs `c:/repo`
+  // would split the per-repo gate into two independent queues (no mutual
+  // exclusion) and fracture the dedupe/dispatch caches. Mirrors sqlite-gate's
+  // normalizeSqlitePath.
+  if (process.platform === "win32") text = text.toLowerCase();
   return text || "global";
 }
 
@@ -398,7 +411,7 @@ export class AtlasToolExecutor {
     const action = gatewayEffectiveAction(baseAction, args);
     const repoKey = this.#repoKeyFor(request);
     const dispatchCachePolicy = dispatchCachePolicyFor(action);
-    const dispatchKeyParts = this.#dispatchCacheKeyParts({ policy: dispatchCachePolicy, repoKey });
+    const dispatchKeyParts = this.#dispatchCacheKeyParts({ policy: dispatchCachePolicy });
     const dispatchCacheKey = dispatchCacheEnabledFor(request) && dispatchKeyParts
       ? this.#dispatchCache?.keyFor({
         repoKey,
@@ -409,7 +422,7 @@ export class AtlasToolExecutor {
       })
       : null;
     const dispatchCacheTtlMs = dispatchCacheKey ? dispatchCacheTtlFor(request) : 0;
-    const dispatchCacheReady = this.#dispatchCacheReady({ policy: dispatchCachePolicy, keyParts: dispatchKeyParts });
+    const dispatchCacheReady = this.#dispatchCacheReady();
     const run = () => this.#runThroughGate({ ...request, toolName, args, action, repoKey });
     if (dispatchCacheKey) {
       const result = await this.#dispatchCache.getOrRun(dispatchCacheKey, async () => {
@@ -484,7 +497,7 @@ export class AtlasToolExecutor {
     });
     this.#clearRecentDedupeForRepo(repoKey);
     if (requestRepoKey !== repoKey) this.#clearRecentDedupeForRepo(requestRepoKey);
-    const branch = this.#branchForRepo(repoRoot);
+    const branch = await this.#branchForRepo(repoRoot);
     const config = {
       ...(atlas && typeof atlas === "object" ? atlas : {}),
       ...(request.config && typeof request.config === "object" ? request.config : {}),
@@ -580,25 +593,19 @@ export class AtlasToolExecutor {
     this.#readContextVersions.clear();
   }
 
-  #dispatchCacheKeyParts({ policy, repoKey }) {
+  #dispatchCacheKeyParts({ policy }) {
     if (policy === DISPATCH_CACHE_POLICIES.NEVER) return null;
     if (policy === DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY) {
       return { policyVersion: 1, policy };
     }
-    if (policy === DISPATCH_CACHE_POLICIES.VERSIONED) {
-      const readContextVersion = this.#readContextVersions.get(repoKey);
-      return readContextVersion ? { policyVersion: 1, policy, readContextVersion } : { policyVersion: 1, policy, unversioned: true };
-    }
-    if (policy === DISPATCH_CACHE_POLICIES.GIT_STATE) {
-      return { policyVersion: 1, policy, missingGitState: true };
-    }
     return null;
   }
 
-  #dispatchCacheReady({ policy, keyParts }) {
-    if (!keyParts) return false;
-    if (policy === DISPATCH_CACHE_POLICIES.VERSIONED) return !keyParts.unversioned && !!keyParts.readContextVersion;
-    if (policy === DISPATCH_CACHE_POLICIES.GIT_STATE) return !keyParts.missingGitState && !!keyParts.gitState;
+  #dispatchCacheReady() {
+    // Every mapped action is INFLIGHT_ONLY (pure coalescing, no TTL replay).
+    // The old VERSIONED/GIT_STATE policies were unreachable machinery: no
+    // action mapped to them, and GIT_STATE could never become ready — they
+    // read as if version/git-keyed TTL caching existed when it cannot.
     return false;
   }
 
@@ -665,7 +672,10 @@ export class AtlasToolExecutor {
     if (!context) return null;
     const args = request.args && typeof request.args === "object" ? request.args : {};
     const action = request.action;
-    const call = { action, ...args };
+    // action LAST: an `action` key inside args (a legitimate semantic arg for
+    // some domains) must not clobber the resolved dispatch action — mirrors
+    // the gateway branch in retrieve-runner, which spreads args first.
+    const call = { ...args, action };
     const taskText = typeof args.taskText === "string"
       ? args.taskText
       : (action === "symbol.search" && typeof args.query === "string" ? args.query : undefined);
@@ -735,9 +745,9 @@ export class AtlasToolExecutor {
     }
   }
 
-  #branchForRepo(repoRoot) {
+  async #branchForRepo(repoRoot) {
     try {
-      return resolveTargetBranch(repoRoot || process.cwd());
+      return await resolveTargetBranchAsync(repoRoot || process.cwd());
     } catch {
       return "main";
     }

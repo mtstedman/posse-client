@@ -33,7 +33,10 @@ function aggregateWithDecay(rows, halfLifeDays) {
     const parsedTs = Date.parse(r.ts);
     if (!Number.isFinite(parsedTs)) continue;
     const ageDays = Math.max(0, (now - parsedTs) / MS_PER_DAY);
-    const weight = Math.exp(-ageDays / halfLifeDays);
+    // Half-life semantics: weight is 0.5 at exactly `halfLifeDays` old. The
+    // LN2 factor matters — plain exp(-age/halfLife) is e-folding and decays
+    // ~1.44x faster than the parameter name promises.
+    const weight = Math.exp(-Math.LN2 * ageDays / halfLifeDays);
     if (!Number.isFinite(weight)) continue;
 
     const key = `${r.content_hash}:${r.local_id}`;
@@ -93,6 +96,17 @@ function aggregateFeedbackRows(rows) {
 }
 
 const FEEDBACK_TASK_TEXT_MATCH = 0.34;
+
+// Raw-path scan bound (independent of the caller's aggregate limit) and the
+// per-(symbol, signal) window cap that keeps one symbol's burst from evicting
+// every other symbol out of that bounded scan.
+const FEEDBACK_RAW_SCAN_CAP = 5000;
+const FEEDBACK_ROWS_PER_SYMBOL_SIGNAL = 20;
+
+// Signals older than every query window (default 30d; repo.quality 90d) are
+// pruned opportunistically on write, a bounded batch per call.
+const FEEDBACK_RETENTION_DAYS = 90;
+const FEEDBACK_PRUNE_BATCH = 500;
 
 /**
  * @param {Array<{ task_text?: string | null }>} rows
@@ -214,6 +228,9 @@ export class FeedbackStore {
            (ts, slice_handle, content_hash, local_id, signal, task_type, task_text)
          VALUES(?, ?, ?, ?, ?, ?, ?)`,
       ),
+      // Grouped aggregates are recency-ordered BEFORE the limit — an
+      // unordered GROUP BY ... LIMIT returns an arbitrary subset, making
+      // agent.feedback.query pages nondeterministic.
       feedbackRecent: db.prepare(
         `SELECT content_hash, local_id,
                 SUM(CASE WHEN signal = 'useful'  THEN 1 ELSE 0 END) AS useful_count,
@@ -222,6 +239,7 @@ export class FeedbackStore {
          FROM feedback_signals
          WHERE ts >= ?
          GROUP BY content_hash, local_id
+         ORDER BY MAX(ts) DESC
          LIMIT ?`,
       ),
       feedbackRecentByTaskType: db.prepare(
@@ -232,23 +250,45 @@ export class FeedbackStore {
          FROM feedback_signals
          WHERE ts >= ? AND task_type = ?
          GROUP BY content_hash, local_id
+         ORDER BY MAX(ts) DESC
          LIMIT ?`,
       ),
       // Raw signal fetch — used by the decay path so we can weight rows
-      // by age in JS without registering an exp() SQL function.
+      // by age in JS without registering an exp() SQL function. The
+      // per-(symbol, signal) window cap keeps one spammy symbol's burst from
+      // evicting every other symbol out of the bounded scan (append-only
+      // writes have no dedup, so crowding is bounded here at read time).
       feedbackRaw: db.prepare(
-        `SELECT content_hash, local_id, signal, ts, task_text
-         FROM feedback_signals
-         WHERE ts >= ?
+        `SELECT content_hash, local_id, signal, ts, task_text FROM (
+           SELECT content_hash, local_id, signal, ts, task_text,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY content_hash, local_id, signal
+                    ORDER BY ts DESC
+                  ) AS rn
+           FROM feedback_signals
+           WHERE ts >= ?
+         )
+         WHERE rn <= ${FEEDBACK_ROWS_PER_SYMBOL_SIGNAL}
          ORDER BY ts DESC
          LIMIT ?`,
       ),
       feedbackRawByTaskType: db.prepare(
-        `SELECT content_hash, local_id, signal, ts, task_text
-         FROM feedback_signals
-         WHERE ts >= ? AND task_type = ?
+        `SELECT content_hash, local_id, signal, ts, task_text FROM (
+           SELECT content_hash, local_id, signal, ts, task_text,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY content_hash, local_id, signal
+                    ORDER BY ts DESC
+                  ) AS rn
+           FROM feedback_signals
+           WHERE ts >= ? AND task_type = ?
+         )
+         WHERE rn <= ${FEEDBACK_ROWS_PER_SYMBOL_SIGNAL}
          ORDER BY ts DESC
          LIMIT ?`,
+      ),
+      feedbackPruneOld: db.prepare(
+        `DELETE FROM feedback_signals
+         WHERE id IN (SELECT id FROM feedback_signals WHERE ts < ? LIMIT ?)`,
       ),
     };
   }
@@ -274,10 +314,16 @@ export class FeedbackStore {
     const missing = Array.isArray(input.missingSymbolIds) ? input.missingSymbolIds : [];
     let inserted = 0;
     const ts = nowIso();
+    // Within-batch dedupe: the schema allows 1000 ids per call and arrays may
+    // repeat the same id — one call is one opinion per (symbol, signal).
+    const seen = new Set();
     const txn = this.#db.transaction(() => {
       for (const id of useful) {
         const parsed = parseSymbolIdString(id);
         if (!parsed) continue;
+        const key = `${parsed.content_hash}:${parsed.local_id}:useful`;
+        if (seen.has(key)) continue;
+        seen.add(key);
         this.#stmt.feedbackInsert.run(
           ts,
           sliceHandle,
@@ -292,6 +338,9 @@ export class FeedbackStore {
       for (const id of missing) {
         const parsed = parseSymbolIdString(id);
         if (!parsed) continue;
+        const key = `${parsed.content_hash}:${parsed.local_id}:missing`;
+        if (seen.has(key)) continue;
+        seen.add(key);
         this.#stmt.feedbackInsert.run(
           ts,
           sliceHandle,
@@ -303,8 +352,16 @@ export class FeedbackStore {
         );
         inserted++;
       }
+      // Opportunistic retention: signals past every query window (default 30d,
+      // repo.quality 90d) are dead weight in the raw scans and the FTS shadow
+      // (delete triggers keep feedback_fts in sync). Bounded per call so a
+      // backlog drains over a few writes instead of stalling one.
+      if (inserted > 0) {
+        const cutoff = new Date(Date.now() - FEEDBACK_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+        this.#stmt.feedbackPruneOld.run(cutoff, FEEDBACK_PRUNE_BATCH);
+      }
     });
-    txn();
+    txn.immediate();
     return inserted;
   }
 
@@ -345,14 +402,20 @@ export class FeedbackStore {
 
     const hasTaskText = typeof o.taskText === "string" && o.taskText.trim().length > 0;
     if (halfLife != null || hasTaskText) {
+      // `limit` means AGGREGATES on every path. The raw fetch uses its own
+      // scan cap — letting the caller's aggregate limit bound RAW rows made
+      // hasMore/pagination lie whenever rows collapsed into fewer aggregates.
       /** @type {any[]} */
       const raw = o.taskType
-        ? this.#stmt.feedbackRawByTaskType.all(sinceTs, o.taskType, limit)
-        : this.#stmt.feedbackRaw.all(sinceTs, limit);
+        ? this.#stmt.feedbackRawByTaskType.all(sinceTs, o.taskType, FEEDBACK_RAW_SCAN_CAP)
+        : this.#stmt.feedbackRaw.all(sinceTs, FEEDBACK_RAW_SCAN_CAP);
       const filtered = filterFeedbackRowsByTaskText(raw, o.taskText, /** @type {any} */ (o).onTaskTextMatch);
-      return halfLife != null
+      const aggregates = halfLife != null
         ? aggregateWithDecay(filtered, halfLife)
         : aggregateFeedbackRows(filtered);
+      return aggregates
+        .sort((a, b) => String(b.last_ts || "").localeCompare(String(a.last_ts || "")))
+        .slice(0, limit);
     }
 
     /** @type {any[]} */

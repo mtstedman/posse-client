@@ -52,13 +52,39 @@ export function tableExists(db, table) {
 }
 
 /**
+ * Remove a SQLite database and its sidecars. Sidecar cleanup is best effort,
+ * but the caller must know whether the MAIN file is actually gone: on Windows
+ * an open handle makes unlink fail, and a "reset" that silently reopens the
+ * stale file it meant to delete is worse than failing.
+ *
  * @param {string} dbPath
+ * @returns {boolean} true when the main db file no longer exists
  */
 export function removeSqliteFile(dbPath) {
+  let removedMain = true;
   for (const sfx of ["", "-wal", "-shm"]) {
-    try { fs.unlinkSync(dbPath + sfx); }
-    catch { /* stale cache cleanup is best effort */ }
+    try {
+      fs.unlinkSync(dbPath + sfx);
+    } catch (err) {
+      if (sfx === "" && /** @type {any} */ (err)?.code !== "ENOENT") removedMain = false;
+      // Sidecar cleanup stays best effort.
+    }
   }
+  return removedMain;
+}
+
+/**
+ * Only genuine corruption markers make a ledger file disposable. Everything
+ * else (SQLITE_BUSY under cross-process contention, I/O errors, ...) must
+ * surface to the caller — deleting a healthy DB another process is writing is
+ * data loss, not repair.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isSqliteCorruptionError(err) {
+  const code = String(/** @type {any} */ (err)?.code || "");
+  return code.startsWith("SQLITE_CORRUPT") || code.startsWith("SQLITE_NOTADB");
 }
 
 /**
@@ -141,26 +167,56 @@ export function ledgerNeedsFormatReset(db) {
  */
 export function openLedgerDb(dbPath) {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const open = () => {
+    const fresh = new Database(dbPath);
+    fresh.pragma("busy_timeout = 5000");
+    // WAL is what the Ledger's concurrency story has assumed all along
+    // ("WAL mode lets readers run concurrently with the writer") but was
+    // never actually enabled: in rollback-journal mode a long writer BLOCKS
+    // readers, which is exactly what made transient BUSY during the format
+    // probe (and the destructive reset it used to trigger) plausible. The
+    // mode is persistent, so a legacy DB upgrades on its first readwrite
+    // open. Known edge: a crash that leaves a hot WAL needing recovery makes
+    // the FIRST read-only open fail until a readwrite open recovers it —
+    // read paths degrade (they no longer escalate to write opens) and the
+    // next warm repairs.
+    try { fresh.pragma("journal_mode = WAL"); } catch { /* keep prior mode */ }
+    return fresh;
+  };
   let db;
   try {
-    db = new Database(dbPath);
-  } catch {
-    removeSqliteFile(dbPath);
-    db = new Database(dbPath);
-    db.pragma("busy_timeout = 5000");
-    return db;
+    db = open();
+  } catch (err) {
+    // A file that cannot even open as SQLite is disposable cache — but only
+    // when it can actually be cleared; otherwise surface the original error
+    // instead of reopening the stale file the reset failed to delete.
+    if (!removeSqliteFile(dbPath)) throw err;
+    return open();
   }
-  db.pragma("busy_timeout = 5000");
 
+  let needsReset = false;
   try {
-    if (!ledgerNeedsFormatReset(db)) return db;
-  } catch {
-    // Corrupt or non-SQLite files are disposable cache at this layer.
+    needsReset = ledgerNeedsFormatReset(db);
+  } catch (err) {
+    if (isSqliteCorruptionError(err)) {
+      needsReset = true;
+    } else {
+      // Transient probe failures (SQLITE_BUSY during cross-process contention,
+      // WAL recovery, I/O hiccups) are not corruption. Deleting the ledger
+      // here would destroy a healthy DB another process is using.
+      try { db.close(); } catch { /* preserve the probe error */ }
+      throw err;
+    }
   }
+  if (!needsReset) return db;
 
   try { db.close(); } catch { /* ignore close failures while resetting */ }
-  removeSqliteFile(dbPath);
-  return new Database(dbPath);
+  if (!removeSqliteFile(dbPath)) {
+    throw new Error(
+      `ATLAS ledger format reset could not remove ${dbPath} (locked by another process?); refusing to reopen the stale file`,
+    );
+  }
+  return open();
 }
 
 /**

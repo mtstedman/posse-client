@@ -206,6 +206,11 @@ async function _awaitSharedClosing() {
 /** Wrap an op so the idle timer is held off while it runs. */
 function _tracked(fn) {
   return async (/** @type {any[]} */ ...args) => {
+    // Wait out any in-progress close BEFORE registering as inflight: an
+    // encode arriving mid-close used to count against the drain (holding it
+    // open to the 10s cap) and then respawn fresh workers — paying a full
+    // model load — the moment teardown finished.
+    await _awaitSharedClosing();
     _sharedInflight++;
     _disarmIdle();
     try {
@@ -227,7 +232,9 @@ function _tracked(fn) {
  */
 async function _encode(texts, opts = {}) {
   if (!Array.isArray(texts) || texts.length === 0) return [];
-  await _awaitSharedClosing();
+  // _tracked already waited out any close BEFORE registering inflight; from
+  // here the drain waits for US, so awaiting the close again would deadlock
+  // the pair until the drain cap.
   _ensureWorkers(opts.workers ?? 1);
   const reqOpts = { signal: opts.signal };
   const n = Math.min(normalizeEmbeddingThreads(opts.workers ?? 1, 1), texts.length, _workers.length);
@@ -253,7 +260,6 @@ async function _encode(texts, opts = {}) {
 }
 
 async function _warm(opts = {}) {
-  await _awaitSharedClosing();
   _ensureWorkers(opts.workers ?? 1);
   const n = Math.min(normalizeEmbeddingThreads(opts.workers ?? 1, 1), _workers.length);
   await Promise.all(_workers.slice(0, n).map((w) => w.warm()));

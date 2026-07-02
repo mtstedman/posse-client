@@ -1,4 +1,3 @@
-export * from "./v2/AsyncEmbeddingIndex.js";
 export * from "./v2/AtlasToolExecutor.js";
 export * from "./v2/ChildEmbeddingIndex.js";
 export * from "./v2/EmbeddingEncoder.js";

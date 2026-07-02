@@ -456,7 +456,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
   baseToolAllowlists: Object.freeze({
     dev: Object.freeze({
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash", "project_db_query"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash", "project_db_query"],
     }),
     artificer: Object.freeze({
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback"],
@@ -464,8 +464,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       imageGeneration: ["generate_image"],
     }),
     assessor: Object.freeze({
-      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash"],
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "run_test", "run_test_suite", "bash"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "run_test", "run_test_suite", "bash"],
     }),
     researcher: Object.freeze({
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
@@ -485,12 +485,15 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
   deterministicMcp: Object.freeze({
     read: Object.freeze(["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"]),
     write: Object.freeze(["write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output"]),
-    imageHelpers: Object.freeze(["read_image_metadata", "validate_artifact_output", "clean_image"]),
+    // Read-only image inspection (dev/artificer/assessor). clean_image is a
+    // mutation and is gated to artificer separately — keep it out of this set.
+    imageHelpers: Object.freeze(["read_image_metadata", "validate_artifact_output"]),
+    imageMutation: Object.freeze(["clean_image"]),
     imageGeneration: Object.freeze(["generate_image"]),
     ocr: Object.freeze(["extract_image_text"]),
     shellRoles: Object.freeze(["dev", "artificer", "assessor"]),
     writeRoles: Object.freeze(["dev", "artificer"]),
-    imageHelperRoles: Object.freeze(["dev", "artificer"]),
+    imageHelperRoles: Object.freeze(["dev", "artificer", "assessor"]),
     imageGenerationRoles: Object.freeze(["artificer"]),
   }),
   atlasRoutes: Object.freeze({
@@ -536,6 +539,7 @@ const ROLE_TOOL_ALLOWLISTS = TOOL_ROLE_LIBRARY.baseToolAllowlists;
 export const DETERMINISTIC_READ_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.read;
 export const DETERMINISTIC_WRITE_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.write;
 export const DETERMINISTIC_IMAGE_HELPER_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.imageHelpers;
+export const DETERMINISTIC_IMAGE_MUTATION_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.imageMutation;
 export const DETERMINISTIC_IMAGE_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.imageGeneration;
 export const DETERMINISTIC_OCR_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.ocr;
 
@@ -548,6 +552,16 @@ export const MEANINGFUL_ATLAS_ACTIONS = new Set([
   "symbol.search",
   "symbol.card",
   "symbol.overview",
+  // slice.build is THE context-retrieval workhorse (tree-first prefetch
+  // seeds it), context/context.summary wrap it, and repo.overview is broad
+  // repo discovery — all four count toward ATLAS-first unlock. Dropping them
+  // silently raised the unlock bar to "three of the narrower actions" and
+  // left the gate suite red. Bookkeeping wrappers (repo.status, policy.get,
+  // agent.feedback) stay non-meaningful on purpose.
+  "slice.build",
+  "context",
+  "context.summary",
+  "repo.overview",
   "edit.plan",
   "code.skeleton",
   "code.lens",
@@ -742,15 +756,20 @@ export function getDeterministicMcpToolNames(role, {
   const tools = [...DETERMINISTIC_READ_TOOLS];
   if (roleUsesDeterministicWriteMcp(role)) tools.push(...DETERMINISTIC_WRITE_TOOLS);
   if (roleUsesDeterministicImageHelpers(role)) tools.push(...DETERMINISTIC_IMAGE_HELPER_TOOLS);
+  // clean_image mutates an image within scope; keep it artificer-only.
+  if (roleUsesDeterministicImageMcp(role)) tools.push(...DETERMINISTIC_IMAGE_MUTATION_TOOLS);
   if (roleUsesDeterministicImageMcp(role) && needsImageGeneration) tools.push(...DETERMINISTIC_IMAGE_TOOLS);
-  if (role === "dev" || role === "artificer") tools.push(...DETERMINISTIC_OCR_TOOLS);
-  if (role === "dev" || role === "assessor") tools.push(
+  if (role === "dev" || role === "artificer" || role === "assessor") tools.push(...DETERMINISTIC_OCR_TOOLS);
+  // Dev authors and runs tests; the assessor may run tests to verify but must
+  // not author them (test creation is a dev-only mutation).
+  if (role === "dev") tools.push(
     "run_scoped_checks",
     "create_test_suite",
     "create_test",
     "run_test",
     "run_test_suite",
   );
+  if (role === "assessor") tools.push("run_scoped_checks", "run_test", "run_test_suite");
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push("bash");
   if (role === "planner") tools.push("get_brief");
   if (role === "researcher") {

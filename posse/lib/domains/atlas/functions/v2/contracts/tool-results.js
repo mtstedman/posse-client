@@ -785,9 +785,11 @@
 
 /**
  * @typedef {Object} AgentFeedbackData
- * @property {boolean} recorded
- * @property {number} usefulCount
- * @property {number} missingCount
+ * @property {boolean} recorded        True only when at least one signal row actually landed.
+ * @property {number} usefulCount      Requested useful ids (before validation).
+ * @property {number} missingCount     Requested missing ids (before validation).
+ * @property {number} insertedCount    Rows the store actually inserted (malformed ids are skipped).
+ * @property {number} [skippedCount]   Requested minus inserted, when any id was skipped.
  * @property {string} [errorMessage]
  */
 

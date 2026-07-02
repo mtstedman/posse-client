@@ -81,7 +81,13 @@ async function executePostgres({ connection, statement, isRead, readOnly, maxRow
     if (readOnly) {
       await client.query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY");
     }
-    const result = await client.query(statement);
+    // Force the EXTENDED query protocol (Parse/Bind/Execute) by passing a config
+    // object with queryMode. A bare string uses the SIMPLE protocol, which runs
+    // every ';'-separated command in the string — so a parser miss in the
+    // single-statement guard would let stacked SQL through. Under the extended
+    // protocol PostgreSQL rejects "multiple commands in a prepared statement",
+    // making single-statement enforcement authoritative at the wire level.
+    const result = await client.query({ text: statement, queryMode: "extended" });
     if (isRead) {
       const allRows = Array.isArray(result.rows) ? result.rows : [];
       const rows = allRows.slice(0, maxRows);

@@ -1860,6 +1860,14 @@ export class RunSession {
       softTimeoutStatus: "running",
       onSoftTimeout: () => {
         if (atlasBootBackgroundRequested) return;
+        // Headless boots have no TTY to press Enter on — the footer action is
+        // unreachable, so a warm wedged before the encode handoff left them
+        // waiting on internal warm timeouts alone. Auto-background instead,
+        // matching the non-interactive behavior at the views-ready handoffs.
+        if (!bootCanPromptForBackground()) {
+          requestAtlasBootBackground("atlas-soft-timeout-non-interactive");
+          return;
+        }
         setBootEnterAction(() => requestAtlasBootBackground("atlas-soft-timeout-enter"));
         updateBootFooter("hit Enter to continue with ATLAS in the background");
       },

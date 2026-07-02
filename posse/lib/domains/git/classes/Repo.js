@@ -6,7 +6,7 @@
 import { execFile as defaultExecFileAsync, execFileSync } from "node:child_process";
 import path from "node:path";
 import { AsyncGateBusyError, AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
-import { runGitNativeMethod, runGitNativeMethodAsync } from "../functions/native/invoke.js";
+import { nativeAsyncOptions, runGitNativeMethod, runGitNativeMethodAsync } from "../functions/native/invoke.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const GIT_READ_ONLY_COMMANDS = new Set([
@@ -262,14 +262,6 @@ function gitGateStateForCwd(cwd) {
   return GIT_GATE.snapshot().keys.find((state) => state.key === key) || null;
 }
 
-function nativeAsyncOptions(options = {}) {
-  return {
-    ...(options.nativeParity || {}),
-    signal: options.signal,
-    timeoutMs: options.timeoutMs,
-  };
-}
-
 function gitExecFailure(command, result) {
   const stderr = String(result?.stderr || "");
   const stdout = String(result?.stdout || "");
@@ -423,10 +415,6 @@ export class Repo {
       : GIT_GATE.read(cwd, run, { label });
   }
 
-  currentHash(ref = "HEAD", nativeParity = {}) {
-    return runGitNativeMethod("git.currentHash", { cwd: this.cwd, refName: ref }, nativeParity);
-  }
-
   currentHashAsync(ref = "HEAD", options = {}) {
     return gitNativeRead(
       this.cwd,
@@ -440,10 +428,6 @@ export class Repo {
     );
   }
 
-  currentBranch(nativeParity = {}) {
-    return runGitNativeMethod("git.currentBranch", { cwd: this.cwd }, nativeParity);
-  }
-
   currentBranchAsync(options = {}) {
     return gitNativeRead(
       this.cwd,
@@ -453,10 +437,6 @@ export class Repo {
     );
   }
 
-  statusPorcelain(args = [], nativeParity = {}) {
-    return runGitNativeMethod("git.statusPorcelain", { cwd: this.cwd, args }, nativeParity);
-  }
-
   statusPorcelainAsync(args = [], options = {}) {
     return gitNativeRead(
       this.cwd,
@@ -464,10 +444,6 @@ export class Repo {
       options,
       () => runGitNativeMethodAsync("git.statusPorcelain", { cwd: this.cwd, args }, nativeAsyncOptions(options)),
     );
-  }
-
-  hasChanges(args = [], nativeParity = {}) {
-    return runGitNativeMethod("git.hasChanges", { cwd: this.cwd, args }, nativeParity);
   }
 
   async hasChangesAsync(args = [], options = {}) {
@@ -496,10 +472,6 @@ export class Repo {
     );
   }
 
-  mergeBase(left = "HEAD", right = "HEAD", nativeParity = {}) {
-    return runGitNativeMethod("git.mergeBase", { cwd: this.cwd, left, right }, nativeParity);
-  }
-
   mergeBaseAsync(left = "HEAD", right = "HEAD", options = {}) {
     return gitNativeRead(
       this.cwd,
@@ -513,10 +485,6 @@ export class Repo {
     );
   }
 
-  isAncestor(ancestor, descendant, nativeParity = {}) {
-    return runGitNativeMethod("git.isAncestor", { cwd: this.cwd, ancestor, descendant }, nativeParity);
-  }
-
   async isAncestorAsync(ancestor, descendant, options = {}) {
     return await gitNativeRead(
       this.cwd,
@@ -528,10 +496,6 @@ export class Repo {
         nativeAsyncOptions(options),
       ),
     );
-  }
-
-  worktree(args = []) {
-    return this.exec(["worktree", ...args]);
   }
 
   worktreeAsync(args = [], options = {}) {

@@ -19,6 +19,7 @@ import {
   verifyMcpOAuthToken,
 } from "../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { getSharedAtlasToolExecutor } from "../../domains/atlas/functions/v2/tools/executor.js";
+import { operatorFeedbackSignalTextForJob } from "../../domains/providers/functions/shared/tool-runtime.js";
 import { recordToolUseObservations } from "../../domains/observability/functions/observations.js";
 import { appendRunTelemetry } from "../../shared/telemetry/functions/run-telemetry.js";
 
@@ -324,6 +325,26 @@ function atlasExecutorSessionContext(session) {
     tokenSource: session?.tokenSource || null,
     tokenVerified: session?.tokenVerified === true,
   };
+}
+
+/**
+ * Append the operator-feedback availability signal to an ATLAS MCP result's
+ * text. Advisory: any failure (or a non-text result) leaves the result
+ * untouched — a signal lookup must never break a successful ATLAS call.
+ */
+function appendOwnerOperatorFeedbackSignal(result, session) {
+  try {
+    const signal = operatorFeedbackSignalTextForJob(session?.bootConfig?.jobId ?? null);
+    if (!signal) return result;
+    const first = result?.content?.[0];
+    if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+    return {
+      ...result,
+      content: [{ ...first, text: `${first.text}${signal}` }, ...result.content.slice(1)],
+    };
+  } catch {
+    return result;
+  }
 }
 
 function mcpToolCallSuccess(response = null) {
@@ -1108,9 +1129,14 @@ export class PersistentMcpOwner {
           sessionId: session?.id || null,
         },
       });
-      const result = executed?.result && typeof executed.result === "object"
+      let result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
+      // ATLAS calls are the bulk of a retrieval-phase agent's tool traffic;
+      // without the signal here (the gateway only appends it to native
+      // tools), an MCP-transport agent deep in an ATLAS-only phase learns
+      // about pending operator feedback late or never.
+      result = appendOwnerOperatorFeedbackSignal(result, session);
       recordOwnerToolObservation({ session, toolName, toolArgs, result });
       appendRunTelemetry("diagnostics", {
         kind: "mcp.owner.atlas_tool_call",

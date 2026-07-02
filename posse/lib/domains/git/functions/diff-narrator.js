@@ -129,54 +129,76 @@ function compact(text, max = MAX_NARRATIVE_CHARS) {
   return `${value.slice(0, max)}\n...[diff narrative truncated]`;
 }
 
+function scopedNarrativePaths(paths) {
+  return [...new Set((Array.isArray(paths) ? paths : []).map(normalizePath).filter(Boolean))].slice(0, MAX_FILES);
+}
+
+// Shared assembly for both twins: the sync/async pair differ only in how the
+// four raw git outputs are gathered — everything downstream of the raw text
+// (parsing, per-file shaping, totals, result shape) lives here once.
+function assembleDiffNarrative(commit, { numstatRaw, nameStatusRaw, statRaw, unifiedRaw }) {
+  const numstat = parseNumstat(numstatRaw);
+  const nameStatus = parseNameStatus(nameStatusRaw);
+  const stat = String(statRaw || "").trim();
+  const unified = parseUnifiedDiff(unifiedRaw);
+  const files = nameStatus.slice(0, MAX_FILES).map((entry) => {
+    const counts = numstat.get(entry.file) || {};
+    const detail = unified.get(entry.file) || { hunks: [], addedSignals: [], removedSignals: [] };
+    return {
+      file: entry.file,
+      status: changeKind(entry.status),
+      status_code: entry.code,
+      added: counts.added ?? null,
+      deleted: counts.deleted ?? null,
+      hunks: detail.hunks,
+      added_signals: detail.addedSignals,
+      removed_signals: detail.removedSignals,
+    };
+  });
+  const totalAdded = files.reduce((sum, file) => sum + (Number.isFinite(file.added) ? file.added : 0), 0);
+  const totalDeleted = files.reduce((sum, file) => sum + (Number.isFinite(file.deleted) ? file.deleted : 0), 0);
+  return {
+    ok: true,
+    commit_hash: commit,
+    summary: `${files.length} file(s) changed, +${totalAdded}/-${totalDeleted}`,
+    files,
+    stat,
+  };
+}
+
+function missingNarrativeInputResult() {
+  return { ok: false, reason: "commitHash and paths are required", summary: "", files: [] };
+}
+
+function diffNarrativeFailure(err, commit, scopedPaths) {
+  return {
+    ok: false,
+    reason: err?.message?.split("\n")[0] || String(err),
+    commit_hash: commit,
+    paths: scopedPaths,
+    summary: "",
+    files: [],
+  };
+}
+
 export function buildDiffNarrative({
   cwd = process.cwd(),
   commitHash = "",
   paths = [],
 } = {}) {
   const commit = String(commitHash || "").trim();
-  const scopedPaths = [...new Set((Array.isArray(paths) ? paths : []).map(normalizePath).filter(Boolean))].slice(0, MAX_FILES);
-  if (!commit || scopedPaths.length === 0) {
-    return { ok: false, reason: "commitHash and paths are required", summary: "", files: [] };
-  }
+  const scopedPaths = scopedNarrativePaths(paths);
+  if (!commit || scopedPaths.length === 0) return missingNarrativeInputResult();
 
   try {
-    const numstat = parseNumstat(git(cwd, diffArgs(commit, scopedPaths, ["--numstat"])));
-    const nameStatus = parseNameStatus(git(cwd, diffArgs(commit, scopedPaths, ["--name-status"])));
-    const stat = git(cwd, diffArgs(commit, scopedPaths, ["--stat", "--summary"])).trim();
-    const unified = parseUnifiedDiff(git(cwd, diffArgs(commit, scopedPaths, ["--unified=0"])));
-    const files = nameStatus.slice(0, MAX_FILES).map((entry) => {
-      const counts = numstat.get(entry.file) || {};
-      const detail = unified.get(entry.file) || { hunks: [], addedSignals: [], removedSignals: [] };
-      return {
-        file: entry.file,
-        status: changeKind(entry.status),
-        status_code: entry.code,
-        added: counts.added ?? null,
-        deleted: counts.deleted ?? null,
-        hunks: detail.hunks,
-        added_signals: detail.addedSignals,
-        removed_signals: detail.removedSignals,
-      };
+    return assembleDiffNarrative(commit, {
+      numstatRaw: git(cwd, diffArgs(commit, scopedPaths, ["--numstat"])),
+      nameStatusRaw: git(cwd, diffArgs(commit, scopedPaths, ["--name-status"])),
+      statRaw: git(cwd, diffArgs(commit, scopedPaths, ["--stat", "--summary"])),
+      unifiedRaw: git(cwd, diffArgs(commit, scopedPaths, ["--unified=0"])),
     });
-    const totalAdded = files.reduce((sum, file) => sum + (Number.isFinite(file.added) ? file.added : 0), 0);
-    const totalDeleted = files.reduce((sum, file) => sum + (Number.isFinite(file.deleted) ? file.deleted : 0), 0);
-    return {
-      ok: true,
-      commit_hash: commit,
-      summary: `${files.length} file(s) changed, +${totalAdded}/-${totalDeleted}`,
-      files,
-      stat,
-    };
   } catch (err) {
-    return {
-      ok: false,
-      reason: err?.message?.split("\n")[0] || String(err),
-      commit_hash: commit,
-      paths: scopedPaths,
-      summary: "",
-      files: [],
-    };
+    return diffNarrativeFailure(err, commit, scopedPaths);
   }
 }
 
@@ -186,10 +208,8 @@ export async function buildDiffNarrativeAsync({
   paths = [],
 } = {}) {
   const commit = String(commitHash || "").trim();
-  const scopedPaths = [...new Set((Array.isArray(paths) ? paths : []).map(normalizePath).filter(Boolean))].slice(0, MAX_FILES);
-  if (!commit || scopedPaths.length === 0) {
-    return { ok: false, reason: "commitHash and paths are required", summary: "", files: [] };
-  }
+  const scopedPaths = scopedNarrativePaths(paths);
+  if (!commit || scopedPaths.length === 0) return missingNarrativeInputResult();
 
   try {
     const [numstatRaw, nameStatusRaw, statRaw, unifiedRaw] = await Promise.all([
@@ -198,42 +218,9 @@ export async function buildDiffNarrativeAsync({
       gitAsync(cwd, diffArgs(commit, scopedPaths, ["--stat", "--summary"])),
       gitAsync(cwd, diffArgs(commit, scopedPaths, ["--unified=0"])),
     ]);
-    const numstat = parseNumstat(numstatRaw);
-    const nameStatus = parseNameStatus(nameStatusRaw);
-    const stat = statRaw.trim();
-    const unified = parseUnifiedDiff(unifiedRaw);
-    const files = nameStatus.slice(0, MAX_FILES).map((entry) => {
-      const counts = numstat.get(entry.file) || {};
-      const detail = unified.get(entry.file) || { hunks: [], addedSignals: [], removedSignals: [] };
-      return {
-        file: entry.file,
-        status: changeKind(entry.status),
-        status_code: entry.code,
-        added: counts.added ?? null,
-        deleted: counts.deleted ?? null,
-        hunks: detail.hunks,
-        added_signals: detail.addedSignals,
-        removed_signals: detail.removedSignals,
-      };
-    });
-    const totalAdded = files.reduce((sum, file) => sum + (Number.isFinite(file.added) ? file.added : 0), 0);
-    const totalDeleted = files.reduce((sum, file) => sum + (Number.isFinite(file.deleted) ? file.deleted : 0), 0);
-    return {
-      ok: true,
-      commit_hash: commit,
-      summary: `${files.length} file(s) changed, +${totalAdded}/-${totalDeleted}`,
-      files,
-      stat,
-    };
+    return assembleDiffNarrative(commit, { numstatRaw, nameStatusRaw, statRaw, unifiedRaw });
   } catch (err) {
-    return {
-      ok: false,
-      reason: err?.message?.split("\n")[0] || String(err),
-      commit_hash: commit,
-      paths: scopedPaths,
-      summary: "",
-      files: [],
-    };
+    return diffNarrativeFailure(err, commit, scopedPaths);
   }
 }
 
@@ -261,14 +248,17 @@ export function formatDiffNarrative(narrative) {
   return compact(lines.join("\n"));
 }
 
-export function attachDiffNarrative(assessmentContext = null, cwd = null) {
-  if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
-  const commitHash = String(assessmentContext.commit_hash || "").trim();
-  const paths = [
-    ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
-    ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
-  ];
-  const narrative = buildDiffNarrative({ cwd, commitHash, paths });
+function narrativeInputsFromContext(assessmentContext) {
+  return {
+    commitHash: String(assessmentContext.commit_hash || "").trim(),
+    paths: [
+      ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
+      ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
+    ],
+  };
+}
+
+function applyNarrativeToContext(assessmentContext, narrative) {
   const formatted = formatDiffNarrative(narrative);
   if (formatted) {
     assessmentContext.scoped_diff_narrative = formatted;
@@ -277,18 +267,14 @@ export function attachDiffNarrative(assessmentContext = null, cwd = null) {
   return assessmentContext;
 }
 
+export function attachDiffNarrative(assessmentContext = null, cwd = null) {
+  if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
+  const { commitHash, paths } = narrativeInputsFromContext(assessmentContext);
+  return applyNarrativeToContext(assessmentContext, buildDiffNarrative({ cwd, commitHash, paths }));
+}
+
 export async function attachDiffNarrativeAsync(assessmentContext = null, cwd = null) {
   if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
-  const commitHash = String(assessmentContext.commit_hash || "").trim();
-  const paths = [
-    ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
-    ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
-  ];
-  const narrative = await buildDiffNarrativeAsync({ cwd, commitHash, paths });
-  const formatted = formatDiffNarrative(narrative);
-  if (formatted) {
-    assessmentContext.scoped_diff_narrative = formatted;
-    assessmentContext.scoped_diff_narrative_json = narrative;
-  }
-  return assessmentContext;
+  const { commitHash, paths } = narrativeInputsFromContext(assessmentContext);
+  return applyNarrativeToContext(assessmentContext, await buildDiffNarrativeAsync({ cwd, commitHash, paths }));
 }

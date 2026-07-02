@@ -7,7 +7,7 @@
 import path from "path";
 import { isAbortError } from "../../runtime/functions/yield.js";
 import { gitExec, gitExecAsync } from "./utils.js";
-import { resolveTargetBranch } from "./target-branch.js";
+import { resolveTargetBranch, resolveTargetBranchAsync } from "./target-branch.js";
 import { runGitNativeMethodAsync } from "./native/invoke.js";
 import { isExpectedGitPredicateMiss, logSuppressedGitFailure } from "./worktree-internal.js";
 import { gitBranchExists } from "./worktree-path.js";
@@ -40,6 +40,10 @@ export async function branchIsAncestorOfTargetAsync(branchName, targetBranch, cw
   }
 }
 
+// deleteBranchPreservingTip / deleteBranchPreservingTipAsync are intentionally
+// NOT twins of one body: the sync fn sequences the snapshot + branch delete in
+// node-git, while the async fn delegates to native methods. Changes here must
+// be mirrored on the async/native side.
 export function deleteBranchPreservingTip(
   projectDir,
   branchName,
@@ -101,8 +105,11 @@ export function compactNativeDeleteBranchResult(value = {}) {
 export async function deleteBranchPreservingTipAsync(
   projectDir,
   branchName,
-  { targetBranch = resolveTargetBranch(projectDir), reason = "branch-cleanup", wiId = null, onMsg = null, signal = null, nativeParity = {} } = {},
+  { targetBranch = null, reason = "branch-cleanup", wiId = null, onMsg = null, signal = null, nativeParity = {} } = {},
 ) {
+  // Resolved in-body via the async twin: a sync default-param resolve would
+  // block the async lane (startup GC omits targetBranch) on a native spawn.
+  if (targetBranch == null) targetBranch = await resolveTargetBranchAsync(projectDir, { signal });
   const result = await runGitNativeMethodAsync(
     "git.worktree.deleteBranchPreservingTip",
     {

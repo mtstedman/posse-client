@@ -45,8 +45,19 @@ export const PROJECT_DB_CONFIG_DDL = `
   );
 `;
 
+// Mutating jobs run with a worktree under `<repo>/.posse-worktrees/` as cwd;
+// the config row always lives with the repo that owns the worktree, so resolve
+// through the worktree back to the repo root before locating orchestrator.db.
+function resolveRepoRoot(projectDir) {
+  if (!projectDir) return null;
+  const resolved = path.resolve(String(projectDir));
+  const segments = resolved.split(path.sep);
+  const idx = segments.lastIndexOf(".posse-worktrees");
+  return idx > 0 ? segments.slice(0, idx).join(path.sep) : resolved;
+}
+
 function resolveDbPath(projectDir = null) {
-  return getRuntimeDbPath(projectDir || null);
+  return getRuntimeDbPath(resolveRepoRoot(projectDir));
 }
 
 function ensureTable(db) {

@@ -3,7 +3,7 @@
 // Shared git shell helpers for worker-side operations.
 
 import { Repo, gitGateReleaseKey, gitGateSnapshot, waitForGitGateRelease } from "../classes/index.js";
-import { runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
+import { nativeAsyncOptions, runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
 
 export { gitGateReleaseKey, gitGateSnapshot, waitForGitGateRelease };
 
@@ -11,14 +11,6 @@ export { gitGateReleaseKey, gitGateSnapshot, waitForGitGateRelease };
 // execSync. 30 seconds matches the historical inline literals used across
 // worktree teardown, merge inspection, and admin commands.
 export const GIT_OPERATION_TIMEOUT_MS = 30000;
-
-function nativeAsyncOptions(options = {}) {
-  return {
-    ...(options.nativeParity || {}),
-    signal: options.signal,
-    timeoutMs: options.timeoutMs,
-  };
-}
 
 export function gitExec(cmdOrArgs, cwd, options = {}) {
   return new Repo(cwd).exec(cmdOrArgs, options);
@@ -59,10 +51,6 @@ export function gitStash(message, cwd) {
 export function gitLocalBranchExists(cwd, branchName, nativeParity = {}) {
   const branch = String(branchName || "").trim();
   return runGitNativeMethod("git.localBranchExists", { cwd, branchName: branch }, nativeParity);
-}
-
-export function gitCurrentBranch(cwd, nativeParity = {}) {
-  return runGitNativeMethod("git.currentBranch", { cwd }, nativeParity);
 }
 
 export function gitRemoteHeadBranch(cwd, remote = "origin", nativeParity = {}) {

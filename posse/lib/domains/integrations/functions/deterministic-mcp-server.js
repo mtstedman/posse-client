@@ -42,7 +42,7 @@ import { TOOL_PROJECT_DB_QUERY } from "../../../catalog/native-tools.js";
 import { execProjectDbQuery } from "../../../functions/toolkit/project-db/query.js";
 import { readProjectDbConfig } from "../../../functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../classes/tools/ToolRegistry.js";
-import { declareToolSuites } from "../../../functions/tools/tool-suites.js";
+import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../functions/tools/tool-suites.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, runWithObservationContext } from "../../observability/functions/observations.js";
 import {
@@ -292,6 +292,14 @@ let toolLogPath = String(bootConfig.toolLogPath || "").trim() || null;
 let mcpDbPath = String(bootConfig.dbPath || "").trim() || null;
 let mcpJobId = Number(bootConfig.jobId) || null;
 let mcpWorkItemId = Number(bootConfig.workItemId) || null;
+// True while handling a message that carried its own hidden session param
+// (owner-hot per-message scoping). See handleRequest.
+let mcpMessageSessionScoped = false;
+// Attempt scoping for the live operator channel: with it, get_operator_feedback
+// takes the transactional once-per-attempt delivery branch with audit rows —
+// the same semantics as the embedded transport (they used to diverge:
+// unbounded re-delivery and zero delivery audit on MCP).
+let mcpAttemptId = Number(bootConfig.attemptId) || null;
 let atlasAvailable = bootConfig.atlasAvailable === true;
 let atlasGateEnabled = bootConfig.atlasGateEnabled === true;
 let atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().toLowerCase();
@@ -1054,6 +1062,10 @@ const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "git_history",
   "inspect_file",
   "hash_file",
+  // Planner-only pre-staged research brief bundle. Has an executor attached
+  // below; without it here the owner-hot gateway never declares it and a
+  // planner issued get_brief by the remote surface gets "No such tool".
+  "get_brief",
   // Monitor Agents live-channel coordination tools. These are always-present,
   // budget-exempt tools the owner-hot gateway must advertise so every role can
   // actually CALL them — without this they are attached as executors but never
@@ -1799,7 +1811,24 @@ function recordResearchEvidenceObservation({
 
 // ── Standard tool executors ────────────────────────────────────────────────
 
+/**
+ * In the owner-hot gateway every message must carry its own session scope: a
+ * call without it would execute against the PREVIOUS session's sticky
+ * mcpJobId — cross-job feedback reads/acks with no error. Same failure
+ * family as the 2026-06-20 attach-under-load fixes; failing loudly makes the
+ * shim retry the handshake instead of silently leaking across sessions.
+ *
+ * @param {string} toolName
+ * @returns {string | null}
+ */
+function liveChannelSessionScopeError(toolName) {
+  if (!ownerHotGateway || mcpMessageSessionScoped) return null;
+  return `Error: ${toolName} requires session-scoped context in the owner-hot gateway (the session handshake did not attach to this call). Retry the tool call.`;
+}
+
 function agentFeedback(args = {}) {
+  const scopeError = liveChannelSessionScopeError("agent_feedback");
+  if (scopeError) return scopeError;
   if (!mcpJobId) return "No active job context is available for agent_feedback.";
   recordAgentActivity({
     work_item_id: mcpWorkItemId,
@@ -1812,8 +1841,6 @@ function agentFeedback(args = {}) {
   });
   return "Agent feedback recorded for Monitor Agents.";
 }
-
-const LIVE_CHANNEL_TOOL_NAMES = new Set(["agent_feedback", "get_operator_feedback", "ack_operator_feedback"]);
 
 function operatorFeedbackSignalText(toolName) {
   if (LIVE_CHANNEL_TOOL_NAMES.has(toolName)) return "";
@@ -1838,9 +1865,12 @@ function appendOperatorFeedbackSignal(text, toolName) {
 }
 
 function getOperatorFeedback(args = {}) {
+  const scopeError = liveChannelSessionScopeError("get_operator_feedback");
+  if (scopeError) return scopeError;
   if (!mcpJobId) return "No active job context is available for get_operator_feedback.";
   const feedback = getOperatorFeedbackForJob({
     job_id: mcpJobId,
+    attempt_id: mcpAttemptId,
     limit: args.limit,
   });
   return JSON.stringify({
@@ -1853,10 +1883,13 @@ function getOperatorFeedback(args = {}) {
 }
 
 function ackOperatorFeedback(args = {}) {
+  const scopeError = liveChannelSessionScopeError("ack_operator_feedback");
+  if (scopeError) return scopeError;
   if (!mcpJobId) return "No active job context is available for ack_operator_feedback.";
   const row = acknowledgeOperatorFeedback({
     interaction_id: args.interaction_id,
     job_id: mcpJobId,
+    attempt_id: mcpAttemptId,
     decision: args.decision || "accepted",
     reason: args.reason || "",
   });
@@ -1867,6 +1900,8 @@ function ackOperatorFeedback(args = {}) {
     decision: row.ack_decision || "accepted",
     reason: row.ack_reason || null,
     acknowledged_at: row.acknowledged_at || null,
+    // First ack wins; a repeat ack reads back the recorded decision.
+    ...(row.already_acknowledged ? { already_acknowledged: true } : {}),
   }, null, 2);
 }
 
@@ -1898,18 +1933,27 @@ if (allowBash && execBash) {
   mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd));
 }
 if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
-  mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
   const actor = { role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId };
-  mcpToolRegistry.attach("create_test_suite", (args) => execCreateTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-  mcpToolRegistry.attach("create_test", (args) => execCreateTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+  mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
   mcpToolRegistry.attach("run_test", (args) => execRunTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
   mcpToolRegistry.attach("run_test_suite", (args) => execRunTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+  // Test authoring is a dev-only mutation; the assessor may run tests to verify
+  // but must not create them.
+  if (ownerHotGateway || roleName === "dev") {
+    mcpToolRegistry.attach("create_test_suite", (args) => execCreateTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+    mcpToolRegistry.attach("create_test", (args) => execCreateTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+  }
 }
 if (allowImageHelpers) {
   mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
-  mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
+}
+// clean_image mutates images and is artificer-only. Owner-hot attaches every
+// executor (the remote token gates per call); scoped boots attach it only for
+// the artificer role so a read-only assessor cannot reach it in a no-token boot.
+if (ownerHotGateway || roleName === "artificer") {
+  mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
 }
 if (allowImageGeneration) {
   mcpToolRegistry.attach("generate_image", async (args) => {
@@ -2050,18 +2094,25 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
     mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd));
   }
   if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
-    mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
     const actor = { role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId };
-    mcpToolRegistry.attach("create_test_suite", (args) => execCreateTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-    mcpToolRegistry.attach("create_test", (args) => execCreateTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+    mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
     mcpToolRegistry.attach("run_test", (args) => execRunTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
     mcpToolRegistry.attach("run_test_suite", (args) => execRunTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+    // Test authoring is a dev-only mutation; the assessor may run but not create.
+    if (ownerHotGateway || roleName === "dev") {
+      mcpToolRegistry.attach("create_test_suite", (args) => execCreateTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+      mcpToolRegistry.attach("create_test", (args) => execCreateTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
+    }
   }
   if (allowImageHelpers) {
     mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
-    mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
+  }
+  // clean_image is artificer-only mutation; owner-hot attaches all executors
+  // (remote token gates per call), scoped boots only for the artificer role.
+  if (ownerHotGateway || roleName === "artificer") {
+    mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
   }
   if (allowImageGeneration) {
     mcpToolRegistry.attach("generate_image", async (args) => {
@@ -2162,6 +2213,7 @@ function applyRuntimeBootConfig(nextConfig = {}) {
   mcpDbPath = String(bootConfig.dbPath || "").trim() || null;
   mcpJobId = Number(bootConfig.jobId) || null;
   mcpWorkItemId = Number(bootConfig.workItemId) || null;
+  mcpAttemptId = Number(bootConfig.attemptId) || null;
   atlasAvailable = bootConfig.atlasAvailable === true;
   atlasGateEnabled = bootConfig.atlasGateEnabled === true;
   atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().toLowerCase();
@@ -2427,6 +2479,13 @@ function sendMessage(payload) {
 
 async function handleRequest(msg) {
   const session = hiddenSessionFromParams(msg?.params);
+  // Owner-hot messages are session-scoped per message; without the hidden
+  // param the module globals (mcpJobId/mcpAttemptId/role/cwd) are STICKY
+  // leftovers from the previous message. Job-scoped tools consult this flag
+  // so a message whose shim handshake failed to attach the param can never
+  // read or ack ANOTHER session's operator feedback. Requests are serialized
+  // by requestQueue, so a module flag is race-free.
+  mcpMessageSessionScoped = !!session;
   if (session) {
     applyRuntimeBootConfig(session.bootConfig);
     msg = { ...msg, params: stripHiddenSessionParam(msg?.params) };
@@ -2812,6 +2871,7 @@ function dispatchParsed(parsed) {
     {
       work_item_id: Number(sessionBoot.workItemId) || mcpWorkItemId,
       job_id: Number(sessionBoot.jobId) || mcpJobId,
+      attempt_id: Number(sessionBoot.attemptId) || mcpAttemptId,
     },
     () => handleRequest(parsed),
   )).catch((err) => {

@@ -17,7 +17,7 @@ import { POSSE_MCP_GATEWAY_TRANSPORT } from "./mcp-gateway.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View as AtlasView } from "../../atlas/classes/v2/View.js";
 import { Warmer } from "../../atlas/classes/v2/Warmer.js";
-import { resolveTargetBranch, resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
+import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import { gitCurrentHashAsync } from "../../git/functions/utils.js";
 import { ledgerBranchForWi } from "../../atlas/functions/v2/runtime-paths.js";
 import { describeScipStagingState, ensureScipStaged } from "../../atlas/functions/v2/scip/stager.js";
@@ -340,18 +340,9 @@ async function repoStorageForAsync({ cwd = null, config = getAtlasIntegrationCon
   };
 }
 
-function resolveAtlasBaselineBranch(repoRoot = null) {
-  try {
-    return resolveTargetBranch(repoRoot || process.cwd());
-  } catch {
-    return "main";
-  }
-}
-
-// Async twin for in-session call sites (freshness gate, warm jobs, runtime
-// mounts): branch resolution is a native git call (~50–95ms), and the sync
-// form blocks the orchestrator event loop — a visible TUI hiccup every time
-// the warm route fires.
+// Branch resolution is a native git call (~50–95ms); the sync form would block
+// the orchestrator event loop, so all call sites (freshness gate, warm jobs,
+// runtime mounts) use this async resolver.
 async function resolveAtlasBaselineBranchAsync(repoRoot = null) {
   try {
     return await resolveTargetBranchAsync(repoRoot || process.cwd());
@@ -1028,76 +1019,6 @@ function v2WorkItemContext({
   };
 }
 
-function v2JoinResult(args = {}) {
-  const config = args.config || getAtlasIntegrationConfig();
-  if (!config?.enabled) return { attempted: false, skipped: "atlas_disabled", disableAtlas: false, backend: "atlas-v2" };
-  if (!isAtlasIndexMaintenanceEnabled(config)) return { attempted: false, skipped: "phase_not_enabled", disableAtlas: false, backend: "atlas-v2" };
-  const ctx = v2WorkItemContext(args);
-  ensureParentDir(ctx.viewDbPath);
-  const workItemId = args.workItemId ?? null;
-  const ledgerBranch = workItemId != null ? ledgerBranchForWi(workItemId) : null;
-  const baselineBranch = resolveAtlasBaselineBranch(ctx.repoRoot);
-  let ledger = null;
-  try {
-    ledger = Ledger.open({ dbPath: ctx.ledgerDbPath });
-    if (!ledger.getBranch(baselineBranch)) ledger.ensureRootBranch(baselineBranch);
-    if (ledgerBranch && !ledger.getBranch(ledgerBranch)) {
-      ledger.forkBranch(ledgerBranch, baselineBranch, ledger.headSeq(baselineBranch));
-    }
-    const warmer = new Warmer({
-      ledger,
-      repoRoot: ctx.repoRoot,
-      defaultBranch: baselineBranch,
-      config: ctx.config,
-    });
-    const mount = warmer.mountForWorktree({
-      workItemId: workItemId ?? "unknown",
-      ledgerBranch: ledgerBranch || undefined,
-      worktreePath: args.worktreePath || process.cwd(),
-    });
-    const mounted = !!(mount.viewPath && fs.existsSync(mount.viewPath));
-    return {
-      attempted: true,
-      skipped: null,
-      disableAtlas: false,
-      config: ctx.config,
-      graphDbPath: ctx.graphDbPath,
-      primaryGraphDbPath: ctx.primaryGraphDbPath,
-      viewDbPath: ctx.viewDbPath,
-      mainViewDbPath: ctx.mainViewDbPath,
-      ledgerDbPath: ctx.ledgerDbPath,
-      warmedViewDbPath: ctx.warmedViewDbPath,
-      state: stateForMountSource(mount.from),
-      backend: "atlas-v2",
-      mounted,
-      mount,
-      view: openMountedView(mount.viewPath || ctx.viewDbPath),
-    };
-  } catch (err) {
-    logAtlasError(`[atlas] mount failed (workItemId=${args?.workItemId}):`, err);
-    if (isVerboseAtlasErrors()) throw err;
-    return {
-      attempted: true,
-      skipped: "mount_failed",
-      error: formatAtlasError(err),
-      disableAtlas: false,
-      config: ctx.config,
-      graphDbPath: ctx.graphDbPath,
-      primaryGraphDbPath: ctx.primaryGraphDbPath,
-      viewDbPath: ctx.viewDbPath,
-      mainViewDbPath: ctx.mainViewDbPath,
-      ledgerDbPath: ctx.ledgerDbPath,
-      warmedViewDbPath: ctx.warmedViewDbPath,
-      state: "mount_failed",
-      backend: "atlas-v2",
-      mounted: false,
-      view: null,
-    };
-  } finally {
-    try { ledger?.close?.(); } catch { /* ignore */ }
-  }
-}
-
 async function v2JoinResultAsync(args = {}) {
   const config = args.config || getAtlasIntegrationConfig();
   if (!config?.enabled) return { attempted: false, skipped: "atlas_disabled", disableAtlas: false, backend: "atlas-v2" };
@@ -1360,10 +1281,6 @@ export function disposeWorkItemAtlasGraph(opts = {}) {
 
 export function resolveWorkItemAtlasContext(opts = {}) {
   return v2WorkItemContext({ ...opts, config: opts?.config || getAtlasIntegrationConfig() });
-}
-
-export function ensureWorkItemAtlasJoin(opts = {}) {
-  return v2JoinResult({ ...opts, config: opts?.config || getAtlasIntegrationConfig() });
 }
 
 export async function ensureWorkItemAtlasJoinAsync(opts = {}) {
@@ -2205,7 +2122,6 @@ export default {
   buildAtlasServerSpec,
   disposeWorkItemAtlasGraph,
   ensureAtlasRepoIndexedOnBoot,
-  ensureWorkItemAtlasJoin,
   getAtlasIntegrationConfig,
   getAtlasProviderSupport,
   probeAtlasGraphReadiness,

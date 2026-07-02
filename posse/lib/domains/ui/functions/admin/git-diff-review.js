@@ -8,9 +8,9 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import {
-  findLegacyWorktreeForWi,
-  resolveTargetBranch,
-  worktreePath,
+  findLegacyWorktreeForWiAsync,
+  resolveTargetBranchAsync,
+  worktreePathAsync,
 } from "../../../git/functions/worktree.js";
 
 const execFileAsync = promisify(execFile);
@@ -216,11 +216,11 @@ function mergeSourceRows({ wi, targetBranch, wtDir, wtExists, branchRows, worktr
   return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
-function resolveWorktreeDir(projectDir, wiId) {
+async function resolveWorktreeDirAsync(projectDir, wiId) {
   if (wiId == null) return null;
-  const canonical = worktreePath(projectDir, wiId);
+  const canonical = await worktreePathAsync(projectDir, wiId);
   if (fs.existsSync(canonical)) return canonical;
-  return findLegacyWorktreeForWi(projectDir, wiId);
+  return await findLegacyWorktreeForWiAsync(projectDir, wiId);
 }
 
 function lineCount(raw = "") {
@@ -235,7 +235,7 @@ function sumFinite(files, key) {
 export async function buildAdminGitDiffSnapshot({ projectDir, workItems = [], limit = 200 } = {}) {
   const root = path.resolve(projectDir || process.cwd());
   let targetBranch = "main";
-  try { targetBranch = resolveTargetBranch(root); } catch { targetBranch = "main"; }
+  try { targetBranch = await resolveTargetBranchAsync(root); } catch { targetBranch = "main"; }
 
   const items = [];
   const flatFiles = [];
@@ -263,7 +263,7 @@ export async function buildAdminGitDiffSnapshot({ projectDir, workItems = [], li
     }
 
     try {
-      wtDir = resolveWorktreeDir(root, wi.id);
+      wtDir = await resolveWorktreeDirAsync(root, wi.id);
       wtExists = !!(wtDir && fs.existsSync(wtDir));
       if (wtExists) worktreeRows = await collectWorktreeRows(wtDir);
     } catch (err) {

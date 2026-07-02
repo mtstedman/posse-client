@@ -1,7 +1,9 @@
 import fs from "fs";
 import {
+  expireUnackedOperatorFeedbackForJob,
   getJob,
 } from "../../../queue/functions/index.js";
+import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 import {
   cleanupAgentLoaderAsync,
   loaderPathForJob,
@@ -54,7 +56,10 @@ export class WorkerExecutionFinalizer {
     if (job.id != null) {
       try {
         const freshJob = getJob(job.id);
-        if (freshJob && ["succeeded", "failed"].includes(String(freshJob.status || ""))) {
+        // Succeeded jobs only: "useful" is a permanent positive ranking
+        // boost, and the feedback store has no outcome column — emitting for
+        // failed jobs bakes their context in as equally trustworthy signal.
+        if (freshJob && String(freshJob.status || "") === "succeeded") {
           await emitAtlasAutoFeedbackForJob({
             job: freshJob,
             attemptId: currentAttemptId,
@@ -66,6 +71,20 @@ export class WorkerExecutionFinalizer {
       } catch (err) {
         // ATLAS feedback is advisory; job finalization must never fail here.
         worker._logFinalizerFailure(job, "atlas_feedback", err);
+      }
+      try {
+        const freshJob = getJob(job.id);
+        // Unacked operator guidance on a terminal job is undeliverable —
+        // expire it loudly so the operator sees the nudge never landed,
+        // instead of a forever-pending row no surface renders.
+        if (freshJob && TERMINAL_JOB_STATUSES.includes(String(freshJob.status || ""))) {
+          expireUnackedOperatorFeedbackForJob({
+            job_id: job.id,
+            reason: `job_${freshJob.status}`,
+          });
+        }
+      } catch (err) {
+        worker._logFinalizerFailure(job, "operator_feedback_expiry", err);
       }
     }
 

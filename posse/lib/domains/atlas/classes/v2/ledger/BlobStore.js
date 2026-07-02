@@ -295,7 +295,7 @@ export class BlobStore {
       throw new TypeError("Ledger.ingestBlobLayer: layer is required");
     }
     const txn = this.#db.transaction(() => this.#writeBlobLayerRecord(layer));
-    return txn();
+    return txn.immediate();
   }
 
   /**
@@ -417,7 +417,7 @@ export class BlobStore {
         source: inferLayerSource(symbols, edges),
       });
     });
-    txn();
+    txn.immediate();
   }
 
   /**
@@ -586,7 +586,7 @@ export class BlobStore {
         });
       }
     });
-    txn();
+    txn.immediate();
     return counts;
   }
 
@@ -782,7 +782,7 @@ export class BlobStore {
       counts.removed_symbols = Number(symbolsInfo.changes) || 0;
       this.#stmt.reingestClearBlobParseVersion.run(content_hash);
     });
-    txn();
+    txn.immediate();
     return counts;
   }
 

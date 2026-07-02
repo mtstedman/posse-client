@@ -81,15 +81,28 @@ import { workflowExecute } from "./workflow.js";
 export function dispatch(call, ctx) {
   const startedAt = Date.now();
   const normalizedCall = normalizeAtlasToolCall(normalizeToolCall(call));
-  const result = dispatchImpl(normalizedCall, ctx);
-  return recordAndReturn(result, {
+  const usage = {
     ledger: ctx.ledger,
     action: String(normalizedCall?.action || ""),
     repoId: ctx.repoId,
     versionId: ctx.versionId,
     startedAt,
     taskType: ctx.taskType || (typeof /** @type {any} */ (normalizedCall).taskType === "string" ? /** @type {any} */ (normalizedCall).taskType : null),
-  });
+  };
+  let result;
+  try {
+    result = dispatchImpl(normalizedCall, ctx);
+  } catch (err) {
+    // Sync handler throws used to escape usage accounting entirely (only
+    // promise rejections were recorded) — native-failure paths were invisible
+    // in usage_events.
+    recordAtlasUsageEvent({
+      ...usage,
+      envelope: { ok: false, action: usage.action, error: { code: "handler_threw", message: String(/** @type {any} */ (err)?.message || err) } },
+    });
+    throw err;
+  }
+  return recordAndReturn(result, usage);
 }
 
 /**
@@ -608,10 +621,16 @@ function normalizeFieldName(key) {
 }
 
 /**
+ * Resolve an action string (including atlas_/atlas. prefixes, underscore and
+ * case variants) to its canonical registered name. Exported so lane/blocking
+ * gates can classify the SAME action dispatch will execute — a gate that
+ * checks the raw string while dispatch normalizes aliases lets a variant
+ * spelling route a mutation onto the read-only lane.
+ *
  * @param {unknown} value
  * @returns {string}
  */
-function normalizeActionName(value) {
+export function normalizeActionName(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
   if (ATLAS_TOOL_ACTIONS.includes(/** @type {AtlasToolAction} */ (raw))) return raw;

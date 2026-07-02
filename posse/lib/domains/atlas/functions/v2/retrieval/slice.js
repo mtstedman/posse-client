@@ -67,6 +67,24 @@ const TOKENS_PER_CARD_ESTIMATE = 220;
  */
 const SLICE_REGISTRY = new Map();
 
+// Hot-cache bound for the in-memory registry. Handles are content-addressed
+// per (view version × entry set), so a long-lived reader thread accumulates
+// one entry per distinct slice as versions advance — unbounded without this.
+// Durable resolution survives eviction via slices.db (loadSliceEntry).
+const SLICE_REGISTRY_MAX = 256;
+
+function rememberSliceEntry(sliceHandle, entry) {
+  // Map preserves insertion order; delete+set keeps this LRU-ish so repeat
+  // builds of the same handle refresh recency instead of aging out.
+  if (SLICE_REGISTRY.has(sliceHandle)) SLICE_REGISTRY.delete(sliceHandle);
+  SLICE_REGISTRY.set(sliceHandle, entry);
+  while (SLICE_REGISTRY.size > SLICE_REGISTRY_MAX) {
+    const oldest = SLICE_REGISTRY.keys().next().value;
+    if (oldest == null) break;
+    SLICE_REGISTRY.delete(oldest);
+  }
+}
+
 const REFRESH_DIFF_LIMIT = 100;
 
 /**
@@ -379,8 +397,13 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
       includeResolutionMetadata: !!params.includeResolutionMetadata,
       etag,
     };
-    SLICE_REGISTRY.set(sliceHandle, entry);
-    saveSliceEntry({ repoRoot, handle: sliceHandle, entry });
+    rememberSliceEntry(sliceHandle, entry);
+    // Durable-store persistence is best-effort: the slice is already built
+    // and resolvable via the in-memory registry, so slices.db contention or
+    // corruption must not fail a completed slice.build.
+    try {
+      saveSliceEntry({ repoRoot, handle: sliceHandle, entry });
+    } catch { /* handle stays resolvable in-process */ }
     cache.setSlice(cacheKey, { data, etag });
     if (params.ifNoneMatch && params.ifNoneMatch === etag) {
       return /** @type {any} */ (notModifiedEnvelope({ action: "slice.build", versionId, etag }));
@@ -436,18 +459,20 @@ export function sliceRefresh({ view, versionId, params, repoRoot }) {
     return okEnvelope({ action: "slice.refresh", versionId, data });
   }
 
-  SLICE_REGISTRY.set(params.sliceHandle, {
+  rememberSliceEntry(params.sliceHandle, {
     ...entry,
     versionId,
     cards: diff.cards,
     spillover: diff.spillover,
     etag: diff.etag,
   });
-  saveSliceEntry({
-    repoRoot,
-    handle: params.sliceHandle,
-    entry: { ...entry, versionId, cards: diff.cards, spillover: diff.spillover, etag: diff.etag },
-  });
+  try {
+    saveSliceEntry({
+      repoRoot,
+      handle: params.sliceHandle,
+      entry: { ...entry, versionId, cards: diff.cards, spillover: diff.spillover, etag: diff.etag },
+    });
+  } catch { /* handle stays resolvable in-process */ }
 
   /** @type {SliceRefreshData} */
   const data = {

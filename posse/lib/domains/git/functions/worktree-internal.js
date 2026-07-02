@@ -29,13 +29,6 @@ export function formatGcDuration(ms) {
   return `${seconds >= 10 ? seconds.toFixed(0) : seconds.toFixed(1)}s`;
 }
 
-export function sleepSyncMs(ms) {
-  const delay = Math.max(0, Number(ms) || 0);
-  if (delay <= 0) return;
-  const buffer = new SharedArrayBuffer(4);
-  Atomics.wait(new Int32Array(buffer), 0, 0, delay);
-}
-
 export function sleepMs(ms, { signal = null } = {}) {
   const delay = Math.max(0, Number(ms) || 0);
   throwIfAborted(signal);

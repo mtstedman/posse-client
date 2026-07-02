@@ -39,16 +39,30 @@ const MAX_ABS_SIGNAL = 3;
  * @param {{ ledger?: Ledger, taskType?: string, taskText?: string, sinceTs?: string, halfLifeDays?: number }} args
  * @returns {Map<string, FeedbackAggregate> | null}
  */
-export function buildFeedbackIndex({ ledger, taskType, taskText, sinceTs, halfLifeDays }) {
+export function buildFeedbackIndex({ ledger, taskType, taskText, sinceTs, halfLifeDays, onSummary }) {
   if (!ledger || typeof ledger.recentFeedback !== "function") return null;
   try {
+    // The store invokes the callback once per raw feedback row it scans, so a
+    // per-row logEvent would write thousands of event rows (each embedding the
+    // full taskText) inside the ranking hot path. Accumulate instead and emit
+    // one summary event per query.
+    const summary = {
+      evaluated: 0,
+      included: 0,
+      missing_prior_task_text: 0,
+      empty_prior_task_tokens: 0,
+      min_score: /** @type {number | null} */ (null),
+      max_score: /** @type {number | null} */ (null),
+      threshold: /** @type {number | null} */ (null),
+    };
     const rows = ledger.recentFeedback({
       taskType,
       taskText,
       sinceTs,
       halfLifeDays,
-      onTaskTextMatch: emitFeedbackTaskTextMatch,
+      onTaskTextMatch: (detail) => accumulateTaskTextMatch(summary, detail),
     });
+    emitFeedbackTaskTextSummary(taskText, summary, onSummary);
     /** @type {Map<string, FeedbackAggregate>} */
     const map = new Map();
     for (const r of rows) {
@@ -65,15 +79,46 @@ export function buildFeedbackIndex({ ledger, taskType, taskText, sinceTs, halfLi
 }
 
 /**
+ * @param {{ evaluated: number, included: number, missing_prior_task_text: number, empty_prior_task_tokens: number, min_score: number | null, max_score: number | null, threshold: number | null }} summary
  * @param {{ taskText: string, prior_task_text: string | null, score: number | null, included_in_filter: boolean, threshold: number, reason?: string }} detail
  */
-function emitFeedbackTaskTextMatch(detail) {
+function accumulateTaskTextMatch(summary, detail) {
+  summary.evaluated += 1;
+  if (detail.included_in_filter) summary.included += 1;
+  if (detail.reason === "missing_prior_task_text") summary.missing_prior_task_text += 1;
+  if (detail.reason === "empty_prior_task_tokens") summary.empty_prior_task_tokens += 1;
+  summary.threshold = detail.threshold;
+  if (typeof detail.score === "number") {
+    summary.min_score = summary.min_score == null ? detail.score : Math.min(summary.min_score, detail.score);
+    summary.max_score = summary.max_score == null ? detail.score : Math.max(summary.max_score, detail.score);
+  }
+}
+
+const TASK_TEXT_SUMMARY_DETAIL_CHARS = 200;
+
+/**
+ * @param {string | undefined} taskText
+ * @param {{ evaluated: number, included: number, missing_prior_task_text: number, empty_prior_task_tokens: number, min_score: number | null, max_score: number | null, threshold: number | null }} summary
+ * @param {((detail: object) => void) | undefined} [onSummary]
+ */
+function emitFeedbackTaskTextSummary(taskText, summary, onSummary) {
+  if (summary.evaluated === 0) return;
+  if (typeof onSummary === "function") {
+    onSummary({
+      taskText: String(taskText || "").slice(0, TASK_TEXT_SUMMARY_DETAIL_CHARS),
+      ...summary,
+    });
+    return;
+  }
   try {
     logEvent({
       event_type: EVENT_TYPES.ATLAS_FEEDBACK_TASK_TEXT_MATCH,
       actor_type: EVENT_ACTORS.ATLAS,
-      message: "ATLAS feedback task-text filter evaluated",
-      event_json: detail,
+      message: `ATLAS feedback task-text filter evaluated ${summary.evaluated} row(s), included ${summary.included}`,
+      event_json: {
+        taskText: String(taskText || "").slice(0, TASK_TEXT_SUMMARY_DETAIL_CHARS),
+        ...summary,
+      },
     });
   } catch {
     // Feedback boosts should remain pure-ranking behavior when the host event

@@ -78,7 +78,7 @@ export async function emitAtlasAutoFeedbackForJob({
   try {
     const executeOpts = {
       cwd,
-      origin: "agent",
+      origin: "auto_feedback",
       ...(config ? { config } : {}),
     };
     const result = await runWithObservationContext({
@@ -215,7 +215,7 @@ async function resolveRelevantPathSymbols(observations, { cwd, config, maxSymbol
     try {
       const raw = await executeEmbeddedAtlasTool("code.skeleton", { file }, {
         cwd,
-        origin: "agent",
+        origin: "auto_feedback",
         ...(config ? { config } : {}),
       });
       if (String(raw || "").startsWith("Error:")) continue;

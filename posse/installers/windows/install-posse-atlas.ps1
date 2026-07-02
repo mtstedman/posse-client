@@ -3,11 +3,20 @@
   Posse + ATLAS Windows installer.
 
 .DESCRIPTION
-  Idempotent installer for posse on Windows. ATLAS is built into Posse — there
-  is no separate ATLAS checkout or build step. Parity with the Linux bash
-  installer: same flags, same checks, same post-install validation, same
-  account-settings seeding. It uses the Posse checkout containing this installer
-  when available; cloning is only a fallback for standalone use.
+  Bootstraps a Windows host: helper CLI tools (via winget), Node.js 24+ (via
+  winget when missing), the Posse checkout, npm deps, Python venv + SCIP
+  language environments (delegated to `posse doctor` — the same engine Posse
+  uses at boot), account settings, and PATH/profile wiring.
+
+  Design rules (parity with the Linux installer):
+    - Never dies mid-run without a summary: every step is fenced, failures are
+      recorded and reported, and dependent steps are marked "blocked".
+    - Idempotent: re-running is safe; fresh steps are skipped. -Force
+      reinstalls npm deps, -DryRun previews without changes.
+    - All command output is captured to a log file; failures print the tail.
+    - Works under both Windows PowerShell 5.1 and PowerShell 7+ — native
+      commands run through cmd.exe with file redirection, so stderr output can
+      never surface as a terminating PowerShell error.
 
 .PARAMETER InstallRoot
   Base directory for installs. Default: $env:USERPROFILE\claude-tools
@@ -34,23 +43,33 @@
   Skip the smoke test.
 
 .PARAMETER NoPersistEnv
-  Don't write the ATLAS env vars to the user PowerShell profile.
+  Don't write PATH/profile wiring.
 
 .PARAMETER SkipSettings
   Don't seed ~/.posse/account.db.
 
 .PARAMETER SkipHostTools
-  Don't install/check host CLI tools used by Posse helpers (rg, tesseract,
-  ImageMagick, ffmpeg, Python, PHP/Composer).
+  Don't install helper CLI tools (rg, tesseract, ImageMagick, ffmpeg, Python,
+  PHP). Missing tools are still reported.
+
+.PARAMETER NoInstallNode
+  Don't auto-install Node via winget when Node 24+ is missing.
+
+.PARAMETER ConfigureKeys
+  Interactively prompt for provider API keys (stored in providers.env.ps1 with
+  a user-only ACL).
 
 .PARAMETER Force
-  Re-run npm install / build even when node_modules looks fresh.
+  Re-run npm install even when node_modules looks fresh.
 
 .PARAMETER DryRun
   Print what would happen; make no changes.
 
+.PARAMETER Plain
+  Disable colors, splash gradient, and spinners.
+
 .EXAMPLE
-  .\install-posse-atlas.ps1 -PosseDir C:\development\claude\tools\posse
+  .\install-posse-atlas.ps1
 
 .EXAMPLE
   .\install-posse-atlas.ps1 -DryRun
@@ -69,102 +88,330 @@ param(
   [switch]$NoPersistEnv,
   [switch]$SkipSettings,
   [switch]$SkipHostTools,
+  [switch]$NoInstallNode,
   [switch]$ConfigureKeys,
   [switch]$Force,
-  [switch]$DryRun
+  [switch]$DryRun,
+  [switch]$Plain
 )
 
+# Cmdlet failures should surface; native commands never throw because they run
+# through the step engine (cmd.exe + file redirection), not raw invocation.
 $ErrorActionPreference = "Stop"
 
-# Config defaults -- mirror the Linux script.
-$PosseMode        = "preferred"
-$PossePhases      = "research,planning,assessment,dev"
-$PosseLiveFunnel  = "true"
-$PosseScipMode    = "on"
+# --- config defaults (parity with the Linux script) ---------------------------
+$PosseMode          = "preferred"
+$PossePhases        = "research,planning,assessment,dev"
+$PosseLiveFunnel    = "true"
+$PosseScipMode      = "on"
 $PosseScipLanguages = "typescript,python,php"
-$NodeMinMajor     = 24
+$NodeMinMajor       = 24
 
-# Step results, populated through the run and printed in the summary.
-$script:Steps = [ordered]@{
-  "posse clone"           = "pending"
-  "host tool deps"        = "pending"
-  "posse npm install"     = "pending"
-  "posse python deps"     = "pending"
-  "posse SCIP deps"       = "pending"
-  "env file"              = "pending"
-  "posse alias"           = "pending"
-  "account settings seed" = "pending"
-  "admin init"            = "pending"
-  "posse validate"        = "pending"
-  "provider keys"         = "skipped"
-  "smoke test"            = "pending"
-}
-$script:Warnings = @()
-$script:ConfiguredKeys = @()
+# =============================================================================
+# UI layer: colors, splash, spinner, step engine
+# =============================================================================
 
-function Write-Log {
-  param([string]$Message)
-  Write-Host "[install-posse-atlas] $Message"
-}
+$script:Esc = [char]27
+$script:UiAnsi = $false
+$script:UiSpinner = $false
 
-function Write-Warn {
-  param([string]$Message)
-  Write-Warning "[install-posse-atlas] $Message"
-  $script:Warnings += $Message
-}
+function Initialize-Ui {
+  $isRedirected = $false
+  try { $isRedirected = [Console]::IsOutputRedirected } catch { $isRedirected = $false }
+  $supportsAnsi = ($PSVersionTable.PSVersion.Major -ge 7) -or $env:WT_SESSION -or ($env:TERM_PROGRAM -eq "vscode")
+  $script:UiAnsi = (-not $Plain) -and (-not $env:NO_COLOR) -and (-not $isRedirected) -and $supportsAnsi
+  $script:UiSpinner = $script:UiAnsi
+  if ($script:UiAnsi) {
+    try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+  }
 
-function Fail {
-  param([string]$Message)
-  Write-Error "[install-posse-atlas] ERROR: $Message"
-  exit 1
-}
-
-function ConvertTo-PowerShellLiteral {
-  param([AllowNull()][string]$Value)
-  if ($null -eq $Value) { $Value = "" }
-  return "'" + ($Value -replace "'", "''") + "'"
-}
-
-function Require-Cmd {
-  param([string]$Name)
-  if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-    Fail "Missing required command: $Name (install it and re-run)"
+  if ($script:UiAnsi) {
+    $script:R      = "$Esc[0m"
+    $script:BOLD   = "$Esc[1m"
+    $script:DIM    = "$Esc[2m"
+    $script:RED    = "$Esc[31m"
+    $script:GREEN  = "$Esc[32m"
+    $script:YELLOW = "$Esc[33m"
+    $script:CYAN   = "$Esc[36m"
+    $script:ORANGE = "$Esc[38;2;255;153;51m"
+    $script:GlyphOk = [string][char]0x2713   # ✓
+    $script:GlyphFail = [string][char]0x2717 # ✗
+    $script:GlyphWarn = "!"
+    $script:GlyphDot = [string][char]0x00B7  # ·
+    $script:SpinnerFrames = @([char]0x280B, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2807, [char]0x280F | ForEach-Object { [string]$_ })
+  }
+  else {
+    $script:R = ""; $script:BOLD = ""; $script:DIM = ""
+    $script:RED = ""; $script:GREEN = ""; $script:YELLOW = ""; $script:CYAN = ""; $script:ORANGE = ""
+    $script:GlyphOk = "+"; $script:GlyphFail = "x"; $script:GlyphWarn = "!"; $script:GlyphDot = "-"
+    $script:SpinnerFrames = @("-", "\", "|", "/")
   }
 }
 
-function Invoke-Cmd {
-  param([scriptblock]$Script, [string]$Description)
-  if ($DryRun) {
-    Write-Log "(dry-run) $Description"
-    return $true
-  }
-  try {
-    & $Script
-    if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) {
-      throw "command exited with code $LASTEXITCODE"
+function Write-Splash {
+  Write-Host ""
+  if ($script:UiAnsi) {
+    $lines = @(
+      "$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2557)  $([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2557) $([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2557)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2557)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2557)",
+      "$([char]0x2588)$([char]0x2588)$([char]0x2554)$([char]0x2550)$([char]0x2550)$([char]0x2588)$([char]0x2588)$([char]0x2557)$([char]0x2588)$([char]0x2588)$([char]0x2554)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2588)$([char]0x2588)$([char]0x2557)$([char]0x2588)$([char]0x2588)$([char]0x2554)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x255D)$([char]0x2588)$([char]0x2588)$([char]0x2554)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x255D)$([char]0x2588)$([char]0x2588)$([char]0x2554)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x255D)",
+      "$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2554)$([char]0x255D)$([char]0x2588)$([char]0x2588)$([char]0x2551)   $([char]0x2588)$([char]0x2588)$([char]0x2551)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2557)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2557)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2557)  ",
+      "$([char]0x2588)$([char]0x2588)$([char]0x2554)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x255D) $([char]0x2588)$([char]0x2588)$([char]0x2551)   $([char]0x2588)$([char]0x2588)$([char]0x2551)$([char]0x255A)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2588)$([char]0x2588)$([char]0x2551)$([char]0x255A)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2588)$([char]0x2588)$([char]0x2551)$([char]0x2588)$([char]0x2588)$([char]0x2554)$([char]0x2550)$([char]0x2550)$([char]0x255D)  ",
+      "$([char]0x2588)$([char]0x2588)$([char]0x2551)     $([char]0x255A)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2554)$([char]0x255D)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2551)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2551)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2588)$([char]0x2557)",
+      "$([char]0x255A)$([char]0x2550)$([char]0x255D)      $([char]0x255A)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x255D) $([char]0x255A)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x255D)$([char]0x255A)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x255D)$([char]0x255A)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x2550)$([char]0x255D)"
+    )
+    foreach ($line in $lines) {
+      $n = $line.Length
+      $sb = New-Object System.Text.StringBuilder
+      [void]$sb.Append("  ")
+      for ($i = 0; $i -lt $n; $i++) {
+        $ch = $line[$i]
+        if ($ch -eq " ") { [void]$sb.Append(" "); continue }
+        $g = 153 - [int](153 * $i / ($n - 1))
+        $b = [int](153 * $i / ($n - 1))
+        [void]$sb.Append("$Esc[38;2;255;$g;$b" + "m$ch")
+      }
+      [void]$sb.Append($script:R)
+      Write-Host $sb.ToString()
     }
-    return $true
   }
-  catch {
-    Write-Warn "$Description failed: $_"
-    return $false
+  else {
+    Write-Host "   ____   ___  ____  ____  _____"
+    Write-Host "  |  _ \ / _ \/ ___|/ ___|| ____|"
+    Write-Host "  | |_) | | | \___ \\___ \|  _|"
+    Write-Host "  |  __/| |_| |___) |___) | |___"
+    Write-Host "  |_|    \___/|____/|____/|_____|"
+  }
+  Write-Host ("  {0}{1}Posse + ATLAS{2} {3}$([char]0x2014) multi-provider dev orchestrator $([char]0x00B7) Windows installer{2}" -f $script:BOLD, $script:ORANGE, $script:R, $script:DIM)
+  Write-Host ("  {0}{1}{2}" -f $script:DIM, ("-" * 58), $script:R)
+  Write-Host ""
+}
+
+function Format-Duration {
+  param([int]$Seconds)
+  if ($Seconds -ge 60) { return ("{0}m {1:d2}s" -f [int][math]::Floor($Seconds / 60), ($Seconds % 60)) }
+  return "${Seconds}s"
+}
+
+# --- log file ------------------------------------------------------------------
+$script:LogDir = Join-Path $env:USERPROFILE ".posse\logs"
+try { New-Item -ItemType Directory -Force -Path $script:LogDir | Out-Null }
+catch { $script:LogDir = $env:TEMP }
+$script:LogFile = Join-Path $script:LogDir ("install-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+try { Set-Content -Path $script:LogFile -Value "" -Encoding UTF8 } catch { $script:LogFile = Join-Path $env:TEMP "posse-install.log" }
+
+function Write-LogOnly { param([string]$Message) try { Add-Content -Path $script:LogFile -Value $Message -Encoding UTF8 } catch {} }
+
+function Write-Info {
+  param([string]$Message)
+  Write-Host ("    {0}{1}{2} {3}" -f $script:DIM, $script:GlyphDot, $script:R, $Message)
+  Write-LogOnly "[info] $Message"
+}
+
+$script:Warnings = @()
+function Write-Warn2 {
+  param([string]$Message)
+  Write-Host ("    {0}{1}{2} {3}" -f $script:YELLOW, $script:GlyphWarn, $script:R, $Message)
+  $script:Warnings += $Message
+  Write-LogOnly "[warn] $Message"
+}
+
+# --- step engine -----------------------------------------------------------------
+$script:StepKeys = @("packages", "node", "checkout", "composer", "npm", "shell", "seed", "doctor", "admin", "validate", "keys", "smoke")
+$script:StepTitles = @{
+  packages = "System packages"
+  node     = "Node.js runtime"
+  checkout = "Posse checkout"
+  composer = "Composer (SCIP PHP)"
+  npm      = "npm dependencies"
+  shell    = "Shell wiring"
+  seed     = "Account settings"
+  doctor   = "Runtime doctor (Python + SCIP)"
+  admin    = "Provider CLI detection"
+  validate = "Validation"
+  keys     = "Provider API keys"
+  smoke    = "ATLAS smoke test"
+}
+$script:StepStatus = @{}
+$script:StepNote = @{}
+foreach ($k in $script:StepKeys) { $script:StepStatus[$k] = "pending"; $script:StepNote[$k] = "" }
+$script:StepIndex = 0
+$script:CurrentStep = ""
+$script:CriticalFailed = $false
+$script:SummaryPrinted = $false
+
+function Step-Begin {
+  param([string]$Key)
+  $script:CurrentStep = $Key
+  $script:StepIndex++
+  Write-Host ""
+  Write-Host ("{0}[{1,2}/{2}]{3} {4}{5}{6}" -f $script:DIM, $script:StepIndex, $script:StepKeys.Count, $script:R, $script:BOLD, $script:StepTitles[$Key], $script:R)
+  Write-LogOnly ""
+  Write-LogOnly ("===== [{0}/{1}] {2} =====" -f $script:StepIndex, $script:StepKeys.Count, $script:StepTitles[$Key])
+}
+
+function Step-End {
+  param([string]$Status, [string]$Note = "")
+  $script:StepStatus[$script:CurrentStep] = $Status
+  $script:StepNote[$script:CurrentStep] = $Note
+  Write-LogOnly ("----- {0}: {1}{2}" -f $script:CurrentStep, $Status, $(if ($Note) { " ($Note)" } else { "" }))
+  switch -Regex ($Status) {
+    "^(ok|done)$"        { Write-Host ("    {0}{1}{2} {3}" -f $script:GREEN, $script:GlyphOk, $script:R, $(if ($Note) { $Note } else { "done" })) }
+    "^(skipped|dry-run)$" { Write-Host ("    {0}{1} {2}{3}" -f $script:DIM, $script:GlyphDot, $(if ($Note) { $Note } else { $Status }), $script:R) }
+    "^partial$"          { Write-Host ("    {0}{1}{2} {3}" -f $script:YELLOW, $script:GlyphWarn, $script:R, $(if ($Note) { $Note } else { "completed with warnings" })) }
+    "^failed$"           { Write-Host ("    {0}{1}{2} {3}" -f $script:RED, $script:GlyphFail, $script:R, $(if ($Note) { $Note } else { "failed" })) }
+    "^blocked$"          { Write-Host ("    {0}{1} {2}{3}" -f $script:DIM, $script:GlyphFail, $(if ($Note) { $Note } else { "blocked by an earlier failure" }), $script:R) }
   }
 }
+
+function Step-FailCritical {
+  param([string]$Note)
+  $script:CriticalFailed = $true
+  Step-End -Status "failed" -Note $Note
+}
+
+function Quote-Arg {
+  param([string]$Value)
+  if ($Value -match '[\s"]') { return '"' + ($Value -replace '"', '\"') + '"' }
+  if ($Value -eq "") { return '""' }
+  return $Value
+}
+
+function Format-CommandLine {
+  param([string[]]$Parts)
+  return (($Parts | ForEach-Object { Quote-Arg $_ }) -join " ")
+}
+
+# Runs a native command line via cmd.exe with output appended to the log file.
+# Never throws on native stderr (the PS 5.1 NativeCommandError trap); shows a
+# spinner with elapsed time on capable terminals; prints the output tail on
+# failure. Returns the exit code.
+function Invoke-Logged {
+  param(
+    [string]$Description,
+    [string[]]$Command,
+    [string]$WorkingDirectory = ""
+  )
+  $cmdLine = Format-CommandLine $Command
+  Write-LogOnly ""
+  Write-LogOnly (">>> {0}" -f $Description)
+  Write-LogOnly (">>> `$ {0}" -f $cmdLine)
+  if ($DryRun) {
+    Write-Host ("    {0}{1} (dry-run) would run:{2} {3}" -f $script:DIM, $script:GlyphDot, $script:R, $Description)
+    return 0
+  }
+
+  $chunk = [System.IO.Path]::GetTempFileName()
+  $started = Get-Date
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $env:ComSpec
+  $psi.Arguments = '/d /s /c "' + $cmdLine + ' >> "' + $chunk + '" 2>&1"'
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+  $proc = [System.Diagnostics.Process]::Start($psi)
+
+  if ($script:UiSpinner) {
+    $i = 0
+    $n = $script:SpinnerFrames.Count
+    while (-not $proc.HasExited) {
+      $elapsed = [int]((Get-Date) - $started).TotalSeconds
+      Write-Host ("`r$Esc[2K    {0}{1}{2} {3} {4}({5}){6}" -f $script:CYAN, $script:SpinnerFrames[$i % $n], $script:R, $Description, $script:DIM, (Format-Duration $elapsed), $script:R) -NoNewline
+      $i++
+      Start-Sleep -Milliseconds 120
+    }
+    Write-Host "`r$Esc[2K" -NoNewline
+  }
+  else {
+    Write-Host ("    {0}{1}{2} {3}" -f $script:DIM, $script:GlyphDot, $script:R, $Description)
+    $proc.WaitForExit()
+  }
+
+  $proc.WaitForExit()
+  $rc = $proc.ExitCode
+  $elapsedTotal = [int]((Get-Date) - $started).TotalSeconds
+
+  $chunkContent = ""
+  try { $chunkContent = Get-Content -Path $chunk -Raw -ErrorAction SilentlyContinue } catch {}
+  if ($chunkContent) { Write-LogOnly $chunkContent.TrimEnd() }
+
+  if ($rc -eq 0) {
+    Write-Host ("    {0}{1}{2} {3} {4}({5}){6}" -f $script:GREEN, $script:GlyphOk, $script:R, $Description, $script:DIM, (Format-Duration $elapsedTotal), $script:R)
+  }
+  else {
+    Write-Host ("    {0}{1}{2} {3} {4}(exit {5} after {6}){7}" -f $script:RED, $script:GlyphFail, $script:R, $Description, $script:DIM, $rc, (Format-Duration $elapsedTotal), $script:R)
+    if ($chunkContent) {
+      Write-Host ("    {0}| last output:{1}" -f $script:DIM, $script:R)
+      ($chunkContent -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 10) | ForEach-Object { Write-Host ("      " + $_) }
+      Write-Host ("    {0}| full log: {1}{2}" -f $script:DIM, $script:LogFile, $script:R)
+    }
+  }
+  Remove-Item $chunk -Force -ErrorAction SilentlyContinue
+  return $rc
+}
+
+# --- summary ----------------------------------------------------------------------
+function Print-Summary {
+  if ($script:SummaryPrinted) { return }
+  $script:SummaryPrinted = $true
+  Write-Host ""
+  Write-Host ("  {0}{1}{2}" -f $script:DIM, ("-" * 58), $script:R)
+  Write-Host ("  {0}Install summary{1}" -f $script:BOLD, $script:R)
+  foreach ($key in $script:StepKeys) {
+    $status = $script:StepStatus[$key]
+    $note = $script:StepNote[$key]
+    switch -Regex ($status) {
+      "^(ok|done)$" { $color = $script:GREEN;  $glyph = $script:GlyphOk }
+      "^partial$"   { $color = $script:YELLOW; $glyph = $script:GlyphWarn }
+      "^failed$"    { $color = $script:RED;    $glyph = $script:GlyphFail }
+      "^blocked$"   { $color = $script:DIM;    $glyph = $script:GlyphFail }
+      default       { $color = $script:DIM;    $glyph = $script:GlyphDot }
+    }
+    $noteSuffix = if ($note) { " {0}- {1}{2}" -f $script:DIM, $note, $script:R } else { "" }
+    Write-Host ("    {0}{1}{2} {3,-31} {4}{5}{6}{7}" -f $color, $glyph, $script:R, $script:StepTitles[$key], $color, $status, $script:R, $noteSuffix)
+  }
+  if ($script:Warnings.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("  {0}Warnings ({1}):{2}" -f $script:YELLOW, $script:Warnings.Count, $script:R)
+    foreach ($w in $script:Warnings) { Write-Host ("    {0}{1}{2} {3}" -f $script:YELLOW, $script:GlyphWarn, $script:R, $w) }
+  }
+  Write-Host ""
+  Write-Host ("  {0}Log:{1} {2}" -f $script:DIM, $script:R, $script:LogFile)
+  Write-Host ""
+  if ($script:CriticalFailed) {
+    Write-Host ("  {0}{1}Install did not complete.{2} Fix the failed step above and re-run - completed steps are skipped on re-runs." -f $script:RED, $script:BOLD, $script:R)
+  }
+  else {
+    Write-Host ("  {0}Next steps:{1}" -f $script:BOLD, $script:R)
+    Write-Host "    1. Open a new terminal (PATH changes need a fresh shell)"
+    Write-Host ("    2. cd <your project>; posse add     {0}# describe a task{1}" -f $script:DIM, $script:R)
+    Write-Host ("    3. posse go                         {0}# plan + run{1}" -f $script:DIM, $script:R)
+  }
+  Write-Host ""
+}
+
+# =============================================================================
+# helpers
+# =============================================================================
+
+function Test-Cmd { param([string]$Name) return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue) }
 
 function Get-NodeMajor {
-  $v = (& node -p "Number(process.versions.node.split('.')[0])" 2>$null)
-  return [int]$v
+  $node = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $node) { return 0 }
+  try {
+    $v = (& $node.Source --version) 2>$null
+    if ($v -match "^v(\d+)\.") { return [int]$Matches[1] }
+  }
+  catch {}
+  return 0
 }
 
 function Resolve-FullPath {
   param([string]$PathValue)
   if ([string]::IsNullOrWhiteSpace($PathValue)) { return $PathValue }
-  try {
-    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PathValue)
-  }
-  catch {
-    return [System.IO.Path]::GetFullPath($PathValue)
-  }
+  try { return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PathValue) }
+  catch { return [System.IO.Path]::GetFullPath($PathValue) }
 }
 
 function Get-InstallerPosseDir {
@@ -174,55 +421,18 @@ function Get-InstallerPosseDir {
   return ""
 }
 
-function Test-DepsFresh {
-  param([string]$Dir)
-  $nm = Join-Path $Dir "node_modules"
-  $lock = Join-Path $nm ".package-lock.json"
-  $pkg = Join-Path $Dir "package.json"
-  if (-not (Test-Path $nm)) { return $false }
-  if (-not (Test-Path $lock)) { return $false }
-  if (-not (Test-Path $pkg)) { return $false }
-  $lockTime = (Get-Item $lock).LastWriteTime
-  $pkgTime  = (Get-Item $pkg).LastWriteTime
-  return ($pkgTime -le $lockTime)
-}
-
-function Ensure-GitCheckout {
-  param(
-    [string]$Dir,
-    [string]$RepoUrl,
-    [string]$StepKey,
-    [string]$Label,
-    [string]$SentinelPath,
-    [string]$SentinelLabel
-  )
-
-  if (Test-Path $Dir) {
-    $script:Steps[$StepKey] = "skipped"
+# Winget installs land on Machine/User PATH, which this process doesn't see.
+# Re-merge them (preserving process-local additions) so freshly installed
+# tools are visible without a new shell.
+function Update-SessionPath {
+  $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
+  $user = [Environment]::GetEnvironmentVariable("Path", "User")
+  $merged = @()
+  foreach ($part in (($machine, $user, $env:Path) -join ";") -split ";") {
+    $p = $part.Trim()
+    if ($p -and ($merged -notcontains $p)) { $merged += $p }
   }
-  else {
-    Write-Log "$Label directory missing -- cloning $RepoUrl into $Dir"
-    $cloned = Invoke-Cmd -Script {
-      $parent = Split-Path $Dir -Parent
-      if ([string]::IsNullOrWhiteSpace($parent)) { $parent = "." }
-      if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-      & git clone $RepoUrl $Dir
-    } -Description "git clone $RepoUrl $Dir"
-    if ($cloned) {
-      $script:Steps[$StepKey] = if ($DryRun) { "dry-run" } else { "done" }
-    }
-    else {
-      $script:Steps[$StepKey] = "failed"
-      Fail "failed to clone $Label from $RepoUrl into $Dir"
-    }
-  }
-
-  if (-not (Test-Path $SentinelPath)) {
-    if ($DryRun -and -not (Test-Path $Dir)) {
-      return
-    }
-    Fail "$SentinelLabel not found in: $Dir (is this the $Label repo root?)"
-  }
+  $env:Path = $merged -join ";"
 }
 
 function Get-PythonRunner {
@@ -234,201 +444,252 @@ function Get-PythonRunner {
   foreach ($candidate in $candidates) {
     $cmd = Get-Command $candidate.Name -ErrorAction SilentlyContinue
     if (-not $cmd) { continue }
-    & $cmd.Source @($candidate.Args + @("-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)")) *> $null
-    if ($LASTEXITCODE -eq 0) {
-      return [PSCustomObject]@{ Command = $cmd.Source; Args = $candidate.Args }
+    try {
+      & $cmd.Source @($candidate.Args + @("-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)")) *> $null
+      if ($LASTEXITCODE -eq 0) { return [PSCustomObject]@{ Command = $cmd.Source; Args = $candidate.Args } }
     }
+    catch {}
   }
   return $null
 }
 
-function Install-PythonDeps {
-  $requirements = Join-Path $PosseDir "requirements.txt"
+function Test-DepsFresh {
+  param([string]$Dir)
+  $nm = Join-Path $Dir "node_modules"
+  $lock = Join-Path $nm ".package-lock.json"
+  $pkg = Join-Path $Dir "package.json"
+  if (-not ((Test-Path $nm) -and (Test-Path $lock) -and (Test-Path $pkg))) { return $false }
+  return ((Get-Item $pkg).LastWriteTime -le (Get-Item $lock).LastWriteTime)
+}
+
+function Test-ImageMagick {
+  return (Test-Cmd "magick") -or (Test-Cmd "convert")
+}
+
+# =============================================================================
+# steps
+# =============================================================================
+
+function Step-Packages {
+  Step-Begin "packages"
+
+  $tools = @(
+    [PSCustomObject]@{ Label = "ripgrep";       Test = { Test-Cmd "rg" };        WingetIds = @("BurntSushi.ripgrep.MSVC"); Reason = "deterministic search" },
+    [PSCustomObject]@{ Label = "Tesseract OCR"; Test = { Test-Cmd "tesseract" }; WingetIds = @("UB-Mannheim.TesseractOCR"); Reason = "image OCR extraction" },
+    [PSCustomObject]@{ Label = "ImageMagick";   Test = { Test-ImageMagick };     WingetIds = @("ImageMagick.ImageMagick", "ImageMagick.Q16-HDRI", "ImageMagick.Q16"); Reason = "image conversion" },
+    [PSCustomObject]@{ Label = "FFmpeg";        Test = { Test-Cmd "ffmpeg" };    WingetIds = @("Gyan.FFmpeg"); Reason = "media conversion" },
+    [PSCustomObject]@{ Label = "Python 3";      Test = { $null -ne (Get-PythonRunner) }; WingetIds = @("Python.Python.3.13", "Python.Python.3.12"); Reason = "Python helpers + managed venvs" },
+    [PSCustomObject]@{ Label = "PHP";           Test = { Test-Cmd "php" };       WingetIds = @("PHP.PHP.8.4", "PHP.PHP.8.3"); Reason = "php -l + SCIP PHP indexing" }
+  )
+
+  $missing = @($tools | Where-Object { -not (& $_.Test) })
+  if ($missing.Count -eq 0) {
+    Step-End "ok" "all helper CLIs present (rg, tesseract, ImageMagick, ffmpeg, python, php)"
+    return
+  }
+
+  foreach ($tool in $missing) { Write-Info ("missing: {0} ({1})" -f $tool.Label, $tool.Reason) }
+
+  if ($SkipHostTools) {
+    Step-End "skipped" ("-SkipHostTools; missing: " + (($missing | ForEach-Object { $_.Label }) -join ", "))
+    return
+  }
+  if (-not (Test-Cmd "winget")) {
+    Write-Warn2 "winget is not available; install the missing tools manually (App Installer from the Microsoft Store provides winget)"
+    Step-End "partial" "winget unavailable; tools not installed"
+    return
+  }
   if ($DryRun) {
-    Write-Log "(dry-run) would install posse Python dependencies from $requirements"
-    $script:Steps["posse python deps"] = "dry-run"
+    foreach ($tool in $missing) {
+      Write-Host ("    {0}{1} (dry-run) would winget install {2}{3}" -f $script:DIM, $script:GlyphDot, ($tool.WingetIds[0]), $script:R)
+    }
+    Step-End "dry-run" "would install missing tools via winget"
     return
   }
-  if (-not (Test-Path $requirements)) {
-    $script:Steps["posse python deps"] = "skipped"
-    Write-Warn "requirements.txt not found in $PosseDir; Python helper dependencies were not installed."
-    return
+
+  $failed = @()
+  foreach ($tool in $missing) {
+    $installed = $false
+    foreach ($id in $tool.WingetIds) {
+      $rc = Invoke-Logged -Description ("install {0} ({1})" -f $tool.Label, $id) -Command @(
+        "winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent",
+        "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
+      )
+      if ($rc -eq 0) { $installed = $true; break }
+    }
+    if (-not $installed) { $failed += $tool.Label }
   }
-  $runner = Get-PythonRunner
-  if (-not $runner) {
-    $script:Steps["posse python deps"] = "skipped"
-    Write-Warn "Python 3.9+ not found; Python helper tools (file/image parsing and conversion) may be unavailable."
-    return
+
+  Update-SessionPath
+
+  # Tesseract's installer does not reliably add itself to PATH.
+  if (-not (Test-Cmd "tesseract")) {
+    foreach ($dir in @("$env:ProgramFiles\Tesseract-OCR", "${env:ProgramFiles(x86)}\Tesseract-OCR", "$env:LOCALAPPDATA\Programs\Tesseract-OCR")) {
+      if ($dir -and (Test-Path (Join-Path $dir "tesseract.exe"))) {
+        $env:Path = "$dir;$env:Path"
+        if (-not $NoPersistEnv) {
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          if (-not (($userPath -split ";") -contains $dir)) {
+            [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(";") + ";" + $dir), "User")
+          }
+        }
+        Write-Info "added Tesseract to PATH: $dir"
+        break
+      }
+    }
   }
-  Write-Log "Installing posse Python dependencies"
-  if (Invoke-Cmd -Script { & $runner.Command @($runner.Args + @("-m", "pip", "install", "--user", "-r", $requirements)) } -Description "pip install --user -r requirements.txt (posse)") {
-    $script:Steps["posse python deps"] = "done"
+
+  $stillMissing = @($tools | Where-Object { -not (& $_.Test) } | ForEach-Object { $_.Label })
+  if ($failed.Count -eq 0 -and $stillMissing.Count -eq 0) {
+    Step-End "ok" "helper CLIs installed"
+  }
+  elseif ($stillMissing.Count -gt 0 -and $failed.Count -eq 0) {
+    Write-Warn2 ("installed, but not visible on PATH yet (a new terminal may be needed): " + ($stillMissing -join ", "))
+    Step-End "partial" ("PATH not refreshed for: " + ($stillMissing -join ", "))
   }
   else {
-    $script:Steps["posse python deps"] = "failed"
+    Write-Warn2 ("could not install: " + ($failed -join ", ") + " (Posse degrades gracefully; related helpers stay disabled)")
+    Step-End "partial" ("installed with gaps: " + ($failed -join ", "))
   }
 }
 
-function Install-ScipDeps {
+function Step-Node {
+  Step-Begin "node"
+  $major = Get-NodeMajor
+  if ($major -ge $NodeMinMajor) {
+    $script:NodeBin = (Get-Command node).Source
+    Step-End "ok" ("node v{0}.x at {1}" -f $major, $script:NodeBin)
+    return
+  }
+  if ($major -gt 0) { Write-Info ("found node v{0}.x, but {1}+ is required" -f $major, $NodeMinMajor) }
+  else { Write-Info "node is not installed" }
+
+  if ($NoInstallNode) {
+    Step-FailCritical "Node $NodeMinMajor+ required (-NoInstallNode was passed). Install it and re-run."
+    return
+  }
+  if (-not (Test-Cmd "winget")) {
+    Step-FailCritical "Node $NodeMinMajor+ required and winget is unavailable to install it. Install Node from https://nodejs.org and re-run."
+    return
+  }
   if ($DryRun) {
-    Write-Log "(dry-run) would install Posse-managed SCIP dependencies for $PosseScipLanguages"
-    $script:Steps["posse SCIP deps"] = "dry-run"
+    Step-End "dry-run" "would install Node via winget (OpenJS.NodeJS.LTS)"
     return
   }
 
-  Write-Log "Installing Posse-managed SCIP dependencies for $PosseScipLanguages"
-  $scipJs = @'
-import { installScipLanguageDependenciesSync } from "./lib/domains/atlas/functions/v2/scip/dependencies.js";
+  $installed = $false
+  foreach ($id in @("OpenJS.NodeJS.LTS", "OpenJS.NodeJS")) {
+    $rc = Invoke-Logged -Description ("install Node.js ({0})" -f $id) -Command @(
+      "winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent",
+      "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
+    )
+    if ($rc -eq 0) { $installed = $true; break }
+  }
+  if (-not $installed) {
+    Step-FailCritical "Node install via winget failed; install Node $NodeMinMajor+ from https://nodejs.org and re-run"
+    return
+  }
 
-const result = installScipLanguageDependenciesSync({
-  languages: process.env.POSSE_INSTALL_SCIP_LANGUAGES || "typescript,python,php",
-  force: process.env.POSSE_INSTALL_SCIP_FORCE === "true",
-  onProgress: (message) => console.log(`[scip-deps] ${message}`),
-});
-
-for (const row of result.results || []) {
-  const marker = row.ok ? "ok" : "warn";
-  console.log(`[scip-deps] ${marker} ${row.language}: ${row.status} - ${row.message}`);
+  Update-SessionPath
+  $major = Get-NodeMajor
+  if ($major -ge $NodeMinMajor) {
+    $script:NodeBin = (Get-Command node).Source
+    Step-End "ok" ("node v{0}.x installed at {1}" -f $major, $script:NodeBin)
+  }
+  else {
+    Step-FailCritical "node still not usable in this session after install (found major: $major); open a new terminal and re-run"
+  }
 }
 
-if (!result.ok) process.exitCode = 2;
-'@
-  $env:POSSE_INSTALL_SCIP_LANGUAGES = $PosseScipLanguages
-  $env:POSSE_INSTALL_SCIP_FORCE = if ($Force) { "true" } else { "false" }
-  try {
-    Push-Location $PosseDir
-    $ok = Invoke-Cmd -Script { $scipJs | & node --input-type=module - } -Description "install Posse-managed SCIP dependencies"
-    if ($ok) {
-      $script:Steps["posse SCIP deps"] = "done"
+function Step-Checkout {
+  Step-Begin "checkout"
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
+
+  if (-not $script:PosseDirResolved) {
+    $detected = Get-InstallerPosseDir
+    if ($detected) {
+      $script:PosseDirResolved = $detected
+      Write-Info "using the Posse checkout containing this installer"
     }
     else {
-      $script:Steps["posse SCIP deps"] = "partial"
-      $retryLanguages = ($PosseScipLanguages -split ",") -join " "
-      Write-Warn "some SCIP language dependencies could not be installed automatically. Install the missing host toolchains and run: posse atlas-v2 scip install $retryLanguages"
+      $script:PosseDirResolved = Join-Path $InstallRoot "posse"
     }
   }
-  finally {
-    Pop-Location
-    Remove-Item Env:\POSSE_INSTALL_SCIP_LANGUAGES, Env:\POSSE_INSTALL_SCIP_FORCE -ErrorAction SilentlyContinue
-  }
-}
+  $script:PosseDirResolved = Resolve-FullPath $script:PosseDirResolved
 
-function Test-AnyCommandAvailable {
-  param([string[]]$Names)
-  foreach ($name in $Names) {
-    if (Get-Command $name -ErrorAction SilentlyContinue) { return $true }
-  }
-  return $false
-}
-
-function Test-HostToolAvailable {
-  param([object]$Tool)
-  if ($Tool.Label -eq "Python 3") {
-    return $null -ne (Get-PythonRunner)
-  }
-  return Test-AnyCommandAvailable -Names $Tool.Commands
-}
-
-function Get-HostToolDefinitions {
-  return @(
-    [PSCustomObject]@{
-      Label = "ripgrep"
-      Commands = @("rg")
-      WingetIds = @("BurntSushi.ripgrep.MSVC")
-      Reason = "deterministic MCP search_files"
-    },
-    [PSCustomObject]@{
-      Label = "Tesseract OCR"
-      Commands = @("tesseract")
-      WingetIds = @("UB-Mannheim.TesseractOCR")
-      Reason = "image OCR extraction"
-    },
-    [PSCustomObject]@{
-      Label = "ImageMagick"
-      Commands = @("magick")
-      WingetIds = @("ImageMagick.Q16", "ImageMagick.ImageMagick")
-      Reason = "image re-encoding and conversion"
-    },
-    [PSCustomObject]@{
-      Label = "FFmpeg"
-      Commands = @("ffmpeg")
-      WingetIds = @("Gyan.FFmpeg")
-      Reason = "image/video fallback conversion"
-    },
-    [PSCustomObject]@{
-      Label = "Python 3"
-      Commands = @("python", "python3", "py")
-      WingetIds = @("Python.Python.3.13", "Python.Python.3.12")
-      Reason = "Python runtime and scoped Python lint"
-    },
-    [PSCustomObject]@{
-      Label = "PHP"
-      Commands = @("php")
-      WingetIds = @("PHP.PHP.8.4", "PHP.PHP.NTS.8.4")
-      Reason = "PHP runtime, php -l, and SCIP PHP indexing"
+  if (Test-Path $script:PosseDirResolved) {
+    if (Test-Path (Join-Path $script:PosseDirResolved "orchestrator.js")) {
+      Step-End "ok" ("existing checkout: {0}" -f $script:PosseDirResolved)
     }
-  )
-}
-
-function Install-WingetPackage {
-  param(
-    [string]$Label,
-    [string[]]$PackageIds
-  )
-  foreach ($packageId in $PackageIds) {
-    Write-Log "Installing $Label via winget package $packageId"
-    if (Invoke-Cmd -Script {
-      & winget install --id $packageId --exact --source winget --silent --accept-package-agreements --accept-source-agreements
-    } -Description "winget install $packageId ($Label)") {
-      return $true
+    else {
+      Step-FailCritical ("{0} exists but has no orchestrator.js (not a Posse repo root?)" -f $script:PosseDirResolved)
     }
+    return
   }
-  return $false
+
+  if (-not (Test-Cmd "git")) {
+    Step-FailCritical "git is required to clone Posse but is not installed (winget install Git.Git)"
+    return
+  }
+  if ($DryRun) {
+    Step-End "dry-run" ("would clone {0} into {1}" -f $PosseRepoUrl, $script:PosseDirResolved)
+    return
+  }
+  $parent = Split-Path $script:PosseDirResolved -Parent
+  if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+  $rc = Invoke-Logged -Description ("clone {0}" -f $PosseRepoUrl) -Command @("git", "clone", $PosseRepoUrl, $script:PosseDirResolved)
+  if ($rc -eq 0 -and (Test-Path (Join-Path $script:PosseDirResolved "orchestrator.js"))) {
+    Step-End "ok" ("cloned into {0}" -f $script:PosseDirResolved)
+  }
+  else {
+    Step-FailCritical "git clone failed (or orchestrator.js missing after clone); see log"
+  }
 }
 
-function Test-ComposerForScip {
-  if (Get-Command composer -ErrorAction SilentlyContinue) { return $true }
-  if ([string]::IsNullOrWhiteSpace($PosseDir)) { return $false }
-  return Test-Path (Join-Path $PosseDir "scip\bin\composer.phar")
-}
-
-function Install-ComposerPhar {
-  if (Test-ComposerForScip) { return $true }
+function Step-Composer {
+  Step-Begin "composer"
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
+  $pharPath = Join-Path $script:PosseDirResolved "scip\bin\composer.phar"
+  if (Test-Cmd "composer") { Step-End "ok" "composer on PATH"; return }
+  if (Test-Path $pharPath) { Step-End "ok" "composer.phar already present in scip\bin"; return }
   $php = Get-Command php -ErrorAction SilentlyContinue
   if (-not $php) {
-    Write-Warn "Composer could not be installed because php is not visible on PATH."
-    return $false
+    Write-Warn2 "PHP is not installed, so Composer was skipped - SCIP PHP indexing stays disabled until both exist"
+    Step-End "skipped" "php not available"
+    return
   }
-
-  $binDir = Join-Path $PosseDir "scip\bin"
-  $pharPath = Join-Path $binDir "composer.phar"
   if ($DryRun) {
-    Write-Log "(dry-run) would download verified Composer phar to $pharPath"
-    return $true
+    Step-End "dry-run" "would download signature-verified composer.phar into scip\bin"
+    return
   }
 
+  $binDir = Split-Path $pharPath -Parent
   $setupPath = Join-Path ([System.IO.Path]::GetTempPath()) ("composer-setup-" + [Guid]::NewGuid().ToString("N") + ".php")
   try {
     if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
+    Write-Info "downloading Composer installer (signature-verified)"
     $expected = (Invoke-RestMethod -Uri "https://composer.github.io/installer.sig").Trim()
-    Invoke-WebRequest -Uri "https://getcomposer.org/installer" -OutFile $setupPath
+    Invoke-WebRequest -Uri "https://getcomposer.org/installer" -OutFile $setupPath -UseBasicParsing
     $env:POSSE_COMPOSER_SETUP = $setupPath
-    $actual = (& $php.Source -r 'echo hash_file("sha384", getenv("POSSE_COMPOSER_SETUP"));')
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($actual) -or ($actual.Trim().ToLowerInvariant() -ne $expected.ToLowerInvariant())) {
-      Write-Warn "Composer installer signature verification failed."
-      return $false
+    $actual = ""
+    try { $actual = (& $php.Source -r 'echo hash_file("sha384", getenv("POSSE_COMPOSER_SETUP"));') } catch {}
+    if ([string]::IsNullOrWhiteSpace($actual) -or ($actual.Trim().ToLowerInvariant() -ne $expected.ToLowerInvariant())) {
+      Write-Warn2 "Composer installer signature verification failed"
+      Step-End "partial" "composer unavailable (signature mismatch)"
+      return
     }
-    & $php.Source $setupPath "--install-dir=$binDir" "--filename=composer.phar" --quiet
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $pharPath)) {
-      Write-Warn "Composer installer did not produce $pharPath."
-      return $false
+    $rc = Invoke-Logged -Description "run Composer installer" -Command @($php.Source, $setupPath, "--install-dir=$binDir", "--filename=composer.phar", "--quiet")
+    if ($rc -eq 0 -and (Test-Path $pharPath)) {
+      Step-End "ok" "composer.phar installed into scip\bin"
     }
-    Write-Log "Installed Composer phar for SCIP PHP dependencies: $pharPath"
-    return $true
+    else {
+      Write-Warn2 "Composer could not be installed; SCIP PHP dependency installs will be skipped"
+      Step-End "partial" "composer unavailable"
+    }
   }
   catch {
-    Write-Warn "Composer phar install failed: $_"
-    return $false
+    Write-Warn2 ("Composer install failed: {0}" -f $_.Exception.Message)
+    Step-End "partial" "composer unavailable"
   }
   finally {
     Remove-Item $setupPath -Force -ErrorAction SilentlyContinue
@@ -436,111 +697,90 @@ function Install-ComposerPhar {
   }
 }
 
-function Install-HostToolDeps {
-  if ($SkipHostTools) {
-    $script:Steps["host tool deps"] = "skipped"
+function Step-Npm {
+  Step-Begin "npm"
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
+  if (-not $Force -and (Test-DepsFresh $script:PosseDirResolved)) {
+    Step-End "skipped" "node_modules is fresh (pass -Force to reinstall)"
     return
   }
-
-  $tools = Get-HostToolDefinitions
-  $missing = @()
-  foreach ($tool in $tools) {
-    if (Test-HostToolAvailable -Tool $tool) {
-      Write-Log "$($tool.Label) found for $($tool.Reason)"
-    }
-    else {
-      $missing += $tool
-    }
-  }
-
-  $composerReady = Test-ComposerForScip
-  if ($missing.Count -eq 0 -and $composerReady) {
-    $script:Steps["host tool deps"] = "ok"
-    return
-  }
-
   if ($DryRun) {
-    foreach ($tool in $missing) {
-      Write-Log "(dry-run) would install $($tool.Label) for $($tool.Reason) via winget package(s): $($tool.WingetIds -join ', ')"
-    }
-    if (-not $composerReady) {
-      Write-Log "(dry-run) would install verified Composer phar for PHP SCIP dependencies"
-    }
-    $script:Steps["host tool deps"] = "dry-run"
+    Step-End "dry-run" ("would run npm install --include=optional in {0}" -f $script:PosseDirResolved)
     return
   }
+  $npmArgs = @("npm", "install", "--include=optional", "--no-fund", "--no-audit")
+  $rc = Invoke-Logged -Description "npm install (includes native module builds)" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
+  if ($rc -eq 0) { Step-End "ok" "npm dependencies installed"; return }
 
-  $failed = @()
-  if ($missing.Count -gt 0 -and -not (Get-Command winget -ErrorAction SilentlyContinue)) {
-    $labels = ($missing | ForEach-Object { $_.Label }) -join ", "
-    Write-Warn "winget not found; cannot auto-install host CLI dependencies: $labels. Install them manually or re-run after installing winget."
-    $failed += ($missing | ForEach-Object { $_.Label })
-  }
+  Write-Info "retrying once (transient network/registry failures are common)"
+  $rc = Invoke-Logged -Description "npm install (retry)" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
+  if ($rc -eq 0) { Step-End "ok" "npm dependencies installed on retry"; return }
 
-  if ($missing.Count -gt 0 -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-    foreach ($tool in $missing) {
-      if (Install-WingetPackage -Label $tool.Label -PackageIds $tool.WingetIds) {
-        if (-not (Test-HostToolAvailable -Tool $tool)) {
-          Write-Warn "$($tool.Label) installed, but command '$($tool.Commands[0])' is not visible in this shell yet. Open a new terminal or update PATH before using related tools."
-        }
-      }
-      else {
-        $failed += $tool.Label
-      }
-    }
-  }
-
-  if (-not (Test-ComposerForScip)) {
-    if (-not (Install-ComposerPhar)) {
-      $failed += "Composer"
-    }
-  }
-
-  if ($failed.Count -gt 0) {
-    $script:Steps["host tool deps"] = "partial"
-    Write-Warn "some host CLI dependencies could not be installed automatically: $($failed -join ', ')"
-  }
-  else {
-    $script:Steps["host tool deps"] = "done"
-  }
+  Step-FailCritical "npm install failed twice - if the log shows node-gyp/MSBuild errors, install 'Visual Studio Build Tools' (C++ workload) and re-run"
 }
 
-function Test-ProviderCredentials {
-  $found = @()
-  if (Get-Command claude -ErrorAction SilentlyContinue) { $found += "claude-cli" }
-  if ($env:OPENAI_API_KEY) { $found += "OPENAI_API_KEY" }
-  if ($env:XAI_API_KEY)    { $found += "XAI_API_KEY" }
-  $codexAuth = Join-Path $env:USERPROFILE ".codex\auth.json"
-  if ($env:CODEX_API_KEY -or (Test-Path $codexAuth)) { $found += "codex" }
-  if ($found.Count -eq 0) {
-    Write-Warn "no provider credentials detected (claude CLI / OPENAI_API_KEY / XAI_API_KEY / CODEX_API_KEY / ~/.codex/auth.json). Posse will not be able to dispatch jobs until one is configured."
-  }
-  else {
-    Write-Log "Detected provider credentials: $($found -join ', ')"
-  }
-  if ($env:POSSE_KEY) {
-    Write-Log "Detected Posse remote key: POSSE_KEY"
-  }
-  else {
-    Write-Warn "POSSE_KEY is not set. Posse remote prompt/tool catalog requests will require this key."
-  }
-}
+function Step-ShellWiring {
+  Step-Begin "shell"
+  $envDir = Join-Path $env:USERPROFILE ".config\posse"
+  $script:EnvFile = Join-Path $envDir "atlas.env.ps1"
+  $binDir = Join-Path $env:USERPROFILE ".local\bin"
 
-function Test-GitConfig {
-  $name  = (& git config --global user.name  2>$null)
-  $email = (& git config --global user.email 2>$null)
-  if (-not $name)  { Write-Warn 'git user.name is not set globally (git config --global user.name "Your Name"). Posse auto-commits will fall back to repo-local config.' }
-  if (-not $email) { Write-Warn 'git user.email is not set globally (git config --global user.email "you@example.com").' }
-}
-
-function Seed-AccountSettings {
-  param([string]$NodeBin)
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
   if ($DryRun) {
-    Write-Log "(dry-run) would seed missing ATLAS keys into ~/.posse/account.db"
-    $script:Steps["account settings seed"] = "dry-run"
+    Step-End "dry-run" ("would write {0}, posse shims in {1}, and PATH/profile wiring" -f $script:EnvFile, $binDir)
     return
   }
-  $seedJs = @'
+
+  New-Item -ItemType Directory -Path $envDir -Force | Out-Null
+  $envLiteral = "'" + ($binDir -replace "'", "''") + "'"
+  $contents = @(
+    "# Posse PATH wiring -- generated by install-posse-atlas.ps1",
+    "# ATLAS runtime configuration lives in ~\.posse\account.db (posse admin),",
+    "# not environment variables.",
+    ('$env:POSSE_BIN_DIR = ' + $envLiteral),
+    'if (($env:PATH -split '';'') -notcontains $env:POSSE_BIN_DIR) { $env:PATH = "$env:POSSE_BIN_DIR;$env:PATH" }'
+  ) -join "`r`n"
+  Set-Content -Path $script:EnvFile -Value $contents -Encoding UTF8
+
+  New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+  $cmdShim = Join-Path $binDir "posse.cmd"
+  $psShim = Join-Path $binDir "posse.ps1"
+  $orchestrator = Join-Path $script:PosseDirResolved "orchestrator.js"
+  Set-Content -Path $cmdShim -Value ("@echo off`r`n""{0}"" ""{1}"" %*" -f $script:NodeBin, $orchestrator) -Encoding ASCII
+  $psLines = @(
+    ('$node = ' + "'" + ($script:NodeBin -replace "'", "''") + "'"),
+    ('$entry = ' + "'" + ($orchestrator -replace "'", "''") + "'"),
+    '& $node $entry @args',
+    'exit $LASTEXITCODE'
+  ) -join "`r`n"
+  Set-Content -Path $psShim -Value $psLines -Encoding UTF8
+
+  # Persist ~\.local\bin on the user PATH and pick it up in this session.
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  $parts = @($userPath -split ";" | Where-Object { $_ })
+  if (-not ($parts | Where-Object { $_ -ieq $binDir })) {
+    $newUserPath = if ($userPath) { $userPath.TrimEnd(";") + ";" + $binDir } else { $binDir }
+    if (-not $NoPersistEnv) { [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User") }
+  }
+  if (-not (($env:Path -split ";") | Where-Object { $_ -ieq $binDir })) { $env:Path = "$binDir;$env:Path" }
+
+  if (-not $NoPersistEnv -and $PROFILE) {
+    $profileDir = Split-Path $PROFILE -Parent
+    if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
+    if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
+    $existing = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $existing -or -not $existing.Contains($script:EnvFile)) {
+      Add-Content -Path $PROFILE -Value ("`n# Posse ATLAS integration`n. '" + ($script:EnvFile -replace "'", "''") + "'")
+      Write-Info "updated $PROFILE"
+    }
+  }
+
+  $note = "env file + posse shims installed"
+  if (-not (Test-Cmd "posse")) { $note += " (open a new terminal to pick up PATH)" }
+  Step-End "ok" $note
+}
+
+$script:SeedJs = @'
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -555,6 +795,7 @@ const seed = {
   atlas_scip_mode: process.env.POSSE_SEED_SCIP_MODE,
   atlas_scip_languages: process.env.POSSE_SEED_SCIP_LANGUAGES,
 };
+let added = 0, kept = 0, skipped = 0;
 fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
 const db = new Database(settingsPath);
 db.pragma("journal_mode = WAL");
@@ -574,7 +815,6 @@ const upsert = db.prepare(`
     SET setting_value = excluded.setting_value,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 `);
-let added = 0, kept = 0, skipped = 0;
 const tx = db.transaction((entries) => {
   for (const [k, v] of entries) {
     if (v == null || String(v).trim() === "") { skipped++; continue; }
@@ -592,439 +832,288 @@ db.close();
 console.log(`[seed-settings] wrote ${settingsPath} -- added ${added}, kept ${kept} existing, skipped ${skipped} empty`);
 '@
 
-  # Pass values via env vars so we don't have to worry about quoting inside a heredoc-equivalent.
-  $env:POSSE_SEED_MODE      = $PosseMode
-  $env:POSSE_SEED_PHASES    = $PossePhases
-  $env:POSSE_SEED_FUNNEL    = $PosseLiveFunnel
+function Step-SeedSettings {
+  Step-Begin "seed"
+  if ($SkipSettings) { Step-End "skipped" "-SkipSettings"; return }
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
+  if ($DryRun) {
+    Step-End "dry-run" "would seed missing ATLAS keys into ~/.posse/account.db (merge-only)"
+    return
+  }
+  # The seed file must live inside the Posse tree: Node resolves require()
+  # from the script's own directory, and better-sqlite3 lives in
+  # $PosseDir\node_modules. The .cjs extension keeps it CommonJS despite the
+  # repo's "type": "module"; .posse\ is gitignored.
+  $seedDir = Join-Path $script:PosseDirResolved ".posse"
+  New-Item -ItemType Directory -Path $seedDir -Force | Out-Null
+  $seedFile = Join-Path $seedDir "install-seed.tmp.cjs"
+  Set-Content -Path $seedFile -Value $script:SeedJs -Encoding UTF8
+
+  $env:POSSE_SEED_MODE = $PosseMode
+  $env:POSSE_SEED_PHASES = $PossePhases
+  $env:POSSE_SEED_FUNNEL = $PosseLiveFunnel
   $env:POSSE_SEED_SCIP_MODE = $PosseScipMode
   $env:POSSE_SEED_SCIP_LANGUAGES = $PosseScipLanguages
   try {
-    Push-Location $PosseDir
-    try { $seedJs | & $NodeBin --input-type=commonjs - }
-    finally { Pop-Location }
-    if ($LASTEXITCODE -ne 0) {
-      Write-Warn "seed-settings node script failed (exit $LASTEXITCODE)"
-      $script:Steps["account settings seed"] = "failed"
-    }
+    $rc = Invoke-Logged -Description "seed ~/.posse/account.db (merge-only, existing values kept)" -Command @($script:NodeBin, $seedFile) -WorkingDirectory $script:PosseDirResolved
+    if ($rc -eq 0) { Step-End "ok" "account settings seeded" }
     else {
-      $script:Steps["account settings seed"] = "done"
+      Write-Warn2 "settings seed failed; run 'posse admin' to configure ATLAS settings manually"
+      Step-End "failed" "seed script failed; see log"
     }
   }
   finally {
-    Remove-Item Env:\POSSE_SEED_MODE, Env:\POSSE_SEED_PHASES, Env:\POSSE_SEED_FUNNEL, `
-                Env:\POSSE_SEED_SCIP_MODE, Env:\POSSE_SEED_SCIP_LANGUAGES `
-                -ErrorAction SilentlyContinue
+    Remove-Item $seedFile -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:\POSSE_SEED_MODE, Env:\POSSE_SEED_PHASES, Env:\POSSE_SEED_FUNNEL, Env:\POSSE_SEED_SCIP_MODE, Env:\POSSE_SEED_SCIP_LANGUAGES -ErrorAction SilentlyContinue
   }
 }
 
-function Invoke-AdminInit {
-  param([string]$NodeBin)
+function Step-Doctor {
+  Step-Begin "doctor"
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
   if ($DryRun) {
-    Write-Log "(dry-run) would run posse admin init --non-interactive"
-    $script:Steps["admin init"] = "dry-run"
+    Step-End "dry-run" "would run 'posse doctor' (Python venv + SCIP language environments)"
     return
   }
-  Push-Location $PosseDir
-  try {
-    & $NodeBin orchestrator.js admin init --non-interactive
-    if ($LASTEXITCODE -eq 0) {
-      $script:Steps["admin init"] = "done"
-    }
-    else {
-      $script:Steps["admin init"] = "failed"
-      Write-Warn "posse admin init failed (exit $LASTEXITCODE). Run it manually to see provider CLI detection details."
-    }
+  Write-Info "delegating to Posse's own dependency engine (managed Python venv, SCIP indexer environments)"
+  $rc = Invoke-Logged -Description "posse doctor (first run builds Python venv + SCIP envs; this can take a few minutes)" -Command @($script:NodeBin, "orchestrator.js", "doctor") -WorkingDirectory $script:PosseDirResolved
+  if ($rc -eq 0) { Step-End "ok" "runtime dependencies ready" }
+  else {
+    Write-Warn2 "posse doctor reported unresolved dependencies - run 'posse doctor' after fixing the tools it names (log has details)"
+    Step-End "partial" "some runtime dependencies unresolved"
   }
-  finally { Pop-Location }
 }
 
-function Validate-Posse {
-  if ($DryRun) { $script:Steps["posse validate"] = "dry-run"; return }
-  Push-Location $PosseDir
-  try {
-    & node orchestrator.js status *> $null
-    $script:Steps["posse validate"] = if ($LASTEXITCODE -eq 0) { "ok" } else { "failed" }
-    if ($LASTEXITCODE -ne 0) {
-      Write-Warn "posse failed to boot (node orchestrator.js status returned $LASTEXITCODE). Run it manually to see the error."
-    }
-  }
-  finally { Pop-Location }
-}
-
-function Write-EnvFile {
-  param([string]$NodeBin)
-  $envDir  = Join-Path $env:USERPROFILE ".config\posse"
-  $envFile = Join-Path $envDir "atlas.env.ps1"
+function Step-AdminInit {
+  Step-Begin "admin"
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
   if ($DryRun) {
-    Write-Log "(dry-run) would write $envFile"
-    $script:Steps["env file"] = "dry-run"
-    return $envFile
-  }
-  New-Item -ItemType Directory -Path $envDir -Force | Out-Null
-  $contents = @(
-    "# Posse PATH wiring -- generated by install-posse-atlas.ps1",
-    "# ATLAS runtime configuration lives in ~\.posse\account.db (posse admin),",
-    "# not environment variables.",
-    ("`$env:POSSE_BIN_DIR = {0}" -f (ConvertTo-PowerShellLiteral (Join-Path $env:USERPROFILE ".local\bin"))),
-    'if (($env:PATH -split '';'') -notcontains $env:POSSE_BIN_DIR) { $env:PATH = "$env:POSSE_BIN_DIR;$env:PATH" }'
-  ) -join "`r`n"
-  Set-Content -Path $envFile -Value $contents -Encoding UTF8
-  Write-Log "Wrote environment file: $envFile"
-  $script:Steps["env file"] = "done"
-  return $envFile
-}
-
-function Append-ProfileSource {
-  param([string]$EnvFile)
-  if ($NoPersistEnv) { return }
-  if (-not $PROFILE) { Write-Warn "No PowerShell profile path available. Skipping auto-source."; return }
-  $line = ". $(ConvertTo-PowerShellLiteral $EnvFile)"
-  if ($DryRun) {
-    Write-Log "(dry-run) would ensure '$line' is in $PROFILE"
+    Step-End "dry-run" "would run posse admin init --non-interactive"
     return
   }
-  $profileDir = Split-Path $PROFILE -Parent
-  if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
-  if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
-  $existing = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
-  if ($null -eq $existing -or -not $existing.Contains($EnvFile)) {
-    Add-Content -Path $PROFILE -Value "`n# Posse ATLAS integration`n$line"
-    Write-Log "Updated $PROFILE to source $EnvFile"
+  $rc = Invoke-Logged -Description "detect provider CLIs (admin init)" -Command @($script:NodeBin, "orchestrator.js", "admin", "init", "--non-interactive") -WorkingDirectory $script:PosseDirResolved
+  if ($rc -eq 0) { Step-End "ok" "provider CLI detection complete" }
+  else {
+    Write-Warn2 "posse admin init failed - run 'posse admin init' manually to see provider CLI detection details"
+    Step-End "failed" "admin init failed; see log"
   }
 }
 
-function Ensure-PosseAlias {
-  param([string]$NodeBin)
-  $binDir = Join-Path $env:USERPROFILE ".local\bin"
-  $cmdShim = Join-Path $binDir "posse.cmd"
-  $psShim = Join-Path $binDir "posse.ps1"
-
+function Step-Validate {
+  Step-Begin "validate"
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
   if ($DryRun) {
-    Write-Log "(dry-run) would create posse alias shims at $cmdShim and $psShim"
-    $script:Steps["posse alias"] = "dry-run"
+    Step-End "dry-run" "would run node orchestrator.js status"
     return
   }
-
-  New-Item -ItemType Directory -Path $binDir -Force | Out-Null
-  $cmdContents = @(
-    "@echo off",
-    ('"{0}" "{1}" %*' -f $NodeBin, (Join-Path $PosseDir "orchestrator.js"))
-  ) -join "`r`n"
-  Set-Content -Path $cmdShim -Value $cmdContents -Encoding ASCII
-
-  $psContents = @(
-    ('$node = {0}' -f (ConvertTo-PowerShellLiteral $NodeBin)),
-    ('$entry = {0}' -f (ConvertTo-PowerShellLiteral (Join-Path $PosseDir "orchestrator.js"))),
-    '& $node $entry @args',
-    'exit $LASTEXITCODE'
-  ) -join "`r`n"
-  Set-Content -Path $psShim -Value $psContents -Encoding UTF8
-
-  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-  $pathParts = @($userPath -split ";" | Where-Object { $_ })
-  if (-not ($pathParts | Where-Object { $_ -ieq $binDir })) {
-    $newUserPath = if ($userPath) { "$userPath;$binDir" } else { $binDir }
-    [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
-  }
-  if (-not (($env:Path -split ";") | Where-Object { $_ -ieq $binDir })) {
-    $env:Path = "$binDir;$env:Path"
-  }
-
-  $script:Steps["posse alias"] = "done"
-  Write-Log "Installed posse alias shims: $cmdShim and $psShim"
-  if (-not (Get-Command posse -ErrorAction SilentlyContinue)) {
-    Write-Warn "posse alias was written to $binDir, but it is not visible in this shell yet. Open a new terminal or ensure the directory is on PATH."
+  $rc = Invoke-Logged -Description "boot posse (orchestrator.js status)" -Command @($script:NodeBin, "orchestrator.js", "status") -WorkingDirectory $script:PosseDirResolved
+  if ($rc -eq 0) { Step-End "ok" "posse boots cleanly" }
+  else {
+    Write-Warn2 ("posse failed to boot - run 'posse status' in {0} to see the error" -f $script:PosseDirResolved)
+    Step-End "failed" "status returned non-zero; see log"
   }
 }
 
-# Prompt (hidden) for a provider API key. Skips if the env var is already set.
-# Returns $true if a value was captured.
+# --- provider keys (interactive; no spinner) --------------------------------------
+$script:ConfiguredKeys = @()
+
 function Prompt-ForKey {
   param([string]$Label, [string]$VarName)
   $existing = [Environment]::GetEnvironmentVariable($VarName, "Process")
   if ($existing) {
-    Write-Log "$VarName already set (length $($existing.Length)) -- skipping"
+    Write-Info "$VarName already set (length $($existing.Length)) - skipping"
     return $false
   }
-  if ($DryRun) {
-    Write-Log "(dry-run) would prompt for $Label ($VarName)"
-    return $false
-  }
-  $secure = Read-Host -Prompt "  Enter $Label (press Enter to skip)" -AsSecureString
-  # Empty SecureString has Length 0. Convert to plaintext only if user typed something.
-  if ($secure.Length -eq 0) {
-    Write-Log "Skipped $Label"
-    return $false
-  }
+  $secure = Read-Host -Prompt "      Enter $Label (press Enter to skip)" -AsSecureString
+  if ($secure.Length -eq 0) { Write-Info "skipped $Label"; return $false }
   $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-  try {
-    $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-  }
-  finally {
-    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-  }
-  if (-not $plain) {
-    Write-Log "Skipped $Label"
-    return $false
-  }
-  # Export for this process (validation, smoke test can use it).
+  try { $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+  finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+  if (-not $plain) { Write-Info "skipped $Label"; return $false }
   [Environment]::SetEnvironmentVariable($VarName, $plain, "Process")
   $script:ConfiguredKeys += [PSCustomObject]@{ Name = $VarName; Value = $plain }
   return $true
 }
 
-function Configure-Keys {
-  param([string]$ProvidersFile)
-
-  # Dot-source any existing providers.env.ps1 so we don't re-prompt for keys
-  # that were captured on a previous run.
-  if (Test-Path $ProvidersFile) {
-    . $ProvidersFile
+function Step-Keys {
+  Step-Begin "keys"
+  $providersFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "providers.env.ps1"
+  if (-not $ConfigureKeys) {
+    Step-End "skipped" "pass -ConfigureKeys to set provider API keys interactively"
+    return
+  }
+  if ($DryRun) {
+    Step-End "dry-run" "would prompt for POSSE_KEY / OPENAI_API_KEY / XAI_API_KEY / CODEX_API_KEY"
+    return
   }
 
-  Write-Log "Configuring provider API keys. Input is hidden. Press Enter to skip."
+  if (Test-Path $providersFile) { . $providersFile }
+
+  Write-Info "input is hidden; press Enter to skip any key"
   [void](Prompt-ForKey "Posse remote key" "POSSE_KEY")
   [void](Prompt-ForKey "OpenAI API key" "OPENAI_API_KEY")
   [void](Prompt-ForKey "xAI (Grok) key" "XAI_API_KEY")
-  [void](Prompt-ForKey "Codex API key (optional -- skip if you prefer 'codex login')" "CODEX_API_KEY")
+  [void](Prompt-ForKey "Codex API key (optional - skip if you prefer 'codex login')" "CODEX_API_KEY")
 
-  if (-not $DryRun) {
-    if (Get-Command claude -ErrorAction SilentlyContinue) {
-      $ans = Read-Host "  Run 'claude' now to log in to Claude? [y/N]"
-      if ($ans -match '^[Yy]$') {
-        try { & claude } catch { Write-Warn "claude login command did not exit cleanly: $_" }
-      }
+  if (Test-Cmd "claude") {
+    $ans = Read-Host "      Run 'claude' now to log in to Claude? [y/N]"
+    if ($ans -match '^[Yy]$') {
+      try { & claude } catch { Write-Warn2 "claude login command did not exit cleanly: $_" }
     }
-    if ((Get-Command codex -ErrorAction SilentlyContinue) -and -not $env:CODEX_API_KEY) {
-      $ans = Read-Host "  Run 'codex login' now? [y/N]"
-      if ($ans -match '^[Yy]$') {
-        try { & codex login } catch { Write-Warn "codex login command did not exit cleanly: $_" }
-      }
+  }
+  if ((Test-Cmd "codex") -and -not $env:CODEX_API_KEY) {
+    $ans = Read-Host "      Run 'codex login' now? [y/N]"
+    if ($ans -match '^[Yy]$') {
+      try { & codex login } catch { Write-Warn2 "codex login command did not exit cleanly: $_" }
     }
   }
 
   if ($script:ConfiguredKeys.Count -eq 0) {
-    $script:Steps["provider keys"] = "none captured"
+    Step-End "ok" "no new keys captured"
     return
   }
 
-  if ($DryRun) {
-    Write-Log "(dry-run) would write $($script:ConfiguredKeys.Count) key(s) to $ProvidersFile"
-    $script:Steps["provider keys"] = "dry-run"
-    return
-  }
-
-  # Merge with existing file: keep any $env: lines for vars we didn't touch.
-  $capturedNames = $script:ConfiguredKeys.Name
+  # Merge with existing file: keep $env: lines for vars we didn't touch.
+  $capturedNames = @($script:ConfiguredKeys | ForEach-Object { $_.Name })
   $preserved = @()
-  if (Test-Path $ProvidersFile) {
-    $preserved = Get-Content $ProvidersFile | Where-Object {
+  if (Test-Path $providersFile) {
+    $preserved = Get-Content $providersFile | Where-Object {
       $line = $_
       $keep = $true
       foreach ($n in $capturedNames) {
         if ($line -match "^\s*\`$env:$([regex]::Escape($n))\s*=") { $keep = $false; break }
       }
-      $keep
+      $keep -and $line -notmatch '^\s*#\s*Posse provider API keys'
     }
   }
-
   $lines = @("# Posse provider API keys -- generated by install-posse-atlas.ps1")
-  $lines += $preserved | Where-Object { $_ -and ($_ -notmatch '^\s*#\s*Posse provider API keys') }
+  $lines += $preserved | Where-Object { $_ }
   foreach ($k in $script:ConfiguredKeys) {
-    $lines += ('$env:{0} = {1}' -f $k.Name, (ConvertTo-PowerShellLiteral $k.Value))
+    $lines += ('$env:{0} = ''{1}''' -f $k.Name, ($k.Value -replace "'", "''"))
   }
-
-  $dir = Split-Path $ProvidersFile -Parent
+  $dir = Split-Path $providersFile -Parent
   if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-  Set-Content -Path $ProvidersFile -Value ($lines -join "`r`n") -Encoding UTF8
+  Set-Content -Path $providersFile -Value ($lines -join "`r`n") -Encoding UTF8
 
-  # Tighten ACL so only the current user can read. NTFS ACL set: remove
-  # inherited permissions, add explicit full control for the current user.
+  # Tighten ACL so only the current user (and admins/system) can read it.
   try {
-    $acl = Get-Acl $ProvidersFile
-    $acl.SetAccessRuleProtection($true, $false)  # disable inheritance, don't copy
+    $acl = Get-Acl $providersFile
+    $acl.SetAccessRuleProtection($true, $false)
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-      [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
-      "FullControl",
-      "Allow"
-    )
+      [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, "FullControl", "Allow")
     $acl.SetAccessRule($rule)
-    Set-Acl -Path $ProvidersFile -AclObject $acl
+    Set-Acl -Path $providersFile -AclObject $acl
   }
   catch {
-    Write-Warn "Could not tighten ACL on $ProvidersFile -- file is readable by default NTFS permissions. $_"
+    Write-Warn2 "could not tighten ACL on $providersFile - file keeps default NTFS permissions. $_"
   }
 
-  Write-Log "Wrote $($script:ConfiguredKeys.Count) key(s) to $ProvidersFile (ACL: current user only)"
-  $script:Steps["provider keys"] = ($capturedNames -join ", ")
-}
-
-function Print-Summary {
-  param([string]$EnvFile)
-  Write-Host ""
-  Write-Host "================ Install Summary ================"
-  foreach ($k in $script:Steps.Keys) {
-    $v = $script:Steps[$k]
-    Write-Host ("  {0,-22}: {1}" -f $k, $v)
-  }
-  Write-Host "================================================="
-  if ($script:Warnings.Count -gt 0) {
-    Write-Host ""
-    Write-Host "Warnings:"
-    foreach ($w in $script:Warnings) { Write-Host "  - $w" }
-  }
-  Write-Host ""
-  Write-Host "Next steps:"
-  Write-Host "  1. . `"$EnvFile`"                        # load ATLAS env for this shell"
-  Write-Host "  2. cd `"$PosseDir`""
-  Write-Host "  3. posse add                            # describe a task"
-  Write-Host "  4. posse go                             # plan + run"
-  Write-Host ""
-}
-
-# -----------------------------------------------------------------------------
-# Pre-flight
-# -----------------------------------------------------------------------------
-
-Require-Cmd git
-Require-Cmd node
-Require-Cmd npm
-
-$nodeMajor = Get-NodeMajor
-if ($nodeMajor -lt $NodeMinMajor) {
-  Fail "Node $NodeMinMajor+ required. Found $(node -v). Install via nvm-windows or https://nodejs.org."
-}
-
-if (-not $PosseDir) {
-  $detectedPosseDir = Get-InstallerPosseDir
-  if ($detectedPosseDir) {
-    $PosseDir = $detectedPosseDir
-    Write-Log "Using Posse checkout containing this installer: $PosseDir"
-  }
-  else {
-    $PosseDir = Join-Path $InstallRoot "posse"
-  }
-}
-
-$PosseDir = Resolve-FullPath $PosseDir
-
-Ensure-GitCheckout -Dir $PosseDir -RepoUrl $PosseRepoUrl -StepKey "posse clone" -Label "posse" -SentinelPath (Join-Path $PosseDir "orchestrator.js") -SentinelLabel "orchestrator.js"
-
-if ($RepoPath -and -not (Test-Path $RepoPath)) { Fail "repo path does not exist: $RepoPath" }
-if ($RepoPath -and -not $RepoId) { $RepoId = Split-Path $RepoPath -Leaf }
-
-Test-GitConfig
-Test-ProviderCredentials
-
-if ($DryRun) { Write-Log "DRY RUN MODE -- no changes will be made" }
-
-# -----------------------------------------------------------------------------
-# Install host CLI deps used by Posse helper tools
-# -----------------------------------------------------------------------------
-
-Install-HostToolDeps
-
-# -----------------------------------------------------------------------------
-# Install npm deps (idempotent)
-# -----------------------------------------------------------------------------
-
-if (-not $Force -and (Test-DepsFresh $PosseDir)) {
-  Write-Log "Posse deps are fresh -- skipping npm install (pass -Force to reinstall)"
-  $script:Steps["posse npm install"] = "skipped"
-}
-else {
-  Write-Log "Installing posse npm dependencies"
-  if (Invoke-Cmd -Script { Push-Location $PosseDir; try { & npm install --include=optional } finally { Pop-Location } } -Description "npm install --include=optional (posse)") {
-    $script:Steps["posse npm install"] = if ($DryRun) { "dry-run" } else { "done" }
-  }
-  else { $script:Steps["posse npm install"] = "failed" }
-}
-
-Install-PythonDeps
-Install-ScipDeps
-
-# -----------------------------------------------------------------------------
-# Write env file + wire profile
-# -----------------------------------------------------------------------------
-
-$nodeBin = (Get-Command node).Source
-$envFile = Write-EnvFile -NodeBin $nodeBin
-Append-ProfileSource -EnvFile $envFile
-Ensure-PosseAlias -NodeBin $nodeBin
-
-# -----------------------------------------------------------------------------
-# Configure provider API keys (opt-in via -ConfigureKeys)
-# -----------------------------------------------------------------------------
-
-$providersFile = Join-Path (Split-Path $envFile -Parent) "providers.env.ps1"
-if ($ConfigureKeys) {
-  Configure-Keys -ProvidersFile $providersFile
-}
-if ((Test-Path $providersFile) -and -not $NoPersistEnv -and $PROFILE -and -not $DryRun) {
-  $profileContent = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
-  if ($null -eq $profileContent -or -not $profileContent.Contains($providersFile)) {
-    $line = ". `"$providersFile`""
-    Add-Content -Path $PROFILE -Value "`n# Posse provider keys`n$line"
-    Write-Log "Updated $PROFILE to source $providersFile"
-  }
-}
-
-# -----------------------------------------------------------------------------
-# Seed account settings (merge-only -- never overwrite existing)
-# -----------------------------------------------------------------------------
-
-if (-not $SkipSettings) {
-  Seed-AccountSettings -NodeBin $nodeBin
-}
-else {
-  $script:Steps["account settings seed"] = "skipped"
-}
-
-Invoke-AdminInit -NodeBin $nodeBin
-
-# -----------------------------------------------------------------------------
-# Post-install validation
-# -----------------------------------------------------------------------------
-
-Validate-Posse
-
-# -----------------------------------------------------------------------------
-# Optional smoke test
-# -----------------------------------------------------------------------------
-
-if (-not $NoSmoke) {
-  if (-not $RepoPath) {
-    Write-Log "Skipping smoke test (no -RepoPath provided)"
-    $script:Steps["smoke test"] = "skipped"
-  }
-  elseif ($DryRun) {
-    Write-Log "(dry-run) would run atlas-smoke on $RepoPath"
-    $script:Steps["smoke test"] = "dry-run"
-  }
-  else {
-    Write-Log "Running ATLAS smoke test"
-    Push-Location $PosseDir
-    try {
-      . $envFile
-      & node ./orchestrator.js atlas-smoke $RepoPath $SmokeQuery $SmokeProvider
-      if ($LASTEXITCODE -eq 0) {
-        $script:Steps["smoke test"] = "ok"
-      }
-      else {
-        $script:Steps["smoke test"] = "failed"
-        Write-Warn "atlas-smoke failed (exit $LASTEXITCODE). Run it manually to see the error: node orchestrator.js atlas-smoke $RepoPath $SmokeQuery $SmokeProvider"
-      }
+  if (-not $NoPersistEnv -and $PROFILE) {
+    $profileContent = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $profileContent -or -not $profileContent.Contains($providersFile)) {
+      Add-Content -Path $PROFILE -Value ("`n# Posse provider keys`n. '" + ($providersFile -replace "'", "''") + "'")
+      Write-Info "updated $PROFILE"
     }
-    finally { Pop-Location }
+  }
+  Step-End "ok" ("wrote {0} key(s) to {1} (user-only ACL)" -f $script:ConfiguredKeys.Count, $providersFile)
+}
+
+function Step-Smoke {
+  Step-Begin "smoke"
+  if ($NoSmoke) { Step-End "skipped" "-NoSmoke"; return }
+  if (-not $RepoPath) { Step-End "skipped" "no -RepoPath provided"; return }
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
+  if ($DryRun) {
+    Step-End "dry-run" ("would run atlas-smoke on {0}" -f $RepoPath)
+    return
+  }
+  $repoLabel = if ($RepoId) { $RepoId } else { Split-Path $RepoPath -Leaf }
+  $rc = Invoke-Logged -Description ("atlas-smoke {0} (query: {1})" -f $repoLabel, $SmokeQuery) -Command @($script:NodeBin, "orchestrator.js", "atlas-smoke", $RepoPath, $SmokeQuery, $SmokeProvider) -WorkingDirectory $script:PosseDirResolved
+  if ($rc -eq 0) { Step-End "ok" "smoke test passed" }
+  else {
+    Write-Warn2 ("atlas-smoke failed - run it manually: node orchestrator.js atlas-smoke {0} {1} {2}" -f $RepoPath, $SmokeQuery, $SmokeProvider)
+    Step-End "failed" "smoke test failed; see log"
   }
 }
-else {
-  $script:Steps["smoke test"] = "skipped"
+
+# --- soft preflight checks (warnings only) ------------------------------------------
+function Test-ProviderCredentials {
+  $found = @()
+  if (Test-Cmd "claude") { $found += "claude-cli" }
+  if ($env:OPENAI_API_KEY) { $found += "OPENAI_API_KEY" }
+  if ($env:XAI_API_KEY) { $found += "XAI_API_KEY" }
+  $codexAuth = Join-Path $env:USERPROFILE ".codex\auth.json"
+  if ($env:CODEX_API_KEY -or (Test-Path $codexAuth)) { $found += "codex" }
+  if ($found.Count -eq 0) {
+    if ($ConfigureKeys) { Write-Info "no provider credentials detected yet - the keys step below will prompt for them" }
+    else { Write-Warn2 "no provider credentials detected (claude CLI / OPENAI_API_KEY / XAI_API_KEY / codex). Re-run with -ConfigureKeys, or set one before dispatching jobs." }
+  }
+  else {
+    Write-Info ("provider credentials detected: " + ($found -join ", "))
+  }
+  if (-not $env:POSSE_KEY -and -not $ConfigureKeys) {
+    Write-Warn2 "POSSE_KEY is not set - Posse remote prompt/tool catalog requests need it (-ConfigureKeys can capture it)"
+  }
 }
 
-# -----------------------------------------------------------------------------
-# Summary
-# -----------------------------------------------------------------------------
+function Test-GitConfig {
+  if (-not (Test-Cmd "git")) { return }
+  $name = ""; $email = ""
+  try { $name = (& git config --global user.name 2>$null) } catch {}
+  try { $email = (& git config --global user.email 2>$null) } catch {}
+  if (-not $name) { Write-Warn2 'git user.name is not set globally (git config --global user.name "Your Name")' }
+  if (-not $email) { Write-Warn2 'git user.email is not set globally (git config --global user.email "you@example.com")' }
+}
 
-Print-Summary -EnvFile $envFile
-Write-Log "Install complete."
+# =============================================================================
+# main
+# =============================================================================
+
+$script:NodeBin = ""
+$script:EnvFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "atlas.env.ps1"
+$script:PosseDirResolved = $PosseDir
+
+try {
+  Initialize-Ui
+  Write-Splash
+
+  Write-LogOnly ("install-posse-atlas started {0}" -f (Get-Date -Format "o"))
+  Write-LogOnly ("dry_run={0} force={1} host_tools={2} install_node={3}" -f $DryRun, $Force, (-not $SkipHostTools), (-not $NoInstallNode))
+
+  if ($DryRun) {
+    Write-Host ("  {0}{1}DRY RUN{2} {3}- no changes will be made{2}" -f $script:BOLD, $script:YELLOW, $script:R, $script:DIM)
+  }
+  Write-Host ("  {0}Log: {1}{2}" -f $script:DIM, $script:LogFile, $script:R)
+
+  if ($RepoPath) {
+    $RepoPath = Resolve-FullPath $RepoPath
+    if (-not (Test-Path $RepoPath)) {
+      Write-Host ("  {0}{1}{2} repo path does not exist: {3}" -f $script:RED, $script:GlyphFail, $script:R, $RepoPath)
+      $script:CriticalFailed = $true
+      exit 1
+    }
+    if (-not $RepoId) { $RepoId = Split-Path $RepoPath -Leaf }
+  }
+
+  Test-GitConfig
+  Test-ProviderCredentials
+
+  Step-Packages
+  Step-Node
+  Step-Checkout
+  Step-Composer
+  Step-Npm
+  Step-ShellWiring
+  Step-SeedSettings
+  Step-Doctor
+  Step-AdminInit
+  Step-Validate
+  Step-Keys
+  Step-Smoke
+}
+finally {
+  Print-Summary
+}
+
+if ($script:CriticalFailed) { exit 1 }
+exit 0

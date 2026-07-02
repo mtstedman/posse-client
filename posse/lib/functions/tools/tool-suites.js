@@ -94,3 +94,13 @@ export function getToolMetadataRegistry() {
 export function embeddedAdvertisedToolNames() {
   return getToolMetadataRegistry().advertisedNames("function");
 }
+
+/**
+ * The live operator channel (budget-exempt tools). Single source of truth for
+ * every consumer — turn-budget exemption in the provider loops and
+ * feedback-signal suppression in the transports previously hand-copied this
+ * set in four files, where drift silently changed behavior per transport.
+ */
+export const LIVE_CHANNEL_TOOL_NAMES = Object.freeze(new Set(
+  TOOLS_SUITE.filter((t) => t.budgetExempt).map((t) => t.name),
+));

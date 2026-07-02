@@ -48,12 +48,11 @@ import {
   gitWorktreeAddAsync,
   isMergeInProgressAsync,
   mergeTargetIntoWorktreeAsync,
-  resolveTargetBranch,
-  safeSnapshotAndRemoveWorktree,
+  resolveTargetBranchAsync,
   safeSnapshotAndRemoveWorktreeAsync,
   snapshotAndResetDirtyWorktreeAsync,
   withWorktreeLockAsync,
-  worktreePath,
+  worktreePathAsync,
 } from "../../../git/functions/worktree.js";
 import {
   gitCurrentHashAsync,
@@ -481,7 +480,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     });
     const slug = slugify(wi.title, { maxLength: 40 });
     branchName = wi.branch_name || `posse/wi-${wi.id}-${slug}`;
-    const wtDir = worktreePath(worker.projectDir, wi.id, wi.title);
+    const wtDir = await worktreePathAsync(worker.projectDir, wi.id, wi.title, { signal });
     const shouldSkipReusedDirtyRecovery = async ({ wtPath: candidatePath, currentBranch = null, branchName: expectedBranch = null }) => {
       if (!earlyPayload) return false;
       const actual = String(currentBranch || "").trim();
@@ -755,7 +754,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       await withPhase("target_merge", prepTrace, async () => {
         await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
           try {
-            const targetBranch = resolveTargetBranch(worker.projectDir);
+            const targetBranch = await resolveTargetBranchAsync(worker.projectDir, { signal });
             const staleness = branchStalenessCheck({
               projectDir: worker.projectDir,
               branchName,
@@ -982,7 +981,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     try {
       await yieldNow({ signal }).catch(() => {});
       const wi = getWorkItem(job.work_item_id);
-      const wtDir = worktreePath(worker.projectDir, wi.id, wi.title);
+      const wtDir = await worktreePathAsync(worker.projectDir, wi.id, wi.title, { signal });
       if (fs.existsSync(wtDir)) {
         const siblingLocks = activeLiveSiblingWriteLocks(job);
         const sentinel = readActiveWorktreeSentinel(wtDir);
@@ -1151,125 +1150,6 @@ function atlasCleanupDisposition(wi) {
   return "purged";
 }
 
-export function cleanupWorktreeIfDone(worker, workItemId) {
-  try {
-    const wi = getWorkItem(workItemId);
-    if (!wi) return;
-
-    if (!TERMINAL_WORK_ITEM_STATUS_SET.has(wi.status)) return;
-    if (isIterativeWorkItemActive(wi)) return;
-    if (shouldDeferBranchBackedCompleteCleanupUntilMerge(wi)) {
-      logCompleteCleanupDeferredUntilMerge(wi);
-      return;
-    }
-
-    const wtDir = worktreePath(worker.projectDir, wi.id, wi.title);
-    if (deferTerminalCleanupIfActiveWork(wi, wtDir)) return;
-    let atlasDisposed = false;
-    const disposeAtlas = () => {
-      if (atlasDisposed) return;
-      atlasDisposed = true;
-      disposeWorkItemAtlasGraph({
-        projectDir: worker.projectDir,
-        workItemId: wi.id,
-        worktreePath: wtDir,
-        includeWarmed: !shouldPreserveUnmergedCompleteAtlasView(wi),
-      });
-    };
-    if (fs.existsSync(wtDir)) {
-      disposeAtlas();
-      const cleanupResult = safeSnapshotAndRemoveWorktree(wtDir, worker.projectDir, {
-        reason: "terminal-worktree-cleanup",
-        branchName: wi.branch_name || null,
-        wiId: wi.id,
-        onMsg: (msg) => {
-          logEvent({
-            work_item_id: wi.id,
-            event_type: EVENT_TYPES.WORKTREE_SNAPSHOT_WARNING,
-            actor_type: EVENT_ACTORS.WORKER,
-            message: msg,
-          });
-          if (!worker.display && !worker.silent) {
-            console.log(`${C.dim}[system] WI#${wi.id} ${msg}${C.reset}`);
-          }
-        },
-        onSnapshot: ({ snapshotDir }) => {
-          logEvent({
-            work_item_id: wi.id,
-            event_type: EVENT_TYPES.WORKTREE_TERMINAL_SNAPSHOT,
-            actor_type: EVENT_ACTORS.WORKER,
-            message: `Preserved terminal dirty worktree snapshot: ${snapshotDir}`,
-          });
-          if (!worker.display && !worker.silent) {
-            console.log(`${C.dim}[system] WI#${wi.id} preserved terminal dirty worktree snapshot: ${snapshotDir}${C.reset}`);
-          }
-        },
-        onFailure: ({ message, ...extra }) => {
-          logTerminalCleanupFailure(worker, wi, wtDir, message, extra);
-        },
-        onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir: resetSnapshotDir = null }) => {
-          logEvent({
-            work_item_id: wi.id,
-            event_type: EVENT_TYPES.WORKTREE_RESET_INCOMPLETE,
-            actor_type: EVENT_ACTORS.WORKER,
-            message: `Terminal cleanup left ${remainingPaths.length} path(s) in worktree`,
-            event_json: JSON.stringify({
-              remaining_paths: remainingPaths,
-              porcelain: postResetPorcelain,
-              snapshot_dir: resetSnapshotDir,
-            }),
-          });
-        },
-      });
-      if (cleanupResult.skipped) return;
-    }
-
-    disposeAtlas();
-    if (isAtlasV2EmissionEnabled()) {
-      const disposition = atlasCleanupDisposition(wi);
-      if (disposition) {
-        emitAtlasV2WiCleanup({
-          payload: {
-            wi_id: Number(wi.id),
-            branch: String(wi.branch_name || ""),
-            disposition,
-          },
-          onError: () => { /* outbox failure must not block cleanup */ },
-        });
-      }
-    }
-
-    const ctxDir = contextDir(wiScopeId(wi.id), worker.projectDir);
-    if (fs.existsSync(ctxDir)) {
-      try {
-        fs.rmSync(ctxDir, { recursive: true, force: true });
-      } catch {
-        // ignore
-      }
-    }
-
-    const artifactCleanup = wi.status === "complete"
-      ? cleanupArtifactDirs(wiScopeId(wi.id), worker.projectDir, { keepArtifacts: true })
-      : null;
-    if (artifactCleanup?.removed?.length > 0) {
-      logEvent({
-        work_item_id: wi.id,
-        event_type: EVENT_TYPES.ARTIFACTS_TRANSIENT_DIRS_CLEANED,
-        actor_type: EVENT_ACTORS.WORKER,
-        message: `Removed ${artifactCleanup.removed.length} transient artifact resource dir(s) after WI completion`,
-        event_json: JSON.stringify({ dirs: artifactCleanup.removed }),
-      });
-    }
-  } catch (err) {
-    const message = err?.message || String(err);
-    logEvent({
-      work_item_id: workItemId,
-      event_type: EVENT_TYPES.WORKTREE_CLEANUP_FAILED,
-      actor_type: EVENT_ACTORS.WORKER,
-      message: `Terminal worktree cleanup failed: ${message}`,
-    });
-  }
-}
 
 export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = null } = {}) {
   try {
@@ -1283,7 +1163,7 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
       return;
     }
 
-    const wtDir = worktreePath(worker.projectDir, wi.id, wi.title);
+    const wtDir = await worktreePathAsync(worker.projectDir, wi.id, wi.title, { signal });
     if (deferTerminalCleanupIfActiveWork(wi, wtDir)) return;
     let atlasDisposed = false;
     const disposeAtlas = () => {

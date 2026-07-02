@@ -47,17 +47,19 @@ export function applyMemoryNote(memoryId, { detail = null } = {}) {
 
 /**
  * Soft-delete the memory (it stops surfacing AND stops being queryable as
- * active). The deliberate "this should not exist" action.
+ * active). The deliberate "this should not exist" action, routed through the
+ * memory.feedback suppress verdict — the only removal route ATLAS implements.
  *
  * @param {string} memoryId
  * @param {{ cwd?: string, detail?: unknown }} [opts]
  * @returns {Promise<{ ok: boolean, error?: string }>}
  */
-export async function applyMemorySuppress(memoryId, { cwd = process.cwd(), detail = null } = {}) {
-  const result = await callAtlasMemoryAction("memory.remove", {
+export async function applyMemorySuppress(memoryId, { cwd = process.cwd(), detail = null, memoryClient = null } = {}) {
+  const result = await callAtlasMemoryAction("memory.feedback", {
     memoryId,
-    deleteFile: false,
-  }, { cwd }).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+    verdict: "suppress",
+    ...(detail ? { detail: String(detail).slice(0, 500) } : {}),
+  }, { cwd, memoryClient }).catch((err) => ({ ok: false, error: String(err?.message || err) }));
   if (!result?.ok) {
     return { ok: false, error: String(result?.error || result?.skipped || "ATLAS memory unavailable") };
   }
@@ -65,40 +67,56 @@ export async function applyMemorySuppress(memoryId, { cwd = process.cwd(), detai
   return { ok: true };
 }
 
+/** How human flag reasons map onto the ATLAS evidence verdicts. */
+const FLAG_REASON_TO_VERDICT = Object.freeze({
+  contradicted: "wrong",
+  wrong: "wrong",
+  duplicate: "duplicate",
+});
+
 /**
  * Flag the memory stale with an evidence reason (it stops auto-surfacing but
- * stays queryable and correctable). Gentler than suppress.
+ * stays queryable and correctable). Gentler than suppress. Routed through the
+ * memory.feedback evidence verdicts; the human-facing reason rides along in
+ * detail and the local review event.
  *
  * @param {string} memoryId
  * @param {{ cwd?: string, reason?: string, detail?: string | null }} [opts]
  * @returns {Promise<{ ok: boolean, error?: string }>}
  */
-export async function applyMemoryFlag(memoryId, { cwd = process.cwd(), reason = "manual", detail = null } = {}) {
-  const result = await callAtlasMemoryAction("memory.flag", {
+export async function applyMemoryFlag(memoryId, { cwd = process.cwd(), reason = "manual", detail = null, memoryClient = null } = {}) {
+  const normalizedReason = String(reason || "manual").trim().toLowerCase();
+  const verdict = FLAG_REASON_TO_VERDICT[normalizedReason] || "stale";
+  const detailText = [
+    `flag reason: ${normalizedReason}`,
+    ...(detail ? [String(detail)] : []),
+  ].join(" — ").slice(0, 500);
+  const result = await callAtlasMemoryAction("memory.feedback", {
     memoryId,
-    reason,
-    ...(detail ? { detail: String(detail) } : {}),
-  }, { cwd }).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+    verdict,
+    detail: detailText,
+  }, { cwd, memoryClient }).catch((err) => ({ ok: false, error: String(err?.message || err) }));
   if (!result?.ok) {
     return { ok: false, error: String(result?.error || result?.skipped || "ATLAS memory unavailable") };
   }
-  recordMemoryFeedbackEvent("flag", memoryId, { reason, detail });
+  recordMemoryFeedbackEvent("flag", memoryId, { reason: normalizedReason, verdict, detail });
   return { ok: true };
 }
 
 /**
- * Store a correction memory, then soft-delete the memory it corrects.
+ * Store a correction memory, then suppress the memory it corrects. The
+ * suppression result is checked: a correction that leaves the wrong memory
+ * surfacing must not report success.
  *
  * @param {string} memoryId
  * @param {string} replacement
  * @param {{ cwd?: string }} [opts]
  * @returns {Promise<{ ok: boolean, error?: string, correctionMemoryId?: string | null }>}
  */
-export async function applyMemoryCorrection(memoryId, replacement, { cwd = process.cwd() } = {}) {
+export async function applyMemoryCorrection(memoryId, replacement, { cwd = process.cwd(), memoryClient = null } = {}) {
   const text = String(replacement || "").trim();
   if (!text) return { ok: false, error: "Correction text is required." };
   const stored = await callAtlasMemoryAction("memory.store", {
-    type: "decision",
     title: `Correction for ${memoryId}`.slice(0, 120),
     content: [
       `Correction for prior memory ${memoryId}:`,
@@ -106,19 +124,26 @@ export async function applyMemoryCorrection(memoryId, replacement, { cwd = proce
       text,
       "",
       "Source: human review memory correction.",
-    ].join("\n"),
-    tags: ["posse-kaizen", "correction"],
-    confidence: 0.95,
-  }, { cwd }).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+    ].join("\n").slice(0, 1200),
+  }, { cwd, memoryClient }).catch((err) => ({ ok: false, error: String(err?.message || err) }));
   if (!stored?.ok) {
     return { ok: false, error: String(stored?.error || stored?.skipped || "ATLAS memory unavailable") };
   }
-  await callAtlasMemoryAction("memory.remove", { memoryId, deleteFile: false }, { cwd }).catch(() => null);
+  const correctionMemoryId = stored?.json?.memoryId || stored?.json?.memory_id || null;
+  const suppressed = await applyMemorySuppress(memoryId, {
+    cwd,
+    memoryClient,
+    detail: `superseded by correction ${correctionMemoryId || "(unknown id)"}`,
+  });
+  if (!suppressed.ok) {
+    return {
+      ok: false,
+      error: `Correction stored as ${correctionMemoryId || "(unknown id)"}, but suppressing ${memoryId} failed: ${suppressed.error}`,
+      correctionMemoryId,
+    };
+  }
   recordMemoryFeedbackEvent("correct", memoryId, text);
-  return {
-    ok: true,
-    correctionMemoryId: stored?.json?.memoryId || stored?.json?.memory_id || null,
-  };
+  return { ok: true, correctionMemoryId };
 }
 
 /**
@@ -127,13 +152,13 @@ export async function applyMemoryCorrection(memoryId, replacement, { cwd = proce
  * @param {{ action: string, memoryId: string, replacement?: string, reason?: string, detail?: string | null, cwd?: string }} args
  * @returns {Promise<{ ok: boolean, error?: string, correctionMemoryId?: string | null }>}
  */
-export async function applyMemoryReviewAction({ action, memoryId, replacement = "", reason = "manual", detail = null, cwd = process.cwd() } = {}) {
+export async function applyMemoryReviewAction({ action, memoryId, replacement = "", reason = "manual", detail = null, cwd = process.cwd(), memoryClient = null } = {}) {
   const normalized = String(action || "").trim().toLowerCase();
   const id = String(memoryId || "").trim();
   if (!id) return { ok: false, error: "memoryId is required" };
   if (normalized === "note") return applyMemoryNote(id, { detail });
-  if (normalized === "suppress") return applyMemorySuppress(id, { cwd, detail });
-  if (normalized === "flag") return applyMemoryFlag(id, { cwd, reason, detail });
-  if (normalized === "correct") return applyMemoryCorrection(id, replacement, { cwd });
+  if (normalized === "suppress") return applyMemorySuppress(id, { cwd, detail, memoryClient });
+  if (normalized === "flag") return applyMemoryFlag(id, { cwd, reason, detail, memoryClient });
+  if (normalized === "correct") return applyMemoryCorrection(id, replacement, { cwd, memoryClient });
   return { ok: false, error: `Unknown memory action: ${normalized}` };
 }

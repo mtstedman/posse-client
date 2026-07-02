@@ -250,7 +250,7 @@ export function stashPartialWorkForExtension(job, wtPath, { projectDir = null } 
   return withWorktreeLock(wtPath, projectDir, () => {
     const state = collectPartialWorkState(job, wtPath);
     if (!state.hasChanges || state.inScopePaths.length === 0) return false;
-    const stashLockPath = gitStashLockPath(wtPath, projectDir);
+    const stashLockPath = gitStashLockPath(wtPath, projectDir, { disabled: true });
     const stashLock = acquireWorktreeLock(stashLockPath);
     if (!stashLock.acquired) {
       throw new Error(`Timed out waiting for git stash lock: ${stashLockPath}`);
@@ -282,7 +282,7 @@ export async function stashPartialWorkForExtensionAsync(job, wtPath, {
   return await withWorktreeLockAsync(wtPath, projectDir, async () => {
     const state = await collectPartialWorkStateAsync(job, wtPath, { signal });
     if (!state.hasChanges || state.inScopePaths.length === 0) return false;
-    const stashLockPath = await gitStashLockPathAsync(wtPath, projectDir, { signal });
+    const stashLockPath = await gitStashLockPathAsync(wtPath, projectDir, { signal, nativeParity: { disabled: true } });
     const stashLock = await acquireWorktreeLockAsync(stashLockPath, { signal });
     if (!stashLock.acquired) {
       throw new Error(`Timed out waiting for git stash lock: ${stashLockPath}`);

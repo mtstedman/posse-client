@@ -167,7 +167,7 @@ export function repoStatus({ view, versionId, params, repoId = "default", repoRo
   const graphDerivedState = buildGraphDerivedState(view);
   const treeCompression = buildTreeCompressionStatus(view);
   const dataQuality = params.detail === "minimal" ? null : buildDataQuality(view, ledger);
-  const memoryStats = ledger ? buildMemoryStats(ledger) : null;
+  const memoryStats = ledger ? buildMemoryStats(ledger, repoId) : null;
   /** @type {RepoStatusData} */
   const data = {
     repoId,
@@ -220,12 +220,19 @@ export function repoStatus({ view, versionId, params, repoId = "default", repoRo
   if (scipWarning) data.diagnostics?.warnings.push(scipWarning);
   if (params.surfaceMemories && ledger) {
     try {
-      const surfaced = memorySurface({
-        versionId,
-        ledger,
-        repoId,
-        params: {},
-      });
+      // memorySurface requires anchors (no anchors → always-empty presence,
+      // which made this advertised feature a silent no-op). Seed it with the
+      // repo's own recently-touched memory anchors so "surface relevant
+      // memories" surfaces what the store actually knows about.
+      const anchors = recentMemoryAnchorFiles(ledger, repoId);
+      const surfaced = anchors.length > 0
+        ? memorySurface({
+          versionId,
+          ledger,
+          repoId,
+          params: { fileRelPaths: anchors },
+        })
+        : null;
       data.surfacedMemories = surfaced?.ok ? surfaced.data : { symbols: [], files: [] };
     } catch {
       data.surfacedMemories = { symbols: [], files: [] };
@@ -288,9 +295,45 @@ function buildTreeCompressionStatus(view) {
 }
 
 /**
+ * File anchors of the repo's most recently touched active memories — the
+ * seed set for repo.status's surfaceMemories presence summary.
+ *
  * @param {LedgerContract} ledger
+ * @param {string | null} repoId
+ * @param {number} [limit]
+ * @returns {string[]}
  */
-function buildMemoryStats(ledger) {
+function recentMemoryAnchorFiles(ledger, repoId, limit = 25) {
+  const ledgerPath = typeof /** @type {any} */ (ledger)?._dbPath === "function"
+    ? /** @type {any} */ (ledger)._dbPath()
+    : "";
+  const memoryPath = memoryDbPathForLedgerDb(ledgerPath);
+  if (!repoId || !memoryPath || !fs.existsSync(memoryPath)) return [];
+  let memoryDb = null;
+  try {
+    memoryDb = new Database(memoryPath, { readonly: true, fileMustExist: true });
+    const rows = /** @type {Array<{ repo_rel_path: string }>} */ (memoryDb.prepare(
+      `SELECT l.repo_rel_path AS repo_rel_path
+       FROM memory_file_links l
+       JOIN memories m ON m.memory_id = l.memory_id
+       WHERE m.repo_id = ? AND m.deleted = 0
+       GROUP BY l.repo_rel_path
+       ORDER BY MAX(m.updated_at) DESC
+       LIMIT ?`,
+    ).all(repoId, Math.max(1, limit)));
+    return rows.map((row) => String(row.repo_rel_path || "")).filter(Boolean);
+  } catch {
+    return []; // best effort; repo.status must not fail on memory surfacing
+  } finally {
+    try { memoryDb?.close?.(); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * @param {LedgerContract} ledger
+ * @param {string | null} [repoId]
+ */
+function buildMemoryStats(ledger, repoId = null) {
   const db = typeof /** @type {any} */ (ledger)?._unsafeDb === "function"
     ? /** @type {any} */ (ledger)._unsafeDb()
     : null;
@@ -298,12 +341,20 @@ function buildMemoryStats(ledger) {
     ? /** @type {any} */ (ledger)._dbPath()
     : "";
   const memoryPath = memoryDbPathForLedgerDb(ledgerPath);
-  let memories = db ? countSql(db, "SELECT COUNT(*) AS cnt FROM memories") : 0;
+  // Scope to this repo's ACTIVE rows: memory.db is shared across repo ids and
+  // keeps soft-deleted rows, so an unscoped COUNT advertises memory (and
+  // unhides memory.surface downstream) for stores holding only deleted or
+  // other-repo rows.
+  const activeCountSql = repoId
+    ? "SELECT COUNT(*) AS cnt FROM memories WHERE repo_id = ? AND deleted = 0"
+    : "SELECT COUNT(*) AS cnt FROM memories WHERE deleted = 0";
+  const activeCountParams = repoId ? [repoId] : [];
+  let memories = db ? countSql(db, activeCountSql, activeCountParams) : 0;
   if (memoryPath && fs.existsSync(memoryPath)) {
     let memoryDb = null;
     try {
       memoryDb = new Database(memoryPath, { readonly: true, fileMustExist: true });
-      memories = countSql(memoryDb, "SELECT COUNT(*) AS cnt FROM memories");
+      memories = countSql(memoryDb, activeCountSql, activeCountParams);
     } catch {
       // Keep repo.status best-effort; memory.surface/get are the source of truth.
     } finally {

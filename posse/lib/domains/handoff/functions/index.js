@@ -60,10 +60,7 @@ import {
   parseResearcherStructuredOutput as parseResearcherStructuredOutputFromModule,
   researcherOutputNeedsHuman as researcherOutputNeedsHumanFromModule,
 } from "./helpers/researcher-output.js";
-import {
-  detectPendingMergeAsync as detectPendingMergeAsyncFromModule,
-  detectPendingMerge as detectPendingMergeFromModule,
-} from "./helpers/merge-state.js";
+import { detectPendingMergeAsync as detectPendingMergeAsyncFromModule } from "./helpers/merge-state.js";
 import {
   buildMemoryPrefetchNotice as buildMemoryPrefetchNoticeFromModule,
   buildStep0Context as buildStep0ContextFromModule,
@@ -530,10 +527,6 @@ const ASSESSABLE_TYPES = ASSESSABLE_JOB_TYPES;
  * Returns { targetHash, mergeMsg, conflicts } or null when no merge is pending.
  * Uses git plumbing directly — works for both main repos and linked worktrees.
  */
-export function detectPendingMerge(cwd) {
-  return detectPendingMergeFromModule(cwd);
-}
-
 export async function detectPendingMergeAsync(cwd) {
   return detectPendingMergeAsyncFromModule(cwd);
 }

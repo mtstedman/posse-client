@@ -3,6 +3,7 @@
 // context and agent.feedback handlers.
 
 import { sliceBuild } from "./slice.js";
+import { memoryGet } from "./memory.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { buildSymbolCard, symbolHit, symbolIdOf } from "./cards.js";
 import { rankSymbols } from "./rank.js";
@@ -63,18 +64,67 @@ export function contextBuild({ view, versionId, params, ledger, repoRoot, repoId
   }));
   if (sliceEnv && typeof sliceEnv.then === "function") {
     return sliceEnv.then((resolved) => finishContextBuild({
-      sliceEnv: resolved,
+      sliceEnv: hydrateContextMemories({ sliceEnv: resolved, versionId, ledger, repoId, view }),
       versionId,
       params,
       maxTokens,
     }));
   }
   return finishContextBuild({
-    sliceEnv,
+    sliceEnv: hydrateContextMemories({ sliceEnv, versionId, ledger, repoId, view }),
     versionId,
     params,
     maxTokens,
   });
+}
+
+/**
+ * sliceBuild reports memory PRESENCE (`data.memorySurface`: anchors that have
+ * memories) but never bodies — which left the whole memories branch of
+ * context.build (capContextPayload fitting, evidenceFromMemory, the
+ * "Relevant memories" prompt section) unreachable dead machinery. Hydrate the
+ * surfaced anchors through memory.get here: context.build is the
+ * prompt-shaped wrapper, so this is also genuine surfacing (memory.get's
+ * offered-count accounting is supposed to fire for it). Additive and
+ * best-effort — a memory store problem must never fail the context build.
+ *
+ * @param {{ sliceEnv: any, versionId: string, ledger: any, repoId: string | null | undefined, view: any }} args
+ * @returns {any}
+ */
+function hydrateContextMemories({ sliceEnv, versionId, ledger, repoId, view }) {
+  try {
+    if (!sliceEnv?.ok || !ledger) return sliceEnv;
+    const data = /** @type {any} */ (sliceEnv.data);
+    if (Array.isArray(data?.memories) && data.memories.length > 0) return sliceEnv;
+    const surface = data?.memorySurface;
+    const symbolIds = Array.isArray(surface?.symbols) ? surface.symbols.slice(0, 100) : [];
+    const fileRelPaths = Array.isArray(surface?.files) ? surface.files.slice(0, 100) : [];
+    if (symbolIds.length === 0 && fileRelPaths.length === 0) return sliceEnv;
+    const got = memoryGet({
+      versionId,
+      ledger,
+      repoId,
+      view,
+      params: { symbolIds, fileRelPaths },
+    });
+    if (!got?.ok) return sliceEnv;
+    const seen = new Set();
+    const memories = [];
+    for (const bucket of [got.data?.symbols, got.data?.files]) {
+      for (const list of Object.values(bucket || {})) {
+        for (const memory of /** @type {any[]} */ (list || [])) {
+          const id = memory?.memoryId || memory?.memory_id;
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          memories.push(memory);
+        }
+      }
+    }
+    if (memories.length > 0) data.memories = memories;
+  } catch {
+    // Memories are additive context; the build stands without them.
+  }
+  return sliceEnv;
 }
 
 /**
@@ -208,7 +258,7 @@ function finishContextSummary({ contextEnv, versionId, params }) {
 export async function agentFeedback({ view, versionId, params, ledger }) {
   const useful = params.usefulSymbols || [];
   const missing = params.missingSymbols || [];
-  let recorded = false;
+  let inserted = 0;
   /** @type {string | null} */
   let errorMessage = null;
   const ledgerApi = /** @type {any} */ (ledger);
@@ -222,25 +272,31 @@ export async function agentFeedback({ view, versionId, params, ledger }) {
         taskText: params.taskText,
       };
       if (typeof ledgerApi.recordFeedbackAsync === "function") {
-        await ledgerApi.recordFeedbackAsync(input, { label: "agent.feedback.recordFeedback" });
+        inserted = Number(await ledgerApi.recordFeedbackAsync(input, { label: "agent.feedback.recordFeedback" })) || 0;
       } else {
-        ledgerApi.recordFeedback(input);
+        inserted = Number(ledgerApi.recordFeedback(input)) || 0;
       }
-      recorded = true;
     } catch (err) {
       // A persistence failure shouldn't break the agent's request flow —
       // surface that it wasn't recorded but keep the envelope ok=true so
       // the caller still gets the count summary.
-      recorded = false;
+      inserted = 0;
       errorMessage = err instanceof Error ? err.message : String(err);
       console.warn(`[atlas.agent.feedback] ledger write failed: ${errorMessage}`);
     }
   }
+  // `recorded` reflects what actually landed: the store silently skips
+  // malformed ids, so echoing the REQUESTED counts as success told agents
+  // (and the auto-feedback observer) feedback was persisted when nothing was.
+  const requested = useful.length + missing.length;
+  const recorded = inserted > 0;
   /** @type {AgentFeedbackData} */
   const data = {
     recorded,
     usefulCount: useful.length,
     missingCount: missing.length,
+    insertedCount: inserted,
+    ...(requested > inserted ? { skippedCount: requested - inserted } : {}),
   };
   if (!recorded && errorMessage) data.errorMessage = errorMessage;
   if (recorded) getRetrievalCache().invalidateAll();

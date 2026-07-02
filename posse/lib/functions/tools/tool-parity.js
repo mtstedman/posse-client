@@ -4,9 +4,10 @@
 // read-only role — fails loudly instead of silently misbehaving at runtime.
 
 // Roles that never receive a worktree-mutating tool. assessor/dev/artificer are
-// intentionally excluded: assessor authors tests (create_test) and runs a
-// read-only bash variant; dev/artificer write within scope. researcher/planner
-// are discovery-only; preflight/delegator are routing-only.
+// intentionally excluded: the assessor runs tests and a read-only bash variant
+// to verify (but does not author tests or write files); dev/artificer write
+// within scope. researcher/planner are discovery-only; preflight/delegator are
+// routing-only.
 export const READ_ONLY_ROLES = Object.freeze(["researcher", "planner", "preflight", "delegator"]);
 
 /**

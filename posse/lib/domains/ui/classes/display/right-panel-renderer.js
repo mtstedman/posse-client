@@ -127,7 +127,10 @@ function roleLabel(role) {
 
 
 function monitorStateMeta(state) {
-  if (state === "ask") return { label: "ASK", color: C.red, rail: C.red };
+  // Amber = needs the operator. A routine question is not an error, so it must
+  // not scream red — red stays reserved for genuine failures (merge failed,
+  // killed) to keep its alarm value.
+  if (state === "ask") return { label: "ASK", color: C.yellow, rail: C.yellow };
   if (state === "nudge") return { label: "nudge", color: C.yellow, rail: C.yellow };
   if (state === "idle") return { label: "idle", color: C.dim, rail: C.dim };
   return { label: "live", color: C.green, rail: C.green };
@@ -141,7 +144,7 @@ function monitorWiStateChip(agent = {}) {
   const merge = String(agent.wiMergeState || "").toLowerCase();
   const status = String(agent.wiStatus || agent.status || "").toLowerCase();
   if (merge === "pending_review") return { label: "pending review", color: C.yellow };
-  if (merge === "merge_failed") return { label: "merge failed", color: C.yellow };
+  if (merge === "merge_failed") return { label: "merge failed", color: C.red };
   if (merge === "merged") return { label: "merged", color: C.green };
   if (status && status !== "running") return { label: status, color: C.dim };
   return null;
@@ -189,9 +192,11 @@ function latestStamp(rows) {
 // tool rows dominate the stream and never get a "thinking" counter-event, so
 // last-event logic stuck the tag on "tool call" forever after the first call.
 // The two live states breathe (glyph pulses off the render tick); waiting and
-// nudge sit still so a parked agent reads as parked at a glance.
+// nudge sit still so a parked agent reads as parked at a glance. Both parked
+// states are amber (attention, not failure); "waiting" is bolded so the agent
+// blocked on the operator still outranks a mere queued nudge.
 function monitorActivityState(agent, spinIdx) {
-  if (agent.state === "ask") return { label: "waiting", color: C.red, glyph: "◉" };
+  if (agent.state === "ask") return { label: "waiting", color: C.yellow, glyph: "◉", bold: true };
   if (agent.state === "nudge") return { label: "nudge", color: C.yellow, glyph: "◆" };
   if (agent.inFlightTool) {
     return { label: "tool call", color: C.cyan, glyph: monitorPulse(spinIdx) };
@@ -460,24 +465,50 @@ export class DisplayRightPanelRenderer {
     const openSlots = Math.max(0, (this.concurrency || 0) - (this.workers?.size || 0));
     const blockedByLock = Math.min(this._blockedByLock || 0, openSlots);
 
-    const status = [
-      heartbeat,
-      `${C.brightWhite}${String(running).padStart(2, "0")}${C.reset}${C.dim} running${C.reset}`,
+    // Status chips carry a drop priority so a narrow pane sheds the least
+    // important ones first (idle, then zero-counts/on-lock, then the heartbeat)
+    // instead of letting the frame clip whatever happens to sit rightmost.
+    // Running and a non-zero "waiting on you" always survive.
+    const chips = [
+      { keep: 2, text: heartbeat },
+      { keep: 3, text: `${C.brightWhite}${String(running).padStart(2, "0")}${C.reset}${C.dim} running${C.reset}` },
       waiting > 0
-        ? `${C.red}${C.bold}${String(waiting).padStart(2, "0")} waiting on you${C.reset}`
-        : `${C.dim}00 waiting on you${C.reset}`,
-      ...(blockedByLock > 0 ? [`${C.yellow}${String(blockedByLock).padStart(2, "0")} on lock${C.reset}`] : []),
-      `${C.dim}${Math.max(0, openSlots - blockedByLock)} idle${C.reset}`,
-    ].join(` ${C.dim}\u00b7${C.reset} `);
+        ? { keep: 4, text: `${C.yellow}${C.bold}${String(waiting).padStart(2, "0")} waiting on you${C.reset}` }
+        : { keep: 1, text: `${C.dim}00 waiting on you${C.reset}` },
+      ...(blockedByLock > 0 ? [{ keep: 1, text: `${C.yellow}${String(blockedByLock).padStart(2, "0")} on lock${C.reset}` }] : []),
+      { keep: 0, text: `${C.dim}${Math.max(0, openSlots - blockedByLock)} idle${C.reset}` },
+    ];
+    const statusText = () => chips.map((chip) => chip.text).join(` ${C.dim}\u00b7${C.reset} `);
+    while (chips.length > 1 && 24 + stripAnsi(statusText()).length > width) {
+      let dropIdx = 0;
+      for (let i = 1; i < chips.length; i++) {
+        if (chips[i].keep < chips[dropIdx].keep) dropIdx = i;
+      }
+      if (chips[dropIdx].keep >= 3) break;
+      chips.splice(dropIdx, 1);
+    }
+    const status = statusText();
 
     const mastheadLeft = ` ${posseWordmark()} ${C.dim}/${C.reset} ${C.brightWhite}${C.bold}monitor agents${C.reset} ${C.dim}[operator console]${C.reset}`;
     lines.push(`${visiblePad(mastheadLeft, Math.max(20, width - stripAnsi(status).length - 1))}${status}`);
     lines.push(` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`);
 
     if (agents.length === 0) {
-      lines.push("");
-      lines.push(` ${C.dim}No live agents right now.${C.reset}`);
-      lines.push(` ${C.dim}Monitor Agents will show running workers, questions, nudges, and tool history here.${C.reset}`);
+      lines.push(...this._buildMonitorEmptyLines(width, Math.max(0, maxLines - lines.length)));
+      return lines.slice(0, maxLines);
+    }
+
+    // Narrow panes go single-column: the fleet rail gets the full width and the
+    // focus pane sits out \u2014 a sub-20-col detail column was unreadable anyway.
+    // Selection, jumping, and the state-aware controls all keep working.
+    if (width < 60) {
+      const bodyRows = Math.max(0, maxLines - lines.length - 1);
+      const railW = Math.max(20, width - 1);
+      const fleetLines = this._buildMonitorFleetLines(agents, selected, railW, bodyRows);
+      for (let idx = 0; idx < bodyRows; idx++) {
+        lines.push(visiblePad(fleetLines[idx] || "", railW));
+      }
+      lines.push(fit(` ${this._monitorControlsLine(agents, selected, waiting)}`, width));
       return lines.slice(0, maxLines);
     }
 
@@ -486,7 +517,7 @@ export class DisplayRightPanelRenderer {
     const divider = `${C.dim}\u2502${C.reset}`;
     const leftHead = ` ${C.dim}FLEET${C.reset}${" ".repeat(Math.max(1, leftW - 19))}${C.dim}< > cycle${C.reset}`;
     const rightHead = selected
-      ? ` ${C.brightWhite}${C.bold}[${selected.index}] ${selected.role} #${selected.jobId}${C.reset}${C.dim} \u00b7 ${selected.wiLabel} \u00b7 attempt ${selected.attempt}${C.reset}`
+      ? ` ${C.brightWhite}${C.bold}[${selected.index}] ${selected.role} #${selected.jobId}${C.reset}${C.dim} \u00b7 ${selected.wiLabel}${selected.attempt > 1 ? ` \u00b7 attempt ${selected.attempt}` : ""}${C.reset}`
       : "";
     lines.push(`${visiblePad(leftHead, leftW)}${divider}${fit(rightHead, rightW)}`);
     lines.push(`${C.dim}${"\u2500".repeat(leftW)}\u253c${"\u2500".repeat(rightW)}${C.reset}`);
@@ -509,23 +540,87 @@ export class DisplayRightPanelRenderer {
     // every control here acts on the selected agent shown to the right, so the
     // fleet rail + usage column on the left stays uncluttered. The column divider
     // runs straight down into the bar. (state-aware actions · fleet navigation)
-    const nav = `${C.dim}[1-${Math.min(agents.length, 9)}] jump  [< >] cycle  [m] log${C.reset}`;
-    let actions;
-    if (selected?.state === "ask") {
-      actions = `${C.green}[a] answer${C.reset}  ${C.yellow}[n] nudge${C.reset}  ${C.red}[!] interrupt${C.reset}`;
-    } else if (selected) {
-      actions = `${C.yellow}[n] nudge${C.reset}  ${C.magenta}[d] changes${C.reset}`;
-    } else {
-      actions = `${C.dim}no agent selected${C.reset}`;
-    }
-    const controls = `${actions}  ${C.dim}·${C.reset}  ${nav}`;
-    lines.push(`${" ".repeat(leftW)}${divider}${fit(` ${controls}`, rightW)}`);
+    lines.push(`${" ".repeat(leftW)}${divider}${fit(` ${this._monitorControlsLine(agents, selected, waiting)}`, rightW)}`);
     return lines.slice(0, maxLines);
   }
 
 
 
-  _collectMonitorAgents() {
+  // One state-aware controls line shared by the two-column and narrow layouts.
+  // Actions on the selected agent lead; navigation trails so a cramped pane
+  // clips the least important hints first. "[!] kill" matches the main queue
+  // bar's vocabulary ([k] kill) and only shows when the selection is actually a
+  // killable live worker.
+  _monitorControlsLine(agents, selected, waiting) {
+    const actions = [];
+    if (selected?.state === "ask") actions.push(`${C.green}[a] answer${C.reset}`);
+    if (selected && this.onNudge) actions.push(`${C.yellow}[n] nudge${C.reset}`);
+    if (selected) actions.push(`${C.magenta}[d] changes${C.reset}`);
+    if (selected && this.onKill && this.workers?.has?.(selected.jobId)) actions.push(`${C.red}[!] kill${C.reset}`);
+    if (actions.length === 0) actions.push(`${C.dim}no agent selected${C.reset}`);
+    const nav = [
+      `[1-${Math.min(agents.length, 9)}] jump`,
+      "[< >] cycle",
+      ...(waiting > 0 ? ["[w] next waiting"] : []),
+      "[↑↓] history",
+      "[q] close",
+    ];
+    return `${actions.join("  ")}  ${C.dim}·  ${nav.join("  ")}${C.reset}`;
+  }
+
+
+
+  // Empty-state: answer "why is nothing running?" with the queue itself —
+  // what's waiting for a slot and what just finished — instead of dead space.
+  _buildMonitorEmptyLines(width, maxLines) {
+    const lines = [];
+    lines.push("");
+    lines.push(` ${C.dim}No live agents right now.${C.reset}`);
+    let jobs = [];
+    try { jobs = this._getQueueData?.({ maxAgeMs: 1000 })?.jobs || []; } catch { jobs = []; }
+    const queued = jobs.filter((job) => ["queued", "pending"].includes(String(job.status || "").toLowerCase()));
+    const finished = jobs
+      .filter((job) => ["succeeded", "failed", "canceled"].includes(String(job.status || "").toLowerCase()))
+      .sort((a, b) => (Date.parse(b.updated_at || "") || 0) - (Date.parse(a.updated_at || "") || 0))
+      .slice(0, 4);
+    if (queued.length > 0 && lines.length + 2 <= maxLines) {
+      lines.push("");
+      lines.push(` ${C.bold}QUEUED${C.reset} ${C.dim}· ${queued.length} waiting for a slot${C.reset}`);
+      for (const job of queued.slice(0, 4)) {
+        if (lines.length >= maxLines) break;
+        const label = _sanitizeDisplayLine(jobLabel(job.job_type, job.title));
+        lines.push(`  ${C.dim}·${C.reset} #${job.id} ${roleBrandColor(job.job_type)}${roleLabel(job.job_type)}${C.reset}  ${C.dim}${fit(label, Math.max(8, width - 22))}${C.reset}`);
+      }
+    }
+    if (finished.length > 0 && lines.length + 2 <= maxLines) {
+      lines.push("");
+      lines.push(` ${C.bold}RECENTLY FINISHED${C.reset}`);
+      for (const job of finished) {
+        if (lines.length >= maxLines) break;
+        const jobStatus = String(job.status || "").toLowerCase();
+        const glyph = jobStatus === "succeeded" ? `${C.green}✓` : (jobStatus === "failed" ? `${C.red}✗` : `${C.dim}·`);
+        const ago = fmtAgo(Date.now() - (Date.parse(job.updated_at || "") || Date.now()));
+        const label = _sanitizeDisplayLine(jobLabel(job.job_type, job.title));
+        lines.push(`  ${glyph}${C.reset} #${job.id} ${roleBrandColor(job.job_type)}${roleLabel(job.job_type)}${C.reset}  ${fit(label, Math.max(8, width - 30))} ${C.dim}${ago} ago${C.reset}`);
+      }
+    }
+    if (queued.length === 0 && finished.length === 0) {
+      lines.push(` ${C.dim}Monitor Agents will show running workers, questions, nudges, and tool history here.${C.reset}`);
+    }
+    return lines;
+  }
+
+
+
+  _collectMonitorAgents({ maxAgeMs = 750 } = {}) {
+    // Rebuilding this hits the interactions/guidance tables per agent, and the
+    // render loop repaints every ~120ms — cache the built roster like the queue
+    // snapshot so a repaint is a pure read. Selection hotkeys read the same
+    // cache, so the roster a keypress acts on is the roster on screen.
+    const cacheNow = Date.now();
+    if (this._monitorAgentsCache && (cacheNow - (this._monitorAgentsCacheAt || 0)) < maxAgeMs) {
+      return this._monitorAgentsCache;
+    }
     const queueData = this._getQueueData?.({ maxAgeMs: 1000 }) || {};
     const jobsById = new Map((queueData.jobs || []).map((job) => [Number(job.id), job]));
     // WI rows (already fetched + cached in queueData) so the focus-pane agent
@@ -651,8 +746,20 @@ export class DisplayRightPanelRenderer {
       });
       seen.add(numericJobId);
     }
-    agents.forEach((agent, idx) => { agent.index = idx + 1; });
-    return agents;
+    // Display order IS selection order: regroup by work item (first-seen order,
+    // exactly how the fleet rail groups its rows) BEFORE numbering, so the [n]
+    // printed beside an agent is always the [n] the digit keys jump to.
+    const grouped = new Map();
+    for (const agent of agents) {
+      const key = agent.workItemId == null ? "_none" : String(agent.workItemId);
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(agent);
+    }
+    const ordered = [...grouped.values()].flat();
+    ordered.forEach((agent, idx) => { agent.index = idx + 1; });
+    this._monitorAgentsCache = ordered;
+    this._monitorAgentsCacheAt = cacheNow;
+    return ordered;
   }
 
 
@@ -664,8 +771,12 @@ export class DisplayRightPanelRenderer {
     }
     let selected = agents.find((agent) => agent.jobId === this._monitorSelectedJobId);
     if (!selected) {
-      selected = agents[0];
+      // Prefer an agent that's blocked on the operator: when the previous
+      // selection finishes (or nothing is selected yet), the focus pane lands
+      // on whoever actually needs attention rather than whoever is first.
+      selected = agents.find((agent) => agent.state === "ask") || agents[0];
       this._monitorSelectedJobId = selected.jobId;
+      this._monitorFeedbackScroll = 0;
     }
     return selected;
   }
@@ -675,59 +786,105 @@ export class DisplayRightPanelRenderer {
   _buildMonitorFleetLines(agents, selected, width, height = 0) {
     const lines = [];
     const spin = this._spinIdx | 0;
-    const shown = agents.slice(0, 9);
 
     // Group occupied slots by work item so the rail reads "what is working on
-    // what": one WI header, then its agents, then the next WI.
+    // what": one WI header, then its agents, then the next WI. Agents arrive
+    // already numbered in this grouped order (_collectMonitorAgents), so the
+    // rail's visual order always matches the digit-jump numbers.
     const groups = new Map();
-    for (const agent of shown) {
+    for (const agent of agents) {
       const key = agent.workItemId == null ? "_none" : String(agent.workItemId);
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(agent);
     }
+    // One block per agent (its WI header rides the group's first block) so
+    // overflow can window whole agents into view instead of slicing raw lines.
+    const blocks = [];
     let firstGroup = true;
     for (const [key, groupAgents] of groups) {
-      if (!firstGroup) lines.push("");
-      firstGroup = false;
-      // Just the WI id \u2014 the title only gets cut off at this width.
-      lines.push(key === "_none"
-        ? ` ${C.dim}\u00b7 no work item${C.reset}`
-        : ` ${C.blue}${C.bold}WI#${key}${C.reset}`);
-      for (const agent of groupAgents) {
+      groupAgents.forEach((agent, agentIdx) => {
+        const blockLines = [];
+        if (agentIdx === 0) {
+          if (!firstGroup) blockLines.push("");
+          // Just the WI id \u2014 the title only gets cut off at this width.
+          blockLines.push(key === "_none"
+            ? ` ${C.dim}\u00b7 no work item${C.reset}`
+            : ` ${C.blue}${C.bold}WI#${key}${C.reset}`);
+        }
         const meta = monitorActivityState(agent, spin);
         const isSelected = selected?.jobId === agent.jobId;
-        // Green selector cursor marks the focused row; the rail bar is tinted by
-        // ROLE (researcher purple, dev green, planner cyan, \u2026) so the roster
-        // reads as "who is who" at a glance. Agent STATE isn't lost \u2014 it still
-        // shows in the activity tag on the right (waiting/nudge/tool/thinking)
-        // and the "waiting on you" header count.
-        const selector = isSelected ? `${C.green}\u258c${C.reset}` : " ";
+        // Only the selected row carries the cursor and the bright/bold ink, so
+        // the focused agent pops from the roster instead of sharing its weight
+        // with every row. The rail bar keeps the ROLE tint (researcher purple,
+        // dev green, planner cyan, \u2026) so the roster still reads as "who is
+        // who"; agent STATE shows in the activity tag on the right
+        // (waiting/nudge/tool/thinking) and the "waiting on you" header count.
+        const selector = isSelected ? `${C.brightWhite}${C.bold}\u258c${C.reset}` : " ";
         const rail = `${roleBrandColor(agent.role)}\u2503${C.reset}`;
-        const title = `${selector}${rail} ${C.brightWhite}${C.bold}[${agent.index}] ${agent.role}${C.reset} ${C.dim}#${agent.jobId}${C.reset}`;
-        const tag = `${meta.color}${meta.glyph} ${meta.label}${C.reset}`;
-        lines.push(`${visiblePad(title, Math.max(0, width - stripAnsi(tag).length - 1))}${tag}`);
-        lines.push(`   ${C.dim}${fit(agent.activity, Math.max(8, width - 5))}${C.reset}`);
+        const titleInk = isSelected ? `${C.brightWhite}${C.bold}` : "";
+        const title = `${selector}${rail} ${titleInk}[${agent.index}] ${agent.role}${C.reset} ${C.dim}#${agent.jobId}${C.reset}`;
+        const tag = `${meta.color}${meta.bold ? C.bold : ""}${meta.glyph} ${meta.label}${C.reset}`;
+        blockLines.push(`${visiblePad(title, Math.max(0, width - stripAnsi(tag).length - 1))}${tag}`);
+        blockLines.push(`   ${C.dim}${fit(agent.activity, Math.max(8, width - 5))}${C.reset}`);
         if (agent.pendingGuidance?.length > 0) {
-          lines.push(`   ${C.yellow}${fit(`nudge queued: ${agent.pendingGuidance[0].body || ""}`, Math.max(8, width - 5))}${C.reset}`);
+          blockLines.push(`   ${C.yellow}${fit(`nudge queued: ${agent.pendingGuidance[0].body || ""}`, Math.max(8, width - 5))}${C.reset}`);
         }
-      }
+        blocks.push({ lines: blockLines, isSelected });
+      });
+      firstGroup = false;
     }
 
     // Open slots \u2014 surfaced like the main queue panel: file-lock-blocked first
     // (yellow, same lock-summary labels), then truly-idle/available slots.
+    // Built before the roster so the windowing below knows its real budget.
     const openSlots = Math.max(0, (this.concurrency || 0) - (this.workers?.size || 0));
     const blockedByLock = Math.min(this._blockedByLock || 0, openSlots);
     const trulyIdle = openSlots - blockedByLock;
+    const slotLines = [];
     if (blockedByLock > 0 || trulyIdle > 0) {
-      if (lines.length > 0) lines.push("");
+      if (blocks.length > 0) slotLines.push("");
       if (blockedByLock > 0) {
         const labels = this._blockedLockSummaryLabels(blockedByLock);
-        lines.push(`  ${C.yellow}\u00b7 ${fit(labels.join(", "), Math.max(8, width - 4))}${C.reset}`);
+        slotLines.push(`  ${C.yellow}\u00b7 ${fit(labels.join(", "), Math.max(8, width - 4))}${C.reset}`);
       }
       if (trulyIdle > 0) {
-        lines.push(`  ${C.dim}\u00b7 ${trulyIdle} idle slot${trulyIdle === 1 ? "" : "s"} available${C.reset}`);
+        slotLines.push(`  ${C.dim}\u00b7 ${trulyIdle} idle slot${trulyIdle === 1 ? "" : "s"} available${C.reset}`);
       }
     }
+
+    // Window the agent blocks around the selection instead of silently
+    // truncating at nine: every agent stays reachable via cycling, and clipped
+    // ends announce themselves with \u25b2/\u25bc counts.
+    const totalAgentLines = blocks.reduce((sum, block) => sum + block.lines.length, 0);
+    const agentBudget = Math.max(3, (height || 0) - slotLines.length);
+    if (height > 0 && totalAgentLines > agentBudget) {
+      const avail = Math.max(1, agentBudget - 2); // reserve the marker rows
+      let start = Math.max(0, blocks.findIndex((block) => block.isSelected));
+      let end = start;
+      let used = blocks[start].lines.length;
+      let grew = true;
+      while (grew) {
+        grew = false;
+        if (end + 1 < blocks.length && used + blocks[end + 1].lines.length <= avail) {
+          end++; used += blocks[end].lines.length; grew = true;
+        }
+        if (start > 0 && used + blocks[start - 1].lines.length <= avail) {
+          start--; used += blocks[start].lines.length; grew = true;
+        }
+      }
+      if (start > 0) lines.push(` ${C.dim}\u25b2 ${start} earlier${C.reset}`);
+      for (let i = start; i <= end; i++) {
+        // The first visible block drops its leading group gap so the window
+        // opens on content, not a blank.
+        const blockLines = (i === start && blocks[i].lines[0] === "") ? blocks[i].lines.slice(1) : blocks[i].lines;
+        lines.push(...blockLines);
+      }
+      const below = blocks.length - end - 1;
+      if (below > 0) lines.push(` ${C.dim}\u25bc ${below} more${C.reset}`);
+    } else {
+      for (const block of blocks) lines.push(...block.lines);
+    }
+    lines.push(...slotLines);
     // Provider usage widget tucked against the bottom of the rail — the same
     // widget the main queue page shows (run tokens/cost + session/week pressure
     // gauges). The fleet rail intentionally does NOT mirror the event log here.
@@ -920,8 +1077,14 @@ export class DisplayRightPanelRenderer {
     })();
 
     const buildFeedback = (content) => {
+      // The history scrolls: _monitorFeedbackScroll counts lines back from the
+      // live floor (0 = pinned to the newest message). Clamp and write back
+      // like the diff scroll so holding the key can't run past the history.
+      const maxScroll = Math.max(0, feedbackRows.length - content);
+      const scroll = clamp(this._monitorFeedbackScroll || 0, 0, maxScroll);
+      this._monitorFeedbackScroll = scroll;
       const boxedFeedback = (rows) => this._monitorBoxedLane({
-        title: "feedback",
+        title: scroll > 0 ? `feedback \u2191${scroll}` : "feedback",
         count: feedbackEntries.length,
         color: C.yellow,
         width,
@@ -933,19 +1096,24 @@ export class DisplayRightPanelRenderer {
       // Anchor to the bottom: drop oldest lines from the top, pad short content
       // at the top so the live message always lands on the floor.
       let rows = feedbackRows.slice();
-      if (rows.length > content) rows = rows.slice(rows.length - content);
+      if (rows.length > content) rows = rows.slice(rows.length - content - scroll, rows.length - scroll);
       while (rows.length < content) rows.unshift("");
       return boxedFeedback(rows);
     };
 
+    // A blocked agent leads with WHAT it's asking: the pending question renders
+    // in its own amber box instead of hiding in the bottom-bar preview.
+    const askRows = agent.state === "ask" ? this._monitorPendingQuestionRows(agent, inner) : [];
+
     // A short pane only has room for one box.
     if (total < 11) {
       if (this._monitorChangesMode) return this._buildMonitorChangesBox(agent, width, total);
+      if (askRows.length > 0) return this._monitorAskBox(askRows, width, Math.max(1, total - 4));
       return buildFeedback(Math.max(1, total - 4));
     }
 
-    const FEEDBACK_MAX = 8;     // cap so a chatty feed can't dominate the pane
-    const CARD_BOX_H = 7;       // 3 dossier rows + 4 chrome
+    const FEEDBACK_MAX = 8;     // preferred cap; may grow into rows tools doesn't need
+    const CARD_BOX_H = 8;       // 4 dossier rows + 4 chrome
     const MIN_TOOLS_H = 5;
 
     // CHANGES mode keeps the two-box feedback+diff split (no card \u2014 the git-diff
@@ -962,24 +1130,36 @@ export class DisplayRightPanelRenderer {
       ];
     }
 
-    // Normal mode: agent card (top) + feedback (middle) + tools (bottom). The
-    // agent dossier leads so its WI/diff/tool stats and the trotting horse sit at
-    // the top of the focus pane, with the conversation and tool log stacked below.
-    const showCard = total >= 18; // only seat the card when there's room for all three
+    // Normal mode: agent card (top) + ask box (only while blocked) + feedback +
+    // tools. The dossier leads so its WI/diff/tool stats and the trotting horse
+    // sit at the top of the focus pane, with the conversation and tool log
+    // stacked below.
+    let askBoxH = 0;
+    if (askRows.length > 0) {
+      askBoxH = Math.min(askRows.length + 4, 12, Math.max(5, total - 11));
+      if (total - askBoxH < 11) askBoxH = 0; // no room: [a] still opens the answer flow
+    }
+    const showCard = total >= 19 + askBoxH; // only seat the card when everything else fits
     const cardH = showCard ? CARD_BOX_H : 0;
 
-    // Feedback is sized to its own content (capped); tools then claims ALL the
-    // remaining height up front and holds it. We deliberately do NOT shrink tools
-    // to its current row count — that is what used to make the box grow downward as
-    // calls accumulated and shove feedback/the card around. Instead tools stands at
-    // its full height from the first paint and pads with blank rows, so a growing
-    // tool log fills the box in place rather than moving the rest of the pane.
-    const rest = total - cardH;
-    const feedbackContentCap = Math.max(2, Math.floor(rest / 2) - 2);
-    const feedbackContent = Math.max(2, Math.min(Math.max(1, feedbackRows.length), FEEDBACK_MAX, feedbackContentCap));
-    let feedbackBoxH = feedbackContent + 4;
-    let toolBoxH = rest - feedbackBoxH;
-    if (toolBoxH < MIN_TOOLS_H) { toolBoxH = MIN_TOOLS_H; feedbackBoxH = rest - MIN_TOOLS_H; }
+    // Feedback states its preference (content up to FEEDBACK_MAX); tools sizes
+    // to its call count within what's left. The tools height RATCHETS per
+    // selection — it may grow as calls land but never shrinks back — so the box
+    // boundary settles instead of bouncing, and any leftover height goes to
+    // feedback, which pads at the top like a chat. Net effect: a chatty agent
+    // with few tool calls gets a tall conversation, not a pane of blank rows.
+    const rest = total - cardH - askBoxH;
+    const feedbackDesired = Math.max(2, Math.min(Math.max(1, feedbackRows.length), FEEDBACK_MAX));
+    const toolCap = Math.max(MIN_TOOLS_H, rest - (feedbackDesired + 4));
+    if (this._monitorToolRatchetJob !== agent.jobId) {
+      this._monitorToolRatchetJob = agent.jobId;
+      this._monitorToolRatchetH = 0;
+    }
+    let toolBoxH = Math.max(MIN_TOOLS_H, Math.min(toolRows.length + 4, toolCap));
+    toolBoxH = Math.min(Math.max(toolBoxH, this._monitorToolRatchetH), toolCap);
+    this._monitorToolRatchetH = toolBoxH;
+    let feedbackBoxH = rest - toolBoxH;
+    if (feedbackBoxH < 6) { feedbackBoxH = 6; toolBoxH = rest - 6; }
     const toolContent = Math.max(1, toolBoxH - 4);
 
     const toolsBox = this._monitorBoxedLane({
@@ -994,34 +1174,75 @@ export class DisplayRightPanelRenderer {
 
     return [
       ...(showCard ? this._buildMonitorAgentCard(agent, width, cardH) : []),
+      ...(askBoxH > 0 ? this._monitorAskBox(askRows, width, askBoxH - 4) : []),
       ...buildFeedback(Math.max(1, feedbackBoxH - 4)),
       ...toolsBox,
     ];
   }
 
+
+
+  // The selected agent's pending interactive question, wrapped for the ask box.
+  // Empty when the job has no queued question set (e.g. a human-wait job whose
+  // input arrives through another surface).
+  _monitorPendingQuestionRows(agent, inner) {
+    const qSet = (this._questionQueue || []).find((entry) => Number(entry.jobId) === Number(agent.jobId));
+    const pending = qSet ? (qSet.questions || []).slice(qSet.currentIdx || 0) : [];
+    if (pending.length === 0) return [];
+    const rows = [];
+    const bodyW = Math.max(8, inner - 3);
+    for (const chunk of wrapHanging(_sanitizeDisplayLine(pending[0]), bodyW, bodyW)) {
+      rows.push(` ${C.yellow}▏${C.reset} ${chunk}`);
+    }
+    const more = pending.length - 1;
+    rows.push(` ${C.dim}${more > 0 ? `+${more} more queued · ` : ""}[a] answer${C.reset}`);
+    return rows;
+  }
+
+
+
+  _monitorAskBox(askRows, width, contentRows) {
+    return this._monitorBoxedLane({
+      title: "waiting on you",
+      count: null,
+      color: C.yellow,
+      width,
+      rows: askRows,
+      emptyText: "waiting",
+      fixedRows: contentRows,
+    });
+  }
+
   // \u2500\u2500 Focus-pane agent card \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-  // A compact WI + diff/tool dossier with the Posse mascot trotting in a lane on
-  // the right. Everything here is free at render time: the WI title/state ride
-  // the cached queue snapshot, the +/\u2212 counts come from the same git-diff
-  // snapshot the [d] changes view already builds (warming it here means [d]
-  // opens instantly), and the tool tally is the per-job observation count. No
+  // A compact dossier \u2014 WI + status/phase + diff/tool stats \u2014 with the Posse
+  // mascot trotting in a lane on the right. It also carries the status line
+  // that used to sit above the boxes, so the card is the single place that
+  // answers "what is this agent and what is it doing". Everything here is free
+  // at render time: the WI title/state ride the cached queue snapshot, the
+  // +/\u2212 counts come from the same git-diff snapshot the [d] changes view
+  // already builds, and the tool tally is the per-job observation count. No
   // per-agent token plumbing \u2014 run-level token/cost already shows on the left
   // fleet rail, so repeating it here would just duplicate.
   _buildMonitorAgentCard(agent, width, height) {
     const content = Math.max(1, (height | 0) - 4);
     const boxInner = Math.max(8, width - 2); // content width between the box borders
 
-    // The horse gallops across HALF the card row; the dossier text takes the other
-    // half. renderPosseMascotFrame needs a lane of ~19 cells to draw and returns
-    // null below that, so on a narrow card it drops out and the text spans the full
-    // width.
-    const horseLane = Math.floor(boxInner / 2);
-    const horse = renderPosseMascotFrame({ tick: this._spinIdx, laneWidth: horseLane, colors: { ...C, orange: MASCOT_FG } }) || [];
+    // The horse is decoration, so the dossier text sets the floor: the lane only
+    // gets what a ~44-col text column doesn't need (below that the horse sits
+    // out and the text spans the full width) instead of always claiming half the
+    // card and squeezing the WI title. renderPosseMascotFrame additionally needs
+    // ~19 cells to draw and returns null below that.
+    const horseLane = Math.min(Math.floor(boxInner / 2), Math.max(0, boxInner - 44));
+    const horse = horseLane > 0
+      ? (renderPosseMascotFrame({ tick: this._spinIdx, laneWidth: horseLane, colors: { ...C, orange: MASCOT_FG } }) || [])
+      : [];
     const horseW = horse.length ? horseLane : 0;
     const textW = Math.max(8, boxInner - (horseW ? horseW + 1 : 0));
 
-    // Diff stats from the cached snapshot (same source/cache as the [d] view).
-    const diff = this._monitorDiffFilesForAgent(agent);
+    // Diff stats from the cached snapshot (same source as the [d] view, on a
+    // slower clock: the card only needs coarse counts, so it doesn't re-shell
+    // git every 3s while the monitor idles open).
+    const diff = this._monitorDiffFilesForAgent(agent, { ttlMs: 10000 });
     const files = Array.isArray(diff.files) ? diff.files : [];
     let add = 0;
     let del = 0;
@@ -1041,29 +1262,43 @@ export class DisplayRightPanelRenderer {
     const titleBudget = Math.max(6, textW - wiLabel.length - stripAnsi(chipText).length - 3);
     const row1 = ` ${C.blue}${C.bold}${wiLabel}${C.reset}${wiTitle ? ` ${C.brightWhite}${fit(wiTitle, titleBudget)}${C.reset}` : ""}${chipText}`;
 
-    // Row 2 \u2014 change + tool tally.
+    // Row 2 \u2014 live status + phase (folded in from the old focus-pane header).
+    const stateMeta = monitorStateMeta(agent.state);
+    const statusLabel = String(agent.status || "running");
+    const phaseBudget = Math.max(8, textW - statusLabel.length - 5);
+    const row2 = ` ${stateMeta.color}\u25cf${C.reset} ${C.dim}${statusLabel}${C.reset}  ${C.brightWhite}${fit(_sanitizeDisplayLine(agent.activity || ""), phaseBudget)}${C.reset}`;
+
+    // Row 3 \u2014 change + tool tally.
     const tally = `${toolCount} tool call${toolCount === 1 ? "" : "s"}`;
-    let row2;
+    let row3;
     if (diff.loading) {
-      row2 = ` ${C.dim}changes computing\u2026 \u00b7 ${tally}${C.reset}`;
+      row3 = ` ${C.dim}changes computing\u2026 \u00b7 ${tally}${C.reset}`;
     } else if (diff.error) {
-      row2 = ` ${C.dim}changes ${fit(diff.error, Math.max(8, textW - 10))}${C.reset}`;
+      row3 = ` ${C.dim}changes ${fit(diff.error, Math.max(8, textW - 10))}${C.reset}`;
     } else if (files.length === 0) {
-      row2 = ` ${C.dim}changes none yet \u00b7 ${tally}${C.reset}`;
+      row3 = ` ${C.dim}changes none yet \u00b7 ${tally}${C.reset}`;
     } else {
-      row2 = ` ${C.dim}changes${C.reset} ${C.green}+${add}${C.reset} ${C.red}\u2212${del}${C.reset} ${C.dim}\u00b7 ${files.length} file${files.length === 1 ? "" : "s"} \u00b7 ${tally}${C.reset}`;
+      row3 = ` ${C.dim}changes${C.reset} ${C.green}+${add}${C.reset} ${C.red}\u2212${del}${C.reset} ${C.dim}\u00b7 ${files.length} file${files.length === 1 ? "" : "s"} \u00b7 ${tally}${C.reset}`;
     }
 
-    // Row 3 \u2014 pending nudges, model/effort, freshness.
+    // Row 4 \u2014 pending nudges, model/effort (only when they deviate from the
+    // defaults: "tier/standard \u00b7 medium" said nothing), runtime, freshness.
     const modelChip = agent.provider
       ? `${agent.provider}${agent.modelName ? `/${agent.modelName}` : ""}`
-      : `tier/${agent.tier || "standard"}`;
+      : (agent.tier && agent.tier !== "standard" ? `tier/${agent.tier}` : "");
+    const effortChip = agent.effort && agent.effort !== "medium" ? String(agent.effort) : "";
     const nudgeChip = nudges > 0
       ? `${C.yellow}${nudges} nudge${nudges === 1 ? "" : "s"} queued${C.reset}${C.dim} \u00b7 ${C.reset}`
       : "";
-    const row3 = ` ${nudgeChip}${C.dim}${modelChip} \u00b7 ${agent.effort || "medium"} \u00b7 ${ago}${C.reset}`;
+    const bits = [
+      ...(modelChip ? [modelChip] : []),
+      ...(effortChip ? [effortChip] : []),
+      ...(agent.elapsed ? [`elapsed ${agent.elapsed}`] : []),
+      ago,
+    ];
+    const row4 = ` ${nudgeChip}${C.dim}${bits.join(" \u00b7 ")}${C.reset}`;
 
-    const textRows = [row1, row2, row3].slice(0, content);
+    const textRows = [row1, row2, row3, row4].slice(0, content);
     while (textRows.length < content) textRows.push("");
 
     // Seat the horse flush against the right border: pad the text to textW, one
@@ -1113,11 +1348,14 @@ export class DisplayRightPanelRenderer {
 
 
   // ── Changes / git-diff view (toggled with [d] on the selected agent) ──
-  _monitorDiffFilesForAgent(agent) {
+  // ttlMs picks the refresh clock per consumer: the [d] changes browser wants
+  // fresh counts (3s), the always-on agent card only coarse ones (it passes
+  // 10s) so the monitor doesn't shell out to git constantly while idling open.
+  _monitorDiffFilesForAgent(agent, { ttlMs = 3000 } = {}) {
     const wiId = agent?.workItemId;
     if (wiId == null) return { files: [], loading: false };
     const fresh = this._monitorDiffSnapshotCache && this._monitorDiffSnapshotWi === wiId
-      && (Date.now() - (this._monitorDiffSnapshotAt || 0)) < 3000;
+      && (Date.now() - (this._monitorDiffSnapshotAt || 0)) < ttlMs;
     if (!fresh && !this._monitorDiffSnapshotBuilding) {
       this._monitorDiffSnapshotBuilding = true;
       const projectDir = this.projectDir || process.cwd();
@@ -1227,7 +1465,7 @@ export class DisplayRightPanelRenderer {
         }
       }
       return this._monitorBoxedLane({
-        title: files.length ? `changes ${this._monitorDiffFileIndex + 1}/${files.length}  [↑↓ select · enter open]` : "changes",
+        title: files.length ? `changes ${this._monitorDiffFileIndex + 1}/${files.length}  [↑↓ select · enter open · esc back]` : "changes  [esc back]",
         count: files.length,
         color: C.magenta,
         width,
@@ -1247,7 +1485,7 @@ export class DisplayRightPanelRenderer {
       ? ` ${this._monitorDiffScroll + 1}-${Math.min(body.length, this._monitorDiffScroll + content)}/${body.length}`
       : "";
     return this._monitorBoxedLane({
-      title: `diff${span}  [↑↓ scroll · esc files]`,
+      title: `diff${span}  [↑↓ PgUp/Dn scroll · esc files]`,
       count: file ? (file.additions || 0) + (file.deletions || 0) : 0,
       color: C.magenta,
       width,
@@ -1258,28 +1496,19 @@ export class DisplayRightPanelRenderer {
   }
 
   _buildMonitorFocusLines(agent, width, height = 18) {
-    const meta = monitorStateMeta(agent.state);
-    const provider = agent.provider
-      ? `${agent.provider}${agent.modelName ? `/${agent.modelName}` : ""}`
-      : `tier/${agent.tier}`;
-    const top = [
-      ` ${meta.color}\u25cf${C.reset} ${agent.status}  ${C.dim}${provider}  elapsed ${agent.elapsed}  phase${C.reset} ${C.brightWhite}${fit(agent.activity, Math.max(8, width - 54))}${C.reset}`,
-      ` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`,
-    ];
-
-    // No control bar here: the single agent-controls bar lives at the foot of the
-    // monitor view (state-aware), so the focus pane just caps its content with a
-    // thin rule and hands the full height to the feedback/tools boxes.
+    // The status/phase header folded into the agent card (row 2), so the focus
+    // pane hands its full height to the stacked boxes and just caps the column
+    // with a thin rule above the controls bar. (The single agent-controls bar
+    // lives at the foot of the monitor view, state-aware.)
     const footer = [` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`];
 
-    const bodyH = Math.max(0, height - top.length - footer.length);
+    const bodyH = Math.max(0, height - footer.length);
     const body = [];
-    const lanesH = Math.max(0, bodyH - body.length);
-    if (lanesH >= 5) {
-      body.push(...this._buildMonitorFeedbackToolLanes(agent, width, lanesH));
+    if (bodyH >= 5) {
+      body.push(...this._buildMonitorFeedbackToolLanes(agent, width, bodyH));
     }
 
-    const out = [...top, ...body.slice(0, bodyH), ...footer];
+    const out = [...body.slice(0, bodyH), ...footer];
     while (out.length < height) out.push("");
     return out.slice(0, height);
   }

@@ -203,7 +203,7 @@ export function embeddingChildPoolEnabled(config = {}, env = {}) {
 }
 
 export function createEmbeddingResourcePool({ idleMs = EMBEDDING_POOL_IDLE_MS } = {}) {
-  /** @type {Map<string, { resources: any, refCount: number, idleTimer: any }>} */
+  /** @type {Map<string, { resources: any, refCount: number, idleTimer: any, retired: boolean }>} */
   const entries = new Map();
 
   function wrap(key, entry) {
@@ -213,8 +213,16 @@ export function createEmbeddingResourcePool({ idleMs = EMBEDDING_POOL_IDLE_MS } 
       close: async () => {
         if (released) return;
         released = true;
-        if (entries.get(key) !== entry) return; // entry already evicted
         entry.refCount = Math.max(0, entry.refCount - 1);
+        if (entries.get(key) !== entry) {
+          // Entry was retired (invalidation) or evicted while we held it: the
+          // pool no longer owns it, so the LAST holder closes the underlying
+          // resources for real — otherwise the stale child leaks forever.
+          if (entry.retired && entry.refCount <= 0) {
+            try { await entry.resources.close(); } catch { /* best effort */ }
+          }
+          return;
+        }
         if (entry.refCount > 0) return;
         // No active users — keep the child warm briefly, then really close.
         if (entry.idleTimer) clearTimeout(entry.idleTimer);
@@ -231,6 +239,28 @@ export function createEmbeddingResourcePool({ idleMs = EMBEDDING_POOL_IDLE_MS } 
     try { await entry.resources.close(); } catch { /* best effort */ }
   }
 
+  /**
+   * Drop an entry from the pool NOW so the next acquire rebuilds fresh
+   * resources. Active holders keep the old resources until their close; the
+   * last one closes the underlying child. This is the invalidation hook —
+   * without it, wrapper close only refcounts and a "reopened" reader gets the
+   * same stale in-memory ANN back.
+   *
+   * @param {string} key
+   * @returns {boolean} whether an entry existed
+   */
+  function retire(key) {
+    const entry = entries.get(key);
+    if (!entry) return false;
+    entries.delete(key);
+    if (entry.idleTimer) { clearTimeout(entry.idleTimer); entry.idleTimer = null; }
+    entry.retired = true;
+    if (entry.refCount <= 0) {
+      void (async () => { try { await entry.resources.close(); } catch { /* best effort */ } })();
+    }
+    return true;
+  }
+
   return {
     /** @param {string} key @param {() => any} build */
     acquire(key, build) {
@@ -240,18 +270,27 @@ export function createEmbeddingResourcePool({ idleMs = EMBEDDING_POOL_IDLE_MS } 
         // Never pool a disabled/failed open — return it unwrapped so the caller
         // sees the real reason and nothing lingers in the pool.
         if (!resources || resources.enabled === false) return resources;
-        entry = { resources, refCount: 0, idleTimer: null };
+        entry = { resources, refCount: 0, idleTimer: null, retired: false };
         entries.set(key, entry);
       }
       if (entry.idleTimer) { clearTimeout(entry.idleTimer); entry.idleTimer = null; }
       entry.refCount += 1;
       return wrap(key, entry);
     },
+    retire,
+    retireAll() {
+      let retired = 0;
+      for (const key of [...entries.keys()]) {
+        if (retire(key)) retired += 1;
+      }
+      return retired;
+    },
     async closeAll() {
       const all = [...entries.values()];
       entries.clear();
       for (const entry of all) {
         if (entry.idleTimer) clearTimeout(entry.idleTimer);
+        entry.retired = true;
         try { await entry.resources.close(); } catch { /* best effort */ }
       }
     },
@@ -266,7 +305,19 @@ export function closeAllPooledEmbeddingResources() {
   return embeddingResourcePool.closeAll();
 }
 
-export function openEmbeddingResources({ repoRoot, config = {}, env = {} }) {
+/**
+ * Invalidation hook: retire every pooled embedding entry in THIS realm so the
+ * next semantic open forks a fresh child that reads the just-rewritten index.
+ * Cross-lane ANN invalidation is only effective through this — a wrapper
+ * close alone refcounts and the next acquire resurrects the stale child.
+ *
+ * @returns {number} entries retired
+ */
+export function retirePooledEmbeddingResources() {
+  return embeddingResourcePool.retireAll();
+}
+
+export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOnly = false }) {
   /** @type {Record<string, unknown>} */
   const effectiveConfig = {
     ...normalizeEmbeddingConfig(config, env),
@@ -304,8 +355,10 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {} }) {
     }
   }
 
+  // Mode is part of the pool identity: a read-only child (no quarantine, no
+  // saves) must never be handed to a caller that intends to write.
   const poolKey = embeddingChildPoolEnabled(effectiveConfig, env)
-    ? `${embeddingsRoot(repoRoot)}|${provider}|${vectorBackend}`
+    ? `${embeddingsRoot(repoRoot)}|${provider}|${vectorBackend}|${readOnly ? "ro" : "rw"}`
     : null;
   const build = () => {
     let encoder = resolveConfiguredEncoder(effectiveConfig, env);
@@ -317,6 +370,7 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {} }) {
       encoder,
       repoRoot,
       requestedProvider: provider,
+      readOnly,
     });
     recordEmbeddingForensics("resources.open.enabled", {
       repo_root: repoRoot,
@@ -435,7 +489,7 @@ function disabled(provider, reason, backend = null, details = {}) {
  * }} args
  * @returns {OpenEmbeddingResourcesResult}
  */
-function openIndexForBackend({ backend, encoder, repoRoot, requestedProvider }) {
+function openIndexForBackend({ backend, encoder, repoRoot, requestedProvider, readOnly = false }) {
   const root = embeddingsRoot(repoRoot);
   const openUsearch = () => {
     if (!usearchPackageResolvable()) {
@@ -446,6 +500,7 @@ function openIndexForBackend({ backend, encoder, repoRoot, requestedProvider }) 
       model_version: encoder.model_version,
       dim: encoder.dim,
       embeddingsRoot: root,
+      readOnly,
     });
   };
 

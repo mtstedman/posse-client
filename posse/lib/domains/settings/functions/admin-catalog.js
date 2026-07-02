@@ -164,8 +164,18 @@ export const SETTINGS_PANES = Object.freeze([
   Object.freeze({ id: "providers", label: "Providers" }),
   Object.freeze({ id: "atlas", label: "ATLAS" }),
   Object.freeze({ id: "general", label: "General" }),
+  Object.freeze({ id: "repo", label: "Repo" }),
   Object.freeze({ id: "debug", label: "Debug" }),
 ]);
+
+// Catalog keys whose rows persist per-repo rather than machine-global. They
+// render on the Repo pane so operators can tell at a glance which knobs follow
+// the repository and which follow the account.
+export const REPO_SCOPED_DISPLAY_KEYS = new Set(
+  SETTINGS_CATALOG
+    .filter((entry) => entry.scope === "repo")
+    .map((entry) => entry.key),
+);
 
 export const SETTINGS_GROUPS = Object.freeze([
   // ── Providers pane ──
@@ -243,7 +253,6 @@ export const SETTINGS_GROUPS = Object.freeze([
     keys: Object.freeze([
       "scheduler_concurrency",
       "startup_dirty_tree_policy",
-      "target_branch",
       "session_recycle_mode",
     ]),
   },
@@ -262,15 +271,6 @@ export const SETTINGS_GROUPS = Object.freeze([
     ]),
   },
   {
-    id: "bridge",
-    pane: "general",
-    label: "local bridge",
-    keys: Object.freeze([
-      "bridge_port",
-      "bridge_label",
-    ]),
-  },
-  {
     id: "remote",
     pane: "general",
     label: "file requests",
@@ -285,6 +285,24 @@ export const SETTINGS_GROUPS = Object.freeze([
     keys: Object.freeze([
       "skills_enabled",
       "skills_disabled_ids",
+    ]),
+  },
+  // ── Repo pane (rows persist per-repo, not as machine-global account state) ──
+  {
+    id: "repo_git",
+    pane: "repo",
+    label: "git & merge",
+    keys: Object.freeze([
+      "target_branch",
+    ]),
+  },
+  {
+    id: "bridge",
+    pane: "repo",
+    label: "local bridge",
+    keys: Object.freeze([
+      "bridge_port",
+      "bridge_label",
     ]),
   },
   // ── Debug pane ──
@@ -515,10 +533,12 @@ export function isGroupedSettingKey(displayKey) {
 }
 
 // Pane an editable DB-backed setting renders under. Ungrouped keys fall back
-// to Debug when they're tuning knobs, otherwise General, so new catalog keys
-// stay visible until they're explicitly slotted into SETTINGS_GROUPS.
+// to Repo when the catalog scopes them per-repo, to Debug when they're tuning
+// knobs, otherwise General, so new catalog keys stay visible until they're
+// explicitly slotted into SETTINGS_GROUPS.
 export function settingsPaneForKey(displayKey) {
   const group = settingsGroupForKey(displayKey);
   if (group?.pane) return group.pane;
+  if (REPO_SCOPED_DISPLAY_KEYS.has(toStorageSettingKey(displayKey))) return "repo";
   return isTuningSettingKey(displayKey) ? "debug" : "general";
 }

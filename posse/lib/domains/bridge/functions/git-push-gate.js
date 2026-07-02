@@ -8,7 +8,7 @@
 import { execFileSync } from "node:child_process";
 
 import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
-import { resolveTargetBranch } from "../../git/functions/target-branch.js";
+import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import {
   acquireMergeLock,
   forceUpdateJobStatus,
@@ -35,9 +35,9 @@ function truncatedRedactedOutput(output) {
  * daemon is unavailable — fall back to the gate's recorded branch, then
  * the currently checked-out branch.
  */
-function resolveTargetBranchSafe(projectDir, gatePayload = {}) {
+async function resolveTargetBranchSafe(projectDir, gatePayload = {}) {
   try {
-    const resolved = resolveTargetBranch(projectDir);
+    const resolved = await resolveTargetBranchAsync(projectDir);
     if (resolved) return resolved;
   } catch {
     // native git daemon unavailable — degrade below
@@ -68,11 +68,13 @@ export async function executeGitPushGate(jobId, args = {}, context = {}, deps = 
 
   const projectDir = context.projectDir || process.cwd();
   const gatePayload = parseJobPayload(job) || {};
+  // Resolved once per gate execution: workflow helpers require a synchronous
+  // getTargetBranch, and the branch cannot change mid-push.
   const helpers = deps.collectState && deps.push
     ? null
     : createGitWorkflowHelpers({
         projectDir,
-        getTargetBranch: () => resolveTargetBranchSafe(projectDir, gatePayload),
+        targetBranch: await resolveTargetBranchSafe(projectDir, gatePayload),
       });
   const collectState = deps.collectState || (() => helpers._collectPushOfferState(0));
   const runPush = deps.push || ((pushArgs) => helpers._executePush(pushArgs));

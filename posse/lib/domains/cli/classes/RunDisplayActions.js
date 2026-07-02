@@ -1,4 +1,5 @@
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
+import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../../providers/functions/execution-routing.js";
 import { createOperatorNudge } from "../../queue/functions/index.js";
 import { buildImageInjectionPayload } from "../functions/run-session.js";
@@ -139,6 +140,14 @@ export class RunDisplayActions {
 
   nudge(jobId, correction) {
     const job = this.getJob(jobId);
+    // A finished job can never retrieve guidance — refuse instead of telling
+    // the operator "agent will retrieve it live" about a nudge that would sit
+    // pending until the finalizer sweep expires it.
+    const status = String(job?.status || "");
+    if (TERMINAL_JOB_STATUSES.includes(status)) {
+      this.display.addEvent(`${this.C.yellow}Job #${jobId} is already ${status} — feedback cannot be delivered to it.${this.C.reset}`);
+      return;
+    }
     createOperatorNudge({
       work_item_id: job?.work_item_id,
       job_id: jobId,

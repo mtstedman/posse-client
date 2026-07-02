@@ -47,18 +47,22 @@ function nowMs() {
 const ATLAS_WARM_DISABLED_REQUEUE_DELAY_MS = 10 * 60 * 1000;
 
 function clampPaths(paths, max = 100) {
-  if (!Array.isArray(paths)) return [];
+  if (!Array.isArray(paths)) return { paths: [], truncated: false };
   const out = [];
   const seen = new Set();
+  let truncated = false;
   for (const value of paths) {
     if (typeof value !== "string") continue;
     const trimmed = value.trim();
     if (!trimmed || seen.has(trimmed)) continue;
     seen.add(trimmed);
+    if (out.length >= max) {
+      truncated = true;
+      break;
+    }
     out.push(trimmed);
-    if (out.length >= max) break;
   }
-  return out;
+  return { paths: out, truncated };
 }
 
 // Async on purpose: this runs on the orchestrator main loop at every warm
@@ -204,7 +208,16 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
     const payload = parseJobPayload(job) || {};
     const purpose = String(payload.purpose || "wi");
     const repoRoot = resolveAtlasRepoRoot(worker);
-    const paths = clampPaths(payload.paths);
+    const clamped = clampPaths(payload.paths);
+    // A truncated path list must not silently narrow reindex coverage: for
+    // incremental warms, drop the partial hints and force the freshness scan
+    // instead — it re-derives staleness from the ledger and covers the
+    // dropped tail. (The coalescer sets paths_truncated the same way when its
+    // union overflows.)
+    const forceFreshnessScan = purpose === "main-incremental"
+      && (clamped.truncated || payload.paths_truncated === true);
+    const paths = forceFreshnessScan ? [] : clamped.paths;
+    if (forceFreshnessScan) payload.paths_truncated = true;
     const config = getAtlasIntegrationConfig();
     const disabledReason = atlasRuntimeDisabledReasonForRepo(repoRoot);
 

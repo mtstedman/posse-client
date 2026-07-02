@@ -239,6 +239,11 @@ export class Display {
     this._toolsTab = 0;         // 0=tools, 1=roles, 2=locks
     this._toolsTabScrolls = [0, 0, 0];
     this._monitorSelectedJobId = null;
+    this._monitorFeedbackScroll = 0;   // lines back from the feedback floor (0 = live)
+    this._monitorAgentsCache = null;   // built roster, ~750ms TTL (see _collectMonitorAgents)
+    this._monitorAgentsCacheAt = 0;
+    this._monitorToolRatchetJob = null; // tools-box height ratchet, per selected job
+    this._monitorToolRatchetH = 0;
     this._providerUsageRefreshTimer = null;
     this._lastProviderUsageRefreshErrorAt = 0;
     this._providerUsageRefresh = typeof providerUsageRefresh === "function"
@@ -1427,6 +1432,10 @@ export class Display {
     return this._inputController._cycleMonitorSelection.call(this, ...args);
   }
 
+  _jumpToWaitingMonitorAgent(...args) {
+    return this._inputController._jumpToWaitingMonitorAgent.call(this, ...args);
+  }
+
   _submitAnswer(...args) {
     return this._inputController._submitAnswer.call(this, ...args);
   }
@@ -1567,6 +1576,23 @@ export class Display {
   _buildMonitor(...args) {
     return this._rightPanelRenderer._buildMonitor.call(this, ...args);
   }
+
+  _monitorControlsLine(...args) {
+    return this._rightPanelRenderer._monitorControlsLine.call(this, ...args);
+  }
+
+  _buildMonitorEmptyLines(...args) {
+    return this._rightPanelRenderer._buildMonitorEmptyLines.call(this, ...args);
+  }
+
+  _monitorPendingQuestionRows(...args) {
+    return this._rightPanelRenderer._monitorPendingQuestionRows.call(this, ...args);
+  }
+
+  _monitorAskBox(...args) {
+    return this._rightPanelRenderer._monitorAskBox.call(this, ...args);
+  }
+
   _collectMonitorAgents(...args) {
     return this._rightPanelRenderer._collectMonitorAgents.call(this, ...args);
   }

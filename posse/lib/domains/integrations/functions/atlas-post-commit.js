@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { closeDb, getDb } from "../../../shared/storage/functions/index.js";
 import { closeLog, writeRuntimeLogAtDir } from "../../../shared/telemetry/functions/logging/logger.js";
 import { logEvent } from "../../queue/functions/events.js";
-import { resolveTargetBranch } from "../../git/functions/target-branch.js";
+import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
 import {
   getAtlasIntegrationConfig,
@@ -291,7 +291,7 @@ export async function runAtlasPostCommitHook({
     try {
       const headFull = git(["rev-parse", "HEAD"], cwd);
       const { fromSha, paths } = postCommitDiffScope(cwd, headFull, mergeReason);
-      const targetBranch = mergeDetails.target || resolveTargetBranch(cwd);
+      const targetBranch = mergeDetails.target || await resolveTargetBranchAsync(cwd);
       emitAtlasV2MainAdvanced({
         payload: {
           from_sha: String(fromSha || ""),

@@ -10,7 +10,7 @@
 //
 import fs from "fs";
 import path from "path";
-import { execFile, execFileSync, execSync } from "child_process";
+import { execFile, execFileSync } from "child_process";
 import { getSetting } from "../../queue/functions/index.js";
 import { snapshotPublishingPushConfigs, snapshotPublishingPushConfigsAsync } from "./push-guard.js";
 import { SECRET_PATTERNS } from "../../../shared/telemetry/functions/logging/secret-patterns.js";
@@ -139,13 +139,20 @@ function readSettingBool(key, fallback = false) {
 
 // ─── Hook runner ────────────────────────────────────────────────────────────
 
+function hookDisabled(hookName) {
+  return readSettingBool("skip_hooks", false) || readSettingBool(`skip_hook_${hookName}`, false);
+}
+
+function hookThrewResult(hookName, err) {
+  return { ok: false, output: `Hook "${hookName}" threw: ${err.message}` };
+}
+
 /**
  * Run a named hook. Returns { ok: boolean, output: string }.
  * If the hook is disabled in settings, returns ok.
  */
 export function runHook(hookName, ctx) {
-  if (readSettingBool("skip_hooks", false)) return { ok: true, output: "" };
-  if (readSettingBool(`skip_hook_${hookName}`, false)) return { ok: true, output: "" };
+  if (hookDisabled(hookName)) return { ok: true, output: "" };
 
   const hook = HOOKS[hookName];
   if (!hook) return { ok: true, output: "" };
@@ -153,13 +160,12 @@ export function runHook(hookName, ctx) {
   try {
     return hook(ctx);
   } catch (err) {
-    return { ok: false, output: `Hook "${hookName}" threw: ${err.message}` };
+    return hookThrewResult(hookName, err);
   }
 }
 
 export async function runHookAsync(hookName, ctx) {
-  if (readSettingBool("skip_hooks", false)) return { ok: true, output: "" };
-  if (readSettingBool(`skip_hook_${hookName}`, false)) return { ok: true, output: "" };
+  if (hookDisabled(hookName)) return { ok: true, output: "" };
 
   const hook = ASYNC_HOOKS[hookName] || HOOKS[hookName];
   if (!hook) return { ok: true, output: "" };
@@ -167,7 +173,7 @@ export async function runHookAsync(hookName, ctx) {
   try {
     return await hook(ctx);
   } catch (err) {
-    return { ok: false, output: `Hook "${hookName}" threw: ${err.message}` };
+    return hookThrewResult(hookName, err);
   }
 }
 
@@ -220,34 +226,37 @@ function commandErrorFromHelperResult(command, result, fallback = {}) {
   return err;
 }
 
-function runHookShellCommand(command, { cwd, timeoutMs = VERIFY_COMMAND_TIMEOUT_MS } = {}) {
-  const payload = JSON.stringify({
+function hookShellCommandPayload(command, cwd, timeoutMs) {
+  return JSON.stringify({
     command,
     cwd,
     timeoutMs,
     maxCapture: VERIFY_COMMAND_MAX_CAPTURE,
   });
-  const helperTimeout = Math.max(1000, Number(timeoutMs) || VERIFY_COMMAND_TIMEOUT_MS) + VERIFY_COMMAND_HELPER_GRACE_MS;
-  let raw = "";
-  try {
-    raw = execFileSync(process.execPath, ["-e", VERIFY_COMMAND_HELPER_SCRIPT, payload], {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: helperTimeout,
-      maxBuffer: VERIFY_COMMAND_HELPER_MAX_BUFFER,
-    });
-  } catch (err) {
-    const result = parseHookCommandHelperResult(err.stdout);
-    throw commandErrorFromHelperResult(command, result, {
-      status: err.status,
-      signal: err.signal,
-      stdout: result.stdout ?? err.stdout ?? "",
-      stderr: result.stderr ?? err.stderr ?? "",
-      timedOut: err.killed || err.code === "ETIMEDOUT" || result.timedOut,
-      timeoutMs,
-      error: err.message,
-    });
-  }
+}
+
+function hookShellHelperTimeout(timeoutMs) {
+  return Math.max(1000, Number(timeoutMs) || VERIFY_COMMAND_TIMEOUT_MS) + VERIFY_COMMAND_HELPER_GRACE_MS;
+}
+
+// commandErrorFromHelperResult reads fallback.{status,signal,stdout,stderr,
+// timedOut,error}; a past async-only fallback shape used ignored keys, so a
+// helper-process death reported "exit 1" with empty output. (B11) Building the
+// fallback in one place keeps the twins' error fidelity identical.
+function helperDeathError(command, err, timeoutMs) {
+  const result = parseHookCommandHelperResult(err.stdout);
+  return commandErrorFromHelperResult(command, result, {
+    status: err.status,
+    signal: err.signal,
+    stdout: result.stdout ?? err.stdout ?? "",
+    stderr: result.stderr ?? err.stderr ?? "",
+    timedOut: err.killed || err.code === "ETIMEDOUT" || result.timedOut,
+    timeoutMs,
+    error: err.message,
+  });
+}
+
+function finishHookShellCommand(command, raw, timeoutMs) {
   const result = parseHookCommandHelperResult(raw);
   if ((result.status ?? 0) !== 0 || result.timedOut || result.error) {
     throw commandErrorFromHelperResult(command, result, { timeoutMs });
@@ -255,43 +264,34 @@ function runHookShellCommand(command, { cwd, timeoutMs = VERIFY_COMMAND_TIMEOUT_
   return result;
 }
 
-async function runHookShellCommandAsync(command, { cwd, timeoutMs = VERIFY_COMMAND_TIMEOUT_MS } = {}) {
-  const payload = JSON.stringify({
-    command,
-    cwd,
-    timeoutMs,
-    maxCapture: VERIFY_COMMAND_MAX_CAPTURE,
-  });
-  const helperTimeout = Math.max(1000, Number(timeoutMs) || VERIFY_COMMAND_TIMEOUT_MS) + VERIFY_COMMAND_HELPER_GRACE_MS;
+function runHookShellCommand(command, { cwd, timeoutMs = VERIFY_COMMAND_TIMEOUT_MS } = {}) {
   let raw = "";
   try {
-    raw = await execFileText(process.execPath, ["-e", VERIFY_COMMAND_HELPER_SCRIPT, payload], {
+    raw = execFileSync(process.execPath, ["-e", VERIFY_COMMAND_HELPER_SCRIPT, hookShellCommandPayload(command, cwd, timeoutMs)], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: helperTimeout,
+      timeout: hookShellHelperTimeout(timeoutMs),
       maxBuffer: VERIFY_COMMAND_HELPER_MAX_BUFFER,
     });
   } catch (err) {
-    const result = parseHookCommandHelperResult(err.stdout);
-    // commandErrorFromHelperResult reads fallback.{status,signal,stdout,stderr,
-    // timedOut,error}; the old {helperError,fallbackStatus} keys were ignored,
-    // so a helper-process death reported "exit 1" with empty output. Mirror the
-    // sync path's fallback shape. (B11)
-    throw commandErrorFromHelperResult(command, result, {
-      status: err.status,
-      signal: err.signal,
-      stdout: result.stdout ?? err.stdout ?? "",
-      stderr: result.stderr ?? err.stderr ?? "",
-      timedOut: err.killed || err.code === "ETIMEDOUT" || result.timedOut,
-      timeoutMs,
-      error: err.message,
+    throw helperDeathError(command, err, timeoutMs);
+  }
+  return finishHookShellCommand(command, raw, timeoutMs);
+}
+
+async function runHookShellCommandAsync(command, { cwd, timeoutMs = VERIFY_COMMAND_TIMEOUT_MS } = {}) {
+  let raw = "";
+  try {
+    raw = await execFileText(process.execPath, ["-e", VERIFY_COMMAND_HELPER_SCRIPT, hookShellCommandPayload(command, cwd, timeoutMs)], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: hookShellHelperTimeout(timeoutMs),
+      maxBuffer: VERIFY_COMMAND_HELPER_MAX_BUFFER,
     });
+  } catch (err) {
+    throw helperDeathError(command, err, timeoutMs);
   }
-  const result = parseHookCommandHelperResult(raw);
-  if ((result.status ?? 0) !== 0 || result.timedOut || result.error) {
-    throw commandErrorFromHelperResult(command, result, { timeoutMs });
-  }
-  return result;
+  return finishHookShellCommand(command, raw, timeoutMs);
 }
 
 export function __testRunHookShellCommand(command, opts = {}) {
@@ -316,10 +316,46 @@ const BINARY_EXTENSIONS = new Set([
   ".lock", ".min.js", ".min.css",
 ]);
 
+// Shared secrets-scan evaluators: which files scan, how a file's content is
+// judged, and how findings render live once — the twins keep only the git
+// subprocess gathering. (Past twin-drift bug B10 lived exactly here: the async
+// scan fed whole-file content to the diff-only scanner and silently found
+// nothing.)
+function scannableStagedFiles(staged) {
+  return staged.split("\n").filter(Boolean).filter((file) => !BINARY_EXTENSIONS.has(path.extname(file).toLowerCase()));
+}
+
+function secretsFindingsForContent(file, content) {
+  const findings = [];
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    for (const { re, label } of SECRET_PATTERNS) {
+      if (re.test(lines[i])) {
+        findings.push(`  ${file}:${i + 1} — ${label}`);
+      }
+    }
+  }
+  return findings;
+}
+
+function secretsBlockResult(findings) {
+  if (findings.length === 0) return { ok: true, output: "" };
+  const output = [
+    "SECRETS DETECTED — COMMIT BLOCKED",
+    "",
+    ...findings.slice(0, 20),
+    findings.length > 20 ? `  ... and ${findings.length - 20} more` : "",
+    "",
+    "Remove the secrets and re-stage before committing.",
+    "If these are false positives, set skip_hook_secrets_scan=true in Posse admin.",
+  ].filter(Boolean).join("\n");
+  return { ok: false, output };
+}
+
 function secretsScan({ cwd }) {
   let staged;
   try {
-    staged = execSync("git diff --cached --name-only --diff-filter=ACM", {
+    staged = execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACM"], {
       cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
     }).trim();
   } catch { return { ok: true, output: "" }; }
@@ -327,11 +363,7 @@ function secretsScan({ cwd }) {
   if (!staged) return { ok: true, output: "" };
 
   const findings = [];
-
-  for (const file of staged.split("\n").filter(Boolean)) {
-    const ext = path.extname(file).toLowerCase();
-    if (BINARY_EXTENSIONS.has(ext)) continue;
-
+  for (const file of scannableStagedFiles(staged)) {
     let content;
     try {
       content = execFileSync("git", ["show", `:${file}`], {
@@ -345,30 +377,10 @@ function secretsScan({ cwd }) {
       if (!fs.existsSync(fullPath)) continue;
       try { content = fs.readFileSync(fullPath, "utf-8"); } catch { continue; }
     }
-
-    const lines = content.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      for (const { re, label } of SECRET_PATTERNS) {
-        if (re.test(lines[i])) {
-          findings.push(`  ${file}:${i + 1} — ${label}`);
-        }
-      }
-    }
+    findings.push(...secretsFindingsForContent(file, content));
   }
 
-  if (findings.length === 0) return { ok: true, output: "" };
-
-  const output = [
-    "SECRETS DETECTED — COMMIT BLOCKED",
-    "",
-    ...findings.slice(0, 20),
-    findings.length > 20 ? `  ... and ${findings.length - 20} more` : "",
-    "",
-    "Remove the secrets and re-stage before committing.",
-    "If these are false positives, set skip_hook_secrets_scan=true in Posse admin.",
-  ].filter(Boolean).join("\n");
-
-  return { ok: false, output };
+  return secretsBlockResult(findings);
 }
 
 async function secretsScanAsync({ cwd }) {
@@ -384,11 +396,7 @@ async function secretsScanAsync({ cwd }) {
   if (!staged) return { ok: true, output: "" };
 
   const findings = [];
-
-  for (const file of staged.split("\n").filter(Boolean)) {
-    const ext = path.extname(file).toLowerCase();
-    if (BINARY_EXTENSIONS.has(ext)) continue;
-
+  for (const file of scannableStagedFiles(staged)) {
     let content;
     try {
       content = await execFileText("git", ["show", `:${file}`], {
@@ -402,33 +410,10 @@ async function secretsScanAsync({ cwd }) {
       if (!fs.existsSync(fullPath)) continue;
       try { content = await fs.promises.readFile(fullPath, "utf-8"); } catch { continue; }
     }
-
-    // Scan whole-file content line-by-line, mirroring the sync `secretsScan`.
-    // `_scanTextForSecrets` only inspects diff-style `+` lines, so feeding it
-    // full file content found nothing — a fail-open no-op. (B10)
-    const lines = content.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      for (const { re, label } of SECRET_PATTERNS) {
-        if (re.test(lines[i])) {
-          findings.push(`  ${file}:${i + 1} — ${label}`);
-        }
-      }
-    }
+    findings.push(...secretsFindingsForContent(file, content));
   }
 
-  if (findings.length === 0) return { ok: true, output: "" };
-
-  const output = [
-    "SECRETS DETECTED — COMMIT BLOCKED",
-    "",
-    ...findings.slice(0, 20),
-    findings.length > 20 ? `  ... and ${findings.length - 20} more` : "",
-    "",
-    "Remove the secrets and re-stage before committing.",
-    "If these are false positives, set skip_hook_secrets_scan=true in Posse admin.",
-  ].filter(Boolean).join("\n");
-
-  return { ok: false, output };
+  return secretsBlockResult(findings);
 }
 
 // ─── post_dev_verify ────────────────────────────────────────────────────────
@@ -438,6 +423,19 @@ async function secretsScanAsync({ cwd }) {
 // code that doesn't build).
 // ctx: { cwd: string }
 //
+// Shared failure formatter for verify-command hooks. Keeps only the tail of
+// the captured output to avoid flooding logs. The heading is caller-supplied
+// (post_dev_verify vs pre_push_gate word their blocks differently).
+function verifyCommandFailureOutput(heading, cmd, err, tailLines) {
+  const raw = ((err.stdout || "") + "\n" + (err.stderr || "")).trim();
+  return [
+    heading,
+    `Command: ${cmd}`,
+    "",
+    raw.split("\n").slice(-tailLines).join("\n"),
+  ].join("\n");
+}
+
 function postDevVerify({ cwd }) {
   const cmd = readSettingText("pre_assess_cmd");
   if (!cmd) return { ok: true, output: "" };
@@ -446,16 +444,7 @@ function postDevVerify({ cwd }) {
     runHookShellCommand(cmd, { cwd, timeoutMs: VERIFY_COMMAND_TIMEOUT_MS });
     return { ok: true, output: "" };
   } catch (err) {
-    const raw = ((err.stdout || "") + "\n" + (err.stderr || "")).trim();
-    // Keep last 80 lines to avoid flooding logs
-    const truncated = raw.split("\n").slice(-80).join("\n");
-    const output = [
-      `Build/lint verification failed (exit ${err.status ?? "?"})`,
-      `Command: ${cmd}`,
-      "",
-      truncated,
-    ].join("\n");
-    return { ok: false, output };
+    return { ok: false, output: postDevVerifyFailureOutput(cmd, err) };
   }
 }
 
@@ -467,18 +456,12 @@ async function postDevVerifyAsync({ cwd }) {
     await runHookShellCommandAsync(cmd, { cwd, timeoutMs: VERIFY_COMMAND_TIMEOUT_MS });
     return { ok: true, output: "" };
   } catch (err) {
-    const raw = ((err.stdout || "") + "\n" + (err.stderr || "")).trim();
-    const truncated = raw.split("\n").slice(-80).join("\n");
-    return {
-      ok: false,
-      output: [
-        `pre_assess_cmd failed (exit ${err.status ?? "?"})`,
-        `Command: ${cmd}`,
-        "",
-        truncated,
-      ].join("\n"),
-    };
+    return { ok: false, output: postDevVerifyFailureOutput(cmd, err) };
   }
+}
+
+function postDevVerifyFailureOutput(cmd, err) {
+  return verifyCommandFailureOutput(`Build/lint verification failed (exit ${err.status ?? "?"})`, cmd, err, 80);
 }
 
 // —— pre_push_gate ——————————————————————————————————————————————————————————————
@@ -493,56 +476,89 @@ async function postDevVerifyAsync({ cwd }) {
 // Config:
 //   pre_push_verify_cmd   Optional command to run before push
 
+// Shared pre-push evaluators: every block decision and its user-visible
+// wording lives once so the twins cannot drift (the risky-push and verify
+// messages had already diverged between them before this extraction).
+function prePushBlock(lines) {
+  return { ok: false, output: ["Push blocked by pre-push gate.", ...lines].join("\n") };
+}
+
+function riskyPushConfigBlock(riskyPushConfigs) {
+  if (riskyPushConfigs.length === 0) return null;
+  return prePushBlock([
+    "Remote push configuration could publish Posse recovery snapshot refs:",
+    ...riskyPushConfigs.slice(0, 10).map((entry) => `  ${entry.key}=${entry.value}`),
+    "Run Posse once to rewrite remote push refspecs, or set remote.<name>.push to HEAD/refs/heads only.",
+  ]);
+}
+
+function dirtyStatusBlock(status) {
+  if (!status) return null;
+  const relevantStatus = status
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .filter((line) => !_isRuntimePath(line.slice(3).trim()));
+  if (relevantStatus.length === 0) return null;
+  return prePushBlock([
+    "Working tree is not clean:",
+    ...relevantStatus.slice(0, 20),
+  ]);
+}
+
+function envFileBlock(names) {
+  const envFiles = names
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => /(^|\/)\.env($|\.)/i.test(line));
+  if (envFiles.length === 0) return null;
+  return prePushBlock([
+    "Unpushed commits include .env-style files:",
+    ...envFiles.slice(0, 10).map((file) => `  ${file}`),
+  ]);
+}
+
+function pushDiffSecretsBlock(diff) {
+  const findings = _scanTextForSecrets(diff);
+  if (findings.length === 0) return null;
+  return prePushBlock([
+    "Possible secrets detected in unpushed diff:",
+    ...findings.slice(0, 10).map((finding) => `  ${finding}`),
+  ]);
+}
+
+function prePushVerifyFailure(verifyCmd, err) {
+  return {
+    ok: false,
+    output: verifyCommandFailureOutput(
+      `Push blocked by pre-push verify command (exit ${err.status ?? "?"}).`,
+      verifyCmd,
+      err,
+      40,
+    ),
+  };
+}
+
 function prePushGate({ cwd, nativeParity = {} }) {
-  const riskyPushConfigs = snapshotPublishingPushConfigs(cwd, nativeParity);
-  if (riskyPushConfigs.length > 0) {
-    return {
-      ok: false,
-      output: [
-        "Push blocked by pre-push gate.",
-        "Remote push configuration could publish Posse recovery snapshot refs:",
-        ...riskyPushConfigs.slice(0, 10).map((entry) => `  ${entry.key}=${entry.value}`),
-        "Run Posse once to rewrite remote push refspecs, or set remote.<name>.push to HEAD/refs/heads only.",
-      ].join("\n"),
-    };
-  }
+  const riskyBlock = riskyPushConfigBlock(snapshotPublishingPushConfigs(cwd, nativeParity));
+  if (riskyBlock) return riskyBlock;
 
   let status = "";
   try {
-    status = execSync("git status --porcelain", {
+    status = execFileSync("git", ["status", "--porcelain"], {
       cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
     }).trim();
   } catch {
     return { ok: true, output: "" };
   }
 
-  if (status) {
-    const relevantStatus = status
-      .split("\n")
-      .map((line) => line.trimEnd())
-      .filter(Boolean)
-      .filter((line) => !_isRuntimePath(line.slice(3).trim()));
-    if (relevantStatus.length === 0) {
-      status = "";
-    } else {
-      status = relevantStatus.join("\n");
-    }
-  }
-
-  if (status) {
-    return {
-      ok: false,
-      output: [
-        "Push blocked by pre-push gate.",
-        "Working tree is not clean:",
-        ...status.split("\n").slice(0, 20),
-      ].join("\n"),
-    };
-  }
+  const dirtyBlock = dirtyStatusBlock(status);
+  if (dirtyBlock) return dirtyBlock;
 
   let upstream = "";
   try {
-    upstream = execSync("git rev-parse --abbrev-ref @{upstream}", {
+    upstream = execFileSync("git", ["rev-parse", "--abbrev-ref", "@{upstream}"], {
       cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
     }).trim();
   } catch { /* no upstream is allowed */ }
@@ -552,36 +568,14 @@ function prePushGate({ cwd, nativeParity = {} }) {
       const names = execFileSync("git", ["diff", "--name-only", `${upstream}..HEAD`], {
         cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
       }).trim();
-      const envFiles = names
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .filter((line) => /(^|\/)\.env($|\.)/i.test(line));
-      if (envFiles.length > 0) {
-        return {
-          ok: false,
-          output: [
-            "Push blocked by pre-push gate.",
-            "Unpushed commits include .env-style files:",
-            ...envFiles.slice(0, 10).map((file) => `  ${file}`),
-          ].join("\n"),
-        };
-      }
+      const envBlock = envFileBlock(names);
+      if (envBlock) return envBlock;
 
       const diff = execFileSync("git", ["diff", `${upstream}..HEAD`, "--unified=0"], {
         cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], maxBuffer: 1024 * 1024 * 4,
       });
-      const findings = _scanTextForSecrets(diff);
-      if (findings.length > 0) {
-        return {
-          ok: false,
-          output: [
-            "Push blocked by pre-push gate.",
-            "Possible secrets detected in unpushed diff:",
-            ...findings.slice(0, 10).map((finding) => `  ${finding}`),
-          ].join("\n"),
-        };
-      }
+      const secretsBlock = pushDiffSecretsBlock(diff);
+      if (secretsBlock) return secretsBlock;
     } catch { /* best effort */ }
   }
 
@@ -590,16 +584,7 @@ function prePushGate({ cwd, nativeParity = {} }) {
     try {
       runHookShellCommand(verifyCmd, { cwd, timeoutMs: VERIFY_COMMAND_TIMEOUT_MS });
     } catch (err) {
-      const raw = ((err.stdout || "") + "\n" + (err.stderr || "")).trim();
-      return {
-        ok: false,
-        output: [
-          `Push blocked by pre-push verify command (exit ${err.status ?? "?"}).`,
-          `Command: ${verifyCmd}`,
-          "",
-          ...raw.split("\n").slice(-40),
-        ].join("\n"),
-      };
+      return prePushVerifyFailure(verifyCmd, err);
     }
   }
 
@@ -607,18 +592,8 @@ function prePushGate({ cwd, nativeParity = {} }) {
 }
 
 async function prePushGateAsync({ cwd, nativeParity = {} }) {
-  const riskyPushConfigs = await snapshotPublishingPushConfigsAsync(cwd, nativeParity);
-  if (riskyPushConfigs.length > 0) {
-    return {
-      ok: false,
-      output: [
-        "Push blocked by pre-push gate.",
-        "Remote push config could publish local Posse recovery refs:",
-        ...riskyPushConfigs.slice(0, 10).map((entry) => `  ${entry.key}=${entry.value}`),
-        "Run Posse once to rewrite remote push refspecs, or set remote.<name>.push to HEAD/refs/heads only.",
-      ].join("\n"),
-    };
-  }
+  const riskyBlock = riskyPushConfigBlock(await snapshotPublishingPushConfigsAsync(cwd, nativeParity));
+  if (riskyBlock) return riskyBlock;
 
   let status = "";
   try {
@@ -631,26 +606,8 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
     return { ok: true, output: "" };
   }
 
-  if (status) {
-    const relevantStatus = status
-      .split("\n")
-      .map((line) => line.trimEnd())
-      .filter(Boolean)
-      .filter((line) => {
-        const file = _normalizeRepoPath(line.slice(3).trim());
-        return !_isRuntimePath(file);
-      });
-    if (relevantStatus.length > 0) {
-      return {
-        ok: false,
-        output: [
-          "Push blocked by pre-push gate.",
-          "Working tree is not clean:",
-          ...status.split("\n").slice(0, 20),
-        ].join("\n"),
-      };
-    }
-  }
+  const dirtyBlock = dirtyStatusBlock(status);
+  if (dirtyBlock) return dirtyBlock;
 
   let upstream = "";
   try {
@@ -668,21 +625,8 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
       })).trim();
-      const envFiles = names
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .filter((line) => /(^|\/)\.env($|\.)/i.test(line));
-      if (envFiles.length > 0) {
-        return {
-          ok: false,
-          output: [
-            "Push blocked by pre-push gate.",
-            "Unpushed commits include .env-style files:",
-            ...envFiles.slice(0, 10).map((file) => `  ${file}`),
-          ].join("\n"),
-        };
-      }
+      const envBlock = envFileBlock(names);
+      if (envBlock) return envBlock;
 
       const diff = await execFileText("git", ["diff", `${upstream}..HEAD`, "--unified=0"], {
         cwd,
@@ -690,17 +634,8 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
         stdio: ["pipe", "pipe", "pipe"],
         maxBuffer: 1024 * 1024 * 4,
       });
-      const findings = _scanTextForSecrets(diff);
-      if (findings.length > 0) {
-        return {
-          ok: false,
-          output: [
-            "Push blocked by pre-push gate.",
-            "Possible secrets detected in unpushed diff:",
-            ...findings.slice(0, 10).map((finding) => `  ${finding}`),
-          ].join("\n"),
-        };
-      }
+      const secretsBlock = pushDiffSecretsBlock(diff);
+      if (secretsBlock) return secretsBlock;
     } catch { /* best effort */ }
   }
 
@@ -709,16 +644,7 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
     try {
       await runHookShellCommandAsync(verifyCmd, { cwd, timeoutMs: VERIFY_COMMAND_TIMEOUT_MS });
     } catch (err) {
-      const raw = ((err.stdout || "") + "\n" + (err.stderr || "")).trim();
-      return {
-        ok: false,
-        output: [
-          `Push blocked by pre-push verify command (exit ${err.status ?? "?"}).`,
-          `Command: ${verifyCmd}`,
-          "",
-          ...raw.split("\n").slice(-40),
-        ].join("\n"),
-      };
+      return prePushVerifyFailure(verifyCmd, err);
     }
   }
 

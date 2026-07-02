@@ -22,7 +22,7 @@ import {
   gitStashLockPath,
 } from "./worktree-locks.js";
 import { SnapshotRef } from "../classes/index.js";
-import { runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
+import { nativeAsyncOptions, runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
 
 export const SNAPSHOT_REF_PREFIX = "refs/posse/snapshots";
 export const SNAPSHOT_NOTES_REF = "refs/notes/posse-snapshots";
@@ -43,19 +43,6 @@ export {
   DEFAULT_SNAPSHOT_MAX_COPY_BYTES,
   DEFAULT_SNAPSHOT_MAX_REFS,
 };
-
-function nativeAsyncOptions(options = {}) {
-  // Only native-parity keys cross into the native invocation, plus the
-  // explicitly threaded manager/signal/timeout — never the whole caller
-  // options bag.
-  const parity = options.nativeParity || {};
-  return {
-    ...parity,
-    manager: options.manager ?? parity.manager,
-    signal: options.signal,
-    timeoutMs: options.timeoutMs,
-  };
-}
 
 function snapshotRefFromNative(value, { metadata = {} } = {}) {
   if (!value || typeof value !== "object") return null;
@@ -167,7 +154,7 @@ export async function dirSizeBytesAsync(dirPath, nativeParity = {}) {
   );
 }
 
-export function readSnapshotNotesByObjectHash(projectDir, objectHashes = []) {
+function readSnapshotNotesByObjectHash(projectDir, objectHashes = []) {
   const wanted = new Set((Array.isArray(objectHashes) ? objectHashes : []).filter(Boolean));
   const notesByObject = new Map();
   if (wanted.size === 0) return notesByObject;
@@ -307,15 +294,6 @@ export async function readSnapshotNotesByObjectHashAsync(projectDir, objectHashe
   return parseBatchCatFileNotes(batchOut, noteObjectByTarget);
 }
 
-export function listSnapshotRefs(projectDir, nativeParity = {}) {
-  if (nativeParity?.disabled === true) return listSnapshotRefsNode(projectDir);
-  try {
-    return runGitNativeMethod("git.snapshot.listRefs", { projectDir: path.resolve(projectDir) }, nativeParity);
-  } catch {
-    return listSnapshotRefsNode(projectDir);
-  }
-}
-
 export async function listSnapshotRefsAsync(projectDir, options = {}) {
   if (options?.disabled === true || options?.nativeParity?.disabled === true) {
     return await listSnapshotRefsNodeAsync(projectDir, options);
@@ -414,18 +392,18 @@ async function listSnapshotRefsNodeAsync(projectDir, options = {}) {
     .sort((a, b) => a.createdMs - b.createdMs);
 }
 
+function readSnapshotNotePayload(projectDir, objectHash) {
+  return { projectDir: path.resolve(projectDir), objectHash: String(objectHash || "") };
+}
+
 export function readSnapshotNote(projectDir, objectHash, nativeParity = {}) {
-  return runGitNativeMethod(
-    "git.snapshot.readNote",
-    { projectDir: path.resolve(projectDir), objectHash: String(objectHash || "") },
-    nativeParity,
-  );
+  return runGitNativeMethod("git.snapshot.readNote", readSnapshotNotePayload(projectDir, objectHash), nativeParity);
 }
 
 export async function readSnapshotNoteAsync(projectDir, objectHash, options = {}) {
   return await runGitNativeMethodAsync(
     "git.snapshot.readNote",
-    { projectDir: path.resolve(projectDir), objectHash: String(objectHash || "") },
+    readSnapshotNotePayload(projectDir, objectHash),
     nativeAsyncOptions(options),
   );
 }
@@ -445,6 +423,10 @@ async function readSnapshotNoteNodeAsync(projectDir, objectHash, options = {}) {
   }
 }
 
+// writeSnapshotNote routes via node-git while writeSnapshotNoteAsync routes
+// via the native git.snapshot.writeNote method — intentionally divergent
+// routing (the async lane keeps note writes on the daemon). Both persist the
+// same payloads; those are built by the shared note layer above.
 export function writeSnapshotNote(projectDir, objectHash, note) {
   if (!objectHash || !note) return false;
   try {
@@ -468,6 +450,15 @@ export async function writeSnapshotNoteAsync(projectDir, objectHash, note, optio
   );
 }
 
+function findDedupRefPayload(projectDir, { wiId, reason, dedupHash }) {
+  return {
+    projectDir: path.resolve(projectDir),
+    wiId: wiId == null ? null : String(wiId),
+    reason,
+    dedupHash: String(dedupHash || ""),
+  };
+}
+
 export function findExistingDedupSnapshotRef(projectDir, { wiId = null, reason = "dirty-worktree", dedupHash = null, nativeParity = {} } = {}) {
   if (nativeParity?.disabled === true) {
     return findExistingDedupSnapshotRefNode(projectDir, { wiId, reason, dedupHash });
@@ -475,7 +466,7 @@ export function findExistingDedupSnapshotRef(projectDir, { wiId = null, reason =
   try {
     return runGitNativeMethod(
       "git.snapshot.findExistingDedupRef",
-      { projectDir: path.resolve(projectDir), wiId: wiId == null ? null : String(wiId), reason, dedupHash: String(dedupHash || "") },
+      findDedupRefPayload(projectDir, { wiId, reason, dedupHash }),
       withDefaultTimeout(nativeParity),
     );
   } catch {
@@ -490,12 +481,7 @@ export async function findExistingDedupSnapshotRefAsync(projectDir, { wiId = nul
   try {
     return await runGitNativeMethodAsync(
       "git.snapshot.findExistingDedupRef",
-      {
-        projectDir: path.resolve(projectDir),
-        wiId: wiId == null ? null : String(wiId),
-        reason,
-        dedupHash: String(dedupHash || ""),
-      },
+      findDedupRefPayload(projectDir, { wiId, reason, dedupHash }),
       { ...withDefaultTimeout(nativeParity), signal },
     );
   } catch (err) {
@@ -526,99 +512,6 @@ async function findExistingDedupSnapshotRefNodeAsync(projectDir, { wiId = null, 
     return ref.refName.includes(`/${wiPart}-${reasonPart}-`);
   });
   return candidates.length > 0 ? candidates[candidates.length - 1] : null;
-}
-
-export function pruneRecoveredWorktreeSnapshots(projectDir, onMsg = () => {}) {
-  const retentionDays = parsePositiveIntSetting("snapshot_retention_days", DEFAULT_SNAPSHOT_RETENTION_DAYS);
-  const maxBytes = parsePositiveIntSetting("snapshot_max_bytes", DEFAULT_SNAPSHOT_MAX_BYTES);
-  const maxRefs = parsePositiveIntSetting("snapshot_max_refs", DEFAULT_SNAPSHOT_MAX_REFS);
-
-  // Preferred storage: git refs under refs/posse/snapshots/*
-  const refs = listSnapshotRefs(projectDir, { disabled: true });
-  const refToRemove = [];
-  if (refs.length > 0) {
-    if (retentionDays > 0) {
-      const cutoffMs = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
-      for (const ref of refs) {
-        if (ref.createdMs > 0 && ref.createdMs < cutoffMs) refToRemove.push(ref.refName);
-      }
-    }
-    const kept = refs.filter((ref) => !refToRemove.includes(ref.refName));
-    if (maxRefs > 0 && kept.length > maxRefs) {
-      const over = kept.length - maxRefs;
-      for (let i = 0; i < over; i++) refToRemove.push(kept[i].refName);
-    }
-    for (const refName of refToRemove) {
-      try { gitExec(["update-ref", "-d", refName], projectDir); } catch { /* best effort */ }
-    }
-    if (refToRemove.length > 0) {
-      try { gitExec(["notes", `--ref=${SNAPSHOT_NOTES_REF}`, "prune"], projectDir); } catch { /* best effort */ }
-      try { gitExec(["gc", "--auto"], projectDir); } catch { /* best effort */ }
-      onMsg(`GC: pruned ${refToRemove.length} snapshot ref(s)`);
-    }
-  }
-
-  // Backward-compat cleanup for legacy directory snapshots.
-  const root = path.join(getRuntimeRoot(projectDir), "recovered-worktrees");
-  if (!fs.existsSync(root)) return { removed: refToRemove.length, bytesFreed: 0 };
-
-  let entries;
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => {
-        const dir = path.join(root, entry.name);
-        let mtimeMs = 0;
-        try { mtimeMs = Number(fs.statSync(dir).mtimeMs || 0); } catch { /* ignore */ }
-        return {
-          dir,
-          name: entry.name,
-          mtimeMs,
-          sizeBytes: dirSizeBytes(dir),
-        };
-      })
-      .sort((a, b) => a.mtimeMs - b.mtimeMs);
-  } catch {
-    return { removed: 0, bytesFreed: 0 };
-  }
-
-  const toRemove = [];
-  let totalBytes = entries.reduce((sum, entry) => sum + entry.sizeBytes, 0);
-
-  if (retentionDays > 0) {
-    const cutoffMs = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
-    for (const entry of entries) {
-      if (entry.mtimeMs > 0 && entry.mtimeMs < cutoffMs) {
-        toRemove.push(entry);
-        totalBytes -= entry.sizeBytes;
-      }
-    }
-  }
-
-  const kept = entries.filter((entry) => !toRemove.includes(entry));
-  if (maxBytes > 0 && totalBytes > maxBytes) {
-    for (const entry of kept) {
-      if (totalBytes <= maxBytes) break;
-      toRemove.push(entry);
-      totalBytes -= entry.sizeBytes;
-    }
-  }
-
-  let removed = 0;
-  let bytesFreed = 0;
-  for (const entry of toRemove) {
-    try {
-      fs.rmSync(entry.dir, { recursive: true, force: true });
-      removed++;
-      bytesFreed += entry.sizeBytes;
-    } catch {
-      // Best effort pruning.
-    }
-  }
-  if (removed > 0) {
-    onMsg(`GC: pruned ${removed} recovery snapshot(s), freed ${bytesFreed} bytes`);
-  }
-  return { removed: removed + refToRemove.length, bytesFreed };
 }
 
 export async function pruneRecoveredWorktreeSnapshotsAsync(projectDir, onMsg = () => {}, { signal = null } = {}) {
@@ -811,6 +704,180 @@ function updateHashWithUntrackedContents(hash, wtPath, untracked = []) {
 
 // ─── Snapshot creation ──────────────────────────────────────────────
 
+// ─── Shared note/fingerprint layer for the preserve twins ───────────────────
+// The sync/async twins differ only in how git output is gathered and which
+// lock primitive they hold; every payload the pair persists (dedup hash,
+// stash message, notes, failure records, the directory fallback) is built
+// here once so the two lanes cannot drift on preserved data.
+
+function newSnapshotToken() {
+  return `${process.pid}-${Date.now()}-${randomToken()}`;
+}
+
+function snapshotStashMessage(reason, uniqueToken) {
+  return `posse-snapshot:${reason}:${new Date().toISOString()}:${uniqueToken}`;
+}
+
+function dirtyStateFingerprint({ status, diffPatch, stagedPatch }, wtPath, untracked) {
+  const hasher = createHash("sha256")
+    .update(status || "")
+    .update("\n---\n")
+    .update(diffPatch || "")
+    .update("\n---\n")
+    .update(stagedPatch || "");
+  updateHashWithUntrackedContents(hasher, wtPath, untracked);
+  return hasher.digest("hex").slice(0, 16);
+}
+
+function dedupReuseNotePayload(existingNote, dedupHash, seenAt) {
+  const existingSeenAt = Array.isArray(existingNote?.seen_at) ? existingNote.seen_at : [];
+  const nextSeenCount = Number.isFinite(Number(existingNote?.seen_count))
+    ? Number(existingNote.seen_count) + 1
+    : 2;
+  return {
+    ...(existingNote || {}),
+    dedup_hash: dedupHash,
+    seen_count: nextSeenCount,
+    seen_at: [...existingSeenAt.slice(-19), seenAt],
+  };
+}
+
+function restoreFailureNoteFields(existingNote, at, wtPath, restoreError) {
+  return {
+    restore_failed_count: Number.isFinite(Number(existingNote?.restore_failed_count))
+      ? Number(existingNote.restore_failed_count) + 1
+      : 1,
+    last_restore_failure: {
+      at,
+      worktree_path: wtPath,
+      error: restoreError,
+    },
+  };
+}
+
+function snapshotNotePayload({ refName, stashHash, wtPath, projectDir, branchName, wiId, reason, headSha, trackedDirty, untracked, dedupHash, status, diffPatch, stagedPatch }) {
+  return {
+    storage: "git-ref",
+    ref_name: refName,
+    object_hash: stashHash,
+    source_worktree: wtPath,
+    project_dir: projectDir,
+    branch_name: branchName,
+    work_item_id: wiId,
+    reason,
+    captured_at: new Date().toISOString(),
+    head_sha: headSha,
+    tracked_dirty: trackedDirty,
+    untracked,
+    dedup_hash: dedupHash,
+    status,
+    diff_patch: diffPatch,
+    staged_patch: stagedPatch,
+  };
+}
+
+// Last-resort data preservation when the stash route is unavailable: write the
+// captured dirty state (patches + untracked file copies) to a recovery
+// directory. Both twins use this — data-preserving degradation is the
+// canonical posture, not a sync-only behavior.
+function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branchName, wiId, onMsg, status, diffPatch, stagedPatch, trackedDirty, untracked, dedupHash, headSha }) {
+  const baseName = [wiId != null ? `wi-${wiId}` : null, safeFilename(reason), dedupHash].filter(Boolean).join("-");
+  const outDir = path.join(recoveryRoot(projectDir), baseName);
+  const partDir = `${outDir}.part-${process.pid}-${Date.now()}`;
+  const untrackedRel = untracked.map((relPath) => String(relPath || "").replace(/\\/g, "/")).filter(Boolean);
+  // The diff/staged patches cannot carry untracked contents (the stash push
+  // already failed), so the only copy lives in the worktree until the files
+  // are mirrored under <snapshot>/untracked/. Never hand back a snapshot
+  // ref that misses any of them — `git clean -fd` runs right after.
+  const untrackedPreservedIn = (dir) => untrackedRel.every((relPath) =>
+    fs.existsSync(path.join(dir, "untracked", ...relPath.split("/")))
+  );
+  const directoryRef = () => SnapshotRef.directory(outDir, {
+    projectDir,
+    worktreePath: wtPath,
+    metadata: { reason, wiId, branchName, dedupHash, headSha },
+  });
+  const untrackedCopyWarnings = [];
+  try {
+    if (fs.existsSync(outDir)) {
+      if (untrackedPreservedIn(outDir)) {
+        return directoryRef();
+      }
+      // Existing snapshot predates untracked content copies; rewrite it.
+      fs.rmSync(outDir, { recursive: true, force: true });
+    }
+  } catch {
+    // proceed with best effort write
+  }
+  try {
+    fs.mkdirSync(partDir, { recursive: true });
+    fs.writeFileSync(path.join(partDir, "status.txt"), status ? `${status}\n` : "", "utf-8");
+    fs.writeFileSync(path.join(partDir, "diff.patch"), diffPatch, "utf-8");
+    fs.writeFileSync(path.join(partDir, "staged.patch"), stagedPatch, "utf-8");
+    for (const relPath of untrackedRel) {
+      const srcPath = path.resolve(wtPath, relPath);
+      if (!isInsideRoot(srcPath, wtPath, { allowEqual: false, followSymlinks: false })) {
+        untrackedCopyWarnings.push({ file: relPath, error: "path escapes worktree root; skipped" });
+        continue;
+      }
+      const destPath = path.join(partDir, "untracked", ...relPath.split("/"));
+      try {
+        fs.mkdirSync(path.dirname(destPath), { recursive: true });
+        fs.copyFileSync(srcPath, destPath);
+      } catch (copyErr) {
+        if (copyErr?.code === "ENOENT" && !fs.existsSync(srcPath)) {
+          // File vanished between enumeration and copy; nothing left to preserve.
+          untrackedCopyWarnings.push({ file: relPath, error: "vanished before copy" });
+          continue;
+        }
+        throw copyErr;
+      }
+    }
+    fs.writeFileSync(path.join(partDir, "manifest.json"), JSON.stringify({
+      source_worktree: wtPath,
+      project_dir: projectDir,
+      branch_name: branchName,
+      work_item_id: wiId,
+      reason,
+      captured_at: new Date().toISOString(),
+      tracked_dirty: trackedDirty,
+      untracked,
+      untracked_copy_warnings: untrackedCopyWarnings,
+      dedup_hash: dedupHash,
+      head_sha: headSha,
+      storage: "directory-fallback",
+    }, null, 2) + "\n", "utf-8");
+  } catch (err) {
+    try { fs.rmSync(partDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    throw err;
+  }
+  try {
+    fs.renameSync(partDir, outDir);
+  } catch (err) {
+    if (fs.existsSync(outDir)) {
+      // Lost a race (or could not clear a stale dir above). Reuse the
+      // winner only if it actually preserved the untracked contents.
+      if (untrackedPreservedIn(outDir)) {
+        try { fs.rmSync(partDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        return directoryRef();
+      }
+      try {
+        fs.rmSync(outDir, { recursive: true, force: true });
+        fs.renameSync(partDir, outDir);
+      } catch {
+        try { fs.rmSync(partDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        if (typeof onMsg === "function") {
+          onMsg(`legacy fallback snapshot could not be finalized at ${outDir}; refusing to report dirty state as preserved`);
+        }
+        return null;
+      }
+      return directoryRef();
+    }
+    throw err;
+  }
+  return directoryRef();
+}
+
 export function preserveDirtyWorktreeSnapshot(
   wtPath,
   projectDir,
@@ -833,137 +900,23 @@ export function preserveDirtyWorktreeSnapshot(
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const dedupHasher = createHash("sha256")
-      .update(status || "")
-      .update("\n---\n")
-      .update(diffPatch || "")
-      .update("\n---\n")
-      .update(stagedPatch || "");
-    updateHashWithUntrackedContents(dedupHasher, wtPath, untracked);
-    const dedupHash = dedupHasher.digest("hex").slice(0, 16);
+    const dedupHash = dirtyStateFingerprint({ status, diffPatch, stagedPatch }, wtPath, untracked);
     const headSha = (() => {
       try { return gitExec(["rev-parse", "HEAD"], wtPath).trim(); } catch { return null; }
     })();
-    const writeLegacyFallback = () => {
-      const baseName = [wiId != null ? `wi-${wiId}` : null, safeFilename(reason), dedupHash].filter(Boolean).join("-");
-      const outDir = path.join(recoveryRoot(projectDir), baseName);
-      const partDir = `${outDir}.part-${process.pid}-${Date.now()}`;
-      const untrackedRel = untracked.map((relPath) => String(relPath || "").replace(/\\/g, "/")).filter(Boolean);
-      // The diff/staged patches cannot carry untracked contents (the stash push
-      // already failed), so the only copy lives in the worktree until the files
-      // are mirrored under <snapshot>/untracked/. Never hand back a snapshot
-      // ref that misses any of them — `git clean -fd` runs right after.
-      const untrackedPreservedIn = (dir) => untrackedRel.every((relPath) =>
-        fs.existsSync(path.join(dir, "untracked", ...relPath.split("/")))
-      );
-      const untrackedCopyWarnings = [];
-      try {
-        if (fs.existsSync(outDir)) {
-          if (untrackedPreservedIn(outDir)) {
-            return SnapshotRef.directory(outDir, {
-              projectDir,
-              worktreePath: wtPath,
-              metadata: { reason, wiId, branchName, dedupHash, headSha },
-            });
-          }
-          // Existing snapshot predates untracked content copies; rewrite it.
-          fs.rmSync(outDir, { recursive: true, force: true });
-        }
-      } catch {
-        // proceed with best effort write
-      }
-      try {
-        fs.mkdirSync(partDir, { recursive: true });
-        fs.writeFileSync(path.join(partDir, "status.txt"), status ? `${status}\n` : "", "utf-8");
-        fs.writeFileSync(path.join(partDir, "diff.patch"), diffPatch, "utf-8");
-        fs.writeFileSync(path.join(partDir, "staged.patch"), stagedPatch, "utf-8");
-        for (const relPath of untrackedRel) {
-          const srcPath = path.resolve(wtPath, relPath);
-          if (!isInsideRoot(srcPath, wtPath, { allowEqual: false, followSymlinks: false })) {
-            untrackedCopyWarnings.push({ file: relPath, error: "path escapes worktree root; skipped" });
-            continue;
-          }
-          const destPath = path.join(partDir, "untracked", ...relPath.split("/"));
-          try {
-            fs.mkdirSync(path.dirname(destPath), { recursive: true });
-            fs.copyFileSync(srcPath, destPath);
-          } catch (copyErr) {
-            if (copyErr?.code === "ENOENT" && !fs.existsSync(srcPath)) {
-              // File vanished between enumeration and copy; nothing left to preserve.
-              untrackedCopyWarnings.push({ file: relPath, error: "vanished before copy" });
-              continue;
-            }
-            throw copyErr;
-          }
-        }
-        fs.writeFileSync(path.join(partDir, "manifest.json"), JSON.stringify({
-          source_worktree: wtPath,
-          project_dir: projectDir,
-          branch_name: branchName,
-          work_item_id: wiId,
-          reason,
-          captured_at: new Date().toISOString(),
-          tracked_dirty: trackedDirty,
-          untracked,
-          untracked_copy_warnings: untrackedCopyWarnings,
-          dedup_hash: dedupHash,
-          head_sha: headSha,
-          storage: "directory-fallback",
-        }, null, 2) + "\n", "utf-8");
-      } catch (err) {
-        try { fs.rmSync(partDir, { recursive: true, force: true }); } catch { /* ignore */ }
-        throw err;
-      }
-      try {
-        fs.renameSync(partDir, outDir);
-      } catch (err) {
-        if (fs.existsSync(outDir)) {
-          // Lost a race (or could not clear a stale dir above). Reuse the
-          // winner only if it actually preserved the untracked contents.
-          if (untrackedPreservedIn(outDir)) {
-            try { fs.rmSync(partDir, { recursive: true, force: true }); } catch { /* ignore */ }
-            return SnapshotRef.directory(outDir, {
-              projectDir,
-              worktreePath: wtPath,
-              metadata: { reason, wiId, branchName, dedupHash, headSha },
-            });
-          }
-          try {
-            fs.rmSync(outDir, { recursive: true, force: true });
-            fs.renameSync(partDir, outDir);
-          } catch {
-            try { fs.rmSync(partDir, { recursive: true, force: true }); } catch { /* ignore */ }
-            if (typeof onMsg === "function") {
-              onMsg(`legacy fallback snapshot could not be finalized at ${outDir}; refusing to report dirty state as preserved`);
-            }
-            return null;
-          }
-          return SnapshotRef.directory(outDir, {
-            projectDir,
-            worktreePath: wtPath,
-            metadata: { reason, wiId, branchName, dedupHash, headSha },
-          });
-        }
-        throw err;
-      }
-      return SnapshotRef.directory(outDir, {
-        projectDir,
-        worktreePath: wtPath,
-        metadata: { reason, wiId, branchName, dedupHash, headSha },
-      });
-    };
+    const fallbackState = { wtPath, projectDir, reason, branchName, wiId, onMsg, status, diffPatch, stagedPatch, trackedDirty, untracked, dedupHash, headSha };
 
-    const uniqueToken = `${process.pid}-${Date.now()}-${randomToken()}`;
-    const stashMessage = `posse-snapshot:${reason}:${new Date().toISOString()}:${uniqueToken}`;
+    const uniqueToken = newSnapshotToken();
+    const stashMessage = snapshotStashMessage(reason, uniqueToken);
     const repoCwd = wtPath;
-    const stashLockPath = gitStashLockPath(wtPath, projectDir);
+    const stashLockPath = gitStashLockPath(wtPath, projectDir, { disabled: true });
     const stashLock = acquireWorktreeLock(stashLockPath);
-    if (!stashLock.acquired) return writeLegacyFallback();
+    if (!stashLock.acquired) return writeLegacyFallbackSnapshot(fallbackState);
     try {
     try {
       gitExec(["stash", "push", "--include-untracked", "-m", stashMessage], wtPath);
     } catch {
-      return writeLegacyFallback();
+      return writeLegacyFallbackSnapshot(fallbackState);
     }
     let stashHash = null;
     let stashRef = null;
@@ -972,7 +925,7 @@ export function preserveDirtyWorktreeSnapshot(
       stashHash = entry?.hash || null;
       stashRef = entry?.ref || null;
     } catch { /* fall through to fallback */ }
-    if (!stashHash || !stashRef) return writeLegacyFallback();
+    if (!stashHash || !stashRef) return writeLegacyFallbackSnapshot(fallbackState);
 
     const dedupEnabled = parseBooleanSetting("snapshot_dedup", true);
     const existingDedupRef = dedupEnabled
@@ -981,16 +934,7 @@ export function preserveDirtyWorktreeSnapshot(
     if (existingDedupRef?.refName) {
       const seenAt = new Date().toISOString();
       const existingNote = readSnapshotNote(repoCwd, existingDedupRef.objectHash);
-      const existingSeenAt = Array.isArray(existingNote?.seen_at) ? existingNote.seen_at : [];
-      const nextSeenCount = Number.isFinite(Number(existingNote?.seen_count))
-        ? Number(existingNote.seen_count) + 1
-        : 2;
-      const nextNote = {
-        ...(existingNote || {}),
-        dedup_hash: dedupHash,
-        seen_count: nextSeenCount,
-        seen_at: [...existingSeenAt.slice(-19), seenAt],
-      };
+      const nextNote = dedupReuseNotePayload(existingNote, dedupHash, seenAt);
       writeSnapshotNote(repoCwd, existingDedupRef.objectHash, nextNote);
       let restoreFailed = false;
       let restoreError = null;
@@ -1004,14 +948,7 @@ export function preserveDirtyWorktreeSnapshot(
         try { gitExec(["reset", "--hard", "HEAD"], wtPath); } catch { /* worktree may be too broken to reset */ }
         const failedNote = {
           ...nextNote,
-          restore_failed_count: Number.isFinite(Number(existingNote?.restore_failed_count))
-            ? Number(existingNote.restore_failed_count) + 1
-            : 1,
-          last_restore_failure: {
-            at: seenAt,
-            worktree_path: wtPath,
-            error: restoreError,
-          },
+          ...restoreFailureNoteFields(existingNote, seenAt, wtPath, restoreError),
         };
         writeSnapshotNote(repoCwd, existingDedupRef.objectHash, failedNote);
         if (typeof onMsg === "function") {
@@ -1040,24 +977,7 @@ export function preserveDirtyWorktreeSnapshot(
       return null;
     }
 
-    const note = {
-      storage: "git-ref",
-      ref_name: refName,
-      object_hash: stashHash,
-      source_worktree: wtPath,
-      project_dir: projectDir,
-      branch_name: branchName,
-      work_item_id: wiId,
-      reason,
-      captured_at: new Date().toISOString(),
-      head_sha: headSha,
-      tracked_dirty: trackedDirty,
-      untracked,
-      dedup_hash: dedupHash,
-      status,
-      diff_patch: diffPatch,
-      staged_patch: stagedPatch,
-    };
+    const note = snapshotNotePayload({ refName, stashHash, wtPath, projectDir, branchName, wiId, reason, headSha, trackedDirty, untracked, dedupHash, status, diffPatch, stagedPatch });
     writeSnapshotNote(repoCwd, stashHash, note);
 
     let restoreFailed = false;
@@ -1069,12 +989,7 @@ export function preserveDirtyWorktreeSnapshot(
       restoreError = applyErr?.message || String(applyErr);
       const failedNote = {
         ...note,
-        restore_failed_count: 1,
-        last_restore_failure: {
-          at: new Date().toISOString(),
-          worktree_path: wtPath,
-          error: restoreError,
-        },
+        ...restoreFailureNoteFields(null, new Date().toISOString(), wtPath, restoreError),
       };
       writeSnapshotNote(repoCwd, stashHash, failedNote);
       try { gitExec(["reset", "--hard", "HEAD"], wtPath); } catch { /* worktree may be too broken to reset */ }
@@ -1123,25 +1038,22 @@ export async function preserveDirtyWorktreeSnapshotAsync(
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const dedupHasher = createHash("sha256")
-      .update(status || "")
-      .update("\n---\n")
-      .update(diffPatch || "")
-      .update("\n---\n")
-      .update(stagedPatch || "");
-    updateHashWithUntrackedContents(dedupHasher, wtPath, untracked);
-    const dedupHash = dedupHasher.digest("hex").slice(0, 16);
+    const dedupHash = dirtyStateFingerprint({ status, diffPatch, stagedPatch }, wtPath, untracked);
     const headSha = await gitExecAsync(["rev-parse", "HEAD"], wtPath, nodeGitAsyncOptions({ signal })).catch((err) => {
       if (isAbortError(err)) throw err;
       return null;
     });
     const repoCwd = wtPath;
+    const fallbackState = { wtPath, projectDir, reason, branchName, wiId, onMsg, status, diffPatch, stagedPatch, trackedDirty, untracked, dedupHash, headSha };
 
-    const uniqueToken = `${process.pid}-${Date.now()}-${randomToken()}`;
-    const stashMessage = `posse-snapshot:${reason}:${new Date().toISOString()}:${uniqueToken}`;
+    const uniqueToken = newSnapshotToken();
+    const stashMessage = snapshotStashMessage(reason, uniqueToken);
     const stashLockPath = gitStashLockPath(wtPath, projectDir, { disabled: true });
     const stashLock = await acquireWorktreeLockAsync(stashLockPath, { signal });
     if (!stashLock.acquired) {
+      // Unlike the sync worker-lane twin (which degrades to the directory
+      // fallback), a lock timeout on the async job lane is a real failure the
+      // caller must see — another lane is actively working this worktree.
       throw new Error(`Timed out waiting for git stash lock: ${stashLockPath}`);
     }
     let stashLockReleased = false;
@@ -1166,15 +1078,15 @@ export async function preserveDirtyWorktreeSnapshotAsync(
     } catch (err) {
       if (isAbortError(err)) throw err;
       if (typeof onMsg === "function") {
-        onMsg(`snapshot lookup failed; stash preserved for manual recovery (${stashMessage})`);
+        onMsg(`snapshot lookup failed; writing directory fallback (stash also preserved: ${stashMessage})`);
       }
-      return null;
+      return writeLegacyFallbackSnapshot(fallbackState);
     }
     if (!stashHash || !stashRef) {
       if (typeof onMsg === "function") {
-        onMsg(`snapshot lookup missed stashed entry; stash preserved for manual recovery (${stashMessage})`);
+        onMsg(`snapshot lookup missed stashed entry; writing directory fallback (stash also preserved: ${stashMessage})`);
       }
-      return null;
+      return writeLegacyFallbackSnapshot(fallbackState);
     }
 
     const dedupEnabled = parseBooleanSetting("snapshot_dedup", true);
@@ -1184,16 +1096,7 @@ export async function preserveDirtyWorktreeSnapshotAsync(
     if (existingDedupRef?.refName) {
       const seenAt = new Date().toISOString();
       const existingNote = await readSnapshotNoteNodeAsync(repoCwd, existingDedupRef.objectHash, { signal });
-      const existingSeenAt = Array.isArray(existingNote?.seen_at) ? existingNote.seen_at : [];
-      const nextSeenCount = Number.isFinite(Number(existingNote?.seen_count))
-        ? Number(existingNote.seen_count) + 1
-        : 2;
-      const nextNote = {
-        ...(existingNote || {}),
-        dedup_hash: dedupHash,
-        seen_count: nextSeenCount,
-        seen_at: [...existingSeenAt.slice(-19), seenAt],
-      };
+      const nextNote = dedupReuseNotePayload(existingNote, dedupHash, seenAt);
       await writeSnapshotNoteAsync(repoCwd, existingDedupRef.objectHash, nextNote, { signal, nativeParity });
 
       let restoreFailed = false;
@@ -1209,14 +1112,7 @@ export async function preserveDirtyWorktreeSnapshotAsync(
         try { await gitExecAsync(["reset", "--hard", "HEAD"], wtPath, { signal }); } catch { /* worktree may be too broken to reset */ }
         const failedNote = {
           ...nextNote,
-          restore_failed_count: Number.isFinite(Number(existingNote?.restore_failed_count))
-            ? Number(existingNote.restore_failed_count) + 1
-            : 1,
-          last_restore_failure: {
-            at: seenAt,
-            worktree_path: wtPath,
-            error: restoreError,
-          },
+          ...restoreFailureNoteFields(existingNote, seenAt, wtPath, restoreError),
         };
         await writeSnapshotNoteAsync(repoCwd, existingDedupRef.objectHash, failedNote, { signal, nativeParity });
         if (typeof onMsg === "function") {
@@ -1246,24 +1142,8 @@ export async function preserveDirtyWorktreeSnapshotAsync(
       return null;
     }
 
-    await writeSnapshotNoteAsync(repoCwd, stashHash, {
-      storage: "git-ref",
-      ref_name: refName,
-      object_hash: stashHash,
-      source_worktree: wtPath,
-      project_dir: projectDir,
-      branch_name: branchName,
-      work_item_id: wiId,
-      reason,
-      captured_at: new Date().toISOString(),
-      head_sha: headSha,
-      tracked_dirty: trackedDirty,
-      untracked,
-      dedup_hash: dedupHash,
-      status,
-      diff_patch: diffPatch,
-      staged_patch: stagedPatch,
-    }, { signal, nativeParity });
+    const note = snapshotNotePayload({ refName, stashHash, wtPath, projectDir, branchName, wiId, reason, headSha, trackedDirty, untracked, dedupHash, status, diffPatch, stagedPatch });
+    await writeSnapshotNoteAsync(repoCwd, stashHash, note, { signal, nativeParity });
 
     let restoreFailed = false;
     let restoreError = null;
@@ -1272,30 +1152,11 @@ export async function preserveDirtyWorktreeSnapshotAsync(
     } catch (applyErr) {
       restoreFailed = true;
       restoreError = applyErr?.message || String(applyErr);
-      await writeSnapshotNoteAsync(repoCwd, stashHash, {
-        storage: "git-ref",
-        ref_name: refName,
-        object_hash: stashHash,
-        source_worktree: wtPath,
-        project_dir: projectDir,
-        branch_name: branchName,
-        work_item_id: wiId,
-        reason,
-        captured_at: new Date().toISOString(),
-        head_sha: headSha,
-        tracked_dirty: trackedDirty,
-        untracked,
-        dedup_hash: dedupHash,
-        status,
-        diff_patch: diffPatch,
-        staged_patch: stagedPatch,
-        restore_failed_count: 1,
-        last_restore_failure: {
-          at: new Date().toISOString(),
-          worktree_path: wtPath,
-          error: restoreError,
-        },
-      }, { signal, nativeParity });
+      const failedNote = {
+        ...note,
+        ...restoreFailureNoteFields(null, new Date().toISOString(), wtPath, restoreError),
+      };
+      await writeSnapshotNoteAsync(repoCwd, stashHash, failedNote, { signal, nativeParity });
       try { await gitExecAsync(["reset", "--hard", "HEAD"], wtPath, { signal }); } catch { /* worktree may be too broken to reset */ }
       if (typeof onMsg === "function") {
         onMsg(`snapshot restore failed after pinning ${refName}; inspect with git show ${refName} and restore with git stash apply ${refName} (${restoreError})`);
@@ -1323,6 +1184,10 @@ export async function preserveDirtyWorktreeSnapshotAsync(
   }
 }
 
+// preserveBranchTipSnapshot / preserveBranchTipSnapshotAsync are intentionally
+// NOT twins of one body: the sync fn builds the tip snapshot in node-git,
+// while the async fn delegates the whole semantics to the native Rust method
+// (git.snapshot.preserveBranchTip). Changes here must be mirrored in Rust.
 export function preserveBranchTipSnapshot(
   projectDir,
   branchName,

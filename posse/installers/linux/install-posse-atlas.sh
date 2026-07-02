@@ -1,13 +1,27 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
 # -----------------------------------------------------------------------------
 # Posse + ATLAS Linux installer
 #
-# Idempotent: re-running without changes is a no-op. Pass --force to reinstall
-# npm deps. Pass --dry-run to preview actions without executing them.
+# Bootstraps a host from scratch: system packages (build toolchain + helper
+# CLIs), Node.js 24+ (via nvm when missing), the Posse checkout, npm deps,
+# Python venv + SCIP language environments (delegated to `posse doctor`, the
+# same engine boot uses), account settings, and shell wiring.
+#
+# Design rules:
+#   - Never dies mid-run without a summary: every step is fenced, failures are
+#     recorded and reported, and dependent steps are marked "blocked".
+#   - Idempotent: re-running is safe; fresh steps are skipped. Pass --force to
+#     reinstall npm deps, --dry-run to preview.
+#   - All command output is captured to a log file; failures print the tail.
 # -----------------------------------------------------------------------------
 
+set -u -o pipefail
+# NOTE: deliberately no `set -e` — the step engine owns error handling so a
+# failing step degrades gracefully instead of killing the run mid-way.
+
+INSTALLER_NAME="install-posse-atlas"
+
+# --- defaults ----------------------------------------------------------------
 POSSE_MODE="preferred"
 POSSE_PHASES="research,planning,assessment,dev"
 POSSE_LIVE_FUNNEL="true"
@@ -19,32 +33,19 @@ RUN_SMOKE="true"
 PERSIST_ENV="true"
 SEED_SETTINGS="true"
 INSTALL_HOST_TOOLS="true"
+INSTALL_NODE="true"
 FORCE_REINSTALL="false"
 DRY_RUN="false"
 CONFIGURE_KEYS="false"
+PLAIN="false"
 INSTALL_ROOT="${HOME}/claude-tools"
 POSSE_DIR=""
 POSSE_REPO_URL="https://github.com/mtstedman/posse.git"
 REPO_ID=""
 REPO_PATH=""
 NODE_MIN_MAJOR="24"
+NVM_VERSION="v0.40.3"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-
-# Step results — populated as the installer runs, printed in the final summary.
-STEP_POSSE_CLONE="pending"
-STEP_HOST_TOOLS="pending"
-STEP_POSSE_NPM="pending"
-STEP_POSSE_PYTHON="pending"
-STEP_POSSE_SCIP="pending"
-STEP_ENV_FILE="pending"
-STEP_POSSE_ALIAS="pending"
-STEP_SEED_SETTINGS="pending"
-STEP_ADMIN_INIT="pending"
-STEP_POSSE_VALIDATE="pending"
-STEP_SMOKE="pending"
-STEP_KEYS="skipped"
-CONFIGURED_KEYS=()
-WARNINGS=()
 
 usage() {
   cat <<'USAGE'
@@ -62,245 +63,370 @@ Options:
   --no-smoke              Skip smoke test
   --no-persist-env        Do not append env sourcing to shell rc files
   --skip-settings         Do not seed ~/.posse/account.db
-  --skip-host-tools       Do not install/check host CLI tools used by Posse
-                          helpers (rg, tesseract, ImageMagick, ffmpeg,
-                          Python, PHP/Composer)
+  --skip-host-tools       Do not install system packages (build toolchain and
+                          helper CLIs: rg, tesseract, ImageMagick, ffmpeg,
+                          Python, PHP). Missing tools are still reported.
+  --no-install-node       Do not auto-install Node via nvm when Node 24+ is missing
   --configure-keys        Interactively prompt for provider API keys (stored in
-                          ~/.config/posse/providers.env, chmod 600). Skipped
-                          keys already set in your environment or providers.env.
-  --force                 Re-run npm install / build even if node_modules looks fresh
+                          ~/.config/posse/providers.env, chmod 600)
+  --force                 Re-run npm install even if node_modules looks fresh
   --dry-run               Print what would happen; do not execute
+  --plain                 Disable colors and spinners (also honors NO_COLOR)
   --help                  Show help
 
 Notes:
   - Uses the Posse checkout containing this installer when available; cloning
-    is only a fallback.
-  - ATLAS is built into Posse (no separate ATLAS checkout or build step).
-  - It installs host CLI tools, posse npm deps including optional packages,
-    Python helper deps, default SCIP/lint language environments
-    (typescript/python/php), writes
-    ~/.config/posse/atlas.env (PATH wiring), seeds ~/.posse/account.db,
-    validates the install, and optionally runs posse atlas-smoke.
-  - Re-runs are safe: unchanged steps are skipped.
+    is only a fallback. ATLAS is built into Posse (no separate checkout).
+  - Installs the C/C++ build toolchain needed by Posse's native npm modules
+    (node-pty and friends) and auto-installs Node 24 via nvm when missing.
+  - Python helper deps and SCIP language environments are installed through
+    `posse doctor` — the same self-repair engine Posse uses at boot — so the
+    installer never fights Posse over how Python environments are managed.
+  - Re-runs are safe: unchanged steps are skipped. All output is captured to a
+    log file whose path is printed in the summary.
 USAGE
 }
 
-fail() {
-  echo "[install-posse-atlas] ERROR: $*" >&2
-  exit 1
+# --- argument parsing ----------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --install-root) INSTALL_ROOT="${2:?missing value for --install-root}"; shift 2 ;;
+    --posse-dir) POSSE_DIR="${2:?missing value for --posse-dir}"; shift 2 ;;
+    --posse-repo-url) POSSE_REPO_URL="${2:?missing value for --posse-repo-url}"; shift 2 ;;
+    --repo-id) REPO_ID="${2:?missing value for --repo-id}"; shift 2 ;;
+    --repo-path) REPO_PATH="${2:?missing value for --repo-path}"; shift 2 ;;
+    --smoke-query) SMOKE_QUERY="${2:?missing value for --smoke-query}"; shift 2 ;;
+    --smoke-provider) SMOKE_PROVIDER="${2:?missing value for --smoke-provider}"; shift 2 ;;
+    --no-smoke) RUN_SMOKE="false"; shift ;;
+    --no-persist-env) PERSIST_ENV="false"; shift ;;
+    --skip-settings) SEED_SETTINGS="false"; shift ;;
+    --skip-host-tools) INSTALL_HOST_TOOLS="false"; shift ;;
+    --no-install-node) INSTALL_NODE="false"; shift ;;
+    --configure-keys) CONFIGURE_KEYS="true"; shift ;;
+    --force) FORCE_REINSTALL="true"; shift ;;
+    --dry-run) DRY_RUN="true"; shift ;;
+    --plain|--no-color) PLAIN="true"; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "[${INSTALLER_NAME}] ERROR: Unknown argument: $1 (see --help)" >&2; exit 2 ;;
+  esac
+done
+
+# =============================================================================
+# UI layer: colors, splash, spinner, step engine
+# =============================================================================
+
+UI_TTY=0
+UI_COLOR=0
+UI_TRUECOLOR=0
+UI_256=0
+UI_UTF8=0
+# Safe defaults so the INT/EXIT traps can render a summary even if the run is
+# interrupted before init_ui.
+R=""; BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; MAGENTA=""; CYAN=""; ORANGE=""
+GLYPH_OK="+"; GLYPH_FAIL="x"; GLYPH_WARN="!"; GLYPH_DOT="-"
+SPINNER_FRAMES=("-")
+
+init_ui() {
+  [[ -t 1 ]] && UI_TTY=1
+  if [[ "$PLAIN" != "true" && -z "${NO_COLOR:-}" && $UI_TTY -eq 1 && "${TERM:-dumb}" != "dumb" ]]; then
+    UI_COLOR=1
+    case "${COLORTERM:-}" in *truecolor*|*24bit*) UI_TRUECOLOR=1 ;; esac
+    case "${TERM:-}" in *256color*|*direct*) UI_256=1 ;; esac
+  fi
+  local charmap="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+  if command -v locale >/dev/null 2>&1; then
+    charmap="$(locale charmap 2>/dev/null || true) ${charmap}"
+  fi
+  case "$charmap" in *UTF-8*|*utf-8*|*UTF8*|*utf8*) UI_UTF8=1 ;; esac
+
+  if [[ $UI_COLOR -eq 1 ]]; then
+    R=$'\033[0m'; BOLD=$'\033[1m'; DIM=$'\033[2m'
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'
+    MAGENTA=$'\033[35m'; CYAN=$'\033[36m'
+    if [[ $UI_TRUECOLOR -eq 1 ]]; then ORANGE=$'\033[38;2;255;153;51m'
+    elif [[ $UI_256 -eq 1 ]]; then ORANGE=$'\033[38;5;208m'
+    else ORANGE="$YELLOW"; fi
+  else
+    R=""; BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; MAGENTA=""; CYAN=""; ORANGE=""
+  fi
+
+  if [[ $UI_UTF8 -eq 1 ]]; then
+    GLYPH_OK="✓"; GLYPH_FAIL="✗"; GLYPH_WARN="!"; GLYPH_DOT="·"
+    SPINNER_FRAMES=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  else
+    GLYPH_OK="+"; GLYPH_FAIL="x"; GLYPH_WARN="!"; GLYPH_DOT="-"
+    SPINNER_FRAMES=("-" "\\" "|" "/")
+  fi
 }
 
-log() {
-  echo "[install-posse-atlas] $*"
+# Per-column orange→magenta truecolor gradient over the block logotype; falls
+# back to per-line 256-color stops, then to a single color, then to ASCII art.
+print_splash() {
+  echo
+  if [[ $UI_UTF8 -eq 1 ]]; then
+    local lines=(
+      "██████╗  ██████╗ ███████╗███████╗███████╗"
+      "██╔══██╗██╔═══██╗██╔════╝██╔════╝██╔════╝"
+      "██████╔╝██║   ██║███████╗███████╗█████╗  "
+      "██╔═══╝ ██║   ██║╚════██║╚════██║██╔══╝  "
+      "██║     ╚██████╔╝███████║███████║███████╗"
+      "╚═╝      ╚═════╝ ╚══════╝╚══════╝╚══════╝"
+    )
+    if [[ $UI_TRUECOLOR -eq 1 ]]; then
+      local line ch i n out r g b
+      for line in "${lines[@]}"; do
+        n=${#line}; out="  "
+        for ((i = 0; i < n; i++)); do
+          ch="${line:i:1}"
+          if [[ "$ch" == " " ]]; then out+=" "; continue; fi
+          r=255
+          g=$((153 - (153 * i) / (n - 1)))
+          b=$(((153 * i) / (n - 1)))
+          out+=$'\033[38;2;'"${r};${g};${b}m${ch}"
+        done
+        printf "%s%s\n" "$out" "$R"
+      done
+    elif [[ $UI_256 -eq 1 ]]; then
+      local stops=(214 208 203 198 197 161) i=0 line
+      for line in "${lines[@]}"; do
+        printf "  \033[38;5;%sm%s%s\n" "${stops[i]}" "$line" "$R"
+        i=$((i + 1))
+      done
+    else
+      local line
+      for line in "${lines[@]}"; do printf "  %s%s%s\n" "$MAGENTA" "$line" "$R"; done
+    fi
+  else
+    cat <<'ASCII'
+   ____   ___  ____  ____  _____
+  |  _ \ / _ \/ ___|/ ___|| ____|
+  | |_) | | | \___ \\___ \|  _|
+  |  __/| |_| |___) |___) | |___
+  |_|    \___/|____/|____/|_____|
+ASCII
+  fi
+  printf "  %s%sPosse + ATLAS%s %s— multi-provider dev orchestrator · Linux installer%s\n" "$BOLD" "$ORANGE" "$R" "$DIM" "$R"
+  printf "  %s%s%s\n\n" "$DIM" "$(printf '%.0s─' {1..58})" "$R"
 }
 
+fmt_duration() {
+  local secs=$1
+  if ((secs >= 60)); then printf "%dm %02ds" $((secs / 60)) $((secs % 60)); else printf "%ds" "$secs"; fi
+}
+
+# --- log file ----------------------------------------------------------------
+LOG_DIR="${HOME}/.posse/logs"
+mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="$(mktemp -d)"
+LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
+: >"$LOG_FILE" 2>/dev/null || LOG_FILE="/dev/null"
+
+log_only() { printf '%s\n' "$*" >>"$LOG_FILE"; }
+
+info() { printf "    %s%s%s %s\n" "$DIM" "$GLYPH_DOT" "$R" "$*"; log_only "[info] $*"; }
+
+WARNINGS=()
 warn() {
-  echo "[install-posse-atlas] WARN: $*" >&2
+  printf "    %s%s%s %s\n" "$YELLOW" "$GLYPH_WARN" "$R" "$*"
   WARNINGS+=("$*")
+  log_only "[warn] $*"
 }
 
-shell_quote() {
-  printf "%q" "$1"
-}
+shell_quote() { printf "%q" "$1"; }
 
 format_command() {
-  local parts=()
-  local arg
-  for arg in "$@"; do
-    parts+=("$(shell_quote "$arg")")
-  done
+  local parts=() arg
+  for arg in "$@"; do parts+=("$(shell_quote "$arg")"); done
   printf "%s" "${parts[*]}"
 }
 
-run() {
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) $(format_command "$@")"
+# --- step engine ---------------------------------------------------------------
+# Steps are declared up-front so numbering and the summary are stable no matter
+# where the run stops. Each step records ok/skipped/partial/failed/blocked.
+STEP_KEYS=(packages node checkout composer npm shell seed doctor admin validate keys smoke)
+declare -A STEP_TITLES=(
+  [packages]="System packages"
+  [node]="Node.js runtime"
+  [checkout]="Posse checkout"
+  [composer]="Composer (SCIP PHP)"
+  [npm]="npm dependencies"
+  [shell]="Shell wiring"
+  [seed]="Account settings"
+  [doctor]="Runtime doctor (Python + SCIP)"
+  [admin]="Provider CLI detection"
+  [validate]="Validation"
+  [keys]="Provider API keys"
+  [smoke]="ATLAS smoke test"
+)
+declare -A STEP_STATUS STEP_NOTE
+for k in "${STEP_KEYS[@]}"; do STEP_STATUS[$k]="pending"; STEP_NOTE[$k]=""; done
+STEP_TOTAL=${#STEP_KEYS[@]}
+STEP_INDEX=0
+CURRENT_STEP=""
+CRITICAL_FAILED="false"
+
+step_begin() {
+  local key="$1"
+  CURRENT_STEP="$key"
+  STEP_INDEX=$((STEP_INDEX + 1))
+  printf "\n%s[%2d/%d]%s %s%s%s\n" "$DIM" "$STEP_INDEX" "$STEP_TOTAL" "$R" "$BOLD" "${STEP_TITLES[$key]}" "$R"
+  log_only ""
+  log_only "===== [${STEP_INDEX}/${STEP_TOTAL}] ${STEP_TITLES[$key]} ====="
+}
+
+step_end() {
+  local status="$1" note="${2:-}"
+  STEP_STATUS[$CURRENT_STEP]="$status"
+  STEP_NOTE[$CURRENT_STEP]="$note"
+  log_only "----- ${CURRENT_STEP}: ${status}${note:+ (${note})}"
+  case "$status" in
+    ok|done) printf "    %s%s%s %s\n" "$GREEN" "$GLYPH_OK" "$R" "${note:-done}" ;;
+    skipped|dry-run) printf "    %s%s %s%s\n" "$DIM" "$GLYPH_DOT" "${note:-$status}" "$R" ;;
+    partial) printf "    %s%s%s %s\n" "$YELLOW" "$GLYPH_WARN" "$R" "${note:-completed with warnings}" ;;
+    failed) printf "    %s%s%s %s\n" "$RED" "$GLYPH_FAIL" "$R" "${note:-failed}" ;;
+    blocked) printf "    %s%s %s%s\n" "$DIM" "$GLYPH_FAIL" "${note:-blocked by an earlier failure}" "$R" ;;
+  esac
+}
+
+step_fail_critical() {
+  CRITICAL_FAILED="true"
+  step_end "failed" "$1"
+}
+
+# Runs `"$@"` with output captured to the log. On a TTY, shows a spinner with
+# elapsed time; on failure prints the last lines of output. Backgrounded, so
+# `"$@"` runs in a subshell: it must not mutate parent state.
+CMD_PID=""
+run_logged() {
+  local desc="$1"; shift
+  log_only ""
+  log_only ">>> ${desc}"
+  log_only ">>> \$ $(format_command "$@")"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf "    %s%s (dry-run) would run:%s %s\n" "$DIM" "$GLYPH_DOT" "$R" "$desc"
     return 0
   fi
-  "$@"
-}
 
-run_in_dir() {
-  local dir="$1"
-  shift
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) (cd $(shell_quote "$dir") && $(format_command "$@"))"
-    return 0
-  fi
-  (cd "$dir" && "$@")
-}
+  local chunk rc started elapsed
+  chunk="$(mktemp)"
+  started=$SECONDS
 
-write_export() {
-  local name="$1"
-  local value="$2"
-  printf 'export %s=%s\n' "$name" "$(shell_quote "$value")"
-}
+  ("$@") >"$chunk" 2>&1 </dev/null &
+  CMD_PID=$!
 
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1 (install it and re-run)"
-}
-
-as_root() {
-  if [[ "$(id -u)" -eq 0 ]]; then
-    "$@"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo "$@"
+  if [[ $UI_COLOR -eq 1 ]]; then
+    local i=0 nframes=${#SPINNER_FRAMES[@]}
+    while kill -0 "$CMD_PID" 2>/dev/null; do
+      elapsed=$((SECONDS - started))
+      printf "\r\033[2K    %s%s%s %s %s(%s)%s" "$CYAN" "${SPINNER_FRAMES[i]}" "$R" "$desc" "$DIM" "$(fmt_duration $elapsed)" "$R"
+      i=$(((i + 1) % nframes))
+      sleep 0.12
+    done
+    printf "\r\033[2K"
   else
-    return 127
+    printf "    %s%s%s %s\n" "$DIM" "$GLYPH_DOT" "$R" "$desc"
+  fi
+
+  wait "$CMD_PID"
+  rc=$?
+  CMD_PID=""
+  elapsed=$((SECONDS - started))
+  cat "$chunk" >>"$LOG_FILE"
+
+  if [[ $rc -eq 0 ]]; then
+    printf "    %s%s%s %s %s(%s)%s\n" "$GREEN" "$GLYPH_OK" "$R" "$desc" "$DIM" "$(fmt_duration $elapsed)" "$R"
+  else
+    printf "    %s%s%s %s %s(exit %d after %s)%s\n" "$RED" "$GLYPH_FAIL" "$R" "$desc" "$DIM" "$rc" "$(fmt_duration $elapsed)" "$R"
+    if [[ -s "$chunk" ]]; then
+      printf "    %s┆ last output:%s\n" "$DIM" "$R"
+      tail -n 10 "$chunk" | sed 's/^/      /'
+      printf "    %s┆ full log: %s%s\n" "$DIM" "$LOG_FILE" "$R"
+    fi
+  fi
+  rm -f "$chunk"
+  return $rc
+}
+
+run_logged_in_dir() {
+  local dir="$1" desc="$2"; shift 2
+  run_logged "$desc" run_in_dir_helper "$dir" "$@"
+}
+run_in_dir_helper() { local dir="$1"; shift; cd "$dir" && "$@"; }
+
+# --- summary + traps -----------------------------------------------------------
+SUMMARY_PRINTED="false"
+print_summary() {
+  [[ "$SUMMARY_PRINTED" == "true" ]] && return 0
+  SUMMARY_PRINTED="true"
+  local key status note color glyph
+  echo
+  printf "  %s%s%s\n" "$DIM" "$(printf '%.0s─' {1..58})" "$R"
+  printf "  %sInstall summary%s\n" "$BOLD" "$R"
+  for key in "${STEP_KEYS[@]}"; do
+    status="${STEP_STATUS[$key]}"
+    note="${STEP_NOTE[$key]}"
+    case "$status" in
+      ok|done) color="$GREEN"; glyph="$GLYPH_OK" ;;
+      partial) color="$YELLOW"; glyph="$GLYPH_WARN" ;;
+      failed) color="$RED"; glyph="$GLYPH_FAIL" ;;
+      blocked) color="$DIM"; glyph="$GLYPH_FAIL" ;;
+      *) color="$DIM"; glyph="$GLYPH_DOT" ;;
+    esac
+    printf "    %s%s%s %-31s %s%s%s%s\n" "$color" "$glyph" "$R" "${STEP_TITLES[$key]}" "$color" "$status" "$R" "${note:+ ${DIM}— ${note}${R}}"
+  done
+  if [[ ${#WARNINGS[@]} -gt 0 ]]; then
+    printf "\n  %sWarnings (%d):%s\n" "$YELLOW" "${#WARNINGS[@]}" "$R"
+    local w
+    for w in "${WARNINGS[@]}"; do printf "    %s%s%s %s\n" "$YELLOW" "$GLYPH_WARN" "$R" "$w"; done
+  fi
+  printf "\n  %sLog:%s %s\n" "$DIM" "$R" "$LOG_FILE"
+  echo
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then
+    printf "  %s%sInstall did not complete.%s Fix the failed step above and re-run — completed steps are skipped on re-runs.\n\n" "$RED" "$BOLD" "$R"
+  else
+    printf "  %sNext steps:%s\n" "$BOLD" "$R"
+    printf "    1. Open a new shell (or: source %s)\n" "${ENV_FILE:-$HOME/.config/posse/atlas.env}"
+    printf "    2. cd <your project> && posse add     %s# describe a task%s\n" "$DIM" "$R"
+    printf "    3. posse go                           %s# plan + run%s\n\n" "$DIM" "$R"
   fi
 }
 
-node_major() {
-  node -p "Number(process.versions.node.split('.')[0])"
+on_interrupt() {
+  [[ -n "$CMD_PID" ]] && kill "$CMD_PID" 2>/dev/null
+  printf "\n\n  %sInterrupted.%s\n" "$RED" "$R"
+  [[ -n "$CURRENT_STEP" && "${STEP_STATUS[$CURRENT_STEP]}" == "pending" ]] && STEP_STATUS[$CURRENT_STEP]="failed" && STEP_NOTE[$CURRENT_STEP]="interrupted"
+  CRITICAL_FAILED="true"
+  print_summary
+  exit 130
 }
 
-set_step() {
-  local step_var="$1" value="$2"
-  printf -v "$step_var" "%s" "$value"
-}
+on_exit() { print_summary; }
+
+trap on_interrupt INT TERM
+trap on_exit EXIT
+
+# =============================================================================
+# helpers
+# =============================================================================
+
+node_major() { node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || echo 0; }
 
 resolve_full_path() {
-  local input_path="$1"
-  node -e 'const path = require("path"); process.stdout.write(path.resolve(process.argv[1]));' "$input_path"
+  # readlink -f is universal on Linux (GNU coreutils / busybox).
+  readlink -f -- "$1" 2>/dev/null || printf "%s" "$1"
 }
 
-detect_installer_posse_dir() {
-  local candidate
-  candidate="$(cd "$SCRIPT_DIR/../.." && pwd -P)" || return 1
-  if [[ -f "$candidate/orchestrator.js" ]]; then
-    printf "%s\n" "$candidate"
-  fi
+fetch_to() {
+  local url="$1" dest="$2"
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 2 -o "$dest" "$url"
+  elif command -v wget >/dev/null 2>&1; then wget -q -O "$dest" "$url"
+  else return 127; fi
 }
 
-ensure_git_checkout() {
-  local dir="$1"
-  local repo_url="$2"
-  local step_var="$3"
-  local label="$4"
-  local sentinel_path="$5"
-  local sentinel_label="$6"
-
-  if [[ -d "$dir" ]]; then
-    set_step "$step_var" "skipped"
-  else
-    log "$label directory missing -- cloning ${repo_url} into ${dir}"
-    run mkdir -p "$(dirname "$dir")"
-    run git clone "$repo_url" "$dir"
-    if [[ "${DRY_RUN}" == "true" ]]; then
-      set_step "$step_var" "dry-run"
-    else
-      set_step "$step_var" "done"
-    fi
-  fi
-
-  if [[ ! -f "$sentinel_path" ]]; then
-    if [[ "${DRY_RUN}" == "true" && ! -d "$dir" ]]; then
-      return
-    fi
-    fail "${sentinel_label} not found in: ${dir} (is this the ${label} repo root?)"
-  fi
-}
-
-install_host_tool_deps() {
-  if [[ "${INSTALL_HOST_TOOLS}" != "true" ]]; then
-    STEP_HOST_TOOLS="skipped"
-    return
-  fi
-
-  local missing=()
-  command -v rg >/dev/null 2>&1 || missing+=("ripgrep")
-  command -v tesseract >/dev/null 2>&1 || missing+=("tesseract")
-  command -v magick >/dev/null 2>&1 || missing+=("ImageMagick")
-  command -v ffmpeg >/dev/null 2>&1 || missing+=("ffmpeg")
-  find_python >/dev/null 2>&1 || missing+=("python3")
-  command -v php >/dev/null 2>&1 || missing+=("php-cli")
-  command -v composer >/dev/null 2>&1 || missing+=("composer")
-
-  if [[ ${#missing[@]} -eq 0 ]]; then
-    log "Host CLI dependencies found: rg, tesseract, magick, ffmpeg, python, php, composer"
-    STEP_HOST_TOOLS="ok"
-    return
-  fi
-
-  local packages=()
-  local manager=""
-  if command -v apt-get >/dev/null 2>&1; then
-    manager="apt-get"
-    packages=(ripgrep tesseract-ocr imagemagick ffmpeg python3 python3-pip php-cli composer)
-  elif command -v dnf >/dev/null 2>&1; then
-    manager="dnf"
-    packages=(ripgrep tesseract ImageMagick ffmpeg python3 python3-pip php-cli composer)
-  elif command -v yum >/dev/null 2>&1; then
-    manager="yum"
-    packages=(ripgrep tesseract ImageMagick ffmpeg python3 python3-pip php-cli composer)
-  elif command -v pacman >/dev/null 2>&1; then
-    manager="pacman"
-    packages=(ripgrep tesseract imagemagick ffmpeg python python-pip php composer)
-  elif command -v zypper >/dev/null 2>&1; then
-    manager="zypper"
-    packages=(ripgrep tesseract-ocr ImageMagick ffmpeg python3 python3-pip php8 composer)
-  fi
-
-  if [[ -z "$manager" ]]; then
-    STEP_HOST_TOOLS="missing"
-    warn "cannot auto-install missing host CLI dependencies (${missing[*]}): supported package manager not found"
-    return
-  fi
-
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) would install host CLI dependencies via ${manager}: ${packages[*]}"
-    STEP_HOST_TOOLS="dry-run"
-    return
-  fi
-
-  if [[ "$(id -u)" -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
-    STEP_HOST_TOOLS="missing"
-    warn "cannot auto-install missing host CLI dependencies (${missing[*]}): sudo not found and current user is not root"
-    return
-  fi
-
-  log "Installing host CLI dependencies via ${manager}: ${packages[*]}"
-  local ok="false"
-  case "$manager" in
-    apt-get)
-      as_root apt-get update || warn "apt-get update failed; trying package install anyway"
-      if as_root apt-get install -y "${packages[@]}"; then ok="true"; fi
-      ;;
-    dnf)
-      if as_root dnf install -y "${packages[@]}"; then ok="true"; fi
-      ;;
-    yum)
-      if as_root yum install -y "${packages[@]}"; then ok="true"; fi
-      ;;
-    pacman)
-      if as_root pacman -S --needed --noconfirm "${packages[@]}"; then ok="true"; fi
-      ;;
-    zypper)
-      if as_root zypper --non-interactive install "${packages[@]}"; then ok="true"; fi
-      ;;
-  esac
-
-  if [[ "$ok" != "true" ]]; then
-    STEP_HOST_TOOLS="failed"
-    warn "host CLI dependency install failed via ${manager}. Missing before install: ${missing[*]}"
-    return
-  fi
-
-  local still_missing=()
-  command -v rg >/dev/null 2>&1 || still_missing+=("rg")
-  command -v tesseract >/dev/null 2>&1 || still_missing+=("tesseract")
-  command -v magick >/dev/null 2>&1 || still_missing+=("magick")
-  command -v ffmpeg >/dev/null 2>&1 || still_missing+=("ffmpeg")
-  find_python >/dev/null 2>&1 || still_missing+=("python3")
-  command -v php >/dev/null 2>&1 || still_missing+=("php")
-  command -v composer >/dev/null 2>&1 || still_missing+=("composer")
-
-  if [[ ${#still_missing[@]} -gt 0 ]]; then
-    STEP_HOST_TOOLS="partial"
-    warn "host CLI packages installed, but these commands are still not visible on PATH: ${still_missing[*]}"
-  else
-    STEP_HOST_TOOLS="done"
-  fi
+fetch_stdout() {
+  local url="$1"
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 2 "$url"
+  elif command -v wget >/dev/null 2>&1; then wget -q -O- "$url"
+  else return 127; fi
 }
 
 find_python() {
@@ -315,68 +441,408 @@ find_python() {
   return 1
 }
 
-install_python_deps() {
-  local requirements="${POSSE_DIR}/requirements.txt"
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) would install posse Python dependencies from ${requirements}"
-    STEP_POSSE_PYTHON="dry-run"
-    return
-  fi
-  if [[ ! -f "$requirements" ]]; then
-    STEP_POSSE_PYTHON="skipped"
-    warn "requirements.txt not found in ${POSSE_DIR}; Python helper dependencies were not installed."
-    return
-  fi
-  local python_bin
-  if ! python_bin="$(find_python)"; then
-    STEP_POSSE_PYTHON="skipped"
-    warn "Python 3.9+ not found; Python helper tools (file/image parsing and conversion) may be unavailable."
-    return
-  fi
-  log "Installing posse Python dependencies"
-  run "$python_bin" -m pip install --user -r "$requirements"
-  STEP_POSSE_PYTHON="done"
+detect_installer_posse_dir() {
+  local candidate
+  candidate="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd -P)" || return 1
+  [[ -f "$candidate/orchestrator.js" ]] && printf "%s\n" "$candidate"
 }
 
-install_scip_deps() {
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) would install Posse-managed SCIP dependencies for ${POSSE_SCIP_LANGUAGES}"
-    STEP_POSSE_SCIP="dry-run"
-    return
-  fi
-
-  log "Installing Posse-managed SCIP dependencies for ${POSSE_SCIP_LANGUAGES}"
-  if (
-    export POSSE_INSTALL_SCIP_LANGUAGES="$POSSE_SCIP_LANGUAGES"
-    export POSSE_INSTALL_SCIP_FORCE="$FORCE_REINSTALL"
-    cd "$POSSE_DIR"
-    node --input-type=module - <<'NODESCIP'
-import { installScipLanguageDependenciesSync } from "./lib/domains/atlas/functions/v2/scip/dependencies.js";
-
-const result = installScipLanguageDependenciesSync({
-  languages: process.env.POSSE_INSTALL_SCIP_LANGUAGES || "typescript,python,php",
-  force: process.env.POSSE_INSTALL_SCIP_FORCE === "true",
-  onProgress: (message) => console.log(`[scip-deps] ${message}`),
-});
-
-for (const row of result.results || []) {
-  const marker = row.ok ? "ok" : "warn";
-  console.log(`[scip-deps] ${marker} ${row.language}: ${row.status} - ${row.message}`);
-}
-
-if (!result.ok) process.exitCode = 2;
-NODESCIP
-  ); then
-    STEP_POSSE_SCIP="done"
+# --- privilege handling --------------------------------------------------------
+# Resolved once, interactively, BEFORE any spinner runs (sudo prompts and
+# spinners don't mix — the password prompt would be swallowed into the log).
+SUDO_STATE="unchecked" # root | ok | none
+ensure_root_access() {
+  [[ "$SUDO_STATE" != "unchecked" ]] && return 0
+  if [[ "$(id -u)" -eq 0 ]]; then
+    SUDO_STATE="root"
+  elif command -v sudo >/dev/null 2>&1; then
+    if sudo -n true 2>/dev/null; then
+      SUDO_STATE="ok"
+    elif [[ $UI_TTY -eq 1 && "$DRY_RUN" != "true" ]]; then
+      printf "    %s%s%s sudo is needed to install system packages (you may be prompted)\n" "$DIM" "$GLYPH_DOT" "$R"
+      if sudo -v; then SUDO_STATE="ok"; else SUDO_STATE="none"; fi
+    else
+      SUDO_STATE="none"
+    fi
   else
-    STEP_POSSE_SCIP="partial"
-    local retry_languages="${POSSE_SCIP_LANGUAGES//,/ }"
-    warn "some SCIP language dependencies could not be installed automatically. Install the missing host toolchains and run: posse atlas-v2 scip install ${retry_languages}"
+    SUDO_STATE="none"
   fi
 }
 
-# True if node_modules is fresh -- i.e. package.json is not newer than
-# node_modules/.package-lock.json. Avoids re-running npm install on every invoke.
+as_root() {
+  case "$SUDO_STATE" in
+    root) "$@" ;;
+    ok) sudo "$@" ;;
+    *) return 127 ;;
+  esac
+}
+
+# --- package manager abstraction -------------------------------------------------
+PKG_MGR="none"
+detect_pkg_manager() {
+  local mgr
+  for mgr in apt-get dnf yum pacman zypper apk; do
+    if command -v "$mgr" >/dev/null 2>&1; then PKG_MGR="$mgr"; return 0; fi
+  done
+}
+
+# Refresh the package index once, in the parent shell, before any spinnered
+# installs (pkg_install runs in run_logged subshells, so state set there —
+# like an "already updated" flag — would not stick).
+PKG_INDEX_REFRESHED="false"
+pkg_refresh_index() {
+  [[ "$PKG_INDEX_REFRESHED" == "true" ]] && return 0
+  PKG_INDEX_REFRESHED="true"
+  case "$PKG_MGR" in
+    apt-get) run_logged "refresh package index (apt-get update)" as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq || true ;;
+    pacman) run_logged "refresh package index (pacman -Sy)" as_root pacman -Sy --noconfirm || true ;;
+  esac
+}
+
+pkg_install() {
+  # Installs one or more packages; returns non-zero if the manager fails.
+  case "$PKG_MGR" in
+    apt-get) as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" ;;
+    dnf) as_root dnf install -y -q "$@" ;;
+    yum) as_root yum install -y -q "$@" ;;
+    pacman) as_root pacman -S --needed --noconfirm "$@" ;;
+    zypper) as_root zypper --non-interactive --quiet install "$@" ;;
+    apk) as_root apk add --no-progress "$@" ;;
+    *) return 127 ;;
+  esac
+}
+
+# Package names per manager. Toolchain packages are what native npm modules
+# (node-pty, tree-sitter, better-sqlite3 fallback builds) need to compile, plus
+# python3-venv/pip which Posse's managed Python runtimes require.
+core_packages() {
+  echo "git curl ca-certificates"
+}
+toolchain_packages() {
+  case "$PKG_MGR" in
+    apt-get) echo "build-essential pkg-config python3 python3-pip python3-venv unzip" ;;
+    dnf|yum) echo "gcc gcc-c++ make pkgconf-pkg-config python3 python3-pip unzip" ;;
+    pacman) echo "base-devel python python-pip unzip" ;;
+    zypper) echo "gcc gcc-c++ make pkg-config python3 python3-pip unzip" ;;
+    apk) echo "build-base pkgconf python3 py3-pip unzip" ;;
+  esac
+}
+
+# name|check-kind|packages(comma-separated candidates, tried in order)
+host_tools_table() {
+  case "$PKG_MGR" in
+    apt-get) cat <<'EOT'
+ripgrep|rg|ripgrep
+tesseract|tesseract|tesseract-ocr
+imagemagick|magick_or_convert|imagemagick
+ffmpeg|ffmpeg|ffmpeg
+php|php|php-cli,php
+composer|composer|composer
+EOT
+      ;;
+    dnf|yum) cat <<'EOT'
+ripgrep|rg|ripgrep
+tesseract|tesseract|tesseract
+imagemagick|magick_or_convert|ImageMagick
+ffmpeg|ffmpeg|ffmpeg
+php|php|php-cli,php
+composer|composer|composer,php-composer
+EOT
+      ;;
+    pacman) cat <<'EOT'
+ripgrep|rg|ripgrep
+tesseract|tesseract|tesseract
+imagemagick|magick_or_convert|imagemagick
+ffmpeg|ffmpeg|ffmpeg
+php|php|php
+composer|composer|composer
+EOT
+      ;;
+    zypper) cat <<'EOT'
+ripgrep|rg|ripgrep
+tesseract|tesseract|tesseract-ocr
+imagemagick|magick_or_convert|ImageMagick
+ffmpeg|ffmpeg|ffmpeg
+php|php|php8-cli,php-cli,php8,php7
+composer|composer|php-composer,composer
+EOT
+      ;;
+    apk) cat <<'EOT'
+ripgrep|rg|ripgrep
+tesseract|tesseract|tesseract-ocr
+imagemagick|magick_or_convert|imagemagick
+ffmpeg|ffmpeg|ffmpeg
+php|php|php83-cli,php82-cli,php
+composer|composer|composer
+EOT
+      ;;
+  esac
+}
+
+tool_available() {
+  case "$1" in
+    magick_or_convert) command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1 ;;
+    *) command -v "$1" >/dev/null 2>&1 ;;
+  esac
+}
+
+# =============================================================================
+# steps
+# =============================================================================
+
+step_packages() {
+  step_begin packages
+  detect_pkg_manager
+
+  # What's missing? Core + toolchain checked by representative commands.
+  local missing_core=() missing_toolchain="false" missing_tools=()
+  command -v git >/dev/null 2>&1 || missing_core+=("git")
+  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing_core+=("curl")
+  { command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; } && command -v make >/dev/null 2>&1 || missing_toolchain="true"
+  find_python >/dev/null 2>&1 || missing_toolchain="true"
+  # Debian/Ubuntu split venv out of python3 — Posse's managed venvs need it.
+  if [[ "$PKG_MGR" == "apt-get" ]] && find_python >/dev/null 2>&1; then
+    "$(find_python)" -m venv --help >/dev/null 2>&1 || missing_toolchain="true"
+  fi
+
+  local line name check pkgs
+  while IFS='|' read -r name check pkgs; do
+    [[ -z "$name" ]] && continue
+    tool_available "$check" || missing_tools+=("${name}|${check}|${pkgs}")
+  done < <(host_tools_table)
+
+  if [[ ${#missing_core[@]} -eq 0 && "$missing_toolchain" == "false" && ${#missing_tools[@]} -eq 0 ]]; then
+    step_end ok "git, curl, build toolchain, and helper CLIs all present"
+    return 0
+  fi
+
+  if [[ "$INSTALL_HOST_TOOLS" != "true" ]]; then
+    local names=()
+    [[ ${#missing_core[@]} -gt 0 ]] && names+=("${missing_core[@]}")
+    [[ "$missing_toolchain" == "true" ]] && names+=("build-toolchain")
+    local t; for t in "${missing_tools[@]}"; do names+=("${t%%|*}"); done
+    warn "missing (not installed due to --skip-host-tools): ${names[*]}"
+    step_end skipped "--skip-host-tools; missing: ${names[*]}"
+    return 0
+  fi
+
+  if [[ "$PKG_MGR" == "none" ]]; then
+    warn "no supported package manager found (apt/dnf/yum/pacman/zypper/apk); install missing packages manually"
+    step_end partial "no package manager; some tools missing"
+    return 0
+  fi
+
+  ensure_root_access
+  if [[ "$SUDO_STATE" == "none" && "$DRY_RUN" != "true" ]]; then
+    warn "cannot install system packages: not root and sudo unavailable/declined"
+    step_end partial "no root access; packages not installed"
+    return 0
+  fi
+
+  pkg_refresh_index
+  local failures=()
+
+  # Core (git/curl) and toolchain go in one shot each — these are standard
+  # package names that exist everywhere; helper CLIs install per-package so a
+  # missing name in one repo can't sink the rest.
+  if [[ ${#missing_core[@]} -gt 0 ]]; then
+    # shellcheck disable=SC2086
+    run_logged "install core packages (${missing_core[*]})" pkg_install $(core_packages) || failures+=("core")
+  fi
+  if [[ "$missing_toolchain" == "true" ]]; then
+    # shellcheck disable=SC2086
+    run_logged "install build toolchain ($(toolchain_packages | cut -c1-48)…)" pkg_install $(toolchain_packages) || failures+=("toolchain")
+  fi
+
+  local entry pkg installed
+  for entry in "${missing_tools[@]}"; do
+    IFS='|' read -r name check pkgs <<<"$entry"
+    installed="false"
+    IFS=',' read -ra candidates <<<"$pkgs"
+    for pkg in "${candidates[@]}"; do
+      if run_logged "install ${name} (${pkg})" pkg_install "$pkg"; then
+        installed="true"
+        break
+      fi
+    done
+    if [[ "$DRY_RUN" == "true" ]]; then continue; fi
+    if [[ "$installed" != "true" ]] || ! tool_available "$check"; then
+      failures+=("$name")
+    fi
+  done
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would install missing system packages"
+  elif [[ ${#failures[@]} -eq 0 ]]; then
+    step_end ok "system packages installed"
+  else
+    # Composer failure here is fine — the composer step has a phar fallback.
+    warn "could not install: ${failures[*]} (Posse degrades gracefully; related helpers are disabled until installed)"
+    step_end partial "installed with gaps: ${failures[*]}"
+  fi
+}
+
+step_node() {
+  step_begin node
+  local major
+  if command -v node >/dev/null 2>&1; then
+    major="$(node_major)"
+    if [[ "$major" -ge "$NODE_MIN_MAJOR" ]]; then
+      NODE_BIN="$(command -v node)"
+      step_end ok "node $(node -v) at ${NODE_BIN}"
+      return 0
+    fi
+    info "found node $(node -v), but ${NODE_MIN_MAJOR}+ is required"
+  else
+    info "node is not installed"
+  fi
+
+  if [[ "$INSTALL_NODE" != "true" ]]; then
+    step_fail_critical "Node ${NODE_MIN_MAJOR}+ required (--no-install-node was passed). Install it and re-run."
+    return 1
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would install Node ${NODE_MIN_MAJOR} via nvm ${NVM_VERSION}"
+    return 0
+  fi
+
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
+    local nvm_installer
+    nvm_installer="$(mktemp)"
+    if ! run_logged "download nvm ${NVM_VERSION}" fetch_to "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" "$nvm_installer"; then
+      rm -f "$nvm_installer"
+      step_fail_critical "could not download nvm; install Node ${NODE_MIN_MAJOR}+ manually and re-run"
+      return 1
+    fi
+    if ! run_logged "install nvm into ${NVM_DIR}" bash "$nvm_installer"; then
+      rm -f "$nvm_installer"
+      step_fail_critical "nvm install failed; see log"
+      return 1
+    fi
+    rm -f "$nvm_installer"
+  fi
+
+  if ! run_logged "install Node ${NODE_MIN_MAJOR} (nvm install ${NODE_MIN_MAJOR})" bash -c "export NVM_DIR=$(shell_quote "$NVM_DIR"); set +u; . \"\$NVM_DIR/nvm.sh\"; nvm install ${NODE_MIN_MAJOR} && nvm alias default ${NODE_MIN_MAJOR}"; then
+    step_fail_critical "Node ${NODE_MIN_MAJOR} install via nvm failed; see log"
+    return 1
+  fi
+
+  # Adopt the freshly installed node in THIS shell.
+  set +u
+  # shellcheck disable=SC1091
+  . "$NVM_DIR/nvm.sh"
+  nvm use --silent "$NODE_MIN_MAJOR" >/dev/null 2>&1
+  set -u
+
+  if command -v node >/dev/null 2>&1 && [[ "$(node_major)" -ge "$NODE_MIN_MAJOR" ]]; then
+    NODE_BIN="$(command -v node)"
+    step_end ok "node $(node -v) installed via nvm at ${NODE_BIN}"
+  else
+    step_fail_critical "node still not usable after nvm install; open a new shell and re-run, or install Node ${NODE_MIN_MAJOR}+ manually"
+    return 1
+  fi
+}
+
+step_checkout() {
+  step_begin checkout
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+
+  if [[ -z "$POSSE_DIR" ]]; then
+    local detected
+    detected="$(detect_installer_posse_dir || true)"
+    if [[ -n "$detected" ]]; then
+      POSSE_DIR="$detected"
+      info "using the Posse checkout containing this installer"
+    else
+      POSSE_DIR="${INSTALL_ROOT}/posse"
+    fi
+  fi
+  POSSE_DIR="$(resolve_full_path "$POSSE_DIR")"
+
+  if [[ -d "$POSSE_DIR" ]]; then
+    if [[ -f "$POSSE_DIR/orchestrator.js" ]]; then
+      step_end ok "existing checkout: ${POSSE_DIR}"
+    else
+      step_fail_critical "${POSSE_DIR} exists but has no orchestrator.js (not a Posse repo root?)"
+      return 1
+    fi
+    return 0
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    step_fail_critical "git is required to clone Posse but is not installed"
+    return 1
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would clone ${POSSE_REPO_URL} into ${POSSE_DIR}"
+    return 0
+  fi
+  mkdir -p "$(dirname "$POSSE_DIR")"
+  if run_logged "clone ${POSSE_REPO_URL}" git clone "$POSSE_REPO_URL" "$POSSE_DIR"; then
+    if [[ -f "$POSSE_DIR/orchestrator.js" ]]; then
+      step_end ok "cloned into ${POSSE_DIR}"
+    else
+      step_fail_critical "clone succeeded but orchestrator.js is missing (wrong repo URL?)"
+      return 1
+    fi
+  else
+    step_fail_critical "git clone failed; see log"
+    return 1
+  fi
+}
+
+do_install_composer_phar() {
+  # Runs in a run_logged subshell: stdout/err go to the log.
+  local bin_dir="$POSSE_DIR/scip/bin"
+  local phar="$bin_dir/composer.phar"
+  local setup expected actual
+  mkdir -p "$bin_dir" || return 1
+  setup="$(mktemp)" || return 1
+  expected="$(fetch_stdout "https://composer.github.io/installer.sig")" || { rm -f "$setup"; return 1; }
+  expected="$(printf "%s" "$expected" | tr -d '[:space:]')"
+  fetch_to "https://getcomposer.org/installer" "$setup" || { rm -f "$setup"; return 1; }
+  actual="$(php -r 'echo hash_file("sha384", $argv[1]);' -- "$setup")" || { rm -f "$setup"; return 1; }
+  if [[ -z "$expected" || "$actual" != "$expected" ]]; then
+    echo "composer installer signature mismatch (expected ${expected:0:16}…, got ${actual:0:16}…)"
+    rm -f "$setup"
+    return 1
+  fi
+  php "$setup" --install-dir="$bin_dir" --filename=composer.phar --quiet
+  local rc=$?
+  rm -f "$setup"
+  [[ $rc -eq 0 && -f "$phar" ]]
+}
+
+step_composer() {
+  step_begin composer
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if command -v composer >/dev/null 2>&1; then
+    step_end ok "composer on PATH"
+    return 0
+  fi
+  if [[ -f "$POSSE_DIR/scip/bin/composer.phar" ]]; then
+    step_end ok "composer.phar already present in scip/bin"
+    return 0
+  fi
+  if ! command -v php >/dev/null 2>&1; then
+    warn "PHP is not installed, so Composer was skipped — SCIP PHP indexing stays disabled until both exist"
+    step_end skipped "php not available"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would download signature-verified composer.phar into scip/bin"
+    return 0
+  fi
+  if run_logged "download verified composer.phar" do_install_composer_phar; then
+    step_end ok "composer.phar installed into scip/bin"
+  else
+    warn "Composer could not be installed (package + phar both failed); SCIP PHP dependency installs will be skipped"
+    step_end partial "composer unavailable"
+  fi
+}
+
 deps_fresh() {
   local dir="$1"
   [[ -d "$dir/node_modules" ]] || return 1
@@ -385,62 +851,89 @@ deps_fresh() {
   return 0
 }
 
-append_source_if_missing() {
-  local rc_file="$1"
-  local env_file="$2"
-  local line="source $(shell_quote "$env_file")"
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) would ensure '${line}' in ${rc_file}"
-    return
+step_npm() {
+  step_begin npm
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+
+  if [[ "$FORCE_REINSTALL" != "true" ]] && deps_fresh "$POSSE_DIR"; then
+    step_end skipped "node_modules is fresh (pass --force to reinstall)"
+    return 0
   fi
-  [[ -f "$rc_file" ]] || touch "$rc_file"
-  grep -F "$line" "$rc_file" >/dev/null 2>&1 || {
-    printf "\n# Posse ATLAS integration\n%s\n" "$line" >>"$rc_file"
-    log "Updated ${rc_file} to source ${env_file}"
-  }
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would run npm install --include=optional in ${POSSE_DIR}"
+    return 0
+  fi
+
+  if run_logged_in_dir "$POSSE_DIR" "npm install (includes native module builds)" \
+    npm install --include=optional --no-fund --no-audit; then
+    step_end ok "npm dependencies installed"
+    return 0
+  fi
+
+  info "retrying once (transient network/registry failures are common)"
+  if run_logged_in_dir "$POSSE_DIR" "npm install (retry)" \
+    npm install --include=optional --no-fund --no-audit; then
+    step_end ok "npm dependencies installed on retry"
+    return 0
+  fi
+
+  step_fail_critical "npm install failed twice — the log usually names the missing system dependency (see above)"
+  return 1
 }
 
-ensure_posse_alias() {
-  local node_bin="$1"
+step_shell_wiring() {
+  step_begin shell
+  ENV_DIR="${HOME}/.config/posse"
+  ENV_FILE="${ENV_DIR}/atlas.env"
   local bin_dir="${HOME}/.local/bin"
   local shim="${bin_dir}/posse"
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) would create posse alias shim at ${shim}"
-    STEP_POSSE_ALIAS="dry-run"
-    return
+
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would write ${ENV_FILE}, install ${shim}, and wire shell rc files"
+    return 0
   fi
+
+  mkdir -p "$ENV_DIR"
+  {
+    echo "# Posse PATH wiring -- generated by ${INSTALLER_NAME}.sh"
+    echo "# ATLAS runtime configuration lives in ~/.posse/account.db (posse admin),"
+    echo "# not environment variables."
+    printf 'export POSSE_BIN_DIR=%s\n' "$(shell_quote "$bin_dir")"
+    # shellcheck disable=SC2016
+    echo 'case ":$PATH:" in *":$POSSE_BIN_DIR:"*) ;; *) export PATH="$POSSE_BIN_DIR:$PATH";; esac'
+  } >"$ENV_FILE"
 
   mkdir -p "$bin_dir"
   cat >"$shim" <<EOF
 #!/usr/bin/env bash
-exec "$(printf "%s" "$node_bin")" "$(printf "%s" "$POSSE_DIR")/orchestrator.js" "\$@"
+exec "$(printf "%s" "$NODE_BIN")" "$(printf "%s" "$POSSE_DIR")/orchestrator.js" "\$@"
 EOF
   chmod 755 "$shim"
-  STEP_POSSE_ALIAS="done"
-  log "Installed posse alias: ${shim}"
 
+  if [[ "$PERSIST_ENV" == "true" ]]; then
+    append_source_if_missing "${HOME}/.bashrc" "$ENV_FILE"
+    [[ -f "${HOME}/.zshrc" ]] && append_source_if_missing "${HOME}/.zshrc" "$ENV_FILE"
+  fi
+
+  local note="env file + posse shim installed"
   if ! command -v posse >/dev/null 2>&1; then
-    warn "posse alias was written to ${bin_dir}, but that directory is not currently on PATH. Add it to PATH or open a new shell after sourcing ${ENV_FILE:-$HOME/.config/posse/atlas.env}."
+    note+=" (open a new shell to pick up PATH)"
+  fi
+  step_end ok "$note"
+}
+
+append_source_if_missing() {
+  local rc_file="$1" env_file="$2"
+  local line="source $(shell_quote "$env_file")"
+  [[ -f "$rc_file" ]] || touch "$rc_file"
+  if ! grep -F "$line" "$rc_file" >/dev/null 2>&1; then
+    printf "\n# Posse ATLAS integration\n%s\n" "$line" >>"$rc_file"
+    info "updated ${rc_file}"
   fi
 }
 
-# Seed ATLAS keys into ~/.posse/account.db without overwriting existing
-# user-set values.
-seed_account_settings() {
-  local node_bin="$1"
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) would seed missing ATLAS keys into ~/.posse/account.db"
-    STEP_SEED_SETTINGS="dry-run"
-    return
-  fi
-  (
-    export POSSE_SEED_MODE="$POSSE_MODE"
-    export POSSE_SEED_PHASES="$POSSE_PHASES"
-    export POSSE_SEED_FUNNEL="$POSSE_LIVE_FUNNEL"
-    export POSSE_SEED_SCIP_MODE="$POSSE_SCIP_MODE"
-    export POSSE_SEED_SCIP_LANGUAGES="$POSSE_SCIP_LANGUAGES"
-    cd "$POSSE_DIR"
-    "$node_bin" - <<'NODESEED'
+SEED_JS='
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -463,17 +956,17 @@ db.pragma("synchronous = NORMAL");
 db.exec(`
   CREATE TABLE IF NOT EXISTS account_settings (
     setting_key TEXT PRIMARY KEY,
-    setting_value TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    setting_value TEXT NOT NULL DEFAULT '"'"''"'"',
+    updated_at TEXT NOT NULL DEFAULT (strftime('"'"'%Y-%m-%dT%H:%M:%fZ'"'"','"'"'now'"'"'))
   );
 `);
 const get = db.prepare(`SELECT setting_value FROM account_settings WHERE setting_key = ?`);
 const upsert = db.prepare(`
   INSERT INTO account_settings (setting_key, setting_value, updated_at)
-  VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  VALUES (?, ?, strftime('"'"'%Y-%m-%dT%H:%M:%fZ'"'"','"'"'now'"'"'))
   ON CONFLICT(setting_key) DO UPDATE
     SET setting_value = excluded.setting_value,
-        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        updated_at = strftime('"'"'%Y-%m-%dT%H:%M:%fZ'"'"','"'"'now'"'"')
 `);
 const tx = db.transaction((entries) => {
   for (const [k, v] of entries) {
@@ -490,389 +983,267 @@ const tx = db.transaction((entries) => {
 tx(Object.entries(seed));
 db.close();
 console.log(`[seed-settings] wrote ${settingsPath} -- added ${added}, kept ${kept} existing, skipped ${skipped} empty`);
-NODESEED
-  )
-  STEP_SEED_SETTINGS="done"
-}
+'
 
-validate_posse() {
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    STEP_POSSE_VALIDATE="dry-run"
-    return
+step_seed_settings() {
+  step_begin seed
+  if [[ "$SEED_SETTINGS" != "true" ]]; then step_end skipped "--skip-settings"; return 0; fi
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would seed missing ATLAS keys into ~/.posse/account.db (merge-only)"
+    return 0
   fi
-  if ( cd "$POSSE_DIR" && node orchestrator.js status >/dev/null 2>&1 ); then
-    STEP_POSSE_VALIDATE="ok"
+  # The seed file must live inside the Posse tree: Node resolves require()
+  # from the script's own directory, and better-sqlite3 lives in
+  # $POSSE_DIR/node_modules. The .cjs extension keeps it CommonJS despite the
+  # repo's "type": "module"; .posse/ is gitignored so a crash can't leave
+  # untracked litter.
+  local seed_file="$POSSE_DIR/.posse/install-seed.tmp.cjs"
+  mkdir -p "$POSSE_DIR/.posse"
+  printf "%s" "$SEED_JS" >"$seed_file"
+  export POSSE_SEED_MODE="$POSSE_MODE" POSSE_SEED_PHASES="$POSSE_PHASES" \
+    POSSE_SEED_FUNNEL="$POSSE_LIVE_FUNNEL" POSSE_SEED_SCIP_MODE="$POSSE_SCIP_MODE" \
+    POSSE_SEED_SCIP_LANGUAGES="$POSSE_SCIP_LANGUAGES"
+  if run_logged_in_dir "$POSSE_DIR" "seed ~/.posse/account.db (merge-only, existing values kept)" "$NODE_BIN" "$seed_file"; then
+    step_end ok "account settings seeded"
   else
-    STEP_POSSE_VALIDATE="failed"
-    warn "posse failed to boot (node orchestrator.js status returned non-zero). Run it manually to see the error."
+    warn "settings seed failed; run 'posse admin' to configure ATLAS settings manually"
+    step_end failed "seed script failed; see log"
   fi
+  rm -f "$seed_file"
+  unset POSSE_SEED_MODE POSSE_SEED_PHASES POSSE_SEED_FUNNEL POSSE_SEED_SCIP_MODE POSSE_SEED_SCIP_LANGUAGES
 }
 
-admin_init() {
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) would run posse admin init --non-interactive"
-    STEP_ADMIN_INIT="dry-run"
-    return
+step_doctor() {
+  step_begin doctor
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would run 'posse doctor' (Python venv + SCIP language environments)"
+    return 0
   fi
-  if ( cd "$POSSE_DIR" && "$NODE_BIN" orchestrator.js admin init --non-interactive ); then
-    STEP_ADMIN_INIT="done"
+  info "delegating to Posse's own dependency engine (managed Python venv, SCIP indexer environments)"
+  if run_logged_in_dir "$POSSE_DIR" "posse doctor (first run builds Python venv + SCIP envs; this can take a few minutes)" \
+    "$NODE_BIN" orchestrator.js doctor; then
+    step_end ok "runtime dependencies ready"
   else
-    STEP_ADMIN_INIT="failed"
-    warn "posse admin init failed. Run it manually to see provider CLI detection details."
+    warn "posse doctor reported unresolved dependencies — run 'posse doctor' after fixing the tools it names (log has details)"
+    step_end partial "some runtime dependencies unresolved"
   fi
 }
 
-check_provider_credentials() {
-  local have=0
-  local candidates=()
-  if command -v claude >/dev/null 2>&1; then
-    candidates+=("claude-cli")
-    have=1
+step_admin_init() {
+  step_begin admin
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would run posse admin init --non-interactive"
+    return 0
   fi
-  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
-    candidates+=("OPENAI_API_KEY")
-    have=1
-  fi
-  if [[ -n "${XAI_API_KEY:-}" ]]; then
-    candidates+=("XAI_API_KEY")
-    have=1
-  fi
-  if [[ -n "${CODEX_API_KEY:-}" || -f "${HOME}/.codex/auth.json" ]]; then
-    candidates+=("codex")
-    have=1
-  fi
-  if [[ "$have" -eq 0 ]]; then
-    warn "no provider credentials detected (claude CLI / OPENAI_API_KEY / XAI_API_KEY / CODEX_API_KEY / ~/.codex/auth.json). Posse will not be able to dispatch jobs until one is configured."
+  if run_logged_in_dir "$POSSE_DIR" "detect provider CLIs (admin init)" "$NODE_BIN" orchestrator.js admin init --non-interactive; then
+    step_end ok "provider CLI detection complete"
   else
-    log "Detected provider credentials: ${candidates[*]}"
+    warn "posse admin init failed — run 'posse admin init' manually to see provider CLI detection details"
+    step_end failed "admin init failed; see log"
   fi
-  if [[ -n "${POSSE_KEY:-}" ]]; then
-    log "Detected Posse remote key: POSSE_KEY"
+}
+
+step_validate() {
+  step_begin validate
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would run node orchestrator.js status"
+    return 0
+  fi
+  local -a cmd=("$NODE_BIN" orchestrator.js status)
+  command -v timeout >/dev/null 2>&1 && cmd=(timeout 300 "${cmd[@]}")
+  if run_logged_in_dir "$POSSE_DIR" "boot posse (orchestrator.js status)" "${cmd[@]}"; then
+    step_end ok "posse boots cleanly"
   else
-    warn "POSSE_KEY is not set. Posse remote prompt/tool catalog requests will require this key."
+    warn "posse failed to boot — run 'posse status' in ${POSSE_DIR} to see the error"
+    step_end failed "status returned non-zero; see log"
   fi
 }
 
-check_git_config() {
-  if ! git config --global user.name >/dev/null 2>&1; then
-    warn "git user.name is not set globally (git config --global user.name \"Your Name\"). Posse auto-commits will fall back to repo-local config."
-  fi
-  if ! git config --global user.email >/dev/null 2>&1; then
-    warn "git user.email is not set globally (git config --global user.email \"you@example.com\")."
-  fi
-}
+# --- provider keys (interactive; no spinner) ------------------------------------
+CONFIGURED_KEYS=()
 
-# Prompt (hidden) for a provider API key and stash it for later persistence.
-# Skips if the env var is already set, or if we already sourced a value from a
-# prior providers.env. Returns 0 if a value was captured, 1 otherwise.
 prompt_for_key() {
   local label="$1" var_name="$2"
   local existing="${!var_name:-}"
   if [[ -n "$existing" ]]; then
-    log "$var_name already set (length ${#existing}) -- skipping"
-    return 1
-  fi
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) would prompt for $label ($var_name)"
+    info "$var_name already set (length ${#existing}) — skipping"
     return 1
   fi
   local input=""
-  # -r: no backslash escapes; -s: hidden; prompt goes to stderr via -p + redirect.
-  read -r -s -p "  Enter $label (press Enter to skip): " input </dev/tty
+  read -r -s -p "      Enter $label (press Enter to skip): " input </dev/tty
   echo >/dev/tty
   if [[ -z "$input" ]]; then
-    log "Skipped $label"
+    info "skipped $label"
     return 1
   fi
-  # Export so the rest of this run can see it (validation, smoke test).
   export "$var_name"="$input"
   CONFIGURED_KEYS+=("$var_name")
   return 0
 }
 
-configure_keys() {
-  local providers_file="$1"
+step_keys() {
+  step_begin keys
+  local providers_file="${ENV_DIR:-$HOME/.config/posse}/providers.env"
+  if [[ "$CONFIGURE_KEYS" != "true" ]]; then
+    step_end skipped "pass --configure-keys to set provider API keys interactively"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would prompt for POSSE_KEY / OPENAI_API_KEY / XAI_API_KEY / CODEX_API_KEY"
+    return 0
+  fi
+  if [[ $UI_TTY -ne 1 ]]; then
+    warn "--configure-keys needs an interactive terminal; skipped"
+    step_end skipped "no TTY"
+    return 0
+  fi
 
-  # Load any previously-captured keys from providers.env so we don't re-prompt.
   if [[ -f "$providers_file" ]]; then
     # shellcheck disable=SC1090
     set -a; source "$providers_file"; set +a
   fi
 
-  log "Configuring provider API keys. Input is hidden. Press Enter to skip."
+  info "input is hidden; press Enter to skip any key"
   prompt_for_key "Posse remote key" "POSSE_KEY" || true
-  prompt_for_key "OpenAI API key"   "OPENAI_API_KEY" || true
-  prompt_for_key "xAI (Grok) key"   "XAI_API_KEY"    || true
-  prompt_for_key "Codex API key (optional -- skip if you prefer 'codex login')" "CODEX_API_KEY" || true
+  prompt_for_key "OpenAI API key" "OPENAI_API_KEY" || true
+  prompt_for_key "xAI (Grok) key" "XAI_API_KEY" || true
+  prompt_for_key "Codex API key (optional — skip if you prefer 'codex login')" "CODEX_API_KEY" || true
 
-  # Offer interactive CLI logins. Skip offers in dry-run.
-  if [[ "${DRY_RUN}" != "true" ]]; then
-    if command -v claude >/dev/null 2>&1; then
-      read -r -p "  Run 'claude' now to log in to Claude? [y/N]: " ans </dev/tty
-      if [[ "$ans" =~ ^[Yy]$ ]]; then
-        claude || warn "claude login command did not exit cleanly"
-      fi
-    fi
-    if command -v codex >/dev/null 2>&1 && [[ -z "${CODEX_API_KEY:-}" ]]; then
-      read -r -p "  Run 'codex login' now? [y/N]: " ans </dev/tty
-      if [[ "$ans" =~ ^[Yy]$ ]]; then
-        codex login || warn "codex login command did not exit cleanly"
-      fi
-    fi
+  local ans
+  if command -v claude >/dev/null 2>&1; then
+    read -r -p "      Run 'claude' now to log in to Claude? [y/N]: " ans </dev/tty
+    [[ "$ans" =~ ^[Yy]$ ]] && { claude || warn "claude login command did not exit cleanly"; }
+  fi
+  if command -v codex >/dev/null 2>&1 && [[ -z "${CODEX_API_KEY:-}" ]]; then
+    read -r -p "      Run 'codex login' now? [y/N]: " ans </dev/tty
+    [[ "$ans" =~ ^[Yy]$ ]] && { codex login || warn "codex login command did not exit cleanly"; }
   fi
 
-  # Persist captured keys to providers.env. Existing file contents are merged
-  # by rewriting only lines whose var we (re)captured, keeping any other
-  # user-added exports untouched.
-  if [[ ${#CONFIGURED_KEYS[@]} -gt 0 ]]; then
-    if [[ "${DRY_RUN}" == "true" ]]; then
-      log "(dry-run) would write ${#CONFIGURED_KEYS[@]} key(s) to $providers_file"
-      STEP_KEYS="dry-run"
-      return
-    fi
-    mkdir -p "$(dirname "$providers_file")"
-    local tmp_file
-    tmp_file="$(mktemp)"
-    if [[ -f "$providers_file" ]]; then
-      # Strip any old lines for the vars we're about to rewrite.
-      local filter_expr=""
-      for k in "${CONFIGURED_KEYS[@]}"; do
-        filter_expr+="/^export ${k}=/d;"
-      done
-      sed "$filter_expr" "$providers_file" >"$tmp_file"
+  if [[ ${#CONFIGURED_KEYS[@]} -eq 0 ]]; then
+    step_end ok "no new keys captured"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$providers_file")"
+  local tmp_file k
+  tmp_file="$(mktemp)"
+  if [[ -f "$providers_file" ]]; then
+    local filter_expr=""
+    for k in "${CONFIGURED_KEYS[@]}"; do filter_expr+="/^export ${k}=/d;"; done
+    sed "$filter_expr" "$providers_file" >"$tmp_file"
+  else
+    : >"$tmp_file"
+  fi
+  for k in "${CONFIGURED_KEYS[@]}"; do
+    printf 'export %s=%q\n' "$k" "${!k}" >>"$tmp_file"
+  done
+  mv "$tmp_file" "$providers_file"
+  chmod 600 "$providers_file"
+
+  if [[ "$PERSIST_ENV" == "true" ]]; then
+    append_source_if_missing "${HOME}/.bashrc" "$providers_file"
+    [[ -f "${HOME}/.zshrc" ]] && append_source_if_missing "${HOME}/.zshrc" "$providers_file"
+  fi
+  step_end ok "wrote ${#CONFIGURED_KEYS[@]} key(s) to ${providers_file} (chmod 600)"
+}
+
+step_smoke() {
+  step_begin smoke
+  if [[ "$RUN_SMOKE" != "true" ]]; then step_end skipped "--no-smoke"; return 0; fi
+  if [[ -z "$REPO_PATH" ]]; then
+    step_end skipped "no --repo-path provided"
+    return 0
+  fi
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would run atlas-smoke on ${REPO_PATH}"
+    return 0
+  fi
+  if run_logged_in_dir "$POSSE_DIR" "atlas-smoke ${REPO_ID:-$(basename "$REPO_PATH")} (query: ${SMOKE_QUERY})" \
+    "$NODE_BIN" ./orchestrator.js atlas-smoke "$REPO_PATH" "$SMOKE_QUERY" "$SMOKE_PROVIDER"; then
+    step_end ok "smoke test passed"
+  else
+    warn "atlas-smoke failed — run it manually: node orchestrator.js atlas-smoke $(format_command "$REPO_PATH" "$SMOKE_QUERY" "$SMOKE_PROVIDER")"
+    step_end failed "smoke test failed; see log"
+  fi
+}
+
+# --- soft preflight checks (warnings only) ---------------------------------------
+check_provider_credentials() {
+  local have=0 candidates=()
+  command -v claude >/dev/null 2>&1 && { candidates+=("claude-cli"); have=1; }
+  [[ -n "${OPENAI_API_KEY:-}" ]] && { candidates+=("OPENAI_API_KEY"); have=1; }
+  [[ -n "${XAI_API_KEY:-}" ]] && { candidates+=("XAI_API_KEY"); have=1; }
+  { [[ -n "${CODEX_API_KEY:-}" || -f "${HOME}/.codex/auth.json" ]]; } && { candidates+=("codex"); have=1; }
+  if [[ "$have" -eq 0 ]]; then
+    if [[ "$CONFIGURE_KEYS" == "true" ]]; then
+      info "no provider credentials detected yet — the keys step below will prompt for them"
     else
-      : >"$tmp_file"
+      warn "no provider credentials detected (claude CLI / OPENAI_API_KEY / XAI_API_KEY / codex). Re-run with --configure-keys, or set one before dispatching jobs."
     fi
-    for k in "${CONFIGURED_KEYS[@]}"; do
-      # Use printf %q to safely escape any shell-special chars in the value.
-      printf 'export %s=%q\n' "$k" "${!k}" >>"$tmp_file"
-    done
-    mv "$tmp_file" "$providers_file"
-    chmod 600 "$providers_file"
-    log "Wrote ${#CONFIGURED_KEYS[@]} key(s) to $providers_file (chmod 600)"
-    STEP_KEYS="${CONFIGURED_KEYS[*]}"
   else
-    STEP_KEYS="none captured"
+    info "provider credentials detected: ${candidates[*]}"
+  fi
+  if [[ -z "${POSSE_KEY:-}" && "$CONFIGURE_KEYS" != "true" ]]; then
+    warn "POSSE_KEY is not set — Posse remote prompt/tool catalog requests need it (--configure-keys can capture it)"
   fi
 }
 
-print_summary() {
-  echo
-  echo "================ Install Summary ================"
-  printf "  posse clone           : %s\n" "$STEP_POSSE_CLONE"
-  printf "  host tool deps        : %s\n" "$STEP_HOST_TOOLS"
-  printf "  posse npm install     : %s\n" "$STEP_POSSE_NPM"
-  printf "  posse python deps     : %s\n" "$STEP_POSSE_PYTHON"
-  printf "  posse SCIP deps       : %s\n" "$STEP_POSSE_SCIP"
-  printf "  env file              : %s\n" "$STEP_ENV_FILE"
-  printf "  posse alias           : %s\n" "$STEP_POSSE_ALIAS"
-  printf "  account settings seed : %s\n" "$STEP_SEED_SETTINGS"
-  printf "  admin init            : %s\n" "$STEP_ADMIN_INIT"
-  printf "  posse validate        : %s\n" "$STEP_POSSE_VALIDATE"
-  printf "  provider keys         : %s\n" "$STEP_KEYS"
-  printf "  smoke test            : %s\n" "$STEP_SMOKE"
-  echo "================================================="
-  if [[ ${#WARNINGS[@]} -gt 0 ]]; then
-    echo
-    echo "Warnings:"
-    for w in "${WARNINGS[@]}"; do
-      printf "  - %s\n" "$w"
-    done
-  fi
-  echo
-  echo "Next steps:"
-  echo "  1. source ${ENV_FILE:-$HOME/.config/posse/atlas.env}"
-  echo "  2. cd ${POSSE_DIR}"
-  echo "  3. posse add                    # describe a task"
-  echo "  4. posse go                     # plan + run"
-  echo
+check_git_config() {
+  command -v git >/dev/null 2>&1 || return 0
+  git config --global user.name >/dev/null 2>&1 \
+    || warn 'git user.name is not set globally (git config --global user.name "Your Name")'
+  git config --global user.email >/dev/null 2>&1 \
+    || warn 'git user.email is not set globally (git config --global user.email "you@example.com")'
 }
 
-# -----------------------------------------------------------------------------
-# Argument parsing
-# -----------------------------------------------------------------------------
+# =============================================================================
+# main
+# =============================================================================
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --install-root) INSTALL_ROOT="$2"; shift 2 ;;
-    --posse-dir) POSSE_DIR="$2"; shift 2 ;;
-    --posse-repo-url) POSSE_REPO_URL="$2"; shift 2 ;;
-    --repo-id) REPO_ID="$2"; shift 2 ;;
-    --repo-path) REPO_PATH="$2"; shift 2 ;;
-    --smoke-query) SMOKE_QUERY="$2"; shift 2 ;;
-    --smoke-provider) SMOKE_PROVIDER="$2"; shift 2 ;;
-    --no-smoke) RUN_SMOKE="false"; shift ;;
-    --no-persist-env) PERSIST_ENV="false"; shift ;;
-    --skip-settings) SEED_SETTINGS="false"; shift ;;
-    --skip-host-tools) INSTALL_HOST_TOOLS="false"; shift ;;
-    --configure-keys) CONFIGURE_KEYS="true"; shift ;;
-    --force) FORCE_REINSTALL="true"; shift ;;
-    --dry-run) DRY_RUN="true"; shift ;;
-    --help) usage; exit 0 ;;
-    *) fail "Unknown argument: $1" ;;
-  esac
-done
+NODE_BIN=""
+ENV_DIR="${HOME}/.config/posse"
+ENV_FILE="${ENV_DIR}/atlas.env"
 
-# -----------------------------------------------------------------------------
-# Pre-flight
-# -----------------------------------------------------------------------------
+init_ui
+print_splash
 
-require_cmd git
-require_cmd node
-require_cmd npm
+log_only "${INSTALLER_NAME} started $(date -Iseconds 2>/dev/null || date)"
+log_only "argv: $0 dry_run=${DRY_RUN} force=${FORCE_REINSTALL} host_tools=${INSTALL_HOST_TOOLS} install_node=${INSTALL_NODE}"
 
-NODE_MAJOR="$(node_major)"
-if [[ "${NODE_MAJOR}" -lt "${NODE_MIN_MAJOR}" ]]; then
-  fail "Node ${NODE_MIN_MAJOR}+ required. Found $(node -v). Install via nvm: nvm install ${NODE_MIN_MAJOR} && nvm use ${NODE_MIN_MAJOR}"
+if [[ "$DRY_RUN" == "true" ]]; then
+  printf "  %s%sDRY RUN%s %s— no changes will be made%s\n" "$BOLD" "$YELLOW" "$R" "$DIM" "$R"
 fi
+printf "  %sLog: %s%s\n" "$DIM" "$LOG_FILE" "$R"
 
-if [[ -z "${POSSE_DIR}" ]]; then
-  DETECTED_POSSE_DIR="$(detect_installer_posse_dir || true)"
-  if [[ -n "$DETECTED_POSSE_DIR" ]]; then
-    POSSE_DIR="$DETECTED_POSSE_DIR"
-    log "Using Posse checkout containing this installer: $POSSE_DIR"
-  else
-    POSSE_DIR="${INSTALL_ROOT}/posse"
-  fi
-fi
-POSSE_DIR="$(resolve_full_path "$POSSE_DIR")"
-
-ensure_git_checkout "$POSSE_DIR" "$POSSE_REPO_URL" "STEP_POSSE_CLONE" "posse" "$POSSE_DIR/orchestrator.js" "orchestrator.js"
-
-if [[ -n "${REPO_PATH}" && ! -d "${REPO_PATH}" ]]; then
-  fail "repo path does not exist: ${REPO_PATH}"
-fi
-if [[ -n "${REPO_PATH}" && -z "${REPO_ID}" ]]; then
-  REPO_ID="$(basename "$REPO_PATH")"
+if [[ -n "$REPO_PATH" ]]; then
+  REPO_PATH="$(resolve_full_path "$REPO_PATH")"
+  [[ -d "$REPO_PATH" ]] || { printf "  %s%s%s repo path does not exist: %s\n" "$RED" "$GLYPH_FAIL" "$R" "$REPO_PATH"; CRITICAL_FAILED="true"; exit 1; }
+  [[ -z "$REPO_ID" ]] && REPO_ID="$(basename "$REPO_PATH")"
 fi
 
 check_git_config
 check_provider_credentials
 
-if [[ "${DRY_RUN}" == "true" ]]; then
-  log "DRY RUN MODE — no changes will be made"
-fi
-
-# -----------------------------------------------------------------------------
-# Install host CLI deps used by Posse helper tools
-# -----------------------------------------------------------------------------
-
-install_host_tool_deps
-
-# -----------------------------------------------------------------------------
-# Install npm deps (idempotent)
-# -----------------------------------------------------------------------------
-
-if [[ "${FORCE_REINSTALL}" != "true" ]] && deps_fresh "$POSSE_DIR"; then
-  log "Posse deps are fresh — skipping npm install (pass --force to reinstall)"
-  STEP_POSSE_NPM="skipped"
-else
-  log "Installing posse npm dependencies"
-  run_in_dir "$POSSE_DIR" npm install --include=optional
-  STEP_POSSE_NPM=$([[ "${DRY_RUN}" == "true" ]] && echo "dry-run" || echo "done")
-fi
-
-install_python_deps
-install_scip_deps
-
-# -----------------------------------------------------------------------------
-# Write env file
-# -----------------------------------------------------------------------------
-
-ENV_DIR="${HOME}/.config/posse"
-ENV_FILE="${ENV_DIR}/atlas.env"
-NODE_BIN="$(command -v node)"
-
-if [[ "${DRY_RUN}" == "true" ]]; then
-  log "(dry-run) would write ${ENV_FILE}"
-  STEP_ENV_FILE="dry-run"
-else
-  mkdir -p "$ENV_DIR"
-  {
-    echo "# Posse PATH wiring -- generated by install-posse-atlas.sh"
-    echo "# ATLAS runtime configuration lives in ~/.posse/account.db (posse admin),"
-    echo "# not environment variables."
-    write_export POSSE_BIN_DIR "${HOME}/.local/bin"
-    echo 'case ":$PATH:" in *":$POSSE_BIN_DIR:"*) ;; *) export PATH="$POSSE_BIN_DIR:$PATH";; esac'
-  } >"$ENV_FILE"
-  log "Wrote environment file: ${ENV_FILE}"
-  STEP_ENV_FILE="done"
-fi
-
-ensure_posse_alias "$NODE_BIN"
-
-PROVIDERS_FILE="${ENV_DIR}/providers.env"
-
-if [[ "${CONFIGURE_KEYS}" == "true" ]]; then
-  configure_keys "$PROVIDERS_FILE"
-fi
-
-if [[ "${PERSIST_ENV}" == "true" ]]; then
-  append_source_if_missing "${HOME}/.bashrc" "${ENV_FILE}"
-  if [[ -f "${HOME}/.zshrc" ]]; then
-    append_source_if_missing "${HOME}/.zshrc" "${ENV_FILE}"
-  fi
-  # Wire providers.env into the profile too, but only if the file actually
-  # exists (no point sourcing a nonexistent file on a fresh system).
-  if [[ -f "$PROVIDERS_FILE" ]]; then
-    append_source_if_missing "${HOME}/.bashrc" "${PROVIDERS_FILE}"
-    if [[ -f "${HOME}/.zshrc" ]]; then
-      append_source_if_missing "${HOME}/.zshrc" "${PROVIDERS_FILE}"
-    fi
-  fi
-fi
-
-# -----------------------------------------------------------------------------
-# Seed account settings (merge-only — never overwrite existing)
-# -----------------------------------------------------------------------------
-
-if [[ "${SEED_SETTINGS}" == "true" ]]; then
-  seed_account_settings "$NODE_BIN"
-else
-  STEP_SEED_SETTINGS="skipped"
-fi
-
-admin_init
-# -----------------------------------------------------------------------------
-# Post-install validation
-# -----------------------------------------------------------------------------
-
-validate_posse
-
-# -----------------------------------------------------------------------------
-# Optional smoke test
-# -----------------------------------------------------------------------------
-
-if [[ "${RUN_SMOKE}" == "true" ]]; then
-  if [[ -z "${REPO_PATH}" ]]; then
-    log "Skipping smoke test (no --repo-path provided)"
-    STEP_SMOKE="skipped"
-  elif [[ "${DRY_RUN}" == "true" ]]; then
-    log "(dry-run) would run atlas-smoke on ${REPO_PATH}"
-    STEP_SMOKE="dry-run"
-  else
-    log "Running ATLAS smoke test"
-    if (
-      set -a
-      # shellcheck disable=SC1090
-      source "$ENV_FILE"
-      set +a
-      cd "$POSSE_DIR"
-      node ./orchestrator.js atlas-smoke "$REPO_PATH" "$SMOKE_QUERY" "$SMOKE_PROVIDER"
-    ); then
-      STEP_SMOKE="ok"
-    else
-      STEP_SMOKE="failed"
-      warn "atlas-smoke failed. Run it manually to see the error: node orchestrator.js atlas-smoke $REPO_PATH $SMOKE_QUERY $SMOKE_PROVIDER"
-    fi
-  fi
-else
-  STEP_SMOKE="skipped"
-fi
-
-# -----------------------------------------------------------------------------
-# Summary
-# -----------------------------------------------------------------------------
+step_packages
+step_node
+step_checkout
+step_composer
+step_npm
+step_shell_wiring
+step_seed_settings
+step_doctor
+step_admin_init
+step_validate
+step_keys
+step_smoke
 
 print_summary
-log "Install complete."
+if [[ "$CRITICAL_FAILED" == "true" ]]; then
+  exit 1
+fi
+exit 0

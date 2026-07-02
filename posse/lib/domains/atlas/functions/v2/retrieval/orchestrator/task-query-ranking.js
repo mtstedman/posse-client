@@ -17,11 +17,46 @@ import { tokenizeForRanking, tokenizeForRankingAsync } from "./tokens.js";
 /** @typedef {import("./rrf.js").FusedEntry<ViewSymbol>} FusedSymbolEntry */
 
 /**
- * Scale applied to task-overlap bonus. Held small intentionally — the
- * orchestrator's RRF order is authoritative; this is a tiebreaker, not
- * an override.
+ * Weight of the task-overlap bonus, applied PROPORTIONALLY to the entry's own
+ * fused score (score += score * weight * overlapRatio). Proportional scaling
+ * is what makes this a genuine tiebreaker: it reorders near-ties (adjacent
+ * RRF ranks differ by a few percent) but cannot vault a deep-ranked symbol
+ * over the top hits — the old flat +0.05 bonus was ~3x a rank-1 RRF score
+ * (1/(k+1) with k=60), so "tiebreaker" silently dominated the fused order.
  */
-const TASK_BONUS_SCALE = 0.05;
+const TASK_BONUS_WEIGHT = 0.25;
+
+/**
+ * Shared scoring core: the twins differ only in how token sets are gathered
+ * (in-process tokenizer vs daemon-backed async tokenizer); the bonus math and
+ * the deterministic re-sort live here once.
+ *
+ * @param {FusedSymbolEntry[]} fused
+ * @param {Set<string>} taskTokens
+ * @param {Set<string>[]} symbolTokenSets one per `fused` entry, same order
+ * @returns {FusedSymbolEntry[]}
+ */
+function applyTaskBonusesAndSort(fused, taskTokens, symbolTokenSets) {
+  for (let i = 0; i < fused.length; i += 1) {
+    const entry = fused[i];
+    const symbolTokens = symbolTokenSets[i];
+    if (symbolTokens.size === 0) continue;
+    const overlap = intersectionSize(taskTokens, symbolTokens);
+    if (overlap === 0) continue;
+    // Normalize by the symbol's token count: a symbol named exactly the
+    // task keyword should bonus more than a long qualified name that
+    // happens to contain it.
+    const overlapRatio = overlap / symbolTokens.size;
+    const bonus = entry.score * TASK_BONUS_WEIGHT * overlapRatio;
+    entry.score += bonus;
+    /** @type {any} */ (entry).taskRanking = { overlap, overlapRatio, bonus };
+  }
+  fused.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.id.localeCompare(b.id);
+  });
+  return fused;
+}
 
 /**
  * Re-rank fused entries with task-query overlap as a tiebreaker. Mutates
@@ -35,25 +70,8 @@ export function applyTaskQueryRanking(fused, taskText) {
   if (!taskText || typeof taskText !== "string") return fused;
   const taskTokens = tokenSet(taskText);
   if (taskTokens.size === 0) return fused;
-  for (const entry of fused) {
-    const sym = entry.payload;
-    const symbolTokens = symbolTokenSet(sym);
-    if (symbolTokens.size === 0) continue;
-    const overlap = intersectionSize(taskTokens, symbolTokens);
-    if (overlap === 0) continue;
-    // Normalize by the symbol's token count: a symbol named exactly the
-    // task keyword should bonus more than a long qualified name that
-    // happens to contain it.
-    const overlapRatio = overlap / symbolTokens.size;
-    const bonus = TASK_BONUS_SCALE * overlapRatio;
-    entry.score += bonus;
-    /** @type {any} */ (entry).taskRanking = { overlap, overlapRatio, bonus };
-  }
-  fused.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    return a.id.localeCompare(b.id);
-  });
-  return fused;
+  const symbolTokenSets = fused.map((entry) => symbolTokenSet(entry.payload));
+  return applyTaskBonusesAndSort(fused, taskTokens, symbolTokenSets);
 }
 
 /**
@@ -68,22 +86,7 @@ export async function applyTaskQueryRankingAsync(fused, taskText) {
   const taskTokens = await tokenSetAsync(taskText);
   if (taskTokens.size === 0) return fused;
   const symbolTokenSets = await Promise.all(fused.map((entry) => symbolTokenSetAsync(entry.payload)));
-  for (let i = 0; i < fused.length; i += 1) {
-    const entry = fused[i];
-    const symbolTokens = symbolTokenSets[i];
-    if (symbolTokens.size === 0) continue;
-    const overlap = intersectionSize(taskTokens, symbolTokens);
-    if (overlap === 0) continue;
-    const overlapRatio = overlap / symbolTokens.size;
-    const bonus = TASK_BONUS_SCALE * overlapRatio;
-    entry.score += bonus;
-    /** @type {any} */ (entry).taskRanking = { overlap, overlapRatio, bonus };
-  }
-  fused.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    return a.id.localeCompare(b.id);
-  });
-  return fused;
+  return applyTaskBonusesAndSort(fused, taskTokens, symbolTokenSets);
 }
 
 /**

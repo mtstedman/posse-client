@@ -489,14 +489,6 @@ export function acquireWorktreeLock(lockPath, {
   return { acquired: false, reason: "timeout", lockPath, lastErrorCode: lastRetryableError?.code || null, lastErrorMessage: lastRetryableError?.message || null };
 }
 
-export function releaseWorktreeLock(lockOrPath, maybeLock = null) {
-  const lock = isWorktreeLockHandle(lockOrPath) ? lockOrPath : maybeLock;
-  if (!(lock instanceof WorktreeLock)) {
-    throw new Error("releaseWorktreeLock requires a WorktreeLock handle");
-  }
-  return lock.release();
-}
-
 export async function acquireWorktreeLockAsync(lockPath, {
   waitMs = null,
   pollMs = WORKTREE_LOCK_POLL_MS,
@@ -564,45 +556,48 @@ export async function releaseWorktreeLockAsync(lockOrPath, maybeLock = null) {
   throw new Error("releaseWorktreeLockAsync requires a worktree lock handle");
 }
 
-export function worktreeLockPath(wtPath, projectDir = null, nativeParity = {}) {
+// Shared lock-path request preamble: runtime-root resolution, the best-effort
+// info/exclude write, and payload normalization live once so the sync/async
+// twins send identical requests.
+//
+// ROUTING INVARIANT: every worktree/stash lock-path RESOLUTION call site passes
+// `{ disabled: true }` so the path is computed by the Node implementation on
+// both the sync worker lane and the async lifecycle lane. Lock paths are pure
+// path computations; if one lane resolved via the native binary and the other
+// via Node, a native/Node disagreement would make the lanes lock DIFFERENT
+// files and silently break cross-lane mutual exclusion. (Branch locks resolve
+// via native on both twins — consistent, so left as-is.)
+function lockPathRequestPayload(wtPath, projectDir, extra = {}) {
   const runtimeRoot = getRuntimeRoot(projectDir || wtPath);
   try { ensurePosseGitInfoExclude(projectDir || wtPath); } catch { /* best effort */ }
-  return runGitNativeMethod(
-    "git.worktree.lockPath",
-    { wtPath: path.resolve(wtPath), projectDir: projectDir ? path.resolve(projectDir) : null, runtimeRoot },
-    nativeParity,
-  );
+  return {
+    wtPath: path.resolve(wtPath),
+    projectDir: projectDir ? path.resolve(projectDir) : null,
+    runtimeRoot,
+    ...extra,
+  };
+}
+
+export function worktreeLockPath(wtPath, projectDir = null, nativeParity = {}) {
+  return runGitNativeMethod("git.worktree.lockPath", lockPathRequestPayload(wtPath, projectDir), nativeParity);
 }
 
 export function gitStashLockPath(wtPath, projectDir = null, nativeParity = {}) {
-  const runtimeRoot = getRuntimeRoot(projectDir || wtPath);
-  try { ensurePosseGitInfoExclude(projectDir || wtPath); } catch { /* best effort */ }
-  return runGitNativeMethod(
-    "git.worktree.stashLockPath",
-    { wtPath: path.resolve(wtPath), projectDir: projectDir ? path.resolve(projectDir) : null, runtimeRoot },
-    nativeParity,
-  );
+  return runGitNativeMethod("git.worktree.stashLockPath", lockPathRequestPayload(wtPath, projectDir), nativeParity);
 }
 
 export async function gitStashLockPathAsync(wtPath, projectDir = null, { signal = null, nativeParity = {} } = {}) {
   return await runGitNativeMethodAsync(
     "git.worktree.stashLockPath",
-    { wtPath: path.resolve(wtPath), projectDir: projectDir ? path.resolve(projectDir) : null, runtimeRoot: getRuntimeRoot(projectDir || wtPath) },
+    lockPathRequestPayload(wtPath, projectDir),
     { ...nativeParity, signal },
   );
 }
 
 export function gitBranchLockPath(wtPath, branchName, projectDir = null, nativeParity = {}) {
-  const runtimeRoot = getRuntimeRoot(projectDir || wtPath);
-  try { ensurePosseGitInfoExclude(projectDir || wtPath); } catch { /* best effort */ }
   return runGitNativeMethod(
     "git.worktree.branchLockPath",
-    {
-      wtPath: path.resolve(wtPath),
-      projectDir: projectDir ? path.resolve(projectDir) : null,
-      branchName,
-      runtimeRoot,
-    },
+    lockPathRequestPayload(wtPath, projectDir, { branchName }),
     nativeParity,
   );
 }
@@ -621,7 +616,7 @@ export function withWorktreeLock(wtPath, projectDir, fn, opts = {}) {
 }
 
 export async function withWorktreeLockAsync(wtPath, projectDir, fn, opts = {}) {
-  const lockPath = worktreeLockPath(wtPath, projectDir);
+  const lockPath = worktreeLockPath(wtPath, projectDir, { disabled: true });
   const lock = await acquireWorktreeLockAsync(lockPath, opts);
   if (!lock.acquired) {
     throw new Error(`Timed out waiting for worktree lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);

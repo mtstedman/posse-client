@@ -4,15 +4,7 @@
 // wrappers over the native git binary plus a result compactor for the merge op.
 
 import path from "path";
-import { runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
-
-export function classifyDirtyWorktree(wtPath, { jobId = null, nativeParity = {} } = {}) {
-  return runGitNativeMethod(
-    "git.worktree.classifyDirty",
-    { wtPath: path.resolve(wtPath), jobId: jobId == null ? null : String(jobId) },
-    nativeParity,
-  );
-}
+import { runGitNativeMethodAsync } from "./native/invoke.js";
 
 export async function classifyDirtyWorktreeAsync(wtPath, { jobId = null, signal = null, nativeParity = {} } = {}) {
   return await runGitNativeMethodAsync(
@@ -26,10 +18,6 @@ export async function classifyDirtyWorktreeAsync(wtPath, { jobId = null, signal 
  * Is a merge currently in progress inside this worktree? True when MERGE_HEAD
  * is set (from a `git merge` that hit conflicts or was paused before commit).
  */
-export function isMergeInProgress(wtPath, nativeParity = {}) {
-  return runGitNativeMethod("git.worktree.isMergeInProgress", { wtPath: path.resolve(wtPath) }, nativeParity);
-}
-
 export async function isMergeInProgressAsync(wtPath, { signal = null, nativeParity = {} } = {}) {
   return await runGitNativeMethodAsync(
     "git.worktree.isMergeInProgress",
@@ -42,10 +30,6 @@ export async function isMergeInProgressAsync(wtPath, { signal = null, nativePari
  * List the unmerged (conflicted) paths in a worktree. Empty array when no
  * conflicts or when git errors out.
  */
-export function listMergeConflicts(wtPath, nativeParity = {}) {
-  return runGitNativeMethod("git.worktree.listMergeConflicts", { wtPath: path.resolve(wtPath) }, nativeParity);
-}
-
 export async function listMergeConflictsAsync(wtPath, { signal = null, nativeParity = {} } = {}) {
   return await runGitNativeMethodAsync(
     "git.worktree.listMergeConflicts",

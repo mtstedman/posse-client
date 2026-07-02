@@ -166,9 +166,19 @@ function mergeWarmPayload(existing, incoming) {
     if (!trimmed || seen.has(trimmed)) continue;
     seen.add(trimmed);
     paths.push(trimmed);
-    if (paths.length >= 200) break;
   }
-  if (paths.length > 0) merged.paths = paths;
+  const truncated = existing?.paths_truncated === true
+    || incoming?.paths_truncated === true
+    || paths.length > 200;
+  if (truncated) {
+    // Never index a silent subset of an over-cap union: drop the hints and
+    // mark the payload so the warm falls back to the freshness scan, which
+    // covers the dropped tail from ledger staleness.
+    merged.paths = [];
+    merged.paths_truncated = true;
+  } else if (paths.length > 0) {
+    merged.paths = paths;
+  }
   const eventCount = warmEventCount(existing) + warmEventCount(incoming);
   if (eventCount > 1) merged._atlas_event_count = eventCount;
   const eventTypes = uniqueWarmEventTypes([

@@ -37,7 +37,7 @@ import { signalAbortError } from "../../../runtime/functions/yield.js";
 
 export { extractJson };
 
-const LIVE_CHANNEL_TOOL_NAMES = new Set(["agent_feedback", "get_operator_feedback", "ack_operator_feedback"]);
+import { LIVE_CHANNEL_TOOL_NAMES } from "../../../../functions/tools/tool-suites.js";
 const LIVE_CHANNEL_TURN_LIMIT = 12;
 
 function abortableThrottle(ms, signal = null) {

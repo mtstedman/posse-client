@@ -79,15 +79,6 @@ function gitNativeOptions(options = {}) {
   return options.nativeParity || options;
 }
 
-export function ensureRestrictivePushRefspecs(cwd, options = {}) {
-  const result = runGitNativeMethod(
-    "git.ensureRestrictivePushRefspecs",
-    { cwd },
-    gitNativeOptions(options),
-  );
-  return Array.isArray(result?.changed) ? result.changed : [];
-}
-
 export async function ensureRestrictivePushRefspecsAsync(cwd, options = {}) {
   const result = await runGitNativeMethodAsync(
     "git.ensureRestrictivePushRefspecs",

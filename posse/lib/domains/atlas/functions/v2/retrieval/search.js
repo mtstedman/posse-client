@@ -435,7 +435,7 @@ function normalizeEntities(value) {
   for (const entry of raw) {
     const text = String(entry || "").trim();
     if (!text || seen.has(text)) continue;
-    if (text !== "symbols" && text !== "memories" && text !== "feedback") continue;
+    if (text !== "symbols" && text !== "feedback") continue;
     seen.add(text);
     out.push(text);
   }
@@ -467,7 +467,14 @@ function rankOverlaySymbols({ repoRoot, sessionId, query, limit }) {
  */
 function overlayHit({ entry, symbol, query }) {
   const hit = symbolHit(symbol);
-  hit.score = Math.min(1, Math.max(0.1, lexicalScore(query, symbol)));
+  // Native scorer unavailable must not fail the search (this runs BEFORE the
+  // durable hybridSearch); the floor score keeps the overlay symbol visible
+  // with neutral ranking until the binary is back.
+  let score = 0.1;
+  try {
+    score = Math.min(1, Math.max(0.1, lexicalScore(query, symbol)));
+  } catch { /* degrade to the floor score */ }
+  hit.score = score;
   /** @type {any} */ (hit).overlay = true;
   /** @type {any} */ (hit).source = "buffer";
   /** @type {any} */ (hit).buffer = {

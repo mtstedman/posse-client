@@ -1,66 +1,90 @@
 # Posse Windows Installer
 
-PowerShell port of the Linux installer. Same flags, same behavior.
+PowerShell counterpart of the Linux installer: same step sequence, same
+summary, same idempotency.
 
 ATLAS is built into Posse — there is no separate ATLAS checkout, build, or
 server process. ATLAS runtime configuration lives in `~\.posse\account.db`
 (managed through `posse admin`), not environment variables.
 
-## What It Does
+## Design
 
-- Verifies required tools (`git`, `node` >= 24, `npm`) and warns about soft gaps
-  (missing provider credentials, unset global git identity).
-- Uses the Posse checkout containing the installer when available; cloning is
-  only a fallback for standalone use.
-- Installs host CLI dependencies used by Posse helper tools when they are
-  missing: ripgrep (`rg`), Tesseract OCR (`tesseract`), ImageMagick (`magick`),
-  FFmpeg (`ffmpeg`), Python, PHP, and Composer support for PHP SCIP.
-- Installs posse npm dependencies with optional packages explicitly included
-  (skipped when `node_modules` is fresh).
-- Installs Posse Python helper dependencies from `requirements.txt` when
-  Python 3.9+ is available.
-- Installs the default Posse-managed SCIP/lint language environments
-  (`typescript,python,php`) and reports any missing host toolchains.
-- Writes PATH wiring to `%USERPROFILE%\.config\posse\atlas.env.ps1` as a
-  PowerShell snippet.
-- Installs `posse.cmd` and `posse.ps1` shims in
-  `%USERPROFILE%\.local\bin` and adds that directory to the user `PATH`.
-- Seeds missing rows in `~\.posse\account.db` (ATLAS mode/phases plus
-  `atlas_scip_mode=on` and default enabled languages) so the admin TUI and in-process
-  callers pick it up. Existing user values are preserved -- never overwritten.
-- Runs `posse admin init --non-interactive` to detect `claude` and `codex` CLI
-  paths when possible.
-- Optionally (`-ConfigureKeys`) prompts for provider API keys (hidden via
-  `Read-Host -AsSecureString`), writes them to
-  `%USERPROFILE%\.config\posse\providers.env.ps1` with an NTFS ACL locked to
-  the current user, and offers to launch `claude` / `codex login` for the
-  CLI-based providers.
-- Optionally adds `. "atlas.env.ps1"` to the user PowerShell profile (`$PROFILE`),
-  plus `providers.env.ps1` when it exists.
-- Validates the install by running `node orchestrator.js status`.
-- Optionally runs `node orchestrator.js atlas-smoke ...`.
-- Prints a summary table of each step's outcome and any warnings.
+- **Never dies mid-run.** Every step is fenced: failures are recorded, the
+  installer keeps going where it can, steps that depend on a failed step are
+  marked `blocked`, and the summary always prints.
+- **Idempotent.** Re-running is safe; fresh steps are skipped. `-Force`
+  reinstalls npm deps, `-DryRun` previews everything.
+- **PS 5.1 and 7+ safe.** Native commands run through `cmd.exe` with output
+  redirected to the log file, so stderr output can never surface as a
+  terminating `NativeCommandError` (the classic Windows PowerShell 5.1
+  failure mode of the old installer).
+- **Self-sufficient.** Installs Node 24+ via winget when missing
+  (`-NoInstallNode` opts out) and refreshes `PATH` from the registry after
+  winget installs so new tools are visible without a new terminal.
+- **Observable.** A splash, numbered steps (`[ 3/12]`), a spinner with
+  elapsed time on capable terminals (Windows Terminal / PS 7+), and full
+  command output captured to
+  `%USERPROFILE%\.posse\logs\install-<timestamp>.log` (failures print the
+  output tail inline).
+
+## What It Does (steps)
+
+1. **System packages** — installs missing helper CLIs via winget: ripgrep,
+   Tesseract OCR, ImageMagick, FFmpeg, Python 3, PHP. Each tool tries its
+   winget id candidates independently, so one failure can't sink the rest.
+   Tesseract's install dir is probed and added to `PATH` when its installer
+   doesn't do so.
+2. **Node.js runtime** — accepts an existing Node ≥ 24; otherwise installs
+   `OpenJS.NodeJS.LTS` via winget and adopts it in-session.
+3. **Posse checkout** — uses the checkout containing this installer when
+   available; cloning is only a fallback for standalone use.
+4. **Composer (SCIP PHP)** — uses a global `composer` when present; otherwise
+   downloads a signature-verified `composer.phar` into Posse's `scip\bin`
+   (skipped when PHP is absent).
+5. **npm dependencies** — `npm install --include=optional` (skipped when
+   `node_modules` is fresh; one automatic retry). If the log shows
+   node-gyp/MSBuild errors, install Visual Studio Build Tools (C++ workload)
+   and re-run.
+6. **Shell wiring** — writes `%USERPROFILE%\.config\posse\atlas.env.ps1`,
+   installs `posse.cmd` / `posse.ps1` shims in `%USERPROFILE%\.local\bin`,
+   puts that directory on the user `PATH`, and (unless `-NoPersistEnv`)
+   sources the env file from `$PROFILE`.
+7. **Account settings** — seeds missing ATLAS keys into `~\.posse\account.db`
+   (merge-only; existing values are never overwritten).
+8. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
+   which builds the managed Python venv from `requirements.txt` and installs
+   the SCIP language environments (replaces the old standalone
+   `pip install --user` and inline SCIP steps).
+9. **Provider CLI detection** — `posse admin init --non-interactive`.
+10. **Validation** — boots Posse (`node orchestrator.js status`).
+11. **Provider API keys** — only with `-ConfigureKeys`: hidden SecureString
+    prompts for `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` /
+    `CODEX_API_KEY`, written to
+    `%USERPROFILE%\.config\posse\providers.env.ps1` with an NTFS ACL locked
+    to the current user, plus optional `claude` / `codex login` launches.
+12. **ATLAS smoke test** — only with `-RepoPath`.
 
 ## Prereqs
 
-- PowerShell 5.1 (ships with Windows 10/11) or PowerShell 7+
-- Node.js 24+ (install via [nvm-windows](https://github.com/coreybutler/nvm-windows) or the Node.js installer)
-- Git
-- winget is recommended so the installer can fetch host tools automatically
-  (`BurntSushi.ripgrep.MSVC`, `UB-Mannheim.TesseractOCR`, `ImageMagick.Q16`,
-  `Gyan.FFmpeg`, `Python.Python.3.13`, `PHP.PHP.8.4`).
-- Python 3.9+ is recommended for file/image helper tools.
+- PowerShell 5.1 (ships with Windows) or PowerShell 7+.
+- `winget` (App Installer from the Microsoft Store) so the installer can
+  fetch Node and host tools automatically. Without it, missing tools are
+  reported and everything else still runs.
+- `git` for the clone fallback (`winget install Git.Git`).
 
 ## Run
 
 ```powershell
 cd <posse-dir>\installers\windows
-powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
-  -RepoPath C:\repos\your-target-repo `
-  -RepoId your-target-repo
+powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1
 ```
 
-If you omit `-RepoPath`, install still completes and the smoke test is skipped.
+With a smoke test against a repo:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
+  -RepoPath C:\repos\your-target-repo
+```
 
 > **Execution policy.** If PowerShell blocks the script, either set
 > `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or invoke with
@@ -71,45 +95,39 @@ If you omit `-RepoPath`, install still completes and the smoke test is skipped.
 | Flag | Purpose |
 |------|---------|
 | `-InstallRoot <path>` | Base directory for installs (default: `$env:USERPROFILE\claude-tools`) |
-| `-PosseDir <path>` | Posse checkout directory (default: installer checkout when available, else `<InstallRoot>\posse`) |
-| `-PosseRepoUrl <url>` | Fallback Git URL used only when no checkout is detected and `-PosseDir` is missing |
-| `-RepoId <id>` | ATLAS repo id for smoke test / defaults |
-| `-RepoPath <path>` | ATLAS repo path for smoke test / defaults |
+| `-PosseDir <path>` | Posse checkout directory (default: installer checkout, else `<InstallRoot>\posse`) |
+| `-PosseRepoUrl <url>` | Fallback Git URL when no checkout is detected |
+| `-RepoId <id>` | ATLAS repo id for the smoke test |
+| `-RepoPath <path>` | ATLAS repo path for the smoke test |
 | `-SmokeQuery <q>` | Query used for atlas-smoke (default: `auth`) |
 | `-SmokeProvider <p>` | Provider for atlas-smoke (default: `openai`) |
 | `-NoSmoke` | Skip the smoke test |
-| `-NoPersistEnv` | Don't wire atlas.env.ps1 into `$PROFILE` |
+| `-NoPersistEnv` | Don't write user `PATH` / `$PROFILE` wiring |
 | `-SkipSettings` | Don't seed `~\.posse\account.db` |
-| `-SkipHostTools` | Don't install/check host CLI tools (`rg`, `tesseract`, `magick`, `ffmpeg`, Python, PHP/Composer) |
-| `-ConfigureKeys` | Prompt for `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` / `CODEX_API_KEY` (hidden input via SecureString). Persists to `%USERPROFILE%\.config\posse\providers.env.ps1` with an NTFS ACL locked to the current user. Keys already set in your env are skipped. Offers to run `claude` / `codex login`. |
+| `-SkipHostTools` | Don't install helper CLIs (missing ones are still reported) |
+| `-NoInstallNode` | Don't auto-install Node via winget when Node 24+ is missing |
+| `-ConfigureKeys` | Prompt for provider API keys (SecureString input, user-only ACL file) |
 | `-Force` | Re-run `npm install` even when `node_modules` looks fresh |
 | `-DryRun` | Print what would happen; make no changes |
+| `-Plain` | Disable colors, splash gradient, and spinners (also honors `NO_COLOR`) |
 
-## Re-running
+## Re-running and troubleshooting
 
-The installer is idempotent:
-
-- `npm install --include=optional` is skipped when
-  `node_modules/.package-lock.json` is newer than `package.json`. Pass
-  `-Force` to override.
-- Missing host CLI tools are installed with `winget`. If a tool installs but
-  is not visible in the current shell yet, open a new terminal so PATH changes
-  can take effect. Composer is installed as a verified `composer.phar` under
-  Posse's `scip\bin` when a global `composer` command is unavailable and PHP
-  is visible on PATH.
-- Python helper deps are installed from `requirements.txt` with
-  `python -m pip install --user -r requirements.txt`.
-- SCIP dependencies are installed for the default enabled languages
-  (`typescript,python,php`). Optional Go, Rust, and C/C++ SCIP support can be
-  enabled in admin or installed with `posse atlas-v2 scip install --all`; if a
-  default language host toolchain is missing, the installer keeps going and
-  prints a follow-up `posse atlas-v2 scip install ...` command.
-- `atlas.env.ps1` is rewritten each run.
-- `providers.env.ps1` is **only** touched when `-ConfigureKeys` is passed,
-  and only the specific keys you enter are added or updated -- any other
-  lines (manually added exports, comments) are preserved.
-- Account settings are merged, never overwritten -- existing user values are
-  always preserved.
+- The summary marks each step `ok`, `skipped`, `partial`, `failed`,
+  `blocked`, or `dry-run`, with warnings listed underneath and the log path
+  at the end.
+- Every command's output lands in
+  `%USERPROFILE%\.posse\logs\install-<timestamp>.log`; a failing step prints
+  its last lines inline.
+- Tools installed by winget sometimes need a new terminal before they're
+  visible; the installer refreshes `PATH` from the registry to minimize this
+  and says so when a tool still isn't visible.
+- If the doctor step is `partial`, run `posse doctor` after fixing the tools
+  it names; it repairs incrementally.
+- `atlas.env.ps1` is rewritten each run. `providers.env.ps1` is **only**
+  touched when `-ConfigureKeys` is passed, and only the keys you enter are
+  updated — other lines are preserved. Account settings are merged, never
+  overwritten.
 
 ## Provider API keys
 
@@ -121,49 +139,26 @@ With `-ConfigureKeys`, the installer prompts (hidden via
 | `POSSE_KEY` | Posse remote prompt/tool catalog API key |
 | `OPENAI_API_KEY` | OpenAI provider |
 | `XAI_API_KEY` | Grok (xAI) provider |
-| `CODEX_API_KEY` | Codex API-key auth (optional -- the `codex` CLI can also use `~\.codex\auth.json` from `codex login`) |
+| `CODEX_API_KEY` | Codex API-key auth (optional — the `codex` CLI can also use `~\.codex\auth.json` from `codex login`) |
 
-- Any var already set in your environment is detected and skipped.
-- Empty input skips the prompt.
+- Any var already set in your environment is detected and skipped; empty
+  input skips the prompt.
 - Values are stored **plaintext** in
   `%USERPROFILE%\.config\posse\providers.env.ps1`. The installer applies an
-  NTFS ACL granting only the current Windows user FullControl -- inheritance
-  is disabled. This is the strongest protection available without integrating
-  Windows Credential Manager / DPAPI.
-- Claude and Codex CLI logins can't be fully scripted -- after the key
-  prompts, the installer offers to launch `claude` and/or `codex login`
-  interactively.
+  NTFS ACL granting only the current Windows user access (inheritance
+  disabled) — the strongest protection available without DPAPI/Credential
+  Manager integration.
+- Claude and Codex CLI logins can't be fully scripted — after the key
+  prompts, the installer offers to launch `claude` and/or `codex login`.
 
 If you prefer to manage keys yourself, omit `-ConfigureKeys` and set them
-with `setx OPENAI_API_KEY ...`, 1Password CLI, or however you already manage
-secrets. The installer only detects and warns in that mode.
-
-## Troubleshooting
-
-The summary footer marks each step `done`, `skipped`, `failed`, `partial`, `ok`,
-or `dry-run`. Any warning is also printed with the specific gap (missing
-provider key, unset git identity, SCIP host toolchain, etc.).
-
-If `posse validate` shows `failed`, run it manually to see the error:
-
-```powershell
-cd <posse-dir>
-posse status
-```
+with `setx`, 1Password CLI, or however you already manage secrets. The
+installer only detects and warns in that mode.
 
 ## Parity with the Linux script
 
-Functional parity:
-
-- Same `--force` / `--dry-run` / `--skip-settings` / `--no-smoke` /
-  `--no-persist-env` flags (PowerShell style `-Force` / `-DryRun` / etc.).
-- Same pre-flight, idempotency, validation, settings seeding, and summary.
-
-Differences by platform:
-
-- Env file is `atlas.env.ps1` (PowerShell `$env:` syntax) vs `atlas.env` (bash
-  `export` syntax).
-- Auto-source wires `$PROFILE` (typically
-  `...\WindowsPowerShell\Microsoft.PowerShell_profile.ps1`) instead of
-  `~/.bashrc` / `~/.zshrc`.
-- `where` / `Get-Command` replaces `command -v`.
+Same steps, same summary format, same flags (PowerShell-style names). The
+platform differences: winget instead of distro package managers + nvm,
+`atlas.env.ps1` / `$PROFILE` instead of `atlas.env` / `.bashrc`, `posse.cmd` +
+`posse.ps1` shims instead of a bash shim, and NTFS ACLs instead of
+`chmod 600`.

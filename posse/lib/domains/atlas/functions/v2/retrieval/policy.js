@@ -13,10 +13,14 @@ export const DEFAULT_ATLAS_POLICY = Object.freeze({
   defaultMinCallConfidence: 0.5,
   defaultDenyRaw: false,
   memoryEnabled: true,
-  // Memories untouched for this many days are flagged stale and stop
-  // surfacing proactively (0 disables the sweep). Refreshing via memory.store
-  // clears the flag.
-  memoryStaleAfterDays: 180,
+  // Wall-clock staleness is OFF by default: the memory model's decay signal
+  // is anchor drift (the code a memory points at changing), never age — a
+  // dormant memory that still matches its anchors stays true no matter how
+  // old, and the age sweep additionally fed stale-first cap eviction, so
+  // dormant memories were retired by age in exactly the way the module
+  // doctrine forbids. The knob remains for repos that want an age flag
+  // (>0 days re-enables the sweep).
+  memoryStaleAfterDays: 0,
   // Active memories beyond this cap are soft-deleted on write, least valuable
   // first (0 disables). Matches the 5000-row retrieval candidate scan limit:
   // rows past it were unreachable in recency order anyway.

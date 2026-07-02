@@ -73,9 +73,19 @@ export function toRanked(items, idOf) {
  * @returns {FusedEntry<P>[]}
  */
 export function rrfFuse(listsByBackend, opts) {
-  // Fusion is owned by the native posse-atlas binary — the only path.
+  // Fusion is owned by the native posse-atlas binary — primary path. The JS
+  // fallback below exists ONLY so a missing/broken binary degrades ranking
+  // instead of throwing away healthy FTS results: the orchestrator's contract
+  // is "never throws — downgrades", and fusion was its hardest native
+  // dependency (it threw even for empty inputs).
   const k = typeof opts?.k === "number" && opts.k > 0 ? opts.k : RRF_K;
-  return /** @type {any} */ (runAtlasNativeOperation({ op: "rrf_fuse", lists_by_backend: listsByBackend, k }));
+  const backends = Object.keys(listsByBackend || {});
+  if (backends.length <= 1) return rrfFuseJs(listsByBackend, k); // trivial fusion — skip the native hop
+  try {
+    return /** @type {any} */ (runAtlasNativeOperation({ op: "rrf_fuse", lists_by_backend: listsByBackend, k }));
+  } catch {
+    return rrfFuseJs(listsByBackend, k);
+  }
 }
 
 /**
@@ -90,5 +100,39 @@ export function rrfFuse(listsByBackend, opts) {
  */
 export async function rrfFuseAsync(listsByBackend, opts) {
   const k = typeof opts?.k === "number" && opts.k > 0 ? opts.k : RRF_K;
-  return /** @type {any} */ (await runAtlasNativeOperationAsync({ op: "rrf_fuse", lists_by_backend: listsByBackend, k }));
+  const backends = Object.keys(listsByBackend || {});
+  if (backends.length <= 1) return rrfFuseJs(listsByBackend, k);
+  try {
+    return /** @type {any} */ (await runAtlasNativeOperationAsync({ op: "rrf_fuse", lists_by_backend: listsByBackend, k }));
+  } catch {
+    return rrfFuseJs(listsByBackend, k);
+  }
+}
+
+/**
+ * Pure-JS RRF, used for trivial inputs and as the native-down fallback. Same
+ * math as the native op: score = Σ 1/(k + rank), first backend's payload wins
+ * for shared ids, deterministic tie-break by id.
+ *
+ * @template P
+ * @param {Record<string, RankedEntry<P>[]>} listsByBackend
+ * @param {number} k
+ * @returns {FusedEntry<P>[]}
+ */
+function rrfFuseJs(listsByBackend, k) {
+  /** @type {Map<string, FusedEntry<P>>} */
+  const fused = new Map();
+  for (const [backend, entries] of Object.entries(listsByBackend || {})) {
+    for (const entry of entries || []) {
+      if (!entry || !entry.id) continue;
+      let item = fused.get(entry.id);
+      if (!item) {
+        item = { id: entry.id, score: 0, payload: entry.payload, contributions: {} };
+        fused.set(entry.id, item);
+      }
+      item.score += 1 / (k + entry.rank);
+      item.contributions[backend] = entry.rank;
+    }
+  }
+  return [...fused.values()].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
 }

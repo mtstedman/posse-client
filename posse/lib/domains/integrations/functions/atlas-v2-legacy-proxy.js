@@ -16,7 +16,7 @@ import { ATLAS_TOOL_PARAM_SCHEMAS } from "../../atlas/functions/v2/contracts/too
 import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
 import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
-import { resolveTargetBranch } from "../../git/functions/target-branch.js";
+import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import { canonicalAtlasActionName, formatAtlasToolDisplayName } from "../../../functions/tools/mcp-surface.js";
 
 const REQUEST_TIMEOUT_MS = 120_000;
@@ -1103,9 +1103,9 @@ function _viewNotReadyOutcome({ toolName, probe, waitMs }) {
   };
 }
 
-function _mainViewBranchMismatch({ viewPath, meta, configuredRepoRoot }) {
+async function _mainViewBranchMismatch({ viewPath, meta, configuredRepoRoot }) {
   if (!_isMainViewPath(viewPath, configuredRepoRoot)) return null;
-  const baselineBranch = _baselineBranchForRepo(configuredRepoRoot);
+  const baselineBranch = await _baselineBranchForRepo(configuredRepoRoot);
   const viewBranch = typeof meta?.branch === "string" && meta.branch ? meta.branch : null;
   if (!baselineBranch || !viewBranch || viewBranch === baselineBranch) return null;
   return {
@@ -1130,9 +1130,9 @@ function _isV2LifecycleAction(action) {
   return action === "repo.register" || action === "index.refresh" || action === "scip.ingest";
 }
 
-function _baselineBranchForRepo(repoRoot) {
+async function _baselineBranchForRepo(repoRoot) {
   try {
-    return resolveTargetBranch(repoRoot || process.cwd());
+    return await resolveTargetBranchAsync(repoRoot || process.cwd());
   } catch {
     return "main";
   }
@@ -1242,7 +1242,7 @@ async function _awaitQueuedAutoRefreshStaleView({
     || viewCandidates?.[0]
     || null;
   if (!_isMainViewPath(target, configuredRepoRoot)) return false;
-  const baselineBranch = _baselineBranchForRepo(configuredRepoRoot);
+  const baselineBranch = await _baselineBranchForRepo(configuredRepoRoot);
   const branch = baselineBranch;
   if (!branch) return false;
   const queueKey = `${branch}:${path.resolve(target)}`;
@@ -1316,7 +1316,7 @@ async function _executeV2Call(toolName, args) {
         view = probe.view;
         meta = probe.meta;
         viewPath = probe.dbPath;
-        const mismatch = _mainViewBranchMismatch({ viewPath, meta, configuredRepoRoot });
+        const mismatch = await _mainViewBranchMismatch({ viewPath, meta, configuredRepoRoot });
         if (mismatch) {
           try { view.close(); } catch { /* ignore stale view close */ }
           view = null;
@@ -1460,7 +1460,7 @@ async function _executeV2Call(toolName, args) {
           view = probe.view;
           meta = probe.meta;
           viewPath = probe.dbPath;
-          const mismatch = _mainViewBranchMismatch({ viewPath, meta, configuredRepoRoot });
+          const mismatch = await _mainViewBranchMismatch({ viewPath, meta, configuredRepoRoot });
           if (mismatch) {
             try { view.close(); } catch { /* ignore stale view close */ }
             view = null;
@@ -1495,7 +1495,7 @@ async function _executeV2Call(toolName, args) {
         }
       }
     }
-    const baselineBranch = _baselineBranchForRepo(configuredRepoRoot);
+    const baselineBranch = await _baselineBranchForRepo(configuredRepoRoot);
     const readRoot = _resolveV2ReadRoot({ configuredRepoRoot, viewMeta: meta, viewPath });
     const dispatchRepoRoot = _isV2LifecycleAction(action) ? configuredRepoRoot : readRoot;
     const versionId = meta ? `${meta.branch}@${meta.ledger_seq}` : `${baselineBranch}@0`;

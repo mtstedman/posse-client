@@ -3,7 +3,7 @@
 // Retrieval port barrel. Single import for everything Workstream E /
 // Workstream G needs to wire v2 into the rest of posse.
 
-export { dispatch } from "./dispatch.js";
+export { dispatch, normalizeActionName } from "./dispatch.js";
 export { workflowExecute } from "./workflow.js";
 export { symbolSearch } from "./search.js";
 export { symbolGetCard } from "./symbol-card.js";

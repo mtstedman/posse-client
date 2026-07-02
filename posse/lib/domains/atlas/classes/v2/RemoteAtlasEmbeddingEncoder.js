@@ -242,9 +242,15 @@ export class SideBySideEmbeddingEncoder {
         { kind: "symbols", count: Array.isArray(symbols) ? symbols.length : 0 },
       );
     }
+    // INGEST must never fall back to the local encoder: encodeSymbols output
+    // is persisted under this encoder's advertised (remote) identity, and
+    // same-dim local vectors in the remote embedding space silently poison
+    // cosine ranking for those rows until they happen to re-encode. Queries
+    // (encode) may fall back — a degraded transient ranking beats an outage.
     return this.#runRemoteAuthoritative(
       () => encodeSymbolsWith(this.#remote, symbols, signal),
       () => encodeSymbolsWith(this.#local, symbols, signal),
+      { allowLocalFallback: false },
     );
   }
 
@@ -268,11 +274,11 @@ export class SideBySideEmbeddingEncoder {
     return localResult.value;
   }
 
-  async #runRemoteAuthoritative(remoteCall, localCall) {
+  async #runRemoteAuthoritative(remoteCall, localCall, { allowLocalFallback = true } = {}) {
     try {
       return await remoteCall();
     } catch (err) {
-      if (this.#mode === "required" || !this.#localFallbackCompatible) throw err;
+      if (!allowLocalFallback || this.#mode === "required" || !this.#localFallbackCompatible) throw err;
       return localCall();
     }
   }

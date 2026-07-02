@@ -195,6 +195,7 @@ export class DisplayInputController {
     if (agents.length === 0) return false;
     const idx = Math.max(0, Math.min(agents.length - 1, Number(index) || 0));
     this._monitorSelectedJobId = agents[idx].jobId;
+    this._monitorFeedbackScroll = 0;
     return true;
   }
 
@@ -205,6 +206,18 @@ export class DisplayInputController {
     const base = current >= 0 ? current : 0;
     const next = (base + delta + agents.length) % agents.length;
     this._monitorSelectedJobId = agents[next].jobId;
+    this._monitorFeedbackScroll = 0;
+    return true;
+  }
+
+  // [w]: hop between the agents that are blocked on the operator, in roster
+  // order. No-op (falls through) when nobody is waiting.
+  _jumpToWaitingMonitorAgent() {
+    const waiting = this._getMonitorAgents().filter((agent) => agent.state === "ask");
+    if (waiting.length === 0) return false;
+    const current = waiting.findIndex((agent) => agent.jobId === this._monitorSelectedJobId);
+    this._monitorSelectedJobId = waiting[(current + 1) % waiting.length].jobId;
+    this._monitorFeedbackScroll = 0;
     return true;
   }
 
@@ -579,6 +592,15 @@ export class DisplayInputController {
         this.requestRender({ force: true });
       } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "a") && this._startAnsweringForJob(this._monitorSelectedJobId)) {
         this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "w") && this._jumpToWaitingMonitorAgent()) {
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "!") && this.onKill
+        && this._monitorSelectedJobId && this.workers.has(this._monitorSelectedJobId)) {
+        // Kill the SELECTED agent, routed through the kill-confirm picker
+        // (single entry) so one stray keypress can't drop a worker.
+        this._inputMode = "kill";
+        this._killJobIds = [this._monitorSelectedJobId];
+        this.requestRender({ force: true });
       } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "d")) {
         // Toggle the CHANGES (git-diff) view for the selected agent.
         if (this._monitorChangesMode) {
@@ -614,6 +636,16 @@ export class DisplayInputController {
         this.requestRender({ force: true });
       } else if (this._rightMode === "monitor" && this._monitorChangesMode && keyName(key) === "escape") {
         this._monitorChangesMode = false;
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && !this._monitorChangesMode
+        && (keyName(key) === "up" || keyName(key) === "pageup")) {
+        // Page back through the selected agent's feedback history; the renderer
+        // clamps to what the history actually holds.
+        this._monitorFeedbackScroll = (this._monitorFeedbackScroll || 0) + (keyName(key) === "pageup" ? 5 : 1);
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && !this._monitorChangesMode
+        && (keyName(key) === "down" || keyName(key) === "pagedown")) {
+        this._monitorFeedbackScroll = Math.max(0, (this._monitorFeedbackScroll || 0) - (keyName(key) === "pagedown" ? 5 : 1));
         this.requestRender({ force: true });
       } else if (isEnterKey(str, key) && this._questionQueue.length > 0) {
         this._startAnswering();

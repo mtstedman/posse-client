@@ -2,7 +2,6 @@ import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
 
-import { resolveTargetBranch } from "../../git/functions/target-branch.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { readActiveWorktreeCap } from "../../scheduler/functions/config.js";
 import {
@@ -318,7 +317,9 @@ export function branchStalenessCheck({
 } = {}) {
   const root = path.resolve(projectDir || process.cwd());
   const branch = String(branchName || "").trim();
-  const target = String(targetBranch || resolveTargetBranch(root) || "").trim();
+  // No implicit resolveTargetBranch fallback: every caller passes targetBranch
+  // (resolved async upstream), and a missing target degrades to "unknown" below.
+  const target = String(targetBranch || "").trim();
   if (!branch) return { ok: false, status: "unknown", reason: "missing branchName", project_dir: root };
   if (!target) return { ok: false, status: "unknown", reason: "missing targetBranch", project_dir: root, branch };
   try {

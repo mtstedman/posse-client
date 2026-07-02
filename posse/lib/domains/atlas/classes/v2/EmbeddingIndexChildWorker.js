@@ -84,6 +84,7 @@ async function handle(op, args = {}) {
         embeddingsRoot: String(args.embeddingsRoot || ""),
         annSaveEveryBatches: args.annSaveEveryBatches,
         annSaveEveryMs: args.annSaveEveryMs,
+        readOnly: args.readOnly === true,
       });
       return {
         model: index.model,

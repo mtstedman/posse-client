@@ -629,6 +629,10 @@ export function getProviderRateLimitState(providerName) {
   return { blocked: false, retryInSec: 0, reason: "" };
 }
 
+// getProviderUsage / getProviderUsageAsync diverge on purpose: the sync twin
+// reads the cached summary only (safe on render/boot paths), while the async
+// twin prefers a network refresh before falling back to the cache. Collapsing
+// them would either add network calls to sync paths or lose the refresh.
 export function getProviderUsage(providerName, opts = {}) {
   const mod = resolveProviderModule(providerName);
   if (typeof mod.getUsageSummary === "function") {
@@ -679,6 +683,8 @@ export function getProviderCapacityState(providerName, opts = {}) {
   return { blocked: false, reason: "", source: "available", retryInSec: 0 };
 }
 
+// getConfiguredProviderUsage / *Async diverge on purpose: serial cached reads
+// vs parallel refreshing fan-out — the fan-out shape is the semantics.
 export function getConfiguredProviderUsage(opts = {}) {
   if (opts.primeAuth) {
     primeProviderUsageAuth({
@@ -725,26 +731,19 @@ export async function getConfiguredProviderUsageAsync(opts = {}) {
   return results.filter(Boolean);
 }
 
-export function primeProviderUsageAuth({ cwd = null, force = false, timeoutMs = 20_000 } = {}) {
-  if (providerRuntimeState.isUsageAuthPrimed() && !force) {
-    return {
-      attempted: false,
-      ok: true,
-      skipped: "already-primed",
-      providers: [],
-    };
-  }
+// Shared head/tail for the prime-auth twins: they differ only in which warm
+// call they make (sync warmOauthSession vs async warmOauthSessionAsync with
+// interactive options).
+function alreadyPrimedResult() {
+  return {
+    attempted: false,
+    ok: true,
+    skipped: "already-primed",
+    providers: [],
+  };
+}
 
-  const configuredProviders = getEffectiveUsageProviderSet();
-  const providerResults = [];
-  const claudeProvider = providerRegistry.get("claude");
-  if (configuredProviders.has("claude") && typeof claudeProvider?.warmOauthSession === "function") {
-    providerResults.push({
-      provider: "claude",
-      ...(claudeProvider.warmOauthSession({ cwd, timeoutMs }) || { attempted: false, ok: false, skipped: "unknown" }),
-    });
-  }
-
+function finalizePrimeAuthResults(providerResults) {
   const attemptedResults = providerResults.filter((entry) => entry.attempted);
   const allOk = attemptedResults.every((entry) => entry.ok);
   providerRuntimeState.markUsageAuthPrimed(attemptedResults.length === 0 || allOk);
@@ -756,6 +755,22 @@ export function primeProviderUsageAuth({ cwd = null, force = false, timeoutMs = 
   };
 }
 
+export function primeProviderUsageAuth({ cwd = null, force = false, timeoutMs = 20_000 } = {}) {
+  if (providerRuntimeState.isUsageAuthPrimed() && !force) return alreadyPrimedResult();
+
+  const configuredProviders = getEffectiveUsageProviderSet();
+  const providerResults = [];
+  const claudeProvider = providerRegistry.get("claude");
+  if (configuredProviders.has("claude") && typeof claudeProvider?.warmOauthSession === "function") {
+    providerResults.push({
+      provider: "claude",
+      ...(claudeProvider.warmOauthSession({ cwd, timeoutMs }) || { attempted: false, ok: false, skipped: "unknown" }),
+    });
+  }
+
+  return finalizePrimeAuthResults(providerResults);
+}
+
 export async function primeProviderUsageAuthAsync({
   cwd = null,
   force = false,
@@ -763,14 +778,7 @@ export async function primeProviderUsageAuthAsync({
   preferInteractive = false,
   interactiveBackend = null,
 } = {}) {
-  if (providerRuntimeState.isUsageAuthPrimed() && !force) {
-    return {
-      attempted: false,
-      ok: true,
-      skipped: "already-primed",
-      providers: [],
-    };
-  }
+  if (providerRuntimeState.isUsageAuthPrimed() && !force) return alreadyPrimedResult();
 
   const configuredProviders = getEffectiveUsageProviderSet();
   const providerResults = [];
@@ -794,15 +802,7 @@ export async function primeProviderUsageAuthAsync({
     }
   }
 
-  const attemptedResults = providerResults.filter((entry) => entry.attempted);
-  const allOk = attemptedResults.every((entry) => entry.ok);
-  providerRuntimeState.markUsageAuthPrimed(attemptedResults.length === 0 || allOk);
-  return {
-    attempted: attemptedResults.length > 0,
-    ok: allOk,
-    skipped: attemptedResults.length === 0 ? "no-auth-refresh-required" : null,
-    providers: providerResults,
-  };
+  return finalizePrimeAuthResults(providerResults);
 }
 
 export function __testResetProviderUsageAuthPrime() {

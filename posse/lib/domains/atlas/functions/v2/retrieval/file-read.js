@@ -187,25 +187,56 @@ function fileReadWithRedaction({ versionId, params, readFile, view }, redaction)
               after: resolvedLines.slice(li + 1, Math.min(lines.length, li + 1 + ctxLines)),
             },
           }));
-        return finishFileRead({ params, source, versionId, data });
+        return finishFileRead({ params, source, versionId, data, redaction });
       });
     }
 
-    return finishFileRead({ params, source, versionId, data });
+    return finishFileRead({ params, source, versionId, data, redaction });
   });
 }
 
-function finishFileRead({ params, source, versionId, data }) {
+function finishFileRead({ params, source, versionId, data, redaction }) {
   if (params.jsonPath) {
+    /** @type {unknown} */
+    let value;
+    let extracted = false;
     try {
       const parsed = JSON.parse(source);
-      data.jsonPathValue = extractJsonPath(parsed, params.jsonPath);
+      value = extractJsonPath(parsed, params.jsonPath);
+      extracted = true;
     } catch {
       // Tolerate non-JSON; jsonPathValue omitted.
+    }
+    if (extracted) {
+      // The extraction reads the RAW source (the content field is redacted
+      // separately), so the value must pass through the same secret redaction
+      // before it reaches the envelope.
+      return mapMaybePromise(redactJsonPathValue(value, redaction), (redactedValue) => {
+        data.jsonPathValue = redactedValue;
+        return okEnvelope({ action: "file.read", versionId, data });
+      });
     }
   }
 
   return okEnvelope({ action: "file.read", versionId, data });
+}
+
+/**
+ * @param {unknown} value
+ * @param {{ redactText: (text: string) => string | Promise<string> }} redaction
+ * @returns {unknown | Promise<unknown>}
+ */
+function redactJsonPathValue(value, redaction) {
+  if (typeof value === "string") return redaction.redactText(value);
+  if (value == null || typeof value !== "object") return value;
+  return mapMaybePromise(redaction.redactText(JSON.stringify(value)), (redacted) => {
+    try {
+      return JSON.parse(/** @type {string} */ (redacted));
+    } catch {
+      // A replacement that broke JSON shape still must not leak the raw value.
+      return redacted;
+    }
+  });
 }
 
 function mapMaybePromise(value, map) {

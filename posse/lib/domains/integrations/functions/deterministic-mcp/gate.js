@@ -124,9 +124,39 @@ const DEAD_ATLAS_RESULT_PATTERNS = [
   /ATLAS proxy init failed/i,
 ];
 
+// Machine codes carried in the structured error block that
+// formatAtlasV2EmbeddedError appends to failure texts. Code-first
+// classification: the prose patterns above remain as fallback for paths that
+// predate the structured block; new unavailability modes should add a code
+// here rather than another regex.
+const DEAD_ATLAS_ERROR_CODES = new Set([
+  "atlas_disabled",
+  "atlas_runtime_disabled",
+  "atlas_conductor_unavailable",
+  "atlas_gate_timeout",
+  "backend_unavailable",
+]);
+
+/**
+ * Extract the structured error code from an ATLAS failure text. Only error
+ * texts are parsed — a successful file.read of JSON that contains a "code"
+ * key must not classify as anything.
+ *
+ * @param {string} text
+ * @returns {string | null}
+ */
+export function atlasErrorCodeFromResultText(text) {
+  const raw = String(text ?? "");
+  if (!/^Error:/i.test(raw)) return null;
+  const match = /"code"\s*:\s*"([a-z0-9_.:-]+)"/i.exec(raw);
+  return match ? match[1].toLowerCase() : null;
+}
+
 export function isDeadAtlasResultText(text) {
   const raw = String(text ?? "");
   if (!raw) return false;
+  const code = atlasErrorCodeFromResultText(raw);
+  if (code && DEAD_ATLAS_ERROR_CODES.has(code)) return true;
   return DEAD_ATLAS_RESULT_PATTERNS.some((pattern) => pattern.test(raw));
 }
 

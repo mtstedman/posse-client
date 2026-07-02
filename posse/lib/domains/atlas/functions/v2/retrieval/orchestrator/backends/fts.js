@@ -32,31 +32,63 @@ import { isCanonicalRepoPath } from "../../../paths.js";
  */
 
 /**
- * @param {{ view: View, query: string, limit: number, plan?: QueryPlan, scope?: "name" | "body" | "either" }} args
- * @returns {FtsBackendResult}
+ * Shared guards for both twins. Returns a failure result to short-circuit
+ * with, or null when the query can proceed.
+ *
+ * @param {View} view
+ * @param {string} query
+ * @returns {FtsBackendResult | null}
  */
-export function runFtsBackend({ view, query, limit, plan, scope = "either" }) {
+function ftsPreflight(view, query) {
   if (!view || !view.query || typeof view.query.findSymbol !== "function") {
     return { ok: false, entries: [], raw: [], total: 0, reason: "unavailable" };
   }
   if (typeof query !== "string" || query.length === 0) {
     return { ok: false, entries: [], raw: [], total: 0, reason: "query_error" };
   }
+  return null;
+}
+
+/**
+ * @param {ViewSymbol[]} ranked
+ * @param {number} total
+ * @param {QueryPlan} usedPlan
+ * @returns {FtsBackendResult}
+ */
+function assembleFtsResult(ranked, total, usedPlan) {
+  return {
+    ok: true,
+    entries: toRanked(ranked, (s) => symbolIdOf(s)),
+    raw: ranked,
+    total,
+    plan: usedPlan,
+  };
+}
+
+/**
+ * @param {QueryPlan} usedPlan
+ * @returns {FtsBackendResult}
+ */
+function ftsQueryFailure(usedPlan) {
+  return { ok: false, entries: [], raw: [], total: 0, reason: "query_error", plan: usedPlan };
+}
+
+/**
+ * @param {{ view: View, query: string, limit: number, plan?: QueryPlan, scope?: "name" | "body" | "either" }} args
+ * @returns {FtsBackendResult}
+ */
+export function runFtsBackend({ view, query, limit, plan, scope = "either" }) {
+  const preflight = ftsPreflight(view, query);
+  if (preflight) return preflight;
   const usedPlan = plan ?? planQuery(query);
   try {
     const raw = collectFtsHits({ view, query, limit, plan: usedPlan, scope });
     // Lexical rerank — FTS returns rows in MATCH-rank order, but we want
     // identifier-exact hits first so the fused ranking favors them.
     const ranked = rankSymbols(query, raw);
-    return {
-      ok: true,
-      entries: toRanked(ranked, (s) => symbolIdOf(s)),
-      raw: ranked,
-      total: raw.length,
-      plan: usedPlan,
-    };
+    return assembleFtsResult(ranked, raw.length, usedPlan);
   } catch {
-    return { ok: false, entries: [], raw: [], total: 0, reason: "query_error", plan: usedPlan };
+    return ftsQueryFailure(usedPlan);
   }
 }
 
@@ -68,25 +100,15 @@ export function runFtsBackend({ view, query, limit, plan, scope = "either" }) {
  * @returns {Promise<FtsBackendResult>}
  */
 export async function runFtsBackendAsync({ view, query, limit, plan, scope = "either" }) {
-  if (!view || !view.query || typeof view.query.findSymbol !== "function") {
-    return { ok: false, entries: [], raw: [], total: 0, reason: "unavailable" };
-  }
-  if (typeof query !== "string" || query.length === 0) {
-    return { ok: false, entries: [], raw: [], total: 0, reason: "query_error" };
-  }
+  const preflight = ftsPreflight(view, query);
+  if (preflight) return preflight;
   const usedPlan = plan ?? planQuery(query);
   try {
     const raw = collectFtsHits({ view, query, limit, plan: usedPlan, scope });
     const ranked = await rankSymbolsAsync(query, raw);
-    return {
-      ok: true,
-      entries: toRanked(ranked, (s) => symbolIdOf(s)),
-      raw: ranked,
-      total: raw.length,
-      plan: usedPlan,
-    };
+    return assembleFtsResult(ranked, raw.length, usedPlan);
   } catch {
-    return { ok: false, entries: [], raw: [], total: 0, reason: "query_error", plan: usedPlan };
+    return ftsQueryFailure(usedPlan);
   }
 }
 

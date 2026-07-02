@@ -12,7 +12,7 @@ import { ViewBuilder } from "../../atlas/classes/v2/ViewBuilder.js";
 import { sharedParserAdapter } from "../../atlas/classes/v2/ParserAdapter.js";
 import { ledgerDbPath, mainViewPath, warmedViewPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { ingestScipFile } from "../../atlas/functions/v2/scip/ingester.js";
-import { resolveTargetBranch } from "../../git/functions/target-branch.js";
+import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 
 /**
  * @typedef {Object} AtlasSystemBase
@@ -28,11 +28,11 @@ function resolveRepoRoot(repoRoot) {
   return path.resolve(String(repoRoot || process.cwd()));
 }
 
-function defaultBranchFor(repoRoot, branch) {
+async function defaultBranchFor(repoRoot, branch) {
   const explicit = String(branch || "").trim();
   if (explicit) return explicit;
   try {
-    return resolveTargetBranch(repoRoot);
+    return await resolveTargetBranchAsync(repoRoot);
   } catch {
     return "main";
   }
@@ -40,11 +40,11 @@ function defaultBranchFor(repoRoot, branch) {
 
 /**
  * @param {AtlasSystemBase} opts
- * @returns {{ repoRoot: string, branch: string, ledger: Ledger, engine: ParseEngine, closeLedger: () => void }}
+ * @returns {Promise<{ repoRoot: string, branch: string, ledger: Ledger, engine: ParseEngine, closeLedger: () => void }>}
  */
-function openEngine(opts) {
+async function openEngine(opts) {
   const repoRoot = resolveRepoRoot(opts.repoRoot);
-  const branch = defaultBranchFor(repoRoot, opts.branch);
+  const branch = await defaultBranchFor(repoRoot, opts.branch);
   const ownsLedger = !opts.ledger;
   const ledger = /** @type {Ledger} */ (opts.ledger || Ledger.open({ dbPath: ledgerDbPath(repoRoot) }));
   if (typeof ledger.ensureRootBranch === "function" && !ledger.getBranch(branch)) {
@@ -85,7 +85,7 @@ export async function refresh(opts) {
   const mode = requestedMode === "incremental" || (requestedMode === "smart" && paths.length > 0)
     ? "incremental"
     : "full";
-  const { repoRoot, branch, ledger, engine, closeLedger } = openEngine(opts);
+  const { repoRoot, branch, ledger, engine, closeLedger } = await openEngine(opts);
   try {
     const warmResult = await engine.handleWarmJob({
       purpose: mode === "incremental" ? "main-incremental" : "main-full",
@@ -129,7 +129,7 @@ export async function parse(opts) {
       ? opts.scope.paths
       : [];
   const paths = scopePaths.map((p) => String(p));
-  const { repoRoot, branch, ledger, engine, closeLedger } = openEngine(opts);
+  const { repoRoot, branch, ledger, engine, closeLedger } = await openEngine(opts);
   try {
     const workItemId = opts.workItemId == null ? null : Number(opts.workItemId);
     const warmResult = await engine.handleWarmJob({
@@ -163,7 +163,7 @@ export async function parse(opts) {
  * @param {AtlasSystemBase & { lang?: string, wait?: boolean, force?: boolean }} opts
  */
 export async function stageScip(opts) {
-  const { repoRoot, branch, ledger, engine, closeLedger } = openEngine(opts);
+  const { repoRoot, branch, ledger, engine, closeLedger } = await openEngine(opts);
   try {
     const warmResult = await engine.handleWarmJob({
       purpose: "scip-restage",
@@ -198,7 +198,7 @@ export async function ingestScip(opts) {
     ? path.resolve(repoRoot, String(opts.stagedPath))
     : "";
   if (!stagedPath) throw new TypeError("system.atlas.ingestScip: stagedPath is required");
-  const { branch, ledger, closeLedger } = openEngine({ ...opts, repoRoot });
+  const { branch, ledger, closeLedger } = await openEngine({ ...opts, repoRoot });
   try {
     const result = await ingestScipFile({
       ledger,
@@ -227,13 +227,13 @@ export async function ingestScip(opts) {
  * @param {AtlasSystemBase & { workItemId?: number | string, ontoBranch?: string }} opts
  */
 export async function merge(opts) {
-  const { repoRoot, branch, ledger, engine, closeLedger } = openEngine(opts);
+  const { repoRoot, branch, ledger, engine, closeLedger } = await openEngine(opts);
   try {
     const warmResult = await engine.handleWarmJob({
       purpose: "main-merge",
       branch,
       work_item_id: opts.workItemId == null ? null : Number(opts.workItemId),
-      onto_branch: opts.ontoBranch || defaultBranchFor(repoRoot, null),
+      onto_branch: opts.ontoBranch || await defaultBranchFor(repoRoot, null),
       trigger_event: `system.atlas.merge:${opts.reason || "unspecified"}`,
       out_view_path: mainViewPath(repoRoot),
     });
@@ -258,12 +258,13 @@ export async function merge(opts) {
  * @param {AtlasSystemBase & { mode?: string, symbols?: string[], wait?: boolean }} opts
  */
 export async function onnxRefresh(opts) {
+  const repoRoot = resolveRepoRoot(opts.repoRoot);
   return {
     ok: true,
     operation: "onnxRefresh",
     reason: String(opts.reason || "unspecified"),
-    repoRoot: resolveRepoRoot(opts.repoRoot),
-    branch: defaultBranchFor(resolveRepoRoot(opts.repoRoot), opts.branch),
+    repoRoot,
+    branch: await defaultBranchFor(repoRoot, opts.branch),
     mode: opts.mode || "changed",
     symbols: Array.isArray(opts.symbols) ? opts.symbols : [],
     wait: opts.wait === true,

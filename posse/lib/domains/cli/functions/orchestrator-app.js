@@ -546,7 +546,9 @@ let _stallTimeout = undefined;
 
 // Explicit merge target branch. resolveTargetBranch() is shared with worker
 // worktree/rebase code, so settings and auto-detect stay in one order for the
-// whole run.
+// whole run. Deliberately SYNC: this is passed as the getTargetBranch callback
+// into createGitWorkflowHelpers, whose contract rejects promise-returning
+// callbacks (workflow-context.js currentTargetBranch).
 function getTargetBranch() {
   return resolveTargetBranch(PROJECT_DIR);
 }

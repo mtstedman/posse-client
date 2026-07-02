@@ -25,6 +25,24 @@ const READ_VERBS = new Set([
   "PRAGMA", "EXPLAIN", "SHOW", "DESCRIBE", "DESC",
 ]);
 
+// Postgres dollar-quoted string delimiter: `$tag$` where tag is an optional
+// identifier (letter/underscore first, then alphanumerics; never digit-led, so
+// numbered params like `$1` are NOT delimiters). Inside `$tag$ … $tag$` every
+// `'`, `"`, `` ` `` and `;` is literal — the ONLY terminator is the matching
+// `$tag$`. A scan that didn't understand this would treat an apostrophe inside
+// `$$ it's $$` as a string opener, swallow a following `;`, and mis-count the
+// statements — defeating the single-statement guard. Returns the delimiter text
+// (e.g. `$$` or `$fn$`) if one opens at `i`, else null.
+function dollarQuoteDelimiter(text, i) {
+  if (text[i] !== "$") return null;
+  let j = i + 1;
+  if (j < text.length && /[A-Za-z_]/.test(text[j])) {
+    j += 1;
+    while (j < text.length && /[A-Za-z0-9_]/.test(text[j])) j += 1;
+  }
+  return text[j] === "$" ? text.slice(i, j + 1) : null;
+}
+
 /**
  * Strip SQL comments and split into statements, quote/identifier aware so that
  * a `;` or comment marker inside a string/identifier is not treated as
@@ -46,6 +64,19 @@ export function splitSqlStatements(sql) {
         else quote = null;
       }
       continue;
+    }
+    if (ch === "$") {
+      const delim = dollarQuoteDelimiter(text, i);
+      if (delim) {
+        // Consume the whole dollar-quoted span so its content never splits. An
+        // unterminated span swallows the rest (the engine will reject it, and no
+        // phantom `;` can leak a stacked statement past the guard).
+        const end = text.indexOf(delim, i + delim.length);
+        const stop = end === -1 ? text.length : end + delim.length;
+        current += text.slice(i, stop);
+        i = stop - 1;
+        continue;
+      }
     }
     if (ch === "'" || ch === '"' || ch === "`") { quote = ch; current += ch; continue; }
     if (ch === "-" && next === "-") {
@@ -90,6 +121,18 @@ export function maskSqlLiterals(statement) {
       }
       out += " ";
       continue;
+    }
+    if (ch === "$") {
+      const delim = dollarQuoteDelimiter(s, i);
+      if (delim) {
+        // Blank the whole dollar-quoted literal (length-preserving) so a keyword
+        // inside `$$ … UPDATE … $$` can't trip the DML scan.
+        const end = s.indexOf(delim, i + delim.length);
+        const stop = end === -1 ? s.length : end + delim.length;
+        out += " ".repeat(stop - i);
+        i = stop - 1;
+        continue;
+      }
     }
     if (ch === "'" || ch === '"' || ch === "`") { quote = ch; out += " "; continue; }
     out += ch;

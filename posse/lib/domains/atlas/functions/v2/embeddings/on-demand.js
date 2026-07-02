@@ -48,7 +48,10 @@ export async function ensureEmbeddingsForView({
 
   const symbolsLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100_000) : 5000;
   const symbols = view.query.allSymbols({ limit: symbolsLimit });
-  const guardKey = inFlightKey({ view, index, encoder });
+  // The scan limit is part of the identity: a full reconcile (100k) joining a
+  // lazy 5k run would inherit a result that scanned a fraction of its scope
+  // and clear the inflight breadcrumb as if parity had been checked.
+  const guardKey = `${inFlightKey({ view, index, encoder })}\0limit:${symbolsLimit}`;
   const existing = IN_FLIGHT_BY_VIEW.get(guardKey);
   if (existing) {
     recordEmbeddingForensics("on_demand.join_existing", {

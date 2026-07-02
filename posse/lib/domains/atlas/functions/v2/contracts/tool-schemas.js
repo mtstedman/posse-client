@@ -568,23 +568,31 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     domains: a(s({ enum: ["ux", "schema", "security", "performance"] }), { maxItems: 4 }),
     title: s({ minLength: 1, maxLength: 120 }),
     content: s({ minLength: 1, maxLength: 1200 }),
-    symbolIds: symbolIds(1000),
-    fileRelPaths: repoPaths(1000),
-    memoryId: s({ maxLength: 256 }),
+    // Aligned with the handler caps (memory.js): anchors past 100 were
+    // silently truncated, which changed the stored content-hash identity of
+    // what the caller thought it wrote; memoryId past 120 was silently
+    // discarded and a random id minted.
+    symbolIds: symbolIds(100),
+    fileRelPaths: repoPaths(100),
+    memoryId: s({ maxLength: 120 }),
   }, ["title", "content"]),
   "memory.get": o({
-    symbolIds: symbolIds(1000),
-    fileRelPaths: repoPaths(1000),
+    symbolIds: symbolIds(500),
+    fileRelPaths: repoPaths(500),
     domains: a(s({ enum: ["general", "ux", "schema", "security", "performance"] }), { maxItems: 5 }),
   }),
   "memory.feedback": o({
     memoryId: s({ minLength: 1, maxLength: 256 }),
-    verdict: s({ enum: ["used", "stale", "wrong", "duplicate"] }),
+    // "suppress" is the deliberate soft-delete route for the human review
+    // surfaces (posse admin memory / TUI review). Accepted here but NOT
+    // advertised in the agent-facing catalog enum — agents issue evidence
+    // verdicts; suppression stays a human GC decision.
+    verdict: s({ enum: ["used", "stale", "wrong", "duplicate", "suppress"] }),
     detail: s({ maxLength: 500 }),
   }, ["memoryId", "verdict"]),
   "memory.surface": o({
-    symbolIds: symbolIds(1000),
-    fileRelPaths: repoPaths(1000),
+    symbolIds: symbolIds(500),
+    fileRelPaths: repoPaths(500),
     domains: a(s({ enum: ["general", "ux", "schema", "security", "performance"] }), { maxItems: 5 }),
   }),
 

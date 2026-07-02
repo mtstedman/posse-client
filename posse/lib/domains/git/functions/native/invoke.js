@@ -262,6 +262,26 @@ const WORKER_ELIGIBLE_METHODS = new Set([
  */
 
 /**
+ * Normalize a caller options bag into native invocation options: only
+ * native-parity keys cross into the invocation, plus the explicitly threaded
+ * manager/signal/timeout — never the whole caller options bag. Shared by the
+ * `*Async` twins across the git function modules so the filtering cannot
+ * drift per-file.
+ *
+ * @param {{ nativeParity?: Record<string, any>, manager?: unknown, signal?: AbortSignal | null, timeoutMs?: number }} [options]
+ * @returns {Record<string, unknown>}
+ */
+export function nativeAsyncOptions(options = {}) {
+  const parity = options.nativeParity || {};
+  return {
+    ...parity,
+    manager: options.manager ?? parity.manager,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs,
+  };
+}
+
+/**
  * @param {string} method
  * @param {unknown} payload
  * @returns {{ protocol: string, method: string, payload: unknown }}

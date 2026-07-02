@@ -90,7 +90,7 @@ function recordRecoveryEvent(event, data = {}) {
     event,
     component: "atlas.embedding.child-index",
     ...data,
-  });
+  }, { flush: true });
 }
 
 /** @implements {EmbeddingIndexContract} */
@@ -150,7 +150,7 @@ export class ChildEmbeddingIndex {
    *   annSaveEveryMs?: number,
    * }} args
    */
-  constructor({ model, model_version, dim, embeddingsRoot, annSaveEveryBatches, annSaveEveryMs }) {
+  constructor({ model, model_version, dim, embeddingsRoot, annSaveEveryBatches, annSaveEveryMs, readOnly = false }) {
     if (!model) throw new TypeError("ChildEmbeddingIndex: model is required");
     if (!model_version) throw new TypeError("ChildEmbeddingIndex: model_version is required");
     if (!Number.isInteger(dim) || dim <= 0) throw new RangeError("ChildEmbeddingIndex: dim must be a positive integer");
@@ -161,6 +161,7 @@ export class ChildEmbeddingIndex {
     this.#embeddingsRoot = embeddingsRoot;
     this.#annSaveEveryBatches = annSaveEveryBatches;
     this.#annSaveEveryMs = annSaveEveryMs;
+    this.readOnly = !!readOnly;
     this.gateKey = `usearch-child:${path.join(embeddingsRoot, childEmbeddingModelDirName({ model, model_version }))}`;
   }
 
@@ -262,6 +263,7 @@ export class ChildEmbeddingIndex {
       model: this.model,
       model_version: this.model_version,
       dim: this.dim,
+      readOnly: this.readOnly,
       embeddingsRoot: this.#embeddingsRoot,
       runtimePathOverrides: {
         runtimeRoot: getRuntimeRoot(),

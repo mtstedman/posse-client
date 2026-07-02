@@ -1792,6 +1792,7 @@ export {
   createAgentInteraction,
   createAgentQuestion,
   createOperatorNudge,
+  expireUnackedOperatorFeedbackForJob,
   getOperatorFeedbackForJob,
   hasPendingOperatorFeedbackForJob,
   listActiveAgentGuidanceForJob,

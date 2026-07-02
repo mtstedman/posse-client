@@ -37,15 +37,71 @@ export function getPersistentTelemetryFile(stream) {
   return path.join(getPersistentTelemetryDir(), streamFileName(stream));
 }
 
-export function appendPersistentTelemetry(stream, entry = {}) {
+// Hot paths (embedding child request pairs, per-batch add events, gate
+// events) emit thousands of entries per semantic-heavy session; a
+// stat+append per entry put blocking fs calls on the reader lane and the
+// main-loop fallback. Entries buffer per stream and flush as ONE sync write
+// per window (or immediately at the line cap / via {flush:true} for rare
+// forensic-critical events). readPersistentTelemetryEntries drains the
+// stream's buffer first, so read-after-write semantics are preserved.
+const FLUSH_AFTER_LINES = 64;
+const FLUSH_AFTER_MS = 250;
+/** @type {Map<string, string[]>} filePath -> pending lines */
+const _pending = new Map();
+/** @type {ReturnType<typeof setTimeout> | null} */
+let _flushTimer = null;
+let _exitHookInstalled = false;
+
+function _writeLines(filePath, lines) {
+  if (!lines.length) return;
+  const dir = path.dirname(filePath);
+  if (!_ensuredDirs.has(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+    _ensuredDirs.add(dir);
+  }
+  rotatePersistentTelemetryFileIfNeeded(filePath);
+  const chunk = lines.join("");
+  try {
+    fs.appendFileSync(filePath, chunk, "utf8");
+  } catch (err) {
+    if (String(err?.code || "") !== "ENOENT") throw err;
+    _ensuredDirs.delete(dir);
+    fs.mkdirSync(dir, { recursive: true });
+    _ensuredDirs.add(dir);
+    fs.appendFileSync(filePath, chunk, "utf8");
+  }
+}
+
+function _flushFile(filePath) {
+  const lines = _pending.get(filePath);
+  if (!lines || lines.length === 0) return;
+  _pending.delete(filePath);
+  try { _writeLines(filePath, lines); } catch { /* telemetry is best effort */ }
+}
+
+export function flushPersistentTelemetry() {
+  if (_flushTimer) { clearTimeout(_flushTimer); _flushTimer = null; }
+  for (const filePath of [..._pending.keys()]) _flushFile(filePath);
+}
+
+function _scheduleFlush() {
+  if (!_exitHookInstalled) {
+    _exitHookInstalled = true;
+    // Sync flush is exit-safe; crashes lose at most the last window of
+    // NON-critical entries (critical ones use {flush:true} write-through).
+    process.on("exit", () => { try { flushPersistentTelemetry(); } catch { /* ignore */ } });
+  }
+  if (_flushTimer) return;
+  _flushTimer = setTimeout(() => {
+    _flushTimer = null;
+    flushPersistentTelemetry();
+  }, FLUSH_AFTER_MS);
+  _flushTimer.unref?.();
+}
+
+export function appendPersistentTelemetry(stream, entry = {}, { flush = false } = {}) {
   try {
     const filePath = getPersistentTelemetryFile(stream);
-    const dir = path.dirname(filePath);
-    if (!_ensuredDirs.has(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-      _ensuredDirs.add(dir);
-    }
-    rotatePersistentTelemetryFileIfNeeded(filePath);
     const line = `${safeStringify({
       t: entry?.created_at || entry?.t || nowIso(),
       run_id: getRunTelemetryId(),
@@ -55,14 +111,13 @@ export function appendPersistentTelemetry(stream, entry = {}) {
       cwd: safeProcessCwd(),
       ...entry,
     })}\n`;
-    try {
-      fs.appendFileSync(filePath, line, "utf8");
-    } catch (err) {
-      if (String(err?.code || "") !== "ENOENT") throw err;
-      _ensuredDirs.delete(dir);
-      fs.mkdirSync(dir, { recursive: true });
-      _ensuredDirs.add(dir);
-      fs.appendFileSync(filePath, line, "utf8");
+    const pending = _pending.get(filePath) || [];
+    pending.push(line);
+    _pending.set(filePath, pending);
+    if (flush || pending.length >= FLUSH_AFTER_LINES) {
+      _flushFile(filePath);
+    } else {
+      _scheduleFlush();
     }
     return true;
   } catch {
@@ -92,6 +147,8 @@ export function readPersistentTelemetryEntries(stream, {
   predicate = () => true,
 } = {}) {
   const filePath = getPersistentTelemetryFile(stream);
+  // Read-after-write: drain this stream's buffered lines before reading.
+  _flushFile(filePath);
   const max = limit == null ? Infinity : Math.max(0, Number(limit) || 0);
   if (max === 0) return [];
   let lines;

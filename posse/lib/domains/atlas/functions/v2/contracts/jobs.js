@@ -51,6 +51,7 @@
  * @property {string} [branch]                The branch this warm targets. Defaults to "main" for main-* purposes.
  * @property {string} [onto_branch]           Destination branch for "main-merge". Defaults to "main".
  * @property {string[]} [paths]               Canonical repo-relative paths. Required iff purpose === "main-incremental"; optional hint when purpose === "wi".
+ * @property {boolean} [paths_truncated]      Set when a hint list overflowed a cap (executor clamp or coalescer union): the warm must run the freshness scan instead of indexing the silent subset.
  * @property {number} [from_seq]              For "main-incremental": only consider deltas after this ledger seq.
  * @property {string} [out_view_path]         Absolute filesystem path where the resulting view file should be written. Required for "wi" purpose; optional for main-* (defaults to <repo>/.posse/atlas/views/main.view.db).
  * @property {string} [trigger_event]         Originating event name (one of ATLAS_EVENTS values). Informational only.

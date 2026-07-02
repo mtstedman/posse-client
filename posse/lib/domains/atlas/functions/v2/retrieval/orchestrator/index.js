@@ -20,7 +20,7 @@ import { runEntityFtsBackends } from "./backends/entity-fts.js";
 import { buildFeedbackIndex, applyFeedbackBoost } from "./feedback-boost.js";
 import { applyTaskQueryRanking, applyTaskQueryRankingAsync } from "./task-query-ranking.js";
 import { summarizeBackends } from "./fallback.js";
-import { planQuery, planQueryAsync } from "./query-planner.js";
+import { fallbackQueryPlan, planQuery, planQueryAsync } from "./query-planner.js";
 
 /** @typedef {import("../../contracts/api.js").View} View */
 /** @typedef {import("../../contracts/api.js").Ledger} Ledger */
@@ -40,7 +40,7 @@ import { planQuery, planQueryAsync } from "./query-planner.js";
  * @property {number} [feedbackHalfLifeDays]     When set, decay feedback signals by exp(-age/halfLife).
  *                                               Unset = equal-weight within the window (v1 default).
  * @property {number} [rrfK]                     Override the RRF k constant. Default 60.
- * @property {string[]} [entities]               Optional extra ledger entity types: "memories", "feedback".
+ * @property {string[]} [entities]               Optional extra ledger entity types: "feedback". (Memories moved to the per-repo memory DB; they are not an FTS entity here.)
  * @property {"name" | "body" | "either"} [searchScope]
  * @property {import("./query-planner-types.js").QueryPlan} [plan]
  * @property {(input: string) => import("./query-planner-types.js").QueryPlan | Promise<import("./query-planner-types.js").QueryPlan>} [planner]
@@ -79,14 +79,29 @@ const DEFAULT_LIMIT = 50;
  * @returns {HybridSearchResult | Promise<HybridSearchResult>}
  */
 export function hybridSearch(args) {
-  const planInput = args.options?.taskText || args.query;
+  // The QUERY names what the caller wants found; taskText is context. The
+  // plan (which generates every FTS probe) must derive from the query — with
+  // taskText as plan input, a symbol.search for "RetrievalCache" alongside
+  // divergent task prose never issued a single probe containing the queried
+  // name (bare identifiers are not literal-name probes). taskText still
+  // shapes ranking via the feedback task-text filter, and callers whose
+  // query IS the task text (slice.build entry discovery) are unaffected.
+  const planInput = args.query || args.options?.taskText || "";
   const wantSemantic =
     !!args.options?.semantic &&
     !!args.embeddingIndex &&
     !!args.encoder &&
     args.encoder.dim === args.embeddingIndex.dim;
+  // Native planner failure degrades to the JS fallback plan instead of
+  // failing the search — conductor paths already do this via their injected
+  // planner; the bare sync/async paths here (direct dispatch, tests) must
+  // honor the same downgrade-not-throw contract.
   const planned = args.options?.plan
-    || (args.options?.planner ? args.options.planner(planInput) : (wantSemantic ? planQueryAsync(planInput) : planQuery(planInput)));
+    || (args.options?.planner
+      ? args.options.planner(planInput)
+      : (wantSemantic
+        ? planQueryAsync(planInput).catch(() => fallbackQueryPlan(planInput))
+        : (() => { try { return planQuery(planInput); } catch { return fallbackQueryPlan(planInput); } })()));
   if (planned && typeof /** @type {any} */ (planned).then === "function") {
     return /** @type {Promise<import("./query-planner-types.js").QueryPlan>} */ (planned)
       .then((plan) => hybridSearchWithPlan(args, plan, true));
@@ -138,23 +153,7 @@ function hybridSearchSync(args, plan) {
     feedbackHalfLifeDays: options?.feedbackHalfLifeDays,
     k: options?.rrfK,
   });
-  const items = fused.slice(0, limit);
-  const entities = runEntityFtsBackends({
-    ledger,
-    query,
-    repoId,
-    entities: options?.entities,
-    limit,
-  });
-  return {
-    items,
-    symbols: items.map((e) => e.payload),
-    total: fused.length,
-    truncated: fused.length > items.length,
-    degraded: summarizeBackends(backendStatus),
-    plan,
-    ...(entities.length > 0 ? { entities } : {}),
-  };
+  return assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options });
 }
 
 /**
@@ -198,6 +197,26 @@ async function hybridSearchAsync(args, plan) {
     feedbackHalfLifeDays: options?.feedbackHalfLifeDays,
     k: options?.rrfK,
   });
+  return assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options });
+}
+
+/**
+ * Shared result assembly for the sync/async search paths: trim to the
+ * caller's limit, attach entity hits, and summarize backend degradation.
+ *
+ * @param {{
+ *   fused: FusedSymbolEntry[],
+ *   limit: number,
+ *   plan: import("./query-planner-types.js").QueryPlan,
+ *   backendStatus: Record<string, { ok: boolean, total: number, reason?: string }>,
+ *   ledger?: Ledger,
+ *   query: string,
+ *   repoId?: string,
+ *   options?: Parameters<typeof hybridSearch>[0]["options"],
+ * }} args
+ * @returns {HybridSearchResult}
+ */
+function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options }) {
   const items = fused.slice(0, limit);
   const entities = runEntityFtsBackends({
     ledger,
@@ -234,12 +253,31 @@ async function fuseAndAdjustAsync({
   feedbackHalfLifeDays,
   k,
 }) {
+  const lists = buildFusionLists(fts, vector);
+  const fused = await rrfFuseAsync(lists, { k: typeof k === "number" ? k : RRF_K });
+  applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });
+  await applyTaskQueryRankingAsync(fused, taskText);
+  return fused;
+}
+
+/**
+ * @param {ReturnType<typeof runFtsBackend>} fts
+ * @param {Awaited<ReturnType<typeof runVectorBackend>> | null} vector
+ * @returns {Record<string, ReturnType<typeof runFtsBackend>["entries"]>}
+ */
+function buildFusionLists(fts, vector) {
   /** @type {Record<string, ReturnType<typeof runFtsBackend>["entries"]>} */
   const lists = {};
   if (fts.ok && fts.entries.length > 0) lists.fts = fts.entries;
   if (vector && vector.ok && vector.entries.length > 0) lists.vector = vector.entries;
-  const fused = await rrfFuseAsync(lists, { k: typeof k === "number" ? k : RRF_K });
+  return lists;
+}
 
+/**
+ * @param {FusedSymbolEntry[]} fused
+ * @param {{ ledger?: Ledger, taskType?: string, taskText?: string, feedbackSinceTs?: string, feedbackHalfLifeDays?: number }} args
+ */
+function applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays }) {
   const feedbackIndex = buildFeedbackIndex({
     ledger,
     taskType,
@@ -248,8 +286,6 @@ async function fuseAndAdjustAsync({
     halfLifeDays: feedbackHalfLifeDays,
   });
   applyFeedbackBoost(fused, feedbackIndex);
-  await applyTaskQueryRankingAsync(fused, taskText);
-  return fused;
 }
 
 /**
@@ -278,20 +314,9 @@ function fuseAndAdjust({
   feedbackHalfLifeDays,
   k,
 }) {
-  /** @type {Record<string, ReturnType<typeof runFtsBackend>["entries"]>} */
-  const lists = {};
-  if (fts.ok && fts.entries.length > 0) lists.fts = fts.entries;
-  if (vector && vector.ok && vector.entries.length > 0) lists.vector = vector.entries;
+  const lists = buildFusionLists(fts, vector);
   const fused = rrfFuse(lists, { k: typeof k === "number" ? k : RRF_K });
-
-  const feedbackIndex = buildFeedbackIndex({
-    ledger,
-    taskType,
-    taskText,
-    sinceTs: feedbackSinceTs,
-    halfLifeDays: feedbackHalfLifeDays,
-  });
-  applyFeedbackBoost(fused, feedbackIndex);
+  applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });
   applyTaskQueryRanking(fused, taskText);
   return fused;
 }

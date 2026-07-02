@@ -161,18 +161,23 @@ function readObservationFileRows({
       if (!matchesNumber(entry.job_id ?? entry.job, jobId)) return false;
       if (!matchesNumber(entry.work_item_id ?? entry.wi, workItemId)) return false;
       if (typePrefix && !type.startsWith(typePrefix)) return false;
-      if (excludeTypeSuffix && type.endsWith(excludeTypeSuffix)) return false;
+      if (excludeTypeSuffix
+        && [].concat(excludeTypeSuffix).some((suffix) => suffix && type.endsWith(suffix))) {
+        return false;
+      }
       return true;
     },
   }).map(normalizeObservationRow).filter(Boolean);
 }
 
-// Harness-origin ATLAS prefetch (tool.atlas.prefetch) is recorded with the
-// agent's job_id so operator analytics can join it to the call it warms — but it
-// is NOT an agent tool invocation, it's handoff/prefetch behavior. Keep it out of
-// the agent-facing tool feed and per-job tool counts. (The admin ATLAS report
-// still queries job_observations directly by that type, so analytics are intact.)
-const HARNESS_PREFETCH_TYPE_SUFFIX = ".prefetch";
+// Harness-origin ATLAS work is recorded with the agent's job_id so operator
+// analytics can join it to the run — but it is NOT an agent tool invocation.
+// Keep it out of the agent-facing tool feed and per-job tool counts:
+//   .prefetch      — handoff/prefetch warms (tool.atlas.prefetch)
+//   .autofeedback  — finalizer-driven auto-feedback (tool.atlas.autofeedback)
+// (The admin ATLAS report still queries job_observations directly by these
+// types, so analytics are intact.)
+const HARNESS_SYSTEM_TYPE_SUFFIXES = Object.freeze([".prefetch", ".autofeedback"]);
 
 function _rowDetailObject(row) {
   if (row && row.detail && typeof row.detail === "object") return row.detail;
@@ -1211,12 +1216,13 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
   const db = getDb();
   const cappedLimit = Math.max(0, Number(limit) || 0);
   const candidateLimit = includeUnscoped ? cappedLimit : Math.max(200, cappedLimit * 10);
-  const fileRows = readObservationFileRows({ typePrefix: "tool.", excludeTypeSuffix: HARNESS_PREFETCH_TYPE_SUFFIX, limit: candidateLimit, order: "desc" });
+  const fileRows = readObservationFileRows({ typePrefix: "tool.", excludeTypeSuffix: HARNESS_SYSTEM_TYPE_SUFFIXES, limit: candidateLimit, order: "desc" });
   const dbRows = currentRunOnly ? db.prepare(`
     SELECT o.*
     FROM job_observations o
     WHERE o.observation_type LIKE 'tool.%'
       AND o.observation_type NOT LIKE '%.prefetch'
+      AND o.observation_type NOT LIKE '%.autofeedback'
       AND o.created_at >= ?
     ORDER BY o.id DESC
     LIMIT ?
@@ -1225,6 +1231,7 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
     FROM job_observations o
     WHERE o.observation_type LIKE 'tool.%'
       AND o.observation_type NOT LIKE '%.prefetch'
+      AND o.observation_type NOT LIKE '%.autofeedback'
     ORDER BY o.id DESC
     LIMIT ?
   `).all(candidateLimit);
@@ -1242,12 +1249,13 @@ export function getToolInvocationCountsByJob({ limit = 50 } = {}) {
   const db = getDb();
   const cappedLimit = Math.max(0, Number(limit) || 0);
   const candidateLimit = Math.max(1000, cappedLimit * 200);
-  const fileRows = readObservationFileRows({ typePrefix: "tool.", excludeTypeSuffix: HARNESS_PREFETCH_TYPE_SUFFIX, limit: candidateLimit, order: "desc" });
+  const fileRows = readObservationFileRows({ typePrefix: "tool.", excludeTypeSuffix: HARNESS_SYSTEM_TYPE_SUFFIXES, limit: candidateLimit, order: "desc" });
   const dbRows = db.prepare(`
     SELECT *
     FROM job_observations
     WHERE observation_type LIKE 'tool.%'
       AND observation_type NOT LIKE '%.prefetch'
+      AND observation_type NOT LIKE '%.autofeedback'
     ORDER BY id DESC
     LIMIT ?
   `).all(candidateLimit);
@@ -1255,7 +1263,7 @@ export function getToolInvocationCountsByJob({ limit = 50 } = {}) {
     .filter((row) => row.job_id != null
       && row.observation_type !== "tool.chain_read"
       && !String(row.observation_type || "").endsWith(".started")
-      && !String(row.observation_type || "").endsWith(HARNESS_PREFETCH_TYPE_SUFFIX)
+      && !HARNESS_SYSTEM_TYPE_SUFFIXES.some((suffix) => String(row.observation_type || "").endsWith(suffix))
       && String(row.observation_type || "").startsWith("tool."));
 
   const groups = new Map();

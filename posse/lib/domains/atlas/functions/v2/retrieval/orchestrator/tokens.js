@@ -33,9 +33,35 @@ export function tokenizeForRanking(input) {
   const key = String(input ?? "");
   const cached = TOKENIZE_MEMO.get(key);
   if (cached) return cached.slice();
-  const tokens = /** @type {string[]} */ (runAtlasNativeOperation({ op: "tokenize", input: key }));
+  let tokens;
+  try {
+    tokens = /** @type {string[]} */ (runAtlasNativeOperation({ op: "tokenize", input: key }));
+  } catch {
+    // Native binary unavailable: degrade to the JS splitter rather than fail
+    // the whole search — ranking is a tiebreaker, and the orchestrator's
+    // contract is downgrade-not-throw. Deliberately NOT memoized so native
+    // quality returns as soon as the binary does.
+    return tokenizeJsFallback(key);
+  }
   memoizeTokens(key, tokens);
   return Array.isArray(tokens) ? tokens.slice() : [];
+}
+
+/**
+ * Rough JS approximation of the native tokenizer (camelCase / underscore /
+ * punctuation split, lowercase, short-token drop). Only used when the native
+ * binary is unavailable.
+ *
+ * @param {string} input
+ * @returns {string[]}
+ */
+function tokenizeJsFallback(input) {
+  return String(input || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .split(/[^a-zA-Z0-9]+/)
+    .map((token) => token.toLowerCase())
+    .filter((token) => token.length >= 2);
 }
 
 /**
@@ -55,6 +81,9 @@ export async function tokenizeForRankingAsync(input) {
         memoizeTokens(key, tokens);
         return Array.isArray(tokens) ? tokens.slice() : [];
       })
+      // Same degrade-not-throw fallback as the sync path; not memoized so
+      // native quality returns with the daemon.
+      .catch(() => tokenizeJsFallback(key))
       .finally(() => {
         if (TOKENIZE_INFLIGHT.get(key) === inFlight) TOKENIZE_INFLIGHT.delete(key);
       });

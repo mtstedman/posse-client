@@ -74,10 +74,32 @@ export function usageStats({ versionId, params, ledger, repoId }) {
  *   taskType?: string | null,
  * }} args
  */
+// Reads dispatched on the conductor reader lane carry a READ-ONLY ledger
+// handle, so their usage events cannot be inserted from that thread. Count the
+// drops (surfaced via getUsageEventDropStats and a once-per-process warn)
+// instead of silently swallowing SQLITE_READONLY per call — usage.stats
+// systematically undercounting the default read path looked like low usage,
+// not like a broken recorder.
+let _readOnlyDrops = 0;
+let _warnedReadOnlyDrops = false;
+
+/** @returns {{ droppedReadOnly: number }} */
+export function getUsageEventDropStats() {
+  return { droppedReadOnly: _readOnlyDrops };
+}
+
 export function recordAtlasUsageEvent({ ledger, action, repoId, versionId, startedAt, envelope, taskType = null }) {
   if (action === "usage.stats") return;
   const db = ledgerDb(ledger);
   if (!db) return;
+  if (/** @type {any} */ (db).readonly === true) {
+    _readOnlyDrops += 1;
+    if (!_warnedReadOnlyDrops) {
+      _warnedReadOnlyDrops = true;
+      console.warn("[atlas-v2 usage] reader-lane ledger handle is read-only; usage events from this lane are counted as drops, not persisted");
+    }
+    return;
+  }
   try {
     const ok = envelope?.ok === true ? 1 : 0;
     const resultBytes = Buffer.byteLength(JSON.stringify(envelope?.data ?? envelope?.error ?? {}), "utf8");

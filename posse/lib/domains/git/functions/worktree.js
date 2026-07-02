@@ -15,7 +15,7 @@ export * from "./worktree-safe-remove.js";
 export * from "./worktree-create.js";
 export * from "./worktree-gc.js";
 
-export { resolveTargetBranch } from "./target-branch.js";
+export { resolveTargetBranch, resolveTargetBranchAsync } from "./target-branch.js";
 export {
   acquireWorktreeLockAsync,
   releaseWorktreeLockAsync,
@@ -25,7 +25,6 @@ export {
 } from "./worktree-locks.js";
 export {
   dirSizeBytes,
-  pruneRecoveredWorktreeSnapshots,
   pruneRecoveredWorktreeSnapshotsAsync,
   preserveDirtyWorktreeSnapshot,
   preserveDirtyWorktreeSnapshotAsync,
@@ -34,14 +33,13 @@ export {
 } from "./worktree-snapshots.js";
 
 import { isExpectedGitPredicateMiss } from "./worktree-internal.js";
-import { gitTopLevel, gitTopLevelAsync } from "./worktree-path.js";
+import { gitTopLevelAsync } from "./worktree-path.js";
 import { branchIsAncestorOfTarget, branchIsAncestorOfTargetAsync } from "./worktree-branch-ops.js";
 import { resetDirtyWorktreeAsync } from "./worktree-recovery.js";
 
 export const __testGitDiagnostics = Object.freeze({
   branchIsAncestorOfTarget,
   branchIsAncestorOfTargetAsync,
-  gitTopLevel,
   gitTopLevelAsync,
   isExpectedGitPredicateMiss,
   resetDirtyWorktreeAsync,

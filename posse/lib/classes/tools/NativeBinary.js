@@ -568,19 +568,6 @@ export class NativeBinary {
   }
 
   /**
-   * Native protocol requests must carry the heartbeat envelope owned by this
-   * handle's auth manager. Leaf invoke modules normally attach it, but the
-   * spawn boundary is the last reliable place to enforce that invariant for
-   * key-gated binaries and worker respawns.
-   *
-   * @param {Buffer | string | undefined} input
-   * @returns {Buffer | string | undefined}
-   */
-  #inputWithNativeAuth(input) {
-    return this.#inputWithNativeAuthDetails(input).input;
-  }
-
-  /**
    * @param {Record<string, unknown> | null} request
    * @returns {boolean}
    */

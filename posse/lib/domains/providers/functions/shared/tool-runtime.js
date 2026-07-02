@@ -4,7 +4,7 @@ import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncG
 import { stripPosseMcpGatewayPrefix } from "../../../integrations/functions/mcp-gateway.js";
 import { ToolCatalog } from "../../../../classes/tools/ToolCatalog.js";
 import { ToolRegistry } from "../../../../classes/tools/ToolRegistry.js";
-import { declareToolSuites } from "../../../../functions/tools/tool-suites.js";
+import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../../functions/tools/tool-suites.js";
 import { assertAdvertisedHaveExecutors } from "../../../../functions/tools/tool-parity.js";
 import { createChainLedger } from "../../../../functions/tools/chain-ledger.js";
 import { formatAtlasToolUseDisplayName } from "../../../../functions/tools/mcp-surface.js";
@@ -37,12 +37,6 @@ const BLOCKING_NATIVE_TOOL_NAMES = new Set([
   "resize_image",
   "write_file",
 ]);
-const LIVE_CHANNEL_TOOL_NAMES = new Set([
-  "agent_feedback",
-  "get_operator_feedback",
-  "ack_operator_feedback",
-]);
-
 function nativeToolGateKey(cwd) {
   const normalized = path.resolve(String(cwd || process.cwd())).replace(/\\/g, "/");
   return `provider-tools:${process.platform === "win32" ? normalized.toLowerCase() : normalized}`;
@@ -56,7 +50,23 @@ function liveChannelSignalForAmbient(toolName) {
   if (LIVE_CHANNEL_TOOL_NAMES.has(toolName)) return "";
   const ambient = getObservationContext() || {};
   if (ambient.job_id == null) return "";
-  const pendingCount = countPendingOperatorFeedbackForJob(ambient.job_id);
+  return operatorFeedbackSignalTextForJob(ambient.job_id, toolName);
+}
+
+/**
+ * The signal suffix for a specific job — shared with owner-side result paths
+ * (PersistentMcpOwner ATLAS results) that carry an explicit session job id
+ * instead of ambient observation context.
+ *
+ * @param {number | string | null} jobId
+ * @param {string} [toolName]
+ * @returns {string}
+ */
+export function operatorFeedbackSignalTextForJob(jobId, toolName = "") {
+  if (toolName && LIVE_CHANNEL_TOOL_NAMES.has(toolName)) return "";
+  const normalized = Number(jobId);
+  if (!Number.isFinite(normalized) || normalized <= 0) return "";
+  const pendingCount = countPendingOperatorFeedbackForJob(normalized);
   if (pendingCount <= 0) return "";
   return [
     "",
@@ -71,9 +81,19 @@ function liveChannelSignalForAmbient(toolName) {
 }
 
 function appendLiveChannelSignal(result, toolName) {
-  const signal = liveChannelSignalForAmbient(toolName);
+  // The signal is advisory: a DB hiccup while counting pending feedback must
+  // never convert a SUCCESSFUL tool result into an error, and non-string
+  // results must pass through untouched (String() would turn structured
+  // results into "[object Object]").
+  if (typeof result !== "string") return result;
+  let signal = "";
+  try {
+    signal = liveChannelSignalForAmbient(toolName);
+  } catch {
+    return result;
+  }
   if (!signal) return result;
-  return `${typeof result === "string" ? result : String(result ?? "")}${signal}`;
+  return `${result}${signal}`;
 }
 
 export function parseToolArgs(argsStr) {
@@ -304,6 +324,8 @@ export function createStandardToolHandlerMap({
         decision: row.ack_decision || "accepted",
         reason: row.ack_reason || null,
         acknowledged_at: row.acknowledged_at || null,
+        // First ack wins; a repeat ack reads back the recorded decision.
+        ...(row.already_acknowledged ? { already_acknowledged: true } : {}),
       }, null, 2);
     },
     read_file(args, ctx) {
@@ -451,6 +473,14 @@ export async function executeToolWithMap(name, argsStr, context, {
     const handler = handlers[name];
     if (typeof handler === "function") {
       const run = () => handler(args, context);
+      // The operator channel must stay reachable no matter what holds the
+      // worktree gate: the trio touches only SQLite, so running it ungated
+      // cannot conflict with a blocking tool's write barrier — and gating it
+      // meant a 120s bash hold could fail the operator's own recovery path
+      // with gate contention.
+      if (LIVE_CHANNEL_TOOL_NAMES.has(name)) {
+        return appendLiveChannelSignal(await run(), name);
+      }
       const label = `tool.${name}`;
       const key = nativeToolGateKey(context?.cwd);
       const result = BLOCKING_NATIVE_TOOL_NAMES.has(name)

@@ -51,7 +51,15 @@ export async function runVectorBackend({ view, query, limit, embeddingIndex, enc
     });
     const symbols = hits.map((h) => h.symbol);
     if (symbols.length === 0) {
-      return { ok: false, entries: [], raw: [], total: 0, reason: "index_empty" };
+      // Distinguish "ran and legitimately found nothing" from real
+      // unavailability: only a knowably-empty index is a degradation signal.
+      // Reporting empty results as ok:false used to flip meta.semantic to
+      // unavailable and emit a misleading fell-back-to-lexical warning.
+      const indexSize = Number(/** @type {any} */ (embeddingIndex)?.size ?? NaN);
+      if (indexSize === 0) {
+        return { ok: false, entries: [], raw: [], total: 0, reason: "index_empty" };
+      }
+      return { ok: true, entries: [], raw: [], total: 0 };
     }
     return {
       ok: true,

@@ -32,6 +32,7 @@ import {
   ledgerBranchForWi,
   mainViewPath,
   warmedViewPath,
+  warmedViewsDir,
   worktreeViewPath,
 } from "../../functions/v2/runtime-paths.js";
 import {
@@ -1571,7 +1572,11 @@ export class ParseEngine {
       }));
       return base;
     }
-    if (paths.length === 0 && String(payload?.trigger_event || "") === "boot") {
+    // Boot warms and truncated-hint warms both need the freshness scan: the
+    // former has no hints at all, the latter deliberately dropped an
+    // over-cap hint list rather than index a silent subset of it.
+    if (paths.length === 0
+      && (String(payload?.trigger_event || "") === "boot" || payload?.paths_truncated === true)) {
       paths = await this.#discoverBootFreshnessPaths({ branch, base });
     }
     base.paths_considered = paths.length;
@@ -2511,6 +2516,59 @@ export class ParseEngine {
   }
 
   /**
+   * Symbol identities of every SIBLING live view (main + pre-warmed WI views)
+   * so a full-scope prune keeps their vectors: the embedding store is
+   * repo-global and pruning to one view's keys deleted the others' content.
+   * Worktree-local view drift is a documented residual — those vectors
+   * re-encode on demand. An unreadable sibling aborts the prune for this pass
+   * (housekeeping retries next warm) rather than pruning a live view's keys.
+   *
+   * @param {string} currentViewPath
+   * @returns {{ ok: true, keys: Array<{ content_hash: string, local_id: number }> } | { ok: false, reason: string }}
+   */
+  #collectSiblingViewKeepKeys(currentViewPath) {
+    const current = path.resolve(String(currentViewPath || ""));
+    /** @type {string[]} */
+    const candidates = [];
+    try {
+      candidates.push(mainViewPath(this.#repoRoot));
+      const warmedDir = warmedViewsDir(this.#repoRoot);
+      if (fs.existsSync(warmedDir)) {
+        for (const name of fs.readdirSync(warmedDir)) {
+          if (name.endsWith(".view.db")) candidates.push(path.join(warmedDir, name));
+        }
+      }
+    } catch (err) {
+      return { ok: false, reason: `enumerate: ${/** @type {any} */ (err)?.message || err}` };
+    }
+    /** @type {Array<{ content_hash: string, local_id: number }>} */
+    const keys = [];
+    for (const candidate of candidates) {
+      if (path.resolve(candidate) === current) continue;
+      if (!fs.existsSync(candidate)) continue;
+      let sibling = null;
+      try {
+        sibling = View.mount({ dbPath: candidate, mode: "readonly" });
+        const symbols = sibling.query.allSymbols({ limit: 100_000 });
+        if (symbols.length >= 100_000) {
+          // A truncated sibling keep-set would prune that view's tail — same
+          // sliding-window churn the keep-cap guard prevents for the current
+          // view. Abort the prune for this pass.
+          return { ok: false, reason: `${path.basename(candidate)}: keep-set truncated at scan cap` };
+        }
+        for (const symbol of symbols) {
+          keys.push({ content_hash: symbol.content_hash, local_id: symbol.local_id });
+        }
+      } catch (err) {
+        return { ok: false, reason: `${path.basename(candidate)}: ${/** @type {any} */ (err)?.message || err}` };
+      } finally {
+        try { sibling?.close?.(); } catch { /* best effort */ }
+      }
+    }
+    return { ok: true, keys };
+  }
+
+  /**
    * Best-effort semantic index refresh. A failed encoder/API/native ANN
    * dependency must never make the warm job fail; the view is still the
    * primary cache. Operators get a structured error in result_json and,
@@ -2654,17 +2712,20 @@ export class ParseEngine {
       base.embeddings_indexed = report.indexed;
       /** @type {any} */ (base).embeddings_skipped_unsupported_language = report.skippedUnsupportedLanguage || 0;
       /** @type {any} */ (base).embeddings_already_indexed = report.alreadyIndexed || 0;
-      await pruneStaleEmbeddingHashes({
-        base,
-        index: resources.index,
-        hashes: useIncrementalScope ? this.#staleHashesSafeToPrune({ view, base }) : null,
-      });
-      recordEmbeddingForensics("warmer.embeddings.prune_stale_hashes.done", {
-        view_path: viewPath,
-        scope: useIncrementalScope ? "incremental" : "full",
-        base,
-      });
       if (useIncrementalScope) {
+        // Incremental scope: no prune-to-view runs, so stale before-hashes
+        // are removed directly — filtered by liveness so a hash whose content
+        // is still current at another path keeps its vectors.
+        await pruneStaleEmbeddingHashes({
+          base,
+          index: resources.index,
+          hashes: this.#staleHashesSafeToPrune({ view, base }),
+        });
+        recordEmbeddingForensics("warmer.embeddings.prune_stale_hashes.done", {
+          view_path: viewPath,
+          scope: "incremental",
+          base,
+        });
         /** @type {any} */ (base).embeddings_prune_scope = "incremental";
         recordEmbeddingForensics("warmer.embeddings.prune_to_view.skipped", {
           view_path: viewPath,
@@ -2672,12 +2733,47 @@ export class ParseEngine {
           base,
         });
       } else {
-        await pruneEmbeddingIndexToCurrentView({ base, view, index: resources.index });
-        /** @type {any} */ (base).embeddings_prune_scope = "full";
-        recordEmbeddingForensics("warmer.embeddings.prune_to_view.done", {
-          view_path: viewPath,
-          base,
-        });
+        const siblings = this.#collectSiblingViewKeepKeys(viewPath);
+        if (siblings.ok) {
+          // Full scope: prune-to-view SUBSUMES the stale-hash prune — any
+          // stale key absent from every live view falls out of the union
+          // keep-set, and one that a sibling WI view still serves is
+          // (correctly) kept, which the current-view-only liveness filter
+          // could not see. One keys-diff also means ONE full ANN rebuild
+          // (each removal path rebuilds + durable-saves the whole index —
+          // running both prunes doubled the dominant cost of full warms).
+          await pruneEmbeddingIndexToCurrentView({
+            base,
+            view,
+            index: resources.index,
+            extraKeepKeys: siblings.keys,
+          });
+          /** @type {any} */ (base).embeddings_prune_scope = "full";
+          recordEmbeddingForensics("warmer.embeddings.prune_to_view.done", {
+            view_path: viewPath,
+            sibling_keep_keys: siblings.keys.length,
+            base,
+          });
+        } else {
+          // Housekeeping degraded: fall back to the filtered stale-hash prune
+          // so replaced content still gets cleaned this pass.
+          await pruneStaleEmbeddingHashes({
+            base,
+            index: resources.index,
+            hashes: this.#staleHashesSafeToPrune({ view, base }),
+          });
+          recordEmbeddingForensics("warmer.embeddings.prune_stale_hashes.done", {
+            view_path: viewPath,
+            scope: "full_fallback",
+            base,
+          });
+          /** @type {any} */ (base).embeddings_prune_scope = "skipped_sibling_unreadable";
+          recordEmbeddingForensics("warmer.embeddings.prune_to_view.skipped", {
+            view_path: viewPath,
+            reason: `sibling_view_unreadable: ${siblings.reason}`,
+            base,
+          });
+        }
       }
       await this.#writeEmbeddingWatermark({
         index: resources.index,

@@ -70,48 +70,6 @@ function memorySurfaceEnabled({
   return false;
 }
 
-function normalizeSurfaceMemory(memory = {}) {
-  const memoryId = memory.memoryId || memory.memory_id || memory.id || null;
-  const type = memory.type || "task_context";
-  const tags = Array.isArray(memory.tags) ? memory.tags : [];
-  const kind = tags.includes("enforcement") ? "enforcement"
-    : tags.includes("lesson") ? "lesson"
-      : tags.includes("pattern") ? "pattern"
-        : type;
-  const content = String(memory.content || "");
-  const firstLine = content.split("\n").map((line) => line.trim()).find(Boolean) || memory.title || "ATLAS memory";
-  return {
-    id: memoryId ? `atlas:${memoryId}` : `atlas:${memory.title || firstLine}`,
-    memory_id: memoryId,
-    insight_type: "atlas_memory",
-    summary: memory.title || firstLine,
-    detail: content,
-    insight_kind: kind,
-    action: firstLine,
-    // Memory confidence is an internal-only ordering/pruning signal and is never
-    // surfaced to agents; it is deliberately not carried onto the insight.
-    // Provenance: who originally wrote this memory (agent, human, kaizen, ...),
-    // carried from the memories.source column; insight_type already marks the
-    // surfacing path as atlas_memory.
-    source: `memory:${String(memory.source || "agent").trim() || "agent"}`,
-    evidence: JSON.stringify([
-      `surface score: ${memory.score ?? "n/a"}`,
-      ...(Array.isArray(memory.matchedSymbols) && memory.matchedSymbols.length > 0
-        ? [`matched symbols: ${memory.matchedSymbols.slice(0, 5).join(", ")}`]
-        : []),
-    ]),
-    file_paths: null,
-    surfaced_memory: true,
-    prefetch_origin: HANDOFF_MEMORY_PREFETCH_ORIGIN,
-    why_surface: memory.score != null ? `ATLAS memory.surface score ${memory.score}` : "ATLAS memory.surface",
-    stale: !!memory.stale,
-  };
-}
-
-function nonStaleSurfaceMemories(memories = []) {
-  return memories.filter((memory) => !memory?.stale);
-}
-
 function surfacedAtlasMemoryInsights(rows = []) {
   return rows.filter((row) =>
     row?.surfaced_memory === true
@@ -334,6 +292,4 @@ export const __test = {
   buildMemoryPrefetchNotice,
   memorySurfaceArgs,
   memorySurfaceEnabled,
-  nonStaleSurfaceMemories,
-  normalizeSurfaceMemory,
 };

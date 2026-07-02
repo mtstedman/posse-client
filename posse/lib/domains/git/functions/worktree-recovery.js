@@ -21,9 +21,7 @@ import {
   acquireWorktreeLock,
   acquireWorktreeLockAsync,
   worktreeLockPath,
-  gitStashLockPath,
   gitStashLockPathAsync,
-  withWorktreeLock,
   withWorktreeLockAsync,
 } from "./worktree-locks.js";
 import {
@@ -33,12 +31,18 @@ import {
 } from "./worktree-snapshots.js";
 import { worktreeRoot } from "./worktree-path.js";
 
-export function worktreePorcelain(wtPath) {
-  return gitExec(["status", "--porcelain"], wtPath).trim();
-}
-
 export async function worktreePorcelainAsync(wtPath, { signal = null } = {}) {
   return (await gitExecAsync(["status", "--porcelain"], wtPath, { signal })).trim();
+}
+
+// Fail closed: callers treat "clean" as "leave the worktree alone", so an
+// unreadable/corrupt worktree is never reset. Log it so corruption isn't
+// silently invisible.
+function logDirtyCheckFailure(wtPath, err) {
+  log.warn("git", "Worktree dirty-state check failed; treating as clean (no recovery)", {
+    wtPath,
+    error: err?.message || String(err),
+  });
 }
 
 export function worktreeNeedsRecovery(wtPath) {
@@ -46,13 +50,7 @@ export function worktreeNeedsRecovery(wtPath) {
     return gitHasChanges(wtPath)
       || (parseBooleanSetting("worktree_clean_ignored", false) && gitHasIgnoredChanges(wtPath));
   } catch (err) {
-    // Fail closed: callers treat "clean" as "leave the worktree alone", so an
-    // unreadable/corrupt worktree is never reset. Log it so corruption isn't
-    // silently invisible.
-    log.warn("git", "Worktree dirty-state check failed; treating as clean (no recovery)", {
-      wtPath,
-      error: err?.message || String(err),
-    });
+    logDirtyCheckFailure(wtPath, err);
     return false;
   }
 }
@@ -63,10 +61,7 @@ export async function worktreeNeedsRecoveryAsync(wtPath, options = {}) {
       || (parseBooleanSetting("worktree_clean_ignored", false) && await worktreeHasIgnoredChangesNodeAsync(wtPath, options));
   } catch (err) {
     if (isAbortError(err)) throw err;
-    log.warn("git", "Worktree dirty-state check failed; treating as clean (no recovery)", {
-      wtPath,
-      error: err?.message || String(err),
-    });
+    logDirtyCheckFailure(wtPath, err);
     return false;
   }
 }
@@ -91,27 +86,22 @@ export async function worktreeHasIgnoredChangesNodeAsync(wtPath, { signal = null
     .some((line) => line.startsWith("!! "));
 }
 
-export function cleanWorktreeUntracked(wtPath, { cleanIgnoredOverride = null } = {}) {
+// The clean invocation is the drift surface here: `-e .posse/` preserves posse
+// runtime dirs when ignored artifacts are cleared too. Both twins take their
+// argv from this one builder.
+function cleanUntrackedArgs(cleanIgnoredOverride) {
   const cleanIgnored = cleanIgnoredOverride == null
     ? parseBooleanSetting("worktree_clean_ignored", false)
     : !!cleanIgnoredOverride;
-  if (cleanIgnored) {
-    // Remove ignored artifacts too, while preserving posse runtime dirs.
-    gitExec(["clean", "-fdx", "-e", ".posse/"], wtPath);
-    return;
-  }
-  gitExec(["clean", "-fd"], wtPath);
+  return cleanIgnored ? ["clean", "-fdx", "-e", ".posse/"] : ["clean", "-fd"];
+}
+
+export function cleanWorktreeUntracked(wtPath, { cleanIgnoredOverride = null } = {}) {
+  gitExec(cleanUntrackedArgs(cleanIgnoredOverride), wtPath);
 }
 
 export async function cleanWorktreeUntrackedAsync(wtPath, { cleanIgnoredOverride = null, signal = null } = {}) {
-  const cleanIgnored = cleanIgnoredOverride == null
-    ? parseBooleanSetting("worktree_clean_ignored", false)
-    : !!cleanIgnoredOverride;
-  if (cleanIgnored) {
-    await gitExecAsync(["clean", "-fdx", "-e", ".posse/"], wtPath, { signal });
-    return;
-  }
-  await gitExecAsync(["clean", "-fd"], wtPath, { signal });
+  await gitExecAsync(cleanUntrackedArgs(cleanIgnoredOverride), wtPath, { signal });
 }
 
 export function parsePorcelainRemainingPaths(porcelainZ) {
@@ -142,6 +132,11 @@ export function parsePorcelainRemainingPaths(porcelainZ) {
   return remaining.filter(Boolean);
 }
 
+// resetDirtyWorktree / resetDirtyWorktreeAsync are intentionally NOT twins of
+// one body: the sync fn implements the abort-merge/rebase/cherry-pick + reset
+// sequence in Node, while the async fn delegates the entire semantics to the
+// native Rust method (git.worktree.resetDirty). Changes here must be mirrored
+// in Rust; the snapshot-and-reset twin-parity test pins the equivalence.
 export function resetDirtyWorktree(wtPath, { cleanIgnoredOverride = null } = {}) {
   // Unmerged paths (MERGE_HEAD/conflicts) make `checkout -- .` fail.
   // Best effort: clear merge state first, then force-reset tracked and untracked.
@@ -217,55 +212,11 @@ export async function resetDirtyWorktreeAsync(wtPath, { cleanIgnoredOverride = n
   );
 }
 
-export function resetDirtyWorktreeFallback(wtPath, projectDir = null) {
-  return withWorktreeLock(wtPath, projectDir || wtPath, () => {
-    gitExec(["checkout", "--", "."], wtPath);
-    gitExec(["clean", "-fd"], wtPath);
-  });
-}
-
 export async function resetDirtyWorktreeFallbackAsync(wtPath, projectDir = null, { signal = null } = {}) {
   return withWorktreeLockAsync(wtPath, projectDir || wtPath, async () => {
     await gitExecAsync(["checkout", "--", "."], wtPath, { signal });
     await gitExecAsync(["clean", "-fd"], wtPath, { signal });
   }, { signal });
-}
-
-export function stashDirtyWorktree(
-  wtPath,
-  projectDir,
-  message,
-  { worktreeLockWaitMs = null, stashLockWaitMs = null, shouldDefer = null } = {},
-) {
-  if (!wtPath) return false;
-  const mainCwd = projectDir || wtPath;
-  return withWorktreeLock(wtPath, mainCwd, () => {
-    if (typeof shouldDefer === "function") {
-      let defer = false;
-      try {
-        defer = !!shouldDefer({ wtPath, projectDir: mainCwd, message });
-      } catch {
-        return false;
-      }
-      if (defer) return false;
-    }
-    if (!gitHasChanges(wtPath)) return false;
-
-    // refs/stash is shared by every worktree in the repository.
-    const lockPath = gitStashLockPath(wtPath, mainCwd);
-    const stashLock = acquireWorktreeLock(lockPath, {
-      waitMs: stashLockWaitMs ?? worktreeLockWaitMs,
-    });
-    if (!stashLock.acquired) {
-      throw new Error(`Timed out waiting for git stash lock: ${lockPath}`);
-    }
-    try {
-      gitExec(["stash", "push", "--include-untracked", "-m", message], wtPath);
-      return true;
-    } finally {
-      stashLock.release();
-    }
-  }, { waitMs: worktreeLockWaitMs });
 }
 
 export async function stashDirtyWorktreeAsync(
@@ -289,7 +240,7 @@ export async function stashDirtyWorktreeAsync(
     if (!(await gitHasChangesAsync(wtPath, { signal }))) return false;
 
     // refs/stash is shared by every worktree in the repository.
-    const lockPath = await gitStashLockPathAsync(wtPath, mainCwd, { signal });
+    const lockPath = await gitStashLockPathAsync(wtPath, mainCwd, { signal, nativeParity: { disabled: true } });
     const stashLock = await acquireWorktreeLockAsync(lockPath, {
       waitMs: stashLockWaitMs ?? worktreeLockWaitMs,
       signal,
@@ -377,6 +328,27 @@ export function preserveCorruptWorktreeContents(wtPath, projectDir, { wiId, bran
   return recoveryDir;
 }
 
+// Shared post-reset notification for the snapshot-and-reset twins: the
+// callback payload shape is API surface (worker/GC log messages key on it),
+// so it is built in exactly one place.
+function notifyResetIncomplete(onResetIncomplete, { wtPath, projectDir, reason, branchName, wiId, snapshotDir, resetResult }) {
+  if (resetResult?.clean || typeof onResetIncomplete !== "function") return;
+  try {
+    onResetIncomplete({
+      wtPath,
+      projectDir,
+      reason,
+      branchName,
+      wiId,
+      snapshotDir,
+      remainingPaths: resetResult?.remainingPaths || [],
+      postResetPorcelain: resetResult?.postResetPorcelain || "",
+    });
+  } catch {
+    // Recovery should remain best-effort.
+  }
+}
+
 export function snapshotAndResetDirtyWorktree(
   wtPath,
   projectDir,
@@ -413,22 +385,7 @@ export function snapshotAndResetDirtyWorktree(
       throw new Error(`Dirty worktree snapshot failed for ${wtPath}; refusing to reset`);
     }
     const resetResult = resetDirtyWorktree(wtPath, { cleanIgnoredOverride });
-    if (!resetResult?.clean && typeof onResetIncomplete === "function") {
-      try {
-        onResetIncomplete({
-          wtPath,
-          projectDir,
-          reason,
-          branchName,
-          wiId,
-          snapshotDir,
-          remainingPaths: resetResult?.remainingPaths || [],
-          postResetPorcelain: resetResult?.postResetPorcelain || "",
-        });
-      } catch {
-        // Recovery should remain best-effort.
-      }
-    }
+    notifyResetIncomplete(onResetIncomplete, { wtPath, projectDir, reason, branchName, wiId, snapshotDir, resetResult });
     return snapshotDir;
   } finally {
     if (heldLock?.acquired) heldLock.release();
@@ -458,7 +415,7 @@ export async function snapshotAndResetDirtyWorktreeAsync(
   }
   if (!(await worktreeNeedsRecoveryAsync(wtPath, { signal }))) return null;
 
-  const lockPath = worktreeLockPath(wtPath, projectDir);
+  const lockPath = worktreeLockPath(wtPath, projectDir, { disabled: true });
   let heldLock = null;
   if (lock) {
     heldLock = await acquireWorktreeLockAsync(lockPath, { signal, waitMs: worktreeLockWaitMs });
@@ -475,22 +432,7 @@ export async function snapshotAndResetDirtyWorktreeAsync(
       throw new Error(`Dirty worktree snapshot failed for ${wtPath}; refusing to reset`);
     }
     const resetResult = await resetDirtyWorktreeAsync(wtPath, { cleanIgnoredOverride, signal, nativeParity });
-    if (!resetResult?.clean && typeof onResetIncomplete === "function") {
-      try {
-        onResetIncomplete({
-          wtPath,
-          projectDir,
-          reason,
-          branchName,
-          wiId,
-          snapshotDir,
-          remainingPaths: resetResult?.remainingPaths || [],
-          postResetPorcelain: resetResult?.postResetPorcelain || "",
-        });
-      } catch {
-        // Recovery should remain best-effort.
-      }
-    }
+    notifyResetIncomplete(onResetIncomplete, { wtPath, projectDir, reason, branchName, wiId, snapshotDir, resetResult });
     return snapshotDir;
   } finally {
     if (heldLock?.acquired) await heldLock.releaseAsync();

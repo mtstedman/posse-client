@@ -90,7 +90,7 @@ function recordAnnRecoveryEvent(event, data = {}) {
     event,
     component: "atlas.embedding.index",
     ...data,
-  });
+  }, { flush: true });
 }
 
 /** @typedef {import("../../functions/v2/contracts/embeddings.js").EmbeddingIngest} EmbeddingIngest */
@@ -223,6 +223,7 @@ export class EmbeddingIndex {
   #lastAnnSaveAt = Date.now();
   /** @type {boolean} */
   #annSaveFailureLogged = false;
+  #readOnly = false;
   /** @type {boolean} */
   #lastSaveDurable = true;
 
@@ -236,13 +237,19 @@ export class EmbeddingIndex {
    *   annSaveEveryMs?: number,
    * }} args
    */
-  constructor({ model, model_version, dim, modelDir, annSaveEveryBatches, annSaveEveryMs }) {
+  constructor({ model, model_version, dim, modelDir, annSaveEveryBatches, annSaveEveryMs, readOnly = false }) {
     if (usearch === null) {
       throw new Error(
         `EmbeddingIndex: usearch native dependency is not installed (${usearchLoadError ?? "missing"}). ` +
         `Embeddings are an optional feature; install usearch to enable, or skip semantic search.`,
       );
     }
+    // Single-writer discipline: reader-intent opens (reader lane, in-process
+    // retrieval fallback) must never touch the on-disk index — no quarantine
+    // renames, no rebuild saves, no temp sweeps. An untrusted ANN (routine
+    // mid-warm after a throttled checkpoint) rebuilds IN MEMORY only, so a
+    // reader can't yank a live index out from under the writer's next rename.
+    this.#readOnly = !!readOnly;
     if (!model) throw new TypeError("EmbeddingIndex: model is required");
     if (!model_version) throw new TypeError("EmbeddingIndex: model_version is required");
     if (!Number.isInteger(dim) || dim <= 0) {
@@ -256,8 +263,10 @@ export class EmbeddingIndex {
     this.#annSaveEveryBatches = normalizePositiveInt(annSaveEveryBatches, DEFAULT_ANN_SAVE_EVERY_BATCHES);
     this.#annSaveEveryMs = normalizePositiveInt(annSaveEveryMs, DEFAULT_ANN_SAVE_EVERY_MS);
 
-    ensureDir(modelDir);
-    cleanupStaleAnnTempFiles(modelDir);
+    if (!this.#readOnly) {
+      ensureDir(modelDir);
+      cleanupStaleAnnTempFiles(modelDir);
+    }
     const { usearchPath, manifestPath, sidecarPath } = pathsFor(modelDir);
     this.#usearchPath = usearchPath;
     this.#manifestPath = manifestPath;
@@ -275,10 +284,17 @@ export class EmbeddingIndex {
       ann_save_every_ms: this.#annSaveEveryMs,
     });
 
-    this.#db = new Database(sidecarPath);
-    this.#db.pragma("journal_mode = WAL");
-    this.#db["exec"](SIDECAR_SCHEMA);
-    this.#assertMeta();
+    if (this.#readOnly) {
+      // Readers require an existing sidecar (the writer creates it); a
+      // missing store surfaces as open_failed → semantic degrades to FTS.
+      this.#db = new Database(sidecarPath, { readonly: true, fileMustExist: true });
+      this.#assertMeta();
+    } else {
+      this.#db = new Database(sidecarPath);
+      this.#db.pragma("journal_mode = WAL");
+      this.#db["exec"](SIDECAR_SCHEMA);
+      this.#assertMeta();
+    }
     this.#lookupByUid = this.#db.prepare(
       "SELECT content_hash, local_id FROM keys WHERE uid = ?",
     );
@@ -306,7 +322,7 @@ export class EmbeddingIndex {
    * }} args
    * @returns {EmbeddingIndex}
    */
-  static open({ model, model_version, dim, embeddingsRoot, annSaveEveryBatches, annSaveEveryMs }) {
+  static open({ model, model_version, dim, embeddingsRoot, annSaveEveryBatches, annSaveEveryMs, readOnly = false }) {
     const modelDir = path.join(embeddingsRoot, modelDirName({ model, model_version }));
     return new EmbeddingIndex({
       model,
@@ -315,14 +331,12 @@ export class EmbeddingIndex {
       modelDir,
       annSaveEveryBatches,
       annSaveEveryMs,
+      readOnly,
     });
   }
 
   #assertMeta() {
     const get = this.#db.prepare("SELECT value FROM meta WHERE key = ?");
-    const put = this.#db.prepare(
-      "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    );
     const existingModel = /** @type {{ value: string } | undefined} */ (get.get("model"));
     const existingVersion = /** @type {{ value: string } | undefined} */ (get.get("model_version"));
     const existingDim = /** @type {{ value: string } | undefined} */ (get.get("dim"));
@@ -341,6 +355,10 @@ export class EmbeddingIndex {
         `EmbeddingIndex: sidecar dim ${existingDim.value} != requested ${this.dim}`,
       );
     }
+    if (this.#readOnly) return;
+    const put = this.#db.prepare(
+      "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    );
     put.run("model", this.model);
     put.run("model_version", this.model_version);
     put.run("dim", String(this.dim));
@@ -363,7 +381,11 @@ export class EmbeddingIndex {
       trust,
     });
     if (!trust.load) {
-      if (trust.quarantine) {
+      // Readers never quarantine: a non-durable manifest is ROUTINE mid-warm
+      // (throttled checkpoints write sha256:null), and renaming the live ANN
+      // out from under the writer is exactly the single-writer violation the
+      // write barrier exists to prevent. Rebuild in memory and move on.
+      if (trust.quarantine && !this.#readOnly) {
         quarantinePath(this.#usearchPath, trust.reason);
         quarantinePath(this.#manifestPath, trust.reason);
       }
@@ -466,6 +488,7 @@ export class EmbeddingIndex {
    * @returns {void}
    */
   add(rows) {
+    if (this.#readOnly) throw new Error("EmbeddingIndex: add() is not available on a read-only open");
     if (!Array.isArray(rows) || rows.length === 0) return;
     const startedAt = performance.now();
     recordEmbeddingForensics("embedding_index.add.start", {
@@ -622,6 +645,7 @@ export class EmbeddingIndex {
    * @returns {number}
    */
   removeByContentHash(content_hashes) {
+    if (this.#readOnly) throw new Error("EmbeddingIndex: removeByContentHash() is not available on a read-only open");
     if (!Array.isArray(content_hashes) || content_hashes.length === 0) return 0;
     const select = this.#db.prepare(
       "SELECT uid FROM keys WHERE content_hash = ?",
@@ -662,6 +686,7 @@ export class EmbeddingIndex {
    * @returns {number}
    */
   pruneToKeys(keys) {
+    if (this.#readOnly) throw new Error("EmbeddingIndex: pruneToKeys() is not available on a read-only open");
     if (!Array.isArray(keys)) return 0;
     const keep = new Set();
     for (const key of keys) {
@@ -744,6 +769,7 @@ export class EmbeddingIndex {
    * @returns {boolean}
    */
   #saveBestEffort(context, timing = null, { durable = true } = {}) {
+    if (this.#readOnly) return false;
     try {
       this.save(timing, { durable });
       // A recovered save ends the failure streak; log the next one anew.
@@ -929,6 +955,9 @@ export class EmbeddingIndex {
    * @returns {void}
    */
   save(timing = null, { durable = true } = {}) {
+    // Read-only opens never persist — an in-memory rebuild on a reader must
+    // not race the writer's checkpoint renames.
+    if (this.#readOnly) return;
     if (!this.#dirty && fs.existsSync(this.#usearchPath) && (!durable || this.#lastSaveDurable)) return;
     ensureDir(path.dirname(this.#usearchPath));
     const tmpPath = uniqueTempPath(this.#usearchPath);
@@ -1299,7 +1328,16 @@ function cleanupStaleAnnTempFiles(modelDir) {
     if (!entry.name.startsWith(`${ANN_INDEX_FILE}.`) && !entry.name.startsWith(`${ANN_MANIFEST_FILE}.`)) continue;
     const filePath = path.join(modelDir, entry.name);
     if (entry.name.endsWith(".tmp")) {
-      try { fs.rmSync(filePath, { force: true }); } catch { /* ignore */ }
+      // Only sweep temps old enough that no live save can still own them —
+      // an immediate unlink races a CONCURRENT writer's in-flight
+      // save(tmp)+rename (fails the rename on POSIX; silently unlinks the
+      // bytes on Windows).
+      try {
+        const tmpStat = fs.statSync(filePath);
+        if (nowMs - tmpStat.mtimeMs > 10 * 60 * 1000) {
+          fs.rmSync(filePath, { force: true });
+        }
+      } catch { /* ignore */ }
       continue;
     }
     let stat;

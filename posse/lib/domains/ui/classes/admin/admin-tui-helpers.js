@@ -9,7 +9,7 @@
 
 import { runtimeDbLooksBusyOrCorrupt, getModelProviderDefaults } from "../../functions/admin/shared-helpers.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import { listSettings, getSetting, setSetting } from "../../../queue/functions/index.js";
+import { listSettings, getSetting } from "../../../queue/functions/index.js";
 import { isProviderSelectable } from "../../../providers/functions/provider.js";
 import { jobReportStatus } from "../display/Display.js";
 import { FAILED_JOB_STATUSES } from "../../../../catalog/job.js";
@@ -33,10 +33,6 @@ export const PROVIDER_USAGE_SETTING_DEFS = [
 
 export const MODEL_SETTING_KEYS = new Set(MODEL_SETTING_DEFS.map((def) => def.key));
 export const PROVIDER_USAGE_SETTING_KEYS = new Set(PROVIDER_USAGE_SETTING_DEFS.map((def) => def.key));
-
-export function setSettingWithRuntimeSync(settingKey, value) {
-  setSetting(settingKey, value);
-}
 
 export function getHistoryJobPresentation(job, jobs = []) {
   const rawStatus = job?.status || "unknown";
@@ -227,10 +223,6 @@ export function getProviderUsageStoredValue(settingKey) {
   const globalValue = getAccountSetting(settingKey);
   if (globalValue != null && String(globalValue).trim() !== "") return String(globalValue);
   return safeGetSetting(settingKey);
-}
-
-export function setProviderUsageStoredValue(settingKey, value) {
-  setSettingWithRuntimeSync(settingKey, value);
 }
 
 export function safeGetSetting(key) {

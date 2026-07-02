@@ -226,6 +226,10 @@ function supersedePriorActiveNudges({ jobId, exceptId } = {}) {
   return priors;
 }
 
+// Operator paste can be arbitrarily large; the nudge body is delivered
+// verbatim into tool payloads, so cap it the same way agent activity is.
+const OPERATOR_NUDGE_BODY_MAX_CHARS = 4000;
+
 export function createOperatorNudge({
   work_item_id = null,
   job_id,
@@ -236,21 +240,28 @@ export function createOperatorNudge({
   metadata_json = null,
   expires_at = null,
 } = {}) {
-  const row = createAgentInteraction({
-    work_item_id,
-    job_id,
-    agent_call_id,
-    direction: USER_TO_AGENT,
-    kind: "nudge",
-    blocking_policy: "checkpoint",
-    status: "active",
-    source,
-    author,
-    body,
-    metadata_json,
-    expires_at,
+  const cappedBody = String(body ?? "").slice(0, OPERATOR_NUDGE_BODY_MAX_CHARS);
+  // Insert + supersede atomically: a concurrent get_operator_feedback in the
+  // gap would deliver BOTH the old and new guidance ("latest correction
+  // wins" briefly violated), and a crash mid-supersede leaves two actives.
+  const row = runImmediateTransaction(getDb(), () => {
+    const created = createAgentInteraction({
+      work_item_id,
+      job_id,
+      agent_call_id,
+      direction: USER_TO_AGENT,
+      kind: "nudge",
+      blocking_policy: "checkpoint",
+      status: "active",
+      source,
+      author,
+      body: cappedBody,
+      metadata_json,
+      expires_at,
+    });
+    supersedePriorActiveNudges({ jobId: created.job_id, exceptId: created.id });
+    return created;
   });
-  supersedePriorActiveNudges({ jobId: row.job_id, exceptId: row.id });
   return row;
 }
 
@@ -415,15 +426,20 @@ export function applyActiveAgentInteractionsForAttempt({
     `);
     const rows = [];
     for (const row of candidates) {
+      // The application row is a delivery AUDIT, not a delivery gate: an item
+      // stays retrievable until it is acknowledged. The pending-count signal
+      // keys on ack_state='pending', so hiding retrieved-but-unacked items
+      // here would leave the agent chasing a signal that get_operator_feedback
+      // can never clear (guidance silently undeliverable for the attempt).
       const info = insert.run(row.id, row.work_item_id, row.job_id, attemptId, agentCallId, nowIso);
-      if (info.changes <= 0) continue;
       update.run(nowIso, nowIso, nowIso, row.id);
-      rows.push(row);
+      rows.push({ row, firstDelivery: info.changes > 0 });
     }
     return rows;
   });
 
-  for (const row of applied) {
+  for (const { row, firstDelivery } of applied) {
+    if (!firstDelivery) continue;
     logEvent({
       work_item_id: row.work_item_id,
       job_id: row.job_id,
@@ -439,10 +455,10 @@ export function applyActiveAgentInteractionsForAttempt({
       },
     });
   }
-  if (applied.length > 0) {
-    notifyQueueStateChanged({ reason: "agent_interactions_applied", jobId, workItemId: applied[0]?.work_item_id ?? null });
+  if (applied.some((entry) => entry.firstDelivery)) {
+    notifyQueueStateChanged({ reason: "agent_interactions_applied", jobId, workItemId: applied[0]?.row?.work_item_id ?? null });
   }
-  return applied;
+  return applied.map((entry) => entry.row);
 }
 
 export function buildOperatorGuidanceForAttempt({
@@ -527,40 +543,52 @@ export function acknowledgeOperatorFeedback({
   }
 
   const db = getDb();
-  const row = normalizeRow(db.prepare(`
-    SELECT *
-    FROM agent_interactions
-    WHERE id = ?
-      AND direction = 'user_to_agent'
-      AND kind IN ('nudge','answer','scope_request','status_request')
-  `).get(id));
-  if (!row) return null;
-  const normalizedJobId = normalizePositiveInt(job_id);
-  if (normalizedJobId && row.job_id !== normalizedJobId) {
-    throw new Error(`operator feedback #${id} does not belong to job #${normalizedJobId}`);
-  }
-
   const nowIso = now();
-  db.prepare(`
-    UPDATE agent_interactions
-    SET ack_state = 'acknowledged',
-        ack_decision = ?,
-        ack_reason = ?,
-        acknowledged_at = ?,
-        status = CASE WHEN status = 'active' THEN 'applied' ELSE status END,
-        first_applied_at = COALESCE(first_applied_at, ?),
-        last_applied_at = ?,
-        updated_at = ?
-    WHERE id = ?
-  `).run(
-    normalizedDecision,
-    normalizedReason || null,
-    nowIso,
-    nowIso,
-    nowIso,
-    nowIso,
-    id,
-  );
+  // Read + guarded update in one immediate transaction: the first ack wins and
+  // is immutable. A repeat ack (agent retry, coalesced double call, or a late
+  // attempt trying to flip an earlier decision) must not rewrite the operator's
+  // acknowledgement record nor re-fire events/wakes.
+  const { row, acknowledgedNow } = runImmediateTransaction(db, () => {
+    const current = normalizeRow(db.prepare(`
+      SELECT *
+      FROM agent_interactions
+      WHERE id = ?
+        AND direction = 'user_to_agent'
+        AND kind IN ('nudge','answer','scope_request','status_request')
+    `).get(id));
+    if (!current) return { row: null, acknowledgedNow: false };
+    const normalizedJobId = normalizePositiveInt(job_id);
+    if (normalizedJobId && current.job_id !== normalizedJobId) {
+      throw new Error(`operator feedback #${id} does not belong to job #${normalizedJobId}`);
+    }
+    const info = db.prepare(`
+      UPDATE agent_interactions
+      SET ack_state = 'acknowledged',
+          ack_decision = ?,
+          ack_reason = ?,
+          acknowledged_at = ?,
+          status = CASE WHEN status = 'active' THEN 'applied' ELSE status END,
+          first_applied_at = COALESCE(first_applied_at, ?),
+          last_applied_at = ?,
+          updated_at = ?
+      WHERE id = ? AND ack_state = 'pending'
+    `).run(
+      normalizedDecision,
+      normalizedReason || null,
+      nowIso,
+      nowIso,
+      nowIso,
+      nowIso,
+      id,
+    );
+    return { row: current, acknowledgedNow: info.changes > 0 };
+  });
+  if (!row) return null;
+  if (!acknowledgedNow) {
+    const existing = normalizeRow(db.prepare(`SELECT * FROM agent_interactions WHERE id = ?`).get(id));
+    if (existing) existing.already_acknowledged = true;
+    return existing;
+  }
 
   logEvent({
     work_item_id: row.work_item_id,
@@ -580,6 +608,61 @@ export function acknowledgeOperatorFeedback({
   });
   notifyQueueStateChanged({ reason: "operator_feedback_acknowledged", jobId: row.job_id, workItemId: row.work_item_id });
   return normalizeRow(db.prepare(`SELECT * FROM agent_interactions WHERE id = ?`).get(id));
+}
+
+/**
+ * Job-end reconciliation: any user_to_agent guidance still unacked when a job
+ * reaches a terminal status can never be delivered — mark it expired and say
+ * so, instead of leaving `ack_state='pending'` rows that render on no surface
+ * while the operator believes the nudge landed.
+ *
+ * @param {{ job_id: number, reason?: string }} args
+ * @returns {number} rows expired
+ */
+export function expireUnackedOperatorFeedbackForJob({ job_id, reason = "job_finalized" } = {}) {
+  const jobId = normalizePositiveInt(job_id);
+  if (!jobId) return 0;
+  const db = getDb();
+  const nowIso = now();
+  const expired = runImmediateTransaction(db, () => {
+    const rows = db.prepare(`
+      SELECT id, work_item_id, job_id, kind
+      FROM agent_interactions
+      WHERE job_id = ?
+        AND direction = 'user_to_agent'
+        AND kind IN ('nudge','answer','scope_request','status_request')
+        AND ack_state = 'pending'
+        AND status IN ('active','answered')
+    `).all(jobId).map(normalizeRow);
+    if (rows.length === 0) return rows;
+    const update = db.prepare(`
+      UPDATE agent_interactions
+      SET status = 'expired', updated_at = ?
+      WHERE id = ? AND ack_state = 'pending'
+    `);
+    for (const row of rows) update.run(nowIso, row.id);
+    return rows;
+  });
+  for (const row of expired) {
+    logEvent({
+      work_item_id: row.work_item_id,
+      job_id: row.job_id,
+      event_type: applicationEventType(row.kind),
+      actor_type: EVENT_ACTORS.WORKER,
+      message: `Undelivered ${interactionLabel(row)} #${row.id} expired: ${reason}`,
+      event_json: {
+        interaction_id: row.id,
+        kind: row.kind,
+        reason,
+        expired: true,
+        live_channel: true,
+      },
+    });
+  }
+  if (expired.length > 0) {
+    notifyQueueStateChanged({ reason: "operator_feedback_expired", jobId, workItemId: expired[0]?.work_item_id ?? null });
+  }
+  return expired.length;
 }
 
 export function listAgentInteractions({

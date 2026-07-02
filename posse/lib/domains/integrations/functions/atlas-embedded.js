@@ -22,10 +22,11 @@ import { formatAtlasToolDisplayName } from "../../../functions/tools/mcp-surface
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View } from "../../atlas/classes/v2/View.js";
-import { dispatch as dispatchAtlasV2 } from "../../atlas/functions/v2/retrieval/dispatch.js";
+import { dispatch as dispatchAtlasV2, normalizeActionName } from "../../atlas/functions/v2/retrieval/dispatch.js";
 import { getSharedConductor, isConductorIndexingInFlight, onConductorIndexingSuccess } from "../../atlas/functions/v2/parse/conductor.js";
 import {
   openEmbeddingResources,
+  retirePooledEmbeddingResources,
   semanticDispatchEnabled,
 } from "../../atlas/functions/v2/embeddings/resources.js";
 import { fallbackQueryPlan, planQueryAsync } from "../../atlas/functions/v2/retrieval/orchestrator/query-planner.js";
@@ -33,7 +34,7 @@ import { extractAtlasResponseTelemetry, extractAtlasResultArtifacts } from "../.
 import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
-import { resolveTargetBranch } from "../../git/functions/target-branch.js";
+import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
 import { clearSharedAtlasToolExecutorReadContexts, getSharedAtlasToolExecutor } from "../../atlas/functions/v2/tools/executor.js";
 import {
@@ -107,6 +108,10 @@ export async function invalidateAtlasEmbeddedResourceCache() {
     entry.retired = true;
     if (entry.refCount <= 0) closeCachedAtlasResource(entry);
   }
+  // The cached embedding entries hold POOLED wrappers, so closing them only
+  // refcounts — retire the pool entries too or the next semantic open in this
+  // realm resurrects the same stale child (and its pre-warm in-memory ANN).
+  try { retirePooledEmbeddingResources(); } catch { /* best effort */ }
 }
 
 onConductorIndexingSuccess(() => {
@@ -564,11 +569,12 @@ function releaseEmbeddedResourceLease(lease) {
 
 function openEmbeddedLedger(dbPath, { readOnly = false } = {}) {
   if (!readOnly) return Ledger.open({ dbPath });
-  try {
-    return Ledger.openReadOnly({ dbPath });
-  } catch {
-    return Ledger.open({ dbPath });
-  }
+  // Never escalate a failed read-only open to a readwrite open: Ledger.open
+  // runs migrations and can trigger the destructive format reset, so a READ
+  // must not be able to rebuild (or delete) the ledger out from under a
+  // concurrent writer. A missing/stale ledger surfaces as an error the
+  // dispatch layer degrades on; the next warm (write path) repairs it.
+  return Ledger.openReadOnly({ dbPath });
 }
 
 /**
@@ -600,11 +606,17 @@ function acquireEmbeddedLedger(dbPath, { readOnly = false, cache = false } = {})
  * @param {Record<string, unknown>} config
  */
 function acquireEmbeddedEmbeddingResources(repoRoot, config = {}) {
+  // Fill-disabled acquisitions are pure readers — that flag is only set by
+  // the conductor-fallback path, which runs while the writer is typically
+  // mid-warm. Read-only opens can't quarantine or rewrite the live ANN.
+  // (The cache key already separates modes: onDemandEmbeddingFill matches the
+  // /embedding/ relevant-config filter, and the pool key carries ro/rw.)
+  const readOnly = config?.onDemandEmbeddingFill === false;
   const key = embeddedEmbeddingResourceKey(repoRoot, config);
   const lease = acquireCachedAtlasResource(
     ATLAS_EMBEDDED_EMBEDDING_CACHE,
     key,
-    () => openEmbeddingResources({ repoRoot, config }),
+    () => openEmbeddingResources({ repoRoot, config, readOnly }),
     (resources) => {
       try {
         const result = resources?.close?.();
@@ -662,7 +674,9 @@ function gatewayEffectiveAction(action, args = {}) {
     || args?.action
     || "",
   ).trim();
-  return target || action;
+  // Normalize alias spellings so blocking/lane gates classify the SAME action
+  // dispatch will execute (see normalizeActionName in retrieval/dispatch.js).
+  return target ? normalizeActionName(target) : action;
 }
 
 function isBlockingAction(action, payload = {}) {
@@ -730,12 +744,17 @@ function truncateForObservation(value, max = 240) {
 function atlasObservationTypeForOrigin(origin = "agent") {
   if (origin === "prefetch") return "tool.atlas.prefetch";
   if (origin === "handoff_memory_prefetch") return "atlas.prefetch.memory";
+  // Finalizer-driven auto-feedback is harness work: keep the job_id join for
+  // analytics but stay out of agent tool feeds/counts (filtered alongside
+  // %.prefetch in observability).
+  if (origin === "auto_feedback") return "tool.atlas.autofeedback";
   return "tool.atlas";
 }
 
 function atlasOriginTag(origin = "agent", cacheHit = false) {
   if (origin === "prefetch") return " [prefetch]";
   if (origin === "handoff_memory_prefetch") return " [memory prefetch]";
+  if (origin === "auto_feedback") return " [auto-feedback]";
   return cacheHit ? " [cache]" : "";
 }
 
@@ -992,9 +1011,9 @@ function atlasV2ViewWaitMs(config) {
   return 2500;
 }
 
-function baselineBranchForRepo(repoRoot) {
+async function baselineBranchForRepo(repoRoot) {
   try {
-    return resolveTargetBranch(repoRoot || process.cwd());
+    return await resolveTargetBranchAsync(repoRoot || process.cwd());
   } catch {
     return "main";
   }
@@ -1010,8 +1029,18 @@ function atlasV2EnvelopeError(envelope) {
 function formatAtlasV2EmbeddedError(action, err) {
   const message = err?.message || String(err);
   const text = `Error: ATLAS tool ${action} failed via atlas-v2: ${message.slice(0, 600)}`;
-  const error = (/** @type {any} */ (err))?.atlasV2Error;
-  if (!error || typeof error !== "object") return text;
+  let error = (/** @type {any} */ (err))?.atlasV2Error;
+  if (!error || typeof error !== "object") {
+    // Executor-level failures carry no dispatch envelope. Synthesize the
+    // machine code so gate strike/unlock classification keys on codes, not
+    // prose — a queue-timeout or missing conductor is ATLAS-unavailable and
+    // must unlock the ATLAS-first gate rather than accrue strikes.
+    const syntheticCode = isAtlasGateError(err)
+      ? "atlas_gate_timeout"
+      : (/does not expose (executeTool|retrieve)/i.test(message) ? "atlas_conductor_unavailable" : null);
+    if (!syntheticCode) return text;
+    error = { code: syntheticCode, message };
+  }
   const structured = {
     code: error.code ? String(error.code) : "error",
     message: error.message ? String(error.message) : message,
@@ -1139,7 +1168,7 @@ async function resolveEmbeddedAtlasV2ReadContext({
         viewPath = secondProbe.dbPath;
       }
     }
-    const branch = meta?.branch || baselineBranchForRepo(repoRoot);
+    const branch = meta?.branch || await baselineBranchForRepo(repoRoot);
     const ledgerSeq = freshnessExempt && ledger && typeof ledger.headSeq === "function"
       ? ledger.headSeq(branch)
       : (meta?.ledger_seq ?? (ledger && typeof ledger.headSeq === "function" ? ledger.headSeq(branch) : 0));
@@ -1345,7 +1374,7 @@ async function executeEmbeddedAtlasV2Tool({
         viewPath = secondProbe.dbPath;
       }
     }
-    const branch = meta?.branch || baselineBranchForRepo(repoRoot);
+    const branch = meta?.branch || await baselineBranchForRepo(repoRoot);
     // Exempt actions may hold a stale view whose meta.ledger_seq is behind —
     // stamp their results with the ledger's actual head instead.
     const ledgerSeq = freshnessExempt && ledger && typeof ledger.headSeq === "function"

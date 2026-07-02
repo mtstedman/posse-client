@@ -197,6 +197,13 @@ CREATE INDEX IF NOT EXISTS idx_memory_file_links_path
  * }} args
  */
 export function memoryStore({ versionId, params, ledger, repoId, view = null }) {
+  // Policy gate BEFORE the DB open: openMemoryActionDb mkdirs + runs DDL, so
+  // checking afterwards materialized a memory.db as a side effect of a call
+  // the policy was about to refuse.
+  const policy = getEffectivePolicy(ledger, effectiveRepo(repoId, params.repoId));
+  if (!policy.memoryEnabled) {
+    return memoryDisabled("memory.store", versionId);
+  }
   const opened = openMemoryActionDb({ ledger, action: "memory.store", versionId });
   if (opened.error) return opened.error;
   const db = opened.db;
@@ -204,10 +211,6 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
     closeMemoryDb(db);
     return result;
   };
-  const policy = getEffectivePolicy(ledger, effectiveRepo(repoId, params.repoId));
-  if (!policy.memoryEnabled) {
-    return finish(memoryDisabled("memory.store", versionId));
-  }
 
   const domains = normalizeDomains(params.domains);
   const title = cleanString(params.title, 120);
@@ -240,6 +243,17 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
     MEMORY_CONFIDENCE.base + (hasAnchors ? MEMORY_CONFIDENCE.anchoredBonus : 0),
   );
   const providedId = cleanMemoryId(params.memoryId);
+  // A provided id that fails validation must error — silently minting a
+  // random id instead meant an explicit refresh-by-id quietly created a
+  // duplicate memory rather than updating the intended one.
+  if (params.memoryId != null && String(params.memoryId).trim() !== "" && !providedId) {
+    return finish(errorEnvelope({
+      action: "memory.store",
+      versionId,
+      code: "invalid_memory_id",
+      message: "memory.store memoryId may only contain [A-Za-z0-9_.:-] (max 120 chars)",
+    }));
+  }
   const contentHash = memoryContentHash({ title, content, tags, symbolIds, fileRelPaths });
   const memoryId = providedId || `mem_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const existing = providedId ? findMemoryById(db, memoryId) : null;
@@ -267,6 +281,7 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
     }
     if (!providedId) {
       reviveMemory(db, existingByHash.memory_id, new Date().toISOString());
+      mergeMemoryLinks(db, existingByHash.memory_id, symbolIds, fileRelPaths, viewFilePathHashes(view, fileRelPaths));
       return finish(okEnvelope({
         action: "memory.store",
         versionId,
@@ -290,6 +305,10 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
     const resurrected = findDeletedMemoryByHash(db, effectiveRepoId, contentHash);
     if (resurrected) {
       reviveMemory(db, resurrected.memory_id, new Date().toISOString());
+      // Re-baseline the anchors to today's view: a resurrected memory judged
+      // against its pre-prune baselines would flip straight back to dead on
+      // the next reconcile.
+      mergeMemoryLinks(db, resurrected.memory_id, symbolIds, fileRelPaths, viewFilePathHashes(view, fileRelPaths));
       return finish(okEnvelope({
         action: "memory.store",
         versionId,
@@ -314,6 +333,9 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
     const nearDuplicate = findNearDuplicateMemory(db, effectiveRepoId, title, content);
     if (nearDuplicate) {
       reviveMemory(db, nearDuplicate.memory_id, new Date().toISOString());
+      // A reworded re-derivation may carry NEW valid anchors — folding the
+      // write into the twin used to drop them on the floor.
+      mergeMemoryLinks(db, nearDuplicate.memory_id, symbolIds, fileRelPaths, viewFilePathHashes(view, fileRelPaths));
       return finish(okEnvelope({
         action: "memory.store",
         versionId,
@@ -352,19 +374,41 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
           tags_json = excluded.tags_json,
           -- Keep any confidence the memory has earned; a corrective refresh of a
           -- wrong memory already had its confidence knocked down, so max() lands
-          -- back at base, while a re-asserted healthy memory keeps its standing.
-          confidence = MAX(memories.confidence, excluded.confidence),
+          -- back at base, while a same-content re-assert is corroboration — the
+          -- exact signal the auto-id dedupe path routes through reviveMemory —
+          -- so it earns the revive bump and durable tenure. Durable also makes
+          -- the just-refreshed row immune to this same call's
+          -- pruneSurfacedEphemeral (which would otherwise revive/kill an
+          -- over-surfaced ephemeral in one store). Lifespan is never demoted.
+          confidence = CASE WHEN memories.content_hash IS excluded.content_hash
+                            THEN MIN(?, memories.confidence + ?)
+                            ELSE MAX(memories.confidence, excluded.confidence) END,
+          lifespan = CASE WHEN memories.content_hash IS excluded.content_hash
+                          THEN 'durable' ELSE memories.lifespan END,
           content_hash = excluded.content_hash,
           stale = 0,
           stale_reason = NULL,
           wrong_at = NULL,
-          wrong_count = 0,
+          -- wrong_count is repeat-offender HISTORY, not suppression state: a
+          -- same-content re-assert clears the flag (wrong_at) but must not
+          -- whitewash how often this exact claim was called wrong. A content
+          -- rewrite is a new claim and starts clean.
+          wrong_count = CASE WHEN memories.content_hash IS excluded.content_hash
+                             THEN memories.wrong_count ELSE 0 END,
           deleted = 0,
           updated_at = excluded.updated_at,
-          deleted_at = NULL
-          -- lifespan and offered_count are intentionally NOT reset: an explicit
-          -- refresh must not demote a memory that earned durable, nor wipe its
-          -- surfaced history.`,
+          deleted_at = NULL,
+          -- offered_count is the OLD content's surfaced history. A same-content
+          -- re-assert keeps it (an explicit refresh must not wipe a memory's
+          -- standing). But a corrective refresh (content_hash changed) rewrites
+          -- the memory, so its surfacing budget resets to zero — otherwise the
+          -- inherited retire count trips pruneSurfacedEphemeral and soft-deletes
+          -- the just-written correction in this same store call, defeating the
+          -- deliberate refresh-by-id recovery route.
+          offered_count = CASE WHEN memories.content_hash IS NOT excluded.content_hash
+                               THEN 0 ELSE memories.offered_count END,
+          last_offered_at = CASE WHEN memories.content_hash IS NOT excluded.content_hash
+                                 THEN NULL ELSE memories.last_offered_at END`,
     ).run(
       memoryId,
       effectiveRepoId,
@@ -377,12 +421,36 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
       contentHash,
       existing?.created_at || now,
       now,
+      MEMORY_CONFIDENCE.max,
+      MEMORY_CONFIDENCE.reviveBump,
     );
     replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths, fileBaselines);
   });
   try {
     txn();
   } catch (err) {
+    // Cross-session race: dedupe is check-then-insert, so two writers storing
+    // identical new content can both miss the twin and the loser trips the
+    // (repo_id, content_hash) WHERE deleted=0 unique index. That's a
+    // dedupe outcome, not a failure — re-run the lookup and fold into the
+    // winner exactly as the pre-check would have.
+    if (String(/** @type {any} */ (err)?.code || "").startsWith("SQLITE_CONSTRAINT")) {
+      const twin = findActiveMemoryByHash(db, effectiveRepoId, contentHash);
+      if (twin && twin.memory_id !== memoryId) {
+        reviveMemory(db, twin.memory_id, new Date().toISOString());
+        return finish(okEnvelope({
+          action: "memory.store",
+          versionId,
+          data: {
+            ok: true,
+            memoryId: twin.memory_id,
+            memory_id: twin.memory_id,
+            created: false,
+            deduplicated: true,
+          },
+        }));
+      }
+    }
     return finish(errorEnvelope({
       action: "memory.store",
       versionId,
@@ -488,7 +556,73 @@ function memoryFlagInternal({ versionId, params, ledger, repoId }) {
   }));
 }
 
-const MEMORY_FEEDBACK_VERDICTS = new Set(["used", "stale", "wrong", "duplicate"]);
+const MEMORY_FEEDBACK_VERDICTS = new Set(["used", "stale", "wrong", "duplicate", "suppress"]);
+
+/**
+ * Deliberate suppression: soft-delete the memory so it stops surfacing AND
+ * stops being queryable as active. This is the human-review GC route (the
+ * agent-facing catalog advertises only the evidence verdicts); it stays
+ * recoverable — re-derivation of the same content resurrects via reviveMemory.
+ *
+ * @param {{
+ *   versionId: string,
+ *   params: import("../contracts/tool-params.js").MemoryFeedbackParams,
+ *   ledger?: import("../contracts/api.js").Ledger,
+ *   repoId?: string | null,
+ * }} args
+ */
+function memorySuppressInternal({ versionId, params, ledger, repoId }) {
+  const opened = openMemoryActionDb({ ledger, action: "memory.feedback", versionId });
+  if (opened.error) return opened.error;
+  const db = opened.db;
+  const finish = (result) => {
+    closeMemoryDb(db);
+    return result;
+  };
+  const effectiveRepoId = effectiveRepo(repoId, params.repoId);
+  if (!getEffectivePolicy(ledger, effectiveRepoId).memoryEnabled) {
+    return finish(memoryDisabled("memory.feedback", versionId));
+  }
+  const memoryId = cleanMemoryId(params.memoryId);
+  if (!memoryId) {
+    return finish(errorEnvelope({
+      action: "memory.feedback",
+      versionId,
+      code: "invalid_memory_id",
+      message: "memory.feedback requires memoryId",
+    }));
+  }
+  const row = findMemoryById(db, memoryId);
+  if (!row || row.repo_id !== effectiveRepoId) {
+    return finish(errorEnvelope({
+      action: "memory.feedback",
+      versionId,
+      code: "memory_not_found",
+      message: `Memory ${memoryId} was not found`,
+    }));
+  }
+  const alreadyDeleted = Number(row.deleted || 0) === 1;
+  if (!alreadyDeleted) {
+    const now = new Date().toISOString();
+    db.prepare(
+      "UPDATE memories SET deleted = 1, deleted_at = ?, updated_at = ? WHERE memory_id = ?",
+    ).run(now, now, memoryId);
+    getRetrievalCache().invalidateAll();
+  }
+  return finish(okEnvelope({
+    action: "memory.feedback",
+    versionId,
+    data: {
+      ok: true,
+      memoryId,
+      memory_id: memoryId,
+      verdict: "suppress",
+      suppressed: true,
+      ...(alreadyDeleted ? { alreadyDeleted: true } : {}),
+      ...(params.detail ? { detail: cleanString(params.detail, 500) } : {}),
+    },
+  }));
+}
 
 /**
  * First-pass memory feedback surface. Negative freshness verdicts suppress the
@@ -508,8 +642,11 @@ export function memoryFeedback({ versionId, params, ledger, repoId }) {
       action: "memory.feedback",
       versionId,
       code: "invalid_memory_feedback_verdict",
-      message: "memory.feedback verdict must be one of: used, stale, wrong, duplicate",
+      message: "memory.feedback verdict must be one of: used, stale, wrong, duplicate, suppress",
     });
+  }
+  if (verdict === "suppress") {
+    return memorySuppressInternal({ versionId, params, ledger, repoId });
   }
   if (verdict === "stale" || verdict === "wrong" || verdict === "duplicate") {
     const flagged = memoryFlagInternal({
@@ -661,7 +798,7 @@ export function memorySurface({ versionId, params, ledger, repoId, view = null }
     return result;
   };
   try {
-    const rows = candidateRows(db, effectiveRepoId, { includeDeleted: false });
+    const rows = candidateRows(db, effectiveRepoId, { includeDeleted: false, policy });
     const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
     let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true, policy });
     filtered = applyAnchorEvidence(view, filtered, links);
@@ -718,7 +855,7 @@ export function memoryGet({ versionId, params, ledger, repoId, view = null }) {
     return result;
   };
   try {
-    const rows = candidateRows(db, effectiveRepoId, { includeDeleted: false });
+    const rows = candidateRows(db, effectiveRepoId, { includeDeleted: false, policy });
     const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
     let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true, policy });
     filtered = applyAnchorEvidence(view, filtered, links);
@@ -1012,7 +1149,11 @@ function enforceMemoryCap(db, repoId, policy, now) {
      WHERE repo_id = ? AND deleted = 0
      ORDER BY stale DESC,
               (lifespan = 'ephemeral') DESC,
-              offered_count DESC,
+              -- more-surfaced-yet-still-ephemeral = clearer noise; but for
+              -- DURABLE rows high offered_count means most-consulted, so the
+              -- term must not apply there or the cap evicts the most useful
+              -- durable memories first.
+              CASE WHEN lifespan = 'ephemeral' THEN offered_count ELSE 0 END DESC,
               confidence ASC,
               updated_at ASC
      LIMIT ?`,
@@ -1035,7 +1176,9 @@ function reviveMemory(db, memoryId, now) {
      SET stale = 0,
          stale_reason = NULL,
          wrong_at = NULL,
-         wrong_count = 0,
+         -- wrong_count deliberately survives revival: it is repeat-offender
+         -- history, and zeroing it made negative feedback free to whitewash
+         -- by re-storing the same content.
          confidence = MIN(?, confidence + ?),
          lifespan = 'durable',
          deleted = 0,
@@ -1044,6 +1187,34 @@ function reviveMemory(db, memoryId, now) {
      WHERE memory_id = ?`,
   ).run(MEMORY_CONFIDENCE.max, MEMORY_CONFIDENCE.reviveBump, now, memoryId);
   getRetrievalCache().invalidateAll();
+}
+
+/**
+ * Additive link merge for the revive/dedupe paths: keeps the twin's existing
+ * anchors, adds the fresh write's, and re-baselines file links to the current
+ * view so revived memories are judged against today's code, not the state
+ * that got them pruned.
+ */
+function mergeMemoryLinks(db, memoryId, symbolIds, fileRelPaths, fileBaselines = new Map()) {
+  const symIns = db.prepare(
+    "INSERT OR IGNORE INTO memory_symbol_links(memory_id, content_hash, local_id) VALUES(?, ?, ?)",
+  );
+  for (const symbolId of symbolIds || []) {
+    const parsed = parseAtlasSymbolId(symbolId);
+    if (!parsed) continue;
+    symIns.run(memoryId, parsed.content_hash, parsed.local_id);
+  }
+  const fileIns = db.prepare(
+    "INSERT OR IGNORE INTO memory_file_links(memory_id, repo_rel_path, content_hash) VALUES(?, ?, ?)",
+  );
+  const fileUpd = db.prepare(
+    "UPDATE memory_file_links SET content_hash = ? WHERE memory_id = ? AND repo_rel_path = ?",
+  );
+  for (const repoRelPath of fileRelPaths || []) {
+    const baseline = fileBaselines.get(repoRelPath) ?? null;
+    fileIns.run(memoryId, repoRelPath, baseline);
+    if (baseline) fileUpd.run(baseline, memoryId, repoRelPath);
+  }
 }
 
 function replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths, fileBaselines = new Map()) {
@@ -1144,14 +1315,21 @@ function recordMemoriesOffered(ledger, memoryIds) {
   }
 }
 
-function candidateRows(db, repoId, { includeDeleted = false } = {}) {
+function candidateRows(db, repoId, { includeDeleted = false, policy = null } = {}) {
   const deletedSql = includeDeleted ? "" : "AND deleted = 0";
+  // The scan bound follows the effective cap: with the default 5000-row cap,
+  // 5000 covers every active row, but a raised cap (or memoryMaxPerRepo=0 =
+  // uncapped) must not leave older active rows silently unreachable by
+  // get/surface. Uncapped repos get a hard ceiling instead of an unbounded
+  // scan.
+  const cap = clampInt(/** @type {any} */ (policy)?.memoryMaxPerRepo, 0, 100_000, 0);
+  const scanLimit = cap > 0 ? Math.max(cap, 5000) : 50_000;
   return db.prepare(
     `SELECT * FROM memories
      WHERE repo_id = ? ${deletedSql}
      ORDER BY updated_at DESC
-     LIMIT 5000`,
-  ).all(repoId);
+     LIMIT ?`,
+  ).all(repoId, scanLimit);
 }
 
 /**
@@ -1430,8 +1608,12 @@ function applyAnchorEvidence(view, rows, links) {
       continue;
     }
     if (missing.length === 0) { kept.push(row); continue; }
-    const olderThanView = !viewBuiltAt
-      || String(row.created_at || "") < viewBuiltAt;
+    // Unknown built_at must KEEP the memory (decorate only): a fresh memory
+    // whose anchors simply post-date the view must not be punished for the
+    // view's lag — treating unknown as "older" inverted that guard and hid
+    // every all-anchors-missing memory whenever built_at was absent.
+    const olderThanView = !!viewBuiltAt
+      && String(row.created_at || "") < viewBuiltAt;
     if (missing.length === files.length && olderThanView) {
       continue; // every anchor gone: do not surface
     }

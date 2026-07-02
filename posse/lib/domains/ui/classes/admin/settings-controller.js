@@ -755,7 +755,7 @@ export class AdminSettingsController {
       if (oa !== ob) return oa - ob;
       return String(a.setting_key).localeCompare(String(b.setting_key));
     });
-    const dbSettingsByPane = { providers: [], atlas: [], general: [], debug: [] };
+    const dbSettingsByPane = { providers: [], atlas: [], general: [], repo: [], debug: [] };
     for (const entry of dbSettings) {
       const pane = settingsPaneForKey(entry.setting_key);
       (dbSettingsByPane[pane] || dbSettingsByPane.general).push(entry);
@@ -784,6 +784,9 @@ export class AdminSettingsController {
       general: [
         ...dbSettingsByPane.general,
         ...skillSettings,
+      ],
+      repo: [
+        ...dbSettingsByPane.repo,
         ...projectDbSettings,
       ],
       debug: [
@@ -794,6 +797,7 @@ export class AdminSettingsController {
       ...paneEditableSettings.providers,
       ...paneEditableSettings.atlas,
       ...paneEditableSettings.general,
+      ...paneEditableSettings.repo,
       ...paneEditableSettings.debug,
     ];
     this._settingsCache = {
@@ -1484,7 +1488,7 @@ export class AdminSettingsController {
 
     const settingsSnapshot = this._getSettingsSnapshot();
     const dbSettingsByPane = settingsSnapshot.dbSettingsByPane
-      || { providers: [], atlas: [], general: [], debug: [] };
+      || { providers: [], atlas: [], general: [], repo: [], debug: [] };
     const providerSettings = settingsSnapshot.providerSettings;
     const modelSettings = settingsSnapshot.modelSettings;
     const artifactSettings = settingsSnapshot.artifactSettings || [];
@@ -1682,8 +1686,18 @@ export class AdminSettingsController {
         }
       }
       lines.push("");
+    };
 
-      pushSection("Project Database", "(opt-in agent SQL access; press 'e' to edit)");
+    // Everything on this pane follows the repository, not the account: catalog
+    // rows scoped `repo` persist keyed to this repo, and the project-database
+    // config lives in this repo's .posse/db/orchestrator.db.
+    const renderRepoPane = () => {
+      lines.push(`  ${C.dim}Settings on this pane apply only to:${C.reset} ${C.bold}${this.projectDir}${C.reset}`);
+      lines.push("");
+
+      renderDbGroupsForPane("repo");
+
+      pushSection("Project Database", "(opt-in agent SQL access; stored in this repo's .posse/db)");
       pushTableHeader();
       for (const s of projectDbSettings) {
         pushEditableRow(s.setting_key, s.setting_value || "", s.description || "");
@@ -1709,6 +1723,8 @@ export class AdminSettingsController {
       renderAtlasPane();
     } else if (settingsPane === "general") {
       renderGeneralPane();
+    } else if (settingsPane === "repo") {
+      renderRepoPane();
     } else if (settingsPane === "debug") {
       renderDebugPane();
     } else {
@@ -1717,6 +1733,7 @@ export class AdminSettingsController {
       renderProvidersPane();
       renderAtlasPane();
       renderGeneralPane();
+      renderRepoPane();
       renderDebugPane();
     }
 

@@ -1130,6 +1130,10 @@ export class AdminTUI {
     return this._settingsController._getDelegationSettingEntries.call(this, ...args);
   }
 
+  _getProjectDbSettingEntries(...args) {
+    return this._settingsController._getProjectDbSettingEntries.call(this, ...args);
+  }
+
   _getEditableSettings(...args) {
     return this._settingsController._getEditableSettings.call(this, ...args);
   }
@@ -1148,12 +1152,20 @@ export class AdminTUI {
     return this._settingsController._startEdit.call(this, ...args);
   }
 
+  _startProjectDbEdit(...args) {
+    return this._settingsController._startProjectDbEdit.call(this, ...args);
+  }
+
   _resetEditState(...args) {
     return this._settingsController._resetEditState.call(this, ...args);
   }
 
   _saveSettingValue(...args) {
     return this._settingsController._saveSettingValue.call(this, ...args);
+  }
+
+  _saveProjectDbSetting(...args) {
+    return this._settingsController._saveProjectDbSetting.call(this, ...args);
   }
 
   _installScipLanguageDependencies(...args) {
