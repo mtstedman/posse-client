@@ -30,7 +30,6 @@ import {
   gitCommitAllAsync as gitCommitAllAsyncFromModule,
 } from "../../../git/functions/commit-scope.js";
 import {
-  resetDirtyWorktreeFallbackAsync as resetDirtyWorktreeFallbackAsyncFromModule,
   snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule,
 } from "../../../git/functions/worktree.js";
 import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
@@ -214,16 +213,29 @@ export async function handlePostExecutionForWorker({
                     event_json: JSON.stringify({ locks: siblingLocks.slice(0, 20) }),
                   });
                 } else {
-                  await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
-                    reason: `blocked-job-${job.id}`,
-                    branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-                    wiId: job.work_item_id,
-                  });
+                  try {
+                    await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
+                      reason: `blocked-job-${job.id}`,
+                      branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+                      wiId: job.work_item_id,
+                    });
+                  } catch (resetErr) {
+                    // Snapshot refused or failed — leave the dirt in place for
+                    // the next job's setup recovery. An unsnapshotted wipe here
+                    // is the one response the snapshot layer forbids.
+                    logEvent({
+                      work_item_id: job.work_item_id,
+                      job_id: job.id,
+                      attempt_id: attempt.id,
+                      event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+                      actor_type: EVENT_ACTORS.WORKER,
+                      message: `Left blocked-attempt dirty state in place; snapshot/reset failed: ${resetErr?.message || String(resetErr)}`,
+                      event_json: JSON.stringify({ reason: `blocked-job-${job.id}` }),
+                    });
+                  }
                 }
               }
-            } catch {
-              try { await resetDirtyWorktreeFallbackAsyncFromModule(wtPath, this.projectDir); } catch { /* best effort */ }
-            }
+            } catch { /* dirty probe failed — leave the worktree alone; setup recovery handles pre-existing dirt */ }
           }
 
           const allAttempts = getAttempts(job.id);
@@ -372,6 +384,33 @@ export async function handlePostExecutionForWorker({
             });
             hasFileChanges = true;
             satisfiedNoop = true;
+          } else if ((preCommitPayload?.task_mode || "code") === "db") {
+            // DB-only job: nothing to commit by design — the write surface is
+            // the project database and the file tools run read-only. Skip the
+            // commit machinery entirely (its unscoped-add assert would throw on
+            // an empty scope) and defensively reset any stray worktree changes
+            // so they cannot leak into the next job on this branch. Flow
+            // continues with hasFileChanges=false: requiresGitNoopCheck exempts
+            // db mode from the no-op guard and the assessor still runs.
+            try {
+              if (await gitHasChangesAsync(wtPath)) {
+                const discardMsg = `db-mode job left unexpected worktree changes — snapshotting and resetting`;
+                this.emit(job.id, `${C.yellow}[scope] WI#${job.work_item_id} job #${job.id}: ${discardMsg}${C.reset}`);
+                logEvent({
+                  work_item_id: job.work_item_id,
+                  job_id: job.id,
+                  attempt_id: attempt.id,
+                  event_type: EVENT_TYPES.WORKTREE_EXTERNAL_DRIFT_DETECTED,
+                  actor_type: EVENT_ACTORS.WORKER,
+                  message: discardMsg,
+                });
+                await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
+                  reason: `db-mode-noop-job-${job.id}`,
+                  branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+                  wiId: job.work_item_id,
+                });
+              }
+            } catch { /* best effort — the reset is defensive, not load-bearing */ }
           } else {
           try {
             const jobPayload = preCommitPayload;
@@ -492,6 +531,7 @@ export async function handlePostExecutionForWorker({
               createdViaModifyScope,
               createdOutOfScope,
               skippedIgnoredCreateFiles,
+              skippedIgnoredModifyFiles,
               skippedStaleModifyFiles,
               outOfScopeDirtySkipped,
               outOfScopeStagingSkipped,
@@ -640,6 +680,20 @@ export async function handlePostExecutionForWorker({
               });
             }
 
+            if (skippedIgnoredModifyFiles && skippedIgnoredModifyFiles.length > 0) {
+              const ignoredModifyMsg = `Skipped ${skippedIgnoredModifyFiles.length} ignored modifyFiles path(s) during commit staging: ${skippedIgnoredModifyFiles.slice(0, 10).join(", ")}`;
+              this.emit(job.id, `${C.yellow}[scope-runtime] WI#${job.work_item_id} job #${job.id}: ${ignoredModifyMsg}${C.reset}`);
+              logEvent({
+                work_item_id: job.work_item_id,
+                job_id: job.id,
+                attempt_id: attempt.id,
+                event_type: EVENT_TYPES.JOB_SCOPE_IGNORED_MODIFYFILES_SKIPPED,
+                actor_type: EVENT_ACTORS.WORKER,
+                message: ignoredModifyMsg,
+                event_json: JSON.stringify({ files: skippedIgnoredModifyFiles }),
+              });
+            }
+
             if (skippedStaleModifyFiles && skippedStaleModifyFiles.length > 0) {
               const staleMsg = `Skipped ${skippedStaleModifyFiles.length} stale modifyFiles path(s) during commit staging: ${skippedStaleModifyFiles.slice(0, 10).join(", ")}`;
               this.emit(job.id, `${C.yellow}[scope-runtime] WI#${job.work_item_id} job #${job.id}: ${staleMsg}${C.reset}`);
@@ -710,6 +764,7 @@ export async function handlePostExecutionForWorker({
                   files_committed_error: filesCommittedError,
                   files_reverted: filesReverted,
                   created_via_modify_scope: createdViaModifyScope,
+                  skipped_ignored_modify_files: skippedIgnoredModifyFiles || [],
                   skipped_stale_modify_files: skippedStaleModifyFiles || [],
                   out_of_scope_dirty_skipped: outOfScopeDirtySkipped || [],
                   out_of_scope_staging_skipped: outOfScopeStagingSkipped || [],
@@ -1014,8 +1069,19 @@ export async function handlePostExecutionForWorker({
                         branchName: getWorkItem(job.work_item_id)?.branch_name || null,
                         wiId: job.work_item_id,
                       });
-                    } catch {
-                      try { await resetDirtyWorktreeFallbackAsyncFromModule(wtPath, this.projectDir); } catch { /* ignore */ }
+                    } catch (resetErr) {
+                      // Snapshot refused or failed — leave the dirt for the
+                      // next job's setup recovery rather than wiping the only
+                      // copy of the failed attempt's work.
+                      logEvent({
+                        work_item_id: job.work_item_id,
+                        job_id: job.id,
+                        attempt_id: attempt.id,
+                        event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+                        actor_type: EVENT_ACTORS.WORKER,
+                        message: `Left commit-failure dirty state in place; snapshot/reset failed: ${resetErr?.message || String(resetErr)}`,
+                        event_json: JSON.stringify({ reason: `commit-failed-job-${job.id}` }),
+                      });
                     }
                   }
                 }

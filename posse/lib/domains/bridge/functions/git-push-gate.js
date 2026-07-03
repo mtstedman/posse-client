@@ -5,9 +5,8 @@
 // double-pushing, and the configured pre_push_verify_cmd hook plus the
 // conflict-marker check run exactly as they do for a terminal-initiated push.
 
-import { execFileSync } from "node:child_process";
-
 import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
+import { gitExec } from "../../git/functions/utils.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import {
   acquireMergeLock,
@@ -45,11 +44,7 @@ async function resolveTargetBranchSafe(projectDir, gatePayload = {}) {
   const fromGate = String(gatePayload?.target_branch || gatePayload?.push_branch || "").trim();
   if (fromGate) return fromGate;
   try {
-    return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd: projectDir,
-      encoding: "utf-8",
-      timeout: 5000,
-    }).trim();
+    return gitExec(["rev-parse", "--abbrev-ref", "HEAD"], projectDir, { timeoutMs: 5000 }).trim();
   } catch {
     return "main";
   }

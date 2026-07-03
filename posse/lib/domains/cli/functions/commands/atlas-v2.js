@@ -20,7 +20,6 @@
 
 import fs from "fs";
 import path from "path";
-import { execFileSync } from "child_process";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { ATLAS_WARM_JOB_TYPE, ATLAS_WARM_JOB_POLICY } from "../../../atlas/functions/v2/contracts/jobs.js";
@@ -48,6 +47,7 @@ import {
 } from "../../../atlas/functions/v2/embeddings/local-onnx.js";
 import { ensureOnnxModelCached } from "../../../atlas/functions/v2/embeddings/onnx-bootstrap.js";
 import { ATLAS_V2_HELP_COMMANDS } from "../atlas-v2-help.js";
+import { gitExecSafe } from "../../../git/functions/utils.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -529,14 +529,7 @@ function detectGitCurrentBranch(projectDir) {
  * @returns {string}
  */
 function gitOutput(projectDir, args) {
-  try {
-    return String(execFileSync("git", ["-C", projectDir, ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    })).trim();
-  } catch {
-    return "";
-  }
+  return gitExecSafe(args, projectDir);
 }
 
 async function printScipStatus({ projectDir }) {

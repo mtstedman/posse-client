@@ -408,7 +408,9 @@ export class NativeBinary {
       encoding: "utf8",
       windowsHide: true,
       timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      maxBuffer: DEFAULT_MAX_BUFFER,
+      // Callers with large expected payloads (base64 envelopes) may raise the
+      // capture ceiling; never shrink below the default.
+      maxBuffer: Math.max(DEFAULT_MAX_BUFFER, Number(opts.maxBuffer) || 0),
     });
     return this.#finishResult({
       stdout: typeof res.stdout === "string" ? res.stdout : "",
@@ -469,7 +471,7 @@ export class NativeBinary {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });
-      const captureMaxChars = opts.maxBuffer ?? DEFAULT_MAX_BUFFER;
+      const captureMaxChars = Math.max(DEFAULT_MAX_BUFFER, Number(opts.maxBuffer) || 0);
       let stdout = "";
       let stderr = "";
       child.stdout?.on("data", (d) => { stdout = appendBoundedText(stdout, d, captureMaxChars); });

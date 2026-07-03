@@ -2,11 +2,11 @@
 // Read-only dirty-state audits and human-facing worktree review output.
 
 import fs from "fs";
-import { execFileSync, execSync } from "child_process";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { listWorkItems } from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { worktreePath as canonicalWorktreePath, findLegacyWorktreeForWi } from "./worktree.js";
+import { gitExec } from "./utils.js";
 
 export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine }) {
   const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread } = context;
@@ -30,7 +30,7 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
       // Check for dirty worktree (uncommitted changes)
       if (wtExists) {
         try {
-          const status = execSync("git status --porcelain", { cwd: wtDir, encoding: "utf-8", timeout: 5000 }).trim();
+          const status = gitExec(["status", "--porcelain"], wtDir, { timeoutMs: 5000 }).trim();
           if (status) {
             const fileCount = status.split("\n").length;
             issues.push({ type: "dirty", message: `${fileCount} uncommitted change(s) in worktree`, files: status });
@@ -39,7 +39,7 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
 
         // Check for stashes
         try {
-          const stashList = execSync("git stash list", { cwd: wtDir, encoding: "utf-8", timeout: 5000 }).trim();
+          const stashList = gitExec(["stash", "list"], wtDir, { timeoutMs: 5000 }).trim();
           if (stashList) {
             const stashCount = stashList.split("\n").length;
             issues.push({ type: "stash", message: `${stashCount} stash(es) with uncommitted work` });
@@ -50,16 +50,14 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
       // Check if branch has commits not yet merged into target
       if (wi.merge_state !== "merged") {
         try {
-          const ahead = execFileSync("git", ["rev-list", `${targetBranch}..${wi.branch_name}`, "--count"], {
-            cwd: projectDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 5000,
-          }).trim();
+          const ahead = gitExec(["rev-list", `${targetBranch}..${wi.branch_name}`, "--count"], projectDir, { timeoutMs: 5000 }).trim();
           if (parseInt(ahead) > 0) {
             issues.push({ type: "unmerged", message: `${ahead} commit(s) not merged into ${targetBranch}` });
           }
         } catch {
           // Branch referenced in DB but doesn't exist in git — orphaned record
           try {
-            execFileSync("git", ["rev-parse", "--verify", wi.branch_name], { cwd: projectDir, encoding: "utf-8", stdio: "pipe", timeout: 3000 });
+            gitExec(["rev-parse", "--verify", wi.branch_name], projectDir, { timeoutMs: 3000 });
           } catch {
             issues.push({ type: "orphan_ref", message: `Branch ${wi.branch_name} no longer exists in git (DB record is stale)` });
           }
@@ -84,7 +82,7 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
     const dirtyItems = auditWorktreeState();
     let targetStatus = "";
     try {
-      targetStatus = execSync("git status --porcelain", { cwd: projectDir, encoding: "utf-8", timeout: 5000 }).trim();
+      targetStatus = gitExec(["status", "--porcelain"], projectDir, { timeoutMs: 5000 }).trim();
     } catch {
       targetStatus = "";
     }
@@ -108,11 +106,7 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
     if (!fs.existsSync(wtDir)) return null;
     let status = "";
     try {
-      status = execSync("git status --porcelain --untracked-files=all", {
-        cwd: wtDir,
-        encoding: "utf-8",
-        timeout: 5000,
-      }).trim();
+      status = gitExec(["status", "--porcelain", "--untracked-files=all"], wtDir, { timeoutMs: 5000 }).trim();
     } catch {
       return null;
     }

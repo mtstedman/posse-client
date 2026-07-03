@@ -40,17 +40,18 @@ import {
 } from "../../../functions/toolkit/index.js";
 import { TOOL_PROJECT_DB_QUERY } from "../../../catalog/native-tools.js";
 import { execProjectDbQuery } from "../../../functions/toolkit/project-db/query.js";
-import { readProjectDbConfig } from "../../../functions/toolkit/project-db/config.js";
+import { capProjectDbPermissions, readProjectDbConfig } from "../../../functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../classes/tools/ToolRegistry.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../functions/tools/tool-suites.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
-import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, runWithObservationContext } from "../../observability/functions/observations.js";
+import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, runWithObservationContext } from "../../observability/functions/observations.js";
 import {
   acknowledgeOperatorFeedback,
   countPendingOperatorFeedbackForJob,
   getOperatorFeedbackForJob,
   recordAgentActivity,
 } from "../../queue/functions/index.js";
+import { guardToolWriteLock } from "../../queue/functions/write-lock-guard.js";
 import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.js";
 import { resolveAtlasRepoTarget } from "./atlas/repo.js";
 import { shouldUseAtlasV2 } from "./atlas-v2-mode.js";
@@ -282,6 +283,9 @@ const ownerHotProcess = bootConfig.ownerHotGateway === true;
 let ownerHotGateway = ownerHotProcess || bootConfig.ownerHotGateway === true;
 let workspaceCwd = String(bootConfig.cwd || "").trim() || process.cwd();
 let allowWrite = bootConfig.allowWrite === true || ownerHotGateway;
+// db-mode dev jobs run with allowWrite=false (no file tools) but carry the
+// projectDbWrite capability: project_db_query stays on the write lane.
+let projectDbWrite = bootConfig.projectDbWrite === true;
 let allowImageHelpers = bootConfig.allowImageHelpers === true || ownerHotGateway;
 let allowImageGeneration = bootConfig.allowImageGeneration === true || ownerHotGateway;
 let roleName = String(bootConfig.role || "").trim() || null;
@@ -1038,11 +1042,17 @@ function dedupeReadFile(args = {}) {
 let allowBash = ownerHotGateway || ["dev", "artificer", "assessor"].includes(roleName);
 let execBash = allowBash ? createBashExecutor() : null;
 // Opt-in project DB access: advertised + attached only when this repo has it
-// configured (a db type + at least one granted permission). Off by default.
+// configured (enabled + a db type + a grant usable by this session's
+// capability lane — write sessions take the full grant, read sessions need
+// the `read` permission). Off by default.
+function projectDbCapability() {
+  return (writeEnabled || projectDbWrite) ? "write" : "read";
+}
 function computeProjectDbAccessEnabled() {
   try {
     const cfg = readProjectDbConfig({ projectDir: workspaceCwd });
-    return !!cfg.enabled && Array.isArray(cfg.permissions) && cfg.permissions.length > 0;
+    if (!cfg.enabled || !cfg.dbType) return false;
+    return capProjectDbPermissions(cfg.permissions, projectDbCapability()).length > 0;
   } catch {
     return false;
   }
@@ -1325,6 +1335,10 @@ function moveFileWithinScope(args = {}) {
   if (!destinationExists && !effectiveScopePredicates.canCreate(destinationPath)) {
     return `Error: move_file blocked - ${args.destination} is outside the allowed creation scope.`;
   }
+  const sourceLockErr = guardToolWriteLock("move_file", args.source, workspaceCwd);
+  if (sourceLockErr) return sourceLockErr;
+  const destinationLockErr = guardToolWriteLock("move_file", args.destination, workspaceCwd);
+  if (destinationLockErr) return destinationLockErr;
 
   const destinationDir = path.dirname(destinationPath);
   const replacementTempPath = () => path.join(destinationDir, `.posse-move-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
@@ -1413,6 +1427,8 @@ function copyFileWithinScope(args = {}) {
   if (!destinationExists && !effectiveScopePredicates.canCreate(destinationPath)) {
     return `Error: copy_file blocked - ${args.destination} is outside the allowed creation scope.`;
   }
+  const destinationLockErr = guardToolWriteLock("copy_file", args.destination, workspaceCwd);
+  if (destinationLockErr) return destinationLockErr;
 
   try {
     fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
@@ -1977,7 +1993,7 @@ if (ownerHotGateway || isResearcherRole) {
   mcpToolRegistry.attach("chain_verdict", (args) => chainVerdict(args || {}));
 }
 if (projectDbAccessEnabled) {
-  mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd }));
+  mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd, capability: projectDbCapability() }));
 }
 
 let TOOL_EXECUTORS = new Map(Object.entries(mcpToolRegistry.handlerMap()));
@@ -2136,7 +2152,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
     mcpToolRegistry.attach("chain_verdict", (args) => chainVerdict(args || {}));
   }
   if (projectDbAccessEnabled) {
-    mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd }));
+    mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd, capability: projectDbCapability() }));
   }
 }
 
@@ -2203,6 +2219,7 @@ function applyRuntimeBootConfig(nextConfig = {}) {
   scopeParseState.invalid = bootConfig?.mcpOAuth?.verified === false;
   workspaceCwd = String(bootConfig.cwd || "").trim() || process.cwd();
   allowWrite = bootConfig.allowWrite === true || ownerHotGateway;
+  projectDbWrite = bootConfig.projectDbWrite === true;
   allowImageHelpers = bootConfig.allowImageHelpers === true || ownerHotGateway;
   allowImageGeneration = bootConfig.allowImageGeneration === true || ownerHotGateway;
   roleName = String(bootConfig.role || "").trim() || null;
@@ -2228,7 +2245,6 @@ function applyRuntimeBootConfig(nextConfig = {}) {
     : null;
   allowBash = ownerHotGateway || ["dev", "artificer", "assessor"].includes(roleName);
   execBash = allowBash ? createBashExecutor() : null;
-  projectDbAccessEnabled = computeProjectDbAccessEnabled();
   scopePredicates = buildScopePredicates(workspaceCwd, {
     modifyFiles: Array.isArray(bootConfig.scopedFiles) ? bootConfig.scopedFiles : [],
     createFiles: Array.isArray(bootConfig.createFiles) ? bootConfig.createFiles : [],
@@ -2244,6 +2260,9 @@ function applyRuntimeBootConfig(nextConfig = {}) {
     readRoots: Array.isArray(bootConfig.readRoots) ? [...bootConfig.readRoots] : [],
   });
   writeEnabled = allowWrite && !scopeParseState.invalid;
+  // After writeEnabled: the project-DB gate caps the grant by this session's
+  // read/write capability lane, so it must see the updated value.
+  projectDbAccessEnabled = computeProjectDbAccessEnabled();
   effectiveScopePredicates = scopeParseState.invalid
     ? {
       canEdit: () => false,
@@ -2810,12 +2829,18 @@ async function handleRequest(msg) {
         noteResearchExplorationStep({ toolName });
       }
       const atlasLiveBuffer = ok ? await maybePushAtlasLiveBufferForToolObservation({ toolName, args }) : null;
+      const readStats = ok ? nativeReadResultStats(toolName, text) : null;
       finishToolInvocation(toolInvocation, {
         tool: toolName,
         input: recordInput,
         cwd: workspaceCwd,
         ok,
-        ...(atlasLiveBuffer ? { extraDetail: { atlas_live_buffer: atlasLiveBuffer } } : {}),
+        ...(atlasLiveBuffer || readStats ? {
+          extraDetail: {
+            ...(atlasLiveBuffer ? { atlas_live_buffer: atlasLiveBuffer } : {}),
+            ...(readStats || {}),
+          },
+        } : {}),
       });
       appendToolLog({
         event: "tool_result",

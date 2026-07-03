@@ -1,11 +1,8 @@
-import { execFile as execFileCallback } from "node:child_process";
-import { promisify } from "node:util";
-
 import { runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
+import { gitExecAsync, isGitCommandFailure } from "./utils.js";
 
 export const SAFE_PUSH_REFSPEC = "HEAD";
 
-const execFileAsync = promisify(execFileCallback);
 const REMOTE_PUSH_CONFIG_RE = "^remote\\..*\\.(push|mirror)$";
 
 function refspecSource(refspec) {
@@ -25,22 +22,16 @@ function isTrueConfigValue(value) {
 }
 
 export async function remotePushConfigsAreClearlyRestrictive(cwd, options = {}) {
-  const execFileAsyncImpl = options.execFileAsync || execFileAsync;
   let stdout = "";
   try {
-    const result = await execFileAsyncImpl("git", [
-      "config",
-      "--get-regexp",
-      REMOTE_PUSH_CONFIG_RE,
-    ], {
-      cwd,
-      encoding: "utf8",
-      timeout: options.timeoutMs ?? 5_000,
-      windowsHide: true,
+    stdout = await gitExecAsync(["config", "--get-regexp", REMOTE_PUSH_CONFIG_RE], cwd, {
+      timeoutMs: options.timeoutMs ?? 5_000,
     });
-    stdout = String(result?.stdout || "");
   } catch (err) {
-    if (Number(err?.code) !== 1) return false;
+    // `git config --get-regexp` exits 1 when nothing matches — that means
+    // "no push configs", which is restrictive. Anything else (git error,
+    // gate busy, native unavailable) must not report restrictive-by-default.
+    if (!isGitCommandFailure(err) || err.status !== 1) return false;
     stdout = String(err?.stdout || "");
   }
 

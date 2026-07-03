@@ -346,7 +346,7 @@ export function buildTreeCompressionModelPassPrompt(modelInput) {
  *   modelMetadata?: Record<string, unknown>,
  *   nativeManager?: import("../../../../../classes/tools/BinaryManager.js").BinaryManager,
  * }} [opts]
- * @returns {Promise<{ ok: boolean, durationMs: number, snapshotId?: number, seedCount: number, profile: string, sourceSignature: string | null, modelSeedCount?: number, deltaSeeds?: number, carriedForwardSeeds?: number, error?: string }>}
+ * @returns {Promise<{ ok: boolean, durationMs: number, snapshotId?: number, seedCount: number, profile: string, sourceSignature: string | null, modelSeedCount?: number, deltaSeeds?: number, unannotatedSeeds?: number, carriedForwardSeeds?: number, error?: string }>}
  */
 export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {}) {
   ensureTreeCompressionTables(db);
@@ -368,25 +368,31 @@ export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {})
       { snapshot: base, maxSeeds: opts.modelMaxSeeds, priorSnapshot: prior },
       nativeOpts,
     ));
-    const deltaSeeds = Array.isArray(input?.seeds) ? input.seeds.length : 0;
+    const emittedSeeds = Array.isArray(input?.seeds) ? input.seeds.length : 0;
+    // Content deltas (new/changed areas, enrichment stale without a model pass)
+    // vs unannotated backlog (unchanged areas an earlier pass never labeled —
+    // safe to defer). Older binaries only report the combined pool, so the
+    // content gate falls back to the emitted length.
+    const deltaSeeds = numberOr(input?.summary?.deltaSeeds, emittedSeeds);
+    const unannotatedSeeds = numberOr(input?.summary?.unannotatedSeeds, 0);
     const carriedForwardSeeds = numberOr(input?.summary?.carriedForwardSeeds, 0);
 
-    // Only pay for the provider when there are deltas. With zero deltas the
-    // annotate pass still runs (cheap, in-binary) to rebuild the current snapshot
-    // and carry every prior annotation forward unchanged.
+    // Pay for the provider whenever the binary emitted work and we can annotate
+    // (content deltas and backlog drain together). Without an annotator only
+    // content deltas are fatal; an unlabeled backlog just waits for the next
+    // annotator-equipped pass, and the annotate call below still rebuilds the
+    // snapshot with every prior annotation carried forward.
     let rawAnnotations = { seeds: [] };
     if (opts.annotations !== undefined) {
       rawAnnotations = opts.annotations;
-    } else if (deltaSeeds > 0) {
-      if (typeof opts.annotator === "function") {
-        const prompt = buildTreeCompressionModelPassPrompt(input);
-        rawAnnotations = await opts.annotator({ prompt, input, snapshot: base });
-      } else {
-        rawAnnotations = null;
-      }
+    } else if (emittedSeeds > 0 && typeof opts.annotator === "function") {
+      const prompt = buildTreeCompressionModelPassPrompt(input);
+      rawAnnotations = await opts.annotator({ prompt, input, snapshot: base });
       if (rawAnnotations == null || rawAnnotations === "") {
         throw new Error("tree_compression_model_annotations_missing");
       }
+    } else if (deltaSeeds > 0) {
+      throw new Error("tree_compression_model_annotations_missing");
     }
 
     const enriched = /** @type {any} */ (runAtlasNativeMethod(
@@ -411,8 +417,9 @@ export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {})
         deterministic_profile: base.profile,
         source_signature: sourceSignature,
         seed_count: enrichedSeeds.length,
-        model_seed_count: deltaSeeds,
+        model_seed_count: emittedSeeds,
         delta_seeds: deltaSeeds,
+        unannotated_seeds: unannotatedSeeds,
         carried_forward_seeds: carriedForwardSeeds,
         model: opts.modelMetadata || null,
       });
@@ -424,8 +431,9 @@ export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {})
         seedCount: enrichedSeeds.length,
         profile: enriched.profile,
         sourceSignature,
-        modelSeedCount: deltaSeeds,
+        modelSeedCount: emittedSeeds,
         deltaSeeds,
+        unannotatedSeeds,
         carriedForwardSeeds,
       };
     } catch (err) {

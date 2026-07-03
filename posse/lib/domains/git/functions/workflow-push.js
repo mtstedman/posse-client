@@ -1,13 +1,12 @@
 // lib/domains/git/functions/workflow-push.js
 // Push-offer gate and push execution workflow helpers.
 
-import { execFileSync, execSync } from "child_process";
 import { logEvent } from "../../queue/functions/index.js";
 import { markOpenPushOfferGatePushed, upsertPushOfferGate } from "../../queue/functions/push-offer.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { runHook } from "./hooks.js";
-import { resolvePushBranch } from "./utils.js";
+import { gitExec, resolvePushBranch } from "./utils.js";
 import { GIT_MERGE_TIMEOUT_MS } from "./workflow-git-utils.js";
 
 export function createPushWorkflowHelpers(context, { auditWorktreeState, askSingleKeyYesNo }) {
@@ -15,10 +14,10 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
 
   function collectPushOfferState(mergedCount) {
     const targetBranch = currentTargetBranch();
-    const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: projectDir, encoding: "utf-8" }).trim();
+    const branch = gitExec(["rev-parse", "--abbrev-ref", "HEAD"], projectDir).trim();
     const remotes = (() => {
       try {
-        return execSync("git remote", { cwd: projectDir, encoding: "utf-8" })
+        return gitExec(["remote"], projectDir)
           .split(/\r?\n/)
           .map((line) => line.trim())
           .filter(Boolean);
@@ -28,10 +27,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     })();
     const branchRemote = (() => {
       try {
-        return execFileSync("git", ["config", "--get", `branch.${branch}.remote`], {
-          cwd: projectDir,
-          encoding: "utf-8",
-        }).trim();
+        return gitExec(["config", "--get", `branch.${branch}.remote`], projectDir).trim();
       } catch {
         return "";
       }
@@ -50,10 +46,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     const pushBranch = pushBranchInfo.branch;
     const pushBranchRemote = (() => {
       try {
-        return execFileSync("git", ["config", "--get", `branch.${pushBranch}.remote`], {
-          cwd: projectDir,
-          encoding: "utf-8",
-        }).trim();
+        return gitExec(["config", "--get", `branch.${pushBranch}.remote`], projectDir).trim();
       } catch {
         return "";
       }
@@ -62,7 +55,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
 
     let workingTreeStatus = "";
     try {
-      workingTreeStatus = execSync("git status --porcelain", { cwd: projectDir, encoding: "utf-8", timeout: 5000 }).trim();
+      workingTreeStatus = gitExec(["status", "--porcelain"], projectDir, { timeoutMs: 5000 }).trim();
     } catch {
       workingTreeStatus = "";
     }
@@ -76,16 +69,8 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     let aheadCount = null;
     try {
       const upstreamRef = `${effectiveRemote}/${pushBranch}`;
-      execFileSync("git", ["rev-parse", "--verify", "--quiet", upstreamRef], {
-        cwd: projectDir,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      const counted = execFileSync("git", ["rev-list", "--count", `${upstreamRef}..${pushBranch}`], {
-        cwd: projectDir,
-        encoding: "utf-8",
-        timeout: 5000,
-      }).trim();
+      gitExec(["rev-parse", "--verify", "--quiet", upstreamRef], projectDir);
+      const counted = gitExec(["rev-list", "--count", `${upstreamRef}..${pushBranch}`], projectDir, { timeoutMs: 5000 }).trim();
       const parsed = Number.parseInt(counted, 10);
       aheadCount = Number.isFinite(parsed) ? parsed : null;
     } catch {
@@ -122,10 +107,20 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
 
   function executePush({ effectiveRemote, pushBranch, mergedCount = 0 }) {
     try {
-      const markerCheck = execSync(
-        'git grep -l -e "^<<<<<<<" -e "^=======$" -e "^>>>>>>>" HEAD -- . ":(exclude).posse/**"',
-        { cwd: projectDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10000 },
-      ).trim();
+      const markerCheck = gitExec([
+        "grep",
+        "-l",
+        "-e",
+        "^<<<<<<<",
+        "-e",
+        "^=======$",
+        "-e",
+        "^>>>>>>>",
+        "HEAD",
+        "--",
+        ".",
+        ":(exclude).posse/**",
+      ], projectDir, { timeoutMs: 10000 }).trim();
       if (markerCheck) {
         return {
           ok: false,
@@ -133,8 +128,17 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
           files: markerCheck.split("\n").filter(Boolean).map((file) => file.replace(/^HEAD:/, "")),
         };
       }
-    } catch {
-      // git grep exits non-zero when no matches are found.
+    } catch (err) {
+      // git grep exits 1 when no matches are found — the only failure that
+      // means "clean". Anything else (gate busy, native git unavailable,
+      // grep itself erroring) must not silently pass the marker gate.
+      if (err?.status !== 1) {
+        return {
+          ok: false,
+          reason: "marker_check_failed",
+          output: String(err?.message || err).split("\n")[0],
+        };
+      }
     }
 
     const gate = runHook("pre_push_gate", { cwd: projectDir, targetBranch: pushBranch });
@@ -143,12 +147,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     }
 
     try {
-      execFileSync("git", ["push", effectiveRemote, pushBranch], {
-        cwd: projectDir,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: GIT_MERGE_TIMEOUT_MS,
-      });
+      gitExec(["push", effectiveRemote, pushBranch], projectDir, { timeoutMs: GIT_MERGE_TIMEOUT_MS });
       logEvent({
         event_type: EVENT_TYPES.GIT_PUSHED,
         actor_type: EVENT_ACTORS.HUMAN,

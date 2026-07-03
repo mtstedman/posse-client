@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 import path from "path";
-import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
 import { closeDb, getDb } from "../../../shared/storage/functions/index.js";
 import { closeLog, writeRuntimeLogAtDir } from "../../../shared/telemetry/functions/logging/logger.js";
 import { logEvent } from "../../queue/functions/events.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
+import { gitExecSafe } from "../../git/functions/utils.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
 import {
   getAtlasIntegrationConfig,
@@ -21,37 +21,27 @@ import { normalizeAtlasScipMode, shouldRunScipPhase } from "./atlas-v2-mode.js";
 import { describeScipStagingState } from "../../atlas/functions/v2/scip/stager.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
-function git(args, cwd) {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 10000,
-  }).trim();
-}
+// The hook runs once per commit, so every HEAD probe (short hash, full hash,
+// parents, subject) collapses into a single `git show` spawn whose facts are
+// threaded through the run.
+const HEAD_FACTS_FORMAT = "%h%x00%H%x00%P%x00%s";
 
-function currentShortHead(cwd) {
-  try { return git(["rev-parse", "--short", "HEAD"], cwd); } catch { return ""; }
+function headCommitFacts(cwd) {
+  const raw = gitExecSafe(["show", "-s", `--format=${HEAD_FACTS_FORMAT}`, "HEAD"], cwd, { timeoutMs: 10000 });
+  if (!raw) return { shortHead: "", fullHead: "", parents: [], subject: "" };
+  const [shortHead = "", fullHead = "", parentsRaw = "", subject = ""] = raw.split("\0");
+  return {
+    shortHead: shortHead.trim(),
+    fullHead: fullHead.trim(),
+    parents: parentsRaw.split(/\s+/).filter(Boolean),
+    subject: subject.trim(),
+  };
 }
 
 function commitRangePaths(cwd, fromSha, toSha) {
   if (!fromSha || !toSha) return [];
-  try {
-    const raw = git(["diff", "--name-only", fromSha, toSha], cwd);
-    return raw.split("\n").map((line) => String(line || "").replace(/\\/g, "/").trim()).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function commitParents(cwd, ref = "HEAD") {
-  try {
-    return git(["show", "-s", "--format=%P", ref], cwd)
-      .split(/\s+/)
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
+  const raw = gitExecSafe(["diff", "--name-only", fromSha, toSha], cwd, { timeoutMs: 10000 });
+  return raw.split("\n").map((line) => String(line || "").replace(/\\/g, "/").trim()).filter(Boolean);
 }
 
 function uniqueCommitRangePaths(cwd, ranges = []) {
@@ -67,15 +57,8 @@ function uniqueCommitRangePaths(cwd, ranges = []) {
   return paths;
 }
 
-function previousCommitSha(cwd, headSha) {
-  try { return git(["rev-parse", `${headSha || "HEAD"}^`], cwd); } catch { return ""; }
-}
-
-function mergeCommitDetails(cwd) {
-  const parents = commitParents(cwd);
-
-  let subject = "";
-  try { subject = git(["show", "-s", "--format=%s", "HEAD"], cwd); } catch { subject = ""; }
+function mergeCommitDetails(head) {
+  const { parents, subject } = head;
   const branchMatch = subject.match(/^(Squash merge|Manual merge)\s+(.+?)\s+into\s+(.+)$/i);
   const details = {
     reason: null,
@@ -89,20 +72,17 @@ function mergeCommitDetails(cwd) {
   return details;
 }
 
-function postCommitDiffScope(cwd, headSha, mergeReason) {
-  const prevSha = previousCommitSha(cwd, headSha);
-  if (mergeReason === "merge_commit") {
-    const parents = commitParents(cwd, headSha);
-    if (parents.length > 1) {
-      return {
-        fromSha: prevSha,
-        paths: uniqueCommitRangePaths(cwd, parents.map((parent) => [parent, headSha])),
-      };
-    }
+function postCommitDiffScope(cwd, head, mergeReason) {
+  const prevSha = head.parents[0] || "";
+  if (mergeReason === "merge_commit" && head.parents.length > 1) {
+    return {
+      fromSha: prevSha,
+      paths: uniqueCommitRangePaths(cwd, head.parents.map((parent) => [parent, head.fullHead])),
+    };
   }
   return {
     fromSha: prevSha,
-    paths: commitRangePaths(cwd, prevSha, headSha),
+    paths: commitRangePaths(cwd, prevSha, head.fullHead),
   };
 }
 
@@ -255,7 +235,8 @@ export async function runAtlasPostCommitHook({
   timeoutMs = 10 * 60 * 1000,
   out = process.stdout,
 } = {}) {
-  const shortHead = currentShortHead(cwd);
+  const head = headCommitFacts(cwd);
+  const shortHead = head.shortHead;
   if (config?.reindexOnCommit !== true) {
     out.write(`[atlas] post-commit skipped after ${shortHead || "HEAD"} (commit_hook_disabled)\n`);
     writePostCommitStatus(cwd, "info", "ATLAS post-commit reindex skipped", {
@@ -265,7 +246,7 @@ export async function runAtlasPostCommitHook({
     }, { visible: false });
     return { ok: true, attempted: false, skipped: "commit_hook_disabled", exitCode: 0 };
   }
-  const mergeDetails = mergeCommitDetails(cwd);
+  const mergeDetails = mergeCommitDetails(head);
   const mergeReason = mergeDetails.reason;
   if (mergeOnly && !mergeReason) {
     out.write(`[atlas] post-commit skipped after ${shortHead || "HEAD"} (not a merge commit)\n`);
@@ -289,8 +270,9 @@ export async function runAtlasPostCommitHook({
   // `atlas.main_advanced` so the warmer enqueues an incremental reindex job.
   if (isAtlasV2EmissionEnabled(config)) {
     try {
-      const headFull = git(["rev-parse", "HEAD"], cwd);
-      const { fromSha, paths } = postCommitDiffScope(cwd, headFull, mergeReason);
+      const headFull = head.fullHead;
+      if (!headFull) throw new Error("HEAD commit facts unavailable");
+      const { fromSha, paths } = postCommitDiffScope(cwd, head, mergeReason);
       const targetBranch = mergeDetails.target || await resolveTargetBranchAsync(cwd);
       emitAtlasV2MainAdvanced({
         payload: {

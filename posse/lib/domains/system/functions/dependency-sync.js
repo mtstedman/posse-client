@@ -10,6 +10,7 @@ import path from "path";
 import { spawn, spawnSync } from "child_process";
 
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
+import { gitExec } from "../../git/functions/utils.js";
 import { installScipLanguageDependenciesSync } from "../../atlas/functions/v2/scip/dependencies.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
 import {
@@ -497,16 +498,12 @@ function firstLine(value) {
 }
 
 function gitRootForPath(root) {
-  const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-    cwd: root,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-    windowsHide: true,
-    timeout: 5000,
-  });
-  if ((result.status ?? 1) !== 0) return null;
-  const text = String(result.stdout || "").trim();
-  return text ? path.resolve(text) : null;
+  try {
+    const text = String(gitExec(["rev-parse", "--show-toplevel"], root, { timeoutMs: 5000 }) || "").trim();
+    return text ? path.resolve(text) : null;
+  } catch {
+    return null;
+  }
 }
 
 function isInsideRoot(root, target) {
@@ -515,14 +512,12 @@ function isInsideRoot(root, target) {
 }
 
 function gitPathStatus(repoRoot, args) {
-  const result = spawnSync("git", args, {
-    cwd: repoRoot,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-    windowsHide: true,
-    timeout: 5000,
-  });
-  return (result.status ?? 1) === 0;
+  try {
+    gitExec(args, repoRoot, { timeoutMs: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function gitignoreAlreadyHas(ignorePath, pattern) {

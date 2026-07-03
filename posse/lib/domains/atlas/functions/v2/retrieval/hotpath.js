@@ -1,8 +1,12 @@
 // @ts-check
 //
 // AST-backed code.lens matcher. It scopes symbol requests to the target
-// declaration and ignores comments/strings so lexical noise does not look like
-// executable dependency evidence.
+// declaration and matches identifier usages first, so lexical noise inside
+// comments/strings does not look like executable dependency evidence. An
+// identifier the AST pass cannot find is rescued by a second pass over the
+// skipped string/comment nodes and tagged matchKind "text" — string-dispatch
+// code (`$action === 'create'`) must never produce a confident false
+// "missing" verdict.
 
 import {
   findNodesByType,
@@ -44,6 +48,8 @@ const IDENTIFIER_TYPES = new Set([
   "null",
 ]);
 
+const TEXT_MATCH_CAP_PER_IDENT = 5;
+
 const SKIP_TYPES = new Set([
   "comment",
   "string",
@@ -69,6 +75,7 @@ const SKIP_TYPES = new Set([
  *   ok: true,
  *   matches: CodeHotPathData["matches"],
  *   identifiersFound: string[],
+ *   identifiersFoundInText?: string[],
  *   identifiersMissing: string[],
  *   etagSeed: string,
  * } | {
@@ -93,6 +100,7 @@ export function buildAstHotPath(args) {
  *   ok: true,
  *   matches: CodeHotPathData["matches"],
  *   identifiersFound: string[],
+ *   identifiersFoundInText?: string[],
  *   identifiersMissing: string[],
  *   etagSeed: string,
  * } | {
@@ -140,9 +148,51 @@ function buildAstHotPathWithRedactor(args, redactLines) {
     rawMatches.push({ line, ident });
   });
 
+  // Rescue pass: identifiers the AST pass could not find anywhere may still
+  // live inside the skipped string/comment nodes (string-dispatch code,
+  // config keys, template interpolation). A confident false "missing" is the
+  // hazard being prevented, but the rescue must not recreate envelope bloat:
+  // string hits emit at most TEXT_MATCH_CAP_PER_IDENT match lines each, and
+  // comment-only hits are reported in identifiersFoundInText without match
+  // entries (comment mentions are not dependency evidence, just presence).
+  const textFound = new Set();
+  /** @type {Array<{ line: number, ident: string }>} */
+  const textRawMatches = [];
+  const missingAfterAst = args.identifiers.filter((ident) => !found.has(ident));
+  if (missingAfterAst.length > 0) {
+    const perIdentLines = new Map(missingAfterAst.map((ident) => [ident, 0]));
+    const patterns = missingAfterAst.map((ident) => ({
+      ident,
+      re: new RegExp(`\\b${escapeRegExpText(ident)}\\b`, "g"),
+    }));
+    walkAstSubtree(scope, (node) => {
+      if (!SKIP_TYPES.has(node.type)) return;
+      const isComment = node.type === "comment";
+      const text = String(node.text || "");
+      if (text) {
+        for (const { ident, re } of patterns) {
+          re.lastIndex = 0;
+          for (let hit = re.exec(text); hit; hit = re.exec(text)) {
+            textFound.add(ident);
+            if (isComment) break;
+            const line = lineForIndex(doc.lineStarts, node.startIndex + hit.index);
+            const key = `${ident}:${line}`;
+            if (seen.has(key)) continue;
+            const emitted = perIdentLines.get(ident) || 0;
+            if (emitted >= TEXT_MATCH_CAP_PER_IDENT) break;
+            seen.add(key);
+            perIdentLines.set(ident, emitted + 1);
+            textRawMatches.push({ line, ident });
+          }
+        }
+      }
+      return false;
+    });
+  }
+
   // One native redaction call for the whole source instead of one per matched
   // line plus one per context line (each sync call is a process spawn).
-  const redactedLines = rawMatches.length > 0 ? redactLines(lines) : lines;
+  const redactedLines = rawMatches.length + textRawMatches.length > 0 ? redactLines(lines) : lines;
   return mapMaybePromise(redactedLines, (resolvedLines) => {
     for (const { line, ident } of rawMatches) {
       matches.push({
@@ -156,6 +206,19 @@ function buildAstHotPathWithRedactor(args, redactLines) {
         },
       });
     }
+    for (const { line, ident } of textRawMatches) {
+      matches.push({
+        repo_rel_path: args.file,
+        line,
+        text: resolvedLines[line - 1] || "",
+        identifier: ident,
+        matchKind: "text",
+        context: {
+          before: resolvedLines.slice(Math.max(0, line - 1 - contextLines), line - 1),
+          after: resolvedLines.slice(line, Math.min(lines.length, line + contextLines)),
+        },
+      });
+    }
 
     matches.sort((a, b) => a.line - b.line || a.identifier.localeCompare(b.identifier));
     const identifiersFound = [...found].sort();
@@ -163,7 +226,8 @@ function buildAstHotPathWithRedactor(args, redactLines) {
       ok: true,
       matches,
       identifiersFound,
-      identifiersMissing: args.identifiers.filter((ident) => !found.has(ident)).sort(),
+      ...(textFound.size > 0 ? { identifiersFoundInText: [...textFound].sort() } : {}),
+      identifiersMissing: args.identifiers.filter((ident) => !found.has(ident) && !textFound.has(ident)).sort(),
       etagSeed: `ast:${doc.lang}:${scope.startIndex}-${scope.endIndex}:${matches.length}`,
     };
   });
@@ -249,6 +313,14 @@ function walkAstSubtree(node, visitor) {
  */
 function cleanNodeName(value) {
   return String(value || "").replace(/^#/, "").trim();
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function escapeRegExpText(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**

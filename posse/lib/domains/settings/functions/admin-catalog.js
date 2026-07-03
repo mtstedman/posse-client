@@ -37,6 +37,8 @@ export const PROJECT_DB_PERMISSION_OPTIONS = Object.freeze([
   Object.freeze({ value: "write", label: "write (UPDATE)" }),
   Object.freeze({ value: "insert", label: "insert (INSERT)" }),
   Object.freeze({ value: "delete", label: "delete (DELETE)" }),
+  Object.freeze({ value: "create", label: "create (CREATE)" }),
+  Object.freeze({ value: "alter", label: "alter (ALTER)" }),
 ]);
 
 export const BOOLEAN_SETTING_KEYS = new Set(

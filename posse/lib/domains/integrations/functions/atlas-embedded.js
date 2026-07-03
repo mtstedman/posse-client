@@ -35,6 +35,7 @@ import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functi
 import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
+import { gitCurrentHashAsync } from "../../git/functions/utils.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
 import { clearSharedAtlasToolExecutorReadContexts, getSharedAtlasToolExecutor } from "../../atlas/functions/v2/tools/executor.js";
 import {
@@ -423,20 +424,9 @@ function prefetchScopeId(ctx, repo) {
 
 function gitHeadForCacheAsync(cwd) {
   if (!cwd) return Promise.resolve(null);
-  return new Promise((resolve) => {
-    import("child_process").then(({ execFile }) => {
-      try {
-        execFile("git", ["rev-parse", "HEAD"], {
-          cwd,
-          encoding: "utf8",
-          timeout: 5000,
-          windowsHide: true,
-        }, (err, stdout) => resolve(err ? null : (String(stdout || "").trim() || null)));
-      } catch {
-        resolve(null);
-      }
-    }, () => resolve(null));
-  });
+  return gitCurrentHashAsync(cwd, { timeoutMs: 5000 })
+    .then((sha) => String(sha || "").trim() || null)
+    .catch(() => null);
 }
 
 async function prefetchVersionId(cwd, repo = {}) {
@@ -1472,7 +1462,9 @@ async function executeEmbeddedAtlasV2Tool({
     const payloadWithMeta = envelope?.meta && data && typeof data === "object" && !Array.isArray(data)
       ? { ...data, _meta: envelope.meta }
       : data;
-    const output = JSON.stringify(payloadWithMeta, null, 2);
+    // Compact on purpose: pretty-printing inflated every agent-facing tool
+    // result by double-digit percent for zero information (2026-07 A/B).
+    const output = JSON.stringify(payloadWithMeta);
     const responseTelemetry = extractAtlasResponseTelemetry(output);
     recordAtlasToolObservation({
       action,

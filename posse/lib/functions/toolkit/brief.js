@@ -1,11 +1,11 @@
 import fs from "fs";
 import path from "path";
-import { execFileSync } from "child_process";
 import { TOOL_BRIEF_DEFAULT_EXTENSIONS } from "../../catalog/files.js";
 import { createWorkspaceSkipDirs } from "../../domains/runtime/functions/workspace-skip.js";
 import { isSensitiveEnvFileOrTargetPath } from "../../domains/runtime/functions/sensitive-paths.js";
 import { getObservationContext } from "../../domains/observability/functions/observations.js";
 import { contextDir, wiScopeId } from "../../domains/artifacts/functions/index.js";
+import { gitExec } from "../../domains/git/functions/utils.js";
 
 export { TOOL_PULL_BRIEF } from "../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 
@@ -120,19 +120,23 @@ function resolveRelativeImportToPath(importerRelPath, specifier, includeExt = DE
   return candidates;
 }
 
-function gatherRecentGitPaths(cwd, maxCommits = 10, gitLogImpl = execFileSync) {
+function gatherRecentGitPaths(cwd, maxCommits = 10, gitLogImpl = null) {
+  const args = [
+    "log",
+    "--name-only",
+    "--pretty=format:",
+    `-n`,
+    String(maxCommits),
+  ];
   try {
-    const output = gitLogImpl("git", [
-      "log",
-      "--name-only",
-      "--pretty=format:",
-      `-n`,
-      String(maxCommits),
-    ], {
+    const output = typeof gitLogImpl === "function" ? gitLogImpl(args, {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 4000,
+      maxBuffer: 1024 * 1024,
+    }) : gitExec(args, cwd, {
+      timeoutMs: 4000,
       maxBuffer: 1024 * 1024,
     });
     const lines = String(output || "")
@@ -197,7 +201,7 @@ function createBriefEntry({
   };
 }
 
-export function createPullBriefExecutor(safePathImpl, { skipDirs = DEFAULT_SKIP_DIRS, gitLogImpl = execFileSync } = {}) {
+export function createPullBriefExecutor(safePathImpl, { skipDirs = DEFAULT_SKIP_DIRS, gitLogImpl = null } = {}) {
   if (typeof safePathImpl !== "function") {
     throw new Error("createPullBriefExecutor requires safePath.");
   }

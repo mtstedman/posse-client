@@ -1,8 +1,8 @@
 import fs from "fs";
 import path from "path";
-import { execFile, spawnSync } from "child_process";
 import { getAtlasIntegrationConfig } from "./config.js";
 import { deriveRepoId, isPathWithin, normalizeAbsolutePath, pathsEqual } from "./shared.js";
+import { gitExec, gitExecAsync } from "../../../git/functions/utils.js";
 
 export const _gitRepoInfoCache = new Map();
 
@@ -13,23 +13,23 @@ export function resolveGitRepoInfoFromCwd(cwd) {
   let result = null;
   try {
     if (fs.existsSync(normalized)) {
-      const commonOut = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
-        cwd: normalized,
-        encoding: "utf-8",
-        timeout: 5000,
-        windowsHide: true,
-      });
-      const gitDirOut = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-dir"], {
-        cwd: normalized,
-        encoding: "utf-8",
-        timeout: 5000,
-        windowsHide: true,
-      });
+      let commonStdout = "";
+      let gitDirStdout = "";
+      let commonOk = false;
+      let gitDirOk = false;
+      try {
+        commonStdout = gitExec(["rev-parse", "--path-format=absolute", "--git-common-dir"], normalized, { timeoutMs: 5000 });
+        commonOk = true;
+      } catch { /* not a git repo */ }
+      try {
+        gitDirStdout = gitExec(["rev-parse", "--path-format=absolute", "--git-dir"], normalized, { timeoutMs: 5000 });
+        gitDirOk = true;
+      } catch { /* not a git repo */ }
       result = gitRepoInfoFromRevParse(
-        commonOut.stdout,
-        gitDirOut.stdout,
-        commonOut.status === 0,
-        gitDirOut.status === 0,
+        commonStdout,
+        gitDirStdout,
+        commonOk,
+        gitDirOk,
       );
     }
   } catch {
@@ -60,22 +60,9 @@ function gitRepoInfoFromRevParse(commonStdout, gitDirStdout, commonOk, gitDirOk)
 }
 
 function gitRevParseAsync(args, cwd, { signal = null } = {}) {
-  return new Promise((resolve) => {
-    try {
-      const options = {
-        cwd,
-        encoding: "utf-8",
-        timeout: 5000,
-        windowsHide: true,
-      };
-      if (signal) options.signal = signal;
-      execFile("git", ["rev-parse", ...args], options, (error, stdout) => {
-        resolve({ ok: !error, stdout: String(stdout || "") });
-      });
-    } catch {
-      resolve({ ok: false, stdout: "" });
-    }
-  });
+  return gitExecAsync(["rev-parse", ...args], cwd, { signal, timeoutMs: 5000 })
+    .then((stdout) => ({ ok: true, stdout: String(stdout || "") }))
+    .catch(() => ({ ok: false, stdout: "" }));
 }
 
 export async function resolveGitRepoInfoFromCwdAsync(cwd, { signal = null } = {}) {

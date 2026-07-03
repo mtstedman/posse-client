@@ -1,6 +1,5 @@
 import fs from "fs";
 import path from "path";
-import { execFileSync, execSync } from "child_process";
 import { C } from "../../../shared/format/functions/colors.js";
 import {
   getAgentCallsByWorkItem,
@@ -12,6 +11,7 @@ import {
 } from "../../queue/functions/index.js";
 import { getObservationsByJob } from "../../observability/functions/observations.js";
 import { dirSizeBytes, worktreeRoot } from "../../git/functions/worktree.js";
+import { gitExec } from "../../git/functions/utils.js";
 import { ACTIVE_LEASE_STATUSES, COMPLETED_OUTCOME_JOB_STATUSES } from "../../../catalog/job.js";
 
 const AUDIT_RECENT_JOB_STATUSES = new Set([
@@ -73,18 +73,14 @@ function runWorktreeAudit({ projectDir, targetBranch }) {
     let mergeInProgress = false;
     let aheadBehind = null;
     try {
-      branch = execSync("git branch --show-current", { cwd: wtPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim() || "?";
-      dirty = execSync("git status --porcelain", { cwd: wtPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim().length > 0;
-      mergeInProgress = execSync("git rev-parse --verify MERGE_HEAD", { cwd: wtPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim().length > 0;
+      branch = gitExec(["branch", "--show-current"], wtPath).trim() || "?";
+      dirty = gitExec(["status", "--porcelain"], wtPath).trim().length > 0;
+      mergeInProgress = gitExec(["rev-parse", "--verify", "MERGE_HEAD"], wtPath).trim().length > 0;
     } catch {
       // best effort
     }
     try {
-      const counts = execFileSync("git", ["rev-list", "--left-right", "--count", `${targetBranch}...HEAD`], {
-        cwd: wtPath,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      }).trim();
+      const counts = gitExec(["rev-list", "--left-right", "--count", `${targetBranch}...HEAD`], wtPath).trim();
       aheadBehind = counts.replace(/\s+/, "/");
     } catch {
       // best effort

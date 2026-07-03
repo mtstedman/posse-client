@@ -288,9 +288,11 @@ export class EmbeddingIndex {
       // Readers require an existing sidecar (the writer creates it); a
       // missing store surfaces as open_failed → semantic degrades to FTS.
       this.#db = new Database(sidecarPath, { readonly: true, fileMustExist: true });
+      this.#db.pragma("busy_timeout = 5000");
       this.#assertMeta();
     } else {
       this.#db = new Database(sidecarPath);
+      this.#db.pragma("busy_timeout = 5000");
       this.#db.pragma("journal_mode = WAL");
       this.#db["exec"](SIDECAR_SCHEMA);
       this.#assertMeta();

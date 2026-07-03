@@ -704,7 +704,7 @@ export class AdminSettingsController {
     return [
       row("project_db_enabled", cfg.enabled ? "true" : "false", "Enable the opt-in project_db_query agent tool for this repo."),
       row("project_db_type", cfg.dbType || "", "Project database engine: sqlite, postgres, or mysql."),
-      row("project_db_permissions", (cfg.permissions || []).join(","), "Granted SQL ops: read, write, insert, delete (DDL never allowed)."),
+      row("project_db_permissions", (cfg.permissions || []).join(","), "Granted SQL ops: read, write, insert, delete, create, alter (DROP/TRUNCATE never allowed). Read-phase roles only ever use the read grant."),
       row("project_db_database", cfg.database || "", "sqlite: file path (relative to repo). postgres/mysql: database name."),
       row("project_db_host", cfg.host || "", "postgres/mysql host (ignored for sqlite)."),
       row("project_db_port", cfg.port != null ? String(cfg.port) : "", "postgres/mysql port (ignored for sqlite)."),

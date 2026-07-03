@@ -248,6 +248,7 @@ export async function callProvider(promptText, {
   role = "planner",
   roleMode = null,
   allowWrite = false,
+  projectDbWrite = false, // db-mode dev: project_db_query gets the write lane while file tools stay read-only
   modelTier = "standard",
   modelName = null,    // explicit per-job model from delegation; beats provider-wide default
   reasoningEffort = "medium",
@@ -393,6 +394,8 @@ export async function callProvider(promptText, {
       deleteFiles,
       createRoots,
       readRoots,
+      allowWrite,
+      projectDbWrite,
       needsImageGeneration,
       disableSystemTools: disableSystemToolsResolved,
       jobId,
@@ -456,6 +459,7 @@ export async function callProvider(promptText, {
       role,
       roleMode,
       allowWrite,
+      projectDbWrite,
       scopedFiles,
       createFiles,
       createRoots,
@@ -464,6 +468,7 @@ export async function callProvider(promptText, {
       needsImageGeneration,
       platform: process.platform,
       includeBaseTools: !(deterministicReadMcp.active || disableSystemToolsResolved),
+      projectDir: providerPaths.cwd,
     });
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);

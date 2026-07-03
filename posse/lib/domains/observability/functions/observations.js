@@ -1007,6 +1007,54 @@ function _summarizeToolUse(toolUse, cwd = null) {
   return null;
 }
 
+// Result-side stats for native read tools, merged into the completion
+// observation via extraDetail. The request-side offset/limit alone cannot
+// distinguish a full read of a small file from a default-window read of a
+// large one; pricing "ATLAS vs raw reads" needs what actually came back.
+const READ_RESULT_STATS_TYPES = new Set(["tool.read", "tool.chain_read"]);
+
+export function nativeReadResultStats(tool, resultText) {
+  try {
+    const spec = TOOL_CATALOG[_normalizeCatalogToolName(tool)]?.observation;
+    if (!spec || !READ_RESULT_STATS_TYPES.has(spec.type)) return null;
+    if (typeof resultText !== "string" || resultText === "" || /^Error:/i.test(resultText)) return null;
+    const structured = _structuredReadStats(resultText);
+    if (structured) return structured;
+    // Plain numbered-lines format: execReadFile appends "... (N more lines)"
+    // when the window ends before the file does.
+    const marker = /\n\.\.\. \((\d+) more lines\)$/.exec(resultText);
+    let lines = 1;
+    for (let i = 0; i < resultText.length; i += 1) {
+      if (resultText.charCodeAt(i) === 10) lines += 1;
+    }
+    return {
+      result_chars: resultText.length,
+      result_lines: marker ? lines - 1 : lines,
+      truncated: !!marker,
+      ...(marker ? { remaining_lines: Number(marker[1]) } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function _structuredReadStats(text) {
+  if (!text.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || parsed.ok !== true) return null;
+    if (typeof parsed.returnedLines !== "number" && typeof parsed.totalLines !== "number") return null;
+    return {
+      result_chars: text.length,
+      ...(typeof parsed.returnedLines === "number" ? { result_lines: parsed.returnedLines } : {}),
+      truncated: parsed.truncated === true,
+      ...(typeof parsed.totalLines === "number" ? { total_lines: parsed.totalLines } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function recordToolInvocation({
   tool = null,
   input = null,

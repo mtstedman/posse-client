@@ -3,6 +3,7 @@ import {
   logEvent,
   setJobError,
 } from "../../../queue/functions/index.js";
+import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
@@ -30,6 +31,10 @@ export function shouldShortCircuitNoWriteAssessment({
 } = {}) {
   if (!(job?.job_type === "dev" || job?.job_type === "fix")) return false;
   if (hasFileChanges || satisfiedNoop || verifiedNoChange) return false;
+  // DB-only jobs never produce file changes; their work lives in the project
+  // database and the assessor verifies it via read-lane project_db_query, so
+  // a zero-diff outcome must still be assessed rather than failed as a no-op.
+  if (parseJobPayload(job)?.task_mode === "db") return false;
   return pendingFileRequestCount(pendingFileRequests) === 0;
 }
 

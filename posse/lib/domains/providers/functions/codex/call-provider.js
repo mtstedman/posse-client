@@ -39,6 +39,7 @@ export async function callProvider(promptText, {
   role = "planner",
   roleMode = null,
   allowWrite = false,
+  projectDbWrite = false,
   modelTier = "standard",
   modelName = null,
   reasoningEffort = "medium",
@@ -147,6 +148,8 @@ export async function callProvider(promptText, {
       deleteFiles,
       createRoots,
       readRoots,
+      allowWrite,
+      projectDbWrite,
       needsImageGeneration,
       disableSystemTools,
       jobId,
@@ -223,6 +226,7 @@ export async function callProvider(promptText, {
       role,
       roleMode,
       allowWrite,
+      projectDbWrite,
       scopedFiles,
       createFiles,
       createRoots,
@@ -232,6 +236,7 @@ export async function callProvider(promptText, {
       fallbackReads,
       platform: process.platform,
       includeBaseTools: !(deterministicReadMcp.active || disableSystemTools),
+      projectDir: workingDir,
     });
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);

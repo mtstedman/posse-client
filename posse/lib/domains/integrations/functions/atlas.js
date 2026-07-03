@@ -7,7 +7,6 @@
 
 import fs from "fs";
 import path from "path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Worker as NodeWorker } from "node:worker_threads";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -18,7 +17,7 @@ import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View as AtlasView } from "../../atlas/classes/v2/View.js";
 import { Warmer } from "../../atlas/classes/v2/Warmer.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
-import { gitCurrentHashAsync } from "../../git/functions/utils.js";
+import { gitCurrentHashAsync, gitExec } from "../../git/functions/utils.js";
 import { ledgerBranchForWi } from "../../atlas/functions/v2/runtime-paths.js";
 import { describeScipStagingState, ensureScipStaged } from "../../atlas/functions/v2/scip/stager.js";
 import { listScipFiles } from "../../atlas/functions/v2/scip/ingester.js";
@@ -191,7 +190,7 @@ function stripManagedHookBlock(content = "", beginMarker = "", endMarker = "") {
   return [before, after].filter(Boolean).join("\n\n");
 }
 
-function resolveAtlasGitHooksDir(cwd = null, execImpl = spawnSync) {
+function resolveAtlasGitHooksDir(cwd = null, execImpl = null) {
   const repoCwd = path.resolve(cwd || process.cwd());
   const gitPath = path.join(repoCwd, ".git");
   try {
@@ -202,14 +201,22 @@ function resolveAtlasGitHooksDir(cwd = null, execImpl = spawnSync) {
   }
 
   try {
-    const out = /** @type {any} */ (execImpl("git", ["rev-parse", "--git-path", "hooks"], {
-      cwd: repoCwd,
-      encoding: "utf8",
-      timeout: 10000,
-      windowsHide: true,
-    }) || {});
-    if (Number.isInteger(out.status) && out.status !== 0) return null;
-    const raw = String(out.stdout || "").trim();
+    let raw = "";
+    if (typeof execImpl === "function") {
+      const out = /** @type {any} */ (execImpl(["rev-parse", "--git-path", "hooks"], {
+        cwd: repoCwd,
+        encoding: "utf8",
+        timeout: 10000,
+        windowsHide: true,
+      }) || {});
+      if (Number.isInteger(out.status) && out.status !== 0) return null;
+      raw = String(out.stdout || out || "").trim();
+    } else {
+      raw = String(gitExec(["rev-parse", "--git-path", "hooks"], repoCwd, {
+        timeoutMs: 10000,
+        maxBuffer: 1024 * 128,
+      }) || "").trim();
+    }
     return raw ? path.resolve(repoCwd, raw) : null;
   } catch {
     return null;
@@ -1800,7 +1807,7 @@ export async function reconcileAtlasDriftIfIdleAsync(opts = {}) {
 export function ensureAtlasCommitReindexHook({
   cwd = null,
   config = getAtlasIntegrationConfig(),
-  execImpl = spawnSync,
+  execImpl = null,
 } = {}) {
   const repoCwd = path.resolve(cwd || process.cwd());
   const hooksDir = resolveAtlasGitHooksDir(repoCwd, execImpl);

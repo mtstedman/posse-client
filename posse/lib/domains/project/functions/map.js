@@ -1,14 +1,12 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { execFile, spawnSync } from "child_process";
-import { promisify } from "util";
+import { gitCurrentHash, gitCurrentHashAsync, gitExec, gitExecAsync } from "../../git/functions/utils.js";
 
 const CACHE_RELATIVE_PATH = path.join(".posse", "project-map.json");
 const SCAN_ROOTS = Object.freeze(["lib", "test", "prompts"]);
 const HOOK_BEGIN = "# >>> POSSE PROJECT MAP (managed) >>>";
 const HOOK_END = "# <<< POSSE PROJECT MAP (managed) <<<";
-const execFileAsync = promisify(execFile);
 
 function toPosix(value) {
   return String(value || "").replace(/\\/g, "/");
@@ -26,18 +24,22 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
 
-function currentGitHead(projectDir, execImpl = spawnSync) {
+function currentGitHead(projectDir, execImpl = null) {
+  const cwd = normalizeProjectDir(projectDir);
   try {
-    const out = execImpl("git", ["rev-parse", "HEAD"], {
-      cwd: normalizeProjectDir(projectDir),
-      encoding: "utf8",
-      timeout: 5000,
-      windowsHide: true,
-    }) || {};
-    if (out.status === 0) {
-      const sha = String(out.stdout || "").trim();
+    if (typeof execImpl === "function") {
+      const out = execImpl(["rev-parse", "HEAD"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 5000,
+        windowsHide: true,
+      }) || {};
+      if (Number.isInteger(out.status) && out.status !== 0) return null;
+      const sha = String(out.stdout || out || "").trim();
       return sha || null;
     }
+    const sha = String(gitCurrentHash(cwd) || "").trim();
+    return sha || null;
   } catch {
     // Non-git directories are valid Posse targets; the cache just has no SHA.
   }
@@ -45,14 +47,9 @@ function currentGitHead(projectDir, execImpl = spawnSync) {
 }
 
 async function currentGitHeadAsync(projectDir) {
+  const cwd = normalizeProjectDir(projectDir);
   try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
-      cwd: normalizeProjectDir(projectDir),
-      encoding: "utf8",
-      timeout: 5000,
-      windowsHide: true,
-    });
-    const sha = String(stdout || "").trim();
+    const sha = String(await gitCurrentHashAsync(cwd, { timeoutMs: 5000 }) || "").trim();
     return sha || null;
   } catch {
     return null;
@@ -223,7 +220,7 @@ async function writeJsonAtomicAsync(file, value) {
   }
 }
 
-export function generateProjectMap(projectDir, { execImpl = spawnSync } = {}) {
+export function generateProjectMap(projectDir, { execImpl = null } = {}) {
   const root = normalizeProjectDir(projectDir);
   const scanned = {};
   for (const relRoot of SCAN_ROOTS) {
@@ -267,7 +264,7 @@ export async function getCachedProjectMapAsync(projectDir) {
   return await readCacheAsync(projectDir);
 }
 
-export function ensureProjectMap(projectDir, { force = false, execImpl = spawnSync } = {}) {
+export function ensureProjectMap(projectDir, { force = false, execImpl = null } = {}) {
   const root = normalizeProjectDir(projectDir);
   const currentHead = currentGitHead(root, execImpl);
   const cached = force ? null : readCache(root);
@@ -291,17 +288,25 @@ export async function ensureProjectMapAsync(projectDir, { force = false } = {}) 
   return map;
 }
 
-function resolveGitHooksDir(cwd, execImpl = spawnSync) {
+function resolveGitHooksDir(cwd, execImpl = null) {
   const resolvedCwd = normalizeProjectDir(cwd);
   try {
-    const out = execImpl("git", ["rev-parse", "--git-path", "hooks"], {
-      cwd: resolvedCwd,
-      encoding: "utf8",
-      timeout: 10000,
-      windowsHide: true,
-    }) || {};
-    if (Number.isInteger(out.status) && out.status !== 0) return null;
-    const raw = String(out.stdout || "").trim();
+    let raw = "";
+    if (typeof execImpl === "function") {
+      const out = execImpl(["rev-parse", "--git-path", "hooks"], {
+        cwd: resolvedCwd,
+        encoding: "utf8",
+        timeout: 10000,
+        windowsHide: true,
+      }) || {};
+      if (Number.isInteger(out.status) && out.status !== 0) return null;
+      raw = String(out.stdout || out || "").trim();
+    } else {
+      raw = String(gitExec(["rev-parse", "--git-path", "hooks"], resolvedCwd, {
+        timeoutMs: 10000,
+        maxBuffer: 1024 * 128,
+      }) || "").trim();
+    }
     return raw ? path.resolve(resolvedCwd, raw) : null;
   } catch {
     return null;
@@ -311,13 +316,10 @@ function resolveGitHooksDir(cwd, execImpl = spawnSync) {
 async function resolveGitHooksDirAsync(cwd) {
   const resolvedCwd = normalizeProjectDir(cwd);
   try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "--git-path", "hooks"], {
-      cwd: resolvedCwd,
-      encoding: "utf8",
-      timeout: 10000,
-      windowsHide: true,
-    });
-    const raw = String(stdout || "").trim();
+    const raw = String(await gitExecAsync(["rev-parse", "--git-path", "hooks"], resolvedCwd, {
+      timeoutMs: 10000,
+      maxBuffer: 1024 * 128,
+    }) || "").trim();
     return raw ? path.resolve(resolvedCwd, raw) : null;
   } catch {
     return null;
@@ -384,7 +386,7 @@ function buildHookBlock(repoCwd) {
 
 export function ensureProjectMapRebuildHook({
   cwd = null,
-  execImpl = spawnSync,
+  execImpl = null,
   resolveHooksDirImpl = resolveGitHooksDir,
 } = {}) {
   const repoCwd = normalizeProjectDir(cwd);

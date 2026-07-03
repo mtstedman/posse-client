@@ -5,7 +5,7 @@ import { resolvePathWithin } from "../../../../shared/scope/functions/path.js";
 import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { gitCommitAllAsync } from "../../../git/functions/commit-scope.js";
 import { gitHasChangesAsync } from "../../../git/functions/utils.js";
-import { resetDirtyWorktreeFallbackAsync, snapshotAndResetDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
+import { snapshotAndResetDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import {
@@ -356,8 +356,18 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
                 branchName: getWorkItem(job.work_item_id)?.branch_name || null,
                 wiId: job.work_item_id,
               });
-            } catch {
-              try { await resetDirtyWorktreeFallbackAsync(job._worktreePath, worker.projectDir); } catch { /* ignore */ }
+            } catch (resetErr) {
+              // Snapshot refused or failed — leave the dirt for setup
+              // recovery rather than wiping the only copy.
+              logEvent({
+                work_item_id: job.work_item_id,
+                job_id: job.id,
+                attempt_id: attempt.attempt.id,
+                event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+                actor_type: EVENT_ACTORS.WORKER,
+                message: `Left promote-failure dirty state in place; snapshot/reset failed: ${resetErr?.message || String(resetErr)}`,
+                event_json: JSON.stringify({ reason: `promote-failed-job-${job.id}` }),
+              });
             }
           }
         }

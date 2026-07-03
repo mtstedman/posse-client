@@ -18,11 +18,41 @@ import {
 import { normalizeResearcherFilePriorities } from "../../handoff/functions/index.js";
 import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
 import { isSensitiveEnvFilePath, safePath } from "../../../functions/toolkit/index.js";
+import { readProjectDbConfig } from "../../../functions/toolkit/project-db/config.js";
 
 export function emit(worker, jobId, message) {
   if (typeof worker?.emit === "function") {
     worker.emit(jobId, message);
   }
+}
+
+// Conditional planner routing lines for the project database. Empty when the
+// repo has no enabled project-db config — the block must never add noise to
+// repos that haven't opted in. With a write-capable grant the planner is told
+// how to emit db-only tasks (task_mode:"db", empty file scope); with a
+// read-only grant it is told the tool exists for inspection but db tasks are
+// not plannable.
+export function buildProjectDbRoutingLines(projectDir) {
+  let config = null;
+  try {
+    config = readProjectDbConfig({ projectDir });
+  } catch {
+    return [];
+  }
+  if (!config?.enabled || !config.dbType || config.permissions.length === 0) return [];
+  const grants = config.permissions.join(", ");
+  const label = `${config.dbType}${config.database ? ` "${config.database}"` : ""}`;
+  const writeCapable = config.permissions.some((perm) => perm !== "read");
+  if (!writeCapable) {
+    return [
+      `- Project database: ${label} is queryable read-only via project_db_query (grants: ${grants}). Use it to inspect data while planning, but do NOT emit task_mode "db" tasks — no write grant is configured.`,
+    ];
+  }
+  return [
+    `- Project database: ${label} is writable via project_db_query (grants: ${grants}).`,
+    "- For work whose ENTIRE change is database rows/schema (within those grants), emit ONE dev task with task_mode \"db\" and EMPTY file scope (no files_to_modify/files_to_create/files_to_delete/create_roots). The dev's only write surface is project_db_query; state the intended statements/outcomes in task_spec and make success_criteria verifiable with SELECT.",
+    "- db tasks cannot touch repo files. If work needs both repo edits and database changes, plan separate tasks (code task + db task).",
+  ];
 }
 
 export function normalizePlannerRoleMode(value) {

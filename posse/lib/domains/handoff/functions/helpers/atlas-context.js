@@ -1742,28 +1742,28 @@ function renderRequiredRetrievalOrderLine(packet) {
   const prefetchStatus = String(packet?.atlas?.prefetchStatus || "").toLowerCase();
   if (!gateEnabled) {
     if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-      return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use prefetch as the first code map, then make only targeted additional ${label} calls for specific evidence gaps. Prefer symbol/slice/skeleton/window tools over repeated broad overview or memory calls. Use standard tools when ${label} is unavailable, insufficient, you have mutated files and need exact current worktree state, or git/test/build/shell operations are required.`;
+      return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use prefetch as the first code map, then make only targeted additional ${label} calls for specific evidence gaps. Prefer symbol/slice/skeleton/window tools over repeated broad overview or memory calls. If ${label} evidence already answers the question, do not re-read the source natively. Use standard tools for a named gap: ${label} unavailable or still insufficient after a focused attempt, non-indexed config/data/docs where the raw text is the object, files you mutated needing exact current worktree state, or git/test/build/shell operations.`;
     }
     if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
-      return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Try a task-relevant ${label} retrieval first when possible, then use standard tools if ${label} cannot provide sufficient information.`;
+      return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Try a task-relevant ${label} retrieval first when possible, then use standard tools for whatever ${label} could not answer, stating the gap.`;
     }
     const firstTools = selectFirstRetrievalTools(packet?.atlas?.tools, packet?.atlas);
     const examples = firstTools.length > 0
       ? ` (start with ${firstTools.join(" / ")})`
       : "";
-    return `${label} RETRIEVAL ORDER: use ${label} tools when possible for repository discovery, codebase understanding, and line-level inspection${examples}. Treat ${label} output as a map of concepts, relationships, content, and likely behavior, then read only the few decisive files needed to verify exact behavior. Use standard tools when ${label} is unavailable, insufficient, you have mutated files and need exact current worktree state, git/test/build/shell operations are required, or ${label} does not expose the needed operation.`;
+    return `${label} RETRIEVAL ORDER: use ${label} tools when possible for repository discovery, codebase understanding, and line-level inspection${examples}. Treat ${label} output as a map of concepts, relationships, content, and likely behavior, then read only the few decisive files needed to verify exact behavior — if ${label} evidence is already sufficient, skip the native read. Use standard tools when ${label} is unavailable, still insufficient after a focused attempt, the target is non-indexed config/data/docs, you have mutated files and need exact current worktree state, git/test/build/shell operations are required, or ${label} does not expose the needed operation.`;
   }
   if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-    return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use prefetch as the first code map; it does not count as active ${label} use or unlock fallback. Make only targeted additional ${label} calls for remaining evidence or gate unlocks, and never call ${label} just to satisfy usage.`;
+    return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context (prefetch does not count as active ${label} use). ${label} is the inspection path: answer from prefetch plus targeted ${label} evidence calls, and stop when the evidence is sufficient. Never call ${label} merely to make native tools available. Native read/search/list tools are the exception, not the next step — use them only for a named evidence gap (${label} stale/empty/conflicting after a focused attempt, non-indexed config/data/docs where the raw text is the object, files you mutated needing exact worktree state, or exact surrounding text ${label} could not provide) and state that gap when you do.`;
   }
   if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
-    return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Make focused ${label} retrieval calls for the exact task or scoped files before broad native reads; stop once the needed context or fallback unlock is obtained.`;
+    return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Make focused ${label} retrieval calls for the exact task or scoped files; if a focused attempt still cannot answer, use native tools for that named gap and state what ${label} left unanswered.`;
   }
   const firstTools = selectFirstRetrievalTools(packet?.atlas?.tools, packet?.atlas);
   const examples = firstTools.length > 0
     ? ` (start with ${firstTools.join(" / ")})`
     : "";
-  return `REQUIRED RETRIEVAL ORDER: use task-relevant ${label} retrieval calls${examples} to build the codebase map and unlock fallback before standard list/search/read tools. Prefetch and internal bookkeeping calls do not count. Use standard tools only when ${label} is unavailable, fails to answer after the required real retrieval attempts, you have mutated files and need exact current worktree state, git/test/build/shell operations are required, or ${label} does not expose the needed operation.`;
+  return `REQUIRED RETRIEVAL ORDER: ${label} is the inspection path${examples} — discover with task/symbol/tree retrieval, get code evidence with card/skeleton/lens/window, and stop when the answer or edit is safely evidenced. Prefetch and internal bookkeeping calls do not count as retrieval. Never call ${label} merely to make native tools available, and if ${label} evidence is sufficient do not re-read the source natively. Native list/search/read tools are for named evidence gaps only: ${label} unavailable or stale/empty/conflicting after a focused attempt, non-indexed config/data/docs where the raw text is the object, files you mutated needing exact current worktree state, exact surrounding text ${label} could not provide, or operations ${label} does not expose (git/test/build/shell). When you use one, state the precise gap and the ${label} result that was insufficient.`;
 }
 
 function renderAtlasContextSection(packet) {
@@ -2086,7 +2086,7 @@ function renderAtlasResearchContextSection(packet, { trim = 0 } = {}) {
 
   if (packet.atlas?.gateEnabled) {
     const label = atlasBackendLabel(packet.atlas);
-    lines.push(`Use prefetch as the first codebase map, then make targeted real ${label} retrieval calls only for remaining code-evidence gaps or native fallback unlocks; prefetch does not count toward gate unlocks.`);
+    lines.push(`Use prefetch as the first codebase map, then make targeted ${label} retrieval calls only for remaining code-evidence gaps; never call ${label} merely to make native tools available (prefetch does not count as active retrieval).`);
   } else {
     const label = atlasBackendLabel(packet.atlas);
     lines.push(`Use prefetch as the first codebase map. Make additional task-relevant ${label} calls only for specific code-evidence gaps; use native file/search tools when ${label} cannot provide sufficient information.`);

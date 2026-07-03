@@ -97,7 +97,6 @@ import {
 import {
   gcWorktreesAsync as gcWorktreesAsyncFromModule,
   preserveDirtyWorktreeSnapshot as preserveDirtyWorktreeSnapshotFromModule,
-  resetDirtyWorktreeFallbackAsync as resetDirtyWorktreeFallbackAsyncFromModule,
   snapshotAndResetDirtyWorktree as snapshotAndResetDirtyWorktreeFromModule,
   snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule,
   worktreeRoot as worktreeRootFromModule,

@@ -23,8 +23,9 @@ export const PROJECT_DB_TYPES = Object.freeze(["sqlite", "postgres", "mysql"]);
 
 // Granular permissions the operator can grant, mapped to the leading SQL verb
 // the tool will allow. READ also implies the read-only inspection verbs
-// (PRAGMA/EXPLAIN/SHOW/DESCRIBE) — see permissions.js.
-export const PROJECT_DB_PERMISSIONS = Object.freeze(["read", "write", "insert", "delete"]);
+// (PRAGMA/EXPLAIN/SHOW/DESCRIBE) — see permissions.js. CREATE/ALTER are the
+// only grantable DDL; DROP/TRUNCATE and the rest are always blocked in permissions.js.
+export const PROJECT_DB_PERMISSIONS = Object.freeze(["read", "write", "insert", "delete", "create", "alter"]);
 
 export const PROJECT_DB_CONFIG_TABLE = "project_db_config";
 
@@ -144,9 +145,26 @@ export function readProjectDbConfig({ projectDir = null } = {}) {
   };
 }
 
-export function projectDbEnabled({ projectDir = null } = {}) {
+/**
+ * Cap a granted permission set to a job capability lane. Read-lane jobs
+ * (researcher/planner, or any job running without write permission) only ever
+ * keep the `read` grant; write-lane jobs keep the full operator grant.
+ */
+export function capProjectDbPermissions(permissions = [], capability = "write") {
+  const perms = normalizePermissions(permissions);
+  return capability === "read" ? perms.filter((perm) => perm === "read") : perms;
+}
+
+/**
+ * The permissions a job with the given capability lane may actually use:
+ * empty unless the repo's admin config is enabled AND has a configured engine,
+ * then the operator grant capped to the lane. An empty result means the tool
+ * must not be surfaced to that job.
+ */
+export function projectDbEffectivePermissions({ projectDir = null, capability = "write" } = {}) {
   const conn = readProjectDbConnection({ projectDir });
-  return conn.enabled && !!conn.dbType && conn.permissions.length > 0;
+  if (!conn.enabled || !conn.dbType) return [];
+  return capProjectDbPermissions(conn.permissions, capability);
 }
 
 /**

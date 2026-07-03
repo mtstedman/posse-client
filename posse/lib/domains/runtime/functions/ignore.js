@@ -1,12 +1,10 @@
 import fs from "fs";
 import path from "path";
-import { execFile, execFileSync } from "child_process";
-import { promisify } from "util";
 import { isInsideRoot } from "./fs-safety.js";
 import { getRuntimeRoot } from "./paths.js";
+import { gitExec, gitExecAsync } from "../../git/functions/utils.js";
 
 export const POSSE_RUNTIME_IGNORE_HEADER = "# Posse runtime (auto-added)";
-const execFileAsync = promisify(execFile);
 
 const RUNTIME_DB_GLOBS = [
   "*.db",
@@ -178,22 +176,11 @@ export async function ensurePosseRuntimeGitignoreAsync(projectDir, {
 }
 
 function gitOutput(args, cwd) {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf-8",
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 30_000,
-  }).trim();
+  return gitExec(args, cwd, { timeoutMs: 30_000 }).trim();
 }
 
 async function gitOutputAsync(args, cwd) {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd,
-    encoding: "utf-8",
-    timeout: 30_000,
-    windowsHide: true,
-  });
-  return String(stdout || "").trim();
+  return String(await gitExecAsync(args, cwd, { timeoutMs: 30_000 }) || "").trim();
 }
 
 export async function stagePosseRuntimeGitignoreForInitialCommit(projectDir, {

@@ -8,8 +8,8 @@
 import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
-import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
+import { gitExecBuffer } from "../../../../git/functions/utils.js";
 import { languageForPath } from "../parse/language-buckets.js";
 import { normalizeScipLanguages } from "./languages.js";
 
@@ -582,11 +582,11 @@ function filesetSpecForPlan(plan = {}) {
 function gitTreeFilesetEntries(repoRoot, ref, spec) {
   let buf;
   try {
-    buf = execFileSync("git", ["ls-tree", "-rz", "-r", "--full-tree", ref], {
-      cwd: repoRoot,
-      encoding: "buffer",
+    buf = gitExecBuffer(["ls-tree", "-rz", "-r", "--full-tree", ref], repoRoot, {
       maxBuffer: 64 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
+      // Full-tree listings on large repos legitimately run minutes; do not
+      // inherit the 30s gitExec default.
+      timeoutMs: 10 * 60_000,
     });
   } catch (err) {
     return { ok: false, entries: [], reason: err?.message || "git_ls_tree_failed" };
@@ -610,11 +610,9 @@ function gitTreeFilesetEntries(repoRoot, ref, spec) {
 function gitWorktreeFilesetEntries(repoRoot, spec) {
   let buf;
   try {
-    buf = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
-      cwd: repoRoot,
-      encoding: "buffer",
+    buf = gitExecBuffer(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], repoRoot, {
       maxBuffer: 64 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
+      timeoutMs: 10 * 60_000,
     });
   } catch (err) {
     return { ok: false, entries: [], reason: err?.message || "git_ls_files_failed" };
@@ -638,11 +636,9 @@ function gitWorktreeFilesetEntries(repoRoot, spec) {
 function gitWorktreeFilesetPathEntries(repoRoot, spec) {
   let buf;
   try {
-    buf = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
-      cwd: repoRoot,
-      encoding: "buffer",
+    buf = gitExecBuffer(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], repoRoot, {
       maxBuffer: 64 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
+      timeoutMs: 10 * 60_000,
     });
   } catch (err) {
     return { ok: false, entries: [], reason: err?.message || "git_ls_files_failed" };

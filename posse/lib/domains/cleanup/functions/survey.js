@@ -6,11 +6,11 @@
 
 import fs from "fs";
 import path from "path";
-import { execFileSync } from "child_process";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { listWorkItems } from "../../queue/functions/index.js";
 import { dirSizeBytes, worktreeRoot } from "../../git/functions/worktree.js";
+import { gitExec, gitExecSafe } from "../../git/functions/utils.js";
 
 const TERMINAL_WI_STATUS = new Set(TERMINAL_WORK_ITEM_STATUSES);
 
@@ -18,11 +18,7 @@ function git(argv, cwd) {
   if (!Array.isArray(argv)) {
     throw new TypeError(`survey.git requires an array of args, got ${typeof argv}`);
   }
-  try {
-    return execFileSync("git", argv, { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10000 }).trim();
-  } catch {
-    return "";
-  }
+  return gitExecSafe(argv, cwd, { timeoutMs: 10000 });
 }
 
 function gitStatus(argv, cwd) {
@@ -32,7 +28,7 @@ function gitStatus(argv, cwd) {
   try {
     return {
       ok: true,
-      stdout: execFileSync("git", argv, { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10000 }).trim(),
+      stdout: gitExec(argv, cwd, { timeoutMs: 10000 }).trim(),
       error: null,
     };
   } catch (err) {

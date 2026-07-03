@@ -12,7 +12,7 @@ const PROVIDER_ERROR_PATTERNS = [
   /API Error:\s*5\d\d/i,
   /api_error.*internal server error/i,
   /rate.?limit|429|too many requests/i,
-  /out of.*usage|usage.*reset|usage limit|usage cap|usage exhausted|over usage|quota exceeded|credit balance is too low/i,
+  /out of.*usage|usage.*reset|usage limit|usage cap|usage exhausted|over usage|quota exceeded|credit balance is too low|session limit|hit your.*limit/i,
   /configuration.*corrupted/i,
   /Failed to spawn claude/i,
   /claude exited null/i,

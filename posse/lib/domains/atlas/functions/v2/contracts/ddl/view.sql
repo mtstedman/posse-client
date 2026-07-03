@@ -294,18 +294,6 @@ CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_nodes_parent
 CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_nodes_kind
   ON atlas_tree_scope_nodes(kind);
 
-CREATE TABLE IF NOT EXISTS atlas_tree_scope_terms (
-  term        TEXT NOT NULL,
-  node_id     TEXT NOT NULL,
-  kind        TEXT NOT NULL,
-  direct      INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (term, node_id, direct),
-  FOREIGN KEY (node_id) REFERENCES atlas_tree_scope_nodes(node_id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_terms_term_kind
-  ON atlas_tree_scope_terms(term, kind, direct);
-
 CREATE TABLE IF NOT EXISTS atlas_tree_scope_term_stats (
   term                 TEXT PRIMARY KEY,
   direct_file_count    INTEGER NOT NULL DEFAULT 0,

@@ -268,6 +268,7 @@ export async function callProvider(promptText, {
   role = "planner",
   roleMode = null,
   allowWrite = false,
+  projectDbWrite = false,
   scopedFiles = null,   // files_to_modify
   createFiles = null,   // files_to_create
   createRoots = null,   // create_roots directories
@@ -369,6 +370,7 @@ export async function callProvider(promptText, {
     role,
     roleMode,
     allowWrite,
+    projectDbWrite,
     needsImageGeneration,
     scopedFiles,
     createFiles,
@@ -377,6 +379,7 @@ export async function callProvider(promptText, {
     deleteFiles,
     fallbackReads,
     platform: process.platform,
+    projectDir: workingDir,
   });
   executionContract = appendExecutionTools(executionContract, atlasAttachment.tools);
   const contractBlock = renderExecutionContractBlock(executionContract);
@@ -396,6 +399,9 @@ export async function callProvider(promptText, {
     deleteFiles: deleteFiles || [],
     createRoots: createRoots || [],
     readRoots: readRoots || [],
+    // db-mode capability override: project_db_query gets the write lane even
+    // though allowWrite is false (scope predicates ignore unknown keys).
+    projectDbWrite: !!projectDbWrite,
   };
   const scopePredicates = sharedBuildScopePredicates(workingDir, declaredScope);
 

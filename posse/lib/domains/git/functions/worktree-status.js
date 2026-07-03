@@ -6,10 +6,11 @@
 // out at merge time.
 
 import fs from "fs";
-import { execFileSync } from "child_process";
 import { Worker as NodeWorker } from "worker_threads";
 
 import { gitCommitAll } from "./commit-scope.js";
+import { gitExec } from "./utils.js";
+import { acquireWorktreeLock, gitStashLockPath } from "./worktree-locks.js";
 import { worktreePath as canonicalWorktreePath, findLegacyWorktreeForWi } from "./worktree.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { runHook } from "./hooks.js";
@@ -18,6 +19,7 @@ import { errorFromThreadPayload } from "../../../shared/concurrency/classes/Thre
 
 const PORCELAIN_TIMEOUT_MS = 5000;
 const MUTATING_TIMEOUT_MS = 15000;
+const STASH_PUSH_TIMEOUT_MS = 120000;
 
 function runWorktreeStatusTaskOffMainThread(task, args = {}) {
   return new Promise((resolve, reject) => {
@@ -76,9 +78,7 @@ function parsePorcelainLine(rawLine) {
 
 function gitFile(args, cwd, timeoutMs = PORCELAIN_TIMEOUT_MS) {
   try {
-    return execFileSync("git", ["-c", "core.quotePath=false", ...args], {
-      cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs,
-    });
+    return gitExec(["-c", "core.quotePath=false", ...args], cwd, { timeoutMs, trim: false });
   } catch {
     return "";
   }
@@ -252,9 +252,7 @@ export function computeWorktreeStatusAsync(args = {}) {
 }
 
 function runGitMutating(args, cwd) {
-  execFileSync("git", ["-c", "core.quotePath=false", ...args], {
-    cwd, stdio: ["pipe", "pipe", "pipe"], timeout: MUTATING_TIMEOUT_MS,
-  });
+  gitExec(["-c", "core.quotePath=false", ...args], cwd, { timeoutMs: MUTATING_TIMEOUT_MS });
 }
 
 function commitScopeFromReviewScope(scope = {}) {
@@ -316,11 +314,16 @@ export function commitInScopeChangesAsync(args = {}) {
   return runWorktreeStatusTaskOffMainThread("commitInScopeChanges", args);
 }
 
+// :(literal) throughout: these paths come from UI selections, and git pathspecs
+// glob after `--` — an untracked `app/[id]/x` otherwise matches (and lets the
+// checkout/clean legs revert or delete) a sibling like `app/i/x`. Verified live.
+function literalPathspec(p) {
+  return `:(literal)${p}`;
+}
+
 function isTracked(wtDir, p) {
   try {
-    execFileSync("git", ["ls-files", "--error-unmatch", "--", p], {
-      cwd: wtDir, stdio: ["pipe", "pipe", "pipe"], timeout: PORCELAIN_TIMEOUT_MS,
-    });
+    gitExec(["ls-files", "--error-unmatch", "--", literalPathspec(p)], wtDir, { timeoutMs: PORCELAIN_TIMEOUT_MS });
     return true;
   } catch {
     return false;
@@ -349,7 +352,7 @@ export function discardWorktreeFiles({ wtDir, paths }) {
   let didCheckout = false;
   if (untracked.length > 0) {
     try {
-      runGitMutating(["clean", "-fd", "--", ...untracked], wtDir);
+      runGitMutating(["clean", "-fd", "--", ...untracked.map(literalPathspec)], wtDir);
       didClean = true;
     } catch {
       // Paths may already be absent.
@@ -357,7 +360,7 @@ export function discardWorktreeFiles({ wtDir, paths }) {
   }
   if (tracked.length > 0) {
     try {
-      runGitMutating(["checkout", "HEAD", "--", ...tracked], wtDir);
+      runGitMutating(["checkout", "HEAD", "--", ...tracked.map(literalPathspec)], wtDir);
       didCheckout = true;
     } catch {
       // Tracked path with conflicting state — leave it alone rather than failing the whole batch.
@@ -375,12 +378,26 @@ export function discardWorktreeFilesAsync(args = {}) {
 
 export function stashTargetBranchChanges({ projectDir, message = "posse-review: pre-merge stash" }) {
   if (!projectDir) return { ok: false, message: "projectDir is required" };
+  // refs/stash is shared by every worktree in the repo; an unlocked push here
+  // can shift indices under a snapshot lane's list→drop and get the wrong
+  // entry dropped. Same lock discipline as the snapshot machinery.
+  const stashLock = acquireWorktreeLock(gitStashLockPath(projectDir, projectDir, { disabled: true }));
+  if (!stashLock.acquired) {
+    return { ok: false, message: "git stash skipped: another snapshot operation holds the stash lock; retry shortly" };
+  }
   try {
-    runGitMutating(["stash", "push", "-u", "-m", message], projectDir);
+    // Big repos overrun the default mutating timeout mid-push; a kill then
+    // strands the content in a stash the UI never reports (verified: git
+    // writes the stash ref before resetting the tree) and leaves a stale
+    // index.lock. Give the push the same budget as a git operation, not a UI
+    // action.
+    gitExec(["-c", "core.quotePath=false", "stash", "push", "-u", "-m", message], projectDir, { timeoutMs: STASH_PUSH_TIMEOUT_MS });
     return { ok: true, message: "Target branch stashed (recover with `git stash pop`)" };
   } catch (err) {
     const detail = String(err?.stderr || err?.message || err).split("\n")[0];
     return { ok: false, message: `git stash failed: ${detail}` };
+  } finally {
+    stashLock.release();
   }
 }
 

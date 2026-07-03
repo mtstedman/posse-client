@@ -28,7 +28,6 @@ import {
 import { refreshAndExtractInsights } from "./insights.js";
 import { gitHasChangesAsync } from "../../../git/functions/utils.js";
 import {
-  resetDirtyWorktreeFallbackAsync,
   snapshotAndResetDirtyWorktreeAsync,
   stashDirtyWorktreeAsync,
 } from "../../../git/functions/worktree.js";
@@ -65,12 +64,19 @@ async function stashInterruptedWork(job, wtPath, label, projectDir = null) {
       });
       if (stashed) flagStallResume(job.id);
       return stashed;
-    } catch {
-      try {
-        await resetDirtyWorktreeFallbackAsync(wtPath, mainCwd);
-      } catch {
-        // best effort cleanup
-      }
+    } catch (stashErr) {
+      // Stash failed (lock timeout, index.lock from the killed child) — the
+      // dirty tree is the only copy of the interrupted work. Leave it for the
+      // next attempt's setup recovery; never answer a failed capture with an
+      // unsnapshotted wipe.
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Left ${label} dirty state in place; stash failed: ${stashErr?.message || String(stashErr)}`,
+        event_json: JSON.stringify({ label }),
+      });
       return false;
     }
   } catch {
@@ -127,12 +133,17 @@ async function stashWorktreeForFailure(job, wtPath, projectDir) {
           });
         },
       });
-    } catch {
-      try {
-        await resetDirtyWorktreeFallbackAsync(wtPath, projectDir || wtPath);
-      } catch {
-        // ignore
-      }
+    } catch (resetErr) {
+      // Snapshot refused or failed — leave the dirt for the next attempt's
+      // setup recovery rather than wiping the only copy.
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Left failed-attempt dirty state in place; snapshot/reset failed: ${resetErr?.message || String(resetErr)}`,
+        event_json: JSON.stringify({ reason: `failed-job-${job.id}` }),
+      });
     }
   } catch {
     // ignore

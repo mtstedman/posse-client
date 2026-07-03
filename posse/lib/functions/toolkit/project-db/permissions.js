@@ -2,21 +2,26 @@
 //
 // Defense-in-depth on top of whatever the configured DB account itself permits:
 //   1. single-statement guard  — one statement per call, no stacked SQL
-//   2. verb allowlist          — only SELECT / INSERT / UPDATE / DELETE +
-//                                read-only inspection verbs; never DDL
+//   2. verb allowlist          — only SELECT / INSERT / UPDATE / DELETE /
+//                                CREATE / ALTER + read-only inspection verbs;
+//                                DROP/TRUNCATE and other DDL are never allowed
 //   3. permission gate         — the statement's verb must map to a permission
-//                                the operator granted (read/write/insert/delete)
+//                                the operator granted
+//                                (read/write/insert/delete/create/alter)
 //
 // The engine is *also* opened read-only when only `read` is granted (see
 // drivers.js), so a verb-parser miss still can't mutate a read-only grant.
 
 import { PROJECT_DB_PERMISSIONS } from "./config.js";
 
-// Leading verb -> required granted permission.
+// Leading verb -> required granted permission. CREATE/ALTER are the only
+// grantable DDL verbs; everything destructive (DROP/TRUNCATE) stays blocked.
 const WRITE_VERB_PERMISSION = Object.freeze({
   INSERT: "insert",
   UPDATE: "write",
   DELETE: "delete",
+  CREATE: "create",
+  ALTER: "alter",
 });
 
 // Read-only verbs all gated behind the `read` permission.
@@ -147,6 +152,12 @@ const DML_OP_SCANS = Object.freeze([
   { label: "INSERT", permission: "insert", pattern: /\bINSERT\b/i },
   { label: "UPDATE", permission: "write", pattern: /\bUPDATE\b/i },
   { label: "DELETE", permission: "delete", pattern: /\bDELETE\b/i },
+  // DDL scans skip read statements: DDL cannot ride a read verb (EXPLAIN
+  // ANALYZE and SELECT ... INTO are blocked outright, and CTEs cannot contain
+  // DDL), while scanning reads would false-positive legitimate inspection
+  // such as mysql's SHOW CREATE TABLE.
+  { label: "CREATE", permission: "create", pattern: /\bCREATE\b/i, skipReads: true },
+  { label: "ALTER", permission: "alter", pattern: /\bALTER\b/i, skipReads: true },
 ]);
 
 /**
@@ -163,7 +174,7 @@ export function classifyStatement(statement) {
   if (READ_VERBS.has(verb)) {
     return { verb, requiredPermission: "read", isRead: true, allowedVerb: true };
   }
-  // CREATE / DROP / ALTER / TRUNCATE / REPLACE / MERGE / GRANT / ATTACH / etc.
+  // DROP / TRUNCATE / REPLACE / MERGE / GRANT / ATTACH / etc.
   return { verb, requiredPermission: null, isRead: false, allowedVerb: false };
 }
 
@@ -195,7 +206,7 @@ export function authorizeProjectDbStatement(sql, grantedPermissions = []) {
   if (!allowedVerb) {
     return {
       ok: false,
-      error: `Statement type ${verb || "(unknown)"} is not permitted. Allowed: SELECT, INSERT, UPDATE, DELETE, and read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE). DDL is never allowed.`,
+      error: `Statement type ${verb || "(unknown)"} is not permitted. Allowed: SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER (each per its granted permission), and read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE). DROP, TRUNCATE, and other DDL are never allowed.`,
     };
   }
 
@@ -224,6 +235,7 @@ export function authorizeProjectDbStatement(sql, grantedPermissions = []) {
   // Any data-modifying verb whose permission the grant doesn't include —
   // anywhere in the body, regardless of the leading keyword.
   for (const scan of DML_OP_SCANS) {
+    if (scan.skipReads && isRead) continue;
     if (!granted.has(scan.permission) && scan.pattern.test(masked)) {
       return {
         ok: false,
@@ -241,8 +253,5 @@ export function isReadOnlyGrant(grantedPermissions = []) {
     (Array.isArray(grantedPermissions) ? grantedPermissions : [])
       .map((p) => String(p || "").trim().toLowerCase()),
   );
-  return granted.has("read")
-    && !granted.has("write")
-    && !granted.has("insert")
-    && !granted.has("delete");
+  return granted.has("read") && [...granted].every((p) => p === "read");
 }

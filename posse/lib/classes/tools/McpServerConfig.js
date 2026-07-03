@@ -293,6 +293,7 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}, {
     POSSE_DETERMINISTIC_MCP_DB_PATH: String(payload.dbPath || ""),
     POSSE_DETERMINISTIC_MCP_CWD: String(payload.cwd || ""),
     POSSE_DETERMINISTIC_MCP_ALLOW_WRITE: boolEnv(payload.allowWrite === true),
+    POSSE_DETERMINISTIC_MCP_PROJECT_DB_WRITE: boolEnv(payload.projectDbWrite === true),
     POSSE_DETERMINISTIC_MCP_ALLOW_IMAGE_HELPERS: boolEnv(payload.allowImageHelpers === true),
     POSSE_DETERMINISTIC_MCP_ALLOW_IMAGE_GENERATION: boolEnv(payload.allowImageGeneration === true),
     POSSE_DETERMINISTIC_MCP_ROLE: String(payload.role || ""),
@@ -373,6 +374,12 @@ function buildDeterministicMcpBootPayload(role, {
   atlasAvailable = null,
   atlasGateEnabled = true,
   atlasConfig = null,
+  // Caller override for the role-derived write capability (null = role
+  // default). db-mode dev jobs pass allowWrite:false + projectDbWrite:true:
+  // file tools off, project_db_query on the write lane. The override can only
+  // narrow — it is ANDed with the role capability, never widens it.
+  allowWrite = null,
+  projectDbWrite = false,
 } = {}) {
   const resolvedAtlasConfig = atlasConfig || getAtlasIntegrationConfig();
   const atlasEnabled = (typeof atlasAvailable === "boolean")
@@ -389,7 +396,8 @@ function buildDeterministicMcpBootPayload(role, {
       deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
       createRoots: Array.isArray(createRoots) ? createRoots : [],
       readRoots: Array.isArray(readRoots) ? readRoots : [],
-      allowWrite: roleUsesDeterministicWriteMcp(role),
+      allowWrite: roleUsesDeterministicWriteMcp(role) && allowWrite !== false,
+      projectDbWrite: projectDbWrite === true,
       allowImageHelpers: roleUsesDeterministicImageHelpers(role),
       allowImageGeneration,
       role,

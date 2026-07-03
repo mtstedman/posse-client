@@ -8,14 +8,13 @@
 import fs from "fs";
 import path from "path";
 import { createHash, randomBytes } from "crypto";
-import { execFile, execFileSync } from "child_process";
 import { slugify } from "../../../shared/format/functions/slug.js";
 import { getSetting } from "../../queue/functions/index.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { ensurePosseGitInfoExclude } from "../../runtime/functions/ignore.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
 import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
-import { gitExec, gitExecAsync } from "./utils.js";
+import { gitExec, gitExecAsync, gitExecBuffer, gitExecBufferAsync, isGitCommandFailure } from "./utils.js";
 import {
   acquireWorktreeLock,
   acquireWorktreeLockAsync,
@@ -63,13 +62,6 @@ function snapshotRefFromNative(value, { metadata = {} } = {}) {
       ...metadata,
     },
   });
-}
-
-function nodeGitAsyncOptions(options = {}) {
-  return {
-    ...options,
-    nativeParity: { disabled: true },
-  };
 }
 
 function randomToken(bytes = 4) {
@@ -164,7 +156,6 @@ function readSnapshotNotesByObjectHash(projectDir, objectHashes = []) {
     notesListRaw = gitExec(
       ["notes", `--ref=${SNAPSHOT_NOTES_REF}`, "list"],
       projectDir,
-      { nativeParity: { disabled: true } },
     );
   } catch {
     return notesByObject;
@@ -186,11 +177,8 @@ function readSnapshotNotesByObjectHash(projectDir, objectHashes = []) {
   const noteObjects = [...new Set([...noteObjectByTarget.values()])];
   let batchOut;
   try {
-    batchOut = execFileSync("git", ["cat-file", "--batch"], {
-      cwd: projectDir,
+    batchOut = gitExecBuffer(["cat-file", "--batch"], projectDir, {
       input: `${noteObjects.join("\n")}\n`,
-      encoding: null,
-      stdio: ["pipe", "pipe", "pipe"],
     });
   } catch {
     return notesByObject;
@@ -201,22 +189,10 @@ function readSnapshotNotesByObjectHash(projectDir, objectHashes = []) {
 
 async function gitCatFileBatchAsync(projectDir, objectHashes = [], options = {}) {
   const input = `${objectHashes.join("\n")}\n`;
-  return await new Promise((resolve, reject) => {
-    const execOptions = {
-      cwd: projectDir,
-      encoding: null,
-      windowsHide: true,
-      maxBuffer: 1024 * 1024 * 16,
-    };
-    if (options.signal) execOptions.signal = options.signal;
-    const child = execFile("git", ["cat-file", "--batch"], execOptions, (error, stdout) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve(Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout || ""));
-    });
-    child.stdin?.end(input);
+  return await gitExecBufferAsync(["cat-file", "--batch"], projectDir, {
+    ...options,
+    input,
+    maxBuffer: 1024 * 1024 * 16,
   });
 }
 
@@ -296,7 +272,7 @@ export async function readSnapshotNotesByObjectHashAsync(projectDir, objectHashe
 
 export async function listSnapshotRefsAsync(projectDir, options = {}) {
   if (options?.disabled === true || options?.nativeParity?.disabled === true) {
-    return await listSnapshotRefsNodeAsync(projectDir, options);
+    return await listSnapshotRefsViaGitExecAsync(projectDir, options);
   }
   try {
     return await runGitNativeMethodAsync(
@@ -306,19 +282,25 @@ export async function listSnapshotRefsAsync(projectDir, options = {}) {
     );
   } catch (err) {
     if (isAbortError(err)) throw err;
-    return await listSnapshotRefsNodeAsync(projectDir, options);
+    return await listSnapshotRefsViaGitExecAsync(projectDir, options);
   }
 }
 
-function listSnapshotRefsNode(projectDir) {
+function listSnapshotRefsViaGitExec(projectDir) {
   let raw = "";
   try {
     raw = gitExec([
       "for-each-ref",
       "--format=%(refname)|%(objectname)|%(creatordate:unix)",
       SNAPSHOT_REF_PREFIX,
-    ], projectDir, { nativeParity: { disabled: true } });
-  } catch {
+    ], projectDir);
+  } catch (err) {
+    // Degrading to "no snapshots" on infrastructure failures (gate busy,
+    // native unavailable) hides recoverable work — surface those before
+    // returning empty. Genuine git failures stay silent (repo may lack refs).
+    if (!isGitCommandFailure(err)) {
+      console.warn(`[worktree-snapshots] snapshot ref listing degraded to empty: ${err?.message || err}`);
+    }
     return [];
   }
   const refRows = String(raw || "")
@@ -350,16 +332,21 @@ function listSnapshotRefsNode(projectDir) {
     .sort((a, b) => a.createdMs - b.createdMs);
 }
 
-async function listSnapshotRefsNodeAsync(projectDir, options = {}) {
+async function listSnapshotRefsViaGitExecAsync(projectDir, options = {}) {
   let raw = "";
   try {
     raw = await gitExecAsync([
       "for-each-ref",
       "--format=%(refname)|%(objectname)|%(creatordate:unix)",
       SNAPSHOT_REF_PREFIX,
-    ], projectDir, nodeGitAsyncOptions(options));
+    ], projectDir, options);
   } catch (err) {
     if (isAbortError(err)) throw err;
+    // See the sync twin: infra failures degrading to "no snapshots" must
+    // leave a trace; git-said-no stays silent.
+    if (!isGitCommandFailure(err)) {
+      console.warn(`[worktree-snapshots] snapshot ref listing degraded to empty: ${err?.message || err}`);
+    }
     return [];
   }
   const refRows = String(raw || "")
@@ -373,7 +360,7 @@ async function listSnapshotRefsNodeAsync(projectDir, options = {}) {
   const notesByObject = await readSnapshotNotesByObjectHashAsync(
     projectDir,
     refRows.map((row) => row.objectHash),
-    nodeGitAsyncOptions(options),
+    options,
   );
   return refRows
     .map(({ refName, objectHash, createdUnix }) => {
@@ -414,7 +401,7 @@ async function readSnapshotNoteNodeAsync(projectDir, objectHash, options = {}) {
     const raw = await gitExecAsync(
       ["notes", `--ref=${SNAPSHOT_NOTES_REF}`, "show", objectHash],
       projectDir,
-      nodeGitAsyncOptions(options),
+      options,
     );
     return raw ? JSON.parse(raw) : null;
   } catch (err) {
@@ -494,7 +481,7 @@ function findExistingDedupSnapshotRefNode(projectDir, { wiId = null, reason = "d
   if (!dedupHash) return null;
   const wiPart = wiId != null ? `wi-${wiId}` : "wi-unknown";
   const reasonPart = safeFilenameNode(reason);
-  const refs = listSnapshotRefsNode(projectDir);
+  const refs = listSnapshotRefsViaGitExec(projectDir);
   const candidates = refs.filter((ref) => {
     if (!ref.refName || !ref.refName.endsWith(`-${dedupHash}`)) return false;
     return ref.refName.includes(`/${wiPart}-${reasonPart}-`);
@@ -506,7 +493,7 @@ async function findExistingDedupSnapshotRefNodeAsync(projectDir, { wiId = null, 
   if (!dedupHash) return null;
   const wiPart = wiId != null ? `wi-${wiId}` : "wi-unknown";
   const reasonPart = safeFilename(reason, { disabled: true });
-  const refs = await listSnapshotRefsNodeAsync(projectDir, { signal });
+  const refs = await listSnapshotRefsViaGitExecAsync(projectDir, { signal });
   const candidates = refs.filter((ref) => {
     if (!ref.refName || !ref.refName.endsWith(`-${dedupHash}`)) return false;
     return ref.refName.includes(`/${wiPart}-${reasonPart}-`);
@@ -585,8 +572,13 @@ export async function pruneRecoveredWorktreeSnapshotsAsync(projectDir, onMsg = (
 
   const kept = entries.filter((entry) => !toRemove.includes(entry));
   if (maxBytes > 0 && totalBytes > maxBytes) {
+    // A fresh entry can be the only copy of work reset moments ago (a single
+    // >cap fallback would otherwise be reaped by the next GC pass), so the
+    // byte cap never consumes entries younger than an hour.
+    const minAgeCutoffMs = Date.now() - (60 * 60 * 1000);
     for (const entry of kept) {
       if (totalBytes <= maxBytes) break;
+      if (entry.mtimeMs > 0 && entry.mtimeMs > minAgeCutoffMs) continue;
       toRemove.push(entry);
       totalBytes -= entry.sizeBytes;
     }
@@ -642,6 +634,14 @@ async function findStashEntryByTokenAsync(wtPath, uniqueToken, options = {}) {
 function dropStashEntryByToken(wtPath, uniqueToken) {
   const entry = findStashEntryByToken(wtPath, uniqueToken);
   if (!entry?.ref) return false;
+  // Positional refs go stale if anything pushes to the shared refs/stash
+  // between list and drop (a user's own `git stash` in a terminal is the
+  // irreducible writer no lock covers) — never drop a slot whose commit no
+  // longer matches the token's hash.
+  const resolved = (() => {
+    try { return gitExec(["rev-parse", entry.ref], wtPath).trim(); } catch { return null; }
+  })();
+  if (resolved !== entry.hash) return false;
   gitExec(["stash", "drop", entry.ref], wtPath);
   return true;
 }
@@ -649,6 +649,13 @@ function dropStashEntryByToken(wtPath, uniqueToken) {
 async function dropStashEntryByTokenAsync(wtPath, uniqueToken, options = {}) {
   const entry = await findStashEntryByTokenAsync(wtPath, uniqueToken, options);
   if (!entry?.ref) return false;
+  const resolved = await gitExecAsync(["rev-parse", entry.ref], wtPath, options)
+    .then((out) => String(out || "").trim())
+    .catch((err) => {
+      if (isAbortError(err)) throw err;
+      return null;
+    });
+  if (resolved !== entry.hash) return false;
   await gitExecAsync(["stash", "drop", entry.ref], wtPath, options);
   return true;
 }
@@ -739,6 +746,12 @@ function dedupReuseNotePayload(existingNote, dedupHash, seenAt) {
     dedup_hash: dedupHash,
     seen_count: nextSeenCount,
     seen_at: [...existingSeenAt.slice(-19), seenAt],
+    // Retention ages refs from captured_at (both the node and native list
+    // lanes prefer it over ref creatordate). A reused ref may have just become
+    // the only copy of freshly reset work, so the retention anchor must move
+    // with the reuse; the original capture time survives in first_captured_at.
+    first_captured_at: existingNote?.first_captured_at || existingNote?.captured_at || seenAt,
+    captured_at: seenAt,
   };
 }
 
@@ -781,6 +794,15 @@ function snapshotNotePayload({ refName, stashHash, wtPath, projectDir, branchNam
 // directory. Both twins use this — data-preserving degradation is the
 // canonical posture, not a sync-only behavior.
 function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branchName, wiId, onMsg, status, diffPatch, stagedPatch, trackedDirty, untracked, dedupHash, headSha }) {
+  // Tracked modifications exist in this snapshot only as the captured patches.
+  // If patch capture failed and tracked dirt exists, a directory snapshot
+  // would silently miss it — refuse so callers cannot treat it as preserved.
+  if ((diffPatch == null || stagedPatch == null) && (trackedDirty?.length || 0) > 0) {
+    if (typeof onMsg === "function") {
+      onMsg(`directory fallback refused for ${wtPath}: tracked changes present but patch capture failed`);
+    }
+    return null;
+  }
   const baseName = [wiId != null ? `wi-${wiId}` : null, safeFilename(reason), dedupHash].filter(Boolean).join("-");
   const outDir = path.join(recoveryRoot(projectDir), baseName);
   const partDir = `${outDir}.part-${process.pid}-${Date.now()}`;
@@ -812,8 +834,8 @@ function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branchName, w
   try {
     fs.mkdirSync(partDir, { recursive: true });
     fs.writeFileSync(path.join(partDir, "status.txt"), status ? `${status}\n` : "", "utf-8");
-    fs.writeFileSync(path.join(partDir, "diff.patch"), diffPatch, "utf-8");
-    fs.writeFileSync(path.join(partDir, "staged.patch"), stagedPatch, "utf-8");
+    fs.writeFileSync(path.join(partDir, "diff.patch"), diffPatch ?? "", "utf-8");
+    fs.writeFileSync(path.join(partDir, "staged.patch"), stagedPatch ?? "", "utf-8");
     for (const relPath of untrackedRel) {
       const srcPath = path.resolve(wtPath, relPath);
       if (!isInsideRoot(srcPath, wtPath, { allowEqual: false, followSymlinks: false })) {
@@ -885,8 +907,23 @@ export function preserveDirtyWorktreeSnapshot(
 ) {
   try {
     const status = gitExec(["status", "--porcelain"], wtPath);
-    const diffPatch = gitExec(["diff"], wtPath, { trim: false });
-    const stagedPatch = gitExec(["diff", "--cached"], wtPath, { trim: false });
+    // --binary: without it a modified tracked binary survives only as a
+    // "Binary files differ" stub that git apply cannot restore. A capture
+    // failure (e.g. diff beyond the exec output cap) must not abort the
+    // preserve — the stash route doesn't need the patches; only the
+    // directory fallback does, and it refuses tracked dirt without them.
+    let diffPatch = null;
+    let stagedPatch = null;
+    let patchCaptureFailed = false;
+    try {
+      diffPatch = gitExec(["diff", "--binary"], wtPath, { trim: false });
+      stagedPatch = gitExec(["diff", "--binary", "--cached"], wtPath, { trim: false });
+    } catch (captureErr) {
+      patchCaptureFailed = true;
+      if (typeof onMsg === "function") {
+        onMsg(`snapshot patch capture failed (${captureErr?.message || String(captureErr)}); relying on stash capture`);
+      }
+    }
     const trackedDirty = [
       ...new Set(
         `${gitExec(["-c", "core.quotePath=false", "diff", "--name-only"], wtPath)}\n${gitExec(["-c", "core.quotePath=false", "diff", "--name-only", "--cached"], wtPath)}`
@@ -900,7 +937,11 @@ export function preserveDirtyWorktreeSnapshot(
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const dedupHash = dirtyStateFingerprint({ status, diffPatch, stagedPatch }, wtPath, untracked);
+    // Without the patches the fingerprint would collide with a same-status
+    // snapshot, so dedup is disabled for this capture.
+    const dedupHash = patchCaptureFailed
+      ? null
+      : dirtyStateFingerprint({ status, diffPatch, stagedPatch }, wtPath, untracked);
     const headSha = (() => {
       try { return gitExec(["rev-parse", "HEAD"], wtPath).trim(); } catch { return null; }
     })();
@@ -928,7 +969,7 @@ export function preserveDirtyWorktreeSnapshot(
     if (!stashHash || !stashRef) return writeLegacyFallbackSnapshot(fallbackState);
 
     const dedupEnabled = parseBooleanSetting("snapshot_dedup", true);
-    const existingDedupRef = dedupEnabled
+    const existingDedupRef = dedupEnabled && dedupHash
       ? findExistingDedupSnapshotRef(repoCwd, { wiId, reason, dedupHash })
       : null;
     if (existingDedupRef?.refName) {
@@ -1022,24 +1063,40 @@ export async function preserveDirtyWorktreeSnapshotAsync(
   { reason = "dirty-worktree", branchName = null, wiId = null, onMsg = null, signal = null, nativeParity = {} } = {},
 ) {
   try {
-    const status = await gitExecAsync(["status", "--porcelain"], wtPath, nodeGitAsyncOptions({ signal }));
-    const diffPatch = await gitExecAsync(["diff"], wtPath, nodeGitAsyncOptions({ signal, trim: false }));
-    const stagedPatch = await gitExecAsync(["diff", "--cached"], wtPath, nodeGitAsyncOptions({ signal, trim: false }));
+    const status = await gitExecAsync(["status", "--porcelain"], wtPath, { signal });
+    // --binary + capture-failure tolerance: see the sync twin for rationale.
+    let diffPatch = null;
+    let stagedPatch = null;
+    let patchCaptureFailed = false;
+    try {
+      diffPatch = await gitExecAsync(["diff", "--binary"], wtPath, { signal, trim: false });
+      stagedPatch = await gitExecAsync(["diff", "--binary", "--cached"], wtPath, { signal, trim: false });
+    } catch (captureErr) {
+      if (isAbortError(captureErr)) throw captureErr;
+      patchCaptureFailed = true;
+      if (typeof onMsg === "function") {
+        onMsg(`snapshot patch capture failed (${captureErr?.message || String(captureErr)}); relying on stash capture`);
+      }
+    }
     const trackedDirty = [
       ...new Set(
-        `${await gitExecAsync(["-c", "core.quotePath=false", "diff", "--name-only"], wtPath, nodeGitAsyncOptions({ signal }))}\n${await gitExecAsync(["-c", "core.quotePath=false", "diff", "--name-only", "--cached"], wtPath, nodeGitAsyncOptions({ signal }))}`
+        `${await gitExecAsync(["-c", "core.quotePath=false", "diff", "--name-only"], wtPath, { signal })}\n${await gitExecAsync(["-c", "core.quotePath=false", "diff", "--name-only", "--cached"], wtPath, { signal })}`
           .split("\n")
           .map((s) => s.trim())
           .filter(Boolean)
       ),
     ];
-    const untracked = (await gitExecAsync(["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"], wtPath, nodeGitAsyncOptions({ signal })))
+    const untracked = (await gitExecAsync(["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"], wtPath, { signal }))
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const dedupHash = dirtyStateFingerprint({ status, diffPatch, stagedPatch }, wtPath, untracked);
-    const headSha = await gitExecAsync(["rev-parse", "HEAD"], wtPath, nodeGitAsyncOptions({ signal })).catch((err) => {
+    // Without the patches the fingerprint would collide with a same-status
+    // snapshot, so dedup is disabled for this capture.
+    const dedupHash = patchCaptureFailed
+      ? null
+      : dirtyStateFingerprint({ status, diffPatch, stagedPatch }, wtPath, untracked);
+    const headSha = await gitExecAsync(["rev-parse", "HEAD"], wtPath, { signal }).catch((err) => {
       if (isAbortError(err)) throw err;
       return null;
     });
@@ -1051,10 +1108,14 @@ export async function preserveDirtyWorktreeSnapshotAsync(
     const stashLockPath = gitStashLockPath(wtPath, projectDir, { disabled: true });
     const stashLock = await acquireWorktreeLockAsync(stashLockPath, { signal });
     if (!stashLock.acquired) {
-      // Unlike the sync worker-lane twin (which degrades to the directory
-      // fallback), a lock timeout on the async job lane is a real failure the
-      // caller must see — another lane is actively working this worktree.
-      throw new Error(`Timed out waiting for git stash lock: ${stashLockPath}`);
+      // Degrade to the directory fallback like the sync twin. The fallback
+      // never touches refs/stash, so it is safe to write without the lock.
+      // Throwing here instead taught callers to answer with an unsnapshotted
+      // reset — the one outcome this module exists to prevent.
+      if (typeof onMsg === "function") {
+        onMsg(`stash lock contended for ${wtPath}; writing directory fallback snapshot`);
+      }
+      return writeLegacyFallbackSnapshot(fallbackState);
     }
     let stashLockReleased = false;
     try {
@@ -1090,7 +1151,7 @@ export async function preserveDirtyWorktreeSnapshotAsync(
     }
 
     const dedupEnabled = parseBooleanSetting("snapshot_dedup", true);
-    const existingDedupRef = dedupEnabled
+    const existingDedupRef = dedupEnabled && dedupHash
       ? await findExistingDedupSnapshotRefNodeAsync(repoCwd, { wiId, reason, dedupHash, signal })
       : null;
     if (existingDedupRef?.refName) {

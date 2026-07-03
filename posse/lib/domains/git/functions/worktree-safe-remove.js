@@ -22,8 +22,24 @@ import {
   snapshotAndResetDirtyWorktreeAsync,
 } from "./worktree-recovery.js";
 
-export function removeWorktreePathAsync(wtPath, mainCwd, options = {}) {
-  return Worktree.at(mainCwd, wtPath).removeAsync({ force: true, prune: true, fallbackRemove: true, ...options });
+export async function removeWorktreePathAsync(wtPath, mainCwd, options = {}) {
+  const worktree = Worktree.at(mainCwd, wtPath);
+  // Two-phase removal: the native fallback (`remove_dir_all` with retries)
+  // shreds every openable file before erroring on a locked one, which
+  // destroys a live holder's writes before the in-use classification can
+  // defer. So first let git alone try (native touches nothing on failure),
+  // and only escalate to the fs fallback when the failure is not a live
+  // holder.
+  if (options.fallbackRemove === false) {
+    return worktree.removeAsync({ force: true, prune: true, ...options, fallbackRemove: false });
+  }
+  try {
+    return await worktree.removeAsync({ force: true, prune: true, ...options, fallbackRemove: false });
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    if (isWorktreeInUseError(err)) throw err;
+    return worktree.removeAsync({ force: true, prune: true, ...options, fallbackRemove: true });
+  }
 }
 
 export async function forceRemoveWorktreePathAfterNativeAsync(wtPath, mainCwd, { signal = null } = {}) {
@@ -247,8 +263,10 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
     }
 
     let verifiedClean = false;
+    let verifyRan = false;
     try {
       verifiedClean = await worktreePorcelainAsync(wtPath, { signal }) === "";
+      verifyRan = true;
     } catch (err) {
       if (isAbortError(err)) throw err;
       if (!snapshotSucceeded) {
@@ -275,7 +293,13 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
       }
     }
 
-    if (!snapshotSucceeded && !verifiedClean) {
+    // A verify that RAN and still reports dirt refuses removal even when the
+    // snapshot "succeeded": post-snapshot leftovers are exactly what the stash
+    // cannot capture (nested repos, dirty submodules) — verified empirically:
+    // `stash push -u` ignores a nested repo with exit 0 and `worktree remove
+    // --force` then deletes it wholesale. The snapshot-succeeded bypass stays
+    // only for the verify-threw case.
+    if (!verifiedClean && (verifyRan || !snapshotSucceeded)) {
       const message = "Worktree removal skipped because dirty state was not snapshotted and worktree is not clean";
       notifySafeRemoveFailure(onFailure, {
         wtPath,

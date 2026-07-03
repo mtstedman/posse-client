@@ -13,6 +13,7 @@ import path from "path";
 import { execFile, execFileSync } from "child_process";
 import { getSetting } from "../../queue/functions/index.js";
 import { snapshotPublishingPushConfigs, snapshotPublishingPushConfigsAsync } from "./push-guard.js";
+import { gitExec, gitExecAsync, gitExecBuffer, gitExecBufferAsync, isGitCommandFailure } from "./utils.js";
 import { SECRET_PATTERNS } from "../../../shared/telemetry/functions/logging/secret-patterns.js";
 
 const VERIFY_COMMAND_TIMEOUT_MS = 120_000;
@@ -352,27 +353,93 @@ function secretsBlockResult(findings) {
   return { ok: false, output };
 }
 
+// A git check that could not RUN (sync gate busy, posse-git unavailable) is
+// not evidence of a clean tree. Security gates fail closed on that class and
+// stay fail-open only when git itself ran and said no (isGitCommandFailure),
+// matching the pre-native-cutover failure surface.
+function gitInfraBlockResult(gateName, err) {
+  return {
+    ok: false,
+    output: [
+      `${gateName} blocked: git checks could not run (${String(err?.message || err).split("\n")[0]}).`,
+      "This is a git-access failure, not a clean scan. Retry once git access is restored.",
+    ].join("\n"),
+  };
+}
+
+// One `cat-file --batch` fetches every staged blob in a single native call
+// (each sync git call is a full posse-git spawn, so per-file `git show` made
+// guarded commits pay N spawns).
+const STAGED_BATCH_MAX_BUFFER = 1024 * 1024 * 64;
+
+function stagedBatchInput(files) {
+  return `${files.map((file) => `:${file}`).join("\n")}\n`;
+}
+
+function parseStagedBatch(buf, files) {
+  const bodies = new Map();
+  let cursor = 0;
+  for (const file of files) {
+    const nl = buf.indexOf(0x0a, cursor);
+    if (nl === -1) break;
+    const header = buf.subarray(cursor, nl).toString("utf-8");
+    cursor = nl + 1;
+    const parts = header.split(" ");
+    const size = Number(parts[2]);
+    if (parts.length < 3 || !Number.isFinite(size)) {
+      // "<spec> missing" — no body line follows.
+      bodies.set(file, null);
+      continue;
+    }
+    bodies.set(file, buf.subarray(cursor, cursor + size).toString("utf-8"));
+    cursor += size + 1;
+  }
+  return bodies;
+}
+
+function stagedContentsBatch(cwd, files) {
+  if (files.length === 0) return new Map();
+  try {
+    const buf = gitExecBuffer(["cat-file", "--batch"], cwd, {
+      input: stagedBatchInput(files),
+      maxBuffer: STAGED_BATCH_MAX_BUFFER,
+    });
+    return parseStagedBatch(buf, files);
+  } catch {
+    return null;
+  }
+}
+
+async function stagedContentsBatchAsync(cwd, files) {
+  if (files.length === 0) return new Map();
+  try {
+    const buf = await gitExecBufferAsync(["cat-file", "--batch"], cwd, {
+      input: stagedBatchInput(files),
+      maxBuffer: STAGED_BATCH_MAX_BUFFER,
+    });
+    return parseStagedBatch(buf, files);
+  } catch {
+    return null;
+  }
+}
+
 function secretsScan({ cwd }) {
   let staged;
   try {
-    staged = execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACM"], {
-      cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-  } catch { return { ok: true, output: "" }; }
+    staged = gitExec(["diff", "--cached", "--name-only", "--diff-filter=ACM"], cwd).trim();
+  } catch (err) {
+    if (!isGitCommandFailure(err)) return gitInfraBlockResult("Secrets scan", err);
+    return { ok: true, output: "" };
+  }
 
   if (!staged) return { ok: true, output: "" };
 
+  const files = scannableStagedFiles(staged);
+  const stagedContents = stagedContentsBatch(cwd, files);
   const findings = [];
-  for (const file of scannableStagedFiles(staged)) {
-    let content;
-    try {
-      content = execFileSync("git", ["show", `:${file}`], {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        maxBuffer: 1024 * 1024 * 4,
-      });
-    } catch {
+  for (const file of files) {
+    let content = stagedContents?.get(file);
+    if (content == null) {
       const fullPath = path.join(cwd, file);
       if (!fs.existsSync(fullPath)) continue;
       try { content = fs.readFileSync(fullPath, "utf-8"); } catch { continue; }
@@ -386,26 +453,20 @@ function secretsScan({ cwd }) {
 async function secretsScanAsync({ cwd }) {
   let staged;
   try {
-    staged = (await execFileText("git", ["diff", "--cached", "--name-only", "--diff-filter=ACM"], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    })).trim();
-  } catch { return { ok: true, output: "" }; }
+    staged = (await gitExecAsync(["diff", "--cached", "--name-only", "--diff-filter=ACM"], cwd)).trim();
+  } catch (err) {
+    if (!isGitCommandFailure(err)) return gitInfraBlockResult("Secrets scan", err);
+    return { ok: true, output: "" };
+  }
 
   if (!staged) return { ok: true, output: "" };
 
+  const files = scannableStagedFiles(staged);
+  const stagedContents = await stagedContentsBatchAsync(cwd, files);
   const findings = [];
-  for (const file of scannableStagedFiles(staged)) {
-    let content;
-    try {
-      content = await execFileText("git", ["show", `:${file}`], {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        maxBuffer: 1024 * 1024 * 4,
-      });
-    } catch {
+  for (const file of files) {
+    let content = stagedContents?.get(file);
+    if (content == null) {
       const fullPath = path.join(cwd, file);
       if (!fs.existsSync(fullPath)) continue;
       try { content = await fs.promises.readFile(fullPath, "utf-8"); } catch { continue; }
@@ -546,10 +607,9 @@ function prePushGate({ cwd, nativeParity = {} }) {
 
   let status = "";
   try {
-    status = execFileSync("git", ["status", "--porcelain"], {
-      cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-  } catch {
+    status = gitExec(["status", "--porcelain"], cwd).trim();
+  } catch (err) {
+    if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
     return { ok: true, output: "" };
   }
 
@@ -558,25 +618,25 @@ function prePushGate({ cwd, nativeParity = {} }) {
 
   let upstream = "";
   try {
-    upstream = execFileSync("git", ["rev-parse", "--abbrev-ref", "@{upstream}"], {
-      cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-  } catch { /* no upstream is allowed */ }
+    upstream = gitExec(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd).trim();
+  } catch (err) {
+    // no upstream is allowed; infra failures are not
+    if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
+  }
 
   if (upstream) {
     try {
-      const names = execFileSync("git", ["diff", "--name-only", `${upstream}..HEAD`], {
-        cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-      }).trim();
+      const names = gitExec(["diff", "--name-only", `${upstream}..HEAD`], cwd).trim();
       const envBlock = envFileBlock(names);
       if (envBlock) return envBlock;
 
-      const diff = execFileSync("git", ["diff", `${upstream}..HEAD`, "--unified=0"], {
-        cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], maxBuffer: 1024 * 1024 * 4,
-      });
+      const diff = gitExec(["diff", `${upstream}..HEAD`, "--unified=0"], cwd, { maxBuffer: 1024 * 1024 * 4, trim: false });
       const secretsBlock = pushDiffSecretsBlock(diff);
       if (secretsBlock) return secretsBlock;
-    } catch { /* best effort */ }
+    } catch (err) {
+      // best effort for git failures only
+      if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
+    }
   }
 
   const verifyCmd = readSettingText("pre_push_verify_cmd");
@@ -597,12 +657,9 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
 
   let status = "";
   try {
-    status = (await execFileText("git", ["status", "--porcelain"], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    })).trim();
-  } catch {
+    status = (await gitExecAsync(["status", "--porcelain"], cwd)).trim();
+  } catch (err) {
+    if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
     return { ok: true, output: "" };
   }
 
@@ -611,32 +668,25 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
 
   let upstream = "";
   try {
-    upstream = (await execFileText("git", ["rev-parse", "--abbrev-ref", "@{upstream}"], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    })).trim();
-  } catch { /* no upstream is allowed */ }
+    upstream = (await gitExecAsync(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd)).trim();
+  } catch (err) {
+    // no upstream is allowed; infra failures are not
+    if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
+  }
 
   if (upstream) {
     try {
-      const names = (await execFileText("git", ["diff", "--name-only", `${upstream}..HEAD`], {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      })).trim();
+      const names = (await gitExecAsync(["diff", "--name-only", `${upstream}..HEAD`], cwd)).trim();
       const envBlock = envFileBlock(names);
       if (envBlock) return envBlock;
 
-      const diff = await execFileText("git", ["diff", `${upstream}..HEAD`, "--unified=0"], {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        maxBuffer: 1024 * 1024 * 4,
-      });
+      const diff = await gitExecAsync(["diff", `${upstream}..HEAD`, "--unified=0"], cwd, { maxBuffer: 1024 * 1024 * 4, trim: false });
       const secretsBlock = pushDiffSecretsBlock(diff);
       if (secretsBlock) return secretsBlock;
-    } catch { /* best effort */ }
+    } catch (err) {
+      // best effort for git failures only
+      if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
+    }
   }
 
   const verifyCmd = readSettingText("pre_push_verify_cmd");

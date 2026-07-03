@@ -4,20 +4,13 @@
 
 import fs from "fs";
 import path from "path";
-import { execFile } from "child_process";
-import { promisify } from "util";
-
-const execFileAsync = promisify(execFile);
+import { gitExecAsync } from "../../../git/functions/utils.js";
 
 async function gitTextAsync(cwd, args) {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd,
-    encoding: "utf-8",
-    timeout: 10_000,
+  return await gitExecAsync(args, cwd, {
+    timeoutMs: 10_000,
     maxBuffer: 1024 * 1024,
-    windowsHide: true,
   });
-  return String(stdout || "");
 }
 
 /**

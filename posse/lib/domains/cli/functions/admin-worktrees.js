@@ -4,9 +4,9 @@
 
 import fs from "fs";
 import path from "path";
-import { execFileSync } from "child_process";
 import { C } from "../../../shared/format/functions/colors.js";
-import { GIT_OPERATION_TIMEOUT_MS } from "../../git/functions/utils.js";
+import { GIT_OPERATION_TIMEOUT_MS, gitExec } from "../../git/functions/utils.js";
+import { _batchReadNotes } from "../../project/functions/context.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 
 function safeJsonLoose(value) {
@@ -32,33 +32,24 @@ export function listRecoveredWorktreeSnapshots(projectDir, limit = 100) {
 
   // Preferred: git-native snapshot refs.
   try {
-    const refsRaw = execFileSync(
-      "git",
+    const refsRaw = gitExec(
       [
         "for-each-ref",
         "--format=%(refname)|%(objectname)|%(creatordate:iso-strict)",
         "refs/posse/snapshots",
       ],
-      {
-        cwd: projectDir,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: GIT_OPERATION_TIMEOUT_MS,
-      },
+      projectDir,
+      { timeoutMs: GIT_OPERATION_TIMEOUT_MS },
     ).trim();
-    for (const line of String(refsRaw || "").split("\n").filter(Boolean)) {
-      const [refName, objectHash, createdIso] = line.split("|");
-      if (!refName || !objectHash) continue;
-      let note = null;
-      try {
-        const noteRaw = execFileSync("git", ["notes", "--ref=refs/notes/posse-snapshots", "show", objectHash], {
-          cwd: projectDir,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-          timeout: 15000,
-        }).trim();
-        note = safeJsonLoose(noteRaw);
-      } catch { /* ignore */ }
+    const refRows = String(refsRaw || "").split("\n").filter(Boolean)
+      .map((line) => {
+        const [refName, objectHash, createdIso] = line.split("|");
+        return refName && objectHash ? { refName, objectHash, createdIso } : null;
+      })
+      .filter(Boolean);
+    const notesByHash = _batchReadNotes(projectDir, refRows.map((row) => row.objectHash));
+    for (const { refName, objectHash, createdIso } of refRows) {
+      const note = notesByHash.get(objectHash) || null;
       const createdAt = note?.captured_at || createdIso;
       const trackedDirty = Array.isArray(note?.tracked_dirty) ? note.tracked_dirty : [];
       const untracked = Array.isArray(note?.untracked) ? note.untracked : [];

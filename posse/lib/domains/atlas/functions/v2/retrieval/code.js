@@ -291,6 +291,9 @@ function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, se
       repo_rel_path: targetPath,
       matches: astHotPath.matches,
       identifiersFound: astHotPath.identifiersFound,
+      ...(astHotPath.identifiersFoundInText?.length
+        ? { identifiersFoundInText: astHotPath.identifiersFoundInText }
+        : {}),
       identifiersMissing: astHotPath.identifiersMissing,
       etag,
     };

@@ -455,25 +455,37 @@ const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
 export const TOOL_ROLE_LIBRARY = Object.freeze({
   baseToolAllowlists: Object.freeze({
     dev: Object.freeze({
-      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback"],
+      // The read lane is the db-mode dev surface (task_mode:"db" runs with
+      // allowWrite:false): read/inspect tools plus project_db_query — whose
+      // write capability comes from the projectDbWrite override, not the
+      // file-write grant. No file mutation tools on this lane.
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "bash", "project_db_query"],
       write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash", "project_db_query"],
     }),
     artificer: Object.freeze({
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "inspect_file", "write_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "inspect_file", "write_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash", "project_db_query"],
       imageGeneration: ["generate_image"],
     }),
+    // Assessor carries project_db_query on the READ lane so it can verify the
+    // claimed end state of db-mode dev work with SELECT/inspection; the
+    // execution capability cap keeps it read-only regardless of the operator
+    // grant, and the contract gate drops the tool when no read grant exists.
     assessor: Object.freeze({
-      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "run_test", "run_test_suite", "bash"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "run_test", "run_test_suite", "bash"],
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "run_test", "run_test_suite", "bash", "project_db_query"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "run_test", "run_test_suite", "bash", "project_db_query"],
     }),
+    // researcher/planner carry project_db_query as a READ-lane tool: the
+    // execution capability cap limits them to SELECT/inspection regardless of
+    // the operator grant, and the contract gate drops the tool entirely when
+    // the repo grants no read permission.
     researcher: Object.freeze({
-      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
     }),
     planner: Object.freeze({
-      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
     }),
     preflight: Object.freeze({ read: [], write: [] }),
     delegator: Object.freeze({ read: [], write: [] }),
@@ -772,6 +784,11 @@ export function getDeterministicMcpToolNames(role, {
   if (role === "assessor") tools.push("run_scoped_checks", "run_test", "run_test_suite");
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push("bash");
   if (role === "planner") tools.push("get_brief");
+  // Opt-in project DB access: write-lane roles (dev/artificer) use the full
+  // operator grant, read-lane roles (researcher/planner) are capped to SELECT
+  // at execution. The MCP gateway's runtimeToolAvailable() hides the tool
+  // unless this repo's admin config enables it with a usable grant.
+  if (["dev", "artificer", "researcher", "planner"].includes(role)) tools.push("project_db_query");
   if (role === "researcher") {
     const readIdx = tools.indexOf("read_file");
     if (readIdx !== -1) tools.splice(readIdx, 1);
@@ -929,19 +946,22 @@ function renderActiveAtlasFallbackLines(opts = {}) {
   if (atlasGateEnabledForContract(opts)) {
     const extensions = renderIndexableExtensionList();
     return [
-      `For indexable source files (${extensions}), native read_file/chain_read fallback unlocks file by file: before reading a given source file, attempt task-relevant ${label} discovery against that same file or a symbol, tree, or code result that returns that file.`,
+      `${label} is the inspection path; native reads are the exception for a named evidence gap, never the reward for making enough ${label} calls.`,
+      `For indexable source files (${extensions}), discovery is file-scoped: before reading a given source file natively, attempt task-relevant ${label} discovery against that same file or a symbol, tree, or code result that returns that file — often that answers the question and no native read is needed.`,
       `Good file-specific discovery calls include ${renderAtlasToolNameForContract("code.skeleton", opts)}, ${renderAtlasToolNameForContract("code.lens", opts)}, ${renderAtlasToolNameForContract("code.window", opts)}, ${renderAtlasToolNameForContract("symbol.search", opts)}, ${renderAtlasToolNameForContract("tree.branch", opts)}, and ${renderAtlasToolNameForContract("tree.expand", opts)}.`,
-      `Other indexable source files stay locked until separately discovered through ${label}.`,
-      `For broad standard list/search/read fallback not tied to one source file, make the required real ${label} retrieval attempts only when broad native fallback is still needed; keep them targeted to the task and stop when the needed context or fallback unlock is obtained.`,
+      `Each indexable source file needs its own focused ${label} attempt before a native read of it.`,
+      `Never make ${label} calls merely to make native tools available; aim every retrieval at your actual evidence gap and stop when the evidence is sufficient.`,
       `For broad audits, sweeps, or unfamiliar repositories, start with ${renderAtlasToolNameForContract("tree.branch", opts)} or ${renderAtlasToolNameForContract("tree.expand", opts)}, then narrow with ${renderAtlasToolNameForContract("symbol.search", opts)} and ${renderAtlasToolNameForContract("code.skeleton", opts)}.`,
-      `${label} prefetch and internal bookkeeping calls do not count toward file unlocks or broad fallback unlocks.`,
-      "Use standard tools only when:",
+      `${label} prefetch and internal bookkeeping calls do not count as active retrieval.`,
+      "Use standard tools only for a named evidence gap:",
       `- ${label} is unavailable,`,
-      `- ${label} fails to answer the question after the required targeted discovery attempts,`,
+      `- ${label} returned stale, empty, or conflicting evidence after a focused attempt,`,
+      "- the target is non-indexed config/data/docs where the raw text is the object,",
       "- you have mutated files and need exact current worktree state,",
+      `- you need exact surrounding text ${label} code tools could not provide,`,
       `- you need git state/history/diff operations not exposed through ${label},`,
       "- you need to run tests, build commands, or other shell commands.",
-      `If you fall back to standard tools, state what ${label} could not provide.`,
+      `If you use a standard tool, state the precise gap and the ${label} result that was insufficient.`,
     ];
   }
   const extensions = renderIndexableExtensionList();
@@ -965,7 +985,7 @@ function renderPrefetchGuidance(opts = {}) {
     return [
       `${label} prefetch supplied task-relevant context for this handoff.`,
       atlasGateEnabledForContract(opts)
-        ? `Use prefetch as a comprehension scaffold for the first codebase map; it does not count as active ${label} use or toward the 3-call native fallback gate.`
+        ? `Use prefetch as a comprehension scaffold for the first codebase map; it does not count as active ${label} retrieval. Make additional ${label} calls only for real evidence gaps, never to make native tools available.`
         : `Use prefetch as a comprehension scaffold for the first codebase map; make additional task-relevant ${label} retrieval only when a specific context gap remains.`,
       ...renderActiveAtlasFallbackLines(opts),
     ];

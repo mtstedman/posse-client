@@ -5,15 +5,12 @@
 
 import fs from "fs";
 import path from "path";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import {
   findLegacyWorktreeForWiAsync,
   resolveTargetBranchAsync,
   worktreePathAsync,
 } from "../../../git/functions/worktree.js";
-
-const execFileAsync = promisify(execFile);
+import { gitExecAsync } from "../../../git/functions/utils.js";
 
 const GIT_TIMEOUT_MS = 10000;
 const MAX_BUFFER = 1024 * 1024 * 8;
@@ -51,13 +48,10 @@ function isRuntimePath(filePath) {
 // stays responsive while the snapshot builds in the background.
 async function safeGit(cwd, args, { allowFailure = false, maxBuffer = MAX_BUFFER } = {}) {
   try {
-    const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", ...args], {
-      cwd,
-      encoding: "utf8",
-      timeout: GIT_TIMEOUT_MS,
+    return await gitExecAsync(["-c", "core.quotePath=false", ...args], cwd, {
+      timeoutMs: GIT_TIMEOUT_MS,
       maxBuffer,
     });
-    return stdout;
   } catch (err) {
     if (!allowFailure) throw err;
     const stderr = String(err?.stderr || "").trim();

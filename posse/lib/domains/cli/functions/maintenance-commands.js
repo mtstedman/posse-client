@@ -1,11 +1,11 @@
 import fs from "fs";
 import path from "path";
-import { execFileSync, execSync } from "child_process";
 import { initArtifactRoots, pruneEmptyArtifactDirs } from "../../artifacts/functions/index.js";
 import { buildInventory, inventoryIsEmpty, inventorySummary } from "../../cleanup/functions/survey.js";
 import { triageInventory, buildItemIndex } from "../../cleanup/functions/triage.js";
 import { applyAction } from "../../cleanup/functions/actions.js";
 import { deleteBranchPreservingTip, snapshotAndResetDirtyWorktree } from "../../git/functions/worktree.js";
+import { gitExec } from "../../git/functions/utils.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { clearAll, getLiveSchedulerBlockMessage, listWorkItems } from "../../queue/functions/index.js";
 import { C as defaultColors } from "../../../shared/format/functions/colors.js";
@@ -107,7 +107,7 @@ export function createMaintenanceCommands({
     const wtRoot = worktreeRoot(projectDir);
     if (fs.existsSync(wtRoot)) {
       try {
-        execSync("git worktree prune", { cwd: projectDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+        gitExec(["worktree", "prune"], projectDir);
       } catch {
         // best effort
       }
@@ -217,7 +217,7 @@ export function createMaintenanceCommands({
 
     if (candidates.length > 0) {
       try {
-        execSync("git worktree prune", { cwd: projectDir, encoding: "utf-8" });
+        gitExec(["worktree", "prune"], projectDir);
       } catch {
         // best effort
       }
@@ -235,7 +235,7 @@ export function createMaintenanceCommands({
 
     let branches = [];
     try {
-      const raw = execSync("git branch --list \"posse/*\"", { cwd: projectDir, encoding: "utf-8" }).trim();
+      const raw = gitExec(["branch", "--list", "posse/*"], projectDir).trim();
       if (raw) branches = raw.split("\n").map(b => b.trim().replace(/^\*\s*/, ""));
     } catch {
       // no branches
@@ -254,10 +254,7 @@ export function createMaintenanceCommands({
 
     const mergedBranches = new Set();
     try {
-      const raw = execFileSync("git", ["branch", "--merged", resolvedTargetBranch, "--list", "posse/*"], {
-        cwd: projectDir,
-        encoding: "utf-8",
-      }).trim();
+      const raw = gitExec(["branch", "--merged", resolvedTargetBranch, "--list", "posse/*"], projectDir).trim();
       if (raw) raw.split("\n").forEach(b => mergedBranches.add(b.trim().replace(/^\*\s*/, "")));
     } catch {
       // best effort
@@ -265,11 +262,7 @@ export function createMaintenanceCommands({
 
     const isDiffEmptyAgainstTarget = (branch) => {
       try {
-        execFileSync("git", ["diff", "--quiet", `${resolvedTargetBranch}...${branch}`], {
-          cwd: projectDir,
-          encoding: "utf-8",
-          stdio: ["ignore", "ignore", "ignore"],
-        });
+        gitExec(["diff", "--quiet", `${resolvedTargetBranch}...${branch}`], projectDir);
         return true;
       } catch {
         return false;
@@ -358,7 +351,7 @@ export function createMaintenanceCommands({
     }
 
     try {
-      execSync("git worktree prune", { cwd: projectDir, encoding: "utf-8" });
+      gitExec(["worktree", "prune"], projectDir);
     } catch {
       // best effort
     }

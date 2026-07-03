@@ -47,7 +47,9 @@ export const ATLAS_EMBEDDINGS_PARITY = 0.95;
 function openReadonly(dbPath) {
   try {
     if (!fs.existsSync(dbPath)) return null;
-    return new Database(dbPath, { readonly: true, fileMustExist: true });
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    db.pragma("busy_timeout = 5000");
+    return db;
   } catch {
     return null;
   }

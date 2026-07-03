@@ -473,7 +473,7 @@
  * @property {number} matchTotal              Total focus matches before the capped matches array is returned.
  * @property {boolean} focusTruncated         True when focus lookup matched more nodes than the capped matches array.
  * @property {TreeNodeSummary[]} nodes
- * @property {Array<{ path: string, label: string, confidence: "high" | "medium" | "low" }>} [areaMap]  Top-level calls only: compressed-tree labeled area map.
+ * @property {Array<{ path: string, label: string, confidence: number, confidenceBand: "high" | "medium" | "low" }>} [areaMap]  Top-level calls only: compressed-tree labeled area map.
  * @property {number} total
  * @property {number} [offset]
  * @property {number} [limit]
@@ -587,8 +587,8 @@
  * @property {boolean} available
  * @property {string | null} [reason]
  * @property {string | null} [profile]
- * @property {Array<{ path: string, label: string, confidence: "high" | "medium" | "low", hits: number, entrypoints: string[] }>} matchedSeeds
- * @property {Array<{ path: string, label: string, confidence: "high" | "medium" | "low" }>} [areaMap]
+ * @property {Array<{ path: string, label: string, confidence: number, confidenceBand: "high" | "medium" | "low", hits: number, entrypoints: string[] }>} matchedSeeds
+ * @property {Array<{ path: string, label: string, confidence: number, confidenceBand: "high" | "medium" | "low" }>} [areaMap]
  *   Labeled repo orientation: most-specific annotated areas with ancestor
  *   chains collapsed. Drill into any area via tree.overview {path, maxDepth}.
  */
@@ -713,6 +713,7 @@
  * @property {string} [repo_rel_path]
  * @property {CodeHotPathMatch[]} matches
  * @property {string[]} identifiersFound
+ * @property {string[]} [identifiersFoundInText]  Identifiers with no AST usage but present inside string/comment text (matchKind "text").
  * @property {string[]} identifiersMissing
  * @property {string} [etag]
  */
@@ -723,6 +724,7 @@
  * @property {number} line
  * @property {string} text
  * @property {string} identifier
+ * @property {"text"} [matchKind]  Absent for AST usage matches; "text" when the identifier was only found inside string/comment text.
  * @property {{ before: string[], after: string[] }} context
  */
 

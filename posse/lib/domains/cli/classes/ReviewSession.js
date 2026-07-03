@@ -38,7 +38,6 @@ export class ReviewSession {
       logEvent,
       gitMergeToTarget,
       PROJECT_DIR,
-      execSync,
       TARGET_BRANCH,
       setMergeState,
       cleanupWiBranch,
@@ -283,7 +282,6 @@ export class ReviewSession {
       logEvent,
       gitMergeToTarget,
       PROJECT_DIR,
-      execSync,
       TARGET_BRANCH,
       setMergeState,
       cleanupWiBranch,
@@ -414,7 +412,6 @@ export class ReviewSession {
       logEvent,
       gitMergeToTarget,
       PROJECT_DIR,
-      execSync,
       TARGET_BRANCH,
       setMergeState,
       cleanupWiBranch,
@@ -473,7 +470,6 @@ export class ReviewSession {
       logEvent,
       gitMergeToTarget,
       PROJECT_DIR,
-      execSync,
       TARGET_BRANCH,
       setMergeState,
       cleanupWiBranch,
@@ -528,7 +524,6 @@ export class ReviewSession {
       logEvent,
       gitMergeToTarget,
       PROJECT_DIR,
-      execSync,
       TARGET_BRANCH,
       setMergeState,
       cleanupWiBranch,
@@ -623,7 +618,6 @@ export class ReviewSession {
       logEvent,
       gitMergeToTarget,
       PROJECT_DIR,
-      execSync,
       TARGET_BRANCH,
       setMergeState,
       cleanupWiBranch,
@@ -1168,7 +1162,6 @@ export class ReviewSession {
       logEvent,
       gitMergeToTarget,
       PROJECT_DIR,
-      execSync,
       TARGET_BRANCH,
       setMergeState,
       cleanupWiBranch,
@@ -1225,7 +1218,11 @@ export class ReviewSession {
         display.addEvent(`${C.yellow || ""}Auto-merge skipped: target branch is dirty.${C.reset || ""}`);
         return 0;
       }
-      const outcome = await withMergeLock(() => autoMergeCompletedWorkItems({ display, reason: "live review" }));
+      // runGc:false like the wrap-up/idle sweeps: live review runs mid-run,
+      // and GC's held-WI path would snapshot+hard-reset worktrees whose
+      // agents are still executing (they hold no worktree lock while the
+      // provider runs).
+      const outcome = await withMergeLock(() => autoMergeCompletedWorkItems({ display, reason: "live review", runGc: false }));
       if (!outcome.acquired) {
         display.addEvent(`${C.yellow}Auto-merge skipped: another merge is already in progress.${C.reset}`);
         return 0;
@@ -1333,7 +1330,6 @@ export class ReviewSession {
       logEvent,
       gitMergeToTarget,
       PROJECT_DIR,
-      execSync,
       TARGET_BRANCH,
       setMergeState,
       cleanupWiBranch,
@@ -1416,7 +1412,6 @@ export class ReviewSession {
       logEvent,
       gitMergeToTarget,
       PROJECT_DIR,
-      execSync,
       TARGET_BRANCH,
       setMergeState,
       cleanupWiBranch,
@@ -1695,7 +1690,6 @@ export class ReviewSession {
       logEvent,
       gitMergeToTarget,
       PROJECT_DIR,
-      execSync,
       TARGET_BRANCH,
       setMergeState,
       cleanupWiBranch,

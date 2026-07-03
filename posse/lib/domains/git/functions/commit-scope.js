@@ -3,7 +3,6 @@
 // Git scope helpers for staged commit boundaries, scoped asset repair, and
 // commit-time hook integration inside worker-managed worktrees.
 
-import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { Worker as NodeWorker } from "worker_threads";
@@ -109,11 +108,9 @@ function execGitCommitWithIndexLockRetry(message, cwd, budget, { attempts = 3, w
   let lastErr = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return execFileSync("git", ["commit", ...(allowEmpty ? ["--allow-empty"] : []), "-m", message], {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: budget.processTimeoutMs,
+      return gitExec(["commit", ...(allowEmpty ? ["--allow-empty"] : []), "-m", message], cwd, {
+        timeoutMs: budget.processTimeoutMs,
+        trim: false,
       });
     } catch (err) {
       if (!isGitIndexLockError(err)) throw err;
@@ -170,12 +167,7 @@ function safeGitAdd(file, cwd, context, warnings = null) {
 
 function isGitIgnored(file, cwd) {
   try {
-    execFileSync("git", ["check-ignore", "-q", "--", file], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: GIT_COMMAND_TIMEOUT_MS,
-    });
+    gitExec(["check-ignore", "-q", "--", file], cwd, { timeoutMs: GIT_COMMAND_TIMEOUT_MS });
     return true;
   } catch (err) {
     if (err && err.status === 1) return false;
@@ -318,6 +310,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const createdViaModifyScope = [];
   const createdOutOfScope = [];
   const skippedIgnoredCreateFiles = [];
+  const skippedIgnoredModifyFiles = [];
   const skippedStaleModifyFiles = [];
   const discardedGeneratedFiles = [];
   const outOfScopeDirtySkipped = [];
@@ -381,12 +374,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   // unrelated dirty paths so they cannot ride along in the merge commit.
   let mergeInProgress = false;
   try {
-    execFileSync("git", ["rev-parse", "--verify", "MERGE_HEAD"], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: GIT_COMMAND_TIMEOUT_MS,
-    });
+    gitExec(["rev-parse", "--verify", "MERGE_HEAD"], cwd, { timeoutMs: GIT_COMMAND_TIMEOUT_MS });
     mergeInProgress = true;
   } catch { /* not in a merge — normal path */ }
 
@@ -663,7 +651,20 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
         });
         continue;
       }
-      safeGitAdd(resolveScopedPath(f), cwd, "modifyFiles", gitAddWarnings);
+      const resolved = resolveScopedPath(f);
+      // git add refuses ignored untracked paths; a declared modify path the
+      // job never touched (not tracked, not dirty) can only be staged with
+      // --force, so skip it like ignored createFiles paths instead of letting
+      // the strict-context throw dead-letter a clean job.
+      if (!trackedByFold.has(norm(f)) && !actualDirtyByFold.has(norm(f)) && isGitIgnored(resolved, cwd)) {
+        skippedIgnoredModifyFiles.push(resolved);
+        log.warn("git-commit-scope", "Skipped ignored modifyFiles path during staging", {
+          file: resolved,
+          context: "modifyFiles",
+        });
+        continue;
+      }
+      safeGitAdd(resolved, cwd, "modifyFiles", gitAddWarnings);
     }
     for (const f of createFilesRaw) {
       const resolved = resolveScopedPath(f);
@@ -806,7 +807,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   // the next job's commit.
   if (!staged && !mergeInProgress) {
     const scopeCleanedNoOp = hasScope && reverted.length > 0;
-    return { hash: gitCurrentHash(cwd), reverted, createdViaModifyScope, createdOutOfScope, skippedIgnoredCreateFiles, skippedStaleModifyFiles, discardedGeneratedFiles, outOfScopeDirtySkipped, outOfScopeStagingSkipped, siblingDirtySkipped, siblingUntrackedSkipped, siblingStagingSkipped, gitAddWarnings, scopeCleanedNoOp, snapshotRestoreFailed, snapshotRestoreError, snapshotRestoreRef };
+    return { hash: gitCurrentHash(cwd), reverted, createdViaModifyScope, createdOutOfScope, skippedIgnoredCreateFiles, skippedIgnoredModifyFiles, skippedStaleModifyFiles, discardedGeneratedFiles, outOfScopeDirtySkipped, outOfScopeStagingSkipped, siblingDirtySkipped, siblingUntrackedSkipped, siblingStagingSkipped, gitAddWarnings, scopeCleanedNoOp, snapshotRestoreFailed, snapshotRestoreError, snapshotRestoreRef };
   }
 
   // When completing a merge, verify the dev actually resolved the conflicts
@@ -829,12 +830,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       throw new Error(`Merge conflict unresolved: ${unmergedPaths.slice(0, 10).join(", ")}`);
     }
     try {
-      execFileSync("git", ["diff", "--cached", "--check"], {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: GIT_COMMAND_TIMEOUT_MS,
-      });
+      gitExec(["diff", "--cached", "--check"], cwd, { timeoutMs: GIT_COMMAND_TIMEOUT_MS });
     } catch (err) {
       const out = String(err.stdout || err.stderr || err.message || "").trim();
       const firstLines = out.split("\n").slice(0, 10).join(" | ");
@@ -929,6 +925,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     createdViaModifyScope,
     createdOutOfScope,
     skippedIgnoredCreateFiles,
+    skippedIgnoredModifyFiles,
     skippedStaleModifyFiles,
     discardedGeneratedFiles,
     outOfScopeDirtySkipped,

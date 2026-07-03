@@ -3,7 +3,6 @@
 
 import fs from "fs";
 import path from "path";
-import { execFileSync, execSync } from "child_process";
 import { listCrossWiMergeBlockers, logEvent } from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { runHook } from "./hooks.js";
@@ -14,7 +13,7 @@ import {
   emitMergedToMain as emitAtlasV2MergedToMain,
   isAtlasV2EmissionEnabled,
 } from "../../atlas/classes/v2/PipelineHooks.js";
-import { GIT_OPERATION_TIMEOUT_MS } from "./utils.js";
+import { GIT_OPERATION_TIMEOUT_MS, gitExec } from "./utils.js";
 import {
   preserveDirtyWorktreeSnapshot,
   snapshotAndResetDirtyWorktree,
@@ -34,7 +33,7 @@ export function createMergeWorkflowHelpers(context, {
 
   function gitDiffStat(mergeBase, branch, cwd) {
     try {
-      const raw = execFileSync("git", ["diff", "--stat", `${mergeBase}...${branch}`], { cwd, encoding: "utf-8", timeout: GIT_OPERATION_TIMEOUT_MS });
+      const raw = gitExec(["diff", "--stat", `${mergeBase}...${branch}`], cwd, { timeoutMs: GIT_OPERATION_TIMEOUT_MS });
       return raw.trim().split("\n").filter(l => l.trim());
     } catch {
       return [];
@@ -51,13 +50,7 @@ export function createMergeWorkflowHelpers(context, {
    */
 
   function gitMergeExec(args, cwd, { trim = true } = {}) {
-    const out = execFileSync("git", args, {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: GIT_MERGE_TIMEOUT_MS,
-    });
-    return trim ? String(out || "").trim() : String(out || "");
+    return gitExec(args, cwd, { timeoutMs: GIT_MERGE_TIMEOUT_MS, trim });
   }
 
   function firstGitLine(err) {
@@ -624,7 +617,10 @@ export function createMergeWorkflowHelpers(context, {
     let autoStash = null;
 
     try {
-      // Pre-flight: clean up any stale merge state (MERGE_HEAD from aborted merge)
+      // Pre-flight: MERGE_HEAD in the target checkout is never Posse's own
+      // state — every Posse merge here is `merge --squash`, which does not
+      // write MERGE_HEAD under any failure mode. Aborting it would discard a
+      // human's in-progress merge resolution, so refuse like the dirty gate.
       let hasMergeHead = false;
       try {
         gitMergeExec(["rev-parse", "--verify", "MERGE_HEAD"], cwd);
@@ -633,21 +629,38 @@ export function createMergeWorkflowHelpers(context, {
         hasMergeHead = false;
       }
       if (hasMergeHead) {
-        log(`Found stale MERGE_HEAD — cleaning up before merge of ${branch}`);
-        try { gitMergeExec(["merge", "--abort"], cwd); } catch {
-          gitMergeExec(["reset", "--merge"], cwd);
-        }
+        const message = `Merge refused: target worktree has an in-progress merge (MERGE_HEAD present) before merging ${branch}; finish or abort it manually`;
+        log(message, { json: { branch, target: targetBranch, merge_in_progress: true } });
+        return { ok: false, dirty: true, message };
       }
 
-      // Pre-flight: clean up unmerged index entries (left by failed stash pop)
-      // These have no MERGE_HEAD but leave conflict markers in the working tree.
-      // Accept the current HEAD version and move on. Never drop a stash here:
-      // stale conflict cleanup cannot know which stash, if any, caused it.
+      // Pre-flight: unmerged index entries without MERGE_HEAD do have Posse
+      // origins (a crashed conflicted squash merge, a failed stash pop), so
+      // heal them — but only after the conflicted files are snapshotted; the
+      // working tree may hold hand-resolution work the stash stack does not.
+      // Never drop a stash here: stale conflict cleanup cannot know which
+      // stash, if any, caused it.
       try {
         const unmerged = gitMergeExec(["diff", "--name-only", "--diff-filter=U"], cwd);
         if (unmerged.length > 0) {
           const files = unmerged.split("\n").filter(Boolean);
-          log(`Found ${files.length} unmerged path(s) from stale stash pop — resetting to HEAD and leaving stash stack untouched`, { json: { files } });
+          let snapshotRef = null;
+          try {
+            snapshotRef = preserveDirtyWorktreeSnapshot(cwd, projectDir, {
+              reason: "merge-preflight-unmerged",
+              branchName: targetBranch,
+              onMsg: (msg) => log(msg),
+            });
+          } catch (snapErr) {
+            snapshotRef = null;
+            log(`Pre-flight snapshot of unmerged paths failed: ${snapErr?.message || String(snapErr)}`);
+          }
+          if (!snapshotRef) {
+            const message = `Merge refused: target worktree has ${files.length} unmerged path(s) and the pre-flight snapshot failed; resolve manually before merging ${branch}`;
+            log(message, { json: { branch, target: targetBranch, files } });
+            return { ok: false, dirty: true, message };
+          }
+          log(`Found ${files.length} unmerged path(s) from stale merge/stash state — snapshotted to ${snapshotRef} then resetting to HEAD, leaving stash stack untouched`, { json: { files, snapshot_ref: String(snapshotRef) } });
           for (const f of files) {
             gitMergeExec(["checkout", "HEAD", "--", f], cwd);
           }
@@ -974,12 +987,7 @@ export function createMergeWorkflowHelpers(context, {
     const targetBranch = currentTargetBranch();
     let sourceBranchTip = null;
     try {
-      sourceBranchTip = execFileSync("git", ["rev-parse", branchName], {
-        cwd: projectDir,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 5000,
-      }).trim();
+      sourceBranchTip = gitExec(["rev-parse", branchName], projectDir, { timeoutMs: 5000 }).trim();
     } catch {
       sourceBranchTip = null;
     }

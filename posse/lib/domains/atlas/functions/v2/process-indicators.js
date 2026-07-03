@@ -43,6 +43,7 @@ function statInfo(filePath) {
 function openReadonly(dbPath, fn) {
   if (!fs.existsSync(dbPath)) return null;
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  db.pragma("busy_timeout = 5000");
   try {
     return fn(db);
   } finally {

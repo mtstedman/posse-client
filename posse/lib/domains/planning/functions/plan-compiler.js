@@ -42,6 +42,7 @@ import {
   wiScopeId,
 } from "../../artifacts/functions/index.js";
 import { hasWritableScope, parseResearcherStructuredOutput } from "../../handoff/functions/index.js";
+import { projectDbEffectivePermissions } from "../../../functions/toolkit/project-db/config.js";
 import {
   normalizeRiskTags,
   resolveTaskExecutionPolicy,
@@ -877,6 +878,33 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           || (Array.isArray(t.files_to_delete) && t.files_to_delete.length > 0);
         const plannerRepoCreateScope = Array.isArray(t.files_to_create) && t.files_to_create.length > 0;
         const plannerRepoWritableScope = plannerRepoMutationScope || plannerRepoCreateScope;
+
+        // ── DB-only task normalization (task_mode:"db") ──
+        // A db task's entire write surface is the project database; it must
+        // carry no file scope (locks/commit machinery key on task_mode:"db"
+        // carrying none). Contradictory shapes degrade to dev/code — the file
+        // scope wins. A db task compiled without a write-capable grant fails
+        // fast at the developer preflight; warn here so the gap is visible in
+        // plan events rather than only as a downstream job failure.
+        if (taskMode === "db") {
+          if (plannerRepoWritableScope) {
+            worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: db task "${t.title}" carries file scope — demoted to dev/code`);
+            taskMode = "code";
+            t.task_mode = "code";
+          } else {
+            if (t.output_root) t.output_root = null;
+            let dbWritePerms = [];
+            try {
+              dbWritePerms = projectDbEffectivePermissions({ projectDir: worker.projectDir, capability: "write" })
+                .filter((perm) => perm !== "read");
+            } catch {
+              dbWritePerms = [];
+            }
+            if (dbWritePerms.length === 0) {
+              worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: db task "${t.title}" compiled without a write-capable project DB grant — it will fail fast unless the grant is configured`);
+            }
+          }
+        }
         const forceRepoOutput = explicitBindings.outputMode === "repo";
         const forceArtifactOutput = explicitBindings.outputMode === "artifact";
         const intakeDesiredOutputs = Array.isArray(intakeHints.desired_outputs)
@@ -901,7 +929,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           if (t.output_root) t.output_root = null;
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: explicit output_mode=repo preserved "${t.title}" as dev/code`);
         }
-        if (forceArtifactOutput && jobType === "dev" && wiMode === "build" && taskMode !== "code") {
+        if (forceArtifactOutput && jobType === "dev" && wiMode === "build" && taskMode !== "code" && taskMode !== "db") {
           t.job_type = "artificer";
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: explicit output_mode=artifact preserved "${t.title}" as artificer/${taskMode}`);
         }
@@ -1075,9 +1103,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: WI mode "image" auto-set needs_image_generation in task "${t.title}"`);
             t.needs_image_generation = true;
           }
-        } else if (taskMode !== "code") {
+        } else if (taskMode !== "code" && taskMode !== "db") {
           // Build WI with non-code task (image/content) — route to artificer.
           // Build WIs can mix code tasks (dev) with artifact tasks (artificer).
+          // db tasks are excluded: they stay dev jobs with no artifact dirs.
           if (plannerRepoCodeTaskNormalized && !t.needs_image_generation && taskMode !== "image") {
             taskMode = "code";
             t.task_mode = "code";

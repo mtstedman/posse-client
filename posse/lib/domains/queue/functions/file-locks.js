@@ -70,8 +70,17 @@ function jobIsAssessOnly(job = {}) {
     || payload?._assess_only === "1";
 }
 
+// DB-only jobs (task_mode:"db") mutate the project database, never worktree
+// files. File locks exist to prevent cross-branch merge conflicts; DB writes
+// don't merge through git, so these jobs take no file locks — and must not
+// fall into the unknown-scope whole-repo promotion below.
+function jobIsDbOnly(job = {}) {
+  const payload = parseJobPayload(job);
+  return payload?.task_mode === "db";
+}
+
 export function jobNeedsWriteLocks(job = {}) {
-  return QUEUE_LOCKING_JOB_TYPES.has(job?.job_type) && !jobIsAssessOnly(job);
+  return QUEUE_LOCKING_JOB_TYPES.has(job?.job_type) && !jobIsAssessOnly(job) && !jobIsDbOnly(job);
 }
 
 export function jobHasWritePermission(job = {}) {
@@ -345,7 +354,7 @@ export function queuedCohortJobIdsForJob(job, db = getDb()) {
   return new Set(rows.map((row) => Number(row.id)));
 }
 
-function insertMissingWiLocks(db, job, scope, ts) {
+function insertMissingWiLocks(db, job, scope, ts, source = "scheduler_handoff") {
   const wi = db.prepare(`
     SELECT status, branch_name, merge_state
     FROM work_items
@@ -358,21 +367,110 @@ function insertMissingWiLocks(db, job, scope, ts) {
     INSERT OR IGNORE INTO work_item_file_locks (work_item_id, path, lock_kind, source_job_id, acquired_at, metadata_json)
     VALUES (?, ?, ?, ?, ?, ?)
   `);
-  const metadata = JSON.stringify({ source: "scheduler_handoff", job_type: job.job_type });
+  const metadata = JSON.stringify({ source, job_type: job.job_type });
   for (const lock of scopeToLockRows(scope)) {
     stmt.run(job.work_item_id, lock.path, lock.lock_kind, job.id, ts, metadata);
   }
 }
 
-function insertJobLocks(db, job, scope, ts) {
+function insertJobLocks(db, job, scope, ts, source = "scheduler_handoff") {
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO job_file_locks (job_id, work_item_id, path, lock_kind, acquired_at, metadata_json)
     VALUES (?, ?, ?, ?, ?, ?)
   `);
-  const metadata = JSON.stringify({ source: "scheduler_handoff", job_type: job.job_type });
+  const metadata = JSON.stringify({ source, job_type: job.job_type });
   for (const lock of scopeToLockRows(scope)) {
     stmt.run(job.id, job.work_item_id, lock.path, lock.lock_kind, ts, metadata);
   }
+}
+
+// ─── Tool-time write-lock guard primitives (defense in depth) ────────────────
+//
+// Locks are inserted at lease time from the payload scope and trusted
+// thereafter; nothing at the write site verifies the executing job actually
+// holds a lock covering the path it is about to mutate. Any drift between
+// scope and lock rows — an explicit-scope lease narrower than the payload, a
+// skipConflictCheck caller, a FILE_REQUEST-approved mid-job scope addition
+// whose lock rows were never inserted — writes unguarded. These primitives let
+// the mutating tools close that gap at the last write barrier.
+
+export function jobHoldsWriteLockForPath(jobId, filePath) {
+  const id = Number(jobId);
+  const target = normalizeLockPath(filePath);
+  if (!Number.isFinite(id) || !target) return false;
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT path, lock_kind FROM job_file_locks
+    WHERE job_id = ? AND released_at IS NULL
+  `).all(id);
+  return rows.some((row) => {
+    const lockPath = normalizeLockPath(row.path);
+    if (!lockPath) return false;
+    if (lockPath === "*") return true;
+    if (row.lock_kind === "file") return lockPath === target;
+    if (row.lock_kind === "root") return target === lockPath || isUnderRoot(target, [lockPath]);
+    return false;
+  });
+}
+
+/**
+ * Verify the job holds a write lock covering `filePath`; acquire it
+ * transactionally when the row is missing and no other holder conflicts.
+ * Returns { ok:true, held|acquired|skipped } or { ok:false, conflict } — a
+ * conflict means another work item/job owns the path and the write must be
+ * refused (the caller instructs the agent to report BLOCKED, not poll).
+ */
+export function verifyOrAcquireJobWriteLockForPath(jobId, filePath, { source = "tool_guard" } = {}) {
+  const target = normalizeLockPath(filePath);
+  if (!target) return { ok: true, skipped: "unlockable_path" };
+  const db = getDb();
+  const job = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(Number(jobId));
+  if (!job) return { ok: true, skipped: "no_job" };
+  if (!jobNeedsWriteLocks(job)) return { ok: true, skipped: "job_not_locking" };
+  if (jobHoldsWriteLockForPath(job.id, target)) return { ok: true, held: true };
+
+  const scope = { files: [target], roots: [] };
+  return runImmediateTransaction(db, () => {
+    if (jobHoldsWriteLockForPath(job.id, target)) return { ok: true, held: true };
+    let conflict = findWriteLockConflict(job, scope);
+    if (conflict) {
+      const cleaned = cleanupStaleFileLocks();
+      if (cleaned.job_locks_released > 0 || cleaned.wi_locks_released > 0) {
+        conflict = findWriteLockConflict(job, scope);
+      }
+    }
+    if (conflict) {
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.JOB_WRITE_LOCK_BLOCKED,
+        actor_type: EVENT_ACTORS.WORKER,
+        actor_id: `job-${job.id}`,
+        message: `Tool-time write to ${target} refused: ${lockConflictMessage(job, conflict)}`,
+        event_json: JSON.stringify({
+          visible: false,
+          source,
+          conflict_type: conflict.type,
+          candidate: conflict.candidate,
+          holder: conflict.lock,
+        }),
+      });
+      return { ok: false, conflict };
+    }
+    const ts = now();
+    insertMissingWiLocks(db, job, scope, ts, source);
+    insertJobLocks(db, job, scope, ts, source);
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      event_type: EVENT_TYPES.JOB_WRITE_LOCKS_ACQUIRED,
+      actor_type: EVENT_ACTORS.WORKER,
+      actor_id: `job-${job.id}`,
+      message: `Acquired write lock for ${target} at tool time (missing from lease scope)`,
+      event_json: JSON.stringify({ files: [target], roots: [], source }),
+    });
+    return { ok: true, acquired: true };
+  });
 }
 
 function lockConflictMessage(job, conflict) {

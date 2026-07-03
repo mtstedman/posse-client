@@ -593,7 +593,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_get_hot_path",
-    description: "Iris Rung 3 (~600 tokens). Fetch identifier-focused code lines with small context windows for an ATLAS symbol or a repo-relative file.",
+    description: "Iris Rung 3 (~600 tokens). Fetch identifier-focused code lines with small context windows for an ATLAS symbol or a repo-relative file. AST usages match first; identifiers that only appear inside strings/comments (e.g. dispatch like $action === 'create') return as matchKind \"text\" via identifiersFoundInText, so identifiersMissing means the identifier appears nowhere in the target.",
     parameters: {
       type: "object",
       properties: {

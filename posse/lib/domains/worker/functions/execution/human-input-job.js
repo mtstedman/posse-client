@@ -19,7 +19,8 @@ import {
   updateJobPayload,
 } from "../../../queue/functions/index.js";
 import { withWorktreeLockAsync, worktreePath } from "../../../git/functions/worktree.js";
-import { findStallStashAsync, gitExecAsync } from "../../../git/functions/utils.js";
+import { acquireWorktreeLockAsync, gitStashLockPath } from "../../../git/functions/worktree-locks.js";
+import { dropStashByHashAsync, findStallStashEntryAsync } from "../../../git/functions/utils.js";
 import {
   applyPartialWorkTurnExtension,
   commitScopedPartialWorkAsync,
@@ -48,10 +49,23 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
 async function dropPartialWorkStashAsync(worker, origJob, wtPath) {
   return await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
-    const stashRef = await findStallStashAsync(origJob.id, wtPath);
-    if (stashRef) await gitExecAsync(["stash", "drop", stashRef], wtPath);
+    // refs/stash is repo-shared: a bare positional drop can destroy another
+    // lane's entry after any concurrent push shifts indices. Resolve the
+    // job's entry by hash and drop under the stash lock; if the lock is
+    // contended, leave an orphan stash (recoverable) rather than misdrop.
+    const entry = await findStallStashEntryAsync(origJob.id, wtPath);
+    if (entry) {
+      const stashLock = await acquireWorktreeLockAsync(gitStashLockPath(wtPath, worker.projectDir, { disabled: true }));
+      if (stashLock.acquired) {
+        try {
+          await dropStashByHashAsync(wtPath, entry.hash);
+        } finally {
+          await stashLock.releaseAsync();
+        }
+      }
+    }
     clearStallResume(origJob.id);
-    return stashRef || null;
+    return entry?.ref || null;
   });
 }
 

@@ -3,7 +3,8 @@ import fs from "fs";
 import path from "path";
 import { execSync, spawnSync } from "child_process";
 
-import { recordToolInvocation } from "../../domains/observability/functions/observations.js";
+import { nativeReadResultStats, recordToolInvocation } from "../../domains/observability/functions/observations.js";
+import { guardToolWriteLock } from "../../domains/queue/functions/write-lock-guard.js";
 import { isInsideRoot, realpathExistingPrefix } from "../../domains/runtime/functions/fs-safety.js";
 import {
   isSensitiveEnvFileOrTargetPath,
@@ -534,13 +535,13 @@ export function createDeterministicToolkit({
       if (result && typeof result.then === "function") {
         return result.then((resolved) => {
           if (isSuccessfulToolResult(resolved)) {
-            recordToolInvocation({ tool: toolName, input: args, cwd });
+            recordToolInvocation({ tool: toolName, input: args, cwd, extraDetail: nativeReadResultStats(toolName, resolved) });
           }
           return resolved;
         });
       }
       if (isSuccessfulToolResult(result)) {
-        recordToolInvocation({ tool: toolName, input: args, cwd });
+        recordToolInvocation({ tool: toolName, input: args, cwd, extraDetail: nativeReadResultStats(toolName, result) });
       }
       return result;
     };
@@ -623,6 +624,8 @@ export function createDeterministicToolkit({
     if (!exists && scopePredicates?.hasScope && !scopePredicates.canCreate(filePath)) {
       return `Error: write_file blocked - ${args.path} is outside the allowed creation scope.`;
     }
+    const lockErr = guardToolWriteLock("write_file", args.path, cwd);
+    if (lockErr) return lockErr;
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     writeTextFileAtomic(filePath, args.content);
     return `File written: ${filePath} (${args.content.length} chars)`;
@@ -642,6 +645,8 @@ export function createDeterministicToolkit({
     if (scopePredicates?.hasScope && !scopePredicates.canEdit(filePath)) {
       return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope.`;
     }
+    const lockErr = guardToolWriteLock("edit_file", args.path, cwd);
+    if (lockErr) return lockErr;
     const originalContent = fs.readFileSync(filePath, "utf-8");
     let content = originalContent;
 
@@ -1418,6 +1423,8 @@ export function createDeterministicToolkit({
     if (!destExists && scopePredicates?.hasScope && !scopePredicates.canCreate(destPath)) {
       return `Error: resize_image blocked - ${destArg} is outside the allowed creation scope.`;
     }
+    const lockErr = guardToolWriteLock("resize_image", destArg, cwd);
+    if (lockErr) return lockErr;
 
     try {
       const parsed = decodePngToRgba(fs.readFileSync(srcPath));
@@ -1495,6 +1502,8 @@ export function createDeterministicToolkit({
     if (!destExists && scopePredicates?.hasScope && !scopePredicates.canCreate(destPath)) {
       return `Error: optimize_image blocked - ${destArg} is outside the allowed creation scope.`;
     }
+    const lockErr = guardToolWriteLock("optimize_image", destArg, cwd);
+    if (lockErr) return lockErr;
 
     try {
       const parsed = decodePngToRgba(fs.readFileSync(srcPath));
@@ -1539,6 +1548,8 @@ export function createDeterministicToolkit({
     if (!destExists && scopePredicates?.hasScope && !scopePredicates.canCreate(destPath)) {
       return `Error: reencode_image blocked - ${destArg} is outside the allowed creation scope.`;
     }
+    const lockErr = guardToolWriteLock("reencode_image", destArg, cwd);
+    if (lockErr) return lockErr;
 
     const inputBuffer = fs.readFileSync(srcPath);
     const inputFormat = detectImageFormat(inputBuffer);
@@ -1838,6 +1849,8 @@ export function createDeterministicToolkit({
     if (!destExists && scopePredicates?.hasScope && !scopePredicates.canCreate(destPath)) {
       return `Error: clean_image alpha_key blocked - ${destArg} is outside the allowed creation scope.`;
     }
+    const lockErr = guardToolWriteLock("clean_image", destArg, cwd);
+    if (lockErr) return lockErr;
 
     try {
       const parsed = decodePngToRgba(fs.readFileSync(srcPath));

@@ -3,7 +3,6 @@
 // Small value/service object around a git working directory. This is the first
 // strangler step for moving worker git helpers behind an explicit domain API.
 
-import { execFile as defaultExecFileAsync, execFileSync } from "node:child_process";
 import path from "node:path";
 import { AsyncGateBusyError, AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { nativeAsyncOptions, runGitNativeMethod, runGitNativeMethodAsync } from "../functions/native/invoke.js";
@@ -12,15 +11,26 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const GIT_READ_ONLY_COMMANDS = new Set([
   "blame",
   "cat-file",
+  "check-ignore",
   "diff",
   "for-each-ref",
+  "grep",
   "log",
   "ls-files",
+  "ls-tree",
   "merge-base",
   "rev-list",
   "rev-parse",
   "show",
   "status",
+]);
+// Commands whose mutability depends on the subcommand. The empty string is
+// the bare-command form (e.g. `git remote` lists, `git stash` pushes).
+const GIT_SUBCOMMAND_READ_ONLY = new Map([
+  ["notes", new Set(["", "list", "show"])],
+  ["remote", new Set(["", "show", "get-url"])],
+  ["stash", new Set(["list", "show"])],
+  ["worktree", new Set(["list"])],
 ]);
 const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
   "-C",
@@ -237,12 +247,26 @@ function isReadOnlyConfigArgs(args = []) {
   return false;
 }
 
+function isReadOnlySubcommandArgs(cmd, args = []) {
+  const readOnlySubcommands = GIT_SUBCOMMAND_READ_ONLY.get(cmd);
+  if (!readOnlySubcommands) return false;
+  let subcommand = "";
+  for (const raw of args) {
+    const arg = String(raw || "");
+    if (!arg || arg.startsWith("-")) continue;
+    subcommand = arg;
+    break;
+  }
+  return readOnlySubcommands.has(subcommand);
+}
+
 export function isGitReadOnlyArgs(args = []) {
   const command = gitCommandArgs(args);
   const cmd = String(command[0] || "");
   let result = false;
   if (cmd === "branch") result = isReadOnlyBranchArgs(command.slice(1));
   else if (cmd === "config") result = isReadOnlyConfigArgs(command.slice(1));
+  else if (GIT_SUBCOMMAND_READ_ONLY.has(cmd)) result = isReadOnlySubcommandArgs(cmd, command.slice(1));
   else result = GIT_READ_ONLY_COMMANDS.has(cmd);
   return result;
 }
@@ -262,16 +286,54 @@ function gitGateStateForCwd(cwd) {
   return GIT_GATE.snapshot().keys.find((state) => state.key === key) || null;
 }
 
-function gitExecFailure(command, result) {
+function gitExecFailure(command, result, { base64Stdout = false } = {}) {
   const stderr = String(result?.stderr || "");
-  const stdout = String(result?.stdout || "");
+  let stdout = String(result?.stdout || "");
+  if (base64Stdout && stdout) {
+    try { stdout = Buffer.from(stdout.replace(/\s+/g, ""), "base64").toString("utf8"); } catch { /* keep raw */ }
+  }
   const detail = (stderr || stdout || `git ${command.join(" ")} failed`).trim();
   const error = new Error(detail);
   error.code = result?.status ?? 1;
   error.status = result?.status ?? 1;
   error.stdout = stdout;
   error.stderr = stderr;
+  // Marks "git itself ran and exited non-zero" — absent on gate-busy,
+  // native-unavailable, and transport errors. See isGitCommandFailure.
+  error.gitCommandFailed = true;
   return error;
+}
+
+/**
+ * True when the error came from git running and exiting non-zero (the
+ * pre-cutover child_process failure class). False for infrastructure
+ * failures the native route introduced: sync gate busy (ASYNC_GATE_BUSY),
+ * native binary unavailable (GIT_NATIVE_UNAVAILABLE), heartbeat/transport
+ * errors. Callers whose catch blocks encode "git said no" semantics
+ * (exit-code probes, fail-open guards) must not swallow the latter class.
+ */
+export function isGitCommandFailure(err) {
+  return err?.gitCommandFailed === true;
+}
+
+function decodeNativeBase64Stdout(text, command) {
+  const compact = String(text || "").replace(/\s+/g, "");
+  if (compact.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact)) {
+    const error = new Error(
+      `git ${command.join(" ")}: native git.exec returned non-base64 stdout for outputEncoding=base64; ` +
+      "the posse-git binary on disk is likely stale (pre-outputEncoding protocol)",
+    );
+    error.code = "GIT_NATIVE_PROTOCOL_SKEW";
+    throw error;
+  }
+  return Buffer.from(compact, "base64");
+}
+
+// Base64 inflates stdout by 4/3 and the JSON envelope adds framing; size the
+// transport capture so payloads near maxCaptureBytes are not truncated at the
+// spawn boundary (NativeBinary otherwise pins its default cap).
+function envelopeMaxBufferFor(maxCaptureBytes) {
+  return Math.ceil(maxCaptureBytes * 4 / 3) + 1024 * 1024;
 }
 
 function gitNativeRead(cwd, gitArgs, options, run) {
@@ -304,23 +366,13 @@ function assertSyncGitGateAvailable(cwd, mode, label) {
 
 export class Repo {
   constructor(cwd, {
-    execFile = execFileSync,
-    execFileAsync = defaultExecFileAsync,
     timeoutMs = DEFAULT_TIMEOUT_MS,
   } = {}) {
     if (!cwd || typeof cwd !== "string") {
       throw new Error("Repo requires cwd");
     }
-    if (typeof execFile !== "function") {
-      throw new Error("Repo requires execFile function");
-    }
-    if (typeof execFileAsync !== "function") {
-      throw new Error("Repo requires execFileAsync function");
-    }
 
     this.cwd = path.resolve(cwd);
-    this.execFile = execFile;
-    this.execFileAsync = execFileAsync;
     this.timeoutMs = timeoutMs;
     Object.freeze(this);
   }
@@ -332,21 +384,33 @@ export class Repo {
     maxBuffer = 1024 * 1024 * 16,
     gate = true,
     gateMode = "auto",
+    timeoutMs = this.timeoutMs,
+    nativeParity = {},
+    encoding = "utf8",
   } = {}) {
     const gitArgs = normalizeGitArgs(cmdOrArgs);
+    const wantBuffer = encoding === "buffer";
     if (gate !== false) {
       const mode = gitGateModeForArgs(gitArgs, gateMode);
       assertSyncGitGateAvailable(cwd, mode, gitGateLabel(gitArgs));
     }
-    const output = this.execFile("git", gitArgs, {
-      cwd,
-      encoding: "utf-8",
-      input,
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: this.timeoutMs,
-      maxBuffer,
-    });
-    return trim ? String(output).trim() : String(output);
+    const result = runGitNativeMethod(
+      "git.exec",
+      {
+        cwd,
+        args: gitArgs,
+        input: input ?? null,
+        trim: wantBuffer ? false : trim,
+        maxCaptureBytes: maxBuffer,
+        timeoutMs,
+        ...(wantBuffer ? { outputEncoding: "base64" } : {}),
+      },
+      { ...nativeParity, timeoutMs, maxBuffer: envelopeMaxBufferFor(maxBuffer) },
+    );
+    if (!result?.ok) throw gitExecFailure(gitArgs, result, { base64Stdout: wantBuffer });
+    return wantBuffer
+      ? decodeNativeBase64Stdout(result.stdout, gitArgs)
+      : String(result.stdout ?? "");
   }
 
   execAsync(cmdOrArgs, {
@@ -354,65 +418,41 @@ export class Repo {
     trim = true,
     input = undefined,
     signal = undefined,
-    env = undefined,
     timeoutMs = this.timeoutMs,
     gate = true,
     gateMode = "auto",
     barrierKey = null,
     nativeParity = {},
+    maxBuffer = 1024 * 1024 * 16,
+    encoding = "utf8",
   } = {}) {
     const gitArgs = normalizeGitArgs(cmdOrArgs);
-    const readOnly = isGitReadOnlyArgs(gitArgs);
-    const useNativeRead = readOnly && nativeParity?.disabled !== true;
-    const maxCaptureBytes = 1024 * 1024 * 16;
-    const runNativeRead = async () => {
+    const wantBuffer = encoding === "buffer";
+    const runNativeGit = async () => {
       const result = await runGitNativeMethodAsync(
         "git.exec",
-        { cwd, args: gitArgs, input: input ?? null, trim, maxCaptureBytes },
-        { ...nativeParity, signal, timeoutMs },
-      );
-      if (!result?.ok) throw gitExecFailure(gitArgs, result);
-      return String(result.stdout ?? "");
-    };
-    const runNodeGit = () => new Promise((resolve, reject) => {
-      let child = null;
-      try {
-        const execOptions = {
+        {
           cwd,
-          encoding: "utf-8",
-          input,
-          env,
-          timeout: timeoutMs,
-          windowsHide: true,
-          maxBuffer: maxCaptureBytes,
-        };
-        if (signal) execOptions.signal = signal;
-        child = this.execFileAsync("git", gitArgs, {
-          ...execOptions,
-        }, (error, stdout, stderr) => {
-          if (error) {
-            if (stdout != null && error.stdout == null) error.stdout = stdout;
-            if (stderr != null && error.stderr == null) error.stderr = stderr;
-            reject(error);
-            return;
-          }
-          const result = trim ? String(stdout || "").trim() : String(stdout || "");
-          resolve(result);
-        });
-      } catch (error) {
-        reject(error);
-      }
-      if (signal?.aborted && child?.kill) {
-        try { child.kill(); } catch { /* ignore */ }
-      }
-    });
-    const run = useNativeRead ? runNativeRead : runNodeGit;
-    if (gate === false) return run();
+          args: gitArgs,
+          input: input ?? null,
+          trim: wantBuffer ? false : trim,
+          maxCaptureBytes: maxBuffer,
+          timeoutMs,
+          ...(wantBuffer ? { outputEncoding: "base64" } : {}),
+        },
+        { ...nativeParity, signal, timeoutMs, maxBuffer: envelopeMaxBufferFor(maxBuffer) },
+      );
+      if (!result?.ok) throw gitExecFailure(gitArgs, result, { base64Stdout: wantBuffer });
+      return wantBuffer
+        ? decodeNativeBase64Stdout(result.stdout, gitArgs)
+        : String(result.stdout ?? "");
+    };
+    if (gate === false) return runNativeGit();
     const mode = gitGateModeForArgs(gitArgs, gateMode);
     const label = gitGateLabel(gitArgs);
     return mode === "blocking"
-      ? GIT_GATE.write(cwd, run, { label, waitMs: timeoutMs, barrierKey })
-      : GIT_GATE.read(cwd, run, { label });
+      ? GIT_GATE.write(cwd, runNativeGit, { label, waitMs: timeoutMs, barrierKey })
+      : GIT_GATE.read(cwd, runNativeGit, { label });
   }
 
   currentHashAsync(ref = "HEAD", options = {}) {
@@ -504,8 +544,6 @@ export class Repo {
 
   withCwd(cwd) {
     return new Repo(cwd, {
-      execFile: this.execFile,
-      execFileAsync: this.execFileAsync,
       timeoutMs: this.timeoutMs,
     });
   }

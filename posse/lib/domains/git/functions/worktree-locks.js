@@ -257,6 +257,10 @@ export function removeLockIfOwner(lockPath, ownerToken, { allowUnowned = false, 
     metadata = readLockMetadata(lockPath);
     if (!metadata && !lockFileExists(lockPath)) return true;
     if (metadata?.ownerToken !== ownerToken) return false;
+    // A caller-supplied stat pins the exact file observed during the reclaim
+    // decision — if another waiter already swapped in a fresh lock, the token
+    // may still match a stale read but the stat cannot.
+    if (expectedStat && !statMatchesExpected(lockPath, expectedStat)) return false;
   } else if (allowUnowned) {
     if (!expectedStat || !statMatchesExpected(lockPath, expectedStat)) return false;
     metadata = readLockMetadata(lockPath);
@@ -278,6 +282,8 @@ export async function removeLockIfOwnerAsync(lockPath, ownerToken, { allowUnowne
     metadata = await readLockMetadataAsync(lockPath);
     if (!metadata && !(await lockFileExistsAsync(lockPath))) return true;
     if (metadata?.ownerToken !== ownerToken) return false;
+    // See sync twin: the stat pins the exact file observed at reclaim time.
+    if (expectedStat && !(await statMatchesExpectedAsync(lockPath, expectedStat))) return false;
   } else if (allowUnowned) {
     if (!expectedStat || !(await statMatchesExpectedAsync(lockPath, expectedStat))) return false;
     metadata = await readLockMetadataAsync(lockPath);

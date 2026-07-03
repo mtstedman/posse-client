@@ -1,31 +1,16 @@
-import { execFile, execFileSync } from "child_process";
-import { promisify } from "util";
+import { gitExec, gitExecAsync } from "./utils.js";
 
 const MAX_FILES = 40;
 const MAX_HUNKS_PER_FILE = 12;
 const MAX_SIGNALS_PER_FILE = 8;
 const MAX_NARRATIVE_CHARS = 12000;
-const execFileAsync = promisify(execFile);
 
 function git(cwd, args) {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 15000,
-    maxBuffer: 1024 * 1024 * 2,
-  });
+  return gitExec(args, cwd, { timeoutMs: 15000, maxBuffer: 1024 * 1024 * 2, trim: false });
 }
 
 async function gitAsync(cwd, args) {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd,
-    encoding: "utf8",
-    timeout: 15000,
-    maxBuffer: 1024 * 1024 * 2,
-    windowsHide: true,
-  });
-  return String(stdout || "");
+  return await gitExecAsync(args, cwd, { timeoutMs: 15000, maxBuffer: 1024 * 1024 * 2, trim: false });
 }
 
 function normalizePath(value) {

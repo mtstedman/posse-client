@@ -4,7 +4,6 @@
 
 import fs from "fs";
 import path from "path";
-import { execFileSync } from "child_process";
 import Database from "better-sqlite3";
 import { Ledger } from "../../../classes/v2/Ledger.js";
 import { View as ViewClass } from "../../../classes/v2/View.js";
@@ -33,6 +32,7 @@ import { isDefaultVisibleSymbol, isGeneratedPath, isLiteralSymbolName, isNoisyLo
 import { isBuiltinCall } from "../resolver/builtins.js";
 import { PHP_STDLIB_FUNCTIONS } from "../resolver/php-stdlib.generated.js";
 import { parseImportModuleRef } from "../resolver/import-context.js";
+import { gitExecSafe } from "../../../../git/functions/utils.js";
 
 let indexOperationCounter = 0;
 const DEFAULT_BRANCH_CACHE_TTL_MS = 60_000;
@@ -1110,14 +1110,7 @@ function normalizeRemoteBranch(value) {
  * @returns {string}
  */
 function gitOutput(repoRoot, args) {
-  try {
-    return String(execFileSync("git", ["-C", repoRoot, ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    })).trim();
-  } catch {
-    return "";
-  }
+  return gitExecSafe(args, repoRoot);
 }
 
 /**

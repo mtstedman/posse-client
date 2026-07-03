@@ -59,7 +59,15 @@ export async function ensureDetachedReadOnlyWorktreeAsync(projectDir, {
   let targetDir = path.resolve(worktreeDir);
   if (fs.existsSync(targetDir)) {
     try {
-      await gitExecAsync(["rev-parse", "--git-dir"], targetDir, { signal });
+      // The dir must BE a worktree root, not merely sit inside one:
+      // `rev-parse --git-dir` resolves upward, so a stale dir that lost its
+      // .git file (partial context-dir rm) resolves to the enclosing repo —
+      // the main checkout, since these dirs live under <project>/.posse/ —
+      // and the reset/clean below would then hit the user's working tree.
+      const toplevel = String(await gitExecAsync(["rev-parse", "--show-toplevel"], targetDir, { signal }) || "").trim();
+      if (!toplevel || path.resolve(toplevel).toLowerCase() !== targetDir.toLowerCase()) {
+        throw new Error(`stale directory is not a worktree root (toplevel: ${toplevel || "unknown"})`);
+      }
       await gitExecAsync(["checkout", "--detach", ref], targetDir, { signal });
       await gitExecAsync(["reset", "--hard", ref], targetDir, { signal });
       await gitExecAsync(["clean", "-fd"], targetDir, { signal });
@@ -106,7 +114,19 @@ export async function gitWorktreeAddAsync(wtPath, branchName, mainCwd, opts = {}
       try {
         await gitExecAsync(["rev-parse", "--git-dir"], wtPath, { signal });
         const currentBranch = await gitCurrentBranchAsync(wtPath, { signal });
-        const dirty = await worktreeNeedsRecoveryAsync(wtPath, { signal });
+        let dirty;
+        try {
+          dirty = await worktreeNeedsRecoveryAsync(wtPath, { signal, strict: true });
+        } catch (probeErr) {
+          if (isAbortError(probeErr)) throw probeErr;
+          // Unknown dirty state must defer, not fall into the corrupt-metadata
+          // removal below — the probe failure is usually transient (index.lock,
+          // status timeout) while the removal is permanent.
+          const err = new Error(`Worktree dirty-state probe failed; deferring reuse recovery: ${probeErr?.message || String(probeErr)}`);
+          err.code = "WORKTREE_DIRTY_PROBE_FAILED";
+          err.deferWorktreeCleanup = true;
+          throw err;
+        }
         if (dirty) {
           const skipDirtyRecovery = typeof opts.shouldSkipDirtyRecovery === "function"
             && await opts.shouldSkipDirtyRecovery({ wtPath, currentBranch, branchName });
@@ -146,6 +166,23 @@ export async function gitWorktreeAddAsync(wtPath, branchName, mainCwd, opts = {}
             branchName,
             currentBranch,
           }, "Worktree branch mismatch recovery deferred");
+          // The removal below is a raw force-remove. Anything the recovery
+          // pass above could not capture (tolerated sibling residue, stash-
+          // blind leftovers like nested repos) must block it — as must an
+          // unreadable status, since removal is permanent.
+          let leftover;
+          try {
+            leftover = String(await gitExecAsync(["status", "--porcelain"], wtPath, { signal }) || "").trim();
+          } catch (statusErr) {
+            if (isAbortError(statusErr)) throw statusErr;
+            leftover = `status unreadable: ${statusErr?.message || String(statusErr)}`;
+          }
+          if (leftover) {
+            const err = new Error(`Worktree on ${currentBranch || "unknown"} (expected ${branchName}) still has unpreserved changes; deferring removal`);
+            err.code = "WORKTREE_DIRTY_PROBE_FAILED";
+            err.deferWorktreeCleanup = true;
+            throw err;
+          }
           if (opts.onBranchMismatch) {
             opts.onBranchMismatch({ expected: branchName, actual: currentBranch || null, wtPath });
           }
@@ -175,6 +212,10 @@ export async function gitWorktreeAddAsync(wtPath, branchName, mainCwd, opts = {}
       } catch (err) {
         if (isAbortError(err)) throw err;
         if (err?.deferWorktreeCleanup) throw err;
+        // A snapshot refusal is a deliberate fail-closed stop, not corrupt
+        // metadata — reclassifying it here would answer "refusing to reset"
+        // with a lossy copy plus force-removal.
+        if (err?.code === "SNAPSHOT_REFUSED_RESET") throw err;
         const fileSnapshot = preserveCorruptWorktreeContents(wtPath, mainCwd, {
           wiId: opts.wiId || null,
           branchName,
@@ -182,6 +223,20 @@ export async function gitWorktreeAddAsync(wtPath, branchName, mainCwd, opts = {}
         if (fileSnapshot && opts.onDirtySnapshot) {
           opts.onDirtySnapshot(fileSnapshot, "corrupt-metadata: copied worktree contents to recovery directory");
         }
+        // null means nothing was copied: either the worktree is genuinely
+        // empty (a bare dir / lone .git gitfile is safe to remove) or the
+        // copy itself failed — in which case removal would be the only copy's
+        // destruction, so surface the original error instead.
+        let removable = !!fileSnapshot;
+        if (!removable) {
+          try {
+            const entries = fs.readdirSync(wtPath);
+            removable = entries.every((name) => name === ".git" && fs.statSync(path.join(wtPath, name)).isFile());
+          } catch {
+            removable = false;
+          }
+        }
+        if (!removable) throw err;
         await removeWorktreePathAsync(wtPath, mainCwd, { signal });
       }
     }

@@ -37,11 +37,17 @@ export const TASK_MODES = Object.freeze({
   image: Object.freeze({ needsInputs: false, needsWorkspace: false, needsArtifacts: true }),
   // Process uploaded files — inputs read-only, workspace mutable, outputs to artifacts.
   intake_processing: Object.freeze({ needsInputs: true, needsWorkspace: true, needsArtifacts: true }),
+  // DB-only work — the entire write surface is the project database via
+  // project_db_query. No file scope, no file locks (see queue/file-locks.js
+  // jobNeedsWriteLocks), no commit, no artifact dirs. The role runs without
+  // file-write tools; the operator's project-db grant is the only mutation
+  // channel.
+  db: Object.freeze({ needsInputs: false, needsWorkspace: false, needsArtifacts: false }),
 });
 
 // Work-item-level intent that constrains the planner's task-mode choices.
 export const WI_MODES = Object.freeze({
-  build: Object.freeze({ allowedTaskModes: ["code", "image", "content"], defaultTaskMode: "code" }),
+  build: Object.freeze({ allowedTaskModes: ["code", "image", "content", "db"], defaultTaskMode: "code" }),
   image: Object.freeze({ allowedTaskModes: ["image", "content"], defaultTaskMode: "image" }),
   report: Object.freeze({ allowedTaskModes: ["report", "content"], defaultTaskMode: "report" }),
 });

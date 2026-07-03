@@ -8,7 +8,7 @@
 // the connection object passed to the driver, and any error text is scrubbed of
 // it before it leaves this module.
 
-import { readProjectDbConnection } from "./config.js";
+import { capProjectDbPermissions, readProjectDbConnection } from "./config.js";
 import { authorizeProjectDbStatement, isReadOnlyGrant } from "./permissions.js";
 import { executeProjectDbStatement, DEFAULT_MAX_ROWS } from "./drivers.js";
 
@@ -40,23 +40,30 @@ function renderRows(rows, columns) {
 
 /**
  * @param {{ query?: string, sql?: string, maxRows?: number, limit?: number }} args
- * @param {{ projectDir?: string|null }} [ctx]
+ * @param {{ projectDir?: string|null, capability?: "read"|"write" }} [ctx]
+ *   `capability` is the calling job's lane: read-lane jobs (researcher/planner,
+ *   or any job without write permission) are capped to the `read` grant no
+ *   matter what the operator granted; write-lane jobs use the full grant.
  * @returns {Promise<string>}
  */
-export async function execProjectDbQuery(args = {}, { projectDir = null } = {}) {
+export async function execProjectDbQuery(args = {}, { projectDir = null, capability = "write" } = {}) {
   const conn = readProjectDbConnection({ projectDir });
   if (!conn.enabled || !conn.dbType || conn.permissions.length === 0) {
     return "Error: Project DB access is not enabled for this repository.";
+  }
+  const permissions = capProjectDbPermissions(conn.permissions, capability);
+  if (permissions.length === 0) {
+    return "Error: Project DB access for this read-capability role requires the 'read' permission, which is not granted.";
   }
 
   const sql = String(args.query ?? args.sql ?? "").trim();
   if (!sql) return "Error: No SQL query provided (pass `query`).";
 
-  const auth = authorizeProjectDbStatement(sql, conn.permissions);
+  const auth = authorizeProjectDbStatement(sql, permissions);
   if (!auth.ok) return `Error: ${auth.error}`;
 
   const maxRows = clampMaxRows(args.maxRows ?? args.limit);
-  const readOnly = isReadOnlyGrant(conn.permissions);
+  const readOnly = isReadOnlyGrant(permissions);
 
   let result;
   try {
@@ -82,6 +89,11 @@ export async function execProjectDbQuery(args = {}, { projectDir = null } = {}) 
       out = `${out.slice(0, DEFAULT_MAX_BYTES)}\n… [output truncated at ${DEFAULT_MAX_BYTES} bytes; narrow the query]`;
     }
     return out;
+  }
+
+  // DDL path (CREATE/ALTER): "rows affected" is meaningless for schema changes.
+  if (auth.verb === "CREATE" || auth.verb === "ALTER") {
+    return `project_db_query (${conn.dbType}) — ${auth.verb}: statement executed`;
   }
 
   // Write path (UPDATE/INSERT/DELETE).

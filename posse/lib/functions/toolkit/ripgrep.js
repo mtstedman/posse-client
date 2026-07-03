@@ -5,7 +5,7 @@
 
 import fs from "fs";
 import path from "path";
-import { spawnSync } from "child_process";
+import { gitExec } from "../../domains/git/functions/utils.js";
 
 export const SEARCH_MAX_FILE_BYTES = 5 * 1024 * 1024;
 export const SEARCH_BINARY_SNIFF_BYTES = 8 * 1024;
@@ -179,23 +179,16 @@ function setCacheEntry(cache, key, entry) {
 
 function isWorkspaceRootIgnoredByGitUncached(cwd) {
   try {
-    const rootResult = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true,
-    });
-    if (rootResult.status !== 0) return false;
-    const repoRoot = String(rootResult.stdout || "").trim();
+    const repoRoot = String(gitExec(["rev-parse", "--show-toplevel"], cwd) || "").trim();
     if (!repoRoot) return false;
     const rel = normalizeRelPath(path.relative(repoRoot, path.resolve(cwd)));
     if (!rel || rel === ".") return false;
-    const ignoredResult = spawnSync("git", ["check-ignore", "-q", "--", rel], {
-      cwd: repoRoot,
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    return ignoredResult.status === 0;
+    try {
+      gitExec(["check-ignore", "-q", "--", rel], repoRoot);
+      return true;
+    } catch {
+      return false;
+    }
   } catch {
     return false;
   }
@@ -212,16 +205,12 @@ function buildGitIgnoredPathSnapshot(cwd) {
   const ignoredFiles = new Set();
   const ignoredDirs = new Set();
   try {
-    const result = spawnSync("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true,
-      timeout: GIT_IGNORE_SNAPSHOT_TIMEOUT_MS,
+    const stdout = gitExec(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], cwd, {
+      timeoutMs: GIT_IGNORE_SNAPSHOT_TIMEOUT_MS,
       maxBuffer: GIT_IGNORE_SNAPSHOT_MAX_BUFFER,
+      trim: false,
     });
-    if (result.status !== 0 || result.error) return { ignoredFiles, ignoredDirs };
-    for (const rawEntry of String(result.stdout || "").split("\0")) {
+    for (const rawEntry of String(stdout || "").split("\0")) {
       if (!rawEntry) continue;
       const isDir = /[\\/]$/.test(rawEntry);
       const rel = normalizeGitIgnoredRel(rawEntry);

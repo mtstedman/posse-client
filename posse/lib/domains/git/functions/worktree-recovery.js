@@ -61,6 +61,10 @@ export async function worktreeNeedsRecoveryAsync(wtPath, options = {}) {
       || (parseBooleanSetting("worktree_clean_ignored", false) && await worktreeHasIgnoredChangesNodeAsync(wtPath, options));
   } catch (err) {
     if (isAbortError(err)) throw err;
+    // strict: callers about to take a destructive action on the answer must
+    // not proceed on an unknown dirty state — false-on-error is only safe for
+    // callers that leave the worktree alone when "clean".
+    if (options?.strict) throw err;
     logDirtyCheckFailure(wtPath, err);
     return false;
   }
@@ -212,12 +216,10 @@ export async function resetDirtyWorktreeAsync(wtPath, { cleanIgnoredOverride = n
   );
 }
 
-export async function resetDirtyWorktreeFallbackAsync(wtPath, projectDir = null, { signal = null } = {}) {
-  return withWorktreeLockAsync(wtPath, projectDir || wtPath, async () => {
-    await gitExecAsync(["checkout", "--", "."], wtPath, { signal });
-    await gitExecAsync(["clean", "-fd"], wtPath, { signal });
-  }, { signal });
-}
+// resetDirtyWorktreeFallbackAsync was deleted deliberately: every caller used
+// it to answer a snapshot failure with an unsnapshotted `checkout -- .` +
+// `clean -fd`, which is the one response this module exists to prevent. When
+// a snapshot fails, leave the worktree dirty and defer to setup recovery.
 
 export async function stashDirtyWorktreeAsync(
   wtPath,
@@ -382,7 +384,11 @@ export function snapshotAndResetDirtyWorktree(
       ? preserveDirtyWorktreeSnapshot(wtPath, projectDir, { reason, branchName, wiId, onMsg })
       : null;
     if (hasTrackedOrUntracked && !snapshotDir) {
-      throw new Error(`Dirty worktree snapshot failed for ${wtPath}; refusing to reset`);
+      const refusal = new Error(`Dirty worktree snapshot failed for ${wtPath}; refusing to reset`);
+      // Deliberate fail-closed stop — catch-alls must not reclassify it as
+      // corrupt metadata or answer it with an unsnapshotted reset.
+      refusal.code = "SNAPSHOT_REFUSED_RESET";
+      throw refusal;
     }
     const resetResult = resetDirtyWorktree(wtPath, { cleanIgnoredOverride });
     notifyResetIncomplete(onResetIncomplete, { wtPath, projectDir, reason, branchName, wiId, snapshotDir, resetResult });
@@ -429,7 +435,11 @@ export async function snapshotAndResetDirtyWorktreeAsync(
       ? await preserveDirtyWorktreeSnapshotAsync(wtPath, projectDir, { reason, branchName, wiId, onMsg, signal, nativeParity })
       : null;
     if (hasTrackedOrUntracked && !snapshotDir) {
-      throw new Error(`Dirty worktree snapshot failed for ${wtPath}; refusing to reset`);
+      const refusal = new Error(`Dirty worktree snapshot failed for ${wtPath}; refusing to reset`);
+      // Deliberate fail-closed stop — catch-alls must not reclassify it as
+      // corrupt metadata or answer it with an unsnapshotted reset.
+      refusal.code = "SNAPSHOT_REFUSED_RESET";
+      throw refusal;
     }
     const resetResult = await resetDirtyWorktreeAsync(wtPath, { cleanIgnoredOverride, signal, nativeParity });
     notifyResetIncomplete(onResetIncomplete, { wtPath, projectDir, reason, branchName, wiId, snapshotDir, resetResult });

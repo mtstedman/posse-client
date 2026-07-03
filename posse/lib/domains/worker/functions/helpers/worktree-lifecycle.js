@@ -237,6 +237,43 @@ async function assertCrossWiSyncSourceBranchAsync(sourceBranch, projectDir, { si
   }
 }
 
+async function gitObjectHashAsync(cwd, ref, repoPath, { signal = null } = {}) {
+  try {
+    const out = await gitExecAsync(["rev-parse", `${ref}:${repoPath}`], cwd, { signal });
+    return String(out || "").trim() || null;
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    return null;
+  }
+}
+
+// A handoff copy is only safe while the target branch still holds the path at
+// its merge-base content. If the target committed its own changes to the path
+// after the handoff was prepared, checking out the source version would
+// silently discard those commits — the caller must skip the copy and let the
+// recorded cross-WI merge dependency resolve the overlap at merge time.
+async function crossWiSyncTargetGuardAsync(wtPath, sync, { signal = null } = {}) {
+  const headObject = await gitObjectHashAsync(wtPath, "HEAD", sync.path, { signal });
+  const sourceObject = await gitObjectHashAsync(wtPath, sync.source_branch, sync.path, { signal });
+  if (headObject === sourceObject) {
+    return { clobbers: false, head_object: headObject, source_object: sourceObject, base_object: null, merge_base: null };
+  }
+  let mergeBase = null;
+  try {
+    mergeBase = String(await gitExecAsync(["merge-base", "HEAD", sync.source_branch], wtPath, { signal }) || "").trim() || null;
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+  }
+  const baseObject = mergeBase ? await gitObjectHashAsync(wtPath, mergeBase, sync.path, { signal }) : null;
+  return {
+    clobbers: headObject !== baseObject,
+    head_object: headObject,
+    source_object: sourceObject,
+    base_object: baseObject,
+    merge_base: mergeBase,
+  };
+}
+
 function recordWorktreeSetupFailureAttempt(job, leaseToken, message) {
   const created = incrementAndCreateAttempt(job.id, leaseToken, "system", "worktree-setup", null);
   if (!created?.attempt?.id) return null;
@@ -348,10 +385,12 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
     throw new Error("Cannot apply cross-WI file sync while merge conflicts are pending");
   }
 
+  const skippedSyncs = [];
   await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
     const branchName = String(await gitExecAsync(["branch", "--show-current"], wtPath, { signal }) || "").trim();
     const runSync = async () => {
       const paths = [];
+      const copiedPaths = [];
       const headBeforeSync = await gitCurrentHashAsync(wtPath, { signal });
       try {
         for (const sync of syncs) {
@@ -363,24 +402,29 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
             throw new Error(`Cross-WI sync path is dirty before sync: ${sync.path}`);
           }
           await assertCrossWiSyncSourceBranchAsync(sync.source_branch, worker.projectDir, { signal });
-          let sourceHasPath = true;
-          try {
-            await gitExecAsync(["cat-file", "-e", `${sync.source_branch}:${sync.path}`], worker.projectDir, { signal });
-          } catch (err) {
-            if (isAbortError(err)) throw err;
-            sourceHasPath = false;
+          const guard = await crossWiSyncTargetGuardAsync(wtPath, sync, { signal });
+          if (guard.clobbers) {
+            skippedSyncs.push({ sync, guard });
+            continue;
           }
           paths.push(sync.path);
-          if (sourceHasPath) {
+          if (guard.source_object != null) {
             await gitExecAsync(["checkout", sync.source_branch, "--", sync.path], wtPath, { signal });
+            copiedPaths.push(sync.path);
           } else {
+            // git rm stages the deletion itself; the path is gone from both
+            // index and worktree afterwards, so a later `git add` on it fatals.
             await gitExecAsync(["rm", "--ignore-unmatch", "--", sync.path], wtPath, { signal });
           }
         }
 
-        const status = await gitExecAsync(["status", "--porcelain", "--", ...paths], wtPath, { signal });
+        const status = paths.length > 0
+          ? await gitExecAsync(["status", "--porcelain", "--", ...paths], wtPath, { signal })
+          : "";
         if (String(status || "").trim()) {
-          await gitExecAsync(["add", "--", ...paths], wtPath, { signal });
+          if (copiedPaths.length > 0) {
+            await gitExecAsync(["add", "--", ...copiedPaths], wtPath, { signal });
+          }
           const headBeforeCommit = await gitCurrentHashAsync(wtPath, { signal });
           if (headBeforeCommit && headBeforeSync && headBeforeCommit !== headBeforeSync) {
             const err = new Error(`Branch HEAD moved during cross-WI sync (${headBeforeSync.slice(0, 12)} -> ${headBeforeCommit.slice(0, 12)}); refusing stale commit`);
@@ -400,7 +444,10 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
         throw err;
       }
 
-      markCrossWiSyncsApplied(job, payload, paths);
+      // Skipped syncs are cleared from the pending list too: the target's own
+      // content is deliberately kept, and retrying the copy later would still
+      // clobber it. The cross-WI merge dependency stays recorded.
+      markCrossWiSyncsApplied(job, payload, [...paths, ...skippedSyncs.map((entry) => entry.sync.path)]);
     };
     if (branchName && branchName !== "HEAD") {
       await withBranchLockAsync(wtPath, branchName, worker.projectDir, runSync, { signal });
@@ -408,7 +455,9 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
       await runSync();
     }
   }, { signal });
+  const skippedPathSet = new Set(skippedSyncs.map((entry) => entry.sync.path));
   for (const sync of syncs) {
+    if (skippedPathSet.has(sync.path)) continue;
     logEvent({
       work_item_id: job.work_item_id,
       job_id: job.id,
@@ -419,6 +468,25 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
         source_work_item_id: sync.source_work_item_id,
         source_branch: sync.source_branch,
         path: sync.path,
+      }),
+    });
+  }
+  for (const { sync, guard } of skippedSyncs) {
+    worker.emit(job.id, `${C.yellow}[system] WI#${job.work_item_id} kept its own ${sync.path}; skipped cross-WI copy from WI#${sync.source_work_item_id} (target branch changed the path since handoff)${C.reset}`);
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_SYNC_SKIPPED,
+      actor_type: EVENT_ACTORS.WORKER,
+      message: `Skipped cross-WI sync of ${sync.path} from WI#${sync.source_work_item_id}; target branch has newer changes to the path`,
+      event_json: JSON.stringify({
+        source_work_item_id: sync.source_work_item_id,
+        source_branch: sync.source_branch,
+        path: sync.path,
+        head_object: guard.head_object,
+        source_object: guard.source_object,
+        base_object: guard.base_object,
+        merge_base: guard.merge_base,
       }),
     });
   }
@@ -1276,3 +1344,8 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
     });
   }
 }
+
+// Test hook: exercises the cross-WI file sync application (including the
+// target-divergence guard) against a real git worktree without booting a
+// full Worker.
+export { applyPendingCrossWiFileSyncsAsync as __testApplyPendingCrossWiFileSyncsAsync };

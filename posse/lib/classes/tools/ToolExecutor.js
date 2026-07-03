@@ -8,6 +8,7 @@ import {
   safePath,
 } from "../../functions/toolkit/index.js";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../domains/runtime/functions/protected-paths.js";
+import { guardToolWriteLock } from "../../domains/queue/functions/write-lock-guard.js";
 import { agentHiddenReadablePathReason } from "../../shared/scope/functions/agent-hidden-paths.js";
 
 function normalizeScope(scope = {}) {
@@ -256,6 +257,11 @@ export class ToolExecutor {
       return `Error: move_file blocked - ${destination} is outside the allowed creation scope.`;
     }
 
+    const sourceLockErr = guardToolWriteLock("move_file", source, ctx.cwd);
+    if (sourceLockErr) return sourceLockErr;
+    const destLockErr = guardToolWriteLock("move_file", destination, ctx.cwd);
+    if (destLockErr) return destLockErr;
+
     fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
     try {
       fs.renameSync(sourcePath, destinationPath);
@@ -318,6 +324,9 @@ export class ToolExecutor {
     } else if (!ctx.scopePredicates.canCreate(destinationPath)) {
       return `Error: copy_file blocked - ${destination} is outside the allowed creation scope.`;
     }
+
+    const destLockErr = guardToolWriteLock("copy_file", destination, ctx.cwd);
+    if (destLockErr) return destLockErr;
 
     fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
     fs.copyFileSync(sourcePath, destinationPath, fs.constants.COPYFILE_EXCL);

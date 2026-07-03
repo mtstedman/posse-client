@@ -136,8 +136,10 @@ function conductorEnvelopeToToolResult(envelope) {
   const payload = envelope.meta && data && typeof data === "object" && !Array.isArray(data)
     ? { ...data, _meta: envelope.meta }
     : data;
+  // Compact on purpose: pretty-printing inflated every agent-facing tool
+  // result by double-digit percent for zero information (2026-07 A/B).
   let text;
-  try { text = JSON.stringify(payload, null, 2); }
+  try { text = JSON.stringify(payload); }
   catch { text = String(payload); }
   return { result: mcpTextResult(text, false), ok: true, errorMsg: null };
 }

@@ -328,7 +328,9 @@ function unwrapGitNativeMethodResponse(value) {
 function runGitNativeMethodOnce(method, payload, opts = {}) {
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("git")) {
-    throw new Error(`Git native method unavailable: ${method}`);
+    const unavailable = new Error(`Git native method unavailable: ${method}`);
+    unavailable.code = "GIT_NATIVE_UNAVAILABLE";
+    throw unavailable;
   }
   const request = buildGitNativeMethodRequest(method, payload);
   const auth = resolveGitAuthEnvelope(opts, manager);
@@ -347,6 +349,7 @@ function runGitNativeMethodOnce(method, payload, opts = {}) {
         timeoutMs: opts.timeoutMs,
         signal: opts.signal,
         worker: workerEligible,
+        maxBuffer: opts.maxBuffer,
       },
     );
   } catch (err) {
@@ -446,7 +449,9 @@ async function runGitNativeMethodAsyncOnce(method, payload, opts = {}) {
   }
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("git")) {
-    throw new Error(`Git native method unavailable: ${method}`);
+    const unavailable = new Error(`Git native method unavailable: ${method}`);
+    unavailable.code = "GIT_NATIVE_UNAVAILABLE";
+    throw unavailable;
   }
   const request = buildGitNativeMethodRequest(method, payload);
   const auth = resolveGitAuthEnvelope(opts, manager);
@@ -466,6 +471,7 @@ async function runGitNativeMethodAsyncOnce(method, payload, opts = {}) {
         timeoutMs: opts.timeoutMs,
         signal: opts.signal,
         worker: workerRequested,
+        maxBuffer: opts.maxBuffer,
       },
     );
   } catch (err) {

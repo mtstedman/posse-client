@@ -83,6 +83,7 @@ import {
   renderPlannerFilePriorities,
   latestPlanArtifactText,
   buildPlanSynthesisArtifact,
+  buildProjectDbRoutingLines,
   validatePlannerContextPreflight,
 } from "../../../planning/functions/planner-helpers.js";
 
@@ -490,6 +491,9 @@ export class PlannerRole extends BaseRole {
       availableSkillsBlock,
       "- If a task produces images, reports, generated content, or intake outputs, route it to job_type \"artificer\" with the matching task_mode.",
       "- If repo code must consume artificer output, insert a \"promote\" job between the artificer task and the dev task.",
+      // Conditional: empty when this repo has no project-db config, so
+      // unconfigured repos see no db-task guidance at all.
+      ...buildProjectDbRoutingLines(worker.projectDir),
       "",
     ].join("\n");
 

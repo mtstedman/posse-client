@@ -4,9 +4,18 @@
 // worker.js to keep execute-path orchestration lean.
 
 import { C } from "../../../../shared/format/functions/colors.js";
+import { isAbortError } from "../../../runtime/functions/yield.js";
 import { getWorkItem, clearStallResume } from "../../../queue/functions/index.js";
 import { preserveDirtyWorktreeSnapshot, withWorktreeLock, withWorktreeLockAsync } from "../../../git/functions/worktree.js";
-import { findStallStash, findStallStashAsync, gitExec, gitExecAsync } from "../../../git/functions/utils.js";
+import { acquireWorktreeLock, acquireWorktreeLockAsync, gitStashLockPath } from "../../../git/functions/worktree-locks.js";
+import {
+  dropStashByHash,
+  dropStashByHashAsync,
+  findStallStashEntry,
+  findStallStashEntryAsync,
+  gitExec,
+  gitExecAsync,
+} from "../../../git/functions/utils.js";
 
 export function detectDrift(worker, job, files, cwd) {
   if (!files || files.length === 0 || !job.created_at || !cwd) return "";
@@ -47,37 +56,85 @@ export function detectDrift(worker, job, files, cwd) {
   }
 }
 
+// The positional `stash drop stash@{N}` is the one op that needs the repo
+// stash lock: refs/stash is shared by all linked worktrees, and a push from
+// any lane between the hash→position lookup and the drop would retarget the
+// drop. Apply-by-hash is shift-immune, and the snapshot machinery takes this
+// same lock internally, so only the drops are wrapped.
+function dropStallStashLocked(worker, wtPath, hash) {
+  const stashLock = acquireWorktreeLock(gitStashLockPath(wtPath, worker.projectDir, { disabled: true }));
+  if (!stashLock.acquired) return false;
+  try {
+    return dropStashByHash(wtPath, hash);
+  } catch {
+    return false;
+  } finally {
+    stashLock.release();
+  }
+}
+
+async function dropStallStashLockedAsync(worker, wtPath, hash, { signal = null } = {}) {
+  const stashLock = await acquireWorktreeLockAsync(gitStashLockPath(wtPath, worker.projectDir, { disabled: true }), { signal });
+  if (!stashLock.acquired) return false;
+  try {
+    return await dropStashByHashAsync(wtPath, hash, { signal });
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    return false;
+  } finally {
+    await stashLock.releaseAsync();
+  }
+}
+
 function applyStallStashUnlocked(worker, job, wtPath) {
-  const stashRef = findStallStash(job.id, wtPath);
-  if (!stashRef) {
+  const entry = findStallStashEntry(job.id, wtPath);
+  if (!entry) {
     clearStallResume(job.id);
     return null;
   }
 
+  let applied = false;
   try {
-    gitExec(["stash", "pop", stashRef], wtPath);
-  } catch {
-    try {
-      gitExec(["stash", "apply", stashRef], wtPath);
-    } catch {
-      worker.emit(job.id, `${C.yellow}[stall-resume] WI#${job.work_item_id} job #${job.id}: stash conflicts — starting fresh${C.reset}`);
-      const branchName = getWorkItem(job.work_item_id)?.branch_name || null;
-      const snapshotDir = preserveDirtyWorktreeSnapshot(wtPath, worker.projectDir, {
-        reason: `stall-stash-conflict-job-${job.id}`,
-        branchName,
-        wiId: job.work_item_id,
-      });
-      if (snapshotDir) {
-        worker.emit(job.id, `${C.yellow}[stall-resume]${C.reset} WI#${job.work_item_id} job #${job.id}: preserved conflicted snapshot at ${snapshotDir}`);
-      }
-      try {
-        gitExec(["reset", "--hard", "HEAD"], wtPath);
-        gitExec(["clean", "-fd"], wtPath);
-      } catch { /* ignore */ }
-      try { gitExec(["stash", "drop", stashRef], wtPath); } catch { /* ignore */ }
-      clearStallResume(job.id);
+    gitExec(["stash", "apply", entry.hash], wtPath);
+    applied = true;
+  } catch { /* fall through to the dirty-evidence gate */ }
+
+  if (applied) {
+    if (!dropStallStashLocked(worker, wtPath, entry.hash)) {
+      worker.emit(job.id, `${C.yellow}[stall-resume]${C.reset} WI#${job.work_item_id} job #${job.id}: applied stash could not be dropped; orphan entry ${entry.hash.slice(0, 12)} left on the stash stack`);
+    }
+  } else {
+    // Only drop the stash when the failed apply verifiably landed content
+    // (conflict markers => dirty tree). A clean tree means nothing was
+    // applied (stale index.lock, transient exec failure) and the stash is
+    // the only copy of the interrupted attempt — keep it and the stall flag
+    // so the next attempt retries.
+    let treeDirty = false;
+    try { treeDirty = gitExec(["status", "--porcelain"], wtPath).trim().length > 0; } catch { treeDirty = false; }
+    if (!treeDirty) {
+      worker.emit(job.id, `${C.yellow}[stall-resume]${C.reset} WI#${job.work_item_id} job #${job.id}: stash apply failed with a clean tree — keeping stash for next attempt`);
       return null;
     }
+    worker.emit(job.id, `${C.yellow}[stall-resume] WI#${job.work_item_id} job #${job.id}: stash conflicts — starting fresh${C.reset}`);
+    const branchName = getWorkItem(job.work_item_id)?.branch_name || null;
+    const snapshotDir = preserveDirtyWorktreeSnapshot(wtPath, worker.projectDir, {
+      reason: `stall-stash-conflict-job-${job.id}`,
+      branchName,
+      wiId: job.work_item_id,
+    });
+    if (snapshotDir) {
+      worker.emit(job.id, `${C.yellow}[stall-resume]${C.reset} WI#${job.work_item_id} job #${job.id}: preserved conflicted snapshot at ${snapshotDir}`);
+    }
+    try {
+      gitExec(["reset", "--hard", "HEAD"], wtPath);
+      gitExec(["clean", "-fd"], wtPath);
+    } catch { /* ignore */ }
+    // Without a snapshot the stash is still the only copy — keep it.
+    if (snapshotDir) {
+      dropStallStashLocked(worker, wtPath, entry.hash);
+    }
+    clearStallResume(job.id);
+    return null;
   }
 
   clearStallResume(job.id);
@@ -129,36 +186,60 @@ function applyStallStashUnlocked(worker, job, wtPath) {
 }
 
 async function applyStallStashUnlockedAsync(worker, job, wtPath, { signal = null } = {}) {
-  const stashRef = await findStallStashAsync(job.id, wtPath, { signal });
-  if (!stashRef) {
+  const entry = await findStallStashEntryAsync(job.id, wtPath, { signal });
+  if (!entry) {
     clearStallResume(job.id);
     return null;
   }
 
+  let applied = false;
   try {
-    await gitExecAsync(["stash", "pop", stashRef], wtPath, { signal });
-  } catch {
+    await gitExecAsync(["stash", "apply", entry.hash], wtPath, { signal });
+    applied = true;
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+  }
+
+  if (applied) {
+    if (!(await dropStallStashLockedAsync(worker, wtPath, entry.hash, { signal }))) {
+      worker.emit(job.id, `${C.yellow}[stall-resume]${C.reset} WI#${job.work_item_id} job #${job.id}: applied stash could not be dropped; orphan entry ${entry.hash.slice(0, 12)} left on the stash stack`);
+    }
+  } else {
+    // Only drop the stash when the failed apply verifiably landed content
+    // (conflict markers => dirty tree). A clean tree means nothing was
+    // applied and the stash is the only copy — keep it and the stall flag
+    // so the next attempt retries.
+    let treeDirty = false;
     try {
-      await gitExecAsync(["stash", "apply", stashRef], wtPath, { signal });
-    } catch {
-      worker.emit(job.id, `${C.yellow}[stall-resume] WI#${job.work_item_id} job #${job.id}: stash conflicts — starting fresh${C.reset}`);
-      const branchName = getWorkItem(job.work_item_id)?.branch_name || null;
-      const snapshotDir = preserveDirtyWorktreeSnapshot(wtPath, worker.projectDir, {
-        reason: `stall-stash-conflict-job-${job.id}`,
-        branchName,
-        wiId: job.work_item_id,
-      });
-      if (snapshotDir) {
-        worker.emit(job.id, `${C.yellow}[stall-resume]${C.reset} WI#${job.work_item_id} job #${job.id}: preserved conflicted snapshot at ${snapshotDir}`);
-      }
-      try {
-        await gitExecAsync(["reset", "--hard", "HEAD"], wtPath, { signal });
-        await gitExecAsync(["clean", "-fd"], wtPath, { signal });
-      } catch { /* ignore */ }
-      try { await gitExecAsync(["stash", "drop", stashRef], wtPath, { signal }); } catch { /* ignore */ }
-      clearStallResume(job.id);
+      treeDirty = String(await gitExecAsync(["status", "--porcelain"], wtPath, { signal }) || "").trim().length > 0;
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      treeDirty = false;
+    }
+    if (!treeDirty) {
+      worker.emit(job.id, `${C.yellow}[stall-resume]${C.reset} WI#${job.work_item_id} job #${job.id}: stash apply failed with a clean tree — keeping stash for next attempt`);
       return null;
     }
+    worker.emit(job.id, `${C.yellow}[stall-resume] WI#${job.work_item_id} job #${job.id}: stash conflicts — starting fresh${C.reset}`);
+    const branchName = getWorkItem(job.work_item_id)?.branch_name || null;
+    const snapshotDir = preserveDirtyWorktreeSnapshot(wtPath, worker.projectDir, {
+      reason: `stall-stash-conflict-job-${job.id}`,
+      branchName,
+      wiId: job.work_item_id,
+    });
+    if (snapshotDir) {
+      worker.emit(job.id, `${C.yellow}[stall-resume]${C.reset} WI#${job.work_item_id} job #${job.id}: preserved conflicted snapshot at ${snapshotDir}`);
+    }
+    try {
+      await gitExecAsync(["reset", "--hard", "HEAD"], wtPath, { signal });
+      await gitExecAsync(["clean", "-fd"], wtPath, { signal });
+    } catch { /* ignore */ }
+    // Without a snapshot the stash is still the only copy — keep it.
+    if (snapshotDir) {
+      await dropStallStashLockedAsync(worker, wtPath, entry.hash, { signal });
+    }
+    clearStallResume(job.id);
+    return null;
   }
 
   clearStallResume(job.id);

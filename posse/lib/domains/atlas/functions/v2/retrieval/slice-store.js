@@ -38,6 +38,7 @@ function openStore(repoRoot) {
   const dbPath = path.join(atlasDir(repoRoot), "slices.db");
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
+  db.pragma("busy_timeout = 5000");
   db.pragma("journal_mode = WAL");
   db.exec(SLICE_STORE_DDL);
   return db;
@@ -74,9 +75,10 @@ export function loadSliceEntry({ repoRoot, handle }) {
   const db = openStore(repoRoot);
   if (!db) return null;
   try {
-    db.prepare("DELETE FROM slice_handles WHERE expires_at < ?").run(Date.now());
+    // Expired rows are filtered here and purged on the save path; loads stay
+    // read-only so concurrent readers never contend for the write lock.
     const row = /** @type {{ handle: string, version_id: string, expires_at: number, entry_json: string } | undefined} */ (
-      db.prepare("SELECT handle, version_id, expires_at, entry_json FROM slice_handles WHERE handle = ?").get(handle)
+      db.prepare("SELECT handle, version_id, expires_at, entry_json FROM slice_handles WHERE handle = ? AND expires_at >= ?").get(handle, Date.now())
     );
     if (!row) return null;
     return {

@@ -316,13 +316,32 @@ export class ViewBuilder {
       throw new Error(`ViewBuilder.cloneView: destination already exists: ${destPath}`);
     }
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    // VACUUM INTO takes a transactionally consistent snapshot that includes
+    // committed-but-uncheckpointed WAL frames. A bare file copy of the main
+    // db would silently lose those frames: wal_checkpoint(TRUNCATE) reports
+    // busy (without throwing) whenever a concurrent reader pins an older
+    // snapshot, and the -wal sidecar is not part of the copy.
     const source = new Database(sourcePath, { fileMustExist: true });
     try {
-      source.pragma("wal_checkpoint(TRUNCATE)");
+      source.pragma("busy_timeout = 5000");
+      source.prepare("VACUUM INTO ?").run(destPath);
+    } catch (err) {
+      for (const sfx of ["", "-wal", "-shm"]) {
+        try { fs.unlinkSync(destPath + sfx); } catch { /* nothing staged */ }
+      }
+      throw err;
     } finally {
       source.close();
     }
-    fs.copyFileSync(sourcePath, destPath);
+    // VACUUM INTO does not carry the source's journal mode; view readers
+    // assume WAL (concurrent reads during warm), so re-assert it on the clone.
+    const dest = new Database(destPath, { fileMustExist: true });
+    try {
+      dest.pragma("busy_timeout = 5000");
+      dest.pragma("journal_mode = WAL");
+    } finally {
+      dest.close();
+    }
   }
 
   /**

@@ -196,6 +196,18 @@ export function extractAtlasResponseTelemetry(value) {
   ) {
     out.truncated = true;
   }
+  // Ladder-policy meta is only attached to non-compliant calls, so its
+  // presence IS the skip signal; the denominator is every call for the same
+  // action in job_observations. This is what makes production skip rate
+  // measurable at all.
+  const ladder = data._meta?.ladderPolicy && typeof data._meta.ladderPolicy === "object"
+    ? data._meta.ladderPolicy
+    : null;
+  if (ladder) {
+    out.ladder_skipped = true;
+    const requiredRung = finiteTelemetryNumber(ladder.requiredRung);
+    if (requiredRung != null) out.ladder_required_rung = requiredRung;
+  }
   return Object.keys(out).length > 0 ? out : null;
 }
 

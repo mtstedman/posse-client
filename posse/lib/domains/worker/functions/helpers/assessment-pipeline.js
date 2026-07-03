@@ -39,7 +39,6 @@ import {
 import { refreshAndExtractInsights } from "./insights.js";
 import { gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
 import {
-  resetDirtyWorktreeFallbackAsync,
   snapshotAndResetDirtyWorktreeAsync,
   stashDirtyWorktreeAsync,
 } from "../../../git/functions/worktree.js";
@@ -2170,7 +2169,19 @@ export async function runPostExecutionAssessment(worker, {
                     },
                   });
                 }
-                catch { try { await resetDirtyWorktreeFallbackAsync(wtPath, worker.projectDir); } catch { /* ignore */ } }
+                catch (stashErr) {
+                  // Stash failed — leave the dirt for setup recovery rather
+                  // than wiping the only copy of the rate-limited attempt.
+                  logEvent({
+                    work_item_id: job.work_item_id,
+                    job_id: job.id,
+                    attempt_id: attempt.id,
+                    event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+                    actor_type: EVENT_ACTORS.WORKER,
+                    message: `Left assessment-error dirty state in place; stash failed: ${stashErr?.message || String(stashErr)}`,
+                    event_json: JSON.stringify({ reason: `assessment-error-job-${job.id}` }),
+                  });
+                }
               }
             }
           } catch { /* ignore */ }

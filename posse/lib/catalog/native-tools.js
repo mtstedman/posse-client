@@ -866,9 +866,10 @@ export const TOOL_PROJECT_DB_QUERY = {
     "Run a single SQL statement against this project's configured application database " +
     "(sqlite/postgres/mysql). Opt-in and operator-configured per repository: the statement " +
     "types you may run depend on the granted permissions (READ→SELECT, WRITE→UPDATE, " +
-    "INSERT, DELETE) plus read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE). Anything outside " +
-    "the grant is rejected and DDL (CREATE/DROP/ALTER) is never allowed. One statement per call; " +
-    "read results are row- and byte-capped.",
+    "INSERT, DELETE, CREATE, ALTER) plus read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE). " +
+    "Read-phase roles are capped to SELECT/inspection regardless of the grant. Anything outside " +
+    "the grant is rejected, and destructive DDL (DROP/TRUNCATE) is never allowed. One statement " +
+    "per call; read results are row- and byte-capped.",
   parameters: {
     type: "object",
     properties: {

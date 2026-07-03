@@ -1,6 +1,6 @@
 import path from "path";
-import { execFileSync } from "child_process";
 
+import { gitExec } from "../../git/functions/utils.js";
 import { normalizeProjectDir } from "../../runtime/functions/paths.js";
 import { SETTINGS_CATALOG, getCatalogEntry } from "../../settings/functions/catalog.js";
 import {
@@ -35,13 +35,7 @@ function settingProjectDir(projectDir = null) {
 export function resolveRepoSettingPath(projectDir = null) {
   const cwd = settingProjectDir(projectDir);
   try {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2000,
-      windowsHide: true,
-    }).trim();
+    const root = gitExec(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 2000 }).trim();
     return path.resolve(root || cwd);
   } catch {
     return cwd;

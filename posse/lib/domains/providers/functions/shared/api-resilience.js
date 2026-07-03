@@ -23,7 +23,7 @@ function errorStatus(err) {
 
 function hasRateLimitTextSignal(msg, status = null) {
   if (status === 429) return true;
-  return /rate.?limit|429|too many requests|usage limit|usage cap|out of usage|out of.*usage|over usage|usage exhausted|usage.*reset|quota exceeded|credit balance is too low/i.test(msg);
+  return /rate.?limit|429|too many requests|usage limit|usage cap|out of usage|out of.*usage|over usage|usage exhausted|usage.*reset|quota exceeded|credit balance is too low|session limit|hit your.*limit/i.test(msg);
 }
 
 export function retryAfterHeader(err) {
@@ -142,7 +142,7 @@ export function classifyProviderError(err, {
     return { backoffSec: retryClockSec, isRateLimit: true, source: "usage_reset" };
   }
 
-  if (/usage limit|usage cap|out of usage|out of.*usage|over usage|usage exhausted|usage.*reset|quota exceeded|credit balance is too low/i.test(msg)) {
+  if (/usage limit|usage cap|out of usage|out of.*usage|over usage|usage exhausted|usage.*reset|quota exceeded|credit balance is too low|session limit|hit your.*limit/i.test(msg)) {
     return { backoffSec: 15 * 60, isRateLimit: true, source: "usage_limit" };
   }
 

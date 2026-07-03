@@ -167,12 +167,14 @@ export {
   getJobWriteScopeAsync,
   getJobWriteScope,
   jobHasWritePermission,
+  jobHoldsWriteLockForPath,
   jobNeedsWriteLocks,
   listActiveFileLocks,
   queuedCohortJobIdsForJob,
   releaseWorkItemFileLockForPath,
   releaseJobFileLocks,
   releaseWorkItemFileLocks,
+  verifyOrAcquireJobWriteLockForPath,
   workItemCanReleaseFileLock,
 } from "./file-locks.js";
 

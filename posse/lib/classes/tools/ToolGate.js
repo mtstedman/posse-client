@@ -247,15 +247,15 @@ export class ToolGate {
         ? routedMeaningfulTools
         : [...this._meaningfulAtlasActions].map(formatTool);
       return [
-        `[${label}-first] Native file reads are file-scoped fallback for indexable source files while ${label} is available.`,
+        `[${label}-first] ${label} is the inspection path for indexable source files while it is available; a native read is the exception for what ${label} cannot provide.`,
         "",
-        `Target file still locked: ${target}`,
+        `Target file not yet inspected through ${label}: ${target}`,
         "",
-        `Before reading this file with ${toolName}, attempt ${label} discovery against this same file or a symbol, tree, or code result that returns this file.`,
+        `Inspect this file through ${label} first — often that answers the question and no native read is needed. If a gap remains (stale/empty/conflicting evidence, or exact surrounding text ${label} could not provide), the native read follows naturally from that focused attempt.`,
         `Good first calls: ${formatTool("code.skeleton")}({ file: "${target}" }), ${formatTool("code.lens")}, ${formatTool("code.window")}, ${formatTool("symbol.search")}, ${formatTool("tree.branch")}, or ${formatTool("tree.expand")}.`,
         "",
-        `${label} prefetch and internal bookkeeping calls do NOT unlock file reads; they are not active file discovery.`,
-        `A global ${label} unlock does not unlock other indexable source files; each source file needs its own ${label} discovery attempt before native read fallback.`,
+        `${label} prefetch and internal bookkeeping calls do NOT count as file discovery; they are not active retrieval.`,
+        `Discovery is file-scoped: each indexable source file needs its own focused ${label} attempt before a native read of it.`,
         "",
         `Meaningful ${label} tools for this role:`,
         ...meaningfulTools.map((tool) => `  - ${tool}`),
@@ -264,20 +264,18 @@ export class ToolGate {
       ].join("\n");
     }
 
-    const remainingCalls = Math.max(0, this._requiredMeaningfulAtlasCalls - this.meaningfulAtlasCalls);
-    const remainingStrikes = Math.max(0, this._fallbackStrikeLimit - this.unhelpfulStrikes);
-    const callLine = `  Real ${label} retrieval calls so far: ${this.meaningfulAtlasCalls}/${this._requiredMeaningfulAtlasCalls} - ${remainingCalls} more required before standard tools are available.`;
+    const callLine = `  Task-relevant ${label} retrieval calls recorded: ${this.meaningfulAtlasCalls}/${this._requiredMeaningfulAtlasCalls}.`;
     const strikeLine = this.unhelpfulStrikes > 0
-      ? `  Unhelpful ATLAS attempts so far: ${this.unhelpfulStrikes}/${this._fallbackStrikeLimit} - ${remainingStrikes} more before standard tools are appropriate empty/error fallback.`
+      ? `  Unhelpful ${label} attempts recorded: ${this.unhelpfulStrikes}/${this._fallbackStrikeLimit} (at ${this._fallbackStrikeLimit}, empty/error fallback to standard tools is appropriate).`
       : null;
     const roleLabel = this.role || "this";
     const lines = [
-      `[${label}-first] Native research fallback tools are fallback-only for the ${roleLabel} role while ${label} is available.`,
+      `[${label}-first] ${label} is the inspection path for the ${roleLabel} role while it is available; native research tools are the exception for evidence gaps ${label} cannot answer.`,
       "",
-      `Always prefer ${label} over standard tools for discovery when possible.`,
-      `Use native research fallback tools only after at least ${this._requiredMeaningfulAtlasCalls} real ${label} retrieval calls after prefetch, or when ${label} is unavailable.`,
-      `For indexable source file reads, the fallback is file-scoped: each source file must have its own ${label} discovery attempt before native read fallback.`,
-      `If those real ${label} calls only return empty/errors, native research tools become the fallback.`,
+      `Always prefer ${label}: use it to answer the question, and stop when the evidence is sufficient — do not make ${label} calls merely to make native tools available. A focused retrieval aimed at your actual evidence gap is what counts.`,
+      `Native research tools are appropriate when ${label} is unavailable, or when focused ${label} attempts (at least ${this._requiredMeaningfulAtlasCalls} since prefetch) still leave a named gap: stale/empty/conflicting results, non-indexed config/data/docs, files you mutated, or exact text ${label} could not provide.`,
+      `For indexable source file reads, discovery is file-scoped: attempt ${label} against that file first.`,
+      `If real ${label} calls only return empty/errors, native research tools are the appropriate fallback.`,
       "",
       callLine,
     ];
@@ -300,17 +298,17 @@ export class ToolGate {
       chain_read: `For research context, prefer ${formatTool("symbol.search")}, ${formatTool("tree.branch")}, or ${formatTool("code.skeleton")}.`,
       git_history: `For assessment changes, prefer ${formatTool("review.risk")} when version ids are known.`,
     };
-    const hint = replacementHints[String(toolName || "")] || `Use one of the role-routed ${label} tools below before retrying native fallback.`;
+    const hint = replacementHints[String(toolName || "")] || `Use one of the role-routed ${label} tools below to close your actual evidence gap.`;
     lines.push(
       "",
       `Replacement hint: ${hint}`,
       "",
-      `Meaningful ${label} tools (make ${this._requiredMeaningfulAtlasCalls} real calls from this set before native fallback):`,
+      `Meaningful ${label} tools (aim focused retrieval at the actual gap - these are the calls that count):`,
       ...meaningfulTools.map((tool) => `  - ${tool}`),
       "",
       `${label} prefetch and internal bookkeeping calls do NOT count - they are not active retrieval.`,
       "",
-      `Use ${label} evidence first; use native research fallback tools only as fallback for context ${label} cannot cover.`,
+      `Use ${label} evidence first; when you do fall back to a native tool, state the precise gap and the ${label} result that was insufficient.`,
       "",
       `Attempted tool: ${toolName}`,
     );

@@ -62,7 +62,9 @@ const VIEW_INDEXES = Object.freeze([
  * @returns {Database.Database}
  */
 function openDbReadOnly(dbPath) {
-  return new Database(dbPath, { readonly: true, fileMustExist: true });
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  db.pragma("busy_timeout = 5000");
+  return db;
 }
 
 /**
@@ -94,6 +96,11 @@ function openDbReadWrite(dbPath) {
       fresh = true;
     }
   }
+  // busy_timeout and synchronous are per-connection; the DDL's pragmas only
+  // ever applied to the connection that created the file, so reopens ran with
+  // busy_timeout=0 and synchronous=FULL.
+  db.pragma("busy_timeout = 5000");
+  db.pragma("synchronous = NORMAL");
   if (fresh) runDdl(db, VIEW_DDL);
   // Idempotent additive column adds for pre-line-anchor view DBs.
   ensureColumn(db, "symbols", "range_start_line", "INTEGER");

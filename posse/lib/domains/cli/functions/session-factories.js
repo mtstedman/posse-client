@@ -11,7 +11,6 @@
 
 import path from "path";
 import fs from "fs";
-import { execSync } from "child_process";
 import { C } from "../../../shared/format/functions/colors.js";
 import {
   cancelWorkItemJobs,
@@ -106,7 +105,6 @@ export async function createReviewSessionDeps(bootDeps) {
     gitMergeToTarget: helpers.gitMergeToTarget,
     gitMergeToTargetAsync: helpers.gitMergeToTargetAsync,
     PROJECT_DIR: projectDir,
-    execSync,
     TARGET_BRANCH: null,
     getTargetBranch,
     setMergeState,

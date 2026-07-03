@@ -25,8 +25,6 @@ import { HANDOFF_SOURCE_EXTENSIONS } from "../../../catalog/files.js";
 
 import fs from "fs";
 import path from "path";
-import { execFile, execFileSync } from "child_process";
-import { promisify } from "util";
 import { getIntSetting, getSetting, logEvent } from "../../queue/functions/index.js";
 import {
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES,
@@ -40,6 +38,7 @@ import {
 } from "../../../shared/skills/functions/registry.js";
 import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../../catalog/job.js";
 import { attachDiffNarrative, attachDiffNarrativeAsync } from "../../git/functions/diff-narrator.js";
+import { gitExec, gitExecAsync } from "../../git/functions/utils.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
 import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
 import {
@@ -210,7 +209,6 @@ function copyAtlasPrefetchFields(target, source) {
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const SKIP_DIRS = createWorkspaceSkipDirs();
-const execFileAsync = promisify(execFile);
 
 const SOURCE_EXTENSIONS = HANDOFF_SOURCE_EXTENSIONS;
 
@@ -1626,17 +1624,14 @@ export function attachAssessmentDiffContext(assessmentContext = null, cwd = null
   ].filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))].slice(0, 20);
   if (!commitHash || scopedPaths.length === 0) return assessmentContext;
   try {
-    const diff = execFileSync("git", [
+    const diff = gitExec([
       "diff",
       "--unified=6",
       `${commitHash}^!`,
       "--",
       ...scopedPaths,
-    ], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 15000,
+    ], cwd, {
+      timeoutMs: 15000,
       maxBuffer: 1024 * 1024 * 2,
     });
     const trimmed = String(diff || "").trim();
@@ -1661,18 +1656,15 @@ export async function attachAssessmentDiffContextAsync(assessmentContext = null,
   ].filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))].slice(0, 20);
   if (!commitHash || scopedPaths.length === 0) return assessmentContext;
   try {
-    const { stdout } = await execFileAsync("git", [
+    const stdout = await gitExecAsync([
       "diff",
       "--unified=6",
       `${commitHash}^!`,
       "--",
       ...scopedPaths,
-    ], {
-      cwd,
-      encoding: "utf8",
-      timeout: 15000,
+    ], cwd, {
+      timeoutMs: 15000,
       maxBuffer: 1024 * 1024 * 2,
-      windowsHide: true,
     });
     const trimmed = String(stdout || "").trim();
     if (trimmed) {

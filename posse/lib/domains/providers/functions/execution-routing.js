@@ -79,7 +79,12 @@ export function shouldPreservePinnedProvider(targetJob, role, allowedProviders, 
 
 export function requiresGitNoopCheck(job, payload = null) {
   if (!(job?.job_type === "dev" || job?.job_type === "fix")) return false;
-  return !isArtifactMode(effectiveArtifactTaskMode(job, payload));
+  const taskMode = effectiveArtifactTaskMode(job, payload);
+  // DB-only jobs mutate the project database, not the worktree — a zero-diff
+  // COMPLETE is their normal success shape, so the git no-op guard must not
+  // treat it as a failed attempt.
+  if (taskMode === "db") return false;
+  return !isArtifactMode(taskMode);
 }
 
 export function resolveImageExecutionProvider(payload = null) {

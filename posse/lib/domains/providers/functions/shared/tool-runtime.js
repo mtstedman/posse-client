@@ -432,10 +432,16 @@ export function createStandardToolHandlerMap({
     async generate_image(args, ctx) {
       return execGenerateImage(args, ctx.cwd, ctx.scopePredicates);
     },
-    // Opt-in project DB access. Capability is gated by per-repo config; when the
-    // repo hasn't enabled it the handler returns a clear "not enabled" error.
+    // Opt-in project DB access. Availability is gated by per-repo config (when
+    // the repo hasn't enabled it the handler returns a clear "not enabled"
+    // error), and the job's write permission picks the capability lane:
+    // read-lane jobs are capped to SELECT/inspection at execution. db-mode dev
+    // jobs (task_mode:"db") run with allowWrite:false but carry the
+    // projectDbWrite override on their declared scope — the project database
+    // is their write surface even though the file tools are read-only.
     project_db_query(args, ctx) {
-      return execProjectDbQuery(args, { projectDir: ctx.cwd });
+      const dbWrite = ctx.allowWrite || ctx.declaredScope?.projectDbWrite === true;
+      return execProjectDbQuery(args, { projectDir: ctx.cwd, capability: dbWrite ? "write" : "read" });
     },
   };
   // Attach the embedded executors to a ToolRegistry seeded with the shared

@@ -3,8 +3,6 @@
 
 import fs from "fs";
 import path from "path";
-import { execFile, execFileSync, execSync } from "child_process";
-import { promisify } from "util";
 import { getSetting, logEvent } from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -14,25 +12,23 @@ import {
   buildPosseRuntimeIgnoreEntries,
   isPosseRuntimeOnlyGitignoreContent,
 } from "../../runtime/functions/ignore.js";
-import { GIT_OPERATION_TIMEOUT_MS } from "./utils.js";
+import { GIT_OPERATION_TIMEOUT_MS, gitExec, gitExecAsync, isGitCommandFailure } from "./utils.js";
 import { snapshotAndResetDirtyWorktree } from "./worktree.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
 import { firstGitLine } from "./workflow-git-utils.js";
 
-const execFileAsync = promisify(execFile);
-
 export function createStartupDirtyGuardHelpers(context) {
   const { projectDir, runGitWorkflowTaskOffMainThread } = context;
 
+  // "" means "git ran and reported a clean tree" (or no repo). An infra
+  // failure (git gate busy, posse-git unavailable) must NOT read as clean —
+  // the dirty-tree guard would skip preserving uncommitted work — so it
+  // propagates and fails the startup step loudly instead.
   function gitStatusPorcelain(cwd = projectDir) {
     try {
-      return execSync("git status --porcelain", {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 5000,
-      }).trim();
-    } catch {
+      return gitExec(["status", "--porcelain"], cwd, { timeoutMs: 5000 }).trim();
+    } catch (err) {
+      if (!isGitCommandFailure(err)) throw err;
       return "";
     }
   }
@@ -46,13 +42,9 @@ export function createStartupDirtyGuardHelpers(context) {
   // normalization and break `git add` during the startup dirty-tree commit.
   function gitStatusPorcelainStartup(cwd = projectDir) {
     try {
-      return execFileSync("git", ["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=normal"], {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 5000,
-      }).trim();
-    } catch {
+      return gitExec(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=normal"], cwd, { timeoutMs: 5000 }).trim();
+    } catch (err) {
+      if (!isGitCommandFailure(err)) throw err;
       return "";
     }
   }
@@ -60,16 +52,9 @@ export function createStartupDirtyGuardHelpers(context) {
   async function gitStatusPorcelainStartupAsync(cwd = projectDir, { signal = null } = {}) {
     throwIfAborted(signal);
     try {
-      const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=normal"], {
-        cwd,
-        encoding: "utf-8",
-        timeout: 5000,
-        signal,
-        windowsHide: true,
-      });
-      return String(stdout || "").trim();
+      return String(await gitExecAsync(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=normal"], cwd, { timeoutMs: 5000, signal }) || "").trim();
     } catch (err) {
-      if (isAbortError(err)) throw err;
+      if (isAbortError(err) || !isGitCommandFailure(err)) throw err;
       return "";
     }
   }
@@ -141,11 +126,7 @@ export function createStartupDirtyGuardHelpers(context) {
   function gitignoreDiffIsRuntimeOnly(cwd) {
     let diff;
     try {
-      diff = execFileSync(
-        "git",
-        ["diff", "--no-color", "--no-ext-diff", "HEAD", "--", ".gitignore"],
-        { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 5000 },
-      );
+      diff = gitExec(["diff", "--no-color", "--no-ext-diff", "HEAD", "--", ".gitignore"], cwd, { timeoutMs: 5000, trim: false });
     } catch {
       return false;
     }
@@ -179,12 +160,7 @@ export function createStartupDirtyGuardHelpers(context) {
     throwIfAborted(signal);
     let diff;
     try {
-      const { stdout } = await execFileAsync(
-        "git",
-        ["diff", "--no-color", "--no-ext-diff", "HEAD", "--", ".gitignore"],
-        { cwd, encoding: "utf-8", timeout: 5000, signal, windowsHide: true },
-      );
-      diff = stdout;
+      diff = await gitExecAsync(["diff", "--no-color", "--no-ext-diff", "HEAD", "--", ".gitignore"], cwd, { timeoutMs: 5000, signal, trim: false });
     } catch (err) {
       if (isAbortError(err)) throw err;
       return false;
@@ -242,11 +218,7 @@ export function createStartupDirtyGuardHelpers(context) {
 
   function commitHasStagedChanges() {
     try {
-      execFileSync("git", ["diff", "--cached", "--quiet", "--exit-code"], {
-        cwd: projectDir,
-        stdio: ["ignore", "ignore", "ignore"],
-        timeout: 5000,
-      });
+      gitExec(["diff", "--cached", "--quiet", "--exit-code"], projectDir, { timeoutMs: 5000 });
       return false;
     } catch {
       return true;
@@ -256,12 +228,7 @@ export function createStartupDirtyGuardHelpers(context) {
   async function commitHasStagedChangesAsync({ signal = null } = {}) {
     throwIfAborted(signal);
     try {
-      await execFileAsync("git", ["diff", "--cached", "--quiet", "--exit-code"], {
-        cwd: projectDir,
-        timeout: 5000,
-        signal,
-        windowsHide: true,
-      });
+      await gitExecAsync(["diff", "--cached", "--quiet", "--exit-code"], projectDir, { timeoutMs: 5000, signal });
       return false;
     } catch (err) {
       if (isAbortError(err)) throw err;
@@ -271,12 +238,7 @@ export function createStartupDirtyGuardHelpers(context) {
 
   function gitShortHead() {
     try {
-      return execFileSync("git", ["rev-parse", "--short", "HEAD"], {
-        cwd: projectDir,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 5000,
-      }).trim();
+      return gitExec(["rev-parse", "--short", "HEAD"], projectDir, { timeoutMs: 5000 }).trim();
     } catch {
       return "";
     }
@@ -285,14 +247,7 @@ export function createStartupDirtyGuardHelpers(context) {
   async function gitShortHeadAsync({ signal = null } = {}) {
     throwIfAborted(signal);
     try {
-      const { stdout } = await execFileAsync("git", ["rev-parse", "--short", "HEAD"], {
-        cwd: projectDir,
-        encoding: "utf-8",
-        timeout: 5000,
-        signal,
-        windowsHide: true,
-      });
-      return String(stdout || "").trim();
+      return String(await gitExecAsync(["rev-parse", "--short", "HEAD"], projectDir, { timeoutMs: 5000, signal }) || "").trim();
     } catch (err) {
       if (isAbortError(err)) throw err;
       return "";
@@ -331,11 +286,7 @@ export function createStartupDirtyGuardHelpers(context) {
 
   function tsconfigIsTracked(cwd) {
     try {
-      execFileSync("git", ["ls-files", "--error-unmatch", "--", "tsconfig.json"], {
-        cwd,
-        stdio: ["ignore", "ignore", "ignore"],
-        timeout: 5000,
-      });
+      gitExec(["ls-files", "--error-unmatch", "--", "tsconfig.json"], cwd, { timeoutMs: 5000 });
       return true;
     } catch {
       return false;
@@ -345,13 +296,7 @@ export function createStartupDirtyGuardHelpers(context) {
   async function tsconfigIsTrackedAsync(cwd, { signal = null } = {}) {
     throwIfAborted(signal);
     try {
-      await execFileAsync("git", ["ls-files", "--error-unmatch", "--", "tsconfig.json"], {
-        cwd,
-        stdio: ["ignore", "ignore", "ignore"],
-        timeout: 5000,
-        signal,
-        windowsHide: true,
-      });
+      await gitExecAsync(["ls-files", "--error-unmatch", "--", "tsconfig.json"], cwd, { timeoutMs: 5000, signal });
       return true;
     } catch (err) {
       if (isAbortError(err)) throw err;
@@ -447,12 +392,7 @@ export function createStartupDirtyGuardHelpers(context) {
       }
     }
     for (let index = 0; index < paths.length; index += 100) {
-      execFileSync("git", ["add", "-A", "--", ...paths.slice(index, index + 100)], {
-        cwd: projectDir,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: GIT_OPERATION_TIMEOUT_MS,
-      });
+      gitExec(["add", "-A", "--", ...paths.slice(index, index + 100)], projectDir, { timeoutMs: GIT_OPERATION_TIMEOUT_MS });
     }
   }
 
@@ -470,13 +410,7 @@ export function createStartupDirtyGuardHelpers(context) {
     }
     for (let index = 0; index < paths.length; index += 100) {
       throwIfAborted(signal);
-      await execFileAsync("git", ["add", "-A", "--", ...paths.slice(index, index + 100)], {
-        cwd: projectDir,
-        encoding: "utf-8",
-        timeout: GIT_OPERATION_TIMEOUT_MS,
-        signal,
-        windowsHide: true,
-      });
+      await gitExecAsync(["add", "-A", "--", ...paths.slice(index, index + 100)], projectDir, { timeoutMs: GIT_OPERATION_TIMEOUT_MS, signal });
     }
   }
 
@@ -519,12 +453,7 @@ export function createStartupDirtyGuardHelpers(context) {
         };
       }
       emitPhase("committing startup work");
-      execFileSync("git", ["commit", "-m", String(message || "chore: preserve startup work before posse boot")], {
-        cwd: projectDir,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: GIT_OPERATION_TIMEOUT_MS,
-      });
+      gitExec(["commit", "-m", String(message || "chore: preserve startup work before posse boot")], projectDir, { timeoutMs: GIT_OPERATION_TIMEOUT_MS });
     } catch (err) {
       const detail = firstGitLine(err);
       throw new Error(`Startup dirty tree guard could not commit current work before ${reason}: ${detail}`);
@@ -597,13 +526,7 @@ export function createStartupDirtyGuardHelpers(context) {
       }
       throwIfAborted(signal);
       emitPhase("committing startup work");
-      await execFileAsync("git", ["commit", "-m", String(message || "chore: preserve startup work before posse boot")], {
-        cwd: projectDir,
-        encoding: "utf-8",
-        timeout: GIT_OPERATION_TIMEOUT_MS,
-        signal,
-        windowsHide: true,
-      });
+      await gitExecAsync(["commit", "-m", String(message || "chore: preserve startup work before posse boot")], projectDir, { timeoutMs: GIT_OPERATION_TIMEOUT_MS, signal });
     } catch (err) {
       if (isAbortError(err)) throw err;
       const detail = firstGitLine(err);

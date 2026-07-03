@@ -4,4 +4,8 @@
 // shape or meaning. Warm jobs use this to decide whether a content-addressed
 // blob can reuse its stored symbol/edge rows without running tree-sitter.
 export const ATLAS_PARSER_VERSION = "atlas-v2-parser";
-export const ATLAS_PARSER_SPEC_VERSION = "body-identifiers-v1";
+// edge-coverage-v1: JS require/re-export/dynamic-import edges, synthetic
+// module anchors for import-only files, Rust #[derive] implements edges,
+// Go multi-name const/var + receiver-method parenting, Python subscripted
+// bases, JS signature body-boundary fix (encoder parse_extract changes).
+export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v1";

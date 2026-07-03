@@ -55,7 +55,7 @@ import os from "os";
 import path from "path";
 import { getDb, closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
-import { execFile, execFileSync, execSync, spawnSync } from "child_process";
+import { execFile, spawnSync } from "child_process";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
@@ -205,6 +205,7 @@ import { closePromptLog, readRecentPrompts } from "../../../shared/telemetry/fun
 import { loadRemotePromptBundle } from "../../remote/functions/prompt-bundle.js";
 import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
 import { resolveTargetBranch } from "../../git/functions/target-branch.js";
+import { gitExecAsync, isGitCommandFailure } from "../../git/functions/utils.js";
 import { ensureRestrictivePushRefspecsAsync, remotePushConfigsAreClearlyRestrictive } from "../../git/functions/push-guard.js";
 import { normalizeIntakeHints } from "../../intake/functions/hints.js";
 import {
@@ -315,16 +316,19 @@ function firstGitErrorLine(err) {
 }
 
 async function ensureGitRepositoryInitialized({ verbose = false } = {}) {
-  const gitOpts = {
-    cwd: PROJECT_DIR,
-    encoding: "utf-8",
-    timeout: BOOT_GIT_PROBE_TIMEOUT_MS,
-    windowsHide: true,
-  };
   try {
-    await execFileAsync("git", ["rev-parse", "--git-dir"], gitOpts);
+    await gitExecAsync(["rev-parse", "--git-dir"], PROJECT_DIR, {
+      timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
+      maxBuffer: 1024 * 128,
+    });
     return { initialized: false };
-  } catch {
+  } catch (err) {
+    // Only git itself saying "not a repository" may trigger init. A probe
+    // that could not run (native git layer down, gate busy, timeout) must
+    // not re-initialize an existing repo.
+    if (!isGitCommandFailure(err)) {
+      throw new Error(`git availability probe failed (not a missing repo): ${firstGitErrorLine(err)}`);
+    }
     // First run in a fresh directory: create the local repository before
     // writing Posse runtime files so ignore rules can be staged for HEAD.
   }
@@ -333,7 +337,10 @@ async function ensureGitRepositoryInitialized({ verbose = false } = {}) {
     console.log(`\n  ${C.yellow}${PROJECT_DIR} is not a git repository — initializing one.${C.reset}`);
   }
   try {
-    await execFileAsync("git", ["init"], gitOpts);
+    await gitExecAsync(["init"], PROJECT_DIR, {
+      timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
   } catch (err) {
     throw new Error(`failed to git init: ${firstGitErrorLine(err)}`);
   }
@@ -375,11 +382,13 @@ async function ensureSnapshotPushRefsGuarded({ verbose = false, timeoutMs = BOOT
  * by serial git calls once repository presence is settled.
  */
 async function ensureGitReady() {
-  const gitOpts = { cwd: PROJECT_DIR, encoding: "utf-8", timeout: BOOT_GIT_PROBE_TIMEOUT_MS, windowsHide: true };
   const tryGit = async (args) => {
     try {
-      const { stdout } = await execFileAsync("git", args, gitOpts);
-      return { ok: true, stdout: stdout.trim() };
+      const stdout = await gitExecAsync(args, PROJECT_DIR, {
+        timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      });
+      return { ok: true, stdout: String(stdout || "").trim() };
     } catch (err) {
       return { ok: false, error: err };
     }
@@ -387,6 +396,9 @@ async function ensureGitReady() {
 
   const repoCheck = await tryGit(["rev-parse", "--git-dir"]);
   if (!repoCheck.ok) {
+    if (!isGitCommandFailure(repoCheck.error)) {
+      throw new Error(`git availability probe failed (not a missing repo): ${firstGitErrorLine(repoCheck.error)}`);
+    }
     const initCheck = await tryGit(["init"]);
     if (!initCheck.ok) {
       throw new Error(`could not initialize git repository: ${firstGitErrorLine(initCheck.error)}`);
@@ -437,12 +449,10 @@ async function ensureGitReady() {
 async function ensureRepoSetupConfirmed() {
   // Async so the boot event loop isn't blocked on git between the interactive
   // prompts (the broader boot orchestration requires every task be off-loop).
-  const runGit = async (args) => (await execFileAsync("git", args, {
-    cwd: PROJECT_DIR,
-    encoding: "utf-8",
-    timeout: BOOT_GIT_PROBE_TIMEOUT_MS,
-    windowsHide: true,
-  })).stdout;
+  const runGit = async (args) => await gitExecAsync(args, PROJECT_DIR, {
+    timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
+    maxBuffer: 1024 * 1024,
+  });
 
   try {
     await ensureGitRepositoryInitialized({ verbose: true });
@@ -1043,8 +1053,7 @@ function promptViaEditor(header) {
 async function cmdAdd() {
   const rawArgs = process.argv.slice(3);
   if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
-    console.log(`\n  Usage: posse add "description of what you want built"`);
-    console.log(`  ${C.dim}Optional: --mode build|report|image --intent task|bugfix|design|context|question|report|image (hotkeys ok: b,d,c,q,r,i) --output repo|artifact|question_only --files LIST --constraints LIST${C.reset}\n`);
+    COMMAND_USAGE.add();
     return;
   }
 
@@ -2013,10 +2022,10 @@ async function maybeWarnPosseUpdateAvailable(commandPolicy) {
   if (!commandPolicy?.known || ["help", "run", "go", "update"].includes(commandName) || process.argv.includes("--json")) return;
   try {
     const {
-      checkPosseUpdateAvailability,
+      checkPosseUpdateAvailabilityCached,
       formatPosseUpdateAvailableWarning,
     } = await loadUpdateCommandModule();
-    const check = await checkPosseUpdateAvailability();
+    const check = await checkPosseUpdateAvailabilityCached();
     if (!check?.available) return;
     console.warn(`\n  ${C.yellow}${formatPosseUpdateAvailableWarning(check)}${C.reset}\n`);
   } catch {
@@ -2214,10 +2223,56 @@ async function cmdServe() {
 // MAIN
 // ═════════════════════════════════════════════════════════════════════════════
 
+// Per-command --help, intercepted in main() before init/dispatch so that
+// `posse <command> --help` prints usage instead of executing the command
+// (previously `posse run --help` booted the scheduler).
+const COMMAND_USAGE = {
+  add: () => {
+    console.log(`\n  Usage: posse add "description of what you want built"`);
+    console.log(`  ${C.dim}Optional: --mode build|report|image --intent task|bugfix|design|context|question|report|image (hotkeys ok: b,d,c,q,r,i) --output repo|artifact|question_only --files LIST --constraints LIST${C.reset}\n`);
+  },
+  run: () => {
+    console.log(`\n  Usage: posse run [flags]`);
+    console.log(`  Execute all pending jobs (scheduler + worker loop).\n`);
+    console.log(`    ${C.cyan}--concurrency N${C.reset}     Run N workers in parallel`);
+    console.log(`    ${C.cyan}--auto-approve${C.reset}      Dev won't pause for tool permission prompts`);
+    console.log(`    ${C.cyan}--auto-merge${C.reset} / ${C.cyan}--no-auto-merge${C.reset}  Merge (or don't) completed WI branches during wrap-up`);
+    console.log(`    ${C.cyan}--auto-approve-plan${C.reset} Skip plan approval gates for this run`);
+    console.log(`    ${C.cyan}--no-tui${C.reset}            Disable split-screen display (classic output)`);
+    console.log(`    ${C.cyan}--non-interactive${C.reset}   Suppress terminal prompts; leave app gates open instead`);
+    console.log(`    ${C.cyan}--dry-run${C.reset}           Research + plan only — dev jobs auto-pass without execution`);
+    console.log(`    ${C.cyan}--stall-timeout N${C.reset}   Seconds before killing stalled process`);
+    console.log(`    ${C.cyan}--cold-index${C.reset}        Clear the cold index before starting\n`);
+  },
+  go: () => {
+    console.log(`\n  Usage: posse go [flags]`);
+    console.log(`  plan + run in one shot: plans queued work items, then starts the scheduler.`);
+    console.log(`  ${C.dim}Accepts the same flags as 'run' — see: posse run --help${C.reset}\n`);
+  },
+};
+
+function helpFlagRequested() {
+  const args = process.argv.slice(3);
+  return args.includes("--help") || args.includes("-h");
+}
+
+async function printCommandHelp(command) {
+  const usage = COMMAND_USAGE[command];
+  if (usage) {
+    usage();
+    return;
+  }
+  await printGlobalHelp();
+}
+
 export async function main() {
   const command = normalizeCommandName((!COMMAND && ITERATE_FLAG) ? "add" : COMMAND);
   if (rejectUnknownFlags()) return;
   const commandPolicy = getCommandBootstrapPolicy(command);
+  if (!isHelpCommand(command) && commandPolicy.known && helpFlagRequested()) {
+    await printCommandHelp(command);
+    return;
+  }
   const runBootPanelOwnsReadiness = commandPolicy.name === "run" || commandPolicy.name === "go";
   await init({
     requireWritableArtifacts: commandPolicy.requiresWritableArtifacts,
@@ -2227,8 +2282,16 @@ export async function main() {
   await maybeWarnPosseUpdateAvailable(commandPolicy);
 
   if (isHelpCommand(command)) {
-    const aliasDiagnostic = await posseAliasDiagnostic();
-    console.log(`
+    await printGlobalHelp();
+    return;
+  }
+
+  return dispatchResolvedCommand(command);
+}
+
+async function printGlobalHelp() {
+  const aliasDiagnostic = await posseAliasDiagnostic();
+  console.log(`
 ${C.bold}  Posse (claude-org v4) — SQLite Job Queue Orchestrator${C.reset}
   ${C.dim}Project: ${PROJECT_DIR}${C.reset}
   ${C.dim}Providers: configured per role in Posse settings${C.reset}
@@ -2342,9 +2405,9 @@ ${aliasDiagnostic}
     posse add "Add JWT authentication to all endpoints"
     posse go --auto-approve
 `);
-    return;
-  }
+}
 
+async function dispatchResolvedCommand(command) {
   const { handled, result } = await dispatchCommand(command, {
     add: cmdAdd,
     queue: cmdQueue,

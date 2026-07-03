@@ -8,7 +8,7 @@
 
 import fs from "fs";
 import path from "path";
-import { LOCK_HOLDING_JOB_STATUSES, TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
+import { ACTIVE_LEASE_STATUSES, LOCK_HOLDING_JOB_STATUSES, TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { getWorkItem, listJobsByWorkItem, refreshWorkItemStatus, setMergeState, setWorkItemBranch } from "../../queue/functions/index.js";
 import { throwIfAborted, isAbortError } from "../../runtime/functions/yield.js";
 import { jobNeedsGitWorktree } from "./policy.js";
@@ -26,11 +26,21 @@ import { deleteBranchPreservingTipAsync } from "./worktree-branch-ops.js";
 import { pruneRecoveredWorktreeSnapshotsAsync } from "./worktree-snapshots.js";
 
 const HOLDING_STATUSES = new Set(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
+const ACTIVE_LEASE_STATUS_SET = new Set(ACTIVE_LEASE_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 
 function workItemHoldsBench(workItemId) {
   const jobs = listJobsByWorkItem(workItemId);
   return jobs.some((job) => jobNeedsGitWorktree(job) && HOLDING_STATUSES.has(job.status));
+}
+
+// Leased/running jobs may have a live agent writing to the worktree right now
+// (agents hold no worktree lock during provider execution), so the held-path
+// reset below must not touch them. Queued/blocked holders only park stale
+// dirt from an earlier attempt — that reset is the designed recovery.
+function workItemHasActiveLease(workItemId) {
+  const jobs = listJobsByWorkItem(workItemId);
+  return jobs.some((job) => jobNeedsGitWorktree(job) && ACTIVE_LEASE_STATUS_SET.has(job.status));
 }
 
 function clearWorkItemBranchState(wi, { clearMergeState = false } = {}) {
@@ -323,6 +333,10 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
           continue;
         } else {
           try {
+            if (workItemHasActiveLease(wiId)) {
+              onMsg(`GC: skipped dirty check for held WI#${wiId}; a leased/running job may be writing to the worktree`);
+              continue;
+            }
             if (await timing.step(`held WI#${wiId} dirty check`, () => worktreeNeedsRecoveryAsync(wtDir, { signal }), { gitCwd: wtDir })) {
               const snapshotDir = await timing.step(`held WI#${wiId} snapshot/reset`, () => snapshotAndResetDirtyWorktreeAsync(wtDir, projectDir, {
                 reason: "startup-gc-dirty-worktree",

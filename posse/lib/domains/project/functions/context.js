@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
-import { execFileSync } from "child_process";
 import { Worker as NodeWorker } from "worker_threads";
+import { gitExec, gitExecBuffer } from "../../git/functions/utils.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { UNMERGED_WORK_ITEM_MERGE_STATES } from "../../../catalog/work-item.js";
 import { ACTIVE_LEASE_STATUSES, FAILED_JOB_STATUSES, PARKED_JOB_STATUSES } from "../../queue/functions/common.js";
@@ -16,19 +16,14 @@ function _safeJson(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
-function _batchReadNotes(projectDir, objectHashes) {
+export function _batchReadNotes(projectDir, objectHashes) {
   // Replaces an N+1 pattern (one `git notes show` per ref) with a single
   // `git cat-file --batch` call. Cuts up to 5+ git subprocess starts per
   // CLI invocation on repos with multiple snapshot refs.
   if (objectHashes.length === 0) return new Map();
   let notesMap = null;
   try {
-    const listRaw = execFileSync("git", ["notes", "--ref=refs/notes/posse-snapshots", "list"], {
-      cwd: projectDir,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 10000,
-    });
+    const listRaw = gitExec(["notes", "--ref=refs/notes/posse-snapshots", "list"], projectDir, { timeoutMs: 10000 });
     notesMap = new Map();
     for (const line of String(listRaw || "").split("\n").filter(Boolean)) {
       const [noteSha, annotatedSha] = line.trim().split(/\s+/);
@@ -46,12 +41,9 @@ function _batchReadNotes(projectDir, objectHashes) {
   const out = new Map();
   try {
     const stdin = wanted.map((entry) => entry.note).join("\n") + "\n";
-    const batched = execFileSync("git", ["cat-file", "--batch"], {
-      cwd: projectDir,
+    const batched = gitExecBuffer(["cat-file", "--batch"], projectDir, {
       input: stdin,
-      encoding: "buffer",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 10000,
+      timeoutMs: 10000,
     });
     let cursor = 0;
     for (const entry of wanted) {
@@ -78,12 +70,7 @@ function _latestRecoverySnapshots(projectDir, limit = 5) {
   const out = [];
 
   try {
-    const refsRaw = execFileSync("git", ["for-each-ref", "--format=%(refname)|%(objectname)|%(creatordate:iso-strict)", "refs/posse/snapshots"], {
-      cwd: projectDir,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 15000,
-    });
+    const refsRaw = gitExec(["for-each-ref", "--format=%(refname)|%(objectname)|%(creatordate:iso-strict)", "refs/posse/snapshots"], projectDir, { timeoutMs: 15000 });
     const rows = String(refsRaw || "").split("\n").filter(Boolean)
       .map((line) => {
         const [refName, objectHash, createdAt] = line.split("|");

@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
-import { execFileSync } from "child_process";
 
+import { gitExec } from "../../git/functions/utils.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { readActiveWorktreeCap } from "../../scheduler/functions/config.js";
 import {
@@ -46,11 +46,7 @@ function listFiles(dirPath) {
 }
 
 function git(projectDir, args) {
-  return execFileSync("git", args, {
-    cwd: projectDir,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
+  return gitExec(args, projectDir).trim();
 }
 
 function diskProbe(projectDir) {

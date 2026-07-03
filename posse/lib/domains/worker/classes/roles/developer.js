@@ -33,6 +33,7 @@ import {
   spawnFailureForRole,
   spawnSuccessForRole,
 } from "../../../../shared/policies/functions/spawn-policy.js";
+import { projectDbEffectivePermissions } from "../../../../functions/toolkit/project-db/config.js";
 
 const DEFAULT_DEPS = {
   checkpointTokenThreshold: CHECKPOINT_TOKEN_THRESHOLD,
@@ -66,7 +67,28 @@ export class DeveloperRole extends BaseRole {
     const workItem = getWorkItem(job.work_item_id);
     const payload = worker.parsePayload(job);
     const devCwd = job._worktreePath || worker.projectDir;
-    const deleteFiles = scopedDeleteTargets(job, payload);
+    const dbOnlyTask = (payload.task_mode || "code") === "db";
+    let dbGrants = [];
+    if (dbOnlyTask) {
+      // DB-only means DB-only: the write surface is project_db_query under the
+      // operator grant; file scope must be empty (locks/commit machinery key on
+      // task_mode:"db" carrying none). Both checks run before any provider
+      // spend so an impossible job fails fast with a clear reason.
+      const scopeLeak = [payload.files_to_modify, payload.files_to_create, payload.files_to_delete, payload.create_roots]
+        .some((list) => Array.isArray(list) && list.length > 0);
+      if (scopeLeak) {
+        throw new Error(
+          "db-mode dev job must not carry file scope (files_to_modify/files_to_create/files_to_delete/create_roots); use task_mode:\"code\" for repo edits."
+        );
+      }
+      dbGrants = projectDbEffectivePermissions({ projectDir: worker.projectDir, capability: "write" });
+      if (!dbGrants.some((perm) => perm !== "read")) {
+        throw new Error(
+          "db-mode dev job requires a write-capable project DB grant (insert/write/delete/create/alter), but this repo's project_db config grants none; configure the grant or replan the task as repo work."
+        );
+      }
+    }
+    const deleteFiles = dbOnlyTask ? [] : scopedDeleteTargets(job, payload);
     let files = uniqueScopeFiles(payload.files_to_modify || []);
     let createFiles = payload.files_to_create || [];
     let createRoots = payload.create_roots || [];
@@ -92,11 +114,13 @@ export class DeveloperRole extends BaseRole {
     });
 
     await handoff(packet);
-    files = uniqueScopeFiles(packet.files_to_modify || []);
-    createFiles = packet.files_to_create || [];
-    createRoots = packet.create_roots || [];
+    files = dbOnlyTask ? [] : uniqueScopeFiles(packet.files_to_modify || []);
+    createFiles = dbOnlyTask ? [] : (packet.files_to_create || []);
+    createRoots = dbOnlyTask ? [] : (packet.create_roots || []);
     const hasScope = files.length > 0 || createFiles.length > 0 || deleteFiles.length > 0 || createRoots.length > 0;
-    if (!hasScope) {
+    // db-mode jobs legitimately run with an empty file scope: their write
+    // surface is the project database, and the file tools stay read-only.
+    if (!hasScope && !dbOnlyTask) {
       throw new Error(
         "Developer job has no writable scope (files_to_modify/files_to_create/files_to_delete/create_roots); reject to prevent unsafely broad edits."
       );
@@ -150,6 +174,7 @@ export class DeveloperRole extends BaseRole {
     Object.assign(ctx, {
       createFiles,
       createRoots,
+      dbOnlyTask,
       deleteFiles,
       deleteOnlyTask,
       deleteOutcome,
@@ -186,6 +211,16 @@ export class DeveloperRole extends BaseRole {
       promptLiteral("TASK", job.title),
       "",
       promptLiteral("INSTRUCTIONS", payload.task_spec || job.title),
+      dbOnlyTask
+        ? [
+          "",
+          "DB-ONLY TASK MODE:",
+          `- This job's entire change is in the project database, made through the project_db_query tool (granted permissions: ${dbGrants.join(", ")}).`,
+          "- File tools are read-only for this job: do not attempt repo edits, file creation, or FILE_REQUESTs for this work.",
+          "- Verify your changes with SELECT/inspection statements and put that evidence in the dev log criteria_check.",
+          "- A COMPLETE status with zero file changes is the expected success shape for this task.",
+        ].join("\n")
+        : null,
     ].filter((value) => value !== null).join("\n");
   }
 
@@ -225,7 +260,10 @@ export class DeveloperRole extends BaseRole {
     const maxTurns = maxTurnsOverrideFromPayload(ctx.payload);
     return {
       role: this.getRole(),
-      allowWrite: true,
+      // db-mode jobs run without file-write tools entirely; their only write
+      // surface is project_db_query, granted via projectDbWrite below.
+      allowWrite: !ctx.dbOnlyTask,
+      projectDbWrite: !!ctx.dbOnlyTask,
       scopedFiles: ctx.editableScope.length > 0 ? ctx.editableScope : null,
       createFiles: ctx.createFiles.length > 0 ? ctx.createFiles : null,
       createRoots: ctx.createRoots.length > 0 ? ctx.createRoots : null,
