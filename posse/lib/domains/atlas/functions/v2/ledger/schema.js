@@ -245,6 +245,11 @@ export function ensureLegacyScipColumnsBeforeDdl(db) {
   if (tableExists(db, "blob_symbols")) {
     ensureColumn(db, "blob_symbols", "source", "TEXT NOT NULL DEFAULT 'treesitter'");
   }
+  if (tableExists(db, "scip_indexes")) {
+    // idx_scip_indexes_bytes_hash in LEDGER_DDL references this column.
+    ensureColumn(db, "scip_indexes", "scip_bytes_hash", "TEXT");
+    ensureColumn(db, "scip_indexes", "ingested_head", "TEXT");
+  }
 }
 
 /**

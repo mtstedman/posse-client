@@ -25,6 +25,16 @@ const STEP_SECTION_MAP = new Map([
 
 const TERMINAL_BOOT_LANG_STATES = new Set(["done", "skipped", "deferred", "failed"]);
 
+// Event-loop stall detector cadence/threshold. Boot renders to the console
+// from the main thread, and on Windows a console that stops draining (text
+// selection / Mark mode, ConPTY backpressure, Ctrl+S) blocks that write and
+// wedges the whole event loop — the panel freezes and every boot await stops,
+// with nothing in the logs to say why. A heartbeat that measures its own
+// scheduling drift can't prevent the stall, but it names it: the first tick
+// after the loop unwedges logs how long the loop was gone.
+const STALL_HEARTBEAT_MS = 250;
+const STALL_WARN_MS = 1000;
+
 export class RunBootPanelController {
   constructor({
     C,
@@ -52,6 +62,9 @@ export class RunBootPanelController {
     this.startedAtIso = new Date().toISOString();
     this.statusTimer = null;
     this.statusPending = null;
+    this.stallTimer = null;
+    this.lastStallTickAt = 0;
+    this.startStallDetector();
     this.terminalOutputIntercept = createTerminalOutputIntercept({
       stdout: process.stdout,
       stderr: process.stderr,
@@ -187,6 +200,42 @@ export class RunBootPanelController {
     if (this.getDisplay() || this.monitorTimer || this.monitorDisposed) return;
     this.monitorTimer = setInterval(() => this.render({ force: true }), 120);
     this.monitorTimer.unref?.();
+  }
+
+  startStallDetector() {
+    if (this.stallTimer) return;
+    this.lastStallTickAt = Date.now();
+    this.stallTimer = setInterval(() => this.noteStallTick(Date.now()), STALL_HEARTBEAT_MS);
+    this.stallTimer.unref?.();
+  }
+
+  stopStallDetector() {
+    if (!this.stallTimer) return;
+    clearInterval(this.stallTimer);
+    this.stallTimer = null;
+  }
+
+  /**
+   * Record one heartbeat tick and log a warning when the tick arrived far
+   * later than scheduled — the loop just came back from a stall (blocked
+   * console write, long sync call, process suspension). Runs only while the
+   * boot panel is alive, so a stall in the boot window is named in the run
+   * log instead of surfacing as an unexplained gap between boot steps.
+   *
+   * @param {number} now
+   * @returns {number} the measured stall in ms (0 when on schedule)
+   */
+  noteStallTick(now) {
+    const previous = this.lastStallTickAt;
+    this.lastStallTickAt = now;
+    const stallMs = now - previous - STALL_HEARTBEAT_MS;
+    if (!Number.isFinite(stallMs) || stallMs < STALL_WARN_MS) return 0;
+    this.log?.warn?.("run", "Boot event loop stalled", {
+      stall_ms: Math.round(stallMs),
+      last_render_age_ms: this.lastRenderAt > 0 ? Math.max(0, Math.round(now - this.lastRenderAt)) : null,
+      likely: "blocked console write or long synchronous call",
+    });
+    return stallMs;
   }
 
   updateStep(label, patch = {}) {
@@ -402,6 +451,7 @@ export class RunBootPanelController {
       this.monitorTimer = null;
     }
     if (final) {
+      this.stopStallDetector();
       if (this.monitorDisposed) {
         this.terminalOutputIntercept.release();
         return;

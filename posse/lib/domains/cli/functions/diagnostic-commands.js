@@ -13,7 +13,7 @@ import { C } from "../../../shared/format/functions/colors.js";
 import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
 import { getCommandPositionalArgs } from "./flags.js";
 import { readRecentPrompts } from "../../../shared/telemetry/functions/logging/prompt-log.js";
-import { getAgentCallStats, getResearcherGuardrailStats, listAgentCalls } from "../../queue/functions/index.js";
+import { getAgentCallStats, getResearcherGuardrailStats, getScopeContextHealthMetrics, listAgentCalls } from "../../queue/functions/index.js";
 import { buildAgentCallReplayPacket, formatReplayPacket } from "../../observability/functions/recovery/job-replay.js";
 import { appendRunTelemetry, getRunTelemetryDir } from "../../../shared/telemetry/functions/run-telemetry.js";
 
@@ -80,6 +80,7 @@ export function cmdCalls({ tierModelName }) {
   // ── Aggregate stats ────────────────────────────────────────────────────
   const stats = getAgentCallStats();
   const researcherGuardrails = getResearcherGuardrailStats();
+  const scopeContextHealth = getScopeContextHealthMetrics({ trailingDays: 7 });
   const recent = filterArg
     ? listAgentCalls({ role: filterArg, limit: 20 })
     : listAgentCalls({ limit: 20 });
@@ -91,6 +92,8 @@ export function cmdCalls({ tierModelName }) {
     acc.total_input_tokens += row.total_input_tokens || 0;
     acc.total_cached_input_tokens += row.total_cached_input_tokens || 0;
     acc.total_output_tokens += row.total_output_tokens || 0;
+    acc.total_turns_used += row.total_turns_used || 0;
+    acc.output_truncated_count += row.output_truncated_count || 0;
     return acc;
   }, {
     call_count: 0,
@@ -100,6 +103,8 @@ export function cmdCalls({ tierModelName }) {
     total_input_tokens: 0,
     total_cached_input_tokens: 0,
     total_output_tokens: 0,
+    total_turns_used: 0,
+    output_truncated_count: 0,
   });
 
   if (jsonOutput) {
@@ -108,9 +113,10 @@ export function cmdCalls({ tierModelName }) {
       totals,
       stats,
       researcher_guardrails: researcherGuardrails,
+      scope_context_health: scopeContextHealth,
       recent,
     }, null, 2));
-    return { filter_role: filterArg, totals, stats, researcher_guardrails: researcherGuardrails, recent };
+    return { filter_role: filterArg, totals, stats, researcher_guardrails: researcherGuardrails, scope_context_health: scopeContextHealth, recent };
   }
 
   if (stats.length === 0) {
@@ -170,7 +176,12 @@ export function cmdCalls({ tierModelName }) {
     `${(totalOutput / 1024).toFixed(1).padStart(10)} ` +
     `${fmtTok(totalInTok).padStart(9)} ` +
     `${fmtTok(totalCachedInTok).padStart(9)} ` +
-    `${fmtTok(totalOutTok).padStart(9)}`
+      `${fmtTok(totalOutTok).padStart(9)}`
+  );
+  const avgTurns = totalCalls > 0 ? (totals.total_turns_used / totalCalls).toFixed(1) : "0.0";
+  console.log(
+    `  ${C.dim}turns:${fmtTok(totals.total_turns_used)} avg:${avgTurns}/call ` +
+    `output-caps-hit:${fmtTok(totals.output_truncated_count)}${C.reset}`
   );
 
   if (researcherGuardrails.totals.call_count > 0) {
@@ -195,6 +206,19 @@ export function cmdCalls({ tierModelName }) {
     );
   }
 
+  const contextTrailing = scopeContextHealth.trailing || {};
+  const contextTotal = Object.values(contextTrailing).reduce((sum, value) => sum + (Number(value) || 0), 0);
+  if (contextTotal > 0) {
+    console.log(`\n  ${C.bold}Context Health${C.reset} ${C.dim}(last ${scopeContextHealth.trailing_days}d)${C.reset}`);
+    console.log(
+      `  trims:${String(contextTrailing.context_trimmed_packets || 0).padStart(3)} ` +
+      `under-scoped:${String(contextTrailing.under_scoped_drops || 0).padStart(3)} ` +
+      `recoveries:${String(contextTrailing.recovery_escalations || 0).padStart(3)} ` +
+      `scope-noops:${String(contextTrailing.scope_cleaned_noops || 0).padStart(3)} ` +
+      `shadow-conflicts:${String(contextTrailing.strict_shadow_conflicts || 0).padStart(3)}`
+    );
+  }
+
   // ── Recent calls detail ────────────────────────────────────────────────
   if (recent.length > 0) {
     console.log(`\n  ${C.bold}Recent Calls${filterArg ? ` (${filterArg})` : ""}${C.reset}\n`);
@@ -209,6 +233,8 @@ export function cmdCalls({ tierModelName }) {
       const jobRef = call.job_id ? `#${call.job_id}` : "";
       const promptK = call.prompt_chars ? `${(call.prompt_chars / 1024).toFixed(0)}K` : "";
       const outputK = call.output_chars ? `${(call.output_chars / 1024).toFixed(0)}K` : "";
+      const turns = call.turns_used != null ? ` turns:${call.turns_used}` : "";
+      const capHit = call.output_truncated ? ` ${C.yellow}cap:${call.output_limit_reason || "hit"}${C.reset}` : "";
 
       console.log(
         `  ${C.dim}${time}${C.reset} ${statusIcon}${C.reset} ` +
@@ -216,7 +242,7 @@ export function cmdCalls({ tierModelName }) {
         `${C.dim}${tierModelName(call.model_tier, { providerName: call.provider }).padEnd(9)}${C.reset} ` +
         `${jobRef.padEnd(5)} ` +
         `${dur.padStart(7)} ` +
-        `${C.dim}in:${promptK.padEnd(5)} out:${outputK.padEnd(5)}${C.reset} ` +
+        `${C.dim}in:${promptK.padEnd(5)} out:${outputK.padEnd(5)}${turns}${C.reset}${capHit} ` +
         `${call.activity || ""}`
       );
     }

@@ -85,6 +85,78 @@ export function symbolUsages({ view, versionId, params }) {
 }
 
 /**
+ * Compact "who calls into this" breadcrumbs for read surfaces (skeleton,
+ * lens): the top definitions by distinct calling files, each with a small
+ * path sample. Graph context rides along on the reads agents already make,
+ * so consuming the caller graph does not require issuing graph calls.
+ *
+ * @param {View} view
+ * @param {ViewSymbol[]} symbols
+ * @param {{ maxSymbols?: number, examineLimit?: number, sampleLimit?: number }} [opts]
+ * @returns {{ symbol: string, calledFromFiles: number, sample: string[] }[]}
+ */
+export function calledFromBreadcrumbs(view, symbols, { maxSymbols = 6, examineLimit = 24, sampleLimit = 2 } = {}) {
+  const rows = [];
+  try {
+    for (const symbol of (symbols || []).slice(0, examineLimit)) {
+      if (symbol?.global_id == null || !isDefaultVisibleSymbol(symbol)) continue;
+      const { callerCount, callerPathsSample } = countIncomingCallers(view, symbol, { sampleLimit, distinctPaths: true });
+      if (callerCount > 0) {
+        rows.push({ symbol: symbol.name, calledFromFiles: callerCount, sample: callerPathsSample });
+      }
+    }
+  } catch {
+    // Advisory context; whatever was collected still helps.
+  }
+  rows.sort((a, b) => b.calledFromFiles - a.calledFromFiles || a.symbol.localeCompare(b.symbol));
+  return rows.slice(0, maxSymbols);
+}
+
+/**
+ * Count resolved, default-visible incoming callers for a symbol and sample a
+ * few distinct caller paths. Shares the exact caller-enumeration + visibility
+ * filter that {@link symbolUsages} applies (view.query.callers +
+ * isDefaultVisibleSymbol) so retrieval reachability signals stay consistent
+ * with the symbol.overview surface. Best-effort: returns zero on any error.
+ *
+ * `distinctPaths` counts distinct caller FILES instead of call-site edges —
+ * the hub measure for "how much of the codebase routes through this": a
+ * helper invoked 30 times from inside one test file is one calling file, not
+ * a 30-edge hub.
+ *
+ * @param {View} view
+ * @param {ViewSymbol} target
+ * @param {{ sampleLimit?: number, distinctPaths?: boolean }} [opts]
+ * @returns {{ callerCount: number, callerPathsSample: string[] }}
+ */
+export function countIncomingCallers(view, target, { sampleLimit = 3, distinctPaths = false } = {}) {
+  const result = { callerCount: 0, callerPathsSample: /** @type {string[]} */ ([]) };
+  try {
+    if (!view?.query || target?.global_id == null) return result;
+    const seenPaths = new Set();
+    const distinct = distinctPaths ? new Set() : null;
+    for (const edge of view.query.callers(target.global_id)) {
+      const from = view.query.getSymbol(edge.from_global_id);
+      if (!from || !isDefaultVisibleSymbol(from)) continue;
+      const p = String(edge.repo_rel_path || from.repo_rel_path || "").replace(/\\/g, "/") || null;
+      if (distinct) {
+        if (p) distinct.add(p);
+      } else {
+        result.callerCount += 1;
+      }
+      if (p && !seenPaths.has(p) && result.callerPathsSample.length < sampleLimit) {
+        seenPaths.add(p);
+        result.callerPathsSample.push(p);
+      }
+    }
+    if (distinct) result.callerCount = distinct.size;
+  } catch {
+    // Reachability is an advisory signal; degrade to whatever we counted.
+  }
+  return result;
+}
+
+/**
  * @param {ViewEdge} edge
  * @param {ViewSymbol} from
  * @param {boolean} resolved

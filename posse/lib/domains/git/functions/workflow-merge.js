@@ -173,6 +173,43 @@ export function createMergeWorkflowHelpers(context, {
     }
   }
 
+  // Non-blocking counterpart of refreshAtlasMainAfterMerge: hand the merge
+  // replay to the ATLAS outbox so the background atlas_warm scheduler picks
+  // it up (coalescing with any queued main-merge warm for the same branch).
+  // Review/approval and wrap-up paths use this so the operator never waits
+  // on a reindex; if the session exits first, the queued job persists and
+  // runs next session.
+  function queueAtlasMainRefreshAfterMerge({
+    wiId,
+    branchName = null,
+    targetBranch = null,
+    mergeHash = null,
+  } = {}) {
+    if (!wiId) return { attempted: false, ok: true, skipped: "missing_work_item_id" };
+    if (!isAtlasV2EmissionEnabled()) return { attempted: false, ok: true, skipped: "atlas_v2_emission_disabled" };
+    const result = emitAtlasV2MergedToMain({
+      payload: {
+        wi_id: Number(wiId),
+        source_branch: String(branchName || ""),
+        target_branch: String(targetBranch || "main"),
+        merge_commit_sha: String(mergeHash || ""),
+      },
+      onError: (err) => logEvent({
+        work_item_id: wiId,
+        event_type: EVENT_TYPES.ATLAS_REINDEX_FAILED,
+        actor_type: EVENT_ACTORS.ATLAS,
+        message: `ATLAS merge replay enqueue failed for ${branchName || `WI#${wiId}`}: ${err?.message || String(err)}`,
+        event_json: JSON.stringify({
+          branch: branchName || null,
+          target_branch: targetBranch || null,
+          merge_hash: mergeHash || null,
+          error: err?.message || String(err),
+        }),
+      }),
+    });
+    return { ...result, attempted: true };
+  }
+
   async function refreshAtlasMainAfterMerge({
     wiId,
     branchName,
@@ -253,27 +290,8 @@ export function createMergeWorkflowHelpers(context, {
         } catch { /* best effort; boot readiness can rediscover the gap */ }
       }
     }
-    if (isAtlasV2EmissionEnabled() && (replay.ok === false || replay.skipped === "source_branch_missing")) {
-      emitAtlasV2MergedToMain({
-        payload: {
-          wi_id: Number(wiId),
-          source_branch: String(branchName || ""),
-          target_branch: String(targetBranch || "main"),
-          merge_commit_sha: String(mergeHash || ""),
-        },
-        onError: (err) => logEvent({
-          work_item_id: wiId,
-          event_type: EVENT_TYPES.ATLAS_REINDEX_FAILED,
-          actor_type: EVENT_ACTORS.ATLAS,
-          message: `ATLAS merge outbox fallback failed for ${branchName || `WI#${wiId}`}: ${err?.message || String(err)}`,
-          event_json: JSON.stringify({
-            branch: branchName || null,
-            target_branch: targetBranch || null,
-            merge_hash: mergeHash || null,
-            error: err?.message || String(err),
-          }),
-        }),
-      });
+    if (replay.ok === false || replay.skipped === "source_branch_missing") {
+      queueAtlasMainRefreshAfterMerge({ wiId, branchName, targetBranch, mergeHash });
     }
     return replay;
   }
@@ -387,7 +405,7 @@ export function createMergeWorkflowHelpers(context, {
         },
       });
       try {
-        emitMergePhase(onPhase, "atlas-indexing", `ATLAS indexing ${branch}`, { branch, target: targetBranch, retry: true });
+        emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch, retry: true });
         gitMergeExec(["commit", "-m", subject], cwd);
         const mergeHash = gitMergeExec(["rev-parse", "HEAD"], cwd);
         cleanupSquashMessage(cwd);
@@ -798,7 +816,7 @@ export function createMergeWorkflowHelpers(context, {
               staged_files: stagedFiles.slice(0, 50),
             },
           });
-          emitMergePhase(onPhase, "atlas-indexing", `ATLAS indexing ${branch}`, { branch, target: targetBranch });
+          emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
           mergeStep = "commit";
           gitMergeExec(["commit", "-m", expectedSquashSubject(branch, targetBranch)], cwd);
           mergeCreated = true;
@@ -1063,6 +1081,7 @@ export function createMergeWorkflowHelpers(context, {
     gitMergeToTarget,
     gitMergeToTargetAsync,
     mergeIterativePassToTarget,
+    queueAtlasMainRefreshAfterMerge,
     refreshAtlasMainAfterMerge,
   };
 }

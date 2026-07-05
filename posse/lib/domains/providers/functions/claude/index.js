@@ -44,7 +44,8 @@ import {
   extractClaudeSessionHandleFromStreamMessage,
   isClaudeResumeHandleExpiredError,
 } from "./session-handles.js";
-import { escalateModelTier, getMaxTurnsForProvider } from "../shared/turns.js";
+import { escalateModelTier, getMaxOutputTokensForProvider, getMaxTurnsForProvider } from "../shared/turns.js";
+import { normalizeMaxOutputTokens } from "../shared/output-limits.js";
 import { resolveProviderStallTimeout } from "../shared/stall-timeout.js";
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
 import { classifyProviderError } from "../shared/api-resilience.js";
@@ -263,6 +264,7 @@ export async function callProvider(promptText, {
   stableContext = null,
   remoteSystemPrompt = null,
   maxTurns = null,
+  maxOutputTokens = null,
   deepthink = false,
   complexity = null,   // 1-5 planner complexity score — drives dynamic turn budget for dev/artificer
   filesToModifyCount = null, // dev turn scaling input from planner scope size
@@ -347,6 +349,8 @@ export async function callProvider(promptText, {
 
     // ── Max turns ──────────────────────────────────────────────────────────
     const turns = maxTurns || getMaxTurns(role, modelTier, complexity, deepthink, filesToModifyCount);
+    const outputTokenLimit = normalizeMaxOutputTokens(maxOutputTokens)
+      || getMaxOutputTokensForProvider("claude", { role });
     if (turns) {
       args.push("--max-turns", String(turns));
     }
@@ -718,6 +722,9 @@ export async function callProvider(promptText, {
             durationMs,
             exitCode: result.exitCode,
             maxTurns: turns,
+            maxOutputTokens: outputTokenLimit,
+            outputTruncated: false,
+            outputLimitReason: null,
             toolUses: null,
             atlasMethod: atlasMethodForStats,
             sessionHandle: result.sessionHandle || null,
@@ -768,6 +775,9 @@ export async function callProvider(promptText, {
             durationMs: Date.now() - startTime,
             exitCode: null,
             maxTurns: turns,
+            maxOutputTokens: outputTokenLimit,
+            outputTruncated: false,
+            outputLimitReason: null,
             atlasMethod: atlasMethodForStats,
             priorSessionHandle: priorSessionHandle || null,
             sessionExpired: !!priorSessionHandle && isClaudeResumeHandleExpiredError(`${transcript}\n${wrapped.message}`),
@@ -1225,6 +1235,9 @@ export async function callProvider(promptText, {
         durationMs,
         exitCode: code,
         maxTurns: turns,
+        maxOutputTokens: outputTokenLimit,
+        outputTruncated: false,
+        outputLimitReason: null,
         toolUses: toolUses.length > 0 ? toolUses : null,
         atlasMethod: atlasMethodForStats,
         sessionHandle: latestSessionHandle || null,
@@ -1327,6 +1340,9 @@ export async function callProvider(promptText, {
         durationMs: Date.now() - startTime,
         exitCode: null,
         maxTurns: turns,
+        maxOutputTokens: outputTokenLimit,
+        outputTruncated: false,
+        outputLimitReason: null,
         executionMode: CLAUDE_EXECUTION_MODE_PRINT,
       };
       reject(wrapped);

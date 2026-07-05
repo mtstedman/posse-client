@@ -31,6 +31,7 @@ import {
   resolvePrimaryExecutionModelName,
   sanitizeExecutionHintsForRole,
 } from "../../providers/functions/execution-routing.js";
+import { getMaxOutputTokensForProvider } from "../../providers/functions/shared/turns.js";
 import { selectFallbackProvider } from "../../providers/functions/delegation-routing.js";
 import { buildResumeHandoff } from "../../handoff/functions/index.js";
 import { getReplayMemoryStats, recordRecoveryCheckpoint, retainReplayOutput, retainReplayPrompt, retainReplayToolUses } from "../../observability/functions/recovery/job-replay.js";
@@ -152,6 +153,11 @@ function defaultResolveCallCostEstimate(stats) {
     if (Number.isFinite(numeric) && numeric >= 0) return numeric;
   }
   return null;
+}
+
+function positiveIntegerOrNull(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : null;
 }
 
 // Production defaults are captured at module import time. Tests should pass
@@ -501,6 +507,9 @@ export class TrackedProviderClient {
       retainReplayToolUses,
       runWithObservationContext,
     } = this.deps;
+    const resolvedMaxTurns = positiveIntegerOrNull(opts.maxTurns);
+    const resolvedMaxOutputTokens = positiveIntegerOrNull(opts.maxOutputTokens)
+      || getMaxOutputTokensForProvider(providerName, { role: opts.role });
     const call = await timeProviderSetupPhase("provider.agent_call_create", {
       role: opts.role,
       provider: providerName,
@@ -515,6 +524,8 @@ export class TrackedProviderClient {
       model_name: modelName,
       activity: opts.activity,
       prompt_chars: prompt.length,
+      max_turns_configured: resolvedMaxTurns,
+      max_output_tokens_configured: resolvedMaxOutputTokens,
       reasoning_effort: opts.reasoningEffort || "medium",
       provider: providerName,
       atlas_method: opts.disableAtlas ? null : (opts.atlasMethod || null),
@@ -541,10 +552,13 @@ export class TrackedProviderClient {
         model_name: modelName,
         activity: opts.activity,
         prompt_chars: prompt.length,
+        max_turns_configured: resolvedMaxTurns,
+        max_output_tokens_configured: resolvedMaxOutputTokens,
       },
     });
     const attemptOpts = {
       ...opts,
+      maxOutputTokens: resolvedMaxOutputTokens,
       attemptId: observationContext?.attempt_id ?? opts.attemptId ?? null,
       abortSignal,
       recordFinalPrompt: (finalPrompt, { systemPrompt = null, systemPromptFiles = null } = {}) => {
@@ -628,6 +642,9 @@ export class TrackedProviderClient {
         input_tokens: stats.inputTokens ?? null,
         output_tokens: stats.outputTokens ?? null,
         output_chars: stats.outputChars ?? (typeof output === "string" ? output.length : null),
+        turns_used: stats.numTurns ?? null,
+        max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+        output_truncated: stats.outputTruncated === true,
         replay_memory: getReplayMemoryStats(),
       });
       const accountingStats = {
@@ -635,6 +652,9 @@ export class TrackedProviderClient {
         provider: providerName,
         modelTier: tier,
         modelName: stats.modelName || modelName,
+        maxOutputTokens: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+        outputTruncated: stats.outputTruncated === true,
+        outputLimitReason: stats.outputLimitReason || null,
       };
 
       completeAgentCall(agentCallId, {
@@ -644,6 +664,11 @@ export class TrackedProviderClient {
         output_tokens: stats.outputTokens ?? null,
         cached_input_tokens: stats.cachedInputTokens ?? null,
         cache_creation_input_tokens: stats.cacheCreationInputTokens ?? null,
+        turns_used: stats.numTurns ?? null,
+        max_turns_configured: stats.maxTurns ?? resolvedMaxTurns,
+        max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+        output_truncated: stats.outputTruncated === true,
+        output_limit_reason: stats.outputLimitReason || null,
         model_name: stats.modelName || null,
         duration_ms: stats.durationMs,
         exit_code: stats.exitCode,
@@ -711,6 +736,9 @@ export class TrackedProviderClient {
           output_chars: stats.outputChars ?? (typeof output === "string" ? output.length : null),
           input_tokens: stats.inputTokens ?? null,
           output_tokens: stats.outputTokens ?? null,
+          turns_used: stats.numTurns ?? null,
+          max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+          output_truncated: stats.outputTruncated === true,
           duration_ms: stats.durationMs ?? null,
           tool_uses: toolUsesForReplay.length,
         },
@@ -735,6 +763,9 @@ export class TrackedProviderClient {
         output_tokens: stats.outputTokens ?? null,
         error_name: err?.name || null,
         error_message: String(err?.message || err).slice(0, 1000),
+        turns_used: stats.numTurns ?? null,
+        max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+        output_truncated: stats.outputTruncated === true || err.outputTruncated === true,
         replay_memory: getReplayMemoryStats(),
       });
       const accountingStats = {
@@ -742,6 +773,9 @@ export class TrackedProviderClient {
         provider: providerName,
         modelTier: tier,
         modelName: stats.modelName || modelName,
+        maxOutputTokens: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+        outputTruncated: stats.outputTruncated === true || err.outputTruncated === true,
+        outputLimitReason: stats.outputLimitReason || err.outputLimitReason || null,
       };
       completeAgentCall(agentCallId, {
         status: "failed",
@@ -750,6 +784,11 @@ export class TrackedProviderClient {
         output_tokens: stats.outputTokens ?? null,
         cached_input_tokens: stats.cachedInputTokens ?? null,
         cache_creation_input_tokens: stats.cacheCreationInputTokens ?? null,
+        turns_used: stats.numTurns ?? null,
+        max_turns_configured: stats.maxTurns ?? resolvedMaxTurns,
+        max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+        output_truncated: stats.outputTruncated === true || err.outputTruncated === true,
+        output_limit_reason: stats.outputLimitReason || err.outputLimitReason || null,
         duration_ms: stats.durationMs || 0,
         exit_code: stats.exitCode,
         error_text: err.message?.slice(0, 2000),
@@ -837,6 +876,9 @@ export class TrackedProviderClient {
           output_chars: stats.outputChars || failureOutput.length || 0,
           input_tokens: stats.inputTokens ?? null,
           output_tokens: stats.outputTokens ?? null,
+          turns_used: stats.numTurns ?? null,
+          max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+          output_truncated: stats.outputTruncated === true || err.outputTruncated === true,
           duration_ms: stats.durationMs || 0,
           tool_uses: failureToolUsesForReplay.length,
         },

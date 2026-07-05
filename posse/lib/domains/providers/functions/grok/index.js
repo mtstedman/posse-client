@@ -27,7 +27,8 @@ import { getDefaultImageModel, getProviderTierDefaults } from "../model-catalog.
 import { buildGrokImageGenerateParams, isUnsupportedReasoningError, supportsReasoningEffort } from "./image-params.js";
 import { selectExecutionModel } from "../shared/model-selection.js";
 import { normalizeProviderUsage } from "../shared/usage-normalization.js";
-import { escalateModelTier, getMaxTurnsForProvider } from "../shared/turns.js";
+import { escalateModelTier, getMaxOutputTokensForProvider, getMaxTurnsForProvider } from "../shared/turns.js";
+import { buildOutputLimitError, normalizeMaxOutputTokens, responseOutputLimitReason, withMaxOutputTokens } from "../shared/output-limits.js";
 import { resolveProviderStallTimeout } from "../shared/stall-timeout.js";
 import { DEFAULT_FALLBACK_READS, createOpenAiCompatibleTooling } from "../shared/response-tooling.js";
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
@@ -283,6 +284,7 @@ export async function callProvider(promptText, {
   silent = false,
   autoApprove = false,
   maxTurns = null,
+  maxOutputTokens = null,
   complexity = null,   // 1-5 planner complexity score - drives dynamic turn budget
   filesToModifyCount = null, // dev turn scaling input from planner scope size
   deepthink = false,
@@ -315,6 +317,8 @@ export async function callProvider(promptText, {
   const modelToUse = selectExecutionModel({ jobModelName: modelName, globalModelOverride: getModelOverride(), tierModel: tierConfig.model });
   const effort = reasoningEffort || tierConfig.effort || "medium";
   const turnLimit = maxTurns || getMaxTurns(role, modelTier, complexity, filesToModifyCount, deepthink);
+  const outputTokenLimit = normalizeMaxOutputTokens(maxOutputTokens)
+    || getMaxOutputTokensForProvider("grok", { role });
   const workingDir = cwd || process.cwd();
   const assignmentUnit = resolveAtlasAssignmentUnit({
     workItemId,
@@ -457,6 +461,8 @@ export async function callProvider(promptText, {
   const maxReads = fallbackReads ?? DEFAULT_FALLBACK_READS;
   let allText = "";
   const toolUses = [];
+  let outputTruncated = false;
+  let outputLimitReason = null;
 
   // -- Stall detection --
   // Role-aware multiplier matching Claude provider behavior.
@@ -481,6 +487,14 @@ export async function callProvider(promptText, {
     totalOutputTokens += normalized.outputTokens ?? 0;
     totalCachedInputTokens += normalized.cachedInputTokens ?? 0;
     totalReasoningOutputTokens += normalized.reasoningOutputTokens ?? 0;
+  };
+
+  const throwIfOutputLimited = (response, phase) => {
+    const reason = responseOutputLimitReason(response);
+    if (!reason) return;
+    outputTruncated = true;
+    outputLimitReason = reason;
+    throw buildOutputLimitError("Grok", phase, reason, outputTokenLimit);
   };
 
   // Configure the ATLAS-first gate for this call. Capture the resolved scope
@@ -515,11 +529,11 @@ export async function callProvider(promptText, {
     };
 
     // -- Build request options --
-    const createOpts = {
+    const createOpts = withMaxOutputTokens({
       model: modelToUse,
       input,
       ...(tools.length > 0 ? { tools } : {}),
-    };
+    }, outputTokenLimit);
 
     // xAI rejects reasoning effort for image flows and most Grok models.
     const canSetReasoningEffort = !needsImageGeneration && supportsReasoningEffort(modelToUse);
@@ -549,6 +563,7 @@ export async function callProvider(promptText, {
       if (turnText) {
         allText += (allText ? "\n" : "") + turnText;
       }
+      throwIfOutputLimited(response, turnCount > 0 ? `turn ${turnCount}` : "initial call");
 
       // Check for function calls
       const functionCalls = (response.output || []).filter(
@@ -571,7 +586,7 @@ export async function callProvider(promptText, {
           call_id: call.call_id,
           output: "(live coordination limit reached - tool call skipped)",
         }));
-        const finalOpts = {
+        const finalOpts = withMaxOutputTokens({
           model: modelToUse,
           previous_response_id: response.id,
           input: [
@@ -579,7 +594,7 @@ export async function callProvider(promptText, {
             { role: "user", content: [{ type: "input_text", text:
               "SYSTEM: Live coordination limit reached. Do not call more tools. Produce your final answer from the current state." }] },
           ],
-        };
+        }, outputTokenLimit);
         if (canSetReasoningEffort) finalOpts.reasoning = { effort };
 
         await abortableThrottle(THROTTLE_MS, abortSignal);
@@ -587,6 +602,7 @@ export async function callProvider(promptText, {
         addUsage(finalResponse.usage);
         const finalText = finalResponse.output_text || "";
         if (finalText) allText += (allText ? "\n" : "") + finalText;
+        throwIfOutputLimited(finalResponse, "forced final answer");
         break;
       }
 
@@ -600,7 +616,7 @@ export async function callProvider(promptText, {
           call_id: call.call_id,
           output: "(turn limit reached - tool call skipped)",
         }));
-        const finalOpts = {
+        const finalOpts = withMaxOutputTokens({
           model: modelToUse,
           previous_response_id: response.id,
           input: [
@@ -609,7 +625,7 @@ export async function callProvider(promptText, {
               "SYSTEM: Tool turn limit reached. You must now produce your final answer. Do not call any more tools." }] },
           ],
           // No tools - force text-only response
-        };
+        }, outputTokenLimit);
         if (canSetReasoningEffort) finalOpts.reasoning = { effort };
 
         await abortableThrottle(THROTTLE_MS, abortSignal);
@@ -617,6 +633,7 @@ export async function callProvider(promptText, {
         addUsage(finalResponse.usage);
         const finalText = finalResponse.output_text || "";
         if (finalText) allText += (allText ? "\n" : "") + finalText;
+        throwIfOutputLimited(finalResponse, "forced final answer");
         break;
       }
 
@@ -677,12 +694,12 @@ export async function callProvider(promptText, {
       await abortableThrottle(THROTTLE_MS, abortSignal);
 
           // Send tool results back to Grok
-      const nextOpts = {
+      const nextOpts = withMaxOutputTokens({
         model: modelToUse,
         previous_response_id: response.id,
         input: toolResults,
         ...(tools.length > 0 ? { tools } : {}),
-      };
+      }, outputTokenLimit);
       if (canSetReasoningEffort) {
         nextOpts.reasoning = { effort };
       }
@@ -699,6 +716,8 @@ export async function callProvider(promptText, {
     const wrapped = new Error(`Grok API error: ${err.message}`);
     wrapped.cause = err;
     if (err?.code) wrapped.code = err.code;
+    if (err.outputTruncated) wrapped.outputTruncated = true;
+    if (err.outputLimitReason) wrapped.outputLimitReason = err.outputLimitReason;
     if (err?.code === "ASYNC_GATE_BUSY" || err?.code === "ASYNC_GATE_TIMEOUT") {
       wrapped.gateContention = true;
     }
@@ -716,6 +735,9 @@ export async function callProvider(promptText, {
       modelTier,
       reasoningEffort: effort,
       maxTurns: turnLimit,
+      maxOutputTokens: outputTokenLimit,
+      outputTruncated: outputTruncated || err.outputTruncated === true,
+      outputLimitReason: err.outputLimitReason || outputLimitReason || null,
       toolUses: toolUses.length > 0 ? toolUses : null,
       toolUsesLoggedByToolkit: true,
       atlasMethod: atlasMethodForStats,
@@ -762,6 +784,9 @@ export async function callProvider(promptText, {
       modelTier,
       reasoningEffort: effort,
       maxTurns: turnLimit,
+      maxOutputTokens: outputTokenLimit,
+      outputTruncated,
+      outputLimitReason,
       numTurns: turnCount,
       toolUses: toolUses.length > 0 ? toolUses : null,
       toolUsesLoggedByToolkit: true,

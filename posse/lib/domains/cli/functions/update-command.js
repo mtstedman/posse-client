@@ -225,7 +225,14 @@ export async function checkPosseUpdateAvailability({
   }
 }
 
-function defaultUpdateCheckCachePath() {
+// Test processes must never read or write the operator's real update-check
+// cache (same isolation contract as the account DB): redirect to a per-process
+// temp path under test context so raced-past background checks can't publish
+// test-derived verdicts into ~/.posse.
+export function defaultUpdateCheckCachePath() {
+  if (process.env.NODE_TEST_CONTEXT || process.env.POSSE_TEST_RUN) {
+    return path.join(os.tmpdir(), `posse-test-${process.pid}`, "update-check.json");
+  }
   return path.join(os.homedir(), ".posse", "update-check.json");
 }
 

@@ -523,6 +523,10 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   cache_creation_input_tokens INTEGER,
 
   max_turns_configured INTEGER,
+  turns_used INTEGER,
+  max_output_tokens_configured INTEGER,
+  output_truncated INTEGER NOT NULL DEFAULT 0 CHECK (output_truncated IN (0,1)),
+  output_limit_reason TEXT,
 
   started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   finished_at TEXT,

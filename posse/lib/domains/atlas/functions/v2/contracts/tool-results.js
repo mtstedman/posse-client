@@ -704,7 +704,15 @@
  * @property {number} startLine
  * @property {number} endLine
  * @property {boolean} truncated
+ * @property {CalledFromBreadcrumb[]} [calledFrom]  Top definitions here by distinct calling files.
  * @property {string} [etag]
+ */
+
+/**
+ * @typedef {Object} CalledFromBreadcrumb
+ * @property {string} symbol
+ * @property {number} calledFromFiles         Distinct calling files (not call sites).
+ * @property {string[]} sample                Up to two caller paths.
  */
 
 /**
@@ -715,6 +723,7 @@
  * @property {string[]} identifiersFound
  * @property {string[]} [identifiersFoundInText]  Identifiers with no AST usage but present inside string/comment text (matchKind "text").
  * @property {string[]} identifiersMissing
+ * @property {CalledFromBreadcrumb[]} [calledFrom]  Breadcrumbs for the definitions being read.
  * @property {string} [etag]
  */
 

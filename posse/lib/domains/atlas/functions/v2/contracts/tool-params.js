@@ -350,6 +350,17 @@
  */
 
 /**
+ * @typedef {Object} CodeSurveyParams
+ * @property {string | string[]} paths        One dir prefix / file path, or an array of them (max 64 files resolved).
+ * @property {string} [path]                  Internal alias for a single `paths` entry (not surfaced).
+ * @property {string[]} [symbols]             Optional dig terms: restrict to these symbols' neighborhoods. Max 16.
+ * @property {number} [maxFiles]              Optional. Default 64.
+ * @property {number} [maxSymbolsPerFile]     Internal cap override. Default 48.
+ * @property {number} [maxEdges]              Internal cap override. Default 200.
+ * @property {string} [sessionId]             Optional ladder-credit namespace (matches code.* actions).
+ */
+
+/**
  * @typedef {Object} CodeGetHotPathParams
  * @property {string} [symbolId]
  * @property {string} [file]                  Canonical repo-relative path.
@@ -624,6 +635,7 @@
  *   | { action: "code.skeleton" } & CodeGetSkeletonParams
  *   | { action: "code.lens" } & CodeGetHotPathParams
  *   | { action: "code.window" } & CodeNeedWindowParams
+ *   | { action: "code.survey" } & CodeSurveyParams
  *   | { action: "context" } & ContextParams
  *   | { action: "context.summary" } & ContextSummaryParams
  *   | { action: "agent.feedback" } & AgentFeedbackParams
@@ -678,6 +690,7 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "code.skeleton",
   "code.lens",
   "code.window",
+  "code.survey",
   "context",
   "context.summary",
   "agent.feedback",

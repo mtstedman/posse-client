@@ -73,6 +73,7 @@ import {
 } from "../../../integrations/functions/atlas-v2-mode.js";
 import {
   normalizedScipPath,
+  scipBasenameSourceLanguages,
   scipEventToProgressText,
 } from "../../functions/v2/scip-progress.js";
 import {
@@ -508,7 +509,14 @@ export class ParseEngine {
     if (!Array.isArray(files) || files.length === 0) return;
     for (const scipPath of files) {
       try {
-        await this.#emitStage("scip", `ingesting SCIP ${path.basename(scipPath)}`);
+        // A structured kind + language routing (not a bare stage line): the
+        // boot matrix flips the parse cell to "intaking" the moment the file
+        // is picked up, instead of showing "—" through the read/decode phase.
+        await this.#emitStage("scip", `ingesting SCIP ${path.basename(scipPath)}`, {
+          kind: "atlas.scip.ingest.reading",
+          language: path.basename(scipPath, ".scip").toLowerCase() || null,
+          source_languages: scipBasenameSourceLanguages(scipPath),
+        });
         const result = await ingestScipFile({
           ledger: this.#ledger,
           scipPath,
@@ -524,9 +532,16 @@ export class ParseEngine {
             // generic stage:"scip" line, stripping the kind — so the matrix only
             // ever saw "indexing" and the row hung at 100% indexing, never
             // showing intaking or reaching done. A `text` is added for the
-            // activity-log/text-monitor renderer.
+            // activity-log/text-monitor renderer. `stage:"scip"` routes the
+            // percents into the warm-readiness scip bucket, and the basename
+            // source-language fallback keeps pre-decode events addressable in
+            // the per-language matrix.
             this.#emitProgress({
               ...event,
+              stage: event.stage || "scip",
+              source_languages: Array.isArray(event.source_languages) && event.source_languages.length > 0
+                ? event.source_languages
+                : scipBasenameSourceLanguages(scipPath),
               stream: "system",
               text: scipEventToProgressText(event, scipPath),
             });
@@ -1754,7 +1769,7 @@ export class ParseEngine {
       return base;
     }
     await this.#emitStage("walking", `scanning repository for ${branch}`);
-    const paths = await walkRepoFilesAsync(this.#repoRoot, (filename, relPath) => {
+    const walkedPaths = await walkRepoFilesAsync(this.#repoRoot, (filename, relPath) => {
       const ext = path.extname(filename).toLowerCase();
       if (!ext || !(/** @type {ParserAdapter} */ (this.#parser)).supports(ext)) return false;
       // Skip well-known minified/bundled paths so we never even open them.
@@ -1762,12 +1777,34 @@ export class ParseEngine {
       if (isLikelyMinifiedPath(relPath || filename)) return false;
       return true;
     }, { maxPaths: MAX_FULL_WARM_PATHS });
-    base.paths_considered = paths.length;
-    if (paths.length >= MAX_FULL_WARM_PATHS) {
+    let paths = walkedPaths;
+    const truncated = walkedPaths.length >= MAX_FULL_WARM_PATHS;
+    let removedSnapshotPaths = [];
+    if (truncated) {
       base.truncated = true;
       base.truncation_reason = `Full warm stopped at MAX_FULL_WARM_PATHS=${MAX_FULL_WARM_PATHS}`;
+    } else {
+      const headSeq = this.#ledger.headSeq(branch);
+      const snapshot = headSeq > 0 ? this.#ledger.pathSnapshotAt(branch, headSeq) : new Map();
+      const walkedSet = new Set(walkedPaths);
+      removedSnapshotPaths = [...snapshot.keys()]
+        .filter((repoRelPath) => !walkedSet.has(repoRelPath))
+        .sort();
+      if (removedSnapshotPaths.length > 0) {
+        paths = walkedPaths.concat(removedSnapshotPaths);
+        /** @type {any} */ (base).fileset_paths_removed = removedSnapshotPaths.length;
+        await this.#emitStage("walking", `reconciling ${removedSnapshotPaths.length} removed indexed file${removedSnapshotPaths.length === 1 ? "" : "s"}`, {
+          progress_current: walkedPaths.length,
+          progress_total: paths.length,
+          percent: paths.length > 0 ? (walkedPaths.length / paths.length) * 100 : 100,
+        });
+      }
     }
-    await this.#emitStage("walking", `found ${paths.length} supported file${paths.length === 1 ? "" : "s"}`, {
+    base.paths_considered = paths.length;
+    const removedSuffix = removedSnapshotPaths.length > 0
+      ? `, ${removedSnapshotPaths.length} removed indexed file${removedSnapshotPaths.length === 1 ? "" : "s"}`
+      : "";
+    await this.#emitStage("walking", `found ${walkedPaths.length} supported file${walkedPaths.length === 1 ? "" : "s"}${removedSuffix}`, {
       progress_current: 0,
       progress_total: paths.length,
       percent: paths.length > 0 ? 0 : 100,

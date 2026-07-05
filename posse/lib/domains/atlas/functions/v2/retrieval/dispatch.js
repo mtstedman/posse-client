@@ -23,6 +23,7 @@ import { bufferPush, bufferCheckpoint, bufferStatus, makeOverlayReadFile } from 
 import { symbolGetCard, symbolGetCards } from "./symbol-card.js";
 import { symbolUsages } from "./usages.js";
 import { treeGrow, treeOverview, treeScope, treeWalk } from "./tree.js";
+import { codeSurvey } from "./survey.js";
 import {
   codeGetSkeleton,
   codeGetSkeletonAsync,
@@ -290,6 +291,9 @@ function dispatchImpl(call, ctx) {
     case "code.window":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeNeedWindowAsync : codeNeedWindow)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
+    case "code.survey":
+      if (!ctx.view) return notIndexed(action, ctx.versionId);
+      return /** @type {any} */ (codeSurvey({ view: ctx.view, versionId: ctx.versionId, params: call }));
     case "context":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (contextBuild({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder, planner: ctx.planner }));
@@ -394,11 +398,13 @@ const GATEWAY_ACTIONS = Object.freeze({
     "memory.surface",
     "memory.get",
     "file.read",
+    "code.survey",
   ]),
   code: new Set([
     "code.skeleton",
     "code.lens",
     "code.window",
+    "code.survey",
     "edit.plan",
     "file.read",
   ]),

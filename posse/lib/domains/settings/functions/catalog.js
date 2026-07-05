@@ -148,6 +148,13 @@ export const SETTINGS_CATALOG = [
   { key: "claude_usage_backoff_ms", default: "300000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to wait before retrying Claude usage refresh after an error" },
   { key: "codex_usage_cache_ms", default: "120000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to cache Codex usage summaries before refreshing" },
   { key: "codex_usage_backoff_ms", default: "300000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to wait before retrying Codex usage refresh after an error" },
+  { key: "max_output_tokens_researcher", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for researcher provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_planner", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for planner provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_dev", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for dev provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_artificer", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for artificer provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_assessor", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for assessor provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_preflight", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for preflight provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_delegator", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for delegator provider calls (empty = role/provider default)" },
 
   // ── Hidden runtime tracking (live usage state, written by providers) ─────
   { key: "claude_session_tokens",        default: "", adminVisible: false, description: "Live Claude session token count (auto-updated)" },

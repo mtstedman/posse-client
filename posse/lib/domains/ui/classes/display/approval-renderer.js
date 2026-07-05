@@ -371,7 +371,10 @@ export class DisplayApprovalRenderer {
     }
 
     if (buf !== this._lastFrame) {
-      const ok = process.stdout.write(buf);
+      // DEC 2026 synchronized output (same as the main render path): the
+      // blocking-overlay spinner repaints this frame on a wall-clock tick,
+      // and an unsynchronized full-frame write at that cadence tears.
+      const ok = process.stdout.write(`\x1b[?2026h${buf}\x1b[?2026l`);
       if (!ok) {
         // Mirror the main render path's backpressure handling: requestRender()
         // skips frames while _stdoutBackedUp is set, and the drained frame is

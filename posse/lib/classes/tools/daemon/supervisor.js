@@ -25,6 +25,7 @@
 
 import { Daemon } from "./Daemon.js";
 import { listOwnDaemonSpawns, reapOwnDaemonSpawns } from "./process-ledger.js";
+import { appendRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
 
 const DEFAULT_SHUTDOWN_GRACE_MS = 2_000;
 
@@ -186,3 +187,16 @@ export class DaemonSupervisor {
  * main thread's shutdown ledger sweep still covers.
  */
 export const daemonSupervisor = new DaemonSupervisor();
+
+// Persist lifecycle events (spawn/retire/breaker/shutdown) from the shared
+// singleton to the run diagnostics stream. Without this, a host retire or
+// breaker trip leaves no trace once the process exits — the closeout
+// "degraded to per-call spawn(s)" warning was undiagnosable post-hoc.
+// Test-constructed DaemonSupervisor instances stay silent.
+daemonSupervisor.onLifecycle((event) => {
+  appendRunTelemetry("diagnostics", {
+    kind: `daemon.${event.kind}`,
+    label: event.label,
+    ...(event.detail || {}),
+  });
+});

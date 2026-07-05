@@ -511,7 +511,12 @@ export function agentCallsCreateSql(tableName = "agent_calls") {
           input_tokens INTEGER,
           output_tokens INTEGER,
           cached_input_tokens INTEGER,
+          cache_creation_input_tokens INTEGER,
           max_turns_configured INTEGER,
+          turns_used INTEGER,
+          max_output_tokens_configured INTEGER,
+          output_truncated INTEGER NOT NULL DEFAULT 0 CHECK (output_truncated IN (0,1)),
+          output_limit_reason TEXT,
           started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           finished_at TEXT,
           duration_ms INTEGER,
@@ -1378,6 +1383,34 @@ export function getDb() {
   ).get();
   if (hasAgentCallCacheCreationInputTokens.cnt === 0) {
     _db.exec(`ALTER TABLE agent_calls ADD COLUMN cache_creation_input_tokens INTEGER`);
+  }
+
+  const hasAgentCallTurnsUsed = _db.prepare(
+    `SELECT COUNT(*) as cnt FROM pragma_table_info('agent_calls') WHERE name='turns_used'`
+  ).get();
+  if (hasAgentCallTurnsUsed.cnt === 0) {
+    _db.exec(`ALTER TABLE agent_calls ADD COLUMN turns_used INTEGER`);
+  }
+
+  const hasAgentCallMaxOutputTokensConfigured = _db.prepare(
+    `SELECT COUNT(*) as cnt FROM pragma_table_info('agent_calls') WHERE name='max_output_tokens_configured'`
+  ).get();
+  if (hasAgentCallMaxOutputTokensConfigured.cnt === 0) {
+    _db.exec(`ALTER TABLE agent_calls ADD COLUMN max_output_tokens_configured INTEGER`);
+  }
+
+  const hasAgentCallOutputTruncated = _db.prepare(
+    `SELECT COUNT(*) as cnt FROM pragma_table_info('agent_calls') WHERE name='output_truncated'`
+  ).get();
+  if (hasAgentCallOutputTruncated.cnt === 0) {
+    _db.exec(`ALTER TABLE agent_calls ADD COLUMN output_truncated INTEGER DEFAULT 0`);
+  }
+
+  const hasAgentCallOutputLimitReason = _db.prepare(
+    `SELECT COUNT(*) as cnt FROM pragma_table_info('agent_calls') WHERE name='output_limit_reason'`
+  ).get();
+  if (hasAgentCallOutputLimitReason.cnt === 0) {
+    _db.exec(`ALTER TABLE agent_calls ADD COLUMN output_limit_reason TEXT`);
   }
 
   // ── Migration: project_context snapshot table ─────────────────────────────

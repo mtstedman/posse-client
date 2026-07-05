@@ -136,6 +136,11 @@ export class Ledger {
     // omits the fresh-DB CHECK; writer-side validation keeps values bounded.
     ensureColumn(this.#db, "scip_indexes", "documents_failed", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(this.#db, "scip_indexes", "status", "TEXT NOT NULL DEFAULT 'complete'");
+    // Pre-bytes-hash DBs: NULL disables the cheap pre-decode skip until the
+    // next full ingest backfills the key. Nullable additive — intentionally
+    // NOT in REQUIRED_LEDGER_COLUMNS (missing columns there force a reset).
+    ensureColumn(this.#db, "scip_indexes", "scip_bytes_hash", "TEXT");
+    ensureColumn(this.#db, "scip_indexes", "ingested_head", "TEXT");
     ensureMemoryEvidenceColumns(this.#db);
     ensureLedgerFtsBackfill(this.#db);
     this.#stmt = this.#prepareAll();
@@ -886,6 +891,22 @@ export class Ledger {
    */
   findScipIndexId(input) {
     return this.#scipIndex.findScipIndexId(input);
+  }
+
+  /**
+   * @param {Parameters<ScipIndexStore["findScipIndexByBytesHash"]>[0]} input
+   * @returns {ReturnType<ScipIndexStore["findScipIndexByBytesHash"]>}
+   */
+  findScipIndexByBytesHash(input) {
+    return this.#scipIndex.findScipIndexByBytesHash(input);
+  }
+
+  /**
+   * @param {Parameters<ScipIndexStore["updateScipIndexBytesHash"]>[0]} id
+   * @param {Parameters<ScipIndexStore["updateScipIndexBytesHash"]>[1]} [fields]
+   */
+  updateScipIndexBytesHash(id, fields) {
+    this.#scipIndex.updateScipIndexBytesHash(id, fields);
   }
 
   /**

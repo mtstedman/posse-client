@@ -212,6 +212,12 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
         merged.current = previous.current;
       }
     }
+    // Liveness stamp for the stale-cell pulse: a state change or forward
+    // motion counts as advance; a same-value repaint (heartbeat) does not.
+    const advanced = merged.state !== previous.state
+      || (Number.isFinite(merged.percent) && merged.percent !== previous.percent)
+      || (Number.isFinite(merged.current) && merged.current !== previous.current);
+    merged.advancedAt = advanced ? Date.now() : (previous.advancedAt ?? Date.now());
     if (merged.state === "done" || merged.state === "skipped" || merged.state === "deferred" || merged.state === "failed") {
       if (!merged.finishedAt) merged.finishedAt = Date.now();
     }
@@ -358,7 +364,8 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
 
   // A fixed 12-col grid cell: a 7-wide bar + a 4-wide right-justified status
   // field ("38%" / "✓" / "—" / …). kind ∈ active|done|wait|skip|fail|defer.
-  const cell = (kind, percent, colorKey = "green") => {
+  const cell = (kind, percent, opts = {}) => {
+    const colorKey = opts.colorKey || "green";
     let bar;
     let fieldRaw;
     let fieldColored;
@@ -367,7 +374,22 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     if (kind === "active" && clamp(percent) >= 100) kind = "done";
     if (kind === "active") {
       const filled = Math.round((clamp(percent) / 100) * CELL_BAR);
-      bar = `${col(colorKey)}${"█".repeat(filled)}${col("reset")}${col("dim")}${"░".repeat(CELL_BAR - filled)}${col("reset")}`;
+      if (opts.pulse) {
+        // Stale-progress pulse: the percent hasn't moved lately (silent
+        // indexer tail, native convert hold), so blink the block at the fill
+        // boundary — the cell reads as alive without inventing progress. The
+        // controller's forced-render tick repaints often enough to animate.
+        const on = animFrame() % 2 === 0;
+        const idx = Math.min(filled, CELL_BAR - 1);
+        let pulsed = "";
+        for (let i = 0; i < CELL_BAR; i++) {
+          const lit = i === idx ? on : i < filled;
+          pulsed += lit ? `${col(colorKey)}█${col("reset")}` : `${col("dim")}░${col("reset")}`;
+        }
+        bar = pulsed;
+      } else {
+        bar = `${col(colorKey)}${"█".repeat(filled)}${col("reset")}${col("dim")}${"░".repeat(CELL_BAR - filled)}${col("reset")}`;
+      }
       fieldRaw = `${clamp(percent)}%`;
       fieldColored = `${col("bold")}${col(colorKey)}${fieldRaw}${col("reset")}`;
     } else if (kind === "done") {
@@ -388,6 +410,13 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   // Per-language stage "kinds" — the grid shows three columns derived from the
   // two stored sides. SCIP is stored as one side that walks
   // idle → indexing (generate) → intaking (parse) → done; split it back out.
+  // Active cells whose progress hasn't advanced lately carry a pulse flag so
+  // the bar can blink instead of reading as frozen.
+  const STALE_PULSE_MS = 3000;
+  const activeOpts = (side) => {
+    const at = Number(side?.advancedAt);
+    return { pulse: Number.isFinite(at) && Date.now() - at > STALE_PULSE_MS };
+  };
   const atlasKind = (a) => {
     if (!a) return ["wait", null];
     if (a.state === "done") return ["done", 100];
@@ -395,7 +424,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     if (a.state === "failed") return ["fail", null];
     if (a.state === "deferred") return ["defer", null];
     if (a.state === "waiting" || a.state === "idle") return ["wait", null];
-    return ["active", Number.isFinite(a.percent) ? a.percent : 0];
+    return ["active", Number.isFinite(a.percent) ? a.percent : 0, activeOpts(a)];
   };
   const scipGenKind = (s) => {
     if (!s) return ["wait", null];
@@ -403,7 +432,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     if (s.state === "deferred") return ["defer", null];
     if (s.state === "failed") return ["fail", null];
     if (s.state === "done" || s.state === "intaking") return ["done", 100];
-    if (s.state === "indexing") return ["active", Number.isFinite(s.percent) ? s.percent : 0];
+    if (s.state === "indexing") return ["active", Number.isFinite(s.percent) ? s.percent : 0, activeOpts(s)];
     return ["wait", null];
   };
   const scipParseKind = (s) => {
@@ -412,7 +441,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     if (s.state === "deferred") return ["defer", null];
     if (s.state === "failed") return ["fail", null];
     if (s.state === "done") return ["done", 100];
-    if (s.state === "intaking") return ["active", Number.isFinite(s.percent) ? s.percent : 0];
+    if (s.state === "intaking") return ["active", Number.isFinite(s.percent) ? s.percent : 0, activeOpts(s)];
     return ["wait", null];
   };
 
@@ -497,7 +526,15 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   // glyph already spins, so the body carries no spinner of its own.
   const runningSectionBody = (labels) => {
     const entries = labels.map((l) => [l, steps.get(l)]).filter(([, s]) => s);
-    const active = entries.find(([, s]) => s.status === "running");
+    // Most-recently-STARTED running step wins (ties → later insertion), not
+    // first-inserted: the background dependency check stays "running" for most
+    // of boot, and by insertion order it would pin the row to "checking
+    // packages" while git ready / worktree cleanup advance invisibly behind
+    // it — making a healthy boot read as frozen.
+    const running = entries.filter(([, s]) => s.status === "running");
+    const active = running.length > 0
+      ? running.reduce((latest, entry) => (entry[1].startedAt >= latest[1].startedAt ? entry : latest))
+      : null;
     if (active) return active[1].detail || active[0];
     const done = entries.filter(([, s]) => isStepResolved(s)).length;
     if (done > 0 && done < entries.length) {

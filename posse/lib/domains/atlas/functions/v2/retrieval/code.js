@@ -17,6 +17,7 @@ import { getEffectivePolicy } from "./policy.js";
 import { buildAstSkeleton, selectSkeletonSymbols } from "./skeleton.js";
 import { buildAstHotPath, buildAstHotPathAsync } from "./hotpath.js";
 import { annotateCodeLadder, validateCodeLadder } from "./code-ladder.js";
+import { calledFromBreadcrumbs } from "./usages.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -127,6 +128,7 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
   const filtered = params.exportedOnly
     ? symbols.filter((s) => s.visibility !== "private" && s.visibility !== "protected")
     : symbols;
+  const calledFrom = calledFromBreadcrumbs(view, filtered);
   const source = targetPath ? readFile(targetPath) : null;
   if (source != null) {
     const astSkeleton = buildAstSkeleton({
@@ -151,6 +153,7 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
           startLine: astSkeleton.startLine,
           endLine: astSkeleton.endLine,
           truncated: astSkeleton.truncated,
+          ...(calledFrom.length > 0 ? { calledFrom } : {}),
           etag,
         };
         return annotateCodeLadder(okEnvelope({
@@ -196,6 +199,7 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
     startLine: 1,
     endLine: lines.length || 1,
     truncated,
+    ...(calledFrom.length > 0 ? { calledFrom } : {}),
     etag,
   };
   return annotateCodeLadder(okEnvelope({
@@ -252,6 +256,17 @@ function codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRo
   const lines = source.split(/\r?\n/);
   const idents = normalizeIdentifiers(params.identifiersToFind);
   const contextLines = typeof params.contextLines === "number" ? params.contextLines : 2;
+  // Breadcrumbs for the definitions the agent is actually looking at: the
+  // resolved target plus any requested identifiers defined in this file.
+  const identSet = new Set(idents.map((ident) => String(ident || "").toLowerCase()));
+  const lensTargets = new Map();
+  if (resolved.target?.global_id != null) lensTargets.set(resolved.target.global_id, resolved.target);
+  for (const symbol of view.query.symbolsInFile(targetPath)) {
+    if (symbol?.global_id != null && identSet.has(String(symbol.name || "").toLowerCase())) {
+      lensTargets.set(symbol.global_id, symbol);
+    }
+  }
+  const calledFrom = calledFromBreadcrumbs(view, [...lensTargets.values()], { maxSymbols: 4 });
   const astHotPath = redaction.buildHotPath({
     repoRoot,
     file: targetPath,
@@ -274,11 +289,12 @@ function codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRo
       contextLines,
       astHotPath: resolvedAstHotPath,
       redactLines: redaction.redactLines,
+      calledFrom,
     });
   });
 }
 
-function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, sessionId, ladder, lines, idents, contextLines, astHotPath, redactLines }) {
+function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, sessionId, ladder, lines, idents, contextLines, astHotPath, redactLines, calledFrom = [] }) {
   if (astHotPath.ok) {
     const etagSeed = symbolId || `${targetPath}:${sha256Hex(source).slice(0, 16)}`;
     const etag = `hp:${etagSeed}:${idents.join(",")}:${astHotPath.etagSeed}`;
@@ -295,6 +311,7 @@ function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, se
         ? { identifiersFoundInText: astHotPath.identifiersFoundInText }
         : {}),
       identifiersMissing: astHotPath.identifiersMissing,
+      ...(calledFrom.length > 0 ? { calledFrom } : {}),
       etag,
     };
     return annotateCodeLadder(okEnvelope({
@@ -347,6 +364,7 @@ function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, se
       matches,
       identifiersFound: [...found].sort(),
       identifiersMissing: missing.sort(),
+      ...(calledFrom.length > 0 ? { calledFrom } : {}),
       etag,
     };
     return annotateCodeLadder(okEnvelope({

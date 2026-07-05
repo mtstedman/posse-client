@@ -38,7 +38,7 @@ import {
   scopeScipEventToSourceLanguage,
 } from "../functions/run-session.js";
 import {
-  checkPosseUpdateAvailability,
+  checkPosseUpdateAvailabilityCached,
   formatPosseUpdateAvailableWarning,
 } from "../functions/update-command.js";
 import { createRunWrapUpTracker } from "../functions/review-session.js";
@@ -65,7 +65,7 @@ export class RunSession {
       ensureRepoSetupConfirmed,
       ensureGitReady,
       guardStartupDirtyTree,
-      checkPosseUpdateAvailability: checkPosseUpdateAvailabilityForRun = checkPosseUpdateAvailability,
+      checkPosseUpdateAvailability: checkPosseUpdateAvailabilityForRun = checkPosseUpdateAvailabilityCached,
       formatPosseUpdateAvailableWarning: formatPosseUpdateAvailableWarningForRun = formatPosseUpdateAvailableWarning,
       ensureBootDependenciesInWorker: runBootDependencySync = ensureBootDependenciesInWorker,
       formatBootDependencySync: formatBootDependencySyncForRun = formatBootDependencySync,
@@ -643,6 +643,13 @@ export class RunSession {
     }
   })();
 
+  // CACHED check (6h TTL): a warm cache answers from disk without touching the
+  // network, so boot normally pays ~0ms here. The uncached variant used to run
+  // a fresh `ls-remote` every boot — its 2s budget also covers the native git
+  // per-call spawn, so on slow hosts the network check lost the race every
+  // time and boot burned a flat second for a verdict it never got. When the
+  // cache IS stale, the fresh check that the race abandons still completes
+  // detached and writes the cache, so the NEXT boot answers instantly.
   updateBootStep("posse update", { section: "workspace", status: "running", detail: "checking client", force: true });
   try {
     const updateCheck = await Promise.race([
@@ -2346,7 +2353,10 @@ export class RunSession {
     const fallbackStats = nativeBinariesForRun?.workerFallbackStats?.() || { total: 0, byBinary: {} };
     if (fallbackStats.total > 0) {
       const detail = Object.entries(fallbackStats.byBinary)
-        .map(([name, s]) => `${name}=${s.count}`)
+        .map(([name, s]) => {
+          const reasons = Object.entries(s.byReason || {}).map(([reason, count]) => `${reason}=${count}`).join(", ");
+          return `${name}=${s.count}${reasons ? ` [${reasons}]` : ""}`;
+        })
         .join(", ");
       emitCloseoutStatus(`Run wrap-up: native worker degraded to ${fallbackStats.total} per-call spawn(s) (${detail}) — daemon layer needs attention.`, C.yellow);
     }

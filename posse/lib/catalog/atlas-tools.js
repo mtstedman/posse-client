@@ -25,11 +25,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code": {
     type: "function",
     name: "atlas_code",
-    description: "Gateway. Compact native ATLAS v2 code-inspection wrapper for skeleton, hot-path, edit planning, and gated raw-window actions.",
+    description: "Gateway. Compact native ATLAS v2 code-inspection wrapper for skeleton, hot-path, area survey, edit planning, and gated raw-window actions.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["code.skeleton", "code.lens", "code.window", "edit.plan", "file.read"], description: "ATLAS code action to route through this gateway." },
+        action: { type: "string", enum: ["code.skeleton", "code.lens", "code.window", "code.survey", "edit.plan", "file.read"], description: "ATLAS code action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -459,7 +459,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.branch": {
     type: "function",
     name: "atlas_tree_walk",
-    description: "Walk a code-tree branch. Focus a path, nodeId, symbolId, or cluster/process ref and page through its descendants with aggregate counts and compressed-tree area labels.",
+    description: "Walk a code-tree branch. Focus a path, nodeId, symbolId, or cluster/process ref and page through its descendants with aggregate counts and compressed-tree area labels. Structure only (paths, counts, labels — no code content); for per-file skeletons plus a call map over an area, follow with one code.survey call.",
     parameters: {
       type: "object",
       properties: {
@@ -587,6 +587,22 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         exportedOnly: { type: "boolean", description: "Prefer exported symbols only when possible." },
       },
       required: [],
+      additionalProperties: false,
+    },
+  },
+  "code.survey": {
+    type: "function",
+    name: "atlas_code_survey",
+    description: "Best first call for work that covers an AREA — enumerations, audits, \"every X under Y\", or orienting in several files at once. ONE call returns per-file skeletons plus a call map for a directory or file list, replacing per-file skeleton/lens/window loops and grep-digging, and satisfies card+skeleton evidence for every file it covers. Without symbols: file-level wiring map (which file calls which, counts, one representative site each). With symbols: symbol-level dig restricted to those names' neighborhoods, including unresolved name references (string dispatch grep parity). Boundary rows always show which outside symbols reach in (the doors).",
+    parameters: {
+      type: "object",
+      properties: {
+        paths: { type: ["string", "array"], items: { type: "string" }, description: "Repository-relative directory prefix or file path — one string or an array of them, e.g. \"src/billing\" or [\"lib/a.js\", \"lib/b.js\"]. Resolves up to 64 indexed files." },
+        symbols: { type: "array", items: { type: "string" }, description: "Optional. Dig terms: restrict the survey to these symbol names' neighborhoods (max 16)." },
+        maxFiles: { type: "integer", description: "Optional. Cap on files surveyed. Default 64." },
+        sessionId: { type: "string", description: "Optional session namespace for ladder credit (matches other code.* actions)." },
+      },
+      required: ["paths"],
       additionalProperties: false,
     },
   },

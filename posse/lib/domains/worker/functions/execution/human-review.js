@@ -20,6 +20,15 @@ export function extractHumanAnswerText(answer) {
   return "";
 }
 
+export function extractLatestActionableHumanAnswerText(answers) {
+  if (!Array.isArray(answers)) return "";
+  for (let i = answers.length - 1; i >= 0; i--) {
+    const text = extractHumanAnswerText(answers[i]).trim();
+    if (text && text.toLowerCase() !== "(skipped)") return text;
+  }
+  return "";
+}
+
 export function classifyApprovalAnswer(answer) {
   const text = String(answer || "").trim().toLowerCase();
   if (!text || text === "(skipped)") return "unknown";

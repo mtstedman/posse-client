@@ -8,6 +8,8 @@ import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { readTreeBuildResult } from "../tree-derived.js";
 import { readLatestTreeCompressionSnapshot } from "../tree-compression.js";
 import { runAtlasNativeMethod } from "../native/invoke.js";
+import { isDefaultVisibleSymbol } from "./hygiene.js";
+import { countIncomingCallers } from "./usages.js";
 
 const TREE_RUN_KIND = "tree-derived";
 const TREE_TABLES = Object.freeze(["atlas_tree_nodes", "atlas_tree_refs", "derived_state_runs"]);
@@ -172,10 +174,13 @@ function runTreeScope({ view, versionId, params = {}, action }) {
       },
     });
   }
+  const widened = action === "tree.scope" ? collectScopeWidenedPaths({ view, params }) : [];
+  const widenedPaths = widened.map((w) => w.path);
   const result = /** @type {Record<string, unknown>} */ (runAtlasNativeMethod("tree-scope", {
     tree: readTreeBuildResult(db, { for: "scope" }),
     taskText: params.taskText,
     paths: params.paths,
+    widenedPaths,
     editedFiles: params.editedFiles,
     path: params.path,
     symbolIds: params.symbolIds,
@@ -189,8 +194,177 @@ function runTreeScope({ view, versionId, params = {}, action }) {
     taskType: params.taskType,
     compressionSnapshot: readOptionalCompressionSnapshot(db),
   }));
+  if (widenedPaths.length > 0) {
+    const sidecar = result.sidecar && typeof result.sidecar === "object" && !Array.isArray(result.sidecar)
+      ? /** @type {Record<string, unknown>} */ (result.sidecar)
+      : {};
+    result.sidecar = {
+      ...sidecar,
+      scopeWidening: {
+        used: true,
+        reason: "incoming_callers",
+        paths: widenedPaths,
+        callers: widened,
+      },
+    };
+  }
   result.latestRun = readLatestRun(db);
   return okEnvelope({ action, versionId, data: result });
+}
+
+/**
+ * @typedef {{ path: string, callerName: string | null, callerCount: number, loadBearing: boolean }} WidenedCaller
+ */
+
+/**
+ * Find one-hop caller files for explicit scope file seeds, annotated with each
+ * caller's own fan-in (incoming-caller count). The native scorer treats the
+ * paths as soft context via `widenedPaths`; the fan-in lets the handoff ELEVATE
+ * a load-bearing hub (e.g. the executor gate everything routes through) instead
+ * of leaving it as one bare path among many — surfacing without leverage was
+ * shown insufficient. `loadBearing` marks the fan-in standouts; a widened caller
+ * with no clear fan-in advantage is left un-elevated on purpose.
+ *
+ * Which symbols in a seed file get widened from is anchored on the task text:
+ * a symbol the task names outranks file position, so a query target defined
+ * late in a large file (past the per-file cap) is still the one whose callers
+ * are examined. Position is only the fallback ordering.
+ *
+ * @param {{ view: import("../contracts/api.js").View, params?: import("../contracts/tool-params.js").TreeScopeParams, maxPaths?: number, maxSymbolsPerFile?: number }} args
+ * @returns {WidenedCaller[]}
+ */
+export function collectScopeWidenedPaths({ view, params = {}, maxPaths = 8, maxSymbolsPerFile = 12 }) {
+  try {
+    if (!view?.query || typeof view.query.symbolsInFile !== "function" || typeof view.query.callers !== "function") {
+      return [];
+    }
+    const seedPaths = collectScopeSeedPaths(params);
+    if (seedPaths.length === 0) return [];
+    const seedDirs = seedPaths.map(parentDirOf).filter(Boolean);
+    const seen = new Set(seedPaths);
+    const taskTokens = taskIdentifierTokens(params.taskText);
+    /** @type {Map<string, WidenedCaller>} */
+    const byPath = new Map();
+    /** @type {Map<number, number>} */
+    const fanInByCaller = new Map();
+    for (const seedPath of seedPaths.slice(0, 8)) {
+      const symbols = selectWideningAnchors(view.query.symbolsInFile(seedPath), taskTokens, maxSymbolsPerFile);
+      for (const symbol of symbols) {
+        if (symbol?.global_id == null) continue;
+        for (const edge of view.query.callers(symbol.global_id)) {
+          const from = typeof view.query.getSymbol === "function" ? view.query.getSymbol(edge.from_global_id) : null;
+          if (!from || !isDefaultVisibleSymbol(from)) continue;
+          const callerPath = normalizeRepoPathCandidate(edge.repo_rel_path || from.repo_rel_path);
+          if (!callerPath || seen.has(callerPath) || isUnderAnyDir(callerPath, seedDirs)) continue;
+          // Fan-in of the CALLER symbol: how much of the codebase routes through
+          // this caller. Distinct calling FILES, not call-site edges — edge
+          // counting let a helper hammered from inside one test file outrank a
+          // production gate called once each from dozens of files.
+          let callerCount = fanInByCaller.get(from.global_id);
+          if (callerCount == null) {
+            callerCount = countIncomingCallers(view, from, { sampleLimit: 0, distinctPaths: true }).callerCount;
+            fanInByCaller.set(from.global_id, callerCount);
+          }
+          const existing = byPath.get(callerPath);
+          if (!existing || callerCount > existing.callerCount) {
+            byPath.set(callerPath, { path: callerPath, callerName: from.name || null, callerCount, loadBearing: false });
+          }
+        }
+      }
+    }
+    // Rank the FULL candidate set by fan-in before cutting to maxPaths: cutting
+    // at the first N encountered made the result depend on seed order, letting
+    // an early seed's low-value callers crowd out a later seed's hub.
+    const out = [...byPath.values()].sort((a, b) => b.callerCount - a.callerCount).slice(0, maxPaths);
+    // Relative cut, not an absolute count (fan-in scales with repo size): elevate
+    // only the standouts — top-2 that are also genuine hubs (>=2 incoming and at
+    // least half the top caller's fan-in). If nothing stands out, elevate nothing.
+    const maxCount = out[0]?.callerCount || 0;
+    const threshold = Math.max(2, Math.ceil(maxCount * 0.5));
+    for (let i = 0; i < out.length; i += 1) {
+      out[i].loadBearing = i < 2 && out[i].callerCount >= threshold;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Order a seed file's symbols for scope-widening: symbols whose name the task
+ * text mentions come first, everything else keeps file order. Only the ordering
+ * changes — the per-file cap still applies, so this matters exactly when the
+ * file holds more symbols than the cap and the query target sits past it.
+ *
+ * @param {import("../contracts/api.js").ViewSymbol[]} symbols
+ * @param {Set<string>} taskTokens
+ * @param {number} maxSymbolsPerFile
+ */
+function selectWideningAnchors(symbols, taskTokens, maxSymbolsPerFile) {
+  const all = Array.isArray(symbols) ? symbols : [];
+  if (all.length <= maxSymbolsPerFile || taskTokens.size === 0) {
+    return all.slice(0, maxSymbolsPerFile);
+  }
+  const named = [];
+  const rest = [];
+  for (const symbol of all) {
+    const name = String(symbol?.name || "").toLowerCase();
+    (name && taskTokens.has(name) ? named : rest).push(symbol);
+  }
+  return named.concat(rest).slice(0, maxSymbolsPerFile);
+}
+
+/**
+ * Identifier-shaped tokens (length >= 3, case-folded) from free-form task
+ * text, for matching against symbol names.
+ *
+ * @param {unknown} taskText
+ * @returns {Set<string>}
+ */
+function taskIdentifierTokens(taskText) {
+  const tokens = new Set();
+  for (const match of String(taskText || "").matchAll(/[A-Za-z_$][A-Za-z0-9_$]{2,}/g)) {
+    tokens.add(match[0].toLowerCase());
+  }
+  return tokens;
+}
+
+function collectScopeSeedPaths(params = {}) {
+  const raw = [
+    ...(Array.isArray(params.paths) ? params.paths : []),
+    ...(Array.isArray(params.editedFiles) ? params.editedFiles : []),
+    params.path,
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const value of raw) {
+    const path = normalizeRepoPathCandidate(value);
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    out.push(path);
+  }
+  return out;
+}
+
+function normalizeRepoPathCandidate(value) {
+  const text = String(value || "").trim().replace(/\\/g, "/");
+  if (!text || text.includes("\0") || text.startsWith("/") || /^[A-Za-z]:/.test(text)) return null;
+  const parts = [];
+  for (const segment of text.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") return null;
+    parts.push(segment);
+  }
+  return parts.length > 0 ? parts.join("/") : null;
+}
+
+function parentDirOf(path) {
+  const index = String(path || "").lastIndexOf("/");
+  return index > 0 ? path.slice(0, index) : "";
+}
+
+function isUnderAnyDir(path, dirs) {
+  return dirs.some((dir) => dir && (path === dir || path.startsWith(`${dir}/`)));
 }
 
 function unsafeDb(view) {

@@ -33,7 +33,10 @@ function post(message) {
 function progress(event) {
   recordEmbeddingForensics("atlas.boot_worker.progress", {
     worker_data: publicWorkerData(),
-    event,
+    // Not `event:` — appendPersistentTelemetry spreads this payload over its
+    // own `event` name field, and the collision left every one of these
+    // records unnamed in the JSONL.
+    progress_event: event,
   });
   post({ type: "progress", event });
 }

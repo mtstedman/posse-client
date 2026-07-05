@@ -47,13 +47,24 @@ export class ScipIndexStore {
          WHERE scheme = ? AND indexer_version = ? AND fileset_hash = ?
             AND config_hash = ? AND deps_hash = ?`,
       ),
+      // Pre-decode idempotency probe: raw `.scip` bytes identify a prior
+      // ingest without paying decode/hydrate/native-rows. Head matching
+      // happens in the caller so it can resolve the current git head LAZILY —
+      // only after this query proves a candidate exists at all.
+      scipIndexSelectByBytesHash: db.prepare(
+        `SELECT id, status, ingested_head FROM scip_indexes
+         WHERE scip_bytes_hash = ? AND config_hash = ? AND deps_hash = ?
+            AND status = 'complete'
+         ORDER BY id DESC
+         LIMIT 1`,
+      ),
       scipIndexInsert: db.prepare(
         `INSERT INTO scip_indexes
             (scheme, tool_name, indexer_version, indexer_arguments,
              project_root, langs, fileset_hash, config_hash, deps_hash,
              document_count, documents_failed, occurrence_count, external_symbol_count,
-             status, produced_at, ingested_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             status, produced_at, ingested_at, scip_bytes_hash, ingested_head)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(scheme, indexer_version, fileset_hash, config_hash, deps_hash)
             DO NOTHING
          RETURNING id`,
@@ -70,14 +81,22 @@ export class ScipIndexStore {
              external_symbol_count = ?,
              status = ?,
              produced_at = ?,
-             ingested_at = ?
+             ingested_at = ?,
+             scip_bytes_hash = COALESCE(?, scip_bytes_hash),
+             ingested_head = COALESCE(?, ingested_head)
+         WHERE id = ?`,
+      ),
+      scipIndexTouchBytesHash: db.prepare(
+        `UPDATE scip_indexes
+         SET scip_bytes_hash = ?, ingested_head = ?
          WHERE id = ?`,
       ),
       scipIndexList: db.prepare(
         `SELECT id, scheme, tool_name, indexer_version, indexer_arguments,
                  project_root, langs, fileset_hash, config_hash, deps_hash,
                  document_count, documents_failed, occurrence_count,
-                 external_symbol_count, status, produced_at, ingested_at
+                 external_symbol_count, status, produced_at, ingested_at,
+                 scip_bytes_hash, ingested_head
          FROM scip_indexes
          ORDER BY ingested_at DESC`,
       ),
@@ -161,6 +180,8 @@ export class ScipIndexStore {
    *   status?: "complete" | "partial",
    *   produced_at?: string | null,
    *   return_existing?: boolean,
+   *   scip_bytes_hash?: string | null,
+   *   ingested_head?: string | null,
    * }} input
    * @returns {number | null}
    */
@@ -191,12 +212,20 @@ export class ScipIndexStore {
     const documentCount = Math.max(0, Math.floor(Number(input.document_count) || 0));
     const occurrenceCount = Math.max(0, Math.floor(Number(input.occurrence_count) || 0));
     const externalSymbolCount = Math.max(0, Math.floor(Number(input.external_symbol_count) || 0));
+    const bytesHash = normalizeHashField(input.scip_bytes_hash);
+    const ingestedHead = normalizeHashField(input.ingested_head);
 
     const existing = /** @type {{ id: number, status?: string } | undefined} */ (
       this.#stmt.scipIndexSelect.get(scheme, indexerVersion, filesetHash, configHash, depsHash)
     );
     if (existing) {
       if (existing.status === "complete" && status === "complete" && !input.return_existing) {
+        // Same identity already recorded — still refresh the cheap-skip key so
+        // a restage that produced byte-different-but-content-identical output
+        // (or a pre-migration row) converges onto the bytes-hash fast path.
+        if (bytesHash && ingestedHead) {
+          this.#stmt.scipIndexTouchBytesHash.run(bytesHash, ingestedHead, existing.id);
+        }
         return null;
       }
       if (existing.status === "complete" && status === "partial") {
@@ -214,6 +243,8 @@ export class ScipIndexStore {
         status,
         input.produced_at ?? null,
         nowIso(),
+        bytesHash,
+        ingestedHead,
         existing.id,
       );
       return existing.id;
@@ -237,6 +268,8 @@ export class ScipIndexStore {
         status,
         input.produced_at ?? null,
         nowIso(),
+        bytesHash,
+        ingestedHead,
       )
     );
     return inserted ? inserted.id : null;
@@ -288,6 +321,54 @@ export class ScipIndexStore {
   }
 
   /**
+   * Pre-decode idempotency probe: find the newest COMPLETE ingest of
+   * byte-identical `.scip` input, without needing scheme/indexer_version
+   * (both are implied by the bytes). Partial rows never match — a cheap skip
+   * must not mask an ingest that still has work to do. The caller compares
+   * `ingested_head` against the current git head; keeping that comparison
+   * out of SQL lets the caller skip the git spawn entirely when no candidate
+   * row exists (the fresh-DB / restaged-bytes common case).
+   *
+   * @param {{
+   *   scip_bytes_hash: string,
+   *   config_hash?: string | null,
+   *   deps_hash?: string | null,
+   * }} input
+   * @returns {{ id: number, ingested_head: string | null } | null}
+   */
+  findScipIndexByBytesHash(input) {
+    if (!input || typeof input !== "object") {
+      throw new TypeError("Ledger.findScipIndexByBytesHash: input is required");
+    }
+    const bytesHash = normalizeHashField(input.scip_bytes_hash);
+    if (!bytesHash) return null;
+    const configHash = input.config_hash == null ? "" : String(input.config_hash);
+    const depsHash = input.deps_hash == null ? "" : String(input.deps_hash);
+    const existing = /** @type {{ id: number, ingested_head?: string | null } | undefined} */ (
+      this.#stmt.scipIndexSelectByBytesHash.get(bytesHash, configHash, depsHash)
+    );
+    if (!existing) return null;
+    return { id: existing.id, ingested_head: normalizeHashField(existing.ingested_head) };
+  }
+
+  /**
+   * Best-effort backfill of the cheap-skip key onto an existing row (the
+   * legacy fileset-hash skip path, where no recordScipIndex call happens).
+   * No-op when either field is missing.
+   *
+   * @param {number} id
+   * @param {{ scip_bytes_hash?: string | null, ingested_head?: string | null }} fields
+   */
+  updateScipIndexBytesHash(id, fields = {}) {
+    const rowId = Number(id);
+    if (!Number.isInteger(rowId) || rowId <= 0) return;
+    const bytesHash = normalizeHashField(fields.scip_bytes_hash);
+    const ingestedHead = normalizeHashField(fields.ingested_head);
+    if (!bytesHash || !ingestedHead) return;
+    this.#stmt.scipIndexTouchBytesHash.run(bytesHash, ingestedHead, rowId);
+  }
+
+  /**
    * Snapshot of every ingested SCIP index, newest first.
    *
    * @returns {Array<{
@@ -308,6 +389,8 @@ export class ScipIndexStore {
    *   status: "complete" | "partial",
    *   produced_at: string | null,
    *   ingested_at: string,
+   *   scip_bytes_hash: string | null,
+   *   ingested_head: string | null,
    * }>}
    */
   listScipIndexes() {
@@ -339,7 +422,21 @@ export class ScipIndexStore {
         status: r.status === "partial" ? "partial" : "complete",
         produced_at: r.produced_at ?? null,
         ingested_at: r.ingested_at,
+        scip_bytes_hash: r.scip_bytes_hash ?? null,
+        ingested_head: r.ingested_head ?? null,
       };
     });
   }
+}
+
+/**
+ * Hash-ish text fields (bytes hash, git head) normalize to a trimmed string or
+ * null — empty/whitespace values must never participate in cheap-skip matches.
+ *
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function normalizeHashField(value) {
+  const text = value == null ? "" : String(value).trim();
+  return text ? text : null;
 }

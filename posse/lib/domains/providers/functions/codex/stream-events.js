@@ -33,6 +33,9 @@ export function __testBuildCloseStats({
   sessionHandle = null,
   priorSessionHandle = null,
   sessionExpired = false,
+  maxOutputTokens = null,
+  outputTruncated = false,
+  outputLimitReason = null,
 }) {
   return {
     role,
@@ -47,6 +50,9 @@ export function __testBuildCloseStats({
     durationMs,
     outputChars: (finalOutput || stdout.trim()).length,
     exitCode: code,
+    maxOutputTokens,
+    outputTruncated: !!outputTruncated,
+    outputLimitReason: outputLimitReason || null,
     atlasMethod,
     toolUses: Array.isArray(toolUses) ? toolUses : [],
     toolUsesLoggedByToolkit: !!toolUsesLoggedByToolkit,

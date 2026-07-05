@@ -1144,6 +1144,16 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
       .slice(0, 6);
     const metrics = atlasResultField(action, parsed, "metrics") || {};
     const compression = atlasResultField(action, parsed, "compression") || null;
+    // Surface the scope-widening sidecar (callers of the seed from outside its
+    // area), carrying each caller's fan-in so the render can ELEVATE a
+    // load-bearing hub by name — surfacing the path alone was shown insufficient.
+    const widening = data?.sidecar?.scopeWidening;
+    const scopeWidening =
+      widening?.used && Array.isArray(widening.callers)
+        ? widening.callers.filter((c) => c && typeof c.path === "string").slice(0, 8)
+        : (widening?.used && Array.isArray(widening.paths)
+            ? _uniqueAtlasPaths(widening.paths, 8).map((p) => ({ path: p, callerName: null, callerCount: 0, loadBearing: false }))
+            : []);
     return {
       ok: true,
       action,
@@ -1156,6 +1166,7 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
       candidateFileCount: Number(metrics.candidateFileCount || candidateFiles.length),
       compressionSeeds: Array.isArray(compression?.matchedSeeds) ? compression.matchedSeeds.slice(0, 6) : [],
       areaMap: Array.isArray(compression?.areaMap) ? compression.areaMap.slice(0, 16) : [],
+      scopeWidening,
     };
   } catch (err) {
     return { ok: false, action, error: String(err?.message || err).slice(0, 300) };
@@ -1947,6 +1958,24 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
           seed.labelStale ? "label predates recent changes here" : null,
         ].filter(Boolean);
         lines.push(`  - ${seed.path} — ${seed.label}${notes.length > 0 ? ` (${notes.join("; ")})` : ""}`);
+      }
+    }
+    if (Array.isArray(treeScope.scopeWidening) && treeScope.scopeWidening.length > 0) {
+      const loadBearing = treeScope.scopeWidening.filter((c) => c && c.loadBearing);
+      const others = treeScope.scopeWidening.filter((c) => !(c && c.loadBearing));
+      if (loadBearing.length > 0) {
+        lines.push("- highest fan-in callers of these seeds (measured: distinct calling files; from outside the seeds' own area):");
+        for (const c of loadBearing) {
+          const who = c.callerName ? `${c.callerName} — ${c.path}` : c.path;
+          lines.push(`  - ${who} (called from ${c.callerCount} file${c.callerCount === 1 ? "" : "s"})`);
+        }
+        if (others.length > 0) {
+          lines.push("  - other callers of these seeds from outside their area (not the full caller set):");
+          for (const c of others) lines.push(`    - ${c.path}`);
+        }
+      } else {
+        lines.push("- callers that reach these seeds from outside their area (scope-widened; not the full caller set):");
+        for (const c of treeScope.scopeWidening) lines.push(`  - ${c.path}`);
       }
     }
   } else if (treeScope && treeScope.error) {

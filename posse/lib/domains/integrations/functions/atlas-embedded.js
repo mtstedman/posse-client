@@ -23,6 +23,7 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View } from "../../atlas/classes/v2/View.js";
 import { dispatch as dispatchAtlasV2, normalizeActionName } from "../../atlas/functions/v2/retrieval/dispatch.js";
+import { grepIndexedSource, grepNonIndexed } from "../../atlas/functions/v2/retrieval/nonindexed-grep.js";
 import { getSharedConductor, isConductorIndexingInFlight, onConductorIndexingSuccess } from "../../atlas/functions/v2/parse/conductor.js";
 import {
   openEmbeddingResources,
@@ -1570,6 +1571,163 @@ function isRuntimeDisabled(config = {}) {
   return config?.enabled === false || mode === "off";
 }
 
+// Common English + query-shell stopwords dropped when we have to fall back to
+// splitting the raw query for the non-indexed grep terms.
+const NONINDEXED_GREP_STOPWORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "from", "into", "was", "are",
+  "which", "where", "when", "what", "how", "why", "who", "does", "did", "has",
+  "have", "not", "but", "all", "any", "can", "get", "got", "use", "used",
+  "using", "via", "per", "out", "off", "its", "our", "their", "them", "then",
+  "than", "you", "your", "code", "file", "files", "function", "method", "class",
+]);
+
+/**
+ * Derive the grep terms for the non-indexed sidecar. Prefers the query plan's
+ * extracted identifiers + keywords; otherwise splits the raw query into
+ * significant words (drop stopwords and tokens shorter than 3 chars).
+ *
+ * @param {any} parsed   The parsed symbol.search envelope payload.
+ * @param {string | undefined} rawQuery
+ * @returns {string[]}
+ */
+function nonIndexedGrepTerms(parsed, rawQuery) {
+  const out = [];
+  const seen = new Set();
+  const push = (value) => {
+    const term = String(value == null ? "" : value).trim();
+    if (term.length < 3) return;
+    const key = term.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(term);
+  };
+  const plan = parsed && typeof parsed._meta === "object" ? parsed._meta.queryPlan : null;
+  if (plan && typeof plan === "object") {
+    for (const id of Array.isArray(plan.identifiers) ? plan.identifiers : []) push(id);
+    for (const kw of Array.isArray(plan.keywords) ? plan.keywords : []) push(kw);
+  }
+  if (out.length === 0) {
+    for (const tok of String(rawQuery || "").split(/[^A-Za-z0-9_]+/)) {
+      if (!tok || NONINDEXED_GREP_STOPWORDS.has(tok.toLowerCase())) continue;
+      push(tok);
+    }
+  }
+  return out.slice(0, 12);
+}
+
+/**
+ * Feature A2 wiring: augment a successful symbol.search result string with a
+ * grep pass over non-indexed config/data files. Additive and defensive — on the
+ * flag being off, a non-search / error / non-JSON output, a missing repoRoot, or
+ * any grep failure it returns the output unchanged. Never throws.
+ *
+ * @param {{ output: string, repoRoot: string | null | undefined, rawQuery?: string }} args
+ * @returns {string}
+ */
+function attachNonIndexedGrepSidecar({ output, repoRoot, rawQuery }) {
+  try {
+    if (process.env.POSSE_ATLAS_NONINDEXED_GREP === "0") return output;
+    if (typeof output !== "string" || !output || /^Error:/i.test(output)) return output;
+    if (!repoRoot) return output;
+    let parsed;
+    try { parsed = JSON.parse(output); } catch { return output; }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return output;
+
+    const terms = nonIndexedGrepTerms(parsed, rawQuery);
+    if (terms.length === 0) return output;
+
+    const grep = grepNonIndexed({ repoRoot, terms });
+    if (!grep || !Array.isArray(grep.matches) || grep.matches.length === 0) return output;
+
+    parsed.nonIndexedMatches = {
+      matches: grep.matches,
+      truncated: !!grep.truncated,
+      nextCursor: grep.nextCursor || null,
+    };
+    if (!parsed._meta || typeof parsed._meta !== "object" || Array.isArray(parsed._meta)) {
+      parsed._meta = {};
+    }
+    parsed._meta.nonIndexedGrep = {
+      note: `${grep.matches.length} match(es) in ${grep.filesMatched} non-indexed config/data file(s) (grep sidecar over .sql/.json/.yaml/etc. not covered by the symbol index) — see data.nonIndexedMatches`,
+      filesMatched: grep.filesMatched,
+      truncated: !!grep.truncated,
+      nextCursor: grep.nextCursor || null,
+    };
+    try {
+      return JSON.stringify(parsed);
+    } catch {
+      return output;
+    }
+  } catch {
+    return output;
+  }
+}
+
+/**
+ * Identifier-miss rescue (grep parity for indexed source): when the search's
+ * terms have NO identifier-space hit among the returned items, the term may
+ * still exist in source as a string literal / dispatch key — content the
+ * symbol index never tokenizes. Run the same bounded grep over INDEXED source
+ * for exactly those miss terms and attach the text matches. Best-effort and
+ * additive; never throws.
+ *
+ * @param {{ output: string, repoRoot: string | null | undefined, rawQuery?: string }} args
+ * @returns {string}
+ */
+function attachSourceTextRescueSidecar({ output, repoRoot, rawQuery }) {
+  try {
+    if (process.env.POSSE_ATLAS_TEXT_RESCUE === "0") return output;
+    if (typeof output !== "string" || !output || /^Error:/i.test(output)) return output;
+    if (!repoRoot) return output;
+    let parsed;
+    try { parsed = JSON.parse(output); } catch { return output; }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return output;
+
+    const terms = nonIndexedGrepTerms(parsed, rawQuery);
+    if (terms.length === 0) return output;
+    const items = Array.isArray(parsed.items) ? parsed.items : [];
+    const nameBag = new Set();
+    for (const item of items) {
+      for (const value of [item?.name, item?.qualified_name, item?.qualifiedName]) {
+        if (typeof value === "string" && value) nameBag.add(value.toLowerCase());
+      }
+    }
+    const missTerms = terms.filter((term) => {
+      const needle = String(term || "").toLowerCase();
+      if (!needle || needle.length < 4) return false;
+      for (const name of nameBag) {
+        if (name.includes(needle)) return false;
+      }
+      return true;
+    }).slice(0, 6);
+    if (missTerms.length === 0) return output;
+
+    const grep = grepIndexedSource({ repoRoot, terms: missTerms });
+    if (!grep || !Array.isArray(grep.matches) || grep.matches.length === 0) return output;
+
+    parsed.sourceTextMatches = {
+      matches: grep.matches,
+      truncated: !!grep.truncated,
+    };
+    if (!parsed._meta || typeof parsed._meta !== "object" || Array.isArray(parsed._meta)) {
+      parsed._meta = {};
+    }
+    parsed._meta.sourceTextRescue = {
+      note: `No indexed identifier matched ${missTerms.join(", ")} — ${grep.matches.length} text match(es) in indexed source (string literals / dispatch keys are not identifier-indexed). See data.sourceTextMatches.`,
+      terms: missTerms,
+      filesMatched: grep.filesMatched,
+      truncated: !!grep.truncated,
+    };
+    try {
+      return JSON.stringify(parsed);
+    } catch {
+      return output;
+    }
+  } catch {
+    return output;
+  }
+}
+
 export async function executeEmbeddedAtlasTool(action, args = {}, {
   cwd = null,
   config = getAtlasIntegrationConfig(),
@@ -1792,6 +1950,23 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
         artifacts: extractAtlasResultArtifacts(output, { action: prepared.action, args: prepared.payload }),
       });
       return output;
+    }
+    // Feature A: attach a non-indexed config/data grep sidecar to symbol.search
+    // results. Runs at the agent-lane executor (repoRoot + FS access) so the
+    // pure daemon handlers stay filesystem-pure. Best-effort and additive.
+    if (prepared.action === "symbol.search") {
+      const sidecarRepoRoot = repo?.repoPath || config?.requestedRepoPath || cwd || process.cwd();
+      const sidecarQuery = typeof prepared.payload?.query === "string" ? prepared.payload.query : args?.query;
+      output = attachNonIndexedGrepSidecar({
+        output,
+        repoRoot: sidecarRepoRoot,
+        rawQuery: sidecarQuery,
+      });
+      output = attachSourceTextRescueSidecar({
+        output,
+        repoRoot: sidecarRepoRoot,
+        rawQuery: sidecarQuery,
+      });
     }
     if (!/^Error:/i.test(String(output || ""))) {
       if (origin === "agent") {

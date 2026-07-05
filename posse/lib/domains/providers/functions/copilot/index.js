@@ -38,6 +38,8 @@ import { buildRuntimeEnv } from "../../../runtime/functions/paths.js";
 import { appendBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { providerRuntimeState } from "../../classes/runtime-state-singleton.js";
 import { selectExecutionModel } from "../shared/model-selection.js";
+import { getMaxOutputTokensForProvider } from "../shared/turns.js";
+import { normalizeMaxOutputTokens } from "../shared/output-limits.js";
 import { MODEL_TIERS, escalateTier, getModelOverride, getModelTierConfig } from "./model-config.js";
 import { getCopilotInfo } from "./cli-discovery.js";
 import { getAuthMethod, hasCredentials, resolveCopilotAuth } from "./auth-state.js";
@@ -127,6 +129,7 @@ export function callProvider(promptText, opts = {}) {
     projectDir = null,
     abortSignal = null,
     stallTimeout = null,
+    maxOutputTokens = null,
   } = opts || {};
 
   return new Promise((resolve, reject) => {
@@ -137,6 +140,8 @@ export function callProvider(promptText, opts = {}) {
       globalModelOverride: getModelOverride(),
       tierModel: tierConfig.model,
     });
+    const outputTokenLimit = normalizeMaxOutputTokens(maxOutputTokens)
+      || getMaxOutputTokensForProvider("copilot", { role });
 
     const argv = buildCopilotArgs({
       prompt: promptText,
@@ -291,6 +296,9 @@ export function callProvider(promptText, opts = {}) {
         code,
         sessionHandle: acc.sessionId,
         priorSessionHandle: null,
+        maxOutputTokens: outputTokenLimit,
+        outputTruncated: false,
+        outputLimitReason: null,
       });
 
       if (code === 0 && !killedByStall && !killedByAbort) {

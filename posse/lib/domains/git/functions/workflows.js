@@ -33,7 +33,7 @@ export function createGitWorkflowHelpers(options = {}) {
   });
   const autoMerge = createAutoMergeWorkflowHelpers(context, {
     gitMergeToTargetAsync: merge.gitMergeToTargetAsync,
-    refreshAtlasMainAfterMerge: merge.refreshAtlasMainAfterMerge,
+    queueAtlasMainRefreshAfterMerge: merge.queueAtlasMainRefreshAfterMerge,
     cleanupWiBranchAsync: cleanup.cleanupWiBranchAsync,
     snapshotAndRemoveWorktreeOnlyAsync: cleanup.snapshotAndRemoveWorktreeOnlyAsync,
   });

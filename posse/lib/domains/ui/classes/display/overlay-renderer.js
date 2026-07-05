@@ -39,32 +39,61 @@ export class DisplayOverlayRenderer {
 
 
 
+  // Small in-flight action modal (approve/merge/stash/discard in review).
+  // Layout rules mirror the wrap-up overlay's flicker guards: the box
+  // geometry is derived from STATIC content only (title, context lines) and
+  // the row shape is constant, so ticks only swap the spinner glyph and the
+  // elapsed digits in place \u2014 never resize or recenter the box.
   _applyBlockingOverlay(buf) {
     if (!this._blockingOverlay) return buf;
     if (this._blockingOverlay.kind === "wrapup") {
       return this._applyWrapUpOverlay(buf);
     }
-    const title = this._blockingOverlay.title;
-    const subtitle = this._blockingOverlay.subtitle || "";
-    const visibleTitle = stripAnsi(title);
-    const visibleSubtitle = stripAnsi(subtitle);
-    const innerW = Math.min(
-      Math.max(visibleTitle.length, visibleSubtitle.length, 18) + 8,
-      Math.max(18, this.cols - 8),
-    );
+    const overlay = this._blockingOverlay;
+    const meta = overlay.meta && typeof overlay.meta === "object" ? overlay.meta : {};
+    const tone = meta.tone === "warn" ? C.yellow : C.cyan;
+    const nowMs = Date.now();
+    const startedAtMs = Number(overlay.startedAt || nowMs);
+    const elapsedMs = Math.max(0, nowMs - startedAtMs);
+    const spinFrames = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
+    const spin = spinFrames[Math.floor(elapsedMs / 250) % spinFrames.length];
+    const title = stripAnsi(overlay.title).replace(/[.\u2026]+$/, "");
+    // The elapsed row already carries the "please wait" hint; drop a
+    // redundant trailing one from legacy subtitles used as fallback context.
+    const subtitle = stripAnsi(overlay.subtitle || "").replace(/\s*[-–—·]?\s*please wait$/i, "");
+    const flowText = meta.branch
+      ? `${C.cyan}${stripAnsi(String(meta.branch))}${C.reset} ${C.dim}\u2192${C.reset} ${stripAnsi(String(meta.target || "main"))}`
+      : (subtitle ? `${C.dim}${subtitle}${C.reset}` : "");
+    const itemText = meta.item ? `${C.dim}${stripAnsi(String(meta.item))}${C.reset}` : "";
+    // Constant row shape: blank rows stand in for absent context lines so a
+    // phase change never alters the box height mid-operation.
+    const content = [
+      "",
+      `  ${tone}${spin}${C.reset} ${C.bold}${title}${C.reset}`,
+      flowText ? `    ${flowText}` : "",
+      "",
+      itemText ? `  ${itemText}` : "",
+      `  ${C.dim}${formatOverlayElapsed(elapsedMs)} \u00b7 please wait${C.reset}`,
+      "",
+    ];
+    const widthBasis = [
+      `  + ${title}`,
+      flowText ? `    ${flowText}` : "",
+      itemText ? `  ${itemText}` : "",
+      "  0:00 \u00b7 please wait",
+    ];
+    const rawWidth = Math.max(34, ...widthBasis.map((line) => displayColumnWidth(line)));
+    const innerW = Math.min(rawWidth + 3, Math.max(24, this.cols - 8));
     const boxW = innerW + 2;
+    const boxH = content.length + 2;
     const col = Math.max(1, Math.floor((this.cols - boxW) / 2) + 1);
-    const row = Math.max(2, Math.floor((this.rows - 7) / 2) + 1);
-    const titleLine = fit(`${C.yellow}${C.bold}! ${title}${C.reset}`, innerW);
-    const subtitleLine = subtitle ? fit(`${C.dim}${subtitle}${C.reset}`, innerW) : " ".repeat(innerW);
-    const pad = " ".repeat(innerW);
-    return buf
-      + `\x1b[${row};${col}H${C.yellow}${C.bold}\u250c${"\u2500".repeat(innerW)}\u2510${C.reset}`
-      + `\x1b[${row + 1};${col}H${C.yellow}${C.bold}\u2502${C.reset}${pad}${C.yellow}${C.bold}\u2502${C.reset}`
-      + `\x1b[${row + 2};${col}H${C.yellow}${C.bold}\u2502${C.reset}${titleLine}${C.yellow}${C.bold}\u2502${C.reset}`
-      + `\x1b[${row + 3};${col}H${C.yellow}${C.bold}\u2502${C.reset}${subtitleLine}${C.yellow}${C.bold}\u2502${C.reset}`
-      + `\x1b[${row + 4};${col}H${C.yellow}${C.bold}\u2502${C.reset}${pad}${C.yellow}${C.bold}\u2502${C.reset}`
-      + `\x1b[${row + 5};${col}H${C.yellow}${C.bold}\u2514${"\u2500".repeat(innerW)}\u2518${C.reset}`;
+    const row = Math.max(2, Math.floor((this.rows - boxH) / 2) + 1);
+    let out = buf + `\x1b[${row};${col}H${tone}\u256d${"\u2500".repeat(innerW)}\u256e${C.reset}`;
+    for (let i = 0; i < content.length; i++) {
+      out += `\x1b[${row + 1 + i};${col}H${tone}\u2502${C.reset}${fit(content[i], innerW)}${tone}\u2502${C.reset}`;
+    }
+    out += `\x1b[${row + boxH - 1};${col}H${tone}\u2570${"\u2500".repeat(innerW)}\u256f${C.reset}`;
+    return out;
   }
 
 

@@ -59,6 +59,7 @@ function enrichCall(call) {
     cacheCreationInputTokens,
   });
   const billableInputTokens = Math.max(0, Number(billable.billableInputTokens) || 0);
+  const turnsUsed = Math.max(0, Number(call.turns_used) || 0);
   return {
     ...call,
     input_tokens: inputTokens,
@@ -70,7 +71,24 @@ function enrichCall(call) {
     cache_discount_ratio: billable.cacheDiscountRatio,
     resolved_cost_usd: est.costUsd,
     cost_source: est.source,
+    turns_used: turnsUsed,
+    output_truncated: Number(call.output_truncated) === 1,
   };
+}
+
+function costPer1kOutputTokens(costUsd, outputTokens) {
+  const cost = Number(costUsd);
+  const output = Number(outputTokens);
+  return Number.isFinite(cost) && Number.isFinite(output) && output > 0
+    ? cost / (output / 1000)
+    : null;
+}
+
+function aggregateCacheDiscountRatio(inputTokens, billableInputTokens) {
+  const input = Number(inputTokens) || 0;
+  if (input <= 0) return null;
+  const billable = Math.max(0, Number(billableInputTokens) || 0);
+  return Math.max(0, Math.min(1, 1 - (billable / input)));
 }
 
 /**
@@ -85,7 +103,8 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
   const { where, params } = buildWhere({ wiId, since });
   const rows = db.prepare(`
     SELECT work_item_id, job_id, role, provider, model_tier, model_name,
-           input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, cost_estimate_usd, status
+           input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
+           cost_estimate_usd, status, turns_used, output_truncated
     FROM agent_calls
     ${where}
   `).all(...params);
@@ -95,6 +114,8 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
   let totalCachedInput = 0;
   let totalBillableInput = 0;
   let totalOutput = 0;
+  let totalTurns = 0;
+  let outputTruncatedCalls = 0;
   const sourceCounts = {};
   let unknownCostCalls = 0;
   for (const raw of rows) {
@@ -104,6 +125,8 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
     totalCachedInput += call.cached_input_tokens || 0;
     totalBillableInput += call.billable_input_tokens || 0;
     totalOutput += call.output_tokens || 0;
+    totalTurns += call.turns_used || 0;
+    if (call.output_truncated) outputTruncatedCalls += 1;
     sourceCounts[call.cost_source] = (sourceCounts[call.cost_source] || 0) + 1;
     if (call.cost_source === "none") unknownCostCalls += 1;
   }
@@ -117,6 +140,10 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
     billableInputTokens: totalBillableInput,
     billableTokens: totalBillableInput + totalOutput,
     outputTokens: totalOutput,
+    turnsUsed: totalTurns,
+    outputTruncatedCalls,
+    cacheDiscountRatio: aggregateCacheDiscountRatio(totalInput, totalBillableInput),
+    costPer1kOutputTokensUsd: costPer1kOutputTokens(totalCost, totalOutput),
     callCount: rows.length,
     costSourceCounts: sourceCounts,
     unknownCostCalls,
@@ -133,7 +160,8 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
   const { where, params } = buildWhere({ wiId, since });
   const rows = db.prepare(`
     SELECT work_item_id, job_id, role, provider, model_tier, model_name,
-           input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, cost_estimate_usd, status
+           input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
+           cost_estimate_usd, status, turns_used, output_truncated
     FROM agent_calls
     ${where}
   `).all(...params);
@@ -155,6 +183,8 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
         cachedInputTokens: 0,
         billableInputTokens: 0,
         outputTokens: 0,
+        turnsUsed: 0,
+        outputTruncatedCalls: 0,
         costUsd: 0,
         unknownCostCalls: 0,
       });
@@ -165,6 +195,8 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     entry.cachedInputTokens += call.cached_input_tokens || 0;
     entry.billableInputTokens += call.billable_input_tokens || 0;
     entry.outputTokens += call.output_tokens || 0;
+    entry.turnsUsed += call.turns_used || 0;
+    if (call.output_truncated) entry.outputTruncatedCalls += 1;
     entry.costUsd += call.resolved_cost_usd || 0;
     if (call.cost_source === "none") entry.unknownCostCalls += 1;
     grandCost += call.resolved_cost_usd || 0;
@@ -178,6 +210,8 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
   for (const entry of out) {
     entry.uncachedInputTokens = Math.max(0, entry.inputTokens - entry.cachedInputTokens);
     entry.billableTokens = entry.billableInputTokens + entry.outputTokens;
+    entry.cacheDiscountRatio = aggregateCacheDiscountRatio(entry.inputTokens, entry.billableInputTokens);
+    entry.costPer1kOutputTokensUsd = costPer1kOutputTokens(entry.costUsd, entry.outputTokens);
   }
   return {
     groupBy,
@@ -188,6 +222,10 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     billableInputTokens: totalBillableInput,
     billableTokens: totalBillableInput + totalOutput,
     outputTokens: totalOutput,
+    turnsUsed: out.reduce((acc, entry) => acc + (entry.turnsUsed || 0), 0),
+    outputTruncatedCalls: out.reduce((acc, entry) => acc + (entry.outputTruncatedCalls || 0), 0),
+    cacheDiscountRatio: aggregateCacheDiscountRatio(totalInput, totalBillableInput),
+    costPer1kOutputTokensUsd: costPer1kOutputTokens(grandCost, totalOutput),
     groups: out,
   };
 }
@@ -204,7 +242,8 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
   // re-querying agent_calls per work item.
   const rows = db.prepare(`
     SELECT work_item_id, job_id, role, provider, model_tier, model_name,
-           input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, cost_estimate_usd, status
+           input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
+           cost_estimate_usd, status, turns_used, output_truncated
     FROM agent_calls
     ${where}
   `).all(...params);
@@ -222,6 +261,8 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
         cachedInputTokens: 0,
         billableInputTokens: 0,
         outputTokens: 0,
+        turnsUsed: 0,
+        outputTruncatedCalls: 0,
         totalCostUsd: 0,
         unknownCostCalls: 0,
       };
@@ -232,6 +273,8 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
     entry.cachedInputTokens += call.cached_input_tokens || 0;
     entry.billableInputTokens += call.billable_input_tokens || 0;
     entry.outputTokens += call.output_tokens || 0;
+    entry.turnsUsed += call.turns_used || 0;
+    if (call.output_truncated) entry.outputTruncatedCalls += 1;
     entry.totalCostUsd += call.resolved_cost_usd || 0;
     if (call.cost_source === "none") entry.unknownCostCalls += 1;
   }
@@ -240,6 +283,8 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
   for (const entry of enriched) {
     entry.uncachedInputTokens = Math.max(0, entry.inputTokens - entry.cachedInputTokens);
     entry.billableTokens = entry.billableInputTokens + entry.outputTokens;
+    entry.cacheDiscountRatio = aggregateCacheDiscountRatio(entry.inputTokens, entry.billableInputTokens);
+    entry.costPer1kOutputTokensUsd = costPer1kOutputTokens(entry.totalCostUsd, entry.outputTokens);
   }
   enriched.sort((a, b) => b.totalCostUsd - a.totalCostUsd);
   const trimmed = enriched.slice(0, limit);
@@ -256,6 +301,10 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
     billableInputTokens: totalBillableInput,
     billableTokens: totalBillableInput + totalOutput,
     outputTokens: totalOutput,
+    turnsUsed: enriched.reduce((acc, e) => acc + (e.turnsUsed || 0), 0),
+    outputTruncatedCalls: enriched.reduce((acc, e) => acc + (e.outputTruncatedCalls || 0), 0),
+    cacheDiscountRatio: aggregateCacheDiscountRatio(totalInput, totalBillableInput),
+    costPer1kOutputTokensUsd: costPer1kOutputTokens(grandCost, totalOutput),
     workItems: trimmed,
     truncated: enriched.length > limit,
   };

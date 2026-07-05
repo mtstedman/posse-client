@@ -25,6 +25,7 @@ import { osKey, archKey } from "../../shared/platform/functions/native-platform.
 import { buildRuntimeEnv } from "../../domains/runtime/functions/paths.js";
 import { signalAbortError } from "../../domains/runtime/functions/yield.js";
 import { appendBoundedText } from "../../shared/format/functions/bounded-text.js";
+import { appendRunTelemetry } from "../../shared/telemetry/functions/run-telemetry.js";
 import { Daemon, ProcessTransport, daemonSupervisor } from "./daemon/index.js";
 import { HeartbeatAuthManager } from "../../shared/native/classes/HeartbeatAuthManager.js";
 import { POSSE_REMOTE_DEFAULT_URL } from "../../domains/remote/functions/mode.js";
@@ -117,7 +118,9 @@ export class NativeBinary {
      * Worker→per-call fallback visibility: every time a worker-eligible
      * request degrades to a per-call spawn the daemon layer is unhealthy, and
      * the transparent fallback would otherwise hide it completely. Counted
-     * here, surfaced once per run at closeout (and via BinaryManager stats).
+     * here, surfaced once per run at closeout (and via BinaryManager stats);
+     * each fallback also lands in the run diagnostics stream with its reason
+     * and method so the closeout warning is diagnosable after the fact.
      * @type {{ count: number, byReason: Record<string, number> }}
      */
     this.workerFallbacks = { count: 0, byReason: {} };
@@ -171,10 +174,17 @@ export class NativeBinary {
     return this._daemon;
   }
 
-  /** @param {string} reason */
-  #noteWorkerFallback(reason) {
+  /** @param {string} reason @param {string | null} [method] */
+  #noteWorkerFallback(reason, method = null) {
     this.workerFallbacks.count += 1;
     this.workerFallbacks.byReason[reason] = (this.workerFallbacks.byReason[reason] || 0) + 1;
+    appendRunTelemetry("diagnostics", {
+      kind: "native.worker_fallback",
+      binary: this.name,
+      reason,
+      method,
+      fallback_count: this.workerFallbacks.count,
+    });
   }
 
   /**
@@ -265,7 +275,7 @@ export class NativeBinary {
       // fallback otherwise hides an unhealthy daemon layer completely.
       const reason = response._transportGone === true ? "transport_gone"
         : response._timedOut === true ? "timeout" : "overloaded";
-      this.#noteWorkerFallback(reason);
+      this.#noteWorkerFallback(reason, subcommand);
       return this.#runPerCall(subcommand, args, requestOpts);
     }
     if (response?._aborted === true) {

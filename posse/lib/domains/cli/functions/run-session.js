@@ -272,7 +272,21 @@ export function bootScipLangPatchFromEvent(event = {}) {
       detail: processed > 0 ? `${processed} docs` : "indexed",
     };
   }
+  if (kind === "atlas.scip.ingest.reading") {
+    // Ingest picked the file up but hasn't decoded it yet — flip the parse
+    // cell to its active phase immediately instead of leaving it at "—".
+    return { state: "intaking", detail: event.text || "reading index" };
+  }
   if (kind === "atlas.scip.ingest.started" || kind === "atlas.scip.ingest.progress") {
+    const phase = String(event.phase || "");
+    if (phase === "decode") {
+      return { state: "intaking", detail: event.text || "decoding index" };
+    }
+    if (phase === "convert") {
+      // The native rows conversion emits no counts; omit percent so the cell
+      // holds at the hydrate ceiling (the merge keeps the previous value).
+      return { state: "intaking", detail: event.text || "converting rows" };
+    }
     if (!(Number.isFinite(total) && total > 0) && !Number.isFinite(percent)) {
       return {
         state: "indexing",
@@ -280,11 +294,23 @@ export function bootScipLangPatchFromEvent(event = {}) {
         detail: event.text || "preparing intake",
       };
     }
-    return {
+    const patch = {
       state: "intaking",
       ...countPatch,
       detail: event.text || "intaking",
     };
+    // One continuous sweep across the ingest phases instead of two 0→100
+    // runs: hydrate owns 0-35, the ledger write loop 35-100. Display-only
+    // scaling — the ingester's events keep their honest per-phase percents.
+    if (Number.isFinite(patch.percent)) {
+      const raw = Math.max(0, Math.min(100, patch.percent));
+      patch.percent = phase === "hydrate" || kind === "atlas.scip.ingest.started"
+        ? raw * 0.35
+        : phase === "write"
+          ? 35 + raw * 0.65
+          : raw;
+    }
+    return patch;
   }
   if (kind === "atlas.scip.restage_started"
       || kind === "atlas.scip.restage_decided"

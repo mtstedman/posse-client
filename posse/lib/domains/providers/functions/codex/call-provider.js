@@ -18,6 +18,8 @@ import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry, logProvi
 import { buildWindowsSpawn, terminateSpawnedProcess, trackSpawnedProcess } from "../shared/windows-spawn.js";
 import { selectExecutionModel } from "../shared/model-selection.js";
 import { resolveProviderStallTimeout } from "../shared/stall-timeout.js";
+import { getMaxOutputTokensForProvider } from "../shared/turns.js";
+import { normalizeMaxOutputTokens } from "../shared/output-limits.js";
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
 import { isWebToolName, recordToolUseObservations } from "../../../observability/functions/observations.js";
 import {
@@ -54,6 +56,7 @@ export async function callProvider(promptText, {
   stableContext = null,
   remoteSystemPrompt = null,
   maxTurns = null,
+  maxOutputTokens = null,
   complexity = null,
   filesToModifyCount = null,
   deepthink = false,
@@ -108,6 +111,8 @@ export async function callProvider(promptText, {
     const requestedModel = selectExecutionModel({ jobModelName: modelName, globalModelOverride: getModelOverride(), tierModel: tierConfig.model });
     const modelToUse = normalizeModelForAuthMode(requestedModel, preferredAuthMode);
     const turnLimit = maxTurns || getMaxTurns(role, modelTier, complexity, filesToModifyCount, deepthink);
+    const outputTokenLimit = normalizeMaxOutputTokens(maxOutputTokens)
+      || getMaxOutputTokensForProvider("codex", { role });
     const providerPaths = normalizeProviderPaths({ cwd, projectDir });
     const workingDir = providerPaths.cwd;
     const mcpWorkspaceCwd = mcpCwd ? path.resolve(mcpCwd) : workingDir;
@@ -414,6 +419,9 @@ export async function callProvider(promptText, {
         cachedInputTokens: totalCachedInputTokens,
         longContextInputTokens,
         durationMs,
+        maxOutputTokens: outputTokenLimit,
+        outputTruncated: false,
+        outputLimitReason: null,
       };
       wrapped.stdout = stdout;
       wrapped.stderr = stderr;
@@ -620,6 +628,9 @@ export async function callProvider(promptText, {
         toolUsesLoggedByToolkit: !!deterministicReadMcp.active,
         sessionHandle: latestSessionHandle,
         priorSessionHandle: resumeSessionHandle,
+        maxOutputTokens: outputTokenLimit,
+        outputTruncated: false,
+        outputLimitReason: null,
       });
       stats.mcpAttachProof = mcpCleanup?.attachProofResult?.proof || null;
       stats.mcpAttachMissingProof = mcpCleanup?.attachProofResult?.missingProof === true;

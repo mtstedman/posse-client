@@ -29,7 +29,14 @@ import { MessageChannel, Worker } from "node:worker_threads";
 import { recordDaemonSpawn, forgetDaemonSpawn } from "./process-ledger.js";
 import { attachNativeThreadBridge } from "./native-thread-bridge.js";
 
-const JSONL_BUFFER_MAX_CHARS = 16 * 1024 * 1024;
+// Ceiling for one accumulating JSONL frame. This is a malfunctioning-host
+// guard, NOT a response-size budget: legitimate single-line responses reach
+// tens of MB (a 320-doc scip-rows response is ~27MB, and responses amplify
+// their request roughly 2x while the Rust worker accepts requests up to
+// 64MB), so the cap must sit far above real traffic. A host that pushes this
+// much without a newline is broken — kill it (see the overflow branch) so
+// pending requests fail over immediately instead of dying by timeout.
+const JSONL_BUFFER_MAX_CHARS = 256 * 1024 * 1024;
 
 function killProcessTree(proc, { force = true, platform = process.platform, spawnImpl = spawn } = {}) {
   if (!proc || proc.exitCode != null || proc.killed) return false;
@@ -74,17 +81,21 @@ function killProcessTree(proc, { force = true, platform = process.platform, spaw
  *   spawnImpl?: typeof spawn,
  *   label?: string,
  *   platform?: NodeJS.Platform,
+ *   maxBufferChars?: number,
  * }} opts
  * @returns {Transport}
  */
 export function ProcessTransport(opts) {
   const spawnImpl = opts.spawnImpl || spawn;
   const platform = opts.platform || process.platform;
+  const maxBufferChars = opts.maxBufferChars ?? JSONL_BUFFER_MAX_CHARS;
   /** @type {import("node:child_process").ChildProcess | null} */
   let proc = null;
   /** Last spawned child pid, for the process ledger (orphan reaping). */
   let spawnedPid = null;
   let buffer = "";
+  /** Frame-scan resume point: buffer[0..scanFrom) is known newline-free. */
+  let scanFrom = 0;
   /** @type {Array<(m: Record<string, unknown>) => void>} */
   const messageHandlers = [];
   /** @type {Array<() => void>} */
@@ -94,10 +105,11 @@ export function ProcessTransport(opts) {
     proc = null;
     if (spawnedPid != null) { forgetDaemonSpawn(spawnedPid); spawnedPid = null; }
     buffer = "";
+    scanFrom = 0;
     for (const cb of exitHandlers) cb();
   };
 
-  return {
+  const transport = {
     start() {
       if (proc && !proc.killed && proc.exitCode == null) return true;
       const bin = opts.resolveBin();
@@ -114,6 +126,7 @@ export function ProcessTransport(opts) {
         return false;
       }
       buffer = "";
+      scanFrom = 0;
       // Don't let an idle daemon pin the event loop: unref the child and its
       // pipes so the host process can exit when its real work is done (an
       // in-flight request's own timer keeps the loop alive meanwhile). Without
@@ -131,9 +144,13 @@ export function ProcessTransport(opts) {
       proc.stdout?.on("data", (chunk) => {
         buffer += chunk.toString("utf8");
         let newline;
-        while ((newline = buffer.indexOf("\n")) >= 0) {
+        // Resume the delimiter scan where the last chunk left off — large
+        // frames arrive in ~64KB pipe chunks, and rescanning the whole
+        // accumulated buffer per chunk is quadratic in frame size.
+        while ((newline = buffer.indexOf("\n", scanFrom)) >= 0) {
           const line = buffer.slice(0, newline);
           buffer = buffer.slice(newline + 1);
+          scanFrom = 0;
           if (!line.trim()) continue;
           let message;
           try {
@@ -143,8 +160,14 @@ export function ProcessTransport(opts) {
           }
           for (const cb of messageHandlers) cb(message);
         }
-        if (buffer.length > JSONL_BUFFER_MAX_CHARS) {
-          buffer = "";
+        scanFrom = buffer.length;
+        if (buffer.length > maxBufferChars) {
+          // Never silently drop a partial frame: the line's tail would still
+          // arrive, corrupt the framing, and the pending request would die by
+          // timeout (a 120s stall per oversized response). A host emitting a
+          // frame this large is malfunctioning — kill it so the Daemon fails
+          // pending requests now and callers take their fallback path.
+          transport.kill();
         }
       });
       proc.stderr?.on("data", () => { /* host diagnostics; ignored */ });
@@ -199,6 +222,7 @@ export function ProcessTransport(opts) {
       return proc?.pid ?? null;
     },
   };
+  return transport;
 }
 
 /**

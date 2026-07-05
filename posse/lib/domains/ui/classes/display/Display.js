@@ -590,14 +590,24 @@ export class Display {
     this.requestRender({ reason: "event" });
   }
 
-  setBlockingOverlay(title = null, subtitle = null) {
+  setBlockingOverlay(title = null, subtitle = null, meta = null) {
     const cleanTitle = String(title || "").trim();
     const cleanSubtitle = String(subtitle || "").trim();
-    const next = cleanTitle ? { title: cleanTitle, subtitle: cleanSubtitle } : null;
-    const currentKey = this._blockingOverlay ? `${this._blockingOverlay.title}\n${this._blockingOverlay.subtitle || ""}` : "";
-    const nextKey = next ? `${next.title}\n${next.subtitle || ""}` : "";
-    if (currentKey === nextKey) return;
+    const cleanMeta = meta && typeof meta === "object" ? meta : null;
+    const next = cleanTitle ? { title: cleanTitle, subtitle: cleanSubtitle, meta: cleanMeta } : null;
+    const keyOf = (overlay) => (overlay
+      ? `${overlay.title}\n${overlay.subtitle || ""}\n${JSON.stringify(overlay.meta || null)}`
+      : "");
+    if (keyOf(this._blockingOverlay) === keyOf(next)) return;
     if (!next || !this._blockingOverlay) this._resetBlockingOverlayBaseFrame();
+    if (next) {
+      // Phase changes ("Merging" -> "Committing") keep the original start so
+      // the modal's elapsed clock spans the whole operation, not one phase.
+      const prior = this._blockingOverlay && this._blockingOverlay.kind !== "wrapup"
+        ? Number(this._blockingOverlay.startedAt)
+        : NaN;
+      next.startedAt = Number.isFinite(prior) ? prior : Date.now();
+    }
     this._blockingOverlay = next;
     this.requestRender({ force: true });
   }

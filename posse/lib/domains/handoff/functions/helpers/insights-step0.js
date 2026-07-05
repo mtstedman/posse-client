@@ -35,6 +35,13 @@ function collectInsightFilePaths(payload) {
   for (const file of payload?.atlas_slice_context?.filePaths || []) push(file);
   for (const card of payload?.atlas_slice_context?.cards || []) push(card?.file);
   for (const file of payload?.atlas_fallback_context?.candidateFiles || []) push(file);
+  // The full tree-scope discovery set, not just the preload-selected subset:
+  // memories anchor to files an agent will REACH, and the discovered scope
+  // (candidates + widened callers) is that reach. Probing only the preload
+  // targets left memories on discovered-but-not-preloaded files invisible
+  // (e.g. the executor write-lane memory anchored to tool-descriptors.js).
+  for (const file of payload?.atlas_slice_context?.treeScope?.candidateFiles || []) push(file);
+  for (const caller of payload?.atlas_slice_context?.treeScope?.scopeWidening || []) push(caller?.path);
   return [...new Set(paths)];
 }
 

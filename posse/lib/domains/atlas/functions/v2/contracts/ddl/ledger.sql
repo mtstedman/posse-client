@@ -420,8 +420,13 @@ CREATE TABLE IF NOT EXISTS scip_indexes (
                           CHECK (status IN ('complete','partial')),
   produced_at           TEXT,                          -- ISO-8601 from the .scip metadata, nullable
   ingested_at           TEXT NOT NULL,                 -- ISO-8601
+  scip_bytes_hash       TEXT,                          -- SHA-256 of the raw .scip bytes (pre-decode skip key)
+  ingested_head         TEXT,                          -- git HEAD at ingest time (bounds cheap-skip staleness)
   UNIQUE (scheme, indexer_version, fileset_hash, config_hash, deps_hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_scip_indexes_scheme
   ON scip_indexes(scheme);
+
+CREATE INDEX IF NOT EXISTS idx_scip_indexes_bytes_hash
+  ON scip_indexes(scip_bytes_hash);

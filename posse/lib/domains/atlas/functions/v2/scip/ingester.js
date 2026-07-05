@@ -19,7 +19,9 @@ import { sha256Hex } from "../hash.js";
 import { normalizeRepoPath, repoRelativeFromAbsolute } from "../paths.js";
 import { languageForPath } from "../parse/language-buckets.js";
 import { inspectSampleForMinified, isLikelyMinifiedPath, MINIFIED_SAMPLE_BYTES } from "../parser/index-filters.js";
+import { scipBasenameSourceLanguages } from "../scip-progress.js";
 import { runSqliteWrite } from "../../../../../shared/concurrency/functions/sqlite-gate.js";
+import { getCurrentGitHeadAsync } from "../../../../integrations/functions/atlas/shared.js";
 
 /** @typedef {import("../../../classes/v2/Ledger.js").Ledger} Ledger */
 
@@ -99,6 +101,7 @@ export async function ingestScipFile({
   // is otherwise unused by callers, so it is a safe carrier.
   const effectiveConfigHash = scipRowsConfigHash(configHash, rowsSpecVersion);
 
+  const ingestStartedAtMs = Date.now();
   let buf = bytes;
   let effectiveProducedAt = producedAt;
   if (!buf) {
@@ -109,12 +112,82 @@ export async function ingestScipFile({
       catch { effectiveProducedAt = null; }
     }
   }
+
+  // Cheap pre-decode skip: byte-identical input already ingested at the same
+  // repo head means the whole decode/hydrate/native-rows pipeline (the
+  // dominant ingest cost) would only rediscover today's fileset-hash skip.
+  // Head equality bounds staleness — a commit misses here and re-derives
+  // through the full pipeline, which backfills the key for the next boot.
+  // The git head resolves LAZILY: the spawn only happens once a candidate
+  // row exists, so fresh ledgers and restaged bytes never pay it before
+  // `ingest.started` (the boot intake overlaps tree-sitter parse — an
+  // unconditional spawn here visibly delayed the intake start).
+  // Plain `force` (reparse) bypasses; `forceIfMissing` treats a match as
+  // "present", mirroring the effectiveForce semantics below.
+  const bytesHash = sha256Hex(buf);
+  let currentHead = null;
+  let currentHeadResolved = false;
+  const resolveCurrentHead = async () => {
+    if (!currentHeadResolved) {
+      currentHeadResolved = true;
+      try { currentHead = (await getCurrentGitHeadAsync(repoRoot)) || null; } catch { currentHead = null; }
+    }
+    return currentHead;
+  };
+  const basenameLanguage = scipPath
+    ? path.basename(String(scipPath), ".scip").toLowerCase() || null
+    : null;
+  const basenameSourceLanguages = scipBasenameSourceLanguages(scipPath || "");
+  const allowBytesSkip = !(force === true && forceIfMissing !== true);
+  if (allowBytesSkip && typeof ledger.findScipIndexByBytesHash === "function") {
+    const bytesMatch = ledger.findScipIndexByBytesHash({
+      scip_bytes_hash: bytesHash,
+      config_hash: effectiveConfigHash,
+      deps_hash: depsHash || "",
+    });
+    if (bytesMatch && bytesMatch.ingested_head && bytesMatch.ingested_head === await resolveCurrentHead()) {
+      emit(onEvent, {
+        kind: "atlas.scip.ingest.skipped",
+        scheme: null,
+        language: basenameLanguage,
+        source_languages: basenameSourceLanguages,
+        reason: "bytes_match",
+        scip_bytes_hash: bytesHash,
+        fileset_hash: "",
+      });
+      return {
+        skipped: true,
+        documents_ingested: 0,
+        documents_failed: 0,
+        documents_skipped: 0,
+        blobs_reused: 0,
+        external_symbols: 0,
+        covered_content_hashes: [],
+        ledger_entries_appended: 0,
+        scheme: "",
+        fileset_hash: "",
+        scip_index_id: bytesMatch.id,
+        status: "complete",
+      };
+    }
+  }
+
+  emit(onEvent, {
+    kind: "atlas.scip.ingest.progress",
+    phase: "decode",
+    language: basenameLanguage,
+    source_languages: basenameSourceLanguages,
+    byte_size: buf.byteLength ?? buf.length ?? 0,
+    elapsed_ms: Date.now() - ingestStartedAtMs,
+  });
+  const decodeStartedAtMs = Date.now();
   let index;
   try {
     index = decodeScipIndex(buf);
   } catch (err) {
     return handleScipIndexDecodeFailure({ buf, err, onEvent, scipPath });
   }
+  const decodeMs = Date.now() - decodeStartedAtMs;
   const scheme = inferSchemeFromIndex(index);
   if (!scheme) {
     throw new RangeError("ingestScipFile: Metadata.ToolInfo.name is required when no SCIP symbol scheme can be inferred");
@@ -125,13 +198,16 @@ export async function ingestScipFile({
   // source-language buckets below so scip-typescript can still distinguish JS
   // files from TS files.
   const language = String(scheme || "").replace(/^scip-/, "").toLowerCase() || null;
-  await prepareAndMutateDocumentText(index, repoRoot);
-  const nativeRows = await scipIndexToRowsNative({ index });
-  const rowDocuments = normalizeNativeRowDocuments(nativeRows?.documents);
-  const totalDocuments = rowDocuments.length;
-  let sourceLanguages = collectSourceLanguages(rowDocuments);
-  let sourceLanguageTotals = collectSourceLanguageCounts(rowDocuments);
-  const sourceLanguageCurrent = zeroCountsFromTotals(sourceLanguageTotals);
+
+  // `started` fires post-decode (document totals are known) but BEFORE the
+  // hydrate + native-rows work, so the UI gets counts while the expensive
+  // phases run instead of after them. Language stats here derive from the
+  // decoded document paths; they are recomputed from the native rows below
+  // for the write loop.
+  const decodedDocuments = Array.isArray(index.documents) ? index.documents : [];
+  let sourceLanguages = collectSourceLanguages(decodedDocuments);
+  let sourceLanguageTotals = collectSourceLanguageCounts(decodedDocuments);
+  let sourceLanguageCurrent = zeroCountsFromTotals(sourceLanguageTotals);
   emit(onEvent, {
     kind: "atlas.scip.ingest.started",
     scheme,
@@ -139,9 +215,9 @@ export async function ingestScipFile({
     source_languages: sourceLanguages,
     source_language_current: { ...sourceLanguageCurrent },
     source_language_total: { ...sourceLanguageTotals },
-    documents: totalDocuments,
+    documents: decodedDocuments.length,
     current: 0,
-    total: totalDocuments,
+    total: decodedDocuments.length,
     percent: 0,
   });
   if (!index.metadata.tool_info.name) {
@@ -162,7 +238,33 @@ export async function ingestScipFile({
       message: "SCIP Metadata.ToolInfo.version is absent; using 'unknown'",
     });
   }
+
+  const hydrateStartedAtMs = Date.now();
+  await prepareAndMutateDocumentText(index, repoRoot, { onEvent, scheme, language });
+  const hydrateMs = Date.now() - hydrateStartedAtMs;
+  emit(onEvent, {
+    kind: "atlas.scip.ingest.progress",
+    phase: "convert",
+    scheme,
+    language,
+    source_languages: sourceLanguages,
+    documents: decodedDocuments.length,
+    decode_ms: decodeMs,
+    hydrate_ms: hydrateMs,
+    elapsed_ms: Date.now() - ingestStartedAtMs,
+  });
+  const convertStartedAtMs = Date.now();
+  const nativeRows = await scipIndexToRowsNative({ index });
+  const convertMs = Date.now() - convertStartedAtMs;
+  const rowDocuments = normalizeNativeRowDocuments(nativeRows?.documents);
+  const totalDocuments = rowDocuments.length;
+  sourceLanguages = collectSourceLanguages(rowDocuments);
+  sourceLanguageTotals = collectSourceLanguageCounts(rowDocuments);
+  sourceLanguageCurrent = zeroCountsFromTotals(sourceLanguageTotals);
   const filesetHash = String(nativeRows?.fileset_hash || nativeRows?.filesetHash || "");
+  // The expensive pipeline is behind us — resolve the head now so the
+  // bookkeeping row (or the fileset-skip backfill) records the cheap-skip key.
+  await resolveCurrentHead();
   const indexerVersion = index.metadata.tool_info.version || "unknown";
   const toolName = index.metadata.tool_info.name || scheme;
 
@@ -185,6 +287,8 @@ export async function ingestScipFile({
     occurrence_count: nativeRowsNumber(nativeRows, "occurrence_count", "occurrenceCount"),
     external_symbol_count: index.external_symbols.length,
     produced_at: effectiveProducedAt,
+    scip_bytes_hash: bytesHash,
+    ingested_head: currentHead,
   };
 
   const existingIndexId = typeof ledger.findScipIndexId === "function"
@@ -200,6 +304,16 @@ export async function ingestScipFile({
   const effectiveForce = force === true && !(forceIfMissing === true && existingIndexId != null);
 
   if (existingIndexId != null && !effectiveForce) {
+    // Backfill the cheap-skip key: this row matched by fileset hash even
+    // though the raw bytes (or recorded head) differ — a restaged-but-
+    // content-identical index, or a pre-migration row. Next boot takes the
+    // pre-decode path instead of re-deriving the fileset hash.
+    if (typeof ledger.updateScipIndexBytesHash === "function") {
+      ledger.updateScipIndexBytesHash(existingIndexId, {
+        scip_bytes_hash: bytesHash,
+        ingested_head: currentHead,
+      });
+    }
     emit(onEvent, {
       kind: "atlas.scip.ingest.skipped",
       scheme,
@@ -268,6 +382,7 @@ export async function ingestScipFile({
     });
   }
 
+  const writeStartedAtMs = Date.now();
   const writeResult = await runScipIngestWrite(ledger, () => {
     if (pathSnapshotError) {
       // A failed branch-snapshot read fails every document identically, so
@@ -311,6 +426,7 @@ export async function ingestScipFile({
           || documentsProcessed % progressStep === 0) {
         emit(onEvent, {
           kind: "atlas.scip.ingest.progress",
+          phase: "write",
           scheme,
           language,
           source_languages: sourceLanguages,
@@ -484,6 +600,11 @@ export async function ingestScipFile({
     current: totalDocuments,
     total: totalDocuments,
     percent: 100,
+    decode_ms: decodeMs,
+    hydrate_ms: hydrateMs,
+    convert_ms: convertMs,
+    write_ms: Date.now() - writeStartedAtMs,
+    elapsed_ms: Date.now() - ingestStartedAtMs,
   });
 
   return {
@@ -605,52 +726,92 @@ function handleScipIndexDecodeFailure({ buf, err, onEvent, scipPath }) {
  *
  * @param {import("./decode.js").ScipIndex} index
  * @param {string} repoRoot
+ * @param {{ onEvent?: ((event: { kind: string, [k: string]: any }) => void) | null, scheme?: string | null, language?: string | null }} [opts]
  * @returns {Promise<void>}
  */
-async function prepareAndMutateDocumentText(index, repoRoot) {
-  for (const doc of index.documents || []) {
-    const repoRelPath = canonicalizePath(doc.relative_path, {
-      repoRoot,
-      projectRoot: index.metadata.project_root,
+async function prepareAndMutateDocumentText(index, repoRoot, opts = {}) {
+  const docs = index.documents || [];
+  const onEvent = opts.onEvent || null;
+  const total = docs.length;
+  const langTotals = collectSourceLanguageCounts(docs);
+  const langCurrent = zeroCountsFromTotals(langTotals);
+  const langList = collectSourceLanguages(docs);
+  // Same throttle shape as the write loop: ~1% steps, min every 5 docs.
+  const progressStep = Math.max(5, Math.floor(total / 100) || 5);
+  let processed = 0;
+  const emitHydrateProgress = () => {
+    if (!onEvent) return;
+    if (processed !== total && processed !== 1 && processed % progressStep !== 0) return;
+    emit(onEvent, {
+      kind: "atlas.scip.ingest.progress",
+      phase: "hydrate",
+      scheme: opts.scheme ?? null,
+      language: opts.language ?? null,
+      source_languages: langList,
+      source_language_current: { ...langCurrent },
+      source_language_total: { ...langTotals },
+      current: processed,
+      total,
+      percent: total > 0 ? (processed / total) * 100 : 0,
     });
-    if (!repoRelPath) {
-      doc.atlas_skip_reason = "path_not_canonical";
-      doc.atlas_skip_message = `SCIP document path is not canonical repo-relative: ${doc.relative_path || "(empty)"}`;
-      continue;
-    }
-    doc.relative_path = repoRelPath;
-    const abs = resolveDocumentPath(index.metadata.project_root, repoRoot, repoRelPath);
-    if (!abs) continue;
-    if (doc.text) {
-      try {
-        const diskBytes = await fs.promises.readFile(abs);
-        const embeddedBytes = Buffer.from(doc.text, "utf8");
-        if (sha256Hex(diskBytes) !== sha256Hex(embeddedBytes)) {
-          // Embedded text means the indexer gave us an exact file snapshot.
-          // If the same path now has different bytes, ranges belong to the
-          // older snapshot and must not be attached to the current file hash.
-          doc.atlas_skip_reason = "text_mismatch";
-          doc.atlas_skip_message = `SCIP embedded text for ${repoRelPath} differs from current on-disk bytes`;
-        } else {
-          doc.source_bytes = diskBytes;
-          markMinifiedDocumentSkip(doc, repoRelPath, diskBytes);
-        }
-      } catch {
-        // If the file is no longer on disk, keep the embedded text. It still
-        // represents an explicit indexer payload and can be appended by callers
-        // that intentionally ingest generated or out-of-tree sources.
-      }
-      continue;
-    }
+  };
+  for (const doc of docs) {
+    await hydrateScipDocument(doc, index, repoRoot);
+    processed++;
+    const docLang = sourceLanguageForDocument(doc);
+    if (docLang) langCurrent[docLang] = (langCurrent[docLang] || 0) + 1;
+    emitHydrateProgress();
+  }
+}
+
+/**
+ * @param {Record<string, any>} doc
+ * @param {import("./decode.js").ScipIndex} index
+ * @param {string} repoRoot
+ * @returns {Promise<void>}
+ */
+async function hydrateScipDocument(doc, index, repoRoot) {
+  const repoRelPath = canonicalizePath(doc.relative_path, {
+    repoRoot,
+    projectRoot: index.metadata.project_root,
+  });
+  if (!repoRelPath) {
+    doc.atlas_skip_reason = "path_not_canonical";
+    doc.atlas_skip_message = `SCIP document path is not canonical repo-relative: ${doc.relative_path || "(empty)"}`;
+    return;
+  }
+  doc.relative_path = repoRelPath;
+  const abs = resolveDocumentPath(index.metadata.project_root, repoRoot, repoRelPath);
+  if (!abs) return;
+  if (doc.text) {
     try {
-      const bytes = await fs.promises.readFile(abs);
-      doc.text = bytes.toString("utf8");
-      doc.source_bytes = bytes;
-      markMinifiedDocumentSkip(doc, repoRelPath, bytes);
+      const diskBytes = await fs.promises.readFile(abs);
+      const embeddedBytes = Buffer.from(doc.text, "utf8");
+      if (sha256Hex(diskBytes) !== sha256Hex(embeddedBytes)) {
+        // Embedded text means the indexer gave us an exact file snapshot.
+        // If the same path now has different bytes, ranges belong to the
+        // older snapshot and must not be attached to the current file hash.
+        doc.atlas_skip_reason = "text_mismatch";
+        doc.atlas_skip_message = `SCIP embedded text for ${repoRelPath} differs from current on-disk bytes`;
+      } else {
+        doc.source_bytes = diskBytes;
+        markMinifiedDocumentSkip(doc, repoRelPath, diskBytes);
+      }
     } catch {
-      doc.atlas_skip_reason = "missing_text";
-      doc.atlas_skip_message = `SCIP document ${repoRelPath} has no embedded text and could not be read from disk`;
+      // If the file is no longer on disk, keep the embedded text. It still
+      // represents an explicit indexer payload and can be appended by callers
+      // that intentionally ingest generated or out-of-tree sources.
     }
+    return;
+  }
+  try {
+    const bytes = await fs.promises.readFile(abs);
+    doc.text = bytes.toString("utf8");
+    doc.source_bytes = bytes;
+    markMinifiedDocumentSkip(doc, repoRelPath, bytes);
+  } catch {
+    doc.atlas_skip_reason = "missing_text";
+    doc.atlas_skip_message = `SCIP document ${repoRelPath} has no embedded text and could not be read from disk`;
   }
 }
 

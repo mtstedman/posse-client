@@ -175,7 +175,7 @@ export class ReviewSession {
         const mergeOutcome = await withMergeLock(() => mergeFn(wi.branch_name, PROJECT_DIR, {
           wiId: wi.id,
           onPhase(event = {}) {
-            if (event.phase === "atlas-indexing") console.log(`     ${C.cyan}ATLAS Indexing${C.reset}`);
+            if (event.phase === "commit") console.log(`     ${C.cyan}Committing....${C.reset}`);
             else if (event.phase === "retry") console.log(`     ${C.yellow}Retrying merge...${C.reset}`);
             else if (event.phase === "merge") console.log(`     ${C.cyan}Merging....${C.reset}`);
           },
@@ -668,8 +668,16 @@ export class ReviewSession {
       display.setBlockingOverlay(null);
       return;
     }
-    const wiLabel = item?.wi?.id != null ? `WI#${item.wi.id}` : "";
-    display.setBlockingOverlay(title, wiLabel ? `${wiLabel} - please wait` : "Please wait");
+    const wi = item?.wi || {};
+    const wiLabel = wi.id != null ? `WI#${wi.id}` : "";
+    const wiTitle = String(wi.title || "").trim();
+    const meta = {
+      tone: /retry/i.test(String(title)) ? "warn" : "work",
+      branch: wi.branch_name || null,
+      target: wi.branch_name ? currentTargetBranch() : null,
+      item: wiLabel ? (wiTitle ? `${wiLabel} · ${wiTitle.slice(0, 60)}` : wiLabel) : null,
+    };
+    display.setBlockingOverlay(title, wiLabel ? `${wiLabel} - please wait` : "Please wait", meta);
   }
 
   function enqueueGitWork(item, run, { overlay = "Merging....", advanceAfter = true } = {}) {
@@ -687,9 +695,7 @@ export class ReviewSession {
             const wiLabel = item?.wi?.id != null ? `WI#${item.wi.id}` : "Work item";
             const branch = event.branch || item?.wi?.branch_name || "branch";
             const target = event.target || currentTargetBranch();
-            if (event.phase === "atlas-indexing") {
-              return;
-            } else if (event.phase === "retry") {
+            if (event.phase === "retry") {
               display.addEvent(`${C.yellow}[review]${C.reset} ${wiLabel}: retrying merge`);
             } else if (event.phase === "merge") {
               display.addEvent(`${C.cyan}[review]${C.reset} ${wiLabel}: merging ${branch} into ${target}`);
@@ -774,7 +780,7 @@ export class ReviewSession {
         const mergeOutcome = await withMergeLock(() => mergeFn(freshWi.branch_name, PROJECT_DIR, {
           wiId,
           onPhase(event = {}) {
-            if (event.phase === "atlas-indexing") phase("ATLAS Indexing", event);
+            if (event.phase === "commit") phase("Committing....", event);
             else if (event.phase === "merge") phase("Merging....", event);
             else if (event.phase === "retry") phase("Retrying Merge....", event);
           },

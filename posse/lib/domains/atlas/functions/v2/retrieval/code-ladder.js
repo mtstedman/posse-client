@@ -94,6 +94,22 @@ export function __resetCodeLadderForTests() {
 }
 
 /**
+ * Grant card+skeleton rung credit for every file a code.survey covered: the
+ * survey's per-symbol rows (name, kind, signature, line) carry the same
+ * evidence tier, so later lens/window calls on those files must not warn
+ * about rungs the survey already satisfied.
+ *
+ * @param {{ sessionId?: string | null, files?: string[] }} args
+ */
+export function recordCodeLadderSurvey({ sessionId = null, files = [] } = {}) {
+  for (const file of files) {
+    if (!file) continue;
+    recordCodeLadderStep({ action: "symbol.card", sessionId, file });
+    recordCodeLadderStep({ action: "code.skeleton", sessionId, file });
+  }
+}
+
+/**
  * @param {{ sessionId?: string | null, symbolId?: string | null, file?: string | null }} args
  */
 function ladderKeys(args) {

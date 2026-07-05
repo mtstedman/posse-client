@@ -38,7 +38,7 @@ import {
   classifyPartialWorkRecoveryAnswer,
   classifyReviewAnswer,
   extractHumanAnswers,
-  extractHumanAnswerText,
+  extractLatestActionableHumanAnswerText,
   incomingDependenciesForRecoveryRetry,
 } from "./human-review.js";
 import {
@@ -164,7 +164,7 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
     try {
     if (Array.isArray(payload.file_requests) && payload.file_requests.length > 0) {
       const answers = extractHumanAnswers(output);
-      const lastAnswer = answers.length > 0 ? extractHumanAnswerText(answers[answers.length - 1]) : "";
+      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       const decision = classifyApprovalAnswer(lastAnswer);
       const dependents = getDependents(job.id);
 
@@ -203,7 +203,7 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
     if (payload.original_job_id && payload.review_type === "partial_work_recovery") {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
-      const lastAnswer = answers.length > 0 ? extractHumanAnswerText(answers[answers.length - 1]) : "";
+      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       const decision = classifyPartialWorkRecoveryAnswer(lastAnswer);
       handledReviewDecision = true;
 
@@ -292,7 +292,7 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
     if (payload.original_job_id && payload.review_type === "blocked_recovery") {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
-      const lastAnswer = answers.length > 0 ? extractHumanAnswerText(answers[answers.length - 1]) : "";
+      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       const decision = classifyBlockedRecoveryAnswer(lastAnswer);
       handledReviewDecision = true;
 
@@ -381,7 +381,7 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
     if (payload.original_job_id && (payload.review_type === "dead_letter_recovery" || payload.review_type === "stall_exhausted_recovery")) {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
-      const lastAnswer = answers.length > 0 ? extractHumanAnswerText(answers[answers.length - 1]) : "";
+      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       const decision = classifyDeadLetterRecoveryAnswer(lastAnswer);
       handledReviewDecision = true;
 
@@ -460,7 +460,7 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
     if (!handledReviewDecision && payload.original_job_id && payload.review_type) {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
-      const lastAnswer = answers.length > 0 ? extractHumanAnswerText(answers[answers.length - 1]) : "";
+      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       const reviewDecision = classifyReviewAnswer(lastAnswer);
       if (origJob) {
         if (reviewDecision === "pass") {

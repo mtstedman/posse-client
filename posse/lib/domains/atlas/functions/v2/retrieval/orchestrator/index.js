@@ -58,9 +58,24 @@ import { fallbackQueryPlan, planQuery, planQueryAsync } from "./query-planner.js
  *   show "we searched for these identifiers / files / keywords", and so
  *   benchmarks can validate planning quality independently of fusion.
  * @property {import("../../contracts/tool-results.js").EntitySearchHit[]} [entities]
+ * @property {RetrievalSeparation} [separation]
+ */
+
+/**
+ * @typedef {Object} RetrievalSeparation
+ * @property {"decisive"|"contested"|"flat"} confidence
+ * @property {"pre_boost_rrf"} basis
+ * @property {number} poolSize
+ * @property {number} maxBackendPoolSize
+ * @property {Record<string, number>} backendPoolSizes
+ * @property {number} topGap
+ * @property {number} relativeGap
+ * @property {boolean} smallPool
+ * @property {{id:string,score:number,contributionCount:number,backends:string[]}[]} top
  */
 
 const DEFAULT_LIMIT = 50;
+const MIN_SEPARATION_POOL = 15;
 
 /**
  * Top-level hybrid search. Returns either a result (sync path) or a
@@ -143,7 +158,7 @@ function hybridSearchSync(args, plan) {
   // Vector reason is "unavailable" — we did not run it.
   backendStatus.vector = { ok: false, total: 0, reason: "unavailable" };
 
-  const fused = fuseAndAdjust({
+  const { fused, separation } = fuseAndAdjust({
     fts,
     vector: null,
     ledger,
@@ -153,7 +168,7 @@ function hybridSearchSync(args, plan) {
     feedbackHalfLifeDays: options?.feedbackHalfLifeDays,
     k: options?.rrfK,
   });
-  return assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options });
+  return assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options, separation });
 }
 
 /**
@@ -187,7 +202,7 @@ async function hybridSearchAsync(args, plan) {
     vector: { ok: vector.ok, total: vector.total, reason: vector.reason },
   };
 
-  const fused = await fuseAndAdjustAsync({
+  const { fused, separation } = await fuseAndAdjustAsync({
     fts,
     vector,
     ledger,
@@ -197,7 +212,7 @@ async function hybridSearchAsync(args, plan) {
     feedbackHalfLifeDays: options?.feedbackHalfLifeDays,
     k: options?.rrfK,
   });
-  return assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options });
+  return assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options, separation });
 }
 
 /**
@@ -213,10 +228,11 @@ async function hybridSearchAsync(args, plan) {
  *   query: string,
  *   repoId?: string,
  *   options?: Parameters<typeof hybridSearch>[0]["options"],
+ *   separation?: RetrievalSeparation,
  * }} args
  * @returns {HybridSearchResult}
  */
-function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options }) {
+function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options, separation }) {
   const items = fused.slice(0, limit);
   const entities = runEntityFtsBackends({
     ledger,
@@ -232,6 +248,7 @@ function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query
     truncated: fused.length > items.length,
     degraded: summarizeBackends(backendStatus),
     plan,
+    ...(separation ? { separation } : {}),
     ...(entities.length > 0 ? { entities } : {}),
   };
 }
@@ -241,7 +258,7 @@ function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query
  * search asynchronous; keeps native helper calls on the warmed daemon.
  *
  * @param {Parameters<typeof fuseAndAdjust>[0]} args
- * @returns {Promise<FusedSymbolEntry[]>}
+ * @returns {Promise<{fused:FusedSymbolEntry[], separation:RetrievalSeparation}>}
  */
 async function fuseAndAdjustAsync({
   fts,
@@ -255,9 +272,10 @@ async function fuseAndAdjustAsync({
 }) {
   const lists = buildFusionLists(fts, vector);
   const fused = await rrfFuseAsync(lists, { k: typeof k === "number" ? k : RRF_K });
+  const separation = assessRetrievalSeparation(fused, lists);
   applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });
   await applyTaskQueryRankingAsync(fused, taskText);
-  return fused;
+  return { fused, separation };
 }
 
 /**
@@ -302,7 +320,7 @@ function applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSi
  *   feedbackHalfLifeDays?: number,
  *   k?: number,
  * }} args
- * @returns {FusedSymbolEntry[]}
+ * @returns {{fused:FusedSymbolEntry[], separation:RetrievalSeparation}}
  */
 function fuseAndAdjust({
   fts,
@@ -316,9 +334,85 @@ function fuseAndAdjust({
 }) {
   const lists = buildFusionLists(fts, vector);
   const fused = rrfFuse(lists, { k: typeof k === "number" ? k : RRF_K });
+  const separation = assessRetrievalSeparation(fused, lists);
   applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });
   applyTaskQueryRanking(fused, taskText);
-  return fused;
+  return { fused, separation };
+}
+
+/**
+ * Summarize how separated the raw fused pool was before feedback and task
+ * boosts. This deliberately describes the evidence pool; it does not change
+ * ranking.
+ *
+ * @param {FusedSymbolEntry[]} fused
+ * @param {Record<string, ReturnType<typeof runFtsBackend>["entries"]>} lists
+ * @returns {RetrievalSeparation}
+ */
+export function assessRetrievalSeparation(fused, lists) {
+  const backendPoolSizes = Object.fromEntries(
+    Object.entries(lists).map(([backend, entries]) => [backend, entries.length]),
+  );
+  const poolSize = fused.length;
+  const maxBackendPoolSize = Math.max(0, ...Object.values(backendPoolSizes));
+  const top = fused[0] ?? null;
+  const second = fused[1] ?? null;
+  const topGap = top ? top.score - (second?.score ?? 0) : 0;
+  const relativeGap = top && top.score > 0 ? topGap / top.score : 0;
+  const smallPool = maxBackendPoolSize > 0 && maxBackendPoolSize < MIN_SEPARATION_POOL;
+  const nearTopCount = top
+    ? fused
+      .slice(1, 5)
+      .filter((entry) => top.score > 0 && ((top.score - entry.score) / top.score) <= 0.05)
+      .length
+    : 0;
+  const topContributionCount = contributionCount(top);
+  const secondContributionCount = contributionCount(second);
+
+  /** @type {"decisive"|"contested"|"flat"} */
+  let confidence = "flat";
+  if (top && poolSize === 1) {
+    confidence = smallPool ? "contested" : "decisive";
+  } else if (top && topGap > 0) {
+    if (nearTopCount >= 2 && relativeGap < 0.08) {
+      confidence = "flat";
+    } else if (
+      relativeGap >= 0.18
+      || (relativeGap >= 0.08 && topContributionCount > secondContributionCount)
+    ) {
+      confidence = "decisive";
+    } else {
+      confidence = "contested";
+    }
+  }
+
+  return {
+    confidence,
+    basis: "pre_boost_rrf",
+    poolSize,
+    maxBackendPoolSize,
+    backendPoolSizes,
+    topGap: roundSeparation(topGap),
+    relativeGap: roundSeparation(relativeGap),
+    smallPool,
+    top: fused.slice(0, 5).map((entry) => ({
+      id: entry.id,
+      score: roundSeparation(entry.score),
+      contributionCount: contributionCount(entry),
+      backends: Object.keys(entry.contributions ?? {}).sort(),
+    })),
+  };
+}
+
+/**
+ * @param {FusedSymbolEntry | null | undefined} entry
+ */
+function contributionCount(entry) {
+  return Object.keys(entry?.contributions ?? {}).length;
+}
+
+function roundSeparation(value) {
+  return Number.isFinite(value) ? Number(value.toFixed(6)) : 0;
 }
 
 export { RRF_K };

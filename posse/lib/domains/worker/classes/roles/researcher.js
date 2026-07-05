@@ -625,6 +625,7 @@ export class ResearcherRole extends BaseRole {
       "On retries with prior context or salvage, reuse it and make only a few targeted verification reads before producing the final answer.",
       "A partial but evidence-backed brief is better than exhausting turns without a final response.",
       "When stopping early or retrying, include files/symbols consulted, why each mattered, unknowns, and stop_reason so the planner can decide whether escalation is worth the cost.",
+      "When you identify a mechanism (enforcement, routing, dispatch, config read), enumerate its parallel lanes before concluding: same-named symbols elsewhere, sibling constant sets, and second-layer enforcement. List each lane with evidence, or state explicitly that you searched for parallels and found none.",
       "In the structured researcher appendix, include scope_estimate when repo scope is relevant: { confidence: \"high\" | \"medium\" | \"low\", likely_touch_count: number, unknowns: string[], scope_reasons: string[] }. This is scope evidence only; do not choose downstream models or budgets.",
     ].join("\n");
   }

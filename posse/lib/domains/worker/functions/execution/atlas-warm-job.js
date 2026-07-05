@@ -596,6 +596,17 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
         outcome: "sqlite_gate_busy",
         error: errorSummary(err),
       });
+      // A gate-busy deferral is NOT a no-op: the warm did no work, so the view
+      // is now STALE (retrieval keeps serving the last-built view, but new
+      // commits are not reflected). This was previously silent — the job
+      // reported "succeeded" with 0 updates and nothing surfaced — which let a
+      // starved warm gate hide for dozens of jobs. Surface it on the job log
+      // like the hard-failure path below, without failing the job (maxAttempts
+      // is 1; failing would just dead-letter a transient contention).
+      try {
+        const gateWaitMs = atlasWarmGateWaitMs(purpose);
+        worker.emit(jobId, `${C.yellow}[atlas] warm #${jobId} (${purpose}) deferred — ledger write gate busy after ${gateWaitMs}ms; view left STALE until the next warm acquires the gate${C.reset}`);
+      } catch { /* emit is best-effort */ }
       return atlasWarmSkippedResult({ payload, purpose, paths, reason: "busy", message });
     }
     if (err?._killReason || err?.code === "THREAD_ABORTED" || err?.name === "AbortError"

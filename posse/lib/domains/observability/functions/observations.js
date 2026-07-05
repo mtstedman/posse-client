@@ -178,6 +178,10 @@ function readObservationFileRows({
 // (The admin ATLAS report still queries job_observations directly by these
 // types, so analytics are intact.)
 const HARNESS_SYSTEM_TYPE_SUFFIXES = Object.freeze([".prefetch", ".autofeedback"]);
+// The agent tool-log DISPLAY surfaces prefetch (with its success/fail) so a silent
+// ATLAS-unavailable fallback is visible; only the COUNTS (getToolInvocationCountsByJob,
+// admin analytics) keep excluding prefetch so it isn't tallied as an agent tool call.
+const DISPLAY_TOOL_EXCLUDE_SUFFIXES = Object.freeze([".autofeedback"]);
 
 function _rowDetailObject(row) {
   if (row && row.detail && typeof row.detail === "object") return row.detail;
@@ -1264,12 +1268,11 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
   const db = getDb();
   const cappedLimit = Math.max(0, Number(limit) || 0);
   const candidateLimit = includeUnscoped ? cappedLimit : Math.max(200, cappedLimit * 10);
-  const fileRows = readObservationFileRows({ typePrefix: "tool.", excludeTypeSuffix: HARNESS_SYSTEM_TYPE_SUFFIXES, limit: candidateLimit, order: "desc" });
+  const fileRows = readObservationFileRows({ typePrefix: "tool.", excludeTypeSuffix: DISPLAY_TOOL_EXCLUDE_SUFFIXES, limit: candidateLimit, order: "desc" });
   const dbRows = currentRunOnly ? db.prepare(`
     SELECT o.*
     FROM job_observations o
     WHERE o.observation_type LIKE 'tool.%'
-      AND o.observation_type NOT LIKE '%.prefetch'
       AND o.observation_type NOT LIKE '%.autofeedback'
       AND o.created_at >= ?
     ORDER BY o.id DESC
@@ -1278,7 +1281,6 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
     SELECT o.*
     FROM job_observations o
     WHERE o.observation_type LIKE 'tool.%'
-      AND o.observation_type NOT LIKE '%.prefetch'
       AND o.observation_type NOT LIKE '%.autofeedback'
     ORDER BY o.id DESC
     LIMIT ?

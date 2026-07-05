@@ -11,7 +11,8 @@
 // Promise only when a usable encoder + index pair is wired and the
 // caller asked for semantic=true.
 
-import { buildSymbolCard, symbolHit, symbolIdOf } from "./cards.js";
+import { buildSymbolCard, parseSymbolId, symbolHit, symbolIdOf } from "./cards.js";
+import { countIncomingCallers } from "./usages.js";
 import { okEnvelope } from "./envelope.js";
 import { hybridSearch } from "./orchestrator/index.js";
 import { RRF_K } from "./orchestrator/rrf.js";
@@ -232,6 +233,7 @@ function buildEnvelope({ view, result, versionId, limit, query, semanticRequeste
     rrfK: RRF_K,
     relevance: "exact|strong|weak",
   };
+  if (result.separation) meta.separation = result.separation;
   meta.prefetch = schedulePrefetchTopCards({ view, result, versionId, ledger, repoId });
   if (result.plan) {
     meta.queryPlan = {
@@ -277,12 +279,161 @@ function buildEnvelope({ view, result, versionId, limit, query, semanticRequeste
       ];
     }
   }
+  // Feature B (default ON; disable with POSSE_ATLAS_DISAMBIG=0 for A/B control).
+  // B1: warn when a result NAME is defined in more than one file. Same-named
+  // functions across subsystems (e.g. a live vs. offline-batch implementation)
+  // let an agent confidently trace the wrong one; surface the collision so it
+  // verifies reachability before tracing. B2: annotate the top hits with an
+  // incoming caller count so "which of these collides is actually reachable?"
+  // is answerable without a follow-up symbol.overview (callerCount===0 is itself
+  // a "no callers found" signal). Both are pure/defensive and never throw. The
+  // flag gates the whole feature so an experiment can compare with it off.
+  if (process.env.POSSE_ATLAS_DISAMBIG !== "0") {
+    const disambiguation = detectNameCollisions(visibleItems);
+    if (disambiguation.length > 0) meta.disambiguation = disambiguation;
+    annotateReachability({ view, hits: visibleItems, limit: 5 });
+    annotateLiveness({ hits: visibleItems, limit: 5 });
+    const trust = buildRetrievalTrustCaution({ disambiguation, separation: result.separation });
+    if (trust) {
+      meta.trust = trust;
+      meta.warnings = [
+        ...(Array.isArray(meta.warnings) ? meta.warnings : []),
+        trust.message,
+      ];
+    }
+  }
+
   return okEnvelope({
     action: "symbol.search",
     versionId,
     data,
     meta,
   });
+}
+
+/**
+ * Group result hits by NAME and flag any name defined in more than one distinct
+ * file path. Pure and defensive — returns [] on any error and never throws.
+ *
+ * @param {import("../contracts/tool-results.js").SymbolHit[]} hits
+ * @param {{ cap?: number }} [opts]
+ * @returns {Array<{ name: string, definedIn: string[], note: string }>}
+ */
+export function detectNameCollisions(hits, { cap = 8 } = {}) {
+  try {
+    /** @type {Map<string, Set<string>>} */
+    const byName = new Map();
+    for (const hit of Array.isArray(hits) ? hits : []) {
+      const name = hit && typeof hit.name === "string" ? hit.name : null;
+      const rawPath = hit?.location?.repo_rel_path;
+      if (!name || !rawPath) continue;
+      const path = String(rawPath).replace(/\\/g, "/");
+      let paths = byName.get(name);
+      if (!paths) { paths = new Set(); byName.set(name, paths); }
+      paths.add(path);
+    }
+    /** @type {Array<{ name: string, definedIn: string[], note: string }>} */
+    const out = [];
+    for (const [name, paths] of byName) {
+      if (paths.size <= 1) continue;
+      out.push({
+        name,
+        definedIn: [...paths],
+        note: `same name defined in ${paths.size} files; verify which is on the live/reachable path before tracing`,
+      });
+      if (out.length >= cap) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * @param {{ disambiguation?: Array<{ name: string, definedIn: string[] }>, separation?: { confidence?: string } | null }} [args]
+ * @returns {{ verifyBeforeCommitting: true, reason: string, message: string, confidence: string, collisionNames: string[] } | null}
+ */
+export function buildRetrievalTrustCaution({ disambiguation = [], separation = null } = {}) {
+  const confidence = separation?.confidence || "";
+  if (!Array.isArray(disambiguation) || disambiguation.length === 0) return null;
+  if (confidence !== "contested" && confidence !== "flat") return null;
+  return {
+    verifyBeforeCommitting: true,
+    reason: "name_collision_low_separation",
+    message: "same-named symbols found and retrieval separation is not decisive; verify the reachable/live target before editing",
+    confidence,
+    collisionNames: disambiguation.slice(0, 5).map((entry) => entry.name),
+  };
+}
+
+/**
+ * Annotate up to `limit` hits in place with `{ reachability: { callerCount,
+ * callerPathsSample } }` computed from the view's caller edges. Best-effort:
+ * skips the whole feature if the view/edges aren't available and never throws.
+ *
+ * @param {{ view: View, hits: import("../contracts/tool-results.js").SymbolHit[], limit?: number }} args
+ */
+function annotateReachability({ view, hits, limit = 5 }) {
+  try {
+    if (!view?.query || typeof view.query.getByContentLocal !== "function") return;
+    if (!Array.isArray(hits)) return;
+    for (const hit of hits.slice(0, limit)) {
+      try {
+        const parsed = parseSymbolId(hit?.symbolId);
+        if (!parsed) continue;
+        const target = view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
+        if (!target || target.global_id == null) continue;
+        const { callerCount, callerPathsSample } = countIncomingCallers(view, target, { sampleLimit: 3 });
+        /** @type {any} */ (hit).reachability = { callerCount, callerPathsSample };
+      } catch {
+        // Per-hit failure must not strand the rest of the annotation pass.
+      }
+    }
+  } catch {
+    // Reachability is optional; a view without queryable edges just skips it.
+  }
+}
+
+/**
+ * Annotate likely live/stale status without filtering or ranking. This is a
+ * hint only; caller reachability beats path-name heuristics.
+ *
+ * @param {{ hits: import("../contracts/tool-results.js").SymbolHit[], limit?: number }} args
+ */
+function annotateLiveness({ hits, limit = 5 }) {
+  try {
+    if (!Array.isArray(hits)) return;
+    for (const hit of hits.slice(0, limit)) {
+      const path = String(hit?.location?.repo_rel_path || "").replace(/\\/g, "/");
+      const reachability = /** @type {any} */ (hit).reachability;
+      const callerCount = Number(reachability?.callerCount || 0);
+      const markers = [];
+      if (callerCount > 0) markers.push("incoming-callers");
+      if (looksStaleOrOffline(path)) markers.push("stale-or-offline-path");
+      const status = callerCount > 0
+        ? "possibly_live"
+        : (markers.includes("stale-or-offline-path") ? "possibly_stale_or_offline" : "unknown");
+      /** @type {any} */ (hit).liveness = {
+        status,
+        markers,
+        note: status === "possibly_live"
+          ? "incoming callers were found for this symbol"
+          : "metadata-only hint; verify with callers/usages before editing",
+      };
+    }
+  } catch {
+    // Liveness is advisory metadata only.
+  }
+}
+
+/**
+ * @param {string} path
+ */
+function looksStaleOrOffline(path) {
+  const normalized = String(path || "").toLowerCase();
+  if (!normalized) return false;
+  return /(^|[/_.-])(offline|archive|archived|backup|bak|legacy|deprecated|dead)([/_.-]|$)/.test(normalized)
+    || /(^|[/_.-])old([/_.-]|$)/.test(normalized);
 }
 
 /**

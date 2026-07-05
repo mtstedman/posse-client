@@ -32,6 +32,17 @@ export function scipEventToProgressText(event, scipPath) {
       const skippedText = skipped > 0 ? `, ${skipped} skipped` : "";
       return `scip ingest ${base}: ${ingested} ingested${reusedText}${skippedText}, ${failed} failed, ${externals} externals`;
     }
+    case "atlas.scip.ingest.reading":
+      return `scip ingest ${base}: reading index`;
+    case "atlas.scip.ingest.progress": {
+      const phase = String(event.phase || "");
+      if (phase === "decode") return `scip ingest ${base}: decoding index`;
+      if (phase === "hydrate") {
+        return `scip ingest ${base}: hydrating ${event.current || 0}/${event.total || 0} documents`;
+      }
+      if (phase === "convert") return `scip ingest ${base}: converting rows (native)`;
+      return `scip ingest ${base}: writing ${event.current || 0}/${event.total || 0} documents`;
+    }
     case "atlas.scip.ingest.skipped":
       return `scip ingest ${base}: already up-to-date`;
     case "atlas.scip.ingest.failed":

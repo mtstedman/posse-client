@@ -36,6 +36,19 @@ function formatCostTokenBreakdown(inputTokens, outputTokens, cachedInputTokens =
   return parts.join(", ");
 }
 
+function formatCostDiagnostics(row = {}) {
+  const parts = [];
+  if (Number(row.turnsUsed) > 0) parts.push(`${formatCostTokens(row.turnsUsed)} turns`);
+  if (Number(row.outputTruncatedCalls) > 0) parts.push(`${row.outputTruncatedCalls} cap-hit`);
+  if (Number.isFinite(Number(row.cacheDiscountRatio))) {
+    parts.push(`${(Number(row.cacheDiscountRatio) * 100).toFixed(1)}% cache discount`);
+  }
+  if (Number.isFinite(Number(row.costPer1kOutputTokensUsd))) {
+    parts.push(`${formatUsd(row.costPer1kOutputTokensUsd)}/1K out`);
+  }
+  return parts.length > 0 ? parts.join(", ") : "";
+}
+
 export function runTimelineCommand(args = []) {
   const wiArg = String(args[0] || "").trim();
   if (!wiArg || wiArg === "--help" || wiArg === "-h") {
@@ -300,13 +313,18 @@ export function runCostCommand(args = []) {
       && Math.round(Number(totals.billableTokens)) !== Math.round((Number(totals.inputTokens) || 0) + (Number(totals.outputTokens) || 0))
       ? `  ${C.dim}Billable:${C.reset} ${formatCostTokens(totals.billableTokens)} total`
       : "";
+    const diagnosticSummary = formatCostDiagnostics(totals);
     console.log(`  ${C.dim}Status:${C.reset} ${wi.status}  ${C.dim}Calls:${C.reset} ${totals.callCount}  ${C.dim}Tokens:${C.reset} ${tokenSummary}${billableSummary}  ${C.dim}Total:${C.reset} ${C.bold}${formatUsd(totals.totalCostUsd)}${C.reset}`);
+    if (diagnosticSummary) {
+      console.log(`  ${C.dim}${diagnosticSummary}${C.reset}`);
+    }
     if (totals.unknownCostCalls > 0) {
       console.log(`  ${C.yellow}!${C.reset}  ${totals.unknownCostCalls} call(s) had unknown pricing - edit with ${C.cyan}posse cost pricing set${C.reset}`);
     }
     console.log(`\n  ${C.bold}By ${groupBy}${C.reset}`);
     for (const row of grouped.groups) {
-      console.log(`  ${row.key.padEnd(20)}  ${formatUsd(row.costUsd).padStart(9)}  ${C.dim}${formatCostTokenBreakdown(row.inputTokens, row.outputTokens, row.cachedInputTokens, row.billableTokens)}  ${row.callCount} calls${row.unknownCostCalls > 0 ? `  ${C.yellow}${row.unknownCostCalls} unknown${C.reset}` : ""}${C.reset}`);
+      const diag = formatCostDiagnostics(row);
+      console.log(`  ${row.key.padEnd(20)}  ${formatUsd(row.costUsd).padStart(9)}  ${C.dim}${formatCostTokenBreakdown(row.inputTokens, row.outputTokens, row.cachedInputTokens, row.billableTokens)}  ${row.callCount} calls${diag ? `, ${diag}` : ""}${row.unknownCostCalls > 0 ? `  ${C.yellow}${row.unknownCostCalls} unknown${C.reset}` : ""}${C.reset}`);
     }
     console.log();
     return;
@@ -326,7 +344,8 @@ export function runCostCommand(args = []) {
   for (const row of summary.workItems) {
     const wi = getWorkItem(row.wiId);
     const title = wi ? wi.title.slice(0, 60) : "(missing)";
-    console.log(`  WI#${String(row.wiId).padEnd(4)}  ${formatUsd(row.totalCostUsd).padStart(9)}  ${C.dim}${formatCostTokenBreakdown(row.inputTokens, row.outputTokens, row.cachedInputTokens, row.billableTokens)}  ${row.callCount} calls${row.unknownCostCalls > 0 ? `  ${C.yellow}${row.unknownCostCalls} unknown${C.reset}` : ""}${C.reset}  ${title}`);
+    const diag = formatCostDiagnostics(row);
+    console.log(`  WI#${String(row.wiId).padEnd(4)}  ${formatUsd(row.totalCostUsd).padStart(9)}  ${C.dim}${formatCostTokenBreakdown(row.inputTokens, row.outputTokens, row.cachedInputTokens, row.billableTokens)}  ${row.callCount} calls${diag ? `, ${diag}` : ""}${row.unknownCostCalls > 0 ? `  ${C.yellow}${row.unknownCostCalls} unknown${C.reset}` : ""}${C.reset}  ${title}`);
   }
   console.log();
 }

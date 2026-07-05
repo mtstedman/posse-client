@@ -18,7 +18,7 @@ const AUTO_MERGE_STATUS_RECONCILE_STATUSES = [
 
 export function createAutoMergeWorkflowHelpers(context, {
   gitMergeToTargetAsync,
-  refreshAtlasMainAfterMerge,
+  queueAtlasMainRefreshAfterMerge,
   cleanupWiBranchAsync,
   snapshotAndRemoveWorktreeOnlyAsync,
 }) {
@@ -55,28 +55,6 @@ export function createAutoMergeWorkflowHelpers(context, {
     const updateStep = (id, status, detail = "") => {
       try { display?.updateWrapUpOverlayStep?.(id, { status, detail }); } catch { /* display callback only */ }
     };
-    const exitRequested = () => {
-      try { return display?.isWrapUpEarlyExitRequested?.() === true; } catch { return false; }
-    };
-    const abortError = () => {
-      const err = new Error("operator exited wrap-up early");
-      err.name = "AbortError";
-      try { err.code = "ABORT_ERR"; } catch { /* best effort */ }
-      return err;
-    };
-    const updateAtlasProgress = (event = {}) => {
-      const stage = String(event.stage || "").trim();
-      const text = String(event.text || stage || "working").trim();
-      const pct = Number(event.percent);
-      const detail = Number.isFinite(pct) ? `${Math.round(pct)}% ${text}` : text;
-      if (stage === "embeddings" || stage === "encoding") {
-        updateStep("onnx", "running", detail);
-      } else if (stage === "tree" || stage === "tree-compression") {
-        updateStep("tree", "running", detail);
-      } else {
-        updateStep("atlas", "running", detail);
-      }
-    };
 
     if (mergeable.length > 0) {
       if (typeof display?.setRunPhase === "function") {
@@ -102,9 +80,8 @@ export function createAutoMergeWorkflowHelpers(context, {
         const result = await gitMergeToTargetAsync(branchName, projectDir, {
           wiId: wi.id,
           onPhase(event = {}) {
-            if (event.phase === "atlas-indexing") {
-              if (typeof display?.setRunPhase === "function") display.setRunPhase(`ATLAS indexing WI#${wi.id}`);
-              if (!display) say(`  ${C.cyan}[git]${C.reset} WI#${wi.id}: ATLAS post-commit indexing`);
+            if (event.phase === "commit") {
+              if (typeof display?.setRunPhase === "function") display.setRunPhase(`Committing WI#${wi.id} squash merge`);
             } else if (event.phase === "retry") {
               updateStep("merge", "running", `retrying WI#${wi.id}`);
               if (typeof display?.setRunPhase === "function") display.setRunPhase(`Retrying merge for WI#${wi.id}`);
@@ -134,58 +111,34 @@ export function createAutoMergeWorkflowHelpers(context, {
           });
           setMergeState(wi.id, "merged");
           updateStep("merge", "done", `${targetBranch} ${mergeHash.slice(0, 8)}`);
+          // ATLAS reindex is never a blocking step on the review/approval or
+          // wrap-up path: enqueue the merge replay on the background warm
+          // scheduler and move on. The queued job survives WI cleanup (only
+          // purpose "wi" warms are retired) and session exit.
           let atlasFollowupOk = true;
           try {
-            updateStep("atlas", "running", `WI#${wi.id} main replay`);
-            const atlasAbort = new AbortController();
-            const abortIfRequested = () => {
-              if (!atlasAbort.signal.aborted && exitRequested()) atlasAbort.abort(abortError());
-            };
-            abortIfRequested();
-            let poll = setInterval(abortIfRequested, 250);
-            poll.unref?.();
-            let replay;
-            try {
-              replay = await refreshAtlasMainAfterMerge({
-                wiId: wi.id,
-                branchName,
-                targetBranch,
-                mergeHash,
-                onPhase: (event = {}) => {
-                  if (event.phase === "atlas-indexing") {
-                    if (typeof display?.setRunPhase === "function") display.setRunPhase(`ATLAS finalizing WI#${wi.id}`);
-                    if (!display) say(`  ${C.cyan}[git]${C.reset} WI#${wi.id}: ATLAS final merge indexing`);
-                  } else if (event.phase === "atlas-progress") {
-                    updateAtlasProgress(event.atlasEvent || {});
-                  }
-                },
-                onProgress: (event = {}) => {
-                  updateAtlasProgress(event);
-                  abortIfRequested();
-                },
-                signal: atlasAbort.signal,
-                source: "auto_merge",
-              });
-            } finally {
-              if (poll) {
-                clearInterval(poll);
-                poll = null;
-              }
-            }
-            const warmResult = replay?.result || {};
-            if (replay?.aborted) {
-              updateStep("atlas", "skipped", "queued for next run");
-              updateStep("onnx", "skipped", "queued for next run");
-              say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: ATLAS finalization deferred; queued for next run`);
+            const queued = queueAtlasMainRefreshAfterMerge({
+              wiId: wi.id,
+              branchName,
+              targetBranch,
+              mergeHash,
+            });
+            if (queued.ok === false) {
+              atlasFollowupOk = false;
+              updateStep("atlas", "failed", "background replay enqueue failed");
+              say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: ATLAS merge replay enqueue failed after merge`);
+            } else if (queued.attempted === false) {
+              updateStep("atlas", "skipped", "ATLAS off");
+              updateStep("onnx", "skipped", "ATLAS off");
             } else {
-              updateStep("atlas", "done", `view ${warmResult.paths_indexed ?? warmResult.paths_considered ?? 0} path(s)`);
-              if (warmResult.embeddings_deferred === true) updateStep("onnx", "skipped", "queued for next run");
-              else if (warmResult.embeddings_indexed != null || warmResult.embeddings_candidates != null) updateStep("onnx", "done", `${warmResult.embeddings_indexed ?? 0}/${warmResult.embeddings_candidates ?? "?"}`);
+              updateStep("atlas", "done", queued.coalesced ? "queued in background (coalesced)" : "queued in background");
+              updateStep("onnx", "skipped", "runs with background replay");
+              if (!display) say(`  ${C.dim}[git]${C.reset} WI#${wi.id}: ATLAS main replay queued in background`);
             }
           } catch (err) {
             atlasFollowupOk = false;
             updateStep("atlas", "failed", err?.message || String(err));
-            say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: ATLAS finalization failed after merge: ${err?.message || err}`);
+            say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: ATLAS merge replay enqueue failed after merge: ${err?.message || err}`);
           }
           let cleanupOk = false;
           try {

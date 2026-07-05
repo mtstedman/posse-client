@@ -12,6 +12,9 @@ export function buildCopilotCloseStats({
   code,
   sessionHandle,
   priorSessionHandle,
+  maxOutputTokens = null,
+  outputTruncated = false,
+  outputLimitReason = null,
 }) {
   const outputBody = (finalOutputText || stdout.trim());
   return {
@@ -25,6 +28,9 @@ export function buildCopilotCloseStats({
     durationMs,
     outputChars: outputBody.length,
     exitCode: code,
+    maxOutputTokens,
+    outputTruncated: !!outputTruncated,
+    outputLimitReason: outputLimitReason || null,
     atlasMethod: "baseline",
     toolUses: Array.isArray(acc?.toolUses) ? acc.toolUses : [],
     toolUsesLoggedByToolkit: false,

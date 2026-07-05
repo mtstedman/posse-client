@@ -2,6 +2,77 @@ import { getSetting } from "../../../queue/functions/index.js";
 
 const TIER_ORDER = Object.freeze(["cheap", "standard", "strong"]);
 
+const OUTPUT_TOKEN_CONFIGS = Object.freeze({
+  claude: Object.freeze({
+    defaults: Object.freeze({
+      researcher: 6000,
+      planner: 4000,
+      dev: 8000,
+      artificer: 8000,
+      assessor: 2500,
+      preflight: 1500,
+      delegator: 1500,
+    }),
+    fallback: 4000,
+  }),
+  codex: Object.freeze({
+    defaults: Object.freeze({
+      researcher: 6000,
+      planner: 4000,
+      dev: 8000,
+      artificer: 8000,
+      assessor: 2500,
+      preflight: 1500,
+      delegator: 1500,
+    }),
+    fallback: 4000,
+  }),
+  copilot: Object.freeze({
+    defaults: Object.freeze({
+      researcher: 6000,
+      planner: 4000,
+      dev: 8000,
+      artificer: 8000,
+      assessor: 2500,
+      preflight: 1500,
+      delegator: 1500,
+    }),
+    fallback: 4000,
+  }),
+  openai: Object.freeze({
+    defaults: Object.freeze({
+      researcher: 5000,
+      planner: 3500,
+      dev: 7000,
+      artificer: 7000,
+      assessor: 2200,
+      preflight: 1200,
+      delegator: 1200,
+    }),
+    fallback: 3500,
+  }),
+  grok: Object.freeze({
+    defaults: Object.freeze({
+      researcher: 5000,
+      planner: 3500,
+      dev: 7000,
+      artificer: 7000,
+      assessor: 2200,
+      preflight: 1200,
+      delegator: 1200,
+    }),
+    fallback: 3500,
+  }),
+});
+
+const ROLE_ALIASES = Object.freeze({
+  research: "researcher",
+  plan: "planner",
+  developer: "dev",
+  fix: "dev",
+  promote: "dev",
+});
+
 const TURN_CONFIGS = Object.freeze({
   claude: Object.freeze({
     configured: "base",
@@ -117,6 +188,23 @@ function readConfiguredMaxTurns(role, { requirePositive = true } = {}) {
   return null;
 }
 
+function normalizeRole(role) {
+  const key = String(role || "").trim().toLowerCase();
+  return ROLE_ALIASES[key] || key;
+}
+
+function readConfiguredMaxOutputTokens(role) {
+  try {
+    const dbVal = getSetting(`max_output_tokens_${role}`);
+    if (!dbVal) return null;
+    const value = Number.parseInt(dbVal, 10);
+    if (!Number.isNaN(value) && value > 0) return value;
+  } catch {
+    // DB may not be ready yet.
+  }
+  return null;
+}
+
 function boundedComplexity(value) {
   return Math.max(1, Math.min(5, value || 3));
 }
@@ -184,6 +272,17 @@ export function getMaxTurnsForProvider(providerName, {
   if ((providerName === "openai" || providerName === "grok") && role === "assessor") {
     return modelTier === "cheap" ? 4 : 6;
   }
+  return Math.max(1, base);
+}
+
+export function getMaxOutputTokensForProvider(providerName, {
+  role,
+} = {}) {
+  const config = OUTPUT_TOKEN_CONFIGS[providerName] || OUTPUT_TOKEN_CONFIGS.openai;
+  const normalizedRole = normalizeRole(role);
+  const configured = readConfiguredMaxOutputTokens(normalizedRole);
+  if (Number.isFinite(configured)) return configured;
+  const base = config.defaults[normalizedRole] || config.fallback;
   return Math.max(1, base);
 }
 

@@ -93,6 +93,7 @@ const gatewaySchema = () => o({
 export const ATLAS_MULTI_GATEWAY_ACTIONS = Object.freeze({
   "edit.plan": Object.freeze(["query", "code"]),
   "file.read": Object.freeze(["query", "code"]),
+  "code.survey": Object.freeze(["query", "code"]),
 });
 
 const QUERY_SHARED_ACTIONS = Object.freeze(
@@ -496,6 +497,12 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     sliceContext: sliceContextHint(),
     sessionId: s({ maxLength: 256 }),
   }, ["reason", "expectedLines", "identifiersToFind"]),
+  "code.survey": o({
+    paths: { type: ["string", "array"], minLength: 1, items: { type: "string", minLength: 1 }, maxItems: 64 },
+    symbols: identifierList({ maxItems: 16 }),
+    maxFiles: i({ minimum: 1, maximum: 64 }),
+    sessionId: s({ maxLength: 256 }),
+  }, ["paths"]),
 
   context: o({
     taskText: s({ minLength: 1, maxLength: 200_000 }),
