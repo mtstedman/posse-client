@@ -359,6 +359,36 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
+  "symbol.cards": {
+    type: "function",
+    name: "atlas_symbol_cards",
+    description: "Iris Rung 1, batched. Fetch multiple compact symbol cards in one call by symbolIds or symbolRefs, with per-item errors so a single bad reference does not fail the batch.",
+    parameters: {
+      type: "object",
+      properties: {
+        symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Opaque ATLAS symbol IDs returned by ATLAS results. Do not construct these from file paths or names." },
+        symbolRefs: {
+          type: "array",
+          description: "Fallback lookups when you do not have symbolIds. Each is a concrete name plus optional file/kind.",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "Symbol name to resolve." },
+              file: { type: "string", description: "Optional repository-relative file path containing the symbol." },
+              kind: { type: "string", description: "Optional symbol kind hint." },
+              exportedOnly: { type: "boolean", description: "Prefer exported symbols only when possible." },
+            },
+            required: ["name"],
+            additionalProperties: true,
+          },
+        },
+        minCallConfidence: { type: "number", description: "Minimum call-confidence threshold." },
+        includeResolutionMetadata: { type: "boolean", description: "Include ATLAS resolution metadata." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
   "slice.build": {
     type: "function",
     name: "atlas_slice_build",

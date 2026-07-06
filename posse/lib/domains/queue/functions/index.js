@@ -836,6 +836,32 @@ export function setJobError(id, errorText) {
   db.prepare(`UPDATE jobs SET last_error = ?, updated_at = ? WHERE id = ?`).run(errorText, now(), id);
 }
 
+/**
+ * Merge fields into a job's result_json without clobbering the existing result
+ * or touching last_error (unlike setJobResult, which overwrites both). Only
+ * merges when the stored result is a plain object or absent; a non-object
+ * result (array/scalar) is left untouched and the merge is skipped so no
+ * existing data is lost. Returns true when the merge was written.
+ *
+ * @param {number|string} id
+ * @param {Record<string, unknown>} fields
+ * @returns {boolean}
+ */
+export function mergeJobResultFields(id, fields) {
+  if (!fields || typeof fields !== "object") return false;
+  const db = getDb();
+  const row = db.prepare(`SELECT result_json FROM jobs WHERE id = ?`).get(id);
+  if (!row) return false;
+  let base = null;
+  if (row.result_json != null && String(row.result_json).trim() !== "") {
+    try { base = JSON.parse(row.result_json); } catch { return false; }
+    if (base !== null && (typeof base !== "object" || Array.isArray(base))) return false;
+  }
+  const merged = { ...(base || {}), ...fields };
+  db.prepare(`UPDATE jobs SET result_json = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(merged), now(), id);
+  return true;
+}
+
 export function setJobContext(id, text) {
   const db = getDb();
   db.prepare(`UPDATE jobs SET context_text = ?, updated_at = ? WHERE id = ?`).run(text, now(), id);

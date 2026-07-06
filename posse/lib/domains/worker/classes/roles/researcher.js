@@ -622,6 +622,7 @@ export class ResearcherRole extends BaseRole {
       "Gather evidence with the available tools before answering; do not invent file paths, symbols, or sources.",
       "Do not spend the whole turn budget on discovery. After enough evidence to answer, stop reading and synthesize.",
       "As a guide, synthesize after 8-12 meaningful repo tool calls, 4 child/web calls, repeated paths/sources, or any point where additional reads are unlikely to change the brief.",
+      "Call count is a budget, not a coverage test: before you synthesize, account for every load-bearing file that was seeded or surfaced to you (handoff seeds, tree scope candidates, prefetch) - either you inspected it, or you name it as unvisited in the brief's unknowns. Naming an unread candidate costs one line; leaving it silently unread makes an incomplete answer read as complete. Prefer naming over spending the whole budget - do not force-read every candidate.",
       "On retries with prior context or salvage, reuse it and make only a few targeted verification reads before producing the final answer.",
       "A partial but evidence-backed brief is better than exhausting turns without a final response.",
       "When stopping early or retrying, include files/symbols consulted, why each mattered, unknowns, and stop_reason so the planner can decide whether escalation is worth the cost.",

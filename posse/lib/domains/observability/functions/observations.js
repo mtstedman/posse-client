@@ -1261,6 +1261,44 @@ export function getObservationsByJob(jobId, limit = 100) {
   return mergeObservationRows([...fileRows, ...dbRows], "desc", cappedLimit);
 }
 
+/**
+ * Compact per-job tool-usage profile, computed at job closeout so it survives
+ * the job_observations tail prune (which reclaims a terminal job's rows after
+ * a 10-min grace). Sourced from getObservationsByJob, which merges the JSONL
+ * archive with the live DB — so it stays complete even if the DB tail already
+ * dropped some rows. Persisted into jobs.result_json.tool_mix; this is the
+ * durable answer to "which tools did this job actually call" that the A/B
+ * attribution work kept losing to pruning.
+ *
+ * @param {number|string} jobId
+ * @returns {{ toolCalls: number, byType: Record<string, number>, atlasActions: Record<string, number> } | null}
+ */
+export function summarizeJobToolMix(jobId) {
+  try {
+    const rows = getObservationsByJob(jobId, 5000);
+    const byType = {};
+    const atlasActions = {};
+    let toolCalls = 0;
+    for (const row of rows) {
+      const type = String(row.observation_type || "");
+      if (!type.startsWith("tool.")) continue;
+      if (type.endsWith(".started")) continue;         // completion half only
+      if (type === "tool.chain_read") continue;         // paired with chain_verdict
+      const isSystemLane = type.endsWith(".prefetch") || type.endsWith(".autofeedback");
+      byType[type] = (byType[type] || 0) + 1;
+      if (!isSystemLane) toolCalls += 1;                // agent-lane calls only
+      if (type.startsWith("tool.atlas") && !isSystemLane) {
+        let action = null;
+        try { action = JSON.parse(row.detail_json || "{}")?.action; } catch { /* ignore */ }
+        if (action) atlasActions[action] = (atlasActions[action] || 0) + 1;
+      }
+    }
+    return { toolCalls, byType, atlasActions };
+  } catch {
+    return null;
+  }
+}
+
 export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, currentRunOnly = false } = {}) {
   // Both chain_read and chain_verdict live under "tool.*" now, so a single
   // prefix match is sufficient. The legacy "chain.%" branch was dropped after

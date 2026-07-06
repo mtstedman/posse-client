@@ -2,7 +2,9 @@ import fs from "fs";
 import {
   expireUnackedOperatorFeedbackForJob,
   getJob,
+  mergeJobResultFields,
 } from "../../../queue/functions/index.js";
+import { summarizeJobToolMix } from "../../../observability/functions/observations.js";
 import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 import {
   cleanupAgentLoaderAsync,
@@ -71,6 +73,20 @@ export class WorkerExecutionFinalizer {
       } catch (err) {
         // ATLAS feedback is advisory; job finalization must never fail here.
         worker._logFinalizerFailure(job, "atlas_feedback", err);
+      }
+      try {
+        const freshJob = getJob(job.id);
+        // Persist a compact per-job tool-usage profile before the observation
+        // tail prune reclaims this terminal job's rows (10-min grace). Runs for
+        // every terminal job, unconditionally — this is measurement, not the
+        // auto-feedback path (which is gated + succeeded-only). Advisory: a
+        // failure here must never fail finalization.
+        if (freshJob && TERMINAL_JOB_STATUSES.includes(String(freshJob.status || ""))) {
+          const toolMix = summarizeJobToolMix(job.id);
+          if (toolMix) mergeJobResultFields(job.id, { tool_mix: toolMix });
+        }
+      } catch (err) {
+        worker._logFinalizerFailure(job, "tool_mix", err);
       }
       try {
         const freshJob = getJob(job.id);
