@@ -32,9 +32,9 @@ const MODEL_TIER_DEFAULTS = Object.freeze({
     strong: Object.freeze({ model: "gpt-5.5" }),
   }),
   grok: Object.freeze({
-    cheap: Object.freeze({ model: "grok-3-mini" }),
-    standard: Object.freeze({ model: "grok-code-fast-1" }),
-    strong: Object.freeze({ model: "grok-4" }),
+    cheap: Object.freeze({ model: "grok-build-0.1" }),
+    standard: Object.freeze({ model: "grok-build-0.1" }),
+    strong: Object.freeze({ model: "grok-4.3" }),
   }),
   // GitHub Copilot CLI. Tier-to-model mapping follows the same shape as
   // other providers, but pricing is subscription quota (premium requests),
@@ -138,6 +138,9 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "grok-3-mini",
     "grok-3",
     "grok-code-fast-1",
+    "grok-code-fast",
+    "grok-code-fast-1-0825",
+    "grok-build-0.1",
     "grok-4",
     "grok-4-0709",
     "grok-4-fast-non-reasoning",
@@ -163,6 +166,8 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
 
 const IMAGE_MODEL_CHOICES_INTERNAL = Object.freeze({
   openai: Object.freeze([
+    "gpt-image-2",
+    "gpt-image-2-2026-04-21",
     "gpt-image-1.5",
     "gpt-image-1",
     "gpt-image-1-mini",
