@@ -92,6 +92,7 @@ With a smoke test against a repo:
 | `--repo-path <path>` | ATLAS repo path for the smoke test |
 | `--smoke-query <q>` | Query used for atlas-smoke (default: `auth`) |
 | `--smoke-provider <p>` | Provider for atlas-smoke (default: `openai`) |
+| `--scip-languages <csv>` | Initial SCIP languages to install/index: `typescript`, `python`, `php`, `go`, `rust`, `clang`, or `all`. Omit for an interactive multi-select prompt. |
 | `--no-smoke` | Skip the smoke test |
 | `--no-persist-env` | Don't append env sourcing to shell rc files |
 | `--skip-settings` | Don't seed `~/.posse/account.db` |

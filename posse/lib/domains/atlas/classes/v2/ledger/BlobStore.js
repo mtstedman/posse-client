@@ -70,6 +70,23 @@ function stableJson(value) {
 
 /**
  * @param {unknown} value
+ * @returns {Record<string, any>}
+ */
+function normalizeLayerMetadata(value) {
+  if (typeof value === "string" && value) {
+    const parsed = parseLayerJson(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? /** @type {Record<string, any>} */ (parsed)
+      : {};
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return /** @type {Record<string, any>} */ (value);
+  }
+  return {};
+}
+
+/**
+ * @param {unknown} value
  * @returns {unknown}
  */
 function parseLayerJson(value) {
@@ -98,6 +115,8 @@ export class BlobStore {
   #interner;
   /** @type {Record<string, import("better-sqlite3").Statement>} */
   #stmt;
+  /** @type {boolean} */
+  #hasBlobLayerMetadata;
 
   /**
    * @param {import("better-sqlite3").Database} db
@@ -111,8 +130,10 @@ export class BlobStore {
     const blobColumns = tableExists(db, "blobs") ? tableColumnSet(db, "blobs") : new Set();
     const blobSymbolColumns = tableExists(db, "blob_symbols") ? tableColumnSet(db, "blob_symbols") : new Set();
     const hasBlobLayers = tableExists(db, "blob_layers");
+    const blobLayerColumns = hasBlobLayers ? tableColumnSet(db, "blob_layers") : new Set();
     const hasBlobParserVersion = blobColumns.has("parser_version") && blobColumns.has("parser_spec_version");
     const hasBodyIdentifiers = blobSymbolColumns.has("body_identifiers");
+    this.#hasBlobLayerMetadata = blobLayerColumns.has("metadata_json");
     this.#stmt = {
       blobExists: db.prepare("SELECT 1 AS one FROM blobs WHERE content_hash = ? LIMIT 1"),
       blobByHash: db.prepare("SELECT content_hash, lang, byte_size FROM blobs WHERE content_hash = ? LIMIT 1"),
@@ -183,16 +204,28 @@ export class BlobStore {
          VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ),
       blobLayerUpsert: db.prepare(
-        `INSERT INTO blob_layers
-           (content_hash, lang, source, tool_version, parser_spec_version,
-            config_hash, deps_hash, fileset_hash, indexed_at, status)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(content_hash, source, tool_version, parser_spec_version, config_hash, deps_hash, fileset_hash)
-           DO UPDATE SET
-             lang = excluded.lang,
-             indexed_at = excluded.indexed_at,
-             status = excluded.status
-         RETURNING id`,
+        this.#hasBlobLayerMetadata
+          ? `INSERT INTO blob_layers
+               (content_hash, lang, source, tool_version, parser_spec_version,
+                config_hash, deps_hash, fileset_hash, indexed_at, status, metadata_json)
+             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(content_hash, source, tool_version, parser_spec_version, config_hash, deps_hash, fileset_hash)
+               DO UPDATE SET
+                 lang = excluded.lang,
+                 indexed_at = excluded.indexed_at,
+                 status = excluded.status,
+                 metadata_json = excluded.metadata_json
+             RETURNING id`
+          : `INSERT INTO blob_layers
+               (content_hash, lang, source, tool_version, parser_spec_version,
+                config_hash, deps_hash, fileset_hash, indexed_at, status)
+             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(content_hash, source, tool_version, parser_spec_version, config_hash, deps_hash, fileset_hash)
+               DO UPDATE SET
+                 lang = excluded.lang,
+                 indexed_at = excluded.indexed_at,
+                 status = excluded.status
+             RETURNING id`,
       ),
       blobLayerMarkStale: db.prepare(
         `UPDATE blob_layers
@@ -223,7 +256,8 @@ export class BlobStore {
       ),
       blobLayerListByHash: db.prepare(
         `SELECT id, content_hash, lang, source, tool_version, parser_spec_version,
-                config_hash, deps_hash, fileset_hash, indexed_at, status
+                config_hash, deps_hash, fileset_hash, indexed_at, status,
+                ${this.#hasBlobLayerMetadata ? "metadata_json" : "NULL AS metadata_json"}
          FROM blob_layers
          WHERE content_hash = ?
          ORDER BY source ASC, indexed_at ASC, id ASC`,
@@ -287,6 +321,7 @@ export class BlobStore {
    *   fileset_hash?: string,
    *   indexed_at?: string,
    *   status?: "indexed" | "failed" | "stale",
+   *   metadata?: Record<string, any>,
    * }} layer
    * @returns {{ layer_id: number, source: "treesitter" | "scip", symbols: number, edges: number }}
    */
@@ -616,6 +651,7 @@ export class BlobStore {
    *   fileset_hash: string,
    *   indexed_at: string,
    *   status: "indexed" | "failed" | "stale",
+   *   metadata: Record<string, any>,
    * }>}
    */
   listBlobLayers(content_hash) {
@@ -632,6 +668,7 @@ export class BlobStore {
       fileset_hash: row.fileset_hash || "",
       indexed_at: row.indexed_at,
       status: normalizeLayerStatus(row.status),
+      metadata: normalizeLayerMetadata(row.metadata_json),
     }));
   }
 
@@ -812,6 +849,7 @@ export class BlobStore {
    *   fileset_hash?: string,
    *   indexed_at?: string,
    *   status?: "indexed" | "failed" | "stale",
+   *   metadata?: Record<string, any>,
    * }} layer
    * @returns {{ layer_id: number, source: "treesitter" | "scip", symbols: number, edges: number }}
    */
@@ -841,6 +879,9 @@ export class BlobStore {
     const filesetHash = layer.fileset_hash == null ? "" : String(layer.fileset_hash);
     const indexedAt = layer.indexed_at || nowIso();
     const status = normalizeLayerStatus(layer.status);
+    const metadataJson = stableJson(normalizeLayerMetadata(
+      layer.metadata ?? /** @type {any} */ (layer).metadata_json ?? /** @type {any} */ (layer).metadataJson,
+    ));
 
     this.#stmt.blobInsertIfMissing.run(
       content_hash,
@@ -851,7 +892,7 @@ export class BlobStore {
       parserSpecVersion,
     );
 
-    const row = /** @type {{ id: number } | undefined} */ (this.#stmt.blobLayerUpsert.get(
+    const layerArgs = [
       content_hash,
       lang,
       source,
@@ -862,7 +903,9 @@ export class BlobStore {
       filesetHash,
       indexedAt,
       status,
-    ));
+    ];
+    if (this.#hasBlobLayerMetadata) layerArgs.push(metadataJson);
+    const row = /** @type {{ id: number } | undefined} */ (this.#stmt.blobLayerUpsert.get(...layerArgs));
     const layerId = Number(row?.id);
     if (!Number.isInteger(layerId) || layerId <= 0) {
       throw new Error("Ledger.ingestBlobLayer: failed to resolve layer id");

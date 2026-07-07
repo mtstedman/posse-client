@@ -45,6 +45,7 @@ export const KNOWN_EVENT_NAMESPACES = Object.freeze(new Set([
   "research",
   "scheduler",
   "operator_nudge",
+  "oneshot",
   "atlas",
   "wi",
   "work_item",

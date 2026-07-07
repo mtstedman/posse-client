@@ -9,7 +9,9 @@ import {
   getPosseRemoteTimeoutMs,
   getPosseRemoteUrl,
 } from "../functions/mode.js";
+import { getSetting } from "../../queue/functions/settings.js";
 import { recordObservation } from "../../observability/functions/observations.js";
+import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 
 function joinPromptParts(parts = []) {
@@ -35,6 +37,7 @@ export class RemoteComposer {
     clientOptions = {},
     renderEnrichment = renderLocalEnrichment,
     reloadPromptBundle = loadRemotePromptBundle,
+    readSetting = getSetting,
     now = () => Date.now(),
     warn = log.warn,
   } = {}) {
@@ -46,6 +49,7 @@ export class RemoteComposer {
     });
     this.renderEnrichment = renderEnrichment;
     this.reloadPromptBundle = typeof reloadPromptBundle === "function" ? reloadPromptBundle : loadRemotePromptBundle;
+    this.readSetting = typeof readSetting === "function" ? readSetting : getSetting;
     this.now = now;
     this.warn = typeof warn === "function" ? warn : () => {};
   }
@@ -157,14 +161,161 @@ export class RemoteComposer {
         latency_ms: latencyMs,
       },
     };
-    recordPromptSectionAccounting(packet, composed);
+    recordPromptSectionAccounting(packet, composed, { readSetting: this.readSetting });
     return composed;
   }
 }
 
+function estimateTokensFromChars(value) {
+  const chars = Number(value) || 0;
+  return Math.max(0, Math.ceil(chars / 4));
+}
+
+function normalizeContextCompactionMode(value) {
+  const raw = String(value || "shadow").trim().toLowerCase();
+  return ["off", "shadow", "inject", "enforce"].includes(raw) ? raw : "shadow";
+}
+
+function readIntegerSetting(readSetting, key, fallback) {
+  try {
+    const raw = readSetting?.(key);
+    if (raw == null || String(raw).trim() === "") return fallback;
+    const parsed = Number.parseInt(String(raw).trim(), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readContextCompactionConfig(readSetting) {
+  let mode = "shadow";
+  try {
+    mode = normalizeContextCompactionMode(readSetting?.(SETTING_KEYS.CONTEXT_COMPACTION_MODE));
+  } catch {
+    mode = "shadow";
+  }
+  return {
+    mode,
+    triggerInputTokens: readIntegerSetting(
+      readSetting,
+      SETTING_KEYS.CONTEXT_COMPACTION_TRIGGER_INPUT_TOKENS,
+      32_000,
+    ),
+    recentTargetTokens: readIntegerSetting(
+      readSetting,
+      SETTING_KEYS.CONTEXT_COMPACTION_RECENT_TARGET_TOKENS,
+      12_000,
+    ),
+  };
+}
+
+function sectionLabel(section, index) {
+  if (!section || typeof section !== "object") return `section_${index + 1}`;
+  return String(
+    section.label
+    || section.name
+    || section.id
+    || section.key
+    || section.type
+    || `section_${index + 1}`,
+  );
+}
+
+function sectionCharCount(section) {
+  if (!section || typeof section !== "object") return 0;
+  const candidates = [
+    section.char_count,
+    section.charCount,
+    section.chars,
+    section.length,
+    section.size_chars,
+    section.sizeChars,
+  ];
+  for (const candidate of candidates) {
+    const numeric = Number(candidate);
+    if (Number.isFinite(numeric) && numeric > 0) return Math.floor(numeric);
+  }
+  const tokenCount = Number(section.token_count ?? section.tokenCount ?? section.tokens);
+  return Number.isFinite(tokenCount) && tokenCount > 0 ? Math.floor(tokenCount * 4) : 0;
+}
+
+function promptSectionsForPnl(composed) {
+  const metadataSections = Array.isArray(composed?.metadata?.sections) ? composed.metadata.sections : [];
+  if (metadataSections.length > 0) {
+    return metadataSections.map((section, index) => ({
+      label: sectionLabel(section, index),
+      chars: sectionCharCount(section),
+    }));
+  }
+  return [
+    { label: "system_prompt", chars: composed?.systemPrompt?.length || 0 },
+    { label: "stable_context", chars: composed?.stableContext?.length || 0 },
+    { label: "user_prompt", chars: composed?.userPrompt?.length || 0 },
+    { label: "local_enrichment", chars: composed?.enrichment?.length || 0 },
+  ];
+}
+
+function isPinnedExactSection(label) {
+  return /(?:^|[^a-z0-9])(system|role|contract|policy|tool|scope|current[_ -]?task|operator|nudge|approval)(?:$|[^a-z0-9])/i
+    .test(String(label || ""));
+}
+
+function recordRollingContextShadowPnl(packet, composed, { readSetting = getSetting } = {}) {
+  const config = readContextCompactionConfig(readSetting);
+  if (config.mode === "off") return;
+  const candidateMinTokens = Math.max(1000, Math.min(8000, Math.floor(config.triggerInputTokens / 4)));
+  const sections = promptSectionsForPnl(composed)
+    .map((section) => ({
+      ...section,
+      tokens: estimateTokensFromChars(section.chars),
+      pinned_exact: isPinnedExactSection(section.label),
+    }))
+    .filter((section) => section.tokens > 0);
+  const candidates = sections.filter((section) => !section.pinned_exact && section.tokens >= candidateMinTokens);
+  if (candidates.length === 0) return;
+  const sourceTokens = candidates.reduce((sum, section) => sum + section.tokens, 0);
+  const targetTokens = Math.min(
+    config.recentTargetTokens,
+    Math.max(1000, Math.ceil(sourceTokens * 0.25)),
+  );
+  const grossSavedTokens = Math.max(0, sourceTokens - targetTokens);
+  if (grossSavedTokens <= 0) return;
+  const summarizerCostTokens = sourceTokens + targetTokens;
+  const paybackCalls = Math.ceil(summarizerCostTokens / grossSavedTokens);
+  recordObservation({
+    work_item_id: packet?.work_item_id ?? null,
+    job_id: packet?.job_id ?? null,
+    observation_type: "context.rollup.shadow_pnl",
+    summary: `Context rollup shadow P&L: ~${grossSavedTokens} gross token(s) saved, payback ${paybackCalls} call(s)`,
+    detail: {
+      mode: config.mode,
+      estimate_method: "chars_div4_section_shadow",
+      total_prompt_chars: composed?.prompt?.length || 0,
+      source_tokens: sourceTokens,
+      target_tokens: targetTokens,
+      gross_saved_tokens: grossSavedTokens,
+      summarizer_cost_tokens: summarizerCostTokens,
+      payback_calls: paybackCalls,
+      candidate_min_tokens: candidateMinTokens,
+      thresholds: {
+        pressure_input_tokens: config.triggerInputTokens,
+        recent_target_tokens: config.recentTargetTokens,
+      },
+      candidate_sections: candidates.map((section) => ({
+        label: section.label,
+        chars: section.chars,
+        tokens: section.tokens,
+      })),
+      pinned_exact_sections: sections
+        .filter((section) => section.pinned_exact)
+        .map((section) => ({ label: section.label, chars: section.chars, tokens: section.tokens })),
+    },
+  });
+}
+
 // Operator-facing accounting of what the compiled prompt cost per section.
 // Telemetry only — nothing here is rendered into the agent prompt.
-function recordPromptSectionAccounting(packet, composed) {
+function recordPromptSectionAccounting(packet, composed, { readSetting = getSetting } = {}) {
   try {
     const metadata = composed?.metadata || {};
     const droppedCount = Array.isArray(metadata.sections_dropped) ? metadata.sections_dropped.length : 0;
@@ -186,6 +337,7 @@ function recordPromptSectionAccounting(packet, composed) {
         atlas_render: packet?.atlas_render_meta || null,
       },
     });
+    recordRollingContextShadowPnl(packet, composed, { readSetting });
   } catch { /* accounting must never break compose */ }
 }
 

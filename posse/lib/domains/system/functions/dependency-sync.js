@@ -11,7 +11,7 @@ import { spawn, spawnSync } from "child_process";
 
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { gitExec } from "../../git/functions/utils.js";
-import { installScipLanguageDependenciesSync } from "../../atlas/functions/v2/scip/dependencies.js";
+import { installScipLanguageDependencies } from "../../atlas/functions/v2/scip/dependencies.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
 import {
   DEFAULT_POSSE_ROOT,
@@ -495,6 +495,12 @@ function outputLines(value) {
 
 function firstLine(value) {
   return outputLines(value)[0] || "";
+}
+
+function prefixScipDependencyProgress(message) {
+  const text = String(message || "").trim();
+  if (!text) return "SCIP deps";
+  return /^SCIP deps:/iu.test(text) ? text : `SCIP deps: ${text}`;
 }
 
 function gitRootForPath(root) {
@@ -1068,6 +1074,7 @@ function buildDependencyDoctorReport(result, mode) {
  *   includeTestTools?: boolean,
  *   timeoutMs?: number | string | boolean | null,
  *   onProgress?: ((message: string) => void) | null,
+ *   onEvent?: ((event: Record<string, any>) => void) | null,
  * }} [input]
  */
 export async function ensureBootDependencies(input = {}) {
@@ -1080,6 +1087,7 @@ export async function ensureBootDependencies(input = {}) {
     projectDir,
     timeoutMs: normalizeCommandTimeoutMs(input.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS),
     onProgress: typeof input.onProgress === "function" ? input.onProgress : null,
+    onEvent: typeof input.onEvent === "function" ? input.onEvent : null,
   };
 
   /** @type {any[]} */
@@ -1157,12 +1165,13 @@ export async function ensureBootDependencies(input = {}) {
         scip = { ok: true, skipped: "no SCIP source languages detected", results: [] };
       } else {
         opts.onProgress?.("SCIP deps: checking managed indexers");
-        scip = installScipLanguageDependenciesSync({
+        scip = await installScipLanguageDependencies({
           posseRoot,
           languages: scipLanguages || input.scipLanguages,
           dryRun,
           timeoutMs: opts.timeoutMs,
-          onProgress: (message) => opts.onProgress?.(`SCIP deps: ${message}`),
+          onProgress: (message) => opts.onProgress?.(prefixScipDependencyProgress(message)),
+          onEvent: (event) => opts.onEvent?.(event),
         });
       }
     } else {

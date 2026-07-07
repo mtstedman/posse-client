@@ -48,6 +48,7 @@ import {
 } from "./helpers/fn-index.js";
 import {
   classifyFileRisk as classifyFileRiskFromModule,
+  isHighRiskPath as isHighRiskPathFromModule,
   looksLikeConcreteRequestedFile,
   parseFileRequest as parseFileRequestFromModule,
   splitFileRequestsByRisk as splitFileRequestsByRiskFromModule,
@@ -1863,6 +1864,10 @@ export function parseMissingContext(output, { maxFiles = 5 } = {}) {
 
 export function classifyFileRisk(filePath) {
   return classifyFileRiskFromModule(filePath);
+}
+
+export function isHighRiskPath(filePath) {
+  return isHighRiskPathFromModule(filePath);
 }
 
 export function parseFileRequest(output) {

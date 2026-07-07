@@ -23,7 +23,7 @@
 // shadow diffs land on the same bindings.
 
 import { buildNameIndexes, lookupByName, lookupByQualifiedName } from "./name-index.js";
-import { buildImportContexts, resolveModuleSpecifier, RESOLVABLE_EXTENSIONS } from "./import-context.js";
+import { buildImportContexts, resolveModulePathCandidates } from "./import-context.js";
 import { calibrateResolutionConfidence, toEdgeConfidence } from "./confidence.js";
 import { buildFileContexts } from "./call-context.js";
 import { adapterFor } from "./adapters/registry.js";
@@ -364,20 +364,8 @@ function unresolved(edge) {
  * @returns {string | null}
  */
 function resolveModulePathToFile(importingFile, specifier, pathToBlob) {
-  const base = resolveModuleSpecifier(importingFile, specifier);
-  if (!base) return null;
-  // Strip a trailing `.js`/`.ts` extension that some TS imports include
-  // even though the target is a `.ts` file (Node-style ESM import
-  // pattern). We try the literal first, then with the extension stripped.
-  /** @type {string[]} */
-  const candidates = [base];
-  const stripped = base.replace(/\.(js|mjs|cjs)$/, "");
-  if (stripped !== base) candidates.push(stripped);
-  for (const cand of candidates) {
-    for (const ext of RESOLVABLE_EXTENSIONS) {
-      const hit = `${cand}${ext}`;
-      if (pathToBlob.has(hit)) return hit;
-    }
+  for (const candidate of resolveModulePathCandidates(importingFile, specifier, pathToBlob)) {
+    if (pathToBlob.has(candidate)) return candidate;
   }
   return null;
 }

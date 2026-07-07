@@ -361,6 +361,23 @@
  */
 
 /**
+ * @typedef {Object} CodeStructureParams
+ * @property {string | string[]} paths        Directory prefix / file path, or an array of them (max 128 files resolved).
+ * @property {string} [path]                  Internal alias for a single `paths` entry (not surfaced).
+ * @property {("imports" | "calls" | "references" | "extends" | "implements" | "uses_type")[]} [edgeKinds] Defaults to ["imports"].
+ * @property {number} [maxFiles]              Optional. Default 64, max 128.
+ * @property {boolean} [includeSymbols]       Include per-file symbol summaries. Default true.
+ * @property {boolean} [includeEdges]         Include exact internal/inbound/outbound edges. Default true.
+ */
+
+/**
+ * @typedef {Object} CodePersistenceParams
+ * @property {string | string[]} paths        Directory prefix / file path, or an array of them (max 128 files resolved).
+ * @property {string} [path]                  Internal alias for a single `paths` entry (not surfaced).
+ * @property {number} [maxFiles]              Optional. Default 64, max 128.
+ */
+
+/**
  * @typedef {Object} CodeGetHotPathParams
  * @property {string} [symbolId]
  * @property {string} [file]                  Canonical repo-relative path.
@@ -636,6 +653,8 @@
  *   | { action: "code.lens" } & CodeGetHotPathParams
  *   | { action: "code.window" } & CodeNeedWindowParams
  *   | { action: "code.survey" } & CodeSurveyParams
+ *   | { action: "code.structure" } & CodeStructureParams
+ *   | { action: "code.persistence" } & CodePersistenceParams
  *   | { action: "context" } & ContextParams
  *   | { action: "context.summary" } & ContextSummaryParams
  *   | { action: "agent.feedback" } & AgentFeedbackParams
@@ -691,6 +710,8 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "code.lens",
   "code.window",
   "code.survey",
+  "code.structure",
+  "code.persistence",
   "context",
   "context.summary",
   "agent.feedback",

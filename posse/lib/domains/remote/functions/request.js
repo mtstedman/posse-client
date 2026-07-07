@@ -220,6 +220,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
   const atlasSummary = sanitizeAtlasSummary(packet?.atlas?.summary);
   const requestInstructions = dedupeAtlasSummaryFromInstructions(instructions, packet?.atlas?.summary, atlasSummary);
   const shellPolicyHint = assessorShellPolicyHint(role, packet);
+  const promptProfile = packet?.prompt_profile || packet?.promptProfile || null;
   const selectedSkills = Array.isArray(packet?.skills_attached)
     ? packet.skills_attached
     : (Array.isArray(packet?.skills) ? packet.skills : []);
@@ -278,6 +279,10 @@ export function buildRemoteCompileRequest(packet, instructions, {
     },
     extra: {
       local_prompt_contract: "remote_skeleton_local_enrichment",
+      ...(promptProfile ? { prompt_profile: promptProfile } : {}),
+      ...(packet?.research_role_mode ? { research_role_mode: packet.research_role_mode } : {}),
+      ...(packet?.research_budget ? { research_budget: packet.research_budget } : {}),
+      ...(packet?.fanout_context ? { fanout: packet.fanout_context } : {}),
       ...(shellPolicyHint ? { shell_policy_hint: shellPolicyHint } : {}),
     },
   };

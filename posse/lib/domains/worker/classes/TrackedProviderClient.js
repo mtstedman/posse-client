@@ -9,6 +9,7 @@ import {
   completeAgentCall,
   createAgentCall,
   getJob,
+  getSetting,
   setAttemptSession,
   updateJobProvider,
 } from "../../queue/functions/index.js";
@@ -43,6 +44,7 @@ import {
   resolveSessionRecycleModeForWorkItem,
 } from "../../session/functions/manager-singleton.js";
 import { isRecyclableLane } from "../../session/functions/keys.js";
+import { SETTING_KEYS } from "../../../catalog/settings.js";
 
 const DEFAULT_PROVIDER_ERROR_PATTERNS = [
   /overloaded_error/i,
@@ -166,6 +168,7 @@ const DEFAULT_DEPS = {
   completeAgentCall,
   createAgentCall,
   getJob,
+  getSetting,
   updateJobProvider,
   setAttemptSession,
   getAvailableProviders,
@@ -198,6 +201,75 @@ const DEFAULT_DEPS = {
 function estimateTokensFromChars(value) {
   const chars = typeof value === "string" ? value.length : Number(value) || 0;
   return Math.max(0, Math.ceil(chars / 4));
+}
+
+function normalizeContextCompactionMode(value) {
+  const raw = String(value || "shadow").trim().toLowerCase();
+  return ["off", "shadow", "inject", "enforce"].includes(raw) ? raw : "shadow";
+}
+
+function readIntegerSetting(getSettingFn, key, fallback) {
+  try {
+    const raw = getSettingFn?.(key);
+    if (raw == null || String(raw).trim() === "") return fallback;
+    const parsed = Number.parseInt(String(raw).trim(), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readContextCompactionConfig(getSettingFn) {
+  let mode = "shadow";
+  try {
+    mode = normalizeContextCompactionMode(getSettingFn?.(SETTING_KEYS.CONTEXT_COMPACTION_MODE));
+  } catch {
+    mode = "shadow";
+  }
+  return {
+    mode,
+    triggerInputTokens: readIntegerSetting(
+      getSettingFn,
+      SETTING_KEYS.CONTEXT_COMPACTION_TRIGGER_INPUT_TOKENS,
+      32_000,
+    ),
+    sessionResetInputTokens: readIntegerSetting(
+      getSettingFn,
+      SETTING_KEYS.CONTEXT_COMPACTION_SESSION_RESET_INPUT_TOKENS,
+      96_000,
+    ),
+    recentTargetTokens: readIntegerSetting(
+      getSettingFn,
+      SETTING_KEYS.CONTEXT_COMPACTION_RECENT_TARGET_TOKENS,
+      12_000,
+    ),
+  };
+}
+
+function nonNegativeTokenCount(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? Math.floor(numeric) : null;
+}
+
+function contextPressureMetrics({ stats = {}, promptChars = 0 } = {}) {
+  const inputTokens = nonNegativeTokenCount(stats.inputTokens);
+  const outputTokens = nonNegativeTokenCount(stats.outputTokens);
+  const cachedInputTokens = nonNegativeTokenCount(stats.cachedInputTokens) || 0;
+  const cacheCreationInputTokens = nonNegativeTokenCount(stats.cacheCreationInputTokens) || 0;
+  const promptEstimateTokens = estimateTokensFromChars(promptChars);
+  const observedInputTokens = inputTokens ?? promptEstimateTokens;
+  const uncachedInputTokensApprox = Math.max(0, observedInputTokens - cachedInputTokens);
+  return {
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+    cacheCreationInputTokens,
+    promptEstimateTokens,
+    observedInputTokens,
+    observedInputTokensEstimated: inputTokens == null,
+    uncachedInputTokensApprox,
+    cachedInputRatio: observedInputTokens > 0 ? cachedInputTokens / observedInputTokens : null,
+  };
 }
 
 function codexReuseContractAllowsScope(opts = {}) {
@@ -382,6 +454,87 @@ export class TrackedProviderClient {
         },
       });
     } catch { /* observability only — never block the call path */ }
+  }
+
+  _recordContextPressureTelemetry({
+    agentCallId,
+    work_item_id,
+    job_id,
+    attempt_id,
+    providerName,
+    role,
+    modelTier,
+    modelName,
+    promptChars,
+    stats,
+    status,
+    opts,
+  } = {}) {
+    try {
+      const config = readContextCompactionConfig(this.deps.getSetting);
+      if (config.mode === "off") return;
+      const metrics = contextPressureMetrics({ stats, promptChars });
+      const sessionRecycle = opts?._sessionRecycle || null;
+      const recycleDecision = sessionRecycle?.decision || null;
+      const baseDetail = {
+        mode: config.mode,
+        provider: providerName || null,
+        role: role || null,
+        model_tier: modelTier || null,
+        model_name: modelName || null,
+        status: status || null,
+        agent_call_id: agentCallId ?? null,
+        prompt_chars: promptChars ?? null,
+        prompt_estimate_tokens: metrics.promptEstimateTokens,
+        input_tokens: metrics.inputTokens,
+        output_tokens: metrics.outputTokens,
+        cached_input_tokens: metrics.cachedInputTokens,
+        cache_creation_input_tokens: metrics.cacheCreationInputTokens,
+        observed_input_tokens: metrics.observedInputTokens,
+        observed_input_tokens_estimated: metrics.observedInputTokensEstimated,
+        uncached_input_tokens_approx: metrics.uncachedInputTokensApprox,
+        cached_input_ratio: metrics.cachedInputRatio,
+        thresholds: {
+          pressure_input_tokens: config.triggerInputTokens,
+          session_reset_input_tokens: config.sessionResetInputTokens,
+          recent_target_tokens: config.recentTargetTokens,
+        },
+        session: sessionRecycle ? {
+          recycling_mode: opts?.recyclingMode || recycleDecision?.recyclingMode || null,
+          lane_id: recycleDecision?.lane?.id ?? null,
+          session_id: recycleDecision?.session?.id ?? null,
+          hop_count: recycleDecision?.session?.hop_count ?? null,
+          full_prompt_estimate_tokens: sessionRecycle.fullPromptEstimateTokens ?? null,
+          resume_prompt_estimate_tokens: sessionRecycle.resumePromptEstimateTokens ?? null,
+        } : null,
+      };
+
+      if (metrics.observedInputTokens >= config.triggerInputTokens) {
+        this.deps.recordObservation?.({
+          work_item_id: work_item_id ?? null,
+          job_id: job_id ?? null,
+          attempt_id: attempt_id ?? null,
+          observation_type: "context.pressure.observed",
+          summary: `Context pressure observed: ${metrics.observedInputTokens} input token(s) (${providerName || "unknown provider"})`,
+          detail: baseDetail,
+        });
+      }
+
+      if (opts?.recyclingMode === "resume" && metrics.observedInputTokens >= config.sessionResetInputTokens) {
+        this.deps.recordObservation?.({
+          work_item_id: work_item_id ?? null,
+          job_id: job_id ?? null,
+          attempt_id: attempt_id ?? null,
+          observation_type: "context.session.would_reset",
+          summary: `Resumed session would reset after ${metrics.observedInputTokens} input token(s)`,
+          detail: {
+            ...baseDetail,
+            reset_reason: "context_compaction_session_reset_threshold",
+            estimate_method: metrics.observedInputTokensEstimated ? "prompt_chars_div4" : "provider_usage_input_tokens",
+          },
+        });
+      }
+    } catch { /* context telemetry must never affect provider calls */ }
   }
 
   _prepareSessionReuse(prompt, opts, {
@@ -679,6 +832,21 @@ export class TrackedProviderClient {
         session_handle: stats.sessionHandle || stats.responseId || null,
       });
 
+      this._recordContextPressureTelemetry({
+        agentCallId,
+        work_item_id,
+        job_id,
+        attempt_id: observationContext?.attempt_id ?? null,
+        providerName,
+        role: opts.role,
+        modelTier: tier,
+        modelName: stats.modelName || modelName,
+        promptChars: prompt.length,
+        stats,
+        status: "succeeded",
+        opts,
+      });
+
       if (opts._sessionRecycle && (stats.sessionHandle || stats.responseId)) {
         this.worker._registerSessionRecycleResult?.({
           ...opts._sessionRecycle,
@@ -797,6 +965,21 @@ export class TrackedProviderClient {
         cost_estimate_usd: this.resolveCallCostEstimate(accountingStats),
         skills: opts.skillsAttached || null,
         session_handle: stats.sessionHandle || stats.responseId || null,
+      });
+
+      this._recordContextPressureTelemetry({
+        agentCallId,
+        work_item_id,
+        job_id,
+        attempt_id: observationContext?.attempt_id ?? null,
+        providerName,
+        role: opts.role,
+        modelTier: tier,
+        modelName: stats.modelName || modelName,
+        promptChars: prompt.length,
+        stats,
+        status: "failed",
+        opts,
       });
 
       const recycleDecision = opts._sessionRecycle?.decision || null;

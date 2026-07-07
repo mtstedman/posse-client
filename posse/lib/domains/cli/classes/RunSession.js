@@ -298,6 +298,7 @@ export class RunSession {
   const matrixLanguages = { add: (language) => boot.addMatrixLanguage(language) };
   const setBootEnterAction = (handler = null) => boot.setEnterAction(handler);
   const updateBootFooter = (text) => boot.updateFooter(text);
+  const updateBootAtlasNotice = (text) => boot.updateAtlasNotice(text);
   const bootCanPromptForBackground = () => boot.canPromptForBackground();
   const stopBootMonitor = (opts) => boot.stop(opts);
   const handleSchedulerBootEvent = (event = {}) => boot.handleSchedulerBootEvent(event);
@@ -1377,6 +1378,12 @@ export class RunSession {
           // codebases don't look hung. Keep stdout compact: the indexer's raw
           // output is still captured for diagnostics, but boot only shows a
           // single activity indicator plus a final status line.
+          if (event?.kind === "atlas.index_notice" || event?.kind === "atlas.cold_index") {
+            const notice = firstLine(event.text || event.detail || "");
+            const noticeDetail = firstLine(event.noticeDetail || "");
+            const noticeLines = [notice, noticeDetail].filter(Boolean);
+            if (noticeLines.length > 0) updateBootAtlasNotice(noticeLines);
+          }
           // ── Per-language matrix routing (new panel) ──────────────────
           // SCIP emits the indexer id as `language` (for example
           // `typescript`) and the source buckets it actually covers as

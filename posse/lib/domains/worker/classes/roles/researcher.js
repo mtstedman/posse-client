@@ -68,6 +68,9 @@ const RETRY_SALVAGE_OBSERVATION_LIMIT = 80;
 const RETRY_SALVAGE_RESPONSE_CHAR_LIMIT = 9000;
 const RETRY_SALVAGE_LINE_LIMIT = 140;
 const RETRY_SYNTHESIS_MAX_TURNS = 10;
+const FANOUT_CHILD_DESCRIPTION_CHAR_LIMIT = 1200;
+const FANOUT_CHILD_EVIDENCE_TOKEN_TARGET = 900;
+const FANOUT_SYNTHESIS_TOKEN_TARGET = 1800;
 
 const DEFAULT_DEPS = {
   getResearchBudget: defaultGetResearchBudget,
@@ -96,6 +99,38 @@ function parseChildJobIds(payload) {
     : [];
 }
 
+function fanoutBranchFromPayload(payload = {}) {
+  return payload?.fanout_branch && typeof payload.fanout_branch === "object"
+    ? payload.fanout_branch
+    : {};
+}
+
+function fanoutBranchScopeHints(payload = {}) {
+  const branch = fanoutBranchFromPayload(payload);
+  return Array.isArray(branch.scope_hints)
+    ? branch.scope_hints
+    : Array.isArray(payload?.fanout_scope_hints)
+      ? payload.fanout_scope_hints
+      : [];
+}
+
+function fanoutBranchKind(payload = {}) {
+  const kind = String(fanoutBranchFromPayload(payload).kind || "module").trim().toLowerCase();
+  return kind === "web" ? "web" : "module";
+}
+
+function researchPromptProfile(roleMode) {
+  if (roleMode === "child") return "researcher_fanout_child";
+  if (roleMode === "synth") return "researcher_fanout_synthesis";
+  return "researcher";
+}
+
+function truncateForPrompt(value, maxChars, label) {
+  const text = String(value || "");
+  if (!Number.isFinite(maxChars) || maxChars <= 0 || text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars).trimEnd()}\n... (${label} truncated to ${maxChars} chars)`;
+}
+
 function buildWebOnlyAnswerBlock(payload) {
   const hints = Array.isArray(payload?.web_scope_hints) ? payload.web_scope_hints : [];
   return [
@@ -108,35 +143,29 @@ function buildWebOnlyAnswerBlock(payload) {
 }
 
 function buildFanoutChildBlock(payload) {
-  const branch = payload?.fanout_branch && typeof payload.fanout_branch === "object"
-    ? payload.fanout_branch
-    : {};
+  const branch = fanoutBranchFromPayload(payload);
   const label = String(branch.label || payload?.fanout_branch_index || "branch").trim();
-  const kind = String(branch.kind || "module").trim().toLowerCase() === "web" ? "web" : "module";
-  const scopeHints = Array.isArray(branch.scope_hints)
-    ? branch.scope_hints
-    : Array.isArray(payload?.fanout_scope_hints)
-      ? payload.fanout_scope_hints
-      : [];
+  const kind = fanoutBranchKind(payload);
+  const scopeHints = fanoutBranchScopeHints(payload);
   const focusLines = kind === "web"
     ? [
-        "- Branch kind: web. Treat scope hints as domains, URLs, or vendor documentation surfaces.",
-        "- Use WebSearch/WebFetch for this branch; do not inspect repository code unless needed to connect an external claim back to the work item.",
-        "- Emit exact URLs for documentation claims. Include path:line citations only for repository-specific claims.",
+        "- Kind: web",
+        "- Evidence: exact URLs for documentation claims; path:line citations only for repository connections.",
       ]
     : [
-        "- Branch kind: module. Treat scope hints as repository paths or module aliases.",
-        "- Focus on this branch only. Follow direct dependencies only when needed to verify a claim.",
-        "- Emit exact file paths and line-number citations for findings the synthesizer should rely on.",
+        "- Kind: module",
+        "- Evidence: exact file paths and line-number citations for claims the synthesizer should rely on.",
       ];
 
   return [
-    "RESEARCH FANOUT CHILD MODE:",
+    "RESEARCH FANOUT CHILD ROUTE:",
+    "- Prompt profile: researcher_fanout_child",
     `- Branch: ${label}`,
     `- Fanout run: ${payload?.fanout_run_id || "(unknown)"}`,
     ...focusLines,
-    "- If you find a contradiction or uncertainty, name it plainly instead of resolving it by assumption.",
-    "- If web tools are available, use WebSearch for discovery first. Keep WebSearch to at most 2 queries and WebFetch to at most 3 URLs; if you exceed either cap, include a brief justification naming the prior query or URL that lacked enough evidence.",
+    `- Output target: branch evidence packet, <= ${FANOUT_CHILD_EVIDENCE_TOKEN_TARGET} tokens.`,
+    "- Preserve uncertainty/contradictions; synthesis owns the planner-ready brief.",
+    "- Web budget: at most 2 searches and 3 fetches unless evidence is insufficient.",
     scopeHints.length > 0
       ? `- ${kind === "web" ? "Domain/URL hints" : "Scope hints"}:\n${scopeHints.map((hint) => `  - ${hint}`).join("\n")}`
       : `- ${kind === "web" ? "Domain/URL hints" : "Scope hints"}: (none provided)`,
@@ -149,14 +178,14 @@ function buildFanoutSynthBlock(payload, childBriefs) {
     ? "- Shadow mode: this synthesis is for offline comparison and must not assume it is the planner source."
     : "- Active mode: this synthesis is the research brief the planner will consume.";
   return [
-    "RESEARCH FANOUT SYNTHESIS MODE:",
+    "RESEARCH FANOUT SYNTHESIS ROUTE:",
+    "- Prompt profile: researcher_fanout_synthesis",
     `- Fanout run: ${payload?.fanout_run_id || "(unknown)"}`,
     shadowText,
-    "- Compare the child briefs and preserve exact path:line citations for code claims and exact URLs for external documentation claims.",
-    "- Treat code citations and URL citations as distinct evidence classes; do not convert one into the other.",
-    "- Re-read cited files/lines before relying on a disputed code claim.",
-    "- If child briefs contradict each other and you cannot resolve the contradiction, include needs_review with the conflicting evidence.",
-    "- Produce one planner-ready research brief, not separate summaries.",
+    `- Output target: one planner-ready brief, <= ${FANOUT_SYNTHESIS_TOKEN_TARGET} tokens unless critical evidence needs more space.`,
+    "- Preserve code citations and URL citations as distinct evidence classes.",
+    "- Re-read disputed cited files/lines before relying on them.",
+    "- If contradictions remain unresolved, include needs_review with conflicting evidence.",
     "",
     childBriefs ? `CHILD RESEARCH BRIEFS:\n${childBriefs}\n` : "CHILD RESEARCH BRIEFS: none found. State this limitation in the output.\n",
   ].join("\n");
@@ -430,9 +459,12 @@ export class ResearcherRole extends BaseRole {
       cwdError: replanCwd.error,
     });
     const roleMode = normalizeResearchRoleMode(payload.role_mode);
+    const promptProfile = researchPromptProfile(roleMode);
     const webOnlyAnswer = payload.web_only_answer === true;
     const fanoutRunId = payload.fanout_run_id || null;
     const childJobIds = parseChildJobIds(payload);
+    const fanoutScopeHints = fanoutBranchScopeHints(payload);
+    const focusedFanoutChild = roleMode === "child" && fanoutScopeHints.length > 0;
     const researchBudget = this.deps?.isDeepthinkTask && !this.deps?.getResearchBudget
       ? researchBudgetFromDeepthink(isDeepthinkTask(workItem, payload))
       : getResearchBudget(workItem, payload);
@@ -507,7 +539,7 @@ export class ResearcherRole extends BaseRole {
     let atlasHandoffBlock = "";
     const synthNeedsVerificationHandoff = roleMode === "synth"
       && payload.verify_child_citations === true;
-    const shouldRenderAtlasHandoff = (roleMode !== "synth" && !webOnlyAnswer) || synthNeedsVerificationHandoff;
+    const shouldRenderAtlasHandoff = (roleMode !== "synth" && !webOnlyAnswer && !focusedFanoutChild) || synthNeedsVerificationHandoff;
     const researcherExecProvider = ctx.providerName || currentExecutionProvider(job);
     const researcherAttempts = getAttempts(job.id);
     const packetFields = {
@@ -517,6 +549,22 @@ export class ResearcherRole extends BaseRole {
       title: job.title,
       model_tier: ctx.tier || job.model_tier || "standard",
       reasoning_effort: job.reasoning_effort || "medium",
+      prompt_profile: promptProfile,
+      research_role_mode: roleMode,
+      research_budget: researchBudget,
+      fanout_context: roleMode === "child" || roleMode === "synth"
+        ? {
+            run_id: fanoutRunId,
+            mode: payload.fanout_mode || null,
+            shadow: payload.fanout_shadow === true,
+            role_mode: roleMode,
+            branch: roleMode === "child" ? fanoutBranchFromPayload(payload) : null,
+            branches: roleMode === "synth" && Array.isArray(payload.fanout_branches) ? payload.fanout_branches : [],
+            child_job_ids: childJobIds,
+            prompt_tax_policy: roleMode === "child" ? "branch_evidence_packet" : "planner_ready_synthesis",
+            output_token_target: roleMode === "child" ? FANOUT_CHILD_EVIDENCE_TOKEN_TARGET : FANOUT_SYNTHESIS_TOKEN_TARGET,
+          }
+        : null,
       governance_tier: workItem?.governance_tier || "mvp",
       execution_provider: researcherExecProvider,
       attempt: {
@@ -528,7 +576,8 @@ export class ResearcherRole extends BaseRole {
       success_criteria: Array.isArray(payload.success_criteria) ? payload.success_criteria : [],
       test_command: payload.test_command || null,
     };
-    const projectContext = (payload.task_spec || workItem.description || "").slice(0, 4000);
+    const projectContextLimit = roleMode === "child" ? FANOUT_CHILD_DESCRIPTION_CHAR_LIMIT : 4000;
+    const projectContext = truncateForPrompt(payload.task_spec || workItem.description || "", projectContextLimit, "fanout child context");
     if (shouldRenderAtlasHandoff) {
       researcherPacket = await handoff({
         recipient: this.getRole(),
@@ -557,7 +606,10 @@ export class ResearcherRole extends BaseRole {
         tool_policy: { allow_read: true, allow_write: false, allow_shell: false },
         budgets: { fallback_reads_remaining: 0 },
         atlas: null,
-        context_hints: { disableAtlas: true },
+        context_hints: {
+          disableAtlas: true,
+          ...(focusedFanoutChild ? { focusedFanoutChild: true } : {}),
+        },
       };
     }
     Object.assign(researcherPacket, packetFields);
@@ -568,9 +620,12 @@ export class ResearcherRole extends BaseRole {
     }
     // Built after the ATLAS handoff state resolves so hinted files the ATLAS
     // prefetch already covered render as pointers instead of body previews.
-    const hintedPreload = buildResearchIntakePreload(projectDir, intakeHints, {
-      atlasCoveredFiles: collectAtlasCoveredFiles(researcherPacket),
-    });
+    const includeResearchPreload = roleMode !== "synth" && !focusedFanoutChild;
+    const hintedPreload = includeResearchPreload
+      ? buildResearchIntakePreload(projectDir, intakeHints, {
+          atlasCoveredFiles: collectAtlasCoveredFiles(researcherPacket),
+        })
+      : "";
 
     Object.assign(ctx, {
       deepthink,
@@ -578,6 +633,7 @@ export class ResearcherRole extends BaseRole {
       fanoutRunId,
       payload,
       projectDir,
+      promptProfile,
       researchBudget,
       researchRetrySynthesisMode: retrySynthesisMode,
       researchRoleMode: roleMode,
@@ -589,13 +645,15 @@ export class ResearcherRole extends BaseRole {
       "Research the following topic for a development work item.",
       "",
       promptLiteral("WORK ITEM", workItem.title),
-      promptLiteral("DESCRIPTION", workItem.description || "(none)"),
-      researchBudgetPromptBlock(researchBudget, "researcher"),
+      promptLiteral("DESCRIPTION", roleMode === "child"
+        ? truncateForPrompt(workItem.description || "(none)", FANOUT_CHILD_DESCRIPTION_CHAR_LIMIT, "description")
+        : workItem.description || "(none)"),
+      roleMode === "child" ? "" : researchBudgetPromptBlock(researchBudget, "researcher"),
       "",
-      workflowModeBlock,
-      roleMode !== "synth" && hintedPreload ? `${hintedPreload}\n` : "",
-      roleMode !== "synth" && webFetchCachePreload ? `${webFetchCachePreload}\n` : "",
-      roleMode !== "synth" && !webOnlyAnswer ? routingContext : "",
+      roleMode === "child" ? "" : workflowModeBlock,
+      includeResearchPreload && hintedPreload ? `${hintedPreload}\n` : "",
+      roleMode !== "synth" && !focusedFanoutChild && webFetchCachePreload ? `${webFetchCachePreload}\n` : "",
+      roleMode !== "synth" && !focusedFanoutChild && !webOnlyAnswer ? routingContext : "",
       webOnlyAnswer ? buildWebOnlyAnswerBlock(payload) : "",
       roleMode === "child" ? buildFanoutChildBlock(payload) : "",
       roleMode === "synth" ? buildFanoutSynthBlock(payload, childBriefs) : "",
@@ -661,6 +719,7 @@ export class ResearcherRole extends BaseRole {
     return {
       role: this.getRole(),
       roleMode,
+      promptProfile: ctx.promptProfile || researchPromptProfile(roleMode),
       allowWrite: false,
       modelTier: ctx.tier,
       reasoningEffort: researchBudgetToReasoningEffort(researchBudget, job.reasoning_effort || "medium"),

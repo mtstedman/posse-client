@@ -383,8 +383,14 @@ function annotateReachability({ view, hits, limit = 5 }) {
         if (!parsed) continue;
         const target = view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
         if (!target || target.global_id == null) continue;
-        const { callerCount, callerPathsSample } = countIncomingCallers(view, target, { sampleLimit: 3 });
-        /** @type {any} */ (hit).reachability = { callerCount, callerPathsSample };
+        const raw = countIncomingCallers(view, target, { sampleLimit: 0, distinctPaths: false });
+        const distinct = countIncomingCallers(view, target, { sampleLimit: 3, distinctPaths: true });
+        /** @type {any} */ (hit).reachability = {
+          callerCount: distinct.callerCount,
+          callerFileCount: distinct.callerCount,
+          rawCallerEdgeCount: raw.callerCount,
+          callerPathsSample: distinct.callerPathsSample,
+        };
       } catch {
         // Per-hit failure must not strand the rest of the annotation pass.
       }

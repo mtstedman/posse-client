@@ -9,6 +9,7 @@ import { extractJson } from "../../../../shared/format/functions/json.js";
 import { getAtlasDeterministicToolDefinitions } from "../../../../functions/toolkit/atlas.js";
 import { getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { executeEmbeddedAtlasTool } from "../../../integrations/functions/atlas-embedded.js";
+import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { isIndexableSourcePath } from "../../../integrations/functions/deterministic-mcp/source-file-gate.js";
@@ -1350,7 +1351,7 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
     exactFiles,
     frontier: [],
     skeletons,
-    surveyContext: surveyOk ? surveyContext : null,
+    surveyContext,
     treeScope,
   };
 }
@@ -1361,26 +1362,39 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
 // tool.atlas.prefetch/code.survey (system lane). Never throws; a miss returns
 // { ok:false } and the caller falls back to the skeleton pass.
 async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDirs, seedFiles, keySymbols }) {
+  const startedAt = Date.now();
+  let scope = null;
   try {
-    const scope = chooseSurveyScope(
+    scope = chooseSurveyScope(
       { taskText, rankedFiles, candidateDirs, seedFiles, keySymbols },
       defaultSurveyScopeDeps(packet.cwd),
     );
-    if (!scope.inject) return { ok: false, attempted: false, scope };
+    if (!scope.inject) {
+      return _finishAtlasSurveyPrefetch(packet, { ok: false, attempted: false, scope }, startedAt);
+    }
     const args = { paths: scope.paths, maxFiles: MAX_SURVEY_FILES };
     if (scope.symbols) args.symbols = scope.symbols;
-    const raw = await executeEmbeddedAtlasTool("code.survey", args, {
+    const { raw, retries } = await _executeAtlasSurveyWithRetry(args, {
       cwd: packet.cwd,
       config: packet.atlas_config || undefined,
       origin: "prefetch",
     });
-    if (String(raw || "").startsWith("Error:")) return { ok: false, attempted: true, scope, error: String(raw).slice(0, 200) };
+    if (String(raw || "").startsWith("Error:")) {
+      return _finishAtlasSurveyPrefetch(packet, { ok: false, attempted: true, scope, error: String(raw).slice(0, 200), retries }, startedAt);
+    }
     let data = extractAtlasJsonPayload(raw);
     data = data?.result ?? data?.data ?? data;
     if (!data || !Array.isArray(data.files) || data.files.length === 0) {
-      return { ok: false, attempted: true, scope, error: "survey returned no files" };
+      return _finishAtlasSurveyPrefetch(packet, {
+        ok: false,
+        attempted: true,
+        scope,
+        error: "survey returned no files",
+        metrics: data?.metrics || null,
+        retries,
+      }, startedAt);
     }
-    return {
+    return _finishAtlasSurveyPrefetch(packet, {
       ok: true,
       attempted: true,
       scope,
@@ -1390,10 +1404,105 @@ async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDi
       metrics: data.metrics || null,
       granularity: data.granularity || null,
       truncated: !!data.truncated,
-    };
+      retries,
+    }, startedAt);
   } catch (err) {
-    return { ok: false, attempted: true, error: String(err?.message || err).slice(0, 200) };
+    return _finishAtlasSurveyPrefetch(packet, {
+      ok: false,
+      attempted: !!scope?.inject,
+      scope,
+      error: String(err?.message || err).slice(0, 200),
+    }, startedAt);
   }
+}
+
+async function _executeAtlasSurveyWithRetry(args, opts) {
+  let raw = await executeEmbeddedAtlasTool("code.survey", args, opts);
+  if (!_isTransientAtlasSurveyError(raw)) return { raw, retries: 0 };
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  raw = await executeEmbeddedAtlasTool("code.survey", args, opts);
+  return { raw, retries: 1 };
+}
+
+function _isTransientAtlasSurveyError(raw) {
+  const text = String(raw || "");
+  if (!text.startsWith("Error:")) return false;
+  return /\b(timeout|timed out|busy|locked|sqlite_busy|gate|temporarily disabled|transport|econnreset|epipe)\b/i.test(text);
+}
+
+function _finishAtlasSurveyPrefetch(packet, result, startedAt) {
+  const durationMs = Date.now() - startedAt;
+  const out = { ...result, durationMs };
+  _recordAtlasSurveyPrefetchDiagnostic(packet, out);
+  return out;
+}
+
+function _recordAtlasSurveyPrefetchDiagnostic(packet, result) {
+  try {
+    const context = getObservationContext() || {};
+    const metrics = result?.metrics && typeof result.metrics === "object" ? result.metrics : {};
+    const fileCount = Array.isArray(result?.files)
+      ? result.files.length
+      : (Number.isFinite(Number(metrics.fileCount)) ? Number(metrics.fileCount) : null);
+    const internalEdgeCount = Number.isFinite(Number(metrics.internalEdgeCount))
+      ? Number(metrics.internalEdgeCount)
+      : (Array.isArray(result?.callMap?.edges) ? result.callMap.edges.length : null);
+    const status = result?.ok ? "ok" : result?.attempted ? "miss" : "skipped";
+    recordObservation({
+      work_item_id: context.work_item_id ?? packet?.work_item_id ?? null,
+      job_id: context.job_id ?? packet?.job_id ?? null,
+      attempt_id: context.attempt_id ?? null,
+      observation_type: "atlas.prefetch.survey",
+      summary: `ATLAS code.survey prefetch ${status} (${_formatSurveyScopeCompact(result?.scope)})${result?.durationMs != null ? ` (${result.durationMs}ms)` : ""}`,
+      detail: {
+        kind: "atlas_survey_prefetch",
+        origin: "prefetch",
+        action: "code.survey",
+        ok: !!result?.ok,
+        attempted: !!result?.attempted,
+        duration_ms: Number(result?.durationMs || 0),
+        retries: Number(result?.retries || 0),
+        scope: _summarizeSurveyScope(result?.scope),
+        file_count: fileCount,
+        internal_edge_count: internalEdgeCount,
+        error: result?.error ? String(result.error).slice(0, 500) : null,
+      },
+    });
+  } catch {
+    // Diagnostic logging must never affect handoff assembly.
+  }
+}
+
+function _summarizeSurveyScope(scope) {
+  if (!scope || typeof scope !== "object") return null;
+  const rawPaths = scope.paths;
+  const paths = Array.isArray(rawPaths)
+    ? rawPaths.slice(0, 16).map((p) => String(p))
+    : (rawPaths ? String(rawPaths) : null);
+  return {
+    inject: !!scope.inject,
+    source: scope.source || null,
+    mode: scope.mode || null,
+    paths,
+    fileCount: Number.isFinite(Number(scope.files)) ? Number(scope.files) : null,
+    symbols: Array.isArray(scope.symbols) ? scope.symbols.slice(0, 16).map((s) => String(s)) : null,
+    reason: scope.reason || null,
+  };
+}
+
+function _formatSurveyScopeCompact(scope) {
+  if (!scope || typeof scope !== "object") return "no scope";
+  const source = scope.source || (scope.inject ? "selected scope" : "not selected");
+  const target = _formatSurveyScopeTarget(scope);
+  return target ? `${source}: ${target}` : String(source);
+}
+
+function _formatSurveyScopeTarget(scope) {
+  if (!scope || typeof scope !== "object") return null;
+  const paths = scope.paths;
+  if (typeof paths === "string" && paths) return paths;
+  if (Array.isArray(paths) && paths.length > 0) return `${paths.length} files`;
+  return scope.reason || null;
 }
 
 // Fallback graph-slice prefetch — runs only when tree.scope was unavailable
@@ -2005,6 +2114,17 @@ function _renderAtlasSurveySection(sc, _packet) {
   return lines;
 }
 
+function _renderAtlasSurveyMissSection(sc, packet) {
+  const label = displayAtlasToolName("code.survey", packet?.atlas);
+  const target = _formatSurveyScopeTarget(sc?.scope) || "selected area";
+  const reason = sc?.error ? String(sc.error).split(/\r?\n/)[0].slice(0, 220) : "unknown reason";
+  const source = sc?.scope?.source ? ` (scope source: ${sc.scope.source})` : "";
+  return [
+    `Area survey (${label} over ${target}) was attempted but unavailable${source}: ${reason}.`,
+    `If call edges or exhaustive area structure matter, call ${label} over that scope if available; otherwise climb per-file rungs for the listed candidates instead of treating tree scope as a call map.`,
+  ];
+}
+
 function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
   const slice = packet.atlas_slice_context;
   const label = atlasBackendLabel(packet?.atlas);
@@ -2091,6 +2211,8 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
 
   if (slice.surveyContext?.ok && trim < 2) {
     for (const line of _renderAtlasSurveySection(slice.surveyContext, packet)) lines.push(line);
+  } else if (slice.surveyContext?.attempted && trim < 2) {
+    for (const line of _renderAtlasSurveyMissSection(slice.surveyContext, packet)) lines.push(line);
   }
 
   if (Array.isArray(slice.exactFiles) && slice.exactFiles.length > 0) {

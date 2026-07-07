@@ -130,6 +130,10 @@ export class Ledger {
     // unresolved; non-NULL = pointer into external_symbols(id).
     ensureColumn(this.#db, "blob_edges", "to_external_id", "INTEGER");
     ensureColumn(this.#db, "blob_edges", "to_module_id", "INTEGER");
+    // Pre-call-proof-metadata DBs: layered SCIP ingest stores per-document
+    // proof coverage here so merge paths can suppress weaker tree-sitter calls
+    // only when SCIP explicitly says its call graph is complete.
+    ensureColumn(this.#db, "blob_layers", "metadata_json", "TEXT");
     // Pre-partial-SCIP-bookkeeping DBs: complete rows keep their prior
     // semantics; new partial rows can be recorded without short-circuiting
     // later complete ingests. Like source above, the migrated status column

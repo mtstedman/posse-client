@@ -27,6 +27,7 @@ POSSE_PHASES="research,planning,assessment,dev"
 POSSE_LIVE_FUNNEL="true"
 POSSE_SCIP_MODE="on"
 POSSE_SCIP_LANGUAGES="typescript,python,php"
+POSSE_SCIP_LANGUAGES_SUPPLIED="false"
 SMOKE_QUERY="auth"
 SMOKE_PROVIDER="openai"
 RUN_SMOKE="true"
@@ -60,6 +61,10 @@ Options:
   --repo-path <path>      ATLAS repo path for smoke tests
   --smoke-query <query>   Query used for atlas-smoke (default: auth)
   --smoke-provider <name> Provider for atlas-smoke (default: openai)
+  --scip-languages <csv>  Initial SCIP languages to install/index. Values:
+                          typescript, python, php, go, rust, clang, or all.
+                          If omitted in an interactive shell, a multi-select
+                          prompt is shown. Default: typescript,python,php.
   --no-smoke              Skip smoke test
   --no-persist-env        Do not append env sourcing to shell rc files
   --skip-settings         Do not seed ~/.posse/account.db
@@ -97,6 +102,8 @@ while [[ $# -gt 0 ]]; do
     --repo-path) REPO_PATH="${2:?missing value for --repo-path}"; shift 2 ;;
     --smoke-query) SMOKE_QUERY="${2:?missing value for --smoke-query}"; shift 2 ;;
     --smoke-provider) SMOKE_PROVIDER="${2:?missing value for --smoke-provider}"; shift 2 ;;
+    --scip-languages|--scip-langs) POSSE_SCIP_LANGUAGES="${2:?missing value for --scip-languages}"; POSSE_SCIP_LANGUAGES_SUPPLIED="true"; shift 2 ;;
+    --scip-languages=*|--scip-langs=*) POSSE_SCIP_LANGUAGES="${1#*=}"; POSSE_SCIP_LANGUAGES_SUPPLIED="true"; shift ;;
     --no-smoke) RUN_SMOKE="false"; shift ;;
     --no-persist-env) PERSIST_ENV="false"; shift ;;
     --skip-settings) SEED_SETTINGS="false"; shift ;;
@@ -231,6 +238,161 @@ warn() {
   log_only "[warn] $*"
 }
 
+SCIP_LANGUAGE_VALUES=(typescript python php go rust clang)
+SCIP_LANGUAGE_LABELS=("TypeScript / JavaScript" "Python" "PHP" "Go" "Rust" "C / C++ (clang)")
+SCIP_LANGUAGE_STEP_STATUS="ok"
+SCIP_LANGUAGE_STEP_NOTE=""
+
+scip_allowed_languages_text() {
+  local joined="${SCIP_LANGUAGE_VALUES[*]}"
+  printf '%s, all' "${joined// /, }"
+}
+
+scip_language_alias() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+  case "$value" in
+    all) printf '%s\n' "all" ;;
+    typescript|javascript|node|nodejs|ts|js) printf '%s\n' "typescript" ;;
+    python|py) printf '%s\n' "python" ;;
+    php) printf '%s\n' "php" ;;
+    go|golang) printf '%s\n' "go" ;;
+    rust|rs) printf '%s\n' "rust" ;;
+    clang|c|c++|cpp|cxx|cc) printf '%s\n' "clang" ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_scip_languages() {
+  local raw="${1:-}" token canonical selected="" invalid=()
+  raw="${raw//,/ }"
+  if [[ -z "${raw//[[:space:]]/}" ]]; then
+    printf '%s\n' "no SCIP languages selected"
+    return 1
+  fi
+  for token in $raw; do
+    if ! canonical="$(scip_language_alias "$token")"; then
+      invalid+=("$token")
+      continue
+    fi
+    if [[ "$canonical" == "all" ]]; then
+      selected="${SCIP_LANGUAGE_VALUES[*]}"
+      break
+    fi
+    case " $selected " in
+      *" $canonical "*) ;;
+      *) selected="${selected:+$selected }$canonical" ;;
+    esac
+  done
+  if [[ ${#invalid[@]} -gt 0 ]]; then
+    printf 'invalid SCIP language(s): %s; allowed: %s\n' "${invalid[*]}" "$(scip_allowed_languages_text)"
+    return 1
+  fi
+  if [[ -z "$selected" ]]; then
+    printf '%s\n' "no SCIP languages selected"
+    return 1
+  fi
+  printf '%s\n' "${selected// /,}"
+}
+
+prompt_scip_languages_if_needed() {
+  local normalized answer raw token idx selection invalid_numbers
+
+  if [[ "$POSSE_SCIP_LANGUAGES_SUPPLIED" == "true" ]]; then
+    if ! normalized="$(normalize_scip_languages "$POSSE_SCIP_LANGUAGES")"; then
+      SCIP_LANGUAGE_STEP_STATUS="failed"
+      SCIP_LANGUAGE_STEP_NOTE="$normalized"
+      return 1
+    fi
+    POSSE_SCIP_LANGUAGES="$normalized"
+    SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (--scip-languages)"
+    info "using --scip-languages: ${POSSE_SCIP_LANGUAGES}"
+    return 0
+  fi
+
+  if ! normalized="$(normalize_scip_languages "$POSSE_SCIP_LANGUAGES")"; then
+    SCIP_LANGUAGE_STEP_STATUS="failed"
+    SCIP_LANGUAGE_STEP_NOTE="$normalized"
+    return 1
+  fi
+  POSSE_SCIP_LANGUAGES="$normalized"
+
+  if [[ "$SEED_SETTINGS" != "true" ]]; then
+    SCIP_LANGUAGE_STEP_STATUS="skipped"
+    SCIP_LANGUAGE_STEP_NOTE="--skip-settings; account language setting unchanged"
+    info "initial SCIP language prompt skipped (--skip-settings)"
+    return 0
+  fi
+
+  if ! ( : </dev/tty ) 2>/dev/null; then
+    SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (default; no interactive terminal)"
+    info "no interactive terminal for SCIP language selection; using default: ${POSSE_SCIP_LANGUAGES}"
+    return 0
+  fi
+
+  while true; do
+    printf "\n  %sInitial SCIP language environments%s\n" "$BOLD" "$R" >/dev/tty
+    printf "    Select one or more languages for first-run indexing. Press Enter for defaults [%s].\n" "$POSSE_SCIP_LANGUAGES" >/dev/tty
+    printf "    Use numbers, names, comma-separated values, or 'all'.\n" >/dev/tty
+    local i value mark
+    for ((i = 0; i < ${#SCIP_LANGUAGE_VALUES[@]}; i++)); do
+      value="${SCIP_LANGUAGE_VALUES[i]}"
+      mark=" "
+      case ",${POSSE_SCIP_LANGUAGES}," in *",$value,"*) mark="*" ;; esac
+      printf "      %d) [%s] %s (%s)\n" "$((i + 1))" "$mark" "${SCIP_LANGUAGE_LABELS[i]}" "$value" >/dev/tty
+    done
+    if ! read -r -p "      Languages (numbers/names, comma-separated, or all): " answer </dev/tty; then
+      SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (default; prompt unavailable)"
+      info "SCIP language prompt unavailable; using default: ${POSSE_SCIP_LANGUAGES}"
+      return 0
+    fi
+    if [[ -z "${answer//[[:space:]]/}" ]]; then
+      SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (default)"
+      info "initial SCIP languages: ${POSSE_SCIP_LANGUAGES}"
+      return 0
+    fi
+
+    selection=""
+    invalid_numbers=()
+    raw="${answer//,/ }"
+    for token in $raw; do
+      if [[ "$token" =~ ^[0-9]+$ ]]; then
+        idx=$((token - 1))
+        if ((idx >= 0 && idx < ${#SCIP_LANGUAGE_VALUES[@]})); then
+          selection="${selection:+$selection }${SCIP_LANGUAGE_VALUES[idx]}"
+        else
+          invalid_numbers+=("$token")
+        fi
+      else
+        selection="${selection:+$selection }$token"
+      fi
+    done
+    if [[ ${#invalid_numbers[@]} -gt 0 ]]; then
+      printf "    %s%s%s invalid option number(s): %s\n" "$YELLOW" "$GLYPH_WARN" "$R" "${invalid_numbers[*]}" >/dev/tty
+      continue
+    fi
+    if normalized="$(normalize_scip_languages "$selection")"; then
+      POSSE_SCIP_LANGUAGES="$normalized"
+      SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (interactive)"
+      info "initial SCIP languages: ${POSSE_SCIP_LANGUAGES}"
+      return 0
+    fi
+    printf "    %s%s%s %s\n" "$YELLOW" "$GLYPH_WARN" "$R" "$normalized" >/dev/tty
+  done
+}
+
+step_scip_languages() {
+  step_begin languages
+  info "choose initial SCIP language environments before runtime doctor runs"
+  if prompt_scip_languages_if_needed; then
+    step_end "$SCIP_LANGUAGE_STEP_STATUS" "$SCIP_LANGUAGE_STEP_NOTE"
+    return 0
+  fi
+  CRITICAL_FAILED="true"
+  step_end failed "$SCIP_LANGUAGE_STEP_NOTE"
+  return 1
+}
+
 shell_quote() { printf "%q" "$1"; }
 
 format_command() {
@@ -242,8 +404,10 @@ format_command() {
 # --- step engine ---------------------------------------------------------------
 # Steps are declared up-front so numbering and the summary are stable no matter
 # where the run stops. Each step records ok/skipped/partial/failed/blocked.
-STEP_KEYS=(packages node checkout composer npm shell seed doctor admin validate keys smoke)
+STEP_KEYS=(languages preflight packages node checkout composer npm shell seed doctor admin validate keys smoke)
 declare -A STEP_TITLES=(
+  [languages]="SCIP language selection"
+  [preflight]="Preflight checks"
   [packages]="System packages"
   [node]="Node.js runtime"
   [checkout]="Posse checkout"
@@ -290,6 +454,16 @@ step_end() {
 step_fail_critical() {
   CRITICAL_FAILED="true"
   step_end "failed" "$1"
+}
+
+block_pending_steps() {
+  local note="${1:-blocked by an earlier failure}" key
+  for key in "${STEP_KEYS[@]}"; do
+    if [[ "${STEP_STATUS[$key]}" == "pending" ]]; then
+      STEP_STATUS[$key]="blocked"
+      STEP_NOTE[$key]="$note"
+    fi
+  done
 }
 
 # Runs `"$@"` with output captured to the log. On a TTY, shows a spinner with
@@ -1201,6 +1375,26 @@ check_git_config() {
     || warn 'git user.email is not set globally (git config --global user.email "you@example.com")'
 }
 
+step_preflight() {
+  step_begin preflight
+  if [[ -n "$REPO_PATH" ]]; then
+    REPO_PATH="$(resolve_full_path "$REPO_PATH")"
+    if [[ ! -d "$REPO_PATH" ]]; then
+      CRITICAL_FAILED="true"
+      step_end failed "repo path does not exist: ${REPO_PATH}"
+      return 1
+    fi
+    [[ -z "$REPO_ID" ]] && REPO_ID="$(basename "$REPO_PATH")"
+    info "smoke repo: ${REPO_PATH}"
+  else
+    info "no --repo-path provided; smoke test will be skipped"
+  fi
+  check_git_config
+  check_provider_credentials
+  step_end ok "preflight complete"
+  return 0
+}
+
 # =============================================================================
 # main
 # =============================================================================
@@ -1220,14 +1414,17 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 printf "  %sLog: %s%s\n" "$DIM" "$LOG_FILE" "$R"
 
-if [[ -n "$REPO_PATH" ]]; then
-  REPO_PATH="$(resolve_full_path "$REPO_PATH")"
-  [[ -d "$REPO_PATH" ]] || { printf "  %s%s%s repo path does not exist: %s\n" "$RED" "$GLYPH_FAIL" "$R" "$REPO_PATH"; CRITICAL_FAILED="true"; exit 1; }
-  [[ -z "$REPO_ID" ]] && REPO_ID="$(basename "$REPO_PATH")"
+if ! step_scip_languages; then
+  block_pending_steps "language selection failed"
+  print_summary
+  exit 1
 fi
 
-check_git_config
-check_provider_credentials
+if ! step_preflight; then
+  block_pending_steps "preflight failed"
+  print_summary
+  exit 1
+fi
 
 step_packages
 step_node

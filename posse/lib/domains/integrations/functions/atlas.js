@@ -108,7 +108,7 @@ const ATLAS_V2_BOOT_WORKER_STOP_GRACE_MS = 10_000;
 /**
  * Run the boot main-view freshness check in a worker thread.
  * @param {any} [args]
- * @returns {Promise<{ exists: boolean, readable: boolean, branchMatches: boolean, current: boolean, error: string | null }>}
+ * @returns {Promise<{ exists: boolean, readable: boolean, branchMatches: boolean, current: boolean, meta?: any, freshness?: any, ledgerFormat?: any, error: string | null }>}
  */
 function inspectMainViewForBootInWorker({ viewPath, branch, ledgerDbPath = null, timeoutMs = 120_000, signal = null, layerMerge = null } = {}) {
   return ATLAS_BOOT_THREAD_MANAGER.run(VIEW_INSPECT_WORKER_URL, {
@@ -289,6 +289,108 @@ function resolveAtlasV2BootTimeoutMs(value = null, config = null) {
 function normalizeAtlasBootReindexPolicy(value = null) {
   const raw = String(value || "").trim().toLowerCase();
   return raw === "always" || raw === "missing" || raw === "smart" ? raw : "smart";
+}
+
+function atlasBootLedgerNeedsReset(viewStatus = null) {
+  return viewStatus?.ledgerFormat?.resetNeeded === true;
+}
+
+function atlasBootViewCorruptionError(viewStatus = null) {
+  const error = viewStatus?.error || viewStatus?.ledgerFormat?.error || "";
+  return error && isAtlasGraphCorruptionError(error) ? error : "";
+}
+
+function atlasBootFreshnessRequiresFullWarm(viewStatus = null) {
+  const reason = String(viewStatus?.freshness?.reason || "").toLowerCase();
+  return /layer-merge|schema|format/.test(reason);
+}
+
+function atlasBootRequiresFullWarm({ ledgerPresent, mainViewPresent, viewStatus = null, policy = "smart" } = {}) {
+  if (policy === "always") return true;
+  if (!ledgerPresent || !mainViewPresent) return true;
+  if (!viewStatus?.branchMatches) return true;
+  if (atlasBootLedgerNeedsReset(viewStatus)) return true;
+  if (atlasBootViewCorruptionError(viewStatus)) return true;
+  if (atlasBootFreshnessRequiresFullWarm(viewStatus)) return true;
+  return false;
+}
+
+function atlasBootIndexCurrent({ ledgerPresent, mainViewPresent, viewStatus = null } = {}) {
+  return !!(
+    ledgerPresent
+    && mainViewPresent
+    && viewStatus?.branchMatches
+    && viewStatus?.current
+    && !atlasBootLedgerNeedsReset(viewStatus)
+    && !atlasBootViewCorruptionError(viewStatus)
+  );
+}
+
+function atlasBootIndexNotice({
+  ledgerPresent,
+  mainViewPresent,
+  viewStatus = null,
+  policy = "smart",
+  purpose = "main-full",
+} = {}) {
+  const mode = purpose === "main-incremental" ? "incremental" : "full";
+  const cold = mode === "full";
+  const make = (reason, text, detail = null) => ({
+    cold,
+    reason,
+    purpose,
+    mode,
+    text: `${text} (${mode})`,
+    noticeDetail: cold ? "May take a while; future warm indexes will be much faster." : null,
+    detail,
+  });
+  if (policy === "always") {
+    return make("policy_always", "Cold re-index: forced by boot policy");
+  }
+  if (!ledgerPresent && !mainViewPresent) {
+    return make("first_run", "Cold re-index: first ATLAS index for this repo");
+  }
+  if (!ledgerPresent) {
+    return make("ledger_missing", "Cold re-index: ATLAS ledger is missing");
+  }
+  if (atlasBootLedgerNeedsReset(viewStatus)) {
+    const format = viewStatus?.ledgerFormat || {};
+    const detail = format.error
+      || (format.schemaVersion != null
+        ? `schema ${format.schemaVersion} -> ${format.expectedSchemaVersion}`
+        : "ledger format reset required");
+    if (atlasBootViewCorruptionError(viewStatus)) {
+      return make("storage_repair", "Cold re-index: ATLAS storage was unreadable", detail);
+    }
+    return make("format_changed", "Cold re-index: ATLAS index format changed", detail);
+  }
+  if (!mainViewPresent) {
+    return make("view_missing", "Cold re-index: ATLAS search view is missing");
+  }
+  if (atlasBootViewCorruptionError(viewStatus)) {
+    return make("storage_repair", "Cold re-index: ATLAS storage was unreadable", atlasBootViewCorruptionError(viewStatus));
+  }
+  if (viewStatus && !viewStatus.readable) {
+    return make("view_unreadable", "Cold re-index: ATLAS search view was unreadable", viewStatus.error || null);
+  }
+  if (viewStatus && !viewStatus.branchMatches) {
+    const actual = viewStatus.meta?.branch ? `view branch ${viewStatus.meta.branch}` : "view branch unknown";
+    return make("branch_changed", "Cold re-index: ATLAS target branch changed", actual);
+  }
+  const freshnessReason = viewStatus?.freshness?.reason || null;
+  if (freshnessReason) {
+    if (atlasBootFreshnessRequiresFullWarm(viewStatus)) {
+      return make("format_changed", "Cold re-index: ATLAS index format changed", freshnessReason);
+    }
+    return make("repo_version_changed", "Index refresh: repository version changed", freshnessReason);
+  }
+  if (purpose === "main-full") {
+    return make("full_rebuild", "Cold re-index: rebuilding ATLAS index");
+  }
+  if (viewStatus && !viewStatus.current) {
+    return make("index_stale", "Index refresh: ATLAS view is stale", viewStatus.error || null);
+  }
+  return null;
 }
 
 function uniqueSourceLanguages(values = []) {
@@ -744,6 +846,8 @@ function runAtlasV2BootWarmWorkerThread({
           purpose,
           result: message.result || null,
         });
+        try { worker.unref?.(); } catch { /* best effort: result is already in hand */ }
+        try { worker.terminate().catch(() => undefined); } catch { /* worker may already be gone */ }
         finish(resolve, message.result || {});
         return;
       }
@@ -861,13 +965,13 @@ function runAtlasV2BootWarmInWorker(args) {
           layerMerge: args?.config?.viewLayerMerge === true,
         })
       : null;
-    const indexCurrent = !!(ledgerPresent && mainViewPresent && viewStatus?.branchMatches && viewStatus?.current);
-    const canUseIncremental = !!(
-      ledgerPresent
-      && mainViewPresent
-      && viewStatus?.branchMatches
-      && policy !== "always"
-    );
+    const indexCurrent = atlasBootIndexCurrent({ ledgerPresent, mainViewPresent, viewStatus });
+    const canUseIncremental = !atlasBootRequiresFullWarm({
+      ledgerPresent,
+      mainViewPresent,
+      viewStatus,
+      policy,
+    });
     return { ledgerPresent, mainViewPresent, viewStatus, indexCurrent, canUseIncremental };
   };
   // SCIP staging (.scip generation) is no longer pre-staged here. The boot
@@ -878,12 +982,20 @@ function runAtlasV2BootWarmInWorker(args) {
   return runSqliteWrite(
     args.ledgerDbPath,
     async () => {
-      const { canUseIncremental } = await inspectBootState();
+      const bootState = await inspectBootState();
       // Even when the index looks current, run main-incremental: the worker's
       // boot source-stat freshness scan only hashes files whose size/mtime
       // changed, so this stays cheap while catching disk changes that never
       // reached the ledger.
-      const purpose = canUseIncremental ? "main-incremental" : "main-full";
+      const purpose = bootState.canUseIncremental ? "main-incremental" : "main-full";
+      const indexNotice = atlasBootIndexNotice({ ...bootState, policy, purpose });
+      if (indexNotice) {
+        emitBootProgress(args.onProgress, {
+          kind: "atlas.index_notice",
+          stage: "index",
+          ...indexNotice,
+        });
+      }
       return runAtlasV2BootWarmWorkerThread({
         ...args,
         timeoutMs,
@@ -1447,7 +1559,7 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
         layerMerge: config?.viewLayerMerge === true,
       })
     : null;
-  const indexPresent = !!(ledgerPresent && mainViewPresent && viewStatus?.branchMatches && viewStatus?.current);
+  const indexPresent = atlasBootIndexCurrent({ ledgerPresent, mainViewPresent, viewStatus });
   const canUseExistingIndex = indexPresent && bootReindexPolicy !== "always";
   // Decide whether ATLAS itself can be skipped (index already current and
   // boot policy isn't forcing a rebuild). SCIP staging runs concurrently in
@@ -1565,7 +1677,11 @@ export async function startAtlasPreflightIndex(opts = {}) {
         ledgerDbPath: storage.ledgerDbPath,
         layerMerge: config?.viewLayerMerge === true,
       });
-      viewCurrent = !!(status?.branchMatches && status?.current);
+      viewCurrent = atlasBootIndexCurrent({
+        ledgerPresent,
+        mainViewPresent,
+        viewStatus: status,
+      });
     } catch {
       viewCurrent = false;
     }

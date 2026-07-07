@@ -47,6 +47,10 @@ import {
   isRedTeamPlanningPayload,
   redTeamPlanningPayload,
 } from "../../../planning/functions/red-team-plan.js";
+import {
+  createOneshotDevJob,
+  createPlanAfterSkippedResearch,
+} from "../../../research/functions/intake-routing.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
 const ALLOWED_BARE_DOTFILES = new Set([
@@ -69,7 +73,8 @@ const ALLOWED_BARE_DOTFILES = new Set([
   ".prettierignore",
 ]);
 
-const PREFLIGHT_MODES = new Set(["solo", "fanout_clear"]);
+const PREFLIGHT_MODES = new Set(["solo", "fanout_clear", "oneshot", "plan_direct"]);
+const PREFLIGHT_ALLOWED_KEYS = new Set(["mode", "budget", "candidate_files", "branches", "reason"]);
 
 function parsePayload(worker, job) {
   if (typeof worker?.parsePayload === "function") return worker.parsePayload(job);
@@ -86,16 +91,15 @@ function findExistingPlanForResearch(researchJob) {
     .sort((a, b) => a.id - b.id)[0] || null;
 }
 
-// Symmetric to findExistingPlanForResearch: detect a research continuation that
+// Symmetric to findExistingPlanForResearch: detect a continuation that
 // already follows this preflight so a lease-loss re-lease (two workers reaching
-// the success tail) can't double-spawn the research+plan subtree. Solo, active
-// fanout (children + synth), and shadow fanout all create `research` jobs
-// parented to the preflight, so a single type/parent check covers every route.
-function findExistingResearchForPreflight(preflightJob) {
+// the success tail) can't double-spawn the routed subtree. Some preflight
+// routes create research, while one-shot and plan-direct routes create dev/plan
+// jobs parented to the preflight.
+function findExistingContinuationForPreflight(preflightJob) {
   return listJobsByWorkItem(preflightJob.work_item_id)
     .filter((job) =>
-      job.job_type === "research"
-      && job.parent_job_id === preflightJob.id
+      job.parent_job_id === preflightJob.id
       && job.status !== "canceled"
     )
     .sort((a, b) => a.id - b.id)[0] || null;
@@ -117,17 +121,39 @@ export function parsePreflightRoutingDecision(output, { fallbackBudget = "normal
       mode: "solo",
       budget: normalizeResearchBudget(fallbackBudget, "normal"),
       branches: [],
+      candidate_files: [],
       fallback: true,
       reason: fallbackReason || "preflight returned malformed JSON",
+    };
+  }
+  const extraKeys = Object.keys(parsed).filter((key) => !PREFLIGHT_ALLOWED_KEYS.has(key));
+  if (extraKeys.length > 0) {
+    return {
+      mode: "solo",
+      budget: normalizeResearchBudget(fallbackBudget, "normal"),
+      branches: [],
+      candidate_files: [],
+      fallback: true,
+      reason: `preflight returned unsupported field(s): ${extraKeys.slice(0, 5).join(", ")}`,
     };
   }
 
   const mode = PREFLIGHT_MODES.has(parsed.mode) ? parsed.mode : "solo";
   const branches = mode === "fanout_clear" ? normalizeFanoutBranches(parsed.branches).slice(0, 3) : [];
+  const candidateFiles = Array.isArray(parsed.candidate_files)
+    ? parsed.candidate_files
+      .map((file) => String(file || "").trim().replace(/\\/g, "/").replace(/^\.\//, ""))
+      .filter(Boolean)
+      .slice(0, 1)
+    : [];
+  const finalMode = mode === "fanout_clear"
+    ? (branches.length > 0 ? "fanout_clear" : "solo")
+    : mode;
   return {
-    mode: mode === "fanout_clear" && branches.length > 0 ? "fanout_clear" : "solo",
+    mode: finalMode,
     budget: normalizeResearchBudget(parsed.budget, fallbackBudget),
     branches,
+    candidate_files: candidateFiles,
     fallback: false,
     reason: typeof parsed.reason === "string" ? parsed.reason.slice(0, 500) : null,
   };
@@ -147,8 +173,8 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
   const rawAutoApproved = requestsByRisk?.autoApproved || [];
   const rawNeedsApproval = requestsByRisk?.needsApproval || [];
   const rawRequestCount = rawAutoApproved.length + rawNeedsApproval.length;
-  const autoApproved = sanitizeRequests(rawAutoApproved);
-  const needsApproval = sanitizeRequests(rawNeedsApproval);
+  let autoApproved = sanitizeRequests(rawAutoApproved);
+  let needsApproval = sanitizeRequests(rawNeedsApproval);
   if (autoApproved.length === 0 && needsApproval.length === 0) {
     if (rawRequestCount > 0) {
       const droppedCount = rawRequestCount - autoApproved.length - needsApproval.length;
@@ -175,6 +201,11 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
   // Gather context from the origin job for the follow-up task_spec
   // Dev jobs use task_spec; fix jobs use fix_instructions instead
   const originPayload = worker.parsePayload(originJob);
+  const originIsOneshot = originPayload.oneshot === true || originPayload.oneshot_origin === true;
+  if (originIsOneshot && autoApproved.length > 0) {
+    needsApproval = [...needsApproval, ...autoApproved];
+    autoApproved = [];
+  }
   const originSpec = originPayload.task_spec
     || originPayload.fix_instructions
     || originJob.title;
@@ -202,6 +233,7 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
       inheritedPayloadFields[key] = originPayload[key];
     }
   }
+  if (originIsOneshot) inheritedPayloadFields.oneshot_origin = true;
   const researchArtifacts = getArtifactsByWorkItem(originJob.work_item_id, "summary");
   const projectContext = researchArtifacts.length > 0
     ? researchArtifacts[researchArtifacts.length - 1].content_long
@@ -299,6 +331,7 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
       .map(r => `- ${r.path}${r.reason ? ` — ${r.reason}` : ""}`)
       .join("\n");
 
+    const approvalLabel = originIsOneshot ? "human-gated one-shot file creation" : "high-risk file(s)";
     // 1. Human approval gate
     const humanJob = spawnFromRole(originRole, "succeeded", "human_input", {
       work_item_id: originJob.work_item_id,
@@ -310,9 +343,9 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
         original_job_id: originJob.id,
         questions: [
           [
-            `Job #${originJob.id} (${originJob.title}) requests creation of ${approvalPaths.length} high-risk file(s):`,
+            `Job #${originJob.id} (${originJob.title}) requests creation of ${approvalPaths.length} ${approvalLabel}:`,
             fileDesc,
-            `These are script/executable/code files.`,
+            originIsOneshot ? `One-shot-origin file requests require human approval before creating files.` : `These are script/executable/code files.`,
             `Reply with "approve" to continue or "reject" to cancel the gated file-creation job.`,
           ].join("\n"),
         ],
@@ -378,22 +411,23 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
 }
 
 export function spawnResearchAfterPreflight(worker, preflightJob, output, { fallbackReason = null } = {}) {
-  const existingResearch = findExistingResearchForPreflight(preflightJob);
-  if (existingResearch) {
+  const existingContinuation = findExistingContinuationForPreflight(preflightJob);
+  if (existingContinuation) {
     worker?.emit?.(preflightJob.id,
-      `${C.cyan}[preflight]${C.reset} WI#${preflightJob.work_item_id}: existing research #${existingResearch.id} already follows preflight #${preflightJob.id} - skipping duplicate spawn`);
+      `${C.cyan}[preflight]${C.reset} WI#${preflightJob.work_item_id}: existing ${existingContinuation.job_type} #${existingContinuation.id} already follows preflight #${preflightJob.id} - skipping duplicate spawn`);
     logEvent({
       work_item_id: preflightJob.work_item_id,
-      job_id: existingResearch.id,
+      job_id: existingContinuation.id,
       event_type: EVENT_TYPES.PIPELINE_DUPLICATE_RESEARCH_SKIPPED,
       actor_type: EVENT_ACTORS.SYSTEM,
-      message: `Skipped duplicate research spawn after preflight #${preflightJob.id}; existing research #${existingResearch.id} already follows it`,
+      message: `Skipped duplicate continuation spawn after preflight #${preflightJob.id}; existing ${existingContinuation.job_type} #${existingContinuation.id} already follows it`,
       event_json: JSON.stringify({
         preflight_job_id: preflightJob.id,
-        existing_research_job_id: existingResearch.id,
+        existing_continuation_job_id: existingContinuation.id,
+        existing_continuation_job_type: existingContinuation.job_type,
       }),
     });
-    return existingResearch;
+    return existingContinuation;
   }
 
   const wi = getWorkItem(preflightJob.work_item_id);
@@ -422,6 +456,85 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
         budget: researchBudget,
       }),
     });
+  }
+
+  if (decision.mode === "oneshot" && wi) {
+    const outcome = createOneshotDevJob(wi, {
+      routing: {
+        ...(preflightPayload.routing || {}),
+        bucket: "oneshot",
+        budget: decision.budget,
+        reason: decision.reason || preflightPayload.routing?.reason || "preflight resolved one-shot scope",
+        candidate_files: decision.candidate_files,
+      },
+      source: "preflight",
+      projectDir: worker?.projectDir,
+      candidateFiles: decision.candidate_files,
+      parentJob: preflightJob,
+      redTeamPlan: isRedTeamPlanningPayload(preflightPayload),
+      demotionSource: "preflight_gate",
+    });
+    logEvent({
+      work_item_id: preflightJob.work_item_id,
+      job_id: outcome.job?.id || preflightJob.id,
+      event_type: EVENT_TYPES.PREFLIGHT_ROUTED,
+      actor_type: EVENT_ACTORS.PREFLIGHT,
+      message: outcome.demoted
+        ? `Preflight one-shot demoted to plan job #${outcome.job?.id}`
+        : `Preflight routed to one-shot dev job #${outcome.job?.id}`,
+      event_json: JSON.stringify({
+        mode: decision.mode,
+        budget: decision.budget,
+        fallback: !!decision.fallback,
+        reason: decision.reason,
+        candidate_files: decision.candidate_files,
+        preflight_job_id: preflightJob.id,
+        continuation_job_id: outcome.job?.id || null,
+        continuation_job_type: outcome.job?.job_type || null,
+        demoted: !!outcome.demoted,
+      }),
+    });
+    worker?.emit?.(
+      preflightJob.id,
+      `${C.cyan}[preflight]${C.reset} WI#${preflightJob.work_item_id}: ${outcome.demoted ? "demoted one-shot to" : "routed to one-shot"} ${outcome.job?.job_type || "job"} #${outcome.job?.id}`,
+    );
+    return outcome.job;
+  }
+
+  if (decision.mode === "plan_direct" && wi) {
+    const planJob = createPlanAfterSkippedResearch(wi, {
+      routing: {
+        ...(preflightPayload.routing || {}),
+        bucket: "no_research",
+        budget: decision.budget,
+        reason: decision.reason || preflightPayload.routing?.reason || "preflight routed directly to planning",
+      },
+      budget: researchBudget,
+      source: "preflight_plan_direct",
+      redTeamPlan: isRedTeamPlanningPayload(preflightPayload),
+      parentJob: preflightJob,
+    });
+    logEvent({
+      work_item_id: preflightJob.work_item_id,
+      job_id: planJob.id,
+      event_type: EVENT_TYPES.PREFLIGHT_ROUTED,
+      actor_type: EVENT_ACTORS.PREFLIGHT,
+      message: `Preflight routed directly to plan job #${planJob.id}`,
+      event_json: JSON.stringify({
+        mode: decision.mode,
+        budget: researchBudget,
+        fallback: !!decision.fallback,
+        reason: decision.reason,
+        preflight_job_id: preflightJob.id,
+        continuation_job_id: planJob.id,
+        continuation_job_type: planJob.job_type,
+      }),
+    });
+    worker?.emit?.(
+      preflightJob.id,
+      `${C.cyan}[preflight]${C.reset} WI#${preflightJob.work_item_id}: routed directly to plan job #${planJob.id} (${researchBudget})`,
+    );
+    return planJob;
   }
 
   if (decision.mode === "fanout_clear" && fanoutMode === "on" && wi) {

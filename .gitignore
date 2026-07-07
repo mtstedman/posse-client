@@ -60,6 +60,7 @@ posse/node_modules/
 
 # Artifacts
 *.zip
+*.stackdump
 # Posse runtime (auto-added)
 sdl-mcp/
 logs/

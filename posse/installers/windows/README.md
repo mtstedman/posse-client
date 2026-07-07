@@ -101,6 +101,7 @@ powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
 | `-RepoPath <path>` | ATLAS repo path for the smoke test |
 | `-SmokeQuery <q>` | Query used for atlas-smoke (default: `auth`) |
 | `-SmokeProvider <p>` | Provider for atlas-smoke (default: `openai`) |
+| `-ScipLanguages <csv>` | Initial SCIP languages to install/index: `typescript`, `python`, `php`, `go`, `rust`, `clang`, or `all`. Omit for an interactive multi-select prompt. |
 | `-NoSmoke` | Skip the smoke test |
 | `-NoPersistEnv` | Don't write user `PATH` / `$PROFILE` wiring |
 | `-SkipSettings` | Don't seed `~\.posse\account.db` |

@@ -2,6 +2,7 @@ import { normalizeResearchBudget } from "../../../shared/policies/functions/role
 import { slugify } from "../../../shared/format/functions/slug.js";
 
 const SIMPLE_NO_RESEARCH_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|rename|renaming|copy\s*edit|docs?\s+fix|formatting|whitespace)\b/i;
+const ONESHOT_SIMPLE_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|copy\s*edit|docs?\s+fix|whitespace)\b/i;
 const LOW_NO_LOGIC_RE = /\b(?:typo|spelling|comments?\s+fix|comment-only|rename|copy\s*edit|docs?|readme|formatting|whitespace|no\s+(?:logic|behavior|behaviour)\s+change)\b/i;
 const COMPLEX_RE = /\b(?:race|concurren\w*|security|auth|authorization|authentication|lock|locking|deadlock|transaction|migration|corruption|data\s+loss|permission|credential|secret|encryption|oauth|session)\b/i;
 const AMBIGUOUS_RE = /\b(?:investigate|figure\s+out\s+why|diagnose|debug\s+why|root\s+cause|trace\s+why|why\s+(?:is|does|did)|flaky|intermittent)\b/i;
@@ -348,10 +349,13 @@ export function buildSyntheticResearchBrief(routingOrReason = null) {
   const reason = typeof routingOrReason === "string"
     ? routingOrReason
     : routingOrReason?.reason || "deterministic no_research route";
+  const keyFiles = typeof routingOrReason === "object" && routingOrReason
+    ? unique([...(routingOrReason.candidate_files || []), ...(routingOrReason.key_files || [])].map(normalizePathLike))
+    : [];
   const structured = {
     research_skipped: true,
     reason,
-    key_files: [],
+    key_files: keyFiles,
     related_files: [],
     constraints: ["Researcher was skipped by deterministic routing; planner should rely on the original work item and intake hints."],
     questions_for_human: false,
@@ -386,6 +390,7 @@ export function classifyResearchTask({
   const listItems = extractListItems(taskDescription || taskTitle);
   const noResearchText = taskDescription || taskTitle;
   const protectedFileMention = hasProtectedFileMention(fileMentions);
+  const oneshotSimple = !protectedFileMention && ONESHOT_SIMPLE_RE.test(text) && noResearchText.length < 200 && !COMPLEX_RE.test(text);
   const simpleNoResearch = !protectedFileMention && SIMPLE_NO_RESEARCH_RE.test(text) && fileMentions.length === 1 && noResearchText.length < 200 && !COMPLEX_RE.test(text);
   const renameMultiNoResearch = !protectedFileMention && RENAME_RE.test(text) && filesAllInSameModule(fileMentions) && noResearchText.length < 400 && !COMPLEX_RE.test(text);
   const webFanoutCandidate = webBranches.length >= 2 && WEB_FANOUT_RE.test(text) && mentionedModules.length === 0 && fileMentions.length === 0;
@@ -409,6 +414,17 @@ export function classifyResearchTask({
     result = { bucket: "no_research", reason: "intake intent is typo_fix" };
   } else if (!protectedFileMention && lowerMode === "promote") {
     result = { bucket: "no_research", reason: "promote mode is a branch handoff" };
+  } else if (oneshotSimple && fileMentions.length === 1) {
+    result = {
+      bucket: "oneshot",
+      reason: "single-file trivial edit can skip planner",
+      candidate_files: fileMentions,
+    };
+  } else if (oneshotSimple && fileMentions.length === 0 && lowerMode !== "question") {
+    result = {
+      bucket: "oneshot_candidate",
+      reason: "trivial edit needs preflight scope resolution",
+    };
   } else if (simpleNoResearch) {
     result = { bucket: "no_research", reason: "single-file low-risk text edit" };
   } else if (renameMultiNoResearch) {

@@ -29,6 +29,7 @@ import { PROVIDER_ROLE_SETTING_DEFS } from "../../providers/functions/roles.js";
 import {
   CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
+  CONTEXT_COMPACTION_MODE_VALUES,
   DELEGATION_MODE_VALUES,
   FIX_SCOPE_HANDOFF_GUARD_VALUES,
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES,
@@ -62,6 +63,7 @@ import {
 export {
   CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
+  CONTEXT_COMPACTION_MODE_VALUES,
   DELEGATION_MODE_VALUES,
   FIX_SCOPE_HANDOFF_GUARD_VALUES,
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES,
@@ -148,6 +150,10 @@ export const SETTINGS_CATALOG = [
   { key: "claude_usage_backoff_ms", default: "300000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to wait before retrying Claude usage refresh after an error" },
   { key: "codex_usage_cache_ms", default: "120000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to cache Codex usage summaries before refreshing" },
   { key: "codex_usage_backoff_ms", default: "300000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to wait before retrying Codex usage refresh after an error" },
+  { key: "context_compaction_mode", default: "shadow", options: CONTEXT_COMPACTION_MODE_VALUES, description: "Rolling context compaction mode: off records nothing, shadow records savings telemetry only, inject/reset modes are future behavior gates" },
+  { key: "context_compaction_trigger_input_tokens", default: "32000", numeric: { integer: true, min: 1 }, description: "Input-token pressure threshold for rolling-context shadow observations" },
+  { key: "context_compaction_session_reset_input_tokens", default: "96000", numeric: { integer: true, min: 1 }, description: "Resumed-session input-token threshold that would trigger a future context rollup reset" },
+  { key: "context_compaction_recent_target_tokens", default: "12000", numeric: { integer: true, min: 1000 }, description: "Target exact-recent token window used by rolling-context savings estimates" },
   { key: "max_output_tokens_researcher", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for researcher provider calls (empty = role/provider default)" },
   { key: "max_output_tokens_planner", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for planner provider calls (empty = role/provider default)" },
   { key: "max_output_tokens_dev", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for dev provider calls (empty = role/provider default)" },

@@ -25,6 +25,44 @@ function parseJson(value) {
   try { return value ? JSON.parse(value) : null; } catch { return null; }
 }
 
+function tableHasColumn(db, table, column) {
+  try {
+    const rows = /** @type {Array<{ name: string }>} */ (db.prepare(`PRAGMA table_info(${table})`).all());
+    return rows.some((row) => row.name === column);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {Record<string, any>}
+ */
+function objectOrEmpty(value) {
+  if (typeof value === "string" && value) {
+    const parsed = parseJson(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? /** @type {Record<string, any>} */ (parsed)
+      : {};
+  }
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? /** @type {Record<string, any>} */ (value)
+    : {};
+}
+
+/**
+ * @param {{ source?: string, metadata?: Record<string, any> }} layer
+ */
+function callProofCoverage(layer) {
+  const metadata = objectOrEmpty(layer.metadata);
+  const raw = metadata.call_proof_coverage
+    ?? metadata.callProofCoverage
+    ?? objectOrEmpty(metadata.call_proof).coverage
+    ?? objectOrEmpty(metadata.callProof).coverage;
+  const value = String(raw || "").toLowerCase();
+  return value === "full" || value === "partial" || value === "none" ? value : "none";
+}
+
 function mergeKey(kind, qualifiedOrName) {
   return `${String(kind || "")}\0${String(qualifiedOrName || "")}`;
 }
@@ -51,17 +89,50 @@ function nullableInt(value) {
   return Number.isInteger(value) ? value : null;
 }
 
+function confidenceScore(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : -1;
+}
+
+function edgeDedupKey(edge) {
+  if (edge.kind === "calls") {
+    return [
+      "calls",
+      edge.from_local_id,
+      edge.to_content_hash ?? "",
+      edge.to_local_id ?? "",
+      edge.to_external_id ?? "",
+      edge.to_name ?? "",
+      edge.to_module ?? "",
+      edge.range_start,
+    ].join("\0");
+  }
+  return [
+    edge.from_local_id,
+    edge.to_content_hash ?? "",
+    edge.to_local_id ?? "",
+    edge.to_external_id ?? "",
+    edge.to_name ?? "",
+    edge.kind,
+    edge.range_start,
+    edge.source,
+  ].join("\0");
+}
+
 /**
  * Latest indexed layer per source, ordered tree-sitter first.
  * @param {import("better-sqlite3").Database} ledgerDb
  * @param {string} contentHash
  * @param {string} lang
- * @returns {Array<{ id: number, source: "treesitter" | "scip" }>}
+ * @returns {Array<{ id: number, source: "treesitter" | "scip", metadata: Record<string, any> }>}
  */
 function latestLayers(ledgerDb, contentHash, lang) {
-  const rows = /** @type {Array<{ id: number, source: string }>} */ (
+  const metadataSelect = tableHasColumn(ledgerDb, "blob_layers", "metadata_json")
+    ? "metadata_json"
+    : "NULL AS metadata_json";
+  const rows = /** @type {Array<{ id: number, source: string, metadata_json?: string | null }>} */ (
     ledgerDb.prepare(
-      `SELECT id, source FROM blob_layers
+      `SELECT id, source, ${metadataSelect} FROM blob_layers
        WHERE content_hash = ? AND lang = ? AND status = 'indexed'
        ORDER BY indexed_at DESC, id DESC`,
     ).all(contentHash, lang)
@@ -69,7 +140,11 @@ function latestLayers(ledgerDb, contentHash, lang) {
   const bySource = new Map();
   for (const r of rows) {
     if ((r.source === "treesitter" || r.source === "scip") && !bySource.has(r.source)) {
-      bySource.set(r.source, { id: Number(r.id), source: r.source });
+      bySource.set(r.source, {
+        id: Number(r.id),
+        source: r.source,
+        metadata: objectOrEmpty(r.metadata_json),
+      });
     }
   }
   return /** @type {any} */ (SOURCE_ORDER.map((s) => bySource.get(s)).filter(Boolean));
@@ -236,11 +311,14 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
   }
 
   // Edges: remap from/to ids; keep cross-blob targets raw for buildFrom's
-  // resolver. Dedup identical A/B edges.
+  // resolver. Dedup identical A/B calls by confidence; when SCIP explicitly
+  // proves full call coverage, drop weaker tree-sitter calls up front.
+  const scipCallProofFull = layers.some((layer) => layer.source === "scip" && callProofCoverage(layer) === "full");
   const edges = [];
-  const seen = new Set();
+  const edgeIndexByKey = new Map();
   for (const layer of layers) {
     for (const row of readLayerEdges(ledgerDb, layer.id)) {
+      if (scipCallProofFull && layer.source === "treesitter" && row.kind === "calls") continue;
       const detail = parseJson(row.detail_json) || {};
       const range = parseJson(row.range_json) || {};
       const fromLocal = remap.get(`${layer.id}:${row.from_local_id}`);
@@ -251,19 +329,7 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
         : (detail.to_local_id ?? null);
       const toName = detail.to_name ?? null;
       const source = detail.source || layer.source;
-      const key = [
-        fromLocal,
-        sameBlob ? `L${toLocal}` : (detail.to_content_hash || ""),
-        sameBlob ? "" : (detail.to_local_id ?? ""),
-        detail.to_external_id ?? "",
-        toName ?? "",
-        row.kind,
-        num(range.range_start, 0),
-        source,
-      ].join("\0");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      edges.push({
+      const edge = {
         from_content_hash: contentHash,
         from_local_id: fromLocal,
         to_content_hash: sameBlob ? contentHash : (detail.to_content_hash ?? null),
@@ -278,7 +344,17 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
         range_end_line: nullableInt(range.range_end_line),
         confidence: detail.confidence ?? null,
         source,
-      });
+      };
+      const key = edgeDedupKey(edge);
+      const existingIndex = edgeIndexByKey.get(key);
+      if (existingIndex != null) {
+        if (edge.kind === "calls" && confidenceScore(edge.confidence) > confidenceScore(edges[existingIndex].confidence)) {
+          edges[existingIndex] = edge;
+        }
+        continue;
+      }
+      edgeIndexByKey.set(key, edges.length);
+      edges.push(edge);
     }
   }
 

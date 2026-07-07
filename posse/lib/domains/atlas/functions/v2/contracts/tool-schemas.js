@@ -94,6 +94,8 @@ export const ATLAS_MULTI_GATEWAY_ACTIONS = Object.freeze({
   "edit.plan": Object.freeze(["query", "code"]),
   "file.read": Object.freeze(["query", "code"]),
   "code.survey": Object.freeze(["query", "code"]),
+  "code.structure": Object.freeze(["query", "code"]),
+  "code.persistence": Object.freeze(["query", "code"]),
 });
 
 const QUERY_SHARED_ACTIONS = Object.freeze(
@@ -502,6 +504,17 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     symbols: identifierList({ maxItems: 16 }),
     maxFiles: i({ minimum: 1, maximum: 64 }),
     sessionId: s({ maxLength: 256 }),
+  }, ["paths"]),
+  "code.structure": o({
+    paths: { type: ["string", "array"], minLength: 1, items: { type: "string", minLength: 1 }, maxItems: 128 },
+    edgeKinds: a(s({ enum: ["imports", "calls", "references", "extends", "implements", "uses_type"] }), { maxItems: 6 }),
+    maxFiles: i({ minimum: 1, maximum: 128 }),
+    includeSymbols: b(),
+    includeEdges: b(),
+  }, ["paths"]),
+  "code.persistence": o({
+    paths: { type: ["string", "array"], minLength: 1, items: { type: "string", minLength: 1 }, maxItems: 128 },
+    maxFiles: i({ minimum: 1, maximum: 128 }),
   }, ["paths"]),
 
   context: o({

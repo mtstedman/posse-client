@@ -784,12 +784,15 @@ function materializeLayeredContentHash({ viewDb, ledgerDb, lang, contentHash }) 
  * @param {Database.Database} ledgerDb
  * @param {string} contentHash
  * @param {string} lang
- * @returns {Array<{ id: number, source: "treesitter" | "scip" }>}
+ * @returns {Array<{ id: number, source: "treesitter" | "scip", metadata: Record<string, any> }>}
  */
 function latestLayersForContentHash(ledgerDb, contentHash, lang) {
-  const rows = /** @type {Array<{ id: number, source: string }>} */ (
+  const metadataSelect = tableHasColumn(ledgerDb, "blob_layers", "metadata_json")
+    ? "metadata_json"
+    : "NULL AS metadata_json";
+  const rows = /** @type {Array<{ id: number, source: string, metadata_json?: string | null }>} */ (
     ledgerDb.prepare(
-      `SELECT id, source
+      `SELECT id, source, ${metadataSelect}
        FROM blob_layers
        WHERE content_hash = ? AND lang = ? AND status = 'indexed'
        ORDER BY indexed_at DESC, id DESC`,
@@ -798,7 +801,11 @@ function latestLayersForContentHash(ledgerDb, contentHash, lang) {
   const bySource = new Map();
   for (const row of rows) {
     if ((row.source === "treesitter" || row.source === "scip") && !bySource.has(row.source)) {
-      bySource.set(row.source, { id: Number(row.id), source: row.source });
+      bySource.set(row.source, {
+        id: Number(row.id),
+        source: row.source,
+        metadata: layerJson(row.metadata_json),
+      });
     }
   }
   return ["treesitter", "scip"].map((source) => bySource.get(source)).filter(Boolean);
@@ -808,7 +815,7 @@ function latestLayersForContentHash(ledgerDb, contentHash, lang) {
  * @param {{
  *   viewDb: Database.Database,
  *   ledgerDb: Database.Database,
- *   layers: Array<{ id: number, source: "treesitter" | "scip" }>,
+ *   layers: Array<{ id: number, source: "treesitter" | "scip", metadata: Record<string, any> }>,
  *   repoRelPath: string,
  *   contentHash: string,
  *   lang: string,
@@ -908,10 +915,11 @@ function materializeLayeredPath({ viewDb, ledgerDb, layers, repoRelPath, content
     globalByKey.set(key, Number(info.lastInsertRowid));
   }
 
-  const seenEdges = new Set();
-  let edgeCount = 0;
+  const scipCallProofFull = layers.some((layer) => layer.source === "scip" && callProofCoverage(layer) === "full");
+  const edgeRowsByKey = new Map();
   for (const layer of layers) {
     for (const row of layerEdges(ledgerDb, layer.id)) {
+      if (scipCallProofFull && layer.source === "treesitter" && row.kind === "calls") continue;
       const detail = layerJson(row.detail_json);
       const range = layerJson(row.range_json);
       const fromKey = sourceLocalToKey.get(`${layer.id}:${row.from_local_id}`);
@@ -925,40 +933,56 @@ function materializeLayeredPath({ viewDb, ledgerDb, layers, repoRelPath, content
       if (!toName) continue;
       const edgeSource = detail?.source === "scip" || layer.source === "scip" ? "scip" : "treesitter";
       const sameBlob = detail?.to_content_hash === contentHash && detail?.to_local_id != null;
-      const edgeKey = [
+      const edgeRow = {
         fromGlobal,
-        toGlobal || "",
-        sameBlob ? "" : stringOrNull(detail?.to_content_hash),
-        sameBlob ? "" : nullableNumber(detail?.to_local_id),
-        detail?.to_external_id || "",
+        toGlobal: toGlobal || null,
         toName,
-        row.kind,
-        numberOr(range?.range_start, detail?.range_start, 0),
+        toModule: stringOrNull(detail?.to_module),
+        toExternalId: nullableNumber(detail?.to_external_id),
+        externalDescriptor: row.to_symbol && String(row.to_symbol).startsWith("external:") ? row.to_symbol : null,
         edgeSource,
-      ].join("\0");
-      if (seenEdges.has(edgeKey)) continue;
-      seenEdges.add(edgeKey);
-      edgeInsert.run(
-        fromGlobal,
-        toGlobal || null,
-        toName,
-        stringOrNull(detail?.to_module),
-        nullableNumber(detail?.to_external_id),
-        row.to_symbol && String(row.to_symbol).startsWith("external:") ? row.to_symbol : null,
-        edgeSource,
-        row.kind,
+        kind: row.kind,
         repoRelPath,
-        numberOr(range?.range_start, detail?.range_start, 0),
-        numberOr(range?.range_end, detail?.range_end, 0),
-        nullableNumber(range?.range_start_line),
-        nullableNumber(range?.range_end_line),
-        numberOr(detail?.confidence, null, 50),
-      );
-      edgeCount++;
+        rangeStart: numberOr(range?.range_start, detail?.range_start, 0),
+        rangeEnd: numberOr(range?.range_end, detail?.range_end, 0),
+        rangeStartLine: nullableNumber(range?.range_start_line),
+        rangeEndLine: nullableNumber(range?.range_end_line),
+        confidence: numberOr(detail?.confidence, null, 50),
+        toContentHash: sameBlob ? contentHash : stringOrNull(detail?.to_content_hash),
+        toLocalId: nullableNumber(detail?.to_local_id),
+      };
+      const edgeKey = materializedEdgeDedupKey(edgeRow);
+      const existing = edgeRowsByKey.get(edgeKey);
+      if (existing) {
+        if (edgeRow.kind === "calls" && confidenceScore(edgeRow.confidence) > confidenceScore(existing.confidence)) {
+          edgeRowsByKey.set(edgeKey, edgeRow);
+        }
+        continue;
+      }
+      edgeRowsByKey.set(edgeKey, edgeRow);
     }
   }
 
-  return { symbols: canonical.size, edges: edgeCount };
+  for (const edgeRow of edgeRowsByKey.values()) {
+    edgeInsert.run(
+      edgeRow.fromGlobal,
+      edgeRow.toGlobal,
+      edgeRow.toName,
+      edgeRow.toModule,
+      edgeRow.toExternalId,
+      edgeRow.externalDescriptor,
+      edgeRow.edgeSource,
+      edgeRow.kind,
+      edgeRow.repoRelPath,
+      edgeRow.rangeStart,
+      edgeRow.rangeEnd,
+      edgeRow.rangeStartLine,
+      edgeRow.rangeEndLine,
+      edgeRow.confidence,
+    );
+  }
+
+  return { symbols: canonical.size, edges: edgeRowsByKey.size };
 }
 
 /**
@@ -1005,6 +1029,67 @@ function layerJson(value) {
   } catch {
     return {};
   }
+}
+
+function objectOrEmpty(value) {
+  if (typeof value === "string") return layerJson(value);
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+/**
+ * @param {Database.Database} db
+ * @param {string} table
+ * @param {string} column
+ */
+function tableHasColumn(db, table, column) {
+  try {
+    const cols = /** @type {Array<{ name: string }>} */ (db.prepare(`PRAGMA table_info(${table})`).all());
+    return cols.some((col) => col.name === column);
+  } catch {
+    return false;
+  }
+}
+
+function callProofCoverage(layer) {
+  const metadata = objectOrEmpty(layer?.metadata);
+  const raw = metadata.call_proof_coverage
+    ?? metadata.callProofCoverage
+    ?? objectOrEmpty(metadata.call_proof).coverage
+    ?? objectOrEmpty(metadata.callProof).coverage;
+  const value = String(raw || "").toLowerCase();
+  return value === "full" || value === "partial" || value === "none" ? value : "none";
+}
+
+function confidenceScore(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : -1;
+}
+
+function materializedEdgeDedupKey(edge) {
+  if (edge.kind === "calls") {
+    return [
+      "calls",
+      edge.fromGlobal,
+      edge.toGlobal || "",
+      edge.toContentHash || "",
+      edge.toLocalId ?? "",
+      edge.toExternalId ?? "",
+      edge.toName,
+      edge.toModule || "",
+      edge.rangeStart,
+    ].join("\0");
+  }
+  return [
+    edge.fromGlobal,
+    edge.toGlobal || "",
+    edge.toContentHash || "",
+    edge.toLocalId ?? "",
+    edge.toExternalId ?? "",
+    edge.toName,
+    edge.kind,
+    edge.rangeStart,
+    edge.edgeSource,
+  ].join("\0");
 }
 
 /**

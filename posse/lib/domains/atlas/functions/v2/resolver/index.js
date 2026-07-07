@@ -10,6 +10,7 @@ export {
 } from "./name-index.js";
 export {
   buildImportContexts,
+  resolveModulePathCandidates,
   resolveModuleSpecifier,
   RESOLVABLE_EXTENSIONS,
 } from "./import-context.js";

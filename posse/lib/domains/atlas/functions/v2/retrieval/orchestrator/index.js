@@ -16,6 +16,7 @@
 import { rrfFuse, rrfFuseAsync, RRF_K } from "./rrf.js";
 import { runFtsBackend, runFtsBackendAsync } from "./backends/fts.js";
 import { runVectorBackend } from "./backends/vector.js";
+import { runGraphBackend } from "./backends/graph.js";
 import { runEntityFtsBackends } from "./backends/entity-fts.js";
 import { buildFeedbackIndex, applyFeedbackBoost } from "./feedback-boost.js";
 import { applyTaskQueryRanking, applyTaskQueryRankingAsync } from "./task-query-ranking.js";
@@ -153,14 +154,17 @@ function hybridSearchSync(args, plan) {
   const { view, query, ledger, repoId, options } = args;
   const limit = options?.limit && options.limit > 0 ? options.limit : DEFAULT_LIMIT;
   const fts = runFtsBackend({ view, query, limit, plan, scope: options?.searchScope });
+  const graph = runGraphBackend({ view, limit, plan });
   /** @type {Record<string, { ok: boolean, total: number, reason?: string }>} */
   const backendStatus = { fts: { ok: fts.ok, total: fts.total, reason: fts.reason } };
   // Vector reason is "unavailable" — we did not run it.
   backendStatus.vector = { ok: false, total: 0, reason: "unavailable" };
+  backendStatus.graph = { ok: graph.ok, total: graph.total, reason: graph.reason };
 
   const { fused, separation } = fuseAndAdjust({
     fts,
     vector: null,
+    graph,
     ledger,
     taskType: options?.taskType,
     taskText: options?.taskText,
@@ -189,22 +193,25 @@ async function hybridSearchAsync(args, plan) {
     !!embeddingIndex &&
     !!encoder &&
     encoder.dim === embeddingIndex.dim;
-  const [fts, vector] = await Promise.all([
+  const [fts, vector, graph] = await Promise.all([
     runFtsBackendAsync({ view, query, limit, plan, scope: options?.searchScope }),
     wantSemantic
       ? runVectorBackend({ view, query, limit, embeddingIndex, encoder, signal })
       : Promise.resolve({ ok: false, entries: [], raw: [], total: 0, reason: "unavailable" }),
+    Promise.resolve(runGraphBackend({ view, limit, plan })),
   ]);
 
   /** @type {Record<string, { ok: boolean, total: number, reason?: string }>} */
   const backendStatus = {
     fts: { ok: fts.ok, total: fts.total, reason: fts.reason },
     vector: { ok: vector.ok, total: vector.total, reason: vector.reason },
+    graph: { ok: graph.ok, total: graph.total, reason: graph.reason },
   };
 
   const { fused, separation } = await fuseAndAdjustAsync({
     fts,
     vector,
+    graph,
     ledger,
     taskType: options?.taskType,
     taskText: options?.taskText,
@@ -263,6 +270,7 @@ function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query
 async function fuseAndAdjustAsync({
   fts,
   vector,
+  graph,
   ledger,
   taskType,
   taskText,
@@ -270,7 +278,7 @@ async function fuseAndAdjustAsync({
   feedbackHalfLifeDays,
   k,
 }) {
-  const lists = buildFusionLists(fts, vector);
+  const lists = buildFusionLists(fts, vector, graph);
   const fused = await rrfFuseAsync(lists, { k: typeof k === "number" ? k : RRF_K });
   const separation = assessRetrievalSeparation(fused, lists);
   applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });
@@ -281,13 +289,15 @@ async function fuseAndAdjustAsync({
 /**
  * @param {ReturnType<typeof runFtsBackend>} fts
  * @param {Awaited<ReturnType<typeof runVectorBackend>> | null} vector
+ * @param {ReturnType<typeof runGraphBackend> | null} graph
  * @returns {Record<string, ReturnType<typeof runFtsBackend>["entries"]>}
  */
-function buildFusionLists(fts, vector) {
+function buildFusionLists(fts, vector, graph) {
   /** @type {Record<string, ReturnType<typeof runFtsBackend>["entries"]>} */
   const lists = {};
   if (fts.ok && fts.entries.length > 0) lists.fts = fts.entries;
   if (vector && vector.ok && vector.entries.length > 0) lists.vector = vector.entries;
+  if (graph && graph.ok && graph.entries.length > 0) lists.graph = graph.entries;
   return lists;
 }
 
@@ -313,6 +323,7 @@ function applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSi
  * @param {{
  *   fts: ReturnType<typeof runFtsBackend>,
  *   vector: Awaited<ReturnType<typeof runVectorBackend>> | null,
+ *   graph?: ReturnType<typeof runGraphBackend> | null,
  *   ledger?: Ledger,
  *   taskType?: string,
  *   taskText?: string,
@@ -325,6 +336,7 @@ function applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSi
 function fuseAndAdjust({
   fts,
   vector,
+  graph = null,
   ledger,
   taskType,
   taskText,
@@ -332,7 +344,7 @@ function fuseAndAdjust({
   feedbackHalfLifeDays,
   k,
 }) {
-  const lists = buildFusionLists(fts, vector);
+  const lists = buildFusionLists(fts, vector, graph);
   const fused = rrfFuse(lists, { k: typeof k === "number" ? k : RRF_K });
   const separation = assessRetrievalSeparation(fused, lists);
   applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });

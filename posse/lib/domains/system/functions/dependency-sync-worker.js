@@ -27,6 +27,10 @@ try {
       type: "progress",
       event: { message: String(message || "") },
     }),
+    onEvent: (event) => post({
+      type: "progress",
+      event: event && typeof event === "object" ? event : { message: String(event || "") },
+    }),
   });
   post({ type: "result", result });
 } catch (err) {

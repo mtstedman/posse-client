@@ -41,6 +41,8 @@ const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
   "code.skeleton",
   "code.lens",
   "code.window",
+  "code.structure",
+  "code.persistence",
   "file.read",
   "review.risk",
   "memory.get",

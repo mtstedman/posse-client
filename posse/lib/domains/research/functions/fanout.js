@@ -189,21 +189,14 @@ export function createResearchFanoutJobs({
         fanout_branch_index: index,
         fanout_branch: branch,
         fanout_scope_hints: branch.scope_hints,
+        prompt_profile: "researcher_fanout_child",
+        output_contract: "branch_evidence_packet",
+        output_token_target: 900,
         preflight_job_id: inheritedPreflightJobId,
         instructions: [
           `Fanout child branch: ${branch.label}`,
           `Branch kind: ${branch.kind}`,
-          "",
-          branch.kind === "web" ? "Domain/URL hints:" : "Scope hints:",
-          ...(branch.scope_hints.length > 0 ? branch.scope_hints.map((hint) => `- ${hint}`) : ["- (none provided)"]),
-          "",
-          branch.kind === "web"
-            ? "Investigate only this external-source branch unless a direct code connection is required to verify a claim."
-            : "Investigate only this branch unless a direct dependency is required to verify a claim.",
-          branch.kind === "web"
-            ? "Emit exact URLs for external-source findings and path:line citations only when you connect the docs back to repository code."
-            : "Emit exact file paths and line-number citations for important findings.",
-          "Surface uncertainty and contradictions instead of filling gaps with guesses.",
+          "Use the fanout route metadata and remote researcher_fanout_child prompt profile for scope, evidence, and output shape.",
         ].join("\n"),
       }, researchBudget)),
     }));
@@ -226,13 +219,14 @@ export function createResearchFanoutJobs({
         fanout_reason: reason || null,
         fanout_branches: normalizedBranches,
         child_job_ids: childJobs.map((job) => job.id),
+        prompt_profile: "researcher_fanout_synthesis",
+        output_contract: "planner_ready_research_brief",
+        output_token_target: 1800,
         solo_job_id: soloJob?.id || null,
         preflight_job_id: inheritedPreflightJobId,
         instructions: [
-          "Synthesize the child research briefs into one planner-ready research brief.",
-          "Compare cited claims across children and preserve code citations and URL citations as distinct evidence classes.",
-          "Re-read cited files/lines before relying on a disputed code claim; preserve exact URLs for external documentation claims.",
-          "If child briefs contradict each other and the contradiction cannot be resolved, include needs_review with the conflicting evidence.",
+          "Synthesize the child research evidence packets.",
+          "Use the remote researcher_fanout_synthesis prompt profile for planner-ready output shape.",
         ].join("\n"),
       }, synthBudget)),
     });

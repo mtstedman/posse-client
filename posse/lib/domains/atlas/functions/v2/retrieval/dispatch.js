@@ -24,6 +24,8 @@ import { symbolGetCard, symbolGetCards } from "./symbol-card.js";
 import { symbolUsages } from "./usages.js";
 import { treeGrow, treeOverview, treeScope, treeWalk } from "./tree.js";
 import { codeSurvey } from "./survey.js";
+import { codeStructure } from "./exact.js";
+import { codePersistence } from "./persistence.js";
 import {
   codeGetSkeleton,
   codeGetSkeletonAsync,
@@ -293,7 +295,13 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeNeedWindowAsync : codeNeedWindow)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "code.survey":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (codeSurvey({ view: ctx.view, versionId: ctx.versionId, params: call }));
+      return /** @type {any} */ (codeSurvey({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot }));
+    case "code.structure":
+      if (!ctx.view) return notIndexed(action, ctx.versionId);
+      return /** @type {any} */ (codeStructure({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot }));
+    case "code.persistence":
+      if (!ctx.view) return notIndexed(action, ctx.versionId);
+      return /** @type {any} */ (codePersistence({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot }));
     case "context":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (contextBuild({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder, planner: ctx.planner }));
@@ -399,12 +407,16 @@ const GATEWAY_ACTIONS = Object.freeze({
     "memory.get",
     "file.read",
     "code.survey",
+    "code.structure",
+    "code.persistence",
   ]),
   code: new Set([
     "code.skeleton",
     "code.lens",
     "code.window",
     "code.survey",
+    "code.structure",
+    "code.persistence",
     "edit.plan",
     "file.read",
   ]),

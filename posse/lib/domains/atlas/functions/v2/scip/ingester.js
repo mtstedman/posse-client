@@ -497,6 +497,7 @@ export async function ingestScipFile({
             config_hash: effectiveConfigHash,
             deps_hash: depsHash || "",
             fileset_hash: filesetHash,
+            metadata: document.metadata,
           });
           if (blobAlreadyPresent && !effectiveForce) blobsReused++;
           else documentsIngested++;
@@ -514,6 +515,7 @@ export async function ingestScipFile({
               config_hash: effectiveConfigHash,
               deps_hash: depsHash || "",
               fileset_hash: filesetHash,
+              metadata: document.metadata,
             });
           }
           if (typeof ledger.mergeBlobParseRows === "function") {
@@ -913,9 +915,43 @@ function normalizeNativeRowDocuments(documents) {
     lang: String(doc?.lang || ""),
     symbols: Array.isArray(doc?.symbols) ? doc.symbols : [],
     edges: Array.isArray(doc?.edges) ? doc.edges : [],
+    metadata: normalizeNativeDocumentMetadata(doc),
     skip_reason: doc?.skip_reason ?? doc?.skipReason ?? null,
     skip_message: doc?.skip_message ?? doc?.skipMessage ?? null,
   }));
+}
+
+function normalizeNativeDocumentMetadata(doc) {
+  const metadata = {
+    ...metadataObject(doc?.metadata),
+    ...metadataObject(doc?.metadata_json),
+    ...metadataObject(doc?.metadataJson),
+    ...metadataObject(doc?.layer_metadata),
+    ...metadataObject(doc?.layerMetadata),
+  };
+  const coverage = doc?.call_proof_coverage ?? doc?.callProofCoverage
+    ?? metadata.call_proof_coverage ?? metadata.callProofCoverage;
+  if (coverage != null) {
+    metadata.call_proof_coverage = String(coverage);
+  }
+  const reasons = doc?.call_proof_unavailable_reasons ?? doc?.callProofUnavailableReasons
+    ?? metadata.call_proof_unavailable_reasons ?? metadata.callProofUnavailableReasons;
+  if (Array.isArray(reasons)) {
+    metadata.call_proof_unavailable_reasons = reasons.map((reason) => String(reason));
+  }
+  return metadata;
+}
+
+function metadataObject(value) {
+  if (typeof value === "string" && value) {
+    try {
+      const parsed = JSON.parse(value);
+      return plainObject(parsed) || {};
+    } catch {
+      return {};
+    }
+  }
+  return plainObject(value) || {};
 }
 
 function nativeRowsNumber(value, snake, camel) {

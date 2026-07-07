@@ -64,6 +64,9 @@ export const EVENT_TYPES = Object.freeze({
   OPERATOR_NUDGE_EXPIRED: "operator_nudge.expired",
   OPERATOR_NUDGE_REQUEUED: "operator_nudge.requeued",
 
+  // ── one-shot routing ───────────────────────────────────────────────────
+  ONESHOT_DEMOTED: "oneshot.demoted",
+
   // ── cleanup ─────────────────────────────────────────────────────────────
   CLEANUP_BRANCH_DISCARDED: "cleanup.branch_discarded",
   CLEANUP_BRANCH_SNAPSHOT_RESTORED: "cleanup.branch_snapshot_restored",

@@ -391,6 +391,13 @@ export class RunBootPanelController {
     this.render({ force: true });
   }
 
+  updateAtlasNotice(text) {
+    this.panel.setAtlasNotice(text || "");
+    if (this.getDisplay()) return;
+    this.ensureMonitor();
+    this.render({ force: true });
+  }
+
   canPromptForBackground() {
     return !!process.stdin?.isTTY
       && !!process.stdout?.isTTY

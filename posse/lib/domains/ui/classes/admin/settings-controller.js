@@ -121,7 +121,7 @@ import {
   normalizePermissions as normalizeProjectDbPermissions,
   PROJECT_DB_TYPES,
 } from "../../../../functions/toolkit/project-db/config.js";
-import { installScipLanguageDependenciesSync } from "../../../atlas/functions/v2/scip/dependencies.js";
+import { installScipLanguageDependencies } from "../../../atlas/functions/v2/scip/dependencies.js";
 import { brandRule } from "../../functions/display/helpers/brand.js";
 const PROVIDER_USAGE_SETTING_DEFS = [
   { provider: "claude", key: "claude_limit_tokens_session", label: "Claude session token limit", description: "Token cap for Claude's 5-hour rolling session window." },
@@ -1201,17 +1201,20 @@ export class AdminSettingsController {
       return;
     }
     console.log(`SCIP deps: checking ${String(value || "").trim() || "configured languages"}`);
-    const result = installScipLanguageDependenciesSync({
+    installScipLanguageDependencies({
       languages: value,
       onProgress: (message) => console.log(`SCIP deps: ${message}`),
+    }).then((result) => {
+      for (const entry of result.results) {
+        const prefix = entry.ok ? "ok" : "warn";
+        console.log(`SCIP deps ${prefix}: ${entry.language}: ${entry.message}`);
+      }
+      if (!result.ok) {
+        console.error("SCIP deps: selected languages were saved, but one or more installers did not complete; see the language messages above");
+      }
+    }).catch((err) => {
+      console.error(`SCIP deps: installer failed: ${err?.message || err}`);
     });
-    for (const entry of result.results) {
-      const prefix = entry.ok ? "ok" : "warn";
-      console.log(`SCIP deps ${prefix}: ${entry.language}: ${entry.message}`);
-    }
-    if (!result.ok) {
-      console.error("SCIP deps: selected languages were saved, but one or more installers did not complete; see the language messages above");
-    }
   }
 
   _onEditKeypress(str, key) {

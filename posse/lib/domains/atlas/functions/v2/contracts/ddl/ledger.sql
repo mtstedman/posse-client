@@ -209,6 +209,7 @@ CREATE TABLE IF NOT EXISTS blob_layers (
   indexed_at           TEXT NOT NULL,
   status               TEXT NOT NULL DEFAULT 'indexed'
                          CHECK (status IN ('indexed','failed','stale')),
+  metadata_json        TEXT,
   UNIQUE (
     content_hash, source, tool_version, parser_spec_version,
     config_hash, deps_hash, fileset_hash

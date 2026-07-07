@@ -108,6 +108,43 @@ export function resolveModuleSpecifier(importingFile, specifier) {
 }
 
 /**
+ * Resolve a module/import string into concrete candidate repo paths. This
+ * extends the JS/TS resolver with the same repo-local native-language cases
+ * the extractors emit: Rust module paths, C/C++ header includes, Go/PHP
+ * package paths, and additional source/header extensions.
+ *
+ * @param {string} importingFile
+ * @param {string} specifier
+ * @param {Map<string, string>} [pathToBlob]
+ * @returns {string[]}
+ */
+export function resolveModulePathCandidates(importingFile, specifier, pathToBlob) {
+  const raw = String(specifier || "").trim();
+  if (!raw) return [];
+  /** @type {string[]} */
+  const bases = [];
+  const jsBase = resolveModuleSpecifier(importingFile, raw);
+  if (jsBase) {
+    bases.push(jsBase);
+  } else {
+    bases.push(...nativeModuleSpecifierBases(importingFile, raw, pathToBlob));
+  }
+  const out = [];
+  const seen = new Set();
+  for (const base of bases) {
+    for (const candidateBase of candidateBases(base)) {
+      for (const ext of RESOLVABLE_EXTENSIONS) {
+        const candidate = normalizeRel(`${candidateBase}${ext}`);
+        if (!candidate || seen.has(candidate)) continue;
+        seen.add(candidate);
+        out.push(candidate);
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * @param {string} p
  * @returns {string}
  */
@@ -145,6 +182,154 @@ function normalizeRel(p) {
 }
 
 /**
+ * @param {string} base
+ * @returns {string[]}
+ */
+function candidateBases(base) {
+  const normalized = normalizeRel(base);
+  if (!normalized) return [];
+  const out = [normalized];
+  const stripped = normalized.replace(/\.(js|jsx|mjs|cjs|ts|tsx|mts|cts|d\.ts)$/i, "");
+  if (stripped !== normalized) out.push(stripped);
+  return out;
+}
+
+/**
+ * @param {string} importingFile
+ * @param {string} specifier
+ * @param {Map<string, string> | undefined} pathToBlob
+ * @returns {string[]}
+ */
+function nativeModuleSpecifierBases(importingFile, specifier, pathToBlob) {
+  const out = [];
+  const raw = stripImportQuotes(specifier);
+  if (!raw) return out;
+
+  out.push(...rustModuleBases(importingFile, raw, pathToBlob));
+
+  if (looksLikeRepoLocalInclude(raw)) {
+    out.push(joinAndNormalize(parentDir(importingFile), raw));
+  }
+
+  if (raw.includes("\\")) {
+    out.push(...phpNamespaceBases(raw));
+  }
+
+  if (raw.includes("/") && !raw.startsWith("@") && hasRepoCandidate(raw, pathToBlob)) {
+    out.push(raw);
+  }
+
+  return unique(out.filter(Boolean).map((entry) => String(entry)));
+}
+
+/**
+ * @param {string} importingFile
+ * @param {string} raw
+ * @param {Map<string, string> | undefined} pathToBlob
+ * @returns {string[]}
+ */
+function rustModuleBases(importingFile, raw, pathToBlob) {
+  if (!raw.includes("::")) return [];
+  const parts = raw.split("::").map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) return [];
+  const head = parts[0];
+  if (head === "crate") {
+    const tail = parts.slice(1).join("/");
+    return rustSourceRoots(importingFile, pathToBlob).map((root) => root ? `${root}/${tail}` : tail);
+  }
+  if (head === "self") {
+    return [joinAndNormalize(parentDir(importingFile), parts.slice(1).join("/"))].filter(Boolean);
+  }
+  if (head === "super") {
+    let base = parentDir(importingFile);
+    let idx = 0;
+    while (parts[idx] === "super") {
+      if (idx > 0) base = parentDir(base);
+      idx++;
+    }
+    return [joinAndNormalize(base, parts.slice(idx).join("/"))].filter(Boolean);
+  }
+  return [];
+}
+
+/**
+ * @param {string} importingFile
+ * @param {Map<string, string> | undefined} pathToBlob
+ * @returns {string[]}
+ */
+function rustSourceRoots(importingFile, pathToBlob) {
+  const out = [];
+  const srcIdx = importingFile.lastIndexOf("/src/");
+  if (srcIdx >= 0) out.push(importingFile.slice(0, srcIdx + 4));
+  if (importingFile.startsWith("src/") || importingFile === "src/lib.rs" || importingFile === "src/main.rs") {
+    out.push("src");
+  }
+  if (pathToBlob?.has("Cargo.toml")) out.push("src");
+  out.push("");
+  return unique(out);
+}
+
+/**
+ * @param {string} raw
+ */
+function phpNamespaceBases(raw) {
+  const slash = raw.replace(/^\\+/, "").replace(/\\+/g, "/");
+  const withoutRoot = slash.replace(/^(App|Tests|Src)\//, "");
+  return unique([
+    slash,
+    `src/${withoutRoot}`,
+    `app/${withoutRoot}`,
+  ]);
+}
+
+/**
+ * @param {string} raw
+ */
+function stripImportQuotes(raw) {
+  return raw.replace(/^["'<]+|["'>]+$/g, "").trim();
+}
+
+/**
+ * @param {string} raw
+ */
+function looksLikeRepoLocalInclude(raw) {
+  return /\.(h|hh|hpp|hxx|c|cc|cpp|cxx|go|rs|php|java|kt|kts|cs)$/i.test(raw);
+}
+
+/**
+ * @param {string} base
+ * @param {Map<string, string> | undefined} pathToBlob
+ */
+function hasRepoCandidate(base, pathToBlob) {
+  if (!pathToBlob || pathToBlob.size === 0) return true;
+  for (const candidateBase of candidateBases(base)) {
+    for (const ext of RESOLVABLE_EXTENSIONS) {
+      const candidate = normalizeRel(`${candidateBase}${ext}`);
+      if (candidate && pathToBlob.has(candidate)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @template T
+ * @param {T[]} values
+ * @returns {T[]}
+ */
+function unique(values) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    if (!value) continue;
+    const key = String(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+/**
  * Candidate file extensions to try when the specifier didn't include
  * one. Order reflects priority — earliest match wins. Driven by what
  * resolver path-lookup tries against path_to_blob.
@@ -154,12 +339,30 @@ export const RESOLVABLE_EXTENSIONS = Object.freeze(
     "",       // exact match (specifier already had an extension)
     ".ts",
     ".tsx",
+    ".mts",
+    ".cts",
     ".js",
     ".jsx",
     ".mjs",
     ".cjs",
     ".d.ts",
     ".py",
+    ".pyi",
+    ".rs",
+    ".go",
+    ".php",
+    ".java",
+    ".kt",
+    ".kts",
+    ".cs",
+    ".c",
+    ".h",
+    ".hpp",
+    ".hh",
+    ".hxx",
+    ".cpp",
+    ".cc",
+    ".cxx",
     "/index.ts",
     "/index.tsx",
     "/index.js",
@@ -167,5 +370,7 @@ export const RESOLVABLE_EXTENSIONS = Object.freeze(
     "/index.mjs",
     "/index.cjs",
     "/__init__.py",
+    "/mod.rs",
+    "/index.php",
   ]),
 );

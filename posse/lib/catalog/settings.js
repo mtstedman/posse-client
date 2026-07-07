@@ -25,6 +25,10 @@ export const SETTING_KEYS = Object.freeze({
   BRIDGE_PORT: "bridge_port",
   BRIDGE_RELAY_TOKEN: "bridge_relay_token",
   BRIDGE_RELAY_URL: "bridge_relay_url",
+  CONTEXT_COMPACTION_MODE: "context_compaction_mode",
+  CONTEXT_COMPACTION_TRIGGER_INPUT_TOKENS: "context_compaction_trigger_input_tokens",
+  CONTEXT_COMPACTION_SESSION_RESET_INPUT_TOKENS: "context_compaction_session_reset_input_tokens",
+  CONTEXT_COMPACTION_RECENT_TARGET_TOKENS: "context_compaction_recent_target_tokens",
   CONTEXT_EXPAND_FILE_BUDGET_PER_ATTEMPT: "context_expand_file_budget_per_attempt",
   CONTEXT_EXPAND_MAX_STEPS: "context_expand_max_steps",
   CLAUDE_EXECUTION_MODE: "claude_execution_mode",
@@ -111,6 +115,7 @@ export const CODEX_AUTH_MODE_OPTIONS = Object.freeze([
 ]);
 
 export const CLAUDE_EXECUTION_MODE_VALUES = Object.freeze(["print", "interactive"]);
+export const CONTEXT_COMPACTION_MODE_VALUES = Object.freeze(["off", "shadow", "inject", "enforce"]);
 export const DELEGATION_MODE_VALUES = Object.freeze(["js", "ml"]);
 export const FIX_SCOPE_HANDOFF_GUARD_VALUES = Object.freeze(["off", "auto", "warn", "enforce"]);
 export const HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES = Object.freeze(["off", "small", "always"]);

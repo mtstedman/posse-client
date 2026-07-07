@@ -14,6 +14,7 @@ import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { runAtlasNativeMethod } from "../native/invoke.js";
 import { isDefaultVisibleSymbol } from "./hygiene.js";
 import { recordCodeLadderSurvey } from "./code-ladder.js";
+import { buildPathAmbiguity } from "./path-ambiguity.js";
 
 const MAX_SURVEY_FILES = 64;
 const MAX_RAW_EDGES = 20_000;
@@ -24,9 +25,10 @@ const MAX_DIG_TERMS = 16;
  *   view: import("../contracts/api.js").View,
  *   versionId: string,
  *   params?: import("../contracts/tool-params.js").CodeSurveyParams,
+ *   repoRoot?: string,
  * }} args
  */
-export function codeSurvey({ view, versionId, params = {} }) {
+export function codeSurvey({ view, versionId, params = {}, repoRoot }) {
   const action = "code.survey";
   // `paths` accepts one string or an array; each entry may be an indexed file
   // or a directory prefix (resolved in that order). `path` stays as an alias.
@@ -123,6 +125,13 @@ export function codeSurvey({ view, versionId, params = {} }) {
     max_edges: params.maxEdges,
   }));
   if (prefixTruncated) result.truncated = true;
+  const pathAmbiguity = buildPathAmbiguity({ view, repoRoot, paths, requested, terms: digTerms });
+  if (pathAmbiguity) {
+    result.pathAmbiguity = pathAmbiguity;
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    warnings.push(.../** @type {string[]} */ (pathAmbiguity.warnings || []));
+    result.warnings = warnings;
+  }
   recordCodeLadderSurvey({ sessionId: params.sessionId, files: paths });
   return okEnvelope({ action, versionId, data: result });
 }
@@ -155,7 +164,7 @@ function surveyEdge(edge, from, to, surveyed) {
  *
  * @param {{ view: import("../contracts/api.js").View, requested: string[], maxFiles: number }} args
  */
-function collectSurveyPaths({ view, requested, maxFiles }) {
+export function collectSurveyPaths({ view, requested, maxFiles }) {
   const seen = new Set();
   const paths = [];
   let prefixTruncated = false;

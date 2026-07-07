@@ -71,6 +71,11 @@ export const VOLATILE_FIELDS = Object.freeze(
   ]),
 );
 
+const VOLATILE_OPTIONAL_DEPENDENCIES = new Set([
+  "@huggingface/transformers",
+  "onnxruntime-node",
+]);
+
 /**
  * Drop volatile fields from a JSON-serializable tree, returning a fresh
  * structure with the same shape minus the masked keys. Leaves arrays
@@ -85,6 +90,10 @@ export function stripVolatileFields(value) {
     return /** @type {any} */ (value.map((v) => stripVolatileFields(v)));
   }
   if (value && typeof value === "object") {
+    if (isVolatileOptionalDependency(value)) {
+      const { available: _available, path: _path, ...rest } = /** @type {Record<string, unknown>} */ (value);
+      return /** @type {any} */ (stripVolatileFields(rest));
+    }
     /** @type {Record<string, unknown>} */
     const out = {};
     for (const [k, v] of Object.entries(/** @type {Record<string, unknown>} */ (value))) {
@@ -111,6 +120,10 @@ export function maskVolatileFields(value, sentinel = "<stripped>") {
     return /** @type {any} */ (value.map((v) => maskVolatileFields(v, sentinel)));
   }
   if (value && typeof value === "object") {
+    if (isVolatileOptionalDependency(value)) {
+      const out = { .../** @type {Record<string, unknown>} */ (value), available: sentinel, path: sentinel };
+      return /** @type {any} */ (out);
+    }
     /** @type {Record<string, unknown>} */
     const out = {};
     for (const [k, v] of Object.entries(/** @type {Record<string, unknown>} */ (value))) {
@@ -123,4 +136,13 @@ export function maskVolatileFields(value, sentinel = "<stripped>") {
     return /** @type {any} */ (out);
   }
   return value;
+}
+
+function isVolatileOptionalDependency(value) {
+  if (!value || typeof value !== "object") return false;
+  const obj = /** @type {Record<string, unknown>} */ (value);
+  return typeof obj.name === "string"
+    && VOLATILE_OPTIONAL_DEPENDENCIES.has(obj.name)
+    && Object.hasOwn(obj, "available")
+    && Object.hasOwn(obj, "path");
 }

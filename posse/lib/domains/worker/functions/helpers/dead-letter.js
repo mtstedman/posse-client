@@ -516,29 +516,34 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhauste
       : buildFastFailureProviderHint(job, getAttempts(job.id));
     const recovery = spawnDeadLetterRecoveryForDependents(worker, job, freshJob, { providerHint });
     const { dependents, isRecoveryJob } = recovery;
-    if (!recovery.spawned && dependents.length === 0 && !isRecoveryJob && job.job_type === "research") {
+    const deadLetterPayload = parseJobPayload(job);
+    const isOneshotLeaf = job.job_type === "dev" && (deadLetterPayload.oneshot === true || deadLetterPayload.oneshot_origin === true);
+    if (!recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf)) {
       const attemptHistory = buildAttemptSummary(job.id);
+      const pipelineHeadLabel = isOneshotLeaf ? "One-shot dev job" : "Research job";
       const recoveryJob = createJob({
         work_item_id: job.work_item_id,
         job_type: "human_input",
-        title: `Research failed: ${job.title.slice(0, 80)}`,
+        title: `${isOneshotLeaf ? "One-shot failed" : "Research failed"}: ${job.title.slice(0, 80)}`,
         parent_job_id: job.id,
         priority: "urgent",
         model_tier: "cheap",
         payload_json: JSON.stringify({
+          original_job_id: job.id,
+          review_type: isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery",
           questions: [
-            `Research job #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nThis is the pipeline head — nothing else can proceed until this is resolved.\nShould we retry with different parameters, retry with a different provider (claude/openai/codex/grok), simplify the scope, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
+            `${pipelineHeadLabel} #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nThis is the pipeline head — nothing else can proceed until this is resolved.\nShould we retry with different parameters, retry with a different provider (claude/openai/codex/grok), simplify the scope, replan, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
           ],
-          context: `This research job is the pipeline head for the work item. No downstream jobs exist yet. The attempt history shows what went wrong on each try.`,
+          context: `This ${isOneshotLeaf ? "one-shot dev" : "research"} job is the pipeline head for the work item. No downstream jobs exist yet. The attempt history shows what went wrong on each try.`,
         }),
       });
-      worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} research dead-lettered — spawned human_input #${recoveryJob.id}${C.reset}`);
+      worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} ${isOneshotLeaf ? "one-shot" : "research"} dead-lettered — spawned human_input #${recoveryJob.id}${C.reset}`);
       logEvent({
         work_item_id: job.work_item_id,
         job_id: job.id,
         event_type: EVENT_TYPES.JOB_DEAD_LETTER_RECOVERY,
         actor_type: EVENT_ACTORS.WORKER,
-        message: `Research dead-letter recovery: spawned human_input #${recoveryJob.id}`,
+        message: `${isOneshotLeaf ? "One-shot" : "Research"} dead-letter recovery: spawned human_input #${recoveryJob.id}`,
       });
     } else if (dependents.length === 0 && !isRecoveryJob && stallExhausted) {
       const stallRecoveryCount = stallRecoveryRetryCount(job);

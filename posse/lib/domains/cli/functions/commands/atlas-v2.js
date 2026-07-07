@@ -33,7 +33,7 @@ import { ingestScipFile, listScipFiles } from "../../../atlas/functions/v2/scip/
 import { describeScipStagingState, ensureScipStaged } from "../../../atlas/functions/v2/scip/stager.js";
 import {
   getScipLanguageDependencyStatus,
-  installScipLanguageDependenciesSync,
+  installScipLanguageDependencies,
 } from "../../../atlas/functions/v2/scip/dependencies.js";
 import { ATLAS_SCIP_LANGUAGE_VALUES, normalizeScipLanguages } from "../../../atlas/functions/v2/scip/languages.js";
 import { getAtlasIntegrationConfig } from "../../../integrations/functions/atlas/config.js";
@@ -638,7 +638,7 @@ function parseScipInstallArgs(args = []) {
   return { languages, force, dryRun };
 }
 
-function runScipInstall({ args }) {
+async function runScipInstall({ args }) {
   const parsed = parseScipInstallArgs(args);
   const config = getAtlasIntegrationConfig();
   const languages = parsed.languages.length > 0
@@ -649,7 +649,7 @@ function runScipInstall({ args }) {
     return { ok: false, languages: [], results: [] };
   }
   console.log(`  ${C.cyan}[atlas-v2 scip install]${C.reset} languages: ${languages.join(", ")}${parsed.dryRun ? " (dry run)" : ""}`);
-  const result = installScipLanguageDependenciesSync({
+  const result = await installScipLanguageDependencies({
     languages,
     force: parsed.force,
     dryRun: parsed.dryRun,
@@ -893,7 +893,7 @@ export async function runAtlasV2Command({ projectDir, argv = [] } = {}) {
       const scipSub = String(rest[0] || "status").toLowerCase();
       const scipArgs = rest.slice(1);
       if (scipSub === "status") return await printScipStatus({ projectDir });
-      if (scipSub === "install") return runScipInstall({ args: scipArgs });
+      if (scipSub === "install") return await runScipInstall({ args: scipArgs });
       if (scipSub === "restage") return await runScipRestage({ projectDir, args: scipArgs });
       if (scipSub === "ingest") return await runScipIngest({ projectDir, args: scipArgs });
       if (scipSub === "reparse") return await runScipReparse({ projectDir, args: scipArgs });

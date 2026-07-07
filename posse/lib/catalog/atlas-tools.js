@@ -16,7 +16,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["symbol.search", "symbol.card", "symbol.overview", "slice.build", "slice.refresh", "slice.spillover.get", "edit.plan", "file.read", "context", "context.summary", "review.delta", "review.analyze", "review.risk", "repo.status", "repo.quality", "memory.surface", "memory.get"], description: "ATLAS action to route through this gateway." },
+        action: { type: "string", enum: ["symbol.search", "symbol.card", "symbol.overview", "slice.build", "slice.refresh", "slice.spillover.get", "edit.plan", "file.read", "code.survey", "code.structure", "code.persistence", "context", "context.summary", "review.delta", "review.analyze", "review.risk", "repo.status", "repo.quality", "memory.surface", "memory.get"], description: "ATLAS action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -25,11 +25,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code": {
     type: "function",
     name: "atlas_code",
-    description: "Gateway. Compact native ATLAS v2 code-inspection wrapper for skeleton, hot-path, area survey, edit planning, and gated raw-window actions.",
+    description: "Gateway. Compact native ATLAS v2 code-inspection wrapper for skeleton, hot-path, area survey, structure/persistence inventory, edit planning, and gated raw-window actions.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["code.skeleton", "code.lens", "code.window", "code.survey", "edit.plan", "file.read"], description: "ATLAS code action to route through this gateway." },
+        action: { type: "string", enum: ["code.skeleton", "code.lens", "code.window", "code.survey", "code.structure", "code.persistence", "edit.plan", "file.read"], description: "ATLAS code action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -623,7 +623,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Best first call for work that covers an AREA — enumerations, audits, \"every X under Y\", or orienting in several files at once. ONE call returns per-file skeletons plus a call map for a directory or file list, replacing per-file skeleton/lens/window loops and grep-digging, and satisfies card+skeleton evidence for every file it covers. Without symbols: file-level wiring map (which file calls which, counts, one representative site each). With symbols: symbol-level dig restricted to those names' neighborhoods, including unresolved name references (string dispatch grep parity). Boundary rows always show which outside symbols reach in (the doors).",
+    description: "Best first content call for work that covers an AREA — audits, \"every X under Y\", or orienting in several files at once. ONE call returns per-file skeletons plus a call map for a directory or file list, replacing per-file skeleton/lens/window loops and grep-digging, and satisfies card+skeleton evidence for every file it covers. For exact file/import/fan-in inventories where code bodies are not needed, use code.structure first. Without symbols: file-level wiring map (which file calls which, counts, one representative site each). With symbols: symbol-level dig restricted to those names' neighborhoods, including unresolved name references (string dispatch grep parity). Boundary rows always show which outside symbols reach in (the doors).",
     parameters: {
       type: "object",
       properties: {
@@ -631,6 +631,37 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         symbols: { type: "array", items: { type: "string" }, description: "Optional. Dig terms: restrict the survey to these symbol names' neighborhoods (max 16)." },
         maxFiles: { type: "integer", description: "Optional. Cap on files surveyed. Default 64." },
         sessionId: { type: "string", description: "Optional session namespace for ladder credit (matches other code.* actions)." },
+      },
+      required: ["paths"],
+      additionalProperties: false,
+    },
+  },
+  "code.structure": {
+    type: "function",
+    name: "atlas_code_structure",
+    description: "Deterministic exact inventory for structure-map, import graph, file fan-in/fan-out, and enumeration questions. Reads indexed symbol/edge rows only: no semantic search, no raw bodies, no per-file loop. Use before code.survey when the deliverable is counts, file-to-file edges, duplicate import/fan-in reasoning, or an exact list of files/symbols under a directory. Returns pathAmbiguity and negativeEvidence when same-name stubs, tests, docs, scripts, or other decoys are relevant.",
+    parameters: {
+      type: "object",
+      properties: {
+        paths: { type: ["string", "array"], items: { type: "string" }, description: "Repository-relative directory prefix or file path, e.g. \"src/routes\" or [\"lib/a.ts\", \"lib/b.ts\"]. Resolves up to 128 indexed files." },
+        edgeKinds: { type: "array", items: { type: "string", enum: ["imports", "calls", "references", "extends", "implements", "uses_type"] }, description: "Exact edge kinds to inventory. Defaults to [\"imports\"] for structure/fan-in work." },
+        maxFiles: { type: "integer", description: "Optional cap on resolved indexed files. Default 64, max 128." },
+        includeSymbols: { type: "boolean", description: "Include per-file symbol summaries. Default true." },
+        includeEdges: { type: "boolean", description: "Include exact internal/inbound/outbound edge rows. Default true." },
+      },
+      required: ["paths"],
+      additionalProperties: false,
+    },
+  },
+  "code.persistence": {
+    type: "function",
+    name: "atlas_code_persistence",
+    description: "First-pass persistence inventory for DB/file write questions. Scans resolved indexed files for SQL INSERT/UPDATE/DELETE/CREATE and common file-write APIs, classifies writes as durable_result, telemetry, bookkeeping, cache, or unknown, and appends negativeEvidence for same-name test/script/doc/stub decoys. Use before raw windows when asked which tables/files are written, whether a write is live vs telemetry, or to separate included results from cache/offline/bookkeeping writes.",
+    parameters: {
+      type: "object",
+      properties: {
+        paths: { type: ["string", "array"], items: { type: "string" }, description: "Repository-relative directory prefix or file path, e.g. \"src/scoring\" or [\"lib/a.ts\", \"lib/b.ts\"]. Resolves up to 128 indexed files." },
+        maxFiles: { type: "integer", description: "Optional cap on resolved indexed files. Default 64, max 128." },
       },
       required: ["paths"],
       additionalProperties: false,

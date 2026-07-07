@@ -4,6 +4,8 @@ import { parseSymbolId, symbolIdOf, symbolHit } from "./cards.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { isDefaultVisibleSymbol } from "./hygiene.js";
 
+const FILE_GROUP_LIMIT = 200;
+
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewEdge} ViewEdge */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -69,6 +71,7 @@ export function symbolUsages({ view, versionId, params }) {
   const total = rows.length;
   const usages = rows.slice(0, limit);
   const warnings = usageWarnings(view, total);
+  const usageSummary = summarizeUsageRows(rows);
   return okEnvelope({
     action: "symbol.overview",
     versionId,
@@ -76,6 +79,12 @@ export function symbolUsages({ view, versionId, params }) {
       symbolId: params.symbolId,
       name: target.name,
       qualifiedName: target.qualified_name,
+      rawOccurrenceCount: total,
+      distinctFileCount: usageSummary.distinctFileCount,
+      distinctResolvedFileCount: usageSummary.distinctResolvedFileCount,
+      distinctCallerFileCount: usageSummary.distinctCallerFileCount,
+      callerFiles: usageSummary.callerFiles,
+      unresolvedFiles: usageSummary.unresolvedFiles,
       usages,
       total,
       truncated: total > usages.length,
@@ -176,6 +185,57 @@ function usageFromEdge(edge, from, resolved) {
     confidence: edge.confidence,
     resolved,
   };
+}
+
+function summarizeUsageRows(rows) {
+  const allFiles = new Set();
+  const resolvedFiles = new Set();
+  const callerFiles = groupUsageFiles(rows, (row) => row.resolved && row.kind === "calls");
+  const unresolvedFiles = groupUsageFiles(rows, (row) => !row.resolved);
+  for (const row of rows) {
+    const path = String(row.repo_rel_path || "").replace(/\\/g, "/");
+    if (!path) continue;
+    allFiles.add(path);
+    if (row.resolved) resolvedFiles.add(path);
+  }
+  return {
+    distinctFileCount: allFiles.size,
+    distinctResolvedFileCount: resolvedFiles.size,
+    distinctCallerFileCount: callerFiles.length,
+    callerFiles,
+    unresolvedFiles,
+  };
+}
+
+function groupUsageFiles(rows, predicate) {
+  const byPath = new Map();
+  for (const row of rows) {
+    if (!predicate(row)) continue;
+    const path = String(row.repo_rel_path || "").replace(/\\/g, "/");
+    if (!path) continue;
+    const group = byPath.get(path) || {
+      repo_rel_path: path,
+      occurrenceCount: 0,
+      firstLine: Number.isInteger(row.startLine) ? row.startLine : 1,
+      kinds: new Set(),
+      fromNames: new Set(),
+    };
+    group.occurrenceCount += 1;
+    if (Number.isInteger(row.startLine)) group.firstLine = Math.min(group.firstLine, row.startLine);
+    if (row.kind) group.kinds.add(String(row.kind));
+    if (row.fromName) group.fromNames.add(String(row.fromName));
+    byPath.set(path, group);
+  }
+  return [...byPath.values()]
+    .sort((a, b) => a.repo_rel_path.localeCompare(b.repo_rel_path))
+    .slice(0, FILE_GROUP_LIMIT)
+    .map((group) => ({
+      repo_rel_path: group.repo_rel_path,
+      occurrenceCount: group.occurrenceCount,
+      firstLine: group.firstLine,
+      kinds: [...group.kinds].sort(),
+      fromNames: [...group.fromNames].sort().slice(0, 12),
+    }));
 }
 
 /**

@@ -127,7 +127,7 @@ function normalizeRequestedPath(filePath) {
   return String(filePath || "").trim().replace(/\\/g, "/");
 }
 
-function isHighRiskPath(filePath) {
+export function isHighRiskPath(filePath) {
   const normalized = normalizeRequestedPath(filePath).toLowerCase();
   const basename = path.posix.basename(normalized);
   if (isProtectedMutablePath(normalized)) return true;

@@ -1271,32 +1271,97 @@ export function getObservationsByJob(jobId, limit = 100) {
  * attribution work kept losing to pruning.
  *
  * @param {number|string} jobId
- * @returns {{ toolCalls: number, byType: Record<string, number>, atlasActions: Record<string, number> } | null}
+ * @returns {{ toolCalls: number, byType: Record<string, number>, atlasActions: Record<string, number>, atlasPrefetchActions: Record<string, { total: number, ok: number, failed: number, cacheHits: number, firstError: string | null, sampleArgs: Record<string, unknown> | null, survey?: Record<string, unknown> }> } | null}
  */
 export function summarizeJobToolMix(jobId) {
   try {
     const rows = getObservationsByJob(jobId, 5000);
     const byType = {};
     const atlasActions = {};
+    const atlasPrefetchActions = {};
     let toolCalls = 0;
     for (const row of rows) {
       const type = String(row.observation_type || "");
+      let detail = null;
+      try { detail = JSON.parse(row.detail_json || "{}"); } catch { /* ignore */ }
+
+      if (type === "atlas.prefetch.survey") {
+        mergeAtlasSurveyPrefetchDiagnostic(atlasPrefetchActions, detail);
+        continue;
+      }
+
       if (!type.startsWith("tool.")) continue;
-      if (type.endsWith(".started")) continue;         // completion half only
+      if (type.endsWith(".started")) continue;          // completion half only
       if (type === "tool.chain_read") continue;         // paired with chain_verdict
       const isSystemLane = type.endsWith(".prefetch") || type.endsWith(".autofeedback");
       byType[type] = (byType[type] || 0) + 1;
-      if (!isSystemLane) toolCalls += 1;                // agent-lane calls only
+      if (!isSystemLane) toolCalls += 1;                 // agent-lane calls only
       if (type.startsWith("tool.atlas") && !isSystemLane) {
-        let action = null;
-        try { action = JSON.parse(row.detail_json || "{}")?.action; } catch { /* ignore */ }
+        const action = detail?.action;
         if (action) atlasActions[action] = (atlasActions[action] || 0) + 1;
+      } else if (type === "tool.atlas.prefetch") {
+        mergeAtlasPrefetchAction(atlasPrefetchActions, detail);
       }
     }
-    return { toolCalls, byType, atlasActions };
+    return { toolCalls, byType, atlasActions, atlasPrefetchActions };
   } catch {
     return null;
   }
+}
+
+function ensureAtlasPrefetchAction(out, action) {
+  const name = String(action || "").trim();
+  if (!name) return null;
+  if (!out[name]) {
+    out[name] = {
+      total: 0,
+      ok: 0,
+      failed: 0,
+      cacheHits: 0,
+      firstError: null,
+      sampleArgs: null,
+    };
+  }
+  return out[name];
+}
+
+function mergeAtlasPrefetchAction(out, detail) {
+  const entry = ensureAtlasPrefetchAction(out, detail?.action);
+  if (!entry) return;
+  entry.total += 1;
+  if (detail?.ok) entry.ok += 1;
+  else entry.failed += 1;
+  if (detail?.cache_hit) entry.cacheHits += 1;
+  if (!entry.firstError && detail?.error) entry.firstError = String(detail.error).slice(0, 240);
+  if (!entry.sampleArgs && detail?.args && typeof detail.args === "object") entry.sampleArgs = detail.args;
+}
+
+function mergeAtlasSurveyPrefetchDiagnostic(out, detail) {
+  const entry = ensureAtlasPrefetchAction(out, detail?.action || "code.survey");
+  if (!entry) return;
+  const survey = entry.survey && typeof entry.survey === "object"
+    ? entry.survey
+    : {
+      diagnostics: 0,
+      attempted: 0,
+      ok: 0,
+      failed: 0,
+      skipped: 0,
+      firstError: null,
+      lastScope: null,
+      lastFileCount: null,
+      lastInternalEdgeCount: null,
+    };
+  survey.diagnostics = Number(survey.diagnostics || 0) + 1;
+  if (detail?.attempted) survey.attempted = Number(survey.attempted || 0) + 1;
+  else survey.skipped = Number(survey.skipped || 0) + 1;
+  if (detail?.ok) survey.ok = Number(survey.ok || 0) + 1;
+  else if (detail?.attempted) survey.failed = Number(survey.failed || 0) + 1;
+  if (!survey.firstError && detail?.error) survey.firstError = String(detail.error).slice(0, 240);
+  if (detail?.scope) survey.lastScope = detail.scope;
+  if (detail?.file_count != null) survey.lastFileCount = detail.file_count;
+  if (detail?.internal_edge_count != null) survey.lastInternalEdgeCount = detail.internal_edge_count;
+  entry.survey = survey;
 }
 
 export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, currentRunOnly = false } = {}) {

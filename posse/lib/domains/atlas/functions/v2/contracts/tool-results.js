@@ -427,10 +427,25 @@
  */
 
 /**
+ * @typedef {Object} SymbolUsageFileGroup
+ * @property {string} repo_rel_path
+ * @property {number} occurrenceCount
+ * @property {number} firstLine
+ * @property {string[]} kinds
+ * @property {string[]} fromNames
+ */
+
+/**
  * @typedef {Object} SymbolUsagesData
  * @property {SymbolId} symbolId
  * @property {string} name
  * @property {string | null} [qualifiedName]
+ * @property {number} rawOccurrenceCount
+ * @property {number} distinctFileCount
+ * @property {number} distinctResolvedFileCount
+ * @property {number} distinctCallerFileCount
+ * @property {SymbolUsageFileGroup[]} callerFiles
+ * @property {SymbolUsageFileGroup[]} unresolvedFiles
  * @property {SymbolUsageSite[]} usages
  * @property {number} total
  * @property {boolean} truncated
@@ -746,6 +761,149 @@
  * @property {number} endLine
  * @property {number} estimatedTokens
  * @property {boolean} truncated
+ */
+
+/**
+ * @typedef {Object} CodeStructureSymbol
+ * @property {SymbolId} symbolId
+ * @property {string} name
+ * @property {string | null} qualifiedName
+ * @property {string} kind
+ * @property {number} line
+ * @property {string | null} visibility
+ * @property {string | null} signature
+ */
+
+/**
+ * @typedef {Object} CodeStructureFile
+ * @property {string} path
+ * @property {number} symbolCount
+ * @property {CodeStructureSymbol[]} topLevelSymbols
+ * @property {number} internalFanIn
+ * @property {number} internalFanOut
+ * @property {number} inboundFanIn
+ * @property {number} outboundFanOut
+ * @property {CodeStructureSymbol[]} [symbols]
+ */
+
+/**
+ * @typedef {Object} CodeStructureEdge
+ * @property {string} fromPath
+ * @property {string} fromName
+ * @property {SymbolId} fromSymbolId
+ * @property {string} toPath
+ * @property {string} toName
+ * @property {SymbolId} toSymbolId
+ * @property {string} kind
+ * @property {string} site
+ * @property {boolean} fromInScope
+ * @property {boolean} toInScope
+ */
+
+/**
+ * @typedef {Object} CodeStructureFileEdge
+ * @property {string} fromPath
+ * @property {string} toPath
+ * @property {string[]} kinds
+ * @property {number} count
+ * @property {string[]} sites
+ */
+
+/**
+ * @typedef {Object} CodeStructureData
+ * @property {CodeStructureFile[]} files
+ * @property {CodeStructureEdge[]} internalEdges
+ * @property {CodeStructureEdge[]} inboundEdges
+ * @property {CodeStructureEdge[]} outboundEdges
+ * @property {CodeStructureFileEdge[]} fileEdges
+ * @property {Record<string, unknown>} metrics
+ * @property {boolean} truncated
+ * @property {string[]} warnings
+ * @property {PathAmbiguityData} [pathAmbiguity]
+ * @property {NegativeEvidenceData} [negativeEvidence]
+ */
+
+/**
+ * @typedef {Object} PathAmbiguityGroup
+ * @property {string} basename
+ * @property {string} stem
+ * @property {string[]} paths
+ * @property {string[]} zeroBytePaths
+ * @property {string[]} rootPaths
+ * @property {string[]} [liveCandidates]
+ * @property {string[]} [staleCandidates]
+ * @property {boolean} [needsDeployProof]
+ * @property {string[]} sources
+ */
+
+/**
+ * @typedef {Object} PathAmbiguityStub
+ * @property {string} path
+ * @property {number | null} byteSize
+ * @property {string} reason
+ * @property {string[]} sources
+ */
+
+/**
+ * @typedef {Object} PathAmbiguityData
+ * @property {PathAmbiguityGroup[]} duplicateBasenames
+ * @property {PathAmbiguityStub[]} zeroByteStubs
+ * @property {string[]} terms
+ * @property {number} scannedPathCount
+ * @property {boolean} truncated
+ * @property {string[]} warnings
+ */
+
+/**
+ * @typedef {Object} NegativeEvidenceCandidate
+ * @property {string} path
+ * @property {string} classification
+ * @property {string} reason
+ * @property {string[]} matchedTerms
+ * @property {string | null} site
+ * @property {string | null} evidence
+ * @property {number | null} byteSize
+ * @property {string[]} sources
+ */
+
+/**
+ * @typedef {Object} NegativeEvidenceData
+ * @property {NegativeEvidenceCandidate[]} candidates
+ * @property {Record<string, unknown>} metrics
+ * @property {string[]} warnings
+ */
+
+/**
+ * @typedef {Object} CodePersistenceWrite
+ * @property {"db" | "file"} kind
+ * @property {string} operation
+ * @property {string} target
+ * @property {string} path
+ * @property {number} line
+ * @property {string} site
+ * @property {"durable_result" | "telemetry" | "bookkeeping" | "cache" | "unknown"} classification
+ * @property {string} confidence
+ * @property {string} evidence
+ */
+
+/**
+ * @typedef {Object} CodePersistenceFile
+ * @property {string} path
+ * @property {boolean} scanned
+ * @property {number | null} byteSize
+ * @property {string | null} warning
+ */
+
+/**
+ * @typedef {Object} CodePersistenceData
+ * @property {CodePersistenceFile[]} files
+ * @property {CodePersistenceWrite[]} writes
+ * @property {NegativeEvidenceCandidate[]} exclusions
+ * @property {Record<string, unknown>} metrics
+ * @property {boolean} truncated
+ * @property {string[]} warnings
+ * @property {PathAmbiguityData} [pathAmbiguity]
+ * @property {NegativeEvidenceData} [negativeEvidence]
  */
 
 // ============================================================================
@@ -1141,6 +1299,8 @@
  *   | ToolResultEnvelope<CodeSkeletonData>     & { action: "code.skeleton" }
  *   | ToolResultEnvelope<CodeHotPathData>      & { action: "code.lens" }
  *   | ToolResultEnvelope<CodeWindowData>       & { action: "code.window" }
+ *   | ToolResultEnvelope<CodeStructureData>    & { action: "code.structure" }
+ *   | ToolResultEnvelope<CodePersistenceData>  & { action: "code.persistence" }
  *   | ToolResultEnvelope<ContextData>          & { action: "context" }
  *   | ToolResultEnvelope<ContextSummaryData>   & { action: "context.summary" }
  *   | ToolResultEnvelope<AgentFeedbackData>    & { action: "agent.feedback" }
@@ -1244,6 +1404,26 @@ export const ATLAS_TOOL_RESULT_FIELD_CATALOG = Object.freeze({
     endLine: "endLine",
     truncated: "truncated",
     etag: "etag",
+  }),
+  "code.structure": Object.freeze({
+    files: "files",
+    internalEdges: "internalEdges",
+    inboundEdges: "inboundEdges",
+    outboundEdges: "outboundEdges",
+    fileEdges: "fileEdges",
+    pathAmbiguity: "pathAmbiguity",
+    negativeEvidence: "negativeEvidence",
+    metrics: "metrics",
+    truncated: "truncated",
+  }),
+  "code.persistence": Object.freeze({
+    files: "files",
+    writes: "writes",
+    exclusions: "exclusions",
+    pathAmbiguity: "pathAmbiguity",
+    negativeEvidence: "negativeEvidence",
+    metrics: "metrics",
+    truncated: "truncated",
   }),
   "file.read": Object.freeze({
     filePath: "repo_rel_path",

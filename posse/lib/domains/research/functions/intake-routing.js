@@ -6,6 +6,9 @@
 // The pure decision logic stays in routing.js. This module is the
 // orchestration layer that orchestrator-app.js used to inline.
 
+import path from "path";
+import { execFileSync } from "node:child_process";
+
 import {
   createJob,
   getWorkItem,
@@ -24,7 +27,10 @@ import {
   logFanoutSkipped,
 } from "./fanout.js";
 import { createRedTeamPlanChain, redTeamPlanningPayload } from "../../planning/functions/red-team-plan.js";
+import { isPlanApprovalEnabled } from "../../planning/functions/plan-approval.js";
+import { isHighRiskPath } from "../../handoff/functions/index.js";
 import { researchPayload } from "./payload.js";
+import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import {
   defaultResearchModelTier,
   maxResearchBudget,
@@ -32,6 +38,143 @@ import {
   researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+
+function normalizeCandidatePath(value) {
+  return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function isPathInsideProject(projectDir, candidate) {
+  if (!projectDir) return false;
+  const base = path.resolve(projectDir);
+  const resolved = path.resolve(base, candidate);
+  const rel = path.relative(base, resolved);
+  return !!rel && rel !== "." && !path.isAbsolute(rel) && !rel.startsWith("..") && !rel.startsWith(`..${path.sep}`);
+}
+
+function listTrackedFiles(projectDir, candidates = []) {
+  if (!projectDir || candidates.length === 0) return new Map();
+  const output = execFileSync("git", ["ls-files", "-z", "--", ...candidates], {
+    cwd: projectDir,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 30_000,
+  });
+  const tracked = String(output || "").split("\0").filter(Boolean);
+  const byNormalized = new Map();
+  for (const file of tracked) {
+    const normalized = normalizeCandidatePath(file);
+    byNormalized.set(process.platform === "win32" ? normalized.toLowerCase() : normalized, normalized);
+  }
+  return byNormalized;
+}
+
+function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPlan = false } = {}) {
+  const rawCandidates = Array.isArray(candidateFiles) ? candidateFiles : [];
+  const candidates = rawCandidates.map(normalizeCandidatePath).filter(Boolean);
+  const results = candidates.map((candidate) => ({
+    candidate,
+    ok: true,
+    checks: {},
+    canonical_path: null,
+  }));
+
+  const failAll = (reason) => {
+    for (const result of results) {
+      result.ok = false;
+      result.reason = result.reason || reason;
+    }
+    return { ok: false, reason, candidate_files: candidates, gate_results: results };
+  };
+
+  if (candidates.length !== 1) {
+    return failAll(`candidate_count_${candidates.length}`);
+  }
+  if (!projectDir) return failAll("missing_project_dir");
+  if (isPlanApprovalEnabled()) return failAll("plan_approval_enabled");
+  if (redTeamPlan) return failAll("red_team_plan_requested");
+
+  for (const result of results) {
+    const candidate = result.candidate;
+    const validationError = validateScopedPath(candidate, "oneshot.candidate_file");
+    result.checks.scoped_path = validationError ? { ok: false, reason: validationError } : { ok: true };
+    if (validationError) {
+      result.ok = false;
+      result.reason = validationError;
+      continue;
+    }
+
+    const contained = isPathInsideProject(projectDir, candidate);
+    result.checks.contained = { ok: contained };
+    if (!contained) {
+      result.ok = false;
+      result.reason = "path_outside_project";
+      continue;
+    }
+  }
+
+  let failed = results.find((result) => !result.ok);
+  if (failed) {
+    return {
+      ok: false,
+      reason: failed.reason || "candidate_rejected",
+      candidate_files: candidates,
+      gate_results: results,
+    };
+  }
+
+  let tracked = new Map();
+  try {
+    tracked = listTrackedFiles(projectDir, candidates);
+  } catch (err) {
+    return failAll(`git_tracked_check_failed: ${err?.message || err}`);
+  }
+
+  for (const result of results) {
+    const candidate = result.candidate;
+
+    const key = process.platform === "win32" ? candidate.toLowerCase() : candidate;
+    const canonical = tracked.get(key);
+    result.checks.git_tracked = canonical ? { ok: true, canonical_path: canonical } : { ok: false };
+    if (!canonical) {
+      result.ok = false;
+      result.reason = "not_git_tracked";
+      continue;
+    }
+    result.canonical_path = canonical;
+
+    const highRisk = isHighRiskPath(canonical);
+    result.checks.high_risk_path = { ok: !highRisk };
+    if (highRisk) {
+      result.ok = false;
+      result.reason = "high_risk_path";
+      continue;
+    }
+  }
+
+  failed = results.find((result) => !result.ok);
+  if (failed) {
+    return {
+      ok: false,
+      reason: failed.reason || "candidate_rejected",
+      candidate_files: candidates,
+      gate_results: results,
+    };
+  }
+
+  return {
+    ok: true,
+    reason: "accepted",
+    candidate_files: [results[0].canonical_path],
+    gate_results: results,
+  };
+}
+
+function workItemText(workItem) {
+  return [workItem?.title, workItem?.description]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
 
 export function getProjectMapForResearchRouting(projectDir) {
   try {
@@ -82,6 +225,7 @@ export function classifyResearchForRouting({
           bucket: routing.bucket,
           budget: routing.budget,
           reason: routing.reason,
+          candidate_files: routing.candidate_files || [],
           branches: routing.branches || [],
           web_targets: routing.web_targets || [],
         },
@@ -94,7 +238,7 @@ export function classifyResearchForRouting({
   return routing;
 }
 
-export function createPlanAfterSkippedResearch(workItem, { routing, budget = "normal", source = null, redTeamPlan = false } = {}) {
+export function createPlanAfterSkippedResearch(workItem, { routing, budget = "normal", source = null, redTeamPlan = false, parentJob = null } = {}) {
   const deepthinkBudget = normalizeResearchBudget(budget);
   const reason = routing?.reason || "deterministic no_research route";
   updateWorkItemResearchSkip(workItem.id, { skipped: true, reason });
@@ -107,6 +251,7 @@ export function createPlanAfterSkippedResearch(workItem, { routing, budget = "no
   if (redTeamPlan) {
     const chain = createRedTeamPlanChain({
       workItem,
+      parentJob,
       basePayload: researchPayload({
         research_skipped: true,
         research_skip_reason: reason,
@@ -136,8 +281,9 @@ export function createPlanAfterSkippedResearch(workItem, { routing, budget = "no
     work_item_id: workItem.id,
     job_type: "plan",
     title: `Plan: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
+    parent_job_id: parentJob?.id || null,
     priority: workItem.priority,
-    model_tier: "standard",
+    model_tier: "cheap",
     reasoning_effort: researchBudgetToReasoningEffort(deepthinkBudget, "high"),
     payload_json: JSON.stringify(researchPayload({
       research_skipped: true,
@@ -159,6 +305,103 @@ export function createPlanAfterSkippedResearch(workItem, { routing, budget = "no
   });
   refreshWorkItemStatus(workItem.id);
   return planJob;
+}
+
+export function createOneshotDevJob(workItem, {
+  routing,
+  source = null,
+  projectDir = null,
+  candidateFiles = null,
+  parentJob = null,
+  redTeamPlan = false,
+  demotionSource = "intake_gate",
+} = {}) {
+  const requestedCandidates = candidateFiles || routing?.candidate_files || [];
+  const gate = validateOneshotGate({ candidateFiles: requestedCandidates, projectDir, redTeamPlan });
+  const reason = routing?.reason || "one-shot trivial edit";
+  if (!gate.ok) {
+    logEvent({
+      work_item_id: workItem.id,
+      job_id: parentJob?.id || null,
+      event_type: EVENT_TYPES.ONESHOT_DEMOTED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `One-shot demoted to planning: ${gate.reason}`,
+      event_json: {
+        source,
+        demotion_source: demotionSource,
+        reason: gate.reason,
+        candidate_files: gate.candidate_files,
+        gate_results: gate.gate_results,
+        routing_reason: reason,
+      },
+    });
+    const planJob = createPlanAfterSkippedResearch(workItem, {
+      routing: {
+        ...routing,
+        bucket: "no_research",
+        reason: `one-shot demoted: ${gate.reason}`,
+        candidate_files: gate.candidate_files,
+      },
+      budget: routing?.budget || "low",
+      source,
+      redTeamPlan,
+      parentJob,
+    });
+    return { kind: "plan", job: planJob, routing, gate, demoted: true };
+  }
+
+  const [file] = gate.candidate_files;
+  const syntheticRouting = {
+    ...routing,
+    reason,
+    candidate_files: [file],
+  };
+  updateWorkItemResearchSkip(workItem.id, { skipped: true, reason });
+  storeArtifact({
+    work_item_id: workItem.id,
+    job_id: null,
+    artifact_type: "response",
+    content_long: buildSyntheticResearchBrief(syntheticRouting),
+  });
+
+  const requestedText = workItemText(workItem) || workItem?.title || `WI#${workItem.id}`;
+  const taskSpec = [
+    requestedText,
+    "",
+    "This task was machine-derived from the work item with no planner. The work item text above is the authoritative statement of intent; make the smallest change that fully satisfies it.",
+  ].join("\n");
+  const devJob = createJob({
+    work_item_id: workItem.id,
+    job_type: "dev",
+    title: `One-shot: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
+    parent_job_id: parentJob?.id || null,
+    priority: workItem.priority,
+    model_tier: "standard",
+    reasoning_effort: "low",
+    planner_risk_score: 1,
+    payload_json: JSON.stringify({
+      task_spec: taskSpec,
+      success_criteria: [
+        `The requested edit is complete: ${workItem.title || requestedText}`,
+        "The change is internally consistent; nothing the request implies was left un-updated.",
+      ],
+      files_to_modify: [file],
+      files_to_create: [],
+      files_to_delete: [],
+      create_roots: [],
+      task_mode: "code",
+      dev_mode: "cleanup",
+      risk: 1,
+      oneshot: true,
+      oneshot_origin: true,
+      _oneshot_reason: reason,
+      _oneshot_source: source === "preflight" ? "preflight" : "intake",
+      _assess_model_tier: "standard",
+    }),
+  });
+
+  refreshWorkItemStatus(workItem.id);
+  return { kind: "dev", job: devJob, routing: syntheticRouting, gate, demoted: false };
 }
 
 export function createPreflightResearchJob(workItem, {
@@ -187,6 +430,7 @@ export function createPreflightResearchJob(workItem, {
       project_map: metadata.research_project_map || getProjectMapForResearchRouting(projectDir),
       routing: routing || null,
       fallback_budget: fallbackBudget,
+      ...(routing?.bucket === "oneshot_candidate" ? { preflight_objective: "oneshot_scope" } : {}),
       upstream_mode: workItem.mode || metadata.mode || null,
       upstream_source: source,
       ...redTeamPlanningPayload(redTeamPlan),
@@ -201,6 +445,27 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, sour
   const effectiveRouting = routing;
   const actualBudget = maxResearchBudget(deepthinkBudget, effectiveRouting.budget);
   const fanoutMode = effectiveRouting.bucket === "fanout_clear" ? getResearchFanoutMode() : "off";
+  if (effectiveRouting.bucket === "oneshot") {
+    const outcome = createOneshotDevJob(workItem, {
+      routing: effectiveRouting,
+      source,
+      projectDir,
+      candidateFiles: effectiveRouting.candidate_files || [],
+      redTeamPlan,
+      demotionSource: "intake_gate",
+    });
+    return { ...outcome, routing: effectiveRouting };
+  }
+  if (effectiveRouting.bucket === "oneshot_candidate") {
+    const job = createPreflightResearchJob(workItem, {
+      deepthinkBudget,
+      routing: effectiveRouting,
+      source,
+      redTeamPlan,
+      projectDir,
+    });
+    return { kind: "preflight", job, routing: effectiveRouting };
+  }
   if (effectiveRouting.bucket === "no_research") {
     return {
       kind: "plan",

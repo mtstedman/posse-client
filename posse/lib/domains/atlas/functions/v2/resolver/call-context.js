@@ -20,8 +20,7 @@
 
 import {
   parseImportModuleRef,
-  resolveModuleSpecifier,
-  RESOLVABLE_EXTENSIONS,
+  resolveModulePathCandidates,
 } from "./import-context.js";
 
 /** @typedef {import("./name-index.js").NameCandidate} NameCandidate */
@@ -92,16 +91,8 @@ export function buildFileContexts(args) {
    * @returns {string | null}
    */
   const resolveTargetFile = (importingFile, module) => {
-    const base = resolveModuleSpecifier(importingFile, module);
-    if (!base) return null;
-    const candidates = [base];
-    const stripped = base.replace(/\.(js|mjs|cjs)$/, "");
-    if (stripped !== base) candidates.push(stripped);
-    for (const cand of candidates) {
-      for (const ext of RESOLVABLE_EXTENSIONS) {
-        const hit = `${cand}${ext}`;
-        if (pathToBlob.has(hit)) return hit;
-      }
+    for (const candidate of resolveModulePathCandidates(importingFile, module, pathToBlob)) {
+      if (pathToBlob.has(candidate)) return candidate;
     }
     return null;
   };

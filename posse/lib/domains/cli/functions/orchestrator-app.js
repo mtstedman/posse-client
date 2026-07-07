@@ -892,7 +892,7 @@ function classifyResearchForRouting(args = {}) {
 }
 
 function createInitialResearchOrPlanJob(workItem, opts = {}) {
-  return createInitialResearchOrPlanJobImpl(workItem, opts);
+  return createInitialResearchOrPlanJobImpl(workItem, { projectDir: PROJECT_DIR, ...opts });
 }
 
 function spawnIterativeNextPass(wi, state) {
@@ -1209,6 +1209,8 @@ async function cmdInject() {
     console.log(`  ${C.dim}Skipped research; created plan job #${initialJob.job.id}. The scheduler will pick this up automatically.${C.reset}\n`);
   } else if (initialJob.kind === "preflight") {
     console.log(`  ${C.dim}Created preflight job #${initialJob.job.id}. The scheduler will route research automatically.${C.reset}\n`);
+  } else if (initialJob.kind === "dev") {
+    console.log(`  ${C.dim}Created one-shot dev job #${initialJob.job.id}. The scheduler will pick this up automatically.${C.reset}\n`);
   } else {
     console.log(`  ${C.dim}Created research job #${initialJob.job.id}. The scheduler will pick this up automatically.${C.reset}\n`);
   }

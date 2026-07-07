@@ -337,12 +337,18 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   const blank = () => line("");
 
   let footer = "";
+  let atlasNotice = [];
   // The old neural-network banner path still calls setFooter with an array of
   // banner rows. Ignore that retired shape, but keep a single-line footer for
   // boot actions such as the ONNX background ripcord.
   const setFooter = (value = "") => {
     if (Array.isArray(value)) return;
     footer = String(value || "").replace(/\s+/g, " ").trim();
+  };
+  const normalizeNoticeLine = (value = "") => String(value || "").replace(/\s+/g, " ").trim();
+  const setAtlasNotice = (value = "") => {
+    const raw = Array.isArray(value) ? value : String(value || "").split(/\r?\n/u);
+    atlasNotice = raw.map(normalizeNoticeLine).filter(Boolean).slice(0, 2);
   };
 
   // ---- gauges ----
@@ -723,6 +729,10 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     return [divider, ...noteLines];
   };
   const renderFooter = () => (footer ? [line(`  ${footer}`)] : []);
+  const renderAtlasNotice = () => atlasNotice.map((text, index) => {
+    const marker = index === 0 ? `${col("yellow")}!${col("reset")}` : " ";
+    return line(`  ${marker} ${text}`);
+  });
 
   const lines = () => {
     const out = [];
@@ -746,6 +756,11 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
       out.push(tailRow("merge", zip));
       out.push(tailRow("tree", tree));
       out.push(tailRow("encode", encode));
+      const atlasNoticeRows = renderAtlasNotice();
+      if (atlasNoticeRows.length > 0) {
+        out.push(blank());
+        out.push(...atlasNoticeRows);
+      }
     }
     const footerRows = renderFooter();
     if (footerRows.length > 0) {
@@ -764,6 +779,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     updateTree,
     updateEncode,
     setFooter,
+    setAtlasNotice,
     lines,
     /**
      * Iterate the per-language matrix entries — used by the caller to

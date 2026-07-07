@@ -39,6 +39,11 @@
 .PARAMETER SmokeProvider
   Provider for atlas-smoke. Default: openai
 
+.PARAMETER ScipLanguages
+  Initial SCIP languages to install/index. Values: typescript, python, php, go,
+  rust, clang, or all. If omitted in an interactive shell, a multi-select prompt
+  is shown. Default: typescript,python,php.
+
 .PARAMETER NoSmoke
   Skip the smoke test.
 
@@ -84,6 +89,7 @@ param(
   [string]$RepoPath = "",
   [string]$SmokeQuery = "auth",
   [string]$SmokeProvider = "openai",
+  [string]$ScipLanguages = "",
   [switch]$NoSmoke,
   [switch]$NoPersistEnv,
   [switch]$SkipSettings,
@@ -104,7 +110,8 @@ $PosseMode          = "preferred"
 $PossePhases        = "research,planning,assessment,dev"
 $PosseLiveFunnel    = "true"
 $PosseScipMode      = "on"
-$PosseScipLanguages = "typescript,python,php"
+$ScipLanguagesSupplied = $PSBoundParameters.ContainsKey("ScipLanguages")
+$PosseScipLanguages = if ($ScipLanguagesSupplied) { $ScipLanguages } else { "typescript,python,php" }
 $NodeMinMajor       = 24
 
 # =============================================================================
@@ -215,9 +222,159 @@ function Write-Warn2 {
   Write-LogOnly "[warn] $Message"
 }
 
+$script:ScipLanguageOptions = @(
+  [PSCustomObject]@{ Value = "typescript"; Label = "TypeScript / JavaScript"; Aliases = @("javascript", "node", "nodejs", "ts", "js") },
+  [PSCustomObject]@{ Value = "python"; Label = "Python"; Aliases = @("py") },
+  [PSCustomObject]@{ Value = "php"; Label = "PHP"; Aliases = @() },
+  [PSCustomObject]@{ Value = "go"; Label = "Go"; Aliases = @("golang") },
+  [PSCustomObject]@{ Value = "rust"; Label = "Rust"; Aliases = @("rs") },
+  [PSCustomObject]@{ Value = "clang"; Label = "C / C++ (clang)"; Aliases = @("c", "c++", "cpp", "cxx", "cc") }
+)
+$script:ScipLanguageStepStatus = "ok"
+$script:ScipLanguageStepNote = ""
+
+function Get-ScipLanguagesAllowedText {
+  return (($script:ScipLanguageOptions | ForEach-Object { $_.Value }) -join ", ") + ", all"
+}
+
+function Normalize-ScipLanguages {
+  param([string]$Value)
+  $tokens = @($Value -split "[,\s]+" | Where-Object { $_ -and $_.Trim() })
+  if ($tokens.Count -eq 0) { throw "no SCIP languages selected" }
+
+  $selected = New-Object System.Collections.Generic.List[string]
+  $invalid = @()
+  foreach ($token in $tokens) {
+    $needle = $token.Trim().ToLowerInvariant()
+    if ($needle -eq "all") {
+      return (($script:ScipLanguageOptions | ForEach-Object { $_.Value }) -join ",")
+    }
+    $match = $script:ScipLanguageOptions | Where-Object {
+      $_.Value -eq $needle -or ($_.Aliases -contains $needle)
+    } | Select-Object -First 1
+    if ($null -eq $match) {
+      $invalid += $token
+      continue
+    }
+    if (-not $selected.Contains($match.Value)) {
+      [void]$selected.Add($match.Value)
+    }
+  }
+
+  if ($invalid.Count -gt 0) {
+    throw ("invalid SCIP language(s): {0}; allowed: {1}" -f ($invalid -join ", "), (Get-ScipLanguagesAllowedText))
+  }
+  if ($selected.Count -eq 0) { throw "no SCIP languages selected" }
+  return ($selected -join ",")
+}
+
+function Resolve-ScipLanguageSelection {
+  if ($ScipLanguagesSupplied) {
+    try {
+      $script:PosseScipLanguages = Normalize-ScipLanguages $script:PosseScipLanguages
+      $script:ScipLanguageStepNote = "selected $script:PosseScipLanguages (-ScipLanguages)"
+      Write-Info "using -ScipLanguages: $script:PosseScipLanguages"
+      return $true
+    }
+    catch {
+      $script:ScipLanguageStepStatus = "failed"
+      $script:ScipLanguageStepNote = $_.Exception.Message
+      Write-LogOnly "[error] $($_.Exception.Message)"
+      return $false
+    }
+  }
+
+  try {
+    $script:PosseScipLanguages = Normalize-ScipLanguages $script:PosseScipLanguages
+  }
+  catch {
+    $script:ScipLanguageStepStatus = "failed"
+    $script:ScipLanguageStepNote = $_.Exception.Message
+    Write-LogOnly "[error] $($_.Exception.Message)"
+    return $false
+  }
+
+  if ($SkipSettings) {
+    $script:ScipLanguageStepStatus = "skipped"
+    $script:ScipLanguageStepNote = "-SkipSettings; account language setting unchanged"
+    Write-Info "initial SCIP language prompt skipped (-SkipSettings)"
+    return $true
+  }
+
+  $inputRedirected = $false
+  try { $inputRedirected = [Console]::IsInputRedirected } catch { $inputRedirected = $false }
+  if ($inputRedirected) {
+    $script:ScipLanguageStepNote = "selected $script:PosseScipLanguages (default; no interactive terminal)"
+    Write-Info "no interactive terminal for SCIP language selection; using default: $script:PosseScipLanguages"
+    return $true
+  }
+
+  while ($true) {
+    Write-Host ""
+    Write-Host ("  {0}Initial SCIP language environments{1}" -f $script:BOLD, $script:R)
+    Write-Host ("    Select one or more languages for first-run indexing. Press Enter for defaults [{0}]." -f $script:PosseScipLanguages)
+    Write-Host "    Use numbers, names, comma-separated values, or 'all'."
+    for ($i = 0; $i -lt $script:ScipLanguageOptions.Count; $i++) {
+      $option = $script:ScipLanguageOptions[$i]
+      $mark = if ((",$script:PosseScipLanguages,").Contains("," + $option.Value + ",")) { "*" } else { " " }
+      Write-Host ("      {0}) [{1}] {2} ({3})" -f ($i + 1), $mark, $option.Label, $option.Value)
+    }
+    $answer = Read-Host "      Languages (numbers/names, comma-separated, or all)"
+    if (-not $answer -or -not $answer.Trim()) {
+      $script:ScipLanguageStepNote = "selected $script:PosseScipLanguages (default)"
+      Write-Info "initial SCIP languages: $script:PosseScipLanguages"
+      return $true
+    }
+
+    $selection = @()
+    $invalidNumbers = @()
+    foreach ($token in @($answer -split "[,\s]+" | Where-Object { $_ -and $_.Trim() })) {
+      if ($token -match "^\d+$") {
+        $idx = [int]$token - 1
+        if ($idx -ge 0 -and $idx -lt $script:ScipLanguageOptions.Count) {
+          $selection += $script:ScipLanguageOptions[$idx].Value
+        }
+        else {
+          $invalidNumbers += $token
+        }
+      }
+      else {
+        $selection += $token
+      }
+    }
+    if ($invalidNumbers.Count -gt 0) {
+      Write-Host ("    {0}{1}{2} invalid option number(s): {3}" -f $script:YELLOW, $script:GlyphWarn, $script:R, ($invalidNumbers -join ", "))
+      continue
+    }
+    try {
+      $script:PosseScipLanguages = Normalize-ScipLanguages ($selection -join ",")
+      $script:ScipLanguageStepNote = "selected $script:PosseScipLanguages (interactive)"
+      Write-Info "initial SCIP languages: $script:PosseScipLanguages"
+      return $true
+    }
+    catch {
+      Write-Host ("    {0}{1}{2} {3}" -f $script:YELLOW, $script:GlyphWarn, $script:R, $_.Exception.Message)
+    }
+  }
+}
+
+function Step-ScipLanguages {
+  Step-Begin "languages"
+  Write-Info "choose initial SCIP language environments before runtime doctor runs"
+  if (Resolve-ScipLanguageSelection) {
+    Step-End $script:ScipLanguageStepStatus $script:ScipLanguageStepNote
+    return $true
+  }
+  $script:CriticalFailed = $true
+  Step-End "failed" $script:ScipLanguageStepNote
+  return $false
+}
+
 # --- step engine -----------------------------------------------------------------
-$script:StepKeys = @("packages", "node", "checkout", "composer", "npm", "shell", "seed", "doctor", "admin", "validate", "keys", "smoke")
+$script:StepKeys = @("languages", "preflight", "packages", "node", "checkout", "composer", "npm", "shell", "seed", "doctor", "admin", "validate", "keys", "smoke")
 $script:StepTitles = @{
+  languages = "SCIP language selection"
+  preflight = "Preflight checks"
   packages = "System packages"
   node     = "Node.js runtime"
   checkout = "Posse checkout"
@@ -267,6 +424,16 @@ function Step-FailCritical {
   param([string]$Note)
   $script:CriticalFailed = $true
   Step-End -Status "failed" -Note $Note
+}
+
+function Block-PendingSteps {
+  param([string]$Note = "blocked by an earlier failure")
+  foreach ($key in $script:StepKeys) {
+    if ($script:StepStatus[$key] -eq "pending") {
+      $script:StepStatus[$key] = "blocked"
+      $script:StepNote[$key] = $Note
+    }
+  }
 }
 
 function Quote-Arg {
@@ -1065,6 +1232,27 @@ function Test-GitConfig {
   if (-not $email) { Write-Warn2 'git user.email is not set globally (git config --global user.email "you@example.com")' }
 }
 
+function Step-Preflight {
+  Step-Begin "preflight"
+  if ($script:RepoPath) {
+    $script:RepoPath = Resolve-FullPath $script:RepoPath
+    if (-not (Test-Path $script:RepoPath)) {
+      $script:CriticalFailed = $true
+      Step-End "failed" ("repo path does not exist: {0}" -f $script:RepoPath)
+      return $false
+    }
+    if (-not $script:RepoId) { $script:RepoId = Split-Path $script:RepoPath -Leaf }
+    Write-Info "smoke repo: $script:RepoPath"
+  }
+  else {
+    Write-Info "no -RepoPath provided; smoke test will be skipped"
+  }
+  Test-GitConfig
+  Test-ProviderCredentials
+  Step-End "ok" "preflight complete"
+  return $true
+}
+
 # =============================================================================
 # main
 # =============================================================================
@@ -1085,31 +1273,28 @@ try {
   }
   Write-Host ("  {0}Log: {1}{2}" -f $script:DIM, $script:LogFile, $script:R)
 
-  if ($RepoPath) {
-    $RepoPath = Resolve-FullPath $RepoPath
-    if (-not (Test-Path $RepoPath)) {
-      Write-Host ("  {0}{1}{2} repo path does not exist: {3}" -f $script:RED, $script:GlyphFail, $script:R, $RepoPath)
-      $script:CriticalFailed = $true
-      exit 1
-    }
-    if (-not $RepoId) { $RepoId = Split-Path $RepoPath -Leaf }
+  if (-not (Step-ScipLanguages)) {
+    Block-PendingSteps "language selection failed"
   }
 
-  Test-GitConfig
-  Test-ProviderCredentials
+  if (-not $script:CriticalFailed -and -not (Step-Preflight)) {
+    Block-PendingSteps "preflight failed"
+  }
 
-  Step-Packages
-  Step-Node
-  Step-Checkout
-  Step-Composer
-  Step-Npm
-  Step-ShellWiring
-  Step-SeedSettings
-  Step-Doctor
-  Step-AdminInit
-  Step-Validate
-  Step-Keys
-  Step-Smoke
+  if (-not $script:CriticalFailed) {
+    Step-Packages
+    Step-Node
+    Step-Checkout
+    Step-Composer
+    Step-Npm
+    Step-ShellWiring
+    Step-SeedSettings
+    Step-Doctor
+    Step-AdminInit
+    Step-Validate
+    Step-Keys
+    Step-Smoke
+  }
 }
 finally {
   Print-Summary

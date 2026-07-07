@@ -41,6 +41,18 @@ data/
 # One-off local ATLAS probes against sibling repos.
 scripts/atlas-streaming-*.mjs
 
+# ATLAS A/B test run artifacts (raw logs, curated grades, per-arm scaffolding).
+# Kept local, out of the repo.
+reports/
+
+# Internal working/planning docs at the posse root — kept local, out of the
+# repo (leading slash anchors to posse/ so co-located nested design docs stay
+# tracked unless listed explicitly below).
+/*-PLAN.md
+/*-SPEC.md
+/*ASSESSMENT.md
+scripts/live-prompt-matrix-plan.md
+
 # Local per-file test run-time ledger (scripts/run-tests.mjs + test-timings.mjs)
 .posse-test-timings.json
 

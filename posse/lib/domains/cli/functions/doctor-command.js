@@ -35,6 +35,84 @@ function renderEntries({ log, colors, projectDir, title, entries = [], color }) 
   }
 }
 
+function progressText(value) {
+  if (value && typeof value === "object") {
+    return firstLine(value.message || value.text || value.step || value.kind || "");
+  }
+  return firstLine(value);
+}
+
+function stepOrdinal(event = {}) {
+  const index = Number(event.stepIndex || 0);
+  const total = Number(event.totalSteps || 0);
+  return index > 0 && total > 0 ? `[${index}/${total}] ` : "";
+}
+
+function formatLanguageStep(event = {}) {
+  const language = String(event.language || "environment");
+  const step = firstLine(event.step || event.message || "install");
+  return `${language} ${stepOrdinal(event)}${step}`.trim();
+}
+
+function createDoctorProgressRenderer({ log, colors, json }) {
+  let sawStructuredScipInstall = false;
+  let scipSectionShown = false;
+
+  const showScipSection = () => {
+    if (json || scipSectionShown) return;
+    scipSectionShown = true;
+    log(`\n  ${colors.bold}SCIP language environments${colors.reset}`);
+  };
+
+  const renderInstallEvent = (event = {}) => {
+    const kind = String(event.kind || "");
+    if (!kind.startsWith("environment.install.")) return false;
+    sawStructuredScipInstall = true;
+    if (json) return true;
+    showScipSection();
+
+    if (kind === "environment.install.started") {
+      log(`    ${colors.dim}-${colors.reset} ${progressText(event) || "checking managed language environments"}`);
+      return true;
+    }
+    if (kind === "environment.install.step.started") {
+      log(`    ${colors.dim}-${colors.reset} ${formatLanguageStep(event)}`);
+      return true;
+    }
+    if (kind === "environment.install.step.completed") {
+      log(`    ${colors.green}+${colors.reset} ${formatLanguageStep(event)}`);
+      return true;
+    }
+    if (kind === "environment.install.step.failed" || kind === "environment.install.language.failed") {
+      log(`    ${colors.red}x${colors.reset} ${progressText(event) || formatLanguageStep(event)}`);
+      return true;
+    }
+    if (kind === "environment.install.completed") {
+      log(`    ${colors.green}+${colors.reset} SCIP language environments ready`);
+      return true;
+    }
+    if (kind === "environment.install.failed") {
+      log(`    ${colors.red}x${colors.reset} SCIP language environment install failed`);
+      return true;
+    }
+    log(`    ${colors.dim}-${colors.reset} ${progressText(event) || kind}`);
+    return true;
+  };
+
+  const renderProgress = (message) => {
+    if (json) return;
+    const text = progressText(message);
+    if (!text) return;
+    if (sawStructuredScipInstall && /^SCIP deps:/iu.test(text)) return;
+    log(`  ${colors.dim}[doctor]${colors.reset} ${text}`);
+  };
+
+  return {
+    onEvent: renderInstallEvent,
+    onProgress: renderProgress,
+  };
+}
+
 function renderDoctorHelp({ log, colors }) {
   log(`
   ${colors.bold}posse doctor${colors.reset}
@@ -65,12 +143,12 @@ export async function cmdDoctor({
 
   const json = argv.includes("--json");
   const dryRun = argv.includes("--dry-run");
+  const progress = createDoctorProgressRenderer({ log, colors, json });
   const result = await runDoctor({
     projectDir,
     dryRun,
-    onProgress: (message) => {
-      if (!json) log(`  ${colors.dim}[doctor]${colors.reset} ${message}`);
-    },
+    onProgress: progress.onProgress,
+    onEvent: progress.onEvent,
   });
 
   if (json) {

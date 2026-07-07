@@ -69,6 +69,14 @@ export class PreflightRole extends BaseRole {
       promptLiteral("TITLE", workItem?.title || job.title || ""),
       promptLiteral("DESCRIPTION", workItem?.description || ""),
       "",
+      payload.preflight_objective === "oneshot_scope"
+        ? [
+          "Preflight objective: resolve whether this trivial-shaped item has exactly one clear existing repo file target.",
+          "If exactly one existing repo-relative file is clear, return mode \"oneshot\" with candidate_files containing only that path.",
+          "If it is low-research but not one-shot-safe, return mode \"plan_direct\". Otherwise return mode \"solo\".",
+          "",
+        ].join("\n")
+        : null,
       `Fallback budget: ${fallbackBudget}`,
       "",
       "Deterministic routing result:",
@@ -79,7 +87,7 @@ export class PreflightRole extends BaseRole {
       "",
       "Project map:",
       truncateJson(projectMap || { unavailable: true }),
-    ].join("\n");
+    ].filter((part) => part != null).join("\n");
   }
 
   buildContract() {

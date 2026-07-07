@@ -38,7 +38,10 @@ import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
 //       tree-sitter-derived qualified names instead of duplicating.
 //   v3: production ingest uses the Rust native SCIP row converter; JS remains
 //       only as a parity oracle/reference implementation.
-export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v3-native";
+//   v4: native rows carry per-document call-proof coverage metadata into
+//       layered storage so the view merge can suppress redundant tree-sitter
+//       calls only when SCIP coverage is explicit.
+export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v4-call-proof-metadata";
 
 /** @typedef {import("./cache.js").CachedDocument} CachedDocument */
 /** @typedef {import("./cache.js").CachedOccurrence} CachedOccurrence */
