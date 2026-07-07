@@ -7,8 +7,10 @@
 //
 // Locations checked (relative to the repo root that contains this script):
 //   ./docs/control-protocol.md              (tools/posse — this repo)
-//   ../../posse-remote/docs/control-protocol.md
-//   ../../posse-remote-control/docs/control-protocol.md
+//   ../../posse/posse-remote/docs/control-protocol.md
+//   ../../posse/posse-remote-control/docs/control-protocol.md
+// Falls back to the legacy sibling layout without the intermediate posse/
+// directory when that is the checked-out workspace shape.
 //
 // Override locations via POSSE_PROTOCOL_DOC_PATHS=path1,path2,...
 
@@ -20,13 +22,23 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 
 const overrides = process.env.POSSE_PROTOCOL_DOC_PATHS;
+const localProtocolDoc = resolve(repoRoot, "docs/control-protocol.md");
+const defaultSiblingLayouts = [
+  [
+    resolve(repoRoot, "../../posse/posse-remote/docs/control-protocol.md"),
+    resolve(repoRoot, "../../posse/posse-remote-control/docs/control-protocol.md"),
+  ],
+  [
+    resolve(repoRoot, "../../posse-remote/docs/control-protocol.md"),
+    resolve(repoRoot, "../../posse-remote-control/docs/control-protocol.md"),
+  ],
+];
+const defaultSiblingDocs =
+  defaultSiblingLayouts.find((paths) => paths.every((target) => existsSync(target))) ??
+  defaultSiblingLayouts[0];
 const targets = overrides
   ? overrides.split(",").map((value) => value.trim()).filter(Boolean)
-  : [
-      resolve(repoRoot, "docs/control-protocol.md"),
-      resolve(repoRoot, "../../posse-remote/docs/control-protocol.md"),
-      resolve(repoRoot, "../../posse-remote-control/docs/control-protocol.md"),
-    ];
+  : [localProtocolDoc, ...defaultSiblingDocs];
 
 function normalizeProtocolDoc(text) {
   return String(text || "")

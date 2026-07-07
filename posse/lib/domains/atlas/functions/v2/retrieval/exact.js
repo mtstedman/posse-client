@@ -6,9 +6,8 @@
 
 import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { isDefaultVisibleSymbol } from "./hygiene.js";
+import { nativePathEvidence } from "./native-evidence.js";
 import { collectSurveyPaths } from "./survey.js";
-import { buildPathAmbiguity } from "./path-ambiguity.js";
-import { buildNegativeEvidence } from "./negative-evidence.js";
 
 const MAX_STRUCTURE_FILES = 128;
 const MAX_SITES_PER_FILE_EDGE = 4;
@@ -127,11 +126,11 @@ export function codeStructure({ view, versionId, params = {}, repoRoot }) {
       .map((file) => ({ path: file.path, count: file.internalFanIn })),
   };
 
-  const pathAmbiguity = buildPathAmbiguity({ view, repoRoot, paths, requested });
-  const negativeEvidence = buildNegativeEvidence({ view, repoRoot, paths, requested, symbolsByPath, pathAmbiguity });
+  const evidence = nativePathEvidence({ view, repoRoot, paths, requested, symbolsByPath });
+  const pathAmbiguity = /** @type {Record<string, unknown> | null} */ (evidence.pathAmbiguity || null);
+  const negativeEvidence = /** @type {Record<string, unknown> | null} */ (evidence.negativeEvidence || null);
   const warnings = prefixTruncated ? [`Path expansion reached the ${maxFiles}-file cap.`] : [];
-  if (pathAmbiguity?.warnings) warnings.push(.../** @type {string[]} */ (pathAmbiguity.warnings));
-  if (negativeEvidence?.warnings) warnings.push(.../** @type {string[]} */ (negativeEvidence.warnings));
+  if (Array.isArray(evidence.warnings)) warnings.push(.../** @type {string[]} */ (evidence.warnings));
   const data = {
     files,
     internalEdges,

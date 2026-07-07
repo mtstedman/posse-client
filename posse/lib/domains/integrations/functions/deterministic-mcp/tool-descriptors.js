@@ -465,11 +465,11 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       // write capability comes from the projectDbWrite override, not the
       // file-write grant. No file mutation tools on this lane.
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "bash", "project_db_query"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash", "project_db_query"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash", "project_db_query"],
     }),
     artificer: Object.freeze({
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "inspect_file", "write_file", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash", "project_db_query"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash", "project_db_query"],
       imageGeneration: ["generate_image"],
     }),
     // Assessor carries project_db_query on the READ lane so it can verify the
@@ -796,7 +796,7 @@ export function getDeterministicMcpToolNames(role, {
   // operator grant, read-lane roles (researcher/planner) are capped to SELECT
   // at execution. The MCP gateway's runtimeToolAvailable() hides the tool
   // unless this repo's admin config enables it with a usable grant.
-  if (["dev", "artificer", "researcher", "planner"].includes(role)) tools.push("project_db_query");
+  if (["dev", "artificer", "assessor", "researcher", "planner"].includes(role)) tools.push("project_db_query");
   if (role === "researcher") {
     const readIdx = tools.indexOf("read_file");
     if (readIdx !== -1) tools.splice(readIdx, 1);

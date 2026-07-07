@@ -13,8 +13,8 @@
 import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { runAtlasNativeMethod } from "../native/invoke.js";
 import { isDefaultVisibleSymbol } from "./hygiene.js";
+import { nativePathEvidence } from "./native-evidence.js";
 import { recordCodeLadderSurvey } from "./code-ladder.js";
-import { buildPathAmbiguity } from "./path-ambiguity.js";
 
 const MAX_SURVEY_FILES = 64;
 const MAX_RAW_EDGES = 20_000;
@@ -125,11 +125,12 @@ export function codeSurvey({ view, versionId, params = {}, repoRoot }) {
     max_edges: params.maxEdges,
   }));
   if (prefixTruncated) result.truncated = true;
-  const pathAmbiguity = buildPathAmbiguity({ view, repoRoot, paths, requested, terms: digTerms });
+  const evidence = nativePathEvidence({ view, repoRoot, paths, requested, terms: digTerms });
+  const pathAmbiguity = /** @type {Record<string, unknown> | null} */ (evidence.pathAmbiguity || null);
   if (pathAmbiguity) {
     result.pathAmbiguity = pathAmbiguity;
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
-    warnings.push(.../** @type {string[]} */ (pathAmbiguity.warnings || []));
+    if (Array.isArray(evidence.warnings)) warnings.push(.../** @type {string[]} */ (evidence.warnings));
     result.warnings = warnings;
   }
   recordCodeLadderSurvey({ sessionId: params.sessionId, files: paths });

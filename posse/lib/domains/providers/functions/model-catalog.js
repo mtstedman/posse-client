@@ -22,9 +22,9 @@ const MODEL_TIER_DEFAULTS = Object.freeze({
     strong: Object.freeze({ model: "opus" }),
   }),
   openai: Object.freeze({
-    cheap: Object.freeze({ model: "gpt-4.1-mini" }),
-    standard: Object.freeze({ model: "gpt-4.1" }),
-    strong: Object.freeze({ model: "gpt-4.1" }),
+    cheap: Object.freeze({ model: "gpt-5.4-mini" }),
+    standard: Object.freeze({ model: "gpt-5.4" }),
+    strong: Object.freeze({ model: "gpt-5.5" }),
   }),
   codex: Object.freeze({
     cheap: Object.freeze({ model: "gpt-5.4-mini" }),
@@ -116,9 +116,13 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "gpt-5.3",
     "gpt-5.3-pro",
     "gpt-5.3-codex",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
     "gpt-5.4",
     "gpt-5.4-pro",
     "gpt-5.4-codex",
+    "gpt-5.5",
+    "gpt-5.5-pro",
   ]),
   codex: Object.freeze([
     "gpt-5.5",

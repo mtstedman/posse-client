@@ -198,6 +198,41 @@ function atlasToolTarget(input = {}) {
   return first ? String(first).split(/\r?\n/)[0].slice(0, 80) : "";
 }
 
+function observationValueFromKeys(input = {}, keys = []) {
+  for (const key of keys || []) {
+    const value = input?.[key];
+    if (Array.isArray(value)) {
+      const first = value.find((item) => item != null && String(item).trim() !== "");
+      if (first != null) return String(first);
+      continue;
+    }
+    if (value != null && String(value).trim() !== "") return String(value);
+  }
+  return "";
+}
+
+function summarizeCatalogObservedToolUse(toolName, input = {}) {
+  const entry = ToolCatalog.get(toolName);
+  const observation = entry?.observation;
+  if (!observation?.label) return null;
+  const source = observationValueFromKeys(input, observation.sourceKey ? [observation.sourceKey] : []);
+  const destination = observationValueFromKeys(input, observation.destinationKey ? [observation.destinationKey] : []);
+  const target = source || destination
+    ? `${source || "?"} -> ${destination || "?"}`
+    : observationValueFromKeys(input, [
+        observation.commandKey,
+        observation.rootKey,
+        ...(observation.pathKeys || []),
+        ...(observation.arrayPathKeys || []),
+        ...(observation.targetKeys || []),
+      ]);
+  const clippedTarget = String(target || "").split(/\r?\n/)[0].slice(0, 80);
+  return {
+    target: clippedTarget,
+    summary: `${observation.label}${clippedTarget ? `: ${clippedTarget}` : ""}`,
+  };
+}
+
 export function summarizeObservedToolUse(toolName, input = {}) {
   const raw = String(toolName || "");
   const atlasDisplayName = formatAtlasToolUseDisplayName(raw, input);
@@ -213,6 +248,8 @@ export function summarizeObservedToolUse(toolName, input = {}) {
   const normalized = stripPosseMcpGatewayPrefix(raw);
   const formatter = OBSERVED_TOOL_FORMATTERS[normalized];
   if (typeof formatter === "function") return formatter(input);
+  const catalogSummary = summarizeCatalogObservedToolUse(normalized, input);
+  if (catalogSummary) return catalogSummary;
   const fallback = Object.values(input).filter((value) => typeof value === "string").join(" ");
   return {
     target: fallback.slice(0, 60),
