@@ -109,7 +109,12 @@ export class AssessorRole extends BaseRole {
   }
 
   buildContract() {
-    return "Assess the following work output.";
+    // No local prompt text: the assessor role prompt (prompts/roles/assessor.md)
+    // is the relay-compiled system prompt and already states the mission
+    // ("quality control ... you verify the work actually did what was asked").
+    // The ASSESSMENT REQUEST context is supplied by buildContext (all prompts
+    // remote-owned; artificer pattern).
+    return "";
   }
 
   async composePrompt({ contextText, contract, ctx } = {}) {

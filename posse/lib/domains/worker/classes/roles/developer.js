@@ -225,15 +225,13 @@ export class DeveloperRole extends BaseRole {
   }
 
   buildContract() {
-    return [
-      "Execute this task. Follow the instructions EXACTLY.",
-      "Stay within the provided task scope and implement only repo code/file changes for this job.",
-      "If the requested end state is already present, do not create comment-only or formatting-only churn just to make a diff. Instead prove the current state and use status VERIFIED_NO_CHANGE.",
-      "",
-      "When finished, output your dev log between --- DEV LOG START --- and --- DEV LOG END --- markers.",
-      "Include: task_id, status (COMPLETE, VERIFIED_NO_CHANGE, BLOCKED, or PARTIAL), summary, files_touched, criteria_check.",
-      "In criteria_check, use FAIL only when evidence shows a success criterion is unmet. If a check cannot run because tooling or environment is unavailable, write VERIFICATION_UNAVAILABLE with the command/tool and reason, then separately list any static evidence you did verify.",
-    ].join("\n");
+    // No local prompt text: the dev role prompt (prompts/roles/dev.md) and the
+    // DEV LOG contract (prompts/contracts/dev-log.md) are the relay-compiled
+    // system prompt. They own execute-exactly, hard file scope,
+    // VERIFIED_NO_CHANGE (no decorative churn), the DEV LOG markers/fields, and
+    // the criteria_check rules incl. VERIFICATION_UNAVAILABLE. All prompts
+    // remote-owned (artificer pattern).
+    return "";
   }
 
   async composePrompt({ contextText, contract, job, ctx } = {}) {

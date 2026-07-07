@@ -613,22 +613,15 @@ export class ResearcherRole extends BaseRole {
   }
 
   buildContract() {
-    // The researcher role prompt and the researcher-output contract are supplied
-    // by the remote prompt compiler as the system prompt. This block carries only
-    // the task-framing directive that rides in the user instructions, matching the
-    // dev/planner/assessor pattern (no local role-prompt/contract re-assembly).
-    return [
-      "Return your findings in the required researcher output format.",
-      "Gather evidence with the available tools before answering; do not invent file paths, symbols, or sources.",
-      "Do not spend the whole turn budget on discovery. After enough evidence to answer, stop reading and synthesize.",
-      "As a guide, synthesize after 8-12 meaningful repo tool calls, 4 child/web calls, repeated paths/sources, or any point where additional reads are unlikely to change the brief.",
-      "Call count is a budget, not a coverage test: before you synthesize, account for every load-bearing file that was seeded or surfaced to you (handoff seeds, tree scope candidates, prefetch) - either you inspected it, or you name it as unvisited in the brief's unknowns. Naming an unread candidate costs one line; leaving it silently unread makes an incomplete answer read as complete. Prefer naming over spending the whole budget - do not force-read every candidate.",
-      "On retries with prior context or salvage, reuse it and make only a few targeted verification reads before producing the final answer.",
-      "A partial but evidence-backed brief is better than exhausting turns without a final response.",
-      "When stopping early or retrying, include files/symbols consulted, why each mattered, unknowns, and stop_reason so the planner can decide whether escalation is worth the cost.",
-      "When you identify a mechanism (enforcement, routing, dispatch, config read), enumerate its parallel lanes before concluding: same-named symbols elsewhere, sibling constant sets, and second-layer enforcement. List each lane with evidence, or state explicitly that you searched for parallels and found none.",
-      "In the structured researcher appendix, include scope_estimate when repo scope is relevant: { confidence: \"high\" | \"medium\" | \"low\", likely_touch_count: number, unknowns: string[], scope_reasons: string[] }. This is scope evidence only; do not choose downstream models or budgets.",
-    ].join("\n");
+    // All researcher prompt text is remote-owned: the role prompt
+    // (prompts/roles/researcher.md), the researcher-output contract
+    // (prompts/contracts/researcher-output.md), and the ATLAS tools contract
+    // are compiled into the system prompt by the remote prompt compiler.
+    // Retrieval/coverage directives live once on the relay's ATLAS contract;
+    // investigation discipline + the scope_estimate appendix field moved to the
+    // role prompt/contract. This role carries no local directive text (matches
+    // the artificer pattern).
+    return "";
   }
 
   async composePrompt({ contextText, contract, ctx } = {}) {

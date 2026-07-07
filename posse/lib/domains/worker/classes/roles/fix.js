@@ -326,14 +326,13 @@ export class FixRole extends BaseRole {
   }
 
   buildContract() {
-    return [
-      "Fix the following issue. The previous dev attempt failed assessment.",
-      "If the fix is already present, do not create comment-only or formatting-only churn just to make a diff. Instead prove the current state and use status VERIFIED_NO_CHANGE.",
-      "",
-      "When finished, output your dev log between --- DEV LOG START --- and --- DEV LOG END --- markers.",
-      "Include: task_id, status (COMPLETE, VERIFIED_NO_CHANGE, BLOCKED, or PARTIAL), summary, files_touched, criteria_check.",
-      "In criteria_check, use FAIL only when evidence shows a success criterion is unmet. If a check cannot run because tooling or environment is unavailable, write VERIFICATION_UNAVAILABLE with the command/tool and reason, then separately list any static evidence you did verify.",
-    ].join("\n");
+    // No local prompt text. Fix compiles as role "dev", so the dev role prompt
+    // (dev.md) + DEV LOG contract (dev-log.md) are the relay-compiled system
+    // prompt (VERIFIED_NO_CHANGE, DEV LOG format, criteria_check rules incl.
+    // VERIFICATION_UNAVAILABLE). The fix-retry framing is already carried by the
+    // injected FIX INSTRUCTIONS + assessor feedback + PREVIOUS DEV OUTPUT
+    // context in this role's run(). All prompts remote-owned (artificer pattern).
+    return "";
   }
 
   async composePrompt({ contextText, contract, job, ctx } = {}) {

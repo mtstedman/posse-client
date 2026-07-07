@@ -9,6 +9,7 @@ import { extractJson } from "../../../../shared/format/functions/json.js";
 import { getAtlasDeterministicToolDefinitions } from "../../../../functions/toolkit/atlas.js";
 import { getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { executeEmbeddedAtlasTool } from "../../../integrations/functions/atlas-embedded.js";
+import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { isIndexableSourcePath } from "../../../integrations/functions/deterministic-mcp/source-file-gate.js";
 import { resolvePathWithin } from "../../../runtime/functions/fs-safety.js";
@@ -1268,7 +1269,7 @@ export async function attachAtlasPlannerSlice(packet) {
     if (areaMap.length === 0 && Array.isArray(treeScope?.areaMap)) areaMap = treeScope.areaMap;
 
     if (treeScope?.ok && treeScope.candidateFiles.length > 0) {
-      await _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards, areaMap, prefetchMode: plan.mode });
+      await _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards, areaMap, prefetchMode: plan.mode, taskText, seedSymbols });
       return;
     }
 
@@ -1285,7 +1286,7 @@ export async function attachAtlasPlannerSlice(packet) {
 // an empty list) so every downstream consumer — relevance classification,
 // insight promotion, step-0 insights — keeps working unchanged; `source`
 // tells the renderer which discovery pass produced the candidates.
-async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards = [], areaMap = [], prefetchMode = null }) {
+async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards = [], areaMap = [], prefetchMode = null, taskText = null, seedSymbols = [] }) {
   const prefetchTargets = selectAtlasPrefetchTargets(packet, treeScope.candidateFiles);
   packet.atlas_slice_candidates = {
     filePaths: prefetchTargets.filePaths,
@@ -1300,12 +1301,31 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
     maxFiles: ATLAS_EXACT_PREFETCH_MAX_FILES,
   });
 
+  // Area handoffs: hand the agent the code.survey call-map for the area rather
+  // than leaving it to CHOOSE survey (it never does — it answers from the tree
+  // prefetch, which has no call edges). When survey succeeds it IS the per-file
+  // skeleton evidence for the whole area, so the separate skeleton pass is
+  // skipped (cost stays bounded, not additive). Any miss falls back to it.
+  // Embedded prefetch call: code.survey runs via executeEmbeddedAtlasTool
+  // (origin:"prefetch") and does NOT require the agent/internal tool surface to
+  // expose it (it is an agent-surface action, absent from internalAtlasTools).
+  // The tree-prefetch gate above already ensured ATLAS is usable; any survey
+  // miss returns { ok:false } and falls back to the skeleton pass below.
+  const surveyContext = await _prefetchAtlasSurvey(packet, {
+    taskText,
+    rankedFiles: prefetchTargets.rankedFiles,
+    candidateDirs: Array.isArray(treeScope.candidateDirs) ? treeScope.candidateDirs : [],
+    seedFiles: prefetchTargets.exactFiles,
+    keySymbols: seedSymbols,
+  });
+  const surveyOk = surveyContext?.ok === true;
+
   // Researcher results are intentionally only file paths: before
   // research/planning exists, ranking can drift into unrelated files. Defer
   // skeleton expansion until planner/dev handoffs.
   const skeletonMaxFiles = atlasSliceSkeletonPrefetchLimit(packet.recipient);
   const exactOkPaths = _pathSet(exactFiles.filter((item) => item?.ok).map((item) => item.file));
-  const skeletons = skeletonMaxFiles > 0
+  const skeletons = (!surveyOk && skeletonMaxFiles > 0)
     ? await _prefetchSliceSkeletons(prefetchTargets.skeletonFiles.filter((file) => !exactOkPaths.has(file.toLowerCase())), {
       packet,
       toolsAvailable: [...tools],
@@ -1330,8 +1350,50 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
     exactFiles,
     frontier: [],
     skeletons,
+    surveyContext: surveyOk ? surveyContext : null,
     treeScope,
   };
+}
+
+// Prefetch a code.survey for area-shaped handoffs. Scope (dir vs file-list,
+// symbols) is chosen by the pure chooseSurveyScope ladder from the relevance
+// signal the tree pass already produced. origin:"prefetch" -> logs as
+// tool.atlas.prefetch/code.survey (system lane). Never throws; a miss returns
+// { ok:false } and the caller falls back to the skeleton pass.
+async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDirs, seedFiles, keySymbols }) {
+  try {
+    const scope = chooseSurveyScope(
+      { taskText, rankedFiles, candidateDirs, seedFiles, keySymbols },
+      defaultSurveyScopeDeps(packet.cwd),
+    );
+    if (!scope.inject) return { ok: false, attempted: false, scope };
+    const args = { paths: scope.paths, maxFiles: MAX_SURVEY_FILES };
+    if (scope.symbols) args.symbols = scope.symbols;
+    const raw = await executeEmbeddedAtlasTool("code.survey", args, {
+      cwd: packet.cwd,
+      config: packet.atlas_config || undefined,
+      origin: "prefetch",
+    });
+    if (String(raw || "").startsWith("Error:")) return { ok: false, attempted: true, scope, error: String(raw).slice(0, 200) };
+    let data = extractAtlasJsonPayload(raw);
+    data = data?.result ?? data?.data ?? data;
+    if (!data || !Array.isArray(data.files) || data.files.length === 0) {
+      return { ok: false, attempted: true, scope, error: "survey returned no files" };
+    }
+    return {
+      ok: true,
+      attempted: true,
+      scope,
+      symbols: scope.symbols || null,
+      files: data.files,
+      callMap: data.callMap || null,
+      metrics: data.metrics || null,
+      granularity: data.granularity || null,
+      truncated: !!data.truncated,
+    };
+  } catch (err) {
+    return { ok: false, attempted: true, error: String(err?.message || err).slice(0, 200) };
+  }
 }
 
 // Fallback graph-slice prefetch — runs only when tree.scope was unavailable
@@ -1911,6 +1973,38 @@ function _renderExactFileBlock(item, trim) {
   return lines;
 }
 
+// Render a prefetched code.survey: per-file skeletons + the internal/inbound
+// call map. This is the area orientation the agent otherwise never retrieves.
+function _renderAtlasSurveySection(sc, _packet) {
+  const lines = [];
+  const target = sc.scope?.mode === "directory" ? sc.scope.paths : `${(sc.files || []).length} files`;
+  const dig = sc.symbols ? `, dig: ${sc.symbols.join(", ")}` : "";
+  lines.push(`Area survey (prefetched code.survey over ${target}${dig}) — per-file skeletons + call map. This covers the card and skeleton rungs for every file below; climb a per-file rung only for a specific gap it leaves:`);
+  for (const f of (sc.files || []).slice(0, MAX_SURVEY_FILES)) {
+    const syms = Array.isArray(f.symbols)
+      ? f.symbols.slice(0, 8).map((s) => `${s.name}${s.kind ? `:${s.kind}` : ""}${s.line ? `@${s.line}` : ""}`).join(", ")
+      : "";
+    const count = f.symbolCount != null ? ` (${f.symbolCount})` : "";
+    lines.push(`  - ${f.path}${count}${syms ? ` — ${syms}` : ""}`);
+  }
+  const cm = sc.callMap;
+  if (cm) {
+    const edges = Array.isArray(cm.edges) ? cm.edges.slice(0, 40) : [];
+    if (edges.length > 0) {
+      lines.push("  call edges (internal):");
+      for (const e of edges) lines.push(`    ${e.from} -> ${e.to}${e.count > 1 ? ` (x${e.count})` : ""}`);
+      if (cm.edgesTruncated) lines.push("    (internal edge list truncated)");
+    }
+    const inbound = Array.isArray(cm.inbound) ? cm.inbound.slice(0, 16) : [];
+    if (inbound.length > 0) {
+      lines.push("  inbound (callers from outside the surveyed set):");
+      for (const e of inbound) lines.push(`    ${e.from} -> ${e.to}${e.count > 1 ? ` (x${e.count})` : ""}`);
+    }
+  }
+  if (sc.truncated) lines.push("  (survey hit the file cap; name a narrower path for the remainder)");
+  return lines;
+}
+
 function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
   const slice = packet.atlas_slice_context;
   const label = atlasBackendLabel(packet?.atlas);
@@ -1993,6 +2087,10 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
   const recipientRole = String(packet?.recipient || "").trim().toLowerCase();
   if (treeScope?.ok && (recipientRole === "planner" || recipientRole === "dev")) {
     lines.push("The seeds above are pre-expanded from the brief; call tree.expand only for files you newly validate.");
+  }
+
+  if (slice.surveyContext?.ok && trim < 2) {
+    for (const line of _renderAtlasSurveySection(slice.surveyContext, packet)) lines.push(line);
   }
 
   if (Array.isArray(slice.exactFiles) && slice.exactFiles.length > 0) {
