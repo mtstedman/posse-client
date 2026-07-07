@@ -16,7 +16,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["symbol.search", "symbol.card", "symbol.overview", "slice.build", "slice.refresh", "slice.spillover.get", "edit.plan", "file.read", "code.survey", "code.structure", "code.persistence", "context", "context.summary", "review.delta", "review.analyze", "review.risk", "repo.status", "repo.quality", "memory.surface", "memory.get"], description: "ATLAS action to route through this gateway." },
+        action: { type: "string", enum: ["symbol.search", "symbol.card", "symbol.overview", "slice.build", "slice.refresh", "slice.spillover.get", "edit.plan", "file.read", "code.survey", "code.structure", "code.db", "context", "context.summary", "review.delta", "review.analyze", "review.risk", "repo.status", "repo.quality", "memory.surface", "memory.get"], description: "ATLAS action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -25,11 +25,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code": {
     type: "function",
     name: "atlas_code",
-    description: "Gateway. Compact native ATLAS v2 code-inspection wrapper for skeleton, hot-path, area survey, structure/persistence inventory, edit planning, and gated raw-window actions.",
+    description: "Gateway. Compact native ATLAS v2 code-inspection wrapper for skeleton, hot-path, area survey, structure/DB inventory, edit planning, and gated raw-window actions.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["code.skeleton", "code.lens", "code.window", "code.survey", "code.structure", "code.persistence", "edit.plan", "file.read"], description: "ATLAS code action to route through this gateway." },
+        action: { type: "string", enum: ["code.skeleton", "code.lens", "code.window", "code.survey", "code.structure", "code.db", "edit.plan", "file.read"], description: "ATLAS code action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -653,10 +653,10 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
-  "code.persistence": {
+  "code.db": {
     type: "function",
-    name: "atlas_code_persistence",
-    description: "First-pass persistence inventory for DB/file write questions. Scans resolved indexed files for SQL INSERT/UPDATE/DELETE/CREATE and common file-write APIs, classifies writes as durable_result, telemetry, bookkeeping, cache, or unknown, and appends negativeEvidence for same-name test/script/doc/stub decoys. Use before raw windows when asked which tables/files are written, whether a write is live vs telemetry, or to separate included results from cache/offline/bookkeeping writes.",
+    name: "atlas_code_db",
+    description: "First-pass DB query inventory. Scans resolved indexed files for SQL SELECT/INSERT/UPDATE/DELETE/DDL sites, classifies DB targets as durable_result, telemetry, bookkeeping, cache, or unknown, and appends negativeEvidence for same-name test/script/doc/stub decoys. Use before raw windows when asked which tables are read or written, whether a DB touchpoint is live vs telemetry/bookkeeping/cache, or to separate included results from offline/test DB code.",
     parameters: {
       type: "object",
       properties: {

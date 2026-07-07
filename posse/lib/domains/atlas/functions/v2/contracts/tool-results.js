@@ -874,8 +874,9 @@
  */
 
 /**
- * @typedef {Object} CodePersistenceWrite
- * @property {"db" | "file"} kind
+ * @typedef {Object} CodeDbQuery
+ * @property {"db"} kind
+ * @property {"read" | "write" | "schema"} access
  * @property {string} operation
  * @property {string} target
  * @property {string} path
@@ -887,7 +888,7 @@
  */
 
 /**
- * @typedef {Object} CodePersistenceFile
+ * @typedef {Object} CodeDbFile
  * @property {string} path
  * @property {boolean} scanned
  * @property {number | null} byteSize
@@ -895,9 +896,9 @@
  */
 
 /**
- * @typedef {Object} CodePersistenceData
- * @property {CodePersistenceFile[]} files
- * @property {CodePersistenceWrite[]} writes
+ * @typedef {Object} CodeDbData
+ * @property {CodeDbFile[]} files
+ * @property {CodeDbQuery[]} queries
  * @property {NegativeEvidenceCandidate[]} exclusions
  * @property {Record<string, unknown>} metrics
  * @property {boolean} truncated
@@ -1300,7 +1301,7 @@
  *   | ToolResultEnvelope<CodeHotPathData>      & { action: "code.lens" }
  *   | ToolResultEnvelope<CodeWindowData>       & { action: "code.window" }
  *   | ToolResultEnvelope<CodeStructureData>    & { action: "code.structure" }
- *   | ToolResultEnvelope<CodePersistenceData>  & { action: "code.persistence" }
+ *   | ToolResultEnvelope<CodeDbData>        & { action: "code.db" }
  *   | ToolResultEnvelope<ContextData>          & { action: "context" }
  *   | ToolResultEnvelope<ContextSummaryData>   & { action: "context.summary" }
  *   | ToolResultEnvelope<AgentFeedbackData>    & { action: "agent.feedback" }
@@ -1416,9 +1417,9 @@ export const ATLAS_TOOL_RESULT_FIELD_CATALOG = Object.freeze({
     metrics: "metrics",
     truncated: "truncated",
   }),
-  "code.persistence": Object.freeze({
+  "code.db": Object.freeze({
     files: "files",
-    writes: "writes",
+    queries: "queries",
     exclusions: "exclusions",
     pathAmbiguity: "pathAmbiguity",
     negativeEvidence: "negativeEvidence",

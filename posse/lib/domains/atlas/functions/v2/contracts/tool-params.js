@@ -371,7 +371,7 @@
  */
 
 /**
- * @typedef {Object} CodePersistenceParams
+ * @typedef {Object} CodeDbParams
  * @property {string | string[]} paths        Directory prefix / file path, or an array of them (max 128 files resolved).
  * @property {string} [path]                  Internal alias for a single `paths` entry (not surfaced).
  * @property {number} [maxFiles]              Optional. Default 64, max 128.
@@ -654,7 +654,7 @@
  *   | { action: "code.window" } & CodeNeedWindowParams
  *   | { action: "code.survey" } & CodeSurveyParams
  *   | { action: "code.structure" } & CodeStructureParams
- *   | { action: "code.persistence" } & CodePersistenceParams
+ *   | { action: "code.db" } & CodeDbParams
  *   | { action: "context" } & ContextParams
  *   | { action: "context.summary" } & ContextSummaryParams
  *   | { action: "agent.feedback" } & AgentFeedbackParams
@@ -711,7 +711,7 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "code.window",
   "code.survey",
   "code.structure",
-  "code.persistence",
+  "code.db",
   "context",
   "context.summary",
   "agent.feedback",

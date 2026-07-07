@@ -95,7 +95,7 @@ export const ATLAS_MULTI_GATEWAY_ACTIONS = Object.freeze({
   "file.read": Object.freeze(["query", "code"]),
   "code.survey": Object.freeze(["query", "code"]),
   "code.structure": Object.freeze(["query", "code"]),
-  "code.persistence": Object.freeze(["query", "code"]),
+  "code.db": Object.freeze(["query", "code"]),
 });
 
 const QUERY_SHARED_ACTIONS = Object.freeze(
@@ -512,7 +512,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     includeSymbols: b(),
     includeEdges: b(),
   }, ["paths"]),
-  "code.persistence": o({
+  "code.db": o({
     paths: { type: ["string", "array"], minLength: 1, items: { type: "string", minLength: 1 }, maxItems: 128 },
     maxFiles: i({ minimum: 1, maximum: 128 }),
   }, ["paths"]),

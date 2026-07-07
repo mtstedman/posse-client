@@ -199,7 +199,7 @@ function namespaceOf(action) {
 function actionTags(action) {
   const ns = namespaceOf(action);
   const tags = new Set([ns]);
-  if (["symbol.search", "symbol.card", "symbol.overview", "tree.overview", "tree.branch", "tree.scope", "tree.expand", "slice.build", "edit.plan", "context", "code.survey", "code.structure", "code.persistence"].includes(action)) tags.add("query");
+  if (["symbol.search", "symbol.card", "symbol.overview", "tree.overview", "tree.branch", "tree.scope", "tree.expand", "slice.build", "edit.plan", "context", "code.survey", "code.structure", "code.db"].includes(action)) tags.add("query");
   if (["buffer.push", "buffer.checkpoint", "memory.store", "policy.set", "agent.feedback", "index.refresh", "scip.ingest"].includes(action)) tags.add("mutates");
   if (action === "workflow" || action.startsWith("runtime.")) tags.add("orchestration");
   return [...tags].filter(Boolean);
@@ -219,7 +219,7 @@ function examplesFor(action) {
     "code.window": [{ action, symbolId: "<symbolId>", reason: "Need implementation details after card/skeleton", identifiersToFind: ["handler"], expectedLines: 80 }],
     "code.survey": [{ action, paths: "lib/domains/billing" }, { action, paths: ["lib/a.js", "lib/b.js"], symbols: ["processInvoice"] }],
     "code.structure": [{ action, paths: "lib/domains/billing", edgeKinds: ["imports"] }, { action, paths: ["lib/a.js", "lib/b.js"], edgeKinds: ["imports", "calls"] }],
-    "code.persistence": [{ action, paths: "lib/domains/billing" }, { action, paths: ["lib/a.js", "lib/b.js"] }],
+    "code.db": [{ action, paths: "lib/domains/billing" }, { action, paths: ["lib/a.js", "lib/b.js"] }],
     "repo.overview": [{ action, level: "full", includeHotspots: true }],
     "workflow": [{ action, steps: [{ id: "search", action: "symbol.search", args: { query: "Greeter", limit: 1 } }] }],
     "memory.store": [{ action, title: "Why", content: "Decision details", symbolIds: ["<symbolId>"] }],
@@ -236,7 +236,7 @@ function prerequisitesFor(action) {
   if (action === "tree.expand") return ["Seed with files/areas already validated (from the brief, tree.branch, or symbol.overview locations)."];
   if (action === "code.survey") return ["Use tree.branch or tree.expand first to pick the directory or file set worth surveying."];
   if (action === "code.structure") return ["Use when the answer needs exact file/symbol/import/fan-in inventory instead of code-body context."];
-  if (action === "code.persistence") return ["Use when the answer needs DB/file write inventory, durable-vs-telemetry classification, or proof that same-name stores are not live writes."];
+  if (action === "code.db") return ["Use when the answer needs DB table read/write inventory, durable-vs-telemetry classification, or proof that same-name stores are not live DB touchpoints."];
   if (action.startsWith("slice.") || action === "context") return ["Start from symbol.search, symbol.card, or taskText."];
   if (action === "edit.plan") return ["Resolve target symbols with symbol.search or target files with file.read/search first."];
   if (action.startsWith("runtime.")) return ["Runtime execution must be enabled by ATLAS policy."];
@@ -250,14 +250,14 @@ function nextActionsFor(action) {
     "symbol.card": ["symbol.overview", "tree.branch", "tree.scope", "slice.build", "code.window", "agent.feedback"],
     "symbol.overview": ["symbol.card", "tree.branch", "tree.scope", "slice.build", "code.window"],
     "tree.overview": ["tree.branch", "tree.scope", "symbol.card", "slice.build", "code.skeleton"],
-    "tree.branch": ["code.structure", "code.persistence", "code.survey", "tree.expand", "symbol.card", "slice.build", "code.skeleton"],
+    "tree.branch": ["code.structure", "code.db", "code.survey", "tree.expand", "symbol.card", "slice.build", "code.skeleton"],
     "tree.scope": ["slice.build", "context", "code.skeleton", "review.analyze"],
-    "tree.expand": ["code.structure", "code.persistence", "tree.branch", "code.skeleton", "symbol.search", "slice.build"],
+    "tree.expand": ["code.structure", "code.db", "tree.branch", "code.skeleton", "symbol.search", "slice.build"],
     "slice.build": ["slice.refresh", "agent.feedback", "context"],
     "edit.plan": ["code.skeleton", "code.lens", "file.read"],
     "code.survey": ["code.structure", "symbol.overview", "code.lens", "code.window", "slice.build"],
-    "code.structure": ["code.persistence", "code.survey", "symbol.overview", "code.skeleton"],
-    "code.persistence": ["code.survey", "code.structure", "code.lens", "code.window"],
+    "code.structure": ["code.db", "code.survey", "symbol.overview", "code.skeleton"],
+    "code.db": ["code.survey", "code.structure", "code.lens", "code.window"],
     "code.skeleton": ["symbol.overview", "code.lens", "code.survey"],
     "code.lens": ["symbol.overview", "code.window", "symbol.card"],
     "repo.register": ["index.refresh", "repo.status"],

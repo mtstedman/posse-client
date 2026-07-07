@@ -25,7 +25,7 @@ import { symbolUsages } from "./usages.js";
 import { treeGrow, treeOverview, treeScope, treeWalk } from "./tree.js";
 import { codeSurvey } from "./survey.js";
 import { codeStructure } from "./exact.js";
-import { codePersistence } from "./persistence.js";
+import { codeDb } from "./db.js";
 import {
   codeGetSkeleton,
   codeGetSkeletonAsync,
@@ -299,9 +299,9 @@ function dispatchImpl(call, ctx) {
     case "code.structure":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (codeStructure({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot }));
-    case "code.persistence":
+    case "code.db":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (codePersistence({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot }));
+      return /** @type {any} */ (codeDb({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot }));
     case "context":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (contextBuild({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder, planner: ctx.planner }));
@@ -408,7 +408,7 @@ const GATEWAY_ACTIONS = Object.freeze({
     "file.read",
     "code.survey",
     "code.structure",
-    "code.persistence",
+    "code.db",
   ]),
   code: new Set([
     "code.skeleton",
@@ -416,7 +416,7 @@ const GATEWAY_ACTIONS = Object.freeze({
     "code.window",
     "code.survey",
     "code.structure",
-    "code.persistence",
+    "code.db",
     "edit.plan",
     "file.read",
   ]),

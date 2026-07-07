@@ -60,7 +60,7 @@ const ATLAS_JOB_CACHE_ACTIONS = new Set([
   "code.skeleton",
   "code.lens",
   "code.structure",
-  "code.persistence",
+  "code.db",
 ]);
 
 // Cross-agent read-through cache for the hot "shape of the repo" reads that
