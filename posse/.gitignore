@@ -41,6 +41,52 @@ data/
 # One-off local ATLAS probes against sibling repos.
 scripts/atlas-streaming-*.mjs
 
+# ATLAS A/B harness generated run outputs. Keep run definitions and grading keys
+# tracked (README.md, cells.jsonl, key-*.md), but ignore per-run relics.
+scripts/atlas-ab/**/*.answer.md
+scripts/atlas-ab/**/*.run.log
+scripts/atlas-ab/**/*.blind-map.json
+scripts/atlas-ab/**/blind-map.json
+scripts/atlas-ab/**/*.grade-prompt.md
+scripts/atlas-ab/**/*.grade.raw.txt
+scripts/atlas-ab/**/*.grade.output.json
+scripts/atlas-ab/**/*.grade.missing-key.md
+scripts/atlas-ab/**/*.grade.error.txt
+scripts/atlas-ab/**/results.jsonl
+scripts/atlas-ab/**/grades.jsonl
+scripts/atlas-ab/**/matrix.html
+scripts/atlas-ab/**/matrix.md
+
+# Generic task A/B harness generated run outputs.
+scripts/task-ab/**/*.diff.patch
+scripts/task-ab/**/*.review.md
+scripts/task-ab/**/*.run.log
+scripts/task-ab/**/*.blind-map.json
+scripts/task-ab/**/blind-map.json
+scripts/task-ab/**/*.grade-prompt.md
+scripts/task-ab/**/*.grade.raw.txt
+scripts/task-ab/**/*.grade.output.json
+scripts/task-ab/**/*.grade.error.txt
+scripts/task-ab/**/results.jsonl
+scripts/task-ab/**/grades.jsonl
+scripts/task-ab/**/matrix.html
+scripts/task-ab/**/matrix.md
+
+# One-shot A/B harness generated run outputs.
+scripts/oneshot-ab/**/*.diff.patch
+scripts/oneshot-ab/**/*.review.md
+scripts/oneshot-ab/**/*.run.log
+scripts/oneshot-ab/**/*.blind-map.json
+scripts/oneshot-ab/**/blind-map.json
+scripts/oneshot-ab/**/*.grade-prompt.md
+scripts/oneshot-ab/**/*.grade.raw.txt
+scripts/oneshot-ab/**/*.grade.output.json
+scripts/oneshot-ab/**/*.grade.error.txt
+scripts/oneshot-ab/**/results.jsonl
+scripts/oneshot-ab/**/grades.jsonl
+scripts/oneshot-ab/**/matrix.html
+scripts/oneshot-ab/**/matrix.md
+
 # ATLAS A/B test run artifacts (raw logs, curated grades, per-arm scaffolding).
 # Kept local, out of the repo.
 reports/

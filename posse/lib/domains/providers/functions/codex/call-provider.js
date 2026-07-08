@@ -35,7 +35,7 @@ import { isCodexResumeHandleExpiredError } from "./errors.js";
 import { getMaxTurns, getModelOverride, getModelTierConfig, normalizeModelForAuthMode } from "./model-config.js";
 import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRoute, buildCodexDeterministicReadConfigOverridesAsync, buildCodexSystemToolLockdownOverrides } from "./request-builders.js";
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
-import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractUsageFromEvent, summarizeJsonEvent } from "./stream-events.js";
+import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractTurnCountFromEvent, extractUsageFromEvent, summarizeJsonEvent } from "./stream-events.js";
 
 export async function callProvider(promptText, {
   role = "planner",
@@ -402,6 +402,7 @@ export async function callProvider(promptText, {
     let totalCachedInputTokens = null;
     let longContextInputTokens = null;
     let latestSessionHandle = resumeSessionHandle || null;
+    let latestTurnCount = null;
     const buildSpawnError = (err) => {
       const durationMs = Date.now() - startTime;
       const wrapped = new Error(
@@ -419,6 +420,7 @@ export async function callProvider(promptText, {
         cachedInputTokens: totalCachedInputTokens,
         longContextInputTokens,
         durationMs,
+        maxTurns: turnLimit,
         maxOutputTokens: outputTokenLimit,
         outputTruncated: false,
         outputLimitReason: null,
@@ -500,6 +502,8 @@ export async function callProvider(promptText, {
         if (totals.outputTokens != null) totalOutputTokens = totals.outputTokens;
         if (totals.cachedInputTokens != null) totalCachedInputTokens = totals.cachedInputTokens;
         if (totals.longContextInputTokens != null) longContextInputTokens = totals.longContextInputTokens;
+        const turnCount = extractTurnCountFromEvent(msg);
+        if (turnCount != null) latestTurnCount = Math.max(latestTurnCount ?? 0, turnCount);
         const extracted = _extractCodexToolUse(msg);
         const extractedEntries = Array.isArray(extracted) ? extracted : (extracted ? [extracted] : []);
         const webToolUses = extractedEntries.filter((entry) => entry && isWebToolName(entry.tool));
@@ -628,6 +632,8 @@ export async function callProvider(promptText, {
         toolUsesLoggedByToolkit: !!deterministicReadMcp.active,
         sessionHandle: latestSessionHandle,
         priorSessionHandle: resumeSessionHandle,
+        numTurns: latestTurnCount ?? toolUses.length,
+        maxTurns: turnLimit,
         maxOutputTokens: outputTokenLimit,
         outputTruncated: false,
         outputLimitReason: null,

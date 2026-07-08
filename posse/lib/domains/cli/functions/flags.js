@@ -152,6 +152,27 @@ export function parseSessionRecycleFlagFromArgv() {
   return process.argv.includes("--session-recycle") ? "on" : null;
 }
 
+export function parseWorkItemIdsFlagFromArgv(argv = process.argv) {
+  const values = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const raw = String(argv[i] || "");
+    if (raw === "--work-item" || raw === "--wi") {
+      const value = argv[i + 1];
+      if (value != null && !String(value).startsWith("-")) {
+        values.push(value);
+        i += 1;
+      }
+      continue;
+    }
+    if (raw.startsWith("--work-item=")) values.push(raw.slice("--work-item=".length));
+    if (raw.startsWith("--wi=")) values.push(raw.slice("--wi=".length));
+  }
+  return [...new Set(values
+    .flatMap((value) => String(value || "").split(","))
+    .map((value) => Number.parseInt(String(value).trim().replace(/^wi#?/i, ""), 10))
+    .filter((id) => Number.isSafeInteger(id) && id > 0))];
+}
+
 // Single source of truth for every CLI flag the orchestrator accepts.
 // Each descriptor has:
 //   name        — the flag literal (with leading dashes; short aliases included)
@@ -184,6 +205,8 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--constraints", takesValue: true, category: "value" },
   { name: "--concurrency", takesValue: true, category: "value" },
   { name: "--stall-timeout", takesValue: true, category: "value" },
+  { name: "--work-item", takesValue: true, category: "value" },
+  { name: "--wi", takesValue: true, category: "value" },
 
   // Filter/query value flags (used by reports, audit, status, etc.).
   { name: "--by", takesValue: true, category: "filter-value" },
@@ -242,6 +265,7 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--show-token", takesValue: false, category: "boolean" },
   { name: "--show-lan-token", takesValue: false, category: "boolean" },
   { name: "--no-session-recycle", takesValue: false, category: "boolean" },
+  { name: "--oneshot", takesValue: false, category: "boolean" },
   { name: "--pair", takesValue: false, category: "boolean" },
   { name: "--verbose", takesValue: false, category: "boolean" },
   { name: "-v", takesValue: false, category: "boolean" },
@@ -334,10 +358,15 @@ export function parseIntakeHintsFromArgv(description, fallbackMode = "build") {
   const inputSelection = parseFlagValue("--input-contexts") || parseFlagValue("--contexts");
   const outputFlag = parseFlagValue("--output");
   const deliverableFlag = parseFlagValue("--deliverable");
+  const oneshotFlag = hasArgFlag("--oneshot");
   const rawIntentFlag = parseFlagValue("--intent");
-  const intentFlag = hasArgFlag("--intent")
-    ? (normalizeRequestKindChoice(rawIntentFlag, "") || rawIntentFlag)
-    : "";
+  const intentFlag = oneshotFlag
+    ? "oneshot"
+    : (
+      hasArgFlag("--intent")
+        ? (normalizeRequestKindChoice(rawIntentFlag, "") || rawIntentFlag)
+        : ""
+    );
   const mergedDirs = mergeSuspectedDirsWithInputContexts(
     parseFlagValue("--dirs"),
     inputSelection,
@@ -345,7 +374,7 @@ export function parseIntakeHintsFromArgv(description, fallbackMode = "build") {
   );
   return normalizeIntakeHints({
     intent_type: intentFlag,
-    intent_type_source: hasArgFlag("--intent") ? "explicit" : "inferred",
+    intent_type_source: (oneshotFlag || hasArgFlag("--intent")) ? "explicit" : "inferred",
     deliverable_type: deliverableFlag,
     deliverable_type_source: hasArgFlag("--deliverable") ? "explicit" : "inferred",
     output_mode: outputFlag || defaultOutputModeForMode(fallbackMode),
@@ -359,7 +388,7 @@ export function parseIntakeHintsFromArgv(description, fallbackMode = "build") {
 }
 
 export function hasIntakeHintFlags() {
-  return ["--intent", "--deliverable", "--output", "--dirs", "--input-contexts", "--contexts", "--subtasks"]
+  return ["--intent", "--oneshot", "--deliverable", "--output", "--files", "--dirs", "--input-contexts", "--contexts", "--subtasks", "--constraints"]
     .some((flag) => hasArgFlag(flag));
 }
 

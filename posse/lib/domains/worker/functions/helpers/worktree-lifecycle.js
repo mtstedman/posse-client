@@ -239,12 +239,17 @@ async function assertCrossWiSyncSourceBranchAsync(sourceBranch, projectDir, { si
 
 async function gitObjectHashAsync(cwd, ref, repoPath, { signal = null } = {}) {
   try {
-    const out = await gitExecAsync(["rev-parse", `${ref}:${repoPath}`], cwd, { signal });
+    const out = await gitExecAsync(["rev-parse", `${ref}:./${repoPath}`], cwd, { signal });
     return String(out || "").trim() || null;
   } catch (err) {
     if (isAbortError(err)) throw err;
     return null;
   }
+}
+
+async function gitLsFilesIncludesPathAsync(cwd, repoPath, { signal = null } = {}) {
+  const out = await gitExecAsync(["ls-files", "-z", "--", repoPath], cwd, { signal });
+  return String(out || "").split("\0").filter(Boolean).includes(repoPath);
 }
 
 // A handoff copy is only safe while the target branch still holds the path at
@@ -255,6 +260,19 @@ async function gitObjectHashAsync(cwd, ref, repoPath, { signal = null } = {}) {
 async function crossWiSyncTargetGuardAsync(wtPath, sync, { signal = null } = {}) {
   const headObject = await gitObjectHashAsync(wtPath, "HEAD", sync.path, { signal });
   const sourceObject = await gitObjectHashAsync(wtPath, sync.source_branch, sync.path, { signal });
+  if (headObject == null && sourceObject == null) {
+    if (await gitLsFilesIncludesPathAsync(wtPath, sync.path, { signal })) {
+      throw new Error(`Cross-WI sync could not resolve tracked path in HEAD or ${sync.source_branch}: ${sync.path}`);
+    }
+    return {
+      clobbers: false,
+      head_object: null,
+      source_object: null,
+      base_object: null,
+      merge_base: null,
+      absent_in_both_refs: true,
+    };
+  }
   if (headObject === sourceObject) {
     return { clobbers: false, head_object: headObject, source_object: sourceObject, base_object: null, merge_base: null };
   }

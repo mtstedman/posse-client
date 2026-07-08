@@ -10,6 +10,9 @@ const FANOUT_TRIGGER_RE = /\b(?:audit|review\s+all|verify\s+each|find\s+all|scan
 const BROAD_SCOPE_RE = /\b(?:all|every|each|across|whole|entire)\b/i;
 const WEB_FANOUT_RE = /\b(?:compare|versus|vs\.?|between|across|audit|review|verify|investigate)\b/i;
 const RENAME_RE = /\b(?:rename|renaming)\b/i;
+const FORMAT_RE = /\bformatting\b/i;
+const ONESHOT_TOKEN_RE = /(?:^|\s)#one[-_]?shot\b/i;
+const LOW_BLAST_SCOPE_RE = /\b(?:keep|limit(?:ed)?|scop(?:e|ed)|single[-\s]?file|one[-\s]?file|only|do\s+not\s+change|don't\s+change|without\s+changing|no\s+(?:runtime\s+)?behaviou?r|smallest\s+change)\b/i;
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:ai|app|cloud|co|com|dev|edu|gov|io|net|org)\b/gi;
 
@@ -180,6 +183,26 @@ function extractFileMentions(text, intakeHints = {}) {
   return unique(mentions);
 }
 
+function extractEditTargetFiles(text, intakeHints = {}, fileMentions = []) {
+  const hinted = splitHintList(intakeHints?.candidate_files ?? intakeHints?.suspected_files)
+    .map(normalizePathLike);
+  if (hinted.length > 0) return unique(hinted);
+
+  const leadingTargets = [];
+  for (const match of text.matchAll(FILE_MENTION_RE)) {
+    const file = normalizePathLike(match[1]);
+    const start = match.index || 0;
+    const end = start + match[0].length;
+    const before = text.slice(0, start);
+    const after = text.slice(end);
+    const leadIn = /(?:^|[\n.!?]\s*)\s*(?:in|within|inside)\s*$/i.test(before);
+    if (leadIn && /^\s*,/.test(after)) leadingTargets.push(file);
+  }
+  if (leadingTargets.length > 0) return unique(leadingTargets);
+
+  return fileMentions.length === 1 ? fileMentions : [];
+}
+
 function extractDirMentions(intakeHints = {}) {
   return unique(splitHintList(intakeHints?.suspected_dirs).map(normalizePathLike));
 }
@@ -345,6 +368,26 @@ function hasProtectedFileMention(fileMentions) {
   return fileMentions.some((file) => normalizePathLike(file).toLowerCase().startsWith("prompts/"));
 }
 
+function isLowBlastRadiusSingleFileEdit({
+  text,
+  noResearchText,
+  editTargetFiles,
+  protectedFileMention,
+  webBranches,
+  listItems,
+  lowerMode,
+}) {
+  if (protectedFileMention) return false;
+  if (lowerMode === "question" || lowerMode === "promote") return false;
+  if (editTargetFiles.length !== 1) return false;
+  if (webBranches.length > 0) return false;
+  if (listItems.length > 1) return false;
+  if (noResearchText.length > 700) return false;
+  if (COMPLEX_RE.test(text) || AMBIGUOUS_RE.test(text) || FANOUT_TRIGGER_RE.test(text)) return false;
+  if (BROAD_SCOPE_RE.test(text) && !LOW_BLAST_SCOPE_RE.test(text)) return false;
+  return LOW_BLAST_SCOPE_RE.test(text);
+}
+
 export function buildSyntheticResearchBrief(routingOrReason = null) {
   const reason = typeof routingOrReason === "string"
     ? routingOrReason
@@ -384,16 +427,27 @@ export function classifyResearchTask({
   const text = normalizeText([taskTitle, taskDescription].filter(Boolean).join("\n\n"));
   const lowerMode = String(mode || intakeHints?.mode || "").toLowerCase().trim();
   const fileMentions = extractFileMentions(text, intakeHints);
+  const editTargetFiles = extractEditTargetFiles(text, intakeHints, fileMentions);
   const dirMentions = extractDirMentions(intakeHints);
   const mentionedModules = extractMentionedModules(text, projectMap, fileMentions, dirMentions);
   const webBranches = extractWebBranches(text, intakeHints);
   const listItems = extractListItems(taskDescription || taskTitle);
   const noResearchText = taskDescription || taskTitle;
   const protectedFileMention = hasProtectedFileMention(fileMentions);
-  const oneshotSimple = !protectedFileMention && ONESHOT_SIMPLE_RE.test(text) && noResearchText.length < 200 && !COMPLEX_RE.test(text);
+  const explicitOneshot = String(intakeHints?.intent_type || "").toLowerCase() === "oneshot" || ONESHOT_TOKEN_RE.test(text);
+  const oneshotSimple = !protectedFileMention && ONESHOT_SIMPLE_RE.test(text) && noResearchText.length < 200 && !COMPLEX_RE.test(text) && !RENAME_RE.test(text) && !FORMAT_RE.test(text);
   const simpleNoResearch = !protectedFileMention && SIMPLE_NO_RESEARCH_RE.test(text) && fileMentions.length === 1 && noResearchText.length < 200 && !COMPLEX_RE.test(text);
   const renameMultiNoResearch = !protectedFileMention && RENAME_RE.test(text) && filesAllInSameModule(fileMentions) && noResearchText.length < 400 && !COMPLEX_RE.test(text);
   const webFanoutCandidate = webBranches.length >= 2 && WEB_FANOUT_RE.test(text) && mentionedModules.length === 0 && fileMentions.length === 0;
+  const lowBlastSingleFileEdit = isLowBlastRadiusSingleFileEdit({
+    text,
+    noResearchText,
+    editTargetFiles,
+    protectedFileMention,
+    webBranches,
+    listItems,
+    lowerMode,
+  });
 
   let result = null;
   if (lowerMode === "question" && webFanoutCandidate && webBranches.length <= 3) {
@@ -410,20 +464,42 @@ export function classifyResearchTask({
     };
   } else if (lowerMode === "question") {
     result = { bucket: "solo", reason: "question mode always runs researcher" };
+  } else if (!protectedFileMention && explicitOneshot && lowerMode !== "question" && lowerMode !== "promote" && fileMentions.length === 1) {
+    result = {
+      bucket: "oneshot",
+      reason: "explicit one-shot intent with single file",
+      candidate_files: fileMentions,
+      oneshot_source: "explicit",
+    };
+  } else if (!protectedFileMention && explicitOneshot && lowerMode !== "question" && lowerMode !== "promote" && fileMentions.length === 0) {
+    result = {
+      bucket: "oneshot_candidate",
+      reason: "explicit one-shot intent needs preflight scope resolution",
+      oneshot_source: "explicit",
+    };
   } else if (!protectedFileMention && String(intakeHints?.intent_type || "").toLowerCase() === "typo_fix") {
     result = { bucket: "no_research", reason: "intake intent is typo_fix" };
   } else if (!protectedFileMention && lowerMode === "promote") {
     result = { bucket: "no_research", reason: "promote mode is a branch handoff" };
+  } else if (lowBlastSingleFileEdit) {
+    result = {
+      bucket: "oneshot",
+      reason: "single-file low-blast-radius edit can skip planner",
+      candidate_files: editTargetFiles,
+      oneshot_source: "scope",
+    };
   } else if (oneshotSimple && fileMentions.length === 1) {
     result = {
       bucket: "oneshot",
       reason: "single-file trivial edit can skip planner",
       candidate_files: fileMentions,
+      oneshot_source: "heuristic",
     };
   } else if (oneshotSimple && fileMentions.length === 0 && lowerMode !== "question") {
     result = {
       bucket: "oneshot_candidate",
       reason: "trivial edit needs preflight scope resolution",
+      oneshot_source: "heuristic",
     };
   } else if (simpleNoResearch) {
     result = { bucket: "no_research", reason: "single-file low-risk text edit" };
@@ -475,10 +551,19 @@ export function classifyResearchTask({
   }
 
   const noResearch = result.bucket === "no_research";
+  const oneshotBucket = ["oneshot", "oneshot_candidate"].includes(result.bucket);
+  const budget = oneshotBucket
+    ? normalizeExplicitBudget(
+      intakeHints?.deepthink_budget
+        ?? intakeHints?.research_budget
+        ?? intakeHints?.reasoning_budget
+        ?? intakeHints?.budget,
+    ) || "low"
+    : determineBudget({ text, intakeHints, mentionedModules, fileMentions, noResearch });
   const finalResult = {
     ...result,
     web_targets: result.web_targets || (result.branches || []).filter((branch) => branch.kind === "web"),
-    budget: determineBudget({ text, intakeHints, mentionedModules, fileMentions, noResearch }),
+    budget,
   };
   return finalResult;
 }

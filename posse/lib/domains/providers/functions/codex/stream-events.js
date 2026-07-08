@@ -33,6 +33,8 @@ export function __testBuildCloseStats({
   sessionHandle = null,
   priorSessionHandle = null,
   sessionExpired = false,
+  numTurns = null,
+  maxTurns = null,
   maxOutputTokens = null,
   outputTruncated = false,
   outputLimitReason = null,
@@ -50,6 +52,8 @@ export function __testBuildCloseStats({
     durationMs,
     outputChars: (finalOutput || stdout.trim()).length,
     exitCode: code,
+    numTurns,
+    maxTurns,
     maxOutputTokens,
     outputTruncated: !!outputTruncated,
     outputLimitReason: outputLimitReason || null,
@@ -60,6 +64,38 @@ export function __testBuildCloseStats({
     priorSessionHandle: priorSessionHandle || null,
     sessionExpired: !!sessionExpired,
   };
+}
+
+function normalizeTurnCount(value) {
+  if (value == null) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.floor(n);
+}
+
+export function extractTurnCountFromEvent(msg) {
+  if (!msg || typeof msg !== "object") return null;
+  const candidates = [
+    msg.num_turns,
+    msg.numTurns,
+    msg.turn_count,
+    msg.turnCount,
+    msg.turns_used,
+    msg.turnsUsed,
+    msg.metrics?.num_turns,
+    msg.metrics?.numTurns,
+    msg.metrics?.turn_count,
+    msg.metrics?.turnCount,
+    msg.usage?.num_turns,
+    msg.usage?.numTurns,
+    msg.usage?.turn_count,
+    msg.usage?.turnCount,
+  ];
+  for (const candidate of candidates) {
+    const count = normalizeTurnCount(candidate);
+    if (count != null) return count;
+  }
+  return null;
 }
 
 export function __testClassifyCodexStderrLine(line) {

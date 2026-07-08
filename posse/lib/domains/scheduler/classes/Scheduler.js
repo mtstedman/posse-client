@@ -428,6 +428,9 @@ export class Scheduler {
     this._lockLossKillCallback = null;
     this._lockLost = false;
     this._lockLostKilledJobIds = new Set();
+    this.onlyWorkItemIds = Array.isArray(opts.onlyWorkItemIds)
+      ? opts.onlyWorkItemIds.map((id) => Number(id)).filter((id) => Number.isSafeInteger(id) && id > 0)
+      : [];
     this.createSchedulerLockLease = typeof opts.createSchedulerLockLease === "function"
       ? opts.createSchedulerLockLease
       : (lockOptions) => new SchedulerLockLease({
@@ -1726,6 +1729,7 @@ export class Scheduler {
           const candidates = findRunnableJobsBatch(fetchLimit, {
             excludeJobIds: [...scanExcludeJobIds],
             onlyJobTypes,
+            onlyWorkItemIds: this.onlyWorkItemIds,
           });
           if (candidates.length === 0) break;
 

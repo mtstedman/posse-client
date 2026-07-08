@@ -48,6 +48,21 @@ export function defaultResearchModelTier() {
   return "strong";
 }
 
+export function researchModelTierForBudget(budget, fallback = defaultResearchModelTier()) {
+  const normalized = normalizeResearchBudget(budget);
+  return normalized === "low" ? "standard" : fallback;
+}
+
+export function resolveResearchBudgetForRouting(baseBudget, routingBudget, {
+  baseExplicit = false,
+} = {}) {
+  const base = normalizeResearchBudget(baseBudget, "normal");
+  const routed = normalizeResearchBudget(routingBudget, base);
+  if (baseExplicit) return base;
+  if (base !== "normal") return maxResearchBudget(base, routed);
+  return routed;
+}
+
 export function getResearchBudget(workItem, payload = null) {
   const metadata = getWorkItemMetadata(workItem);
   const explicit = payload?.deepthink_budget

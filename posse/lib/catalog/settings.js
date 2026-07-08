@@ -51,6 +51,8 @@ export const SETTING_KEYS = Object.freeze({
   PLAN_APPROVAL_MODE: "plan_approval_mode",
   PLANNER_MAX_TASKS: "planner_max_tasks",
   PLANNER_UNDER_SCOPED_BROAD_GATE: "planner_under_scoped_broad_gate",
+  RESEARCH_TRAVERSAL_COMPLETION_CHECK: "research_traversal_completion_check",
+  RESEARCH_TRAVERSAL_COMPLETION_MAX_CHARS: "research_traversal_completion_max_chars",
   POSSE_REMOTE_RESPONSE_SIGNING_SECRET: "posse_remote_response_signing_secret",
   POSSE_REMOTE_TIMEOUT_MS: "posse_remote_timeout_ms",
   KAIZEN_TO_ATLAS: "posse_kaizen_to_atlas",
@@ -124,6 +126,7 @@ export const LOG_LEVEL_VALUES = Object.freeze(["debug", "info", "warn", "error"]
 export const MODEL_CATALOG_ENFORCEMENT_VALUES = Object.freeze(["warn_and_fallback", "warn_only", "off"]);
 export const PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES = Object.freeze(["off", "warn", "enforce"]);
 export const RESEARCH_FANOUT_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
+export const RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const ATLAS_MEMORY_SURFACE_MODE_VALUES = Object.freeze(["auto", "off", "on"]);
 export const SESSION_RECYCLE_MODE_VALUES = Object.freeze(["off", "dev-fix", "full"]);
 export const STARTUP_DIRTY_TREE_POLICY_VALUES = Object.freeze(["block", "commit"]);

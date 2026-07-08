@@ -39,8 +39,8 @@ import { createRedTeamPlanChain, redTeamPlanningPayload } from "./red-team-plan.
 import { normalizeIntakeHints } from "../../intake/functions/hints.js";
 import { researchPayload } from "../../research/functions/payload.js";
 import {
-  defaultResearchModelTier,
   getResearchBudget,
+  researchModelTierForBudget,
   researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -163,7 +163,7 @@ export function spawnIterativeNextPass(wi, state, { projectDir, redTeamPlan = fa
     job_type: "research",
     title: `Research (iterate ${passNumber}): ${wiTitle}`,
     priority: wi.priority,
-    model_tier: defaultResearchModelTier(),
+    model_tier: researchModelTierForBudget(deepthinkBudget),
     reasoning_effort: researchBudgetToReasoningEffort(deepthinkBudget, "medium"),
     payload_json: JSON.stringify(researchPayload({
       _is_loopback: true,

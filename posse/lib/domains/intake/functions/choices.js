@@ -8,6 +8,7 @@ const REQUEST_KIND_CHOICES = Object.freeze([
   { value: "design", aliases: ["d", "ux", "ui"] },
   { value: "context", aliases: ["c"] },
   { value: "question", aliases: ["q"] },
+  { value: "oneshot", aliases: ["o", "one-shot"] },
   { value: "image", aliases: ["i"] },
   { value: "report", aliases: ["r"] },
   { value: "analysis", aliases: ["a", "analyze"] },

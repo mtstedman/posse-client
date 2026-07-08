@@ -33,11 +33,12 @@ import {
 } from "../../../research/functions/fanout.js";
 import { validateScopedPath } from "../../../../shared/scope/functions/validation.js";
 import {
-  defaultResearchModelTier,
   getResearchBudget,
   isResearchBudgetDeep,
   maxResearchBudget,
   normalizeResearchBudget,
+  researchModelTierForBudget,
+  resolveResearchBudgetForRouting,
   researchBudgetToReasoningEffort,
 } from "../../../../shared/policies/functions/role-utils.js";
 import { spawnFromRole } from "../../../queue/functions/spawn-guard.js";
@@ -144,7 +145,6 @@ export function parsePreflightRoutingDecision(output, { fallbackBudget = "normal
     ? parsed.candidate_files
       .map((file) => String(file || "").trim().replace(/\\/g, "/").replace(/^\.\//, ""))
       .filter(Boolean)
-      .slice(0, 1)
     : [];
   const finalMode = mode === "fanout_clear"
     ? (branches.length > 0 ? "fanout_clear" : "solo")
@@ -438,9 +438,13 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
     "normal",
   );
   const decision = parsePreflightRoutingDecision(output, { fallbackBudget, fallbackReason });
+  const fallbackBudgetExplicit = preflightPayload.fallback_budget_explicit === true
+    || preflightPayload.research_budget_explicit === true;
   const researchBudget = decision.fallback
     ? decision.budget
-    : maxResearchBudget(fallbackBudget, decision.budget);
+    : resolveResearchBudgetForRouting(fallbackBudget, decision.budget, {
+      baseExplicit: fallbackBudgetExplicit,
+    });
   const wiTitle = (wi?.title || preflightJob.title.replace(/^Preflight:\s*/i, "") || `WI#${preflightJob.work_item_id}`).slice(0, 60);
   const fanoutMode = decision.mode === "fanout_clear" ? getResearchFanoutMode() : "off";
 
@@ -466,6 +470,7 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
         budget: decision.budget,
         reason: decision.reason || preflightPayload.routing?.reason || "preflight resolved one-shot scope",
         candidate_files: decision.candidate_files,
+        oneshot_source: preflightPayload.routing?.oneshot_source || "preflight",
       },
       source: "preflight",
       projectDir: worker?.projectDir,
@@ -587,7 +592,7 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
     title: `Research: ${wiTitle}`,
     parent_job_id: preflightJob.id,
     priority: preflightJob.priority,
-    model_tier: defaultResearchModelTier(),
+    model_tier: researchModelTierForBudget(researchBudget),
     reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
     payload_json: JSON.stringify({
       deepthink_budget: researchBudget,

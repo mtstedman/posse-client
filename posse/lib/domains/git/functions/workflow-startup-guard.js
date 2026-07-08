@@ -19,6 +19,7 @@ import { firstGitLine } from "./workflow-git-utils.js";
 
 export function createStartupDirtyGuardHelpers(context) {
   const { projectDir, runGitWorkflowTaskOffMainThread } = context;
+  let projectGitPrefixCache;
 
   // "" means "git ran and reported a clean tree" (or no repo). An infra
   // failure (git gate busy, posse-git unavailable) must NOT read as clean —
@@ -72,8 +73,28 @@ export function createStartupDirtyGuardHelpers(context) {
       .trim();
   }
 
+  function projectGitPrefix() {
+    if (projectGitPrefixCache !== undefined) return projectGitPrefixCache;
+    try {
+      const raw = gitExec(["rev-parse", "--show-prefix"], projectDir, { timeoutMs: 5000 }).trim();
+      const normalized = String(raw || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+      projectGitPrefixCache = normalized ? `${normalized}/` : "";
+    } catch {
+      projectGitPrefixCache = "";
+    }
+    return projectGitPrefixCache;
+  }
+
+  function projectRelativePorcelainPath(filePath) {
+    const normalized = String(filePath || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "").trim();
+    const prefix = projectGitPrefix();
+    if (!prefix) return normalized;
+    if (normalized === prefix.slice(0, -1)) return "";
+    return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
+  }
+
   function isRuntimePorcelainLine(line, cwd = projectDir) {
-    const filePath = porcelainPath(line);
+    const filePath = projectRelativePorcelainPath(porcelainPath(line));
     if (filePath === ".posse" || filePath.startsWith(".posse/")) return true;
     if (filePath !== ".gitignore") return false;
     const code = String(line || "").trim();
@@ -99,7 +120,7 @@ export function createStartupDirtyGuardHelpers(context) {
 
   async function isRuntimePorcelainLineAsync(line, cwd = projectDir, { signal = null } = {}) {
     throwIfAborted(signal);
-    const filePath = porcelainPath(line);
+    const filePath = projectRelativePorcelainPath(porcelainPath(line));
     if (filePath === ".posse" || filePath.startsWith(".posse/")) return true;
     if (filePath !== ".gitignore") return false;
     const code = String(line || "").trim();
@@ -191,10 +212,10 @@ export function createStartupDirtyGuardHelpers(context) {
   function porcelainPathsForGitAdd(line) {
     const filePath = porcelainPath(line);
     if (!filePath) return [];
-    if (!filePath.includes(" -> ")) return [filePath];
+    if (!filePath.includes(" -> ")) return [projectRelativePorcelainPath(filePath)].filter(Boolean);
     return filePath
       .split(/\s+->\s+/)
-      .map((part) => part.replace(/^"|"$/g, "").replace(/\\/g, "/").trim())
+      .map((part) => projectRelativePorcelainPath(part.replace(/^"|"$/g, "").replace(/\\/g, "/").trim()))
       .filter(Boolean);
   }
 

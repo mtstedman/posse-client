@@ -31,9 +31,9 @@ import {
   writeRunArtifactPayload,
 } from "../../../shared/telemetry/functions/run-telemetry.js";
 import {
-  defaultResearchModelTier,
   getResearchBudget,
   isResearchBudgetDeep,
+  researchModelTierForBudget,
   researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -327,7 +327,7 @@ export function respawnAfterRejection(wiId, { feedback = null, rejectedArtifactI
     job_type: "research",
     title: `Research (after plan rejection): ${(wi.title || "").slice(0, 60)}`,
     priority: wi.priority || "normal",
-    model_tier: defaultResearchModelTier(),
+    model_tier: researchModelTierForBudget(researchBudget),
     reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
     payload_json: JSON.stringify({
       deepthink_budget: researchBudget,

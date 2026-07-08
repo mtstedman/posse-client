@@ -880,6 +880,11 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       contract_warnings = null,
       output_root = null,
       verified_no_change = false,
+      branch_net_diff_detected = false,
+      branch_net_diff_base = null,
+      branch_net_diff_head = null,
+      branch_net_diff_target = null,
+      branch_net_diff_files = [],
       allowed_files = [],
       allowed_create_files = [],
       allowed_delete_files = [],
@@ -902,6 +907,12 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
 
     if (verified_no_change) {
       sections.push("verified_no_change: true — the agent claims the requested end state was already present, so an empty files_actually_committed list is expected. Verify current file snapshots against the success criteria instead of failing solely because there is no commit.");
+    }
+    if (branch_net_diff_detected) {
+      sections.push(`branch_net_diff_detected: true — this attempt made no new commit, but the WI branch already differs from ${branch_net_diff_target || "the merge target"} (${branch_net_diff_base || "unknown base"}..${branch_net_diff_head || "HEAD"}). Assess the branch state below instead of treating the job as a clean no-op.`);
+      if (branch_net_diff_files.length > 0) {
+        sections.push(`branch_net_diff_files: ${JSON.stringify(branch_net_diff_files)}`);
+      }
     }
 
     // Manifest from artifact-mode jobs
@@ -986,6 +997,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
         `- Edited files must be in files_to_modify or under create_roots → otherwise FAIL`,
         `- Created files must be in files_to_create or under create_roots → otherwise FAIL`,
         `- Deleted files must be in files_to_delete → otherwise FAIL`,
+        branch_net_diff_detected ? `- branch_net_diff_detected=true means a zero-commit attempt is being assessed against preexisting WI branch changes; verify that branch diff directly and fail destructive or out-of-scope branch state.` : null,
         verified_no_change ? `- verified_no_change=true means no commit is expected; judge whether the current scoped file snapshots already satisfy the task.` : null,
         `- If out-of-scope files were committed, verdict MUST be "fail"; file requests are follow-up scope and do not authorize the current commit.`,
         `- If files_reverted is non-empty → the dev attempted out-of-scope edits that were ALREADY REVERTED by the system. Do NOT fail for this — it is informational only. Judge the task solely on whether the in-scope committed files satisfy the success criteria.`,
@@ -1487,6 +1499,7 @@ export async function runPostExecutionAssessment(worker, {
   pendingFileRequests,
   preAssessAlreadyVerified = false,
   preManifestState,
+  branchNetDiff = null,
   satisfiedNoop,
   verifiedNoChange = false,
   startTime,
@@ -1885,6 +1898,12 @@ export async function runPostExecutionAssessment(worker, {
         contract_violations: contractViolations,
         contract_warnings: contractWarnings,
         commit_hash: committedHash,
+        branch_net_diff_detected: !!branchNetDiff?.hasDiff,
+        branch_net_diff_base: branchNetDiff?.mergeBase || null,
+        branch_net_diff_head: branchNetDiff?.head || null,
+        branch_net_diff_target: branchNetDiff?.targetBranch || null,
+        branch_net_diff_files: branchNetDiff?.files || [],
+        branch_net_diff: branchNetDiff?.diff || null,
         output_root: jobPayloadForAssess.output_root || null,
         verified_no_change: verifiedNoChange,
         allowed_files: jobPayloadForAssess.files_to_modify || [],

@@ -32,12 +32,16 @@ import { isHighRiskPath } from "../../handoff/functions/index.js";
 import { researchPayload } from "./payload.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import {
-  defaultResearchModelTier,
-  maxResearchBudget,
   normalizeResearchBudget,
+  researchModelTierForBudget,
+  resolveResearchBudgetForRouting,
   researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+
+const ONESHOT_RENAME_RE = /\b(?:rename|renaming)\b/i;
+const ONESHOT_FORMAT_RE = /\bformatting\b/i;
+const ONESHOT_SOURCES = new Set(["explicit", "heuristic", "intake", "preflight", "internal"]);
 
 function normalizeCandidatePath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
@@ -53,7 +57,10 @@ function isPathInsideProject(projectDir, candidate) {
 
 function listTrackedFiles(projectDir, candidates = []) {
   if (!projectDir || candidates.length === 0) return new Map();
-  const output = execFileSync("git", ["ls-files", "-z", "--", ...candidates], {
+  const args = process.platform === "win32"
+    ? ["ls-files", "-z"]
+    : ["ls-files", "-z", "--", ...candidates];
+  const output = execFileSync("git", args, {
     cwd: projectDir,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -68,7 +75,7 @@ function listTrackedFiles(projectDir, candidates = []) {
   return byNormalized;
 }
 
-function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPlan = false } = {}) {
+function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPlan = false, requestText = "" } = {}) {
   const rawCandidates = Array.isArray(candidateFiles) ? candidateFiles : [];
   const candidates = rawCandidates.map(normalizeCandidatePath).filter(Boolean);
   const results = candidates.map((candidate) => ({
@@ -92,6 +99,8 @@ function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPl
   if (!projectDir) return failAll("missing_project_dir");
   if (isPlanApprovalEnabled()) return failAll("plan_approval_enabled");
   if (redTeamPlan) return failAll("red_team_plan_requested");
+  if (ONESHOT_RENAME_RE.test(requestText)) return failAll("rename_requested");
+  if (ONESHOT_FORMAT_RE.test(requestText)) return failAll("formatting_requested");
 
   for (const result of results) {
     const candidate = result.candidate;
@@ -176,6 +185,12 @@ function workItemText(workItem) {
     .join("\n\n");
 }
 
+function oneshotSourceForPayload(routing, source) {
+  const fromRouting = String(routing?.oneshot_source || "").trim().toLowerCase();
+  if (ONESHOT_SOURCES.has(fromRouting)) return fromRouting;
+  return source === "preflight" ? "preflight" : "intake";
+}
+
 export function getProjectMapForResearchRouting(projectDir) {
   try {
     return getCachedProjectMap(projectDir) || ensureProjectMap(projectDir);
@@ -225,6 +240,7 @@ export function classifyResearchForRouting({
           bucket: routing.bucket,
           budget: routing.budget,
           reason: routing.reason,
+          oneshot_source: routing.oneshot_source || null,
           candidate_files: routing.candidate_files || [],
           branches: routing.branches || [],
           web_targets: routing.web_targets || [],
@@ -317,8 +333,13 @@ export function createOneshotDevJob(workItem, {
   demotionSource = "intake_gate",
 } = {}) {
   const requestedCandidates = candidateFiles || routing?.candidate_files || [];
-  const gate = validateOneshotGate({ candidateFiles: requestedCandidates, projectDir, redTeamPlan });
   const reason = routing?.reason || "one-shot trivial edit";
+  const gate = validateOneshotGate({
+    candidateFiles: requestedCandidates,
+    projectDir,
+    redTeamPlan,
+    requestText: [workItemText(workItem), reason].filter(Boolean).join("\n"),
+  });
   if (!gate.ok) {
     logEvent({
       work_item_id: workItem.id,
@@ -395,7 +416,7 @@ export function createOneshotDevJob(workItem, {
       oneshot: true,
       oneshot_origin: true,
       _oneshot_reason: reason,
-      _oneshot_source: source === "preflight" ? "preflight" : "intake",
+      _oneshot_source: oneshotSourceForPayload(routing, source),
       _assess_model_tier: "standard",
     }),
   });
@@ -406,6 +427,7 @@ export function createOneshotDevJob(workItem, {
 
 export function createPreflightResearchJob(workItem, {
   deepthinkBudget = "normal",
+  deepthinkBudgetExplicit = false,
   routing,
   source = null,
   redTeamPlan = false,
@@ -430,6 +452,7 @@ export function createPreflightResearchJob(workItem, {
       project_map: metadata.research_project_map || getProjectMapForResearchRouting(projectDir),
       routing: routing || null,
       fallback_budget: fallbackBudget,
+      fallback_budget_explicit: !!deepthinkBudgetExplicit,
       ...(routing?.bucket === "oneshot_candidate" ? { preflight_objective: "oneshot_scope" } : {}),
       upstream_mode: workItem.mode || metadata.mode || null,
       upstream_source: source,
@@ -438,12 +461,15 @@ export function createPreflightResearchJob(workItem, {
   });
 }
 
-export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, source = null, routing = null, redTeamPlan = false, projectDir = null } = {}) {
+export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deepthinkBudgetExplicit = false, source = null, routing = null, redTeamPlan = false, projectDir = null } = {}) {
   if (!routing) {
     throw new Error("createInitialResearchOrPlanJob requires a precomputed routing decision");
   }
   const effectiveRouting = routing;
-  const actualBudget = maxResearchBudget(deepthinkBudget, effectiveRouting.budget);
+  const metadata = parseWorkItemMetadata(workItem);
+  const actualBudget = resolveResearchBudgetForRouting(deepthinkBudget, effectiveRouting.budget, {
+    baseExplicit: !!deepthinkBudgetExplicit || metadata.research_budget_explicit === true,
+  });
   const fanoutMode = effectiveRouting.bucket === "fanout_clear" ? getResearchFanoutMode() : "off";
   if (effectiveRouting.bucket === "oneshot") {
     const outcome = createOneshotDevJob(workItem, {
@@ -459,6 +485,7 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, sour
   if (effectiveRouting.bucket === "oneshot_candidate") {
     const job = createPreflightResearchJob(workItem, {
       deepthinkBudget,
+      deepthinkBudgetExplicit,
       routing: effectiveRouting,
       source,
       redTeamPlan,
@@ -481,6 +508,7 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, sour
   if (effectiveRouting.bucket === "ambiguous") {
     const job = createPreflightResearchJob(workItem, {
       deepthinkBudget,
+      deepthinkBudgetExplicit,
       routing: effectiveRouting,
       source,
       redTeamPlan,
@@ -495,7 +523,7 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, sour
       job_type: "research",
       title: `Research: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
       priority: workItem.priority,
-      model_tier: defaultResearchModelTier(),
+      model_tier: researchModelTierForBudget(actualBudget),
       reasoning_effort: researchBudgetToReasoningEffort(actualBudget, "medium"),
       payload_json: JSON.stringify(researchPayload({
         ...redTeamPlanningPayload(redTeamPlan),
@@ -531,7 +559,7 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, sour
     job_type: "research",
     title: `Research: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
     priority: workItem.priority,
-    model_tier: defaultResearchModelTier(),
+    model_tier: researchModelTierForBudget(actualBudget),
     reasoning_effort: researchBudgetToReasoningEffort(actualBudget, "medium"),
     payload_json: JSON.stringify(researchPayload({
       ...redTeamPlanningPayload(redTeamPlan),

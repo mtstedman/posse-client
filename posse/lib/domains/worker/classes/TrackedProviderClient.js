@@ -10,6 +10,7 @@ import {
   createAgentCall,
   getJob,
   getSetting,
+  getWorkItem,
   setAttemptSession,
   updateJobProvider,
 } from "../../queue/functions/index.js";
@@ -44,7 +45,10 @@ import {
   resolveSessionRecycleModeForWorkItem,
 } from "../../session/functions/manager-singleton.js";
 import { isRecyclableLane } from "../../session/functions/keys.js";
-import { SETTING_KEYS } from "../../../catalog/settings.js";
+import {
+  estimateTokensFromChars,
+  resolveContextCompactionConfig,
+} from "../../settings/functions/context-compaction.js";
 
 const DEFAULT_PROVIDER_ERROR_PATTERNS = [
   /overloaded_error/i,
@@ -169,6 +173,7 @@ const DEFAULT_DEPS = {
   createAgentCall,
   getJob,
   getSetting,
+  getWorkItem,
   updateJobProvider,
   setAttemptSession,
   getAvailableProviders,
@@ -197,54 +202,6 @@ const DEFAULT_DEPS = {
   retainReplayPrompt,
   retainReplayToolUses,
 };
-
-function estimateTokensFromChars(value) {
-  const chars = typeof value === "string" ? value.length : Number(value) || 0;
-  return Math.max(0, Math.ceil(chars / 4));
-}
-
-function normalizeContextCompactionMode(value) {
-  const raw = String(value || "shadow").trim().toLowerCase();
-  return ["off", "shadow", "inject", "enforce"].includes(raw) ? raw : "shadow";
-}
-
-function readIntegerSetting(getSettingFn, key, fallback) {
-  try {
-    const raw = getSettingFn?.(key);
-    if (raw == null || String(raw).trim() === "") return fallback;
-    const parsed = Number.parseInt(String(raw).trim(), 10);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function readContextCompactionConfig(getSettingFn) {
-  let mode = "shadow";
-  try {
-    mode = normalizeContextCompactionMode(getSettingFn?.(SETTING_KEYS.CONTEXT_COMPACTION_MODE));
-  } catch {
-    mode = "shadow";
-  }
-  return {
-    mode,
-    triggerInputTokens: readIntegerSetting(
-      getSettingFn,
-      SETTING_KEYS.CONTEXT_COMPACTION_TRIGGER_INPUT_TOKENS,
-      32_000,
-    ),
-    sessionResetInputTokens: readIntegerSetting(
-      getSettingFn,
-      SETTING_KEYS.CONTEXT_COMPACTION_SESSION_RESET_INPUT_TOKENS,
-      96_000,
-    ),
-    recentTargetTokens: readIntegerSetting(
-      getSettingFn,
-      SETTING_KEYS.CONTEXT_COMPACTION_RECENT_TARGET_TOKENS,
-      12_000,
-    ),
-  };
-}
 
 function nonNegativeTokenCount(value) {
   const numeric = Number(value);
@@ -471,7 +428,11 @@ export class TrackedProviderClient {
     opts,
   } = {}) {
     try {
-      const config = readContextCompactionConfig(this.deps.getSetting);
+      const config = resolveContextCompactionConfig({
+        readSetting: this.deps.getSetting,
+        readWorkItem: this.deps.getWorkItem,
+        workItemId: work_item_id,
+      });
       if (config.mode === "off") return;
       const metrics = contextPressureMetrics({ stats, promptChars });
       const sessionRecycle = opts?._sessionRecycle || null;
@@ -499,6 +460,7 @@ export class TrackedProviderClient {
           session_reset_input_tokens: config.sessionResetInputTokens,
           recent_target_tokens: config.recentTargetTokens,
         },
+        config_source: config.source || null,
         session: sessionRecycle ? {
           recycling_mode: opts?.recyclingMode || recycleDecision?.recyclingMode || null,
           lane_id: recycleDecision?.lane?.id ?? null,

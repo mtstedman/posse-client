@@ -93,6 +93,10 @@ import {
   packetToDynamicContextString as packetToDynamicContextStringFromModule,
 } from "./helpers/context-render.js";
 import {
+  DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS,
+  buildTraversalCompletionCheck as buildTraversalCompletionCheckFromModule,
+} from "./helpers/traversal-completeness.js";
+import {
   attachCreatableFiles as attachCreatableFilesFromModule,
   attachDirectoryTree as attachDirectoryTreeFromModule,
   attachEditableFiles as attachEditableFilesFromModule,
@@ -959,6 +963,7 @@ export function buildRoutingPacket(job, opts) {
     // ── Kaizen: cross-run insights ──
     run_insights: _loadRelevantInsights(resolvedRole, sanitizedPayload),
     memory_surface: { symbols: [], files: [] },
+    traversal_completion_check: null,
 
     // ── Passthrough for worker ──
     context_hints: contextHints,
@@ -1250,6 +1255,7 @@ export async function handoff(input) {
     packet.prior_artifacts = packet.prior_artifacts || {};
     packet.run_insights = Array.isArray(packet.run_insights) ? packet.run_insights : [];
     packet.pending_merge = packet.pending_merge || null;
+    packet.traversal_completion_check = packet.traversal_completion_check || null;
   } else if (input.recipient && input.data) {
     // Legacy style: { recipient, data }
     packet = {
@@ -1302,6 +1308,7 @@ export async function handoff(input) {
       governance_tier: input.data.governance_tier || "mvp",
       step0_context: null,
       run_insights: [],
+      traversal_completion_check: null,
       project_context: input.data.project_context || "",
       prompt: null,
       context_hints: input.data.context_hints || {},
@@ -1610,14 +1617,71 @@ export async function handoff(input) {
 
   // Step 7: Tool policy + budgets
   await timeHandoffStep(packet, "skills.attach", () => _attachSkills(packet));
+  await timeHandoffStep(packet, "traversal_completion.resolve", () => _applyTraversalCompletionCheck(packet));
   await timeHandoffStep(packet, "tool_policy.apply", () => _applyToolPolicy(recipient, packet));
   await timeHandoffStep(packet, "drop_telemetry.emit", () => _emitHandoffDropTelemetry(packet));
 
   return packet;
 }
 
+function _applyTraversalCompletionCheck(packet) {
+  const mode = getSetting(SETTING_KEYS.RESEARCH_TRAVERSAL_COMPLETION_CHECK) || "off";
+  const maxChars = getIntSetting(
+    SETTING_KEYS.RESEARCH_TRAVERSAL_COMPLETION_MAX_CHARS,
+    DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS,
+  );
+  const check = buildTraversalCompletionCheckFromModule(packet, { mode, maxChars });
+  packet.traversal_completion_check = check;
+
+  if (check.mode === "off") return check;
+
+  try {
+    const ctx = getObservationContext() || {};
+    const status = check.attach ? "attached" : (check.shadow ? "shadowed" : "skipped");
+    const terms = check.matched_terms.length > 0 ? check.matched_terms.join(",") : "none";
+    recordObservation({
+      work_item_id: packet.work_item_id ?? ctx.work_item_id ?? null,
+      job_id: packet.job_id ?? ctx.job_id ?? null,
+      attempt_id: ctx.attempt_id ?? null,
+      observation_type: "handoff.traversal_completion_check",
+      summary: `Traversal completion check ${status} (${check.mode}; terms=${terms})`,
+      detail: {
+        kind: "handoff_traversal_completion_check",
+        mode: check.mode,
+        status,
+        triggered: check.triggered,
+        matched_terms: check.matched_terms,
+        rendered_chars: check.rendered_chars,
+        max_chars: check.max_chars,
+        task_text_chars: check.task_text_chars,
+        recipient: packet.recipient || null,
+        job_type: packet.job_type || null,
+        provider: packet.execution_provider || null,
+        atlas_prefetch_status: packet.atlas?.prefetchStatus || null,
+      },
+    });
+  } catch {
+    // Optional telemetry only; handoff rendering must not fail on observation IO.
+  }
+
+  return check;
+}
+
 export function attachAssessmentDiffContext(assessmentContext = null, cwd = null) {
   if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
+  const branchNetDiff = String(assessmentContext.branch_net_diff || "").trim();
+  if (branchNetDiff) {
+    assessmentContext.scoped_git_diff = branchNetDiff.length > 50000
+      ? `${branchNetDiff.slice(0, 50000)}\n...[diff truncated]`
+      : branchNetDiff;
+    assessmentContext.scoped_diff_narrative = [
+      `BRANCH NET DIFF: zero-commit attempt found existing committed WI branch changes vs ${assessmentContext.branch_net_diff_target || "target"}.`,
+      Array.isArray(assessmentContext.branch_net_diff_files) && assessmentContext.branch_net_diff_files.length > 0
+        ? `Files: ${assessmentContext.branch_net_diff_files.slice(0, 40).join(", ")}`
+        : null,
+    ].filter(Boolean).join("\n");
+    return assessmentContext;
+  }
   const commitHash = String(assessmentContext.commit_hash || "").trim();
   const scopedPaths = [...new Set([
     ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
@@ -1650,6 +1714,19 @@ export function attachAssessmentDiffContext(assessmentContext = null, cwd = null
 
 export async function attachAssessmentDiffContextAsync(assessmentContext = null, cwd = null) {
   if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
+  const branchNetDiff = String(assessmentContext.branch_net_diff || "").trim();
+  if (branchNetDiff) {
+    assessmentContext.scoped_git_diff = branchNetDiff.length > 50000
+      ? `${branchNetDiff.slice(0, 50000)}\n...[diff truncated]`
+      : branchNetDiff;
+    assessmentContext.scoped_diff_narrative = [
+      `BRANCH NET DIFF: zero-commit attempt found existing committed WI branch changes vs ${assessmentContext.branch_net_diff_target || "target"}.`,
+      Array.isArray(assessmentContext.branch_net_diff_files) && assessmentContext.branch_net_diff_files.length > 0
+        ? `Files: ${assessmentContext.branch_net_diff_files.slice(0, 40).join(", ")}`
+        : null,
+    ].filter(Boolean).join("\n");
+    return assessmentContext;
+  }
   const commitHash = String(assessmentContext.commit_hash || "").trim();
   const scopedPaths = [...new Set([
     ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),

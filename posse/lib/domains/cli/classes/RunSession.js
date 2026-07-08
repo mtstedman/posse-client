@@ -105,6 +105,7 @@ export class RunSession {
       Worker,
       AUTO_APPROVE,
       DRY_RUN,
+      RUN_WORK_ITEM_IDS = [],
       requeueForShutdown,
       requeueWaitingHumanInputJobs,
       refreshWorkItemStatus,
@@ -218,11 +219,23 @@ export class RunSession {
     return schedulerStopPromise;
   };
 
+  const scopedWorkItemIds = Array.isArray(RUN_WORK_ITEM_IDS)
+    ? RUN_WORK_ITEM_IDS.map((id) => Number(id)).filter((id) => Number.isSafeInteger(id) && id > 0)
+    : [];
+  const scopedWorkItemIdSet = new Set(scopedWorkItemIds);
+  const isScopedRun = scopedWorkItemIdSet.size > 0;
   maybeAnnounceAutoMergeSetting();
-  const jobs = listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
+  const allCandidateJobs = listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
+  const jobs = isScopedRun
+    ? allCandidateJobs.filter((job) => scopedWorkItemIdSet.has(Number(job.work_item_id)))
+    : allCandidateJobs;
   const needsGit = jobsNeedGitWorktree(jobs);
 
   if (jobs.length === 0) {
+    if (isScopedRun) {
+      console.log(`\n  No active jobs for scoped work item(s): ${scopedWorkItemIds.join(", ")}.\n`);
+      return;
+    }
     const iterateResult = await processIterativeWrapUp({
       reason: "run start",
       mergeIterativePassToTarget,
@@ -263,7 +276,7 @@ export class RunSession {
   const isResume = resumed.length > 0 || stallResume.length > 0 || wiWithBranch.length > 0;
 
   if (isResume) {
-    console.log(`\n  ${C.green}${C.bold}Resuming session${C.reset}${C.green}: ${jobs.length} active job(s) (concurrency: ${CONCURRENCY})${C.reset}`);
+    console.log(`\n  ${C.green}${C.bold}Resuming session${C.reset}${C.green}: ${jobs.length} active job(s) (concurrency: ${CONCURRENCY})${isScopedRun ? ` scoped to WI#${scopedWorkItemIds.join(", WI#")}` : ""}${C.reset}`);
     if (wiWithBranch.length > 0)
       console.log(`  ${C.cyan}Rejoining ${wiWithBranch.length} worktree(s)${C.reset}`);
     if (stallResume.length > 0)
@@ -272,7 +285,7 @@ export class RunSession {
       console.log(`  ${C.yellow}${resumed.length} previously in-flight job(s) requeued${C.reset}`);
     console.log();
   } else {
-    console.log(`\n  ${C.bold}New session: ${jobs.length} active job(s) (concurrency: ${CONCURRENCY})${C.reset}\n`);
+    console.log(`\n  ${C.bold}New session: ${jobs.length} active job(s) (concurrency: ${CONCURRENCY})${isScopedRun ? ` scoped to WI#${scopedWorkItemIds.join(", WI#")}` : ""}${C.reset}\n`);
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -576,15 +589,12 @@ export class RunSession {
 
   // The dependency CHECK is advisory and must NOT gate boot. It is check-only
   // (dryRun) and nothing downstream consumes its result — it only paints the
-  // "dependencies" chip. Awaiting it here used to block the whole boot: on a
-  // cold boot the per-language indexer version probes (a spawnSync child-process
-  // storm inside the dep worker) run ~15s, and the boot panel sat frozen on this
-  // step before the scheduler/ATLAS phase even began. Run it in the BACKGROUND
-  // instead — the chip stays "running" and flips to ok/warning when the probe
-  // resolves, while boot proceeds straight on. Errors degrade to a warning row,
-  // never aborting; the abort signal still cancels it if boot is torn down.
-  updateBootStep("dependencies", { section: "workspace", status: "running", detail: "checking packages", force: true });
-  void (async () => {
+  // "dependencies" chip. Awaiting it here used to block the whole boot; starting
+  // it before git/worktree probes can also starve short native git budgets on
+  // Windows. Launch it in the background after the git-critical DAG below.
+  const startBootDependencyCheck = () => {
+    updateBootStep("dependencies", { section: "workspace", status: "running", detail: "checking packages", force: true });
+    void (async () => {
     try {
       const dependencyConfig = typeof getAtlasIntegrationConfig === "function"
         ? getAtlasIntegrationConfig()
@@ -642,7 +652,8 @@ export class RunSession {
         force: true,
       });
     }
-  })();
+    })();
+  };
 
   // CACHED check (6h TTL): a warm cache answers from disk without touching the
   // network, so boot normally pays ~0ms here. The uncached variant used to run
@@ -795,6 +806,8 @@ export class RunSession {
     }
   }
 
+  startBootDependencyCheck();
+
   for (const wiId of wiIds) {
     const wi = getWorkItem(wiId);
     if (wi && ["planned", "planning"].includes(wi.status)) {
@@ -818,6 +831,7 @@ export class RunSession {
     concurrency: CONCURRENCY,
     hasDisplay: useTui,
     onQueueSnapshot: handleQueueSnapshot,
+    onlyWorkItemIds: scopedWorkItemIds,
   });
 
   // During boot, scheduler events are already represented by the boot panel.

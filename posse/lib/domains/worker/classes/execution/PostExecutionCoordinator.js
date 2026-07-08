@@ -58,6 +58,7 @@ import {
   refreshAndExtractInsights as refreshAndExtractInsightsFromModule,
 } from "../../functions/helpers/insights.js";
 import {
+  detectBranchNetDiffForNoWriteAsync as detectBranchNetDiffForNoWriteAsyncFromModule,
   finishNoWriteAttempt as finishNoWriteAttemptFromModule,
   shouldShortCircuitNoWriteAssessment as shouldShortCircuitNoWriteAssessmentFromModule,
 } from "../../functions/helpers/no-write-retry.js";
@@ -332,6 +333,8 @@ export async function handlePostExecutionForWorker({
         let filesCommittedUnknown = false;
         let filesCommittedError = null;
         let committedHash = null;
+        let branchNetDiff = null;
+        let skippedStaleModifyFiles = [];
         let preAssessAlreadyVerified = false;
         if (wtPath) {
           if (!isLeaseValid(job.id, leaseToken)) {
@@ -532,7 +535,7 @@ export async function handlePostExecutionForWorker({
               createdOutOfScope,
               skippedIgnoredCreateFiles,
               skippedIgnoredModifyFiles,
-              skippedStaleModifyFiles,
+              skippedStaleModifyFiles: skippedStaleModifyFilesFromCommit,
               outOfScopeDirtySkipped,
               outOfScopeStagingSkipped,
               gitAddWarnings,
@@ -547,6 +550,7 @@ export async function handlePostExecutionForWorker({
             } = commitResult;
 
             filesReverted = reverted;
+            skippedStaleModifyFiles = skippedStaleModifyFilesFromCommit || [];
 
             if (mergeCompleted) {
               this.emit(job.id, `${C.dim}[git] WI#${job.work_item_id} job #${job.id}: merge completed by dev${C.reset}`);
@@ -1175,6 +1179,65 @@ export async function handlePostExecutionForWorker({
 
         // -- No-op guard (git-based — code tasks only; artifact tasks use manifest check) --
         const noOpPayload = this.parsePayload(job);
+        if (
+          wtPath
+          && MUTATING_JOB_TYPES.has(job.job_type)
+          && requiresGitNoopCheckFromModule(job, noOpPayload)
+          && !committedHash
+        ) {
+          const branchDiffScopePaths = [
+            ...(noOpPayload.files_to_modify || []),
+            ...(noOpPayload.files_to_create || []),
+            ...scopedDeleteTargetsFromModule(job, noOpPayload),
+            ...skippedStaleModifyFiles,
+          ].filter(Boolean);
+          const netDiff = await detectBranchNetDiffForNoWriteAsyncFromModule({
+            wtPath,
+            projectDir: this.projectDir,
+            scopePaths: branchDiffScopePaths,
+            scopeRoots: noOpPayload.create_roots || [],
+          });
+          if (netDiff?.hasDiff) {
+            branchNetDiff = netDiff;
+            hasFileChanges = true;
+            satisfiedNoop = false;
+            filesCommitted = netDiff.files || [];
+            filesCommittedUnknown = false;
+            filesCommittedError = null;
+            committedHash = netDiff.head || null;
+            const msg = `Zero-commit attempt found existing branch diff vs ${netDiff.targetBranch || "target"} (${filesCommitted.length} file(s)); routing branch state to assessment`;
+            this.emit(job.id, `${C.yellow}[assessor] WI#${job.work_item_id} job #${job.id}: ${msg}${C.reset}`);
+            logEvent({
+              work_item_id: job.work_item_id,
+              job_id: job.id,
+              attempt_id: attempt.id,
+              event_type: EVENT_TYPES.JOB_NOOP_BRANCH_DIFF_DETECTED,
+              actor_type: EVENT_ACTORS.WORKER,
+              message: msg,
+              event_json: JSON.stringify({
+                target_branch: netDiff.targetBranch || null,
+                merge_base: netDiff.mergeBase || null,
+                head: netDiff.head || null,
+                files: filesCommitted.slice(0, 50),
+              }),
+            });
+          } else if (netDiff && netDiff.ok === false) {
+            const msg = `Could not prove branch has no committed diff before no-op handling: ${netDiff.reason || "unknown git error"}`;
+            this.emit(job.id, `${C.yellow}[assessor] WI#${job.work_item_id} job #${job.id}: ${msg}${C.reset}`);
+            logEvent({
+              work_item_id: job.work_item_id,
+              job_id: job.id,
+              attempt_id: attempt.id,
+              event_type: EVENT_TYPES.JOB_NOOP_BRANCH_DIFF_DETECTED,
+              actor_type: EVENT_ACTORS.WORKER,
+              message: msg,
+              event_json: JSON.stringify({
+                target_branch: netDiff.targetBranch || null,
+                reason: netDiff.reason || null,
+              }),
+            });
+          }
+        }
         if (!hasFileChanges && requiresGitNoopCheckFromModule(job, noOpPayload)) {
           // Parse dev/artificer log status — BLOCKED is handled before commit.
           const devLogMatch = agentCompletionLog.found ? { 1: agentCompletionLog.body } : null;
@@ -1312,6 +1375,23 @@ export async function handlePostExecutionForWorker({
             return;
           }
 
+          if (skippedStaleModifyFiles.length > 0) {
+            const staleMsg = [
+              `Declared modifyFiles path(s) were stale during commit staging: ${skippedStaleModifyFiles.slice(0, 10).join(", ")}`,
+              `No scoped commit was produced. This usually means the target file was missing from the worktree or the planner scope was wrong.`,
+              `Recover the target file/scope before treating this job as complete.`,
+            ].join("\n");
+            finishNoWriteAttemptFromModule(this, {
+              attempt,
+              attemptCount,
+              job,
+              leaseToken,
+              message: staleMsg,
+              startTime,
+            });
+            return;
+          }
+
           // File-request bypass: no file changes, but valid file requests pending.
           // The dev discovered what files are needed — this is a legitimate outcome.
           // Fall through to skip-assessment success path to spawn follow-ups.
@@ -1378,6 +1458,9 @@ export async function handlePostExecutionForWorker({
             if (filesReverted.length > 0) {
               noopMsg += `\nReverted ${filesReverted.length} out-of-scope file(s): ${filesReverted.slice(0, 8).join(", ")}`;
             }
+            if (skippedStaleModifyFiles.length > 0) {
+              noopMsg += `\nStale modifyFiles path(s): ${skippedStaleModifyFiles.slice(0, 8).join(", ")}`;
+            }
             if (scopeFiles.length > 0 || scopeCreate.length > 0) {
               const allScope = [...scopeFiles, ...scopeCreate.map(f => `${f} (new)`)];
               noopMsg += `\nAllowed scope: ${allScope.slice(0, 10).join(", ")}`;
@@ -1409,6 +1492,9 @@ export async function handlePostExecutionForWorker({
           if (filesReverted.length > 0) {
             noopMsg += `\nReverted ${filesReverted.length} out-of-scope file(s): ${filesReverted.slice(0, 8).join(", ")}`;
           }
+          if (skippedStaleModifyFiles.length > 0) {
+            noopMsg += `\nStale modifyFiles path(s): ${skippedStaleModifyFiles.slice(0, 8).join(", ")}`;
+          }
           if (scopeFiles.length > 0 || scopeCreate.length > 0) {
             const allScope = [...scopeFiles, ...scopeCreate.map(f => `${f} (new)`)];
             noopMsg += `\nAllowed scope: ${allScope.slice(0, 10).join(", ")}`;
@@ -1439,6 +1525,7 @@ export async function handlePostExecutionForWorker({
           pendingFileRequests,
           preAssessAlreadyVerified,
           preManifestState,
+          branchNetDiff,
           satisfiedNoop,
           verifiedNoChange,
           startTime,

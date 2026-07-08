@@ -133,6 +133,7 @@ import {
   parseSessionRecycleFlagFromArgv,
   parseStallTimeout,
   parseTierFlagFromArgv,
+  parseWorkItemIdsFlagFromArgv,
   rejectUnknownFlags,
   resolveResearchBudgetForDeepthink,
 } from "./flags.js";
@@ -205,7 +206,7 @@ import { closePromptLog, readRecentPrompts } from "../../../shared/telemetry/fun
 import { loadRemotePromptBundle } from "../../remote/functions/prompt-bundle.js";
 import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
 import { resolveTargetBranch } from "../../git/functions/target-branch.js";
-import { gitExecAsync, isGitCommandFailure } from "../../git/functions/utils.js";
+import { GIT_OPERATION_TIMEOUT_MS, gitExecAsync, isGitCommandFailure } from "../../git/functions/utils.js";
 import { ensureRestrictivePushRefspecsAsync, remotePushConfigsAreClearlyRestrictive } from "../../git/functions/push-guard.js";
 import { normalizeIntakeHints } from "../../intake/functions/hints.js";
 import {
@@ -306,7 +307,7 @@ async function posseAliasDiagnostic() {
   return `  ${C.yellow}Alias notice:${C.reset} legacy command ${C.cyan}claude-org${C.reset} is on PATH, but ${C.cyan}posse${C.reset} is not. Re-run the installer or npm link this package to add the alias.\n`;
 }
 
-const BOOT_GIT_PROBE_TIMEOUT_MS = 5_000;
+const BOOT_GIT_PROBE_TIMEOUT_MS = GIT_OPERATION_TIMEOUT_MS;
 const BOOT_PUSH_GUARD_TIMEOUT_MS = 2_500;
 
 function firstGitErrorLine(err) {
@@ -922,6 +923,10 @@ function isReviewableWorkItem(wi) {
   });
 }
 
+function hasInlineOneshotIntent(description) {
+  return /(?:^|\s)#one[-_]?shot\b/i.test(String(description || ""));
+}
+
 
 async function promptForIterativeWorkflowMode() {
   const answer = (await ask(`  Iterative workflow mode? [b]ugfix / [d]esign(ux) / [r]efactor / [a]udit / [i]terate [bugfix]: `))
@@ -978,7 +983,7 @@ async function promptForScopedAdd(description, defaultMode = "build", defaultDee
     };
   }
 
-  const rawKindInput = await ask(`  What kind of request is this? [t]ask / [b]ugfix / [d]esign / [c]ontext / [q]uestion / [i]mage / [r]eport [task]: `);
+  const rawKindInput = await ask(`  What kind of request is this? [t]ask / [b]ugfix / [d]esign / [c]ontext / [q]uestion / [o]neshot / [i]mage / [r]eport [task]: `);
   const explicitKind = normalizeRequestKindChoice(rawKindInput, "");
   const defaultOutputMode = defaultOutputModeForMode(defaultMode);
   const outputInput = (await ask(`  What should the result be? auto / repo / artifact / question_only / comma-separated desired outputs [${defaultOutputMode}]: `)).trim().toLowerCase();
@@ -1087,7 +1092,7 @@ async function cmdAdd() {
   const defaultDeepthink = isResearchBudgetDeep(parsedResearchBudget.budget);
   const workflowMode = ITERATE_FLAG ? await promptForIterativeWorkflowMode() : null;
   const workflowRedTeamPlan = workflowMode ? shouldPersistIterativeRedTeamPlan() : false;
-  const guidedScope = process.argv.includes("--guided") || !hasIntakeHintFlags()
+  const guidedScope = process.argv.includes("--guided") || (!hasInlineOneshotIntent(description) && !hasIntakeHintFlags())
     ? await promptForScopedAdd(description, mode, defaultDeepthink, workflowMode)
     : { intakeHints: parseIntakeHintsFromArgv(description, mode), deepthink: defaultDeepthink || !!workflowMode };
   const intakeHints = workflowMode
@@ -1102,6 +1107,7 @@ async function cmdAdd() {
     governance_tier: tier,
     session_recycle: sessionRecycle,
     metadata: researchBudgetMetadata({
+      research_budget_explicit: parsedResearchBudget.explicit,
       intake_hints: intakeHints,
       workflow_mode: workflowMode,
       iterate: !!workflowMode,
@@ -1178,6 +1184,7 @@ async function cmdInject() {
     mode,
     session_recycle: sessionRecycle,
     metadata: researchBudgetMetadata({
+      research_budget_explicit: parsedResearchBudget.explicit,
       intake_hints: intakeHints,
       workflow_mode: workflowMode,
       iterate: !!workflowMode,
@@ -1196,6 +1203,7 @@ async function cmdInject() {
   updateWorkItemStatus(item.id, "planning");
   const initialJob = createInitialResearchOrPlanJob(item, {
     deepthinkBudget,
+    deepthinkBudgetExplicit: parsedResearchBudget.explicit,
     source: "inject",
     redTeamPlan: shouldUseRedTeamPlanForWorkItem(item),
     routing: classifyResearchForRouting({ workItem: item, intakeHints, mode, source: "inject", live: true }),
@@ -1255,12 +1263,17 @@ function cmdAsk() {
   }, { requestText: question, fallbackMode: "build" });
   const item = createWorkItem(title, question, "normal", {
     source: "ask",
-    metadata: researchBudgetMetadata({ mode: "question", intake_hints: intakeHints }, deepthinkBudget),
+    metadata: researchBudgetMetadata({
+      mode: "question",
+      intake_hints: intakeHints,
+      research_budget_explicit: parsedResearchBudget.explicit,
+    }, deepthinkBudget),
   });
   updateWorkItemStatus(item.id, "planning");
   const routing = classifyResearchForRouting({ workItem: item, intakeHints, mode: "question", source: "ask", live: true });
   const initialJob = createInitialResearchOrPlanJob(item, {
     deepthinkBudget,
+    deepthinkBudgetExplicit: parsedResearchBudget.explicit,
     source: "ask",
     routing,
   });
@@ -1501,8 +1514,10 @@ async function cmdPlan() {
     const effectiveWi = persistIterativeRedTeamPlanIfRequested(wi);
     updateWorkItemStatus(effectiveWi.id, "planning");
     const deepthinkBudget = getResearchBudget(effectiveWi);
+    const metadata = parseWorkItemMetadata(effectiveWi);
     const initialJob = createInitialResearchOrPlanJob(effectiveWi, {
       deepthinkBudget,
+      deepthinkBudgetExplicit: metadata.research_budget_explicit === true,
       source: "plan",
       redTeamPlan: shouldUseRedTeamPlanForWorkItem(effectiveWi),
       routing: classifyResearchForRouting({ workItem: effectiveWi, source: "plan", live: true }),
@@ -1525,6 +1540,7 @@ function sessionBootDeps() {
     nonInteractive: NON_INTERACTIVE,
     AUTO_APPROVE,
     DRY_RUN,
+    RUN_WORK_ITEM_IDS: parseWorkItemIdsFlagFromArgv(),
     ask,
     log,
     cmdDashboard,
@@ -1642,8 +1658,10 @@ async function cmdGo() {
       const effectiveWi = persistIterativeRedTeamPlanIfRequested(wi);
       updateWorkItemStatus(effectiveWi.id, "planning");
       const deepthinkBudget = getResearchBudget(effectiveWi);
+      const metadata = parseWorkItemMetadata(effectiveWi);
       createInitialResearchOrPlanJob(effectiveWi, {
         deepthinkBudget,
+        deepthinkBudgetExplicit: metadata.research_budget_explicit === true,
         source: "go",
         redTeamPlan: shouldUseRedTeamPlanForWorkItem(effectiveWi),
         routing: classifyResearchForRouting({ workItem: effectiveWi, source: "go", live: true }),
@@ -2231,7 +2249,7 @@ async function cmdServe() {
 const COMMAND_USAGE = {
   add: () => {
     console.log(`\n  Usage: posse add "description of what you want built"`);
-    console.log(`  ${C.dim}Optional: --mode build|report|image --intent task|bugfix|design|context|question|report|image (hotkeys ok: b,d,c,q,r,i) --output repo|artifact|question_only --files LIST --constraints LIST${C.reset}\n`);
+    console.log(`  ${C.dim}Optional: --mode build|report|image --oneshot --intent task|bugfix|design|context|question|oneshot|report|image (hotkeys ok: b,d,c,q,o,r,i) --output repo|artifact|question_only --files LIST --constraints LIST${C.reset}\n`);
   },
   run: () => {
     console.log(`\n  Usage: posse run [flags]`);
@@ -2244,6 +2262,7 @@ const COMMAND_USAGE = {
     console.log(`    ${C.cyan}--non-interactive${C.reset}   Suppress terminal prompts; leave app gates open instead`);
     console.log(`    ${C.cyan}--dry-run${C.reset}           Research + plan only — dev jobs auto-pass without execution`);
     console.log(`    ${C.cyan}--stall-timeout N${C.reset}   Seconds before killing stalled process`);
+    console.log(`    ${C.cyan}--work-item N${C.reset}       Run only jobs for one work item (repeat or comma-separate)`);
     console.log(`    ${C.cyan}--cold-index${C.reset}        Clear the cold index before starting\n`);
   },
   go: () => {
@@ -2376,7 +2395,8 @@ ${aliasDiagnostic}
       ${C.cyan}--auto-approve-plan${C.reset} Skip plan approval gates for this run
       ${C.cyan}--deepthink${C.reset}      Raise planner/research budget for deeper analysis
       ${C.cyan}--deepthink-budget N${C.reset}  Set planner/research budget: low, normal, high, xhigh
-      ${C.cyan}--intent KIND${C.reset}    Intake type: task, bugfix, design, context, question, report, image ${C.dim}(hotkeys ok)${C.reset}
+      ${C.cyan}--oneshot${C.reset}        Propose one-shot routing; deterministic gate still validates scope and safety
+      ${C.cyan}--intent KIND${C.reset}    Intake type: task, bugfix, design, context, question, oneshot, report, image ${C.dim}(hotkeys ok)${C.reset}
       ${C.cyan}--input-contexts${C.reset} Select context dirs from resources/inputs (names, indices, or all)
       ${C.cyan}--files LIST${C.reset}     Optional hinted files for research/planning
       ${C.cyan}--constraints LIST${C.reset} Optional intake constraints for research/planning

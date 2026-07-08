@@ -156,6 +156,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_MERGE_SCOPE_AUDIT: "job.merge_scope_audit",
   JOB_MERGE_SCOPE_AUDIT_FAILED: "job.merge_scope_audit_failed",
   JOB_NOOP_BYPASS_FILE_REQUEST: "job.noop_bypass_file_request",
+  JOB_NOOP_BRANCH_DIFF_DETECTED: "job.noop_branch_diff_detected",
   JOB_NOOP_FAILURE: "job.noop_failure",
   JOB_NOOP_RETRY: "job.noop_retry",
   JOB_NUDGE_REQUEUED: "job.nudge_requeued",

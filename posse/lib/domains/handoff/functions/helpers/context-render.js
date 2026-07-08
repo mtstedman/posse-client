@@ -123,6 +123,10 @@ function renderPacketContextString(packet, {
     packet.atlas.renderedTruncated = atlasMeta.truncated;
   }
 
+  if (includeDynamic && packet.traversal_completion_check?.attach && packet.traversal_completion_check?.text) {
+    addSection(packet.traversal_completion_check.text, { required: true, key: "traversal_completion_check" });
+  }
+
   const atlasFallbackEntries = includeDynamic ? Object.entries(packet.atlas_fallback_context?.files || {}) : [];
   if (includeDynamic && atlasFallbackEntries.length > 0) {
     const parts = [];

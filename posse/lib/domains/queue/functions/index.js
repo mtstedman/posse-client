@@ -1519,7 +1519,7 @@ export function requeueExpiredLeases() {
  * Find the next runnable job: status=queued, ready_at<=now, all hard deps succeeded.
  * Ordered by priority then creation time.
  */
-export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], excludeJobIds = [], onlyJobTypes = [] } = {}) {
+export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], excludeJobIds = [], onlyJobTypes = [], onlyWorkItemIds = [] } = {}) {
   const db = getDb();
   const ts = now();
 
@@ -1532,6 +1532,10 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
   if (excludeWorkItemIds.length > 0) {
     conditions.push(`j.work_item_id NOT IN (${excludeWorkItemIds.map(() => "?").join(",")})`);
     params.push(...excludeWorkItemIds);
+  }
+  if (onlyWorkItemIds.length > 0) {
+    conditions.push(`j.work_item_id IN (${onlyWorkItemIds.map(() => "?").join(",")})`);
+    params.push(...onlyWorkItemIds);
   }
   if (excludeJobIds.length > 0) {
     conditions.push(`j.id NOT IN (${excludeJobIds.map(() => "?").join(",")})`);

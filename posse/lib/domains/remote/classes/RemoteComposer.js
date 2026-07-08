@@ -10,9 +10,13 @@ import {
   getPosseRemoteUrl,
 } from "../functions/mode.js";
 import { getSetting } from "../../queue/functions/settings.js";
+import { getWorkItem } from "../../queue/functions/index.js";
 import { recordObservation } from "../../observability/functions/observations.js";
-import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
+import {
+  estimateTokensFromChars,
+  resolveContextCompactionConfig,
+} from "../../settings/functions/context-compaction.js";
 
 function joinPromptParts(parts = []) {
   return parts
@@ -38,6 +42,7 @@ export class RemoteComposer {
     renderEnrichment = renderLocalEnrichment,
     reloadPromptBundle = loadRemotePromptBundle,
     readSetting = getSetting,
+    readWorkItem = getWorkItem,
     now = () => Date.now(),
     warn = log.warn,
   } = {}) {
@@ -50,6 +55,7 @@ export class RemoteComposer {
     this.renderEnrichment = renderEnrichment;
     this.reloadPromptBundle = typeof reloadPromptBundle === "function" ? reloadPromptBundle : loadRemotePromptBundle;
     this.readSetting = typeof readSetting === "function" ? readSetting : getSetting;
+    this.readWorkItem = typeof readWorkItem === "function" ? readWorkItem : getWorkItem;
     this.now = now;
     this.warn = typeof warn === "function" ? warn : () => {};
   }
@@ -161,52 +167,12 @@ export class RemoteComposer {
         latency_ms: latencyMs,
       },
     };
-    recordPromptSectionAccounting(packet, composed, { readSetting: this.readSetting });
+    recordPromptSectionAccounting(packet, composed, {
+      readSetting: this.readSetting,
+      readWorkItem: this.readWorkItem,
+    });
     return composed;
   }
-}
-
-function estimateTokensFromChars(value) {
-  const chars = Number(value) || 0;
-  return Math.max(0, Math.ceil(chars / 4));
-}
-
-function normalizeContextCompactionMode(value) {
-  const raw = String(value || "shadow").trim().toLowerCase();
-  return ["off", "shadow", "inject", "enforce"].includes(raw) ? raw : "shadow";
-}
-
-function readIntegerSetting(readSetting, key, fallback) {
-  try {
-    const raw = readSetting?.(key);
-    if (raw == null || String(raw).trim() === "") return fallback;
-    const parsed = Number.parseInt(String(raw).trim(), 10);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function readContextCompactionConfig(readSetting) {
-  let mode = "shadow";
-  try {
-    mode = normalizeContextCompactionMode(readSetting?.(SETTING_KEYS.CONTEXT_COMPACTION_MODE));
-  } catch {
-    mode = "shadow";
-  }
-  return {
-    mode,
-    triggerInputTokens: readIntegerSetting(
-      readSetting,
-      SETTING_KEYS.CONTEXT_COMPACTION_TRIGGER_INPUT_TOKENS,
-      32_000,
-    ),
-    recentTargetTokens: readIntegerSetting(
-      readSetting,
-      SETTING_KEYS.CONTEXT_COMPACTION_RECENT_TARGET_TOKENS,
-      12_000,
-    ),
-  };
 }
 
 function sectionLabel(section, index) {
@@ -260,8 +226,12 @@ function isPinnedExactSection(label) {
     .test(String(label || ""));
 }
 
-function recordRollingContextShadowPnl(packet, composed, { readSetting = getSetting } = {}) {
-  const config = readContextCompactionConfig(readSetting);
+function recordRollingContextShadowPnl(packet, composed, { readSetting = getSetting, readWorkItem = getWorkItem } = {}) {
+  const config = resolveContextCompactionConfig({
+    readSetting,
+    readWorkItem,
+    workItemId: packet?.work_item_id ?? null,
+  });
   if (config.mode === "off") return;
   const candidateMinTokens = Math.max(1000, Math.min(8000, Math.floor(config.triggerInputTokens / 4)));
   const sections = promptSectionsForPnl(composed)
@@ -301,6 +271,7 @@ function recordRollingContextShadowPnl(packet, composed, { readSetting = getSett
         pressure_input_tokens: config.triggerInputTokens,
         recent_target_tokens: config.recentTargetTokens,
       },
+      config_source: config.source || null,
       candidate_sections: candidates.map((section) => ({
         label: section.label,
         chars: section.chars,
@@ -315,7 +286,7 @@ function recordRollingContextShadowPnl(packet, composed, { readSetting = getSett
 
 // Operator-facing accounting of what the compiled prompt cost per section.
 // Telemetry only — nothing here is rendered into the agent prompt.
-function recordPromptSectionAccounting(packet, composed, { readSetting = getSetting } = {}) {
+function recordPromptSectionAccounting(packet, composed, { readSetting = getSetting, readWorkItem = getWorkItem } = {}) {
   try {
     const metadata = composed?.metadata || {};
     const droppedCount = Array.isArray(metadata.sections_dropped) ? metadata.sections_dropped.length : 0;
@@ -337,7 +308,7 @@ function recordPromptSectionAccounting(packet, composed, { readSetting = getSett
         atlas_render: packet?.atlas_render_meta || null,
       },
     });
-    recordRollingContextShadowPnl(packet, composed, { readSetting });
+    recordRollingContextShadowPnl(packet, composed, { readSetting, readWorkItem });
   } catch { /* accounting must never break compose */ }
 }
 
