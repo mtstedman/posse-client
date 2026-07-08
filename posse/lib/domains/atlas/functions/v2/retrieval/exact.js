@@ -8,6 +8,7 @@ import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { isDefaultVisibleSymbol } from "./hygiene.js";
 import { nativePathEvidence } from "./native-evidence.js";
 import { collectSurveyPaths } from "./survey.js";
+import { recordCodeLadderAreaCoverage } from "./code-ladder.js";
 
 const MAX_STRUCTURE_FILES = 128;
 const MAX_SITES_PER_FILE_EDGE = 4;
@@ -143,6 +144,10 @@ export function codeStructure({ view, versionId, params = {}, repoRoot }) {
   };
   if (pathAmbiguity) data.pathAmbiguity = pathAmbiguity;
   if (negativeEvidence) data.negativeEvidence = negativeEvidence;
+  // Area-coverage credit: code.structure's per-file symbol rows (name, kind,
+  // signature, line) satisfy the card+skeleton rungs for every covered file,
+  // exactly like code.survey — later lens/window calls must not re-warn.
+  recordCodeLadderAreaCoverage({ sessionId: params.sessionId, files: paths });
   return okEnvelope({ action, versionId, data });
 }
 

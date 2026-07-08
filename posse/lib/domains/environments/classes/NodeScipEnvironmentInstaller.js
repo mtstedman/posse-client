@@ -53,8 +53,9 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
     if (existing?.ok === true) return existing;
 
     const install = await this.runStep(3, "run npm install", async () => {
-      if (this.dryRun) return this.ok("dry-run", `would run npm install in ${this.nodeDir}`);
-      const run = await runCommand(npmCommand(this.platform), ["install"], {
+      const args = ["install", "--include=optional", "--no-save"];
+      if (this.dryRun) return this.ok("dry-run", `would run ${["npm", ...args].join(" ")} in ${this.nodeDir}`);
+      const run = await runCommand(npmCommand(this.platform), args, {
         cwd: this.nodeDir,
         timeoutMs: this.timeoutMs,
       });

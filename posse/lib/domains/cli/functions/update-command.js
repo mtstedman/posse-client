@@ -313,6 +313,7 @@ function safeUi(ui) {
 
 export async function updatePosseClient({
   posseRoot = DEFAULT_POSSE_ROOT,
+  projectDir = process.cwd(),
   remote = DEFAULT_REMOTE,
   branch = DEFAULT_BRANCH,
   dryRun = false,
@@ -321,6 +322,7 @@ export async function updatePosseClient({
   ui = null,
 } = {}) {
   const resolvedPosseRoot = path.resolve(posseRoot || DEFAULT_POSSE_ROOT);
+  const resolvedProjectDir = path.resolve(projectDir || process.cwd());
   const targetBranch = normalizeBranch(branch);
   const u = safeUi(ui);
 
@@ -543,7 +545,7 @@ export async function updatePosseClient({
       ? "checking the dependency plan (posse doctor --dry-run)"
       : "refreshing dependencies (posse doctor)");
     const dependencies = await runDoctor({
-      projectDir: resolvedPosseRoot,
+      projectDir: resolvedProjectDir,
       posseRoot: resolvedPosseRoot,
       dryRun,
       timeoutMs: null,
@@ -558,6 +560,7 @@ export async function updatePosseClient({
       ok: update.ok !== false && depsOk,
       dry_run: dryRun,
       posse_root: resolvedPosseRoot,
+      project_dir: resolvedProjectDir,
       repo_root: repoRoot,
       update,
       dependencies,
@@ -569,6 +572,7 @@ export async function updatePosseClient({
       ok: false,
       dry_run: dryRun,
       posse_root: resolvedPosseRoot,
+      project_dir: resolvedProjectDir,
       ...(repoRoot ? { repo_root: repoRoot } : {}),
       update: { ok: false, status: "failed", changed: false, message },
       dependencies: null,
@@ -733,6 +737,7 @@ function renderUpdateHelp({ log, colors }) {
 export async function cmdUpdate({
   argv = process.argv.slice(3),
   posseRoot = DEFAULT_POSSE_ROOT,
+  projectDir = process.cwd(),
   colors = C,
   log = console.log,
   stream = process.stdout,
@@ -766,6 +771,7 @@ export async function cmdUpdate({
   try {
     result = await updatePosseClient({
       posseRoot,
+      projectDir,
       branch,
       dryRun,
       git,

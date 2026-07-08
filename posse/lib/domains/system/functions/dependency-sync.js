@@ -365,7 +365,9 @@ function nodeInstallCacheDir(root, opts = {}) {
 
 function installArgsForPackageManager(manager, root, opts = {}) {
   if (manager === "bun") return ["install"];
-  if (manager === "npm") return ["install", "--include=optional", "--cache", nodeInstallCacheDir(root, opts)];
+  if (manager === "npm") {
+    return ["install", "--include=optional", "--no-save", "--cache", nodeInstallCacheDir(root, opts)];
+  }
   return ["install"];
 }
 
@@ -737,6 +739,7 @@ async function ensureNodeProject(entry, opts) {
   if (!before.present) return before;
   const command = packageManagerCommand(before.manager);
   const args = installArgsForPackageManager(before.manager, entry.root, opts);
+  const installLabel = `${before.manager} ${args[0] || "install"}`;
   if (before.status === "ok") {
     if (!opts.dryRun && before.needs_stamp) writeNodeManifestStamp(entry.root, before.manifest_hash);
     return { ...before, label: entry.label, action: before.needs_stamp ? "stamp" : "none", message: "node packages ready" };
@@ -752,10 +755,10 @@ async function ensureNodeProject(entry, opts) {
     return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: `${before.manager} is not available on PATH` };
   }
   if (opts.dryRun) {
-    return { ...before, label: entry.label, ok: true, status: "dry-run", action: "install", message: `would run ${before.manager} install (${reason})` };
+    return { ...before, label: entry.label, ok: true, status: "dry-run", action: "install", message: `would run ${installLabel} (${reason})` };
   }
 
-  opts.onProgress?.(`${entry.label}: ${before.manager} install`);
+  opts.onProgress?.(`${entry.label}: ${installLabel}`);
   const run = await runCommand(command, args, {
     cwd: entry.root,
     timeoutMs: opts.timeoutMs,
@@ -765,7 +768,7 @@ async function ensureNodeProject(entry, opts) {
     ? ensureGeneratedDirectoryIgnored(entry.root, "node_modules", opts)
     : null;
   if (!run.ok) {
-    return { ...before, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${before.manager} install failed: ${firstLine(run.message)}` };
+    return { ...before, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${installLabel} failed: ${firstLine(run.message)}` };
   }
   let after = inspectNodeProject(entry.root);
   let missingAfter = missingNodePackageLabels(after);
@@ -795,7 +798,7 @@ async function ensureNodeProject(entry, opts) {
     action: "install",
     generated_ignore: generatedIgnore,
     message: packagesOk
-      ? `${before.manager} install completed${usedFocusedRetry ? " after focused retry" : ""}`
+      ? `${installLabel} completed${usedFocusedRetry ? " after focused retry" : ""}`
       : `missing packages after install: ${missingAfter.join(", ")}`,
   };
 }
@@ -1306,8 +1309,9 @@ export function doctorRepoDependenciesInWorker(input = {}, {
 export function formatBootDependencySync(result) {
   const counts = result?.counts || {};
   if (!result) return "dependency sync unavailable";
+  const entries = bootDependencyEntries(result);
   if (counts.failed > 0) {
-    const failed = bootDependencyEntries(result)
+    const failed = entries
       .filter((entry) => entry?.status === "failed" || entry?.ok === false)
       .slice(0, 3)
       .map((entry) => `${entry.label || "dependency"}: ${firstLine(entry.message || entry.reason || entry.status)}`)
@@ -1316,7 +1320,20 @@ export function formatBootDependencySync(result) {
     const more = counts.failed > failed.length ? ` (+${counts.failed - failed.length} more)` : "";
     return compact(`${counts.failed} failed${counts.installed ? `, ${counts.installed} installed` : ""}${suffix}${more}`, 260);
   }
-  if (counts.dry_run > 0) return `would install ${counts.dry_run}`;
+  if (counts.dry_run > 0) {
+    const pending = entries
+      .filter((entry) => entry?.status === "dry-run" || entry?.status === "needs-install")
+      .slice(0, 3)
+      .map((entry) => {
+        const label = entry.label || "dependency";
+        const detail = firstLine(entry.message || entry.reason || "");
+        return detail ? `${label}: ${detail}` : label;
+      })
+      .filter(Boolean);
+    const suffix = pending.length > 0 ? `: ${pending.join("; ")}` : "";
+    const more = counts.dry_run > pending.length ? ` (+${counts.dry_run - pending.length} more)` : "";
+    return compact(`would install ${counts.dry_run}${suffix}${more}`, 260);
+  }
   if (counts.installed > 0) return `installed ${counts.installed}`;
   return "ready";
 }

@@ -2172,7 +2172,7 @@ async function cmdDoctor() {
 
 async function cmdUpdate() {
   const { cmdUpdate: cmdUpdateImpl } = await loadUpdateCommandModule();
-  return cmdUpdateImpl();
+  return cmdUpdateImpl({ projectDir: PROJECT_DIR });
 }
 
 async function maybeWarnPosseUpdateAvailable(commandPolicy) {
