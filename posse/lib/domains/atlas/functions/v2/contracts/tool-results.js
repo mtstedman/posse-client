@@ -118,6 +118,37 @@
 // ============================================================================
 
 /**
+ * @typedef {Object} SymbolDbAccessSite
+ * @property {"read" | "write" | "schema"} access
+ * @property {string} operation
+ * @property {string} target
+ * @property {string} path
+ * @property {number | null} line
+ * @property {string} classification
+ * @property {string} confidence
+ * @property {string} symbolRelation
+ * @property {string} symbolSurface
+ */
+
+/**
+ * Database access facts cached from code.db and attached to symbol cards when
+ * the symbol was matched to one or more query sites.
+ *
+ * @typedef {Object} SymbolDbAccess
+ * @property {("read" | "write" | "schema")[]} access
+ * @property {string[]} operations
+ * @property {string[]} targets
+ * @property {number} readCount
+ * @property {number} writeCount
+ * @property {number} schemaCount
+ * @property {number} telemetryCount
+ * @property {number} ambiguousLineCount
+ * @property {SymbolDbAccessSite[]} [reads]
+ * @property {SymbolDbAccessSite[]} [writes]
+ * @property {SymbolDbAccessSite[]} [schema]
+ */
+
+/**
  * @typedef {Object} SymbolCard
  * @property {SymbolId} symbolId
  * @property {string} name
@@ -134,6 +165,7 @@
  * @property {SymbolHit[]} [callers]
  * @property {SymbolHit[]} [callees]
  * @property {string} [etag]
+ * @property {SymbolDbAccess} [dbAccess]
  * @property {ResolutionMetadata} [resolution]   Populated when includeResolutionMetadata=true.
  */
 
@@ -874,6 +906,18 @@
  */
 
 /**
+ * @typedef {Object} CodeDbQuerySymbol
+ * @property {SymbolId} symbolId
+ * @property {string} name
+ * @property {string | null} qualifiedName
+ * @property {string} kind
+ * @property {string} path
+ * @property {number} startLine
+ * @property {number} endLine
+ * @property {"enclosing" | "same_line"} relation
+ */
+
+/**
  * @typedef {Object} CodeDbQuery
  * @property {"db"} kind
  * @property {"read" | "write" | "schema"} access
@@ -885,6 +929,11 @@
  * @property {"durable_result" | "telemetry" | "bookkeeping" | "cache" | "unknown"} classification
  * @property {string} confidence
  * @property {string} evidence
+ * @property {CodeDbQuerySymbol[]} [symbols]
+ * @property {number} [symbolCount]
+ * @property {boolean} [symbolsTruncated]
+ * @property {"range" | "same_line" | "none"} [symbolSurface]
+ * @property {number} [sameLineSymbolCount]
  */
 
 /**
@@ -1338,6 +1387,7 @@ export const ATLAS_TOOL_RESULT_FIELD_CATALOG = Object.freeze({
     summary: "summary",
     deps: "deps",
     metrics: "metrics",
+    dbAccess: "dbAccess",
     visibility: "visibility",
     filePath: "location.repo_rel_path",
     startLine: "location.startLine",

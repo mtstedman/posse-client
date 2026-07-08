@@ -11,6 +11,7 @@ import {
 
 const DEFAULT_MAX_REFS_PER_LANE = 24;
 const DEFAULT_MAX_WHY_CHARS = 180;
+const PROOF_EXPANSION_GENERATOR = "hash_ref_store";
 
 function compactText(value, max = 180) {
   return String(value || "")
@@ -67,7 +68,9 @@ function laneCount(lanes) {
   return HASH_REF_LANES.reduce((sum, lane) => sum + (Array.isArray(lanes?.[lane]) ? lanes[lane].length : 0), 0);
 }
 
-function normalizeProofExpansion(entry) {
+function normalizeProofExpansion(entry, {
+  trustInlinePayload = false,
+} = {}) {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
   const ref = normalizeHashRefAlias(entry.ref);
   if (!isHashRefAlias(ref)) return null;
@@ -86,14 +89,17 @@ function normalizeProofExpansion(entry) {
   }
   if (entry.note) out.note = compactText(entry.note, 240);
   if (entry.why) out.why = compactText(entry.why, DEFAULT_MAX_WHY_CHARS);
-  if (entry.text != null) out.text = String(entry.text);
-  if (entry.descriptor != null) out.descriptor = entry.descriptor;
-  if (entry.fingerprint_map != null || entry.fingerprintMap != null) {
-    out.fingerprint_map = entry.fingerprint_map ?? entry.fingerprintMap;
+  if (entry.generated_by === PROOF_EXPANSION_GENERATOR) out.generated_by = PROOF_EXPANSION_GENERATOR;
+  if (trustInlinePayload && out.generated_by === PROOF_EXPANSION_GENERATOR) {
+    if (entry.text != null) out.text = String(entry.text);
+    if (entry.descriptor != null) out.descriptor = entry.descriptor;
+    if (entry.fingerprint_map != null || entry.fingerprintMap != null) {
+      out.fingerprint_map = entry.fingerprint_map ?? entry.fingerprintMap;
+    }
+    if (entry.degraded === true) out.degraded = true;
+    if (entry.notice) out.notice = compactText(entry.notice, 300);
   }
-  if (entry.degraded === true) out.degraded = true;
   if (entry.error) out.error = compactText(entry.error, 120);
-  if (entry.notice) out.notice = compactText(entry.notice, 300);
   return out;
 }
 
@@ -210,10 +216,15 @@ export function normalizeHashRefHandoffPacket(input, opts = {}) {
   if (Array.isArray(input.dropped) && input.dropped.length > 0) {
     packet.upstream_dropped = input.dropped.slice(0, 50);
   }
+  const trustProofExpansions = opts.trustProofExpansions === true
+    || input.proof_expansions_generated === PROOF_EXPANSION_GENERATOR;
   const proofExpansions = (Array.isArray(input.proof_expansions) ? input.proof_expansions : [])
-    .map(normalizeProofExpansion)
+    .map((entry) => normalizeProofExpansion(entry, { trustInlinePayload: trustProofExpansions }))
     .filter(Boolean);
   if (proofExpansions.length > 0) packet.proof_expansions = proofExpansions;
+  if (trustProofExpansions && proofExpansions.length > 0) {
+    packet.proof_expansions_generated = PROOF_EXPANSION_GENERATOR;
+  }
   return { packet, dropped };
 }
 
@@ -260,8 +271,6 @@ function resurfaceEntry(fetchResult, laneEntry, {
       ...(sourceEntry.metadata || {}),
       reissued_by: "hash_ref_handoff",
       source_ref: laneEntry.ref,
-      source_owner_scope: fetchResult.owner_scope || null,
-      source_owner_id: fetchResult.owner_id || null,
       handoff_destination: packet?.destination || "handoff",
     },
   }, { ownerScope: targetOwnerScope });
@@ -298,6 +307,18 @@ export function reissueHashRefHandoffPacket(input, {
   for (const lane of HASH_REF_LANES) {
     packet.lanes[lane] = [];
     for (const laneEntry of normalized.packet.lanes[lane]) {
+      let targetFetchResult = null;
+      try {
+        targetFetchResult = fetchHashRefForContext(targetContext, laneEntry.ref);
+      } catch {
+        targetFetchResult = null;
+      }
+      if (targetFetchResult?.ok && targetFetchResult?.found && targetFetchResult.entry) {
+        packet.lanes[lane].push(laneEntry);
+        reissued += 1;
+        continue;
+      }
+
       let fetchResult = null;
       try {
         fetchResult = fetchHashRefForContext(sourceContext, laneEntry.ref);
@@ -350,6 +371,7 @@ function proofExpansionForFetch(fetchResult, laneEntry) {
     size_chars: entry.size_chars,
     content_hash: entry.content_hash,
     note: entry.note,
+    generated_by: PROOF_EXPANSION_GENERATOR,
   };
   if (entry.entry_kind === "materialized") {
     return {
@@ -441,6 +463,7 @@ export function expandHashRefHandoffPacketProofs(input, {
     ...normalized.packet,
     lanes: normalized.packet.lanes,
     proof_expanded: true,
+    proof_expansions_generated: PROOF_EXPANSION_GENERATOR,
     proof_expansions: [],
   };
   const dropped = [...normalized.dropped];
@@ -526,7 +549,11 @@ function renderPreview(preview) {
 }
 
 export function renderHashRefHandoffPacket(input, opts = {}) {
-  const normalized = normalizeHashRefHandoffPacket(input, opts);
+  const normalized = normalizeHashRefHandoffPacket(input, {
+    ...opts,
+    trustProofExpansions: opts.trustProofExpansions === true
+      || input?.proof_expansions_generated === PROOF_EXPANSION_GENERATOR,
+  });
   const packet = normalized.packet;
   if (!packet || packet.source !== "atlas") return "";
   const lines = [

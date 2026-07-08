@@ -5,6 +5,7 @@
 
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 import { bareSymbolCard, buildSymbolCard, parseSymbolId, symbolIdOf, etagOf, locationOf, symbolHit } from "./cards.js";
+import { applyDbAccessToCard } from "./db-symbol-access.js";
 import { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 import { findOverlaySymbol, findOverlaySymbolByRef, getOverlaySymbols } from "./buffer.js";
 import { getEffectivePolicy } from "./policy.js";
@@ -135,6 +136,7 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
   const cachedCard = cache.getCard(cacheKey);
   recordPrefetchAccess({ kind: "card", key: cacheKey, hit: !!cachedCard });
   if (cachedCard) {
+    applyDbAccessToCard(cachedCard);
     if (params.ifNoneMatch && params.ifNoneMatch === etag) {
       return notModifiedEnvelope({ action: "symbol.card", versionId, etag });
     }

@@ -46,3 +46,4 @@ export { __resetRetrievalCacheForTests } from "../../../classes/v2/RetrievalCach
 export { __resetPrefetchStatsForTests } from "./prefetch.js";
 export { __resetLiveReconciliationForTests } from "../live-reconciliation.js";
 export { __resetCodeLadderForTests } from "./code-ladder.js";
+export { __resetDbSymbolAccessForTests } from "./db-symbol-access.js";

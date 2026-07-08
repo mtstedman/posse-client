@@ -680,6 +680,33 @@ function hashRefObjectTableSql({
   `;
 }
 
+function hashRefAliasTableSql({
+  tableName,
+  workItemRequired = false,
+  jobRequired = false,
+  attemptRequired = false,
+} = {}) {
+  return `
+    CREATE TABLE IF NOT EXISTS ${quoteIdent(tableName)} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_item_id INTEGER ${workItemRequired ? "NOT NULL" : ""},
+      job_id INTEGER ${jobRequired ? "NOT NULL" : ""},
+      attempt_id INTEGER ${attemptRequired ? "NOT NULL" : ""},
+      agent_call_id INTEGER,
+      ref TEXT NOT NULL UNIQUE,
+      target_ref TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+      FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE CASCADE,
+      FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE SET NULL,
+      FOREIGN KEY (ref) REFERENCES hash_ref_aliases(ref) ON DELETE CASCADE,
+      FOREIGN KEY (target_ref) REFERENCES hash_ref_aliases(ref) ON DELETE CASCADE
+    )
+  `;
+}
+
 export function createHashRefStoreTables(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS hash_ref_aliases (
@@ -695,13 +722,26 @@ export function createHashRefStoreTables(db) {
     tableName: "work_item_hash_refs",
     workItemRequired: true,
   }));
+  db.exec(hashRefAliasTableSql({
+    tableName: "work_item_hash_ref_aliases",
+    workItemRequired: true,
+  }));
   db.exec(hashRefObjectTableSql({
     tableName: "job_hash_refs",
     workItemRequired: true,
     jobRequired: true,
   }));
+  db.exec(hashRefAliasTableSql({
+    tableName: "job_hash_ref_aliases",
+    workItemRequired: true,
+    jobRequired: true,
+  }));
   db.exec(hashRefObjectTableSql({
     tableName: "agent_run_hash_refs",
+    attemptRequired: true,
+  }));
+  db.exec(hashRefAliasTableSql({
+    tableName: "agent_run_hash_ref_aliases",
     attemptRequired: true,
   }));
 
@@ -710,16 +750,25 @@ export function createHashRefStoreTables(db) {
     CREATE INDEX IF NOT EXISTS idx_work_item_hash_refs_content ON work_item_hash_refs(work_item_id, content_hash);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_work_item_hash_refs_owner_content_unique
       ON work_item_hash_refs(work_item_id, content_hash);
+    CREATE INDEX IF NOT EXISTS idx_work_item_hash_ref_aliases_ref ON work_item_hash_ref_aliases(ref);
+    CREATE INDEX IF NOT EXISTS idx_work_item_hash_ref_aliases_target
+      ON work_item_hash_ref_aliases(work_item_id, target_ref);
 
     CREATE INDEX IF NOT EXISTS idx_job_hash_refs_ref ON job_hash_refs(ref);
     CREATE INDEX IF NOT EXISTS idx_job_hash_refs_content ON job_hash_refs(job_id, content_hash);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_job_hash_refs_owner_content_unique
       ON job_hash_refs(job_id, content_hash);
+    CREATE INDEX IF NOT EXISTS idx_job_hash_ref_aliases_ref ON job_hash_ref_aliases(ref);
+    CREATE INDEX IF NOT EXISTS idx_job_hash_ref_aliases_target
+      ON job_hash_ref_aliases(job_id, target_ref);
 
     CREATE INDEX IF NOT EXISTS idx_agent_run_hash_refs_ref ON agent_run_hash_refs(ref);
     CREATE INDEX IF NOT EXISTS idx_agent_run_hash_refs_content ON agent_run_hash_refs(attempt_id, content_hash);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_hash_refs_owner_content_unique
       ON agent_run_hash_refs(attempt_id, content_hash);
+    CREATE INDEX IF NOT EXISTS idx_agent_run_hash_ref_aliases_ref ON agent_run_hash_ref_aliases(ref);
+    CREATE INDEX IF NOT EXISTS idx_agent_run_hash_ref_aliases_target
+      ON agent_run_hash_ref_aliases(attempt_id, target_ref);
   `);
 }
 

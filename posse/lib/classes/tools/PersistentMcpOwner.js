@@ -22,7 +22,7 @@ import { getSharedAtlasToolExecutor } from "../../domains/atlas/functions/v2/too
 import { operatorFeedbackSignalTextForJob } from "../../domains/providers/functions/shared/tool-runtime.js";
 import { recordToolUseObservations } from "../../domains/observability/functions/observations.js";
 import { appendRunTelemetry } from "../../shared/telemetry/functions/run-telemetry.js";
-import { fetchHashRefTool } from "../../functions/tools/hash-adder.js";
+import { appendHashRefIfMajor, fetchHashRefTool } from "../../functions/tools/hash-adder.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
@@ -349,6 +349,24 @@ function hashRefToolContext(session) {
 function isAtlasFetchRefTool(toolName, toolArgs) {
   const requested = requestedToolPolicyName(toolName, toolArgs);
   return requested.suite === "atlas" && requested.name === "fetch_ref";
+}
+
+function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
+  if (!result || result.isError === true) return result;
+  const first = result?.content?.[0];
+  if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+  const requested = requestedToolPolicyName(toolName, toolArgs);
+  const stamped = appendHashRefIfMajor(requested.name || toolName, first.text, {
+    args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
+    context: hashRefToolContext(session),
+    source: `atlas:${requested.name || toolName}`,
+    objectType: requested.name ? `atlas.${requested.name}` : "atlas.tool_result",
+  });
+  if (stamped === first.text) return result;
+  return {
+    ...result,
+    content: [{ ...first, text: stamped }, ...result.content.slice(1)],
+  };
 }
 
 /**
@@ -1172,6 +1190,7 @@ export class PersistentMcpOwner {
       let result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
+      result = appendHashRefToMcpTextResult(result, toolName, toolArgs, session);
       // ATLAS calls are the bulk of a retrieval-phase agent's tool traffic;
       // without the signal here (the gateway only appends it to native
       // tools), an MCP-transport agent deep in an ATLAS-only phase learns

@@ -24,7 +24,7 @@ export const HASH_REF_LANES = Object.freeze([
 export const HASH_REF_LANE_SET = new Set(HASH_REF_LANES);
 export const HASH_REF_LANE_LIST_SQL = HASH_REF_LANES.map((value) => `'${value}'`).join(",");
 
-export const HASH_REF_ALIAS_PATTERN = /^#[0-9a-z]+$/;
+export const HASH_REF_ALIAS_PATTERN = /^#[0-9a-z]{4,12}$/;
 
 export function normalizeHashRefAlias(value) {
   const raw = String(value || "").trim().toLowerCase();

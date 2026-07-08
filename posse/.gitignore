@@ -42,7 +42,7 @@ data/
 scripts/atlas-streaming-*.mjs
 
 # ATLAS A/B harness scratch and generated outputs.
-scripts/atlas-ab/
+/scripts/atlas-ab/*
 
 # Generic task A/B harness generated run outputs.
 scripts/task-ab/**/*.diff.patch

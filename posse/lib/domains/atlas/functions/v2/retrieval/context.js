@@ -6,6 +6,7 @@ import { sliceBuild } from "./slice.js";
 import { memoryGet } from "./memory.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { buildSymbolCard, symbolHit, symbolIdOf } from "./cards.js";
+import { compactDbAccess } from "./db-symbol-access.js";
 import { rankSymbols } from "./rank.js";
 import { sha256Hex } from "../hash.js";
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
@@ -453,6 +454,8 @@ function renderContextPrompt({ taskText, taskType, cards, memories = [] }) {
   for (const c of cards) {
     lines.push(`- \`${c.qualifiedName || c.name}\` (${c.kind}, ${c.location.repo_rel_path})`);
     if (c.signature) lines.push(`  - ${c.signature}`);
+    const dbLine = renderCardDbAccess(c.dbAccess);
+    if (dbLine) lines.push(`  - DB: ${dbLine}`);
   }
   if (memories.length > 0) {
     lines.push("");
@@ -657,6 +660,7 @@ function compactContextCard(card) {
     location: card.location,
     signature: signature || null,
     summary: summary || null,
+    ...(card.dbAccess ? { dbAccess: compactDbAccess(card.dbAccess, 6) } : {}),
     ...(card.visibility ? { visibility: card.visibility } : {}),
     ...(card.etag ? { etag: card.etag } : {}),
     detailLevel: "signature",
@@ -679,6 +683,7 @@ function minimalContextCard(card) {
     location: card.location,
     signature: signature || null,
     summary: summary || null,
+    ...(card.dbAccess ? { dbAccess: compactDbAccess(card.dbAccess, 3) } : {}),
     detailLevel: "minimal",
   };
 }
@@ -694,7 +699,36 @@ function compactContextHit(card) {
     kind: card.kind,
     lang: card.lang,
     location: card.location,
+    ...(card.dbAccess ? { dbAccess: compactDbAccess(card.dbAccess, 3) } : {}),
   };
+}
+
+/**
+ * @param {any} dbAccess
+ */
+function renderCardDbAccess(dbAccess) {
+  if (!dbAccess || typeof dbAccess !== "object") return "";
+  const pieces = [];
+  const reads = summarizeDbSites(dbAccess.reads, "reads");
+  const writes = summarizeDbSites(dbAccess.writes, "writes");
+  const schema = summarizeDbSites(dbAccess.schema, "schema");
+  if (reads) pieces.push(reads);
+  if (writes) pieces.push(writes);
+  if (schema) pieces.push(schema);
+  return pieces.join("; ");
+}
+
+/**
+ * @param {unknown} sites
+ * @param {string} label
+ */
+function summarizeDbSites(sites, label) {
+  if (!Array.isArray(sites) || sites.length === 0) return "";
+  const targets = [...new Set(sites.map((site) => String(site?.target || "").trim()).filter(Boolean))].slice(0, 4);
+  const operations = [...new Set(sites.map((site) => String(site?.operation || "").trim()).filter(Boolean))].slice(0, 4);
+  const opText = operations.length > 0 ? ` via ${operations.join(", ")}` : "";
+  const targetText = targets.length > 0 ? ` ${targets.join(", ")}` : "";
+  return `${label}${targetText}${opText}`;
 }
 
 /**

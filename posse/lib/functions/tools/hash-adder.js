@@ -5,15 +5,17 @@ import {
   fetchHashRefForContext,
   surfaceHashRefForContext,
 } from "../../domains/queue/functions/hash-refs.js";
+import {
+  isHashRefAlias,
+  normalizeHashRefAlias,
+} from "../../catalog/hash-store.js";
 
 const DEFAULT_SURFACE_MIN_CHARS = 4000;
 const DEFAULT_MATERIALIZE_CHAR_CAP = 60000;
 const HASH_ADDER_BLOCKED_TOOLS = new Set(["fetch_ref"]);
 
 function normalizeRef(value) {
-  const raw = String(value || "").trim().toLowerCase();
-  if (!raw) return "";
-  return raw.startsWith("#") ? raw : `#${raw}`;
+  return normalizeHashRefAlias(value);
 }
 
 function refInputs(args = {}) {
@@ -80,8 +82,15 @@ function shouldSurfaceHashRef(toolName, result, {
 
 function refStub({ entry, toolName, sizeChars }) {
   const ref = entry?.ref || "";
-  const objectType = entry?.object_type || toolName || "tool_result";
-  const note = entry?.note ? ` note="${String(entry.note).slice(0, 140)}"` : "";
+  const objectType = String(entry?.object_type || toolName || "tool_result")
+    .replace(/[^0-9A-Za-z_.:-]+/g, "_")
+    .slice(0, 80) || "tool_result";
+  const noteValue = String(entry?.note || "")
+    .replace(/["\\\]\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 140);
+  const note = noteValue ? ` note="${noteValue}"` : "";
   return `\n\n[ref_hash ${objectType} ${sizeChars} chars ${ref}${note}]`;
 }
 
@@ -98,11 +107,28 @@ function recordHashObservation(context, surfaced, toolName, sizeChars) {
       object_type: surfaced.entry.object_type,
       content_hash: surfaced.entry.content_hash,
       size_chars: sizeChars,
-      owner_scope: surfaced.owner_scope,
-      owner_id: surfaced.owner_id,
       reused: surfaced.reused === true,
     },
   });
+}
+
+function recordHashSurfaceFailure(context, toolName, sizeChars, reason) {
+  try {
+    recordObservation({
+      work_item_id: context.work_item_id ?? null,
+      job_id: context.job_id ?? null,
+      attempt_id: context.attempt_id ?? null,
+      observation_type: "hash_ref.surface_failed",
+      summary: `Failed to surface ${toolName || "tool_result"} as hash ref`,
+      detail: {
+        tool: toolName || null,
+        size_chars: sizeChars,
+        error: String(reason || "surface_failed").slice(0, 500),
+      },
+    });
+  } catch {
+    // Hash-ref telemetry must never break the tool result path.
+  }
 }
 
 export function appendHashRefIfMajor(toolName, result, {
@@ -111,6 +137,7 @@ export function appendHashRefIfMajor(toolName, result, {
   source = null,
   objectType = null,
   note = null,
+  ownerScope = null,
   minChars = DEFAULT_SURFACE_MIN_CHARS,
   materializeCharCap = DEFAULT_MATERIALIZE_CHAR_CAP,
 } = {}) {
@@ -150,11 +177,15 @@ export function appendHashRefIfMajor(toolName, result, {
         tool: toolName || null,
         materialized,
       },
-    });
-  } catch {
+    }, { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) });
+  } catch (err) {
+    recordHashSurfaceFailure(hashContext, toolName, sizeChars, err?.message || err);
     return result;
   }
-  if (!surfaced?.ok) return result;
+  if (!surfaced?.ok) {
+    recordHashSurfaceFailure(hashContext, toolName, sizeChars, surfaced?.error || "surface_failed");
+    return result;
+  }
   recordHashObservation(hashContext, surfaced, toolName, sizeChars);
   return `${result}${refStub({ entry: surfaced.entry, toolName, sizeChars })}`;
 }
@@ -172,8 +203,6 @@ function fetchResultText(result) {
     return JSON.stringify({
       ok: true,
       ref: entry.ref,
-      owner_scope: result.owner_scope,
-      via_parent: result.via_parent === true,
       object_type: entry.object_type,
       source: entry.source,
       note: entry.note,
@@ -185,8 +214,6 @@ function fetchResultText(result) {
   return JSON.stringify({
     ok: true,
     ref: entry.ref,
-    owner_scope: result.owner_scope,
-    via_parent: result.via_parent === true,
     object_type: entry.object_type,
     source: entry.source,
     note: entry.note,
@@ -210,11 +237,18 @@ function recordFetchObservation(hashContext, ref, result) {
       ref,
       ok: result?.ok === true,
       found: result?.found === true,
-      owner_scope: result?.owner_scope || null,
-      via_parent: result?.via_parent === true,
       error: result?.error || null,
     },
   });
+}
+
+function invalidRefResult(ref) {
+  return {
+    ok: false,
+    found: false,
+    ref: normalizeRef(ref),
+    error: "invalid_ref",
+  };
 }
 
 function parseFetchPayload(text) {
@@ -232,13 +266,13 @@ export function fetchHashRefTool(args = {}, {
   const refs = refInputs(args);
   if (refs.length === 0) return JSON.stringify({ ok: false, error: "fetch_ref requires ref or refs" }, null, 2);
   if (refs.length === 1 && !Array.isArray(args.refs) && !Array.isArray(args.hashes)) {
-    const result = fetchHashRefForContext(hashContext, refs[0]);
+    const result = isHashRefAlias(refs[0]) ? fetchHashRefForContext(hashContext, refs[0]) : invalidRefResult(refs[0]);
     recordFetchObservation(hashContext, refs[0], result);
     return fetchResultText(result);
   }
 
   const results = refs.map((ref) => {
-    const result = fetchHashRefForContext(hashContext, ref);
+    const result = isHashRefAlias(ref) ? fetchHashRefForContext(hashContext, ref) : invalidRefResult(ref);
     recordFetchObservation(hashContext, ref, result);
     return parseFetchPayload(fetchResultText(result));
   });

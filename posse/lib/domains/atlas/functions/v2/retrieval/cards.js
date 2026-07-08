@@ -6,6 +6,7 @@
 
 import { sha256Hex } from "../hash.js";
 import { isDefaultVisibleSymbol, isNoisyLocalSymbol } from "./hygiene.js";
+import { applyDbAccessToCard } from "./db-symbol-access.js";
 
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
 /** @typedef {import("../contracts/api.js").ViewEdge} ViewEdge */
@@ -184,7 +185,7 @@ export function bareSymbolCard({ symbol, detail = "compact", path }) {
     startByte: symbol.range_start,
     endByte: symbol.range_end,
   };
-  return {
+  return applyDbAccessToCard({
     symbolId: symbolIdOf(symbol),
     name: symbol.name,
     qualifiedName: symbol.qualified_name,
@@ -194,7 +195,7 @@ export function bareSymbolCard({ symbol, detail = "compact", path }) {
     signature: detail === "minimal" ? null : signatureFromSymbol(symbol),
     summary: detail === "minimal" ? null : summaryFromSymbol(symbol),
     etag: etagOf(symbol),
-  };
+  });
 }
 
 /**

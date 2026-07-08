@@ -569,24 +569,102 @@ function _dbDisplayName(db) {
 function _dbCallerLine(query) {
   const pathLine = `${query?.path || "(unknown)"}${query?.line != null ? `:${query.line}` : ""}`;
   const target = query?.target ? ` target=${query.target}` : "";
+  const symbols = _dbQuerySymbols(query);
+  const symbolList = symbols.length > 0
+    ? ` symbols=[${symbols.slice(0, 6).map(_dbInlineSymbolLabel).join(", ")}${symbols.length > 6 || query?.symbolsTruncated ? ", ..." : ""}]`
+    : "";
+  const surface = query?.symbolSurface && query.symbolSurface !== "range" && query.symbolSurface !== "none"
+    ? ` symbolSurface=${query.symbolSurface}`
+    : "";
   const site = query?.site ? ` site=${String(query.site).replace(/\s+/g, " ").slice(0, 120)}` : "";
   const classification = query?.classification ? ` class=${query.classification}` : "";
   const confidence = query?.confidence ? ` confidence=${query.confidence}` : "";
-  return `- ${pathLine}${target}${classification}${confidence}${site}`;
+  return `- ${pathLine}${target}${symbolList}${surface}${classification}${confidence}${site}`;
 }
 
 function _renderDbRefPayload({ db, operation, queries }) {
+  const symbols = _aggregateDbSymbols(queries);
   const lines = [
     `Database: ${_dbDisplayName(db)}`,
     `Operation: ${_dbOperationLabel(operation)}`,
     `Callers: ${queries.length}`,
     "",
   ];
+  if (symbols.length > 0) {
+    lines.push("Symbols:");
+    for (const symbol of symbols.slice(0, 24)) lines.push(_dbSymbolLine(symbol));
+    if (symbols.length > 24) lines.push(`- ... ${symbols.length - 24} more symbols`);
+    lines.push("");
+  }
   for (const query of queries) {
     lines.push(_dbCallerLine(query));
     if (query?.evidence) lines.push(`  evidence: ${String(query.evidence).replace(/\s+/g, " ").slice(0, 220)}`);
   }
   return lines.join("\n").trimEnd();
+}
+
+function _dbQuerySymbols(query) {
+  return Array.isArray(query?.symbols)
+    ? query.symbols.filter((symbol) => symbol && typeof symbol === "object")
+    : [];
+}
+
+function _dbInlineSymbolLabel(symbol) {
+  const name = symbol?.qualifiedName || symbol?.name || "(anonymous)";
+  return `${name}#${_shortSymbolId(symbol?.symbolId)}`;
+}
+
+function _shortSymbolId(symbolId) {
+  const text = String(symbolId || "");
+  const idx = text.indexOf(":");
+  if (idx > 0) return `${text.slice(0, 8)}${text.slice(idx)}`;
+  return text.slice(0, 12);
+}
+
+function _aggregateDbSymbols(queries) {
+  const byId = new Map();
+  for (const query of Array.isArray(queries) ? queries : []) {
+    for (const symbol of _dbQuerySymbols(query)) {
+      const symbolId = String(symbol?.symbolId || "").trim();
+      if (!symbolId) continue;
+      const existing = byId.get(symbolId) || {
+        symbolId,
+        name: symbol?.name || "",
+        qualifiedName: symbol?.qualifiedName || null,
+        kind: symbol?.kind || "",
+        path: symbol?.path || query?.path || "",
+        startLine: symbol?.startLine ?? null,
+        endLine: symbol?.endLine ?? null,
+        operations: new Set(),
+        access: new Set(),
+        targets: new Set(),
+        relations: new Set(),
+        callers: 0,
+      };
+      if (query?.operation) existing.operations.add(String(query.operation));
+      if (query?.access) existing.access.add(String(query.access));
+      if (query?.target) existing.targets.add(String(query.target));
+      if (symbol?.relation) existing.relations.add(String(symbol.relation));
+      existing.callers += 1;
+      byId.set(symbolId, existing);
+    }
+  }
+  return [...byId.values()].sort((a, b) => {
+    const pathCmp = String(a.path || "").localeCompare(String(b.path || ""));
+    if (pathCmp) return pathCmp;
+    return Number(a.startLine || 0) - Number(b.startLine || 0)
+      || String(a.qualifiedName || a.name || "").localeCompare(String(b.qualifiedName || b.name || ""));
+  });
+}
+
+function _dbSymbolLine(symbol) {
+  const label = symbol.qualifiedName || symbol.name || "(anonymous)";
+  const loc = `${symbol.path || "(unknown)"}${symbol.startLine ? `:${symbol.startLine}` : ""}${symbol.endLine && symbol.endLine !== symbol.startLine ? `-${symbol.endLine}` : ""}`;
+  const access = [...symbol.access].sort().join(",");
+  const operations = [...symbol.operations].sort().join(",");
+  const targets = [...symbol.targets].sort().slice(0, 8).join(",");
+  const relations = [...symbol.relations].sort().join(",");
+  return `- ${label} [${symbol.kind || "symbol"}] ${loc} id=${symbol.symbolId} access=${access || "unknown"} operations=${operations || "unknown"}${targets ? ` targets=${targets}` : ""}${relations ? ` relation=${relations}` : ""}`;
 }
 
 function _hashRefContextForPacket(packet) {
