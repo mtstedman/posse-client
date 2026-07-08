@@ -41,21 +41,8 @@ data/
 # One-off local ATLAS probes against sibling repos.
 scripts/atlas-streaming-*.mjs
 
-# ATLAS A/B harness generated run outputs. Keep run definitions and grading keys
-# tracked (README.md, cells.jsonl, key-*.md), but ignore per-run relics.
-scripts/atlas-ab/**/*.answer.md
-scripts/atlas-ab/**/*.run.log
-scripts/atlas-ab/**/*.blind-map.json
-scripts/atlas-ab/**/blind-map.json
-scripts/atlas-ab/**/*.grade-prompt.md
-scripts/atlas-ab/**/*.grade.raw.txt
-scripts/atlas-ab/**/*.grade.output.json
-scripts/atlas-ab/**/*.grade.missing-key.md
-scripts/atlas-ab/**/*.grade.error.txt
-scripts/atlas-ab/**/results.jsonl
-scripts/atlas-ab/**/grades.jsonl
-scripts/atlas-ab/**/matrix.html
-scripts/atlas-ab/**/matrix.md
+# ATLAS A/B harness scratch and generated outputs.
+scripts/atlas-ab/
 
 # Generic task A/B harness generated run outputs.
 scripts/task-ab/**/*.diff.patch
