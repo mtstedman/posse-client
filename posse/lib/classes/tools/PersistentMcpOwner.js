@@ -22,6 +22,7 @@ import { getSharedAtlasToolExecutor } from "../../domains/atlas/functions/v2/too
 import { operatorFeedbackSignalTextForJob } from "../../domains/providers/functions/shared/tool-runtime.js";
 import { recordToolUseObservations } from "../../domains/observability/functions/observations.js";
 import { appendRunTelemetry } from "../../shared/telemetry/functions/run-telemetry.js";
+import { fetchHashRefTool } from "../../functions/tools/hash-adder.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
@@ -308,6 +309,14 @@ function mcpToolErrorPayload(message, error = null) {
   };
 }
 
+function mcpToolTextPayload(text) {
+  const value = String(text || "");
+  return {
+    content: [{ type: "text", text: value }],
+    isError: /^Error:/i.test(value),
+  };
+}
+
 function mcpToolResultMessage(message, result) {
   const id = message && Object.prototype.hasOwnProperty.call(message, "id") ? message.id : null;
   if (id == null) return null;
@@ -325,6 +334,21 @@ function atlasExecutorSessionContext(session) {
     tokenSource: session?.tokenSource || null,
     tokenVerified: session?.tokenVerified === true,
   };
+}
+
+function hashRefToolContext(session) {
+  const boot = session?.bootConfig || {};
+  return {
+    work_item_id: boot.workItemId ?? null,
+    job_id: boot.jobId ?? null,
+    attempt_id: boot.attemptId ?? null,
+    agent_call_id: boot.agentCallId ?? null,
+  };
+}
+
+function isAtlasFetchRefTool(toolName, toolArgs) {
+  const requested = requestedToolPolicyName(toolName, toolArgs);
+  return requested.suite === "atlas" && requested.name === "fetch_ref";
 }
 
 /**
@@ -1118,6 +1142,22 @@ export class PersistentMcpOwner {
     const startedAt = Date.now();
     const context = attachTelemetryContext(session, this.bootId);
     try {
+      if (isAtlasFetchRefTool(toolName, toolArgs)) {
+        let result = mcpToolTextPayload(fetchHashRefTool(toolArgs || {}, {
+          context: hashRefToolContext(session),
+        }));
+        result = appendOwnerOperatorFeedbackSignal(result, session);
+        recordOwnerToolObservation({ session, toolName, toolArgs, result });
+        appendRunTelemetry("diagnostics", {
+          kind: "mcp.owner.atlas_tool_call",
+          ...context,
+          outcome: result?.isError ? "tool_error" : "ok",
+          tool_name: toolName,
+          duration_ms: Date.now() - startedAt,
+          executor: { via: "hash_ref_store" },
+        });
+        return mcpToolResultMessage(message, result);
+      }
       const executor = getSharedAtlasToolExecutor();
       const executed = await executor.executeTool({
         toolName,

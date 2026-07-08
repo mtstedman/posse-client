@@ -8,6 +8,10 @@
 
 import { ATLAS_TOOL_ACTIONS } from "./tool-params.js";
 import { ATLAS_RUNTIME_INPUTS } from "./runtimes.js";
+import {
+  INTERNAL_ATLAS_ACTIONS,
+  INTERNAL_TOOL_FAMILY,
+} from "../../../../../catalog/internal-tools.js";
 
 const ATLAS_SYMBOL_ID_PATTERN = "^[0-9a-f]{64}:[0-9]+$";
 const TASK_TYPES = Object.freeze(["debug", "review", "implement", "explain"]);
@@ -92,10 +96,8 @@ const gatewaySchema = () => o({
 // either direction.
 export const ATLAS_MULTI_GATEWAY_ACTIONS = Object.freeze({
   "edit.plan": Object.freeze(["query", "code"]),
-  "file.read": Object.freeze(["query", "code"]),
   "code.survey": Object.freeze(["query", "code"]),
   "code.structure": Object.freeze(["query", "code"]),
-  "code.db": Object.freeze(["query", "code"]),
 });
 
 const QUERY_SHARED_ACTIONS = Object.freeze(
@@ -114,21 +116,12 @@ const QUERY_GATEWAY_ACTIONS = Object.freeze([
   "symbol.card",
   "symbol.cards",
   "symbol.overview",
-  "tree.overview",
   "tree.branch",
-  "tree.scope",
   "tree.expand",
-  "slice.build",
-  "slice.refresh",
-  "slice.spillover.get",
   ...QUERY_SHARED_ACTIONS,
-  "context",
-  "context.summary",
   "review.delta",
   "review.analyze",
   "review.risk",
-  "repo.status",
-  "repo.quality",
   "memory.surface",
   "memory.get",
 ]);
@@ -139,28 +132,10 @@ const CODE_GATEWAY_ACTIONS = Object.freeze([
   ...CODE_SHARED_ACTIONS,
 ]);
 const REPO_GATEWAY_ACTIONS = Object.freeze([
-  "info",
   "action.search",
   "manual",
-  "repo.register",
-  "repo.status",
-  "repo.quality",
-  "index.refresh",
-  "policy.get",
-  "policy.set",
-  "usage.stats",
-  "runtime.execute",
-  "runtime.queryOutput",
-  "scip.ingest",
 ]);
 const AGENT_GATEWAY_ACTIONS = Object.freeze([
-  "context",
-  "context.summary",
-  "agent.feedback",
-  "agent.feedback.query",
-  "buffer.push",
-  "buffer.checkpoint",
-  "buffer.status",
   "memory.store",
   "memory.feedback",
 ]);
@@ -170,6 +145,7 @@ export const ATLAS_GATEWAY_ACTIONS = Object.freeze({
   code: CODE_GATEWAY_ACTIONS,
   repo: REPO_GATEWAY_ACTIONS,
   agent: AGENT_GATEWAY_ACTIONS,
+  [INTERNAL_TOOL_FAMILY]: INTERNAL_ATLAS_ACTIONS,
 });
 
 const workflowStep = () => o({
@@ -233,6 +209,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   code: gatewaySchema(),
   repo: gatewaySchema(),
   agent: gatewaySchema(),
+  [INTERNAL_TOOL_FAMILY]: gatewaySchema(),
 
   "action.search": o({
     query: s({ maxLength: 20_000 }),
@@ -262,6 +239,11 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     repoId: s({ maxLength: 256 }),
     includePolicy: b(),
     includeCounts: b(),
+  }),
+  fetch_ref: o({
+    ref: s({ maxLength: 512 }),
+    refs: a(s({ maxLength: 512 }), { maxItems: 100 }),
+    hashes: a(s({ maxLength: 512 }), { maxItems: 100 }),
   }),
 
   "repo.register": o({

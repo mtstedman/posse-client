@@ -10,11 +10,13 @@ import { getAtlasDeterministicToolDefinitions } from "../../../../functions/tool
 import { getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { executeEmbeddedAtlasTool } from "../../../integrations/functions/atlas-embedded.js";
 import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
+import { surfaceHashRefForContext } from "../../../queue/functions/hash-refs.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { isIndexableSourcePath } from "../../../integrations/functions/deterministic-mcp/source-file-gate.js";
 import { resolvePathWithin } from "../../../runtime/functions/fs-safety.js";
 import { isSensitiveEnvFileOrTargetPath } from "../../../runtime/functions/sensitive-paths.js";
+import { readProjectDbConfig } from "../../../../functions/toolkit/project-db/config.js";
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { formatAtlasBackendText, atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 import { isExternallyRoutedAtlasTool } from "../../../integrations/functions/deterministic-mcp/tool-descriptors.js";
@@ -31,11 +33,37 @@ const ATLAS_EXACT_PREFETCH_MAX_BYTES = 96 * 1024;
 const ATLAS_EXACT_PREFETCH_MAX_LINES = 1200;
 const ATLAS_SLICE_FILE_DISPLAY_MAX = 8;
 const ATLAS_REFERENCE_PREFETCH_MAX_FILES = 8;
+const ATLAS_DB_PREFETCH_MAX_FILES = 64;
+const ATLAS_DB_PREFETCH_RG_MAX_BUFFER = 16 * 1024 * 1024;
 const LEXICAL_PREFETCH_CACHE_TTL_MS = 30_000;
 const LEXICAL_PREFETCH_CACHE_MAX = 64;
 const LEXICAL_PREFETCH_SCAN_LIMIT = 120_000;
 const LEXICAL_PREFETCH_RG_MAX_BUFFER = 16 * 1024 * 1024;
 const LEXICAL_PREFETCH_CACHE = new Map();
+
+const ATLAS_DB_PREFETCH_RG_PATTERN = [
+  "\\bselect\\b",
+  "\\binsert\\s+into\\b",
+  "\\bupdate\\s+\\w",
+  "\\bdelete\\s+from\\b",
+  "\\bupsert\\b",
+  "\\bcreate\\s+table\\b",
+  "\\balter\\s+table\\b",
+  "\\bdrop\\s+table\\b",
+  "\\bdb\\.(?:prepare|query|exec|run)\\b",
+  "\\.(?:prepare|query|execute)\\s*\\(",
+].join("|");
+
+const ATLAS_DB_PREFETCH_SKIP_GLOBS = Object.freeze([
+  "!node_modules/**",
+  "!vendor/**",
+  "!dist/**",
+  "!build/**",
+  "!coverage/**",
+  "!.git/**",
+  "!.posse/**",
+  "!.posse-worktrees/**",
+]);
 
 function externallyRoutedAtlasTools(tools = []) {
   return (Array.isArray(tools) ? tools : [])
@@ -381,6 +409,265 @@ function buildPlannerAtlasTaskText(packet) {
   ].map((value) => String(value || "").trim()).filter(Boolean);
   if (parts.length === 0) return "";
   return parts.join("\n\n").slice(0, 1500);
+}
+
+function _collectAtlasDbHintPaths(packet) {
+  const hints = packet?.context_hints || {};
+  const raw = packet?._raw_payload || {};
+  return _uniqueAtlasPaths([
+    ...(Array.isArray(hints.atlas_db_prefetch_paths) ? hints.atlas_db_prefetch_paths : []),
+    ...(Array.isArray(hints.atlasDbPrefetchPaths) ? hints.atlasDbPrefetchPaths : []),
+    ...(Array.isArray(hints.database_prefetch_paths) ? hints.database_prefetch_paths : []),
+    ...(Array.isArray(hints.databasePrefetchPaths) ? hints.databasePrefetchPaths : []),
+    ...(Array.isArray(raw.atlas_db_prefetch_paths) ? raw.atlas_db_prefetch_paths : []),
+    ...(Array.isArray(raw.atlasDbPrefetchPaths) ? raw.atlasDbPrefetchPaths : []),
+    ...(Array.isArray(raw.database_prefetch_paths) ? raw.database_prefetch_paths : []),
+    ...(Array.isArray(raw.databasePrefetchPaths) ? raw.databasePrefetchPaths : []),
+  ], ATLAS_DB_PREFETCH_MAX_FILES);
+}
+
+function _looksLikeDatabasePrefetchTask(packet) {
+  const raw = packet?._raw_payload || {};
+  const hints = packet?.context_hints || {};
+  if (_truthyHint(hints.atlas_db_prefetch) || _truthyHint(hints.database_prefetch)) return true;
+  if (_truthyHint(raw.atlas_db_prefetch) || _truthyHint(raw.database_prefetch)) return true;
+  if (String(packet?.task_mode || raw.task_mode || "").trim().toLowerCase() === "db") return true;
+  const text = [
+    buildPlannerAtlasTaskText(packet),
+    raw.task_spec,
+    raw.instructions,
+    raw.fix_instructions,
+    packet?.title,
+    Array.isArray(packet?.success_criteria) ? packet.success_criteria.join(" ") : "",
+  ].filter(Boolean).join("\n");
+  return /\b(database|db|sql|query|queries|select|insert|update|delete|upsert|schema|migration|table|transaction|mysql|postgres|sqlite|project_db)\b/i.test(text);
+}
+
+function _existingAtlasDbRoots(cwd, values = []) {
+  if (!cwd) return [];
+  const out = [];
+  for (const value of values) {
+    const rel = _normalizeAtlasRelativePath(value);
+    if (!rel) continue;
+    try {
+      const abs = resolvePathWithin(cwd, rel, { allowEqual: false });
+      if (!abs || isSensitiveEnvFileOrTargetPath(abs)) continue;
+      const stat = fs.statSync(abs);
+      if ((stat.isFile() || stat.isDirectory()) && !out.includes(rel)) out.push(rel);
+    } catch {
+      // Drop missing or unsafe roots.
+    }
+    if (out.length >= ATLAS_DB_PREFETCH_MAX_FILES) break;
+  }
+  return out;
+}
+
+function _listAtlasDbPrefetchFiles(cwd, roots = [], maxItems = ATLAS_DB_PREFETCH_MAX_FILES) {
+  if (!_isPrefetchCwdUsable(cwd)) return [];
+  const safeRoots = _existingAtlasDbRoots(cwd, roots);
+  try {
+    const output = execFileSync("rg", [
+      "-l",
+      "-i",
+      ...ATLAS_DB_PREFETCH_SKIP_GLOBS.flatMap((glob) => ["--glob", glob]),
+      ATLAS_DB_PREFETCH_RG_PATTERN,
+      ...(safeRoots.length > 0 ? safeRoots : []),
+    ], {
+      cwd,
+      encoding: "utf8",
+      timeout: 3000,
+      maxBuffer: ATLAS_DB_PREFETCH_RG_MAX_BUFFER,
+      windowsHide: true,
+    });
+    return _uniqueAtlasPaths(
+      output.split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((filePath) => filePath && _isIndexedSourcePath(filePath)),
+      maxItems,
+    );
+  } catch {
+    return [];
+  }
+}
+
+function _collectAtlasDbPrefetchPaths(packet) {
+  const hints = _collectAtlasDbHintPaths(packet);
+  const scoped = _uniqueAtlasPaths([
+    ...(Array.isArray(packet?.files_to_modify) ? packet.files_to_modify : []),
+    ...(Array.isArray(packet?.related_files) ? packet.related_files : []),
+    ..._collectValidatedAtlasSeedFiles(packet),
+    ..._collectAtlasReferenceFiles(packet),
+  ], ATLAS_DB_PREFETCH_MAX_FILES);
+  const roots = hints.length > 0 ? hints : scoped;
+  const grepFiles = _listAtlasDbPrefetchFiles(packet?.cwd, roots, ATLAS_DB_PREFETCH_MAX_FILES);
+  return _uniqueAtlasPaths([
+    ...hints,
+    ...grepFiles,
+    ...scoped.filter((filePath) => _isIndexedSourcePath(filePath)),
+  ], ATLAS_DB_PREFETCH_MAX_FILES);
+}
+
+function _normalizeDbEngineHint(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "postgresql") return "postgres";
+  if (["mysql", "postgres", "sqlite"].includes(raw)) return raw;
+  return null;
+}
+
+function _resolveAtlasDbEngine(packet, queries = []) {
+  const hints = packet?.context_hints || {};
+  const raw = packet?._raw_payload || {};
+  const hinted = [
+    hints.db,
+    hints.db_type,
+    hints.dbType,
+    hints.database_type,
+    hints.databaseType,
+    hints.project_db_type,
+    hints.projectDbType,
+    raw.db,
+    raw.db_type,
+    raw.dbType,
+    raw.database_type,
+    raw.databaseType,
+    raw.project_db_type,
+    raw.projectDbType,
+  ].map(_normalizeDbEngineHint).find(Boolean);
+  if (hinted) return hinted;
+  try {
+    const cfg = readProjectDbConfig({ projectDir: packet?.cwd || null });
+    if (cfg?.enabled && cfg.dbType) return String(cfg.dbType).toLowerCase();
+  } catch {
+    // Config is optional; source inventory still has value without it.
+  }
+  const access = new Set((Array.isArray(queries) ? queries : []).map((query) => String(query?.access || "").toLowerCase()).filter(Boolean));
+  if (access.size > 0) return "source";
+  return "unknown";
+}
+
+function _normalizeDbOperation(value) {
+  const key = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return key || "unknown";
+}
+
+function _dbOperationLabel(operation) {
+  const key = _normalizeDbOperation(operation);
+  if (key === "ddl") return "DDL";
+  return key.split("_").map((part) => part ? `${part[0].toUpperCase()}${part.slice(1)}` : "").join(" ");
+}
+
+function _dbDisplayName(db) {
+  const key = String(db || "").trim().toLowerCase();
+  if (key === "mysql") return "MySql";
+  if (key === "sqlite") return "SQLite";
+  if (key === "postgres" || key === "postgresql") return "Postgres";
+  if (key === "source") return "Source";
+  return key ? `${key[0].toUpperCase()}${key.slice(1)}` : "Unknown";
+}
+
+function _dbCallerLine(query) {
+  const pathLine = `${query?.path || "(unknown)"}${query?.line != null ? `:${query.line}` : ""}`;
+  const target = query?.target ? ` target=${query.target}` : "";
+  const site = query?.site ? ` site=${String(query.site).replace(/\s+/g, " ").slice(0, 120)}` : "";
+  const classification = query?.classification ? ` class=${query.classification}` : "";
+  const confidence = query?.confidence ? ` confidence=${query.confidence}` : "";
+  return `- ${pathLine}${target}${classification}${confidence}${site}`;
+}
+
+function _renderDbRefPayload({ db, operation, queries }) {
+  const lines = [
+    `Database: ${_dbDisplayName(db)}`,
+    `Operation: ${_dbOperationLabel(operation)}`,
+    `Callers: ${queries.length}`,
+    "",
+  ];
+  for (const query of queries) {
+    lines.push(_dbCallerLine(query));
+    if (query?.evidence) lines.push(`  evidence: ${String(query.evidence).replace(/\s+/g, " ").slice(0, 220)}`);
+  }
+  return lines.join("\n").trimEnd();
+}
+
+function _hashRefContextForPacket(packet) {
+  const obs = getObservationContext() || {};
+  return {
+    work_item_id: packet?.work_item_id ?? obs.work_item_id ?? null,
+    job_id: packet?.job_id ?? obs.job_id ?? null,
+    attempt_id: obs.attempt_id ?? null,
+    agent_call_id: obs.agent_call_id ?? null,
+  };
+}
+
+function _surfaceDbBucketRef(packet, { db, operation, queries, metadata = {} }) {
+  const context = _hashRefContextForPacket(packet);
+  const ownerScope = context.job_id && context.work_item_id ? "job" : "work_item";
+  const payloadText = _renderDbRefPayload({ db, operation, queries });
+  const surfaced = surfaceHashRefForContext(context, {
+    payloadText,
+    objectType: "atlas_db_prefetch",
+    source: "atlas:code.db",
+    note: `${_dbOperationLabel(operation)} database callers (${queries.length})`,
+    sizeChars: payloadText.length,
+    metadata: {
+      surfaced_by: "atlas_db_prefetch",
+      db,
+      operation,
+      caller_count: queries.length,
+      ...metadata,
+    },
+  }, { ownerScope });
+  return surfaced?.ok ? surfaced.entry?.ref || null : null;
+}
+
+function _buildAtlasDbContext(packet, data, paths) {
+  const queries = Array.isArray(data?.queries) ? data.queries : [];
+  if (queries.length === 0) return null;
+  const db = _resolveAtlasDbEngine(packet, queries);
+  const byOperation = new Map();
+  for (const query of queries) {
+    const operation = _normalizeDbOperation(query?.operation);
+    if (!byOperation.has(operation)) byOperation.set(operation, []);
+    byOperation.get(operation).push(query);
+  }
+
+  const out = {
+    ok: true,
+    db,
+    operations: {},
+    counts: {},
+    paths: Array.isArray(paths) ? paths.slice(0, ATLAS_DB_PREFETCH_MAX_FILES) : [],
+    scanned_files: Number(data?.metrics?.scannedFileCount ?? data?.metrics?.fileCount ?? 0) || null,
+    query_count: queries.length,
+  };
+
+  for (const operation of [...byOperation.keys()].sort()) {
+    const bucket = byOperation.get(operation);
+    const ref = _surfaceDbBucketRef(packet, { db, operation, queries: bucket });
+    if (!ref) continue;
+    out[operation] = ref;
+    out.counts[operation] = bucket.length;
+    out.operations[operation] = { ref, callers: bucket.length };
+  }
+
+  const telemetryQueries = queries.filter((query) => String(query?.classification || "").toLowerCase() === "telemetry");
+  if (telemetryQueries.length > 0) {
+    const ref = _surfaceDbBucketRef(packet, {
+      db,
+      operation: "telemetry",
+      queries: telemetryQueries,
+      metadata: { classification: "telemetry" },
+    });
+    if (ref) {
+      out.telemetry = ref;
+      out.telemetry_count = telemetryQueries.length;
+    }
+  }
+
+  if (Object.keys(out.operations).length === 0 && !out.telemetry) return null;
+  if (data?.metrics && typeof data.metrics === "object") out.metrics = data.metrics;
+  if (data?.truncated != null) out.truncated = !!data.truncated;
+  return out;
 }
 
 function pickFirstString(...values) {
@@ -826,6 +1113,37 @@ export async function attachAtlasResearcherPrefetch(packet) {
       ok: false,
       error: String(err?.message || err).slice(0, 300),
     };
+  }
+}
+
+export async function attachAtlasDbPrefetch(packet) {
+  try {
+    if (!packet?.atlas?.active) return;
+    if (packet.recipient !== "researcher" && packet.recipient !== "planner" && packet.recipient !== "dev") return;
+    if (!_isPrefetchCwdUsable(packet.cwd)) return;
+    if (!_looksLikeDatabasePrefetchTask(packet)) return;
+    const tools = internalAtlasTools(packet);
+    if (!tools.has("code.db")) return;
+
+    const paths = _collectAtlasDbPrefetchPaths(packet);
+    if (paths.length === 0) return;
+
+    const raw = await executeEmbeddedAtlasTool("code.db", {
+      paths,
+      maxFiles: Math.min(ATLAS_DB_PREFETCH_MAX_FILES, paths.length),
+    }, {
+      cwd: packet.cwd,
+      config: packet.atlas_config || undefined,
+      origin: "prefetch",
+    });
+    if (String(raw || "").startsWith("Error:")) return;
+    const parsed = extractAtlasJsonPayload(raw);
+    const data = atlasResultData("code.db", parsed) || parsed;
+    const context = _buildAtlasDbContext(packet, data, paths);
+    if (context) packet.atlas_db_context = context;
+  } catch {
+    // DB prefetch is a compact side package. Missing it should not change the
+    // main ATLAS fallback decision or block handoff rendering.
   }
 }
 
@@ -1879,6 +2197,10 @@ export function classifyAtlasPrefetchRelevance(packet, recipient = packet?.recip
   const scopedFiles = _collectExplicitAtlasPrefetchFiles(packet);
   const scopedSet = _pathSet(scopedFiles);
 
+  if (packet.atlas_db_context?.ok && _looksLikeDatabasePrefetchTask(packet)) {
+    return true;
+  }
+
   if ((role === "planner" || role === "dev") && packet.atlas_slice_context?.ok) {
     const slice = packet.atlas_slice_context;
     const evidencePaths = _collectSliceEvidencePaths(slice);
@@ -2343,6 +2665,45 @@ function renderAtlasResearchContextSection(packet, { trim = 0 } = {}) {
   return lines.join("\n");
 }
 
+function renderAtlasDbContextSection(packet) {
+  const dbContext = packet.atlas_db_context;
+  if (!dbContext?.ok) return "";
+  const operations = dbContext.operations && typeof dbContext.operations === "object"
+    ? dbContext.operations
+    : {};
+  const keys = Object.keys(operations);
+  const ordered = [
+    "select",
+    "insert",
+    "update",
+    "delete",
+    "upsert",
+    "create_table",
+    "alter_table",
+    "drop_table",
+    ...keys.filter((key) => !["select", "insert", "update", "delete", "upsert", "create_table", "alter_table", "drop_table"].includes(key)).sort(),
+  ].filter((key, index, values) => operations[key] && values.indexOf(key) === index);
+  if (ordered.length === 0 && !dbContext.telemetry) return "";
+
+  const lines = [
+    atlasHeading("DATABASE PREFETCH"),
+    `Database: ${_dbDisplayName(dbContext.db)}`,
+  ];
+  for (const operation of ordered) {
+    const entry = operations[operation] || {};
+    const ref = entry.ref || dbContext[operation];
+    if (!ref) continue;
+    const callers = Number(entry.callers ?? dbContext.counts?.[operation] ?? 0);
+    lines.push(`${_dbOperationLabel(operation)}: ${ref} (${callers} caller${callers === 1 ? "" : "s"})`);
+  }
+  if (dbContext.telemetry && Number(dbContext.telemetry_count || 0) > 0) {
+    const count = Number(dbContext.telemetry_count || 0);
+    lines.push(`Telemetry: ${dbContext.telemetry} (${count} caller${count === 1 ? "" : "s"})`);
+  }
+  lines.push("Fetch only the operation ref that matches your database task.");
+  return lines.join("\n");
+}
+
 function renderAtlasAssessmentBaselineSection(packet, { trim = 0 } = {}) {
   const baseline = packet.atlas_assessment_baseline;
   const lines = [
@@ -2422,6 +2783,11 @@ function _buildAtlasSections(packet, trim) {
         packet.atlas_research_context.error,
       ));
     }
+  }
+
+  if (packet.atlas_db_context?.ok) {
+    const dbSection = renderAtlasDbContextSection(packet);
+    if (dbSection) sections.push(dbSection);
   }
 
   if (packet.atlas_slice_context) {

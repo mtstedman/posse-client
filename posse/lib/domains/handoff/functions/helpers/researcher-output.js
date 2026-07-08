@@ -4,6 +4,11 @@
 
 import { extractJsonResult } from "../../../../shared/format/functions/json.js";
 import { sanitizeAtlasSymbolIdList } from "../../../atlas/functions/v2/symbol-id.js";
+import {
+  HASH_REF_LANES,
+  isHashRefAlias,
+  normalizeHashRefAlias,
+} from "../../../../catalog/hash-store.js";
 
 /**
  * Extract the structured researcher appendix from output text.
@@ -21,6 +26,8 @@ export function parseResearcherStructuredOutput(output) {
     Array.isArray(parsed.related_files) ||
     Array.isArray(parsed.key_symbols) ||
     Array.isArray(parsed.memories) ||
+    typeof parsed.synthesis === "string" ||
+    HASH_REF_LANES.some((lane) => Array.isArray(parsed[lane])) ||
     Array.isArray(parsed.planner_file_priorities) ||
     Array.isArray(parsed.ranked_files) ||
     Array.isArray(parsed.constraints) ||
@@ -34,6 +41,8 @@ export function parseResearcherStructuredOutput(output) {
 
 const RESEARCHER_MEMORY_TITLE_MAX = 120;
 const RESEARCHER_MEMORY_CONTENT_MAX = 1200;
+const RESEARCHER_CITATION_WHY_MAX = 180;
+const RESEARCHER_CITATION_REFS_PER_LANE_MAX = 24;
 
 function safeRelMemoryPath(value) {
   const raw = String(value || "").trim().replace(/\\/g, "/");
@@ -53,6 +62,86 @@ function resilientSymbolIdList(values, maxItems, fieldName) {
     } catch { /* drop the malformed id */ }
     if (out.length >= maxItems) break;
   }
+  return out;
+}
+
+function normalizeCitationWhy(value, maxChars = RESEARCHER_CITATION_WHY_MAX) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, maxChars) : "";
+}
+
+function citationEntryParts(entry) {
+  if (typeof entry === "string") return { rawRef: entry, why: "" };
+  if (Array.isArray(entry)) {
+    return {
+      rawRef: entry[0],
+      why: normalizeCitationWhy(entry[1]),
+    };
+  }
+  if (entry && typeof entry === "object") {
+    return {
+      rawRef: entry.hash ?? entry.ref ?? entry.ref_hash,
+      why: normalizeCitationWhy(entry.why ?? entry.note ?? entry.reason),
+    };
+  }
+  return { rawRef: "", why: "" };
+}
+
+/**
+ * Normalize researcher hash-ref citation triage into the closed lane contract
+ * from the hash-store catalog. Entries may be "#hash", ["#hash", "why"], or
+ * object-shaped { hash/ref/ref_hash, why/note/reason }. Decoy refs without a
+ * why are dropped because the exclusion judgment is not recoverable from the
+ * artifact payload alone.
+ *
+ * @param {any} parsed
+ * @param {{ maxRefsPerLane?: number, maxWhyChars?: number }} [opts]
+ * @returns {{ synthesis: string, proof: Array<{ hash: string, why?: string }>, support: Array<{ hash: string, why?: string }>, decoy: Array<{ hash: string, why: string }>, dropped: Array<{ lane: string, ref: string, reason: string }> }}
+ */
+export function normalizeResearcherCitationTriage(parsed, opts = {}) {
+  const maxRefsPerLane = Math.max(
+    1,
+    Number.parseInt(String(opts.maxRefsPerLane || RESEARCHER_CITATION_REFS_PER_LANE_MAX), 10) ||
+      RESEARCHER_CITATION_REFS_PER_LANE_MAX,
+  );
+  const maxWhyChars = Math.max(
+    1,
+    Number.parseInt(String(opts.maxWhyChars || RESEARCHER_CITATION_WHY_MAX), 10) ||
+      RESEARCHER_CITATION_WHY_MAX,
+  );
+  const out = {
+    synthesis: String(parsed?.synthesis || "").trim(),
+    dropped: [],
+  };
+  for (const lane of HASH_REF_LANES) out[lane] = [];
+
+  const seen = new Set();
+  for (const lane of HASH_REF_LANES) {
+    const entries = Array.isArray(parsed?.[lane]) ? parsed[lane] : [];
+    for (const entry of entries) {
+      if (out[lane].length >= maxRefsPerLane) break;
+      const parts = citationEntryParts(entry);
+      const hash = normalizeHashRefAlias(parts.rawRef);
+      const why = normalizeCitationWhy(parts.why, maxWhyChars);
+      if (!isHashRefAlias(hash)) {
+        out.dropped.push({ lane, ref: String(parts.rawRef || "").trim(), reason: "invalid_ref" });
+        continue;
+      }
+      if (seen.has(hash)) {
+        out.dropped.push({ lane, ref: hash, reason: "duplicate_ref" });
+        continue;
+      }
+      if (lane === "decoy" && !why) {
+        out.dropped.push({ lane, ref: hash, reason: "missing_decoy_why" });
+        continue;
+      }
+      seen.add(hash);
+      const normalized = { hash };
+      if (why) normalized.why = why;
+      out[lane].push(normalized);
+    }
+  }
+
   return out;
 }
 

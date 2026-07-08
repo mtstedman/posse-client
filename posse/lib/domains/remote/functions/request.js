@@ -209,6 +209,32 @@ function memoryPrefetchForRemote(packet = {}) {
   };
 }
 
+function databasePrefetchForRemote(packet = {}) {
+  const dbContext = packet?.atlas_db_context;
+  if (!dbContext?.ok) return null;
+  const operations = dbContext.operations && typeof dbContext.operations === "object"
+    ? dbContext.operations
+    : {};
+  const out = {
+    db: dbContext.db || null,
+  };
+  const counts = {};
+  for (const [operation, entry] of Object.entries(operations)) {
+    const ref = entry?.ref || dbContext[operation];
+    if (!ref) continue;
+    out[operation] = ref;
+    const callerCount = Number(entry?.callers ?? dbContext.counts?.[operation]);
+    if (Number.isFinite(callerCount) && callerCount >= 0) counts[operation] = Math.floor(callerCount);
+  }
+  if (dbContext.telemetry && Number(dbContext.telemetry_count || 0) > 0) {
+    out.telemetry = dbContext.telemetry;
+    counts.telemetry = Number(dbContext.telemetry_count || 0);
+  }
+  if (Object.keys(out).length <= 1) return null;
+  if (Object.keys(counts).length > 0) out.counts = counts;
+  return out;
+}
+
 export function buildRemoteCompileRequest(packet, instructions, {
   providerName = null,
   maxPromptChars = null,
@@ -261,6 +287,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
       atlas_summary: atlasSummary,
       step0_context: packet?.step0_context || null,
       memory_prefetch: memoryPrefetchForRemote(packet),
+      database_prefetch: databasePrefetchForRemote(packet),
       memory_surface: packet?.memory_surface || null,
       file_snippets: readOnlyFileSnippets(packet),
       insights: Array.isArray(packet?.run_insights) ? packet.run_insights.map(insightForRemote) : [],

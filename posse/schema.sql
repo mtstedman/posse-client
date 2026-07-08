@@ -641,6 +641,135 @@ CREATE INDEX IF NOT EXISTS idx_agent_interaction_applications_interaction
   ON agent_interaction_applications(interaction_id, applied_at);
 
 
+-- Hash-store citation substrate. The orchestrator owns only alias minting in
+-- hash_ref_aliases; payload/descriptor data lives in the owning object table.
+CREATE TABLE IF NOT EXISTS hash_ref_aliases (
+  ref TEXT PRIMARY KEY,
+  width INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_hash_ref_aliases_width
+  ON hash_ref_aliases(width, created_at);
+
+CREATE TABLE IF NOT EXISTS work_item_hash_refs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_item_id INTEGER NOT NULL,
+  job_id INTEGER,
+  attempt_id INTEGER,
+  agent_call_id INTEGER,
+  ref TEXT NOT NULL UNIQUE,
+  content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+  object_type TEXT NOT NULL DEFAULT 'text',
+  source TEXT,
+  entry_kind TEXT NOT NULL DEFAULT 'materialized' CHECK (entry_kind IN ('materialized','descriptor')),
+  payload_text TEXT,
+  descriptor_json TEXT CHECK (descriptor_json IS NULL OR json_valid(descriptor_json)),
+  fingerprint_json TEXT CHECK (fingerprint_json IS NULL OR json_valid(fingerprint_json)),
+  note TEXT,
+  size_chars INTEGER NOT NULL DEFAULT 0,
+  version_id TEXT,
+  recomputable INTEGER NOT NULL DEFAULT 0 CHECK (recomputable IN (0, 1)),
+  degraded INTEGER NOT NULL DEFAULT 0 CHECK (degraded IN (0, 1)),
+  metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE CASCADE,
+  FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE SET NULL,
+  FOREIGN KEY (ref) REFERENCES hash_ref_aliases(ref) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_item_hash_refs_ref
+  ON work_item_hash_refs(ref);
+
+CREATE INDEX IF NOT EXISTS idx_work_item_hash_refs_content
+  ON work_item_hash_refs(work_item_id, content_hash);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_item_hash_refs_owner_content_unique
+  ON work_item_hash_refs(work_item_id, content_hash);
+
+CREATE TABLE IF NOT EXISTS job_hash_refs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_item_id INTEGER NOT NULL,
+  job_id INTEGER NOT NULL,
+  attempt_id INTEGER,
+  agent_call_id INTEGER,
+  ref TEXT NOT NULL UNIQUE,
+  content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+  object_type TEXT NOT NULL DEFAULT 'text',
+  source TEXT,
+  entry_kind TEXT NOT NULL DEFAULT 'materialized' CHECK (entry_kind IN ('materialized','descriptor')),
+  payload_text TEXT,
+  descriptor_json TEXT CHECK (descriptor_json IS NULL OR json_valid(descriptor_json)),
+  fingerprint_json TEXT CHECK (fingerprint_json IS NULL OR json_valid(fingerprint_json)),
+  note TEXT,
+  size_chars INTEGER NOT NULL DEFAULT 0,
+  version_id TEXT,
+  recomputable INTEGER NOT NULL DEFAULT 0 CHECK (recomputable IN (0, 1)),
+  degraded INTEGER NOT NULL DEFAULT 0 CHECK (degraded IN (0, 1)),
+  metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE CASCADE,
+  FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE SET NULL,
+  FOREIGN KEY (ref) REFERENCES hash_ref_aliases(ref) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_hash_refs_ref
+  ON job_hash_refs(ref);
+
+CREATE INDEX IF NOT EXISTS idx_job_hash_refs_content
+  ON job_hash_refs(job_id, content_hash);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_job_hash_refs_owner_content_unique
+  ON job_hash_refs(job_id, content_hash);
+
+CREATE TABLE IF NOT EXISTS agent_run_hash_refs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_item_id INTEGER,
+  job_id INTEGER,
+  attempt_id INTEGER NOT NULL,
+  agent_call_id INTEGER,
+  ref TEXT NOT NULL UNIQUE,
+  content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+  object_type TEXT NOT NULL DEFAULT 'text',
+  source TEXT,
+  entry_kind TEXT NOT NULL DEFAULT 'materialized' CHECK (entry_kind IN ('materialized','descriptor')),
+  payload_text TEXT,
+  descriptor_json TEXT CHECK (descriptor_json IS NULL OR json_valid(descriptor_json)),
+  fingerprint_json TEXT CHECK (fingerprint_json IS NULL OR json_valid(fingerprint_json)),
+  note TEXT,
+  size_chars INTEGER NOT NULL DEFAULT 0,
+  version_id TEXT,
+  recomputable INTEGER NOT NULL DEFAULT 0 CHECK (recomputable IN (0, 1)),
+  degraded INTEGER NOT NULL DEFAULT 0 CHECK (degraded IN (0, 1)),
+  metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE CASCADE,
+  FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE SET NULL,
+  FOREIGN KEY (ref) REFERENCES hash_ref_aliases(ref) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_hash_refs_ref
+  ON agent_run_hash_refs(ref);
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_hash_refs_content
+  ON agent_run_hash_refs(attempt_id, content_hash);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_hash_refs_owner_content_unique
+  ON agent_run_hash_refs(attempt_id, content_hash);
+
+
 -- ═════════════════════════════════════════════════════════════════════════════
 -- RUN INSIGHTS — Kaizen feedback loop (cross-run learning)
 -- ═════════════════════════════════════════════════════════════════════════════

@@ -765,6 +765,9 @@ export function validatePlannedTask(task, index, taskCount) {
   if (task.skills != null && !isStringArray(task.skills)) {
     errors.push("skills must be an array of strings");
   }
+  if (task.dev_brief != null && (!task.dev_brief || typeof task.dev_brief !== "object" || Array.isArray(task.dev_brief))) {
+    errors.push("dev_brief must be an object");
+  }
 
   return errors;
 }

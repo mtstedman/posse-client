@@ -3,6 +3,7 @@
 // Prompt context rendering for handoff packets.
 
 import { renderAtlasHandoffSectionsWithMeta } from "./atlas-context.js";
+import { renderHashRefHandoffPacket } from "./hash-ref-packet.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 
@@ -12,6 +13,92 @@ export function packetToContextString(packet) {
 
 export function packetToDynamicContextString(packet) {
   return renderPacketContextString(packet, { includeStable: false, includeDynamic: true });
+}
+
+function compactLine(value, max = 220) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function isAtlasDevBrief(brief) {
+  if (!brief || typeof brief !== "object" || Array.isArray(brief)) return false;
+  return String(brief.source || "").trim().toLowerCase() === "atlas";
+}
+
+function renderDevBriefFilePriorities(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return [];
+  return [
+    "Planner file priorities:",
+    ...entries.map((entry, index) => {
+      const path = compactLine(entry?.path, 180);
+      if (!path) return "";
+      const rank = Number.isFinite(Number(entry.rank)) && Number(entry.rank) > 0
+        ? Number(entry.rank)
+        : index + 1;
+      const details = [
+        entry.usefulness && entry.usefulness !== "unspecified" ? `usefulness=${compactLine(entry.usefulness, 60)}` : "",
+        entry.evidence && entry.evidence !== "unspecified" ? `evidence=${compactLine(entry.evidence, 60)}` : "",
+        entry.reason ? compactLine(entry.reason, 180) : "",
+      ].filter(Boolean);
+      return `${rank}. ${path}${details.length > 0 ? ` - ${details.join("; ")}` : ""}`;
+    }).filter(Boolean),
+  ];
+}
+
+function renderDevBriefRefs(brief) {
+  if (brief?.hash_ref_packet) return [];
+  const lines = [];
+  for (const lane of ["proof", "support", "decoy"]) {
+    const refs = Array.isArray(brief?.[lane]) ? brief[lane] : [];
+    if (refs.length === 0) continue;
+    lines.push(`${lane}:`);
+    for (const ref of refs) {
+      const hash = compactLine(ref?.hash || ref?.ref || ref?.ref_hash || ref, 40);
+      if (!hash) continue;
+      const why = compactLine(ref?.why || ref?.reason || ref?.note || "", 180);
+      lines.push(`- ${hash}${why ? ` - ${why}` : ""}`);
+    }
+  }
+  return lines;
+}
+
+function renderPlannerDevBrief(brief) {
+  if (!isAtlasDevBrief(brief)) return "";
+  const lines = [
+    "PLANNER ATLAS DEV BRIEF (task-tailored):",
+    "This is read guidance only; writable scope is still controlled by the file-scope sections below.",
+  ];
+  const summary = compactLine(brief.summary || brief.synthesis || "", 1200);
+  if (summary) {
+    lines.push("");
+    lines.push(`Summary: ${summary}`);
+  }
+  const priorities = renderDevBriefFilePriorities(brief.planner_file_priorities);
+  if (priorities.length > 0) {
+    lines.push("");
+    lines.push(...priorities);
+  }
+  for (const [label, values] of [
+    ["Key files", brief.key_files],
+    ["Related files", brief.related_files],
+  ]) {
+    if (!Array.isArray(values) || values.length === 0) continue;
+    lines.push("");
+    lines.push(`${label}:`);
+    for (const filePath of values) {
+      const normalized = compactLine(filePath, 220);
+      if (normalized) lines.push(`- ${normalized}`);
+    }
+  }
+  const refs = renderDevBriefRefs(brief);
+  if (refs.length > 0) {
+    lines.push("");
+    lines.push("Hash refs:");
+    lines.push(...refs);
+  }
+  return lines.join("\n");
 }
 
 function renderPacketContextString(packet, {
@@ -195,6 +282,14 @@ function renderPacketContextString(packet, {
       ].join("\n\n"),
       { required: true, key: "skills" },
     );
+  }
+
+  if (includeStable && (packet.recipient === "dev" || packet.job_type === "fix")) {
+    addSection(renderPlannerDevBrief(packet.dev_brief), { required: true, key: "planner_dev_brief" });
+    addSection(renderHashRefHandoffPacket(packet.hash_ref_packet || packet.dev_brief?.hash_ref_packet), {
+      required: true,
+      key: "hash_ref_packet",
+    });
   }
 
   // Editable files (existing files to modify) (required)

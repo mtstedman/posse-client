@@ -236,7 +236,7 @@ function prerequisitesFor(action) {
   if (action === "tree.expand") return ["Seed with files/areas already validated (from the brief, tree.branch, or symbol.overview locations)."];
   if (action === "code.survey") return ["Use tree.branch or tree.expand first to pick the directory or file set worth surveying."];
   if (action === "code.structure") return ["Use when the answer needs exact file/symbol/import/fan-in inventory instead of code-body context."];
-  if (action === "code.db") return ["Use when the answer needs DB table read/write inventory, durable-vs-telemetry classification, or proof that same-name stores are not live DB touchpoints."];
+  if (action === "code.db") return ["Internal WI/setup DB inventory only. Agents receive the resulting WI brief and hash refs instead of calling this action."];
   if (action.startsWith("slice.") || action === "context") return ["Start from symbol.search, symbol.card, or taskText."];
   if (action === "edit.plan") return ["Resolve target symbols with symbol.search or target files with file.read/search first."];
   if (action.startsWith("runtime.")) return ["Runtime execution must be enabled by ATLAS policy."];
@@ -246,17 +246,17 @@ function prerequisitesFor(action) {
 
 function nextActionsFor(action) {
   const next = {
-    "symbol.search": ["symbol.card", "symbol.overview", "slice.build", "code.skeleton"],
-    "symbol.card": ["symbol.overview", "tree.branch", "tree.scope", "slice.build", "code.window", "agent.feedback"],
-    "symbol.overview": ["symbol.card", "tree.branch", "tree.scope", "slice.build", "code.window"],
-    "tree.overview": ["tree.branch", "tree.scope", "symbol.card", "slice.build", "code.skeleton"],
-    "tree.branch": ["code.structure", "code.db", "code.survey", "tree.expand", "symbol.card", "slice.build", "code.skeleton"],
-    "tree.scope": ["slice.build", "context", "code.skeleton", "review.analyze"],
-    "tree.expand": ["code.structure", "code.db", "tree.branch", "code.skeleton", "symbol.search", "slice.build"],
-    "slice.build": ["slice.refresh", "agent.feedback", "context"],
-    "edit.plan": ["code.skeleton", "code.lens", "file.read"],
-    "code.survey": ["code.structure", "symbol.overview", "code.lens", "code.window", "slice.build"],
-    "code.structure": ["code.db", "code.survey", "symbol.overview", "code.skeleton"],
+    "symbol.search": ["symbol.card", "symbol.overview", "code.skeleton"],
+    "symbol.card": ["symbol.overview", "tree.branch", "code.window"],
+    "symbol.overview": ["symbol.card", "tree.branch", "code.window"],
+    "tree.overview": ["tree.branch", "symbol.card", "code.skeleton"],
+    "tree.branch": ["code.structure", "code.survey", "tree.expand", "symbol.card", "code.skeleton"],
+    "tree.scope": ["code.skeleton", "review.analyze"],
+    "tree.expand": ["code.structure", "tree.branch", "code.skeleton", "symbol.search"],
+    "slice.build": ["slice.refresh", "context"],
+    "edit.plan": ["code.skeleton", "code.lens"],
+    "code.survey": ["code.structure", "symbol.overview", "code.lens", "code.window"],
+    "code.structure": ["code.survey", "symbol.overview", "code.skeleton"],
     "code.db": ["code.survey", "code.structure", "code.lens", "code.window"],
     "code.skeleton": ["symbol.overview", "code.lens", "code.survey"],
     "code.lens": ["symbol.overview", "code.window", "symbol.card"],

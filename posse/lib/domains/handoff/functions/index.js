@@ -55,6 +55,7 @@ import {
 } from "./helpers/file-request.js";
 import {
   extractResearcherFiles as extractResearcherFilesFromModule,
+  normalizeResearcherCitationTriage as normalizeResearcherCitationTriageFromModule,
   normalizeResearcherFilePriorities as normalizeResearcherFilePrioritiesFromModule,
   normalizeResearcherKeySymbols as normalizeResearcherKeySymbolsFromModule,
   parseResearcherStructuredOutput as parseResearcherStructuredOutputFromModule,
@@ -75,6 +76,7 @@ import {
 } from "./helpers/scope-preflight.js";
 import {
   attachAtlasAssessorPrefetch as attachAtlasAssessorPrefetchFromModule,
+  attachAtlasDbPrefetch as attachAtlasDbPrefetchFromModule,
   attachAtlasPlannerSlice as attachAtlasPlannerSliceFromModule,
   attachAtlasResearcherPrefetch as attachAtlasResearcherPrefetchFromModule,
   classifyAtlasPrefetchRelevance as classifyAtlasPrefetchRelevanceFromModule,
@@ -92,6 +94,9 @@ import {
   packetToContextString as packetToContextStringFromModule,
   packetToDynamicContextString as packetToDynamicContextStringFromModule,
 } from "./helpers/context-render.js";
+import {
+  expandHashRefHandoffPacketProofs as expandHashRefHandoffPacketProofsFromModule,
+} from "./helpers/hash-ref-packet.js";
 import {
   DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS,
   buildTraversalCompletionCheck as buildTraversalCompletionCheckFromModule,
@@ -201,6 +206,7 @@ function formatHandoffStepFailure(err) {
 function copyAtlasPrefetchFields(target, source) {
   for (const key of [
     "atlas_assessment_baseline",
+    "atlas_db_context",
     "atlas_research_context",
     "atlas_slice_candidates",
     "atlas_slice_context",
@@ -453,6 +459,14 @@ function _sanitizePayloadForRecipient(recipient, payload = {}) {
   }
   if (recipient === "dev" && sanitized?.needs_image_generation) {
     sanitized = { ...sanitized, needs_image_generation: false };
+  }
+  if (recipient !== "dev" && sanitized?.dev_brief) {
+    sanitized = { ...sanitized };
+    delete sanitized.dev_brief;
+  }
+  if (recipient !== "dev" && sanitized?.hash_ref_packet) {
+    sanitized = { ...sanitized };
+    delete sanitized.hash_ref_packet;
   }
   return sanitized;
 }
@@ -768,6 +782,10 @@ async function _attachAtlasResearcherPrefetch(packet) {
   return attachAtlasResearcherPrefetchFromModule(packet);
 }
 
+async function _attachAtlasDbPrefetch(packet) {
+  return attachAtlasDbPrefetchFromModule(packet);
+}
+
 function _applyToolPolicy(recipient, packet) {
   const base = TOOL_POLICIES[recipient] || TOOL_POLICIES.dev;
   const hints = packet.context_hints || {};
@@ -927,6 +945,14 @@ export function buildRoutingPacket(job, opts) {
     test_command: sanitizedPayload.test_command || null,
     skills: parseSkillIds(job.skills || sanitizedPayload.skills),
     requested_skills: parseSkillIds(job.skills || sanitizedPayload.skills),
+    dev_brief: sanitizedPayload.dev_brief && typeof sanitizedPayload.dev_brief === "object"
+      ? sanitizedPayload.dev_brief
+      : null,
+    hash_ref_packet: sanitizedPayload.hash_ref_packet && typeof sanitizedPayload.hash_ref_packet === "object"
+      ? sanitizedPayload.hash_ref_packet
+      : sanitizedPayload.dev_brief?.hash_ref_packet && typeof sanitizedPayload.dev_brief.hash_ref_packet === "object"
+        ? sanitizedPayload.dev_brief.hash_ref_packet
+        : null,
 
     // ── Risk (deterministic) ──
     risk: {
@@ -1237,6 +1263,7 @@ export async function handoff(input) {
     packet.source_files = packet.source_files || {};
     packet.dropped_files = Array.isArray(packet.dropped_files) ? packet.dropped_files : [];
     packet.atlas = packet.atlas || null;
+    packet.atlas_db_context = packet.atlas_db_context || null;
     packet.atlas_research_context = packet.atlas_research_context || null;
     packet.atlas_slice_context = packet.atlas_slice_context || null;
     packet.atlas_slice_candidates = packet.atlas_slice_candidates || null;
@@ -1256,6 +1283,8 @@ export async function handoff(input) {
     packet.run_insights = Array.isArray(packet.run_insights) ? packet.run_insights : [];
     packet.pending_merge = packet.pending_merge || null;
     packet.traversal_completion_check = packet.traversal_completion_check || null;
+    packet.dev_brief = packet.dev_brief || packet._raw_payload?.dev_brief || null;
+    packet.hash_ref_packet = packet.hash_ref_packet || packet._raw_payload?.hash_ref_packet || packet.dev_brief?.hash_ref_packet || null;
   } else if (input.recipient && input.data) {
     // Legacy style: { recipient, data }
     packet = {
@@ -1280,6 +1309,14 @@ export async function handoff(input) {
       test_command: input.data.test_command || null,
       skills: parseSkillIds(input.data.skills || input.data.requested_skills),
       requested_skills: parseSkillIds(input.data.skills || input.data.requested_skills),
+      dev_brief: input.data.dev_brief && typeof input.data.dev_brief === "object"
+        ? input.data.dev_brief
+        : null,
+      hash_ref_packet: input.data.hash_ref_packet && typeof input.data.hash_ref_packet === "object"
+        ? input.data.hash_ref_packet
+        : input.data.dev_brief?.hash_ref_packet && typeof input.data.dev_brief.hash_ref_packet === "object"
+          ? input.data.dev_brief.hash_ref_packet
+          : null,
       risk: { mutating: false, assessable: false },
       tool_policy: null,
       budgets: null,
@@ -1294,6 +1331,7 @@ export async function handoff(input) {
       dropped_files: [],
       atlas: null,
       atlas_config: input.data.atlasConfig || input.data.atlas_config || null,
+      atlas_db_context: null,
       atlas_research_context: null,
       atlas_slice_context: null,
       atlas_slice_candidates: null,
@@ -1431,6 +1469,7 @@ export async function handoff(input) {
       _attachAtlasPlannerSlice(atlasPrefetchPacket),
       _attachAtlasAssessorPrefetch(atlasPrefetchPacket),
       _attachAtlasResearcherPrefetch(atlasPrefetchPacket),
+      _attachAtlasDbPrefetch(atlasPrefetchPacket),
     ]);
   }), {
     timeoutMs: atlasHandoffPrefetchTimeoutMs(),
@@ -1527,6 +1566,7 @@ export async function handoff(input) {
     _attachAtlasFallbackSmartContext(packet);
     packet.atlas_research_context = null;
     packet.atlas_assessment_baseline = null;
+    packet.atlas_db_context = null;
     packet.atlas_slice_context = null;
   } else if (atlasPrefetchFailed && packet.atlas?.active && packet.atlas?.fallback !== "fail") {
     try {
@@ -1618,10 +1658,33 @@ export async function handoff(input) {
   // Step 7: Tool policy + budgets
   await timeHandoffStep(packet, "skills.attach", () => _attachSkills(packet));
   await timeHandoffStep(packet, "traversal_completion.resolve", () => _applyTraversalCompletionCheck(packet));
+  await timeHandoffStep(packet, "hash_refs.proof_expand", () => _expandHashRefProofs(packet));
   await timeHandoffStep(packet, "tool_policy.apply", () => _applyToolPolicy(recipient, packet));
   await timeHandoffStep(packet, "drop_telemetry.emit", () => _emitHandoffDropTelemetry(packet));
 
   return packet;
+}
+
+function _expandHashRefProofs(packet) {
+  if (!packet || !(packet.recipient === "dev" || packet.job_type === "fix")) return null;
+  const sourcePacket = packet.hash_ref_packet || packet.dev_brief?.hash_ref_packet || null;
+  if (!sourcePacket) return null;
+  const result = expandHashRefHandoffPacketProofsFromModule(sourcePacket, {
+    context: {
+      work_item_id: packet.work_item_id || null,
+      job_id: packet.job_id || null,
+    },
+  });
+  if (result.packet) {
+    packet.hash_ref_packet = result.packet;
+    if (packet.dev_brief && typeof packet.dev_brief === "object") {
+      packet.dev_brief.hash_ref_packet = result.packet;
+    }
+  }
+  if (result.dropped?.length > 0) {
+    packet.hash_ref_packet_dropped = result.dropped;
+  }
+  return result;
 }
 
 function _applyTraversalCompletionCheck(packet) {
@@ -1974,6 +2037,17 @@ export function normalizeResearcherKeySymbols(parsed, maxItems = 24) {
 export function normalizeResearcherFilePriorities(parsed) {
   return normalizeResearcherFilePrioritiesFromModule(parsed);
 }
+
+export function normalizeResearcherCitationTriage(parsed, opts = {}) {
+  return normalizeResearcherCitationTriageFromModule(parsed, opts);
+}
+
+export {
+  expandHashRefHandoffPacketProofs,
+  normalizeHashRefHandoffPacket,
+  reissueHashRefHandoffPacket,
+  renderHashRefHandoffPacket,
+} from "./helpers/hash-ref-packet.js";
 
 // ─── Test-only exports ──────────────────────────────────────────────────────
 export { _parseFunctions, _buildSmartPreload };

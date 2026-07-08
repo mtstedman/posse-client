@@ -14,6 +14,12 @@ import { executeProjectDbStatement, DEFAULT_MAX_ROWS } from "./drivers.js";
 
 const MAX_ROWS_CEILING = 1000;
 const DEFAULT_MAX_BYTES = 16000;
+const TABLE_SOURCE_KEYWORDS = new Set(["FROM", "JOIN", "UPDATE", "INTO"]);
+const TABLE_DDL_KEYWORDS = new Set(["TABLE"]);
+const CLAUSE_BOUNDARY_KEYWORDS = new Set([
+  "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "RETURNING", "SET",
+  "VALUES", "ON", "USING", "UNION", "EXCEPT", "INTERSECT",
+]);
 
 function clampMaxRows(value) {
   const n = Number(value);
@@ -36,6 +42,151 @@ function renderRows(rows, columns) {
     return out;
   });
   return JSON.stringify(shaped, (_k, v) => (typeof v === "bigint" ? Number(v) : v), 2);
+}
+
+function sqlIdentifierTokens(sql) {
+  const tokens = [];
+  const text = String(sql || "");
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === "-" && text[i + 1] === "-") {
+      i += 2;
+      while (i < text.length && text[i] !== "\n") i += 1;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "*") {
+      i += 2;
+      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i += 1;
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      i += 1;
+      while (i < text.length) {
+        if (text[i] === "'" && text[i + 1] === "'") {
+          i += 2;
+          continue;
+        }
+        if (text[i] === "'") {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "`") {
+      const quote = ch;
+      let value = "";
+      i += 1;
+      while (i < text.length) {
+        if (text[i] === quote && text[i + 1] === quote) {
+          value += quote;
+          i += 2;
+          continue;
+        }
+        if (text[i] === quote) {
+          i += 1;
+          break;
+        }
+        value += text[i];
+        i += 1;
+      }
+      if (value) tokens.push({ type: "ident", value });
+      continue;
+    }
+    if (ch === "[") {
+      let value = "";
+      i += 1;
+      while (i < text.length && text[i] !== "]") {
+        value += text[i];
+        i += 1;
+      }
+      if (text[i] === "]") i += 1;
+      if (value) tokens.push({ type: "ident", value });
+      continue;
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      let value = ch;
+      i += 1;
+      while (i < text.length && /[A-Za-z0-9_$]/.test(text[i])) {
+        value += text[i];
+        i += 1;
+      }
+      tokens.push({ type: "ident", value });
+      continue;
+    }
+    if (".(),;".includes(ch)) {
+      tokens.push({ type: ch, value: ch });
+    }
+    i += 1;
+  }
+  return tokens;
+}
+
+function upperToken(token) {
+  return String(token?.value || "").toUpperCase();
+}
+
+function readQualifiedIdentifier(tokens, startIndex) {
+  let i = startIndex;
+  while (upperToken(tokens[i]) === "ONLY") i += 1;
+  if (tokens[i]?.type === "(") return null;
+  const parts = [];
+  if (tokens[i]?.type !== "ident") return null;
+  parts.push(tokens[i].value);
+  i += 1;
+  while (tokens[i]?.type === "." && tokens[i + 1]?.type === "ident") {
+    parts.push(tokens[i + 1].value);
+    i += 2;
+  }
+  const value = parts.join(".");
+  if (!value || CLAUSE_BOUNDARY_KEYWORDS.has(value.toUpperCase())) return null;
+  return { value, nextIndex: i };
+}
+
+function skipIfTableOptions(tokens, index) {
+  let i = index;
+  if (upperToken(tokens[i]) === "IF") {
+    i += 1;
+    if (upperToken(tokens[i]) === "NOT") i += 1;
+    if (upperToken(tokens[i]) === "EXISTS") i += 1;
+  }
+  return i;
+}
+
+export function extractProjectDbTableNames(sql) {
+  const tokens = sqlIdentifierTokens(sql);
+  const tables = new Set();
+  for (let i = 0; i < tokens.length; i += 1) {
+    const upper = upperToken(tokens[i]);
+    if (TABLE_SOURCE_KEYWORDS.has(upper)) {
+      const found = readQualifiedIdentifier(tokens, i + 1);
+      if (found) {
+        tables.add(found.value);
+        i = Math.max(i, found.nextIndex - 1);
+      }
+      continue;
+    }
+    if (TABLE_DDL_KEYWORDS.has(upper) && ["CREATE", "ALTER", "DROP", "TRUNCATE"].includes(upperToken(tokens[i - 1]))) {
+      const found = readQualifiedIdentifier(tokens, skipIfTableOptions(tokens, i + 1));
+      if (found) {
+        tables.add(found.value);
+        i = Math.max(i, found.nextIndex - 1);
+      }
+    }
+  }
+  return [...tables].slice(0, 12);
+}
+
+function tableSuffix(tables = []) {
+  if (!Array.isArray(tables) || tables.length === 0) return "";
+  return ` [tables=${tables.join(",")}]`;
 }
 
 /**
@@ -64,6 +215,7 @@ export async function execProjectDbQuery(args = {}, { projectDir = null, capabil
 
   const maxRows = clampMaxRows(args.maxRows ?? args.limit);
   const readOnly = isReadOnlyGrant(permissions);
+  const tables = extractProjectDbTableNames(auth.statement);
 
   let result;
   try {
@@ -83,6 +235,7 @@ export async function execProjectDbQuery(args = {}, { projectDir = null, capabil
   if (auth.isRead) {
     const body = renderRows(result.rows || [], result.columns || []);
     const header = `project_db_query (${conn.dbType}) — ${result.rowCount} row(s)`
+      + tableSuffix(tables)
       + (result.truncated ? ` (truncated to ${maxRows}; refine with a WHERE/LIMIT)` : "");
     let out = `${header}\n${body}`;
     if (out.length > DEFAULT_MAX_BYTES) {
@@ -93,12 +246,12 @@ export async function execProjectDbQuery(args = {}, { projectDir = null, capabil
 
   // DDL path (CREATE/ALTER): "rows affected" is meaningless for schema changes.
   if (auth.verb === "CREATE" || auth.verb === "ALTER") {
-    return `project_db_query (${conn.dbType}) — ${auth.verb}: statement executed`;
+    return `project_db_query (${conn.dbType}) — ${auth.verb}: statement executed${tableSuffix(tables)}`;
   }
 
   // Write path (UPDATE/INSERT/DELETE).
   const affected = result.affectedRows ?? 0;
   const extra = result.lastInsertRowid != null ? `, lastInsertRowid=${result.lastInsertRowid}`
     : (result.insertId != null && result.insertId !== 0 ? `, insertId=${result.insertId}` : "");
-  return `project_db_query (${conn.dbType}) — ${auth.verb}: ${affected} row(s) affected${extra}`;
+  return `project_db_query (${conn.dbType}) — ${auth.verb}: ${affected} row(s) affected${extra}${tableSuffix(tables)}`;
 }

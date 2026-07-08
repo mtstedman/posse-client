@@ -131,6 +131,17 @@
  */
 
 // ============================================================================
+// fetch_ref — Hash-store citation fetch
+// ============================================================================
+
+/**
+ * @typedef {Object} FetchRefParams
+ * @property {string} [ref]
+ * @property {string[]} [refs]
+ * @property {string[]} [hashes]
+ */
+
+// ============================================================================
 // repo.* — Repository status and overview
 // ============================================================================
 
@@ -624,12 +635,13 @@
  *   | { action: "code" } & GatewayParams
  *   | { action: "repo" } & GatewayParams
  *   | { action: "agent" } & GatewayParams
+ *   | { action: "internal" } & GatewayParams
  *   | { action: "action.search" } & ActionSearchParams
  *   | { action: "manual" } & ManualParams
  *   | { action: "workflow" } & WorkflowParams
  *   | { action: "info" } & InfoParams
- *   |
- *   { action: "repo.register" } & RepoRegisterParams
+ *   | { action: "fetch_ref" } & FetchRefParams
+ *   | { action: "repo.register" } & RepoRegisterParams
  *   | { action: "repo.status" } & RepoStatusParams
  *   | { action: "index.refresh" } & IndexRefreshParams
  *   | { action: "repo.overview" } & RepoOverviewParams
@@ -682,10 +694,12 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "code",
   "repo",
   "agent",
+  "internal",
   "action.search",
   "manual",
   "workflow",
   "info",
+  "fetch_ref",
   "repo.register",
   "repo.status",
   "index.refresh",

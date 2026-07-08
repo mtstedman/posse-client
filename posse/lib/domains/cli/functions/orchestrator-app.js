@@ -140,12 +140,9 @@ import {
 import {
   defaultOutputModeForMode,
   normalizeIterativeWorkflowModeChoice,
-  normalizeRequestKindChoice,
 } from "../../intake/functions/choices.js";
 import {
-  listInputContextDirectories,
   mergeSuspectedDirsWithInputContexts,
-  resolveInputContextSelection,
 } from "../../intake/functions/input-contexts.js";
 import { inferWiMode } from "../../intake/functions/mode-inference.js";
 import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
@@ -927,6 +924,145 @@ function hasInlineOneshotIntent(description) {
   return /(?:^|\s)#one[-_]?shot\b/i.test(String(description || ""));
 }
 
+const RESPONSE_SHAPE_ALIASES = new Map([
+  ["a", "auto"],
+  ["auto", "auto"],
+  ["r", "repo"],
+  ["repo", "repo"],
+  ["code", "repo"],
+  ["artifact", "artifact"],
+  ["artifacts", "artifact"],
+  ["f", "artifact"],
+  ["file", "artifact"],
+  ["files", "artifact"],
+  ["q", "question_only"],
+  ["question", "question_only"],
+  ["question-only", "question_only"],
+  ["question_only", "question_only"],
+]);
+
+function normalizeResponseShapeChoice(value, fallback = "auto") {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return { value: fallback, explicit: false };
+  return { value: RESPONSE_SHAPE_ALIASES.get(raw) || raw, explicit: true };
+}
+
+function normalizeThinkingBudgetChoice(value, defaultDeepthink = false) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw || ["a", "auto", "normal", "n"].includes(raw)) {
+    return { deepthink: !!defaultDeepthink, oneshot: false };
+  }
+  if (["d", "deepthink", "deep", "think", "thinking", "y", "yes"].includes(raw)) {
+    return { deepthink: true, oneshot: false };
+  }
+  if (["o", "oneshot", "one-shot", "one_shot", "1shot"].includes(raw)) {
+    return { deepthink: !!defaultDeepthink, oneshot: true };
+  }
+  return { deepthink: !!defaultDeepthink, oneshot: false };
+}
+
+function normalizeSuggestedFilePath(value) {
+  return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function atlasHitFilePath(hit) {
+  return normalizeSuggestedFilePath(
+    hit?.location?.repo_rel_path
+      || hit?.location?.filePath
+      || hit?.repo_rel_path
+      || hit?.filePath
+      || hit?.path,
+  );
+}
+
+function uniqueAtlasFileSuggestions(items, limit = 8) {
+  const out = [];
+  const seen = new Set();
+  for (const item of Array.isArray(items) ? items : []) {
+    const file = atlasHitFilePath(item);
+    if (!file) continue;
+    const key = file.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      file,
+      label: item?.name || item?.qualified_name || item?.qualifiedName || null,
+      score: Number.isFinite(Number(item?.score)) ? Number(item.score) : null,
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function atlasReadinessHasWarmOnnx(readiness) {
+  const layers = Array.isArray(readiness?.layers) ? readiness.layers : [];
+  return layers.some((layer) =>
+    String(layer?.layer || "").startsWith("embeddings")
+    && layer.status === "ready"
+    && (!Number.isFinite(Number(layer.coverage)) || Number(layer.coverage) >= 95));
+}
+
+async function suggestOneshotFilesFromAtlas(description) {
+  try {
+    const [
+      { getAtlasIntegrationConfig, computeAtlasLayerReadiness },
+      { inspectLocalOnnxStatus },
+    ] = await Promise.all([
+      loadAtlasModule(),
+      import("../../atlas/functions/v2/embeddings/local-onnx.js"),
+    ]);
+    const config = getAtlasIntegrationConfig();
+    const onnx = inspectLocalOnnxStatus({ repoRoot: PROJECT_DIR, config });
+    if (!onnx.enabled) return [];
+    const readiness = computeAtlasLayerReadiness({ repoRoot: PROJECT_DIR, config });
+    if (!atlasReadinessHasWarmOnnx(readiness)) return [];
+
+    const { executeEmbeddedAtlasTool } = await import("../../integrations/functions/atlas-embedded.js");
+    const raw = await executeEmbeddedAtlasTool("symbol.search", {
+      query: description,
+      taskText: description,
+      semantic: true,
+      limit: 12,
+    }, {
+      cwd: PROJECT_DIR,
+      config: { ...config, onDemandEmbeddingFill: false },
+      timeoutMs: 5000,
+      origin: "intake_oneshot_file_hint",
+    });
+    if (!raw || /^Error:/i.test(String(raw))) return [];
+    const parsed = JSON.parse(raw);
+    return uniqueAtlasFileSuggestions(parsed?.items, 8);
+  } catch {
+    return [];
+  }
+}
+
+function normalizeOneshotFileHintChoice(answer, suggestions) {
+  const raw = String(answer || "").trim();
+  if (!raw) return "";
+  const selected = [];
+  for (const part of raw.split(",").map((item) => item.trim()).filter(Boolean)) {
+    const index = Number.parseInt(part.replace(/^#/, ""), 10);
+    if (Number.isInteger(index) && index >= 1 && index <= suggestions.length) {
+      selected.push(suggestions[index - 1].file);
+    } else {
+      selected.push(part);
+    }
+  }
+  return selected.map(normalizeSuggestedFilePath).filter(Boolean).join(",");
+}
+
+async function promptForOneshotFileHint(description) {
+  const suggestions = await suggestOneshotFilesFromAtlas(description);
+  if (suggestions.length === 0) return "";
+  console.log(`  ${C.dim}ONNX file candidates:${C.reset}`);
+  suggestions.forEach((entry, index) => {
+    const label = entry.label ? ` ${C.dim}(${entry.label})${C.reset}` : "";
+    console.log(`    ${C.dim}${index + 1}.${C.reset} ${entry.file}${label}`);
+  });
+  const answer = await ask(`  One-shot file hint? number/path/comma list [none]: `);
+  return normalizeOneshotFileHintChoice(answer, suggestions);
+}
 
 async function promptForIterativeWorkflowMode() {
   const answer = (await ask(`  Iterative workflow mode? [b]ugfix / [d]esign(ux) / [r]efactor / [a]udit / [i]terate [bugfix]: `))
@@ -937,33 +1073,14 @@ async function promptForIterativeWorkflowMode() {
 }
 
 async function promptForScopedAdd(description, defaultMode = "build", defaultDeepthink = false, workflowMode = null) {
-  const hintedFilesOption = parseFlagValue("--files");
-  const constraintsOption = parseFlagValue("--constraints");
-  const inputContexts = listInputContextDirectories(PROJECT_DIR);
-  let selectedInputContextDirs = [];
-  if (inputContexts.length > 0) {
-    console.log(`  ${C.dim}Input contexts found in resources/inputs:${C.reset}`);
-    inputContexts.forEach((entry, index) => {
-      console.log(`    ${C.dim}${index + 1}. ${entry.name}${C.reset}`);
-    });
-    const inputContextChoice = (await ask(`  Input context folders to include (comma names/#, all, none) [none]: `)).trim();
-    if (inputContextChoice) {
-      const resolved = resolveInputContextSelection(inputContextChoice, inputContexts);
-      selectedInputContextDirs = resolved.selectedDirs;
-      if (resolved.invalidTokens.length > 0) {
-        console.log(`  ${C.yellow}Ignored unknown input contexts:${C.reset} ${resolved.invalidTokens.join(", ")}`);
-      }
-    }
-  }
+  const baseHints = parseIntakeHintsFromArgv(description, defaultMode);
 
   if (workflowMode) {
     const profile = getIterativeWorkflowProfile(workflowMode);
     let deepthink = defaultDeepthink || !!profile.deepthink;
     if (!defaultDeepthink && !profile.deepthink) {
-      const deepthinkInput = (await ask(`  Deep-think budget? [y/N]: `)).trim().toLowerCase();
-      deepthink = deepthinkInput
-        ? /^(y|yes|1|true|on)$/i.test(deepthinkInput)
-        : false;
+      const budgetInput = await ask(`  Thinking budget? [A]uto / [D]eepthink / [O]neshot [auto]: `);
+      deepthink = normalizeThinkingBudgetChoice(budgetInput, false).deepthink;
     }
     return {
       intakeHints: applyIterativeWorkflowProfile(normalizeIntakeHints({
@@ -974,39 +1091,41 @@ async function promptForScopedAdd(description, defaultMode = "build", defaultDee
         output_mode: profile.output_mode,
         output_mode_source: "explicit",
         desired_outputs_source: "explicit",
-        suspected_files: hintedFilesOption,
-        suspected_dirs: selectedInputContextDirs,
+        suspected_files: baseHints.suspected_files,
+        suspected_dirs: baseHints.suspected_dirs,
         subtasks: profile.subtasks,
-        constraints: [...profile.constraints, ...String(constraintsOption || "").split(",").map((item) => item.trim()).filter(Boolean)],
+        constraints: [...profile.constraints, ...(baseHints.constraints || [])],
       }, { requestText: description, fallbackMode: defaultMode }), workflowMode, defaultMode),
       deepthink,
     };
   }
 
-  const rawKindInput = await ask(`  What kind of request is this? [t]ask / [b]ugfix / [d]esign / [c]ontext / [q]uestion / [o]neshot / [i]mage / [r]eport [task]: `);
-  const explicitKind = normalizeRequestKindChoice(rawKindInput, "");
-  const defaultOutputMode = defaultOutputModeForMode(defaultMode);
-  const outputInput = (await ask(`  What should the result be? auto / repo / artifact / question_only / comma-separated desired outputs [${defaultOutputMode}]: `)).trim().toLowerCase();
-  let deepthink = defaultDeepthink;
-  if (!defaultDeepthink) {
-    const deepthinkInput = (await ask(`  Deep-think budget? [y/N]: `)).trim().toLowerCase();
-    deepthink = deepthinkInput
-      ? /^(y|yes|1|true|on)$/i.test(deepthinkInput)
-      : false;
+  const defaultOutputMode = baseHints.output_mode || defaultOutputModeForMode(defaultMode);
+  const responseShape = normalizeResponseShapeChoice(
+    await ask(`  Response shape? [A]uto / [R]epo / arti[F]act / [Q]uestion [${defaultOutputMode}]: `),
+    defaultOutputMode,
+  );
+  const budgetChoice = normalizeThinkingBudgetChoice(
+    await ask(`  Thinking budget? [A]uto / [D]eepthink / [O]neshot [auto]: `),
+    defaultDeepthink,
+  );
+  let suspectedFiles = baseHints.suspected_files;
+  if (budgetChoice.oneshot && (!Array.isArray(suspectedFiles) || suspectedFiles.length === 0)) {
+    const fileHint = await promptForOneshotFileHint(description);
+    if (fileHint) suspectedFiles = fileHint;
   }
   return {
     intakeHints: normalizeIntakeHints({
-      intent_type: explicitKind || null,
-      intent_type_source: explicitKind ? "explicit" : "inferred",
-      output_mode: outputInput || defaultOutputMode,
-      output_mode_source: outputInput ? "explicit" : "inferred",
-      desired_outputs_source: outputInput ? "explicit" : "inferred",
-      suspected_files: hintedFilesOption,
-      suspected_dirs: selectedInputContextDirs,
-      subtasks: null,
-      constraints: constraintsOption,
+      ...baseHints,
+      intent_type: budgetChoice.oneshot ? "oneshot" : baseHints.intent_type,
+      intent_type_source: budgetChoice.oneshot ? "explicit" : baseHints.intent_type_source,
+      output_mode: responseShape.value || defaultOutputMode,
+      output_mode_source: responseShape.explicit ? "explicit" : baseHints.output_mode_source,
+      desired_outputs: responseShape.explicit ? responseShape.value : baseHints.desired_outputs,
+      desired_outputs_source: responseShape.explicit ? "explicit" : baseHints.desired_outputs_source,
+      suspected_files: suspectedFiles,
     }, { requestText: description, fallbackMode: defaultMode }),
-    deepthink,
+    deepthink: budgetChoice.deepthink,
   };
 }
 

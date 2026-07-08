@@ -13,8 +13,12 @@
 import fs from "fs";
 import path from "path";
 import { ATLAS_TOOL_ACTIONS } from "../contracts/tool-params.js";
-import { normalizeAtlasToolCall, validateAtlasToolCall } from "../contracts/tool-schemas.js";
-import { errorEnvelope } from "./envelope.js";
+import {
+  ATLAS_GATEWAY_ACTIONS as ATLAS_GATEWAY_ACTION_LISTS,
+  normalizeAtlasToolCall,
+  validateAtlasToolCall,
+} from "../contracts/tool-schemas.js";
+import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { symbolSearch } from "./search.js";
 import { sliceBuild, sliceRefresh, sliceSpilloverGet } from "./slice.js";
 import { editPlan } from "./edit-plan.js";
@@ -45,6 +49,7 @@ import { scipIngest } from "./scip.js";
 import { info } from "./info.js";
 import { actionSearch, manual } from "./discovery.js";
 import { workflowExecute } from "./workflow.js";
+import { fetchHashRefTool } from "../../../../../functions/tools/hash-adder.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").Ledger} Ledger */
@@ -74,6 +79,7 @@ import { workflowExecute } from "./workflow.js";
  * @property {TaskType} [taskType]    When present, scopes feedback boost for symbol.search to one task type.
  * @property {(input: string) => QueryPlan | Promise<QueryPlan>} [planner]
  * @property {boolean} [asyncNativeRedaction] When true, redaction-heavy retrieval uses async native daemon calls.
+ * @property {Record<string, unknown>} [hashRefContext] Queue scope for hash-store citation refs.
  */
 
 /**
@@ -154,6 +160,8 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ (dispatchGateway({ gateway: "repo", call, ctx }));
     case "agent":
       return /** @type {any} */ (dispatchGateway({ gateway: "agent", call, ctx }));
+    case "internal":
+      return /** @type {any} */ (dispatchGateway({ gateway: "internal", call, ctx }));
     case "action.search":
       return /** @type {any} */ (actionSearch({ versionId: ctx.versionId, params: call }));
     case "manual":
@@ -174,6 +182,8 @@ function dispatchImpl(call, ctx) {
         repoId: ctx.repoId,
         viewPath: ctx.viewPath,
       }));
+    case "fetch_ref":
+      return /** @type {any} */ (fetchRef({ versionId: ctx.versionId, params: call, ctx }));
     case "repo.register":
       return /** @type {any} */ (repoRegister({
         versionId: ctx.versionId,
@@ -382,71 +392,11 @@ function validationErrorCodeForAction(action, errors = []) {
   return "invalid_params";
 }
 
-const GATEWAY_ACTIONS = Object.freeze({
-  query: new Set([
-    "symbol.search",
-    "symbol.card",
-    "symbol.cards",
-    "symbol.overview",
-    "tree.overview",
-    "tree.branch",
-    "tree.scope",
-    "tree.expand",
-    "slice.build",
-    "slice.refresh",
-    "slice.spillover.get",
-    "edit.plan",
-    "context",
-    "context.summary",
-    "review.delta",
-    "review.analyze",
-    "review.risk",
-    "repo.status",
-    "repo.quality",
-    "memory.surface",
-    "memory.get",
-    "file.read",
-    "code.survey",
-    "code.structure",
-    "code.db",
-  ]),
-  code: new Set([
-    "code.skeleton",
-    "code.lens",
-    "code.window",
-    "code.survey",
-    "code.structure",
-    "code.db",
-    "edit.plan",
-    "file.read",
-  ]),
-  repo: new Set([
-    "info",
-    "action.search",
-    "manual",
-    "repo.register",
-    "repo.status",
-    "repo.quality",
-    "index.refresh",
-    "policy.get",
-    "policy.set",
-    "usage.stats",
-    "runtime.execute",
-    "runtime.queryOutput",
-    "scip.ingest",
-  ]),
-  agent: new Set([
-    "context",
-    "context.summary",
-    "agent.feedback",
-    "agent.feedback.query",
-    "buffer.push",
-    "buffer.checkpoint",
-    "buffer.status",
-    "memory.store",
-    "memory.feedback",
-  ]),
-});
+const GATEWAY_ACTIONS = Object.freeze(
+  Object.fromEntries(
+    Object.entries(ATLAS_GATEWAY_ACTION_LISTS).map(([gateway, actions]) => [gateway, new Set(actions)]),
+  ),
+);
 
 const ACTION_BY_NORMALIZED_KEY = new Map(
   ATLAS_TOOL_ACTIONS.map((action) => [actionKey(action), action]),
@@ -504,7 +454,7 @@ const FIELD_ALIASES = Object.freeze({
 const BLOCKED_ARGUMENT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 /**
- * @param {{ gateway: "query" | "code" | "repo" | "agent", call: ToolCall, ctx: DispatchContext }} args
+ * @param {{ gateway: "query" | "code" | "repo" | "agent" | "internal", call: ToolCall, ctx: DispatchContext }} args
  */
 function dispatchGateway({ gateway, call, ctx }) {
   const target = normalizeActionName(String(
@@ -529,6 +479,39 @@ function dispatchGateway({ gateway, call, ctx }) {
   delete inner.actionName;
   inner.action = target;
   return dispatchImpl(/** @type {ToolCall} */ (inner), ctx);
+}
+
+/**
+ * @param {{ versionId: string, params: ToolCall, ctx: DispatchContext }} input
+ * @returns {AnyToolResult}
+ */
+function fetchRef({ versionId, params, ctx }) {
+  try {
+    const text = fetchHashRefTool(params, {
+      context: {
+        ...(ctx.hashRefContext || {}),
+        ...(ctx.config?.hashRefContext && typeof ctx.config.hashRefContext === "object" ? ctx.config.hashRefContext : {}),
+      },
+    });
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { ok: false, error: "invalid_fetch_ref_payload", text };
+    }
+    return /** @type {AnyToolResult} */ (/** @type {any} */ (okEnvelope({
+      action: "fetch_ref",
+      versionId,
+      data,
+    })));
+  } catch (err) {
+    return /** @type {AnyToolResult} */ (/** @type {any} */ (errorEnvelope({
+      action: "fetch_ref",
+      versionId,
+      code: "fetch_ref_failed",
+      message: err?.message || String(err),
+    })));
+  }
 }
 
 /**

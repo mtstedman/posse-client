@@ -89,6 +89,8 @@ import {
   collectRequestedImageOutputs,
   hasRequestedImageGenerationOutput,
 } from "./image-outputs.js";
+import { sanitizePlannerDevBrief } from "./planner-helpers.js";
+import { reissueHashRefHandoffPacket } from "../../handoff/functions/helpers/hash-ref-packet.js";
 import {
   isBroadNarrowScopedCodeTask,
   parseUnderScopedBroadGateMode,
@@ -258,6 +260,8 @@ function mergeSkillId(skillIds, skillId) {
 }
 
 export function createJobsFromPlan(worker, planJob, tasks, {
+  atlasDevBriefsEnabled = false,
+  sourceHashRefContext = null,
   artifactTaskSlug = (title, mode) => `${String(mode || "task")}-${String(title || "task")}`,
   buildIntermediateReportTask = (task) => task,
   logBadInputFailure = () => {},
@@ -1539,6 +1543,14 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             : "execution policy";
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: policy adjusted ${policyChanges.join(", ")} in task "${t.title}" (${reasons})`);
         }
+        const devBriefResult = atlasDevBriefsEnabled && finalJobType === "dev" && taskMode === "code"
+          ? sanitizePlannerDevBrief(t.dev_brief, worker.projectDir)
+          : { brief: null, droppedFiles: [], droppedHashRefs: [] };
+        if (devBriefResult.droppedFiles.length > 0 || devBriefResult.droppedHashRefs.length > 0) {
+          const droppedCount = devBriefResult.droppedFiles.length + devBriefResult.droppedHashRefs.length;
+          worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dropped ${droppedCount} ATLAS dev_brief item(s) in task "${t.title}"`);
+        }
+        let activeHashRefPacket = devBriefResult.hashRefPacket || null;
         const payloadJson = finalJobType === "promote"
           ? JSON.stringify(normalizedPromotePayload)
           : JSON.stringify({
@@ -1561,6 +1573,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               ...(Array.isArray(t.must_modify) && t.must_modify.length > 0 ? { must_modify: t.must_modify } : {}),
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: t.test_command || null,
+              ...(devBriefResult.brief ? { dev_brief: devBriefResult.brief } : {}),
+              ...(activeHashRefPacket ? { hash_ref_packet: activeHashRefPacket } : {}),
+              ...(devBriefResult.droppedFiles.length > 0 ? { dropped_dev_brief_files: devBriefResult.droppedFiles } : {}),
+              ...(devBriefResult.droppedHashRefs.length > 0 ? { dropped_dev_brief_hash_refs: devBriefResult.droppedHashRefs } : {}),
               _planner_set_files: (t.files_to_modify?.length > 0 || t.files_to_create?.length > 0 || t.files_to_delete?.length > 0) || false,
               risk: executionPolicy?.risk_score ?? plannerRiskScore,
               risk_tags: resolvedRiskTags,
@@ -1628,6 +1644,35 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         });
         allCreatedJobIds.add(job.id);
         recordCompiledTaskJob(i, job.id);
+        let activeHashRefPacketDropped = [];
+        if (activeHashRefPacket && sourceHashRefContext && finalJobType === "dev" && taskMode === "code") {
+          const targetHashRefContext = {
+            work_item_id: planJob.work_item_id,
+            job_id: job.id,
+          };
+          const reissuedPacket = reissueHashRefHandoffPacket(activeHashRefPacket, {
+            sourceContext: sourceHashRefContext,
+            targetContext: targetHashRefContext,
+            targetOwnerScope: "job",
+          });
+          if (reissuedPacket.packet) {
+            activeHashRefPacket = reissuedPacket.packet;
+            if (devBriefResult.brief) devBriefResult.brief.hash_ref_packet = activeHashRefPacket;
+            const existingPayload = parseJobPayload(job);
+            existingPayload.hash_ref_packet = activeHashRefPacket;
+            if (existingPayload.dev_brief && typeof existingPayload.dev_brief === "object") {
+              existingPayload.dev_brief.hash_ref_packet = activeHashRefPacket;
+            }
+            if (reissuedPacket.dropped.length > 0) {
+              existingPayload.dropped_hash_ref_packet_refs = reissuedPacket.dropped;
+            }
+            updateJobPayload(job.id, JSON.stringify(existingPayload));
+          }
+          activeHashRefPacketDropped = reissuedPacket.dropped || [];
+          if (activeHashRefPacketDropped.length > 0) {
+            worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: ${activeHashRefPacketDropped.length} ATLAS hash_ref_packet ref(s) were not reissued for task "${t.title}"`);
+          }
+        }
         if (finalJobType === "promote") {
           recordPromoteDestinationClaim(job, normalizedPromotePayload, {
             files: promoteClaim?.files || null,
@@ -1767,6 +1812,11 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               create_roots: t.create_roots || [],
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: t.test_command || null,
+              ...(devBriefResult.brief ? { dev_brief: devBriefResult.brief } : {}),
+              ...(activeHashRefPacket ? { hash_ref_packet: activeHashRefPacket } : {}),
+              ...(devBriefResult.droppedFiles.length > 0 ? { dropped_dev_brief_files: devBriefResult.droppedFiles } : {}),
+              ...(devBriefResult.droppedHashRefs.length > 0 ? { dropped_dev_brief_hash_refs: devBriefResult.droppedHashRefs } : {}),
+              ...(activeHashRefPacketDropped.length > 0 ? { dropped_hash_ref_packet_refs: activeHashRefPacketDropped } : {}),
             }, null, 2), "utf-8");
 
             // Copy only this job's scoped source files

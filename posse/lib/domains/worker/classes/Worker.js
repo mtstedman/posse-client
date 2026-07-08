@@ -1316,17 +1316,18 @@ export class Worker {
   // --- Plan ? Jobs -----------------------------------------------------
 
   createJobsFromPlan(...args) {
-    const [planJob, tasks] = args;
+    const [planJob, tasks, options = {}] = args;
     const session = new PlanSession({
       worker: this,
       planJob,
       rawTasks: tasks,
       options: {
-      artifactTaskSlug: _artifactTaskSlug,
-      buildIntermediateReportTask: _buildIntermediateReportTask,
-      isDeepthinkTask: isDeepthinkTaskFromModule,
-      logBadInputFailure: _logBadInputFailure,
-      normalizePlannerScore: _normalizePlannerScore,
+        ...options,
+        artifactTaskSlug: options.artifactTaskSlug || _artifactTaskSlug,
+        buildIntermediateReportTask: options.buildIntermediateReportTask || _buildIntermediateReportTask,
+        isDeepthinkTask: options.isDeepthinkTask || isDeepthinkTaskFromModule,
+        logBadInputFailure: options.logBadInputFailure || _logBadInputFailure,
+        normalizePlannerScore: options.normalizePlannerScore || _normalizePlannerScore,
       },
     });
     return session.emit();

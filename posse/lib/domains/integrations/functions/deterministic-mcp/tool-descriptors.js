@@ -109,8 +109,13 @@ export {
 } from "../../../../catalog/native-tools.js";
 
 import { ATLAS_TOOL_DEFS_RAW } from "../../../../catalog/atlas-tools.js";
+import {
+  INTERNAL_ATLAS_SURFACE_ACTIONS,
+  INTERNAL_ATLAS_SURFACE_ACTION_SET,
+} from "../../../../catalog/internal-tools.js";
 
 export const HIDDEN_ATLAS_SURFACE_ACTIONS = Object.freeze(new Set([
+  ...INTERNAL_ATLAS_SURFACE_ACTIONS,
   "agent.feedback",
   "agent.feedback.query",
   "buffer.status",
@@ -382,6 +387,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "manual": { access: "atlas", summary: "Return compact native ATLAS v2 API reference entries." },
   "workflow": { access: "atlas", summary: "Execute multi-step native ATLAS workflows with data transforms and references." },
   "info": { access: "atlas", summary: "Report native ATLAS v2 runtime, storage, view freshness, ledger, and policy diagnostics." },
+  "fetch_ref": { access: "atlas", summary: "Fetch one or many visible hash-store citation refs from the current agent scope or its parent scopes." },
   "repo.register": { access: "atlas", summary: "Register a repository with ATLAS v2 and initialize ledger/view storage." },
   "repo.status": { access: "atlas", summary: "Get ATLAS repository status, health, and latest version identifiers." },
   "repo.overview": { access: "atlas", summary: "Fetch ATLAS repository summaries, indexed coverage, directory summaries, and hotspots." },
@@ -395,7 +401,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "symbol.cards": { access: "atlas", summary: "Fetch multiple symbol cards by symbolIds or symbolRefs with per-item errors." },
   "symbol.overview": { access: "atlas", summary: "List compact call/reference sites for a symbol without full caller cards." },
   "tree.overview": { access: "atlas", summary: "Top-level code-tree orientation: root containment page plus the compressed-tree labeled area map." },
-  "tree.branch": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels. Structure only — for exact file/import/fan-in inventory, follow with code.structure; for DB query inventory, follow with code.db; for content intake, follow with code.survey." },
+  "tree.branch": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels. Structure only — for exact file/import/fan-in inventory, follow with code.structure; for content intake, follow with code.survey." },
   "tree.scope": { access: "atlas", summary: "Prefetch-only task scoping; agents use tree.expand for seed expansion instead." },
   "tree.expand": { access: "atlas", summary: "Grow scope from validated seed files/areas: surrounding branches, siblings, tests, entrypoints, risk metrics." },
   "slice.build": { access: "atlas", summary: "Build a task-scoped ATLAS slice for bounded dependency context." },
@@ -406,7 +412,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "code.window": { access: "atlas", summary: "Request policy-gated raw code windows only when prior rungs are insufficient." },
   "code.survey": { access: "atlas", summary: "Bulk cross-file intake: per-file skeletons plus a call map (internal, inbound, outbound, unresolved) for a directory or file list in one call. May include pathAmbiguity for duplicate/stub decoys." },
   "code.structure": { access: "atlas", summary: "Exact deterministic file/symbol/import/fan-in inventory for structure maps and enumeration tasks, with pathAmbiguity and negativeEvidence attached when duplicate/stub decoys are detected." },
-  "code.db": { access: "atlas", summary: "First-pass DB query inventory: SQL read/write/schema sites classified as durable result, telemetry, bookkeeping, cache, or unknown, with negativeEvidence for test/script/doc/stub decoys." },
+  "code.db": { access: "atlas", summary: "Internal WI/setup DB query inventory. Not routed through agent gateways." },
   "context": { access: "atlas", summary: "Request generated ATLAS context (taskType + contextMode) for precise/broad retrieval." },
   "context.summary": { access: "atlas", summary: "Request compact ATLAS context with an answer, evidence list, and next action guidance." },
   "agent.feedback": { access: "atlas", summary: "Record useful/missing symbols to improve future ATLAS context quality." },
@@ -569,23 +575,12 @@ export const MEANINGFUL_ATLAS_ACTIONS = new Set([
   "symbol.search",
   "symbol.card",
   "symbol.overview",
-  // slice.build is THE context-retrieval workhorse (tree-first prefetch
-  // seeds it), context/context.summary wrap it, and repo.overview is broad
-  // repo discovery — all four count toward ATLAS-first unlock. Dropping them
-  // silently raised the unlock bar to "three of the narrower actions" and
-  // left the gate suite red. Bookkeeping wrappers (repo.status, policy.get,
-  // agent.feedback) stay non-meaningful on purpose.
-  "slice.build",
-  "context",
-  "context.summary",
-  "repo.overview",
   "edit.plan",
   "code.skeleton",
   "code.lens",
   "code.window",
   "code.survey",
   "code.structure",
-  "code.db",
   "review.delta",
   "review.analyze",
   "review.risk",
@@ -959,7 +954,7 @@ function renderActiveAtlasFallbackLines(opts = {}) {
       `Good file-specific discovery calls include ${renderAtlasToolNameForContract("code.skeleton", opts)}, ${renderAtlasToolNameForContract("code.lens", opts)}, ${renderAtlasToolNameForContract("code.window", opts)}, ${renderAtlasToolNameForContract("symbol.search", opts)}, ${renderAtlasToolNameForContract("tree.branch", opts)}, and ${renderAtlasToolNameForContract("tree.expand", opts)}.`,
       `Each indexable source file needs its own focused ${label} attempt before a native read of it.`,
       `Never make ${label} calls merely to make native tools available; aim every retrieval at your actual evidence gap and stop when the evidence is sufficient.`,
-      `For broad audits, sweeps, enumerations, or unfamiliar areas: pick the area with ${renderAtlasToolNameForContract("tree.branch", opts)} or ${renderAtlasToolNameForContract("tree.expand", opts)} (structure only — no code content). If the deliverable is exact file/import/fan-in inventory, use ONE ${renderAtlasToolNameForContract("code.structure", opts)} call; if it asks which DB tables are read or written, use ONE ${renderAtlasToolNameForContract("code.db", opts)} call; if content understanding is needed, use ONE ${renderAtlasToolNameForContract("code.survey", opts)} call over that directory or file list. These area calls can surface pathAmbiguity or negativeEvidence when duplicate/stub decoys are detected.`,
+      `For broad audits, sweeps, enumerations, or unfamiliar areas: pick the area with ${renderAtlasToolNameForContract("tree.branch", opts)} or ${renderAtlasToolNameForContract("tree.expand", opts)} (structure only — no code content). If the deliverable is exact file/import/fan-in inventory, use ONE ${renderAtlasToolNameForContract("code.structure", opts)} call; if content understanding is needed, use ONE ${renderAtlasToolNameForContract("code.survey", opts)} call over that directory or file list. These area calls can surface pathAmbiguity or negativeEvidence when duplicate/stub decoys are detected.`,
       `${label} prefetch and internal bookkeeping calls do not count as active retrieval.`,
       "Use standard tools only for a named evidence gap:",
       `- ${label} is unavailable,`,
@@ -975,7 +970,7 @@ function renderActiveAtlasFallbackLines(opts = {}) {
   const extensions = renderIndexableExtensionList();
   return [
     `For indexable source files (${extensions}), attempt task-relevant ${label} discovery against the file before native read_file/chain_read fallback whenever possible.`,
-    `For broad audits, sweeps, enumerations, or unfamiliar areas: pick the area with ${renderAtlasToolNameForContract("tree.branch", opts)} or ${renderAtlasToolNameForContract("tree.expand", opts)} (structure only), then make ONE ${renderAtlasToolNameForContract("code.structure", opts)} call for exact inventory, ONE ${renderAtlasToolNameForContract("code.db", opts)} call for DB query inventory, or ONE ${renderAtlasToolNameForContract("code.survey", opts)} call for content intake before any per-file loop.`,
+    `For broad audits, sweeps, enumerations, or unfamiliar areas: pick the area with ${renderAtlasToolNameForContract("tree.branch", opts)} or ${renderAtlasToolNameForContract("tree.expand", opts)} (structure only), then make ONE ${renderAtlasToolNameForContract("code.structure", opts)} call for exact inventory or ONE ${renderAtlasToolNameForContract("code.survey", opts)} call for content intake before any per-file loop.`,
     "Use standard tools only when:",
     `- ${label} is unavailable,`,
     `- ${label} fails to answer the question after a relevant attempt,`,
@@ -1041,7 +1036,6 @@ function renderRouteUsageLines(role, tools, opts = {}) {
   pushAvailableToolLine(discovery, tools, "tree.branch", "best first call when you know a path, symbol, or branch and need the structure around it (paths, counts, areas — no code content).", opts);
   pushAvailableToolLine(discovery, tools, "tree.expand", "best first call when you have seed files, symbols, or areas and need nearby structure, siblings, tests, or entrypoints.", opts);
   pushAvailableToolLine(discovery, tools, "code.structure", "best first call for exact structure-map, import graph, file fan-in/fan-out, or enumeration deliverables: one call returns deterministic files, symbols, file edges, pathAmbiguity, and negativeEvidence when decoys are present.", opts);
-  pushAvailableToolLine(discovery, tools, "code.db", "best first call for DB table inventories: one call returns SQL read/write/schema sites, target table names, durable-vs-telemetry/bookkeeping/cache classification, and negativeEvidence for decoys.", opts);
   pushAvailableToolLine(discovery, tools, "code.survey", "best first content call when the deliverable covers an AREA — audits, \"every X under Y\", or orienting in several files at once: one call returns per-file skeletons plus the caller map and pathAmbiguity when decoys are present.", opts);
   if (discovery.length) {
     lines.push("", "Discovery starters:");
@@ -1061,8 +1055,8 @@ function renderRouteUsageLines(role, tools, opts = {}) {
       "",
       `Iris rungs are the ${label} evidence ladder, ordered by cost: Rung 1 (~100 token cards) -> Rung 2 (~300 token skeletons) -> Rung 3 (~600 token hot paths) -> Rung 4 (~2000 token raw windows). Escalate only as far as needed — prefer the cheapest rung that answers the question.`,
     );
-    if (tools.includes("code.survey") || tools.includes("code.structure") || tools.includes("code.db") || tools.includes("code")) {
-      lines.push(`Area rule: when evidence spans several files in one area, use ${renderAtlasToolNameForContract("code.structure", opts)} for exact inventory, ${renderAtlasToolNameForContract("code.db", opts)} for DB query inventory, and ${renderAtlasToolNameForContract("code.survey", opts)} for code-content understanding; climb per-file rungs only where the area call left a specific gap.`);
+    if (tools.includes("code.survey") || tools.includes("code.structure") || tools.includes("code")) {
+      lines.push(`Area rule: when evidence spans several files in one area, use ${renderAtlasToolNameForContract("code.structure", opts)} for exact inventory and ${renderAtlasToolNameForContract("code.survey", opts)} for code-content understanding; climb per-file rungs only where the area call left a specific gap.`);
     }
     if (role === "planner" && !tools.includes("code.window")) {
       lines.push("Planner routes stop at Rung 3 by design. If raw bodies are still required, name the exact missing symbols or files instead of making a raw-window call.");
@@ -1199,9 +1193,11 @@ export function isExternallyRoutedAtlasTool(name) {
   // Route allowlist membership keeps hidden-surface read actions (info,
   // policy.get, usage.stats, etc.). Those actions are routed/allowed for the
   // role even though they are not advertised as standalone enum values; only
-  // mutating and fallback-only actions are stripped from the role route.
+  // mutating, fallback-only, and internal-only actions are stripped from the
+  // agent route.
   return !isBlockedFoldedAtlasTool(action)
     && !isFallbackOnlyAtlasTool(action)
+    && !INTERNAL_ATLAS_SURFACE_ACTION_SET.has(action)
     && !ATLAS_PREFETCH_ONLY_ACTIONS.has(action);
 }
 

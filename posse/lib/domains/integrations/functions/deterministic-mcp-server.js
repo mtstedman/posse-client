@@ -43,6 +43,7 @@ import { execProjectDbQuery } from "../../../functions/toolkit/project-db/query.
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../classes/tools/ToolRegistry.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../functions/tools/tool-suites.js";
+import { appendHashRefIfMajor } from "../../../functions/tools/hash-adder.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, runWithObservationContext } from "../../observability/functions/observations.js";
 import {
@@ -2339,9 +2340,17 @@ async function runNativeToolThroughGate(toolName, args, handler) {
   const label = `tool.${toolName}`;
   const key = nativeToolGateKey();
   const run = () => handler(args);
-  return BLOCKING_NATIVE_TOOL_NAMES.has(toolName)
+  const result = BLOCKING_NATIVE_TOOL_NAMES.has(toolName)
     ? await DETERMINISTIC_TOOL_GATE.write(key, run, { label, waitMs: 120000 })
     : await DETERMINISTIC_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
+  return appendHashRefIfMajor(toolName, result, {
+    args,
+    context: {
+      work_item_id: mcpWorkItemId,
+      job_id: mcpJobId,
+      attempt_id: mcpAttemptId,
+    },
+  });
 }
 
 function atlasLiveBufferMode() {

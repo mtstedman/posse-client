@@ -14,6 +14,7 @@ import { createInspectFileExecutor } from "../../domains/worker/functions/helper
 import { createGitHistoryExecutor } from "../../domains/git/functions/history.js";
 import { createPullBriefExecutor, createGetBriefExecutor } from "./brief.js";
 import { createBashExecutor } from "./bash-executor.js";
+import { fetchHashRefTool } from "../tools/hash-adder.js";
 import {
   convertImageToPng,
   convertImageToJpeg,
@@ -1027,6 +1028,14 @@ export function createDeterministicToolkit({
       }, null, 2);
     } catch (err) {
       return `Error: ${err.message}`;
+    }
+  }
+
+  function execFetchRef(args, _cwd = null, _scopePredicates = null, context = {}) {
+    try {
+      return fetchHashRefTool(args || {}, { context });
+    } catch (err) {
+      return `Error: fetch_ref failed - ${err?.message || String(err)}`;
     }
   }
 
@@ -2092,6 +2101,7 @@ export function createDeterministicToolkit({
     ),
     execInspectFile: wrapDeterministicExecutor("inspect_file", createInspectFileExecutor(safePathImpl)),
     execHashFile: wrapDeterministicExecutor("hash_file", execHashFile),
+    execFetchRef: wrapDeterministicExecutor("fetch_ref", execFetchRef),
     execValidateArtifactOutput: wrapDeterministicExecutor("validate_artifact_output", execValidateArtifactOutput),
     execPruneArtifactOutput: wrapDeterministicExecutor("prune_artifact_output", execPruneArtifactOutput),
     execResizeImage: wrapDeterministicExecutor("resize_image", execResizeImage),

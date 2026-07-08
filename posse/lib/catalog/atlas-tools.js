@@ -6,17 +6,62 @@
 // ATLAS_TOOL_DEFS / SURFACED_ATLAS_TOOL_DEFS live in the integrations
 // tool-descriptors module, which imports ATLAS_TOOL_DEFS_RAW from here.
 
+import {
+  INTERNAL_ATLAS_ACTIONS,
+  INTERNAL_ATLAS_SURFACE_ACTIONS,
+  INTERNAL_ATLAS_SURFACE_ACTION_SET,
+  INTERNAL_TOOL_FAMILY,
+} from "./internal-tools.js";
+
 const ATLAS_SYMBOL_ID_PATTERN = "^[0-9a-f]{64}:[0-9]+$";
+
+const QUERY_GATEWAY_ACTIONS = Object.freeze([
+  "symbol.search",
+  "symbol.card",
+  "symbol.cards",
+  "symbol.overview",
+  "tree.branch",
+  "tree.expand",
+  "edit.plan",
+  "code.survey",
+  "code.structure",
+  "review.delta",
+  "review.analyze",
+  "review.risk",
+  "memory.surface",
+  "memory.get",
+]);
+
+const CODE_GATEWAY_ACTIONS = Object.freeze([
+  "code.skeleton",
+  "code.lens",
+  "code.window",
+  "code.survey",
+  "code.structure",
+  "edit.plan",
+]);
+
+const REPO_GATEWAY_ACTIONS = Object.freeze([
+  "action.search",
+  "manual",
+]);
+
+const AGENT_GATEWAY_ACTIONS = Object.freeze([
+  "memory.store",
+  "memory.feedback",
+]);
+
+export { INTERNAL_ATLAS_ACTIONS, INTERNAL_ATLAS_SURFACE_ACTIONS, INTERNAL_ATLAS_SURFACE_ACTION_SET };
 
 export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "query": {
     type: "function",
     name: "atlas_query",
-    description: "Gateway. Compact native ATLAS v2 retrieval wrapper for symbol, slice, context, diff/risk, and exact memory surface/get actions.",
+    description: "Gateway. Compact native ATLAS v2 retrieval wrapper for agent-routable symbol, tree, code, review, and memory retrieval actions.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["symbol.search", "symbol.card", "symbol.overview", "slice.build", "slice.refresh", "slice.spillover.get", "edit.plan", "file.read", "code.survey", "code.structure", "code.db", "context", "context.summary", "review.delta", "review.analyze", "review.risk", "repo.status", "repo.quality", "memory.surface", "memory.get"], description: "ATLAS action to route through this gateway." },
+        action: { type: "string", enum: QUERY_GATEWAY_ACTIONS, description: "Agent-routable ATLAS retrieval action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -25,11 +70,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code": {
     type: "function",
     name: "atlas_code",
-    description: "Gateway. Compact native ATLAS v2 code-inspection wrapper for skeleton, hot-path, area survey, structure/DB inventory, edit planning, and gated raw-window actions.",
+    description: "Gateway. Compact native ATLAS v2 code-inspection wrapper for agent-routable skeleton, hot-path, area survey, structure, edit planning, and gated raw-window actions.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["code.skeleton", "code.lens", "code.window", "code.survey", "code.structure", "code.db", "edit.plan", "file.read"], description: "ATLAS code action to route through this gateway." },
+        action: { type: "string", enum: CODE_GATEWAY_ACTIONS, description: "Agent-routable ATLAS code action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -38,11 +83,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "repo": {
     type: "function",
     name: "atlas_repo",
-    description: "Gateway. Compact native ATLAS v2 repository/operations wrapper for lifecycle, diagnostics, policy, usage, and SCIP actions.",
+    description: "Gateway. Compact native ATLAS v2 repository discovery wrapper for action lookup and compact manuals.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["info", "action.search", "manual", "repo.register", "repo.status", "repo.quality", "index.refresh", "policy.get", "policy.set", "usage.stats", "runtime.execute", "runtime.queryOutput", "scip.ingest"], description: "ATLAS repository action to route through this gateway." },
+        action: { type: "string", enum: REPO_GATEWAY_ACTIONS, description: "Agent-routable ATLAS repository discovery action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -51,11 +96,24 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "agent": {
     type: "function",
     name: "atlas_agent",
-    description: "Gateway. Compact native ATLAS v2 agent wrapper for context, feedback, live buffers, and memory actions.",
+    description: "Gateway. Compact native ATLAS v2 agent wrapper for agent-routable memory curation actions.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["context", "context.summary", "agent.feedback", "agent.feedback.query", "buffer.push", "buffer.checkpoint", "buffer.status", "memory.store", "memory.feedback"], description: "ATLAS agent action to route through this gateway." },
+        action: { type: "string", enum: AGENT_GATEWAY_ACTIONS, description: "Agent-routable ATLAS agent action to route through this gateway." },
+      },
+      required: ["action"],
+      additionalProperties: true,
+    },
+  },
+  [INTERNAL_TOOL_FAMILY]: {
+    type: "function",
+    name: INTERNAL_TOOL_FAMILY,
+    description: "Gateway. Internal main-MCP/WI setup wrapper for bookkeeping, prefetch, lifecycle, policy, runtime, and DB inventory actions. Not routed through agent gateways.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: INTERNAL_ATLAS_ACTIONS, description: "Internal action to route through this gateway." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -152,6 +210,21 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         repoId: { type: "string", description: "Optional stable repository identifier." },
         includePolicy: { type: "boolean", description: "Include the effective native ATLAS v2 policy." },
         includeCounts: { type: "boolean", description: "Include small ledger row-count diagnostics when a ledger is open." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  "fetch_ref": {
+    type: "function",
+    name: "atlas_fetch_ref",
+    description: "Citation. Fetch one or many visible hash-store citation refs from the current agent scope or its parent scopes.",
+    parameters: {
+      type: "object",
+      properties: {
+        ref: { type: "string", description: "Single hash ref alias such as #a3f9. May also be a comma/space separated list." },
+        refs: { type: "array", items: { type: "string" }, description: "Batch of hash ref aliases to fetch in one call." },
+        hashes: { type: "array", items: { type: "string" }, description: "Alias for refs." },
       },
       required: [],
       additionalProperties: false,
@@ -656,7 +729,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.db": {
     type: "function",
     name: "atlas_code_db",
-    description: "First-pass DB query inventory. Scans resolved indexed files for SQL SELECT/INSERT/UPDATE/DELETE/DDL sites, classifies DB targets as durable_result, telemetry, bookkeeping, cache, or unknown, and appends negativeEvidence for same-name test/script/doc/stub decoys. Use before raw windows when asked which tables are read or written, whether a DB touchpoint is live vs telemetry/bookkeeping/cache, or to separate included results from offline/test DB code.",
+    description: "Internal WI/setup DB query inventory. Not routed through agent gateways.",
     parameters: {
       type: "object",
       properties: {

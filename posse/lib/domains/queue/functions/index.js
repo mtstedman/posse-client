@@ -187,6 +187,13 @@ export {
 } from "./sibling-locks.js";
 
 export {
+  createHashRefStoreForContext,
+  fetchHashRefForContext,
+  resolveHashRefContext,
+  surfaceHashRefForContext,
+} from "./hash-refs.js";
+
+export {
   acquireMergeLock,
   acquireSchedulerLock,
   forceAcquireSchedulerLock,
@@ -1698,6 +1705,10 @@ export function clearAll() {
       db.prepare(`UPDATE agent_calls SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
       db.prepare(`UPDATE job_observations SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
       db.prepare(`UPDATE run_insights SET work_item_id = NULL, job_id = NULL`).run();
+      db.prepare(`DELETE FROM agent_run_hash_refs`).run();
+      db.prepare(`DELETE FROM job_hash_refs`).run();
+      db.prepare(`DELETE FROM work_item_hash_refs`).run();
+      db.prepare(`DELETE FROM hash_ref_aliases`).run();
       db.prepare(`DELETE FROM job_file_locks`).run();
       db.prepare(`DELETE FROM work_item_file_locks`).run();
       db.prepare(`DELETE FROM session_recycle_savings`).run();

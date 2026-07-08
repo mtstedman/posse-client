@@ -149,6 +149,7 @@ const ATLAS_V2_VIEW_OPTIONAL_ACTIONS = new Set([
   "manual",
   "workflow",
   "info",
+  "fetch_ref",
   "repo.register",
   "index.refresh",
   "buffer.push",
@@ -183,9 +184,10 @@ const ATLAS_V2_VIEW_FRESHNESS_EXEMPT_ACTIONS = new Set([
   "info",
   "action.search",
   "manual",
+  "fetch_ref",
   "repo.status",
 ]);
-const ATLAS_V2_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent"]);
+const ATLAS_V2_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent", "internal"]);
 const ATLAS_V2_BLOCKING_ACTIONS = new Set([
   "repo.register",
   "index.refresh",
@@ -1054,6 +1056,7 @@ function canUseAtlasToolExecutor(action, payload, config = {}) {
   if (action.startsWith("buffer.") || action.startsWith("runtime.")) return false;
   if (action === "memory.store" || action === "memory.feedback") return false;
   if (action === "policy.set" || action === "agent.feedback") return false;
+  if (action === "fetch_ref") return false;
   return true;
 }
 
@@ -1267,6 +1270,7 @@ async function executeEmbeddedAtlasV2Tool({
   startedAt,
   origin,
   queueInfo = null,
+  hashRefContext = null,
 }) {
   const repoRoot = repo?.repoPath || config?.requestedRepoPath || cwd || process.cwd();
   const optionalView = ATLAS_V2_VIEW_OPTIONAL_ACTIONS.has(action);
@@ -1397,7 +1401,8 @@ async function executeEmbeddedAtlasV2Tool({
       && !action.startsWith("buffer.")
       && !action.startsWith("runtime.")
       && action !== "memory.store"
-      && action !== "policy.set" && action !== "agent.feedback";
+      && action !== "policy.set" && action !== "agent.feedback"
+      && action !== "fetch_ref";
     let envelope = null;
     let conductorFellBack = false;
     if (conductorEligible) {
@@ -1458,6 +1463,7 @@ async function executeEmbeddedAtlasV2Tool({
         taskType: typeof payload?.taskType === "string" ? payload.taskType : undefined,
         planner: embeddedPlanQuery,
         asyncNativeRedaction: true,
+        hashRefContext: hashRefContext || undefined,
       }));
     }
     if (envelope?.ok === false || envelope?.error) throw atlasV2EnvelopeError(envelope);
@@ -1864,6 +1870,10 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
         origin,
         queueInfo,
         workItemId,
+        hashRefContext: {
+          ...obsCtx,
+          ...(config?.hashRefContext && typeof config.hashRefContext === "object" ? config.hashRefContext : {}),
+        },
       };
       return useToolExecutor
         ? executeEmbeddedAtlasViaExecutor(runArgs)

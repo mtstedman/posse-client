@@ -156,6 +156,16 @@ export class PlannerRole extends BaseRole {
             "",
           ].join("\n")
         : "";
+    const atlasDevBriefContract = plannerCtx.plannerPacket?.atlas?.active
+      ? [
+          "ATLAS-ONLY DEV BRIEF CONTRACT:",
+          "When a dev code task needs task-specific ATLAS/hash-ref evidence, add dev_brief to that dev task only.",
+          "Shape: dev_brief: { source: \"atlas\", summary, key_files, related_files, planner_file_priorities, proof, support, decoy }.",
+          "Use the same file fields as researcher output: key_files, related_files, and planner_file_priorities. Tailor them to this one dev task; do not copy the whole research brief.",
+          "Use proof/support/decoy only for hash refs from ATLAS-backed evidence. Proof refs are auto-expanded into the dev handoff; support and decoy refs stay compact/fetchable. Decoy refs must include a short why. Omit dev_brief when only standard brief prose supports the task.",
+          "",
+        ].join("\n")
+      : "";
 
     return [
       modeInstructions,
@@ -178,6 +188,7 @@ export class PlannerRole extends BaseRole {
       "Optional: deepthink_budget: \"low\" | \"normal\" | \"high\" | \"xhigh\" for tasks that need lower or higher analysis/tool-turn budget. Legacy deepthink: true is also accepted and maps to high.",
       "For repo code tasks, include risk: 1-5, risk_tags: [\"auth\" | \"security\" | \"schema\" | \"migration\" | \"persistence\" | \"delete\" | \"payment\" | \"concurrency\" | \"git\", ...], scope_confidence: \"high\" | \"medium\" | \"low\", and score_reasons: [\"...\"].",
       "Do not emit complexity; downstream budget is derived from declared scope, risk, verification path, and deterministic structural facts.",
+      atlasDevBriefContract,
       "If job_type is \"promote\", also include mappings: [{ pattern, dest }] and optionally source_dir. Use promote for deterministic artifact copies from .posse/resources/artifacts into repo paths.",
       "For repo code tasks, include file scope explicitly: files_to_modify (existing files to edit), files_to_create (exact new files), files_to_delete (exact existing files to remove), and create_roots only when a free-write directory is truly needed.",
       "For non-code tasks, artifact tasks, promote tasks, and human_input tasks, omit files_to_modify unless the task genuinely edits an existing repo file.",
@@ -830,7 +841,14 @@ export class PlannerRole extends BaseRole {
       });
       tasks = tasks.slice(0, maxTasks);
     }
-    worker.createJobsFromPlan(job, tasks);
+    worker.createJobsFromPlan(job, tasks, {
+      atlasDevBriefsEnabled: !!ctx.plannerPacket?.atlas?.active,
+      sourceHashRefContext: {
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: ctx.attemptId || null,
+      },
+    });
 
     return output;
   }

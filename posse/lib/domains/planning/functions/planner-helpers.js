@@ -15,10 +15,14 @@ import {
   artifactsDir,
   wiScopeId,
 } from "../../artifacts/functions/index.js";
-import { normalizeResearcherFilePriorities } from "../../handoff/functions/index.js";
+import {
+  normalizeResearcherCitationTriage,
+  normalizeResearcherFilePriorities,
+} from "../../handoff/functions/index.js";
 import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
 import { isSensitiveEnvFilePath, safePath } from "../../../functions/toolkit/index.js";
 import { readProjectDbConfig } from "../../../functions/toolkit/project-db/config.js";
+import { normalizeHashRefHandoffPacket } from "../../handoff/functions/helpers/hash-ref-packet.js";
 
 export function emit(worker, jobId, message) {
   if (typeof worker?.emit === "function") {
@@ -229,6 +233,83 @@ export function oneLine(value, max = 180) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, max);
+}
+
+function isAtlasPlannerDevBrief(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (value.atlas === true || value.atlas_backed === true) return true;
+  const source = String(value.source || value.evidence_source || value.brief_source || "")
+    .trim()
+    .toLowerCase();
+  return source === "atlas" || source === "atlas_hash_refs" || source === "hash_ref_store";
+}
+
+function briefText(value, max = 1200) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+export function sanitizePlannerDevBrief(value, projectDir) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { brief: null, droppedFiles: [], droppedHashRefs: [] };
+  }
+  if (!isAtlasPlannerDevBrief(value)) {
+    return { brief: null, droppedFiles: [], droppedHashRefs: [] };
+  }
+
+  const keyFiles = sanitizeResearcherFileList(value.key_files, projectDir, "dev_brief.key_files");
+  const relatedFiles = sanitizeResearcherFileList(value.related_files, projectDir, "dev_brief.related_files");
+  const priorities = sanitizeResearcherFilePriorities(
+    { planner_file_priorities: value.planner_file_priorities },
+    projectDir,
+  );
+  const triage = normalizeResearcherCitationTriage({
+    synthesis: value.synthesis || value.summary || "",
+    proof: value.proof,
+    support: value.support,
+    decoy: value.decoy,
+  }, {
+    maxRefsPerLane: 16,
+    maxWhyChars: 180,
+  });
+
+  const summary = briefText(value.summary || value.synthesis || value.task_summary || "");
+  const brief = {
+    source: "atlas",
+  };
+  if (summary) brief.summary = summary;
+  if (keyFiles.files.length > 0) brief.key_files = keyFiles.files;
+  if (relatedFiles.files.length > 0) brief.related_files = relatedFiles.files;
+  if (priorities.files.length > 0) brief.planner_file_priorities = priorities.files;
+  for (const lane of ["proof", "support", "decoy"]) {
+    if (triage[lane]?.length > 0) brief[lane] = triage[lane];
+  }
+  const hashRefPacket = normalizeHashRefHandoffPacket({
+    source: "atlas",
+    destination: "handoff",
+    synthesis: value.synthesis || value.summary || "",
+    proof: triage.proof,
+    support: triage.support,
+    decoy: triage.decoy,
+  });
+  if (hashRefPacket.packet) brief.hash_ref_packet = hashRefPacket.packet;
+
+  const hasSubstance = Object.keys(brief).some((key) => key !== "source");
+  return {
+    brief: hasSubstance ? brief : null,
+    hashRefPacket: hashRefPacket.packet,
+    droppedFiles: [
+      ...keyFiles.dropped,
+      ...relatedFiles.dropped,
+      ...priorities.dropped,
+    ],
+    droppedHashRefs: [
+      ...triage.dropped,
+      ...hashRefPacket.dropped,
+    ],
+  };
 }
 
 export function renderPlannerFilePriorities(entries) {

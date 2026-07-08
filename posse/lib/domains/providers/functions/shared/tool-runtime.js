@@ -6,6 +6,7 @@ import { ToolCatalog } from "../../../../classes/tools/ToolCatalog.js";
 import { ToolRegistry } from "../../../../classes/tools/ToolRegistry.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../../functions/tools/tool-suites.js";
 import { assertAdvertisedHaveExecutors } from "../../../../functions/tools/tool-parity.js";
+import { appendHashRefIfMajor } from "../../../../functions/tools/hash-adder.js";
 import { createChainLedger } from "../../../../functions/tools/chain-ledger.js";
 import { formatAtlasToolUseDisplayName } from "../../../../functions/tools/mcp-surface.js";
 import { getObservationContext } from "../../../observability/functions/observations.js";
@@ -529,7 +530,8 @@ export async function executeToolWithMap(name, argsStr, context, {
       const result = BLOCKING_NATIVE_TOOL_NAMES.has(name)
         ? await PROVIDER_TOOL_GATE.write(key, run, { label, waitMs: 120000, barrierName: label })
         : await PROVIDER_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
-      return appendLiveChannelSignal(result, name);
+      const withHashRef = appendHashRefIfMajor(name, result, { args, context });
+      return appendLiveChannelSignal(withHashRef, name);
     }
     if (typeof onUnknown === "function") {
       const result = await onUnknown(name, args, context);
