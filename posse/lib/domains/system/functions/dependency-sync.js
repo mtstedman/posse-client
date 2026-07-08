@@ -382,6 +382,14 @@ function missingNodePackageLabels(report) {
   ];
 }
 
+function missingRequiredNodePackageLabels(report) {
+  return (report?.missing_required || []).map((name) => `required:${name}`);
+}
+
+function missingOptionalNodePackageLabels(report) {
+  return (report?.missing_optional || []).map((name) => `optional:${name}`);
+}
+
 function installArgsForMissingNodePackages(manager, root, missingNames, opts = {}) {
   if (manager !== "npm" || !Array.isArray(missingNames) || missingNames.length === 0) return null;
   return [
@@ -480,7 +488,10 @@ function inspectNodeProject(root) {
   const installedManifestHash = readNodeManifestStamp(root);
   const stale = Boolean(installedManifestHash && manifestHash && installedManifestHash !== manifestHash);
   const needsStamp = Boolean(!missingNodeModules && manifestHash && !installedManifestHash);
-  const needsInstall = missingNodeModules || missingRequired.length > 0 || missingOptional.length > 0 || stale;
+  const needsInstall = missingNodeModules
+    || missingRequired.length > 0
+    || stale
+    || (missingOptional.length > 0 && !installedManifestHash);
 
   return {
     present: true,
@@ -782,13 +793,29 @@ async function ensureNodeProject(entry, opts) {
       onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
     });
     if (!retry.ok) {
+      if (missingRequiredNodePackageLabels(after).length === 0) {
+        const missingOptional = missingOptionalNodePackageLabels(after);
+        const hash = after.manifest_hash || before.manifest_hash;
+        if (!opts.dryRun) writeNodeManifestStamp(entry.root, hash);
+        return {
+          ...after,
+          label: entry.label,
+          ok: true,
+          status: "installed",
+          action: "install",
+          generated_ignore: generatedIgnore,
+          message: `${installLabel} completed; optional packages unavailable: ${missingOptional.join(", ")}`,
+        };
+      }
       return { ...after, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${before.manager} focused install failed: ${firstLine(retry.message)}` };
     }
     after = inspectNodeProject(entry.root);
     missingAfter = missingNodePackageLabels(after);
     usedFocusedRetry = true;
   }
-  const packagesOk = missingAfter.length === 0;
+  const missingRequiredAfter = missingRequiredNodePackageLabels(after);
+  const missingOptionalAfter = missingOptionalNodePackageLabels(after);
+  const packagesOk = missingRequiredAfter.length === 0;
   if (packagesOk && !opts.dryRun) writeNodeManifestStamp(entry.root, after.manifest_hash || before.manifest_hash);
   return {
     ...after,
@@ -798,8 +825,8 @@ async function ensureNodeProject(entry, opts) {
     action: "install",
     generated_ignore: generatedIgnore,
     message: packagesOk
-      ? `${installLabel} completed${usedFocusedRetry ? " after focused retry" : ""}`
-      : `missing packages after install: ${missingAfter.join(", ")}`,
+      ? `${installLabel} completed${usedFocusedRetry ? " after focused retry" : ""}${missingOptionalAfter.length ? `; optional packages unavailable: ${missingOptionalAfter.join(", ")}` : ""}`
+      : `missing required packages after install: ${missingRequiredAfter.join(", ")}`,
   };
 }
 
