@@ -2689,6 +2689,18 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     atlasField("Repo", slice.repoId || ATLAS_MISSING_VALUE),
   ].filter(Boolean);
 
+  // Read-depth steer (mode-2 fix): this slice hands cards/skeletons/pointers,
+  // which name a branch but not its condition. For control-flow, branch/guard,
+  // or completeness reasoning the agent must full-read the load-bearing files
+  // rather than synthesize from skeletons alone. This mirrors the relay
+  // role-contract ladder rule, delivered here on the live handoff path so it
+  // reaches the agent regardless of the remote contract.
+  if (trim < 3) {
+    lines.push(
+      `Read-depth: for control-flow, branch/guard, or completeness answers (enumerations, "every path/write", decoy/negative-evidence), ${displayAtlasToolName("code.window", packet?.atlas)} the top load-bearing files before answering — a card or skeleton names a branch but not its condition, so guard, single-branch, and cache-disabled details are invisible without a raw window.`,
+    );
+  }
+
   // Orientation first: the compressed tree's labeled area map tells the
   // agent what lives where before any file list — rendered regardless of
   // which discovery pass produced the candidates (tree.overview supplies it

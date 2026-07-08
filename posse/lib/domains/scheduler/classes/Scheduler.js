@@ -151,6 +151,7 @@ const RUN_BACKGROUND_JOB_TYPES_LIST = [...RUN_BACKGROUND_JOB_TYPES];
 // deterministic, so a single background slot bounds its CPU without starving
 // agent work. A constant, derived from runtime state — NOT a user setting.
 const BACKGROUND_JOB_CONCURRENCY = 1;
+const RUN_LOOP_KEEPALIVE_INTERVAL_MS = 30_000;
 
 // Holder types that represent SYSTEM holds, not agent-vs-agent contention.
 // They must never be counted as the agent pipeline being "on lock".
@@ -425,6 +426,14 @@ export class Scheduler {
     this._stopMarked = false;
     this._sleepResolves = new Set(); // for interrupting any pending scheduler sleeps on shutdown
     this._activeRunWorkers = null;
+    this._runLoopKeepAliveTimer = null;
+    this._runLoopKeepAliveIntervalMs = Math.max(1_000, Number(opts.runLoopKeepAliveIntervalMs) || RUN_LOOP_KEEPALIVE_INTERVAL_MS);
+    this._setRunLoopKeepAliveInterval = typeof opts.setRunLoopKeepAliveInterval === "function"
+      ? opts.setRunLoopKeepAliveInterval
+      : setInterval;
+    this._clearRunLoopKeepAliveInterval = typeof opts.clearRunLoopKeepAliveInterval === "function"
+      ? opts.clearRunLoopKeepAliveInterval
+      : clearInterval;
     this._lockLossKillCallback = null;
     this._lockLost = false;
     this._lockLostKilledJobIds = new Set();
@@ -1429,6 +1438,7 @@ export class Scheduler {
       ownerId: this.ownerId,
       activeWorkersProvider: () => activeWorkers,
     });
+    this._startRunLoopKeepAlive();
     recordRunDiagnostic("scheduler.run_loop_started", {
       owner_id: this.ownerId,
       concurrency: this.concurrency,
@@ -2166,6 +2176,7 @@ export class Scheduler {
       }
 
     } finally {
+      this._stopRunLoopKeepAlive();
       unsubscribeQueueWake();
       const shutdownReason = this._lockLost ? "lock_lost" : (this._stopRequested ? "stop_requested" : "run_loop_exit");
       this.stop({ activeWorkers, reason: shutdownReason });
@@ -2184,6 +2195,21 @@ export class Scheduler {
     // Interrupt the poll sleep so the loop exits immediately
     this._wakeSleeps();
     this.schedulerLock.stopRenewal();
+  }
+
+  _startRunLoopKeepAlive() {
+    if (this._runLoopKeepAliveTimer) return;
+    this._runLoopKeepAliveTimer = this._setRunLoopKeepAliveInterval(
+      () => {},
+      this._runLoopKeepAliveIntervalMs,
+    );
+    this._runLoopKeepAliveTimer?.ref?.();
+  }
+
+  _stopRunLoopKeepAlive() {
+    if (!this._runLoopKeepAliveTimer) return;
+    this._clearRunLoopKeepAliveInterval(this._runLoopKeepAliveTimer);
+    this._runLoopKeepAliveTimer = null;
   }
 
   /**
