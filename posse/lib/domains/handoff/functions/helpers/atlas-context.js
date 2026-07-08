@@ -1698,32 +1698,41 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
     maxFiles: ATLAS_EXACT_PREFETCH_MAX_FILES,
   });
 
-  // Area handoffs: hand the agent the code.survey call-map for the area rather
-  // than leaving it to CHOOSE survey (it never does — it answers from the tree
-  // prefetch, which has no call edges). When survey succeeds it IS the per-file
-  // skeleton evidence for the whole area, so the separate skeleton pass is
-  // skipped (cost stays bounded, not additive). Any miss falls back to it.
+  // Area handoffs: pre-surface a compact code.survey pointer so the agent knows
+  // a call map exists for this scope, without pushing the whole graph/skeleton
+  // body into every prompt. Any miss falls back to the skeleton pass below.
   // Embedded prefetch call: code.survey runs via executeEmbeddedAtlasTool
   // (origin:"prefetch") and does NOT require the agent/internal tool surface to
   // expose it (it is an agent-surface action, absent from internalAtlasTools).
   // The tree-prefetch gate above already ensured ATLAS is usable; any survey
   // miss returns { ok:false } and falls back to the skeleton pass below.
+  // Include tree.scope's widened caller paths (callers reaching the seeds from
+  // OUTSIDE their area) in the survey candidate set. On fan-in/inventory tasks
+  // the answer lives in these sibling files; adding them both puts them in the
+  // file-list survey and dilutes any single-dir dominance.
+  const wideningCallerPaths = Array.isArray(treeScope.scopeWidening)
+    ? treeScope.scopeWidening.map((c) => (c && typeof c === "object" ? c.path : c)).filter(Boolean)
+    : [];
+  const surveyRankedFiles = _uniqueAtlasPaths(
+    [...(Array.isArray(prefetchTargets.rankedFiles) ? prefetchTargets.rankedFiles : []), ...wideningCallerPaths],
+    MAX_SURVEY_FILES,
+  );
   const surveyContext = await _prefetchAtlasSurvey(packet, {
     taskText,
-    rankedFiles: prefetchTargets.rankedFiles,
+    rankedFiles: surveyRankedFiles,
     candidateDirs: Array.isArray(treeScope.candidateDirs) ? treeScope.candidateDirs : [],
     seedFiles: prefetchTargets.exactFiles,
     keySymbols: seedSymbols,
   });
   const surveyOk = surveyContext?.ok === true;
 
-  // Researcher results are intentionally only file paths: before
-  // research/planning exists, ranking can drift into unrelated files. Defer
-  // skeleton expansion until planner/dev handoffs.
+  // The compact survey pointer is rendered even at higher trim levels. If the
+  // survey is unavailable, keep a bounded structural floor by skeletonizing the
+  // top ranked files instead of only explicit prefetch files.
   const skeletonMaxFiles = atlasSliceSkeletonPrefetchLimit(packet.recipient);
   const exactOkPaths = _pathSet(exactFiles.filter((item) => item?.ok).map((item) => item.file));
   const skeletons = (!surveyOk && skeletonMaxFiles > 0)
-    ? await _prefetchSliceSkeletons(prefetchTargets.skeletonFiles.filter((file) => !exactOkPaths.has(file.toLowerCase())), {
+    ? await _prefetchSliceSkeletons(_atlasSkeletonFloorFiles(prefetchTargets).filter((file) => !exactOkPaths.has(file.toLowerCase())), {
       packet,
       toolsAvailable: [...tools],
       maxFiles: skeletonMaxFiles,
@@ -1750,6 +1759,14 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
     surveyContext,
     treeScope,
   };
+}
+
+function _atlasSkeletonFloorFiles(prefetchTargets = {}) {
+  return _uniqueAtlasPaths([
+    ...(Array.isArray(prefetchTargets.skeletonFiles) ? prefetchTargets.skeletonFiles : []),
+    ...(Array.isArray(prefetchTargets.rankedFiles) ? prefetchTargets.rankedFiles : []),
+    ...(Array.isArray(prefetchTargets.filePaths) ? prefetchTargets.filePaths : []),
+  ], ATLAS_SLICE_FILE_DISPLAY_MAX);
 }
 
 // Prefetch a code.survey for area-shaped handoffs. Scope (dir vs file-list,
@@ -1830,7 +1847,116 @@ function _finishAtlasSurveyPrefetch(packet, result, startedAt) {
   const durationMs = Date.now() - startedAt;
   const out = { ...result, durationMs };
   _recordAtlasSurveyPrefetchDiagnostic(packet, out);
-  return out;
+  return _compactAtlasSurveyPrefetchResult(out);
+}
+
+const MAX_SURVEY_POINTER_FILES = 8;
+const MAX_SURVEY_POINTER_EDGES = 8;
+const MAX_SURVEY_POINTER_SYMBOLS = 8;
+
+function _compactAtlasSurveyPrefetchResult(result) {
+  if (!result?.ok) return result;
+  const files = Array.isArray(result.files) ? result.files : [];
+  const callMap = result.callMap && typeof result.callMap === "object" ? result.callMap : null;
+  const metrics = result.metrics && typeof result.metrics === "object" ? result.metrics : {};
+  const summary = _compactSurveyCallMap(callMap, metrics);
+  const fileCount = Number.isFinite(Number(metrics.fileCount))
+    ? Number(metrics.fileCount)
+    : files.length;
+  return {
+    ok: true,
+    attempted: !!result.attempted,
+    scope: result.scope || null,
+    symbols: result.symbols || null,
+    metrics,
+    granularity: result.granularity || null,
+    truncated: !!result.truncated,
+    retries: Number(result.retries || 0),
+    durationMs: result.durationMs,
+    fileCount,
+    topFiles: files
+      .map((file) => String(file?.path || "").trim())
+      .filter(Boolean)
+      .slice(0, MAX_SURVEY_POINTER_FILES),
+    callMapSummary: summary,
+    fullPayloadOmitted: true,
+  };
+}
+
+function _compactSurveyCallMap(callMap, metrics = {}) {
+  const internal = Array.isArray(callMap?.edges) ? callMap.edges : [];
+  const inbound = Array.isArray(callMap?.inbound) ? callMap.inbound : [];
+  const outbound = Array.isArray(callMap?.outbound) ? callMap.outbound : [];
+  const unresolved = Array.isArray(callMap?.unresolved) ? callMap.unresolved : [];
+  const topEdges = _compactSurveyTopEdges({ inbound, outbound, internal, unresolved });
+  return {
+    counts: {
+      internal: _finiteMetric(metrics.internalEdgeCount, internal.length),
+      inbound: _finiteMetric(metrics.inboundEdgeCount, inbound.length),
+      outbound: _finiteMetric(metrics.outboundEdgeCount, outbound.length),
+      unresolved: _finiteMetric(metrics.unresolvedEdgeCount, unresolved.length),
+    },
+    topEdges,
+    topSymbols: _compactSurveyEdgeSymbols(topEdges),
+    truncated: !!(callMap?.edgesTruncated || callMap?.inboundTruncated || callMap?.outboundTruncated),
+  };
+}
+
+function _compactSurveyTopEdges({ inbound = [], outbound = [], internal = [], unresolved = [] } = {}) {
+  return [
+    ..._compactSurveyEdges(inbound, "inbound", MAX_SURVEY_POINTER_EDGES),
+    ..._compactSurveyEdges(outbound, "outbound", MAX_SURVEY_POINTER_EDGES),
+    ..._compactSurveyEdges(internal, "internal", MAX_SURVEY_POINTER_EDGES),
+    ..._compactSurveyEdges(unresolved, "unresolved", MAX_SURVEY_POINTER_EDGES),
+  ].slice(0, MAX_SURVEY_POINTER_EDGES);
+}
+
+function _finiteMetric(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+function _compactSurveyEdges(edges, kind, limit) {
+  if (!Array.isArray(edges) || limit <= 0) return [];
+  return edges
+    .map((edge) => ({
+      kind,
+      from: _compactSurveySymbolName(edge?.from),
+      to: _compactSurveySymbolName(edge?.to),
+      count: _finiteMetric(edge?.count, 1),
+    }))
+    .filter((edge) => edge.from || edge.to)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limit);
+}
+
+function _compactSurveySymbolName(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+}
+
+function _compactSurveyEdgeSymbols(edges) {
+  const counts = new Map();
+  let order = 0;
+  for (const edge of Array.isArray(edges) ? edges : []) {
+    const count = _finiteMetric(edge?.count, 1);
+    for (const endpoint of [edge?.from, edge?.to]) {
+      const symbol = _compactSurveySymbolName(endpoint);
+      if (!symbol) continue;
+      const current = counts.get(symbol);
+      if (current) {
+        current.count += count;
+      } else {
+        counts.set(symbol, { symbol, count, order: order++ });
+      }
+    }
+  }
+  return [...counts.values()]
+    .sort((a, b) => a.order - b.order || b.count - a.count)
+    .slice(0, MAX_SURVEY_POINTER_SYMBOLS)
+    .map(({ symbol, count }) => ({ symbol, count }));
 }
 
 function _recordAtlasSurveyPrefetchDiagnostic(packet, result) {
@@ -2482,36 +2608,61 @@ function _renderExactFileBlock(item, trim) {
   return lines;
 }
 
-// Render a prefetched code.survey: per-file skeletons + the internal/inbound
-// call map. This is the area orientation the agent otherwise never retrieves.
-function _renderAtlasSurveySection(sc, _packet) {
+// Render a prefetched code.survey as a compact pointer. The full per-file
+// skeletons and call graph stay pull-only via code.survey.
+function _renderAtlasSurveySection(sc, packet) {
   const lines = [];
-  const target = sc.scope?.mode === "directory" ? sc.scope.paths : `${(sc.files || []).length} files`;
+  const label = displayAtlasToolName("code.survey", packet?.atlas);
+  const target = _formatSurveyScopeTarget(sc?.scope) || `${Number(sc.fileCount || 0)} files`;
   const dig = sc.symbols ? `, dig: ${sc.symbols.join(", ")}` : "";
-  lines.push(`Area survey (prefetched code.survey over ${target}${dig}) — per-file skeletons + call map. This covers the card and skeleton rungs for every file below; climb a per-file rung only for a specific gap it leaves:`);
-  for (const f of (sc.files || []).slice(0, MAX_SURVEY_FILES)) {
-    const syms = Array.isArray(f.symbols)
-      ? f.symbols.slice(0, 8).map((s) => `${s.name}${s.kind ? `:${s.kind}` : ""}${s.line ? `@${s.line}` : ""}`).join(", ")
-      : "";
-    const count = f.symbolCount != null ? ` (${f.symbolCount})` : "";
-    lines.push(`  - ${f.path}${count}${syms ? ` — ${syms}` : ""}`);
+  lines.push(`Area survey pointer (${label} over ${target}${dig}) - compact call-map signal only; pull the full survey for specific symbols or edges you will trace.`);
+  const args = _surveyPullArgs(sc);
+  if (args) lines.push(`  pull: ${label} ${args}`);
+  const fileCount = Number.isFinite(Number(sc.fileCount))
+    ? Number(sc.fileCount)
+    : (Array.isArray(sc.files) ? sc.files.length : 0);
+  if (fileCount > 0) lines.push(`  files covered: ${fileCount}${sc.truncated ? " (survey hit file cap)" : ""}`);
+  const summary = sc.callMapSummary || _compactSurveyCallMap(sc.callMap, sc.metrics || {});
+  const counts = summary?.counts || {};
+  const countParts = [
+    Number.isFinite(Number(counts.internal)) ? `internal=${counts.internal}` : null,
+    Number.isFinite(Number(counts.inbound)) ? `inbound=${counts.inbound}` : null,
+    Number.isFinite(Number(counts.outbound)) ? `outbound=${counts.outbound}` : null,
+    Number.isFinite(Number(counts.unresolved)) ? `unresolved=${counts.unresolved}` : null,
+  ].filter(Boolean);
+  if (countParts.length > 0) lines.push(`  edge counts: ${countParts.join(", ")}`);
+  const topSymbols = Array.isArray(summary?.topSymbols) ? summary.topSymbols : [];
+  if (topSymbols.length > 0) {
+    lines.push(`  top edge symbols: ${topSymbols.map((entry) => `${entry.symbol}${entry.count > 1 ? ` (${entry.count})` : ""}`).join(", ")}`);
   }
-  const cm = sc.callMap;
-  if (cm) {
-    const edges = Array.isArray(cm.edges) ? cm.edges.slice(0, 40) : [];
-    if (edges.length > 0) {
-      lines.push("  call edges (internal):");
-      for (const e of edges) lines.push(`    ${e.from} -> ${e.to}${e.count > 1 ? ` (x${e.count})` : ""}`);
-      if (cm.edgesTruncated) lines.push("    (internal edge list truncated)");
+  const topEdges = Array.isArray(summary?.topEdges) ? summary.topEdges : [];
+  if (topEdges.length > 0) {
+    lines.push("  top call edges:");
+    for (const edge of topEdges) {
+      const count = Number(edge.count || 0) > 1 ? ` (x${edge.count})` : "";
+      const kind = edge.kind && edge.kind !== "internal" ? ` [${edge.kind}]` : "";
+      lines.push(`    ${edge.from || "?"} -> ${edge.to || "?"}${count}${kind}`);
     }
-    const inbound = Array.isArray(cm.inbound) ? cm.inbound.slice(0, 16) : [];
-    if (inbound.length > 0) {
-      lines.push("  inbound (callers from outside the surveyed set):");
-      for (const e of inbound) lines.push(`    ${e.from} -> ${e.to}${e.count > 1 ? ` (x${e.count})` : ""}`);
-    }
+    if (summary.truncated) lines.push("    (edge sample truncated)");
   }
-  if (sc.truncated) lines.push("  (survey hit the file cap; name a narrower path for the remainder)");
+  const topFiles = Array.isArray(sc.topFiles)
+    ? sc.topFiles
+    : (Array.isArray(sc.files) ? sc.files.map((file) => file?.path).filter(Boolean).slice(0, MAX_SURVEY_POINTER_FILES) : []);
+  if (topFiles.length > 0) {
+    lines.push(`  top files in survey scope: ${topFiles.join(", ")}`);
+  }
   return lines;
+}
+
+function _surveyPullArgs(sc) {
+  const scope = sc?.scope || {};
+  if (!scope.inject) return "";
+  const args = {
+    paths: scope.paths,
+    maxFiles: MAX_SURVEY_FILES,
+    ...(sc.symbols ? { symbols: sc.symbols } : {}),
+  };
+  return JSON.stringify(args);
 }
 
 function _renderAtlasSurveyMissSection(sc, packet) {
@@ -2609,9 +2760,9 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     lines.push("The seeds above are pre-expanded from the brief; call tree.expand only for files you newly validate.");
   }
 
-  if (slice.surveyContext?.ok && trim < 2) {
+  if (slice.surveyContext?.ok) {
     for (const line of _renderAtlasSurveySection(slice.surveyContext, packet)) lines.push(line);
-  } else if (slice.surveyContext?.attempted && trim < 2) {
+  } else if (slice.surveyContext?.attempted) {
     for (const line of _renderAtlasSurveyMissSection(slice.surveyContext, packet)) lines.push(line);
   }
 

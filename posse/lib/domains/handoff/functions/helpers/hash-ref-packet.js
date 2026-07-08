@@ -558,7 +558,7 @@ export function renderHashRefHandoffPacket(input, opts = {}) {
   if (!packet || packet.source !== "atlas") return "";
   const lines = [
     "ATLAS HASH REF HANDOFF PACKET:",
-    "Proof refs are auto-expanded below. Support and decoy refs get compact type-aware previews when possible; use fetch_ref for exact evidence when needed.",
+    "Compact durable evidence map. Use fetch_ref for exact evidence when needed; proof evidence appears below only when a local renderer has already expanded it.",
   ];
   if (packet.synthesis) {
     lines.push("");

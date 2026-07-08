@@ -1,3 +1,9 @@
+import {
+  HASH_REF_ALIAS_PATTERN,
+  HASH_REF_LANES,
+  normalizeHashRefAlias,
+} from "../../../catalog/hash-store.js";
+
 function normalizedPath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
 }
@@ -76,6 +82,173 @@ function readOnlyFileSnippets(packet = {}) {
     path: filePath,
     kind: "read_only",
   }));
+}
+
+const MAX_HASH_REFS_PER_LANE = 24;
+const MAX_HASH_WHY_CHARS = 180;
+const MAX_HASH_DROPPED_REFS = 12;
+
+function compactText(value, max = 220) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function objectValue(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function normalizeRef(value) {
+  const text = normalizeHashRefAlias(compactText(value, 80));
+  return HASH_REF_ALIAS_PATTERN.test(text) ? text : "";
+}
+
+function compactHashPreviewSymbol(value) {
+  const symbol = objectValue(value);
+  if (!symbol) return null;
+  const symbolId = compactText(symbol.symbolId || symbol.symbol_id || symbol.id || "", 90);
+  const name = compactText(symbol.qualifiedName || symbol.qualified_name || symbol.name || symbol.symbolName || symbol.symbol_name || "", 160);
+  if (!symbolId && !name) return null;
+  const out = {};
+  if (symbolId) out.symbolId = symbolId;
+  if (name) out.name = name;
+  if (symbol.qualifiedName || symbol.qualified_name) out.qualifiedName = compactText(symbol.qualifiedName || symbol.qualified_name, 180);
+  if (symbol.kind) out.kind = compactText(symbol.kind, 60);
+  if (symbol.lang) out.lang = compactText(symbol.lang, 40);
+  const location = objectValue(symbol.location || symbol.loc || symbol);
+  if (location) {
+    const path = compactText(location.repo_rel_path || location.repoRelPath || location.path || location.file || "", 220);
+    const startLine = Number(location.startLine ?? location.start_line ?? location.range_start_line);
+    const endLine = Number(location.endLine ?? location.end_line ?? location.range_end_line);
+    const loc = {};
+    if (path) loc.path = path;
+    if (Number.isFinite(startLine) && startLine > 0) loc.startLine = startLine;
+    if (Number.isFinite(endLine) && endLine > 0) loc.endLine = endLine;
+    if (Object.keys(loc).length > 0) out.location = loc;
+  }
+  if (Number.isFinite(Number(symbol.score))) out.score = Number(symbol.score);
+  if (symbol.relevance) out.relevance = compactText(symbol.relevance, 40);
+  return out;
+}
+
+function compactHashPreview(value) {
+  const preview = objectValue(value);
+  if (!preview) return null;
+  const symbols = (Array.isArray(preview.symbols) ? preview.symbols : [])
+    .map(compactHashPreviewSymbol)
+    .filter(Boolean)
+    .slice(0, 8);
+  if (symbols.length === 0) return null;
+  return {
+    kind: "symbols",
+    symbols,
+    ...(Number.isFinite(Number(preview.total)) ? { total: Math.max(symbols.length, Number(preview.total)) } : {}),
+    ...(preview.truncated === true ? { truncated: true } : {}),
+  };
+}
+
+function compactHashRefEntry(entry) {
+  const source = typeof entry === "string" ? { ref: entry } : objectValue(entry);
+  if (!source) return null;
+  const ref = normalizeRef(source.ref ?? source.hash ?? source.ref_hash);
+  if (!ref) return null;
+  const out = { ref };
+  const why = compactText(source.why ?? source.reason ?? source.note, MAX_HASH_WHY_CHARS);
+  const sourceRef = normalizeRef(source.source_ref ?? source.sourceRef);
+  const objectType = compactText(source.object_type ?? source.objectType, 80);
+  const entryKind = compactText(source.entry_kind ?? source.entryKind, 40);
+  if (why) out.why = why;
+  if (sourceRef) out.source_ref = sourceRef;
+  if (objectType) out.object_type = objectType;
+  if (entryKind) out.entry_kind = entryKind;
+  if (Number.isFinite(Number(source.size_chars ?? source.sizeChars))) {
+    out.size_chars = Math.max(0, Number(source.size_chars ?? source.sizeChars));
+  }
+  if (/^[0-9a-f]{64}$/i.test(String(source.content_hash ?? source.contentHash ?? ""))) {
+    out.content_hash = String(source.content_hash ?? source.contentHash).toLowerCase();
+  }
+  const preview = compactHashPreview(source.preview);
+  if (preview) out.preview = preview;
+  if (source.unresolved === true) out.unresolved = true;
+  if (source.error) out.error = compactText(source.error, 120);
+  return out;
+}
+
+function compactHashRefDropped(entry) {
+  const source = objectValue(entry);
+  if (!source) return null;
+  const lane = compactText(source.lane, 20);
+  const ref = normalizeRef(source.ref);
+  const reason = compactText(source.reason || source.error, 120);
+  if (!lane && !ref && !reason) return null;
+  return {
+    ...(lane ? { lane } : {}),
+    ...(ref ? { ref } : {}),
+    ...(reason ? { reason } : {}),
+  };
+}
+
+function compactHashRefPacketForRemote(packet = {}) {
+  const sourcePacket = objectValue(packet?._raw_payload?.hash_ref_packet)
+    || objectValue(packet?._raw_payload?.dev_brief?.hash_ref_packet)
+    || objectValue(packet?.hash_ref_packet)
+    || objectValue(packet?.dev_brief?.hash_ref_packet);
+  if (!sourcePacket) return null;
+  const source = compactText(sourcePacket.source || sourcePacket.evidence_source || "atlas", 40).toLowerCase();
+  if (source !== "atlas") return null;
+  const lanes = {};
+  const capDropped = [];
+  const truncatedLanes = {};
+  for (const lane of HASH_REF_LANES) {
+    const entries = Array.isArray(sourcePacket?.lanes?.[lane])
+      ? sourcePacket.lanes[lane]
+      : (Array.isArray(sourcePacket?.[lane]) ? sourcePacket[lane] : []);
+    lanes[lane] = [];
+    const seen = new Set();
+    let omittedCount = 0;
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      if (lanes[lane].length >= MAX_HASH_REFS_PER_LANE) {
+        omittedCount += 1;
+        const ref = normalizeRef(objectValue(entry)?.ref ?? objectValue(entry)?.hash ?? objectValue(entry)?.ref_hash ?? entry);
+        capDropped.push({
+          lane,
+          ...(ref ? { ref } : {}),
+          reason: "lane_cap_truncated",
+        });
+        continue;
+      }
+      const compact = compactHashRefEntry(entry);
+      if (!compact || seen.has(compact.ref)) continue;
+      seen.add(compact.ref);
+      lanes[lane].push(compact);
+    }
+    if (omittedCount > 0) truncatedLanes[lane] = omittedCount;
+  }
+  const refCount = HASH_REF_LANES.reduce((sum, lane) => sum + lanes[lane].length, 0);
+  if (refCount === 0) return null;
+  const dropped = [
+    ...(Array.isArray(sourcePacket.dropped) ? sourcePacket.dropped : []),
+    ...(Array.isArray(sourcePacket.upstream_dropped) ? sourcePacket.upstream_dropped : []),
+    ...capDropped,
+  ].map(compactHashRefDropped).filter(Boolean).slice(0, MAX_HASH_DROPPED_REFS);
+  return {
+    schema_version: Number.isFinite(Number(sourcePacket.schema_version)) ? Number(sourcePacket.schema_version) : 1,
+    source,
+    destination: compactText(sourcePacket.destination || "handoff", 40) || "handoff",
+    render_mode: "compact_hash_ref_map",
+    synthesis: compactText(sourcePacket.synthesis || sourcePacket.summary, 1200),
+    lanes,
+    ref_count: refCount,
+    ...(dropped.length > 0 ? { dropped } : {}),
+    ...(Object.keys(truncatedLanes).length > 0 ? { truncated_lanes: truncatedLanes } : {}),
+    ...(Number.isFinite(Number(sourcePacket.reissued_count)) ? { reissued_count: Number(sourcePacket.reissued_count) } : {}),
+    ...(Number.isFinite(Number(sourcePacket.missed_count)) ? { missed_count: Number(sourcePacket.missed_count) } : {}),
+    ...(Array.isArray(sourcePacket.proof_expansions) && sourcePacket.proof_expansions.length > 0
+      ? { omitted_proof_expansion_count: sourcePacket.proof_expansions.length }
+      : {}),
+  };
 }
 
 function isAtlasSummaryBlock(value) {
@@ -289,6 +462,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
       memory_prefetch: memoryPrefetchForRemote(packet),
       database_prefetch: databasePrefetchForRemote(packet),
       memory_surface: packet?.memory_surface || null,
+      hash_ref_packet: compactHashRefPacketForRemote(packet),
       file_snippets: readOnlyFileSnippets(packet),
       insights: Array.isArray(packet?.run_insights) ? packet.run_insights.map(insightForRemote) : [],
     },
@@ -305,7 +479,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
       embed_extra: false,
     },
     extra: {
-      local_prompt_contract: "remote_skeleton_local_enrichment",
+      local_prompt_contract: "remote_skeleton_hash_refs",
       ...(promptProfile ? { prompt_profile: promptProfile } : {}),
       ...(packet?.research_role_mode ? { research_role_mode: packet.research_role_mode } : {}),
       ...(packet?.research_budget ? { research_budget: packet.research_budget } : {}),

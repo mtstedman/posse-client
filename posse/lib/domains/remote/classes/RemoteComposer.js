@@ -18,6 +18,8 @@ import {
   resolveContextCompactionConfig,
 } from "../../settings/functions/context-compaction.js";
 
+const DEFAULT_LOCAL_ENRICHMENT_ENABLED = false;
+
 function joinPromptParts(parts = []) {
   return parts
     .map((part) => String(part || "").trim())
@@ -45,6 +47,7 @@ export class RemoteComposer {
     readWorkItem = getWorkItem,
     now = () => Date.now(),
     warn = log.warn,
+    enableLocalEnrichment = DEFAULT_LOCAL_ENRICHMENT_ENABLED,
   } = {}) {
     this.client = client || new RemotePromptClient({
       baseUrl: getPosseRemoteUrl(),
@@ -58,6 +61,7 @@ export class RemoteComposer {
     this.readWorkItem = typeof readWorkItem === "function" ? readWorkItem : getWorkItem;
     this.now = now;
     this.warn = typeof warn === "function" ? warn : () => {};
+    this.enableLocalEnrichment = enableLocalEnrichment === true;
   }
 
   async composePrompt(packet, instructions, {
@@ -135,14 +139,16 @@ export class RemoteComposer {
     // from the local packet, never the remote response — a compromised remote
     // could otherwise point cwd at an arbitrary directory and have its files
     // inlined into the provider prompt.
-    const enrichment = this.renderEnrichment(response?.handoff, {
-      cwd: packet?.cwd || process.cwd(),
-    });
+    const enrichment = this.enableLocalEnrichment
+      ? this.renderEnrichment(response?.handoff, {
+        cwd: packet?.cwd || process.cwd(),
+      })
+      : "";
     const prompt = joinPromptParts([skeleton, localPolicyOverlay, enrichment]);
     const userPrompt = joinPromptParts([remoteUserPrompt || skeleton, localPolicyOverlay, enrichment]);
     const promptCap = Number(maxPromptChars);
     if (Number.isFinite(promptCap) && promptCap > 0 && prompt.length > promptCap) {
-      const err = new Error(`remote prompt plus local enrichment exceeded max prompt chars (${prompt.length} > ${promptCap})`);
+      const err = new Error(`remote prompt exceeded max prompt chars (${prompt.length} > ${promptCap})`);
       err.code = "POSSE_PROMPT_TOO_LARGE";
       err.promptChars = prompt.length;
       err.maxPromptChars = promptCap;
@@ -159,11 +165,13 @@ export class RemoteComposer {
       response,
       issuance: response?.issuance || null,
       latencyMs,
+      localEnrichmentEnabled: this.enableLocalEnrichment,
       metadata: {
         ...(response?.metadata || {}),
         prompt_version: promptVersion,
         ...(bundlePromptVersion ? { bundle_prompt_version: bundlePromptVersion } : {}),
         ...(promptVersionSkew ? { prompt_version_skew: promptVersionSkew } : {}),
+        local_enrichment_enabled: this.enableLocalEnrichment,
         latency_ms: latencyMs,
       },
     };

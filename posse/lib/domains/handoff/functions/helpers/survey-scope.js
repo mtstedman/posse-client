@@ -32,6 +32,7 @@ const EXPLICIT_PATH_RE = /\b(?:lib|src|www|test|tests|app|apps|crates|rust|packa
 
 export const MAX_SURVEY_FILES = 64;   // code.survey hard cap on paths resolution
 export const FILE_LIST_MAX = 24;      // top-N when surveying a scattered file list
+export const FILE_LIST_MAX_CROSS_CUTTING = 40;  // fan-in/inventory/reachability span more files — give them a wider file budget
 export const TOP_K = 12;              // strongest slice of the ranked set for dominance
 export const DOMINANCE = 0.6;         // fraction of top-K under one dir to call it dominant
 export const MIN_AREA_FILES = 4;      // fewer than this is not an "area" - keep the ladder
@@ -104,6 +105,17 @@ function deriveSymbols(taskText, keySymbols) {
   return ids.length ? ids : null;
 }
 
+// Cross-cutting tasks — fan-in (who-calls), inventory ("every write"),
+// reachability, and negative-evidence — resolve their answer in SIBLING dirs
+// (the callers/writers/decoys), not the target symbol's home dir. Directory
+// mode fences those out, so these tasks must stay file-list even when the
+// ranked files cluster under one dir. `deriveSymbols` already flags the
+// fan-in/trace verbs; this covers the inventory/enumeration/negative phrasings.
+const CROSS_CUTTING_RE = /\b(inventor(?:y|ies)|enumerate|every\s+\w+|all\s+(?:the\s+)?(?:writes?|callers?|usages?|places?|references?|paths?)|reachable|reached\s+from|fan[-\s]?in|who\s+(?:calls|writes|reads|uses)|negative[-\s]evidence|decoys?|persist(?:ence|ed)?\s+writes?)\b/i;
+function isCrossCuttingTask(taskText) {
+  return CROSS_CUTTING_RE.test(String(taskText || ""));
+}
+
 function decide(source, mode, paths, symbols, extra = {}) {
   return { inject: true, source, mode, paths, symbols: symbols || null, ...extra };
 }
@@ -124,6 +136,11 @@ export function chooseSurveyScope(input = {}, deps = {}) {
   const dirFileCount = typeof deps.dirFileCount === "function" ? deps.dirFileCount : () => -1;
 
   const symbols = deriveSymbols(taskText, keySymbols);
+  // A relational/enumerative task must never collapse to one dir (rungs 2-3):
+  // its evidence is cross-dir by definition. Explicit paths (rung 1) still win
+  // — an author who named a dir scoped it deliberately.
+  const crossCutting = symbols !== null || isCrossCuttingTask(taskText);
+  const fileListCap = crossCutting ? FILE_LIST_MAX_CROSS_CUTTING : FILE_LIST_MAX;
 
   // (1) explicit path named in the task
   const explicit = extractExplicitPaths(taskText, pathKind);
@@ -143,9 +160,9 @@ export function chooseSurveyScope(input = {}, deps = {}) {
   // (2) seeds (explicit scope / validated research key_files)
   const seeds = uniq(seedFiles).filter((f) => CODE_EXT_RE.test(f));
   if (seeds.length >= MIN_AREA_FILES) {
-    const dom = dominantDir(seeds, uniq(seeds.map(parentDir)), dirFileCount);
+    const dom = crossCutting ? null : dominantDir(seeds, uniq(seeds.map(parentDir)), dirFileCount);
     if (dom) return decide("seeds", "directory", dom.dir, symbols, { files: dom.files, coverage: dom.coverage });
-    return decide("seeds", "file-list", seeds.slice(0, FILE_LIST_MAX), symbols);
+    return decide("seeds", "file-list", seeds.slice(0, fileListCap), symbols, crossCutting ? { crossCutting: true } : {});
   }
 
   // area gate
@@ -154,12 +171,16 @@ export function chooseSurveyScope(input = {}, deps = {}) {
     return { inject: false, reason: `no area: ${ranked.length} ranked files, no explicit/seed scope`, symbols: null };
   }
 
-  // (3) dominant candidateDir
-  const dom = dominantDir(ranked.slice(0, TOP_K), candidateDirs, dirFileCount);
+  // (3) dominant candidateDir — skipped for cross-cutting tasks, whose callers/
+  // writers/decoys live outside the dominant dir a directory survey would fence.
+  const dom = crossCutting ? null : dominantDir(ranked.slice(0, TOP_K), candidateDirs, dirFileCount);
   if (dom) return decide("candidateDir", "directory", dom.dir, symbols, { files: dom.files, coverage: dom.coverage });
 
   // (4) file-list over the ranked hits (cross-cutting)
-  return decide("ranked-file-list", "file-list", ranked.slice(0, FILE_LIST_MAX), symbols, { note: "no dominant bounded dir; scattered hits" });
+  return decide("ranked-file-list", "file-list", ranked.slice(0, fileListCap), symbols, {
+    note: crossCutting ? "cross-cutting task; file-list spans sibling dirs" : "no dominant bounded dir; scattered hits",
+    ...(crossCutting ? { crossCutting: true } : {}),
+  });
 }
 
 // Disk-backed probes for production (Phase 2). A reasonable proxy for the ATLAS

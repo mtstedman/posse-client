@@ -162,7 +162,7 @@ export class PlannerRole extends BaseRole {
           "When a dev code task needs task-specific ATLAS/hash-ref evidence, add dev_brief to that dev task only.",
           "Shape: dev_brief: { source: \"atlas\", summary, key_files, related_files, planner_file_priorities, proof, support, decoy }.",
           "Use the same file fields as researcher output: key_files, related_files, and planner_file_priorities. Tailor them to this one dev task; do not copy the whole research brief.",
-          "Use proof/support/decoy only for hash refs from ATLAS-backed evidence. Proof refs are auto-expanded into the dev handoff; support and decoy refs stay compact/fetchable. Decoy refs must include a short why. Omit dev_brief when only standard brief prose supports the task.",
+          "Use proof/support/decoy only for hash refs from ATLAS-backed evidence. Refs stay as compact durable intake; dev agents fetch exact evidence on demand with fetch_ref only when they will rely on it. Decoy refs must include a short why. Omit dev_brief when only standard brief prose supports the task.",
           "",
         ].join("\n")
       : "";

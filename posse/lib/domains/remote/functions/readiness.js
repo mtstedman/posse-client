@@ -91,6 +91,13 @@ function requireContains(errors, label, text, needle) {
   if (!String(text || "").includes(needle)) errors.push(`${label} missing ${JSON.stringify(needle)}`);
 }
 
+function requireAnyContains(errors, label, text, needles, description) {
+  const value = String(text || "");
+  if (!needles.some((needle) => value.includes(needle))) {
+    errors.push(`${label} missing ${description || needles.map((needle) => JSON.stringify(needle)).join(" or ")}`);
+  }
+}
+
 export function validateRemoteCompileReadinessResponse(response) {
   const errors = [];
   pushMissing(errors, "prompt_version", response?.prompt_version);
@@ -109,8 +116,9 @@ export function validateRemoteCompileReadinessResponse(response) {
   requireContains(errors, "system_prompt", systemPrompt, "FILE SCOPE CONTRACT");
   requireContains(errors, "system_prompt", systemPrompt, "DEV LOG FORMAT");
   requireContains(errors, "stable_context", stableContext, "STABLE EXECUTION CONTEXT");
-  requireContains(errors, "stable_context", stableContext, "source_policy: no_raw_source");
-  requireContains(errors, "stable_context", stableContext, "enrichment_owner: local_client");
+  requireAnyContains(errors, "stable_context", stableContext, ["raw_source_policy: no_raw_source", "source_policy: no_raw_source"], "no raw-source policy");
+  requireAnyContains(errors, "stable_context", stableContext, ["context_contract: remote_skeleton_hash_refs", "enrichment_owner: local_client"], "remote skeleton/hash-ref or legacy enrichment contract");
+  requireAnyContains(errors, "stable_context", stableContext, ["evidence_delivery: compact_hash_refs_pull_on_demand", "enrichment_stage: before_provider_call"], "pull-on-demand or legacy enrichment delivery");
   requireContains(errors, "stable_context", stableContext, "tool_surface:");
   requireContains(errors, "stable_context", stableContext, "tool_policy:");
   requireContains(errors, "stable_context", stableContext, "files_to_modify:");
@@ -129,8 +137,13 @@ export function validateRemoteCompileReadinessResponse(response) {
 
   const handoff = response?.handoff || {};
   if (handoff.source_policy !== "no_raw_source") errors.push("handoff.source_policy must be no_raw_source");
-  if (handoff.enrichment_owner !== "local_client") errors.push("handoff.enrichment_owner must be local_client");
-  if (handoff.enrichment_stage !== "before_provider_call") errors.push("handoff.enrichment_stage must be before_provider_call");
+  const hasNewContract = handoff.context_contract === "remote_skeleton_hash_refs"
+    && handoff.evidence_delivery === "compact_hash_refs_pull_on_demand";
+  const hasLegacyContract = handoff.enrichment_owner === "local_client"
+    && handoff.enrichment_stage === "before_provider_call";
+  if (!hasNewContract && !hasLegacyContract) {
+    errors.push("handoff must expose remote_skeleton_hash_refs/compact_hash_refs_pull_on_demand or legacy local_client enrichment contract");
+  }
   if (!hasPath(handoff.files?.files_to_modify, PROBE_FILE)) errors.push("handoff.files.files_to_modify missing probe file");
   if (!hasPath(handoff.files?.read_only_context, PROBE_FILE)) errors.push("handoff.files.read_only_context missing probe file");
   if (!Array.isArray(handoff.instructions) || handoff.instructions.length === 0) {

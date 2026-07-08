@@ -1057,6 +1057,9 @@ function renderRouteUsageLines(role, tools, opts = {}) {
       "",
       `Iris rungs are the ${label} evidence ladder, ordered by cost: Rung 1 (~100 token cards) -> Rung 2 (~300 token skeletons) -> Rung 3 (~600 token hot paths) -> Rung 4 (~2000 token raw windows). Escalate only as far as needed — prefer the cheapest rung that answers the question.`,
     );
+    lines.push(
+      `Read-depth rule: for completeness, control-flow, or branch/guard reasoning — enumerations, "every path/write", decoy or negative-evidence questions — window the top load-bearing files (Rung 4) instead of answering from cards or skeletons alone. A skeleton names a branch but not its condition, so single-branch, guard, and cache-disabled details are invisible below a raw window.`,
+    );
     if (tools.includes("code.survey") || tools.includes("code.structure") || tools.includes("code")) {
       lines.push(`Area rule: when evidence spans several files in one area, use ${renderAtlasToolNameForContract("code.structure", opts)} for exact inventory and ${renderAtlasToolNameForContract("code.survey", opts)} for code-content understanding; climb per-file rungs only where the area call left a specific gap.`);
     }
