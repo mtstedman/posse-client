@@ -23,6 +23,133 @@ function writeLine(output, text = "") {
   output.write(`${text}\n`);
 }
 
+function normalizeSelectorChoices(choices) {
+  return (Array.isArray(choices) ? choices : [])
+    .map((choice) => {
+      if (typeof choice === "string") return { value: choice, label: choice, aliases: [] };
+      return {
+        value: String(choice?.value ?? choice?.label ?? "").trim(),
+        label: String(choice?.label ?? choice?.value ?? "").trim(),
+        aliases: (Array.isArray(choice?.aliases) ? choice.aliases : [])
+          .map((alias) => String(alias || "").trim().toLowerCase())
+          .filter(Boolean),
+      };
+    })
+    .filter((choice) => choice.value && choice.label);
+}
+
+function selectorAnswerValue(answer, choices, defaultValue) {
+  const raw = String(answer || "").trim().toLowerCase();
+  const fallback = choices.find((choice) => choice.value === defaultValue) || choices[0] || null;
+  if (!raw) return fallback?.value || "";
+  const match = choices.find((choice) => {
+    const value = choice.value.toLowerCase();
+    const label = choice.label.toLowerCase();
+    return raw === value
+      || raw === label
+      || raw === value[0]
+      || raw === label[0]
+      || choice.aliases.includes(raw);
+  });
+  return match?.value || fallback?.value || "";
+}
+
+function selectorFallbackPrompt(question, choices, defaultValue) {
+  const fallback = choices.find((choice) => choice.value === defaultValue) || choices[0] || null;
+  const labels = choices.map((choice) => choice.label).join(" / ");
+  const defaultLabel = fallback ? ` [${fallback.label.toLowerCase()}]` : "";
+  return `${String(question || "").trimEnd()} ${labels}${defaultLabel}: `;
+}
+
+export function askSelectorChoice(question, choices = [], {
+  defaultValue = null,
+  input = process.stdin,
+  output = process.stdout,
+  colors = C,
+  fallbackAsk = null,
+} = {}) {
+  const normalized = normalizeSelectorChoices(choices);
+  if (normalized.length === 0) return Promise.resolve("");
+  const initialValue = defaultValue || normalized[0].value;
+  const defaultIndex = Math.max(0, normalized.findIndex((choice) => choice.value === initialValue));
+  const fallbackPrompt = selectorFallbackPrompt(question, normalized, normalized[defaultIndex].value);
+
+  if (!input?.isTTY || !output?.isTTY || typeof input.setRawMode !== "function") {
+    const askFallback = typeof fallbackAsk === "function"
+      ? fallbackAsk
+      : (prompt) => ask(prompt, { input, output });
+    return Promise.resolve(askFallback(fallbackPrompt))
+      .then((answer) => selectorAnswerValue(answer, normalized, normalized[defaultIndex].value));
+  }
+
+  return new Promise((resolve) => {
+    let selectedIndex = defaultIndex;
+    let renderedRows = 0;
+    let settled = false;
+    const wasRaw = Boolean(input.isRaw);
+    const wasPaused = typeof input.isPaused === "function" ? input.isPaused() : false;
+
+    const clearRendered = () => {
+      if (renderedRows <= 0) return;
+      output.write(`\x1b[${renderedRows}A\r\x1b[J`);
+      renderedRows = 0;
+    };
+
+    const render = () => {
+      clearRendered();
+      const lines = [String(question || "").trimEnd()];
+      normalized.forEach((choice, index) => {
+        const selected = index === selectedIndex;
+        const marker = selected ? `${colors.cyan}${colors.bold}>${colors.reset}` : " ";
+        const label = selected ? `${colors.cyan}${colors.bold}${choice.label}${colors.reset}` : choice.label;
+        const defaultTag = index === defaultIndex ? ` ${colors.dim}(default)${colors.reset}` : "";
+        lines.push(`    ${marker} ${label}${defaultTag}`);
+      });
+      lines.push(`    ${colors.dim}Use Up/Down, Enter${colors.reset}`);
+      output.write(`${lines.join("\n")}\n`);
+      renderedRows = lines.length;
+    };
+
+    const cleanup = () => {
+      try { input.off("data", onData); } catch { /* best effort */ }
+      try { input.setRawMode(wasRaw); } catch { /* best effort */ }
+      if (wasPaused) {
+        try { input.pause(); } catch { /* best effort */ }
+      }
+    };
+
+    const settle = (index = selectedIndex) => {
+      if (settled) return;
+      settled = true;
+      const choice = normalized[index] || normalized[defaultIndex];
+      clearRendered();
+      output.write(`${String(question || "").trimEnd()} ${choice.label}\n`);
+      cleanup();
+      resolve(choice.value);
+    };
+
+    const move = (delta) => {
+      selectedIndex = (selectedIndex + delta + normalized.length) % normalized.length;
+      render();
+    };
+
+    const onData = (chunk) => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
+      if (!text) return;
+      if (text.includes("\u0003")) return settle(defaultIndex);
+      if (text.includes("\r") || text.includes("\n")) return settle();
+      if (text.includes("\u001b[A") || text.includes("\u001b[D")) return move(-1);
+      if (text.includes("\u001b[B") || text.includes("\u001b[C")) return move(1);
+      if (text.includes("\u001b")) return settle(defaultIndex);
+    };
+
+    try { input.setRawMode(true); } catch { return settle(defaultIndex); }
+    input.on("data", onData);
+    try { input.resume(); } catch { /* best effort */ }
+    render();
+  });
+}
+
 function defaultCompletionHint(terminator, colors = C) {
   if (terminator === "dot") {
     return `${colors.dim}(finish with a single "." on its own line)${colors.reset}`;

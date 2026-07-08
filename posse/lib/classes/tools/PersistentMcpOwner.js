@@ -18,6 +18,7 @@ import {
   bootConfigFromMcpOAuthClaims,
   verifyMcpOAuthToken,
 } from "../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
+import { ATLAS_TOOL_ACTIONS } from "../../domains/atlas/functions/v2/contracts/tool-params.js";
 import { getSharedAtlasToolExecutor } from "../../domains/atlas/functions/v2/tools/executor.js";
 import { operatorFeedbackSignalTextForJob } from "../../domains/providers/functions/shared/tool-runtime.js";
 import { recordToolUseObservations } from "../../domains/observability/functions/observations.js";
@@ -29,6 +30,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
 const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
 const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
+const ATLAS_TOOL_ACTION_SET = new Set(ATLAS_TOOL_ACTIONS);
 
 function randomToken() {
   return crypto.randomBytes(32).toString("base64url");
@@ -160,7 +162,18 @@ function stripAtlasPrefix(name) {
 }
 
 function normalizeAtlasActionName(name) {
-  return stripAtlasPrefix(name).replace(/^atlas_/, "").replace(/_/g, ".").trim();
+  const raw = String(name || "").trim();
+  const stripped = raw.startsWith("atlas.")
+    ? raw.slice("atlas.".length).trim()
+    : (raw.startsWith("atlas_") ? raw.slice("atlas_".length).trim() : raw);
+  if (ATLAS_TOOL_ACTION_SET.has(stripped)) return stripped;
+  const dotted = stripped.replace(/^atlas_/, "").replace(/_/g, ".").trim();
+  if (ATLAS_TOOL_ACTION_SET.has(dotted)) return dotted;
+  const lowered = dotted.toLowerCase();
+  for (const action of ATLAS_TOOL_ACTION_SET) {
+    if (String(action).toLowerCase() === lowered) return action;
+  }
+  return stripped;
 }
 
 function nestedAtlasAction(args = {}) {

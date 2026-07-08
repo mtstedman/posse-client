@@ -151,6 +151,10 @@ export class DisplayStatusRenderer {
         failed,
         running,
         queued,
+        parked,
+        waitingOnHuman,
+        waitingOnReview,
+        blocked,
         assessing,
         resolved,
         fraction,
@@ -161,6 +165,12 @@ export class DisplayStatusRenderer {
       if (running > 0) parts.push(`${C.cyan}${running} running${C.reset}`);
       if (assessing > 0) parts.push(`${C.cyan}${assessing} assessing${C.reset}`);
       if (queued > 0) parts.push(`${C.blue}${queued} queued${C.reset}`);
+      if (waitingOnHuman > 0) parts.push(`${C.yellow}${waitingOnHuman} needs input${C.reset}`);
+      if (waitingOnReview > 0) parts.push(`${C.magenta}${waitingOnReview} needs review${C.reset}`);
+      if (blocked > 0) parts.push(`${C.yellow}${blocked} blocked${C.reset}`);
+      if (parked > waitingOnHuman + waitingOnReview + blocked) {
+        parts.push(`${C.yellow}${parked - waitingOnHuman - waitingOnReview - blocked} parked${C.reset}`);
+      }
       if (failed > 0) parts.push(`${C.red}${failed} failed${C.reset}`);
       const statsStr = parts.join("  ");
       const statsVisible = stripAnsi(statsStr);

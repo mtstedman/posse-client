@@ -369,6 +369,30 @@ function installArgsForPackageManager(manager, root, opts = {}) {
   return ["install"];
 }
 
+function missingNodePackageNames(report) {
+  return [...(report?.missing_required || []), ...(report?.missing_optional || [])];
+}
+
+function missingNodePackageLabels(report) {
+  return [
+    ...(report?.missing_required || []).map((name) => `required:${name}`),
+    ...(report?.missing_optional || []).map((name) => `optional:${name}`),
+  ];
+}
+
+function installArgsForMissingNodePackages(manager, root, missingNames, opts = {}) {
+  if (manager !== "npm" || !Array.isArray(missingNames) || missingNames.length === 0) return null;
+  return [
+    "install",
+    "--include=optional",
+    "--legacy-peer-deps",
+    "--no-save",
+    "--cache",
+    nodeInstallCacheDir(root, opts),
+    ...missingNames,
+  ];
+}
+
 function commandOnPath(command) {
   const probe = process.platform === "win32" ? "where" : "which";
   const result = spawnSync(probe, [command.replace(/\.(cmd|bat)$/iu, "")], {
@@ -743,19 +767,36 @@ async function ensureNodeProject(entry, opts) {
   if (!run.ok) {
     return { ...before, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${before.manager} install failed: ${firstLine(run.message)}` };
   }
-  const after = inspectNodeProject(entry.root);
-  const requiredOk = after.missing_required.length === 0;
-  if (requiredOk && !opts.dryRun) writeNodeManifestStamp(entry.root, after.manifest_hash || before.manifest_hash);
+  let after = inspectNodeProject(entry.root);
+  let missingAfter = missingNodePackageLabels(after);
+  let usedFocusedRetry = false;
+  const retryArgs = installArgsForMissingNodePackages(before.manager, entry.root, missingNodePackageNames(after), opts);
+  if (missingAfter.length > 0 && retryArgs) {
+    opts.onProgress?.(`${entry.label}: ${before.manager} focused install ${missingNodePackageNames(after).join(", ")}`);
+    const retry = await runCommand(command, retryArgs, {
+      cwd: entry.root,
+      timeoutMs: opts.timeoutMs,
+      onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
+    });
+    if (!retry.ok) {
+      return { ...after, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${before.manager} focused install failed: ${firstLine(retry.message)}` };
+    }
+    after = inspectNodeProject(entry.root);
+    missingAfter = missingNodePackageLabels(after);
+    usedFocusedRetry = true;
+  }
+  const packagesOk = missingAfter.length === 0;
+  if (packagesOk && !opts.dryRun) writeNodeManifestStamp(entry.root, after.manifest_hash || before.manifest_hash);
   return {
     ...after,
     label: entry.label,
-    ok: requiredOk,
-    status: requiredOk ? "installed" : "failed",
+    ok: packagesOk,
+    status: packagesOk ? "installed" : "failed",
     action: "install",
     generated_ignore: generatedIgnore,
-    message: requiredOk
-      ? `${before.manager} install completed`
-      : `missing required packages after install: ${after.missing_required.join(", ")}`,
+    message: packagesOk
+      ? `${before.manager} install completed${usedFocusedRetry ? " after focused retry" : ""}`
+      : `missing packages after install: ${missingAfter.join(", ")}`,
   };
 }
 

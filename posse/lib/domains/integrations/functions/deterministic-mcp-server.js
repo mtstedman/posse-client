@@ -574,7 +574,7 @@ function _stripAtlasPrefix(name) {
 
 function _normalizeAtlasToolRequestName(name) {
   const raw = String(name || "").trim();
-  if (raw.startsWith("atlas_")) return `atlas.${raw.slice("atlas_".length).replace(/_/g, ".")}`;
+  if (raw.startsWith("atlas_")) return `atlas.${_normalizeAtlasActionForAllowlist(raw)}`;
   return raw;
 }
 
@@ -604,10 +604,15 @@ function isStaticAtlasToolName(toolName) {
 const ATLAS_GATEWAY_TOOL_NAMES = new Set(["query", "code", "repo", "agent"]);
 
 function _normalizeAtlasActionForAllowlist(name) {
-  const raw = _stripAtlasPrefix(name).replace(/^atlas_/, "").replace(/_/g, ".").trim();
+  const value = String(name || "").trim();
+  const raw = value.startsWith("atlas.")
+    ? value.slice("atlas.".length).trim()
+    : (value.startsWith("atlas_") ? value.slice("atlas_".length).trim() : value);
   if (!raw) return "";
   if (ATLAS_TOOL_ACTIONS.includes(/** @type {any} */ (raw))) return raw;
-  const lowered = raw.toLowerCase();
+  const dotted = raw.replace(/^atlas_/, "").replace(/_/g, ".").trim();
+  if (ATLAS_TOOL_ACTIONS.includes(/** @type {any} */ (dotted))) return dotted;
+  const lowered = dotted.toLowerCase();
   for (const action of ATLAS_TOOL_ACTIONS) {
     if (String(action).toLowerCase() === lowered) return action;
   }

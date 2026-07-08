@@ -228,7 +228,7 @@ import {
   researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { ask, askMultiline } from "./input-prompts.js";
+import { ask, askMultiline, askSelectorChoice } from "./input-prompts.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -947,18 +947,44 @@ function normalizeResponseShapeChoice(value, fallback = "auto") {
   return { value: RESPONSE_SHAPE_ALIASES.get(raw) || raw, explicit: true };
 }
 
+async function promptForResponseShapeChoice(defaultOutputMode = "auto") {
+  const value = await askSelectorChoice("  Response shape?", [
+    { value: "auto", label: "Auto", aliases: ["a"] },
+    { value: "repo", label: "Repo", aliases: ["r", "code"] },
+    { value: "artifact", label: "Artifact", aliases: ["f", "file", "files"] },
+    { value: "question_only", label: "Question", aliases: ["q", "question-only", "question"] },
+  ], {
+    defaultValue: defaultOutputMode || "auto",
+    fallbackAsk: (prompt) => ask(prompt),
+  });
+  return normalizeResponseShapeChoice(value, defaultOutputMode);
+}
+
 function normalizeThinkingBudgetChoice(value, defaultDeepthink = false) {
   const raw = String(value || "").trim().toLowerCase();
-  if (!raw || ["a", "auto", "normal", "n"].includes(raw)) {
+  if (!raw) {
     return { deepthink: !!defaultDeepthink, oneshot: false };
   }
+  if (["a", "auto", "normal", "n"].includes(raw)) return { deepthink: false, oneshot: false };
   if (["d", "deepthink", "deep", "think", "thinking", "y", "yes"].includes(raw)) {
     return { deepthink: true, oneshot: false };
   }
   if (["o", "oneshot", "one-shot", "one_shot", "1shot"].includes(raw)) {
-    return { deepthink: !!defaultDeepthink, oneshot: true };
+    return { deepthink: false, oneshot: true };
   }
   return { deepthink: !!defaultDeepthink, oneshot: false };
+}
+
+async function promptForThinkingBudgetChoice(defaultDeepthink = false) {
+  const value = await askSelectorChoice("  Thinking budget?", [
+    { value: "auto", label: "Auto" },
+    { value: "deepthink", label: "Deepthink" },
+    { value: "oneshot", label: "One-shot" },
+  ], {
+    defaultValue: "auto",
+    fallbackAsk: (prompt) => ask(prompt),
+  });
+  return normalizeThinkingBudgetChoice(value || "auto", defaultDeepthink);
 }
 
 function normalizeSuggestedFilePath(value) {
@@ -1079,8 +1105,7 @@ async function promptForScopedAdd(description, defaultMode = "build", defaultDee
     const profile = getIterativeWorkflowProfile(workflowMode);
     let deepthink = defaultDeepthink || !!profile.deepthink;
     if (!defaultDeepthink && !profile.deepthink) {
-      const budgetInput = await ask(`  Thinking budget? [A]uto / [D]eepthink / [O]neshot [auto]: `);
-      deepthink = normalizeThinkingBudgetChoice(budgetInput, false).deepthink;
+      deepthink = (await promptForThinkingBudgetChoice(false)).deepthink;
     }
     return {
       intakeHints: applyIterativeWorkflowProfile(normalizeIntakeHints({
@@ -1101,14 +1126,8 @@ async function promptForScopedAdd(description, defaultMode = "build", defaultDee
   }
 
   const defaultOutputMode = baseHints.output_mode || defaultOutputModeForMode(defaultMode);
-  const responseShape = normalizeResponseShapeChoice(
-    await ask(`  Response shape? [A]uto / [R]epo / arti[F]act / [Q]uestion [${defaultOutputMode}]: `),
-    defaultOutputMode,
-  );
-  const budgetChoice = normalizeThinkingBudgetChoice(
-    await ask(`  Thinking budget? [A]uto / [D]eepthink / [O]neshot [auto]: `),
-    defaultDeepthink,
-  );
+  const responseShape = await promptForResponseShapeChoice(defaultOutputMode);
+  const budgetChoice = await promptForThinkingBudgetChoice(defaultDeepthink);
   let suspectedFiles = baseHints.suspected_files;
   if (budgetChoice.oneshot && (!Array.isArray(suspectedFiles) || suspectedFiles.length === 0)) {
     const fileHint = await promptForOneshotFileHint(description);

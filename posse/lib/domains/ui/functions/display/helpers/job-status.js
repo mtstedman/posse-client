@@ -1,6 +1,6 @@
 // lib/display/helpers/job-status.js
 
-import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../../queue/functions/common.js";
+import { FAILED_JOB_STATUSES, PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../../queue/functions/common.js";
 import { MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../../../catalog/job.js";
 
 export const JOB_TYPE_ABBR = {
@@ -64,6 +64,7 @@ export function reviewVisibleJobs(jobs = []) {
 }
 
 const JOB_FAILURE_STATUSES = new Set(FAILED_JOB_STATUSES);
+const PARKED_JOB_STATUS_SET = new Set(PARKED_JOB_STATUSES);
 
 /** Strip redundant job_type prefix from title (e.g., "research: Research X" -> "Research X") */
 export function jobLabel(jobType, title) {
@@ -167,6 +168,10 @@ export function computeJobProgressStats(jobs = []) {
   const canceled = allJobs.filter((job) => job?.status === "canceled").length;
   const running = allJobs.filter((job) => job?.status === "running").length;
   const queued = allJobs.filter((job) => job?.status === "queued").length;
+  const parked = allJobs.filter((job) => PARKED_JOB_STATUS_SET.has(job?.status)).length;
+  const waitingOnHuman = allJobs.filter((job) => job?.status === "waiting_on_human").length;
+  const waitingOnReview = allJobs.filter((job) => job?.status === "waiting_on_review").length;
+  const blocked = allJobs.filter((job) => job?.status === "blocked").length;
   const assessing = allJobs.filter((job) => job?.status === "awaiting_assessment").length;
   const resolved = succeeded + failed + canceled;
   return {
@@ -176,6 +181,10 @@ export function computeJobProgressStats(jobs = []) {
     canceled,
     running,
     queued,
+    parked,
+    waitingOnHuman,
+    waitingOnReview,
+    blocked,
     assessing,
     resolved,
     fraction: total > 0 ? resolved / total : 0,

@@ -16,7 +16,8 @@ import { recordRunDiagnostic } from "../../../shared/telemetry/functions/run-dia
 import { ensureBootDependenciesInWorker, formatBootDependencySync } from "../../system/functions/dependency-sync.js";
 import { repairMissingProviderDependencies, getProvidersNeedingDependencyRepair } from "../../providers/functions/provider.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
-import { LOCK_HOLDING_JOB_STATUSES } from "../../../catalog/job.js";
+import { LOCK_HOLDING_JOB_STATUSES, PARKED_JOB_STATUSES } from "../../../catalog/job.js";
+import { TERMINAL_WORK_ITEM_STATUSES, WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { nativeBinaries as defaultNativeBinaries } from "../../../classes/tools/BinaryManager.js";
 import { daemonSupervisor as defaultDaemonSupervisor } from "../../../classes/tools/daemon/index.js";
@@ -42,6 +43,10 @@ import {
   formatPosseUpdateAvailableWarning,
 } from "../functions/update-command.js";
 import { createRunWrapUpTracker } from "../functions/review-session.js";
+
+const OPEN_WORK_ITEM_STATUSES = Object.freeze(
+  WORK_ITEM_STATUSES.filter((status) => !TERMINAL_WORK_ITEM_STATUSES.includes(status)),
+);
 
 export class RunSession {
   constructor(deps = {}) {
@@ -224,16 +229,46 @@ export class RunSession {
     : [];
   const scopedWorkItemIdSet = new Set(scopedWorkItemIds);
   const isScopedRun = scopedWorkItemIdSet.size > 0;
+  const refreshRunVisibleWorkItems = () => {
+    if (typeof refreshWorkItemStatus !== "function") return;
+    const items = isScopedRun
+      ? scopedWorkItemIds.map((id) => getWorkItem(id)).filter(Boolean)
+      : listWorkItems(OPEN_WORK_ITEM_STATUSES);
+    for (const item of items) {
+      if (!item?.id || TERMINAL_WORK_ITEM_STATUSES.includes(item.status)) continue;
+      try { refreshWorkItemStatus(item.id); } catch { /* best-effort status repair before run selection */ }
+    }
+  };
+  const describeScopedWorkItems = () => scopedWorkItemIds
+    .map((id) => getWorkItem(id))
+    .filter(Boolean)
+    .map((item) => `WI#${item.id} ${item.status}`)
+    .join(", ");
+  refreshRunVisibleWorkItems();
   maybeAnnounceAutoMergeSetting();
   const allCandidateJobs = listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
   const jobs = isScopedRun
     ? allCandidateJobs.filter((job) => scopedWorkItemIdSet.has(Number(job.work_item_id)))
     : allCandidateJobs;
   const needsGit = jobsNeedGitWorktree(jobs);
+  const parkedStatusSet = new Set(PARKED_JOB_STATUSES);
+  const parkedJobs = jobs.filter((job) => parkedStatusSet.has(job.status));
+  const runnableOrActiveJobs = jobs.filter((job) => !parkedStatusSet.has(job.status));
+  const sessionCountLabel = () => {
+    const parts = [`${runnableOrActiveJobs.length} runnable/active job(s)`];
+    if (parkedJobs.length > 0) parts.push(`${parkedJobs.length} parked/waiting`);
+    return parts.join(", ");
+  };
+  if (runnableOrActiveJobs.length === 0 && parkedJobs.length > 0 && !useTui) {
+    console.log(`\n  ${C.yellow}No runnable jobs. ${parkedJobs.length} parked/waiting job(s) need the TUI or operator action before work can continue.${C.reset}\n`);
+    return;
+  }
 
   if (jobs.length === 0) {
     if (isScopedRun) {
-      console.log(`\n  No active jobs for scoped work item(s): ${scopedWorkItemIds.join(", ")}.\n`);
+      const scopedSummary = describeScopedWorkItems();
+      const suffix = scopedSummary ? ` (${scopedSummary})` : "";
+      console.log(`\n  No runnable jobs for scoped work item(s): ${scopedWorkItemIds.join(", ")}${suffix}.\n`);
       return;
     }
     const iterateResult = await processIterativeWrapUp({
@@ -248,7 +283,7 @@ export class RunSession {
     // No active jobs — but if there are reviewable work items, go straight to review
     const reviewable = listWorkItems(["complete", "failed"]).filter(isReviewableWorkItem);
     if (reviewable.length > 0) {
-      console.log(`\n  ${C.bold}No active jobs — ${reviewable.length} work item(s) ready for review.${C.reset}\n`);
+      console.log(`\n  ${C.bold}No runnable jobs — ${reviewable.length} work item(s) ready for review.${C.reset}\n`);
       await cmdReview();
       return;
     }
@@ -256,7 +291,17 @@ export class RunSession {
       await offerPush?.(autoMergedNow);
       return;
     }
-    console.log(`\n  No active jobs. Use 'plan' to create jobs from queued items.\n`);
+    const openWorkItems = listWorkItems(OPEN_WORK_ITEM_STATUSES);
+    if (openWorkItems.length > 0) {
+      const summary = openWorkItems
+        .slice(0, 5)
+        .map((item) => `WI#${item.id} ${item.status}`)
+        .join(", ");
+      const more = openWorkItems.length > 5 ? `, +${openWorkItems.length - 5} more` : "";
+      console.log(`\n  No runnable jobs. ${openWorkItems.length} open work item(s) are parked or blocked: ${summary}${more}.\n`);
+      return;
+    }
+    console.log(`\n  No runnable jobs. Use 'plan' to create jobs from queued items.\n`);
     return;
   }
 
@@ -276,7 +321,7 @@ export class RunSession {
   const isResume = resumed.length > 0 || stallResume.length > 0 || wiWithBranch.length > 0;
 
   if (isResume) {
-    console.log(`\n  ${C.green}${C.bold}Resuming session${C.reset}${C.green}: ${jobs.length} active job(s) (concurrency: ${CONCURRENCY})${isScopedRun ? ` scoped to WI#${scopedWorkItemIds.join(", WI#")}` : ""}${C.reset}`);
+    console.log(`\n  ${C.green}${C.bold}Resuming session${C.reset}${C.green}: ${sessionCountLabel()} (concurrency: ${CONCURRENCY})${isScopedRun ? ` scoped to WI#${scopedWorkItemIds.join(", WI#")}` : ""}${C.reset}`);
     if (wiWithBranch.length > 0)
       console.log(`  ${C.cyan}Rejoining ${wiWithBranch.length} worktree(s)${C.reset}`);
     if (stallResume.length > 0)
@@ -285,7 +330,8 @@ export class RunSession {
       console.log(`  ${C.yellow}${resumed.length} previously in-flight job(s) requeued${C.reset}`);
     console.log();
   } else {
-    console.log(`\n  ${C.bold}New session: ${jobs.length} active job(s) (concurrency: ${CONCURRENCY})${isScopedRun ? ` scoped to WI#${scopedWorkItemIds.join(", WI#")}` : ""}${C.reset}\n`);
+    console.log(`\n  ${C.bold}New session: ${sessionCountLabel()} (concurrency: ${CONCURRENCY})${isScopedRun ? ` scoped to WI#${scopedWorkItemIds.join(", WI#")}` : ""}${C.reset}`);
+    console.log();
   }
 
   // ════════════════════════════════════════════════════════════════════════

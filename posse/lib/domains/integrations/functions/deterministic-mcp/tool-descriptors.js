@@ -436,6 +436,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
 });
 
 const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
+  "fetch_ref",
   "repo.overview",
   "tree.overview",
   "tree.scope",
@@ -547,7 +548,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     artificer: Object.freeze({
       phase: null,
       tools: Object.freeze([]),
-      rationale: "Artificer produces non-code deliverables; ATLAS retrieval is not in scope, deterministic write tools handle artifact output.",
+      internalTools: Object.freeze(["fetch_ref"]),
+      rationale: "Artificer produces non-code deliverables; ATLAS retrieval is not in scope, but remote policy may issue citation ref fetches.",
     }),
     delegator: Object.freeze({
       phase: null,
