@@ -8,7 +8,7 @@ import {
 } from "../../functions/v2/parser/languages/index.js";
 import { parserFor } from "../../functions/v2/parser/treesitter/loader.js";
 import { parseBuffer } from "../../functions/v2/parser/adapter.js";
-import { nativeBinaries } from "../../../../classes/tools/BinaryManager.js";
+import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
 
 /** @typedef {import("../../functions/v2/contracts/api.js").ParserAdapter} ParserAdapterContract */
 /** @typedef {import("../../functions/v2/contracts/schemas.js").ParseResult} ParseResult */

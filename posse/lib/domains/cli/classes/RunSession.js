@@ -18,10 +18,12 @@ import { repairMissingProviderDependencies, getProvidersNeedingDependencyRepair 
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 import { LOCK_HOLDING_JOB_STATUSES, PARKED_JOB_STATUSES } from "../../../catalog/job.js";
 import { TERMINAL_WORK_ITEM_STATUSES, WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
+import { parseWorkItemMetadata } from "../../planning/functions/state.js";
+import { getResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
-import { nativeBinaries as defaultNativeBinaries } from "../../../classes/tools/BinaryManager.js";
-import { daemonSupervisor as defaultDaemonSupervisor } from "../../../classes/tools/daemon/index.js";
-import { persistentMcpOwner } from "../../../classes/tools/PersistentMcpOwner.js";
+import { nativeBinaries as defaultNativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
+import { daemonSupervisor as defaultDaemonSupervisor } from "../../../shared/tools/classes/daemon/index.js";
+import { persistentMcpOwner } from "../../../shared/tools/classes/PersistentMcpOwner.js";
 import { RunBootPanelController } from "./RunBootPanelController.js";
 import { RunCloseoutController } from "./RunCloseoutController.js";
 import { RunDisplayActions } from "./RunDisplayActions.js";
@@ -110,6 +112,7 @@ export class RunSession {
       Worker,
       AUTO_APPROVE,
       DRY_RUN,
+      nonInteractive = false,
       RUN_WORK_ITEM_IDS = [],
       requeueForShutdown,
       requeueWaitingHumanInputJobs,
@@ -126,6 +129,7 @@ export class RunSession {
       getResolvedImageProtocol,
       createJob,
       getJob,
+      listJobsByWorkItem,
       getToolInvocationCountsByJob,
       getRecentToolInvocations,
       listActiveFileLocks,
@@ -244,7 +248,33 @@ export class RunSession {
     .filter(Boolean)
     .map((item) => `WI#${item.id} ${item.status}`)
     .join(", ");
+  const seedInitialJobsForBootWorkItems = (items, source) => {
+    let created = 0;
+    for (const item of items) {
+      const status = String(item?.status || "").toLowerCase();
+      if (status !== "queued" && status !== "planning") continue;
+      const existingJobs = typeof listJobsByWorkItem === "function" ? listJobsByWorkItem(item.id) : [];
+      if (Array.isArray(existingJobs) && existingJobs.length > 0) continue;
+      const deepthinkBudget = getResearchBudget(item);
+      const metadata = parseWorkItemMetadata(item);
+      createInitialResearchOrPlanJob(item, {
+        deepthinkBudget,
+        deepthinkBudgetExplicit: metadata.research_budget_explicit === true,
+        source,
+        redTeamPlan: shouldUseRedTeamPlanForWorkItem(item),
+        routing: classifyResearchForRouting({ workItem: item, source, live: true }),
+      });
+      const freshStatus = String(getWorkItem(item.id)?.status || status).toLowerCase();
+      if (freshStatus === "queued") updateWorkItemStatus(item.id, "planning");
+      created += 1;
+    }
+    return created;
+  };
   refreshRunVisibleWorkItems();
+  const seedableRunItems = isScopedRun
+    ? scopedWorkItemIds.map((id) => getWorkItem(id)).filter(Boolean)
+    : listWorkItems(["queued", "planning"]);
+  seedInitialJobsForBootWorkItems(seedableRunItems, isScopedRun ? "run_scoped" : "run");
   maybeAnnounceAutoMergeSetting();
   const allCandidateJobs = listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
   const jobs = isScopedRun
@@ -2253,7 +2283,7 @@ export class RunSession {
     display.addEvent(`${C.green}Boot complete — entering main loop${C.reset}`);
   }
 
-  worker = new Worker({ autoApprove: AUTO_APPROVE, projectDir: PROJECT_DIR, display, dryRun: DRY_RUN, stallTimeout: STALL_TIMEOUT, leaseSec: scheduler.leaseSec });
+  worker = new Worker({ autoApprove: AUTO_APPROVE, projectDir: PROJECT_DIR, display, dryRun: DRY_RUN, nonInteractive, stallTimeout: STALL_TIMEOUT, leaseSec: scheduler.leaseSec });
 
   if (display) {
     const revivedHumanJobs = requeueWaitingHumanInputJobs();

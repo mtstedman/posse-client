@@ -17,7 +17,7 @@ import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functi
 import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
 import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
-import { canonicalAtlasActionName, formatAtlasToolDisplayName } from "../../../functions/tools/mcp-surface.js";
+import { canonicalAtlasActionName, formatAtlasToolDisplayName } from "../../../shared/tools/functions/mcp-surface.js";
 
 const REQUEST_TIMEOUT_MS = 120_000;
 const ATLAS_DEDUPE_WINDOW_MS = 1500;

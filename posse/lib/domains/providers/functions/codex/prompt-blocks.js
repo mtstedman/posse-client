@@ -1,5 +1,5 @@
-import { WEB_TOOL_ROLES } from "../../../../functions/tools/contract.js";
-import { buildMcpSurfaceToolDescriptors } from "../../../../functions/tools/mcp-surface.js";
+import { WEB_TOOL_ROLES } from "../../../../shared/tools/functions/contract.js";
+import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
 import { atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 
 function codexMcpSurfaceExample(canonicalName) {

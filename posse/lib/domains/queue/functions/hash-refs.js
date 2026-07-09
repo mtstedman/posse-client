@@ -1,5 +1,5 @@
-import { HashMinter } from "../../../classes/hash-store/HashMinter.js";
-import { HashRefStore } from "../../../classes/hash-store/HashRefStore.js";
+import { HashMinter } from "../../../shared/tools/classes/hash-store/HashMinter.js";
+import { HashRefStore } from "../../../shared/tools/classes/hash-store/HashRefStore.js";
 import {
   HASH_REF_OWNER_SCOPE_SET,
 } from "../../../catalog/hash-store.js";

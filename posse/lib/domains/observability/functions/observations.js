@@ -6,7 +6,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { TOOL_CATALOG, TOOL_OBSERVATION_ALIASES } from "../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { isPosseMcpGatewaySurfaceName, stripPosseMcpGatewayPrefix } from "../../integrations/functions/mcp-gateway.js";
 import { redactBridgeValue, redactString } from "../../bridge/functions/redaction.js";
-import { canonicalAtlasToolUseActionName, formatAtlasToolDisplayName } from "../../../functions/tools/mcp-surface.js";
+import { canonicalAtlasToolUseActionName, formatAtlasToolDisplayName } from "../../../shared/tools/functions/mcp-surface.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
 import { markTelemetryRowsMirrored, pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";

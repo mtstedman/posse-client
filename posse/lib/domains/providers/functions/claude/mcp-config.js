@@ -1,4 +1,4 @@
-import { buildMcpSurfaceToolDescriptors } from "../../../../functions/tools/mcp-surface.js";
+import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
 import {
   buildDisabledAtlasAttachment,
   buildAtlasMcpServerConfig,

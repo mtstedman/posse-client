@@ -14,7 +14,7 @@ const LADDER_STATE_LIMIT = 5000;
 const LADDER_TTL_MS = 60 * 60 * 1000;
 
 // Bounded advisory-policy cache keyed by session/target. This is the narrow
-// module-level mutable state exception allowed for lib/functions helpers.
+// Module-level mutable state exception: narrow cache for retrieval helpers.
 /** @type {Map<string, { seen: Set<number>, updatedAt: number }>} */
 const LADDER_STATE = new Map();
 

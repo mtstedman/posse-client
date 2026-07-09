@@ -89,6 +89,38 @@ function stallRecoveryRetryCount(job) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+function recoveryIsUnattended(worker) {
+  if (worker?.nonInteractive) return true;
+  if (process.env.POSSE_AB_HARNESS || process.env.POSSE_AB_CELL || process.env.POSSE_AB_ARM) return true;
+  return !(worker?.display && typeof worker.display.askQuestions === "function");
+}
+
+function unattendedRecoveryReason(worker) {
+  if (worker?.nonInteractive) return "non-interactive run";
+  if (process.env.POSSE_AB_HARNESS || process.env.POSSE_AB_CELL || process.env.POSSE_AB_ARM) return "harness run";
+  return "no interactive TUI";
+}
+
+function emitUnattendedRecoverySkipped(worker, job, label, details = {}) {
+  const reason = unattendedRecoveryReason(worker);
+  worker?.emit?.(
+    job.id,
+    `${C.yellow}[recovery] WI#${job.work_item_id} ${label} dead-lettered; recovery human_input skipped (${reason})${C.reset}`,
+  );
+  logEvent({
+    work_item_id: job.work_item_id,
+    job_id: job.id,
+    event_type: EVENT_TYPES.JOB_DEAD_LETTER_RECOVERY,
+    actor_type: EVENT_ACTORS.WORKER,
+    message: `${label} dead-letter recovery skipped (${reason})`,
+    event_json: JSON.stringify({
+      suppressed: true,
+      reason,
+      ...details,
+    }),
+  });
+}
+
 function currentProviderSettingSummary(job) {
   const role = providerSettingRoleForJobType(job?.job_type || "");
   const key = `provider_${role}`;
@@ -178,7 +210,14 @@ export function spawnDeadLetterRecoveryForDependents(worker, job, freshJob = nul
   const dependents = getDependents(job.id);
   const isRecoveryJob = job.job_type === "human_input" || (job.title && job.title.startsWith("Dead-letter recovery:"));
   if (dependents.length === 0 || isRecoveryJob) {
-    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob };
+    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: false };
+  }
+  if (recoveryIsUnattended(worker)) {
+    emitUnattendedRecoverySkipped(worker, job, "Dependent job", {
+      dependent_count: dependents.length,
+      recovery_kind: "dead_letter_recovery",
+    });
+    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: true };
   }
 
   const attemptHistory = buildAttemptSummary(job.id);
@@ -212,7 +251,7 @@ export function spawnDeadLetterRecoveryForDependents(worker, job, freshJob = nul
     message: `Dead-letter recovery: spawned human_input #${recoveryJob.id}, rewired ${dependents.length} dependent(s)`,
   });
 
-  return { spawned: true, recoveryJob, dependents, isRecoveryJob };
+  return { spawned: true, recoveryJob, dependents, isRecoveryJob, suppressed: false };
 }
 
 function isTurnBudgetExhaustedError(errorDetails = null) {
@@ -519,32 +558,38 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhauste
     const deadLetterPayload = parseJobPayload(job);
     const isOneshotLeaf = job.job_type === "dev" && (deadLetterPayload.oneshot === true || deadLetterPayload.oneshot_origin === true);
     if (!recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf)) {
-      const attemptHistory = buildAttemptSummary(job.id);
-      const pipelineHeadLabel = isOneshotLeaf ? "One-shot dev job" : "Research job";
-      const recoveryJob = createJob({
-        work_item_id: job.work_item_id,
-        job_type: "human_input",
-        title: `${isOneshotLeaf ? "One-shot failed" : "Research failed"}: ${job.title.slice(0, 80)}`,
-        parent_job_id: job.id,
-        priority: "urgent",
-        model_tier: "cheap",
-        payload_json: JSON.stringify({
-          original_job_id: job.id,
-          review_type: isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery",
-          questions: [
-            `${pipelineHeadLabel} #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nThis is the pipeline head — nothing else can proceed until this is resolved.\nShould we retry with different parameters, retry with a different provider (claude/openai/codex/grok), simplify the scope, replan, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
-          ],
-          context: `This ${isOneshotLeaf ? "one-shot dev" : "research"} job is the pipeline head for the work item. No downstream jobs exist yet. The attempt history shows what went wrong on each try.`,
-        }),
-      });
-      worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} ${isOneshotLeaf ? "one-shot" : "research"} dead-lettered — spawned human_input #${recoveryJob.id}${C.reset}`);
-      logEvent({
-        work_item_id: job.work_item_id,
-        job_id: job.id,
-        event_type: EVENT_TYPES.JOB_DEAD_LETTER_RECOVERY,
-        actor_type: EVENT_ACTORS.WORKER,
-        message: `${isOneshotLeaf ? "One-shot" : "Research"} dead-letter recovery: spawned human_input #${recoveryJob.id}`,
-      });
+      if (recoveryIsUnattended(worker)) {
+        emitUnattendedRecoverySkipped(worker, job, isOneshotLeaf ? "One-shot" : "Research", {
+          recovery_kind: isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery",
+        });
+      } else {
+        const attemptHistory = buildAttemptSummary(job.id);
+        const pipelineHeadLabel = isOneshotLeaf ? "One-shot dev job" : "Research job";
+        const recoveryJob = createJob({
+          work_item_id: job.work_item_id,
+          job_type: "human_input",
+          title: `${isOneshotLeaf ? "One-shot failed" : "Research failed"}: ${job.title.slice(0, 80)}`,
+          parent_job_id: job.id,
+          priority: "urgent",
+          model_tier: "cheap",
+          payload_json: JSON.stringify({
+            original_job_id: job.id,
+            review_type: isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery",
+            questions: [
+              `${pipelineHeadLabel} #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nThis is the pipeline head — nothing else can proceed until this is resolved.\nShould we retry with different parameters, retry with a different provider (claude/openai/codex/grok), simplify the scope, replan, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
+            ],
+            context: `This ${isOneshotLeaf ? "one-shot dev" : "research"} job is the pipeline head for the work item. No downstream jobs exist yet. The attempt history shows what went wrong on each try.`,
+          }),
+        });
+        worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} ${isOneshotLeaf ? "one-shot" : "research"} dead-lettered — spawned human_input #${recoveryJob.id}${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          event_type: EVENT_TYPES.JOB_DEAD_LETTER_RECOVERY,
+          actor_type: EVENT_ACTORS.WORKER,
+          message: `${isOneshotLeaf ? "One-shot" : "Research"} dead-letter recovery: spawned human_input #${recoveryJob.id}`,
+        });
+      }
     } else if (dependents.length === 0 && !isRecoveryJob && stallExhausted) {
       const stallRecoveryCount = stallRecoveryRetryCount(job);
       if (stallRecoveryCount >= MAX_STALL_EXHAUSTED_RECOVERY_RETRIES) {
@@ -561,36 +606,43 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhauste
           }),
         });
       } else {
-      const attemptHistory = buildAttemptSummary(job.id);
-      const recoveryJob = createJob({
-        work_item_id: job.work_item_id,
-        job_type: "human_input",
-        title: `Stall recovery: ${job.title.slice(0, 80)}`,
-        parent_job_id: job.id,
-        priority: "urgent",
-        model_tier: "cheap",
-        payload_json: JSON.stringify({
-          original_job_id: job.id,
-          questions: [
-            `Job #${job.id} "${job.title}" was dead-lettered after repeated stall kills.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nHow should we proceed?\n- Retry with a larger stall timeout\n- Retry with a different provider\n- Narrow/simplify scope\n- Skip this job`,
-          ],
-          context: `This job repeatedly stalled and exhausted the stall retry budget. It has no downstream dependents, so explicit operator guidance is needed before retrying.`,
-          review_type: "stall_exhausted_recovery",
-        }),
-      });
-      worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} stalled out — spawned human_input #${recoveryJob.id}${C.reset}`);
-      logEvent({
-        work_item_id: job.work_item_id,
-        job_id: job.id,
-        event_type: EVENT_TYPES.JOB_DEAD_LETTER_RECOVERY,
-        actor_type: EVENT_ACTORS.WORKER,
-        message: `Stall-exhausted recovery: spawned human_input #${recoveryJob.id}`,
-        event_json: JSON.stringify({
-          recovery_job_id: recoveryJob.id,
-          stall_recovery_count: stallRecoveryCount,
-          max_stall_recoveries: MAX_STALL_EXHAUSTED_RECOVERY_RETRIES,
-        }),
-      });
+        if (recoveryIsUnattended(worker)) {
+          emitUnattendedRecoverySkipped(worker, job, "Stall", {
+            recovery_kind: "stall_exhausted_recovery",
+            stall_recovery_count: stallRecoveryCount,
+          });
+        } else {
+          const attemptHistory = buildAttemptSummary(job.id);
+          const recoveryJob = createJob({
+            work_item_id: job.work_item_id,
+            job_type: "human_input",
+            title: `Stall recovery: ${job.title.slice(0, 80)}`,
+            parent_job_id: job.id,
+            priority: "urgent",
+            model_tier: "cheap",
+            payload_json: JSON.stringify({
+              original_job_id: job.id,
+              questions: [
+                `Job #${job.id} "${job.title}" was dead-lettered after repeated stall kills.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nHow should we proceed?\n- Retry with a larger stall timeout\n- Retry with a different provider\n- Narrow/simplify scope\n- Skip this job`,
+              ],
+              context: `This job repeatedly stalled and exhausted the stall retry budget. It has no downstream dependents, so explicit operator guidance is needed before retrying.`,
+              review_type: "stall_exhausted_recovery",
+            }),
+          });
+          worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} stalled out — spawned human_input #${recoveryJob.id}${C.reset}`);
+          logEvent({
+            work_item_id: job.work_item_id,
+            job_id: job.id,
+            event_type: EVENT_TYPES.JOB_DEAD_LETTER_RECOVERY,
+            actor_type: EVENT_ACTORS.WORKER,
+            message: `Stall-exhausted recovery: spawned human_input #${recoveryJob.id}`,
+            event_json: JSON.stringify({
+              recovery_job_id: recoveryJob.id,
+              stall_recovery_count: stallRecoveryCount,
+              max_stall_recoveries: MAX_STALL_EXHAUSTED_RECOVERY_RETRIES,
+            }),
+          });
+        }
       }
     }
 

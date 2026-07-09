@@ -11,8 +11,8 @@ import OpenAI from "openai";
 import { getSetting } from "../../../queue/functions/index.js";
 import { getResolvedImageProtocol } from "../../../artifacts/functions/index.js";
 import { composeRemoteAssessorPromptForProvider } from "../shared/remote-assessor-prompt.js";
-import { appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../functions/tools/contract.js";
-import { formatAtlasToolUseDisplayName } from "../../../../functions/tools/mcp-surface.js";
+import { appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
+import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { buildDisabledAtlasAttachment, logAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import {
   configureGate,
@@ -39,7 +39,7 @@ import { signalAbortError } from "../../../runtime/functions/yield.js";
 export { extractJson };
 export { getUsageSummary };
 
-import { LIVE_CHANNEL_TOOL_NAMES } from "../../../../functions/tools/tool-suites.js";
+import { LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/tools/functions/tool-suites.js";
 const LIVE_CHANNEL_TURN_LIMIT = 12;
 
 function abortableThrottle(ms, signal = null) {

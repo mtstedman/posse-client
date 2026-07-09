@@ -128,7 +128,7 @@ export function normalizeParseResultForNativeParity(result) {
  * }} args
  * @param {{
  *   nodeParseBuffer: (args: { bytes: Buffer | string, repo_rel_path: string, lang?: string }) => ParseResult,
- *   manager?: import("../../../../../classes/tools/BinaryManager.js").BinaryManager,
+ *   manager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  *   timeoutMs?: number,
  * }} opts
  * @returns {{ ok: true, node: unknown, native: unknown } | { ok: false, node: unknown, native: unknown, message: string }}

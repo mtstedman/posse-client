@@ -20,7 +20,7 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
   const { parseJobPayload } = await import("../../queue/functions/payload.js");
   const { BACKGROUND_JOB_TYPES } = await import("../../../catalog/job.js");
 
-  const active = listWorkItems(["planning", "running", "complete", "failed"]);
+  const active = listWorkItems(["queued", "planning", "running", "complete", "failed"]);
   return active.slice(0, 20).map((wi) => {
     // The pipeline is agent work only — background maintenance (atlas_warm)
     // never appears here even when it is scoped to this work item.

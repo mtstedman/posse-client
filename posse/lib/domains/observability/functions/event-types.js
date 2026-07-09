@@ -53,6 +53,8 @@ export const KNOWN_EVENT_NAMESPACES = Object.freeze(new Set([
   // Reserved for likely future use; harmless if unused
   "assessor",
   "human",
+  "hash_ref",
+  "context",
   "merge",
   "system",
   "tool",

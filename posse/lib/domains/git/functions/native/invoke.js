@@ -8,8 +8,8 @@
 //   3. Once parity is exact for the covered surface, the call site switches to
 //      the Rust method and the matching Node body is deleted in the same change.
 
-import { nativeBinaries } from "../../../../classes/tools/BinaryManager.js";
-import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../classes/tools/daemon/native-thread-bridge.js";
+import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
+import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 import { isAbortError, signalAbortError } from "../../../runtime/functions/yield.js";
 import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 
@@ -23,7 +23,7 @@ export const GIT_NATIVE_PROTOCOL = "posse.git.native.v1";
  * silently re-read settings/env.
  *
  * @param {GitNativeMethodRunOptions} opts
- * @param {import("../../../../classes/tools/BinaryManager.js").BinaryManager} manager
+ * @param {import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager} manager
  * @returns {Record<string, unknown> | null}
  */
 function resolveGitAuthEnvelope(opts, manager) {
@@ -249,7 +249,7 @@ const WORKER_ELIGIBLE_METHODS = new Set([
 
 /**
  * @typedef {Object} GitNativeMethodRunOptions
- * @property {import("../../../../classes/tools/BinaryManager.js").BinaryManager} [manager]
+ * @property {import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager} [manager]
  * @property {number} [timeoutMs]
  * @property {boolean} [disabled]
  * @property {AbortSignal} [signal]

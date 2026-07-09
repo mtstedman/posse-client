@@ -427,6 +427,7 @@ export class DisplayLeftPanelRenderer {
       const visibleItems = visible.map((wi) => {
         const jobs = jobsByWi.get(wi.id) || [];
         const dirtyReview = dirtyReviewForWi(wi);
+        const displayStatus = workItemDisplayStatus(wi, jobs);
         const done = jobs.filter(j => TERMINAL.has(j.status)).length;
         const wiFailed = jobs.filter(j => jobIsDisplayFailure(j, jobs)).length;
         const allDone = jobs.length > 0 && done === jobs.length;
@@ -453,6 +454,7 @@ export class DisplayLeftPanelRenderer {
         return {
           wi,
           jobs,
+          displayStatus,
           done,
           wiFailed,
           allDone,
@@ -475,6 +477,7 @@ export class DisplayLeftPanelRenderer {
         const {
           wi,
           jobs,
+          displayStatus,
           done,
           wiFailed,
           allDone,
@@ -496,6 +499,16 @@ export class DisplayLeftPanelRenderer {
           while (lines.length > maxLines - 1) lines.pop();
           lines.push(` ${C.dim}... ${remaining} more${C.reset}`);
           break;
+        }
+
+        // Queued/planned work items can exist before planning has created
+        // jobs. Keep them visible as real queue rows instead of a cryptic
+        // "(0/0)" placeholder.
+        if (jobs.length === 0) {
+          const statusColor = displayStatus === "queued" ? C.blue : C.dim;
+          const prefix = ` ${C.blue}WI#${wi.id}${C.reset} ${statusColor}${displayStatus}${C.reset}`;
+          lines.push(formatQueueWiHeader(prefix, wi.title, inner));
+          continue;
         }
 
         // All done — single collapsed line

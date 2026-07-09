@@ -42,7 +42,7 @@ import {
   wiScopeId,
 } from "../../artifacts/functions/index.js";
 import { hasWritableScope, parseResearcherStructuredOutput } from "../../handoff/functions/index.js";
-import { projectDbEffectivePermissions } from "../../../functions/toolkit/project-db/config.js";
+import { projectDbEffectivePermissions } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import {
   normalizeRiskTags,
   resolveTaskExecutionPolicy,

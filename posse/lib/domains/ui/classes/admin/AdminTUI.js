@@ -432,7 +432,7 @@ export class AdminTUI {
   run() {
     return new Promise((resolve) => {
       this._done = resolve;
-      if (!this._settingsPane) this._settingsPane = "providers";
+      if (!this._settingsPane) this._settingsPane = "atlas";
       this._installConsoleIntercept();
       this._installExitHandlers();
       process.on("exit", this._onProcessExit);
@@ -1033,7 +1033,7 @@ export class AdminTUI {
         ? (this._tab + ADMIN_TAB_COUNT - 1) % ADMIN_TAB_COUNT
         : (this._tab + 1) % ADMIN_TAB_COUNT;
       this._scroll = this._tabScrolls[this._tab];
-      if (this._tabId() === "settings" && !this._settingsPane) this._settingsPane = "providers";
+      if (this._tabId() === "settings" && !this._settingsPane) this._settingsPane = "atlas";
     } else if (ADMIN_TAB_KEYS.has(String(str))) {
       this._resetEditState();
       this._selectedWi = null;
@@ -1041,7 +1041,7 @@ export class AdminTUI {
       this._purgeLogsConfirm = false;
       this._tab = parseInt(str) - 1;
       this._scroll = this._tabScrolls[this._tab];
-      if (this._tabId() === "settings" && !this._settingsPane) this._settingsPane = "providers";
+      if (this._tabId() === "settings" && !this._settingsPane) this._settingsPane = "atlas";
     } else if (matchesHotkey(str, key, "e") && tabId === "settings") {
       this._startEdit();
       return;
@@ -1260,7 +1260,7 @@ export class AdminTUI {
     } else if (this._editing === "editProviders") {
       const toggles = this._editProviderChoices.map((choice, index) => {
         const marker = choice.enabled ? `${C.green}[x]${C.reset}` : `${C.dim}[ ]${C.reset}`;
-        const label = `${index + 1}:${choice.provider}`;
+        const label = `${index + 1}:${choice.label || choice.provider}`;
         if (index === this._editProviderIndex) return `${C.yellow}>${marker} ${label}<${C.reset}`;
         return `${marker} ${label}`;
       }).join(` ${C.dim}|${C.reset} `);

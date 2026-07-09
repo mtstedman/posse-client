@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { extractJson } from "../../../../shared/format/functions/json.js";
-import { getAtlasDeterministicToolDefinitions } from "../../../../functions/toolkit/atlas.js";
+import { getAtlasDeterministicToolDefinitions } from "../../../../shared/tools/functions/toolkit/atlas.js";
 import { getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { executeEmbeddedAtlasTool } from "../../../integrations/functions/atlas-embedded.js";
 import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
@@ -16,7 +16,7 @@ import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/det
 import { isIndexableSourcePath } from "../../../integrations/functions/deterministic-mcp/source-file-gate.js";
 import { resolvePathWithin } from "../../../runtime/functions/fs-safety.js";
 import { isSensitiveEnvFileOrTargetPath } from "../../../runtime/functions/sensitive-paths.js";
-import { readProjectDbConfig } from "../../../../functions/toolkit/project-db/config.js";
+import { readProjectDbConfig } from "../../../../shared/tools/functions/toolkit/project-db/config.js";
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { formatAtlasBackendText, atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 import { isExternallyRoutedAtlasTool } from "../../../integrations/functions/deterministic-mcp/tool-descriptors.js";

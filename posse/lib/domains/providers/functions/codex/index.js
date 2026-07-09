@@ -51,6 +51,10 @@ export {
   __testCollectCodexExtraDirs,
 } from "./cli-spawn.js";
 export {
+  appendCodexMcpEnvOverrides as __testAppendCodexMcpEnvOverrides,
+  sanitizeCodexMcpEnvValue as __testSanitizeCodexMcpEnvValue,
+} from "./config-format.js";
+export {
   __testBuildCodexAtlasConfigOverrides,
   __testBuildCodexDeveloperInstructionRoute,
   __testBuildCodexDeterministicReadConfigOverrides,

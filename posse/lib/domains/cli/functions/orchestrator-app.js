@@ -991,78 +991,6 @@ function normalizeSuggestedFilePath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
-function atlasHitFilePath(hit) {
-  return normalizeSuggestedFilePath(
-    hit?.location?.repo_rel_path
-      || hit?.location?.filePath
-      || hit?.repo_rel_path
-      || hit?.filePath
-      || hit?.path,
-  );
-}
-
-function uniqueAtlasFileSuggestions(items, limit = 8) {
-  const out = [];
-  const seen = new Set();
-  for (const item of Array.isArray(items) ? items : []) {
-    const file = atlasHitFilePath(item);
-    if (!file) continue;
-    const key = file.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({
-      file,
-      label: item?.name || item?.qualified_name || item?.qualifiedName || null,
-      score: Number.isFinite(Number(item?.score)) ? Number(item.score) : null,
-    });
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-
-function atlasReadinessHasWarmOnnx(readiness) {
-  const layers = Array.isArray(readiness?.layers) ? readiness.layers : [];
-  return layers.some((layer) =>
-    String(layer?.layer || "").startsWith("embeddings")
-    && layer.status === "ready"
-    && (!Number.isFinite(Number(layer.coverage)) || Number(layer.coverage) >= 95));
-}
-
-async function suggestOneshotFilesFromAtlas(description) {
-  try {
-    const [
-      { getAtlasIntegrationConfig, computeAtlasLayerReadiness },
-      { inspectLocalOnnxStatus },
-    ] = await Promise.all([
-      loadAtlasModule(),
-      import("../../atlas/functions/v2/embeddings/local-onnx.js"),
-    ]);
-    const config = getAtlasIntegrationConfig();
-    const onnx = inspectLocalOnnxStatus({ repoRoot: PROJECT_DIR, config });
-    if (!onnx.enabled) return [];
-    const readiness = computeAtlasLayerReadiness({ repoRoot: PROJECT_DIR, config });
-    if (!atlasReadinessHasWarmOnnx(readiness)) return [];
-
-    const { executeEmbeddedAtlasTool } = await import("../../integrations/functions/atlas-embedded.js");
-    const raw = await executeEmbeddedAtlasTool("symbol.search", {
-      query: description,
-      taskText: description,
-      semantic: true,
-      limit: 12,
-    }, {
-      cwd: PROJECT_DIR,
-      config: { ...config, onDemandEmbeddingFill: false },
-      timeoutMs: 5000,
-      origin: "intake_oneshot_file_hint",
-    });
-    if (!raw || /^Error:/i.test(String(raw))) return [];
-    const parsed = JSON.parse(raw);
-    return uniqueAtlasFileSuggestions(parsed?.items, 8);
-  } catch {
-    return [];
-  }
-}
-
 function normalizeOneshotFileHintChoice(answer, suggestions) {
   const raw = String(answer || "").trim();
   if (!raw) return "";
@@ -1078,16 +1006,9 @@ function normalizeOneshotFileHintChoice(answer, suggestions) {
   return selected.map(normalizeSuggestedFilePath).filter(Boolean).join(",");
 }
 
-async function promptForOneshotFileHint(description) {
-  const suggestions = await suggestOneshotFilesFromAtlas(description);
-  if (suggestions.length === 0) return "";
-  console.log(`  ${C.dim}ONNX file candidates:${C.reset}`);
-  suggestions.forEach((entry, index) => {
-    const label = entry.label ? ` ${C.dim}(${entry.label})${C.reset}` : "";
-    console.log(`    ${C.dim}${index + 1}.${C.reset} ${entry.file}${label}`);
-  });
-  const answer = await ask(`  One-shot file hint? number/path/comma list [none]: `);
-  return normalizeOneshotFileHintChoice(answer, suggestions);
+async function promptForOneshotFileHint() {
+  const answer = await ask(`  One-shot file hint? path/comma list [none]: `);
+  return normalizeOneshotFileHintChoice(answer, []);
 }
 
 async function promptForIterativeWorkflowMode() {

@@ -77,6 +77,7 @@ import {
 import {
   IMAGE_PROVIDER_OPTIONS,
   MODEL_SETTING_DEFS,
+  PROVIDER_LABELS,
   PROVIDER_OPTIONS,
   getDefaultTierModel,
   getImageModelOptions,
@@ -120,7 +121,7 @@ import {
   writeProjectDbConfig,
   normalizePermissions as normalizeProjectDbPermissions,
   PROJECT_DB_TYPES,
-} from "../../../../functions/toolkit/project-db/config.js";
+} from "../../../../shared/tools/functions/toolkit/project-db/config.js";
 import { installScipLanguageDependencies } from "../../../atlas/functions/v2/scip/dependencies.js";
 import { brandRule } from "../../functions/display/helpers/brand.js";
 const PROVIDER_USAGE_SETTING_DEFS = [
@@ -132,6 +133,35 @@ const PROVIDER_USAGE_SETTING_DEFS = [
 
 const MODEL_SETTING_KEYS = new Set(MODEL_SETTING_DEFS.map((def) => def.key));
 const PROVIDER_USAGE_SETTING_KEYS = new Set(PROVIDER_USAGE_SETTING_DEFS.map((def) => def.key));
+
+const AGENT_SETTING_SECTIONS = Object.freeze([
+  Object.freeze({ role: "researcher", label: "Researcher", keys: Object.freeze(["base_turns_researcher", "max_output_tokens_researcher"]) }),
+  Object.freeze({ role: "planner", label: "Planner", keys: Object.freeze(["base_turns_planner", "max_output_tokens_planner", "planner_max_tasks", "planner_under_scoped_broad_gate"]) }),
+  Object.freeze({ role: "dev", label: "Dev", keys: Object.freeze(["base_turns_dev", "max_output_tokens_dev"]) }),
+  Object.freeze({ role: "artificer", label: "Artificer", keys: Object.freeze(["max_output_tokens_artificer"]) }),
+  Object.freeze({ role: "preflight", label: "Preflight", keys: Object.freeze(["max_output_tokens_preflight"]) }),
+  Object.freeze({ role: "assessor", label: "Assessor", keys: Object.freeze(["base_turns_assessor", "max_output_tokens_assessor"]) }),
+  Object.freeze({ role: "delegator", label: "Delegator", keys: Object.freeze(["delegation_mode", "max_output_tokens_delegator"]) }),
+]);
+
+const PROVIDER_SETTING_SECTIONS = Object.freeze([
+  Object.freeze({ provider: "claude", label: "Claude", budgetKeys: Object.freeze(["claude_run_budget_pct_session"]) }),
+  Object.freeze({ provider: "codex", label: "Codex", budgetKeys: Object.freeze(["codex_auth_mode", "codex_run_budget_pct_session"]) }),
+  Object.freeze({ provider: "openai", label: "OpenAI", budgetKeys: Object.freeze(["openai_run_budget_usd", "openai_daily_budget_usd", "openai_account_limit_tokens_session", "openai_account_limit_tokens_week"]) }),
+  Object.freeze({ provider: "grok", label: "Grok", budgetKeys: Object.freeze(["grok_run_budget_usd", "grok_daily_budget_usd"]) }),
+  Object.freeze({ provider: "copilot", label: "Copilot", budgetKeys: Object.freeze([]) }),
+]);
+
+const PROVIDER_CATALOG_SETTING_KEYS = Object.freeze([
+  "model_catalog_enforcement",
+  "model_catalog_cache_ms",
+  "claude_execution_mode",
+]);
+
+const IMAGE_SETTING_SECTIONS = Object.freeze([
+  Object.freeze({ provider: "grok", label: "Grok", budgetKeys: Object.freeze(["grok_image_budget_usd"]) }),
+  Object.freeze({ provider: "openai", label: "OpenAI", budgetKeys: Object.freeze(["openai_image_budget_usd"]) }),
+]);
 
 function setSettingWithRuntimeSync(settingKey, value, projectDir = null) {
   setSetting(settingKey, value, { projectDir });
@@ -755,10 +785,10 @@ export class AdminSettingsController {
       if (oa !== ob) return oa - ob;
       return String(a.setting_key).localeCompare(String(b.setting_key));
     });
-    const dbSettingsByPane = { providers: [], atlas: [], general: [], repo: [], debug: [] };
+    const dbSettingsByPane = Object.fromEntries(SETTINGS_PANES.map((pane) => [pane.id, []]));
     for (const entry of dbSettings) {
       const pane = settingsPaneForKey(entry.setting_key);
-      (dbSettingsByPane[pane] || dbSettingsByPane.general).push(entry);
+      (dbSettingsByPane[pane] || dbSettingsByPane.debug).push(entry);
     }
     const modelSettings = this._getModelSettingEntries();
     const artifactSettings = this._getArtifactSettingEntries();
@@ -767,19 +797,49 @@ export class AdminSettingsController {
     const delegationSettings = this._getDelegationSettingEntries();
     const skillSettings = this._getSkillSettingEntries();
     const projectDbSettings = this._getProjectDbSettingEntries();
+    const dbSettingsByKey = new Map(dbSettings.map((entry) => [entry.setting_key, entry]));
+    const providerSettingsByRole = new Map(providerSettings.map((entry) => [entry.role, entry]));
+    const delegationSetting = delegationSettings[0] || null;
+    const dbRowsForKeys = (keys) => keys.map((key) => dbSettingsByKey.get(key)).filter(Boolean);
+    const agentSettings = AGENT_SETTING_SECTIONS.flatMap((section) => {
+      const rows = [];
+      const providerRow = providerSettingsByRole.get(section.role);
+      if (providerRow) rows.push(providerRow);
+      if (section.role === "delegator" && delegationSetting) rows.push(delegationSetting);
+      rows.push(...dbRowsForKeys(section.keys.filter((key) => key !== "delegation_mode")));
+      return rows;
+    });
+    const textModelSettings = modelSettings.filter((entry) => (entry.kind || "text") === "text");
+    const imageModelSettings = modelSettings.filter((entry) => entry.kind === "image");
+    const providerPanelSettings = [
+      ...PROVIDER_SETTING_SECTIONS.flatMap((section) => [
+        ...textModelSettings.filter((entry) => entry.provider === section.provider),
+        ...dbRowsForKeys(section.budgetKeys),
+      ]),
+      ...dbRowsForKeys(PROVIDER_CATALOG_SETTING_KEYS),
+    ];
+    const imagePanelSettings = [
+      ...artifactSettings,
+      ...IMAGE_SETTING_SECTIONS.flatMap((section) => [
+        ...imageModelSettings.filter((entry) => entry.provider === section.provider),
+        ...dbRowsForKeys(section.budgetKeys),
+      ]),
+    ];
     // Per-pane editable lists. Order here MUST match the visual row order
     // _buildSettings renders for that pane — ↑/↓ selection walks this list.
     const paneEditableSettings = {
-      providers: [
-        ...providerSettings,
-        ...delegationSettings,
-        ...artifactSettings,
-        ...providerUsageSettings,
-        ...modelSettings,
-        ...dbSettingsByPane.providers,
-      ],
       atlas: [
         ...dbSettingsByPane.atlas,
+      ],
+      agents: [
+        ...agentSettings,
+      ],
+      providers: [
+        ...providerPanelSettings,
+        ...providerUsageSettings,
+      ],
+      images: [
+        ...imagePanelSettings,
       ],
       general: [
         ...dbSettingsByPane.general,
@@ -794,8 +854,10 @@ export class AdminSettingsController {
       ],
     };
     const editableSettings = [
-      ...paneEditableSettings.providers,
       ...paneEditableSettings.atlas,
+      ...paneEditableSettings.agents,
+      ...paneEditableSettings.providers,
+      ...paneEditableSettings.images,
       ...paneEditableSettings.general,
       ...paneEditableSettings.repo,
       ...paneEditableSettings.debug,
@@ -808,6 +870,9 @@ export class AdminSettingsController {
       providerUsageSettings,
       providerSettings,
       delegationSettings,
+      agentSettings,
+      providerPanelSettings,
+      imagePanelSettings,
       skillSettings,
       projectDbSettings,
       editableSettings,
@@ -986,6 +1051,7 @@ export class AdminSettingsController {
       this._editStorageKey = storageKey;
       this._editProviderChoices = allowed.map((provider) => ({
         provider,
+        label: PROVIDER_LABELS[provider] || provider,
         enabled: enabled.has(provider),
       }));
       this._editProviderIndex = 0;
@@ -1491,7 +1557,7 @@ export class AdminSettingsController {
 
     const settingsSnapshot = this._getSettingsSnapshot();
     const dbSettingsByPane = settingsSnapshot.dbSettingsByPane
-      || { providers: [], atlas: [], general: [], repo: [], debug: [] };
+      || Object.fromEntries(SETTINGS_PANES.map((pane) => [pane.id, []]));
     const providerSettings = settingsSnapshot.providerSettings;
     const modelSettings = settingsSnapshot.modelSettings;
     const artifactSettings = settingsSnapshot.artifactSettings || [];
@@ -1575,6 +1641,34 @@ export class AdminSettingsController {
 
     // ── Database settings, split into focused groups per pane ─────────────
     const settingsByKey = new Map((settingsSnapshot.dbSettings || []).map((s) => [s.setting_key, s]));
+    const providerSettingsByRole = new Map((providerSettings || []).map((s) => [s.role, s]));
+    const textModelSettings = (modelSettings || []).filter((s) => (s.kind || "text") === "text");
+    const imageModelSettings = (modelSettings || []).filter((s) => s.kind === "image");
+    const pushDbSettingRow = (key) => {
+      const s = settingsByKey.get(key);
+      if (!s) return false;
+      pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(key, s));
+      return true;
+    };
+    const pushModelSettingRow = (s) => {
+      const source = s.source || "default";
+      const providerLabel = PROVIDER_LABELS[s.provider] || s.provider;
+      const desc = `${s.description} (${providerLabel}, ${source}; using ${s.effective_model || "?"})`;
+      const displayValue = formatModelSettingDisplayValue(s);
+      const valueColor = s.setting_value ? C.cyan : C.dim;
+      pushEditableRow(s.setting_key, displayValue, desc, valueColor);
+    };
+    const pushProviderSettingRow = (s, { dimWhenDelegatorInactive = true } = {}) => {
+      const envNote = s.source === "global" && s.env_value
+        ? ` overrides env${s.env_value ? `; env=${s.env_value}` : ""}`
+        : s.source === "env" && s.db_value
+          ? ` env fallback${s.db_value ? `; saved global=${s.db_value}` : ""}`
+          : "";
+      const isDelegatorInactive = dimWhenDelegatorInactive && s.setting_key === "provider_delegator" && delegationMode === "js";
+      const desc = `${s.description} (${s.source}${envNote})${isDelegatorInactive ? " - currently handled by system" : ""}`;
+      const valueColor = isDelegatorInactive ? C.dim : C.cyan;
+      pushEditableRow(s.setting_key, formatProviderSettingValue(s), desc, valueColor, { dimmed: isDelegatorInactive });
+    };
     const renderDbGroupsForPane = (paneId) => {
       const placedKeys = new Set();
       for (const group of SETTINGS_GROUPS) {
@@ -1604,27 +1698,49 @@ export class AdminSettingsController {
       }
     };
 
+    const renderAgentsPane = () => {
+      for (const section of AGENT_SETTING_SECTIONS) {
+        const providerRow = providerSettingsByRole.get(section.role);
+        const hasDbRows = section.keys.some((key) => key !== "delegation_mode" && settingsByKey.has(key));
+        const hasDelegation = section.role === "delegator" && delegationSettings[0];
+        if (!providerRow && !hasDbRows && !hasDelegation) continue;
+        pushSection(section.label, "(enabled; provider, turn limit, token cap)");
+        pushTableHeader();
+        if (providerRow) pushProviderSettingRow(providerRow);
+        if (hasDelegation) {
+          const s = delegationSettings[0];
+          pushEditableRow(s.setting_key, s.setting_value || "", `${s.description} (${s.source})`);
+        }
+        for (const key of section.keys) {
+          if (key === "delegation_mode") continue;
+          pushDbSettingRow(key);
+        }
+        lines.push("");
+      }
+    };
+
     const renderProvidersPane = () => {
-      pushSection("Provider Configuration", "(most commonly adjusted)");
-      pushTableHeader();
-      for (const s of providerSettings) {
-        const envNote = s.source === "global" && s.env_value
-          ? ` overrides env${s.env_value ? `; env=${s.env_value}` : ""}`
-          : s.source === "env" && s.db_value
-            ? ` env fallback${s.db_value ? `; saved global=${s.db_value}` : ""}`
-            : "";
-        const isDelegatorInactive = s.setting_key === "provider_delegator" && delegationMode === "js";
-        const desc = `${s.description} (${s.source}${envNote})${isDelegatorInactive ? " — currently handled by system" : ""}`;
-        const valueColor = isDelegatorInactive ? C.dim : C.cyan;
-        pushEditableRow(s.setting_key, formatProviderSettingValue(s), desc, valueColor, { dimmed: isDelegatorInactive });
+      for (const section of PROVIDER_SETTING_SECTIONS) {
+        const models = textModelSettings.filter((s) => s.provider === section.provider);
+        const budgetKeys = section.budgetKeys.filter((key) => settingsByKey.has(key));
+        if (models.length === 0 && budgetKeys.length === 0) continue;
+        const budgetNote = section.provider === "claude" || section.provider === "codex"
+          ? "models and % session run budget"
+          : "models and USD run budget";
+        pushSection(section.label, `(${budgetNote})`);
+        pushTableHeader();
+        for (const s of models) pushModelSettingRow(s);
+        for (const key of budgetKeys) pushDbSettingRow(key);
+        lines.push("");
       }
-      for (const s of delegationSettings) {
-        pushEditableRow(s.setting_key, s.setting_value || "", `${s.description} (${s.source})`);
+
+      const catalogRows = PROVIDER_CATALOG_SETTING_KEYS.filter((key) => settingsByKey.has(key));
+      if (catalogRows.length > 0) {
+        pushSection("Model Catalog", "(validation and provider runtime behavior)");
+        pushTableHeader();
+        for (const key of catalogRows) pushDbSettingRow(key);
+        lines.push("");
       }
-      for (const s of artifactSettings) {
-        pushEditableRow(s.setting_key, s.setting_value || "", s.description || "");
-      }
-      lines.push("");
 
       if (providerUsageSettings.length > 0) {
         pushSection("Provider Usage Limits", `(${getAccountSettingsPathForDisplay()})`);
@@ -1637,21 +1753,6 @@ export class AdminSettingsController {
         }
         lines.push("");
       }
-
-      if (modelSettings.length > 0) {
-        pushSection("Provider Models", "(editable when provider credentials are available)");
-        pushTableHeader();
-        for (const s of modelSettings) {
-          const source = s.source || "default";
-          const desc = `${s.description} (${s.provider}, ${source}; using ${s.effective_model || "?"})`;
-          const displayValue = formatModelSettingDisplayValue(s);
-          const valueColor = s.setting_value ? C.cyan : C.dim;
-          pushEditableRow(s.setting_key, displayValue, desc, valueColor);
-        }
-        lines.push("");
-      }
-
-      renderDbGroupsForPane("providers");
 
       // Secrets stay env-only; show which ones are present without ever
       // rendering any part of the value.
@@ -1666,10 +1767,32 @@ export class AdminSettingsController {
         if (process.env[key]) {
           lines.push(`  ${C.green}✓${C.reset} ${C.bold}${key.padEnd(30)}${C.reset} ${C.green}configured${C.reset}  ${C.dim}${label}${C.reset}`);
         } else {
-          lines.push(`  ${C.dim}· ${key.padEnd(30)} not set     ${label}${C.reset}`);
+          lines.push(`  ${C.dim}. ${key.padEnd(30)} not set     ${label}${C.reset}`);
         }
       }
       lines.push("");
+    };
+
+    const renderImagesPane = () => {
+      if (artifactSettings.length > 0) {
+        pushSection("Image Routing", "(artifact image provider)");
+        pushTableHeader();
+        for (const s of artifactSettings) {
+          pushEditableRow(s.setting_key, s.setting_value || "", s.description || "");
+        }
+        lines.push("");
+      }
+
+      for (const section of IMAGE_SETTING_SECTIONS) {
+        const models = imageModelSettings.filter((s) => s.provider === section.provider);
+        const budgetKeys = section.budgetKeys.filter((key) => settingsByKey.has(key));
+        if (models.length === 0 && budgetKeys.length === 0) continue;
+        pushSection(section.label, "(image model and USD budget)");
+        pushTableHeader();
+        for (const s of models) pushModelSettingRow(s);
+        for (const key of budgetKeys) pushDbSettingRow(key);
+        lines.push("");
+      }
     };
 
     const renderAtlasPane = () => {
@@ -1720,10 +1843,14 @@ export class AdminSettingsController {
       renderDbGroupsForPane("debug");
     };
 
-    if (settingsPane === "providers") {
-      renderProvidersPane();
-    } else if (settingsPane === "atlas") {
+    if (settingsPane === "atlas") {
       renderAtlasPane();
+    } else if (settingsPane === "agents") {
+      renderAgentsPane();
+    } else if (settingsPane === "providers") {
+      renderProvidersPane();
+    } else if (settingsPane === "images") {
+      renderImagesPane();
     } else if (settingsPane === "general") {
       renderGeneralPane();
     } else if (settingsPane === "repo") {
@@ -1733,8 +1860,10 @@ export class AdminSettingsController {
     } else {
       // "all" — non-interactive snapshots and tests render every pane in the
       // same order paneEditableSettings concatenates them.
-      renderProvidersPane();
       renderAtlasPane();
+      renderAgentsPane();
+      renderProvidersPane();
+      renderImagesPane();
       renderGeneralPane();
       renderRepoPane();
       renderDebugPane();

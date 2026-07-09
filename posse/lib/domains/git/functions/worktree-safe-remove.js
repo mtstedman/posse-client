@@ -7,7 +7,7 @@
 
 import fs from "fs";
 import { isAbortError } from "../../runtime/functions/yield.js";
-import { reapOwnDaemonSpawnsForCwd } from "../../../classes/tools/daemon/index.js";
+import { reapOwnDaemonSpawnsForCwd } from "../../../shared/tools/classes/daemon/index.js";
 import { FORCE_REMOVE_OPTIONS, isWorktreeInUseError } from "./worktree-remove-options.js";
 import { gitExecAsync } from "./utils.js";
 import { Worktree } from "../classes/index.js";

@@ -44,6 +44,10 @@ export const EVENT_TYPES = Object.freeze({
   // ── bridge ──────────────────────────────────────────────────────────────
   BRIDGE_COMMAND_MUTATION: "bridge.command_mutation",
 
+  // ── context / citation store ───────────────────────────────────────────
+  CONTEXT_BOUNDED_INGRESS: "context.bounded_ingress",
+  HASH_REF_FETCH: "hash_ref.fetch",
+
   // ── assessor ────────────────────────────────────────────────────────────
   ASSESSOR_SPAWN_JOB_SKIPPED: "assessor.spawn_job_skipped",
 

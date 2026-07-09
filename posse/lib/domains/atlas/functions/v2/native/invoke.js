@@ -7,8 +7,8 @@
 // an invalid response, the call fails. During migration, Node implementations
 // are used only as explicit parity oracles outside this boundary.
 
-import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
-import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../../classes/tools/daemon/native-thread-bridge.js";
+import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
+import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 
 export const ATLAS_NATIVE_PROTOCOL = "posse.atlas.native.v1";
 
@@ -20,7 +20,7 @@ export const ATLAS_NATIVE_PROTOCOL = "posse.atlas.native.v1";
  * silently re-read settings/env.
  *
  * @param {NativeMethodRunOptions} opts
- * @param {import("../../../../../classes/tools/BinaryManager.js").BinaryManager} manager
+ * @param {import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager} manager
  * @returns {Record<string, unknown> | null}
  */
 function resolveAtlasAuthEnvelope(opts, manager) {
@@ -33,7 +33,7 @@ function resolveAtlasAuthEnvelope(opts, manager) {
 
 /**
  * @typedef {Object} NativeMethodRunOptions
- * @property {import("../../../../../classes/tools/BinaryManager.js").BinaryManager} [manager]
+ * @property {import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager} [manager]
  * @property {number} [timeoutMs]
  * @property {boolean} [disabled]
  * @property {Record<string, unknown>} [auth]

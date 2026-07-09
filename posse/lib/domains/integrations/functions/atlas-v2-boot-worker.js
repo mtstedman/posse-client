@@ -9,7 +9,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { Warmer } from "../../atlas/classes/v2/Warmer.js";
 import { sharedParserAdapter } from "../../atlas/classes/v2/ParserAdapter.js";
-import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import {
   errorForTelemetry,

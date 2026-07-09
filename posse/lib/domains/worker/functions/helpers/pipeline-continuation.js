@@ -478,6 +478,7 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
       parentJob: preflightJob,
       redTeamPlan: isRedTeamPlanningPayload(preflightPayload),
       demotionSource: "preflight_gate",
+      requirePathCorroboration: true,
     });
     logEvent({
       work_item_id: preflightJob.work_item_id,

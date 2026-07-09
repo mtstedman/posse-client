@@ -1,5 +1,5 @@
 // Central file-extension catalogs shared by handoff, ATLAS gates, and toolkit
-// helpers. Keep this module pure: catalog modules must not import lib/functions.
+// helpers. Keep this module pure: catalog modules must not import runtime helpers.
 
 export const ATLAS_INDEXABLE_SOURCE_EXTENSIONS = new Set([
   ".ts", ".tsx", ".mts", ".cts",

@@ -5,7 +5,7 @@
 // Windows and terminate spawned process trees cross-platform.
 
 import { spawn } from "child_process";
-import { recordDaemonSpawn, forgetDaemonSpawn } from "../../../../classes/tools/daemon/process-ledger.js";
+import { recordDaemonSpawn, forgetDaemonSpawn } from "../../../../shared/tools/classes/daemon/process-ledger.js";
 
 export function quoteWindowsArg(arg) {
   const value = String(arg == null ? "" : arg);

@@ -114,6 +114,17 @@ export class DisplayStatusRenderer {
       const allJobs = normalJobs.filter(j => visibleWiIds.has(j.work_item_id));
       const total = allJobs.length;
       if (total === 0) {
+        const openNoJobWorkItems = workItems.filter((wi) => {
+          const wiJobs = normalJobs.filter((job) => job.work_item_id === wi.id);
+          return wiJobs.length === 0 && !["complete", "canceled"].includes(workItemDisplayStatus(wi, wiJobs));
+        });
+        if (openNoJobWorkItems.length > 0) {
+          const queued = openNoJobWorkItems.filter((wi) => workItemDisplayStatus(wi, []) === "queued").length;
+          const count = openNoJobWorkItems.length;
+          const label = queued === count ? "queued" : "open";
+          lines.push(` ${C.blue}${count} ${label} work item${count === 1 ? "" : "s"}${C.reset}${C.dim} · waiting for planning${C.reset}`);
+          return lines;
+        }
         const warmJobs = jobs.filter((job) => jobIsBackgroundAtlasWarm(job) && !terminal.has(job.status));
         if (warmJobs.length > 0) {
           const groups = atlasWarmQueueGroups(warmJobs);

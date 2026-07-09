@@ -1185,6 +1185,9 @@ export class Display {
     this._approvalActionBusy = false;
     this._approvalExitConfirm = false;
     this._approvalFlash = null;
+    if (mode === "normal" && !this._aborted && !this._inputMode && this._questionQueue.length > 0) {
+      this._drainQuestions();
+    }
   }
 
   get hasQuestions() {

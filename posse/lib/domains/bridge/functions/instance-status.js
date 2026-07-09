@@ -87,6 +87,19 @@ function schedulerHeartbeatMs(db, schedulerRow) {
   return Math.max(fromRow, fromLock);
 }
 
+function countQueuedWorkItems(db) {
+  try {
+    const row = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM work_items
+      WHERE status = 'queued'
+    `).get();
+    return Number(row?.count) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * @param {import("better-sqlite3").Database} db — any handle on the
  *   orchestrator DB (the bridge passes its readonly connection).
@@ -107,14 +120,18 @@ export function composeInstanceStatus(db, { nowMs = Date.now() } = {}) {
   const schedulerValue = scheduler?.value || {};
   const runningJobs = Number(schedulerValue.running_jobs) || 0;
   const queuedJobs = Number(schedulerValue.queued_jobs) || 0;
+  const queuedWorkItems = countQueuedWorkItems(db);
+  const hasQueuedWork = queuedJobs > 0 || queuedWorkItems > 0;
 
   let phase;
-  if (shutdownMs != null && (heartbeatMs == null || shutdownMs >= heartbeatMs)) {
+  if (shutdownMs != null && (heartbeatMs == null || shutdownMs >= heartbeatMs) && queuedWorkItems === 0) {
     phase = "offline";
   } else if (boot && !bootSettled && (bootFresh || heartbeatFresh)) {
     phase = bootLooksLikeWarming(bootSteps) ? "warming" : "booting";
   } else if (heartbeatFresh) {
-    phase = runningJobs > 0 ? "running" : queuedJobs > 0 ? "ready" : "idle";
+    phase = runningJobs > 0 ? "running" : hasQueuedWork ? "ready" : "idle";
+  } else if (queuedWorkItems > 0) {
+    phase = "ready";
   } else if (heartbeatMs != null && nowMs - heartbeatMs <= OFFLINE_HEARTBEAT_MS) {
     // The run process stopped renewing without a clean shutdown — wedged.
     phase = "stalled";
@@ -128,6 +145,7 @@ export function composeInstanceStatus(db, { nowMs = Date.now() } = {}) {
 
   return {
     phase,
+    queued_work_items: queuedWorkItems,
     boot_steps: phase === "booting" || phase === "warming" ? bootSteps : [],
     scheduler: heartbeatMs != null
       ? {
@@ -135,6 +153,7 @@ export function composeInstanceStatus(db, { nowMs = Date.now() } = {}) {
           active_workers: Number(schedulerValue.active_workers) || 0,
           running_jobs: runningJobs,
           queued_jobs: queuedJobs,
+          queued_work_items: queuedWorkItems,
         }
       : null,
     version: posseVersion(),

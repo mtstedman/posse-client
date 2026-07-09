@@ -67,6 +67,7 @@ export function askSelectorChoice(question, choices = [], {
   output = process.stdout,
   colors = C,
   fallbackAsk = null,
+  pauseOnSettle = input === process.stdin,
 } = {}) {
   const normalized = normalizeSelectorChoices(choices);
   if (normalized.length === 0) return Promise.resolve("");
@@ -113,7 +114,7 @@ export function askSelectorChoice(question, choices = [], {
     const cleanup = () => {
       try { input.off("data", onData); } catch { /* best effort */ }
       try { input.setRawMode(wasRaw); } catch { /* best effort */ }
-      if (wasPaused) {
+      if (wasPaused || pauseOnSettle) {
         try { input.pause(); } catch { /* best effort */ }
       }
     };

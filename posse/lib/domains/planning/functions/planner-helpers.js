@@ -20,8 +20,8 @@ import {
   normalizeResearcherFilePriorities,
 } from "../../handoff/functions/index.js";
 import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
-import { isSensitiveEnvFilePath, safePath } from "../../../functions/toolkit/index.js";
-import { readProjectDbConfig } from "../../../functions/toolkit/project-db/config.js";
+import { isSensitiveEnvFilePath, safePath } from "../../../shared/tools/functions/toolkit/index.js";
+import { readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { normalizeHashRefHandoffPacket } from "../../handoff/functions/helpers/hash-ref-packet.js";
 
 export function emit(worker, jobId, message) {

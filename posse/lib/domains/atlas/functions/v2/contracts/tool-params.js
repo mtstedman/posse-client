@@ -139,6 +139,9 @@
  * @property {string} [ref]
  * @property {string[]} [refs]
  * @property {string[]} [hashes]
+ * @property {number} [offset]              Character offset; in search mode, matched-row offset.
+ * @property {number} [limit]               Maximum page characters.
+ * @property {string} [search]              Case-insensitive literal search within materialized text.
  */
 
 // ============================================================================

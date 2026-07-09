@@ -68,7 +68,7 @@ import {
 } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
-import { ensureRegisteredTestTables, runRegisteredTest } from "../../../../functions/toolkit/registered-tests.js";
+import { ensureRegisteredTestTables, runRegisteredTest } from "../../../../shared/tools/functions/toolkit/registered-tests.js";
 
 function readSettingText(key) {
   try {

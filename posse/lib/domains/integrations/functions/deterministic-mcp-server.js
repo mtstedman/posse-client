@@ -37,13 +37,13 @@ import {
   createBashExecutor,
   isSensitiveEnvFileOrTargetPath,
   safePath,
-} from "../../../functions/toolkit/index.js";
+} from "../../../shared/tools/functions/toolkit/index.js";
 import { TOOL_PROJECT_DB_QUERY } from "../../../catalog/native-tools.js";
-import { execProjectDbQuery } from "../../../functions/toolkit/project-db/query.js";
-import { capProjectDbPermissions, readProjectDbConfig } from "../../../functions/toolkit/project-db/config.js";
-import { ToolRegistry } from "../../../classes/tools/ToolRegistry.js";
-import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../functions/tools/tool-suites.js";
-import { appendHashRefIfMajor } from "../../../functions/tools/hash-adder.js";
+import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
+import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
+import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
+import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../shared/tools/functions/tool-suites.js";
+import { appendHashRefIfMajor } from "../../../shared/tools/functions/hash-adder.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, runWithObservationContext } from "../../observability/functions/observations.js";
 import {
@@ -57,7 +57,7 @@ import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.
 import { resolveAtlasRepoTarget } from "./atlas/repo.js";
 import { shouldUseAtlasV2 } from "./atlas-v2-mode.js";
 import { atlasBackendLabel } from "./atlas-label.js";
-import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import {
   configureGate,
@@ -77,6 +77,7 @@ import {
   buildMcpOAuthClaimsFromBootConfig,
   verifyMcpOAuthToken,
 } from "./deterministic-mcp/oauth-token.js";
+import { CONTEXT_CHAIN_READ_DEFAULT_LIMIT_LINES } from "../../../catalog/context.js";
 import {
   DETERMINISTIC_IMAGE_HELPER_TOOLS,
   DETERMINISTIC_IMAGE_TOOLS,
@@ -1691,12 +1692,21 @@ function chainRead(args) {
   const resolvedPath = path.resolve(workspaceCwd, requestedPath).replace(/\\/g, "/");
   const relPath = path.relative(workspaceCwd, resolvedPath).replace(/\\/g, "/");
   const offset = _normalizeReadRange(args.offset, 1);
-  const limit = _normalizeReadRange(args.limit, 2000);
+  const limit = _normalizeReadRange(args.limit, CONTEXT_CHAIN_READ_DEFAULT_LIMIT_LINES);
   const continuationRead = offset > 1;
 
   if (researchState.relevant.has(relPath) && !continuationRead) {
-    return `AUDIT ERROR: "${relPath}" was already read and tagged relevant. ` +
-      `Each file may only be read once unless you request a continuation with offset/limit. It is already in your research buffer.`;
+    const cached = researchState.relevant.get(relPath) || {};
+    const relevantCount = researchState.relevant.size;
+    const irrelevantCount = researchState.irrelevant.size;
+    const ledgerLine = `[audit ledger: ${relevantCount} relevant, ${irrelevantCount} irrelevant, ${researchState.readOrder.length} total reads]`;
+    return [
+      ledgerLine,
+      `[chain restored from ledger: "${relPath}" was already tagged relevant; verdict carries over, do not call chain_verdict again for this restored view]`,
+      cached.summary ? `[prior verdict summary: ${cached.summary}]` : "[prior verdict summary: none]",
+      "",
+      cached.content || "",
+    ].join("\n");
   }
   if (researchState.irrelevant.has(relPath) && !continuationRead) {
     return `AUDIT ERROR: "${relPath}" was already read and tagged irrelevant. ` +
@@ -1704,7 +1714,7 @@ function chainRead(args) {
   }
 
   // ── Read the file ─────────────────────────────────────────────────────
-  const result = execReadFile({ ...args, path: requestedPath }, workspaceCwd, effectiveScopePredicates);
+  const result = execReadFile({ ...args, path: requestedPath, limit }, workspaceCwd, effectiveScopePredicates);
 
   // The offset-past-EOF sentinel is not file content. Surface it as an audit
   // error without locking the chain or recording it — otherwise chain_verdict
@@ -1738,10 +1748,13 @@ function chainVerdict(args) {
 
   const { path: filePath, content, continuation = false } = researchState.currentlyReading;
   const verdict = String(args.verdict || "").toLowerCase();
-  const summary = args.summary || "";
+  const summary = String(args.summary || "").trim();
 
   if (verdict !== "relevant" && verdict !== "irrelevant") {
     return `AUDIT ERROR: verdict must be "relevant" or "irrelevant", got "${args.verdict}".`;
+  }
+  if (verdict === "irrelevant" && !summary) {
+    return "AUDIT ERROR: summary is required when verdict is \"irrelevant\" so pruning can preserve why this file was excluded.";
   }
 
   const wasRelevant = researchState.relevant.has(filePath);

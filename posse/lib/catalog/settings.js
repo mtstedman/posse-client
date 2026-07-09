@@ -32,8 +32,10 @@ export const SETTING_KEYS = Object.freeze({
   CONTEXT_EXPAND_FILE_BUDGET_PER_ATTEMPT: "context_expand_file_budget_per_attempt",
   CONTEXT_EXPAND_MAX_STEPS: "context_expand_max_steps",
   CLAUDE_EXECUTION_MODE: "claude_execution_mode",
+  CLAUDE_RUN_BUDGET_PCT_SESSION: "claude_run_budget_pct_session",
   CLAUDE_USAGE_BACKOFF_MS: "claude_usage_backoff_ms",
   CLAUDE_USAGE_CACHE_MS: "claude_usage_cache_ms",
+  CODEX_RUN_BUDGET_PCT_SESSION: "codex_run_budget_pct_session",
   CODEX_USAGE_BACKOFF_MS: "codex_usage_backoff_ms",
   CODEX_USAGE_CACHE_MS: "codex_usage_cache_ms",
   DEFAULT_MAX_ATTEMPTS: "default_max_attempts",
@@ -64,6 +66,7 @@ export const SETTING_KEYS = Object.freeze({
   SESSION_RECYCLE_STRICT_PROVIDER: "session_recycle_strict_provider",
   STARTUP_DIRTY_TREE_POLICY: "startup_dirty_tree_policy",
   ATLAS_MEMORY_SURFACE: "atlas_memory_surface",
+  ATLAS_SHADOW_GUARDRAILS: "atlas_shadow_guardrails",
   ATLAS_V2_BOOT_TIMEOUT_MS: "atlas_v2_boot_timeout_ms",
   ATLAS_HANDOFF_PREFETCH_TIMEOUT_MS: "atlas_handoff_prefetch_timeout_ms",
   ATLAS_EMBEDDED_TIMEOUT_MS: "atlas_embedded_timeout_ms",
@@ -108,6 +111,10 @@ export const SETTING_KEYS = Object.freeze({
   ARTIFACT_IMAGE_PROVIDER: "artifact_image_provider",
   OPENAI_ACCOUNT_LIMIT_TOKENS_SESSION: "openai_account_limit_tokens_session",
   OPENAI_ACCOUNT_LIMIT_TOKENS_WEEK: "openai_account_limit_tokens_week",
+  OPENAI_IMAGE_BUDGET_USD: "openai_image_budget_usd",
+  OPENAI_RUN_BUDGET_USD: "openai_run_budget_usd",
+  GROK_IMAGE_BUDGET_USD: "grok_image_budget_usd",
+  GROK_RUN_BUDGET_USD: "grok_run_budget_usd",
 });
 
 export const CODEX_AUTH_MODE_OPTIONS = Object.freeze([
@@ -127,6 +134,7 @@ export const MODEL_CATALOG_ENFORCEMENT_VALUES = Object.freeze(["warn_and_fallbac
 export const PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES = Object.freeze(["off", "warn", "enforce"]);
 export const RESEARCH_FANOUT_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
+export const ATLAS_SHADOW_GUARDRAILS_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const ATLAS_MEMORY_SURFACE_MODE_VALUES = Object.freeze(["auto", "off", "on"]);
 export const SESSION_RECYCLE_MODE_VALUES = Object.freeze(["off", "dev-fix", "full"]);
 export const STARTUP_DIRTY_TREE_POLICY_VALUES = Object.freeze(["block", "commit"]);

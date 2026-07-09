@@ -39,6 +39,7 @@ import {
   PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES,
   RESEARCH_FANOUT_MODE_VALUES,
   RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES,
+  ATLAS_SHADOW_GUARDRAILS_MODE_VALUES,
   ATLAS_MEMORY_SURFACE_MODE_VALUES,
   SESSION_RECYCLE_MODE_VALUES,
   STARTUP_DIRTY_TREE_POLICY_VALUES,
@@ -74,6 +75,7 @@ export {
   PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES,
   RESEARCH_FANOUT_MODE_VALUES,
   RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES,
+  ATLAS_SHADOW_GUARDRAILS_MODE_VALUES,
   ATLAS_MEMORY_SURFACE_MODE_VALUES,
   SESSION_RECYCLE_MODE_VALUES,
   STARTUP_DIRTY_TREE_POLICY_VALUES,
@@ -146,6 +148,12 @@ export const SETTINGS_CATALOG = [
   { key: "openai_observed_pct_week",    default: "", numeric: { integer: false, min: 0, max: 100 }, description: "Observed OpenAI weekly usage % calibration" },
   { key: "openai_account_limit_tokens_session", default: "", numeric: { integer: true, min: 0 }, description: "Hard OpenAI account-level session token cap" },
   { key: "openai_account_limit_tokens_week",    default: "", numeric: { integer: true, min: 0 }, description: "Hard OpenAI account-level weekly token cap" },
+  { key: "claude_run_budget_pct_session", default: "", numeric: { integer: false, min: 0, max: 100 }, description: "Claude run budget as a percent of the current session window (empty = no run budget)" },
+  { key: "codex_run_budget_pct_session", default: "", numeric: { integer: false, min: 0, max: 100 }, description: "Codex run budget as a percent of the current session window (empty = no run budget)" },
+  { key: "openai_run_budget_usd", default: "", numeric: { integer: false, min: 0 }, description: "OpenAI run spend budget in USD (empty = no run budget)" },
+  { key: "grok_run_budget_usd", default: "", numeric: { integer: false, min: 0 }, description: "Grok run spend budget in USD (empty = no run budget)" },
+  { key: "openai_image_budget_usd", default: "", numeric: { integer: false, min: 0 }, description: "OpenAI image-generation spend budget in USD (empty = no image budget)" },
+  { key: "grok_image_budget_usd", default: "", numeric: { integer: false, min: 0 }, description: "Grok image-generation spend budget in USD (empty = no image budget)" },
   { key: "openai_daily_budget_usd", default: "", numeric: { integer: false, min: 0 }, description: "OpenAI daily spend budget in USD (empty = no dashboard budget bar)" },
   { key: "grok_daily_budget_usd",   default: "", numeric: { integer: false, min: 0 }, description: "Grok daily spend budget in USD (empty = no dashboard budget bar)" },
   { key: "claude_usage_cache_ms", default: "120000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to cache Claude usage summaries before refreshing" },
@@ -253,6 +261,7 @@ export const SETTINGS_CATALOG = [
   { key: "research_fanout",      default: "off", options: RESEARCH_FANOUT_MODE_VALUES, description: "Research fanout mode for preflight fanout-clear decisions (off, shadow, on)" },
   { key: "research_traversal_completion_check", default: "off", options: RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES, description: "Traversal completion check mode for researcher/dev handoffs: off, shadow, or on" },
   { key: "research_traversal_completion_max_chars", default: "1600", numeric: { integer: true, min: 1 }, description: "Maximum rendered characters for the traversal completion check directive" },
+  { key: "atlas_shadow_guardrails", default: "shadow", options: ATLAS_SHADOW_GUARDRAILS_MODE_VALUES, description: "Telemetry-only ATLAS guardrails for deploy provenance, exact-count, negative-evidence, and token-pressure A/B miss patterns" },
   { key: "plan_approval_mode",   default: "false", valueType: "boolean", description: "Require human approval before executing plans" },
   { key: "disable_system_tools", default: "true", valueType: "boolean", adminVisible: false, description: "Disable Claude's native Read/Write/Grep/Glob/Edit/Bash; agents use only the deterministic MCP + ATLAS tool surface" },
 
@@ -383,14 +392,38 @@ export const SETTINGS_DEFAULTS = Object.freeze(
   Object.fromEntries(SETTINGS_CATALOG.map((entry) => [entry.key, entry.default])),
 );
 
+const OPTION_LABEL_OVERRIDES = Object.freeze({
+  js: "JavaScript",
+  ml: "ML",
+  scip: "SCIP",
+  onnx: "ONNX",
+  on_demand: "On demand",
+  "dev-fix": "Dev/fix",
+  warn_and_fallback: "Warn and fallback",
+  warn_only: "Warn only",
+  "jina-v2-code": "Jina v2 code",
+  "openai-compatible": "OpenAI-compatible",
+});
+
+function humanizeCatalogOptionLabel(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return raw;
+  const lower = raw.toLowerCase();
+  if (OPTION_LABEL_OVERRIDES[lower]) return OPTION_LABEL_OVERRIDES[lower];
+  return raw
+    .replace(/[_-]+/g, " ")
+    .replace(/\b(api|cli|db|fts|http|json|mcp|ml|onnx|pty|scip|sql|ui|url|wi|usd)\b/gi, (word) => word.toUpperCase())
+    .replace(/^\w/, (ch) => ch.toUpperCase());
+}
+
 function normalizeCatalogOption(option) {
   if (option && typeof option === "object") {
     const value = String(option.value ?? "").trim();
     if (!value) return null;
-    return Object.freeze({ value, label: String(option.label ?? value) });
+    return Object.freeze({ value, label: String(option.label ?? humanizeCatalogOptionLabel(value)) });
   }
   const value = String(option ?? "").trim();
-  return value ? Object.freeze({ value, label: value }) : null;
+  return value ? Object.freeze({ value, label: humanizeCatalogOptionLabel(value) }) : null;
 }
 
 export function getCatalogEntry(key) {

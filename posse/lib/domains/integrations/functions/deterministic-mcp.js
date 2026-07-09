@@ -1,4 +1,4 @@
-import { McpServerConfig } from "../../../classes/tools/McpServerConfig.js";
+import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 import { prepareIsolatedProviderHome } from "./isolated-provider-home.js";
 import {
   getDeterministicMcpToolNames,
@@ -14,8 +14,8 @@ export {
   roleUsesDeterministicReadMcp,
   roleUsesDeterministicWriteMcp,
 } from "./deterministic-mcp/tool-descriptors.js";
-export { McpServerConfig } from "../../../classes/tools/McpServerConfig.js";
-export { McpServer } from "../../../classes/tools/McpServer.js";
+export { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
+export { McpServer } from "../../../shared/tools/classes/McpServer.js";
 export {
   bootConfigFromMcpOAuthClaims,
   buildMcpOAuthClaimsFromBootConfig,

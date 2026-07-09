@@ -41,10 +41,131 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 const ONESHOT_RENAME_RE = /\b(?:rename|renaming)\b/i;
 const ONESHOT_FORMAT_RE = /\bformatting\b/i;
-const ONESHOT_SOURCES = new Set(["explicit", "heuristic", "intake", "preflight", "internal"]);
+const ONESHOT_SOURCES = new Set(["explicit", "heuristic", "scope", "fuzzy", "intake", "preflight", "internal"]);
+const PATH_MATCH_STOPWORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "without",
+  "from",
+  "into",
+  "onto",
+  "this",
+  "that",
+  "these",
+  "those",
+  "fix",
+  "fixed",
+  "update",
+  "updated",
+  "change",
+  "changed",
+  "make",
+  "set",
+  "remove",
+  "delete",
+  "add",
+  "bump",
+  "correct",
+  "adjust",
+  "polish",
+  "copy",
+  "edit",
+  "copyedit",
+  "typo",
+  "spelling",
+  "comment",
+  "comments",
+  "doc",
+  "docs",
+  "documentation",
+  "whitespace",
+  "only",
+  "single",
+  "file",
+  "one",
+  "keep",
+]);
 
 function normalizeCandidatePath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function singularizeToken(token) {
+  const value = String(token || "").toLowerCase();
+  if (value.length > 4 && value.endsWith("ies")) return `${value.slice(0, -3)}y`;
+  if (value.length > 4 && value.endsWith("s")) return value.slice(0, -1);
+  return value;
+}
+
+function tokenizeForPathMatch(value, { keepStopwords = false } = {}) {
+  const expanded = String(value || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ");
+  const tokens = expanded
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3)
+    .filter((token) => keepStopwords || !PATH_MATCH_STOPWORDS.has(token));
+  const out = new Set();
+  for (const token of tokens) {
+    out.add(token);
+    out.add(singularizeToken(token));
+  }
+  return out;
+}
+
+function basenameStem(filePath) {
+  const base = path.posix.basename(normalizeCandidatePath(filePath));
+  if (!base) return "";
+  if (base.startsWith(".") && base.indexOf(".", 1) === -1) return base.slice(1);
+  return base.replace(/\.[^.]+$/, "");
+}
+
+function pathTokenSets(filePath) {
+  const normalized = normalizeCandidatePath(filePath);
+  const stem = basenameStem(normalized);
+  const basenameTokens = tokenizeForPathMatch(stem || path.posix.basename(normalized), { keepStopwords: true });
+  const fullPathTokens = tokenizeForPathMatch(normalized, { keepStopwords: true });
+  return { basenameTokens, fullPathTokens };
+}
+
+function intersection(left, right) {
+  const out = [];
+  for (const value of left) {
+    if (right.has(value)) out.push(value);
+  }
+  return out;
+}
+
+function scoreTrackedFileForText(filePath, requestTokens) {
+  const { basenameTokens, fullPathTokens } = pathTokenSets(filePath);
+  const basenameMatches = intersection(requestTokens, basenameTokens);
+  const pathMatches = intersection(requestTokens, fullPathTokens);
+  const uniquePathOnlyMatches = pathMatches.filter((token) => !basenameMatches.includes(token));
+  const score = basenameMatches.length * 4 + uniquePathOnlyMatches.length;
+  const strong = basenameMatches.length >= 2
+    || (basenameMatches.length >= 1 && pathMatches.length >= 2)
+    || basenameMatches.some((token) => token.length >= 5);
+  return {
+    file: normalizeCandidatePath(filePath),
+    score,
+    strong,
+    matched_tokens: [...new Set([...basenameMatches, ...uniquePathOnlyMatches])],
+  };
+}
+
+function pathCorroboratesRequest(requestText, candidatePath) {
+  const requestTokens = tokenizeForPathMatch(requestText);
+  const { fullPathTokens } = pathTokenSets(candidatePath);
+  const matched = intersection(requestTokens, fullPathTokens);
+  return {
+    ok: matched.length > 0,
+    matched_tokens: matched,
+    request_token_count: requestTokens.size,
+  };
 }
 
 function isPathInsideProject(projectDir, candidate) {
@@ -55,18 +176,30 @@ function isPathInsideProject(projectDir, candidate) {
   return !!rel && rel !== "." && !path.isAbsolute(rel) && !rel.startsWith("..") && !rel.startsWith(`..${path.sep}`);
 }
 
-function listTrackedFiles(projectDir, candidates = []) {
-  if (!projectDir || candidates.length === 0) return new Map();
-  const args = process.platform === "win32"
-    ? ["ls-files", "-z"]
-    : ["ls-files", "-z", "--", ...candidates];
-  const output = execFileSync("git", args, {
+function runGitLsFiles(projectDir, args = ["ls-files", "-z"]) {
+  return execFileSync("git", args, {
     cwd: projectDir,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 30_000,
   });
-  const tracked = String(output || "").split("\0").filter(Boolean);
+}
+
+function parseGitLsFiles(output) {
+  return String(output || "").split("\0").map(normalizeCandidatePath).filter(Boolean);
+}
+
+function listAllTrackedFiles(projectDir) {
+  if (!projectDir) return [];
+  return parseGitLsFiles(runGitLsFiles(projectDir));
+}
+
+function listTrackedFiles(projectDir, candidates = []) {
+  if (!projectDir || candidates.length === 0) return new Map();
+  const args = process.platform === "win32"
+    ? ["ls-files", "-z"]
+    : ["ls-files", "-z", "--", ...candidates];
+  const tracked = parseGitLsFiles(runGitLsFiles(projectDir, args));
   const byNormalized = new Map();
   for (const file of tracked) {
     const normalized = normalizeCandidatePath(file);
@@ -75,7 +208,28 @@ function listTrackedFiles(projectDir, candidates = []) {
   return byNormalized;
 }
 
-function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPlan = false, requestText = "" } = {}) {
+function resolveOneshotCandidateFromTrackedFiles({ projectDir = null, requestText = "", routing = null } = {}) {
+  if (!projectDir || routing?.bucket !== "oneshot_candidate") return null;
+  if (Array.isArray(routing?.candidate_files) && routing.candidate_files.length > 0) return null;
+  const requestTokens = tokenizeForPathMatch(requestText);
+  if (requestTokens.size === 0) return null;
+
+  let tracked = [];
+  try {
+    tracked = listAllTrackedFiles(projectDir);
+  } catch {
+    return null;
+  }
+  const ranked = tracked
+    .map((file) => scoreTrackedFileForText(file, requestTokens))
+    .filter((entry) => entry.strong && entry.score >= 4)
+    .sort((a, b) => b.score - a.score || a.file.length - b.file.length || a.file.localeCompare(b.file));
+  if (ranked.length === 0) return null;
+  if (ranked.length > 1 && ranked[0].score === ranked[1].score) return null;
+  return ranked[0];
+}
+
+function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPlan = false, requestText = "", corroborationText = "", requirePathCorroboration = false } = {}) {
   const rawCandidates = Array.isArray(candidateFiles) ? candidateFiles : [];
   const candidates = rawCandidates.map(normalizeCandidatePath).filter(Boolean);
   const results = candidates.map((candidate) => ({
@@ -157,6 +311,16 @@ function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPl
       result.ok = false;
       result.reason = "high_risk_path";
       continue;
+    }
+
+    if (requirePathCorroboration) {
+      const corroboration = pathCorroboratesRequest(corroborationText || requestText, canonical);
+      result.checks.path_corroboration = corroboration;
+      if (!corroboration.ok) {
+        result.ok = false;
+        result.reason = "path_corroboration_failed";
+        continue;
+      }
     }
   }
 
@@ -331,14 +495,18 @@ export function createOneshotDevJob(workItem, {
   parentJob = null,
   redTeamPlan = false,
   demotionSource = "intake_gate",
+  requirePathCorroboration = false,
 } = {}) {
   const requestedCandidates = candidateFiles || routing?.candidate_files || [];
   const reason = routing?.reason || "one-shot trivial edit";
+  const requestedText = workItemText(workItem);
   const gate = validateOneshotGate({
     candidateFiles: requestedCandidates,
     projectDir,
     redTeamPlan,
-    requestText: [workItemText(workItem), reason].filter(Boolean).join("\n"),
+    requestText: [requestedText, reason].filter(Boolean).join("\n"),
+    corroborationText: requestedText,
+    requirePathCorroboration,
   });
   if (!gate.ok) {
     logEvent({
@@ -385,9 +553,9 @@ export function createOneshotDevJob(workItem, {
     content_long: buildSyntheticResearchBrief(syntheticRouting),
   });
 
-  const requestedText = workItemText(workItem) || workItem?.title || `WI#${workItem.id}`;
+  const effectiveRequestedText = requestedText || workItem?.title || `WI#${workItem.id}`;
   const taskSpec = [
-    requestedText,
+    effectiveRequestedText,
     "",
     "This task was machine-derived from the work item with no planner. The work item text above is the authoritative statement of intent; make the smallest change that fully satisfies it.",
   ].join("\n");
@@ -403,7 +571,7 @@ export function createOneshotDevJob(workItem, {
     payload_json: JSON.stringify({
       task_spec: taskSpec,
       success_criteria: [
-        `The requested edit is complete: ${workItem.title || requestedText}`,
+        `The requested edit is complete: ${workItem.title || effectiveRequestedText}`,
         "The change is internally consistent; nothing the request implies was left un-updated.",
       ],
       files_to_modify: [file],
@@ -483,6 +651,32 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
     return { ...outcome, routing: effectiveRouting };
   }
   if (effectiveRouting.bucket === "oneshot_candidate") {
+    const fuzzyCandidate = resolveOneshotCandidateFromTrackedFiles({
+      projectDir,
+      requestText: workItemText(workItem),
+      routing: effectiveRouting,
+    });
+    if (fuzzyCandidate) {
+      const outcome = createOneshotDevJob(workItem, {
+        routing: {
+          ...effectiveRouting,
+          bucket: "oneshot",
+          reason: `deterministic tracked-file match: ${fuzzyCandidate.file}`,
+          candidate_files: [fuzzyCandidate.file],
+          oneshot_source: "fuzzy",
+          fuzzy_match: {
+            score: fuzzyCandidate.score,
+            matched_tokens: fuzzyCandidate.matched_tokens,
+          },
+        },
+        source,
+        projectDir,
+        candidateFiles: [fuzzyCandidate.file],
+        redTeamPlan,
+        demotionSource: "deterministic_scope",
+      });
+      return { ...outcome, routing: outcome.routing };
+    }
     const job = createPreflightResearchJob(workItem, {
       deepthinkBudget,
       deepthinkBudgetExplicit,

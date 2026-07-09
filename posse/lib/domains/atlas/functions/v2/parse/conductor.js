@@ -14,7 +14,7 @@
 // on demand; warm-only consumers (post-commit hooks, most tests) never pay for
 // the pool.
 
-import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../classes/tools/daemon/index.js";
+import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../shared/tools/classes/daemon/index.js";
 import { heartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { log } from "../../../../../shared/telemetry/functions/logging/logger.js";
 

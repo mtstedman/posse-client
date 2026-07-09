@@ -116,6 +116,24 @@ function isCrossCuttingTask(taskText) {
   return CROSS_CUTTING_RE.test(String(taskText || ""));
 }
 
+// Lexically-matched test files routinely out-rank the real source in an area
+// survey — a config/runtime task pulls the suites that name the same symbols,
+// starving the source that actually answers it (measured: 6 of 8 top-ranked
+// files were tests on a config-provenance task). Demote — never drop — test
+// files below source so source fills the survey budget first; tests still ride
+// the tail when there is room, so a fan-in task that legitimately counts test
+// callers still sees them. Left alone when the task itself targets tests.
+const TEST_PATH_RE = /(?:^|\/)(?:tests?|__tests__|specs?|e2e)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]+\.py$|_test\.(?:py|go)$/i;
+const TEST_TASK_RE = /\b(?:test\s+coverage|which\s+tests?|test\s+files?|unit\s+tests?|test\s+suites?|coverage\s+gaps?|spec\s+files?|how\s+is\s+[\w.]+\s+tested)\b/i;
+function isTestPath(p) { return TEST_PATH_RE.test(String(p || "")); }
+function demoteTestFiles(files, taskText) {
+  if (TEST_TASK_RE.test(String(taskText || ""))) return files;
+  const src = [];
+  const tst = [];
+  for (const f of files) (isTestPath(f) ? tst : src).push(f);
+  return src.length > 0 ? [...src, ...tst] : files;
+}
+
 function decide(source, mode, paths, symbols, extra = {}) {
   return { inject: true, source, mode, paths, symbols: symbols || null, ...extra };
 }
@@ -158,7 +176,7 @@ export function chooseSurveyScope(input = {}, deps = {}) {
   if (explicitFiles.length) return decide("explicit-path", "file-list", explicitFiles.slice(0, MAX_SURVEY_FILES), symbols);
 
   // (2) seeds (explicit scope / validated research key_files)
-  const seeds = uniq(seedFiles).filter((f) => CODE_EXT_RE.test(f));
+  const seeds = demoteTestFiles(uniq(seedFiles).filter((f) => CODE_EXT_RE.test(f)), taskText);
   if (seeds.length >= MIN_AREA_FILES) {
     const dom = crossCutting ? null : dominantDir(seeds, uniq(seeds.map(parentDir)), dirFileCount);
     if (dom) return decide("seeds", "directory", dom.dir, symbols, { files: dom.files, coverage: dom.coverage });
@@ -166,7 +184,7 @@ export function chooseSurveyScope(input = {}, deps = {}) {
   }
 
   // area gate
-  const ranked = uniq(rankedFiles).filter((f) => CODE_EXT_RE.test(f));
+  const ranked = demoteTestFiles(uniq(rankedFiles).filter((f) => CODE_EXT_RE.test(f)), taskText);
   if (ranked.length < MIN_AREA_FILES) {
     return { inject: false, reason: `no area: ${ranked.length} ranked files, no explicit/seed scope`, symbols: null };
   }

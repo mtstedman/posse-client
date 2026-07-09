@@ -5,10 +5,10 @@
 // derived from the canonical ToolCatalog so the function surface tracks the
 // catalog instead of a hand-maintained, duplicated map.
 
-import { ToolCatalog } from "../../../../classes/tools/ToolCatalog.js";
-import { buildProviderToolDefinitions } from "../../../../functions/tools/contract.js";
+import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
+import { buildProviderToolDefinitions } from "../../../../shared/tools/functions/contract.js";
 import { getAtlasEmbeddedToolDefinitions } from "../../../integrations/functions/atlas-embedded.js";
-import { embeddedAdvertisedToolNames } from "../../../../functions/tools/tool-suites.js";
+import { embeddedAdvertisedToolNames } from "../../../../shared/tools/functions/tool-suites.js";
 
 // Deterministic tools advertised on the function-calling (embedded) transport
 // used by OpenAI and Grok. Sourced from the shared ToolRegistry metadata

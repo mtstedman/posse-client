@@ -159,12 +159,14 @@ export function toStorageSettingKey(settingKey = "") {
 // The admin TUI settings tab is split into broad panes (switched with ←/→).
 // Each group below belongs to exactly one pane and renders its `keys`
 // (display-keys, matching what the settings snapshot returns) in the listed
-// order. Any catalog key not mentioned here lands in a "Misc" group — in the
-// Debug pane when it's a tuning key, otherwise in General — so newly-added
-// settings stay visible until they're explicitly placed.
+// order. Any catalog key not mentioned here lands in a "Misc" group on the
+// Debug pane, so newly-added settings stay visible until they're intentionally
+// promoted into an operator-facing section.
 export const SETTINGS_PANES = Object.freeze([
-  Object.freeze({ id: "providers", label: "Providers" }),
   Object.freeze({ id: "atlas", label: "ATLAS" }),
+  Object.freeze({ id: "agents", label: "Agents" }),
+  Object.freeze({ id: "providers", label: "Providers" }),
+  Object.freeze({ id: "images", label: "Images" }),
   Object.freeze({ id: "general", label: "General" }),
   Object.freeze({ id: "repo", label: "Repo" }),
   Object.freeze({ id: "debug", label: "Debug" }),
@@ -180,113 +182,257 @@ export const REPO_SCOPED_DISPLAY_KEYS = new Set(
 );
 
 export const SETTINGS_GROUPS = Object.freeze([
-  // ── Providers pane ──
-  {
-    id: "budgets",
-    pane: "providers",
-    label: "budgets & account limits",
-    keys: Object.freeze([
-      "openai_account_limit_tokens_session",
-      "openai_account_limit_tokens_week",
-      "openai_daily_budget_usd",
-      "grok_daily_budget_usd",
-    ]),
-  },
   // ── ATLAS pane ──
   {
-    id: "atlas",
+    id: "atlas_core",
     pane: "atlas",
-    label: "ATLAS",
+    label: "Atlas",
     keys: Object.freeze([
       "atlas_v2",
-      "atlas_scip_mode",
-      "atlas_scip_languages",
-      "atlas_scip_restage_policy",
       "atlas_phases",
       "atlas_live_funnel",
       "atlas_live_index",
+      "atlas_live_buffers",
       "atlas_memory_surface",
       "atlas_semantic_enabled",
       "atlas_reindex_on_commit",
       "atlas_tool_gate_enabled",
+      "atlas_boot_reindex_policy",
+      "atlas_drift_check",
+      "atlas_shadow_guardrails",
+      "atlas_auto_feedback",
+      "posse_kaizen_to_atlas",
     ]),
   },
   {
-    id: "atlas_advanced",
+    id: "atlas_scip",
     pane: "atlas",
-    label: "ATLAS advanced",
+    label: "SCIP",
     keys: Object.freeze([
+      "atlas_scip_mode",
+      "atlas_scip_languages",
+      "atlas_scip_restage_policy",
       "atlas_scip_index_command",
       "atlas_scip_index_args",
       "atlas_scip_index_timeout_ms",
       "atlas_scip_cold_index_timeout_ms",
       "atlas_scip_max_age_hours",
-      "atlas_auto_feedback",
-      "atlas_live_buffers",
-      "posse_kaizen_to_atlas",
+    ]),
+  },
+  {
+    id: "atlas_onnx",
+    pane: "atlas",
+    label: "ONNX",
+    keys: Object.freeze([
       "atlas_vector_backend",
-      "atlas_tree_compression_mode",
-      "atlas_tree_compression_provider",
-      "atlas_tree_compression_model_tier",
-      "atlas_tree_compression_max_seeds",
-      "atlas_tree_compression_model_max_seeds",
       "atlas_embedding_provider",
       "atlas_embedding_endpoint",
       "atlas_embedding_model",
       "atlas_embedding_dim",
       "atlas_embedding_threads",
       "atlas_wi_embeddings",
+    ]),
+  },
+  {
+    id: "atlas_tree_encode",
+    pane: "atlas",
+    label: "Tree / Encode",
+    keys: Object.freeze([
+      "atlas_view_layer_merge",
+      "atlas_tree_compression_mode",
+      "atlas_tree_compression_provider",
+      "atlas_tree_compression_model_tier",
+      "atlas_tree_compression_max_seeds",
+      "atlas_tree_compression_model_max_seeds",
       "atlas_remote_encoder_mode",
       "atlas_remote_encoder_url",
       "atlas_remote_encoder_model",
       "atlas_remote_encoder_dim",
-      "atlas_boot_reindex_policy",
       "atlas_v2_boot_soft_timeout_ms",
-      "atlas_drift_check",
       "atlas_handoff_prefetch_timeout_ms",
       "git_atlas_post_commit_hook_timeout_ms",
     ]),
   },
-  // ── General pane ──
+  // ── Agents pane ──
   {
-    id: "scheduler",
-    pane: "general",
-    label: "scheduler & branches",
+    id: "agent_researcher",
+    pane: "agents",
+    label: "Researcher",
     keys: Object.freeze([
-      "scheduler_concurrency",
-      "startup_dirty_tree_policy",
-      "session_recycle_mode",
+      "base_turns_researcher",
+      "max_output_tokens_researcher",
     ]),
   },
   {
-    id: "behaviors",
+    id: "agent_planner",
+    pane: "agents",
+    label: "Planner",
+    keys: Object.freeze([
+      "base_turns_planner",
+      "max_output_tokens_planner",
+      "planner_max_tasks",
+      "planner_under_scoped_broad_gate",
+    ]),
+  },
+  {
+    id: "agent_dev",
+    pane: "agents",
+    label: "Dev",
+    keys: Object.freeze([
+      "base_turns_dev",
+      "max_output_tokens_dev",
+    ]),
+  },
+  {
+    id: "agent_artificer",
+    pane: "agents",
+    label: "Artificer",
+    keys: Object.freeze([
+      "max_output_tokens_artificer",
+    ]),
+  },
+  {
+    id: "agent_preflight",
+    pane: "agents",
+    label: "Preflight",
+    keys: Object.freeze([
+      "max_output_tokens_preflight",
+    ]),
+  },
+  {
+    id: "agent_assessor",
+    pane: "agents",
+    label: "Assessor",
+    keys: Object.freeze([
+      "base_turns_assessor",
+      "max_output_tokens_assessor",
+    ]),
+  },
+  {
+    id: "agent_delegator",
+    pane: "agents",
+    label: "Delegator",
+    keys: Object.freeze([
+      "delegation_mode",
+      "max_output_tokens_delegator",
+    ]),
+  },
+  // ── Providers pane ──
+  {
+    id: "provider_claude",
+    pane: "providers",
+    label: "Claude",
+    keys: Object.freeze([
+      "claude_run_budget_pct_session",
+    ]),
+  },
+  {
+    id: "provider_codex",
+    pane: "providers",
+    label: "Codex",
+    keys: Object.freeze([
+      "codex_auth_mode",
+      "codex_run_budget_pct_session",
+    ]),
+  },
+  {
+    id: "provider_openai",
+    pane: "providers",
+    label: "OpenAI",
+    keys: Object.freeze([
+      "openai_run_budget_usd",
+      "openai_daily_budget_usd",
+      "openai_account_limit_tokens_session",
+      "openai_account_limit_tokens_week",
+    ]),
+  },
+  {
+    id: "provider_grok",
+    pane: "providers",
+    label: "Grok",
+    keys: Object.freeze([
+      "grok_run_budget_usd",
+      "grok_daily_budget_usd",
+    ]),
+  },
+  {
+    id: "provider_catalog",
+    pane: "providers",
+    label: "Model Catalog",
+    keys: Object.freeze([
+      "model_catalog_enforcement",
+      "model_catalog_cache_ms",
+      "claude_execution_mode",
+    ]),
+  },
+  // ── Images pane ──
+  {
+    id: "image_grok",
+    pane: "images",
+    label: "Grok",
+    keys: Object.freeze([
+      "grok_image_budget_usd",
+    ]),
+  },
+  {
+    id: "image_openai",
+    pane: "images",
+    label: "OpenAI",
+    keys: Object.freeze([
+      "openai_image_budget_usd",
+    ]),
+  },
+  // ── General pane ──
+  {
+    id: "behavior",
     pane: "general",
-    label: "behaviors & safety hooks",
+    label: "Behavior",
+    keys: Object.freeze([
+      "research_fanout",
+      "scheduler_concurrency",
+      "session_recycle_mode",
+      "context_compaction_mode",
+      "context_compaction_trigger_input_tokens",
+      "context_compaction_session_reset_input_tokens",
+      "context_compaction_recent_target_tokens",
+    ]),
+  },
+  {
+    id: "skills",
+    pane: "general",
+    label: "Skills",
+    keys: Object.freeze([
+      "skills_enabled",
+      "skills_disabled_ids",
+    ]),
+  },
+  {
+    id: "safety",
+    pane: "general",
+    label: "Safety",
     keys: Object.freeze([
       "auto_merge_completed",
       "plan_approval_mode",
       "web_tools_enabled",
-      "claude_execution_mode",
-      "codex_auth_mode",
+      "posse_log_scrub_secrets",
+      "skip_hooks",
+      "skip_hook_secrets_scan",
+      "skip_hook_post_dev_verify",
+      "skip_hook_pre_push_gate",
+      "startup_dirty_tree_policy",
       "pre_assess_cmd",
       "pre_push_verify_cmd",
     ]),
   },
   {
-    id: "remote",
+    id: "logging",
     pane: "general",
-    label: "file requests",
+    label: "Logging",
     keys: Object.freeze([
-      "file_request_low_risk_extensions",
-    ]),
-  },
-  {
-    id: "planner",
-    pane: "general",
-    label: "skills",
-    keys: Object.freeze([
-      "skills_enabled",
-      "skills_disabled_ids",
+      "posse_log_level",
+      "posse_retention_days",
+      "posse_display_max_events",
+      "posse_display_event_rate_limit_per_sec",
     ]),
   },
   // ── Repo pane (rows persist per-repo, not as machine-global account state) ──
@@ -335,12 +481,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     pane: "debug",
     label: "hook & worktree overrides",
     keys: Object.freeze([
-      "skip_hooks",
-      "skip_hook_secrets_scan",
-      "skip_hook_post_dev_verify",
-      "skip_hook_pre_push_gate",
       "worktree_clean_ignored",
-      "research_fanout",
       "research_traversal_completion_check",
       "research_traversal_completion_max_chars",
       "fix_scope_handoff_guard",
@@ -382,26 +523,7 @@ export const SETTINGS_GROUPS = Object.freeze([
       "posse_remote_timeout_ms",
       "context_expand_max_steps",
       "context_expand_file_budget_per_attempt",
-    ]),
-  },
-  {
-    id: "planner_turns",
-    pane: "debug",
-    label: "planner & per-role caps",
-    keys: Object.freeze([
-      "planner_max_tasks",
-      "planner_under_scoped_broad_gate",
-      "base_turns_researcher",
-      "base_turns_planner",
-      "base_turns_dev",
-      "base_turns_assessor",
-      "max_output_tokens_researcher",
-      "max_output_tokens_planner",
-      "max_output_tokens_dev",
-      "max_output_tokens_artificer",
-      "max_output_tokens_assessor",
-      "max_output_tokens_preflight",
-      "max_output_tokens_delegator",
+      "file_request_low_risk_extensions",
     ]),
   },
   {
@@ -416,20 +538,15 @@ export const SETTINGS_GROUPS = Object.freeze([
     ]),
   },
   {
-    id: "limits_logging",
+    id: "limits",
     pane: "debug",
-    label: "limits & logging",
+    label: "limits",
     keys: Object.freeze([
-      "posse_retention_days",
       "posse_wi_failure_threshold",
       "posse_max_fix_chain_depth",
       "posse_max_replans",
       "posse_max_file_request_depth",
       "posse_fanout_child_timeout_sec",
-      "posse_display_max_events",
-      "posse_display_event_rate_limit_per_sec",
-      "posse_log_level",
-      "posse_log_scrub_secrets",
     ]),
   },
 ]);
@@ -499,6 +616,7 @@ export const TUNING_SETTING_KEYS = new Set([
   "atlas_scip_index_timeout_ms",
   "atlas_scip_cold_index_timeout_ms",
   "atlas_scip_max_age_hours",
+  "atlas_shadow_guardrails",
   "atlas_auto_feedback",
   "atlas_live_buffers",
   "posse_kaizen_to_atlas",
@@ -553,12 +671,12 @@ export function isGroupedSettingKey(displayKey) {
 }
 
 // Pane an editable DB-backed setting renders under. Ungrouped keys fall back
-// to Repo when the catalog scopes them per-repo, to Debug when they're tuning
-// knobs, otherwise General, so new catalog keys stay visible until they're
-// explicitly slotted into SETTINGS_GROUPS.
+// to Repo when the catalog scopes them per-repo; everything else falls into
+// Debug, so newly-added catalog keys stay visible without cluttering the
+// operator-facing panes.
 export function settingsPaneForKey(displayKey) {
   const group = settingsGroupForKey(displayKey);
   if (group?.pane) return group.pane;
   if (REPO_SCOPED_DISPLAY_KEYS.has(toStorageSettingKey(displayKey))) return "repo";
-  return isTuningSettingKey(displayKey) ? "debug" : "general";
+  return "debug";
 }

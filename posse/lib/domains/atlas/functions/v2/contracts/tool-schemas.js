@@ -244,6 +244,9 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     ref: s({ maxLength: 512 }),
     refs: a(s({ maxLength: 512 }), { maxItems: 100 }),
     hashes: a(s({ maxLength: 512 }), { maxItems: 100 }),
+    offset: i({ minimum: 0 }),
+    limit: i({ minimum: 1, maximum: 60000 }),
+    search: s({ maxLength: 512 }),
   }),
 
   "repo.register": o({

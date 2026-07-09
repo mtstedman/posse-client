@@ -35,9 +35,9 @@ import { ACTIVE_LEASE_STATUSES, LOCK_HOLDING_JOB_STATUSES } from "../../../catal
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { fit as fitAnsi } from "../../../shared/format/functions/ansi.js";
-import { nativeBinaries as defaultNativeBinaries } from "../../../classes/tools/BinaryManager.js";
-import { daemonSupervisor as defaultDaemonSupervisor } from "../../../classes/tools/daemon/index.js";
-import { persistentMcpOwner } from "../../../classes/tools/PersistentMcpOwner.js";
+import { nativeBinaries as defaultNativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
+import { daemonSupervisor as defaultDaemonSupervisor } from "../../../shared/tools/classes/daemon/index.js";
+import { persistentMcpOwner } from "../../../shared/tools/classes/PersistentMcpOwner.js";
 
 export const PROVIDER_AUTH_WARMUP_TIMEOUT_MS = 30_000;
 export const PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS = 1_200;

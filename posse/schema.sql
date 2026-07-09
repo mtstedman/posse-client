@@ -2,7 +2,7 @@ PRAGMA foreign_keys = ON;
 
 -- Schema version sentinel. Bumped when host-schema changes ship.
 -- Existing installs that read a lower value should run HOST_MIGRATIONS
--- from lib/functions/atlas/v2/contracts/ddl/host-migrations/index.js to
+-- from lib/domains/atlas/functions/v2/contracts/ddl/host-migrations/index.js to
 -- upgrade in place. Fresh installs created from this file pick up the
 -- end-state directly.
 --   1 = pre-ATLAS-v2 schema (implicit; older DBs return 0 by default).
@@ -834,7 +834,7 @@ CREATE TABLE IF NOT EXISTS project_context (
 
 
 -- Provider pricing table for cost attribution. Keyed by (provider, model_name)
--- with per-million-token rates in USD. Seed via lib/functions/billing/pricing.js defaults on
+-- with per-million-token rates in USD. Seed via lib/domains/billing/functions/pricing.js defaults on
 -- first lookup; editable by operator via admin/CLI.
 CREATE TABLE IF NOT EXISTS provider_pricing (
   provider TEXT NOT NULL,

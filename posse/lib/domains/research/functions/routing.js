@@ -477,6 +477,13 @@ export function classifyResearchTask({
       reason: "explicit one-shot intent needs preflight scope resolution",
       oneshot_source: "explicit",
     };
+  } else if (!protectedFileMention && explicitOneshot && lowerMode !== "question" && lowerMode !== "promote" && fileMentions.length > 1) {
+    result = {
+      bucket: "oneshot_candidate",
+      reason: "explicit one-shot intent has multiple file mentions; preflight must resolve or demote",
+      candidate_files: fileMentions,
+      oneshot_source: "explicit",
+    };
   } else if (!protectedFileMention && String(intakeHints?.intent_type || "").toLowerCase() === "typo_fix") {
     result = { bucket: "no_research", reason: "intake intent is typo_fix" };
   } else if (!protectedFileMention && lowerMode === "promote") {

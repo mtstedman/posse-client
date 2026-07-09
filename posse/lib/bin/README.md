@@ -5,7 +5,7 @@ This directory stages the compiled Rust helper binaries Posse ships
 per-OS/arch build targets, and filenames — lives in the catalog at
 [`lib/catalog/binary.js`](../catalog/binary.js), the single source of truth for
 both the deploy scripts and the runtime resolver
-([`lib/classes/tools/BinaryManager.js`](../classes/tools/BinaryManager.js)).
+([`lib/shared/tools/classes/BinaryManager.js`](../shared/tools/classes/BinaryManager.js)).
 
 ## Layout
 

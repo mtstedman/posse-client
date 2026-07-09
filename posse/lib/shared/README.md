@@ -36,6 +36,10 @@ lib/shared/
     index.js
     classes/index.js
     functions/index.js
+  tools/
+    index.js
+    classes/index.js
+    functions/index.js
 ```
 
 Shared is not a place to blur the boundary. Stateful shared primitives belong
@@ -64,3 +68,8 @@ value objects and mutation policy classes belong under
 
 Skills registry helpers are shared policy/data helpers used by multiple
 domains. Keep them under `lib/shared/skills/functions/`.
+
+Tool contracts, deterministic toolkit helpers, native binary owners, daemon
+supervisors, MCP owners, and hash-ref tool context stores are shared
+infrastructure. Keep stateful owners under `lib/shared/tools/classes/` and
+stateless tool/toolkit helpers under `lib/shared/tools/functions/`.

@@ -6,7 +6,7 @@
 
 import { isDeepStrictEqual } from "node:util";
 
-import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
+import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { runAtlasNativeMethod, runAtlasNativeOperation } from "./invoke.js";
 
 /**
@@ -37,7 +37,7 @@ export function shouldRunAtlasNativeParity(opts = {}) {
  *   method: string,
  *   payload: unknown,
  *   nodeResult: unknown,
- *   manager?: import("../../../../../classes/tools/BinaryManager.js").BinaryManager,
+ *   manager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  *   timeoutMs?: number,
  *   key?: string,
  *   auth?: Record<string, unknown>,
@@ -73,7 +73,7 @@ export function diffAtlasNativeParity(args) {
  * @param {{
  *   operation: Record<string, unknown>,
  *   nodeResult: unknown,
- *   manager?: import("../../../../../classes/tools/BinaryManager.js").BinaryManager,
+ *   manager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  *   timeoutMs?: number,
  *   key?: string,
  *   auth?: Record<string, unknown>,

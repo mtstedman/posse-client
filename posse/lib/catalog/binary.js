@@ -3,7 +3,7 @@
 // Authoritative registry for the Rust-compiled helper binaries Posse ships
 // (posse-atlas, posse-git, posse-remote). This is the single source of truth consumed by
 // BOTH the deploy script (scripts/deploy-rust-binaries.mjs) and the runtime
-// binary manager (lib/classes/tools/BinaryManager.js) — it replaces the old
+// binary manager (lib/shared/tools/classes/BinaryManager.js) — it replaces the old
 // standalone lib/bin/native-binaries.json so the build pipeline and the
 // runtime resolver can never drift.
 //

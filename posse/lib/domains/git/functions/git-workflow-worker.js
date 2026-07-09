@@ -1,6 +1,6 @@
 import { parentPort, workerData } from "worker_threads";
 import { createGitWorkflowHelpers } from "./workflows.js";
-import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import {
   computeWorktreeStatus,

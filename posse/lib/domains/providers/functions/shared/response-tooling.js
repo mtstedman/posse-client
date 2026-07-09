@@ -1,11 +1,11 @@
-import { appendExecutionTools } from "../../../../functions/tools/contract.js";
+import { appendExecutionTools } from "../../../../shared/tools/functions/contract.js";
 import {
   TOOL_BASH,
   safePath as sharedSafePath,
   buildScopePredicates as sharedBuildScopePredicates,
   createDeterministicToolkit,
   createBashExecutor,
-} from "../../../../functions/toolkit/index.js";
+} from "../../../../shared/tools/functions/toolkit/index.js";
 import { executeEmbeddedAtlasTool, resolveEmbeddedAtlasAction } from "../../../integrations/functions/atlas-embedded.js";
 import {
   buildLockedToolError as buildGateLockedToolError,

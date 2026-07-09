@@ -52,7 +52,7 @@ import {
   waitForQueueStateChangeAfter,
 } from "../../queue/functions/index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { reapOrphanedDaemons } from "../../../classes/tools/daemon/index.js";
+import { reapOrphanedDaemons } from "../../../shared/tools/classes/daemon/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { primeProviderUsageAuthAsync } from "../../providers/functions/provider.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";

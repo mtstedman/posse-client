@@ -2,15 +2,15 @@ import path from "path";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../../runtime/functions/protected-paths.js";
 import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncGate.js";
 import { stripPosseMcpGatewayPrefix } from "../../../integrations/functions/mcp-gateway.js";
-import { ToolCatalog } from "../../../../classes/tools/ToolCatalog.js";
-import { ToolRegistry } from "../../../../classes/tools/ToolRegistry.js";
-import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../../functions/tools/tool-suites.js";
-import { assertAdvertisedHaveExecutors } from "../../../../functions/tools/tool-parity.js";
-import { appendHashRefIfMajor } from "../../../../functions/tools/hash-adder.js";
-import { createChainLedger } from "../../../../functions/tools/chain-ledger.js";
-import { formatAtlasToolUseDisplayName } from "../../../../functions/tools/mcp-surface.js";
+import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
+import { ToolRegistry } from "../../../../shared/tools/classes/ToolRegistry.js";
+import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/tools/functions/tool-suites.js";
+import { assertAdvertisedHaveExecutors } from "../../../../shared/tools/functions/tool-parity.js";
+import { appendHashRefIfMajor } from "../../../../shared/tools/functions/hash-adder.js";
+import { createChainLedger } from "../../../../shared/tools/functions/chain-ledger.js";
+import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { getObservationContext } from "../../../observability/functions/observations.js";
-import { execProjectDbQuery } from "../../../../functions/toolkit/project-db/query.js";
+import { execProjectDbQuery } from "../../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   acknowledgeOperatorFeedback,
   countPendingOperatorFeedbackForJob,

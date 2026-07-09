@@ -49,7 +49,7 @@ import { scipIngest } from "./scip.js";
 import { info } from "./info.js";
 import { actionSearch, manual } from "./discovery.js";
 import { workflowExecute } from "./workflow.js";
-import { fetchHashRefTool } from "../../../../../functions/tools/hash-adder.js";
+import { fetchHashRefTool } from "../../../../../shared/tools/functions/hash-adder.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").Ledger} Ledger */

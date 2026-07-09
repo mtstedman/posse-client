@@ -3,8 +3,8 @@
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
-import { adaptExecutionContractForProvider, appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../functions/tools/contract.js";
-import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap } from "../../../../functions/tools/mcp-surface.js";
+import { adaptExecutionContractForProvider, appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
+import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap } from "../../../../shared/tools/functions/mcp-surface.js";
 import { logAtlasAttachment, resolveAtlasAssignmentUnit } from "../../../integrations/functions/atlas.js";
 import { atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 import { releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";

@@ -403,6 +403,29 @@ function installArgsForMissingNodePackages(manager, root, missingNames, opts = {
   ];
 }
 
+function isNpmPeerDependencyConflict(run) {
+  const text = cleanCommandOutput([
+    run?.message || "",
+    run?.stderr || "",
+    run?.stdout || "",
+  ].join("\n"));
+  return /\bERESOLVE\b/iu.test(text)
+    || /unable to resolve dependency tree/iu.test(text)
+    || /conflicting peer dependency/iu.test(text)
+    || /peer dep(?:endency)? conflict/iu.test(text);
+}
+
+function installArgsForPeerConflictRetry(manager, args, run) {
+  if (manager !== "npm" || !Array.isArray(args) || args.includes("--legacy-peer-deps")) return null;
+  if (!isNpmPeerDependencyConflict(run)) return null;
+  const insertAt = Math.max(1, args.indexOf("--include=optional") + 1);
+  return [
+    ...args.slice(0, insertAt),
+    "--legacy-peer-deps",
+    ...args.slice(insertAt),
+  ];
+}
+
 function commandOnPath(command) {
   const probe = process.platform === "win32" ? "where" : "which";
   const result = spawnSync(probe, [command.replace(/\.(cmd|bat)$/iu, "")], {
@@ -778,8 +801,30 @@ async function ensureNodeProject(entry, opts) {
   const generatedIgnore = before.missing_node_modules
     ? ensureGeneratedDirectoryIgnored(entry.root, "node_modules", opts)
     : null;
+  let usedPeerConflictRetry = false;
   if (!run.ok) {
-    return { ...before, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${installLabel} failed: ${firstLine(run.message)}` };
+    const peerRetryArgs = installArgsForPeerConflictRetry(before.manager, args, run);
+    if (!peerRetryArgs) {
+      return { ...before, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${installLabel} failed: ${firstLine(run.message)}` };
+    }
+    opts.onProgress?.(`${entry.label}: ${before.manager} install with legacy peer deps`);
+    const peerRetry = await runCommand(command, peerRetryArgs, {
+      cwd: entry.root,
+      timeoutMs: opts.timeoutMs,
+      onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
+    });
+    if (!peerRetry.ok) {
+      return {
+        ...before,
+        label: entry.label,
+        ok: false,
+        status: "failed",
+        action: "install",
+        generated_ignore: generatedIgnore,
+        message: `${installLabel} failed after peer dependency retry: ${firstLine(peerRetry.message) || firstLine(run.message)}`,
+      };
+    }
+    usedPeerConflictRetry = true;
   }
   let after = inspectNodeProject(entry.root);
   let missingAfter = missingNodePackageLabels(after);
@@ -804,7 +849,7 @@ async function ensureNodeProject(entry, opts) {
           status: "installed",
           action: "install",
           generated_ignore: generatedIgnore,
-          message: `${installLabel} completed; optional packages unavailable: ${missingOptional.join(", ")}`,
+          message: `${installLabel} completed${usedPeerConflictRetry ? " after peer dependency retry" : ""}; optional packages unavailable: ${missingOptional.join(", ")}`,
         };
       }
       return { ...after, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${before.manager} focused install failed: ${firstLine(retry.message)}` };
@@ -817,6 +862,10 @@ async function ensureNodeProject(entry, opts) {
   const missingOptionalAfter = missingOptionalNodePackageLabels(after);
   const packagesOk = missingRequiredAfter.length === 0;
   if (packagesOk && !opts.dryRun) writeNodeManifestStamp(entry.root, after.manifest_hash || before.manifest_hash);
+  const retryDetails = [
+    usedPeerConflictRetry ? "peer dependency retry" : "",
+    usedFocusedRetry ? "focused retry" : "",
+  ].filter(Boolean);
   return {
     ...after,
     label: entry.label,
@@ -825,7 +874,7 @@ async function ensureNodeProject(entry, opts) {
     action: "install",
     generated_ignore: generatedIgnore,
     message: packagesOk
-      ? `${installLabel} completed${usedFocusedRetry ? " after focused retry" : ""}${missingOptionalAfter.length ? `; optional packages unavailable: ${missingOptionalAfter.join(", ")}` : ""}`
+      ? `${installLabel} completed${retryDetails.length ? ` after ${retryDetails.join(" and ")}` : ""}${missingOptionalAfter.length ? `; optional packages unavailable: ${missingOptionalAfter.join(", ")}` : ""}`
       : `missing required packages after install: ${missingRequiredAfter.join(", ")}`,
   };
 }

@@ -1,5 +1,5 @@
-import { getObservationContext } from "../../../observability/functions/observations.js";
-import { ToolGate } from "../../../../classes/tools/ToolGate.js";
+import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
+import { ToolGate } from "../../../../shared/tools/classes/ToolGate.js";
 import {
   GATED_NATIVE_TOOLS,
   GATED_ROLES,
@@ -9,8 +9,13 @@ import {
 const REQUIRED_MEANINGFUL_ATLAS_CALLS = 3;
 const FALLBACK_STRIKE_LIMIT = REQUIRED_MEANINGFUL_ATLAS_CALLS;
 const DEFAULT_SCOPE = "__default__";
+const PRESSURE_TTL_MS = 60 * 60 * 1000;
+const PRESSURE_STATE_LIMIT = 5000;
+const PRESSURE_TOTAL_THRESHOLD = 4;
+const PRESSURE_WINDOW_THRESHOLD = 2;
 
 const _gates = new Map();
+const _pressure = new Map();
 
 function _resolveScope(explicit) {
   if (explicit) return String(explicit);
@@ -106,6 +111,7 @@ export function getRequiredMeaningfulAtlasCalls() {
 
 export function noteAtlasCall({ action = "", ok = false, empty = false, args = {}, artifacts = null, cwd = null, scopeKey = null } = {}) {
   _getGate(scopeKey).noteAtlasCall({ action, ok, empty, args, artifacts, cwd });
+  maybeRecordAtlasShadowTokenPressure({ action, args, artifacts, scopeKey });
 }
 
 export function unlockForAtlasUnavailable({ reason = "atlas_unavailable", scopeKey = null } = {}) {
@@ -221,6 +227,7 @@ export function buildLockedToolError(toolName, { args = {}, cwd = null, scopeKey
 
 export function __resetGateForTests() {
   _gates.clear();
+  _pressure.clear();
 }
 
 export function __peekMeaningfulActions() {
@@ -233,4 +240,119 @@ export function __peekGatedTools() {
 
 export function __peekGateKeys() {
   return [..._gates.keys()];
+}
+
+function maybeRecordAtlasShadowTokenPressure({ action = "", args = {}, artifacts = null, scopeKey = null } = {}) {
+  const effectiveAction = normalizeAtlasActionForPressure(action, args);
+  if (effectiveAction !== "code.lens" && effectiveAction !== "code.window") return;
+
+  prunePressureState();
+  const scope = _resolveScope(scopeKey);
+  const target = normalizePressureTarget(args, artifacts);
+  const key = `${scope}\0${target}`;
+  const entry = _pressure.get(key) || {
+    scope,
+    target,
+    total: 0,
+    byAction: {},
+    emitted: new Set(),
+    updatedAt: 0,
+  };
+  entry.total += 1;
+  entry.byAction[effectiveAction] = (entry.byAction[effectiveAction] || 0) + 1;
+  entry.updatedAt = Date.now();
+  _pressure.delete(key);
+  _pressure.set(key, entry);
+
+  const windowCount = Number(entry.byAction["code.window"] || 0);
+  const shouldEmitTotal = entry.total >= PRESSURE_TOTAL_THRESHOLD && !entry.emitted.has("total");
+  const shouldEmitWindow = windowCount >= PRESSURE_WINDOW_THRESHOLD && !entry.emitted.has("window");
+  if (!shouldEmitTotal && !shouldEmitWindow) return;
+
+  if (shouldEmitTotal) entry.emitted.add("total");
+  if (shouldEmitWindow) entry.emitted.add("window");
+  try {
+    const ctx = getObservationContext() || {};
+    recordObservation({
+      work_item_id: ctx.work_item_id ?? null,
+      job_id: ctx.job_id ?? null,
+      attempt_id: ctx.attempt_id ?? null,
+      observation_type: "atlas.shadow.token_pressure",
+      summary: `ATLAS shadow token pressure: ${entry.total} lens/window call(s) for ${target}`,
+      detail: {
+        kind: "atlas_shadow_token_pressure",
+        mode: "shadow",
+        scope,
+        target,
+        total_ladder_calls: entry.total,
+        code_lens_calls: Number(entry.byAction["code.lens"] || 0),
+        code_window_calls: windowCount,
+        last_action: effectiveAction,
+        thresholds: {
+          total: PRESSURE_TOTAL_THRESHOLD,
+          code_window: PRESSURE_WINDOW_THRESHOLD,
+        },
+        recommendation: "Summarize the remaining evidence gap, use one area survey/structure call, or switch to a single targeted native-read exception instead of continuing per-file ladder loops.",
+      },
+    });
+  } catch {
+    // Token-pressure telemetry is advisory only.
+  }
+}
+
+function normalizeAtlasActionForPressure(action, args = {}) {
+  const raw = String(action || "").trim();
+  const nested = String(args?.action || "").trim();
+  const value = nested || raw;
+  return value
+    .replace(/^atlas[._]/i, "")
+    .replace(/^code_lens$/i, "code.lens")
+    .replace(/^code_window$/i, "code.window")
+    .replace(/^query[._]/i, "")
+    .toLowerCase();
+}
+
+function normalizePressureTarget(args = {}, artifacts = null) {
+  const file = firstNonEmpty(args?.file, args?.path, args?.paths);
+  if (file) return normalizePathLike(file);
+  const symbol = firstNonEmpty(args?.symbolId, args?.symbolRef, args?.identifier);
+  if (symbol) return String(symbol).slice(0, 160);
+  const artifactFile = Array.isArray(artifacts?.symbols)
+    ? artifacts.symbols.map((sym) => sym?.filePath).find(Boolean)
+    : null;
+  if (artifactFile) return normalizePathLike(artifactFile);
+  return "*";
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      const first = value.find((item) => String(item || "").trim());
+      if (first) return first;
+      continue;
+    }
+    const text = String(value || "").trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+function normalizePathLike(value) {
+  return String(value || "")
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "/")
+    .slice(0, 200);
+}
+
+function prunePressureState() {
+  const now = Date.now();
+  for (const [key, entry] of _pressure) {
+    if (now - Number(entry.updatedAt || 0) <= PRESSURE_TTL_MS) continue;
+    _pressure.delete(key);
+  }
+  while (_pressure.size > PRESSURE_STATE_LIMIT) {
+    const oldest = _pressure.keys().next().value;
+    if (oldest == null) break;
+    _pressure.delete(String(oldest));
+  }
 }

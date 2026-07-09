@@ -16,7 +16,7 @@
 
 import { execFileSync } from "child_process";
 import { EXT_TO_LANG } from "../parse/language-buckets.js";
-import { resolveRipgrepCommand } from "../../../../../functions/toolkit/ripgrep.js";
+import { resolveRipgrepCommand } from "../../../../../shared/tools/functions/toolkit/ripgrep.js";
 
 // Curated config/data extensions. Each is intersected against the indexed
 // extension set below so an entry that a language actually owns is dropped —

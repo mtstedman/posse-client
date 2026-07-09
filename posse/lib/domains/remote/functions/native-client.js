@@ -1,6 +1,6 @@
 // @ts-check
 
-import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { nativeHeartbeatAuthFromSettings } from "../../../shared/native/functions/auth.js";
 
 export const REMOTE_NATIVE_PROTOCOL = "posse.remote.native.v1";
@@ -52,7 +52,7 @@ function unwrapRemoteNativeResponse(value) {
  *   maxResponseBytes?: number,
  * }} request
  * @param {{
- *   manager?: import("../../../classes/tools/BinaryManager.js").BinaryManager,
+ *   manager?: import("../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  *   apiKey?: string,
  *   auth?: Record<string, unknown> | null,
  * }} [opts]

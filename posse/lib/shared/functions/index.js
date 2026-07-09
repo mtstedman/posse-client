@@ -6,3 +6,4 @@ export * from "../scope/functions/index.js";
 export * from "../skills/functions/index.js";
 export * from "../storage/functions/index.js";
 export * from "../telemetry/functions/index.js";
+export * from "../tools/functions/index.js";

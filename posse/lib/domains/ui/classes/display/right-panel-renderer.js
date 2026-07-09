@@ -4,7 +4,7 @@ import { fit, stripAnsi, _sanitizeDisplayLine } from "../../functions/display/he
 import { roleBrandColor, roleBrandIcon } from "../../functions/display/helpers/brand.js";
 import { jobLabel, jobDisplayStatus } from "../../functions/display/helpers/job-status.js";
 import { renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
-import { canonicalAtlasActionName } from "../../../../functions/tools/mcp-surface.js";
+import { canonicalAtlasActionName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
 import { _buildQueueProviderUsageLines, getProviderUsageSummaryCache } from "../../functions/display/helpers/provider-usage.js";
 import { buildAdminGitDiffSnapshot, buildAdminGitDiffFileDetail } from "../../functions/admin/git-diff-review.js";
@@ -576,9 +576,12 @@ export class DisplayRightPanelRenderer {
     const lines = [];
     lines.push("");
     lines.push(` ${C.dim}No live agents right now.${C.reset}`);
-    let jobs = [];
-    try { jobs = this._getQueueData?.({ maxAgeMs: 1000 })?.jobs || []; } catch { jobs = []; }
+    let queueData = {};
+    try { queueData = this._getQueueData?.({ maxAgeMs: 1000 }) || {}; } catch { queueData = {}; }
+    const jobs = queueData.jobs || [];
+    const workItems = queueData.workItems || [];
     const queued = jobs.filter((job) => ["queued", "pending"].includes(String(job.status || "").toLowerCase()));
+    const queuedWorkItems = workItems.filter((wi) => String(wi?.status || "").toLowerCase() === "queued");
     const finished = jobs
       .filter((job) => ["succeeded", "failed", "canceled"].includes(String(job.status || "").toLowerCase()))
       .sort((a, b) => (Date.parse(b.updated_at || "") || 0) - (Date.parse(a.updated_at || "") || 0))
@@ -590,6 +593,14 @@ export class DisplayRightPanelRenderer {
         if (lines.length >= maxLines) break;
         const label = _sanitizeDisplayLine(jobLabel(job.job_type, job.title));
         lines.push(`  ${C.dim}·${C.reset} #${job.id} ${roleBrandColor(job.job_type)}${roleLabel(job.job_type)}${C.reset}  ${C.dim}${fit(label, Math.max(8, width - 22))}${C.reset}`);
+      }
+    } else if (queuedWorkItems.length > 0 && lines.length + 2 <= maxLines) {
+      lines.push("");
+      lines.push(` ${C.bold}QUEUED WORK ITEMS${C.reset} ${C.dim}· ${queuedWorkItems.length} waiting for planning${C.reset}`);
+      for (const wi of queuedWorkItems.slice(0, 4)) {
+        if (lines.length >= maxLines) break;
+        const label = _sanitizeDisplayLine(wi.title || "");
+        lines.push(`  ${C.dim}·${C.reset} WI#${wi.id} ${C.blue}queued${C.reset}  ${C.dim}${fit(label, Math.max(8, width - 24))}${C.reset}`);
       }
     }
     if (finished.length > 0 && lines.length + 2 <= maxLines) {
@@ -604,7 +615,7 @@ export class DisplayRightPanelRenderer {
         lines.push(`  ${glyph}${C.reset} #${job.id} ${roleBrandColor(job.job_type)}${roleLabel(job.job_type)}${C.reset}  ${fit(label, Math.max(8, width - 30))} ${C.dim}${ago} ago${C.reset}`);
       }
     }
-    if (queued.length === 0 && finished.length === 0) {
+    if (queued.length === 0 && queuedWorkItems.length === 0 && finished.length === 0) {
       lines.push(` ${C.dim}Monitor Agents will show running workers, questions, nudges, and tool history here.${C.reset}`);
     }
     return lines;

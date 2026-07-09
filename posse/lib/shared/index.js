@@ -8,3 +8,4 @@ export * as native from "./native/index.js";
 export * as scope from "./scope/index.js";
 export * as skills from "./skills/index.js";
 export * as policies from "./policies/index.js";
+export * as tools from "./tools/index.js";

@@ -37,22 +37,26 @@ Key behavior:
 ## Repository Map
 
 - `orchestrator.js`: CLI entry point and command bootstrap.
-- `lib/classes/`: stateful domain objects such as workers, schedulers,
-  providers, policies, queues, tools, display, and ATLAS sessions.
-- `lib/functions/`: stateless helpers grouped by domain, including queue,
-  handoff, provider routing, runtime paths, git workflows, artifacts, CLI
-  commands, deterministic tooling, and worker helpers.
-- `lib/functions/queue/index.js`: SQLite-backed state transitions and queue
-  logic.
-- `lib/classes/scheduler/Scheduler.js`: poll loop, leasing, deadlock checks,
-  and dispatch.
-- `lib/classes/worker/Worker.js`: job execution engine.
-- `lib/classes/worker/roles/`: role handlers for researcher, planner,
+- `lib/catalog/`: canonical domain enums and pure catalog data.
+- `lib/domains/`: domain packages with `classes/` and `functions/` tiers.
+- `lib/shared/`: cross-domain primitives, storage, telemetry, scope, policies,
+  and shared tools infrastructure.
+- `lib/domains/queue/functions/index.js`: SQLite-backed state transitions and
+  queue logic.
+- `lib/domains/scheduler/classes/Scheduler.js`: poll loop, leasing, deadlock
+  checks, and dispatch.
+- `lib/domains/worker/classes/Worker.js`: job execution engine.
+- `lib/domains/worker/classes/roles/`: role handlers for researcher, planner,
   developer, assessor, delegator, artificer, preflight, fix, and summary.
-- `lib/functions/handoff/index.js`: deterministic prompt/context assembly.
-- `lib/functions/provider/`: provider entry points and routing helpers.
-- `lib/functions/git/`: worktree, commit-scope, merge, and recovery helpers.
-- `lib/functions/runtime/paths.js`: runtime root, DB, resources, and log paths.
+- `lib/domains/handoff/functions/index.js`: deterministic prompt/context
+  assembly.
+- `lib/domains/providers/functions/`: provider entry points and routing helpers.
+- `lib/domains/git/functions/`: worktree, commit-scope, merge, and recovery
+  helpers.
+- `lib/domains/runtime/functions/paths.js`: runtime root, DB, resources, and log
+  paths.
+- `lib/shared/tools/`: deterministic toolkit contracts, MCP/native tool owners,
+  daemon supervision, and hash-ref tool context storage.
 - Runtime prompt pieces: fetched from `posse-remote` with
   `GET /v1/prompts/bundle` and kept in process memory only.
 - `test/`: core regression suite, focused suite wrappers, and root-level

@@ -715,6 +715,7 @@ export const TOOL_CHAIN_READ = {
     "call chain_verdict to issue your verdict. Large files may be paged with " +
     "offset/limit by issuing a verdict for each page, then calling chain_read " +
     "again with a higher offset; continuation pages for the same file are allowed. " +
+    "If a previously relevant file is restored from the audit ledger, its verdict carries over and no new verdict is needed. " +
     "Optional search/jsonPath/maxBytes uses the same structured extraction as read_file.",
   parameters: {
     type: "object",
@@ -753,7 +754,7 @@ export const TOOL_CHAIN_VERDICT = {
       },
       summary: {
         type: "string",
-        description: "What you found. Required when relevant, optional when irrelevant.",
+        description: "What you found. Required for irrelevant verdicts so later pruning preserves why the file was excluded.",
       },
     },
     required: ["verdict"],

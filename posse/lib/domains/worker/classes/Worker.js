@@ -416,6 +416,7 @@ export class Worker {
     this.display = opts.display || null;
     this.silent = opts.silent || false;
     this.dryRun = opts.dryRun || false;
+    this.nonInteractive = opts.nonInteractive || false;
     this.stallTimeout = opts.stallTimeout || null;
     this.leaseSec = opts.leaseSec || 900;
     this.renewLease = opts.renewLease || renewLease;

@@ -33,7 +33,7 @@ import {
   spawnFailureForRole,
   spawnSuccessForRole,
 } from "../../../../shared/policies/functions/spawn-policy.js";
-import { projectDbEffectivePermissions } from "../../../../functions/toolkit/project-db/config.js";
+import { projectDbEffectivePermissions } from "../../../../shared/tools/functions/toolkit/project-db/config.js";
 
 const DEFAULT_DEPS = {
   checkpointTokenThreshold: CHECKPOINT_TOKEN_THRESHOLD,

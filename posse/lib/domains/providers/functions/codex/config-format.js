@@ -63,12 +63,48 @@ export function shouldForwardCodexMcpEnvKey(envKey, extraAllowedKeys = null) {
   return false;
 }
 
-export function appendCodexMcpEnvOverrides(configOverrides, serverKey, env = {}, { extraAllowedKeys = [] } = {}) {
+function isWindowsPathEnvKey(envKey) {
+  return String(envKey || "").toUpperCase() === "PATH";
+}
+
+function isUnsafeWindowsPathEntry(entry = "") {
+  const value = String(entry || "").trim();
+  if (!value) return true;
+  if (/[\0\r\n<>|"?*]/.test(value)) return true;
+  const normalized = value.replace(/\//g, "\\").toLowerCase();
+  return /(^|\\)windowsapps(\\|$)/.test(normalized);
+}
+
+export function sanitizeCodexMcpEnvValue(envKey, envValue, {
+  platform = process.platform,
+} = {}) {
+  const value = String(envValue ?? "");
+  if (platform !== "win32" || !isWindowsPathEnvKey(envKey)) return value;
+
+  const seen = new Set();
+  const entries = [];
+  for (const rawEntry of value.split(";")) {
+    const entry = String(rawEntry || "").trim();
+    if (isUnsafeWindowsPathEntry(entry)) continue;
+    const key = entry.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push(entry);
+  }
+  return entries.join(";");
+}
+
+export function appendCodexMcpEnvOverrides(configOverrides, serverKey, env = {}, {
+  extraAllowedKeys = [],
+  platform = process.platform,
+} = {}) {
   const extraAllowed = new Set((Array.isArray(extraAllowedKeys) ? extraAllowedKeys : []).filter(Boolean));
   if (!env || typeof env !== "object") return;
   for (const [envKey, envValue] of Object.entries(env)) {
     if (!envKey || envValue == null || envValue === "") continue;
     if (!shouldForwardCodexMcpEnvKey(envKey, extraAllowed)) continue;
-    configOverrides.push(`mcp_servers.${serverKey}.env.${_toTomlKeyPart(envKey)}=${_toTomlLiteral(envValue)}`);
+    const sanitizedValue = sanitizeCodexMcpEnvValue(envKey, envValue, { platform });
+    if (sanitizedValue === "") continue;
+    configOverrides.push(`mcp_servers.${serverKey}.env.${_toTomlKeyPart(envKey)}=${_toTomlLiteral(sanitizedValue)}`);
   }
 }

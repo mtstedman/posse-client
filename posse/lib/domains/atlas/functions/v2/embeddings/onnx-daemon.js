@@ -8,7 +8,7 @@
 // search uses — replacing the per-ingestView encode pool that paid the ~6s
 // model load on every warm.
 
-import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../classes/tools/daemon/index.js";
+import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../shared/tools/classes/daemon/index.js";
 import { heartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 
 const HOST_URL = new URL("./onnx-host.mjs", import.meta.url);

@@ -16,9 +16,9 @@ import {
   getAtlasDeterministicToolDefinitions,
   prepareAtlasDeterministicPayload,
   resolveAtlasDeterministicAction,
-} from "../../../functions/toolkit/atlas.js";
+} from "../../../shared/tools/functions/toolkit/atlas.js";
 import { getObservationContext, recordObservation, atlasSummaryHint } from "../../observability/functions/observations.js";
-import { formatAtlasToolDisplayName } from "../../../functions/tools/mcp-surface.js";
+import { formatAtlasToolDisplayName } from "../../../shared/tools/functions/mcp-surface.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View } from "../../atlas/classes/v2/View.js";

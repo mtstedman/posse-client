@@ -344,7 +344,7 @@ export function buildTreeCompressionModelPassPrompt(modelInput) {
  *   annotations?: any,
  *   annotator?: ((args: { prompt: string, input: any, snapshot: any }) => any | Promise<any>),
  *   modelMetadata?: Record<string, unknown>,
- *   nativeManager?: import("../../../../../classes/tools/BinaryManager.js").BinaryManager,
+ *   nativeManager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  * }} [opts]
  * @returns {Promise<{ ok: boolean, durationMs: number, snapshotId?: number, seedCount: number, profile: string, sourceSignature: string | null, modelSeedCount?: number, deltaSeeds?: number, unannotatedSeeds?: number, carriedForwardSeeds?: number, error?: string }>}
  */

@@ -1,4 +1,4 @@
-import { nativeBinaries } from "../../../classes/tools/BinaryManager.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import {
   assertSafeRemoteAuthUrl,
   POSSE_REMOTE_MAX_RESPONSE_BYTES,
