@@ -438,12 +438,12 @@ function _editableFilePreloadMode() {
 //   allow_read=true   → skip bulk source preload (agent has read tools at runtime)
 // Must match actual runtime tool grants in the Claude and OpenAI providers.
 const TOOL_POLICIES = {
-  researcher: { allow_read: true,  allow_write: false, allow_shell: false, fallback_reads: 0 },  // chain_read/chain_verdict
-  planner:    { allow_read: true,  allow_write: false, allow_shell: false, fallback_reads: 0 },  // read-only deterministic tools
-  assessor:   { allow_read: true,  allow_write: false, allow_shell: true,  fallback_reads: 4 },  // has Read/Glob/Grep/Bash at runtime
-  delegator:  { allow_read: false, allow_write: false, allow_shell: false, fallback_reads: 0 },  // single-call, receives queue state
-  dev:        { allow_read: true,  allow_write: true,  allow_shell: true,  fallback_reads: 3 },
-  artificer:  { allow_read: true,  allow_write: true,  allow_shell: true,  fallback_reads: 0 },  // writes to output_root, bash for transforms
+  researcher: { allow_read: true,  allow_write: false, allow_shell: false, allow_tests: false, fallback_reads: 0 },  // chain_read/chain_verdict
+  planner:    { allow_read: true,  allow_write: false, allow_shell: false, allow_tests: false, fallback_reads: 0 },  // read-only deterministic tools
+  assessor:   { allow_read: true,  allow_write: false, allow_shell: true,  allow_tests: true,  fallback_reads: 4 },  // has verification/test tools and read-only Bash
+  delegator:  { allow_read: false, allow_write: false, allow_shell: false, allow_tests: false, fallback_reads: 0 },  // single-call, receives queue state
+  dev:        { allow_read: true,  allow_write: true,  allow_shell: true,  allow_tests: true,  fallback_reads: 3 },
+  artificer:  { allow_read: true,  allow_write: true,  allow_shell: true,  allow_tests: false, fallback_reads: 0 },  // writes to output_root, bash for transforms
 };
 
 function _sanitizePayloadForRecipient(recipient, payload = {}) {
@@ -797,6 +797,7 @@ function _applyToolPolicy(recipient, packet) {
     allow_read: base.allow_read,
     allow_write: base.allow_write,
     allow_shell: base.allow_shell,
+    allow_tests: base.allow_tests,
   };
 
   packet.budgets = {
@@ -860,7 +861,7 @@ function _applyToolPolicy(recipient, packet) {
  *   risk.assessable      boolean
  *
  *   ── Tool policy ──
- *   tool_policy          { allow_read, allow_write, allow_shell }
+ *   tool_policy          { allow_read, allow_write, allow_shell, allow_tests }
  *   budgets              { fallback_reads_remaining }
  *
  *   ── Context (filled by handoff enrichment) ──

@@ -10,6 +10,7 @@ const DEFAULT_MAX_WIDTH = 12;
 const DEFAULT_OCCUPANCY_GROWTH_RATIO = 0.65;
 const DEFAULT_COLLISION_GROWTH_THRESHOLD = 8;
 const DEFAULT_MAX_ATTEMPTS_PER_WIDTH = 256;
+const READY_SCHEMA_DBS = new WeakSet();
 
 function nowIso() {
   return new Date().toISOString();
@@ -24,6 +25,8 @@ function randomAlias(width, alphabet, randomInt) {
 }
 
 export class HashMinter {
+  #schemaReady = false;
+
   constructor({
     db,
     alphabet = DEFAULT_ALPHABET,
@@ -48,6 +51,11 @@ export class HashMinter {
   }
 
   ensureSchema() {
+    if (this.#schemaReady) return;
+    if (READY_SCHEMA_DBS.has(this.db)) {
+      this.#schemaReady = true;
+      return;
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS hash_ref_aliases (
         ref TEXT PRIMARY KEY,
@@ -56,6 +64,8 @@ export class HashMinter {
       )
     `);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_hash_ref_aliases_width ON hash_ref_aliases(width, created_at)`);
+    READY_SCHEMA_DBS.add(this.db);
+    this.#schemaReady = true;
   }
 
   refExists(ref) {

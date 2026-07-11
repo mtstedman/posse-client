@@ -24,6 +24,10 @@ import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/fun
 import { recordToolUseObservations } from "../../../domains/observability/functions/observations.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { appendHashRefIfMajor, fetchHashRefTool } from "../functions/hash-adder.js";
+import {
+  isInternalAtlasAction,
+  narrowBootConfigToSignedClaims,
+} from "../functions/issued-tool-policy.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
@@ -31,6 +35,7 @@ const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
 const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
 const ATLAS_TOOL_ACTION_SET = new Set(ATLAS_TOOL_ACTIONS);
+const ATLAS_NESTED_ACTION_WRAPPERS = new Set(["query", "code", "repo", "agent", "workflow"]);
 
 function randomToken() {
   return crypto.randomBytes(32).toString("base64url");
@@ -234,13 +239,12 @@ function toolAllowedByPolicy(policy, toolName, args = {}) {
   const requested = requestedToolPolicyName(toolName, args);
   const allowed = policy?.suites?.[requested.suite] || new Set();
   if (requested.suite === "atlas") {
-    return !!(
-      requested.name
-      && (
-        allowed.has(requested.name)
-        || (requested.nested && allowed.has(requested.nested))
-      )
-    );
+    if (!requested.name || isInternalAtlasAction(requested.name)) return false;
+    if (!allowed.has(requested.name)) return false;
+    if (ATLAS_NESTED_ACTION_WRAPPERS.has(requested.name) && requested.nested) {
+      return !isInternalAtlasAction(requested.nested) && allowed.has(requested.nested);
+    }
+    return true;
   }
   return !!requested.name && allowed.has(requested.name);
 }
@@ -829,8 +833,10 @@ export class PersistentMcpOwner {
     const id = String(claims.jti || claims.sub || "");
     if (!id) throw new Error("MCP OAuth token is missing a session id");
     const sessionBootConfig = {
-      ...bootConfigFromMcpOAuthClaims(claims),
-      ...bootConfig,
+      ...narrowBootConfigToSignedClaims(
+        bootConfigFromMcpOAuthClaims(claims),
+        bootConfig,
+      ),
       mcpOAuth: {
         verified: true,
         tokenId: id,

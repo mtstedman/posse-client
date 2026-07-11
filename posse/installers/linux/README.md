@@ -19,54 +19,65 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
   them: the C/C++ build toolchain that Posse's native npm modules (node-pty
   and friends) compile with, `python3-venv`/`pip`, and Node 24 via `nvm` when
   the host has no usable Node.
-- **Observable.** A splash, numbered steps (`[ 3/12]`), a spinner with elapsed
+- **Observable.** A splash, numbered steps (`[ 3/14]`), a spinner with elapsed
   time on TTYs, and full command output captured to
   `~/.posse/logs/install-<timestamp>.log` (failures print the output tail
   inline).
 
 ## What It Does (steps)
 
-1. **System packages** — detects `apt`/`dnf`/`yum`/`pacman`/`zypper`/`apk`
+1. **SCIP language selection** — validates `--scip-languages` or offers the
+   interactive default selection before runtime repair begins.
+2. **Preflight checks** — validates the optional smoke-test repo and reports
+   provider credential / Git identity gaps.
+3. **System packages** — detects `apt`/`dnf`/`yum`/`pacman`/`zypper`
    and installs what's missing: core (`git`, `curl`), build toolchain
    (`build-essential`/`gcc`+`make`, `pkg-config`, `python3`, `python3-pip`,
    `python3-venv`, `unzip`), and helper CLIs (ripgrep, Tesseract OCR,
-   ImageMagick, FFmpeg, PHP). Helper CLIs install per-package, so one missing
+   ImageMagick, FFmpeg, PHP, Composer). Helper CLIs install per-package, so one missing
    package name can't sink the rest. Uses `sudo` (prompted once, up front)
    unless running as root.
-2. **Node.js runtime** — accepts an existing Node ≥ 24; otherwise installs
+4. **Node.js runtime** — accepts an existing Node ≥ 24; otherwise installs
    nvm (pinned version) and `nvm install 24`, then adopts it for the rest of
    the run. `--no-install-node` opts out.
-3. **Posse checkout** — uses the checkout containing this installer when
+5. **Posse checkout** — uses the checkout containing this installer when
    available; cloning is only a fallback for standalone use.
-4. **Composer (SCIP PHP)** — uses a global `composer` when present; otherwise
+6. **Composer (SCIP PHP)** — uses a global `composer` when present; otherwise
    downloads a signature-verified `composer.phar` into Posse's `scip/bin`
    (skipped when PHP is absent).
-5. **npm dependencies** — `npm install --include=optional` (skipped when
+7. **npm dependencies** — `npm install --include=optional` (skipped when
    `node_modules` is fresh; one automatic retry for transient registry
    failures).
-6. **Shell wiring** — writes `~/.config/posse/atlas.env`, installs the
+8. **Shell wiring** — writes `~/.config/posse/atlas.env`, installs the
    `posse` shim in `~/.local/bin`, and (unless `--no-persist-env`) sources the
    env file from `~/.bashrc` / `~/.zshrc`.
-7. **Account settings** — seeds missing ATLAS keys into `~/.posse/account.db`
+9. **Account settings** — seeds missing ATLAS keys into `~/.posse/account.db`
    (merge-only; existing values are never overwritten).
-8. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
+10. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
    which builds the managed Python venv from `requirements.txt` and installs
    the SCIP language environments. This replaces the old `pip install --user`
    step (which broke on PEP 668 distros like Ubuntu 23.04+/Debian 12+) — the
    venv route works everywhere and matches what Posse does at boot.
-9. **Provider CLI detection** — `posse admin init --non-interactive`.
-10. **Validation** — boots Posse (`node orchestrator.js status`).
-11. **Provider API keys** — only with `--configure-keys`: hidden prompts for
+11. **Provider CLI detection** — `posse admin init --non-interactive`.
+12. **Validation** — boots Posse (`node orchestrator.js status`).
+13. **Provider API keys** — only with `--configure-keys`: hidden prompts for
     `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` / `CODEX_API_KEY`, written
     to `~/.config/posse/providers.env` (chmod 600), plus optional `claude` /
     `codex login` launches.
-12. **ATLAS smoke test** — only with `--repo-path`.
+14. **ATLAS smoke test** — only with `--repo-path`.
 
 ## Prereqs
 
-Almost none — that's the point. A supported package manager plus `sudo` (or
-root) lets the installer fetch everything else. Without root access it still
-completes whatever doesn't need packages and reports the gaps.
+Almost none — that's the point. Bash 4.4+, a supported package manager, and
+`sudo` (or a direct root login) let the installer fetch everything else. Do
+not invoke the installer itself through `sudo`; it requests elevation only for
+system packages. Without root access it still completes whatever doesn't need
+packages and reports the gaps.
+
+Alpine Linux is explicitly unsupported. Its musl userspace is incompatible
+with the installer's nvm/Node binary path, and stock Alpine does not include
+Bash. The preflight rejects Alpine when the script is launched from a Bash
+environment; use a supported glibc-based distribution instead.
 
 ## Run
 

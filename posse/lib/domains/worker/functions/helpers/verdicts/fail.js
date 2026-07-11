@@ -344,6 +344,7 @@ function _extractOriginalPayloadContext(job) {
   const origOutputRoot = origPayload.output_root || null;
   const origNeedsImageGen = !!origPayload.needs_image_generation;
   const origPlannerSetFiles = !!origPayload._planner_set_files;
+  const origOneshotOrigin = origPayload.oneshot === true || origPayload.oneshot_origin === true;
   if (isArtifactMode(origTaskMode) && origOutputRoot) {
     originalCreateRoots = _mergeUniquePaths(originalCreateRoots, [origOutputRoot]);
   }
@@ -351,7 +352,49 @@ function _extractOriginalPayloadContext(job) {
     originalFiles, originalCreateFiles, originalDeleteFiles, originalCreateRoots,
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
+    origOneshotOrigin,
   };
+}
+
+function _normalizeScopePath(value) {
+  return String(value || "").trim().replace(/\\/g, "/");
+}
+
+// One-shot lineage scope guard: a fix descended from a one-shot may keep the
+// original file scope automatically, but any added modify/create/delete path
+// or create root must be approved by a human before the fix can run.
+function _oneshotFixScopeExpansions({
+  origCtx,
+  mergedFixModify,
+  mergedFixCreate,
+  mergedFixDelete,
+  mergedFixRoots,
+}) {
+  const baselinePaths = new Set([
+    ...origCtx.originalFiles,
+    ...origCtx.originalCreateFiles,
+    ...origCtx.originalDeleteFiles,
+  ].map(_normalizeScopePath).filter(Boolean));
+  const baselineRoots = new Set(origCtx.originalCreateRoots.map(_normalizeScopePath).filter(Boolean));
+
+  const expansions = new Map();
+  const record = (paths, kind, baseline) => {
+    for (const raw of paths) {
+      const candidate = _normalizeScopePath(raw);
+      if (!candidate || baseline.has(candidate)) continue;
+      const existing = expansions.get(candidate);
+      if (existing) {
+        if (!existing.kinds.includes(kind)) existing.kinds.push(kind);
+      } else {
+        expansions.set(candidate, { path: candidate, kinds: [kind] });
+      }
+    }
+  };
+  record(mergedFixModify, "modify", baselinePaths);
+  record(mergedFixCreate, "create", baselinePaths);
+  record(mergedFixDelete, "delete", baselinePaths);
+  record(mergedFixRoots, "create_root", baselineRoots);
+  return [...expansions.values()];
 }
 
 function _seedDefaultFixSpecIfMissing(verdict, job) {
@@ -389,7 +432,11 @@ function _spawnRecoveryJobsForVerdict({
     originalFiles, originalCreateFiles, originalDeleteFiles, originalCreateRoots,
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
+    origOneshotOrigin,
   } = origCtx;
+  // One-shot lineage marker survives every recovery spawn so later fixes and
+  // file-request follow-ups keep the tightened one-shot policies.
+  const oneshotPayloadFields = origOneshotOrigin ? { oneshot_origin: true } : {};
 
   const dependencyReplacementJobs = [];
   for (const spec of verdict.spawn_jobs) {
@@ -465,7 +512,7 @@ function _spawnRecoveryJobsForVerdict({
         model_tier: job.model_tier,
         reasoning_effort: job.reasoning_effort,
         skills: job.skills || null,
-        payload_json: JSON.stringify(recoveryPlan.artifactPayload),
+        payload_json: JSON.stringify({ ...recoveryPlan.artifactPayload, ...oneshotPayloadFields }),
       });
       const promoteJob = spawnFromAssessor("failed", "promote", {
         work_item_id: job.work_item_id,
@@ -475,7 +522,7 @@ function _spawnRecoveryJobsForVerdict({
         model_tier: "cheap",
         reasoning_effort: "low",
         max_attempts: 2,
-        payload_json: JSON.stringify(recoveryPlan.promotePayload),
+        payload_json: JSON.stringify({ ...recoveryPlan.promotePayload, ...oneshotPayloadFields }),
       });
       addDependency(promoteJob.id, artifactFixJob.id, "hard");
       spawnedJobs.push(artifactFixJob, promoteJob);
@@ -547,7 +594,7 @@ function _spawnRecoveryJobsForVerdict({
         model_tier: job.model_tier,
         reasoning_effort: job.reasoning_effort,
         skills: job.skills || null,
-        payload_json: JSON.stringify(imagePayload),
+        payload_json: JSON.stringify({ ...imagePayload, ...oneshotPayloadFields }),
       });
       spawnedJobs.push(imageJob);
       dependencyReplacementJobs.push({ job: imageJob, label: "image artifact repair" });
@@ -580,7 +627,7 @@ function _spawnRecoveryJobsForVerdict({
         model_tier: job.model_tier,
         reasoning_effort: job.reasoning_effort,
         skills: job.skills || null,
-        payload_json: JSON.stringify(artifactPayload),
+        payload_json: JSON.stringify({ ...artifactPayload, ...oneshotPayloadFields }),
       });
       spawnedJobs.push(artifactJob);
       dependencyReplacementJobs.push({ job: artifactJob, label: "artifact repair" });
@@ -589,6 +636,10 @@ function _spawnRecoveryJobsForVerdict({
       jobLog("FIX_SPAWNED", { wi: job.work_item_id, job: artifactJob.id, detail: `artifact recovery for failed #${job.id} via artificer route` });
       continue;
     }
+
+    const oneshotScopeExpansions = origOneshotOrigin
+      ? _oneshotFixScopeExpansions({ origCtx, mergedFixModify, mergedFixCreate, mergedFixDelete, mergedFixRoots })
+      : [];
 
     const fixJob = spawnFromAssessor("failed", "fix", {
       work_item_id: job.work_item_id,
@@ -613,6 +664,7 @@ function _spawnRecoveryJobsForVerdict({
         needs_image_generation: origNeedsImageGen,
         success_criteria: originalSuccessCriteria,
         _planner_set_files: origPlannerSetFiles,
+        ...oneshotPayloadFields,
         // Fix jobs inherit the original scope as editable context; the
         // assessor verifies success after the fix, so don't require every
         // inherited file to be re-committed on each repair attempt.
@@ -621,6 +673,57 @@ function _spawnRecoveryJobsForVerdict({
     });
     spawnedJobs.push(fixJob);
     dependencyReplacementJobs.push({ job: fixJob, label: "fix" });
+
+    if (oneshotScopeExpansions.length > 0) {
+      // A one-shot's machine-derived scope was exactly one file. Same-file
+      // fixes run automatically; a fix that adds paths or create roots is a
+      // scope expansion and must be human-approved. Rejection cancels the
+      // gated fix (dependents of the human job); approval releases it.
+      const expansionDesc = oneshotScopeExpansions
+        .map((entry) => `- ${entry.path} (${entry.kinds.join(", ")})`)
+        .join("\n");
+      const gateJob = spawnFromAssessor("failed", "human_input", {
+        work_item_id: job.work_item_id,
+        title: `Approve one-shot fix scope: ${oneshotScopeExpansions.slice(0, 3).map((entry) => entry.path).join(", ")}${oneshotScopeExpansions.length > 3 ? ` (+${oneshotScopeExpansions.length - 3})` : ""}`,
+        parent_job_id: job.id,
+        priority: "high",
+        model_tier: "cheap",
+        payload_json: JSON.stringify({
+          original_job_id: job.id,
+          questions: [
+            [
+              `Fix #${fixJob.id} descends from one-shot job #${job.id} ("${job.title}") but expands beyond the original one-file scope:`,
+              expansionDesc,
+              `Original one-shot scope: ${[...origCtx.originalFiles, ...origCtx.originalCreateFiles].join(", ") || "(none)"}`,
+              `Reply with "approve" to let the expanded fix run or "reject" to cancel it.`,
+            ].join("\n"),
+          ],
+          context: `One-shot lineage scope gate for fix #${fixJob.id}; assessor feedback: ${verdict.reasons.join("; ").slice(0, 500)}`,
+          file_requests: oneshotScopeExpansions.map((entry) => ({
+            path: entry.path,
+            reason: `one-shot fix scope expansion (${entry.kinds.join(", ")})`,
+            risk: "high",
+          })),
+        }),
+      });
+      addDependency(fixJob.id, gateJob.id, "hard");
+      spawnedJobs.push(gateJob);
+
+      log(`${C.yellow}[assessor]${C.reset} gated one-shot fix #${fixJob.id} on scope approval #${gateJob.id} (${oneshotScopeExpansions.length} added path(s))`);
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: fixJob.id,
+        event_type: EVENT_TYPES.ONESHOT_FIX_SCOPE_GATED,
+        actor_type: EVENT_ACTORS.ASSESSOR,
+        message: `One-shot fix #${fixJob.id} scope expansion gated behind human approval #${gateJob.id}`,
+        event_json: JSON.stringify({
+          fix_job_id: fixJob.id,
+          human_job_id: gateJob.id,
+          original_scope: [...origCtx.originalFiles, ...origCtx.originalCreateFiles],
+          expansions: oneshotScopeExpansions,
+        }),
+      });
+    }
 
     log(`${C.yellow}[assessor]${C.reset} spawned fix #${fixJob.id}: ${fixJob.title.slice(0, 60)}`);
     jobLog("FIX_SPAWNED", { wi: job.work_item_id, job: fixJob.id, detail: `for failed #${job.id}  ${(verdict.reasons[0] || "").slice(0, 100)}` });

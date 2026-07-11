@@ -32,6 +32,10 @@ const SENSITIVE_KEY_PAIRS = new Set([
   "lease:token",
   "oauth:token",
   "private:key",
+  // The raw Posse credential (posse_key / posseKey). Pulse envelopes need no
+  // entry of their own: their `token`/`pulse_token` fields already hit the
+  // `token` rules above.
+  "posse:key",
   "refresh:token",
   "session:token",
   "setup:token",

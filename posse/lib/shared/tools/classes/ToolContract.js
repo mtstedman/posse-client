@@ -1,4 +1,5 @@
 import { normPath, normalizeRoots } from "../../scope/functions/path.js";
+import { isToolAuthorizedByIssuedSurface } from "../functions/issued-tool-policy.js";
 import { ToolCatalog } from "./ToolCatalog.js";
 
 const CLAUDE_AMBIENT_TOOLS = [
@@ -99,6 +100,9 @@ function normalizeCreateRootGlobs(createRoots = [], scopeCwd = process.cwd()) {
 
 function normalizeContractShape(contract = {}) {
   const roleMode = String(contract.roleMode || contract.role_mode || "").trim().toLowerCase();
+  const issuedToolSurface = Array.isArray(contract.issuedToolSurface)
+    ? [...contract.issuedToolSurface]
+    : null;
   return {
     provider: contract.provider || "generic",
     role: contract.role || "planner",
@@ -115,7 +119,12 @@ function normalizeContractShape(contract = {}) {
       readRoots: Array.isArray(contract?.scope?.readRoots) ? [...contract.scope.readRoots] : [],
       deleteFiles: Array.isArray(contract?.scope?.deleteFiles) ? [...contract.scope.deleteFiles] : [],
     },
-    tools: Array.isArray(contract.tools) ? contract.tools.map((tool) => ({ ...tool })) : [],
+    issuedToolSurface,
+    tools: Array.isArray(contract.tools)
+      ? contract.tools
+        .filter((tool) => isToolAuthorizedByIssuedSurface(tool, issuedToolSurface))
+        .map((tool) => ({ ...tool }))
+      : [],
   };
 }
 
@@ -428,6 +437,7 @@ export class ToolContract {
     fallbackReads = null,
     platform = process.platform,
     includeBaseTools = true,
+    issuedToolSurface = null,
   } = {}) {
     const toolNames = includeBaseTools
       ? ToolCatalog.forRole(role, { allowWrite, needsImageGeneration })
@@ -445,6 +455,7 @@ export class ToolContract {
       shellMode,
       platform,
       fallbackReads: Number.isFinite(Number(fallbackReads)) ? Math.max(0, Number(fallbackReads)) : null,
+      issuedToolSurface: Array.isArray(issuedToolSurface) ? issuedToolSurface : null,
       scope: {
         modifyFiles: Array.isArray(scopedFiles) ? scopedFiles : [],
         createFiles: Array.isArray(createFiles) ? createFiles : [],
@@ -452,7 +463,9 @@ export class ToolContract {
         readRoots: Array.isArray(readRoots) ? readRoots : [],
         deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
       },
-      tools: toolNames.map((name) => ({ name, ...ToolCatalog.getExecutionSpec(name) })),
+      tools: toolNames
+        .map((name) => ({ name, ...ToolCatalog.getExecutionSpec(name) }))
+        .filter((tool) => isToolAuthorizedByIssuedSurface(tool, issuedToolSurface)),
     };
     return new ToolContract(contract);
   }
@@ -468,6 +481,7 @@ export class ToolContract {
     for (const toolLike of toolNames || []) {
       const incoming = normalizeToolAppendSpec(toolLike, catalog);
       if (!incoming) continue;
+      if (!isToolAuthorizedByIssuedSurface(incoming, normalized.issuedToolSurface)) continue;
       const existingIndex = indexByName.get(incoming.name);
       if (existingIndex != null) {
         tools[existingIndex] = { ...tools[existingIndex], ...incoming, name: incoming.name };

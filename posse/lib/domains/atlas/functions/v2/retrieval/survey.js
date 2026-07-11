@@ -169,7 +169,6 @@ export function collectSurveyPaths({ view, requested, maxFiles }) {
   const seen = new Set();
   const paths = [];
   let prefixTruncated = false;
-  const db = typeof (/** @type {any} */ (view))._unsafeDb === "function" ? /** @type {any} */ (view)._unsafeDb() : null;
   const push = (path) => {
     if (seen.has(path)) return true;
     if (paths.length >= maxFiles) {
@@ -181,19 +180,16 @@ export function collectSurveyPaths({ view, requested, maxFiles }) {
     return true;
   };
   for (const entry of requested) {
-    const isFile = db
-      ? !!db.prepare("SELECT 1 FROM path_to_blob WHERE repo_rel_path = ?").get(entry)
-      : view.query.symbolsInFile(entry).length > 0;
+    const matches = typeof view.query.indexedPaths === "function"
+      ? view.query.indexedPaths({ pathPrefix: entry, limit: maxFiles + 1 })
+      : [];
+    const isFile = matches[0] === entry;
     if (isFile) {
       if (!push(entry)) break;
       continue;
     }
-    if (!db) continue;
-    const rows = db.prepare(
-      "SELECT repo_rel_path FROM path_to_blob WHERE repo_rel_path LIKE ? ORDER BY repo_rel_path LIMIT ?",
-    ).all(`${entry}/%`, maxFiles + 1);
-    for (const row of rows) {
-      if (!push(String(row.repo_rel_path))) break;
+    for (const matchedPath of matches) {
+      if (!push(String(matchedPath))) break;
     }
     if (prefixTruncated) break;
   }

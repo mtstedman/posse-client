@@ -478,8 +478,19 @@ export function createStandardToolHandlerMap({
     // projectDbWrite override on their declared scope — the project database
     // is their write surface even though the file tools are read-only.
     project_db_query(args, ctx) {
-      const dbWrite = ctx.allowWrite || ctx.declaredScope?.projectDbWrite === true;
-      return execProjectDbQuery(args, { projectDir: ctx.cwd, capability: dbWrite ? "write" : "read" });
+      const declaredCapability = ["none", "read", "write"].includes(String(ctx.declaredScope?.projectDbCapability || "").toLowerCase())
+        ? String(ctx.declaredScope.projectDbCapability).toLowerCase()
+        : null;
+      if (declaredCapability === "none") {
+        return "Error: project_db_query is not authorized by the declared project database capability.";
+      }
+      const dbWrite = declaredCapability
+        ? declaredCapability === "write"
+        : ctx.allowWrite || ctx.declaredScope?.projectDbWrite === true;
+      return execProjectDbQuery(args, {
+        projectDir: ctx.cwd,
+        capability: declaredCapability || (dbWrite ? "write" : "read"),
+      });
     },
   };
   // Attach the embedded executors to a ToolRegistry seeded with the shared

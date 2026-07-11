@@ -197,6 +197,24 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
           message: `Approved file creation gate for ${payload.file_requests.length} file(s)`,
           event_json: JSON.stringify({ file_requests: payload.file_requests }),
         });
+      } else {
+        finalHumanStatus = "failed";
+        for (const dep of dependents) {
+          const depJob = getJob(dep.job_id);
+          if (!depJob) continue;
+          if (TERMINAL_JOB_STATUS_SET.has(depJob.status)) continue;
+          await worker._setJobRowStatus(depJob, "canceled");
+        }
+        worker.emit(job.id, `${C.yellow}[human] File creation answer was ambiguous - canceled ${dependents.length} gated dependent(s)${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          attempt_id: attempt.attempt.id,
+          event_type: EVENT_TYPES.JOB_FILE_REQUEST_REJECTED,
+          actor_type: EVENT_ACTORS.WORKER,
+          message: `File creation gate did not receive explicit approval for ${payload.file_requests.length} file(s)`,
+          event_json: JSON.stringify({ file_requests: payload.file_requests, decision: "unknown" }),
+        });
       }
     }
 

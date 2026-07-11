@@ -192,5 +192,5 @@ export function createChainLedger({
     };
   }
 
-  return { chainRead, chainVerdict, digest, state };
+  return { chainRead, chainVerdict, digest, save, state };
 }

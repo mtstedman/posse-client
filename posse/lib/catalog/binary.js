@@ -12,7 +12,7 @@
 // (lib/shared/platform/functions/native-platform.js), which reads the maps
 // exported here.
 
-export const BINARY_NAMES = Object.freeze(["atlas", "git", "remote"]);
+export const BINARY_NAMES = Object.freeze(["atlas", "git", "remote", "vector"]);
 export const VALID_BINARY_NAMES = new Set(BINARY_NAMES);
 
 // Folder + manifest keys. These are OUR canonical os/arch tokens — distinct
@@ -39,9 +39,14 @@ export const ARCH_BY_NODE_ARCH = Object.freeze({
 /**
  * @param {string} pkg
  * @param {{ windows: string, posix: string }} files
- * @param {{ macosUniversal?: boolean, keyGated?: boolean }} [opts]
+ * @param {{ macosUniversal?: boolean, keyGated?: boolean, workerCapable?: boolean, exactVersion?: string | null }} [opts]
  */
-function defineBinary(pkg, files, { macosUniversal = true, keyGated = true } = {}) {
+function defineBinary(pkg, files, {
+  macosUniversal = true,
+  keyGated = true,
+  workerCapable = false,
+  exactVersion = null,
+} = {}) {
   return Object.freeze({
     package: pkg,
     // Posse method binaries are gated on native heartbeat auth: when true the
@@ -49,6 +54,8 @@ function defineBinary(pkg, files, { macosUniversal = true, keyGated = true } = {
     // + audience) in the native JSON request. Raw Posse keys must never travel
     // in native process argv.
     keyGated,
+    workerCapable,
+    exactVersion,
     platforms: Object.freeze({
       windows: Object.freeze({
         sourceFile: files.windows,
@@ -82,9 +89,14 @@ function defineBinary(pkg, files, { macosUniversal = true, keyGated = true } = {
 }
 
 export const NATIVE_BINARIES = Object.freeze({
-  atlas: defineBinary("posse-atlas", { windows: "posse-atlas.exe", posix: "posse-atlas" }),
-  git: defineBinary("posse-git", { windows: "posse-git.exe", posix: "posse-git" }),
+  atlas: defineBinary("posse-atlas", { windows: "posse-atlas.exe", posix: "posse-atlas" }, { workerCapable: true }),
+  git: defineBinary("posse-git", { windows: "posse-git.exe", posix: "posse-git" }, { workerCapable: true }),
   remote: defineBinary("posse-remote", { windows: "posse-remote.exe", posix: "posse-remote" }),
+  vector: defineBinary(
+    "posse-vector",
+    { windows: "posse-vector.exe", posix: "posse-vector" },
+    { workerCapable: true, exactVersion: "0.1.0" },
+  ),
 });
 
 /**
@@ -127,4 +139,12 @@ export function nativeBinaryIsUniversal(name, os) {
  */
 export function nativeBinaryIsKeyGated(name) {
   return nativeBinaryEntry(name)?.keyGated === true;
+}
+
+export function nativeBinaryIsWorkerCapable(name) {
+  return nativeBinaryEntry(name)?.workerCapable === true;
+}
+
+export function nativeBinaryExactVersion(name) {
+  return nativeBinaryEntry(name)?.exactVersion || null;
 }

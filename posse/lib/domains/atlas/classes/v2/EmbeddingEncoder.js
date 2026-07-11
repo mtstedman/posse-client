@@ -510,12 +510,6 @@ function createRemoteAtlasEmbeddingEncoder(config) {
     || config.modelVersion
     || "",
   ).trim() || null;
-  const apiKey = String(
-    config.remoteEncoderApiKey
-    || config.embeddingApiKey
-    || config.apiKey
-    || "",
-  ).trim() || undefined;
   return new RemoteAtlasEmbeddingEncoder({
     baseUrl,
     model,
@@ -524,7 +518,8 @@ function createRemoteAtlasEmbeddingEncoder(config) {
     timeoutMs: parseIntInRange(config.remoteEncoderTimeoutMs ?? config.embeddingTimeoutMs ?? config.timeoutMs, 1, 600000)
       || DEFAULT_HTTP_TIMEOUT_MS,
     fetchImpl: typeof config.fetchImpl === "function" ? /** @type {typeof fetch} */ (config.fetchImpl) : globalThis.fetch,
-    apiKey,
+    ...(config.authManager ? { authManager: config.authManager } : {}),
+    ...(config.pulseTokens ? { pulseTokens: config.pulseTokens } : {}),
     repoFingerprint: String(config.repoFingerprint || "").trim() || null,
   });
 }

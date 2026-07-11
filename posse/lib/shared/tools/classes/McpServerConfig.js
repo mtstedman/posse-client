@@ -20,6 +20,11 @@ import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.
 import { mintMcpOAuthTokenForBootConfig } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { resolveRemoteMcpToolSurfaceForBootConfig } from "../../../domains/integrations/functions/deterministic-mcp/remote-tool-surface.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
+import {
+  issuedToolNamesForSuite,
+  narrowBootConfigToRemoteSurface,
+  normalizeProjectDbCapability,
+} from "../functions/issued-tool-policy.js";
 import { persistentMcpOwner } from "./PersistentMcpOwner.js";
 import { McpServer } from "./McpServer.js";
 
@@ -219,39 +224,6 @@ function remoteSurfaceSummary(surface = null) {
   };
 }
 
-function stripSuitePrefix(name = "", suite = "") {
-  const raw = String(name || "").trim();
-  const prefix = `${String(suite || "").trim()}.`;
-  return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
-}
-
-function remoteToolNamesForSuite(surface = null, suite = "") {
-  const target = String(suite || "").trim().toLowerCase();
-  if (!target || !surface || typeof surface !== "object" || !Array.isArray(surface.tools)) return [];
-  const names = [];
-  for (const entry of surface.tools) {
-    const entrySuite = String(entry?.suite || "").trim().toLowerCase();
-    if (entrySuite !== target) continue;
-    const name = stripSuitePrefix(entry?.local_name || entry?.name, target);
-    if (name && !names.includes(name)) names.push(name);
-  }
-  return names;
-}
-
-function remoteToolAllowlistForSurface(surface = null) {
-  const allowlist = {};
-  if (!surface || typeof surface !== "object" || !Array.isArray(surface.tools)) return allowlist;
-  for (const entry of surface.tools) {
-    const suite = String(entry?.suite || "").trim().toLowerCase();
-    if (!suite) continue;
-    const name = stripSuitePrefix(entry?.local_name || entry?.name, suite);
-    if (!name) continue;
-    if (!Array.isArray(allowlist[suite])) allowlist[suite] = [];
-    if (!allowlist[suite].includes(name)) allowlist[suite].push(name);
-  }
-  return allowlist;
-}
-
 function expectedMcpToolNames(role, bootPayload = {}) {
   try {
     return getDeterministicMcpToolNames(role, {
@@ -287,7 +259,6 @@ function logMcpBootTelemetry(kind, role, bootPayload = {}, extra = {}) {
 
 function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}, {
   includeEmbeddingApiKey = true,
-  includeRemoteApiKey = true,
 } = {}) {
   const out = {
     POSSE_DETERMINISTIC_MCP_DB_PATH: String(payload.dbPath || ""),
@@ -321,17 +292,6 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}, {
   // Credential transport intentionally stays env-backed; the boot JSON payload
   // is carried in process args and must not contain provider secrets.
   if (includeEmbeddingApiKey && atlasConfig?.embeddingApiKey) out.POSSE_ATLAS_EMBEDDING_API_KEY = String(atlasConfig.embeddingApiKey);
-  // NOTE: this POSSE_KEY is the REMOTE-API credential (Bearer token for the
-  // /v1/catalog tool-surface fetch), NOT native-binary auth — native ATLAS/git
-  // now travel as the non-secret heartbeat capability in the boot payload. It is
-  // the only remaining raw-key handed to the child and is scoped to when the
-  // remote catalog is enabled; it goes away once the catalog fetch is brokered.
-  if (includeRemoteApiKey && payload.remoteCatalog?.enabled === true) {
-    const posseKey = resolvePosseKey();
-    if (posseKey) {
-      out.POSSE_KEY = posseKey;
-    }
-  }
   if (payload.providerName) out.POSSE_DETERMINISTIC_MCP_PROVIDER = String(payload.providerName);
   if (payload.jobId != null) out.POSSE_DETERMINISTIC_MCP_JOB_ID = String(payload.jobId);
   if (payload.workItemId != null) out.POSSE_DETERMINISTIC_MCP_WORK_ITEM_ID = String(payload.workItemId);
@@ -342,7 +302,6 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}, {
 function deterministicMcpShimMetadataEnv(payload = {}, atlasConfig = {}) {
   const out = deterministicMcpCompatibilityEnv(payload, atlasConfig, {
     includeEmbeddingApiKey: false,
-    includeRemoteApiKey: false,
   });
   // The stdio shim is a forwarding gate only. Keep non-secret deterministic
   // metadata for diagnostics/back-compat, but never give the shim credentials
@@ -370,6 +329,8 @@ function buildDeterministicMcpBootPayload(role, {
   jobId = null,
   workItemId = null,
   attemptId = null,
+  agentCallId = null,
+  promptChars = 0,
   atlasPrefetchStatus = null,
   atlasAvailable = null,
   atlasGateEnabled = true,
@@ -380,12 +341,25 @@ function buildDeterministicMcpBootPayload(role, {
   // narrow — it is ANDed with the role capability, never widens it.
   allowWrite = null,
   projectDbWrite = false,
+  projectDbCapability = null,
 } = {}) {
   const resolvedAtlasConfig = atlasConfig || getAtlasIntegrationConfig();
   const atlasEnabled = (typeof atlasAvailable === "boolean")
     ? atlasAvailable
     : resolvedAtlasConfig.enabled;
   const allowImageGeneration = roleUsesDeterministicImageMcp(role) && !!needsImageGeneration;
+  const expectedTools = getDeterministicMcpToolNames(role, { needsImageGeneration: allowImageGeneration });
+  const allowShell = expectedTools.includes("bash");
+  const requestedProjectDbCapability = normalizeProjectDbCapability(
+    projectDbCapability || (projectDbWrite === true ? "write" : "none"),
+  );
+  const allowTests = requestedProjectDbCapability !== "write" && expectedTools.some((name) => [
+    "run_scoped_checks",
+    "create_test_suite",
+    "create_test",
+    "run_test",
+    "run_test_suite",
+  ].includes(name));
   const remoteCatalogMode = getPosseRemoteMode();
   const remoteCatalogEnabled = remoteCatalogMode !== "off";
   return {
@@ -397,7 +371,10 @@ function buildDeterministicMcpBootPayload(role, {
       createRoots: Array.isArray(createRoots) ? createRoots : [],
       readRoots: Array.isArray(readRoots) ? readRoots : [],
       allowWrite: roleUsesDeterministicWriteMcp(role) && allowWrite !== false,
-      projectDbWrite: projectDbWrite === true,
+      allowShell,
+      allowTests,
+      projectDbCapability: requestedProjectDbCapability,
+      projectDbWrite: projectDbWrite === true && requestedProjectDbCapability === "write",
       allowImageHelpers: roleUsesDeterministicImageHelpers(role),
       allowImageGeneration,
       role,
@@ -406,6 +383,8 @@ function buildDeterministicMcpBootPayload(role, {
       jobId,
       workItemId,
       attemptId,
+      agentCallId,
+      promptChars: Math.max(0, Number(promptChars) || 0),
       atlasAvailable: atlasEnabled,
       atlasGateEnabled,
       atlasPrefetchStatus: atlasPrefetchStatus != null ? String(atlasPrefetchStatus) : "",
@@ -448,8 +427,8 @@ function buildDeterministicMcpBootPayload(role, {
       dbPath: getRuntimeDbPath(),
       // Native-binary auth as a parent-minted, NON-SECRET capability (heartbeat
       // URL + pinned public verification key + audience — no POSSE_KEY). The
-      // sidecar reconstructs a child-scoped auth manager from this; the same
-      // manager separately owns the current binary compatibility launch key.
+      // sidecar reconstructs a child-scoped auth manager from this. The raw
+      // Posse credential is never part of the boot payload.
       nativeAuth: heartbeatAuthManager.getCapability(),
     },
     resolvedAtlasConfig,
@@ -470,10 +449,14 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
   if (!remoteToolSurface || typeof remoteToolSurface !== "object") {
     throw requiredRemoteToolSurfaceError(role, null, "did not include a remote-issued tool surface");
   }
-  if (remoteToolSurface && typeof remoteToolSurface === "object") {
-    bootPayload.remoteToolSurface = sanitizeRemoteToolSurfaceForBoot(remoteToolSurface);
-    bootPayload.toolAllowlist = remoteToolAllowlistForSurface(remoteToolSurface);
+  const narrowedBootPayload = narrowBootConfigToRemoteSurface(bootPayload, remoteToolSurface);
+  if (!narrowedBootPayload.remoteToolSurface) {
+    throw requiredRemoteToolSurfaceError(role, null, "returned an invalid or mismatched remote-issued tool surface");
   }
+  narrowedBootPayload.remoteToolSurface = sanitizeRemoteToolSurfaceForBoot(
+    narrowedBootPayload.remoteToolSurface,
+  );
+  Object.assign(bootPayload, narrowedBootPayload);
   // The remote is authoritative for the tool policy surface, but the persistent
   // MCP owner is local. Its bearer must be signed by the local owner key, with
   // the remote-derived suite allowlist embedded as a local capability.
@@ -507,6 +490,9 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
     providerName: "",
     jobId: null,
     workItemId: null,
+    attemptId: null,
+    agentCallId: null,
+    promptChars: 0,
     scopedFiles: [],
     createFiles: [],
     deleteFiles: [],
@@ -524,9 +510,12 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
   const serverEnv = {
     ...deterministicMcpBaseEnv(process.env),
     ...imageGenerationCredentialEnv(process.env),
-    ...deterministicMcpCompatibilityEnv(ownerHotBootPayload, resolvedAtlasConfig, {
-      includeRemoteApiKey: false,
-    }),
+    ...deterministicMcpCompatibilityEnv(ownerHotBootPayload, resolvedAtlasConfig),
+    // Temporary rollout exception: only the trusted persistent owner receives
+    // POSSE_KEY, because released native Git/ATLAS helpers still mint their own
+    // pulse from the manager-owned credential that NativeBinary writes into
+    // each stdin request. The provider-facing shim and boot payload never
+    // receive it. Remove this when native helpers accept a parent-brokered pulse.
     ...(ownerHotPosseKey ? { POSSE_KEY: ownerHotPosseKey } : {}),
   };
   const registerAt = Date.now();
@@ -596,9 +585,9 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
       ...deterministicMcpBaseEnv(process.env),
       ...deterministicMcpShimMetadataEnv(bootPayload, resolvedAtlasConfig),
     },
-    tools: remoteToolNamesForSuite(remoteToolSurface, "tools"),
-    atlasTools: remoteToolNamesForSuite(remoteToolSurface, "atlas"),
-    remoteToolSurface: sanitizeRemoteToolSurfaceForBoot(remoteToolSurface),
+    tools: issuedToolNamesForSuite(bootPayload.remoteToolSurface.tools, "tools"),
+    atlasTools: issuedToolNamesForSuite(bootPayload.remoteToolSurface.tools, "atlas"),
+    remoteToolSurface: sanitizeRemoteToolSurfaceForBoot(bootPayload.remoteToolSurface),
     ownerSession: registration?.sessionId ? {
       sessionId: registration.sessionId,
       ownerBootId: registration.bootId || ownerEndpoint?.bootId || null,
@@ -772,6 +761,8 @@ export class McpServerConfig {
     jobId = null,
     workItemId = null,
     attemptId = null,
+    agentCallId = null,
+    promptChars = 0,
     atlasPrefetchStatus = null,
     atlasAvailable = null,
     atlasGateEnabled = true,
@@ -799,6 +790,8 @@ export class McpServerConfig {
     void jobId;
     void workItemId;
     void attemptId;
+    void agentCallId;
+    void promptChars;
     void atlasPrefetchStatus;
     void atlasAvailable;
     void atlasGateEnabled;

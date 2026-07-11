@@ -15,9 +15,9 @@
 // (unscoped) merge is the cold-boot case.
 
 import { workerData } from "node:worker_threads";
-import { runDaemonThread } from "../../../../../classes/tools/daemon/thread-host.js";
-import { installNativeThreadBridge } from "../../../../../classes/tools/daemon/native-thread-bridge.js";
-import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
+import { runDaemonThread } from "../../../../../shared/tools/classes/daemon/thread-host.js";
+import { installNativeThreadBridge } from "../../../../../shared/tools/classes/daemon/native-thread-bridge.js";
+import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
 import { SCIP_INDEXER_COUNT } from "../scip/indexers.js";

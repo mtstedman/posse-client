@@ -19,6 +19,19 @@ set -u -o pipefail
 # NOTE: deliberately no `set -e` — the step engine owns error handling so a
 # failing step degrades gracefully instead of killing the run mid-way.
 
+if [[ -z "${HOME:-}" ]]; then
+  printf '%s\n' '[install-posse-atlas] ERROR: HOME is not set; run from a normal user login shell.' >&2
+  exit 2
+fi
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+  printf '%s\n' '[install-posse-atlas] ERROR: Bash 4.4 or newer is required.' >&2
+  exit 2
+fi
+if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+  printf '%s\n' '[install-posse-atlas] ERROR: Do not run this installer with sudo; run it as your normal user and let it request sudo for system packages.' >&2
+  exit 2
+fi
+
 INSTALLER_NAME="install-posse-atlas"
 
 # --- defaults ----------------------------------------------------------------
@@ -46,7 +59,11 @@ REPO_ID=""
 REPO_PATH=""
 NODE_MIN_MAJOR="24"
 NVM_VERSION="v0.40.3"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
+SCRIPT_DIR=""
+if [[ -n "$SCRIPT_SOURCE" ]]; then
+  SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_SOURCE")" && pwd -P)"
+fi
 
 usage() {
   cat <<'USAGE'
@@ -427,6 +444,7 @@ STEP_TOTAL=${#STEP_KEYS[@]}
 STEP_INDEX=0
 CURRENT_STEP=""
 CRITICAL_FAILED="false"
+INSTALL_FAILED="false"
 
 step_begin() {
   local key="$1"
@@ -441,6 +459,7 @@ step_end() {
   local status="$1" note="${2:-}"
   STEP_STATUS[$CURRENT_STEP]="$status"
   STEP_NOTE[$CURRENT_STEP]="$note"
+  [[ "$status" == "failed" ]] && INSTALL_FAILED="true"
   log_only "----- ${CURRENT_STEP}: ${status}${note:+ (${note})}"
   case "$status" in
     ok|done) printf "    %s%s%s %s\n" "$GREEN" "$GLYPH_OK" "$R" "${note:-done}" ;;
@@ -554,7 +573,7 @@ print_summary() {
   fi
   printf "\n  %sLog:%s %s\n" "$DIM" "$R" "$LOG_FILE"
   echo
-  if [[ "$CRITICAL_FAILED" == "true" ]]; then
+  if [[ "$INSTALL_FAILED" == "true" ]]; then
     printf "  %s%sInstall did not complete.%s Fix the failed step above and re-run — completed steps are skipped on re-runs.\n\n" "$RED" "$BOLD" "$R"
   else
     printf "  %sNext steps:%s\n" "$BOLD" "$R"
@@ -565,15 +584,28 @@ print_summary() {
 }
 
 on_interrupt() {
-  [[ -n "$CMD_PID" ]] && kill "$CMD_PID" 2>/dev/null
+  [[ -n "$CMD_PID" ]] && kill_process_tree "$CMD_PID" TERM
   printf "\n\n  %sInterrupted.%s\n" "$RED" "$R"
   [[ -n "$CURRENT_STEP" && "${STEP_STATUS[$CURRENT_STEP]}" == "pending" ]] && STEP_STATUS[$CURRENT_STEP]="failed" && STEP_NOTE[$CURRENT_STEP]="interrupted"
   CRITICAL_FAILED="true"
+  INSTALL_FAILED="true"
+  block_pending_steps "interrupted"
   print_summary
   exit 130
 }
 
-on_exit() { print_summary; }
+on_exit() {
+  local rc=$?
+  if [[ $rc -ne 0 && "$INSTALL_FAILED" != "true" ]]; then
+    INSTALL_FAILED="true"
+    if [[ -n "$CURRENT_STEP" && "${STEP_STATUS[$CURRENT_STEP]}" == "pending" ]]; then
+      STEP_STATUS[$CURRENT_STEP]="failed"
+      STEP_NOTE[$CURRENT_STEP]="installer exited unexpectedly (${rc})"
+    fi
+    block_pending_steps "installer exited unexpectedly (${rc})"
+  fi
+  print_summary
+}
 
 trap on_interrupt INT TERM
 trap on_exit EXIT
@@ -581,6 +613,14 @@ trap on_exit EXIT
 # =============================================================================
 # helpers
 # =============================================================================
+
+kill_process_tree() {
+  local pid="$1" signal_name="${2:-TERM}" child
+  while read -r child; do
+    [[ -n "$child" ]] && kill_process_tree "$child" "$signal_name"
+  done < <(ps -eo pid=,ppid= 2>/dev/null | awk -v parent="$pid" '$2 == parent { print $1 }')
+  kill "-${signal_name}" "$pid" 2>/dev/null || true
+}
 
 node_major() { node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || echo 0; }
 
@@ -591,15 +631,15 @@ resolve_full_path() {
 
 fetch_to() {
   local url="$1" dest="$2"
-  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 2 -o "$dest" "$url"
-  elif command -v wget >/dev/null 2>&1; then wget -q -O "$dest" "$url"
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 -o "$dest" "$url"
+  elif command -v wget >/dev/null 2>&1; then wget -q --timeout=30 --tries=3 -O "$dest" "$url"
   else return 127; fi
 }
 
 fetch_stdout() {
   local url="$1"
-  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 2 "$url"
-  elif command -v wget >/dev/null 2>&1; then wget -q -O- "$url"
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 "$url"
+  elif command -v wget >/dev/null 2>&1; then wget -q --timeout=30 --tries=3 -O- "$url"
   else return 127; fi
 }
 
@@ -617,6 +657,7 @@ find_python() {
 
 detect_installer_posse_dir() {
   local candidate
+  [[ -n "$SCRIPT_DIR" ]] || return 1
   candidate="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd -P)" || return 1
   [[ -f "$candidate/orchestrator.js" ]] && printf "%s\n" "$candidate"
 }
@@ -655,7 +696,7 @@ as_root() {
 PKG_MGR="none"
 detect_pkg_manager() {
   local mgr
-  for mgr in apt-get dnf yum pacman zypper apk; do
+  for mgr in apt-get dnf yum pacman zypper; do
     if command -v "$mgr" >/dev/null 2>&1; then PKG_MGR="$mgr"; return 0; fi
   done
 }
@@ -681,7 +722,6 @@ pkg_install() {
     yum) as_root yum install -y -q "$@" ;;
     pacman) as_root pacman -S --needed --noconfirm "$@" ;;
     zypper) as_root zypper --non-interactive --quiet install "$@" ;;
-    apk) as_root apk add --no-progress "$@" ;;
     *) return 127 ;;
   esac
 }
@@ -698,7 +738,6 @@ toolchain_packages() {
     dnf|yum) echo "gcc gcc-c++ make pkgconf-pkg-config python3 python3-pip unzip" ;;
     pacman) echo "base-devel python python-pip unzip" ;;
     zypper) echo "gcc gcc-c++ make pkg-config python3 python3-pip unzip" ;;
-    apk) echo "build-base pkgconf python3 py3-pip unzip" ;;
   esac
 }
 
@@ -739,15 +778,6 @@ imagemagick|magick_or_convert|ImageMagick
 ffmpeg|ffmpeg|ffmpeg
 php|php|php8-cli,php-cli,php8,php7
 composer|composer|php-composer,composer
-EOT
-      ;;
-    apk) cat <<'EOT'
-ripgrep|rg|ripgrep
-tesseract|tesseract|tesseract-ocr
-imagemagick|magick_or_convert|imagemagick
-ffmpeg|ffmpeg|ffmpeg
-php|php|php83-cli,php82-cli,php
-composer|composer|composer
 EOT
       ;;
   esac
@@ -801,7 +831,7 @@ step_packages() {
   fi
 
   if [[ "$PKG_MGR" == "none" ]]; then
-    warn "no supported package manager found (apt/dnf/yum/pacman/zypper/apk); install missing packages manually"
+    warn "no supported package manager found (apt/dnf/yum/pacman/zypper); install missing packages manually"
     step_end partial "no package manager; some tools missing"
     return 0
   fi
@@ -1068,26 +1098,48 @@ step_shell_wiring() {
     return 0
   fi
 
-  mkdir -p "$ENV_DIR"
-  {
+  if ! mkdir -p "$ENV_DIR"; then
+    step_fail_critical "could not create ${ENV_DIR}"
+    return 1
+  fi
+  if ! {
     echo "# Posse PATH wiring -- generated by ${INSTALLER_NAME}.sh"
     echo "# ATLAS runtime configuration lives in ~/.posse/account.db (posse admin),"
     echo "# not environment variables."
     printf 'export POSSE_BIN_DIR=%s\n' "$(shell_quote "$bin_dir")"
     # shellcheck disable=SC2016
     echo 'case ":$PATH:" in *":$POSSE_BIN_DIR:"*) ;; *) export PATH="$POSSE_BIN_DIR:$PATH";; esac'
-  } >"$ENV_FILE"
+  } >"$ENV_FILE"; then
+    step_fail_critical "could not write ${ENV_FILE}"
+    return 1
+  fi
 
-  mkdir -p "$bin_dir"
-  cat >"$shim" <<EOF
+  if ! mkdir -p "$bin_dir"; then
+    step_fail_critical "could not create ${bin_dir}"
+    return 1
+  fi
+  if ! cat >"$shim" <<EOF
 #!/usr/bin/env bash
 exec "$(printf "%s" "$NODE_BIN")" "$(printf "%s" "$POSSE_DIR")/orchestrator.js" "\$@"
 EOF
-  chmod 755 "$shim"
+  then
+    step_fail_critical "could not write ${shim}"
+    return 1
+  fi
+  if ! chmod 755 "$shim"; then
+    step_fail_critical "could not make ${shim} executable"
+    return 1
+  fi
 
   if [[ "$PERSIST_ENV" == "true" ]]; then
-    append_source_if_missing "${HOME}/.bashrc" "$ENV_FILE"
-    [[ -f "${HOME}/.zshrc" ]] && append_source_if_missing "${HOME}/.zshrc" "$ENV_FILE"
+    if ! append_source_if_missing "${HOME}/.bashrc" "$ENV_FILE"; then
+      step_fail_critical "could not update ${HOME}/.bashrc"
+      return 1
+    fi
+    if [[ -f "${HOME}/.zshrc" ]] && ! append_source_if_missing "${HOME}/.zshrc" "$ENV_FILE"; then
+      step_fail_critical "could not update ${HOME}/.zshrc"
+      return 1
+    fi
   fi
 
   local note="env file + posse shim installed"
@@ -1100,9 +1152,9 @@ EOF
 append_source_if_missing() {
   local rc_file="$1" env_file="$2"
   local line="source $(shell_quote "$env_file")"
-  [[ -f "$rc_file" ]] || touch "$rc_file"
+  [[ -f "$rc_file" ]] || touch "$rc_file" || return 1
   if ! grep -F "$line" "$rc_file" >/dev/null 2>&1; then
-    printf "\n# Posse ATLAS integration\n%s\n" "$line" >>"$rc_file"
+    printf "\n# Posse ATLAS integration\n%s\n" "$line" >>"$rc_file" || return 1
     info "updated ${rc_file}"
   fi
 }
@@ -1173,8 +1225,10 @@ step_seed_settings() {
   # repo's "type": "module"; .posse/ is gitignored so a crash can't leave
   # untracked litter.
   local seed_file="$POSSE_DIR/.posse/install-seed.tmp.cjs"
-  mkdir -p "$POSSE_DIR/.posse"
-  printf "%s" "$SEED_JS" >"$seed_file"
+  if ! mkdir -p "$POSSE_DIR/.posse" || ! printf "%s" "$SEED_JS" >"$seed_file"; then
+    step_end failed "could not write settings seed file"
+    return 1
+  fi
   export POSSE_SEED_MODE="$POSSE_MODE" POSSE_SEED_PHASES="$POSSE_PHASES" \
     POSSE_SEED_FUNNEL="$POSSE_LIVE_FUNNEL" POSSE_SEED_SCIP_MODE="$POSSE_SCIP_MODE" \
     POSSE_SEED_SCIP_LANGUAGES="$POSSE_SCIP_LANGUAGES"
@@ -1375,8 +1429,25 @@ check_git_config() {
     || warn 'git user.email is not set globally (git config --global user.email "you@example.com")'
 }
 
+linux_distribution_id() {
+  local key value
+  [[ -r /etc/os-release ]] || return 0
+  while IFS='=' read -r key value; do
+    if [[ "$key" == "ID" ]]; then
+      value="${value#\"}"
+      value="${value%\"}"
+      printf '%s' "${value,,}"
+      return 0
+    fi
+  done </etc/os-release
+}
+
 step_preflight() {
   step_begin preflight
+  if [[ "$(linux_distribution_id)" == "alpine" ]]; then
+    step_fail_critical "Alpine Linux is not supported (its musl userspace is incompatible with the installer's Node/nvm path); use Debian, Ubuntu, Fedora, RHEL, Arch, or openSUSE"
+    return 1
+  fi
   if [[ -n "$REPO_PATH" ]]; then
     REPO_PATH="$(resolve_full_path "$REPO_PATH")"
     if [[ ! -d "$REPO_PATH" ]]; then
@@ -1392,6 +1463,18 @@ step_preflight() {
   check_git_config
   check_provider_credentials
   step_end ok "preflight complete"
+  return 0
+}
+
+run_installer_step() {
+  local key="$1" critical="$2" fn="$3" rc
+  "$fn"
+  rc=$?
+  if [[ $rc -ne 0 && "${STEP_STATUS[$key]}" == "pending" ]]; then
+    CURRENT_STEP="$key"
+    [[ "$critical" == "true" ]] && CRITICAL_FAILED="true"
+    step_end failed "step returned ${rc} without a result"
+  fi
   return 0
 }
 
@@ -1426,21 +1509,21 @@ if ! step_preflight; then
   exit 1
 fi
 
-step_packages
-step_node
-step_checkout
-step_composer
-step_npm
-step_shell_wiring
-step_seed_settings
-step_doctor
-step_admin_init
-step_validate
-step_keys
-step_smoke
+run_installer_step packages false step_packages
+run_installer_step node true step_node
+run_installer_step checkout true step_checkout
+run_installer_step composer false step_composer
+run_installer_step npm true step_npm
+run_installer_step shell true step_shell_wiring
+run_installer_step seed false step_seed_settings
+run_installer_step doctor false step_doctor
+run_installer_step admin false step_admin_init
+run_installer_step validate false step_validate
+run_installer_step keys false step_keys
+run_installer_step smoke false step_smoke
 
 print_summary
-if [[ "$CRITICAL_FAILED" == "true" ]]; then
+if [[ "$INSTALL_FAILED" == "true" ]]; then
   exit 1
 fi
 exit 0

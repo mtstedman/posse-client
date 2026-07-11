@@ -279,10 +279,8 @@ export function commitInScopeChanges({ wtDir, scope, message = "review: include 
   }
   const visiblePaths = [...new Set(inScope.map((entry) => entry.path))];
   try {
-    // Review actions are scoped to the paths shown in the UI. Clear any
-    // pre-staged entries first so the shared scoped commit path evaluates the
-    // actual worktree dirt and can revert out-of-scope tracked edits cleanly.
-    try { runGitMutating(["reset", "-q", "HEAD", "--", "."], wtDir); } catch { /* best effort */ }
+    // The native scoped transaction uses an isolated index. Existing staged
+    // entries outside the review scope remain byte-for-byte untouched.
     const headBefore = gitFile(["rev-parse", "HEAD"], wtDir).trim() || null;
     const result = gitCommitAll(message, wtDir, commitScopeFromReviewScope(scope), {
       worktreeLock: false,

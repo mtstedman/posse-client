@@ -179,19 +179,39 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
       }
       snapshotDir = preserveCorruptWorktreeContents(wtPath, projectDir, { wiId, branchName });
       corruptPreserved = !!snapshotDir;
-      if (snapshotDir) {
-        notifySafeRemoveSnapshot(onSnapshot, {
+      if (!snapshotDir) {
+        const message = "Could not completely preserve corrupt worktree contents; leaving worktree on disk";
+        notifySafeRemoveFailure(onFailure, {
           wtPath,
           projectDir,
           reason,
           branchName,
           wiId,
-          snapshotDir,
-          corruptMetadata: true,
+          phase: "preserve_corrupt",
+          message,
+          error: err?.message || String(err),
+          corruptMetadata,
+          corruptPreserved: false,
         });
-        if (typeof onMsg === "function") {
-          try { onMsg(`Preserved corrupt worktree contents at ${snapshotDir}`); } catch { /* best effort */ }
-        }
+        return safeRemoveBaseResult(wtPath, {
+          skipped: true,
+          corruptMetadata,
+          corruptPreserved: false,
+          reason: "corrupt_preservation_failed",
+          error: err?.message || String(err),
+        });
+      }
+      notifySafeRemoveSnapshot(onSnapshot, {
+        wtPath,
+        projectDir,
+        reason,
+        branchName,
+        wiId,
+        snapshotDir,
+        corruptMetadata: true,
+      });
+      if (typeof onMsg === "function") {
+        try { onMsg(`Preserved corrupt worktree contents at ${snapshotDir}`); } catch { /* best effort */ }
       }
       try {
         await removeWorktreePathAsync(wtPath, projectDir, { signal });

@@ -104,8 +104,8 @@ export function buildCodexWebToolsNote(role) {
   if (role === "researcher") {
     return "WEB RESEARCH: The Codex `web_search` tool is enabled. Use it to gather external documentation, specs, or current facts when the repo does not already contain them. Cite URLs in the research brief.";
   }
-  if (role === "artificer") {
-    return "WEB RESEARCH: The Codex `web_search` tool is enabled. Use it only to gather external references needed for artifact content. Do not use native/system file tools; use deterministic MCP tools for files and images.";
+  if (role === "assessor") {
+    return "WEB VERIFICATION: The Codex `web_search` tool is enabled only to verify a concrete claim against a known authoritative documentation source. Do not use it for general discovery.";
   }
   return null;
 }

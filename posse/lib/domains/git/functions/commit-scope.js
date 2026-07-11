@@ -42,7 +42,7 @@ function gitCommitTimeoutBudget() {
 
 function isGitCommitProcessTimeout(err) {
   const text = `${err?.message || ""}\n${err?.code || ""}\n${err?.signal || ""}`;
-  return /ETIMEDOUT|SIGTERM|timed out/i.test(text);
+  return /GIT_TIMEOUT|ETIMEDOUT|SIGTERM|timed out/i.test(text);
 }
 
 function isGitIndexLockError(err) {
@@ -134,6 +134,34 @@ function annotateGitCommitProcessError(err, budget) {
 
 export const __testGitCommitTimeoutBudget = gitCommitTimeoutBudget;
 
+function nativeScopedCommitOptions(opts, budget) {
+  const parity = opts?.nativeParity || {};
+  return {
+    ...parity,
+    manager: opts?.nativeManager ?? parity.manager,
+    timeoutMs: budget.processTimeoutMs,
+  };
+}
+
+function nativeScopedCommitError(result, cwd, budget) {
+  const failure = result?.failure && typeof result.failure === "object" ? result.failure : {};
+  const failureCode = String(failure.code || "GIT_SCOPED_TRANSACTION_FAILED");
+  const headMoved = failureCode === "HEAD_MOVED" || failureCode === "EXPECTED_HEAD_MISMATCH";
+  const err = new Error(headMoved
+    ? `Branch HEAD moved during scoped commit: ${failure.message || "native compare-and-swap rejected the commit"}`
+    : String(failure.message || "Native scoped commit transaction failed"));
+  err.code = headMoved ? "BRANCH_HEAD_MOVED" : failureCode;
+  err.nativeFailure = failure;
+  err.rollbackStatus = result?.rollbackStatus || null;
+  err.rollbackSucceeded = result?.rollbackStatus?.restored === true;
+  err.nativeDiagnostics = Array.isArray(result?.diagnostics) ? result.diagnostics : [];
+  err.headBefore = result?.headBefore || null;
+  err.headAfter = result?.headAfter || null;
+  if (failure.phase === "hook") err.stderr = String(failure.message || "");
+  if (isGitIndexLockError(err)) return annotateGitIndexLockError(err, cwd, "native scoped commit");
+  return annotateGitCommitProcessError(err, budget);
+}
+
 function assertUnscopedGitAddAllowed(opts = {}) {
   const taskMode = String(opts?.taskMode || opts?.task_mode || "").trim().toLowerCase();
   if (UNSCOPED_GIT_ADD_TASK_MODES.has(taskMode)) return;
@@ -165,9 +193,9 @@ function safeGitAdd(file, cwd, context, warnings = null) {
   }
 }
 
-function isGitIgnored(file, cwd) {
+function isGitIgnored(file, cwd, nativeParity = {}) {
   try {
-    gitExec(["check-ignore", "-q", "--", file], cwd, { timeoutMs: GIT_COMMAND_TIMEOUT_MS });
+    gitExec(["check-ignore", "-q", "--", file], cwd, { timeoutMs: GIT_COMMAND_TIMEOUT_MS, nativeParity });
     return true;
   } catch (err) {
     if (err && err.status === 1) return false;
@@ -287,6 +315,12 @@ export function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
       if (message.gitCommitTimeoutBudget) err.gitCommitTimeoutBudget = message.gitCommitTimeoutBudget;
       if (Array.isArray(message.createdOutOfScope)) err.createdOutOfScope = message.createdOutOfScope;
       if (Array.isArray(message.gitAddWarnings)) err.gitAddWarnings = message.gitAddWarnings;
+      if (message.nativeFailure) err.nativeFailure = message.nativeFailure;
+      if (message.rollbackStatus) err.rollbackStatus = message.rollbackStatus;
+      if (message.rollbackSucceeded != null) err.rollbackSucceeded = message.rollbackSucceeded;
+      if (Array.isArray(message.nativeDiagnostics)) err.nativeDiagnostics = message.nativeDiagnostics;
+      if (message.headBefore) err.headBefore = message.headBefore;
+      if (message.headAfter) err.headAfter = message.headAfter;
       settle(reject, err);
     });
     worker.on("error", (err) => settle(reject, err));
@@ -319,6 +353,14 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const siblingUntrackedSkipped = [];
   const siblingStagingSkipped = [];
   const gitAddWarnings = [];
+  const commitNativeParity = {
+    ...(opts?.nativeParity || {}),
+    ...(opts?.nativeManager ? { manager: opts.nativeManager } : {}),
+  };
+  const gitForCommit = (args, options = {}) => gitExec(args, cwd, {
+    ...options,
+    nativeParity: { ...commitNativeParity, ...(options.nativeParity || {}) },
+  });
   // On Windows, git preserves the case stored in the index while the FS is
   // case-insensitive. Lowercasing keeps scope comparisons robust against
   // case drift between files_to_modify (user-authored) and git diff output
@@ -328,7 +370,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const norm = (p) => caseFold(normRaw(p));
   const nestedRepoPrefix = (() => {
     try {
-      const repoRoot = path.resolve(gitExec(["rev-parse", "--show-toplevel"], cwd));
+      const repoRoot = path.resolve(gitForCommit(["rev-parse", "--show-toplevel"]));
       const rel = path.relative(repoRoot, path.resolve(cwd)).replace(/\\/g, "/").replace(/\/+$/, "");
       if (rel && rel !== "." && isInsideRoot(path.resolve(cwd), repoRoot, { allowEqual: false, followSymlinks: false })) return rel;
     } catch {
@@ -346,7 +388,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const jobId = opts?.jobId || null;
   const activeFileLocks = activeFileLocksForCommit(opts);
   let headAtScopeStart = null;
-  try { headAtScopeStart = gitCurrentHash(cwd); } catch { headAtScopeStart = null; }
+  try { headAtScopeStart = gitCurrentHash(cwd, commitNativeParity); } catch { headAtScopeStart = null; }
   let snapshotRestoreFailed = false;
   let snapshotRestoreError = null;
   let snapshotRestoreRef = null;
@@ -374,7 +416,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   // unrelated dirty paths so they cannot ride along in the merge commit.
   let mergeInProgress = false;
   try {
-    gitExec(["rev-parse", "--verify", "MERGE_HEAD"], cwd, { timeoutMs: GIT_COMMAND_TIMEOUT_MS });
+    gitForCommit(["rev-parse", "--verify", "MERGE_HEAD"], { timeoutMs: GIT_COMMAND_TIMEOUT_MS });
     mergeInProgress = true;
   } catch { /* not in a merge — normal path */ }
 
@@ -419,9 +461,8 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   // Rename detection collapses a staged rename into its destination, hiding
   // the out-of-scope source from enforcement (status R, not D). Force
   // --no-renames so every scope decision sees both sides of a rename.
-  const gitNameList = (...args) => gitExec(
+  const gitNameList = (...args) => gitForCommit(
     ["-c", "core.quotePath=false", ...(args[0] === "diff" ? ["diff", "--no-renames", ...args.slice(1)] : args)],
-    cwd
   );
   const collectDeletedTracked = () => new Set([
     ...gitNameList("diff", "--name-only", "--diff-filter=D")
@@ -438,7 +479,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       .map(norm),
   ]);
   const collectMergeBroughtInPaths = (leftRev = "HEAD", rightRev = "MERGE_HEAD") => {
-    const raw = gitExec(["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", `${leftRev}...${rightRev}`], cwd);
+    const raw = gitForCommit(["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", `${leftRev}...${rightRev}`]);
     const rawPaths = raw.split("\n").map(scopeCompatiblePath).filter(Boolean);
     return {
       rawPaths,
@@ -598,11 +639,23 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
         .filter(Boolean),
       norm
     );
+    // Rust owns the isolated index and commit. Node only resolves the exact
+    // paths admitted by Posse scope/sibling-lock policy before handing the
+    // compound transaction to the native boundary.
+    const nativeModifyPaths = new Set();
+    const nativeCreatePaths = new Set();
+    const nativeDeletePaths = new Set();
     const resolveScopedPath = (file) =>
       actualDirtyByFold.get(norm(file))
       || trackedByFold.get(norm(file))
       || resolveCaseInsensitivePath(cwd, file)
       || file;
+    const admitNativePath = (file, { modify = true, create = true, delete: remove = false } = {}) => {
+      const resolved = resolveScopedPath(file);
+      if (modify) nativeModifyPaths.add(resolved);
+      if (create) nativeCreatePaths.add(resolved);
+      if (remove) nativeDeletePaths.add(resolved);
+    };
     const isInertStaleModifyPath = (file) => {
       const normalized = norm(file);
       if (!normalized || actualDirtyByFold.has(normalized) || trackedByFold.has(normalized) || deletedTracked.has(normalized)) {
@@ -645,7 +698,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     for (const f of modifyFilesRaw) {
       if (isInertStaleModifyPath(f)) {
         skippedStaleModifyFiles.push(f);
-        log.warn("git-commit-scope", "Skipped stale modifyFiles path during staging", {
+        log.warn("git-commit-scope", "Skipped stale modifyFiles path during scoped commit preflight", {
           file: f,
           context: "modifyFiles",
         });
@@ -656,31 +709,31 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       // job never touched (not tracked, not dirty) can only be staged with
       // --force, so skip it like ignored createFiles paths instead of letting
       // the strict-context throw dead-letter a clean job.
-      if (!trackedByFold.has(norm(f)) && !actualDirtyByFold.has(norm(f)) && isGitIgnored(resolved, cwd)) {
+      if (!trackedByFold.has(norm(f)) && !actualDirtyByFold.has(norm(f)) && isGitIgnored(resolved, cwd, commitNativeParity)) {
         skippedIgnoredModifyFiles.push(resolved);
-        log.warn("git-commit-scope", "Skipped ignored modifyFiles path during staging", {
+        log.warn("git-commit-scope", "Skipped ignored modifyFiles path during scoped commit preflight", {
           file: resolved,
           context: "modifyFiles",
         });
         continue;
       }
-      safeGitAdd(resolved, cwd, "modifyFiles", gitAddWarnings);
+      admitNativePath(resolved);
     }
     for (const f of createFilesRaw) {
       const resolved = resolveScopedPath(f);
-      if (isGitIgnored(resolved, cwd)) {
+      if (isGitIgnored(resolved, cwd, commitNativeParity)) {
         skippedIgnoredCreateFiles.push(resolved);
-        log.warn("git-commit-scope", "Skipped ignored createFiles path during staging", {
+        log.warn("git-commit-scope", "Skipped ignored createFiles path during scoped commit preflight", {
           file: resolved,
           context: "createFiles",
         });
         continue;
       }
-      safeGitAdd(resolved, cwd, "createFiles", gitAddWarnings);
+      admitNativePath(resolved);
     }
     for (const f of deleteFilesRaw) {
       if (canDelete(norm(f))) {
-        safeGitAdd(resolveScopedPath(f), cwd, "deleteFiles", gitAddWarnings);
+        admitNativePath(f, { modify: false, create: false, delete: true });
       }
     }
     if (createRoots.length > 0) {
@@ -693,7 +746,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
             continue;
           }
           if (isUnderRoot(norm(u), createRoots)) {
-            safeGitAdd(u, cwd, "createRoots/untracked", gitAddWarnings);
+            admitNativePath(u);
           }
         }
       }
@@ -704,7 +757,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
             rememberSiblingSkipped(siblingStagingSkipped, f, siblingLock);
             continue;
           }
-          safeGitAdd(f, cwd, "createRoots/dirty", gitAddWarnings);
+          admitNativePath(f);
         }
       }
     }
@@ -718,77 +771,133 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       if (isSnapshotPath(normalized)) continue;
       const siblingLock = isExplicitCurrentScope(normalized) ? null : siblingLockFor(normalized);
       if (siblingLock) {
-        try {
-          gitExec(["reset", "HEAD", "--", f], cwd);
-          rememberSiblingSkipped(siblingStagingSkipped, f, siblingLock);
-        } catch {
-          const err = new Error(`Failed to unstage sibling-owned path "${f}" before scoped commit`);
-          err.gitAddWarnings = gitAddWarnings;
-          throw err;
-        }
+        rememberSiblingSkipped(siblingStagingSkipped, f, siblingLock);
         continue;
       }
       const allowedStaged = canEdit(normalized)
         || canCreateWithoutTrackingCompat(normalized)
         || (deletedTracked.has(normalized) && canDelete(normalized));
       if (!allowedStaged) {
-        try {
-          gitExec(["reset", "HEAD", "--", f], cwd);
-          rememberUnique(outOfScopeStagingSkipped, f);
-        } catch {
-          const err = new Error(`Failed to unstage out-of-scope path "${f}" before scoped commit`);
-          err.gitAddWarnings = gitAddWarnings;
-          throw err;
-        }
+        // The isolated native index excludes this entry without mutating the
+        // user's real index, so pre-staged out-of-scope work remains exact.
+        rememberUnique(outOfScopeStagingSkipped, f);
       }
     }
 
-    const expectedStaged = new Set();
-    for (const f of dirtyFiles) {
-      const normalized = norm(f);
-      if (isSnapshotPath(normalized)) continue;
-      if (siblingLockFor(normalized)) continue;
-      if (canEdit(normalized) || (deletedTracked.has(normalized) && canDelete(normalized))) {
-        expectedStaged.add(normalized);
+    if (!headAtScopeStart) {
+      throw new Error("Native scoped commit requires an existing branch HEAD");
+    }
+
+    const transactionPaths = [...new Set([
+      ...nativeModifyPaths,
+      ...nativeCreatePaths,
+      ...nativeDeletePaths,
+    ])].sort((left, right) => norm(left).localeCompare(norm(right)));
+    const dirtyAtPreflight = new Set([...dirtyFiles, ...untrackedFiles].map(norm));
+    const preflightPaths = transactionPaths.filter((file) => dirtyAtPreflight.has(norm(file)));
+
+    if (preflightPaths.length > 0) {
+      if (typeof opts?.beforeCommitHook === "function") {
+        const hookResult = opts.beforeCommitHook({
+          cwd,
+          stagedFiles: preflightPaths,
+          mergeInProgress: false,
+        });
+        if (!hookResult?.ok) {
+          const err = new Error("Pre-commit verification failed — commit blocked by hook");
+          err.hookOutput = hookResult?.output || "verification hook failed";
+          throw err;
+        }
       }
-    }
-    for (const u of untrackedFiles) {
-      const normalized = norm(u);
-      if (isSnapshotPath(normalized)) continue;
-      if (siblingLockFor(normalized)) continue;
-      if (canCreate(normalized)) expectedStaged.add(normalized);
-    }
-    if (expectedStaged.size > 0) {
-      const stagedNow = new Set(
-        gitNameList("diff", "--cached", "--name-only")
-          .split("\n")
-          .map(scopeCompatiblePath)
-          .filter(Boolean)
-          .map(norm)
-      );
-      const unstagedAfterAdd = new Set(
-        gitNameList("diff", "--name-only")
-          .split("\n")
-          .map(scopeCompatiblePath)
-          .filter(Boolean)
-          .map(norm)
-      );
-      const untrackedAfterAdd = new Set(
-        gitNameList("ls-files", "--others", "--exclude-standard")
-          .split("\n")
-          .map(scopeCompatiblePath)
-          .filter(Boolean)
-          .map(norm)
-      );
-      const missing = [...expectedStaged].filter((file) =>
-        !stagedNow.has(file) && (unstagedAfterAdd.has(file) || untrackedAfterAdd.has(file))
-      );
-      if (missing.length > 0) {
-        const err = new Error(`Scoped path(s) remained unstaged after case-resolved git add: ${missing.join(", ")}`);
-        if (gitAddWarnings.length > 0) err.gitAddWarnings = gitAddWarnings;
+
+      // Verification may run project tooling. Scan after it so any final
+      // scoped working-tree content is checked immediately before Rust stages
+      // and commits it.
+      const secretsResult = runHook("secrets_scan", { cwd, paths: preflightPaths });
+      if (!secretsResult.ok) {
+        const err = new Error("Secrets detected in scoped files — commit blocked by hook");
+        err.hookOutput = secretsResult.output;
         throw err;
       }
     }
+
+    const commitTimeoutBudget = gitCommitTimeoutBudget();
+    const nativeResult = runGitNativeMethod("git.commitScopedTransaction", {
+      cwd,
+      expectedHead: headAtScopeStart,
+      message,
+      modifyPaths: [...nativeModifyPaths],
+      createPaths: [...nativeCreatePaths],
+      deletePaths: [...nativeDeletePaths],
+      modifyRoots: [],
+      createRoots: [],
+      deleteRoots: [],
+      options: {
+        allowEmpty: false,
+        timeoutMs: commitTimeoutBudget.processTimeoutMs,
+      },
+    }, nativeScopedCommitOptions(opts, commitTimeoutBudget));
+    if (
+      !nativeResult
+      || typeof nativeResult !== "object"
+      || typeof nativeResult.ok !== "boolean"
+      || typeof nativeResult.createdCommit !== "boolean"
+      || !Array.isArray(nativeResult.committedPaths)
+      || !Array.isArray(nativeResult.skippedPaths)
+      || !Array.isArray(nativeResult.diagnostics)
+      || !nativeResult.rollbackStatus
+      || typeof nativeResult.rollbackStatus !== "object"
+    ) {
+      throw new Error("Git native method git.commitScopedTransaction returned an invalid result");
+    }
+    if (!nativeResult.ok) throw nativeScopedCommitError(nativeResult, cwd, commitTimeoutBudget);
+    if (nativeResult.createdCommit && !String(nativeResult.committedHash || "").trim()) {
+      throw new Error("Git native method git.commitScopedTransaction omitted the committed hash");
+    }
+
+    const rollbackStatus = nativeResult.rollbackStatus || null;
+    const nativeDiagnostics = Array.isArray(nativeResult.diagnostics) ? nativeResult.diagnostics : [];
+    for (const diagnostic of nativeDiagnostics) {
+      if (diagnostic?.level !== "warning" && diagnostic?.level !== "error") continue;
+      log.warn("git-commit-scope", "Native scoped commit diagnostic", {
+        level: diagnostic.level,
+        phase: diagnostic.phase || null,
+        code: diagnostic.code || null,
+        path: diagnostic.path || null,
+        error: diagnostic.message || null,
+      });
+    }
+    snapshotRestoreFailed = rollbackStatus?.restored === false;
+    snapshotRestoreError = snapshotRestoreFailed ? (rollbackStatus?.message || "native index rollback failed") : null;
+    return {
+      hash: nativeResult.committedHash || headAtScopeStart,
+      reverted,
+      createdViaModifyScope,
+      createdOutOfScope,
+      skippedIgnoredCreateFiles,
+      skippedIgnoredModifyFiles,
+      skippedStaleModifyFiles,
+      discardedGeneratedFiles,
+      outOfScopeDirtySkipped,
+      outOfScopeStagingSkipped,
+      siblingDirtySkipped,
+      siblingUntrackedSkipped,
+      siblingStagingSkipped,
+      gitAddWarnings,
+      scopeCleanedNoOp: false,
+      snapshotRestoreFailed,
+      snapshotRestoreError,
+      snapshotRestoreRef,
+      mergeCompleted: false,
+      outOfScopeMergeFiles,
+      quarantinedOutOfScopeMergeFiles,
+      mergeAuditFailed,
+      mergeAuditError,
+      committedPaths: Array.isArray(nativeResult.committedPaths) ? nativeResult.committedPaths : [],
+      nativeSkippedPaths: Array.isArray(nativeResult.skippedPaths) ? nativeResult.skippedPaths : [],
+      rollbackStatus,
+      nativeDiagnostics,
+    };
   } else if (mergeInProgress && hasScope) {
     quarantinedOutOfScopeMergeFiles = stageScopedMergeResolution();
     outOfScopeMergeFiles = quarantinedOutOfScopeMergeFiles.slice();

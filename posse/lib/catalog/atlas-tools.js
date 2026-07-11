@@ -18,7 +18,6 @@ const ATLAS_SYMBOL_ID_PATTERN = "^[0-9a-f]{64}:[0-9]+$";
 const QUERY_GATEWAY_ACTIONS = Object.freeze([
   "symbol.search",
   "symbol.card",
-  "symbol.cards",
   "symbol.overview",
   "tree.branch",
   "tree.expand",
@@ -307,7 +306,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        probeTreeSitter: { type: "boolean", description: "Attempt to load observed tree-sitter grammars and report failures." },
+        probeTreeSitter: { type: "boolean", description: "Probe native parser availability for observed supported languages." },
         feedbackLimit: { type: "integer", description: "Maximum feedback aggregates to inspect for quality hints." },
         halfLifeDays: { type: "number", description: "Optional recency decay half-life in days for feedback weights." },
       },
@@ -410,7 +409,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.card": {
     type: "function",
     name: "atlas_symbol_card",
-    description: "Iris Rung 1 (~100 tokens). Fetch one compact symbol card by symbolId or symbolRef: signature, summary, callers/callees, relationship metrics, and location.",
+    description: "Iris Rung 1 (~100 tokens). Fetch compact symbol cards: one card by symbolId or symbolRef, or a batch via symbolIds/symbolRefs with per-item errors. Cards carry signature, summary, callers/callees, relationship metrics, and location.",
     parameters: {
       type: "object",
       properties: {
@@ -427,7 +426,23 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           required: ["name"],
           additionalProperties: false,
         },
-        ifNoneMatch: { type: "string", description: "Optional ETag for conditional fetch." },
+        symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Batch form: opaque ATLAS symbol IDs returned by ATLAS results. Returns batched cards with per-item errors." },
+        symbolRefs: {
+          type: "array",
+          description: "Batch form: fallback lookups when you do not have symbolIds. Each is a concrete name plus optional file/kind. Returns batched cards with per-item errors.",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "Symbol name to resolve." },
+              file: { type: "string", description: "Optional repository-relative file path containing the symbol." },
+              kind: { type: "string", description: "Optional symbol kind hint." },
+              exportedOnly: { type: "boolean", description: "Prefer exported symbols only when possible." },
+            },
+            required: ["name"],
+            additionalProperties: true,
+          },
+        },
+        ifNoneMatch: { type: "string", description: "Optional ETag for conditional fetch (single-card form only)." },
         minCallConfidence: { type: "number", description: "Minimum call-confidence threshold." },
         includeResolutionMetadata: { type: "boolean", description: "Include ATLAS resolution metadata." },
       },
@@ -438,7 +453,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.cards": {
     type: "function",
     name: "atlas_symbol_cards",
-    description: "Iris Rung 1, batched. Fetch multiple compact symbol cards in one call by symbolIds or symbolRefs, with per-item errors so a single bad reference does not fail the batch.",
+    description: "Deprecated compatibility alias for symbol.card, which accepts the same symbolIds/symbolRefs batch inputs directly. Not surfaced to providers; kept so existing callers keep working.",
     parameters: {
       type: "object",
       properties: {

@@ -400,7 +400,7 @@ export function getProvidersNeedingDependencyRepair() {
  * install or a still-broken re-import is reported, never thrown.
  *
  * @param {{
- *   runNodeDependencySync?: (opts: { signal?: AbortSignal|null, onProgress?: ((message: string) => void)|null }) => Promise<any>,
+ *   runNodeDependencySync?: (opts: { signal?: AbortSignal|null, onProgress?: ((message: string) => void)|null, forceNodeInstall?: boolean }) => Promise<any>,
  *   onProgress?: ((message: string) => void) | null,
  *   signal?: AbortSignal | null,
  * }} [input]
@@ -422,7 +422,10 @@ export async function repairMissingProviderDependencies({
   onProgress?.(`repairing provider dependencies: ${missing.join(", ")}`);
   let install = null;
   try {
-    install = await runNodeDependencySync({ signal, onProgress });
+    // The provider load error itself proves the tree is incomplete. Force a
+    // manifest-backed install even when top-level package probes and the manifest
+    // stamp otherwise look healthy.
+    install = await runNodeDependencySync({ signal, onProgress, forceNodeInstall: true });
   } catch (err) {
     return { attempted: true, missing, repaired: [], stillBroken: missing, install: { ok: false, error: firstErrLine(err) } };
   }

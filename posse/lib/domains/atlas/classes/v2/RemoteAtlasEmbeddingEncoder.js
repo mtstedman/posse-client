@@ -24,7 +24,8 @@ const DEFAULT_REMOTE_DIM = 128;
  * @property {number | string | null} [timeoutMs]
  * @property {RemoteAtlasEncoderClient | null} [client]
  * @property {typeof fetch} [fetchImpl]
- * @property {string | null | undefined} [apiKey]
+ * @property {import("../../../shared/native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager | null} [authManager]
+ * @property {import("../../../shared/native/classes/PulseTokenManager.js").PulseTokenManager | null} [pulseTokens]
  * @property {string | null} [repoFingerprint]
  */
 
@@ -65,7 +66,8 @@ export class RemoteAtlasEmbeddingEncoder {
     timeoutMs = DEFAULT_REMOTE_ATLAS_ENCODER_TIMEOUT_MS,
     client = null,
     fetchImpl = globalThis.fetch,
-    apiKey = undefined,
+    authManager = null,
+    pulseTokens = null,
     repoFingerprint = null,
   } = {}) {
     const normalizedModel = String(model || DEFAULT_REMOTE_MODEL).trim();
@@ -86,7 +88,8 @@ export class RemoteAtlasEmbeddingEncoder {
         ? parsedTimeoutMs
         : DEFAULT_REMOTE_ATLAS_ENCODER_TIMEOUT_MS,
       fetchImpl,
-      apiKey,
+      ...(authManager ? { authManager } : {}),
+      ...(pulseTokens ? { pulseTokens } : {}),
     });
   }
 

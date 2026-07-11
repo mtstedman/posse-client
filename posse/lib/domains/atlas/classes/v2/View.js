@@ -8,14 +8,12 @@
 // the ledger. If anything looks wrong, delete the file and rebuild.
 
 import path from "path";
-import fs from "fs";
 import crypto from "crypto";
-import Database from "better-sqlite3";
-import { VIEW_DDL, VIEW_SCHEMA_VERSION } from "../../functions/v2/contracts/index.js";
+import { VIEW_SCHEMA_VERSION } from "../../functions/v2/contracts/index.js";
 import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
-import { ensureGraphDerivedTables } from "../../functions/v2/graph-derived.js";
-import { ftsQueryForTerm, normalizeSearchScope } from "../../functions/v2/view-fts.js";
-import { runBlastRadius, runSlice } from "../../functions/v2/view-slice.js";
+import { openViewDbReadOnly, openViewDbReadWrite } from "../../functions/v2/view-database.js";
+import { runNativeViewRead } from "../../functions/v2/native/view-read.js";
+import { hydrateNativeBlastRadius, hydrateNativeSlice } from "../../functions/v2/view-slice.js";
 
 /** @typedef {import("../../functions/v2/contracts/schemas.js").ViewMeta} ViewMeta */
 /** @typedef {import("../../functions/v2/contracts/api.js").View} ViewContract */
@@ -25,220 +23,9 @@ import { runBlastRadius, runSlice } from "../../functions/v2/view-slice.js";
 /** @typedef {import("../../functions/v2/contracts/api.js").SymbolSearchOptions} SymbolSearchOptions */
 /** @typedef {import("../../functions/v2/contracts/api.js").SliceOptions} SliceOptions */
 
-/**
- * @param {Database.Database} db
- * @param {string} sql
- */
-function runDdl(db, sql) {
-  db["exec"](sql);
-}
-
-const VIEW_INDEXES = Object.freeze([
-  {
-    name: "idx_symbols_path",
-    sql: "CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(repo_rel_path, range_start, global_id)",
-  },
-  {
-    name: "idx_symbols_lang",
-    sql: "CREATE INDEX IF NOT EXISTS idx_symbols_lang ON symbols(lang)",
-  },
-  {
-    name: "idx_edges_from",
-    sql: "CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_global_id, range_start)",
-  },
-  {
-    name: "idx_edges_to",
-    sql: `CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_global_id, from_global_id)
-      WHERE to_global_id IS NOT NULL`,
-  },
-  {
-    name: "idx_edges_source",
-    sql: "CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source)",
-  },
-]);
-
-/**
- * @param {string} dbPath
- * @returns {Database.Database}
- */
-function openDbReadOnly(dbPath) {
-  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-  db.pragma("busy_timeout = 5000");
-  return db;
-}
-
-/**
- * @param {string} dbPath
- * @returns {Database.Database}
- */
-function openDbReadWrite(dbPath) {
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  let fresh = !fs.existsSync(dbPath);
-  let db;
-  try {
-    db = new Database(dbPath);
-  } catch {
-    removeSqliteFile(dbPath);
-    db = new Database(dbPath);
-    fresh = true;
-  }
-  if (!fresh) {
-    let reset = false;
-    try {
-      reset = viewNeedsFormatReset(db);
-    } catch {
-      reset = true;
-    }
-    if (reset) {
-      try { db.close(); } catch { /* ignore close failures while resetting */ }
-      removeSqliteFile(dbPath);
-      db = new Database(dbPath);
-      fresh = true;
-    }
-  }
-  // busy_timeout and synchronous are per-connection; the DDL's pragmas only
-  // ever applied to the connection that created the file, so reopens ran with
-  // busy_timeout=0 and synchronous=FULL.
-  db.pragma("busy_timeout = 5000");
-  db.pragma("synchronous = NORMAL");
-  if (fresh) runDdl(db, VIEW_DDL);
-  // Idempotent additive column adds for pre-line-anchor view DBs.
-  ensureColumn(db, "symbols", "range_start_line", "INTEGER");
-  ensureColumn(db, "symbols", "range_end_line", "INTEGER");
-  ensureColumn(db, "edges", "range_start_line", "INTEGER");
-  ensureColumn(db, "edges", "range_end_line", "INTEGER");
-  // Pre-signature-text view DBs: legacy rows get NULL signature_text.
-  ensureColumn(db, "symbols", "signature_text", "TEXT");
-  ensureColumn(db, "symbols", "body_identifiers", "TEXT");
-  ensureColumn(db, "symbols", "merged_fingerprint", "TEXT");
-  // Pre-SCIP view DBs: SCIP-bound external edges carry a pointer back to
-  // external_symbols(id) (denormalized into external_descriptor for hot
-  // path retrieval), and `source` mirrors the ledger's row provenance so
-  // the resolver can skip SCIP-bound rows.
-  ensureColumn(db, "edges", "to_external_id", "INTEGER");
-  ensureColumn(db, "edges", "external_descriptor", "TEXT");
-  ensureColumn(db, "edges", "source", "TEXT NOT NULL DEFAULT 'treesitter'");
-  ensureViewIndexes(db);
-  ensureGraphDerivedTables(db);
-  return db;
-}
-
-/**
- * @param {string} dbPath
- */
-function removeSqliteFile(dbPath) {
-  for (const sfx of ["", "-wal", "-shm"]) {
-    try { fs.unlinkSync(dbPath + sfx); }
-    catch { /* disposable cache cleanup is best effort */ }
-  }
-}
-
-/**
- * @param {Database.Database} db
- * @returns {Set<string>}
- */
-function applicationTableNames(db) {
-  const rows = /** @type {Array<{ name: string }>} */ (
-    db.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-    ).all()
-  );
-  return new Set(rows.map((r) => r.name));
-}
-
-/**
- * View DBs are rebuildable caches. If an existing file is stale or malformed,
- * recreate it instead of trying to run current statements against old tables.
- *
- * @param {Database.Database} db
- * @returns {boolean}
- */
-function viewNeedsFormatReset(db) {
-  const tables = applicationTableNames(db);
-  if (tables.size === 0) return true;
-  for (const table of ["meta", "path_to_blob", "symbols", "edges"]) {
-    if (!tables.has(table)) return true;
-  }
-  const existing = /** @type {{ value: string } | undefined} */ (
-    db.prepare("SELECT value FROM meta WHERE key = ?").get("schema_version")
-  );
-  return !existing || Number(existing.value) !== VIEW_SCHEMA_VERSION;
-}
-
-/**
- * Add `column` to `table` if it does not already exist. Used during
- * read-write open so additive view-schema evolutions stay backwards
- * compatible without bumping VIEW_SCHEMA_VERSION.
- *
- * @param {Database.Database} db
- * @param {string} table
- * @param {string} column
- * @param {string} sqlType
- */
-function ensureColumn(db, table, column, sqlType) {
-  const cols = /** @type {Array<{ name: string }>} */ (
-    db.prepare(`PRAGMA table_info(${table})`).all()
-  );
-  if (cols.some((c) => c.name === column)) return;
-  runDdl(db, `ALTER TABLE ${table} ADD COLUMN ${column} ${sqlType}`);
-}
-
-/**
- * Keep additive/replacement index upgrades compatible with existing view DBs.
- * Views are rebuildable caches, but replacing the known index definitions here
- * avoids forcing a schema-version bump just to improve planner choices.
- *
- * @param {Database.Database} db
- */
-function ensureViewIndexes(db) {
-  for (const index of VIEW_INDEXES) {
-    ensureIndex(db, index.name, index.sql);
-  }
-}
-
-/**
- * @param {Database.Database} db
- * @param {string} name
- * @param {string} sql
- */
-function ensureIndex(db, name, sql) {
-  const row = /** @type {{ sql: string | null } | undefined} */ (
-    db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?").get(name)
-  );
-  if (row && normalizeIndexSql(row.sql) !== normalizeIndexSql(sql)) {
-    runDdl(db, `DROP INDEX IF EXISTS ${name}`);
-  }
-  runDdl(db, sql);
-}
-
-/**
- * @param {string | null | undefined} sql
- */
-function normalizeIndexSql(sql) {
-  return String(sql || "")
-    .replace(/\s+/g, " ")
-    .replace(/;$/, "")
-    .trim()
-    .toLowerCase();
-}
-
-/**
- * @param {string} prefix
- */
-function pathPrefixBounds(prefix) {
-  const normalized = String(prefix || "").replace(/\/+$/, "");
-  return {
-    exact: normalized,
-    lower: `${normalized}/`,
-    // Repo paths use forward slashes; "0" is the next ASCII code point after
-    // "/". This bounds descendants without matching sibling prefixes.
-    upper: `${normalized}0`,
-  };
-}
-
 /** @implements {ViewContract} */
 export class View {
-  /** @type {Database.Database} */
+  /** @type {any} */
   #db;
   /** @type {string} */
   #dbPath;
@@ -254,7 +41,7 @@ export class View {
     if (!dbPath) throw new Error("View: dbPath is required");
     this.#dbPath = path.resolve(dbPath);
     this.#mode = mode;
-    this.#db = mode === "readonly" ? openDbReadOnly(dbPath) : openDbReadWrite(dbPath);
+    this.#db = mode === "readonly" ? openViewDbReadOnly(dbPath) : openViewDbReadWrite(dbPath);
     try {
       // PRAGMAs from DDL only bind to the connection that ran them; re-assert
       // here so every open enforces FK constraints (needed for the
@@ -277,45 +64,11 @@ export class View {
 
   /** @returns {ViewMeta} */
   meta() {
-    const rows = this.#db.prepare("SELECT key, value FROM meta").all();
-    /** @type {Record<string, string>} */
-    const map = {};
-    for (const r of /** @type {any[]} */ (rows)) {
-      if (r.value !== null && r.value !== undefined) map[r.key] = r.value;
+    const response = runNativeViewRead(this.#dbPath, "meta");
+    if (response.result !== "meta" || !response.value || response.value.schema_version !== VIEW_SCHEMA_VERSION) {
+      throw new Error("ATLAS view-read returned an invalid meta result");
     }
-    const schemaVersion = map.schema_version ? Number(map.schema_version) : NaN;
-    if (Number.isNaN(schemaVersion)) {
-      throw new Error("View.meta: missing or invalid schema_version in view DB");
-    }
-    if (schemaVersion !== VIEW_SCHEMA_VERSION) {
-      throw new Error(
-        `View.meta: schema_version mismatch (db=${schemaVersion}, code=${VIEW_SCHEMA_VERSION})`,
-      );
-    }
-    // branch is load-bearing for ViewBuilder.incrementalApply (mismatch
-    // means the entire batch gets rejected). Catch the corruption here
-    // rather than letting a mid-query rebuild silently no-op.
-    if (typeof map.branch !== "string" || map.branch.length === 0) {
-      throw new Error("View.meta: missing or empty branch in view DB");
-    }
-    const ledgerSeqRaw = map.ledger_seq;
-    const ledgerSeq = Number(ledgerSeqRaw);
-    if (ledgerSeqRaw == null || !Number.isInteger(ledgerSeq) || ledgerSeq < 0) {
-      throw new Error("View.meta: missing or invalid ledger_seq in view DB");
-    }
-    return {
-      schema_version: schemaVersion,
-      branch: map.branch,
-      parent_branch: map.parent_branch ?? null,
-      parent_seq: map.parent_seq != null ? Number(map.parent_seq) : null,
-      ledger_seq: ledgerSeq,
-      built_at: map.built_at,
-      warmed_for_files: map.warmed_for_files ? JSON.parse(map.warmed_for_files) : null,
-      prefetched_symbols: map.prefetched_symbols != null ? Number(map.prefetched_symbols) : null,
-      prefetched_edges: map.prefetched_edges != null ? Number(map.prefetched_edges) : null,
-      repo_root: map.repo_root ?? null,
-      layer_merge: map.layer_merge === "on" || map.layer_merge === "true" || map.layer_merge === "1",
-    };
+    return response.value;
   }
 
   /** @returns {ViewQuery} */
@@ -436,229 +189,126 @@ export class View {
 
   /** @returns {ViewQuery} */
   #buildQueryApi() {
-    const db = this.#db;
-
-    const stmtFindSymbolFts = db.prepare(
-      `SELECT s.*
-       FROM symbols_fts f
-       JOIN symbols s ON s.global_id = f.rowid
-       WHERE symbols_fts MATCH ?
-       ORDER BY rank
-       LIMIT ?`,
-    );
-    const stmtFindSymbolExact = db.prepare(
-      `SELECT * FROM symbols
-       WHERE name = ?
-       ORDER BY global_id ASC
-       LIMIT ?`,
-    );
-    const stmtGetSymbol = db.prepare("SELECT * FROM symbols WHERE global_id = ?");
-    const stmtSymbolsInFile = db.prepare(
-      "SELECT * FROM symbols WHERE repo_rel_path = ? ORDER BY range_start ASC, global_id ASC",
-    );
-    const stmtCallers = db.prepare(
-      `SELECT from_global_id, to_global_id, to_name, to_module,
-              to_external_id, external_descriptor, source,
-              kind, repo_rel_path,
-              range_start, range_end, range_start_line, range_end_line, confidence
-       FROM edges
-       WHERE to_global_id = ?
-       ORDER BY from_global_id ASC`,
-    );
-    const stmtCallees = db.prepare(
-      `SELECT from_global_id, to_global_id, to_name, to_module,
-              to_external_id, external_descriptor, source,
-              kind, repo_rel_path,
-              range_start, range_end, range_start_line, range_end_line, confidence
-       FROM edges
-       WHERE from_global_id = ?
-       ORDER BY range_start ASC`,
-    );
-    const stmtUnresolvedToName = db.prepare(
-      `SELECT from_global_id, to_global_id, to_name, to_module,
-              to_external_id, external_descriptor, source,
-              kind, repo_rel_path,
-              range_start, range_end, range_start_line, range_end_line, confidence
-       FROM edges
-       WHERE to_global_id IS NULL AND to_external_id IS NULL AND to_name = ?`,
-    );
-    const stmtGetByContentLocal = db.prepare(
-      `SELECT * FROM symbols
-       WHERE content_hash = ? AND local_id = ?
-       LIMIT 1`,
-    );
-    const stmtHasContentHash = db.prepare(
-      `SELECT 1 AS present
-       FROM symbols
-       WHERE content_hash = ?
-       LIMIT 1`,
-    );
-    const stmtAllSymbols = db.prepare(
-      `SELECT * FROM symbols ORDER BY global_id ASC LIMIT ?`,
-    );
-    const stmtAllSymbolsPrefixed = db.prepare(
-      `SELECT * FROM symbols
-       WHERE repo_rel_path = ?
-          OR (repo_rel_path >= ? AND repo_rel_path < ?)
-       ORDER BY global_id ASC LIMIT ?`,
-    );
-
-    /** @param {any} row @returns {ViewSymbol} */
-    const hydrateSymbol = (row) => ({
-      global_id: row.global_id,
-      content_hash: row.content_hash,
-      local_id: row.local_id,
-      kind: row.kind,
-      name: row.name,
-      qualified_name: row.qualified_name ?? null,
-      repo_rel_path: row.repo_rel_path,
-      range_start: row.range_start,
-      range_end: row.range_end,
-      // Default legacy NULLs to 1 — preserves the pre-line-anchors
-      // behavior for views built before the migration ran.
-      range_start_line: Number.isInteger(row.range_start_line) ? row.range_start_line : 1,
-      range_end_line: Number.isInteger(row.range_end_line) ? row.range_end_line : 1,
-      signature_hash: row.signature_hash,
-      signature_text: row.signature_text ?? null,
-      body_identifiers: row.body_identifiers ?? null,
-      visibility: row.visibility ?? null,
-      doc: row.doc ?? null,
-      lang: row.lang,
-    });
-
-    /** @param {any} row @returns {ViewEdge} */
-    const hydrateEdge = (row) => ({
-      from_global_id: row.from_global_id,
-      to_global_id: row.to_global_id ?? null,
-      to_name: row.to_name,
-      to_module: row.to_module ?? null,
-      to_external_id: row.to_external_id ?? null,
-      external_descriptor: row.external_descriptor ?? null,
-      source: row.source || "treesitter",
-      kind: row.kind,
-      repo_rel_path: row.repo_rel_path,
-      range_start: row.range_start,
-      range_end: row.range_end,
-      range_start_line: Number.isInteger(row.range_start_line) ? row.range_start_line : 1,
-      range_end_line: Number.isInteger(row.range_end_line) ? row.range_end_line : 1,
-      confidence: row.confidence,
-    });
+    const read = (query, params = {}) => runNativeViewRead(this.#dbPath, query, params);
 
     /** @type {ViewQuery} */
     const api = {
+      stats: () => read("stats").value,
+      edgeStats: () => read("edge_stats").value,
+      symbolMetrics: () => read("symbol_metrics").value,
+      edgeTaxonomyInput: () => read("edge_taxonomy_input").value,
+
       findSymbol: (name, opts = {}) => {
-        const limit = typeof opts.limit === "number" && opts.limit > 0 ? opts.limit : 50;
-        const fuzzy = opts.fuzzy !== false;
-        const scope = normalizeSearchScope(opts.scope);
-        /** @type {any[]} */
-        let rows;
-        if (fuzzy) {
-          // FTS5 prefix match; quote to handle punctuation.
-          const ftsQuery = ftsQueryForTerm(name, { fuzzy: true, scope });
-          rows = stmtFindSymbolFts.all(ftsQuery, limit);
-        } else if (scope === "body") {
-          rows = stmtFindSymbolFts.all(ftsQueryForTerm(name, { fuzzy: false, scope }), limit);
-        } else {
-          rows = stmtFindSymbolExact.all(name, limit);
-        }
-        let results = rows.map(hydrateSymbol);
-        if (opts.kinds && opts.kinds.length > 0) {
-          const k = new Set(opts.kinds);
-          results = results.filter((s) => k.has(s.kind));
-        }
-        if (opts.langs && opts.langs.length > 0) {
-          const l = new Set(opts.langs);
-          results = results.filter((s) => l.has(s.lang));
-        }
         if (opts.pathPrefix) {
-          if (!isCanonicalRepoPath(opts.pathPrefix)) {
-            // Tolerate a non-strictly-canonical prefix (the user may pass
-            // a directory like "src" without trailing slash); only reject
-            // truly malformed inputs (absolute, parent-escape).
-            const trimmed = String(opts.pathPrefix).replace(/^\/+|\/+$/g, "");
-            if (trimmed.startsWith("..") || /^[a-zA-Z]:\//.test(trimmed)) {
-              throw new RangeError(`findSymbol: invalid pathPrefix '${opts.pathPrefix}'`);
-            }
-          }
-          const prefix = String(opts.pathPrefix).replace(/\/+$/, "");
-          results = results.filter(
-            (s) => s.repo_rel_path === prefix || s.repo_rel_path.startsWith(prefix + "/"),
-          );
+          assertPathPrefix("findSymbol", opts.pathPrefix);
         }
-        return results;
+        return read("find_symbol", {
+          name: String(name),
+          options: {
+            ...(positiveInteger(opts.limit) != null ? { limit: positiveInteger(opts.limit) } : {}),
+            kinds: Array.isArray(opts.kinds) ? opts.kinds : [],
+            langs: Array.isArray(opts.langs) ? opts.langs : [],
+            ...(opts.pathPrefix ? { path_prefix: opts.pathPrefix } : {}),
+            ...(opts.fuzzy != null ? { fuzzy: opts.fuzzy } : {}),
+            ...(opts.scope ? { scope: opts.scope } : {}),
+          },
+        }).value;
       },
 
-      getSymbol: (global_id) => {
-        const row = /** @type {any} */ (stmtGetSymbol.get(global_id));
-        return row ? hydrateSymbol(row) : null;
-      },
+      getSymbol: (global_id) => read("get_symbol", { global_id }).value,
 
       symbolsInFile: (repo_rel_path) => {
         if (!isCanonicalRepoPath(repo_rel_path)) {
           throw new RangeError(`symbolsInFile: invalid path '${repo_rel_path}'`);
         }
-        const rows = /** @type {any[]} */ (stmtSymbolsInFile.all(repo_rel_path));
-        return rows.map(hydrateSymbol);
+        return read("symbols_in_file", { repo_rel_path }).value;
       },
 
-      callers: (global_id) => {
-        const rows = /** @type {any[]} */ (stmtCallers.all(global_id));
-        return rows.map(hydrateEdge);
-      },
+      callers: (global_id) => read("callers", { global_id }).value,
 
-      callees: (global_id) => {
-        const rows = /** @type {any[]} */ (stmtCallees.all(global_id));
-        return rows.map(hydrateEdge);
-      },
+      callees: (global_id) => read("callees", { global_id }).value,
 
-      unresolvedReferencesTo: (name) => {
-        const rows = /** @type {any[]} */ (stmtUnresolvedToName.all(name));
-        return rows.map(hydrateEdge);
-      },
+      unresolvedReferencesTo: (name) => read("unresolved_references_to", { name: String(name) }).value,
 
       slice: (seedGlobalIds, opts = {}) => {
-        return runSlice(db, hydrateSymbol, seedGlobalIds, opts).symbols;
+        const result = read("slice", sliceParams(seedGlobalIds, opts)).value;
+        return hydrateNativeSlice(result).symbols;
       },
 
       sliceWithMetadata: (seedGlobalIds, opts = {}) => {
-        return runSlice(db, hydrateSymbol, seedGlobalIds, opts);
+        const result = read("slice", sliceParams(seedGlobalIds, opts)).value;
+        return hydrateNativeSlice(result);
       },
 
-      blastRadius: (paths) => {
-        return runBlastRadius(db, hydrateSymbol, paths);
-      },
+      blastRadius: (paths) => hydrateNativeBlastRadius(read("blast_radius", { paths }).value),
 
-      getByContentLocal: (content_hash, local_id) => {
-        const row = /** @type {any} */ (stmtGetByContentLocal.get(content_hash, local_id));
-        return row ? hydrateSymbol(row) : null;
-      },
+      getByContentLocal: (content_hash, local_id) => read("get_by_content_local", {
+        content_hash,
+        local_id,
+      }).value,
 
       hasContentHash: (content_hash) => {
         if (typeof content_hash !== "string" || content_hash.length === 0) return false;
-        return !!stmtHasContentHash.get(content_hash);
+        return read("has_content_hash", { content_hash }).value === true;
+      },
+
+      contentHashForPath: (repo_rel_path) => {
+        if (!isCanonicalRepoPath(repo_rel_path)) {
+          throw new RangeError(`contentHashForPath: invalid path '${repo_rel_path}'`);
+        }
+        return read("content_hash_for_path", { repo_rel_path }).value;
+      },
+
+      hasSnapshotContentHash: (content_hash) => {
+        if (typeof content_hash !== "string" || content_hash.length === 0) return false;
+        return read("has_snapshot_content_hash", { content_hash }).value === true;
+      },
+
+      indexedPaths: (opts = {}) => {
+        if (opts.pathPrefix) assertPathPrefix("indexedPaths", opts.pathPrefix);
+        return read("indexed_paths", {
+          ...(opts.pathPrefix ? { path_prefix: opts.pathPrefix } : {}),
+          ...(positiveInteger(opts.limit) != null ? { limit: positiveInteger(opts.limit) } : {}),
+        }).value;
       },
 
       allSymbols: (opts = {}) => {
-        const limit = typeof opts.limit === "number" && opts.limit > 0 ? opts.limit : 10000;
         if (opts.pathPrefix) {
-          if (!isCanonicalRepoPath(opts.pathPrefix)) {
-            const trimmed = String(opts.pathPrefix).replace(/^\/+|\/+$/g, "");
-            if (trimmed.startsWith("..") || /^[a-zA-Z]:\//.test(trimmed)) {
-              throw new RangeError(`allSymbols: invalid pathPrefix '${opts.pathPrefix}'`);
-            }
-          }
-          const bounds = pathPrefixBounds(String(opts.pathPrefix));
-          const rows = /** @type {any[]} */ (
-            stmtAllSymbolsPrefixed.all(bounds.exact, bounds.lower, bounds.upper, limit)
-          );
-          return rows.map(hydrateSymbol);
+          assertPathPrefix("allSymbols", opts.pathPrefix);
         }
-        const rows = /** @type {any[]} */ (stmtAllSymbols.all(limit));
-        return rows.map(hydrateSymbol);
+        return read("all_symbols", {
+          options: {
+            ...(positiveInteger(opts.limit) != null ? { limit: positiveInteger(opts.limit) } : {}),
+            ...(opts.pathPrefix ? { path_prefix: opts.pathPrefix } : {}),
+          },
+        }).value;
       },
     };
     return Object.freeze(api);
   }
+}
+
+function assertPathPrefix(operation, value) {
+  if (isCanonicalRepoPath(value)) return;
+  throw new RangeError(`${operation}: invalid pathPrefix '${value}'`);
+}
+
+function sliceParams(seedGlobalIds, opts) {
+  return {
+    seed_global_ids: Array.isArray(seedGlobalIds) ? seedGlobalIds : [],
+    options: {
+      ...(positiveInteger(opts.depth) != null ? { depth: positiveInteger(opts.depth) } : {}),
+      edge_kinds: Array.isArray(opts.edgeKinds) ? opts.edgeKinds : [],
+      ...(positiveInteger(opts.maxSymbols) != null ? { max_symbols: positiveInteger(opts.maxSymbols) } : {}),
+      ...(opts.minConfidence != null ? { min_confidence: opts.minConfidence } : {}),
+    },
+  };
+}
+
+function positiveInteger(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : null;
 }
 
 /**

@@ -12,7 +12,9 @@ import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 import { childEmbeddingModelDirName } from "../../../classes/v2/ChildEmbeddingIndex.js";
 import { embeddingsRoot, ledgerDbPath, mainViewPath, memoryDbPathForLedgerDb } from "../runtime-paths.js";
 import { refresh as systemAtlasRefresh } from "../../../../system/functions/atlas.js";
-import { knownLanguageTags, loadFailureFor, parserFor } from "../parser/treesitter/loader.js";
+import { supportedLanguageTags } from "../parser/languages/index.js";
+import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
+import { __atlasNativeManagerForTests } from "../native/invoke.js";
 import { openEmbeddingResources, semanticDispatchEnabled } from "../embeddings/resources.js";
 import { inspectLocalOnnxStatus } from "../embeddings/local-onnx.js";
 import { openViewWithMeta, removeSqliteFile, viewFreshness } from "../view-health.js";
@@ -585,7 +587,7 @@ export function repoQuality({ view, versionId, params, repoRoot, viewPath, ledge
   const scipWarning = scipAvailableButDisabledWarning({ root, ledger, config, edges });
   if (scipWarning) warnings.push(scipWarning);
   for (const failure of treeSitter.observedFailures) {
-    warnings.push(`tree-sitter unavailable for ${failure.lang}: ${failure.error}`);
+    warnings.push(`native parser unavailable for ${failure.lang}: ${failure.error}`);
   }
   if (embeddings && !embeddings.enabled && embeddings.reason && embeddings.reason !== "disabled") {
     warnings.push(`Embeddings unavailable: ${embeddings.reason}`);
@@ -626,31 +628,16 @@ export function repoQuality({ view, versionId, params, repoRoot, viewPath, ledge
  * @param {View} view
  */
 function computeStats(view) {
-  const db = viewDb(view);
-  if (db) {
-    try {
-      const counts = /** @type {{ symbolCount: number, fileCount: number } | undefined} */ (
-        db.prepare("SELECT COUNT(*) AS symbolCount, COUNT(DISTINCT repo_rel_path) AS fileCount FROM symbols").get()
-      );
-      const byLangRows = /** @type {Array<{ lang: string, count: number }>} */ (
-        db.prepare("SELECT lang, COUNT(*) AS count FROM symbols GROUP BY lang ORDER BY lang").all()
-      );
-      const byKindRows = /** @type {Array<{ kind: string, count: number }>} */ (
-        db.prepare("SELECT kind, COUNT(*) AS count FROM symbols GROUP BY kind ORDER BY kind").all()
-      );
-      const byLang = Object.fromEntries(byLangRows.map((row) => [String(row.lang || "unknown"), Number(row.count || 0)]));
-      const byKind = Object.fromEntries(byKindRows.map((row) => [String(row.kind || "unknown"), Number(row.count || 0)]));
-      return {
-        symbolCount: Number(counts?.symbolCount || 0),
-        fileCount: Number(counts?.fileCount || 0),
-        languages: Object.keys(byLang).sort(),
-        byLang,
-        byKind,
-        truncated: false,
-      };
-    } catch {
-      // Fall through to the public query API below.
-    }
+  if (typeof view?.query?.stats === "function") {
+    const stats = view.query.stats();
+    return {
+      symbolCount: Number(stats.symbol_count || 0),
+      fileCount: Number(stats.file_count || 0),
+      languages: Object.keys(stats.by_lang || {}).sort(),
+      byLang: stats.by_lang || {},
+      byKind: stats.by_kind || {},
+      truncated: false,
+    };
   }
   /** @type {Map<string, number>} */
   const byLang = new Map();
@@ -696,69 +683,10 @@ function viewDb(view) {
  * @returns {ViewSymbol[]}
  */
 function readAllSymbols(view, opts = {}) {
-  const db = viewDb(view);
-  if (db) {
-    try {
-      /** @type {any[]} */
-      let rows;
-      if (opts.pathPrefix) {
-        const bounds = pathPrefixBounds(String(opts.pathPrefix));
-        rows = db.prepare(
-          `SELECT * FROM symbols
-           WHERE repo_rel_path = ?
-              OR (repo_rel_path >= ? AND repo_rel_path < ?)
-           ORDER BY global_id ASC`,
-        ).all(bounds.exact, bounds.lower, bounds.upper);
-      } else {
-        rows = db.prepare("SELECT * FROM symbols ORDER BY global_id ASC").all();
-      }
-      return rows.map(hydrateViewSymbol);
-    } catch {
-      // Fall through to the public API.
-    }
-  }
   return view.query.allSymbols({
     limit: Number.MAX_SAFE_INTEGER,
     ...(opts.pathPrefix ? { pathPrefix: opts.pathPrefix } : {}),
   });
-}
-
-/**
- * @param {string} prefix
- */
-function pathPrefixBounds(prefix) {
-  const normalized = String(prefix || "").replace(/\/+$/, "");
-  return {
-    exact: normalized,
-    lower: `${normalized}/`,
-    upper: `${normalized}0`,
-  };
-}
-
-/**
- * @param {any} row
- * @returns {ViewSymbol}
- */
-function hydrateViewSymbol(row) {
-  return {
-    global_id: row.global_id,
-    content_hash: row.content_hash,
-    local_id: row.local_id,
-    kind: row.kind,
-    name: row.name,
-    qualified_name: row.qualified_name ?? null,
-    repo_rel_path: row.repo_rel_path,
-    range_start: row.range_start,
-    range_end: row.range_end,
-    range_start_line: Number.isInteger(row.range_start_line) ? row.range_start_line : 1,
-    range_end_line: Number.isInteger(row.range_end_line) ? row.range_end_line : 1,
-    signature_hash: row.signature_hash,
-    signature_text: row.signature_text ?? null,
-    body_identifiers: row.body_identifiers ?? null,
-    visibility: row.visibility ?? null,
-    doc: row.doc ?? null,
-    lang: row.lang,
-  };
 }
 
 function tokenMetricsFor(stats) {
@@ -948,30 +876,8 @@ function countFlatSymbolsBySource(db, symbols, out) {
  * @param {View} view
  */
 function edgeSourceQuality(view) {
-  const db = typeof /** @type {any} */ (view)._unsafeDb === "function" ? /** @type {any} */ (view)._unsafeDb() : null;
-  if (!db) return null;
   try {
-    const rows = db.prepare(
-      `SELECT source,
-              COUNT(*) AS total,
-              SUM(CASE WHEN to_global_id IS NOT NULL OR to_external_id IS NOT NULL THEN 1 ELSE 0 END) AS resolved,
-              SUM(CASE WHEN to_external_id IS NOT NULL THEN 1 ELSE 0 END) AS external,
-              SUM(CASE WHEN to_global_id IS NULL AND to_external_id IS NULL THEN 1 ELSE 0 END) AS unresolved
-       FROM edges
-       GROUP BY source
-       ORDER BY source`,
-    ).all();
-    /** @type {Record<string, { total: number, resolved: number, external: number, unresolved: number }>} */
-    const out = {};
-    for (const row of rows) {
-      out[String(row.source || "unknown")] = {
-        total: Number(row.total || 0),
-        resolved: Number(row.resolved || 0),
-        external: Number(row.external || 0),
-        unresolved: Number(row.unresolved || 0),
-      };
-    }
-    return out;
+    return typeof view?.query?.edgeStats === "function" ? view.query.edgeStats().by_source : null;
   } catch {
     return null;
   }
@@ -1645,15 +1551,15 @@ function configFlag(value) {
  */
 function computeEdgeStats(view, opts = {}) {
   const includeTaxonomy = opts.includeTaxonomy === true;
-  const db = typeof /** @type {any} */ (view)._unsafeDb === "function" ? /** @type {any} */ (view)._unsafeDb() : null;
-  if (db) {
-    const total = countSql(db, "SELECT COUNT(*) AS cnt FROM edges");
-    const internal = countSql(db, "SELECT COUNT(*) AS cnt FROM edges WHERE to_global_id IS NOT NULL");
-    const external = countSql(db, "SELECT COUNT(*) AS cnt FROM edges WHERE to_external_id IS NOT NULL");
-    const resolved = internal + external;
-    const callTotal = countSql(db, "SELECT COUNT(*) AS cnt FROM edges WHERE kind = 'calls'");
-    const callResolved = countSql(db, "SELECT COUNT(*) AS cnt FROM edges WHERE kind = 'calls' AND (to_global_id IS NOT NULL OR to_external_id IS NOT NULL)");
-    const byKind = edgeCountsByKindSql(db);
+  if (typeof view?.query?.edgeStats === "function") {
+    const nativeStats = view.query.edgeStats();
+    const total = Number(nativeStats.total || 0);
+    const internal = Number(nativeStats.internal || 0);
+    const external = Number(nativeStats.external || 0);
+    const resolved = Number(nativeStats.resolved || 0);
+    const callTotal = Number(nativeStats.call_total || 0);
+    const callResolved = Number(nativeStats.call_resolved || 0);
+    const byKind = nativeStats.by_kind || {};
     const unresolved = Math.max(0, total - resolved);
     const out = {
       total,
@@ -1668,7 +1574,7 @@ function computeEdgeStats(view, opts = {}) {
       callResolutionRate: callTotal > 0 ? callResolved / callTotal : 1,
     };
     if (!includeTaxonomy) return out;
-    const taxonomy = edgeTaxonomySql(db, opts.cacheKey || null);
+    const taxonomy = edgeTaxonomy(view, nativeStats, opts.cacheKey || null);
     return {
       ...out,
       runtimeExternal: taxonomy.runtimeExternal,
@@ -1720,33 +1626,25 @@ function computeEdgeStats(view, opts = {}) {
 }
 
 /**
- * @param {any} db
+ * @param {View} view
+ * @param {{ internal?: number, external?: number }} edgeStats
  * @param {string | null} [cacheKey]
  */
-function edgeTaxonomySql(db, cacheKey = null) {
+function edgeTaxonomy(view, edgeStats, cacheKey = null) {
   const cached = readEdgeTaxonomyCache(cacheKey);
   if (cached) return cached;
-  const rows = /** @type {Array<{ kind: string, to_name: string, to_module: string | null, repo_rel_path: string, lang: string }>} */ (
-    db.prepare(
-      `SELECT e.kind, e.to_name, e.to_module, e.repo_rel_path, s.lang
-       FROM edges e
-       JOIN symbols s ON s.global_id = e.from_global_id
-       WHERE e.to_global_id IS NULL AND e.to_external_id IS NULL`,
-    ).all()
-  );
-  const importRows = /** @type {Array<{ kind: string, to_name: string, to_module: string | null, repo_rel_path: string, lang: string, confidence: number | null }>} */ (
-    db.prepare(
-      `SELECT e.kind, e.to_name, e.to_module, e.repo_rel_path, s.lang, e.confidence
-       FROM edges e
-       JOIN symbols s ON s.global_id = e.from_global_id
-       WHERE e.kind = 'imports' AND e.to_module IS NOT NULL`,
-    ).all()
-  );
+  const input = view.query.edgeTaxonomyInput();
+  const rows = Array.isArray(input.unresolved_edges) ? input.unresolved_edges : [];
+  const importRows = Array.isArray(input.import_edges) ? input.import_edges : [];
   const importsByFile = buildExternalImportBindings(importRows);
-  const repoSymbolNames = repoSymbolNameSetSql(db);
+  const repoSymbolNames = new Set(
+    (Array.isArray(input.symbol_names) ? input.symbol_names : [])
+      .map((name) => String(name || "").trim())
+      .filter(Boolean),
+  );
   const taxonomy = {
-    internalResolved: countSql(db, "SELECT COUNT(*) AS cnt FROM edges WHERE to_global_id IS NOT NULL"),
-    externalResolved: countSql(db, "SELECT COUNT(*) AS cnt FROM edges WHERE to_external_id IS NOT NULL"),
+    internalResolved: Number(edgeStats.internal || 0),
+    externalResolved: Number(edgeStats.external || 0),
     runtimeExternal: 0,
     importScopedExternal: 0,
     dynamicReceiver: 0,
@@ -1888,19 +1786,6 @@ function memberRootName(target) {
   return dot > 0 ? text.slice(0, dot) : text;
 }
 
-function repoSymbolNameSetSql(db) {
-  try {
-    // This set is intentionally repo-global, not scope-aware. A bare
-    // unresolved call that collides with any repo symbol stays in the
-    // actionable true-unresolved bucket instead of being dismissed as local
-    // closure/state noise; that keeps this classifier conservative.
-    const rows = db.prepare("SELECT DISTINCT name FROM symbols WHERE name IS NOT NULL").all();
-    return new Set(rows.map((row) => String(row.name || "").trim()).filter(Boolean));
-  } catch {
-    return new Set();
-  }
-}
-
 function isPhpRuntimeFunction(target) {
   const name = target.replace(/^\\+/, "").trim().toLowerCase();
   if (!name || name.includes(".") || name.includes("->") || name.includes("::")) return false;
@@ -1950,41 +1835,25 @@ function countSql(db, sql, params = []) {
  * @param {any} db
  * @returns {Record<string, number>}
  */
-function edgeCountsByKindSql(db) {
-  try {
-    const rows = db.prepare("SELECT kind, COUNT(*) AS cnt FROM edges GROUP BY kind").all();
-    /** @type {Record<string, number>} */
-    const out = {};
-    for (const row of rows) out[String(row.kind)] = Number(row.cnt || 0);
-    return out;
-  } catch {
-    return {};
-  }
-}
-
 /**
  * @param {{ languages: string[], probe: boolean }} args
  */
 function treeSitterHealth({ languages, probe }) {
-  const known = knownLanguageTags();
+  const known = supportedLanguageTags();
   const knownSet = new Set(known);
   const observed = languages.filter((lang) => knownSet.has(lang)).sort();
-  const observedFailures = observed
-    .map((lang) => ({ lang, error: loadFailureFor(lang) }))
-    .filter((entry) => !!entry.error)
-    .map((entry) => ({ lang: entry.lang, error: /** @type {string} */ (entry.error) }));
-  const probedLanguages = [];
-  if (probe) {
-    for (const lang of observed) {
-      const parser = parserFor(lang);
-      const error = loadFailureFor(lang);
-      probedLanguages.push({
+  const manager = __atlasNativeManagerForTests() || nativeBinaries;
+  const nativeAvailable = manager.shouldUse("atlas");
+  const observedFailures = nativeAvailable
+    ? []
+    : observed.map((lang) => ({ lang, error: "native_binary_unavailable" }));
+  const probedLanguages = probe
+    ? observed.map((lang) => ({
         lang,
-        ok: !!parser,
-        ...(error ? { error } : {}),
-      });
-    }
-  }
+        ok: nativeAvailable,
+        ...(!nativeAvailable ? { error: "native_binary_unavailable" } : {}),
+      }))
+    : [];
   return {
     knownLanguageCount: known.length,
     observedLanguages: observed,
@@ -2118,38 +1987,14 @@ function topHotspots(view, limit) {
 function symbolMetrics(view) {
   /** @type {Map<number, { fanIn: number, fanOut: number }>} */
   const out = new Map();
-  const db = viewDb(view);
-  if (db) {
-    try {
-      const rows = /** @type {Array<{ global_id: number, fan_in: number, fan_out: number }>} */ (
-        db.prepare(
-          `SELECT s.global_id,
-                  COALESCE(inbound.fan_in, 0) AS fan_in,
-                  COALESCE(outbound.fan_out, 0) AS fan_out
-           FROM symbols s
-           LEFT JOIN (
-             SELECT to_global_id AS global_id, COUNT(*) AS fan_in
-             FROM edges
-             WHERE to_global_id IS NOT NULL
-             GROUP BY to_global_id
-           ) inbound ON inbound.global_id = s.global_id
-           LEFT JOIN (
-             SELECT from_global_id AS global_id, COUNT(*) AS fan_out
-             FROM edges
-             GROUP BY from_global_id
-           ) outbound ON outbound.global_id = s.global_id`,
-        ).all()
-      );
-      for (const row of rows) {
-        out.set(Number(row.global_id), {
-          fanIn: Number(row.fan_in || 0),
-          fanOut: Number(row.fan_out || 0),
-        });
-      }
-      return out;
-    } catch {
-      out.clear();
+  if (typeof view?.query?.symbolMetrics === "function") {
+    for (const row of view.query.symbolMetrics()) {
+      out.set(Number(row.global_id), {
+        fanIn: Number(row.fan_in || 0),
+        fanOut: Number(row.fan_out || 0),
+      });
     }
+    return out;
   }
   for (const s of readAllSymbols(view)) {
     out.set(s.global_id, {

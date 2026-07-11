@@ -486,7 +486,7 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
       event_type: EVENT_TYPES.PREFLIGHT_ROUTED,
       actor_type: EVENT_ACTORS.PREFLIGHT,
       message: outcome.demoted
-        ? `Preflight one-shot demoted to plan job #${outcome.job?.id}`
+        ? `Preflight one-shot demoted to ${outcome.job?.job_type || "plan"} job #${outcome.job?.id}`
         : `Preflight routed to one-shot dev job #${outcome.job?.id}`,
       event_json: JSON.stringify({
         mode: decision.mode,

@@ -15,6 +15,8 @@ import { embeddingsRoot } from "../runtime-paths.js";
 import { inspectLocalOnnxStatus, localOnnxRequested, LOCAL_ONNX_PROVIDER_ALIASES } from "./local-onnx.js";
 import { resolveConfiguredEncoder } from "../../../classes/v2/EmbeddingEncoder.js";
 import { ChildEmbeddingIndex, childEmbeddingModelDirName } from "../../../classes/v2/ChildEmbeddingIndex.js";
+import { RustEmbeddingIndex } from "../../../classes/v2/RustEmbeddingIndex.js";
+import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { encodeViaSharedOnnxDaemon } from "./onnx-daemon.js";
 import { errorForTelemetry, recordEmbeddingForensics } from "./forensics.js";
 
@@ -84,11 +86,12 @@ export function semanticDispatchEnabled(config = {}) {
 
 /**
  * @param {Record<string, unknown>} config
- * @returns {"auto" | "usearch" | "off"}
+ * @returns {"auto" | "rust" | "usearch" | "off"}
  */
 export function configuredVectorBackend(config = {}) {
   const raw = String(config?.vectorBackend || "auto").trim().toLowerCase();
   if (raw === "0" || raw === "false" || raw === "none" || raw === "off") return "off";
+  if (raw === "rust") return raw;
   if (raw === "usearch") return raw;
   // Unknown values (including legacy "lancedb") silently degrade to auto so
   // existing settings don't crash the pipeline after the lance removal.
@@ -371,6 +374,7 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOn
       repoRoot,
       requestedProvider: provider,
       readOnly,
+      nativeVectorManager: effectiveConfig.nativeVectorManager,
     });
     recordEmbeddingForensics("resources.open.enabled", {
       repo_root: repoRoot,
@@ -482,15 +486,24 @@ function disabled(provider, reason, backend = null, details = {}) {
 
 /**
  * @param {{
- *   backend: "auto" | "usearch" | "off",
+ *   backend: "auto" | "rust" | "usearch" | "off",
  *   encoder: EmbeddingEncoder,
  *   repoRoot: string,
  *   requestedProvider: string,
+ *   nativeVectorManager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  * }} args
  * @returns {OpenEmbeddingResourcesResult}
  */
-function openIndexForBackend({ backend, encoder, repoRoot, requestedProvider, readOnly = false }) {
+function openIndexForBackend({ backend, encoder, repoRoot, requestedProvider, readOnly = false, nativeVectorManager = nativeBinaries }) {
   const root = embeddingsRoot(repoRoot);
+  const openRust = () => RustEmbeddingIndex.open({
+    model: encoder.model,
+    model_version: encoder.model_version,
+    dim: encoder.dim,
+    embeddingsRoot: root,
+    readOnly,
+    manager: nativeVectorManager,
+  });
   const openUsearch = () => {
     if (!usearchPackageResolvable()) {
       throw new Error("usearch_unavailable: missing");
@@ -504,8 +517,21 @@ function openIndexForBackend({ backend, encoder, repoRoot, requestedProvider, re
     });
   };
 
-  // usearch is the only supported backend. `auto` and `usearch` resolve to
-  // the same path; anything else falls through to `auto`.
+  if (backend === "auto" || backend === "rust") {
+    try {
+      if (!nativeVectorManager.shouldUse("vector")) {
+        throw new Error("catalog-pinned posse-vector unavailable");
+      }
+      return enabled({ provider: encoder.model, backend: "rust", encoder, index: openRust() });
+    } catch (err) {
+      if (backend === "rust") {
+        return disabled(requestedProvider, `rust: ${err?.message || String(err)}`, backend);
+      }
+    }
+  }
+
+  // During the transition `usearch` explicitly selects the JS child. `auto`
+  // reaches it only when the exact catalog-pinned Rust worker is unavailable.
   try {
     return enabled({ provider: encoder.model, backend: "usearch", encoder, index: openUsearch() });
   } catch (err) {

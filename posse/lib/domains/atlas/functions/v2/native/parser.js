@@ -19,6 +19,23 @@ import { runAtlasNativeMethod } from "./invoke.js";
 
 export const ATLAS_NATIVE_PARSE_BUFFER_METHOD = "parser.parseBuffer";
 
+/** @type {import("./invoke.js").NativeMethodRunOptions | null} */
+let parserNativeOptionsForTests = null;
+
+/**
+ * Narrow test hook for exercising the strict parser boundary against an
+ * injected real debug binary. Production never sets this.
+ *
+ * @param {import("./invoke.js").NativeMethodRunOptions | null} opts
+ */
+export function __setParseBufferNativeOptionsForTests(opts) {
+  parserNativeOptionsForTests = opts && typeof opts === "object" ? opts : null;
+}
+
+export function __parseBufferNativeManagerForTests() {
+  return parserNativeOptionsForTests?.manager || null;
+}
+
 /**
  * @param {Buffer | string} bytes
  * @returns {Buffer}
@@ -102,7 +119,8 @@ function parseNativeParseResult(value, expected) {
  */
 export function parseBufferNative(args, opts = {}) {
   const payload = buildParseBufferNativePayload(args);
-  const result = runAtlasNativeMethod(ATLAS_NATIVE_PARSE_BUFFER_METHOD, payload, opts);
+  const runOptions = parserNativeOptionsForTests ? { ...parserNativeOptionsForTests, ...opts } : opts;
+  const result = runAtlasNativeMethod(ATLAS_NATIVE_PARSE_BUFFER_METHOD, payload, runOptions);
   return parseNativeParseResult(result, payload);
 }
 

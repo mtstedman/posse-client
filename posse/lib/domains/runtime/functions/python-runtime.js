@@ -1,11 +1,17 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_POSSE_ROOT = path.resolve(THIS_DIR, "..", "..", "..", "..");
 export const PYTHON_RUNTIME_STAMP_NAME = ".posse-requirements.sha256";
+
+// Executability is stable for the life of one Posse process. Cache successful
+// and failed probes by file metadata so building child environments does not
+// spawn Python for every provider/tool invocation.
+const PYTHON_EXECUTABLE_PROBE_CACHE = new Map();
 
 function fileExists(filePath) {
   try {
@@ -51,6 +57,26 @@ export function getPythonVenvExecutable(runtimeDir) {
     : path.join(getPythonVenvBinDir(runtimeDir), "python");
 }
 
+function pythonExecutableWorks(python) {
+  if (!fileExists(python)) return false;
+  try {
+    const stat = fs.statSync(python);
+    const signature = `${stat.size}:${stat.mtimeMs}`;
+    const cached = PYTHON_EXECUTABLE_PROBE_CACHE.get(python);
+    if (cached?.signature === signature) return cached.ok;
+    const result = spawnSync(python, ["--version"], {
+      stdio: "ignore",
+      windowsHide: true,
+      timeout: 15000,
+    });
+    const ok = result.status === 0;
+    PYTHON_EXECUTABLE_PROBE_CACHE.set(python, { signature, ok });
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export function resolveManagedPythonRuntime({
   projectDir = process.cwd(),
   posseRoot = DEFAULT_POSSE_ROOT,
@@ -86,6 +112,6 @@ export function resolveManagedPythonRuntimeForProject({
     projectDir: root,
     requirements,
     requirementsHash,
-    ready: fileExists(runtime.python) && installedHash === requirementsHash,
+    ready: installedHash === requirementsHash && pythonExecutableWorks(runtime.python),
   };
 }

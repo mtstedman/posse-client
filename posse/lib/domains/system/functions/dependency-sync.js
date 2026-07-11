@@ -10,6 +10,7 @@ import path from "path";
 import { spawn, spawnSync } from "child_process";
 
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
+import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { installScipLanguageDependencies } from "../../atlas/functions/v2/scip/dependencies.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
@@ -44,6 +45,9 @@ const DEPENDENCY_INSTALL_ENV_ALLOWLIST = new Set([
   "node_extra_ca_certs",
   "no_proxy",
   "npm_config_cafile",
+  "npm_config_https_proxy",
+  "npm_config_noproxy",
+  "npm_config_proxy",
   "npm_config_registry",
   "npm_config_strict_ssl",
   "path",
@@ -62,13 +66,15 @@ const DEPENDENCY_INSTALL_ENV_ALLOWLIST = new Set([
   "tmpdir",
   "userprofile",
   "windir",
+  "cargo_home",
+  "goprivate",
+  "gonoproxy",
+  "gonosumdb",
+  "goproxy",
+  "gosumdb",
+  "rustup_home",
 ]);
-const DEPENDENCY_INSTALL_URL_ENV_KEYS = new Set([
-  "all_proxy",
-  "http_proxy",
-  "https_proxy",
-  "npm_config_registry",
-]);
+const DEPENDENCY_INSTALL_ENV_PREFIXES = ["pip_"];
 
 /**
  * @param {NodeJS.ProcessEnv} [sourceEnv]
@@ -79,35 +85,14 @@ function dependencyInstallEnv(sourceEnv = process.env) {
   const env = {};
   for (const [key, value] of Object.entries(sourceEnv || {})) {
     const normalizedKey = String(key).toLowerCase();
-    if (!DEPENDENCY_INSTALL_ENV_ALLOWLIST.has(normalizedKey)) continue;
+    if (
+      !DEPENDENCY_INSTALL_ENV_ALLOWLIST.has(normalizedKey)
+      && !DEPENDENCY_INSTALL_ENV_PREFIXES.some((prefix) => normalizedKey.startsWith(prefix))
+    ) continue;
     if (value == null) continue;
-    let nextValue = String(value);
-    if (DEPENDENCY_INSTALL_URL_ENV_KEYS.has(normalizedKey)) {
-      nextValue = stripUrlCredentials(nextValue);
-      if (!nextValue) continue;
-    }
-    env[key] = nextValue;
+    env[key] = String(value);
   }
   return env;
-}
-
-function stripUrlCredentials(value = "") {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  let url = null;
-  try {
-    url = new URL(raw);
-  } catch {
-    return raw.includes("@") ? "" : raw;
-  }
-  if (!url.username && !url.password && !url.search && !url.hash) return raw;
-  // Authenticated proxies may require external configuration; dependency
-  // installers intentionally receive URL hosts without embedded credentials.
-  url.username = "";
-  url.password = "";
-  url.search = "";
-  url.hash = "";
-  return url.toString();
 }
 
 function fileExists(filePath) {
@@ -167,8 +152,9 @@ function uniqueByPath(entries) {
   const out = [];
   for (const entry of entries) {
     const root = path.resolve(entry.root || "");
-    if (!root || seen.has(root.toLowerCase())) continue;
-    seen.add(root.toLowerCase());
+    const key = process.platform === "win32" ? root.toLowerCase() : root;
+    if (!root || seen.has(key)) continue;
+    seen.add(key);
     out.push({ ...entry, root });
   }
   return out;
@@ -346,11 +332,10 @@ function writeComposerManifestStamp(root, hash) {
 }
 
 function packageManagerCommand(manager) {
-  const base = manager === "pnpm" ? "pnpm"
+  return manager === "pnpm" ? "pnpm"
     : manager === "yarn" ? "yarn"
       : manager === "bun" ? "bun"
         : "npm";
-  return process.platform === "win32" ? `${base}.cmd` : base;
 }
 
 function nodeInstallCacheDir(root, opts = {}) {
@@ -436,21 +421,52 @@ function commandOnPath(command) {
   return result.status === 0;
 }
 
-function windowsCommandArg(value) {
-  const text = String(value ?? "");
-  if (text === "") return "\"\"";
-  if (!/[ \t\r\n"&|<>^%!]/u.test(text)) return text;
-  return `"${text.replace(/(["^&|<>])/gu, "^$1").replace(/%/gu, "%%")}"`;
+function resolveWindowsCommand(command) {
+  if (process.platform !== "win32") return command;
+  if (path.isAbsolute(command) || /[\\/]/u.test(command)) return command;
+  const result = spawnSync("where", [command.replace(/\.(cmd|bat)$/iu, "")], {
+    env: dependencyInstallEnv(),
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.status !== 0) return command;
+  const candidates = String(result.stdout || "")
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return candidates.find((candidate) => /\.(cmd|bat|exe)$/iu.test(candidate)) || candidates[0] || command;
+}
+
+function quoteCmdToken(value) {
+  return `"${String(value ?? "").replace(/"/gu, '""')}"`;
 }
 
 function spawnSpecForCommand(command, args = []) {
-  if (process.platform === "win32" && /\.(cmd|bat)$/iu.test(command)) {
+  const resolved = resolveWindowsCommand(command);
+  if (process.platform === "win32" && /\.(cmd|bat)$/iu.test(resolved)) {
+    const commandLine = [resolved, ...args].map(quoteCmdToken).join(" ");
     return {
       command: process.env.ComSpec || "cmd.exe",
-      args: ["/d", "/s", "/c", [command, ...args].map(windowsCommandArg).join(" ")],
+      args: ["/d", "/s", "/c", `"${commandLine}"`],
+      windowsVerbatimArguments: true,
     };
   }
-  return { command, args };
+  return { command: resolved, args };
+}
+
+function npmLockedPackageDirs(root, manager) {
+  if (manager !== "npm") return [];
+  const lock = readJson(path.join(root, "npm-shrinkwrap.json"))
+    || readJson(path.join(root, "package-lock.json"));
+  if (!lock?.packages || typeof lock.packages !== "object") return [];
+  const dirs = [];
+  for (const [relative, metadata] of Object.entries(lock.packages)) {
+    const normalized = String(relative || "").replace(/\\/g, "/").replace(/^\.\//u, "");
+    if (!normalized || !normalized.split("/").includes("node_modules")) continue;
+    if (metadata?.optional === true) continue;
+    dirs.push(normalized);
+  }
+  return dirs;
 }
 
 function terminateDependencyCommand(child, { force = false } = {}) {
@@ -506,6 +522,8 @@ function inspectNodeProject(root) {
   const { required, optional } = packageNames(pkg);
   const missingRequired = required.filter((name) => !dirExists(packageDir(root, name)));
   const missingOptional = optional.filter((name) => !dirExists(packageDir(root, name)));
+  const missingLocked = npmLockedPackageDirs(root, manager)
+    .filter((relative) => !dirExists(path.join(root, ...relative.split("/"))));
   const missingNodeModules = !dirExists(nodeModules);
   const manifestHash = nodeManifestHash(root);
   const installedManifestHash = readNodeManifestStamp(root);
@@ -513,18 +531,21 @@ function inspectNodeProject(root) {
   const needsStamp = Boolean(!missingNodeModules && manifestHash && !installedManifestHash);
   const needsInstall = missingNodeModules
     || missingRequired.length > 0
+    || missingLocked.length > 0
     || stale
+    || needsStamp
     || (missingOptional.length > 0 && !installedManifestHash);
 
   return {
     present: true,
     root,
-    ok: missingRequired.length === 0,
+    ok: missingRequired.length === 0 && missingLocked.length === 0,
     status: needsInstall ? "needs-install" : "ok",
     manager,
     missing_node_modules: missingNodeModules,
     missing_required: missingRequired,
     missing_optional: missingOptional,
+    missing_locked: missingLocked,
     stale,
     needs_stamp: needsStamp,
     manifest_hash: manifestHash,
@@ -698,10 +719,17 @@ async function runCommand(command, args, {
     let timer = null;
     let forceTimer = null;
     let settleTimer = null;
+    let onSigint = null;
+    let onSigterm = null;
     const spawnSpec = spawnSpecForCommand(command, args);
+    const removeSignalHandlers = () => {
+      if (onSigint) process.off("SIGINT", onSigint);
+      if (onSigterm) process.off("SIGTERM", onSigterm);
+    };
     const finish = (result) => {
       if (finished) return;
       finished = true;
+      removeSignalHandlers();
       if (timer) clearTimeout(timer);
       if (forceTimer) clearTimeout(forceTimer);
       if (settleTimer) clearTimeout(settleTimer);
@@ -713,12 +741,29 @@ async function runCommand(command, args, {
         env: dependencyInstallEnv(),
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments === true,
         detached: process.platform !== "win32",
       });
     } catch (err) {
       finish({ ok: false, message: err?.message || String(err), stdout: "", stderr: "" });
       return;
     }
+
+    const forwardSignal = (signal) => {
+      removeSignalHandlers();
+      terminateDependencyCommand(child, { force: true });
+      setImmediate(() => {
+        try {
+          process.kill(process.pid, signal);
+        } catch {
+          process.exitCode = signal === "SIGINT" ? 130 : 143;
+        }
+      });
+    };
+    onSigint = () => forwardSignal("SIGINT");
+    onSigterm = () => forwardSignal("SIGTERM");
+    process.once("SIGINT", onSigint);
+    process.once("SIGTERM", onSigterm);
 
     const effectiveTimeoutMs = normalizeCommandTimeoutMs(timeoutMs, null);
     timer = effectiveTimeoutMs == null ? null : setTimeout(() => {
@@ -774,15 +819,17 @@ async function ensureNodeProject(entry, opts) {
   const command = packageManagerCommand(before.manager);
   const args = installArgsForPackageManager(before.manager, entry.root, opts);
   const installLabel = `${before.manager} ${args[0] || "install"}`;
-  if (before.status === "ok") {
-    if (!opts.dryRun && before.needs_stamp) writeNodeManifestStamp(entry.root, before.manifest_hash);
-    return { ...before, label: entry.label, action: before.needs_stamp ? "stamp" : "none", message: "node packages ready" };
+  if (before.status === "ok" && opts.forceNodeInstall !== true) {
+    return { ...before, label: entry.label, action: "none", message: "node packages ready" };
   }
   const reason = [
+    opts.forceNodeInstall === true ? "repair explicitly requested" : "",
     before.missing_node_modules ? "missing node_modules" : "",
     before.missing_required.length ? `${before.missing_required.length} required missing` : "",
+    before.missing_locked.length ? `${before.missing_locked.length} locked transitive missing` : "",
     before.missing_optional.length ? `${before.missing_optional.length} optional missing` : "",
     before.stale ? "manifest newer than install" : "",
+    before.needs_stamp ? "install tree not verified" : "",
   ].filter(Boolean).join(", ");
 
   if (!commandOnPath(command)) {
@@ -838,7 +885,7 @@ async function ensureNodeProject(entry, opts) {
       onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
     });
     if (!retry.ok) {
-      if (missingRequiredNodePackageLabels(after).length === 0) {
+      if (missingRequiredNodePackageLabels(after).length === 0 && (after.missing_locked || []).length === 0) {
         const missingOptional = missingOptionalNodePackageLabels(after);
         const hash = after.manifest_hash || before.manifest_hash;
         if (!opts.dryRun) writeNodeManifestStamp(entry.root, hash);
@@ -860,7 +907,8 @@ async function ensureNodeProject(entry, opts) {
   }
   const missingRequiredAfter = missingRequiredNodePackageLabels(after);
   const missingOptionalAfter = missingOptionalNodePackageLabels(after);
-  const packagesOk = missingRequiredAfter.length === 0;
+  const missingLockedAfter = after.missing_locked || [];
+  const packagesOk = missingRequiredAfter.length === 0 && missingLockedAfter.length === 0;
   if (packagesOk && !opts.dryRun) writeNodeManifestStamp(entry.root, after.manifest_hash || before.manifest_hash);
   const retryDetails = [
     usedPeerConflictRetry ? "peer dependency retry" : "",
@@ -875,7 +923,7 @@ async function ensureNodeProject(entry, opts) {
     generated_ignore: generatedIgnore,
     message: packagesOk
       ? `${installLabel} completed${retryDetails.length ? ` after ${retryDetails.join(" and ")}` : ""}${missingOptionalAfter.length ? `; optional packages unavailable: ${missingOptionalAfter.join(", ")}` : ""}`
-      : `missing required packages after install: ${missingRequiredAfter.join(", ")}`,
+      : `missing packages after install: ${[...missingRequiredAfter, ...missingLockedAfter.map((name) => `locked:${name}`)].join(", ")}`,
   };
 }
 
@@ -891,11 +939,16 @@ function resolvePythonCommand(projectRoot = process.cwd()) {
       candidates.push({ command: path.join(root, "venv", "bin", "python"), args: [] });
     }
   }
-  candidates.push(
-    { command: "python", args: [] },
-    { command: "python3", args: [] },
-    { command: "py", args: ["-3"] },
-  );
+  candidates.push(...(process.platform === "win32"
+    ? [
+      { command: "py", args: ["-3"] },
+      { command: "python", args: [] },
+      { command: "python3", args: [] },
+    ]
+    : [
+      { command: "python3", args: [] },
+      { command: "python", args: [] },
+    ]));
   for (const candidate of candidates) {
     if (candidate.command.includes(path.sep) && !fileExists(candidate.command)) continue;
     const result = spawnSync(candidate.command, [...candidate.args, "--version"], {
@@ -967,7 +1020,7 @@ async function ensurePythonProject(entry, opts) {
 }
 
 function composerCommand(posseRoot) {
-  const composer = process.platform === "win32" ? "composer.bat" : "composer";
+  const composer = "composer";
   if (commandOnPath(composer)) return { command: composer, args: [] };
   const phar = path.join(posseRoot, "scip", "bin", "composer.phar");
   if (commandOnPath("php") && fileExists(phar)) return { command: "php", args: [phar] };
@@ -988,8 +1041,8 @@ function inspectComposerProject(root) {
   const missingInstalled = !fileExists(installedJson);
   const staleByHash = Boolean(installedManifestHash && manifestHash && installedManifestHash !== manifestHash);
   const staleByMtime = Boolean(!installedManifestHash && installedStamp > 0 && manifestStamp > installedStamp + 1000);
-  const needsInstall = missingVendor || missingInstalled || staleByHash || staleByMtime;
-  const needsStamp = Boolean(!needsInstall && manifestHash && !installedManifestHash);
+  const needsStamp = Boolean(!missingVendor && !missingInstalled && !staleByHash && !staleByMtime && manifestHash && !installedManifestHash);
+  const needsInstall = missingVendor || missingInstalled || staleByHash || staleByMtime || needsStamp;
   return {
     present: true,
     root,
@@ -1009,8 +1062,7 @@ async function ensureComposerProject(entry, opts) {
   const before = inspectComposerProject(entry.root);
   if (!before.present) return before;
   if (before.status === "ok") {
-    if (!opts.dryRun && before.needs_stamp) writeComposerManifestStamp(entry.root, before.manifest_hash);
-    return { ...before, label: entry.label, action: before.needs_stamp ? "stamp" : "none", message: "composer dependencies ready" };
+    return { ...before, label: entry.label, action: "none", message: "composer dependencies ready" };
   }
   const composer = composerCommand(opts.posseRoot);
   if (!composer) {
@@ -1080,15 +1132,42 @@ async function ensureSimpleCommandProject(entry, opts) {
   return { present: true, root: entry.root, label: entry.label, ok: true, status: "installed", action: "install", message: `${entry.command} completed` };
 }
 
-function testToolRuntime(projectRoot, posseRoot) {
-  const managedPython = inspectPythonProject(projectRoot, { posseRoot });
-  const python = managedPython.present && managedPython.ok
-    ? { command: managedPython.python, args: [] }
-    : resolvePythonCommand(posseRoot || projectRoot);
+async function ensureDependencyEntry(entry, ensure, opts) {
+  try {
+    return await withDependencyInstallLock(opts.posseRoot, () => ensure(entry, opts), {
+      dryRun: opts.dryRun,
+      waitMs: opts.timeoutMs,
+      onProgress: (message) => opts.onProgress?.(`${entry.label}: ${message}`),
+    });
+  } catch (err) {
+    return {
+      present: true,
+      root: entry.root,
+      label: entry.label,
+      ok: false,
+      status: "failed",
+      action: "install",
+      message: firstLine(err?.message || err) || "dependency repair failed",
+    };
+  }
+}
+
+function testToolRuntime(projectRoot, posseRoot, { requirePython = false } = {}) {
+  const managedPython = requirePython ? inspectPythonProject(projectRoot, { posseRoot }) : null;
+  const python = !requirePython
+    ? null
+    : (managedPython.present && managedPython.ok
+      ? { command: managedPython.python, args: [] }
+      : resolvePythonCommand(posseRoot || projectRoot));
   return {
-    ok: Boolean(process.execPath) && Boolean(python),
+    ok: Boolean(process.execPath) && (!requirePython || Boolean(python)),
     javascript: { ok: Boolean(process.execPath), command: process.execPath },
-    python: { ok: Boolean(python), command: python?.command || null, args: python?.args || [] },
+    python: {
+      ok: !requirePython || Boolean(python),
+      required: requirePython,
+      command: python?.command || null,
+      args: python?.args || [],
+    },
   };
 }
 
@@ -1146,7 +1225,7 @@ function bootDependencyEntries(result) {
       status: result.test_tools.javascript.ok ? "ok" : "failed",
       message: result.test_tools.javascript.command || "node unavailable",
     }] : []),
-    ...(result.test_tools?.python ? [{
+    ...(result.test_tools?.python?.required ? [{
       present: true,
       label: "test python",
       ok: result.test_tools.python.ok,
@@ -1193,6 +1272,7 @@ function buildDependencyDoctorReport(result, mode) {
  *   includeScip?: boolean,
  *   includeTestTools?: boolean,
  *   timeoutMs?: number | string | boolean | null,
+ *   forceNodeInstall?: boolean,
  *   onProgress?: ((message: string) => void) | null,
  *   onEvent?: ((event: Record<string, any>) => void) | null,
  * }} [input]
@@ -1205,6 +1285,7 @@ export async function ensureBootDependencies(input = {}) {
     dryRun,
     posseRoot,
     projectDir,
+    forceNodeInstall: input.forceNodeInstall === true,
     timeoutMs: normalizeCommandTimeoutMs(input.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS),
     onProgress: typeof input.onProgress === "function" ? input.onProgress : null,
     onEvent: typeof input.onEvent === "function" ? input.onEvent : null,
@@ -1234,7 +1315,7 @@ export async function ensureBootDependencies(input = {}) {
       { root: projectDir, label: "repo npm" },
       ...discoverLockBackedNodeRoots(projectDir),
     ]).filter((entry) => fileExists(path.join(entry.root, "package.json")));
-    for (const entry of nodeRoots) node.push(await ensureNodeProject(entry, opts));
+    for (const entry of nodeRoots) node.push(await ensureDependencyEntry(entry, ensureNodeProject, opts));
   }
 
   if (includePython) {
@@ -1242,36 +1323,36 @@ export async function ensureBootDependencies(input = {}) {
       { root: posseRoot, label: "posse python" },
       { root: projectDir, label: "repo python" },
     ]).filter((entry) => fileExists(path.join(entry.root, "requirements.txt")));
-    for (const entry of pythonRoots) python.push(await ensurePythonProject(entry, opts));
+    for (const entry of pythonRoots) python.push(await ensureDependencyEntry(entry, ensurePythonProject, opts));
   }
 
   if (includeComposer) {
     const composerRoots = uniqueByPath([
       { root: projectDir, label: "repo composer" },
     ]).filter((entry) => fileExists(path.join(entry.root, "composer.json")));
-    for (const entry of composerRoots) composer.push(await ensureComposerProject(entry, opts));
+    for (const entry of composerRoots) composer.push(await ensureDependencyEntry(entry, ensureComposerProject, opts));
   }
 
   if (includeGo) {
-    native.push(await ensureSimpleCommandProject({
+    native.push(await ensureDependencyEntry({
       root: projectDir,
       label: "repo go modules",
       manifest: "go.mod",
       stamp: path.join(".posse", "deps", "go-mod-download.stamp"),
       command: "go",
       args: ["mod", "download"],
-    }, opts));
+    }, ensureSimpleCommandProject, opts));
   }
 
   if (includeCargo) {
-    native.push(await ensureSimpleCommandProject({
+    native.push(await ensureDependencyEntry({
       root: projectDir,
       label: "repo cargo",
       manifest: "Cargo.toml",
       stamp: path.join(".posse", "deps", "cargo-fetch.stamp"),
       command: "cargo",
       args: ["fetch"],
-    }, opts));
+    }, ensureSimpleCommandProject, opts));
   }
 
   if (includeScip) {
@@ -1285,21 +1366,30 @@ export async function ensureBootDependencies(input = {}) {
         scip = { ok: true, skipped: "no SCIP source languages detected", results: [] };
       } else {
         opts.onProgress?.("SCIP deps: checking managed indexers");
-        scip = await installScipLanguageDependencies({
-          posseRoot,
-          languages: scipLanguages || input.scipLanguages,
-          dryRun,
-          timeoutMs: opts.timeoutMs,
-          onProgress: (message) => opts.onProgress?.(prefixScipDependencyProgress(message)),
-          onEvent: (event) => opts.onEvent?.(event),
-        });
+        try {
+          scip = await installScipLanguageDependencies({
+            posseRoot,
+            languages: scipLanguages || input.scipLanguages,
+            dryRun,
+            timeoutMs: opts.timeoutMs,
+            onProgress: (message) => opts.onProgress?.(prefixScipDependencyProgress(message)),
+            onEvent: (event) => opts.onEvent?.(event),
+          });
+        } catch (err) {
+          scip = {
+            ok: false,
+            results: [{ language: "environment", ok: false, status: "failed", message: err?.message || String(err) }],
+          };
+        }
       }
     } else {
       scip = { ok: true, skipped: "scip disabled", results: [] };
     }
   }
 
-  const test_tools = includeTestTools ? testToolRuntime(projectDir, posseRoot) : { ok: true, skipped: "disabled" };
+  const test_tools = includeTestTools
+    ? testToolRuntime(projectDir, posseRoot, { requirePython: python.some((entry) => entry?.present !== false) })
+    : { ok: true, skipped: "disabled" };
   const allResults = [
     ...node,
     ...python,
@@ -1312,7 +1402,7 @@ export async function ensureBootDependencies(input = {}) {
     })) : []),
     ...(includeTestTools ? [
       { present: true, label: "test javascript", ok: test_tools.javascript.ok, status: test_tools.javascript.ok ? "ok" : "failed", message: test_tools.javascript.command || "node unavailable" },
-      { present: true, label: "test python", ok: test_tools.python.ok, status: test_tools.python.ok ? "ok" : "failed", message: test_tools.python.command || "python unavailable" },
+      ...(test_tools.python.required ? [{ present: true, label: "test python", ok: test_tools.python.ok, status: test_tools.python.ok ? "ok" : "failed", message: test_tools.python.command || "python unavailable" }] : []),
     ] : []),
   ];
   const counts = summarizeResults(allResults);

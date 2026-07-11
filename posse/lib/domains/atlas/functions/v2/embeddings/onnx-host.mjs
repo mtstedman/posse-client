@@ -8,8 +8,8 @@
 // the client recycling the whole daemon rather than this host reloading.
 
 import { workerData } from "node:worker_threads";
-import { runDaemonThread } from "../../../../../classes/tools/daemon/thread-host.js";
-import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
+import { runDaemonThread } from "../../../../../shared/tools/classes/daemon/thread-host.js";
+import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 
 const config = workerData?.config || {};

@@ -311,6 +311,7 @@ export const SETTINGS_CATALOG = [
   // build is staged for the host os/arch (BinaryManager.shouldUse). Runtime
   // env overrides POSSE_NATIVE_BINARIES / POSSE_NATIVE_<TOOL> win.
   { key: "posse_native_remote",           default: "true",               valueType: "boolean", adminVisible: false, description: "Delegate authenticated Posse remote prompt/catalog HTTP calls to the native posse-remote binary when present" },
+  { key: "posse_native_vector",           default: "false",              valueType: "boolean", adminVisible: false, description: "Opt in to the exact catalog-pinned posse-vector worker after its vector:methods pulse route is available; disabled keeps the npm usearch transition backend" },
   { key: "posse_native_heartbeat_url",    default: "",                   adminVisible: false, description: "Heartbeat URL passed explicitly to key-gated native Posse binaries" },
   { key: "posse_native_heartbeat_public_key_url", default: "",           adminVisible: false, description: "Optional heartbeat public-key discovery URL passed explicitly to native Posse binaries" },
   { key: "posse_native_heartbeat_jwt_public_key", default: "",           adminVisible: false, description: "Ed25519 JWT public key passed explicitly to native Posse binaries" },
@@ -333,7 +334,7 @@ export const SETTINGS_CATALOG = [
   { key: "atlas_memory_surface",          default: "on",                 options: ATLAS_MEMORY_SURFACE_MODE_VALUES, description: "Probe ATLAS memory anchor presence in handoffs. on/auto = return exact files/symbols with attached memory; off = never probe." },
   { key: "posse_kaizen_to_atlas",         default: "off",                options: KAIZEN_TO_ATLAS_MODE_VALUES, description: "Reserved Kaizen insight promotion setting. Kaizen promotion is currently hardwired off." },
   { key: "atlas_semantic_enabled",        default: "true",               valueType: "boolean", description: "Enable ATLAS semantic search dispatch (default on, backed by the local ONNX jina-v2-code encoder; FTS remains the fallback when the encoder is unavailable)" },
-  { key: "atlas_vector_backend",          default: "auto",               options: ATLAS_VECTOR_BACKEND_VALUES, description: "ATLAS embedding vector backend: auto, usearch, or off" },
+  { key: "atlas_vector_backend",          default: "auto",               options: ATLAS_VECTOR_BACKEND_VALUES, description: "ATLAS embedding vector backend: auto (enabled native worker, then npm usearch), rust, usearch, or off" },
   { key: "atlas_wi_embeddings",           default: "on_demand",          options: ATLAS_WI_EMBEDDINGS_VALUES, description: "ATLAS WI embedding mode: off, on_demand, or on" },
   { key: "atlas_view_layer_merge",        default: "on",                 options: ["off", "on"], description: "ATLAS v2 order-independent view build: source view symbols/edges from per-source tree-sitter+SCIP layers (on, default) vs the legacy flat tables (off). Off is a fallback during the layer-merge rollout." },
   { key: "atlas_tree_compression_mode",   default: "ml",                 options: ATLAS_TREE_COMPRESSION_MODE_VALUES, description: "ATLAS tree compression seed mode: off, deterministic, or ml. ml runs an explicit one-time model enrichment pass over the cached tree seed snapshot." },

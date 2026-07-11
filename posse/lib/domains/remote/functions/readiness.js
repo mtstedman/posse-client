@@ -45,7 +45,7 @@ function probePacket({ cwd = process.cwd(), providerName = "claude" } = {}) {
     success_criteria: ["Remote readiness probe includes success criteria"],
     test_command: "npm test -- --remote-readiness",
     risk: { mutating: true, assessable: true },
-    tool_policy: { allow_read: true, allow_write: true, allow_shell: true },
+    tool_policy: { allow_read: true, allow_write: true, allow_shell: true, allow_tests: true },
     atlas: {
       active: true,
       tools: ["context", "symbol.search"],

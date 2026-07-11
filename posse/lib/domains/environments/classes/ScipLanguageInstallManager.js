@@ -4,6 +4,7 @@ import path from "path";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { KeyedAsyncGate } from "../../../shared/concurrency/classes/AsyncGate.js";
+import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
 import { normalizeScipLanguages } from "../../atlas/functions/v2/scip/languages.js";
 import { EnvironmentInstallHarness } from "./EnvironmentInstallHarness.js";
 import { TypeScriptScipEnvironmentInstaller } from "./typescript/TypeScriptScipEnvironmentInstaller.js";
@@ -63,6 +64,19 @@ export class ScipLanguageInstallManager {
   }
 
   async install() {
+    return await withDependencyInstallLock(this.posseRoot, () => this.installUnlocked(), {
+      dryRun: this.dryRun,
+      waitMs: this.timeoutMs,
+      onProgress: (message) => this.harness.emit({
+        kind: "environment.install.waiting",
+        language: "scip",
+        step: "wait for dependency install lock",
+        message: `SCIP deps: ${message}`,
+      }),
+    });
+  }
+
+  async installUnlocked() {
     this.harness.emit({
       kind: "environment.install.started",
       language: "scip",
@@ -75,7 +89,7 @@ export class ScipLanguageInstallManager {
       try {
         return await INSTALL_GATE.run(installer.installKey, () => installer.install(), {
           label: `SCIP ${language} install`,
-          waitMs: this.timeoutMs ?? DEFAULT_SCIP_COMMAND_TIMEOUT_MS,
+          waitMs: this.timeoutMs,
         });
       } catch (err) {
         const message = err?.message || String(err);

@@ -8,8 +8,7 @@ import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { readTreeBuildResult } from "../tree-derived.js";
 import { readLatestTreeCompressionSnapshot } from "../tree-compression.js";
 import { runAtlasNativeMethod } from "../native/invoke.js";
-import { isDefaultVisibleSymbol } from "./hygiene.js";
-import { countIncomingCallers } from "./usages.js";
+import { isCanonicalRepoPath } from "../paths.js";
 
 const TREE_RUN_KIND = "tree-derived";
 const TREE_TABLES = Object.freeze(["atlas_tree_nodes", "atlas_tree_refs", "derived_state_runs"]);
@@ -234,137 +233,73 @@ function runTreeScope({ view, versionId, params = {}, action }) {
  * @returns {WidenedCaller[]}
  */
 export function collectScopeWidenedPaths({ view, params = {}, maxPaths = 8, maxSymbolsPerFile = 12 }) {
-  try {
-    if (!view?.query || typeof view.query.symbolsInFile !== "function" || typeof view.query.callers !== "function") {
-      return [];
-    }
-    const seedPaths = collectScopeSeedPaths(params);
-    if (seedPaths.length === 0) return [];
-    const seedDirs = seedPaths.map(parentDirOf).filter(Boolean);
-    const seen = new Set(seedPaths);
-    const taskTokens = taskIdentifierTokens(params.taskText);
-    /** @type {Map<string, WidenedCaller>} */
-    const byPath = new Map();
-    /** @type {Map<number, number>} */
-    const fanInByCaller = new Map();
-    for (const seedPath of seedPaths.slice(0, 8)) {
-      const symbols = selectWideningAnchors(view.query.symbolsInFile(seedPath), taskTokens, maxSymbolsPerFile);
-      for (const symbol of symbols) {
-        if (symbol?.global_id == null) continue;
-        for (const edge of view.query.callers(symbol.global_id)) {
-          const from = typeof view.query.getSymbol === "function" ? view.query.getSymbol(edge.from_global_id) : null;
-          if (!from || !isDefaultVisibleSymbol(from)) continue;
-          const callerPath = normalizeRepoPathCandidate(edge.repo_rel_path || from.repo_rel_path);
-          if (!callerPath || seen.has(callerPath) || isUnderAnyDir(callerPath, seedDirs)) continue;
-          // Fan-in of the CALLER symbol: how much of the codebase routes through
-          // this caller. Distinct calling FILES, not call-site edges — edge
-          // counting let a helper hammered from inside one test file outrank a
-          // production gate called once each from dozens of files.
-          let callerCount = fanInByCaller.get(from.global_id);
-          if (callerCount == null) {
-            callerCount = countIncomingCallers(view, from, { sampleLimit: 0, distinctPaths: true }).callerCount;
-            fanInByCaller.set(from.global_id, callerCount);
-          }
-          const existing = byPath.get(callerPath);
-          if (!existing || callerCount > existing.callerCount) {
-            byPath.set(callerPath, { path: callerPath, callerName: from.name || null, callerCount, loadBearing: false });
-          }
-        }
-      }
-    }
-    // Rank the FULL candidate set by fan-in before cutting to maxPaths: cutting
-    // at the first N encountered made the result depend on seed order, letting
-    // an early seed's low-value callers crowd out a later seed's hub.
-    const out = [...byPath.values()].sort((a, b) => b.callerCount - a.callerCount).slice(0, maxPaths);
-    // Relative cut, not an absolute count (fan-in scales with repo size): elevate
-    // only the standouts — top-2 that are also genuine hubs (>=2 incoming and at
-    // least half the top caller's fan-in). If nothing stands out, elevate nothing.
-    const maxCount = out[0]?.callerCount || 0;
-    const threshold = Math.max(2, Math.ceil(maxCount * 0.5));
-    for (let i = 0; i < out.length; i += 1) {
-      out[i].loadBearing = i < 2 && out[i].callerCount >= threshold;
-    }
-    return out;
-  } catch {
+  if (!view?.query || typeof view.query.symbolsInFile !== "function" || typeof view.query.callers !== "function") {
     return [];
   }
-}
-
-/**
- * Order a seed file's symbols for scope-widening: symbols whose name the task
- * text mentions come first, everything else keeps file order. Only the ordering
- * changes — the per-file cap still applies, so this matters exactly when the
- * file holds more symbols than the cap and the query target sits past it.
- *
- * @param {import("../contracts/api.js").ViewSymbol[]} symbols
- * @param {Set<string>} taskTokens
- * @param {number} maxSymbolsPerFile
- */
-function selectWideningAnchors(symbols, taskTokens, maxSymbolsPerFile) {
-  const all = Array.isArray(symbols) ? symbols : [];
-  if (all.length <= maxSymbolsPerFile || taskTokens.size === 0) {
-    return all.slice(0, maxSymbolsPerFile);
+  const baseRequest = {
+    paths: arrayValue(params.paths),
+    editedFiles: arrayValue(params.editedFiles),
+    path: params.path,
+    taskText: params.taskText,
+    maxPaths,
+    maxSymbolsPerFile,
+  };
+  const seedSelection = /** @type {Record<string, any>} */ (runAtlasNativeMethod("tree-scope-widening", {
+    ...baseRequest,
+    files: [],
+    callerEdges: [],
+    fanInEdges: [],
+  }));
+  const seedPaths = Array.isArray(seedSelection.seedPaths) ? seedSelection.seedPaths : [];
+  if (seedPaths.length === 0) return [];
+  const files = seedPaths.map((path) => ({ path, symbols: view.query.symbolsInFile(path) }));
+  const callerEdges = [];
+  const callerSymbols = new Map();
+  for (const file of files) {
+    for (const symbol of file.symbols) {
+      if (symbol?.global_id == null) continue;
+      for (const edge of view.query.callers(symbol.global_id)) {
+        const from = typeof view.query.getSymbol === "function" ? view.query.getSymbol(edge.from_global_id) : null;
+        if (!from) continue;
+        const input = wideningCallInput(symbol.global_id, edge, from);
+        if (!input) continue;
+        callerEdges.push(input);
+        if (from.global_id != null) callerSymbols.set(from.global_id, from);
+      }
+    }
   }
-  const named = [];
-  const rest = [];
-  for (const symbol of all) {
-    const name = String(symbol?.name || "").toLowerCase();
-    (name && taskTokens.has(name) ? named : rest).push(symbol);
+  const fanInEdges = [];
+  for (const caller of callerSymbols.values()) {
+    for (const edge of view.query.callers(caller.global_id)) {
+      const from = typeof view.query.getSymbol === "function" ? view.query.getSymbol(edge.from_global_id) : null;
+      if (!from) continue;
+      const input = wideningCallInput(caller.global_id, edge, from);
+      if (input) fanInEdges.push(input);
+    }
   }
-  return named.concat(rest).slice(0, maxSymbolsPerFile);
+  const result = /** @type {Record<string, any>} */ (runAtlasNativeMethod("tree-scope-widening", {
+    ...baseRequest,
+    files,
+    callerEdges,
+    fanInEdges,
+  }));
+  return Array.isArray(result.callers) ? result.callers : [];
 }
 
-/**
- * Identifier-shaped tokens (length >= 3, case-folded) from free-form task
- * text, for matching against symbol names.
- *
- * @param {unknown} taskText
- * @returns {Set<string>}
- */
-function taskIdentifierTokens(taskText) {
-  const tokens = new Set();
-  for (const match of String(taskText || "").matchAll(/[A-Za-z_$][A-Za-z0-9_$]{2,}/g)) {
-    tokens.add(match[0].toLowerCase());
-  }
-  return tokens;
+function arrayValue(value) {
+  if (Array.isArray(value)) return value;
+  return value == null ? [] : [value];
 }
 
-function collectScopeSeedPaths(params = {}) {
-  const raw = [
-    ...(Array.isArray(params.paths) ? params.paths : []),
-    ...(Array.isArray(params.editedFiles) ? params.editedFiles : []),
-    params.path,
-  ];
-  const seen = new Set();
-  const out = [];
-  for (const value of raw) {
-    const path = normalizeRepoPathCandidate(value);
-    if (!path || seen.has(path)) continue;
-    seen.add(path);
-    out.push(path);
-  }
-  return out;
-}
-
-function normalizeRepoPathCandidate(value) {
-  const text = String(value || "").trim().replace(/\\/g, "/");
-  if (!text || text.includes("\0") || text.startsWith("/") || /^[A-Za-z]:/.test(text)) return null;
-  const parts = [];
-  for (const segment of text.split("/")) {
-    if (!segment || segment === ".") continue;
-    if (segment === "..") return null;
-    parts.push(segment);
-  }
-  return parts.length > 0 ? parts.join("/") : null;
-}
-
-function parentDirOf(path) {
-  const index = String(path || "").lastIndexOf("/");
-  return index > 0 ? path.slice(0, index) : "";
-}
-
-function isUnderAnyDir(path, dirs) {
-  return dirs.some((dir) => dir && (path === dir || path.startsWith(`${dir}/`)));
+function wideningCallInput(targetGlobalId, edge, from) {
+  const fromPath = String(from?.repo_rel_path || "");
+  const sitePath = String(edge?.repo_rel_path || fromPath);
+  if (!isCanonicalRepoPath(fromPath) || !isCanonicalRepoPath(sitePath)) return null;
+  return {
+    targetGlobalId,
+    from,
+    sitePath,
+  };
 }
 
 function unsafeDb(view) {

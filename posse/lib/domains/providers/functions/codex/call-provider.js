@@ -4,6 +4,7 @@ import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { adaptExecutionContractForProvider, appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
+import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap } from "../../../../shared/tools/functions/mcp-surface.js";
 import { logAtlasAttachment, resolveAtlasAssignmentUnit } from "../../../integrations/functions/atlas.js";
 import { atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
@@ -42,6 +43,7 @@ export async function callProvider(promptText, {
   roleMode = null,
   allowWrite = false,
   projectDbWrite = false,
+  projectDbCapability = "none",
   modelTier = "standard",
   modelName = null,
   reasoningEffort = "medium",
@@ -73,6 +75,8 @@ export async function callProvider(promptText, {
   jobId = null,
   workItemId = null,
   attemptId = null,
+  agentCallId = null,
+  promptChars = 0,
   atlasPrefetchStatus = null,
   skipRolePrompt = false,
   recyclingMode = "fresh",
@@ -80,6 +84,7 @@ export async function callProvider(promptText, {
   recordFinalPrompt = null,
   disableAtlas = false,
   atlasConfig = null,
+  _remoteIssuedPolicy = null,
 } = {}) {
   const readiness = await isReadyAsync();
   if (!readiness.ready) {
@@ -155,11 +160,14 @@ export async function callProvider(promptText, {
       readRoots,
       allowWrite,
       projectDbWrite,
+      projectDbCapability,
       needsImageGeneration,
       disableSystemTools,
       jobId,
       workItemId,
       attemptId,
+      agentCallId,
+      promptChars,
       atlasPrefetchStatus,
       atlasAvailable: atlasReadyForMcp,
       atlasGateEnabled: atlasToolGateEnabled,
@@ -209,7 +217,7 @@ export async function callProvider(promptText, {
     const webTools = buildCodexWebToolsOverrides({
       role,
       roleMode,
-      webToolsEnabled: resolveWebToolsEnabled(),
+      webToolsEnabled: resolveWebToolsEnabled() && issuedWebAccessEnabled(_remoteIssuedPolicy),
     });
     // The Posse MCP gateway exposes deterministic and atlas.* suites from a
     // single process, so do not attach a second ATLAS MCP server when the
@@ -232,6 +240,7 @@ export async function callProvider(promptText, {
       roleMode,
       allowWrite,
       projectDbWrite,
+      issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
       scopedFiles,
       createFiles,
       createRoots,

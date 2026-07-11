@@ -35,6 +35,12 @@ function runCommit() {
       hookOutput: err?.hookOutput || null,
       createdOutOfScope: Array.isArray(err?.createdOutOfScope) ? err.createdOutOfScope : null,
       gitAddWarnings: Array.isArray(err?.gitAddWarnings) ? err.gitAddWarnings : null,
+      nativeFailure: err?.nativeFailure || null,
+      rollbackStatus: err?.rollbackStatus || null,
+      rollbackSucceeded: err?.rollbackSucceeded ?? null,
+      nativeDiagnostics: Array.isArray(err?.nativeDiagnostics) ? err.nativeDiagnostics : null,
+      headBefore: err?.headBefore || null,
+      headAfter: err?.headAfter || null,
     });
   }
 }

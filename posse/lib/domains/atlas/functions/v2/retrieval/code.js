@@ -7,15 +7,19 @@
 // `readFile` function so this module stays pure — the dispatcher decides
 // where to read from (worktree fs, in-memory fixture, etc.).
 
-import { parseSymbolId, locationOf } from "./cards.js";
+import { parseSymbolId } from "./cards.js";
 import { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
-import { redactSecrets, redactSecretsAsync, redactSecretsLines, redactSecretsLinesAsync } from "./redaction.js";
 import { findOverlaySymbol, getOverlaySymbols } from "./buffer.js";
-import { sha256Hex } from "../hash.js";
 import { getEffectivePolicy } from "./policy.js";
-import { buildAstSkeleton, selectSkeletonSymbols } from "./skeleton.js";
-import { buildAstHotPath, buildAstHotPathAsync } from "./hotpath.js";
+import {
+  codeHotPathNative,
+  codeHotPathNativeAsync,
+  codeSkeletonNative,
+  codeSkeletonNativeAsync,
+  codeWindowNative,
+  codeWindowNativeAsync,
+} from "../native/code-context.js";
 import { annotateCodeLadder, validateCodeLadder } from "./code-ladder.js";
 import { calledFromBreadcrumbs } from "./usages.js";
 
@@ -40,7 +44,7 @@ import { calledFromBreadcrumbs } from "./usages.js";
  * }} args
  */
 export function codeGetSkeleton({ view, versionId, params, readFile, repoRoot }) {
-  return codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoRoot }, redactSecrets);
+  return codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot }, codeSkeletonNative);
 }
 
 /**
@@ -53,10 +57,10 @@ export function codeGetSkeleton({ view, versionId, params, readFile, repoRoot })
  * }} args
  */
 export async function codeGetSkeletonAsync({ view, versionId, params, readFile, repoRoot }) {
-  return await codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoRoot }, redactSecretsAsync);
+  return await codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot }, codeSkeletonNativeAsync);
 }
 
-function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoRoot }, redactText) {
+function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot }, buildSkeleton) {
   const sessionId = /** @type {any} */ (params).sessionId;
   const ladder = validateCodeLadder({
     action: "code.skeleton",
@@ -130,43 +134,6 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
     : symbols;
   const calledFrom = calledFromBreadcrumbs(view, filtered);
   const source = targetPath ? readFile(targetPath) : null;
-  if (source != null) {
-    const astSkeleton = buildAstSkeleton({
-      repoRoot,
-      file: targetPath,
-      source,
-      symbols: filtered,
-      identifiersToFind: params.identifiersToFind,
-      maxLines: params.maxLines,
-      maxTokens: params.maxTokens,
-    });
-    if (astSkeleton.ok) {
-      const etag = `sk:${targetPath}:${sha256Hex(source).slice(0, 16)}:${astSkeleton.etagSeed}`;
-      if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-        return notModifiedEnvelope({ action: "code.skeleton", versionId, etag });
-      }
-      return mapMaybePromise(redactText(astSkeleton.content), (content) => {
-        /** @type {CodeSkeletonData} */
-        const data = {
-          repo_rel_path: targetPath,
-          content,
-          startLine: astSkeleton.startLine,
-          endLine: astSkeleton.endLine,
-          truncated: astSkeleton.truncated,
-          ...(calledFrom.length > 0 ? { calledFrom } : {}),
-          etag,
-        };
-        return annotateCodeLadder(okEnvelope({
-          action: "code.skeleton",
-          versionId,
-          data,
-          meta: { etag },
-        }), ladder, { action: "code.skeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
-      });
-    }
-  }
-
-  const maxLines = params.maxLines || 200;
   if (source == null && explicitFileRequest) {
     return errorEnvelope({
       action: "code.skeleton",
@@ -175,39 +142,37 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
       message: `Could not read ${targetPath}`,
     });
   }
-  const lines = [];
-  let truncated = false;
-  const fallbackSymbols = selectSkeletonSymbols(filtered, params.identifiersToFind);
-  for (const s of fallbackSymbols) {
-    const sig = signatureLine(s);
-    if (lines.length >= maxLines) {
-      truncated = true;
-      break;
-    }
-    lines.push(sig);
-  }
-
-  const etag = `sk:${targetPath}:${fallbackSymbols.length}`;
-  if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-    return notModifiedEnvelope({ action: "code.skeleton", versionId, etag });
-  }
-
-  /** @type {CodeSkeletonData} */
-  const data = {
+  const nativeResult = buildSkeleton({
     repo_rel_path: targetPath,
-    content: lines.join("\n"),
-    startLine: 1,
-    endLine: lines.length || 1,
-    truncated,
-    ...(calledFrom.length > 0 ? { calledFrom } : {}),
-    etag,
-  };
-  return annotateCodeLadder(okEnvelope({
-    action: "code.skeleton",
-    versionId,
-    data,
-    meta: { etag },
-  }), ladder, { action: "code.skeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
+    source,
+    symbols,
+    identifiersToFind: normalizeIdentifiers(params.identifiersToFind),
+    exportedOnly: params.exportedOnly === true,
+    maxLines: params.maxLines,
+    maxTokens: params.maxTokens,
+  });
+  return mapMaybePromise(nativeResult, (result) => {
+    const etag = String(result.etag || "");
+    if (params.ifNoneMatch && params.ifNoneMatch === etag) {
+      return notModifiedEnvelope({ action: "code.skeleton", versionId, etag });
+    }
+    /** @type {CodeSkeletonData} */
+    const data = {
+      repo_rel_path: targetPath,
+      content: String(result.content || ""),
+      startLine: Number(result.startLine || 1),
+      endLine: Number(result.endLine || 1),
+      truncated: result.truncated === true,
+      ...(calledFrom.length > 0 ? { calledFrom } : {}),
+      etag,
+    };
+    return annotateCodeLadder(okEnvelope({
+      action: "code.skeleton",
+      versionId,
+      data,
+      meta: { etag },
+    }), ladder, { action: "code.skeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
+  });
 }
 
 /**
@@ -220,10 +185,7 @@ function codeGetSkeletonWithRedaction({ view, versionId, params, readFile, repoR
  * }} args
  */
 export function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) {
-  return codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRoot }, {
-    buildHotPath: buildAstHotPath,
-    redactLines: redactSecretsLines,
-  });
+  return codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, codeHotPathNative);
 }
 
 /**
@@ -236,13 +198,10 @@ export function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) 
  * }} args
  */
 export async function codeGetHotPathAsync({ view, versionId, params, readFile, repoRoot }) {
-  return await codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRoot }, {
-    buildHotPath: buildAstHotPathAsync,
-    redactLines: redactSecretsLinesAsync,
-  });
+  return await codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, codeHotPathNativeAsync);
 }
 
-function codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRoot }, redaction) {
+function codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, buildHotPath) {
   const resolved = resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.lens" });
   if (!resolved.ok) return errorEnvelope({ action: "code.lens", versionId, code: resolved.code, message: resolved.message });
   const { source, targetPath, symbolId } = resolved;
@@ -253,7 +212,6 @@ function codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRo
     symbolId: symbolId || null,
     file: targetPath,
   });
-  const lines = source.split(/\r?\n/);
   const idents = normalizeIdentifiers(params.identifiersToFind);
   const contextLines = typeof params.contextLines === "number" ? params.contextLines : 2;
   // Breadcrumbs for the definitions the agent is actually looking at: the
@@ -267,113 +225,54 @@ function codeGetHotPathWithRedaction({ view, versionId, params, readFile, repoRo
     }
   }
   const calledFrom = calledFromBreadcrumbs(view, [...lensTargets.values()], { maxSymbols: 4 });
-  const astHotPath = redaction.buildHotPath({
-    repoRoot,
-    file: targetPath,
+  const nativeHotPath = buildHotPath({
+    repo_rel_path: targetPath,
     source,
     target: resolved.target,
-    identifiers: idents,
+    symbolId,
+    identifiersToFind: idents,
     contextLines,
   });
-  return mapMaybePromise(astHotPath, (resolvedAstHotPath) => {
+  return mapMaybePromise(nativeHotPath, (resolvedHotPath) => {
     return finishCodeHotPath({
       versionId,
       params,
-      source,
       targetPath,
       symbolId,
       sessionId,
       ladder,
-      lines,
-      idents,
-      contextLines,
-      astHotPath: resolvedAstHotPath,
-      redactLines: redaction.redactLines,
+      hotPath: resolvedHotPath,
       calledFrom,
     });
   });
 }
 
-function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, sessionId, ladder, lines, idents, contextLines, astHotPath, redactLines, calledFrom = [] }) {
-  if (astHotPath.ok) {
-    const etagSeed = symbolId || `${targetPath}:${sha256Hex(source).slice(0, 16)}`;
-    const etag = `hp:${etagSeed}:${idents.join(",")}:${astHotPath.etagSeed}`;
-    if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-      return notModifiedEnvelope({ action: "code.lens", versionId, etag });
-    }
-    /** @type {CodeHotPathData} */
-    const data = {
-      ...(symbolId ? { symbolId } : {}),
-      repo_rel_path: targetPath,
-      matches: astHotPath.matches,
-      identifiersFound: astHotPath.identifiersFound,
-      ...(astHotPath.identifiersFoundInText?.length
-        ? { identifiersFoundInText: astHotPath.identifiersFoundInText }
-        : {}),
-      identifiersMissing: astHotPath.identifiersMissing,
-      ...(calledFrom.length > 0 ? { calledFrom } : {}),
-      etag,
-    };
-    return annotateCodeLadder(okEnvelope({
-      action: "code.lens",
-      versionId,
-      data,
-      meta: { etag },
-    }), ladder, { action: "code.lens", sessionId, symbolId: symbolId || null, file: targetPath });
+function finishCodeHotPath({ versionId, params, targetPath, symbolId, sessionId, ladder, hotPath, calledFrom = [] }) {
+  const etag = String(hotPath.etag || "");
+  if (params.ifNoneMatch && params.ifNoneMatch === etag) {
+    return notModifiedEnvelope({ action: "code.lens", versionId, etag });
   }
-  /** @type {Set<string>} */
-  const found = new Set();
-  /** @type {Array<{ li: number, ident: string }>} */
-  const rawMatches = [];
-  for (let li = 0; li < lines.length; li++) {
-    const line = lines[li];
-    for (const ident of idents) {
-      if (!ident) continue;
-      const re = new RegExp(`\\b${escapeRegExp(ident)}\\b`);
-      if (re.test(line)) {
-        found.add(ident);
-        rawMatches.push({ li, ident });
-      }
-    }
-  }
-  // One native redaction call for the whole file instead of one per matched
-  // line plus one per context line (each sync call is a process spawn).
-  const redactedLines = rawMatches.length > 0 ? redactLines(lines) : lines;
-  return mapMaybePromise(redactedLines, (resolvedLines) => {
-    /** @type {CodeHotPathData["matches"]} */
-    const matches = rawMatches.map(({ li, ident }) => ({
-      repo_rel_path: targetPath,
-      line: li + 1,
-      text: resolvedLines[li],
-      identifier: ident,
-      context: {
-        before: resolvedLines.slice(Math.max(0, li - contextLines), li),
-        after: resolvedLines.slice(li + 1, Math.min(lines.length, li + 1 + contextLines)),
-      },
-    }));
-    const missing = idents.filter((i) => !found.has(i));
-    const etagSeed = symbolId || `${targetPath}:${sha256Hex(source).slice(0, 16)}`;
-    const etag = `hp:${etagSeed}:${idents.join(",")}:${matches.length}`;
-    if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-      return notModifiedEnvelope({ action: "code.lens", versionId, etag });
-    }
-    /** @type {CodeHotPathData} */
-    const data = {
-      ...(symbolId ? { symbolId } : {}),
-      repo_rel_path: targetPath,
-      matches,
-      identifiersFound: [...found].sort(),
-      identifiersMissing: missing.sort(),
-      ...(calledFrom.length > 0 ? { calledFrom } : {}),
-      etag,
-    };
-    return annotateCodeLadder(okEnvelope({
-      action: "code.lens",
-      versionId,
-      data,
-      meta: { etag },
-    }), ladder, { action: "code.lens", sessionId, symbolId: symbolId || null, file: targetPath });
-  });
+  /** @type {CodeHotPathData} */
+  const data = {
+    ...(symbolId ? { symbolId } : {}),
+    repo_rel_path: targetPath,
+    matches: Array.isArray(hotPath.matches) ? hotPath.matches : [],
+    identifiersFound: Array.isArray(hotPath.identifiersFound) ? hotPath.identifiersFound : [],
+    ...(hotPath.identifiersFoundInText?.length
+      ? { identifiersFoundInText: hotPath.identifiersFoundInText }
+      : {}),
+    identifiersMissing: Array.isArray(hotPath.identifiersMissing) ? hotPath.identifiersMissing : [],
+    truncated: hotPath.truncated === true,
+    omittedMatchCount: Math.max(0, Number(hotPath.omittedMatchCount) || 0),
+    ...(calledFrom.length > 0 ? { calledFrom } : {}),
+    etag,
+  };
+  return annotateCodeLadder(okEnvelope({
+    action: "code.lens",
+    versionId,
+    data,
+    meta: { etag },
+  }), ladder, { action: "code.lens", sessionId, symbolId: symbolId || null, file: targetPath });
 }
 
 /**
@@ -388,7 +287,7 @@ function finishCodeHotPath({ versionId, params, source, targetPath, symbolId, se
  * }} args
  */
 export function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
-  return codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRoot, ledger, repoId }, redactSecrets);
+  return codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, codeWindowNative);
 }
 
 /**
@@ -403,10 +302,10 @@ export function codeNeedWindow({ view, versionId, params, readFile, repoRoot, le
  * }} args
  */
 export async function codeNeedWindowAsync({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
-  return await codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRoot, ledger, repoId }, redactSecretsAsync);
+  return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, codeWindowNativeAsync);
 }
 
-function codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRoot, ledger, repoId }, redactText) {
+function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, buildWindow) {
   const resolved = resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.window" });
   if (!resolved.ok) return errorEnvelope({ action: "code.window", versionId, code: resolved.code, message: resolved.message });
   const sessionId = /** @type {any} */ (params).sessionId;
@@ -435,30 +334,32 @@ function codeNeedWindowWithRedaction({ view, versionId, params, readFile, repoRo
       message: "code.window requires identifiersToFind under the active ATLAS policy",
     });
   }
-  const window = target
-    ? symbolWindow({ source, target, granularity: params.granularity || "symbol" })
-    : fileWindow({ source, identifiers, expectedLines: params.expectedLines });
-  const policyLimited = limitWindowLines(window, policy.maxWindowLines);
-  /** @type {CodeWindowData} */
-  const data = {
-    ...(symbolId ? { symbolId } : {}),
-    repo_rel_path: targetPath,
-    content: policyLimited.content,
-    startLine: policyLimited.startLine,
-    endLine: policyLimited.endLine,
-    estimatedTokens: Math.ceil(policyLimited.content.length / 4),
-    truncated: policyLimited.truncated,
-  };
   const maxTokens = Math.min(
     typeof params.maxTokens === "number" && params.maxTokens > 0 ? params.maxTokens : policy.maxWindowTokens,
     policy.maxWindowTokens,
   );
-  if (data.estimatedTokens > maxTokens) {
-    applyCodeWindowTokenBudget(data, maxTokens);
-  }
-  return mapMaybePromise(redactText(data.content), (content) => {
-    data.content = content;
-    refreshCodeWindowLineMetadata(data);
+  const nativeWindow = buildWindow({
+    repo_rel_path: targetPath,
+    source,
+    target,
+    symbolId,
+    identifiersToFind: identifiers,
+    expectedLines: positiveInteger(params.expectedLines),
+    granularity: params.granularity || "symbol",
+    maxWindowLines: policy.maxWindowLines,
+    maxTokens,
+  });
+  return mapMaybePromise(nativeWindow, (result) => {
+    /** @type {CodeWindowData} */
+    const data = {
+      ...(symbolId ? { symbolId } : {}),
+      repo_rel_path: targetPath,
+      content: String(result.content || ""),
+      startLine: Number(result.startLine || 1),
+      endLine: Number(result.endLine || 1),
+      estimatedTokens: Number(result.estimatedTokens || 0),
+      truncated: result.truncated === true,
+    };
     return annotateCodeLadder(
       okEnvelope({ action: "code.window", versionId, data }),
       ladder,
@@ -474,105 +375,6 @@ function mapMaybePromise(value, map) {
   return map(value);
 }
 
-/**
- * @param {CodeWindowData} data
- * @param {number} maxTokens
- */
-function applyCodeWindowTokenBudget(data, maxTokens) {
-  const maxChars = Math.max(1, Math.floor(Number(maxTokens) || 1) * 4);
-  if (String(data.content || "").length <= maxChars) return;
-  data.content = truncateTextAtLineBoundary(String(data.content || ""), maxChars);
-  data.truncated = true;
-  refreshCodeWindowLineMetadata(data);
-}
-
-/**
- * Prefer returning complete lines so `endLine` and `content` stay in sync. If a
- * single long first line exceeds the budget, fall back to a character cap.
- *
- * @param {string} text
- * @param {number} maxChars
- */
-function truncateTextAtLineBoundary(text, maxChars) {
-  const slice = text.slice(0, maxChars);
-  const lastNewline = slice.lastIndexOf("\n");
-  if (lastNewline > 0) return slice.slice(0, lastNewline).replace(/\r$/u, "");
-  return slice;
-}
-
-/**
- * @param {CodeWindowData} data
- */
-function refreshCodeWindowLineMetadata(data) {
-  const lineCount = countReturnedLines(data.content);
-  data.endLine = data.startLine + Math.max(1, lineCount) - 1;
-  data.estimatedTokens = Math.ceil(String(data.content || "").length / 4);
-}
-
-/**
- * @param {string} content
- */
-function countReturnedLines(content) {
-  if (content === "") return 0;
-  return String(content).split(/\r?\n/u).length;
-}
-
-function limitWindowLines(window, maxLines) {
-  const limit = Number.isFinite(Number(maxLines)) ? Math.max(1, Number(maxLines)) : 500;
-  const lines = String(window.content || "").split(/\r?\n/);
-  if (lines.length <= limit) return window;
-  const kept = lines.slice(0, limit);
-  return {
-    ...window,
-    content: kept.join("\n"),
-    endLine: window.startLine + kept.length - 1,
-    truncated: true,
-  };
-}
-
-function symbolWindow({ source, target, granularity }) {
-  let content;
-  let startByte = target.range_start;
-  let endByte = target.range_end;
-  if (granularity === "symbol") {
-    content = source.slice(startByte, endByte);
-  } else if (granularity === "block") {
-    const blockStart = source.lastIndexOf("\n", startByte) + 1;
-    const blockEnd = source.indexOf("\n", endByte);
-    startByte = blockStart;
-    endByte = blockEnd < 0 ? source.length : blockEnd;
-    content = source.slice(startByte, endByte);
-  } else {
-    content = source;
-    startByte = 0;
-    endByte = source.length;
-  }
-  const loc = locationOf({ ...target, range_start: startByte, range_end: endByte }, { source });
-  return { content, startLine: loc.startLine, endLine: loc.endLine, truncated: false };
-}
-
-function fileWindow({ source, identifiers, expectedLines }) {
-  const lines = source.split(/\r?\n/);
-  const targetLines = Math.max(1, Math.min(2000, Number(expectedLines) || 120));
-  let center = 0;
-  for (let li = 0; li < lines.length; li++) {
-    if ((identifiers || []).some((ident) => ident && new RegExp(`\\b${escapeRegExp(ident)}\\b`).test(lines[li]))) {
-      center = li;
-      break;
-    }
-  }
-  const half = Math.floor(targetLines / 2);
-  let start = Math.max(0, center - half);
-  let end = Math.min(lines.length, start + targetLines);
-  start = Math.max(0, Math.min(start, Math.max(0, end - targetLines)));
-  const content = lines.slice(start, end).join("\n");
-  return {
-    content,
-    startLine: start + 1,
-    endLine: Math.max(start + 1, end),
-    truncated: start > 0 || end < lines.length,
-  };
-}
 
 function normalizeIdentifiers(value) {
   if (Array.isArray(value)) {
@@ -633,20 +435,7 @@ function resolveCodeSymbol({ view, symbolId, repoRoot, sessionId }) {
   return { symbol: null };
 }
 
-/**
- * @param {ViewSymbol} sym
- * @returns {string}
- */
-function signatureLine(sym) {
-  const visibility = sym.visibility ? `${sym.visibility} ` : "";
-  const qname = sym.qualified_name || sym.name;
-  return `${visibility}${sym.kind} ${qname}`.trim();
-}
-
-/**
- * @param {string} s
- * @returns {string}
- */
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function positiveInteger(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
 }

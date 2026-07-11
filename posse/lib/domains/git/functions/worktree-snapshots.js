@@ -1265,6 +1265,22 @@ export function preserveBranchTipSnapshot(
       dedupHash,
     });
     if (existingDedupRef?.refName) {
+      const capturedAt = new Date().toISOString();
+      const existingNote = readSnapshotNote(projectDir, existingDedupRef.objectHash);
+      const refreshedNote = {
+        ...(existingNote || {}),
+        storage: "branch-ref",
+        ref_name: existingDedupRef.refName,
+        object_hash: existingDedupRef.objectHash,
+        project_dir: projectDir,
+        branch_name: branchName,
+        work_item_id: wiId,
+        reason,
+        first_captured_at: existingNote?.first_captured_at || existingNote?.captured_at || capturedAt,
+        captured_at: capturedAt,
+        head_sha: existingDedupRef.objectHash,
+      };
+      if (!writeSnapshotNote(projectDir, existingDedupRef.objectHash, refreshedNote)) return null;
       return SnapshotRef.gitRef(existingDedupRef.refName, {
         storageType: "branch-ref",
         objectHash: existingDedupRef.objectHash,
@@ -1275,7 +1291,7 @@ export function preserveBranchTipSnapshot(
 
     const refName = snapshotRefName({ wiId, reason: snapshotReason, dedupHash });
     gitExec(["update-ref", refName, branchHash], projectDir);
-    writeSnapshotNote(projectDir, branchHash, {
+    const noteWritten = writeSnapshotNote(projectDir, branchHash, {
       storage: "branch-ref",
       ref_name: refName,
       object_hash: branchHash,
@@ -1286,6 +1302,7 @@ export function preserveBranchTipSnapshot(
       captured_at: new Date().toISOString(),
       head_sha: branchHash,
     });
+    if (!noteWritten) return null;
     if (typeof onMsg === "function") {
       onMsg(`preserved branch ${branchName} tip at ${refName}`);
     }

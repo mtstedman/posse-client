@@ -49,6 +49,8 @@ import {
   estimateTokensFromChars,
   resolveContextCompactionConfig,
 } from "../../settings/functions/context-compaction.js";
+import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
+import { narrowProviderOptionsToRemoteIssuance } from "../../../shared/tools/functions/issued-tool-policy.js";
 
 const DEFAULT_PROVIDER_ERROR_PATTERNS = [
   /overloaded_error/i,
@@ -435,6 +437,10 @@ export class TrackedProviderClient {
       });
       if (config.mode === "off") return;
       const metrics = contextPressureMetrics({ stats, promptChars });
+      const meterSnapshot = ContextMeter.forContext(
+        { agent_call_id: agentCallId },
+        { promptChars },
+      )?.snapshot() || null;
       const sessionRecycle = opts?._sessionRecycle || null;
       const recycleDecision = sessionRecycle?.decision || null;
       const baseDetail = {
@@ -455,6 +461,11 @@ export class TrackedProviderClient {
         observed_input_tokens_estimated: metrics.observedInputTokensEstimated,
         uncached_input_tokens_approx: metrics.uncachedInputTokensApprox,
         cached_input_ratio: metrics.cachedInputRatio,
+        context_meter: meterSnapshot ? {
+          ...meterSnapshot,
+          observed_input_tokens: metrics.observedInputTokens,
+          estimate_delta_tokens: meterSnapshot.estimate_tokens - metrics.observedInputTokens,
+        } : null,
         thresholds: {
           pressure_input_tokens: config.triggerInputTokens,
           session_reset_input_tokens: config.sessionResetInputTokens,
@@ -652,6 +663,13 @@ export class TrackedProviderClient {
     if (agentCallId == null) {
       throw new Error("createAgentCall must return an object with an id");
     }
+    ContextMeter.forContext({ agent_call_id: agentCallId }, { promptChars: prompt.length });
+    const callObservationContext = {
+      ...(observationContext || {}),
+      work_item_id: work_item_id ?? observationContext?.work_item_id ?? null,
+      job_id: job_id ?? observationContext?.job_id ?? null,
+      agent_call_id: agentCallId,
+    };
     recordRecoveryCheckpoint?.({
       work_item_id,
       job_id,
@@ -671,10 +689,13 @@ export class TrackedProviderClient {
         max_output_tokens_configured: resolvedMaxOutputTokens,
       },
     });
+    const effectiveCapabilityOpts = narrowProviderOptionsToRemoteIssuance(opts);
     const attemptOpts = {
-      ...opts,
+      ...effectiveCapabilityOpts,
       maxOutputTokens: resolvedMaxOutputTokens,
       attemptId: observationContext?.attempt_id ?? opts.attemptId ?? null,
+      agentCallId,
+      promptChars: prompt.length,
       abortSignal,
       recordFinalPrompt: (finalPrompt, { systemPrompt = null, systemPromptFiles = null } = {}) => {
         const promptText = typeof finalPrompt === "string" ? finalPrompt : String(finalPrompt ?? "");
@@ -739,7 +760,7 @@ export class TrackedProviderClient {
         atlas_method: opts.disableAtlas ? null : (opts.atlasMethod || null),
       });
       const { output, stats = {} } = await runWithObservationContext(
-        observationContext,
+        callObservationContext,
         () => provider.call(prompt, attemptOpts),
       );
       if (abortSignal?.aborted) {
@@ -1030,6 +1051,8 @@ export class TrackedProviderClient {
       });
 
       throw err;
+    } finally {
+      ContextMeter.release({ agent_call_id: agentCallId });
     }
   }
 

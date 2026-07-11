@@ -1,18 +1,21 @@
 import { normalizeResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { slugify } from "../../../shared/format/functions/slug.js";
+import {
+  ONESHOT_AMBIGUOUS_SIGNAL_RE as AMBIGUOUS_RE,
+  ONESHOT_BROAD_SCOPE_SIGNAL_RE as BROAD_SCOPE_RE,
+  ONESHOT_COMPLEX_SIGNAL_RE as COMPLEX_RE,
+  ONESHOT_FORMAT_SWEEP_SIGNAL_RE as FORMAT_RE,
+  ONESHOT_LOW_BLAST_SCOPE_RE as LOW_BLAST_SCOPE_RE,
+  ONESHOT_RENAME_SIGNAL_RE as RENAME_RE,
+  evaluateOneshotRequestEligibility,
+} from "./oneshot-policy.js";
 
 const SIMPLE_NO_RESEARCH_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|rename|renaming|copy\s*edit|docs?\s+fix|formatting|whitespace)\b/i;
 const ONESHOT_SIMPLE_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|copy\s*edit|docs?\s+fix|whitespace)\b/i;
 const LOW_NO_LOGIC_RE = /\b(?:typo|spelling|comments?\s+fix|comment-only|rename|copy\s*edit|docs?|readme|formatting|whitespace|no\s+(?:logic|behavior|behaviour)\s+change)\b/i;
-const COMPLEX_RE = /\b(?:race|concurren\w*|security|auth|authorization|authentication|lock|locking|deadlock|transaction|migration|corruption|data\s+loss|permission|credential|secret|encryption|oauth|session)\b/i;
-const AMBIGUOUS_RE = /\b(?:investigate|figure\s+out\s+why|diagnose|debug\s+why|root\s+cause|trace\s+why|why\s+(?:is|does|did)|flaky|intermittent)\b/i;
 const FANOUT_TRIGGER_RE = /\b(?:audit|review\s+all|verify\s+each|find\s+all|scan\s+all|check\s+every|across)\b/i;
-const BROAD_SCOPE_RE = /\b(?:all|every|each|across|whole|entire)\b/i;
 const WEB_FANOUT_RE = /\b(?:compare|versus|vs\.?|between|across|audit|review|verify|investigate)\b/i;
-const RENAME_RE = /\b(?:rename|renaming)\b/i;
-const FORMAT_RE = /\bformatting\b/i;
 const ONESHOT_TOKEN_RE = /(?:^|\s)#one[-_]?shot\b/i;
-const LOW_BLAST_SCOPE_RE = /\b(?:keep|limit(?:ed)?|scop(?:e|ed)|single[-\s]?file|one[-\s]?file|only|do\s+not\s+change|don't\s+change|without\s+changing|no\s+(?:runtime\s+)?behaviou?r|smallest\s+change)\b/i;
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:ai|app|cloud|co|com|dev|edu|gov|io|net|org)\b/gi;
 
@@ -421,6 +424,7 @@ export function classifyResearchTask({
   intakeHints = {},
   projectMap = null,
   mode = null,
+  disallowOneshot = false,
 } = {}) {
   const taskTitle = normalizeText(title);
   const taskDescription = normalizeText(description);
@@ -435,7 +439,15 @@ export function classifyResearchTask({
   const noResearchText = taskDescription || taskTitle;
   const protectedFileMention = hasProtectedFileMention(fileMentions);
   const explicitOneshot = String(intakeHints?.intent_type || "").toLowerCase() === "oneshot" || ONESHOT_TOKEN_RE.test(text);
-  const oneshotSimple = !protectedFileMention && ONESHOT_SIMPLE_RE.test(text) && noResearchText.length < 200 && !COMPLEX_RE.test(text) && !RENAME_RE.test(text) && !FORMAT_RE.test(text);
+  // One shared eligibility policy for every one-shot origin: mode must be
+  // build, explicit output must resolve to repo output, and the request must
+  // carry no security/concurrency/ambiguity/broad-scope/rename/formatting
+  // signals. Ineligible requests fall through to the ordinary router below,
+  // so complex work returns to research and trivial-but-unsafe scope returns
+  // to planning.
+  const oneshotEligibility = evaluateOneshotRequestEligibility({ text, mode: lowerMode, intakeHints });
+  const oneshotAllowed = !disallowOneshot && !protectedFileMention && oneshotEligibility.ok;
+  const oneshotSimple = oneshotAllowed && ONESHOT_SIMPLE_RE.test(text) && noResearchText.length < 200 && !COMPLEX_RE.test(text) && !RENAME_RE.test(text) && !FORMAT_RE.test(text);
   const simpleNoResearch = !protectedFileMention && SIMPLE_NO_RESEARCH_RE.test(text) && fileMentions.length === 1 && noResearchText.length < 200 && !COMPLEX_RE.test(text);
   const renameMultiNoResearch = !protectedFileMention && RENAME_RE.test(text) && filesAllInSameModule(fileMentions) && noResearchText.length < 400 && !COMPLEX_RE.test(text);
   const webFanoutCandidate = webBranches.length >= 2 && WEB_FANOUT_RE.test(text) && mentionedModules.length === 0 && fileMentions.length === 0;
@@ -464,20 +476,20 @@ export function classifyResearchTask({
     };
   } else if (lowerMode === "question") {
     result = { bucket: "solo", reason: "question mode always runs researcher" };
-  } else if (!protectedFileMention && explicitOneshot && lowerMode !== "question" && lowerMode !== "promote" && fileMentions.length === 1) {
+  } else if (oneshotAllowed && explicitOneshot && fileMentions.length === 1) {
     result = {
       bucket: "oneshot",
       reason: "explicit one-shot intent with single file",
       candidate_files: fileMentions,
       oneshot_source: "explicit",
     };
-  } else if (!protectedFileMention && explicitOneshot && lowerMode !== "question" && lowerMode !== "promote" && fileMentions.length === 0) {
+  } else if (oneshotAllowed && explicitOneshot && fileMentions.length === 0) {
     result = {
       bucket: "oneshot_candidate",
       reason: "explicit one-shot intent needs preflight scope resolution",
       oneshot_source: "explicit",
     };
-  } else if (!protectedFileMention && explicitOneshot && lowerMode !== "question" && lowerMode !== "promote" && fileMentions.length > 1) {
+  } else if (oneshotAllowed && explicitOneshot && fileMentions.length > 1) {
     result = {
       bucket: "oneshot_candidate",
       reason: "explicit one-shot intent has multiple file mentions; preflight must resolve or demote",
@@ -488,7 +500,7 @@ export function classifyResearchTask({
     result = { bucket: "no_research", reason: "intake intent is typo_fix" };
   } else if (!protectedFileMention && lowerMode === "promote") {
     result = { bucket: "no_research", reason: "promote mode is a branch handoff" };
-  } else if (lowBlastSingleFileEdit) {
+  } else if (oneshotAllowed && lowBlastSingleFileEdit) {
     result = {
       bucket: "oneshot",
       reason: "single-file low-blast-radius edit can skip planner",
@@ -572,5 +584,8 @@ export function classifyResearchTask({
     web_targets: result.web_targets || (result.branches || []).filter((branch) => branch.kind === "web"),
     budget,
   };
+  if (explicitOneshot && !oneshotBucket && !oneshotEligibility.ok) {
+    finalResult.oneshot_suppressed = oneshotEligibility.reason;
+  }
   return finalResult;
 }

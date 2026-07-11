@@ -6,6 +6,8 @@ import {
   HASH_REF_ENTRY_KIND_SET,
   HASH_REF_OWNER_SCOPE_SET,
 } from "../../../../catalog/hash-store.js";
+import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
+import { logEvent } from "../../../../domains/queue/functions/events.js";
 import { HashMinter } from "./HashMinter.js";
 
 const OWNER_TABLES = Object.freeze({
@@ -30,7 +32,12 @@ const OWNER_TABLES = Object.freeze({
 });
 
 const DEFAULT_MAX_MATERIALIZED_ROWS_PER_OWNER = 256;
+// The legacy option name says bytes, but SQLite length() and JS String.length
+// both govern this cache in characters. maxMaterializedChars is the honest
+// name; maxMaterializedBytes remains accepted for existing callers.
 const DEFAULT_MAX_MATERIALIZED_BYTES_PER_OWNER = 4 * 1024 * 1024;
+const PINNED_PRESSURE_BUDGET_MULTIPLIER = 2;
+const READY_OWNER_SCHEMAS_BY_DB = new WeakMap();
 
 function nowIso() {
   return new Date().toISOString();
@@ -126,6 +133,8 @@ function isUniqueConstraintError(err) {
 }
 
 export class HashRefStore {
+  #schemaReady = false;
+
   constructor({
     db,
     minter = null,
@@ -136,6 +145,7 @@ export class HashRefStore {
     agentCallId = null,
     parent = null,
     maxMaterializedRows = DEFAULT_MAX_MATERIALIZED_ROWS_PER_OWNER,
+    maxMaterializedChars = null,
     maxMaterializedBytes = DEFAULT_MAX_MATERIALIZED_BYTES_PER_OWNER,
   } = {}) {
     if (!db) throw new Error("HashRefStore requires a db");
@@ -159,7 +169,9 @@ export class HashRefStore {
     this.parent = parent || null;
     this.config = config;
     this.maxMaterializedRows = Math.max(1, Number(maxMaterializedRows) || DEFAULT_MAX_MATERIALIZED_ROWS_PER_OWNER);
-    this.maxMaterializedBytes = Math.max(0, Number(maxMaterializedBytes) || DEFAULT_MAX_MATERIALIZED_BYTES_PER_OWNER);
+    const configuredCharBudget = maxMaterializedChars == null ? maxMaterializedBytes : maxMaterializedChars;
+    this.maxMaterializedChars = Math.max(0, Number(configuredCharBudget) || DEFAULT_MAX_MATERIALIZED_BYTES_PER_OWNER);
+    this.maxMaterializedBytes = this.maxMaterializedChars;
   }
 
   static _idFromKey(ids, key) {
@@ -176,6 +188,16 @@ export class HashRefStore {
   }
 
   ensureSchema() {
+    if (this.#schemaReady) return;
+    let readyTables = READY_OWNER_SCHEMAS_BY_DB.get(this.db);
+    if (!readyTables) {
+      readyTables = new Set();
+      READY_OWNER_SCHEMAS_BY_DB.set(this.db, readyTables);
+    }
+    if (readyTables.has(this.config.table)) {
+      this.#schemaReady = true;
+      return;
+    }
     this.minter.ensureSchema();
     const table = this.config.table;
     const jobRequired = this.ownerScope === "job" ? "NOT NULL" : "";
@@ -236,6 +258,8 @@ export class HashRefStore {
     `);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${aliasTable}_ref ON ${aliasTable}(ref)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${aliasTable}_target ON ${aliasTable}(${this.config.ownerColumn}, target_ref)`);
+    readyTables.add(this.config.table);
+    this.#schemaReady = true;
   }
 
   surface(entry = {}) {
@@ -278,10 +302,16 @@ export class HashRefStore {
           if (existingRef.content_hash !== contentHash) {
             throw new Error(`hash ref alias collision for ${preferredRef}`);
           }
-          this._mergeNote(existingRef, note);
+          const reused = this._reuseRow(existingRef, {
+            payloadText,
+            sizeChars,
+            metadata,
+            note,
+          });
           return {
             reused: true,
-            entry: this._deserializeRow(existingRef),
+            rematerialized: reused.rematerialized,
+            entry: this._deserializeRow(reused.row),
           };
         }
         const existingAlias = this._selectAliasByRef(preferredRef);
@@ -290,28 +320,41 @@ export class HashRefStore {
           if (!target || target.content_hash !== contentHash) {
             throw new Error(`hash ref alias collision for ${preferredRef}`);
           }
-          this._mergeNote(target, note);
+          const reused = this._reuseRow(target, {
+            payloadText,
+            sizeChars,
+            metadata,
+            note,
+          });
           return {
             reused: true,
             aliased: true,
-            entry: this._deserializeAliasRow(existingAlias, this._selectByRef(existingAlias.target_ref)),
+            rematerialized: reused.rematerialized,
+            entry: this._deserializeAliasRow(existingAlias, reused.row),
           };
         }
       }
       const existing = this._selectByContentHash(contentHash);
       if (existing) {
-        this._mergeNote(existing, note);
+        const reused = this._reuseRow(existing, {
+          payloadText,
+          sizeChars,
+          metadata,
+          note,
+        });
         if (preferredRef && preferredRef !== existing.ref) {
           const aliasRow = this._bindAlias(preferredRef, existing.ref);
           return {
             reused: true,
             aliased: true,
-            entry: this._deserializeAliasRow(aliasRow, this._selectByRef(existing.ref)),
+            rematerialized: reused.rematerialized,
+            entry: this._deserializeAliasRow(aliasRow, reused.row),
           };
         }
         return {
           reused: true,
-          entry: this._deserializeRow(this._selectByRef(existing.ref)),
+          rematerialized: reused.rematerialized,
+          entry: this._deserializeRow(reused.row),
         };
       }
 
@@ -363,9 +406,16 @@ export class HashRefStore {
         if (!preferredRef || reservedPreferred) this.minter.release(minted.ref);
         const raced = this._selectByContentHash(contentHash);
         if (!raced) throw err;
+        const reused = this._reuseRow(raced, {
+          payloadText,
+          sizeChars,
+          metadata,
+          note,
+        });
         return {
           reused: true,
-          entry: this._deserializeRow(this._selectByRef(raced.ref)),
+          rematerialized: reused.rematerialized,
+          entry: this._deserializeRow(reused.row),
         };
       }
       return {
@@ -376,13 +426,20 @@ export class HashRefStore {
 
     const result = runImmediateTransaction(this.db, run);
     if (entryKind === "materialized") this._enforceMaterializedBudget();
-    return result;
+    return {
+      ...result,
+      entry: this._selectDeserializedRef(result.entry?.ref),
+    };
   }
 
   takeHash(source, opts = {}) {
     const fetchResult = source?.entry ? source : { entry: source };
     const entry = fetchResult?.entry;
     if (!entry) return { ok: false, error: "missing_hash_entry" };
+    const custodyMetadata = { ...(entry.metadata || {}) };
+    // Pressure reporting is owner-local state, not content provenance. A child
+    // marker must never suppress the parent owner's independent watchdog.
+    delete custodyMetadata.pinned_pressure_reported;
     const payload = entry.entry_kind === "materialized"
       ? {
         entryKind: "materialized",
@@ -405,7 +462,7 @@ export class HashRefStore {
       sizeChars: entry.size_chars,
       versionId: entry.version_id,
       metadata: {
-        ...(entry.metadata || {}),
+        ...custodyMetadata,
         taken_by: "hash_ref_store",
         custody_from_ref: entry.ref,
       },
@@ -478,15 +535,51 @@ export class HashRefStore {
     return { ok: false, found: false, ref: normalized, error: "not_found_or_not_visible" };
   }
 
-  _mergeNote(row, note) {
-    const mergedNote = mergeNotes(row?.note, note);
-    if (row && mergedNote !== (row.note || null)) {
-      this.db.prepare(`
-        UPDATE ${this.config.table}
-        SET note = ?, updated_at = ?
-        WHERE id = ?
-      `).run(mergedNote, nowIso(), row.id);
-    }
+  _reuseRow(row, {
+    payloadText = null,
+    sizeChars = 0,
+    metadata = null,
+    note = null,
+  } = {}) {
+    const rematerialized = payloadText != null
+      && row.entry_kind === "descriptor"
+      && row.degraded === 1;
+    const currentMetadata = parseJson(row.metadata_json);
+    const shouldPin = metadata?.bounded_ingress === true || metadata?.bounded_ingress === 1;
+    const pinChanged = shouldPin && currentMetadata?.bounded_ingress !== true && currentMetadata?.bounded_ingress !== 1;
+    const nextMetadata = pinChanged
+      ? { ...(currentMetadata || {}), bounded_ingress: true }
+      : currentMetadata;
+    const mergedNote = mergeNotes(row.note, note);
+    const shouldTouch = rematerialized || row.entry_kind === "materialized" || pinChanged || mergedNote !== (row.note || null);
+    if (!shouldTouch) return { row, rematerialized: false };
+
+    this.db.prepare(`
+      UPDATE ${this.config.table}
+      SET entry_kind = CASE WHEN ? = 1 THEN 'materialized' ELSE entry_kind END,
+          payload_text = CASE WHEN ? = 1 THEN ? ELSE payload_text END,
+          size_chars = CASE WHEN ? = 1 THEN ? ELSE size_chars END,
+          degraded = CASE WHEN ? = 1 THEN 0 ELSE degraded END,
+          metadata_json = ?,
+          note = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      rematerialized ? 1 : 0,
+      rematerialized ? 1 : 0,
+      rematerialized ? String(payloadText) : null,
+      rematerialized ? 1 : 0,
+      sizeChars,
+      rematerialized ? 1 : 0,
+      jsonText(nextMetadata),
+      mergedNote,
+      nowIso(),
+      row.id,
+    );
+    return {
+      row: this._selectByRef(row.ref),
+      rematerialized,
+    };
   }
 
   _bindAlias(ref, targetRef) {
@@ -566,14 +659,19 @@ export class HashRefStore {
   }
 
   _enforceMaterializedBudget() {
-    const stats = this.db.prepare(`
-      SELECT COUNT(*) AS count, COALESCE(SUM(length(COALESCE(payload_text, ''))), 0) AS bytes
+    const statsQuery = this.db.prepare(`
+      SELECT COUNT(*) AS count, COALESCE(SUM(length(COALESCE(payload_text, ''))), 0) AS chars
       FROM ${this.config.table}
-      WHERE ${this.config.ownerColumn} = ? AND entry_kind = 'materialized'
-    `).get(this.ownerId);
-    let count = Number(stats?.count || 0);
-    let bytes = Number(stats?.bytes || 0);
-    while (count > this.maxMaterializedRows || (this.maxMaterializedBytes > 0 && bytes > this.maxMaterializedBytes)) {
+      WHERE ${this.config.ownerColumn} = ?
+        AND entry_kind = 'materialized'
+        AND COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) != 1
+    `);
+    while (true) {
+      const stats = statsQuery.get(this.ownerId);
+      const count = Number(stats?.count || 0);
+      const chars = Number(stats?.chars || 0);
+      if (count <= this.maxMaterializedRows
+        && (this.maxMaterializedChars <= 0 || chars <= this.maxMaterializedChars)) break;
       const row = this.db.prepare(`
         SELECT *
         FROM ${this.config.table}
@@ -585,8 +683,59 @@ export class HashRefStore {
       `).get(this.ownerId);
       if (!row) break;
       this._evictMaterializedRow(row);
-      count -= 1;
-      bytes -= String(row.payload_text || "").length;
+    }
+    this._reportPinnedPressure();
+  }
+
+  _reportPinnedPressure() {
+    if (this.maxMaterializedChars <= 0) return;
+    const stats = this.db.prepare(`
+      SELECT COUNT(*) AS count,
+             COALESCE(SUM(length(COALESCE(payload_text, ''))), 0) AS chars,
+             MAX(COALESCE(json_extract(metadata_json, '$.pinned_pressure_reported'), 0)) AS reported
+      FROM ${this.config.table}
+      WHERE ${this.config.ownerColumn} = ?
+        AND entry_kind = 'materialized'
+        AND COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) = 1
+    `).get(this.ownerId);
+    const pinnedChars = Number(stats?.chars || 0);
+    const thresholdChars = this.maxMaterializedChars * PINNED_PRESSURE_BUDGET_MULTIPLIER;
+    if (pinnedChars < thresholdChars || Number(stats?.reported || 0) === 1) return;
+
+    const marker = this.db.prepare(`
+      UPDATE ${this.config.table}
+      SET metadata_json = json_set(COALESCE(metadata_json, '{}'), '$.pinned_pressure_reported', 1)
+      WHERE id = (
+        SELECT id
+        FROM ${this.config.table}
+        WHERE ${this.config.ownerColumn} = ?
+          AND entry_kind = 'materialized'
+          AND COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) = 1
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+      )
+    `).run(this.ownerId);
+    if (marker.changes !== 1) return;
+    try {
+      logEvent({
+        work_item_id: this.workItemId,
+        job_id: this.jobId,
+        attempt_id: this.attemptId,
+        event_type: EVENT_TYPES.HASH_REF_PINNED_PRESSURE,
+        actor_type: EVENT_ACTORS.SYSTEM,
+        actor_id: "hash_ref_store",
+        message: `Pinned hash-ref recovery payloads reached ${pinnedChars} chars`,
+        event_json: {
+          owner_scope: this.ownerScope,
+          owner_id: this.ownerId,
+          pinned_rows: Number(stats?.count || 0),
+          pinned_chars: pinnedChars,
+          reporting_threshold_chars: thresholdChars,
+          materialized_budget_chars: this.maxMaterializedChars,
+        },
+      });
+    } catch {
+      // Cache pressure telemetry must never break hash-ref delivery.
     }
   }
 
@@ -646,6 +795,14 @@ export class HashRefStore {
       WHERE ${this.config.ownerColumn} = ? AND ref = ?
       LIMIT 1
     `).get(this.ownerId, normalized);
+  }
+
+  _selectDeserializedRef(ref) {
+    const row = this._selectByRef(ref);
+    if (row) return this._deserializeRow(row);
+    const alias = this._selectAliasByRef(ref);
+    if (!alias) return null;
+    return this._deserializeAliasRow(alias, this._selectByRef(alias.target_ref));
   }
 
   _deserializeRow(row) {

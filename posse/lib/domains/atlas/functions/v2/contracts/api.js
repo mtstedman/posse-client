@@ -227,6 +227,11 @@
 /**
  * @typedef {Object} ViewQuery
  *
+ * @property {() => { symbol_count: number, file_count: number, by_lang: Record<string, number>, by_kind: Record<string, number> }} [stats]
+ * @property {() => { total: number, internal: number, external: number, resolved: number, call_total: number, call_resolved: number, by_kind: Record<string, number>, by_source: Record<string, { total: number, resolved: number, external: number, unresolved: number }> }} [edgeStats]
+ * @property {() => { global_id: number, fan_in: number, fan_out: number }[]} [symbolMetrics]
+ * @property {() => { unresolved_edges: any[], import_edges: any[], symbol_names: string[] }} [edgeTaxonomyInput]
+ *
  * @property {(name: string, opts?: SymbolSearchOptions) => ViewSymbol[]} findSymbol
  *
  * @property {(global_id: number) => ViewSymbol | null} getSymbol
@@ -262,6 +267,11 @@
  *
  * @property {(content_hash: string) => boolean} [hasContentHash]
  *   Fast liveness check for a source blob represented in the current view.
+ * @property {(repo_rel_path: string) => string | null} [contentHashForPath]
+ * @property {(content_hash: string) => boolean} [hasSnapshotContentHash]
+ *
+ * @property {(opts?: { limit?: number, pathPrefix?: string }) => string[]} [indexedPaths]
+ *   Bounded, lexically ordered inventory of paths in the view snapshot.
  *
  * @property {(opts?: { limit?: number, pathPrefix?: string }) => ViewSymbol[]} allSymbols
  *   Enumerate every symbol in the view. Used by stats, overview, and

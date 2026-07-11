@@ -526,7 +526,7 @@ export class RunSession {
       try {
         const result = await repairMissingProviderDependenciesForRun({
           signal: bootAbortController.signal,
-          runNodeDependencySync: ({ signal } = {}) => runBootDependencySync({
+          runNodeDependencySync: ({ signal, forceNodeInstall = false } = {}) => runBootDependencySync({
             // Target the posse INSTALL root (where the provider modules resolve
             // their node_modules), node-only — no SCIP/python/composer/native
             // probes, and NOT dryRun: this is the repair the boot check skips.
@@ -539,6 +539,7 @@ export class RunSession {
             includeScip: false,
             includeTestTools: false,
             dryRun: false,
+            forceNodeInstall,
           }, {
             signal,
             onProgress: (event = {}) => {
@@ -1144,6 +1145,17 @@ export class RunSession {
           ? `ready (${result.promptVersion})`
           : "ready",
         isOk: (result = {}) => result.ok !== false,
+      }));
+    }
+
+    if (nativeBinariesForRun?.enabled?.("vector") === true
+        && typeof nativeBinariesForRun.ensureAvailable === "function") {
+      bootWarmups.push(bootWarmup("Vector binary", () => nativeBinariesForRun.ensureAvailable("vector"), {
+        start: "checking platform artifact",
+        done: (result = {}) => result.available
+          ? `${result.downloaded ? "downloaded" : "ready"} (${result.source || "cache"})`
+          : `unavailable (${result.reason || "unknown"})`,
+        isOk: () => true,
       }));
     }
 

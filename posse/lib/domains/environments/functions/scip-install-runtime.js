@@ -45,7 +45,15 @@ const SCIP_DEPENDENCY_INSTALL_ENV_ALLOWLIST = new Set([
   "tmpdir",
   "userprofile",
   "windir",
+  "cargo_home",
+  "goprivate",
+  "gonoproxy",
+  "gonosumdb",
+  "goproxy",
+  "gosumdb",
+  "rustup_home",
 ]);
+const SCIP_DEPENDENCY_INSTALL_ENV_PREFIXES = ["pip_"];
 
 /**
  * Narrow process-local cache: command PATH probes are stable within one
@@ -75,7 +83,11 @@ export function scipDependencyInstallEnv(sourceEnv = process.env) {
   const env = {};
   for (const [key, value] of Object.entries(sourceEnv || {})) {
     if (value == null) continue;
-    if (!SCIP_DEPENDENCY_INSTALL_ENV_ALLOWLIST.has(String(key).toLowerCase())) continue;
+    const normalizedKey = String(key).toLowerCase();
+    if (
+      !SCIP_DEPENDENCY_INSTALL_ENV_ALLOWLIST.has(normalizedKey)
+      && !SCIP_DEPENDENCY_INSTALL_ENV_PREFIXES.some((prefix) => normalizedKey.startsWith(prefix))
+    ) continue;
     env[key] = String(value);
   }
   return env;
@@ -247,7 +259,7 @@ export function npmCommand(platform = process.platform) {
 }
 
 export function composerBin(platform = process.platform) {
-  return platform === "win32" ? "composer.bat" : "composer";
+  return "composer";
 }
 
 export function commandPath(posseRoot, segments, command, platform = process.platform) {

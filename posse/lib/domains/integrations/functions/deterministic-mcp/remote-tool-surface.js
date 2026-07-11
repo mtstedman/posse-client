@@ -8,7 +8,6 @@
 // persistent owner.
 
 import { RemotePromptClient } from "../../../remote/classes/RemotePromptClient.js";
-import { resolvePosseKey } from "../../../remote/functions/client.js";
 import {
   getPosseRemoteTimeoutMs,
   getPosseRemoteUrl,
@@ -87,7 +86,7 @@ function remoteSurfaceSummary(surface = null) {
   };
 }
 
-function promptClientRuntimeSummary(promptClient, { apiKey = "", useNativeClient = true } = {}) {
+function promptClientRuntimeSummary(promptClient, { useNativeClient = true } = {}) {
   let nativeAuth = null;
   let nativeManagerAvailable = false;
   let nativeClientSelected = false;
@@ -95,7 +94,7 @@ function promptClientRuntimeSummary(promptClient, { apiKey = "", useNativeClient
   try { nativeManagerAvailable = promptClient?.nativeManager?.shouldUse?.("remote") === true; } catch { nativeManagerAvailable = false; }
   try { nativeClientSelected = promptClient?.shouldUseNativeClient?.() === true; } catch { nativeClientSelected = false; }
   return {
-    api_key_present: !!String(promptClient?.apiKey ?? apiKey ?? "").trim(),
+    authentication_present: promptClient?.hasAuthentication?.() === true,
     default_fetch: promptClient?.usesDefaultFetch === true,
     native_client_requested: useNativeClient !== false && promptClient?.useNativeClient !== false,
     native_auth_present: !!nativeAuth,
@@ -167,8 +166,10 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
       tools: {
         read: true,
         write: bootConfig.allowWrite === true,
-        shell: ["dev", "artificer", "assessor"].includes(String(bootConfig.role || "")),
+        shell: bootConfig.allowShell === true,
+        tests: bootConfig.allowTests === true,
         image_generation: bootConfig.allowImageGeneration === true,
+        project_db: bootConfig.projectDbCapability || (bootConfig.projectDbWrite === true ? "write" : "none"),
       },
       atlas: atlasCapabilities,
     },
@@ -199,13 +200,13 @@ export function extractRemoteMcpOAuthToken(surface = {}) {
 export async function resolveRemoteMcpToolSurfaceForBootConfig(bootConfig = {}, {
   client = null,
   fetchImpl = undefined,
-  apiKey = resolvePosseKey(),
+  authManager = null,
+  pulseTokens = null,
   useNativeClient = true,
 } = {}) {
   if (bootConfig.remoteCatalog?.enabled !== true) {
     logRemoteGatewayTelemetry("mcp.remote_gateway.call_skipped", bootConfig, {
       outcome: "disabled",
-      api_key_present: !!String(apiKey || "").trim(),
     });
     return null;
   }
@@ -213,7 +214,6 @@ export async function resolveRemoteMcpToolSurfaceForBootConfig(bootConfig = {}, 
   if (!baseUrl) {
     logRemoteGatewayTelemetry("mcp.remote_gateway.call_skipped", bootConfig, {
       outcome: "missing_base_url",
-      api_key_present: !!String(apiKey || "").trim(),
     });
     return null;
   }
@@ -222,11 +222,12 @@ export async function resolveRemoteMcpToolSurfaceForBootConfig(bootConfig = {}, 
     baseUrl,
     timeoutMs,
     fetchImpl,
-    apiKey,
+    ...(authManager ? { authManager } : {}),
+    ...(pulseTokens ? { pulseTokens } : {}),
     useNativeClient,
   });
   const request = buildRemoteToolSurfaceRequestFromBootConfig(bootConfig);
-  const runtime = promptClientRuntimeSummary(promptClient, { apiKey, useNativeClient });
+  const runtime = promptClientRuntimeSummary(promptClient, { useNativeClient });
   logRemoteGatewayTelemetry("mcp.remote_gateway.call_start", bootConfig, {
     outcome: "started",
     remote_catalog_origin: safeRemoteOrigin(baseUrl),

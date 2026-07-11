@@ -1,5 +1,6 @@
-import { execFileSync } from "child_process";
 import { createHash, createHmac, timingSafeEqual } from "crypto";
+
+export { resolvePosseKey } from "../../../shared/native/functions/key.js";
 
 export { RemotePromptClient } from "../classes/RemotePromptClient.js";
 
@@ -196,21 +197,6 @@ export async function readResponseTextWithLimit(response, {
   return text;
 }
 
-/**
- * Resolve the canonical Posse key (POSSE_KEY) used by remote prompt/catalog
- * calls and native method binaries. Reads the process env first, then the
- * Windows-persisted user/machine env.
- *
- * @param {NodeJS.ProcessEnv} [env]
- * @returns {string}
- */
-export function resolvePosseKey(env = process.env) {
-  const processValue = String(env?.POSSE_KEY || "").trim();
-  if (processValue) return processValue;
-  if (env !== process.env) return "";
-  return readWindowsPersistedEnv("POSSE_KEY");
-}
-
 export function assertSafeRemoteAuthUrl(baseUrl, apiKey, operation = "remote request") {
   if (!apiKey) return;
   let url;
@@ -235,25 +221,4 @@ function isLoopbackRemoteHostname(hostname = "") {
   if (!ipv4) return false;
   const octets = ipv4.slice(1).map((part) => Number.parseInt(part, 10));
   return octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255) && octets[0] === 127;
-}
-
-function readWindowsPersistedEnv(name) {
-  if (process.platform !== "win32") return "";
-  try {
-    const script = [
-      `$name = ${JSON.stringify(name)}`,
-      "$user = [Environment]::GetEnvironmentVariable($name, 'User')",
-      "if ($user) { $user; exit 0 }",
-      "$machine = [Environment]::GetEnvironmentVariable($name, 'Machine')",
-      "if ($machine) { $machine; exit 0 }",
-    ].join("; ");
-    return execFileSync("powershell.exe", ["-NoProfile", "-Command", script], {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2000,
-      windowsHide: true,
-    }).trim();
-  } catch {
-    return "";
-  }
 }

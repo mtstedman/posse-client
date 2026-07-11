@@ -3,10 +3,11 @@
   Posse + ATLAS Windows installer.
 
 .DESCRIPTION
-  Bootstraps a Windows host: helper CLI tools (via winget), Node.js 24+ (via
-  winget when missing), the Posse checkout, npm deps, Python venv + SCIP
-  language environments (delegated to `posse doctor` — the same engine Posse
-  uses at boot), account settings, and PATH/profile wiring.
+  Bootstraps a Windows host: helper CLI tools (via winget), an interactive
+  offer to install the MSVC C++ workload when missing, Node.js 24+ (via winget
+  when missing), the Posse checkout, npm deps, Python venv + SCIP language
+  environments (delegated to `posse doctor` — the same engine Posse uses at
+  boot), account settings, and PATH/profile wiring.
 
   Design rules (parity with the Linux installer):
     - Never dies mid-run without a summary: every step is fenced, failures are
@@ -55,7 +56,7 @@
 
 .PARAMETER SkipHostTools
   Don't install helper CLI tools (rg, tesseract, ImageMagick, ffmpeg, Python,
-  PHP). Missing tools are still reported.
+  PHP) or offer to install C++ Build Tools. Missing tools are still reported.
 
 .PARAMETER NoInstallNode
   Don't auto-install Node via winget when Node 24+ is missing.
@@ -301,9 +302,7 @@ function Resolve-ScipLanguageSelection {
     return $true
   }
 
-  $inputRedirected = $false
-  try { $inputRedirected = [Console]::IsInputRedirected } catch { $inputRedirected = $false }
-  if ($inputRedirected) {
+  if (-not (Test-InteractiveInput)) {
     $script:ScipLanguageStepNote = "selected $script:PosseScipLanguages (default; no interactive terminal)"
     Write-Info "no interactive terminal for SCIP language selection; using default: $script:PosseScipLanguages"
     return $true
@@ -371,11 +370,12 @@ function Step-ScipLanguages {
 }
 
 # --- step engine -----------------------------------------------------------------
-$script:StepKeys = @("languages", "preflight", "packages", "node", "checkout", "composer", "npm", "shell", "seed", "doctor", "admin", "validate", "keys", "smoke")
+$script:StepKeys = @("languages", "preflight", "packages", "buildtools", "node", "checkout", "composer", "npm", "shell", "seed", "doctor", "admin", "validate", "keys", "smoke")
 $script:StepTitles = @{
   languages = "SCIP language selection"
   preflight = "Preflight checks"
   packages = "System packages"
+  buildtools = "C++ Build Tools"
   node     = "Node.js runtime"
   checkout = "Posse checkout"
   composer = "Composer (SCIP PHP)"
@@ -394,6 +394,7 @@ foreach ($k in $script:StepKeys) { $script:StepStatus[$k] = "pending"; $script:S
 $script:StepIndex = 0
 $script:CurrentStep = ""
 $script:CriticalFailed = $false
+$script:InstallFailed = $false
 $script:SummaryPrinted = $false
 
 function Step-Begin {
@@ -410,6 +411,7 @@ function Step-End {
   param([string]$Status, [string]$Note = "")
   $script:StepStatus[$script:CurrentStep] = $Status
   $script:StepNote[$script:CurrentStep] = $Note
+  if ($Status -eq "failed") { $script:InstallFailed = $true }
   Write-LogOnly ("----- {0}: {1}{2}" -f $script:CurrentStep, $Status, $(if ($Note) { " ($Note)" } else { "" }))
   switch -Regex ($Status) {
     "^(ok|done)$"        { Write-Host ("    {0}{1}{2} {3}" -f $script:GREEN, $script:GlyphOk, $script:R, $(if ($Note) { $Note } else { "done" })) }
@@ -426,6 +428,30 @@ function Step-FailCritical {
   Step-End -Status "failed" -Note $Note
 }
 
+function Invoke-InstallerStep {
+  param(
+    [string]$Key,
+    [scriptblock]$Body,
+    [switch]$Critical
+  )
+  try {
+    & $Body
+  }
+  catch {
+    $message = ($_.Exception.Message -split "`r?`n" | Select-Object -First 1)
+    Write-LogOnly ("[error] {0}: {1}" -f $Key, $_.Exception.ToString())
+    Write-Warn2 ("{0} failed: {1}" -f $script:StepTitles[$Key], $message)
+    if ($script:StepStatus[$Key] -eq "pending") {
+      $script:CurrentStep = $Key
+      Step-End "failed" $message
+    }
+    else {
+      $script:InstallFailed = $true
+    }
+    if ($Critical) { $script:CriticalFailed = $true }
+  }
+}
+
 function Block-PendingSteps {
   param([string]$Note = "blocked by an earlier failure")
   foreach ($key in $script:StepKeys) {
@@ -436,27 +462,50 @@ function Block-PendingSteps {
   }
 }
 
-function Quote-Arg {
+function Quote-NativeArg {
   param([string]$Value)
-  if ($Value -match '[\s"]') { return '"' + ($Value -replace '"', '\"') + '"' }
   if ($Value -eq "") { return '""' }
-  return $Value
+  if ($Value -notmatch '[\s"]') { return $Value }
+  $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+  $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+  return '"' + $escaped + '"'
 }
 
 function Format-CommandLine {
   param([string[]]$Parts)
-  return (($Parts | ForEach-Object { Quote-Arg $_ }) -join " ")
+  return (($Parts | ForEach-Object { Quote-NativeArg $_ }) -join " ")
 }
 
-# Runs a native command line via cmd.exe with output appended to the log file.
-# Never throws on native stderr (the PS 5.1 NativeCommandError trap); shows a
-# spinner with elapsed time on capable terminals; prints the output tail on
-# failure. Returns the exit code.
+function Stop-InstallerProcessTree {
+  param([System.Diagnostics.Process]$Process)
+  if (-not $Process) { return }
+  try { if ($Process.HasExited) { return } } catch { return }
+  $stopped = $false
+  try {
+    $killInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $killInfo.FileName = "taskkill.exe"
+    $killInfo.Arguments = "/pid $($Process.Id) /t /f"
+    $killInfo.UseShellExecute = $false
+    $killInfo.CreateNoWindow = $true
+    $kill = [System.Diagnostics.Process]::Start($killInfo)
+    if ($kill) {
+      [void]$kill.WaitForExit(5000)
+      $stopped = $kill.HasExited -and $kill.ExitCode -eq 0
+    }
+  }
+  catch {}
+  if (-not $stopped) { try { $Process.Kill() } catch {} }
+}
+
+# Runs native executables directly so cmd.exe cannot reinterpret paths, smoke
+# queries, or other arguments. Batch launchers such as npm.cmd still use a
+# minimal cmd.exe wrapper, with output captured through redirected streams.
 function Invoke-Logged {
   param(
     [string]$Description,
     [string[]]$Command,
-    [string]$WorkingDirectory = ""
+    [string]$WorkingDirectory = "",
+    [int]$TimeoutSeconds = 0
   )
   $cmdLine = Format-CommandLine $Command
   Write-LogOnly ""
@@ -467,39 +516,65 @@ function Invoke-Logged {
     return 0
   }
 
-  $chunk = [System.IO.Path]::GetTempFileName()
   $started = Get-Date
 
+  $commandInfo = Get-Command $Command[0] -ErrorAction SilentlyContinue
+  $executable = if ($commandInfo -and $commandInfo.Source) { $commandInfo.Source } else { $Command[0] }
+  $arguments = @($Command | Select-Object -Skip 1)
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $env:ComSpec
-  $psi.Arguments = '/d /s /c "' + $cmdLine + ' >> "' + $chunk + '" 2>&1"'
-  $psi.UseShellExecute = $false
-  $psi.CreateNoWindow = $true
-  if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
-  $proc = [System.Diagnostics.Process]::Start($psi)
-
-  if ($script:UiSpinner) {
-    $i = 0
-    $n = $script:SpinnerFrames.Count
-    while (-not $proc.HasExited) {
-      $elapsed = [int]((Get-Date) - $started).TotalSeconds
-      Write-Host ("`r$Esc[2K    {0}{1}{2} {3} {4}({5}){6}" -f $script:CYAN, $script:SpinnerFrames[$i % $n], $script:R, $Description, $script:DIM, (Format-Duration $elapsed), $script:R) -NoNewline
-      $i++
-      Start-Sleep -Milliseconds 120
-    }
-    Write-Host "`r$Esc[2K" -NoNewline
+  if ($executable -match '\.(cmd|bat)$') {
+    $batchParts = @($executable) + $arguments
+    $batchLine = ($batchParts | ForEach-Object { '"' + ($_ -replace '"', '""') + '"' }) -join " "
+    $psi.FileName = $env:ComSpec
+    $psi.Arguments = '/d /s /c "' + $batchLine + '"'
   }
   else {
-    Write-Host ("    {0}{1}{2} {3}" -f $script:DIM, $script:GlyphDot, $script:R, $Description)
-    $proc.WaitForExit()
+    $psi.FileName = $executable
+    $psi.Arguments = ($arguments | ForEach-Object { Quote-NativeArg $_ }) -join " "
+  }
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+  $proc = [System.Diagnostics.Process]::Start($psi)
+  $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+  $stderrTask = $proc.StandardError.ReadToEndAsync()
+  $timedOut = $false
+  $i = 0
+  $n = $script:SpinnerFrames.Count
+  $plainShown = $false
+
+  try {
+    while (-not $proc.HasExited) {
+      $elapsed = [int]((Get-Date) - $started).TotalSeconds
+      if ($TimeoutSeconds -gt 0 -and $elapsed -ge $TimeoutSeconds) {
+        $timedOut = $true
+        Stop-InstallerProcessTree $proc
+        break
+      }
+      if ($script:UiSpinner) {
+        Write-Host ("`r$Esc[2K    {0}{1}{2} {3} {4}({5}){6}" -f $script:CYAN, $script:SpinnerFrames[$i % $n], $script:R, $Description, $script:DIM, (Format-Duration $elapsed), $script:R) -NoNewline
+        $i++
+      }
+      elseif (-not $plainShown) {
+        Write-Host ("    {0}{1}{2} {3}" -f $script:DIM, $script:GlyphDot, $script:R, $Description)
+        $plainShown = $true
+      }
+      Start-Sleep -Milliseconds 120
+    }
+  }
+  finally {
+    if (-not $proc.HasExited) { Stop-InstallerProcessTree $proc }
   }
 
   $proc.WaitForExit()
-  $rc = $proc.ExitCode
+  if ($script:UiSpinner) { Write-Host "`r$Esc[2K" -NoNewline }
+  $rc = if ($timedOut) { 124 } else { $proc.ExitCode }
   $elapsedTotal = [int]((Get-Date) - $started).TotalSeconds
 
-  $chunkContent = ""
-  try { $chunkContent = Get-Content -Path $chunk -Raw -ErrorAction SilentlyContinue } catch {}
+  $chunkContent = (($stdoutTask.Result, $stderrTask.Result) | Where-Object { $_ }) -join "`r`n"
+  if ($timedOut) { $chunkContent = ($chunkContent + "`r`ntimed out after ${TimeoutSeconds}s").Trim() }
   if ($chunkContent) { Write-LogOnly $chunkContent.TrimEnd() }
 
   if ($rc -eq 0) {
@@ -513,7 +588,6 @@ function Invoke-Logged {
       Write-Host ("    {0}| full log: {1}{2}" -f $script:DIM, $script:LogFile, $script:R)
     }
   }
-  Remove-Item $chunk -Force -ErrorAction SilentlyContinue
   return $rc
 }
 
@@ -545,7 +619,7 @@ function Print-Summary {
   Write-Host ""
   Write-Host ("  {0}Log:{1} {2}" -f $script:DIM, $script:R, $script:LogFile)
   Write-Host ""
-  if ($script:CriticalFailed) {
+  if ($script:InstallFailed) {
     Write-Host ("  {0}{1}Install did not complete.{2} Fix the failed step above and re-run - completed steps are skipped on re-runs." -f $script:RED, $script:BOLD, $script:R)
   }
   else {
@@ -562,6 +636,43 @@ function Print-Summary {
 # =============================================================================
 
 function Test-Cmd { param([string]$Name) return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue) }
+
+function Test-InteractiveInput {
+  if ([Environment]::GetCommandLineArgs() -contains "-NonInteractive") { return $false }
+  try { return -not [Console]::IsInputRedirected } catch { return $false }
+}
+
+function Get-PersistentExecutionPolicy {
+  try {
+    $policies = @(Get-ExecutionPolicy -List)
+    foreach ($scope in @("MachinePolicy", "UserPolicy", "CurrentUser", "LocalMachine")) {
+      $entry = $policies | Where-Object { $_.Scope -eq $scope } | Select-Object -First 1
+      if ($entry -and $entry.ExecutionPolicy -ne "Undefined") { return [string]$entry.ExecutionPolicy }
+    }
+  }
+  catch {}
+  return "Restricted"
+}
+
+function Get-UserPathRaw {
+  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
+  if (-not $key) { return "" }
+  try {
+    return [string]$key.GetValue(
+      "Path",
+      "",
+      [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+    )
+  }
+  finally { $key.Dispose() }
+}
+
+function Set-UserPathRaw {
+  param([string]$Value)
+  $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment")
+  try { $key.SetValue("Path", $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString) }
+  finally { $key.Dispose() }
+}
 
 function Get-NodeMajor {
   $node = Get-Command node -ErrorAction SilentlyContinue
@@ -633,6 +744,33 @@ function Test-ImageMagick {
   return (Test-Cmd "magick") -or (Test-Cmd "convert")
 }
 
+function Get-VsWherePath {
+  $command = Get-Command "vswhere.exe" -ErrorAction SilentlyContinue
+  if ($command -and $command.Source) { return $command.Source }
+
+  $installerRoot = ${env:ProgramFiles(x86)}
+  if (-not $installerRoot) { return "" }
+  $candidate = Join-Path $installerRoot "Microsoft Visual Studio\Installer\vswhere.exe"
+  if (Test-Path $candidate) { return $candidate }
+  return ""
+}
+
+function Get-VsCppInstallationPath {
+  if (Test-Cmd "cl.exe") { return (Get-Command "cl.exe").Source }
+
+  $vswhere = Get-VsWherePath
+  if (-not $vswhere) { return "" }
+  try {
+    $installations = @(& $vswhere -products * -requires Microsoft.VisualStudio.Workload.VCTools -property installationPath 2>$null)
+    return [string]($installations | Where-Object { $_ -and $_.Trim() } | Select-Object -First 1)
+  }
+  catch { return "" }
+}
+
+function Test-VsCppBuildTools {
+  return -not [string]::IsNullOrWhiteSpace((Get-VsCppInstallationPath))
+}
+
 # =============================================================================
 # steps
 # =============================================================================
@@ -641,6 +779,7 @@ function Step-Packages {
   Step-Begin "packages"
 
   $tools = @(
+    [PSCustomObject]@{ Label = "Git";             Test = { Test-Cmd "git" };       WingetIds = @("Git.Git"); Reason = "required Posse checkout and worktree lifecycle" },
     [PSCustomObject]@{ Label = "ripgrep";       Test = { Test-Cmd "rg" };        WingetIds = @("BurntSushi.ripgrep.MSVC"); Reason = "deterministic search" },
     [PSCustomObject]@{ Label = "Tesseract OCR"; Test = { Test-Cmd "tesseract" }; WingetIds = @("UB-Mannheim.TesseractOCR"); Reason = "image OCR extraction" },
     [PSCustomObject]@{ Label = "ImageMagick";   Test = { Test-ImageMagick };     WingetIds = @("ImageMagick.ImageMagick", "ImageMagick.Q16-HDRI", "ImageMagick.Q16"); Reason = "image conversion" },
@@ -695,9 +834,10 @@ function Step-Packages {
       if ($dir -and (Test-Path (Join-Path $dir "tesseract.exe"))) {
         $env:Path = "$dir;$env:Path"
         if (-not $NoPersistEnv) {
-          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          $userPath = Get-UserPathRaw
           if (-not (($userPath -split ";") -contains $dir)) {
-            [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(";") + ";" + $dir), "User")
+            $newUserPath = if ($userPath) { $userPath.TrimEnd(";") + ";" + $dir } else { $dir }
+            Set-UserPathRaw $newUserPath
           }
         }
         Write-Info "added Tesseract to PATH: $dir"
@@ -718,6 +858,78 @@ function Step-Packages {
     Write-Warn2 ("could not install: " + ($failed -join ", ") + " (Posse degrades gracefully; related helpers stay disabled)")
     Step-End "partial" ("installed with gaps: " + ($failed -join ", "))
   }
+}
+
+function Step-BuildTools {
+  Step-Begin "buildtools"
+
+  $existing = Get-VsCppInstallationPath
+  if ($existing) {
+    Step-End "ok" ("MSVC C++ workload detected: {0}" -f $existing)
+    return
+  }
+
+  Write-Info "the MSVC C++ workload is not installed; npm may need it to compile native modules"
+
+  if ($SkipHostTools) {
+    Step-End "skipped" "-SkipHostTools; C++ workload not installed"
+    return
+  }
+  if ($DryRun) {
+    Step-End "dry-run" "would ask whether to install Visual Studio Build Tools with the C++ workload"
+    return
+  }
+  if (-not (Test-InteractiveInput)) {
+    Write-Warn2 "C++ Build Tools are missing and no interactive input is available; skipping them. Re-run interactively if npm reports node-gyp/MSBuild errors."
+    Step-End "skipped" "no interactive input; C++ workload not installed"
+    return
+  }
+  if (-not (Test-Cmd "winget")) {
+    Write-Warn2 "C++ Build Tools are missing and winget is unavailable. Install the 'Desktop development with C++' workload from Visual Studio Installer if npm reports node-gyp/MSBuild errors."
+    Step-End "partial" "winget unavailable; C++ workload not installed"
+    return
+  }
+
+  Write-Host ""
+  Write-Host ("  {0}Optional native build support{1}" -f $script:BOLD, $script:R)
+  Write-Host "    Some npm dependencies may need Microsoft's C++ compiler and Windows SDK."
+  Write-Host "    Visual Studio Build Tools requires several GB, may request administrator approval,"
+  Write-Host "    and can require a reboot. Posse can install the required C++ workload for you."
+
+  $install = $false
+  while ($true) {
+    try { $answer = Read-Host "      Would you like Posse to install C++ Build Tools now? [y/N]" }
+    catch {
+      Write-Warn2 "the Build Tools prompt could not read input; continuing without the C++ workload"
+      Step-End "skipped" "prompt unavailable; C++ workload not installed"
+      return
+    }
+    if (-not $answer -or $answer.Trim() -match '^(n|no)$') { break }
+    if ($answer.Trim() -match '^(y|yes)$') { $install = $true; break }
+    Write-Host ("    {0}{1}{2} Please answer yes or no (Enter means no)." -f $script:YELLOW, $script:GlyphWarn, $script:R)
+  }
+
+  if (-not $install) {
+    Write-Warn2 "C++ Build Tools installation was declined; re-run this installer if npm reports node-gyp/MSBuild errors"
+    Step-End "skipped" "user declined C++ workload installation"
+    return
+  }
+
+  Write-Info "installing Visual Studio Build Tools 2022 with the Desktop development with C++ workload"
+  $rc = Invoke-Logged -Description "install Visual Studio Build Tools (C++ workload)" -Command @(
+    "winget", "install", "--id", "Microsoft.VisualStudio.2022.BuildTools", "--exact", "--source", "winget",
+    "--accept-package-agreements", "--accept-source-agreements",
+    "--override", "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+  )
+
+  if (Test-VsCppBuildTools) {
+    if ($rc -ne 0) { Write-Warn2 "winget returned exit $rc, but the MSVC C++ workload is now detected" }
+    Step-End "ok" "MSVC C++ workload installed"
+    return
+  }
+
+  Write-Warn2 "Visual Studio Build Tools did not finish successfully. You can continue, but native npm modules may fail to compile; see the installer log."
+  Step-End "partial" ("C++ workload still missing after winget exit {0}" -f $rc)
 }
 
 function Step-Node {
@@ -789,7 +1001,7 @@ function Step-Checkout {
       Step-End "ok" ("existing checkout: {0}" -f $script:PosseDirResolved)
     }
     else {
-      Step-FailCritical ("{0} exists but has no orchestrator.js (not a Posse repo root?)" -f $script:PosseDirResolved)
+      Step-FailCritical ("{0} exists but has no orchestrator.js (move or remove the partial directory, then re-run)" -f $script:PosseDirResolved)
     }
     return
   }
@@ -804,12 +1016,19 @@ function Step-Checkout {
   }
   $parent = Split-Path $script:PosseDirResolved -Parent
   if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-  $rc = Invoke-Logged -Description ("clone {0}" -f $PosseRepoUrl) -Command @("git", "clone", $PosseRepoUrl, $script:PosseDirResolved)
-  if ($rc -eq 0 -and (Test-Path (Join-Path $script:PosseDirResolved "orchestrator.js"))) {
-    Step-End "ok" ("cloned into {0}" -f $script:PosseDirResolved)
+  $cloneDir = $script:PosseDirResolved + ".installing-" + [Guid]::NewGuid().ToString("N")
+  try {
+    $rc = Invoke-Logged -Description ("clone {0}" -f $PosseRepoUrl) -Command @("git", "-c", "core.longpaths=true", "clone", $PosseRepoUrl, $cloneDir)
+    if ($rc -eq 0 -and (Test-Path (Join-Path $cloneDir "orchestrator.js"))) {
+      Move-Item -LiteralPath $cloneDir -Destination $script:PosseDirResolved
+      Step-End "ok" ("cloned into {0}" -f $script:PosseDirResolved)
+    }
+    else {
+      Step-FailCritical "git clone failed (or orchestrator.js missing after clone); see log"
+    }
   }
-  else {
-    Step-FailCritical "git clone failed (or orchestrator.js missing after clone); see log"
+  finally {
+    if (Test-Path $cloneDir) { Remove-Item -LiteralPath $cloneDir -Recurse -Force -ErrorAction SilentlyContinue }
   }
 }
 
@@ -835,8 +1054,9 @@ function Step-Composer {
   try {
     if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
     Write-Info "downloading Composer installer (signature-verified)"
-    $expected = (Invoke-RestMethod -Uri "https://composer.github.io/installer.sig").Trim()
-    Invoke-WebRequest -Uri "https://getcomposer.org/installer" -OutFile $setupPath -UseBasicParsing
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $expected = (Invoke-RestMethod -Uri "https://composer.github.io/installer.sig" -TimeoutSec 30).Trim()
+    Invoke-WebRequest -Uri "https://getcomposer.org/installer" -OutFile $setupPath -UseBasicParsing -TimeoutSec 120
     $env:POSSE_COMPOSER_SETUP = $setupPath
     $actual = ""
     try { $actual = (& $php.Source -r 'echo hash_file("sha384", getenv("POSSE_COMPOSER_SETUP"));') } catch {}
@@ -883,7 +1103,7 @@ function Step-Npm {
   $rc = Invoke-Logged -Description "npm install (retry)" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Step-End "ok" "npm dependencies installed on retry"; return }
 
-  Step-FailCritical "npm install failed twice - if the log shows node-gyp/MSBuild errors, install 'Visual Studio Build Tools' (C++ workload) and re-run"
+  Step-FailCritical "npm install failed twice - if the log shows node-gyp/MSBuild errors, re-run this installer and accept the C++ Build Tools prompt"
 }
 
 function Step-ShellWiring {
@@ -913,25 +1133,25 @@ function Step-ShellWiring {
   $cmdShim = Join-Path $binDir "posse.cmd"
   $psShim = Join-Path $binDir "posse.ps1"
   $orchestrator = Join-Path $script:PosseDirResolved "orchestrator.js"
-  Set-Content -Path $cmdShim -Value ("@echo off`r`n""{0}"" ""{1}"" %*" -f $script:NodeBin, $orchestrator) -Encoding ASCII
-  $psLines = @(
-    ('$node = ' + "'" + ($script:NodeBin -replace "'", "''") + "'"),
-    ('$entry = ' + "'" + ($orchestrator -replace "'", "''") + "'"),
-    '& $node $entry @args',
-    'exit $LASTEXITCODE'
-  ) -join "`r`n"
-  Set-Content -Path $psShim -Value $psLines -Encoding UTF8
+  $cmdContents = ("@echo off`r`n""{0}"" ""{1}"" %*`r`n" -f $script:NodeBin, $orchestrator)
+  [System.IO.File]::WriteAllText($cmdShim, $cmdContents, (New-Object System.Text.UTF8Encoding($false)))
+  # A same-name .ps1 takes precedence over posse.cmd in PowerShell and is
+  # unusable under the default Restricted execution policy. Remove the old
+  # installer-generated shim; the UTF-8 posse.cmd is policy-independent.
+  if (Test-Path $psShim) { Remove-Item $psShim -Force }
 
   # Persist ~\.local\bin on the user PATH and pick it up in this session.
-  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  $userPath = Get-UserPathRaw
   $parts = @($userPath -split ";" | Where-Object { $_ })
   if (-not ($parts | Where-Object { $_ -ieq $binDir })) {
     $newUserPath = if ($userPath) { $userPath.TrimEnd(";") + ";" + $binDir } else { $binDir }
-    if (-not $NoPersistEnv) { [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User") }
+    if (-not $NoPersistEnv) { Set-UserPathRaw $newUserPath }
   }
   if (-not (($env:Path -split ";") | Where-Object { $_ -ieq $binDir })) { $env:Path = "$binDir;$env:Path" }
 
-  if (-not $NoPersistEnv -and $PROFILE) {
+  $executionPolicy = Get-PersistentExecutionPolicy
+  $profileAllowed = $executionPolicy -notin @("Restricted", "AllSigned")
+  if (-not $NoPersistEnv -and $PROFILE -and $profileAllowed) {
     $profileDir = Split-Path $PROFILE -Parent
     if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
     if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
@@ -941,8 +1161,11 @@ function Step-ShellWiring {
       Write-Info "updated $PROFILE"
     }
   }
+  elseif (-not $NoPersistEnv -and -not $profileAllowed) {
+    Write-Warn2 ("PowerShell execution policy is {0}; skipped profile script wiring. posse.cmd remains available through the user PATH." -f $executionPolicy)
+  }
 
-  $note = "env file + posse shims installed"
+  $note = "env file + UTF-8 posse.cmd shim installed"
   if (-not (Test-Cmd "posse")) { $note += " (open a new terminal to pick up PATH)" }
   Step-End "ok" $note
 }
@@ -1073,7 +1296,7 @@ function Step-Validate {
     Step-End "dry-run" "would run node orchestrator.js status"
     return
   }
-  $rc = Invoke-Logged -Description "boot posse (orchestrator.js status)" -Command @($script:NodeBin, "orchestrator.js", "status") -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description "boot posse (orchestrator.js status)" -Command @($script:NodeBin, "orchestrator.js", "status") -WorkingDirectory $script:PosseDirResolved -TimeoutSeconds 300
   if ($rc -eq 0) { Step-End "ok" "posse boots cleanly" }
   else {
     Write-Warn2 ("posse failed to boot - run 'posse status' in {0} to see the error" -f $script:PosseDirResolved)
@@ -1105,12 +1328,18 @@ function Prompt-ForKey {
 function Step-Keys {
   Step-Begin "keys"
   $providersFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "providers.env.ps1"
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
   if (-not $ConfigureKeys) {
     Step-End "skipped" "pass -ConfigureKeys to set provider API keys interactively"
     return
   }
   if ($DryRun) {
     Step-End "dry-run" "would prompt for POSSE_KEY / OPENAI_API_KEY / XAI_API_KEY / CODEX_API_KEY"
+    return
+  }
+  if (-not (Test-InteractiveInput)) {
+    Write-Warn2 "-ConfigureKeys needs an interactive terminal; skipped"
+    Step-End "skipped" "no interactive terminal"
     return
   }
 
@@ -1273,32 +1502,42 @@ try {
   }
   Write-Host ("  {0}Log: {1}{2}" -f $script:DIM, $script:LogFile, $script:R)
 
-  if (-not (Step-ScipLanguages)) {
-    Block-PendingSteps "language selection failed"
-  }
+  Invoke-InstallerStep "languages" {
+    if (-not (Step-ScipLanguages)) { Block-PendingSteps "language selection failed" }
+  } -Critical
 
-  if (-not $script:CriticalFailed -and -not (Step-Preflight)) {
-    Block-PendingSteps "preflight failed"
+  if (-not $script:CriticalFailed) {
+    Invoke-InstallerStep "preflight" {
+      if (-not (Step-Preflight)) { Block-PendingSteps "preflight failed" }
+    } -Critical
   }
 
   if (-not $script:CriticalFailed) {
-    Step-Packages
-    Step-Node
-    Step-Checkout
-    Step-Composer
-    Step-Npm
-    Step-ShellWiring
-    Step-SeedSettings
-    Step-Doctor
-    Step-AdminInit
-    Step-Validate
-    Step-Keys
-    Step-Smoke
+    Invoke-InstallerStep "packages" { Step-Packages }
+    Invoke-InstallerStep "buildtools" { Step-BuildTools }
+    Invoke-InstallerStep "node" { Step-Node } -Critical
+    Invoke-InstallerStep "checkout" { Step-Checkout } -Critical
+    Invoke-InstallerStep "composer" { Step-Composer }
+    Invoke-InstallerStep "npm" { Step-Npm } -Critical
+    Invoke-InstallerStep "shell" { Step-ShellWiring } -Critical
+    Invoke-InstallerStep "seed" { Step-SeedSettings }
+    Invoke-InstallerStep "doctor" { Step-Doctor }
+    Invoke-InstallerStep "admin" { Step-AdminInit }
+    Invoke-InstallerStep "validate" { Step-Validate }
+    Invoke-InstallerStep "keys" { Step-Keys }
+    Invoke-InstallerStep "smoke" { Step-Smoke }
   }
+}
+catch {
+  $script:InstallFailed = $true
+  $script:CriticalFailed = $true
+  Write-LogOnly ("[fatal] " + $_.Exception.ToString())
+  Write-Warn2 ("installer failed: " + $_.Exception.Message)
+  Block-PendingSteps "installer aborted after an unexpected error"
 }
 finally {
   Print-Summary
 }
 
-if ($script:CriticalFailed) { exit 1 }
+if ($script:InstallFailed) { exit 1 }
 exit 0

@@ -137,6 +137,12 @@ const GIT_CONFIG_OPTIONS_WITH_VALUE = new Set([
   "--file",
   "--type",
 ]);
+const GIT_READ_ONLY_UNSAFE_OPTIONS = new Set([
+  "--ext-diff",
+  "--filters",
+  "--output",
+  "--textconv",
+]);
 
 function normalizeGitArgs(cmdOrArgs) {
   if (Array.isArray(cmdOrArgs)) return cmdOrArgs.map((arg) => String(arg));
@@ -261,8 +267,12 @@ function isReadOnlySubcommandArgs(cmd, args = []) {
 }
 
 export function isGitReadOnlyArgs(args = []) {
+  if (args.some((arg) => arg === "-p" || arg === "--paginate")) return false;
   const command = gitCommandArgs(args);
   const cmd = String(command[0] || "");
+  if (command.slice(1).some((arg) => GIT_READ_ONLY_UNSAFE_OPTIONS.has(optionName(arg)))) {
+    return false;
+  }
   let result = false;
   if (cmd === "branch") result = isReadOnlyBranchArgs(command.slice(1));
   else if (cmd === "config") result = isReadOnlyConfigArgs(command.slice(1));

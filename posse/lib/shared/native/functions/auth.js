@@ -1,8 +1,9 @@
 // @ts-check
 //
-// Shared auth envelope builder for key-gated native Posse binaries. The Rust
-// binaries receive runtime tuning as JSON, so this helper is the one place that
-// translates account settings into the heartbeat config object.
+// Trusted auth policy for key-gated native helpers and Node pulse-token
+// exchange. Production uses one compiled origin, audience, and verification
+// pin set. Alternate trust roots are accepted only through an explicit policy
+// object or the isolated node-test bootstrap.
 
 import { getSetting } from "../../../domains/queue/functions/index.js";
 import { POSSE_REMOTE_DEFAULT_URL } from "../../../domains/remote/functions/mode.js";
@@ -14,12 +15,8 @@ export const NATIVE_HEARTBEAT_SETTING_KEYS = Object.freeze({
   publicKeySha256: "posse_native_heartbeat_jwt_public_key_sha256",
   audience: "posse_native_heartbeat_jwt_audience",
   timeoutSeconds: "posse_native_heartbeat_timeout_seconds",
-  remoteUrl: "posse_remote_url",
 });
 
-// Environment fallbacks for the heartbeat config, used when the account db has
-// no stored value. This lets a process supply native auth without a configured
-// account db (e.g. the test runner, or short-lived CLI invocations).
 export const NATIVE_HEARTBEAT_ENV_KEYS = Object.freeze({
   heartbeatUrl: "POSSE_NATIVE_HEARTBEAT_URL",
   publicKeyUrl: "POSSE_NATIVE_HEARTBEAT_PUBLIC_KEY_URL",
@@ -27,20 +24,22 @@ export const NATIVE_HEARTBEAT_ENV_KEYS = Object.freeze({
   publicKeySha256: "POSSE_NATIVE_HEARTBEAT_JWT_PUBLIC_KEY_SHA256",
   audience: "POSSE_NATIVE_HEARTBEAT_JWT_AUDIENCE",
   timeoutSeconds: "POSSE_NATIVE_HEARTBEAT_TIMEOUT_SECONDS",
-  remoteUrl: "POSSE_REMOTE_URL",
 });
 
-function settingOrEnv(field, getSettingFn) {
-  const fromSetting = getSettingText(NATIVE_HEARTBEAT_SETTING_KEYS[field], { getSettingFn });
-  if (fromSetting) return fromSetting;
-  return String(process.env[NATIVE_HEARTBEAT_ENV_KEYS[field]] || "").trim();
-}
+export const DEFAULT_HEARTBEAT_PUBLIC_KEY = "k2snf5sbudyEzeSfggF5ahnjqOZwN+GRlB/UIYh8sjA=";
+export const DEFAULT_HEARTBEAT_PUBLIC_KEY_SHA256 = "f8d47974dfb948147da25b58c88d9b7f7c8c26d010bbd717e1bd05a69b2d45e2";
+export const DEFAULT_HEARTBEAT_AUDIENCE = "posse-native-binaries";
 
-/**
- * @param {string} key
- * @param {{ getSettingFn?: (key: string) => unknown }} [opts]
- * @returns {string}
- */
+const ENVELOPE_FIELDS = Object.freeze([
+  "heartbeatUrl",
+  "heartbeatPublicKeyUrl",
+  "heartbeatJwtPublicKey",
+  "heartbeatJwtPublicKeySha256",
+  "heartbeatJwtAudience",
+  "heartbeatTimeoutSeconds",
+]);
+
+/** @param {string} key @param {{ getSettingFn?: (key: string) => unknown }} [opts] */
 export function getSettingText(key, { getSettingFn = getSetting } = {}) {
   try {
     return String(getSettingFn(key) || "").trim();
@@ -53,21 +52,7 @@ function urlBase(value) {
   return String(value || "").trim().replace(/\/+$/, "");
 }
 
-// Compiled trust root for the DEFAULT remote's heartbeat signer: the PUBLIC
-// verification key + its sha256 + the JWT audience served by
-// POSSE_REMOTE_DEFAULT_URL/v1/native/public-key. These are public (verification
-// only — never the signing key, which never leaves the remote), pinned here so
-// the key-gated binaries authenticate out of the box with zero configuration.
-// Overridable via settings/env (custom remote, or a rotated pin before a release
-// ships the new value). Only applied when pointed at the default remote.
-const DEFAULT_HEARTBEAT_PUBLIC_KEY = "k2snf5sbudyEzeSfggF5ahnjqOZwN+GRlB/UIYh8sjA=";
-const DEFAULT_HEARTBEAT_PUBLIC_KEY_SHA256 = "f8d47974dfb948147da25b58c88d9b7f7c8c26d010bbd717e1bd05a69b2d45e2";
-const DEFAULT_HEARTBEAT_AUDIENCE = "posse-native-binaries";
-
-/**
- * @param {{ remoteUrl?: string, defaultRemoteUrl?: string }} [opts]
- * @returns {string}
- */
+/** @param {{ remoteUrl?: string, defaultRemoteUrl?: string }} [opts] */
 export function deriveNativeHeartbeatUrl({
   remoteUrl = "",
   defaultRemoteUrl = POSSE_REMOTE_DEFAULT_URL,
@@ -76,10 +61,7 @@ export function deriveNativeHeartbeatUrl({
   return base ? `${base}/v1/native/heartbeat` : "";
 }
 
-/**
- * @param {{ remoteUrl?: string, defaultRemoteUrl?: string }} [opts]
- * @returns {string}
- */
+/** @param {{ remoteUrl?: string, defaultRemoteUrl?: string }} [opts] */
 export function deriveNativeHeartbeatPublicKeyUrl({
   remoteUrl = "",
   defaultRemoteUrl = POSSE_REMOTE_DEFAULT_URL,
@@ -88,43 +70,168 @@ export function deriveNativeHeartbeatPublicKeyUrl({
   return base ? `${base}/v1/native/public-key` : "";
 }
 
+/** @param {unknown} value */
+export function normalizeNativeAuthEnvelope(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = /** @type {Record<string, unknown>} */ (value);
+  /** @type {Record<string, unknown>} */
+  const envelope = {};
+  for (const field of ENVELOPE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(source, field)) continue;
+    if (field === "heartbeatTimeoutSeconds") {
+      const parsed = Number.parseInt(String(source[field] || ""), 10);
+      if (Number.isFinite(parsed) && parsed > 0) envelope[field] = parsed;
+      continue;
+    }
+    const text = String(source[field] || "").trim();
+    if (text) envelope[field] = text;
+  }
+  return Object.keys(envelope).length > 0 ? envelope : null;
+}
+
 /**
- * @param {{ getSettingFn?: (key: string) => unknown, defaultRemoteUrl?: string }} [opts]
- * @returns {Record<string, unknown> | null}
+ * @param {{ envelope?: Record<string, unknown> | null, developmentMode?: boolean } | Record<string, unknown> | null} [value]
+ */
+export function createNativeAuthTrustedPolicy(value = null) {
+  const wrapper = value && typeof value === "object" && !Array.isArray(value)
+    ? /** @type {Record<string, unknown>} */ (value)
+    : {};
+  const envelopeInput = Object.prototype.hasOwnProperty.call(wrapper, "envelope")
+    ? wrapper.envelope
+    : wrapper;
+  const envelope = normalizeNativeAuthEnvelope(envelopeInput);
+  if (!envelope?.heartbeatUrl) {
+    throw nativeAuthPolicyError("POSSE_NATIVE_AUTH_POLICY_INVALID", "trusted heartbeat policy requires a heartbeat URL");
+  }
+  const heartbeatUrl = validateHeartbeatUrl(String(envelope.heartbeatUrl), wrapper.developmentMode === true);
+  envelope.heartbeatUrl = heartbeatUrl.toString();
+  if (envelope.heartbeatPublicKeyUrl) {
+    const publicKeyUrl = validateAuthUrl(String(envelope.heartbeatPublicKeyUrl), wrapper.developmentMode === true, "heartbeat public-key URL");
+    if (publicKeyUrl.origin !== heartbeatUrl.origin) {
+      throw nativeAuthPolicyError("POSSE_NATIVE_AUTH_POLICY_INVALID", "heartbeat public-key origin does not match the trusted heartbeat origin");
+    }
+    envelope.heartbeatPublicKeyUrl = publicKeyUrl.toString();
+  }
+  return Object.freeze({
+    developmentMode: wrapper.developmentMode === true,
+    origin: heartbeatUrl.origin,
+    envelope: freezeEnvelope(envelope),
+  });
+}
+
+/**
+ * Production policy is compiled and singular. Test/development overrides are
+ * enabled only by an explicit argument or the test runner's isolated context.
+ *
+ * @param {{
+ *   getSettingFn?: (key: string) => unknown,
+ *   defaultRemoteUrl?: string,
+ *   allowDevelopmentOverrides?: boolean,
+ * }} [opts]
  */
 export function nativeHeartbeatAuthFromSettings({
   getSettingFn = getSetting,
   defaultRemoteUrl = POSSE_REMOTE_DEFAULT_URL,
+  allowDevelopmentOverrides = isIsolatedTestContext(),
 } = {}) {
-  const current = {
-    heartbeatUrl: settingOrEnv("heartbeatUrl", getSettingFn),
-    publicKeyUrl: settingOrEnv("publicKeyUrl", getSettingFn),
-    publicKey: settingOrEnv("publicKey", getSettingFn),
-    publicKeySha256: settingOrEnv("publicKeySha256", getSettingFn),
-    audience: settingOrEnv("audience", getSettingFn),
-    timeoutSeconds: settingOrEnv("timeoutSeconds", getSettingFn),
-  };
-  // The remote is always-on AND singular: heartbeat auth is mandatory for the
-  // key-gated native binaries (git is hard-on), and there is exactly ONE
-  // authoritative remote — the compiled default. It is NOT a configurable knob
-  // (the old `posse_remote_url` override was an early-testing artifact that could
-  // strand auth on a stale localhost endpoint). A fresh install with no config
-  // authenticates out of the box: both URLs + the pinned trust root come from
-  // the compiled default. The remaining env/setting overrides exist only to pin
-  // or pre-fetch a key for offline test runs.
+  const compiledBase = allowDevelopmentOverrides ? defaultRemoteUrl : POSSE_REMOTE_DEFAULT_URL;
   /** @type {Record<string, unknown>} */
-  const auth = {};
-  auth.heartbeatUrl = current.heartbeatUrl || deriveNativeHeartbeatUrl({ defaultRemoteUrl });
-  auth.heartbeatPublicKeyUrl = current.publicKeyUrl || deriveNativeHeartbeatPublicKeyUrl({ defaultRemoteUrl });
-  const publicKey = current.publicKey || DEFAULT_HEARTBEAT_PUBLIC_KEY;
-  const publicKeySha256 = current.publicKeySha256 || DEFAULT_HEARTBEAT_PUBLIC_KEY_SHA256;
-  const audience = current.audience || DEFAULT_HEARTBEAT_AUDIENCE;
-  if (publicKey) auth.heartbeatJwtPublicKey = publicKey;
-  if (publicKeySha256) auth.heartbeatJwtPublicKeySha256 = publicKeySha256;
-  if (audience) auth.heartbeatJwtAudience = audience;
-  if (current.timeoutSeconds) {
-    const parsed = Number.parseInt(current.timeoutSeconds, 10);
-    if (Number.isFinite(parsed) && parsed > 0) auth.heartbeatTimeoutSeconds = parsed;
+  const auth = {
+    heartbeatUrl: deriveNativeHeartbeatUrl({ defaultRemoteUrl: compiledBase }),
+    heartbeatPublicKeyUrl: deriveNativeHeartbeatPublicKeyUrl({ defaultRemoteUrl: compiledBase }),
+    heartbeatJwtPublicKey: DEFAULT_HEARTBEAT_PUBLIC_KEY,
+    heartbeatJwtPublicKeySha256: DEFAULT_HEARTBEAT_PUBLIC_KEY_SHA256,
+    heartbeatJwtAudience: DEFAULT_HEARTBEAT_AUDIENCE,
+  };
+
+  if (allowDevelopmentOverrides) {
+    const heartbeatUrl = settingOrEnv("heartbeatUrl", getSettingFn);
+    const publicKeyUrl = settingOrEnv("publicKeyUrl", getSettingFn);
+    const publicKey = settingOrEnv("publicKey", getSettingFn);
+    const publicKeySha256 = settingOrEnv("publicKeySha256", getSettingFn);
+    const audience = settingOrEnv("audience", getSettingFn);
+    if (heartbeatUrl) {
+      auth.heartbeatUrl = heartbeatUrl;
+      if (!publicKeyUrl) {
+        try {
+          auth.heartbeatPublicKeyUrl = `${new URL(heartbeatUrl).origin}/v1/native/public-key`;
+        } catch { /* validated by the trusted-policy boundary */ }
+      }
+    }
+    if (publicKeyUrl) auth.heartbeatPublicKeyUrl = publicKeyUrl;
+    if (publicKey) auth.heartbeatJwtPublicKey = publicKey;
+    if (publicKeySha256) auth.heartbeatJwtPublicKeySha256 = publicKeySha256;
+    if (audience) auth.heartbeatJwtAudience = audience;
   }
-  return auth.heartbeatUrl ? auth : null;
+
+  const timeoutSeconds = allowDevelopmentOverrides
+    ? settingOrEnv("timeoutSeconds", getSettingFn)
+    : getSettingText(NATIVE_HEARTBEAT_SETTING_KEYS.timeoutSeconds, { getSettingFn });
+  const parsedTimeout = Number.parseInt(timeoutSeconds, 10);
+  if (Number.isFinite(parsedTimeout) && parsedTimeout > 0) auth.heartbeatTimeoutSeconds = parsedTimeout;
+  return freezeEnvelope(auth);
+}
+
+export function productionNativeAuthTrustedPolicy() {
+  return createNativeAuthTrustedPolicy({
+    envelope: nativeHeartbeatAuthFromSettings({ allowDevelopmentOverrides: false }),
+    developmentMode: false,
+  });
+}
+
+/** @param {string} field @param {(key: string) => unknown} getSettingFn */
+function settingOrEnv(field, getSettingFn) {
+  const fromSetting = getSettingText(NATIVE_HEARTBEAT_SETTING_KEYS[field], { getSettingFn });
+  if (fromSetting) return fromSetting;
+  return String(process.env[NATIVE_HEARTBEAT_ENV_KEYS[field]] || "").trim();
+}
+
+function isIsolatedTestContext() {
+  return Boolean(process.env.NODE_TEST_CONTEXT || process.env.POSSE_TEST_RUN);
+}
+
+/** @param {string} value @param {boolean} developmentMode */
+function validateHeartbeatUrl(value, developmentMode) {
+  const url = validateAuthUrl(value, developmentMode, "heartbeat URL");
+  if (url.pathname.replace(/\/+$/, "") !== "/v1/native/heartbeat" || url.search || url.hash) {
+    throw nativeAuthPolicyError("POSSE_NATIVE_AUTH_POLICY_INVALID", "trusted heartbeat URL must use the fixed /v1/native/heartbeat endpoint");
+  }
+  return url;
+}
+
+/** @param {string} value @param {boolean} developmentMode @param {string} label */
+function validateAuthUrl(value, developmentMode, label) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw nativeAuthPolicyError("POSSE_NATIVE_AUTH_POLICY_INVALID", `${label} must be an absolute URL`);
+  }
+  if (url.username || url.password) {
+    throw nativeAuthPolicyError("POSSE_NATIVE_AUTH_POLICY_INVALID", `${label} must not contain URL credentials`);
+  }
+  if (url.protocol === "https:") return url;
+  if (developmentMode && url.protocol === "http:" && isLoopbackHostname(url.hostname)) return url;
+  throw nativeAuthPolicyError("POSSE_NATIVE_AUTH_POLICY_INVALID", `${label} must use HTTPS; loopback HTTP requires explicit development mode`);
+}
+
+/** @param {string} hostname */
+export function isLoopbackHostname(hostname = "") {
+  const host = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
+  const ipv4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/u);
+  if (!ipv4) return false;
+  const octets = ipv4.slice(1).map((part) => Number.parseInt(part, 10));
+  return octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255) && octets[0] === 127;
+}
+
+/** @param {Record<string, unknown>} envelope */
+export function freezeEnvelope(envelope) {
+  return Object.freeze({ ...envelope });
+}
+
+function nativeAuthPolicyError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
 }

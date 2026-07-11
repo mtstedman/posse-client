@@ -8,6 +8,13 @@ export const SECRET_PATTERNS = [
   // Posse remote keys. Keep the body alphanumeric to avoid redacting
   // ordinary setting names such as posse_native_heartbeat_timeout_seconds.
   { re: /\bposse[_-][A-Za-z0-9]{20,}\b/, label: "Posse API key" },
+  // Raw Posse credential serialized into JSON bodies / env-style assignments
+  // (e.g. the heartbeat request body, captured spawn options). Catches any
+  // value shape, not just posse_-prefixed keys.
+  { re: /\b(?:posse_key|posseKey)\b["']?\s*[=:]\s*["']?[A-Za-z0-9._~+/=-]{4,}["']?/i, label: "Posse key" },
+  // Compact JWTs (native pulse tokens are Ed25519 JWTs). redactString also
+  // catches these; kept here so SECRET_PATTERNS consumers redact them too.
+  { re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/, label: "JWT token" },
   // Generic API keys/tokens assigned as string literals to common variable names.
   // Requiring a quoted literal avoids false positives like:
   //   $apiKey = resolveApiKeyFromEnvironment();

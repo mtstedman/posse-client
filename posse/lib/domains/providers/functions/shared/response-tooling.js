@@ -114,7 +114,12 @@ export function createOpenAiCompatibleTooling({ buildImageTool } = {}) {
     });
   }
 
-  async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atlasConfig = null, gateScopeKey = null, declaredScope = {}) {
+  async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atlasConfig = null, gateScopeKey = null, declaredScope = {}, executionContract = null) {
+    const atlasAction = resolveEmbeddedAtlasAction(name);
+    const canonicalName = atlasAction || String(name || "");
+    if (executionContract && !(executionContract.tools || []).some((tool) => (tool?.canonicalName || tool?.name) === canonicalName)) {
+      return `Error: Tool "${name}" is not authorized by the active execution contract.`;
+    }
     const gateArgs = parseGateToolArgs(argsStr);
     if (isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(name)) {
       const gateDecision = checkNativeToolAllowed(name, gateArgs, { cwd, scopeKey: gateScopeKey });
@@ -123,7 +128,6 @@ export function createOpenAiCompatibleTooling({ buildImageTool } = {}) {
       }
     }
 
-    const atlasAction = resolveEmbeddedAtlasAction(name);
     const result = await executeToolWithMap(name, argsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey, declaredScope }, {
       handlers: standardToolHandlers,
       onUnknown: (toolName, args) => {

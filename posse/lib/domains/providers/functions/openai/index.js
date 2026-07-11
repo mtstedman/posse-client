@@ -13,6 +13,7 @@ import { getResolvedImageProtocol } from "../../../artifacts/functions/index.js"
 import { composeRemoteAssessorPromptForProvider } from "../shared/remote-assessor-prompt.js";
 import { appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
 import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
+import { issuedToolSurfaceForProviderPolicy, narrowProviderOptionsToRemoteIssuance } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildDisabledAtlasAttachment, logAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import {
   configureGate,
@@ -284,6 +285,7 @@ export async function callProvider(promptText, {
   roleMode = null,
   allowWrite = false,
   projectDbWrite = false,
+  projectDbCapability = "none",
   scopedFiles = null,   // files_to_modify
   createFiles = null,   // files_to_create
   createRoots = null,   // create_roots directories
@@ -319,6 +321,7 @@ export async function callProvider(promptText, {
   atlasPrefetchStatus = null,
   disableAtlas = false,
   atlasConfig = null,
+  _remoteIssuedPolicy = null,
 } = {}) {
   // Circuit breaker - if OpenAI was recently rate-limited, fail fast so the
   // worker falls back to Claude immediately instead of piling on.
@@ -383,6 +386,23 @@ export async function callProvider(promptText, {
     stableContext = remoteAssessorPrompt.stableContext || stableContext;
     remoteSystemPrompt = remoteAssessorPrompt.remoteSystemPrompt || remoteSystemPrompt;
     skipRolePrompt = true;
+    const narrowed = narrowProviderOptionsToRemoteIssuance({
+      role,
+      allowWrite,
+      projectDbWrite,
+      projectDbCapability,
+      needsImageGeneration,
+      disableAtlas,
+      fallbackReads,
+      sessionPacket: remoteAssessorPrompt.packet,
+    });
+    allowWrite = narrowed.allowWrite;
+    projectDbWrite = narrowed.projectDbWrite;
+    projectDbCapability = narrowed.projectDbCapability;
+    needsImageGeneration = narrowed.needsImageGeneration;
+    disableAtlas = narrowed.disableAtlas;
+    fallbackReads = narrowed.fallbackReads;
+    _remoteIssuedPolicy = narrowed._remoteIssuedPolicy || null;
   }
 
   let executionContract = buildExecutionContract({
@@ -391,6 +411,7 @@ export async function callProvider(promptText, {
     roleMode,
     allowWrite,
     projectDbWrite,
+    issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
     needsImageGeneration,
     scopedFiles,
     createFiles,
@@ -423,6 +444,11 @@ export async function callProvider(promptText, {
     // db-mode capability override: project_db_query gets the write lane even
     // though allowWrite is false (scope predicates ignore unknown keys).
     projectDbWrite: !!projectDbWrite,
+    projectDbCapability: _remoteIssuedPolicy
+      ? projectDbCapability
+      : (projectDbCapability !== "none"
+          ? projectDbCapability
+          : ((allowWrite || projectDbWrite) ? "write" : "read")),
   };
   const scopePredicates = sharedBuildScopePredicates(workingDir, declaredScope);
 
@@ -684,7 +710,7 @@ export async function callProvider(promptText, {
         const displayToolName = formatAtlasToolUseDisplayName(call.name, callInput) || call.name;
         emit(`${C.dim}  [tool] ${displayToolName}(${shortArgs}${shortArgs.length >= 100 ? "..." : ""})${C.reset}`);
 
-        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey, declaredScope);
+        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey, declaredScope, executionContract);
         const toolMs = Date.now() - toolStart;
         // executeTool can yield non-strings (e.g. error paths in tool handlers
         // that surface objects). Coerce before .length / .slice so a single

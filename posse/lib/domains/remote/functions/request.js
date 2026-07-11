@@ -20,8 +20,8 @@ function uniqueStrings(values = []) {
   return out;
 }
 
-function boolCapability(value, fallback = true) {
-  return value == null ? fallback : !!value;
+function narrowBoolCapability(value, ceiling = false) {
+  return ceiling === true && value !== false;
 }
 
 function nonNegativeInteger(value) {
@@ -36,9 +36,8 @@ function capabilitiesFromPacket(packet = {}) {
   const tools = explicit.tools || {};
   const atlas = packet?.atlas || {};
   const atlasExplicit = explicit.atlas || {};
-  const atlasAvailable = atlasExplicit.available == null
-    ? !!(atlas.active && !atlas.prefetchFailed)
-    : !!atlasExplicit.available;
+  const localAtlasAvailable = !!(atlas.active && !atlas.prefetchFailed);
+  const atlasAvailable = localAtlasAvailable && atlasExplicit.available !== false;
   const atlasMemoryCount = nonNegativeInteger(
     atlasExplicit.memory_count
     ?? atlasExplicit.memoryCount
@@ -54,16 +53,31 @@ function capabilitiesFromPacket(packet = {}) {
     transport: atlasExplicit.transport || atlas.transport || null,
   };
   if (atlasMemoryCount != null) atlasCapabilities.memory_count = atlasMemoryCount;
+  const role = String(packet?.recipient || packet?.job_type || "").trim().toLowerCase();
+  const taskMode = String(
+    packet?._raw_payload?.assessmentContext?.task_mode
+    || packet?._raw_payload?.assessment_context?.task_mode
+    || packet?._raw_payload?.task_mode
+    || "",
+  ).trim().toLowerCase();
+  const localProjectDbCapability = taskMode === "db" && (role === "dev" || role === "fix")
+    ? "write"
+    : (taskMode === "db" && role === "assessor" ? "read" : "none");
+  const assertedProjectDbCapability = String(tools.project_db || tools.projectDb || localProjectDbCapability).trim().toLowerCase();
+  const projectDbRanks = { none: 0, read: 1, write: 2 };
+  const projectDbCapability = (projectDbRanks[assertedProjectDbCapability] ?? 0) < projectDbRanks[localProjectDbCapability]
+    ? assertedProjectDbCapability
+    : localProjectDbCapability;
+  const imageGenerationAvailable = !!(packet?.needs_image_generation || packet?.needsImageGeneration);
 
   return {
     tools: {
-      read: boolCapability(tools.read, true),
-      write: boolCapability(tools.write, true),
-      shell: boolCapability(tools.shell, true),
-      image_generation: boolCapability(
-        tools.image_generation,
-        !!(packet?.needs_image_generation || packet?.needsImageGeneration),
-      ),
+      read: narrowBoolCapability(tools.read, packet?.tool_policy?.allow_read === true),
+      write: narrowBoolCapability(tools.write, packet?.tool_policy?.allow_write === true),
+      shell: narrowBoolCapability(tools.shell, packet?.tool_policy?.allow_shell === true),
+      tests: narrowBoolCapability(tools.tests, packet?.tool_policy?.allow_tests === true),
+      image_generation: narrowBoolCapability(tools.image_generation, imageGenerationAvailable),
+      project_db: ["read", "write"].includes(projectDbCapability) ? projectDbCapability : "none",
     },
     atlas: atlasCapabilities,
   };

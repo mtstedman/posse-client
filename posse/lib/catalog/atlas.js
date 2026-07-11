@@ -39,7 +39,7 @@ export const ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT = 24;
 export const ATLAS_AUTO_FEEDBACK_VALUES = Object.freeze(["off", "dry-run", "write"]);
 export const VALID_ATLAS_AUTO_FEEDBACK_MODES = new Set(ATLAS_AUTO_FEEDBACK_VALUES);
 
-export const ATLAS_VECTOR_BACKEND_VALUES = Object.freeze(["auto", "usearch", "off"]);
+export const ATLAS_VECTOR_BACKEND_VALUES = Object.freeze(["auto", "rust", "usearch", "off"]);
 export const VALID_ATLAS_VECTOR_BACKENDS = new Set(ATLAS_VECTOR_BACKEND_VALUES);
 
 export const ATLAS_REMOTE_ENCODER_MODE_VALUES = Object.freeze(["off", "shadow", "preferred", "required"]);

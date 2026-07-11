@@ -10,6 +10,7 @@ import {
   normalizeHashRefAlias,
 } from "../../../catalog/hash-store.js";
 import {
+  CONTEXT_BOUNDED_RETENTION_CHAR_CAP,
   CONTEXT_BOUNDING_POLICIES,
   CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS,
   CONTEXT_FETCH_REF_MAX_LIMIT_CHARS,
@@ -176,6 +177,7 @@ function renderBoundedResult(text, {
   args,
   entry,
   sizeChars,
+  materialized = false,
 }) {
   const headChars = Math.max(0, Math.min(policy.headChars || policy.capChars || 0, sizeChars));
   const tailBudget = Math.max(0, Math.min(policy.tailChars || 0, Math.max(0, sizeChars - headChars)));
@@ -187,7 +189,9 @@ function renderBoundedResult(text, {
   const digestText = JSON.stringify(digest, null, 2);
   const lines = [
     `[bounded_result ${objectLabel}: full payload ${sizeChars} chars; showing ${head.length}${tail ? `+${tail.length}` : ""} chars; omitted ${omitted} chars]`,
-    `[bounded_result recovery: fetch_ref ref=${entry?.ref || ""} offset=<char_offset> limit=<chars> search=<literal> pages the stored payload]`,
+    materialized
+      ? `[bounded_result recovery: fetch_ref ref=${entry?.ref || ""} offset=<char_offset> limit=<chars> search=<literal> pages the stored payload]`
+      : `[bounded_result recovery: payload exceeded retention cap; digest+fingerprints kept; re-run ${toolName || "the tool"} with narrower args]`,
     "[overflow_digest]",
     digestText,
     "[/overflow_digest]",
@@ -407,27 +411,36 @@ export function appendHashRefIfMajor(toolName, result, {
   const sizeChars = text.length;
   const effectiveObjectType = normalizeObjectType(objectType || toolName || "tool_result") || "tool_result";
   const boundPolicy = boundingPolicyFor(toolName, effectiveObjectType);
-  const materialized = sizeChars <= materializeCharCap;
+  const boundedIngress = !!(boundPolicy && sizeChars > boundPolicy.capChars);
+  const retainedBoundedPayload = boundedIngress && sizeChars <= CONTEXT_BOUNDED_RETENTION_CHAR_CAP;
+  const materialized = sizeChars <= materializeCharCap || retainedBoundedPayload;
+  const descriptor = {
+    kind: "tool_result",
+    tool: toolName,
+    args,
+    source: source || `tool:${toolName}`,
+  };
   const entry = materialized
     ? {
       entryKind: "materialized",
       payloadText: text,
+      descriptor,
+      recomputable: true,
     }
     : {
       entryKind: "descriptor",
-      descriptor: {
-        kind: "tool_result",
-        tool: toolName,
-        args,
-        source: source || `tool:${toolName}`,
-      },
+      descriptor,
       fingerprintMap: lineFingerprintMap(text),
       recomputable: true,
     };
   let surfaced;
   const noteText = [
     note,
-    boundPolicy && sizeChars > boundPolicy.capChars ? "bounded view; fetch_ref pages the rest" : "",
+    boundedIngress
+      ? (materialized
+        ? "bounded view; fetch_ref pages the rest"
+        : `bounded view; payload exceeded retention cap; re-run ${toolName || "the tool"} with narrower args`)
+      : "",
   ].filter(Boolean).join(" | ") || null;
   try {
     surfaced = surfaceHashRefForContext(hashContext, {
@@ -440,7 +453,8 @@ export function appendHashRefIfMajor(toolName, result, {
         surfaced_by: "hash_adder",
         tool: toolName || null,
         materialized,
-        bounded_ingress: !!(boundPolicy && sizeChars > boundPolicy.capChars),
+        bounded_ingress: boundedIngress,
+        retention_exceeded: boundedIngress && !materialized,
       },
     }, { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) });
   } catch (err) {
@@ -470,6 +484,7 @@ export function appendHashRefIfMajor(toolName, result, {
       args,
       entry: surfaced.entry,
       sizeChars,
+      materialized: surfaced.entry?.entry_kind === "materialized",
     });
     recordContextMeterSample(hashContext, toolName, {
       fullSizeChars: sizeChars,
@@ -530,7 +545,9 @@ function fetchResultText(result, args = {}) {
     degraded: true,
     descriptor: entry.descriptor,
     fingerprint_map: entry.fingerprint_map,
-    notice: "This ref is descriptor-backed. Recompute fetch is not wired for this descriptor in the current runtime, so the original payload is not being claimed verbatim.",
+    notice: entry.metadata?.retention_exceeded
+      ? `Payload exceeded the bounded retention cap. Digest and fingerprints were kept; re-run ${entry.descriptor?.tool || "the source tool"} with narrower args.`
+      : "This ref is descriptor-backed. Recompute fetch is not wired for this descriptor in the current runtime, so the original payload is not being claimed verbatim.",
   }, null, 2);
 }
 

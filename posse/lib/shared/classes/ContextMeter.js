@@ -3,6 +3,8 @@ import {
   CONTEXT_PRESSURE_THRESHOLDS,
 } from "../../catalog/context.js";
 
+const MAX_RETAINED_METERS = 512;
+
 function positiveNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -32,6 +34,11 @@ export class ContextMeter {
     if (!key) return null;
     let meter = this.#meters.get(key);
     if (!meter) {
+      while (this.#meters.size >= MAX_RETAINED_METERS) {
+        const oldestKey = this.#meters.keys().next().value;
+        if (oldestKey == null) break;
+        this.#meters.delete(oldestKey);
+      }
       meter = new ContextMeter({ key, ...opts });
       this.#meters.set(key, meter);
     } else if (opts.promptChars != null) {
@@ -42,6 +49,14 @@ export class ContextMeter {
 
   static resetForTests() {
     this.#meters.clear();
+  }
+
+  static release(contextOrKey = {}) {
+    const key = typeof contextOrKey === "string"
+      ? contextOrKey
+      : meterKeyFromContext(contextOrKey);
+    if (!key) return false;
+    return this.#meters.delete(key);
   }
 
   constructor({
@@ -60,7 +75,7 @@ export class ContextMeter {
     this.emittedChars = 0;
     this.fullToolResultChars = 0;
     this.trimmedBeforeIngressChars = 0;
-    this.turns = 0;
+    this.toolResults = 0;
     this.lastPressureBand = "normal";
     this.lastReportedTurn = 0;
   }
@@ -76,7 +91,7 @@ export class ContextMeter {
   } = {}) {
     const full = positiveNumber(fullSizeChars, 0);
     const emitted = emittedSizeChars == null ? full : positiveNumber(emittedSizeChars, 0);
-    this.turns += 1;
+    this.toolResults += 1;
     this.fullToolResultChars += full;
     this.emittedChars += emitted;
     if (bounded) {
@@ -88,7 +103,7 @@ export class ContextMeter {
   snapshot() {
     const emittedTokens = estimateTokensFromChars(this.emittedChars);
     const promptTokens = estimateTokensFromChars(this.promptChars);
-    const estimateTokens = promptTokens + emittedTokens + (this.turns * this.avgOutputTokensPerTurn);
+    const estimateTokens = promptTokens + emittedTokens + (this.toolResults * this.avgOutputTokensPerTurn);
     const band = estimateTokens >= this.thresholds.resetTokens
       ? "reset"
       : estimateTokens >= this.thresholds.hardTokens
@@ -104,7 +119,8 @@ export class ContextMeter {
       emitted_tokens_est: emittedTokens,
       full_tool_result_chars: this.fullToolResultChars,
       trimmed_before_ingress_chars: this.trimmedBeforeIngressChars,
-      turns: this.turns,
+      tool_results: this.toolResults,
+      turns: this.toolResults,
       avg_output_tokens_per_turn: this.avgOutputTokensPerTurn,
       estimate_tokens: estimateTokens,
       pressure_band: band,
@@ -114,11 +130,11 @@ export class ContextMeter {
   shouldReport(snapshot = this.snapshot()) {
     if (snapshot.pressure_band !== this.lastPressureBand) {
       this.lastPressureBand = snapshot.pressure_band;
-      this.lastReportedTurn = snapshot.turns;
+      this.lastReportedTurn = snapshot.tool_results;
       return snapshot.pressure_band !== "normal";
     }
-    if (snapshot.turns - this.lastReportedTurn >= 25) {
-      this.lastReportedTurn = snapshot.turns;
+    if (snapshot.tool_results - this.lastReportedTurn >= 25) {
+      this.lastReportedTurn = snapshot.tool_results;
       return true;
     }
     return false;
@@ -126,6 +142,7 @@ export class ContextMeter {
 }
 
 export const __testContextMeterInternals = Object.freeze({
+  MAX_RETAINED_METERS,
   estimateTokensFromChars,
   meterKeyFromContext,
 });

@@ -268,20 +268,11 @@ function clampInt(value, fallback, min, max) {
  */
 function usageWarnings(view, total) {
   if (total > 0) return [];
-  const db = typeof /** @type {any} */ (view)._unsafeDb === "function"
-    ? /** @type {any} */ (view)._unsafeDb()
-    : null;
-  if (!db) return [];
   try {
-    const row = /** @type {{ total?: number, unresolved?: number } | undefined} */ (
-      db.prepare(
-        `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN to_global_id IS NULL AND to_external_id IS NULL THEN 1 ELSE 0 END) AS unresolved
-         FROM edges`,
-      ).get()
-    );
-    const edgeTotal = Number(row?.total || 0);
-    const unresolved = Number(row?.unresolved || 0);
+    if (typeof view?.query?.edgeStats !== "function") return [];
+    const stats = view.query.edgeStats();
+    const edgeTotal = Number(stats.total || 0);
+    const unresolved = Math.max(0, edgeTotal - Number(stats.resolved || 0));
     if (edgeTotal <= 0) return [];
     const ratio = unresolved / edgeTotal;
     if (ratio <= 0.25) return [];

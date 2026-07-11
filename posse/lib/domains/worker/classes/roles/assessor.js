@@ -96,6 +96,7 @@ export class AssessorRole extends BaseRole {
     Object.assign(ctx, {
       packet,
       payload,
+      taskMode,
       disableAtlas,
       workerCwd: job._worktreePath || worker.projectDir,
     });
@@ -138,7 +139,10 @@ export class AssessorRole extends BaseRole {
       stableContext: ctx.packet?.stable_context || null,
       remoteSystemPrompt: ctx.packet?.remote_system_prompt || null,
       fallbackReads: ctx.packet.budgets?.fallback_reads_remaining ?? null,
+      taskMode: ctx.taskMode,
+      projectDbCapability: ctx.taskMode === "db" ? "read" : "none",
       disableAtlas: !!ctx.disableAtlas,
+      sessionPacket: ctx.packet || null,
       skipRolePrompt: !!ctx.packet?.remote_prompt_composed,
     };
   }

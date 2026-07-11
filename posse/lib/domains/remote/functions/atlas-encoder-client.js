@@ -33,7 +33,8 @@ export const REMOTE_ATLAS_ENCODER_EGRESS_POLICY = Object.freeze({
  * @property {number} [retryDelayMs]
  * @property {number} [maxResponseBytes]
  * @property {typeof fetch} [fetchImpl]
- * @property {string | null} [apiKey]
+ * @property {import("../../../shared/native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager} [authManager]
+ * @property {import("../../../shared/native/classes/PulseTokenManager.js").PulseTokenManager} [pulseTokens]
  */
 
 export function normalizeRemoteAtlasEncodeRequest(request = {}) {

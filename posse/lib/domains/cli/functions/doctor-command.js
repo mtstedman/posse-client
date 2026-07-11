@@ -1,6 +1,7 @@
 import path from "path";
 
 import { C } from "../../../shared/format/functions/colors.js";
+import { getAtlasIntegrationConfig } from "../../integrations/functions/atlas/config.js";
 import {
   doctorRepoDependencies,
   formatBootDependencySync,
@@ -133,6 +134,7 @@ export async function cmdDoctor({
   argv = process.argv.slice(3),
   runDoctor = doctorRepoDependencies,
   formatResult = formatBootDependencySync,
+  getAtlasConfig = getAtlasIntegrationConfig,
   colors = C,
   log = console.log,
 } = {}) {
@@ -144,12 +146,40 @@ export async function cmdDoctor({
   const json = argv.includes("--json");
   const dryRun = argv.includes("--dry-run");
   const progress = createDoctorProgressRenderer({ log, colors, json });
-  const result = await runDoctor({
-    projectDir,
-    dryRun,
-    onProgress: progress.onProgress,
-    onEvent: progress.onEvent,
-  });
+  let result;
+  try {
+    const atlasConfig = getAtlasConfig?.() || {};
+    result = await runDoctor({
+      projectDir,
+      dryRun,
+      scipMode: atlasConfig.enabled === false
+        ? "off"
+        : (atlasConfig.scipMode ?? atlasConfig.atlas_scip_mode ?? null),
+      scipLanguages: atlasConfig.scipLanguages ?? atlasConfig.atlas_scip_languages ?? null,
+      onProgress: progress.onProgress,
+      onEvent: progress.onEvent,
+    });
+  } catch (err) {
+    const message = firstLine(err?.message || err) || "dependency doctor failed";
+    const failure = { label: "dependency doctor", ok: false, status: "failed", message };
+    result = {
+      ok: false,
+      status: "failed",
+      project_dir: projectDir,
+      dry_run: dryRun,
+      counts: { checked: 1, installed: 0, dry_run: 0, failed: 1, ready: 0 },
+      doctor: {
+        ok: false,
+        mode: dryRun ? "plan" : "repair",
+        summary: `1 failed: dependency doctor: ${message}`,
+        checked: 1,
+        repaired: [],
+        pending: [],
+        failed: [failure],
+        ready: [],
+      },
+    };
+  }
 
   if (json) {
     log(JSON.stringify(result, null, 2));

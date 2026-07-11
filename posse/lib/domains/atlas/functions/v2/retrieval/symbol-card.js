@@ -187,7 +187,9 @@ export function symbolGetCards({ view, versionId, params, repoRoot, ledger, repo
       action,
       versionId,
       code: "invalid_params",
-      message: "symbol.cards requires symbolIds or symbolRefs",
+      message: action === "symbol.card"
+        ? "symbol.card requires symbolId, symbolRef, symbolIds, or symbolRefs"
+        : "symbol.cards requires symbolIds or symbolRefs",
     });
   }
 

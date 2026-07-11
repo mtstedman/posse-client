@@ -10,6 +10,7 @@ import os from "os";
 import path from "path";
 import { getSetting } from "../../../queue/functions/index.js";
 import { appendExecutionTools, buildClaudeCliToolConfig, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
+import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap, formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { buildRuntimeEnv, normalizeProviderPaths } from "../../../runtime/functions/paths.js";
 import { logAtlasAttachment, resolveAtlasAssignmentUnit } from "../../../integrations/functions/atlas.js";
@@ -250,6 +251,7 @@ export async function callProvider(promptText, {
   roleMode = null,
   allowWrite = false,
   projectDbWrite = false, // db-mode dev: project_db_query gets the write lane while file tools stay read-only
+  projectDbCapability = "none",
   modelTier = "standard",
   modelName = null,    // explicit per-job model from delegation; beats provider-wide default
   reasoningEffort = "medium",
@@ -280,6 +282,8 @@ export async function callProvider(promptText, {
   jobId = null,
   workItemId = null,
   attemptId = null,
+  agentCallId = null,
+  promptChars = 0,
   skipRolePrompt = false,
   recyclingMode = "fresh",
   priorSessionHandle = null,
@@ -289,6 +293,7 @@ export async function callProvider(promptText, {
   atlasConfig = null,
   executionMode = null,
   interactiveBackend = null,
+  _remoteIssuedPolicy = null,
 } = {}) {
   const resolvedClaude = await getClaudeCommandAsync();
   const providerPathsForAtlas = normalizeProviderPaths({ cwd, projectDir });
@@ -400,11 +405,14 @@ export async function callProvider(promptText, {
       readRoots,
       allowWrite,
       projectDbWrite,
+      projectDbCapability,
       needsImageGeneration,
       disableSystemTools: disableSystemToolsResolved,
       jobId,
       workItemId,
       attemptId,
+      agentCallId,
+      promptChars,
       atlasPrefetchStatus,
       atlasAvailable: atlasReadyForMcp,
       atlasGateEnabled: atlasToolGateEnabled,
@@ -464,6 +472,7 @@ export async function callProvider(promptText, {
       roleMode,
       allowWrite,
       projectDbWrite,
+      issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
       scopedFiles,
       createFiles,
       createRoots,
@@ -485,7 +494,7 @@ export async function callProvider(promptText, {
       scopeCwd: mcpWorkspaceCwd,
       deterministicReadMcpActive: deterministicReadMcp.active,
       disableSystemTools: disableSystemToolsResolved,
-      webToolsEnabled: resolveWebToolsEnabled(),
+      webToolsEnabled: resolveWebToolsEnabled() && issuedWebAccessEnabled(_remoteIssuedPolicy),
     });
     // MCP servers are resolved here so their names can drive the permission
     // allowlist below. The Posse MCP gateway exposes the deterministic and

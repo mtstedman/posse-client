@@ -9,3 +9,23 @@ export function firstGitLine(err) {
     .map((line) => line.trim())
     .filter(Boolean)[0] || "unknown git error";
 }
+
+export function timedOutMergeCommitLanded({
+  head = null,
+  preMergeHead = null,
+  headSubject = "",
+  expectedSubject = "",
+  stagedFiles = null,
+  unmergedFiles = null,
+} = {}) {
+  return Boolean(
+    head
+    && preMergeHead
+    && head !== preMergeHead
+    && headSubject === expectedSubject
+    && Array.isArray(stagedFiles)
+    && stagedFiles.length === 0
+    && Array.isArray(unmergedFiles)
+    && unmergedFiles.length === 0
+  );
+}

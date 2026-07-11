@@ -1,11 +1,17 @@
 # Posse Native Binaries
 
-This directory stages the compiled Rust helper binaries Posse ships
-(`posse-atlas`, `posse-git`, `posse-remote`). The registry that describes them — package names,
-per-OS/arch build targets, and filenames — lives in the catalog at
+This directory stages the native binaries Posse ships. The Rust helper binaries
+(`posse-atlas`, `posse-git`, `posse-remote`, and the opt-in `posse-vector`)
+are runtime-managed tools. The
+registry that describes them — package names, per-OS/arch build targets, and
+filenames — lives in the catalog at
 [`lib/catalog/binary.js`](../catalog/binary.js), the single source of truth for
 both the deploy scripts and the runtime resolver
 ([`lib/shared/tools/classes/BinaryManager.js`](../shared/tools/classes/BinaryManager.js)).
+
+Bossy is a standalone fleet TUI rather than a runtime helper. Its own
+green-gated deployment workflow stages release builds under `lib/bin/bossy/`;
+it is intentionally not registered in the helper-binary catalog.
 
 ## Layout
 
@@ -28,6 +34,14 @@ lib/bin/
     windows/{x64,arm64}/posse-remote.exe
     linux/{x64,arm64}/posse-remote
     macos/posse-remote           # universal
+  vector/
+    windows/{x64,arm64}/posse-vector.exe
+    linux/{x64,arm64}/posse-vector
+    macos/posse-vector           # universal
+  bossy/
+    windows/{x64,arm64}/bossy.exe
+    linux/{x64,arm64}/bossy
+    macos/bossy                  # universal in CI
 ```
 
 The runtime resolver selects `<tool>/<os>/<arch>/<file>` for the host, falling
@@ -37,8 +51,8 @@ from `process.platform` / `process.arch` by
 
 ## Build & deploy
 
-Rebuild from the sibling `posse-encoder-rust` workspace (flush + cargo build +
-deploy) for the current host OS:
+Rebuild atlas/git/remote from the sibling `posse-encoder-rust` workspace
+(flush + cargo build + deploy) for the current host OS:
 
 ```bash
 npm run rebuild:rust-binaries -- --rust-root <path-to-posse-encoder-rust>
@@ -51,6 +65,21 @@ toolchains. The macOS entry is built for both `aarch64-apple-darwin` and
 ```bash
 npm run rebuild:rust-binaries:all -- --rust-root <path-to-posse-encoder-rust>
 ```
+
+`posse-vector` is intentionally excluded from those build defaults because it
+comes from the separate `posse-vector` workspace. An explicitly staged
+`lib/bin/vector/...` build remains the development override. When native vector
+mode is enabled and no staged build exists, run boot mints an
+`artifacts:read` pulse, downloads the exact catalog-pinned version for the
+current OS/architecture from Posse Remote, verifies its SHA-256, and caches it
+under `~/.posse/native/bundles/posse-vector-<version>/vector/...` before ATLAS
+opens embedding resources.
+
+The cache stores a SHA-256 sidecar and is re-verified on every process boot.
+Downloads use a same-directory `.part` file, fsync, and atomic rename; a
+checksum mismatch never becomes runnable. The raw `POSSE_KEY` is used only by
+the existing heartbeat broker and is never sent to the artifact endpoint or
+written to disk.
 
 If the binaries were already built elsewhere, deploy existing artifacts:
 

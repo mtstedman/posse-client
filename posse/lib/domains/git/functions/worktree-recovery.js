@@ -277,9 +277,18 @@ export function preserveCorruptWorktreeContents(wtPath, projectDir, { wiId, bran
 
   let filesCopied = 0;
   const skippedSymlinks = [];
+  const copyErrors = [];
   const walk = (srcDir, dstDir) => {
     let entries;
-    try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
+    try {
+      entries = fs.readdirSync(srcDir, { withFileTypes: true });
+    } catch (err) {
+      copyErrors.push({
+        path: path.relative(wtPath, srcDir).replace(/\\/g, "/") || ".",
+        error: err?.message || String(err),
+      });
+      return;
+    }
     for (const entry of entries) {
       if (entry.name === ".git") continue;
       // Worktree-local Posse state is regenerated runtime data, not user work.
@@ -287,7 +296,15 @@ export function preserveCorruptWorktreeContents(wtPath, projectDir, { wiId, bran
       const srcPath = path.join(srcDir, entry.name);
       const dstPath = path.join(dstDir, entry.name);
       if (entry.isDirectory()) {
-        try { fs.mkdirSync(dstPath, { recursive: true }); } catch { continue; }
+        try {
+          fs.mkdirSync(dstPath, { recursive: true });
+        } catch (err) {
+          copyErrors.push({
+            path: path.relative(wtPath, srcPath).replace(/\\/g, "/"),
+            error: err?.message || String(err),
+          });
+          continue;
+        }
         walk(srcPath, dstPath);
       } else if (entry.isSymbolicLink()) {
         let target = null;
@@ -300,12 +317,26 @@ export function preserveCorruptWorktreeContents(wtPath, projectDir, { wiId, bran
         try {
           fs.copyFileSync(srcPath, dstPath);
           filesCopied++;
-        } catch { /* skip unreadable entries */ }
+        } catch (err) {
+          copyErrors.push({
+            path: path.relative(wtPath, srcPath).replace(/\\/g, "/"),
+            error: err?.message || String(err),
+          });
+        }
+      } else {
+        copyErrors.push({
+          path: path.relative(wtPath, srcPath).replace(/\\/g, "/"),
+          error: "unsupported filesystem entry",
+        });
       }
     }
   };
   walk(wtPath, recoveryDir);
 
+  if (copyErrors.length > 0) {
+    try { fs.rmSync(recoveryDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    return null;
+  }
   if (filesCopied === 0 && skippedSymlinks.length === 0) {
     try { fs.rmdirSync(recoveryDir); } catch { /* ignore */ }
     return null;

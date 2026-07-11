@@ -133,6 +133,13 @@ const PROVIDER_USAGE_SETTING_DEFS = [
 
 const MODEL_SETTING_KEYS = new Set(MODEL_SETTING_DEFS.map((def) => def.key));
 const PROVIDER_USAGE_SETTING_KEYS = new Set(PROVIDER_USAGE_SETTING_DEFS.map((def) => def.key));
+const PROTECTED_REMOTE_AUTH_SETTING_KEYS = new Set([
+  "posse_native_heartbeat_url",
+  "posse_native_heartbeat_public_key_url",
+  "posse_native_heartbeat_jwt_public_key",
+  "posse_native_heartbeat_jwt_public_key_sha256",
+  "posse_native_heartbeat_jwt_audience",
+]);
 
 const AGENT_SETTING_SECTIONS = Object.freeze([
   Object.freeze({ role: "researcher", label: "Researcher", keys: Object.freeze(["base_turns_researcher", "max_output_tokens_researcher"]) }),
@@ -525,6 +532,13 @@ export function validateAdminSettingValue(settingKey, value) {
   if (!storageKey) return { ok: false, error: "Setting key is required." };
   const rawValue = String(value ?? "");
   const trimmed = rawValue.trim();
+
+  if (PROTECTED_REMOTE_AUTH_SETTING_KEYS.has(storageKey)) {
+    return {
+      ok: false,
+      error: `${settingKey} is managed by the compiled remote auth policy and cannot be changed through admin settings.`,
+    };
+  }
 
   if (PROJECT_DB_SETTING_KEYS.has(storageKey)) {
     if (storageKey === "project_db_enabled") {

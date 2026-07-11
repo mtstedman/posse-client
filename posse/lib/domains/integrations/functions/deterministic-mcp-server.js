@@ -44,6 +44,9 @@ import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/to
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../shared/tools/functions/tool-suites.js";
 import { appendHashRefIfMajor } from "../../../shared/tools/functions/hash-adder.js";
+import { createChainLedger } from "../../../shared/tools/functions/chain-ledger.js";
+import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
+import { normalizeProjectDbCapability } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, runWithObservationContext } from "../../observability/functions/observations.js";
 import {
@@ -59,6 +62,7 @@ import { shouldUseAtlasV2 } from "./atlas-v2-mode.js";
 import { atlasBackendLabel } from "./atlas-label.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
+import { PulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import {
   configureGate,
   isGateActive,
@@ -77,7 +81,6 @@ import {
   buildMcpOAuthClaimsFromBootConfig,
   verifyMcpOAuthToken,
 } from "./deterministic-mcp/oauth-token.js";
-import { CONTEXT_CHAIN_READ_DEFAULT_LIMIT_LINES } from "../../../catalog/context.js";
 import {
   DETERMINISTIC_IMAGE_HELPER_TOOLS,
   DETERMINISTIC_IMAGE_TOOLS,
@@ -95,7 +98,7 @@ import { ATLAS_TOOL_ACTIONS } from "../../atlas/functions/v2/contracts/tool-para
 import { POSSE_MCP_GATEWAY_SERVER_INFO_NAME, stripPosseMcpGatewayPrefix } from "./mcp-gateway.js";
 import { setRuntimePathOverrides } from "../../runtime/functions/paths.js";
 import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
-import { assertSafeRemoteAuthUrl, readResponseTextWithLimit, resolvePosseKey } from "../../remote/functions/client.js";
+import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../runtime/functions/protected-paths.js";
 import {
   parseEnvBool,
@@ -288,6 +291,9 @@ let allowWrite = bootConfig.allowWrite === true || ownerHotGateway;
 // db-mode dev jobs run with allowWrite=false (no file tools) but carry the
 // projectDbWrite capability: project_db_query stays on the write lane.
 let projectDbWrite = bootConfig.projectDbWrite === true;
+let projectDbCapabilityGrant = normalizeProjectDbCapability(
+  bootConfig.projectDbCapability || (projectDbWrite ? "write" : "none"),
+);
 let allowImageHelpers = bootConfig.allowImageHelpers === true || ownerHotGateway;
 let allowImageGeneration = bootConfig.allowImageGeneration === true || ownerHotGateway;
 let roleName = String(bootConfig.role || "").trim() || null;
@@ -306,6 +312,8 @@ let mcpMessageSessionScoped = false;
 // the same semantics as the embedded transport (they used to diverge:
 // unbounded re-delivery and zero delivery audit on MCP).
 let mcpAttemptId = Number(bootConfig.attemptId) || null;
+let mcpAgentCallId = Number(bootConfig.agentCallId) || null;
+let mcpPromptChars = Math.max(0, Number(bootConfig.promptChars) || 0);
 let atlasAvailable = bootConfig.atlasAvailable === true;
 let atlasGateEnabled = bootConfig.atlasGateEnabled === true;
 let atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().toLowerCase();
@@ -351,8 +359,9 @@ if (mcpDbPath) {
 // Native-binary auth: when the parent supplied a non-secret heartbeat capability
 // (config-json boots), install it as this child's auth authority so ATLAS/git
 // native calls share the parent's heartbeat envelope. Current compiled helpers
-// still need the manager-owned compatibility launch key; raw POSSE_KEY is
-// scrubbed from native child env and never resolved per leaf call.
+// still need a manager-owned Posse credential; only the trusted persistent owner
+// receives POSSE_KEY, and NativeBinary moves it into each native request while
+// scrubbing it from the grandchild argv and environment.
 if (!ownerHotProcess && bootConfig.nativeAuth && typeof bootConfig.nativeAuth === "object") {
   try {
     nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(bootConfig.nativeAuth));
@@ -361,8 +370,19 @@ if (!ownerHotProcess && bootConfig.nativeAuth && typeof bootConfig.nativeAuth ==
 
 // Tag all tool observations with the job context so the display can query by job_id
 if (mcpJobId || mcpWorkItemId) {
-  enterObservationContext({ work_item_id: mcpWorkItemId, job_id: mcpJobId });
+  enterObservationContext({
+    work_item_id: mcpWorkItemId,
+    job_id: mcpJobId,
+    attempt_id: mcpAttemptId,
+    agent_call_id: mcpAgentCallId,
+  });
 }
+ContextMeter.forContext({
+  work_item_id: mcpWorkItemId,
+  job_id: mcpJobId,
+  attempt_id: mcpAttemptId,
+  agent_call_id: mcpAgentCallId,
+}, { promptChars: mcpPromptChars });
 
 let scopePredicates = buildScopePredicates(workspaceCwd, {
   modifyFiles: Array.isArray(bootConfig.scopedFiles) ? bootConfig.scopedFiles : [],
@@ -678,6 +698,8 @@ if (!remoteToolCatalogEnabled() && atlasAvailable && roleName && _atlasAllowedAc
 let _remoteToolCatalogPromise = null;
 let _remoteToolCatalogCache = null;
 let _remoteToolSurfaceRequest = null;
+let _remotePulseTokens = null;
+let _remotePulseAuthManager = null;
 
 function remoteToolCatalogEnabled() {
   return remoteToolCatalogConfig.enabled === true
@@ -698,8 +720,13 @@ function remoteToolCatalogTimeoutMs() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 1500;
 }
 
-function resolveRemoteCatalogApiKey() {
-  return resolvePosseKey();
+function remotePulseTokens() {
+  const authManager = nativeBinaries.nativeAuthManager;
+  if (!_remotePulseTokens || _remotePulseAuthManager !== authManager) {
+    _remotePulseAuthManager = authManager;
+    _remotePulseTokens = new PulseTokenManager({ authManager });
+  }
+  return _remotePulseTokens;
 }
 
 function remoteToolCatalogCacheKey(request) {
@@ -767,21 +794,25 @@ async function fetchRemoteToolCatalog() {
     promise: (async () => {
       const url = remoteToolSurfaceUrl();
       const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), remoteToolCatalogTimeoutMs());
+      let timer = null;
       try {
         const headers = { "content-type": "application/json" };
-        const apiKey = resolveRemoteCatalogApiKey();
-        if (apiKey) {
-          assertSafeRemoteAuthUrl(url, apiKey, "remote tool catalog");
-          headers.authorization = `Bearer ${apiKey}`;
+        const tokens = remotePulseTokens();
+        const pulseToken = await tokens.getPulseToken({ requiredRoute: "catalog:read" });
+        if (pulseToken) {
+          tokens.assertTrustedResourceUrl(url, "remote tool catalog");
+          headers.authorization = `Bearer ${pulseToken}`;
         }
+        timer = setTimeout(() => ac.abort(), remoteToolCatalogTimeoutMs());
         const response = await fetch(url, {
           method: "POST",
           headers,
           body: JSON.stringify(request),
+          redirect: "error",
           signal: ac.signal,
         });
         if (!response.ok) {
+          if (response.status === 401 || response.status === 403) tokens.clearAuthentication();
           throw new Error(`HTTP ${response.status} ${response.statusText}`);
         }
         // Same 1MB response cap as every other posse-remote call; a bare
@@ -809,7 +840,7 @@ async function fetchRemoteToolCatalog() {
         });
         return null;
       } finally {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         _remoteToolCatalogPromise = null;
       }
     })(),
@@ -855,7 +886,9 @@ function buildRemoteToolSurfaceRequest() {
         read: true,
         write: writeEnabled,
         shell: allowBash,
+        tests: bootConfig.allowTests === true,
         image_generation: allowImageGeneration,
+        project_db: projectDbCapabilityGrant,
       },
       atlas: atlasCapabilities,
     },
@@ -1053,10 +1086,14 @@ let execBash = allowBash ? createBashExecutor() : null;
 // capability lane — write sessions take the full grant, read sessions need
 // the `read` permission). Off by default.
 function projectDbCapability() {
-  return (writeEnabled || projectDbWrite) ? "write" : "read";
+  if (ownerHotGateway && !mcpMessageSessionScoped) return "write";
+  if (projectDbCapabilityGrant === "write" && projectDbWrite) return "write";
+  if (projectDbCapabilityGrant === "read" || projectDbCapabilityGrant === "write") return "read";
+  return "none";
 }
 function computeProjectDbAccessEnabled() {
   try {
+    if (projectDbCapability() === "none") return false;
     const cfg = readProjectDbConfig({ projectDir: workspaceCwd });
     if (!cfg.enabled || !cfg.dbType) return false;
     return capProjectDbPermissions(cfg.permissions, projectDbCapability()).length > 0;
@@ -1487,93 +1524,87 @@ function makeDirWithinScope(args = {}) {
 
 // ── Researcher read-gate state machine ─────────────────────────────────────
 // Tracks what the researcher has read, gates the next read until a verdict is
-// emitted (relevant/irrelevant). Persists to a JSONL file so restarts resume.
+// emitted (relevant/irrelevant). Persists to a JSON file so restarts resume.
 
-function createResearchState() {
-  return {
-  currentlyReading: null,      // { path, content } — awaiting verdict
-  relevant: new Map(),         // path → { summary, content }
-  irrelevant: new Set(),       // paths tagged irrelevant
-  readOrder: [],               // ordered list of all reads
-  explorationSteps: 0,
-  lastNovelEvidenceStep: 0,
-  synthesisRequiredAt: null,
-  synthesisReason: null,
-  synthesisNoticeEmitted: false,
-  };
-}
-
-let researchState = createResearchState();
 const researchStatesByKey = new Map();
 
-let researchLogPath = (() => {
+function researchStatePathForCurrentBoot() {
   if (!isResearcherRole || !mcpJobId) return null;
   const logDir = path.join(workspaceCwd, ".posse", "research-state");
   return path.join(logDir, `job-${mcpJobId}.json`);
-})();
-
-function loadResearchState() {
-  if (!researchLogPath) return;
-  try {
-    if (!fs.existsSync(researchLogPath)) return;
-    const data = JSON.parse(fs.readFileSync(researchLogPath, "utf8"));
-    if (data.relevant) {
-      for (const [p, v] of Object.entries(data.relevant)) {
-        researchState.relevant.set(p, v);
-      }
-    }
-    if (Array.isArray(data.irrelevant)) {
-      for (const p of data.irrelevant) researchState.irrelevant.add(p);
-    }
-    if (Array.isArray(data.readOrder)) {
-      researchState.readOrder = data.readOrder;
-    }
-    if (data.currentlyReading) {
-      researchState.currentlyReading = data.currentlyReading;
-    }
-    const explorationSteps = Number(data.explorationSteps);
-    if (Number.isFinite(explorationSteps) && explorationSteps >= 0) {
-      researchState.explorationSteps = Math.floor(explorationSteps);
-    }
-    const lastNovelEvidenceStep = Number(data.lastNovelEvidenceStep);
-    if (Number.isFinite(lastNovelEvidenceStep) && lastNovelEvidenceStep >= 0) {
-      researchState.lastNovelEvidenceStep = Math.floor(lastNovelEvidenceStep);
-    }
-    if (data.synthesisRequiredAt) {
-      researchState.synthesisRequiredAt = String(data.synthesisRequiredAt);
-      researchState.synthesisNoticeEmitted = data.synthesisNoticeEmitted !== false;
-    }
-    if (data.synthesisReason) {
-      researchState.synthesisReason = String(data.synthesisReason);
-    }
-  } catch { /* fresh start */ }
 }
 
-function saveResearchState() {
-  if (!researchLogPath) return;
+function readResearchState(filePath) {
+  if (!filePath) return null;
   try {
-    const researchLogDir = path.dirname(researchLogPath);
+    if (!fs.existsSync(filePath)) return null;
+    const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizedResearchStateExtras(data = {}) {
+  const explorationSteps = Number(data.explorationSteps);
+  const lastNovelEvidenceStep = Number(data.lastNovelEvidenceStep);
+  const synthesisRequiredAt = data.synthesisRequiredAt ? String(data.synthesisRequiredAt) : null;
+  return {
+    explorationSteps: Number.isFinite(explorationSteps) && explorationSteps >= 0 ? Math.floor(explorationSteps) : 0,
+    lastNovelEvidenceStep: Number.isFinite(lastNovelEvidenceStep) && lastNovelEvidenceStep >= 0
+      ? Math.floor(lastNovelEvidenceStep)
+      : 0,
+    synthesisRequiredAt,
+    synthesisReason: data.synthesisReason ? String(data.synthesisReason) : null,
+    synthesisNoticeEmitted: synthesisRequiredAt ? data.synthesisNoticeEmitted !== false : false,
+  };
+}
+
+function writeResearchState(filePath, coreState, state) {
+  if (!filePath) return;
+  try {
+    const researchLogDir = path.dirname(filePath);
     fs.mkdirSync(researchLogDir, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(researchLogDir, 0o700); } catch { /* best effort */ }
     const data = {
       jobId: mcpJobId,
       workItemId: mcpWorkItemId,
-      currentlyReading: researchState.currentlyReading,
-      relevant: Object.fromEntries(researchState.relevant),
-      irrelevant: [...researchState.irrelevant],
-      readOrder: researchState.readOrder,
-      explorationSteps: researchState.explorationSteps,
-      lastNovelEvidenceStep: researchState.lastNovelEvidenceStep,
-      synthesisRequiredAt: researchState.synthesisRequiredAt,
-      synthesisReason: researchState.synthesisReason,
-      synthesisNoticeEmitted: researchState.synthesisNoticeEmitted,
+      ...coreState,
+      explorationSteps: state.explorationSteps,
+      lastNovelEvidenceStep: state.lastNovelEvidenceStep,
+      synthesisRequiredAt: state.synthesisRequiredAt,
+      synthesisReason: state.synthesisReason,
+      synthesisNoticeEmitted: state.synthesisNoticeEmitted,
     };
-    fs.writeFileSync(researchLogPath, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
-    try { fs.chmodSync(researchLogPath, 0o600); } catch { /* best effort */ }
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
+    try { fs.chmodSync(filePath, 0o600); } catch { /* best effort */ }
   } catch { /* best effort */ }
 }
 
-if (isResearcherRole) loadResearchState();
+function createResearchLedger(filePath = null) {
+  const loaded = readResearchState(filePath);
+  let ledgerState = null;
+  const persist = filePath ? {
+    load: () => loaded,
+    save: (coreState) => writeResearchState(filePath, coreState, ledgerState),
+  } : null;
+  const ledger = createChainLedger({
+    readFile: (args) => execReadFile(args, workspaceCwd, effectiveScopePredicates),
+    cwd: workspaceCwd,
+    persist,
+  });
+  Object.assign(ledger.state, normalizedResearchStateExtras(loaded || {}));
+  ledgerState = ledger.state;
+  return ledger;
+}
+
+let researchLogPath = researchStatePathForCurrentBoot();
+let researchLedger = createResearchLedger(researchLogPath);
+let researchState = researchLedger.state;
+
+function saveResearchState() {
+  researchLedger.save();
+}
 
 function isResearchExplorationTool(toolName, { requestedAtlasTool = false } = {}) {
   if (requestedAtlasTool) return true;
@@ -1670,139 +1701,34 @@ function buildResearchSynthesisRequiredMessage(toolName) {
   ].join("\n");
 }
 
-// Matches the out-of-range sentinel returned by execReadFile (toolkit/index.js)
-// when the requested offset is past EOF. It is NOT an "Error:" string but is
-// also not file content, so chainRead must not store it in the research buffer.
-const READ_FILE_EOF_SENTINEL_RE = /^File has \d+ lines\. Requested offset \d+ is beyond end of file\.$/;
-
 function chainRead(args) {
-  const requestedPath = args.path;
-
-  if (!requestedPath) {
-    return "Error: path is required.";
-  }
-
-  // ── Gate: chain is locked until verdict is issued ──────────────────────
-  if (researchState.currentlyReading) {
-    const pending = researchState.currentlyReading.path;
-    return `AUDIT ERROR: Chain is locked. You must call chain_verdict on "${pending}" before reading another file.`;
-  }
-
-  // ── Enforce single-read rule ──────────────────────────────────────────
-  const resolvedPath = path.resolve(workspaceCwd, requestedPath).replace(/\\/g, "/");
-  const relPath = path.relative(workspaceCwd, resolvedPath).replace(/\\/g, "/");
-  const offset = _normalizeReadRange(args.offset, 1);
-  const limit = _normalizeReadRange(args.limit, CONTEXT_CHAIN_READ_DEFAULT_LIMIT_LINES);
-  const continuationRead = offset > 1;
-
-  if (researchState.relevant.has(relPath) && !continuationRead) {
-    const cached = researchState.relevant.get(relPath) || {};
-    const relevantCount = researchState.relevant.size;
-    const irrelevantCount = researchState.irrelevant.size;
-    const ledgerLine = `[audit ledger: ${relevantCount} relevant, ${irrelevantCount} irrelevant, ${researchState.readOrder.length} total reads]`;
-    return [
-      ledgerLine,
-      `[chain restored from ledger: "${relPath}" was already tagged relevant; verdict carries over, do not call chain_verdict again for this restored view]`,
-      cached.summary ? `[prior verdict summary: ${cached.summary}]` : "[prior verdict summary: none]",
-      "",
-      cached.content || "",
-    ].join("\n");
-  }
-  if (researchState.irrelevant.has(relPath) && !continuationRead) {
-    return `AUDIT ERROR: "${relPath}" was already read and tagged irrelevant. ` +
-      `Each file may only be read once unless you request a continuation with offset/limit.`;
-  }
-
-  // ── Read the file ─────────────────────────────────────────────────────
-  const result = execReadFile({ ...args, path: requestedPath, limit }, workspaceCwd, effectiveScopePredicates);
-
-  // The offset-past-EOF sentinel is not file content. Surface it as an audit
-  // error without locking the chain or recording it — otherwise chain_verdict
-  // would persist the placeholder string as the file's "relevant content".
-  if (READ_FILE_EOF_SENTINEL_RE.test(result.trim())) {
-    return `AUDIT ERROR: ${result.trim()} Nothing was recorded; re-read "${relPath}" with a valid offset.`;
-  }
-
-  if (/^Error:/i.test(result.trim())) {
-    const message = result.trim().replace(/^Error:\s*/i, "");
-    return `AUDIT ERROR: ${message || "read failed"} Nothing was recorded.`;
-  }
-
-  if (!result.startsWith("Error:")) {
-    researchState.currentlyReading = { path: relPath, content: result, offset, limit, continuation: continuationRead };
-    researchState.readOrder.push(relPath);
-    saveResearchState();
-  }
-
-  const relevantCount = researchState.relevant.size;
-  const irrelevantCount = researchState.irrelevant.size;
-  const ledgerLine = `[audit ledger: ${relevantCount} relevant, ${irrelevantCount} irrelevant, ${researchState.readOrder.length} total reads]`;
-
-  return `${ledgerLine}\n[chain locked — call chain_verdict when done reviewing this file]\n\n${result}`;
+  return researchLedger.chainRead(args || {});
 }
 
 function chainVerdict(args) {
-  if (!researchState.currentlyReading) {
-    return "AUDIT ERROR: No file pending verdict. Call chain_read first.";
+  const raw = researchLedger.chainVerdict(args || {});
+  let response;
+  try {
+    response = JSON.parse(raw);
+  } catch {
+    return raw;
   }
+  if (response?.ok !== true) return raw;
 
-  const { path: filePath, content, continuation = false } = researchState.currentlyReading;
-  const verdict = String(args.verdict || "").toLowerCase();
-  const summary = String(args.summary || "").trim();
-
-  if (verdict !== "relevant" && verdict !== "irrelevant") {
-    return `AUDIT ERROR: verdict must be "relevant" or "irrelevant", got "${args.verdict}".`;
-  }
-  if (verdict === "irrelevant" && !summary) {
-    return "AUDIT ERROR: summary is required when verdict is \"irrelevant\" so pruning can preserve why this file was excluded.";
-  }
-
-  const wasRelevant = researchState.relevant.has(filePath);
-  if (verdict === "relevant") {
-    const previous = researchState.relevant.get(filePath);
-    const nextSummary = summary || "(no summary)";
-    researchState.relevant.set(filePath, previous ? {
-      summary: [previous.summary, continuation ? `continuation: ${nextSummary}` : nextSummary].filter(Boolean).join("; "),
-      content: [previous.content, content].filter(Boolean).join("\n\n--- chain_read continuation ---\n\n"),
-    } : {
-      summary: nextSummary,
-      content,
-    });
-    researchState.irrelevant.delete(filePath);
-  } else {
-    if (!researchState.relevant.has(filePath)) {
-      researchState.irrelevant.add(filePath);
-    }
-  }
-
-  researchState.currentlyReading = null;
-  saveResearchState();
-
-  const relevantCount = researchState.relevant.size;
-  const irrelevantCount = researchState.irrelevant.size;
-  const ledger = { relevant: relevantCount, irrelevant: irrelevantCount, total: researchState.readOrder.length };
-  const novelRelevantFile = verdict === "relevant" && !wasRelevant;
+  const filePath = response.tagged;
+  const verdict = response.verdict;
+  const summary = response.summary || "";
+  const continuation = response.evidence?.continuation === true;
+  const novelRelevantFile = response.evidence?.novel_relevant_file === true;
   recordResearchEvidenceObservation({
     filePath,
     verdict,
     summary,
     continuation,
-    ledger,
+    ledger: response.ledger,
     novelRelevantFile,
   });
   noteResearchExplorationStep({ toolName: "chain_verdict", novelRelevantFile });
-  const response = {
-    ok: true,
-    tagged: filePath,
-    verdict,
-    summary: summary || null,
-    ledger,
-    evidence: {
-      novel_relevant_file: novelRelevantFile,
-      continuation,
-    },
-    chain: "unlocked",
-  };
   const synthesis = researchSynthesisStatus();
   if (synthesis) response.synthesis = synthesis;
 
@@ -2192,7 +2118,7 @@ function rebuildToolExecutors() {
 }
 
 function recomputeAtlasAllowedActionsForCurrentBoot() {
-  if (ownerHotGateway && atlasAvailable) {
+  if (ownerHotGateway && !mcpMessageSessionScoped && atlasAvailable) {
     return new Set(ATLAS_TOOL_ACTIONS.filter(isExternallyRoutedAtlasTool));
   }
   if (hasTokenToolAllowlist()) {
@@ -2211,36 +2137,39 @@ function recomputeAtlasAllowedActionsForCurrentBoot() {
 }
 
 function selectResearchStateForCurrentBoot() {
-  researchLogPath = (() => {
-    if (!isResearcherRole || !mcpJobId) return null;
-    const logDir = path.join(workspaceCwd, ".posse", "research-state");
-    return path.join(logDir, `job-${mcpJobId}.json`);
-  })();
+  researchLogPath = researchStatePathForCurrentBoot();
   const key = runtimeSessionKey();
-  let entry = researchStatesByKey.get(key);
-  if (!entry) {
-    entry = { state: createResearchState(), loaded: false };
-    researchStatesByKey.set(key, entry);
+  let ledger = researchStatesByKey.get(key);
+  if (!ledger) {
+    ledger = createResearchLedger(researchLogPath);
+    researchStatesByKey.set(key, ledger);
   }
-  researchState = entry.state;
-  if (!entry.loaded) {
-    loadResearchState();
-    entry.loaded = true;
-  }
+  researchLedger = ledger;
+  researchState = ledger.state;
 }
 
 function applyRuntimeBootConfig(nextConfig = {}) {
   const parsedConfig = bootConfigFromOAuthToken(nextConfig && typeof nextConfig === "object" ? nextConfig : {});
   const nextSessionKey = runtimeSessionKey(parsedConfig);
   const sessionChanged = nextSessionKey !== activeRuntimeSessionKey;
+  const previousMeterContext = {
+    work_item_id: mcpWorkItemId,
+    job_id: mcpJobId,
+    attempt_id: mcpAttemptId,
+    agent_call_id: mcpAgentCallId,
+  };
   bootConfig = parsedConfig;
   ownerHotGateway = ownerHotProcess || bootConfig.ownerHotGateway === true;
+  const ownerHotUnscoped = ownerHotGateway && !mcpMessageSessionScoped;
   scopeParseState.invalid = bootConfig?.mcpOAuth?.verified === false;
   workspaceCwd = String(bootConfig.cwd || "").trim() || process.cwd();
-  allowWrite = bootConfig.allowWrite === true || ownerHotGateway;
+  allowWrite = bootConfig.allowWrite === true || ownerHotUnscoped;
   projectDbWrite = bootConfig.projectDbWrite === true;
-  allowImageHelpers = bootConfig.allowImageHelpers === true || ownerHotGateway;
-  allowImageGeneration = bootConfig.allowImageGeneration === true || ownerHotGateway;
+  projectDbCapabilityGrant = normalizeProjectDbCapability(
+    bootConfig.projectDbCapability || (projectDbWrite ? "write" : "none"),
+  );
+  allowImageHelpers = bootConfig.allowImageHelpers === true || ownerHotUnscoped;
+  allowImageGeneration = bootConfig.allowImageGeneration === true || ownerHotUnscoped;
   roleName = String(bootConfig.role || "").trim() || null;
   isResearcherRole = roleName === "researcher";
   providerName = String(bootConfig.providerName || "").trim() || null;
@@ -2250,6 +2179,8 @@ function applyRuntimeBootConfig(nextConfig = {}) {
   mcpJobId = Number(bootConfig.jobId) || null;
   mcpWorkItemId = Number(bootConfig.workItemId) || null;
   mcpAttemptId = Number(bootConfig.attemptId) || null;
+  mcpAgentCallId = Number(bootConfig.agentCallId) || null;
+  mcpPromptChars = Math.max(0, Number(bootConfig.promptChars) || 0);
   atlasAvailable = bootConfig.atlasAvailable === true;
   atlasGateEnabled = bootConfig.atlasGateEnabled === true;
   atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().toLowerCase();
@@ -2262,7 +2193,10 @@ function applyRuntimeBootConfig(nextConfig = {}) {
   remoteToolCatalogPreload = bootConfig.remoteToolSurface && typeof bootConfig.remoteToolSurface === "object"
     ? bootConfig.remoteToolSurface
     : null;
-  allowBash = ownerHotGateway || ["dev", "artificer", "assessor"].includes(roleName);
+  allowBash = ownerHotUnscoped || (
+    bootConfig.allowShell === true
+    && ["dev", "artificer", "assessor"].includes(roleName)
+  );
   execBash = allowBash ? createBashExecutor() : null;
   scopePredicates = buildScopePredicates(workspaceCwd, {
     modifyFiles: Array.isArray(bootConfig.scopedFiles) ? bootConfig.scopedFiles : [],
@@ -2317,11 +2251,18 @@ function applyRuntimeBootConfig(nextConfig = {}) {
   _remoteToolSurfaceRequest = null;
   _remoteToolCatalogPromise = null;
   if (sessionChanged) {
+    ContextMeter.release(previousMeterContext);
     gateBootedAtMs = Date.now();
     imageGenerationCallCount = 0;
     _lastReadMeta = null;
     activeRuntimeSessionKey = nextSessionKey;
   }
+  ContextMeter.forContext({
+    work_item_id: mcpWorkItemId,
+    job_id: mcpJobId,
+    attempt_id: mcpAttemptId,
+    agent_call_id: mcpAgentCallId,
+  }, { promptChars: mcpPromptChars });
   rebuildNativeToolSchemas();
   rebuildToolExecutors();
   selectResearchStateForCurrentBoot();
@@ -2367,6 +2308,7 @@ async function runNativeToolThroughGate(toolName, args, handler) {
       work_item_id: mcpWorkItemId,
       job_id: mcpJobId,
       attempt_id: mcpAttemptId,
+      agent_call_id: mcpAgentCallId,
     },
   });
 }
@@ -2924,6 +2866,7 @@ function dispatchParsed(parsed) {
       work_item_id: Number(sessionBoot.workItemId) || mcpWorkItemId,
       job_id: Number(sessionBoot.jobId) || mcpJobId,
       attempt_id: Number(sessionBoot.attemptId) || mcpAttemptId,
+      agent_call_id: Number(sessionBoot.agentCallId) || mcpAgentCallId,
     },
     () => handleRequest(parsed),
   )).catch((err) => {

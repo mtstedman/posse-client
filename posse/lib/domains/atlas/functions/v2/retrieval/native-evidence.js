@@ -77,17 +77,9 @@ export function nativeCodeDb({
  */
 export function collectNativeEvidenceIndexedPaths(view, maxFiles = MAX_NATIVE_EVIDENCE_PATHS) {
   const cap = clampInt(maxFiles, MAX_NATIVE_EVIDENCE_PATHS, 1, MAX_NATIVE_EVIDENCE_PATHS);
-  const db = typeof (/** @type {any} */ (view))._unsafeDb === "function"
-    ? /** @type {any} */ (view)._unsafeDb()
-    : null;
-  if (db) {
-    const rows = db.prepare("SELECT repo_rel_path FROM path_to_blob ORDER BY repo_rel_path LIMIT ?").all(cap);
-    return normalizePathList(rows.map((row) => row.repo_rel_path));
-  }
-  if (view?.query && typeof view.query.allSymbols === "function") {
-    return normalizePathList(view.query.allSymbols({ limit: cap }).map((symbol) => symbol.repo_rel_path));
-  }
-  return [];
+  return view?.query && typeof view.query.indexedPaths === "function"
+    ? normalizePathList(view.query.indexedPaths({ limit: cap }))
+    : [];
 }
 
 /**

@@ -8,4 +8,6 @@ export const ATLAS_PARSER_VERSION = "atlas-v2-parser";
 // module anchors for import-only files, Rust #[derive] implements edges,
 // Go multi-name const/var + receiver-method parenting, Python subscripted
 // bases, JS signature body-boundary fix (encoder parse_extract changes).
-export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v1";
+// edge-coverage-v2: Python import edges persist the local binding in to_name
+// and the original imported name in the module#original target.
+export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v2";

@@ -133,6 +133,10 @@ export const HIDDEN_ATLAS_SURFACE_ACTIONS = Object.freeze(new Set([
   "runtime.queryOutput",
   "context.summary",
   "usage.stats",
+  // Deprecated compatibility alias: symbol.card accepts the same
+  // symbolIds/symbolRefs batch inputs directly, so the plural action stays
+  // dispatchable but is hidden from provider surfaces and gateway enums.
+  "symbol.cards",
 ]));
 
 export function isAtlasActionSurfaced(action) {
@@ -381,8 +385,8 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   },
   "query": { access: "atlas", summary: "Compact gateway for native ATLAS v2 retrieval actions." },
   "code": { access: "atlas", summary: "Compact gateway for native ATLAS v2 code-inspection actions." },
-  "repo": { access: "atlas", summary: "Compact gateway for native ATLAS v2 repository, policy, usage, and diagnostics actions." },
-  "agent": { access: "atlas", summary: "Compact gateway for native ATLAS v2 context, feedback, buffer, and memory actions." },
+  "repo": { access: "atlas", summary: "Compact gateway for native ATLAS v2 action-catalog discovery: action search and compact manuals." },
+  "agent": { access: "atlas", summary: "Compact gateway for native ATLAS v2 memory curation actions: memory store and memory feedback." },
   "action.search": { access: "atlas", summary: "Search the native ATLAS v2 action catalog for the right tool/action." },
   "manual": { access: "atlas", summary: "Return compact native ATLAS v2 API reference entries." },
   "workflow": { access: "atlas", summary: "Execute multi-step native ATLAS workflows with data transforms and references." },
@@ -397,8 +401,8 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "buffer.checkpoint": { access: "atlas", summary: "Clear or persist an ATLAS v2 editor buffer overlay." },
   "buffer.status": { access: "atlas", summary: "Inspect active ATLAS v2 editor buffer overlays." },
   "symbol.search": { access: "atlas", summary: "Search indexed symbols through ATLAS for targeted semantic discovery." },
-  "symbol.card": { access: "atlas", summary: "Fetch one symbol card by symbolId or symbolRef without loading whole files." },
-  "symbol.cards": { access: "atlas", summary: "Fetch multiple symbol cards by symbolIds or symbolRefs with per-item errors." },
+  "symbol.card": { access: "atlas", summary: "Fetch compact symbol cards without loading whole files: one card by symbolId/symbolRef, or a batch with per-item errors via symbolIds/symbolRefs." },
+  "symbol.cards": { access: "atlas", summary: "Deprecated compatibility alias for symbol.card, which accepts the same symbolIds/symbolRefs batch inputs directly." },
   "symbol.overview": { access: "atlas", summary: "List compact call/reference sites for a symbol without full caller cards." },
   "tree.overview": { access: "atlas", summary: "Top-level code-tree orientation: root containment page plus the compressed-tree labeled area map." },
   "tree.branch": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels. Structure only — for exact file/import/fan-in inventory, follow with code.structure; for content intake, follow with code.survey." },
@@ -444,7 +448,6 @@ const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
   "tree.expand",
   "symbol.search",
   "symbol.card",
-  "symbol.cards",
   "symbol.overview",
   "slice.build",
   "slice.refresh",
@@ -568,7 +571,7 @@ export const DETERMINISTIC_IMAGE_MUTATION_TOOLS = TOOL_ROLE_LIBRARY.deterministi
 export const DETERMINISTIC_IMAGE_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.imageGeneration;
 export const DETERMINISTIC_OCR_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.ocr;
 
-export const WEB_TOOL_ROLES = new Set(["researcher", "artificer"]);
+export const WEB_TOOL_ROLES = new Set(["researcher", "assessor"]);
 export const GATED_ROLES = new Set(["researcher", "planner", "dev", "assessor"]);
 
 export const MEANINGFUL_ATLAS_ACTIONS = new Set([

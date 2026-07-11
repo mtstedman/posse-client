@@ -1,9 +1,12 @@
 // @ts-check
 
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
-import { nativeHeartbeatAuthFromSettings } from "../../../shared/native/functions/auth.js";
 
 export const REMOTE_NATIVE_PROTOCOL = "posse.remote.native.v1";
+// Pulse route grant for the posse-remote server-proxy family. Distinct from
+// the atlas/git grants: a remote pulse never authorizes atlas or git work and
+// vice versa.
+export const REMOTE_NATIVE_ROUTE = "remote:methods";
 
 /**
  * @param {string} method
@@ -53,8 +56,6 @@ function unwrapRemoteNativeResponse(value) {
  * }} request
  * @param {{
  *   manager?: import("../../../shared/tools/classes/BinaryManager.js").BinaryManager,
- *   apiKey?: string,
- *   auth?: Record<string, unknown> | null,
  * }} [opts]
  * @returns {Promise<unknown>}
  */
@@ -63,25 +64,14 @@ export async function runRemoteNativeRequestJson(request, opts = {}) {
   if (!manager.shouldUse("remote")) {
     throw new Error("remote native client unavailable");
   }
-  const apiKey = String(opts.apiKey || "").trim();
-  if (!apiKey) {
+  if (manager.nativeAuthManager?.hasLaunchKey?.() !== true) {
     throw new Error("remote native client requires a Posse key");
   }
-  const envelope = buildRemoteNativeRequest("request-json", {
-    ...request,
-    apiKey,
-  });
-  // Heartbeat envelope from the manager's single auth authority (cached) when
-  // available; an explicit caller `auth` wins, and settings is only a defensive
-  // fallback for stub managers.
-  const auth = (opts.auth && typeof opts.auth === "object")
-    ? opts.auth
-    : (typeof manager.nativeAuthEnvelope === "function"
-      ? manager.nativeAuthEnvelope()
-      : nativeHeartbeatAuthFromSettings());
-  if (auth && typeof auth === "object") {
-    /** @type {Record<string, unknown>} */ (envelope).auth = auth;
-  }
+  // NativeBinary owns request.pulse at the final stdin boundary: it strips any
+  // caller-supplied credential/trust fields and attaches a route-scoped pulse
+  // envelope. The raw key never enters the child; the resource payload accepts
+  // no caller auth override.
+  const envelope = buildRemoteNativeRequest("request-json", request);
   const res = await manager.binary("remote").run(
     "request-json",
     [],
@@ -89,6 +79,7 @@ export async function runRemoteNativeRequestJson(request, opts = {}) {
       input: `${JSON.stringify(envelope)}\n`,
       json: true,
       timeoutMs: request.timeoutMs,
+      requiredRoute: REMOTE_NATIVE_ROUTE,
     },
   );
   if (!res.ok) {

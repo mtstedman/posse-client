@@ -21,7 +21,7 @@ import {
 } from "./worktree.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
-import { GIT_MERGE_TIMEOUT_MS, firstGitLine } from "./workflow-git-utils.js";
+import { GIT_MERGE_TIMEOUT_MS, firstGitLine, timedOutMergeCommitLanded } from "./workflow-git-utils.js";
 
 export function createMergeWorkflowHelpers(context, {
   ensureCleanTargetBranch,
@@ -331,17 +331,6 @@ export function createMergeWorkflowHelpers(context, {
     } catch { /* best effort */ }
   }
 
-  function gitLines(args, cwd) {
-    try {
-      return gitMergeExec(args, cwd)
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
-    } catch {
-      return [];
-    }
-  }
-
   function gitLinesOrNull(args, cwd) {
     try {
       return gitMergeExec(args, cwd)
@@ -353,7 +342,11 @@ export function createMergeWorkflowHelpers(context, {
     }
   }
 
-  function recoverTimedOutMerge(branch, cwd, log, onPhase = null, { step = "unknown", targetBranch = currentTargetBranch() } = {}) {
+  function recoverTimedOutMerge(branch, cwd, log, onPhase = null, {
+    step = "unknown",
+    targetBranch = currentTargetBranch(),
+    preMergeHead = null,
+  } = {}) {
     const canRecover = step === "commit" || step === "postcommit";
     if (!canRecover) return null;
 
@@ -364,13 +357,20 @@ export function createMergeWorkflowHelpers(context, {
     const headSubject = (() => {
       try { return gitMergeExec(["show", "-s", "--format=%s", "HEAD"], cwd); } catch { return ""; }
     })();
-    const stagedFiles = gitLines(["diff", "--cached", "--name-only"], cwd);
+    const stagedFiles = gitLinesOrNull(["diff", "--cached", "--name-only"], cwd);
     const unmergedFiles = gitLinesOrNull(["diff", "--name-only", "--diff-filter=U"], cwd);
-    if (unmergedFiles == null) {
+    if (stagedFiles == null || unmergedFiles == null) {
       return null;
     }
 
-    if (head && headSubject === subject && unmergedFiles.length === 0) {
+    if (timedOutMergeCommitLanded({
+      head,
+      preMergeHead,
+      headSubject,
+      expectedSubject: subject,
+      stagedFiles,
+      unmergedFiles,
+    })) {
       cleanupSquashMessage(cwd);
       log(`Merge timeout recovered: ${branch} commit already landed at ${head}`, {
         json: {
@@ -521,7 +521,11 @@ export function createMergeWorkflowHelpers(context, {
     }
   }
 
-  function gitMergeToTarget(branch, cwd, { wiId = null, onPhase = null } = {}) {
+  function gitMergeToTarget(branch, cwd, options = {}) {
+    return withWorktreeLock(cwd, projectDir, () => gitMergeToTargetUnlocked(branch, cwd, options));
+  }
+
+  function gitMergeToTargetUnlocked(branch, cwd, { wiId = null, onPhase = null } = {}) {
     const targetBranch = currentTargetBranch();
     const log = (msg, extra = {}) => {
       logEvent({
@@ -889,7 +893,11 @@ export function createMergeWorkflowHelpers(context, {
         const error = firstGitLine(finalMergeErr);
         const timedOut = isGitTimeoutError(finalMergeErr);
         if (timedOut) {
-          const recovered = recoverTimedOutMerge(branch, cwd, log, onPhase, { step: mergeStep, targetBranch });
+          const recovered = recoverTimedOutMerge(branch, cwd, log, onPhase, {
+            step: mergeStep,
+            targetBranch,
+            preMergeHead,
+          });
           if (recovered?.ok) {
             emitAtlasMainAdvancedAfterMerge({
               wiId,

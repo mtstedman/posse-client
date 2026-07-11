@@ -14,9 +14,17 @@
 // recipe for remaining tools: mirror in Rust, A/B against the Node oracle,
 // switch the call site to the binary, then delete the replaced Node function.
 
-import { BINARY_NAMES, VALID_BINARY_NAMES } from "../../../catalog/binary.js";
+import {
+  BINARY_NAMES,
+  VALID_BINARY_NAMES,
+  nativeBinaryExactVersion,
+} from "../../../catalog/binary.js";
 import { getNativeBinaryEnabled } from "../../../domains/settings/functions/tunables.js";
 import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
+import {
+  ensureNativeBinaryArtifact,
+  invalidateNativeArtifactCache,
+} from "../../native/functions/artifact-download.js";
 import { NativeBinary } from "./NativeBinary.js";
 
 /**
@@ -45,6 +53,10 @@ export class BinaryManager {
    *   env?: NodeJS.ProcessEnv,
    *   enabledResolver?: (name: string) => boolean,
    *   nativeAuthManager?: import("../../native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
+   *   artifactInstaller?: typeof ensureNativeBinaryArtifact,
+   *   artifactCacheRoot?: string,
+   *   artifactFetchImpl?: typeof fetch,
+   *   artifactPulseTokens?: import("../../native/classes/PulseTokenManager.js").PulseTokenManager,
    * }} [opts]
    */
   constructor(opts = {}) {
@@ -58,6 +70,12 @@ export class BinaryManager {
     // at module load. Child runtimes swap in a capability-seeded manager via
     // setNativeAuthManager().
     this._nativeAuthManager = opts.nativeAuthManager || null;
+    this._artifactInstaller = opts.artifactInstaller || ensureNativeBinaryArtifact;
+    this._artifactCacheRoot = opts.artifactCacheRoot || null;
+    this._artifactFetchImpl = opts.artifactFetchImpl || globalThis.fetch;
+    this._artifactPulseTokens = opts.artifactPulseTokens || null;
+    /** @type {Map<string, Promise<Record<string, unknown>>>} */
+    this._artifactEnsures = new Map();
     /** @type {Map<string, NativeBinary>} */
     this._handles = new Map();
   }
@@ -117,21 +135,25 @@ export class BinaryManager {
     }
     let handle = this._handles.get(name);
     if (!handle) {
-      handle = new NativeBinary({
-        name,
-        binRoot: this._opts.binRoot,
-        platform: this._opts.platform,
-        arch: this._opts.arch,
-        spawnImpl: this._opts.spawnImpl,
-        spawnSyncImpl: this._opts.spawnSyncImpl,
-        // Previously dropped on the floor: a manager-scoped env (and the auth
-        // authority) now reach the handle so key/heartbeat resolution honors it.
-        env: this._opts.env,
-        nativeAuthManager: this.nativeAuthManager,
-      });
+      handle = this._createHandle(name, this._opts.binRoot);
       this._handles.set(name, handle);
     }
     return handle;
+  }
+
+  _createHandle(name, binRoot) {
+    return new NativeBinary({
+      name,
+      binRoot,
+      platform: this._opts.platform,
+      arch: this._opts.arch,
+      spawnImpl: this._opts.spawnImpl,
+      spawnSyncImpl: this._opts.spawnSyncImpl,
+      // Previously dropped on the floor: a manager-scoped env (and the auth
+      // authority) now reach the handle so key/heartbeat resolution honors it.
+      env: this._opts.env,
+      nativeAuthManager: this.nativeAuthManager,
+    });
   }
 
   /**
@@ -147,6 +169,77 @@ export class BinaryManager {
     } catch {
       // Unsupported host OS/arch → treat as unavailable rather than throwing.
       return false;
+    }
+  }
+
+  /**
+   * Ensure a remotely distributed native binary is present for this host.
+   * Local lib/bin (or an explicit test binRoot) always wins; only the catalog-
+   * pinned vector binary is downloadable. Concurrent callers share one fetch.
+   *
+   * @param {string} name
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async ensureAvailable(name) {
+    if (!VALID_BINARY_NAMES.has(name)) {
+      return { available: false, name, reason: "unknown_binary" };
+    }
+    const existing = this.binary(name);
+    if (existing.isAvailable()) {
+      return { available: true, name, path: existing.resolvePath(), source: "staged", downloaded: false };
+    }
+    if (name !== "vector") {
+      return { available: false, name, reason: "not_remotely_distributed" };
+    }
+    if (this._opts.binRoot && this._artifactInstaller === ensureNativeBinaryArtifact) {
+      return { available: false, name, reason: "explicit_bin_root_missing" };
+    }
+    const inFlight = this._artifactEnsures.get(name);
+    if (inFlight) return inFlight;
+    const promise = this._ensureRemoteArtifact(name).finally(() => {
+      if (this._artifactEnsures.get(name) === promise) this._artifactEnsures.delete(name);
+    });
+    this._artifactEnsures.set(name, promise);
+    return promise;
+  }
+
+  async _ensureRemoteArtifact(name) {
+    const handle = this.binary(name);
+    const version = nativeBinaryExactVersion(name);
+    if (!version) return { available: false, name, reason: "version_not_pinned" };
+    try {
+      const installed = await this._artifactInstaller({
+        name,
+        version,
+        os: handle.os,
+        arch: handle.arch,
+        authManager: this.nativeAuthManager,
+        pulseTokens: this._artifactPulseTokens,
+        fetchImpl: this._artifactFetchImpl,
+        ...(this._artifactCacheRoot ? { cacheRoot: this._artifactCacheRoot } : {}),
+      });
+      const cachedHandle = this._createHandle(name, installed.bundleRoot);
+      this._handles.set(name, cachedHandle);
+      if (!cachedHandle.isAvailable()) {
+        this._handles.set(name, handle);
+        await invalidateNativeArtifactCache(installed);
+        return { available: false, name, reason: "downloaded_version_mismatch" };
+      }
+      return {
+        available: true,
+        name,
+        path: cachedHandle.resolvePath(),
+        source: installed.source,
+        downloaded: installed.downloaded === true,
+        sha256: installed.sha256,
+      };
+    } catch (error) {
+      return {
+        available: false,
+        name,
+        reason: String(error?.code || "artifact_download_failed"),
+        error,
+      };
     }
   }
 

@@ -185,7 +185,7 @@
 
 /**
  * @typedef {Object} RepoQualityParams
- * @property {boolean} [probeTreeSitter]      When true, attempt to load observed tree-sitter grammars.
+ * @property {boolean} [probeTreeSitter]      Legacy field name; probes native parser availability for observed languages.
  * @property {number} [feedbackLimit]         Max feedback aggregate rows to inspect for quality hints.
  * @property {number} [halfLifeDays]          Optional recency decay for feedback weights.
  */

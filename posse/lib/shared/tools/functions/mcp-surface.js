@@ -14,11 +14,16 @@ const ATLAS_DISPLAY_ACTIONS = Object.freeze({
   "code": "code",
   "code.lens": "code.lens",
   "code.skeleton": "code.skeleton",
+  "code.structure": "code.structure",
+  "code.survey": "code.survey",
   "code.window": "code.window",
   "context": "context",
   "context.summary": "context.summary",
   "review.delta": "review.delta",
   "edit.plan": "edit.plan",
+  // fetch_ref normalizes to "fetch.ref" (underscores become dots) but displays
+  // under its canonical issued name.
+  "fetch.ref": "fetch_ref",
   "file.read": "file.read",
   "file.write": "file.write",
   "index.refresh": "index.refresh",
@@ -47,6 +52,8 @@ const ATLAS_DISPLAY_ACTIONS = Object.freeze({
   "slice.refresh": "slice.refresh",
   "slice.spillover.get": "slice.spillover.get",
   "symbol.card": "symbol.card",
+  // Deprecated compatibility alias; displays as the canonical singular action.
+  "symbol.cards": "symbol.card",
   "symbol.search": "symbol.search",
   "symbol.overview": "symbol.overview",
   "tree.overview": "tree.overview",

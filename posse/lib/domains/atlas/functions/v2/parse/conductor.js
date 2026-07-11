@@ -6,7 +6,7 @@
 // handles + the serial write queue live for the whole session, so steady-state
 // incremental reindex pays no reopen cost.
 //
-// Lanes (CONDUCTOR-THREAD-BUNDLE-SPEC.md): the writer thread above is one lane
+// Lanes (docs/specs/CONDUCTOR-THREAD-BUNDLE-SPEC.md): the writer thread above is one lane
 // of a bundle. `retrieve` routes to a parallel READER pool — worker threads
 // with cached readonly WAL connections behind writer-priority gates. Indexing
 // writers ask every live reader to drain and retire affected read handles before

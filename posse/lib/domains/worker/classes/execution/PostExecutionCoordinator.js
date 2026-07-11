@@ -639,8 +639,8 @@ export async function handlePostExecutionForWorker({
 
             if ((outOfScopeDirtySkipped?.length || 0) > 0 || (outOfScopeStagingSkipped?.length || 0) > 0) {
               const deferredDirty = outOfScopeDirtySkipped || [];
-              const unstaged = outOfScopeStagingSkipped || [];
-              const deferredMsg = `Left ${deferredDirty.length} out-of-scope dirty path(s) and unstaged ${unstaged.length} out-of-scope staged path(s) for WI merge cleanup`;
+              const preservedStaged = outOfScopeStagingSkipped || [];
+              const deferredMsg = `Left ${deferredDirty.length} out-of-scope dirty path(s) and preserved ${preservedStaged.length} out-of-scope staged path(s) for WI merge cleanup`;
               this.emit(job.id, `${C.yellow}[scope-compat] WI#${job.work_item_id} job #${job.id}: ${deferredMsg}${C.reset}`);
               logEvent({
                 work_item_id: job.work_item_id,
@@ -651,7 +651,7 @@ export async function handlePostExecutionForWorker({
                 message: deferredMsg,
                 event_json: JSON.stringify({
                   dirty: deferredDirty.slice(0, 50),
-                  unstaged: unstaged.slice(0, 50),
+                  unstaged: preservedStaged.slice(0, 50),
                 }),
               });
             }
@@ -718,7 +718,7 @@ export async function handlePostExecutionForWorker({
               ...(siblingStagingSkipped || []),
             ];
             if (siblingSkipped.length > 0) {
-              const siblingMsg = `Left ${siblingSkipped.length} sibling-owned dirty path(s) unstaged: ${siblingSkipped.slice(0, 5).map((entry) => `${entry.file} by #${entry.job_id || "?"}`).join(", ")}`;
+              const siblingMsg = `Left ${siblingSkipped.length} sibling-owned dirty path(s) uncommitted: ${siblingSkipped.slice(0, 5).map((entry) => `${entry.file} by #${entry.job_id || "?"}`).join(", ")}`;
               logEvent({
                 work_item_id: job.work_item_id,
                 job_id: job.id,

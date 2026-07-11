@@ -16,11 +16,12 @@ import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-t
 export const GIT_NATIVE_PROTOCOL = "posse.git.native.v1";
 
 /**
- * Resolve the heartbeat auth envelope for a native request. An explicit
- * `opts.auth` always wins; otherwise the envelope comes from the manager's
- * single auth authority (cached, resolved once per runtime). Stub managers that
- * want auth in tests should expose nativeAuthEnvelope(); this leaf must not
- * silently re-read settings/env.
+ * Resolve the heartbeat auth envelope for FAILURE TELEMETRY only. The request
+ * itself carries no trust object: native trust is compiled into the binary,
+ * and NativeBinary attaches the manager-owned pulse envelope at the final
+ * stdin boundary. An explicit `opts.auth` wins; otherwise the envelope comes
+ * from the manager's single auth authority (cached, resolved once per
+ * runtime). This leaf must not silently re-read settings/env.
  *
  * @param {GitNativeMethodRunOptions} opts
  * @param {import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager} manager
@@ -194,10 +195,10 @@ function logNativeHeartbeatFailure({ method, asyncMode = false, bridge = false, 
   });
 }
 
-// Read-only methods that are safe to run through the persistent worker: no
-// side effects (or idempotent ones), so an abort can simply discard the result
-// without needing to kill the in-flight process. Mutating/cancellable methods
-// keep the per-call spawn path so an abort kills their own process.
+// Methods that are safe to run through the persistent worker: they are either
+// read-only or idempotent, so an abort can simply discard the result without
+// needing to kill the in-flight process. This is a transport/idempotency
+// decision only; authorization is classified independently below.
 const WORKER_ELIGIBLE_METHODS = new Set([
   "git.currentBranch",
   "git.currentHash",
@@ -246,6 +247,277 @@ const WORKER_ELIGIBLE_METHODS = new Set([
   // every git_history tool invocation otherwise pays.
   "git.history",
 ]);
+
+export const GIT_READ_ROUTE = "git:read";
+export const GIT_MUTATE_ROUTE = "git:mutate";
+
+// This allowlist mirrors every statically read-only arm in posse-git's
+// dispatch_git_method. Payload-sensitive methods are handled separately and
+// every unrecognized method falls through to git:mutate.
+const GIT_READ_ONLY_METHODS = new Set([
+  "git.branchExists",
+  "git.commitScope.conflictsWith",
+  "git.commitScope.containsFile",
+  "git.commitScope.findConflict",
+  "git.commitScope.fromInput",
+  "git.commitScope.fromPayload",
+  "git.commitScope.hasScope",
+  "git.commitScope.isWildcard",
+  "git.commitScope.lockRows",
+  "git.currentBranch",
+  "git.currentHash",
+  "git.findStallStash",
+  "git.hasChanges",
+  "git.hasIgnoredChanges",
+  "git.history",
+  "git.isAncestor",
+  "git.isReadOnly",
+  "git.jobNeedsWorktree",
+  "git.jobsNeedWorktree",
+  "git.localBranchExists",
+  "git.mergeBase",
+  "git.push.refspecCanPublishSnapshotRefs",
+  "git.remoteHeadBranch",
+  "git.repairWebAssetCreateScope",
+  "git.repo.branchExists",
+  "git.repo.currentBranch",
+  "git.repo.currentHash",
+  "git.repo.hasChanges",
+  "git.repo.isAncestor",
+  "git.repo.isReadOnly",
+  "git.repo.mergeBase",
+  "git.repo.statusPorcelain",
+  "git.repo.workflowStatus",
+  "git.resolvePushBranch",
+  "git.resolveTargetBranch",
+  "git.snapshot.dirSizeBytes",
+  "git.snapshot.exists",
+  "git.snapshot.findExistingDedupRef",
+  "git.snapshot.listRefs",
+  "git.snapshot.readNote",
+  "git.snapshot.refName",
+  "git.snapshot.safeFilename",
+  "git.snapshotPublishingPushConfigs",
+  "git.statusFromRepo",
+  "git.statusPorcelain",
+  "git.workflow.status",
+  "git.workflow.statusFromRepo",
+  "git.workflowStatus",
+  "git.worktree.branchLockPath",
+  "git.worktree.classifyDirty",
+  "git.worktree.currentBranch",
+  "git.worktree.exists",
+  "git.worktree.findLegacy",
+  "git.worktree.isMergeInProgress",
+  "git.worktree.isUsable",
+  "git.worktree.listMergeConflicts",
+  "git.worktree.lockPath",
+  "git.worktree.parsePorcelainRemainingPaths",
+  "git.worktree.path",
+  "git.worktree.stashLockPath",
+  "status",
+  "workflow-status",
+]);
+
+// git.exec must use the encoder's argument policy, not the broader Node Repo
+// scheduling classifier. These tables intentionally match git_core::repo.
+const GIT_EXEC_READ_ONLY_COMMANDS = new Set([
+  "blame",
+  "cat-file",
+  "diff",
+  "for-each-ref",
+  "log",
+  "ls-files",
+  "merge-base",
+  "rev-list",
+  "rev-parse",
+  "show",
+  "status",
+]);
+const GIT_EXEC_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+  "-C",
+  "-c",
+  "--exec-path",
+  "--git-dir",
+  "--namespace",
+  "--work-tree",
+]);
+const GIT_EXEC_GLOBAL_FLAGS = new Set([
+  "--bare",
+  "--glob-pathspecs",
+  "--icase-pathspecs",
+  "--literal-pathspecs",
+  "--no-pager",
+  "--no-replace-objects",
+  "--noglob-pathspecs",
+]);
+const GIT_EXEC_GLOBAL_OPTIONS_WITH_EQUALS = [
+  "--exec-path=",
+  "--git-dir=",
+  "--namespace=",
+  "--work-tree=",
+];
+const GIT_EXEC_BRANCH_MUTATING_FLAGS = new Set([
+  "-c", "-C", "-d", "-D", "-f", "-m", "-M", "--copy",
+  "--create-reflog", "--delete", "--edit-description", "--force", "--move",
+  "--no-create-reflog", "--no-track", "--set-upstream-to", "--track", "--unset-upstream",
+]);
+const GIT_EXEC_BRANCH_READ_FLAGS = new Set([
+  "-a", "-r", "-v", "-vv", "--all", "--color", "--column", "--contains",
+  "--format", "--ignore-case", "--list", "--merged", "--no-color", "--no-column",
+  "--no-contains", "--no-merged", "--points-at", "--remotes", "--show-current",
+  "--sort", "--verbose",
+]);
+const GIT_EXEC_BRANCH_READ_OPTIONS_WITH_VALUE = new Set([
+  "--color", "--column", "--contains", "--format", "--merged",
+  "--no-contains", "--no-merged", "--points-at", "--sort",
+]);
+const GIT_EXEC_CONFIG_READ_FLAGS = new Set([
+  "-l", "--get", "--get-all", "--get-color", "--get-colorbool",
+  "--get-regexp", "--get-urlmatch", "--list",
+]);
+const GIT_EXEC_CONFIG_WRITE_FLAGS = new Set([
+  "--add", "--remove-section", "--rename-section", "--replace-all",
+  "--set", "--unset", "--unset-all",
+]);
+const GIT_EXEC_CONFIG_OPTIONS_WITH_VALUE = new Set(["--blob", "--file", "--type"]);
+const GIT_EXEC_READ_ONLY_UNSAFE_OPTIONS = new Set(["--ext-diff", "--filters", "--output", "--textconv"]);
+
+/**
+ * @param {string} arg
+ * @returns {string}
+ */
+function gitExecOptionName(arg) {
+  const text = String(arg || "");
+  const equals = text.indexOf("=");
+  return equals === -1 ? text : text.slice(0, equals);
+}
+
+/**
+ * @param {string[]} args
+ * @returns {string[] | null}
+ */
+function gitExecCommandArgs(args) {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index];
+    if (!arg) {
+      index += 1;
+      continue;
+    }
+    if (arg === "--") return args.slice(index + 1);
+    if (!arg.startsWith("-")) break;
+    if (arg === "-c" || (arg.startsWith("-c") && arg.length > 2) || arg === "-p" || arg === "--paginate") {
+      return null;
+    }
+    if (GIT_EXEC_GLOBAL_OPTIONS_WITH_VALUE.has(arg)) {
+      index += 2;
+      continue;
+    }
+    if (GIT_EXEC_GLOBAL_OPTIONS_WITH_EQUALS.some((prefix) => arg.startsWith(prefix))) {
+      index += 1;
+      continue;
+    }
+    if (GIT_EXEC_GLOBAL_FLAGS.has(arg)) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return args.slice(index);
+}
+
+/**
+ * @param {string[]} args
+ * @returns {boolean}
+ */
+function gitExecBranchArgsAreReadOnly(args) {
+  if (args.length === 0) return true;
+  let sawReadIntent = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const name = gitExecOptionName(arg);
+    if (GIT_EXEC_BRANCH_MUTATING_FLAGS.has(name)) return false;
+    if (GIT_EXEC_BRANCH_READ_FLAGS.has(name)) {
+      sawReadIntent = true;
+      if (GIT_EXEC_BRANCH_READ_OPTIONS_WITH_VALUE.has(name) && !arg.includes("=")) index += 1;
+      continue;
+    }
+    if (arg.startsWith("-") || !sawReadIntent) return false;
+  }
+  return sawReadIntent;
+}
+
+/**
+ * @param {string[]} args
+ * @returns {boolean}
+ */
+function gitExecConfigArgsAreReadOnly(args) {
+  let sawNonOptionBeforeReadAction = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const name = gitExecOptionName(arg);
+    if (GIT_EXEC_CONFIG_WRITE_FLAGS.has(name)) return false;
+    if (GIT_EXEC_CONFIG_READ_FLAGS.has(name)) return !sawNonOptionBeforeReadAction;
+    if (GIT_EXEC_CONFIG_OPTIONS_WITH_VALUE.has(name) && !arg.includes("=")) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    sawNonOptionBeforeReadAction = true;
+  }
+  return false;
+}
+
+/**
+ * @param {string[]} args
+ * @returns {boolean}
+ */
+function gitExecArgsAreReadOnly(args) {
+  const command = gitExecCommandArgs(args);
+  if (!command?.length) return false;
+  const [name, ...commandArgs] = command;
+  if (name === "branch") return gitExecBranchArgsAreReadOnly(commandArgs);
+  if (name === "config") return gitExecConfigArgsAreReadOnly(commandArgs);
+  return GIT_EXEC_READ_ONLY_COMMANDS.has(name)
+    && !commandArgs.some((arg) => GIT_EXEC_READ_ONLY_UNSAFE_OPTIONS.has(gitExecOptionName(arg)));
+}
+
+/**
+ * @param {unknown} payload
+ * @returns {boolean}
+ */
+function gitExecPayloadRequiresMutate(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return true;
+  const value = /** @type {Record<string, unknown>} */ (payload);
+  const args = Object.prototype.hasOwnProperty.call(value, "args") ? value.args : [];
+  if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string")) return true;
+  return !gitExecArgsAreReadOnly(args);
+}
+
+/**
+ * Pulse route grant one git native method must present. Authorization is
+ * payload-aware and deliberately independent from persistent-worker
+ * eligibility. Only explicitly classified read operations receive `git:read`;
+ * unknown or malformed operations fail closed to `git:mutate`.
+ *
+ * @param {string} method
+ * @param {unknown} [payload]
+ * @returns {string}
+ */
+export function gitNativeMethodRoute(method, payload = null) {
+  const command = String(method || "").trim();
+  if (command === "git.exec" || command === "git.repo.exec") {
+    return gitExecPayloadRequiresMutate(payload) ? GIT_MUTATE_ROUTE : GIT_READ_ROUTE;
+  }
+  if (command === "git.worktree.root") {
+    return payload && typeof payload === "object" && !Array.isArray(payload)
+      && /** @type {Record<string, unknown>} */ (payload).create === true
+      ? GIT_MUTATE_ROUTE
+      : GIT_READ_ROUTE;
+  }
+  return GIT_READ_ONLY_METHODS.has(command) ? GIT_READ_ROUTE : GIT_MUTATE_ROUTE;
+}
 
 /**
  * @typedef {Object} GitNativeMethodRunOptions
@@ -333,10 +605,10 @@ function runGitNativeMethodOnce(method, payload, opts = {}) {
     throw unavailable;
   }
   const request = buildGitNativeMethodRequest(method, payload);
+  // NativeBinary owns the request's auth material: it attaches a route-scoped
+  // pulse envelope at the final stdin boundary. The heartbeat envelope is
+  // resolved here only for failure telemetry.
   const auth = resolveGitAuthEnvelope(opts, manager);
-  if (auth && typeof auth === "object") {
-    /** @type {Record<string, unknown>} */ (request).auth = auth;
-  }
   const workerEligible = WORKER_ELIGIBLE_METHODS.has(request.method);
   let res;
   try {
@@ -350,6 +622,7 @@ function runGitNativeMethodOnce(method, payload, opts = {}) {
         signal: opts.signal,
         worker: workerEligible,
         maxBuffer: opts.maxBuffer,
+        requiredRoute: gitNativeMethodRoute(request.method, request.payload),
       },
     );
   } catch (err) {
@@ -454,10 +727,10 @@ async function runGitNativeMethodAsyncOnce(method, payload, opts = {}) {
     throw unavailable;
   }
   const request = buildGitNativeMethodRequest(method, payload);
+  // NativeBinary owns the request's auth material: it attaches a route-scoped
+  // pulse envelope at the final stdin boundary. The heartbeat envelope is
+  // resolved here only for failure telemetry.
   const auth = resolveGitAuthEnvelope(opts, manager);
-  if (auth && typeof auth === "object") {
-    /** @type {Record<string, unknown>} */ (request).auth = auth;
-  }
   const workerEligible = WORKER_ELIGIBLE_METHODS.has(request.method);
   const workerRequested = opts.worker !== false && workerEligible;
   let res;
@@ -472,6 +745,7 @@ async function runGitNativeMethodAsyncOnce(method, payload, opts = {}) {
         signal: opts.signal,
         worker: workerRequested,
         maxBuffer: opts.maxBuffer,
+        requiredRoute: gitNativeMethodRoute(request.method, request.payload),
       },
     );
   } catch (err) {

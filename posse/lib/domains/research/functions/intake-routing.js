@@ -20,7 +20,17 @@ import {
 } from "../../queue/functions/index.js";
 import { ensureProjectMap, getCachedProjectMap } from "../../project/functions/map.js";
 import { parseWorkItemMetadata } from "../../planning/functions/state.js";
+import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
 import { buildSyntheticResearchBrief, classifyResearchTask } from "./routing.js";
+import {
+  evaluateOneshotRequestEligibility,
+  isOneshotRiskyTargetPath,
+  normalizeCandidatePath,
+  oneshotPathCorroboration,
+  oneshotTargetRisk,
+  pathTokenSets,
+  tokenizeForPathMatch,
+} from "./oneshot-policy.js";
 import {
   createResearchFanoutJobs,
   getResearchFanoutMode,
@@ -28,7 +38,6 @@ import {
 } from "./fanout.js";
 import { createRedTeamPlanChain, redTeamPlanningPayload } from "../../planning/functions/red-team-plan.js";
 import { isPlanApprovalEnabled } from "../../planning/functions/plan-approval.js";
-import { isHighRiskPath } from "../../handoff/functions/index.js";
 import { researchPayload } from "./payload.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import {
@@ -39,98 +48,7 @@ import {
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
-const ONESHOT_RENAME_RE = /\b(?:rename|renaming)\b/i;
-const ONESHOT_FORMAT_RE = /\bformatting\b/i;
 const ONESHOT_SOURCES = new Set(["explicit", "heuristic", "scope", "fuzzy", "intake", "preflight", "internal"]);
-const PATH_MATCH_STOPWORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "with",
-  "without",
-  "from",
-  "into",
-  "onto",
-  "this",
-  "that",
-  "these",
-  "those",
-  "fix",
-  "fixed",
-  "update",
-  "updated",
-  "change",
-  "changed",
-  "make",
-  "set",
-  "remove",
-  "delete",
-  "add",
-  "bump",
-  "correct",
-  "adjust",
-  "polish",
-  "copy",
-  "edit",
-  "copyedit",
-  "typo",
-  "spelling",
-  "comment",
-  "comments",
-  "doc",
-  "docs",
-  "documentation",
-  "whitespace",
-  "only",
-  "single",
-  "file",
-  "one",
-  "keep",
-]);
-
-function normalizeCandidatePath(value) {
-  return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
-}
-
-function singularizeToken(token) {
-  const value = String(token || "").toLowerCase();
-  if (value.length > 4 && value.endsWith("ies")) return `${value.slice(0, -3)}y`;
-  if (value.length > 4 && value.endsWith("s")) return value.slice(0, -1);
-  return value;
-}
-
-function tokenizeForPathMatch(value, { keepStopwords = false } = {}) {
-  const expanded = String(value || "")
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ");
-  const tokens = expanded
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 3)
-    .filter((token) => keepStopwords || !PATH_MATCH_STOPWORDS.has(token));
-  const out = new Set();
-  for (const token of tokens) {
-    out.add(token);
-    out.add(singularizeToken(token));
-  }
-  return out;
-}
-
-function basenameStem(filePath) {
-  const base = path.posix.basename(normalizeCandidatePath(filePath));
-  if (!base) return "";
-  if (base.startsWith(".") && base.indexOf(".", 1) === -1) return base.slice(1);
-  return base.replace(/\.[^.]+$/, "");
-}
-
-function pathTokenSets(filePath) {
-  const normalized = normalizeCandidatePath(filePath);
-  const stem = basenameStem(normalized);
-  const basenameTokens = tokenizeForPathMatch(stem || path.posix.basename(normalized), { keepStopwords: true });
-  const fullPathTokens = tokenizeForPathMatch(normalized, { keepStopwords: true });
-  return { basenameTokens, fullPathTokens };
-}
 
 function intersection(left, right) {
   const out = [];
@@ -154,17 +72,6 @@ function scoreTrackedFileForText(filePath, requestTokens) {
     score,
     strong,
     matched_tokens: [...new Set([...basenameMatches, ...uniquePathOnlyMatches])],
-  };
-}
-
-function pathCorroboratesRequest(requestText, candidatePath) {
-  const requestTokens = tokenizeForPathMatch(requestText);
-  const { fullPathTokens } = pathTokenSets(candidatePath);
-  const matched = intersection(requestTokens, fullPathTokens);
-  return {
-    ok: matched.length > 0,
-    matched_tokens: matched,
-    request_token_count: requestTokens.size,
   };
 }
 
@@ -226,10 +133,14 @@ function resolveOneshotCandidateFromTrackedFiles({ projectDir = null, requestTex
     .sort((a, b) => b.score - a.score || a.file.length - b.file.length || a.file.localeCompare(b.file));
   if (ranked.length === 0) return null;
   if (ranked.length > 1 && ranked[0].score === ranked[1].score) return null;
+  // Decide uniqueness before applying risk policy. If the best match is a
+  // manifest/build/CI path, the request needs preflight; removing it first
+  // would silently promote a weaker, unrelated runner-up into the edit target.
+  if (isOneshotRiskyTargetPath(ranked[0].file)) return null;
   return ranked[0];
 }
 
-function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPlan = false, requestText = "", corroborationText = "", requirePathCorroboration = false } = {}) {
+function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPlan = false, requestText = "", corroborationText = "", requirePathCorroboration = false, requestEligibility = null } = {}) {
   const rawCandidates = Array.isArray(candidateFiles) ? candidateFiles : [];
   const candidates = rawCandidates.map(normalizeCandidatePath).filter(Boolean);
   const results = candidates.map((candidate) => ({
@@ -239,13 +150,21 @@ function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPl
     canonical_path: null,
   }));
 
-  const failAll = (reason) => {
+  const failAll = (reason, extra = {}) => {
     for (const result of results) {
       result.ok = false;
       result.reason = result.reason || reason;
     }
-    return { ok: false, reason, candidate_files: candidates, gate_results: results };
+    return { ok: false, reason, candidate_files: candidates, gate_results: results, ...extra };
   };
+
+  // Final-defense request policy: even a forced or precomputed routing packet
+  // must satisfy the shared one-shot eligibility rules.
+  const eligibility = requestEligibility
+    || evaluateOneshotRequestEligibility({ text: requestText });
+  if (!eligibility.ok) {
+    return failAll(eligibility.reason, { reclassify: eligibility.reclassify || "plan" });
+  }
 
   if (candidates.length !== 1) {
     return failAll(`candidate_count_${candidates.length}`);
@@ -253,8 +172,6 @@ function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPl
   if (!projectDir) return failAll("missing_project_dir");
   if (isPlanApprovalEnabled()) return failAll("plan_approval_enabled");
   if (redTeamPlan) return failAll("red_team_plan_requested");
-  if (ONESHOT_RENAME_RE.test(requestText)) return failAll("rename_requested");
-  if (ONESHOT_FORMAT_RE.test(requestText)) return failAll("formatting_requested");
 
   for (const result of results) {
     const candidate = result.candidate;
@@ -305,16 +222,16 @@ function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPl
     }
     result.canonical_path = canonical;
 
-    const highRisk = isHighRiskPath(canonical);
-    result.checks.high_risk_path = { ok: !highRisk };
-    if (highRisk) {
+    const targetRisk = oneshotTargetRisk(canonical);
+    result.checks.target_risk = { ok: !targetRisk, reason: targetRisk || null };
+    if (targetRisk) {
       result.ok = false;
-      result.reason = "high_risk_path";
+      result.reason = targetRisk;
       continue;
     }
 
     if (requirePathCorroboration) {
-      const corroboration = pathCorroboratesRequest(corroborationText || requestText, canonical);
+      const corroboration = oneshotPathCorroboration(corroborationText || requestText, canonical);
       result.checks.path_corroboration = corroboration;
       if (!corroboration.ok) {
         result.ok = false;
@@ -405,6 +322,7 @@ export function classifyResearchForRouting({
           budget: routing.budget,
           reason: routing.reason,
           oneshot_source: routing.oneshot_source || null,
+          oneshot_suppressed: routing.oneshot_suppressed || null,
           candidate_files: routing.candidate_files || [],
           branches: routing.branches || [],
           web_targets: routing.web_targets || [],
@@ -500,30 +418,72 @@ export function createOneshotDevJob(workItem, {
   const requestedCandidates = candidateFiles || routing?.candidate_files || [];
   const reason = routing?.reason || "one-shot trivial edit";
   const requestedText = workItemText(workItem);
+  const metadata = parseWorkItemMetadata(workItem);
+  const wiMode = String(workItem?.mode || metadata.mode || "build").toLowerCase();
+  const intakeHints = getWorkItemIntakeHints(workItem, wiMode);
+  // Final defense: re-verify the WI and intake metadata still permit a
+  // task_mode "code" one-shot, no matter which origin proposed the route.
+  const requestEligibility = evaluateOneshotRequestEligibility({
+    text: requestedText,
+    mode: wiMode,
+    intakeHints,
+  });
   const gate = validateOneshotGate({
     candidateFiles: requestedCandidates,
     projectDir,
     redTeamPlan,
-    requestText: [requestedText, reason].filter(Boolean).join("\n"),
+    requestText: requestedText,
     corroborationText: requestedText,
     requirePathCorroboration,
+    requestEligibility,
   });
   if (!gate.ok) {
+    // Risk-signal demotions (security/concurrency/ambiguity/broad scope) go
+    // back to research; trivial-but-unsafe scope goes back to planning.
+    const demotionTarget = gate.reclassify === "research" ? "research" : "plan";
     logEvent({
       work_item_id: workItem.id,
       job_id: parentJob?.id || null,
       event_type: EVENT_TYPES.ONESHOT_DEMOTED,
       actor_type: EVENT_ACTORS.SYSTEM,
-      message: `One-shot demoted to planning: ${gate.reason}`,
+      message: `One-shot demoted to ${demotionTarget === "research" ? "research" : "planning"}: ${gate.reason}`,
       event_json: {
         source,
         demotion_source: demotionSource,
+        demotion_target: demotionTarget,
         reason: gate.reason,
         candidate_files: gate.candidate_files,
         gate_results: gate.gate_results,
         routing_reason: reason,
       },
     });
+    if (demotionTarget === "research") {
+      const reclassified = classifyResearchTask({
+        title: workItem?.title || "",
+        description: workItem?.description || "",
+        intakeHints,
+        projectMap: metadata.research_project_map || getProjectMapForResearchRouting(projectDir),
+        mode: wiMode,
+        disallowOneshot: true,
+      });
+      const researchBudget = normalizeResearchBudget(reclassified?.budget, "normal");
+      const researchJob = createJob({
+        work_item_id: workItem.id,
+        job_type: "research",
+        title: `Research: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
+        parent_job_id: parentJob?.id || null,
+        priority: workItem.priority,
+        model_tier: researchModelTierForBudget(researchBudget),
+        reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
+        payload_json: JSON.stringify(researchPayload({
+          ...redTeamPlanningPayload(redTeamPlan),
+          oneshot_demoted: true,
+          oneshot_demotion_reason: gate.reason,
+        }, researchBudget)),
+      });
+      refreshWorkItemStatus(workItem.id);
+      return { kind: "research", job: researchJob, routing, gate, demoted: true };
+    }
     const planJob = createPlanAfterSkippedResearch(workItem, {
       routing: {
         ...routing,

@@ -7,6 +7,14 @@ import {
 } from "../../../bridge/functions/auth.js";
 import { listAllowedBridgeCommands } from "../../../bridge/functions/command-dispatch.js";
 import { resolvePosseKey } from "../../../remote/functions/client.js";
+import {
+  HeartbeatAuthManager,
+  heartbeatAuthManager,
+} from "../../../../shared/native/classes/HeartbeatAuthManager.js";
+import {
+  PulseTokenManager,
+  pulseTokenManager,
+} from "../../../../shared/native/classes/PulseTokenManager.js";
 
 function hasFlag(argv, flag) {
   return (argv || []).includes(flag);
@@ -18,17 +26,6 @@ function flagValue(argv = [], flag) {
   const prefix = `${flag}=`;
   const match = argv.find((value) => value.startsWith(prefix));
   return match ? match.slice(prefix.length) : null;
-}
-
-function relayHttpBaseFromWs(relayWsUrl) {
-  const url = new URL(relayWsUrl || "wss://app.yourposseai.com/v1/instance");
-  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
-  url.pathname = url.pathname.replace(/\/v1\/instance\/?$/, "/");
-  if (!url.pathname.endsWith("/")) url.pathname = url.pathname.replace(/[^/]*$/, "");
-  if (!url.pathname.endsWith("/")) url.pathname += "/";
-  url.search = "";
-  url.hash = "";
-  return url;
 }
 
 function bridgePairUrl(relayHttpBase, endpoint) {
@@ -115,33 +112,57 @@ export async function runPairCommand(
     argv = [],
     promptCode = promptForConfirmationCode,
     retryDelayMs = 2_000,
-    posseKey = resolvePosseKey(),
+    posseKey = undefined,
+    authManager = null,
+    pulseTokens = null,
+    fetchImpl = globalThis.fetch,
     projectDir = process.cwd(),
   } = {},
 ) {
-  const relayHttpBase = relayHttpBaseFromWs(config.relayUrl);
+  const resolvedPosseKey = posseKey === undefined ? resolvePosseKey() : String(posseKey || "").trim();
+  const scopedAuthManager = authManager || (
+    posseKey === undefined ? heartbeatAuthManager : new HeartbeatAuthManager({ posseKey: resolvedPosseKey })
+  );
+  const pairPulseTokens = pulseTokens || (
+    scopedAuthManager === heartbeatAuthManager && fetchImpl === globalThis.fetch
+      ? pulseTokenManager
+      : new PulseTokenManager({ authManager: scopedAuthManager, fetchImpl })
+  );
+  const trustedPolicy = scopedAuthManager.getTrustedAuthPolicy?.();
+  const pairHttpBase = trustedPolicy?.origin ? new URL("/", trustedPolicy.origin) : null;
 
   console.log(`\n  ${C.bold}Pair this Posse instance${C.reset}`);
 
   // Pairing requires a valid API key (bridge:pair grant) — the relay
   // refuses to mint or confirm QR tokens for keyless installs.
-  if (!posseKey) {
+  if (!resolvedPosseKey) {
     console.log(`\n  ${C.red}POSSE_KEY is required to pair.${C.reset} Set the POSSE_KEY environment variable to your API key and run \`posse serve --pair\` again.\n`);
     return { ok: false, reason: "missing_posse_key" };
   }
-  const pairAuthHeaders = {
-    "content-type": "application/json",
-    authorization: `Bearer ${posseKey}`,
+  if (!pairHttpBase) {
+    console.log(`\n  ${C.red}Pairing authentication is unavailable.${C.reset} Trusted remote API policy could not be resolved.\n`);
+    return { ok: false, reason: "pair_auth_unavailable" };
+  }
+
+  const pairAuthHeaders = async () => {
+    const pulse = await pairPulseTokens.getPulseToken({ requiredRoute: "bridge:pair" });
+    if (!pulse) throw new Error("pairing authentication is unavailable");
+    return {
+      "content-type": "application/json",
+      authorization: `Bearer ${pulse}`,
+    };
   };
 
   // Step 1: ask the relay to mint a QR token.
-  const startUrl = bridgePairUrl(relayHttpBase, "start");
+  const startUrl = bridgePairUrl(pairHttpBase, "start");
   let startRes;
   try {
-    startRes = await fetch(startUrl, {
+    pairPulseTokens.assertTrustedResourceUrl(startUrl, "bridge pair start");
+    startRes = await fetchImpl(startUrl, {
       method: "POST",
-      headers: pairAuthHeaders,
+      headers: await pairAuthHeaders(),
       body: JSON.stringify({ instance_label: config.label }),
+      redirect: "error",
     });
   } catch (err) {
     console.log(`\n  ${C.red}Network error contacting relay:${C.reset} ${err?.message || err}\n`);
@@ -178,7 +199,7 @@ export async function runPairCommand(
     flagValue(argv, "--confirmation-code") || flagValue(argv, "--pair-code") || "";
   const scripted = normalizeConfirmationCode(scriptedCode) !== "";
   let confirmationCode = normalizeConfirmationCode(scriptedCode);
-  const confirmUrl = bridgePairUrl(relayHttpBase, "confirm");
+  const confirmUrl = bridgePairUrl(pairHttpBase, "confirm");
   const expiresAt = qrExpiresAtMs(startBody?.expires_at);
   let body;
   let confirmed = false;
@@ -199,13 +220,15 @@ export async function runPairCommand(
 
     let confirmRes;
     try {
-      confirmRes = await fetch(confirmUrl, {
+      pairPulseTokens.assertTrustedResourceUrl(confirmUrl, "bridge pair confirm");
+      confirmRes = await fetchImpl(confirmUrl, {
         method: "POST",
-        headers: pairAuthHeaders,
+        headers: await pairAuthHeaders(),
         body: JSON.stringify({
           qr_token: qrToken,
           confirmation_code: confirmationCode,
         }),
+        redirect: "error",
       });
     } catch (err) {
       console.log(`\n  ${C.red}Network error contacting relay:${C.reset} ${err?.message || err}\n`);

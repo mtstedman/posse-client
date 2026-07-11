@@ -17,6 +17,7 @@ import {
   estimateTokensFromChars,
   resolveContextCompactionConfig,
 } from "../../settings/functions/context-compaction.js";
+import { normalizeRemoteIssuedPolicy } from "../../../shared/tools/functions/issued-tool-policy.js";
 
 const DEFAULT_LOCAL_ENRICHMENT_ENABLED = false;
 
@@ -116,24 +117,17 @@ export class RemoteComposer {
       });
     }
     applyRemoteIssuanceToPacket(packet, response);
-    const preserveAssessorShell = shouldPreserveAssessorReadOnlyShell(packet, localPolicyBeforeRemote);
-    let systemPrompt = String(response?.system_prompt || "").trim() || null;
-    let stableContext = String(response?.stable_context || "").trim() || null;
-    let remoteUserPrompt = String(response?.user_prompt || "").trim() || null;
-    if (preserveAssessorShell) {
-      systemPrompt = normalizeRemoteAssessorShellWording(systemPrompt);
-      stableContext = normalizeRemoteAssessorShellWording(stableContext);
-      remoteUserPrompt = normalizeRemoteAssessorShellWording(remoteUserPrompt);
-    }
+    const systemPrompt = String(response?.system_prompt || "").trim() || null;
+    const stableContext = String(response?.stable_context || "").trim() || null;
+    const remoteUserPrompt = String(response?.user_prompt || "").trim() || null;
     let skeleton = response?.final_prompt || joinPromptParts([
       systemPrompt,
       stableContext,
       remoteUserPrompt,
     ]);
-    if (preserveAssessorShell) skeleton = normalizeRemoteAssessorShellWording(skeleton);
     if (!skeleton) throw new Error("remote prompt compile returned an empty prompt");
     const localPolicyOverlay = renderLocalPolicyOverlay(packet, {
-      localPolicy: localPolicyBeforeRemote,
+      localPolicy: packet?.tool_policy,
     });
     // The enrichment cwd is the local file-read sandbox root. It must come
     // from the local packet, never the remote response — a compromised remote
@@ -163,7 +157,7 @@ export class RemoteComposer {
       source: "remote",
       request,
       response,
-      issuance: response?.issuance || null,
+      issuance: packet?.remote_issuance || null,
       latencyMs,
       localEnrichmentEnabled: this.enableLocalEnrichment,
       metadata: {
@@ -324,23 +318,34 @@ function applyRemoteIssuanceToPacket(packet, response) {
   if (!packet || !response) return;
   const issuance = response.issuance || null;
   const localPolicy = localPolicyCeiling(packet.tool_policy);
-  if (issuance) {
-    packet.remote_issuance = issuance;
-    packet.remote_tool_surface = Array.isArray(issuance.tool_surface)
-      ? issuance.tool_surface.slice()
-      : [];
-  }
-  const policy = issuance?.tool_policy || response?.handoff?.tool_policy || null;
-  if (policy) {
-    const preserveAssessorShell = shouldPreserveAssessorReadOnlyShell(packet, localPolicy);
-    packet.tool_policy = {
-      allow_read: clampPolicyGrant(policy.allow_read, localPolicy, "allow_read"),
-      allow_write: clampPolicyGrant(policy.allow_write, localPolicy, "allow_write"),
-      allow_shell: preserveAssessorShell ? true : clampPolicyGrant(policy.allow_shell, localPolicy, "allow_shell"),
-    };
-    if (preserveAssessorShell && Array.isArray(packet.remote_tool_surface) && !packet.remote_tool_surface.includes("tools.bash")) {
-      packet.remote_tool_surface.push("tools.bash");
-    }
+  const issued = normalizeRemoteIssuedPolicy(issuance, {
+    expectedRole: packet.recipient || packet.job_type,
+  });
+  packet.remote_issuance = {
+    ...(issuance && typeof issuance === "object" ? issuance : {}),
+    source: issued.valid ? "posse-remote" : "invalid",
+    role: issued.role,
+    provider: issued.provider,
+    tool_policy: { ...issued.toolPolicy },
+    tool_surface: issued.toolSurface.slice(),
+    web_access: { ...issued.webAccess },
+    project_db_capability: issued.projectDbCapability,
+    atlas: {
+      ...(issuance?.atlas && typeof issuance.atlas === "object" ? issuance.atlas : {}),
+      available: issued.toolAllowlist.atlas.length > 0,
+      agent_surface: issued.toolAllowlist.atlas.map((name) => `atlas.${name}`),
+      internal_surface: [],
+    },
+  };
+  packet.remote_tool_surface = issued.toolSurface.slice();
+  const policy = issued.toolPolicy;
+  packet.tool_policy = {
+    allow_read: clampPolicyGrant(policy.allow_read, localPolicy, "allow_read"),
+    allow_write: clampPolicyGrant(policy.allow_write, localPolicy, "allow_write"),
+    allow_shell: clampPolicyGrant(policy.allow_shell, localPolicy, "allow_shell"),
+    allow_tests: clampPolicyGrant(policy.allow_tests, localPolicy, "allow_tests"),
+  };
+  if (issued.valid) {
     packet.budgets = {
       ...(packet.budgets || {}),
       fallback_reads_remaining: resolveFallbackReadBudget(
@@ -349,16 +354,12 @@ function applyRemoteIssuanceToPacket(packet, response) {
       ),
     };
   }
-  if (packet.atlas && issuance?.atlas) {
-    packet.atlas.remoteAgentSurface = Array.isArray(issuance.atlas.agent_surface)
-      ? issuance.atlas.agent_surface.slice()
+  if (packet.atlas) {
+    packet.atlas.remoteAgentSurface = issued.toolAllowlist.atlas.map((name) => `atlas.${name}`);
+    packet.atlas.remotePrefetchSurface = Array.isArray(issuance?.atlas?.prefetch_surface)
+      ? issuance.atlas.prefetch_surface.filter((entry) => !issued.toolSurface.includes(entry)).slice()
       : [];
-    packet.atlas.remotePrefetchSurface = Array.isArray(issuance.atlas.prefetch_surface)
-      ? issuance.atlas.prefetch_surface.slice()
-      : [];
-    packet.atlas.remoteInternalSurface = Array.isArray(issuance.atlas.internal_surface)
-      ? issuance.atlas.internal_surface.slice()
-      : [];
+    packet.atlas.remoteInternalSurface = [];
   }
 }
 
@@ -380,28 +381,20 @@ function localPolicyCeiling(policy) {
   return policy;
 }
 
-function shouldPreserveAssessorReadOnlyShell(packet, localPolicy) {
+function shouldRenderAssessorReadOnlyShell(packet, localPolicy) {
   return String(packet?.recipient || packet?.job_type || "").toLowerCase() === "assessor"
     && localPolicy?.allow_shell === true
     && localPolicy?.allow_write === false;
 }
 
 function renderLocalPolicyOverlay(packet, { localPolicy = null } = {}) {
-  if (!shouldPreserveAssessorReadOnlyShell(packet, localPolicy || packet?.tool_policy)) return "";
+  if (!shouldRenderAssessorReadOnlyShell(packet, localPolicy || packet?.tool_policy)) return "";
   return [
     "LOCAL EXECUTION POLICY NOTE:",
     "- Assessor shell policy: read-only bash is allowed for inspection and verification commands only.",
     "- Use run_scoped_checks for lint/typecheck, including PHP syntax checks; do not run php -l or php --syntax-check through bash.",
     "- Assessors have no write permission. Bash must not modify files.",
   ].join("\n");
-}
-
-function normalizeRemoteAssessorShellWording(text) {
-  if (!text) return text;
-  return String(text).replace(
-    /^(\s*allow_shell:\s*)false\s*$/gmi,
-    "$1true  # read-only assessor bash; use run_scoped_checks for lint/typecheck",
-  );
 }
 
 function clampPolicyGrant(remoteGrant, localPolicy, key) {

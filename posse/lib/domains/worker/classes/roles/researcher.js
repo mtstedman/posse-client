@@ -729,6 +729,7 @@ export class ResearcherRole extends BaseRole {
       stableContext: ctx.researcherPacket?.stable_context || null,
       remoteSystemPrompt: ctx.researcherPacket?.remote_system_prompt || null,
       atlasPrefetchStatus: ctx.researcherPacket?.atlas?.prefetchStatus || null,
+      sessionPacket: ctx.researcherPacket || null,
       skipRolePrompt: true,
     };
   }

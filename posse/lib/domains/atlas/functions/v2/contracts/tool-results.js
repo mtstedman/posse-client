@@ -770,6 +770,8 @@
  * @property {string[]} identifiersFound
  * @property {string[]} [identifiersFoundInText]  Identifiers with no AST usage but present inside string/comment text (matchKind "text").
  * @property {string[]} identifiersMissing
+ * @property {boolean} truncated
+ * @property {number} omittedMatchCount
  * @property {CalledFromBreadcrumb[]} [calledFrom]  Breadcrumbs for the definitions being read.
  * @property {string} [etag]
  */

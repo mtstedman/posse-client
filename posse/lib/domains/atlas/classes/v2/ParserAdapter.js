@@ -6,8 +6,8 @@ import {
   resolveLanguage,
   supportedLanguageTags,
 } from "../../functions/v2/parser/languages/index.js";
-import { parserFor } from "../../functions/v2/parser/treesitter/loader.js";
 import { parseBuffer } from "../../functions/v2/parser/adapter.js";
+import { __parseBufferNativeManagerForTests } from "../../functions/v2/native/parser.js";
 import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
 
 /** @typedef {import("../../functions/v2/contracts/api.js").ParserAdapter} ParserAdapterContract */
@@ -47,17 +47,14 @@ export class ParserAdapter {
   supports(extOrLang) {
     const descriptor = resolveLanguage(extOrLang);
     if (!descriptor || !descriptor.supported) return false;
-    // Native-owned languages need no JS grammar; the binary carries its
-    // grammars at compile time. But without a usable binary there is no
-    // parser at all - claiming support would queue every file just to fail
-    // it individually as a parse_error. Probed once: shouldUse stats the
-    // staged binary on every call and supports() runs per file in the
-    // ParseEngine filters; staging doesn't change within a process.
-    if (descriptor.native) {
-      if (nativeParserUsable == null) nativeParserUsable = nativeBinaries.shouldUse("atlas");
-      return nativeParserUsable;
-    }
-    return !!parserFor(descriptor.tag);
+    // All supported grammars are compiled into posse-atlas. Without a usable
+    // binary there is no parser at all, so avoid queueing each file only to
+    // fail it individually. Staging does not change within one process.
+    if (!descriptor.native) return false;
+    const testManager = __parseBufferNativeManagerForTests();
+    if (testManager) return testManager.shouldUse("atlas");
+    if (nativeParserUsable == null) nativeParserUsable = nativeBinaries.shouldUse("atlas");
+    return nativeParserUsable;
   }
 
   /**

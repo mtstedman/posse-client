@@ -47,6 +47,7 @@ export const EVENT_TYPES = Object.freeze({
   // ── context / citation store ───────────────────────────────────────────
   CONTEXT_BOUNDED_INGRESS: "context.bounded_ingress",
   HASH_REF_FETCH: "hash_ref.fetch",
+  HASH_REF_PINNED_PRESSURE: "hash_ref.pinned_pressure",
 
   // ── assessor ────────────────────────────────────────────────────────────
   ASSESSOR_SPAWN_JOB_SKIPPED: "assessor.spawn_job_skipped",
@@ -70,6 +71,7 @@ export const EVENT_TYPES = Object.freeze({
 
   // ── one-shot routing ───────────────────────────────────────────────────
   ONESHOT_DEMOTED: "oneshot.demoted",
+  ONESHOT_FIX_SCOPE_GATED: "oneshot.fix_scope_gated",
 
   // ── cleanup ─────────────────────────────────────────────────────────────
   CLEANUP_BRANCH_DISCARDED: "cleanup.branch_discarded",

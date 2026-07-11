@@ -13,6 +13,10 @@ import {
   getAccountSetting,
   setAccountSetting,
 } from "../../../settings/functions/account-settings.js";
+import {
+  normalizeProjectDbCapability,
+  normalizeSuiteToolAllowlist,
+} from "../../../../shared/tools/functions/issued-tool-policy.js";
 
 export const MCP_OAUTH_ISSUER = "posse";
 export const MCP_OAUTH_AUDIENCE = "posse-mcp-gateway";
@@ -103,6 +107,9 @@ export function mintMcpOAuthTokenForBootConfig(bootConfig = {}, opts = {}) {
 export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
   const jobId = numberOrNull(bootConfig.jobId);
   const workItemId = numberOrNull(bootConfig.workItemId);
+  const attemptId = numberOrNull(bootConfig.attemptId);
+  const agentCallId = numberOrNull(bootConfig.agentCallId);
+  const promptChars = numberOrNull(bootConfig.promptChars);
   const role = stringOrNull(bootConfig.role);
   const providerName = stringOrNull(bootConfig.providerName);
   return {
@@ -118,6 +125,9 @@ export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
       providerName,
       jobId,
       workItemId,
+      attemptId,
+      agentCallId,
+      promptChars,
       disableSystemTools: bootConfig.disableSystemTools === true,
       scopedFiles: stringArray(bootConfig.scopedFiles),
       createFiles: stringArray(bootConfig.createFiles),
@@ -125,7 +135,12 @@ export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
       createRoots: stringArray(bootConfig.createRoots),
       readRoots: stringArray(bootConfig.readRoots),
       allowWrite: bootConfig.allowWrite === true,
+      allowShell: bootConfig.allowShell === true,
+      allowTests: bootConfig.allowTests === true,
       projectDbWrite: bootConfig.projectDbWrite === true,
+      projectDbCapability: normalizeProjectDbCapability(
+        bootConfig.projectDbCapability || (bootConfig.projectDbWrite === true ? "write" : "none"),
+      ),
       allowImageHelpers: bootConfig.allowImageHelpers === true,
       allowImageGeneration: bootConfig.allowImageGeneration === true,
       atlasAvailable: bootConfig.atlasAvailable === true,
@@ -133,7 +148,9 @@ export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
       atlasPrefetchStatus: stringOrNull(bootConfig.atlasPrefetchStatus) || "",
       atlas: plainObjectOrNull(bootConfig.atlas) || {},
       remoteCatalog: plainObjectOrNull(bootConfig.remoteCatalog) || {},
-      toolAllowlist: suiteToolAllowlist(bootConfig.toolAllowlist),
+      toolAllowlist: normalizeSuiteToolAllowlist(bootConfig.toolAllowlist),
+      toolPolicy: plainObjectOrNull(bootConfig.issuedToolPolicy) || {},
+      webAccess: plainObjectOrNull(bootConfig.issuedWebAccess) || {},
       nativeAuth: plainObjectOrNull(bootConfig.nativeAuth) || null,
     },
   };
@@ -191,6 +208,9 @@ export function bootConfigFromMcpOAuthClaims(claims = {}) {
     providerName: stringOrNull(capabilities.providerName) || "",
     jobId: numberOrNull(capabilities.jobId),
     workItemId: numberOrNull(capabilities.workItemId),
+    attemptId: numberOrNull(capabilities.attemptId),
+    agentCallId: numberOrNull(capabilities.agentCallId),
+    promptChars: numberOrNull(capabilities.promptChars) || 0,
     disableSystemTools: capabilities.disableSystemTools === true,
     scopedFiles: stringArray(capabilities.scopedFiles),
     createFiles: stringArray(capabilities.createFiles),
@@ -198,7 +218,12 @@ export function bootConfigFromMcpOAuthClaims(claims = {}) {
     createRoots: stringArray(capabilities.createRoots),
     readRoots: stringArray(capabilities.readRoots),
     allowWrite: capabilities.allowWrite === true,
+    allowShell: capabilities.allowShell === true,
+    allowTests: capabilities.allowTests === true,
     projectDbWrite: capabilities.projectDbWrite === true,
+    projectDbCapability: normalizeProjectDbCapability(
+      capabilities.projectDbCapability || (capabilities.projectDbWrite === true ? "write" : "none"),
+    ),
     allowImageHelpers: capabilities.allowImageHelpers === true,
     allowImageGeneration: capabilities.allowImageGeneration === true,
     atlasAvailable: capabilities.atlasAvailable === true,
@@ -206,7 +231,9 @@ export function bootConfigFromMcpOAuthClaims(claims = {}) {
     atlasPrefetchStatus: stringOrNull(capabilities.atlasPrefetchStatus) || "",
     atlas: plainObjectOrNull(capabilities.atlas) || {},
     remoteCatalog: plainObjectOrNull(capabilities.remoteCatalog) || {},
-    toolAllowlist: suiteToolAllowlist(capabilities.toolAllowlist || capabilities.tool_allowlist),
+    toolAllowlist: normalizeSuiteToolAllowlist(capabilities.toolAllowlist || capabilities.tool_allowlist),
+    issuedToolPolicy: plainObjectOrNull(capabilities.toolPolicy || capabilities.tool_policy) || {},
+    issuedWebAccess: plainObjectOrNull(capabilities.webAccess || capabilities.web_access) || {},
     nativeAuth: plainObjectOrNull(capabilities.nativeAuth) || null,
   };
 }
@@ -280,20 +307,4 @@ function plainObjectOrNull(value) {
   return value && typeof value === "object" && !Array.isArray(value)
     ? /** @type {Record<string, unknown>} */ (value)
     : null;
-}
-
-function suiteToolAllowlist(value) {
-  const source = plainObjectOrNull(value);
-  if (!source) return {};
-  const out = {};
-  for (const [suite, names] of Object.entries(source)) {
-    const suiteName = stringOrNull(suite);
-    if (!suiteName) continue;
-    const unique = [];
-    for (const name of stringArray(names)) {
-      if (!unique.includes(name)) unique.push(name);
-    }
-    out[suiteName] = unique;
-  }
-  return out;
 }

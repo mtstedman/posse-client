@@ -1,29 +1,17 @@
 // @ts-check
 //
-// HeartbeatAuthManager — the single authority for native-binary authentication.
-//
-// The key-gated Rust binaries (posse-atlas / posse-git / posse-remote) authenticate
-// against the central heartbeat endpoint. Native auth has one owner here:
-//
-//   The heartbeat AUTH ENVELOPE — non-secret config: the heartbeat URL, the
-//   PINNED PUBLIC verification key (+ its sha256), and the JWT audience. A
-//   binary needs this to validate the signed heartbeat it fetches; it carries
-//   NO secret and is safe to embed in a child boot payload.
-//
-// Current compiled helpers still require the raw remote API key as their
-// `--posse-key` launch credential. This class owns that compatibility key too,
-// so legacy leaf paths (`opts.key`, ad hoc env reads, per-call resolvers) stay
-// deleted while the native wrapper has one authority to consume.
-//
-// Before this class, every leaf call site resolved both pieces independently
-// (resolvePosseKey + nativeAuthFromSettings), so one logical retrieval could
-// spawn several differently-authenticated processes. This class owns resolution
-// once, caches the envelope, and hands DERIVED material to consumers. Leaf call
-// sites ask the manager; they never call nativeHeartbeatAuthFromSettings()
-// directly.
+// Single authority for the raw Posse credential and the non-secret native
+// heartbeat trust envelope. Production trust is compiled; child capabilities
+// may carry an envelope, but cannot replace the local origin, audience, or
+// verification pins.
 
-import { nativeHeartbeatAuthFromSettings } from "../functions/auth.js";
-import { resolvePosseKey } from "../../../domains/remote/functions/client.js";
+import {
+  createNativeAuthTrustedPolicy,
+  freezeEnvelope,
+  nativeHeartbeatAuthFromSettings,
+  normalizeNativeAuthEnvelope,
+} from "../functions/auth.js";
+import { resolvePosseKey } from "../functions/key.js";
 
 export class HeartbeatAuthManager {
   /**
@@ -33,6 +21,8 @@ export class HeartbeatAuthManager {
    *   envelopeResolver?: (() => (Record<string, unknown> | null)) | null,
    *   getSettingFn?: (key: string) => unknown,
    *   posseKey?: string | null,
+   *   trustedPolicy?: { envelope?: Record<string, unknown> | null, developmentMode?: boolean } | Record<string, unknown> | null,
+   *   developmentMode?: boolean,
    * }} [opts]
    */
   constructor({
@@ -41,55 +31,49 @@ export class HeartbeatAuthManager {
     envelopeResolver = null,
     getSettingFn = undefined,
     posseKey = undefined,
+    trustedPolicy = null,
+    developmentMode = false,
   } = {}) {
     this._env = env || null;
-    this._envelopeResolver = envelopeResolver || null;
     this._getSettingFn = getSettingFn || null;
+    this._developmentMode = developmentMode === true || isIsolatedTestContext();
     this._fixedLaunchKey = posseKey !== undefined ? (String(posseKey || "").trim() || null) : undefined;
     /** @type {string | null | undefined} */
     this._cachedLaunchKey = undefined;
-    // A pre-resolved, authoritative envelope (e.g. reconstructed from a child
-    // capability). When provided it is used verbatim and never re-derived;
-    // `undefined` means "derive from settings/env and cache".
-    this._fixedEnvelope = envelope !== undefined ? (envelope || null) : undefined;
-    /** @type {Record<string, unknown> | null | undefined} */
+
+    this._trustedPolicy = trustedPolicy
+      ? createNativeAuthTrustedPolicy(trustedPolicy)
+      : null;
+    this._envelopeResolver = envelopeResolver || (() => nativeHeartbeatAuthFromSettings({
+      ...(this._getSettingFn ? { getSettingFn: this._getSettingFn } : {}),
+      allowDevelopmentOverrides: this._developmentMode,
+    }));
+
+    if (envelope !== undefined) {
+      if (envelope && !this._trustedPolicy) {
+        this._trustedPolicy = createNativeAuthTrustedPolicy({ envelope, developmentMode: this._developmentMode });
+      }
+      this._fixedEnvelope = envelope
+        ? this.#trustedEnvelopeFor(envelope)
+        : null;
+    } else {
+      this._fixedEnvelope = undefined;
+    }
+    /** @type {Readonly<Record<string, unknown>> | null | undefined} */
     this._cachedEnvelope = undefined;
   }
 
-  /**
-   * The non-secret heartbeat auth envelope, cached after first resolution. This
-   * is what leaves attach as `request.auth` and what is embedded (via
-   * {@link getCapability}) in a child boot payload. Pass `{ refresh: true }` to
-   * force re-resolution (e.g. after a settings change).
-   *
-   * @param {{ refresh?: boolean }} [opts]
-   * @returns {Record<string, unknown> | null}
-   */
+  /** @param {{ refresh?: boolean }} [opts] */
   getNativeAuthEnvelope({ refresh = false } = {}) {
-    if (this._fixedEnvelope !== undefined) {
-      return this._fixedEnvelope && Object.keys(this._fixedEnvelope).length > 0
-        ? this._fixedEnvelope
-        : null;
-    }
+    if (this._fixedEnvelope !== undefined) return this._fixedEnvelope;
     if (refresh || this._cachedEnvelope === undefined) {
-      const resolved = this._envelopeResolver
-        ? this._envelopeResolver()
-        : nativeHeartbeatAuthFromSettings(this._getSettingFn ? { getSettingFn: this._getSettingFn } : {});
-      this._cachedEnvelope = resolved && typeof resolved === "object" && Object.keys(resolved).length > 0
-        ? /** @type {Record<string, unknown>} */ (resolved)
-        : null;
+      const resolved = normalizeNativeAuthEnvelope(this._envelopeResolver?.());
+      this._cachedEnvelope = resolved ? this.#trustedEnvelopeFor(resolved) : null;
     }
     return this._cachedEnvelope;
   }
 
-  /**
-   * Current compiled native helpers still accept their remote API credential
-   * only as `--posse-key`. Resolve it here, once, so all native launch auth is
-   * manager-owned and leaf call sites never read env or pass ad hoc keys.
-   *
-   * @param {{ refresh?: boolean }} [opts]
-   * @returns {string | null}
-   */
+  /** @param {{ refresh?: boolean }} [opts] */
   getLaunchKey({ refresh = false } = {}) {
     if (this._fixedLaunchKey !== undefined) return this._fixedLaunchKey;
     if (refresh || this._cachedLaunchKey === undefined) {
@@ -98,42 +82,125 @@ export class HeartbeatAuthManager {
     return this._cachedLaunchKey;
   }
 
-  /**
-   * A serializable, NON-SECRET capability for seeding a child-scoped manager
-   * (e.g. embedded in the MCP boot payload). Contains only the heartbeat
-   * envelope — never POSSE_KEY.
-   *
-   * @returns {{ envelope: Record<string, unknown> | null }}
-   */
-  getCapability() {
-    return { envelope: this.getNativeAuthEnvelope() };
+  /** @param {{ refresh?: boolean }} [opts] */
+  hasLaunchKey(opts) {
+    return !!this.getLaunchKey(opts);
   }
 
   /**
-   * Reconstruct a child-scoped manager from a capability produced by
-   * {@link getCapability}. A child authenticates from the passed envelope. A
-   * missing/empty envelope falls back to settings/env derivation, so a child is
-   * never left with no auth.
-   *
-   * @param {{ envelope?: Record<string, unknown> | null } | null | undefined} capability
-   * @returns {HeartbeatAuthManager}
+   * Authentication rejection invalidates environment-backed key resolution so
+   * a rotated credential can be observed on the next pulse exchange.
    */
-  static fromCapability(capability) {
-    const envelope = capability && typeof capability === "object"
-      && capability.envelope && typeof capability.envelope === "object"
-      && Object.keys(capability.envelope).length > 0
-      ? /** @type {Record<string, unknown>} */ (capability.envelope)
-      : undefined;
-    return new HeartbeatAuthManager(
-      envelope !== undefined ? { envelope } : {},
-    );
+  clearAuthenticationState() {
+    if (this._fixedLaunchKey === undefined) this._cachedLaunchKey = undefined;
+  }
+
+  getTrustedAuthPolicy() {
+    if (!this._trustedPolicy) {
+      const envelope = this.getNativeAuthEnvelope();
+      if (!envelope) return null;
+      this._trustedPolicy = createNativeAuthTrustedPolicy({
+        envelope,
+        developmentMode: this._developmentMode,
+      });
+    }
+    return this._trustedPolicy;
+  }
+
+  getCapability() {
+    const envelope = this.getNativeAuthEnvelope();
+    return Object.freeze({ envelope: envelope ? freezeEnvelope(envelope) : null });
+  }
+
+  /**
+   * @param {{ envelope?: Record<string, unknown> | null } | null | undefined} capability
+   * @param {{ trustedPolicy?: { envelope?: Record<string, unknown> | null, developmentMode?: boolean } | Record<string, unknown> | null }} [opts]
+   */
+  static fromCapability(capability, { trustedPolicy = null } = {}) {
+    const localPolicy = trustedPolicy
+      ? createNativeAuthTrustedPolicy(trustedPolicy)
+      : defaultRuntimeTrustedPolicy();
+    const supplied = capability && typeof capability === "object" && !Array.isArray(capability)
+      ? normalizeNativeAuthEnvelope(capability.envelope)
+      : null;
+    const envelope = supplied
+      ? validateCapabilityEnvelope(supplied, localPolicy)
+      : localPolicy.envelope;
+    return new HeartbeatAuthManager({
+      envelope,
+      trustedPolicy: localPolicy,
+    });
+  }
+
+  /** @param {Record<string, unknown>} envelope */
+  #trustedEnvelopeFor(envelope) {
+    if (!this._trustedPolicy) {
+      this._trustedPolicy = createNativeAuthTrustedPolicy({
+        envelope,
+        developmentMode: this._developmentMode,
+      });
+    }
+    return validateCapabilityEnvelope(envelope, this._trustedPolicy);
   }
 }
 
+function defaultRuntimeTrustedPolicy() {
+  const developmentMode = isIsolatedTestContext();
+  return createNativeAuthTrustedPolicy({
+    envelope: nativeHeartbeatAuthFromSettings({ allowDevelopmentOverrides: developmentMode }),
+    developmentMode,
+  });
+}
+
 /**
- * Shared process-wide manager. Production wires this singleton through
- * BinaryManager into every NativeBinary so the whole runtime resolves native
- * auth exactly once. Construct a fresh instance only in tests or for a
- * child-scoped capability.
+ * Validate every caller-supplied trust-bearing field, then return the local
+ * trusted envelope rather than the caller's object.
+ *
+ * @param {Record<string, unknown>} supplied
+ * @param {{ envelope: Readonly<Record<string, unknown>>, origin: string }} policy
  */
+function validateCapabilityEnvelope(supplied, policy) {
+  const candidate = normalizeNativeAuthEnvelope(supplied);
+  if (!candidate?.heartbeatUrl) {
+    throw capabilityError("child native-auth capability is missing its heartbeat origin");
+  }
+  let candidateUrl;
+  let trustedUrl;
+  try {
+    candidateUrl = new URL(String(candidate.heartbeatUrl));
+    trustedUrl = new URL(String(policy.envelope.heartbeatUrl));
+  } catch {
+    throw capabilityError("child native-auth capability contains an invalid heartbeat origin");
+  }
+  if (candidateUrl.origin !== policy.origin || normalizeUrl(candidateUrl) !== normalizeUrl(trustedUrl)) {
+    throw capabilityError("child native-auth capability heartbeat origin does not match trusted policy");
+  }
+  assertTrustedField(candidate, policy.envelope, "heartbeatJwtAudience", "audience");
+  assertTrustedField(candidate, policy.envelope, "heartbeatJwtPublicKey", "public key pin");
+  assertTrustedField(candidate, policy.envelope, "heartbeatJwtPublicKeySha256", "public key fingerprint");
+  assertTrustedField(candidate, policy.envelope, "heartbeatPublicKeyUrl", "public-key endpoint");
+  return freezeEnvelope(policy.envelope);
+}
+
+function assertTrustedField(candidate, trusted, field, label) {
+  if (!Object.prototype.hasOwnProperty.call(candidate, field)) return;
+  if (String(candidate[field] || "") !== String(trusted[field] || "")) {
+    throw capabilityError(`child native-auth capability ${label} does not match trusted policy`);
+  }
+}
+
+function normalizeUrl(url) {
+  return url.toString().replace(/\/$/, "");
+}
+
+function capabilityError(message) {
+  const err = new Error(message);
+  err.code = "POSSE_NATIVE_AUTH_CAPABILITY_REJECTED";
+  return err;
+}
+
+function isIsolatedTestContext() {
+  return Boolean(process.env.NODE_TEST_CONTEXT || process.env.POSSE_TEST_RUN);
+}
+
 export const heartbeatAuthManager = new HeartbeatAuthManager();

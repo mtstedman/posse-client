@@ -15,6 +15,7 @@ export const INTERNAL_ATLAS_ACTIONS = Object.freeze([
   "slice.build",
   "slice.refresh",
   "slice.spillover.get",
+  "edit.plan",
   "context",
   "context.summary",
   "agent.feedback",

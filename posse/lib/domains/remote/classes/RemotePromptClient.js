@@ -1,13 +1,15 @@
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
+import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import {
-  assertSafeRemoteAuthUrl,
+  PulseTokenManager,
+  pulseTokenManager,
+} from "../../../shared/native/classes/PulseTokenManager.js";
+import {
   POSSE_REMOTE_MAX_RESPONSE_BYTES,
   readResponseTextWithLimit,
-  resolvePosseKey,
   verifyRemoteResponseIntegrity,
 } from "../functions/client.js";
 import { getPosseRemoteResponseSigningSecret } from "../functions/mode.js";
-import { nativeHeartbeatAuthFromSettings } from "../functions/native-auth.js";
 import { runRemoteNativeRequestJson } from "../functions/native-client.js";
 
 const DEFAULT_REMOTE_PROMPT_TIMEOUT_MS = 60_000;
@@ -20,10 +22,10 @@ export class RemotePromptClient {
     retryDelayMs = 100,
     maxResponseBytes = POSSE_REMOTE_MAX_RESPONSE_BYTES,
     fetchImpl = globalThis.fetch,
-    apiKey = resolvePosseKey(),
     nativeManager = nativeBinaries,
     useNativeClient = true,
-    nativeAuth = null,
+    authManager = null,
+    pulseTokens = null,
     responseSigningSecret = getPosseRemoteResponseSigningSecret(),
   } = {}) {
     if (!baseUrl) throw new Error("RemotePromptClient requires baseUrl");
@@ -39,13 +41,18 @@ export class RemotePromptClient {
       : POSSE_REMOTE_MAX_RESPONSE_BYTES;
     this.fetchImpl = fetchImpl;
     this.usesDefaultFetch = fetchImpl === globalThis.fetch;
-    this.apiKey = apiKey == null ? "" : String(apiKey).trim();
     this.nativeManager = nativeManager;
     this.useNativeClient = useNativeClient !== false;
-    this.nativeAuth = nativeAuth;
+    this.authManager = authManager || nativeManager?.nativeAuthManager || heartbeatAuthManager;
+    this.pulseTokens = pulseTokens || (
+      this.authManager === heartbeatAuthManager && fetchImpl === globalThis.fetch
+        ? pulseTokenManager
+        : new PulseTokenManager({ authManager: this.authManager, fetchImpl })
+    );
     this.responseSigningSecret = String(responseSigningSecret || "").trim();
-    this._resolvedNativeAuth = undefined;
-    assertSafeRemoteAuthUrl(this.baseUrl, this.apiKey, "remote prompt");
+    if (this.hasAuthentication()) {
+      this.pulseTokens.assertTrustedResourceUrl(this.baseUrl, "remote prompt");
+    }
   }
 
   endpoint(path = "") {
@@ -137,16 +144,24 @@ export class RemotePromptClient {
       return await this.requestJsonNative({ path, method, body, operation }, { maxRetries: 0 });
     }
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), this.timeoutMs);
+    let timer = null;
     const url = this.endpoint(path);
     try {
       const headers = {};
       if (body !== undefined) headers["content-type"] = "application/json";
-      if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
+      const pulseToken = await this.pulseTokens.getPulseToken({
+        requiredRoute: requiredRouteFor(path, method),
+      });
+      if (pulseToken) {
+        this.pulseTokens.assertTrustedResourceUrl(url, operation);
+        headers.authorization = `Bearer ${pulseToken}`;
+      }
+      timer = setTimeout(() => ac.abort(), this.timeoutMs);
       const response = await this.fetchImpl(url, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
+        redirect: "error",
         signal: ac.signal,
       });
       const text = await readResponseTextWithLimit(response, {
@@ -163,10 +178,12 @@ export class RemotePromptClient {
         }
       }
       if (!response.ok) {
-        const bodyDetail = formatBodyDetail(responseBody);
+        if (response.status === 401 || response.status === 403) this.pulseTokens.clearAuthentication();
+        const safeResponseBody = redactCredentialValue(responseBody, pulseToken);
+        const bodyDetail = formatBodyDetail(safeResponseBody);
         const err = new Error(`${operation} failed for ${url}: ${response.status} ${response.statusText}${bodyDetail ? ` - ${bodyDetail}` : ""}`);
         err.status = response.status;
-        err.body = responseBody;
+        err.body = safeResponseBody;
         throw err;
       }
       return this.verifyResponseIntegrity(responseBody, { path, operation });
@@ -176,6 +193,7 @@ export class RemotePromptClient {
         timeoutErr.code = "POSSE_REMOTE_TIMEOUT";
         throw timeoutErr;
       }
+      if (String(err?.code || "").startsWith("POSSE_PULSE_")) throw err;
       if (err?.code === "POSSE_REMOTE_RESPONSE_TOO_LARGE") throw err;
       if (err?.status) throw err;
       const wrapped = new Error(`${operation} request failed for ${url}: ${formatFetchError(err)}`);
@@ -183,27 +201,26 @@ export class RemotePromptClient {
       wrapped.cause = err;
       throw wrapped;
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }
   }
 
   shouldUseNativeClient() {
-    if (!this.useNativeClient || !this.usesDefaultFetch || !this.apiKey) return false;
+    if (!this.useNativeClient || !this.usesDefaultFetch || !this.hasAuthentication()) return false;
     if (!this.nativeAuthEnvelope()) return false;
+    if (this.nativeManager?.nativeAuthManager !== this.authManager) return false;
     return this.nativeManager?.shouldUse?.("remote") === true;
   }
 
   nativeAuthEnvelope() {
-    if (this.nativeAuth && typeof this.nativeAuth === "object") {
-      return Object.keys(this.nativeAuth).length > 0 ? this.nativeAuth : null;
-    }
-    if (this._resolvedNativeAuth === undefined) {
-      this._resolvedNativeAuth = nativeHeartbeatAuthFromSettings();
-    }
-    return this._resolvedNativeAuth && typeof this._resolvedNativeAuth === "object"
-      && Object.keys(this._resolvedNativeAuth).length > 0
-      ? this._resolvedNativeAuth
+    const envelope = this.authManager?.getNativeAuthEnvelope?.();
+    return envelope && typeof envelope === "object" && Object.keys(envelope).length > 0
+      ? envelope
       : null;
+  }
+
+  hasAuthentication() {
+    return this.authManager?.hasLaunchKey?.() === true;
   }
 
   async requestJsonNative({
@@ -226,8 +243,6 @@ export class RemotePromptClient {
       maxResponseBytes: this.maxResponseBytes,
     }, {
       manager: this.nativeManager,
-      apiKey: this.apiKey,
-      auth: this.nativeAuthEnvelope(),
     });
     return this.verifyResponseIntegrity(responseBody, { path, operation });
   }
@@ -245,9 +260,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function requiredRouteFor(path, method) {
+  const key = `${String(method || "GET").toUpperCase()} ${String(path || "")}`;
+  if (key === "POST /v1/prompts/compile") return "prompts:compile";
+  if (key === "GET /v1/prompts/bundle") return "prompts:bundle";
+  if (key === "GET /v1/catalog/tool-suites"
+    || key === "GET /v1/catalog/tools"
+    || key === "GET /v1/catalog/models"
+    || key === "POST /v1/catalog/tool-surface") return "catalog:read";
+  return null;
+}
+
 function isRetryableRemoteRequestError(err) {
   if (!err) return false;
   if (err.code === "POSSE_REMOTE_TIMEOUT" || err.code === "POSSE_REMOTE_FETCH_FAILED") return true;
+  if (err.code === "POSSE_PULSE_TIMEOUT" || err.code === "POSSE_PULSE_FETCH_FAILED") return true;
   const status = Number(err.status);
   return Number.isFinite(status) && status >= 500 && status < 600;
 }
@@ -272,4 +299,18 @@ function formatFetchError(err) {
     err?.cause?.name,
   ].map((part) => String(part || "").trim()).filter(Boolean);
   return parts.join(" ") || "fetch failed";
+}
+
+function redactCredentialValue(value, credential) {
+  const secret = String(credential || "");
+  if (!secret) return value;
+  if (typeof value === "string") return value.split(secret).join("[REDACTED]");
+  if (Array.isArray(value)) return value.map((item) => redactCredentialValue(item, secret));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      redactCredentialValue(item, secret),
+    ]));
+  }
+  return value;
 }

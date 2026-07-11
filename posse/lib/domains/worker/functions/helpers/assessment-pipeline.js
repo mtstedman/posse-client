@@ -1164,6 +1164,9 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       disableAtlas: artifactAssessmentRoute,
       stableContext: assessorPacket?.stable_context || null,
       remoteSystemPrompt: assessorPacket?.remote_system_prompt || null,
+      taskMode: parsedJobPayload.task_mode || "code",
+      projectDbCapability: parsedJobPayload.task_mode === "db" ? "read" : "none",
+      sessionPacket: assessorPacket || null,
       skipRolePrompt: !!assessorPacket?.remote_prompt_composed,
       deepthink: assessorDeepthink,
     }, {

@@ -13,7 +13,7 @@ const PRIORITY_AGING_MS = 30000;
 /** @typedef {{ name?: string, maxConcurrency?: number }} QueueOptions */
 /** @typedef {"read-priority" | "fifo" | "writer-priority"} GatePolicy */
 /** @typedef {{ name?: string, policy?: GatePolicy }} ProtectedAssetGateOptions */
-/** @typedef {{ label?: string, waitMs?: number, onBeforeRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void | Promise<void>) | null, onRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void) | null, onCancel?: ((info: QueueInfo & { key?: string, error?: unknown }) => void) | null }} RunOptions */
+/** @typedef {{ label?: string, waitMs?: number | null, onBeforeRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void | Promise<void>) | null, onRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void) | null, onCancel?: ((info: QueueInfo & { key?: string, error?: unknown }) => void) | null }} RunOptions */
 /** @typedef {{ waitMs: number, depthAtEnqueue: number, inFlightAtEnqueue: number, label: string, key?: string, mode?: "blocking" | "non-blocking" }} QueueInfo */
 
 export class AsyncWorkQueue {
@@ -48,6 +48,7 @@ export class AsyncWorkQueue {
    */
   run(fn, { label = "work", waitMs = DEFAULT_WAIT_MS, onBeforeRelease = null, onRelease = null, onCancel = null } = {}) {
     const requestedAt = Date.now();
+    const unboundedWait = waitMs === null;
     const maxWaitMs = Math.max(0, Number(waitMs) || 0);
     return new Promise((resolve, reject) => {
       const task = {
@@ -66,7 +67,7 @@ export class AsyncWorkQueue {
         onRelease,
         onCancel,
       };
-      if (maxWaitMs > 0) {
+      if (!unboundedWait && maxWaitMs > 0) {
         task.timer = setTimeout(() => {
           task.cancelled = true;
           this.#pending = this.#pending.filter((entry) => entry !== task);
@@ -82,7 +83,7 @@ export class AsyncWorkQueue {
       }
       this.#pending.push(task);
       this.#drain();
-      if (maxWaitMs === 0 && !task.started) {
+      if (!unboundedWait && maxWaitMs === 0 && !task.started) {
         task.cancelled = true;
         this.#pending = this.#pending.filter((entry) => entry !== task);
         const err = new AsyncGateBusyError(

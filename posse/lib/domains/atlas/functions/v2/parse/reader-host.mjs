@@ -1,7 +1,7 @@
 // @ts-check
 //
 // Atlas reader-lane daemon host (thread side). The first lane of the conductor
-// thread bundle (CONDUCTOR-THREAD-BUNDLE-SPEC.md v0): read-only retrieval
+// thread bundle (docs/specs/CONDUCTOR-THREAD-BUNDLE-SPEC.md v0): read-only retrieval
 // dispatch runs here, on an event loop the writer lane's long synchronous
 // sections (SCIP ingest transactions, view merges) can never occupy. View and
 // Ledger handles are request-scoped readonly WAL connections (see
@@ -23,9 +23,9 @@
 // gate until the indexing op is done.
 
 import { workerData } from "node:worker_threads";
-import { runDaemonThread } from "../../../../../classes/tools/daemon/thread-host.js";
-import { installNativeThreadBridge } from "../../../../../classes/tools/daemon/native-thread-bridge.js";
-import { nativeBinaries } from "../../../../../classes/tools/BinaryManager.js";
+import { runDaemonThread } from "../../../../../shared/tools/classes/daemon/thread-host.js";
+import { installNativeThreadBridge } from "../../../../../shared/tools/classes/daemon/native-thread-bridge.js";
+import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { setOnnxDaemonKeepWarm, closeSharedOnnxDaemon } from "../embeddings/onnx-daemon.js";
 

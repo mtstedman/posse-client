@@ -1,7 +1,8 @@
 # Posse Windows Installer
 
-PowerShell counterpart of the Linux installer: same step sequence, same
-summary, same idempotency.
+PowerShell counterpart of the Linux installer: the same lifecycle, summary
+contract, and idempotent repair behavior, plus a Windows-specific C++ Build
+Tools decision during bootstrap.
 
 ATLAS is built into Posse — there is no separate ATLAS checkout, build, or
 server process. ATLAS runtime configuration lives in `~\.posse\account.db`
@@ -14,14 +15,15 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
   marked `blocked`, and the summary always prints.
 - **Idempotent.** Re-running is safe; fresh steps are skipped. `-Force`
   reinstalls npm deps, `-DryRun` previews everything.
-- **PS 5.1 and 7+ safe.** Native commands run through `cmd.exe` with output
-  redirected to the log file, so stderr output can never surface as a
+- **PS 5.1 and 7+ safe.** Native executables run directly with redirected
+  output (batch launchers use a minimal `cmd.exe` wrapper), so stderr cannot surface as a
   terminating `NativeCommandError` (the classic Windows PowerShell 5.1
   failure mode of the old installer).
-- **Self-sufficient.** Installs Node 24+ via winget when missing
+- **Self-sufficient.** Installs Git, host helper CLIs, and a Node 24+-capable
+  distribution via winget when missing
   (`-NoInstallNode` opts out) and refreshes `PATH` from the registry after
   winget installs so new tools are visible without a new terminal.
-- **Observable.** A splash, numbered steps (`[ 3/12]`), a spinner with
+- **Observable.** A splash, numbered steps (`[ 3/15]`), a spinner with
   elapsed time on capable terminals (Windows Terminal / PS 7+), and full
   command output captured to
   `%USERPROFILE%\.posse\logs\install-<timestamp>.log` (failures print the
@@ -29,48 +31,59 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
 
 ## What It Does (steps)
 
-1. **System packages** — installs missing helper CLIs via winget: ripgrep,
+1. **SCIP language selection** — validates `-ScipLanguages` or offers the
+   interactive default selection when input is available.
+2. **Preflight checks** — validates the optional smoke-test repo and reports
+   provider credential / Git identity gaps.
+3. **System packages** — installs missing Git and helper CLIs via winget: ripgrep,
    Tesseract OCR, ImageMagick, FFmpeg, Python 3, PHP. Each tool tries its
    winget id candidates independently, so one failure can't sink the rest.
    Tesseract's install dir is probed and added to `PATH` when its installer
    doesn't do so.
-2. **Node.js runtime** — accepts an existing Node ≥ 24; otherwise installs
-   `OpenJS.NodeJS.LTS` via winget and adopts it in-session.
-3. **Posse checkout** — uses the checkout containing this installer when
+4. **C++ Build Tools** — detects an existing MSVC C++ workload. When it is
+   missing and input is interactive, explains the several-GB/UAC/reboot impact
+   and asks whether Posse should install Visual Studio Build Tools with the
+   Desktop development with C++ workload. A yes answer is handled automatically
+   through winget; no or non-interactive input continues with a clear warning.
+5. **Node.js runtime** — accepts an existing Node ≥ 24; otherwise tries the
+   winget Node distributions and verifies the installed major before continuing.
+   Node 24 is a minimum, not an exact-version pin; newer majors are accepted.
+6. **Posse checkout** — uses the checkout containing this installer when
    available; cloning is only a fallback for standalone use.
-4. **Composer (SCIP PHP)** — uses a global `composer` when present; otherwise
+7. **Composer (SCIP PHP)** — uses a global `composer` when present; otherwise
    downloads a signature-verified `composer.phar` into Posse's `scip\bin`
    (skipped when PHP is absent).
-5. **npm dependencies** — `npm install --include=optional` (skipped when
-   `node_modules` is fresh; one automatic retry). If the log shows
-   node-gyp/MSBuild errors, install Visual Studio Build Tools (C++ workload)
-   and re-run.
-6. **Shell wiring** — writes `%USERPROFILE%\.config\posse\atlas.env.ps1`,
-   installs `posse.cmd` / `posse.ps1` shims in `%USERPROFILE%\.local\bin`,
-   puts that directory on the user `PATH`, and (unless `-NoPersistEnv`)
-   sources the env file from `$PROFILE`.
-7. **Account settings** — seeds missing ATLAS keys into `~\.posse\account.db`
+8. **npm dependencies** — `npm install --include=optional` (skipped when
+   `node_modules` is fresh; one automatic retry). If the user declined Build
+   Tools and the log shows node-gyp/MSBuild errors, re-run and accept the prompt.
+9. **Shell wiring** — writes `%USERPROFILE%\.config\posse\atlas.env.ps1`,
+   installs a UTF-8 `posse.cmd` shim in `%USERPROFILE%\.local\bin`, and puts
+   that directory on the user `PATH`. Profile sourcing is added only when the
+   effective PowerShell execution policy can run it.
+10. **Account settings** — seeds missing ATLAS keys into `~\.posse\account.db`
    (merge-only; existing values are never overwritten).
-8. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
+11. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
    which builds the managed Python venv from `requirements.txt` and installs
    the SCIP language environments (replaces the old standalone
    `pip install --user` and inline SCIP steps).
-9. **Provider CLI detection** — `posse admin init --non-interactive`.
-10. **Validation** — boots Posse (`node orchestrator.js status`).
-11. **Provider API keys** — only with `-ConfigureKeys`: hidden SecureString
+12. **Provider CLI detection** — `posse admin init --non-interactive`.
+13. **Validation** — boots Posse (`node orchestrator.js status`) with a
+    five-minute timeout.
+14. **Provider API keys** — only with `-ConfigureKeys`: hidden SecureString
     prompts for `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` /
     `CODEX_API_KEY`, written to
     `%USERPROFILE%\.config\posse\providers.env.ps1` with an NTFS ACL locked
     to the current user, plus optional `claude` / `codex login` launches.
-12. **ATLAS smoke test** — only with `-RepoPath`.
+15. **ATLAS smoke test** — only with `-RepoPath`.
 
 ## Prereqs
 
 - PowerShell 5.1 (ships with Windows) or PowerShell 7+.
 - `winget` (App Installer from the Microsoft Store) so the installer can
-  fetch Node and host tools automatically. Without it, missing tools are
+  fetch Git, Node, and host tools automatically. Without it, missing tools are
   reported and everything else still runs.
-- `git` for the clone fallback (`winget install Git.Git`).
+- `git` for the clone fallback; the packages step installs it through winget
+  when possible.
 
 ## Run
 
@@ -105,7 +118,7 @@ powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
 | `-NoSmoke` | Skip the smoke test |
 | `-NoPersistEnv` | Don't write user `PATH` / `$PROFILE` wiring |
 | `-SkipSettings` | Don't seed `~\.posse\account.db` |
-| `-SkipHostTools` | Don't install helper CLIs (missing ones are still reported) |
+| `-SkipHostTools` | Don't install helper CLIs or offer the C++ Build Tools install (missing tools are still reported) |
 | `-NoInstallNode` | Don't auto-install Node via winget when Node 24+ is missing |
 | `-ConfigureKeys` | Prompt for provider API keys (SecureString input, user-only ACL file) |
 | `-Force` | Re-run `npm install` even when `node_modules` looks fresh |
@@ -158,8 +171,9 @@ installer only detects and warns in that mode.
 
 ## Parity with the Linux script
 
-Same steps, same summary format, same flags (PowerShell-style names). The
-platform differences: winget instead of distro package managers + nvm,
-`atlas.env.ps1` / `$PROFILE` instead of `atlas.env` / `.bashrc`, `posse.cmd` +
-`posse.ps1` shims instead of a bash shim, and NTFS ACLs instead of
-`chmod 600`.
+Both installers expose the same lifecycle and failure-summary contract. Windows
+adds the interactive C++ Build Tools decision and uses winget instead of distro
+package managers + nvm,
+`atlas.env.ps1` / conditional `$PROFILE` wiring instead of `atlas.env` /
+`.bashrc`, a policy-independent `posse.cmd` shim instead of a bash shim, and
+NTFS ACLs instead of `chmod 600`.

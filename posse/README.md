@@ -62,6 +62,23 @@ Key behavior:
 - `test/`: core regression suite, focused suite wrappers, and root-level
   integration tests.
 
+## Remote Tool Authority
+
+`posse-remote` is authoritative for the resolved role, exact tool allowlist,
+web-access maximum, project database capability, and broad read/write/shell/test
+policy. Posse treats that response as a ceiling. Runtime availability, task
+mode, file scope, and operator settings may remove capabilities but never add
+them.
+
+Missing or mismatched issuance fails closed. Provider contracts intersect base
+and attached tools with the exact remote list; MCP owner tokens carry the same
+suite-scoped allowlist and server-derived policy facts. Unsigned boot payloads
+cannot widen signed claims. `project_db_query` additionally requires the issued
+`read` or `write` capability and the repository's configured SQL grants. Web
+tools require both the issued role grant and the operator kill switch. Internal
+ATLAS orchestration actions, including `edit.plan` and `workflow`, are excluded
+from provider and MCP surfaces even if a caller asserts them.
+
 ## Runtime Paths
 
 By default, Posse stores runtime state inside the target project:

@@ -822,13 +822,8 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
             }
           } catch (err) {
             if (isAbortError(err)) throw err;
-            try {
-              await gitExecAsync(["checkout", "--", "."], wtPath, { signal });
-              await gitExecAsync(["clean", "-fd"], wtPath, { signal });
-              worker.emit(job.id, `${C.dim}[system] WI#${wi.id} cleaned dirty worktree (snapshot failed: ${err.message.split("\n")[0]})${C.reset}`);
-            } catch {
-              throw new Error(`Branch has uncommitted changes and cleanup failed: ${dirtyState.dirtyPost.split("\n").slice(0, 5).join(", ")}`);
-            }
+            worker.emit(job.id, `${C.yellow}[system] WI#${wi.id} dirty worktree snapshot/reset failed; leaving changes in place (${err.message.split("\n")[0]})${C.reset}`);
+            throw err;
           }
         });
       }

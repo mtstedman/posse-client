@@ -306,7 +306,7 @@ export function __testRunHookShellCommandAsync(command, opts = {}) {
 // ─── secrets_scan ───────────────────────────────────────────────────────────
 //
 // Scans staged files for leaked credentials before commit.
-// ctx: { cwd: string }
+// ctx: { cwd: string, paths?: string[] }
 //
 const BINARY_EXTENSIONS = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp",
@@ -347,7 +347,7 @@ function secretsBlockResult(findings) {
     ...findings.slice(0, 20),
     findings.length > 20 ? `  ... and ${findings.length - 20} more` : "",
     "",
-    "Remove the secrets and re-stage before committing.",
+    "Remove the secrets before committing.",
     "If these are false positives, set skip_hook_secrets_scan=true in Posse admin.",
   ].filter(Boolean).join("\n");
   return { ok: false, output };
@@ -423,7 +423,52 @@ async function stagedContentsBatchAsync(cwd, files) {
   }
 }
 
-function secretsScan({ cwd }) {
+function normalizedWorkingTreeScanPaths(paths = []) {
+  return [...new Set(paths.map(_normalizeRepoPath).filter(Boolean))]
+    .filter((file) => !BINARY_EXTENSIONS.has(path.extname(file).toLowerCase()));
+}
+
+function secretsScanWorkingTreePaths(cwd, paths = []) {
+  const findings = [];
+  for (const file of normalizedWorkingTreeScanPaths(paths)) {
+    const fullPath = path.resolve(cwd, file);
+    const relative = path.relative(path.resolve(cwd), fullPath);
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+    let content;
+    try {
+      const stat = fs.lstatSync(fullPath);
+      if (stat.isSymbolicLink()) content = fs.readlinkSync(fullPath, "utf-8");
+      else if (stat.isFile()) content = fs.readFileSync(fullPath, "utf-8");
+      else continue;
+    } catch { continue; }
+    findings.push(...secretsFindingsForContent(file, content));
+  }
+  return secretsBlockResult(findings);
+}
+
+async function secretsScanWorkingTreePathsAsync(cwd, paths = []) {
+  const findings = [];
+  for (const file of normalizedWorkingTreeScanPaths(paths)) {
+    const fullPath = path.resolve(cwd, file);
+    const relative = path.relative(path.resolve(cwd), fullPath);
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+    let content;
+    try {
+      const stat = await fs.promises.lstat(fullPath);
+      if (stat.isSymbolicLink()) content = await fs.promises.readlink(fullPath, "utf-8");
+      else if (stat.isFile()) content = await fs.promises.readFile(fullPath, "utf-8");
+      else continue;
+    } catch { continue; }
+    findings.push(...secretsFindingsForContent(file, content));
+  }
+  return secretsBlockResult(findings);
+}
+
+function secretsScan({ cwd, paths = null }) {
+  // Scoped native commits build their index inside Rust. Scan the exact
+  // working-tree paths that transaction will receive so Posse's deterministic
+  // gate still runs before any native index or ref mutation.
+  if (Array.isArray(paths)) return secretsScanWorkingTreePaths(cwd, paths);
   let staged;
   try {
     staged = gitExec(["diff", "--cached", "--name-only", "--diff-filter=ACM"], cwd).trim();
@@ -450,7 +495,8 @@ function secretsScan({ cwd }) {
   return secretsBlockResult(findings);
 }
 
-async function secretsScanAsync({ cwd }) {
+async function secretsScanAsync({ cwd, paths = null }) {
+  if (Array.isArray(paths)) return secretsScanWorkingTreePathsAsync(cwd, paths);
   let staged;
   try {
     staged = (await gitExecAsync(["diff", "--cached", "--name-only", "--diff-filter=ACM"], cwd)).trim();

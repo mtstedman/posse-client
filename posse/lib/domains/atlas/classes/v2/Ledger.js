@@ -12,20 +12,11 @@
 
 import path from "path";
 import Database from "better-sqlite3";
-import { LEDGER_DDL, LEDGER_SCHEMA_VERSION } from "../../functions/v2/contracts/index.js";
 import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
 import { isContentHash } from "../../functions/v2/hash.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
-import {
-  ensureColumn,
-  ensureLedgerFtsBackfill,
-  ensureLegacyScipColumnsBeforeDdl,
-  ensureMemoryEvidenceColumns,
-  openLedgerDb,
-  openLedgerDbReadOnly,
-  runDdl,
-} from "../../functions/v2/ledger/schema.js";
-import { nowIso } from "../../functions/v2/ledger/normalize.js";
+import { openLedgerDb, openLedgerDbReadOnly } from "../../functions/v2/ledger/schema.js";
+import { ensureLedgerNative, writeLedgerNative } from "../../functions/v2/native/storage.js";
 import { BlobStore } from "./ledger/BlobStore.js";
 import { FeedbackStore } from "./ledger/FeedbackStore.js";
 import { Interner } from "./ledger/Interner.js";
@@ -73,6 +64,7 @@ export class Ledger {
     if (!dbPath) throw new Error("Ledger: dbPath is required");
     this.#dbPath = path.resolve(dbPath);
     const readOnly = mode === "readonly";
+    if (!readOnly) ensureLedgerNative(this.#dbPath);
     this.#db = readOnly ? openLedgerDbReadOnly(this.#dbPath) : openLedgerDb(this.#dbPath);
     // Any bootstrap throw after the open (schema-version mismatch, stale
     // read-only format, migration race) must close the connection: a leaked
@@ -90,63 +82,6 @@ export class Ledger {
    * @param {boolean} readOnly
    */
   #bootstrap(readOnly) {
-    if (readOnly) {
-      this.#db.pragma("foreign_keys = ON");
-      this.#stmt = this.#prepareAll();
-      this.#interner = new Interner(this.#db);
-      this.#scipIndex = new ScipIndexStore(this.#db, this.#interner);
-      this.#sourceStats = new SourceStatsStore(this.#db, this.#dbPath, this.#interner);
-      this.#blob = new BlobStore(this.#db, this.#dbPath, this.#interner);
-      this.#feedback = new FeedbackStore(this.#db, this.#dbPath);
-      return;
-    }
-    ensureLegacyScipColumnsBeforeDdl(this.#db);
-    runDdl(this.#db, LEDGER_DDL);
-    // PRAGMAs from DDL only bind to the connection that ran them; re-assert
-    // here so re-opens of an existing DB inherit FK enforcement too.
-    this.#db.pragma("foreign_keys = ON");
-    this.#initMeta();
-    this.#ensureMainBranch();
-    // Idempotent additive column adds for pre-line-anchor DBs. Runs after
-    // DDL so CREATE TABLE IF NOT EXISTS hits the fresh-DB path first.
-    ensureColumn(this.#db, "blob_symbols", "range_start_line", "INTEGER");
-    ensureColumn(this.#db, "blob_symbols", "range_end_line", "INTEGER");
-    ensureColumn(this.#db, "blob_edges", "range_start_line", "INTEGER");
-    ensureColumn(this.#db, "blob_edges", "range_end_line", "INTEGER");
-    ensureColumn(this.#db, "blobs", "parser_version", "TEXT");
-    ensureColumn(this.#db, "blobs", "parser_spec_version", "TEXT");
-    // Pre-signature-text DBs: legacy rows get NULL signature_text; new
-    // ingests populate it. Encoder + downstream consumers treat NULL as
-    // absent and fall back to the identity card only.
-    ensureColumn(this.#db, "blob_symbols", "signature_text", "TEXT");
-    ensureColumn(this.#db, "blob_symbols", "body_identifiers", "TEXT");
-    // Pre-SCIP DBs: source defaults to 'treesitter' so legacy rows have a
-    // sane value and CHECK constraints on fresh DBs stay enforceable. The
-    // CHECK is created with the fresh-DB DDL only — for migrated DBs we
-    // trust the writer to keep `source` valid.
-    ensureColumn(this.#db, "blob_symbols", "source", "TEXT NOT NULL DEFAULT 'treesitter'");
-    ensureColumn(this.#db, "blob_edges", "source", "TEXT NOT NULL DEFAULT 'treesitter'");
-    // Pre-SCIP DBs: external-symbol binding column. NULL = in-repo or
-    // unresolved; non-NULL = pointer into external_symbols(id).
-    ensureColumn(this.#db, "blob_edges", "to_external_id", "INTEGER");
-    ensureColumn(this.#db, "blob_edges", "to_module_id", "INTEGER");
-    // Pre-call-proof-metadata DBs: layered SCIP ingest stores per-document
-    // proof coverage here so merge paths can suppress weaker tree-sitter calls
-    // only when SCIP explicitly says its call graph is complete.
-    ensureColumn(this.#db, "blob_layers", "metadata_json", "TEXT");
-    // Pre-partial-SCIP-bookkeeping DBs: complete rows keep their prior
-    // semantics; new partial rows can be recorded without short-circuiting
-    // later complete ingests. Like source above, the migrated status column
-    // omits the fresh-DB CHECK; writer-side validation keeps values bounded.
-    ensureColumn(this.#db, "scip_indexes", "documents_failed", "INTEGER NOT NULL DEFAULT 0");
-    ensureColumn(this.#db, "scip_indexes", "status", "TEXT NOT NULL DEFAULT 'complete'");
-    // Pre-bytes-hash DBs: NULL disables the cheap pre-decode skip until the
-    // next full ingest backfills the key. Nullable additive — intentionally
-    // NOT in REQUIRED_LEDGER_COLUMNS (missing columns there force a reset).
-    ensureColumn(this.#db, "scip_indexes", "scip_bytes_hash", "TEXT");
-    ensureColumn(this.#db, "scip_indexes", "ingested_head", "TEXT");
-    ensureMemoryEvidenceColumns(this.#db);
-    ensureLedgerFtsBackfill(this.#db);
     this.#stmt = this.#prepareAll();
     this.#interner = new Interner(this.#db);
     this.#scipIndex = new ScipIndexStore(this.#db, this.#interner);
@@ -178,66 +113,16 @@ export class Ledger {
     return new Ledger({ ...args, mode: "readonly" });
   }
 
-  // ---------------------------------------------------------------------------
-  // Bootstrap
-  // ---------------------------------------------------------------------------
-
-  #initMeta() {
-    const get = this.#db.prepare("SELECT value FROM meta WHERE key = ?");
-    const set = this.#db.prepare(
-      "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    );
-    const existing = /** @type {{ value: string } | undefined} */ (get.get("schema_version"));
-    if (!existing) {
-      set.run("schema_version", String(LEDGER_SCHEMA_VERSION));
-    } else if (Number(existing.value) !== LEDGER_SCHEMA_VERSION) {
-      throw new Error(
-        `Ledger: schema_version mismatch (db=${existing.value}, code=${LEDGER_SCHEMA_VERSION})`,
-      );
-    }
-  }
-
-  #ensureMainBranch() {
-    this.#ensureRootBranch(MAIN_BRANCH);
-  }
-
-  #ensureRootBranch(name) {
-    const branch = String(name || "").trim();
-    if (!branch) throw new TypeError("Ledger.ensureRootBranch: name is required");
-    const exists = this.#db
-      .prepare("SELECT name FROM branches WHERE name = ?")
-      .get(branch);
-    if (!exists) {
-      this.#db
-        .prepare(
-          "INSERT INTO branches(name, parent_branch, parent_seq, created_at, status) VALUES(?, NULL, NULL, ?, 'active')",
-        )
-        .run(branch, nowIso());
-    }
-  }
-
   #prepareAll() {
     const db = this.#db;
     return {
       // branches
       branchSelect: db.prepare("SELECT * FROM branches WHERE name = ?"),
-      branchInsert: db.prepare(
-        "INSERT INTO branches(name, parent_branch, parent_seq, created_at, status) VALUES(?, ?, ?, ?, 'active')",
-      ),
-      branchSetStatus: db.prepare("UPDATE branches SET status = ? WHERE name = ?"),
-
-      // ledger writes
+      // ledger reads
       headSeqByBranch: db.prepare(
         "SELECT COALESCE(MAX(seq), 0) AS s FROM symbol_deltas WHERE branch = ?",
       ),
-      lastSeqForBranchPath: db.prepare(
-        "SELECT MAX(seq) AS s FROM symbol_deltas WHERE branch = ? AND path_id = ?",
-      ),
-      deltaInsert: db.prepare(
-        "INSERT INTO symbol_deltas(seq, branch, ts, op, path_id, before_content_hash, after_content_hash, parent_seq) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-      ),
-
-      // ledger reads (hydrated via JOIN on interned_paths)
+      // hydrated via JOIN on interned_paths
       tail: db.prepare(
         `SELECT d.seq, d.branch, d.ts, d.op, p.path AS repo_rel_path,
                 d.before_content_hash, d.after_content_hash, d.parent_seq
@@ -272,18 +157,6 @@ export class Ledger {
            )`,
       ),
     };
-  }
-
-  // ---------------------------------------------------------------------------
-  // Interning helpers
-  // ---------------------------------------------------------------------------
-
-  /**
-   * @param {string} repo_rel_path
-   * @returns {number}
-   */
-  #internPath(repo_rel_path) {
-    return this.#interner.internPath(repo_rel_path);
   }
 
   // ---------------------------------------------------------------------------
@@ -327,48 +200,8 @@ export class Ledger {
       throw new RangeError("Ledger.append: op='modify' requires both hashes non-null");
     }
 
-    const branchRec = this.getBranch(branch);
-    if (!branchRec) throw new Error(`Ledger.append: unknown branch '${branch}'`);
-
-    // Validate that referenced blobs exist.
-    if (before_content_hash && !this.hasBlob(before_content_hash)) {
-      throw new Error(`Ledger.append: before_content_hash ${before_content_hash} not ingested`);
-    }
-    if (after_content_hash && !this.hasBlob(after_content_hash)) {
-      throw new Error(`Ledger.append: after_content_hash ${after_content_hash} not ingested`);
-    }
-
-    const txn = this.#db.transaction(() => {
-      const pathId = this.#internPath(repo_rel_path);
-      const head = /** @type {{ s: number }} */ (this.#stmt.headSeqByBranch.get(branch));
-      const nextSeq = (head.s || 0) + 1;
-      const prev = /** @type {{ s: number | null }} */ (
-        this.#stmt.lastSeqForBranchPath.get(branch, pathId)
-      );
-      const parentSeq = prev?.s ?? null;
-      const ts = nowIso();
-      this.#stmt.deltaInsert.run(
-        nextSeq,
-        branch,
-        ts,
-        op,
-        pathId,
-        before_content_hash,
-        after_content_hash,
-        parentSeq,
-      );
-      return /** @type {LedgerEntry} */ ({
-        seq: nextSeq,
-        branch,
-        ts,
-        op,
-        repo_rel_path,
-        before_content_hash,
-        after_content_hash,
-        parent_seq: parentSeq,
-      });
-    });
-    return txn.immediate();
+    const result = writeLedgerNative(this.#dbPath, "append", input);
+    return /** @type {LedgerEntry} */ (result?.value);
   }
 
   /**
@@ -407,7 +240,8 @@ export class Ledger {
    * @returns {{ layer_id: number, source: "treesitter" | "scip", symbols: number, edges: number }}
    */
   ingestBlobLayer(layer) {
-    return this.#blob.ingestBlobLayer(layer);
+    const result = writeLedgerNative(this.#dbPath, "ingest_blob_layer", layer);
+    return result?.value;
   }
 
   /**
@@ -426,7 +260,7 @@ export class Ledger {
    * @returns {void}
    */
   ingestBlob(blob) {
-    return this.#blob.ingestBlob(blob);
+    writeLedgerNative(this.#dbPath, "ingest_blob", blob);
   }
 
   /**
@@ -448,7 +282,8 @@ export class Ledger {
    * @returns {{ inserted_symbols: number, mapped_symbols: number, inserted_edges: number, skipped_edges: number }}
    */
   mergeBlobParseRows(blob) {
-    return this.#blob.mergeBlobParseRows(blob);
+    const result = writeLedgerNative(this.#dbPath, "merge_blob_parse_rows", blob);
+    return result?.value;
   }
 
   /**
@@ -561,10 +396,12 @@ export class Ledger {
         `Ledger.forkBranch: atSeq ${atSeq} exceeds parent head ${parentHead}`,
       );
     }
-    this.#stmt.branchInsert.run(name, parentBranch, atSeq, nowIso());
-    const rec = this.getBranch(name);
-    if (!rec) throw new Error("Ledger.forkBranch: insert failed");
-    return rec;
+    const result = writeLedgerNative(this.#dbPath, "fork_branch", {
+      name,
+      parent_branch: parentBranch,
+      at_seq: atSeq,
+    });
+    return /** @type {BranchRecord} */ (result?.value);
   }
 
   /**
@@ -605,13 +442,10 @@ export class Ledger {
    * @returns {BranchRecord}
    */
   ensureRootBranch(name) {
-    this.#ensureRootBranch(name);
-    const rec = this.getBranch(name);
-    if (!rec) throw new Error("Ledger.ensureRootBranch: insert failed");
-    if (rec.parent_branch != null) {
-      throw new Error(`Ledger.ensureRootBranch: branch '${name}' already has a parent`);
-    }
-    return rec;
+    const branch = String(name || "").trim();
+    if (!branch) throw new TypeError("Ledger.ensureRootBranch: name is required");
+    const result = writeLedgerNative(this.#dbPath, "ensure_root_branch", { name: branch });
+    return /** @type {BranchRecord} */ (result?.value);
   }
 
   /**
@@ -635,10 +469,7 @@ export class Ledger {
     if (status !== "merged" && status !== "abandoned") {
       throw new RangeError(`Ledger.setBranchStatus: invalid status '${status}'`);
     }
-    if (!this.getBranch(name)) {
-      throw new Error(`Ledger.setBranchStatus: unknown branch '${name}'`);
-    }
-    this.#stmt.branchSetStatus.run(status, name);
+    writeLedgerNative(this.#dbPath, "set_branch_status", { name, status });
   }
 
   /**
@@ -671,50 +502,12 @@ export class Ledger {
    * @returns {LedgerEntry[]}
    */
   replayPartition(branch, ontoBranch, fromSeq) {
-    if (!this.getBranch(branch)) {
-      throw new Error(`Ledger.replayPartition: unknown source branch '${branch}'`);
-    }
-    if (!this.getBranch(ontoBranch)) {
-      throw new Error(`Ledger.replayPartition: unknown destination branch '${ontoBranch}'`);
-    }
-    if (branch === ontoBranch) {
-      throw new Error("Ledger.replayPartition: source and destination must differ");
-    }
-    const source = this.tail(branch, fromSeq);
-    /** @type {LedgerEntry[]} */
-    const replayed = [];
-    const txn = this.#db.transaction(() => {
-      // Snapshot the destination branch's current path → blob map. We
-      // update it in-memory as we go so each entry's precondition sees
-      // the effect of prior replays in this same call.
-      const destHead = this.headSeq(ontoBranch);
-      const destPaths = this.pathSnapshotAt(ontoBranch, destHead);
-      for (const entry of source) {
-        const currentDestHash = destPaths.get(entry.repo_rel_path) ?? null;
-        const expectedBefore = entry.before_content_hash ?? null;
-        if (currentDestHash !== expectedBefore) {
-          throw new Error(
-            `Ledger.replayPartition: conflict at '${entry.repo_rel_path}' ` +
-              `(dest has ${currentDestHash ?? "absent"}, replay expects ${expectedBefore ?? "absent"})`,
-          );
-        }
-        const r = this.append({
-          branch: ontoBranch,
-          op: entry.op,
-          repo_rel_path: entry.repo_rel_path,
-          before_content_hash: entry.before_content_hash,
-          after_content_hash: entry.after_content_hash,
-        });
-        replayed.push(r);
-        if (entry.op === "remove" || entry.after_content_hash == null) {
-          destPaths.delete(entry.repo_rel_path);
-        } else {
-          destPaths.set(entry.repo_rel_path, entry.after_content_hash);
-        }
-      }
+    const result = writeLedgerNative(this.#dbPath, "replay_partition", {
+      branch,
+      onto_branch: ontoBranch,
+      from_seq: fromSeq,
     });
-    txn.immediate();
-    return replayed;
+    return /** @type {LedgerEntry[]} */ (result?.value || []);
   }
 
   /**
@@ -939,7 +732,8 @@ export class Ledger {
    * @returns {{ removed_symbols: number, removed_edges: number, removed_blob: number }}
    */
   reingestBlobWithBackend(input) {
-    return this.#blob.reingestBlobWithBackend(input);
+    const result = writeLedgerNative(this.#dbPath, "reingest_blob", input);
+    return result?.value;
   }
 
   /**

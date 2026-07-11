@@ -3,6 +3,8 @@ import os from "os";
 import path from "path";
 
 import { C } from "../../../shared/format/functions/colors.js";
+import { getAtlasIntegrationConfig } from "../../integrations/functions/atlas/config.js";
+import { getLiveSchedulerBlockMessage } from "../../queue/functions/index.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 import { gitExecAsync } from "../../git/functions/utils.js";
 import {
@@ -17,6 +19,7 @@ const GIT_TIMEOUT_MS = 120_000;
 // they get far more room than ordinary plumbing calls.
 const FETCH_TIMEOUT_MS = 600_000;
 const MERGE_TIMEOUT_MS = 300_000;
+const UPDATE_DOCTOR_TIMEOUT_MS = 20 * 60 * 1000;
 const UPDATE_CHECK_TIMEOUT_MS = 2_000;
 const UPDATE_CHECK_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const CHANGELOG_LIMIT = 8;
@@ -311,6 +314,42 @@ function safeUi(ui) {
   };
 }
 
+async function restoreCheckoutAfterFailedUpdate({ git, repoRoot, before }) {
+  const recoveryGit = async (args, opts) => {
+    try {
+      return await callGit(git, args, { ...opts, allowFailure: true });
+    } catch (err) {
+      return { ok: false, status: 1, stdout: "", stderr: "", error: err?.message || String(err), args };
+    }
+  };
+  const abort = await recoveryGit(["merge", "--abort"], {
+    cwd: repoRoot,
+    timeoutMs: GIT_TIMEOUT_MS,
+  });
+  const reset = await recoveryGit(["reset", "--hard", before], {
+    cwd: repoRoot,
+    timeoutMs: GIT_TIMEOUT_MS,
+  });
+  const head = reset.ok
+    ? await recoveryGit(["rev-parse", "HEAD"], { cwd: repoRoot })
+    : { ok: false, stdout: "" };
+  const dirty = reset.ok
+    ? await recoveryGit(["status", "--porcelain", "--untracked-files=no"], { cwd: repoRoot })
+    : { ok: false, stdout: "" };
+  const restored = reset.ok
+    && head.ok
+    && String(head.stdout || "").trim() === before
+    && dirty.ok
+    && !String(dirty.stdout || "").trim();
+  return {
+    ok: restored,
+    merge_abort_ok: abort.ok,
+    reset_ok: reset.ok,
+    head: String(head.stdout || "").trim() || null,
+    dirty: String(dirty.stdout || "").trim(),
+  };
+}
+
 export async function updatePosseClient({
   posseRoot = DEFAULT_POSSE_ROOT,
   projectDir = process.cwd(),
@@ -319,6 +358,8 @@ export async function updatePosseClient({
   dryRun = false,
   git = runGitCommand,
   runDoctor = doctorRepoDependencies,
+  getAtlasConfig = getAtlasIntegrationConfig,
+  getSchedulerBlockMessage = getLiveSchedulerBlockMessage,
   ui = null,
 } = {}) {
   const resolvedPosseRoot = path.resolve(posseRoot || DEFAULT_POSSE_ROOT);
@@ -328,7 +369,19 @@ export async function updatePosseClient({
 
   let repoRoot = "";
   let phase = "checkout";
+  let before = "";
+  let mergeStarted = false;
   try {
+    if (!dryRun) {
+      const schedulerBlock = getSchedulerBlockMessage?.("main");
+      if (schedulerBlock) {
+        const update = blockedUpdate(`Posse is running; stop it before updating. ${schedulerBlock}`, {
+          posse_root: resolvedPosseRoot,
+        });
+        u.done("checkout", "fail", update.message);
+        return { ok: false, dry_run: dryRun, posse_root: resolvedPosseRoot, update, dependencies: null };
+      }
+    }
     u.start("checkout", "inspecting the Posse checkout");
     try {
       repoRoot = path.resolve(await gitOutput(git, ["rev-parse", "--show-toplevel"], {
@@ -399,7 +452,7 @@ export async function updatePosseClient({
       return { ok: false, dry_run: dryRun, posse_root: resolvedPosseRoot, repo_root: repoRoot, update, dependencies: null };
     }
 
-    const before = await gitOutput(git, ["rev-parse", "HEAD"], { cwd: repoRoot });
+    before = await gitOutput(git, ["rev-parse", "HEAD"], { cwd: repoRoot });
     u.done("checkout", "ok", `${targetBranch} @ ${shortSha(before)} · clean`);
 
     phase = "fetch";
@@ -455,7 +508,7 @@ export async function updatePosseClient({
       update = {
         ok: true,
         status: "up-to-date",
-        changed: false,
+        changed: rollback ? !rollback.ok : false,
         message: `already at ${shortSha(before)}`,
         repo_root: repoRoot,
         remote,
@@ -509,11 +562,13 @@ export async function updatePosseClient({
       // Merge the resolved sha, not FETCH_HEAD — a concurrent fetch in the
       // same checkout (live posse runs do this) can repoint FETCH_HEAD
       // between our fetch and the merge.
+      mergeStarted = true;
       await callGit(git, ["merge", "--ff-only", remoteSha], {
         cwd: repoRoot,
         timeoutMs: MERGE_TIMEOUT_MS,
       });
       const after = await gitOutput(git, ["rev-parse", "HEAD"], { cwd: repoRoot });
+      mergeStarted = false;
       const countText = commitCount != null ? ` · ${commitCount} commit${commitCount === 1 ? "" : "s"}` : "";
       u.done("apply", "ok", `${shortSha(before)} → ${shortSha(after)}${countText}`);
       for (const commit of commits) {
@@ -544,11 +599,16 @@ export async function updatePosseClient({
     u.start("deps", dryRun
       ? "checking the dependency plan (posse doctor --dry-run)"
       : "refreshing dependencies (posse doctor)");
+    const atlasConfig = getAtlasConfig?.() || {};
     const dependencies = await runDoctor({
       projectDir: resolvedProjectDir,
       posseRoot: resolvedPosseRoot,
       dryRun,
-      timeoutMs: null,
+      timeoutMs: UPDATE_DOCTOR_TIMEOUT_MS,
+      scipMode: atlasConfig.enabled === false
+        ? "off"
+        : (atlasConfig.scipMode ?? atlasConfig.atlas_scip_mode ?? null),
+      scipLanguages: atlasConfig.scipLanguages ?? atlasConfig.atlas_scip_languages ?? null,
       onProgress: (message) => u.note("deps", firstLine(message)),
     });
     const depsOk = dependencies?.ok !== false;
@@ -566,7 +626,14 @@ export async function updatePosseClient({
       dependencies,
     };
   } catch (err) {
-    const message = firstLine(err?.message || err) || "update failed";
+    let message = firstLine(err?.message || err) || "update failed";
+    let rollback = null;
+    if (mergeStarted && repoRoot && before && !dryRun) {
+      rollback = await restoreCheckoutAfterFailedUpdate({ git, repoRoot, before });
+      message += rollback.ok
+        ? `; checkout restored to ${shortSha(before)}`
+        : `; automatic restore failed — run git -C "${repoRoot}" reset --hard ${before}`;
+    }
     u.done(phase, "fail", message);
     return {
       ok: false,
@@ -574,7 +641,14 @@ export async function updatePosseClient({
       posse_root: resolvedPosseRoot,
       project_dir: resolvedProjectDir,
       ...(repoRoot ? { repo_root: repoRoot } : {}),
-      update: { ok: false, status: "failed", changed: false, message },
+      update: {
+        ok: false,
+        status: "failed",
+        changed: false,
+        message,
+        ...(before ? { before } : {}),
+        ...(rollback ? { rollback } : {}),
+      },
       dependencies: null,
     };
   }
@@ -743,6 +817,8 @@ export async function cmdUpdate({
   stream = process.stdout,
   git = runGitCommand,
   runDoctor = doctorRepoDependencies,
+  getAtlasConfig = getAtlasIntegrationConfig,
+  getSchedulerBlockMessage = getLiveSchedulerBlockMessage,
 } = {}) {
   if (hasArg(argv, "--help") || hasArg(argv, "-h")) {
     renderUpdateHelp({ log, colors });
@@ -776,6 +852,8 @@ export async function cmdUpdate({
       dryRun,
       git,
       runDoctor,
+      getAtlasConfig,
+      getSchedulerBlockMessage,
       ui: renderer,
     });
   } finally {

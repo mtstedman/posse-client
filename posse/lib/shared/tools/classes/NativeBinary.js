@@ -20,7 +20,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 
-import { nativeBinaryPlatform, nativeBinaryIsKeyGated } from "../../../catalog/binary.js";
+import {
+  nativeBinaryExactVersion,
+  nativeBinaryEntry,
+  nativeBinaryIsKeyGated,
+  nativeBinaryIsWorkerCapable,
+  nativeBinaryPlatform,
+} from "../../../catalog/binary.js";
 import { osKey, archKey } from "../../platform/functions/native-platform.js";
 import { buildRuntimeEnv } from "../../../domains/runtime/functions/paths.js";
 import { signalAbortError } from "../../../domains/runtime/functions/yield.js";
@@ -28,7 +34,7 @@ import { appendBoundedText } from "../../format/functions/bounded-text.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { Daemon, ProcessTransport, daemonSupervisor } from "./daemon/index.js";
 import { HeartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
-import { POSSE_REMOTE_DEFAULT_URL } from "../../../domains/remote/functions/mode.js";
+import { PulseTokenManager } from "../../native/classes/PulseTokenManager.js";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 // lib/shared/tools/classes -> lib/bin
@@ -40,11 +46,47 @@ const DEFAULT_TIMEOUT_MS = 120000;
 // request a serial host could legitimately be chewing has passed its own
 // timeout, short enough that a truly wedged host is replaced within minutes.
 const WORKER_WEDGE_SILENCE_MS = 120_000;
+// When a scheduled pulse refresh fails while the delivered pulse is still
+// valid, retry the mint on this cadence until expiry.
+const PULSE_REFRESH_RETRY_MS = 5_000;
+// Never schedule a refresh timer closer than this (also the floor for a
+// refreshAfter that is already in the past).
+const PULSE_REFRESH_MIN_DELAY_MS = 250;
 
-function hasNativeAuthEnvelope(request) {
-  if (!request || typeof request !== "object" || Array.isArray(request)) return false;
-  const auth = request.auth;
-  return !!auth && typeof auth === "object" && !Array.isArray(auth) && Object.keys(auth).length > 0;
+// Manager-owned request fields at the final stdin boundary. Whatever a caller
+// supplies for these is deleted before the manager attaches its own pulse, so
+// caller data can never override manager state (credentials, trust roots,
+// route grants, or development gates).
+const MANAGER_OWNED_REQUEST_FIELDS = Object.freeze([
+  "posse_key",
+  "pulse",
+  "auth",
+  "origin",
+  "audience",
+  "pins",
+  "signingKeyPins",
+  "routes",
+  "development",
+  "developmentMode",
+]);
+
+/**
+ * Minimal Node-side shape check for a native pulse envelope. Node does NOT
+ * verify the JWT (the native child verifies it offline against compiled
+ * trust); this only decides whether a usable, unexpired envelope exists.
+ *
+ * @param {unknown} pulse
+ * @param {number} [nowSeconds]
+ * @returns {boolean}
+ */
+function isValidPulseEnvelope(pulse, nowSeconds = Math.floor(Date.now() / 1000)) {
+  if (!pulse || typeof pulse !== "object" || Array.isArray(pulse)) return false;
+  const envelope = /** @type {Record<string, unknown>} */ (pulse);
+  if (!String(envelope.token || "").trim()) return false;
+  if (!String(envelope.kid || "").trim()) return false;
+  if (!String(envelope.route || "").trim()) return false;
+  const expiresAt = Number(envelope.expiresAt);
+  return Number.isFinite(expiresAt) && expiresAt > nowSeconds;
 }
 
 function isNativeProtocolRequest(request) {
@@ -55,24 +97,6 @@ function isNativeProtocolRequest(request) {
 
 function isNativeHeartbeatAuthFailure(value) {
   return /heartbeat|posse_key|pulse[\s_-]?token|identity[\s_-]?heartbeat/i.test(String(value || ""));
-}
-
-/**
- * Resolve the heartbeat URL the key-gated Posse binaries authenticate against.
- * They all talk to the same central server, so default to it. Precedence (from
- * the provided child env): explicit POSSE_HEARTBEAT_URL -> POSSE_REMOTE_URL base
- * -> central default. Derived URLs use the canonical native heartbeat route
- * shared with the JSON auth envelope. Reads only the passed env so callers/tests
- * stay in control.
- *
- * @param {NodeJS.ProcessEnv} env
- * @returns {string}
- */
-function resolveHeartbeatUrl(env) {
-  const explicit = String(env?.POSSE_HEARTBEAT_URL || "").trim();
-  if (explicit) return explicit;
-  const base = String(env?.POSSE_REMOTE_URL || POSSE_REMOTE_DEFAULT_URL).trim().replace(/\/+$/, "");
-  return base ? `${base}/v1/native/heartbeat` : "";
 }
 
 /**
@@ -95,23 +119,39 @@ export class NativeBinary {
    *   arch?: string,
    *   env?: NodeJS.ProcessEnv,
    *   nativeAuthManager?: import("../../native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
+   *   pulseManager?: import("../../native/classes/PulseTokenManager.js").PulseTokenManager,
    *   spawnImpl?: typeof spawn,
    *   spawnSyncImpl?: typeof spawnSync,
    * }} args
    */
-  constructor({ name, binRoot, platform, arch, env, nativeAuthManager, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
+  constructor({ name, binRoot, platform, arch, env, nativeAuthManager, pulseManager, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
     if (!name) throw new TypeError("NativeBinary: name is required");
     this.name = name;
     this._binRoot = binRoot || null;
     this._env = env || null;
     // Single native-auth authority. Production injects the shared manager via
     // BinaryManager; standalone construction (tests) lazily derives one from
-    // settings/env for the heartbeat envelope and the compiled-binary
-    // compatibility launch key. Leaf call sites never supply native keys.
+    // settings/env for the heartbeat envelope and pulse minting. Leaf call
+    // sites never supply native keys.
     this._nativeAuthManager = nativeAuthManager || null;
+    // Pulse broker: mints/caches route-scoped pulse envelopes against the
+    // trusted heartbeat. Injectable for tests; lazily derived from the auth
+    // manager otherwise. Native children only ever see its derived envelopes.
+    this._fixedPulseManager = pulseManager || null;
+    /** @type {import("../../native/classes/PulseTokenManager.js").PulseTokenManager | null} */
+    this._pulseManager = null;
+    this._pulseManagerAuth = null;
+    /**
+     * Per-route pulse state delivered to the live persistent worker: the last
+     * envelope sent, the scheduled refresh timer, and whether an expired
+     * control frame has parked protected work for the route.
+     * @type {Map<string, { envelope: Record<string, unknown>, timer: NodeJS.Timeout | null, expired: boolean }>}
+     */
+    this._workerAuthState = new Map();
     this.keyGated = nativeBinaryIsKeyGated(name);
-    // posse-git and posse-atlas implement the `worker --stdio` persistent loop.
-    this.workerCapable = name === "git" || name === "atlas";
+    this.workerCapable = nativeBinaryIsWorkerCapable(name);
+    this.exactVersion = nativeBinaryExactVersion(name);
+    this._versionProbe = null;
     /** @type {import("./daemon/index.js").Daemon | null} */
     this._daemon = null;
     /**
@@ -137,11 +177,7 @@ export class NativeBinary {
 
   /** Args to launch this binary's `worker --stdio` host. */
   #buildWorkerArgs() {
-    const out = [];
-    const key = this.keyGated ? this.#authManager().getLaunchKey() : null;
-    if (key) out.push("--posse-key", key);
-    out.push("worker", "--stdio");
-    return out;
+    return ["worker", "--stdio"];
   }
 
   /**
@@ -170,8 +206,40 @@ export class NativeBinary {
           }),
         }),
       });
+      // Worker startup prewarm: mint the route grants this worker will use so
+      // the first dispatch (and the sync cache-only boundary) finds a cached
+      // pulse instead of paying — or failing closed on — a cold heartbeat.
+      if (this.keyGated) void this.prewarmNativeAuth();
     }
     return this._daemon;
+  }
+
+  /**
+   * Prewarm route-scoped pulse envelopes for this binary (fire-and-forget
+   * safe). Defaults to the routes this binary's worker dispatches; callers
+   * warming a specific grant (e.g. `git:mutate` ahead of a commit) may pass it
+   * explicitly. Mint failures stay silent here — dispatch fails closed.
+   *
+   * @param {string[]} [routes]
+   * @returns {Promise<void>}
+   */
+  async prewarmNativeAuth(routes = []) {
+    if (!this.keyGated) return;
+    const list = Array.isArray(routes) && routes.length > 0 ? routes : this.#defaultRoutes();
+    await Promise.all(list.map(async (route) => {
+      try {
+        await this.#pulseManager().getPulseEnvelope({ requiredRoute: String(route || "").trim() });
+      } catch { /* dispatch fails closed when no pulse is available */ }
+    }));
+  }
+
+  /** Route grants this binary requests when no explicit route is threaded. */
+  #defaultRoutes() {
+    if (this.name === "atlas") return ["atlas:methods"];
+    // Worker-routed git methods are the read-only set; mutating calls thread
+    // `git:mutate` explicitly from the invoke boundary.
+    if (this.name === "git") return ["git:read"];
+    return [`${this.name}:methods`];
   }
 
   /** @param {string} reason @param {string | null} [method] */
@@ -228,13 +296,22 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {{ input?: Buffer | string, json?: boolean, timeoutMs?: number, signal?: AbortSignal }} opts
+   * @param {{ input?: Buffer | string, json?: boolean, timeoutMs?: number, signal?: AbortSignal, requiredRoute?: string, workerFallback?: boolean }} opts
    * @returns {Promise<RunResult>}
    */
   async #runViaWorker(subcommand, args, opts) {
-    const inputWithAuth = this.#inputWithNativeAuthDetails(opts.input);
+    const inputWithAuth = await this.#inputWithNativeAuthAsync(opts.input, opts.requiredRoute);
     if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
       this.#retireWorkerAfterAuthFailure();
+      return this.#nativeAuthUnavailableResult();
+    }
+    const route = inputWithAuth.route;
+    const pulse = inputWithAuth.request?.pulse;
+    // Expired-route gate: after a nativeAuthExpired frame, protected work for
+    // that route stays parked until a refreshed pulse frame reaches the
+    // worker. We just minted a valid pulse (or failed closed above), so
+    // deliver it as the refresh before dispatching.
+    if (route && this.#workerRouteExpired(route) && !this.#deliverWorkerPulseRefresh(route, pulse)) {
       return this.#nativeAuthUnavailableResult();
     }
     const requestOpts = {
@@ -249,10 +326,16 @@ export class NativeBinary {
         return this.#runPerCall(subcommand, args, requestOpts);
       }
     }
+    if (route && pulse) this.#noteWorkerPulse(route, pulse);
     let response = await this.#daemon().request(envelope, {
       signal: requestOpts.signal,
       timeoutMs: requestOpts.timeoutMs,
     });
+    if (response?._transportGone === true) {
+      // The host this pulse state was delivered to is gone; the replacement
+      // host is (re)seeded by the request-borne pulse on its next dispatch.
+      this.#clearWorkerAuthState();
+    }
     if (response?._transportGone === true && requestOpts.signal?.aborted !== true) {
       // Host died/retired under this request. Everything routed through the
       // worker is read-only/idempotent by the WORKER_ELIGIBLE contract
@@ -262,6 +345,11 @@ export class NativeBinary {
         signal: requestOpts.signal,
         timeoutMs: requestOpts.timeoutMs,
       });
+      if (response?._transportGone !== true && route && pulse) {
+        // The replacement host answered: re-seed refresh scheduling for the
+        // pulse it just received in the request envelope.
+        this.#noteWorkerPulse(route, pulse);
+      }
     }
     if (response?._timedOut === true) {
       // One slow request is not a dead host: the Daemon already abandoned the
@@ -276,6 +364,11 @@ export class NativeBinary {
       const reason = response._transportGone === true ? "transport_gone"
         : response._timedOut === true ? "timeout" : "overloaded";
       this.#noteWorkerFallback(reason, subcommand);
+      if (opts.workerFallback === false) {
+        const error = new Error(`native ${this.name} worker unavailable (${reason})`);
+        error.code = "POSSE_NATIVE_WORKER_UNAVAILABLE";
+        return { ok: false, code: null, signal: null, stdout: "", stderr: error.message, error };
+      }
       return this.#runPerCall(subcommand, args, requestOpts);
     }
     if (response?._aborted === true) {
@@ -356,7 +449,23 @@ export class NativeBinary {
 
   /** @returns {boolean} */
   isAvailable() {
-    return this.resolvePath() != null;
+    const binaryPath = this.resolvePath();
+    if (!binaryPath) return false;
+    if (!this.exactVersion) return true;
+    let mtimeMs = null;
+    try { mtimeMs = fs.statSync(binaryPath).mtimeMs; } catch { return false; }
+    if (this._versionProbe?.path === binaryPath && this._versionProbe?.mtimeMs === mtimeMs) {
+      return this._versionProbe.matches;
+    }
+    const result = this._spawnSync(binaryPath, ["--version"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 5_000,
+    });
+    const expected = `${nativeBinaryEntry(this.name)?.package} ${this.exactVersion}`;
+    const matches = !result?.error && result?.status === 0 && String(result?.stdout || "").trim() === expected;
+    this._versionProbe = { path: binaryPath, mtimeMs, matches };
+    return matches;
   }
 
   /**
@@ -377,7 +486,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string, worker?: boolean, signal?: AbortSignal }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string, worker?: boolean, signal?: AbortSignal, requiredRoute?: string }} [opts]
    * @returns {RunResult}
    */
   runSync(subcommand, args = [], opts = {}) {
@@ -399,14 +508,14 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, requiredRoute?: string }} [opts]
    * @returns {RunResult}
    */
   #runSyncPerCall(subcommand, args = [], opts = {}) {
     const bin = this.resolvePath();
     if (!bin) return this.#unavailableResult();
     const fullArgs = this.#buildArgs(subcommand, args);
-    const inputWithAuth = this.#inputWithNativeAuthDetails(opts.input);
+    const inputWithAuth = this.#inputWithNativeAuthSync(opts.input, opts.requiredRoute);
     if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
       this.#retireWorkerAfterAuthFailure();
       return this.#nativeAuthUnavailableResult();
@@ -436,7 +545,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, worker?: boolean, maxBuffer?: number }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, worker?: boolean, maxBuffer?: number, requiredRoute?: string }} [opts]
    * @returns {Promise<RunResult>}
    */
   run(subcommand, args = [], opts = {}) {
@@ -451,7 +560,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, maxBuffer?: number }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, maxBuffer?: number, requiredRoute?: string }} [opts]
    * @returns {Promise<RunResult>}
    */
   #runPerCall(subcommand, args = [], opts = {}) {
@@ -467,12 +576,44 @@ export class NativeBinary {
       }, opts.json === true));
     }
     const fullArgs = this.#buildArgs(subcommand, args);
-    const inputWithAuth = this.#inputWithNativeAuthDetails(opts.input);
-    if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
-      this.#retireWorkerAfterAuthFailure();
-      return Promise.resolve(this.#nativeAuthUnavailableResult());
+    const parsed = this.#parseNativeProtocolInput(opts.input);
+    if (!parsed.protocol) {
+      // Non-protocol stdin (parse buffers, --version probes) carries no pulse;
+      // keep the historical synchronous spawn timing for those callers.
+      return this.#spawnPerCall(bin, fullArgs, opts, parsed.input);
     }
-    const input = inputWithAuth.input;
+    return (async () => {
+      const inputWithAuth = await this.#attachPulseAsync(parsed, opts.requiredRoute);
+      if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
+        this.#retireWorkerAfterAuthFailure();
+        return this.#nativeAuthUnavailableResult();
+      }
+      if (opts.signal?.aborted) {
+        // The signal can flip while the pulse mint awaits; an already-aborted
+        // signal never re-fires its abort event, so check again before spawning.
+        return this.#finishResult({
+          stdout: "",
+          stderr: "",
+          code: null,
+          signal: null,
+          error: signalAbortError(opts.signal),
+        }, opts.json === true);
+      }
+      return this.#spawnPerCall(bin, fullArgs, opts, inputWithAuth.input);
+    })();
+  }
+
+  /**
+   * The raw per-call spawn: pipe `input`, capture stdout/stderr, honor
+   * timeout/abort. Auth decisions happen before this point.
+   *
+   * @param {string} bin
+   * @param {string[]} fullArgs
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, maxBuffer?: number }} opts
+   * @param {Buffer | string | undefined} input
+   * @returns {Promise<RunResult>}
+   */
+  #spawnPerCall(bin, fullArgs, opts, input) {
     return new Promise((resolve) => {
       let settled = false;
       const child = this._spawn(bin, fullArgs, {
@@ -560,10 +701,10 @@ export class NativeBinary {
   }
 
   /**
-   * Build the argv. Native auth is carried only in the JSON request envelope;
-   * current compiled binaries also require the manager-owned compatibility
-   * `--posse-key` launch credential. Stdin payloads are passed via spawn
-   * `input`, which matches the binaries' default `-i -`.
+   * Build the argv. Native auth is carried only as the manager-owned pulse
+   * envelope inside the JSON request; no credential or token ever enters
+   * argv. Stdin payloads are passed via spawn `input`, which matches the
+   * binaries' default `-i -`.
    *
    * @param {string | null} subcommand
    * @param {string[]} args
@@ -572,56 +713,351 @@ export class NativeBinary {
   #buildArgs(subcommand, args) {
     /** @type {string[]} */
     const out = [];
-    const key = this.keyGated ? this.#authManager().getLaunchKey() : null;
-    if (key) out.push("--posse-key", key);
     if (subcommand) out.push(subcommand);
     for (const a of args) out.push(a);
     return out;
   }
 
   /**
+   * Fail closed when a key-gated native protocol request carries no valid
+   * pulse envelope. The raw POSSE_KEY is never an acceptable substitute — it
+   * must not reach a native child at all.
+   *
    * @param {Record<string, unknown> | null} request
    * @returns {boolean}
    */
   #shouldFailMissingNativeAuth(request) {
-    return this.keyGated && isNativeProtocolRequest(request) && !hasNativeAuthEnvelope(request);
+    return this.keyGated
+      && isNativeProtocolRequest(request)
+      && !isValidPulseEnvelope(request?.pulse);
   }
 
   /**
-   * @param {Buffer | string | undefined} input
-   * @returns {{ input: Buffer | string | undefined, request: Record<string, unknown> | null }}
+   * The pulse broker for this handle. Injectable for tests; otherwise derived
+   * from (and kept in lockstep with) the current auth manager, so a swapped
+   * authority (BinaryManager.setNativeAuthManager) rebuilds the broker.
+   *
+   * @returns {import("../../native/classes/PulseTokenManager.js").PulseTokenManager}
    */
-  #inputWithNativeAuthDetails(input) {
-    if (!this.keyGated || input == null) return { input, request: null };
+  #pulseManager() {
+    if (this._fixedPulseManager) return this._fixedPulseManager;
+    const authManager = this.#authManager();
+    if (!this._pulseManager || this._pulseManagerAuth !== authManager) {
+      this._pulseManager = new PulseTokenManager({ authManager });
+      this._pulseManagerAuth = authManager;
+    }
+    return this._pulseManager;
+  }
+
+  /**
+   * The route grant one native call must present. An explicitly threaded route
+   * (invoke boundaries classify git read vs mutate) always wins; otherwise the
+   * binary's method family: `atlas:methods`, `git:read` (least privilege —
+   * mutating git calls MUST thread `git:mutate`), `<name>:methods`.
+   *
+   * @param {string | undefined} explicitRoute
+   * @returns {string}
+   */
+  #requiredRouteFor(explicitRoute) {
+    const explicit = String(explicitRoute || "").trim();
+    if (explicit) return explicit;
+    return this.#defaultRoutes()[0];
+  }
+
+  /**
+   * Parse a key-gated stdin payload and, when it is a native protocol request,
+   * delete every manager-owned field a caller may have supplied. Caller data
+   * can never override manager state.
+   *
+   * @param {Buffer | string | undefined} input
+   * @returns {{ input: Buffer | string | undefined, request: Record<string, unknown> | null, protocol: boolean, wasBuffer: boolean }}
+   */
+  #parseNativeProtocolInput(input) {
+    if (!this.keyGated || input == null) return { input, request: null, protocol: false, wasBuffer: false };
     const wasBuffer = Buffer.isBuffer(input);
     const raw = wasBuffer ? input.toString("utf8") : String(input);
     let request;
     try {
       request = JSON.parse(raw);
     } catch {
-      return { input, request: null };
+      return { input, request: null, protocol: false, wasBuffer };
     }
     if (!request || typeof request !== "object" || Array.isArray(request)) {
-      return { input, request: null };
+      return { input, request: null, protocol: false, wasBuffer };
     }
     if (!Object.prototype.hasOwnProperty.call(request, "protocol")
-      || !Object.prototype.hasOwnProperty.call(request, "method")
-      || Object.prototype.hasOwnProperty.call(request, "auth")) {
-      return { input, request };
+      || !Object.prototype.hasOwnProperty.call(request, "method")) {
+      return { input, request, protocol: false, wasBuffer };
     }
-    const auth = this.#authManager().getNativeAuthEnvelope();
-    if (!auth || typeof auth !== "object" || Object.keys(auth).length === 0) {
-      return { input, request };
+    const sanitized = { ...request };
+    for (const field of MANAGER_OWNED_REQUEST_FIELDS) delete sanitized[field];
+    return { input, request: sanitized, protocol: true, wasBuffer };
+  }
+
+  /** @param {Record<string, unknown>} request @param {boolean} wasBuffer */
+  #encodeNativeRequest(request, wasBuffer) {
+    const encoded = `${JSON.stringify(request)}\n`;
+    return wasBuffer ? Buffer.from(encoded, "utf8") : encoded;
+  }
+
+  /**
+   * Async stdin boundary: strip caller-supplied auth fields and attach the
+   * manager-owned route-scoped pulse envelope as `request.pulse`. The raw
+   * POSSE_KEY never enters the request; when no pulse can be minted the
+   * request is returned WITHOUT one so the fail-closed guard stops the spawn.
+   *
+   * @param {Buffer | string | undefined} input
+   * @param {string | undefined} requiredRoute
+   * @returns {Promise<{ input: Buffer | string | undefined, request: Record<string, unknown> | null, route: string | null }>}
+   */
+  async #inputWithNativeAuthAsync(input, requiredRoute) {
+    const parsed = this.#parseNativeProtocolInput(input);
+    if (!parsed.protocol) return { input: parsed.input, request: parsed.request, route: null };
+    return this.#attachPulseAsync(parsed, requiredRoute);
+  }
+
+  /**
+   * Mint (or reuse) the route-scoped pulse for an already-parsed protocol
+   * request and attach it as `request.pulse`.
+   *
+   * @param {{ input: Buffer | string | undefined, request: Record<string, unknown> | null, wasBuffer: boolean }} parsed
+   * @param {string | undefined} requiredRoute
+   * @returns {Promise<{ input: Buffer | string | undefined, request: Record<string, unknown> | null, route: string | null }>}
+   */
+  async #attachPulseAsync(parsed, requiredRoute) {
+    const route = this.#requiredRouteFor(requiredRoute);
+    let pulse = null;
+    try {
+      pulse = await this.#pulseManager().getPulseEnvelope({ requiredRoute: route });
+    } catch {
+      // Mint failures fail closed below; error details (which never include
+      // token material) are not propagated into the child request.
+      pulse = null;
     }
-    const requestWithAuth = { ...request, auth };
-    const encoded = `${JSON.stringify(requestWithAuth)}\n`;
+    if (!isValidPulseEnvelope(pulse)) {
+      return {
+        input: this.#encodeNativeRequest(/** @type {Record<string, unknown>} */ (parsed.request), parsed.wasBuffer),
+        request: parsed.request,
+        route,
+      };
+    }
+    const requestWithPulse = { .../** @type {Record<string, unknown>} */ (parsed.request), pulse };
     return {
-      input: wasBuffer ? Buffer.from(encoded, "utf8") : encoded,
-      request: requestWithAuth,
+      input: this.#encodeNativeRequest(requestWithPulse, parsed.wasBuffer),
+      request: requestWithPulse,
+      route,
     };
   }
 
+  /**
+   * Sync stdin boundary: identical stripping, but the pulse comes from the
+   * broker's cache only — a sync spawn cannot await the heartbeat exchange.
+   * On a cache miss we kick a background mint (so a later call succeeds) and
+   * return the request without a pulse, which fails closed before spawn.
+   *
+   * @param {Buffer | string | undefined} input
+   * @param {string | undefined} requiredRoute
+   * @returns {{ input: Buffer | string | undefined, request: Record<string, unknown> | null, route: string | null }}
+   */
+  #inputWithNativeAuthSync(input, requiredRoute) {
+    const parsed = this.#parseNativeProtocolInput(input);
+    if (!parsed.protocol) return { input: parsed.input, request: parsed.request, route: null };
+    const route = this.#requiredRouteFor(requiredRoute);
+    let pulse = null;
+    try {
+      pulse = this.#pulseManager().getCachedPulseEnvelope({ requiredRoute: route });
+    } catch {
+      pulse = null;
+    }
+    if (!isValidPulseEnvelope(pulse)) {
+      this.#warmPulse(route);
+      return {
+        input: this.#encodeNativeRequest(/** @type {Record<string, unknown>} */ (parsed.request), parsed.wasBuffer),
+        request: parsed.request,
+        route,
+      };
+    }
+    const requestWithPulse = { .../** @type {Record<string, unknown>} */ (parsed.request), pulse };
+    return {
+      input: this.#encodeNativeRequest(requestWithPulse, parsed.wasBuffer),
+      request: requestWithPulse,
+      route,
+    };
+  }
+
+  /** Fire-and-forget background mint so a later sync call finds a cached pulse. */
+  #warmPulse(route) {
+    try {
+      void Promise.resolve(this.#pulseManager().getPulseEnvelope({ requiredRoute: route })).catch(() => {});
+    } catch { /* fail-closed guard already covers the caller */ }
+  }
+
+  // -------------------------------------------------------------------------
+  // Persistent-worker pulse refresh: near expiry Node re-mints and delivers a
+  // `nativeAuthRefresh` control frame over the worker's stdin; when it cannot
+  // refresh in time it sends `nativeAuthExpired` and parks protected work for
+  // that route until a refresh is delivered.
+  // -------------------------------------------------------------------------
+
+  /** @param {string} route */
+  #workerRouteExpired(route) {
+    return this._workerAuthState.get(route)?.expired === true;
+  }
+
+  /**
+   * Send one control frame line to the live worker host's stdin. Control
+   * frames are id-less notifications, so they bypass the Daemon request queue
+   * and go straight to the transport.
+   *
+   * @param {Record<string, unknown>} frame
+   * @returns {boolean} whether a live host received the frame
+   */
+  #sendWorkerControlFrame(frame) {
+    const daemon = this._daemon;
+    if (!daemon?.isHostAlive?.()) return false;
+    const transport = daemon._transport;
+    if (!transport || typeof transport.send !== "function") return false;
+    try {
+      transport.send(frame);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * `nativeAuthRefresh` control frame. The refreshed envelope is emitted under
+   * BOTH field names — `pulse` (Wave 0 coordinator contract) and `auth` (the
+   * encoder's compiled NativeAuthControlFrame serde contract) — so either
+   * reader accepts the frame; neither shape rejects unknown fields.
+   *
+   * @param {Record<string, unknown>} envelope
+   */
+  #refreshControlFrame(envelope) {
+    return { control: "nativeAuthRefresh", pulse: envelope, auth: envelope };
+  }
+
+  /**
+   * `nativeAuthExpired` control frame. `expiredAt` is the documented contract
+   * key; `expired_at` mirrors the encoder's serde field name.
+   *
+   * @param {string} route @param {number} expiredAt
+   */
+  #expiredControlFrame(route, expiredAt) {
+    return { control: "nativeAuthExpired", route, expiredAt, expired_at: expiredAt };
+  }
+
+  /**
+   * Un-park an expired route by delivering a refresh frame with a valid
+   * envelope. Returns false when no valid envelope exists (callers fail
+   * closed). When no live host remains there is nothing to un-park: the next
+   * spawn is seeded by its own request-borne pulse.
+   *
+   * @param {string} route
+   * @param {unknown} envelope
+   * @returns {boolean}
+   */
+  #deliverWorkerPulseRefresh(route, envelope) {
+    if (!isValidPulseEnvelope(envelope)) return false;
+    if (!this.#sendWorkerControlFrame(this.#refreshControlFrame(/** @type {Record<string, unknown>} */ (envelope)))) {
+      this.#clearWorkerAuthRoute(route);
+      return true;
+    }
+    const state = this._workerAuthState.get(route);
+    if (state) state.expired = false;
+    this.#noteWorkerPulse(route, /** @type {Record<string, unknown>} */ (envelope));
+    return true;
+  }
+
+  /**
+   * Track the pulse most recently delivered to the live worker for a route and
+   * (re)schedule its refresh at `refreshAfter`.
+   *
+   * @param {string} route
+   * @param {Record<string, unknown>} envelope
+   */
+  #noteWorkerPulse(route, envelope) {
+    if (!route || !isValidPulseEnvelope(envelope)) return;
+    const existing = this._workerAuthState.get(route);
+    if (existing && existing.envelope?.token === envelope.token) return;
+    if (existing?.timer) clearTimeout(existing.timer);
+    const state = { envelope, timer: null, expired: existing?.expired === true };
+    this._workerAuthState.set(route, state);
+    this.#scheduleWorkerPulseRefresh(route);
+  }
+
+  /** @param {string} route */
+  #scheduleWorkerPulseRefresh(route) {
+    const state = this._workerAuthState.get(route);
+    if (!state?.envelope) return;
+    const refreshAtMs = Number(state.envelope.refreshAfter) * 1000;
+    const delay = Number.isFinite(refreshAtMs)
+      ? Math.max(refreshAtMs - Date.now(), PULSE_REFRESH_MIN_DELAY_MS)
+      : PULSE_REFRESH_MIN_DELAY_MS;
+    state.timer = setTimeout(() => { void this.#refreshWorkerPulse(route); }, delay);
+    state.timer.unref?.();
+  }
+
+  /** @param {string} route */
+  async #refreshWorkerPulse(route) {
+    const state = this._workerAuthState.get(route);
+    if (!state) return;
+    state.timer = null;
+    if (!this._daemon?.isHostAlive?.()) {
+      // No live host to keep fresh; the next spawn re-seeds from its request.
+      this.#clearWorkerAuthRoute(route);
+      return;
+    }
+    let envelope = null;
+    try {
+      envelope = await this.#pulseManager().getPulseEnvelope({ requiredRoute: route, refresh: true });
+    } catch {
+      envelope = null;
+    }
+    if (isValidPulseEnvelope(envelope)) {
+      if (this.#sendWorkerControlFrame(this.#refreshControlFrame(/** @type {Record<string, unknown>} */ (envelope)))) {
+        state.expired = false;
+        state.envelope = /** @type {Record<string, unknown>} */ (envelope);
+        this.#scheduleWorkerPulseRefresh(route);
+      } else {
+        this.#clearWorkerAuthRoute(route);
+      }
+      return;
+    }
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const expiresAt = Number(state.envelope?.expiresAt) || nowSeconds;
+    if (nowSeconds >= expiresAt) {
+      // Could not refresh in time: tell the worker, then park protected work
+      // for this route until a refresh frame is delivered (see #runViaWorker).
+      this.#sendWorkerControlFrame(this.#expiredControlFrame(route, expiresAt));
+      state.expired = true;
+      appendRunTelemetry("diagnostics", {
+        kind: "native.pulse_expired",
+        binary: this.name,
+        route,
+        expired_at: expiresAt,
+      });
+      return;
+    }
+    // Pulse still valid: retry the mint before expiry.
+    const retryMs = Math.min(PULSE_REFRESH_RETRY_MS, Math.max((expiresAt - nowSeconds) * 1000, PULSE_REFRESH_MIN_DELAY_MS));
+    state.timer = setTimeout(() => { void this.#refreshWorkerPulse(route); }, retryMs);
+    state.timer.unref?.();
+  }
+
+  /** @param {string} route */
+  #clearWorkerAuthRoute(route) {
+    const state = this._workerAuthState.get(route);
+    if (state?.timer) clearTimeout(state.timer);
+    this._workerAuthState.delete(route);
+  }
+
+  #clearWorkerAuthState() {
+    for (const route of [...this._workerAuthState.keys()]) this.#clearWorkerAuthRoute(route);
+  }
+
   #retireWorkerAfterAuthFailure() {
+    this.#clearWorkerAuthState();
     try {
       if (this._daemon?.isHostAlive?.()) this._daemon.retire({ graceMs: 0 });
     } catch { /* best effort */ }
@@ -640,18 +1076,25 @@ export class NativeBinary {
     const base = optsEnv || buildRuntimeEnv();
     if (!this.keyGated) return base;
     const env = { ...base };
-    // Legacy native helpers used to discover the raw Posse API key from argv
-    // or ambient env. The heartbeat envelope is now the only native auth path,
-    // so do not let key-gated binaries silently fall back to POSSE_KEY.
+    // Native helpers never receive the raw Posse API key — not in argv, env,
+    // or stdin. They authenticate with short-lived pulse envelopes minted by
+    // the manager-owned broker. Never let them discover the key from ambient
+    // (or caller-supplied) env.
     delete env.POSSE_KEY;
-    if (String(env.POSSE_HEARTBEAT_URL || "").trim()) return env;
-    const url = resolveHeartbeatUrl(env);
-    return url ? { ...env, POSSE_HEARTBEAT_URL: url } : env;
+    const auth = this.#authManager().getNativeAuthEnvelope();
+    const url = String(auth?.heartbeatUrl || "").trim();
+    if (url) env.POSSE_HEARTBEAT_URL = url;
+    else delete env.POSSE_HEARTBEAT_URL;
+    return env;
   }
 
   /** @returns {RunResult} */
   #nativeAuthUnavailableResult() {
-    const error = new Error(`native heartbeat auth unavailable for ${this.name}; refusing to start key-gated binary`);
+    // Wording is load-bearing: the heartbeat-failure classifiers
+    // (isNativeHeartbeatAuthFailure here, shouldRetryNativeHeartbeat in the
+    // git invoke boundary) match on "heartbeat"/"pulse token". Never include
+    // token material in this message.
+    const error = new Error(`native pulse token heartbeat auth unavailable for ${this.name}; refusing to start key-gated binary`);
     error.code = "POSSE_NATIVE_HEARTBEAT_UNAVAILABLE";
     return {
       ok: false,

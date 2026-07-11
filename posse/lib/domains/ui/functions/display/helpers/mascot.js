@@ -1,15 +1,20 @@
 // Tiny western working indicator for the Posse TUI.
 //
-// The source art is a 30x12 pixel raster using:
+// The source art is a 34x12 pixel raster using:
 //   R = rider pixels
 //   H = horse pixels
 //   . = transparent
 //
-// It renders into 15x3 Braille cells, so it fits beside the 3-row title
+// It renders into 17x3 Braille cells, so it fits beside the 3-row title
 // without adding a dependency or changing the terminal layout.
 // The whole silhouette uses one color because Braille cells cannot color
 // sub-pixels independently; splitting rider and horse colors creates flicker
 // when both share a cell during animation.
+//
+// Anatomy notes for future pixel surgeons: the ears are two separate 1-dot
+// spikes, the eye is a deliberate HOLE in the head (an unset pixel reads as
+// an eye at Braille density), and the body must stay solid — a single
+// missing interior pixel renders as a line through the horse.
 
 const NO_COLOR = {
   reset: "",
@@ -20,37 +25,37 @@ const NO_COLOR = {
   white: "",
 };
 
-export const POSSE_MASCOT_CELL_WIDTH = 15;
+export const POSSE_MASCOT_CELL_WIDTH = 17;
 export const POSSE_MASCOT_CELL_HEIGHT = 3;
 
 const RIGHT_FRAME_A = [
-  "............RRRR..............",
-  "..........RRRRRRRR............",
-  ".............RR........H......",
-  "............RRR.......HH......",
-  "............RR......HH..H.....",
-  "......HHHHHRRHHHHHHHHHHH......",
-  "....H..HHHHH.HHHHHHHHHHHH.....",
-  "..HHH.....HHHHHHHHH...HHH..H..",
-  "...H......HHHHHHH....H........",
-  "....H...H.......H...H.........",
-  "...H....H.......H....H........",
-  "..H......H.......H....H.......",
+  "............RRRR..................",
+  "..........RRRRRRRR................",
+  ".............RR..........H.H......",
+  "............RRR.........HHHHH.....",
+  "............RR......HHHHH.HHHH....",
+  "......HHHHHRRHHHHHHHHHHHHHH.......",
+  "....HH.HHHHHHHHHHHHHHHHHH.........",
+  "...HH.....HHHHHHHHHHHHHHH.........",
+  "..HH......HHHHHHH....H............",
+  "....H...H.......H...H.............",
+  "...H....H.......H....H............",
+  "..H......H.......H....H...........",
 ];
 
 const RIGHT_FRAME_B = [
-  "............RRRR..............",
-  "..........RRRRRRRR............",
-  ".............RR........H......",
-  "............RRR.......HH......",
-  "............RR......HH..H.....",
-  "......HHHHHRRHHHHHHHHHHH......",
-  "....H..HHHHH.HHHHHHHHHHHH.....",
-  "..HHH.....HHHHHHHHH...HHH..H..",
-  "....H.....HHHHHHH...H.........",
-  "......H..H.....H..H.H.........",
-  "......HH......H...HH..........",
-  ".....H.H......H...H.H.........",
+  "............RRRR..................",
+  "..........RRRRRRRR................",
+  ".............RR..........H.H......",
+  "............RRR.........HHHHH.....",
+  "............RR......HHHHH.HHHH....",
+  "......HHHHHRRHHHHHHHHHHHHHH.......",
+  "....HH.HHHHHHHHHHHHHHHHHH.........",
+  "...HH.....HHHHHHHHHHHHHHH.........",
+  "...HH.....HHHHHHH...H.............",
+  "......H..H.....H..H.H.............",
+  "......HH......H...HH..............",
+  ".....H.H......H...H.H.............",
 ];
 
 function mirrorRaster(rows) {

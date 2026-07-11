@@ -12,6 +12,22 @@ import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../..
 
 export const ATLAS_NATIVE_PROTOCOL = "posse.atlas.native.v1";
 
+/** @type {NativeMethodRunOptions | null} */
+let atlasNativeOptionsForTests = null;
+
+/** Narrow process-local test hook for an injected real debug binary. */
+export function __setAtlasNativeOptionsForTests(opts) {
+  atlasNativeOptionsForTests = opts && typeof opts === "object" ? opts : null;
+}
+
+export function __atlasNativeManagerForTests() {
+  return atlasNativeOptionsForTests?.manager || null;
+}
+
+function effectiveRunOptions(opts) {
+  return atlasNativeOptionsForTests ? { ...atlasNativeOptionsForTests, ...opts } : opts;
+}
+
 /**
  * Resolve the heartbeat auth envelope for a native request. An explicit
  * `opts.auth` always wins; otherwise the envelope comes from the manager's
@@ -90,6 +106,7 @@ function unwrapAtlasNativeMethodResponse(value) {
  * @returns {unknown}
  */
 export function runAtlasNativeMethod(method, payload, opts = {}) {
+  opts = effectiveRunOptions(opts);
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("atlas")) {
     throw new Error(`ATLAS native method unavailable: ${method}`);
@@ -134,6 +151,7 @@ export function runAtlasNativeMethod(method, payload, opts = {}) {
  * @returns {Promise<unknown>}
  */
 export async function runAtlasNativeMethodAsync(method, payload, opts = {}) {
+  opts = effectiveRunOptions(opts);
   if (opts.bypassNativeBridge !== true && hasNativeThreadBridge()) {
     const { bypassNativeBridge, manager, signal, ...bridgeOpts } = opts;
     const auth = resolveAtlasAuthEnvelope(opts, manager || nativeBinaries);

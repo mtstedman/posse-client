@@ -13,11 +13,6 @@
 // diffParseBufferNativeParity, flip it to `native: true`, then delete the
 // JS spec in the same change.
 
-import { extract as extractJava } from "./java.js";
-import { extract as extractCSharp } from "./csharp.js";
-import { extract as extractKotlin } from "./kotlin.js";
-import { extract as extractShell } from "./shell.js";
-
 /** @type {(tag: string) => never} */
 const nativeOnly = (tag) => {
   throw new Error(`languages/index: lang "${tag}" is native-only; adapter.js must route it through parseBufferNative`);
@@ -62,8 +57,8 @@ export const LANGUAGES = [
   { tag: "py", extensions: [".py", ".pyi"], extract: () => nativeOnly("py"), supported: true, native: true },
   { tag: "go", extensions: [".go"], extract: () => nativeOnly("go"), supported: true, native: true },
   { tag: "rs", extensions: [".rs"], extract: () => nativeOnly("rs"), supported: true, native: true },
-  { tag: "java", extensions: [".java"], extract: extractJava, supported: true },
-  { tag: "cs", extensions: [".cs"], extract: extractCSharp, supported: true },
+  { tag: "java", extensions: [".java"], extract: () => nativeOnly("java"), supported: true, native: true },
+  { tag: "cs", extensions: [".cs"], extract: () => nativeOnly("cs"), supported: true, native: true },
   {
     tag: "cpp",
     extensions: [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"],
@@ -73,8 +68,8 @@ export const LANGUAGES = [
   },
   { tag: "c", extensions: [".c", ".h"], extract: () => nativeOnly("c"), supported: true, native: true },
   { tag: "php", extensions: [".php"], extract: () => nativeOnly("php"), supported: true, native: true },
-  { tag: "kt", extensions: [".kt", ".kts"], extract: extractKotlin, supported: true },
-  { tag: "sh", extensions: [".sh", ".bash"], extract: extractShell, supported: true },
+  { tag: "kt", extensions: [".kt", ".kts"], extract: () => nativeOnly("kt"), supported: true, native: true },
+  { tag: "sh", extensions: [".sh", ".bash"], extract: () => nativeOnly("sh"), supported: true, native: true },
 ];
 
 /** Lower-cased extension → descriptor index. Built once at import. */

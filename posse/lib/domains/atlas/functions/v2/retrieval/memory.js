@@ -1247,28 +1247,16 @@ function replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths, fileBaselines
  */
 function viewFilePathHashes(view, fileRelPaths) {
   const out = new Map();
-  const viewDb = unsafeViewDb(view);
-  if (!viewDb || fileRelPaths.length === 0) return out;
+  if (typeof view?.query?.contentHashForPath !== "function" || fileRelPaths.length === 0) return out;
   try {
-    const stmt = viewDb.prepare("SELECT content_hash FROM path_to_blob WHERE repo_rel_path = ? LIMIT 1");
     for (const repoRelPath of fileRelPaths) {
-      const hash = stmt.get(repoRelPath)?.content_hash;
+      const hash = view.query.contentHashForPath(repoRelPath);
       if (hash) out.set(repoRelPath, String(hash));
     }
   } catch {
     return out; // baseline capture is best-effort
   }
   return out;
-}
-
-/**
- * @param {import("../contracts/api.js").View | null | undefined} view
- * @returns {import("better-sqlite3").Database | null}
- */
-function unsafeViewDb(view) {
-  return typeof /** @type {any} */ (view)?._unsafeDb === "function"
-    ? /** @type {any} */ (view)._unsafeDb()
-    : null;
 }
 
 /** Memory ids actually returned (surfaced) by a memory.get response. */
@@ -1579,18 +1567,14 @@ export {
  * @param {{ filesById: Map<string, string[]> }} links
  */
 function applyAnchorEvidence(view, rows, links) {
-  const viewDb = typeof /** @type {any} */ (view)?._unsafeDb === "function"
-    ? /** @type {any} */ (view)._unsafeDb()
-    : null;
-  if (!viewDb) return rows;
+  if (typeof view?.query?.contentHashForPath !== "function") return rows;
   let viewBuiltAt = "";
   let hasPath;
   try {
     viewBuiltAt = String(/** @type {any} */ (view).meta?.()?.built_at || "");
-    const stmt = viewDb.prepare("SELECT 1 AS hit FROM path_to_blob WHERE repo_rel_path = ? LIMIT 1");
     const cache = new Map();
     hasPath = (p) => {
-      if (!cache.has(p)) cache.set(p, !!stmt.get(p));
+      if (!cache.has(p)) cache.set(p, view.query.contentHashForPath(p) != null);
       return cache.get(p);
     };
   } catch {
@@ -1666,8 +1650,8 @@ const ANCHOR_DELETED_TOMBSTONE = "";
  * @param {string} now
  */
 function reconcileAnchorConfidence(db, view, repoId, now) {
-  const viewDb = unsafeViewDb(view);
-  if (!viewDb) return;
+  if (typeof view?.query?.contentHashForPath !== "function"
+      || typeof view?.query?.hasSnapshotContentHash !== "function") return;
   const builtAt = String(/** @type {any} */ (view)?.meta?.()?.built_at || "");
   if (!builtAt) return;
   // Per-repo gate: one memory.db can hold several repos, each with its own code
@@ -1676,22 +1660,14 @@ function reconcileAnchorConfidence(db, view, repoId, now) {
   const seen = db.prepare("SELECT value FROM memory_meta WHERE key = ?").get(metaKey)?.value;
   if (seen === builtAt) return; // this view rebuild was already reconciled for this repo
 
-  let pathStmt;
-  let blobStmt;
-  try {
-    pathStmt = viewDb.prepare("SELECT content_hash FROM path_to_blob WHERE repo_rel_path = ? LIMIT 1");
-    blobStmt = viewDb.prepare("SELECT 1 AS hit FROM path_to_blob WHERE content_hash = ? LIMIT 1");
-  } catch {
-    return; // reconciliation is advisory; never fail a write because of it
-  }
   const pathHashCache = new Map();
   const pathHash = (p) => {
-    if (!pathHashCache.has(p)) pathHashCache.set(p, pathStmt.get(p)?.content_hash ?? null);
+    if (!pathHashCache.has(p)) pathHashCache.set(p, view.query.contentHashForPath(p));
     return pathHashCache.get(p);
   };
   const blobAliveCache = new Map();
   const blobAlive = (h) => {
-    if (!blobAliveCache.has(h)) blobAliveCache.set(h, !!blobStmt.get(h));
+    if (!blobAliveCache.has(h)) blobAliveCache.set(h, view.query.hasSnapshotContentHash(h));
     return blobAliveCache.get(h);
   };
 

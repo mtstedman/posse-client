@@ -1,11 +1,14 @@
 // @ts-check
 
 import {
-  assertSafeRemoteAuthUrl,
   POSSE_REMOTE_MAX_RESPONSE_BYTES,
   readResponseTextWithLimit,
-  resolvePosseKey,
 } from "../functions/client.js";
+import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
+import {
+  PulseTokenManager,
+  pulseTokenManager,
+} from "../../../shared/native/classes/PulseTokenManager.js";
 import {
   DEFAULT_REMOTE_ATLAS_ENCODER_TIMEOUT_MS,
   normalizeRemoteAtlasEncodeRequest,
@@ -28,7 +31,8 @@ export class RemoteAtlasEncoderClient {
     retryDelayMs = 100,
     maxResponseBytes = POSSE_REMOTE_MAX_RESPONSE_BYTES,
     fetchImpl = globalThis.fetch,
-    apiKey = resolvePosseKey(),
+    authManager = null,
+    pulseTokens = null,
   } = {}) {
     if (!baseUrl) throw new Error("RemoteAtlasEncoderClient requires baseUrl");
     if (typeof fetchImpl !== "function") throw new Error("RemoteAtlasEncoderClient requires fetch");
@@ -46,8 +50,15 @@ export class RemoteAtlasEncoderClient {
       ? Math.floor(Number(maxResponseBytes))
       : POSSE_REMOTE_MAX_RESPONSE_BYTES;
     this.fetchImpl = fetchImpl;
-    this.apiKey = apiKey == null ? "" : String(apiKey).trim();
-    assertSafeRemoteAuthUrl(this.baseUrl, this.apiKey, "remote ATLAS encode");
+    this.authManager = authManager || heartbeatAuthManager;
+    this.pulseTokens = pulseTokens || (
+      this.authManager === heartbeatAuthManager && fetchImpl === globalThis.fetch
+        ? pulseTokenManager
+        : new PulseTokenManager({ authManager: this.authManager, fetchImpl })
+    );
+    if (this.authManager?.hasLaunchKey?.() === true) {
+      this.pulseTokens.assertTrustedResourceUrl(this.baseUrl, "remote ATLAS encode");
+    }
   }
 
   endpoint(path = REMOTE_ATLAS_ENCODER_PATH) {
@@ -89,9 +100,7 @@ export class RemoteAtlasEncoderClient {
     const onAbort = () => abortWith("caller", signal?.reason || new Error("remote ATLAS encode aborted"));
     if (signal?.aborted) onAbort();
     else signal?.addEventListener?.("abort", onAbort, { once: true });
-    const timer = setTimeout(() => {
-      abortWith("timeout", new Error(`remote ATLAS encode timed out after ${this.timeoutMs}ms`));
-    }, this.timeoutMs);
+    let timer = null;
     try {
       if (abortKind === "caller") throw remoteAtlasEncoderAbortedError(url, signal?.reason);
       const normalized = normalizeRemoteAtlasEncodeRequest(request);
@@ -100,13 +109,22 @@ export class RemoteAtlasEncoderClient {
         accept: "application/json",
         "content-type": "application/json",
       };
-      if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
+      const pulseToken = await this.pulseTokens.getPulseToken({ requiredRoute: "atlas:methods" });
+      if (pulseToken) {
+        this.pulseTokens.assertTrustedResourceUrl(url, "remote ATLAS encode");
+        headers.authorization = `Bearer ${pulseToken}`;
+      }
+      if (abortKind === "caller") throw remoteAtlasEncoderAbortedError(url, signal?.reason);
+      timer = setTimeout(() => {
+        abortWith("timeout", new Error(`remote ATLAS encode timed out after ${this.timeoutMs}ms`));
+      }, this.timeoutMs);
       const idempotencyKey = idempotencyKeyFor(normalized);
       if (idempotencyKey) headers["x-posse-idempotency-key"] = idempotencyKey;
       const response = await this.fetchImpl(url, {
         method: "POST",
         headers,
         body: JSON.stringify(normalized),
+        redirect: "error",
         signal: ac.signal,
       });
       const text = await readResponseTextWithLimit(response, {
@@ -123,10 +141,12 @@ export class RemoteAtlasEncoderClient {
         }
       }
       if (!response.ok) {
-        const detail = formatBodyDetail(body);
+        if (response.status === 401 || response.status === 403) this.pulseTokens.clearAuthentication();
+        const safeBody = redactCredentialValue(body, pulseToken);
+        const detail = formatBodyDetail(safeBody);
         const err = new Error(`remote ATLAS encode failed for ${url}: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ""}`);
         /** @type {any} */ (err).status = response.status;
-        /** @type {any} */ (err).body = body;
+        /** @type {any} */ (err).body = safeBody;
         throw err;
       }
       return body || {};
@@ -140,6 +160,7 @@ export class RemoteAtlasEncoderClient {
         /** @type {any} */ (timeoutErr).code = "POSSE_REMOTE_ATLAS_ENCODER_TIMEOUT";
         throw timeoutErr;
       }
+      if (String(err?.code || "").startsWith("POSSE_PULSE_")) throw err;
       if (err?.code === "POSSE_REMOTE_RESPONSE_TOO_LARGE") {
         /** @type {any} */ (err).code = "POSSE_REMOTE_ATLAS_ENCODER_RESPONSE_TOO_LARGE";
         throw err;
@@ -150,7 +171,7 @@ export class RemoteAtlasEncoderClient {
       /** @type {any} */ (wrapped).cause = err;
       throw wrapped;
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       signal?.removeEventListener?.("abort", onAbort);
     }
   }
@@ -202,4 +223,18 @@ function formatFetchError(err) {
     err?.cause?.name,
   ].map((part) => String(part || "").trim()).filter(Boolean);
   return parts.join(" ") || "fetch failed";
+}
+
+function redactCredentialValue(value, credential) {
+  const secret = String(credential || "");
+  if (!secret) return value;
+  if (typeof value === "string") return value.split(secret).join("[REDACTED]");
+  if (Array.isArray(value)) return value.map((item) => redactCredentialValue(item, secret));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      redactCredentialValue(item, secret),
+    ]));
+  }
+  return value;
 }
