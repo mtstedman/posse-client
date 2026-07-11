@@ -22,7 +22,7 @@ export function defaultNativeArtifactCacheRoot() {
 export function nativeArtifactBundleRoot({ cacheRoot = defaultNativeArtifactCacheRoot(), name, version }) {
   const entry = nativeBinaryEntry(name);
   if (!entry || !version) return null;
-  return path.join(cacheRoot, `${entry.package}-${version}`);
+  return path.join(cacheRoot, entry.package, version);
 }
 
 /** @param {{ cacheRoot?: string, name: string, version: string, os: string, arch: string }} args */
@@ -32,7 +32,8 @@ export function nativeArtifactCachePath({ cacheRoot, name, version, os: osToken,
   const bundleRoot = nativeArtifactBundleRoot({ cacheRoot, name, version });
   if (!entry || !platform || !bundleRoot || !platform.arches?.[arch]) return null;
   return {
-    bundle: `${entry.package}-${version}`,
+    package: entry.package,
+    version,
     bundleRoot,
     binaryPath: path.join(bundleRoot, name, osToken, arch, platform.destinationFile),
     checksumPath: path.join(bundleRoot, name, osToken, arch, `${platform.destinationFile}.sha256`),
@@ -85,7 +86,7 @@ export async function ensureNativeBinaryArtifact({
   const broker = pulseTokens || new PulseTokenManager({ authManager, fetchImpl });
   const pulse = await broker.getPulseEnvelope({ requiredRoute: ARTIFACT_ROUTE_GRANT });
   if (!pulse?.token) throw artifactError("POSSE_ARTIFACT_AUTH_UNAVAILABLE", "native artifact pulse could not be minted");
-  const url = `${policy.origin}/v1/native/artifacts/${encodeURIComponent(selected.bundle)}/${encodeURIComponent(osToken)}/${encodeURIComponent(arch)}`;
+  const url = `${policy.origin}/v1/native/artifacts/${encodeURIComponent(selected.package)}/${encodeURIComponent(selected.version)}/${encodeURIComponent(osToken)}/${encodeURIComponent(arch)}`;
   broker.assertTrustedResourceUrl(url, "native artifact download");
 
   const ac = new AbortController();

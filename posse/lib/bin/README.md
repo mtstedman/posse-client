@@ -72,7 +72,7 @@ comes from the separate `posse-vector` workspace. An explicitly staged
 mode is enabled and no staged build exists, run boot mints an
 `artifacts:read` pulse, downloads the exact catalog-pinned version for the
 current OS/architecture from Posse Remote, verifies its SHA-256, and caches it
-under `~/.posse/native/bundles/posse-vector-<version>/vector/...` before ATLAS
+under `~/.posse/native/bundles/posse-vector/<version>/vector/...` before ATLAS
 opens embedding resources.
 
 The cache stores a SHA-256 sidecar and is re-verified on every process boot.
