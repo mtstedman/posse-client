@@ -827,7 +827,7 @@ async function _loadV2Modules() {
       View: _v2ClassesModule.View,
       openEmbeddingResources: _v2EmbeddingResourcesModule.openEmbeddingResources,
       semanticDispatchEnabled: _v2EmbeddingResourcesModule.semanticDispatchEnabled,
-      planQueryAsync: _v2QueryPlannerModule.planQueryAsync,
+      planQuery: _v2QueryPlannerModule.planQuery,
     };
   }
   try {
@@ -848,7 +848,7 @@ async function _loadV2Modules() {
       View: viewMod.View,
       openEmbeddingResources: embeddingResourcesMod.openEmbeddingResources,
       semanticDispatchEnabled: embeddingResourcesMod.semanticDispatchEnabled,
-      planQueryAsync: queryPlannerMod.planQueryAsync,
+      planQuery: queryPlannerMod.planQuery,
     };
   } catch (err) {
     if (!_v2LoadFailureLogged) {
@@ -951,7 +951,7 @@ function _ledgerSupportsViewMeta(ledger, viewMeta) {
   }
 }
 
-function _openV2LedgerHandle(Ledger, dbPath, { readOnly = false } = {}) {
+async function _openV2LedgerHandle(Ledger, dbPath, { readOnly = false } = {}) {
   if (readOnly && typeof Ledger.openReadOnly === "function") {
     try {
       return Ledger.openReadOnly({ dbPath });
@@ -960,7 +960,7 @@ function _openV2LedgerHandle(Ledger, dbPath, { readOnly = false } = {}) {
       // additive schema work. The successful migrated handle is then cached.
     }
   }
-  return Ledger.open({ dbPath });
+  return await Ledger.open({ dbPath });
 }
 
 function _cachePathKey(dbPath) {
@@ -1021,10 +1021,10 @@ function _releaseAtlasProxyResourceLease(lease) {
   try { lease.close?.(lease.value); } catch { /* best effort */ }
 }
 
-function _acquireV2Ledger(Ledger, dbPath, { readOnly = false, cache = false } = {}) {
+async function _acquireV2Ledger(Ledger, dbPath, { readOnly = false, cache = false } = {}) {
   const cacheKey = _cachePathKey(dbPath);
   if (!cache || !readOnly || !cacheKey) {
-    const ledger = _openV2LedgerHandle(Ledger, dbPath, { readOnly });
+    const ledger = await _openV2LedgerHandle(Ledger, dbPath, { readOnly });
     return {
       value: ledger,
       ledger,
@@ -1032,23 +1032,38 @@ function _acquireV2Ledger(Ledger, dbPath, { readOnly = false, cache = false } = 
       close: (handle) => handle?.close?.(),
     };
   }
+  // The read-only open can fall back to an async read-write open, so cached
+  // entries hold the OPEN PROMISE: concurrent misses coalesce onto one open,
+  // and close resolves the handle before closing it.
+  const key = `ledger:${cacheKey}`;
   const lease = _acquireCachedAtlasProxyResource(
     _v2LedgerCache,
-    `ledger:${cacheKey}`,
+    key,
     () => _openV2LedgerHandle(Ledger, dbPath, { readOnly: true }),
-    (handle) => handle?.close?.(),
+    (handle) => { void Promise.resolve(handle).then((led) => led?.close?.()).catch(() => {}); },
   );
-  return { ...lease, ledger: lease.value };
+  try {
+    const ledger = await lease.value;
+    return { ...lease, ledger };
+  } catch (err) {
+    // A failed open must not stay cached (every later acquire would re-await
+    // the same rejected promise until the TTL) — retire it and drop our ref.
+    if (lease.entry && !lease.entry.retired) {
+      _retireAtlasProxyCachedResource(_v2LedgerCache, key, lease.entry);
+    }
+    _releaseAtlasProxyResourceLease(lease);
+    throw err;
+  }
 }
 
-function _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta, readOnly = false }) {
+async function _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta, readOnly = false }) {
   const paths = _candidateV2LedgerPaths({ configuredRepoRoot, viewMeta });
   let fallback = null;
   for (const dbPath of paths) {
     let candidate = null;
     let candidateLease = null;
     try {
-      candidateLease = _acquireV2Ledger(Ledger, dbPath, { readOnly, cache: readOnly });
+      candidateLease = await _acquireV2Ledger(Ledger, dbPath, { readOnly, cache: readOnly });
       candidate = candidateLease.ledger;
       if (_ledgerSupportsViewMeta(candidate, viewMeta)) {
         if (fallback) {
@@ -1279,7 +1294,7 @@ async function _executeV2Call(toolName, args) {
   if (!configuredRepoRoot) return null;
   const modules = await _loadV2Modules();
   if (!modules) return null;
-  const { dispatch, Ledger, View, openEmbeddingResources, semanticDispatchEnabled, planQueryAsync } = modules;
+  const { dispatch, Ledger, View, openEmbeddingResources, semanticDispatchEnabled, planQuery } = modules;
   const optionalView = ATLAS_V2_VIEW_OPTIONAL_ACTIONS.has(action);
   const preferredViewPath = _preferredExistingV2ViewPath();
   const viewCandidates = preferredViewPath
@@ -1302,7 +1317,7 @@ async function _executeV2Call(toolName, args) {
     const expectedLayerMerge = _config?.viewLayerMerge === true;
     const initialLedgerPath = _existingFilePath(_config?.ledgerDbPath);
     if (initialLedgerPath) {
-      ledgerLease = _acquireV2Ledger(Ledger, initialLedgerPath, { readOnly: readOnlyLedger, cache: readOnlyLedger });
+      ledgerLease = await _acquireV2Ledger(Ledger, initialLedgerPath, { readOnly: readOnlyLedger, cache: readOnlyLedger });
       ledger = ledgerLease.ledger;
     }
     if (viewCandidates.length > 0) {
@@ -1330,7 +1345,7 @@ async function _executeV2Call(toolName, args) {
             error: mismatch.error.message,
           });
           if (!ledger) {
-            const opened = _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta: meta, readOnly: readOnlyLedger });
+            const opened = await _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta: meta, readOnly: readOnlyLedger });
             ledger = opened.ledger;
             ledgerLease = opened.lease;
           }
@@ -1414,7 +1429,7 @@ async function _executeV2Call(toolName, args) {
     }
     const ledgerPath = ledger ? null : _resolveV2LedgerPath({ configuredRepoRoot, viewMeta: meta });
     if (ledgerPath) {
-      const opened = _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta: meta, readOnly: readOnlyLedger });
+      const opened = await _openV2LedgerForView({ Ledger, configuredRepoRoot, viewMeta: meta, readOnly: readOnlyLedger });
       ledger = opened.ledger;
       ledgerLease = opened.lease;
     }
@@ -1532,8 +1547,7 @@ async function _executeV2Call(toolName, args) {
         config: _config || {},
         embeddingIndex: embeddingResources?.enabled ? embeddingResources.index : undefined,
         encoder: embeddingResources?.enabled ? embeddingResources.encoder : undefined,
-        planner: planQueryAsync,
-        asyncNativeRedaction: true,
+        planner: planQuery,
       },
       action,
       configuredRepoRoot,

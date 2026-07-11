@@ -1,6 +1,6 @@
 // @ts-check
 
-import { runAtlasNativeMethod } from "./invoke.js";
+import { runAtlasNativeMethodAsync } from "./invoke.js";
 
 const CONTRACT_VERSION = 1;
 const UNIT_QUERIES = new Set(["meta", "stats", "edge_stats", "symbol_metrics", "edge_taxonomy_input"]);
@@ -27,15 +27,17 @@ const RESULT_BY_QUERY = Object.freeze({
 });
 
 /**
- * Execute one bounded Rust-owned view read and return its tagged result value.
- * Node intentionally does not inspect or query the SQLite database here.
+ * Execute one bounded Rust-owned view read through the persistent worker and
+ * return its tagged result value. Node intentionally does not inspect or
+ * query the SQLite database here.
  *
  * @param {string} viewPath
  * @param {string} query
  * @param {Record<string, unknown>} [params]
+ * @returns {Promise<any>}
  */
-export function runNativeViewRead(viewPath, query, params = {}) {
-  const response = /** @type {any} */ (runAtlasNativeMethod("view-read", {
+export async function runNativeViewRead(viewPath, query, params = {}) {
+  const response = /** @type {any} */ (await runAtlasNativeMethodAsync("view-read", {
     contract_version: CONTRACT_VERSION,
     view_path: viewPath,
     query,

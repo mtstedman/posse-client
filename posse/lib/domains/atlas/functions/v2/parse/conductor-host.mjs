@@ -79,7 +79,7 @@ async function getLedger(ledgerPath, dbPath) {
   const entry = getEntry(ledgerPath, dbPath);
   if (!entry.ledger) {
     const { Ledger } = await import("../../../classes/v2/Ledger.js");
-    entry.ledger = Ledger.open({ dbPath: ledgerPath });
+    entry.ledger = await Ledger.open({ dbPath: ledgerPath });
   }
   return entry.ledger;
 }
@@ -220,8 +220,14 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         await disposeConductorRetrieveResources();
       } catch { /* best effort */ }
       for (const { ledger, view } of handles.values()) {
-        try { ledger?.close?.(); } catch { /* best effort */ }
-        try { view?.close?.(); } catch { /* best effort */ }
+        try {
+          if (typeof ledger?.closeNative === "function") await ledger.closeNative();
+          else ledger?.close?.();
+        } catch { /* best effort */ }
+        try {
+          if (typeof view?.closeNative === "function") await view.closeNative();
+          else view?.close?.();
+        } catch { /* best effort */ }
       }
       handles.clear();
       // This thread's module graph owns any native daemon hosts it spawned

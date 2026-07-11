@@ -1,6 +1,13 @@
 // @ts-check
+//
+// Async-only native storage boundary. Every ledger/view storage operation
+// routes through the persistent posse-atlas worker; the synchronous one-shot
+// wrappers were retired with the sync invoke path. Ledger writes are
+// non-idempotent at the transport level, so they pass `idempotent: false` —
+// a worker host lost mid-write reports instead of transparently retrying a
+// write that may already have committed.
 
-import { runAtlasNativeMethod, runAtlasNativeMethodAsync } from "./invoke.js";
+import { runAtlasNativeMethodAsync } from "./invoke.js";
 
 export const ATLAS_STORAGE_CONTRACT_VERSION = 1;
 export const ATLAS_LEDGER_ENSURE_METHOD = "ledger-ensure";
@@ -9,18 +16,14 @@ export const ATLAS_VIEW_BUILD_METHOD = "view-build";
 export const ATLAS_VIEW_APPLY_METHOD = "view-apply";
 export const ATLAS_VIEW_CLONE_METHOD = "view-clone";
 export const ATLAS_VIEW_PATCH_META_METHOD = "view-patch-meta";
+export const ATLAS_STORAGE_CACHE_STATS_METHOD = "storage-cache-stats";
+export const ATLAS_STORAGE_CACHE_INVALIDATE_METHOD = "storage-cache-invalidate";
 
-export function ensureLedgerNative(ledgerPath, opts = {}) {
-  return runAtlasNativeMethod(ATLAS_LEDGER_ENSURE_METHOD, { ledger_path: ledgerPath }, opts);
-}
-
-export function writeLedgerNative(ledgerPath, operation, request, opts = {}) {
-  return runAtlasNativeMethod(ATLAS_LEDGER_WRITE_METHOD, {
-    ledger_path: ledgerPath,
-    contract_version: ATLAS_STORAGE_CONTRACT_VERSION,
-    operation,
-    request,
-  }, opts);
+export function ensureLedgerNativeAsync(ledgerPath, opts = {}) {
+  return runAtlasNativeMethodAsync(ATLAS_LEDGER_ENSURE_METHOD, { ledger_path: ledgerPath }, {
+    idempotent: false,
+    ...opts,
+  });
 }
 
 export function writeLedgerNativeAsync(ledgerPath, operation, request, opts = {}) {
@@ -29,24 +32,17 @@ export function writeLedgerNativeAsync(ledgerPath, operation, request, opts = {}
     contract_version: ATLAS_STORAGE_CONTRACT_VERSION,
     operation,
     request,
-  }, opts);
-}
-
-export function buildViewNative(args, opts = {}) {
-  return runAtlasNativeMethod(ATLAS_VIEW_BUILD_METHOD, buildViewPayload(args), opts);
+  }, {
+    idempotent: false,
+    ...opts,
+  });
 }
 
 export function buildViewNativeAsync(args, opts = {}) {
-  return runAtlasNativeMethodAsync(ATLAS_VIEW_BUILD_METHOD, buildViewPayload(args), opts);
-}
-
-export function applyViewNative(args, opts = {}) {
-  return runAtlasNativeMethod(ATLAS_VIEW_APPLY_METHOD, {
-    contract_version: ATLAS_STORAGE_CONTRACT_VERSION,
-    ledger_path: args.ledgerPath,
-    view_path: args.viewPath,
-    entries: args.entries,
-  }, opts);
+  return runAtlasNativeMethodAsync(ATLAS_VIEW_BUILD_METHOD, buildViewPayload(args), {
+    idempotent: false,
+    ...opts,
+  });
 }
 
 export function applyViewNativeAsync(args, opts = {}) {
@@ -55,15 +51,10 @@ export function applyViewNativeAsync(args, opts = {}) {
     ledger_path: args.ledgerPath,
     view_path: args.viewPath,
     entries: args.entries,
-  }, opts);
-}
-
-export function cloneViewNative({ sourcePath, destPath }, opts = {}) {
-  return runAtlasNativeMethod(ATLAS_VIEW_CLONE_METHOD, {
-    contract_version: ATLAS_STORAGE_CONTRACT_VERSION,
-    source_path: sourcePath,
-    dest_path: destPath,
-  }, opts);
+  }, {
+    idempotent: false,
+    ...opts,
+  });
 }
 
 export function cloneViewNativeAsync({ sourcePath, destPath }, opts = {}) {
@@ -71,11 +62,14 @@ export function cloneViewNativeAsync({ sourcePath, destPath }, opts = {}) {
     contract_version: ATLAS_STORAGE_CONTRACT_VERSION,
     source_path: sourcePath,
     dest_path: destPath,
-  }, opts);
+  }, {
+    idempotent: false,
+    ...opts,
+  });
 }
 
-export function patchViewMetaNative(viewPath, meta, opts = {}) {
-  return runAtlasNativeMethod(ATLAS_VIEW_PATCH_META_METHOD, {
+export function patchViewMetaNativeAsync(viewPath, meta, opts = {}) {
+  return runAtlasNativeMethodAsync(ATLAS_VIEW_PATCH_META_METHOD, {
     contract_version: ATLAS_STORAGE_CONTRACT_VERSION,
     view_path: viewPath,
     branch: meta.branch,
@@ -83,7 +77,33 @@ export function patchViewMetaNative(viewPath, meta, opts = {}) {
     parent_seq: meta.parent_seq ?? null,
     ledger_seq: Number.isInteger(meta.ledger_seq) ? meta.ledger_seq : null,
     built_at: meta.built_at ?? null,
-  }, opts);
+  }, {
+    idempotent: false,
+    ...opts,
+  });
+}
+
+/**
+ * Daemon-resident storage-handle cache counters ({ opens, hits,
+ * invalidations, evictions, reopened_* }). Benchmarks and diagnostics use
+ * this to prove repeated queries are not re-validating databases.
+ */
+export function storageCacheStatsNativeAsync(opts = {}) {
+  return runAtlasNativeMethodAsync(ATLAS_STORAGE_CACHE_STATS_METHOD, {}, opts);
+}
+
+/**
+ * Close daemon-resident SQLite handles before a Node-owned writer replaces or
+ * removes their files. The method is idempotent and safe to retry.
+ *
+ * @param {string | string[]} paths
+ */
+export function invalidateStorageCacheNativeAsync(paths, opts = {}) {
+  const normalized = (Array.isArray(paths) ? paths : [paths])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  if (normalized.length === 0) return Promise.resolve({ invalidated: 0 });
+  return runAtlasNativeMethodAsync(ATLAS_STORAGE_CACHE_INVALIDATE_METHOD, { paths: normalized }, opts);
 }
 
 function buildViewPayload({ ledgerPath, branch, atSeq, outPath, options = {} }) {

@@ -11,7 +11,7 @@
 // A future revision can swap in semantic similarity once embeddings are
 // stable (Workstream H).
 
-import { tokenizeForRanking, tokenizeForRankingAsync } from "./tokens.js";
+import { tokenizeForRanking } from "./tokens.js";
 
 /** @typedef {import("../../contracts/api.js").ViewSymbol} ViewSymbol */
 /** @typedef {import("./rrf.js").FusedEntry<ViewSymbol>} FusedSymbolEntry */
@@ -27,9 +27,8 @@ import { tokenizeForRanking, tokenizeForRankingAsync } from "./tokens.js";
 const TASK_BONUS_WEIGHT = 0.25;
 
 /**
- * Shared scoring core: the twins differ only in how token sets are gathered
- * (in-process tokenizer vs daemon-backed async tokenizer); the bonus math and
- * the deterministic re-sort live here once.
+ * Scoring core: the bonus math and the deterministic re-sort, applied once the
+ * caller has gathered task + per-symbol token sets from the daemon tokenizer.
  *
  * @param {FusedSymbolEntry[]} fused
  * @param {Set<string>} taskTokens
@@ -64,61 +63,23 @@ function applyTaskBonusesAndSort(fused, taskTokens, symbolTokenSets) {
  *
  * @param {FusedSymbolEntry[]} fused
  * @param {string | undefined} taskText
- * @returns {FusedSymbolEntry[]}
- */
-export function applyTaskQueryRanking(fused, taskText) {
-  if (!taskText || typeof taskText !== "string") return fused;
-  const taskTokens = tokenSet(taskText);
-  if (taskTokens.size === 0) return fused;
-  const symbolTokenSets = fused.map((entry) => symbolTokenSet(entry.payload));
-  return applyTaskBonusesAndSort(fused, taskTokens, symbolTokenSets);
-}
-
-/**
- * Async daemon-backed variant for retrieval paths that are already async.
- *
- * @param {FusedSymbolEntry[]} fused
- * @param {string | undefined} taskText
  * @returns {Promise<FusedSymbolEntry[]>}
  */
-export async function applyTaskQueryRankingAsync(fused, taskText) {
+export async function applyTaskQueryRanking(fused, taskText) {
   if (!taskText || typeof taskText !== "string") return fused;
-  const taskTokens = await tokenSetAsync(taskText);
+  const taskTokens = await tokenSet(taskText);
   if (taskTokens.size === 0) return fused;
-  const symbolTokenSets = await Promise.all(fused.map((entry) => symbolTokenSetAsync(entry.payload)));
+  const symbolTokenSets = await Promise.all(fused.map((entry) => symbolTokenSet(entry.payload)));
   return applyTaskBonusesAndSort(fused, taskTokens, symbolTokenSets);
 }
 
 /**
  * @param {string} text
- * @returns {Set<string>}
- */
-function tokenSet(text) {
-  const out = new Set();
-  for (const t of tokenizeForRanking(text)) out.add(t);
-  return out;
-}
-
-/**
- * @param {string} text
  * @returns {Promise<Set<string>>}
  */
-async function tokenSetAsync(text) {
+async function tokenSet(text) {
   const out = new Set();
-  for (const t of await tokenizeForRankingAsync(text)) out.add(t);
-  return out;
-}
-
-/**
- * @param {ViewSymbol} sym
- * @returns {Set<string>}
- */
-function symbolTokenSet(sym) {
-  const out = new Set();
-  for (const t of tokenizeForRanking(sym.name || "")) out.add(t);
-  if (sym.qualified_name) {
-    for (const t of tokenizeForRanking(sym.qualified_name)) out.add(t);
-  }
+  for (const t of await tokenizeForRanking(text)) out.add(t);
   return out;
 }
 
@@ -126,11 +87,11 @@ function symbolTokenSet(sym) {
  * @param {ViewSymbol} sym
  * @returns {Promise<Set<string>>}
  */
-async function symbolTokenSetAsync(sym) {
+async function symbolTokenSet(sym) {
   const out = new Set();
   const [nameTokens, qualifiedTokens] = await Promise.all([
-    tokenizeForRankingAsync(sym.name || ""),
-    sym.qualified_name ? tokenizeForRankingAsync(sym.qualified_name) : Promise.resolve([]),
+    tokenizeForRanking(sym.name || ""),
+    sym.qualified_name ? tokenizeForRanking(sym.qualified_name) : Promise.resolve([]),
   ]);
   for (const t of nameTokens) out.add(t);
   for (const t of qualifiedTokens) out.add(t);

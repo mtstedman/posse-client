@@ -7,7 +7,7 @@
 import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { nativePathEvidence } from "./native-evidence.js";
 import { recordCodeLadderAreaCoverage } from "./code-ladder.js";
-import { runAtlasNativeMethod } from "../native/invoke.js";
+import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 
 const MAX_STRUCTURE_FILES = 128;
 
@@ -19,7 +19,7 @@ const MAX_STRUCTURE_FILES = 128;
  *   repoRoot?: string,
  * }} args
  */
-export function codeStructure({ view, versionId, params = {}, repoRoot }) {
+export async function codeStructure({ view, versionId, params = {}, repoRoot }) {
   const action = "code.structure";
   const requested = requestedPaths(params.paths ?? params.path);
   if (requested.length === 0) {
@@ -32,21 +32,21 @@ export function codeStructure({ view, versionId, params = {}, repoRoot }) {
   }
 
   const maxFiles = clampInt(params.maxFiles, 64, 1, MAX_STRUCTURE_FILES);
-  const indexedPaths = materializedIndexedPaths(view);
-  const selection = /** @type {Record<string, any>} */ (runAtlasNativeMethod("repository-paths", {
+  const indexedPaths = await materializedIndexedPaths(view);
+  const selection = /** @type {Record<string, any>} */ (await runAtlasNativeMethodAsync("repository-paths", {
     requestedPaths: requested,
     indexedPaths,
     maxFiles,
   }));
   const paths = Array.isArray(selection.paths) ? selection.paths : [];
-  const files = paths.map((repoPath) => ({
-    path: repoPath,
-    symbols: view.query.symbolsInFile(repoPath),
-  }));
+  const files = [];
+  for (const repoPath of paths) {
+    files.push({ path: repoPath, symbols: await view.query.symbolsInFile(repoPath) });
+  }
   const symbolsByPath = new Map(files.map((file) => [file.path, file.symbols]));
   const edgeKinds = normalizedStructureEdgeKinds(params.edgeKinds);
-  const edges = materializedStructureEdges(view, files, new Set(edgeKinds));
-  const data = /** @type {Record<string, any>} */ (runAtlasNativeMethod("code-structure", {
+  const edges = await materializedStructureEdges(view, files, new Set(edgeKinds));
+  const data = /** @type {Record<string, any>} */ (await runAtlasNativeMethodAsync("code-structure", {
     selectedPaths: paths,
     requestedPaths: requested,
     files,
@@ -58,7 +58,7 @@ export function codeStructure({ view, versionId, params = {}, repoRoot }) {
     prefixTruncated: selection.prefixTruncated === true,
   }));
 
-  const evidence = nativePathEvidence({ view, repoRoot, paths, requested, symbolsByPath });
+  const evidence = await nativePathEvidence({ view, repoRoot, paths, requested, symbolsByPath });
   const pathAmbiguity = /** @type {Record<string, unknown> | null} */ (evidence.pathAmbiguity || null);
   const negativeEvidence = /** @type {Record<string, unknown> | null} */ (evidence.negativeEvidence || null);
   const warnings = Array.isArray(data.warnings) ? [...data.warnings] : [];
@@ -82,13 +82,13 @@ function arrayValue(value) {
   return value == null ? [] : [value];
 }
 
-function materializedIndexedPaths(view) {
+async function materializedIndexedPaths(view) {
   return typeof view?.query?.indexedPaths === "function"
-    ? view.query.indexedPaths({ limit: 100_000 })
+    ? await view.query.indexedPaths({ limit: 100_000 })
     : [];
 }
 
-function materializedStructureEdges(view, files, edgeKinds) {
+async function materializedStructureEdges(view, files, edgeKinds) {
   const byGlobalId = new Map();
   for (const file of files) {
     for (const symbol of file.symbols) {
@@ -97,16 +97,16 @@ function materializedStructureEdges(view, files, edgeKinds) {
   }
   const rows = [];
   for (const symbol of byGlobalId.values()) {
-    for (const edge of view.query.callees(symbol.global_id)) {
+    for (const edge of await view.query.callees(symbol.global_id)) {
       if (edge.to_global_id == null) continue;
       if (!edgeKinds.has(String(edge.kind || ""))) continue;
-      const to = view.query.getSymbol(edge.to_global_id);
+      const to = await view.query.getSymbol(edge.to_global_id);
       if (!to) continue;
       rows.push(structureEdgeInput(edge, symbol, to));
     }
-    for (const edge of view.query.callers(symbol.global_id)) {
+    for (const edge of await view.query.callers(symbol.global_id)) {
       if (!edgeKinds.has(String(edge.kind || ""))) continue;
-      const from = view.query.getSymbol(edge.from_global_id);
+      const from = await view.query.getSymbol(edge.from_global_id);
       if (!from) continue;
       rows.push(structureEdgeInput(edge, from, symbol));
     }

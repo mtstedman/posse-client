@@ -41,11 +41,11 @@ import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
  *   encoder?: import("../contracts/embeddings.js").EmbeddingEncoder,
  *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  * }} args
- * @returns {ReturnType<typeof okEnvelope<ContextData>> | ReturnType<typeof errorEnvelope> | Promise<ReturnType<typeof okEnvelope<ContextData>> | ReturnType<typeof errorEnvelope>>}
+ * @returns {Promise<ReturnType<typeof okEnvelope<ContextData>> | ReturnType<typeof errorEnvelope>>}
  */
-export function contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner }) {
+export async function contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner }) {
   const maxTokens = params.maxTokens || 6000;
-  const sliceEnv = /** @type {any} */ (sliceBuild({
+  const sliceEnv = /** @type {any} */ (await sliceBuild({
     view,
     versionId,
     ledger,
@@ -63,16 +63,8 @@ export function contextBuild({ view, versionId, params, ledger, repoRoot, repoId
       budget: { maxEstimatedTokens: maxTokens },
     },
   }));
-  if (sliceEnv && typeof sliceEnv.then === "function") {
-    return sliceEnv.then((resolved) => finishContextBuild({
-      sliceEnv: hydrateContextMemories({ sliceEnv: resolved, versionId, ledger, repoId, view }),
-      versionId,
-      params,
-      maxTokens,
-    }));
-  }
   return finishContextBuild({
-    sliceEnv: hydrateContextMemories({ sliceEnv, versionId, ledger, repoId, view }),
+    sliceEnv: await hydrateContextMemories({ sliceEnv, versionId, ledger, repoId, view }),
     versionId,
     params,
     maxTokens,
@@ -90,9 +82,9 @@ export function contextBuild({ view, versionId, params, ledger, repoRoot, repoId
  * best-effort — a memory store problem must never fail the context build.
  *
  * @param {{ sliceEnv: any, versionId: string, ledger: any, repoId: string | null | undefined, view: any }} args
- * @returns {any}
+ * @returns {Promise<any>}
  */
-function hydrateContextMemories({ sliceEnv, versionId, ledger, repoId, view }) {
+async function hydrateContextMemories({ sliceEnv, versionId, ledger, repoId, view }) {
   try {
     if (!sliceEnv?.ok || !ledger) return sliceEnv;
     const data = /** @type {any} */ (sliceEnv.data);
@@ -101,7 +93,7 @@ function hydrateContextMemories({ sliceEnv, versionId, ledger, repoId, view }) {
     const symbolIds = Array.isArray(surface?.symbols) ? surface.symbols.slice(0, 100) : [];
     const fileRelPaths = Array.isArray(surface?.files) ? surface.files.slice(0, 100) : [];
     if (symbolIds.length === 0 && fileRelPaths.length === 0) return sliceEnv;
-    const got = memoryGet({
+    const got = await memoryGet({
       versionId,
       ledger,
       repoId,
@@ -171,17 +163,10 @@ function finishContextBuild({ sliceEnv, versionId, params, maxTokens }) {
  *   encoder?: import("../contracts/embeddings.js").EmbeddingEncoder,
  *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  * }} args
- * @returns {ReturnType<typeof okEnvelope<ContextSummaryData>> | ReturnType<typeof errorEnvelope> | Promise<ReturnType<typeof okEnvelope<ContextSummaryData>> | ReturnType<typeof errorEnvelope>>}
+ * @returns {Promise<ReturnType<typeof okEnvelope<ContextSummaryData>> | ReturnType<typeof errorEnvelope>>}
  */
-export function contextSummary({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner }) {
-  const contextEnv = contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner });
-  if (contextEnv && typeof /** @type {any} */ (contextEnv).then === "function") {
-    return /** @type {Promise<any>} */ (contextEnv).then((resolved) => finishContextSummary({
-      contextEnv: resolved,
-      versionId,
-      params,
-    }));
-  }
+export async function contextSummary({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner }) {
+  const contextEnv = await contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner });
   return finishContextSummary({
     contextEnv,
     versionId,

@@ -10,7 +10,7 @@ import { randomBytes, createHash } from "crypto";
 import { fileURLToPath } from "url";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { getEffectivePolicy } from "./policy.js";
-import { redactSecretsAsync } from "./redaction.js";
+import { redactSecrets } from "./redaction.js";
 import { ATLAS_RUNTIME_SPECS } from "../contracts/runtimes.js";
 
 /** @typedef {import("../contracts/tool-params.js").RuntimeExecuteParams} RuntimeExecuteParams */
@@ -140,8 +140,8 @@ export async function runtimeExecute({ versionId, params, ledger, repoRoot, repo
   });
   const durationMs = Date.now() - startedAt;
   const [stdout, stderr] = await Promise.all([
-    redactSecretsAsync(result.stdout),
-    redactSecretsAsync(result.stderr),
+    redactSecrets(result.stdout),
+    redactSecrets(result.stderr),
   ]);
   const status = result.timedOut
     ? "timeout"

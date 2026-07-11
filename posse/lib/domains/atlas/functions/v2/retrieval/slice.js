@@ -100,9 +100,9 @@ const REFRESH_DIFF_LIMIT = 100;
  *   taskType?: TaskType,
  *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  * }} args
- * @returns {SliceBuildEnvelope | Promise<SliceBuildEnvelope>}
+ * @returns {Promise<SliceBuildEnvelope>}
  */
-export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, taskType, planner, onDemandEmbeddingFill = true }) {
+export async function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, taskType, planner, onDemandEmbeddingFill = true }) {
   const detail = /** @type {CardDetail} */ (params.cardDetail || "compact");
   const budget = params.budget || {};
   const maxCards = budget.maxCards ?? DEFAULT_BUDGET_CARDS;
@@ -165,17 +165,17 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
   for (const id of params.entrySymbols || []) {
     const parsed = parseSymbolId(id);
     if (!parsed) continue;
-    const sym = view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
+    const sym = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
     if (sym) addEntry(sym);
   }
 
   for (const filePath of params.editedFiles || []) {
     if (!isCanonicalRepoPath(filePath)) continue;
-    for (const s of view.query.symbolsInFile(filePath).filter(isDefaultVisibleSymbol)) addEntry(s);
+    for (const s of (await view.query.symbolsInFile(filePath)).filter(isDefaultVisibleSymbol)) addEntry(s);
   }
 
   if (params.failingTestPath && isCanonicalRepoPath(params.failingTestPath)) {
-    for (const s of view.query.symbolsInFile(params.failingTestPath).filter(isDefaultVisibleSymbol)) addEntry(s);
+    for (const s of (await view.query.symbolsInFile(params.failingTestPath)).filter(isDefaultVisibleSymbol)) addEntry(s);
   }
 
   const applySearchResult = (result) => {
@@ -200,29 +200,27 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
         planner,
       },
     };
-    return (async () => {
-      // Skipped when the caller opted out of the bulk fill (in-process
-      // retrieval fallback): entry discovery searches what's already indexed.
-      if (onDemandEmbeddingFill) {
-        try {
-          await ensureEmbeddingsForView({
-            view,
-            index: /** @type {EmbeddingIndex} */ (embeddingIndex),
-            encoder: /** @type {EmbeddingEncoder} */ (encoder),
-            repoRoot,
-            limit: 5000,
-            timeoutMs: 15000,
-          });
-        } catch (err) {
-          logAtlasError("[sliceBuild.ensureEmbeddingsForView] threw:", err);
-        }
+    // Skipped when the caller opted out of the bulk fill (in-process
+    // retrieval fallback): entry discovery searches what's already indexed.
+    if (onDemandEmbeddingFill) {
+      try {
+        await ensureEmbeddingsForView({
+          view,
+          index: /** @type {EmbeddingIndex} */ (embeddingIndex),
+          encoder: /** @type {EmbeddingEncoder} */ (encoder),
+          repoRoot,
+          limit: 5000,
+          timeoutMs: 15000,
+        });
+      } catch (err) {
+        logAtlasError("[sliceBuild.ensureEmbeddingsForView] threw:", err);
       }
-      applySearchResult(await hybridSearch(searchArgs));
-      return finishBuild();
-    })();
+    }
+    applySearchResult(await hybridSearch(searchArgs));
+    return await finishBuild();
   }
   if (params.taskText && !semanticEntryDiscovery && !hasExplicitEntries) {
-    const lexicalResult = hybridSearch({
+    applySearchResult(await hybridSearch({
       view,
       query: params.taskText,
       ledger,
@@ -235,27 +233,20 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
         searchScope: "either",
         planner,
       },
-    });
-    if (lexicalResult && typeof (/** @type {any} */ (lexicalResult)).then === "function") {
-      return /** @type {Promise<HybridSearchResult>} */ (lexicalResult).then((result) => {
-        applySearchResult(result);
-        return finishBuild();
-      });
-    }
-    applySearchResult(/** @type {HybridSearchResult} */ (lexicalResult));
+    }));
   }
-  return finishBuild();
+  return await finishBuild();
 
   // 2. Expand neighborhood.
-  function finishBuild() {
+  async function finishBuild() {
     const maxSymbols = Math.max(maxCards * 2, 50);
-    let sliceResult = querySliceWithMetadata(view, entries.map((s) => s.global_id), {
+    let sliceResult = await querySliceWithMetadata(view, entries.map((s) => s.global_id), {
       depth: 2,
       maxSymbols,
       minConfidence: effectiveMinConfidence,
     });
     if (params.minConfidence == null && sliceResult.symbols.length < Math.min(maxSymbols, maxCards + entries.length)) {
-      const relaxed = querySliceWithMetadata(view, entries.map((s) => s.global_id), {
+      const relaxed = await querySliceWithMetadata(view, entries.map((s) => s.global_id), {
         depth: 2,
         maxSymbols,
         minConfidence: 0.3,
@@ -295,7 +286,7 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
     let hitCardCap = false;
     let hitTokenCap = false;
     for (const s of ordered) {
-      const card = buildSymbolCard({
+      const card = await buildSymbolCard({
         symbol: s,
         view,
         detail,
@@ -315,14 +306,14 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
 
       if (returnedCards.length >= maxCards) {
         hitCardCap = true;
-        const minimal = buildSymbolCard({ symbol: s, view, detail: "minimal" });
+        const minimal = await buildSymbolCard({ symbol: s, view, detail: "minimal" });
         spilloverReasonBySymbolId.set(minimal.symbolId, "deferred: card budget reached");
         spillover.push(minimal);
         continue;
       }
       if (estimatedTokens + TOKENS_PER_CARD_ESTIMATE > maxTokens) {
         hitTokenCap = true;
-        const minimal = buildSymbolCard({ symbol: s, view, detail: "minimal" });
+        const minimal = await buildSymbolCard({ symbol: s, view, detail: "minimal" });
         spilloverReasonBySymbolId.set(minimal.symbolId, "deferred: token budget reached");
         spillover.push(minimal);
         continue;
@@ -368,7 +359,7 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
     });
     if (ledger) {
       try {
-        const mem = memorySurface({
+        const mem = await memorySurface({
           versionId,
           ledger,
           repoId,
@@ -420,7 +411,7 @@ export function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, 
  *   repoRoot?: string,
  * }} args
  */
-export function sliceRefresh({ view, versionId, params, repoRoot }) {
+export async function sliceRefresh({ view, versionId, params, repoRoot }) {
   const entry = SLICE_REGISTRY.get(params.sliceHandle)
     || /** @type {SliceRegistryEntry | undefined} */ (loadSliceEntry({ repoRoot, handle: params.sliceHandle })?.entry);
   if (!entry) {
@@ -445,7 +436,7 @@ export function sliceRefresh({ view, versionId, params, repoRoot }) {
     return okEnvelope({ action: "slice.refresh", versionId, data, meta: { etag: entry.etag } });
   }
 
-  const diff = diffSliceAgainstView({ view, entry, versionId });
+  const diff = await diffSliceAgainstView({ view, entry, versionId });
   if (!diff.safe) {
     /** @type {SliceRefreshData} */
     const data = {
@@ -609,14 +600,14 @@ function normalizeKnownCardEtags(value) {
  * @param {View} view
  * @param {number[]} seedGlobalIds
  * @param {{ depth: number, maxSymbols: number, minConfidence: number }} opts
- * @returns {{ symbols: ViewSymbol[], frontier: { symbol: ViewSymbol, score: number, why: string }[] }}
+ * @returns {Promise<{ symbols: ViewSymbol[], frontier: { symbol: ViewSymbol, score: number, why: string }[] }>}
  */
-function querySliceWithMetadata(view, seedGlobalIds, opts) {
+async function querySliceWithMetadata(view, seedGlobalIds, opts) {
   if (typeof view.query.sliceWithMetadata === "function") {
-    return view.query.sliceWithMetadata(seedGlobalIds, opts);
+    return await view.query.sliceWithMetadata(seedGlobalIds, opts);
   }
   return {
-    symbols: view.query.slice(seedGlobalIds, opts),
+    symbols: await view.query.slice(seedGlobalIds, opts),
     frontier: [],
   };
 }
@@ -667,7 +658,7 @@ function sanitizeFrontierWhy(value) {
 /**
  * @param {{ view: View, entry: SliceRegistryEntry, versionId: string }} args
  */
-function diffSliceAgainstView({ view, entry, versionId }) {
+async function diffSliceAgainstView({ view, entry, versionId }) {
   const original = [...entry.cards, ...entry.spillover];
   /** @type {SymbolCard[]} */
   const refreshed = [];
@@ -690,13 +681,13 @@ function diffSliceAgainstView({ view, entry, versionId }) {
       touchedPaths.add(card.location.repo_rel_path);
     }
 
-    const current = currentSymbolForCard(view, card);
+    const current = await currentSymbolForCard(view, card);
     if (!current) {
       removedSymbolIds.push(card.symbolId);
       continue;
     }
 
-    const nextCard = buildCardForRefresh({ view, entry, symbol: current });
+    const nextCard = await buildCardForRefresh({ view, entry, symbol: current });
     refreshed.push(nextCard);
     seenCurrentIds.add(nextCard.symbolId);
     if (nextCard.symbolId !== card.symbolId || nextCard.etag !== card.etag) {
@@ -705,12 +696,12 @@ function diffSliceAgainstView({ view, entry, versionId }) {
   }
 
   for (const repoPath of touchedPaths) {
-    for (const sym of view.query.symbolsInFile(repoPath)) {
+    for (const sym of await view.query.symbolsInFile(repoPath)) {
       const id = symbolIdOf(sym);
       if (seenCurrentIds.has(id)) continue;
       const key = symbolSemanticKey(sym);
       if (originalKeys.has(key)) continue;
-      const card = buildCardForRefresh({ view, entry, symbol: sym });
+      const card = await buildCardForRefresh({ view, entry, symbol: sym });
       addedCards.push(card);
       refreshed.push(card);
       seenCurrentIds.add(id);
@@ -746,10 +737,10 @@ function diffSliceAgainstView({ view, entry, versionId }) {
 
 /**
  * @param {{ view: View, entry: SliceRegistryEntry, symbol: ViewSymbol }} args
- * @returns {SymbolCard}
+ * @returns {Promise<SymbolCard>}
  */
-function buildCardForRefresh({ view, entry, symbol }) {
-  return buildSymbolCard({
+async function buildCardForRefresh({ view, entry, symbol }) {
+  return await buildSymbolCard({
     symbol,
     view,
     detail: entry.detail,
@@ -761,18 +752,18 @@ function buildCardForRefresh({ view, entry, symbol }) {
 /**
  * @param {View} view
  * @param {SymbolCard} card
- * @returns {ViewSymbol | null}
+ * @returns {Promise<ViewSymbol | null>}
  */
-function currentSymbolForCard(view, card) {
+async function currentSymbolForCard(view, card) {
   const parsed = parseSymbolId(card.symbolId);
   if (parsed) {
-    const exact = view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
+    const exact = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
     if (exact) return exact;
   }
   const repoPath = card.location?.repo_rel_path;
   if (!isCanonicalRepoPath(repoPath || "")) return null;
   const qname = card.qualifiedName || "";
-  for (const sym of view.query.symbolsInFile(repoPath)) {
+  for (const sym of await view.query.symbolsInFile(repoPath)) {
     if (sym.kind !== card.kind) continue;
     if (sym.name !== card.name) continue;
     if (qname && sym.qualified_name !== qname) continue;

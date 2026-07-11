@@ -89,11 +89,11 @@ export async function repoRegister({ versionId, params, repoRoot, repoId = "defa
   const createdLedger = !fs.existsSync(ledgerPath);
   const buildEmptyView = params.buildEmptyView !== false;
   let createdView = false;
-  const ledger = Ledger.open({ dbPath: ledgerPath });
+  const ledger = await Ledger.open({ dbPath: ledgerPath });
   try {
     const branch = String(params.branch || defaultBranchForRepo(root)).trim() || "main";
     if (typeof ledger.ensureRootBranch === "function" && !ledger.getBranch(branch)) {
-      ledger.ensureRootBranch(branch);
+      await ledger.ensureRootBranch(branch);
     }
     const seq = ledger.headSeq(branch);
     let viewProbe = null;
@@ -131,7 +131,7 @@ export async function repoRegister({ versionId, params, repoRoot, repoId = "defa
       },
     });
   } finally {
-    ledger.close();
+    await ledger.closeNative();
   }
 }
 
@@ -147,13 +147,13 @@ export async function repoRegister({ versionId, params, repoRoot, repoId = "defa
  *   config?: Record<string, unknown>,
  * }} args
  */
-export function repoStatus({ view, versionId, params, repoId = "default", repoRoot, viewPath, ledger, config = {} }) {
-  const meta = view.meta();
-  const stats = computeStats(view);
+export async function repoStatus({ view, versionId, params, repoId = "default", repoRoot, viewPath, ledger, config = {} }) {
+  const meta = await view.meta();
+  const stats = await computeStats(view);
   const root = repoRoot || meta.repo_root || undefined;
   const embeddingStatus = root ? computeEmbeddingStatus(root, config) : null;
   const includeEdgeTaxonomy = params.detail !== "minimal";
-  const edges = computeEdgeStats(view, { includeTaxonomy: includeEdgeTaxonomy, cacheKey: edgeStatsCacheKey({ meta, versionId }) });
+  const edges = await computeEdgeStats(view, { includeTaxonomy: includeEdgeTaxonomy, cacheKey: edgeStatsCacheKey({ meta, versionId }) });
   const freshness = ledger
     ? viewFreshness(meta, ledger)
     : { current: true, branch: meta.branch, ledgerSeq: meta.ledger_seq, headSeq: null, reason: null };
@@ -168,7 +168,7 @@ export function repoStatus({ view, versionId, params, repoId = "default", repoRo
   const indexProgress = buildIndexProgress({ meta, freshness, versionId });
   const graphDerivedState = buildGraphDerivedState(view);
   const treeCompression = buildTreeCompressionStatus(view);
-  const dataQuality = params.detail === "minimal" ? null : buildDataQuality(view, ledger);
+  const dataQuality = params.detail === "minimal" ? null : await buildDataQuality(view, ledger);
   const memoryStats = ledger ? buildMemoryStats(ledger, repoId) : null;
   /** @type {RepoStatusData} */
   const data = {
@@ -228,7 +228,7 @@ export function repoStatus({ view, versionId, params, repoId = "default", repoRo
       // memories" surfaces what the store actually knows about.
       const anchors = recentMemoryAnchorFiles(ledger, repoId);
       const surfaced = anchors.length > 0
-        ? memorySurface({
+        ? await memorySurface({
           versionId,
           ledger,
           repoId,
@@ -466,15 +466,16 @@ function indexRefreshMeta(operation, diagnostics) {
  *   params: RepoOverviewParams,
  * }} args
  */
-export function repoOverview({ view, versionId, params }) {
-  const stats = computeStats(view);
-  const edges = computeEdgeStats(view, { includeTaxonomy: true, cacheKey: edgeStatsCacheKey({ meta: view.meta(), versionId }) });
+export async function repoOverview({ view, versionId, params }) {
+  const meta = await view.meta();
+  const stats = await computeStats(view);
+  const edges = await computeEdgeStats(view, { includeTaxonomy: true, cacheKey: edgeStatsCacheKey({ meta, versionId }) });
   const level = params.level || "stats";
   const includeDirectories = level === "directories" || level === "full";
   const includeHotspots = params.includeHotspots === true || level === "hotspots" || level === "full";
   const includeGraph = level === "graph" || level === "full";
-  const directories = includeDirectories ? topDirectorySummaries(view, params) : undefined;
-  const topSymbols = includeHotspots || includeGraph ? topSymbolMetrics(view, 10) : null;
+  const directories = includeDirectories ? await topDirectorySummaries(view, params) : undefined;
+  const topSymbols = includeHotspots || includeGraph ? await topSymbolMetrics(view, 10) : null;
   const derivedGraph = includeGraph ? readGraphDerivedOverview(view, 10) : null;
   /** @type {RepoOverviewData} */
   const data = {
@@ -504,7 +505,7 @@ export function repoOverview({ view, versionId, params }) {
     tokenMetrics: tokenMetricsFor(stats),
   };
   if (includeHotspots) {
-    data.hotspots = topHotspots(view, 10);
+    data.hotspots = await topHotspots(view, 10);
     data.graph = {
       edges,
       symbolKinds: stats.byKind,
@@ -514,7 +515,7 @@ export function repoOverview({ view, versionId, params }) {
     };
   }
   if (includeGraph) {
-    const entryPoints = findEntryPointPaths(view);
+    const entryPoints = await findEntryPointPaths(view);
     const layers = directories ? identifyArchitecturalLayers(directories) : [];
     data.graph = {
       ...(data.graph || {}),
@@ -558,11 +559,11 @@ export function repoOverview({ view, versionId, params }) {
  *   config?: Record<string, unknown>,
  * }} args
  */
-export function repoQuality({ view, versionId, params, repoRoot, viewPath, ledger, config = {} }) {
-  const meta = view.meta();
+export async function repoQuality({ view, versionId, params, repoRoot, viewPath, ledger, config = {} }) {
+  const meta = await view.meta();
   const root = repoRoot || meta.repo_root || undefined;
-  const stats = computeStats(view);
-  const edges = computeEdgeStats(view, { includeTaxonomy: true, cacheKey: edgeStatsCacheKey({ meta, versionId }) });
+  const stats = await computeStats(view);
+  const edges = await computeEdgeStats(view, { includeTaxonomy: true, cacheKey: edgeStatsCacheKey({ meta, versionId }) });
   const freshness = ledger
     ? viewFreshness(meta, ledger)
     : { current: true, branch: meta.branch, ledgerSeq: meta.ledger_seq, headSeq: null, reason: null };
@@ -580,7 +581,7 @@ export function repoQuality({ view, versionId, params, repoRoot, viewPath, ledge
         halfLifeDays: params.halfLifeDays,
       })
     : undefined;
-  const dataQuality = buildDataQuality(view, ledger);
+  const dataQuality = await buildDataQuality(view, ledger);
   const warnings = [];
   if (!freshness.current && freshness.reason) warnings.push(freshness.reason);
   if (edges.unresolvedRate > 0.25) warnings.push(`High unresolved edge rate: ${Math.round(edges.unresolvedRate * 100)}%.`);
@@ -627,9 +628,9 @@ export function repoQuality({ view, versionId, params, repoRoot, viewPath, ledge
 /**
  * @param {View} view
  */
-function computeStats(view) {
+async function computeStats(view) {
   if (typeof view?.query?.stats === "function") {
-    const stats = view.query.stats();
+    const stats = await view.query.stats();
     return {
       symbolCount: Number(stats.symbol_count || 0),
       fileCount: Number(stats.file_count || 0),
@@ -645,7 +646,7 @@ function computeStats(view) {
   const byKind = new Map();
   /** @type {Set<string>} */
   const files = new Set();
-  const all = readAllSymbols(view);
+  const all = await readAllSymbols(view);
   for (const s of all) {
     files.add(s.repo_rel_path);
     byLang.set(s.lang, (byLang.get(s.lang) || 0) + 1);
@@ -680,10 +681,10 @@ function viewDb(view) {
 /**
  * @param {View} view
  * @param {{ pathPrefix?: string }} [opts]
- * @returns {ViewSymbol[]}
+ * @returns {Promise<ViewSymbol[]>}
  */
-function readAllSymbols(view, opts = {}) {
-  return view.query.allSymbols({
+async function readAllSymbols(view, opts = {}) {
+  return await view.query.allSymbols({
     limit: Number.MAX_SAFE_INTEGER,
     ...(opts.pathPrefix ? { pathPrefix: opts.pathPrefix } : {}),
   });
@@ -753,8 +754,8 @@ function resolveRepoRoot(root) {
  * @param {View} view
  * @param {LedgerContract | undefined} ledger
  */
-function buildDataQuality(view, ledger) {
-  const symbols = readAllSymbols(view);
+async function buildDataQuality(view, ledger) {
+  const symbols = await readAllSymbols(view);
   const hiddenNoisySymbols = symbols.filter(isNoisyLocalSymbol).length;
   const generatedFileSymbols = symbols.filter((s) => isGeneratedPath(s.repo_rel_path)).length;
   const literalSymbols = symbols.filter((s) => isLiteralSymbolName(s.name)).length;
@@ -768,7 +769,7 @@ function buildDataQuality(view, ledger) {
       literalSymbols,
       literalDuplicateGroups,
     },
-    edges: edgeSourceQuality(view),
+    edges: await edgeSourceQuality(view),
   };
 }
 
@@ -875,9 +876,11 @@ function countFlatSymbolsBySource(db, symbols, out) {
 /**
  * @param {View} view
  */
-function edgeSourceQuality(view) {
+async function edgeSourceQuality(view) {
   try {
-    return typeof view?.query?.edgeStats === "function" ? view.query.edgeStats().by_source : null;
+    if (typeof view?.query?.edgeStats !== "function") return null;
+    const stats = await view.query.edgeStats();
+    return stats.by_source;
   } catch {
     return null;
   }
@@ -960,8 +963,33 @@ function defaultBranchForRepo(repoRoot) {
  * @returns {string}
  */
 function detectGitCurrentBranch(repoRoot) {
-  const branch = gitOutput(repoRoot, ["branch", "--show-current"]);
+  const branch = readGitHeadBranch(repoRoot)
+    || gitOutput(repoRoot, ["branch", "--show-current"])
+    || gitOutput(repoRoot, ["symbolic-ref", "--short", "HEAD"]);
   return branch && branch !== "HEAD" ? branch : "";
+}
+
+/**
+ * Read the symbolic HEAD directly so unborn repositories do not require a
+ * one-shot git subprocess merely to determine their checked-out branch.
+ * @param {string} repoRoot
+ */
+function readGitHeadBranch(repoRoot) {
+  try {
+    let gitDir = path.join(repoRoot, ".git");
+    const stat = fs.statSync(gitDir);
+    if (stat.isFile()) {
+      const pointer = fs.readFileSync(gitDir, "utf8").trim();
+      const match = /^gitdir:\s*(.+)$/i.exec(pointer);
+      if (!match) return "";
+      gitDir = path.resolve(repoRoot, match[1]);
+    }
+    const head = fs.readFileSync(path.join(gitDir, "HEAD"), "utf8").trim();
+    const match = /^ref:\s+refs\/heads\/(.+)$/.exec(head);
+    return match ? match[1] : "";
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -1549,10 +1577,10 @@ function configFlag(value) {
  * @param {{ includeTaxonomy?: boolean, cacheKey?: string | null }} [opts]
  * @returns {{ total: number, resolved: number, unresolved: number, unresolvedRate: number, internal: number, external: number, runtimeExternal?: number, dynamicReceiver?: number, importScopedExternal?: number, localUnbound?: number, selfReceiver?: number, trueUnresolved?: number, byKind: Record<string, number>, callTotal: number, callResolved: number, callResolutionRate: number, taxonomy?: Record<string, number> | null, taxonomyUnavailable?: string }}
  */
-function computeEdgeStats(view, opts = {}) {
+async function computeEdgeStats(view, opts = {}) {
   const includeTaxonomy = opts.includeTaxonomy === true;
   if (typeof view?.query?.edgeStats === "function") {
-    const nativeStats = view.query.edgeStats();
+    const nativeStats = await view.query.edgeStats();
     const total = Number(nativeStats.total || 0);
     const internal = Number(nativeStats.internal || 0);
     const external = Number(nativeStats.external || 0);
@@ -1574,7 +1602,7 @@ function computeEdgeStats(view, opts = {}) {
       callResolutionRate: callTotal > 0 ? callResolved / callTotal : 1,
     };
     if (!includeTaxonomy) return out;
-    const taxonomy = edgeTaxonomy(view, nativeStats, opts.cacheKey || null);
+    const taxonomy = await edgeTaxonomy(view, nativeStats, opts.cacheKey || null);
     return {
       ...out,
       runtimeExternal: taxonomy.runtimeExternal,
@@ -1594,8 +1622,8 @@ function computeEdgeStats(view, opts = {}) {
   let callResolved = 0;
   /** @type {Record<string, number>} */
   const byKind = {};
-  for (const s of readAllSymbols(view)) {
-    const callees = view.query.callees(s.global_id);
+  for (const s of await readAllSymbols(view)) {
+    const callees = await view.query.callees(s.global_id);
     total += callees.length;
     resolved += callees.filter((edge) => edge.to_global_id != null || edge.to_external_id != null).length;
     internal += callees.filter((edge) => edge.to_global_id != null).length;
@@ -1630,10 +1658,10 @@ function computeEdgeStats(view, opts = {}) {
  * @param {{ internal?: number, external?: number }} edgeStats
  * @param {string | null} [cacheKey]
  */
-function edgeTaxonomy(view, edgeStats, cacheKey = null) {
+async function edgeTaxonomy(view, edgeStats, cacheKey = null) {
   const cached = readEdgeTaxonomyCache(cacheKey);
   if (cached) return cached;
-  const input = view.query.edgeTaxonomyInput();
+  const input = await view.query.edgeTaxonomyInput();
   const rows = Array.isArray(input.unresolved_edges) ? input.unresolved_edges : [];
   const importRows = Array.isArray(input.import_edges) ? input.import_edges : [];
   const importsByFile = buildExternalImportBindings(importRows);
@@ -1913,14 +1941,14 @@ function qualityFeedback({ ledger, limit, halfLifeDays }) {
  * @param {View} view
  * @param {RepoOverviewParams} params
  */
-function topDirectorySummaries(view, params) {
+async function topDirectorySummaries(view, params) {
   const focus = params.directories || [];
   const maxDirs = params.maxDirectories || 10;
   const maxExports = params.maxExportsPerDirectory || 5;
-  const metrics = symbolMetrics(view);
+  const metrics = await symbolMetrics(view);
   /** @type {Map<string, { files: Set<string>, symbols: ViewSymbol[] }>} */
   const buckets = new Map();
-  for (const s of readAllSymbols(view)) {
+  for (const s of await readAllSymbols(view)) {
     const dir = directoryOf(s.repo_rel_path);
     if (focus.length > 0 && !focus.some((f) => dir === f || dir.startsWith(`${f}/`))) continue;
     if (!buckets.has(dir)) buckets.set(dir, { files: new Set(), symbols: [] });
@@ -1949,11 +1977,11 @@ function topDirectorySummaries(view, params) {
  * @param {View} view
  * @param {number} limit
  */
-function topHotspots(view, limit) {
+async function topHotspots(view, limit) {
   /** @type {Map<string, { inbound: number, outbound: number, symbols: Set<number> }>} */
   const byPath = new Map();
-  const metrics = symbolMetrics(view);
-  for (const s of readAllSymbols(view)) {
+  const metrics = await symbolMetrics(view);
+  for (const s of await readAllSymbols(view)) {
     if (!isDefaultVisibleSymbol(s) || isGeneratedPath(s.repo_rel_path)) continue;
     const current = byPath.get(s.repo_rel_path) || { inbound: 0, outbound: 0, symbols: new Set() };
     const m = metrics.get(s.global_id) || { fanIn: 0, fanOut: 0 };
@@ -1982,13 +2010,13 @@ function topHotspots(view, limit) {
 
 /**
  * @param {View} view
- * @returns {Map<number, { fanIn: number, fanOut: number }>}
+ * @returns {Promise<Map<number, { fanIn: number, fanOut: number }>>}
  */
-function symbolMetrics(view) {
+async function symbolMetrics(view) {
   /** @type {Map<number, { fanIn: number, fanOut: number }>} */
   const out = new Map();
   if (typeof view?.query?.symbolMetrics === "function") {
-    for (const row of view.query.symbolMetrics()) {
+    for (const row of await view.query.symbolMetrics()) {
       out.set(Number(row.global_id), {
         fanIn: Number(row.fan_in || 0),
         fanOut: Number(row.fan_out || 0),
@@ -1996,10 +2024,10 @@ function symbolMetrics(view) {
     }
     return out;
   }
-  for (const s of readAllSymbols(view)) {
+  for (const s of await readAllSymbols(view)) {
     out.set(s.global_id, {
-      fanIn: view.query.callers(s.global_id).length,
-      fanOut: view.query.callees(s.global_id).length,
+      fanIn: (await view.query.callers(s.global_id)).length,
+      fanOut: (await view.query.callees(s.global_id)).length,
     });
   }
   return out;
@@ -2009,9 +2037,9 @@ function symbolMetrics(view) {
  * @param {View} view
  * @param {number} limit
  */
-function topSymbolMetrics(view, limit) {
-  const metrics = symbolMetrics(view);
-  const symbols = readAllSymbols(view)
+async function topSymbolMetrics(view, limit) {
+  const metrics = await symbolMetrics(view);
+  const symbols = (await readAllSymbols(view))
     .filter((s) => isDefaultVisibleSymbol(s) && !isGeneratedPath(s.repo_rel_path));
   return {
     byFanIn: rankedSymbolsByMetric(symbols, metrics, "fanIn", limit),
@@ -2050,12 +2078,12 @@ function hotspotReason(inbound, outbound) {
 
 /**
  * @param {View} view
- * @returns {string[]}
+ * @returns {Promise<string[]>}
  */
-function findEntryPointPaths(view) {
+async function findEntryPointPaths(view) {
   const names = new Set(["main", "index", "server", "app", "cli", "orchestrator"]);
   const paths = new Set();
-  for (const s of readAllSymbols(view)) {
+  for (const s of await readAllSymbols(view)) {
     const file = s.repo_rel_path.split("/").pop() || "";
     const stem = file.replace(/\.[^.]+$/, "");
     if (names.has(stem) || s.name === "main" || s.name === "run") paths.add(s.repo_rel_path);

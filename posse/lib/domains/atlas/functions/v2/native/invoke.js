@@ -56,6 +56,9 @@ function resolveAtlasAuthEnvelope(opts, manager) {
  * @property {Record<string, unknown>} [heartbeat]
  * @property {boolean} [bypassNativeBridge]
  * @property {boolean} [worker]
+ * @property {boolean} [workerFallback]
+ * @property {boolean} [idempotent]
+ * @property {boolean} [allowOneShotSync]
  * @property {(value: unknown) => unknown} [normalizeNodeResult]
  * @property {(value: unknown) => unknown} [normalizeNativeResult]
  * @property {(value: unknown) => unknown} [mapNativeReturn]
@@ -97,8 +100,14 @@ function unwrapAtlasNativeMethodResponse(value) {
 }
 
 /**
- * Invoke one Rust-owned ATLAS method. Throws on disabled/unavailable binary,
- * non-zero exit, invalid JSON, or a structured `{ ok: false }` response.
+ * Invoke one Rust-owned ATLAS method through a SYNCHRONOUS one-shot process
+ * spawn. Retired from production: every production ATLAS operation routes
+ * through the persistent worker via {@link runAtlasNativeMethodAsync}. Only
+ * explicit opt-in callers (parity oracles, tests that exercise the one-shot
+ * transport itself) may pass `allowOneShotSync: true`.
+ *
+ * Throws on missing opt-in, disabled/unavailable binary, non-zero exit,
+ * invalid JSON, or a structured `{ ok: false }` response.
  *
  * @param {string} method
  * @param {unknown} payload
@@ -107,6 +116,12 @@ function unwrapAtlasNativeMethodResponse(value) {
  */
 export function runAtlasNativeMethod(method, payload, opts = {}) {
   opts = effectiveRunOptions(opts);
+  if (opts.allowOneShotSync !== true) {
+    throw new Error(
+      `ATLAS sync one-shot invocation of '${method}' is retired: use runAtlasNativeMethodAsync `
+      + "(persistent worker), or pass allowOneShotSync: true from parity/test harnesses only",
+    );
+  }
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("atlas")) {
     throw new Error(`ATLAS native method unavailable: ${method}`);
@@ -126,11 +141,7 @@ export function runAtlasNativeMethod(method, payload, opts = {}) {
       input: `${JSON.stringify(request)}\n`,
       json: true,
       timeoutMs: opts.timeoutMs,
-      // Sync calls are per-call spawns now (the sync bridge was removed) —
-      // runSync accepts and ignores `worker`. Keep call volume O(1) per
-      // action (batch lines, memoize tokenize) or prefer the async variant,
-      // which does route through the persistent Atlas-Helper daemon.
-      worker: true,
+      worker: false,
     },
   );
   if (!res.ok) {
@@ -141,9 +152,14 @@ export function runAtlasNativeMethod(method, payload, opts = {}) {
 }
 
 /**
- * Async variant of {@link runAtlasNativeMethod}. Routes through the persistent
- * Atlas-Helper daemon (async, off the main loop) — the preferred path for the
- * off-thread callers (e.g. the conductor and ingest pipelines).
+ * The production ATLAS invocation path: routes through the persistent
+ * `posse-atlas worker --stdio` daemon. Worker degradation to a per-call
+ * spawn is DISABLED here — a dead worker restarts (the daemon respawns its
+ * transport and the request retries once on the replacement host) or the
+ * call fails with POSSE_NATIVE_WORKER_UNAVAILABLE; it never silently forks a
+ * one-shot process. Non-idempotent operations (ledger writes) must pass
+ * `idempotent: false` so a host lost mid-request reports instead of
+ * transparently retrying a write that may have committed.
  *
  * @param {string} method
  * @param {unknown} payload
@@ -154,10 +170,12 @@ export async function runAtlasNativeMethodAsync(method, payload, opts = {}) {
   opts = effectiveRunOptions(opts);
   if (opts.bypassNativeBridge !== true && hasNativeThreadBridge()) {
     const { bypassNativeBridge, manager, signal, ...bridgeOpts } = opts;
-    const auth = resolveAtlasAuthEnvelope(opts, manager || nativeBinaries);
-    if (auth && typeof auth === "object") {
-      /** @type {Record<string, unknown>} */ (bridgeOpts).auth = auth;
-    }
+    // The bridge exists so worker threads share the PARENT process's native
+    // manager and auth authority. Do not resolve or forward the worker
+    // thread's manager envelope here: it can be stale/different and an
+    // explicit `auth` would then override the parent manager at the final
+    // native boundary. The parent attaches its own pulse before dispatch.
+    delete /** @type {Record<string, unknown>} */ (bridgeOpts).auth;
     return nativeThreadBridgeRequest("atlas", method, payload, bridgeOpts, { signal, timeoutMs: opts.timeoutMs });
   }
   const manager = opts.manager || nativeBinaries;
@@ -181,6 +199,8 @@ export async function runAtlasNativeMethodAsync(method, payload, opts = {}) {
       timeoutMs: opts.timeoutMs,
       signal: opts.signal,
       worker: opts.worker !== false,
+      workerFallback: opts.workerFallback === true,
+      idempotent: opts.idempotent !== false,
     },
   );
   if (!res.ok) {

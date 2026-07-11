@@ -11,7 +11,7 @@
 // caps, and truncation flags (survey.rs, method "code-survey").
 
 import { errorEnvelope, okEnvelope } from "./envelope.js";
-import { runAtlasNativeMethod } from "../native/invoke.js";
+import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 import { isDefaultVisibleSymbol } from "./hygiene.js";
 import { nativePathEvidence } from "./native-evidence.js";
 import { recordCodeLadderAreaCoverage } from "./code-ladder.js";
@@ -28,7 +28,7 @@ const MAX_DIG_TERMS = 16;
  *   repoRoot?: string,
  * }} args
  */
-export function codeSurvey({ view, versionId, params = {}, repoRoot }) {
+export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
   const action = "code.survey";
   // `paths` accepts one string or an array; each entry may be an indexed file
   // or a directory prefix (resolved in that order). `path` stays as an alias.
@@ -46,7 +46,7 @@ export function codeSurvey({ view, versionId, params = {}, repoRoot }) {
   }
 
   const maxFiles = clampInt(params.maxFiles, MAX_SURVEY_FILES, 1, MAX_SURVEY_FILES);
-  const { paths, prefixTruncated } = collectSurveyPaths({ view, requested, maxFiles });
+  const { paths, prefixTruncated } = await collectSurveyPaths({ view, requested, maxFiles });
   if (paths.length === 0) {
     return okEnvelope({
       action,
@@ -72,7 +72,7 @@ export function codeSurvey({ view, versionId, params = {}, repoRoot }) {
   /** @type {Map<number, import("../contracts/api.js").ViewSymbol>} */
   const surveyedSymbols = new Map();
   for (const path of paths) {
-    const symbols = view.query.symbolsInFile(path).filter(isDefaultVisibleSymbol);
+    const symbols = (await view.query.symbolsInFile(path)).filter(isDefaultVisibleSymbol);
     for (const symbol of symbols) {
       if (symbol.global_id != null) surveyedSymbols.set(symbol.global_id, symbol);
     }
@@ -85,15 +85,15 @@ export function codeSurvey({ view, versionId, params = {}, repoRoot }) {
   let edgeBudget = MAX_RAW_EDGES;
   outer:
   for (const symbol of surveyedSymbols.values()) {
-    for (const edge of view.query.callers(symbol.global_id)) {
-      const from = view.query.getSymbol(edge.from_global_id);
+    for (const edge of await view.query.callers(symbol.global_id)) {
+      const from = await view.query.getSymbol(edge.from_global_id);
       if (!from || !isDefaultVisibleSymbol(from)) continue;
       edges.push(surveyEdge(edge, from, symbol, surveyed));
       if (--edgeBudget <= 0) break outer;
     }
-    for (const edge of view.query.callees(symbol.global_id)) {
+    for (const edge of await view.query.callees(symbol.global_id)) {
       if (edge.to_global_id == null) continue;
-      const to = view.query.getSymbol(edge.to_global_id);
+      const to = await view.query.getSymbol(edge.to_global_id);
       if (!to || !isDefaultVisibleSymbol(to)) continue;
       if (surveyed.has(String(to.repo_rel_path || "").replace(/\\/g, "/"))) continue; // internal: already covered via callers
       edges.push(surveyEdge(edge, symbol, to, surveyed));
@@ -107,7 +107,7 @@ export function codeSurvey({ view, versionId, params = {}, repoRoot }) {
   if (typeof view.query.unresolvedReferencesTo === "function") {
     for (const term of digTerms) {
       const sites = [];
-      for (const edge of view.query.unresolvedReferencesTo(term)) {
+      for (const edge of await view.query.unresolvedReferencesTo(term)) {
         sites.push(`${edge.repo_rel_path}:${edge.range_start_line || 1}`);
         if (sites.length >= 32) break;
       }
@@ -115,7 +115,7 @@ export function codeSurvey({ view, versionId, params = {}, repoRoot }) {
     }
   }
 
-  const result = /** @type {Record<string, unknown>} */ (runAtlasNativeMethod("code-survey", {
+  const result = /** @type {Record<string, unknown>} */ (await runAtlasNativeMethodAsync("code-survey", {
     files,
     edges,
     unresolved,
@@ -125,7 +125,7 @@ export function codeSurvey({ view, versionId, params = {}, repoRoot }) {
     max_edges: params.maxEdges,
   }));
   if (prefixTruncated) result.truncated = true;
-  const evidence = nativePathEvidence({ view, repoRoot, paths, requested, terms: digTerms });
+  const evidence = await nativePathEvidence({ view, repoRoot, paths, requested, terms: digTerms });
   const pathAmbiguity = /** @type {Record<string, unknown> | null} */ (evidence.pathAmbiguity || null);
   if (pathAmbiguity) {
     result.pathAmbiguity = pathAmbiguity;
@@ -165,7 +165,7 @@ function surveyEdge(edge, from, to, surveyed) {
  *
  * @param {{ view: import("../contracts/api.js").View, requested: string[], maxFiles: number }} args
  */
-export function collectSurveyPaths({ view, requested, maxFiles }) {
+export async function collectSurveyPaths({ view, requested, maxFiles }) {
   const seen = new Set();
   const paths = [];
   let prefixTruncated = false;
@@ -181,7 +181,7 @@ export function collectSurveyPaths({ view, requested, maxFiles }) {
   };
   for (const entry of requested) {
     const matches = typeof view.query.indexedPaths === "function"
-      ? view.query.indexedPaths({ pathPrefix: entry, limit: maxFiles + 1 })
+      ? await view.query.indexedPaths({ pathPrefix: entry, limit: maxFiles + 1 })
       : [];
     const isFile = matches[0] === entry;
     if (isFile) {

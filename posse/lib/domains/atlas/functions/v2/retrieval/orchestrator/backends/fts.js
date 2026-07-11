@@ -15,7 +15,7 @@
 /** @typedef {import("../query-planner-types.js").QueryPlan} QueryPlan */
 
 import { symbolIdOf } from "../../cards.js";
-import { rankSymbols, rankSymbolsAsync } from "../../rank.js";
+import { rankSymbols } from "../../rank.js";
 import { isDefaultVisibleSymbol, isExplicitLiteralSymbolQuery, isLiteralSymbolName, pathSymbolPriority } from "../../hygiene.js";
 import { toRanked } from "../rrf.js";
 import { planQuery } from "../query-planner.js";
@@ -75,37 +75,17 @@ function ftsQueryFailure(usedPlan) {
 
 /**
  * @param {{ view: View, query: string, limit: number, plan?: QueryPlan, scope?: "name" | "body" | "either" }} args
- * @returns {FtsBackendResult}
- */
-export function runFtsBackend({ view, query, limit, plan, scope = "either" }) {
-  const preflight = ftsPreflight(view, query);
-  if (preflight) return preflight;
-  const usedPlan = plan ?? planQuery(query);
-  try {
-    const raw = collectFtsHits({ view, query, limit, plan: usedPlan, scope });
-    // Lexical rerank — FTS returns rows in MATCH-rank order, but we want
-    // identifier-exact hits first so the fused ranking favors them.
-    const ranked = rankSymbols(query, raw);
-    return assembleFtsResult(ranked, raw.length, usedPlan);
-  } catch {
-    return ftsQueryFailure(usedPlan);
-  }
-}
-
-/**
- * Async daemon-backed variant for retrieval paths that already resolved an
- * async planner or vector backend.
- *
- * @param {{ view: View, query: string, limit: number, plan?: QueryPlan, scope?: "name" | "body" | "either" }} args
  * @returns {Promise<FtsBackendResult>}
  */
-export async function runFtsBackendAsync({ view, query, limit, plan, scope = "either" }) {
+export async function runFtsBackend({ view, query, limit, plan, scope = "either" }) {
   const preflight = ftsPreflight(view, query);
   if (preflight) return preflight;
-  const usedPlan = plan ?? planQuery(query);
+  const usedPlan = plan ?? await planQuery(query);
   try {
-    const raw = collectFtsHits({ view, query, limit, plan: usedPlan, scope });
-    const ranked = await rankSymbolsAsync(query, raw);
+    const raw = await collectFtsHits({ view, query, limit, plan: usedPlan, scope });
+    // Lexical rerank — FTS returns rows in MATCH-rank order, but we want
+    // identifier-exact hits first so the fused ranking favors them.
+    const ranked = await rankSymbols(query, raw);
     return assembleFtsResult(ranked, raw.length, usedPlan);
   } catch {
     return ftsQueryFailure(usedPlan);
@@ -114,9 +94,9 @@ export async function runFtsBackendAsync({ view, query, limit, plan, scope = "ei
 
 /**
  * @param {{ view: View, query: string, limit: number, plan: QueryPlan, scope: "name" | "body" | "either" }} args
- * @returns {ViewSymbol[]}
+ * @returns {Promise<ViewSymbol[]>}
  */
-function collectFtsHits({ view, query, limit, plan, scope }) {
+async function collectFtsHits({ view, query, limit, plan, scope }) {
   const probes = buildProbes(query, plan);
   const cap = Math.max(limit * 2, limit);
   /** @type {ViewSymbol[]} */
@@ -132,7 +112,7 @@ function collectFtsHits({ view, query, limit, plan, scope }) {
     if (!isCanonicalRepoPath(repoPath)) continue;
     let rows;
     try {
-      rows = view.query.symbolsInFile(repoPath);
+      rows = await view.query.symbolsInFile(repoPath);
     } catch {
       continue;
     }
@@ -153,7 +133,7 @@ function collectFtsHits({ view, query, limit, plan, scope }) {
   // returns Greeter as the first hit regardless of FTS5 ranking.
   if (scope !== "body") {
     for (const ident of plan.identifiers) {
-      const rows = view.query.findSymbol(ident, { limit: cap, fuzzy: false, scope });
+      const rows = await view.query.findSymbol(ident, { limit: cap, fuzzy: false, scope });
       for (const row of rows) {
         if (!isSearchVisibleSymbol(query, row)) continue;
         const id = symbolIdOf(row);
@@ -167,7 +147,7 @@ function collectFtsHits({ view, query, limit, plan, scope }) {
 
   // Then fuzzy/prefix probes from the plan + raw fallback.
   for (const ftsQuery of probes) {
-    const rows = view.query.findSymbol(ftsQuery, { limit: cap, fuzzy: true, scope });
+    const rows = await view.query.findSymbol(ftsQuery, { limit: cap, fuzzy: true, scope });
     for (const row of rows) {
       if (!isSearchVisibleSymbol(query, row)) continue;
       const id = symbolIdOf(row);

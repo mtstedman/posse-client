@@ -16,7 +16,11 @@ import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
 import { isContentHash } from "../../functions/v2/hash.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
 import { openLedgerDb, openLedgerDbReadOnly } from "../../functions/v2/ledger/schema.js";
-import { ensureLedgerNative, writeLedgerNative } from "../../functions/v2/native/storage.js";
+import {
+  ensureLedgerNativeAsync,
+  invalidateStorageCacheNativeAsync,
+  writeLedgerNativeAsync,
+} from "../../functions/v2/native/storage.js";
 import { BlobStore } from "./ledger/BlobStore.js";
 import { FeedbackStore } from "./ledger/FeedbackStore.js";
 import { Interner } from "./ledger/Interner.js";
@@ -58,13 +62,17 @@ export class Ledger {
   #blob;
 
   /**
+   * Constructing directly requires an already-ensured (schema-current)
+   * ledger file: use {@link Ledger.open}, which ensures through the
+   * persistent native worker first. The constructor itself never spawns a
+   * native process.
+   *
    * @param {{ dbPath: string, mode?: "readwrite" | "readonly" }} args
    */
   constructor({ dbPath, mode = "readwrite" }) {
     if (!dbPath) throw new Error("Ledger: dbPath is required");
     this.#dbPath = path.resolve(dbPath);
     const readOnly = mode === "readonly";
-    if (!readOnly) ensureLedgerNative(this.#dbPath);
     this.#db = readOnly ? openLedgerDbReadOnly(this.#dbPath) : openLedgerDb(this.#dbPath);
     // Any bootstrap throw after the open (schema-version mismatch, stale
     // read-only format, migration race) must close the connection: a leaked
@@ -91,13 +99,16 @@ export class Ledger {
   }
 
   /**
-   * Convenience factory. Identical to `new Ledger(...)`; kept for symmetry
-   * with View.mount-style entry points.
+   * THE readwrite entry point. Ensures the ledger schema through the
+   * persistent native worker (creating or migrating the file when needed),
+   * then opens the in-process read connection.
    *
    * @param {{ dbPath: string }} args
-   * @returns {Ledger}
+   * @returns {Promise<Ledger>}
    */
-  static open(args) {
+  static async open(args) {
+    if (!args?.dbPath) throw new Error("Ledger.open: dbPath is required");
+    await ensureLedgerNativeAsync(path.resolve(args.dbPath));
     return new Ledger(args);
   }
 
@@ -164,10 +175,33 @@ export class Ledger {
   // ---------------------------------------------------------------------------
 
   /**
-   * @param {LedgerAppendInput} input
-   * @returns {LedgerEntry}
+   * One ordered ledger write through the persistent native worker. The
+   * per-thread SQLite gate keeps Node-side writers (source stats, feedback)
+   * from racing this path within the thread; cross-process ordering is
+   * SQLite's WAL + the worker's serial request loop. `idempotent: false` is
+   * set at the storage boundary so a worker host lost mid-write reports
+   * instead of retrying a possibly-committed write.
+   *
+   * @param {string} operation
+   * @param {unknown} request
+   * @param {string} label
+   * @param {{ waitMs?: number, label?: string }} [opts]
+   * @returns {Promise<any>}
    */
-  append(input) {
+  #write(operation, request, label, opts = {}) {
+    return runSqliteWrite(
+      this.#dbPath,
+      () => writeLedgerNativeAsync(this.#dbPath, operation, request),
+      { label: opts.label || label, waitMs: opts.waitMs },
+    );
+  }
+
+  /**
+   * @param {LedgerAppendInput} input
+   * @param {{ waitMs?: number, label?: string }} [opts]
+   * @returns {Promise<LedgerEntry>}
+   */
+  async append(input, opts = {}) {
     if (!input || typeof input !== "object") {
       throw new TypeError("Ledger.append: input is required");
     }
@@ -200,26 +234,8 @@ export class Ledger {
       throw new RangeError("Ledger.append: op='modify' requires both hashes non-null");
     }
 
-    const result = writeLedgerNative(this.#dbPath, "append", input);
+    const result = await this.#write("append", input, "Ledger.append", opts);
     return /** @type {LedgerEntry} */ (result?.value);
-  }
-
-  /**
-   * Async wrapper for ordered SQLite writes. Prefer this in worker/warmer
-   * paths where callers can await contention instead of racing the same DB.
-   * Gate order invariant: ATLAS v2 dispatch gates, when present, must stay
-   * outside these SQLite wrappers; ledger code should not acquire dispatch
-   * gates from inside a SQLite critical section.
-   *
-   * @param {LedgerAppendInput} input
-   * @param {{ waitMs?: number, label?: string }} [opts]
-   * @returns {Promise<LedgerEntry>}
-   */
-  appendAsync(input, opts = {}) {
-    return runSqliteWrite(this.#dbPath, () => this.append(input), {
-      label: opts.label || "Ledger.append",
-      waitMs: opts.waitMs,
-    });
   }
 
   /**
@@ -237,39 +253,23 @@ export class Ledger {
    *   indexed_at?: string,
    *   status?: "indexed" | "failed" | "stale",
    * }} layer
-   * @returns {{ layer_id: number, source: "treesitter" | "scip", symbols: number, edges: number }}
-   */
-  ingestBlobLayer(layer) {
-    const result = writeLedgerNative(this.#dbPath, "ingest_blob_layer", layer);
-    return result?.value;
-  }
-
-  /**
-   * @param {Parameters<BlobStore["ingestBlobLayer"]>[0]} layer
    * @param {{ waitMs?: number, label?: string }} [opts]
-   * @returns {Promise<ReturnType<BlobStore["ingestBlobLayer"]>>}
+   * @returns {Promise<{ layer_id: number, source: "treesitter" | "scip", symbols: number, edges: number }>}
    */
-  ingestBlobLayerAsync(layer, opts = {}) {
-    return this.#blob.ingestBlobLayerAsync(layer, opts);
+  async ingestBlobLayer(layer, opts = {}) {
+    const result = await this.#write("ingest_blob_layer", layer, "Ledger.ingestBlobLayer", opts);
+    return result?.value;
   }
 
   /**
    * Idempotent. If the blob already exists, returns without re-inserting.
    *
    * @param {BlobIngest} blob
-   * @returns {void}
-   */
-  ingestBlob(blob) {
-    writeLedgerNative(this.#dbPath, "ingest_blob", blob);
-  }
-
-  /**
-   * @param {BlobIngest} blob
    * @param {{ waitMs?: number, label?: string }} [opts]
    * @returns {Promise<void>}
    */
-  ingestBlobAsync(blob, opts = {}) {
-    return this.#blob.ingestBlobAsync(blob, opts);
+  async ingestBlob(blob, opts = {}) {
+    await this.#write("ingest_blob", blob, "Ledger.ingestBlob", opts);
   }
 
   /**
@@ -279,20 +279,12 @@ export class Ledger {
    * indexer may omit, such as procedural PHP functions.
    *
    * @param {BlobIngest} blob
-   * @returns {{ inserted_symbols: number, mapped_symbols: number, inserted_edges: number, skipped_edges: number }}
-   */
-  mergeBlobParseRows(blob) {
-    const result = writeLedgerNative(this.#dbPath, "merge_blob_parse_rows", blob);
-    return result?.value;
-  }
-
-  /**
-   * @param {BlobIngest} blob
    * @param {{ waitMs?: number, label?: string }} [opts]
    * @returns {Promise<{ inserted_symbols: number, mapped_symbols: number, inserted_edges: number, skipped_edges: number }>}
    */
-  mergeBlobParseRowsAsync(blob, opts = {}) {
-    return this.#blob.mergeBlobParseRowsAsync(blob, opts);
+  async mergeBlobParseRows(blob, opts = {}) {
+    const result = await this.#write("merge_blob_parse_rows", blob, "Ledger.mergeBlobParseRows", opts);
+    return result?.value;
   }
 
   /**
@@ -370,9 +362,10 @@ export class Ledger {
    * @param {string} name
    * @param {string} parentBranch
    * @param {number} atSeq
-   * @returns {BranchRecord}
+   * @param {{ waitMs?: number, label?: string }} [opts]
+   * @returns {Promise<BranchRecord>}
    */
-  forkBranch(name, parentBranch, atSeq) {
+  async forkBranch(name, parentBranch, atSeq, opts = {}) {
     if (!name || typeof name !== "string") {
       throw new TypeError("Ledger.forkBranch: name is required");
     }
@@ -396,26 +389,12 @@ export class Ledger {
         `Ledger.forkBranch: atSeq ${atSeq} exceeds parent head ${parentHead}`,
       );
     }
-    const result = writeLedgerNative(this.#dbPath, "fork_branch", {
+    const result = await this.#write("fork_branch", {
       name,
       parent_branch: parentBranch,
       at_seq: atSeq,
-    });
+    }, "Ledger.forkBranch", opts);
     return /** @type {BranchRecord} */ (result?.value);
-  }
-
-  /**
-   * @param {string} name
-   * @param {string} parentBranch
-   * @param {number} atSeq
-   * @param {{ waitMs?: number, label?: string }} [opts]
-   * @returns {Promise<BranchRecord>}
-   */
-  forkBranchAsync(name, parentBranch, atSeq, opts = {}) {
-    return runSqliteWrite(this.#dbPath, () => this.forkBranch(name, parentBranch, atSeq), {
-      label: opts.label || "Ledger.forkBranch",
-      waitMs: opts.waitMs,
-    });
   }
 
   /**
@@ -439,37 +418,14 @@ export class Ledger {
    * target branch is not literally named "main" (for example "master").
    *
    * @param {string} name
-   * @returns {BranchRecord}
-   */
-  ensureRootBranch(name) {
-    const branch = String(name || "").trim();
-    if (!branch) throw new TypeError("Ledger.ensureRootBranch: name is required");
-    const result = writeLedgerNative(this.#dbPath, "ensure_root_branch", { name: branch });
-    return /** @type {BranchRecord} */ (result?.value);
-  }
-
-  /**
-   * @param {string} name
    * @param {{ waitMs?: number, label?: string }} [opts]
    * @returns {Promise<BranchRecord>}
    */
-  ensureRootBranchAsync(name, opts = {}) {
-    return runSqliteWrite(this.#dbPath, () => this.ensureRootBranch(name), {
-      label: opts.label || "Ledger.ensureRootBranch",
-      waitMs: opts.waitMs,
-    });
-  }
-
-  /**
-   * @param {string} name
-   * @param {"merged" | "abandoned"} status
-   * @returns {void}
-   */
-  setBranchStatus(name, status) {
-    if (status !== "merged" && status !== "abandoned") {
-      throw new RangeError(`Ledger.setBranchStatus: invalid status '${status}'`);
-    }
-    writeLedgerNative(this.#dbPath, "set_branch_status", { name, status });
+  async ensureRootBranch(name, opts = {}) {
+    const branch = String(name || "").trim();
+    if (!branch) throw new TypeError("Ledger.ensureRootBranch: name is required");
+    const result = await this.#write("ensure_root_branch", { name: branch }, "Ledger.ensureRootBranch", opts);
+    return /** @type {BranchRecord} */ (result?.value);
   }
 
   /**
@@ -478,11 +434,11 @@ export class Ledger {
    * @param {{ waitMs?: number, label?: string }} [opts]
    * @returns {Promise<void>}
    */
-  setBranchStatusAsync(name, status, opts = {}) {
-    return runSqliteWrite(this.#dbPath, () => this.setBranchStatus(name, status), {
-      label: opts.label || "Ledger.setBranchStatus",
-      waitMs: opts.waitMs,
-    });
+  async setBranchStatus(name, status, opts = {}) {
+    if (status !== "merged" && status !== "abandoned") {
+      throw new RangeError(`Ledger.setBranchStatus: invalid status '${status}'`);
+    }
+    await this.#write("set_branch_status", { name, status }, "Ledger.setBranchStatus", opts);
   }
 
   /**
@@ -499,29 +455,16 @@ export class Ledger {
    * @param {string} branch
    * @param {string} ontoBranch
    * @param {number} fromSeq
-   * @returns {LedgerEntry[]}
-   */
-  replayPartition(branch, ontoBranch, fromSeq) {
-    const result = writeLedgerNative(this.#dbPath, "replay_partition", {
-      branch,
-      onto_branch: ontoBranch,
-      from_seq: fromSeq,
-    });
-    return /** @type {LedgerEntry[]} */ (result?.value || []);
-  }
-
-  /**
-   * @param {string} branch
-   * @param {string} ontoBranch
-   * @param {number} fromSeq
    * @param {{ waitMs?: number, label?: string }} [opts]
    * @returns {Promise<LedgerEntry[]>}
    */
-  replayPartitionAsync(branch, ontoBranch, fromSeq, opts = {}) {
-    return runSqliteWrite(this.#dbPath, () => this.replayPartition(branch, ontoBranch, fromSeq), {
-      label: opts.label || "Ledger.replayPartition",
-      waitMs: opts.waitMs,
-    });
+  async replayPartition(branch, ontoBranch, fromSeq, opts = {}) {
+    const result = await this.#write("replay_partition", {
+      branch,
+      onto_branch: ontoBranch,
+      from_seq: fromSeq,
+    }, "Ledger.replayPartition", opts);
+    return /** @type {LedgerEntry[]} */ (result?.value || []);
   }
 
   /**
@@ -729,25 +672,23 @@ export class Ledger {
    * the default branch.
    *
    * @param {{ content_hash: string }} input
-   * @returns {{ removed_symbols: number, removed_edges: number, removed_blob: number }}
-   */
-  reingestBlobWithBackend(input) {
-    const result = writeLedgerNative(this.#dbPath, "reingest_blob", input);
-    return result?.value;
-  }
-
-  /**
-   * @param {{ content_hash: string }} input
    * @param {{ waitMs?: number, label?: string }} [opts]
    * @returns {Promise<{ removed_symbols: number, removed_edges: number, removed_blob: number }>}
    */
-  reingestBlobWithBackendAsync(input, opts = {}) {
-    return this.#blob.reingestBlobWithBackendAsync(input, opts);
+  async reingestBlobWithBackend(input, opts = {}) {
+    const result = await this.#write("reingest_blob", input, "Ledger.reingestBlob", opts);
+    return result?.value;
   }
 
   /** @returns {void} */
   close() {
     this.#db.close();
+  }
+
+  /** Close the local reader and the resident Rust writer handle. */
+  async closeNative() {
+    this.close();
+    await invalidateStorageCacheNativeAsync(this.#dbPath);
   }
 
   // ---------------------------------------------------------------------------

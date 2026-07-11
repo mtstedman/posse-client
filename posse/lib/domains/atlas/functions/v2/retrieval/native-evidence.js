@@ -3,7 +3,7 @@
 // Thin JS adapter for Rust-owned deterministic evidence helpers. JS gathers
 // ATLAS view rows; Rust owns scanning and decoy/negative-evidence policy.
 
-import { runAtlasNativeMethod } from "../native/invoke.js";
+import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 
 const MAX_NATIVE_EVIDENCE_PATHS = 5000;
 
@@ -17,9 +17,9 @@ const MAX_NATIVE_EVIDENCE_PATHS = 5000;
  *   symbolsByPath?: Map<string, import("../contracts/api.js").ViewSymbol[]>,
  *   maxFiles?: number,
  * }} args
- * @returns {Record<string, unknown>}
+ * @returns {Promise<Record<string, unknown>>}
  */
-export function nativePathEvidence({
+export async function nativePathEvidence({
   view,
   repoRoot,
   paths = [],
@@ -28,13 +28,13 @@ export function nativePathEvidence({
   symbolsByPath,
   maxFiles = MAX_NATIVE_EVIDENCE_PATHS,
 }) {
-  return /** @type {Record<string, unknown>} */ (runAtlasNativeMethod("path-evidence", {
-    repoRoot: resolveRepoRoot(view, repoRoot),
+  return /** @type {Record<string, unknown>} */ (await runAtlasNativeMethodAsync("path-evidence", {
+    repoRoot: await resolveRepoRoot(view, repoRoot),
     selectedPaths: normalizePathList(paths),
     requestedPaths: normalizePathList(requested),
     terms: normalizeStringList(terms),
     symbolTerms: collectSymbolTerms(symbolsByPath),
-    indexedPaths: collectNativeEvidenceIndexedPaths(view, maxFiles),
+    indexedPaths: await collectNativeEvidenceIndexedPaths(view, maxFiles),
     maxFiles,
   }));
 }
@@ -49,9 +49,9 @@ export function nativePathEvidence({
  *   maxFiles?: number,
  *   prefixTruncated?: boolean,
  * }} args
- * @returns {Record<string, unknown>}
+ * @returns {Promise<Record<string, unknown>>}
  */
-export function nativeCodeDb({
+export async function nativeCodeDb({
   view,
   repoRoot,
   files = [],
@@ -60,12 +60,12 @@ export function nativeCodeDb({
   maxFiles = 64,
   prefixTruncated = false,
 }) {
-  return /** @type {Record<string, unknown>} */ (runAtlasNativeMethod("code-db", {
-    repoRoot: resolveRepoRoot(view, repoRoot),
+  return /** @type {Record<string, unknown>} */ (await runAtlasNativeMethodAsync("code-db", {
+    repoRoot: await resolveRepoRoot(view, repoRoot),
     files: normalizePathList(files),
     selectedPaths: normalizePathList(selectedPaths),
     requestedPaths: normalizePathList(requested),
-    indexedPaths: collectNativeEvidenceIndexedPaths(view, MAX_NATIVE_EVIDENCE_PATHS),
+    indexedPaths: await collectNativeEvidenceIndexedPaths(view, MAX_NATIVE_EVIDENCE_PATHS),
     maxFiles,
     prefixTruncated: Boolean(prefixTruncated),
   }));
@@ -75,10 +75,10 @@ export function nativeCodeDb({
  * @param {import("../contracts/api.js").View} view
  * @param {number} maxFiles
  */
-export function collectNativeEvidenceIndexedPaths(view, maxFiles = MAX_NATIVE_EVIDENCE_PATHS) {
+export async function collectNativeEvidenceIndexedPaths(view, maxFiles = MAX_NATIVE_EVIDENCE_PATHS) {
   const cap = clampInt(maxFiles, MAX_NATIVE_EVIDENCE_PATHS, 1, MAX_NATIVE_EVIDENCE_PATHS);
   return view?.query && typeof view.query.indexedPaths === "function"
-    ? normalizePathList(view.query.indexedPaths({ limit: cap }))
+    ? normalizePathList(await view.query.indexedPaths({ limit: cap }))
     : [];
 }
 
@@ -86,11 +86,11 @@ export function collectNativeEvidenceIndexedPaths(view, maxFiles = MAX_NATIVE_EV
  * @param {import("../contracts/api.js").View} view
  * @param {string | undefined} repoRoot
  */
-function resolveRepoRoot(view, repoRoot) {
+async function resolveRepoRoot(view, repoRoot) {
   const explicit = String(repoRoot || "").trim();
   if (explicit) return explicit;
   if (typeof view?.meta === "function") {
-    const meta = /** @type {any} */ (view.meta());
+    const meta = /** @type {any} */ (await view.meta());
     return String(meta?.repo_root || "").trim();
   }
   return "";

@@ -70,12 +70,14 @@ npm run rebuild:rust-binaries:all -- --rust-root <path-to-posse-encoder-rust>
 comes from the separate `posse-vector` workspace. An explicitly staged
 `lib/bin/vector/...` build remains the development override. When native vector
 mode is enabled and no staged build exists, run boot mints an
-`artifacts:read` pulse, downloads the exact catalog-pinned version for the
-current OS/architecture from Posse Remote, verifies its SHA-256, and caches it
+`artifacts:read` pulse, reads the current package version signed into that
+pulse, downloads that exact version for the current OS/architecture from Posse
+Remote, verifies its SHA-256, and caches it
 under `~/.posse/native/bundles/posse-vector/<version>/vector/...` before ATLAS
 opens embedding resources.
 
-The cache stores a SHA-256 sidecar and is re-verified on every process boot.
+An explicitly staged build is accepted only when its reported version matches
+the server-issued version. The cache stores a SHA-256 sidecar and is re-verified on every process boot.
 Downloads use a same-directory `.part` file, fsync, and atomic rename; a
 checksum mismatch never becomes runnable. The raw `POSSE_KEY` is used only by
 the existing heartbeat broker and is never sent to the artifact endpoint or

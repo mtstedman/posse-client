@@ -13,6 +13,7 @@ import { VIEW_SCHEMA_VERSION } from "../../functions/v2/contracts/index.js";
 import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
 import { openViewDbReadOnly, openViewDbReadWrite } from "../../functions/v2/view-database.js";
 import { runNativeViewRead } from "../../functions/v2/native/view-read.js";
+import { invalidateStorageCacheNativeAsync } from "../../functions/v2/native/storage.js";
 import { hydrateNativeBlastRadius, hydrateNativeSlice } from "../../functions/v2/view-slice.js";
 
 /** @typedef {import("../../functions/v2/contracts/schemas.js").ViewMeta} ViewMeta */
@@ -62,13 +63,33 @@ export class View {
     return new View(args);
   }
 
-  /** @returns {ViewMeta} */
-  meta() {
-    const response = runNativeViewRead(this.#dbPath, "meta");
-    if (response.result !== "meta" || !response.value || response.value.schema_version !== VIEW_SCHEMA_VERSION) {
+  /** @returns {Promise<ViewMeta>} */
+  async meta() {
+    const response = await runNativeViewRead(this.#dbPath, "meta");
+    if (response.result !== "meta" || !response.value) {
       throw new Error("ATLAS view-read returned an invalid meta result");
     }
-    return response.value;
+    return normalizeViewMeta(response.value);
+  }
+
+  /**
+   * Synchronous meta read against this handle's OWN open connection. For the
+   * write lane (ViewBuilder/ParseEngine) which already holds the database
+   * open in-process — no native hop, no process involvement. Read-lane
+   * consumers use {@link meta} (native-validated, daemon-routed).
+   *
+   * @returns {ViewMeta}
+   */
+  metaLocal() {
+    const rows = /** @type {Array<{ key: string, value: string | null }>} */ (
+      this.#db.prepare("SELECT key, value FROM meta").all()
+    );
+    /** @type {Record<string, string>} */
+    const values = {};
+    for (const row of rows) {
+      if (row.value != null) values[row.key] = row.value;
+    }
+    return normalizeViewMeta(values);
   }
 
   /** @returns {ViewQuery} */
@@ -164,6 +185,16 @@ export class View {
     this.#db.close();
   }
 
+  /**
+   * Close both the in-process connection and any validated Rust worker handle
+   * for this view. Writers and cleanup paths must await this before replacing
+   * or removing the SQLite file on Windows.
+   */
+  async closeNative() {
+    this.close();
+    await invalidateStorageCacheNativeAsync(this.#dbPath);
+  }
+
   // ---------------------------------------------------------------------------
   // Internals — used by ViewBuilder for write-side population.
   // ---------------------------------------------------------------------------
@@ -187,16 +218,21 @@ export class View {
   // Query API
   // ---------------------------------------------------------------------------
 
-  /** @returns {ViewQuery} */
+  /**
+   * Every query routes through the persistent worker (async); validation of
+   * arguments stays synchronous so contract errors throw eagerly.
+   *
+   * @returns {ViewQuery}
+   */
   #buildQueryApi() {
-    const read = (query, params = {}) => runNativeViewRead(this.#dbPath, query, params);
+    const read = async (query, params = {}) => (await runNativeViewRead(this.#dbPath, query, params)).value;
 
     /** @type {ViewQuery} */
     const api = {
-      stats: () => read("stats").value,
-      edgeStats: () => read("edge_stats").value,
-      symbolMetrics: () => read("symbol_metrics").value,
-      edgeTaxonomyInput: () => read("edge_taxonomy_input").value,
+      stats: () => read("stats"),
+      edgeStats: () => read("edge_stats"),
+      symbolMetrics: () => read("symbol_metrics"),
+      edgeTaxonomyInput: () => read("edge_taxonomy_input"),
 
       findSymbol: (name, opts = {}) => {
         if (opts.pathPrefix) {
@@ -212,56 +248,56 @@ export class View {
             ...(opts.fuzzy != null ? { fuzzy: opts.fuzzy } : {}),
             ...(opts.scope ? { scope: opts.scope } : {}),
           },
-        }).value;
+        });
       },
 
-      getSymbol: (global_id) => read("get_symbol", { global_id }).value,
+      getSymbol: (global_id) => read("get_symbol", { global_id }),
 
       symbolsInFile: (repo_rel_path) => {
         if (!isCanonicalRepoPath(repo_rel_path)) {
           throw new RangeError(`symbolsInFile: invalid path '${repo_rel_path}'`);
         }
-        return read("symbols_in_file", { repo_rel_path }).value;
+        return read("symbols_in_file", { repo_rel_path });
       },
 
-      callers: (global_id) => read("callers", { global_id }).value,
+      callers: (global_id) => read("callers", { global_id }),
 
-      callees: (global_id) => read("callees", { global_id }).value,
+      callees: (global_id) => read("callees", { global_id }),
 
-      unresolvedReferencesTo: (name) => read("unresolved_references_to", { name: String(name) }).value,
+      unresolvedReferencesTo: (name) => read("unresolved_references_to", { name: String(name) }),
 
-      slice: (seedGlobalIds, opts = {}) => {
-        const result = read("slice", sliceParams(seedGlobalIds, opts)).value;
+      slice: async (seedGlobalIds, opts = {}) => {
+        const result = await read("slice", sliceParams(seedGlobalIds, opts));
         return hydrateNativeSlice(result).symbols;
       },
 
-      sliceWithMetadata: (seedGlobalIds, opts = {}) => {
-        const result = read("slice", sliceParams(seedGlobalIds, opts)).value;
+      sliceWithMetadata: async (seedGlobalIds, opts = {}) => {
+        const result = await read("slice", sliceParams(seedGlobalIds, opts));
         return hydrateNativeSlice(result);
       },
 
-      blastRadius: (paths) => hydrateNativeBlastRadius(read("blast_radius", { paths }).value),
+      blastRadius: async (paths) => hydrateNativeBlastRadius(await read("blast_radius", { paths })),
 
       getByContentLocal: (content_hash, local_id) => read("get_by_content_local", {
         content_hash,
         local_id,
-      }).value,
+      }),
 
-      hasContentHash: (content_hash) => {
+      hasContentHash: async (content_hash) => {
         if (typeof content_hash !== "string" || content_hash.length === 0) return false;
-        return read("has_content_hash", { content_hash }).value === true;
+        return (await read("has_content_hash", { content_hash })) === true;
       },
 
       contentHashForPath: (repo_rel_path) => {
         if (!isCanonicalRepoPath(repo_rel_path)) {
           throw new RangeError(`contentHashForPath: invalid path '${repo_rel_path}'`);
         }
-        return read("content_hash_for_path", { repo_rel_path }).value;
+        return read("content_hash_for_path", { repo_rel_path });
       },
 
-      hasSnapshotContentHash: (content_hash) => {
+      hasSnapshotContentHash: async (content_hash) => {
         if (typeof content_hash !== "string" || content_hash.length === 0) return false;
-        return read("has_snapshot_content_hash", { content_hash }).value === true;
+        return (await read("has_snapshot_content_hash", { content_hash })) === true;
       },
 
       indexedPaths: (opts = {}) => {
@@ -269,7 +305,7 @@ export class View {
         return read("indexed_paths", {
           ...(opts.pathPrefix ? { path_prefix: opts.pathPrefix } : {}),
           ...(positiveInteger(opts.limit) != null ? { limit: positiveInteger(opts.limit) } : {}),
-        }).value;
+        });
       },
 
       allSymbols: (opts = {}) => {
@@ -281,7 +317,7 @@ export class View {
             ...(positiveInteger(opts.limit) != null ? { limit: positiveInteger(opts.limit) } : {}),
             ...(opts.pathPrefix ? { path_prefix: opts.pathPrefix } : {}),
           },
-        }).value;
+        });
       },
     };
     return Object.freeze(api);
@@ -309,6 +345,71 @@ function positiveInteger(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.floor(value)
     : null;
+}
+
+/** @param {string | undefined} value */
+function optionalIntegerMeta(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isInteger(n) ? n : null;
+}
+
+/**
+ * Normalize metadata from either SQLite text rows or the typed native payload.
+ * A view is disposable cache state, so malformed identity/watermark fields
+ * fail loudly and let the caller rebuild instead of serving a poisoned view.
+ *
+ * @param {Record<string, any>} values
+ * @returns {ViewMeta}
+ */
+export function normalizeViewMeta(values) {
+  const schemaVersion = values?.schema_version == null || values.schema_version === ""
+    ? Number.NaN
+    : Number(values.schema_version);
+  if (schemaVersion !== VIEW_SCHEMA_VERSION) {
+    throw new Error(
+      `ATLAS view schema version mismatch (db=${values?.schema_version ?? "missing"}, code=${VIEW_SCHEMA_VERSION})`,
+    );
+  }
+  if (typeof values.branch !== "string" || !values.branch.trim()) {
+    throw new Error("ATLAS view meta is missing branch");
+  }
+  const ledgerSeq = values.ledger_seq == null || values.ledger_seq === ""
+    ? Number.NaN
+    : Number(values.ledger_seq);
+  if (!Number.isInteger(ledgerSeq) || ledgerSeq < 0) {
+    throw new Error("ATLAS view meta has an invalid ledger_seq");
+  }
+
+  let warmedForFiles = values.warmed_for_files ?? null;
+  if (typeof warmedForFiles === "string") {
+    try {
+      warmedForFiles = JSON.parse(warmedForFiles);
+    } catch {
+      throw new Error("ATLAS view meta has invalid warmed_for_files JSON");
+    }
+  }
+  if (warmedForFiles != null && !Array.isArray(warmedForFiles)) {
+    throw new Error("ATLAS view meta has invalid warmed_for_files JSON");
+  }
+
+  return /** @type {ViewMeta} */ ({
+    schema_version: schemaVersion,
+    branch: values.branch,
+    parent_branch: values.parent_branch ?? null,
+    parent_seq: optionalIntegerMeta(values.parent_seq),
+    ledger_seq: ledgerSeq,
+    built_at: typeof values.built_at === "string" ? values.built_at : "",
+    warmed_for_files: warmedForFiles,
+    prefetched_symbols: optionalIntegerMeta(values.prefetched_symbols),
+    prefetched_edges: optionalIntegerMeta(values.prefetched_edges),
+    repo_root: values.repo_root ?? null,
+    layer_merge: values.layer_merge === true
+      || values.layer_merge === 1
+      || values.layer_merge === "on"
+      || values.layer_merge === "true"
+      || values.layer_merge === "1",
+  });
 }
 
 /**

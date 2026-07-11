@@ -520,7 +520,7 @@ function openIndexForBackend({ backend, encoder, repoRoot, requestedProvider, re
   if (backend === "auto" || backend === "rust") {
     try {
       if (!nativeVectorManager.shouldUse("vector")) {
-        throw new Error("catalog-pinned posse-vector unavailable");
+        throw new Error("server-issued posse-vector unavailable");
       }
       return enabled({ provider: encoder.model, backend: "rust", encoder, index: openRust() });
     } catch (err) {
@@ -531,7 +531,7 @@ function openIndexForBackend({ backend, encoder, repoRoot, requestedProvider, re
   }
 
   // During the transition `usearch` explicitly selects the JS child. `auto`
-  // reaches it only when the exact catalog-pinned Rust worker is unavailable.
+  // reaches it only when the server-issued Rust worker is unavailable.
   try {
     return enabled({ provider: encoder.model, backend: "usearch", encoder, index: openUsearch() });
   } catch (err) {

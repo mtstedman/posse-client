@@ -14,11 +14,8 @@ import { findOverlaySymbol, getOverlaySymbols } from "./buffer.js";
 import { getEffectivePolicy } from "./policy.js";
 import {
   codeHotPathNative,
-  codeHotPathNativeAsync,
   codeSkeletonNative,
-  codeSkeletonNativeAsync,
   codeWindowNative,
-  codeWindowNativeAsync,
 } from "../native/code-context.js";
 import { annotateCodeLadder, validateCodeLadder } from "./code-ladder.js";
 import { calledFromBreadcrumbs } from "./usages.js";
@@ -43,24 +40,11 @@ import { calledFromBreadcrumbs } from "./usages.js";
  *   repoRoot?: string,
  * }} args
  */
-export function codeGetSkeleton({ view, versionId, params, readFile, repoRoot }) {
-  return codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot }, codeSkeletonNative);
+export async function codeGetSkeleton({ view, versionId, params, readFile, repoRoot }) {
+  return await codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot }, codeSkeletonNative);
 }
 
-/**
- * @param {{
- *   view: View,
- *   versionId: string,
- *   params: CodeGetSkeletonParams,
- *   readFile: ReadFile,
- *   repoRoot?: string,
- * }} args
- */
-export async function codeGetSkeletonAsync({ view, versionId, params, readFile, repoRoot }) {
-  return await codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot }, codeSkeletonNativeAsync);
-}
-
-function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot }, buildSkeleton) {
+async function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot }, buildSkeleton) {
   const sessionId = /** @type {any} */ (params).sessionId;
   const ladder = validateCodeLadder({
     action: "code.skeleton",
@@ -74,7 +58,7 @@ function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot
   /** @type {ViewSymbol[]} */
   let symbols = [];
   if (params.symbolId) {
-    const resolved = resolveCodeSymbol({ view, symbolId: params.symbolId, repoRoot, sessionId });
+    const resolved = await resolveCodeSymbol({ view, symbolId: params.symbolId, repoRoot, sessionId });
     if (resolved.error === "invalid") {
       return errorEnvelope({
         action: "code.skeleton",
@@ -93,14 +77,14 @@ function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot
       });
     }
     targetPath = target.repo_rel_path;
-    const overlay = getOverlaySymbols({
+    const overlay = await getOverlaySymbols({
       repoRoot,
       sessionId,
       filePath: target.repo_rel_path,
     });
     symbols = overlay.length > 0
       ? overlay.map((item) => item.symbol)
-      : view.query.symbolsInFile(target.repo_rel_path);
+      : await view.query.symbolsInFile(target.repo_rel_path);
   } else if (params.file) {
     explicitFileRequest = true;
     if (!isCanonicalRepoPath(params.file)) {
@@ -112,14 +96,14 @@ function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot
       });
     }
     targetPath = params.file;
-    const overlay = getOverlaySymbols({
+    const overlay = await getOverlaySymbols({
       repoRoot,
       sessionId,
       filePath: params.file,
     });
     symbols = overlay.length > 0
       ? overlay.map((item) => item.symbol)
-      : view.query.symbolsInFile(params.file);
+      : await view.query.symbolsInFile(params.file);
   } else {
     return errorEnvelope({
       action: "code.skeleton",
@@ -132,7 +116,7 @@ function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot
   const filtered = params.exportedOnly
     ? symbols.filter((s) => s.visibility !== "private" && s.visibility !== "protected")
     : symbols;
-  const calledFrom = calledFromBreadcrumbs(view, filtered);
+  const calledFrom = await calledFromBreadcrumbs(view, filtered);
   const source = targetPath ? readFile(targetPath) : null;
   if (source == null && explicitFileRequest) {
     return errorEnvelope({
@@ -142,7 +126,7 @@ function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot
       message: `Could not read ${targetPath}`,
     });
   }
-  const nativeResult = buildSkeleton({
+  const result = await buildSkeleton({
     repo_rel_path: targetPath,
     source,
     symbols,
@@ -151,28 +135,26 @@ function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot
     maxLines: params.maxLines,
     maxTokens: params.maxTokens,
   });
-  return mapMaybePromise(nativeResult, (result) => {
-    const etag = String(result.etag || "");
-    if (params.ifNoneMatch && params.ifNoneMatch === etag) {
-      return notModifiedEnvelope({ action: "code.skeleton", versionId, etag });
-    }
-    /** @type {CodeSkeletonData} */
-    const data = {
-      repo_rel_path: targetPath,
-      content: String(result.content || ""),
-      startLine: Number(result.startLine || 1),
-      endLine: Number(result.endLine || 1),
-      truncated: result.truncated === true,
-      ...(calledFrom.length > 0 ? { calledFrom } : {}),
-      etag,
-    };
-    return annotateCodeLadder(okEnvelope({
-      action: "code.skeleton",
-      versionId,
-      data,
-      meta: { etag },
-    }), ladder, { action: "code.skeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
-  });
+  const etag = String(result.etag || "");
+  if (params.ifNoneMatch && params.ifNoneMatch === etag) {
+    return notModifiedEnvelope({ action: "code.skeleton", versionId, etag });
+  }
+  /** @type {CodeSkeletonData} */
+  const data = {
+    repo_rel_path: targetPath,
+    content: String(result.content || ""),
+    startLine: Number(result.startLine || 1),
+    endLine: Number(result.endLine || 1),
+    truncated: result.truncated === true,
+    ...(calledFrom.length > 0 ? { calledFrom } : {}),
+    etag,
+  };
+  return annotateCodeLadder(okEnvelope({
+    action: "code.skeleton",
+    versionId,
+    data,
+    meta: { etag },
+  }), ladder, { action: "code.skeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
 }
 
 /**
@@ -184,25 +166,12 @@ function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot
  *   repoRoot?: string,
  * }} args
  */
-export function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) {
-  return codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, codeHotPathNative);
+export async function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) {
+  return await codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, codeHotPathNative);
 }
 
-/**
- * @param {{
- *   view: View,
- *   versionId: string,
- *   params: CodeGetHotPathParams,
- *   readFile: ReadFile,
- *   repoRoot?: string,
- * }} args
- */
-export async function codeGetHotPathAsync({ view, versionId, params, readFile, repoRoot }) {
-  return await codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, codeHotPathNativeAsync);
-}
-
-function codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, buildHotPath) {
-  const resolved = resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.lens" });
+async function codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, buildHotPath) {
+  const resolved = await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.lens" });
   if (!resolved.ok) return errorEnvelope({ action: "code.lens", versionId, code: resolved.code, message: resolved.message });
   const { source, targetPath, symbolId } = resolved;
   const sessionId = /** @type {any} */ (params).sessionId;
@@ -219,13 +188,13 @@ function codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot 
   const identSet = new Set(idents.map((ident) => String(ident || "").toLowerCase()));
   const lensTargets = new Map();
   if (resolved.target?.global_id != null) lensTargets.set(resolved.target.global_id, resolved.target);
-  for (const symbol of view.query.symbolsInFile(targetPath)) {
+  for (const symbol of await view.query.symbolsInFile(targetPath)) {
     if (symbol?.global_id != null && identSet.has(String(symbol.name || "").toLowerCase())) {
       lensTargets.set(symbol.global_id, symbol);
     }
   }
-  const calledFrom = calledFromBreadcrumbs(view, [...lensTargets.values()], { maxSymbols: 4 });
-  const nativeHotPath = buildHotPath({
+  const calledFrom = await calledFromBreadcrumbs(view, [...lensTargets.values()], { maxSymbols: 4 });
+  const resolvedHotPath = await buildHotPath({
     repo_rel_path: targetPath,
     source,
     target: resolved.target,
@@ -233,17 +202,15 @@ function codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot 
     identifiersToFind: idents,
     contextLines,
   });
-  return mapMaybePromise(nativeHotPath, (resolvedHotPath) => {
-    return finishCodeHotPath({
-      versionId,
-      params,
-      targetPath,
-      symbolId,
-      sessionId,
-      ladder,
-      hotPath: resolvedHotPath,
-      calledFrom,
-    });
+  return finishCodeHotPath({
+    versionId,
+    params,
+    targetPath,
+    symbolId,
+    sessionId,
+    ladder,
+    hotPath: resolvedHotPath,
+    calledFrom,
   });
 }
 
@@ -286,27 +253,12 @@ function finishCodeHotPath({ versionId, params, targetPath, symbolId, sessionId,
  *   repoId?: string | null,
  * }} args
  */
-export function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
-  return codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, codeWindowNative);
+export async function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
+  return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, codeWindowNative);
 }
 
-/**
- * @param {{
- *   view: View,
- *   versionId: string,
- *   params: CodeNeedWindowParams,
- *   readFile: ReadFile,
- *   repoRoot?: string,
- *   ledger?: import("../contracts/api.js").Ledger,
- *   repoId?: string | null,
- * }} args
- */
-export async function codeNeedWindowAsync({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
-  return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, codeWindowNativeAsync);
-}
-
-function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, buildWindow) {
-  const resolved = resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.window" });
+async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, buildWindow) {
+  const resolved = await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.window" });
   if (!resolved.ok) return errorEnvelope({ action: "code.window", versionId, code: resolved.code, message: resolved.message });
   const sessionId = /** @type {any} */ (params).sessionId;
   const ladder = validateCodeLadder({
@@ -338,7 +290,7 @@ function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot,
     typeof params.maxTokens === "number" && params.maxTokens > 0 ? params.maxTokens : policy.maxWindowTokens,
     policy.maxWindowTokens,
   );
-  const nativeWindow = buildWindow({
+  const result = await buildWindow({
     repo_rel_path: targetPath,
     source,
     target,
@@ -349,32 +301,22 @@ function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot,
     maxWindowLines: policy.maxWindowLines,
     maxTokens,
   });
-  return mapMaybePromise(nativeWindow, (result) => {
-    /** @type {CodeWindowData} */
-    const data = {
-      ...(symbolId ? { symbolId } : {}),
-      repo_rel_path: targetPath,
-      content: String(result.content || ""),
-      startLine: Number(result.startLine || 1),
-      endLine: Number(result.endLine || 1),
-      estimatedTokens: Number(result.estimatedTokens || 0),
-      truncated: result.truncated === true,
-    };
-    return annotateCodeLadder(
-      okEnvelope({ action: "code.window", versionId, data }),
-      ladder,
-      { action: "code.window", sessionId, symbolId: resolved.symbolId || null, file: resolved.targetPath },
-    );
-  });
+  /** @type {CodeWindowData} */
+  const data = {
+    ...(symbolId ? { symbolId } : {}),
+    repo_rel_path: targetPath,
+    content: String(result.content || ""),
+    startLine: Number(result.startLine || 1),
+    endLine: Number(result.endLine || 1),
+    estimatedTokens: Number(result.estimatedTokens || 0),
+    truncated: result.truncated === true,
+  };
+  return annotateCodeLadder(
+    okEnvelope({ action: "code.window", versionId, data }),
+    ladder,
+    { action: "code.window", sessionId, symbolId: resolved.symbolId || null, file: resolved.targetPath },
+  );
 }
-
-function mapMaybePromise(value, map) {
-  if (value && typeof /** @type {any} */ (value).then === "function") {
-    return /** @type {any} */ (value).then(map);
-  }
-  return map(value);
-}
-
 
 function normalizeIdentifiers(value) {
   if (Array.isArray(value)) {
@@ -396,9 +338,9 @@ function normalizeIdentifiers(value) {
   return text.split(/[\s,;]+/u).map((item) => item.trim()).filter(Boolean);
 }
 
-function resolveCodeTarget({ view, params, readFile, repoRoot, action }) {
+async function resolveCodeTarget({ view, params, readFile, repoRoot, action }) {
   if (params.symbolId) {
-    const resolved = resolveCodeSymbol({ view, symbolId: params.symbolId, repoRoot, sessionId: /** @type {any} */ (params).sessionId });
+    const resolved = await resolveCodeSymbol({ view, symbolId: params.symbolId, repoRoot, sessionId: /** @type {any} */ (params).sessionId });
     if (resolved.error === "invalid") {
       return { ok: false, code: "invalid_symbol_id", message: `Malformed symbolId ${params.symbolId}` };
     }
@@ -423,14 +365,14 @@ function resolveCodeTarget({ view, params, readFile, repoRoot, action }) {
 
 /**
  * @param {{ view: View, symbolId: string, repoRoot?: string, sessionId?: string }} args
- * @returns {{ symbol: ViewSymbol | null, entry?: any, error?: "invalid" }}
+ * @returns {Promise<{ symbol: ViewSymbol | null, entry?: any, error?: "invalid" }>}
  */
-function resolveCodeSymbol({ view, symbolId, repoRoot, sessionId }) {
+async function resolveCodeSymbol({ view, symbolId, repoRoot, sessionId }) {
   const parsed = parseSymbolId(symbolId);
   if (!parsed) return { symbol: null, error: "invalid" };
-  const durable = view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
+  const durable = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
   if (durable) return { symbol: durable };
-  const overlay = findOverlaySymbol({ repoRoot, sessionId, symbolId });
+  const overlay = await findOverlaySymbol({ repoRoot, sessionId, symbolId });
   if (overlay) return { symbol: overlay.symbol, entry: overlay.entry };
   return { symbol: null };
 }

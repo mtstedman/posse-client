@@ -61,7 +61,7 @@ function inspectLedgerFormat(ledgerDbPath) {
 /**
  * @param {{ viewPath?: string, branch?: string, ledgerDbPath?: string | null, layerMerge?: boolean | null }} [args]
  */
-function inspect({ viewPath, branch, ledgerDbPath = null, layerMerge = null } = {}) {
+async function inspect({ viewPath, branch, ledgerDbPath = null, layerMerge = null } = {}) {
   const status = {
     exists: false,
     readable: false,
@@ -72,7 +72,7 @@ function inspect({ viewPath, branch, ledgerDbPath = null, layerMerge = null } = 
     ledgerFormat: inspectLedgerFormat(ledgerDbPath),
     error: null,
   };
-  const probe = openViewWithMeta(viewPath, AtlasView);
+  const probe = await openViewWithMeta(viewPath, AtlasView);
   try {
     status.exists = !!probe.exists;
     if (!probe.ok) {
@@ -109,7 +109,7 @@ function inspect({ viewPath, branch, ledgerDbPath = null, layerMerge = null } = 
 }
 
 try {
-  const result = inspect(workerData || {});
+  const result = await inspect(workerData || {});
   post({ type: "result", result });
 } catch (err) {
   post({

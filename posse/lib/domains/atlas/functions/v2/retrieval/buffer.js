@@ -138,6 +138,7 @@ const ACTION_BUFFER_CHECKPOINT = /** @type {any} */ ("buffer.checkpoint");
  * @property {boolean} parsed
  * @property {number} symbolCount
  * @property {ParseResult | null} parseResult
+ * @property {boolean} parseAttempted
  * @property {string} eventType
  * @property {string | null} language
  * @property {boolean} dirty
@@ -233,15 +234,15 @@ function rootStats(root) {
  *   updatedAt?: string,
  *   metadata?: Record<string, unknown>,
  * }} args
- * @returns {OverlayEntry}
+ * @returns {Promise<OverlayEntry>}
  */
-function makeEntry({ root, filePath, sessionId, content, version = null, updatedAt, metadata = {} }) {
+async function makeEntry({ root, filePath, sessionId, content, version = null, updatedAt, metadata = {} }) {
   let parsed = false;
   let symbolCount = 0;
   /** @type {ParseResult | null} */
   let parseResult = null;
   try {
-    const result = parseBuffer({ bytes: content, repo_rel_path: filePath });
+    const result = await parseBuffer({ bytes: content, repo_rel_path: filePath });
     parseResult = result;
     parsed = result.hasError !== true;
     symbolCount = result.symbols.length;
@@ -263,8 +264,33 @@ function makeEntry({ root, filePath, sessionId, content, version = null, updated
     parsed,
     symbolCount,
     parseResult,
+    parseAttempted: true,
     eventType,
     language,
+    dirty: typeof metadata.dirty === "boolean" ? metadata.dirty : eventType !== "save",
+    cursor: normalizeCursor(metadata.cursor),
+    selections: normalizeSelections(metadata.selections),
+  };
+}
+
+/** Rehydrate persisted overlay content; symbol consumers parse it lazily. */
+function makePersistedEntry({ root, filePath, sessionId, content, version = null, updatedAt, metadata = {} }) {
+  const eventType = normalizeEventType(metadata.eventType);
+  return {
+    repoRoot: root,
+    filePath,
+    sessionId,
+    content,
+    contentHash: sha256Hex(Buffer.from(content, "utf8")),
+    byteLength: Buffer.byteLength(content, "utf8"),
+    version: Number.isFinite(Number(version)) ? Number(version) : null,
+    updatedAt: updatedAt || normalizeTimestamp(metadata.timestamp) || new Date().toISOString(),
+    parsed: false,
+    symbolCount: 0,
+    parseResult: null,
+    parseAttempted: false,
+    eventType,
+    language: normalizeLanguage(metadata.language) || null,
     dirty: typeof metadata.dirty === "boolean" ? metadata.dirty : eventType !== "save",
     cursor: normalizeCursor(metadata.cursor),
     selections: normalizeSelections(metadata.selections),
@@ -331,7 +357,7 @@ function loadPersistedBuffers(root) {
       if (typeof raw.content !== "string") continue;
       if (Buffer.byteLength(raw.content, "utf8") > MAX_BUFFER_BYTES) continue;
       const sessionId = normalizeSession(raw.sessionId);
-      const entry = makeEntry({
+      const entry = makePersistedEntry({
         root: resolved,
         filePath: raw.filePath,
         sessionId,
@@ -359,7 +385,7 @@ function loadPersistedBuffers(root) {
  * @param {{ repoRoot?: string, versionId: string, params: BufferPushParams }} args
  * @returns {ReturnType<typeof okEnvelope<BufferPushData>> | ReturnType<typeof errorEnvelope>}
  */
-export function bufferPush({ repoRoot, versionId, params }) {
+export async function bufferPush({ repoRoot, versionId, params }) {
   if (!params.filePath || !isCanonicalRepoPath(params.filePath)) {
     return errorEnvelope({
       action: ACTION_BUFFER_PUSH,
@@ -465,7 +491,7 @@ export function bufferPush({ repoRoot, versionId, params }) {
       },
     });
   }
-  const entry = makeEntry({
+  const entry = await makeEntry({
     root,
     filePath: params.filePath,
     sessionId,
@@ -705,8 +731,8 @@ export function makeOverlayReadFile({ repoRoot, sessionId, baseReadFile }) {
  * @param {{ repoRoot?: string, sessionId?: string, filePath?: string }} args
  * @returns {{ entry: OverlayEntry, symbol: ViewSymbol }[]}
  */
-export function getOverlaySymbols({ repoRoot, sessionId, filePath } = {}) {
-  const entries = getOverlayEntries({ repoRoot, sessionId, filePath });
+export async function getOverlaySymbols({ repoRoot, sessionId, filePath } = {}) {
+  const entries = await getOverlayEntries({ repoRoot, sessionId, filePath });
   /** @type {{ entry: OverlayEntry, symbol: ViewSymbol }[]} */
   const out = [];
   let globalId = -1;
@@ -740,9 +766,9 @@ export function getOverlaySymbols({ repoRoot, sessionId, filePath } = {}) {
 
 /**
  * @param {{ repoRoot?: string, sessionId?: string, filePath?: string }} args
- * @returns {OverlayEntry[]}
+ * @returns {Promise<OverlayEntry[]>}
  */
-export function getOverlayEntries({ repoRoot, sessionId, filePath } = {}) {
+export async function getOverlayEntries({ repoRoot, sessionId, filePath } = {}) {
   if (!repoRoot) return [];
   const root = path.resolve(repoRoot);
   loadPersistedBuffers(root);
@@ -761,17 +787,33 @@ export function getOverlayEntries({ repoRoot, sessionId, filePath } = {}) {
       byFile.set(entry.filePath, entry);
     }
   }
-  return [...byFile.values()].filter((entry) => !!entry.parseResult);
+  const entries = [...byFile.values()];
+  for (const entry of entries) {
+    if (entry.parseAttempted) continue;
+    entry.parseAttempted = true;
+    try {
+      const result = await parseBuffer({ bytes: entry.content, repo_rel_path: entry.filePath });
+      entry.parseResult = result;
+      entry.parsed = result.hasError !== true;
+      entry.symbolCount = result.symbols.length;
+      if (!entry.language) entry.language = result.lang || null;
+    } catch {
+      entry.parseResult = null;
+      entry.parsed = false;
+      entry.symbolCount = 0;
+    }
+  }
+  return entries.filter((entry) => !!entry.parseResult);
 }
 
 /**
  * @param {{ repoRoot?: string, sessionId?: string, symbolId?: string }} args
  * @returns {{ entry: OverlayEntry, symbol: ViewSymbol } | null}
  */
-export function findOverlaySymbol({ repoRoot, sessionId, symbolId }) {
+export async function findOverlaySymbol({ repoRoot, sessionId, symbolId }) {
   const parsed = parseSymbolId(symbolId);
   if (!parsed) return null;
-  return getOverlaySymbols({ repoRoot, sessionId }).find(({ symbol }) =>
+  return (await getOverlaySymbols({ repoRoot, sessionId })).find(({ symbol }) =>
     symbol.content_hash === parsed.content_hash && symbol.local_id === parsed.local_id
   ) || null;
 }
@@ -780,9 +822,9 @@ export function findOverlaySymbol({ repoRoot, sessionId, symbolId }) {
  * @param {{ repoRoot?: string, sessionId?: string, ref?: { name?: string, file?: string, kind?: string } }} args
  * @returns {{ entry: OverlayEntry, symbol: ViewSymbol } | null}
  */
-export function findOverlaySymbolByRef({ repoRoot, sessionId, ref }) {
+export async function findOverlaySymbolByRef({ repoRoot, sessionId, ref }) {
   if (!ref?.name) return null;
-  const candidates = getOverlaySymbols({ repoRoot, sessionId, filePath: ref.file });
+  const candidates = await getOverlaySymbols({ repoRoot, sessionId, filePath: ref.file });
   return candidates.find(({ symbol }) =>
     symbol.name === ref.name && (!ref.kind || symbol.kind === ref.kind)
   ) || null;

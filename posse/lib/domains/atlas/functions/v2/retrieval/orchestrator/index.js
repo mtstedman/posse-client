@@ -5,23 +5,23 @@
 // feedback boost and task-query re-ranking, and returns the fused list
 // alongside a per-backend degradation report.
 //
-// Sync-vs-async: the vector backend is async because the encoder is.
-// A caller-provided async planner also makes the orchestrator async, which
-// lets the conductor use the warmed native worker without changing direct
-// sync callers.
+// Single async path: every backend, the planner, RRF fusion, tokenization,
+// and task-query ranking route through the warmed native worker, so the
+// orchestrator is always async. A caller-provided planner may be sync or
+// async — it is always awaited.
 //
 // The orchestrator NEVER throws on backend failure — it downgrades.
 // A degraded ranking is always preferred to an error envelope.
 
-import { rrfFuse, rrfFuseAsync, RRF_K } from "./rrf.js";
-import { runFtsBackend, runFtsBackendAsync } from "./backends/fts.js";
+import { rrfFuse, RRF_K } from "./rrf.js";
+import { runFtsBackend } from "./backends/fts.js";
 import { runVectorBackend } from "./backends/vector.js";
 import { runGraphBackend } from "./backends/graph.js";
 import { runEntityFtsBackends } from "./backends/entity-fts.js";
 import { buildFeedbackIndex, applyFeedbackBoost } from "./feedback-boost.js";
-import { applyTaskQueryRanking, applyTaskQueryRankingAsync } from "./task-query-ranking.js";
+import { applyTaskQueryRanking } from "./task-query-ranking.js";
 import { summarizeBackends } from "./fallback.js";
-import { fallbackQueryPlan, planQuery, planQueryAsync } from "./query-planner.js";
+import { fallbackQueryPlan, planQuery } from "./query-planner.js";
 
 /** @typedef {import("../../contracts/api.js").View} View */
 /** @typedef {import("../../contracts/api.js").Ledger} Ledger */
@@ -79,8 +79,8 @@ const DEFAULT_LIMIT = 50;
 const MIN_SEPARATION_POOL = 15;
 
 /**
- * Top-level hybrid search. Returns either a result (sync path) or a
- * Promise for one (async path).
+ * Top-level hybrid search. Always async: it awaits the planner, backends,
+ * fusion, and ranking, all of which route through the warmed native worker.
  *
  * @param {{
  *   view: View,
@@ -92,9 +92,9 @@ const MIN_SEPARATION_POOL = 15;
  *   options?: HybridSearchOptions,
  *   signal?: AbortSignal,
  * }} args
- * @returns {HybridSearchResult | Promise<HybridSearchResult>}
+ * @returns {Promise<HybridSearchResult>}
  */
-export function hybridSearch(args) {
+export async function hybridSearch(args) {
   // The QUERY names what the caller wants found; taskText is context. The
   // plan (which generates every FTS probe) must derive from the query — with
   // taskText as plan input, a symbol.search for "RetrievalCache" alongside
@@ -103,102 +103,51 @@ export function hybridSearch(args) {
   // shapes ranking via the feedback task-text filter, and callers whose
   // query IS the task text (slice.build entry discovery) are unaffected.
   const planInput = args.query || args.options?.taskText || "";
-  const wantSemantic =
-    !!args.options?.semantic &&
-    !!args.embeddingIndex &&
-    !!args.encoder &&
-    args.encoder.dim === args.embeddingIndex.dim;
-  // Native planner failure degrades to the JS fallback plan instead of
-  // failing the search — conductor paths already do this via their injected
-  // planner; the bare sync/async paths here (direct dispatch, tests) must
-  // honor the same downgrade-not-throw contract.
-  const planned = args.options?.plan
-    || (args.options?.planner
-      ? args.options.planner(planInput)
-      : (wantSemantic
-        ? planQueryAsync(planInput).catch(() => fallbackQueryPlan(planInput))
-        : (() => { try { return planQuery(planInput); } catch { return fallbackQueryPlan(planInput); } })()));
-  if (planned && typeof /** @type {any} */ (planned).then === "function") {
-    return /** @type {Promise<import("./query-planner-types.js").QueryPlan>} */ (planned)
-      .then((plan) => hybridSearchWithPlan(args, plan, true));
+  let plan;
+  if (args.options?.plan) {
+    plan = args.options.plan;
+  } else if (args.options?.planner) {
+    // Injected planner (conductor read lane) owns its own downgrade contract;
+    // it may be sync or async, so always await it.
+    plan = await args.options.planner(planInput);
+  } else {
+    // Native planner failure degrades to the JS fallback plan instead of
+    // failing the search — honor the downgrade-not-throw contract.
+    try {
+      plan = await planQuery(planInput);
+    } catch {
+      plan = fallbackQueryPlan(planInput);
+    }
   }
-  return hybridSearchWithPlan(args, /** @type {import("./query-planner-types.js").QueryPlan} */ (planned), false);
+  return hybridSearchWithPlan(args, plan);
 }
 
 /**
- * @param {Parameters<typeof hybridSearch>[0]} args
- * @param {import("./query-planner-types.js").QueryPlan} plan
- * @param {boolean} preferAsync
- * @returns {HybridSearchResult | Promise<HybridSearchResult>}
- */
-function hybridSearchWithPlan(args, plan, preferAsync = false) {
-  const wantSemantic =
-    !!args.options?.semantic &&
-    !!args.embeddingIndex &&
-    !!args.encoder &&
-    args.encoder.dim === args.embeddingIndex.dim;
-  if (preferAsync || wantSemantic) {
-    return hybridSearchAsync(args, plan);
-  }
-  return hybridSearchSync(args, plan);
-}
-
-/**
- * Synchronous path. No vector backend.
- *
- * @param {Parameters<typeof hybridSearch>[0]} args
- * @param {import("./query-planner-types.js").QueryPlan} plan
- * @returns {HybridSearchResult}
- */
-function hybridSearchSync(args, plan) {
-  const { view, query, ledger, repoId, options } = args;
-  const limit = options?.limit && options.limit > 0 ? options.limit : DEFAULT_LIMIT;
-  const fts = runFtsBackend({ view, query, limit, plan, scope: options?.searchScope });
-  const graph = runGraphBackend({ view, limit, plan });
-  /** @type {Record<string, { ok: boolean, total: number, reason?: string }>} */
-  const backendStatus = { fts: { ok: fts.ok, total: fts.total, reason: fts.reason } };
-  // Vector reason is "unavailable" — we did not run it.
-  backendStatus.vector = { ok: false, total: 0, reason: "unavailable" };
-  backendStatus.graph = { ok: graph.ok, total: graph.total, reason: graph.reason };
-
-  const { fused, separation } = fuseAndAdjust({
-    fts,
-    vector: null,
-    graph,
-    ledger,
-    taskType: options?.taskType,
-    taskText: options?.taskText,
-    feedbackSinceTs: options?.feedbackSinceTs,
-    feedbackHalfLifeDays: options?.feedbackHalfLifeDays,
-    k: options?.rrfK,
-  });
-  return assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options, separation });
-}
-
-/**
- * Async path. Runs FTS and vector backends in parallel.
+ * Run the backends against the resolved plan, fuse, and assemble. Each
+ * backend handles its own errors and returns a degraded result rather than
+ * throwing.
  *
  * @param {Parameters<typeof hybridSearch>[0]} args
  * @param {import("./query-planner-types.js").QueryPlan} plan
  * @returns {Promise<HybridSearchResult>}
  */
-async function hybridSearchAsync(args, plan) {
+async function hybridSearchWithPlan(args, plan) {
   const { view, query, ledger, repoId, embeddingIndex, encoder, options, signal } = args;
   const limit = options?.limit && options.limit > 0 ? options.limit : DEFAULT_LIMIT;
 
-  // Run both backends in parallel. Each backend handles its own errors
-  // and returns a degraded result rather than throwing.
   const wantSemantic =
     !!options?.semantic &&
     !!embeddingIndex &&
     !!encoder &&
     encoder.dim === embeddingIndex.dim;
+  // Bounded fan-out (3 backends) onto the serial native worker; each backend
+  // keeps its own native calls sequential internally.
   const [fts, vector, graph] = await Promise.all([
-    runFtsBackendAsync({ view, query, limit, plan, scope: options?.searchScope }),
+    runFtsBackend({ view, query, limit, plan, scope: options?.searchScope }),
     wantSemantic
       ? runVectorBackend({ view, query, limit, embeddingIndex, encoder, signal })
       : Promise.resolve({ ok: false, entries: [], raw: [], total: 0, reason: "unavailable" }),
-    Promise.resolve(runGraphBackend({ view, limit, plan })),
+    runGraphBackend({ view, limit, plan }),
   ]);
 
   /** @type {Record<string, { ok: boolean, total: number, reason?: string }>} */
@@ -208,7 +157,7 @@ async function hybridSearchAsync(args, plan) {
     graph: { ok: graph.ok, total: graph.total, reason: graph.reason },
   };
 
-  const { fused, separation } = await fuseAndAdjustAsync({
+  const { fused, separation } = await fuseAndAdjust({
     fts,
     vector,
     graph,
@@ -261,16 +210,27 @@ function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query
 }
 
 /**
- * Common async path used when planning or vector retrieval already made the
- * search asynchronous; keeps native helper calls on the warmed daemon.
+ * Fuse the available backends with RRF, then apply feedback + task-query
+ * passes. All native helper calls (fusion, tokenization) route through the
+ * warmed daemon.
  *
- * @param {Parameters<typeof fuseAndAdjust>[0]} args
+ * @param {{
+ *   fts: Awaited<ReturnType<typeof runFtsBackend>>,
+ *   vector: Awaited<ReturnType<typeof runVectorBackend>> | null,
+ *   graph?: Awaited<ReturnType<typeof runGraphBackend>> | null,
+ *   ledger?: Ledger,
+ *   taskType?: string,
+ *   taskText?: string,
+ *   feedbackSinceTs?: string,
+ *   feedbackHalfLifeDays?: number,
+ *   k?: number,
+ * }} args
  * @returns {Promise<{fused:FusedSymbolEntry[], separation:RetrievalSeparation}>}
  */
-async function fuseAndAdjustAsync({
+async function fuseAndAdjust({
   fts,
   vector,
-  graph,
+  graph = null,
   ledger,
   taskType,
   taskText,
@@ -279,21 +239,21 @@ async function fuseAndAdjustAsync({
   k,
 }) {
   const lists = buildFusionLists(fts, vector, graph);
-  const fused = await rrfFuseAsync(lists, { k: typeof k === "number" ? k : RRF_K });
+  const fused = await rrfFuse(lists, { k: typeof k === "number" ? k : RRF_K });
   const separation = assessRetrievalSeparation(fused, lists);
   applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });
-  await applyTaskQueryRankingAsync(fused, taskText);
+  await applyTaskQueryRanking(fused, taskText);
   return { fused, separation };
 }
 
 /**
- * @param {ReturnType<typeof runFtsBackend>} fts
+ * @param {Awaited<ReturnType<typeof runFtsBackend>>} fts
  * @param {Awaited<ReturnType<typeof runVectorBackend>> | null} vector
- * @param {ReturnType<typeof runGraphBackend> | null} graph
- * @returns {Record<string, ReturnType<typeof runFtsBackend>["entries"]>}
+ * @param {Awaited<ReturnType<typeof runGraphBackend>> | null} graph
+ * @returns {Record<string, Awaited<ReturnType<typeof runFtsBackend>>["entries"]>}
  */
 function buildFusionLists(fts, vector, graph) {
-  /** @type {Record<string, ReturnType<typeof runFtsBackend>["entries"]>} */
+  /** @type {Record<string, Awaited<ReturnType<typeof runFtsBackend>>["entries"]>} */
   const lists = {};
   if (fts.ok && fts.entries.length > 0) lists.fts = fts.entries;
   if (vector && vector.ok && vector.entries.length > 0) lists.vector = vector.entries;
@@ -317,48 +277,12 @@ function applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSi
 }
 
 /**
- * Common path used by both sync and async variants: fuse the available
- * backends, then apply feedback + task-query passes.
- *
- * @param {{
- *   fts: ReturnType<typeof runFtsBackend>,
- *   vector: Awaited<ReturnType<typeof runVectorBackend>> | null,
- *   graph?: ReturnType<typeof runGraphBackend> | null,
- *   ledger?: Ledger,
- *   taskType?: string,
- *   taskText?: string,
- *   feedbackSinceTs?: string,
- *   feedbackHalfLifeDays?: number,
- *   k?: number,
- * }} args
- * @returns {{fused:FusedSymbolEntry[], separation:RetrievalSeparation}}
- */
-function fuseAndAdjust({
-  fts,
-  vector,
-  graph = null,
-  ledger,
-  taskType,
-  taskText,
-  feedbackSinceTs,
-  feedbackHalfLifeDays,
-  k,
-}) {
-  const lists = buildFusionLists(fts, vector, graph);
-  const fused = rrfFuse(lists, { k: typeof k === "number" ? k : RRF_K });
-  const separation = assessRetrievalSeparation(fused, lists);
-  applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });
-  applyTaskQueryRanking(fused, taskText);
-  return { fused, separation };
-}
-
-/**
  * Summarize how separated the raw fused pool was before feedback and task
  * boosts. This deliberately describes the evidence pool; it does not change
  * ranking.
  *
  * @param {FusedSymbolEntry[]} fused
- * @param {Record<string, ReturnType<typeof runFtsBackend>["entries"]>} lists
+ * @param {Record<string, Awaited<ReturnType<typeof runFtsBackend>>["entries"]>} lists
  * @returns {RetrievalSeparation}
  */
 export function assessRetrievalSeparation(fused, lists) {

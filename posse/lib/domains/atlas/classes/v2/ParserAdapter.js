@@ -34,7 +34,7 @@ export class ParserAdapter {
 
   /**
    * @param {{ bytes: Buffer | string, repo_rel_path: string, lang?: string }} args
-   * @returns {ParseResult}
+   * @returns {Promise<ParseResult>}
    */
   parseBuffer(args) {
     return parseBuffer(args);

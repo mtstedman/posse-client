@@ -49,7 +49,9 @@ export function shouldRunAtlasNativeParity(opts = {}) {
  * @returns {{ ok: true, node: unknown, native: unknown } | { ok: false, node: unknown, native: unknown, message: string }}
  */
 export function diffAtlasNativeParity(args) {
-  const nativeResult = runAtlasNativeMethod(args.method, args.payload, args);
+  // Parity oracles are the sanctioned one-shot sync callers: they compare a
+  // Node result against an isolated native process on purpose.
+  const nativeResult = runAtlasNativeMethod(args.method, args.payload, { ...args, allowOneShotSync: true });
   const node = normalizeAtlasResultForNativeParity(
     typeof args.normalizeNodeResult === "function"
       ? args.normalizeNodeResult(args.nodeResult)
@@ -125,7 +127,7 @@ export function assertAtlasNativeParity(method, payload, nodeResult, opts = {}) 
  */
 export function assertAtlasNativeOperationParity(operation, nodeResult, opts = {}) {
   if (!shouldRunAtlasNativeParity(opts)) return nodeResult;
-  const nativeResult = runAtlasNativeOperation(operation, opts);
+  const nativeResult = runAtlasNativeOperation(operation, { ...opts, allowOneShotSync: true });
   const node = normalizeAtlasResultForNativeParity(
     typeof opts.normalizeNodeResult === "function"
       ? opts.normalizeNodeResult(nodeResult)

@@ -125,7 +125,7 @@ async function main() {
       stage: "initializing",
       text: `opening ATLAS ledger for ${defaultBranch}`,
     });
-    ledger = Ledger.open({ dbPath: ledgerDbPath });
+    ledger = await Ledger.open({ dbPath: ledgerDbPath });
 
     progress({
       kind: "line",

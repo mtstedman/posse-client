@@ -7,7 +7,7 @@
 import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { readTreeBuildResult } from "../tree-derived.js";
 import { readLatestTreeCompressionSnapshot } from "../tree-compression.js";
-import { runAtlasNativeMethod } from "../native/invoke.js";
+import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 import { isCanonicalRepoPath } from "../paths.js";
 
 const TREE_RUN_KIND = "tree-derived";
@@ -24,7 +24,7 @@ function treeFocusRequested(params = {}) {
  *   params?: import("../contracts/tool-params.js").TreeOverviewParams,
  * }} args
  */
-export function treeOverview({ view, versionId, params = {} }) {
+export async function treeOverview({ view, versionId, params = {} }) {
   return runTreeTraversal({ view, versionId, params, action: "tree.overview", method: "tree-overview" });
 }
 
@@ -35,7 +35,7 @@ export function treeOverview({ view, versionId, params = {} }) {
  *   params?: import("../contracts/tool-params.js").TreeOverviewParams,
  * }} args
  */
-export function treeWalk({ view, versionId, params = {} }) {
+export async function treeWalk({ view, versionId, params = {} }) {
   if (!treeFocusRequested(params)) {
     return errorEnvelope({
       action: "tree.branch",
@@ -56,7 +56,7 @@ export function treeWalk({ view, versionId, params = {} }) {
  *   method: "tree-overview" | "tree-walk",
  * }} args
  */
-function runTreeTraversal({ view, versionId, params = {}, action, method }) {
+async function runTreeTraversal({ view, versionId, params = {}, action, method }) {
   const db = unsafeDb(view);
   if (!db) return viewUnavailable(action, versionId);
   const missing = missingTreeTables(db);
@@ -80,7 +80,7 @@ function runTreeTraversal({ view, versionId, params = {}, action, method }) {
       },
     });
   }
-  const result = /** @type {Record<string, unknown>} */ (runAtlasNativeMethod(method, {
+  const result = /** @type {Record<string, unknown>} */ (await runAtlasNativeMethodAsync(method, {
     tree: readTreeBuildResult(db, { for: "traversal" }),
     path: params.path,
     nodeId: params.nodeId,
@@ -106,7 +106,7 @@ function runTreeTraversal({ view, versionId, params = {}, action, method }) {
  *   params?: import("../contracts/tool-params.js").TreeScopeParams,
  * }} args
  */
-export function treeScope({ view, versionId, params = {} }) {
+export async function treeScope({ view, versionId, params = {} }) {
   return runTreeScope({ view, versionId, params, action: "tree.scope" });
 }
 
@@ -124,7 +124,7 @@ function treeGrowSeedsRequested(params = {}) {
  *   params?: import("../contracts/tool-params.js").TreeScopeParams,
  * }} args
  */
-export function treeGrow({ view, versionId, params = {} }) {
+export async function treeGrow({ view, versionId, params = {} }) {
   if (!treeGrowSeedsRequested(params)) {
     return errorEnvelope({
       action: "tree.expand",
@@ -146,7 +146,7 @@ export function treeGrow({ view, versionId, params = {} }) {
  *   action: "tree.scope" | "tree.expand",
  * }} args
  */
-function runTreeScope({ view, versionId, params = {}, action }) {
+async function runTreeScope({ view, versionId, params = {}, action }) {
   const db = unsafeDb(view);
   if (!db) return viewUnavailable(action, versionId);
   const missing = missingTreeTables(db);
@@ -173,9 +173,9 @@ function runTreeScope({ view, versionId, params = {}, action }) {
       },
     });
   }
-  const widened = action === "tree.scope" ? collectScopeWidenedPaths({ view, params }) : [];
+  const widened = action === "tree.scope" ? await collectScopeWidenedPaths({ view, params }) : [];
   const widenedPaths = widened.map((w) => w.path);
-  const result = /** @type {Record<string, unknown>} */ (runAtlasNativeMethod("tree-scope", {
+  const result = /** @type {Record<string, unknown>} */ (await runAtlasNativeMethodAsync("tree-scope", {
     tree: readTreeBuildResult(db, { for: "scope" }),
     taskText: params.taskText,
     paths: params.paths,
@@ -232,7 +232,7 @@ function runTreeScope({ view, versionId, params = {}, action }) {
  * @param {{ view: import("../contracts/api.js").View, params?: import("../contracts/tool-params.js").TreeScopeParams, maxPaths?: number, maxSymbolsPerFile?: number }} args
  * @returns {WidenedCaller[]}
  */
-export function collectScopeWidenedPaths({ view, params = {}, maxPaths = 8, maxSymbolsPerFile = 12 }) {
+export async function collectScopeWidenedPaths({ view, params = {}, maxPaths = 8, maxSymbolsPerFile = 12 }) {
   if (!view?.query || typeof view.query.symbolsInFile !== "function" || typeof view.query.callers !== "function") {
     return [];
   }
@@ -244,7 +244,7 @@ export function collectScopeWidenedPaths({ view, params = {}, maxPaths = 8, maxS
     maxPaths,
     maxSymbolsPerFile,
   };
-  const seedSelection = /** @type {Record<string, any>} */ (runAtlasNativeMethod("tree-scope-widening", {
+  const seedSelection = /** @type {Record<string, any>} */ (await runAtlasNativeMethodAsync("tree-scope-widening", {
     ...baseRequest,
     files: [],
     callerEdges: [],
@@ -252,14 +252,19 @@ export function collectScopeWidenedPaths({ view, params = {}, maxPaths = 8, maxS
   }));
   const seedPaths = Array.isArray(seedSelection.seedPaths) ? seedSelection.seedPaths : [];
   if (seedPaths.length === 0) return [];
-  const files = seedPaths.map((path) => ({ path, symbols: view.query.symbolsInFile(path) }));
+  // Sequential reads: the native worker is serial, so fan the query calls out
+  // one at a time rather than issuing an unbounded Promise.all across seeds.
+  const files = [];
+  for (const path of seedPaths) {
+    files.push({ path, symbols: await view.query.symbolsInFile(path) });
+  }
   const callerEdges = [];
   const callerSymbols = new Map();
   for (const file of files) {
     for (const symbol of file.symbols) {
       if (symbol?.global_id == null) continue;
-      for (const edge of view.query.callers(symbol.global_id)) {
-        const from = typeof view.query.getSymbol === "function" ? view.query.getSymbol(edge.from_global_id) : null;
+      for (const edge of await view.query.callers(symbol.global_id)) {
+        const from = typeof view.query.getSymbol === "function" ? await view.query.getSymbol(edge.from_global_id) : null;
         if (!from) continue;
         const input = wideningCallInput(symbol.global_id, edge, from);
         if (!input) continue;
@@ -270,14 +275,14 @@ export function collectScopeWidenedPaths({ view, params = {}, maxPaths = 8, maxS
   }
   const fanInEdges = [];
   for (const caller of callerSymbols.values()) {
-    for (const edge of view.query.callers(caller.global_id)) {
-      const from = typeof view.query.getSymbol === "function" ? view.query.getSymbol(edge.from_global_id) : null;
+    for (const edge of await view.query.callers(caller.global_id)) {
+      const from = typeof view.query.getSymbol === "function" ? await view.query.getSymbol(edge.from_global_id) : null;
       if (!from) continue;
       const input = wideningCallInput(caller.global_id, edge, from);
       if (input) fanInEdges.push(input);
     }
   }
-  const result = /** @type {Record<string, any>} */ (runAtlasNativeMethod("tree-scope-widening", {
+  const result = /** @type {Record<string, any>} */ (await runAtlasNativeMethodAsync("tree-scope-widening", {
     ...baseRequest,
     files,
     callerEdges,

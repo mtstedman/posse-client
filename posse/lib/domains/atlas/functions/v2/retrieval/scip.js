@@ -16,6 +16,7 @@ import { mainViewPath } from "../runtime-paths.js";
 import { openViewWithMeta, removeSqliteFile } from "../view-health.js";
 import { cleanBranchName } from "./version.js";
 import { runSqliteWrite } from "../../../../../shared/concurrency/functions/sqlite-gate.js";
+import { invalidateStorageCacheNativeAsync } from "../native/storage.js";
 
 /**
  * @param {{
@@ -98,7 +99,7 @@ export async function scipIngest({ versionId, params, ledger, repoRoot }) {
   });
   try {
     if (typeof /** @type {any} */ (ledger).ensureRootBranch === "function" && !ledger.getBranch(branch)) {
-      /** @type {any} */ (ledger).ensureRootBranch(branch);
+      await /** @type {any} */ (ledger).ensureRootBranch(branch);
     }
     const events = [];
     const result = await ingestScipFile({
@@ -118,9 +119,10 @@ export async function scipIngest({ versionId, params, ledger, repoRoot }) {
     const rebuiltView = result.skipped !== true && headSeq != null;
     if (rebuiltView) {
       viewPath = mainViewPath(root);
-      await runSqliteWrite(viewPath, () => {
+      await runSqliteWrite(viewPath, async () => {
+        await invalidateStorageCacheNativeAsync([viewPath]);
         removeSqliteFile(viewPath);
-        return new ViewBuilder().buildFrom({
+        return await new ViewBuilder().buildFrom({
           ledger: /** @type {any} */ (ledger),
           branch,
           atSeq: headSeq,

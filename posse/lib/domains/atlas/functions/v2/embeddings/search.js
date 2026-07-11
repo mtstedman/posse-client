@@ -52,7 +52,7 @@ export async function semanticSearch({ query, view, index, encoder, k, minScore,
   /** @type {SemanticHit[]} */
   const out = [];
   for (const h of hits) {
-    const sym = view.query.getByContentLocal(h.content_hash, h.local_id);
+    const sym = await view.query.getByContentLocal(h.content_hash, h.local_id);
     if (!sym) continue; // Embedding referenced a blob that's not in this view.
     out.push({ symbol: sym, score: h.score, distance: h.distance });
   }

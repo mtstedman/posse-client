@@ -8,14 +8,16 @@
 // tiebreaker, not a primary signal. The split/stop-word logic is owned by
 // the native posse-atlas binary — the only implementation path.
 
-import { runAtlasNativeOperation, runAtlasNativeOperationAsync } from "../../native/invoke.js";
+import { runAtlasNativeOperationAsync } from "../../native/invoke.js";
 
 // Memo for tokenize results. Task-query ranking tokenizes 1-2 strings PER
-// fused symbol per query, and each sync native call is a full process spawn
-// since the sync bridge was removed — without the memo one ranking pass costs
-// dozens of spawns. Inputs are short symbol names that repeat heavily within
-// and across queries in a session, so a small bounded map absorbs almost all
-// of it. Tokenization is pure (same input → same tokens), so caching is safe.
+// fused symbol per query, and each native call is a daemon round-trip —
+// without the memo one ranking pass costs dozens of hops. Inputs are short
+// symbol names that repeat heavily within and across queries in a session, so
+// a small bounded map absorbs almost all of it. Tokenization is pure (same
+// input → same tokens), so caching is safe. The in-flight map additionally
+// dedups concurrent identical requests so a single ranking pass over N fused
+// symbols never queues the same key twice.
 const TOKENIZE_MEMO_MAX = 4096;
 /** @type {Map<string, string[]>} */
 const TOKENIZE_MEMO = new Map();
@@ -27,24 +29,31 @@ const TOKENIZE_INFLIGHT = new Map();
  * "user", "by", "id"), underscores, dots, dashes, and whitespace.
  *
  * @param {string} input
- * @returns {string[]}
+ * @returns {Promise<string[]>}
  */
-export function tokenizeForRanking(input) {
+export async function tokenizeForRanking(input) {
   const key = String(input ?? "");
   const cached = TOKENIZE_MEMO.get(key);
   if (cached) return cached.slice();
-  let tokens;
-  try {
-    tokens = /** @type {string[]} */ (runAtlasNativeOperation({ op: "tokenize", input: key }));
-  } catch {
-    // Native binary unavailable: degrade to the JS splitter rather than fail
-    // the whole search — ranking is a tiebreaker, and the orchestrator's
-    // contract is downgrade-not-throw. Deliberately NOT memoized so native
-    // quality returns as soon as the binary does.
-    return tokenizeJsFallback(key);
+  let inFlight = TOKENIZE_INFLIGHT.get(key);
+  if (!inFlight) {
+    inFlight = runAtlasNativeOperationAsync({ op: "tokenize", input: key })
+      .then((tokens) => {
+        memoizeTokens(key, tokens);
+        return Array.isArray(tokens) ? tokens.slice() : [];
+      })
+      // Native binary unavailable: degrade to the JS splitter rather than fail
+      // the whole search — ranking is a tiebreaker, and the orchestrator's
+      // contract is downgrade-not-throw. Deliberately NOT memoized so native
+      // quality returns as soon as the daemon is back.
+      .catch(() => tokenizeJsFallback(key))
+      .finally(() => {
+        if (TOKENIZE_INFLIGHT.get(key) === inFlight) TOKENIZE_INFLIGHT.delete(key);
+      });
+    TOKENIZE_INFLIGHT.set(key, inFlight);
   }
-  memoizeTokens(key, tokens);
-  return Array.isArray(tokens) ? tokens.slice() : [];
+  const tokens = await inFlight;
+  return tokens.slice();
 }
 
 /**
@@ -62,35 +71,6 @@ function tokenizeJsFallback(input) {
     .split(/[^a-zA-Z0-9]+/)
     .map((token) => token.toLowerCase())
     .filter((token) => token.length >= 2);
-}
-
-/**
- * Async daemon-backed tokenizer for retrieval paths that are already async.
- *
- * @param {string} input
- * @returns {Promise<string[]>}
- */
-export async function tokenizeForRankingAsync(input) {
-  const key = String(input ?? "");
-  const cached = TOKENIZE_MEMO.get(key);
-  if (cached) return cached.slice();
-  let inFlight = TOKENIZE_INFLIGHT.get(key);
-  if (!inFlight) {
-    inFlight = runAtlasNativeOperationAsync({ op: "tokenize", input: key })
-      .then((tokens) => {
-        memoizeTokens(key, tokens);
-        return Array.isArray(tokens) ? tokens.slice() : [];
-      })
-      // Same degrade-not-throw fallback as the sync path; not memoized so
-      // native quality returns with the daemon.
-      .catch(() => tokenizeJsFallback(key))
-      .finally(() => {
-        if (TOKENIZE_INFLIGHT.get(key) === inFlight) TOKENIZE_INFLIGHT.delete(key);
-      });
-    TOKENIZE_INFLIGHT.set(key, inFlight);
-  }
-  const tokens = await inFlight;
-  return tokens.slice();
 }
 
 function memoizeTokens(key, tokens) {

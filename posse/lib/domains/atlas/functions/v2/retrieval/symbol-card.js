@@ -27,7 +27,7 @@ import { recordCodeLadderStep } from "./code-ladder.js";
  *   repoId?: string | null,
  * }} args
  */
-export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoId }) {
+export async function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoId }) {
   if (hasBatchCardParams(params)) {
     return symbolGetCards({ view, versionId, params, repoRoot, ledger, repoId, action: "symbol.card" });
   }
@@ -48,25 +48,25 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
         message: `Malformed symbolId ${params.symbolId}`,
       });
     }
-    target = view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
+    target = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
     if (!target) {
-      overlayTarget = findOverlaySymbol({ repoRoot, sessionId, symbolId: params.symbolId });
+      overlayTarget = await findOverlaySymbol({ repoRoot, sessionId, symbolId: params.symbolId });
     }
   } else if (params.symbolRef) {
     const ref = params.symbolRef;
     const opts = /** @type {any} */ ({ fuzzy: false });
     if (ref.kind) opts.kinds = [ref.kind];
     if (ref.file) opts.pathPrefix = ref.file;
-    const matches = view.query.findSymbol(ref.name, opts);
+    const matches = await view.query.findSymbol(ref.name, opts);
     if (matches.length === 0) {
       const fuzzyOpts = { ...opts, fuzzy: true, limit: 25 };
-      const fuzzy = view.query.findSymbol(ref.name, fuzzyOpts);
+      const fuzzy = await view.query.findSymbol(ref.name, fuzzyOpts);
       target = fuzzy.find((s) => s.name === ref.name) || null;
     } else {
       target = matches[0];
     }
     if (!target) {
-      overlayTarget = findOverlaySymbolByRef({ repoRoot, sessionId, ref: params.symbolRef });
+      overlayTarget = await findOverlaySymbolByRef({ repoRoot, sessionId, ref: params.symbolRef });
     }
   } else {
     return errorEnvelope({
@@ -88,7 +88,7 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
 
   if (overlayTarget) {
     const minCallConfidence = params.minCallConfidence ?? getEffectivePolicy(ledger, effectiveRepo(repoId)).defaultMinCallConfidence;
-    const card = buildOverlayCard({
+    const card = await buildOverlayCard({
       repoRoot,
       sessionId,
       target: overlayTarget,
@@ -148,7 +148,7 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
     });
   }
 
-  const card = buildSymbolCard({
+  const card = await buildSymbolCard({
     symbol: /** @type {ViewSymbol} */ (target),
     view,
     detail: "compact",
@@ -180,7 +180,7 @@ export function symbolGetCard({ view, versionId, params, repoRoot, ledger, repoI
  *   action?: "symbol.card" | "symbol.cards",
  * }} args
  */
-export function symbolGetCards({ view, versionId, params, repoRoot, ledger, repoId, action = "symbol.cards" }) {
+export async function symbolGetCards({ view, versionId, params, repoRoot, ledger, repoId, action = "symbol.cards" }) {
   const requests = collectCardRequests(params);
   if (requests.length === 0) {
     return errorEnvelope({
@@ -207,7 +207,7 @@ export function symbolGetCards({ view, versionId, params, repoRoot, ledger, repo
       ...(request.symbolId ? { symbolId: request.symbolId } : {}),
       ...(request.symbolRef ? { symbolRef: request.symbolRef } : {}),
     };
-    const result = symbolGetCard({ view, versionId, params: /** @type {SymbolGetCardParams} */ (childParams), repoRoot, ledger, repoId });
+    const result = await symbolGetCard({ view, versionId, params: /** @type {SymbolGetCardParams} */ (childParams), repoRoot, ledger, repoId });
     if (result.ok) {
       cards.push(result.data);
     } else {
@@ -374,7 +374,7 @@ function effectiveRepo(repoId) {
  * }} args
  * @returns {SymbolCard}
  */
-function buildOverlayCard({ repoRoot, sessionId, target, minCallConfidence, includeResolutionMetadata }) {
+async function buildOverlayCard({ repoRoot, sessionId, target, minCallConfidence, includeResolutionMetadata }) {
   const { entry, symbol } = target;
   const card = bareSymbolCard({ symbol, detail: "compact" });
   card.location = locationOf(symbol, { source: entry.content });
@@ -386,7 +386,7 @@ function buildOverlayCard({ repoRoot, sessionId, target, minCallConfidence, incl
     version: entry.version,
   };
   const edges = entry.parseResult?.edges || [];
-  const overlaySymbols = getOverlaySymbols({ repoRoot, sessionId });
+  const overlaySymbols = await getOverlaySymbols({ repoRoot, sessionId });
   const bySymbolId = new Map(overlaySymbols.map((item) => [`${item.symbol.content_hash}:${item.symbol.local_id}`, item.symbol]));
   card.callees = edges
     .filter((edge) => edge.from_content_hash === symbol.content_hash && edge.from_local_id === symbol.local_id)

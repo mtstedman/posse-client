@@ -41,6 +41,10 @@ data/
 # One-off local ATLAS probes against sibling repos.
 scripts/atlas-streaming-*.mjs
 
+# Local posse-vector deployment driver and test mirror.
+scripts/deploy-vector-native.mjs
+/lib/bin/vector/
+
 # ATLAS A/B harness run outputs (the harness scripts themselves are tracked).
 /scripts/atlas-ab/runs/
 /scripts/atlas-ab/.latest-*

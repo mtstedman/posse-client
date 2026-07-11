@@ -96,9 +96,9 @@ function assertEdgesInvariant(edges, validLocalIds) {
  *   repo_rel_path: string,
  *   lang?: string,
  * }} args
- * @returns {ParseResult}
+ * @returns {Promise<ParseResult>}
  */
-export function parseBuffer(args) {
+export async function parseBuffer(args) {
   const { bytes, repo_rel_path } = args;
   if (!isCanonicalRepoPath(repo_rel_path)) {
     throw new RangeError(

@@ -40,15 +40,15 @@ async function defaultBranchFor(repoRoot, branch) {
 
 /**
  * @param {AtlasSystemBase} opts
- * @returns {Promise<{ repoRoot: string, branch: string, ledger: Ledger, engine: ParseEngine, closeLedger: () => void }>}
+ * @returns {Promise<{ repoRoot: string, branch: string, ledger: Ledger, engine: ParseEngine, closeLedger: () => Promise<void> }>}
  */
 async function openEngine(opts) {
   const repoRoot = resolveRepoRoot(opts.repoRoot);
   const branch = await defaultBranchFor(repoRoot, opts.branch);
   const ownsLedger = !opts.ledger;
-  const ledger = /** @type {Ledger} */ (opts.ledger || Ledger.open({ dbPath: ledgerDbPath(repoRoot) }));
+  const ledger = /** @type {Ledger} */ (opts.ledger || await Ledger.open({ dbPath: ledgerDbPath(repoRoot) }));
   if (typeof ledger.ensureRootBranch === "function" && !ledger.getBranch(branch)) {
-    ledger.ensureRootBranch(branch);
+    await ledger.ensureRootBranch(branch);
   }
   const engine = new ParseEngine({
     ledger,
@@ -64,8 +64,8 @@ async function openEngine(opts) {
     branch,
     ledger,
     engine,
-    closeLedger: () => {
-      if (ownsLedger) ledger.close();
+    closeLedger: async () => {
+      if (ownsLedger) await ledger.closeNative();
     },
   };
 }
@@ -109,7 +109,7 @@ export async function refresh(opts) {
       warmResult,
     };
   } finally {
-    closeLedger();
+    await closeLedger();
   }
 }
 
@@ -155,7 +155,7 @@ export async function parse(opts) {
       warmResult,
     };
   } finally {
-    closeLedger();
+    await closeLedger();
   }
 }
 
@@ -185,7 +185,7 @@ export async function stageScip(opts) {
       warmResult,
     };
   } finally {
-    closeLedger();
+    await closeLedger();
   }
 }
 
@@ -219,7 +219,7 @@ export async function ingestScip(opts) {
       result,
     };
   } finally {
-    closeLedger();
+    await closeLedger();
   }
 }
 
@@ -247,7 +247,7 @@ export async function merge(opts) {
       warmResult,
     };
   } finally {
-    closeLedger();
+    await closeLedger();
   }
 }
 

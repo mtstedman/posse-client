@@ -15,6 +15,7 @@ import { getSetting } from "../../queue/functions/index.js";
 import { snapshotPublishingPushConfigs, snapshotPublishingPushConfigsAsync } from "./push-guard.js";
 import { gitExec, gitExecAsync, gitExecBuffer, gitExecBufferAsync, isGitCommandFailure } from "./utils.js";
 import { SECRET_PATTERNS } from "../../../shared/telemetry/functions/logging/secret-patterns.js";
+import { resolvePathWithin } from "../../runtime/functions/fs-safety.js";
 
 const VERIFY_COMMAND_TIMEOUT_MS = 120_000;
 const VERIFY_COMMAND_HELPER_GRACE_MS = 15_000;
@@ -428,20 +429,34 @@ function normalizedWorkingTreeScanPaths(paths = []) {
     .filter((file) => !BINARY_EXTENSIONS.has(path.extname(file).toLowerCase()));
 }
 
+function workingTreeScanTarget(cwd, file) {
+  const root = path.resolve(cwd);
+  const lexical = resolvePathWithin(root, file, { allowEqual: false, followSymlinks: false });
+  if (!lexical) return null;
+  // Resolve the parent first: a final symlink is safe to scan as its link text,
+  // but a symlinked parent must not redirect the read outside the repository.
+  if (!resolvePathWithin(root, path.dirname(lexical))) return null;
+  return lexical;
+}
+
+function findingsForWorkingTreeContent(file, stat, content) {
+  if (!stat.isSymbolicLink() && !stat.isFile()) return [];
+  return secretsFindingsForContent(file, content);
+}
+
 function secretsScanWorkingTreePaths(cwd, paths = []) {
   const findings = [];
   for (const file of normalizedWorkingTreeScanPaths(paths)) {
-    const fullPath = path.resolve(cwd, file);
-    const relative = path.relative(path.resolve(cwd), fullPath);
-    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+    const fullPath = workingTreeScanTarget(cwd, file);
+    if (!fullPath) continue;
     let content;
     try {
       const stat = fs.lstatSync(fullPath);
       if (stat.isSymbolicLink()) content = fs.readlinkSync(fullPath, "utf-8");
       else if (stat.isFile()) content = fs.readFileSync(fullPath, "utf-8");
       else continue;
+      findings.push(...findingsForWorkingTreeContent(file, stat, content));
     } catch { continue; }
-    findings.push(...secretsFindingsForContent(file, content));
   }
   return secretsBlockResult(findings);
 }
@@ -449,17 +464,16 @@ function secretsScanWorkingTreePaths(cwd, paths = []) {
 async function secretsScanWorkingTreePathsAsync(cwd, paths = []) {
   const findings = [];
   for (const file of normalizedWorkingTreeScanPaths(paths)) {
-    const fullPath = path.resolve(cwd, file);
-    const relative = path.relative(path.resolve(cwd), fullPath);
-    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+    const fullPath = workingTreeScanTarget(cwd, file);
+    if (!fullPath) continue;
     let content;
     try {
       const stat = await fs.promises.lstat(fullPath);
       if (stat.isSymbolicLink()) content = await fs.promises.readlink(fullPath, "utf-8");
       else if (stat.isFile()) content = await fs.promises.readFile(fullPath, "utf-8");
       else continue;
+      findings.push(...findingsForWorkingTreeContent(file, stat, content));
     } catch { continue; }
-    findings.push(...secretsFindingsForContent(file, content));
   }
   return secretsBlockResult(findings);
 }

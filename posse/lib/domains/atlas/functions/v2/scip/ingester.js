@@ -20,7 +20,6 @@ import { normalizeRepoPath, repoRelativeFromAbsolute } from "../paths.js";
 import { languageForPath } from "../parse/language-buckets.js";
 import { inspectSampleForMinified, isLikelyMinifiedPath, MINIFIED_SAMPLE_BYTES } from "../parser/index-filters.js";
 import { scipBasenameSourceLanguages } from "../scip-progress.js";
-import { runSqliteWrite } from "../../../../../shared/concurrency/functions/sqlite-gate.js";
 import { getCurrentGitHeadAsync } from "../../../../integrations/functions/atlas/shared.js";
 
 /** @typedef {import("../../../classes/v2/Ledger.js").Ledger} Ledger */
@@ -383,7 +382,7 @@ export async function ingestScipFile({
   }
 
   const writeStartedAtMs = Date.now();
-  const writeResult = await runScipIngestWrite(ledger, () => {
+  const writeResult = await runScipIngestWrite(ledger, async () => {
     if (pathSnapshotError) {
       // A failed branch-snapshot read fails every document identically, so
       // fail the run once up front instead of burning the whole document
@@ -477,7 +476,7 @@ export async function ingestScipFile({
         if (blobAlreadyPresent && effectiveForce) {
           // Reparse path: drop the prior (tree-sitter) ingest so the SCIP
           // rows take over for this blob.
-          ledger.reingestBlobWithBackend({ content_hash: document.content_hash });
+          await ledger.reingestBlobWithBackend({ content_hash: document.content_hash });
         }
 
         const parseResult = bindNativeParseResult(document, externalIdMap);
@@ -485,7 +484,7 @@ export async function ingestScipFile({
         if (layerOnly && typeof ledger.ingestBlobLayer === "function") {
           // Layer cutover: SCIP always writes its own layer (incl. new blobs),
           // never the flat tables. The view merge combines it with tree-sitter.
-          ledger.ingestBlobLayer({
+          await ledger.ingestBlobLayer({
             content_hash: document.content_hash,
             lang: parseResult.lang,
             byte_size: byteSize,
@@ -503,7 +502,7 @@ export async function ingestScipFile({
           else documentsIngested++;
         } else if (blobAlreadyPresent && !effectiveForce) {
           if (typeof ledger.ingestBlobLayer === "function") {
-            ledger.ingestBlobLayer({
+            await ledger.ingestBlobLayer({
               content_hash: document.content_hash,
               lang: parseResult.lang,
               byte_size: byteSize,
@@ -519,7 +518,7 @@ export async function ingestScipFile({
             });
           }
           if (typeof ledger.mergeBlobParseRows === "function") {
-            ledger.mergeBlobParseRows({
+            await ledger.mergeBlobParseRows({
               content_hash: document.content_hash,
               lang: parseResult.lang,
               byte_size: byteSize,
@@ -529,7 +528,7 @@ export async function ingestScipFile({
           }
           blobsReused++;
         } else {
-          ledger.ingestBlob({
+          await ledger.ingestBlob({
             content_hash: document.content_hash,
             lang: parseResult.lang,
             byte_size: byteSize,
@@ -539,7 +538,7 @@ export async function ingestScipFile({
           documentsIngested++;
         }
         coveredHashes.push(document.content_hash);
-        ledgerEntriesAppended += appendDocumentDelta({
+        ledgerEntriesAppended += await appendDocumentDelta({
           ledger,
           branch: appendBranch,
           snapshot: pathSnapshot,
@@ -629,30 +628,26 @@ export async function ingestScipFile({
 }
 
 /**
- * Run the synchronous SCIP ledger write section under the shared SQLite gate
- * and one DB transaction when a real Ledger instance is available.
+ * Run the SCIP ledger write section.
+ *
+ * Atomicity boundary: the ledger's native writes (append / ingestBlob /
+ * ingestBlobLayer / mergeBlobParseRows / reingestBlobWithBackend) commit
+ * per-operation inside the persistent worker's own connection — they were
+ * never transactional with this Node connection, so no db.transaction wraps
+ * the document loop. In-process bookkeeping (recordScipIndex,
+ * upsertExternalSymbol, updateScipIndexBytesHash) commits individually too;
+ * an interrupted ingest re-runs idempotently on the next warm.
  *
  * @template T
- * @param {Ledger} ledger
- * @param {() => T} fn
+ * @param {Ledger} _ledger
+ * @param {() => Promise<T> | T} fn
  * @returns {Promise<T>}
  */
-async function runScipIngestWrite(ledger, fn) {
-  const anyLedger = /** @type {any} */ (ledger);
-  const dbPath = typeof anyLedger?._dbPath === "function"
-    ? anyLedger._dbPath()
-    : "";
-  const db = typeof anyLedger?._unsafeDb === "function"
-    ? anyLedger._unsafeDb()
-    : null;
-  const run = () => (db && typeof db.transaction === "function"
-    ? db.transaction(fn)()
-    : fn());
-  if (!dbPath) return run();
-  return runSqliteWrite(dbPath, run, {
-    label: "SCIP.ingest",
-    waitMs: 120_000,
-  });
+async function runScipIngestWrite(_ledger, fn) {
+  // Each native Ledger mutation already acquires this database's SQLite gate.
+  // Holding the same non-reentrant gate around the whole ingest would deadlock
+  // as soon as the first native mutation attempted to enter it.
+  return await fn();
 }
 
 /**
@@ -663,13 +658,13 @@ async function runScipIngestWrite(ledger, fn) {
  *   repo_rel_path: string,
  *   content_hash: string,
  * }} args
- * @returns {number}
+ * @returns {Promise<number>}
  */
-function appendDocumentDelta({ ledger, branch, snapshot, repo_rel_path, content_hash }) {
+async function appendDocumentDelta({ ledger, branch, snapshot, repo_rel_path, content_hash }) {
   if (!branch || !snapshot) return 0;
   const before = snapshot.get(repo_rel_path) || null;
   if (before === content_hash) return 0;
-  ledger.append({
+  await ledger.append({
     branch,
     op: before ? "modify" : "add",
     repo_rel_path,

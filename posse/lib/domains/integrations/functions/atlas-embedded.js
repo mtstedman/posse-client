@@ -30,7 +30,7 @@ import {
   retirePooledEmbeddingResources,
   semanticDispatchEnabled,
 } from "../../atlas/functions/v2/embeddings/resources.js";
-import { fallbackQueryPlan, planQueryAsync } from "../../atlas/functions/v2/retrieval/orchestrator/query-planner.js";
+import { fallbackQueryPlan, planQuery } from "../../atlas/functions/v2/retrieval/orchestrator/query-planner.js";
 import { extractAtlasResponseTelemetry, extractAtlasResultArtifacts } from "../../atlas/functions/v2/signal-extraction.js";
 import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
@@ -562,8 +562,8 @@ function releaseEmbeddedResourceLease(lease) {
   try { lease.close?.(lease.value); } catch { /* best effort */ }
 }
 
-function openEmbeddedLedger(dbPath, { readOnly = false } = {}) {
-  if (!readOnly) return Ledger.open({ dbPath });
+async function openEmbeddedLedger(dbPath, { readOnly = false } = {}) {
+  if (!readOnly) return await Ledger.open({ dbPath });
   // Never escalate a failed read-only open to a readwrite open: Ledger.open
   // runs migrations and can trigger the destructive format reset, so a READ
   // must not be able to rebuild (or delete) the ledger out from under a
@@ -576,10 +576,10 @@ function openEmbeddedLedger(dbPath, { readOnly = false } = {}) {
  * @param {string} dbPath
  * @param {{ readOnly?: boolean, cache?: boolean }} opts
  */
-function acquireEmbeddedLedger(dbPath, { readOnly = false, cache = false } = {}) {
+async function acquireEmbeddedLedger(dbPath, { readOnly = false, cache = false } = {}) {
   const normalized = String(dbPath || "").replace(/\\/g, "/").toLowerCase();
   if (!cache || !readOnly || !normalized) {
-    const ledger = openEmbeddedLedger(dbPath, { readOnly });
+    const ledger = await openEmbeddedLedger(dbPath, { readOnly });
     return {
       value: ledger,
       ledger,
@@ -590,7 +590,9 @@ function acquireEmbeddedLedger(dbPath, { readOnly = false, cache = false } = {})
   const lease = acquireCachedAtlasResource(
     ATLAS_EMBEDDED_LEDGER_CACHE,
     `ledger:${normalized}`,
-    () => openEmbeddedLedger(dbPath, { readOnly: true }),
+    // Cached entries are read-only, and openReadOnly is synchronous — the
+    // cache must never hold a Promise (acquire/close treat value as a handle).
+    () => Ledger.openReadOnly({ dbPath }),
     (handle) => closeEmbeddedAtlasHandle(handle, "ledger", { action: "ledger-cache", origin: "embedded" }),
   );
   return { ...lease, ledger: lease.value };
@@ -640,7 +642,7 @@ function embeddedEmbeddingResourceKey(repoRoot, config = {}) {
 async function embeddedPlanQuery(input) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      return await planQueryAsync(input);
+      return await planQuery(input);
     } catch {
       // A planner hiccup should not fail the in-process fallback path.
     }
@@ -963,14 +965,14 @@ function embeddedLedgerSupportsViewMeta(ledger, viewMeta) {
   try { return !!ledger.getBranch(branch); } catch { return false; }
 }
 
-function openEmbeddedLedgerForView({ repoRoot, viewMeta, cwd = null, config = null, readOnly = false }) {
+async function openEmbeddedLedgerForView({ repoRoot, viewMeta, cwd = null, config = null, readOnly = false }) {
   const paths = candidateEmbeddedV2LedgerPaths({ repoRoot, viewMeta, cwd, config });
   let fallback = null;
   for (const dbPath of paths) {
     let candidateLease = null;
     let candidate = null;
     try {
-      candidateLease = acquireEmbeddedLedger(dbPath, { readOnly, cache: readOnly });
+      candidateLease = await acquireEmbeddedLedger(dbPath, { readOnly, cache: readOnly });
       candidate = candidateLease.ledger;
       if (embeddedLedgerSupportsViewMeta(candidate, viewMeta)) {
         if (fallback) releaseEmbeddedResourceLease(fallback);
@@ -1106,7 +1108,7 @@ async function resolveEmbeddedAtlasV2ReadContext({
     const expectedLayerMerge = config?.viewLayerMerge === true;
     const configuredLedgerPath = existingFilePath(config?.atlasV2LedgerDbPath || config?.ledgerDbPath || null);
     if (configuredLedgerPath) {
-      ledgerLease = acquireEmbeddedLedger(configuredLedgerPath, { readOnly: true, cache: true });
+      ledgerLease = await acquireEmbeddedLedger(configuredLedgerPath, { readOnly: true, cache: true });
       ledger = ledgerLease.ledger;
     }
     const waitMs = atlasV2ViewWaitMs(config);
@@ -1134,7 +1136,7 @@ async function resolveEmbeddedAtlasV2ReadContext({
     let ledgerPath = configuredLedgerPath
       || resolveEmbeddedV2LedgerPath({ repoRoot, viewMeta: meta, cwd, config });
     if (!ledger && ledgerPath) {
-      const opened = openEmbeddedLedgerForView({
+      const opened = await openEmbeddedLedgerForView({
         repoRoot,
         viewMeta: meta,
         cwd,
@@ -1305,7 +1307,7 @@ async function executeEmbeddedAtlasV2Tool({
     const configuredLedgerPath = existingFilePath(config?.atlasV2LedgerDbPath || config?.ledgerDbPath || null);
     if (configuredLedgerPath) {
       const readOnlyLedger = !isBlockingAction(action, payload);
-      ledgerLease = acquireEmbeddedLedger(configuredLedgerPath, { readOnly: readOnlyLedger, cache: readOnlyLedger });
+      ledgerLease = await acquireEmbeddedLedger(configuredLedgerPath, { readOnly: readOnlyLedger, cache: readOnlyLedger });
       ledger = ledgerLease.ledger;
     }
     const waitMs = atlasV2ViewWaitMs(config);
@@ -1341,7 +1343,7 @@ async function executeEmbeddedAtlasV2Tool({
     const ledgerPath = ledger ? null : resolveEmbeddedV2LedgerPath({ repoRoot, viewMeta: meta, cwd, config });
     if (!ledger && !ledgerPath && !optionalView) throw new Error("ATLAS v2 ledger is not available");
     if (!ledger && ledgerPath) {
-      const opened = openEmbeddedLedgerForView({
+      const opened = await openEmbeddedLedgerForView({
         repoRoot,
         viewMeta: meta,
         cwd,
@@ -1450,7 +1452,7 @@ async function executeEmbeddedAtlasV2Tool({
           embeddingResources = embeddingResourcesLease.resources;
         } catch { embeddingResources = null; }
       }
-      envelope = await Promise.resolve(dispatchAtlasV2(dispatchCall, {
+      envelope = await dispatchAtlasV2(dispatchCall, {
         view,
         ledger,
         versionId,
@@ -1462,9 +1464,8 @@ async function executeEmbeddedAtlasV2Tool({
         taskText: typeof payload?.taskText === "string" ? payload.taskText : (action === "symbol.search" ? payload?.query : undefined),
         taskType: typeof payload?.taskType === "string" ? payload.taskType : undefined,
         planner: embeddedPlanQuery,
-        asyncNativeRedaction: true,
         hashRefContext: hashRefContext || undefined,
-      }));
+      });
     }
     if (envelope?.ok === false || envelope?.error) throw atlasV2EnvelopeError(envelope);
     const data = envelope?.data ?? {};

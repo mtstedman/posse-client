@@ -8,7 +8,7 @@
 // scores on incompatible scales (FTS rank vs cosine similarity). RRF
 // only uses rank position, which is uniformly comparable.
 
-import { runAtlasNativeOperation, runAtlasNativeOperationAsync } from "../../native/invoke.js";
+import { runAtlasNativeOperationAsync } from "../../native/invoke.js";
 
 /**
  * The k constant. 60 matches atlas-mcp and the original Cormack et al.
@@ -70,9 +70,9 @@ export function toRanked(items, idOf) {
  * @template P
  * @param {Record<string, RankedEntry<P>[]>} listsByBackend
  * @param {{ k?: number }} [opts]
- * @returns {FusedEntry<P>[]}
+ * @returns {Promise<FusedEntry<P>[]>}
  */
-export function rrfFuse(listsByBackend, opts) {
+export async function rrfFuse(listsByBackend, opts) {
   // Fusion is owned by the native posse-atlas binary — primary path. The JS
   // fallback below exists ONLY so a missing/broken binary degrades ranking
   // instead of throwing away healthy FTS results: the orchestrator's contract
@@ -81,27 +81,6 @@ export function rrfFuse(listsByBackend, opts) {
   const k = typeof opts?.k === "number" && opts.k > 0 ? opts.k : RRF_K;
   const backends = Object.keys(listsByBackend || {});
   if (backends.length <= 1) return rrfFuseJs(listsByBackend, k); // trivial fusion — skip the native hop
-  try {
-    return /** @type {any} */ (runAtlasNativeOperation({ op: "rrf_fuse", lists_by_backend: listsByBackend, k }));
-  } catch {
-    return rrfFuseJs(listsByBackend, k);
-  }
-}
-
-/**
- * Async daemon-backed variant for retrieval paths that are already async
- * (conductor reads, semantic search). Keeps those paths off per-call native
- * process spawns.
- *
- * @template P
- * @param {Record<string, RankedEntry<P>[]>} listsByBackend
- * @param {{ k?: number }} [opts]
- * @returns {Promise<FusedEntry<P>[]>}
- */
-export async function rrfFuseAsync(listsByBackend, opts) {
-  const k = typeof opts?.k === "number" && opts.k > 0 ? opts.k : RRF_K;
-  const backends = Object.keys(listsByBackend || {});
-  if (backends.length <= 1) return rrfFuseJs(listsByBackend, k);
   try {
     return /** @type {any} */ (await runAtlasNativeOperationAsync({ op: "rrf_fuse", lists_by_backend: listsByBackend, k }));
   } catch {

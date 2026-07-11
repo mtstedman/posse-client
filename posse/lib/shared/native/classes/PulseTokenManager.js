@@ -22,6 +22,7 @@ const NATIVE_PULSE_MIN_REFRESH_DELAY_SECONDS = 5;
  * @property {string} route        The route this envelope authorizes.
  * @property {number} expiresAt    Unix seconds.
  * @property {number} refreshAfter Unix seconds (== expiresAt - 15 unless the server says otherwise).
+ * @property {Readonly<Record<string, string>>} nativeArtifacts Server-issued current native artifact versions.
  */
 
 export class PulseTokenManager {
@@ -304,12 +305,14 @@ export class PulseTokenManager {
           latestRefreshAfterSeconds,
         ),
       );
+      const nativeArtifacts = exactNativeArtifactVersions(body, token);
       envelope = Object.freeze({
         token,
         kid,
         route: requiredRoute,
         expiresAt: expiresAtSeconds,
         refreshAfter: refreshAfterSeconds,
+        nativeArtifacts,
       });
     }
     return {
@@ -403,6 +406,33 @@ function exactNativePulseRoutes(body, token, requiredRoute) {
     );
   }
   return signedRoutes;
+}
+
+function exactNativeArtifactVersions(body, token) {
+  const responseVersions = normalizedNativeArtifactVersions(body?.nativeArtifacts ?? body?.native_artifacts);
+  const signedVersions = normalizedNativeArtifactVersions(
+    jwtClaims(token)?.native_artifacts ?? jwtClaims(token)?.nativeArtifacts,
+  );
+  if (stableJson(responseVersions) !== stableJson(signedVersions)) {
+    throw pulseError(
+      "POSSE_PULSE_INVALID_RESPONSE",
+      "heartbeat response and signed native artifact versions do not match",
+    );
+  }
+  return Object.freeze(signedVersions);
+}
+
+function normalizedNativeArtifactVersions(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const versions = {};
+  for (const [name, rawVersion] of Object.entries(value)) {
+    const packageName = String(name || "").trim();
+    const version = String(rawVersion || "").trim();
+    if (!/^posse-[a-z0-9-]+$/.test(packageName)) continue;
+    if (!/^[a-zA-Z0-9._-]{1,64}$/.test(version) || version.includes("..")) continue;
+    versions[packageName] = version;
+  }
+  return versions;
 }
 
 function normalizedRoutes(value) {

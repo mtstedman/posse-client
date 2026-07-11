@@ -55,9 +55,9 @@ export class ViewBuilder {
    *   options?: BuildOptions,
    *   onProgress?: ((event: { phase: string, current: number, total: number }) => void) | null,
    * }} args
-   * @returns {ViewMeta}
+   * @returns {Promise<ViewMeta>}
    */
-  buildFrom({ ledger, branch, atSeq, outPath, options = {}, onProgress = null }) {
+  async buildFrom({ ledger, branch, atSeq, outPath, options = {}, onProgress = null }) {
     if (!ledger) throw new TypeError("ViewBuilder.buildFrom: ledger is required");
     if (!branch) throw new TypeError("ViewBuilder.buildFrom: branch is required");
     if (!Number.isInteger(atSeq) || atSeq < 0) {
@@ -114,18 +114,18 @@ export class ViewBuilder {
       populateSymbolsAndEdges(db, ledger._unsafeDb(), pathToBlob, options.layerMerge === true, {
         onProgress: emitPhase,
       });
-      db.transaction(() => {
-        refreshGraphDerivedStateIfChanged(db, { force: true });
-        emitPhase({ phase: "tree", current: 0, total: 2, detail: "building tree" });
-        const treeDerived = refreshTreeDerivedStateIfChanged(db, { force: true });
-        emitPhase({ phase: "tree", current: 1, total: 2, detail: "compressing seeds" });
-        const treeCompression = refreshTreeCompressionSnapshotIfChanged(db, {
-          force: true,
-          mode: options.treeCompressionMode,
-          maxSeeds: options.treeCompressionMaxSeeds,
-        });
-        emitPhase(treeRefreshOutcomeEvent(treeDerived, treeCompression));
-      })();
+      db.transaction(() => refreshGraphDerivedStateIfChanged(db, { force: true }))();
+      // The tree refreshes await the native worker, so they run OUTSIDE any
+      // open transaction (each guards its own writes with a savepoint).
+      emitPhase({ phase: "tree", current: 0, total: 2, detail: "building tree" });
+      const treeDerived = await refreshTreeDerivedStateIfChanged(db, { force: true });
+      emitPhase({ phase: "tree", current: 1, total: 2, detail: "compressing seeds" });
+      const treeCompression = await refreshTreeCompressionSnapshotIfChanged(db, {
+        force: true,
+        mode: options.treeCompressionMode,
+        maxSeeds: options.treeCompressionMaxSeeds,
+      });
+      emitPhase(treeRefreshOutcomeEvent(treeDerived, treeCompression));
       if (hasHint) {
         db.transaction(() => {
           const stats = runPrefetch(db, hint);
@@ -152,7 +152,7 @@ export class ViewBuilder {
         });
       })();
       emitPhase("done", 1, 1);
-      return view.meta();
+      return view.metaLocal();
     } finally {
       view.close();
     }
@@ -188,9 +188,9 @@ export class ViewBuilder {
    *   options?: BuildOptions,
    *   onProgress?: ((e: { phase: string, current: number, total: number }) => void) | null,
    * }} args
-   * @returns {ViewMeta}
+   * @returns {Promise<ViewMeta>}
    */
-  incrementalApply({ view, ledger, entries, options = {}, onProgress = null }) {
+  async incrementalApply({ view, ledger, entries, options = {}, onProgress = null }) {
     if (!view) throw new TypeError("ViewBuilder.incrementalApply: view is required");
     if (view._mode() !== "readwrite") {
       throw new Error("ViewBuilder.incrementalApply: view must be opened readwrite");
@@ -207,7 +207,7 @@ export class ViewBuilder {
         : { phase, current, total };
       try { progress(event); } catch { /* observational */ }
     };
-    const current = view.meta();
+    const current = view.metaLocal();
     if (entries.length === 0) return current;
     // All entries must be on this view's branch, strictly increasing seq,
     // and strictly greater than current.ledger_seq.
@@ -231,14 +231,18 @@ export class ViewBuilder {
     }
 
     const db = view._unsafeDb();
-    /** @type {ViewMeta} */
-    let updated;
-    const txn = db.transaction(() => {
+    // Track the last successfully-applied seq. If an entry skips (missing
+    // blob in the ledger), ledger_seq must NOT advance past it — otherwise
+    // queries would see stale symbols at the new claimed seq.
+    let lastAppliedSeq = current.ledger_seq;
+    // Entries + resolver commit in one transaction; the tree refreshes await
+    // the native worker so they run after that commit (each in its own
+    // savepoint), and writeMeta commits strictly last. A crash between the
+    // commits leaves the view's meta at the OLD ledger_seq, so the next
+    // incremental re-applies the same entries — applyEntry is idempotent
+    // (delete-then-repopulate per path).
+    db.transaction(() => {
       const ledgerDb = ledger._unsafeDb();
-      // Track the last successfully-applied seq. If an entry skips (missing
-      // blob in the ledger), ledger_seq must NOT advance past it — otherwise
-      // queries would see stale symbols at the new claimed seq.
-      let lastAppliedSeq = current.ledger_seq;
       let applied = 0;
       emitPhase("entries", 0, entries.length);
       for (const e of entries) {
@@ -259,25 +263,25 @@ export class ViewBuilder {
       emitPhase("resolve", 0, 1);
       runResolverPass(db, pathToBlob);
       refreshGraphDerivedStateIfChanged(db);
-      emitPhase({ phase: "tree", current: 0, total: 2, detail: "building tree" });
-      const treeDerived = refreshTreeDerivedStateIfChanged(db);
-      emitPhase({ phase: "tree", current: 1, total: 2, detail: "compressing seeds" });
-      const treeCompression = refreshTreeCompressionSnapshotIfChanged(db, {
-        mode: options.treeCompressionMode,
-        maxSeeds: options.treeCompressionMaxSeeds,
-      });
-      emitPhase(treeRefreshOutcomeEvent(treeDerived, treeCompression));
-      emitPhase("resolve", 1, 1);
+    })();
+    emitPhase({ phase: "tree", current: 0, total: 2, detail: "building tree" });
+    const treeDerived = await refreshTreeDerivedStateIfChanged(db);
+    emitPhase({ phase: "tree", current: 1, total: 2, detail: "compressing seeds" });
+    const treeCompression = await refreshTreeCompressionSnapshotIfChanged(db, {
+      mode: options.treeCompressionMode,
+      maxSeeds: options.treeCompressionMaxSeeds,
+    });
+    emitPhase(treeRefreshOutcomeEvent(treeDerived, treeCompression));
+    emitPhase("resolve", 1, 1);
+    db.transaction(() => {
       writeMeta(db, {
         ...current,
         ledger_seq: lastAppliedSeq,
         built_at: new Date().toISOString(),
       });
-    });
-    txn();
+    })();
     emitPhase("done", 1, 1);
-    updated = view.meta();
-    return updated;
+    return view.metaLocal();
   }
 
   /**
@@ -1044,13 +1048,13 @@ function refreshGraphDerivedStateIfChanged(viewDb, opts = {}) {
  * @param {import("better-sqlite3").Database} viewDb
  * @param {{ force?: boolean }} [opts]
  */
-function refreshTreeDerivedStateIfChanged(viewDb, opts = {}) {
+async function refreshTreeDerivedStateIfChanged(viewDb, opts = {}) {
   const nextSignature = treeDerivedInputSignature(viewDb);
   const previousSignature = opts.force ? null : readMetaValue(viewDb, TREE_DERIVED_SIGNATURE_META_KEY);
   if (nextSignature && nextSignature === previousSignature && treeDerivedStateLooksCurrent(viewDb)) {
     return { skipped: true, signature: nextSignature };
   }
-  const result = refreshTreeDerivedState(viewDb);
+  const result = await refreshTreeDerivedState(viewDb);
   if (result.ok && nextSignature) {
     writeMetaValue(viewDb, TREE_DERIVED_SIGNATURE_META_KEY, nextSignature);
   }
@@ -1061,7 +1065,7 @@ function refreshTreeDerivedStateIfChanged(viewDb, opts = {}) {
  * @param {import("better-sqlite3").Database} viewDb
  * @param {{ force?: boolean }} [opts]
  */
-function refreshTreeCompressionSnapshotIfChanged(viewDb, opts = {}) {
+async function refreshTreeCompressionSnapshotIfChanged(viewDb, opts = {}) {
   const mode = normalizeTreeCompressionMode(opts.mode);
   if (mode === "off") {
     if (opts.force) writeMetaValue(viewDb, TREE_COMPRESSION_SIGNATURE_META_KEY, null);
@@ -1072,7 +1076,7 @@ function refreshTreeCompressionSnapshotIfChanged(viewDb, opts = {}) {
   if (nextSignature && nextSignature === previousSignature && treeCompressionSnapshotLooksCurrent(viewDb)) {
     return { skipped: true, signature: nextSignature };
   }
-  const result = refreshTreeCompressionSnapshot(viewDb, {
+  const result = await refreshTreeCompressionSnapshot(viewDb, {
     maxSeeds: positiveIntOrNull(opts.maxSeeds) ?? undefined,
   });
   if (result.ok && nextSignature) {

@@ -20,7 +20,7 @@ const FILE_GROUP_LIMIT = 200;
  * @param {{ view: View, versionId: string, params: SymbolUsagesParams }} args
  * @returns {ReturnType<typeof okEnvelope<SymbolUsagesData>> | ReturnType<typeof errorEnvelope>}
  */
-export function symbolUsages({ view, versionId, params }) {
+export async function symbolUsages({ view, versionId, params }) {
   const parsed = parseSymbolId(params.symbolId);
   if (!parsed) {
     return errorEnvelope({
@@ -30,7 +30,7 @@ export function symbolUsages({ view, versionId, params }) {
       message: "symbol.overview requires a valid symbolId",
     });
   }
-  const target = view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
+  const target = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
   if (!target) {
     return errorEnvelope({
       action: "symbol.overview",
@@ -46,18 +46,18 @@ export function symbolUsages({ view, versionId, params }) {
     ? new Set(params.kind.map(String))
     : null;
   const rows = [];
-  for (const edge of view.query.callers(target.global_id)) {
+  for (const edge of await view.query.callers(target.global_id)) {
     if (kindFilter && !kindFilter.has(edge.kind)) continue;
     if ((Number(edge.confidence) || 0) / 100 < minConfidence) continue;
-    const from = view.query.getSymbol(edge.from_global_id);
+    const from = await view.query.getSymbol(edge.from_global_id);
     if (!from || !isDefaultVisibleSymbol(from)) continue;
     rows.push(usageFromEdge(edge, from, true));
   }
   if (params.includeUnresolved) {
-    for (const edge of view.query.unresolvedReferencesTo(target.name)) {
+    for (const edge of await view.query.unresolvedReferencesTo(target.name)) {
       if (kindFilter && !kindFilter.has(edge.kind)) continue;
       if ((Number(edge.confidence) || 0) / 100 < minConfidence) continue;
-      const from = view.query.getSymbol(edge.from_global_id);
+      const from = await view.query.getSymbol(edge.from_global_id);
       if (!from || !isDefaultVisibleSymbol(from)) continue;
       rows.push(usageFromEdge(edge, from, false));
     }
@@ -70,7 +70,7 @@ export function symbolUsages({ view, versionId, params }) {
   );
   const total = rows.length;
   const usages = rows.slice(0, limit);
-  const warnings = usageWarnings(view, total);
+  const warnings = await usageWarnings(view, total);
   const usageSummary = summarizeUsageRows(rows);
   return okEnvelope({
     action: "symbol.overview",
@@ -102,14 +102,14 @@ export function symbolUsages({ view, versionId, params }) {
  * @param {View} view
  * @param {ViewSymbol[]} symbols
  * @param {{ maxSymbols?: number, examineLimit?: number, sampleLimit?: number }} [opts]
- * @returns {{ symbol: string, calledFromFiles: number, sample: string[] }[]}
+ * @returns {Promise<{ symbol: string, calledFromFiles: number, sample: string[] }[]>}
  */
-export function calledFromBreadcrumbs(view, symbols, { maxSymbols = 6, examineLimit = 24, sampleLimit = 2 } = {}) {
+export async function calledFromBreadcrumbs(view, symbols, { maxSymbols = 6, examineLimit = 24, sampleLimit = 2 } = {}) {
   const rows = [];
   try {
     for (const symbol of (symbols || []).slice(0, examineLimit)) {
       if (symbol?.global_id == null || !isDefaultVisibleSymbol(symbol)) continue;
-      const { callerCount, callerPathsSample } = countIncomingCallers(view, symbol, { sampleLimit, distinctPaths: true });
+      const { callerCount, callerPathsSample } = await countIncomingCallers(view, symbol, { sampleLimit, distinctPaths: true });
       if (callerCount > 0) {
         rows.push({ symbol: symbol.name, calledFromFiles: callerCount, sample: callerPathsSample });
       }
@@ -136,16 +136,16 @@ export function calledFromBreadcrumbs(view, symbols, { maxSymbols = 6, examineLi
  * @param {View} view
  * @param {ViewSymbol} target
  * @param {{ sampleLimit?: number, distinctPaths?: boolean }} [opts]
- * @returns {{ callerCount: number, callerPathsSample: string[] }}
+ * @returns {Promise<{ callerCount: number, callerPathsSample: string[] }>}
  */
-export function countIncomingCallers(view, target, { sampleLimit = 3, distinctPaths = false } = {}) {
+export async function countIncomingCallers(view, target, { sampleLimit = 3, distinctPaths = false } = {}) {
   const result = { callerCount: 0, callerPathsSample: /** @type {string[]} */ ([]) };
   try {
     if (!view?.query || target?.global_id == null) return result;
     const seenPaths = new Set();
     const distinct = distinctPaths ? new Set() : null;
-    for (const edge of view.query.callers(target.global_id)) {
-      const from = view.query.getSymbol(edge.from_global_id);
+    for (const edge of await view.query.callers(target.global_id)) {
+      const from = await view.query.getSymbol(edge.from_global_id);
       if (!from || !isDefaultVisibleSymbol(from)) continue;
       const p = String(edge.repo_rel_path || from.repo_rel_path || "").replace(/\\/g, "/") || null;
       if (distinct) {
@@ -264,13 +264,13 @@ function clampInt(value, fallback, min, max) {
 /**
  * @param {View} view
  * @param {number} total
- * @returns {string[]}
+ * @returns {Promise<string[]>}
  */
-function usageWarnings(view, total) {
+async function usageWarnings(view, total) {
   if (total > 0) return [];
   try {
     if (typeof view?.query?.edgeStats !== "function") return [];
-    const stats = view.query.edgeStats();
+    const stats = await view.query.edgeStats();
     const edgeTotal = Number(stats.total || 0);
     const unresolved = Math.max(0, edgeTotal - Number(stats.resolved || 0));
     if (edgeTotal <= 0) return [];

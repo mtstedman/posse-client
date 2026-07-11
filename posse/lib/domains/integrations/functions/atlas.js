@@ -573,7 +573,7 @@ export async function checkAtlasMainFreshnessGate({
   const runtimeExists = atlasWarmRuntimeExists(storage);
   const pending = await listPendingAtlasMainWarmJobs({ cwd: storage.repoRoot, config, targetBranch: branch });
   if (!runtimeExists) {
-    const readiness = probeAtlasGraphReadiness({ cwd: storage.repoRoot, config });
+    const readiness = await probeAtlasGraphReadiness({ cwd: storage.repoRoot, config });
     return {
       ready: false,
       attempted: true,
@@ -597,7 +597,7 @@ export async function checkAtlasMainFreshnessGate({
     };
   }
 
-  const readiness = probeAtlasGraphReadiness({ cwd: storage.repoRoot, config });
+  const readiness = await probeAtlasGraphReadiness({ cwd: storage.repoRoot, config });
   if (readiness.usable) {
     return {
       ready: true,
@@ -645,7 +645,7 @@ export async function checkAtlasMainFreshnessGate({
   };
 }
 
-function inspectMainViewForBoot(viewPath, branch, ledgerDbPath = null, { layerMerge = null } = {}) {
+async function inspectMainViewForBoot(viewPath, branch, ledgerDbPath = null, { layerMerge = null } = {}) {
   const status = {
     exists: false,
     readable: false,
@@ -655,7 +655,7 @@ function inspectMainViewForBoot(viewPath, branch, ledgerDbPath = null, { layerMe
     freshness: null,
     error: null,
   };
-  const probe = openViewWithMeta(viewPath, AtlasView);
+  const probe = await openViewWithMeta(viewPath, AtlasView);
   try {
     status.exists = !!probe.exists;
     if (!probe.ok) {
@@ -687,8 +687,8 @@ function inspectMainViewForBoot(viewPath, branch, ledgerDbPath = null, { layerMe
   }
 }
 
-function mainViewMatchesBranch(viewPath, branch) {
-  return inspectMainViewForBoot(viewPath, branch).branchMatches;
+async function mainViewMatchesBranch(viewPath, branch) {
+  return (await inspectMainViewForBoot(viewPath, branch)).branchMatches;
 }
 
 function workItemViewPath(worktreePath = null) {
@@ -1149,12 +1149,12 @@ async function v2JoinResultAsync(args = {}) {
   const baselineBranch = await resolveAtlasBaselineBranchAsync(ctx.repoRoot);
   let ledger = null;
   try {
-    ledger = Ledger.open({ dbPath: ctx.ledgerDbPath });
+    ledger = await Ledger.open({ dbPath: ctx.ledgerDbPath });
     if (!ledger.getBranch(baselineBranch)) {
-      await ledger.ensureRootBranchAsync(baselineBranch, { label: "atlas.ensureBaselineBranch" });
+      await ledger.ensureRootBranch(baselineBranch, { label: "atlas.ensureBaselineBranch" });
     }
     if (ledgerBranch && !ledger.getBranch(ledgerBranch)) {
-      await ledger.forkBranchAsync(ledgerBranch, baselineBranch, ledger.headSeq(baselineBranch), {
+      await ledger.forkBranch(ledgerBranch, baselineBranch, ledger.headSeq(baselineBranch), {
         label: "atlas.forkBranch",
       });
     }
@@ -1406,7 +1406,7 @@ export async function ensureWorkItemAtlasJoinAsync(opts = {}) {
   return await v2JoinResultAsync({ ...opts, config: opts?.config || getAtlasIntegrationConfig() });
 }
 
-export function probeAtlasGraphReadiness(opts = {}) {
+export async function probeAtlasGraphReadiness(opts = {}) {
   const config = opts?.config || getAtlasIntegrationConfig();
   const graphDbPath = opts?.graphDbPath || resolveAtlasGraphDbPath({ ...opts, config });
   const storage = repoStorageFor({ cwd: opts?.cwd, config });
@@ -1418,7 +1418,7 @@ export function probeAtlasGraphReadiness(opts = {}) {
   let freshness = null;
   let viewError = null;
   if (viewExists) {
-    const probe = openViewWithMeta(viewPath, AtlasView);
+    const probe = await openViewWithMeta(viewPath, AtlasView);
     try {
       if (probe.ok) {
         viewOk = true;
@@ -1433,7 +1433,7 @@ export function probeAtlasGraphReadiness(opts = {}) {
   if (ledgerOk && meta) {
     let ledger = null;
     try {
-      ledger = Ledger.open({ dbPath: graphDbPath });
+      ledger = await Ledger.open({ dbPath: graphDbPath });
       freshness = viewFreshness(meta, ledger, { layerMerge: config?.viewLayerMerge === true });
     } catch (err) {
       freshness = {
@@ -1803,7 +1803,7 @@ export async function warmAtlasMergedToMainNow(opts = {}) {
 
   let ledger = null;
   try {
-    ledger = Ledger.open({ dbPath: storage.ledgerDbPath });
+    ledger = await Ledger.open({ dbPath: storage.ledgerDbPath });
     const source = ledger.getBranch(sourceBranch);
     if (!source) {
       return {
@@ -1818,7 +1818,7 @@ export async function warmAtlasMergedToMainNow(opts = {}) {
       };
     }
     if (!ledger.getBranch(targetBranch)) {
-      await ledger.ensureRootBranchAsync(targetBranch, { label: "atlas.mergeWarm.ensureTargetBranch" });
+      await ledger.ensureRootBranch(targetBranch, { label: "atlas.mergeWarm.ensureTargetBranch" });
     }
     const warmer = new Warmer({
       ledger,

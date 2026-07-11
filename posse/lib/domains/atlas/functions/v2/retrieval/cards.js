@@ -210,9 +210,9 @@ export function bareSymbolCard({ symbol, detail = "compact", path }) {
  *   minCallConfidence?: number,
  *   includeResolutionMetadata?: boolean,
  * }} args
- * @returns {SymbolCard}
+ * @returns {Promise<SymbolCard>}
  */
-export function buildSymbolCard(args) {
+export async function buildSymbolCard(args) {
   const {
     symbol,
     view,
@@ -229,26 +229,23 @@ export function buildSymbolCard(args) {
   if (detail !== "minimal" && detail !== "signature") {
     const callerCap = detail === "full" ? 100 : 25;
     const calleeCap = detail === "full" ? 100 : 25;
-    const callers = visibleEndpointEdges({
-      view,
-      endpoint: "from",
-      edges: view.query
-        .callers(symbol.global_id)
-        .filter((e) => e.confidence / 100 >= minCallConfidence),
-    }).slice(0, callerCap);
-    const callees = visibleEndpointEdges({
-      view,
-      endpoint: "to",
-      edges: view.query
-        .callees(symbol.global_id)
-        .filter((e) => e.confidence / 100 >= minCallConfidence),
-    }).slice(0, calleeCap);
+    const callerEdges = (await view.query.callers(symbol.global_id))
+      .filter((e) => e.confidence / 100 >= minCallConfidence);
+    const callers = (await visibleEndpointEdges({ view, endpoint: "from", edges: callerEdges })).slice(0, callerCap);
+    const calleeEdges = (await view.query.callees(symbol.global_id))
+      .filter((e) => e.confidence / 100 >= minCallConfidence);
+    const callees = (await visibleEndpointEdges({ view, endpoint: "to", edges: calleeEdges })).slice(0, calleeCap);
     enrichCardWithEdges(card, symbol, callers, callees, detail);
     // For callers, resolve the FROM endpoint; for callees, resolve the
     // TO endpoint. Without this split, a self-edge in either direction
-    // would collapse the wrong side.
-    card.callers = callers.map((e) => edgeAsHit(view, e, "from"));
-    card.callees = callees.map((e) => edgeAsHit(view, e, "to"));
+    // would collapse the wrong side. Resolve sequentially — the native
+    // worker is serial, so this must not fan out into an unbounded batch.
+    const callerHits = [];
+    for (const e of callers) callerHits.push(await edgeAsHit(view, e, "from"));
+    card.callers = callerHits;
+    const calleeHits = [];
+    for (const e of callees) calleeHits.push(await edgeAsHit(view, e, "to"));
+    card.callees = calleeHits;
   } else if (detail !== "minimal") {
     enrichCardWithEdges(card, symbol, [], [], detail);
   }
@@ -264,14 +261,14 @@ export function buildSymbolCard(args) {
  * them out of card caller/callee presentation.
  *
  * @param {{ view: View, edges: ViewEdge[], endpoint: "from" | "to" }} args
- * @returns {ViewEdge[]}
+ * @returns {Promise<ViewEdge[]>}
  */
-function visibleEndpointEdges({ view, edges, endpoint }) {
+async function visibleEndpointEdges({ view, edges, endpoint }) {
   /** @type {ViewEdge[]} */
   const out = [];
   const seen = new Set();
   for (const edge of edges) {
-    const target = edgeEndpointSymbol(view, edge, endpoint);
+    const target = await edgeEndpointSymbol(view, edge, endpoint);
     if (target) {
       if (!isDefaultVisibleSymbol(target)) continue;
     } else if (endpoint === "to" && isNoisyLocalSymbol(/** @type {any} */ ({
@@ -294,11 +291,11 @@ function visibleEndpointEdges({ view, edges, endpoint }) {
  * @param {View} view
  * @param {ViewEdge} edge
  * @param {"from" | "to"} endpoint
- * @returns {import("../contracts/api.js").ViewSymbol | null}
+ * @returns {Promise<import("../contracts/api.js").ViewSymbol | null>}
  */
-function edgeEndpointSymbol(view, edge, endpoint) {
+async function edgeEndpointSymbol(view, edge, endpoint) {
   const gid = endpoint === "from" ? edge.from_global_id : edge.to_global_id;
-  return gid != null ? view.query.getSymbol(gid) : null;
+  return gid != null ? await view.query.getSymbol(gid) : null;
 }
 
 /**
@@ -472,12 +469,12 @@ function languageLabel(lang) {
  * @param {View} view
  * @param {ViewEdge} edge
  * @param {"from" | "to"} endpoint
- * @returns {SymbolHit}
+ * @returns {Promise<SymbolHit>}
  */
-function edgeAsHit(view, edge, endpoint) {
+async function edgeAsHit(view, edge, endpoint) {
   const gid = endpoint === "from" ? edge.from_global_id : edge.to_global_id;
   if (gid != null) {
-    const target = view.query.getSymbol(gid);
+    const target = await view.query.getSymbol(gid);
     if (target) {
       const hit = symbolHit(target);
       hit.confidence = edge.confidence / 100;

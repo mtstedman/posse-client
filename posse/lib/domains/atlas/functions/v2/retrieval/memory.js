@@ -196,7 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_file_links_path
  *   view?: import("../contracts/api.js").View | null,
  * }} args
  */
-export function memoryStore({ versionId, params, ledger, repoId, view = null }) {
+export async function memoryStore({ versionId, params, ledger, repoId, view = null }) {
   // Policy gate BEFORE the DB open: openMemoryActionDb mkdirs + runs DDL, so
   // checking afterwards materialized a memory.db as a side effect of a call
   // the policy was about to refuse.
@@ -281,7 +281,7 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
     }
     if (!providedId) {
       reviveMemory(db, existingByHash.memory_id, new Date().toISOString());
-      mergeMemoryLinks(db, existingByHash.memory_id, symbolIds, fileRelPaths, viewFilePathHashes(view, fileRelPaths));
+      mergeMemoryLinks(db, existingByHash.memory_id, symbolIds, fileRelPaths, await viewFilePathHashes(view, fileRelPaths));
       return finish(okEnvelope({
         action: "memory.store",
         versionId,
@@ -308,7 +308,7 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
       // Re-baseline the anchors to today's view: a resurrected memory judged
       // against its pre-prune baselines would flip straight back to dead on
       // the next reconcile.
-      mergeMemoryLinks(db, resurrected.memory_id, symbolIds, fileRelPaths, viewFilePathHashes(view, fileRelPaths));
+      mergeMemoryLinks(db, resurrected.memory_id, symbolIds, fileRelPaths, await viewFilePathHashes(view, fileRelPaths));
       return finish(okEnvelope({
         action: "memory.store",
         versionId,
@@ -335,7 +335,7 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
       reviveMemory(db, nearDuplicate.memory_id, new Date().toISOString());
       // A reworded re-derivation may carry NEW valid anchors — folding the
       // write into the twin used to drop them on the floor.
-      mergeMemoryLinks(db, nearDuplicate.memory_id, symbolIds, fileRelPaths, viewFilePathHashes(view, fileRelPaths));
+      mergeMemoryLinks(db, nearDuplicate.memory_id, symbolIds, fileRelPaths, await viewFilePathHashes(view, fileRelPaths));
       return finish(okEnvelope({
         action: "memory.store",
         versionId,
@@ -355,7 +355,7 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
   // Snapshot the current blob hash of each anchored file so a later edit (a
   // different hash) is detectable as drift. No view -> NULL baselines, adopted
   // without penalty on the first reconcile that does see a view.
-  const fileBaselines = viewFilePathHashes(view, fileRelPaths);
+  const fileBaselines = await viewFilePathHashes(view, fileRelPaths);
   const txn = db.transaction(() => {
     if (duplicateToReplace) {
       db.prepare(
@@ -462,7 +462,7 @@ export function memoryStore({ versionId, params, ledger, repoId, view = null }) 
   // points at, once per view rebuild. Runs before the cap so drift-pruned rows
   // free their slots first. Only possible with a view (the write path is
   // otherwise blind to code state).
-  if (view) reconcileAnchorConfidence(db, view, effectiveRepoId, now);
+  if (view) await reconcileAnchorConfidence(db, view, effectiveRepoId, now);
   sweepStaleMemories(db, effectiveRepoId, policy);
   pruneSurfacedEphemeral(db, effectiveRepoId, now);
   enforceMemoryCap(db, effectiveRepoId, policy, now);
@@ -770,7 +770,7 @@ function flagMemoryStale(db, memoryId, reason, now) {
  *   view?: import("../contracts/api.js").View | null,
  * }} args
  */
-export function memorySurface({ versionId, params, ledger, repoId, view = null }) {
+export async function memorySurface({ versionId, params, ledger, repoId, view = null }) {
   const effectiveRepoId = effectiveRepo(repoId, params.repoId);
   const policy = getEffectivePolicy(ledger, effectiveRepoId);
   if (!policy.memoryEnabled) {
@@ -801,7 +801,7 @@ export function memorySurface({ versionId, params, ledger, repoId, view = null }
     const rows = candidateRows(db, effectiveRepoId, { includeDeleted: false, policy });
     const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
     let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true, policy });
-    filtered = applyAnchorEvidence(view, filtered, links);
+    filtered = await applyAnchorEvidence(view, filtered, links);
     const presence = memoryAnchorPresence(filtered, links, requested);
     return finish(okEnvelope({
       action: "memory.surface",
@@ -827,7 +827,7 @@ export function memorySurface({ versionId, params, ledger, repoId, view = null }
  *   view?: import("../contracts/api.js").View | null,
  * }} args
  */
-export function memoryGet({ versionId, params, ledger, repoId, view = null }) {
+export async function memoryGet({ versionId, params, ledger, repoId, view = null }) {
   const effectiveRepoId = effectiveRepo(repoId, params.repoId);
   const policy = getEffectivePolicy(ledger, effectiveRepoId);
   if (!policy.memoryEnabled) {
@@ -858,7 +858,7 @@ export function memoryGet({ versionId, params, ledger, repoId, view = null }) {
     const rows = candidateRows(db, effectiveRepoId, { includeDeleted: false, policy });
     const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
     let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true, policy });
-    filtered = applyAnchorEvidence(view, filtered, links);
+    filtered = await applyAnchorEvidence(view, filtered, links);
     const data = memoryContentByAnchor(filtered, links, requested);
     // Pulling a memory body IS the "surfaced" event that the usage-based prune
     // counts. Record it after the read connection closes (best-effort, throttled,
@@ -1243,14 +1243,14 @@ function replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths, fileBaselines
  *
  * @param {import("../contracts/api.js").View | null | undefined} view
  * @param {string[]} fileRelPaths
- * @returns {Map<string, string>}
+ * @returns {Promise<Map<string, string>>}
  */
-function viewFilePathHashes(view, fileRelPaths) {
+async function viewFilePathHashes(view, fileRelPaths) {
   const out = new Map();
   if (typeof view?.query?.contentHashForPath !== "function" || fileRelPaths.length === 0) return out;
   try {
     for (const repoRelPath of fileRelPaths) {
-      const hash = view.query.contentHashForPath(repoRelPath);
+      const hash = await view.query.contentHashForPath(repoRelPath);
       if (hash) out.set(repoRelPath, String(hash));
     }
   } catch {
@@ -1566,17 +1566,17 @@ export {
  * @param {any[]} rows
  * @param {{ filesById: Map<string, string[]> }} links
  */
-function applyAnchorEvidence(view, rows, links) {
+async function applyAnchorEvidence(view, rows, links) {
   if (typeof view?.query?.contentHashForPath !== "function") return rows;
   let viewBuiltAt = "";
-  let hasPath;
+  const cache = new Map();
+  const hasPath = async (p) => {
+    if (!cache.has(p)) cache.set(p, (await view.query.contentHashForPath(p)) != null);
+    return cache.get(p);
+  };
   try {
-    viewBuiltAt = String(/** @type {any} */ (view).meta?.()?.built_at || "");
-    const cache = new Map();
-    hasPath = (p) => {
-      if (!cache.has(p)) cache.set(p, view.query.contentHashForPath(p) != null);
-      return cache.get(p);
-    };
+    const meta = await /** @type {any} */ (view).meta?.();
+    viewBuiltAt = String(meta?.built_at || "");
   } catch {
     return rows; // anchor evidence is advisory; never fail a surface read
   }
@@ -1584,9 +1584,11 @@ function applyAnchorEvidence(view, rows, links) {
   for (const row of rows) {
     const files = links.filesById.get(row.memory_id) || [];
     if (files.length === 0) { kept.push(row); continue; }
-    let missing;
+    const missing = [];
     try {
-      missing = files.filter((f) => !hasPath(f));
+      for (const f of files) {
+        if (!(await hasPath(f))) missing.push(f);
+      }
     } catch {
       kept.push(row);
       continue;
@@ -1649,27 +1651,17 @@ const ANCHOR_DELETED_TOMBSTONE = "";
  * @param {string} repoId
  * @param {string} now
  */
-function reconcileAnchorConfidence(db, view, repoId, now) {
+async function reconcileAnchorConfidence(db, view, repoId, now) {
   if (typeof view?.query?.contentHashForPath !== "function"
       || typeof view?.query?.hasSnapshotContentHash !== "function") return;
-  const builtAt = String(/** @type {any} */ (view)?.meta?.()?.built_at || "");
+  const meta = await /** @type {any} */ (view)?.meta?.();
+  const builtAt = String(meta?.built_at || "");
   if (!builtAt) return;
   // Per-repo gate: one memory.db can hold several repos, each with its own code
   // state, so a global gate would let the first repo's store starve the rest.
   const metaKey = `last_anchor_reconcile_built_at:${repoId}`;
   const seen = db.prepare("SELECT value FROM memory_meta WHERE key = ?").get(metaKey)?.value;
   if (seen === builtAt) return; // this view rebuild was already reconciled for this repo
-
-  const pathHashCache = new Map();
-  const pathHash = (p) => {
-    if (!pathHashCache.has(p)) pathHashCache.set(p, view.query.contentHashForPath(p));
-    return pathHashCache.get(p);
-  };
-  const blobAliveCache = new Map();
-  const blobAlive = (h) => {
-    if (!blobAliveCache.has(h)) blobAliveCache.set(h, view.query.hasSnapshotContentHash(h));
-    return blobAliveCache.get(h);
-  };
 
   const memories = db.prepare(
     "SELECT memory_id, confidence FROM memories WHERE repo_id = ? AND deleted = 0",
@@ -1681,10 +1673,35 @@ function reconcileAnchorConfidence(db, view, repoId, now) {
   const setConf = db.prepare("UPDATE memories SET confidence = ? WHERE memory_id = ?");
   const softDelete = db.prepare("UPDATE memories SET deleted = 1, deleted_at = ?, updated_at = ? WHERE memory_id = ?");
 
+  // Pre-read each memory's links and pre-resolve the async view lookups into
+  // caches BEFORE the synchronous better-sqlite3 transaction (which cannot
+  // await). The transaction then reads path/blob state purely from the caches.
+  // Sequential awaits: the native worker is serial, so fanning out buys nothing.
+  /** @type {Map<string, { fileLinks: Array<{ repo_rel_path: string, content_hash: string | null }>, symLinks: Array<{ content_hash: string, local_id: number }> }>} */
+  const linksByMemory = new Map();
+  const pathHashCache = new Map();
+  const blobAliveCache = new Map();
+  for (const mem of memories) {
+    const fileLinks = fileLinksStmt.all(mem.memory_id);
+    const symLinks = symLinksStmt.all(mem.memory_id);
+    linksByMemory.set(mem.memory_id, { fileLinks, symLinks });
+    for (const link of fileLinks) {
+      if (!pathHashCache.has(link.repo_rel_path)) {
+        pathHashCache.set(link.repo_rel_path, await view.query.contentHashForPath(link.repo_rel_path));
+      }
+    }
+    for (const link of symLinks) {
+      if (!blobAliveCache.has(link.content_hash)) {
+        blobAliveCache.set(link.content_hash, await view.query.hasSnapshotContentHash(link.content_hash));
+      }
+    }
+  }
+  const pathHash = (p) => pathHashCache.get(p);
+  const blobAlive = (h) => blobAliveCache.get(h);
+
   const run = db.transaction(() => {
     for (const mem of memories) {
-      const fileLinks = fileLinksStmt.all(mem.memory_id);
-      const symLinks = symLinksStmt.all(mem.memory_id);
+      const { fileLinks, symLinks } = linksByMemory.get(mem.memory_id) || { fileLinks: [], symLinks: [] };
       const total = fileLinks.length + symLinks.length;
       if (total === 0) continue; // unanchored memories have no drift signal
 

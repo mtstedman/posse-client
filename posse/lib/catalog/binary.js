@@ -95,7 +95,7 @@ export const NATIVE_BINARIES = Object.freeze({
   vector: defineBinary(
     "posse-vector",
     { windows: "posse-vector.exe", posix: "posse-vector" },
-    { workerCapable: true, exactVersion: "0.1.0" },
+    { workerCapable: true },
   ),
 });
 

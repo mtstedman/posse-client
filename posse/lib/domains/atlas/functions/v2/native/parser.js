@@ -13,7 +13,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { sha256Hex } from "../hash.js";
 import { isCanonicalRepoPath } from "../paths.js";
-import { runAtlasNativeMethod } from "./invoke.js";
+import { runAtlasNativeMethodAsync } from "./invoke.js";
 
 /** @typedef {import("../contracts/schemas.js").ParseResult} ParseResult */
 
@@ -107,7 +107,8 @@ function parseNativeParseResult(value, expected) {
 
 /**
  * Strict Rust-owned parseBuffer implementation. This does not call the Node
- * parser and does not fall back.
+ * parser and does not fall back. Routed through the persistent worker —
+ * one warm process parses every file instead of one spawn per file.
  *
  * @param {{
  *   bytes: Buffer | string,
@@ -115,12 +116,12 @@ function parseNativeParseResult(value, expected) {
  *   lang?: string,
  * }} args
  * @param {import("./invoke.js").NativeMethodRunOptions} [opts]
- * @returns {ParseResult}
+ * @returns {Promise<ParseResult>}
  */
-export function parseBufferNative(args, opts = {}) {
+export async function parseBufferNative(args, opts = {}) {
   const payload = buildParseBufferNativePayload(args);
   const runOptions = parserNativeOptionsForTests ? { ...parserNativeOptionsForTests, ...opts } : opts;
-  const result = runAtlasNativeMethod(ATLAS_NATIVE_PARSE_BUFFER_METHOD, payload, runOptions);
+  const result = await runAtlasNativeMethodAsync(ATLAS_NATIVE_PARSE_BUFFER_METHOD, payload, runOptions);
   return parseNativeParseResult(result, payload);
 }
 
@@ -149,14 +150,14 @@ export function normalizeParseResultForNativeParity(result) {
  *   manager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  *   timeoutMs?: number,
  * }} opts
- * @returns {{ ok: true, node: unknown, native: unknown } | { ok: false, node: unknown, native: unknown, message: string }}
+ * @returns {Promise<{ ok: true, node: unknown, native: unknown } | { ok: false, node: unknown, native: unknown, message: string }>}
  */
-export function diffParseBufferNativeParity(args, opts) {
+export async function diffParseBufferNativeParity(args, opts) {
   if (typeof opts?.nodeParseBuffer !== "function") {
     throw new TypeError("diffParseBufferNativeParity requires nodeParseBuffer");
   }
   const node = normalizeParseResultForNativeParity(opts.nodeParseBuffer(args));
-  const native = normalizeParseResultForNativeParity(parseBufferNative(args, opts));
+  const native = normalizeParseResultForNativeParity(await parseBufferNative(args, opts));
   if (isDeepStrictEqual(native, node)) return { ok: true, node, native };
   return {
     ok: false,

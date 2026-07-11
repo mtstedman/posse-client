@@ -9,7 +9,6 @@
 // and delegates. Error messages keep the `Ledger.` prefix so the public
 // contract — including thrown-message text — is unchanged.
 
-import { runSqliteWrite } from "../../../../../shared/concurrency/functions/sqlite-gate.js";
 import { nowIso } from "../../../functions/v2/ledger/normalize.js";
 import { isContentHash } from "../../../functions/v2/hash.js";
 import { isCanonicalRepoPath } from "../../../functions/v2/paths.js";
@@ -334,18 +333,6 @@ export class BlobStore {
   }
 
   /**
-   * @param {Parameters<BlobStore["ingestBlobLayer"]>[0]} layer
-   * @param {{ waitMs?: number, label?: string }} [opts]
-   * @returns {Promise<ReturnType<BlobStore["ingestBlobLayer"]>>}
-   */
-  ingestBlobLayerAsync(layer, opts = {}) {
-    return runSqliteWrite(this.#dbPath, () => this.ingestBlobLayer(layer), {
-      label: opts.label || "Ledger.ingestBlobLayer",
-      waitMs: opts.waitMs,
-    });
-  }
-
-  /**
    * Idempotent. If the blob already exists, returns without re-inserting.
    *
    * @param {BlobIngest} blob
@@ -453,18 +440,6 @@ export class BlobStore {
       });
     });
     txn.immediate();
-  }
-
-  /**
-   * @param {BlobIngest} blob
-   * @param {{ waitMs?: number, label?: string }} [opts]
-   * @returns {Promise<void>}
-   */
-  ingestBlobAsync(blob, opts = {}) {
-    return runSqliteWrite(this.#dbPath, () => this.ingestBlob(blob), {
-      label: opts.label || "Ledger.ingestBlob",
-      waitMs: opts.waitMs,
-    });
   }
 
   /**
@@ -623,18 +598,6 @@ export class BlobStore {
     });
     txn.immediate();
     return counts;
-  }
-
-  /**
-   * @param {BlobIngest} blob
-   * @param {{ waitMs?: number, label?: string }} [opts]
-   * @returns {Promise<{ inserted_symbols: number, mapped_symbols: number, inserted_edges: number, skipped_edges: number }>}
-   */
-  mergeBlobParseRowsAsync(blob, opts = {}) {
-    return runSqliteWrite(this.#dbPath, () => this.mergeBlobParseRows(blob), {
-      label: opts.label || "Ledger.mergeBlobParseRows",
-      waitMs: opts.waitMs,
-    });
   }
 
   /**
@@ -821,18 +784,6 @@ export class BlobStore {
     });
     txn.immediate();
     return counts;
-  }
-
-  /**
-   * @param {{ content_hash: string }} input
-   * @param {{ waitMs?: number, label?: string }} [opts]
-   * @returns {Promise<{ removed_symbols: number, removed_edges: number, removed_blob: number }>}
-   */
-  reingestBlobWithBackendAsync(input, opts = {}) {
-    return runSqliteWrite(this.#dbPath, () => this.reingestBlobWithBackend(input), {
-      label: opts.label || "Ledger.reingestBlobWithBackend",
-      waitMs: opts.waitMs,
-    });
   }
 
   // ---------------------------------------------------------------------------

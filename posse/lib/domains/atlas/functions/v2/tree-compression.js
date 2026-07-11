@@ -7,7 +7,7 @@
 // seed annotations that an explicit one-time model pass can refine.
 
 import { sha256Hex } from "./hash.js";
-import { runAtlasNativeMethod } from "./native/invoke.js";
+import { runAtlasNativeMethodAsync } from "./native/invoke.js";
 
 export const TREE_COMPRESSION_RUN_KIND = "tree-compression-snapshot";
 export const TREE_COMPRESSION_PROFILE = "quick_dirty_tree_ml_features_v0";
@@ -127,40 +127,46 @@ export function treeCompressionInputSignature(db) {
 /**
  * @param {import("better-sqlite3").Database} db
  * @param {{ maxSeeds?: number, maxDepth?: number, maxFilesPerSeed?: number }} [opts]
- * @returns {{ ok: boolean, durationMs: number, snapshotId?: number, seedCount: number, profile: string, sourceSignature: string | null, error?: string }}
+ * @returns {Promise<{ ok: boolean, durationMs: number, snapshotId?: number, seedCount: number, profile: string, sourceSignature: string | null, error?: string }>}
  */
-export function refreshTreeCompressionSnapshot(db, opts = {}) {
+export async function refreshTreeCompressionSnapshot(db, opts = {}) {
   ensureTreeCompressionTables(db);
   const started = Date.now();
   const sourceSignature = treeCompressionInputSignature(db);
-  db.exec("SAVEPOINT tree_compression_refresh");
   try {
-    const snapshot = buildTreeCompressionSnapshot(db, opts);
+    // Native seed construction is awaited BEFORE the savepoint opens so the
+    // async worker hop never holds an open write transaction on the view.
+    const snapshot = await buildTreeCompressionSnapshot(db, opts);
     if (!snapshot.available) {
       throw new Error(snapshot.reason || "tree_compression_source_unavailable");
     }
 
-    const { snapshotId } = writeTreeCompressionSnapshot(db, snapshot, sourceSignature);
-    const drift = updateTreeCompressionDrift(db);
-    const durationMs = Date.now() - started;
-    recordRun(db, TREE_COMPRESSION_RUN_KIND, "ok", durationMs, {
-      profile: snapshot.profile,
-      source_signature: sourceSignature,
-      seed_count: snapshot.seeds.length,
-      totals: snapshot.summary.totals,
-      ml_label_drift: drift.ok ? { checked: drift.checked, drifted: drift.drifted, cleared: drift.cleared } : { error: drift.error },
-    });
-    db.exec("RELEASE tree_compression_refresh");
-    return {
-      ok: true,
-      durationMs,
-      snapshotId,
-      seedCount: snapshot.seeds.length,
-      profile: snapshot.profile,
-      sourceSignature,
-    };
+    db.exec("SAVEPOINT tree_compression_refresh");
+    try {
+      const { snapshotId } = writeTreeCompressionSnapshot(db, snapshot, sourceSignature);
+      const drift = updateTreeCompressionDrift(db);
+      const durationMs = Date.now() - started;
+      recordRun(db, TREE_COMPRESSION_RUN_KIND, "ok", durationMs, {
+        profile: snapshot.profile,
+        source_signature: sourceSignature,
+        seed_count: snapshot.seeds.length,
+        totals: snapshot.summary.totals,
+        ml_label_drift: drift.ok ? { checked: drift.checked, drifted: drift.drifted, cleared: drift.cleared } : { error: drift.error },
+      });
+      db.exec("RELEASE tree_compression_refresh");
+      return {
+        ok: true,
+        durationMs,
+        snapshotId,
+        seedCount: snapshot.seeds.length,
+        profile: snapshot.profile,
+        sourceSignature,
+      };
+    } catch (err) {
+      rollbackSavepoint(db, "tree_compression_refresh");
+      throw err;
+    }
   } catch (err) {
-    rollbackSavepoint(db, "tree_compression_refresh");
     const durationMs = Date.now() - started;
     recordRun(db, TREE_COMPRESSION_RUN_KIND, "error", durationMs, {
       source_signature: sourceSignature,
@@ -181,7 +187,7 @@ export function refreshTreeCompressionSnapshot(db, opts = {}) {
  * @param {import("better-sqlite3").Database} db
  * @param {{ maxSeeds?: number, maxDepth?: number, maxFilesPerSeed?: number }} [opts]
  */
-export function buildTreeCompressionSnapshot(db, opts = {}) {
+export async function buildTreeCompressionSnapshot(db, opts = {}) {
   const missing = missingTables(db, REQUIRED_SOURCE_TABLES);
   if (missing.length > 0) {
     return {
@@ -201,7 +207,7 @@ export function buildTreeCompressionSnapshot(db, opts = {}) {
   // TreeBuildResult shape the binary consumes. There is no Node fallback — the
   // native route is the single source of truth for tree compression.
   const tree = readScopeTreeForCompression(db);
-  return /** @type {any} */ (runAtlasNativeMethod(
+  return /** @type {any} */ (await runAtlasNativeMethodAsync(
     "tree-compression",
     {
       tree,
@@ -354,7 +360,7 @@ export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {})
   const sourceSignature = treeCompressionInputSignature(db);
   const nativeOpts = opts.nativeManager ? { manager: opts.nativeManager } : {};
   try {
-    const base = buildTreeCompressionSnapshot(db, opts);
+    const base = await buildTreeCompressionSnapshot(db, opts);
     if (!base.available) {
       throw new Error(base.reason || "tree_compression_source_unavailable");
     }
@@ -363,7 +369,7 @@ export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {})
     // limit) so no carry-forward candidate is dropped.
     const prior = readPriorMlSnapshot(db);
 
-    const input = /** @type {any} */ (runAtlasNativeMethod(
+    const input = /** @type {any} */ (await runAtlasNativeMethodAsync(
       "tree-compression-model-input",
       { snapshot: base, maxSeeds: opts.modelMaxSeeds, priorSnapshot: prior },
       nativeOpts,
@@ -395,7 +401,7 @@ export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {})
       throw new Error("tree_compression_model_annotations_missing");
     }
 
-    const enriched = /** @type {any} */ (runAtlasNativeMethod(
+    const enriched = /** @type {any} */ (await runAtlasNativeMethodAsync(
       "tree-compression-annotate",
       {
         snapshot: base,

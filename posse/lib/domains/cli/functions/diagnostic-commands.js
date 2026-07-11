@@ -590,7 +590,7 @@ export async function cmdCodexModels({ projectDir }) {
 export async function cmdMcpStatus({ projectDir, loadAtlasModule }) {
   const { getAtlasIntegrationConfig, probeAtlasGraphReadiness } = await loadAtlasModule();
   const config = getAtlasIntegrationConfig();
-  const status = probeAtlasGraphReadiness({ cwd: projectDir, config });
+  const status = await probeAtlasGraphReadiness({ cwd: projectDir, config });
   console.log(`\n  ${C.bold}MCP Runtime Status${C.reset}`);
   console.log(`  ATLAS backend: v2 native`);
   console.log(`  Configured: ${config.enabled ? `${C.green}yes${C.reset}` : `${C.yellow}no${C.reset}`}`);

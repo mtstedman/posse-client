@@ -68,9 +68,9 @@ function warnOnceDimMismatch(encoder, index) {
  *   repoRoot?: string,
  *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  * }} args
- * @returns {ReturnType<typeof okEnvelope<SymbolSearchData>> | Promise<ReturnType<typeof okEnvelope<SymbolSearchData>>>}
+ * @returns {Promise<ReturnType<typeof okEnvelope<SymbolSearchData>>>}
  */
-export function symbolSearch({
+export async function symbolSearch({
   view,
   versionId,
   params,
@@ -86,7 +86,7 @@ export function symbolSearch({
   onDemandEmbeddingFill = true,
 }) {
   const limit = typeof params.limit === "number" && params.limit > 0 ? params.limit : 50;
-  const overlayHits = rankOverlaySymbols({
+  const overlayHits = await rankOverlaySymbols({
     repoRoot,
     sessionId: /** @type {any} */ (params).sessionId,
     query: params.query,
@@ -100,67 +100,65 @@ export function symbolSearch({
   }
 
   if (params.semantic && embeddingIndex && encoder && encoder.dim === embeddingIndex.dim) {
-    return (async () => {
-      let embeddingEnsureStatus = null;
-      if (!onDemandEmbeddingFill) {
-        // Caller opted out of the bulk fill (e.g. the in-process retrieval
-        // fallback protecting the main loop): search whatever is already
-        // indexed instead of encoding the gap first.
-        embeddingEnsureStatus = { skipped: true, reason: "on_demand_fill_disabled" };
-      } else {
-        try {
-          embeddingEnsureStatus = await ensureEmbeddingsForView({
-            view,
-            index: embeddingIndex,
-            encoder,
-            repoRoot,
-            limit: 5000,
-            timeoutMs: 15000,
-          });
-        } catch (err) {
-          embeddingEnsureStatus = {
-            skipped: false,
-            incomplete: true,
-            reason: String(err?.code || err?.message || err || "encode_error"),
-          };
-          logAtlasError("[symbolSearch.ensureEmbeddingsForView] threw:", err);
-        }
+    let embeddingEnsureStatus = null;
+    if (!onDemandEmbeddingFill) {
+      // Caller opted out of the bulk fill (e.g. the in-process retrieval
+      // fallback protecting the main loop): search whatever is already
+      // indexed instead of encoding the gap first.
+      embeddingEnsureStatus = { skipped: true, reason: "on_demand_fill_disabled" };
+    } else {
+      try {
+        embeddingEnsureStatus = await ensureEmbeddingsForView({
+          view,
+          index: embeddingIndex,
+          encoder,
+          repoRoot,
+          limit: 5000,
+          timeoutMs: 15000,
+        });
+      } catch (err) {
+        embeddingEnsureStatus = {
+          skipped: false,
+          incomplete: true,
+          reason: String(err?.code || err?.message || err || "encode_error"),
+        };
+        logAtlasError("[symbolSearch.ensureEmbeddingsForView] threw:", err);
       }
-      const ensuredResult = await hybridSearch({
-        view,
-        query: params.query,
-        ledger,
-        repoId,
-        embeddingIndex,
-        encoder,
-        options: {
-          semantic: true,
-          taskText,
-          taskType,
-          limit,
-          feedbackHalfLifeDays,
-          entities: normalizeEntities(/** @type {any} */ (params).entities),
-          searchScope: normalizeSearchScope(/** @type {any} */ (params).scope),
-          planner,
-        },
-      });
-      return buildEnvelope({
-        view,
-        result: ensuredResult,
-        versionId,
+    }
+    const ensuredResult = await hybridSearch({
+      view,
+      query: params.query,
+      ledger,
+      repoId,
+      embeddingIndex,
+      encoder,
+      options: {
+        semantic: true,
+        taskText,
+        taskType,
         limit,
-        query: params.query,
-        semanticRequested: true,
-        encoder,
-        overlayHits,
-        ledger,
-        repoId,
-        embeddingEnsureStatus,
-      });
-    })();
+        feedbackHalfLifeDays,
+        entities: normalizeEntities(/** @type {any} */ (params).entities),
+        searchScope: normalizeSearchScope(/** @type {any} */ (params).scope),
+        planner,
+      },
+    });
+    return await buildEnvelope({
+      view,
+      result: ensuredResult,
+      versionId,
+      limit,
+      query: params.query,
+      semanticRequested: true,
+      encoder,
+      overlayHits,
+      ledger,
+      repoId,
+      embeddingEnsureStatus,
+    });
   }
 
-  const result = hybridSearch({
+  const result = await hybridSearch({
     view,
     query: params.query,
     ledger,
@@ -178,12 +176,7 @@ export function symbolSearch({
       planner,
     },
   });
-  if (result && typeof (/** @type {any} */ (result)).then === "function") {
-    return /** @type {Promise<HybridSearchResult>} */ (result).then((r) =>
-      buildEnvelope({ view, result: r, versionId, limit, query: params.query, semanticRequested: !!params.semantic, encoder, overlayHits, ledger, repoId, embeddingEnsureStatus: null }),
-    );
-  }
-  return buildEnvelope({
+  return await buildEnvelope({
     view,
     result: /** @type {HybridSearchResult} */ (result),
     versionId,
@@ -199,9 +192,9 @@ export function symbolSearch({
 }
 
 /**
- * @param {{ view: View, result: HybridSearchResult, versionId: string, limit: number, query: string, semanticRequested?: boolean, encoder?: EmbeddingEncoder, overlayHits?: Array<ReturnType<typeof overlayHit>>, ledger?: Ledger, repoId?: string | null, embeddingEnsureStatus?: any }} args
+ * @param {{ view: View, result: HybridSearchResult, versionId: string, limit: number, query: string, semanticRequested?: boolean, encoder?: EmbeddingEncoder, overlayHits?: Array<Awaited<ReturnType<typeof overlayHit>>>, ledger?: Ledger, repoId?: string | null, embeddingEnsureStatus?: any }} args
  */
-function buildEnvelope({ view, result, versionId, limit, query, semanticRequested = false, encoder, overlayHits = [], ledger, repoId, embeddingEnsureStatus = null }) {
+async function buildEnvelope({ view, result, versionId, limit, query, semanticRequested = false, encoder, overlayHits = [], ledger, repoId, embeddingEnsureStatus = null }) {
   const durableItems = result.items
     .filter((entry) => isDefaultVisibleSymbol(entry.payload) || isExplicitLiteralSymbolQuery(query, entry.payload))
     .map((entry, index) => {
@@ -291,7 +284,7 @@ function buildEnvelope({ view, result, versionId, limit, query, semanticRequeste
   if (process.env.POSSE_ATLAS_DISAMBIG !== "0") {
     const disambiguation = detectNameCollisions(visibleItems);
     if (disambiguation.length > 0) meta.disambiguation = disambiguation;
-    annotateReachability({ view, hits: visibleItems, limit: 5 });
+    await annotateReachability({ view, hits: visibleItems, limit: 5 });
     annotateLiveness({ hits: visibleItems, limit: 5 });
     const trust = buildRetrievalTrustCaution({ disambiguation, separation: result.separation });
     if (trust) {
@@ -373,7 +366,7 @@ export function buildRetrievalTrustCaution({ disambiguation = [], separation = n
  *
  * @param {{ view: View, hits: import("../contracts/tool-results.js").SymbolHit[], limit?: number }} args
  */
-function annotateReachability({ view, hits, limit = 5 }) {
+async function annotateReachability({ view, hits, limit = 5 }) {
   try {
     if (!view?.query || typeof view.query.getByContentLocal !== "function") return;
     if (!Array.isArray(hits)) return;
@@ -381,10 +374,10 @@ function annotateReachability({ view, hits, limit = 5 }) {
       try {
         const parsed = parseSymbolId(hit?.symbolId);
         if (!parsed) continue;
-        const target = view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
+        const target = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
         if (!target || target.global_id == null) continue;
-        const raw = countIncomingCallers(view, target, { sampleLimit: 0, distinctPaths: false });
-        const distinct = countIncomingCallers(view, target, { sampleLimit: 3, distinctPaths: true });
+        const raw = await countIncomingCallers(view, target, { sampleLimit: 0, distinctPaths: false });
+        const distinct = await countIncomingCallers(view, target, { sampleLimit: 3, distinctPaths: true });
         /** @type {any} */ (hit).reachability = {
           callerCount: distinct.callerCount,
           callerFileCount: distinct.callerCount,
@@ -514,9 +507,9 @@ function schedulePrefetchTopCards(args) {
       items: targets,
     },
   };
-  queueMicrotask(() => {
+  queueMicrotask(async () => {
     try {
-      prefetchTopCards(job);
+      await prefetchTopCards(job);
     } catch {
       // Predictive warming must never affect retrieval.
     }
@@ -527,7 +520,7 @@ function schedulePrefetchTopCards(args) {
 /**
  * @param {{ view: View, result: HybridSearchResult, versionId: string, ledger?: Ledger, repoId?: string | null }} args
  */
-function prefetchTopCards({ view, result, versionId, ledger, repoId }) {
+async function prefetchTopCards({ view, result, versionId, ledger, repoId }) {
   const effectiveRepoId = effectiveRepo(repoId);
   const minCallConfidence = getEffectivePolicy(ledger, effectiveRepoId).defaultMinCallConfidence;
   const cache = getRetrievalCache();
@@ -557,7 +550,7 @@ function prefetchTopCards({ view, result, versionId, ledger, repoId }) {
       }
       try {
         const started = Date.now();
-        const card = buildSymbolCard({
+        const card = await buildSymbolCard({
           symbol,
           view,
           detail: "compact",
@@ -610,10 +603,15 @@ function effectiveRepo(repoId) {
 /**
  * @param {{ repoRoot?: string, sessionId?: string, query: string, limit: number }} args
  */
-function rankOverlaySymbols({ repoRoot, sessionId, query, limit }) {
+async function rankOverlaySymbols({ repoRoot, sessionId, query, limit }) {
   if (!repoRoot) return [];
-  return getOverlaySymbols({ repoRoot, sessionId })
-    .map(({ entry, symbol }) => overlayHit({ entry, symbol, query }))
+  // Resolve every overlay score first (the native scorer is async and the
+  // worker is serial), then filter/sort — never await inside a comparator.
+  const hits = [];
+  for (const { entry, symbol } of await getOverlaySymbols({ repoRoot, sessionId })) {
+    hits.push(await overlayHit({ entry, symbol, query }));
+  }
+  return hits
     .filter((hit) => (hit.score || 0) > 0.1)
     .sort((a, b) => (b.score || 0) - (a.score || 0) || a.name.localeCompare(b.name))
     .slice(0, limit);
@@ -622,14 +620,14 @@ function rankOverlaySymbols({ repoRoot, sessionId, query, limit }) {
 /**
  * @param {{ entry: import("./buffer.js").OverlayEntry, symbol: import("../contracts/api.js").ViewSymbol, query: string }} args
  */
-function overlayHit({ entry, symbol, query }) {
+async function overlayHit({ entry, symbol, query }) {
   const hit = symbolHit(symbol);
   // Native scorer unavailable must not fail the search (this runs BEFORE the
   // durable hybridSearch); the floor score keeps the overlay symbol visible
   // with neutral ranking until the binary is back.
   let score = 0.1;
   try {
-    score = Math.min(1, Math.max(0.1, lexicalScore(query, symbol)));
+    score = Math.min(1, Math.max(0.1, await lexicalScore(query, symbol)));
   } catch { /* degrade to the floor score */ }
   hit.score = score;
   /** @type {any} */ (hit).overlay = true;

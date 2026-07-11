@@ -15,18 +15,18 @@ import { okEnvelope } from "./envelope.js";
 
 /**
  * @param {{ view: View, versionId: string, params: EditPlanParams }} args
- * @returns {ReturnType<typeof okEnvelope<EditPlanData>>}
+ * @returns {Promise<ReturnType<typeof okEnvelope<EditPlanData>>>}
  */
-export function editPlan({ view, versionId, params }) {
+export async function editPlan({ view, versionId, params }) {
   const maxEdits = clampInt(params.maxEdits, 1, 500, 25);
   const operation = normalizeOperation(params.operation, params);
   const warnings = [];
-  const symbols = resolveSymbols({ view, params, warnings });
+  const symbols = await resolveSymbols({ view, params, warnings });
   const explicitFiles = new Set((params.targetFiles || []).filter(isCanonicalRepoPath));
   const files = new Set(explicitFiles);
   for (const symbol of symbols) files.add(symbol.repo_rel_path);
   if (files.size === 0 && params.search) {
-    for (const symbol of view.query.findSymbol(params.search, { fuzzy: true, limit: Math.min(maxEdits, 25) })) {
+    for (const symbol of await view.query.findSymbol(params.search, { fuzzy: true, limit: Math.min(maxEdits, 25) })) {
       symbols.push(symbol);
       files.add(symbol.repo_rel_path);
     }
@@ -81,9 +81,9 @@ export function editPlan({ view, versionId, params }) {
 
 /**
  * @param {{ view: View, params: EditPlanParams, warnings: string[] }} args
- * @returns {ViewSymbol[]}
+ * @returns {Promise<ViewSymbol[]>}
  */
-function resolveSymbols({ view, params, warnings }) {
+async function resolveSymbols({ view, params, warnings }) {
   /** @type {ViewSymbol[]} */
   const out = [];
   const seen = new Set();
@@ -98,7 +98,7 @@ function resolveSymbols({ view, params, warnings }) {
       warnings.push(`Ignored malformed target symbol: ${id}`);
       continue;
     }
-    const symbol = view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
+    const symbol = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
     if (symbol) add(symbol);
     else warnings.push(`Target symbol was not found in the current view: ${id}`);
   }
@@ -107,7 +107,7 @@ function resolveSymbols({ view, params, warnings }) {
       warnings.push(`Ignored non-canonical target file: ${filePath}`);
       continue;
     }
-    for (const symbol of view.query.symbolsInFile(filePath)) add(symbol);
+    for (const symbol of await view.query.symbolsInFile(filePath)) add(symbol);
   }
   return out;
 }

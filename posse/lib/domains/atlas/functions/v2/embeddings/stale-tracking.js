@@ -57,7 +57,7 @@ export const PRUNE_KEEP_SCAN_LIMIT = 100_000;
 
 export async function pruneEmbeddingIndexToCurrentView({ base, view, index, extraKeepKeys = [] }) {
   if (!view || typeof index?.pruneToKeys !== "function") return;
-  const symbols = view.query.allSymbols({ limit: PRUNE_KEEP_SCAN_LIMIT });
+  const symbols = await view.query.allSymbols({ limit: PRUNE_KEEP_SCAN_LIMIT });
   if (symbols.length >= PRUNE_KEEP_SCAN_LIMIT) {
     // The keep-set is TRUNCATED: global_id assignment shifts across full view
     // rebuilds, so pruning against a moving 100k window deletes the displaced

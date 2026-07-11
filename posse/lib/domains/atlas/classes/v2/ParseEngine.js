@@ -11,7 +11,7 @@
 //     clone-from-main, fall back to building fresh from the ledger.
 //   * cleanupWiView(...) / cleanupWiViewAsync(...) — delete the warmed
 //     file and (optionally) the worktree's mounted view.
-//   * replayMerge(...) — sync; called at merge-to-main time. Wraps
+//   * replayMerge(...) — async; called at merge-to-main time. Wraps
 //     Ledger.replayPartition with a small bit of branch-status
 //     bookkeeping.
 //
@@ -327,11 +327,12 @@ export class ParseEngine {
   }
 
   // Idempotent default-branch init. Cheap on the hot path: one
-  // getBranch lookup; first call may also issue ensureRootBranch.
-  #ensureDefaultBranch() {
+  // getBranch lookup; first call may also issue ensureRootBranch
+  // (an awaited native-worker write).
+  async #ensureDefaultBranch() {
     if (this.#defaultBranchEnsured) return;
     if (!this.#ledger.getBranch(this.#defaultBranch) && typeof this.#ledger.ensureRootBranch === "function") {
-      this.#ledger.ensureRootBranch(this.#defaultBranch);
+      await this.#ledger.ensureRootBranch(this.#defaultBranch);
     }
     this.#defaultBranchEnsured = true;
   }
@@ -683,7 +684,7 @@ export class ParseEngine {
     };
     try {
       await this.#emitStage("initializing", `warming ${purpose}`);
-      this.#ensureDefaultBranch();
+      await this.#ensureDefaultBranch();
       // Phase 0: consume any `.scip` files staged for this repo. Under the
       // layer model SCIP and tree-sitter each write their OWN source layer
       // (no flat first-writer-wins), so this ordering is no longer load-bearing
@@ -799,7 +800,7 @@ export class ParseEngine {
   }
 
   // ---------------------------------------------------------------------------
-  // Synchronous ops (called inline by Workstream E hooks)
+  // Mount/cleanup/replay ops (called inline by Workstream E hooks)
   // ---------------------------------------------------------------------------
 
   /**
@@ -811,12 +812,12 @@ export class ParseEngine {
    *   ledgerBranch?: string,
    *   worktreePath: string,
    * }} args
-   * @returns {{ from: "warmed" | "main-clone" | "ledger-build" | "none", viewPath: string | null }}
+   * @returns {Promise<{ from: "warmed" | "main-clone" | "ledger-build" | "none", viewPath: string | null }>}
    */
-  mountForWorktree({ workItemId, ledgerBranch, worktreePath }) {
+  async mountForWorktree({ workItemId, ledgerBranch, worktreePath }) {
     if (workItemId == null) throw new TypeError("mountForWorktree: workItemId is required");
     if (!worktreePath) throw new TypeError("mountForWorktree: worktreePath is required");
-    this.#ensureDefaultBranch();
+    await this.#ensureDefaultBranch();
     const dest = worktreeViewPath(worktreePath);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     const warmed = warmedViewPath(this.#repoRoot, workItemId);
@@ -910,7 +911,7 @@ export class ParseEngine {
     // Last resort: build a view directly from the ledger. Slower, but
     // guarantees a usable view file even on a cold repo.
     const atSeq = this.#ledger.headSeq(targetBranch);
-    this.#builder.buildFrom({
+    await this.#builder.buildFrom({
       ledger: this.#ledger,
       branch: targetBranch,
       atSeq,
@@ -921,9 +922,9 @@ export class ParseEngine {
   }
 
   /**
-   * Async gate wrapper for mountForWorktree. The underlying view and ledger
-   * operations are synchronous SQLite/file work, so worker paths should await
-   * this method to share the same contention contract as ATLAS's other writes.
+   * Gate wrapper for mountForWorktree: serializes the mount against ATLAS's
+   * other writes on the same view path (worker paths should await this method
+   * rather than calling mountForWorktree directly).
    *
    * @param {{
    *   workItemId: number | string,
@@ -951,11 +952,11 @@ export class ParseEngine {
    *   worktreePath?: string,
    *   markBranchAbandoned?: boolean,
    * }} args
-   * @returns {{ removed: string[] }}
+   * @returns {Promise<{ removed: string[] }>}
    */
-  cleanupWiView({ workItemId, worktreePath, markBranchAbandoned = false }) {
+  async cleanupWiView({ workItemId, worktreePath, markBranchAbandoned = false }) {
     if (workItemId == null) throw new TypeError("cleanupWiView: workItemId is required");
-    this.#ensureDefaultBranch();
+    await this.#ensureDefaultBranch();
     /** @type {string[]} */
     const removed = [];
     const targets = [warmedViewPath(this.#repoRoot, workItemId)];
@@ -973,7 +974,7 @@ export class ParseEngine {
       const branchName = ledgerBranchForWi(workItemId);
       const rec = this.#ledger.getBranch(branchName);
       if (rec && rec.status === "active") {
-        this.#ledger.setBranchStatus(branchName, "abandoned");
+        await this.#ledger.setBranchStatus(branchName, "abandoned");
       }
     }
     return { removed };
@@ -1006,17 +1007,17 @@ export class ParseEngine {
    *   fromSeq?: number,
    *   markMerged?: boolean,
    * }} args
-   * @returns {{ entries: LedgerEntry[] }}
+   * @returns {Promise<{ entries: LedgerEntry[] }>}
    */
-  replayMerge({ branch, ontoBranch = null, fromSeq = 0, markMerged = true }) {
+  async replayMerge({ branch, ontoBranch = null, fromSeq = 0, markMerged = true }) {
     if (!branch) throw new TypeError("replayMerge: branch is required");
-    this.#ensureDefaultBranch();
+    await this.#ensureDefaultBranch();
     const targetBranch = ontoBranch || this.#defaultBranch;
-    const entries = this.#ledger.replayPartition(branch, targetBranch, fromSeq);
+    const entries = await this.#ledger.replayPartition(branch, targetBranch, fromSeq);
     if (markMerged) {
       const rec = this.#ledger.getBranch(branch);
       if (rec && rec.status === "active") {
-        this.#ledger.setBranchStatus(branch, "merged");
+        await this.#ledger.setBranchStatus(branch, "merged");
       }
     }
     return { entries };
@@ -1108,7 +1109,7 @@ export class ParseEngine {
 
     try {
       await this.#emitStage("merge", `replaying ${sourceBranch} onto ${ontoBranch}`);
-      const entries = await this.#ledger.replayPartitionAsync(
+      const entries = await this.#ledger.replayPartition(
         sourceBranch,
         ontoBranch,
         Number(payload.from_seq || 0),
@@ -1117,7 +1118,7 @@ export class ParseEngine {
       const rec = this.#ledger.getBranch(sourceBranch);
       if (rec && rec.status === "active") {
         await this.#emitStage("merge", `marking ${sourceBranch} merged`);
-        await this.#ledger.setBranchStatusAsync(sourceBranch, "merged", {
+        await this.#ledger.setBranchStatus(sourceBranch, "merged", {
           label: "Warmer.replayMerge.setBranchStatus",
         });
       }
@@ -1148,7 +1149,7 @@ export class ParseEngine {
       const rec = this.#ledger.getBranch(sourceBranch);
       if (rec && rec.status === "active") {
         await this.#emitStage("merge", `marking ${sourceBranch} merged`);
-        await this.#ledger.setBranchStatusAsync(sourceBranch, "merged", {
+        await this.#ledger.setBranchStatus(sourceBranch, "merged", {
           label: "Warmer.replayMerge.idempotentSetBranchStatus",
         });
       }
@@ -1206,7 +1207,7 @@ export class ParseEngine {
         try {
           await this.#emitStage("view", `checking existing view ${path.basename(outPath)}`);
           const existing = View.mount({ dbPath: outPath });
-          try { existingMeta = existing.meta(); }
+          try { existingMeta = existing.metaLocal(); }
           finally { existing.close(); }
         } catch {
           // Corrupt / partial file — fall through and rebuild from ledger.
@@ -1272,7 +1273,7 @@ export class ParseEngine {
           }
           const cloned = View.mount({ dbPath: outPath });
           try {
-            const meta = cloned.meta();
+            const meta = cloned.metaLocal();
             base.view_written = outPath;
             base.view_etag = meta.built_at;
           } finally {
@@ -1637,7 +1638,7 @@ export class ParseEngine {
           progress_total: 1,
         });
         view = View.mount({ dbPath: outPath, mode: "readwrite" });
-        const meta = view.meta();
+        const meta = view.metaLocal();
         if (meta.branch !== branch) {
           // Branch swap — incremental is unsafe across branches; do a full rebuild.
           try { view.close(); } catch { /* ignore */ }
@@ -1661,7 +1662,7 @@ export class ParseEngine {
         if (entries.length === 0) {
           base.view_written = outPath;
           base.view_etag = meta.built_at;
-          embeddingScope = this.#embeddingScopeForEntries({
+          embeddingScope = await this.#embeddingScopeForEntries({
             view,
             entries,
             previousLedgerSeq,
@@ -1709,7 +1710,7 @@ export class ParseEngine {
           }
           base.view_written = outPath;
           base.view_etag = updated.built_at;
-          embeddingScope = this.#embeddingScopeForEntries({
+          embeddingScope = await this.#embeddingScopeForEntries({
             view,
             entries,
             previousLedgerSeq,
@@ -1959,7 +1960,7 @@ export class ParseEngine {
           const before = snapshot.get(repo_rel_path);
           if (before) {
             recordStaleEmbeddingHash(base, before);
-            await this.#ledger.appendAsync({
+            await this.#ledger.append({
               branch,
               op: "remove",
               repo_rel_path,
@@ -2063,7 +2064,7 @@ export class ParseEngine {
             language: pathLanguage,
           });
           parsed = fileBytes && typeof /** @type {any} */ (this.#parser).parseBuffer === "function"
-            ? /** @type {any} */ (this.#parser).parseBuffer({ bytes: fileBytes, repo_rel_path })
+            ? await /** @type {any} */ (this.#parser).parseBuffer({ bytes: fileBytes, repo_rel_path })
             : await this.#parser.parseFile({ absPath, repoRoot: this.#repoRoot });
         } catch (err) {
           logAtlasError(`[Warmer.#indexPaths] parse failed for ${repo_rel_path}:`, err);
@@ -2094,7 +2095,7 @@ export class ParseEngine {
             try { layerByteSize = fs.statSync(absPath).size; }
             catch { layerByteSize = 0; }
           }
-          await this.#ledger.ingestBlobLayerAsync({
+          await this.#ledger.ingestBlobLayer({
             content_hash: parsed.content_hash,
             lang: parsed.lang,
             byte_size: layerByteSize,
@@ -2105,7 +2106,7 @@ export class ParseEngine {
           base.blobs_ingested++;
         } else {
         if (before === parsed.content_hash && ledgerHasCurrentParsedBlob(this.#ledger, parsed.content_hash, { layerMerge: this.#viewLayerMerge })) {
-          if (mergeExistingScipRows && typeof /** @type {any} */ (this.#ledger).mergeBlobParseRowsAsync === "function") {
+          if (mergeExistingScipRows && typeof /** @type {any} */ (this.#ledger).mergeBlobParseRows === "function") {
             await reportIndexProgress(repo_rel_path, {
               force: true,
               stage: "writing ledger",
@@ -2113,7 +2114,7 @@ export class ParseEngine {
               text: `merging parser rows ${ordinal}/${total} ${repo_rel_path}`,
               language: pathLanguage,
             });
-            const merged = await /** @type {any} */ (this.#ledger).mergeBlobParseRowsAsync(parsed, {
+            const merged = await /** @type {any} */ (this.#ledger).mergeBlobParseRows(parsed, {
               label: "Warmer.mergeBlobParseRows",
             });
             if (Number(merged?.inserted_symbols || 0) > 0 || Number(merged?.inserted_edges || 0) > 0) {
@@ -2152,7 +2153,7 @@ export class ParseEngine {
             text: `ingesting blob ${ordinal}/${total} ${repo_rel_path}`,
             language: pathLanguage,
           });
-          await this.#ledger.ingestBlobAsync({
+          await this.#ledger.ingestBlob({
             content_hash: parsed.content_hash,
             lang: parsed.lang,
             byte_size,
@@ -2177,7 +2178,7 @@ export class ParseEngine {
           language: pathLanguage,
         });
         if (before) recordStaleEmbeddingHash(base, before);
-        await this.#ledger.appendAsync({
+        await this.#ledger.append({
           branch,
           op: before ? "modify" : "add",
           repo_rel_path,
@@ -2200,9 +2201,9 @@ export class ParseEngine {
    * produce no symbols here and are handled by stale-hash pruning.
    *
    * @param {{ view: View, entries: any[], previousLedgerSeq: number, nextLedgerSeq: number }} args
-   * @returns {EmbeddingIngestScope}
+   * @returns {Promise<EmbeddingIngestScope>}
    */
-  #embeddingScopeForEntries({ view, entries, previousLedgerSeq, nextLedgerSeq }) {
+  async #embeddingScopeForEntries({ view, entries, previousLedgerSeq, nextLedgerSeq }) {
     /** @type {Map<string, string | null>} */
     const latestAfterByPath = new Map();
     for (const entry of Array.isArray(entries) ? entries : []) {
@@ -2216,7 +2217,7 @@ export class ParseEngine {
     const seen = new Set();
     for (const [repoRelPath, contentHash] of latestAfterByPath.entries()) {
       if (!contentHash) continue;
-      const symbols = view.query.symbolsInFile(repoRelPath)
+      const symbols = (await view.query.symbolsInFile(repoRelPath))
         .filter((symbol) => symbol.content_hash === contentHash);
       for (const symbol of symbols) {
         const key = `${symbol.content_hash}\0${symbol.local_id}`;
@@ -2519,7 +2520,7 @@ export class ParseEngine {
   async #writeEmbeddingWatermark({ index, view, viewPath, key }) {
     if (typeof index?.setEmbeddingWatermark !== "function") return;
     try {
-      const meta = view.meta();
+      const meta = view.metaLocal();
       await index.setEmbeddingWatermark(key, {
         view_path: path.resolve(viewPath),
         branch: meta.branch,
@@ -2538,18 +2539,21 @@ export class ParseEngine {
 
   /**
    * @param {{ view: View, base: AtlasWarmJobResult }} args
-   * @returns {string[]}
+   * @returns {Promise<string[]>}
    */
-  #staleHashesSafeToPrune({ view, base }) {
+  async #staleHashesSafeToPrune({ view, base }) {
     const hasContentHash = /** @type {any} */ (view.query).hasContentHash;
     if (typeof hasContentHash !== "function") return [];
-    return staleEmbeddingHashes(base).filter((hash) => {
+    /** @type {string[]} */
+    const safe = [];
+    for (const hash of staleEmbeddingHashes(base)) {
       try {
-        return !hasContentHash.call(view.query, hash);
+        if (!(await hasContentHash.call(view.query, hash))) safe.push(hash);
       } catch {
-        return false;
+        // Liveness unknown — keep the vectors rather than over-pruning.
       }
-    });
+    }
+    return safe;
   }
 
   /**
@@ -2561,9 +2565,9 @@ export class ParseEngine {
    * (housekeeping retries next warm) rather than pruning a live view's keys.
    *
    * @param {string} currentViewPath
-   * @returns {{ ok: true, keys: Array<{ content_hash: string, local_id: number }> } | { ok: false, reason: string }}
+   * @returns {Promise<{ ok: true, keys: Array<{ content_hash: string, local_id: number }> } | { ok: false, reason: string }>}
    */
-  #collectSiblingViewKeepKeys(currentViewPath) {
+  async #collectSiblingViewKeepKeys(currentViewPath) {
     const current = path.resolve(String(currentViewPath || ""));
     /** @type {string[]} */
     const candidates = [];
@@ -2586,7 +2590,7 @@ export class ParseEngine {
       let sibling = null;
       try {
         sibling = View.mount({ dbPath: candidate, mode: "readonly" });
-        const symbols = sibling.query.allSymbols({ limit: 100_000 });
+        const symbols = await sibling.query.allSymbols({ limit: 100_000 });
         if (symbols.length >= 100_000) {
           // A truncated sibling keep-set would prune that view's tail — same
           // sliding-window churn the keep-cap guard prevents for the current
@@ -2756,7 +2760,7 @@ export class ParseEngine {
         await pruneStaleEmbeddingHashes({
           base,
           index: resources.index,
-          hashes: this.#staleHashesSafeToPrune({ view, base }),
+          hashes: await this.#staleHashesSafeToPrune({ view, base }),
         });
         recordEmbeddingForensics("warmer.embeddings.prune_stale_hashes.done", {
           view_path: viewPath,
@@ -2770,7 +2774,7 @@ export class ParseEngine {
           base,
         });
       } else {
-        const siblings = this.#collectSiblingViewKeepKeys(viewPath);
+        const siblings = await this.#collectSiblingViewKeepKeys(viewPath);
         if (siblings.ok) {
           // Full scope: prune-to-view SUBSUMES the stale-hash prune — any
           // stale key absent from every live view falls out of the union
@@ -2797,7 +2801,7 @@ export class ParseEngine {
           await pruneStaleEmbeddingHashes({
             base,
             index: resources.index,
-            hashes: this.#staleHashesSafeToPrune({ view, base }),
+            hashes: await this.#staleHashesSafeToPrune({ view, base }),
           });
           recordEmbeddingForensics("warmer.embeddings.prune_stale_hashes.done", {
             view_path: viewPath,

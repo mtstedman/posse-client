@@ -73,7 +73,17 @@ export async function ensureNativeBinaryArtifact({
   if (!authManager?.getTrustedAuthPolicy || !authManager?.hasLaunchKey?.()) {
     throw artifactError("POSSE_ARTIFACT_AUTH_UNAVAILABLE", "native artifact download requires Posse authentication");
   }
-  const selected = nativeArtifactCachePath({ cacheRoot, name, version, os: osToken, arch });
+  const policy = authManager.getTrustedAuthPolicy();
+  if (!policy?.origin) throw artifactError("POSSE_ARTIFACT_AUTH_UNAVAILABLE", "trusted native artifact origin is unavailable");
+  const broker = pulseTokens || new PulseTokenManager({ authManager, fetchImpl });
+  const pulse = await broker.getPulseEnvelope({ requiredRoute: ARTIFACT_ROUTE_GRANT });
+  if (!pulse?.token) throw artifactError("POSSE_ARTIFACT_AUTH_UNAVAILABLE", "native artifact pulse could not be minted");
+  const issuedVersion = String(pulse.nativeArtifacts?.[nativeBinaryEntry(name)?.package] || "").trim();
+  const selectedVersion = issuedVersion || String(version || "").trim();
+  if (!selectedVersion) {
+    throw artifactError("POSSE_ARTIFACT_VERSION_UNAVAILABLE", "heartbeat did not issue a native artifact version");
+  }
+  const selected = nativeArtifactCachePath({ cacheRoot, name, version: selectedVersion, os: osToken, arch });
   if (!selected) throw artifactError("POSSE_ARTIFACT_PLATFORM_UNSUPPORTED", "native artifact is unavailable for this platform");
 
   const cachedSha = await verifiedCachedArtifact(selected.binaryPath, selected.checksumPath);
@@ -81,11 +91,6 @@ export async function ensureNativeBinaryArtifact({
     return { ...selected, sha256: cachedSha, source: "cache", downloaded: false };
   }
 
-  const policy = authManager.getTrustedAuthPolicy();
-  if (!policy?.origin) throw artifactError("POSSE_ARTIFACT_AUTH_UNAVAILABLE", "trusted native artifact origin is unavailable");
-  const broker = pulseTokens || new PulseTokenManager({ authManager, fetchImpl });
-  const pulse = await broker.getPulseEnvelope({ requiredRoute: ARTIFACT_ROUTE_GRANT });
-  if (!pulse?.token) throw artifactError("POSSE_ARTIFACT_AUTH_UNAVAILABLE", "native artifact pulse could not be minted");
   const url = `${policy.origin}/v1/native/artifacts/${encodeURIComponent(selected.package)}/${encodeURIComponent(selected.version)}/${encodeURIComponent(osToken)}/${encodeURIComponent(arch)}`;
   broker.assertTrustedResourceUrl(url, "native artifact download");
 

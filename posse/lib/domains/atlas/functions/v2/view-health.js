@@ -90,7 +90,10 @@ export function openViewWithMeta(dbPath, ViewClass, options = {}) {
   let view = null;
   try {
     view = ViewClass.mount({ dbPath, mode: options.mode || "readonly" });
-    const meta = view.meta();
+    // This probe mounts the handle itself, so the local (in-process) meta read
+    // applies; View.meta() is daemon-routed and async. Stub ViewClasses without
+    // metaLocal keep their sync meta().
+    const meta = typeof view.metaLocal === "function" ? view.metaLocal() : view.meta();
     return { ok: true, exists: true, dbPath, view, meta, error: null };
   } catch (err) {
     try { view?.close?.(); } catch { /* ignore close failures while probing */ }

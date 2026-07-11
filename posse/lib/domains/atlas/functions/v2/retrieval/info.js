@@ -22,13 +22,13 @@ import { branchFromVersion } from "./version.js";
  *   viewPath?: string | null,
  * }} args
  */
-export function info({ versionId, params = {}, view, ledger, repoRoot, repoId, viewPath }) {
+export async function info({ versionId, params = {}, view, ledger, repoRoot, repoId, viewPath }) {
   const root = repoRoot ? path.resolve(repoRoot) : null;
   const liveLedgerPath = ledgerPathOf(ledger);
   const ledgerPath = liveLedgerPath || (root ? ledgerDbPath(root) : null);
   const mainPath = root ? mainViewPath(root) : null;
   const worktreePath = root ? worktreeViewPath(root) : null;
-  const meta = safeViewMeta(view);
+  const meta = await safeViewMeta(view);
   const branch = meta?.branch || branchFromVersion(versionId);
   const ledgerHead = branch && ledger && typeof /** @type {any} */ (ledger).headSeq === "function"
     ? safeHeadSeq(ledger, branch)
@@ -103,10 +103,10 @@ function ledgerPathOf(ledger) {
   }
 }
 
-function safeViewMeta(view) {
+async function safeViewMeta(view) {
   try {
     return typeof /** @type {any} */ (view)?.meta === "function"
-      ? /** @type {any} */ (view).meta()
+      ? await /** @type {any} */ (view).meta()
       : null;
   } catch {
     return null;

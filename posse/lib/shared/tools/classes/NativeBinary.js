@@ -120,11 +120,12 @@ export class NativeBinary {
    *   env?: NodeJS.ProcessEnv,
    *   nativeAuthManager?: import("../../native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
    *   pulseManager?: import("../../native/classes/PulseTokenManager.js").PulseTokenManager,
+   *   exactVersion?: string | null,
    *   spawnImpl?: typeof spawn,
    *   spawnSyncImpl?: typeof spawnSync,
    * }} args
    */
-  constructor({ name, binRoot, platform, arch, env, nativeAuthManager, pulseManager, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
+  constructor({ name, binRoot, platform, arch, env, nativeAuthManager, pulseManager, exactVersion = undefined, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
     if (!name) throw new TypeError("NativeBinary: name is required");
     this.name = name;
     this._binRoot = binRoot || null;
@@ -150,7 +151,7 @@ export class NativeBinary {
     this._workerAuthState = new Map();
     this.keyGated = nativeBinaryIsKeyGated(name);
     this.workerCapable = nativeBinaryIsWorkerCapable(name);
-    this.exactVersion = nativeBinaryExactVersion(name);
+    this.exactVersion = exactVersion === undefined ? nativeBinaryExactVersion(name) : exactVersion;
     this._versionProbe = null;
     /** @type {import("./daemon/index.js").Daemon | null} */
     this._daemon = null;
@@ -296,7 +297,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {{ input?: Buffer | string, json?: boolean, timeoutMs?: number, signal?: AbortSignal, requiredRoute?: string, workerFallback?: boolean }} opts
+   * @param {{ input?: Buffer | string, json?: boolean, timeoutMs?: number, signal?: AbortSignal, requiredRoute?: string, workerFallback?: boolean, idempotent?: boolean }} opts
    * @returns {Promise<RunResult>}
    */
   async #runViaWorker(subcommand, args, opts) {
@@ -336,11 +337,13 @@ export class NativeBinary {
       // host is (re)seeded by the request-borne pulse on its next dispatch.
       this.#clearWorkerAuthState();
     }
-    if (response?._transportGone === true && requestOpts.signal?.aborted !== true) {
-      // Host died/retired under this request. Everything routed through the
-      // worker is read-only/idempotent by the WORKER_ELIGIBLE contract
-      // (invoke.js), so one transparent retry on the replacement host is safe
-      // and keeps the fast path instead of degrading to a per-call spawn.
+    if (response?._transportGone === true && requestOpts.signal?.aborted !== true && opts.idempotent !== false) {
+      // Host died/retired under this request. Reads and idempotent methods
+      // take one transparent retry on the replacement host, which keeps the
+      // fast path instead of degrading to a per-call spawn. Non-idempotent
+      // calls (ledger writes pass `idempotent: false`) skip the retry — the
+      // lost host may have committed before dying, so the caller must see
+      // the failure rather than risk a double-apply.
       response = await this.#daemon().request(envelope, {
         signal: requestOpts.signal,
         timeoutMs: requestOpts.timeoutMs,

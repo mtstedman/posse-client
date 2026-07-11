@@ -47,7 +47,7 @@ export async function ensureEmbeddingsForView({
   }
 
   const symbolsLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100_000) : 5000;
-  const symbols = view.query.allSymbols({ limit: symbolsLimit });
+  const symbols = await view.query.allSymbols({ limit: symbolsLimit });
   // The scan limit is part of the identity: a full reconcile (100k) joining a
   // lazy 5k run would inherit a result that scanned a fraction of its scope
   // and clear the inflight breadcrumb as if parity had been checked.
@@ -167,7 +167,7 @@ export async function resumeEmbeddingsSlice({
   const interruptedKeys = Array.isArray(inflight?.keys) ? inflight.keys.length : 0;
 
   const symbolsLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100_000) : 100_000;
-  const symbols = view.query.allSymbols({ limit: symbolsLimit });
+  const symbols = await view.query.allSymbols({ limit: symbolsLimit });
   const missing = await missingSymbols({ index, symbols });
   if (missing.length === 0) {
     if (typeof index?.clearEncoding === "function") await index.clearEncoding();
@@ -340,11 +340,16 @@ function inFlightKey({ view, index, encoder }) {
 }
 
 /**
+ * Stays synchronous: the caller mounted this view handle in-process, so the
+ * local meta read applies. `meta()` is daemon-routed (async) and unusable here.
+ *
  * @param {View} view
  */
 function fallbackViewKey(view) {
   try {
-    const meta = typeof view?.meta === "function" ? view.meta() : null;
+    const meta = typeof /** @type {any} */ (view)?.metaLocal === "function"
+      ? /** @type {any} */ (view).metaLocal()
+      : null;
     return `view:${meta?.branch || "unknown"}:${meta?.ledger_seq ?? "unknown"}`;
   } catch {
     return "view:unknown:unknown";

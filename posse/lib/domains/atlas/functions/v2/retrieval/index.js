@@ -21,14 +21,11 @@ export {
 export { runtimeExecute, runtimeQueryOutput } from "./runtime.js";
 export {
   codeGetSkeleton,
-  codeGetSkeletonAsync,
   codeGetHotPath,
-  codeGetHotPathAsync,
   codeNeedWindow,
-  codeNeedWindowAsync,
 } from "./code.js";
 export { contextBuild, contextSummary, agentFeedback, agentFeedbackQuery } from "./context.js";
-export { fileRead, fileReadAsync } from "./file-read.js";
+export { fileRead } from "./file-read.js";
 export { deltaGet, prRiskAnalyze, prRisk } from "./blast-radius.js";
 export {
   symbolIdOf,
@@ -38,7 +35,7 @@ export {
   locationOf,
   etagOf,
 } from "./cards.js";
-export { rankSymbols, rankSymbolsAsync, lexicalScore, lexicalScoreAsync } from "./rank.js";
+export { rankSymbols, lexicalScore } from "./rank.js";
 export { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 export { ingestView } from "../embeddings/ingest.js";
 export { semanticSearch } from "../embeddings/search.js";

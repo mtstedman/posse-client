@@ -4,7 +4,7 @@
 // assemble materialized view rows and retrieval envelopes, but AST parsing,
 // selection, rendering, occurrence matching, and window bounds stay native.
 
-import { runAtlasNativeMethod, runAtlasNativeMethodAsync } from "./invoke.js";
+import { runAtlasNativeMethodAsync } from "./invoke.js";
 
 /** @typedef {import("./invoke.js").NativeMethodRunOptions} NativeMethodRunOptions */
 
@@ -25,27 +25,15 @@ function requireCodeResult(method, value, repoRelPath) {
   return result;
 }
 
-export function codeSkeletonNative(payload, opts = {}) {
-  return requireCodeResult("code-skeleton", runAtlasNativeMethod("code-skeleton", payload, opts), payload.repo_rel_path);
-}
-
-export async function codeSkeletonNativeAsync(payload, opts = {}) {
+export async function codeSkeletonNative(payload, opts = {}) {
   return requireCodeResult("code-skeleton", await runAtlasNativeMethodAsync("code-skeleton", payload, opts), payload.repo_rel_path);
 }
 
-export function codeHotPathNative(payload, opts = {}) {
-  return requireCodeResult("code-hotpath", runAtlasNativeMethod("code-hotpath", payload, opts), payload.repo_rel_path);
-}
-
-export async function codeHotPathNativeAsync(payload, opts = {}) {
+export async function codeHotPathNative(payload, opts = {}) {
   return requireCodeResult("code-hotpath", await runAtlasNativeMethodAsync("code-hotpath", payload, opts), payload.repo_rel_path);
 }
 
-export function codeWindowNative(payload, opts = {}) {
-  return requireCodeResult("code-window", runAtlasNativeMethod("code-window", normalizeWindowPayload(payload), opts), payload.repo_rel_path);
-}
-
-export async function codeWindowNativeAsync(payload, opts = {}) {
+export async function codeWindowNative(payload, opts = {}) {
   return requireCodeResult(
     "code-window",
     await runAtlasNativeMethodAsync("code-window", normalizeWindowPayload(payload), opts),

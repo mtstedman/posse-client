@@ -5,7 +5,7 @@
 
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
-import { redactSecrets, redactSecretsAsync, redactSecretsLines, redactSecretsLinesAsync } from "./redaction.js";
+import { redactSecrets, redactSecretsLines } from "./redaction.js";
 
 /** @typedef {import("../contracts/tool-params.js").FileReadParams} FileReadParams */
 /** @typedef {import("../contracts/tool-results.js").FileReadData} FileReadData */
@@ -29,29 +29,14 @@ const BLOCKED_JSON_PATH_SEGMENTS = new Set(["__proto__", "constructor", "prototy
  *   view?: View,
  * }} args
  */
-export function fileRead({ versionId, params, readFile, view }) {
-  return fileReadWithRedaction({ versionId, params, readFile, view }, {
+export async function fileRead({ versionId, params, readFile, view }) {
+  return await fileReadWithRedaction({ versionId, params, readFile, view }, {
     redactText: redactSecrets,
     redactLines: redactSecretsLines,
   });
 }
 
-/**
- * @param {{
- *   versionId: string,
- *   params: FileReadParams,
- *   readFile: ReadFile,
- *   view?: View,
- * }} args
- */
-export async function fileReadAsync({ versionId, params, readFile, view }) {
-  return await fileReadWithRedaction({ versionId, params, readFile, view }, {
-    redactText: redactSecretsAsync,
-    redactLines: redactSecretsLinesAsync,
-  });
-}
-
-function fileReadWithRedaction({ versionId, params, readFile, view }, redaction) {
+async function fileReadWithRedaction({ versionId, params, readFile, view }, redaction) {
   if (!params.filePath || !isCanonicalRepoPath(params.filePath)) {
     return errorEnvelope({
       action: "file.read",
@@ -61,7 +46,7 @@ function fileReadWithRedaction({ versionId, params, readFile, view }, redaction)
     });
   }
 
-  if (isIndexedSourceWholeFileRead({ view, params })) {
+  if (await isIndexedSourceWholeFileRead({ view, params })) {
     return errorEnvelope({
       action: "file.read",
       versionId,
@@ -303,16 +288,16 @@ function countReturnedLines(content, requestedLines) {
 
 /**
  * @param {{ view?: View, params: FileReadParams }} args
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
-function isIndexedSourceWholeFileRead({ view, params }) {
+async function isIndexedSourceWholeFileRead({ view, params }) {
   if (!view) return false;
   if (params.search || params.jsonPath || params.offset != null || params.limit != null) return false;
   if (!/\.(?:[cm]?[jt]sx?|py|go|rs|java|cs|cpp|cc|cxx|c|h|hpp|php|kt|kts|sh)$/i.test(params.filePath)) {
     return false;
   }
   try {
-    return view.query.symbolsInFile(params.filePath).length > 0;
+    return (await view.query.symbolsInFile(params.filePath)).length > 0;
   } catch {
     return false;
   }

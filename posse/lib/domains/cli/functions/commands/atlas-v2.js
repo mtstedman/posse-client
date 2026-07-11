@@ -443,13 +443,13 @@ function scipDir(projectDir) {
   return path.join(projectDir, ".posse", "atlas", "scip");
 }
 
-function openLedgerForCli(projectDir) {
+async function openLedgerForCli(projectDir) {
   const paths = repoAtlasPaths(projectDir);
   if (!fileExistsSafe(paths.ledgerDb)) {
     console.log(`  ${C.yellow}[atlas-v2 scip]${C.reset} no ledger at ${path.relative(projectDir, paths.ledgerDb)} — nothing to do`);
     return null;
   }
-  return Ledger.open({ dbPath: paths.ledgerDb });
+  return await Ledger.open({ dbPath: paths.ledgerDb });
 }
 
 /**
@@ -483,9 +483,9 @@ function parseScipArgs(args, opts = {}) {
  * @param {Ledger} led
  * @param {string | null} requested
  * @param {{ explicit?: boolean, onWarning?: (message: string) => void }} [opts]
- * @returns {string}
+ * @returns {Promise<string>}
  */
-function resolveScipBranch(projectDir, led, requested, opts = {}) {
+async function resolveScipBranch(projectDir, led, requested, opts = {}) {
   const explicit = !!opts.explicit && !!requested;
   if (explicit) {
     const branch = String(requested || "").trim();
@@ -500,7 +500,7 @@ function resolveScipBranch(projectDir, led, requested, opts = {}) {
     opts.onWarning("could not detect a git branch; defaulting SCIP ingest to ledger branch 'main'");
   }
   if (!led.getBranch(branch) && typeof led.ensureRootBranch === "function") {
-    led.ensureRootBranch(branch);
+    await led.ensureRootBranch(branch);
   }
   return branch;
 }
@@ -589,7 +589,7 @@ async function printScipStatus({ projectDir }) {
     console.log(`    ${C.yellow}staging freshness unavailable: ${formatAtlasError(err)}${C.reset}`);
   }
 
-  const led = openLedgerForCli(projectDir);
+  const led = await openLedgerForCli(projectDir);
   if (!led) return null;
   try {
     const rows = led.listScipIndexes();
@@ -727,12 +727,12 @@ async function runScipIngest({ projectDir, args }) {
     console.log(`  ${C.red}[atlas-v2 scip ingest]${C.reset} no such file: ${scipPath}`);
     return null;
   }
-  const led = openLedgerForCli(projectDir);
+  const led = await openLedgerForCli(projectDir);
   if (!led) return null;
   try {
     let branch;
     try {
-      branch = resolveScipBranch(projectDir, led, parsed.branch, {
+      branch = await resolveScipBranch(projectDir, led, parsed.branch, {
         explicit: parsed.branchExplicit,
         onWarning: (message) => console.log(`  ${C.yellow}[atlas-v2 scip ingest]${C.reset} warning: ${message}`),
       });
@@ -785,14 +785,14 @@ async function runScipReparse({ projectDir, args }) {
     return null;
   }
 
-  const led = openLedgerForCli(projectDir);
+  const led = await openLedgerForCli(projectDir);
   if (!led) return null;
   let totalDocs = 0;
   let totalExternals = 0;
   try {
     let branch;
     try {
-      branch = resolveScipBranch(projectDir, led, parsed.branch, {
+      branch = await resolveScipBranch(projectDir, led, parsed.branch, {
         explicit: parsed.branchExplicit,
         onWarning: (message) => console.log(`  ${C.yellow}[atlas-v2 scip reparse]${C.reset} warning: ${message}`),
       });

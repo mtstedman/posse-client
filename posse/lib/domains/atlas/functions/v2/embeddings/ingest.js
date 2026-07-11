@@ -93,7 +93,7 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
   const queryStartedAt = performance.now();
   const rawSymbols = Array.isArray(onlySymbols)
     ? onlySymbols.slice(0, symbolsLimit)
-    : view.query.allSymbols({ limit: symbolsLimit });
+    : await view.query.allSymbols({ limit: symbolsLimit });
   timings.symbolQueryMs += elapsedSince(queryStartedAt);
   const filterStartedAt = performance.now();
   const symbols = rawSymbols.filter((symbol) => hasLanguageSemantics(symbol?.lang));

@@ -17,15 +17,19 @@
 import {
   BINARY_NAMES,
   VALID_BINARY_NAMES,
+  nativeBinaryEntry,
   nativeBinaryExactVersion,
 } from "../../../catalog/binary.js";
 import { getNativeBinaryEnabled } from "../../../domains/settings/functions/tunables.js";
 import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
+import { PulseTokenManager } from "../../native/classes/PulseTokenManager.js";
 import {
   ensureNativeBinaryArtifact,
   invalidateNativeArtifactCache,
 } from "../../native/functions/artifact-download.js";
 import { NativeBinary } from "./NativeBinary.js";
+
+const UNRESOLVED_VECTOR_VERSION = "server-issued-version-unresolved";
 
 /**
  * Parse an env override into a tri-state: `true`, `false`, or `null` (unset).
@@ -141,7 +145,10 @@ export class BinaryManager {
     return handle;
   }
 
-  _createHandle(name, binRoot) {
+  _createHandle(name, binRoot, exactVersion = undefined) {
+    const resolvedExactVersion = exactVersion === undefined && name === "vector"
+      ? (nativeBinaryExactVersion(name) || UNRESOLVED_VECTOR_VERSION)
+      : exactVersion;
     return new NativeBinary({
       name,
       binRoot,
@@ -153,6 +160,7 @@ export class BinaryManager {
       // authority) now reach the handle so key/heartbeat resolution honors it.
       env: this._opts.env,
       nativeAuthManager: this.nativeAuthManager,
+      exactVersion: resolvedExactVersion,
     });
   }
 
@@ -174,8 +182,9 @@ export class BinaryManager {
 
   /**
    * Ensure a remotely distributed native binary is present for this host.
-   * Local lib/bin (or an explicit test binRoot) always wins; only the catalog-
-   * pinned vector binary is downloadable. Concurrent callers share one fetch.
+   * A local lib/bin vector build wins when it matches the version issued by
+   * the heartbeat; otherwise that issued version is downloaded. Concurrent
+   * callers share one synchronization.
    *
    * @param {string} name
    * @returns {Promise<Record<string, unknown>>}
@@ -185,7 +194,7 @@ export class BinaryManager {
       return { available: false, name, reason: "unknown_binary" };
     }
     const existing = this.binary(name);
-    if (existing.isAvailable()) {
+    if (name !== "vector" && existing.isAvailable()) {
       return { available: true, name, path: existing.resolvePath(), source: "staged", downloaded: false };
     }
     if (name !== "vector") {
@@ -205,20 +214,46 @@ export class BinaryManager {
 
   async _ensureRemoteArtifact(name) {
     const handle = this.binary(name);
-    const version = nativeBinaryExactVersion(name);
-    if (!version) return { available: false, name, reason: "version_not_pinned" };
+    let version = nativeBinaryExactVersion(name);
     try {
+      let pulseTokens = this._artifactPulseTokens;
+      if (this._artifactInstaller === ensureNativeBinaryArtifact || pulseTokens) {
+        pulseTokens ||= new PulseTokenManager({
+          authManager: this.nativeAuthManager,
+          fetchImpl: this._artifactFetchImpl,
+        });
+        this._artifactPulseTokens = pulseTokens;
+        const pulse = await pulseTokens.getPulseEnvelope({ requiredRoute: "artifacts:read" });
+        const issuedVersion = String(pulse?.nativeArtifacts?.[nativeBinaryEntry(name)?.package] || "").trim();
+        if (issuedVersion) version = issuedVersion;
+        const stagedHandle = version ? this._createHandle(name, this._opts.binRoot, version) : null;
+        if (stagedHandle?.isAvailable()) {
+          this._handles.set(name, stagedHandle);
+          return {
+            available: true,
+            name,
+            version,
+            path: stagedHandle.resolvePath(),
+            source: "staged",
+            downloaded: false,
+          };
+        }
+      }
       const installed = await this._artifactInstaller({
         name,
         version,
         os: handle.os,
         arch: handle.arch,
         authManager: this.nativeAuthManager,
-        pulseTokens: this._artifactPulseTokens,
+        pulseTokens,
         fetchImpl: this._artifactFetchImpl,
         ...(this._artifactCacheRoot ? { cacheRoot: this._artifactCacheRoot } : {}),
       });
-      const cachedHandle = this._createHandle(name, installed.bundleRoot);
+      const expectedVersion = String(installed.version || version || "").trim() || null;
+      if (!expectedVersion) {
+        return { available: false, name, reason: "version_not_issued" };
+      }
+      const cachedHandle = this._createHandle(name, installed.bundleRoot, expectedVersion);
       this._handles.set(name, cachedHandle);
       if (!cachedHandle.isAvailable()) {
         this._handles.set(name, handle);
@@ -232,6 +267,7 @@ export class BinaryManager {
         source: installed.source,
         downloaded: installed.downloaded === true,
         sha256: installed.sha256,
+        version: expectedVersion,
       };
     } catch (error) {
       return {

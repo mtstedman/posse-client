@@ -30,16 +30,9 @@ import { treeGrow, treeOverview, treeScope, treeWalk } from "./tree.js";
 import { codeSurvey } from "./survey.js";
 import { codeStructure } from "./exact.js";
 import { codeDb } from "./db.js";
-import {
-  codeGetSkeleton,
-  codeGetSkeletonAsync,
-  codeGetHotPath,
-  codeGetHotPathAsync,
-  codeNeedWindow,
-  codeNeedWindowAsync,
-} from "./code.js";
+import { codeGetSkeleton, codeGetHotPath, codeNeedWindow } from "./code.js";
 import { contextBuild, contextSummary, agentFeedback, agentFeedbackQuery } from "./context.js";
-import { fileRead, fileReadAsync } from "./file-read.js";
+import { fileRead } from "./file-read.js";
 import { deltaGet, prRiskAnalyze, prRisk } from "./blast-radius.js";
 import { memoryStore, memorySurface, memoryGet, memoryFeedback } from "./memory.js";
 import { policyGet, policySet } from "./policy.js";
@@ -78,7 +71,6 @@ import { fetchHashRefTool } from "../../../../../shared/tools/functions/hash-add
  * @property {string} [taskText]      When present, threads into hybrid search task-query re-ranking on symbol.search.
  * @property {TaskType} [taskType]    When present, scopes feedback boost for symbol.search to one task type.
  * @property {(input: string) => QueryPlan | Promise<QueryPlan>} [planner]
- * @property {boolean} [asyncNativeRedaction] When true, redaction-heavy retrieval uses async native daemon calls.
  * @property {Record<string, unknown>} [hashRefContext] Queue scope for hash-store citation refs.
  */
 
@@ -296,13 +288,13 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ (editPlan({ view: ctx.view, versionId: ctx.versionId, params: call }));
     case "code.skeleton":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeGetSkeletonAsync : codeGetSkeleton)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
+      return /** @type {any} */ (codeGetSkeleton({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
     case "code.lens":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeGetHotPathAsync : codeGetHotPath)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
+      return /** @type {any} */ (codeGetHotPath({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
     case "code.window":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ ((ctx.asyncNativeRedaction ? codeNeedWindowAsync : codeNeedWindow)({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
+      return /** @type {any} */ (codeNeedWindow({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "code.survey":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (codeSurvey({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot }));
@@ -331,7 +323,7 @@ function dispatchImpl(call, ctx) {
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (prRisk({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger }));
     case "file.read":
-      return /** @type {any} */ ((ctx.asyncNativeRedaction ? fileReadAsync : fileRead)({ versionId: ctx.versionId, params: call, readFile, view: ctx.view }));
+      return /** @type {any} */ (fileRead({ versionId: ctx.versionId, params: call, readFile, view: ctx.view }));
     case "memory.store":
       // The view (when present) lets the write reconcile every memory's
       // confidence against current code (anchor-drift decay); storing still

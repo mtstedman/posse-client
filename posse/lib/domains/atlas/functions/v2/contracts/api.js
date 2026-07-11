@@ -48,13 +48,14 @@
 /**
  * @typedef {Object} Ledger
  *
- * @property {(input: LedgerAppendInput) => LedgerEntry} append
- *   Append one delta to the named branch's partition. Assigns `seq` and
- *   `ts`, resolves `parent_seq` from the previous entry on this branch
- *   that touched the same path. Returns the materialized entry.
- *   Throws if `branch` does not exist.
+ * @property {(input: LedgerAppendInput, opts?: { waitMs?: number, label?: string }) => Promise<LedgerEntry>} append
+ *   Append one delta to the named branch's partition, through the
+ *   persistent native worker. Assigns `seq` and `ts`, resolves
+ *   `parent_seq` from the previous entry on this branch that touched the
+ *   same path. Resolves to the materialized entry.
+ *   Rejects if `branch` does not exist.
  *
- * @property {(blob: BlobIngest) => void} ingestBlob
+ * @property {(blob: BlobIngest, opts?: { waitMs?: number, label?: string }) => Promise<void>} ingestBlob
  *   Idempotently store a parsed blob and its symbols/edges. Safe to call
  *   from multiple workers — if the content_hash already exists, this is a
  *   no-op. This is the *only* path symbols enter the system.
@@ -76,24 +77,24 @@
  * @property {(branch: string) => number} headSeq
  *   Highest seq on `branch`, or 0 if the branch has no deltas.
  *
- * @property {(name: string, parentBranch: string, atSeq: number) => BranchRecord} forkBranch
+ * @property {(name: string, parentBranch: string, atSeq: number, opts?: { waitMs?: number, label?: string }) => Promise<BranchRecord>} forkBranch
  *   Create a new branch whose lineage starts at `(parentBranch, atSeq)`.
  *   The new branch starts with seq 0 of its own partition; reads "see"
  *   parent history up to `atSeq` via the View layer.
- *   Throws if `name` already exists or `parentBranch` does not.
+ *   Rejects if `name` already exists or `parentBranch` does not.
  *
- * @property {(name: string) => BranchRecord} ensureRootBranch
+ * @property {(name: string, opts?: { waitMs?: number, label?: string }) => Promise<BranchRecord>} ensureRootBranch
  *   Ensure a root branch exists without assuming the configured git target is
  *   literally named "main".
  *
  * @property {(name: string) => BranchRecord | null} getBranch
  *
- * @property {(name: string, status: "merged" | "abandoned") => void} setBranchStatus
+ * @property {(name: string, status: "merged" | "abandoned", opts?: { waitMs?: number, label?: string }) => Promise<void>} setBranchStatus
  *
- * @property {(branch: string, ontoBranch: string, fromSeq: number) => LedgerEntry[]} replayPartition
+ * @property {(branch: string, ontoBranch: string, fromSeq: number, opts?: { waitMs?: number, label?: string }) => Promise<LedgerEntry[]>} replayPartition
  *   Replay `branch`'s deltas after `fromSeq` onto `ontoBranch` (typically
  *   `main`). Each replayed delta gets a fresh seq on the destination
- *   branch. Returns the appended entries on the destination.
+ *   branch. Resolves to the appended entries on the destination.
  *
  * @property {(content_hash: string) => SymbolRow[]} getBlobSymbols
  *   Hydrate all symbols stored for a content-addressed blob, in

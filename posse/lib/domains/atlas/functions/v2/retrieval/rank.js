@@ -6,9 +6,9 @@
 //
 // Scoring and ordering are owned by the native posse-atlas binary; these
 // wrappers are the only path (the Node implementations were deleted at
-// cutover).
+// cutover). All calls route through the persistent worker.
 
-import { runAtlasNativeOperation, runAtlasNativeOperationAsync } from "../native/invoke.js";
+import { runAtlasNativeOperationAsync } from "../native/invoke.js";
 
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
 
@@ -26,18 +26,9 @@ import { runAtlasNativeOperation, runAtlasNativeOperationAsync } from "../native
  *
  * @param {string} query
  * @param {ViewSymbol} sym
- * @returns {number}
- */
-export function lexicalScore(query, sym) {
-  return /** @type {number} */ (runAtlasNativeOperation({ op: "lexical_score", query, symbol: sym }));
-}
-
-/**
- * @param {string} query
- * @param {ViewSymbol} sym
  * @returns {Promise<number>}
  */
-export async function lexicalScoreAsync(query, sym) {
+export async function lexicalScore(query, sym) {
   return /** @type {number} */ (await runAtlasNativeOperationAsync({ op: "lexical_score", query, symbol: sym }));
 }
 
@@ -46,17 +37,8 @@ export async function lexicalScoreAsync(query, sym) {
  *
  * @param {string} query
  * @param {ViewSymbol[]} symbols
- * @returns {Array<ViewSymbol & { __score: number }>}
- */
-export function rankSymbols(query, symbols) {
-  return /** @type {any} */ (runAtlasNativeOperation({ op: "rank_symbols", query, symbols }));
-}
-
-/**
- * @param {string} query
- * @param {ViewSymbol[]} symbols
  * @returns {Promise<Array<ViewSymbol & { __score: number }>>}
  */
-export async function rankSymbolsAsync(query, symbols) {
+export async function rankSymbols(query, symbols) {
   return /** @type {any} */ (await runAtlasNativeOperationAsync({ op: "rank_symbols", query, symbols }));
 }

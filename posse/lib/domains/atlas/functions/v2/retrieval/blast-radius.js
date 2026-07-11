@@ -41,9 +41,9 @@ import { okEnvelope, errorEnvelope } from "./envelope.js";
  *   params: DeltaGetParams,
  *   ledger?: Ledger,
  * }} args
- * @returns {import("../contracts/tool-results.js").ToolResultEnvelope<DeltaData>}
+ * @returns {Promise<import("../contracts/tool-results.js").ToolResultEnvelope<DeltaData>>}
  */
-export function deltaGet({ view, versionId, params, ledger }) {
+export async function deltaGet({ view, versionId, params, ledger }) {
   if (!params.fromVersion || !params.toVersion) {
     return errorEnvelope({
       action: "review.delta",
@@ -91,7 +91,7 @@ export function deltaGet({ view, versionId, params, ledger }) {
   }
 
   // Fallback: view-only "everything is added".
-  const allSymbols = collectAllSymbolsInView(view);
+  const allSymbols = await collectAllSymbolsInView(view);
   /** @type {DeltaCard[]} */
   const cards = [];
   /** @type {Set<string>} */
@@ -135,9 +135,9 @@ export function deltaGet({ view, versionId, params, ledger }) {
  *   params: PrRiskAnalyzeParams,
  *   ledger?: Ledger,
  * }} args
- * @returns {import("../contracts/tool-results.js").ToolResultEnvelope<PrRiskAnalyzeData>}
+ * @returns {Promise<import("../contracts/tool-results.js").ToolResultEnvelope<PrRiskAnalyzeData>>}
  */
-export function prRiskAnalyze({ view, versionId, params, ledger }) {
+export async function prRiskAnalyze({ view, versionId, params, ledger }) {
   if (!params.fromVersion || !params.toVersion) {
     return errorEnvelope({
       action: "review.analyze",
@@ -188,10 +188,10 @@ export function prRiskAnalyze({ view, versionId, params, ledger }) {
     return okEnvelope({ action: "review.analyze", versionId, data });
   }
   if (touchedPaths.size === 0) {
-    const all = collectAllSymbolsInView(view);
+    const all = await collectAllSymbolsInView(view);
     for (const s of all) touchedPaths.add(s.repo_rel_path);
   }
-  const blastRadiusSymbols = view.query.blastRadius(Array.from(touchedPaths));
+  const blastRadiusSymbols = await view.query.blastRadius(Array.from(touchedPaths));
   const topImpact = Number(/** @type {any} */ (blastRadiusSymbols[0])?._impact || 0);
   const blastRadius = blastRadiusSymbols.slice(0, 100).map((s) => {
     const hit = symbolHit(s);
@@ -205,8 +205,8 @@ export function prRiskAnalyze({ view, versionId, params, ledger }) {
   // Hotspot heuristic: symbols defined in touched files with > 20 inbound edges.
   for (const path of touchedPaths) {
     if (findings.length >= 25) break;
-    for (const sym of view.query.symbolsInFile(path).slice(0, 10)) {
-      const callers = view.query.callers(sym.global_id);
+    for (const sym of (await view.query.symbolsInFile(path)).slice(0, 10)) {
+      const callers = await view.query.callers(sym.global_id);
       if (callers.length >= 50 || isPublicEntryPointSymbol(sym)) {
         findings.push({
           id: `high_impact:${sym.content_hash}:${sym.local_id}`,
@@ -270,10 +270,10 @@ export function prRiskAnalyze({ view, versionId, params, ledger }) {
  *   params: PrRiskParams,
  *   ledger?: Ledger,
  * }} args
- * @returns {import("../contracts/tool-results.js").ToolResultEnvelope<PrRiskData>}
+ * @returns {Promise<import("../contracts/tool-results.js").ToolResultEnvelope<PrRiskData>>}
  */
-export function prRisk({ view, versionId, params, ledger }) {
-  const delta = deltaGet({
+export async function prRisk({ view, versionId, params, ledger }) {
+  const delta = await deltaGet({
     view,
     versionId,
     ledger,
@@ -284,7 +284,7 @@ export function prRisk({ view, versionId, params, ledger }) {
       maxTokens: params.maxTokens,
     },
   });
-  const risk = prRiskAnalyze({
+  const risk = await prRiskAnalyze({
     view,
     versionId,
     ledger,
@@ -499,8 +499,8 @@ function isPublicEntryPointSymbol(sym) {
 
 /**
  * @param {View} view
- * @returns {ViewSymbol[]}
+ * @returns {Promise<ViewSymbol[]>}
  */
-function collectAllSymbolsInView(view) {
-  return view.query.allSymbols({ limit: 10000 });
+async function collectAllSymbolsInView(view) {
+  return await view.query.allSymbols({ limit: 10000 });
 }

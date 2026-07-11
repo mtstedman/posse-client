@@ -656,6 +656,52 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       if (create) nativeCreatePaths.add(resolved);
       if (remove) nativeDeletePaths.add(resolved);
     };
+    const collectCurrentChanges = () => {
+      const deleted = collectDeletedTracked();
+      const created = new Set([
+        ...gitNameList("ls-files", "--others", "--exclude-standard")
+          .split("\n").map(scopeCompatiblePath).filter(Boolean).map(norm),
+        ...gitNameList("diff", "--cached", "--name-only", "--diff-filter=A")
+          .split("\n").map(scopeCompatiblePath).filter(Boolean).map(norm),
+      ]);
+      const paths = [
+        ...new Set(
+          `${gitNameList("diff", "--name-only")}\n${gitNameList("diff", "--cached", "--name-only")}\n${gitNameList("ls-files", "--others", "--exclude-standard")}`
+            .split("\n")
+            .map(scopeCompatiblePath)
+            .filter(Boolean),
+        ),
+      ];
+      return paths.map((file) => ({
+        path: file,
+        changeKind: deleted.has(norm(file)) ? "delete" : created.has(norm(file)) ? "create" : "modify",
+      }));
+    };
+    const nativeSetForChangeKind = (changeKind) => changeKind === "delete"
+      ? nativeDeletePaths
+      : changeKind === "create"
+        ? nativeCreatePaths
+        : nativeModifyPaths;
+    const expectedNativeChanges = () => collectCurrentChanges().filter(({ path: file, changeKind }) =>
+      [...nativeSetForChangeKind(changeKind)].some((candidate) => norm(candidate) === norm(file))
+    );
+    const admitPostHookChanges = () => {
+      for (const { path: file, changeKind } of collectCurrentChanges()) {
+        const normalized = norm(file);
+        const siblingLock = isExplicitCurrentScope(normalized) ? null : siblingLockFor(normalized);
+        if (siblingLock) {
+          rememberSiblingSkipped(siblingStagingSkipped, file, siblingLock);
+          continue;
+        }
+        if (changeKind === "delete") {
+          if (canDelete(normalized)) admitNativePath(file, { modify: false, create: false, delete: true });
+        } else if (changeKind === "create") {
+          if (policy.canCreate(normalized)) admitNativePath(file);
+        } else if (canEdit(normalized)) {
+          admitNativePath(file);
+        }
+      }
+    };
     const isInertStaleModifyPath = (file) => {
       const normalized = norm(file);
       if (!normalized || actualDirtyByFold.has(normalized) || trackedByFold.has(normalized) || deletedTracked.has(normalized)) {
@@ -784,17 +830,12 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       }
     }
 
-    if (!headAtScopeStart) {
-      throw new Error("Native scoped commit requires an existing branch HEAD");
-    }
-
     const transactionPaths = [...new Set([
       ...nativeModifyPaths,
       ...nativeCreatePaths,
       ...nativeDeletePaths,
     ])].sort((left, right) => norm(left).localeCompare(norm(right)));
-    const dirtyAtPreflight = new Set([...dirtyFiles, ...untrackedFiles].map(norm));
-    const preflightPaths = transactionPaths.filter((file) => dirtyAtPreflight.has(norm(file)));
+    const preflightPaths = expectedNativeChanges().map((entry) => entry.path);
 
     if (preflightPaths.length > 0) {
       if (typeof opts?.beforeCommitHook === "function") {
@@ -810,16 +851,23 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
         }
       }
 
-      // Verification may run project tooling. Scan after it so any final
-      // scoped working-tree content is checked immediately before Rust stages
-      // and commits it.
-      const secretsResult = runHook("secrets_scan", { cwd, paths: preflightPaths });
+      // Verification may regenerate declared files or create new files under
+      // an admitted root. Refresh both the native path list and the scan set so
+      // the secrets gate observes the same scoped working-tree bytes Rust will
+      // stage immediately afterward.
+      admitPostHookChanges();
+      const scanPaths = expectedNativeChanges()
+        .filter((entry) => entry.changeKind !== "delete")
+        .map((entry) => entry.path);
+      const secretsResult = runHook("secrets_scan", { cwd, paths: scanPaths });
       if (!secretsResult.ok) {
         const err = new Error("Secrets detected in scoped files — commit blocked by hook");
         err.hookOutput = secretsResult.output;
         throw err;
       }
     }
+
+    const expectedToCommit = expectedNativeChanges();
 
     const commitTimeoutBudget = gitCommitTimeoutBudget();
     const nativeResult = runGitNativeMethod("git.commitScopedTransaction", {
@@ -832,6 +880,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       modifyRoots: [],
       createRoots: [],
       deleteRoots: [],
+      requiredPaths: expectedToCommit.map((entry) => entry.path),
       options: {
         allowEmpty: false,
         timeoutMs: commitTimeoutBudget.processTimeoutMs,
@@ -853,6 +902,39 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     if (!nativeResult.ok) throw nativeScopedCommitError(nativeResult, cwd, commitTimeoutBudget);
     if (nativeResult.createdCommit && !String(nativeResult.committedHash || "").trim()) {
       throw new Error("Git native method git.commitScopedTransaction omitted the committed hash");
+    }
+
+    const committedSet = new Set(nativeResult.committedPaths.map(norm));
+    const skippedForPath = new Map();
+    for (const entry of nativeResult.skippedPaths) {
+      if (!entry || typeof entry !== "object") continue;
+      const key = norm(entry.path);
+      if (!key) continue;
+      const values = skippedForPath.get(key) || [];
+      values.push({
+        reason: String(entry.reason || "unknown"),
+        changeKind: entry.changeKind == null ? null : String(entry.changeKind),
+      });
+      skippedForPath.set(key, values);
+    }
+    const unexpectedlySkipped = expectedToCommit
+      .filter((entry) => !committedSet.has(norm(entry.path)))
+      .map((entry) => ({
+        path: entry.path,
+        changeKind: entry.changeKind,
+        reasons: skippedForPath.get(norm(entry.path)) || [{ reason: "missingFromResult", changeKind: null }],
+      }));
+    if (unexpectedlySkipped.length > 0) {
+      const summary = unexpectedlySkipped.map((entry) => {
+        const reasons = entry.reasons.map((skip) => `${skip.reason}${skip.changeKind ? `:${skip.changeKind}` : ""}`).join("|");
+        return `${entry.path} (${entry.changeKind}; ${reasons})`;
+      }).join(", ");
+      const err = new Error(`Native scoped commit omitted admitted dirty path(s): ${summary}`);
+      err.code = "GIT_SCOPED_COMMIT_INCOMPLETE";
+      err.unexpectedlySkipped = unexpectedlySkipped;
+      err.committedPaths = nativeResult.committedPaths;
+      err.nativeSkippedPaths = nativeResult.skippedPaths;
+      throw err;
     }
 
     const rollbackStatus = nativeResult.rollbackStatus || null;

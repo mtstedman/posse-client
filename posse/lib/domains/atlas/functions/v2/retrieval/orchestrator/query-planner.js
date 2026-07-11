@@ -15,10 +15,9 @@
 //
 // Plan construction (facet extraction, symptom classification, stop-word
 // handling) is owned by the native posse-atlas binary — the only
-// implementation path for the normal/sync path. The conductor read lane can
-// also use the warmed native worker through planQueryAsync().
+// implementation path. Every call routes through the warmed native worker.
 
-import { runAtlasNativeOperation, runAtlasNativeOperationAsync } from "../../native/invoke.js";
+import { runAtlasNativeOperationAsync } from "../../native/invoke.js";
 
 /** @typedef {import("./query-planner-types.js").StackFrame} StackFrame */
 /** @typedef {import("./query-planner-types.js").QueryPlan} QueryPlan */
@@ -30,15 +29,16 @@ let _syncPlanCacheHits = 0;
 let _syncPlanCacheMisses = 0;
 
 /**
- * Produce a QueryPlan for a raw task/query string.
+ * Produce a QueryPlan for a raw task/query string through the warmed native
+ * worker.
  *
  * Always returns a plan, even for empty/garbage input — callers can treat
  * `plan.raw === ""` as the "nothing to plan" signal without null checks.
  *
  * @param {string | undefined | null} input
- * @returns {QueryPlan}
+ * @returns {Promise<QueryPlan>}
  */
-export function planQuery(input) {
+export async function planQuery(input) {
   const key = String(input ?? "");
   const cached = SYNC_PLAN_CACHE.get(key);
   if (cached) {
@@ -48,21 +48,12 @@ export function planQuery(input) {
     return clonePlan(cached);
   }
   _syncPlanCacheMisses += 1;
-  const plan = normalizeNativePlan(/** @type {any} */ (runAtlasNativeOperation({ op: "plan_query", input })));
+  // Cache the resolved plan value, not the promise: a native failure throws
+  // before we reach cacheSyncPlan, so nothing is memoized and the next call
+  // retries the daemon rather than replaying a rejected promise.
+  const plan = normalizeNativePlan(/** @type {any} */ (await runAtlasNativeOperationAsync({ op: "plan_query", input })));
   cacheSyncPlan(key, plan);
   return clonePlan(plan);
-}
-
-/**
- * Produce a QueryPlan through the async native worker path. This keeps the
- * warmed native daemon hot for conductor-side retrieval, avoiding a native
- * cold start for every symbol.search/context/slice query.
- *
- * @param {string | undefined | null} input
- * @returns {Promise<QueryPlan>}
- */
-export async function planQueryAsync(input) {
-  return normalizeNativePlan(/** @type {any} */ (await runAtlasNativeOperationAsync({ op: "plan_query", input })));
 }
 
 /**

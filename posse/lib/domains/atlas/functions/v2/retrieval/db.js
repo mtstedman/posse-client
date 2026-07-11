@@ -21,7 +21,7 @@ const MAX_QUERY_SYMBOLS = 12;
  *   repoRoot?: string,
  * }} args
  */
-export function codeDb({ view, versionId, params = {}, repoRoot }) {
+export async function codeDb({ view, versionId, params = {}, repoRoot }) {
   const action = "code.db";
   const requested = normalizeRequested(params.paths ?? params.path);
   if (requested.length === 0) {
@@ -34,7 +34,7 @@ export function codeDb({ view, versionId, params = {}, repoRoot }) {
   }
 
   const maxFiles = clampInt(params.maxFiles, 64, 1, MAX_DB_FILES);
-  const { paths, prefixTruncated } = collectSurveyPaths({ view, requested, maxFiles });
+  const { paths, prefixTruncated } = await collectSurveyPaths({ view, requested, maxFiles });
   if (paths.length === 0) {
     return okEnvelope({
       action,
@@ -50,8 +50,8 @@ export function codeDb({ view, versionId, params = {}, repoRoot }) {
     });
   }
 
-  const data = attachDbQuerySymbols({
-    data: nativeCodeDb({
+  const data = await attachDbQuerySymbols({
+    data: await nativeCodeDb({
       view,
       repoRoot,
       files: paths,
@@ -110,26 +110,30 @@ function clampInt(value, fallback, min, max) {
  *   view: import("../contracts/api.js").View,
  * }} args
  */
-function attachDbQuerySymbols({ data, view }) {
+async function attachDbQuerySymbols({ data, view }) {
   if (!data || typeof data !== "object" || !Array.isArray(data.queries)) return data;
   if (!view?.query || typeof view.query.symbolsInFile !== "function") return data;
   const symbolsByPath = new Map();
   let attributed = 0;
   let multiMatch = 0;
-  const queries = data.queries.map((query) => {
-    const match = symbolsForDbQuery({ view, query, symbolsByPath });
-    if (match.symbols.length === 0) return { ...query, symbolSurface: "none" };
+  const queries = [];
+  for (const query of data.queries) {
+    const match = await symbolsForDbQuery({ view, query, symbolsByPath });
+    if (match.symbols.length === 0) {
+      queries.push({ ...query, symbolSurface: "none" });
+      continue;
+    }
     attributed++;
     if (match.symbolCount > 1) multiMatch++;
-    return {
+    queries.push({
       ...query,
       symbols: match.symbols,
       symbolCount: match.symbolCount,
       symbolsTruncated: match.symbolsTruncated,
       symbolSurface: match.symbolSurface,
       ...(match.sameLineSymbolCount > 1 ? { sameLineSymbolCount: match.sameLineSymbolCount } : {}),
-    };
-  });
+    });
+  }
   return {
     ...data,
     queries,
@@ -148,13 +152,13 @@ function attachDbQuerySymbols({ data, view }) {
  *   symbolsByPath: Map<string, import("../contracts/api.js").ViewSymbol[]>,
  * }} args
  */
-function symbolsForDbQuery({ view, query, symbolsByPath }) {
+async function symbolsForDbQuery({ view, query, symbolsByPath }) {
   const path = normalizeRepoPath(query?.path);
   const line = Number(query?.line);
   if (!path || !Number.isFinite(line) || line < 1) {
     return emptySymbolMatch();
   }
-  const fileSymbols = getFileSymbols({ view, path, symbolsByPath });
+  const fileSymbols = await getFileSymbols({ view, path, symbolsByPath });
   if (fileSymbols.length === 0) return emptySymbolMatch();
 
   const sameLine = fileSymbols.filter((symbol) => symbolStartLine(symbol) === line);
@@ -192,11 +196,11 @@ function emptySymbolMatch() {
  *   symbolsByPath: Map<string, import("../contracts/api.js").ViewSymbol[]>,
  * }} args
  */
-function getFileSymbols({ view, path, symbolsByPath }) {
+async function getFileSymbols({ view, path, symbolsByPath }) {
   if (symbolsByPath.has(path)) return symbolsByPath.get(path) || [];
   let symbols = [];
   try {
-    symbols = view.query.symbolsInFile(path) || [];
+    symbols = (await view.query.symbolsInFile(path)) || [];
   } catch {
     symbols = [];
   }

@@ -6,7 +6,7 @@
 
 import { sha256Hex } from "./hash.js";
 import { normalizeRepoPath } from "./paths.js";
-import { runAtlasNativeMethod } from "./native/invoke.js";
+import { runAtlasNativeMethodAsync } from "./native/invoke.js";
 
 const TREE_RUN_KIND = "tree-derived";
 
@@ -176,17 +176,37 @@ export function treeDerivedInputSignature(db) {
 
 /**
  * @param {import("better-sqlite3").Database} db
- * @returns {{ ok: boolean, durationMs: number, nodes: number, refs: number, files: number, symbols: number, error?: string }}
+ * @returns {Promise<{ ok: boolean, durationMs: number, nodes: number, refs: number, files: number, symbols: number, error?: string }>}
  */
-export function refreshTreeDerivedState(db) {
+export async function refreshTreeDerivedState(db) {
   ensureTreeDerivedTables(db);
   const started = Date.now();
+  // The native tree-build is awaited BEFORE the savepoint opens so the async
+  // worker hop never holds an open write transaction on the view file.
+  /** @type {any} */
+  let request;
+  /** @type {any} */
+  let tree;
+  try {
+    request = readTreeBuildRequest(db);
+    tree = await runAtlasNativeMethodAsync("tree-build", request);
+    validateNativeTree(tree, { symbolCount: request.symbols.length });
+  } catch (err) {
+    const durationMs = Date.now() - started;
+    recordRun(db, TREE_RUN_KIND, "error", durationMs, { error: err?.message || String(err) });
+    return {
+      ok: false,
+      durationMs,
+      nodes: 0,
+      refs: 0,
+      files: 0,
+      symbols: 0,
+      error: err?.message || String(err),
+    };
+  }
   db.exec("SAVEPOINT tree_derived_refresh");
   try {
     clearTreeTables(db);
-    const request = readTreeBuildRequest(db);
-    const tree = /** @type {any} */ (runAtlasNativeMethod("tree-build", request));
-    validateNativeTree(tree, { symbolCount: request.symbols.length });
     const counts = writeTreeBuildResult(db, tree);
     const durationMs = Date.now() - started;
     recordRun(db, TREE_RUN_KIND, "ok", durationMs, {
