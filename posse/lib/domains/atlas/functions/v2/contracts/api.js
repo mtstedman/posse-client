@@ -245,6 +245,10 @@
  * @property {(global_id: number) => ViewEdge[]} callees
  *   Resolved edges where `from_global_id === global_id`.
  *
+ * @property {(global_id: number) => Promise<{ callers: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>, callees: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }> }>} symbolNeighborhood
+ *   Both edge directions with their relevant endpoint symbols bulk-resolved
+ *   by the native daemon under one storage read.
+ *
  * @property {(name: string) => ViewEdge[]} unresolvedReferencesTo
  *   Edges with no internal or external binding and `to_name = name`. Useful
  *   when adding a new declaration to find latent references.

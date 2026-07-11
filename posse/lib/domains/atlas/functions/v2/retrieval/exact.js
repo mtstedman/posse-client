@@ -97,16 +97,15 @@ async function materializedStructureEdges(view, files, edgeKinds) {
   }
   const rows = [];
   for (const symbol of byGlobalId.values()) {
-    for (const edge of await view.query.callees(symbol.global_id)) {
+    const neighborhood = await view.query.symbolNeighborhood(symbol.global_id);
+    for (const { edge, symbol: to } of neighborhood.callees) {
       if (edge.to_global_id == null) continue;
       if (!edgeKinds.has(String(edge.kind || ""))) continue;
-      const to = await view.query.getSymbol(edge.to_global_id);
       if (!to) continue;
       rows.push(structureEdgeInput(edge, symbol, to));
     }
-    for (const edge of await view.query.callers(symbol.global_id)) {
+    for (const { edge, symbol: from } of neighborhood.callers) {
       if (!edgeKinds.has(String(edge.kind || ""))) continue;
-      const from = await view.query.getSymbol(edge.from_global_id);
       if (!from) continue;
       rows.push(structureEdgeInput(edge, from, symbol));
     }

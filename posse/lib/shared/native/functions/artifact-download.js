@@ -6,7 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
-import { nativeBinaryEntry, nativeBinaryPlatform } from "../../../catalog/binary.js";
+import {
+  VALID_BINARY_NAMES,
+  nativeBinaryEntry,
+  nativeBinaryPlatform,
+} from "../../../catalog/binary.js";
 import { PulseTokenManager } from "../classes/PulseTokenManager.js";
 
 export const NATIVE_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024;
@@ -68,7 +72,9 @@ export async function ensureNativeBinaryArtifact({
   maxBytes = NATIVE_ARTIFACT_MAX_BYTES,
   timeoutMs = DOWNLOAD_TIMEOUT_MS,
 }) {
-  if (name !== "vector") throw artifactError("POSSE_ARTIFACT_UNSUPPORTED", "only posse-vector is remotely distributed");
+  if (!VALID_BINARY_NAMES.has(name)) {
+    throw artifactError("POSSE_ARTIFACT_UNSUPPORTED", `unknown native artifact: ${name}`);
+  }
   if (typeof fetchImpl !== "function") throw artifactError("POSSE_ARTIFACT_FETCH_UNAVAILABLE", "native artifact download requires fetch");
   if (!authManager?.getTrustedAuthPolicy || !authManager?.hasLaunchKey?.()) {
     throw artifactError("POSSE_ARTIFACT_AUTH_UNAVAILABLE", "native artifact download requires Posse authentication");
@@ -159,7 +165,7 @@ export async function ensureNativeBinaryArtifact({
       await safeUnlink(partPath);
       return { ...selected, sha256: concurrentSha, source: "cache", downloaded: false };
     }
-    await quarantineInvalidCache(selected.binaryPath, selected.checksumPath);
+    await deleteInvalidCache(selected.binaryPath, selected.checksumPath);
     await fsp.rename(partPath, selected.binaryPath);
     if (osToken !== "windows") await fsp.chmod(selected.binaryPath, 0o755);
     await writeChecksumSidecar(selected.checksumPath, actual.sha256);
@@ -173,7 +179,7 @@ export async function ensureNativeBinaryArtifact({
 /** @param {{ binaryPath?: string, checksumPath?: string }} [args] */
 export async function invalidateNativeArtifactCache({ binaryPath, checksumPath } = {}) {
   if (!binaryPath || !checksumPath) return;
-  await quarantineInvalidCache(binaryPath, checksumPath);
+  await deleteInvalidCache(binaryPath, checksumPath);
 }
 
 async function verifiedCachedArtifact(binaryPath, checksumPath) {
@@ -243,15 +249,9 @@ async function writeChecksumSidecar(checksumPath, sha256) {
   }
 }
 
-async function quarantineInvalidCache(binaryPath, checksumPath) {
+async function deleteInvalidCache(binaryPath, checksumPath) {
   await safeUnlink(checksumPath);
-  try {
-    const stat = await fsp.stat(binaryPath);
-    if (!stat.isFile()) return;
-    await fsp.rename(binaryPath, `${binaryPath}.invalid-${Date.now()}-${process.pid}`);
-  } catch (err) {
-    if (err?.code !== "ENOENT") throw err;
-  }
+  await safeUnlink(binaryPath);
 }
 
 async function sha256File(filePath) {

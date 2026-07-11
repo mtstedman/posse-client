@@ -241,6 +241,7 @@ export function ProcessTransport(opts) {
 export function ThreadTransport(opts) {
   /** @type {Worker | null} */
   let worker = null;
+  let nativeBridgeDispose = null;
   /** @type {Array<(m: Record<string, unknown>) => void>} */
   const messageHandlers = [];
   /** @type {Array<() => void>} */
@@ -260,7 +261,7 @@ export function ThreadTransport(opts) {
         const transferList = [];
         if (opts.nativeBridge === true) {
           const channel = new MessageChannel();
-          attachNativeThreadBridge(channel.port1);
+          nativeBridgeDispose = attachNativeThreadBridge(channel.port1);
           workerData.nativeBridgePort = channel.port2;
           transferList.push(channel.port2);
         }
@@ -291,6 +292,8 @@ export function ThreadTransport(opts) {
       const w = worker;
       worker = null;
       try { w?.terminate(); } catch { /* ignore */ }
+      try { void nativeBridgeDispose?.(); } catch { /* ignore */ }
+      nativeBridgeDispose = null;
     },
     // Fully release the worker AND its communication MessagePort. In Node,
     // `worker.unref()` lets an idle worker not *block* exit, but the underlying
@@ -302,6 +305,8 @@ export function ThreadTransport(opts) {
       const w = worker;
       worker = null;
       try { await w?.terminate(); } catch { /* ignore */ }
+      try { await nativeBridgeDispose?.(); } catch { /* ignore */ }
+      nativeBridgeDispose = null;
     },
     isAlive() {
       return !!worker;

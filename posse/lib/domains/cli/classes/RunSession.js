@@ -17,6 +17,7 @@ import { ensureBootDependenciesInWorker, formatBootDependencySync } from "../../
 import { repairMissingProviderDependencies, getProvidersNeedingDependencyRepair } from "../../providers/functions/provider.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 import { LOCK_HOLDING_JOB_STATUSES, PARKED_JOB_STATUSES } from "../../../catalog/job.js";
+import { BINARY_NAMES } from "../../../catalog/binary.js";
 import { TERMINAL_WORK_ITEM_STATUSES, WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { parseWorkItemMetadata } from "../../planning/functions/state.js";
 import { getResearchBudget } from "../../../shared/policies/functions/role-utils.js";
@@ -767,15 +768,40 @@ export class RunSession {
     updateBootStep("posse update", { section: "workspace", status: "skipped", force: true });
   }
 
+  // Pull native artifacts before any workspace guard can invoke posse-git and
+  // before prompt/index warmups can select posse-remote or posse-atlas.
+  if (typeof nativeBinariesForRun?.ensureAvailable === "function") {
+    const enabledNativeNames = BINARY_NAMES.filter(
+      (name) => nativeBinariesForRun?.enabled?.(name) === true,
+    );
+    if (enabledNativeNames.length > 0) {
+      updateBootStep("native binaries", { section: "workspace", status: "running", force: true });
+      const nativeArtifactResults = await Promise.all(enabledNativeNames.map(async (name) => {
+        try {
+          return await nativeBinariesForRun.ensureAvailable(name);
+        } catch (error) {
+          return { available: false, name, reason: error?.code || "artifact_download_failed" };
+        }
+      }));
+      const unavailable = nativeArtifactResults.filter((result) => !result?.available);
+      const downloaded = nativeArtifactResults.filter((result) => result?.downloaded).length;
+      updateBootStep("native binaries", {
+        section: "workspace",
+        status: unavailable.length > 0 ? "warning" : "ok",
+        detail: unavailable.length > 0
+          ? `${nativeArtifactResults.length - unavailable.length}/${nativeArtifactResults.length} ready; unavailable: ${unavailable.map((result) => result.name).join(", ")}`
+          : `${nativeArtifactResults.length} ready${downloaded > 0 ? `; ${downloaded} downloaded` : ""}`,
+        showDetail: unavailable.length > 0,
+        force: true,
+      });
+    }
+  }
+
   // Git Ready comes BEFORE Dirty Tree Guard because guardStartupDirtyTree
   // runs git commands; if git isn't available we want a clean error on the
-  // git row, not a cryptic crash in the dirty-tree guard.
-  // Posse is git-based, so verify git is usable on EVERY boot — not only when a
-  // queued job needs a worktree. (The dirty-tree guard below already runs git
-  // commands unconditionally, so gating the availability check on needsGit was
-  // inconsistent.) A failure is fatal when a worktree job is queued (needsGit);
-  // otherwise it degrades to skipped so a research-only / non-git session still
-  // boots instead of aborting.
+  // git row, not a cryptic crash in the dirty-tree guard. Posse is git-based,
+  // so verify git is usable on EVERY boot. A failure is fatal when a worktree
+  // job is queued; otherwise a research-only session can continue.
   {
     updateBootStep("git ready", { section: "workspace", status: "running", force: true });
     try {
@@ -1145,17 +1171,6 @@ export class RunSession {
           ? `ready (${result.promptVersion})`
           : "ready",
         isOk: (result = {}) => result.ok !== false,
-      }));
-    }
-
-    if (nativeBinariesForRun?.enabled?.("vector") === true
-        && typeof nativeBinariesForRun.ensureAvailable === "function") {
-      bootWarmups.push(bootWarmup("Vector binary", () => nativeBinariesForRun.ensureAvailable("vector"), {
-        start: "checking platform artifact",
-        done: (result = {}) => result.available
-          ? `${result.downloaded ? "downloaded" : "ready"} (${result.source || "cache"})`
-          : `unavailable (${result.reason || "unknown"})`,
-        isOk: () => true,
       }));
     }
 

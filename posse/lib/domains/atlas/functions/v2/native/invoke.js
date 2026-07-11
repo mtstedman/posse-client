@@ -11,6 +11,7 @@ import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManage
 import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 
 export const ATLAS_NATIVE_PROTOCOL = "posse.atlas.native.v1";
+export const ATLAS_EXECUTE_TOOL_CONTRACT_VERSION = 1;
 
 /** @type {NativeMethodRunOptions | null} */
 let atlasNativeOptionsForTests = null;

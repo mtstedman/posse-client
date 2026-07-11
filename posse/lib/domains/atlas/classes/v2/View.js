@@ -264,6 +264,8 @@ export class View {
 
       callees: (global_id) => read("callees", { global_id }),
 
+      symbolNeighborhood: (global_id) => read("symbol_neighborhood", { global_id }),
+
       unresolvedReferencesTo: (name) => read("unresolved_references_to", { name: String(name) }),
 
       slice: async (seedGlobalIds, opts = {}) => {

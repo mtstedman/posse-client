@@ -10,6 +10,10 @@ import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js"
 import { normalizeActionName } from "../../functions/v2/retrieval/dispatch.js";
 import { ledgerDbPath, mainViewPath } from "../../functions/v2/runtime-paths.js";
 import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.js";
+import {
+  ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
+  runAtlasNativeMethodAsync,
+} from "../../functions/v2/native/invoke.js";
 import { AtlasToolDispatchCache } from "./AtlasToolDispatchCache.js";
 import path from "node:path";
 
@@ -69,6 +73,15 @@ export const ATLAS_BLOCKING_ACTIONS = new Set([
 ]);
 
 const ATLAS_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent"]);
+const ATLAS_NATIVE_COMPLETE_TOOL_ACTIONS = new Set([
+  "symbol.search",
+  "tree.scope",
+  "code.skeleton",
+  "code.lens",
+  "code.structure",
+  "code.survey",
+  "symbol.overview",
+]);
 
 const DISPATCH_CACHE_POLICIES = Object.freeze({
   NEVER: "never",
@@ -354,6 +367,7 @@ function dispatchCacheTtlFor(request = {}) {
 
 export class AtlasToolExecutor {
   #conductorFactory;
+  #nativeToolCall;
   #gate;
   #dedupeWindowMs;
   #waitMs;
@@ -371,6 +385,7 @@ export class AtlasToolExecutor {
 
   constructor({
     conductorFactory = getSharedConductor,
+    nativeToolCall = (payload, opts) => runAtlasNativeMethodAsync("execute-tool", payload, opts),
     gate = new AsyncResourceGate({ name: "ATLAS tool executor", policy: "writer-priority" }),
     dedupeWindowMs = DEFAULT_DEDUPE_WINDOW_MS,
     waitMs = DEFAULT_WAIT_MS,
@@ -382,6 +397,7 @@ export class AtlasToolExecutor {
     now = Date.now,
   } = {}) {
     this.#conductorFactory = conductorFactory;
+    this.#nativeToolCall = nativeToolCall;
     this.#gate = gate;
     this.#dedupeWindowMs = Math.max(0, Number(dedupeWindowMs) || 0);
     this.#waitMs = Math.max(0, Number(waitMs) || DEFAULT_WAIT_MS);
@@ -638,6 +654,33 @@ export class AtlasToolExecutor {
         },
       };
       const readPayload = await this.#readPayloadFor(request, conductor);
+      if (ATLAS_NATIVE_COMPLETE_TOOL_ACTIONS.has(request.action)) {
+        if (!readPayload) {
+          throw new Error(`ATLAS ${request.action} requires a resolved native read context`);
+        }
+        const timeoutMs = request.waitMs || this.#waitMs;
+        const envelope = await this.#nativeToolCall({
+          contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
+          action: request.action,
+          args: cloneJson(request.args || {}) || {},
+          viewPath: readPayload.viewPath,
+          ledgerPath: readPayload.ledgerPath,
+          repoRoot: readPayload.readRoot
+            || request.config?.repoRoot
+            || request.session?.bootConfig?.atlas?.repoPath
+            || request.session?.bootConfig?.cwd
+            || request.session?.cwd
+            || process.cwd(),
+          repoId: readPayload.repoId,
+          versionId: readPayload.versionId,
+          config: readPayload.config || {},
+          deadline: this.#now() + timeoutMs,
+        }, {
+          timeoutMs,
+          idempotent: true,
+        });
+        return conductorEnvelopeToToolResult(envelope);
+      }
       if (readPayload && typeof conductor.retrieve === "function") {
         const envelope = await conductor.retrieve(readPayload, { timeoutMs: request.waitMs || this.#waitMs });
         return conductorEnvelopeToToolResult(envelope);
@@ -709,7 +752,26 @@ export class AtlasToolExecutor {
   async #readContextFor(request, conductor = null) {
     let context = this.#readContexts.get(request.repoKey);
     const wiKey = workItemKeyForRequest(request);
-    if (context || !wiKey || typeof conductor?.resolveReadContext !== "function") return context || null;
+    if (context) return context;
+    if (!wiKey && !ATLAS_NATIVE_COMPLETE_TOOL_ACTIONS.has(request.action)) return null;
+    if (!wiKey) {
+      const config = request.config || {};
+      const session = request.session || {};
+      const boot = session.bootConfig || session || {};
+      const repoRoot = config.repoRoot || config.cwd || boot?.atlas?.repoPath || boot?.cwd || null;
+      if (!repoRoot) return null;
+      const resolved = {
+        viewPath: mainViewPath(repoRoot),
+        ledgerPath: ledgerDbPath(repoRoot),
+        versionId: String(config.versionId || boot?.atlas?.versionId || "main"),
+        readRoot: String(repoRoot),
+        repoId: config.repoId || boot?.atlas?.repoId || null,
+        config,
+      };
+      this.setReadContext(request.repoKey, resolved);
+      return resolved;
+    }
+    if (typeof conductor?.resolveReadContext !== "function") return null;
     const resolved = await conductor.resolveReadContext({
       workItemKey: wiKey,
       workItemId: wiKey.replace(/^wi-/, ""),

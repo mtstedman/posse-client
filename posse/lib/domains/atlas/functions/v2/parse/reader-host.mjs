@@ -17,7 +17,9 @@
 // client sends the `invalidate` op after every indexing op that rewrites the
 // on-disk ANN (see invalidateReaders in conductor.js).
 //
-// Cached DB handles are also owned by this lane. Indexing writers coordinate
+// This is one Node orchestration lane, not the native concurrency pool. Its
+// native calls share the parent-owned posse-atlas daemon with the writer lane;
+// the daemon's Rust executor owns parallel request admission. Indexing writers coordinate
 // with `beginWrite` / `endWrite`: the begin call drains active reads, closes
 // cached handles for the affected view/ledger key, then holds a writer-priority
 // gate until the indexing op is done.
@@ -112,8 +114,14 @@ runDaemonThread(async (payload) => {
       return result;
     }
 
-    case "info":
-      return { lane: "reader", retrieves, invalidations, writeBegins, writeEnds, activeWriteHolds, invalidationsDuringWrite };
+    case "info": {
+      let storageCache = null;
+      try {
+        const { storageCacheStatsNativeAsync } = await import("../native/storage.js");
+        storageCache = await storageCacheStatsNativeAsync();
+      } catch { /* diagnostics stay best effort */ }
+      return { lane: "reader", retrieves, invalidations, writeBegins, writeEnds, activeWriteHolds, invalidationsDuringWrite, storageCache };
+    }
 
     case "close": {
       try {

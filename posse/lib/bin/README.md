@@ -1,8 +1,9 @@
 # Posse Native Binaries
 
-This directory stages the native binaries Posse ships. The Rust helper binaries
+This directory can stage local development overrides for the native binaries Posse uses. The Rust helper binaries
 (`posse-atlas`, `posse-git`, `posse-remote`, and the opt-in `posse-vector`)
-are runtime-managed tools. The
+are remotely built, runtime-managed tools; their binary payloads are ignored by
+Git. The
 registry that describes them — package names, per-OS/arch build targets, and
 filenames — lives in the catalog at
 [`lib/catalog/binary.js`](../catalog/binary.js), the single source of truth for
@@ -49,7 +50,19 @@ back to `<tool>/<os>/<file>` (the universal-macOS location). os/arch are mapped
 from `process.platform` / `process.arch` by
 [`lib/shared/platform/functions/native-platform.js`](../shared/platform/functions/native-platform.js).
 
-## Build & deploy
+## Pull, build, and deploy
+
+Pull every server-issued binary for the current OS and architecture into the
+verified native bundle cache:
+
+```bash
+npm run pull:native
+```
+
+The command mints an `artifacts:read` pulse, selects the exact package versions
+issued by the server, verifies each SHA-256, and reuses a valid cached artifact.
+Normal `posse run` boot performs the same check for every enabled binary, so the
+explicit pull is primarily useful for prefetching or diagnosing artifact access.
 
 Rebuild atlas/git/remote from the sibling `posse-encoder-rust` workspace
 (flush + cargo build + deploy) for the current host OS:
@@ -66,15 +79,13 @@ toolchains. The macOS entry is built for both `aarch64-apple-darwin` and
 npm run rebuild:rust-binaries:all -- --rust-root <path-to-posse-encoder-rust>
 ```
 
-`posse-vector` is intentionally excluded from those build defaults because it
-comes from the separate `posse-vector` workspace. An explicitly staged
-`lib/bin/vector/...` build remains the development override. When native vector
-mode is enabled and no staged build exists, run boot mints an
-`artifacts:read` pulse, reads the current package version signed into that
-pulse, downloads that exact version for the current OS/architecture from Posse
-Remote, verifies its SHA-256, and caches it
-under `~/.posse/native/bundles/posse-vector/<version>/vector/...` before ATLAS
-opens embedding resources.
+`posse-vector` remains excluded from the Encoder build defaults because it comes
+from the separate `posse-vector` workspace. An explicitly staged
+`lib/bin/<tool>/...` build remains a development override for every tool. Run
+boot otherwise mints an `artifacts:read` pulse, reads each current package
+version signed into that pulse, downloads the exact current OS/architecture
+artifact from Posse Remote, verifies its SHA-256, and caches it under
+`~/.posse/native/bundles/<package>/<version>/<tool>/...`.
 
 An explicitly staged build is accepted only when its reported version matches
 the server-issued version. The cache stores a SHA-256 sidecar and is re-verified on every process boot.

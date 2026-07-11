@@ -85,15 +85,14 @@ export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
   let edgeBudget = MAX_RAW_EDGES;
   outer:
   for (const symbol of surveyedSymbols.values()) {
-    for (const edge of await view.query.callers(symbol.global_id)) {
-      const from = await view.query.getSymbol(edge.from_global_id);
+    const neighborhood = await view.query.symbolNeighborhood(symbol.global_id);
+    for (const { edge, symbol: from } of neighborhood.callers) {
       if (!from || !isDefaultVisibleSymbol(from)) continue;
       edges.push(surveyEdge(edge, from, symbol, surveyed));
       if (--edgeBudget <= 0) break outer;
     }
-    for (const edge of await view.query.callees(symbol.global_id)) {
+    for (const { edge, symbol: to } of neighborhood.callees) {
       if (edge.to_global_id == null) continue;
-      const to = await view.query.getSymbol(edge.to_global_id);
       if (!to || !isDefaultVisibleSymbol(to)) continue;
       if (surveyed.has(String(to.repo_rel_path || "").replace(/\\/g, "/"))) continue; // internal: already covered via callers
       edges.push(surveyEdge(edge, symbol, to, surveyed));

@@ -25,6 +25,7 @@
     "check:vector-fixtures": "node scripts/check-vector-fixture-drift.mjs",
     "fixtures:vector": "node scripts/generate-vector-fixtures.mjs",
     "check:log-secrets": "node scripts/check-log-secrets.mjs",
+    "pull:native": "node scripts/pull-native-artifacts.mjs",
     "compile:native:encoder": "node scripts/deploy-native.mjs --compile",
     "compile:native:vector": "node scripts/deploy-vector-native.mjs --compile",
     "deploy:native:encoder": "node scripts/deploy-native.mjs --deploy",

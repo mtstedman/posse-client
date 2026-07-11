@@ -6,13 +6,11 @@
 // handles + the serial write queue live for the whole session, so steady-state
 // incremental reindex pays no reopen cost.
 //
-// Lanes (docs/specs/CONDUCTOR-THREAD-BUNDLE-SPEC.md): the writer thread above is one lane
-// of a bundle. `retrieve` routes to a parallel READER pool — worker threads
-// with cached readonly WAL connections behind writer-priority gates. Indexing
-// writers ask every live reader to drain and retire affected read handles before
-// mutating view files, then release them after the write. Readers spawn lazily
-// on demand; warm-only consumers (post-commit hooks, most tests) never pay for
-// the pool.
+// Lanes (docs/specs/CONDUCTOR-THREAD-BUNDLE-SPEC.md): the writer thread and one
+// reader orchestration thread remain separate so Node-side indexing cannot
+// block request routing. Native concurrency no longer lives in a Node reader
+// pool: both bridge ports share one posse-atlas daemon, whose Rust executor and
+// Atlas gate own parallel read/write admission.
 
 import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../shared/tools/classes/daemon/index.js";
 import { heartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
@@ -28,7 +26,7 @@ const RETRIEVE_TIMEOUT_MS = 60_000;
 // behind a wedged reader — short fuse, best-effort.
 const READER_OP_TIMEOUT_MS = 5_000;
 const READER_WRITE_OP_TIMEOUT_MS = 70_000;
-const READER_POOL_SIZE = 4;
+const READER_POOL_SIZE = 1;
 let CONDUCTOR_SUPERVISOR_SEQ = 0;
 
 function registerAtlasThreadDaemon(kind, daemon, label) {
@@ -324,7 +322,14 @@ export function createConductorDaemon(opts = {}) {
   const retrieve = (opts, reqOpts) => callReader({ op: "retrieve", ...opts }, reqOpts);
   const executeTool = (opts, reqOpts) => callReader({ op: "executeTool", ...opts }, reqOpts);
 
-  const aggregateReaderInfo = async () => {
+  const aggregateReaderInfo = async ({ ensurePool = false } = {}) => {
+    if (ensurePool) {
+      for (let slot = 0; slot < READER_POOL_SIZE; slot += 1) getReaderEntry(slot);
+      await Promise.all(readerEntries.filter(Boolean).map(async (entry) => {
+        try { await call(entry.daemon, { op: "info" }, { timeoutMs: readerOpTimeoutMs }); }
+        catch { await disposeReaderEntry(entry); }
+      }));
+    }
     const readers = aliveReaderEntries();
     if (readers.length === 0) return null;
     const results = await Promise.allSettled(readers.map((entry) => call(entry.daemon, { op: "info" }, { timeoutMs: readerOpTimeoutMs })));
@@ -348,6 +353,18 @@ export function createConductorDaemon(opts = {}) {
       writeEnds: sum("writeEnds"),
       activeWriteHolds: sum("activeWriteHolds"),
       invalidationsDuringWrite: sum("invalidationsDuringWrite"),
+      storageCache: {
+        opens: infos.reduce((total, info) => total + Number(info?.storageCache?.opens || 0), 0),
+        hits: infos.reduce((total, info) => total + Number(info?.storageCache?.hits || 0), 0),
+        invalidations: infos.reduce((total, info) => total + Number(info?.storageCache?.invalidations || 0), 0),
+        evictions: infos.reduce((total, info) => total + Number(info?.storageCache?.evictions || 0), 0),
+        read_timing: {
+          requests: infos.reduce((total, info) => total + Number(info?.storageCache?.read_timing?.requests || 0), 0),
+          gate_wait_us: infos.reduce((total, info) => total + Number(info?.storageCache?.read_timing?.gate_wait_us || 0), 0),
+          storage_total_us: infos.reduce((total, info) => total + Number(info?.storageCache?.read_timing?.storage_total_us || 0), 0),
+          query_execute_us: infos.reduce((total, info) => total + Number(info?.storageCache?.read_timing?.query_execute_us || 0), 0),
+        },
+      },
       lanes: infos,
     };
   };

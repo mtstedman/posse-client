@@ -5,8 +5,9 @@
 // Worker-thread daemon hosts sometimes need async native helper calls. If they
 // call nativeBinaries directly, each worker thread gets its own BinaryManager
 // singleton and therefore its own process-backed native daemon. This bridge
-// lets those async calls route back to the parent process, where the native
-// daemons are already supervised and share one auth authority.
+// routes async calls through the parent for supervision and auth. ATLAS bridge
+// ports share one parent-owned native daemon; that Rust daemon owns request
+// threading and read/write admission internally.
 
 /** @type {import("node:worker_threads").MessagePort | null} */
 let workerBridgePort = null;
@@ -14,6 +15,52 @@ let nextBridgeRequestId = 1;
 export const DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS = 300_000;
 /** @type {Map<number, { resolve: (value: unknown) => void, reject: (err: Error) => void, timer: ReturnType<typeof setTimeout> | null, onAbort: (() => void) | null, signal: AbortSignal | null }>} */
 const pendingBridgeRequests = new Map();
+/** @type {null | (() => unknown | Promise<unknown>)} */
+let atlasManagerFactoryForTests = null;
+let sharedAtlasManager = null;
+let sharedAtlasManagerPromise = null;
+let sharedAtlasManagerOwned = false;
+let sharedAtlasManagerDisposal = null;
+let atlasBridgeUsers = 0;
+
+/** Test hook: override creation of the one shared parent ATLAS manager. */
+export function __setNativeBridgeAtlasManagerFactoryForTests(factory = null) {
+  atlasManagerFactoryForTests = typeof factory === "function" ? factory : null;
+}
+
+async function atlasManagerForBridges(options = {}) {
+  if (!sharedAtlasManagerPromise) {
+    sharedAtlasManagerPromise = (async () => {
+      const invoke = await import("../../../../domains/atlas/functions/v2/native/invoke.js");
+      const injected = invoke.__atlasNativeManagerForTests?.();
+      const factory = options.atlasManagerFactory || atlasManagerFactoryForTests;
+      sharedAtlasManagerOwned = !!factory;
+      if (factory) return factory();
+      if (injected) return injected;
+      const { nativeBinaries } = await import("../BinaryManager.js");
+      return nativeBinaries;
+    })().then((manager) => {
+      sharedAtlasManager = manager;
+      return manager;
+    });
+  }
+  return sharedAtlasManagerPromise;
+}
+
+function disposeOwnedSharedAtlasManager() {
+  if (!sharedAtlasManagerOwned || atlasBridgeUsers > 0) return Promise.resolve();
+  if (sharedAtlasManagerDisposal) return sharedAtlasManagerDisposal;
+  const manager = sharedAtlasManager;
+  const pending = sharedAtlasManagerPromise;
+  sharedAtlasManager = null;
+  sharedAtlasManagerPromise = null;
+  sharedAtlasManagerOwned = false;
+  sharedAtlasManagerDisposal = Promise.resolve(pending || manager)
+    .then((resolved) => resolved?.disposeAll?.())
+    .catch(() => {})
+    .finally(() => { sharedAtlasManagerDisposal = null; });
+  return sharedAtlasManagerDisposal;
+}
 
 function rejectPendingBridgeRequests(err) {
   for (const [id, pending] of pendingBridgeRequests) {
@@ -72,6 +119,8 @@ export function hasNativeThreadBridge() {
 export function __resetNativeThreadBridgeForTest() {
   workerBridgePort = null;
   nextBridgeRequestId = 1;
+  atlasManagerFactoryForTests = null;
+  if (atlasBridgeUsers === 0) void disposeOwnedSharedAtlasManager();
   rejectPendingBridgeRequests(new Error("native bridge reset"));
 }
 
@@ -135,8 +184,18 @@ export function nativeThreadBridgeRequest(tool, method, payload, opts = {}, cont
  * generic daemon transport own static dependencies on ATLAS/Git native modules.
  *
  * @param {import("node:worker_threads").MessagePort} port
+ * @param {{ atlasManagerFactory?: () => unknown | Promise<unknown> }} [options]
  */
-export function attachNativeThreadBridge(port) {
+export function attachNativeThreadBridge(port, options = {}) {
+  atlasBridgeUsers++;
+  let released = false;
+  const releaseSharedAtlasManager = async () => {
+    if (released) return;
+    released = true;
+    atlasBridgeUsers = Math.max(0, atlasBridgeUsers - 1);
+    await disposeOwnedSharedAtlasManager();
+  };
+
   port.on("message", async (message) => {
     const id = Number(/** @type {any} */ (message)?.id);
     const tool = String(/** @type {any} */ (message)?.tool || "");
@@ -147,7 +206,12 @@ export function attachNativeThreadBridge(port) {
       let data;
       if (tool === "atlas") {
         const { runAtlasNativeMethodAsync } = await import("../../../../domains/atlas/functions/v2/native/invoke.js");
-        data = await runAtlasNativeMethodAsync(method, payload, { ...opts, bypassNativeBridge: true });
+        const manager = await atlasManagerForBridges(options);
+        data = await runAtlasNativeMethodAsync(method, payload, {
+          ...opts,
+          manager,
+          bypassNativeBridge: true,
+        });
       } else if (tool === "git") {
         const { runGitNativeMethodAsync } = await import("../../../../domains/git/functions/native/invoke.js");
         data = await runGitNativeMethodAsync(method, payload, { ...opts, bypassNativeBridge: true });
@@ -159,6 +223,10 @@ export function attachNativeThreadBridge(port) {
       port.postMessage({ id, ok: false, error: { message: String(/** @type {any} */ (err)?.message || err) } });
     }
   });
+  port.on?.("close", () => {
+    try { void releaseSharedAtlasManager(); } catch { /* best effort */ }
+  });
   port.start?.();
   port.unref?.();
+  return releaseSharedAtlasManager;
 }

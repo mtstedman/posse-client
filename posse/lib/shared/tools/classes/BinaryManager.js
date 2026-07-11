@@ -182,9 +182,9 @@ export class BinaryManager {
 
   /**
    * Ensure a remotely distributed native binary is present for this host.
-   * A local lib/bin vector build wins when it matches the version issued by
-   * the heartbeat; otherwise that issued version is downloaded. Concurrent
-   * callers share one synchronization.
+   * A local lib/bin build wins when it matches the version issued by the
+   * heartbeat; otherwise that issued version is downloaded. Concurrent
+   * callers share one synchronization per binary.
    *
    * @param {string} name
    * @returns {Promise<Record<string, unknown>>}
@@ -193,13 +193,7 @@ export class BinaryManager {
     if (!VALID_BINARY_NAMES.has(name)) {
       return { available: false, name, reason: "unknown_binary" };
     }
-    const existing = this.binary(name);
-    if (name !== "vector" && existing.isAvailable()) {
-      return { available: true, name, path: existing.resolvePath(), source: "staged", downloaded: false };
-    }
-    if (name !== "vector") {
-      return { available: false, name, reason: "not_remotely_distributed" };
-    }
+    this.binary(name);
     if (this._opts.binRoot && this._artifactInstaller === ensureNativeBinaryArtifact) {
       return { available: false, name, reason: "explicit_bin_root_missing" };
     }

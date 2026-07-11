@@ -85,8 +85,9 @@ export function patchViewMetaNativeAsync(viewPath, meta, opts = {}) {
 
 /**
  * Daemon-resident storage-handle cache counters ({ opens, hits,
- * invalidations, evictions, reopened_* }). Benchmarks and diagnostics use
- * this to prove repeated queries are not re-validating databases.
+ * invalidations, evictions, reopened_*, read_timing }). Benchmarks and
+ * diagnostics use this to prove repeated queries are not re-validating
+ * databases and to separate Rust storage time from framework/IPC latency.
  */
 export function storageCacheStatsNativeAsync(opts = {}) {
   return runAtlasNativeMethodAsync(ATLAS_STORAGE_CACHE_STATS_METHOD, {}, opts);

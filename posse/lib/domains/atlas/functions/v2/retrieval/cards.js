@@ -229,23 +229,20 @@ export async function buildSymbolCard(args) {
   if (detail !== "minimal" && detail !== "signature") {
     const callerCap = detail === "full" ? 100 : 25;
     const calleeCap = detail === "full" ? 100 : 25;
-    const callerEdges = (await view.query.callers(symbol.global_id))
-      .filter((e) => e.confidence / 100 >= minCallConfidence);
-    const callers = (await visibleEndpointEdges({ view, endpoint: "from", edges: callerEdges })).slice(0, callerCap);
-    const calleeEdges = (await view.query.callees(symbol.global_id))
-      .filter((e) => e.confidence / 100 >= minCallConfidence);
-    const callees = (await visibleEndpointEdges({ view, endpoint: "to", edges: calleeEdges })).slice(0, calleeCap);
-    enrichCardWithEdges(card, symbol, callers, callees, detail);
-    // For callers, resolve the FROM endpoint; for callees, resolve the
-    // TO endpoint. Without this split, a self-edge in either direction
-    // would collapse the wrong side. Resolve sequentially — the native
-    // worker is serial, so this must not fan out into an unbounded batch.
-    const callerHits = [];
-    for (const e of callers) callerHits.push(await edgeAsHit(view, e, "from"));
-    card.callers = callerHits;
-    const calleeHits = [];
-    for (const e of callees) calleeHits.push(await edgeAsHit(view, e, "to"));
-    card.callees = calleeHits;
+    const neighborhood = await view.query.symbolNeighborhood(symbol.global_id);
+    const callers = visibleResolvedEdges(neighborhood.callers, "from", minCallConfidence)
+      .slice(0, callerCap);
+    const callees = visibleResolvedEdges(neighborhood.callees, "to", minCallConfidence)
+      .slice(0, calleeCap);
+    enrichCardWithEdges(
+      card,
+      symbol,
+      callers.map((entry) => entry.edge),
+      callees.map((entry) => entry.edge),
+      detail,
+    );
+    card.callers = callers.map(resolvedEdgeAsHit);
+    card.callees = callees.map(resolvedEdgeAsHit);
   } else if (detail !== "minimal") {
     enrichCardWithEdges(card, symbol, [], [], detail);
   }
@@ -260,15 +257,18 @@ export async function buildSymbolCard(args) {
  * Keep low-level parser locals available in the raw graph while filtering
  * them out of card caller/callee presentation.
  *
- * @param {{ view: View, edges: ViewEdge[], endpoint: "from" | "to" }} args
- * @returns {Promise<ViewEdge[]>}
+ * @param {Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>} entries
+ * @param {"from" | "to"} endpoint
+ * @param {number} minCallConfidence
+ * @returns {Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>}
  */
-async function visibleEndpointEdges({ view, edges, endpoint }) {
-  /** @type {ViewEdge[]} */
+function visibleResolvedEdges(entries, endpoint, minCallConfidence) {
+  /** @type {Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>} */
   const out = [];
   const seen = new Set();
-  for (const edge of edges) {
-    const target = await edgeEndpointSymbol(view, edge, endpoint);
+  for (const entry of entries) {
+    const { edge, symbol: target } = entry;
+    if (edge.confidence / 100 < minCallConfidence) continue;
     if (target) {
       if (!isDefaultVisibleSymbol(target)) continue;
     } else if (endpoint === "to" && isNoisyLocalSymbol(/** @type {any} */ ({
@@ -282,20 +282,9 @@ async function visibleEndpointEdges({ view, edges, endpoint }) {
     const key = edgeEndpointDedupeKey(edge, endpoint, target);
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(edge);
+    out.push(entry);
   }
   return out;
-}
-
-/**
- * @param {View} view
- * @param {ViewEdge} edge
- * @param {"from" | "to"} endpoint
- * @returns {Promise<import("../contracts/api.js").ViewSymbol | null>}
- */
-async function edgeEndpointSymbol(view, edge, endpoint) {
-  const gid = endpoint === "from" ? edge.from_global_id : edge.to_global_id;
-  return gid != null ? await view.query.getSymbol(gid) : null;
 }
 
 /**
@@ -461,25 +450,17 @@ function languageLabel(lang) {
 }
 
 /**
- * Resolve one endpoint of an edge to a SymbolHit. `endpoint === "from"`
- * for caller-list use (look up the source of the edge); `"to"` for
- * callee-list use (look up the target). Falls back to a synthetic
- * placeholder when the chosen endpoint is unresolved.
+ * Convert the daemon-resolved endpoint of an edge to a SymbolHit. Falls back
+ * to a synthetic placeholder when the endpoint is unresolved.
  *
- * @param {View} view
- * @param {ViewEdge} edge
- * @param {"from" | "to"} endpoint
- * @returns {Promise<SymbolHit>}
+ * @param {{ edge: ViewEdge, symbol: ViewSymbol | null }} entry
+ * @returns {SymbolHit}
  */
-async function edgeAsHit(view, edge, endpoint) {
-  const gid = endpoint === "from" ? edge.from_global_id : edge.to_global_id;
-  if (gid != null) {
-    const target = await view.query.getSymbol(gid);
-    if (target) {
-      const hit = symbolHit(target);
-      hit.confidence = edge.confidence / 100;
-      return hit;
-    }
+function resolvedEdgeAsHit({ edge, symbol }) {
+  if (symbol) {
+    const hit = symbolHit(symbol);
+    hit.confidence = edge.confidence / 100;
+    return hit;
   }
   return {
     symbolId: `unresolved:${edge.to_name}`,

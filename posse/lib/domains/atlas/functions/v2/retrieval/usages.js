@@ -46,10 +46,10 @@ export async function symbolUsages({ view, versionId, params }) {
     ? new Set(params.kind.map(String))
     : null;
   const rows = [];
-  for (const edge of await view.query.callers(target.global_id)) {
+  const neighborhood = await view.query.symbolNeighborhood(target.global_id);
+  for (const { edge, symbol: from } of neighborhood.callers) {
     if (kindFilter && !kindFilter.has(edge.kind)) continue;
     if ((Number(edge.confidence) || 0) / 100 < minConfidence) continue;
-    const from = await view.query.getSymbol(edge.from_global_id);
     if (!from || !isDefaultVisibleSymbol(from)) continue;
     rows.push(usageFromEdge(edge, from, true));
   }
@@ -124,7 +124,7 @@ export async function calledFromBreadcrumbs(view, symbols, { maxSymbols = 6, exa
 /**
  * Count resolved, default-visible incoming callers for a symbol and sample a
  * few distinct caller paths. Shares the exact caller-enumeration + visibility
- * filter that {@link symbolUsages} applies (view.query.callers +
+ * filter that {@link symbolUsages} applies (daemon-resolved neighborhood plus
  * isDefaultVisibleSymbol) so retrieval reachability signals stay consistent
  * with the symbol.overview surface. Best-effort: returns zero on any error.
  *
@@ -144,8 +144,8 @@ export async function countIncomingCallers(view, target, { sampleLimit = 3, dist
     if (!view?.query || target?.global_id == null) return result;
     const seenPaths = new Set();
     const distinct = distinctPaths ? new Set() : null;
-    for (const edge of await view.query.callers(target.global_id)) {
-      const from = await view.query.getSymbol(edge.from_global_id);
+    const neighborhood = await view.query.symbolNeighborhood(target.global_id);
+    for (const { edge, symbol: from } of neighborhood.callers) {
       if (!from || !isDefaultVisibleSymbol(from)) continue;
       const p = String(edge.repo_rel_path || from.repo_rel_path || "").replace(/\\/g, "/") || null;
       if (distinct) {
