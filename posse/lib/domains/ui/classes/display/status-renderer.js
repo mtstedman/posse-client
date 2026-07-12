@@ -2,7 +2,6 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import { stripAnsi, fit } from "../../functions/display/helpers/formatters.js";
 import { formatDuration } from "../../../../shared/format/functions/units.js";
-import { getOnnxWarmState, syntheticOnnxLoadPercent } from "../../../atlas/functions/v2/embeddings/onnx-warm-state.js";
 import {
   jobIsBackgroundAtlasWarm,
   workItemDisplayStatus,
@@ -24,9 +23,7 @@ export class DisplayStatusRenderer {
   // ── Context status bar (thin, full width, above the input) ────────────
   // One always-present line that answers "is code-intelligence healthy right
   // now?": a verdict word + glyph, then the live graph-warm families and the
-  // ONNX encoder phase. Derives only from cheap job-row state + the in-memory
-  // ONNX warm singleton — no per-frame DB reads. Returns [] (hidden) only when
-  // there is genuinely nothing to report (ATLAS idle and encoder never warmed).
+  // native index warm phase. Derives only from cheap job-row state.
   _buildContextStatusBar(width) {
     let groups = [];
     try {
@@ -41,13 +38,10 @@ export class DisplayStatusRenderer {
     } catch {
       groups = [];
     }
-    const onnx = getOnnxWarmState();
-
     const anyRunning = groups.some((g) => g.active > 0);
     const anyQueued = groups.some((g) => atlasWarmQueuedEventCount(g) > 0);
 
-    // Nothing to say: ATLAS idle and the encoder never started.
-    if (!anyRunning && !anyQueued && onnx.phase === "idle") return [];
+    if (!anyRunning && !anyQueued) return [];
 
     const halo = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     const spin = halo[this._spinIdx % halo.length];
@@ -55,9 +49,7 @@ export class DisplayStatusRenderer {
     let glyph;
     let glyphColor;
     let word;
-    if (onnx.phase === "failed") {
-      glyph = "✗"; glyphColor = C.red; word = "attention";
-    } else if (anyRunning || onnx.phase === "loading") {
+    if (anyRunning) {
       glyph = spin; glyphColor = C.cyan; word = "warming";
     } else if (anyQueued) {
       glyph = "·"; glyphColor = C.yellow; word = "queued";
@@ -73,15 +65,6 @@ export class DisplayStatusRenderer {
       if (queued > 0) bits.push(`${queued}⏳`);
       clauses.push(`${C.dim}${g.label}${C.reset} ${bits.join(" ")}`);
     }
-    if (onnx.phase === "loading") {
-      clauses.push(`${C.cyan}encoder ${syntheticOnnxLoadPercent()}%${C.reset}`);
-    } else if (onnx.phase === "ready") {
-      clauses.push(`${C.dim}encoder ready${C.reset}`);
-    } else if (onnx.phase === "failed") {
-      const reason = String(onnx.error || "warm failed").split("\n")[0];
-      clauses.push(`${C.red}encoder warm failed${C.reset} ${C.dim}— search is lexical-only (${reason})${C.reset}`);
-    }
-
     const head = `${glyphColor}${glyph} context ${word}${C.reset}`;
     const sep = `${C.dim} · ${C.reset}`;
     // The render loop fit()s every full-width line, trimming the tail (and thus

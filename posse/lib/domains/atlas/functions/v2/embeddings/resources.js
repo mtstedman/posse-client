@@ -2,28 +2,20 @@
 //
 // Shared ATLAS v2 embedding resource opener.
 //
-// The encoder/index contracts are intentionally generic, but production
-// callers all need the same policy:
-//   * embeddings are disabled unless the operator explicitly opts in;
-//   * the optional ANN dependency may be absent and should degrade cleanly;
-//   * opened indexes must be closed by the caller.
+// Production callers share one native-only encoder/index lifecycle.
 
 import fs from "fs";
 import path from "path";
-import { createRequire } from "module";
+import { DEFAULT_ATLAS_EMBEDDING_PROVIDER } from "../../../../../catalog/atlas.js";
 import { embeddingsRoot } from "../runtime-paths.js";
-import { inspectLocalOnnxStatus, localOnnxRequested, LOCAL_ONNX_PROVIDER_ALIASES } from "./local-onnx.js";
-import { resolveConfiguredEncoder } from "../../../classes/v2/EmbeddingEncoder.js";
-import { ChildEmbeddingIndex, childEmbeddingModelDirName } from "../../../classes/v2/ChildEmbeddingIndex.js";
-import { RustEmbeddingIndex } from "../../../classes/v2/RustEmbeddingIndex.js";
+import { AtlasEmbeddingEncoder } from "../../../classes/v2/AtlasEmbeddingEncoder.js";
+import { RustEmbeddingIndex, embeddingModelDirName } from "../../../classes/v2/RustEmbeddingIndex.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
-import { encodeViaSharedOnnxDaemon } from "./onnx-daemon.js";
 import { errorForTelemetry, recordEmbeddingForensics } from "./forensics.js";
+import { inspectJinaModel } from "./jina-model.js";
 
 /** @typedef {import("../contracts/embeddings.js").EmbeddingEncoder} EmbeddingEncoder */
 /** @typedef {import("../contracts/embeddings.js").EmbeddingIndex} EmbeddingIndexContract */
-
-const localRequire = createRequire(import.meta.url);
 
 /**
  * @typedef {Object} OpenEmbeddingResourcesResult
@@ -37,130 +29,14 @@ const localRequire = createRequire(import.meta.url);
  */
 
 /**
- * Embeddings are opt-in for product paths. Direct unit tests can still
- * instantiate StubEmbeddingEncoder by hand; production warmer/proxy paths
- * only enable vector indexing/search when the provider is explicit.
- *
- * @param {Record<string, unknown>} config
- * @returns {string}
- */
-export function configuredEmbeddingProvider(config = {}) {
-  const provider = String(config?.embeddingProvider || config?.atlasEmbeddingProvider || config?.provider || "").trim().toLowerCase();
-  if (provider) return provider;
-  if (localOnnxRequested(config)) return "local-onnx";
-  return configuredRemoteEncoderMode(config) !== "off" ? "posse-remote" : "";
-}
-
-/**
- * @param {Record<string, unknown>} config
- * @returns {"off" | "shadow" | "preferred" | "required"}
- */
-export function configuredRemoteEncoderMode(config = {}) {
-  const raw = String(config?.remoteEncoderMode || config?.atlasRemoteEncoderMode || config?.atlas_remote_encoder_mode || "off").trim().toLowerCase();
-  return raw === "shadow" || raw === "preferred" || raw === "required" ? raw : "off";
-}
-
-/**
- * @param {Record<string, unknown>} config
- * @returns {boolean}
- */
-export function embeddingsExplicitlyEnabled(config = {}) {
-  const provider = configuredEmbeddingProvider(config);
-  return provider !== "" && provider !== "off" && provider !== "none" && provider !== "false" && provider !== "0" && provider !== "no";
-}
-
-/**
- * Operator-opt-in gate for ATLAS semantic dispatch in symbol.search. Even when
- * the embedding index is opened for the warmer or another consumer, the dispatcher only honors a caller's
- * `semantic: true` flag when this gate returns true. Default is off because
- * the deterministic-stub encoder's recall is modest (≈27% top-1 token match
- * on real codebases) and FTS is the safer baseline.
+ * Semantic capability is always installed. Individual requests still choose
+ * semantic or lexical behavior through their explicit `semantic` argument.
  *
  * @param {Record<string, unknown>} config
  * @returns {boolean}
  */
-export function semanticDispatchEnabled(config = {}) {
-  const raw = String(config?.semanticEnabled ?? "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-}
-
-/**
- * @param {Record<string, unknown>} config
- * @returns {"auto" | "rust" | "usearch" | "off"}
- */
-export function configuredVectorBackend(config = {}) {
-  const raw = String(config?.vectorBackend || "auto").trim().toLowerCase();
-  if (raw === "0" || raw === "false" || raw === "none" || raw === "off") return "off";
-  if (raw === "rust") return raw;
-  if (raw === "usearch") return raw;
-  // Unknown values (including legacy "lancedb") silently degrade to auto so
-  // existing settings don't crash the pipeline after the lance removal.
-  return "auto";
-}
-
-function usearchPackageResolvable() {
-  try {
-    localRequire.resolve("usearch");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Encode placement. Local-ONNX inference is transformers.js: tokenization and
-// pooling are synchronous JS, so calling encoder.encode() inline pins whatever
-// thread asked for vectors — the main loop on the in-process retrieval path,
-// the conductor thread during warms/retrieves. Local-ONNX opens therefore wrap
-// the encoder so encode() delegates to the shared persistent ONNX worker set
-// (one warm model per worker). The wrapper preserves the encoder's full identity
-// (model/model_version/dim drive index dir naming), and forwards `workers` so
-// bulk ingest gets data-parallel encode across the warm set.
-
-/**
- * @param {any} encoder  a LocalOnnxEmbeddingEncoder instance
- * @returns {EmbeddingEncoder}
- */
-function daemonBackedLocalOnnxEncoder(encoder) {
-  // The daemon host reconstructs the encoder from this config — it must round-
-  // trip the exact constructor identity (model_version is passed back as
-  // modelVersion so the host's composed version string matches ours).
-  const daemonConfig = {
-    cacheDir: encoder.cacheDir,
-    modelName: encoder.modelName,
-    modelId: encoder.modelId,
-    dim: encoder.dim,
-    modelVersion: encoder.model_version,
-    batchSize: encoder.batchSize,
-    maxInputChars: encoder.maxInputChars,
-    maxInputTokens: encoder.maxInputTokens,
-    dtype: encoder.dtype,
-    localFilesOnly: encoder.localFilesOnly,
-  };
-  return /** @type {any} */ ({
-    model: encoder.model,
-    model_version: encoder.model_version,
-    dim: encoder.dim,
-    modelName: encoder.modelName,
-    modelId: encoder.modelId,
-    cacheDir: encoder.cacheDir,
-    batchSize: encoder.batchSize,
-    maxInputChars: encoder.maxInputChars,
-    maxInputTokens: encoder.maxInputTokens,
-    dtype: encoder.dtype,
-    localFilesOnly: encoder.localFilesOnly,
-    daemonBacked: true,
-    buildSymbolText: (/** @type {any} */ symbol) => encoder.buildSymbolText(symbol),
-    encode: (/** @type {string[]} */ texts, /** @type {AbortSignal} */ signal, /** @type {{ workers?: number }} */ opts = {}) =>
-      encodeViaSharedOnnxDaemon(texts, daemonConfig, { signal, workers: opts?.workers ?? 1 }),
-    // Dispose the wrapped inline encoder only (it never loaded a model — encode
-    // is delegated). The shared daemon outlives any one open and is reclaimed
-    // by its own idle eviction / session cleanup.
-    dispose: () => encoder.dispose?.(),
-  });
-}
-
-export function __testDaemonBackedLocalOnnxEncoder(encoder) {
-  return daemonBackedLocalOnnxEncoder(encoder);
+export function semanticDispatchEnabled(_config = {}) {
+  return true;
 }
 
 /**
@@ -174,10 +50,7 @@ export function __testDaemonBackedLocalOnnxEncoder(encoder) {
 // ---------------------------------------------------------------------------
 // Per-realm embedding-resource pool (default ON).
 //
-// The old behavior forked a fresh ChildEmbeddingIndex (and encoder) per
-// openEmbeddingResources() and killed it on close() — one fork per warm slice,
-// the dominant source of child-index churn (100+ spawns/run). Successive opens
-// for the same (repo, provider, backend) in this realm now reuse ONE
+// Successive opens for the same native index in this realm reuse one
 // reference-counted encoder+index; an idle entry is closed after a grace TTL.
 // Safe because B (reader read-only) + D (in-host flush serialization) keep a
 // single writer regardless of pooling. Escape hatch:
@@ -321,60 +194,39 @@ export function retirePooledEmbeddingResources() {
 }
 
 export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOnly = false }) {
-  /** @type {Record<string, unknown>} */
-  const effectiveConfig = {
-    ...normalizeEmbeddingConfig(config, env),
-    repoRoot,
-  };
-  const provider = configuredEmbeddingProvider(effectiveConfig);
-  if (provider && !effectiveConfig.embeddingProvider && !effectiveConfig.atlasEmbeddingProvider && !effectiveConfig.provider) {
-    effectiveConfig.embeddingProvider = provider;
-    effectiveConfig.atlasEmbeddingProvider = provider;
-  }
-  const vectorBackend = configuredVectorBackend(effectiveConfig);
+  const provider = DEFAULT_ATLAS_EMBEDDING_PROVIDER;
+  const vectorBackend = "posse-vector";
   recordEmbeddingForensics("resources.open.start", {
     repo_root: repoRoot || null,
-    provider: provider || null,
+    provider,
     vector_backend: vectorBackend,
-    semantic_enabled: semanticDispatchEnabled(effectiveConfig),
-    embedding_threads: effectiveConfig.embeddingThreads
-      ?? effectiveConfig.atlasEmbeddingThreads
-      ?? effectiveConfig.atlas_embedding_threads
-      ?? null,
+    semantic_enabled: true,
   });
   if (!repoRoot) {
     return disabled(provider, "missing_repo_root", vectorBackend, { repoRoot });
   }
-  if (!embeddingsExplicitlyEnabled(effectiveConfig)) {
-    return disabled(provider || "off", "disabled", vectorBackend, { repoRoot });
-  }
-  if (vectorBackend === "off") {
-    return disabled(provider, "vector_backend_disabled", "off", { repoRoot });
-  }
-  if (LOCAL_ONNX_PROVIDER_ALIASES.has(provider)) {
-    const onnx = inspectLocalOnnxStatus({ repoRoot, config: effectiveConfig });
-    if (!onnx.enabled) {
-      return disabled(provider, `local_onnx: ${onnx.reason}`, vectorBackend, { repoRoot, onnx });
-    }
+  const jina = inspectJinaModel(repoRoot);
+  if (!jina.ready) {
+    return disabled(provider, "jina_model_cache_missing", vectorBackend, {
+      repoRoot,
+      model_cache_dir: jina.modelCacheDir,
+    });
   }
 
   // Mode is part of the pool identity: a read-only child (no quarantine, no
   // saves) must never be handed to a caller that intends to write.
-  const poolKey = embeddingChildPoolEnabled(effectiveConfig, env)
+  const poolKey = embeddingChildPoolEnabled(config, env)
     ? `${embeddingsRoot(repoRoot)}|${provider}|${vectorBackend}|${readOnly ? "ro" : "rw"}`
     : null;
   const build = () => {
-    let encoder = resolveConfiguredEncoder(effectiveConfig, env);
-    if (encoder?.model === "local-onnx") {
-      encoder = daemonBackedLocalOnnxEncoder(encoder);
-    }
+    if (!nativeBinaries.shouldUse("atlas")) throw new Error("posse-atlas unavailable");
+    if (!nativeBinaries.shouldUse("vector")) throw new Error("posse-vector unavailable");
+    const encoder = new AtlasEmbeddingEncoder({ repoRoot });
     const result = openIndexForBackend({
-      backend: vectorBackend,
       encoder,
       repoRoot,
-      requestedProvider: provider,
       readOnly,
-      nativeVectorManager: effectiveConfig.nativeVectorManager,
+      nativeVectorManager: config.nativeVectorManager,
     });
     recordEmbeddingForensics("resources.open.enabled", {
       repo_root: repoRoot,
@@ -393,24 +245,11 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOn
     recordEmbeddingForensics("resources.open.error", {
       repo_root: repoRoot,
       provider,
-      vector_backend: vectorBackend,
+      vector_backend: "posse-vector",
       error: errorForTelemetry(err),
     });
     return disabled(provider, `open_failed: ${err?.message || String(err)}`, vectorBackend, { repoRoot });
   }
-}
-
-function normalizeEmbeddingConfig(config = {}, env = {}) {
-  return {
-    ...envConfig(env),
-    ...(config && typeof config === "object" ? config : {}),
-  };
-}
-
-function envConfig(env = {}) {
-  return {
-    embeddingApiKey: env.POSSE_ATLAS_EMBEDDING_API_KEY,
-  };
 }
 
 /**
@@ -438,7 +277,7 @@ export function cleanupStaleEmbeddingDirs({
   const model = String(currentModel || "").trim();
   const modelVersion = String(currentModelVersion || "").trim();
   if (!repoRoot || !model || !modelVersion || !fs.existsSync(root)) return { removed: 0 };
-  const current = childEmbeddingModelDirName({ model, model_version: modelVersion });
+  const current = embeddingModelDirName({ model, model_version: modelVersion });
   const prefix = `${encodeModelDirComponent(model)}--`;
   let removed = 0;
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
@@ -486,17 +325,18 @@ function disabled(provider, reason, backend = null, details = {}) {
 
 /**
  * @param {{
- *   backend: "auto" | "rust" | "usearch" | "off",
  *   encoder: EmbeddingEncoder,
  *   repoRoot: string,
- *   requestedProvider: string,
  *   nativeVectorManager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  * }} args
  * @returns {OpenEmbeddingResourcesResult}
  */
-function openIndexForBackend({ backend, encoder, repoRoot, requestedProvider, readOnly = false, nativeVectorManager = nativeBinaries }) {
+function openIndexForBackend({ encoder, repoRoot, readOnly = false, nativeVectorManager = nativeBinaries }) {
   const root = embeddingsRoot(repoRoot);
-  const openRust = () => RustEmbeddingIndex.open({
+  if (!nativeVectorManager.shouldUse("vector")) {
+    throw new Error("posse-vector unavailable");
+  }
+  const index = RustEmbeddingIndex.open({
     model: encoder.model,
     model_version: encoder.model_version,
     dim: encoder.dim,
@@ -504,39 +344,7 @@ function openIndexForBackend({ backend, encoder, repoRoot, requestedProvider, re
     readOnly,
     manager: nativeVectorManager,
   });
-  const openUsearch = () => {
-    if (!usearchPackageResolvable()) {
-      throw new Error("usearch_unavailable: missing");
-    }
-    return ChildEmbeddingIndex.open({
-      model: encoder.model,
-      model_version: encoder.model_version,
-      dim: encoder.dim,
-      embeddingsRoot: root,
-      readOnly,
-    });
-  };
-
-  if (backend === "auto" || backend === "rust") {
-    try {
-      if (!nativeVectorManager.shouldUse("vector")) {
-        throw new Error("server-issued posse-vector unavailable");
-      }
-      return enabled({ provider: encoder.model, backend: "rust", encoder, index: openRust() });
-    } catch (err) {
-      if (backend === "rust") {
-        return disabled(requestedProvider, `rust: ${err?.message || String(err)}`, backend);
-      }
-    }
-  }
-
-  // During the transition `usearch` explicitly selects the JS child. `auto`
-  // reaches it only when the server-issued Rust worker is unavailable.
-  try {
-    return enabled({ provider: encoder.model, backend: "usearch", encoder, index: openUsearch() });
-  } catch (err) {
-    return disabled(requestedProvider, `usearch: ${err?.message || String(err)}`, backend);
-  }
+  return enabled({ provider: DEFAULT_ATLAS_EMBEDDING_PROVIDER, backend: "posse-vector", encoder, index });
 }
 
 /**

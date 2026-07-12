@@ -28,7 +28,6 @@ import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAu
 import { sanitizeWorkerExecArgv } from "../../runtime/functions/worker-exec-argv.js";
 import { getAtlasV2BootTimeoutMs } from "../../settings/functions/tunables.js";
 import { recordEmbeddingForensics, errorForTelemetry } from "../../atlas/functions/v2/embeddings/forensics.js";
-import { embeddingsExplicitlyEnabled, configuredVectorBackend } from "../../atlas/functions/v2/embeddings/resources.js";
 import {
   warmReadinessProgress,
   warmReadinessSeed,
@@ -1267,8 +1266,8 @@ export function buildAtlasRuntimeConfigPayload({ repo, graphDbPath, config = get
     },
     ledger: { path: graphDbPath || storage.ledgerDbPath },
     views: { main: storage.mainViewDbPath },
-    semantic: { enabled: config?.semanticEnabled === true },
-    vectorBackend: config?.vectorBackend || null,
+    semantic: { enabled: true },
+    vectorBackend: "posse-vector",
   };
 }
 
@@ -1491,7 +1490,7 @@ export function prewarmAtlasV2BootDeps() {
  * Mirrors the gates `openEmbeddingResources` applies before opening an encoder.
  */
 function atlasEmbeddingsConfigured(config) {
-  return !!config && embeddingsExplicitlyEnabled(config) && configuredVectorBackend(config) !== "off";
+  return !!config;
 }
 
 /**

@@ -48,7 +48,6 @@ import {
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
   ATLAS_PHASE_VALUES,
-  ATLAS_REMOTE_ENCODER_MODE_VALUES,
   ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
   ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES,
   ATLAS_SCIP_LANGUAGE_OPTIONS,
@@ -58,8 +57,6 @@ import {
   ATLAS_TREE_COMPRESSION_MODE_VALUES,
   ATLAS_TRANSPORT_VALUES,
   ATLAS_V2_MODE_VALUES,
-  ATLAS_VECTOR_BACKEND_VALUES,
-  ATLAS_WI_EMBEDDINGS_VALUES,
 } from "../../../catalog/atlas.js";
 
 export {
@@ -82,7 +79,6 @@ export {
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
   ATLAS_PHASE_VALUES,
-  ATLAS_REMOTE_ENCODER_MODE_VALUES,
   ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
   ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES,
   ATLAS_SCIP_LANGUAGE_OPTIONS,
@@ -92,8 +88,6 @@ export {
   ATLAS_TREE_COMPRESSION_MODE_VALUES,
   ATLAS_TRANSPORT_VALUES,
   ATLAS_V2_MODE_VALUES,
-  ATLAS_VECTOR_BACKEND_VALUES,
-  ATLAS_WI_EMBEDDINGS_VALUES,
 };
 
 function buildModelSelectionSettings() {
@@ -311,7 +305,6 @@ export const SETTINGS_CATALOG = [
   // build is staged for the host os/arch (BinaryManager.shouldUse). Runtime
   // env overrides POSSE_NATIVE_BINARIES / POSSE_NATIVE_<TOOL> win.
   { key: "posse_native_remote",           default: "true",               valueType: "boolean", adminVisible: false, description: "Delegate authenticated Posse remote prompt/catalog HTTP calls to the native posse-remote binary when present" },
-  { key: "posse_native_vector",           default: "false",              valueType: "boolean", adminVisible: false, description: "Opt in to the server-issued current posse-vector worker after its vector:methods pulse route is available; disabled keeps the npm usearch transition backend" },
   { key: "posse_native_heartbeat_url",    default: "",                   adminVisible: false, description: "Heartbeat URL passed explicitly to key-gated native Posse binaries" },
   { key: "posse_native_heartbeat_public_key_url", default: "",           adminVisible: false, description: "Optional heartbeat public-key discovery URL passed explicitly to native Posse binaries" },
   { key: "posse_native_heartbeat_jwt_public_key", default: "",           adminVisible: false, description: "Ed25519 JWT public key passed explicitly to native Posse binaries" },
@@ -333,31 +326,12 @@ export const SETTINGS_CATALOG = [
   { key: "atlas_live_buffers",            default: "true",               valueType: "boolean", description: "Push deterministic write/edit buffers into ATLAS during dev jobs" },
   { key: "atlas_memory_surface",          default: "on",                 options: ATLAS_MEMORY_SURFACE_MODE_VALUES, description: "Probe ATLAS memory anchor presence in handoffs. on/auto = return exact files/symbols with attached memory; off = never probe." },
   { key: "posse_kaizen_to_atlas",         default: "off",                options: KAIZEN_TO_ATLAS_MODE_VALUES, description: "Reserved Kaizen insight promotion setting. Kaizen promotion is currently hardwired off." },
-  { key: "atlas_semantic_enabled",        default: "true",               valueType: "boolean", description: "Enable ATLAS semantic search dispatch (default on, backed by the local ONNX jina-v2-code encoder; FTS remains the fallback when the encoder is unavailable)" },
-  { key: "atlas_vector_backend",          default: "auto",               options: ATLAS_VECTOR_BACKEND_VALUES, description: "ATLAS embedding vector backend: auto (enabled native worker, then npm usearch), rust, usearch, or off" },
-  { key: "atlas_wi_embeddings",           default: "on_demand",          options: ATLAS_WI_EMBEDDINGS_VALUES, description: "ATLAS WI embedding mode: off, on_demand, or on" },
   { key: "atlas_view_layer_merge",        default: "on",                 options: ["off", "on"], description: "ATLAS v2 order-independent view build: source view symbols/edges from per-source tree-sitter+SCIP layers (on, default) vs the legacy flat tables (off). Off is a fallback during the layer-merge rollout." },
   { key: "atlas_tree_compression_mode",   default: "ml",                 options: ATLAS_TREE_COMPRESSION_MODE_VALUES, description: "ATLAS tree compression seed mode: off, deterministic, or ml. ml runs an explicit one-time model enrichment pass over the cached tree seed snapshot." },
   { key: "atlas_tree_compression_provider", default: "", options: [{ value: "", label: "active (researcher provider)" }, ...PROVIDER_OPTIONS.map((provider) => ({ value: provider, label: PROVIDER_LABELS[provider] || provider }))], description: "Provider for the optional ATLAS tree compression ML pass (empty = active researcher provider)" },
   { key: "atlas_tree_compression_model_tier", default: "standard",       options: MODEL_TIER_NAMES, description: "Model tier for the optional ATLAS tree compression ML pass" },
   { key: "atlas_tree_compression_max_seeds", default: "80",              numeric: { integer: true, min: 1, max: 500 }, description: "Maximum ATLAS tree compression seeds stored in the cached snapshot" },
   { key: "atlas_tree_compression_model_max_seeds", default: "40",        numeric: { integer: true, min: 1, max: 200 }, description: "Maximum ATLAS tree compression seeds sent to the one-time ML enrichment pass" },
-  { key: "atlas_embedding_provider",      default: "jina-v2-code",       description: "ATLAS embedding provider: jina-v2-code (default) uses the local ONNX encoder; empty/off disables embeddings; stub uses deterministic local vectors; openai-compatible uses the configured HTTP endpoint" },
-  { key: "atlas_local_onnx_cache_dir",    default: "",                   adminVisible: false, description: "Optional local ONNX model cache directory (empty = repo .posse/atlas/models/onnx)" },
-  { key: "atlas_embedding_endpoint",      default: "",                   description: "ATLAS embedding HTTP endpoint for openai-compatible providers" },
-  { key: "atlas_embedding_model",         default: "",                   description: "ATLAS embedding model name for the configured embedding provider" },
-  { key: "atlas_embedding_dim",           default: "",                   numeric: { integer: true, min: 1 }, description: "ATLAS embedding vector dimension for the configured model" },
-  { key: "atlas_embedding_model_version", default: "",                   adminVisible: false, description: "Optional ATLAS embedding model-version override used to partition persisted vectors" },
-  { key: "atlas_embedding_timeout_ms",    default: "90000",              numeric: { integer: true, min: 1000 }, adminVisible: false, description: "Maximum milliseconds to wait for ATLAS embedding provider requests (default 90s — covers slow first encode under contention)" },
-  { key: "atlas_embedding_threads",       default: "2",                  numeric: { integer: true, min: 1, max: 8 }, description: "ATLAS local ONNX embedding worker threads. 2 is the measured default sweet spot; 1 disables encode fanout." },
-  { key: "atlas_embedding_headers",       default: "",                   adminVisible: false, description: "Optional JSON object of non-secret HTTP headers for ATLAS embedding provider requests" },
-  { key: "atlas_embedding_send_dimensions", default: "false",            valueType: "boolean", adminVisible: false, description: "Include the configured vector dimension in ATLAS embedding provider requests" },
-  { key: "atlas_remote_encoder_mode",     default: "off",                options: ATLAS_REMOTE_ENCODER_MODE_VALUES, description: "ATLAS remote encoder mode: off, shadow, preferred, or required. When enabled, remote encoding sends repo paths, names, signatures, doc comments, body lead snippets, and query text for vectorization. Shadow keeps local vectors authoritative while comparing remote batches." },
-  { key: "atlas_remote_encoder_url",      default: "",                   description: "Posse remote encoder base URL (empty = POSSE_ATLAS_REMOTE_ENCODER_URL or POSSE_REMOTE_URL)" },
-  { key: "atlas_remote_encoder_model",    default: "",                   description: "Remote ATLAS encoder model name used for request hints and vector store partitioning" },
-  { key: "atlas_remote_encoder_dim",      default: "",                   numeric: { integer: true, min: 1 }, description: "Remote ATLAS encoder vector dimension" },
-  { key: "atlas_remote_encoder_model_version", default: "",              adminVisible: false, description: "Remote ATLAS encoder model version used to partition persisted vectors" },
-  { key: "atlas_remote_encoder_timeout_ms", default: "90000",            numeric: { integer: true, min: 1000 }, adminVisible: false, description: "Maximum milliseconds to wait for remote ATLAS encoder requests (default 90s — generous to absorb network jitter)" },
   { key: "atlas_transport",               default: "v2",                 options: ATLAS_TRANSPORT_VALUES, adminVisible: false, description: "ATLAS transport: v2 native" },
   { key: "atlas_install_path",            default: "",                   adminVisible: false, description: "Deprecated ATLAS runtime path setting; ignored by v2 native ATLAS" },
   { key: "atlas_node_path",               default: "",                   adminVisible: false, description: "Deprecated ATLAS Node.js path setting; ignored by v2 native ATLAS" },
@@ -380,7 +354,6 @@ export const SETTINGS_CATALOG = [
   { key: "atlas_handoff_prefetch_timeout_ms", default: "60000",          numeric: { integer: true, min: 1000 }, adminVisible: false, description: "Maximum milliseconds to wait for ATLAS handoff prefetch before deterministic fallback (default 60s — absorbs short restage/index contention)" },
   { key: "atlas_v2_boot_soft_timeout_ms", default: "15000",              numeric: { integer: true, min: 0 }, adminVisible: false, description: "Milliseconds before ATLAS boot warmup moves to background so scheduler boot can continue; 0 waits for completion" },
   { key: "atlas_embedded_timeout_ms",     default: "90000",              numeric: { integer: true, min: 1000 }, adminVisible: false, description: "Default timeout in milliseconds for embedded ATLAS tool calls (default 90s — survives contention)" },
-  { key: "atlas_embedded_dispatch",       default: "conductor",          options: ["conductor", "in-process"], adminVisible: false, description: "Where embedded ATLAS read dispatch runs: conductor (off the main loop, default) or in-process (kill switch)" },
   { key: "atlas_embedded_queue_wait_ms",  default: "90000",              numeric: { integer: true, min: 0 }, adminVisible: false, description: "Maximum milliseconds embedded ATLAS calls wait for protected ATLAS assets (default 90s)" },
   { key: "atlas_job_cache_ttl_ms",        default: "300000",             numeric: { integer: true, min: 0 }, adminVisible: false, description: "TTL in milliseconds for per-job embedded ATLAS result cache entries" },
   { key: "atlas_prefetch_cache_ttl_ms",   default: "600000",             numeric: { integer: true, min: 0 }, adminVisible: false, description: "TTL in milliseconds for ATLAS prefetch cache entries" },
@@ -402,8 +375,6 @@ const OPTION_LABEL_OVERRIDES = Object.freeze({
   "dev-fix": "Dev/fix",
   warn_and_fallback: "Warn and fallback",
   warn_only: "Warn only",
-  "jina-v2-code": "Jina v2 code",
-  "openai-compatible": "OpenAI-compatible",
 });
 
 function humanizeCatalogOptionLabel(value) {

@@ -21,13 +21,12 @@
     "go": "node orchestrator.js go",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
+    "benchmark:atlas:comprehensive": "node scripts/atlas-comprehensive-benchmark.mjs",
     "check:protocol": "node scripts/check-control-protocol-drift.mjs",
-    "check:vector-fixtures": "node scripts/check-vector-fixture-drift.mjs",
-    "fixtures:vector": "node scripts/generate-vector-fixtures.mjs",
     "check:log-secrets": "node scripts/check-log-secrets.mjs",
     "pull:native": "node scripts/pull-native-artifacts.mjs",
-    "compile:native:encoder": "node scripts/deploy-native.mjs --compile",
-    "compile:native:vector": "node scripts/deploy-vector-native.mjs --compile",
+    "compile:native:encoder": "node scripts/rebuild-rust-binaries.mjs --platform windows --binary atlas,git,remote",
+    "compile:native:vector": "node scripts/rebuild-rust-binaries.mjs --platform windows --binary vector",
     "deploy:native:encoder": "node scripts/deploy-native.mjs --deploy",
     "deploy:native:vector": "node scripts/deploy-vector-native.mjs --deploy",
     "deploy:rust-binaries": "node scripts/deploy-rust-binaries.mjs",
@@ -41,8 +40,7 @@
     "better-sqlite3": "12.8.0",
     "node-pty": "^1.1.0",
     "openai": "^4.104.0",
-    "qrcode-terminal": "^0.12.0",
-    "usearch": "2.25.1"
+    "qrcode-terminal": "^0.12.0"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "4.2.0",

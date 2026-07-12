@@ -12,7 +12,6 @@
 import { performance } from "node:perf_hooks";
 
 import { hasLanguageSemantics } from "../resolver/adapters/registry.js";
-import { normalizeEmbeddingThreads } from "./onnx-daemon.js";
 import {
   errorForTelemetry,
   recordEmbeddingForensics,
@@ -53,7 +52,6 @@ const DEFAULT_BATCH_SIZE = 64;
  *   signal?: AbortSignal,
  *   limit?: number,
  *   repoRoot?: string,
- *   embeddingThreads?: number,
  *   onlySymbols?: ViewSymbol[],
  *   onProgress?: ((event: {
  *     kind: string,
@@ -66,7 +64,6 @@ const DEFAULT_BATCH_SIZE = 64;
  *     skipped: number,
  *     languageCurrent: Map<string, number>,
  *     languageTotal: Map<string, number>,
- *     workerCount?: number,
  *     batchSize?: number,
  *     timingsMs?: Record<string, any>,
  *     batchTimingMs?: Record<string, any> | null,
@@ -74,7 +71,7 @@ const DEFAULT_BATCH_SIZE = 64;
  * }} args
  * @returns {Promise<IngestReport>}
  */
-export async function ingestView({ view, index, encoder, batchSize, signal, limit, repoRoot, embeddingThreads = 1, onlySymbols, onProgress = null }) {
+export async function ingestView({ view, index, encoder, batchSize, signal, limit, repoRoot, onlySymbols, onProgress = null }) {
   const startedAt = performance.now();
   if (!view) throw new TypeError("ingestView: view is required");
   if (!index) throw new TypeError("ingestView: index is required");
@@ -84,8 +81,7 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
       `ingestView: encoder dim ${encoder.dim} != index dim ${index.dim}`,
     );
   }
-  const workerCount = normalizeEmbeddingThreads(embeddingThreads, 1);
-  const size = resolveEmbeddingIngestBatchSize({ batchSize, encoder, workerCount });
+  const size = resolveEmbeddingIngestBatchSize({ batchSize });
   const symbolsLimit = Number.isInteger(limit) && /** @type {number} */ (limit) > 0
     ? /** @type {number} */ (limit)
     : 100_000;
@@ -103,7 +99,6 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
     repo_root: repoRoot || null,
     encoder: encoderTelemetry(encoder),
     index: indexTelemetry(index),
-    worker_count: workerCount,
     batch_size: size,
     raw_symbol_count: rawSymbols.length,
     candidate_symbol_count: symbols.length,
@@ -151,7 +146,6 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         skipped: report.skipped,
         languageCurrent: new Map(languageCurrent),
         languageTotal: new Map(languageTotal),
-        workerCount,
         batchSize: size,
         timingsMs: timingSnapshot(timings, startedAt),
         batchTimingMs: currentBatchTiming ? timingSnapshot(currentBatchTiming) : null,
@@ -162,10 +156,10 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
   let currentBatchTiming = null;
   emitProgress(true);
 
-  // Bulk encode fans out across the shared warm ONNX worker set (one model per
-  // worker, persistent across warms); width 1 takes the whole batch on one
-  // worker. The daemon-backed encoder forwards `workers` to the set.
-  const encodeTexts = async (texts) => encoder.encode(texts, signal, { workers: workerCount });
+  // Atlas owns document encoding and batches against its resident Jina session.
+  const encodeTexts = async (texts) => typeof encoder.encodeDocuments === "function"
+    ? encoder.encodeDocuments(texts, signal)
+    : encoder.encode(texts, signal);
 
   try {
     for (let i = 0; i < symbols.length; i += size) {
@@ -270,7 +264,6 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         expected_count: expectedCount,
         kept: summarizeSymbols(kept),
         texts: supportsStructuredSymbols ? null : summarizeTexts(texts),
-        worker_count: workerCount,
         encoder: encoderTelemetry(encoder),
       });
       let vectors;
@@ -510,20 +503,12 @@ function indexTelemetry(index) {
 }
 
 /**
- * @param {{ batchSize?: number, encoder: EmbeddingEncoder, workerCount: number }} args
+ * @param {{ batchSize?: number }} args
  * @returns {number}
  */
-export function resolveEmbeddingIngestBatchSize({ batchSize, encoder, workerCount }) {
+export function resolveEmbeddingIngestBatchSize({ batchSize }) {
   if (Number.isInteger(batchSize)) {
     return Math.max(1, Math.min(/** @type {number} */ (batchSize), 512));
-  }
-  // Only the local-ONNX encoder fans a batch across the warm worker set; remote
-  // encoders ignore `workers`, so a bigger batch would not parallelize.
-  if (normalizeEmbeddingThreads(workerCount, 1) > 1 && /** @type {any} */ (encoder)?.model === "local-onnx") {
-    const encoderBatchSize = Number.isInteger(/** @type {any} */ (encoder)?.batchSize)
-      ? /** @type {number} */ (/** @type {any} */ (encoder).batchSize)
-      : DEFAULT_BATCH_SIZE;
-    return Math.max(DEFAULT_BATCH_SIZE, Math.min(encoderBatchSize * normalizeEmbeddingThreads(workerCount, 1), 512));
   }
   return DEFAULT_BATCH_SIZE;
 }

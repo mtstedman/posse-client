@@ -23,7 +23,7 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
   distribution via winget when missing
   (`-NoInstallNode` opts out) and refreshes `PATH` from the registry after
   winget installs so new tools are visible without a new terminal.
-- **Observable.** A splash, numbered steps (`[ 3/15]`), a spinner with
+- **Observable.** A splash, numbered steps (`[ 3/16]`), a spinner with
   elapsed time on capable terminals (Windows Terminal / PS 7+), and full
   command output captured to
   `%USERPROFILE%\.posse\logs\install-<timestamp>.log` (failures print the
@@ -67,14 +67,18 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
    the SCIP language environments (replaces the old standalone
    `pip install --user` and inline SCIP steps).
 12. **Provider CLI detection** — `posse admin init --non-interactive`.
-13. **Validation** — boots Posse (`node orchestrator.js status`) with a
-    five-minute timeout.
-14. **Provider API keys** — only with `-ConfigureKeys`: hidden SecureString
+13. **Provider API keys** — only with `-ConfigureKeys`: hidden SecureString
     prompts for `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` /
     `CODEX_API_KEY`, written to
     `%USERPROFILE%\.config\posse\providers.env.ps1` with an NTFS ACL locked
     to the current user, plus optional `claude` / `codex login` launches.
-15. **ATLAS smoke test** — only with `-RepoPath`.
+14. **Native binaries** — downloads the current authenticated `posse-atlas`,
+    `posse-git`, `posse-remote`, and `posse-vector` artifacts for the host
+    platform. Existing verified versions are reused. Without `POSSE_KEY`, the
+    step reports a warning and boot readiness retries later.
+15. **Validation** — boots Posse (`node orchestrator.js status`) with a
+    five-minute timeout.
+16. **ATLAS smoke test** — only with `-RepoPath`.
 
 ## Prereqs
 
@@ -150,7 +154,7 @@ With `-ConfigureKeys`, the installer prompts (hidden via
 
 | Var | Purpose |
 |-----|---------|
-| `POSSE_KEY` | Posse remote prompt/tool catalog API key |
+| `POSSE_KEY` | Posse remote prompt/tool catalog and native artifact API key |
 | `OPENAI_API_KEY` | OpenAI provider |
 | `XAI_API_KEY` | Grok (xAI) provider |
 | `CODEX_API_KEY` | Codex API-key auth (optional — the `codex` CLI can also use `~\.codex\auth.json` from `codex login`) |

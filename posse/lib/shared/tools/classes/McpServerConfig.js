@@ -257,9 +257,7 @@ function logMcpBootTelemetry(kind, role, bootPayload = {}, extra = {}) {
   });
 }
 
-function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}, {
-  includeEmbeddingApiKey = true,
-} = {}) {
+function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}) {
   const out = {
     POSSE_DETERMINISTIC_MCP_DB_PATH: String(payload.dbPath || ""),
     POSSE_DETERMINISTIC_MCP_CWD: String(payload.cwd || ""),
@@ -289,9 +287,6 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}, {
     POSSE_ATLAS_LIVE_BUFFERS: payload.atlas?.liveBuffers || "off",
     POSSE_ATLAS_AUTO_FEEDBACK: String(atlasConfig?.autoFeedbackMode || "write"),
   };
-  // Credential transport intentionally stays env-backed; the boot JSON payload
-  // is carried in process args and must not contain provider secrets.
-  if (includeEmbeddingApiKey && atlasConfig?.embeddingApiKey) out.POSSE_ATLAS_EMBEDDING_API_KEY = String(atlasConfig.embeddingApiKey);
   if (payload.providerName) out.POSSE_DETERMINISTIC_MCP_PROVIDER = String(payload.providerName);
   if (payload.jobId != null) out.POSSE_DETERMINISTIC_MCP_JOB_ID = String(payload.jobId);
   if (payload.workItemId != null) out.POSSE_DETERMINISTIC_MCP_WORK_ITEM_ID = String(payload.workItemId);
@@ -300,9 +295,7 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}, {
 }
 
 function deterministicMcpShimMetadataEnv(payload = {}, atlasConfig = {}) {
-  const out = deterministicMcpCompatibilityEnv(payload, atlasConfig, {
-    includeEmbeddingApiKey: false,
-  });
+  const out = deterministicMcpCompatibilityEnv(payload, atlasConfig);
   // The stdio shim is a forwarding gate only. Keep non-secret deterministic
   // metadata for diagnostics/back-compat, but never give the shim credentials
   // or values that would let it perform remote/catalog/native work itself.
@@ -393,26 +386,10 @@ function buildDeterministicMcpBootPayload(role, {
         repoId: resolvedAtlasConfig?.requestedRepoId || "",
         graphDbPath: resolvedAtlasConfig?.requestedGraphDbPath || "",
         liveBuffers: resolvedAtlasConfig?.liveBuffersEnabled === false ? "off" : "deterministic-writes",
-        semanticEnabled: resolvedAtlasConfig?.semanticEnabled === true,
-        vectorBackend: resolvedAtlasConfig?.vectorBackend || "auto",
         viewWaitMs: resolvedAtlasConfig?.viewWaitMs ?? null,
         jobCacheEnabled: resolvedAtlasConfig?.jobCacheEnabled === true,
         jobCacheTtlMs: resolvedAtlasConfig?.jobCacheTtlMs ?? null,
         autoRefreshStale: resolvedAtlasConfig?.autoRefreshStale ?? null,
-        embeddingProvider: resolvedAtlasConfig?.embeddingProvider || resolvedAtlasConfig?.atlasEmbeddingProvider || "",
-        embeddingEndpoint: resolvedAtlasConfig?.embeddingEndpoint || "",
-        embeddingModel: resolvedAtlasConfig?.embeddingModel || "",
-        embeddingDim: resolvedAtlasConfig?.embeddingDim ?? null,
-        embeddingModelVersion: resolvedAtlasConfig?.embeddingModelVersion || "",
-        embeddingTimeoutMs: resolvedAtlasConfig?.embeddingTimeoutMs ?? null,
-        embeddingHeaders: resolvedAtlasConfig?.embeddingHeaders || null,
-        embeddingSendDimensions: resolvedAtlasConfig?.embeddingSendDimensions === true,
-        remoteEncoderMode: resolvedAtlasConfig?.remoteEncoderMode || "off",
-        remoteEncoderUrl: resolvedAtlasConfig?.remoteEncoderUrl || "",
-        remoteEncoderModel: resolvedAtlasConfig?.remoteEncoderModel || "",
-        remoteEncoderDim: resolvedAtlasConfig?.remoteEncoderDim ?? null,
-        remoteEncoderModelVersion: resolvedAtlasConfig?.remoteEncoderModelVersion || "",
-        remoteEncoderTimeoutMs: resolvedAtlasConfig?.remoteEncoderTimeoutMs ?? null,
       },
       remoteCatalog: {
         enabled: remoteCatalogEnabled,

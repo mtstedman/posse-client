@@ -19,8 +19,6 @@ export class RunCloseoutController {
     getAtlasRuntimeDisabledReason = null,
     setConductorKeepWarm = null,
     closeSharedConductor = null,
-    setOnnxDaemonKeepWarm = null,
-    closeSharedOnnxDaemon = null,
   } = {}) {
     this.getDisplay = getDisplay;
     this.getScheduler = getScheduler;
@@ -34,8 +32,6 @@ export class RunCloseoutController {
     this.getAtlasRuntimeDisabledReason = getAtlasRuntimeDisabledReason;
     this.setConductorKeepWarm = setConductorKeepWarm;
     this.closeSharedConductor = closeSharedConductor;
-    this.setOnnxDaemonKeepWarm = setOnnxDaemonKeepWarm;
-    this.closeSharedOnnxDaemon = closeSharedOnnxDaemon;
   }
 
   hasLiveDisplay() {
@@ -71,7 +67,6 @@ export class RunCloseoutController {
       await this.flushStatus();
     }
     try { this.setConductorKeepWarm?.(false); await this.closeSharedConductor?.(); } catch { /* best-effort */ }
-    try { this.setOnnxDaemonKeepWarm?.(false); await this.closeSharedOnnxDaemon?.(); } catch { /* best-effort */ }
     if (announce) {
       const elapsedSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
       this.emitStatus(`${label}: ATLAS cleanup complete (${elapsedSec}s).`, this.C.green);

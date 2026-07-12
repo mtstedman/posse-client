@@ -229,6 +229,7 @@ import {
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { ask, askMultiline, askSelectorChoice } from "./input-prompts.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -823,10 +824,23 @@ function createStartupReadiness({ enabled = false } = {}) {
   };
 }
 
-async function init({ requireWritableArtifacts = true, refreshStartupContext = false, showReadiness = false } = {}) {
+async function init({ requireWritableArtifacts = true, refreshStartupContext = false, showReadiness = false, ensureNativeGit = false, refreshNativeGit = false } = {}) {
   configureRuntimeEnv(PROJECT_DIR);
   const readiness = createStartupReadiness({ enabled: showReadiness });
   try {
+    if (ensureNativeGit) {
+      await readiness.step("Native Git", async () => {
+        const result = await nativeBinaries.ensureAvailable("git", { refresh: refreshNativeGit });
+        if (!result?.available) {
+          throw new Error(`posse-git unavailable (${result?.reason || "unknown"})`);
+        }
+        const active = await nativeBinaries.ensureActive("git");
+        if (!active?.active) {
+          throw new Error(`posse-git inactive (${active?.reason || "unknown"})`);
+        }
+        return active;
+      });
+    }
     if (requireWritableArtifacts) {
       await readiness.step("Git repository", () => ensureGitRepositoryInitialized({ verbose: !showReadiness }));
     }
@@ -2354,10 +2368,23 @@ export async function main() {
     return;
   }
   const runBootPanelOwnsReadiness = commandPolicy.name === "run" || commandPolicy.name === "go";
+  const nativeGitBootstrapCommands = new Set([
+    "status",
+    "health",
+    "dashboard",
+    "audit",
+    "merge",
+    "prune",
+    "purge",
+    "cleanup",
+    "clear",
+  ]);
   await init({
     requireWritableArtifacts: commandPolicy.requiresWritableArtifacts,
     refreshStartupContext: commandPolicy.refreshContextAfter,
     showReadiness: !runBootPanelOwnsReadiness && (commandPolicy.requiresProvider || commandPolicy.refreshContextAfter),
+    ensureNativeGit: commandPolicy.requiresWritableArtifacts || nativeGitBootstrapCommands.has(commandPolicy.name),
+    refreshNativeGit: commandPolicy.name === "status",
   });
   await maybeWarnPosseUpdateAvailable(commandPolicy);
 

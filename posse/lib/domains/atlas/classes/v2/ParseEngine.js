@@ -2623,13 +2623,6 @@ export class ParseEngine {
     recordEmbeddingForensics("warmer.embeddings.start", {
       view_path: viewPath,
       repo_root: this.#repoRoot,
-      config_embedding_provider: /** @type {any} */ (this.#runtimeConfig)?.embeddingProvider
-        ?? /** @type {any} */ (this.#runtimeConfig)?.atlasEmbeddingProvider
-        ?? null,
-      config_embedding_threads: /** @type {any} */ (this.#runtimeConfig)?.embeddingThreads
-        ?? /** @type {any} */ (this.#runtimeConfig)?.atlasEmbeddingThreads
-        ?? /** @type {any} */ (this.#runtimeConfig)?.atlas_embedding_threads
-        ?? null,
     });
     const resources = openEmbeddingResources({
       repoRoot: this.#repoRoot,
@@ -2675,10 +2668,6 @@ export class ParseEngine {
         limit: useIncrementalScope
           ? Math.max(1, Number(embeddingScope?.onlySymbols?.length || 0))
           : undefined,
-        embeddingThreads: /** @type {any} */ (this.#runtimeConfig)?.embeddingThreads
-          ?? /** @type {any} */ (this.#runtimeConfig)?.atlasEmbeddingThreads
-          ?? /** @type {any} */ (this.#runtimeConfig)?.atlas_embedding_threads
-          ?? 1,
         signal: this.#signal,
         onProgress: (event) => {
           // Translate ingestView's structured progress into the standard

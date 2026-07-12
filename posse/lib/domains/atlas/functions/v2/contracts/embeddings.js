@@ -13,13 +13,8 @@
 //   * The view layer doesn't store embeddings — it stores references into
 //     the embedding store. View rebuild does not re-embed.
 //
-// Library choice (deferred to Workstream H — picking the library is the
-// first sub-task of H, NOT this contract):
-//   * hnswlib-node — common, native, well-tested, but Windows native
-//     builds can be fragile.
-//   * usearch      — newer, native, faster build story, smaller surface.
-//   * Pure-JS HNSW — fully portable, slower; viable for repos < 100k symbols.
-// rules.md requires explicit user discussion before adding a native dep.
+// Runtime ownership is fixed: posse-atlas encodes and posse-vector stores and
+// searches the ANN. Node implements only this transport-neutral data contract.
 
 /**
  * One embedding row, content-addressed alongside its source symbol.

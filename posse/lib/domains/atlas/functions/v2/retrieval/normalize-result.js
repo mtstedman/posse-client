@@ -71,10 +71,7 @@ export const VOLATILE_FIELDS = Object.freeze(
   ]),
 );
 
-const VOLATILE_OPTIONAL_DEPENDENCIES = new Set([
-  "@huggingface/transformers",
-  "onnxruntime-node",
-]);
+const VOLATILE_OPTIONAL_DEPENDENCIES = new Set();
 
 /**
  * Drop volatile fields from a JSON-serializable tree, returning a fresh

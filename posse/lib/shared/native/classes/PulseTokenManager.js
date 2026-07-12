@@ -110,26 +110,27 @@ export class PulseTokenManager {
    * can never stand in for `git:mutate`. Returns only derived material; the raw
    * key stays inside the heartbeat exchange and is never attached to an error.
    *
-   * @param {{ refresh?: boolean, requiredRoute: string }} opts
+   * @param {{ refresh?: boolean, requiredRoute: string, nativePackage?: string | null, nativeVersion?: string | null }} opts
    * @returns {Promise<Readonly<NativePulseEnvelope> | null>} null when no launch key is available.
    */
-  async getPulseEnvelope({ refresh = false, requiredRoute } = /** @type {any} */ ({})) {
+  async getPulseEnvelope({ refresh = false, requiredRoute, nativePackage = null, nativeVersion = null } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) throw pulseError("POSSE_PULSE_ROUTE_REQUIRED", "a native pulse envelope requires an explicit route");
+    const nativeIdentity = normalizedNativeIdentity(nativePackage, nativeVersion);
     const rawKey = this.authManager.getLaunchKey({ refresh });
     if (!rawKey) return null;
     const policy = this.authManager.getTrustedAuthPolicy();
     if (!policy?.envelope?.heartbeatUrl) {
       throw pulseError("POSSE_PULSE_AUTH_POLICY_UNAVAILABLE", "trusted heartbeat policy is unavailable");
     }
-    const cacheKey = `${pulseCacheKey(rawKey, policy)}:route=${route}`;
+    const cacheKey = `${pulseCacheKey(rawKey, policy)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`;
     const now = this.now();
     const cached = this._cache.get(cacheKey);
     if (!refresh && cached?.envelope && now < cached.refreshAt && now < cached.expiresAt) {
       assertExactRoute(cached.routes, route);
       return cached.envelope;
     }
-    const minted = await this.#mintPulse(cacheKey, rawKey, policy, route);
+    const minted = await this.#mintPulse(cacheKey, rawKey, policy, route, nativeIdentity);
     const refreshed = this._cache.get(cacheKey);
     if (refreshed) assertExactRoute(refreshed.routes, route);
     return minted.envelope;
@@ -140,17 +141,18 @@ export class PulseTokenManager {
    * cannot await the heartbeat exchange. Returns null (never fetches) when no
    * unexpired envelope for the route is cached.
    *
-   * @param {{ requiredRoute: string }} opts
+   * @param {{ requiredRoute: string, nativePackage?: string | null, nativeVersion?: string | null }} opts
    * @returns {Readonly<NativePulseEnvelope> | null}
    */
-  getCachedPulseEnvelope({ requiredRoute } = /** @type {any} */ ({})) {
+  getCachedPulseEnvelope({ requiredRoute, nativePackage = null, nativeVersion = null } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) return null;
+    const nativeIdentity = normalizedNativeIdentity(nativePackage, nativeVersion);
     const rawKey = this.authManager.getLaunchKey();
     if (!rawKey) return null;
     const policy = this.authManager.getTrustedAuthPolicy();
     if (!policy?.envelope?.heartbeatUrl) return null;
-    const cached = this._cache.get(`${pulseCacheKey(rawKey, policy)}:route=${route}`);
+    const cached = this._cache.get(`${pulseCacheKey(rawKey, policy)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`);
     if (!cached?.envelope || this.now() >= cached.expiresAt) return null;
     try {
       assertExactRoute(cached.routes, route);
@@ -168,13 +170,14 @@ export class PulseTokenManager {
    * @param {string} rawKey
    * @param {{ envelope: Readonly<Record<string, unknown>>, developmentMode: boolean }} policy
    * @param {string | null} requiredRoute
+   * @param {{ package: string, version: string } | null} nativeIdentity
    * @returns {Promise<{ token: string, envelope: Readonly<NativePulseEnvelope> | null }>}
    */
-  #mintPulse(cacheKey, rawKey, policy, requiredRoute) {
+  #mintPulse(cacheKey, rawKey, policy, requiredRoute, nativeIdentity = null) {
     const inFlight = this._refreshes.get(cacheKey);
     if (inFlight) return inFlight;
     const generation = this._generation;
-    const promise = this.#refreshPulse(rawKey, policy, requiredRoute).then((entry) => {
+    const promise = this.#refreshPulse(rawKey, policy, requiredRoute, nativeIdentity).then((entry) => {
       if (this._generation === generation) this._cache.set(cacheKey, entry);
       return { token: entry.token, envelope: entry.envelope };
     }).finally(() => {
@@ -221,8 +224,9 @@ export class PulseTokenManager {
    * @param {string | null} [requiredRoute] Route-scoped native mint: the heartbeat
    *   request names the route so each native grant is distinct. Omitted for
    *   Node's own outbound HTTPS bearer (unscoped legacy body).
+   * @param {{ package: string, version: string } | null} [nativeIdentity]
    */
-  async #refreshPulse(rawKey, policy, requiredRoute = null) {
+  async #refreshPulse(rawKey, policy, requiredRoute = null, nativeIdentity = null) {
     const heartbeatUrl = String(policy.envelope.heartbeatUrl || "");
     this.assertTrustedResourceUrl(heartbeatUrl, "heartbeat request");
     const ac = new AbortController();
@@ -233,34 +237,52 @@ export class PulseTokenManager {
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     let response;
     try {
+      /** @type {Record<string, string>} */
+      const heartbeatBody = { posse_key: rawKey };
+      if (requiredRoute) heartbeatBody.route = requiredRoute;
+      if (nativeIdentity) {
+        heartbeatBody.nativePackage = nativeIdentity.package;
+        heartbeatBody.nativeVersion = nativeIdentity.version;
+      }
       response = await this.fetchImpl(heartbeatUrl, {
         method: "POST",
         headers: {
           accept: "application/json",
           "content-type": "application/json",
         },
-        body: JSON.stringify(requiredRoute ? { posse_key: rawKey, route: requiredRoute } : { posse_key: rawKey }),
+        body: JSON.stringify(heartbeatBody),
         redirect: "error",
         signal: ac.signal,
       });
     } catch (err) {
+      clearTimeout(timer);
       if (err?.name === "AbortError") {
         throw pulseError("POSSE_PULSE_TIMEOUT", `heartbeat request timed out after ${timeoutMs}ms`);
       }
       // Do not retain the transport error as a cause: custom fetch layers may
       // attach request options (including the heartbeat body) to that object.
       throw pulseError("POSSE_PULSE_FETCH_FAILED", "heartbeat request failed");
+    }
+    let text;
+    try {
+      if (response.status === 401 || response.status === 403) this.clearAuthentication();
+      if (!response.ok) {
+        const err = pulseError("POSSE_PULSE_REJECTED", `heartbeat request was rejected with HTTP ${response.status}`);
+        err.status = response.status;
+        throw err;
+      }
+      // The request deadline covers the complete response, not only receipt of
+      // headers. Otherwise a peer can send 200 headers and stall the body
+      // forever while every caller waits on the shared in-flight mint.
+      text = await abortable(boundedResponseText(response), ac.signal);
+    } catch (err) {
+      if (ac.signal.aborted || err?.name === "AbortError") {
+        throw pulseError("POSSE_PULSE_TIMEOUT", `heartbeat request timed out after ${timeoutMs}ms`);
+      }
+      throw err;
     } finally {
       clearTimeout(timer);
     }
-
-    if (response.status === 401 || response.status === 403) this.clearAuthentication();
-    if (!response.ok) {
-      const err = pulseError("POSSE_PULSE_REJECTED", `heartbeat request was rejected with HTTP ${response.status}`);
-      err.status = response.status;
-      throw err;
-    }
-    const text = await boundedResponseText(response);
     let body;
     try {
       body = text ? JSON.parse(text) : null;
@@ -435,6 +457,27 @@ function normalizedNativeArtifactVersions(value) {
   return versions;
 }
 
+function normalizedNativeIdentity(nativePackage, nativeVersion) {
+  const packageName = String(nativePackage || "").trim();
+  const version = String(nativeVersion || "").trim();
+  if (!packageName && !version) return null;
+  if (!packageName || !version) {
+    throw pulseError(
+      "POSSE_PULSE_NATIVE_VERSION_INCOMPLETE",
+      "nativePackage and nativeVersion must be provided together",
+    );
+  }
+  if (!/^posse-[a-z0-9-]+$/.test(packageName)
+    || !/^[a-zA-Z0-9._-]{1,64}$/.test(version)
+    || version.includes("..")) {
+    throw pulseError(
+      "POSSE_PULSE_NATIVE_VERSION_INVALID",
+      "native heartbeat package or version is invalid",
+    );
+  }
+  return Object.freeze({ package: packageName, version });
+}
+
 function normalizedRoutes(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map((route) => String(route || "").trim()).filter(Boolean))];
@@ -467,6 +510,23 @@ async function boundedResponseText(response) {
     throw pulseError("POSSE_PULSE_INVALID_RESPONSE", "heartbeat response exceeded the allowed size");
   }
   return text;
+}
+
+function abortable(promise, signal) {
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
+function abortError() {
+  const err = new Error("operation aborted");
+  err.name = "AbortError";
+  return err;
 }
 
 function stableJson(value) {

@@ -22,12 +22,12 @@ export const ATLAS_V2_HELP_COMMANDS = Object.freeze([
     summary: "Enqueue a warm job synchronously (purposes: wi, main-incremental, main-full, scip-restage)",
   },
   {
-    usage: "models pull [jina-v2-code]",
-    summary: "Download the local ONNX embedding model for offline semantic search",
-  },
-  {
     usage: "purge-views [warmed|main|all]",
     summary: "Delete view files (default: warmed)",
+  },
+  {
+    usage: "models pull",
+    summary: "Download the production Jina ONNX model into the project cache",
   },
   {
     usage: "scip status",

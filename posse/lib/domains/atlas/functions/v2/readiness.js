@@ -20,10 +20,6 @@ import {
   embeddingsRoot,
 } from "./runtime-paths.js";
 import { stagerMetaPathForOutput } from "./scip/stager-meta.js";
-import {
-  configuredVectorBackend,
-  embeddingsExplicitlyEnabled,
-} from "./embeddings/resources.js";
 import { semanticLanguageTags } from "./resolver/adapters/registry.js";
 import { shouldRunScipPhase } from "../../../integrations/functions/atlas-v2-mode.js";
 
@@ -349,9 +345,6 @@ function inspectTreeCompression(repoRoot, config) {
  * @returns {AtlasLayerReadiness[]}
  */
 function inspectEmbeddings(repoRoot, config, candidates, parity) {
-  if (!embeddingsExplicitlyEnabled(config) || configuredVectorBackend(config) === "off") {
-    return [{ layer: "embeddings", status: "off", coverage: null, detail: "embeddings not configured" }];
-  }
   const root = embeddingsRoot(repoRoot);
   /** @type {AtlasLayerReadiness[]} */
   const layers = [];

@@ -1,4 +1,3 @@
-export * from "./atlas-encoder-client.js";
 export * from "./client.js";
 export * from "./mode.js";
 export * from "./native-client.js";

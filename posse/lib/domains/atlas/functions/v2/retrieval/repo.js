@@ -9,14 +9,13 @@ import { Ledger } from "../../../classes/v2/Ledger.js";
 import { View as ViewClass } from "../../../classes/v2/View.js";
 import { ViewBuilder } from "../../../classes/v2/ViewBuilder.js";
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
-import { childEmbeddingModelDirName } from "../../../classes/v2/ChildEmbeddingIndex.js";
+import { embeddingModelDirName } from "../../../classes/v2/RustEmbeddingIndex.js";
 import { embeddingsRoot, ledgerDbPath, mainViewPath, memoryDbPathForLedgerDb } from "../runtime-paths.js";
 import { refresh as systemAtlasRefresh } from "../../../../system/functions/atlas.js";
 import { supportedLanguageTags } from "../parser/languages/index.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { __atlasNativeManagerForTests } from "../native/invoke.js";
 import { openEmbeddingResources, semanticDispatchEnabled } from "../embeddings/resources.js";
-import { inspectLocalOnnxStatus } from "../embeddings/local-onnx.js";
 import { openViewWithMeta, removeSqliteFile, viewFreshness } from "../view-health.js";
 import { buildAtlasCapabilities } from "../capabilities.js";
 import { readGraphOverview } from "../graph-derived.js";
@@ -1086,7 +1085,7 @@ function computeEmbeddingStatus(repoRoot, config = {}) {
 function countIndexedEmbeddings(repoRoot, index) {
   const sidecarPath = path.join(
     embeddingsRoot(repoRoot),
-    childEmbeddingModelDirName({ model: index.model, model_version: index.model_version }),
+    embeddingModelDirName({ model: index.model, model_version: index.model_version }),
     "keys.db",
   );
   if (!fs.existsSync(sidecarPath)) return 0;
@@ -1276,7 +1275,6 @@ function buildSemanticStatus({ config = {}, embeddingStatus = null, view, edges,
       : "semantic_dispatch_disabled",
     embeddings: embeddingStatus || { enabled: false, provider: null, backend: null, reason: "missing_repo_root" },
     enrichment,
-    localOnnx: inspectLocalOnnxStatus({ repoRoot, config }),
   };
 }
 

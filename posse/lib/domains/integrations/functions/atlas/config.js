@@ -11,7 +11,6 @@ import {
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
   ATLAS_PHASE_VALUES,
-  ATLAS_REMOTE_ENCODER_MODE_VALUES,
   ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
   ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES,
   ATLAS_SCIP_LANGUAGE_OPTIONS,
@@ -21,20 +20,15 @@ import {
   ATLAS_TREE_COMPRESSION_MODE_VALUES,
   ATLAS_TRANSPORT_VALUES,
   ATLAS_V2_MODE_VALUES,
-  ATLAS_VECTOR_BACKEND_VALUES,
-  ATLAS_WI_EMBEDDINGS_VALUES,
   VALID_ATLAS_AUTO_FEEDBACK_MODES,
   VALID_ATLAS_BOOT_REINDEX_POLICIES,
   VALID_ATLAS_PHASES,
-  VALID_ATLAS_REMOTE_ENCODER_MODES,
   VALID_ATLAS_SCIP_LANGUAGES,
   VALID_ATLAS_SCIP_MODES,
   VALID_ATLAS_SCIP_RESTAGE_POLICIES,
   VALID_ATLAS_TREE_COMPRESSION_MODES,
   VALID_ATLAS_TRANSPORTS,
   VALID_ATLAS_V2_MODES,
-  VALID_ATLAS_VECTOR_BACKENDS,
-  VALID_ATLAS_WI_EMBEDDINGS,
   ATLAS_ROLE_ORDER,
   DEFAULT_HTTP_HOST,
   DEFAULT_HTTP_PORT,
@@ -48,7 +42,6 @@ export {
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
   ATLAS_PHASE_VALUES,
-  ATLAS_REMOTE_ENCODER_MODE_VALUES,
   ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
   ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES,
   ATLAS_SCIP_LANGUAGE_OPTIONS,
@@ -58,20 +51,15 @@ export {
   ATLAS_TREE_COMPRESSION_MODE_VALUES,
   ATLAS_TRANSPORT_VALUES,
   ATLAS_V2_MODE_VALUES,
-  ATLAS_VECTOR_BACKEND_VALUES,
-  ATLAS_WI_EMBEDDINGS_VALUES,
   VALID_ATLAS_AUTO_FEEDBACK_MODES,
   VALID_ATLAS_BOOT_REINDEX_POLICIES,
   VALID_ATLAS_PHASES,
-  VALID_ATLAS_REMOTE_ENCODER_MODES,
   VALID_ATLAS_SCIP_LANGUAGES,
   VALID_ATLAS_SCIP_MODES,
   VALID_ATLAS_SCIP_RESTAGE_POLICIES,
   VALID_ATLAS_TREE_COMPRESSION_MODES,
   VALID_ATLAS_TRANSPORTS,
   VALID_ATLAS_V2_MODES,
-  VALID_ATLAS_VECTOR_BACKENDS,
-  VALID_ATLAS_WI_EMBEDDINGS,
   ATLAS_ROLE_ORDER,
   DEFAULT_HTTP_HOST,
   DEFAULT_HTTP_PORT,
@@ -90,18 +78,6 @@ let ATLAS_CONFIG_CACHE = {
   settingsVersion: null,
   value: null,
 };
-let warnedIgnoredLocalOnnxCacheEnv = false;
-
-function warnIgnoredLocalOnnxCacheDirEnv() {
-  if (warnedIgnoredLocalOnnxCacheEnv) return;
-  const value = typeof process !== "undefined"
-    ? process.env?.POSSE_ATLAS_LOCAL_ONNX_CACHE_DIR
-    : null;
-  if (value == null || String(value).trim() === "") return;
-  warnedIgnoredLocalOnnxCacheEnv = true;
-  console.warn("[atlas] POSSE_ATLAS_LOCAL_ONNX_CACHE_DIR is ignored; set atlas_local_onnx_cache_dir instead.");
-}
-
 /**
  * @param {any} [config]
  * @returns {any}
@@ -554,9 +530,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
       autoFeedbackMode: "off",
       liveIndexEnabled: false,
       liveBuffersEnabled: false,
-      semanticEnabled: false,
-      vectorBackend: "off",
-      wiEmbeddings: "off",
       treeCompressionMode: "off",
       treeCompressionProvider: null,
       treeCompressionModelTier: "cheap",
@@ -564,23 +537,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
       treeCompressionModelMaxSeeds: 40,
       treeCompressionMlEnabled: false,
       viewLayerMerge: false,
-      embeddingProvider: null,
-      atlasEmbeddingProvider: null,
-      localOnnxCacheDir: null,
-      embeddingEndpoint: null,
-      embeddingModel: null,
-      embeddingDim: null,
-      embeddingApiKey: null,
-      embeddingModelVersion: null,
-      embeddingTimeoutMs: null,
-      embeddingHeaders: null,
-      embeddingSendDimensions: false,
-      remoteEncoderMode: "off",
-      remoteEncoderUrl: null,
-      remoteEncoderModel: null,
-      remoteEncoderDim: null,
-      remoteEncoderModelVersion: null,
-      remoteEncoderTimeoutMs: null,
       viewWaitMs: 2500,
       autoRefreshStale: true,
       atlasVersion: "v2",
@@ -611,7 +567,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
 
   const useLiveSettings = env == null;
   const useExplicitConfigObject = !useLiveSettings;
-  if (useLiveSettings) warnIgnoredLocalOnnxCacheDirEnv();
   const explicitValue = (...keys) => {
     if (!useExplicitConfigObject || !env || typeof env !== "object") return null;
     for (const configKey of keys) {
@@ -648,31 +603,11 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbAutoFeedback = useLiveSettings ? readDbSetting("atlas_auto_feedback") : null;
   const dbLiveIndex = useLiveSettings ? readDbSettingBool("atlas_live_index") : null;
   const dbLiveBuffers = useLiveSettings ? readDbSettingBool("atlas_live_buffers") : null;
-  const dbSemanticEnabled = useLiveSettings ? readDbSettingBool("atlas_semantic_enabled") : null;
-  const dbVectorBackend = useLiveSettings ? readDbSetting("atlas_vector_backend") : null;
-  const dbWiEmbeddings = useLiveSettings ? readDbSetting("atlas_wi_embeddings") : null;
   const dbTreeCompressionMode = useLiveSettings ? readDbSetting("atlas_tree_compression_mode") : null;
   const dbTreeCompressionProvider = useLiveSettings ? readDbSetting("atlas_tree_compression_provider") : null;
   const dbTreeCompressionModelTier = useLiveSettings ? readDbSetting("atlas_tree_compression_model_tier") : null;
   const dbTreeCompressionMaxSeeds = useLiveSettings ? readDbSetting("atlas_tree_compression_max_seeds") : null;
   const dbTreeCompressionModelMaxSeeds = useLiveSettings ? readDbSetting("atlas_tree_compression_model_max_seeds") : null;
-  const dbEmbeddingProvider = useLiveSettings ? readDbSetting("atlas_embedding_provider") : null;
-  const dbLocalOnnxCacheDir = useLiveSettings ? readDbSetting("atlas_local_onnx_cache_dir") : null;
-  const dbEmbeddingEndpoint = useLiveSettings ? readDbSetting("atlas_embedding_endpoint") : null;
-  const dbEmbeddingModel = useLiveSettings ? readDbSetting("atlas_embedding_model") : null;
-  const dbEmbeddingDim = useLiveSettings ? readDbSetting("atlas_embedding_dim") : null;
-  const dbEmbeddingApiKey = useLiveSettings ? readDbSetting("atlas_embedding_api_key") : null;
-  const dbEmbeddingModelVersion = useLiveSettings ? readDbSetting("atlas_embedding_model_version") : null;
-  const dbEmbeddingTimeoutMs = useLiveSettings ? readDbSetting("atlas_embedding_timeout_ms") : null;
-  const dbEmbeddingThreads = useLiveSettings ? readDbSetting("atlas_embedding_threads") : null;
-  const dbEmbeddingHeaders = useLiveSettings ? readDbSetting("atlas_embedding_headers") : null;
-  const dbEmbeddingSendDimensions = useLiveSettings ? readDbSettingBool("atlas_embedding_send_dimensions") : null;
-  const dbRemoteEncoderMode = useLiveSettings ? readDbSetting("atlas_remote_encoder_mode") : null;
-  const dbRemoteEncoderUrl = useLiveSettings ? readDbSetting("atlas_remote_encoder_url") : null;
-  const dbRemoteEncoderModel = useLiveSettings ? readDbSetting("atlas_remote_encoder_model") : null;
-  const dbRemoteEncoderDim = useLiveSettings ? readDbSetting("atlas_remote_encoder_dim") : null;
-  const dbRemoteEncoderModelVersion = useLiveSettings ? readDbSetting("atlas_remote_encoder_model_version") : null;
-  const dbRemoteEncoderTimeoutMs = useLiveSettings ? readDbSetting("atlas_remote_encoder_timeout_ms") : null;
   const dbViewWaitMs = useLiveSettings ? readDbSetting("atlas_v2_view_wait_ms") : null;
   const dbAutoRefreshStale = useLiveSettings ? readDbSettingBool("atlas_v2_auto_refresh_stale") : null;
   const dbServerUrl = useLiveSettings ? readDbSetting("atlas_url") : null;
@@ -684,7 +619,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbBootTimeoutMs = useLiveSettings ? readDbSetting("atlas_v2_boot_timeout_ms") : null;
   const dbBootSoftTimeoutMs = useLiveSettings ? readDbSetting("atlas_v2_boot_soft_timeout_ms") : null;
   const dbEmbeddedTimeoutMs = useLiveSettings ? readDbSetting("atlas_embedded_timeout_ms") : null;
-  const dbEmbeddedDispatch = useLiveSettings ? readDbSetting("atlas_embedded_dispatch") : null;
   const dbEmbeddedQueueWaitMs = useLiveSettings ? readDbSetting("atlas_embedded_queue_wait_ms") : null;
   const dbJobCacheTtlMs = useLiveSettings ? readDbSetting("atlas_job_cache_ttl_ms") : null;
   const dbPrefetchCacheTtlMs = useLiveSettings ? readDbSetting("atlas_prefetch_cache_ttl_ms") : null;
@@ -747,15 +681,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const liveBuffersEnabled = provided(explicitLiveBuffers) && String(explicitLiveBuffers).trim() !== ""
     ? parseLiveBuffersEnabled(explicitLiveBuffers)
     : (dbLiveBuffers !== false);
-  const explicitSemanticEnabled = explicitValue("semanticEnabled", "atlas_semantic_enabled");
-  // Semantic dispatch is opt-in. Default off; a DB setting flips it on.
-  const semanticEnabled = provided(explicitSemanticEnabled) && String(explicitSemanticEnabled).trim() !== ""
-    ? parseBool(explicitSemanticEnabled)
-    : (dbSemanticEnabled === true);
-  const rawVectorBackend = String(firstProvided(explicitValue("vectorBackend", "atlas_vector_backend"), dbVectorBackend, "")).trim().toLowerCase();
-  const vectorBackend = VALID_ATLAS_VECTOR_BACKENDS.has(rawVectorBackend) ? rawVectorBackend : "auto";
-  const rawWiEmbeddings = String(firstProvided(explicitValue("wiEmbeddings", "atlasWiEmbeddings", "atlas_wi_embeddings"), dbWiEmbeddings, "on_demand")).trim().toLowerCase();
-  const wiEmbeddings = VALID_ATLAS_WI_EMBEDDINGS.has(rawWiEmbeddings) ? rawWiEmbeddings : "on_demand";
   const rawTreeCompressionMode = String(firstProvided(
     explicitValue("treeCompressionMode", "atlasTreeCompressionMode", "atlas_tree_compression_mode"),
     dbTreeCompressionMode,
@@ -787,56 +712,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   )) ?? 40));
   const dbViewLayerMerge = useLiveSettings ? readDbSetting("atlas_view_layer_merge") : null;
   const viewLayerMerge = String(firstProvided(explicitValue("viewLayerMerge", "atlasViewLayerMerge", "atlas_view_layer_merge"), dbViewLayerMerge, "on")).trim().toLowerCase() === "on";
-  const embeddingProvider = String(firstProvided(explicitValue("embeddingProvider", "atlasEmbeddingProvider", "atlas_embedding_provider"), dbEmbeddingProvider, "")).trim() || null;
-  const localOnnxCacheDir = normalizeAbsolutePath(firstProvided(
-    explicitValue("localOnnxCacheDir", "atlasLocalOnnxCacheDir", "atlas_local_onnx_cache_dir"),
-    dbLocalOnnxCacheDir,
-    "",
-  ));
-  const embeddingEndpoint = String(firstProvided(explicitValue("embeddingEndpoint", "atlas_embedding_endpoint"), dbEmbeddingEndpoint, "")).trim() || null;
-  const embeddingModel = String(firstProvided(explicitValue("embeddingModel", "atlas_embedding_model"), dbEmbeddingModel, "")).trim() || null;
-  const embeddingDim = parseIntOrNull(firstProvided(explicitValue("embeddingDim", "atlas_embedding_dim"), dbEmbeddingDim));
-  const embeddingApiKey = String(firstProvided(explicitValue("embeddingApiKey", "atlas_embedding_api_key", "POSSE_ATLAS_EMBEDDING_API_KEY"), dbEmbeddingApiKey, "")).trim() || null;
-  const embeddingModelVersion = String(firstProvided(explicitValue("embeddingModelVersion", "atlas_embedding_model_version"), dbEmbeddingModelVersion, "")).trim() || null;
-  const embeddingTimeoutMs = parseIntOrNull(firstProvided(explicitValue("embeddingTimeoutMs", "atlas_embedding_timeout_ms"), dbEmbeddingTimeoutMs));
-  const embeddingThreads = Math.max(1, Math.min(8, parseIntOrNull(firstProvided(
-    explicitValue("embeddingThreads", "atlasEmbeddingThreads", "atlas_embedding_threads"),
-    dbEmbeddingThreads,
-  )) ?? 2));
-  const embeddingHeaders = firstProvided(explicitValue("embeddingHeaders", "atlas_embedding_headers"), dbEmbeddingHeaders);
-  const explicitEmbeddingSendDimensions = explicitValue("embeddingSendDimensions", "atlas_embedding_send_dimensions");
-  const embeddingSendDimensions = provided(explicitEmbeddingSendDimensions) && String(explicitEmbeddingSendDimensions).trim() !== ""
-    ? parseBool(explicitEmbeddingSendDimensions)
-    : (dbEmbeddingSendDimensions === true);
-  const rawRemoteEncoderMode = String(firstProvided(
-    explicitValue("remoteEncoderMode", "atlasRemoteEncoderMode", "atlas_remote_encoder_mode", "POSSE_ATLAS_REMOTE_ENCODER_MODE"),
-    dbRemoteEncoderMode,
-    "",
-  )).trim().toLowerCase();
-  const remoteEncoderMode = VALID_ATLAS_REMOTE_ENCODER_MODES.has(rawRemoteEncoderMode) ? rawRemoteEncoderMode : "off";
-  const remoteEncoderUrl = String(firstProvided(
-    explicitValue("remoteEncoderUrl", "atlasRemoteEncoderUrl", "atlas_remote_encoder_url", "POSSE_ATLAS_REMOTE_ENCODER_URL", "POSSE_REMOTE_URL", "POSSE_REMOTE_BASE_URL"),
-    dbRemoteEncoderUrl,
-    "",
-  )).trim() || null;
-  const remoteEncoderModel = String(firstProvided(
-    explicitValue("remoteEncoderModel", "atlasRemoteEncoderModel", "atlas_remote_encoder_model", "POSSE_ATLAS_REMOTE_ENCODER_MODEL"),
-    dbRemoteEncoderModel,
-    "",
-  )).trim() || null;
-  const remoteEncoderDim = parseIntOrNull(firstProvided(
-    explicitValue("remoteEncoderDim", "atlasRemoteEncoderDim", "atlas_remote_encoder_dim", "POSSE_ATLAS_REMOTE_ENCODER_DIM"),
-    dbRemoteEncoderDim,
-  ));
-  const remoteEncoderModelVersion = String(firstProvided(
-    explicitValue("remoteEncoderModelVersion", "atlasRemoteEncoderModelVersion", "atlas_remote_encoder_model_version", "POSSE_ATLAS_REMOTE_ENCODER_MODEL_VERSION"),
-    dbRemoteEncoderModelVersion,
-    "",
-  )).trim() || null;
-  const remoteEncoderTimeoutMs = parseIntOrNull(firstProvided(
-    explicitValue("remoteEncoderTimeoutMs", "atlasRemoteEncoderTimeoutMs", "atlas_remote_encoder_timeout_ms", "POSSE_ATLAS_REMOTE_ENCODER_TIMEOUT_MS"),
-    dbRemoteEncoderTimeoutMs,
-  ));
   const viewWaitMs = parseIntOrNull(firstProvided(explicitValue("viewWaitMs", "atlas_v2_view_wait_ms"), dbViewWaitMs)) ?? 2500;
   const explicitAutoRefreshStale = explicitValue("autoRefreshStale", "atlas_v2_auto_refresh_stale");
   const autoRefreshStale = provided(explicitAutoRefreshStale) && String(explicitAutoRefreshStale).trim() !== ""
@@ -855,8 +730,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const bootTimeoutMs = parseIntOrNull(firstProvided(explicitValue("bootTimeoutMs", "atlas_v2_boot_timeout_ms", "POSSE_ATLAS_V2_BOOT_TIMEOUT_MS"), dbBootTimeoutMs)) ?? 5400000;
   const bootSoftTimeoutMs = parseIntOrNull(firstProvided(explicitValue("bootSoftTimeoutMs", "atlas_v2_boot_soft_timeout_ms", "POSSE_ATLAS_V2_BOOT_SOFT_TIMEOUT_MS"), dbBootSoftTimeoutMs)) ?? 15000;
   const embeddedTimeoutMs = parseIntOrNull(firstProvided(explicitValue("embeddedTimeoutMs", "atlas_embedded_timeout_ms", "POSSE_ATLAS_EMBEDDED_TIMEOUT_MS"), dbEmbeddedTimeoutMs)) ?? 30000;
-  const rawEmbeddedDispatch = String(firstProvided(explicitValue("embeddedDispatch", "atlas_embedded_dispatch", "POSSE_ATLAS_EMBEDDED_DISPATCH"), dbEmbeddedDispatch, "")).trim().toLowerCase();
-  const embeddedDispatch = rawEmbeddedDispatch === "in-process" ? "in-process" : "conductor";
   const queueWaitMs = parseIntOrNull(firstProvided(explicitValue("queueWaitMs", "atlas_embedded_queue_wait_ms", "POSSE_ATLAS_EMBEDDED_QUEUE_WAIT_MS"), dbEmbeddedQueueWaitMs)) ?? 30000;
   const jobCacheTtlMs = parseIntOrNull(firstProvided(explicitValue("jobCacheTtlMs", "atlas_job_cache_ttl_ms", "POSSE_ATLAS_JOB_CACHE_TTL_MS"), dbJobCacheTtlMs)) ?? 300000;
   const prefetchCacheTtlMs = parseIntOrNull(firstProvided(explicitValue("prefetchCacheTtlMs", "atlas_prefetch_cache_ttl_ms", "POSSE_ATLAS_PREFETCH_CACHE_TTL_MS"), dbPrefetchCacheTtlMs)) ?? 600000;
@@ -897,9 +770,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     autoFeedbackMode,
     liveIndexEnabled,
     liveBuffersEnabled,
-    semanticEnabled,
-    vectorBackend,
-    wiEmbeddings,
     treeCompressionMode,
     treeCompressionProvider,
     treeCompressionModelTier,
@@ -907,24 +777,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     treeCompressionModelMaxSeeds,
     treeCompressionMlEnabled: treeCompressionMode === "ml",
     viewLayerMerge,
-    embeddingProvider,
-    atlasEmbeddingProvider: embeddingProvider,
-    localOnnxCacheDir,
-    embeddingEndpoint,
-    embeddingModel,
-    embeddingDim,
-    embeddingApiKey,
-    embeddingModelVersion,
-    embeddingTimeoutMs,
-    embeddingThreads,
-    embeddingHeaders,
-    embeddingSendDimensions,
-    remoteEncoderMode,
-    remoteEncoderUrl,
-    remoteEncoderModel,
-    remoteEncoderDim,
-    remoteEncoderModelVersion,
-    remoteEncoderTimeoutMs,
     viewWaitMs,
     autoRefreshStale,
     transport: "v2",
@@ -940,7 +792,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     bootTimeoutMs,
     bootSoftTimeoutMs,
     embeddedTimeoutMs,
-    embeddedDispatch,
     queueWaitMs,
     jobCacheTtlMs,
     prefetchCacheTtlMs,

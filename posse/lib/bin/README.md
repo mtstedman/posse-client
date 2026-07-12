@@ -63,24 +63,31 @@ The command mints an `artifacts:read` pulse, selects the exact package versions
 issued by the server, verifies each SHA-256, and reuses a valid cached artifact.
 Normal `posse run` boot performs the same check for every enabled binary, so the
 explicit pull is primarily useful for prefetching or diagnosing artifact access.
+Boot is the automatic update boundary: once a run accepts a valid artifact, the
+process keeps that version for the rest of the run. Ordinary runtime availability
+checks may recover a missing or invalid binary, but they do not refresh issued
+versions or replace a valid live handle mid-run.
 
-Rebuild atlas/git/remote from the sibling `posse-encoder-rust` workspace
+Rebuild native binaries from the sibling `posse-bin` workspace
 (flush + cargo build + deploy) for the current host OS:
 
 ```bash
-npm run rebuild:rust-binaries -- --rust-root <path-to-posse-encoder-rust>
+npm run rebuild:rust-binaries -- --rust-root <path-to-posse-bin>
 ```
 
-Use the all-platform wrapper when the machine has working cross-build
-toolchains. The macOS entry is built for both `aarch64-apple-darwin` and
-`x86_64-apple-darwin` and combined with `lipo`.
+Build each platform on its matching host. Windows uses the MSVC x64 and ARM64
+targets; Linux uses GNU x64 and ARM64 targets. The macOS entry is built for
+both Darwin architectures and combined with `lipo`.
+
+Windows ARM64 builds require the Visual Studio ARM64 C++ tools plus
+`rustup target add aarch64-pc-windows-msvc`. Linux ARM64 builds require the
+`aarch64-linux-gnu-g++` cross toolchain configured by `posse-bin/.cargo/config.toml`.
 
 ```bash
-npm run rebuild:rust-binaries:all -- --rust-root <path-to-posse-encoder-rust>
+npm run rebuild:rust-binaries -- --platform current --rust-root <path-to-posse-bin>
 ```
 
-`posse-vector` remains excluded from the Encoder build defaults because it comes
-from the separate `posse-vector` workspace. An explicitly staged
+`posse-vector` is also owned by the consolidated workspace. An explicitly staged
 `lib/bin/<tool>/...` build remains a development override for every tool. Run
 boot otherwise mints an `artifacts:read` pulse, reads each current package
 version signed into that pulse, downloads the exact current OS/architecture
@@ -137,7 +144,7 @@ request abandon, liveness probe, graceful retire, circuit breaker — and asks
 hosts to implement these protocol-level supervision ops so recovery rarely
 needs process replacement at all. Until a host ships them, the Node side
 degrades gracefully (see "compatibility" notes). Rust implementation lives in
-the sibling `posse-encoder-rust` workspace.
+the sibling `posse-bin` workspace.
 
 All ops use `protocol: "posse.daemon.v1"` and the standard envelope:
 `{ protocol, method, payload, id }` in → `{ id, ok, data | error }` out.

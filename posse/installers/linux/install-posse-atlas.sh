@@ -5,7 +5,8 @@
 # Bootstraps a host from scratch: system packages (build toolchain + helper
 # CLIs), Node.js 24+ (via nvm when missing), the Posse checkout, npm deps,
 # Python venv + SCIP language environments (delegated to `posse doctor`, the
-# same engine boot uses), account settings, and shell wiring.
+# same engine boot uses), authenticated native binaries, account settings, and
+# shell wiring.
 #
 # Design rules:
 #   - Never dies mid-run without a summary: every step is fenced, failures are
@@ -421,7 +422,7 @@ format_command() {
 # --- step engine ---------------------------------------------------------------
 # Steps are declared up-front so numbering and the summary are stable no matter
 # where the run stops. Each step records ok/skipped/partial/failed/blocked.
-STEP_KEYS=(languages preflight packages node checkout composer npm shell seed doctor admin validate keys smoke)
+STEP_KEYS=(languages preflight packages node checkout composer npm shell seed doctor admin keys native validate smoke)
 declare -A STEP_TITLES=(
   [languages]="SCIP language selection"
   [preflight]="Preflight checks"
@@ -434,8 +435,9 @@ declare -A STEP_TITLES=(
   [seed]="Account settings"
   [doctor]="Runtime doctor (Python + SCIP)"
   [admin]="Provider CLI detection"
-  [validate]="Validation"
   [keys]="Provider API keys"
+  [native]="Native binaries"
+  [validate]="Validation"
   [smoke]="ATLAS smoke test"
 )
 declare -A STEP_STATUS STEP_NOTE
@@ -1379,6 +1381,34 @@ step_keys() {
   step_end ok "wrote ${#CONFIGURED_KEYS[@]} key(s) to ${providers_file} (chmod 600)"
 }
 
+step_native_binaries() {
+  step_begin native
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would download current native binaries for this platform"
+    return 0
+  fi
+
+  local providers_file="${ENV_DIR:-$HOME/.config/posse}/providers.env"
+  if [[ -z "${POSSE_KEY:-}" && -f "$providers_file" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "$providers_file"; set +a
+  fi
+  if [[ -z "${POSSE_KEY:-}" ]]; then
+    warn "native binaries need POSSE_KEY; set it or re-run with --configure-keys, then run 'npm run pull:native'"
+    step_end partial "POSSE_KEY unavailable; boot readiness will retry the download"
+    return 0
+  fi
+
+  if run_logged_in_dir "$POSSE_DIR" "download current native binaries" \
+    "$NODE_BIN" scripts/pull-native-artifacts.mjs; then
+    step_end ok "native binaries downloaded or already current"
+  else
+    warn "native binary download failed; boot readiness will retry, or run 'npm run pull:native' in ${POSSE_DIR}"
+    step_end partial "native binaries unavailable; see log"
+  fi
+}
+
 step_smoke() {
   step_begin smoke
   if [[ "$RUN_SMOKE" != "true" ]]; then step_end skipped "--no-smoke"; return 0; fi
@@ -1518,8 +1548,9 @@ run_installer_step shell true step_shell_wiring
 run_installer_step seed false step_seed_settings
 run_installer_step doctor false step_doctor
 run_installer_step admin false step_admin_init
-run_installer_step validate false step_validate
 run_installer_step keys false step_keys
+run_installer_step native false step_native_binaries
+run_installer_step validate false step_validate
 run_installer_step smoke false step_smoke
 
 print_summary

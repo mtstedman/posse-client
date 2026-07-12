@@ -104,7 +104,6 @@ import {
   parseEnvBool,
   parseBoolOverride,
   bootString,
-  bootHeadersOverride,
   nonNegativeIntegerOrNull,
 } from "./deterministic-mcp/boot-config-parse.js";
 import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
@@ -204,7 +203,6 @@ function envBootConfig(env = process.env) {
       repoId: String(env.POSSE_DETERMINISTIC_MCP_ATLAS_REPO_ID || "").trim(),
       graphDbPath: String(env.POSSE_DETERMINISTIC_MCP_ATLAS_GRAPH_DB_PATH || "").trim(),
       liveBuffers: String(env.POSSE_DETERMINISTIC_MCP_ATLAS_LIVE_BUFFERS || env.POSSE_ATLAS_LIVE_BUFFERS || "").trim(),
-      embeddingApiKey: String(env.POSSE_ATLAS_EMBEDDING_API_KEY || "").trim(),
     },
     remoteCatalog: {
       enabled: parseEnvBool(env.POSSE_DETERMINISTIC_MCP_REMOTE_TOOL_CATALOG_ENABLED),
@@ -464,80 +462,24 @@ function getDeterministicAtlasConfig() {
   const repoPath = bootString(atlasConfig.repoPath);
   const repoId = bootString(atlasConfig.repoId);
   const graphDbPath = bootString(atlasConfig.graphDbPath);
-  const semanticEnabled = typeof atlasConfig.semanticEnabled === "boolean" ? atlasConfig.semanticEnabled : null;
-  const vectorBackend = bootString(atlasConfig.vectorBackend);
   const viewWaitMs = bootString(atlasConfig.viewWaitMs);
   const autoRefreshStale = typeof atlasConfig.autoRefreshStale === "boolean"
     ? atlasConfig.autoRefreshStale
     : parseBoolOverride(atlasConfig.autoRefreshStale);
-  const embeddingProvider = bootString(atlasConfig.embeddingProvider);
-  const embeddingEndpoint = bootString(atlasConfig.embeddingEndpoint);
-  const embeddingModel = bootString(atlasConfig.embeddingModel);
-  const embeddingDim = bootString(atlasConfig.embeddingDim);
-  // Provider credentials are the one ATLAS config value that remains env-backed:
-  // boot config is passed as process args, so it must stay non-secret.
-  const embeddingApiKey = String(atlasConfig.embeddingApiKey || process.env.POSSE_ATLAS_EMBEDDING_API_KEY || "").trim();
-  const embeddingModelVersion = bootString(atlasConfig.embeddingModelVersion);
-  const embeddingTimeoutMs = bootString(atlasConfig.embeddingTimeoutMs);
-  const embeddingHeaders = bootHeadersOverride(atlasConfig.embeddingHeaders);
-  const embeddingSendDimensions = typeof atlasConfig.embeddingSendDimensions === "boolean"
-    ? atlasConfig.embeddingSendDimensions
-    : parseBoolOverride(atlasConfig.embeddingSendDimensions);
-  const remoteEncoderMode = bootString(atlasConfig.remoteEncoderMode);
-  const remoteEncoderUrl = bootString(atlasConfig.remoteEncoderUrl);
-  const remoteEncoderModel = bootString(atlasConfig.remoteEncoderModel);
-  const remoteEncoderDim = bootString(atlasConfig.remoteEncoderDim);
-  const remoteEncoderModelVersion = bootString(atlasConfig.remoteEncoderModelVersion);
-  const remoteEncoderTimeoutMs = bootString(atlasConfig.remoteEncoderTimeoutMs);
   if (
     !repoPath
     && !repoId
     && !graphDbPath
-    && semanticEnabled == null
-    && !vectorBackend
     && !viewWaitMs
     && autoRefreshStale == null
-    && !embeddingProvider
-    && !embeddingEndpoint
-    && !embeddingModel
-    && !embeddingDim
-    && !embeddingApiKey
-    && !embeddingModelVersion
-    && !embeddingTimeoutMs
-    && embeddingHeaders == null
-    && embeddingSendDimensions == null
-    && !remoteEncoderMode
-    && !remoteEncoderUrl
-    && !remoteEncoderModel
-    && !remoteEncoderDim
-    && !remoteEncoderModelVersion
-    && !remoteEncoderTimeoutMs
   ) return base;
   return {
     ...base,
     requestedRepoPath: repoPath ? path.resolve(repoPath) : base.requestedRepoPath,
     requestedRepoId: repoId || base.requestedRepoId,
     requestedGraphDbPath: graphDbPath ? path.resolve(graphDbPath) : base.requestedGraphDbPath,
-    semanticEnabled: semanticEnabled == null ? base.semanticEnabled : semanticEnabled,
-    vectorBackend: vectorBackend || base.vectorBackend,
     viewWaitMs: viewWaitMs === "" ? base.viewWaitMs : viewWaitMs,
     autoRefreshStale: autoRefreshStale == null ? base.autoRefreshStale : autoRefreshStale,
-    embeddingProvider: embeddingProvider || base.embeddingProvider,
-    atlasEmbeddingProvider: embeddingProvider || base.atlasEmbeddingProvider,
-    embeddingEndpoint: embeddingEndpoint || base.embeddingEndpoint,
-    embeddingModel: embeddingModel || base.embeddingModel,
-    embeddingDim: embeddingDim === "" ? base.embeddingDim : embeddingDim,
-    embeddingApiKey: embeddingApiKey || base.embeddingApiKey,
-    embeddingModelVersion: embeddingModelVersion === "" ? base.embeddingModelVersion : embeddingModelVersion,
-    embeddingTimeoutMs: embeddingTimeoutMs === "" ? base.embeddingTimeoutMs : embeddingTimeoutMs,
-    embeddingHeaders: embeddingHeaders == null ? base.embeddingHeaders : embeddingHeaders,
-    embeddingSendDimensions: embeddingSendDimensions == null ? base.embeddingSendDimensions : embeddingSendDimensions,
-    remoteEncoderMode: remoteEncoderMode || base.remoteEncoderMode,
-    remoteEncoderUrl: remoteEncoderUrl || base.remoteEncoderUrl,
-    remoteEncoderModel: remoteEncoderModel || base.remoteEncoderModel,
-    remoteEncoderDim: remoteEncoderDim === "" ? base.remoteEncoderDim : remoteEncoderDim,
-    remoteEncoderModelVersion: remoteEncoderModelVersion === "" ? base.remoteEncoderModelVersion : remoteEncoderModelVersion,
-    remoteEncoderTimeoutMs: remoteEncoderTimeoutMs === "" ? base.remoteEncoderTimeoutMs : remoteEncoderTimeoutMs,
   };
 }
 

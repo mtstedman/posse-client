@@ -29,17 +29,11 @@ import { runDaemonThread } from "../../../../../shared/tools/classes/daemon/thre
 import { installNativeThreadBridge } from "../../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
-import { setOnnxDaemonKeepWarm, closeSharedOnnxDaemon } from "../embeddings/onnx-daemon.js";
 
 if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
   nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
 }
 installNativeThreadBridge(workerData?.nativeBridgePort);
-
-// Same lifetime argument as the conductor host: this thread's nested ONNX
-// encoder daemon dies with the thread, so an idle window here would only
-// thrash the ~6s model load between retrieval bursts.
-setOnnxDaemonKeepWarm(true);
 
 // Telemetry counters surfaced via `info` — tests assert invalidation delivery
 // through these, and field diagnostics can confirm reads route here.
@@ -128,13 +122,7 @@ runDaemonThread(async (payload) => {
         const { disposeConductorRetrieveResources } = await import("./retrieve-runner.js");
         await disposeConductorRetrieveResources();
       } catch { /* best effort */ }
-      // Safety net for any native daemon hosts this thread's module graph
-      // spawned (ANN children) and the nested warm ONNX encoder used to encode
-      // query text; dispose before the parent terminates the thread or they
-      // outlive it as orphaned threads/processes.
-      try {
-        await closeSharedOnnxDaemon();
-      } catch { /* best effort */ }
+      // Dispose native daemon hosts before the parent terminates the thread.
       try {
         await nativeBinaries.disposeAll();
       } catch { /* best effort */ }

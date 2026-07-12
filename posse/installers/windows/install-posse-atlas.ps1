@@ -370,7 +370,7 @@ function Step-ScipLanguages {
 }
 
 # --- step engine -----------------------------------------------------------------
-$script:StepKeys = @("languages", "preflight", "packages", "buildtools", "node", "checkout", "composer", "npm", "shell", "seed", "doctor", "admin", "validate", "keys", "smoke")
+$script:StepKeys = @("languages", "preflight", "packages", "buildtools", "node", "checkout", "composer", "npm", "shell", "seed", "doctor", "admin", "keys", "native", "validate", "smoke")
 $script:StepTitles = @{
   languages = "SCIP language selection"
   preflight = "Preflight checks"
@@ -384,8 +384,9 @@ $script:StepTitles = @{
   seed     = "Account settings"
   doctor   = "Runtime doctor (Python + SCIP)"
   admin    = "Provider CLI detection"
-  validate = "Validation"
   keys     = "Provider API keys"
+  native   = "Native binaries"
+  validate = "Validation"
   smoke    = "ATLAS smoke test"
 }
 $script:StepStatus = @{}
@@ -1414,6 +1415,37 @@ function Step-Keys {
   Step-End "ok" ("wrote {0} key(s) to {1} (user-only ACL)" -f $script:ConfiguredKeys.Count, $providersFile)
 }
 
+function Step-NativeBinaries {
+  Step-Begin "native"
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
+  if ($DryRun) {
+    Step-End "dry-run" "would download current native binaries for this platform"
+    return
+  }
+
+  $providersFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "providers.env.ps1"
+  if (-not $env:POSSE_KEY -and (Test-Path $providersFile)) { . $providersFile }
+  if (-not $env:POSSE_KEY) {
+    $persistedKey = [Environment]::GetEnvironmentVariable("POSSE_KEY", "User")
+    if (-not $persistedKey) { $persistedKey = [Environment]::GetEnvironmentVariable("POSSE_KEY", "Machine") }
+    if ($persistedKey) { $env:POSSE_KEY = $persistedKey }
+  }
+  if (-not $env:POSSE_KEY) {
+    Write-Warn2 "native binaries need POSSE_KEY; set it or re-run with -ConfigureKeys, then run 'npm run pull:native'"
+    Step-End "partial" "POSSE_KEY unavailable; boot readiness will retry the download"
+    return
+  }
+
+  $rc = Invoke-Logged -Description "download current native binaries" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
+  if ($rc -eq 0) {
+    Step-End "ok" "native binaries downloaded or already current"
+  }
+  else {
+    Write-Warn2 ("native binary download failed; boot readiness will retry, or run 'npm run pull:native' in {0}" -f $script:PosseDirResolved)
+    Step-End "partial" "native binaries unavailable; see log"
+  }
+}
+
 function Step-Smoke {
   Step-Begin "smoke"
   if ($NoSmoke) { Step-End "skipped" "-NoSmoke"; return }
@@ -1523,8 +1555,9 @@ try {
     Invoke-InstallerStep "seed" { Step-SeedSettings }
     Invoke-InstallerStep "doctor" { Step-Doctor }
     Invoke-InstallerStep "admin" { Step-AdminInit }
-    Invoke-InstallerStep "validate" { Step-Validate }
     Invoke-InstallerStep "keys" { Step-Keys }
+    Invoke-InstallerStep "native" { Step-NativeBinaries }
+    Invoke-InstallerStep "validate" { Step-Validate }
     Invoke-InstallerStep "smoke" { Step-Smoke }
   }
 }

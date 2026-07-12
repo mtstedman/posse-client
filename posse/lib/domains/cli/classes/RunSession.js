@@ -6,11 +6,7 @@ import { describeModelCatalogWarning, validateConfiguredModels } from "../../pro
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
 import { cancelOpenPushOfferGates } from "../../queue/functions/push-offer.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
-import { inspectLocalOnnxStatus } from "../../atlas/functions/v2/embeddings/local-onnx.js";
 import { setConductorKeepWarm, closeSharedConductor } from "../../atlas/functions/v2/parse/conductor.js";
-import { setOnnxDaemonKeepWarm, closeSharedOnnxDaemon } from "../../atlas/functions/v2/embeddings/onnx-daemon.js";
-import { getOnnxWarmState, resetOnnxWarmState, setOnnxWarmState } from "../../atlas/functions/v2/embeddings/onnx-warm-state.js";
-import { recordEmbeddingForensics } from "../../atlas/functions/v2/embeddings/forensics.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { recordRunDiagnostic } from "../../../shared/telemetry/functions/run-diagnostics.js";
 import { ensureBootDependenciesInWorker, formatBootDependencySync } from "../../system/functions/dependency-sync.js";
@@ -21,7 +17,6 @@ import { BINARY_NAMES } from "../../../catalog/binary.js";
 import { TERMINAL_WORK_ITEM_STATUSES, WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { parseWorkItemMetadata } from "../../planning/functions/state.js";
 import { getResearchBudget } from "../../../shared/policies/functions/role-utils.js";
-import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { nativeBinaries as defaultNativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { daemonSupervisor as defaultDaemonSupervisor } from "../../../shared/tools/classes/daemon/index.js";
 import { persistentMcpOwner } from "../../../shared/tools/classes/PersistentMcpOwner.js";
@@ -95,16 +90,12 @@ export class RunSession {
       getAtlasIntegrationConfig,
       ensureAtlasRepoIndexedOnBoot,
       prewarmAtlasV2BootDeps,
-      inspectLocalOnnxStatus: inspectLocalOnnxStatusForRun = inspectLocalOnnxStatus,
-      ThreadManager: RunThreadManager = ThreadManager,
       disableAtlasForRun,
       isAtlasRuntimeDisabled,
       getAtlasRuntimeDisabledReason,
       enqueueAtlasSelfRepair,
       setConductorKeepWarm: setConductorKeepWarmForRun = setConductorKeepWarm,
       closeSharedConductor: closeSharedConductorForRun = closeSharedConductor,
-      setOnnxDaemonKeepWarm: setOnnxDaemonKeepWarmForRun = setOnnxDaemonKeepWarm,
-      closeSharedOnnxDaemon: closeSharedOnnxDaemonForRun = closeSharedOnnxDaemon,
       nativeBinaries: nativeBinariesForRun = defaultNativeBinaries,
       daemonSupervisor: daemonSupervisorForRun = defaultDaemonSupervisor,
       log,
@@ -159,7 +150,6 @@ export class RunSession {
   // reference — it's null during boot, populated before runLoop().
   const useTui = !NO_TUI && process.stdout.isTTY;
   let display = null;
-  try { resetOnnxWarmState(); } catch { /* warm chip state is observational */ }
   // Captured when the ATLAS warmup kicks so boot can WAIT for the (off-thread)
   // index build to finish before workers start — the index must be current
   // pre-loop, not built in the background while jobs run.
@@ -204,8 +194,6 @@ export class RunSession {
     getAtlasRuntimeDisabledReason,
     setConductorKeepWarm: setConductorKeepWarmForRun,
     closeSharedConductor: closeSharedConductorForRun,
-    setOnnxDaemonKeepWarm: setOnnxDaemonKeepWarmForRun,
-    closeSharedOnnxDaemon: closeSharedOnnxDaemonForRun,
   });
   const emitCloseoutStatus = (message, color = C.dim) => closeout.emitStatus(message, color);
   const flushCloseoutStatus = () => closeout.flushStatus();
@@ -778,7 +766,7 @@ export class RunSession {
       updateBootStep("native binaries", { section: "workspace", status: "running", force: true });
       const nativeArtifactResults = await Promise.all(enabledNativeNames.map(async (name) => {
         try {
-          return await nativeBinariesForRun.ensureAvailable(name);
+          return await nativeBinariesForRun.ensureAvailable(name, { refresh: true });
         } catch (error) {
           return { available: false, name, reason: error?.code || "artifact_download_failed" };
         }
@@ -794,6 +782,28 @@ export class RunSession {
         showDetail: unavailable.length > 0,
         force: true,
       });
+    }
+  }
+
+  if (typeof nativeBinariesForRun?.ensureRequiredAtlasBinariesActive === "function") {
+    updateBootStep("native binaries", { section: "workspace", status: "running", force: true });
+    try {
+      const required = await nativeBinariesForRun.ensureRequiredAtlasBinariesActive();
+      updateBootStep("native binaries", {
+        section: "workspace",
+        status: "ok",
+        detail: `${required.map((result) => result.name).join(" + ")} active`,
+        force: true,
+      });
+    } catch (error) {
+      updateBootStep("native binaries", {
+        section: "workspace",
+        status: "failed",
+        detail: firstLine(error?.message || error),
+        showDetail: true,
+        force: true,
+      });
+      throw error;
     }
   }
 
@@ -1234,29 +1244,6 @@ export class RunSession {
         softTimeoutMs: 2_500,
         softTimeoutDetail: "deferred (native module prewarm)",
       }));
-    }
-
-    // ── ONNX status (no eager warm here) ──────────────────────────────────
-    // The encoder pipeline init in @huggingface/transformers parses the ONNX
-    // model on the calling thread and blocks the event loop for many seconds.
-    // Running it inline during boot freezes the boot panel/TUI and stalls the
-    // scheduler heartbeat — the indexers visibly hang at 0%.
-    //
-    // Defer the warm until after both SCIP and ATLAS greenlight (i.e. all
-    // bootWarmups settle, which is when the ATLAS warmup — which covers both
-    // SCIP staging and ATLAS indexing — has resolved), and run it in a
-    // worker thread so the parse never lands on the main loop.
-    let onnxStatusAtBoot = null;
-    try {
-      const onnxConfig = typeof getAtlasIntegrationConfig === "function"
-        ? getAtlasIntegrationConfig()
-        : null;
-      onnxStatusAtBoot = inspectLocalOnnxStatusForRun({
-        repoRoot: PROJECT_DIR,
-        config: onnxConfig || {},
-      });
-    } catch (err) {
-      log?.warn?.("atlas", "ONNX inspect failed", { error: firstLine(err?.message || err) });
     }
 
     // NOTE: Startup worktree cleanup was previously a bootWarmup here. It is
@@ -2019,58 +2006,6 @@ export class RunSession {
         throw fatalWarmup.error || new Error(`${fatalWarmup.label} failed`);
       }
       updateBootStep("pre-loop hooks", { status: "ok", force: true });
-      // SCIP + ATLAS greenlight: both indexers have settled. Kick off the
-      // local-ONNX encoder warm in a worker thread so the @huggingface
-      // pipeline parse runs off the main loop. Fire-and-forget — failures
-      // log to diagnostics only; the banner phase-2 colour will animate via
-      // the vector-DB-fill signal once it's wired.
-      if (onnxStatusAtBoot && onnxStatusAtBoot.status === "ready") {
-        const onnxWorkerUrl = new URL("../functions/onnx-warm-worker.js", import.meta.url);
-        const onnxWarmManager = new RunThreadManager();
-        setOnnxWarmState({ phase: "loading", startedAt: Date.now(), finishedAt: null, error: null });
-        onnxWarmManager.run(onnxWorkerUrl, {
-          label: "ONNX encoder warm",
-          timeoutMs: 5 * 60 * 1000,
-          stopGraceMs: 10_000,
-          unref: true,
-          workerData: {
-            cacheDir: onnxStatusAtBoot.cacheDir,
-            modelName: onnxStatusAtBoot.modelName,
-            modelId: onnxStatusAtBoot.model,
-            dim: onnxStatusAtBoot.dim,
-          },
-          onProgress: (event) => {
-            // Worker emits stage="loading" at start and stage="ready" on
-            // completion. The "loading" event is informational — the chip
-            // already moved to "loading" via setOnnxWarmState above.
-            if (event?.stage === "ready") {
-              setOnnxWarmState({ phase: "ready", finishedAt: Date.now() });
-            }
-          },
-          onLifecycle: (event) => {
-            recordEmbeddingForensics("onnx.warm_thread.lifecycle", {
-              ...event,
-              model_id: onnxStatusAtBoot.model,
-              model_name: onnxStatusAtBoot.modelName,
-              dim: onnxStatusAtBoot.dim,
-            });
-          },
-        }).then(
-          () => {
-            // Worker `result` arrives after the final "ready" progress event;
-            // make sure the chip is in a terminal state even if the progress
-            // message was lost.
-            if (getOnnxWarmState && getOnnxWarmState().phase === "loading") {
-              setOnnxWarmState({ phase: "ready", finishedAt: Date.now() });
-            }
-          },
-          (err) => {
-            const msg = firstLine(err?.message || err) || "unknown";
-            log?.warn?.("atlas", "ONNX encoder warm failed", { error: msg });
-            setOnnxWarmState({ phase: "failed", finishedAt: Date.now(), error: msg });
-          },
-        );
-      }
     } catch (err) {
       bootAbortReason = firstLine(err?.message || err) || "pre-loop hooks failed";
       updateBootStep("pre-loop hooks", {
@@ -2378,11 +2313,9 @@ export class RunSession {
     });
   } catch { /* observational */ }
 
-  // Hold the Atlas conductor + ONNX encoder daemons warm for the whole run so
-  // per-WI warms reuse one hot ParseEngine and encodes reuse one loaded model.
-  // Released + disposed by cleanupAtlasForSession on every exit path.
+  // Hold the Atlas conductor warm for the whole run. Native model residency is
+  // owned by the mandatory posse-atlas worker.
   try { setConductorKeepWarmForRun(true); } catch { /* best-effort */ }
-  try { setOnnxDaemonKeepWarmForRun(true); } catch { /* best-effort */ }
 
   const schedulerCallbacks = new RunSchedulerLoopCallbacks({
     getDisplay: () => display,

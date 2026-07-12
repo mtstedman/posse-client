@@ -10,7 +10,7 @@ const FEATURE_FLAG_KEYS = Object.freeze({
   graphDerivedState: ["atlasGraphDerivedState", "graphDerivedState", "graphDerivedStateEnabled"],
   indexDiagnostics: ["atlasIndexDiagnostics", "indexDiagnostics", "indexDiagnosticsEnabled"],
   semanticEnrichment: ["atlasSemanticEnrichment", "semanticEnrichment", "semanticEnrichmentEnabled"],
-  localOnnxEmbeddings: ["atlasLocalOnnxEmbeddings", "localOnnxEmbeddings", "localOnnxEmbeddingsEnabled"],
+  nativeEmbeddings: [],
   editPlanning: ["atlasEditPlanning", "editPlanning", "editPlanningEnabled"],
   tokenEfficiencyV2: ["atlasTokenEfficiencyV2", "tokenEfficiencyV2", "tokenEfficiencyV2Enabled"],
   liveReconciliation: ["atlasLiveReconciliation", "liveReconciliation", "liveReconciliationEnabled"],
@@ -65,27 +65,26 @@ export function buildAtlasCapabilities(args = {}) {
       runtime: capability(runtimeEnabled ? "enabled" : "disabled", true, runtimeEnabled, "shipped", "Repo-scoped runtime execution is policy-gated.", runtimeEnabled ? null : "policy_disabled"),
       liveBuffers: capability("enabled", true, true, "shipped", "Draft buffer push/checkpoint/status feed live reconciliation telemetry.", null),
       scipIngest: capability("enabled", true, true, "shipped", "SCIP ingestion can overlay compiler-grade cross references.", null),
-      deterministicEmbeddings: capability("available", true, true, "shipped", "Deterministic local hash embeddings are available for offline tests and fallback paths.", null),
+      nativeEmbeddings: capability(
+        embeddingsEnabled ? "enabled" : "unavailable",
+        true,
+        embeddingsEnabled,
+        "shipped",
+        "posse-atlas owns Jina ONNX encoding and posse-vector owns nearest-neighbor search.",
+        embeddingsEnabled ? null : embeddingReason || "native_embeddings_unavailable",
+      ),
       semanticSearch: capability(
         embeddingsEnabled ? "enabled" : "disabled",
         true,
         embeddingsEnabled,
         "shipped",
-        "Semantic symbol search is available when an embedding provider and vector index are configured.",
+        "Semantic symbol search uses the mandatory native Jina and posse-vector pipeline.",
         embeddingsEnabled ? null : embeddingReason || "embeddings_disabled",
       ),
       predictivePrefetch: capability("enabled", true, true, "shipped", "Symbol search predicts likely follow-up cards, warms the retrieval cache, and reports hit/waste telemetry.", null),
       graphDerivedState: capability("enabled", true, true, "shipped", "View DBs materialize clusters, process chains, centrality, and graph rankings.", null),
       indexDiagnostics: capability("enabled", true, true, "shipped", "Index refresh can return structured phase timings and progress metadata with includeDiagnostics.", null),
       semanticEnrichment: capability("enabled", true, true, "shipped", "Repo status surfaces exact edge provenance, SCIP bindings, and symbol-resolution coverage.", null),
-      localOnnxEmbeddings: capability(
-        flags.localOnnxEmbeddings ? (embeddingsEnabled ? "enabled" : "available") : "available",
-        true,
-        flags.localOnnxEmbeddings,
-        "shipped",
-        "Local ONNX embeddings run with the cached Jina code model when optional dependencies are installed.",
-        flags.localOnnxEmbeddings && !embeddingsEnabled ? embeddingReason || "local_onnx_not_ready" : null,
-      ),
       editPlanning: capability("partial", true, true, "shipped", "Preview-only edit plans produce symbol/file-scoped preconditions; applying edits remains delegated to scoped write tools.", null),
       tokenEfficiencyV2: capability("enabled", true, true, "shipped", "Slices support packed columnar responses, slice ETags, and per-card known ETag refs.", null),
       liveReconciliation: capability("partial", true, true, "shipped", "Buffer-overlay reconciliation reports debounce, queue, dependency-frontier, and checkpoint telemetry; filesystem watcher is still planned.", null),
@@ -102,7 +101,7 @@ export function buildCapabilityFlags(config = {}) {
   /** @type {Record<string, boolean>} */
   const flags = {};
   for (const [name, keys] of Object.entries(FEATURE_FLAG_KEYS)) {
-    flags[name] = keys.some((key) => configFlag(config[key]));
+    flags[name] = name === "nativeEmbeddings" || keys.some((key) => configFlag(config[key]));
   }
   return /** @type {Record<keyof typeof FEATURE_FLAG_KEYS, boolean>} */ (flags);
 }

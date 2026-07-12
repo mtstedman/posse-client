@@ -1051,7 +1051,6 @@ function formatAtlasV2EmbeddedError(action, err) {
 }
 
 function canUseAtlasToolExecutor(action, payload, config = {}) {
-  if ((config?.embeddedDispatch || "conductor") === "in-process") return false;
   if (ATLAS_V2_GATEWAY_ACTIONS.has(action)) return false;
   if (ATLAS_V2_BLOCKING_ACTIONS.has(action)) return false;
   if (isBlockingAction(action, payload)) return false;
@@ -1395,8 +1394,7 @@ async function executeEmbeddedAtlasV2Tool({
     // thread instead; anything needing process-local state (semantic encoder
     // handles, live buffers, runtime exec) or write semantics stays here, as
     // does everything when the daemon misbehaves (automatic fallback).
-    const conductorEligible = (config?.embeddedDispatch || "conductor") !== "in-process"
-      && (!!viewPath || freshnessExempt)
+    const conductorEligible = (!!viewPath || freshnessExempt)
       && !ATLAS_V2_GATEWAY_ACTIONS.has(action)
       && !ATLAS_V2_BLOCKING_ACTIONS.has(action)
       && !isBlockingAction(action, payload)

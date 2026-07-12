@@ -121,11 +121,12 @@ export class NativeBinary {
    *   nativeAuthManager?: import("../../native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
    *   pulseManager?: import("../../native/classes/PulseTokenManager.js").PulseTokenManager,
    *   exactVersion?: string | null,
+   *   heartbeatVersion?: string | null,
    *   spawnImpl?: typeof spawn,
    *   spawnSyncImpl?: typeof spawnSync,
    * }} args
    */
-  constructor({ name, binRoot, platform, arch, env, nativeAuthManager, pulseManager, exactVersion = undefined, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
+  constructor({ name, binRoot, platform, arch, env, nativeAuthManager, pulseManager, exactVersion = undefined, heartbeatVersion = null, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
     if (!name) throw new TypeError("NativeBinary: name is required");
     this.name = name;
     this._binRoot = binRoot || null;
@@ -152,7 +153,9 @@ export class NativeBinary {
     this.keyGated = nativeBinaryIsKeyGated(name);
     this.workerCapable = nativeBinaryIsWorkerCapable(name);
     this.exactVersion = exactVersion === undefined ? nativeBinaryExactVersion(name) : exactVersion;
+    this.heartbeatVersion = heartbeatVersion;
     this._versionProbe = null;
+    this._nativePulseIdentity = null;
     /** @type {import("./daemon/index.js").Daemon | null} */
     this._daemon = null;
     /**
@@ -229,7 +232,9 @@ export class NativeBinary {
     const list = Array.isArray(routes) && routes.length > 0 ? routes : this.#defaultRoutes();
     await Promise.all(list.map(async (route) => {
       try {
-        await this.#pulseManager().getPulseEnvelope({ requiredRoute: String(route || "").trim() });
+        await this.#pulseManager().getPulseEnvelope(
+          this.#versionedPulseOptions(String(route || "").trim()),
+        );
       } catch { /* dispatch fails closed when no pulse is available */ }
     }));
   }
@@ -687,6 +692,64 @@ export class NativeBinary {
     return res.ok ? res.stdout.trim() : null;
   }
 
+  /** Stop this handle's daemon and all scheduled pulse refreshes. */
+  async dispose() {
+    this.#clearWorkerAuthState();
+    const daemon = this._daemon;
+    this._daemon = null;
+    if (daemon) await daemon.dispose();
+  }
+
+  /**
+   * Identify the exact native artifact asking for a heartbeat. A local staged
+   * binary is probed with `--version`; remotely selected artifacts already
+   * carry their exact version. The path and mtime bind the cache so replacing
+   * a binary cannot keep renewing under the previous artifact's identity.
+   *
+   * @returns {{ package: string, version: string }}
+   */
+  #nativeHeartbeatIdentity() {
+    const packageName = String(nativeBinaryEntry(this.name)?.package || "").trim();
+    const binaryPath = this.resolvePath();
+    if (!packageName || !binaryPath) {
+      throw new Error("native heartbeat requires an available versioned binary");
+    }
+    let mtimeMs = null;
+    try { mtimeMs = fs.statSync(binaryPath).mtimeMs; } catch {
+      throw new Error("native heartbeat could not inspect the binary version");
+    }
+    if (this._nativePulseIdentity?.path === binaryPath
+      && this._nativePulseIdentity?.mtimeMs === mtimeMs) {
+      return this._nativePulseIdentity.identity;
+    }
+    let version = String(this.heartbeatVersion || this.exactVersion || "").trim();
+    if (!version) {
+      const reported = String(this.version() || "").trim();
+      const prefix = `${packageName} `;
+      if (!reported.startsWith(prefix)) {
+        throw new Error("native heartbeat could not determine the binary version");
+      }
+      version = reported.slice(prefix.length).trim();
+    }
+    if (!/^[a-zA-Z0-9._-]{1,64}$/.test(version) || version.includes("..")) {
+      throw new Error("native heartbeat binary version is invalid");
+    }
+    const identity = Object.freeze({ package: packageName, version });
+    this._nativePulseIdentity = { path: binaryPath, mtimeMs, identity };
+    return identity;
+  }
+
+  /** @param {string} requiredRoute @param {boolean} [refresh] */
+  #versionedPulseOptions(requiredRoute, refresh = false) {
+    const identity = this.#nativeHeartbeatIdentity();
+    return {
+      requiredRoute,
+      refresh,
+      nativePackage: identity.package,
+      nativeVersion: identity.version,
+    };
+  }
+
   /**
    * The native-auth authority for this handle. Production injects the shared
    * HeartbeatAuthManager through BinaryManager; a standalone handle lazily
@@ -831,7 +894,7 @@ export class NativeBinary {
     const route = this.#requiredRouteFor(requiredRoute);
     let pulse = null;
     try {
-      pulse = await this.#pulseManager().getPulseEnvelope({ requiredRoute: route });
+      pulse = await this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route));
     } catch {
       // Mint failures fail closed below; error details (which never include
       // token material) are not propagated into the child request.
@@ -868,7 +931,7 @@ export class NativeBinary {
     const route = this.#requiredRouteFor(requiredRoute);
     let pulse = null;
     try {
-      pulse = this.#pulseManager().getCachedPulseEnvelope({ requiredRoute: route });
+      pulse = this.#pulseManager().getCachedPulseEnvelope(this.#versionedPulseOptions(route));
     } catch {
       pulse = null;
     }
@@ -891,7 +954,9 @@ export class NativeBinary {
   /** Fire-and-forget background mint so a later sync call finds a cached pulse. */
   #warmPulse(route) {
     try {
-      void Promise.resolve(this.#pulseManager().getPulseEnvelope({ requiredRoute: route })).catch(() => {});
+      void Promise.resolve(
+        this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route)),
+      ).catch(() => {});
     } catch { /* fail-closed guard already covers the caller */ }
   }
 
@@ -1013,7 +1078,9 @@ export class NativeBinary {
     }
     let envelope = null;
     try {
-      envelope = await this.#pulseManager().getPulseEnvelope({ requiredRoute: route, refresh: true });
+      envelope = await this.#pulseManager().getPulseEnvelope(
+        this.#versionedPulseOptions(route, true),
+      );
     } catch {
       envelope = null;
     }

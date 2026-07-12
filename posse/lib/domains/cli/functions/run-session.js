@@ -15,12 +15,8 @@ import {
 } from "../../queue/functions/runtime-status.js";
 import { createBootPanel } from "./boot-panel.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
-import { inspectLocalOnnxStatus } from "../../atlas/functions/v2/embeddings/local-onnx.js";
 import { setConductorKeepWarm, closeSharedConductor } from "../../atlas/functions/v2/parse/conductor.js";
-import { setOnnxDaemonKeepWarm, closeSharedOnnxDaemon } from "../../atlas/functions/v2/embeddings/onnx-daemon.js";
 import { renderNeuralNetworkBanner } from "../../ui/functions/display/neural-network-banner.js";
-import { getOnnxWarmState, resetOnnxWarmState, setOnnxWarmState } from "../../atlas/functions/v2/embeddings/onnx-warm-state.js";
-import { recordEmbeddingForensics } from "../../atlas/functions/v2/embeddings/forensics.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";

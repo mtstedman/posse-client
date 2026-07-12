@@ -39,15 +39,6 @@ export const ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT = 24;
 export const ATLAS_AUTO_FEEDBACK_VALUES = Object.freeze(["off", "dry-run", "write"]);
 export const VALID_ATLAS_AUTO_FEEDBACK_MODES = new Set(ATLAS_AUTO_FEEDBACK_VALUES);
 
-export const ATLAS_VECTOR_BACKEND_VALUES = Object.freeze(["auto", "rust", "usearch", "off"]);
-export const VALID_ATLAS_VECTOR_BACKENDS = new Set(ATLAS_VECTOR_BACKEND_VALUES);
-
-export const ATLAS_REMOTE_ENCODER_MODE_VALUES = Object.freeze(["off", "shadow", "preferred", "required"]);
-export const VALID_ATLAS_REMOTE_ENCODER_MODES = new Set(ATLAS_REMOTE_ENCODER_MODE_VALUES);
-
-export const ATLAS_WI_EMBEDDINGS_VALUES = Object.freeze(["off", "on_demand", "on"]);
-export const VALID_ATLAS_WI_EMBEDDINGS = new Set(ATLAS_WI_EMBEDDINGS_VALUES);
-
 export const ATLAS_TREE_COMPRESSION_MODE_VALUES = Object.freeze(["off", "deterministic", "ml"]);
 export const VALID_ATLAS_TREE_COMPRESSION_MODES = new Set(ATLAS_TREE_COMPRESSION_MODE_VALUES);
 
@@ -95,6 +86,26 @@ export const ATLAS_ROLE_ORDER = Object.freeze([
 export const DEFAULT_HTTP_HOST = "127.0.0.1";
 export const DEFAULT_HTTP_PORT = 3939;
 export const DEFAULT_SERVER_NAME = "atlas-v2";
+
+// Canonical ATLAS embedding model identities. Jina remains the production
+// default; CodeRank is staged for a future explicit model selector and must
+// not be activated merely because its runtime method is available.
+export const ATLAS_JINA_MODEL = Object.freeze({
+  provider: "jina-v2-code",
+  indexModel: "local-onnx",
+  modelName: "jinaai/jina-embeddings-v2-base-code",
+  modelId: "jina-v2-code",
+  dim: 768,
+  dtype: "q8",
+});
+
+export const ATLAS_CODERANK_MODEL = Object.freeze({
+  provider: "nomic-ai/CodeRankEmbed",
+  modelName: "nomic-ai/CodeRankEmbed",
+  dim: 768,
+});
+
+export const DEFAULT_ATLAS_EMBEDDING_PROVIDER = ATLAS_JINA_MODEL.provider;
 
 // Provider → how that provider consumes ATLAS.
 //   transport: "mcp"      — exposed through the Posse MCP gateway

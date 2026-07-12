@@ -1,8 +1,8 @@
 # Posse Linux Installer
 
 Bootstraps a Linux host from scratch and leaves `posse` runnable: system
-packages, Node.js 24+, npm dependencies, Python/SCIP runtimes, account
-settings, and shell wiring.
+packages, Node.js 24+, npm dependencies, Python/SCIP runtimes, native
+binaries, account settings, and shell wiring.
 
 ATLAS is built into Posse — there is no separate ATLAS checkout, build, or
 server process. ATLAS runtime configuration lives in `~/.posse/account.db`
@@ -19,7 +19,7 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
   them: the C/C++ build toolchain that Posse's native npm modules (node-pty
   and friends) compile with, `python3-venv`/`pip`, and Node 24 via `nvm` when
   the host has no usable Node.
-- **Observable.** A splash, numbered steps (`[ 3/14]`), a spinner with elapsed
+- **Observable.** A splash, numbered steps (`[ 3/15]`), a spinner with elapsed
   time on TTYs, and full command output captured to
   `~/.posse/logs/install-<timestamp>.log` (failures print the output tail
   inline).
@@ -59,12 +59,16 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
    step (which broke on PEP 668 distros like Ubuntu 23.04+/Debian 12+) — the
    venv route works everywhere and matches what Posse does at boot.
 11. **Provider CLI detection** — `posse admin init --non-interactive`.
-12. **Validation** — boots Posse (`node orchestrator.js status`).
-13. **Provider API keys** — only with `--configure-keys`: hidden prompts for
+12. **Provider API keys** — only with `--configure-keys`: hidden prompts for
     `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` / `CODEX_API_KEY`, written
     to `~/.config/posse/providers.env` (chmod 600), plus optional `claude` /
     `codex login` launches.
-14. **ATLAS smoke test** — only with `--repo-path`.
+13. **Native binaries** — downloads the current authenticated `posse-atlas`,
+    `posse-git`, `posse-remote`, and `posse-vector` artifacts for the host
+    platform. Existing verified versions are reused. Without `POSSE_KEY`, the
+    step reports a warning and boot readiness retries later.
+14. **Validation** — boots Posse (`node orchestrator.js status`).
+15. **ATLAS smoke test** — only with `--repo-path`.
 
 ## Prereqs
 
@@ -138,7 +142,7 @@ With `--configure-keys`, the installer prompts (hidden input) for:
 
 | Var | Purpose |
 |-----|---------|
-| `POSSE_KEY` | Posse remote prompt/tool catalog API key |
+| `POSSE_KEY` | Posse remote prompt/tool catalog and native artifact API key |
 | `OPENAI_API_KEY` | OpenAI provider |
 | `XAI_API_KEY` | Grok (xAI) provider |
 | `CODEX_API_KEY` | Codex API-key auth (optional — the `codex` CLI can also use `~/.codex/auth.json` from `codex login`) |

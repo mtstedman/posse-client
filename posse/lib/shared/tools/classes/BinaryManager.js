@@ -9,13 +9,14 @@
 //   if (nativeBinaries.shouldUse("atlas")) { ...call binary... }
 //
 // `shouldUse` = enabled AND available (build is staged for this os/arch).
-// Git and ATLAS are fully cut over: enabled is hardwired true, so shouldUse
-// reduces to availability and there is no JS fallback path. The migration
+// Git, ATLAS, and vector are fully cut over: enabled is hardwired true, so
+// shouldUse reduces to availability and there is no JS fallback path. The migration
 // recipe for remaining tools: mirror in Rust, A/B against the Node oracle,
 // switch the call site to the binary, then delete the replaced Node function.
 
 import {
   BINARY_NAMES,
+  REQUIRED_ATLAS_BINARY_NAMES,
   VALID_BINARY_NAMES,
   nativeBinaryEntry,
   nativeBinaryExactVersion,
@@ -25,6 +26,7 @@ import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.
 import { PulseTokenManager } from "../../native/classes/PulseTokenManager.js";
 import {
   ensureNativeBinaryArtifact,
+  findVerifiedNativeBinaryArtifact,
   invalidateNativeArtifactCache,
 } from "../../native/functions/artifact-download.js";
 import { NativeBinary } from "./NativeBinary.js";
@@ -182,14 +184,16 @@ export class BinaryManager {
 
   /**
    * Ensure a remotely distributed native binary is present for this host.
-   * A local lib/bin build wins when it matches the version issued by the
-   * heartbeat; otherwise that issued version is downloaded. Concurrent
-   * callers share one synchronization per binary.
+   * A locally valid handle is reused for the lifetime of the process. Passing
+   * `refresh` asks the heartbeat for the current issued version and may replace
+   * that handle; boot and explicit install/update commands are the only callers
+   * that should do so. Concurrent callers share one synchronization per binary.
    *
    * @param {string} name
+   * @param {{ refresh?: boolean }} [opts]
    * @returns {Promise<Record<string, unknown>>}
    */
-  async ensureAvailable(name) {
+  async ensureAvailable(name, { refresh = false } = {}) {
     if (!VALID_BINARY_NAMES.has(name)) {
       return { available: false, name, reason: "unknown_binary" };
     }
@@ -199,17 +203,103 @@ export class BinaryManager {
     }
     const inFlight = this._artifactEnsures.get(name);
     if (inFlight) return inFlight;
-    const promise = this._ensureRemoteArtifact(name).finally(() => {
+    const promise = this._ensureRemoteArtifact(name, { refresh }).finally(() => {
       if (this._artifactEnsures.get(name) === promise) this._artifactEnsures.delete(name);
     });
     this._artifactEnsures.set(name, promise);
     return promise;
   }
 
-  async _ensureRemoteArtifact(name) {
+  /**
+   * Ensure a required worker binary is version-valid, starts successfully,
+   * and answers through its persistent worker transport. There is no one-shot
+   * fallback on this readiness probe.
+   *
+   * @param {string} name
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async ensureActive(name) {
+    const available = await this.ensureAvailable(name);
+    if (!available?.available) return available;
+    try {
+      const protocol = name === "atlas" ? "posse.atlas.native.v1" : `posse.${name}.native.v1`;
+      const requiredRoute = name === "atlas"
+        ? "atlas:methods"
+        : name === "git"
+          ? "git:read"
+          : `${name}:methods`;
+      // Git classifies every unknown application method as mutating. Probe it
+      // with a real deterministic read method so readiness stays on git:read;
+      // an application-level daemon.ping would correctly fail closed.
+      const method = name === "git" ? "git.commitScope.isWildcard" : "daemon.ping";
+      const payload = name === "git"
+        ? { files: [], roots: ["*"], unknown: true }
+        : {};
+      const result = await this.binary(name).run(method, [], {
+        input: `${JSON.stringify({ protocol, method, payload })}\n`,
+        json: true,
+        timeoutMs: 15_000,
+        worker: true,
+        workerFallback: false,
+        idempotent: true,
+        requiredRoute,
+      });
+      if (!result?.ok || result?.json?.ok === false) {
+        return {
+          ...available,
+          available: false,
+          active: false,
+          reason: String(result?.error?.code || "worker_unresponsive"),
+        };
+      }
+      return { ...available, active: true };
+    } catch (error) {
+      return {
+        ...available,
+        available: false,
+        active: false,
+        reason: String(error?.code || "worker_start_failed"),
+        error,
+      };
+    }
+  }
+
+  async ensureRequiredAtlasBinariesActive() {
+    const results = await Promise.all(REQUIRED_ATLAS_BINARY_NAMES.map((name) => this.ensureActive(name)));
+    const unavailable = results.filter((result) => result?.available !== true || result?.active !== true);
+    if (unavailable.length > 0) {
+      const error = new Error(
+        `Required native binaries unavailable: ${unavailable.map((result) => `${result?.name || "unknown"} (${result?.reason || "unavailable"})`).join(", ")}`,
+      );
+      /** @type {any} */ (error).code = "REQUIRED_NATIVE_BINARY_UNAVAILABLE";
+      /** @type {any} */ (error).results = results;
+      throw error;
+    }
+    return results;
+  }
+
+  async _ensureRemoteArtifact(name, { refresh = false } = {}) {
     const handle = this.binary(name);
     let version = nativeBinaryExactVersion(name);
     try {
+      // Do not replace a valid binary during a live run. Boot performs one
+      // explicit refresh before work starts; after that, default ensures only
+      // recover a missing/invalid artifact and let the run finish on its
+      // already-validated version.
+      if (!refresh && handle.isAvailable()) {
+        return {
+          available: true,
+          name,
+          version: handle.exactVersion || null,
+          path: handle.resolvePath(),
+          source: "existing",
+          downloaded: false,
+        };
+      }
+      if (!refresh) {
+        const cached = await this._activateCachedFallback(name, handle);
+        if (cached) return cached;
+      }
       let pulseTokens = this._artifactPulseTokens;
       if (this._artifactInstaller === ensureNativeBinaryArtifact || pulseTokens) {
         pulseTokens ||= new PulseTokenManager({
@@ -217,12 +307,25 @@ export class BinaryManager {
           fetchImpl: this._artifactFetchImpl,
         });
         this._artifactPulseTokens = pulseTokens;
-        const pulse = await pulseTokens.getPulseEnvelope({ requiredRoute: "artifacts:read" });
+        const pulse = await pulseTokens.getPulseEnvelope({
+          refresh,
+          requiredRoute: "artifacts:read",
+        });
         const issuedVersion = String(pulse?.nativeArtifacts?.[nativeBinaryEntry(name)?.package] || "").trim();
         if (issuedVersion) version = issuedVersion;
+        if (version && handle.exactVersion === version && handle.isAvailable()) {
+          return {
+            available: true,
+            name,
+            version,
+            path: handle.resolvePath(),
+            source: "existing",
+            downloaded: false,
+          };
+        }
         const stagedHandle = version ? this._createHandle(name, this._opts.binRoot, version) : null;
         if (stagedHandle?.isAvailable()) {
-          this._handles.set(name, stagedHandle);
+          await this._replaceHandle(name, stagedHandle);
           return {
             available: true,
             name,
@@ -248,12 +351,11 @@ export class BinaryManager {
         return { available: false, name, reason: "version_not_issued" };
       }
       const cachedHandle = this._createHandle(name, installed.bundleRoot, expectedVersion);
-      this._handles.set(name, cachedHandle);
       if (!cachedHandle.isAvailable()) {
-        this._handles.set(name, handle);
         await invalidateNativeArtifactCache(installed);
         return { available: false, name, reason: "downloaded_version_mismatch" };
       }
+      await this._replaceHandle(name, cachedHandle);
       return {
         available: true,
         name,
@@ -264,6 +366,8 @@ export class BinaryManager {
         version: expectedVersion,
       };
     } catch (error) {
+      const fallback = await this._activateCachedFallback(name, handle);
+      if (fallback) return fallback;
       return {
         available: false,
         name,
@@ -273,8 +377,40 @@ export class BinaryManager {
     }
   }
 
+  async _activateCachedFallback(name, handle) {
+    if (handle.isAvailable()) {
+      return {
+        available: true,
+        name,
+        version: handle.exactVersion || null,
+        path: handle.resolvePath(),
+        source: "existing",
+        downloaded: false,
+      };
+    }
+    const cached = await findVerifiedNativeBinaryArtifact({
+      ...(this._artifactCacheRoot ? { cacheRoot: this._artifactCacheRoot } : {}),
+      name,
+      os: handle.os,
+      arch: handle.arch,
+    });
+    if (!cached) return null;
+    const cachedHandle = this._createHandle(name, cached.bundleRoot, cached.version);
+    if (!cachedHandle.isAvailable()) return null;
+    await this._replaceHandle(name, cachedHandle);
+    return {
+      available: true,
+      name,
+      version: cached.version,
+      path: cachedHandle.resolvePath(),
+      source: cached.source,
+      downloaded: false,
+      sha256: cached.sha256,
+    };
+  }
+
   /**
-   * Whether native invocation is enabled for a tool. Git and ATLAS are
+   * Whether native invocation is enabled for a tool. Git, ATLAS, and vector are
    * hard-migrated: the native binary is the only implementation path, so
    * neither settings nor env overrides can turn them off. Remaining tools
    * still honor the persisted tunable and legacy env overrides.
@@ -284,7 +420,7 @@ export class BinaryManager {
    */
   enabled(name) {
     if (!VALID_BINARY_NAMES.has(name)) return false;
-    if (name === "git" || name === "atlas") return true;
+    if (name === "git" || name === "atlas" || name === "vector") return true;
     const master = envFlag(this._env.POSSE_NATIVE_BINARIES);
     if (master != null) return master;
     const perTool = envFlag(this._env[`POSSE_NATIVE_${name.toUpperCase()}`]);
@@ -339,13 +475,17 @@ export class BinaryManager {
   async disposeAll() {
     const waits = [];
     for (const handle of this._handles.values()) {
-      const daemon = handle._daemon;
-      if (daemon) {
-        handle._daemon = null;
-        waits.push((async () => { try { await daemon.dispose(); } catch { /* best effort */ } })());
-      }
+      waits.push((async () => { try { await handle.dispose(); } catch { /* best effort */ } })());
     }
     await Promise.all(waits);
+  }
+
+  async _replaceHandle(name, nextHandle) {
+    const previous = this._handles.get(name);
+    this._handles.set(name, nextHandle);
+    if (previous && previous !== nextHandle) {
+      try { await previous.dispose(); } catch { /* replacement remains usable */ }
+    }
   }
 }
 

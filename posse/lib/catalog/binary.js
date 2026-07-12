@@ -14,6 +14,7 @@
 
 export const BINARY_NAMES = Object.freeze(["atlas", "git", "remote", "vector"]);
 export const VALID_BINARY_NAMES = new Set(BINARY_NAMES);
+export const REQUIRED_ATLAS_BINARY_NAMES = Object.freeze(["atlas", "vector"]);
 
 // Folder + manifest keys. These are OUR canonical os/arch tokens — distinct
 // from node's process.platform / process.arch, which the maps below translate.
@@ -62,7 +63,7 @@ function defineBinary(pkg, files, {
         destinationFile: files.windows,
         arches: Object.freeze({
           x64: Object.freeze({ target: "x86_64-pc-windows-msvc" }),
-          arm64: Object.freeze({ target: "aarch64-pc-windows-gnullvm" }),
+          arm64: Object.freeze({ target: "aarch64-pc-windows-msvc" }),
         }),
       }),
       macos: Object.freeze({
@@ -80,8 +81,8 @@ function defineBinary(pkg, files, {
         sourceFile: files.posix,
         destinationFile: files.posix,
         arches: Object.freeze({
-          x64: Object.freeze({ target: "x86_64-unknown-linux-musl" }),
-          arm64: Object.freeze({ target: "aarch64-unknown-linux-musl" }),
+          x64: Object.freeze({ target: "x86_64-unknown-linux-gnu" }),
+          arm64: Object.freeze({ target: "aarch64-unknown-linux-gnu" }),
         }),
       }),
     }),

@@ -14,6 +14,7 @@ import {
   ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
   runAtlasNativeMethodAsync,
 } from "../../functions/v2/native/invoke.js";
+import { buildNativeVectorBridge } from "../../functions/v2/embeddings/native-vector-bridge.js";
 import { AtlasToolDispatchCache } from "./AtlasToolDispatchCache.js";
 import path from "node:path";
 
@@ -368,6 +369,7 @@ function dispatchCacheTtlFor(request = {}) {
 export class AtlasToolExecutor {
   #conductorFactory;
   #nativeToolCall;
+  #nativeVectorBridge;
   #gate;
   #dedupeWindowMs;
   #waitMs;
@@ -386,6 +388,7 @@ export class AtlasToolExecutor {
   constructor({
     conductorFactory = getSharedConductor,
     nativeToolCall = (payload, opts) => runAtlasNativeMethodAsync("execute-tool", payload, opts),
+    nativeVectorBridge = buildNativeVectorBridge,
     gate = new AsyncResourceGate({ name: "ATLAS tool executor", policy: "writer-priority" }),
     dedupeWindowMs = DEFAULT_DEDUPE_WINDOW_MS,
     waitMs = DEFAULT_WAIT_MS,
@@ -398,6 +401,7 @@ export class AtlasToolExecutor {
   } = {}) {
     this.#conductorFactory = conductorFactory;
     this.#nativeToolCall = nativeToolCall;
+    this.#nativeVectorBridge = nativeVectorBridge;
     this.#gate = gate;
     this.#dedupeWindowMs = Math.max(0, Number(dedupeWindowMs) || 0);
     this.#waitMs = Math.max(0, Number(waitMs) || DEFAULT_WAIT_MS);
@@ -659,6 +663,19 @@ export class AtlasToolExecutor {
           throw new Error(`ATLAS ${request.action} requires a resolved native read context`);
         }
         const timeoutMs = request.waitMs || this.#waitMs;
+        const vectorBridge = request.action === "symbol.search" && request.args?.semantic === true
+          ? await this.#nativeVectorBridge({
+            query: String(request.args?.query || ""),
+            limit: Number(request.args?.limit || 50),
+            repoRoot: readPayload.readRoot
+              || request.config?.repoRoot
+              || request.session?.bootConfig?.atlas?.repoPath
+              || request.session?.bootConfig?.cwd
+              || request.session?.cwd
+              || process.cwd(),
+            config: readPayload.config || {},
+          })
+          : null;
         const envelope = await this.#nativeToolCall({
           contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
           action: request.action,
@@ -674,6 +691,7 @@ export class AtlasToolExecutor {
           repoId: readPayload.repoId,
           versionId: readPayload.versionId,
           config: readPayload.config || {},
+          ...(vectorBridge ? { vectorBridge } : {}),
           deadline: this.#now() + timeoutMs,
         }, {
           timeoutMs,

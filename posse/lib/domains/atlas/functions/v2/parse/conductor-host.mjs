@@ -21,19 +21,11 @@ import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManage
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
 import { SCIP_INDEXER_COUNT } from "../scip/indexers.js";
-import { setOnnxDaemonKeepWarm, closeSharedOnnxDaemon } from "../embeddings/onnx-daemon.js";
 
 if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
   nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
 }
 installNativeThreadBridge(workerData?.nativeBridgePort);
-
-// This thread's nested ONNX encoder daemon (spawned on first daemon-backed
-// encode) stays warm for the conductor's lifetime: the conductor itself is
-// idle-evicted/terminated by its owner, which tears the nested worker down
-// with it, so a short idle window here would only thrash the ~6s model load
-// between retrieval bursts.
-setOnnxDaemonKeepWarm(true);
 
 // One handle entry per (ledger, view) target, reused across requests. The
 // ledger and view connections are opened lazily and independently: the `warm`
@@ -230,13 +222,8 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         } catch { /* best effort */ }
       }
       handles.clear();
-      // This thread's module graph owns any native daemon hosts it spawned
-      // (posse-atlas via the parser adapter) and the nested warm ONNX encoder
-      // worker set used by embeddings ingest; dispose them before the parent
-      // terminates the thread or they outlive it as orphaned threads/processes.
-      try {
-        await closeSharedOnnxDaemon();
-      } catch { /* best effort */ }
+      // This thread's module graph owns the native daemon hosts it spawned;
+      // dispose them before the parent terminates the thread.
       try {
         await nativeBinaries.disposeAll();
       } catch { /* best effort */ }

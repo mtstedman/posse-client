@@ -3,7 +3,6 @@
 import path from "node:path";
 
 import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
-import { childEmbeddingModelDirName } from "./ChildEmbeddingIndex.js";
 
 /** @typedef {import("../../functions/v2/contracts/embeddings.js").EmbeddingIngest} EmbeddingIngest */
 /** @typedef {import("../../functions/v2/contracts/embeddings.js").EmbeddingHit} EmbeddingHit */
@@ -14,12 +13,20 @@ export const VECTOR_NATIVE_PROTOCOL = "posse.vector.native.v1";
 export const VECTOR_NATIVE_ROUTE = "vector:methods";
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 
+function encodeModelDirComponent(value) {
+  return encodeURIComponent(String(value)).replace(/%/g, "~");
+}
+
+export function embeddingModelDirName({ model, model_version }) {
+  return `${encodeModelDirComponent(model)}--${encodeModelDirComponent(model_version)}`;
+}
+
 /** @implements {EmbeddingIndexContract} */
 export class RustEmbeddingIndex {
   /** @type {string} */ model;
   /** @type {string} */ model_version;
   /** @type {number} */ dim;
-  /** @type {string} */ backend = "usearch-rust";
+  /** @type {string} */ backend = "posse-vector";
   /** @type {true} */ asyncIndex = true;
   /** @type {true} */ childIndex = true;
   /** @type {string} */ gateKey;
@@ -59,7 +66,7 @@ export class RustEmbeddingIndex {
     this.#readOnly = !!readOnly;
     this.#manager = manager;
     this.#timeoutMs = timeoutMs;
-    this.gateKey = `usearch-rust:${path.join(embeddingsRoot, childEmbeddingModelDirName({ model, model_version }))}`;
+    this.gateKey = `posse-vector:${path.join(embeddingsRoot, embeddingModelDirName({ model, model_version }))}`;
   }
 
   static open(args) {

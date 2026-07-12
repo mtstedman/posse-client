@@ -21,7 +21,6 @@ import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { formatAtlasBackendText, atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 import { isExternallyRoutedAtlasTool } from "../../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { semanticDispatchEnabled } from "../../../atlas/functions/v2/embeddings/resources.js";
-import { inspectLocalOnnxStatus } from "../../../atlas/functions/v2/embeddings/local-onnx.js";
 import {
   atlasResultData,
   atlasResultField,
@@ -79,8 +78,7 @@ function internalAtlasTools(packet) {
 
 function rawTextSlicePrefetchEnabled(packet) {
   const config = packet?.atlas_config || getAtlasIntegrationConfig();
-  if (!semanticDispatchEnabled(config)) return false;
-  return inspectLocalOnnxStatus({ repoRoot: packet?.cwd || undefined, config }).enabled === true;
+  return semanticDispatchEnabled(config);
 }
 
 function _isPrefetchCwdUsable(cwd) {

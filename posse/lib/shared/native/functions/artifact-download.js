@@ -46,6 +46,41 @@ export function nativeArtifactCachePath({ cacheRoot, name, version, os: osToken,
 }
 
 /**
+ * Find the newest locally cached artifact that still matches its SHA-256
+ * sidecar. This is the offline/startup fallback: the server-issued version is
+ * preferred whenever boot can refresh it, but a previously verified artifact
+ * remains usable when that refresh is unavailable.
+ *
+ * @param {{ cacheRoot?: string, name: string, os: string, arch: string }} args
+ * @returns {Promise<Record<string, any> | null>}
+ */
+export async function findVerifiedNativeBinaryArtifact({
+  cacheRoot = defaultNativeArtifactCacheRoot(),
+  name,
+  os: osToken,
+  arch,
+}) {
+  const entry = nativeBinaryEntry(name);
+  if (!entry) return null;
+  let versions;
+  try {
+    versions = (await fsp.readdir(path.join(cacheRoot, entry.package), { withFileTypes: true }))
+      .filter((candidate) => candidate.isDirectory())
+      .map((candidate) => candidate.name)
+      .sort((left, right) => right.localeCompare(left, undefined, { numeric: true, sensitivity: "base" }));
+  } catch {
+    return null;
+  }
+  for (const version of versions) {
+    const selected = nativeArtifactCachePath({ cacheRoot, name, version, os: osToken, arch });
+    if (!selected) continue;
+    const sha256 = await verifiedCachedArtifact(selected.binaryPath, selected.checksumPath);
+    if (sha256) return { ...selected, sha256, source: "cache-fallback", downloaded: false };
+  }
+  return null;
+}
+
+/**
  * @param {{
  *   name: string,
  *   version: string,
@@ -114,65 +149,78 @@ export async function ensureNativeBinaryArtifact({
       signal: ac.signal,
     });
   } catch (err) {
+    clearTimeout(timer);
     if (err?.name === "AbortError") {
       throw artifactError("POSSE_ARTIFACT_TIMEOUT", "native artifact download timed out");
     }
     throw artifactError("POSSE_ARTIFACT_FETCH_FAILED", "native artifact download failed");
+  }
+
+  let responseComplete = false;
+  try {
+    if (!response.ok) {
+      const detail = await readSmallResponse(response, ac.signal);
+      responseComplete = true;
+      clearTimeout(timer);
+      const err = artifactError(
+        response.status === 404 ? "POSSE_ARTIFACT_NOT_PUBLISHED" : "POSSE_ARTIFACT_REJECTED",
+        `native artifact download was rejected with HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
+      );
+      err.status = response.status;
+      throw err;
+    }
+
+    const expectedSha = response.headers.get("x-artifact-sha256")?.trim().toLowerCase() || "";
+    if (!/^[a-f0-9]{64}$/.test(expectedSha)) {
+      throw artifactError("POSSE_ARTIFACT_INVALID_RESPONSE", "native artifact response omitted a valid SHA-256 digest");
+    }
+    const digestSha = shaFromDigestHeader(response.headers.get("digest"));
+    if (digestSha && digestSha !== expectedSha) {
+      throw artifactError("POSSE_ARTIFACT_INVALID_RESPONSE", "native artifact response digest headers disagree");
+    }
+    const limit = positiveInteger(maxBytes, NATIVE_ARTIFACT_MAX_BYTES);
+    const contentLength = Number.parseInt(response.headers.get("content-length") || "", 10);
+    if (Number.isFinite(contentLength) && contentLength > limit) {
+      throw artifactError("POSSE_ARTIFACT_TOO_LARGE", `native artifact exceeds the ${limit}-byte limit`);
+    }
+
+    await fsp.mkdir(path.dirname(selected.binaryPath), { recursive: true });
+    const partPath = `${selected.binaryPath}.part-${process.pid}-${randomUUID()}`;
+    try {
+      const actual = await writeResponseToPart(response, partPath, limit, ac.signal);
+      responseComplete = true;
+      clearTimeout(timer);
+      if (actual.size === 0) {
+        throw artifactError("POSSE_ARTIFACT_INVALID_RESPONSE", "native artifact response was empty");
+      }
+      if (Number.isFinite(contentLength) && actual.size !== contentLength) {
+        throw artifactError("POSSE_ARTIFACT_INVALID_RESPONSE", "native artifact response length did not match its header");
+      }
+      if (actual.sha256 !== expectedSha) {
+        throw artifactError("POSSE_ARTIFACT_CHECKSUM_MISMATCH", "native artifact checksum verification failed");
+      }
+
+      const concurrentSha = await verifiedCachedArtifact(selected.binaryPath, selected.checksumPath);
+      if (concurrentSha) {
+        await safeUnlink(partPath);
+        return { ...selected, sha256: concurrentSha, source: "cache", downloaded: false };
+      }
+      await deleteInvalidCache(selected.binaryPath, selected.checksumPath);
+      await fsp.rename(partPath, selected.binaryPath);
+      if (osToken !== "windows") await fsp.chmod(selected.binaryPath, 0o755);
+      await writeChecksumSidecar(selected.checksumPath, actual.sha256);
+      await syncDirectory(path.dirname(selected.binaryPath));
+      return { ...selected, sha256: actual.sha256, size: actual.size, source: "remote", downloaded: true };
+    } finally {
+      await safeUnlink(partPath);
+    }
+  } catch (err) {
+    if (!responseComplete && (ac.signal.aborted || err?.name === "AbortError")) {
+      throw artifactError("POSSE_ARTIFACT_TIMEOUT", "native artifact download timed out");
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
-  }
-
-  if (!response.ok) {
-    const detail = await readSmallResponse(response);
-    const err = artifactError(
-      response.status === 404 ? "POSSE_ARTIFACT_NOT_PUBLISHED" : "POSSE_ARTIFACT_REJECTED",
-      `native artifact download was rejected with HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
-    );
-    err.status = response.status;
-    throw err;
-  }
-
-  const expectedSha = response.headers.get("x-artifact-sha256")?.trim().toLowerCase() || "";
-  if (!/^[a-f0-9]{64}$/.test(expectedSha)) {
-    throw artifactError("POSSE_ARTIFACT_INVALID_RESPONSE", "native artifact response omitted a valid SHA-256 digest");
-  }
-  const digestSha = shaFromDigestHeader(response.headers.get("digest"));
-  if (digestSha && digestSha !== expectedSha) {
-    throw artifactError("POSSE_ARTIFACT_INVALID_RESPONSE", "native artifact response digest headers disagree");
-  }
-  const limit = positiveInteger(maxBytes, NATIVE_ARTIFACT_MAX_BYTES);
-  const contentLength = Number.parseInt(response.headers.get("content-length") || "", 10);
-  if (Number.isFinite(contentLength) && contentLength > limit) {
-    throw artifactError("POSSE_ARTIFACT_TOO_LARGE", `native artifact exceeds the ${limit}-byte limit`);
-  }
-
-  await fsp.mkdir(path.dirname(selected.binaryPath), { recursive: true });
-  const partPath = `${selected.binaryPath}.part-${process.pid}-${randomUUID()}`;
-  try {
-    const actual = await writeResponseToPart(response, partPath, limit);
-    if (actual.size === 0) {
-      throw artifactError("POSSE_ARTIFACT_INVALID_RESPONSE", "native artifact response was empty");
-    }
-    if (Number.isFinite(contentLength) && actual.size !== contentLength) {
-      throw artifactError("POSSE_ARTIFACT_INVALID_RESPONSE", "native artifact response length did not match its header");
-    }
-    if (actual.sha256 !== expectedSha) {
-      throw artifactError("POSSE_ARTIFACT_CHECKSUM_MISMATCH", "native artifact checksum verification failed");
-    }
-
-    const concurrentSha = await verifiedCachedArtifact(selected.binaryPath, selected.checksumPath);
-    if (concurrentSha) {
-      await safeUnlink(partPath);
-      return { ...selected, sha256: concurrentSha, source: "cache", downloaded: false };
-    }
-    await deleteInvalidCache(selected.binaryPath, selected.checksumPath);
-    await fsp.rename(partPath, selected.binaryPath);
-    if (osToken !== "windows") await fsp.chmod(selected.binaryPath, 0o755);
-    await writeChecksumSidecar(selected.checksumPath, actual.sha256);
-    await syncDirectory(path.dirname(selected.binaryPath));
-    return { ...selected, sha256: actual.sha256, size: actual.size, source: "remote", downloaded: true };
-  } finally {
-    await safeUnlink(partPath);
   }
 }
 
@@ -195,7 +243,7 @@ async function verifiedCachedArtifact(binaryPath, checksumPath) {
   }
 }
 
-async function writeResponseToPart(response, partPath, maxBytes) {
+async function writeResponseToPart(response, partPath, maxBytes, signal) {
   const handle = await fsp.open(partPath, "wx", 0o600);
   const hash = createHash("sha256");
   let size = 0;
@@ -204,7 +252,7 @@ async function writeResponseToPart(response, partPath, maxBytes) {
       const reader = response.body.getReader();
       try {
         while (true) {
-          const { done, value } = await reader.read();
+          const { done, value } = await readWithSignal(reader, signal);
           if (done) break;
           const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
           size += chunk.byteLength;
@@ -219,7 +267,7 @@ async function writeResponseToPart(response, partPath, maxBytes) {
         try { reader.releaseLock?.(); } catch { /* best effort */ }
       }
     } else {
-      const chunk = new Uint8Array(await response.arrayBuffer());
+      const chunk = new Uint8Array(await abortable(response.arrayBuffer(), signal));
       size = chunk.byteLength;
       if (size > maxBytes) throw artifactError("POSSE_ARTIFACT_TOO_LARGE", `native artifact exceeds the ${maxBytes}-byte limit`);
       hash.update(chunk);
@@ -273,7 +321,7 @@ async function syncDirectory(dirPath) {
   }
 }
 
-async function readSmallResponse(response) {
+async function readSmallResponse(response, signal) {
   try {
     if (response.body && typeof response.body.getReader === "function") {
       const reader = response.body.getReader();
@@ -281,7 +329,7 @@ async function readSmallResponse(response) {
       let size = 0;
       try {
         while (size < ERROR_RESPONSE_MAX_BYTES) {
-          const { done, value } = await reader.read();
+          const { done, value } = await readWithSignal(reader, signal);
           if (done) break;
           const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
           const remaining = ERROR_RESPONSE_MAX_BYTES - size;
@@ -300,11 +348,42 @@ async function readSmallResponse(response) {
         .replace(/\s+/g, " ")
         .trim();
     }
-    const text = await response.text();
+    const text = await abortable(response.text(), signal);
     return String(text || "").replace(/\s+/g, " ").trim().slice(0, ERROR_RESPONSE_MAX_BYTES);
   } catch {
     return "";
   }
+}
+
+function readWithSignal(reader, signal) {
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      void reader.cancel().catch(() => {});
+      reject(abortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(reader.read()).then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
+function abortable(promise, signal) {
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
+function abortError() {
+  const err = new Error("operation aborted");
+  err.name = "AbortError";
+  return err;
 }
 
 function shaFromDigestHeader(value) {

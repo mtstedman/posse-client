@@ -6,7 +6,7 @@
 //   ledger tail           — print the most recent ledger entries on a branch.
 //   view info             — describe one view file (path, freshness, sizes).
 //   warm-now              — synchronously enqueue a warm job, no waiting.
-//   models pull           — download the local ONNX model cache.
+//   models pull           — explicitly download the production Jina model.
 //   purge-views           — delete view files (warmed/, main view, WI views).
 //   scip ...              — inspect/install/restage/ingest SCIP artifacts.
 //
@@ -38,14 +38,11 @@ import {
 import { ATLAS_SCIP_LANGUAGE_VALUES, normalizeScipLanguages } from "../../../atlas/functions/v2/scip/languages.js";
 import { getAtlasIntegrationConfig } from "../../../integrations/functions/atlas/config.js";
 import { normalizeAtlasScipMode } from "../../../integrations/functions/atlas-v2-mode.js";
+import { ATLAS_JINA_MODEL } from "../../../../catalog/atlas.js";
 import {
-  DEFAULT_LOCAL_ONNX_MODEL_ID,
-  LOCAL_ONNX_MODELS,
-  localOnnxModelCacheDir,
-  modelCachePresent,
-  resolveLocalOnnxCacheDir,
-} from "../../../atlas/functions/v2/embeddings/local-onnx.js";
-import { ensureOnnxModelCached } from "../../../atlas/functions/v2/embeddings/onnx-bootstrap.js";
+  inspectJinaModel,
+  pullJinaModel,
+} from "../../../atlas/functions/v2/embeddings/jina-model.js";
 import { ATLAS_V2_HELP_COMMANDS } from "../atlas-v2-help.js";
 import { gitExecSafe } from "../../../git/functions/utils.js";
 
@@ -63,6 +60,38 @@ function fileExistsSafe(filePath) {
 
 function statSafe(filePath) {
   try { return fs.statSync(filePath); } catch { return null; }
+}
+
+async function runModelsPull({ projectDir }) {
+  const target = inspectJinaModel(projectDir);
+  console.log(`  ${C.cyan}[atlas-v2 models]${C.reset} pulling ${ATLAS_JINA_MODEL.modelId} to ${path.relative(projectDir, target.modelCacheDir) || target.modelCacheDir}`);
+  let wroteProgress = false;
+  try {
+    const result = await pullJinaModel({
+      repoRoot: projectDir,
+      onProgress: (progress) => {
+        if (progress?.status !== "progress" || !progress?.file) return;
+        const pct = progress.loaded && progress.total
+          ? Math.round((progress.loaded / progress.total) * 100)
+          : 0;
+        wroteProgress = true;
+        process.stdout.write(`\r  ${C.dim}${progress.file} ${pct}%${C.reset}`);
+      },
+    });
+    if (wroteProgress) process.stdout.write("\n");
+    const color = result.ready ? C.green : C.yellow;
+    console.log(`  ${color}[atlas-v2 models]${C.reset} ${result.ready ? "ready" : result.reason}: ${result.modelCacheDir}`);
+    return { ok: result.ready, model: ATLAS_JINA_MODEL.modelId, ...result };
+  } catch (error) {
+    if (wroteProgress) process.stdout.write("\n");
+    console.log(`  ${C.red}[atlas-v2 models]${C.reset} pull failed: ${formatAtlasError(error)}`);
+    return {
+      ok: false,
+      model: ATLAS_JINA_MODEL.modelId,
+      modelCacheDir: target.modelCacheDir,
+      error: formatAtlasError(error),
+    };
+  }
 }
 
 function formatBytes(bytes) {
@@ -397,46 +426,6 @@ function printPurgeViews({ projectDir, args }) {
   for (const file of removed.slice(0, 20)) console.log(`    - ${path.relative(projectDir, file)}`);
   if (removed.length > 20) console.log(`    ${C.dim}... and ${removed.length - 20} more${C.reset}`);
   return { removed };
-}
-
-async function runModelsPull({ projectDir, args }) {
-  const modelId = String(args[0] || DEFAULT_LOCAL_ONNX_MODEL_ID).trim();
-  const model = LOCAL_ONNX_MODELS[modelId];
-  if (!model) {
-    console.log(`  ${C.red}[atlas-v2 models]${C.reset} unknown model '${modelId}'. Use ${DEFAULT_LOCAL_ONNX_MODEL_ID}.`);
-    return { ok: false, error: "unknown_model", modelId };
-  }
-  const cacheDir = resolveLocalOnnxCacheDir({ repoRoot: projectDir, config: getAtlasIntegrationConfig() });
-  if (!cacheDir) {
-    console.log(`  ${C.red}[atlas-v2 models]${C.reset} could not resolve local ONNX cache directory`);
-    return { ok: false, error: "cache_dir_unresolved", modelId };
-  }
-  const targetDir = localOnnxModelCacheDir(cacheDir, model);
-  console.log(`  ${C.cyan}[atlas-v2 models]${C.reset} pulling ${modelId} to ${path.relative(projectDir, targetDir) || targetDir}`);
-  let wroteProgress = false;
-  try {
-    await ensureOnnxModelCached({
-      modelName: model.model,
-      modelId: model.id,
-      cacheDir,
-      dtype: model.dtype || "q8",
-      onProgress: (p) => {
-        if (p?.status === "progress" && p?.file) {
-          const pct = p.loaded && p.total ? Math.round((p.loaded / p.total) * 100) : 0;
-          wroteProgress = true;
-          process.stdout.write(`\r  ${C.dim}${p.file} ${pct}%${C.reset}`);
-        }
-      },
-    });
-    if (wroteProgress) process.stdout.write("\n");
-    const present = modelCachePresent(cacheDir, model);
-    console.log(`  ${present ? C.green : C.yellow}[atlas-v2 models]${C.reset} ${present ? "ready" : "download finished but model file was not detected"}: ${targetDir}`);
-    return { ok: present, modelId, cacheDir, modelCacheDir: targetDir };
-  } catch (err) {
-    if (wroteProgress) process.stdout.write("\n");
-    console.log(`  ${C.red}[atlas-v2 models]${C.reset} pull failed: ${formatAtlasError(err)}`);
-    return { ok: false, error: formatAtlasError(err), modelId, cacheDir, modelCacheDir: targetDir };
-  }
 }
 
 function scipDir(projectDir) {
@@ -883,9 +872,9 @@ export async function runAtlasV2Command({ projectDir, argv = [] } = {}) {
     case "purge-views":
       return printPurgeViews({ projectDir, args: rest });
     case "models": {
-      const modelSub = String(rest[0] || "pull").toLowerCase();
-      if (modelSub === "pull") return await runModelsPull({ projectDir, args: rest.slice(1) });
-      console.log(`  ${C.red}Unknown models subcommand: ${modelSub}${C.reset}`);
+      const modelsSub = String(rest[0] || "pull").toLowerCase();
+      if (modelsSub === "pull") return await runModelsPull({ projectDir });
+      console.log(`  ${C.red}Unknown models subcommand: ${modelsSub}${C.reset}`);
       console.log("  Available: pull");
       return null;
     }
