@@ -12,6 +12,8 @@ import {
 
 const SIMPLE_NO_RESEARCH_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|rename|renaming|copy\s*edit|docs?\s+fix|formatting|whitespace)\b/i;
 const ONESHOT_SIMPLE_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|copy\s*edit|docs?\s+fix|whitespace)\b/i;
+const ONESHOT_SIMPLE_UI_ACTION_RE = /\b(?:change|convert|make|replace|swap|switch|update|use)\b/i;
+const ONESHOT_SIMPLE_UI_CONTROL_RE = /(?:\bicon(?:-only)?\s+buttons?\b[^.\n]{0,120}\b(?:tooltips?|rather\s+than|instead\s+of)\b|\b(?:tooltips?|rather\s+than|instead\s+of)\b[^.\n]{0,120}\bicon(?:-only)?\s+buttons?\b)/i;
 const LOW_NO_LOGIC_RE = /\b(?:typo|spelling|comments?\s+fix|comment-only|rename|copy\s*edit|docs?|readme|formatting|whitespace|no\s+(?:logic|behavior|behaviour)\s+change)\b/i;
 const FANOUT_TRIGGER_RE = /\b(?:audit|review\s+all|verify\s+each|find\s+all|scan\s+all|check\s+every|across)\b/i;
 const WEB_FANOUT_RE = /\b(?:compare|versus|vs\.?|between|across|audit|review|verify|investigate)\b/i;
@@ -447,7 +449,8 @@ export function classifyResearchTask({
   // to planning.
   const oneshotEligibility = evaluateOneshotRequestEligibility({ text, mode: lowerMode, intakeHints });
   const oneshotAllowed = !disallowOneshot && !protectedFileMention && oneshotEligibility.ok;
-  const oneshotSimple = oneshotAllowed && ONESHOT_SIMPLE_RE.test(text) && noResearchText.length < 200 && !COMPLEX_RE.test(text) && !RENAME_RE.test(text) && !FORMAT_RE.test(text);
+  const simpleUiControlSubstitution = ONESHOT_SIMPLE_UI_ACTION_RE.test(text) && ONESHOT_SIMPLE_UI_CONTROL_RE.test(text);
+  const oneshotSimple = oneshotAllowed && (ONESHOT_SIMPLE_RE.test(text) || simpleUiControlSubstitution) && noResearchText.length < 200 && !COMPLEX_RE.test(text) && !RENAME_RE.test(text) && !FORMAT_RE.test(text);
   const simpleNoResearch = !protectedFileMention && SIMPLE_NO_RESEARCH_RE.test(text) && fileMentions.length === 1 && noResearchText.length < 200 && !COMPLEX_RE.test(text);
   const renameMultiNoResearch = !protectedFileMention && RENAME_RE.test(text) && filesAllInSameModule(fileMentions) && noResearchText.length < 400 && !COMPLEX_RE.test(text);
   const webFanoutCandidate = webBranches.length >= 2 && WEB_FANOUT_RE.test(text) && mentionedModules.length === 0 && fileMentions.length === 0;

@@ -58,6 +58,8 @@ export class PreflightRole extends BaseRole {
     const payload = parsePayload(this.context, job);
     const mode = payload.mode || workItem?.mode || metadata.mode || "build";
     const intakeHints = payload.intake_hints || metadata.intake_hints || getWorkItemIntakeHints(workItem, mode);
+    const userSelectedOneshot = String(intakeHints?.intent_type || "").trim().toLowerCase() === "oneshot"
+      && String(intakeHints?.intent_type_source || "").trim().toLowerCase() === "explicit";
     const fallbackBudget = normalizeResearchBudget(payload.fallback_budget || payload.deepthink_budget || metadata.deepthink_budget, "normal");
     const projectMap = payload.project_map || loadProjectMap(projectDir);
 
@@ -72,6 +74,9 @@ export class PreflightRole extends BaseRole {
       payload.preflight_objective === "oneshot_scope"
         ? [
           "Preflight objective: resolve whether this trivial-shaped item has exactly one clear existing repo file target.",
+          userSelectedOneshot
+            ? "The user explicitly selected one-shot. Treat that as a strong routing preference: do not demote merely because the edit is not a typo or documentation change."
+            : "The deterministic router identified this as a possible one-shot.",
           "If exactly one existing repo-relative file is clear, return mode \"oneshot\" with candidate_files containing only that path.",
           "If it is low-research but not one-shot-safe, return mode \"plan_direct\". Otherwise return mode \"solo\".",
           "",
