@@ -11,6 +11,8 @@ import { spawn, spawnSync } from "child_process";
 
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
+import { reconcileNativeBinaries } from "../../../shared/native/functions/binary-reconciliation.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { installScipLanguageDependencies } from "../../atlas/functions/v2/scip/dependencies.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
@@ -1269,12 +1271,14 @@ function buildDependencyDoctorReport(result, mode) {
  *   includeComposer?: boolean,
  *   includeGo?: boolean,
  *   includeCargo?: boolean,
+ *   includeNativeBinaries?: boolean,
  *   includeScip?: boolean,
  *   includeTestTools?: boolean,
  *   timeoutMs?: number | string | boolean | null,
  *   forceNodeInstall?: boolean,
  *   onProgress?: ((message: string) => void) | null,
  *   onEvent?: ((event: Record<string, any>) => void) | null,
+ *   nativeBinaryManager?: any,
  * }} [input]
  */
 export async function ensureBootDependencies(input = {}) {
@@ -1306,6 +1310,7 @@ export async function ensureBootDependencies(input = {}) {
   const includeComposer = input.includeComposer !== false;
   const includeGo = input.includeGo !== false;
   const includeCargo = input.includeCargo !== false;
+  const includeNativeBinaries = input.includeNativeBinaries === true;
   const includeScip = input.includeScip !== false;
   const includeTestTools = input.includeTestTools !== false;
 
@@ -1353,6 +1358,15 @@ export async function ensureBootDependencies(input = {}) {
       command: "cargo",
       args: ["fetch"],
     }, ensureSimpleCommandProject, opts));
+  }
+
+  if (includeNativeBinaries) {
+    native.push(...await reconcileNativeBinaries({
+      manager: input.nativeBinaryManager || nativeBinaries,
+      refresh: true,
+      dryRun,
+      onProgress: opts.onProgress,
+    }));
   }
 
   if (includeScip) {
@@ -1435,6 +1449,7 @@ export async function doctorRepoDependencies(input = {}) {
     ...input,
     projectDir: input.projectDir || process.cwd(),
     dryRun: input.dryRun === true,
+    includeNativeBinaries: input.includeNativeBinaries !== false,
     timeoutMs: Object.hasOwn(input, "timeoutMs") ? input.timeoutMs : null,
   });
   const mode = result.dry_run ? "plan" : "repair";

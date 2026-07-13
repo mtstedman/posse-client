@@ -70,7 +70,7 @@ export function buildAtlasCapabilities(args = {}) {
         true,
         embeddingsEnabled,
         "shipped",
-        "posse-atlas owns Jina ONNX encoding and posse-vector owns nearest-neighbor search.",
+        "posse-atlas owns Jina ONNX encoding and posse-atlas-vector owns nearest-neighbor search.",
         embeddingsEnabled ? null : embeddingReason || "native_embeddings_unavailable",
       ),
       semanticSearch: capability(
@@ -78,7 +78,7 @@ export function buildAtlasCapabilities(args = {}) {
         true,
         embeddingsEnabled,
         "shipped",
-        "Semantic symbol search uses the mandatory native Jina and posse-vector pipeline.",
+        "Semantic symbol search uses the mandatory native Jina and posse-atlas-vector pipeline.",
         embeddingsEnabled ? null : embeddingReason || "embeddings_disabled",
       ),
       predictivePrefetch: capability("enabled", true, true, "shipped", "Symbol search predicts likely follow-up cards, warms the retrieval cache, and reports hit/waste telemetry.", null),

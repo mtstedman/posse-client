@@ -667,7 +667,7 @@ function prePushGate({ cwd, nativeParity = {} }) {
 
   let status = "";
   try {
-    status = gitExec(["status", "--porcelain"], cwd).trim();
+    status = gitExec(["status", "--porcelain"], cwd, { nativeParity }).trim();
   } catch (err) {
     if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
     return { ok: true, output: "" };
@@ -678,7 +678,7 @@ function prePushGate({ cwd, nativeParity = {} }) {
 
   let upstream = "";
   try {
-    upstream = gitExec(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd).trim();
+    upstream = gitExec(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd, { nativeParity }).trim();
   } catch (err) {
     // no upstream is allowed; infra failures are not
     if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
@@ -686,11 +686,15 @@ function prePushGate({ cwd, nativeParity = {} }) {
 
   if (upstream) {
     try {
-      const names = gitExec(["diff", "--name-only", `${upstream}..HEAD`], cwd).trim();
+      const names = gitExec(["diff", "--name-only", `${upstream}..HEAD`], cwd, { nativeParity }).trim();
       const envBlock = envFileBlock(names);
       if (envBlock) return envBlock;
 
-      const diff = gitExec(["diff", `${upstream}..HEAD`, "--unified=0"], cwd, { maxBuffer: 1024 * 1024 * 4, trim: false });
+      const diff = gitExec(["diff", `${upstream}..HEAD`, "--unified=0"], cwd, {
+        maxBuffer: 1024 * 1024 * 4,
+        trim: false,
+        nativeParity,
+      });
       const secretsBlock = pushDiffSecretsBlock(diff);
       if (secretsBlock) return secretsBlock;
     } catch (err) {
@@ -717,7 +721,7 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
 
   let status = "";
   try {
-    status = (await gitExecAsync(["status", "--porcelain"], cwd)).trim();
+    status = (await gitExecAsync(["status", "--porcelain"], cwd, { nativeParity })).trim();
   } catch (err) {
     if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
     return { ok: true, output: "" };
@@ -728,7 +732,7 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
 
   let upstream = "";
   try {
-    upstream = (await gitExecAsync(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd)).trim();
+    upstream = (await gitExecAsync(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd, { nativeParity })).trim();
   } catch (err) {
     // no upstream is allowed; infra failures are not
     if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
@@ -736,11 +740,15 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
 
   if (upstream) {
     try {
-      const names = (await gitExecAsync(["diff", "--name-only", `${upstream}..HEAD`], cwd)).trim();
+      const names = (await gitExecAsync(["diff", "--name-only", `${upstream}..HEAD`], cwd, { nativeParity })).trim();
       const envBlock = envFileBlock(names);
       if (envBlock) return envBlock;
 
-      const diff = await gitExecAsync(["diff", `${upstream}..HEAD`, "--unified=0"], cwd, { maxBuffer: 1024 * 1024 * 4, trim: false });
+      const diff = await gitExecAsync(["diff", `${upstream}..HEAD`, "--unified=0"], cwd, {
+        maxBuffer: 1024 * 1024 * 4,
+        trim: false,
+        nativeParity,
+      });
       const secretsBlock = pushDiffSecretsBlock(diff);
       if (secretsBlock) return secretsBlock;
     } catch (err) {

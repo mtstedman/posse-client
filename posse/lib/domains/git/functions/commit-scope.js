@@ -5,7 +5,6 @@
 
 import fs from "fs";
 import path from "path";
-import { Worker as NodeWorker } from "worker_threads";
 import { runHook } from "./hooks.js";
 import { gitExec, gitCurrentHash } from "./utils.js";
 import { withWorktreeLock } from "./worktree.js";
@@ -13,18 +12,21 @@ import { withBranchLock } from "./worktree-locks.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { listActiveFileLocks } from "../../queue/functions/file-locks.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
-import { sanitizeWorkerExecArgv } from "../../runtime/functions/worker-exec-argv.js";
+import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { getGitAtlasPostCommitHookTimeoutMs } from "../../settings/functions/tunables.js";
 import { isUnderRoot, normalizeRoots } from "../../../shared/scope/functions/path.js";
 import { findActiveSiblingLockForPath } from "../../queue/functions/sibling-locks.js";
 import { MutationPolicy } from "../../../shared/scope/classes/MutationPolicy.js";
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { UNSCOPED_GIT_ADD_TASK_MODES } from "../../../catalog/artifact.js";
 import { runGitNativeMethod } from "./native/invoke.js";
 
 const GIT_COMMAND_TIMEOUT_MS = 60_000;
 const DEFAULT_GIT_COMMIT_CORE_TIMEOUT_MS = 60_000;
 const DEFAULT_GIT_COMMIT_HOOK_GRACE_MS = 30_000;
+const GIT_COMMIT_WORKER_OVERHEAD_MS = 5 * 60 * 1000;
+const GIT_COMMIT_THREAD_MANAGER = new ThreadManager();
 
 function gitCommitTimeoutBudget() {
   const coreTimeoutMs = DEFAULT_GIT_COMMIT_CORE_TIMEOUT_MS;
@@ -283,50 +285,17 @@ export function gitCommitAll(message, cwd, scope = null, opts = {}) {
   });
 }
 
-export function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
+export async function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
   if (typeof opts?.beforeCommitHook === "function") {
-    return Promise.reject(new Error("gitCommitAllAsync cannot serialize beforeCommitHook; wrap the whole caller off the main thread instead"));
+    throw new Error("gitCommitAllAsync cannot serialize beforeCommitHook; wrap the whole caller off the main thread instead");
   }
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const worker = new NodeWorker(new URL("./commit-worker.js", import.meta.url), {
-      execArgv: sanitizeWorkerExecArgv(),
-      workerData: { message, cwd, scope, opts, nativeAuth: heartbeatAuthManager.getCapability() },
-    });
-    const settle = (fn, value) => {
-      if (settled) return;
-      settled = true;
-      fn(value);
-    };
-    worker.on("message", (message = {}) => {
-      if (message.ok) {
-        settle(resolve, message.result);
-        return;
-      }
-      const err = new Error(message.error || "git commit worker failed");
-      if (message.stack) err.stack = message.stack;
-      for (const key of ["code", "errno", "syscall", "path", "spawnargs", "status", "signal", "killed"]) {
-        if (message[key] != null) err[key] = message[key];
-      }
-      if (message.stderr) err.stderr = message.stderr;
-      if (message.stdout) err.stdout = message.stdout;
-      if (message.hookOutput) err.hookOutput = message.hookOutput;
-      if (message.gitCommitTimedOut) err.gitCommitTimedOut = true;
-      if (message.gitCommitTimeoutBudget) err.gitCommitTimeoutBudget = message.gitCommitTimeoutBudget;
-      if (Array.isArray(message.createdOutOfScope)) err.createdOutOfScope = message.createdOutOfScope;
-      if (Array.isArray(message.gitAddWarnings)) err.gitAddWarnings = message.gitAddWarnings;
-      if (message.nativeFailure) err.nativeFailure = message.nativeFailure;
-      if (message.rollbackStatus) err.rollbackStatus = message.rollbackStatus;
-      if (message.rollbackSucceeded != null) err.rollbackSucceeded = message.rollbackSucceeded;
-      if (Array.isArray(message.nativeDiagnostics)) err.nativeDiagnostics = message.nativeDiagnostics;
-      if (message.headBefore) err.headBefore = message.headBefore;
-      if (message.headAfter) err.headAfter = message.headAfter;
-      settle(reject, err);
-    });
-    worker.on("error", (err) => settle(reject, err));
-    worker.on("exit", (code) => {
-      if (code !== 0) settle(reject, new Error(`git commit worker exited with code ${code}`));
-    });
+  const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
+    routesByBinary: { git: ["git:read", "git:mutate"] },
+  });
+  return GIT_COMMIT_THREAD_MANAGER.run(new URL("./commit-worker.js", import.meta.url), {
+    label: "git commit worker",
+    timeoutMs: gitCommitTimeoutBudget().processTimeoutMs + GIT_COMMIT_WORKER_OVERHEAD_MS,
+    workerData: { message, cwd, scope, opts, nativeAuth: heartbeatAuthManager.getCapability(), nativeRuntime },
   });
 }
 

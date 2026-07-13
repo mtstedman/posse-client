@@ -14,6 +14,8 @@ const STEP_SECTION_MAP = new Map([
   ["repo setup", "scheduler"],
   ["dependencies", "workspace"],
   ["posse update", "workspace"],
+  ["native binaries", "workspace"],
+  ["starting daemons", "workspace"],
   ["startup work tree", "workspace"],
   ["git ready", "workspace"],
   ["worktree cleanup", "workspace"],

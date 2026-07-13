@@ -29,6 +29,7 @@ async function main() {
   if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
     nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
   }
+  nativeBinaries.installWorkerRuntime(workerData?.nativeRuntime);
   const {
     task,
     args = {},

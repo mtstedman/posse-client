@@ -241,10 +241,15 @@ export class Daemon {
   #onExit() {
     this._transport = null;
     this._lastExitAt = this._now();
+    this.#failPending("daemon transport exited");
+  }
+
+  /** Fail every request owned by the transport being detached. */
+  #failPending(message) {
     const waiters = [...this._pending.values()];
     this._pending.clear();
     for (const entry of waiters) {
-      entry.finish({ ok: false, error: { message: "daemon transport exited" }, _transportGone: true });
+      entry.finish({ ok: false, error: { message }, _transportGone: true });
     }
   }
 
@@ -252,6 +257,7 @@ export class Daemon {
     const transport = this._transport;
     this._transport = null;
     this._runningKey = null;
+    this.#failPending("daemon transport recycled");
     try { transport?.kill(); } catch { /* ignore */ }
   }
 
@@ -329,11 +335,7 @@ export class Daemon {
     // restart backoff: a retire is deliberate, not a crash.
     this._nextSpawnIsRetireReplacement = true;
     this.#emitLifecycle("retire", { pid: transport.hostPid?.() ?? null });
-    const waiters = [...this._pending.values()];
-    this._pending.clear();
-    for (const entry of waiters) {
-      entry.finish({ ok: false, error: { message: "daemon host retired" }, _transportGone: true });
-    }
+    this.#failPending("daemon host retired");
     if (typeof transport.retire === "function") {
       try { transport.retire(opts.graceMs ?? DEFAULT_RETIRE_GRACE_MS); } catch { /* best effort */ }
     } else {

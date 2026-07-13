@@ -10,14 +10,14 @@ import { gitExec, resolvePushBranch } from "./utils.js";
 import { GIT_MERGE_TIMEOUT_MS } from "./workflow-git-utils.js";
 
 export function createPushWorkflowHelpers(context, { auditWorktreeState, askSingleKeyYesNo }) {
-  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, nonInteractive, askFn } = context;
+  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, nonInteractive, askFn, nativeParity } = context;
 
   function collectPushOfferState(mergedCount) {
     const targetBranch = currentTargetBranch();
-    const branch = gitExec(["rev-parse", "--abbrev-ref", "HEAD"], projectDir).trim();
+    const branch = gitExec(["rev-parse", "--abbrev-ref", "HEAD"], projectDir, { nativeParity }).trim();
     const remotes = (() => {
       try {
-        return gitExec(["remote"], projectDir)
+        return gitExec(["remote"], projectDir, { nativeParity })
           .split(/\r?\n/)
           .map((line) => line.trim())
           .filter(Boolean);
@@ -27,7 +27,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     })();
     const branchRemote = (() => {
       try {
-        return gitExec(["config", "--get", `branch.${branch}.remote`], projectDir).trim();
+        return gitExec(["config", "--get", `branch.${branch}.remote`], projectDir, { nativeParity }).trim();
       } catch {
         return "";
       }
@@ -46,7 +46,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     const pushBranch = pushBranchInfo.branch;
     const pushBranchRemote = (() => {
       try {
-        return gitExec(["config", "--get", `branch.${pushBranch}.remote`], projectDir).trim();
+        return gitExec(["config", "--get", `branch.${pushBranch}.remote`], projectDir, { nativeParity }).trim();
       } catch {
         return "";
       }
@@ -55,7 +55,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
 
     let workingTreeStatus = "";
     try {
-      workingTreeStatus = gitExec(["status", "--porcelain"], projectDir, { timeoutMs: 5000 }).trim();
+      workingTreeStatus = gitExec(["status", "--porcelain"], projectDir, { timeoutMs: 5000, nativeParity }).trim();
     } catch {
       workingTreeStatus = "";
     }
@@ -69,8 +69,8 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     let aheadCount = null;
     try {
       const upstreamRef = `${effectiveRemote}/${pushBranch}`;
-      gitExec(["rev-parse", "--verify", "--quiet", upstreamRef], projectDir);
-      const counted = gitExec(["rev-list", "--count", `${upstreamRef}..${pushBranch}`], projectDir, { timeoutMs: 5000 }).trim();
+      gitExec(["rev-parse", "--verify", "--quiet", upstreamRef], projectDir, { nativeParity });
+      const counted = gitExec(["rev-list", "--count", `${upstreamRef}..${pushBranch}`], projectDir, { timeoutMs: 5000, nativeParity }).trim();
       const parsed = Number.parseInt(counted, 10);
       aheadCount = Number.isFinite(parsed) ? parsed : null;
     } catch {
@@ -120,7 +120,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
         "--",
         ".",
         ":(exclude).posse/**",
-      ], projectDir, { timeoutMs: 10000 }).trim();
+      ], projectDir, { timeoutMs: 10000, nativeParity }).trim();
       if (markerCheck) {
         return {
           ok: false,
@@ -141,13 +141,13 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       }
     }
 
-    const gate = runHook("pre_push_gate", { cwd: projectDir, targetBranch: pushBranch });
+    const gate = runHook("pre_push_gate", { cwd: projectDir, targetBranch: pushBranch, nativeParity });
     if (!gate.ok) {
       return { ok: false, reason: "gate_failed", output: gate.output || "" };
     }
 
     try {
-      gitExec(["push", effectiveRemote, pushBranch], projectDir, { timeoutMs: GIT_MERGE_TIMEOUT_MS });
+      gitExec(["push", effectiveRemote, pushBranch], projectDir, { timeoutMs: GIT_MERGE_TIMEOUT_MS, nativeParity });
       logEvent({
         event_type: EVENT_TYPES.GIT_PUSHED,
         actor_type: EVENT_ACTORS.HUMAN,

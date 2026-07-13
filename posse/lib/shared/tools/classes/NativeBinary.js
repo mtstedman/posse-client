@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 
 import {
+  ATLAS_VECTOR_NATIVE_ROUTE,
   nativeBinaryExactVersion,
   nativeBinaryEntry,
   nativeBinaryIsKeyGated,
@@ -143,6 +144,8 @@ export class NativeBinary {
     /** @type {import("../../native/classes/PulseTokenManager.js").PulseTokenManager | null} */
     this._pulseManager = null;
     this._pulseManagerAuth = null;
+    /** Parent-minted, route-scoped pulse envelopes for child thread runtimes. */
+    this._runtimePulseEnvelopes = new Map();
     /**
      * Per-route pulse state delivered to the live persistent worker: the last
      * envelope sent, the scheduled refresh timer, and whether an expired
@@ -158,6 +161,10 @@ export class NativeBinary {
     this._nativePulseIdentity = null;
     /** @type {import("./daemon/index.js").Daemon | null} */
     this._daemon = null;
+    /** @type {string[] | null} */
+    this._configuredWorkerArgs = null;
+    /** @type {Promise<void>} Serialize worker configurations whose startup argv differs (ML model roots). */
+    this._workerArgsTail = Promise.resolve();
     /**
      * Worker→per-call fallback visibility: every time a worker-eligible
      * request degrades to a per-call spawn the daemon layer is unhealthy, and
@@ -181,7 +188,52 @@ export class NativeBinary {
 
   /** Args to launch this binary's `worker --stdio` host. */
   #buildWorkerArgs() {
-    return ["worker", "--stdio"];
+    return this._configuredWorkerArgs
+      ? [...this._configuredWorkerArgs]
+      : ["worker", "--stdio"];
+  }
+
+  /**
+   * Run against a worker whose startup argv is part of the request contract.
+   * A NativeBinary owns one daemon at a time, so root changes are serialized
+   * and retire the old host before the replacement starts. Same-root calls
+   * reuse the warm host and its loaded model session.
+   *
+   * @param {string | null} subcommand
+   * @param {string[]} args
+   * @param {{ workerArgs: string[] } & Record<string, any>} opts
+   * @returns {Promise<RunResult>}
+   */
+  async #runViaConfiguredWorker(subcommand, args, opts) {
+    const workerArgs = opts.workerArgs.map((value) => String(value));
+    if (workerArgs.length === 0 || workerArgs.some((value) => value.length === 0)) {
+      const error = new TypeError(`native ${this.name} workerArgs must contain non-empty strings`);
+      return { ok: false, code: null, signal: null, stdout: "", stderr: error.message, error };
+    }
+
+    const previous = this._workerArgsTail;
+    /** @type {() => void} */
+    let release = () => {};
+    this._workerArgsTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      const changed = !this._configuredWorkerArgs
+        || this._configuredWorkerArgs.length !== workerArgs.length
+        || this._configuredWorkerArgs.some((value, index) => value !== workerArgs[index]);
+      if (changed) {
+        this.#clearWorkerAuthState();
+        const daemon = this._daemon;
+        // Model-root changes are deliberate host replacements, not crashes.
+        // Retire lets the old process drain and exempts the replacement from
+        // crash-breaker accounting; the serialized queue guarantees no prior
+        // configured-root request is still active here.
+        if (daemon) daemon.retire({});
+        this._configuredWorkerArgs = workerArgs;
+      }
+      return await this.#runViaWorker(subcommand, args, opts);
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -242,6 +294,7 @@ export class NativeBinary {
   /** Route grants this binary requests when no explicit route is threaded. */
   #defaultRoutes() {
     if (this.name === "atlas") return ["atlas:methods"];
+    if (this.name === "vector") return [ATLAS_VECTOR_NATIVE_ROUTE];
     // Worker-routed git methods are the read-only set; mutating calls thread
     // `git:mutate` explicitly from the invoke boundary.
     if (this.name === "git") return ["git:read"];
@@ -553,11 +606,14 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, worker?: boolean, maxBuffer?: number, requiredRoute?: string }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, worker?: boolean, workerArgs?: string[], workerFallback?: boolean, idempotent?: boolean, maxBuffer?: number, requiredRoute?: string }} [opts]
    * @returns {Promise<RunResult>}
    */
   run(subcommand, args = [], opts = {}) {
     if (this.workerCapable && opts.worker === true) {
+      if (Array.isArray(opts.workerArgs)) {
+        return this.#runViaConfiguredWorker(subcommand, args, /** @type {any} */ (opts));
+      }
       return this.#runViaWorker(subcommand, args, opts);
     }
     return this.#runPerCall(subcommand, args, opts);
@@ -692,9 +748,52 @@ export class NativeBinary {
     return res.ok ? res.stdout.trim() : null;
   }
 
+  /**
+   * Mint least-privilege pulse envelopes for a child thread. Only signed,
+   * expiring route grants cross the workerData boundary; the raw launch key
+   * remains parent-owned.
+   *
+   * @param {string[]} [routes]
+   * @returns {Promise<Record<string, Record<string, unknown>>>}
+   */
+  async workerPulseCapability(routes = []) {
+    if (!this.keyGated) return {};
+    const selected = Array.isArray(routes) && routes.length > 0 ? routes : this.#defaultRoutes();
+    const pulses = {};
+    for (const routeValue of [...new Set(selected)]) {
+      const route = String(routeValue || "").trim();
+      if (!route) continue;
+      let pulse = null;
+      try {
+        pulse = await this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route));
+      } catch {
+        pulse = null;
+      }
+      if (isValidPulseEnvelope(pulse) && String(/** @type {any} */ (pulse).route || "") === route) {
+        pulses[route] = { .../** @type {Record<string, unknown>} */ (pulse) };
+      }
+    }
+    return pulses;
+  }
+
+  /** Install parent-minted route grants into a child thread runtime. */
+  installWorkerPulseCapability(pulses) {
+    this._runtimePulseEnvelopes.clear();
+    if (!pulses || typeof pulses !== "object" || Array.isArray(pulses)) return [];
+    const installed = [];
+    for (const [route, pulse] of Object.entries(pulses)) {
+      if (!route || !isValidPulseEnvelope(pulse)) continue;
+      if (String(/** @type {any} */ (pulse).route || "") !== route) continue;
+      this._runtimePulseEnvelopes.set(route, Object.freeze({ .../** @type {Record<string, unknown>} */ (pulse) }));
+      installed.push(route);
+    }
+    return installed;
+  }
+
   /** Stop this handle's daemon and all scheduled pulse refreshes. */
   async dispose() {
     this.#clearWorkerAuthState();
+    this._runtimePulseEnvelopes.clear();
     const daemon = this._daemon;
     this._daemon = null;
     if (daemon) await daemon.dispose();
@@ -892,13 +991,15 @@ export class NativeBinary {
    */
   async #attachPulseAsync(parsed, requiredRoute) {
     const route = this.#requiredRouteFor(requiredRoute);
-    let pulse = null;
-    try {
-      pulse = await this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route));
-    } catch {
-      // Mint failures fail closed below; error details (which never include
-      // token material) are not propagated into the child request.
-      pulse = null;
+    let pulse = this.#runtimePulseFor(route);
+    if (!pulse) {
+      try {
+        pulse = await this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route));
+      } catch {
+        // Mint failures fail closed below; error details (which never include
+        // token material) are not propagated into the child request.
+        pulse = null;
+      }
     }
     if (!isValidPulseEnvelope(pulse)) {
       return {
@@ -929,11 +1030,13 @@ export class NativeBinary {
     const parsed = this.#parseNativeProtocolInput(input);
     if (!parsed.protocol) return { input: parsed.input, request: parsed.request, route: null };
     const route = this.#requiredRouteFor(requiredRoute);
-    let pulse = null;
-    try {
-      pulse = this.#pulseManager().getCachedPulseEnvelope(this.#versionedPulseOptions(route));
-    } catch {
-      pulse = null;
+    let pulse = this.#runtimePulseFor(route);
+    if (!pulse) {
+      try {
+        pulse = this.#pulseManager().getCachedPulseEnvelope(this.#versionedPulseOptions(route));
+      } catch {
+        pulse = null;
+      }
     }
     if (!isValidPulseEnvelope(pulse)) {
       this.#warmPulse(route);
@@ -958,6 +1061,13 @@ export class NativeBinary {
         this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route)),
       ).catch(() => {});
     } catch { /* fail-closed guard already covers the caller */ }
+  }
+
+  #runtimePulseFor(route) {
+    const pulse = this._runtimePulseEnvelopes.get(route) || null;
+    if (isValidPulseEnvelope(pulse) && String(pulse?.route || "") === route) return pulse;
+    if (pulse) this._runtimePulseEnvelopes.delete(route);
+    return null;
   }
 
   // -------------------------------------------------------------------------
@@ -1128,6 +1238,7 @@ export class NativeBinary {
 
   #retireWorkerAfterAuthFailure() {
     this.#clearWorkerAuthState();
+    this._runtimePulseEnvelopes.clear();
     try {
       if (this._daemon?.isHostAlive?.()) this._daemon.retire({ graceMs: 0 });
     } catch { /* best effort */ }

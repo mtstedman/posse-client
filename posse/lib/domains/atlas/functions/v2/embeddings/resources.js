@@ -12,7 +12,7 @@ import { AtlasEmbeddingEncoder } from "../../../classes/v2/AtlasEmbeddingEncoder
 import { RustEmbeddingIndex, embeddingModelDirName } from "../../../classes/v2/RustEmbeddingIndex.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { errorForTelemetry, recordEmbeddingForensics } from "./forensics.js";
-import { inspectJinaModel } from "./jina-model.js";
+import { ensureJinaMlModelRoot, inspectJinaModel } from "./jina-model.js";
 
 /** @typedef {import("../contracts/embeddings.js").EmbeddingEncoder} EmbeddingEncoder */
 /** @typedef {import("../contracts/embeddings.js").EmbeddingIndex} EmbeddingIndexContract */
@@ -196,6 +196,17 @@ export function retirePooledEmbeddingResources() {
 export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOnly = false }) {
   const provider = DEFAULT_ATLAS_EMBEDDING_PROVIDER;
   const vectorBackend = "posse-vector";
+  const nativeManager = config.nativeManager ?? config.nativeVectorManager ?? nativeBinaries;
+  const modelCacheDir = config.atlasJinaModelCacheDir
+    ? path.resolve(String(config.atlasJinaModelCacheDir))
+    : null;
+  const modelVersion = String(config.atlasEmbeddingModelVersion || "").trim() || null;
+  const batchSize = Number.isInteger(config.atlasEmbeddingBatchSize)
+    ? Math.max(1, Math.min(Number(config.atlasEmbeddingBatchSize), 512))
+    : null;
+  const intraOpThreads = Number.isInteger(config.atlasEmbeddingThreads)
+    ? Math.max(1, Math.min(Number(config.atlasEmbeddingThreads), 32))
+    : null;
   recordEmbeddingForensics("resources.open.start", {
     repo_root: repoRoot || null,
     provider,
@@ -205,7 +216,7 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOn
   if (!repoRoot) {
     return disabled(provider, "missing_repo_root", vectorBackend, { repoRoot });
   }
-  const jina = inspectJinaModel(repoRoot);
+  const jina = inspectJinaModel(repoRoot, { modelCacheDir: modelCacheDir || undefined });
   if (!jina.ready) {
     return disabled(provider, "jina_model_cache_missing", vectorBackend, {
       repoRoot,
@@ -216,17 +227,26 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOn
   // Mode is part of the pool identity: a read-only child (no quarantine, no
   // saves) must never be handed to a caller that intends to write.
   const poolKey = embeddingChildPoolEnabled(config, env)
-    ? `${embeddingsRoot(repoRoot)}|${provider}|${vectorBackend}|${readOnly ? "ro" : "rw"}`
+    ? `${embeddingsRoot(repoRoot)}|${provider}|${vectorBackend}|${jina.modelCacheDir}|${modelVersion || "default"}|batch=${batchSize || "default"}|threads=${intraOpThreads || "default"}|${readOnly ? "ro" : "rw"}`
     : null;
   const build = () => {
-    if (!nativeBinaries.shouldUse("atlas")) throw new Error("posse-atlas unavailable");
-    if (!nativeBinaries.shouldUse("vector")) throw new Error("posse-vector unavailable");
-    const encoder = new AtlasEmbeddingEncoder({ repoRoot });
+    if (!nativeManager.shouldUse("ml")) throw new Error("posse-ml unavailable");
+    if (!nativeManager.shouldUse("vector")) throw new Error("posse-atlas-vector unavailable");
+    const modelRoot = ensureJinaMlModelRoot(jina.modelCacheDir);
+    const encoder = new AtlasEmbeddingEncoder({
+      repoRoot,
+      modelCacheDir: jina.modelCacheDir,
+      modelRoot,
+      modelVersion,
+      batchSize,
+      intraOpThreads,
+      manager: nativeManager,
+    });
     const result = openIndexForBackend({
       encoder,
       repoRoot,
       readOnly,
-      nativeVectorManager: config.nativeVectorManager,
+      nativeVectorManager: nativeManager,
     });
     recordEmbeddingForensics("resources.open.enabled", {
       repo_root: repoRoot,
@@ -334,7 +354,7 @@ function disabled(provider, reason, backend = null, details = {}) {
 function openIndexForBackend({ encoder, repoRoot, readOnly = false, nativeVectorManager = nativeBinaries }) {
   const root = embeddingsRoot(repoRoot);
   if (!nativeVectorManager.shouldUse("vector")) {
-    throw new Error("posse-vector unavailable");
+    throw new Error("posse-atlas-vector unavailable");
   }
   const index = RustEmbeddingIndex.open({
     model: encoder.model,

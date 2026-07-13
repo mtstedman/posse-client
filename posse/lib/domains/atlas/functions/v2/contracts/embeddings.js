@@ -13,7 +13,7 @@
 //   * The view layer doesn't store embeddings — it stores references into
 //     the embedding store. View rebuild does not re-embed.
 //
-// Runtime ownership is fixed: posse-atlas encodes and posse-vector stores and
+// Runtime ownership is fixed: posse-ml encodes and posse-atlas-vector stores and
 // searches the ANN. Node implements only this transport-neutral data contract.
 
 /**
@@ -64,6 +64,8 @@
  * @property {string} model
  * @property {string} model_version
  * @property {number} dim
+ * @property {number | null} [batchSize]
+ * @property {number | null} [intraOpThreads]
  *
  * @property {string} [backend]
  * @property {boolean} [asyncIndex]
@@ -143,6 +145,12 @@
  *
  * @property {(texts: string[], signal?: AbortSignal) => Promise<Float32Array[]>} encode
  *   Batch encode. Returns one Float32Array per input.
+ *
+ * @property {(texts: string[], signal?: AbortSignal) => Promise<Float32Array[]>} [encodeDocuments]
+ *   Optional document-specific batch encoding.
+ *
+ * @property {(text: string, signal?: AbortSignal) => Promise<Float32Array>} [encodeQuery]
+ *   Optional query-specific encoding. Semantic search prefers this when present.
  *
  * @property {(symbols: EmbeddingSymbolInput[], signal?: AbortSignal) => Promise<Float32Array[]>} [encodeSymbols]
  *   Optional structured-symbol batch encode. Remote ATLAS encoders use this to

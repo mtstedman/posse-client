@@ -7,45 +7,50 @@ function post(message) {
   try { parentPort?.postMessage(message); } catch { /* worker is closing */ }
 }
 
-function runCommit() {
+function errorPayload(err) {
+  return {
+    name: err?.name || "Error",
+    message: err?.message || String(err || "git commit worker failed"),
+    stack: err?.stack || null,
+    code: err?.code || null,
+    errno: err?.errno ?? null,
+    syscall: err?.syscall || null,
+    path: err?.path || null,
+    spawnargs: Array.isArray(err?.spawnargs) ? err.spawnargs : null,
+    status: err?.status ?? null,
+    signal: err?.signal || null,
+    killed: Boolean(err?.killed),
+    gitCommitTimedOut: Boolean(err?.gitCommitTimedOut),
+    gitCommitTimeoutBudget: err?.gitCommitTimeoutBudget || null,
+    stderr: err?.stderr ? String(err.stderr) : null,
+    stdout: err?.stdout ? String(err.stdout) : null,
+    hookOutput: err?.hookOutput || null,
+    createdOutOfScope: Array.isArray(err?.createdOutOfScope) ? err.createdOutOfScope : null,
+    gitAddWarnings: Array.isArray(err?.gitAddWarnings) ? err.gitAddWarnings : null,
+    nativeFailure: err?.nativeFailure || null,
+    rollbackStatus: err?.rollbackStatus || null,
+    rollbackSucceeded: err?.rollbackSucceeded ?? null,
+    nativeDiagnostics: Array.isArray(err?.nativeDiagnostics) ? err.nativeDiagnostics : null,
+    headBefore: err?.headBefore || null,
+    headAfter: err?.headAfter || null,
+  };
+}
+
+async function runCommit() {
   try {
     if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
       nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
     }
+    nativeBinaries.installWorkerRuntime(workerData?.nativeRuntime);
     const { message, cwd, scope, opts } = workerData || {};
     const result = gitCommitAll(message, cwd, scope, opts);
-    post({ ok: true, result });
+    post({ type: "result", result });
   } catch (err) {
-    post({
-      ok: false,
-      error: err?.message || String(err),
-      stack: err?.stack || null,
-      code: err?.code || null,
-      errno: err?.errno ?? null,
-      syscall: err?.syscall || null,
-      path: err?.path || null,
-      spawnargs: Array.isArray(err?.spawnargs) ? err.spawnargs : null,
-      status: err?.status ?? null,
-      signal: err?.signal || null,
-      killed: Boolean(err?.killed),
-      gitCommitTimedOut: Boolean(err?.gitCommitTimedOut),
-      gitCommitTimeoutBudget: err?.gitCommitTimeoutBudget || null,
-      stderr: err?.stderr ? String(err.stderr) : null,
-      stdout: err?.stdout ? String(err.stdout) : null,
-      hookOutput: err?.hookOutput || null,
-      createdOutOfScope: Array.isArray(err?.createdOutOfScope) ? err.createdOutOfScope : null,
-      gitAddWarnings: Array.isArray(err?.gitAddWarnings) ? err.gitAddWarnings : null,
-      nativeFailure: err?.nativeFailure || null,
-      rollbackStatus: err?.rollbackStatus || null,
-      rollbackSucceeded: err?.rollbackSucceeded ?? null,
-      nativeDiagnostics: Array.isArray(err?.nativeDiagnostics) ? err.nativeDiagnostics : null,
-      headBefore: err?.headBefore || null,
-      headAfter: err?.headAfter || null,
-    });
+    post({ type: "error", error: errorPayload(err) });
   }
 }
 
 // This module is a worker-thread entrypoint, not a library: importing it runs
 // the commit. The guard keeps an accidental main-thread import (e.g. via a
 // barrel re-export) from executing a junk in-thread commit attempt.
-if (!isMainThread) runCommit();
+if (!isMainThread) void runCommit();

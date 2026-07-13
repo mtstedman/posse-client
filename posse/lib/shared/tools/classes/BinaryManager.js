@@ -9,12 +9,15 @@
 //   if (nativeBinaries.shouldUse("atlas")) { ...call binary... }
 //
 // `shouldUse` = enabled AND available (build is staged for this os/arch).
-// Git, ATLAS, and vector are fully cut over: enabled is hardwired true, so
+// Git, ATLAS, ML, and vector are fully cut over: enabled is hardwired true, so
 // shouldUse reduces to availability and there is no JS fallback path. The migration
 // recipe for remaining tools: mirror in Rust, A/B against the Node oracle,
 // switch the call site to the binary, then delete the replaced Node function.
 
+import path from "node:path";
 import {
+  ATLAS_VECTOR_NATIVE_PROTOCOL,
+  ATLAS_VECTOR_NATIVE_ROUTE,
   BINARY_NAMES,
   REQUIRED_ATLAS_BINARY_NAMES,
   VALID_BINARY_NAMES,
@@ -190,10 +193,10 @@ export class BinaryManager {
    * that should do so. Concurrent callers share one synchronization per binary.
    *
    * @param {string} name
-   * @param {{ refresh?: boolean }} [opts]
+   * @param {{ refresh?: boolean, dryRun?: boolean }} [opts]
    * @returns {Promise<Record<string, unknown>>}
    */
-  async ensureAvailable(name, { refresh = false } = {}) {
+  async ensureAvailable(name, { refresh = false, dryRun = false } = {}) {
     if (!VALID_BINARY_NAMES.has(name)) {
       return { available: false, name, reason: "unknown_binary" };
     }
@@ -201,12 +204,22 @@ export class BinaryManager {
     if (this._opts.binRoot && this._artifactInstaller === ensureNativeBinaryArtifact) {
       return { available: false, name, reason: "explicit_bin_root_missing" };
     }
-    const inFlight = this._artifactEnsures.get(name);
+    // Boot refreshes exact issued versions while Git/daemon readiness checks
+    // consume those artifacts. Let a cached consumer join the per-binary
+    // refresh already in flight instead of racing it with a second install or
+    // observing the old process-local handle. This also removes the boot-wide
+    // artifact barrier: each daemon can start as soon as its own refresh lands.
+    if (!refresh) {
+      const refreshing = this._artifactEnsures.get(`${name}:refresh:${dryRun ? "plan" : "install"}`);
+      if (refreshing) return refreshing;
+    }
+    const ensureKey = `${name}:${refresh ? "refresh" : "cached"}:${dryRun ? "plan" : "install"}`;
+    const inFlight = this._artifactEnsures.get(ensureKey);
     if (inFlight) return inFlight;
-    const promise = this._ensureRemoteArtifact(name, { refresh }).finally(() => {
-      if (this._artifactEnsures.get(name) === promise) this._artifactEnsures.delete(name);
+    const promise = this._ensureRemoteArtifact(name, { refresh, dryRun }).finally(() => {
+      if (this._artifactEnsures.get(ensureKey) === promise) this._artifactEnsures.delete(ensureKey);
     });
-    this._artifactEnsures.set(name, promise);
+    this._artifactEnsures.set(ensureKey, promise);
     return promise;
   }
 
@@ -222,12 +235,18 @@ export class BinaryManager {
     const available = await this.ensureAvailable(name);
     if (!available?.available) return available;
     try {
-      const protocol = name === "atlas" ? "posse.atlas.native.v1" : `posse.${name}.native.v1`;
+      const protocol = name === "atlas"
+        ? "posse.atlas.native.v1"
+        : name === "vector"
+          ? ATLAS_VECTOR_NATIVE_PROTOCOL
+          : `posse.${name}.native.v1`;
       const requiredRoute = name === "atlas"
         ? "atlas:methods"
         : name === "git"
           ? "git:read"
-          : `${name}:methods`;
+          : name === "vector"
+            ? ATLAS_VECTOR_NATIVE_ROUTE
+            : `${name}:methods`;
       // Git classifies every unknown application method as mutating. Probe it
       // with a real deterministic read method so readiness stays on git:read;
       // an application-level daemon.ping would correctly fail closed.
@@ -264,6 +283,95 @@ export class BinaryManager {
     }
   }
 
+  /**
+   * Ensure selected binaries are activated in this process, then export the
+   * exact validated roots a worker thread must use. Worker module graphs have
+   * their own BinaryManager singleton, so a main-thread cache activation is
+   * otherwise invisible to them.
+   *
+   * @param {readonly string[]} [names]
+   * @param {{ routesByBinary?: Record<string, string[]> }} [options]
+   * @returns {Promise<{ version: 1, binaries: Record<string, { bundleRoot: string, binaryPath: string, exactVersion: string | null, os: string, arch: string, pulses?: Record<string, Record<string, unknown>> }> }>}
+   */
+  async prepareWorkerRuntime(names = BINARY_NAMES, { routesByBinary = {} } = {}) {
+    const selected = [...new Set(names.filter((name) => VALID_BINARY_NAMES.has(name)))];
+    const results = await Promise.all(selected.map((name) => this.ensureAvailable(name, { refresh: false })));
+    const unavailable = results.filter((result) => result?.available !== true);
+    if (unavailable.length > 0) {
+      const error = new Error(
+        `Native worker runtime unavailable: ${unavailable.map((result) => `${result?.name || "unknown"} (${result?.reason || "unavailable"})`).join(", ")}`,
+      );
+      /** @type {any} */ (error).code = "NATIVE_WORKER_RUNTIME_UNAVAILABLE";
+      /** @type {any} */ (error).results = results;
+      throw error;
+    }
+    const capability = this.workerRuntimeCapability(selected);
+    for (const name of selected) {
+      const entry = capability.binaries[name];
+      if (!entry) continue;
+      const routes = Array.isArray(routesByBinary?.[name]) ? routesByBinary[name] : [];
+      entry.pulses = await this.binary(name).workerPulseCapability(routes);
+    }
+    return capability;
+  }
+
+  /**
+   * Export already-validated handles for structured-clone workerData.
+   *
+   * @param {readonly string[]} [names]
+   */
+  workerRuntimeCapability(names = BINARY_NAMES) {
+    const binaries = {};
+    for (const name of [...new Set(names)]) {
+      if (!VALID_BINARY_NAMES.has(name)) continue;
+      const handle = this.binary(name);
+      const binaryPath = handle.resolvePath();
+      if (!binaryPath || !handle.isAvailable()) continue;
+      binaries[name] = {
+        bundleRoot: handle.binRoot,
+        binaryPath,
+        exactVersion: handle.exactVersion || null,
+        os: handle.os,
+        arch: handle.arch,
+      };
+    }
+    return { version: 1, binaries };
+  }
+
+  /**
+   * Hydrate this thread-local manager from a capability issued by its parent.
+   * Every entry is re-resolved and version-checked locally before activation;
+   * the supplied binaryPath must exactly match the catalog-derived path.
+   * Call this before the worker performs any native operation.
+   *
+   * @param {unknown} capability
+   * @returns {string[]} activated binary names
+   */
+  installWorkerRuntime(capability) {
+    if (!capability || typeof capability !== "object" || /** @type {any} */ (capability).version !== 1) return [];
+    const entries = /** @type {any} */ (capability).binaries;
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) return [];
+    const installed = [];
+    for (const [name, entry] of Object.entries(entries)) {
+      if (!VALID_BINARY_NAMES.has(name) || !entry || typeof entry !== "object") continue;
+      const bundleRoot = String(/** @type {any} */ (entry).bundleRoot || "").trim();
+      const declaredPath = String(/** @type {any} */ (entry).binaryPath || "").trim();
+      const exactVersionRaw = /** @type {any} */ (entry).exactVersion;
+      const exactVersion = exactVersionRaw == null ? null : String(exactVersionRaw).trim();
+      if (!path.isAbsolute(bundleRoot) || !path.isAbsolute(declaredPath)) continue;
+      if (exactVersion && !/^[a-zA-Z0-9._-]{1,64}$/.test(exactVersion)) continue;
+      const candidate = this._createHandle(name, bundleRoot, exactVersion);
+      if (String(/** @type {any} */ (entry).os || "") !== candidate.os) continue;
+      if (String(/** @type {any} */ (entry).arch || "") !== candidate.arch) continue;
+      const resolved = candidate.resolvePath();
+      if (!resolved || !sameRuntimePath(resolved, declaredPath) || !candidate.isAvailable()) continue;
+      candidate.installWorkerPulseCapability(/** @type {any} */ (entry).pulses);
+      this._handles.set(name, candidate);
+      installed.push(name);
+    }
+    return installed;
+  }
+
   async ensureRequiredAtlasBinariesActive() {
     const results = await Promise.all(REQUIRED_ATLAS_BINARY_NAMES.map((name) => this.ensureActive(name)));
     const unavailable = results.filter((result) => result?.available !== true || result?.active !== true);
@@ -278,7 +386,7 @@ export class BinaryManager {
     return results;
   }
 
-  async _ensureRemoteArtifact(name, { refresh = false } = {}) {
+  async _ensureRemoteArtifact(name, { refresh = false, dryRun = false } = {}) {
     const handle = this.binary(name);
     let version = nativeBinaryExactVersion(name);
     try {
@@ -335,6 +443,28 @@ export class BinaryManager {
             downloaded: false,
           };
         }
+        const cachedCurrent = version
+          ? await this._activateCachedVersion(name, handle, version)
+          : null;
+        if (cachedCurrent) return cachedCurrent;
+      }
+      if (dryRun) {
+        return version
+          ? {
+            available: false,
+            name,
+            version,
+            reason: "artifact_download_required",
+            planned: true,
+            downloaded: false,
+          }
+          : {
+            available: false,
+            name,
+            reason: "version_not_issued",
+            planned: false,
+            downloaded: false,
+          };
       }
       const installed = await this._artifactInstaller({
         name,
@@ -409,9 +539,32 @@ export class BinaryManager {
     };
   }
 
+  async _activateCachedVersion(name, handle, version) {
+    const cached = await findVerifiedNativeBinaryArtifact({
+      ...(this._artifactCacheRoot ? { cacheRoot: this._artifactCacheRoot } : {}),
+      name,
+      version,
+      os: handle.os,
+      arch: handle.arch,
+    });
+    if (!cached) return null;
+    const cachedHandle = this._createHandle(name, cached.bundleRoot, cached.version);
+    if (!cachedHandle.isAvailable()) return null;
+    await this._replaceHandle(name, cachedHandle);
+    return {
+      available: true,
+      name,
+      version: cached.version,
+      path: cachedHandle.resolvePath(),
+      source: cached.source,
+      downloaded: false,
+      sha256: cached.sha256,
+    };
+  }
+
   /**
-   * Whether native invocation is enabled for a tool. Git, ATLAS, and vector are
-   * hard-migrated: the native binary is the only implementation path, so
+   * Whether native invocation is enabled for a tool. Git, ATLAS, ML, and vector
+   * are hard-migrated: the native binary is the only implementation path, so
    * neither settings nor env overrides can turn them off. Remaining tools
    * still honor the persisted tunable and legacy env overrides.
    *
@@ -420,7 +573,7 @@ export class BinaryManager {
    */
   enabled(name) {
     if (!VALID_BINARY_NAMES.has(name)) return false;
-    if (name === "git" || name === "atlas" || name === "vector") return true;
+    if (name === "git" || name === "atlas" || name === "ml" || name === "vector") return true;
     const master = envFlag(this._env.POSSE_NATIVE_BINARIES);
     if (master != null) return master;
     const perTool = envFlag(this._env[`POSSE_NATIVE_${name.toUpperCase()}`]);
@@ -494,3 +647,11 @@ export class BinaryManager {
  * fresh BinaryManager with overrides only in tests.
  */
 export const nativeBinaries = new BinaryManager();
+
+function sameRuntimePath(left, right) {
+  const normalize = (value) => {
+    const resolved = path.resolve(String(value || ""));
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(left) === normalize(right);
+}

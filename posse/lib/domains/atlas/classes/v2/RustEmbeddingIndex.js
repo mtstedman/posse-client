@@ -2,6 +2,10 @@
 
 import path from "node:path";
 
+import {
+  ATLAS_VECTOR_NATIVE_PROTOCOL,
+  ATLAS_VECTOR_NATIVE_ROUTE,
+} from "../../../../catalog/binary.js";
 import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
 
 /** @typedef {import("../../functions/v2/contracts/embeddings.js").EmbeddingIngest} EmbeddingIngest */
@@ -9,8 +13,8 @@ import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.j
 /** @typedef {import("../../functions/v2/contracts/embeddings.js").EmbeddingSearchOptions} EmbeddingSearchOptions */
 /** @typedef {import("../../functions/v2/contracts/embeddings.js").EmbeddingIndex} EmbeddingIndexContract */
 
-export const VECTOR_NATIVE_PROTOCOL = "posse.vector.native.v1";
-export const VECTOR_NATIVE_ROUTE = "vector:methods";
+export const VECTOR_NATIVE_PROTOCOL = ATLAS_VECTOR_NATIVE_PROTOCOL;
+export const VECTOR_NATIVE_ROUTE = ATLAS_VECTOR_NATIVE_ROUTE;
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 
 function encodeModelDirComponent(value) {

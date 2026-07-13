@@ -541,7 +541,13 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     const active = running.length > 0
       ? running.reduce((latest, entry) => (entry[1].startedAt >= latest[1].startedAt ? entry : latest))
       : null;
-    if (active) return active[1].detail || active[0];
+    if (active) {
+      const elapsed = Number.isFinite(active[1].startedAt)
+        ? formatElapsed(Math.max(0, Date.now() - active[1].startedAt))
+        : "";
+      const activity = active[1].detail || active[0];
+      return `${activity}${elapsed ? ` ${col("dim")}· ${elapsed}${col("reset")}` : ""}`;
+    }
     const done = entries.filter(([, s]) => isStepResolved(s)).length;
     if (done > 0 && done < entries.length) {
       return `${col("dim")}${done}/${entries.length} done${col("reset")}`;

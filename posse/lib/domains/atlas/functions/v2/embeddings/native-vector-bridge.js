@@ -1,7 +1,7 @@
 // @ts-check
 
 // Native semantic bridge: posse-atlas owns Jina query encoding and
-// posse-vector owns ANN. Node only transports nearest hits into execute-tool.
+// posse-atlas-vector owns ANN. Node only transports nearest hits into execute-tool.
 
 import { openEmbeddingResources } from "./resources.js";
 

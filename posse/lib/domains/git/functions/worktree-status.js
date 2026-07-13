@@ -6,7 +6,6 @@
 // out at merge time.
 
 import fs from "fs";
-import { Worker as NodeWorker } from "worker_threads";
 
 import { gitCommitAll } from "./commit-scope.js";
 import { gitExec } from "./utils.js";
@@ -14,41 +13,42 @@ import { acquireWorktreeLock, gitStashLockPath } from "./worktree-locks.js";
 import { worktreePath as canonicalWorktreePath, findLegacyWorktreeForWi } from "./worktree.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { runHook } from "./hooks.js";
-import { sanitizeWorkerExecArgv } from "../../runtime/functions/worker-exec-argv.js";
-import { errorFromThreadPayload } from "../../../shared/concurrency/classes/ThreadManager.js";
+import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
+import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 
 const PORCELAIN_TIMEOUT_MS = 5000;
 const MUTATING_TIMEOUT_MS = 15000;
 const STASH_PUSH_TIMEOUT_MS = 120000;
+const WORKTREE_STATUS_WORKER_TIMEOUT_MS = 5 * 60 * 1000;
+const WORKTREE_COMMIT_WORKER_TIMEOUT_MS = 20 * 60 * 1000;
+const WORKTREE_STATUS_THREAD_MANAGER = new ThreadManager();
+const MUTATING_WORKTREE_STATUS_TASKS = new Set([
+  "commitInScopeChanges",
+  "discardWorktreeFiles",
+  "stashTargetBranchChanges",
+]);
 
-function runWorktreeStatusTaskOffMainThread(task, args = {}) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const worker = new NodeWorker(new URL("./git-workflow-worker.js", import.meta.url), {
-      execArgv: sanitizeWorkerExecArgv(),
-      workerData: {
-        task,
-        args,
-        projectDir: args.projectDir || args.wtDir || process.cwd(),
-        targetBranch: args.targetBranch || "main",
-      },
-    });
-    const settle = (fn, value) => {
-      if (settled) return;
-      settled = true;
-      fn(value);
-    };
-    // git-workflow-worker.js posts ThreadManager-style { type, result|error|event }
-    // messages; "progress" frames are observational and must not settle the task.
-    worker.on("message", (message = {}) => {
-      if (message.type === "progress") return;
-      if (message.type === "result") settle(resolve, message.result);
-      else settle(reject, errorFromThreadPayload(message.error || {}, "worktree status task failed"));
-    });
-    worker.on("error", (err) => settle(reject, err));
-    worker.on("exit", (code) => {
-      if (code !== 0) settle(reject, new Error(`worktree status worker exited with code ${code}`));
-    });
+async function runWorktreeStatusTaskOffMainThread(task, args = {}) {
+  const routes = MUTATING_WORKTREE_STATUS_TASKS.has(task)
+    ? ["git:read", "git:mutate"]
+    : ["git:read"];
+  const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
+    routesByBinary: { git: routes },
+  });
+  return WORKTREE_STATUS_THREAD_MANAGER.run(new URL("./git-workflow-worker.js", import.meta.url), {
+    label: `worktree status ${task}`,
+    timeoutMs: task === "commitInScopeChanges"
+      ? WORKTREE_COMMIT_WORKER_TIMEOUT_MS
+      : WORKTREE_STATUS_WORKER_TIMEOUT_MS,
+    workerData: {
+      task,
+      args,
+      projectDir: args.projectDir || args.wtDir || process.cwd(),
+      targetBranch: args.targetBranch || "main",
+      nativeAuth: heartbeatAuthManager.getCapability(),
+      nativeRuntime,
+    },
   });
 }
 

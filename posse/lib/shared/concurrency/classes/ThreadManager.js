@@ -25,7 +25,12 @@ export function errorFromThreadPayload(payload = {}, fallbackMessage = "Worker t
   const err = new Error(String(payload?.message || fallbackMessage));
   err.name = String(payload?.name || "Error");
   if (payload?.stack) err.stack = String(payload.stack);
-  for (const key of ["code", "errno", "syscall", "path", "spawnargs", "status", "signal", "killed", "timeoutMs"]) {
+  for (const key of [
+    "code", "errno", "syscall", "path", "spawnargs", "status", "signal", "killed", "timeoutMs",
+    "stderr", "stdout", "hookOutput", "gitCommitTimedOut", "gitCommitTimeoutBudget",
+    "createdOutOfScope", "gitAddWarnings", "nativeFailure", "rollbackStatus", "rollbackSucceeded",
+    "nativeDiagnostics", "headBefore", "headAfter",
+  ]) {
     if (payload?.[key] != null) {
       try { /** @type {any} */ (err)[key] = payload[key]; } catch { /* best effort */ }
     }

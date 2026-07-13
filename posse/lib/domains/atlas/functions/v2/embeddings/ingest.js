@@ -81,7 +81,9 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
       `ingestView: encoder dim ${encoder.dim} != index dim ${index.dim}`,
     );
   }
-  const size = resolveEmbeddingIngestBatchSize({ batchSize });
+  const size = resolveEmbeddingIngestBatchSize({
+    batchSize: batchSize ?? /** @type {any} */ (encoder).batchSize,
+  });
   const symbolsLimit = Number.isInteger(limit) && /** @type {number} */ (limit) > 0
     ? /** @type {number} */ (limit)
     : 100_000;

@@ -13,7 +13,10 @@ import { isDeepStrictEqual } from "node:util";
 
 import { sha256Hex } from "../hash.js";
 import { isCanonicalRepoPath } from "../paths.js";
-import { runAtlasNativeMethodAsync } from "./invoke.js";
+import {
+  __atlasNativeManagerForTests,
+  runAtlasNativeMethodAsync,
+} from "./invoke.js";
 
 /** @typedef {import("../contracts/schemas.js").ParseResult} ParseResult */
 
@@ -33,7 +36,10 @@ export function __setParseBufferNativeOptionsForTests(opts) {
 }
 
 export function __parseBufferNativeManagerForTests() {
-  return parserNativeOptionsForTests?.manager || null;
+  // Match parseBufferNative's effective option precedence: a parser-specific
+  // manager wins, then the process-wide Atlas test manager. Capability checks
+  // must resolve the same binary that the eventual native parse call will use.
+  return parserNativeOptionsForTests?.manager || __atlasNativeManagerForTests();
 }
 
 /**

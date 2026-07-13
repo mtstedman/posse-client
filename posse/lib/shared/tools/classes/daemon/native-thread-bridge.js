@@ -81,10 +81,12 @@ export function installNativeThreadBridge(port) {
   if (!port || typeof /** @type {any} */ (port).postMessage !== "function") return false;
   if (workerBridgePort && workerBridgePort !== port) {
     rejectPendingBridgeRequests(new Error("native bridge port replaced"));
+    try { workerBridgePort.close?.(); } catch { /* stale port */ }
   }
   const installedPort = /** @type {import("node:worker_threads").MessagePort} */ (port);
   workerBridgePort = installedPort;
   installedPort.on("message", (message) => {
+    if (workerBridgePort !== installedPort) return;
     const id = Number(/** @type {any} */ (message)?.id);
     const pending = pendingBridgeRequests.get(id);
     if (!pending) return;
@@ -117,6 +119,7 @@ export function hasNativeThreadBridge() {
 }
 
 export function __resetNativeThreadBridgeForTest() {
+  try { workerBridgePort?.close?.(); } catch { /* best effort */ }
   workerBridgePort = null;
   nextBridgeRequestId = 1;
   atlasManagerFactoryForTests = null;
@@ -141,6 +144,9 @@ export function nativeThreadBridgeRequest(tool, method, payload, opts = {}, cont
   return new Promise((resolve, reject) => {
     const timeoutMs = Number(control.timeoutMs ?? opts.timeoutMs ?? DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS);
     const signal = control.signal || null;
+    const cancelParentRequest = () => {
+      try { workerBridgePort?.postMessage({ id, cancel: true }); } catch { /* parent already gone */ }
+    };
     const onAbort = signal
       ? () => {
         const pending = pendingBridgeRequests.get(id);
@@ -148,6 +154,7 @@ export function nativeThreadBridgeRequest(tool, method, payload, opts = {}, cont
         pendingBridgeRequests.delete(id);
         if (pending.timer) clearTimeout(pending.timer);
         if (onAbort) signal.removeEventListener?.("abort", onAbort);
+        cancelParentRequest();
         const err = signal.reason instanceof Error ? signal.reason : new Error("native bridge request aborted");
         reject(err);
       }
@@ -156,6 +163,7 @@ export function nativeThreadBridgeRequest(tool, method, payload, opts = {}, cont
       ? setTimeout(() => {
         pendingBridgeRequests.delete(id);
         if (signal && onAbort) signal.removeEventListener?.("abort", onAbort);
+        cancelParentRequest();
         reject(new Error(`native bridge request timed out after ${timeoutMs}ms`));
       }, timeoutMs)
       : null;
@@ -189,19 +197,38 @@ export function nativeThreadBridgeRequest(tool, method, payload, opts = {}, cont
 export function attachNativeThreadBridge(port, options = {}) {
   atlasBridgeUsers++;
   let released = false;
+  /** @type {Map<number, AbortController>} */
+  const activeRequests = new Map();
+  const abortActiveRequests = (reason) => {
+    for (const controller of activeRequests.values()) {
+      try { controller.abort(reason); } catch { /* best effort */ }
+    }
+    activeRequests.clear();
+  };
   const releaseSharedAtlasManager = async () => {
     if (released) return;
     released = true;
+    abortActiveRequests(new Error("native bridge closed"));
     atlasBridgeUsers = Math.max(0, atlasBridgeUsers - 1);
     await disposeOwnedSharedAtlasManager();
   };
 
   port.on("message", async (message) => {
     const id = Number(/** @type {any} */ (message)?.id);
+    if (/** @type {any} */ (message)?.cancel === true) {
+      const controller = activeRequests.get(id);
+      if (controller) {
+        activeRequests.delete(id);
+        try { controller.abort(new Error("native bridge request canceled")); } catch { /* best effort */ }
+      }
+      return;
+    }
     const tool = String(/** @type {any} */ (message)?.tool || "");
     const method = String(/** @type {any} */ (message)?.method || "");
     const payload = /** @type {any} */ (message)?.payload;
     const opts = /** @type {Record<string, unknown>} */ (/** @type {any} */ (message)?.opts || {});
+    const controller = new AbortController();
+    activeRequests.set(id, controller);
     try {
       let data;
       if (tool === "atlas") {
@@ -211,19 +238,30 @@ export function attachNativeThreadBridge(port, options = {}) {
           ...opts,
           manager,
           bypassNativeBridge: true,
+          signal: controller.signal,
         });
       } else if (tool === "git") {
         const { runGitNativeMethodAsync } = await import("../../../../domains/git/functions/native/invoke.js");
-        data = await runGitNativeMethodAsync(method, payload, { ...opts, bypassNativeBridge: true });
+        data = await runGitNativeMethodAsync(method, payload, { ...opts, bypassNativeBridge: true, signal: controller.signal });
       } else {
         throw new Error(`Unknown native bridge tool: ${tool || "(none)"}`);
       }
-      port.postMessage({ id, ok: true, data });
+      if (!controller.signal.aborted) {
+        try { port.postMessage({ id, ok: true, data }); } catch { /* worker gone */ }
+      }
     } catch (err) {
-      port.postMessage({ id, ok: false, error: { message: String(/** @type {any} */ (err)?.message || err) } });
+      if (!controller.signal.aborted) {
+        try { port.postMessage({ id, ok: false, error: { message: String(/** @type {any} */ (err)?.message || err) } }); } catch { /* worker gone */ }
+      }
+    } finally {
+      if (activeRequests.get(id) === controller) activeRequests.delete(id);
     }
   });
   port.on?.("close", () => {
+    try { void releaseSharedAtlasManager(); } catch { /* best effort */ }
+  });
+  port.on?.("error", (err) => {
+    abortActiveRequests(err instanceof Error ? err : new Error(String(err || "native bridge port error")));
     try { void releaseSharedAtlasManager(); } catch { /* best effort */ }
   });
   port.start?.();

@@ -604,6 +604,7 @@ export async function updatePosseClient({
       projectDir: resolvedProjectDir,
       posseRoot: resolvedPosseRoot,
       dryRun,
+      includeNativeBinaries: true,
       timeoutMs: UPDATE_DOCTOR_TIMEOUT_MS,
       scipMode: atlasConfig.enabled === false
         ? "off"

@@ -3,10 +3,22 @@
 
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 
 const GIT_WORKFLOW_WORKER_URL = new URL("./git-workflow-worker.js", import.meta.url);
 const GIT_WORKFLOW_THREAD_MANAGER = new ThreadManager();
 export const GIT_WORKFLOW_TASK_TIMEOUT_MS = 15 * 60 * 1000;
+const MUTATING_GIT_WORKFLOW_TASKS = new Set([
+  "gitMergeToTarget",
+  "cleanupWiBranch",
+  "snapshotAndRemoveWorktreeOnly",
+  "ensureCleanTargetBranch",
+  "guardStartupDirtyTree",
+  "executePush",
+  "commitInScopeChanges",
+  "discardWorktreeFiles",
+  "stashTargetBranchChanges",
+]);
 
 export function createGitWorkflowContext({
   projectDir,
@@ -15,6 +27,7 @@ export function createGitWorkflowContext({
   autoMerge = false,
   nonInteractive = false,
   askFn = async () => "",
+  nativeParity = {},
   isIterativeWorkItemActive = () => false,
   shouldAutoApproveIterativeWorkItem = () => false,
 } = {}) {
@@ -33,7 +46,7 @@ export function createGitWorkflowContext({
     return branch;
   }
 
-  function runGitWorkflowTaskOffMainThread(task, args = {}, {
+  async function runGitWorkflowTaskOffMainThread(task, args = {}, {
     onPhase = null,
     signal = null,
     timeoutMs = GIT_WORKFLOW_TASK_TIMEOUT_MS,
@@ -44,6 +57,12 @@ export function createGitWorkflowContext({
       : Number.isFinite(parsedTimeoutMs)
         ? parsedTimeoutMs
         : GIT_WORKFLOW_TASK_TIMEOUT_MS;
+    const routes = MUTATING_GIT_WORKFLOW_TASKS.has(task)
+      ? ["git:read", "git:mutate"]
+      : ["git:read"];
+    const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
+      routesByBinary: { git: routes },
+    });
     return GIT_WORKFLOW_THREAD_MANAGER.run(GIT_WORKFLOW_WORKER_URL, {
       label: `git workflow ${task}`,
       timeoutMs: effectiveTimeoutMs,
@@ -56,6 +75,7 @@ export function createGitWorkflowContext({
         autoMerge,
         nonInteractive,
         nativeAuth: heartbeatAuthManager.getCapability(),
+        nativeRuntime,
       },
       onProgress: (event = {}) => {
         if (typeof onPhase === "function") {
@@ -73,6 +93,7 @@ export function createGitWorkflowContext({
     autoMerge,
     nonInteractive,
     askFn,
+    nativeParity,
     isIterativeWorkItemActive,
     shouldAutoApproveIterativeWorkItem,
     currentTargetBranch,

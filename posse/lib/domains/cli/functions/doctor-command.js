@@ -152,6 +152,7 @@ export async function cmdDoctor({
     result = await runDoctor({
       projectDir,
       dryRun,
+      includeNativeBinaries: true,
       scipMode: atlasConfig.enabled === false
         ? "off"
         : (atlasConfig.scipMode ?? atlasConfig.atlas_scip_mode ?? null),

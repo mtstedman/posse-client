@@ -23,7 +23,6 @@ import {
   addCrossWiMergeDependency,
   ancestorJobIdsForJob,
   queuedCohortJobIdsForJob,
-  requeueForShutdown,
   findRunnableJob,
   findRunnableJobsBatch,
   getLeaseManager,
@@ -428,6 +427,9 @@ export class Scheduler {
     this._activeRunWorkers = null;
     this._runLoopKeepAliveTimer = null;
     this._runLoopKeepAliveIntervalMs = Math.max(1_000, Number(opts.runLoopKeepAliveIntervalMs) || RUN_LOOP_KEEPALIVE_INTERVAL_MS);
+    this._shutdownWorkerWaitMs = opts.shutdownWorkerWaitMs == null
+      ? 15_000
+      : Math.max(0, Number(opts.shutdownWorkerWaitMs) || 0);
     this._setRunLoopKeepAliveInterval = typeof opts.setRunLoopKeepAliveInterval === "function"
       ? opts.setRunLoopKeepAliveInterval
       : setInterval;
@@ -2130,10 +2132,19 @@ export class Scheduler {
 
       // Wait for any still-running workers to finish (with timeout)
       if (activeWorkers.size > 0) {
-        this._log(`Waiting for ${activeWorkers.size} worker(s) to finish (15s timeout)...`);
+        // Normal shutdown must stop mutation before a job becomes runnable
+        // again. Workers own the safe interruption path: abort, stash/reset
+        // partial work, then release their lease back to queued. Lock-loss
+        // handling already sent the same abort earlier.
+        if (!this._lockLost && onKillJob) {
+          for (const [jobId] of activeWorkers) {
+            this._invokeCallback("onKillJob", onKillJob, jobId, "shutdown");
+          }
+        }
+        this._log(`Waiting for ${activeWorkers.size} worker(s) to finish (${this._shutdownWorkerWaitMs}ms timeout)...`);
         const workersDone = Promise.all([...activeWorkers.values()].map((w) => w.promise));
         let shutdownTimer = null;
-        const timeout = new Promise((r) => { shutdownTimer = setTimeout(r, 15000); });
+        const timeout = new Promise((r) => { shutdownTimer = setTimeout(r, this._shutdownWorkerWaitMs); });
         try {
           await Promise.race([workersDone, timeout]);
         } finally {
@@ -2149,28 +2160,16 @@ export class Scheduler {
             message: `Lock loss shutdown left ${activeWorkers.size} worker(s) running; stale owner did not requeue. Jobs: ${abandonedIds.join(", ")}`,
           });
         } else if (activeWorkers.size > 0) {
-          // Signal workers to abort BEFORE requeueing. Otherwise a worker that
-          // is still mid-call when we flip its job back to `queued` may keep
-          // writing state (commit, completeAttempt) on a job another scheduler
-          // can now lease. Reuse the lock-loss kill path — onKillJob is the
-          // same callback the lock-loss and runtime-exceeded watchdogs use.
-          if (onKillJob) {
-            for (const [jobId] of activeWorkers) {
-              try { this._invokeCallback("onKillJob", onKillJob, jobId, "shutdown"); } catch { /* best-effort */ }
-            }
-          }
-          let requeued = 0;
           const abandonedIds = [];
           for (const [jobId] of activeWorkers) {
             abandonedIds.push(jobId);
-            if (requeueForShutdown(jobId)) requeued++;
           }
-          this._log(`${activeWorkers.size} worker(s) still running \u2014 requeued ${requeued} (attempts not counted). Jobs: ${abandonedIds.join(", ")}`);
+          this._log(`${activeWorkers.size} worker(s) still running after shutdown abort — left leased for expiry/recovery. Jobs: ${abandonedIds.join(", ")}`);
           logEvent({
             event_type: EVENT_TYPES.SCHEDULER_WORKERS_ABANDONED,
             actor_type: EVENT_ACTORS.SCHEDULER,
             actor_id: this.ownerId,
-            message: `Shutdown timeout: ${activeWorkers.size} worker(s) abandoned and requeued. Jobs: ${abandonedIds.join(", ")}`,
+            message: `Shutdown timeout: ${activeWorkers.size} worker(s) still active after abort; left leased for expiry/recovery to prevent duplicate execution. Jobs: ${abandonedIds.join(", ")}`,
           });
         }
       }

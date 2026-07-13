@@ -1,4 +1,3 @@
-import { ACTIVE_LEASE_STATUSES } from "../../../catalog/job.js";
 import { closeRuntimeStateForExit } from "../functions/run-session.js";
 
 export class RunShutdownController {
@@ -28,9 +27,6 @@ export class RunShutdownController {
     this.emitCloseoutStatus = emitCloseoutStatus;
     this.flushCloseoutStatus = flushCloseoutStatus;
     this.C = C;
-    this.listJobs = listJobs;
-    this.requeueForShutdown = requeueForShutdown;
-    this.refreshWorkItemStatus = refreshWorkItemStatus;
     this.closeRuntimeState = closeRuntimeState;
     this.exitProcess = exitProcess;
     this.process = processRef;
@@ -136,29 +132,6 @@ export class RunShutdownController {
     return this.shutdownCleanupPromise;
   }
 
-  requeueInterruptedJobs() {
-    if (typeof this.requeueForShutdown !== "function") return { active: 0, requeued: 0 };
-    let active = [];
-    try {
-      active = this.listJobs([...ACTIVE_LEASE_STATUSES]);
-    } catch {
-      return { active: 0, requeued: 0 };
-    }
-    let requeued = 0;
-    const affectedWorkItems = new Set();
-    for (const job of active) {
-      if (!job?.id) continue;
-      if (job.work_item_id != null) affectedWorkItems.add(job.work_item_id);
-      try {
-        if (this.requeueForShutdown(job.id)) requeued += 1;
-      } catch { /* best-effort; scheduler/boot repair remains the fallback */ }
-    }
-    for (const wiId of affectedWorkItems) {
-      try { this.refreshWorkItemStatus?.(wiId); } catch { /* best-effort */ }
-    }
-    return { active: active.length, requeued };
-  }
-
   cleanup() {
     this.sigintCount++;
     if (this.sigintCount >= 2) {
@@ -195,15 +168,10 @@ export class RunShutdownController {
     }
 
     const killed = this.worker.killAllJobs("shutdown");
-    const shutdownRequeue = this.requeueInterruptedJobs();
     void this.scheduleSchedulerStop().then(() => this.startDirtySweep());
     if (display) {
       display.addEvent(`${this.C.dim}Sent kill to ${killed} worker(s)${this.C.reset}`);
-      if (shutdownRequeue.requeued > 0) {
-        display.addEvent(`${this.C.dim}Requeued ${shutdownRequeue.requeued} interrupted job(s) for next run${this.C.reset}`);
-      } else if (shutdownRequeue.active > 0) {
-        display.addEvent(`${this.C.dim}Shutdown requeue deferred for ${shutdownRequeue.active} active job(s); boot repair will retry${this.C.reset}`);
-      }
+      if (killed > 0) display.addEvent(`${this.C.dim}Workers will requeue after interruption cleanup completes${this.C.reset}`);
       display.requestRender({ force: true });
     }
   }

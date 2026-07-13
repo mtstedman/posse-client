@@ -15,6 +15,12 @@
 export const BINARY_NAMES = Object.freeze(["atlas", "git", "ml", "remote", "vector"]);
 export const VALID_BINARY_NAMES = new Set(BINARY_NAMES);
 export const REQUIRED_ATLAS_BINARY_NAMES = Object.freeze(["atlas", "vector"]);
+export const ATLAS_VECTOR_NATIVE_PROTOCOL = "posse.atlas.vector.native.v1";
+export const ATLAS_VECTOR_NATIVE_ROUTE = "atlas:vector";
+export const ML_NATIVE_PROTOCOL = "posse.ml.native.v1";
+export const ML_NATIVE_ROUTE = "ml:methods";
+export const ML_CAPABILITIES_METHOD = "ml.capabilities";
+export const ML_EMBED_METHOD = "ml.embed";
 
 // Folder + manifest keys. These are OUR canonical os/arch tokens — distinct
 // from node's process.platform / process.arch, which the maps below translate.
@@ -92,7 +98,11 @@ function defineBinary(pkg, files, {
 export const NATIVE_BINARIES = Object.freeze({
   atlas: defineBinary("posse-atlas", { windows: "posse-atlas.exe", posix: "posse-atlas" }, { workerCapable: true }),
   git: defineBinary("posse-git", { windows: "posse-git.exe", posix: "posse-git" }, { workerCapable: true }),
-  ml: defineBinary("posse-ml", { windows: "posse-ml.exe", posix: "posse-ml" }),
+  ml: defineBinary(
+    "posse-ml",
+    { windows: "posse-ml.exe", posix: "posse-ml" },
+    { workerCapable: true },
+  ),
   remote: defineBinary("posse-remote", { windows: "posse-remote.exe", posix: "posse-remote" }),
   vector: defineBinary(
     "posse-atlas-vector",

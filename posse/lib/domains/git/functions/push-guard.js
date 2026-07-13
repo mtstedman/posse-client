@@ -26,6 +26,7 @@ export async function remotePushConfigsAreClearlyRestrictive(cwd, options = {}) 
   try {
     stdout = await gitExecAsync(["config", "--get-regexp", REMOTE_PUSH_CONFIG_RE], cwd, {
       timeoutMs: options.timeoutMs ?? 5_000,
+      nativeParity: gitNativeOptions(options),
     });
   } catch (err) {
     // `git config --get-regexp` exits 1 when nothing matches — that means

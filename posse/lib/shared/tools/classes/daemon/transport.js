@@ -28,6 +28,7 @@ import { spawn } from "node:child_process";
 import { MessageChannel, Worker } from "node:worker_threads";
 import { recordDaemonSpawn, forgetDaemonSpawn } from "./process-ledger.js";
 import { attachNativeThreadBridge } from "./native-thread-bridge.js";
+import { sanitizeWorkerExecArgv } from "../../../../domains/runtime/functions/worker-exec-argv.js";
 
 // Ceiling for one accumulating JSONL frame. This is a malfunctioning-host
 // guard, NOT a response-size budget: legitimate single-line responses reach
@@ -235,65 +236,117 @@ export function ProcessTransport(opts) {
  *   workerData?: Record<string, unknown>,
  *   resourceLimits?: import("node:worker_threads").ResourceLimits,
  *   nativeBridge?: boolean,
+ *   retirePayload?: Record<string, unknown> | null,
  * }} opts
  * @returns {Transport}
  */
 export function ThreadTransport(opts) {
-  /** @type {Worker | null} */
-  let worker = null;
-  let nativeBridgeDispose = null;
+  /** @type {{ worker: Worker, bridgeDispose: null | (() => unknown | Promise<unknown>), bridgePorts: MessageChannel | null, retireTimer: ReturnType<typeof setTimeout> | null, exited: boolean, releasePromise: Promise<void> | null } | null} */
+  let active = null;
   /** @type {Array<(m: Record<string, unknown>) => void>} */
   const messageHandlers = [];
   /** @type {Array<() => void>} */
   const exitHandlers = [];
 
-  const emitExit = () => {
-    worker = null;
+  const releaseBridge = (record) => {
+    if (record.releasePromise) return record.releasePromise;
+    record.releasePromise = Promise.resolve()
+      .then(() => record.bridgeDispose?.())
+      .catch(() => {})
+      .then(() => {
+        try { record.bridgePorts?.port1.close(); } catch { /* already closed */ }
+        try { record.bridgePorts?.port2.close(); } catch { /* transferred */ }
+        record.bridgeDispose = null;
+        record.bridgePorts = null;
+      });
+    return record.releasePromise;
+  };
+
+  const emitExit = (record) => {
+    if (record.exited) return;
+    record.exited = true;
+    if (active === record) active = null;
+    if (record.retireTimer) clearTimeout(record.retireTimer);
+    record.retireTimer = null;
+    void releaseBridge(record);
     for (const cb of exitHandlers) cb();
   };
 
   return {
     start() {
-      if (worker) return true;
+      if (active) return true;
+      let bridgePorts = null;
+      let bridgeDispose = null;
       try {
         const workerData = { ...(opts.workerData || {}) };
         /** @type {Transferable[]} */
         const transferList = [];
         if (opts.nativeBridge === true) {
           const channel = new MessageChannel();
-          nativeBridgeDispose = attachNativeThreadBridge(channel.port1);
+          bridgePorts = channel;
+          bridgeDispose = attachNativeThreadBridge(channel.port1);
           workerData.nativeBridgePort = channel.port2;
           transferList.push(channel.port2);
         }
-        worker = new Worker(opts.moduleUrl, {
+        const worker = new Worker(opts.moduleUrl, {
           workerData,
           resourceLimits: opts.resourceLimits,
           transferList,
+          execArgv: sanitizeWorkerExecArgv(),
         });
+        const record = {
+          worker,
+          bridgeDispose,
+          bridgePorts,
+          retireTimer: null,
+          exited: false,
+          releasePromise: null,
+        };
+        active = record;
+        worker.unref();
+        worker.on("message", (message) => {
+          for (const cb of messageHandlers) cb(message);
+        });
+        worker.on("error", () => emitExit(record));
+        worker.on("exit", () => emitExit(record));
       } catch {
-        worker = null;
+        try { bridgePorts?.port1.close(); } catch { /* ignore */ }
+        try { bridgePorts?.port2.close(); } catch { /* ignore */ }
+        try { void bridgeDispose?.(); } catch { /* ignore */ }
+        active = null;
         return false;
       }
-      // Idle thread daemon must not pin the host process (see ProcessTransport).
-      worker.unref();
-      worker.on("message", (message) => {
-        for (const cb of messageHandlers) cb(message);
-      });
-      worker.on("error", emitExit);
-      worker.on("exit", emitExit);
       return true;
     },
     send(message) {
-      worker?.postMessage(message);
+      active?.worker.postMessage(message);
     },
     onMessage(cb) { messageHandlers.push(cb); },
     onExit(cb) { exitHandlers.push(cb); },
     kill() {
-      const w = worker;
-      worker = null;
-      try { w?.terminate(); } catch { /* ignore */ }
-      try { void nativeBridgeDispose?.(); } catch { /* ignore */ }
-      nativeBridgeDispose = null;
+      const record = active;
+      active = null;
+      if (!record) return;
+      try { void record.worker.terminate().finally(() => emitExit(record)); } catch { emitExit(record); }
+      void releaseBridge(record);
+    },
+    retire(graceMs = 2000) {
+      const record = active;
+      active = null;
+      if (!record) return;
+      const maxGraceMs = Math.max(0, Number(graceMs) || 0);
+      record.retireTimer = setTimeout(() => {
+        try { void record.worker.terminate().finally(() => emitExit(record)); } catch { emitExit(record); }
+      }, maxGraceMs);
+      record.retireTimer.unref?.();
+      try {
+        record.worker.postMessage({
+          __posse_control: "retire",
+          ...(opts.retirePayload && typeof opts.retirePayload === "object" ? { payload: opts.retirePayload } : {}),
+        });
+      } catch {
+        try { void record.worker.terminate().finally(() => emitExit(record)); } catch { emitExit(record); }
+      }
     },
     // Fully release the worker AND its communication MessagePort. In Node,
     // `worker.unref()` lets an idle worker not *block* exit, but the underlying
@@ -302,14 +355,15 @@ export function ThreadTransport(opts) {
     // awaited. `kill()` is the sync best-effort variant (process-exit hook);
     // `dispose()` is for callers that need the loop to drain (tests, one-shots).
     async dispose() {
-      const w = worker;
-      worker = null;
-      try { await w?.terminate(); } catch { /* ignore */ }
-      try { await nativeBridgeDispose?.(); } catch { /* ignore */ }
-      nativeBridgeDispose = null;
+      const record = active;
+      active = null;
+      if (!record) return;
+      try { await record.worker.terminate(); } catch { /* ignore */ }
+      emitExit(record);
+      await releaseBridge(record);
     },
     isAlive() {
-      return !!worker;
+      return !!active;
     },
   };
 }

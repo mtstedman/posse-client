@@ -212,12 +212,12 @@ export function getAtlasCorruptionCooldownMs() {
 
 /**
  * Whether native (Rust) binary invocation is enabled for a tool, via the
- * `posse_native_<name>` tunable. Git and ATLAS are hardwired on inside
+ * `posse_native_<name>` tunable. Git, ATLAS, ML, and vector are hardwired on inside
  * BinaryManager and never reach this resolver; remote auth HTTP defaults on
  * when its binary is staged. Used by BinaryManager (env overrides take
  * precedence there). Unknown tool names return false.
  *
- * @param {string} name  A catalog binary name (e.g. "remote" or "vector").
+ * @param {string} name  A catalog binary name (e.g. "remote").
  * @returns {boolean}
  */
 export function getNativeBinaryEnabled(name) {

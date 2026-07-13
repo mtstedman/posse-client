@@ -51,25 +51,30 @@ export function nativeArtifactCachePath({ cacheRoot, name, version, os: osToken,
  * preferred whenever boot can refresh it, but a previously verified artifact
  * remains usable when that refresh is unavailable.
  *
- * @param {{ cacheRoot?: string, name: string, os: string, arch: string }} args
+ * @param {{ cacheRoot?: string, name: string, version?: string | null, os: string, arch: string }} args
  * @returns {Promise<Record<string, any> | null>}
  */
 export async function findVerifiedNativeBinaryArtifact({
   cacheRoot = defaultNativeArtifactCacheRoot(),
   name,
+  version = null,
   os: osToken,
   arch,
 }) {
   const entry = nativeBinaryEntry(name);
   if (!entry) return null;
   let versions;
-  try {
-    versions = (await fsp.readdir(path.join(cacheRoot, entry.package), { withFileTypes: true }))
-      .filter((candidate) => candidate.isDirectory())
-      .map((candidate) => candidate.name)
-      .sort((left, right) => right.localeCompare(left, undefined, { numeric: true, sensitivity: "base" }));
-  } catch {
-    return null;
+  if (String(version || "").trim()) {
+    versions = [String(version).trim()];
+  } else {
+    try {
+      versions = (await fsp.readdir(path.join(cacheRoot, entry.package), { withFileTypes: true }))
+        .filter((candidate) => candidate.isDirectory())
+        .map((candidate) => candidate.name)
+        .sort((left, right) => right.localeCompare(left, undefined, { numeric: true, sensitivity: "base" }));
+    } catch {
+      return null;
+    }
   }
   for (const version of versions) {
     const selected = nativeArtifactCachePath({ cacheRoot, name, version, os: osToken, arch });

@@ -95,6 +95,9 @@ export const ATLAS_JINA_MODEL = Object.freeze({
   indexModel: "local-onnx",
   modelName: "jinaai/jina-embeddings-v2-base-code",
   modelId: "jina-v2-code",
+  mlModelId: "jina-code-embeddings",
+  mlModelDirectory: "jina-code-embeddings",
+  mlProfileId: "jina-code-embeddings-v1",
   dim: 768,
   dtype: "q8",
 });

@@ -43,11 +43,13 @@ export async function semanticSearch({ query, view, index, encoder, k, minScore,
   }
   const topK = Math.max(1, Math.min(Number.isInteger(k) ? /** @type {number} */ (k) : 20, 200));
   const minS = typeof minScore === "number" ? minScore : 0;
-  const vectors = await encoder.encode([query], signal);
-  if (!Array.isArray(vectors) || vectors.length !== 1) {
-    throw new Error("semanticSearch: encoder returned no vector for query");
+  const queryVector = typeof encoder.encodeQuery === "function"
+    ? await encoder.encodeQuery(query, signal)
+    : (await encoder.encode([query], signal))?.[0];
+  if (!(queryVector instanceof Float32Array) || queryVector.length !== encoder.dim) {
+    throw new Error("semanticSearch: encoder returned no valid vector for query");
   }
-  const hits = await index.nearest(vectors[0], { k: topK, minScore: minS });
+  const hits = await index.nearest(queryVector, { k: topK, minScore: minS });
 
   /** @type {SemanticHit[]} */
   const out = [];

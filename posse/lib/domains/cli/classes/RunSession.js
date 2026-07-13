@@ -9,11 +9,11 @@ import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js
 import { setConductorKeepWarm, closeSharedConductor } from "../../atlas/functions/v2/parse/conductor.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { recordRunDiagnostic } from "../../../shared/telemetry/functions/run-diagnostics.js";
+import { reconcileNativeBinaries } from "../../../shared/native/functions/binary-reconciliation.js";
 import { ensureBootDependenciesInWorker, formatBootDependencySync } from "../../system/functions/dependency-sync.js";
 import { repairMissingProviderDependencies, getProvidersNeedingDependencyRepair } from "../../providers/functions/provider.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 import { LOCK_HOLDING_JOB_STATUSES, PARKED_JOB_STATUSES } from "../../../catalog/job.js";
-import { BINARY_NAMES } from "../../../catalog/binary.js";
 import { TERMINAL_WORK_ITEM_STATUSES, WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { parseWorkItemMetadata } from "../../planning/functions/state.js";
 import { getResearchBudget } from "../../../shared/policies/functions/role-utils.js";
@@ -721,82 +721,81 @@ export class RunSession {
     })();
   };
 
-  // CACHED check (6h TTL): a warm cache answers from disk without touching the
-  // network, so boot normally pays ~0ms here. The uncached variant used to run
-  // a fresh `ls-remote` every boot — its 2s budget also covers the native git
-  // per-call spawn, so on slow hosts the network check lost the race every
-  // time and boot burned a flat second for a verdict it never got. When the
-  // cache IS stale, the fresh check that the race abandons still completes
-  // detached and writes the cache, so the NEXT boot answers instantly.
-  updateBootStep("posse update", { section: "workspace", status: "running", detail: "checking client", force: true });
-  try {
-    const updateCheck = await Promise.race([
-      checkPosseUpdateAvailabilityForRun({ timeoutMs: 2_000 }),
-      new Promise((resolve) => {
-        const timer = setTimeout(() => resolve({ ok: false, skipped: "timeout" }), 1_000);
-        timer.unref?.();
-      }),
-    ]);
-    if (updateCheck?.available) {
-      updateBootStep("posse update", {
+  // Native refresh, required daemon startup, Git readiness, and the cached
+  // client update check are independent after repo setup. Start them together.
+  // BinaryManager makes non-refresh consumers join a same-binary refresh, so
+  // each daemon pipelines behind its own exact artifact without racing handle
+  // replacement or waiting for unrelated binaries to finish downloading.
+  const nativeArtifactTask = (async () => {
+    if (typeof nativeBinariesForRun?.ensureAvailable !== "function") {
+    updateBootStep("native binaries", {
         section: "workspace",
-        status: "warning",
-        detail: formatPosseUpdateAvailableWarningForRun(updateCheck),
-        showDetail: true,
+        status: "skipped",
+        detail: "native manager unavailable",
         force: true,
       });
-    } else {
-      updateBootStep("posse update", {
-        section: "workspace",
-        status: updateCheck?.ok ? "ok" : "skipped",
-        force: true,
-      });
+      return [];
     }
-  } catch {
-    updateBootStep("posse update", { section: "workspace", status: "skipped", force: true });
-  }
-
-  // Pull native artifacts before any workspace guard can invoke posse-git and
-  // before prompt/index warmups can select posse-remote or posse-atlas.
-  if (typeof nativeBinariesForRun?.ensureAvailable === "function") {
-    const enabledNativeNames = BINARY_NAMES.filter(
-      (name) => nativeBinariesForRun?.enabled?.(name) === true,
-    );
-    if (enabledNativeNames.length > 0) {
-      updateBootStep("native binaries", { section: "workspace", status: "running", force: true });
-      const nativeArtifactResults = await Promise.all(enabledNativeNames.map(async (name) => {
-        try {
-          return await nativeBinariesForRun.ensureAvailable(name, { refresh: true });
-        } catch (error) {
-          return { available: false, name, reason: error?.code || "artifact_download_failed" };
-        }
-      }));
-      const unavailable = nativeArtifactResults.filter((result) => !result?.available);
-      const downloaded = nativeArtifactResults.filter((result) => result?.downloaded).length;
+      updateBootStep("native binaries", {
+      section: "workspace",
+      status: "running",
+      detail: "checking native artifacts",
+      force: true,
+    });
+    const nativeArtifactResults = await reconcileNativeBinaries({
+      manager: nativeBinariesForRun,
+      refresh: true,
+    });
+    if (nativeArtifactResults.length === 0) {
       updateBootStep("native binaries", {
         section: "workspace",
-        status: unavailable.length > 0 ? "warning" : "ok",
-        detail: unavailable.length > 0
-          ? `${nativeArtifactResults.length - unavailable.length}/${nativeArtifactResults.length} ready; unavailable: ${unavailable.map((result) => result.name).join(", ")}`
-          : `${nativeArtifactResults.length} ready${downloaded > 0 ? `; ${downloaded} downloaded` : ""}`,
-        showDetail: unavailable.length > 0,
+        status: "skipped",
+        detail: "no enabled native binaries",
         force: true,
       });
+      return nativeArtifactResults;
     }
-  }
+    const unavailable = nativeArtifactResults.filter((result) => result?.ok !== true);
+    const downloaded = nativeArtifactResults.filter((result) => result?.downloaded).length;
+    updateBootStep("native binaries", {
+      section: "workspace",
+      status: unavailable.length > 0 ? "warning" : "ok",
+      detail: unavailable.length > 0
+        ? `${nativeArtifactResults.length - unavailable.length}/${nativeArtifactResults.length} ready; unavailable: ${unavailable.map((result) => result.name).join(", ")}`
+        : `${nativeArtifactResults.length} ready${downloaded > 0 ? `; ${downloaded} downloaded` : ""}`,
+      showDetail: unavailable.length > 0,
+      force: true,
+    });
+    return nativeArtifactResults;
+  })();
 
-  if (typeof nativeBinariesForRun?.ensureRequiredAtlasBinariesActive === "function") {
-    updateBootStep("native binaries", { section: "workspace", status: "running", force: true });
+  const nativeDaemonTask = (async () => {
+    if (typeof nativeBinariesForRun?.ensureRequiredAtlasBinariesActive !== "function") {
+      updateBootStep("starting daemons", {
+        section: "workspace",
+        status: "skipped",
+        detail: "no required native daemons",
+        force: true,
+      });
+      return [];
+    }
+    updateBootStep("starting daemons", {
+      section: "workspace",
+      status: "running",
+      detail: "starting daemons: atlas + vector",
+      force: true,
+    });
     try {
       const required = await nativeBinariesForRun.ensureRequiredAtlasBinariesActive();
-      updateBootStep("native binaries", {
+      updateBootStep("starting daemons", {
         section: "workspace",
         status: "ok",
         detail: `${required.map((result) => result.name).join(" + ")} active`,
         force: true,
       });
+      return required;
     } catch (error) {
-      updateBootStep("native binaries", {
+      updateBootStep("starting daemons", {
         section: "workspace",
         status: "failed",
         detail: firstLine(error?.message || error),
@@ -805,38 +804,75 @@ export class RunSession {
       });
       throw error;
     }
-  }
+  })();
 
-  // Git Ready comes BEFORE Dirty Tree Guard because guardStartupDirtyTree
-  // runs git commands; if git isn't available we want a clean error on the
-  // git row, not a cryptic crash in the dirty-tree guard. Posse is git-based,
-  // so verify git is usable on EVERY boot. A failure is fatal when a worktree
-  // job is queued; otherwise a research-only session can continue.
-  {
-    updateBootStep("git ready", { section: "workspace", status: "running", force: true });
+  // CACHED check (6h TTL): a warm cache answers from disk without touching the
+  // network. A stale check is soft-bounded and continues detached so the next
+  // boot can consume its refreshed cache.
+  const updateCheckTask = (async () => {
+    updateBootStep("posse update", { section: "workspace", status: "running", detail: "checking client", force: true });
     try {
-      await ensureGitReady();
-      updateBootStep("git ready", { section: "workspace", status: "ok", force: true });
-    } catch (err) {
-      if (needsGit) {
-        updateBootStep("git ready", {
+      const updateCheck = await Promise.race([
+        checkPosseUpdateAvailabilityForRun({ timeoutMs: 2_000 }),
+        new Promise((resolve) => {
+          const timer = setTimeout(() => resolve({ ok: false, skipped: "timeout" }), 1_000);
+          timer.unref?.();
+        }),
+      ]);
+      if (updateCheck?.available) {
+        updateBootStep("posse update", {
           section: "workspace",
-          status: "failed",
-          detail: err?.message || String(err),
+          status: "warning",
+          detail: formatPosseUpdateAvailableWarningForRun(updateCheck),
           showDetail: true,
           force: true,
         });
-        try { stopBootMonitor({ final: true }); } catch { /* observational */ }
-        throw err;
+      } else {
+        updateBootStep("posse update", {
+          section: "workspace",
+          status: updateCheck?.ok ? "ok" : "skipped",
+          force: true,
+        });
       }
+    } catch {
+      updateBootStep("posse update", { section: "workspace", status: "skipped", force: true });
+    }
+  })();
+
+  // Git Ready still gates the dirty-tree guard, but its native startup can run
+  // beside Atlas/vector. It joins the in-flight Git artifact refresh above.
+  const gitReadyTask = (async () => {
+    updateBootStep("git ready", { section: "workspace", status: "running", detail: "starting git", force: true });
+    try {
+      await ensureGitReady();
+      updateBootStep("git ready", { section: "workspace", status: "ok", force: true });
+      return { ok: true, error: null };
+    } catch (error) {
       updateBootStep("git ready", {
         section: "workspace",
-        status: "skipped",
-        detail: firstLine(err?.message || "git unavailable"),
+        status: needsGit ? "failed" : "skipped",
+        detail: firstLine(error?.message || "git unavailable"),
         showDetail: true,
         force: true,
       });
+      return { ok: false, error };
     }
+  })();
+
+  const [nativeArtifactsSettled, nativeDaemonsSettled, , gitReadySettled] = await Promise.allSettled([
+    nativeArtifactTask,
+    nativeDaemonTask,
+    updateCheckTask,
+    gitReadyTask,
+  ]);
+  if (nativeArtifactsSettled.status === "rejected") throw nativeArtifactsSettled.reason;
+  if (nativeDaemonsSettled.status === "rejected") throw nativeDaemonsSettled.reason;
+  const gitReadyResult = gitReadySettled.status === "fulfilled"
+    ? gitReadySettled.value
+    : { ok: false, error: gitReadySettled.reason };
+  if (!gitReadyResult.ok && needsGit) {
+    try { stopBootMonitor({ final: true }); } catch { /* observational */ }
+    throw gitReadyResult.error;
   }
 
   if (typeof guardStartupDirtyTree === "function") {

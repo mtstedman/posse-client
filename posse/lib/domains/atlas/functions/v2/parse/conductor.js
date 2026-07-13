@@ -54,7 +54,7 @@ export function createConductorDaemon(opts = {}) {
     ? Math.max(1, Number(opts.readerWriteOpTimeoutMs))
     : READER_WRITE_OP_TIMEOUT_MS;
   const daemon = registerAtlasThreadDaemon("atlas-conductor", new Daemon({
-    transportFactory: () => ThreadTransport({ moduleUrl: HOST_URL, workerData: { nativeAuth }, nativeBridge: true }),
+    transportFactory: () => ThreadTransport({ moduleUrl: HOST_URL, workerData: { nativeAuth }, nativeBridge: true, retirePayload: { op: "close" } }),
     timeoutMs: STAGE_TIMEOUT_MS,
     label: "atlas-conductor",
   }), "atlas-conductor");
@@ -71,7 +71,7 @@ export function createConductorDaemon(opts = {}) {
     slot,
     inFlight: 0,
     daemon: registerAtlasThreadDaemon(`atlas-reader-${slot + 1}`, new Daemon({
-        transportFactory: () => ThreadTransport({ moduleUrl: readerHostUrl, workerData: { nativeAuth }, nativeBridge: true }),
+        transportFactory: () => ThreadTransport({ moduleUrl: readerHostUrl, workerData: { nativeAuth }, nativeBridge: true, retirePayload: { op: "close" } }),
         timeoutMs: RETRIEVE_TIMEOUT_MS,
         label: `atlas-reader-${slot + 1}`,
         onLifecycle: (event) => {
