@@ -193,10 +193,10 @@ export class BinaryManager {
    * that should do so. Concurrent callers share one synchronization per binary.
    *
    * @param {string} name
-   * @param {{ refresh?: boolean, dryRun?: boolean }} [opts]
+   * @param {{ refresh?: boolean, dryRun?: boolean, onProgress?: ((event: Record<string, unknown>) => void) | null }} [opts]
    * @returns {Promise<Record<string, unknown>>}
    */
-  async ensureAvailable(name, { refresh = false, dryRun = false } = {}) {
+  async ensureAvailable(name, { refresh = false, dryRun = false, onProgress = null } = {}) {
     if (!VALID_BINARY_NAMES.has(name)) {
       return { available: false, name, reason: "unknown_binary" };
     }
@@ -216,7 +216,7 @@ export class BinaryManager {
     const ensureKey = `${name}:${refresh ? "refresh" : "cached"}:${dryRun ? "plan" : "install"}`;
     const inFlight = this._artifactEnsures.get(ensureKey);
     if (inFlight) return inFlight;
-    const promise = this._ensureRemoteArtifact(name, { refresh, dryRun }).finally(() => {
+    const promise = this._ensureRemoteArtifact(name, { refresh, dryRun, onProgress }).finally(() => {
       if (this._artifactEnsures.get(ensureKey) === promise) this._artifactEnsures.delete(ensureKey);
     });
     this._artifactEnsures.set(ensureKey, promise);
@@ -386,7 +386,7 @@ export class BinaryManager {
     return results;
   }
 
-  async _ensureRemoteArtifact(name, { refresh = false, dryRun = false } = {}) {
+  async _ensureRemoteArtifact(name, { refresh = false, dryRun = false, onProgress = null } = {}) {
     const handle = this.binary(name);
     let version = nativeBinaryExactVersion(name);
     try {
@@ -474,6 +474,7 @@ export class BinaryManager {
         authManager: this.nativeAuthManager,
         pulseTokens,
         fetchImpl: this._artifactFetchImpl,
+        ...(typeof onProgress === "function" ? { onProgress } : {}),
         ...(this._artifactCacheRoot ? { cacheRoot: this._artifactCacheRoot } : {}),
       });
       const expectedVersion = String(installed.version || version || "").trim() || null;
@@ -492,6 +493,7 @@ export class BinaryManager {
         path: cachedHandle.resolvePath(),
         source: installed.source,
         downloaded: installed.downloaded === true,
+        size: installed.size,
         sha256: installed.sha256,
         version: expectedVersion,
       };

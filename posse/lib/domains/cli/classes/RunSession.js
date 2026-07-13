@@ -46,6 +46,11 @@ const OPEN_WORK_ITEM_STATUSES = Object.freeze(
   WORK_ITEM_STATUSES.filter((status) => !TERMINAL_WORK_ITEM_STATUSES.includes(status)),
 );
 
+function formatNativeDownloadMiB(bytes) {
+  const value = Math.max(0, Number(bytes) || 0) / (1024 * 1024);
+  return value >= 10 ? value.toFixed(1) : value.toFixed(2);
+}
+
 export class RunSession {
   constructor(deps = {}) {
     Object.assign(this, deps);
@@ -745,6 +750,22 @@ export class RunSession {
     const nativeArtifactResults = await reconcileNativeBinaries({
       manager: nativeBinariesForRun,
       refresh: true,
+      onDownloadProgress: (progress) => {
+        const active = progress.currentPackage || progress.currentName || "native artifacts";
+        const activeLabel = progress.activeCount > 1
+          ? `${active} (+${progress.activeCount - 1})`
+          : active;
+        const bytes = progress.totalBytes == null
+          ? `${formatNativeDownloadMiB(progress.loadedBytes)} MB · sizing total`
+          : `${formatNativeDownloadMiB(progress.loadedBytes)}/${formatNativeDownloadMiB(progress.totalBytes)} MB`;
+        updateBootStep("native binaries", {
+          section: "workspace",
+          status: "running",
+          activity: "download",
+          detail: `${activeLabel} · ${bytes}`,
+          percent: progress.percent,
+        });
+      },
     });
     if (nativeArtifactResults.length === 0) {
       updateBootStep("native binaries", {

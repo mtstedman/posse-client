@@ -320,6 +320,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   const COL_GAP = 3;
   const GRID_W = LABEL_INDENT + LANG_LABEL_W + 2 + CELL_W * 3 + COL_GAP * 2;
   const TAIL_BAR = 26;       // wide bar for the global merge / encode rows
+  const DOWNLOAD_BAR = 16;   // aggregate native-artifact bytes during boot
   const PANEL_MIN_INNER = 66;
   const ATLAS_OFF = LABEL_INDENT + LANG_LABEL_W + 2;   // grid column offsets…
   const GEN_OFF = ATLAS_OFF + CELL_W + COL_GAP;
@@ -554,6 +555,17 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     }
     return `${col("dim")}starting…${col("reset")}`;
   };
+  const nativeDownloadRow = () => {
+    const step = steps.get("native binaries");
+    if (!step || step.status !== "running" || step.activity !== "download") return null;
+    const labelCell = `${col("dim")}${padVisible("native", LANG_LABEL_W)}${col("reset")}`;
+    const prefix = `${" ".repeat(LABEL_INDENT)}${labelCell}  `;
+    const pctText = Number.isFinite(Number(step.percent))
+      ? `${col("bold")}${col("cyan")}${clamp(step.percent)}%${col("reset")}`
+      : `${col("dim")}…${col("reset")}`;
+    const detail = step.detail ? ` ${col("dim")}${step.detail}${col("reset")}` : "";
+    return line(`${prefix}${gaugeBar(step.percent, DOWNLOAD_BAR, "cyan")}  ${pctText}${detail}`);
+  };
   const sectionElapsed = (stepList) => {
     const starts = stepList.map((s) => s.startedAt).filter(Number.isFinite);
     const ends = stepList.map((s) => s.finishedAt).filter(Number.isFinite);
@@ -607,6 +619,10 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
         body = runningSectionBody(labels);
       }
       out.push(line(`    ${glyph} ${name} ${body}`));
+      if (section === "workspace") {
+        const downloadRow = nativeDownloadRow();
+        if (downloadRow) out.push(downloadRow);
+      }
     }
     return out;
   };

@@ -252,15 +252,17 @@ export class RunBootPanelController {
     if (section && section !== "internal") {
       const resolvedStatus = stepPatch.status || previous.status || "running";
       const terminalDetail = (stepPatch.showDetail || resolvedStatus === "failed") && resolvedStatus !== "running";
+      const runningDetailMax = label === "native binaries" ? 48 : 28;
       const panelDetail = terminalDetail
         ? this.shortText(stepPatch.detail || "", 40)
         : resolvedStatus === "running"
-          ? this.shortText(stepPatch.detail ?? previous.detail ?? "", 28)
+          ? this.shortText(stepPatch.detail ?? previous.detail ?? "", runningDetailMax)
           : "";
       this.panel.updateStep(label, {
         status: stepPatch.status || previous.status || "running",
         detail: panelDetail,
         percent: stepPatch.percent ?? null,
+        activity: stepPatch.activity ?? previous.activity ?? null,
         section,
       });
     }

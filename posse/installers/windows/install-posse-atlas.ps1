@@ -3,11 +3,11 @@
   Posse + ATLAS Windows installer.
 
 .DESCRIPTION
-  Bootstraps a Windows host: helper CLI tools (via winget), an interactive
-  offer to install the MSVC C++ workload when missing, Node.js 24+ (via winget
-  when missing), the Posse checkout, npm deps, Python venv + SCIP language
-  environments (delegated to `posse doctor` — the same engine Posse uses at
-  boot), account settings, and PATH/profile wiring.
+  Bootstraps a Windows host: helper CLI tools (via winget), SCIP language
+  selection, Node.js 24+ (via winget when missing), the Posse
+  checkout, npm deps, Python venv + SCIP language environments (delegated to
+  `posse doctor` — the same engine Posse uses at boot), account settings, and
+  PATH/profile wiring.
 
   Design rules (parity with the Linux installer):
     - Never dies mid-run without a summary: every step is fenced, failures are
@@ -56,7 +56,7 @@
 
 .PARAMETER SkipHostTools
   Don't install helper CLI tools (rg, tesseract, ImageMagick, ffmpeg, Python,
-  PHP) or offer to install C++ Build Tools. Missing tools are still reported.
+  PHP). Missing tools are still reported.
 
 .PARAMETER NoInstallNode
   Don't auto-install Node via winget when Node 24+ is missing.
@@ -370,12 +370,11 @@ function Step-ScipLanguages {
 }
 
 # --- step engine -----------------------------------------------------------------
-$script:StepKeys = @("languages", "preflight", "packages", "buildtools", "node", "checkout", "composer", "npm", "shell", "seed", "doctor", "admin", "keys", "native", "validate", "smoke")
+$script:StepKeys = @("languages", "preflight", "packages", "node", "checkout", "composer", "npm", "shell", "seed", "doctor", "admin", "keys", "native", "validate", "smoke")
 $script:StepTitles = @{
   languages = "SCIP language selection"
   preflight = "Preflight checks"
   packages = "System packages"
-  buildtools = "C++ Build Tools"
   node     = "Node.js runtime"
   checkout = "Posse checkout"
   composer = "Composer (SCIP PHP)"
@@ -745,33 +744,6 @@ function Test-ImageMagick {
   return (Test-Cmd "magick") -or (Test-Cmd "convert")
 }
 
-function Get-VsWherePath {
-  $command = Get-Command "vswhere.exe" -ErrorAction SilentlyContinue
-  if ($command -and $command.Source) { return $command.Source }
-
-  $installerRoot = ${env:ProgramFiles(x86)}
-  if (-not $installerRoot) { return "" }
-  $candidate = Join-Path $installerRoot "Microsoft Visual Studio\Installer\vswhere.exe"
-  if (Test-Path $candidate) { return $candidate }
-  return ""
-}
-
-function Get-VsCppInstallationPath {
-  if (Test-Cmd "cl.exe") { return (Get-Command "cl.exe").Source }
-
-  $vswhere = Get-VsWherePath
-  if (-not $vswhere) { return "" }
-  try {
-    $installations = @(& $vswhere -products * -requires Microsoft.VisualStudio.Workload.VCTools -property installationPath 2>$null)
-    return [string]($installations | Where-Object { $_ -and $_.Trim() } | Select-Object -First 1)
-  }
-  catch { return "" }
-}
-
-function Test-VsCppBuildTools {
-  return -not [string]::IsNullOrWhiteSpace((Get-VsCppInstallationPath))
-}
-
 # =============================================================================
 # steps
 # =============================================================================
@@ -859,78 +831,6 @@ function Step-Packages {
     Write-Warn2 ("could not install: " + ($failed -join ", ") + " (Posse degrades gracefully; related helpers stay disabled)")
     Step-End "partial" ("installed with gaps: " + ($failed -join ", "))
   }
-}
-
-function Step-BuildTools {
-  Step-Begin "buildtools"
-
-  $existing = Get-VsCppInstallationPath
-  if ($existing) {
-    Step-End "ok" ("MSVC C++ workload detected: {0}" -f $existing)
-    return
-  }
-
-  Write-Info "the MSVC C++ workload is not installed; npm may need it to compile native modules"
-
-  if ($SkipHostTools) {
-    Step-End "skipped" "-SkipHostTools; C++ workload not installed"
-    return
-  }
-  if ($DryRun) {
-    Step-End "dry-run" "would ask whether to install Visual Studio Build Tools with the C++ workload"
-    return
-  }
-  if (-not (Test-InteractiveInput)) {
-    Write-Warn2 "C++ Build Tools are missing and no interactive input is available; skipping them. Re-run interactively if npm reports node-gyp/MSBuild errors."
-    Step-End "skipped" "no interactive input; C++ workload not installed"
-    return
-  }
-  if (-not (Test-Cmd "winget")) {
-    Write-Warn2 "C++ Build Tools are missing and winget is unavailable. Install the 'Desktop development with C++' workload from Visual Studio Installer if npm reports node-gyp/MSBuild errors."
-    Step-End "partial" "winget unavailable; C++ workload not installed"
-    return
-  }
-
-  Write-Host ""
-  Write-Host ("  {0}Optional native build support{1}" -f $script:BOLD, $script:R)
-  Write-Host "    Some npm dependencies may need Microsoft's C++ compiler and Windows SDK."
-  Write-Host "    Visual Studio Build Tools requires several GB, may request administrator approval,"
-  Write-Host "    and can require a reboot. Posse can install the required C++ workload for you."
-
-  $install = $false
-  while ($true) {
-    try { $answer = Read-Host "      Would you like Posse to install C++ Build Tools now? [y/N]" }
-    catch {
-      Write-Warn2 "the Build Tools prompt could not read input; continuing without the C++ workload"
-      Step-End "skipped" "prompt unavailable; C++ workload not installed"
-      return
-    }
-    if (-not $answer -or $answer.Trim() -match '^(n|no)$') { break }
-    if ($answer.Trim() -match '^(y|yes)$') { $install = $true; break }
-    Write-Host ("    {0}{1}{2} Please answer yes or no (Enter means no)." -f $script:YELLOW, $script:GlyphWarn, $script:R)
-  }
-
-  if (-not $install) {
-    Write-Warn2 "C++ Build Tools installation was declined; re-run this installer if npm reports node-gyp/MSBuild errors"
-    Step-End "skipped" "user declined C++ workload installation"
-    return
-  }
-
-  Write-Info "installing Visual Studio Build Tools 2022 with the Desktop development with C++ workload"
-  $rc = Invoke-Logged -Description "install Visual Studio Build Tools (C++ workload)" -Command @(
-    "winget", "install", "--id", "Microsoft.VisualStudio.2022.BuildTools", "--exact", "--source", "winget",
-    "--accept-package-agreements", "--accept-source-agreements",
-    "--override", "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-  )
-
-  if (Test-VsCppBuildTools) {
-    if ($rc -ne 0) { Write-Warn2 "winget returned exit $rc, but the MSVC C++ workload is now detected" }
-    Step-End "ok" "MSVC C++ workload installed"
-    return
-  }
-
-  Write-Warn2 "Visual Studio Build Tools did not finish successfully. You can continue, but native npm modules may fail to compile; see the installer log."
-  Step-End "partial" ("C++ workload still missing after winget exit {0}" -f $rc)
 }
 
 function Step-Node {
@@ -1097,14 +997,14 @@ function Step-Npm {
     return
   }
   $npmArgs = @("npm", "install", "--include=optional", "--no-fund", "--no-audit")
-  $rc = Invoke-Logged -Description "npm install (includes native module builds)" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description "npm install" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Step-End "ok" "npm dependencies installed"; return }
 
   Write-Info "retrying once (transient network/registry failures are common)"
   $rc = Invoke-Logged -Description "npm install (retry)" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Step-End "ok" "npm dependencies installed on retry"; return }
 
-  Step-FailCritical "npm install failed twice - if the log shows node-gyp/MSBuild errors, re-run this installer and accept the C++ Build Tools prompt"
+  Step-FailCritical "npm install failed twice; see the installer log for details"
 }
 
 function Step-ShellWiring {
@@ -1126,7 +1026,7 @@ function Step-ShellWiring {
     "# ATLAS runtime configuration lives in ~\.posse\account.db (posse admin),",
     "# not environment variables.",
     ('$env:POSSE_BIN_DIR = ' + $envLiteral),
-    'if (($env:PATH -split '';'') -notcontains $env:POSSE_BIN_DIR) { $env:PATH = "$env:POSSE_BIN_DIR;$env:PATH" }'
+    '$env:PATH = (@($env:POSSE_BIN_DIR) + @($env:PATH -split [System.IO.Path]::PathSeparator | Where-Object { $_ -and $_ -ine $env:POSSE_BIN_DIR })) -join [System.IO.Path]::PathSeparator'
   ) -join "`r`n"
   Set-Content -Path $script:EnvFile -Value $contents -Encoding UTF8
 
@@ -1141,14 +1041,15 @@ function Step-ShellWiring {
   # installer-generated shim; the UTF-8 posse.cmd is policy-independent.
   if (Test-Path $psShim) { Remove-Item $psShim -Force }
 
-  # Persist ~\.local\bin on the user PATH and pick it up in this session.
+  # Keep the managed shim first so an older npm/global Posse install cannot
+  # win command resolution. The shim itself is rewritten above to point at the
+  # checkout resolved by this installer run.
   $userPath = Get-UserPathRaw
-  $parts = @($userPath -split ";" | Where-Object { $_ })
-  if (-not ($parts | Where-Object { $_ -ieq $binDir })) {
-    $newUserPath = if ($userPath) { $userPath.TrimEnd(";") + ";" + $binDir } else { $binDir }
-    if (-not $NoPersistEnv) { Set-UserPathRaw $newUserPath }
-  }
-  if (-not (($env:Path -split ";") | Where-Object { $_ -ieq $binDir })) { $env:Path = "$binDir;$env:Path" }
+  $parts = @($userPath -split ";" | Where-Object { $_ -and $_ -ine $binDir })
+  $newUserPath = (@($binDir) + $parts) -join ";"
+  if (-not $NoPersistEnv -and $newUserPath -ine $userPath) { Set-UserPathRaw $newUserPath }
+  $sessionParts = @($env:Path -split ";" | Where-Object { $_ -and $_ -ine $binDir })
+  $env:Path = (@($binDir) + $sessionParts) -join ";"
 
   $executionPolicy = Get-PersistentExecutionPolicy
   $profileAllowed = $executionPolicy -notin @("Restricted", "AllSigned")
@@ -1166,7 +1067,7 @@ function Step-ShellWiring {
     Write-Warn2 ("PowerShell execution policy is {0}; skipped profile script wiring. posse.cmd remains available through the user PATH." -f $executionPolicy)
   }
 
-  $note = "env file + UTF-8 posse.cmd shim installed"
+  $note = "env file + UTF-8 posse.cmd shim installed for $script:PosseDirResolved"
   if (-not (Test-Cmd "posse")) { $note += " (open a new terminal to pick up PATH)" }
   Step-End "ok" $note
 }
@@ -1546,7 +1447,6 @@ try {
 
   if (-not $script:CriticalFailed) {
     Invoke-InstallerStep "packages" { Step-Packages }
-    Invoke-InstallerStep "buildtools" { Step-BuildTools }
     Invoke-InstallerStep "node" { Step-Node } -Critical
     Invoke-InstallerStep "checkout" { Step-Checkout } -Critical
     Invoke-InstallerStep "composer" { Step-Composer }

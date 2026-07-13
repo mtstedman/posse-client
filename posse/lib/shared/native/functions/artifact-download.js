@@ -97,6 +97,7 @@ export async function findVerifiedNativeBinaryArtifact({
  *   cacheRoot?: string,
  *   maxBytes?: number,
  *   timeoutMs?: number,
+ *   onProgress?: ((event: { type: string, phase: string, name: string, package: string, loadedBytes: number, totalBytes: number | null }) => void) | null,
  * }} args
  * @returns {Promise<Record<string, any>>}
  */
@@ -111,6 +112,7 @@ export async function ensureNativeBinaryArtifact({
   cacheRoot = defaultNativeArtifactCacheRoot(),
   maxBytes = NATIVE_ARTIFACT_MAX_BYTES,
   timeoutMs = DOWNLOAD_TIMEOUT_MS,
+  onProgress = null,
 }) {
   if (!VALID_BINARY_NAMES.has(name)) {
     throw artifactError("POSSE_ARTIFACT_UNSUPPORTED", `unknown native artifact: ${name}`);
@@ -188,11 +190,29 @@ export async function ensureNativeBinaryArtifact({
     if (Number.isFinite(contentLength) && contentLength > limit) {
       throw artifactError("POSSE_ARTIFACT_TOO_LARGE", `native artifact exceeds the ${limit}-byte limit`);
     }
+    const totalBytes = Number.isFinite(contentLength) && contentLength >= 0 ? contentLength : null;
+    reportArtifactProgress(onProgress, {
+      type: "native-artifact-download",
+      phase: "start",
+      name,
+      package: selected.package,
+      loadedBytes: 0,
+      totalBytes,
+    });
 
     await fsp.mkdir(path.dirname(selected.binaryPath), { recursive: true });
     const partPath = `${selected.binaryPath}.part-${process.pid}-${randomUUID()}`;
     try {
-      const actual = await writeResponseToPart(response, partPath, limit, ac.signal);
+      const actual = await writeResponseToPart(response, partPath, limit, ac.signal, (loadedBytes) => {
+        reportArtifactProgress(onProgress, {
+          type: "native-artifact-download",
+          phase: "progress",
+          name,
+          package: selected.package,
+          loadedBytes,
+          totalBytes,
+        });
+      });
       responseComplete = true;
       clearTimeout(timer);
       if (actual.size === 0) {
@@ -215,6 +235,14 @@ export async function ensureNativeBinaryArtifact({
       if (osToken !== "windows") await fsp.chmod(selected.binaryPath, 0o755);
       await writeChecksumSidecar(selected.checksumPath, actual.sha256);
       await syncDirectory(path.dirname(selected.binaryPath));
+      reportArtifactProgress(onProgress, {
+        type: "native-artifact-download",
+        phase: "complete",
+        name,
+        package: selected.package,
+        loadedBytes: actual.size,
+        totalBytes: actual.size,
+      });
       return { ...selected, sha256: actual.sha256, size: actual.size, source: "remote", downloaded: true };
     } finally {
       await safeUnlink(partPath);
@@ -248,7 +276,7 @@ async function verifiedCachedArtifact(binaryPath, checksumPath) {
   }
 }
 
-async function writeResponseToPart(response, partPath, maxBytes, signal) {
+async function writeResponseToPart(response, partPath, maxBytes, signal, onChunk = null) {
   const handle = await fsp.open(partPath, "wx", 0o600);
   const hash = createHash("sha256");
   let size = 0;
@@ -267,6 +295,7 @@ async function writeResponseToPart(response, partPath, maxBytes, signal) {
           }
           hash.update(chunk);
           await handle.write(chunk);
+          onChunk?.(size);
         }
       } finally {
         try { reader.releaseLock?.(); } catch { /* best effort */ }
@@ -277,6 +306,7 @@ async function writeResponseToPart(response, partPath, maxBytes, signal) {
       if (size > maxBytes) throw artifactError("POSSE_ARTIFACT_TOO_LARGE", `native artifact exceeds the ${maxBytes}-byte limit`);
       hash.update(chunk);
       await handle.write(chunk);
+      onChunk?.(size);
     }
     await handle.sync();
   } finally {
@@ -413,6 +443,11 @@ async function safeUnlink(filePath) {
 function positiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value || ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function reportArtifactProgress(onProgress, event) {
+  if (typeof onProgress !== "function") return;
+  try { onProgress(event); } catch { /* progress reporting is observational */ }
 }
 
 function artifactError(code, message) {

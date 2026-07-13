@@ -47,6 +47,86 @@ function dependencyEntry(result, { dryRun }) {
   };
 }
 
+function byteCount(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function createDownloadAggregator(names, onDownloadProgress) {
+  if (typeof onDownloadProgress !== "function") return null;
+  const states = new Map(names.map((name) => [name, {
+    name,
+    package: nativeBinaryEntry(name)?.package || name,
+    phase: "checking",
+    loadedBytes: 0,
+    totalBytes: null,
+    downloaded: false,
+  }]));
+  let currentName = null;
+  let sawDownload = false;
+
+  const emit = () => {
+    if (!sawDownload) return;
+    const entries = [...states.values()];
+    const active = entries.filter((entry) => entry.phase === "downloading");
+    if (!active.some((entry) => entry.name === currentName)) {
+      currentName = active.at(-1)?.name || currentName;
+    }
+    const current = states.get(currentName) || active.at(-1) || null;
+    const totalsKnown = entries.every((entry) => entry.phase === "settled" || entry.totalBytes != null);
+    const totalBytes = entries.reduce((sum, entry) => sum + (entry.totalBytes || 0), 0);
+    const loadedBytes = entries.reduce((sum, entry) => {
+      const loaded = entry.loadedBytes || 0;
+      return sum + (entry.totalBytes == null ? loaded : Math.min(loaded, entry.totalBytes));
+    }, 0);
+    const percent = totalsKnown && totalBytes > 0
+      ? Math.min(100, (loadedBytes / totalBytes) * 100)
+      : null;
+    try {
+      onDownloadProgress({
+        loadedBytes,
+        totalBytes: totalsKnown ? totalBytes : null,
+        percent,
+        currentName: current?.name || null,
+        currentPackage: current?.package || null,
+        activeCount: active.length,
+        downloadCount: entries.filter((entry) => entry.downloaded || entry.totalBytes != null).length,
+      });
+    } catch { /* progress reporting is observational */ }
+  };
+
+  return {
+    event(name, event) {
+      if (event?.type !== "native-artifact-download") return;
+      const state = states.get(name);
+      if (!state) return;
+      sawDownload = true;
+      state.downloaded = true;
+      state.phase = event.phase === "complete" ? "verifying" : "downloading";
+      state.package = String(event.package || state.package);
+      state.loadedBytes = byteCount(event.loadedBytes) ?? state.loadedBytes;
+      state.totalBytes = byteCount(event.totalBytes) ?? state.totalBytes;
+      currentName = name;
+      emit();
+    },
+    settled(name, result) {
+      const state = states.get(name);
+      if (!state) return;
+      const resultSize = byteCount(result?.size);
+      if (resultSize != null && result?.downloaded === true) {
+        state.downloaded = true;
+        state.loadedBytes = resultSize;
+        state.totalBytes = resultSize;
+      } else if (state.downloaded && state.totalBytes != null && result?.available === true) {
+        state.loadedBytes = state.totalBytes;
+      }
+      state.phase = "settled";
+      emit();
+    },
+  };
+}
+
 /**
  * Reconcile every enabled catalog binary with the exact version issued by the
  * authenticated artifact service. Doctor/update use the dependency-shaped
@@ -59,6 +139,7 @@ function dependencyEntry(result, { dryRun }) {
  *   refresh?: boolean,
  *   dryRun?: boolean,
  *   onProgress?: ((message: string) => void) | null,
+ *   onDownloadProgress?: ((progress: { loadedBytes: number, totalBytes: number | null, percent: number | null, currentName: string | null, currentPackage: string | null, activeCount: number, downloadCount: number }) => void) | null,
  * }} [opts]
  */
 export async function reconcileNativeBinaries({
@@ -67,17 +148,23 @@ export async function reconcileNativeBinaries({
   refresh = true,
   dryRun = false,
   onProgress = null,
+  onDownloadProgress = null,
 } = {}) {
   if (typeof manager?.ensureAvailable !== "function") return [];
   const enabledNames = names.filter((name) => {
     try { return manager.enabled?.(name) === true; } catch { return false; }
   });
+  const downloadAggregator = createDownloadAggregator(enabledNames, onDownloadProgress);
   return await Promise.all(enabledNames.map(async (name) => {
     const packageName = nativeBinaryEntry(name)?.package || name;
     onProgress?.(`native ${name}: checking ${packageName}`);
     let result;
     try {
-      result = await manager.ensureAvailable(name, { refresh, dryRun });
+      const ensureOptions = { refresh, dryRun };
+      if (downloadAggregator) {
+        ensureOptions.onProgress = (event) => downloadAggregator.event(name, event);
+      }
+      result = await manager.ensureAvailable(name, ensureOptions);
     } catch (error) {
       result = {
         available: false,
@@ -86,6 +173,7 @@ export async function reconcileNativeBinaries({
         error,
       };
     }
+    downloadAggregator?.settled(name, result);
     return dependencyEntry({ name, ...result }, { dryRun });
   }));
 }
