@@ -42,7 +42,8 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
    nvm (pinned version) and `nvm install 24`, then adopts it for the rest of
    the run. `--no-install-node` opts out.
 5. **Posse checkout** — uses the checkout containing this installer when
-   available; cloning is only a fallback for standalone use.
+   available; standalone fallback shallow-clones the public client and accepts
+   both a flat Posse root and the public client's `posse/` subdirectory.
 6. **Composer (SCIP PHP, opt-in)** — skipped unless `php` was explicitly
    selected; then uses a global `composer` when present or otherwise
    downloads a signature-verified `composer.phar` into Posse's `scip/bin`
@@ -103,8 +104,8 @@ With a smoke test against a repo:
 | Flag | Purpose |
 |------|---------|
 | `--install-root <path>` | Base directory for installs (default: `~/claude-tools`) |
-| `--posse-dir <path>` | Posse checkout directory (default: installer checkout, else `<install-root>/posse`) |
-| `--posse-repo-url <url>` | Fallback Git URL when no checkout is detected |
+| `--posse-dir <path>` | Posse checkout or workspace directory (default: installer checkout, else `<install-root>/posse-client`; the Posse root is auto-detected) |
+| `--posse-repo-url <url>` | Fallback Git URL when no checkout is detected (default: public `mtstedman/posse-client`) |
 | `--repo-id <id>` | ATLAS repo id for the smoke test |
 | `--repo-path <path>` | ATLAS repo path for the smoke test |
 | `--smoke-query <q>` | Query used for atlas-smoke (default: `auth`) |

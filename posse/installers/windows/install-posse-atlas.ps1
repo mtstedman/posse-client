@@ -23,7 +23,8 @@
   Base directory for installs. Default: $env:USERPROFILE\claude-tools
 
 .PARAMETER PosseDir
-  Posse checkout directory. Default: installer checkout when available, else <InstallRoot>\posse
+  Posse checkout directory. Default: installer checkout when available, else
+  <InstallRoot>\posse-client (with the Posse root auto-detected inside it).
 
 .PARAMETER PosseRepoUrl
   Fallback Git URL used only when no checkout is detected and PosseDir is missing.
@@ -86,7 +87,7 @@
 param(
   [string]$InstallRoot = (Join-Path $env:USERPROFILE "claude-tools"),
   [string]$PosseDir = "",
-  [string]$PosseRepoUrl = "https://github.com/mtstedman/posse.git",
+  [string]$PosseRepoUrl = "https://github.com/mtstedman/posse-client.git",
   [string]$RepoId = "",
   [string]$RepoPath = "",
   [string]$SmokeQuery = "auth",
@@ -716,6 +717,16 @@ function Get-InstallerPosseDir {
   return ""
 }
 
+function Resolve-PosseRootFromCheckout {
+  param([string]$CheckoutDir)
+  if ([string]::IsNullOrWhiteSpace($CheckoutDir)) { return "" }
+  $root = Resolve-FullPath $CheckoutDir
+  if (Test-Path (Join-Path $root "orchestrator.js")) { return $root }
+  $nested = Join-Path $root "posse"
+  if (Test-Path (Join-Path $nested "orchestrator.js")) { return $nested }
+  return ""
+}
+
 # Winget installs land on Machine/User PATH, which this process doesn't see.
 # Re-merge them (preserving process-local additions) so freshly installed
 # tools are visible without a new shell.
@@ -1012,17 +1023,19 @@ function Step-Checkout {
       Write-Info "using the Posse checkout containing this installer"
     }
     else {
-      $script:PosseDirResolved = Join-Path $InstallRoot "posse"
+      $script:PosseDirResolved = Join-Path $InstallRoot "posse-client"
     }
   }
   $script:PosseDirResolved = Resolve-FullPath $script:PosseDirResolved
 
   if (Test-Path $script:PosseDirResolved) {
-    if (Test-Path (Join-Path $script:PosseDirResolved "orchestrator.js")) {
-      Step-End "ok" ("existing checkout: {0}" -f $script:PosseDirResolved)
+    $resolvedRoot = Resolve-PosseRootFromCheckout $script:PosseDirResolved
+    if ($resolvedRoot) {
+      $script:PosseDirResolved = $resolvedRoot
+      Step-End "ok" ("existing checkout: {0}" -f $resolvedRoot)
     }
     else {
-      Step-FailCritical ("{0} exists but has no orchestrator.js (move or remove the partial directory, then re-run)" -f $script:PosseDirResolved)
+      Step-FailCritical ("{0} exists but has no orchestrator.js at its root or under posse\ (move or remove the partial directory, then re-run)" -f $script:PosseDirResolved)
     }
     return
   }
@@ -1032,20 +1045,24 @@ function Step-Checkout {
     return
   }
   if ($DryRun) {
-    Step-End "dry-run" ("would clone {0} into {1}" -f $PosseRepoUrl, $script:PosseDirResolved)
+    Step-End "dry-run" ("would shallow-clone {0} into {1} and auto-detect the Posse root" -f $PosseRepoUrl, $script:PosseDirResolved)
     return
   }
-  $parent = Split-Path $script:PosseDirResolved -Parent
+  $checkoutDir = $script:PosseDirResolved
+  $parent = Split-Path $checkoutDir -Parent
   if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-  $cloneDir = $script:PosseDirResolved + ".installing-" + [Guid]::NewGuid().ToString("N")
+  $cloneDir = $checkoutDir + ".installing-" + [Guid]::NewGuid().ToString("N")
   try {
-    $rc = Invoke-Logged -Description ("clone {0}" -f $PosseRepoUrl) -Command @("git", "-c", "core.longpaths=true", "clone", $PosseRepoUrl, $cloneDir)
-    if ($rc -eq 0 -and (Test-Path (Join-Path $cloneDir "orchestrator.js"))) {
-      Move-Item -LiteralPath $cloneDir -Destination $script:PosseDirResolved
+    $rc = Invoke-Logged -Description ("clone {0}" -f $PosseRepoUrl) -Command @("git", "-c", "core.longpaths=true", "clone", "--depth", "1", $PosseRepoUrl, $cloneDir)
+    $clonedRoot = if ($rc -eq 0) { Resolve-PosseRootFromCheckout $cloneDir } else { "" }
+    if ($clonedRoot) {
+      $nested = $clonedRoot -ne (Resolve-FullPath $cloneDir)
+      Move-Item -LiteralPath $cloneDir -Destination $checkoutDir
+      $script:PosseDirResolved = if ($nested) { Join-Path $checkoutDir "posse" } else { $checkoutDir }
       Step-End "ok" ("cloned into {0}" -f $script:PosseDirResolved)
     }
     else {
-      Step-FailCritical "git clone failed (or orchestrator.js missing after clone); see log"
+      Step-FailCritical "git clone failed (or orchestrator.js is missing at the checkout root and under posse\); see log"
     }
   }
   finally {
@@ -1313,10 +1330,10 @@ function Step-AdminInit {
   Step-Begin "admin"
   if ($script:CriticalFailed) { Step-End "blocked"; return }
   if ($DryRun) {
-    Step-End "dry-run" "would run posse admin init --non-interactive"
+    Step-End "dry-run" "would run posse admin init --non-interactive --provider-clis-only"
     return
   }
-  $rc = Invoke-Logged -Description "detect provider CLIs (admin init)" -Command @($script:NodeBin, "orchestrator.js", "admin", "init", "--non-interactive") -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description "detect provider CLIs (admin init)" -Command @($script:NodeBin, "orchestrator.js", "admin", "init", "--non-interactive", "--provider-clis-only") -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Step-End "ok" "provider CLI detection complete" }
   else {
     Write-Warn2 "posse admin init failed - run 'posse admin init' manually to see provider CLI detection details"

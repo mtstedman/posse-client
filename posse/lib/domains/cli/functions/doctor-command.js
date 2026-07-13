@@ -124,8 +124,10 @@ function renderDoctorHelp({ log, colors }) {
     posse doctor
     posse doctor --dry-run
     posse doctor --json
+    posse doctor --adopt-node-install
 
   Doctor installs are not timed out by default. Boot dependency sync stays bounded.
+  --adopt-node-install reuses a complete existing Posse node_modules tree.
 `);
 }
 

@@ -2209,15 +2209,20 @@ async function cmdAdmin() {
     const dryRun = hasArgFlag("--dry-run");
     const force = hasArgFlag("--force");
     const nonInteractive = hasArgFlag("--non-interactive") || !process.stdout?.isTTY;
+    const providerClisOnly = hasArgFlag("--provider-clis-only");
 
     console.log(`\n${C.bold}Posse admin init${C.reset}`);
-    if (nonInteractive) {
+    if (providerClisOnly) {
+      console.log(`  ${C.dim}Provider CLI detection only; repository setup skipped.${C.reset}`);
+    } else if (nonInteractive) {
       console.log(`  ${C.dim}Non-interactive mode: prompt-free repo repair only.${C.reset}`);
     }
-    const repoReady = await ensureRepoSetupConfirmed();
-    if (!repoReady) {
-      process.exitCode = 2;
-      return;
+    if (!providerClisOnly) {
+      const repoReady = await ensureRepoSetupConfirmed();
+      if (!repoReady) {
+        process.exitCode = 2;
+        return;
+      }
     }
 
     const { initializeProviderCliSettings } = await loadProviderCliInitModule();
@@ -2479,7 +2484,7 @@ ${aliasDiagnostic}
     ${C.cyan}audit${C.reset}      Provider/handoff audit for jobs or work items
     ${C.dim}             audit | audit <jobId> | audit wi<id> | audit worktrees${C.reset}
     ${C.cyan}admin${C.reset}      Stats, session history, and settings management
-    ${C.dim}             admin init | admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin settings${C.reset}
+    ${C.dim}             admin init [--provider-clis-only] | admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin settings${C.reset}
     ${C.cyan}merge${C.reset}      Merge a completed WI branch
     ${C.cyan}prune${C.reset}      Clean up orphaned worktrees
     ${C.dim}             prune [--dry-run]${C.reset}

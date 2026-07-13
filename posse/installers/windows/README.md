@@ -44,7 +44,8 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
    winget Node distributions and verifies the installed major before continuing.
    Node 24 is a minimum, not an exact-version pin; newer majors are accepted.
 5. **Posse checkout** — uses the checkout containing this installer when
-   available; cloning is only a fallback for standalone use.
+   available; standalone fallback shallow-clones the public client and accepts
+   both a flat Posse root and the public client's `posse\` subdirectory.
 6. **Composer (SCIP PHP, opt-in)** — skipped unless `php` was explicitly
    selected; then uses a global `composer` when present or otherwise
    configures PHP's bundled OpenSSL, cURL, and ZIP extensions (backing up an
@@ -111,8 +112,8 @@ powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
 | Flag | Purpose |
 |------|---------|
 | `-InstallRoot <path>` | Base directory for installs (default: `$env:USERPROFILE\claude-tools`) |
-| `-PosseDir <path>` | Posse checkout directory (default: installer checkout, else `<InstallRoot>\posse`) |
-| `-PosseRepoUrl <url>` | Fallback Git URL when no checkout is detected |
+| `-PosseDir <path>` | Posse checkout or workspace directory (default: installer checkout, else `<InstallRoot>\posse-client`; the Posse root is auto-detected) |
+| `-PosseRepoUrl <url>` | Fallback Git URL when no checkout is detected (default: public `mtstedman/posse-client`) |
 | `-RepoId <id>` | ATLAS repo id for the smoke test |
 | `-RepoPath <path>` | ATLAS repo path for the smoke test |
 | `-SmokeQuery <q>` | Query used for atlas-smoke (default: `auth`) |

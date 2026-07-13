@@ -55,7 +55,7 @@ CONFIGURE_KEYS="false"
 PLAIN="false"
 INSTALL_ROOT="${HOME}/claude-tools"
 POSSE_DIR=""
-POSSE_REPO_URL="https://github.com/mtstedman/posse.git"
+POSSE_REPO_URL="https://github.com/mtstedman/posse-client.git"
 REPO_ID=""
 REPO_PATH=""
 NODE_MIN_MAJOR="24"
@@ -73,7 +73,7 @@ Usage:
 
 Options:
   --install-root <path>   Base directory for installs (default: ~/claude-tools)
-  --posse-dir <path>      Posse checkout directory (default: installer checkout, else <install-root>/posse)
+  --posse-dir <path>      Posse checkout/workspace directory (default: installer checkout, else <install-root>/posse-client)
   --posse-repo-url <url>  Fallback Git URL when no checkout is detected and --posse-dir is missing
   --repo-id <id>          ATLAS repo id for smoke tests
   --repo-path <path>      ATLAS repo path for smoke tests
@@ -673,6 +673,20 @@ detect_installer_posse_dir() {
   [[ -f "$candidate/orchestrator.js" ]] && printf "%s\n" "$candidate"
 }
 
+resolve_posse_root_from_checkout() {
+  local checkout_dir="$1"
+  [[ -n "$checkout_dir" ]] || return 1
+  if [[ -f "$checkout_dir/orchestrator.js" ]]; then
+    resolve_full_path "$checkout_dir"
+    return 0
+  fi
+  if [[ -f "$checkout_dir/posse/orchestrator.js" ]]; then
+    resolve_full_path "$checkout_dir/posse"
+    return 0
+  fi
+  return 1
+}
+
 # --- privilege handling --------------------------------------------------------
 # Resolved once, interactively, BEFORE any spinner runs (sudo prompts and
 # spinners don't mix — the password prompt would be swallowed into the log).
@@ -987,16 +1001,19 @@ step_checkout() {
       POSSE_DIR="$detected"
       info "using the Posse checkout containing this installer"
     else
-      POSSE_DIR="${INSTALL_ROOT}/posse"
+      POSSE_DIR="${INSTALL_ROOT}/posse-client"
     fi
   fi
   POSSE_DIR="$(resolve_full_path "$POSSE_DIR")"
 
   if [[ -d "$POSSE_DIR" ]]; then
-    if [[ -f "$POSSE_DIR/orchestrator.js" ]]; then
+    local resolved_root
+    resolved_root="$(resolve_posse_root_from_checkout "$POSSE_DIR" || true)"
+    if [[ -n "$resolved_root" ]]; then
+      POSSE_DIR="$resolved_root"
       step_end ok "existing checkout: ${POSSE_DIR}"
     else
-      step_fail_critical "${POSSE_DIR} exists but has no orchestrator.js (not a Posse repo root?)"
+      step_fail_critical "${POSSE_DIR} exists but has no orchestrator.js at its root or under posse/"
       return 1
     fi
     return 0
@@ -1007,15 +1024,18 @@ step_checkout() {
     return 1
   fi
   if [[ "$DRY_RUN" == "true" ]]; then
-    step_end dry-run "would clone ${POSSE_REPO_URL} into ${POSSE_DIR}"
+    step_end dry-run "would shallow-clone ${POSSE_REPO_URL} into ${POSSE_DIR} and auto-detect the Posse root"
     return 0
   fi
   mkdir -p "$(dirname "$POSSE_DIR")"
-  if run_logged "clone ${POSSE_REPO_URL}" git clone "$POSSE_REPO_URL" "$POSSE_DIR"; then
-    if [[ -f "$POSSE_DIR/orchestrator.js" ]]; then
+  if run_logged "clone ${POSSE_REPO_URL}" git clone --depth 1 "$POSSE_REPO_URL" "$POSSE_DIR"; then
+    local cloned_root
+    cloned_root="$(resolve_posse_root_from_checkout "$POSSE_DIR" || true)"
+    if [[ -n "$cloned_root" ]]; then
+      POSSE_DIR="$cloned_root"
       step_end ok "cloned into ${POSSE_DIR}"
     else
-      step_fail_critical "clone succeeded but orchestrator.js is missing (wrong repo URL?)"
+      step_fail_critical "clone succeeded but orchestrator.js is missing at the checkout root and under posse/"
       return 1
     fi
   else
@@ -1294,10 +1314,10 @@ step_admin_init() {
   step_begin admin
   if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
   if [[ "$DRY_RUN" == "true" ]]; then
-    step_end dry-run "would run posse admin init --non-interactive"
+    step_end dry-run "would run posse admin init --non-interactive --provider-clis-only"
     return 0
   fi
-  if run_logged_in_dir "$POSSE_DIR" "detect provider CLIs (admin init)" "$NODE_BIN" orchestrator.js admin init --non-interactive; then
+  if run_logged_in_dir "$POSSE_DIR" "detect provider CLIs (admin init)" "$NODE_BIN" orchestrator.js admin init --non-interactive --provider-clis-only; then
     step_end ok "provider CLI detection complete"
   else
     warn "posse admin init failed — run 'posse admin init' manually to see provider CLI detection details"
