@@ -22,6 +22,7 @@
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
     "benchmark:atlas:comprehensive": "node scripts/atlas-comprehensive-benchmark.mjs",
+    "benchmark:atlas:quality": "node scripts/atlas-quality-benchmark.mjs --cold-boot",
     "check:protocol": "node scripts/check-control-protocol-drift.mjs",
     "check:log-secrets": "node scripts/check-log-secrets.mjs",
     "pull:native": "node scripts/pull-native-artifacts.mjs",
