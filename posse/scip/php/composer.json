@@ -10,6 +10,9 @@
     "post-update-cmd": "node patch-scip-php.mjs"
   },
   "config": {
+    "platform": {
+      "php": "8.3.0"
+    },
     "audit": {
       "block-insecure": false
     }

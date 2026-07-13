@@ -35,8 +35,9 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
 2. **Preflight checks** — validates the optional smoke-test repo and reports
    provider credential / Git identity gaps.
 3. **System packages** — installs missing Git and helper CLIs via winget: ripgrep,
-   Tesseract OCR, ImageMagick, FFmpeg, Python 3, PHP. Each tool tries its
-   winget id candidates independently, so one failure can't sink the rest.
+   Tesseract OCR, ImageMagick, FFmpeg, and Python 3. PHP is installed only when
+   `php` is explicitly selected for SCIP. Each tool tries its winget id
+   candidates independently, so one failure can't sink the rest.
    Tesseract's install dir is probed and added to `PATH` when its installer
    doesn't do so.
 4. **Node.js runtime** — accepts an existing Node ≥ 24; otherwise tries the
@@ -44,9 +45,12 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
    Node 24 is a minimum, not an exact-version pin; newer majors are accepted.
 5. **Posse checkout** — uses the checkout containing this installer when
    available; cloning is only a fallback for standalone use.
-6. **Composer (SCIP PHP)** — uses a global `composer` when present; otherwise
-   downloads a signature-verified `composer.phar` into Posse's `scip\bin`
-   (skipped when PHP is absent).
+6. **Composer (SCIP PHP, opt-in)** — skipped unless `php` was explicitly
+   selected; then uses a global `composer` when present or otherwise
+   configures PHP's bundled OpenSSL, cURL, and ZIP extensions (backing up an
+   existing `php.ini` once), verifies them in a new PHP process, then downloads a
+   signature-verified `composer.phar` into Posse's `scip\bin` (skipped when
+   PHP is absent).
 7. **npm dependencies** — `npm install --include=optional` (skipped when
    `node_modules` is fresh; one automatic retry).
 8. **Shell wiring** — writes `%USERPROFILE%\.config\posse\atlas.env.ps1`,
@@ -113,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
 | `-RepoPath <path>` | ATLAS repo path for the smoke test |
 | `-SmokeQuery <q>` | Query used for atlas-smoke (default: `auth`) |
 | `-SmokeProvider <p>` | Provider for atlas-smoke (default: `openai`) |
-| `-ScipLanguages <csv>` | Initial SCIP languages to install/index: `typescript`, `python`, `php`, `go`, `rust`, `clang`, or `all`. Omit for an interactive multi-select prompt. |
+| `-ScipLanguages <csv>` | Initial SCIP languages to install/index: `typescript`, `python`, `php`, `go`, `rust`, `clang`, or `all`. Default: `typescript,python`; PHP is opt-in. |
 | `-NoSmoke` | Skip the smoke test |
 | `-NoPersistEnv` | Don't write user `PATH` / `$PROFILE` wiring |
 | `-SkipSettings` | Don't seed `~\.posse\account.db` |

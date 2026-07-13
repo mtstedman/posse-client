@@ -43,7 +43,8 @@
 .PARAMETER ScipLanguages
   Initial SCIP languages to install/index. Values: typescript, python, php, go,
   rust, clang, or all. If omitted in an interactive shell, a multi-select prompt
-  is shown. Default: typescript,python,php.
+  is shown. Default: typescript,python. PHP is opt-in because its SCIP indexer
+  requires a separate PHP/Composer toolchain.
 
 .PARAMETER NoSmoke
   Skip the smoke test.
@@ -56,7 +57,7 @@
 
 .PARAMETER SkipHostTools
   Don't install helper CLI tools (rg, tesseract, ImageMagick, ffmpeg, Python,
-  PHP). Missing tools are still reported.
+  PHP when PHP SCIP is selected). Missing tools are still reported.
 
 .PARAMETER NoInstallNode
   Don't auto-install Node via winget when Node 24+ is missing.
@@ -112,7 +113,7 @@ $PossePhases        = "research,planning,assessment,dev"
 $PosseLiveFunnel    = "true"
 $PosseScipMode      = "on"
 $ScipLanguagesSupplied = $PSBoundParameters.ContainsKey("ScipLanguages")
-$PosseScipLanguages = if ($ScipLanguagesSupplied) { $ScipLanguages } else { "typescript,python,php" }
+$PosseScipLanguages = if ($ScipLanguagesSupplied) { $ScipLanguages } else { "typescript,python" }
 $NodeMinMajor       = 24
 
 # =============================================================================
@@ -236,6 +237,11 @@ $script:ScipLanguageStepNote = ""
 
 function Get-ScipLanguagesAllowedText {
   return (($script:ScipLanguageOptions | ForEach-Object { $_.Value }) -join ", ") + ", all"
+}
+
+function Test-ScipLanguageSelected {
+  param([string]$Language)
+  return (",$script:PosseScipLanguages,").Contains("," + $Language.ToLowerInvariant() + ",")
 }
 
 function Normalize-ScipLanguages {
@@ -755,6 +761,107 @@ function Test-ImageMagick {
   return (Test-Cmd "magick") -or (Test-Cmd "convert")
 }
 
+function Get-MissingPhpComposerExtensions {
+  param([string]$PhpPath)
+  $missing = @()
+  foreach ($extension in @("openssl", "curl", "zip")) {
+    $probe = 'exit(extension_loaded("{0}") ? 0 : 1);' -f $extension
+    try {
+      & $PhpPath -r $probe *> $null
+      if ($LASTEXITCODE -ne 0) { $missing += $extension }
+    }
+    catch { $missing += $extension }
+  }
+  return $missing
+}
+
+function Enable-PhpComposerExtensions {
+  param([string]$PhpPath)
+
+  $missingBefore = @(Get-MissingPhpComposerExtensions $PhpPath)
+  if ($missingBefore.Count -eq 0) {
+    return [PSCustomObject]@{ Ok = $true; Changed = $false; IniPath = ""; Message = "PHP Composer extensions already enabled" }
+  }
+
+  $phpBinary = ""
+  try { $phpBinary = [string](& $PhpPath -r 'echo PHP_BINARY;' 2>$null) } catch {}
+  if ([string]::IsNullOrWhiteSpace($phpBinary) -or -not (Test-Path -LiteralPath $phpBinary)) {
+    $phpBinary = $PhpPath
+  }
+  try { $phpBinary = (Resolve-Path -LiteralPath $phpBinary -ErrorAction Stop).Path } catch {}
+  $phpDir = Split-Path $phpBinary -Parent
+  $extDir = Join-Path $phpDir "ext"
+  $missingDlls = @($missingBefore | Where-Object { -not (Test-Path -LiteralPath (Join-Path $extDir ("php_{0}.dll" -f $_))) })
+  if ($missingDlls.Count -gt 0) {
+    return [PSCustomObject]@{
+      Ok = $false; Changed = $false; IniPath = ""
+      Message = ("the PHP distribution is missing extension DLL(s): {0}" -f ($missingDlls -join ", "))
+    }
+  }
+
+  $loadedIni = ""
+  try { $loadedIni = ([string](& $phpBinary -r 'echo php_ini_loaded_file() ?: "";' 2>$null)).Trim() } catch {}
+  $iniPath = if ($loadedIni) { $loadedIni } else { Join-Path $phpDir "php.ini" }
+  $created = $false
+  try {
+    if (-not (Test-Path -LiteralPath $iniPath)) {
+      $template = @(
+        (Join-Path $phpDir "php.ini-production"),
+        (Join-Path $phpDir "php.ini-development")
+      ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+      if (-not $template) {
+        return [PSCustomObject]@{
+          Ok = $false; Changed = $false; IniPath = $iniPath
+          Message = "PHP has no loaded php.ini or bundled php.ini template"
+        }
+      }
+      Copy-Item -LiteralPath $template -Destination $iniPath
+      $created = $true
+    }
+    else {
+      $backupPath = $iniPath + ".posse-backup"
+      if (-not (Test-Path -LiteralPath $backupPath)) {
+        Copy-Item -LiteralPath $iniPath -Destination $backupPath
+      }
+    }
+
+    $contents = [System.IO.File]::ReadAllText($iniPath)
+    $newline = if ($contents.Contains("`r`n")) { "`r`n" } else { "`n" }
+    # Remove active copies before appending a final authoritative block. The
+    # stock templates keep their commented examples as documentation.
+    $contents = [regex]::Replace($contents, '(?im)^[ \t]*extension_dir[ \t]*=.*(?:\r?\n)?', '')
+    $contents = [regex]::Replace($contents, '(?im)^[ \t]*extension[ \t]*=[ \t]*(?:php_)?(?:openssl|curl|zip)(?:\.dll)?[ \t]*(?:;.*)?(?:\r?\n)?', '')
+    $extIniPath = $extDir.Replace('\', '/')
+    $posseBlock = @(
+      "; Posse installer: secure and fast Composer package downloads.",
+      ('extension_dir = "{0}"' -f $extIniPath),
+      "extension=openssl",
+      "extension=curl",
+      "extension=zip"
+    ) -join $newline
+    $contents = $contents.TrimEnd([char[]]"`r`n") + $newline + $newline + $posseBlock + $newline
+    [System.IO.File]::WriteAllText($iniPath, $contents, (New-Object System.Text.UTF8Encoding($false)))
+  }
+  catch {
+    return [PSCustomObject]@{
+      Ok = $false; Changed = $created; IniPath = $iniPath
+      Message = ("could not configure PHP Composer extensions: {0}" -f $_.Exception.Message)
+    }
+  }
+
+  $missingAfter = @(Get-MissingPhpComposerExtensions $phpBinary)
+  if ($missingAfter.Count -gt 0) {
+    return [PSCustomObject]@{
+      Ok = $false; Changed = $true; IniPath = $iniPath
+      Message = ("PHP still cannot load extension(s) after configuring {0}: {1}" -f $iniPath, ($missingAfter -join ", "))
+    }
+  }
+  return [PSCustomObject]@{
+    Ok = $true; Changed = $true; IniPath = $iniPath
+    Message = ("enabled PHP OpenSSL, cURL, and ZIP in {0}" -f $iniPath)
+  }
+}
+
 # =============================================================================
 # steps
 # =============================================================================
@@ -768,13 +875,15 @@ function Step-Packages {
     [PSCustomObject]@{ Label = "Tesseract OCR"; Test = { Test-Cmd "tesseract" }; WingetIds = @("UB-Mannheim.TesseractOCR"); Reason = "image OCR extraction" },
     [PSCustomObject]@{ Label = "ImageMagick";   Test = { Test-ImageMagick };     WingetIds = @("ImageMagick.ImageMagick", "ImageMagick.Q16-HDRI", "ImageMagick.Q16"); Reason = "image conversion" },
     [PSCustomObject]@{ Label = "FFmpeg";        Test = { Test-Cmd "ffmpeg" };    WingetIds = @("Gyan.FFmpeg"); Reason = "media conversion" },
-    [PSCustomObject]@{ Label = "Python 3";      Test = { $null -ne (Get-PythonRunner) }; WingetIds = @("Python.Python.3.13", "Python.Python.3.12"); Reason = "Python helpers + managed venvs" },
-    [PSCustomObject]@{ Label = "PHP";           Test = { Test-Cmd "php" };       WingetIds = @("PHP.PHP.8.4", "PHP.PHP.8.3"); Reason = "php -l + SCIP PHP indexing" }
+    [PSCustomObject]@{ Label = "Python 3";      Test = { $null -ne (Get-PythonRunner) }; WingetIds = @("Python.Python.3.13", "Python.Python.3.12"); Reason = "Python helpers + managed venvs" }
   )
+  if (Test-ScipLanguageSelected "php") {
+    $tools += [PSCustomObject]@{ Label = "PHP"; Test = { Test-Cmd "php" }; WingetIds = @("PHP.PHP.8.4", "PHP.PHP.8.3"); Reason = "explicitly selected SCIP PHP indexing" }
+  }
 
   $missing = @($tools | Where-Object { -not (& $_.Test) })
   if ($missing.Count -eq 0) {
-    Step-End "ok" "all helper CLIs present (rg, tesseract, ImageMagick, ffmpeg, python, php)"
+    Step-End "ok" "all selected helper CLIs present"
     return
   }
 
@@ -947,17 +1056,30 @@ function Step-Checkout {
 function Step-Composer {
   Step-Begin "composer"
   if ($script:CriticalFailed) { Step-End "blocked"; return }
+  if (-not (Test-ScipLanguageSelected "php")) {
+    Step-End "skipped" "PHP SCIP not selected"
+    return
+  }
   $pharPath = Join-Path $script:PosseDirResolved "scip\bin\composer.phar"
+  $php = Get-Command php -ErrorAction SilentlyContinue
+  if ($php -and -not $DryRun) {
+    $phpExtensions = Enable-PhpComposerExtensions $php.Source
+    if (-not $phpExtensions.Ok) {
+      Write-Warn2 ("PHP Composer extension setup failed: {0}" -f $phpExtensions.Message)
+      Step-End "partial" "PHP Composer extensions unavailable; Composer skipped"
+      return
+    }
+    if ($phpExtensions.Changed) { Write-Info $phpExtensions.Message }
+  }
   if (Test-Cmd "composer") { Step-End "ok" "composer on PATH"; return }
   if (Test-Path $pharPath) { Step-End "ok" "composer.phar already present in scip\bin"; return }
-  $php = Get-Command php -ErrorAction SilentlyContinue
   if (-not $php) {
     Write-Warn2 "PHP is not installed, so Composer was skipped - SCIP PHP indexing stays disabled until both exist"
     Step-End "skipped" "php not available"
     return
   }
   if ($DryRun) {
-    Step-End "dry-run" "would download signature-verified composer.phar into scip\bin"
+    Step-End "dry-run" "would configure PHP Composer extensions and download signature-verified composer.phar into scip\bin"
     return
   }
 

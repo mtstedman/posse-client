@@ -40,7 +40,7 @@ POSSE_MODE="preferred"
 POSSE_PHASES="research,planning,assessment,dev"
 POSSE_LIVE_FUNNEL="true"
 POSSE_SCIP_MODE="on"
-POSSE_SCIP_LANGUAGES="typescript,python,php"
+POSSE_SCIP_LANGUAGES="typescript,python"
 POSSE_SCIP_LANGUAGES_SUPPLIED="false"
 SMOKE_QUERY="auth"
 SMOKE_PROVIDER="openai"
@@ -82,13 +82,15 @@ Options:
   --scip-languages <csv>  Initial SCIP languages to install/index. Values:
                           typescript, python, php, go, rust, clang, or all.
                           If omitted in an interactive shell, a multi-select
-                          prompt is shown. Default: typescript,python,php.
+                          prompt is shown. Default: typescript,python.
+                          PHP is opt-in because it needs PHP + Composer.
   --no-smoke              Skip smoke test
   --no-persist-env        Do not append env sourcing to shell rc files
   --skip-settings         Do not seed ~/.posse/account.db
   --skip-host-tools       Do not install system packages (build toolchain and
                           helper CLIs: rg, tesseract, ImageMagick, ffmpeg,
-                          Python, PHP). Missing tools are still reported.
+                          Python, and PHP only when PHP SCIP is selected).
+                          Missing tools are still reported.
   --no-install-node       Do not auto-install Node via nvm when Node 24+ is missing
   --configure-keys        Interactively prompt for provider API keys (stored in
                           ~/.config/posse/providers.env, chmod 600)
@@ -264,6 +266,13 @@ SCIP_LANGUAGE_STEP_NOTE=""
 scip_allowed_languages_text() {
   local joined="${SCIP_LANGUAGE_VALUES[*]}"
   printf '%s, all' "${joined// /, }"
+}
+
+scip_language_selected() {
+  case ",${POSSE_SCIP_LANGUAGES}," in
+    *",$1,"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 scip_language_alias() {
@@ -746,41 +755,57 @@ toolchain_packages() {
 # name|check-kind|packages(comma-separated candidates, tried in order)
 host_tools_table() {
   case "$PKG_MGR" in
-    apt-get) cat <<'EOT'
+    apt-get)
+      cat <<'EOT'
 ripgrep|rg|ripgrep
 tesseract|tesseract|tesseract-ocr
 imagemagick|magick_or_convert|imagemagick
 ffmpeg|ffmpeg|ffmpeg
+EOT
+      if scip_language_selected php; then cat <<'EOT'
 php|php|php-cli,php
 composer|composer|composer
 EOT
+      fi
       ;;
-    dnf|yum) cat <<'EOT'
+    dnf|yum)
+      cat <<'EOT'
 ripgrep|rg|ripgrep
 tesseract|tesseract|tesseract
 imagemagick|magick_or_convert|ImageMagick
 ffmpeg|ffmpeg|ffmpeg
+EOT
+      if scip_language_selected php; then cat <<'EOT'
 php|php|php-cli,php
 composer|composer|composer,php-composer
 EOT
+      fi
       ;;
-    pacman) cat <<'EOT'
+    pacman)
+      cat <<'EOT'
 ripgrep|rg|ripgrep
 tesseract|tesseract|tesseract
 imagemagick|magick_or_convert|imagemagick
 ffmpeg|ffmpeg|ffmpeg
+EOT
+      if scip_language_selected php; then cat <<'EOT'
 php|php|php
 composer|composer|composer
 EOT
+      fi
       ;;
-    zypper) cat <<'EOT'
+    zypper)
+      cat <<'EOT'
 ripgrep|rg|ripgrep
 tesseract|tesseract|tesseract-ocr
 imagemagick|magick_or_convert|ImageMagick
 ffmpeg|ffmpeg|ffmpeg
+EOT
+      if scip_language_selected php; then cat <<'EOT'
 php|php|php8-cli,php-cli,php8,php7
 composer|composer|php-composer,composer
 EOT
+      fi
       ;;
   esac
 }
@@ -1024,6 +1049,10 @@ do_install_composer_phar() {
 step_composer() {
   step_begin composer
   if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if ! scip_language_selected php; then
+    step_end skipped "PHP SCIP not selected"
+    return 0
+  fi
   if command -v composer >/dev/null 2>&1; then
     step_end ok "composer on PATH"
     return 0

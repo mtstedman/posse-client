@@ -34,7 +34,8 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
    and installs what's missing: core (`git`, `curl`), build toolchain
    (`build-essential`/`gcc`+`make`, `pkg-config`, `python3`, `python3-pip`,
    `python3-venv`, `unzip`), and helper CLIs (ripgrep, Tesseract OCR,
-   ImageMagick, FFmpeg, PHP, Composer). Helper CLIs install per-package, so one missing
+   ImageMagick, and FFmpeg). PHP and Composer are installed only when `php` is
+   explicitly selected for SCIP. Helper CLIs install per-package, so one missing
    package name can't sink the rest. Uses `sudo` (prompted once, up front)
    unless running as root.
 4. **Node.js runtime** — accepts an existing Node ≥ 24; otherwise installs
@@ -42,7 +43,8 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
    the run. `--no-install-node` opts out.
 5. **Posse checkout** — uses the checkout containing this installer when
    available; cloning is only a fallback for standalone use.
-6. **Composer (SCIP PHP)** — uses a global `composer` when present; otherwise
+6. **Composer (SCIP PHP, opt-in)** — skipped unless `php` was explicitly
+   selected; then uses a global `composer` when present or otherwise
    downloads a signature-verified `composer.phar` into Posse's `scip/bin`
    (skipped when PHP is absent).
 7. **npm dependencies** — `npm install --include=optional` (skipped when
@@ -107,7 +109,7 @@ With a smoke test against a repo:
 | `--repo-path <path>` | ATLAS repo path for the smoke test |
 | `--smoke-query <q>` | Query used for atlas-smoke (default: `auth`) |
 | `--smoke-provider <p>` | Provider for atlas-smoke (default: `openai`) |
-| `--scip-languages <csv>` | Initial SCIP languages to install/index: `typescript`, `python`, `php`, `go`, `rust`, `clang`, or `all`. Omit for an interactive multi-select prompt. |
+| `--scip-languages <csv>` | Initial SCIP languages to install/index: `typescript`, `python`, `php`, `go`, `rust`, `clang`, or `all`. Default: `typescript,python`; PHP is opt-in. |
 | `--no-smoke` | Skip the smoke test |
 | `--no-persist-env` | Don't append env sourcing to shell rc files |
 | `--skip-settings` | Don't seed `~/.posse/account.db` |
