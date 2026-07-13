@@ -1,7 +1,8 @@
 # Posse Native Binaries
 
 This directory can stage local development overrides for the native binaries Posse uses. The Rust helper binaries
-(`posse-atlas`, `posse-git`, `posse-remote`, and the opt-in `posse-vector`)
+(`posse-atlas`, `posse-git`, `posse-ml`, `posse-remote`, and the opt-in
+`posse-atlas-vector`)
 are remotely built, runtime-managed tools; their binary payloads are ignored by
 Git. The
 registry that describes them — package names, per-OS/arch build targets, and
@@ -31,14 +32,18 @@ lib/bin/
     windows/{x64,arm64}/posse-git.exe
     linux/{x64,arm64}/posse-git
     macos/posse-git              # universal
+  ml/
+    windows/{x64,arm64}/posse-ml.exe
+    linux/{x64,arm64}/posse-ml
+    macos/posse-ml               # universal
   remote/
     windows/{x64,arm64}/posse-remote.exe
     linux/{x64,arm64}/posse-remote
     macos/posse-remote           # universal
   vector/
-    windows/{x64,arm64}/posse-vector.exe
-    linux/{x64,arm64}/posse-vector
-    macos/posse-vector           # universal
+    windows/{x64,arm64}/posse-atlas-vector.exe
+    linux/{x64,arm64}/posse-atlas-vector
+    macos/posse-atlas-vector     # universal
   bossy/
     windows/{x64,arm64}/bossy.exe
     linux/{x64,arm64}/bossy
@@ -87,7 +92,7 @@ Windows ARM64 builds require the Visual Studio ARM64 C++ tools plus
 npm run rebuild:rust-binaries -- --platform current --rust-root <path-to-posse-bin>
 ```
 
-`posse-vector` is also owned by the consolidated workspace. An explicitly staged
+`posse-atlas-vector` is also owned by the consolidated workspace. An explicitly staged
 `lib/bin/<tool>/...` build remains a development override for every tool. Run
 boot otherwise mints an `artifacts:read` pulse, reads each current package
 version signed into that pulse, downloads the exact current OS/architecture

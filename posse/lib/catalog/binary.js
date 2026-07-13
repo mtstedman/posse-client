@@ -12,7 +12,7 @@
 // (lib/shared/platform/functions/native-platform.js), which reads the maps
 // exported here.
 
-export const BINARY_NAMES = Object.freeze(["atlas", "git", "remote", "vector"]);
+export const BINARY_NAMES = Object.freeze(["atlas", "git", "ml", "remote", "vector"]);
 export const VALID_BINARY_NAMES = new Set(BINARY_NAMES);
 export const REQUIRED_ATLAS_BINARY_NAMES = Object.freeze(["atlas", "vector"]);
 
@@ -92,10 +92,11 @@ function defineBinary(pkg, files, {
 export const NATIVE_BINARIES = Object.freeze({
   atlas: defineBinary("posse-atlas", { windows: "posse-atlas.exe", posix: "posse-atlas" }, { workerCapable: true }),
   git: defineBinary("posse-git", { windows: "posse-git.exe", posix: "posse-git" }, { workerCapable: true }),
+  ml: defineBinary("posse-ml", { windows: "posse-ml.exe", posix: "posse-ml" }),
   remote: defineBinary("posse-remote", { windows: "posse-remote.exe", posix: "posse-remote" }),
   vector: defineBinary(
-    "posse-vector",
-    { windows: "posse-vector.exe", posix: "posse-vector" },
+    "posse-atlas-vector",
+    { windows: "posse-atlas-vector.exe", posix: "posse-atlas-vector" },
     { workerCapable: true },
   ),
 });
