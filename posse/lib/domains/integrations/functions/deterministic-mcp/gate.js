@@ -178,9 +178,10 @@ export function unlockGateForDeadAtlasResult(resultText, { scopeKey = null, reas
   if (!gate.isActive()) return null;
   gate.unlockForAtlasUnavailable({ reason });
   const label = gate.atlasLabel || "ATLAS";
+  const readTool = gate.role === "researcher" ? "chain_read" : "read_file";
   return [
     `[${label}-first] ${label} is unavailable, so the ${label}-first gate has been unlocked for this job.`,
-    `Native research fallback tools (read_file, search_files, list_files, inspect_file, ...) are available now,`,
+    `Native research fallback tools (${readTool}, search_files, list_files, inspect_file, ...) are available now,`,
     `including reads of files that had no prior ${label} discovery. Use them directly; ${label} calls are not required first.`,
   ].join(" ");
 }

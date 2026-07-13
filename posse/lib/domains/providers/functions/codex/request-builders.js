@@ -255,6 +255,8 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
   atlasGateEnabled = false,
   atlasConfig = null,
   remoteToolSurfaceOptions = null,
+  remoteToolSurface = null,
+  remoteMcpOAuthToken = "",
 } = {}) {
   const enabled = roleUsesDeterministicReadMcp(role);
   if (!enabled) {
@@ -290,6 +292,8 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     atlasGateEnabled,
     atlasConfig,
     remoteToolSurfaceOptions,
+    remoteToolSurface,
+    remoteMcpOAuthToken,
   });
   if (!serverConfig?.ready) {
     return {

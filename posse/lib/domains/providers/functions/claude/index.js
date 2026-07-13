@@ -294,6 +294,7 @@ export async function callProvider(promptText, {
   executionMode = null,
   interactiveBackend = null,
   _remoteIssuedPolicy = null,
+  _remoteToolSurface = null,
 } = {}) {
   const resolvedClaude = await getClaudeCommandAsync();
   const providerPathsForAtlas = normalizeProviderPaths({ cwd, projectDir });
@@ -417,6 +418,7 @@ export async function callProvider(promptText, {
       atlasAvailable: atlasReadyForMcp,
       atlasGateEnabled: atlasToolGateEnabled,
       atlasConfig,
+      remoteToolSurface: _remoteToolSurface,
     });
     if (deterministicReadMcp.serverConfig?.ownerSession) {
       let released = false;

@@ -789,12 +789,21 @@ export class McpServerConfig {
     logMcpBootTelemetry("mcp.remote_surface.resolve_start", role, bootPayload, {
       outcome: "started",
       required: remoteToolSurfaceRequired(bootPayload),
+      source: opts.remoteToolSurface ? "prompt_issuance" : "catalog_endpoint",
     });
     try {
-      remoteResolution = await resolveRemoteMcpToolSurfaceWithRetry(bootPayload, {
-        attempts: opts.remoteToolSurfaceAttempts || 3,
-        remoteToolSurfaceOptions: opts.remoteToolSurfaceOptions || {},
-      });
+      // Prompt composition already resolved this exact remote-issued policy.
+      // Revalidate it below against role/provider and reuse it so a redundant
+      // catalog request cannot turn a successful issuance into an outage.
+      remoteResolution = opts.remoteToolSurface && typeof opts.remoteToolSurface === "object"
+        ? {
+            surface: opts.remoteToolSurface,
+            mcpOAuthToken: String(opts.remoteMcpOAuthToken || ""),
+          }
+        : await resolveRemoteMcpToolSurfaceWithRetry(bootPayload, {
+            attempts: opts.remoteToolSurfaceAttempts || 3,
+            remoteToolSurfaceOptions: opts.remoteToolSurfaceOptions || {},
+          });
     } catch (err) {
       remoteResolutionError = err;
       remoteResolution = null;
@@ -806,6 +815,7 @@ export class McpServerConfig {
       duration_ms: remoteDurationMs,
       remote_surface_present: !!remoteResolution?.surface,
       remote_oauth_present: !!remoteResolution?.mcpOAuthToken,
+      source: opts.remoteToolSurface ? "prompt_issuance" : "catalog_endpoint",
       remote_surface: remoteSurfaceSummary(remoteResolution?.surface || null),
       error: errorSummary(remoteResolutionError),
     });

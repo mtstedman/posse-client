@@ -85,6 +85,7 @@ export async function callProvider(promptText, {
   disableAtlas = false,
   atlasConfig = null,
   _remoteIssuedPolicy = null,
+  _remoteToolSurface = null,
 } = {}) {
   const readiness = await isReadyAsync();
   if (!readiness.ready) {
@@ -172,6 +173,7 @@ export async function callProvider(promptText, {
       atlasAvailable: atlasReadyForMcp,
       atlasGateEnabled: atlasToolGateEnabled,
       atlasConfig,
+      remoteToolSurface: _remoteToolSurface,
     });
     let deterministicMcpSessionReleased = false;
     const cleanupDeterministicMcpSession = () => {

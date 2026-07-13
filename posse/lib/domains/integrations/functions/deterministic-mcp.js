@@ -35,6 +35,7 @@ export function buildDeterministicReadMcpServerConfig(role, {
   readRoots = [],
   allowWrite = null,
   projectDbWrite = false,
+  projectDbCapability = "none",
   needsImageGeneration = false,
   providerName = null,
   disableSystemTools = false,
@@ -57,6 +58,7 @@ export function buildDeterministicReadMcpServerConfig(role, {
     readRoots,
     allowWrite,
     projectDbWrite,
+    projectDbCapability,
     needsImageGeneration,
     providerName,
     disableSystemTools,
@@ -81,6 +83,7 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
   readRoots = [],
   allowWrite = null,
   projectDbWrite = false,
+  projectDbCapability = "none",
   needsImageGeneration = false,
   providerName = null,
   disableSystemTools = false,
@@ -94,6 +97,8 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
   atlasGateEnabled = true,
   atlasConfig = null,
   remoteToolSurfaceOptions = null,
+  remoteToolSurface = null,
+  remoteMcpOAuthToken = "",
 } = {}) {
   const spawnArgs = (await McpServerConfig.forDeterministicReadAsync(role, {
     cwd,
@@ -104,6 +109,7 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
     readRoots,
     allowWrite,
     projectDbWrite,
+    projectDbCapability,
     needsImageGeneration,
     providerName,
     disableSystemTools,
@@ -117,6 +123,8 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
     atlasGateEnabled,
     atlasConfig,
     remoteToolSurfaceOptions,
+    remoteToolSurface,
+    remoteMcpOAuthToken,
   })).toSpawnArgs();
   // Running MCP-only means Posse is the sole source of context, so isolate the
   // provider CLI's home from its global memory/config. Generic + provider-keyed:

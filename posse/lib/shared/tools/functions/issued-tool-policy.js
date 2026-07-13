@@ -334,16 +334,21 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
   const issued = normalizeRemoteIssuedPolicy(value, opts);
   if (!source || !issued.valid) return null;
   const allowed = new Set(issued.toolSurface);
-  const tools = (Array.isArray(source.tools) ? source.tools : [])
-    .filter((entry) => {
+  const tools = (Array.isArray(source.tools) ? source.tools : issued.toolSurface)
+    .map((entry) => {
       const tool = canonicalToolEntry(entry);
-      return tool && allowed.has(tool.canonical);
+      if (!tool || !allowed.has(tool.canonical)) return null;
+      return plainObject(entry)
+        ? { ...entry }
+        : { suite: tool.suite, name: tool.canonical, local_name: tool.name };
     })
-    .map((entry) => ({ ...entry }));
+    .filter(Boolean);
   return {
     ...source,
     role: issued.role,
+    provider: issued.provider,
     tools,
+    tool_surface: issued.toolSurface.slice(),
     tool_policy: { ...issued.toolPolicy },
     web_access: { ...issued.webAccess },
     project_db_capability: issued.projectDbCapability,
@@ -450,6 +455,7 @@ function packetTaskMode(packet = {}, opts = {}) {
 export function narrowProviderOptionsToRemoteIssuance(options = {}) {
   const opts = { ...options };
   delete opts._remoteIssuedPolicy;
+  delete opts._remoteToolSurface;
   const packet = plainObject(opts.sessionPacket);
   const consumesRemote = !!packet && (
     packet.remote_prompt_composed === true
@@ -493,6 +499,9 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
       issued.toolPolicy.fallback_reads,
     ),
     _remoteIssuedPolicy: issued,
+    _remoteToolSurface: sanitizeRemoteToolSurfaceResponse(packet.remote_issuance, {
+      expectedRole: opts.role,
+    }),
   };
 }
 

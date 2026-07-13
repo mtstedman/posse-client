@@ -2580,7 +2580,7 @@ async function handleRequest(msg) {
         sendMessage(jsonRpcSuccess(id, {
           content: [{
             type: "text",
-            text: `ATLAS tool ${toolName} is intentionally not exposed. Use deterministic read_file/chain_read as the raw-read fallback after ATLAS discovery, or when ATLAS is unavailable or insufficient.`,
+            text: `ATLAS tool ${toolName} is intentionally not exposed. Use deterministic ${isResearcherRole ? "chain_read" : "read_file"} as the raw-read fallback after ATLAS discovery, or when ATLAS is unavailable or insufficient.`,
           }],
           isError: true,
         }));
