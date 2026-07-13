@@ -17,8 +17,6 @@
 // impls for testability, windowsHide, and taskkill-based termination on win32.
 
 import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 
 import {
@@ -37,10 +35,13 @@ import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { Daemon, ProcessTransport, daemonSupervisor } from "./daemon/index.js";
 import { HeartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
 import { PulseTokenManager } from "../../native/classes/PulseTokenManager.js";
+import {
+  defaultNativeBinRoot,
+  installedNativeArtifactVersionsSync,
+  nativeArtifactLayout,
+  nativeDevelopmentBinaryPaths,
+} from "../../native/functions/artifact-layout.js";
 
-const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
-// lib/shared/tools/classes -> lib/bin
-const DEFAULT_BIN_ROOT = path.resolve(THIS_DIR, "..", "..", "..", "bin");
 const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120000;
 // A silent probe only retires the host once it has produced no message at all
@@ -463,7 +464,7 @@ export class NativeBinary {
    * @returns {string}
    */
   get binRoot() {
-    return this._binRoot || process.env.POSSE_NATIVE_BIN_ROOT || DEFAULT_BIN_ROOT;
+    return this._binRoot || process.env.POSSE_NATIVE_BIN_ROOT || defaultNativeBinRoot();
   }
 
   /**
@@ -475,20 +476,26 @@ export class NativeBinary {
   candidatePaths() {
     const plat = nativeBinaryPlatform(this.name, this.os);
     if (!plat) return [];
-    const file = plat.destinationFile;
-    const direct = [
-      path.join(this.binRoot, this.name, this.os, this.arch, file),
-      path.join(this.binRoot, this.name, this.os, file),
-    ];
+    const direct = nativeDevelopmentBinaryPaths({
+      binRoot: this.binRoot,
+      name: this.name,
+      os: this.os,
+      arch: this.arch,
+    });
     const entry = nativeBinaryEntry(this.name);
     if (!entry?.package) return direct;
     const versions = this.exactVersion
       ? [this.exactVersion]
-      : installedVersions(path.join(this.binRoot, entry.package));
-    const downloaded = versions.flatMap((version) => [
-      path.join(this.binRoot, entry.package, version, this.os, this.arch, file),
-      path.join(this.binRoot, entry.package, version, this.os, file),
-    ]);
+      : installedNativeArtifactVersionsSync({ binRoot: this.binRoot, name: this.name });
+    const downloaded = versions
+      .map((version) => nativeArtifactLayout({
+        binRoot: this.binRoot,
+        name: this.name,
+        version,
+        os: this.os,
+        arch: this.arch,
+      })?.binaryPath)
+      .filter(Boolean);
     return this.exactVersion
       ? [...downloaded, ...direct]
       : [...direct, ...downloaded];
@@ -515,7 +522,22 @@ export class NativeBinary {
    * @returns {string | null}
    */
   expectedPath() {
-    const candidates = this.candidatePaths();
+    if (this.exactVersion) {
+      const downloaded = nativeArtifactLayout({
+        binRoot: this.binRoot,
+        name: this.name,
+        version: this.exactVersion,
+        os: this.os,
+        arch: this.arch,
+      });
+      if (downloaded) return downloaded.binaryPath;
+    }
+    const candidates = nativeDevelopmentBinaryPaths({
+      binRoot: this.binRoot,
+      name: this.name,
+      os: this.os,
+      arch: this.arch,
+    });
     if (candidates.length === 0) return null;
     const plat = nativeBinaryPlatform(this.name, this.os);
     return plat?.universal ? candidates[1] : candidates[0];
@@ -1353,21 +1375,5 @@ export class NativeBinary {
       } catch { /* fall through to signal */ }
     }
     try { child.kill("SIGKILL"); } catch { /* ignore */ }
-  }
-}
-
-function installedVersions(toolRoot) {
-  try {
-    return fs.readdirSync(toolRoot, { withFileTypes: true })
-      .filter((candidate) => candidate.isDirectory()
-        && /^[a-zA-Z0-9._-]{1,64}$/.test(candidate.name)
-        && !candidate.name.includes(".."))
-      .map((candidate) => candidate.name)
-      .sort((left, right) => right.localeCompare(left, undefined, {
-        numeric: true,
-        sensitivity: "base",
-      }));
-  } catch {
-    return [];
   }
 }

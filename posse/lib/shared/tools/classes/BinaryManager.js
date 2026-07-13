@@ -23,6 +23,7 @@ import {
   VALID_BINARY_NAMES,
   nativeBinaryEntry,
   nativeBinaryExactVersion,
+  nativeBinaryRequiresIssuedVersion,
 } from "../../../catalog/binary.js";
 import { getNativeBinaryEnabled } from "../../../domains/settings/functions/tunables.js";
 import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
@@ -389,7 +390,8 @@ export class BinaryManager {
       // explicit refresh before work starts; after that, default ensures only
       // recover a missing/invalid artifact and let the run finish on its
       // already-validated version.
-      if (!refresh && handle.isAvailable() && (name !== "vector" || handle.exactVersion)) {
+      if (!refresh && handle.isAvailable()
+        && (!nativeBinaryRequiresIssuedVersion(name) || handle.exactVersion)) {
         return {
           available: true,
           name,
@@ -505,7 +507,8 @@ export class BinaryManager {
   }
 
   async _activateCachedFallback(name, handle) {
-    if (handle.isAvailable() && (name !== "vector" || handle.exactVersion)) {
+    if (handle.isAvailable()
+      && (!nativeBinaryRequiresIssuedVersion(name) || handle.exactVersion)) {
       return {
         available: true,
         name,

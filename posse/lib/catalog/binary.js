@@ -12,8 +12,6 @@
 // (lib/shared/platform/functions/native-platform.js), which reads the maps
 // exported here.
 
-export const BINARY_NAMES = Object.freeze(["atlas", "git", "ml", "remote", "vector"]);
-export const VALID_BINARY_NAMES = new Set(BINARY_NAMES);
 export const REQUIRED_ATLAS_BINARY_NAMES = Object.freeze(["atlas", "vector"]);
 export const ATLAS_VECTOR_NATIVE_PROTOCOL = "posse.atlas.vector.native.v1";
 export const ATLAS_VECTOR_NATIVE_ROUTE = "atlas:vector";
@@ -46,13 +44,14 @@ export const ARCH_BY_NODE_ARCH = Object.freeze({
 /**
  * @param {string} pkg
  * @param {{ windows: string, posix: string }} files
- * @param {{ macosUniversal?: boolean, keyGated?: boolean, workerCapable?: boolean, exactVersion?: string | null }} [opts]
+ * @param {{ macosUniversal?: boolean, keyGated?: boolean, workerCapable?: boolean, exactVersion?: string | null, issuedVersionRequired?: boolean }} [opts]
  */
 function defineBinary(pkg, files, {
   macosUniversal = true,
   keyGated = true,
   workerCapable = false,
   exactVersion = null,
+  issuedVersionRequired = false,
 } = {}) {
   return Object.freeze({
     package: pkg,
@@ -63,6 +62,7 @@ function defineBinary(pkg, files, {
     keyGated,
     workerCapable,
     exactVersion,
+    issuedVersionRequired,
     platforms: Object.freeze({
       windows: Object.freeze({
         sourceFile: files.windows,
@@ -107,9 +107,15 @@ export const NATIVE_BINARIES = Object.freeze({
   vector: defineBinary(
     "posse-atlas-vector",
     { windows: "posse-atlas-vector.exe", posix: "posse-atlas-vector" },
-    { workerCapable: true },
+    { workerCapable: true, issuedVersionRequired: true },
   ),
 });
+
+// Inventory is derived from the registry itself. Adding a catalog entry is
+// enough to propagate it to pull/reconcile loops; there is no second name list
+// to remember to update.
+export const BINARY_NAMES = Object.freeze(Object.keys(NATIVE_BINARIES));
+export const VALID_BINARY_NAMES = new Set(BINARY_NAMES);
 
 /**
  * @param {string} name
@@ -155,6 +161,10 @@ export function nativeBinaryIsKeyGated(name) {
 
 export function nativeBinaryIsWorkerCapable(name) {
   return nativeBinaryEntry(name)?.workerCapable === true;
+}
+
+export function nativeBinaryRequiresIssuedVersion(name) {
+  return nativeBinaryEntry(name)?.issuedVersionRequired === true;
 }
 
 export function nativeBinaryExactVersion(name) {

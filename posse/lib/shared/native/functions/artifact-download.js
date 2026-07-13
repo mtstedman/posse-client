@@ -4,52 +4,51 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
 
 import {
   VALID_BINARY_NAMES,
   nativeBinaryEntry,
-  nativeBinaryPlatform,
 } from "../../../catalog/binary.js";
 import { PulseTokenManager } from "../classes/PulseTokenManager.js";
+import {
+  defaultNativeBinRoot,
+  installedNativeArtifactVersions,
+  nativeArtifactLayout,
+  nativeArtifactVersionRoot,
+} from "./artifact-layout.js";
 
 export const NATIVE_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024;
 const ARTIFACT_ROUTE_GRANT = "artifacts:read";
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const ERROR_RESPONSE_MAX_BYTES = 4 * 1024;
-const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 export function defaultNativeArtifactCacheRoot() {
-  // lib/shared/native/functions -> lib/bin. Downloads belong to the
-  // Posse installation so a fresh process resolves the same versioned files
-  // that install/update/boot populated.
-  return path.resolve(THIS_DIR, "..", "..", "..", "bin");
+  return defaultNativeBinRoot();
 }
 
 /** @param {{ cacheRoot?: string, name: string, version: string }} args */
 export function nativeArtifactBundleRoot({ cacheRoot = defaultNativeArtifactCacheRoot(), name, version }) {
-  const entry = nativeBinaryEntry(name);
-  if (!entry || !version) return null;
-  const normalizedVersion = String(version || "").trim();
-  if (!/^[a-zA-Z0-9._-]{1,64}$/.test(normalizedVersion)
-    || normalizedVersion.includes("..")) return null;
-  return path.join(cacheRoot, entry.package, normalizedVersion);
+  return nativeArtifactVersionRoot({ binRoot: cacheRoot, name, version });
 }
 
 /** @param {{ cacheRoot?: string, name: string, version: string, os: string, arch: string }} args */
 export function nativeArtifactCachePath({ cacheRoot, name, version, os: osToken, arch }) {
-  const entry = nativeBinaryEntry(name);
-  const platform = nativeBinaryPlatform(name, osToken);
   const resolvedCacheRoot = cacheRoot || defaultNativeArtifactCacheRoot();
-  const versionRoot = nativeArtifactBundleRoot({ cacheRoot: resolvedCacheRoot, name, version });
-  if (!entry || !platform || !versionRoot || !platform.arches?.[arch]) return null;
-  return {
-    package: entry.package,
+  const layout = nativeArtifactLayout({
+    binRoot: resolvedCacheRoot,
+    name,
     version,
-    bundleRoot: resolvedCacheRoot,
-    binaryPath: path.join(versionRoot, osToken, arch, platform.destinationFile),
-    checksumPath: path.join(versionRoot, osToken, arch, `${platform.destinationFile}.sha256`),
-    filename: platform.destinationFile,
+    os: osToken,
+    arch,
+  });
+  if (!layout) return null;
+  return {
+    package: layout.package,
+    version: layout.version,
+    bundleRoot: layout.binRoot,
+    binaryPath: layout.binaryPath,
+    checksumPath: layout.checksumPath,
+    filename: layout.filename,
   };
 }
 
@@ -75,16 +74,7 @@ export async function findVerifiedNativeBinaryArtifact({
   if (String(version || "").trim()) {
     versions = [String(version).trim()];
   } else {
-    try {
-      versions = (await fsp.readdir(path.join(cacheRoot, entry.package), { withFileTypes: true }))
-        .filter((candidate) => candidate.isDirectory()
-          && /^[a-zA-Z0-9._-]{1,64}$/.test(candidate.name)
-          && !candidate.name.includes(".."))
-        .map((candidate) => candidate.name)
-        .sort((left, right) => right.localeCompare(left, undefined, { numeric: true, sensitivity: "base" }));
-    } catch {
-      return null;
-    }
+    versions = await installedNativeArtifactVersions({ binRoot: cacheRoot, name });
   }
   for (const version of versions) {
     const selected = nativeArtifactCachePath({ cacheRoot, name, version, os: osToken, arch });
