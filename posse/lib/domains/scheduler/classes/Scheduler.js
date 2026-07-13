@@ -509,6 +509,11 @@ export class Scheduler {
     this._nextReadyAtCacheMs = null;
   }
 
+  _isJobInRunScope(job) {
+    return this.onlyWorkItemIds.length === 0
+      || this.onlyWorkItemIds.includes(Number(job?.work_item_id));
+  }
+
   /**
    * True while new non-warm job dispatch should be held because the ATLAS
    * conductor is actively indexing. Tracks the hold episode so the pause and
@@ -1605,7 +1610,8 @@ export class Scheduler {
         this._cancelDeadlockedJobs();
 
         const trackedStatusesForCloseout = ["queued", ...LOCK_HOLDING_JOB_STATUSES];
-        const trackedJobsForCloseout = listJobs(trackedStatusesForCloseout);
+        const trackedJobsForCloseout = listJobs(trackedStatusesForCloseout)
+          .filter((job) => this._isJobInRunScope(job));
         const activeBackgroundJobs = [...activeWorkers.values()]
           .map((entry) => entry.job)
           .filter(isRunBackgroundJob);
@@ -1983,12 +1989,10 @@ export class Scheduler {
         });
 
         if (!launched && activeWorkers.size === 0) {
-          // Nothing running and nothing to start — fold the 3 hasJobs probes +
-          // the runnableNow re-query into one GROUP BY snapshot plus the batch
-          // result we already have in hand.
-          const trackedStatuses = ["queued", ...LOCK_HOLDING_JOB_STATUSES];
-          const statusCounts = countJobsByStatus();
-          const anyTracked = trackedStatuses.some((s) => (statusCounts[s] || 0) > 0);
+          // Nothing running and nothing to start. Reuse the tracked rows from
+          // this tick so scoped runs ignore unrelated queued/active jobs when
+          // deciding whether their own work is complete.
+          const anyTracked = trackedJobsForCloseout.length > 0;
           if (!anyTracked) {
             this._invokeCallback("onDone", onDone);
             break;
@@ -1998,13 +2002,8 @@ export class Scheduler {
           // + hard deps met). Non-zero here means we saw eligible jobs, but
           // all were blocked by concurrency or file-scope conflict.
           const runnableNow = candidateCount > 0;
-          const hasActive =
-            (statusCounts.leased || 0) > 0
-            || (statusCounts.running || 0) > 0
-            || (statusCounts.awaiting_assessment || 0) > 0
-            || (statusCounts.waiting_on_human || 0) > 0
-            || (statusCounts.waiting_on_review || 0) > 0;
-          const hasQueued = (statusCounts.queued || 0) > 0;
+          const hasActive = trackedJobsForCloseout.some((job) => LOCK_HOLDING_JOB_STATUSES.includes(job.status));
+          const hasQueued = trackedJobsForCloseout.some((job) => job.status === "queued");
           const canProgress = runnableNow || hasActive || hasQueued;
           if (!canProgress) {
             this._invokeCallback("onDone", onDone);
@@ -2013,7 +2012,7 @@ export class Scheduler {
 
           idleCount++;
           if (onIdle && idleCount === 1) {
-            this._invokeCallback("onIdle", onIdle, listJobs(trackedStatuses));
+            this._invokeCallback("onIdle", onIdle, trackedJobsForCloseout);
           }
         }
 
