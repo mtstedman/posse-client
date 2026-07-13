@@ -42,15 +42,16 @@ export async function nestedProjectSubpathAsync(projectDir, options = {}) {
 }
 
 export function worktreeRoot(projectDir, nativeParity = {}) {
-  return runGitNativeMethod(
-    "git.worktree.root",
-    { projectDir: path.resolve(projectDir), create: true },
-    nativeParity,
-  );
+  const [method, payload] = worktreeRootRequest(projectDir);
+  return runGitNativeMethod(method, payload, nativeParity);
 }
 
 // Shared request builders: method string + payload normalization live once so
 // the sync/async executor twins cannot drift on what they send.
+function worktreeRootRequest(projectDir) {
+  return ["git.worktree.root", { projectDir: path.resolve(projectDir), create: true }];
+}
+
 function worktreePathRequest(projectDir, wiId) {
   return ["git.worktree.path", { projectDir: path.resolve(projectDir), wiId: String(wiId) }];
 }
@@ -72,6 +73,11 @@ export function findLegacyWorktreeForWi(projectDir, wiId, nativeParity = {}) {
 // Async twins for main-thread call sites (e.g. the TUI diff-review builder): the
 // native git call runs off the event loop so a render frame never blocks on a
 // per-call posse-git spawn.
+export function worktreeRootAsync(projectDir, options = {}) {
+  const [method, payload] = worktreeRootRequest(projectDir);
+  return runGitNativeMethodAsync(method, payload, options);
+}
+
 export function worktreePathAsync(projectDir, wiId, _wiTitle = null, options = {}) {
   const [method, payload] = worktreePathRequest(projectDir, wiId);
   return runGitNativeMethodAsync(method, payload, options);

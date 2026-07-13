@@ -286,11 +286,35 @@ export class NativeBinary {
     const list = Array.isArray(routes) && routes.length > 0 ? routes : this.#defaultRoutes();
     await Promise.all(list.map(async (route) => {
       try {
-        await this.#pulseManager().getPulseEnvelope(
-          this.#versionedPulseOptions(String(route || "").trim()),
-        );
+        await this.ensureNativeAuth([route]);
       } catch { /* dispatch fails closed when no pulse is available */ }
     }));
+  }
+
+  /**
+   * Establish the route grants this handle will need before any protected
+   * native call runs. Unlike the fire-and-forget prewarm used by lazy daemon
+   * construction, startup callers await this strict form so a cold or rejected
+   * heartbeat fails at the boot boundary instead of surfacing later from a
+   * synchronous native helper.
+   *
+   * @param {string[]} [routes]
+   * @returns {Promise<Readonly<Record<string, unknown>>[]>}
+   */
+  async ensureNativeAuth(routes = []) {
+    if (!this.keyGated) return [];
+    const list = [...new Set(
+      (Array.isArray(routes) && routes.length > 0 ? routes : this.#defaultRoutes())
+        .map((route) => String(route || "").trim())
+        .filter(Boolean),
+    )];
+    const envelopes = await Promise.all(list.map((route) => (
+      this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route))
+    )));
+    if (envelopes.some((envelope) => !isValidPulseEnvelope(envelope))) {
+      throw new Error(`native pulse token heartbeat auth unavailable for ${this.name}`);
+    }
+    return /** @type {Readonly<Record<string, unknown>>[]} */ (envelopes);
   }
 
   /** Route grants this binary requests when no explicit route is threaded. */

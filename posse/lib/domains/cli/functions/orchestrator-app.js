@@ -841,6 +841,11 @@ async function init({ requireWritableArtifacts = true, refreshStartupContext = f
         if (!result?.available) {
           throw new Error(`posse-git unavailable (${result?.reason || "unknown"})`);
         }
+        // Authentication is a startup prerequisite for every key-gated Git
+        // call. Warm both route grants on the live handle before readiness or
+        // command dispatch so sync compatibility helpers never race a cold
+        // heartbeat cache (git:read alone cannot authorize create/mutate work).
+        await nativeBinaries.binary("git").ensureNativeAuth(["git:read", "git:mutate"]);
         const active = await nativeBinaries.ensureActive("git");
         if (!active?.active) {
           throw new Error(`posse-git inactive (${active?.reason || "unknown"})`);

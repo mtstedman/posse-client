@@ -4,14 +4,17 @@ import { initArtifactRoots, pruneEmptyArtifactDirs } from "../../artifacts/funct
 import { buildInventory, inventoryIsEmpty, inventorySummary } from "../../cleanup/functions/survey.js";
 import { triageInventory, buildItemIndex } from "../../cleanup/functions/triage.js";
 import { applyAction } from "../../cleanup/functions/actions.js";
-import { deleteBranchPreservingTip, snapshotAndResetDirtyWorktree } from "../../git/functions/worktree.js";
+import {
+  deleteBranchPreservingTip,
+  snapshotAndResetDirtyWorktree,
+  worktreeRootAsync as defaultWorktreeRootAsync,
+} from "../../git/functions/worktree.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { clearAll, getLiveSchedulerBlockMessage, listWorkItems } from "../../queue/functions/index.js";
 import { C as defaultColors } from "../../../shared/format/functions/colors.js";
 import { ask as defaultAsk } from "./input-prompts.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
-import { worktreeRoot } from "../../worker/classes/Worker.js";
 
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 
@@ -50,6 +53,7 @@ export function createMaintenanceCommands({
   gitBranchExists,
   gitWorktreePathsForBranch,
   gitWorktreeRemove,
+  worktreeRootAsync = defaultWorktreeRootAsync,
 } = {}) {
   if (!projectDir) throw new Error("createMaintenanceCommands requires projectDir");
 
@@ -57,6 +61,7 @@ export function createMaintenanceCommands({
   const branchExists = requireFn("gitBranchExists", gitBranchExists);
   const branchWorktreePaths = requireFn("gitWorktreePathsForBranch", gitWorktreePathsForBranch);
   const removeWorktree = requireFn("gitWorktreeRemove", gitWorktreeRemove);
+  const resolveWorktreeRoot = requireFn("worktreeRootAsync", worktreeRootAsync);
 
   function resolveMaintenanceTargetBranch(commandName) {
     const resolved = typeof getTargetBranch === "function" ? getTargetBranch() : targetBranch;
@@ -104,7 +109,7 @@ export function createMaintenanceCommands({
       return;
     }
 
-    const wtRoot = worktreeRoot(projectDir);
+    const wtRoot = await resolveWorktreeRoot(projectDir);
     if (fs.existsSync(wtRoot)) {
       try {
         gitExec(["worktree", "prune"], projectDir);
