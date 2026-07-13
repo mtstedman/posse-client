@@ -1158,8 +1158,18 @@ export class PersistentMcpOwner {
         });
         const grant = await handshakes.issue(body);
         sendJson(res, 200, { ok: true, grant });
-      } catch {
-        sendJson(res, 503, { ok: false, error: "heartbeat_unavailable" });
+      } catch (error) {
+        const code = String(error?.code || "");
+        if (code === "POSSE_CAPABILITY_SCOPE_DENIED"
+          || code === "POSSE_CAPABILITY_SCOPE_WIDENED"
+          || code === "POSSE_PULSE_ROUTE_DENIED"
+          || code === "POSSE_PARENT_PULSE_DENIED") {
+          sendJson(res, 403, { ok: false, error: "capability_denied", code });
+        } else if (code === "POSSE_CAPABILITY_REQUEST_INVALID" || code === "POSSE_CAPABILITY_PROTOCOL_INVALID") {
+          sendJson(res, 400, { ok: false, error: "invalid_capability_request", code });
+        } else {
+          sendJson(res, 503, { ok: false, error: "heartbeat_unavailable" });
+        }
       }
       return;
     }

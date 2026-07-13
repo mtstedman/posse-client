@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 
 import { heartbeatAuthManager } from "./HeartbeatAuthManager.js";
 import { isLoopbackHostname } from "../functions/auth.js";
+import { scopeGrantedBy } from "../../permissions/functions/scope-grants.js";
 
 const DEFAULT_REFRESH_SKEW_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -596,10 +597,7 @@ function assertExactRoute(routes, requiredRoute) {
 function assertRouteGranted(routes, requiredRoute) {
   const required = String(requiredRoute || "").trim();
   if (!required) return;
-  const granted = routes.some((route) => route === "*"
-    || route === required
-    || (required === "git:read" && route === "git:mutate"));
-  if (!granted) {
+  if (!scopeGrantedBy(routes, required)) {
     throw pulseError("POSSE_PULSE_ROUTE_DENIED", "pulse token does not authorize the requested route");
   }
 }

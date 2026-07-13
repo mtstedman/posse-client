@@ -1,5 +1,7 @@
 // @ts-check
 
+import { scopeGrantedBy } from "../functions/scope-grants.js";
+
 export const CAPABILITY_HANDSHAKE_PROTOCOL = "posse.capability-handshake.v1";
 const MAX_SCOPES = 128;
 const MAX_GRANT_BYTES = 256 * 1024;
@@ -53,16 +55,15 @@ export class CapabilityHandshakeManager {
   #finalize(request, rawGrant) {
     const grant = plainObject(rawGrant);
     const parentScopes = normalizeScopes(grant.parentScopes, "parent grant");
-    const parentSet = new Set(parentScopes);
     for (const scope of request.scopes) {
-      if (!parentSet.has(scope)) {
+      if (!scopeGrantedBy(parentScopes, scope)) {
         throw handshakeError("POSSE_CAPABILITY_SCOPE_DENIED", `parent capability does not authorize scope ${scope}`);
       }
     }
     const grantedScopes = normalizeScopes(grant.scopes ?? request.scopes, "child grant");
     const requestedSet = new Set(request.scopes);
     for (const scope of grantedScopes) {
-      if (!requestedSet.has(scope) || !parentSet.has(scope)) {
+      if (!requestedSet.has(scope) || !scopeGrantedBy(parentScopes, scope)) {
         throw handshakeError("POSSE_CAPABILITY_SCOPE_WIDENED", `child capability widened scope ${scope}`);
       }
     }

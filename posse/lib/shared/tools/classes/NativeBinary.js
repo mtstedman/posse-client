@@ -361,8 +361,8 @@ export class NativeBinary {
       ]));
       const pulses = Object.fromEntries(entries);
       const expiresAt = Math.min(...entries.map(([, pulse]) => Number(pulse?.expiresAt) || 0));
-      let root = null;
-      try { root = await this.#pulseManager().getHeartbeatGrant?.(); } catch { root = null; }
+      const root = await this.#pulseManager().getHeartbeatGrant?.();
+      if (!root) throw new Error("parent heartbeat grant is unavailable");
       const grantedRoutes = entries
         .filter(([route, pulse]) => isValidPulseEnvelope(pulse) && String(pulse?.route || "") === route)
         .map(([route]) => route);
@@ -370,14 +370,14 @@ export class NativeBinary {
         // A child broker may only know the route grants its own parent handed
         // it. Treat the successfully returned signed envelopes as that parent
         // authority instead of assuming this binary's catalog routes.
-        parentScopes: root?.routes || grantedRoutes,
+        parentScopes: root.routes,
         scopes: grantedRoutes,
-        parentExpiresAt: root?.expiresAt || expiresAt,
+        parentExpiresAt: root.expiresAt,
         expiresAt,
         permissions: { routes: grantedRoutes },
         tokens: { pulses },
-        pins: root?.pins || {},
-        keys: root?.keys || {},
+        pins: root.pins || {},
+        keys: root.keys || {},
       };
     });
     try {
@@ -396,7 +396,14 @@ export class NativeBinary {
         this.#noteWorkerPulse(route, pulse);
         this.#resolveWorkerAuthWaiters(route, true);
       }
-    } catch {
+    } catch (error) {
+      for (const route of requested) this.#resolveWorkerAuthWaiters(route, false);
+      appendRunTelemetry("diagnostics", {
+        kind: "native.capability_handoff_failed",
+        binary: this.name,
+        routes: requested,
+        code: String(error?.code || "POSSE_CAPABILITY_HANDOFF_FAILED"),
+      });
       // The worker keeps its previous live pulse and asks again. Protected work
       // remains fail-closed if no valid grant can be handed down.
     }

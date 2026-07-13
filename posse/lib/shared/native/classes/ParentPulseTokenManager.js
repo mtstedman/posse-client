@@ -25,6 +25,8 @@ export class ParentPulseTokenManager {
       throw new TypeError("ParentPulseTokenManager requires a private parent broker capability");
     }
     this._cache = new Map();
+    this._grants = new Map();
+    this._deniedRoutes = new Set();
     this._refreshes = new Map();
   }
 
@@ -41,6 +43,9 @@ export class ParentPulseTokenManager {
   async getPulseEnvelope({ refresh = false, requiredRoute } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) throw brokerError("POSSE_PULSE_ROUTE_REQUIRED", "a parent pulse request requires an explicit route");
+    if (this._deniedRoutes.has(route)) {
+      throw brokerError("POSSE_PARENT_PULSE_DENIED", `parent pulse broker does not authorize route ${route}`);
+    }
     const cached = this.getCachedPulseEnvelope({ requiredRoute: route });
     if (!refresh && cached && Date.now() < Number(cached.refreshAfter) * 1000) return cached;
     const inFlight = this._refreshes.get(route);
@@ -55,8 +60,10 @@ export class ParentPulseTokenManager {
   getCachedPulseEnvelope({ requiredRoute } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     const envelope = this._cache.get(route) || null;
-    if (!validEnvelope(envelope, route)) {
+    const grant = this._grants.get(route) || null;
+    if (!validEnvelope(envelope, route) || !validRouteGrant(grant, envelope)) {
       if (envelope) this._cache.delete(route);
+      if (grant) this._grants.delete(route);
       return null;
     }
     return envelope;
@@ -70,8 +77,26 @@ export class ParentPulseTokenManager {
     return envelope?.token || null;
   }
 
+  getHeartbeatGrant() {
+    const live = [...this._grants.entries()]
+      .filter(([route, grant]) => validEnvelope(this._cache.get(route), route)
+        && Number(grant?.expiresAt) > Math.floor(Date.now() / 1000));
+    if (live.length === 0) return null;
+    const expiresAt = Math.min(...live.map(([, grant]) => Number(grant.expiresAt)));
+    const pins = live[0][1]?.pins || {};
+    const keys = live[0][1]?.keys || {};
+    return Object.freeze({
+      routes: Object.freeze(live.map(([route]) => route)),
+      expiresAt,
+      pins: Object.freeze({ ...pins }),
+      keys: Object.freeze({ ...keys }),
+    });
+  }
+
   clearAuthentication() {
     this._cache.clear();
+    this._grants.clear();
+    this._deniedRoutes.clear();
     this._refreshes.clear();
   }
 
@@ -107,7 +132,15 @@ export class ParentPulseTokenManager {
         });
         res.on("end", () => {
           if (res.statusCode !== 200) {
-            reject(brokerError("POSSE_PARENT_PULSE_REJECTED", `parent pulse broker rejected the request with HTTP ${res.statusCode || 0}`));
+            const status = Number(res.statusCode) || 0;
+            if (status === 401 || status === 403) {
+              this._cache.delete(route);
+              this._grants.delete(route);
+              this._deniedRoutes.add(route);
+              reject(brokerError("POSSE_PARENT_PULSE_DENIED", `parent pulse broker denied route ${route}`));
+              return;
+            }
+            reject(brokerError("POSSE_PARENT_PULSE_REJECTED", `parent pulse broker rejected the request with HTTP ${status}`));
             return;
           }
           let parsed;
@@ -115,13 +148,30 @@ export class ParentPulseTokenManager {
             reject(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response was not valid JSON"));
             return;
           }
-          const envelope = parsed?.grant?.artifacts?.tokens?.pulses?.[route] || null;
+          const grant = parsed?.grant;
+          const envelope = grant?.artifacts?.tokens?.pulses?.[route] || null;
+          if (grant?.protocol !== CAPABILITY_HANDSHAKE_PROTOCOL
+            || grant?.capability !== "native.pulse"
+            || !Array.isArray(grant?.scopes)
+            || !grant.scopes.includes(route)) {
+            reject(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response contained an invalid capability grant"));
+            return;
+          }
           if (!validEnvelope(envelope, route)) {
             reject(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response did not contain the requested route grant"));
             return;
           }
+          if (!validRouteGrant(grant, envelope)) {
+            reject(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response contained an invalid grant expiry"));
+            return;
+          }
           const frozen = Object.freeze({ ...envelope });
           this._cache.set(route, frozen);
+          this._grants.set(route, Object.freeze({
+            expiresAt: Number(grant.expiresAt),
+            pins: Object.freeze({ ...(grant.artifacts?.pins || {}) }),
+            keys: Object.freeze({ ...(grant.artifacts?.keys || {}) }),
+          }));
           resolve(frozen);
         });
       });
@@ -130,7 +180,9 @@ export class ParentPulseTokenManager {
       }, this.timeoutMs);
       timer.unref?.();
       req.on("close", () => clearTimeout(timer));
-      req.on("error", () => reject(brokerError("POSSE_PARENT_PULSE_UNAVAILABLE", "parent pulse broker is unavailable")));
+      req.on("error", (error) => reject(error?.code
+        ? error
+        : brokerError("POSSE_PARENT_PULSE_UNAVAILABLE", "parent pulse broker is unavailable")));
       req.end(body);
     });
   }
@@ -140,7 +192,20 @@ function validEnvelope(value, route) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   if (String(value.route || "") !== route) return false;
   if (!String(value.token || "").trim() || !String(value.kid || "").trim()) return false;
-  return Number(value.expiresAt) > Math.floor(Date.now() / 1000);
+  const expiresAt = Number(value.expiresAt);
+  const refreshAfter = Number(value.refreshAfter);
+  return Number.isSafeInteger(expiresAt)
+    && Number.isSafeInteger(refreshAfter)
+    && refreshAfter > 0
+    && refreshAfter < expiresAt
+    && expiresAt > Math.floor(Date.now() / 1000);
+}
+
+function validRouteGrant(grant, envelope) {
+  const expiresAt = Number(grant?.expiresAt);
+  return Number.isSafeInteger(expiresAt)
+    && expiresAt > Math.floor(Date.now() / 1000)
+    && expiresAt <= Number(envelope?.expiresAt);
 }
 
 function positiveNumber(value, fallback) {
