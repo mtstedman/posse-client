@@ -2,9 +2,9 @@
 
 import fs from "node:fs";
 import fsp from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import {
   VALID_BINARY_NAMES,
@@ -17,30 +17,38 @@ export const NATIVE_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024;
 const ARTIFACT_ROUTE_GRANT = "artifacts:read";
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const ERROR_RESPONSE_MAX_BYTES = 4 * 1024;
+const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 export function defaultNativeArtifactCacheRoot() {
-  return path.join(os.homedir(), ".posse", "native", "bundles");
+  // lib/shared/native/functions -> lib/bin. Downloads belong to the
+  // Posse installation so a fresh process resolves the same versioned files
+  // that install/update/boot populated.
+  return path.resolve(THIS_DIR, "..", "..", "..", "bin");
 }
 
 /** @param {{ cacheRoot?: string, name: string, version: string }} args */
 export function nativeArtifactBundleRoot({ cacheRoot = defaultNativeArtifactCacheRoot(), name, version }) {
   const entry = nativeBinaryEntry(name);
   if (!entry || !version) return null;
-  return path.join(cacheRoot, entry.package, version);
+  const normalizedVersion = String(version || "").trim();
+  if (!/^[a-zA-Z0-9._-]{1,64}$/.test(normalizedVersion)
+    || normalizedVersion.includes("..")) return null;
+  return path.join(cacheRoot, entry.package, normalizedVersion);
 }
 
 /** @param {{ cacheRoot?: string, name: string, version: string, os: string, arch: string }} args */
 export function nativeArtifactCachePath({ cacheRoot, name, version, os: osToken, arch }) {
   const entry = nativeBinaryEntry(name);
   const platform = nativeBinaryPlatform(name, osToken);
-  const bundleRoot = nativeArtifactBundleRoot({ cacheRoot, name, version });
-  if (!entry || !platform || !bundleRoot || !platform.arches?.[arch]) return null;
+  const resolvedCacheRoot = cacheRoot || defaultNativeArtifactCacheRoot();
+  const versionRoot = nativeArtifactBundleRoot({ cacheRoot: resolvedCacheRoot, name, version });
+  if (!entry || !platform || !versionRoot || !platform.arches?.[arch]) return null;
   return {
     package: entry.package,
     version,
-    bundleRoot,
-    binaryPath: path.join(bundleRoot, name, osToken, arch, platform.destinationFile),
-    checksumPath: path.join(bundleRoot, name, osToken, arch, `${platform.destinationFile}.sha256`),
+    bundleRoot: resolvedCacheRoot,
+    binaryPath: path.join(versionRoot, osToken, arch, platform.destinationFile),
+    checksumPath: path.join(versionRoot, osToken, arch, `${platform.destinationFile}.sha256`),
     filename: platform.destinationFile,
   };
 }
@@ -69,7 +77,9 @@ export async function findVerifiedNativeBinaryArtifact({
   } else {
     try {
       versions = (await fsp.readdir(path.join(cacheRoot, entry.package), { withFileTypes: true }))
-        .filter((candidate) => candidate.isDirectory())
+        .filter((candidate) => candidate.isDirectory()
+          && /^[a-zA-Z0-9._-]{1,64}$/.test(candidate.name)
+          && !candidate.name.includes(".."))
         .map((candidate) => candidate.name)
         .sort((left, right) => right.localeCompare(left, undefined, { numeric: true, sensitivity: "base" }));
     } catch {

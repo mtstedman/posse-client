@@ -58,7 +58,7 @@ from `process.platform` / `process.arch` by
 ## Pull, build, and deploy
 
 Pull every server-issued binary for the current OS and architecture into the
-verified native bundle cache:
+verified, versioned native bin directory inside this Posse installation:
 
 ```bash
 npm run pull:native
@@ -97,7 +97,10 @@ npm run rebuild:rust-binaries -- --platform current --rust-root <path-to-posse-b
 boot otherwise mints an `artifacts:read` pulse, reads each current package
 version signed into that pulse, downloads the exact current OS/architecture
 artifact from Posse Remote, verifies its SHA-256, and caches it under
-`~/.posse/native/bundles/<package>/<version>/<tool>/...`.
+`lib/bin/<package>/<version>/<os>/<arch>/<file>` in the Posse installation.
+Package names come only from `lib/catalog/binary.js`; for example, vector is
+always `lib/bin/posse-atlas-vector/<version>/...`, never `lib/bin/vector/...`.
+Each package keeps its independently issued versions in its own directory.
 
 An explicitly staged build is accepted only when its reported version matches
 the server-issued version. The cache stores a SHA-256 sidecar and is re-verified on every process boot.

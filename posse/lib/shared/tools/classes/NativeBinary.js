@@ -5,8 +5,9 @@
 //
 // Responsibilities:
 //   - Resolve the correct build for the current os/arch from the catalog
-//     (lib/catalog/binary.js), preferring lib/bin/<name>/<os>/<arch>/<file>
-//     and falling back to lib/bin/<name>/<os>/<file> (universal macOS).
+//     (lib/catalog/binary.js), preferring a direct development override under
+//     lib/bin/<name>/..., then a downloaded version under the catalog-owned
+//     package path lib/bin/<package>/<version>/....
 //   - Report availability so migration code can decide when a Rust-owned
 //     method is callable. Availability is not a fallback policy.
 //   - Invoke it protocol-agnostically: pass a subcommand + args, optionally
@@ -475,10 +476,22 @@ export class NativeBinary {
     const plat = nativeBinaryPlatform(this.name, this.os);
     if (!plat) return [];
     const file = plat.destinationFile;
-    return [
+    const direct = [
       path.join(this.binRoot, this.name, this.os, this.arch, file),
       path.join(this.binRoot, this.name, this.os, file),
     ];
+    const entry = nativeBinaryEntry(this.name);
+    if (!entry?.package) return direct;
+    const versions = this.exactVersion
+      ? [this.exactVersion]
+      : installedVersions(path.join(this.binRoot, entry.package));
+    const downloaded = versions.flatMap((version) => [
+      path.join(this.binRoot, entry.package, version, this.os, this.arch, file),
+      path.join(this.binRoot, entry.package, version, this.os, file),
+    ]);
+    return this.exactVersion
+      ? [...downloaded, ...direct]
+      : [...direct, ...downloaded];
   }
 
   /**
@@ -1340,5 +1353,21 @@ export class NativeBinary {
       } catch { /* fall through to signal */ }
     }
     try { child.kill("SIGKILL"); } catch { /* ignore */ }
+  }
+}
+
+function installedVersions(toolRoot) {
+  try {
+    return fs.readdirSync(toolRoot, { withFileTypes: true })
+      .filter((candidate) => candidate.isDirectory()
+        && /^[a-zA-Z0-9._-]{1,64}$/.test(candidate.name)
+        && !candidate.name.includes(".."))
+      .map((candidate) => candidate.name)
+      .sort((left, right) => right.localeCompare(left, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }));
+  } catch {
+    return [];
   }
 }

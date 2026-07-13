@@ -34,8 +34,6 @@ import {
 } from "../../native/functions/artifact-download.js";
 import { NativeBinary } from "./NativeBinary.js";
 
-const UNRESOLVED_VECTOR_VERSION = "server-issued-version-unresolved";
-
 /**
  * Parse an env override into a tri-state: `true`, `false`, or `null` (unset).
  *
@@ -151,9 +149,6 @@ export class BinaryManager {
   }
 
   _createHandle(name, binRoot, exactVersion = undefined) {
-    const resolvedExactVersion = exactVersion === undefined && name === "vector"
-      ? (nativeBinaryExactVersion(name) || UNRESOLVED_VECTOR_VERSION)
-      : exactVersion;
     return new NativeBinary({
       name,
       binRoot,
@@ -165,7 +160,7 @@ export class BinaryManager {
       // authority) now reach the handle so key/heartbeat resolution honors it.
       env: this._opts.env,
       nativeAuthManager: this.nativeAuthManager,
-      exactVersion: resolvedExactVersion,
+      exactVersion,
     });
   }
 
@@ -394,7 +389,7 @@ export class BinaryManager {
       // explicit refresh before work starts; after that, default ensures only
       // recover a missing/invalid artifact and let the run finish on its
       // already-validated version.
-      if (!refresh && handle.isAvailable()) {
+      if (!refresh && handle.isAvailable() && (name !== "vector" || handle.exactVersion)) {
         return {
           available: true,
           name,
@@ -510,7 +505,7 @@ export class BinaryManager {
   }
 
   async _activateCachedFallback(name, handle) {
-    if (handle.isAvailable()) {
+    if (handle.isAvailable() && (name !== "vector" || handle.exactVersion)) {
       return {
         available: true,
         name,
