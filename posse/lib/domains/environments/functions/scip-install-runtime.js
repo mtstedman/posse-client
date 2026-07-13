@@ -187,6 +187,13 @@ export async function runCommand(command, args, {
  */
 export async function spawnSpecForCommand(command, args, env) {
   const resolved = await resolveWindowsCommand(command, env);
+  if (process.platform === "win32" && /^npm(?:\.cmd)?$/iu.test(path.basename(resolved))) {
+    const npmCli = path.join(path.dirname(resolved), "node_modules", "npm", "bin", "npm-cli.js");
+    const adjacentNode = path.join(path.dirname(resolved), "node.exe");
+    if (fileExists(npmCli) && fileExists(adjacentNode)) {
+      return { command: adjacentNode, args: [npmCli, ...args] };
+    }
+  }
   if (process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(String(resolved || ""))) {
     return {
       command: env?.ComSpec || env?.COMSPEC || process.env.ComSpec || process.env.COMSPEC || "cmd.exe",

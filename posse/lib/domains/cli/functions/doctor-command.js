@@ -145,6 +145,7 @@ export async function cmdDoctor({
 
   const json = argv.includes("--json");
   const dryRun = argv.includes("--dry-run");
+  const adoptNodeInstall = argv.includes("--adopt-node-install");
   const progress = createDoctorProgressRenderer({ log, colors, json });
   let result;
   try {
@@ -152,6 +153,7 @@ export async function cmdDoctor({
     result = await runDoctor({
       projectDir,
       dryRun,
+      adoptNodeInstall,
       includeNativeBinaries: true,
       scipMode: atlasConfig.enabled === false
         ? "off"

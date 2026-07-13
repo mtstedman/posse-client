@@ -445,6 +445,13 @@ function quoteCmdToken(value) {
 
 function spawnSpecForCommand(command, args = []) {
   const resolved = resolveWindowsCommand(command);
+  if (process.platform === "win32" && /^npm(?:\.cmd)?$/iu.test(path.basename(resolved))) {
+    const npmCli = path.join(path.dirname(resolved), "node_modules", "npm", "bin", "npm-cli.js");
+    const adjacentNode = path.join(path.dirname(resolved), "node.exe");
+    if (fileExists(npmCli) && fileExists(adjacentNode)) {
+      return { command: adjacentNode, args: [npmCli, ...args] };
+    }
+  }
   if (process.platform === "win32" && /\.(cmd|bat)$/iu.test(resolved)) {
     const commandLine = [resolved, ...args].map(quoteCmdToken).join(" ");
     return {
@@ -823,6 +830,25 @@ async function ensureNodeProject(entry, opts) {
   const installLabel = `${before.manager} ${args[0] || "install"}`;
   if (before.status === "ok" && opts.forceNodeInstall !== true) {
     return { ...before, label: entry.label, action: "none", message: "node packages ready" };
+  }
+  const canAdoptExistingInstall = opts.adoptNodeInstall === true
+    && opts.forceNodeInstall !== true
+    && before.needs_stamp === true
+    && before.missing_node_modules !== true
+    && before.missing_required.length === 0
+    && before.missing_locked.length === 0
+    && before.stale !== true;
+  if (canAdoptExistingInstall && !opts.dryRun) {
+    writeNodeManifestStamp(entry.root, before.manifest_hash);
+    const adopted = inspectNodeProject(entry.root);
+    return {
+      ...adopted,
+      label: entry.label,
+      ok: true,
+      status: "installed",
+      action: "stamp",
+      message: "verified existing npm install",
+    };
   }
   const reason = [
     opts.forceNodeInstall === true ? "repair explicitly requested" : "",
@@ -1276,6 +1302,7 @@ function buildDependencyDoctorReport(result, mode) {
  *   includeTestTools?: boolean,
  *   timeoutMs?: number | string | boolean | null,
  *   forceNodeInstall?: boolean,
+ *   adoptNodeInstall?: boolean,
  *   onProgress?: ((message: string) => void) | null,
  *   onEvent?: ((event: Record<string, any>) => void) | null,
  *   nativeBinaryManager?: any,
@@ -1290,6 +1317,7 @@ export async function ensureBootDependencies(input = {}) {
     posseRoot,
     projectDir,
     forceNodeInstall: input.forceNodeInstall === true,
+    adoptNodeInstall: input.adoptNodeInstall === true,
     timeoutMs: normalizeCommandTimeoutMs(input.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS),
     onProgress: typeof input.onProgress === "function" ? input.onProgress : null,
     onEvent: typeof input.onEvent === "function" ? input.onEvent : null,

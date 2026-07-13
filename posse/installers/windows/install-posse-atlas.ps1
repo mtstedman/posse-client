@@ -522,7 +522,18 @@ function Invoke-Logged {
   $executable = if ($commandInfo -and $commandInfo.Source) { $commandInfo.Source } else { $Command[0] }
   $arguments = @($Command | Select-Object -Skip 1)
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  if ($executable -match '\.(cmd|bat)$') {
+  # PowerShell resolves bare `npm` to npm.ps1 before npm.cmd on a standard
+  # Node install. Launch npm's JS entrypoint with its adjacent node.exe so
+  # execution policy and cmd.exe argument parsing cannot break fresh installs.
+  $npmCli = if ($executable -match '(?i)\\npm\.(cmd|ps1)$') {
+    Join-Path (Split-Path $executable -Parent) "node_modules\npm\bin\npm-cli.js"
+  } else { "" }
+  if ($npmCli -and (Test-Path $npmCli)) {
+    $adjacentNode = Join-Path (Split-Path $executable -Parent) "node.exe"
+    $psi.FileName = if (Test-Path $adjacentNode) { $adjacentNode } else { $script:NodeBin }
+    $psi.Arguments = ((@($npmCli) + $arguments) | ForEach-Object { Quote-NativeArg $_ }) -join " "
+  }
+  elseif ($executable -match '\.(cmd|bat)$') {
     $batchParts = @($executable) + $arguments
     $batchLine = ($batchParts | ForEach-Object { '"' + ($_ -replace '"', '""') + '"' }) -join " "
     $psi.FileName = $env:ComSpec
@@ -1168,7 +1179,7 @@ function Step-Doctor {
     return
   }
   Write-Info "delegating to Posse's own dependency engine (managed Python venv, SCIP indexer environments)"
-  $rc = Invoke-Logged -Description "posse doctor (first run builds Python venv + SCIP envs; this can take a few minutes)" -Command @($script:NodeBin, "orchestrator.js", "doctor") -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description "posse doctor (first run builds Python venv + SCIP envs; this can take a few minutes)" -Command @($script:NodeBin, "orchestrator.js", "doctor", "--adopt-node-install") -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Step-End "ok" "runtime dependencies ready" }
   else {
     Write-Warn2 "posse doctor reported unresolved dependencies - run 'posse doctor' after fixing the tools it names (log has details)"
