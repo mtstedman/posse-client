@@ -735,6 +735,20 @@ class PersistentMcpSession {
   stop({ force = false } = {}) {
     const proc = this._proc;
     if (!proc || proc.exitCode != null || proc.killed) return false;
+    if (process.platform === "win32") {
+      try {
+        const args = ["/pid", String(proc.pid), "/T"];
+        if (force) args.push("/F");
+        const killer = this._spawn("taskkill", args, {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        killer.unref?.();
+        return true;
+      } catch {
+        // Fall through to the direct child kill.
+      }
+    }
     try {
       proc.kill(force ? "SIGKILL" : "SIGTERM");
       return true;
@@ -743,25 +757,54 @@ class PersistentMcpSession {
     }
   }
 
-  close({ force = false, timeoutMs = 2000 } = {}) {
+  close({ force = false, timeoutMs = 10000 } = {}) {
     const proc = this._proc;
     if (!proc || proc.exitCode != null || proc.killed) return Promise.resolve(false);
     return new Promise((resolve) => {
       let settled = false;
+      let procExited = false;
+      let treeKillFinished = process.platform !== "win32";
       const done = (value) => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
         resolve(value);
       };
+      const maybeDone = () => {
+        if (procExited && treeKillFinished) done(true);
+      };
       const timer = setTimeout(() => {
         try { proc.kill("SIGKILL"); } catch { /* best effort */ }
         done(false);
-      }, Math.max(100, Number(timeoutMs) || 2000));
+      }, Math.max(100, Number(timeoutMs) || 10000));
       timer.unref?.();
-      proc.once("exit", () => done(true));
+      proc.once("exit", () => {
+        procExited = true;
+        maybeDone();
+      });
       try {
-        proc.kill(force ? "SIGKILL" : "SIGTERM");
+        if (process.platform === "win32") {
+          const args = ["/pid", String(proc.pid), "/T"];
+          if (force) args.push("/F");
+          const killer = this._spawn("taskkill", args, {
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          killer.once("close", (code) => {
+            treeKillFinished = true;
+            if (code !== 0 && !procExited) {
+              try { proc.kill(force ? "SIGKILL" : "SIGTERM"); } catch { done(false); }
+            }
+            maybeDone();
+          });
+          killer.once("error", () => {
+            treeKillFinished = true;
+            try { proc.kill(force ? "SIGKILL" : "SIGTERM"); } catch { done(false); }
+            maybeDone();
+          });
+        } else {
+          proc.kill(force ? "SIGKILL" : "SIGTERM");
+        }
       } catch {
         done(false);
       }
@@ -783,6 +826,7 @@ export class PersistentMcpOwner {
     this._sessions = new Map();
     this._sessionIdsByTokenHash = new Map();
     this._gatewaySession = null;
+    this._gatewayRetirements = new Set();
     this._startedAt = null;
     this._listenError = null;
   }
@@ -887,6 +931,23 @@ export class PersistentMcpOwner {
     const attachProof = session.snapshotAttachProof();
     this._sessions.delete(id);
     this._sessionIdsByTokenHash.delete(tokenHash(session.token));
+    let gatewayReleased = false;
+    let gatewayStopped = false;
+    if (this._sessions.size === 0 && this._gatewaySession) {
+      const gateway = this._gatewaySession;
+      this._gatewaySession = null;
+      gatewayReleased = true;
+      // No signed sessions remain, so every process in this gateway tree is
+      // run-owned and unreachable. Force the tree down on Windows; graceful
+      // taskkill can leave the stdio helper alive and keep one-shot callers
+      // (including provider-backed ML passes) from exiting.
+      gatewayStopped = !!gateway._proc
+        && gateway._proc.exitCode == null
+        && !gateway._proc.killed;
+      const retirement = gateway.close({ force: true });
+      this._gatewayRetirements.add(retirement);
+      retirement.finally(() => this._gatewayRetirements.delete(retirement));
+    }
     if (telemetry) {
       appendRunTelemetry("diagnostics", {
         kind: "mcp.owner.unregister_session",
@@ -896,6 +957,8 @@ export class PersistentMcpOwner {
         session_id: id,
         reason,
         session_count: this._sessions.size,
+        gateway_released: gatewayReleased,
+        gateway_stopped: gatewayStopped,
         registered_at: session.registeredAt || null,
         last_seen_at: session.lastSeenAt || null,
         expires_at: session.expiresAt || null,
@@ -903,7 +966,15 @@ export class PersistentMcpOwner {
         context: context && typeof context === "object" ? context : null,
       });
     }
-    return { released: true, sessionId: id, reason, sessionCount: this._sessions.size, attachProof };
+    return {
+      released: true,
+      sessionId: id,
+      reason,
+      sessionCount: this._sessions.size,
+      gatewayReleased,
+      gatewayStopped,
+      attachProof,
+    };
   }
 
   unregisterSession({ sessionId = null, token = null, expectedBootId = null, reason = "provider_exit", context = null } = {}) {
@@ -1016,7 +1087,9 @@ export class PersistentMcpOwner {
   async close({ force = true } = {}) {
     await Promise.all([...this._sessions.values()].map((session) => session.close({ force })));
     await this._gatewaySession?.close?.({ force });
+    await Promise.allSettled([...this._gatewayRetirements]);
     this._gatewaySession = null;
+    this._gatewayRetirements.clear();
     this._sessions.clear();
     this._sessionIdsByTokenHash.clear();
     const server = this._server;

@@ -165,9 +165,26 @@ Use `node orchestrator.js help` for the full CLI reference.
 - `image`: generate an image directly.
 - `events`, `timeline`, `cost`, `fanout`, `audit`, `calls`, `prompts`,
   `usage`, `atlas-smoke`, `mcp-status`, `codex-models`: inspection commands.
+- `local-models [list|download]`: inspect the signed local-model catalog or
+  select a pinned bundle for a confirmed, resumable download.
 - `admin`: open stats and settings tooling.
 - `merge`: merge approved work.
 - `prune`, `purge`, `cleanup`, `clear`: maintenance and reset commands.
+
+## Local Model Downloads
+
+Run `posse local-models` for an interactive selector, or use
+`posse local-models list` to inspect the verified catalog without downloading.
+Every model entry shows its signed download size, minimum and recommended
+memory, recommendation summary, intended use cases, runtime profile, and
+license. `posse local-models download <shorthand>` selects a model directly.
+
+Before any bundle bytes are requested, Posse presents a second confirmation
+containing both the human-readable and exact byte size. The default answer is
+No, and `--yes` or non-interactive input cannot bypass the prompt. Confirmed
+downloads show percentage, transferred bytes, throughput, and ETA while the
+native Remote client performs resumable transfer and SHA-256 verification.
+Verified bundles are stored below `~/.posse/artifacts/llm-models/`.
 
 ## ATLAS SCIP Languages
 

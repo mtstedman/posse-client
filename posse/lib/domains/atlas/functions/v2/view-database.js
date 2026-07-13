@@ -22,11 +22,11 @@ const VIEW_INDEXES = Object.freeze([
   },
   {
     name: "idx_edges_from",
-    sql: "CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_global_id, range_start)",
+    sql: "CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_global_id, range_start, to_global_id)",
   },
   {
     name: "idx_edges_to",
-    sql: `CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_global_id, from_global_id)
+    sql: `CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_global_id, from_global_id, range_start)
       WHERE to_global_id IS NOT NULL`,
   },
   {
@@ -90,7 +90,7 @@ export function openViewDbReadWrite(dbPath) {
 }
 
 function removeSqliteFile(dbPath) {
-  for (const suffix of ["", "-wal", "-shm"]) {
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
     try { fs.unlinkSync(dbPath + suffix); } catch { /* disposable cache cleanup is best effort */ }
   }
 }

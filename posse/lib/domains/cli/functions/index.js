@@ -1,6 +1,7 @@
 export * from "./command-bootstrap-policy.js";
 export * from "./dispatch.js";
 export * from "./flags.js";
+export * from "./local-models-command.js";
 export * from "./orchestrator-app.js";
 export * from "./review-session.js";
 export * from "./run-session.js";

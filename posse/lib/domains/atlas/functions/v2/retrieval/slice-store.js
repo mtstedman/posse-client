@@ -7,7 +7,7 @@
 import fs from "fs";
 import path from "path";
 import Database from "better-sqlite3";
-import { atlasDir } from "../runtime-paths.js";
+import { slicesDbPath } from "../runtime-paths.js";
 
 const SLICE_STORE_DDL = `
 CREATE TABLE IF NOT EXISTS slice_handles (
@@ -35,7 +35,7 @@ const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
  */
 function openStore(repoRoot) {
   if (!repoRoot) return null;
-  const dbPath = path.join(atlasDir(repoRoot), "slices.db");
+  const dbPath = slicesDbPath(repoRoot);
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma("busy_timeout = 5000");

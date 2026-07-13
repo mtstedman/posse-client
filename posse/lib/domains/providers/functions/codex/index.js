@@ -14,6 +14,10 @@ export {
   __testIsProtectedWindowsAppCodexPath,
   __testIsExecutableCodexCli,
   __testCodexCliSupportsExecContract,
+  __testPrioritizeCodexCandidatePaths,
+  __testFindCodexNativeExecutableForShim,
+  __testResolveCodexLaunchPath,
+  __testSelectCodexCandidateFromProbes,
 } from "./cli-discovery.js";
 export {
   refreshUsageSummary,

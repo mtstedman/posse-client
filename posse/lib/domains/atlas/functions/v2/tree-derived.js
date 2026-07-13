@@ -48,6 +48,8 @@ export function ensureTreeDerivedTables(db) {
       WHERE symbol_ref IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_kind
       ON atlas_tree_nodes(kind);
+    CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_order
+      ON atlas_tree_nodes(depth, sort_order, node_id);
 
     CREATE TABLE IF NOT EXISTS atlas_tree_refs (
       node_id  TEXT NOT NULL,
@@ -85,6 +87,8 @@ export function ensureTreeDerivedTables(db) {
       ON atlas_tree_scope_nodes(parent_node_id);
     CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_nodes_kind
       ON atlas_tree_scope_nodes(kind);
+    CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_nodes_order
+      ON atlas_tree_scope_nodes(depth, sort_order, node_id);
 
     CREATE TABLE IF NOT EXISTS atlas_tree_scope_term_stats (
       term                 TEXT PRIMARY KEY,
@@ -103,6 +107,8 @@ export function ensureTreeDerivedTables(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_symbol_files_node
       ON atlas_tree_scope_symbol_files(symbol_node_id);
+    CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_symbol_files_path
+      ON atlas_tree_scope_symbol_files(repo_rel_path, symbol_ref, symbol_node_id);
 
     CREATE TABLE IF NOT EXISTS derived_state_runs (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,6 +118,8 @@ export function ensureTreeDerivedTables(db) {
       duration_ms  INTEGER NOT NULL DEFAULT 0,
       details_json TEXT NOT NULL DEFAULT '{}'
     );
+    CREATE INDEX IF NOT EXISTS idx_derived_state_runs_kind_id
+      ON derived_state_runs(kind, id DESC);
   `);
 }
 

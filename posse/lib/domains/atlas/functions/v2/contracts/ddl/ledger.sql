@@ -246,7 +246,7 @@ CREATE TABLE IF NOT EXISTS blob_layer_edges (
 );
 
 CREATE INDEX IF NOT EXISTS blob_layers_lookup
-  ON blob_layers (content_hash, source, lang, status);
+  ON blob_layers(content_hash, source, status, id);
 
 CREATE INDEX IF NOT EXISTS idx_blob_layers_merge_read
   ON blob_layers(content_hash, lang, status, indexed_at DESC, id DESC);
@@ -294,10 +294,6 @@ CREATE TABLE IF NOT EXISTS symbol_deltas (
 -- Walk a path's history on a branch without scanning all deltas.
 CREATE INDEX IF NOT EXISTS idx_symbol_deltas_branch_path
   ON symbol_deltas(branch, path_id, seq DESC);
-
--- Walk all deltas on a branch in order (view builder's primary access pattern).
-CREATE INDEX IF NOT EXISTS idx_symbol_deltas_branch_seq
-  ON symbol_deltas(branch, seq);
 
 -- -----------------------------------------------------------------------------
 -- Agent feedback signals. Persistent across view rebuilds: feedback is a
@@ -425,9 +421,6 @@ CREATE TABLE IF NOT EXISTS scip_indexes (
   ingested_head         TEXT,                          -- git HEAD at ingest time (bounds cheap-skip staleness)
   UNIQUE (scheme, indexer_version, fileset_hash, config_hash, deps_hash)
 );
-
-CREATE INDEX IF NOT EXISTS idx_scip_indexes_scheme
-  ON scip_indexes(scheme);
 
 CREATE INDEX IF NOT EXISTS idx_scip_indexes_bytes_hash
   ON scip_indexes(scip_bytes_hash);

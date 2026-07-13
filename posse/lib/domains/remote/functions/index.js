@@ -1,4 +1,5 @@
 export * from "./client.js";
+export * from "./local-model-artifacts.js";
 export * from "./mode.js";
 export * from "./native-client.js";
 export * from "./native-auth.js";

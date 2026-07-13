@@ -64,7 +64,7 @@ export function ensureGraphDerivedTables(db) {
       FOREIGN KEY (process_id) REFERENCES process_summaries(process_id) ON DELETE CASCADE,
       FOREIGN KEY (symbol_global_id) REFERENCES symbols(global_id) ON DELETE CASCADE
     );
-    CREATE INDEX IF NOT EXISTS idx_process_steps_symbol ON process_steps(symbol_global_id);
+    CREATE INDEX IF NOT EXISTS idx_process_steps_symbol ON process_steps(symbol_global_id, process_id);
 
     CREATE TABLE IF NOT EXISTS derived_state_runs (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +74,8 @@ export function ensureGraphDerivedTables(db) {
       duration_ms  INTEGER NOT NULL DEFAULT 0,
       details_json TEXT NOT NULL DEFAULT '{}'
     );
+    CREATE INDEX IF NOT EXISTS idx_derived_state_runs_kind_id
+      ON derived_state_runs(kind, id DESC);
   `);
 }
 

@@ -23,7 +23,7 @@ function sleep(ms) {
  * @param {string} dbPath
  */
 export function removeSqliteFile(dbPath) {
-  for (const sfx of ["", "-wal", "-shm"]) {
+  for (const sfx of ["", "-wal", "-shm", "-journal"]) {
     const filePath = dbPath + sfx;
     try {
       fs.unlinkSync(filePath);

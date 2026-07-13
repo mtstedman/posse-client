@@ -1,16 +1,22 @@
 import fs from "fs";
 import path from "path";
 
-import { atlasDir, embeddingsRoot, ledgerDbPath, viewsDir } from "../../atlas/functions/v2/runtime-paths.js";
+import {
+  atlasDir,
+  embeddingsRoot,
+  ledgerDbPath,
+  slicesDbPath,
+  viewsDir,
+} from "../../atlas/functions/v2/runtime-paths.js";
 import { removeSqliteFile } from "../../atlas/functions/v2/view-health.js";
 import { C } from "../../../shared/format/functions/colors.js";
 
 // --cold-index: wipe the ATLAS/SCIP index artifacts before boot so the next
 // run rebuilds from scratch (handy for watching a cold boot / reproducing
 // indexing issues). Clears the per-repo ledger, embeddings, SCIP staged output
-// and hidden staging temps, and views under <repo>/.posse/atlas/, but NOT
-// account.db / settings / the ONNX model cache (models/ is preserved so we
-// don't re-download the encoder).
+// and hidden staging temps, slices, and views under <repo>/.posse/atlas/, but
+// NOT memory.db / account.db / settings / the ONNX model cache (models/ is
+// preserved so we don't re-download the encoder).
 export function clearColdIndex(projectDir = process.cwd()) {
   const resolvedProjectDir = path.resolve(projectDir || process.cwd());
   const root = atlasDir(resolvedProjectDir);
@@ -45,7 +51,7 @@ export function clearColdIndex(projectDir = process.cwd()) {
   };
 
   const removeSqlite = (label, targetPath) => {
-    const sidecars = [targetPath, `${targetPath}-wal`, `${targetPath}-shm`];
+    const sidecars = [targetPath, `${targetPath}-wal`, `${targetPath}-shm`, `${targetPath}-journal`];
     const existed = sidecars.some((candidate) => fs.existsSync(candidate));
     try {
       removeSqliteFile(targetPath);
@@ -61,6 +67,7 @@ export function clearColdIndex(projectDir = process.cwd()) {
   };
 
   removeSqlite("ledger", ledgerDbPath(resolvedProjectDir));
+  removeSqlite("slices", slicesDbPath(resolvedProjectDir));
   removeDirectory("embeddings", embeddingsRoot(resolvedProjectDir));
   removeDirectory("scip", path.join(root, "scip"));
   removeDirectory("views", viewsDir(resolvedProjectDir));

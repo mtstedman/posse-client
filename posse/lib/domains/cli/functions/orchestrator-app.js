@@ -31,6 +31,7 @@ installCliWarningFilter();
 //   plan review/approve/reject <wiId>  Review a plan before execution (with --approve-plan)
 //   audit [jobId|wiId]  Show recent handoff/provider audit trail
 //   codex-models        Validate/list codex model compatibility
+//   local-models        List and download signed local model bundles
 //   windows-events      Probe Windows System/Application crash events into the run dir
 //
 // Flags:
@@ -550,6 +551,7 @@ let _updateCommandModulePromise = null;
 let _adminWorktreesModulePromise = null;
 let _serveCommandModulePromise = null;
 let _diagnosticCommandsModulePromise = null;
+let _localModelsCommandModulePromise = null;
 let _concurrency = null;
 let _stallTimeout = undefined;
 
@@ -610,6 +612,11 @@ async function loadServeCommandModule() {
 async function loadDiagnosticCommandsModule() {
   _diagnosticCommandsModulePromise ||= import("./diagnostic-commands.js");
   return _diagnosticCommandsModulePromise;
+}
+
+async function loadLocalModelsCommandModule() {
+  _localModelsCommandModulePromise ||= import("./local-models-command.js");
+  return _localModelsCommandModulePromise;
 }
 
 async function loadAtlasModule() {
@@ -2085,6 +2092,11 @@ async function cmdCodexModels() {
   return cmdCodexModelsImpl({ projectDir: PROJECT_DIR });
 }
 
+async function cmdLocalModels() {
+  const { runLocalModelsCommand } = await loadLocalModelsCommandModule();
+  return runLocalModelsCommand(process.argv.slice(3), { nonInteractive: NON_INTERACTIVE });
+}
+
 async function cmdMcpStatus() {
   const { cmdMcpStatus: cmdMcpStatusImpl } = await loadDiagnosticCommandsModule();
   return cmdMcpStatusImpl({ projectDir: PROJECT_DIR, loadAtlasModule });
@@ -2343,6 +2355,11 @@ const COMMAND_USAGE = {
     console.log(`  plan + run in one shot: plans queued work items, then starts the scheduler.`);
     console.log(`  ${C.dim}Accepts the same flags as 'run' — see: posse run --help${C.reset}\n`);
   },
+  "local-models": () => {
+    console.log(`\n  Usage: posse local-models [list [--json] | download [shorthand]]`);
+    console.log(`  Lists signed local models with download size and recommended memory.`);
+    console.log(`  Downloads always require an interactive, size-aware confirmation.\n`);
+  },
 };
 
 function helpFlagRequested() {
@@ -2455,6 +2472,8 @@ ${aliasDiagnostic}
     ${C.cyan}mcp-status${C.reset} Show repo-scoped MCP runtime state
     ${C.cyan}codex-models${C.reset} Validate/list Codex model candidates against CLI
     ${C.dim}             codex-models [validate|list] [oauth|api|auto]${C.reset}
+    ${C.cyan}local-models${C.reset} List/download signed local models with size and system recommendations
+    ${C.dim}             local-models [list [--json] | download [shorthand]]${C.reset}
     ${C.cyan}windows-events${C.reset} Probe Windows crash/resource events into the run dir
     ${C.dim}             windows-events [--around ISO] [--minutes N] [--json]${C.reset}
     ${C.cyan}audit${C.reset}      Provider/handoff audit for jobs or work items
@@ -2547,6 +2566,7 @@ async function dispatchResolvedCommand(command) {
     "atlas-v2": cmdAtlasV2,
     "mcp-status": cmdMcpStatus,
     "codex-models": cmdCodexModels,
+    "local-models": cmdLocalModels,
     "windows-events": cmdWindowsEvents,
     admin: cmdAdmin,
     merge: cmdMerge,

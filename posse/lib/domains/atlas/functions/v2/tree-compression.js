@@ -36,8 +36,8 @@ export function ensureTreeCompressionTables(db) {
       summary_json     TEXT NOT NULL DEFAULT '{}',
       details_json     TEXT NOT NULL DEFAULT '{}'
     );
-    CREATE INDEX IF NOT EXISTS idx_atlas_tree_compression_snapshots_built
-      ON atlas_tree_compression_snapshots(built_at);
+    CREATE INDEX IF NOT EXISTS idx_atlas_tree_compression_snapshots_profile_id
+      ON atlas_tree_compression_snapshots(profile, id DESC);
 
     CREATE TABLE IF NOT EXISTS atlas_tree_compression_seeds (
       snapshot_id                          INTEGER NOT NULL,
@@ -55,8 +55,8 @@ export function ensureTreeCompressionTables(db) {
       PRIMARY KEY (snapshot_id, node_id),
       FOREIGN KEY (snapshot_id) REFERENCES atlas_tree_compression_snapshots(id) ON DELETE CASCADE
     );
-    CREATE INDEX IF NOT EXISTS idx_atlas_tree_compression_seeds_path
-      ON atlas_tree_compression_seeds(repo_rel_path);
+    CREATE INDEX IF NOT EXISTS idx_atlas_tree_compression_seeds_snapshot_rank
+      ON atlas_tree_compression_seeds(snapshot_id, confidence DESC, repo_rel_path);
 
     CREATE TABLE IF NOT EXISTS derived_state_runs (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,6 +66,8 @@ export function ensureTreeCompressionTables(db) {
       duration_ms  INTEGER NOT NULL DEFAULT 0,
       details_json TEXT NOT NULL DEFAULT '{}'
     );
+    CREATE INDEX IF NOT EXISTS idx_derived_state_runs_kind_id
+      ON derived_state_runs(kind, id DESC);
   `);
   // Older views predate the carry-forward signature column. CREATE TABLE IF NOT
   // EXISTS leaves them untouched, so add it idempotently. The signature lets a
@@ -715,8 +717,11 @@ export function readLatestTreeCompressionSnapshot(db, opts = {}) {
         `SELECT id, built_at AS builtAt, profile, source_signature AS sourceSignature,
                 status, summary_json AS summaryJson, details_json AS detailsJson
          FROM atlas_tree_compression_snapshots
-         ORDER BY (profile = ?) DESC, id DESC
-         LIMIT 1`,
+         WHERE id = COALESCE(
+           (SELECT id FROM atlas_tree_compression_snapshots
+            WHERE profile = ? ORDER BY id DESC LIMIT 1),
+           (SELECT id FROM atlas_tree_compression_snapshots ORDER BY id DESC LIMIT 1)
+         )`,
       ).get(TREE_COMPRESSION_ML_PROFILE);
   if (!row) {
     return {

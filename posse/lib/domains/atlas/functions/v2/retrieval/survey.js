@@ -45,27 +45,33 @@ export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
     });
   }
 
+  const digTerms = (Array.isArray(params.symbols) ? params.symbols : [])
+    .map((t) => String(t || "").trim())
+    .filter(Boolean)
+    .slice(0, MAX_DIG_TERMS);
   const maxFiles = clampInt(params.maxFiles, MAX_SURVEY_FILES, 1, MAX_SURVEY_FILES);
-  const { paths, prefixTruncated } = await collectSurveyPaths({ view, requested, maxFiles });
+  const { paths, prefixTruncated } = await collectSurveyPaths({
+    view,
+    requested,
+    maxFiles,
+    symbols: digTerms,
+  });
   if (paths.length === 0) {
     return okEnvelope({
       action,
       versionId,
       data: {
-        granularity: "file",
+        granularity: digTerms.length > 0 ? "symbol" : "file",
         files: [],
         callMap: { edges: [], inbound: [], outbound: [], unresolved: [], edgesTruncated: false, inboundTruncated: false, outboundTruncated: false },
         metrics: { fileCount: 0, symbolCount: 0, internalEdgeCount: 0, inboundCount: 0, outboundCount: 0, unresolvedCount: 0 },
         truncated: prefixTruncated,
-        warnings: [`No indexed files matched: ${requested.slice(0, 5).join(", ")}.`],
+        warnings: [digTerms.length > 0
+          ? `No indexed symbols matched ${digTerms.slice(0, 5).join(", ")} under: ${requested.slice(0, 5).join(", ")}.`
+          : `No indexed files matched: ${requested.slice(0, 5).join(", ")}.`],
       },
     });
   }
-
-  const digTerms = (Array.isArray(params.symbols) ? params.symbols : [])
-    .map((t) => String(t || "").trim())
-    .filter(Boolean)
-    .slice(0, MAX_DIG_TERMS);
 
   const surveyed = new Set(paths);
   const files = [];
@@ -162,9 +168,9 @@ function surveyEdge(edge, from, to, surveyed) {
  * indexed file is taken as-is; otherwise it is treated as a directory prefix
  * and expanded from the view's path table.
  *
- * @param {{ view: import("../contracts/api.js").View, requested: string[], maxFiles: number }} args
+ * @param {{ view: import("../contracts/api.js").View, requested: string[], maxFiles: number, symbols?: string[] }} args
  */
-export async function collectSurveyPaths({ view, requested, maxFiles }) {
+export async function collectSurveyPaths({ view, requested, maxFiles, symbols = [] }) {
   const seen = new Set();
   const paths = [];
   let prefixTruncated = false;
@@ -178,6 +184,42 @@ export async function collectSurveyPaths({ view, requested, maxFiles }) {
     paths.push(path);
     return true;
   };
+  if (symbols.length > 0 && typeof view.query.indexedPathsWithSymbols === "function") {
+    for (const entry of requested) {
+      const matches = await view.query.indexedPathsWithSymbols(symbols, {
+        pathPrefix: entry,
+        limit: maxFiles + seen.size + 1,
+      });
+      for (const path of matches) {
+        if (!push(String(path))) break;
+      }
+      if (prefixTruncated) break;
+    }
+    return { paths, prefixTruncated };
+  }
+  if (symbols.length > 0 && typeof view.query.findSymbol === "function") {
+    for (const entry of requested) {
+      const matchingPaths = new Set();
+      for (const term of symbols) {
+        const matches = await view.query.findSymbol(term, {
+          fuzzy: false,
+          scope: "name",
+          pathPrefix: entry,
+          limit: 500,
+        });
+        for (const symbol of matches) {
+          if (String(symbol.name || "").toLowerCase() !== term.toLowerCase()) continue;
+          const path = String(symbol.repo_rel_path || "").replace(/\\/g, "/");
+          if (path) matchingPaths.add(path);
+        }
+      }
+      for (const path of [...matchingPaths].sort()) {
+        if (!push(path)) break;
+      }
+      if (prefixTruncated) break;
+    }
+    return { paths, prefixTruncated };
+  }
   for (const entry of requested) {
     const matches = typeof view.query.indexedPaths === "function"
       ? await view.query.indexedPaths({ pathPrefix: entry, limit: maxFiles + 1 })

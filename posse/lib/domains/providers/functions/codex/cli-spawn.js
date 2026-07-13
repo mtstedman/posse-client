@@ -106,6 +106,7 @@ export function buildCodexExecArgs({
   workingDir,
   allowWrite = false,
   modelToUse = null,
+  reasoningEffort = null,
   configOverrides = [],
   forceReadOnlySandbox = false,
   priorSessionHandle = null,
@@ -134,6 +135,11 @@ export function buildCodexExecArgs({
 
   if (modelToUse) {
     args.push("--model", modelToUse);
+  }
+
+  const normalizedReasoningEffort = String(reasoningEffort || "").trim().toLowerCase();
+  if (["low", "medium", "high"].includes(normalizedReasoningEffort)) {
+    args.push("-c", `model_reasoning_effort=${_toTomlLiteral(normalizedReasoningEffort)}`);
   }
 
   for (const override of (configOverrides || [])) {

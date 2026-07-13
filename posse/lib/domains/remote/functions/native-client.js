@@ -6,6 +6,17 @@ export const REMOTE_NATIVE_PROTOCOL = "posse.remote.native.v1";
 export const REMOTE_PROMPTS_COMPILE_ROUTE = "prompts:compile";
 export const REMOTE_PROMPTS_BUNDLE_ROUTE = "prompts:bundle";
 export const REMOTE_CATALOG_READ_ROUTE = "catalog:read";
+export const REMOTE_ARTIFACTS_READ_ROUTE = "artifacts:read";
+
+export const REMOTE_ARTIFACT_CATALOG_METHOD = "remote.artifactCatalog";
+export const REMOTE_ARTIFACT_DOWNLOAD_METHOD = "remote.artifactDownload";
+export const REMOTE_ARTIFACT_STATUS_METHOD = "remote.artifactStatus";
+
+const REMOTE_ARTIFACT_METHODS = new Set([
+  REMOTE_ARTIFACT_CATALOG_METHOD,
+  REMOTE_ARTIFACT_DOWNLOAD_METHOD,
+  REMOTE_ARTIFACT_STATUS_METHOD,
+]);
 
 /**
  * Select the same endpoint-specific pulse grant enforced by posse-remote.
@@ -65,6 +76,56 @@ function unwrapRemoteNativeResponse(value) {
   return value;
 }
 
+async function runRemoteNativeMethodJson(method, payload, {
+  manager = nativeBinaries,
+  requiredRoute,
+  timeoutMs,
+} = {}) {
+  if (!manager.shouldUse("remote")) {
+    throw new Error("remote native client unavailable");
+  }
+  if (manager.nativeAuthManager?.hasLaunchKey?.() !== true) {
+    throw new Error("remote native client requires a Posse key");
+  }
+  const envelope = buildRemoteNativeRequest(method, payload);
+  const res = await manager.binary("remote").run(
+    method,
+    [],
+    {
+      input: `${JSON.stringify(envelope)}\n`,
+      json: true,
+      timeoutMs,
+      requiredRoute,
+    },
+  );
+  if (!res.ok) {
+    const detail = String(res.stderr || res.error?.message || "native process failed").trim();
+    throw new Error(`remote native method ${method} failed${detail ? `: ${detail}` : ""}`);
+  }
+  return unwrapRemoteNativeResponse(res.json);
+}
+
+/**
+ * Invoke one of the signed LLM artifact methods through the key-gated native
+ * Remote client. The native binary owns trust verification, transfer bounds,
+ * resumable download state, and the final cache path.
+ *
+ * @param {string} method
+ * @param {unknown} payload
+ * @param {{ manager?: import("../../../shared/tools/classes/BinaryManager.js").BinaryManager, timeoutMs?: number }} [opts]
+ * @returns {Promise<unknown>}
+ */
+export function runRemoteNativeArtifactJson(method, payload, opts = {}) {
+  const normalized = String(method || "").trim();
+  if (!REMOTE_ARTIFACT_METHODS.has(normalized)) {
+    throw new Error(`remote native artifact method is unsupported: ${normalized || "<empty>"}`);
+  }
+  return runRemoteNativeMethodJson(normalized, payload, {
+    ...opts,
+    requiredRoute: REMOTE_ARTIFACTS_READ_ROUTE,
+  });
+}
+
 /**
  * @param {{
  *   baseUrl: string,
@@ -84,31 +145,21 @@ function unwrapRemoteNativeResponse(value) {
  */
 export async function runRemoteNativeRequestJson(request, opts = {}) {
   const manager = opts.manager || nativeBinaries;
-  if (!manager.shouldUse("remote")) {
-    throw new Error("remote native client unavailable");
-  }
-  if (manager.nativeAuthManager?.hasLaunchKey?.() !== true) {
-    throw new Error("remote native client requires a Posse key");
-  }
   // NativeBinary owns request.pulse at the final stdin boundary: it strips any
   // caller-supplied credential/trust fields and attaches a route-scoped pulse
   // envelope. The raw key never enters the child; the resource payload accepts
   // no caller auth override.
-  const envelope = buildRemoteNativeRequest("request-json", request);
   const requiredRoute = remoteNativeRequestRoute(request);
-  const res = await manager.binary("remote").run(
-    "request-json",
-    [],
-    {
-      input: `${JSON.stringify(envelope)}\n`,
-      json: true,
+  try {
+    return await runRemoteNativeMethodJson("request-json", request, {
+      manager,
       timeoutMs: request.timeoutMs,
       requiredRoute,
-    },
-  );
-  if (!res.ok) {
-    const detail = String(res.stderr || res.error?.message || "native process failed").trim();
-    throw new Error(`remote native request ${request.method || "GET"} ${request.path} failed${detail ? `: ${detail}` : ""}`);
+    });
+  } catch (error) {
+    const message = String(error?.message || error || "native process failed")
+      .replace(/^remote native method request-json failed:?\s*/i, "")
+      .trim();
+    throw new Error(`remote native request ${request.method || "GET"} ${request.path} failed${message ? `: ${message}` : ""}`);
   }
-  return unwrapRemoteNativeResponse(res.json);
 }

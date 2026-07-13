@@ -277,6 +277,9 @@
  *
  * @property {(opts?: { limit?: number, pathPrefix?: string }) => string[]} [indexedPaths]
  *   Bounded, lexically ordered inventory of paths in the view snapshot.
+ * @property {(names: string[], opts?: { limit?: number, pathPrefix?: string }) => string[]} [indexedPathsWithSymbols]
+ *   Bounded, lexically ordered paths containing an exact symbol-name match.
+ *   Name and path filters are applied in storage before the result limit.
  *
  * @property {(opts?: { limit?: number, pathPrefix?: string }) => ViewSymbol[]} allSymbols
  *   Enumerate every symbol in the view. Used by stats, overview, and

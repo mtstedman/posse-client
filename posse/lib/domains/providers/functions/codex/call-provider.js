@@ -352,6 +352,7 @@ export async function callProvider(promptText, {
       workingDir,
       allowWrite,
       modelToUse,
+      reasoningEffort,
       configOverrides: configRoute.configOverrides,
       forceReadOnlySandbox,
       priorSessionHandle: resumeSessionHandle,

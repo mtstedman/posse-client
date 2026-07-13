@@ -38,6 +38,7 @@
 
 export { ATLAS_EVENTS, ATLAS_EVENT_NAMES } from "./events.js";
 export {
+  ATLAS_DATA_SCHEMA_VERSION,
   LEDGER_DDL,
   VIEW_DDL,
   LEDGER_SCHEMA_VERSION,

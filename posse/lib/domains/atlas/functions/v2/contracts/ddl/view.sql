@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS symbols (
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbols_name           ON symbols(name);
+CREATE INDEX IF NOT EXISTS idx_symbols_lower_name_path ON symbols(LOWER(name), repo_rel_path);
 CREATE INDEX IF NOT EXISTS idx_symbols_qualified_name ON symbols(qualified_name)
   WHERE qualified_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_symbols_path           ON symbols(repo_rel_path, range_start, global_id);
@@ -136,10 +137,17 @@ CREATE TABLE IF NOT EXISTS edges (
   FOREIGN KEY (to_global_id)   REFERENCES symbols(global_id) ON DELETE SET NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_edges_from    ON edges(from_global_id, range_start);
-CREATE INDEX IF NOT EXISTS idx_edges_to      ON edges(to_global_id, from_global_id)
+CREATE INDEX IF NOT EXISTS idx_edges_from    ON edges(from_global_id, range_start, to_global_id);
+CREATE INDEX IF NOT EXISTS idx_edges_to      ON edges(to_global_id, from_global_id, range_start)
   WHERE to_global_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_edges_to_name ON edges(to_name);
+CREATE INDEX IF NOT EXISTS idx_edges_to_name ON edges(to_name, from_global_id, range_start)
+  WHERE to_global_id IS NULL AND to_external_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_edges_unresolved_order
+  ON edges(repo_rel_path, range_start, from_global_id)
+  WHERE to_global_id IS NULL AND to_external_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_edges_import_order
+  ON edges(repo_rel_path, range_start, from_global_id)
+  WHERE kind = 'imports' AND to_module IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_edges_kind    ON edges(kind);
 CREATE INDEX IF NOT EXISTS idx_edges_source  ON edges(source);
 CREATE INDEX IF NOT EXISTS idx_edges_external ON edges(to_external_id)
@@ -206,7 +214,7 @@ CREATE TABLE IF NOT EXISTS process_steps (
 );
 
 CREATE INDEX IF NOT EXISTS idx_process_steps_symbol
-  ON process_steps(symbol_global_id);
+  ON process_steps(symbol_global_id, process_id);
 
 -- -----------------------------------------------------------------------------
 -- Rebuildable tree-derived state. This is a stable containment map over the
@@ -253,6 +261,9 @@ CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_symbol_ref
 CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_kind
   ON atlas_tree_nodes(kind);
 
+CREATE INDEX IF NOT EXISTS idx_atlas_tree_nodes_order
+  ON atlas_tree_nodes(depth, sort_order, node_id);
+
 CREATE TABLE IF NOT EXISTS atlas_tree_refs (
   node_id  TEXT NOT NULL,
   ref_type TEXT NOT NULL,
@@ -294,6 +305,9 @@ CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_nodes_parent
 CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_nodes_kind
   ON atlas_tree_scope_nodes(kind);
 
+CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_nodes_order
+  ON atlas_tree_scope_nodes(depth, sort_order, node_id);
+
 CREATE TABLE IF NOT EXISTS atlas_tree_scope_term_stats (
   term                 TEXT PRIMARY KEY,
   direct_file_count    INTEGER NOT NULL DEFAULT 0,
@@ -313,6 +327,9 @@ CREATE TABLE IF NOT EXISTS atlas_tree_scope_symbol_files (
 CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_symbol_files_node
   ON atlas_tree_scope_symbol_files(symbol_node_id);
 
+CREATE INDEX IF NOT EXISTS idx_atlas_tree_scope_symbol_files_path
+  ON atlas_tree_scope_symbol_files(repo_rel_path, symbol_ref, symbol_node_id);
+
 CREATE TABLE IF NOT EXISTS derived_state_runs (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   built_at     TEXT NOT NULL,
@@ -321,3 +338,43 @@ CREATE TABLE IF NOT EXISTS derived_state_runs (
   duration_ms  INTEGER NOT NULL DEFAULT 0,
   details_json TEXT NOT NULL DEFAULT '{}'
 );
+
+CREATE INDEX IF NOT EXISTS idx_derived_state_runs_kind_id
+  ON derived_state_runs(kind, id DESC);
+
+CREATE TABLE IF NOT EXISTS atlas_tree_compression_snapshots (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  built_at         TEXT NOT NULL,
+  profile          TEXT NOT NULL,
+  source_signature TEXT,
+  status           TEXT NOT NULL,
+  summary_json     TEXT NOT NULL DEFAULT '{}',
+  details_json     TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_atlas_tree_compression_snapshots_profile_id
+  ON atlas_tree_compression_snapshots(profile, id DESC);
+
+CREATE TABLE IF NOT EXISTS atlas_tree_compression_seeds (
+  snapshot_id                       INTEGER NOT NULL,
+  node_id                           TEXT NOT NULL,
+  repo_rel_path                     TEXT NOT NULL,
+  label                             TEXT NOT NULL,
+  confidence                        REAL NOT NULL DEFAULT 0,
+  aliases_json                      TEXT NOT NULL DEFAULT '[]',
+  entrypoints_json                  TEXT NOT NULL DEFAULT '[]',
+  likely_tests_json                 TEXT NOT NULL DEFAULT '[]',
+  avoid_if_query_only_mentions_json TEXT NOT NULL DEFAULT '[]',
+  ml_features_json                  TEXT NOT NULL DEFAULT '{}',
+  signals_json                      TEXT NOT NULL DEFAULT '{}',
+  deterministic_signature          TEXT NOT NULL DEFAULT '',
+  labeled_at                        TEXT,
+  drift_count                       INTEGER NOT NULL DEFAULT 0,
+  stale_since                       TEXT,
+  drift_signature                   TEXT,
+  PRIMARY KEY (snapshot_id, node_id),
+  FOREIGN KEY (snapshot_id) REFERENCES atlas_tree_compression_snapshots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_atlas_tree_compression_seeds_snapshot_rank
+  ON atlas_tree_compression_seeds(snapshot_id, confidence DESC, repo_rel_path);

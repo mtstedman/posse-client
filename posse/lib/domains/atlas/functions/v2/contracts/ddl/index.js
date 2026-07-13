@@ -21,8 +21,11 @@ function load(name) {
 export const LEDGER_DDL = load("ledger.sql");
 export const VIEW_DDL = load("view.sql");
 
-/** Bumped on breaking changes to ledger.sql. Stored in ledger meta.schema_version. */
-export const LEDGER_SCHEMA_VERSION = 2;
-
-/** Bumped on breaking changes to view.sql. Stored in view meta.schema_version. */
-export const VIEW_SCHEMA_VERSION = 2;
+/**
+ * Bumped whenever rebuildable ATLAS data or index layout changes. Cold boot
+ * uses a ledger mismatch as the generation marker and recreates every
+ * rebuildable store together; memory.db is intentionally outside this boundary.
+ */
+export const ATLAS_DATA_SCHEMA_VERSION = 3;
+export const LEDGER_SCHEMA_VERSION = ATLAS_DATA_SCHEMA_VERSION;
+export const VIEW_SCHEMA_VERSION = ATLAS_DATA_SCHEMA_VERSION;

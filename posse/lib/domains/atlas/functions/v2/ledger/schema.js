@@ -62,7 +62,7 @@ export function tableExists(db, table) {
  */
 export function removeSqliteFile(dbPath) {
   let removedMain = true;
-  for (const sfx of ["", "-wal", "-shm"]) {
+  for (const sfx of ["", "-wal", "-shm", "-journal"]) {
     try {
       fs.unlinkSync(dbPath + sfx);
     } catch (err) {

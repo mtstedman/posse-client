@@ -9,6 +9,7 @@
 //   <repoRoot>/.posse/atlas/
 //     ledger.db                                  -- single source of truth
 //     memory.db                                  -- durable ATLAS memories
+//     slices.db                                  -- rebuildable slice handles
 //     views/
 //       main.view.db                             -- always-warm main view
 //       warmed/
@@ -51,6 +52,14 @@ export function memoryDbPath(repoRoot) {
  */
 export function memoryDbPathForLedgerDb(ledgerPath) {
   return ledgerPath ? path.join(path.dirname(ledgerPath), "memory.db") : "";
+}
+
+/**
+ * @param {string} repoRoot
+ * @returns {string}
+ */
+export function slicesDbPath(repoRoot) {
+  return path.join(atlasDir(repoRoot), "slices.db");
 }
 
 /**

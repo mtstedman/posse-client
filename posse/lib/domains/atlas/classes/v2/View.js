@@ -310,6 +310,16 @@ export class View {
         });
       },
 
+      indexedPathsWithSymbols: (names, opts = {}) => {
+        if (!Array.isArray(names) || names.length === 0) return [];
+        if (opts.pathPrefix) assertPathPrefix("indexedPathsWithSymbols", opts.pathPrefix);
+        return read("indexed_paths_with_symbols", {
+          names: names.map((name) => String(name || "").trim()).filter(Boolean),
+          ...(opts.pathPrefix ? { path_prefix: opts.pathPrefix } : {}),
+          ...(positiveInteger(opts.limit) != null ? { limit: positiveInteger(opts.limit) } : {}),
+        });
+      },
+
       allSymbols: (opts = {}) => {
         if (opts.pathPrefix) {
           assertPathPrefix("allSymbols", opts.pathPrefix);

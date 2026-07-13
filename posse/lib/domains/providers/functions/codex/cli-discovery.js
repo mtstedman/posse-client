@@ -20,6 +20,7 @@ const CODEX_REQUIRED_EXEC_FLAGS = [
   "--ignore-rules",
   "--config",
 ];
+const CODEX_CLI_PROBE_TIMEOUT_MS = 15000;
 
 function splitPathEntries(pathValue) {
   return String(pathValue || "")
@@ -131,22 +132,70 @@ function spawnProbeAsync(command, args, options = {}, timeoutMs = 3000) {
   });
 }
 
-export function isExecutableCodexCli(exePath, spawnSyncImpl = spawnSync) {
+function parseCodexCliVersion(output = "") {
+  const match = String(output || "").match(/(?:\bcodex-cli\s+)?v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/i);
+  if (!match) return null;
+  return {
+    version: `${match[1]}.${match[2]}.${match[3]}${match[4] ? `-${match[4]}` : ""}`,
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] || null,
+  };
+}
+
+function comparePrerelease(a, b) {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  const aParts = String(a).split(".");
+  const bParts = String(b).split(".");
+  for (let i = 0; i < Math.max(aParts.length, bParts.length); i += 1) {
+    if (aParts[i] == null) return -1;
+    if (bParts[i] == null) return 1;
+    if (aParts[i] === bParts[i]) continue;
+    const aNumber = /^\d+$/.test(aParts[i]) ? Number(aParts[i]) : null;
+    const bNumber = /^\d+$/.test(bParts[i]) ? Number(bParts[i]) : null;
+    if (aNumber != null && bNumber != null) return aNumber - bNumber;
+    if (aNumber != null) return -1;
+    if (bNumber != null) return 1;
+    return aParts[i].localeCompare(bParts[i]);
+  }
+  return 0;
+}
+
+function compareCodexVersions(a, b) {
+  if (!a && !b) return 0;
+  if (!a) return -1;
+  if (!b) return 1;
+  for (const key of ["major", "minor", "patch"]) {
+    if (a[key] !== b[key]) return a[key] - b[key];
+  }
+  return comparePrerelease(a.prerelease, b.prerelease);
+}
+
+function probeCodexVersion(exePath, spawnSyncImpl = spawnSync) {
   const target = String(exePath || "");
-  if (!target) return false;
+  if (!target) return { ok: false, version: null, versionInfo: null };
   try {
     const launch = buildWindowsSpawn(target, ["--version"]);
     const result = spawnSyncImpl(launch.command, launch.args, {
       windowsHide: true,
       windowsVerbatimArguments: launch.windowsVerbatimArguments,
       encoding: "utf8",
-      timeout: 3000,
+      timeout: CODEX_CLI_PROBE_TIMEOUT_MS,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    return result && result.status === 0;
+    if (!result || result.status !== 0) return { ok: false, version: null, versionInfo: null };
+    const versionInfo = parseCodexCliVersion(`${result.stdout || ""}\n${result.stderr || ""}`);
+    return { ok: true, version: versionInfo?.version || null, versionInfo };
   } catch {
-    return false;
+    return { ok: false, version: null, versionInfo: null };
   }
+}
+
+export function isExecutableCodexCli(exePath, spawnSyncImpl = spawnSync) {
+  return probeCodexVersion(exePath, spawnSyncImpl).ok;
 }
 
 function probeCodexCli(exePath, spawnSyncImpl = spawnSync) {
@@ -155,7 +204,8 @@ function probeCodexCli(exePath, spawnSyncImpl = spawnSync) {
   if (isProtectedWindowsAppCodexPath(target)) {
     return { ok: false, path: target, reason: "protected WindowsApps resource binary", missingFlags: [] };
   }
-  if (!isExecutableCodexCli(target, spawnSyncImpl)) {
+  const versionProbe = probeCodexVersion(target, spawnSyncImpl);
+  if (!versionProbe.ok) {
     return { ok: false, path: target, reason: "codex --version failed", missingFlags: [] };
   }
   try {
@@ -164,7 +214,7 @@ function probeCodexCli(exePath, spawnSyncImpl = spawnSync) {
       windowsHide: true,
       windowsVerbatimArguments: launch.windowsVerbatimArguments,
       encoding: "utf8",
-      timeout: 3000,
+      timeout: CODEX_CLI_PROBE_TIMEOUT_MS,
       stdio: ["ignore", "pipe", "pipe"],
     });
     if (!result || result.status !== 0) {
@@ -175,7 +225,14 @@ function probeCodexCli(exePath, spawnSyncImpl = spawnSync) {
     if (missingFlags.length > 0) {
       return { ok: false, path: target, reason: `missing required flags: ${missingFlags.join(", ")}`, missingFlags };
     }
-    return { ok: true, path: target, reason: null, missingFlags: [] };
+    return {
+      ok: true,
+      path: target,
+      reason: null,
+      missingFlags: [],
+      version: versionProbe.version,
+      versionInfo: versionProbe.versionInfo,
+    };
   } catch (err) {
     return { ok: false, path: target, reason: err?.message || "probe failed", missingFlags: [] };
   }
@@ -195,42 +252,129 @@ function getCodexConfiguredPath() {
   }
 }
 
-function getCodexCandidatePaths() {
+function isCodexSandboxBinPath(candidate) {
+  return /[\\/]\.codex[\\/]\.sandbox-bin[\\/]codex\.exe$/i.test(String(candidate || ""));
+}
+
+function prioritizeCodexCandidatePaths(candidates = [], { configuredPath = null } = {}) {
+  const configuredKey = String(configuredPath || "").replace(/\//g, "\\").toLowerCase();
+  const configured = [];
+  const installed = [];
+  const sandbox = [];
+  for (const candidate of candidates || []) {
+    const key = String(candidate || "").replace(/\//g, "\\").toLowerCase();
+    if (configuredKey && key === configuredKey) configured.push(candidate);
+    else if (isCodexSandboxBinPath(candidate)) sandbox.push(candidate);
+    else installed.push(candidate);
+  }
+  // The desktop sandbox binary can lag the operator-installed CLI. Keep it as
+  // a compatibility fallback, while an explicit codex_cli_path remains first.
+  return [...configured, ...installed, ...sandbox];
+}
+
+function findCodexNativeExecutableForShim(candidate, {
+  platform = process.platform,
+  arch = process.arch,
+  existsSyncImpl = fs.existsSync,
+} = {}) {
+  if (platform !== "win32" || path.extname(String(candidate || "")).toLowerCase() !== ".cmd") return null;
+  const target = arch === "arm64"
+    ? { packageName: "codex-win32-arm64", triple: "aarch64-pc-windows-msvc" }
+    : arch === "x64"
+      ? { packageName: "codex-win32-x64", triple: "x86_64-pc-windows-msvc" }
+      : null;
+  if (!target) return null;
+
+  const npmRoot = path.join(path.dirname(candidate), "node_modules");
+  const packageRoots = [
+    path.join(npmRoot, "@openai", "codex", "node_modules", "@openai", target.packageName),
+    path.join(npmRoot, "@openai", target.packageName),
+  ];
+  for (const packageRoot of packageRoots) {
+    const executable = path.join(packageRoot, "vendor", target.triple, "bin", "codex.exe");
+    try {
+      if (existsSyncImpl(executable) && !isProtectedWindowsAppCodexPath(executable)) return executable;
+    } catch {
+      // Keep the npm shim as the fallback candidate.
+    }
+  }
+  return null;
+}
+
+function resolveCodexLaunchPath(candidate, options) {
+  return findCodexNativeExecutableForShim(candidate, options) || candidate;
+}
+
+function getCodexCandidatePaths(configuredPath = getCodexConfiguredPath()) {
   const extraPaths = [];
-  const configuredPath = getCodexConfiguredPath();
   if (configuredPath) extraPaths.push(configuredPath);
   if (process.platform === "win32") {
     extraPaths.push(path.join(os.homedir(), ".codex", ".sandbox-bin", "codex.exe"));
     const appExe = findWindowsAppCodex();
     if (appExe) extraPaths.push(appExe);
   }
-  return discoverCommandCandidates("codex", {
+  const discovered = discoverCommandCandidates("codex", {
     extraPaths,
     protectedPath: isProtectedWindowsAppCodexPath,
   });
+  const candidates = process.platform === "win32"
+    ? discovered.filter((candidate) => (
+        sameCandidatePath(candidate, configuredPath)
+        || [".exe", ".cmd", ".bat", ".com"].includes(path.extname(candidate).toLowerCase())
+      ))
+    : discovered;
+  const launchable = [];
+  for (const candidate of candidates) {
+    launchable.push(resolveCodexLaunchPath(candidate));
+  }
+  const configuredLaunchPath = configuredPath ? resolveCodexLaunchPath(configuredPath) : null;
+  return prioritizeCodexCandidatePaths(launchable, { configuredPath: configuredLaunchPath });
+}
+
+function sameCandidatePath(a, b) {
+  return String(a || "").replace(/\//g, "\\").toLowerCase()
+    === String(b || "").replace(/\//g, "\\").toLowerCase();
+}
+
+function selectCodexCandidateFromProbes(checked = [], { configuredPath = null } = {}) {
+  const viable = (checked || []).filter((entry) => entry?.ok && entry?.path);
+  if (configuredPath) {
+    const configured = viable.find((entry) => sameCandidatePath(entry.path, configuredPath));
+    if (configured) return configured.path;
+  }
+  let selected = null;
+  for (const candidate of viable) {
+    const candidateVersion = candidate.versionInfo || parseCodexCliVersion(candidate.version || "");
+    const selectedVersion = selected?.versionInfo || parseCodexCliVersion(selected?.version || "");
+    if (!selected || compareCodexVersions(candidateVersion, selectedVersion) > 0) selected = candidate;
+  }
+  return selected?.path || null;
 }
 
 function chooseCodexCandidate(spawnSyncImpl = spawnSync) {
-  const checked = [];
-  for (const candidate of getCodexCandidatePaths()) {
-    const probe = probeCodexCli(candidate, spawnSyncImpl);
-    checked.push(probe);
-    if (probe.ok) return { selected: candidate, checked };
-  }
-  return { selected: null, checked };
+  const configuredPath = getCodexConfiguredPath();
+  const configuredLaunchPath = configuredPath ? resolveCodexLaunchPath(configuredPath) : null;
+  const checked = getCodexCandidatePaths(configuredPath)
+    .map((candidate) => probeCodexCli(candidate, spawnSyncImpl));
+  return {
+    selected: selectCodexCandidateFromProbes(checked, { configuredPath: configuredLaunchPath }),
+    checked,
+  };
 }
 
-async function isExecutableCodexCliAsync(exePath) {
+async function probeCodexVersionAsync(exePath) {
   const target = String(exePath || "");
-  if (!target) return false;
+  if (!target) return { ok: false, version: null, versionInfo: null };
   try {
     const launch = buildWindowsSpawn(target, ["--version"]);
     const result = await spawnProbeAsync(launch.command, launch.args, {
       windowsVerbatimArguments: launch.windowsVerbatimArguments,
-    }, 3000);
-    return result && result.status === 0;
+    }, CODEX_CLI_PROBE_TIMEOUT_MS);
+    if (!result || result.status !== 0) return { ok: false, version: null, versionInfo: null };
+    const versionInfo = parseCodexCliVersion(`${result.stdout || ""}\n${result.stderr || ""}`);
+    return { ok: true, version: versionInfo?.version || null, versionInfo };
   } catch {
-    return false;
+    return { ok: false, version: null, versionInfo: null };
   }
 }
 
@@ -240,14 +384,15 @@ async function probeCodexCliAsync(exePath) {
   if (isProtectedWindowsAppCodexPath(target)) {
     return { ok: false, path: target, reason: "protected WindowsApps resource binary", missingFlags: [] };
   }
-  if (!(await isExecutableCodexCliAsync(target))) {
+  const versionProbe = await probeCodexVersionAsync(target);
+  if (!versionProbe.ok) {
     return { ok: false, path: target, reason: "codex --version failed", missingFlags: [] };
   }
   try {
     const launch = buildWindowsSpawn(target, ["exec", "resume", "--help"]);
     const result = await spawnProbeAsync(launch.command, launch.args, {
       windowsVerbatimArguments: launch.windowsVerbatimArguments,
-    }, 3000);
+    }, CODEX_CLI_PROBE_TIMEOUT_MS);
     if (!result || result.status !== 0) {
       return { ok: false, path: target, reason: "codex exec resume --help failed", missingFlags: [] };
     }
@@ -256,20 +401,29 @@ async function probeCodexCliAsync(exePath) {
     if (missingFlags.length > 0) {
       return { ok: false, path: target, reason: `missing required flags: ${missingFlags.join(", ")}`, missingFlags };
     }
-    return { ok: true, path: target, reason: null, missingFlags: [] };
+    return {
+      ok: true,
+      path: target,
+      reason: null,
+      missingFlags: [],
+      version: versionProbe.version,
+      versionInfo: versionProbe.versionInfo,
+    };
   } catch (err) {
     return { ok: false, path: target, reason: err?.message || "probe failed", missingFlags: [] };
   }
 }
 
 async function chooseCodexCandidateAsync() {
-  const checked = [];
-  for (const candidate of getCodexCandidatePaths()) {
-    const probe = await probeCodexCliAsync(candidate);
-    checked.push(probe);
-    if (probe.ok) return { selected: candidate, checked };
-  }
-  return { selected: null, checked };
+  const configuredPath = getCodexConfiguredPath();
+  const configuredLaunchPath = configuredPath ? resolveCodexLaunchPath(configuredPath) : null;
+  const checked = await Promise.all(
+    getCodexCandidatePaths(configuredPath).map((candidate) => probeCodexCliAsync(candidate)),
+  );
+  return {
+    selected: selectCodexCandidateFromProbes(checked, { configuredPath: configuredLaunchPath }),
+    checked,
+  };
 }
 
 function formatCodexResolveError(checked = []) {
@@ -348,6 +502,22 @@ export function __testIsExecutableCodexCli(exePath, spawnSyncImpl) {
 
 export function __testCodexCliSupportsExecContract(exePath, spawnSyncImpl) {
   return codexCliSupportsExecContract(exePath, spawnSyncImpl);
+}
+
+export function __testPrioritizeCodexCandidatePaths(candidates, options) {
+  return prioritizeCodexCandidatePaths(candidates, options);
+}
+
+export function __testFindCodexNativeExecutableForShim(candidate, options) {
+  return findCodexNativeExecutableForShim(candidate, options);
+}
+
+export function __testResolveCodexLaunchPath(candidate, options) {
+  return resolveCodexLaunchPath(candidate, options);
+}
+
+export function __testSelectCodexCandidateFromProbes(checked, options) {
+  return selectCodexCandidateFromProbes(checked, options);
 }
 
 export function getCodexLaunchState() {

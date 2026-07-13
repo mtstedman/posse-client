@@ -28,6 +28,7 @@ import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAu
 import { sanitizeWorkerExecArgv } from "../../runtime/functions/worker-exec-argv.js";
 import { getAtlasV2BootTimeoutMs } from "../../settings/functions/tunables.js";
 import { recordEmbeddingForensics, errorForTelemetry } from "../../atlas/functions/v2/embeddings/forensics.js";
+import { resetAtlasRebuildableData } from "../../atlas/functions/v2/data-schema-reset.js";
 import {
   warmReadinessProgress,
   warmReadinessSeed,
@@ -956,7 +957,7 @@ function runAtlasV2BootWarmInWorker(args) {
   const inspectBootState = async () => {
     const ledgerPresent = fs.existsSync(args.ledgerDbPath);
     const mainViewPresent = fs.existsSync(args.mainViewDbPath);
-    const viewStatus = ledgerPresent && mainViewPresent
+    const viewStatus = ledgerPresent
       ? await inspectMainViewForBootInWorker({
           viewPath: args.mainViewDbPath,
           branch: args.defaultBranch,
@@ -993,6 +994,15 @@ function runAtlasV2BootWarmInWorker(args) {
           kind: "atlas.index_notice",
           stage: "index",
           ...indexNotice,
+        });
+      }
+      if (atlasBootLedgerNeedsReset(bootState.viewStatus)) {
+        const reset = await resetAtlasRebuildableData({ repoRoot: args.repoRoot });
+        emitBootProgress(args.onProgress, {
+          kind: "line",
+          stream: "system",
+          stage: "index",
+          text: `ATLAS data schema reset: cleared ${reset.removed.length} rebuildable stores; memory and settings preserved`,
         });
       }
       return runAtlasV2BootWarmWorkerThread({
@@ -1550,7 +1560,7 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
     fs.promises.access(storage.mainViewDbPath).then(() => true, () => false),
   ]);
   const bootReindexPolicy = normalizeAtlasBootReindexPolicy(config?.bootReindexPolicy);
-  const viewStatus = ledgerPresent && mainViewPresent
+  const viewStatus = ledgerPresent
     ? await inspectMainViewForBootInWorker({
         viewPath: storage.mainViewDbPath,
         branch: baselineBranch,
@@ -1668,7 +1678,7 @@ export async function startAtlasPreflightIndex(opts = {}) {
     fs.promises.access(storage.mainViewDbPath).then(() => true, () => false),
   ]);
   let viewCurrent = false;
-  if (ledgerPresent && mainViewPresent) {
+  if (ledgerPresent) {
     try {
       const status = await inspectMainViewForBootInWorker({
         viewPath: storage.mainViewDbPath,
