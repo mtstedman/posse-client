@@ -42,6 +42,7 @@ export class Daemon {
    *   breakerWindowMs?: number,
    *   breakerCooldownMs?: number,
    *   onLifecycle?: (event: { kind: string, label: string, detail?: Record<string, unknown> }) => void,
+   *   onControl?: (message: Record<string, unknown>, daemon: Daemon) => void | Promise<void>,
    *   now?: () => number,
    * }} opts
    */
@@ -59,6 +60,7 @@ export class Daemon {
     this._breakerWindowMs = opts.breakerWindowMs ?? DEFAULT_BREAKER_WINDOW_MS;
     this._breakerCooldownMs = opts.breakerCooldownMs ?? DEFAULT_BREAKER_COOLDOWN_MS;
     this._onLifecycle = typeof opts.onLifecycle === "function" ? opts.onLifecycle : null;
+    this._onControl = typeof opts.onControl === "function" ? opts.onControl : null;
     this._now = opts.now || (() => Date.now());
 
     /** @type {import("./transport.js").Transport | null} */
@@ -225,7 +227,12 @@ export class Daemon {
     this._lastMessageAt = this._now();
     const id = Number(message?.id);
     const entry = this._pending.get(id);
-    if (!entry) return;
+    if (!entry) {
+      if (message?.control && this._onControl) {
+        try { void Promise.resolve(this._onControl(message, this)).catch(() => {}); } catch { /* control handlers fail closed */ }
+      }
+      return;
+    }
     // Intermediate progress: `{ id, progress }` with no terminal `ok`. Route to
     // the caller's onProgress (observational) and keep the request pending.
     if (message && "progress" in message && !("ok" in message)) {
@@ -309,6 +316,22 @@ export class Daemon {
         finish({ ok: false, error: { message: String(err?.message || err) }, _transportGone: true });
       }
     });
+  }
+
+  /** Start the host without sending a product request. */
+  ensureStarted() {
+    return this.#ensureTransport();
+  }
+
+  /** Send an id-less private control frame to the live host. */
+  sendControl(frame) {
+    if (!this._transport?.isAlive?.()) return false;
+    try {
+      this._transport.send(frame);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Force a recycle (e.g. after a settings change). Next request respawns. */

@@ -63,6 +63,7 @@ import { atlasBackendLabel } from "./atlas-label.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { PulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
+import { ParentPulseTokenManager } from "../../../shared/native/classes/ParentPulseTokenManager.js";
 import {
   configureGate,
   isGateActive,
@@ -354,12 +355,11 @@ if (mcpDbPath) {
   setRuntimePathOverrides({ dbPath: mcpDbPath });
 }
 
-// Native-binary auth: when the parent supplied a non-secret heartbeat capability
-// (config-json boots), install it as this child's auth authority so ATLAS/git
-// native calls share the parent's heartbeat envelope. Current compiled helpers
-// still need a manager-owned Posse credential; only the trusted persistent owner
-// receives POSSE_KEY, and NativeBinary moves it into each native request while
-// scrubbing it from the grandchild argv and environment.
+// Compatibility-only public trust metadata for direct config-json boots. The
+// trusted owner-hot gateway replaces its pulse manager from the private startup
+// handshake before MCP traffic; neither process receives POSSE_KEY, and native
+// daemons pull signed pulse grants from their parent instead of authenticating
+// each request.
 if (!ownerHotProcess && bootConfig.nativeAuth && typeof bootConfig.nativeAuth === "object") {
   try {
     nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(bootConfig.nativeAuth));
@@ -2796,8 +2796,21 @@ async function handleRequest(msg) {
 
 let inputBuffer = Buffer.alloc(0);
 let requestQueue = Promise.resolve();
+let capabilityBrokerInstalled = false;
+let mcpTrafficStarted = false;
 
 function dispatchParsed(parsed) {
+  if (parsed?.__posse_control === "capabilityBroker") {
+    if (!ownerHotProcess || mcpTrafficStarted || capabilityBrokerInstalled) return;
+    try {
+      nativeBinaries.setPulseManager(new ParentPulseTokenManager(parsed.capability));
+      capabilityBrokerInstalled = true;
+    } catch {
+      scopeParseState.invalid = true;
+    }
+    return;
+  }
+  mcpTrafficStarted = true;
   // Re-establish observation context per-message — stdin's async scope
   // predates module-level enterObservationContext, so ALS values set at
   // load time don't propagate into data events.
@@ -2934,6 +2947,7 @@ async function shutdownAndExit(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   try { await requestQueue; } catch { /* requestQueue is best-effort guarded */ }
+  try { await nativeBinaries.disposeAll(); } catch { /* teardown is best effort */ }
   process.exit(code);
 }
 

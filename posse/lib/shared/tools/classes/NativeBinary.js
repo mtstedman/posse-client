@@ -36,6 +36,10 @@ import { Daemon, ProcessTransport, daemonSupervisor } from "./daemon/index.js";
 import { HeartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
 import { PulseTokenManager } from "../../native/classes/PulseTokenManager.js";
 import {
+  CapabilityHandshakeManager,
+  capabilityRequest,
+} from "../../permissions/classes/CapabilityHandshakeManager.js";
+import {
   defaultNativeBinRoot,
   installedNativeArtifactVersionsSync,
   nativeArtifactLayout,
@@ -55,6 +59,7 @@ const PULSE_REFRESH_RETRY_MS = 5_000;
 // Never schedule a refresh timer closer than this (also the floor for a
 // refreshAfter that is already in the past).
 const PULSE_REFRESH_MIN_DELAY_MS = 250;
+const WORKER_PULL_BOOTSTRAP_WAIT_MS = 500;
 
 // Manager-owned request fields at the final stdin boundary. Whatever a caller
 // supplies for these is deleted before the manager attaches its own pulse, so
@@ -139,9 +144,10 @@ export class NativeBinary {
     // settings/env for the heartbeat envelope and pulse minting. Leaf call
     // sites never supply native keys.
     this._nativeAuthManager = nativeAuthManager || null;
-    // Pulse broker: mints/caches route-scoped pulse envelopes against the
-    // trusted heartbeat. Injectable for tests; lazily derived from the auth
-    // manager otherwise. Native children only ever see its derived envelopes.
+    // Pulse broker: owns or inherits the process heartbeat and returns
+    // route-labelled views of its signed grant. Injectable for tests; lazily
+    // derived from the auth manager otherwise. Native children never see the
+    // root credential.
     this._fixedPulseManager = pulseManager || null;
     /** @type {import("../../native/classes/PulseTokenManager.js").PulseTokenManager | null} */
     this._pulseManager = null;
@@ -155,6 +161,8 @@ export class NativeBinary {
      * @type {Map<string, { envelope: Record<string, unknown>, timer: NodeJS.Timeout | null, expired: boolean }>}
      */
     this._workerAuthState = new Map();
+    this._workerAuthWaiters = new Map();
+    this._workerPullManaged = false;
     this.keyGated = nativeBinaryIsKeyGated(name);
     this.workerCapable = nativeBinaryIsWorkerCapable(name);
     this.exactVersion = exactVersion === undefined ? nativeBinaryExactVersion(name) : exactVersion;
@@ -255,6 +263,13 @@ export class NativeBinary {
         label,
         create: () => new Daemon({
           label,
+          onControl: (message, daemon) => this.#handleWorkerControl(message, daemon),
+          onLifecycle: (event) => {
+            if (event.kind === "spawn") {
+              this.#clearWorkerAuthState();
+              this._workerPullManaged = false;
+            }
+          },
           transportFactory: () => ProcessTransport({
             resolveBin: () => this.resolvePath(),
             buildArgs: () => this.#buildWorkerArgs(),
@@ -327,6 +342,120 @@ export class NativeBinary {
     return [`${this.name}:methods`];
   }
 
+  async #handleWorkerControl(message, daemon) {
+    const control = String(message?.control || "");
+    const capability = String(message?.capability || "native.pulse");
+    if (control !== "nativeAuthRequest"
+      && !(control === "capabilityRequest" && capability === "native.pulse")) return;
+    const requested = [...new Set(
+      (Array.isArray(message?.routes) ? message.routes : message?.scopes)
+        ?.map?.((route) => String(route || "").trim())
+        .filter(Boolean) || [],
+    )];
+    if (requested.length === 0) return;
+    const handshakes = new CapabilityHandshakeManager();
+    handshakes.register("native.pulse", async (request) => {
+      const entries = await Promise.all(request.scopes.map(async (route) => [
+        route,
+        await this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route)),
+      ]));
+      const pulses = Object.fromEntries(entries);
+      const expiresAt = Math.min(...entries.map(([, pulse]) => Number(pulse?.expiresAt) || 0));
+      let root = null;
+      try { root = await this.#pulseManager().getHeartbeatGrant?.(); } catch { root = null; }
+      const grantedRoutes = entries
+        .filter(([route, pulse]) => isValidPulseEnvelope(pulse) && String(pulse?.route || "") === route)
+        .map(([route]) => route);
+      return {
+        // A child broker may only know the route grants its own parent handed
+        // it. Treat the successfully returned signed envelopes as that parent
+        // authority instead of assuming this binary's catalog routes.
+        parentScopes: root?.routes || grantedRoutes,
+        scopes: grantedRoutes,
+        parentExpiresAt: root?.expiresAt || expiresAt,
+        expiresAt,
+        permissions: { routes: grantedRoutes },
+        tokens: { pulses },
+        pins: root?.pins || {},
+        keys: root?.keys || {},
+      };
+    });
+    try {
+      const grant = await handshakes.issue(capabilityRequest({
+        requestId: String(message?.requestId || `native-${this.name}-${Date.now()}`),
+        capability: "native.pulse",
+        scopes: requested,
+        reason: String(message?.reason || "worker-pull"),
+      }));
+      const pulses = grant.artifacts.tokens.pulses || {};
+      this._workerPullManaged = true;
+      for (const route of grant.scopes) {
+        const pulse = pulses[route];
+        if (!isValidPulseEnvelope(pulse)) continue;
+        if (!daemon.sendControl(this.#refreshControlFrame(pulse))) continue;
+        this.#noteWorkerPulse(route, pulse);
+        this.#resolveWorkerAuthWaiters(route, true);
+      }
+    } catch {
+      // The worker keeps its previous live pulse and asks again. Protected work
+      // remains fail-closed if no valid grant can be handed down.
+    }
+  }
+
+  #resolveWorkerAuthWaiters(route, value) {
+    const waiters = this._workerAuthWaiters.get(route) || [];
+    this._workerAuthWaiters.delete(route);
+    for (const resolve of waiters) resolve(value);
+  }
+
+  async #ensureWorkerRouteAuth(route, fallbackPulse = null) {
+    const daemon = this.#daemon();
+    const live = this._workerAuthState.get(route)?.envelope;
+    if (daemon.isHostAlive() && isValidPulseEnvelope(live)) return true;
+    let timer = null;
+    const pulled = new Promise((resolve) => {
+      const finish = (value) => {
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      };
+      const waiters = this._workerAuthWaiters.get(route) || [];
+      waiters.push(finish);
+      this._workerAuthWaiters.set(route, waiters);
+      timer = setTimeout(() => {
+        const current = this._workerAuthWaiters.get(route) || [];
+        const remaining = current.filter((waiter) => waiter !== finish);
+        if (remaining.length > 0) this._workerAuthWaiters.set(route, remaining);
+        else this._workerAuthWaiters.delete(route);
+        resolve(false);
+      }, WORKER_PULL_BOOTSTRAP_WAIT_MS);
+      timer.unref?.();
+    });
+    if (!daemon.ensureStarted()) {
+      if (timer) clearTimeout(timer);
+      this.#resolveWorkerAuthWaiters(route, false);
+      return false;
+    }
+    const granted = await pulled;
+    if (timer) clearTimeout(timer);
+    if (granted) return true;
+    // Rollout bridge for an already-released worker that predates pull: seed it
+    // once over the same private pipe. New workers request this themselves.
+    this._workerPullManaged = false;
+    if (!isValidPulseEnvelope(fallbackPulse)) {
+      try {
+        fallbackPulse = await this.#pulseManager().getPulseEnvelope(
+          this.#versionedPulseOptions(route),
+        );
+      } catch {
+        fallbackPulse = null;
+      }
+    }
+    if (!isValidPulseEnvelope(fallbackPulse)) return false;
+    if (!daemon.sendControl(this.#refreshControlFrame(fallbackPulse))) return false;
+    this.#noteWorkerPulse(route, fallbackPulse);
+    return true;
+  }
+
   /** @param {string} reason @param {string | null} [method] */
   #noteWorkerFallback(reason, method = null) {
     this.workerFallbacks.count += 1;
@@ -385,25 +514,15 @@ export class NativeBinary {
    * @returns {Promise<RunResult>}
    */
   async #runViaWorker(subcommand, args, opts) {
-    const inputWithAuth = await this.#inputWithNativeAuthAsync(opts.input, opts.requiredRoute);
-    if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
-      this.#retireWorkerAfterAuthFailure();
-      return this.#nativeAuthUnavailableResult();
-    }
-    const route = inputWithAuth.route;
-    const pulse = inputWithAuth.request?.pulse;
-    // Expired-route gate: after a nativeAuthExpired frame, protected work for
-    // that route stays parked until a refreshed pulse frame reaches the
-    // worker. We just minted a valid pulse (or failed closed above), so
-    // deliver it as the refresh before dispatching.
-    if (route && this.#workerRouteExpired(route) && !this.#deliverWorkerPulseRefresh(route, pulse)) {
-      return this.#nativeAuthUnavailableResult();
-    }
+    const parsed = this.#parseNativeProtocolInput(opts.input);
+    const route = parsed.protocol ? this.#requiredRouteFor(opts.requiredRoute) : null;
     const requestOpts = {
       ...opts,
-      input: inputWithAuth.input,
+      input: parsed.protocol
+        ? this.#encodeNativeRequest(/** @type {Record<string, unknown>} */ (parsed.request), parsed.wasBuffer)
+        : parsed.input,
     };
-    let envelope = inputWithAuth.request;
+    let envelope = parsed.request;
     if (!envelope) {
       try {
         envelope = JSON.parse(String(requestOpts.input));
@@ -411,8 +530,18 @@ export class NativeBinary {
         return this.#runPerCall(subcommand, args, requestOpts);
       }
     }
-    if (route && pulse) this.#noteWorkerPulse(route, pulse);
-    let response = await this.#daemon().request(envelope, {
+    if (route && !(await this.#ensureWorkerRouteAuth(route))) {
+      this.#noteWorkerFallback("auth_handshake_unavailable", subcommand);
+      if (opts.workerFallback === false) return this.#nativeAuthUnavailableResult();
+      return this.#runPerCall(subcommand, args, requestOpts);
+    }
+    // Persistent workers authenticate from the grant they pulled at boot or
+    // refresh time. Keep the request-borne envelope only for the one-shot
+    // compatibility path; normal daemon calls no longer re-authorize every
+    // command.
+    const workerEnvelope = { ...envelope };
+    delete workerEnvelope.pulse;
+    let response = await this.#daemon().request(workerEnvelope, {
       signal: requestOpts.signal,
       timeoutMs: requestOpts.timeoutMs,
     });
@@ -428,14 +557,11 @@ export class NativeBinary {
       // calls (ledger writes pass `idempotent: false`) skip the retry — the
       // lost host may have committed before dying, so the caller must see
       // the failure rather than risk a double-apply.
-      response = await this.#daemon().request(envelope, {
-        signal: requestOpts.signal,
-        timeoutMs: requestOpts.timeoutMs,
-      });
-      if (response?._transportGone !== true && route && pulse) {
-        // The replacement host answered: re-seed refresh scheduling for the
-        // pulse it just received in the request envelope.
-        this.#noteWorkerPulse(route, pulse);
+      if (!route || await this.#ensureWorkerRouteAuth(route)) {
+        response = await this.#daemon().request(workerEnvelope, {
+          signal: requestOpts.signal,
+          timeoutMs: requestOpts.timeoutMs,
+        });
       }
     }
     if (response?._timedOut === true) {
@@ -1025,22 +1151,6 @@ export class NativeBinary {
   }
 
   /**
-   * Async stdin boundary: strip caller-supplied auth fields and attach the
-   * manager-owned route-scoped pulse envelope as `request.pulse`. The raw
-   * POSSE_KEY never enters the request; when no pulse can be minted the
-   * request is returned WITHOUT one so the fail-closed guard stops the spawn.
-   *
-   * @param {Buffer | string | undefined} input
-   * @param {string | undefined} requiredRoute
-   * @returns {Promise<{ input: Buffer | string | undefined, request: Record<string, unknown> | null, route: string | null }>}
-   */
-  async #inputWithNativeAuthAsync(input, requiredRoute) {
-    const parsed = this.#parseNativeProtocolInput(input);
-    if (!parsed.protocol) return { input: parsed.input, request: parsed.request, route: null };
-    return this.#attachPulseAsync(parsed, requiredRoute);
-  }
-
-  /**
    * Mint (or reuse) the route-scoped pulse for an already-parsed protocol
    * request and attach it as `request.pulse`.
    *
@@ -1130,16 +1240,10 @@ export class NativeBinary {
   }
 
   // -------------------------------------------------------------------------
-  // Persistent-worker pulse refresh: near expiry Node re-mints and delivers a
-  // `nativeAuthRefresh` control frame over the worker's stdin; when it cannot
-  // refresh in time it sends `nativeAuthExpired` and parks protected work for
-  // that route until a refresh is delivered.
+  // Rollout-only persistent-worker refresh for binaries that predate daemon
+  // pull. New workers request auth at boot and refresh-due, so this scheduler
+  // is disabled as soon as a pull request is observed.
   // -------------------------------------------------------------------------
-
-  /** @param {string} route */
-  #workerRouteExpired(route) {
-    return this._workerAuthState.get(route)?.expired === true;
-  }
 
   /**
    * Send one control frame line to the live worker host's stdin. Control
@@ -1151,15 +1255,7 @@ export class NativeBinary {
    */
   #sendWorkerControlFrame(frame) {
     const daemon = this._daemon;
-    if (!daemon?.isHostAlive?.()) return false;
-    const transport = daemon._transport;
-    if (!transport || typeof transport.send !== "function") return false;
-    try {
-      transport.send(frame);
-      return true;
-    } catch {
-      return false;
-    }
+    return daemon?.sendControl?.(frame) === true;
   }
 
   /**
@@ -1185,28 +1281,6 @@ export class NativeBinary {
   }
 
   /**
-   * Un-park an expired route by delivering a refresh frame with a valid
-   * envelope. Returns false when no valid envelope exists (callers fail
-   * closed). When no live host remains there is nothing to un-park: the next
-   * spawn is seeded by its own request-borne pulse.
-   *
-   * @param {string} route
-   * @param {unknown} envelope
-   * @returns {boolean}
-   */
-  #deliverWorkerPulseRefresh(route, envelope) {
-    if (!isValidPulseEnvelope(envelope)) return false;
-    if (!this.#sendWorkerControlFrame(this.#refreshControlFrame(/** @type {Record<string, unknown>} */ (envelope)))) {
-      this.#clearWorkerAuthRoute(route);
-      return true;
-    }
-    const state = this._workerAuthState.get(route);
-    if (state) state.expired = false;
-    this.#noteWorkerPulse(route, /** @type {Record<string, unknown>} */ (envelope));
-    return true;
-  }
-
-  /**
    * Track the pulse most recently delivered to the live worker for a route and
    * (re)schedule its refresh at `refreshAfter`.
    *
@@ -1216,11 +1290,17 @@ export class NativeBinary {
   #noteWorkerPulse(route, envelope) {
     if (!route || !isValidPulseEnvelope(envelope)) return;
     const existing = this._workerAuthState.get(route);
-    if (existing && existing.envelope?.token === envelope.token) return;
+    if (existing && existing.envelope?.token === envelope.token) {
+      if (this._workerPullManaged && existing.timer) {
+        clearTimeout(existing.timer);
+        existing.timer = null;
+      }
+      return;
+    }
     if (existing?.timer) clearTimeout(existing.timer);
     const state = { envelope, timer: null, expired: existing?.expired === true };
     this._workerAuthState.set(route, state);
-    this.#scheduleWorkerPulseRefresh(route);
+    if (!this._workerPullManaged) this.#scheduleWorkerPulseRefresh(route);
   }
 
   /** @param {string} route */

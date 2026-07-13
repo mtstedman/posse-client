@@ -54,11 +54,13 @@ export class PulseTokenManager {
     this.now = now;
     this.refreshSkewMs = positiveNumber(refreshSkewMs, DEFAULT_REFRESH_SKEW_MS);
     this.timeoutMs = positiveNumber(timeoutMs, DEFAULT_TIMEOUT_MS);
-    /** @type {Map<string, { token: string, expiresAt: number, refreshAt: number, routes: string[], envelope: Readonly<NativePulseEnvelope> | null }>} */
+    /** @type {Map<string, { token: string, kid: string, expiresAt: number, refreshAt: number, refreshAfter: number, routes: string[], nativeArtifacts: Readonly<Record<string, string>>, envelope: Readonly<NativePulseEnvelope> | null }>} */
     this._cache = new Map();
     /** @type {Map<string, Promise<{ token: string, envelope: Readonly<NativePulseEnvelope> | null }>>} */
     this._refreshes = new Map();
     this._generation = 0;
+    this._heartbeatTimer = null;
+    this._heartbeatRunning = false;
   }
 
   /**
@@ -95,20 +97,72 @@ export class PulseTokenManager {
     const cached = this._cache.get(cacheKey);
     if (!refresh && cached && now < cached.refreshAt && now < cached.expiresAt) {
       assertRouteGranted(cached.routes, requiredRoute);
+      this.#scheduleHeartbeat(cached);
       return cached.token;
     }
     const minted = await this.#mintPulse(cacheKey, rawKey, policy, null);
     const refreshed = this._cache.get(cacheKey);
-    if (refreshed) assertRouteGranted(refreshed.routes, requiredRoute);
+    if (refreshed) {
+      assertRouteGranted(refreshed.routes, requiredRoute);
+      this.#scheduleHeartbeat(refreshed);
+    }
     return minted.token;
   }
 
   /**
-   * Route-scoped pulse envelope for a NATIVE child. Unlike {@link getPulseToken}
-   * (Node's own outbound HTTPS bearer), each route mints and caches a DISTINCT
-   * grant — the heartbeat request names the route, so an `atlas:methods` pulse
-   * can never stand in for `git:mutate`. Returns only derived material; the raw
-   * key stays inside the heartbeat exchange and is never attached to an error.
+   * Establish the one process-wide remote heartbeat and keep it renewed until
+   * {@link stopHeartbeat} is called. Native daemons receive route views of this
+   * same signed token from their parent; this method never mints per-daemon or
+   * per-request credentials.
+   */
+  async startHeartbeat() {
+    this._heartbeatRunning = true;
+    try {
+      const token = await this.getPulseToken();
+      if (token) return token;
+      this._heartbeatRunning = false;
+      throw pulseError("POSSE_PULSE_AUTH_UNAVAILABLE", "heartbeat authentication is unavailable");
+    } catch (error) {
+      this._heartbeatRunning = false;
+      throw error;
+    }
+  }
+
+  async getHeartbeatGrant({ refresh = false } = {}) {
+    const token = await this.getPulseToken({ refresh });
+    if (!token) return null;
+    const rawKey = this.authManager.getLaunchKey();
+    const policy = this.authManager.getTrustedAuthPolicy();
+    if (!rawKey || !policy) return null;
+    const entry = this._cache.get(pulseCacheKey(rawKey, policy));
+    if (!entry || this.now() >= entry.expiresAt) return null;
+    return Object.freeze({
+      token: entry.token,
+      kid: entry.kid,
+      routes: Object.freeze([...entry.routes]),
+      expiresAt: Math.floor(entry.expiresAt / 1000),
+      refreshAfter: entry.refreshAfter,
+      nativeArtifacts: entry.nativeArtifacts,
+      pins: Object.freeze({
+        heartbeatJwtPublicKeySha256: String(policy.envelope?.heartbeatJwtPublicKeySha256 || ""),
+      }),
+      keys: Object.freeze({
+        heartbeatJwtPublicKey: String(policy.envelope?.heartbeatJwtPublicKey || ""),
+      }),
+    });
+  }
+
+  stopHeartbeat() {
+    this._heartbeatRunning = false;
+    if (this._heartbeatTimer) clearTimeout(this._heartbeatTimer);
+    this._heartbeatTimer = null;
+  }
+
+  /**
+   * Route view of the process-wide pulse for a native child. The remote token
+   * is minted once with the orchestrator's full server-authorized route set;
+   * the envelope names the route the child must verify. Agent permissions are
+   * narrowed separately by signed MCP gateway capabilities.
    *
    * @param {{ refresh?: boolean, requiredRoute: string, nativePackage?: string | null, nativeVersion?: string | null }} opts
    * @returns {Promise<Readonly<NativePulseEnvelope> | null>} null when no launch key is available.
@@ -116,24 +170,27 @@ export class PulseTokenManager {
   async getPulseEnvelope({ refresh = false, requiredRoute, nativePackage = null, nativeVersion = null } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) throw pulseError("POSSE_PULSE_ROUTE_REQUIRED", "a native pulse envelope requires an explicit route");
-    const nativeIdentity = normalizedNativeIdentity(nativePackage, nativeVersion);
+    normalizedNativeIdentity(nativePackage, nativeVersion);
     const rawKey = this.authManager.getLaunchKey({ refresh });
     if (!rawKey) return null;
     const policy = this.authManager.getTrustedAuthPolicy();
     if (!policy?.envelope?.heartbeatUrl) {
       throw pulseError("POSSE_PULSE_AUTH_POLICY_UNAVAILABLE", "trusted heartbeat policy is unavailable");
     }
-    const cacheKey = `${pulseCacheKey(rawKey, policy)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`;
+    const cacheKey = pulseCacheKey(rawKey, policy);
     const now = this.now();
     const cached = this._cache.get(cacheKey);
-    if (!refresh && cached?.envelope && now < cached.refreshAt && now < cached.expiresAt) {
-      assertExactRoute(cached.routes, route);
-      return cached.envelope;
+    if (!refresh && cached && now < cached.refreshAt && now < cached.expiresAt) {
+      assertRouteGranted(cached.routes, route);
+      this.#scheduleHeartbeat(cached);
+      return nativeEnvelopeForRoute(cached, route);
     }
-    const minted = await this.#mintPulse(cacheKey, rawKey, policy, route, nativeIdentity);
+    await this.#mintPulse(cacheKey, rawKey, policy, null);
     const refreshed = this._cache.get(cacheKey);
-    if (refreshed) assertExactRoute(refreshed.routes, route);
-    return minted.envelope;
+    if (!refreshed) return null;
+    assertRouteGranted(refreshed.routes, route);
+    this.#scheduleHeartbeat(refreshed);
+    return nativeEnvelopeForRoute(refreshed, route);
   }
 
   /**
@@ -147,19 +204,19 @@ export class PulseTokenManager {
   getCachedPulseEnvelope({ requiredRoute, nativePackage = null, nativeVersion = null } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) return null;
-    const nativeIdentity = normalizedNativeIdentity(nativePackage, nativeVersion);
+    normalizedNativeIdentity(nativePackage, nativeVersion);
     const rawKey = this.authManager.getLaunchKey();
     if (!rawKey) return null;
     const policy = this.authManager.getTrustedAuthPolicy();
     if (!policy?.envelope?.heartbeatUrl) return null;
-    const cached = this._cache.get(`${pulseCacheKey(rawKey, policy)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`);
-    if (!cached?.envelope || this.now() >= cached.expiresAt) return null;
+    const cached = this._cache.get(pulseCacheKey(rawKey, policy));
+    if (!cached || this.now() >= cached.expiresAt) return null;
     try {
-      assertExactRoute(cached.routes, route);
+      assertRouteGranted(cached.routes, route);
     } catch {
       return null;
     }
-    return cached.envelope;
+    return nativeEnvelopeForRoute(cached, route);
   }
 
   /**
@@ -192,6 +249,31 @@ export class PulseTokenManager {
     this._cache.clear();
     this._refreshes.clear();
     this.authManager.clearAuthenticationState?.();
+  }
+
+  #scheduleHeartbeat(entry) {
+    if (!this._heartbeatRunning) return;
+    if (this._heartbeatTimer) clearTimeout(this._heartbeatTimer);
+    const delay = Math.max(250, entry.refreshAt - this.now());
+    this._heartbeatTimer = setTimeout(() => {
+      this._heartbeatTimer = null;
+      void this.#refreshHeartbeat();
+    }, delay);
+    this._heartbeatTimer.unref?.();
+  }
+
+  async #refreshHeartbeat() {
+    if (!this._heartbeatRunning) return;
+    try {
+      await this.getPulseToken({ refresh: true });
+    } catch {
+      if (!this._heartbeatRunning) return;
+      this._heartbeatTimer = setTimeout(() => {
+        this._heartbeatTimer = null;
+        void this.#refreshHeartbeat();
+      }, 5_000);
+      this._heartbeatTimer.unref?.();
+    }
   }
 
   /** @param {string} value @param {string} [operation] */
@@ -301,33 +383,33 @@ export class PulseTokenManager {
     }
     const ttl = expiresAt - issuedAt;
     const skew = Math.min(this.refreshSkewMs, Math.max(1, Math.floor(ttl / 2)));
-    let routes = pulseRoutes(body, token);
+    let routes = exactPulseRoutes(body, token);
     let envelope = null;
+    const kid = String(body?.kid || jwtHeader(token)?.kid || "").trim();
+    const expiresAtSeconds = Math.floor(expiresAt / 1000);
+    const issuedAtSeconds = Math.floor(issuedAt / 1000);
+    const responseRefreshAfter = positiveNumber(body?.refresh_after ?? body?.refreshAfter, 0);
+    const latestRefreshAfterSeconds = expiresAtSeconds - 1;
+    const earliestRefreshAfterSeconds = Math.min(
+      issuedAtSeconds + NATIVE_PULSE_MIN_REFRESH_DELAY_SECONDS,
+      latestRefreshAfterSeconds,
+    );
+    const refreshAfterSeconds = Math.max(
+      earliestRefreshAfterSeconds,
+      Math.min(
+        responseRefreshAfter > 0 ? responseRefreshAfter : expiresAtSeconds - NATIVE_PULSE_REFRESH_SKEW_SECONDS,
+        latestRefreshAfterSeconds,
+      ),
+    );
+    const nativeArtifacts = exactNativeArtifactVersions(body, token);
     if (requiredRoute) {
       // Native mint: fail loud right here when the grant is wrong, and build
       // the wire envelope { token, kid, route, expiresAt, refreshAfter } the
       // native child consumes (unix seconds, offline-verified by kid).
       routes = exactNativePulseRoutes(body, token, requiredRoute);
-      const kid = String(body?.kid || jwtHeader(token)?.kid || "").trim();
       if (!kid) {
         throw pulseError("POSSE_PULSE_INVALID_RESPONSE", "heartbeat response did not name a signing kid for the native pulse");
       }
-      const expiresAtSeconds = Math.floor(expiresAt / 1000);
-      const issuedAtSeconds = Math.floor(issuedAt / 1000);
-      const responseRefreshAfter = positiveNumber(body?.refresh_after ?? body?.refreshAfter, 0);
-      const latestRefreshAfterSeconds = expiresAtSeconds - 1;
-      const earliestRefreshAfterSeconds = Math.min(
-        issuedAtSeconds + NATIVE_PULSE_MIN_REFRESH_DELAY_SECONDS,
-        latestRefreshAfterSeconds,
-      );
-      const refreshAfterSeconds = Math.max(
-        earliestRefreshAfterSeconds,
-        Math.min(
-          responseRefreshAfter > 0 ? responseRefreshAfter : expiresAtSeconds - NATIVE_PULSE_REFRESH_SKEW_SECONDS,
-          latestRefreshAfterSeconds,
-        ),
-      );
-      const nativeArtifacts = exactNativeArtifactVersions(body, token);
       envelope = Object.freeze({
         token,
         kid,
@@ -339,9 +421,12 @@ export class PulseTokenManager {
     }
     return {
       token,
+      kid,
       expiresAt,
       refreshAt: expiresAt - skew,
+      refreshAfter: refreshAfterSeconds,
       routes,
+      nativeArtifacts,
       envelope,
     };
   }
@@ -403,15 +488,30 @@ function jwtExpiryMs(token) {
   return Number.isFinite(exp) && exp > 0 ? exp * 1000 : null;
 }
 
-function pulseRoutes(body, token) {
-  const candidates = [
-    body?.routes,
-    body?.capabilities,
-    jwtClaims(token)?.routes,
-    jwtClaims(token)?.capabilities,
-  ];
-  const values = candidates.find(Array.isArray) || [];
-  return [...new Set(values.map((route) => String(route || "").trim()).filter(Boolean))];
+function exactPulseRoutes(body, token) {
+  const responseRoutes = normalizedRoutes(body?.routes ?? body?.capabilities);
+  const signedRoutes = normalizedRoutes(jwtClaims(token)?.routes ?? jwtClaims(token)?.capabilities);
+  if (responseRoutes.length === 0 || stableJson(responseRoutes) !== stableJson(signedRoutes)) {
+    throw pulseError(
+      "POSSE_PULSE_ROUTE_DENIED",
+      "heartbeat response routes do not match the signed pulse routes",
+    );
+  }
+  return signedRoutes;
+}
+
+function nativeEnvelopeForRoute(entry, route) {
+  if (!entry.kid) {
+    throw pulseError("POSSE_PULSE_INVALID_RESPONSE", "heartbeat response did not name a signing kid for the native pulse");
+  }
+  return Object.freeze({
+    token: entry.token,
+    kid: entry.kid,
+    route,
+    expiresAt: Math.floor(entry.expiresAt / 1000),
+    refreshAfter: entry.refreshAfter,
+    nativeArtifacts: entry.nativeArtifacts,
+  });
 }
 
 function exactNativePulseRoutes(body, token, requiredRoute) {

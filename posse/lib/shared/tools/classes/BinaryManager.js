@@ -27,7 +27,7 @@ import {
 } from "../../../catalog/binary.js";
 import { getNativeBinaryEnabled } from "../../../domains/settings/functions/tunables.js";
 import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
-import { PulseTokenManager } from "../../native/classes/PulseTokenManager.js";
+import { PulseTokenManager, pulseTokenManager } from "../../native/classes/PulseTokenManager.js";
 import {
   ensureNativeBinaryArtifact,
   findVerifiedNativeBinaryArtifact,
@@ -61,6 +61,7 @@ export class BinaryManager {
    *   env?: NodeJS.ProcessEnv,
    *   enabledResolver?: (name: string) => boolean,
    *   nativeAuthManager?: import("../../native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
+   *   pulseManager?: import("../../native/classes/PulseTokenManager.js").PulseTokenManager,
    *   artifactInstaller?: typeof ensureNativeBinaryArtifact,
    *   artifactCacheRoot?: string,
    *   artifactFetchImpl?: typeof fetch,
@@ -78,6 +79,8 @@ export class BinaryManager {
     // at module load. Child runtimes swap in a capability-seeded manager via
     // setNativeAuthManager().
     this._nativeAuthManager = opts.nativeAuthManager || null;
+    this._pulseManager = opts.pulseManager || null;
+    this._pulseManagerAuth = null;
     this._artifactInstaller = opts.artifactInstaller || ensureNativeBinaryArtifact;
     this._artifactCacheRoot = opts.artifactCacheRoot || null;
     this._artifactFetchImpl = opts.artifactFetchImpl || globalThis.fetch;
@@ -110,6 +113,25 @@ export class BinaryManager {
     return this.nativeAuthManager.getNativeAuthEnvelope(opts);
   }
 
+  get pulseManager() {
+    const authManager = this.nativeAuthManager;
+    if (!this._pulseManager || (this._pulseManagerAuth && this._pulseManagerAuth !== authManager)) {
+      this._pulseManager = authManager === heartbeatAuthManager
+        ? pulseTokenManager
+        : new PulseTokenManager({ authManager });
+    }
+    this._pulseManagerAuth = authManager;
+    return this._pulseManager;
+  }
+
+  async startHeartbeat() {
+    return this.pulseManager.startHeartbeat();
+  }
+
+  stopHeartbeat() {
+    this._pulseManager?.stopHeartbeat?.();
+  }
+
   /**
    * Replace the native-auth authority and propagate it to already-created
    * handles. Child runtimes call this at boot with a manager rebuilt from the
@@ -121,8 +143,28 @@ export class BinaryManager {
    */
   setNativeAuthManager(manager) {
     this._nativeAuthManager = manager || heartbeatAuthManager;
+    if (!this._opts.pulseManager) {
+      this._pulseManager?.stopHeartbeat?.();
+      this._pulseManager = null;
+      this._pulseManagerAuth = null;
+    }
     for (const handle of this._handles.values()) {
       handle._nativeAuthManager = this._nativeAuthManager;
+      if (!this._opts.pulseManager) handle._fixedPulseManager = null;
+    }
+  }
+
+  setPulseManager(manager) {
+    if (!manager || typeof manager.getPulseEnvelope !== "function") {
+      throw new TypeError("BinaryManager requires a pulse manager");
+    }
+    this._pulseManager?.stopHeartbeat?.();
+    this._pulseManager = manager;
+    this._pulseManagerAuth = this.nativeAuthManager;
+    for (const handle of this._handles.values()) {
+      handle._fixedPulseManager = manager;
+      handle._pulseManager = null;
+      handle._pulseManagerAuth = null;
     }
   }
 
@@ -161,6 +203,7 @@ export class BinaryManager {
       // authority) now reach the handle so key/heartbeat resolution honors it.
       env: this._opts.env,
       nativeAuthManager: this.nativeAuthManager,
+      pulseManager: this.pulseManager,
       exactVersion,
     });
   }
@@ -407,10 +450,12 @@ export class BinaryManager {
       }
       let pulseTokens = this._artifactPulseTokens;
       if (this._artifactInstaller === ensureNativeBinaryArtifact || pulseTokens) {
-        pulseTokens ||= new PulseTokenManager({
-          authManager: this.nativeAuthManager,
-          fetchImpl: this._artifactFetchImpl,
-        });
+        pulseTokens ||= this._artifactFetchImpl === globalThis.fetch
+          ? this.pulseManager
+          : new PulseTokenManager({
+              authManager: this.nativeAuthManager,
+              fetchImpl: this._artifactFetchImpl,
+            });
         this._artifactPulseTokens = pulseTokens;
         const pulse = await pulseTokens.getPulseEnvelope({
           refresh,
@@ -631,6 +676,7 @@ export class BinaryManager {
       waits.push((async () => { try { await handle.dispose(); } catch { /* best effort */ } })());
     }
     await Promise.all(waits);
+    this.stopHeartbeat();
   }
 
   async _replaceHandle(name, nextHandle) {

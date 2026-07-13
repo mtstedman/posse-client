@@ -23,6 +23,7 @@ import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
 import { recordToolUseObservations } from "../../../domains/observability/functions/observations.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
+import { CapabilityHandshakeManager } from "../../permissions/classes/CapabilityHandshakeManager.js";
 import { appendHashRefIfMajor, fetchHashRefTool } from "../functions/hash-adder.js";
 import {
   isInternalAtlasAction,
@@ -633,6 +634,9 @@ class PersistentMcpSession {
       }
       this._pending.clear();
     });
+    for (const frame of Array.isArray(spec.startupFrames) ? spec.startupFrames : []) {
+      this._write(frame);
+    }
   }
 
   request(message = {}) {
@@ -821,6 +825,10 @@ export class PersistentMcpOwner {
     this.bootId = crypto.randomUUID();
     this.pipePath = pipePath || defaultPipePath(this.bootId);
     this.token = token;
+    // Separate from the agent-facing owner token. Only the trusted hot gateway
+    // receives this capability, over its private stdin, so a provider shim can
+    // never trade its MCP transport token for the orchestrator's full pulse.
+    this.nativeAuthToken = randomToken();
     this._spawn = spawnImpl;
     this._server = null;
     this._sessions = new Map();
@@ -837,6 +845,14 @@ export class PersistentMcpOwner {
       pipePath: this.pipePath,
       token: this.token,
       bootId: this.bootId,
+    };
+  }
+
+  nativeAuthBrokerCapability() {
+    return {
+      transport: "pipe",
+      pipePath: this.pipePath,
+      token: this.nativeAuthToken,
     };
   }
 
@@ -1111,6 +1127,40 @@ export class PersistentMcpOwner {
         return;
       }
       sendJson(res, 200, this.status());
+      return;
+    }
+    if (req.method === "POST" && req.url === "/v1/capabilities/handshake") {
+      if (!tokenEqual(bearerFrom(req), this.nativeAuthToken)) {
+        sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const { pulseTokenManager } = await import("../../native/classes/PulseTokenManager.js");
+      try {
+        const handshakes = new CapabilityHandshakeManager();
+        handshakes.register("native.pulse", async (request) => {
+          const root = await pulseTokenManager.getHeartbeatGrant();
+          if (!root) throw new Error("heartbeat unavailable");
+          const entries = await Promise.all(request.scopes.map(async (route) => [
+            route,
+            await pulseTokenManager.getPulseEnvelope({ requiredRoute: route }),
+          ]));
+          return {
+            parentScopes: root.routes,
+            scopes: request.scopes,
+            parentExpiresAt: root.expiresAt,
+            expiresAt: root.expiresAt,
+            permissions: { routes: request.scopes },
+            tokens: { pulses: Object.fromEntries(entries) },
+            pins: root.pins,
+            keys: root.keys,
+          };
+        });
+        const grant = await handshakes.issue(body);
+        sendJson(res, 200, { ok: true, grant });
+      } catch {
+        sendJson(res, 503, { ok: false, error: "heartbeat_unavailable" });
+      }
       return;
     }
     if (req.method !== "POST" || req.url !== "/v1/mcp/rpc") {

@@ -837,6 +837,10 @@ async function init({ requireWritableArtifacts = true, refreshStartupContext = f
   try {
     if (ensureNativeGit) {
       await readiness.step("Native Git", async () => {
+        // The orchestrator owns one live remote heartbeat for the whole app.
+        // Start it before artifact resolution or any key-gated native work;
+        // children only pull derived pulse grants from their parent.
+        await nativeBinaries.startHeartbeat();
         const result = await nativeBinaries.ensureAvailable("git", { refresh: refreshNativeGit });
         if (!result?.available) {
           throw new Error(`posse-git unavailable (${result?.reason || "unknown"})`);
@@ -2603,6 +2607,7 @@ export function runOrchestratorCli() {
       process.exitCode = 1;
     })
     .finally(async () => {
+      try { await nativeBinaries.disposeAll(); } catch { /* teardown is best effort */ }
       flushEventsNow();
       closeLog();
       closeObservationLog();

@@ -15,9 +15,11 @@ import {
   getPosseRemoteTimeoutMs,
   getPosseRemoteUrl,
 } from "../../../domains/remote/functions/mode.js";
-import { resolvePosseKey } from "../../../domains/remote/functions/client.js";
 import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
-import { mintMcpOAuthTokenForBootConfig } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
+import {
+  mintMcpOAuthTokenForBootConfig,
+  verifyMcpOAuthToken,
+} from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { resolveRemoteMcpToolSurfaceForBootConfig } from "../../../domains/integrations/functions/deterministic-mcp/remote-tool-surface.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import {
@@ -27,6 +29,10 @@ import {
 } from "../functions/issued-tool-policy.js";
 import { persistentMcpOwner } from "./PersistentMcpOwner.js";
 import { McpServer } from "./McpServer.js";
+import {
+  CapabilityHandshakeManager,
+  capabilityRequest,
+} from "../../permissions/classes/CapabilityHandshakeManager.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -309,6 +315,36 @@ function deterministicMcpScriptPaths() {
   };
 }
 
+function mintMcpGatewayGrant(bootPayload) {
+  const scopes = [];
+  for (const [suite, names] of Object.entries(bootPayload.toolAllowlist || {})) {
+    for (const name of Array.isArray(names) ? names : []) scopes.push(`${suite}:${name}`);
+  }
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const handshakes = new CapabilityHandshakeManager();
+  handshakes.register("mcp.gateway", (request) => {
+    const token = mintMcpOAuthTokenForBootConfig(bootPayload);
+    const claims = verifyMcpOAuthToken(token);
+    return {
+      parentScopes: scopes,
+      scopes: request.scopes,
+      parentExpiresAt: Number(claims.exp),
+      expiresAt: Number(claims.exp),
+      permissions: {
+        role: bootPayload.role || null,
+        toolAllowlist: bootPayload.toolAllowlist || {},
+      },
+      tokens: { mcpOAuth: token },
+    };
+  });
+  return handshakes.issueSync(capabilityRequest({
+    requestId: `mcp-${bootPayload.jobId ?? "owner"}-${bootPayload.agentCallId ?? issuedAt}`,
+    capability: "mcp.gateway",
+    scopes,
+    reason: "agent-session-start",
+  }));
+}
+
 function buildDeterministicMcpBootPayload(role, {
   cwd = process.cwd(),
   scopedFiles = [],
@@ -437,7 +473,8 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
   // The remote is authoritative for the tool policy surface, but the persistent
   // MCP owner is local. Its bearer must be signed by the local owner key, with
   // the remote-derived suite allowlist embedded as a local capability.
-  bootPayload.mcpOAuthToken = mintMcpOAuthTokenForBootConfig(bootPayload);
+  const mcpGrant = mintMcpGatewayGrant(bootPayload);
+  bootPayload.mcpOAuthToken = mcpGrant.artifacts.tokens.mcpOAuth;
   let ownerEndpoint = null;
   const ownerStartAt = Date.now();
   try {
@@ -483,17 +520,10 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
     remoteToolSurface: null,
     nativeAuth: null,
   });
-  const ownerHotPosseKey = resolvePosseKey();
   const serverEnv = {
     ...deterministicMcpBaseEnv(process.env),
     ...imageGenerationCredentialEnv(process.env),
     ...deterministicMcpCompatibilityEnv(ownerHotBootPayload, resolvedAtlasConfig),
-    // Temporary rollout exception: only the trusted persistent owner receives
-    // POSSE_KEY, because released native Git/ATLAS helpers still mint their own
-    // pulse from the manager-owned credential that NativeBinary writes into
-    // each stdin request. The provider-facing shim and boot payload never
-    // receive it. Remove this when native helpers accept a parent-brokered pulse.
-    ...(ownerHotPosseKey ? { POSSE_KEY: ownerHotPosseKey } : {}),
   };
   const registerAt = Date.now();
   let registration = null;
@@ -506,6 +536,10 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
         args: [serverScriptPath, "--config-json", deterministicMcpBootArg(ownerHotBootPayload)],
         cwd,
         env: serverEnv,
+        startupFrames: [{
+          __posse_control: "capabilityBroker",
+          capability: persistentMcpOwner.nativeAuthBrokerCapability(),
+        }],
       },
       prewarm: !process.env.NODE_TEST_CONTEXT,
     });
