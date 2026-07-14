@@ -53,6 +53,9 @@ import { getCurrentGitHeadAsync } from "../../../../integrations/functions/atlas
  *   depsHash?: string,
  *   producedAt?: string | null,
  *   onEvent?: (event: { kind: string, [k: string]: any }) => void,
+ *   onDocumentsPrepared?: (coverage: { documents: Array<{ repo_rel_path: string, content_hash: string }>, source_languages: string[] }) => Promise<void> | void,
+ *   onDocumentCommitted?: (document: { repo_rel_path: string, content_hash: string, lang: string }) => Promise<void> | void,
+ *   expectedContentHashes?: Record<string, string> | null,
  *   force?: boolean,
  *   forceIfMissing?: boolean,
  *   branch?: string | null,
@@ -86,6 +89,9 @@ export async function ingestScipFile({
   depsHash,
   producedAt = null,
   onEvent,
+  onDocumentsPrepared,
+  onDocumentCommitted,
+  expectedContentHashes = null,
   force = false,
   forceIfMissing = false,
   branch = null,
@@ -137,7 +143,9 @@ export async function ingestScipFile({
     ? path.basename(String(scipPath), ".scip").toLowerCase() || null
     : null;
   const basenameSourceLanguages = scipBasenameSourceLanguages(scipPath || "");
-  const allowBytesSkip = !(force === true && forceIfMissing !== true);
+  const allowBytesSkip = typeof onDocumentsPrepared !== "function"
+    && typeof onDocumentCommitted !== "function"
+    && !(force === true && forceIfMissing !== true);
   if (allowBytesSkip && typeof ledger.findScipIndexByBytesHash === "function") {
     const bytesMatch = ledger.findScipIndexByBytesHash({
       scip_bytes_hash: bytesHash,
@@ -256,10 +264,29 @@ export async function ingestScipFile({
   const nativeRows = await scipIndexToRowsNative({ index });
   const convertMs = Date.now() - convertStartedAtMs;
   const rowDocuments = normalizeNativeRowDocuments(nativeRows?.documents);
+  if (expectedContentHashes && typeof expectedContentHashes === "object") {
+    for (const document of rowDocuments) {
+      const expected = String(expectedContentHashes[document?.repo_rel_path] || "");
+      if (!expected || expected === String(document?.content_hash || "")) continue;
+      document.skip_reason = "content_hash_mismatch";
+      document.skip_message = `SCIP batch source for ${document.repo_rel_path} changed before intake`;
+    }
+  }
   const totalDocuments = rowDocuments.length;
   sourceLanguages = collectSourceLanguages(rowDocuments);
   sourceLanguageTotals = collectSourceLanguageCounts(rowDocuments);
   sourceLanguageCurrent = zeroCountsFromTotals(sourceLanguageTotals);
+  if (typeof onDocumentsPrepared === "function") {
+    await onDocumentsPrepared({
+      documents: rowDocuments
+        .filter((document) => document?.repo_rel_path && document?.content_hash && !document?.skip_reason)
+        .map((document) => ({
+          repo_rel_path: String(document.repo_rel_path),
+          content_hash: String(document.content_hash),
+        })),
+      source_languages: sourceLanguages,
+    });
+  }
   const filesetHash = String(nativeRows?.fileset_hash || nativeRows?.filesetHash || "");
   // The expensive pipeline is behind us — resolve the head now so the
   // bookkeeping row (or the fileset-skip backfill) records the cheap-skip key.
@@ -322,6 +349,16 @@ export async function ingestScipFile({
       source_language_total: { ...sourceLanguageTotals },
       fileset_hash: filesetHash,
     });
+    if (typeof onDocumentCommitted === "function") {
+      for (const document of rowDocuments) {
+        if (!document?.repo_rel_path || !document?.content_hash || document?.skip_reason) continue;
+        await onDocumentCommitted({
+          repo_rel_path: String(document.repo_rel_path),
+          content_hash: String(document.content_hash),
+          lang: String(document.lang || sourceLanguageForDocument(document) || ""),
+        });
+      }
+    }
     return {
       skipped: true,
       documents_ingested: 0,
@@ -545,6 +582,16 @@ export async function ingestScipFile({
           repo_rel_path: repoRelPath,
           content_hash: document.content_hash,
         });
+        // Publish only after both the SCIP layer and its branch delta are
+        // durable. Awaiting the ordered head is the document-level
+        // backpressure point that prevents SCIP intake from outrunning ONNX.
+        if (typeof onDocumentCommitted === "function") {
+          await onDocumentCommitted({
+            repo_rel_path: repoRelPath,
+            content_hash: document.content_hash,
+            lang: parseResult.lang,
+          });
+        }
       } catch (err) {
         documentsFailed++;
         const failReason = document.skip_reason || (!repoRelPath ? "path_not_canonical" : "parse_error");

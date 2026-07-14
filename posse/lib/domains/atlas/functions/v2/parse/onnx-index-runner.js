@@ -57,6 +57,7 @@ import {
  *   embedSymbols: (symbols: OnnxSymbol[], signal?: AbortSignal) => Promise<Array<{ symbol_key: string, vector: Buffer | Uint8Array | ArrayBufferView }>>,
  *   commitBatch: (rows: Array<{ symbol_key: string, model_id: string, model_version: string, merged_fingerprint: string, vector: Buffer | Uint8Array | ArrayBufferView }>) => Promise<void> | void,
  *   persistWatermark?: (watermark: Record<string, unknown>) => Promise<void> | void,
+ *   onDocumentProcessed?: (document: OnnxDocument) => Promise<void> | void,
  *   onEvent?: (event: Record<string, unknown>) => void,
  * }} opts
  */
@@ -165,34 +166,98 @@ async function runStreamingRefresh(opts, { mode, batchSize, documentWindow, exis
     batchNumber: 0,
     lastDocument: null,
   };
-  let window = [];
-  let windowDocumentHashes = new Map();
-  for await (const value of opts.documents) {
-    throwIfAborted(opts.signal);
-    const document = normalizeOnnxDocument(value, state.processedDocuments + window.length);
-    const priorHash = windowDocumentHashes.get(document.document_id);
-    if (priorHash != null) {
-      throw new Error(
-        `ONNX refresh received duplicate document '${document.document_id}'`
-        + (priorHash === document.content_hash ? "" : " with conflicting content hashes"),
-      );
+  const source = asyncIteratorFor(opts.documents);
+  const queue = [];
+  const itemWaiters = [];
+  const spaceWaiters = [];
+  let sourceDone = false;
+  let sourceError = null;
+  let cancelled = false;
+
+  // Read ahead independently while ONNX works, but never retain more than the
+  // configured N+1 document capacity. Processing below starts as soon as the
+  // first complete document arrives; the window is not a batching delay.
+  const producer = (async () => {
+    try {
+      while (!cancelled) {
+        while (!cancelled && queue.length >= documentWindow) {
+          await new Promise((resolve) => spaceWaiters.push(resolve));
+        }
+        if (cancelled) break;
+        const next = await source.next();
+        if (next.done) break;
+        queue.push(next.value);
+        wakeOne(itemWaiters);
+      }
+    } catch (err) {
+      sourceError = err;
+    } finally {
+      sourceDone = true;
+      wakeAll(itemWaiters);
     }
-    windowDocumentHashes.set(document.document_id, document.content_hash);
-    window.push(document);
-    if (window.length >= documentWindow) {
-      await processDocumentWindow(opts, window, state, { mode, batchSize, existing });
-      window = [];
-      windowDocumentHashes = new Map();
+  })();
+
+  const documentHashes = new Map();
+  let receivedDocuments = 0;
+  try {
+    while (true) {
+      throwIfAborted(opts.signal);
+      while (queue.length === 0 && !sourceDone) {
+        await new Promise((resolve) => itemWaiters.push(resolve));
+      }
+      if (sourceError) throw sourceError;
+      if (queue.length === 0 && sourceDone) break;
+      const available = [];
+      while (queue.length > 0 && available.length < documentWindow) {
+        available.push(queue.shift());
+        wakeOne(spaceWaiters);
+      }
+      const documents = available.map((value) => normalizeOnnxDocument(value, receivedDocuments++));
+      for (const document of documents) {
+        const priorHash = documentHashes.get(document.document_id);
+        if (priorHash != null) {
+          throw new Error(
+            `ONNX refresh received duplicate document '${document.document_id}'`
+            + (priorHash === document.content_hash ? "" : " with conflicting content hashes"),
+          );
+        }
+        documentHashes.set(document.document_id, document.content_hash);
+      }
+      await processDocumentWindow(opts, documents, state, { mode, batchSize, existing });
     }
-  }
-  if (window.length > 0) {
-    await processDocumentWindow(opts, window, state, { mode, batchSize, existing });
+  } finally {
+    cancelled = true;
+    wakeAll(spaceWaiters);
+    try { await source.return?.(); } catch { /* original stream result wins */ }
+    await producer;
   }
   return {
     indexedSymbols: state.indexedSymbols,
     skippedSymbols: state.skippedSymbols,
     processedDocuments: state.processedDocuments,
   };
+}
+
+function asyncIteratorFor(value) {
+  const asyncIterator = value?.[Symbol.asyncIterator]?.();
+  if (asyncIterator) return asyncIterator;
+  const iterator = value?.[Symbol.iterator]?.();
+  if (!iterator) throw new TypeError("ONNX documents must be iterable or async iterable");
+  return {
+    next: () => Promise.resolve(iterator.next()),
+    return: typeof iterator.return === "function"
+      ? () => Promise.resolve(iterator.return())
+      : undefined,
+  };
+}
+
+function wakeOne(waiters) {
+  const wake = waiters.shift();
+  if (wake) wake();
+}
+
+function wakeAll(waiters) {
+  for (const wake of waiters.splice(0)) wake();
 }
 
 async function processDocumentWindow(opts, documents, state, { mode, batchSize, existing }) {
@@ -216,21 +281,40 @@ async function processDocumentWindow(opts, documents, state, { mode, batchSize, 
     remainingByDocument.push(changedInDocument);
   }
 
-  // Packing within a bounded document window groups similarly sized inputs
-  // without retaining rows from the entire index.
-  entries.sort((a, b) => symbolTextLength(a.symbol) - symbolTextLength(b.symbol));
+  // ONNX packing is independent from SCIP/document boundaries. Sort only the
+  // bounded inference pool by text length to reduce padding, then restore the
+  // canonical document/symbol order before durable vector commits.
+  const packedEntries = [...entries].sort((left, right) => (
+    symbolTextLength(left.symbol) - symbolTextLength(right.symbol)
+    || left.documentIndex - right.documentIndex
+  ));
+  const rowByKey = new Map();
+  for (let offset = 0; offset < packedEntries.length; offset += batchSize) {
+    const packed = packedEntries.slice(offset, offset + batchSize);
+    const rows = await embedBatchRows(opts, packed.map((entry) => entry.symbol), {
+      mode,
+      offset: state.indexedSymbols + offset,
+      totalSymbols: null,
+    });
+    for (const row of rows) rowByKey.set(row.symbol_key, row);
+  }
+  const canonicalRows = entries.map((entry) => {
+    const row = rowByKey.get(String(entry.symbol.symbol_key || ""));
+    if (!row) throw new Error(`ONNX refresh lost vector for '${entry.symbol.symbol_key || "<empty>"}'`);
+    return row;
+  });
+
   let completedInWindow = countCompletedDocumentPrefix(remainingByDocument);
-  for (let offset = 0; offset < entries.length; offset += batchSize) {
-    const packed = entries.slice(offset, offset + batchSize);
-    const batch = packed.map((entry) => entry.symbol);
-    const rows = await embedAndCommitBatch(opts, batch, {
+  for (let offset = 0; offset < canonicalRows.length; offset += batchSize) {
+    const rows = canonicalRows.slice(offset, offset + batchSize);
+    const committedEntries = entries.slice(offset, offset + batchSize);
+    await commitPreparedRows(opts, rows, {
       mode,
       offset: state.indexedSymbols,
-      totalSymbols: null,
     });
     state.indexedSymbols += rows.length;
     state.batchNumber++;
-    for (const entry of packed) remainingByDocument[entry.documentIndex]--;
+    for (const entry of committedEntries) remainingByDocument[entry.documentIndex]--;
     completedInWindow = countCompletedDocumentPrefix(remainingByDocument);
     const lastDocument = completedInWindow > 0
       ? documents[completedInWindow - 1]
@@ -249,7 +333,7 @@ async function processDocumentWindow(opts, documents, state, { mode, batchSize, 
       current: state.indexedSymbols,
       total: null,
       processedDocuments: state.processedDocuments + completedInWindow,
-      symbol: batch[batch.length - 1]?.symbol_key || null,
+      symbol: rows[rows.length - 1]?.symbol_key || null,
     });
   }
 
@@ -262,6 +346,9 @@ async function processDocumentWindow(opts, documents, state, { mode, batchSize, 
       processedDocuments: state.processedDocuments + documents.length,
       lastDocument: documents[documents.length - 1],
     });
+  }
+  if (typeof opts.onDocumentProcessed === "function") {
+    for (const document of documents) await opts.onDocumentProcessed(document);
   }
   state.processedDocuments += documents.length;
   state.lastDocument = documents[documents.length - 1] || state.lastDocument;
@@ -291,6 +378,12 @@ async function completeOnnxDocument(opts, document) {
 }
 
 async function embedAndCommitBatch(opts, batch, { mode, offset, totalSymbols }) {
+  const rows = await embedBatchRows(opts, batch, { mode, offset, totalSymbols });
+  await commitPreparedRows(opts, rows, { mode, offset });
+  return rows;
+}
+
+async function embedBatchRows(opts, batch, { mode, offset, totalSymbols }) {
   throwIfAborted(opts.signal);
   recordEmbeddingForensics("parse_onnx.batch.embed.start", {
     mode,
@@ -329,6 +422,10 @@ async function embedAndCommitBatch(opts, batch, { mode, offset, totalSymbols }) 
     model_id: opts.modelId,
     model_version: opts.modelVersion,
   });
+  return rows;
+}
+
+async function commitPreparedRows(opts, rows, { mode, offset }) {
   recordEmbeddingForensics("parse_onnx.batch.commit.start", {
     mode,
     offset,
@@ -355,7 +452,6 @@ async function embedAndCommitBatch(opts, batch, { mode, offset, totalSymbols }) 
     rows: rows.length,
     elapsed_ms: Date.now() - commitStartedAt,
   });
-  return rows;
 }
 
 async function persistOnnxWatermark(opts, {
@@ -409,7 +505,7 @@ function commitRowsForBatch({ vectors, batch, model_id, model_version }) {
     String(symbol.merged_fingerprint || ""),
   ]));
   const seen = new Set();
-  const rows = [];
+  const vectorByKey = new Map();
   for (const row of vectors) {
     const key = String(row?.symbol_key || "");
     if (!fingerprintByKey.has(key)) {
@@ -422,20 +518,25 @@ function commitRowsForBatch({ vectors, batch, model_id, model_version }) {
       throw new Error(`ONNX refresh returned invalid vector for symbol_key '${key}'`);
     }
     seen.add(key);
-    rows.push({
-      symbol_key: key,
-      model_id,
-      model_version,
-      merged_fingerprint: fingerprintByKey.get(key) || "",
-      vector: row.vector,
-    });
+    vectorByKey.set(key, row.vector);
   }
   for (const key of fingerprintByKey.keys()) {
     if (!seen.has(key)) {
       throw new Error(`ONNX refresh missing vector for symbol_key '${key}'`);
     }
   }
-  return rows;
+  // Encoders are allowed to finish their internal work out of order. Durable
+  // vector commits are not: normalize back to the caller's batch sequence.
+  return batch.map((symbol) => {
+    const key = String(symbol.symbol_key || "");
+    return {
+      symbol_key: key,
+      model_id,
+      model_version,
+      merged_fingerprint: fingerprintByKey.get(key) || "",
+      vector: vectorByKey.get(key),
+    };
+  });
 }
 
 /**

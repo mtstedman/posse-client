@@ -51,6 +51,19 @@ const VALID_WORKFLOW_MODES = new Set([
 ]);
 
 const ONESHOT_TOKEN_RE = /(?:^|\s)#one[-_]?shot\b/i;
+const ONESHOT_DIRECTIVE_RES = [
+  /^\s*(?:please\s+)?one[-_\s]?shot(?:\s+(?:please|mode))?\s*(?::|[-—]\s+|(?=(?:do|fix|update|change|add|remove|make|replace|use|keep|limit)\b))/i,
+  /\b(?:please\s+)?(?:do|make|run|handle|treat|execute|complete|keep)\s+(?:this|it|the\s+(?:task|change|edit))\s+(?:(?:as|in|into)\s+)?(?:a\s+)?one[-_\s]?shot\b/i,
+  /\bi\s+(?:want|need|would\s+like)\s+(?:this|it)(?:\s+to\s+be|\s+done|\s+handled|\s+run)?\s+(?:(?:as|in)\s+)?(?:a\s+)?one[-_\s]?shot\b/i,
+  /\b(?:this|it)\s+should\s+(?:be\s+|run\s+|stay\s+)?(?:as\s+|in\s+)?(?:a\s+)?one[-_\s]?shot\b/i,
+  /(?:^|[.!?]\s+)\s*(?:please\s+)?(?:use|select|choose|force)\s+(?:the\s+)?one[-_\s]?shot(?:\s+(?:mode|route|routing|path|flow))?\b/i,
+  /^\s*(?:please\s+)?one[-_\s]?shot\s+(?:this|it|the\s+task)\b/i,
+];
+
+export function hasExplicitOneshotIntent(text = "") {
+  const value = String(text || "");
+  return ONESHOT_TOKEN_RE.test(value) || ONESHOT_DIRECTIVE_RES.some((re) => re.test(value));
+}
 
 function _normPath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
@@ -178,8 +191,19 @@ function _parseDesiredOutputs(inputValue, inferred = []) {
 export function normalizeIntakeHints(input = {}, { requestText = "", fallbackMode = "build" } = {}) {
   const inferred = inferIntakeHints(requestText, fallbackMode);
   const hasInputIntent = _hasValue(input, "intent_type");
-  const tokenIntent = ONESHOT_TOKEN_RE.test(String(requestText || "")) ? "oneshot" : "";
-  const intent = String((hasInputIntent ? input.intent_type : tokenIntent) || inferred.intent_type || "").toLowerCase();
+  const inputIntentSource = _normalizeHintSource(
+    input.intent_type_source,
+    hasInputIntent ? "explicit" : "inferred",
+  );
+  const inputIntentExplicit = hasInputIntent && inputIntentSource === "explicit";
+  const inlineOneshotIntent = hasExplicitOneshotIntent(requestText);
+  const intent = String(
+    (inputIntentExplicit
+      ? input.intent_type
+      : (inlineOneshotIntent ? "oneshot" : (hasInputIntent ? input.intent_type : "")))
+      || inferred.intent_type
+      || "",
+  ).toLowerCase();
   const deliverable = String(input.deliverable_type || inferred.deliverable_type || "").toLowerCase();
   const rawOutput = String(input.output_mode || inferred.output_mode || "").toLowerCase();
   const output = VALID_OUTPUTS.has(rawOutput) ? rawOutput : inferred.output_mode;
@@ -202,12 +226,9 @@ export function normalizeIntakeHints(input = {}, { requestText = "", fallbackMod
     input.desired_outputs_source,
     (_hasValue(input, "desired_outputs") || legacyExplicitOutputMode) ? "explicit" : "inferred",
   );
-  const intentTypeSource = tokenIntent && !hasInputIntent
+  const intentTypeSource = inputIntentExplicit || inlineOneshotIntent
     ? "explicit"
-    : _normalizeHintSource(
-      input.intent_type_source,
-      (hasInputIntent || tokenIntent) ? "explicit" : "inferred",
-    );
+    : inputIntentSource;
   const suspectedFiles = _dedupe(
     _splitList(input.suspected_files)
       .filter(_isSafeHintPath)

@@ -215,7 +215,7 @@ import {
 import { resolveTargetBranch, resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import { GIT_OPERATION_TIMEOUT_MS, gitExecAsync, isGitCommandFailure } from "../../git/functions/utils.js";
 import { ensureRestrictivePushRefspecsAsync, remotePushConfigsAreClearlyRestrictive } from "../../git/functions/push-guard.js";
-import { normalizeIntakeHints } from "../../intake/functions/hints.js";
+import { hasExplicitOneshotIntent, normalizeIntakeHints } from "../../intake/functions/hints.js";
 import {
   collectHandledSuggestionKeys,
   createApprovedSuggestionFollowUp,
@@ -994,10 +994,6 @@ function isReviewableWorkItem(wi) {
   });
 }
 
-function hasInlineOneshotIntent(description) {
-  return /(?:^|\s)#one[-_]?shot\b/i.test(String(description || ""));
-}
-
 const RESPONSE_SHAPE_ALIASES = new Map([
   ["a", "auto"],
   ["auto", "auto"],
@@ -1225,7 +1221,7 @@ async function cmdAdd() {
   const defaultDeepthink = isResearchBudgetDeep(parsedResearchBudget.budget);
   const workflowMode = ITERATE_FLAG ? await promptForIterativeWorkflowMode() : null;
   const workflowRedTeamPlan = workflowMode ? shouldPersistIterativeRedTeamPlan() : false;
-  const guidedScope = process.argv.includes("--guided") || (!hasInlineOneshotIntent(description) && !hasIntakeHintFlags())
+  const guidedScope = process.argv.includes("--guided") || (!hasExplicitOneshotIntent(description) && !hasIntakeHintFlags())
     ? await promptForScopedAdd(description, mode, defaultDeepthink, workflowMode)
     : { intakeHints: parseIntakeHintsFromArgv(description, mode), deepthink: defaultDeepthink || !!workflowMode };
   const intakeHints = workflowMode

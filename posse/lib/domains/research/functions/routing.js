@@ -1,5 +1,6 @@
 import { normalizeResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { slugify } from "../../../shared/format/functions/slug.js";
+import { hasExplicitOneshotIntent } from "../../intake/functions/hints.js";
 import {
   ONESHOT_AMBIGUOUS_SIGNAL_RE as AMBIGUOUS_RE,
   ONESHOT_BROAD_SCOPE_SIGNAL_RE as BROAD_SCOPE_RE,
@@ -17,7 +18,6 @@ const ONESHOT_SIMPLE_UI_CONTROL_RE = /(?:\bicon(?:-only)?\s+buttons?\b[^.\n]{0,1
 const LOW_NO_LOGIC_RE = /\b(?:typo|spelling|comments?\s+fix|comment-only|rename|copy\s*edit|docs?|readme|formatting|whitespace|no\s+(?:logic|behavior|behaviour)\s+change)\b/i;
 const FANOUT_TRIGGER_RE = /\b(?:audit|review\s+all|verify\s+each|find\s+all|scan\s+all|check\s+every|across)\b/i;
 const WEB_FANOUT_RE = /\b(?:compare|versus|vs\.?|between|across|audit|review|verify|investigate)\b/i;
-const ONESHOT_TOKEN_RE = /(?:^|\s)#one[-_]?shot\b/i;
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:ai|app|cloud|co|com|dev|edu|gov|io|net|org)\b/gi;
 
@@ -440,7 +440,8 @@ export function classifyResearchTask({
   const listItems = extractListItems(taskDescription || taskTitle);
   const noResearchText = taskDescription || taskTitle;
   const protectedFileMention = hasProtectedFileMention(fileMentions);
-  const explicitOneshot = String(intakeHints?.intent_type || "").toLowerCase() === "oneshot" || ONESHOT_TOKEN_RE.test(text);
+  const explicitOneshot = String(intakeHints?.intent_type || "").toLowerCase() === "oneshot"
+    || hasExplicitOneshotIntent(text);
   // One shared eligibility policy for every one-shot origin: mode must be
   // build, explicit output must resolve to repo output, and the request must
   // carry no security/concurrency/ambiguity/broad-scope/rename/formatting

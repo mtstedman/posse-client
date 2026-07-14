@@ -14,6 +14,8 @@ import { listScipFiles } from "./ingester.js";
 import { computeScipPlanFilesetHash, countSourceFilesByExtensions, describeScipIndexerLookup, resolveScipStagePlans } from "./indexers.js";
 import { normalizeAtlasScipMode, shouldRunScipPhase } from "../../../../integrations/functions/atlas-v2-mode.js";
 import { formatAtlasError } from "../verbose-errors.js";
+import { sha256Hex } from "../hash.js";
+import { isCanonicalRepoPath } from "../paths.js";
 import { createProtoReader } from "./proto-reader.js";
 import { sanitizeScipOutputFileNative } from "./sanitizer.js";
 import {
@@ -34,6 +36,10 @@ export { resolveScipStagePlan, resolveScipStagePlans } from "./indexers.js";
 const SCIP_STAGE_GATE = new KeyedAsyncGate({ name: "atlas-scip-stager", maxConcurrency: 1 });
 export const DEFAULT_SCIP_COLD_INDEX_TIMEOUT_MS = 600_000;
 const SCIP_STAGING_ORPHAN_GRACE_MS = 660_000;
+const SCIP_BATCH_STAGE_INDEXERS = new Set(["typescript", "python", "php"]);
+export const DEFAULT_SCIP_BATCH_MAX_FILES = 32;
+export const DEFAULT_SCIP_BATCH_MAX_SOURCE_BYTES = 12 * 1024 * 1024;
+export const DEFAULT_SCIP_BATCH_IN_FLIGHT = 2;
 const SCIP_INDEXER_ENV_EXACT = new Set([
   "APPDATA",
   "CARGO_HOME",
@@ -345,6 +351,426 @@ export async function ensureScipStaged({
     emit(onProgress, `SCIP staging failed: ${message}`);
     return { enabled: true, dir, files, staged: false, reason: "error", error: message, results: [], orphanStagingRemoved };
   }
+}
+
+/**
+ * Build the deterministic manifest used by path-preserving SCIP batch views.
+ * Paths are bytewise ordered, deduplicated, and assigned ordinals before any
+ * indexer starts. A batch never mixes indexers and never splits a document.
+ *
+ * @param {{
+ *   repoRoot: string,
+ *   paths: string[],
+ *   plans: ScipStagePlan[],
+ *   maxFiles?: number,
+ *   maxSourceBytes?: number,
+ * }} args
+ */
+export async function buildScipBatchManifest({
+  repoRoot,
+  paths,
+  plans,
+  maxFiles = DEFAULT_SCIP_BATCH_MAX_FILES,
+  maxSourceBytes = DEFAULT_SCIP_BATCH_MAX_SOURCE_BYTES,
+}) {
+  const root = path.resolve(String(repoRoot || process.cwd()));
+  const fileLimit = positiveBatchLimit(maxFiles, DEFAULT_SCIP_BATCH_MAX_FILES);
+  const byteLimit = positiveBatchLimit(maxSourceBytes, DEFAULT_SCIP_BATCH_MAX_SOURCE_BYTES);
+  const orderedPaths = uniqueBytewiseRepoPaths(paths);
+  const planByExtension = new Map();
+  for (const plan of Array.isArray(plans) ? plans : []) {
+    if (!SCIP_BATCH_STAGE_INDEXERS.has(String(plan?.indexerId || ""))) continue;
+    for (const rawExtension of Array.isArray(plan?.sourceExtensions) ? plan.sourceExtensions : []) {
+      const extension = String(rawExtension || "").trim().toLowerCase();
+      if (extension && !planByExtension.has(extension)) planByExtension.set(extension, plan);
+    }
+  }
+
+  const documents = [];
+  const unavailable = [];
+  for (const repoRelPath of orderedPaths) {
+    if (!isCanonicalRepoPath(repoRelPath)) {
+      unavailable.push({ repo_rel_path: repoRelPath, reason: "path_not_canonical" });
+      continue;
+    }
+    const plan = planByExtension.get(path.extname(repoRelPath).toLowerCase()) || null;
+    if (!plan) {
+      unavailable.push({ repo_rel_path: repoRelPath, reason: "batch_indexer_unavailable" });
+      continue;
+    }
+    const sourcePath = path.join(root, repoRelPath);
+    let sourceBytes;
+    try {
+      sourceBytes = await fs.promises.readFile(sourcePath);
+    } catch (err) {
+      unavailable.push({
+        repo_rel_path: repoRelPath,
+        reason: "source_unavailable",
+        error: formatAtlasError(err),
+      });
+      continue;
+    }
+    documents.push({
+      documentOrdinal: documents.length,
+      repoRelPath,
+      sourceBytes: sourceBytes.length,
+      contentHash: sha256Hex(sourceBytes),
+      plan,
+    });
+  }
+
+  const batches = [];
+  let current = null;
+  for (const document of documents) {
+    const planChanged = current && current.plan !== document.plan;
+    const fileLimitReached = current && current.documents.length >= fileLimit;
+    const byteLimitReached = current
+      && current.documents.length > 0
+      && current.sourceBytes + document.sourceBytes > byteLimit;
+    if (!current || planChanged || fileLimitReached || byteLimitReached) {
+      current = {
+        batchOrdinal: batches.length,
+        firstDocumentOrdinal: document.documentOrdinal,
+        plan: document.plan,
+        sourceBytes: 0,
+        documents: [],
+      };
+      batches.push(current);
+    }
+    current.documents.push(document);
+    current.sourceBytes += document.sourceBytes;
+  }
+
+  for (const batch of batches) {
+    batch.paths = batch.documents.map((document) => document.repoRelPath);
+    batch.documentsExpected = batch.documents.length;
+    batch.lastDocumentOrdinal = batch.documents.at(-1)?.documentOrdinal ?? batch.firstDocumentOrdinal;
+    const batchHashPayload = batch.documents.map((document) => ({
+      ordinal: document.documentOrdinal,
+      path: document.repoRelPath,
+      content_hash: document.contentHash,
+      source_bytes: document.sourceBytes,
+    }));
+    batch.batchHash = sha256Hex(Buffer.from(JSON.stringify(batchHashPayload)));
+  }
+  const filesetHashPayload = documents.map((document) => ({
+    ordinal: document.documentOrdinal,
+    path: document.repoRelPath,
+    content_hash: document.contentHash,
+    source_bytes: document.sourceBytes,
+    indexer: document.plan.indexerId,
+  }));
+  const filesetHash = sha256Hex(Buffer.from(JSON.stringify(filesetHashPayload)));
+  return {
+    filesetHash,
+    documentCount: documents.length,
+    batchCount: batches.length,
+    maxFiles: fileLimit,
+    maxSourceBytes: byteLimit,
+    orderedPaths: documents.map((document) => document.repoRelPath),
+    documents,
+    batches,
+    unavailable,
+  };
+}
+
+/**
+ * Stage ordered, path-preserving SCIP batches and hand each completed artifact
+ * to a bounded downstream lane. The callback's returned promise is the batch
+ * acknowledgement; at most `maxInFlight` unacknowledged batches are retained.
+ *
+ * @param {{
+ *   repoRoot?: string,
+ *   paths?: string[],
+ *   scipDir?: string,
+ *   mode?: string,
+ *   config?: Record<string, any>,
+ *   timeoutMs?: number | null,
+ *   posseRoot?: string | null,
+ *   onProgress?: ((event: Record<string, any>) => void) | null,
+ *   onBatchReady?: ((file: string, info: Record<string, any>) => Promise<unknown> | unknown) | null,
+ *   onFileUnavailable?: ((info: Record<string, any>) => Promise<unknown> | unknown) | null,
+ * }} args
+ */
+export async function stageScipBatches({
+  repoRoot,
+  paths = [],
+  scipDir = "",
+  mode = "on",
+  config = {},
+  timeoutMs = null,
+  posseRoot = null,
+  onProgress = null,
+  onBatchReady = null,
+  onFileUnavailable = null,
+} = {}) {
+  const normalizedMode = normalizeAtlasScipMode(mode ?? config?.scipMode);
+  const root = path.resolve(String(repoRoot || process.cwd()));
+  const dir = path.resolve(String(scipDir || config?.scipDir || path.join(root, ".posse", "atlas", "scip")));
+  if (!shouldRunScipPhase(normalizedMode)) {
+    return { enabled: false, dir: null, files: [], staged: false, reason: "disabled", results: [] };
+  }
+  await fs.promises.mkdir(dir, { recursive: true });
+  const lookup = resolveScipStagePlans({
+    repoRoot: root,
+    scipDir: dir,
+    command: config?.scipIndexCommand ?? null,
+    args: config?.scipIndexArgs ?? null,
+    timeoutMs: timeoutMs ?? config?.scipIndexTimeoutMs ?? null,
+    posseRoot,
+    languages: config?.scipLanguages ?? config?.atlas_scip_languages ?? null,
+  });
+  const manifest = await buildScipBatchManifest({
+    repoRoot: root,
+    paths,
+    plans: lookup.plans,
+    maxFiles: config?.atlasScipBatchMaxFiles ?? config?.atlas_scip_batch_max_files,
+    maxSourceBytes: config?.atlasScipBatchMaxSourceBytes ?? config?.atlas_scip_batch_max_source_bytes,
+  });
+  const sessionId = sha256Hex(Buffer.from(
+    `${manifest.filesetHash}\0${Date.now()}\0${process.pid}\0${Math.random()}`,
+  )).slice(0, 32);
+  const sessionDir = path.join(dir, "batches", sessionId);
+  const sessionManifestPath = path.join(sessionDir, "manifest.json");
+  const maxInFlight = positiveBatchLimit(
+    config?.atlasScipBatchInFlight ?? config?.atlas_scip_batch_in_flight,
+    DEFAULT_SCIP_BATCH_IN_FLIGHT,
+  );
+  const state = {
+    sessionId,
+    filesetHash: manifest.filesetHash,
+    documentCount: manifest.documentCount,
+    batchCount: manifest.batchCount,
+    maxFiles: manifest.maxFiles,
+    maxSourceBytes: manifest.maxSourceBytes,
+    completedBatches: [],
+    failedBatches: [],
+    committedDocumentOrdinal: -1,
+    status: "running",
+    batches: manifest.batches.map((batch) => ({
+      batchOrdinal: batch.batchOrdinal,
+      firstDocumentOrdinal: batch.firstDocumentOrdinal,
+      lastDocumentOrdinal: batch.lastDocumentOrdinal,
+      documentsExpected: batch.documentsExpected,
+      sourceBytes: batch.sourceBytes,
+      batchHash: batch.batchHash,
+      language: batch.plan.indexerId,
+      paths: batch.paths,
+    })),
+  };
+  await writeBatchSessionManifest(sessionManifestPath, state);
+  for (const unavailable of manifest.unavailable) {
+    await notifyFileUnavailable(onFileUnavailable, unavailable);
+  }
+
+  const files = [];
+  const results = [];
+  const inFlight = [];
+  const acknowledgeOldest = async () => {
+    const pending = inFlight.shift();
+    if (!pending) return;
+    await pending.ack;
+    state.completedBatches.push(pending.batch.batchOrdinal);
+    state.committedDocumentOrdinal = pending.batch.lastDocumentOrdinal;
+    await writeBatchSessionManifest(sessionManifestPath, state);
+  };
+
+  try {
+    for (const batch of manifest.batches) {
+      while (inFlight.length >= maxInFlight) await acknowledgeOldest();
+      emit(onProgress, `staging SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount} (${batch.documentsExpected} documents)`, {
+        kind: "atlas.scip.batch_staging_started",
+        batch_ordinal: batch.batchOrdinal,
+        batch_count: manifest.batchCount,
+        first_document_ordinal: batch.firstDocumentOrdinal,
+        documents_expected: batch.documentsExpected,
+        source_bytes: batch.sourceBytes,
+        language: batch.plan.indexerId,
+        source_languages: sourceLanguagesForPlan(batch.plan),
+      });
+      const staged = await stageScipBatch({
+        root,
+        sessionDir,
+        batch,
+        onProgress,
+      });
+      const result = {
+        ok: staged.ok === true,
+        staged: staged.ok === true,
+        batchOrdinal: batch.batchOrdinal,
+        firstDocumentOrdinal: batch.firstDocumentOrdinal,
+        documentsExpected: batch.documentsExpected,
+        language: batch.plan.indexerId,
+        source_languages: sourceLanguagesForPlan(batch.plan),
+        outputPath: staged.outputPath || null,
+        error: staged.error,
+      };
+      results.push(result);
+      if (!staged.ok || !staged.outputPath) {
+        state.failedBatches.push(batch.batchOrdinal);
+        await writeBatchSessionManifest(sessionManifestPath, state);
+        for (const repoRelPath of batch.paths) {
+          await notifyFileUnavailable(onFileUnavailable, {
+            repo_rel_path: repoRelPath,
+            reason: "batch_stage_failed",
+            error: staged.error || "SCIP batch staging failed",
+          });
+        }
+        continue;
+      }
+      files.push(staged.outputPath);
+      const info = {
+        session_id: sessionId,
+        batch_ordinal: batch.batchOrdinal,
+        batch_count: manifest.batchCount,
+        first_document_ordinal: batch.firstDocumentOrdinal,
+        documents_expected: batch.documentsExpected,
+        batch_sha256: staged.sha256,
+        manifest_batch_hash: batch.batchHash,
+        repo_rel_paths: batch.paths,
+        content_hashes: Object.fromEntries(batch.documents.map((document) => [
+          document.repoRelPath,
+          document.contentHash,
+        ])),
+        language: batch.plan.indexerId,
+        indexer: batch.plan.label,
+        source_languages: sourceLanguagesForPlan(batch.plan),
+      };
+      let ack;
+      try {
+        ack = typeof onBatchReady === "function"
+          ? Promise.resolve(onBatchReady(staged.outputPath, info))
+          : Promise.resolve();
+      } catch (err) {
+        ack = Promise.reject(err);
+      }
+      inFlight.push({ batch, ack });
+      emit(onProgress, `staged SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount}`, {
+        kind: "atlas.scip.batch_staged",
+        batch_ordinal: batch.batchOrdinal,
+        batch_count: manifest.batchCount,
+        first_document_ordinal: batch.firstDocumentOrdinal,
+        documents_expected: batch.documentsExpected,
+        language: batch.plan.indexerId,
+        source_languages: sourceLanguagesForPlan(batch.plan),
+      });
+    }
+    while (inFlight.length > 0) await acknowledgeOldest();
+    state.status = state.failedBatches.length > 0 ? "partial" : "complete";
+    await writeBatchSessionManifest(sessionManifestPath, state);
+    return {
+      enabled: true,
+      dir,
+      files,
+      staged: files.length > 0,
+      reason: state.status,
+      results,
+      sessionId,
+      sessionManifestPath,
+      manifest,
+    };
+  } catch (err) {
+    state.status = "failed";
+    state.error = formatAtlasError(err);
+    await writeBatchSessionManifest(sessionManifestPath, state).catch(() => {});
+    throw err;
+  }
+}
+
+async function stageScipBatch({ root, sessionDir, batch, onProgress }) {
+  const batchName = `batch-${String(batch.batchOrdinal).padStart(5, "0")}`;
+  const outputDir = path.join(sessionDir, batchName);
+  const outputPath = path.join(outputDir, `${batch.plan.indexerId}.scip`);
+  const viewParent = path.join(sessionDir, ".project-views");
+  await fs.promises.mkdir(outputDir, { recursive: true });
+  await fs.promises.mkdir(viewParent, { recursive: true });
+  const viewRoot = await fs.promises.mkdtemp(path.join(viewParent, `${batchName}-`));
+  try {
+    for (const document of batch.documents) {
+      const sourcePath = path.join(root, document.repoRelPath);
+      const viewPath = path.join(viewRoot, document.repoRelPath);
+      await fs.promises.mkdir(path.dirname(viewPath), { recursive: true });
+      await fs.promises.copyFile(sourcePath, viewPath);
+      const copiedHash = sha256Hex(await fs.promises.readFile(viewPath));
+      if (copiedHash !== document.contentHash) {
+        return { ok: false, outputPath, error: `source changed while staging ${document.repoRelPath}` };
+      }
+    }
+    await writeBatchProjectMetadata(viewRoot, batch);
+    const rewritten = planWithOutputPath(batch.plan, outputPath);
+    if (!rewritten.replaced) {
+      return { ok: false, outputPath, error: `SCIP batch plan does not reference ${batch.plan.outputPath}` };
+    }
+    if (batch.plan.indexerId === "python"
+      && rewritten.plan.args.some((arg) => String(arg).trim() === "--target-only")) {
+      return { ok: false, outputPath, error: "Python SCIP batch staging forbids --target-only" };
+    }
+    const key = `batch::${normalizedFileKey(outputPath)}`;
+    const waitMs = Math.max(30_000, Number(rewritten.plan.timeoutMs || 0) + 30_000);
+    const run = await SCIP_STAGE_GATE.run(key, () => runScipIndexerAtomic(rewritten.plan, {
+      cwd: viewRoot,
+      repoRoot: root,
+      allowedPaths: batch.paths,
+      onProgress,
+    }), { label: `SCIP batch ${batch.batchOrdinal}`, waitMs });
+    if (!run.ok) return { ...run, outputPath };
+    const bytes = await fs.promises.readFile(outputPath);
+    return { ...run, ok: true, outputPath, sha256: sha256Hex(bytes) };
+  } finally {
+    try { await fs.promises.rm(viewRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+async function writeBatchProjectMetadata(viewRoot, batch) {
+  if (batch.plan.indexerId === "typescript") {
+    await fs.promises.writeFile(path.join(viewRoot, "tsconfig.json"), JSON.stringify({
+      compilerOptions: { allowJs: true },
+      files: batch.paths,
+      exclude: GENERATED_INFER_TSCONFIG.exclude,
+    }), "utf8");
+    return;
+  }
+  if (batch.plan.indexerId === "php") {
+    await fs.promises.writeFile(path.join(viewRoot, "composer.json"), JSON.stringify({
+      autoload: { classmap: batch.paths },
+    }), "utf8");
+  }
+  // scip-python indexes the isolated project view with its ordinary `index`
+  // command. Deliberately do not add or invoke --target-only: it emits empty
+  // relative paths and breaks safe merge/parity.
+}
+
+async function writeBatchSessionManifest(filePath, state) {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.staging`;
+  try {
+    await fs.promises.writeFile(tempPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    await replaceFile(tempPath, filePath);
+  } finally {
+    try { await fs.promises.rm(tempPath, { force: true }); } catch { /* best effort */ }
+  }
+}
+
+async function notifyFileUnavailable(callback, info) {
+  if (typeof callback !== "function") return;
+  try { await callback(info); } catch { /* completion notifications are observational */ }
+}
+
+function positiveBatchLimit(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function uniqueBytewiseRepoPaths(paths) {
+  const seen = new Set();
+  const values = [];
+  for (const rawPath of Array.isArray(paths) ? paths : []) {
+    const repoRelPath = String(rawPath || "");
+    if (!repoRelPath || seen.has(repoRelPath)) continue;
+    seen.add(repoRelPath);
+    values.push(repoRelPath);
+  }
+  return values.sort((left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")));
 }
 
 function normalizedFileKey(file) {
@@ -748,10 +1174,15 @@ async function stagePlanThroughGate(plan, { cwd, policy, currentHead, maxAgeHour
 
 /**
  * @param {ScipStagePlan} plan
- * @param {{ cwd: string, onProgress?: ((event: Record<string, any>) => void) | null }} opts
+ * @param {{ cwd: string, repoRoot?: string, allowedPaths?: string[] | null, onProgress?: ((event: Record<string, any>) => void) | null }} opts
  * @returns {Promise<{ ok: boolean, status?: number | null, signal?: string | null, error?: string }>}
  */
-async function runScipIndexerAtomic(plan, { cwd, onProgress = null }) {
+async function runScipIndexerAtomic(plan, {
+  cwd,
+  repoRoot = cwd,
+  allowedPaths = null,
+  onProgress = null,
+}) {
   const tempPath = tempOutputPath(plan.outputPath);
   const rewritten = planWithOutputPath(plan, tempPath);
   const inferredTsconfig = inferredTsconfigCleanupTarget(plan, cwd);
@@ -791,7 +1222,8 @@ async function runScipIndexerAtomic(plan, { cwd, onProgress = null }) {
       const sanitize = await sanitizeScipOutputOrValidationError({
         inputPath: plan.outputPath,
         outputPath: sanitizedPath,
-        repoRoot: cwd,
+        repoRoot,
+        allowedPaths,
         plan,
         run,
         onProgress,
@@ -818,7 +1250,8 @@ async function runScipIndexerAtomic(plan, { cwd, onProgress = null }) {
     const sanitize = await sanitizeScipOutputOrValidationError({
       inputPath: tempPath,
       outputPath: sanitizedPath,
-      repoRoot: cwd,
+      repoRoot,
+      allowedPaths,
       plan,
       run,
       onProgress,
@@ -836,7 +1269,7 @@ async function runScipIndexerAtomic(plan, { cwd, onProgress = null }) {
   }
 }
 
-async function sanitizeScipOutputOrValidationError({ inputPath, outputPath, repoRoot, plan, run, onProgress }) {
+async function sanitizeScipOutputOrValidationError({ inputPath, outputPath, repoRoot, allowedPaths = null, plan, run, onProgress }) {
   const rawValidation = validateScipOutputFile(inputPath, run?.sourceFiles);
   if (!rawValidation.ok) {
     return {
@@ -847,7 +1280,7 @@ async function sanitizeScipOutputOrValidationError({ inputPath, outputPath, repo
   }
   let sanitize;
   try {
-    sanitize = await sanitizeScipOutputFileNative({ inputPath, outputPath, repoRoot, plan, onProgress });
+    sanitize = await sanitizeScipOutputFileNative({ inputPath, outputPath, repoRoot, plan, allowedPaths, onProgress });
   } catch (err) {
     return {
       ok: false,

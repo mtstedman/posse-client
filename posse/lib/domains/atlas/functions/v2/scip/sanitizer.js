@@ -17,6 +17,7 @@ export { SCIP_SANITIZER_POLICY_VERSION };
  *   outputPath?: string,
  *   repoRoot: string,
  *   plan?: Record<string, any> | null,
+ *   allowedPaths?: string[] | null,
  *   onProgress?: ((event: Record<string, any>) => void) | null,
  * }} input
  * @returns {Promise<{ metrics: Record<string, any>, manifest: Record<string, any>, policyVersion: string }>}
@@ -26,6 +27,7 @@ export async function sanitizeScipOutputFileNative({
   outputPath = inputPath,
   repoRoot,
   plan = null,
+  allowedPaths = null,
   onProgress = null,
 } = {}) {
   const rawInput = String(inputPath || "").trim();
@@ -33,7 +35,16 @@ export async function sanitizeScipOutputFileNative({
   const root = path.resolve(String(repoRoot || process.cwd()));
   const inFile = path.resolve(rawInput);
   const outFile = path.resolve(String(outputPath || inFile));
-  const manifest = computeScipPlanFilesetManifest({ repoRoot: root, plan: plan || {} });
+  const scopedPaths = Array.isArray(allowedPaths)
+    ? [...new Set(allowedPaths.map((value) => String(value || "")).filter(Boolean))]
+    : null;
+  const manifest = scopedPaths ? {
+    ok: true,
+    paths: scopedPaths,
+    files: scopedPaths.length,
+    source: "batch",
+    ref: null,
+  } : computeScipPlanFilesetManifest({ repoRoot: root, plan: plan || {} });
   if (!manifest.ok && manifest.reason !== "fileset_unsupported") {
     throw new Error(`SCIP sanitizer manifest failed: ${manifest.reason || "fileset_scan_failed"}`);
   }
@@ -43,15 +54,15 @@ export async function sanitizeScipOutputFileNative({
     language: plan?.indexerId || null,
     indexer: plan?.label || null,
     sanitizer_policy_version: SCIP_SANITIZER_POLICY_VERSION,
-    manifest_files: manifest.files ?? null,
-    manifest_source: manifest.source || null,
+    manifest_files: scopedPaths?.length ?? manifest.files ?? null,
+    manifest_source: scopedPaths ? "batch" : (manifest.source || null),
   });
   const result = await runAtlasNativeMethodAsync("scip-sanitize", {
     inputPath: inFile,
     outputPath: outFile,
     repoRoot: root,
     projectRoot: root,
-    allowedPaths: manifest.ok ? manifest.paths : [],
+    allowedPaths: scopedPaths || (manifest.ok ? manifest.paths : []),
     policyVersion: SCIP_SANITIZER_POLICY_VERSION,
   }, {
     timeoutMs: sanitizerTimeoutMs(plan),
@@ -68,8 +79,8 @@ export async function sanitizeScipOutputFileNative({
     dropped_by_reason: metrics.dropped_by_reason,
     bytes_before: metrics.bytes_before,
     bytes_after: metrics.bytes_after,
-    manifest_files: manifest.files ?? null,
-    manifest_source: manifest.source || null,
+    manifest_files: scopedPaths?.length ?? manifest.files ?? null,
+    manifest_source: scopedPaths ? "batch" : (manifest.source || null),
   });
   return {
     metrics,

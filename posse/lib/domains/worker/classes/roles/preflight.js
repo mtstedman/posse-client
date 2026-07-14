@@ -75,7 +75,11 @@ export class PreflightRole extends BaseRole {
         ? [
           "Preflight objective: resolve whether this trivial-shaped item has exactly one clear existing repo file target.",
           userSelectedOneshot
-            ? "The user explicitly selected one-shot. Treat that as a strong routing preference: do not demote merely because the edit is not a typo or documentation change."
+            ? [
+              "The user explicitly selected one-shot. That choice outranks heuristic preferences for the normal research/planning pipeline.",
+              "Resolve scope for the requested fast path; do not demote merely because a planner would normally help or because the edit is not a typo or documentation change.",
+              "Return mode \"solo\" only when research is materially required for correctness or safety, not as a default for uncertainty.",
+            ].join("\n")
             : "The deterministic router identified this as a possible one-shot.",
           "If exactly one existing repo-relative file is clear, return mode \"oneshot\" with candidate_files containing only that path.",
           "If it is low-research but not one-shot-safe, return mode \"plan_direct\". Otherwise return mode \"solo\".",

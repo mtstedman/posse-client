@@ -23,6 +23,7 @@ import fs from "fs";
 import path from "path";
 import { ViewBuilder } from "./ViewBuilder.js";
 import { View } from "./View.js";
+import { OrderedDocumentIntake } from "./OrderedDocumentIntake.js";
 import {
   exportTreeCompressionMlSnapshot,
   importTreeCompressionMlSnapshot,
@@ -66,7 +67,10 @@ import {
 } from "../../functions/v2/parser/index-filters.js";
 import { sha256Hex } from "../../functions/v2/hash.js";
 import { ingestScipFile } from "../../functions/v2/scip/ingester.js";
-import { ensureScipStaged } from "../../functions/v2/scip/stager.js";
+import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
+import { startOnnxRefresh } from "../../functions/v2/parse/onnx-index-runner.js";
+import { hasLanguageSemantics } from "../../functions/v2/resolver/adapters/registry.js";
+import { ensureScipStaged, stageScipBatches } from "../../functions/v2/scip/stager.js";
 import {
   normalizeAtlasScipMode,
   shouldRunScipPhase,
@@ -497,6 +501,54 @@ export class ParseEngine {
   }
 
   /**
+   * Generate path-preserving SCIP project views in deterministic batches.
+   * Each ready artifact is acknowledged by the serialized intake queue; the
+   * stager keeps at most the configured number of unacknowledged batches.
+   *
+   * @param {AtlasWarmJobResult} base
+   * @param {AtlasWarmPurpose} purpose
+   * @param {string[]} paths
+   * @param {{
+   *   onBatchReady?: ((file: string, info: Record<string, any>) => Promise<unknown> | unknown) | null,
+   *   onFileUnavailable?: ((info: Record<string, any>) => Promise<unknown> | unknown) | null,
+   * }} [opts]
+   */
+  async #stageScipBatches(base, purpose, paths, opts = {}) {
+    if (!this.#scipPhaseEligible(purpose) || !shouldRunScipPhase(this.#scipMode)) return [];
+    try {
+      const staged = await stageScipBatches({
+        repoRoot: this.#repoRoot,
+        paths,
+        scipDir: this.#scipDir,
+        mode: this.#scipMode,
+        config: this.#runtimeConfig,
+        onProgress: (event) => this.#emitProgress(event),
+        onBatchReady: opts.onBatchReady || null,
+        onFileUnavailable: opts.onFileUnavailable || null,
+      });
+      for (const row of staged.results || []) {
+        if (row?.ok !== false) continue;
+        base.skipped.push({
+          repo_rel_path: ".",
+          reason: "parse_error",
+          message: `SCIP batch ${Number(row.batchOrdinal) + 1} failed (${row.language || "unknown"}): ${row.error || "unknown error"}`,
+        });
+      }
+      /** @type {any} */ (base).scip_batch_session = staged.sessionId || null;
+      /** @type {any} */ (base).scip_batches_staged = staged.files?.length || 0;
+      return staged.files || [];
+    } catch (err) {
+      logAtlasError(`[Warmer.#stageScipBatches] stageScipBatches(${this.#scipDir}) threw:`, err);
+      base.skipped.push({
+        repo_rel_path: ".",
+        reason: "parse_error",
+        message: `SCIP batch staging failed: ${formatAtlasError(err)}`,
+      });
+      return [];
+    }
+  }
+
+  /**
    * Phase 0b — INGEST staged `.scip` files into the ledger, one at a time
    * (FIFO). Layer-mode boot warms may run this queue beside tree-sitter parse;
    * the queue serializes SCIP intake itself, and the boot worker keeps ledger
@@ -504,12 +556,20 @@ export class ParseEngine {
    *
    * @param {AtlasWarmJobResult} base
    * @param {string[]} files
-   * @param {{ force?: boolean }} [opts]
+   * @param {{
+   *   force?: boolean,
+   *   forceIfMissing?: boolean,
+   *   preparedFiles?: Map<string, { bytes: Buffer, producedAt: string | null }>,
+   *   onDocumentsPrepared?: ((coverage: { documents: Array<{ repo_rel_path: string, content_hash: string }>, source_languages: string[] }) => Promise<void> | void) | null,
+   *   onDocumentCommitted?: ((document: { repo_rel_path: string, content_hash: string, lang: string }) => Promise<void> | void) | null,
+   *   expectedContentHashes?: Record<string, string> | null,
+   * }} [opts]
    */
   async #ingestScipFiles(base, files, opts = {}) {
     if (!Array.isArray(files) || files.length === 0) return;
     for (const scipPath of files) {
       try {
+        const prepared = opts.preparedFiles?.get(normalizedScipPath(scipPath)) || null;
         // A structured kind + language routing (not a bare stage line): the
         // boot matrix flips the parse cell to "intaking" the moment the file
         // is picked up, instead of showing "—" through the read/decode phase.
@@ -521,11 +581,16 @@ export class ParseEngine {
         const result = await ingestScipFile({
           ledger: this.#ledger,
           scipPath,
+          bytes: prepared?.bytes,
           repoRoot: this.#repoRoot,
+          producedAt: prepared?.producedAt ?? null,
           branch: this.#defaultBranch,
           force: opts.force === true,
           forceIfMissing: opts.forceIfMissing === true,
           layerOnly: this.#viewLayerMerge,
+          onDocumentsPrepared: opts.onDocumentsPrepared || undefined,
+          onDocumentCommitted: opts.onDocumentCommitted || undefined,
+          expectedContentHashes: opts.expectedContentHashes || undefined,
           onEvent: (event) => {
             // Forward the STRUCTURED ingest event (kind/language/current/total/
             // percent) so the boot matrix can drive the SCIP row through its
@@ -574,27 +639,71 @@ export class ParseEngine {
   }
 
   /**
-   * Serialized SCIP intake queue. Stagers can add files as each indexer lands,
-   * while tree-sitter parsing continues in parallel. The queue itself stays
-   * single-file-at-a-time because all intakes share the same ledger handle.
+   * Pipelined SCIP intake queue. Stagers can add files as each indexer lands;
+   * the next artifact read starts immediately while the previous artifact's
+   * ledger writes remain serialized on the shared handle.
    *
    * @param {AtlasWarmJobResult} base
-   * @param {{ force?: boolean }} [opts]
+   * @param {{
+   *   force?: boolean,
+   *   forceIfMissing?: boolean,
+   *   onDocumentsPrepared?: ((coverage: { documents: Array<{ repo_rel_path: string, content_hash: string }>, source_languages: string[] }) => Promise<void> | void) | null,
+   *   onDocumentCommitted?: ((document: { repo_rel_path: string, content_hash: string, lang: string }) => Promise<void> | void) | null,
+   * }} [opts]
    */
   #createScipIngestQueue(base, opts = {}) {
     /** @type {Set<string>} */
     const seen = new Set();
     let tail = Promise.resolve();
-    const add = (scipPath) => {
+    const add = (scipPath, info = {}) => {
       const key = normalizedScipPath(scipPath);
       if (!key || seen.has(key)) return tail;
       seen.add(key);
       const file = String(scipPath);
+      const scopePaths = (Array.isArray(info?.repo_rel_paths) ? info.repo_rel_paths : [])
+        .map((repoRelPath) => String(repoRelPath || ""))
+        .filter(Boolean);
+      const expectedContentHashes = info?.content_hashes && typeof info.content_hashes === "object"
+        ? info.content_hashes
+        : null;
+      // Read the next artifact immediately while the previous artifact's
+      // decoded rows are writing through the serialized ledger tail.
+      const prepared = Promise.all([
+        fs.promises.readFile(file),
+        fs.promises.stat(file).catch(() => null),
+      ]).then(([bytes, stat]) => ({
+        bytes,
+        producedAt: stat?.mtime?.toISOString?.() || null,
+        error: null,
+      })).catch((error) => ({ bytes: null, producedAt: null, error }));
       tail = tail
         .catch((err) => {
           logAtlasError("[Warmer.#createScipIngestQueue] previous intake failed:", err);
         })
-        .then(() => this.#ingestScipFiles(base, [file], opts));
+        .then(async () => {
+          const ready = await prepared;
+          if (ready.error || !ready.bytes) {
+            const error = ready.error || new Error(`SCIP read failed for ${file}`);
+            logAtlasError(`[Warmer.#createScipIngestQueue] read ${file} threw:`, error);
+            base.skipped.push({
+              repo_rel_path: ".",
+              reason: "parse_error",
+              message: `SCIP read failed for ${path.basename(file)}: ${formatAtlasError(error)}`,
+            });
+            return;
+          }
+          return this.#ingestScipFiles(base, [file], {
+            ...opts,
+            onDocumentsPrepared: typeof opts.onDocumentsPrepared === "function"
+              ? (coverage) => opts.onDocumentsPrepared({
+                  ...coverage,
+                  ...(scopePaths.length > 0 ? { scope_paths: scopePaths } : {}),
+                })
+              : null,
+            expectedContentHashes,
+            preparedFiles: new Map([[key, ready]]),
+          });
+        });
       return tail;
     };
     return {
@@ -722,40 +831,92 @@ export class ParseEngine {
             return finalize(await this.#warmIncremental(payload, base), start);
           }
           const branch = payload.branch || this.#defaultBranch;
-          // Overlap: SCIP `.scip` generation runs while tree-sitter parses;
-          // each finished SCIP file enters a serialized intake queue
-          // immediately, while tree-sitter keeps parsing. One incremental view
-          // build folds in both layers after staging + parsing + intake settle.
-          const scipQueue = this.#createScipIngestQueue(base);
-          const stagedScip = this.#stageScipFiles(base, "main-incremental", {
-            onFileReady: (file) => { scipQueue.add(file); },
-          });
-          await Promise.all([
-            this.#warmIncremental(payload, base, { buildView: false }),
-            stagedScip.then((files) => scipQueue.addAll(files)),
-          ]);
-          await scipQueue.idle();
-          const hintPaths = /** @type {any} */ (base)._incrementalHintPaths || null;
-          return finalize(
-            await this.#updateBranchViewIncremental({ payload, branch, base, hintPaths }),
-            start,
-          );
+          const embeddingIntake = this.#startDocumentEmbeddingIntake(base);
+          try {
+            // Overlap: deterministic path-preserving SCIP batches are staged
+            // while tree-sitter parses. Each ready batch enters the serialized
+            // intake lane immediately and its acknowledgement backpressures the
+            // producer before more than the configured batch window can build.
+            const scipQueue = this.#createScipIngestQueue(base, {
+              onDocumentsPrepared: (coverage) => embeddingIntake?.documents.declareScipCoverage(coverage),
+              onDocumentCommitted: (document) => embeddingIntake?.documents.markScip(document),
+            });
+            const stageScipPaths = async (paths) => {
+              try {
+                await this.#stageScipBatches(base, "main-incremental", paths, {
+                  onBatchReady: async (file, info) => {
+                    await scipQueue.add(file, info);
+                    const lastPath = Array.isArray(info?.repo_rel_paths) ? info.repo_rel_paths.at(-1) : null;
+                    if (lastPath) await embeddingIntake?.documents.waitUntilProcessed(lastPath);
+                  },
+                  onFileUnavailable: (info) => embeddingIntake?.documents.declareScipCoverage({
+                    documents: [],
+                    source_languages: [],
+                    scope_paths: [String(info?.repo_rel_path || "")].filter(Boolean),
+                  }),
+                });
+                await scipQueue.idle();
+              } finally {
+                embeddingIntake?.documents.finishScip();
+              }
+            };
+            await this.#warmIncremental(payload, base, {
+              buildView: false,
+              documentIntake: embeddingIntake?.documents || null,
+              stageScipPaths,
+            });
+            await this.#finishDocumentEmbeddingIntake(embeddingIntake, base);
+            const hintPaths = /** @type {any} */ (base)._incrementalHintPaths || null;
+            return finalize(
+              await this.#updateBranchViewIncremental({ payload, branch, base, hintPaths }),
+              start,
+            );
+          } catch (err) {
+            await this.#abortDocumentEmbeddingIntake(embeddingIntake, err);
+            throw err;
+          }
         }
         case "main-full": {
           if (!layerConcurrent) {
             return finalize(await this.#warmFull(payload, base), start);
           }
           const branch = payload.branch || this.#defaultBranch;
-          const scipQueue = this.#createScipIngestQueue(base);
-          const stagedScip = this.#stageScipFiles(base, "main-full", {
-            onFileReady: (file) => { scipQueue.add(file); },
-          });
-          await Promise.all([
-            this.#warmFull(payload, base, { buildView: false }),
-            stagedScip.then((files) => scipQueue.addAll(files)),
-          ]);
-          await scipQueue.idle();
-          return finalize(await this.#rebuildBranchView({ payload, branch, base }), start);
+          const embeddingIntake = this.#startDocumentEmbeddingIntake(base);
+          try {
+            const scipQueue = this.#createScipIngestQueue(base, {
+              onDocumentsPrepared: (coverage) => embeddingIntake?.documents.declareScipCoverage(coverage),
+              onDocumentCommitted: (document) => embeddingIntake?.documents.markScip(document),
+            });
+            const stageScipPaths = async (paths) => {
+              try {
+                await this.#stageScipBatches(base, "main-full", paths, {
+                  onBatchReady: async (file, info) => {
+                    await scipQueue.add(file, info);
+                    const lastPath = Array.isArray(info?.repo_rel_paths) ? info.repo_rel_paths.at(-1) : null;
+                    if (lastPath) await embeddingIntake?.documents.waitUntilProcessed(lastPath);
+                  },
+                  onFileUnavailable: (info) => embeddingIntake?.documents.declareScipCoverage({
+                    documents: [],
+                    source_languages: [],
+                    scope_paths: [String(info?.repo_rel_path || "")].filter(Boolean),
+                  }),
+                });
+                await scipQueue.idle();
+              } finally {
+                embeddingIntake?.documents.finishScip();
+              }
+            };
+            await this.#warmFull(payload, base, {
+              buildView: false,
+              documentIntake: embeddingIntake?.documents || null,
+              stageScipPaths,
+            });
+            await this.#finishDocumentEmbeddingIntake(embeddingIntake, base);
+            return finalize(await this.#rebuildBranchView({ payload, branch, base }), start);
+          } catch (err) {
+            await this.#abortDocumentEmbeddingIntake(embeddingIntake, err);
+            throw err;
+          }
         }
         case "scip-restage":
           return finalize(await this.#restageScip(payload, base), start);
@@ -1569,7 +1730,11 @@ export class ParseEngine {
    * @param {AtlasWarmJobPayload} payload
    * @param {AtlasWarmJobResult} base
    */
-  async #warmIncremental(payload, base, { buildView = true } = {}) {
+  async #warmIncremental(payload, base, {
+    buildView = true,
+    documentIntake = null,
+    stageScipPaths = null,
+  } = {}) {
     let paths = Array.isArray(payload?.paths) ? payload.paths : [];
     const branch = payload.branch || this.#defaultBranch;
     if (!this.#ledger.getBranch(branch)) {
@@ -1595,8 +1760,9 @@ export class ParseEngine {
       && (String(payload?.trigger_event || "") === "boot" || payload?.paths_truncated === true)) {
       paths = await this.#discoverBootFreshnessPaths({ branch, base });
     }
+    paths = orderedUniquePaths(paths);
     base.paths_considered = paths.length;
-    await this.#indexPaths({ paths, branch, base });
+    await this.#indexPaths({ paths, branch, base, documentIntake, stageScipPaths });
     if (!buildView) {
       // Caller (handleWarmJob) will build the view once after SCIP ingest.
       // Stash the hint paths so that deferred build can scope its work.
@@ -1749,7 +1915,11 @@ export class ParseEngine {
    * @param {AtlasWarmJobPayload} payload
    * @param {AtlasWarmJobResult} base
    */
-  async #warmFull(payload, base, { buildView = true } = {}) {
+  async #warmFull(payload, base, {
+    buildView = true,
+    documentIntake = null,
+    stageScipPaths = null,
+  } = {}) {
     base.skipped = [];
     base.paths_considered = 0;
     const branch = payload.branch || this.#defaultBranch;
@@ -1801,6 +1971,7 @@ export class ParseEngine {
         });
       }
     }
+    paths = orderedUniquePaths(paths);
     base.paths_considered = paths.length;
     const removedSuffix = removedSnapshotPaths.length > 0
       ? `, ${removedSnapshotPaths.length} removed indexed file${removedSnapshotPaths.length === 1 ? "" : "s"}`
@@ -1810,7 +1981,7 @@ export class ParseEngine {
       progress_total: paths.length,
       percent: paths.length > 0 ? 0 : 100,
     });
-    await this.#indexPaths({ paths, branch, base });
+    await this.#indexPaths({ paths, branch, base, documentIntake, stageScipPaths });
     if (!buildView) return base;
     return await this.#rebuildBranchView({ payload, branch, base });
   }
@@ -1836,20 +2007,25 @@ export class ParseEngine {
    * Errors per-file do not abort the batch — failures are surfaced in
    * `base.skipped` so operators can see which files couldn't be indexed.
    *
-   * @param {{ paths: string[], branch: string, base: AtlasWarmJobResult }} args
+   * @param {{ paths: string[], branch: string, base: AtlasWarmJobResult, documentIntake?: OrderedDocumentIntake | null, stageScipPaths?: ((paths: string[]) => Promise<unknown>) | null }} args
    */
-  async #indexPaths({ paths, branch, base }) {
+  async #indexPaths({ paths, branch, base, documentIntake = null, stageScipPaths = null }) {
     if (!this.#parser) return;
     await this.#emitStage("snapshot", `loading ${branch} path snapshot`);
     const headSeq = this.#ledger.headSeq(branch);
     const snapshot = headSeq > 0
       ? this.#ledger.pathSnapshotAt(branch, headSeq)
       : new Map();
+    documentIntake?.registerPaths(paths);
+    const scipWork = typeof stageScipPaths === "function"
+      ? Promise.resolve().then(() => stageScipPaths(paths))
+      : null;
     const total = paths.length;
     // Per-language totals (computed up front from path extensions) so each
     // progress event can carry { language, current_for_lang, total_for_lang }
     // and the display can render one row per language.
     const totalByLanguage = new Map();
+    try {
     for (const rawPath of paths) {
       const ext = path.extname(String(rawPath || "")).toLowerCase();
       const lang = languageTagForExtension(ext);
@@ -1924,10 +2100,12 @@ export class ParseEngine {
       considered++;
       const ordinal = considered;
       const pathLanguage = languageTagForExtension(path.extname(repo_rel_path).toLowerCase());
+      let documentPublished = false;
       if (pathLanguage) {
         currentByLanguage.set(pathLanguage, (currentByLanguage.get(pathLanguage) || 0) + 1);
       }
       try {
+        await documentIntake?.waitForReadAhead(repo_rel_path);
         await reportIndexProgress(repo_rel_path, {
           force: true,
           stage: "checking",
@@ -2050,6 +2228,8 @@ export class ParseEngine {
         if (currentParsedBlob && !mergeExistingScipRows) {
           // Same bytes and current parsed rows already on this branch.
           await recordPathSourceStat(repo_rel_path, contentHash, fileStat);
+          await documentIntake?.markTreeSitter({ repo_rel_path, content_hash: contentHash });
+          documentPublished = true;
           continue;
         }
 
@@ -2167,6 +2347,8 @@ export class ParseEngine {
         if (before === parsed.content_hash) {
           if (this.#viewLayerMerge) /** @type {any} */ (base)._forceViewRebuild = true;
           await recordPathSourceStat(repo_rel_path, parsed.content_hash, fileStat);
+          await documentIntake?.markTreeSitter({ repo_rel_path, content_hash: parsed.content_hash });
+          documentPublished = true;
           continue;
         }
 
@@ -2189,9 +2371,16 @@ export class ParseEngine {
         base.ledger_entries_appended++;
         base.paths_indexed++;
         snapshot.set(repo_rel_path, parsed.content_hash);
+        await documentIntake?.markTreeSitter({ repo_rel_path, content_hash: parsed.content_hash });
+        documentPublished = true;
       } finally {
+        if (!documentPublished) documentIntake?.skip(repo_rel_path);
         await reportIndexProgress(repo_rel_path, { force: considered === total, language: pathLanguage });
       }
+    }
+    } finally {
+      documentIntake?.finishTreeSitter();
+      if (scipWork) await scipWork;
     }
   }
 
@@ -2233,6 +2422,119 @@ export class ParseEngine {
       touchedPaths: [...latestAfterByPath.keys()],
       onlySymbols,
     };
+  }
+
+  /**
+   * Open the resident Jina/vector pair before parsing and attach it to an
+   * ordered A+B document stream. The ordinary post-view ingest remains the
+   * reconciliation/rollback path; this ride-along path only shortens intake.
+   *
+   * @param {AtlasWarmJobResult} base
+   */
+  #startDocumentEmbeddingIntake(base) {
+    if (!this.#viewLayerMerge || !this.#parser) return null;
+    const resources = openEmbeddingResources({
+      repoRoot: this.#repoRoot,
+      config: this.#runtimeConfig,
+    });
+    if (!resources.enabled || !resources.encoder || !resources.index) {
+      try { resources.close?.(); } catch { /* disabled resources are inert */ }
+      return null;
+    }
+    const documentWindow = positiveIntOrDefault(
+      /** @type {any} */ (this.#runtimeConfig).atlasEmbeddingDocumentWindow
+        ?? /** @type {any} */ (this.#runtimeConfig).atlas_embedding_document_window,
+      8,
+    );
+    const documents = new OrderedDocumentIntake({ readAhead: documentWindow });
+    const encoder = /** @type {any} */ (resources.encoder);
+    const index = /** @type {any} */ (resources.index);
+    const supportsStructuredSymbols = typeof encoder.encodeSymbols === "function";
+    const runner = /** @type {any} */ (startOnnxRefresh({
+      mode: "changed",
+      modelId: String(encoder.model || encoder.modelId || "jina"),
+      modelVersion: String(encoder.model_version || encoder.modelVersion || "unknown"),
+      batchSize: encoder.batchSize || undefined,
+      documentWindow,
+      wait: false,
+      signal: this.#signal || undefined,
+      documents,
+      mergeDocument: async (document) => {
+        const repoRelPath = String(document.repo_rel_path || document.document_id || "");
+        const contentHash = String(document.content_hash || "");
+        const lang = languageTagForExtension(path.extname(repoRelPath).toLowerCase());
+        const merged = mergeLayerRows(this.#ledger._unsafeDb(), contentHash, lang);
+        const symbols = merged.symbols
+          .filter((symbol) => hasLanguageSemantics(symbol?.lang))
+          .map((symbol) => streamEmbeddingSymbol({
+            ...symbol,
+            repo_rel_path: repoRelPath,
+          }));
+        return await symbolsMissingFromEmbeddingIndex(index, symbols);
+      },
+      ...(supportsStructuredSymbols ? {} : {
+        buildSymbolText: (symbol) => String(encoder.buildSymbolText(symbol) || ""),
+      }),
+      embedSymbols: async (symbols, signal) => {
+        const vectors = supportsStructuredSymbols
+          ? await encoder.encodeSymbols(symbols, signal)
+          : typeof encoder.encodeDocuments === "function"
+            ? await encoder.encodeDocuments(symbols.map((symbol) => String(symbol.text || "")), signal)
+            : await encoder.encode(symbols.map((symbol) => String(symbol.text || "")), signal);
+        return Array.isArray(vectors)
+          ? vectors.map((vector, index) => ({ symbol_key: symbols[index].symbol_key, vector }))
+          : vectors;
+      },
+      commitBatch: async (rows) => {
+        await index.add(rows.map((row) => embeddingIndexRow(row)));
+      },
+      ...(typeof index.setEmbeddingWatermark === "function" ? {
+        persistWatermark: (watermark) => index.setEmbeddingWatermark(
+          `stream:${sha256Hex(path.resolve(this.#repoRoot))}`,
+          { ...watermark, updated_at: new Date().toISOString() },
+        ),
+      } : {}),
+      onDocumentProcessed: (document) => documents.markProcessed(document),
+      onEvent: (event) => this.#emitProgress({
+        ...event,
+        stage: "embeddings",
+        stream: "system",
+      }),
+    }));
+    base.embeddings_streaming = true;
+    /** @type {any} */ (base).embeddings_document_window = documentWindow;
+    return { documents, resources, runner, closed: false };
+  }
+
+  /**
+   * @param {{ documents: OrderedDocumentIntake, resources: any, runner: any, closed: boolean } | null} intake
+   * @param {AtlasWarmJobResult} base
+   */
+  async #finishDocumentEmbeddingIntake(intake, base) {
+    if (!intake || intake.closed) return;
+    intake.documents.finishTreeSitter();
+    intake.documents.finishScip();
+    try {
+      const report = await intake.runner.done;
+      await intake.documents.done;
+      /** @type {any} */ (base).embeddings_streamed_documents = Number(report?.processedDocuments || 0);
+      /** @type {any} */ (base).embeddings_streamed_symbols = Number(report?.indexedSymbols || 0);
+    } catch (err) {
+      /** @type {any} */ (base).embeddings_streaming_error = formatAtlasError(err);
+      intake.documents.abort(err);
+      logAtlasError("[Warmer.#finishDocumentEmbeddingIntake] streaming ingest failed:", err);
+    } finally {
+      intake.closed = true;
+      try { await intake.resources.close(); } catch { /* final bulk pass can reopen/reconcile */ }
+    }
+  }
+
+  async #abortDocumentEmbeddingIntake(intake, error) {
+    if (!intake || intake.closed) return;
+    intake.closed = true;
+    intake.documents.abort(error);
+    try { await intake.runner.done; } catch { /* original warm error wins */ }
+    try { await intake.resources.close(); } catch { /* final recovery reopens */ }
   }
 
   /**
@@ -2906,4 +3208,78 @@ function isAbortLikeError(err) {
   return anyErr.name === "AbortError"
     || anyErr.code === "ABORT_ERR"
     || anyErr.code === "DAEMON_ABORTED";
+}
+
+function orderedUniquePaths(paths) {
+  const seen = new Set();
+  const values = [];
+  for (const rawPath of Array.isArray(paths) ? paths : []) {
+    const repoRelPath = String(rawPath || "");
+    if (!repoRelPath || seen.has(repoRelPath)) continue;
+    seen.add(repoRelPath);
+    values.push(repoRelPath);
+  }
+  return values.sort((left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")));
+}
+
+function streamEmbeddingSymbol(symbol) {
+  const contentHash = String(symbol?.content_hash || "");
+  const localId = Number(symbol?.local_id);
+  const fingerprint = sha256Hex(JSON.stringify({
+    content_hash: contentHash,
+    local_id: localId,
+    kind: symbol?.kind ?? null,
+    name: symbol?.name ?? null,
+    qualified_name: symbol?.qualified_name ?? null,
+    signature_hash: symbol?.signature_hash ?? null,
+    signature_text: symbol?.signature_text ?? null,
+    doc: symbol?.doc ?? null,
+    source: symbol?.source ?? null,
+  }));
+  return {
+    ...symbol,
+    content_hash: contentHash,
+    local_id: localId,
+    symbol_key: `${contentHash}\0${localId}`,
+    merged_fingerprint: fingerprint,
+  };
+}
+
+async function symbolsMissingFromEmbeddingIndex(index, symbols) {
+  const keys = symbols.map((symbol) => ({
+    content_hash: symbol.content_hash,
+    local_id: symbol.local_id,
+  }));
+  if (typeof index?.containsMany === "function") {
+    try {
+      const result = await index.containsMany(keys);
+      const present = result instanceof Set
+        ? result
+        : Array.isArray(result) ? new Set(result.map(String)) : new Set();
+      return symbols.filter((symbol) => !present.has(symbol.symbol_key));
+    } catch { /* fall through to scalar checks */ }
+  }
+  if (typeof index?.contains !== "function") return symbols;
+  const missing = [];
+  for (const symbol of symbols) {
+    let present = false;
+    try { present = !!(await index.contains(symbol.content_hash, symbol.local_id)); }
+    catch { present = false; }
+    if (!present) missing.push(symbol);
+  }
+  return missing;
+}
+
+function embeddingIndexRow(row) {
+  const symbolKey = String(row?.symbol_key || "");
+  const separator = symbolKey.lastIndexOf("\0");
+  if (separator <= 0) throw new Error(`invalid streaming embedding symbol key '${symbolKey}'`);
+  const contentHash = symbolKey.slice(0, separator);
+  const localId = Number(symbolKey.slice(separator + 1));
+  if (!Number.isInteger(localId)) throw new Error(`invalid streaming embedding local id '${symbolKey}'`);
+  return {
+    content_hash: contentHash,
+    local_id: localId,
+    vector: row.vector,
+  };
 }
