@@ -13,11 +13,11 @@ import {
   emitMergedToMain as emitAtlasV2MergedToMain,
   isAtlasV2EmissionEnabled,
 } from "../../atlas/classes/v2/PipelineHooks.js";
-import { GIT_OPERATION_TIMEOUT_MS, gitExec } from "./utils.js";
+import { GIT_OPERATION_TIMEOUT_MS } from "./utils.js";
 import {
-  preserveDirtyWorktreeSnapshot,
+  preserveDirtyWorktreeSnapshot as nativePreserveDirtyWorktreeSnapshot,
   snapshotAndResetDirtyWorktree,
-  withWorktreeLock,
+  withWorktreeLock as nativeWithWorktreeLock,
 } from "./worktree.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
@@ -29,7 +29,9 @@ export function createMergeWorkflowHelpers(context, {
   sourceWorktreeDirtyState,
   sweepOrphanedInferTsconfig,
 }) {
-  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread } = context;
+  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, gitExec } = context;
+  const withWorktreeLock = context.withWorktreeLock || nativeWithWorktreeLock;
+  const preserveDirtyWorktreeSnapshot = context.preserveDirtyWorktreeSnapshot || nativePreserveDirtyWorktreeSnapshot;
 
   function gitDiffStat(mergeBase, branch, cwd) {
     try {

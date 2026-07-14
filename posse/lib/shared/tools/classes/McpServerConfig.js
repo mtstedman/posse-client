@@ -1,7 +1,11 @@
 import path from "path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "url";
 import { getAtlasIntegrationConfig } from "../../../domains/integrations/functions/atlas.js";
-import { getRuntimeDbPath } from "../../../domains/runtime/functions/paths.js";
+import {
+  getRuntimeDbPath,
+  getRuntimeResourcesDir,
+} from "../../../domains/runtime/functions/paths.js";
 import {
   getDeterministicMcpToolNames,
   roleUsesDeterministicImageHelpers,
@@ -17,6 +21,7 @@ import {
 } from "../../../domains/remote/functions/mode.js";
 import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
 import {
+  DEFAULT_MCP_OAUTH_TTL_SECONDS,
   mintMcpOAuthTokenForBootConfig,
   verifyMcpOAuthToken,
 } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
@@ -29,10 +34,7 @@ import {
 } from "../functions/issued-tool-policy.js";
 import { persistentMcpOwner } from "./PersistentMcpOwner.js";
 import { McpServer } from "./McpServer.js";
-import {
-  CapabilityHandshakeManager,
-  capabilityRequest,
-} from "../../permissions/classes/CapabilityHandshakeManager.js";
+import { McpGate } from "./McpGate.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -301,7 +303,17 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}) {
 }
 
 function deterministicMcpShimMetadataEnv(payload = {}, atlasConfig = {}) {
-  const out = deterministicMcpCompatibilityEnv(payload, atlasConfig);
+  const metadataPayload = payload.scopeBindingMode === "dispatcher"
+    ? {
+        ...payload,
+        scopedFiles: [],
+        createFiles: [],
+        deleteFiles: [],
+        createRoots: [],
+        readRoots: [],
+      }
+    : payload;
+  const out = deterministicMcpCompatibilityEnv(metadataPayload, atlasConfig);
   // The stdio shim is a forwarding gate only. Keep non-secret deterministic
   // metadata for diagnostics/back-compat, but never give the shim credentials
   // or values that would let it perform remote/catalog/native work itself.
@@ -315,37 +327,77 @@ function deterministicMcpScriptPaths() {
   };
 }
 
-function mintMcpGatewayGrant(bootPayload) {
-  const scopes = [];
-  for (const [suite, names] of Object.entries(bootPayload.toolAllowlist || {})) {
-    for (const name of Array.isArray(names) ? names : []) scopes.push(`${suite}:${name}`);
-  }
-  const issuedAt = Math.floor(Date.now() / 1000);
-  const handshakes = new CapabilityHandshakeManager();
-  handshakes.register("mcp.gateway", (request) => {
-    const token = mintMcpOAuthTokenForBootConfig(bootPayload);
-    const claims = verifyMcpOAuthToken(token);
-    return {
-      parentScopes: scopes,
-      scopes: request.scopes,
-      parentExpiresAt: Number(claims.exp),
-      expiresAt: Number(claims.exp),
-      permissions: {
-        role: bootPayload.role || null,
-        toolAllowlist: bootPayload.toolAllowlist || {},
-      },
-      tokens: { mcpOAuth: token },
-    };
+function agentContractBootPayload(bootPayload, agentId) {
+  return {
+    ...bootPayload,
+    agentId,
+    scopeBindingMode: "dispatcher",
+    cwd: "",
+    jobId: null,
+    workItemId: null,
+    attemptId: null,
+    agentCallId: null,
+    promptChars: 0,
+    scopedFiles: [],
+    createFiles: [],
+    deleteFiles: [],
+    createRoots: [],
+    readRoots: [],
+  };
+}
+
+function ownerHotBootPayloadFor(contractBootPayload) {
+  return stripMcpOwnerOnlyBootFields({
+    ...contractBootPayload,
+    ownerHotGateway: true,
+    agentId: "",
+    scopeBindingMode: "",
+    role: "",
+    providerName: "",
+    jobId: null,
+    workItemId: null,
+    attemptId: null,
+    agentCallId: null,
+    promptChars: 0,
+    scopedFiles: [],
+    createFiles: [],
+    deleteFiles: [],
+    createRoots: [],
+    readRoots: [],
+    allowWrite: true,
+    allowImageHelpers: true,
+    allowImageGeneration: true,
+    atlasGateEnabled: false,
+    atlasPrefetchStatus: "",
+    atlas: {},
+    remoteToolSurface: null,
+    nativeAuth: null,
   });
-  return handshakes.issueSync(capabilityRequest({
-    requestId: `mcp-${bootPayload.jobId ?? "owner"}-${bootPayload.agentCallId ?? issuedAt}`,
-    capability: "mcp.gateway",
-    scopes,
-    reason: "agent-session-start",
-  }));
+}
+
+function ownerServerSpecFor(contractBootPayload, resolvedAtlasConfig, cwd) {
+  const { serverScriptPath } = deterministicMcpScriptPaths();
+  const ownerHotBootPayload = ownerHotBootPayloadFor(contractBootPayload);
+  return {
+    command: process.execPath,
+    args: [serverScriptPath, "--config-json", deterministicMcpBootArg(ownerHotBootPayload)],
+    cwd,
+    env: {
+      ...deterministicMcpBaseEnv(process.env),
+      ...imageGenerationCredentialEnv(process.env),
+      ...deterministicMcpCompatibilityEnv(ownerHotBootPayload, resolvedAtlasConfig),
+    },
+    startupFrames: [{
+      __posse_control: "capabilityBroker",
+      capability: persistentMcpOwner.nativeAuthBrokerCapability(),
+    }],
+  };
 }
 
 function buildDeterministicMcpBootPayload(role, {
+  agentId = null,
+  scopeBindingMode = null,
+  projectRoot = null,
   cwd = process.cwd(),
   scopedFiles = [],
   createFiles = [],
@@ -372,6 +424,7 @@ function buildDeterministicMcpBootPayload(role, {
   projectDbWrite = false,
   projectDbCapability = null,
 } = {}) {
+  const resolvedProjectRoot = path.resolve(projectRoot || cwd || process.cwd());
   const resolvedAtlasConfig = atlasConfig || getAtlasIntegrationConfig();
   const atlasEnabled = (typeof atlasAvailable === "boolean")
     ? atlasAvailable
@@ -393,7 +446,11 @@ function buildDeterministicMcpBootPayload(role, {
   const remoteCatalogEnabled = remoteCatalogMode !== "off";
   return {
     bootPayload: {
+      agentId: agentId ? String(agentId) : "",
+      scopeBindingMode: scopeBindingMode ? String(scopeBindingMode) : "",
       cwd,
+      projectRoot: resolvedProjectRoot,
+      resourcesRoot: getRuntimeResourcesDir(resolvedProjectRoot),
       scopedFiles: Array.isArray(scopedFiles) ? scopedFiles : [],
       createFiles: Array.isArray(createFiles) ? createFiles : [],
       deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
@@ -432,12 +489,13 @@ function buildDeterministicMcpBootPayload(role, {
         mode: remoteCatalogMode,
         baseUrl: remoteCatalogEnabled ? getPosseRemoteUrl() : "",
         timeoutMs: remoteCatalogEnabled ? getPosseRemoteTimeoutMs() : "",
+        requestMcpOAuth: expectedTools.length > 0,
         requestedSuites: [
           "tools",
           ...(atlasEnabled ? ["atlas"] : []),
         ],
       },
-      dbPath: getRuntimeDbPath(),
+      dbPath: getRuntimeDbPath(resolvedProjectRoot),
       // Native-binary auth as a parent-minted, NON-SECRET capability (heartbeat
       // URL + pinned public verification key + audience — no POSSE_KEY). The
       // sidecar reconstructs a child-scoped auth manager from this. The raw
@@ -456,12 +514,19 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
   allowImageGeneration = false,
   remoteToolSurface = null,
   remoteMcpOAuthToken = "",
+  mcpGate = null,
 } = {}) {
   const command = process.execPath;
-  const { serverScriptPath, shimScriptPath } = deterministicMcpScriptPaths();
+  const { shimScriptPath } = deterministicMcpScriptPaths();
   if (!remoteToolSurface || typeof remoteToolSurface !== "object") {
     throw requiredRemoteToolSurfaceError(role, null, "did not include a remote-issued tool surface");
   }
+  if (!mcpGate || typeof mcpGate.assertAttached !== "function" || !mcpGate.token) {
+    const error = new Error(`Agent role ${role || "unknown"} has no MCP gate dependency`);
+    error.code = "POSSE_AGENT_MCP_GATE_REQUIRED";
+    throw error;
+  }
+  mcpGate.assertCompatible({ role, providerName: bootPayload.providerName });
   const narrowedBootPayload = narrowBootConfigToRemoteSurface(bootPayload, remoteToolSurface);
   if (!narrowedBootPayload.remoteToolSurface) {
     throw requiredRemoteToolSurfaceError(role, null, "returned an invalid or mismatched remote-issued tool surface");
@@ -470,11 +535,17 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
     narrowedBootPayload.remoteToolSurface,
   );
   Object.assign(bootPayload, narrowedBootPayload);
-  // The remote is authoritative for the tool policy surface, but the persistent
-  // MCP owner is local. Its bearer must be signed by the local owner key, with
-  // the remote-derived suite allowlist embedded as a local capability.
-  const mcpGrant = mintMcpGatewayGrant(bootPayload);
-  bootPayload.mcpOAuthToken = mcpGrant.artifacts.tokens.mcpOAuth;
+  // The Dispatcher already attached this Agent to the Job. Provider projection
+  // can only prove it is using that attachment; tools resolve file authority
+  // from the persisted Agent -> Job -> Work Item chain.
+  mcpGate.assertAttached({
+    jobId: bootPayload.jobId,
+    workItemId: bootPayload.workItemId,
+    agentCallId: bootPayload.agentCallId,
+  });
+  bootPayload.agentId = mcpGate.id;
+  bootPayload.scopeBindingMode = "dispatcher";
+  bootPayload.mcpOAuthToken = mcpGate.token;
   let ownerEndpoint = null;
   const ownerStartAt = Date.now();
   try {
@@ -497,76 +568,6 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
     });
     throw err;
   }
-  const ownerHotBootPayload = stripMcpOwnerOnlyBootFields({
-    ...bootPayload,
-    ownerHotGateway: true,
-    role: "",
-    providerName: "",
-    jobId: null,
-    workItemId: null,
-    attemptId: null,
-    agentCallId: null,
-    promptChars: 0,
-    scopedFiles: [],
-    createFiles: [],
-    deleteFiles: [],
-    createRoots: [],
-    readRoots: [],
-    allowWrite: true,
-    allowImageHelpers: true,
-    allowImageGeneration: true,
-    atlasGateEnabled: false,
-    atlasPrefetchStatus: "",
-    remoteToolSurface: null,
-    nativeAuth: null,
-  });
-  const serverEnv = {
-    ...deterministicMcpBaseEnv(process.env),
-    ...imageGenerationCredentialEnv(process.env),
-    ...deterministicMcpCompatibilityEnv(ownerHotBootPayload, resolvedAtlasConfig),
-  };
-  const registerAt = Date.now();
-  let registration = null;
-  try {
-    registration = persistentMcpOwner.registerSession({
-      token: bootPayload.mcpOAuthToken,
-      bootConfig: bootPayload,
-      serverSpec: {
-        command,
-        args: [serverScriptPath, "--config-json", deterministicMcpBootArg(ownerHotBootPayload)],
-        cwd,
-        env: serverEnv,
-        startupFrames: [{
-          __posse_control: "capabilityBroker",
-          capability: persistentMcpOwner.nativeAuthBrokerCapability(),
-        }],
-      },
-      prewarm: !process.env.NODE_TEST_CONTEXT,
-    });
-    logMcpBootTelemetry("mcp.owner.register_session", role, bootPayload, {
-      outcome: "ok",
-      duration_ms: Date.now() - registerAt,
-      owner_boot_id: registration?.bootId || ownerEndpoint?.bootId || null,
-      remote_surface_present: !!remoteToolSurface,
-      remote_oauth_present: !!remoteMcpOAuthToken,
-      oauth_source: "local",
-      prewarm_requested: !process.env.NODE_TEST_CONTEXT,
-      session_count: persistentMcpOwner.status()?.sessionCount ?? null,
-    });
-  } catch (err) {
-    logMcpBootTelemetry("mcp.owner.register_session", role, bootPayload, {
-      outcome: "error",
-      duration_ms: Date.now() - registerAt,
-      owner_boot_id: ownerEndpoint?.bootId || null,
-      remote_surface_present: !!remoteToolSurface,
-      remote_oauth_present: !!remoteMcpOAuthToken,
-      oauth_source: "local",
-      prewarm_requested: !process.env.NODE_TEST_CONTEXT,
-      error: errorSummary(err),
-    });
-    throw err;
-  }
-
   logMcpBootTelemetry("mcp.config.ready", role, bootPayload, {
     outcome: "ok",
     server_name: POSSE_MCP_GATEWAY_SERVER_NAME,
@@ -596,14 +597,10 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
       ...deterministicMcpBaseEnv(process.env),
       ...deterministicMcpShimMetadataEnv(bootPayload, resolvedAtlasConfig),
     },
-    tools: issuedToolNamesForSuite(bootPayload.remoteToolSurface.tools, "tools"),
-    atlasTools: issuedToolNamesForSuite(bootPayload.remoteToolSurface.tools, "atlas"),
-    remoteToolSurface: sanitizeRemoteToolSurfaceForBoot(bootPayload.remoteToolSurface),
-    ownerSession: registration?.sessionId ? {
-      sessionId: registration.sessionId,
-      ownerBootId: registration.bootId || ownerEndpoint?.bootId || null,
-      ownerTransport: registration.transport || ownerEndpoint?.transport || null,
-    } : null,
+    tools: mcpGate.contractBootConfig.toolAllowlist?.tools || [],
+    atlasTools: mcpGate.contractBootConfig.toolAllowlist?.atlas || [],
+    remoteToolSurface: mcpGate.remoteToolSurface,
+    ownerSession: mcpGate.ownerSession,
   });
 }
 
@@ -717,6 +714,8 @@ export class McpServerConfig {
           sessionId: ownerSession.sessionId || null,
           ownerBootId: ownerSession.ownerBootId || null,
           ownerTransport: ownerSession.ownerTransport || null,
+          agentOwned: ownerSession.agentOwned === true,
+          gateId: ownerSession.gateId || null,
         }
       : null;
   }
@@ -751,11 +750,92 @@ export class McpServerConfig {
     if (!session?.sessionId) {
       return { released: false, reason: "missing_session" };
     }
+    if (session.agentOwned === true) {
+      return { released: false, reason: "agent_owned" };
+    }
     return persistentMcpOwner.unregisterSession({
       sessionId: session.sessionId,
       expectedBootId: session.ownerBootId || null,
       reason: opts.reason || "provider_exit",
       context: opts.context || null,
+    });
+  }
+
+  static async mintAgentGate(role, opts = {}) {
+    const agentId = String(opts.agentId || opts.key || crypto.randomUUID());
+    const agentRuntimeCwd = path.resolve(opts.agentRuntimeCwd || opts.projectDir || process.cwd());
+    const { bootPayload, resolvedAtlasConfig } = buildDeterministicMcpBootPayload(role, {
+      ...opts,
+      agentId,
+      scopeBindingMode: "dispatcher",
+      projectRoot: agentRuntimeCwd,
+    });
+    let remoteResolution = null;
+    let remoteResolutionError = null;
+    try {
+      remoteResolution = opts.remoteToolSurface && typeof opts.remoteToolSurface === "object"
+        ? {
+            surface: opts.remoteToolSurface,
+            mcpOAuthToken: String(opts.remoteMcpOAuthToken || ""),
+          }
+        : await resolveRemoteMcpToolSurfaceWithRetry(bootPayload, {
+            attempts: opts.remoteToolSurfaceAttempts || 3,
+            remoteToolSurfaceOptions: opts.remoteToolSurfaceOptions || {},
+          });
+    } catch (error) {
+      remoteResolutionError = error;
+    }
+    if (!remoteResolution?.surface) {
+      throw requiredRemoteToolSurfaceError(
+        role,
+        remoteResolutionError,
+        "did not include a remote-issued agent tool contract",
+      );
+    }
+    const narrowedBootPayload = narrowBootConfigToRemoteSurface(bootPayload, remoteResolution.surface);
+    if (!narrowedBootPayload.remoteToolSurface) {
+      throw requiredRemoteToolSurfaceError(role, null, "returned an invalid or mismatched agent tool contract");
+    }
+    narrowedBootPayload.remoteToolSurface = sanitizeRemoteToolSurfaceForBoot(
+      narrowedBootPayload.remoteToolSurface,
+    );
+    const contractBootPayload = agentContractBootPayload(narrowedBootPayload, agentId);
+    const token = mintMcpOAuthTokenForBootConfig(contractBootPayload, {
+      expiresInSeconds: DEFAULT_MCP_OAUTH_TTL_SECONDS,
+      jti: `agent-${crypto.randomUUID()}`,
+    });
+    const claims = verifyMcpOAuthToken(token);
+    const ownerEndpoint = persistentMcpOwner.ensureStarted();
+    const registration = persistentMcpOwner.registerSession({
+      token,
+      bootConfig: contractBootPayload,
+      serverSpec: ownerServerSpecFor(
+        contractBootPayload,
+        resolvedAtlasConfig,
+        agentRuntimeCwd,
+      ),
+      prewarm: opts.prewarm ?? !process.env.NODE_TEST_CONTEXT,
+      agentOwned: true,
+    });
+    logMcpBootTelemetry("mcp.agent_gate.minted", role, contractBootPayload, {
+      outcome: "ok",
+      agent_id: agentId,
+      owner_boot_id: registration?.bootId || ownerEndpoint?.bootId || null,
+      remote_surface_present: true,
+      remote_oauth_present: !!remoteResolution?.mcpOAuthToken,
+      oauth_source: "local-agent",
+      session_count: persistentMcpOwner.status()?.sessionCount ?? null,
+    });
+    return new McpGate({
+      id: agentId,
+      role,
+      providerName: bootPayload.providerName,
+      token,
+      claims,
+      contractBootConfig: contractBootPayload,
+      remoteToolSurface: contractBootPayload.remoteToolSurface,
+      owner: persistentMcpOwner,
+      ownerSession: registration,
     });
   }
 
@@ -816,6 +896,11 @@ export class McpServerConfig {
     if (!roleUsesDeterministicReadMcp(role)) {
       return McpServerConfig.forDeterministicRead(role, opts);
     }
+    if (!opts.mcpGate || typeof opts.mcpGate.assertAttached !== "function") {
+      const error = new Error(`Agent role ${role || "unknown"} must be constructed with an MCP gate`);
+      error.code = "POSSE_AGENT_MCP_GATE_REQUIRED";
+      throw error;
+    }
     const { bootPayload, resolvedAtlasConfig, allowImageGeneration } = buildDeterministicMcpBootPayload(role, opts);
     let remoteResolution = null;
     let remoteResolutionError = null;
@@ -829,7 +914,12 @@ export class McpServerConfig {
       // Prompt composition already resolved this exact remote-issued policy.
       // Revalidate it below against role/provider and reuse it so a redundant
       // catalog request cannot turn a successful issuance into an outage.
-      remoteResolution = opts.remoteToolSurface && typeof opts.remoteToolSurface === "object"
+      remoteResolution = opts.mcpGate.remoteToolSurface
+        ? {
+            surface: opts.mcpGate.remoteToolSurface,
+            mcpOAuthToken: "",
+          }
+        : opts.remoteToolSurface && typeof opts.remoteToolSurface === "object"
         ? {
             surface: opts.remoteToolSurface,
             mcpOAuthToken: String(opts.remoteMcpOAuthToken || ""),
@@ -871,6 +961,7 @@ export class McpServerConfig {
       allowImageGeneration,
       remoteToolSurface: remoteResolution?.surface || null,
       remoteMcpOAuthToken: remoteResolution?.mcpOAuthToken || "",
+      mcpGate: opts.mcpGate,
     });
   }
 }

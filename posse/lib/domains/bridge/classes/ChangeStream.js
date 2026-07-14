@@ -8,7 +8,12 @@ import {
   BRIDGE_PROTOCOL_VERSION,
 } from "../../../catalog/bridge.js";
 import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
-import { EVENT_TYPES } from "../../../catalog/event.js";
+import {
+  AGENT_ACTIVITY_KINDS,
+  AGENT_ACTIVITY_PROTOCOL,
+  AGENT_ACTIVITY_STATUSES,
+  EVENT_TYPES,
+} from "../../../catalog/event.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { redactBridgeValue } from "../functions/redaction.js";
 import { composeInstanceStatus } from "../functions/instance-status.js";
@@ -25,6 +30,8 @@ const PLAN_GATE_EVENT_TYPES = new Set([
   EVENT_TYPES.PLAN_APPROVED,
   EVENT_TYPES.PLAN_REJECTED,
 ]);
+const AGENT_ACTIVITY_KIND_SET = new Set(AGENT_ACTIVITY_KINDS);
+const AGENT_ACTIVITY_STATUS_SET = new Set(AGENT_ACTIVITY_STATUSES);
 
 function boundedLimit(value, fallback = DEFAULT_TAIL_LIMIT) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -42,6 +49,7 @@ function parseJsonField(text) {
 }
 
 function eventKindForEventType(eventType) {
+  if (eventType === EVENT_TYPES.AGENT_ACTIVITY) return BRIDGE_EVENT_KINDS.AGENT_ACTIVITY;
   if (eventType === EVENT_TYPES.PLAN_APPROVAL_GATE_CREATED) return BRIDGE_EVENT_KINDS.GATE_OPENED;
   if (eventType === EVENT_TYPES.PLAN_APPROVED || eventType === EVENT_TYPES.PLAN_REJECTED) {
     return BRIDGE_EVENT_KINDS.GATE_CLOSED;
@@ -116,6 +124,37 @@ function payloadForDbEvent(row) {
   const event = parseJsonField(row.event_json);
   const redactedEvent = redactBridgeValue(event);
   const kind = eventKindForEventType(row.event_type);
+  if (kind === BRIDGE_EVENT_KINDS.AGENT_ACTIVITY) {
+    if (
+      event?.protocol !== AGENT_ACTIVITY_PROTOCOL ||
+      !AGENT_ACTIVITY_KIND_SET.has(event?.kind) ||
+      !AGENT_ACTIVITY_STATUS_SET.has(event?.status) ||
+      typeof event?.summary !== "string" ||
+      !event.summary.trim() ||
+      row.work_item_id == null
+    ) return null;
+    return {
+      protocol: event.protocol,
+      kind: event.kind,
+      status: event.status,
+      phase: event.phase ?? null,
+      summary: event.summary,
+      detail: event.detail ?? null,
+      agent_call_id: event.agent_call_id ?? null,
+      provider: event.provider ?? null,
+      model: event.model ?? null,
+      input_tokens: event.input_tokens ?? null,
+      output_tokens: event.output_tokens ?? null,
+      duration_ms: event.duration_ms ?? null,
+      cost_usd: event.cost_usd ?? null,
+      work_item_id: row.work_item_id == null ? null : Number(row.work_item_id),
+      job_id: row.job_id == null ? null : Number(row.job_id),
+      attempt_id: row.attempt_id == null ? null : Number(row.attempt_id),
+      role: row.actor_type || null,
+      actor_id: row.actor_id ?? null,
+      at: row.created_at || null,
+    };
+  }
   if (kind === BRIDGE_EVENT_KINDS.GATE_OPENED) {
     return {
       job_id: Number(event?.gate_job_id || row.job_id || 0) || null,
@@ -471,7 +510,8 @@ export class ChangeStream extends EventEmitter {
       this.dbEventCursor = Math.max(this.dbEventCursor, Number(row.id));
       const kind = eventKindForEventType(row.event_type);
       if (kind && !this.shouldSuppressDbGateEvent(row)) {
-        this.emitBridgeEvent(kind, payloadForDbEvent(row));
+        const payload = payloadForDbEvent(row);
+        if (payload) this.emitBridgeEvent(kind, payload);
       }
     }
   }

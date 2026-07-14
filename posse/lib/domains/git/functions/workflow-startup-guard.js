@@ -12,13 +12,13 @@ import {
   buildPosseRuntimeIgnoreEntries,
   isPosseRuntimeOnlyGitignoreContent,
 } from "../../runtime/functions/ignore.js";
-import { GIT_OPERATION_TIMEOUT_MS, gitExec, gitExecAsync, isGitCommandFailure } from "./utils.js";
+import { GIT_OPERATION_TIMEOUT_MS, isGitCommandFailure } from "./utils.js";
 import { snapshotAndResetDirtyWorktree } from "./worktree.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
 import { firstGitLine } from "./workflow-git-utils.js";
 
 export function createStartupDirtyGuardHelpers(context) {
-  const { projectDir, runGitWorkflowTaskOffMainThread } = context;
+  const { projectDir, runGitWorkflowTaskOffMainThread, gitExec, gitExecAsync } = context;
   let projectGitPrefixCache;
 
   // "" means "git ran and reported a clean tree" (or no repo). An infra
@@ -96,6 +96,10 @@ export function createStartupDirtyGuardHelpers(context) {
   function isRuntimePorcelainLine(line, cwd = projectDir) {
     const filePath = projectRelativePorcelainPath(porcelainPath(line));
     if (filePath === ".posse" || filePath.startsWith(".posse/")) return true;
+    // Admin merge may run before bootstrap writes the managed .gitignore.
+    // A linked worktree under Posse's canonical root is runtime state, not a
+    // user edit in the target checkout.
+    if (filePath === ".posse-worktrees" || filePath.startsWith(".posse-worktrees/")) return true;
     if (filePath !== ".gitignore") return false;
     const code = String(line || "").trim();
     // Untracked .gitignore that posse just created — already handled.
@@ -122,6 +126,7 @@ export function createStartupDirtyGuardHelpers(context) {
     throwIfAborted(signal);
     const filePath = projectRelativePorcelainPath(porcelainPath(line));
     if (filePath === ".posse" || filePath.startsWith(".posse/")) return true;
+    if (filePath === ".posse-worktrees" || filePath.startsWith(".posse-worktrees/")) return true;
     if (filePath !== ".gitignore") return false;
     const code = String(line || "").trim();
     if (code.startsWith("??")) {

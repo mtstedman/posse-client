@@ -5,6 +5,7 @@
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getSetting, listWorkItems } from "../../queue/functions/index.js";
+import { adminGitExec } from "./admin-git.js";
 import { runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
 
 const _warnedTargetBranchMessages = new Set();
@@ -61,6 +62,93 @@ function normalizeResolvedTargetBranch(projectDir, result) {
     return String(resolved.branch || "").trim() || "main";
   }
   return String(result || "").trim() || "main";
+}
+
+function adminGitValue(projectDir, args) {
+  try {
+    return String(adminGitExec(args, projectDir, { timeoutMs: 5000 }) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function adminLocalBranchExists(projectDir, branch) {
+  const name = String(branch || "").trim();
+  if (!name) return false;
+  try {
+    adminGitExec(["show-ref", "--verify", "--quiet", `refs/heads/${name}`], projectDir, { timeoutMs: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function adminStripRemotePrefix(value) {
+  const name = String(value || "").trim();
+  const separator = name.indexOf("/");
+  return separator === -1 ? name : name.slice(separator + 1);
+}
+
+function adminIsWorkItemBranch(branch, known) {
+  const name = String(branch || "").trim();
+  return name.startsWith("posse/")
+    || /^wi-\d+(?:$|[-_/.:\s])/.test(name)
+    || known.has(name);
+}
+
+/**
+ * Resolve the target branch for operator/admin surfaces without starting the
+ * native daemon. This mirrors the native resolver's ordering while keeping
+ * Bossy status/merge independent from agent heartbeat/MCP readiness.
+ */
+export function resolveTargetBranchForAdmin(projectDir) {
+  const warnings = [];
+  const known = new Set(knownWorkItemBranches());
+  const configured = configuredTargetBranch(projectDir);
+  if (configured) {
+    if (adminLocalBranchExists(projectDir, configured)) {
+      return normalizeResolvedTargetBranch(projectDir, { branch: configured, warnings });
+    }
+    const remoteBranches = adminGitValue(projectDir, ["for-each-ref", "--format=%(refname:short)", "refs/remotes"])
+      .split(/\r?\n/)
+      .map(adminStripRemotePrefix);
+    const repoAvailable = !!adminGitValue(projectDir, ["rev-parse", "--git-dir"]);
+    if (!repoAvailable) return normalizeResolvedTargetBranch(projectDir, { branch: configured, warnings });
+    if (!remoteBranches.includes(configured)) {
+      warnings.push(`Configured target_branch '${configured}' was not found locally or on a remote; falling back to branch detection.`);
+    }
+  }
+
+  const current = adminGitValue(projectDir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (current && current !== "HEAD" && adminLocalBranchExists(projectDir, current) && !adminIsWorkItemBranch(current, known)) {
+    return normalizeResolvedTargetBranch(projectDir, { branch: current, warnings });
+  }
+
+  const upstream = adminStripRemotePrefix(adminGitValue(projectDir, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]));
+  if (upstream && adminLocalBranchExists(projectDir, upstream) && !adminIsWorkItemBranch(upstream, known)) {
+    return normalizeResolvedTargetBranch(projectDir, { branch: upstream, warnings });
+  }
+
+  const remoteDefault = adminStripRemotePrefix(adminGitValue(projectDir, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]));
+  if (remoteDefault && adminLocalBranchExists(projectDir, remoteDefault) && !adminIsWorkItemBranch(remoteDefault, known)) {
+    return normalizeResolvedTargetBranch(projectDir, { branch: remoteDefault, warnings });
+  }
+
+  const localBranches = adminGitValue(projectDir, ["branch", "--format=%(refname:short)"])
+    .split(/\r?\n/)
+    .map((branch) => branch.trim())
+    .filter((branch) => branch && !adminIsWorkItemBranch(branch, known));
+  if (localBranches.length === 1) {
+    return normalizeResolvedTargetBranch(projectDir, { branch: localBranches[0], warnings });
+  }
+
+  const hasMain = adminLocalBranchExists(projectDir, "main");
+  const hasMaster = adminLocalBranchExists(projectDir, "master");
+  if (hasMain && hasMaster) warnings.push("Both 'main' and 'master' exist - using 'main'.");
+  return normalizeResolvedTargetBranch(projectDir, {
+    branch: hasMain ? "main" : (hasMaster ? "master" : "main"),
+    warnings,
+  });
 }
 
 /**

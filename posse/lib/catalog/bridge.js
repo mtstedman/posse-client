@@ -27,6 +27,7 @@ export const BRIDGE_EVENT_KINDS = Object.freeze({
   FAILED: "failed",
   INSTANCE_STATUS: "instance_status",
   JOB_PROGRESS: "job_progress",
+  AGENT_ACTIVITY: "agent_activity",
 });
 
 export const BRIDGE_FRAME_TYPES = Object.freeze({

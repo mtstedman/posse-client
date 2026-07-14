@@ -146,6 +146,13 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
   const capabilities = claims.capabilities && typeof claims.capabilities === "object"
     ? claims.capabilities
     : {};
+  const agentBound = !!String(bootConfig.agentId || claims.agent_id || "").trim();
+  const oauthIdentityCapabilities = agentBound
+    ? {
+        agentId: String(bootConfig.agentId || claims.agent_id),
+        scopeBindingMode: "dispatcher",
+      }
+    : capabilities;
   const memoryCount = numberOrNull(
     bootConfig?.atlas?.memoryStats?.memories
     ?? bootConfig?.atlas?.memory_count
@@ -174,12 +181,15 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
       atlas: atlasCapabilities,
     },
     mcp_oauth: {
-      requested: true,
+      // Known coordination-only roles resolve an intentionally empty surface.
+      // Their agent still receives a locally signed empty OAuth contract, but
+      // asking the remote mint for a credential would reject the empty surface.
+      requested: bootConfig.remoteCatalog?.requestMcpOAuth !== false,
       audience: MCP_OAUTH_AUDIENCE,
       token_type: MCP_OAUTH_TOKEN_TYPE,
       ttl_seconds: DEFAULT_MCP_OAUTH_TTL_SECONDS,
       subject: claims.sub || null,
-      capabilities,
+      capabilities: oauthIdentityCapabilities,
     },
   };
 }

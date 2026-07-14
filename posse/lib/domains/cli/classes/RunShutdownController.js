@@ -201,6 +201,7 @@ export class RunShutdownController {
     }
     await this.flushCloseoutStatus();
     await this.cleanupAtlasForSession({ label: "Graceful shutdown - run wrap-up" });
+    await this.worker.disposeAgents?.("run_shutdown");
     await this.flushCloseoutStatus();
     this.emitCloseoutStatus("Graceful shutdown - run wrap-up: done.", this.C.green);
     await this.flushCloseoutStatus();

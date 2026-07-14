@@ -1,7 +1,8 @@
 // lib/domains/worker/classes/RoleRegistry.js
 //
 // Central construction point for role instances. Production workers register
-// roles here so helper code does not construct agents ad hoc.
+// roles here so helper code does not construct role handlers ad hoc. Provider
+// agents are minted separately by AgentDispatcher with a required MCP gate.
 
 export class RoleRegistry {
   constructor({ providerClient, context = null, deps = {} } = {}) {

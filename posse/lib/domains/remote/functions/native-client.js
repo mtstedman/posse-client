@@ -11,11 +11,13 @@ export const REMOTE_ARTIFACTS_READ_ROUTE = "artifacts:read";
 export const REMOTE_ARTIFACT_CATALOG_METHOD = "remote.artifactCatalog";
 export const REMOTE_ARTIFACT_DOWNLOAD_METHOD = "remote.artifactDownload";
 export const REMOTE_ARTIFACT_STATUS_METHOD = "remote.artifactStatus";
+export const REMOTE_MODEL_PACKAGE_DOWNLOAD_METHOD = "remote.modelPackageDownload";
 
 const REMOTE_ARTIFACT_METHODS = new Set([
   REMOTE_ARTIFACT_CATALOG_METHOD,
   REMOTE_ARTIFACT_DOWNLOAD_METHOD,
   REMOTE_ARTIFACT_STATUS_METHOD,
+  REMOTE_MODEL_PACKAGE_DOWNLOAD_METHOD,
 ]);
 
 /**
@@ -106,9 +108,9 @@ async function runRemoteNativeMethodJson(method, payload, {
 }
 
 /**
- * Invoke one of the signed LLM artifact methods through the key-gated native
- * Remote client. The native binary owns trust verification, transfer bounds,
- * resumable download state, and the final cache path.
+ * Invoke an artifact method through the key-gated native Remote client. The
+ * native binary owns trust verification, transfer bounds, resumable download
+ * state, and the final cache path.
  *
  * @param {string} method
  * @param {unknown} payload

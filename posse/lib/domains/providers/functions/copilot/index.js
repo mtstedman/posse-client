@@ -47,6 +47,7 @@ import { buildCopilotArgs, buildCopilotChildEnv, buildCopilotSpawn } from "./lau
 import { classifyCopilotFailure, parseCopilotErrorBackoff } from "./failure-classification.js";
 import { buildCopilotCloseStats, resolveCopilotStallTimeoutMs } from "./close-stats.js";
 import { terminateSpawnedProcess, trackSpawnedProcess } from "../shared/windows-spawn.js";
+import { buildDeterministicReadMcpServerConfigAsync } from "../../../integrations/functions/deterministic-mcp.js";
 import {
   consumeCopilotLine,
   createAccumulator,
@@ -112,7 +113,7 @@ function requestCopilotChildTermination(proc, { platform = process.platform, sch
  * @param {Record<string, any>} [opts]
  * @returns {Promise<{ output: string, stats: ReturnType<typeof buildCopilotCloseStats> }>}
  */
-export function callProvider(promptText, opts = {}) {
+export async function callProvider(promptText, opts = {}) {
   const readiness = isReady();
   if (!readiness.ready) {
     return Promise.reject(buildNotReadyError(readiness.reason));
@@ -130,7 +131,36 @@ export function callProvider(promptText, opts = {}) {
     abortSignal = null,
     stallTimeout = null,
     maxOutputTokens = null,
+    mcpGate = null,
   } = opts || {};
+
+  if (!mcpGate) {
+    const error = new Error("Copilot agent requires an MCP gate dependency");
+    error.code = "POSSE_AGENT_MCP_GATE_REQUIRED";
+    throw error;
+  }
+  const mcpConfig = await buildDeterministicReadMcpServerConfigAsync(role, {
+    ...opts,
+    providerName: "copilot",
+    mcpGate,
+    remoteToolSurface: mcpGate.remoteToolSurface,
+  });
+  if (!mcpConfig?.ready) {
+    const error = new Error(`Copilot MCP gate is not ready: ${mcpConfig?.reason || "unknown"}`);
+    error.code = "POSSE_AGENT_MCP_GATE_NOT_READY";
+    throw error;
+  }
+  const additionalMcpConfig = JSON.stringify({
+    mcpServers: {
+      [mcpConfig.name]: {
+        command: mcpConfig.command,
+        args: mcpConfig.args || [],
+        cwd: mcpConfig.cwd || undefined,
+        env: mcpConfig.env || undefined,
+        tools: ["*"],
+      },
+    },
+  });
 
   return new Promise((resolve, reject) => {
     const workingDir = String(cwd || projectDir || process.cwd());
@@ -148,6 +178,12 @@ export function callProvider(promptText, opts = {}) {
       model: resolvedModel,
       reasoningEffort,
       workingDir,
+      additionalMcpConfig,
+      disableBuiltinMcps: true,
+      allowAllTools: false,
+      allowAllPaths: false,
+      availableTools: [mcpConfig.name],
+      allowTools: [mcpConfig.name],
     });
 
     const env = buildCopilotChildEnv(
@@ -156,7 +192,7 @@ export function callProvider(promptText, opts = {}) {
     );
     // COPILOT_ALLOW_ALL is also accepted in lieu of --allow-all-tools;
     // belt-and-braces in case future versions tighten the flag set.
-    env.COPILOT_ALLOW_ALL = env.COPILOT_ALLOW_ALL || "1";
+    delete env.COPILOT_ALLOW_ALL;
 
     /** @type {ReturnType<typeof spawn> | null} */
     let child;

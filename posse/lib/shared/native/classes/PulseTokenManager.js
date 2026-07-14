@@ -112,9 +112,9 @@ export class PulseTokenManager {
 
   /**
    * Establish the one process-wide remote heartbeat and keep it renewed until
-   * {@link stopHeartbeat} is called. Native daemons receive route views of this
-   * same signed token from their parent; this method never mints per-daemon or
-   * per-request credentials.
+   * {@link stopHeartbeat} is called. Native daemons receive independently
+   * scoped grants from this same process-owned broker; the broad root token
+   * remains inside the parent Node process.
    */
   async startHeartbeat() {
     this._heartbeatRunning = true;
@@ -160,10 +160,9 @@ export class PulseTokenManager {
   }
 
   /**
-   * Route view of the process-wide pulse for a native child. The remote token
-   * is minted once with the orchestrator's full server-authorized route set;
-   * the envelope names the route the child must verify. Agent permissions are
-   * narrowed separately by signed MCP gateway capabilities.
+   * Route-scoped pulse envelope for a native child. Each route and native
+   * version gets a distinct server-signed grant, while the raw key remains
+   * inside this process-owned broker.
    *
    * @param {{ refresh?: boolean, requiredRoute: string, nativePackage?: string | null, nativeVersion?: string | null }} opts
    * @returns {Promise<Readonly<NativePulseEnvelope> | null>} null when no launch key is available.
@@ -171,27 +170,24 @@ export class PulseTokenManager {
   async getPulseEnvelope({ refresh = false, requiredRoute, nativePackage = null, nativeVersion = null } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) throw pulseError("POSSE_PULSE_ROUTE_REQUIRED", "a native pulse envelope requires an explicit route");
-    normalizedNativeIdentity(nativePackage, nativeVersion);
+    const nativeIdentity = normalizedNativeIdentity(nativePackage, nativeVersion);
     const rawKey = this.authManager.getLaunchKey({ refresh });
     if (!rawKey) return null;
     const policy = this.authManager.getTrustedAuthPolicy();
     if (!policy?.envelope?.heartbeatUrl) {
       throw pulseError("POSSE_PULSE_AUTH_POLICY_UNAVAILABLE", "trusted heartbeat policy is unavailable");
     }
-    const cacheKey = pulseCacheKey(rawKey, policy);
+    const cacheKey = `${pulseCacheKey(rawKey, policy)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`;
     const now = this.now();
     const cached = this._cache.get(cacheKey);
-    if (!refresh && cached && now < cached.refreshAt && now < cached.expiresAt) {
-      assertRouteGranted(cached.routes, route);
-      this.#scheduleHeartbeat(cached);
-      return nativeEnvelopeForRoute(cached, route);
+    if (!refresh && cached?.envelope && now < cached.refreshAt && now < cached.expiresAt) {
+      assertExactRoute(cached.routes, route);
+      return cached.envelope;
     }
-    await this.#mintPulse(cacheKey, rawKey, policy, null);
+    const minted = await this.#mintPulse(cacheKey, rawKey, policy, route, nativeIdentity);
     const refreshed = this._cache.get(cacheKey);
-    if (!refreshed) return null;
-    assertRouteGranted(refreshed.routes, route);
-    this.#scheduleHeartbeat(refreshed);
-    return nativeEnvelopeForRoute(refreshed, route);
+    if (refreshed) assertExactRoute(refreshed.routes, route);
+    return minted.envelope;
   }
 
   /**
@@ -205,19 +201,19 @@ export class PulseTokenManager {
   getCachedPulseEnvelope({ requiredRoute, nativePackage = null, nativeVersion = null } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) return null;
-    normalizedNativeIdentity(nativePackage, nativeVersion);
+    const nativeIdentity = normalizedNativeIdentity(nativePackage, nativeVersion);
     const rawKey = this.authManager.getLaunchKey();
     if (!rawKey) return null;
     const policy = this.authManager.getTrustedAuthPolicy();
     if (!policy?.envelope?.heartbeatUrl) return null;
-    const cached = this._cache.get(pulseCacheKey(rawKey, policy));
-    if (!cached || this.now() >= cached.expiresAt) return null;
+    const cached = this._cache.get(`${pulseCacheKey(rawKey, policy)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`);
+    if (!cached?.envelope || this.now() >= cached.expiresAt) return null;
     try {
-      assertRouteGranted(cached.routes, route);
+      assertExactRoute(cached.routes, route);
     } catch {
       return null;
     }
-    return nativeEnvelopeForRoute(cached, route);
+    return cached.envelope;
   }
 
   /**
@@ -499,20 +495,6 @@ function exactPulseRoutes(body, token) {
     );
   }
   return signedRoutes;
-}
-
-function nativeEnvelopeForRoute(entry, route) {
-  if (!entry.kid) {
-    throw pulseError("POSSE_PULSE_INVALID_RESPONSE", "heartbeat response did not name a signing kid for the native pulse");
-  }
-  return Object.freeze({
-    token: entry.token,
-    kid: entry.kid,
-    route,
-    expiresAt: Math.floor(entry.expiresAt / 1000),
-    refreshAfter: entry.refreshAfter,
-    nativeArtifacts: entry.nativeArtifacts,
-  });
 }
 
 function exactNativePulseRoutes(body, token, requiredRoute) {

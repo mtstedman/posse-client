@@ -10,21 +10,29 @@ import { emitWiCleanup as emitAtlasV2WiCleanup, isAtlasV2EmissionEnabled } from 
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { throwIfAborted } from "../../runtime/functions/yield.js";
-import { GIT_OPERATION_TIMEOUT_MS, gitExec } from "./utils.js";
+import { getRuntimeRoot } from "../../runtime/functions/paths.js";
+import { GIT_OPERATION_TIMEOUT_MS } from "./utils.js";
 import { FORCE_REMOVE_OPTIONS } from "./worktree-remove-options.js";
 import {
-  worktreePath as canonicalWorktreePath,
-  findLegacyWorktreeForWi,
-  worktreeRoot,
-  preserveDirtyWorktreeSnapshot,
-  deleteBranchPreservingTip,
+  worktreePath as nativeWorktreePath,
+  findLegacyWorktreeForWi as nativeFindLegacyWorktreeForWi,
+  worktreeRoot as nativeWorktreeRoot,
+  preserveDirtyWorktreeSnapshot as nativePreserveDirtyWorktreeSnapshot,
+  deleteBranchPreservingTip as nativeDeleteBranchPreservingTip,
   gcWorktreesAsync,
-  withWorktreeLock,
+  preserveCorruptWorktreeContents,
+  withWorktreeLock as nativeWithWorktreeLock,
 } from "./worktree.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
 
 export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsync }) {
-  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread } = context;
+  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, gitExec } = context;
+  const withWorktreeLock = context.withWorktreeLock || nativeWithWorktreeLock;
+  const canonicalWorktreePath = context.worktreePath || nativeWorktreePath;
+  const findLegacyWorktreeForWi = context.findLegacyWorktree || nativeFindLegacyWorktreeForWi;
+  const worktreeRoot = context.worktreeRoot || nativeWorktreeRoot;
+  const deleteBranchPreservingTip = context.deleteBranchPreservingTip || nativeDeleteBranchPreservingTip;
+  const preserveDirtyWorktreeSnapshot = context.preserveDirtyWorktreeSnapshot || nativePreserveDirtyWorktreeSnapshot;
 
   async function startupWorktreeCleanup({
     signal = null,
@@ -58,10 +66,12 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
 
   function gitBranchExists(branchName, cwd) {
     try {
-      gitExec(["rev-parse", "--verify", branchName], cwd, { timeoutMs: 3000 });
+      gitExec(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], cwd, { timeoutMs: 3000 });
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      const status = Number.isInteger(err?.status) ? err.status : err?.code;
+      if (err?.gitCommandFailed === true && status === 1) return false;
+      throw err;
     }
   }
 
@@ -93,32 +103,35 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
   }
 
   function gitTopLevelPath(cwd) {
-    try {
-      return path.resolve(gitExec(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 3000 }).trim());
-    } catch {
-      return path.resolve(cwd);
+    return path.resolve(gitExec(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 3000 }).trim());
+  }
+
+  function gitWorktreeEntries(cwd) {
+    const raw = gitExec(["worktree", "list", "--porcelain"], cwd, { timeoutMs: 10000 });
+    const entries = [];
+    let current = null;
+    for (const line of raw.split(/\r?\n/)) {
+      if (line.startsWith("worktree ")) {
+        current = { path: line.slice("worktree ".length).trim(), branch: null };
+        entries.push(current);
+        continue;
+      }
+      if (current && line.startsWith("branch ")) {
+        current.branch = line.slice("branch ".length).trim();
+      }
+      if (line.trim() === "") current = null;
     }
+    return entries;
   }
 
   function gitWorktreePathsForBranch(branchName, cwd) {
-    const paths = [];
-    try {
-      const raw = gitExec(["worktree", "list", "--porcelain"], cwd, { timeoutMs: 10000 });
-      let currentPath = null;
-      for (const line of raw.split(/\r?\n/)) {
-        if (line.startsWith("worktree ")) {
-          currentPath = line.slice("worktree ".length).trim();
-          continue;
-        }
-        if (currentPath && line.trim() === `branch refs/heads/${branchName}`) {
-          paths.push(currentPath);
-        }
-        if (line.trim() === "") currentPath = null;
-      }
-    } catch {
-      // best effort; branch deletion will surface failure if a worktree remains
-    }
-    return paths;
+    return gitWorktreeEntries(cwd)
+      .filter((entry) => entry.branch === `refs/heads/${branchName}`)
+      .map((entry) => entry.path);
+  }
+
+  function gitWorktreeIsRegistered(worktreePath, cwd) {
+    return gitWorktreeEntries(cwd).some((entry) => sameFsPath(entry.path, worktreePath));
   }
 
   function gitWorktreeRemove(worktreePath, cwd) {
@@ -129,23 +142,18 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
       return false;
     }
 
-    let removed = false;
-    try {
+    const registered = gitWorktreeIsRegistered(target, cwd);
+    if (registered) {
       gitExec(["worktree", "remove", worktreePath, "--force"], cwd, { timeoutMs: GIT_OPERATION_TIMEOUT_MS });
-      removed = true;
-    } catch {
-      try { gitExec(["worktree", "prune"], cwd, { timeoutMs: GIT_OPERATION_TIMEOUT_MS }); } catch { /* best effort */ }
-    }
-    if (fs.existsSync(worktreePath)) {
+    } else if (fs.existsSync(worktreePath)) {
       try {
         fs.rmSync(worktreePath, FORCE_REMOVE_OPTIONS);
-        removed = true;
       } catch {
-        // best effort; caller can decide whether branch state is safe to clear
+        return false;
       }
     }
-    try { gitExec(["worktree", "prune"], cwd, { timeoutMs: GIT_OPERATION_TIMEOUT_MS }); } catch { /* best effort */ }
-    return removed || !fs.existsSync(worktreePath);
+    gitExec(["worktree", "prune"], cwd, { timeoutMs: GIT_OPERATION_TIMEOUT_MS });
+    return !fs.existsSync(worktreePath);
   }
 
   function gitWorktreePorcelain(worktreePath) {
@@ -182,6 +190,72 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
     });
   }
 
+  function hasPreservableWorktreeContents(wtDir) {
+    const pending = [wtDir];
+    while (pending.length > 0) {
+      const current = pending.pop();
+      let entries;
+      try {
+        entries = fs.readdirSync(current, { withFileTypes: true });
+      } catch {
+        return true;
+      }
+      for (const entry of entries) {
+        if (path.resolve(current) === path.resolve(wtDir) && (entry.name === ".git" || entry.name === ".posse")) {
+          continue;
+        }
+        if (entry.isDirectory()) pending.push(path.join(current, entry.name));
+        else return true;
+      }
+    }
+    return false;
+  }
+
+  function preserveStaleWorktree(wi, wtDir, reason, detail = {}) {
+    let recoveryDir = null;
+    try {
+      recoveryDir = preserveCorruptWorktreeContents(wtDir, projectDir, {
+        wiId: wi.id,
+        branchName: wi.branch_name || null,
+        recoveryRoot: path.join(getRuntimeRoot(projectDir), "recovered-worktrees"),
+        reason: "unregistered_worktree",
+      });
+    } catch (err) {
+      logWorktreeSnapshotCleanupFailure(
+        wi,
+        wtDir,
+        `Could not preserve stale worktree contents; leaving worktree on disk: ${err?.message || String(err)}`,
+        { reason, ...detail, error: err?.message || String(err) },
+      );
+      return false;
+    }
+    if (!recoveryDir && hasPreservableWorktreeContents(wtDir)) {
+      logWorktreeSnapshotCleanupFailure(
+        wi,
+        wtDir,
+        "Could not completely preserve stale worktree contents; leaving worktree on disk",
+        { reason, ...detail },
+      );
+      return false;
+    }
+    if (recoveryDir) {
+      logEvent({
+        work_item_id: wi.id,
+        event_type: EVENT_TYPES.WORKTREE_SNAPSHOT_WARNING,
+        actor_type: EVENT_ACTORS.SYSTEM,
+        message: `Preserved stale worktree contents at ${recoveryDir}`,
+        event_json: JSON.stringify({
+          worktree_path: wtDir,
+          recovery_path: recoveryDir,
+          branch: wi.branch_name || null,
+          reason,
+          ...detail,
+        }),
+      });
+    }
+    return true;
+  }
+
   /**
    * Snapshot-gated single-worktree removal: snapshot any dirty state, verify
    * clean (a verify that RAN and still reports dirt refuses removal even
@@ -192,6 +266,45 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
   function snapshotGateAndRemoveWorktree(wi, wtDir, reason) {
     let removed = false;
     withWorktreeLock(wtDir, projectDir, () => {
+      let topLevel = null;
+      let topLevelError = null;
+      try {
+        topLevel = gitTopLevelPath(wtDir);
+      } catch (err) {
+        topLevelError = err;
+      }
+      let registered = false;
+      try {
+        registered = gitWorktreeIsRegistered(wtDir, projectDir);
+      } catch (err) {
+        logWorktreeSnapshotCleanupFailure(
+          wi,
+          wtDir,
+          `Could not inspect Git worktree registration; leaving worktree on disk: ${err?.message || String(err)}`,
+          { reason, error: err?.message || String(err) },
+        );
+        return;
+      }
+      if (!registered || !topLevel || !sameFsPath(topLevel, wtDir)) {
+        const preserved = preserveStaleWorktree(wi, wtDir, reason, {
+          registered,
+          resolved_top_level: topLevel,
+          top_level_error: topLevelError?.message || null,
+        });
+        if (!preserved) return;
+        try {
+          removed = gitWorktreeRemove(wtDir, projectDir);
+        } catch (err) {
+          logWorktreeSnapshotCleanupFailure(
+            wi,
+            wtDir,
+            `Could not remove preserved stale worktree; leaving it on disk: ${err?.message || String(err)}`,
+            { reason, error: err?.message || String(err), registered },
+          );
+        }
+        return;
+      }
+
       let snapshotSucceeded = false;
       let snapshotFailed = false;
       let status = "";
@@ -238,7 +351,8 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
         }
       }
 
-      if (!verifiedClean && (verifyRan || !snapshotSucceeded)) {
+      const snapshottedRemovalAllowed = context.allowSnapshottedWorktreeRemoval === true && snapshotSucceeded;
+      if (!verifiedClean && !snapshottedRemovalAllowed && (verifyRan || !snapshotSucceeded)) {
         if (!snapshotFailed) {
           logWorktreeSnapshotCleanupFailure(
             wi,
@@ -250,7 +364,16 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
         return;
       }
 
-      removed = gitWorktreeRemove(wtDir, projectDir);
+      try {
+        removed = gitWorktreeRemove(wtDir, projectDir);
+      } catch (err) {
+        logWorktreeSnapshotCleanupFailure(
+          wi,
+          wtDir,
+          `Could not remove worktree after cleanup gate passed; leaving it on disk: ${err?.message || String(err)}`,
+          { reason, error: err?.message || String(err) },
+        );
+      }
     });
     return removed;
   }
@@ -306,6 +429,7 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
     if (legacy && !sameFsPath(legacy, canonical) && fs.existsSync(legacy)) addManagedCandidate(legacy);
     for (const wtPath of gitWorktreePathsForBranch(branchName, projectDir)) addManagedCandidate(wtPath);
     disposeWorkItemAtlasGraph({ projectDir: projectDir, workItemId: wi.id });
+    let managedWorktreeCleanupFailed = false;
     for (const wtPath of candidates) {
       disposeWorkItemAtlasGraph({ projectDir: projectDir, workItemId: wi.id, worktreePath: wtPath });
       // Snapshot-gated: reject/kill/requeue paths reach here with worktrees
@@ -313,9 +437,19 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
       // writes) — bare force-removal destroyed it unsnapshotted. A refusal
       // leaves the worktree; the branch delete below then fails closed and
       // keeps the WI's branch metadata.
-      snapshotGateAndRemoveWorktree(wi, wtPath, clearMergeState ? "wi-branch-discard" : "wi-branch-cleanup");
+      const removed = snapshotGateAndRemoveWorktree(wi, wtPath, clearMergeState ? "wi-branch-discard" : "wi-branch-cleanup");
+      if (!removed && fs.existsSync(wtPath)) managedWorktreeCleanupFailed = true;
     }
-    try { gitExec(["worktree", "prune"], projectDir, { timeoutMs: 10000 }); } catch { /* best effort */ }
+    try { gitExec(["worktree", "prune"], projectDir, { timeoutMs: 10000 }); } catch (err) {
+      logWorktreeSnapshotCleanupFailure(
+        wi,
+        canonical,
+        `Could not prune Git worktree metadata after cleanup: ${err?.message || String(err)}`,
+        { branch: branchName, error: err?.message || String(err) },
+      );
+      return false;
+    }
+    if (managedWorktreeCleanupFailed) return false;
     const remainingExternalWorktrees = gitWorktreePathsForBranch(branchName, projectDir)
       .filter((wtPath) => !isManagedWiWorktreePath(wtPath, wi.id));
     if (remainingExternalWorktrees.length > 0) {

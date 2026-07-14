@@ -8,6 +8,7 @@ import {
   REMOTE_ARTIFACT_CATALOG_METHOD,
   REMOTE_ARTIFACT_DOWNLOAD_METHOD,
   REMOTE_ARTIFACT_STATUS_METHOD,
+  REMOTE_MODEL_PACKAGE_DOWNLOAD_METHOD,
   runRemoteNativeArtifactJson,
 } from "./native-client.js";
 
@@ -104,6 +105,34 @@ export async function downloadLocalModelArtifact(client, artifact, {
   throw new Error("The local model download did not produce a result.");
 }
 
+export async function downloadLocalModelPackage(client, modelId) {
+  const normalizedModelId = String(modelId || "").trim();
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9])?$/.test(normalizedModelId)) {
+    throw new Error("The required local model ID is invalid.");
+  }
+  for (let invocation = 0; invocation < 2; invocation += 1) {
+    try {
+      const value = await runRemoteNativeArtifactJson(
+        REMOTE_MODEL_PACKAGE_DOWNLOAD_METHOD,
+        {
+          baseUrl: client.baseUrl,
+          modelId: normalizedModelId,
+          destinationRoot: client.destinationRoot,
+          timeoutMs: DOWNLOAD_TIMEOUT_MS,
+          maxRetries: 4,
+          retryDelayMs: 1_000,
+        },
+        { manager: client.manager, timeoutMs: 0 },
+      );
+      return validateModelPackageDownload(value, normalizedModelId);
+    } catch (error) {
+      if (invocation === 0 && shouldRetryWithFreshPulse(error)) continue;
+      throw error;
+    }
+  }
+  throw new Error("The required local model package did not produce a result.");
+}
+
 export function buildLocalModelDownloadPayload(client, artifact) {
   validateDownloadSelection(artifact);
   const downloadId = artifact.shorthand;
@@ -160,6 +189,25 @@ function validateDownloadSelection(artifact) {
     || !/^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9])?$/.test(artifact.version)) {
     throw new Error("The selected local model identity is invalid.");
   }
+}
+
+function validateModelPackageDownload(value, expectedModelId) {
+  const result = value && typeof value === "object" && !Array.isArray(value)
+    ? /** @type {Record<string, any>} */ (value)
+    : null;
+  if (!result
+    || result.modelId !== expectedModelId
+    || !String(result.profileId || "").trim()
+    || !String(result.version || "").trim()
+    || !String(result.archiveFormat || "").trim()
+    || !String(result.archiveRoot || "").trim()
+    || !path.isAbsolute(String(result.filePath || ""))
+    || !Number.isSafeInteger(result.bytes)
+    || result.bytes <= 0
+    || !/^[a-f0-9]{64}$/.test(String(result.sha256 || ""))) {
+    throw new Error("The native model package download response is invalid.");
+  }
+  return result;
 }
 
 function delay(ms) {

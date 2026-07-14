@@ -284,6 +284,68 @@ function recordAttemptedProvider(attemptedProviders, providerName) {
   return attemptedProviders;
 }
 
+function providerAgentIdentity(opts = {}, {
+  providerName,
+  role,
+  workItemId,
+  agentCallId,
+} = {}) {
+  const decision = opts?._sessionRecycle?.decision || null;
+  const laneId = decision?.lane?.id || decision?.session?.lane_id || null;
+  const lane = String(decision?.key?.lane || role || "agent").trim().toLowerCase();
+  const provider = String(providerName || "").trim().toLowerCase();
+  const skillKey = String(decision?.key?.skillKey || "");
+  if (laneId != null) {
+    return {
+      key: `session-lane:${laneId}:${provider}:${lane}`,
+      logicalKey: `wi:${workItemId ?? "none"}:${provider}:${lane}:${skillKey}`,
+      reusable: true,
+    };
+  }
+  return {
+    key: `agent-call:${agentCallId}:${provider}:${lane}`,
+    logicalKey: `agent-call:${agentCallId}:${provider}:${lane}`,
+    reusable: false,
+  };
+}
+
+function agentJobAttachment(opts = {}, context = {}) {
+  const atlasConfig = opts.atlasConfig && typeof opts.atlasConfig === "object"
+    ? opts.atlasConfig
+    : {};
+  return {
+    role: opts.role,
+    providerName: context.providerName,
+    cwd: opts.mcpCwd || opts.cwd || context.cwd || context.projectDir || process.cwd(),
+    jobId: context.jobId ?? opts.jobId ?? null,
+    workItemId: context.workItemId ?? opts.workItemId ?? null,
+    attemptId: context.attemptId ?? opts.attemptId ?? null,
+    agentCallId: context.agentCallId ?? opts.agentCallId ?? null,
+    promptChars: opts.promptChars || 0,
+    allowWrite: opts.allowWrite === true,
+    allowShell: opts.allowShell !== false,
+    allowTests: opts.allowTests !== false,
+    projectDbWrite: opts.projectDbWrite === true,
+    projectDbCapability: opts.projectDbCapability || (opts.projectDbWrite === true ? "write" : "none"),
+    allowImageHelpers: opts.allowImageHelpers !== false,
+    allowImageGeneration: opts.needsImageGeneration === true,
+    atlasAvailable: opts.disableAtlas !== true && atlasConfig.enabled !== false,
+    atlasGateEnabled: opts.atlasGateEnabled !== false,
+    atlasPrefetchStatus: opts.atlasPrefetchStatus || "",
+    atlas: {
+      repoPath: atlasConfig.requestedRepoPath || atlasConfig.repoPath || "",
+      repoId: atlasConfig.requestedRepoId || atlasConfig.repoId || "",
+      graphDbPath: atlasConfig.requestedGraphDbPath || atlasConfig.graphDbPath || "",
+      liveBuffers: atlasConfig.liveBuffersEnabled === false ? "off" : "deterministic-writes",
+      viewWaitMs: atlasConfig.viewWaitMs ?? null,
+      jobCacheEnabled: atlasConfig.jobCacheEnabled === true,
+      jobCacheTtlMs: atlasConfig.jobCacheTtlMs ?? null,
+      autoRefreshStale: atlasConfig.autoRefreshStale ?? null,
+    },
+    disableSystemTools: opts.disableSystemTools === true,
+  };
+}
+
 export class TrackedProviderClient {
   constructor({
     worker,
@@ -746,7 +808,53 @@ export class TrackedProviderClient {
       },
     };
 
+    const dispatcher = this.worker?.agentDispatcher;
+    const identity = providerAgentIdentity(opts, {
+      providerName,
+      role: opts.role,
+      workItemId: work_item_id,
+      agentCallId,
+    });
+    let agent = null;
+    let agentLease = null;
+    let retainReusableAgent = false;
+
     try {
+      if (!dispatcher || typeof dispatcher.dispatch !== "function") {
+        const error = new Error("Provider dispatch requires an AgentDispatcher with MCP gate minting");
+        error.code = "POSSE_AGENT_DISPATCHER_REQUIRED";
+        throw error;
+      }
+      const dispatched = await dispatcher.dispatch({
+        ...identity,
+        role: opts.role,
+        providerName,
+        attachment: agentJobAttachment(attemptOpts, {
+          providerName,
+          cwd,
+          projectDir: this.worker.projectDir,
+          jobId: job_id,
+          workItemId: work_item_id,
+          attemptId: observationContext?.attempt_id ?? null,
+          agentCallId,
+        }),
+      });
+      agent = dispatched.agent;
+      agentLease = dispatched.lease;
+      Object.defineProperties(attemptOpts, {
+        agent: {
+          value: agent,
+          enumerable: false,
+          configurable: false,
+          writable: false,
+        },
+        mcpGate: {
+          value: agent.mcpGate,
+          enumerable: false,
+          configurable: false,
+          writable: false,
+        },
+      });
       this.worker._startSessionRecycleLeaseRenewal?.(opts._sessionRecycle);
       recordMemorySample("provider.call.before", {
         agent_call_id: agentCallId,
@@ -840,6 +948,8 @@ export class TrackedProviderClient {
           tokensFreshEstimate: opts._sessionRecycle.fullPromptEstimateTokens,
         });
       }
+      retainReusableAgent = identity.reusable === true
+        && !!(stats.sessionHandle || stats.responseId || opts.priorSessionHandle);
 
       retainReplayOutput?.(agentCallId, {
         output,
@@ -1052,7 +1162,26 @@ export class TrackedProviderClient {
 
       throw err;
     } finally {
-      ContextMeter.release({ agent_call_id: agentCallId });
+      try {
+        try {
+          if (agent && agentLease) await dispatcher.release({
+            agent,
+            lease: agentLease,
+            retain: identity.reusable && retainReusableAgent,
+            reason: "provider_attempt_complete",
+          });
+        } catch {
+          // A scope that cannot be cleared makes this lifetime gate unsafe to
+          // reuse. Destroying the Agent unregisters the owner session; the next
+          // provider attempt must be dispatched with a newly minted gate.
+          retainReusableAgent = false;
+        }
+        if (agent && !agentLease && (!identity.reusable || !retainReusableAgent)) {
+          await dispatcher.destroyAgent(agent, { reason: "provider_agent_complete" });
+        }
+      } finally {
+        ContextMeter.release({ agent_call_id: agentCallId });
+      }
     }
   }
 

@@ -322,6 +322,7 @@ export async function callProvider(promptText, {
   disableAtlas = false,
   atlasConfig = null,
   _remoteIssuedPolicy = null,
+  mcpGate = null,
 } = {}) {
   // Circuit breaker - if OpenAI was recently rate-limited, fail fast so the
   // worker falls back to Claude immediately instead of piling on.
@@ -710,7 +711,7 @@ export async function callProvider(promptText, {
         const displayToolName = formatAtlasToolUseDisplayName(call.name, callInput) || call.name;
         emit(`${C.dim}  [tool] ${displayToolName}(${shortArgs}${shortArgs.length >= 100 ? "..." : ""})${C.reset}`);
 
-        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey, declaredScope, executionContract);
+        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey, declaredScope, executionContract, mcpGate);
         const toolMs = Date.now() - toolStart;
         // executeTool can yield non-strings (e.g. error paths in tool handlers
         // that surface objects). Coerce before .length / .slice so a single

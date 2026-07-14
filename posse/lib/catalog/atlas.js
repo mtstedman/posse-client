@@ -98,6 +98,10 @@ export const ATLAS_JINA_MODEL = Object.freeze({
   mlModelId: "jina-code-embeddings",
   mlModelDirectory: "jina-code-embeddings",
   mlProfileId: "jina-code-embeddings-v1",
+  artifactTask: "embedding",
+  artifactPublisher: "jina",
+  artifactRelease: "v2-base-code-q8",
+  artifactArchiveFormat: "tar+zstd",
   dim: 768,
   dtype: "q8",
 });

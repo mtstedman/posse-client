@@ -27,7 +27,7 @@ export const ATLAS_V2_HELP_COMMANDS = Object.freeze([
   },
   {
     usage: "models pull",
-    summary: "Download the production Jina ONNX model into the project cache",
+    summary: "Download and install the production Jina package into the shared model cache",
   },
   {
     usage: "scip status",

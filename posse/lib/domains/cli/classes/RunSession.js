@@ -51,6 +51,18 @@ function formatNativeDownloadMiB(bytes) {
   return value >= 10 ? value.toFixed(1) : value.toFixed(2);
 }
 
+function summarizeNativeArtifactResults(results) {
+  const unavailable = results.filter((result) => result?.ok !== true);
+  const downloaded = results.filter((result) => result?.downloaded).length;
+  return {
+    unavailable,
+    downloaded,
+    detail: unavailable.length > 0
+      ? `${results.length - unavailable.length}/${results.length} ready; unavailable: ${unavailable.map((result) => result.name).join(", ")}`
+      : `${results.length} ready${downloaded > 0 ? `; ${downloaded} downloaded` : ""}`,
+  };
+}
+
 export class RunSession {
   constructor(deps = {}) {
     Object.assign(this, deps);
@@ -278,11 +290,30 @@ export class RunSession {
   const parkedStatusSet = new Set(PARKED_JOB_STATUSES);
   const parkedJobs = jobs.filter((job) => parkedStatusSet.has(job.status));
   const runnableOrActiveJobs = jobs.filter((job) => !parkedStatusSet.has(job.status));
+  const refreshNativeArtifacts = async ({ onDownloadProgress = null } = {}) => {
+    if (typeof nativeBinariesForRun?.ensureAvailable !== "function") return [];
+    return reconcileNativeBinaries({
+      manager: nativeBinariesForRun,
+      refresh: true,
+      onDownloadProgress,
+    });
+  };
   const sessionCountLabel = () => {
     const parts = [`${runnableOrActiveJobs.length} runnable/active job(s)`];
     if (parkedJobs.length > 0) parts.push(`${parkedJobs.length} parked/waiting`);
     return parts.join(", ");
   };
+  // Headless idle/parked runs return before the panel-driven boot phase below.
+  // Reconcile issued artifacts here so unattended invocations do not leave the
+  // installation on stale binaries merely because no scheduler work can run.
+  if (!useTui && runnableOrActiveJobs.length === 0) {
+    const results = await refreshNativeArtifacts();
+    if (results.length > 0) {
+      const summary = summarizeNativeArtifactResults(results);
+      const color = summary.unavailable.length > 0 ? C.yellow : C.dim;
+      console.log(`  ${color}Native binaries: ${summary.detail}${C.reset}`);
+    }
+  }
   if (runnableOrActiveJobs.length === 0 && parkedJobs.length > 0 && !useTui) {
     console.log(`\n  ${C.yellow}No runnable jobs. ${parkedJobs.length} parked/waiting job(s) need the TUI or operator action before work can continue.${C.reset}\n`);
     return;
@@ -747,9 +778,7 @@ export class RunSession {
       detail: "checking native artifacts",
       force: true,
     });
-    const nativeArtifactResults = await reconcileNativeBinaries({
-      manager: nativeBinariesForRun,
-      refresh: true,
+    const nativeArtifactResults = await refreshNativeArtifacts({
       onDownloadProgress: (progress) => {
         const active = progress.currentPackage || progress.currentName || "native artifacts";
         const activeLabel = progress.activeCount > 1
@@ -776,15 +805,12 @@ export class RunSession {
       });
       return nativeArtifactResults;
     }
-    const unavailable = nativeArtifactResults.filter((result) => result?.ok !== true);
-    const downloaded = nativeArtifactResults.filter((result) => result?.downloaded).length;
+    const summary = summarizeNativeArtifactResults(nativeArtifactResults);
     updateBootStep("native binaries", {
       section: "workspace",
-      status: unavailable.length > 0 ? "warning" : "ok",
-      detail: unavailable.length > 0
-        ? `${nativeArtifactResults.length - unavailable.length}/${nativeArtifactResults.length} ready; unavailable: ${unavailable.map((result) => result.name).join(", ")}`
-        : `${nativeArtifactResults.length} ready${downloaded > 0 ? `; ${downloaded} downloaded` : ""}`,
-      showDetail: unavailable.length > 0,
+      status: summary.unavailable.length > 0 ? "warning" : "ok",
+      detail: summary.detail,
+      showDetail: summary.unavailable.length > 0,
       force: true,
     });
     return nativeArtifactResults;
@@ -2495,6 +2521,9 @@ export class RunSession {
         await flushCloseoutStatus();
       }
     } catch { /* shutdown sweep is best-effort */ }
+    try {
+      await worker?.disposeAgents?.("run_complete");
+    } catch { /* agent gate shutdown is best-effort */ }
     try {
       await persistentMcpOwner.close({ force: true });
     } catch { /* MCP owner shutdown is best-effort */ }

@@ -203,7 +203,16 @@ import { closeObservationLog, getRecentToolInvocations, getToolInvocationCountsB
 import { closePromptLog, readRecentPrompts } from "../../../shared/telemetry/functions/logging/prompt-log.js";
 import { loadRemotePromptBundle } from "../../remote/functions/prompt-bundle.js";
 import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
-import { resolveTargetBranch } from "../../git/functions/target-branch.js";
+import {
+  adminDeleteBranchPreservingTip,
+  adminGitExec,
+  adminGitExecAsync,
+  adminPreserveDirtyWorktreeSnapshot,
+  adminWorktreePath,
+  adminWorktreeRoot,
+  findAdminLegacyWorktree,
+} from "../../git/functions/admin-git.js";
+import { resolveTargetBranch, resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import { GIT_OPERATION_TIMEOUT_MS, gitExecAsync, isGitCommandFailure } from "../../git/functions/utils.js";
 import { ensureRestrictivePushRefspecsAsync, remotePushConfigsAreClearlyRestrictive } from "../../git/functions/push-guard.js";
 import { normalizeIntakeHints } from "../../intake/functions/hints.js";
@@ -530,6 +539,7 @@ async function ensureRepoSetupConfirmed() {
 }
 
 let _gitWorkflowHelpersPromise = null;
+let _adminGitWorkflowHelpersPromise = null;
 let _maintenanceCommandsPromise = null;
 let _statusCommandsPromise = null;
 let _providerModulePromise = null;
@@ -562,6 +572,10 @@ let _stallTimeout = undefined;
 // callbacks (workflow-context.js currentTargetBranch).
 function getTargetBranch() {
   return resolveTargetBranch(PROJECT_DIR);
+}
+
+function getAdminTargetBranch() {
+  return resolveTargetBranchForAdmin(PROJECT_DIR);
 }
 
 async function loadProviderModule() {
@@ -642,6 +656,36 @@ async function getGitWorkflowHelpers() {
   return _gitWorkflowHelpersPromise;
 }
 
+async function getAdminGitWorkflowHelpers() {
+  if (!_adminGitWorkflowHelpersPromise) {
+    _adminGitWorkflowHelpersPromise = (async () => {
+      const { createGitWorkflowHelpers } = await import("../../git/functions/workflows.js");
+      return createGitWorkflowHelpers({
+        projectDir: PROJECT_DIR,
+        getTargetBranch: getAdminTargetBranch,
+        autoMerge: getAutoMergeConfig().enabled,
+        nonInteractive: NON_INTERACTIVE,
+        askFn: ask,
+        gitExecFn: adminGitExec,
+        gitExecAsyncFn: adminGitExecAsync,
+        // `merge` already holds the repo-scoped merge lock and refuses while a
+        // scheduler is live. Avoid deriving the agent worktree lock through a
+        // native daemon on this operator-only lane.
+        withWorktreeLockFn: (_wtPath, _projectDir, fn) => fn(),
+        worktreePathFn: adminWorktreePath,
+        findLegacyWorktreeFn: findAdminLegacyWorktree,
+        worktreeRootFn: adminWorktreeRoot,
+        deleteBranchPreservingTipFn: adminDeleteBranchPreservingTip,
+        preserveDirtyWorktreeSnapshotFn: adminPreserveDirtyWorktreeSnapshot,
+        allowSnapshottedWorktreeRemoval: true,
+        isIterativeWorkItemActive,
+        shouldAutoApproveIterativeWorkItem,
+      });
+    })();
+  }
+  return _adminGitWorkflowHelpersPromise;
+}
+
 async function getMaintenanceCommands() {
   if (!_maintenanceCommandsPromise) {
     _maintenanceCommandsPromise = (async () => {
@@ -651,16 +695,16 @@ async function getMaintenanceCommands() {
         { getAtlasIntegrationConfig },
       ] = await Promise.all([
         import("./maintenance-commands.js"),
-        getGitWorkflowHelpers(),
+        getAdminGitWorkflowHelpers(),
         loadAtlasModule(),
       ]);
       return createMaintenanceCommands({
         projectDir: PROJECT_DIR,
-        getTargetBranch,
+        getTargetBranch: getAdminTargetBranch,
         C,
         ask,
         getAtlasIntegrationConfig,
-        cleanupWiBranch: helpers.cleanupWiBranchAsync || helpers.cleanupWiBranch,
+        cleanupWiBranch: helpers.cleanupWiBranch,
         gitBranchExists: helpers.gitBranchExists,
         gitWorktreePathsForBranch: helpers.gitWorktreePathsForBranch,
         gitWorktreeRemove: helpers.gitWorktreeRemove,
@@ -675,7 +719,7 @@ async function getStatusCommands() {
     _statusCommandsPromise = (async () => {
       const { createStatusCommands } = await import("./status-command.js");
       return createStatusCommands({
-        targetBranch: await getTargetBranch(),
+        targetBranch: getAdminTargetBranch(),
         C,
       });
     })();
@@ -1899,7 +1943,7 @@ async function cmdAudit() {
   const { runAuditCommand } = await loadAuditCommandModule();
   return runAuditCommand(process.argv.slice(3), {
     projectDir: PROJECT_DIR,
-    targetBranch: await getTargetBranch(),
+    targetBranch: getAdminTargetBranch(),
   });
 }
 
@@ -1921,8 +1965,8 @@ function refuseIfSchedulerLive(commandName) {
 
 async function cmdMerge() {
   const rawWiArg = String(process.argv[3] || "").trim();
-  const targetBranch = await getTargetBranch();
-  const helpers = await getGitWorkflowHelpers();
+  const targetBranch = getAdminTargetBranch();
+  const helpers = await getAdminGitWorkflowHelpers();
 
   if (!rawWiArg) {
     // Show all mergeable work items
@@ -1977,8 +2021,10 @@ async function cmdMerge() {
 
   // Show diff stats before merging
   if (wi.merge_base_hash) {
-    const diffFn = helpers.gitDiffStatAsync || helpers.gitDiffStat;
-    const diffLines = await diffFn(wi.merge_base_hash, wi.branch_name, PROJECT_DIR);
+    // `merge` is an operator/admin command (Bossy calls this path directly),
+    // not an agent dispatch. Keep it on the direct Git workflow so MCP/native
+    // daemon heartbeat readiness cannot block approval or merge execution.
+    const diffLines = helpers.gitDiffStat(wi.merge_base_hash, wi.branch_name, PROJECT_DIR);
     if (diffLines.length > 0) {
       console.log(`\n  ${C.bold}Changes in ${wi.branch_name}:${C.reset}`);
       for (const line of diffLines) {
@@ -1993,8 +2039,7 @@ async function cmdMerge() {
     return;
   }
 
-  const mergeFn = helpers.gitMergeToTargetAsync || helpers.gitMergeToTarget;
-  const mergeOutcome = await withMergeLock(() => mergeFn(wi.branch_name, PROJECT_DIR, { wiId: wi.id }));
+  const mergeOutcome = await withMergeLock(() => helpers.gitMergeToTarget(wi.branch_name, PROJECT_DIR, { wiId: wi.id }));
   if (!mergeOutcome.acquired) {
     console.log(`\n  ${C.red}merge refused:${C.reset} another merge is already in progress; retry when it finishes.\n`);
     process.exitCode = 1;
@@ -2015,8 +2060,7 @@ async function cmdMerge() {
     setMergeState(wi.id, "merged");
 
     // Clean up worktree + branch
-    const cleanupFn = helpers.cleanupWiBranchAsync || helpers.cleanupWiBranch;
-    const cleanupOk = await cleanupFn(wi);
+    const cleanupOk = helpers.cleanupWiBranch(wi);
 
     console.log(`\n  ${C.green}\u2713 ${result.message}${C.reset} (${mergeHash.slice(0, 8)})`);
     console.log(cleanupOk
@@ -2399,22 +2443,14 @@ export async function main() {
     return;
   }
   const runBootPanelOwnsReadiness = commandPolicy.name === "run" || commandPolicy.name === "go";
-  const nativeGitBootstrapCommands = new Set([
-    "status",
-    "health",
-    "dashboard",
-    "audit",
-    "merge",
-    "prune",
-    "purge",
-    "cleanup",
-    "clear",
-  ]);
   await init({
     requireWritableArtifacts: commandPolicy.requiresWritableArtifacts,
     refreshStartupContext: commandPolicy.refreshContextAfter,
     showReadiness: !runBootPanelOwnsReadiness && (commandPolicy.requiresProvider || commandPolicy.refreshContextAfter),
-    ensureNativeGit: commandPolicy.requiresWritableArtifacts || nativeGitBootstrapCommands.has(commandPolicy.name),
+    // Only provider/scheduler dispatch owns native-daemon readiness. Read-only
+    // and operator/admin commands (including Bossy status + merge) must remain
+    // usable when agent MCP/native heartbeat infrastructure is unavailable.
+    ensureNativeGit: commandPolicy.requiresProvider,
     refreshNativeGit: commandPolicy.name === "status",
   });
   await maybeWarnPosseUpdateAvailable(commandPolicy);

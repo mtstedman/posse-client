@@ -2,6 +2,7 @@ import path from "path";
 import {
   logEvent,
   storeArtifact,
+  updateJobPayload,
 } from "../../../queue/functions/index.js";
 import {
   getProviderName,
@@ -172,11 +173,15 @@ export class WorkerExecutionCoordinator {
         // Artificer ALWAYS gets artifact scope — it writes to output dirs, not the repo.
         if (MUTATING_JOB_TYPES.has(job.job_type)) {
           let jobPayloadInject = worker.parsePayload(job);
+          if (job.job_type === "artificer" && (!jobPayloadInject.task_mode || jobPayloadInject.task_mode === "code")) {
+            jobPayloadInject = { ...jobPayloadInject, task_mode: "content" };
+          }
           const taskMode = jobPayloadInject.task_mode || "code";
           if (taskMode !== "code" || job.job_type === "artificer") {
             const scopeId = wiScopeId(job.work_item_id);
             jobPayloadInject = injectArtifactScope(jobPayloadInject, scopeId, worker.projectDir);
             job.payload_json = JSON.stringify(jobPayloadInject);
+            updateJobPayload(job.id, job.payload_json);
             worker.emit(job.id, `${C.cyan}[artifacts]${C.reset} WI#${job.work_item_id} job #${job.id}: ${taskMode} mode — output_root=${jobPayloadInject.output_root}`);
             const scopeWarnings = Array.isArray(jobPayloadInject._artifact_scope_warnings)
               ? jobPayloadInject._artifact_scope_warnings

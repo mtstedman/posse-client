@@ -22,6 +22,7 @@ const GIT_READ_ONLY_COMMANDS = new Set([
   "rev-list",
   "rev-parse",
   "show",
+  "show-ref",
   "status",
 ]);
 // Commands whose mutability depends on the subcommand. The empty string is

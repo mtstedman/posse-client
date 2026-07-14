@@ -2,6 +2,20 @@ import { displayRoleForJobType } from "../../providers/functions/roles.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { createRunWrapUpTracker } from "../functions/review-session.js";
 import { BACKGROUND_JOB_TYPES } from "../../../catalog/job.js";
+import { logAgentActivity } from "../../queue/functions/events.js";
+
+function terminalActivityStatus(status) {
+  if (status === "succeeded") return { kind: "result", status: "succeeded" };
+  if (status === "canceled") return { kind: "result", status: "canceled" };
+  if (status === "failed" || status === "dead_letter") return { kind: "error", status: "failed" };
+  return { kind: "phase", status: "waiting" };
+}
+
+function activitySummaryForJob(job) {
+  return String(job?.title || job?.job_type || "Job")
+    .replace(/^(Research|Plan|Ask|Fix|Assess|Dev):\s*/i, "")
+    .slice(0, 180);
+}
 
 export class RunSchedulerLoopCallbacks {
   constructor({
@@ -40,14 +54,27 @@ export class RunSchedulerLoopCallbacks {
   }
 
   onJobStart(job) {
-    const display = this.getDisplay();
-    if (!display) return;
     // Background maintenance (atlas_warm) is not agent work — keep it out of the
     // Workers list and the monitor fleet. It runs on its own scheduler budget and
     // remains visible in the queue job list and the ATLAS readiness bars.
     if (BACKGROUND_JOB_TYPES.has(job.job_type)) return;
     const role = displayRoleForJobType(job.job_type);
-    const titleClean = job.title.replace(/^(Research|Plan|Ask|Fix|Assess|Dev):\s*/i, "").slice(0, 50);
+    const titleClean = activitySummaryForJob(job);
+    logAgentActivity({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      role,
+      actor_id: String(job.id),
+      kind: "phase",
+      status: "running",
+      phase: job.job_type,
+      summary: titleClean,
+      provider: job.provider || null,
+      model: job.model_name || job.model_tier || null,
+    });
+
+    const display = this.getDisplay();
+    if (!display) return;
     display.setWorker(job.id, {
       role,
       activity: titleClean,
@@ -63,11 +90,26 @@ export class RunSchedulerLoopCallbacks {
 
   onJobEnd(job) {
     const display = this.getDisplay();
+    const freshJob = this.getJob(job.id) || job;
     if (display) {
-      const freshJob = this.getJob(job.id);
       display.removeWorker(job.id, freshJob?.status || "done");
     }
-    const freshJob = this.getJob(job.id);
+    if (!BACKGROUND_JOB_TYPES.has(freshJob.job_type)) {
+      const role = displayRoleForJobType(freshJob.job_type);
+      const activity = terminalActivityStatus(freshJob.status);
+      logAgentActivity({
+        work_item_id: freshJob.work_item_id,
+        job_id: freshJob.id,
+        role,
+        actor_id: String(freshJob.id),
+        kind: activity.kind,
+        status: activity.status,
+        phase: freshJob.job_type,
+        summary: activitySummaryForJob(freshJob),
+        provider: freshJob.provider || null,
+        model: freshJob.model_name || freshJob.model_tier || null,
+      });
+    }
     if (freshJob?.status !== "succeeded") return;
     let hasMergeable = false;
     try {

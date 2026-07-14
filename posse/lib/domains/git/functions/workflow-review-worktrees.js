@@ -5,11 +5,15 @@ import fs from "fs";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { listWorkItems } from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
-import { worktreePath as canonicalWorktreePath, findLegacyWorktreeForWi } from "./worktree.js";
-import { gitExec } from "./utils.js";
+import {
+  worktreePath as nativeWorktreePath,
+  findLegacyWorktreeForWi as nativeFindLegacyWorktreeForWi,
+} from "./worktree.js";
 
 export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine }) {
-  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread } = context;
+  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, gitExec } = context;
+  const canonicalWorktreePath = context.worktreePath || nativeWorktreePath;
+  const findLegacyWorktreeForWi = context.findLegacyWorktree || nativeFindLegacyWorktreeForWi;
 
   function auditWorktreeState() {
     const targetBranch = currentTargetBranch();

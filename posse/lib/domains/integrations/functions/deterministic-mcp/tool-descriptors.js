@@ -754,7 +754,11 @@ export function roleUsesDeterministicReadMcp(role) {
     || role === "planner"
     || role === "artificer"
     || role === "assessor"
-    || role === "researcher";
+    || role === "researcher"
+    // Coordination-only agents still receive an MCP gate dependency. Their
+    // role contract is intentionally empty; attachment is not authorization.
+    || role === "preflight"
+    || role === "delegator";
 }
 
 export function roleUsesDeterministicWriteMcp(role) {
@@ -773,6 +777,7 @@ export function getDeterministicMcpToolNames(role, {
   needsImageGeneration = false,
 } = {}) {
   if (!roleUsesDeterministicReadMcp(role)) return [];
+  if (role === "preflight" || role === "delegator") return [];
   const tools = [...DETERMINISTIC_READ_TOOLS];
   if (roleUsesDeterministicWriteMcp(role)) tools.push(...DETERMINISTIC_WRITE_TOOLS);
   if (roleUsesDeterministicImageHelpers(role)) tools.push(...DETERMINISTIC_IMAGE_HELPER_TOOLS);

@@ -18,11 +18,11 @@ function resultToJson(value) {
 }
 
 export class Job {
-  constructor({ row, agent = null, deps } = {}) {
+  constructor({ row, roleHandler = null, deps } = {}) {
     if (!row) throw new Error("Job requires row");
     if (!deps) throw new Error("Job requires deps");
     this.row = row;
-    this.agent = agent;
+    this.roleHandler = roleHandler;
     this.deps = deps;
     return new Proxy(this, {
       get(target, prop, receiver) {
@@ -44,8 +44,8 @@ export class Job {
   get contextText() { return this.row.context_text ?? null; }
 
   getRole() {
-    if (this.agent && typeof this.agent.getRole === "function") {
-      return this.agent.getRole();
+    if (this.roleHandler && typeof this.roleHandler.getRole === "function") {
+      return this.roleHandler.getRole();
     }
     return null;
   }
@@ -63,10 +63,10 @@ export class Job {
   }
 
   async run(attemptCtx = {}) {
-    if (!this.agent || typeof this.agent.run !== "function") {
-      throw new Error(`Job ${this.id} has no agent`);
+    if (!this.roleHandler || typeof this.roleHandler.run !== "function") {
+      throw new Error(`Job ${this.id} has no role handler`);
     }
-    return await this.agent.run(this, attemptCtx);
+    return await this.roleHandler.run(this, attemptCtx);
   }
 
   async setStatus(status, opts = undefined) {

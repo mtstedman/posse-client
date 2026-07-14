@@ -4,6 +4,7 @@
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
+import { gitExec as nativeGitExec, gitExecAsync as nativeGitExecAsync } from "./utils.js";
 
 const GIT_WORKFLOW_WORKER_URL = new URL("./git-workflow-worker.js", import.meta.url);
 const GIT_WORKFLOW_THREAD_MANAGER = new ThreadManager();
@@ -27,6 +28,15 @@ export function createGitWorkflowContext({
   autoMerge = false,
   nonInteractive = false,
   askFn = async () => "",
+  gitExecFn = nativeGitExec,
+  gitExecAsyncFn = nativeGitExecAsync,
+  withWorktreeLockFn = null,
+  worktreePathFn = null,
+  findLegacyWorktreeFn = null,
+  worktreeRootFn = null,
+  deleteBranchPreservingTipFn = null,
+  preserveDirtyWorktreeSnapshotFn = null,
+  allowSnapshottedWorktreeRemoval = false,
   nativeParity = {},
   isIterativeWorkItemActive = () => false,
   shouldAutoApproveIterativeWorkItem = () => false,
@@ -93,6 +103,15 @@ export function createGitWorkflowContext({
     autoMerge,
     nonInteractive,
     askFn,
+    gitExec: gitExecFn,
+    gitExecAsync: gitExecAsyncFn,
+    withWorktreeLock: typeof withWorktreeLockFn === "function" ? withWorktreeLockFn : null,
+    worktreePath: typeof worktreePathFn === "function" ? worktreePathFn : null,
+    findLegacyWorktree: typeof findLegacyWorktreeFn === "function" ? findLegacyWorktreeFn : null,
+    worktreeRoot: typeof worktreeRootFn === "function" ? worktreeRootFn : null,
+    deleteBranchPreservingTip: typeof deleteBranchPreservingTipFn === "function" ? deleteBranchPreservingTipFn : null,
+    preserveDirtyWorktreeSnapshot: typeof preserveDirtyWorktreeSnapshotFn === "function" ? preserveDirtyWorktreeSnapshotFn : null,
+    allowSnapshottedWorktreeRemoval: allowSnapshottedWorktreeRemoval === true,
     nativeParity,
     isIterativeWorkItemActive,
     shouldAutoApproveIterativeWorkItem,

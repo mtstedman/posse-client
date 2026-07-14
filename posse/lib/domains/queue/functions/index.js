@@ -125,6 +125,7 @@ export {
   getEventsByWorkItemSinceId,
   getEventsSinceId,
   getHeadEventId,
+  logAgentActivity,
   logEvent,
 } from "./events.js";
 

@@ -19,6 +19,7 @@ export const ML_NATIVE_PROTOCOL = "posse.ml.native.v1";
 export const ML_NATIVE_ROUTE = "ml:methods";
 export const ML_CAPABILITIES_METHOD = "ml.capabilities";
 export const ML_EMBED_METHOD = "ml.embed";
+export const ML_MODEL_PACKAGE_INSTALL_METHOD = "ml.installModelPackage";
 
 // Folder + manifest keys. These are OUR canonical os/arch tokens — distinct
 // from node's process.platform / process.arch, which the maps below translate.

@@ -58,7 +58,10 @@ import { processVerdict } from "./roles/assessor.js";
 import { PlanSession } from "../../planning/classes/PlanSession.js";
 import { cleanupAgentLoaderAsync, loaderPathForJob } from "../functions/helpers/agent-loader.js";
 import { TrackedProviderClient } from "./TrackedProviderClient.js";
+import { Agent } from "./Agent.js";
 import { RoleRegistry } from "./RoleRegistry.js";
+import { AgentDispatcher } from "../../../shared/permissions/classes/AgentDispatcher.js";
+import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 import { JobLease } from "./JobLease.js";
 import { WorkerExecutionCoordinator } from "./execution/WorkerExecutionCoordinator.js";
 import { PartialWorkCoordinator } from "./execution/PartialWorkCoordinator.js";
@@ -437,6 +440,18 @@ export class Worker {
     this._pendingSessionRecycles = new Map(); // jobId -> leased/fresh provider session result awaiting durable success
     this._pendingSessionRecycleRenewals = new Map(); // jobId -> session lease renewal timer
     this._terminalCleanupByWorkItem = new Map(); // workItemId -> in-flight cleanup promise
+    this.agentDispatcher = opts.agentDispatcher || new AgentDispatcher({
+      gateFactory: async ({ key, role, providerName, ...roleContract }) => {
+        return await McpServerConfig.mintAgentGate(role, {
+          ...roleContract,
+          key,
+          agentId: key,
+          providerName,
+          agentRuntimeCwd: this.projectDir,
+        });
+      },
+      agentFactory: (agentOptions) => new Agent(agentOptions),
+    });
     this.providerClient = opts.providerClient || new TrackedProviderClient({
       worker: this,
       isProviderError: _isProviderError,
@@ -479,10 +494,10 @@ export class Worker {
   }
 
   _wrapJob(job) {
-    const agent = NON_PROVIDER_TYPES.has(job?.job_type)
+    const roleHandler = NON_PROVIDER_TYPES.has(job?.job_type)
       ? null
       : this.roleRegistry.get(job.job_type);
-    return new Job({ row: job, agent, deps: this.jobDeps });
+    return new Job({ row: job, roleHandler, deps: this.jobDeps });
   }
 
   _createJobLease(job, leaseToken, abortController) {
@@ -778,6 +793,10 @@ export class Worker {
     return await this.executionCoordinator.execute(job);
   }
 
+  async disposeAgents(reason = "worker_disposed") {
+    return await this.agentDispatcher?.disposeAll?.({ reason });
+  }
+
   async _handlePartialWorkFailure(args = {}) {
     return await this.partialWorkCoordinator.handle(args);
   }
@@ -787,7 +806,7 @@ export class Worker {
   async _dispatch(job, tier, attemptCount, attemptId, wrappedJob = null) {
     if (!wrappedJob) wrappedJob = this._wrapJob(job);
 
-    if (wrappedJob?.agent) {
+    if (wrappedJob?.roleHandler) {
       return await wrappedJob.run({ tier, attemptId, attemptCount });
     }
 

@@ -70,12 +70,8 @@ async function runModelsPull({ projectDir }) {
     const result = await pullJinaModel({
       repoRoot: projectDir,
       onProgress: (progress) => {
-        if (progress?.status !== "progress" || !progress?.file) return;
-        const pct = progress.loaded && progress.total
-          ? Math.round((progress.loaded / progress.total) * 100)
-          : 0;
         wroteProgress = true;
-        process.stdout.write(`\r  ${C.dim}${progress.file} ${pct}%${C.reset}`);
+        process.stdout.write(`\r\x1b[2K  ${C.dim}${progress?.status || "working"} ${ATLAS_JINA_MODEL.mlModelId}${C.reset}`);
       },
     });
     if (wroteProgress) process.stdout.write("\n");

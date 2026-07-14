@@ -48,6 +48,7 @@ export function buildDeterministicReadMcpServerConfig(role, {
   atlasAvailable = null,
   atlasGateEnabled = true,
   atlasConfig = null,
+  mcpGate = null,
 } = {}) {
   return McpServerConfig.forDeterministicRead(role, {
     cwd,
@@ -71,6 +72,7 @@ export function buildDeterministicReadMcpServerConfig(role, {
     atlasAvailable,
     atlasGateEnabled,
     atlasConfig,
+    mcpGate,
   }).toSpawnArgs();
 }
 
@@ -99,6 +101,7 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
   remoteToolSurfaceOptions = null,
   remoteToolSurface = null,
   remoteMcpOAuthToken = "",
+  mcpGate = null,
 } = {}) {
   const spawnArgs = (await McpServerConfig.forDeterministicReadAsync(role, {
     cwd,
@@ -125,6 +128,7 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
     remoteToolSurfaceOptions,
     remoteToolSurface,
     remoteMcpOAuthToken,
+    mcpGate,
   })).toSpawnArgs();
   // Running MCP-only means Posse is the sole source of context, so isolate the
   // provider CLI's home from its global memory/config. Generic + provider-keyed:

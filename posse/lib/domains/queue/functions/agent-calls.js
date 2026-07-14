@@ -11,7 +11,7 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { normalizeSkillsColumn, now, LEASE_HOLDING_STATUSES_SQL, runImmediateTransaction } from "./common.js";
 import { leaseNowMs } from "./lease-clock.js";
-import { logEvent } from "./events.js";
+import { logAgentActivity, logEvent } from "./events.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { DEADLOCK_TERMINAL_STATUSES } from "../../../catalog/job.js";
 import { appendRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
@@ -65,6 +65,20 @@ export function createAgentCall({
   );
   const row = db.prepare(`SELECT * FROM agent_calls WHERE id = ?`).get(info.lastInsertRowid);
   appendRunTelemetry("agent-calls", { phase: "started", ...row });
+  logAgentActivity({
+    work_item_id: row.work_item_id,
+    job_id: row.job_id,
+    attempt_id: row.attempt_id,
+    role: row.role,
+    actor_id: String(row.id),
+    kind: "model",
+    status: "running",
+    phase: row.activity || "model_call",
+    summary: row.activity || "Model call started",
+    agent_call_id: row.id,
+    provider: row.provider,
+    model: row.model_name || row.model_tier,
+  });
   return row;
 }
 
@@ -131,7 +145,32 @@ export function completeAgentCall(id, {
     id,
   );
   const row = db.prepare(`SELECT * FROM agent_calls WHERE id = ?`).get(id);
-  if (row) appendRunTelemetry("agent-calls", { phase: "completed", ...row });
+  if (row) {
+    appendRunTelemetry("agent-calls", { phase: "completed", ...row });
+    const activityStatus = row.status === "succeeded"
+      ? "succeeded"
+      : row.status === "canceled"
+        ? "canceled"
+        : "failed";
+    logAgentActivity({
+      work_item_id: row.work_item_id,
+      job_id: row.job_id,
+      attempt_id: row.attempt_id,
+      role: row.role,
+      actor_id: String(row.id),
+      kind: activityStatus === "failed" ? "error" : "model",
+      status: activityStatus,
+      phase: row.activity || "model_call",
+      summary: row.activity || `Model call ${activityStatus}`,
+      agent_call_id: row.id,
+      provider: row.provider,
+      model: row.model_name || row.model_tier,
+      input_tokens: row.input_tokens,
+      output_tokens: row.output_tokens,
+      duration_ms: row.duration_ms,
+      cost_usd: row.cost_estimate_usd,
+    });
+  }
 }
 
 /**
@@ -364,6 +403,12 @@ export function getScopeContextHealthMetrics({ trailingDays = 7 } = {}) {
  */
 export function cleanupRunningAgentCalls() {
   const db = getDb();
+  const running = db.prepare(`
+    SELECT id, work_item_id, job_id, attempt_id, role, activity,
+           provider, model_name, model_tier
+    FROM agent_calls
+    WHERE status = 'running'
+  `).all();
   const result = db.prepare(`
     UPDATE agent_calls
     SET status = 'timeout', finished_at = COALESCE(finished_at, ?),
@@ -378,6 +423,22 @@ export function cleanupRunningAgentCalls() {
       finished_at: now(),
       error_text: "Process terminated before completion",
     });
+    for (const call of running) {
+      logAgentActivity({
+        work_item_id: call.work_item_id,
+        job_id: call.job_id,
+        attempt_id: call.attempt_id,
+        role: call.role,
+        actor_id: String(call.id),
+        kind: "error",
+        status: "failed",
+        phase: call.activity || "model_call",
+        summary: call.activity || "Model call interrupted",
+        agent_call_id: call.id,
+        provider: call.provider,
+        model: call.model_name || call.model_tier,
+      });
+    }
   }
   return result;
 }
@@ -398,7 +459,8 @@ export function reconcileOrphanedAgentCalls() {
   const ts = new Date(leaseNowMs()).toISOString();
   const execute = () => {
     const stuck = db.prepare(`
-      SELECT ac.id, ac.job_id
+      SELECT ac.id, ac.work_item_id, ac.job_id, ac.attempt_id, ac.role,
+             ac.activity, ac.provider, ac.model_name, ac.model_tier
       FROM agent_calls ac
       LEFT JOIN jobs j ON j.id = ac.job_id
       WHERE ac.status = 'running'
@@ -422,15 +484,30 @@ export function reconcileOrphanedAgentCalls() {
     `);
 
     let reconciled = 0;
-    for (const { id, job_id } of stuck) {
-      const result = fix.run(ts, id);
+    for (const call of stuck) {
+      const result = fix.run(ts, call.id);
       if (result.changes === 0) continue;
       reconciled += 1;
       logEvent({
-        job_id,
+        work_item_id: call.work_item_id,
+        job_id: call.job_id,
         event_type: EVENT_TYPES.AGENT_CALL_ORPHAN_RECONCILED,
         actor_type: EVENT_ACTORS.SCHEDULER,
-        message: `Orphaned running agent call #${id} marked as timeout`,
+        message: `Orphaned running agent call #${call.id} marked as timeout`,
+      });
+      logAgentActivity({
+        work_item_id: call.work_item_id,
+        job_id: call.job_id,
+        attempt_id: call.attempt_id,
+        role: call.role,
+        actor_id: String(call.id),
+        kind: "error",
+        status: "failed",
+        phase: call.activity || "model_call",
+        summary: call.activity || "Model call interrupted",
+        agent_call_id: call.id,
+        provider: call.provider,
+        model: call.model_name || call.model_tier,
       });
     }
     return reconciled;

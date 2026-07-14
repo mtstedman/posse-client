@@ -34,11 +34,8 @@ import { appendBoundedText } from "../../format/functions/bounded-text.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { Daemon, ProcessTransport, daemonSupervisor } from "./daemon/index.js";
 import { HeartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
+import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
 import { PulseTokenManager } from "../../native/classes/PulseTokenManager.js";
-import {
-  CapabilityHandshakeManager,
-  capabilityRequest,
-} from "../../permissions/classes/CapabilityHandshakeManager.js";
 import {
   defaultNativeBinRoot,
   installedNativeArtifactVersionsSync,
@@ -60,6 +57,7 @@ const PULSE_REFRESH_RETRY_MS = 5_000;
 // refreshAfter that is already in the past).
 const PULSE_REFRESH_MIN_DELAY_MS = 250;
 const WORKER_PULL_BOOTSTRAP_WAIT_MS = 500;
+const WORKER_PULL_GRANT_WAIT_MS = 30_000;
 
 // Manager-owned request fields at the final stdin boundary. Whatever a caller
 // supplies for these is deleted before the manager attaches its own pulse, so
@@ -161,8 +159,15 @@ export class NativeBinary {
      * @type {Map<string, { envelope: Record<string, unknown>, timer: NodeJS.Timeout | null, expired: boolean }>}
      */
     this._workerAuthState = new Map();
+    /** @type {Map<string, Array<{ finish: (value: boolean) => void, claim: () => void }>>} */
     this._workerAuthWaiters = new Map();
+    /** @type {Map<string, Promise<readonly string[]>>} */
+    this._workerAuthHandoffs = new Map();
+    /** @type {Map<string, Promise<boolean>>} */
+    this._workerAuthGates = new Map();
     this._workerPullManaged = false;
+    this._nativeAuthHandshake = null;
+    this._nativeAuthHandshakePulseManager = null;
     this.keyGated = nativeBinaryIsKeyGated(name);
     this.workerCapable = nativeBinaryIsWorkerCapable(name);
     this.exactVersion = exactVersion === undefined ? nativeBinaryExactVersion(name) : exactVersion;
@@ -353,48 +358,27 @@ export class NativeBinary {
         .filter(Boolean) || [],
     )];
     if (requested.length === 0) return;
-    const handshakes = new CapabilityHandshakeManager();
-    handshakes.register("native.pulse", async (request) => {
-      const entries = await Promise.all(request.scopes.map(async (route) => [
-        route,
-        await this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route)),
-      ]));
-      const pulses = Object.fromEntries(entries);
-      const expiresAt = Math.min(...entries.map(([, pulse]) => Number(pulse?.expiresAt) || 0));
-      const root = await this.#pulseManager().getHeartbeatGrant?.();
-      if (!root) throw new Error("parent heartbeat grant is unavailable");
-      const grantedRoutes = entries
-        .filter(([route, pulse]) => isValidPulseEnvelope(pulse) && String(pulse?.route || "") === route)
-        .map(([route]) => route);
-      return {
-        // A child broker may only know the route grants its own parent handed
-        // it. Treat the successfully returned signed envelopes as that parent
-        // authority instead of assuming this binary's catalog routes.
-        parentScopes: root.routes,
-        scopes: grantedRoutes,
-        parentExpiresAt: root.expiresAt,
-        expiresAt,
-        permissions: { routes: grantedRoutes },
-        tokens: { pulses },
-        pins: root.pins || {},
-        keys: root.keys || {},
-      };
-    });
+    let resolveHandoff = /** @type {(routes: readonly string[]) => void} */ (() => {});
+    const handoff = new Promise((resolve) => { resolveHandoff = resolve; });
+    for (const route of requested) this._workerAuthHandoffs.set(route, handoff);
+    this._workerPullManaged = true;
+    for (const route of requested) this.#claimWorkerAuthWaiters(route);
+    const deliveredRoutes = [];
     try {
-      const grant = await handshakes.issue(capabilityRequest({
+      const grant = await this.#nativeAuthHandshake().issue({
+        protocol: message?.protocol,
         requestId: String(message?.requestId || `native-${this.name}-${Date.now()}`),
         capability: "native.pulse",
         scopes: requested,
-        reason: String(message?.reason || "worker-pull"),
-      }));
+      });
       const pulses = grant.artifacts.tokens.pulses || {};
-      this._workerPullManaged = true;
       for (const route of grant.scopes) {
         const pulse = pulses[route];
         if (!isValidPulseEnvelope(pulse)) continue;
         if (!daemon.sendControl(this.#refreshControlFrame(pulse))) continue;
         this.#noteWorkerPulse(route, pulse);
         this.#resolveWorkerAuthWaiters(route, true);
+        deliveredRoutes.push(route);
       }
     } catch (error) {
       for (const route of requested) this.#resolveWorkerAuthWaiters(route, false);
@@ -406,36 +390,82 @@ export class NativeBinary {
       });
       // The worker keeps its previous live pulse and asks again. Protected work
       // remains fail-closed if no valid grant can be handed down.
+    } finally {
+      resolveHandoff(Object.freeze([...deliveredRoutes]));
+      for (const route of requested) {
+        if (this._workerAuthHandoffs.get(route) === handoff) {
+          this._workerAuthHandoffs.delete(route);
+        }
+      }
     }
   }
 
   #resolveWorkerAuthWaiters(route, value) {
     const waiters = this._workerAuthWaiters.get(route) || [];
     this._workerAuthWaiters.delete(route);
-    for (const resolve of waiters) resolve(value);
+    for (const waiter of waiters) waiter.finish(value);
+  }
+
+  #claimWorkerAuthWaiters(route) {
+    const waiters = this._workerAuthWaiters.get(route) || [];
+    for (const waiter of waiters) waiter.claim();
+  }
+
+  async #awaitWorkerAuthHandoff(route) {
+    const handoff = this._workerAuthHandoffs.get(route);
+    if (!handoff) return isValidPulseEnvelope(this._workerAuthState.get(route)?.envelope);
+    let handoffTimer = null;
+    const delivered = await Promise.race([
+      handoff.then((routes) => routes.includes(route)),
+      new Promise((resolve) => {
+        handoffTimer = setTimeout(() => resolve(false), WORKER_PULL_GRANT_WAIT_MS);
+      }),
+    ]);
+    if (handoffTimer) clearTimeout(handoffTimer);
+    return delivered || isValidPulseEnvelope(this._workerAuthState.get(route)?.envelope);
   }
 
   async #ensureWorkerRouteAuth(route, fallbackPulse = null) {
     const daemon = this.#daemon();
     const live = this._workerAuthState.get(route)?.envelope;
     if (daemon.isHostAlive() && isValidPulseEnvelope(live)) return true;
+    const existing = this._workerAuthGates.get(route);
+    if (existing) return existing;
+    const gate = this.#establishWorkerRouteAuth(route, fallbackPulse);
+    this._workerAuthGates.set(route, gate);
+    try {
+      return await gate;
+    } finally {
+      if (this._workerAuthGates.get(route) === gate) this._workerAuthGates.delete(route);
+    }
+  }
+
+  async #establishWorkerRouteAuth(route, fallbackPulse = null) {
+    const daemon = this.#daemon();
     let timer = null;
     const pulled = new Promise((resolve) => {
-      const finish = (value) => {
-        if (timer) clearTimeout(timer);
-        resolve(value);
+      let settled = false;
+      const waiter = {
+        finish: (value) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          const current = this._workerAuthWaiters.get(route) || [];
+          const remaining = current.filter((candidate) => candidate !== waiter);
+          if (remaining.length > 0) this._workerAuthWaiters.set(route, remaining);
+          else this._workerAuthWaiters.delete(route);
+          resolve(value);
+        },
+        claim: () => {
+          if (settled) return;
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => waiter.finish(false), WORKER_PULL_GRANT_WAIT_MS);
+        },
       };
       const waiters = this._workerAuthWaiters.get(route) || [];
-      waiters.push(finish);
+      waiters.push(waiter);
       this._workerAuthWaiters.set(route, waiters);
-      timer = setTimeout(() => {
-        const current = this._workerAuthWaiters.get(route) || [];
-        const remaining = current.filter((waiter) => waiter !== finish);
-        if (remaining.length > 0) this._workerAuthWaiters.set(route, remaining);
-        else this._workerAuthWaiters.delete(route);
-        resolve(false);
-      }, WORKER_PULL_BOOTSTRAP_WAIT_MS);
-      timer.unref?.();
+      timer = setTimeout(() => waiter.finish(false), WORKER_PULL_BOOTSTRAP_WAIT_MS);
     });
     if (!daemon.ensureStarted()) {
       if (timer) clearTimeout(timer);
@@ -445,17 +475,21 @@ export class NativeBinary {
     const granted = await pulled;
     if (timer) clearTimeout(timer);
     if (granted) return true;
+    if (this._workerPullManaged) return this.#awaitWorkerAuthHandoff(route);
     // Rollout bridge for an already-released worker that predates pull: seed it
     // once over the same private pipe. New workers request this themselves.
-    this._workerPullManaged = false;
-    if (!isValidPulseEnvelope(fallbackPulse)) {
-      try {
+    try {
+      if (!isValidPulseEnvelope(fallbackPulse)) {
         fallbackPulse = await this.#pulseManager().getPulseEnvelope(
           this.#versionedPulseOptions(route),
         );
-      } catch {
+      }
+      if (this._workerPullManaged) return this.#awaitWorkerAuthHandoff(route);
+      if (!isValidPulseEnvelope(fallbackPulse) || String(fallbackPulse?.route || "") !== route) {
         fallbackPulse = null;
       }
+    } catch {
+      fallbackPulse = null;
     }
     if (!isValidPulseEnvelope(fallbackPulse)) return false;
     if (!daemon.sendControl(this.#refreshControlFrame(fallbackPulse))) return false;
@@ -985,6 +1019,8 @@ export class NativeBinary {
   /** Stop this handle's daemon and all scheduled pulse refreshes. */
   async dispose() {
     this.#clearWorkerAuthState();
+    this._workerAuthHandoffs.clear();
+    this._workerAuthGates.clear();
     this._runtimePulseEnvelopes.clear();
     const daemon = this._daemon;
     this._daemon = null;
@@ -1104,6 +1140,18 @@ export class NativeBinary {
       this._pulseManagerAuth = authManager;
     }
     return this._pulseManager;
+  }
+
+  #nativeAuthHandshake() {
+    const pulseManager = this.#pulseManager();
+    if (!this._nativeAuthHandshake || this._nativeAuthHandshakePulseManager !== pulseManager) {
+      this._nativeAuthHandshake = new NativeAuthHandshake({
+        pulseManager,
+        pulseOptionsForRoute: (route) => this.#versionedPulseOptions(route),
+      });
+      this._nativeAuthHandshakePulseManager = pulseManager;
+    }
+    return this._nativeAuthHandshake;
   }
 
   /**

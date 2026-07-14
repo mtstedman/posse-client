@@ -4,17 +4,26 @@
 // explicit `atlas-v2 models pull` command is the sole network boundary.
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { ATLAS_JINA_MODEL } from "../../../../../catalog/atlas.js";
-import { atlasDir } from "../runtime-paths.js";
-
-const require = createRequire(import.meta.url);
-const TRANSFORMERS_PACKAGE = "@huggingface/transformers";
+import { ML_MODEL_PACKAGE_INSTALL_METHOD } from "../../../../../catalog/binary.js";
+import { downloadLocalModelPackage, prepareLocalModelArtifactClient } from "../../../../remote/functions/local-model-artifacts.js";
+import { runMlNativeMethodAsync } from "../../../../../shared/native/functions/ml-invoke.js";
+import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 
 /** @param {string} repoRoot */
-export function jinaModelCacheDir(repoRoot) {
-  return path.join(atlasDir(repoRoot), "models", "onnx", ATLAS_JINA_MODEL.modelId);
+export function jinaModelCacheDir(_repoRoot, homeDir = os.homedir()) {
+  return path.join(
+    homeDir,
+    ".posse",
+    "artifacts",
+    "models",
+    ATLAS_JINA_MODEL.artifactTask,
+    ATLAS_JINA_MODEL.artifactPublisher,
+    ATLAS_JINA_MODEL.artifactRelease,
+    ATLAS_JINA_MODEL.mlModelDirectory,
+  );
 }
 
 /**
@@ -91,26 +100,58 @@ export function inspectJinaModel(repoRoot, { modelCacheDir: explicitModelCacheDi
 }
 
 /**
- * @param {{ repoRoot: string, modelCacheDir?: string, onProgress?: (progress: any) => void }} args
+ * @param {{
+ *   repoRoot: string,
+ *   modelCacheDir?: string,
+ *   onProgress?: (progress: any) => void,
+ *   manager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
+ *   prepareClient?: typeof prepareLocalModelArtifactClient,
+ *   downloadPackage?: typeof downloadLocalModelPackage,
+ *   installPackage?: typeof runMlNativeMethodAsync,
+ * }} args
  */
-export async function pullJinaModel({ repoRoot, modelCacheDir: explicitModelCacheDir, onProgress }) {
+export async function pullJinaModel({
+  repoRoot,
+  modelCacheDir: explicitModelCacheDir,
+  onProgress,
+  manager = nativeBinaries,
+  prepareClient = prepareLocalModelArtifactClient,
+  downloadPackage = downloadLocalModelPackage,
+  installPackage = runMlNativeMethodAsync,
+}) {
   const modelCacheDir = explicitModelCacheDir
     ? path.resolve(explicitModelCacheDir)
     : jinaModelCacheDir(repoRoot);
-  fs.mkdirSync(modelCacheDir, { recursive: true });
-  const lib = await loadTransformersPackage();
-  const pipeline = await lib.pipeline("feature-extraction", ATLAS_JINA_MODEL.modelName, {
-    cache_dir: modelCacheDir,
-    local_files_only: false,
-    revision: "main",
-    dtype: ATLAS_JINA_MODEL.dtype,
-    progress_callback: typeof onProgress === "function" ? onProgress : undefined,
-  });
-  try {
-    return inspectJinaModel(repoRoot, { modelCacheDir });
-  } finally {
-    if (typeof pipeline?.dispose === "function") await pipeline.dispose();
+  if (path.basename(modelCacheDir).toLowerCase() !== ATLAS_JINA_MODEL.mlModelDirectory.toLowerCase()) {
+    throw new Error(`Jina package destination must end in ${ATLAS_JINA_MODEL.mlModelDirectory}`);
   }
+  const modelRoot = path.dirname(modelCacheDir);
+  onProgress?.({ status: "resolving", modelId: ATLAS_JINA_MODEL.mlModelId });
+  const client = await prepareClient({ manager });
+  onProgress?.({ status: "downloading", modelId: ATLAS_JINA_MODEL.mlModelId });
+  const downloaded = await downloadPackage(client, ATLAS_JINA_MODEL.mlModelId);
+  onProgress?.({
+    status: "installing",
+    modelId: ATLAS_JINA_MODEL.mlModelId,
+    bytes: downloaded.bytes,
+  });
+  const installed = await installPackage(ML_MODEL_PACKAGE_INSTALL_METHOD, {
+    modelId: downloaded.modelId,
+    version: downloaded.version,
+    archiveFormat: downloaded.archiveFormat,
+    archiveRoot: downloaded.archiveRoot,
+    packagePath: downloaded.filePath,
+    expectedBytes: downloaded.bytes,
+    expectedSha256: downloaded.sha256,
+  }, {
+    modelRoot,
+    manager,
+    timeoutMs: 0,
+    idempotent: false,
+  });
+  const inspection = inspectJinaModel(repoRoot, { modelCacheDir });
+  onProgress?.({ status: "ready", modelId: ATLAS_JINA_MODEL.mlModelId });
+  return { ...inspection, downloaded, installed };
 }
 
 /** @param {string} dir @param {number} depth */
@@ -151,23 +192,4 @@ function samePath(left, right) {
   return process.platform === "win32"
     ? left.toLowerCase() === right.toLowerCase()
     : left === right;
-}
-
-async function loadTransformersPackage() {
-  try {
-    const lib = require(TRANSFORMERS_PACKAGE);
-    if (typeof lib?.pipeline === "function") return lib;
-  } catch {
-    // ESM-only installations are handled below.
-  }
-  try {
-    const imported = await import(TRANSFORMERS_PACKAGE);
-    const lib = imported?.default ?? imported;
-    if (typeof lib?.pipeline === "function") return lib;
-  } catch (error) {
-    const missing = new Error(`${TRANSFORMERS_PACKAGE} is required to pull the Jina model`);
-    /** @type {any} */ (missing).cause = error;
-    throw missing;
-  }
-  throw new Error(`${TRANSFORMERS_PACKAGE} does not export pipeline()`);
 }

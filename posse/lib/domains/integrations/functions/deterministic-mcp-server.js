@@ -108,6 +108,7 @@ import {
   nonNegativeIntegerOrNull,
 } from "./deterministic-mcp/boot-config-parse.js";
 import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
+import { resolveAgentFileAuthority } from "./deterministic-mcp/agent-file-authority.js";
 import {
   jsonRpcSuccess,
   jsonRpcError,
@@ -312,6 +313,7 @@ let mcpMessageSessionScoped = false;
 // unbounded re-delivery and zero delivery audit on MCP).
 let mcpAttemptId = Number(bootConfig.attemptId) || null;
 let mcpAgentCallId = Number(bootConfig.agentCallId) || null;
+let agentAuthorityError = null;
 let mcpPromptChars = Math.max(0, Number(bootConfig.promptChars) || 0);
 let atlasAvailable = bootConfig.atlasAvailable === true;
 let atlasGateEnabled = bootConfig.atlasGateEnabled === true;
@@ -2091,7 +2093,32 @@ function selectResearchStateForCurrentBoot() {
 }
 
 function applyRuntimeBootConfig(nextConfig = {}) {
-  const parsedConfig = bootConfigFromOAuthToken(nextConfig && typeof nextConfig === "object" ? nextConfig : {});
+  let parsedConfig = bootConfigFromOAuthToken(nextConfig && typeof nextConfig === "object" ? nextConfig : {});
+  const parsedDbPath = String(parsedConfig.dbPath || "").trim();
+  if (parsedDbPath) setRuntimePathOverrides({ dbPath: parsedDbPath });
+  agentAuthorityError = null;
+  if (parsedConfig.scopeBindingMode === "dispatcher") {
+    try {
+      const authority = resolveAgentFileAuthority(parsedConfig);
+      parsedConfig = { ...parsedConfig, ...authority.scope };
+    } catch (error) {
+      agentAuthorityError = error;
+      parsedConfig = {
+        ...parsedConfig,
+        scopedFiles: [],
+        createFiles: [],
+        deleteFiles: [],
+        createRoots: [],
+        readRoots: [],
+        allowWrite: false,
+        allowShell: false,
+        allowTests: false,
+        projectDbWrite: false,
+        projectDbCapability: "none",
+        allowImageGeneration: false,
+      };
+    }
+  }
   const nextSessionKey = runtimeSessionKey(parsedConfig);
   const sessionChanged = nextSessionKey !== activeRuntimeSessionKey;
   const previousMeterContext = {
@@ -2103,7 +2130,7 @@ function applyRuntimeBootConfig(nextConfig = {}) {
   bootConfig = parsedConfig;
   ownerHotGateway = ownerHotProcess || bootConfig.ownerHotGateway === true;
   const ownerHotUnscoped = ownerHotGateway && !mcpMessageSessionScoped;
-  scopeParseState.invalid = bootConfig?.mcpOAuth?.verified === false;
+  scopeParseState.invalid = bootConfig?.mcpOAuth?.verified === false || !!agentAuthorityError;
   workspaceCwd = String(bootConfig.cwd || "").trim() || process.cwd();
   allowWrite = bootConfig.allowWrite === true || ownerHotUnscoped;
   projectDbWrite = bootConfig.projectDbWrite === true;
@@ -2438,6 +2465,12 @@ async function handleRequest(msg) {
   if (method === "notifications/initialized") return;
 
   if (method === "tools/list") {
+    if (agentAuthorityError) {
+      sendMessage(jsonRpcError(id, -32041, "Agent file authority is unavailable", {
+        code: agentAuthorityError?.code || "POSSE_AGENT_AUTHORITY_INVALID",
+      }));
+      return;
+    }
     maybeFailOpenLockedGate("limbo_timeout_tools_list");
     let nativeAllowedToolNames;
     let atlasAllowedActions;
@@ -2487,6 +2520,12 @@ async function handleRequest(msg) {
   }
 
   if (method === "tools/call") {
+    if (agentAuthorityError) {
+      sendMessage(jsonRpcError(id, -32041, "Agent file authority is unavailable", {
+        code: agentAuthorityError?.code || "POSSE_AGENT_AUTHORITY_INVALID",
+      }));
+      return;
+    }
     maybeFailOpenLockedGate("limbo_timeout_tools_call");
     const requestedToolName = String(params?.name || "");
     const normalizedRequestToolName = _normalizeGatewayToolRequestName(requestedToolName);

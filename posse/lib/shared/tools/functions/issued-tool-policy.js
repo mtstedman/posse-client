@@ -442,6 +442,56 @@ export function narrowBootConfigToSignedClaims(signedBootConfig = {}, callerBoot
   return result;
 }
 
+/**
+ * Bind a trusted Agent -> Job attachment to an immutable signed role contract.
+ * File authority is deliberately absent: tools resolve it from the persisted
+ * Agent call -> Job -> Work Item chain at execution time.
+ */
+export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attachmentBootConfig = {}) {
+  const signed = plainObject(signedBootConfig) || {};
+  const attachment = plainObject(attachmentBootConfig) || {};
+  const signedDb = normalizeProjectDbCapability(
+    signed.projectDbCapability || (signed.projectDbWrite === true ? "write" : "none"),
+  );
+  const requestedDb = normalizeProjectDbCapability(
+    attachment.projectDbCapability || (attachment.projectDbWrite === true ? "write" : "none"),
+  );
+  const projectDbCapability = intersectProjectDbCapabilities(signedDb, requestedDb);
+  return {
+    ...signed,
+    agentId: signed.agentId || "",
+    scopeBindingMode: "dispatcher",
+    cwd: String(attachment.cwd || ""),
+    jobId: attachment.jobId ?? null,
+    workItemId: attachment.workItemId ?? null,
+    attemptId: attachment.attemptId ?? null,
+    agentCallId: attachment.agentCallId ?? null,
+    promptChars: Math.max(0, Number(attachment.promptChars) || 0),
+    scopedFiles: [],
+    createFiles: [],
+    deleteFiles: [],
+    createRoots: [],
+    readRoots: [],
+    disableSystemTools: signed.disableSystemTools === true || attachment.disableSystemTools === true,
+    allowWrite: signed.allowWrite === true && attachment.allowWrite === true,
+    allowShell: signed.allowShell === true && attachment.allowShell !== false,
+    allowTests: signed.allowTests === true && attachment.allowTests !== false,
+    projectDbCapability,
+    projectDbWrite: signed.projectDbWrite === true
+      && attachment.projectDbWrite === true
+      && projectDbCapability === "write",
+    allowImageHelpers: signed.allowImageHelpers === true && attachment.allowImageHelpers !== false,
+    allowImageGeneration: signed.allowImageGeneration === true && attachment.allowImageGeneration === true,
+    atlasAvailable: signed.atlasAvailable === true && attachment.atlasAvailable !== false,
+    atlasGateEnabled: signed.atlasGateEnabled === true && attachment.atlasGateEnabled !== false,
+    atlasPrefetchStatus: String(attachment.atlasPrefetchStatus || ""),
+    atlas: { ...(plainObject(attachment.atlas) || {}) },
+    // The OAuth bearer is the immutable role/tool contract. A Job can never
+    // replace or widen this allowlist.
+    toolAllowlist: normalizeSuiteToolAllowlist(signed.toolAllowlist),
+  };
+}
+
 function packetTaskMode(packet = {}, opts = {}) {
   return String(
     opts.taskMode

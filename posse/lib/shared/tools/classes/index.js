@@ -1,6 +1,7 @@
 export * from "./BinaryManager.js";
 export * from "./McpServer.js";
 export * from "./McpServerConfig.js";
+export * from "./McpGate.js";
 export * from "./NativeBinary.js";
 export * from "./PersistentMcpOwner.js";
 export * from "./ToolCatalog.js";

@@ -23,9 +23,10 @@ import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
 import { recordToolUseObservations } from "../../../domains/observability/functions/observations.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
-import { CapabilityHandshakeManager } from "../../permissions/classes/CapabilityHandshakeManager.js";
+import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
 import { appendHashRefIfMajor, fetchHashRefTool } from "../functions/hash-adder.js";
 import {
+  bindAgentAttachmentToSignedContract,
   isInternalAtlasAction,
   narrowBootConfigToSignedClaims,
 } from "../functions/issued-tool-policy.js";
@@ -488,6 +489,7 @@ class PersistentMcpSession {
     claims,
     bootConfig,
     serverSpec,
+    agentOwned = false,
     spawnImpl = spawn,
   } = {}) {
     this.id = id;
@@ -495,6 +497,7 @@ class PersistentMcpSession {
     this.claims = claims || {};
     this.bootConfig = bootConfig || {};
     this.serverSpec = serverSpec || null;
+    this.agentOwned = agentOwned === true;
     this._spawn = spawnImpl;
     this._proc = null;
     this._stdoutBuffer = Buffer.alloc(0);
@@ -529,7 +532,7 @@ class PersistentMcpSession {
     };
   }
 
-  update({ token, claims, bootConfig, serverSpec } = {}) {
+  update({ token, claims, bootConfig, serverSpec, agentOwned = undefined } = {}) {
     if (token) this.token = token;
     if (claims) {
       this.claims = claims;
@@ -539,6 +542,9 @@ class PersistentMcpSession {
     }
     if (bootConfig) this.bootConfig = bootConfig;
     if (serverSpec) this.serverSpec = serverSpec;
+    if (agentOwned !== undefined && (agentOwned === true) !== this.agentOwned) {
+      throw new Error("MCP session ownership cannot change after registration");
+    }
     this.updatedAt = Date.now();
     this.attachProof = this._newAttachProof();
     this.touch();
@@ -595,6 +601,10 @@ class PersistentMcpSession {
   }
 
   isExpired(now = Date.now()) {
+    // Agent-owned sessions have an authoritative in-process lifecycle. The
+    // signed bearer is immutable evidence of the construction-time contract;
+    // dispatcher/Agent disposal, not token age or idle time, ends the gate.
+    if (this.agentOwned) return false;
     const idleMs = now - (this.lastSeenAt || this.registeredAt || now);
     if (this.expiresAt && now > this.expiresAt + SESSION_TOKEN_EXPIRY_GRACE_MS) {
       return idleMs > SESSION_TOKEN_EXPIRY_GRACE_MS;
@@ -825,9 +835,8 @@ export class PersistentMcpOwner {
     this.bootId = crypto.randomUUID();
     this.pipePath = pipePath || defaultPipePath(this.bootId);
     this.token = token;
-    // Separate from the agent-facing owner token. Only the trusted hot gateway
-    // receives this capability, over its private stdin, so a provider shim can
-    // never trade its MCP transport token for the orchestrator's full pulse.
+    // Separate from the agent-facing MCP token. The trusted hot gateway uses
+    // this private capability to authenticate its backend daemon session.
     this.nativeAuthToken = randomToken();
     this._spawn = spawnImpl;
     this._server = null;
@@ -884,7 +893,7 @@ export class PersistentMcpOwner {
     return this.endpoint();
   }
 
-  registerSession({ token, bootConfig = {}, serverSpec = null, prewarm = true } = {}) {
+  registerSession({ token, bootConfig = {}, serverSpec = null, prewarm = true, agentOwned = false } = {}) {
     this.pruneExpiredSessions({ reason: "register_prune" });
     const claims = verifyMcpOAuthToken(token);
     const verified = true;
@@ -892,11 +901,12 @@ export class PersistentMcpOwner {
     if (!claims.__source) claims.__source = "local";
     const id = String(claims.jti || claims.sub || "");
     if (!id) throw new Error("MCP OAuth token is missing a session id");
+    const signedBootConfig = bootConfigFromMcpOAuthClaims(claims);
+    const resolvedBootConfig = agentOwned === true
+      ? bindAgentAttachmentToSignedContract(signedBootConfig, bootConfig)
+      : narrowBootConfigToSignedClaims(signedBootConfig, bootConfig);
     const sessionBootConfig = {
-      ...narrowBootConfigToSignedClaims(
-        bootConfigFromMcpOAuthClaims(claims),
-        bootConfig,
-      ),
+      ...resolvedBootConfig,
       mcpOAuth: {
         verified: true,
         tokenId: id,
@@ -918,15 +928,82 @@ export class PersistentMcpOwner {
         claims,
         bootConfig: sessionBootConfig,
         serverSpec: null,
+        agentOwned,
         spawnImpl: this._spawn,
       });
       this._sessions.set(id, session);
     } else {
-      session.update({ token, claims, bootConfig: sessionBootConfig, serverSpec: null });
+      session.update({ token, claims, bootConfig: sessionBootConfig, serverSpec: null, agentOwned });
     }
     this._ensureGatewaySession({ serverSpec, prewarm });
     this._sessionIdsByTokenHash.set(tokenHash(token), id);
     return { sessionId: id, ...this.endpoint() };
+  }
+
+  attachAgentSession({
+    sessionId,
+    token,
+    expectedBootId = null,
+    bootConfig = {},
+    serverSpec = null,
+  } = {}) {
+    if (expectedBootId && expectedBootId !== this.bootId) {
+      throw new Error("MCP owner boot changed before agent scope binding");
+    }
+    const id = String(sessionId || "");
+    const session = id ? this._sessions.get(id) : null;
+    if (!session) throw new Error("MCP agent session is not registered");
+    if (!session.agentOwned) throw new Error("MCP session is not owned by an agent");
+    if (!token || !tokenEqual(session.token, token)) throw new Error("MCP agent session token mismatch");
+    const signedBootConfig = bootConfigFromMcpOAuthClaims(session.claims);
+    const boundBootConfig = {
+      ...bindAgentAttachmentToSignedContract(signedBootConfig, bootConfig),
+      mcpOAuth: {
+        verified: true,
+        tokenId: session.id,
+        expiresAt: session.claims?.exp || null,
+        source: session.claims?.__source || "local",
+      },
+    };
+    if (!hasSuiteToolAllowlist(boundBootConfig)) {
+      throw new Error("MCP agent contract is missing suite-scoped toolAllowlist");
+    }
+    session.update({ bootConfig: boundBootConfig, serverSpec });
+    if (serverSpec?.command) this._ensureGatewaySession({ serverSpec, prewarm: true });
+    return {
+      bound: true,
+      sessionId: id,
+      jobId: boundBootConfig.jobId ?? null,
+      workItemId: boundBootConfig.workItemId ?? null,
+    };
+  }
+
+  detachAgentSession({
+    sessionId,
+    token,
+    expectedBootId = null,
+    reason = "job_release",
+  } = {}) {
+    const result = this.attachAgentSession({
+      sessionId,
+      token,
+      expectedBootId,
+      bootConfig: {
+        cwd: "",
+        jobId: null,
+        workItemId: null,
+        attemptId: null,
+        agentCallId: null,
+        allowWrite: false,
+        allowShell: false,
+        allowTests: false,
+        projectDbCapability: "none",
+        projectDbWrite: false,
+        allowImageGeneration: false,
+        atlasAvailable: false,
+      },
+    });
+    return { cleared: result.bound === true, sessionId: result.sessionId, reason };
   }
 
   _logAttachProof(session, kind, fields = {}) {
@@ -1090,6 +1167,9 @@ export class PersistentMcpOwner {
       } : null,
       sessions: [...this._sessions.values()].map((session) => ({
         id: session.id,
+        agentOwned: session.agentOwned,
+        agentId: session.bootConfig?.agentId || null,
+        jobId: session.bootConfig?.jobId ?? null,
         startedAt: this._gatewaySession?.startedAt || null,
         running: !!this._gatewaySession?._proc && this._gatewaySession._proc.exitCode == null && !this._gatewaySession._proc.killed,
         lastExit: session.lastExit,
@@ -1111,9 +1191,10 @@ export class PersistentMcpOwner {
     const server = this._server;
     this._server = null;
     if (server) {
-      await new Promise((resolve) => {
-        try { server.close(() => resolve()); } catch { resolve(); }
-      });
+      try { server.close(); } catch { /* best effort */ }
+      try { server.closeIdleConnections?.(); } catch { /* best effort */ }
+      try { server.closeAllConnections?.(); } catch { /* best effort */ }
+      server.unref?.();
     }
     if (process.platform !== "win32") {
       try { fs.rmSync(this.pipePath, { force: true }); } catch { /* best effort */ }
@@ -1137,33 +1218,12 @@ export class PersistentMcpOwner {
       const body = await readJsonBody(req);
       const { pulseTokenManager } = await import("../../native/classes/PulseTokenManager.js");
       try {
-        const handshakes = new CapabilityHandshakeManager();
-        handshakes.register("native.pulse", async (request) => {
-          const root = await pulseTokenManager.getHeartbeatGrant();
-          if (!root) throw new Error("heartbeat unavailable");
-          const entries = await Promise.all(request.scopes.map(async (route) => [
-            route,
-            await pulseTokenManager.getPulseEnvelope({ requiredRoute: route }),
-          ]));
-          return {
-            parentScopes: root.routes,
-            scopes: request.scopes,
-            parentExpiresAt: root.expiresAt,
-            expiresAt: root.expiresAt,
-            permissions: { routes: request.scopes },
-            tokens: { pulses: Object.fromEntries(entries) },
-            pins: root.pins,
-            keys: root.keys,
-          };
-        });
+        const handshakes = new NativeAuthHandshake({ pulseManager: pulseTokenManager });
         const grant = await handshakes.issue(body);
         sendJson(res, 200, { ok: true, grant });
       } catch (error) {
         const code = String(error?.code || "");
-        if (code === "POSSE_CAPABILITY_SCOPE_DENIED"
-          || code === "POSSE_CAPABILITY_SCOPE_WIDENED"
-          || code === "POSSE_PULSE_ROUTE_DENIED"
-          || code === "POSSE_PARENT_PULSE_DENIED") {
+        if (code === "POSSE_PULSE_ROUTE_DENIED" || code === "POSSE_PARENT_PULSE_DENIED") {
           sendJson(res, 403, { ok: false, error: "capability_denied", code });
         } else if (code === "POSSE_CAPABILITY_REQUEST_INVALID" || code === "POSSE_CAPABILITY_PROTOCOL_INVALID") {
           sendJson(res, 400, { ok: false, error: "invalid_capability_request", code });
@@ -1197,9 +1257,14 @@ export class PersistentMcpOwner {
     }
     if (!session) {
       claims = verifyMcpOAuthToken(token);
+      const signedBoot = bootConfigFromMcpOAuthClaims(claims);
+      if (claims.agent_id || signedBoot.scopeBindingMode === "dispatcher") {
+        sendJson(res, 403, { ok: false, error: "unregistered_agent_gate" });
+        return;
+      }
       id = String(claims.jti || claims.sub || "");
       const bootConfig = {
-        ...bootConfigFromMcpOAuthClaims(claims),
+        ...signedBoot,
         mcpOAuth: {
           verified: true,
           tokenId: id,
@@ -1216,6 +1281,7 @@ export class PersistentMcpOwner {
         claims: { ...claims, __verified: true, __source: "local" },
         bootConfig,
         serverSpec: null,
+        agentOwned: false,
         spawnImpl: this._spawn,
       });
       this._sessions.set(id, session);

@@ -30,6 +30,33 @@ export const EVENT_ACTOR_TYPES = Object.freeze([
 ]);
 export const EVENT_ACTOR_TYPE_LIST_SQL = sqlList(EVENT_ACTOR_TYPES);
 
+// Stable, bounded activity envelope shared by durable events and the bridge.
+// Consumers must ignore unknown protocol versions instead of guessing from
+// free-form event messages.
+export const AGENT_ACTIVITY_PROTOCOL_VERSION = 1;
+export const AGENT_ACTIVITY_PROTOCOL = `posse.agent_activity.v${AGENT_ACTIVITY_PROTOCOL_VERSION}`;
+export const AGENT_ACTIVITY_KINDS = Object.freeze([
+  "phase",
+  "model",
+  "progress",
+  "result",
+  "error",
+]);
+export const AGENT_ACTIVITY_STATUSES = Object.freeze([
+  "running",
+  "waiting",
+  "succeeded",
+  "failed",
+  "canceled",
+]);
+export const AGENT_ACTIVITY_LIMITS = Object.freeze({
+  PHASE_CHARS: 80,
+  SUMMARY_CHARS: 180,
+  DETAIL_CHARS: 360,
+  PROVIDER_CHARS: 80,
+  MODEL_CHARS: 120,
+});
+
 // Namespaced alias used at logEvent call sites. Same typo-safety story as
 // EVENT_TYPES — schema does CHECK actor_type, but failing at INSERT time
 // is still later than failing at import.

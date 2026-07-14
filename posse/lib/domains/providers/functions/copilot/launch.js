@@ -98,8 +98,10 @@ export function buildCopilotArgs({
   workingDir,
   additionalMcpConfig = null,
   disableBuiltinMcps = false,
-  allowAllTools = true,
-  allowAllPaths = true,
+  allowAllTools = false,
+  allowAllPaths = false,
+  availableTools = [],
+  allowTools = [],
   noAskUser = true,
   noColor = true,
   stream = "on",
@@ -119,6 +121,12 @@ export function buildCopilotArgs({
   if (reasoningEffort) argv.push("--reasoning-effort", normalizeReasoningEffort(reasoningEffort));
   if (allowAllTools) argv.push("--allow-all-tools");
   if (allowAllPaths) argv.push("--allow-all-paths");
+  if (Array.isArray(availableTools) && availableTools.length > 0) {
+    argv.push(`--available-tools=${availableTools.map(String).filter(Boolean).join(",")}`);
+  }
+  for (const tool of Array.isArray(allowTools) ? allowTools : []) {
+    if (tool) argv.push(`--allow-tool=${String(tool)}`);
+  }
   if (noAskUser) argv.push("--no-ask-user");
   if (noColor) argv.push("--no-color");
   if (stream === "on" || stream === "off") argv.push("--stream", stream);

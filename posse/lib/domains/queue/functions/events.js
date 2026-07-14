@@ -2,6 +2,32 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { warnOnceForInvalidEventType } from "../../observability/functions/event-types.js";
 import { markTelemetryRowsMirrored, pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
 import { appendRunTelemetry, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
+import {
+  AGENT_ACTIVITY_KINDS,
+  AGENT_ACTIVITY_LIMITS,
+  AGENT_ACTIVITY_PROTOCOL,
+  AGENT_ACTIVITY_STATUSES,
+  EVENT_ACTORS,
+  EVENT_ACTOR_TYPES,
+  EVENT_TYPES,
+} from "../../../catalog/event.js";
+
+const AGENT_ACTIVITY_KIND_SET = new Set(AGENT_ACTIVITY_KINDS);
+const AGENT_ACTIVITY_STATUS_SET = new Set(AGENT_ACTIVITY_STATUSES);
+const EVENT_ACTOR_TYPE_SET = new Set(EVENT_ACTOR_TYPES);
+
+function boundedActivityText(value, limit) {
+  if (value == null) return null;
+  const text = String(value).replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  return text.slice(0, limit);
+}
+
+function nonNegativeActivityNumber(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
 
 function normalizeJsonText(value) {
   if (value == null) return null;
@@ -262,6 +288,66 @@ export function logEvent({
   } else {
     _scheduleEventFlush();
   }
+}
+
+/**
+ * Persist a versioned, WI-scoped activity update suitable for Bossy and the
+ * bridge. This intentionally accepts no prompt, output, transcript, command,
+ * or error blob fields: the activity stream is a concise protocol, not a log.
+ */
+export function logAgentActivity({
+  work_item_id,
+  job_id = null,
+  attempt_id = null,
+  role = EVENT_ACTORS.WORKER,
+  actor_id = null,
+  kind,
+  status,
+  phase = null,
+  summary,
+  detail = null,
+  agent_call_id = null,
+  provider = null,
+  model = null,
+  input_tokens = null,
+  output_tokens = null,
+  duration_ms = null,
+  cost_usd = null,
+} = {}) {
+  if (work_item_id == null) return null;
+  if (!AGENT_ACTIVITY_KIND_SET.has(kind)) return null;
+  if (!AGENT_ACTIVITY_STATUS_SET.has(status)) return null;
+
+  const safeSummary = boundedActivityText(summary, AGENT_ACTIVITY_LIMITS.SUMMARY_CHARS);
+  if (!safeSummary) return null;
+  const safeRole = EVENT_ACTOR_TYPE_SET.has(role) ? role : EVENT_ACTORS.WORKER;
+  const envelope = {
+    protocol: AGENT_ACTIVITY_PROTOCOL,
+    kind,
+    status,
+    phase: boundedActivityText(phase, AGENT_ACTIVITY_LIMITS.PHASE_CHARS),
+    summary: safeSummary,
+    detail: boundedActivityText(detail, AGENT_ACTIVITY_LIMITS.DETAIL_CHARS),
+    agent_call_id: nonNegativeActivityNumber(agent_call_id),
+    provider: boundedActivityText(provider, AGENT_ACTIVITY_LIMITS.PROVIDER_CHARS),
+    model: boundedActivityText(model, AGENT_ACTIVITY_LIMITS.MODEL_CHARS),
+    input_tokens: nonNegativeActivityNumber(input_tokens),
+    output_tokens: nonNegativeActivityNumber(output_tokens),
+    duration_ms: nonNegativeActivityNumber(duration_ms),
+    cost_usd: nonNegativeActivityNumber(cost_usd),
+  };
+
+  logEvent({
+    work_item_id,
+    job_id,
+    attempt_id,
+    event_type: EVENT_TYPES.AGENT_ACTIVITY,
+    actor_type: safeRole,
+    actor_id,
+    message: safeSummary,
+    event_json: envelope,
+  });
+  return envelope;
 }
 
 /**

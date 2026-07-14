@@ -38,7 +38,10 @@ const POLICY_ENTRIES = [
   { name: "local-models", requiresWritableArtifacts: false },
   { name: "windows-events", readOnly: true, requiresWritableArtifacts: false },
   { name: "admin", requiresWritableArtifacts: false },
-  { name: "merge", requiresWritableArtifacts: true, refreshContextAfter: true },
+  // Operator merge owns its direct-Git checks and DB updates. It is not an
+  // agent/provider dispatch and must not initialize artifact or native Git
+  // infrastructure before Bossy can approve a completed work item.
+  { name: "merge", requiresWritableArtifacts: false },
   { name: "prune", requiresWritableArtifacts: false },
   { name: "purge", requiresWritableArtifacts: false },
   { name: "cleanup", requiresWritableArtifacts: false },

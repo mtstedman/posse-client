@@ -105,6 +105,7 @@ export function mintMcpOAuthTokenForBootConfig(bootConfig = {}, opts = {}) {
  * @returns {Record<string, unknown>}
  */
 export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
+  const agentId = stringOrNull(bootConfig.agentId);
   const jobId = numberOrNull(bootConfig.jobId);
   const workItemId = numberOrNull(bootConfig.workItemId);
   const attemptId = numberOrNull(bootConfig.attemptId);
@@ -113,13 +114,18 @@ export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
   const role = stringOrNull(bootConfig.role);
   const providerName = stringOrNull(bootConfig.providerName);
   return {
-    sub: jobId != null ? `job:${jobId}` : `mcp:${crypto.randomUUID()}`,
+    sub: agentId ? `agent:${agentId}` : (jobId != null ? `job:${jobId}` : `mcp:${crypto.randomUUID()}`),
+    agent_id: agentId,
     job_id: jobId,
     work_item_id: workItemId,
     role,
     provider: providerName,
     capabilities: {
+      agentId,
+      scopeBindingMode: stringOrNull(bootConfig.scopeBindingMode),
       cwd: stringOrNull(bootConfig.cwd),
+      projectRoot: stringOrNull(bootConfig.projectRoot),
+      resourcesRoot: stringOrNull(bootConfig.resourcesRoot),
       dbPath: stringOrNull(bootConfig.dbPath),
       role,
       providerName,
@@ -202,7 +208,11 @@ export function verifyMcpOAuthToken(token, opts = {}) {
 export function bootConfigFromMcpOAuthClaims(claims = {}) {
   const capabilities = plainObjectOrNull(claims.capabilities) || {};
   return {
+    agentId: stringOrNull(capabilities.agentId || claims.agent_id) || "",
+    scopeBindingMode: stringOrNull(capabilities.scopeBindingMode) || "",
     cwd: stringOrNull(capabilities.cwd) || "",
+    projectRoot: stringOrNull(capabilities.projectRoot) || "",
+    resourcesRoot: stringOrNull(capabilities.resourcesRoot) || "",
     dbPath: stringOrNull(capabilities.dbPath) || "",
     role: stringOrNull(capabilities.role) || "",
     providerName: stringOrNull(capabilities.providerName) || "",

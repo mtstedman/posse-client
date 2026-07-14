@@ -1,4 +1,5 @@
 export * from "./BaseRole.js";
+export * from "./Agent.js";
 export * from "./JobLease.js";
 export * from "./RoleRegistry.js";
 export * from "./TrackedProviderClient.js";

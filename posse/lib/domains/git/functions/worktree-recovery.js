@@ -267,9 +267,15 @@ export async function stashDirtyWorktreeAsync(
  * recovery never materializes target contents through a link. Returns the
  * recovery path, or null if no files or symlink notes were preserved.
  */
-export function preserveCorruptWorktreeContents(wtPath, projectDir, { wiId, branchName } = {}) {
+export function preserveCorruptWorktreeContents(wtPath, projectDir, {
+  wiId,
+  branchName,
+  recoveryRoot = null,
+  reason = "git_metadata_corrupt",
+} = {}) {
   if (!fs.existsSync(wtPath)) return null;
-  const root = worktreeRoot(projectDir, { disabled: true });
+  const root = recoveryRoot ? path.resolve(recoveryRoot) : worktreeRoot(projectDir, { disabled: true });
+  fs.mkdirSync(root, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const wiTag = wiId != null ? `wi-${wiId}-` : "";
   const recoveryDir = path.join(root, `.recovered-corrupt-${wiTag}${stamp}`);
@@ -350,7 +356,7 @@ export function preserveCorruptWorktreeContents(wtPath, projectDir, { wiId, bran
         source_worktree: wtPath,
         branch_name: branchName || null,
         work_item_id: wiId ?? null,
-        reason: "git_metadata_corrupt",
+        reason,
         files_copied: filesCopied,
         skipped_symlink_count: skippedSymlinks.length,
         skipped_symlinks: skippedSymlinks,
