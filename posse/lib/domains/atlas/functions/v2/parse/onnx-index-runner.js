@@ -14,123 +14,86 @@ import {
  */
 
 /**
+ * @typedef {Object} OnnxDocumentSource
+ * @property {string} [document_id]
+ * @property {string} [repo_rel_path]
+ * @property {string} content_hash
+ * @property {OnnxSymbol[]} symbols
+ */
+
+/**
+ * One complete document boundary for streaming intake. When both source
+ * layers are present, mergeDocument is responsible for the domain merge after
+ * this runner verifies that both layers identify the same immutable document.
+ *
+ * @typedef {Object} OnnxDocument
+ * @property {string} [document_id]
+ * @property {string} [repo_rel_path]
+ * @property {string} content_hash
+ * @property {OnnxSymbol[]} [symbols]
+ * @property {OnnxDocumentSource} [treeSitter]
+ * @property {OnnxDocumentSource} [scip]
+ */
+
+/**
  * Start a derived ONNX refresh over merged A+B symbols. When wait=false, the
  * returned object includes a `done` promise and the caller is not blocked.
+ * `documents` is the bounded streaming path; `symbols` remains the one-shot
+ * rollback path.
  *
  * @param {{
  *   mode?: string,
- *   symbols: OnnxSymbol[],
+ *   symbols?: OnnxSymbol[],
+ *   documents?: Iterable<OnnxDocument> | AsyncIterable<OnnxDocument>,
  *   existingFingerprints?: Map<string, string> | Record<string, string>,
  *   modelId: string,
  *   modelVersion: string,
  *   batchSize?: number,
+ *   documentWindow?: number,
  *   wait?: boolean,
  *   signal?: AbortSignal,
+ *   mergeDocument?: (document: OnnxDocument, signal?: AbortSignal) => Promise<OnnxSymbol[]> | OnnxSymbol[],
+ *   buildSymbolText?: (symbol: OnnxSymbol, document: OnnxDocument) => string,
  *   embedSymbols: (symbols: OnnxSymbol[], signal?: AbortSignal) => Promise<Array<{ symbol_key: string, vector: Buffer | Uint8Array | ArrayBufferView }>>,
  *   commitBatch: (rows: Array<{ symbol_key: string, model_id: string, model_version: string, merged_fingerprint: string, vector: Buffer | Uint8Array | ArrayBufferView }>) => Promise<void> | void,
+ *   persistWatermark?: (watermark: Record<string, unknown>) => Promise<void> | void,
  *   onEvent?: (event: Record<string, unknown>) => void,
  * }} opts
  */
 export function startOnnxRefresh(opts) {
   const mode = opts.mode || "changed";
   const batchSize = Math.max(1, Math.floor(Number(opts.batchSize) || 128));
+  const documentWindow = Math.max(1, Math.floor(Number(opts.documentWindow) || 8));
   const existing = normalizeExistingFingerprints(opts.existingFingerprints);
-  const changed = (opts.symbols || []).filter((symbol) => {
-    const key = String(symbol.symbol_key || "");
-    const fp = String(symbol.merged_fingerprint || "");
-    return key && fp && existing.get(key) !== fp;
-  });
+  const streaming = opts.documents != null;
+  if (streaming && opts.symbols != null) {
+    throw new TypeError("ONNX refresh accepts either documents or symbols, not both");
+  }
+  if (!streaming && !Array.isArray(opts.symbols)) {
+    throw new TypeError("ONNX refresh requires documents or symbols");
+  }
+  const symbols = streaming ? [] : (opts.symbols || []);
+  const changed = streaming ? [] : symbols.filter((symbol) => shouldIndexSymbol(symbol, existing));
 
   const run = async () => {
     const startedAt = Date.now();
     emitOnnxEvent(opts.onEvent, {
       kind: "atlas.parse.onnx.started",
       mode,
-      totalSymbols: changed.length,
+      totalSymbols: streaming ? null : changed.length,
+      streaming,
+      ...(streaming ? { documentWindow } : {}),
     });
-    let indexed = 0;
-    for (let offset = 0; offset < changed.length; offset += batchSize) {
-      throwIfAborted(opts.signal);
-      const batch = changed.slice(offset, offset + batchSize);
-      recordEmbeddingForensics("parse_onnx.batch.embed.start", {
-        mode,
-        offset,
-        batch_size: batch.length,
-        total_symbols: changed.length,
-        model_id: opts.modelId,
-        model_version: opts.modelVersion,
-        symbols: summarizeOnnxSymbols(batch),
-      });
-      let vectors;
-      const embedStartedAt = Date.now();
-      try {
-        vectors = await opts.embedSymbols(batch, opts.signal);
-      } catch (err) {
-        recordEmbeddingForensics("parse_onnx.batch.embed.error", {
-          mode,
-          offset,
-          batch_size: batch.length,
-          elapsed_ms: Date.now() - embedStartedAt,
-          error: errorForTelemetry(err),
-        });
-        throw err;
-      }
-      recordEmbeddingForensics("parse_onnx.batch.embed.done", {
-        mode,
-        offset,
-        batch_size: batch.length,
-        vector_count: Array.isArray(vectors) ? vectors.length : null,
-        elapsed_ms: Date.now() - embedStartedAt,
-      });
-      throwIfAborted(opts.signal);
-      const rows = commitRowsForBatch({
-        vectors,
-        batch,
-        model_id: opts.modelId,
-        model_version: opts.modelVersion,
-      });
-      recordEmbeddingForensics("parse_onnx.batch.commit.start", {
-        mode,
-        offset,
-        rows: rows.length,
-        model_id: opts.modelId,
-        model_version: opts.modelVersion,
-      });
-      const commitStartedAt = Date.now();
-      try {
-        await opts.commitBatch(rows);
-      } catch (err) {
-        recordEmbeddingForensics("parse_onnx.batch.commit.error", {
-          mode,
-          offset,
-          rows: rows.length,
-          elapsed_ms: Date.now() - commitStartedAt,
-          error: errorForTelemetry(err),
-        });
-        throw err;
-      }
-      recordEmbeddingForensics("parse_onnx.batch.commit.done", {
-        mode,
-        offset,
-        rows: rows.length,
-        elapsed_ms: Date.now() - commitStartedAt,
-      });
-      indexed += rows.length;
-      emitOnnxEvent(opts.onEvent, {
-        kind: "atlas.parse.onnx.progress",
-        mode,
-        current: indexed,
-        total: changed.length,
-        symbol: batch[batch.length - 1]?.symbol_key || null,
-      });
-    }
+    const result = streaming
+      ? await runStreamingRefresh(opts, { mode, batchSize, documentWindow, existing })
+      : await runOneShotRefresh(opts, { mode, batchSize, symbols, changed });
     emitOnnxEvent(opts.onEvent, {
       kind: "atlas.parse.onnx.completed",
       mode,
-      indexedSymbols: indexed,
+      ...result,
       durationMs: Date.now() - startedAt,
     });
-    return { indexedSymbols: indexed, skippedSymbols: (opts.symbols || []).length - changed.length };
+    return result;
   };
 
   const done = Promise.resolve().then(run).catch((err) => {
@@ -156,10 +119,269 @@ export function startOnnxRefresh(opts) {
   return {
     queued: true,
     background: true,
-    totalSymbols: (opts.symbols || []).length,
-    changedSymbols: changed.length,
+    streaming,
+    totalSymbols: streaming ? null : symbols.length,
+    changedSymbols: streaming ? null : changed.length,
     done,
   };
+}
+
+async function runOneShotRefresh(opts, { mode, batchSize, symbols, changed }) {
+  let indexed = 0;
+  let batchNumber = 0;
+  for (let offset = 0; offset < changed.length; offset += batchSize) {
+    const batch = changed.slice(offset, offset + batchSize);
+    const rows = await embedAndCommitBatch(opts, batch, {
+      mode,
+      offset,
+      totalSymbols: changed.length,
+    });
+    indexed += rows.length;
+    batchNumber++;
+    await persistOnnxWatermark(opts, {
+      mode,
+      batchNumber,
+      indexedSymbols: indexed,
+      skippedSymbols: symbols.length - changed.length,
+      processedDocuments: null,
+      lastDocument: null,
+    });
+    emitOnnxEvent(opts.onEvent, {
+      kind: "atlas.parse.onnx.progress",
+      mode,
+      current: indexed,
+      total: changed.length,
+      symbol: batch[batch.length - 1]?.symbol_key || null,
+    });
+  }
+  return { indexedSymbols: indexed, skippedSymbols: symbols.length - changed.length };
+}
+
+async function runStreamingRefresh(opts, { mode, batchSize, documentWindow, existing }) {
+  const state = {
+    indexedSymbols: 0,
+    skippedSymbols: 0,
+    processedDocuments: 0,
+    batchNumber: 0,
+    lastDocument: null,
+  };
+  let window = [];
+  let windowDocumentHashes = new Map();
+  for await (const value of opts.documents) {
+    throwIfAborted(opts.signal);
+    const document = normalizeOnnxDocument(value, state.processedDocuments + window.length);
+    const priorHash = windowDocumentHashes.get(document.document_id);
+    if (priorHash != null) {
+      throw new Error(
+        `ONNX refresh received duplicate document '${document.document_id}'`
+        + (priorHash === document.content_hash ? "" : " with conflicting content hashes"),
+      );
+    }
+    windowDocumentHashes.set(document.document_id, document.content_hash);
+    window.push(document);
+    if (window.length >= documentWindow) {
+      await processDocumentWindow(opts, window, state, { mode, batchSize, existing });
+      window = [];
+      windowDocumentHashes = new Map();
+    }
+  }
+  if (window.length > 0) {
+    await processDocumentWindow(opts, window, state, { mode, batchSize, existing });
+  }
+  return {
+    indexedSymbols: state.indexedSymbols,
+    skippedSymbols: state.skippedSymbols,
+    processedDocuments: state.processedDocuments,
+  };
+}
+
+async function processDocumentWindow(opts, documents, state, { mode, batchSize, existing }) {
+  const entries = [];
+  const remainingByDocument = [];
+  for (let documentIndex = 0; documentIndex < documents.length; documentIndex++) {
+    const document = documents[documentIndex];
+    const symbols = await completeOnnxDocument(opts, document);
+    let changedInDocument = 0;
+    for (const symbol of symbols) {
+      if (!shouldIndexSymbol(symbol, existing)) {
+        state.skippedSymbols++;
+        continue;
+      }
+      const completeSymbol = opts.buildSymbolText
+        ? { ...symbol, text: String(opts.buildSymbolText(symbol, document) || "") }
+        : symbol;
+      entries.push({ symbol: completeSymbol, documentIndex });
+      changedInDocument++;
+    }
+    remainingByDocument.push(changedInDocument);
+  }
+
+  // Packing within a bounded document window groups similarly sized inputs
+  // without retaining rows from the entire index.
+  entries.sort((a, b) => symbolTextLength(a.symbol) - symbolTextLength(b.symbol));
+  let completedInWindow = countCompletedDocumentPrefix(remainingByDocument);
+  for (let offset = 0; offset < entries.length; offset += batchSize) {
+    const packed = entries.slice(offset, offset + batchSize);
+    const batch = packed.map((entry) => entry.symbol);
+    const rows = await embedAndCommitBatch(opts, batch, {
+      mode,
+      offset: state.indexedSymbols,
+      totalSymbols: null,
+    });
+    state.indexedSymbols += rows.length;
+    state.batchNumber++;
+    for (const entry of packed) remainingByDocument[entry.documentIndex]--;
+    completedInWindow = countCompletedDocumentPrefix(remainingByDocument);
+    const lastDocument = completedInWindow > 0
+      ? documents[completedInWindow - 1]
+      : state.lastDocument;
+    await persistOnnxWatermark(opts, {
+      mode,
+      batchNumber: state.batchNumber,
+      indexedSymbols: state.indexedSymbols,
+      skippedSymbols: state.skippedSymbols,
+      processedDocuments: state.processedDocuments + completedInWindow,
+      lastDocument,
+    });
+    emitOnnxEvent(opts.onEvent, {
+      kind: "atlas.parse.onnx.progress",
+      mode,
+      current: state.indexedSymbols,
+      total: null,
+      processedDocuments: state.processedDocuments + completedInWindow,
+      symbol: batch[batch.length - 1]?.symbol_key || null,
+    });
+  }
+
+  if (entries.length === 0) {
+    await persistOnnxWatermark(opts, {
+      mode,
+      batchNumber: state.batchNumber,
+      indexedSymbols: state.indexedSymbols,
+      skippedSymbols: state.skippedSymbols,
+      processedDocuments: state.processedDocuments + documents.length,
+      lastDocument: documents[documents.length - 1],
+    });
+  }
+  state.processedDocuments += documents.length;
+  state.lastDocument = documents[documents.length - 1] || state.lastDocument;
+}
+
+async function completeOnnxDocument(opts, document) {
+  validateOnnxDocumentSource(document, document.treeSitter, "tree-sitter");
+  validateOnnxDocumentSource(document, document.scip, "SCIP");
+  let symbols;
+  if (opts.mergeDocument) {
+    symbols = await opts.mergeDocument(document, opts.signal);
+  } else if (Array.isArray(document.symbols)) {
+    symbols = document.symbols;
+  } else {
+    const sources = [document.treeSitter, document.scip].filter(Boolean);
+    if (sources.length !== 1) {
+      throw new Error(
+        `ONNX document '${document.document_id}' requires mergeDocument when both source layers are present`,
+      );
+    }
+    symbols = sources[0].symbols;
+  }
+  if (!Array.isArray(symbols)) {
+    throw new Error(`ONNX document '${document.document_id}' did not produce a symbol array`);
+  }
+  return symbols;
+}
+
+async function embedAndCommitBatch(opts, batch, { mode, offset, totalSymbols }) {
+  throwIfAborted(opts.signal);
+  recordEmbeddingForensics("parse_onnx.batch.embed.start", {
+    mode,
+    offset,
+    batch_size: batch.length,
+    total_symbols: totalSymbols,
+    model_id: opts.modelId,
+    model_version: opts.modelVersion,
+    symbols: summarizeOnnxSymbols(batch),
+  });
+  let vectors;
+  const embedStartedAt = Date.now();
+  try {
+    vectors = await opts.embedSymbols(batch, opts.signal);
+  } catch (err) {
+    recordEmbeddingForensics("parse_onnx.batch.embed.error", {
+      mode,
+      offset,
+      batch_size: batch.length,
+      elapsed_ms: Date.now() - embedStartedAt,
+      error: errorForTelemetry(err),
+    });
+    throw err;
+  }
+  recordEmbeddingForensics("parse_onnx.batch.embed.done", {
+    mode,
+    offset,
+    batch_size: batch.length,
+    vector_count: Array.isArray(vectors) ? vectors.length : null,
+    elapsed_ms: Date.now() - embedStartedAt,
+  });
+  throwIfAborted(opts.signal);
+  const rows = commitRowsForBatch({
+    vectors,
+    batch,
+    model_id: opts.modelId,
+    model_version: opts.modelVersion,
+  });
+  recordEmbeddingForensics("parse_onnx.batch.commit.start", {
+    mode,
+    offset,
+    rows: rows.length,
+    model_id: opts.modelId,
+    model_version: opts.modelVersion,
+  });
+  const commitStartedAt = Date.now();
+  try {
+    await opts.commitBatch(rows);
+  } catch (err) {
+    recordEmbeddingForensics("parse_onnx.batch.commit.error", {
+      mode,
+      offset,
+      rows: rows.length,
+      elapsed_ms: Date.now() - commitStartedAt,
+      error: errorForTelemetry(err),
+    });
+    throw err;
+  }
+  recordEmbeddingForensics("parse_onnx.batch.commit.done", {
+    mode,
+    offset,
+    rows: rows.length,
+    elapsed_ms: Date.now() - commitStartedAt,
+  });
+  return rows;
+}
+
+async function persistOnnxWatermark(opts, {
+  mode,
+  batchNumber,
+  indexedSymbols,
+  skippedSymbols,
+  processedDocuments,
+  lastDocument,
+}) {
+  if (!opts.persistWatermark) return;
+  throwIfAborted(opts.signal);
+  await opts.persistWatermark({
+    schemaVersion: 1,
+    mode,
+    modelId: opts.modelId,
+    modelVersion: opts.modelVersion,
+    batchNumber,
+    indexedSymbols,
+    skippedSymbols,
+    processedDocuments,
+    lastDocument: lastDocument ? {
+      documentId: lastDocument.document_id,
+      contentHash: lastDocument.content_hash,
+    } : null,
+  });
 }
 
 /**
@@ -243,6 +465,53 @@ function normalizeExistingFingerprints(value) {
     }
   }
   return out;
+}
+
+function shouldIndexSymbol(symbol, existing) {
+  const key = String(symbol?.symbol_key || "");
+  const fingerprint = String(symbol?.merged_fingerprint || "");
+  return !!key && !!fingerprint && existing.get(key) !== fingerprint;
+}
+
+function normalizeOnnxDocument(value, index) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`ONNX document ${index} must be an object`);
+  }
+  const document = /** @type {OnnxDocument} */ (value);
+  const document_id = String(document.document_id || document.repo_rel_path || "").trim();
+  const content_hash = String(document.content_hash || "").trim();
+  if (!document_id) throw new Error(`ONNX document ${index} is missing document identity`);
+  if (!content_hash) throw new Error(`ONNX document '${document_id}' is missing content_hash`);
+  return { ...document, document_id, content_hash };
+}
+
+function validateOnnxDocumentSource(document, source, label) {
+  if (!source) return;
+  const sourceId = String(source.document_id || source.repo_rel_path || "").trim();
+  const sourceHash = String(source.content_hash || "").trim();
+  if (!sourceId || !sourceHash) {
+    throw new Error(`ONNX ${label} source for '${document.document_id}' is missing document identity or content_hash`);
+  }
+  if (sourceId !== document.document_id || sourceHash !== document.content_hash) {
+    throw new Error(
+      `ONNX ${label} source does not match document '${document.document_id}' at '${document.content_hash}'`,
+    );
+  }
+  if (!Array.isArray(source.symbols)) {
+    throw new Error(`ONNX ${label} source for '${document.document_id}' is missing symbols`);
+  }
+}
+
+function symbolTextLength(symbol) {
+  return symbol?.text == null ? 0 : String(symbol.text).length;
+}
+
+function countCompletedDocumentPrefix(remainingByDocument) {
+  let completed = 0;
+  while (completed < remainingByDocument.length && remainingByDocument[completed] === 0) {
+    completed++;
+  }
+  return completed;
 }
 
 function summarizeOnnxSymbols(symbols = []) {

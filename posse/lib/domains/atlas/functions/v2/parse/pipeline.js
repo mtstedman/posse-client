@@ -38,6 +38,7 @@ export function createParsePipeline({
  *   stageScip?: (lang: string) => Promise<unknown> | unknown,
  *   ingestScip?: (lang: string, staged: unknown) => Promise<unknown> | unknown,
  *   mergeLanguage?: (lang: string, sources: string[]) => Promise<unknown> | unknown,
+ *   finalizeGraph?: () => Promise<unknown> | unknown,
  *   onnx?: Parameters<typeof startOnnxRefresh>[0] | null,
  *   dbWriteSemaphore?: import("../../../classes/v2/ParseSemaphore.js").ParseSemaphore,
  *   scipStageSemaphore?: import("../../../classes/v2/ParseSemaphore.js").ParseSemaphore,
@@ -50,6 +51,18 @@ export async function runParsePipeline(opts) {
     scipStageSemaphore: opts.scipStageSemaphore || createScipStageSemaphore(SCIP_INDEXER_COUNT),
     onEvent: opts.onEvent,
   });
+  // A document stream may be fed as soon as individual A+B rows become
+  // complete. Start its consumer before the language-wide work finishes so
+  // the bounded ONNX window provides natural backpressure to its producer.
+  const streamingOnnx = opts.onnx?.documents
+    ? startOnnxRefresh(opts.onnx)
+    : null;
+  const streamingOutcome = streamingOnnx instanceof Promise
+    ? streamingOnnx.then(
+      (value) => ({ value, error: null }),
+      (error) => ({ value: null, error }),
+    )
+    : null;
   await Promise.all((opts.languages || []).map(async (lang) => {
     emitParseEvent(opts.onEvent, { kind: "atlas.parse.parse.started", lang, total: null });
     await opts.parseLanguage(lang);
@@ -68,5 +81,14 @@ export async function runParsePipeline(opts) {
       }
     }
   }));
+  if (opts.finalizeGraph) {
+    await pipeline.runDbWrite(() => opts.finalizeGraph());
+  }
+  if (streamingOutcome) {
+    const outcome = await streamingOutcome;
+    if (outcome.error) throw outcome.error;
+    return outcome.value;
+  }
+  if (streamingOnnx) return streamingOnnx;
   return opts.onnx ? startOnnxRefresh(opts.onnx) : null;
 }
