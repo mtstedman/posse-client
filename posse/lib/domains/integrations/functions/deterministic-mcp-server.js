@@ -1050,6 +1050,13 @@ const WRITE_TOOL_NAMES = new Set(DETERMINISTIC_WRITE_TOOLS);
 const IMAGE_HELPER_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_HELPER_TOOLS);
 const IMAGE_GENERATION_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_TOOLS);
 const OCR_TOOL_NAMES = new Set(DETERMINISTIC_OCR_TOOLS);
+const TEST_TOOL_NAMES = new Set([
+  "run_scoped_checks",
+  "create_test_suite",
+  "create_test",
+  "run_test",
+  "run_test_suite",
+]);
 
 const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "read_file",
@@ -1115,6 +1122,13 @@ function legacyToolNamesForUnscopedRole() {
 
 function runtimeToolAvailable(toolName) {
   if (WRITE_TOOL_NAMES.has(toolName)) return writeEnabled;
+  if (TEST_TOOL_NAMES.has(toolName)) {
+    const legacyRoleAllowsTests = bootConfig?.mcpOAuth?.verified !== true
+      && (roleName === "dev" || roleName === "assessor");
+    return (ownerHotGateway && !mcpMessageSessionScoped)
+      || bootConfig.allowTests === true
+      || legacyRoleAllowsTests;
+  }
   if (IMAGE_HELPER_TOOL_NAMES.has(toolName)) return allowImageHelpers;
   if (OCR_TOOL_NAMES.has(toolName)) return allowImageHelpers;
   if (IMAGE_GENERATION_TOOL_NAMES.has(toolName)) return allowImageGeneration;

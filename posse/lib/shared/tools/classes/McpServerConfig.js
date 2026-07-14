@@ -435,7 +435,8 @@ function buildDeterministicMcpBootPayload(role, {
   const requestedProjectDbCapability = normalizeProjectDbCapability(
     projectDbCapability || (projectDbWrite === true ? "write" : "none"),
   );
-  const allowTests = requestedProjectDbCapability !== "write" && expectedTools.some((name) => [
+  const agentLifetimeContract = scopeBindingMode === "dispatcher";
+  const allowTests = (agentLifetimeContract || requestedProjectDbCapability !== "write") && expectedTools.some((name) => [
     "run_scoped_checks",
     "create_test_suite",
     "create_test",
@@ -751,7 +752,14 @@ export class McpServerConfig {
       return { released: false, reason: "missing_session" };
     }
     if (session.agentOwned === true) {
-      return { released: false, reason: "agent_owned" };
+      return {
+        released: false,
+        reason: "agent_owned",
+        attachProof: persistentMcpOwner.snapshotSessionAttachProof({
+          sessionId: session.sessionId,
+          expectedBootId: session.ownerBootId || null,
+        }),
+      };
     }
     return persistentMcpOwner.unregisterSession({
       sessionId: session.sessionId,

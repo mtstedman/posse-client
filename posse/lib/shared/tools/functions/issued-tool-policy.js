@@ -475,7 +475,9 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     disableSystemTools: signed.disableSystemTools === true || attachment.disableSystemTools === true,
     allowWrite: signed.allowWrite === true && attachment.allowWrite === true,
     allowShell: signed.allowShell === true && attachment.allowShell !== false,
-    allowTests: signed.allowTests === true && attachment.allowTests !== false,
+    allowTests: signed.allowTests === true
+      && attachment.allowTests !== false
+      && projectDbCapability !== "write",
     projectDbCapability,
     projectDbWrite: signed.projectDbWrite === true
       && attachment.projectDbWrite === true

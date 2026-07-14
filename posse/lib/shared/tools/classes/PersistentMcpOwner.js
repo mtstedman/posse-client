@@ -1083,6 +1083,12 @@ export class PersistentMcpOwner {
     return this._removeSession(id, { reason, context, telemetry: true });
   }
 
+  snapshotSessionAttachProof({ sessionId = null, expectedBootId = null } = {}) {
+    if (expectedBootId && expectedBootId !== this.bootId) return null;
+    const session = sessionId ? this._sessions.get(String(sessionId)) : null;
+    return session ? session.snapshotAttachProof() : null;
+  }
+
   pruneExpiredSessions({ now = Date.now(), reason = "expired" } = {}) {
     let released = 0;
     for (const session of [...this._sessions.values()]) {
