@@ -757,11 +757,11 @@ export class RunSession {
     })();
   };
 
-  // Native refresh, required daemon startup, Git readiness, and the cached
-  // client update check are independent after repo setup. Start them together.
-  // BinaryManager makes non-refresh consumers join a same-binary refresh, so
-  // each daemon pipelines behind its own exact artifact without racing handle
-  // replacement or waiting for unrelated binaries to finish downloading.
+  // Native refresh, Git readiness, and the cached client update check can run
+  // together after repo setup. Required daemon startup waits for the complete
+  // artifact pass: artifact inspection can include synchronous version probes,
+  // and starting pulse handshakes while those probes block the event loop can
+  // exhaust the heartbeat deadline before Node can deliver the grant.
   const nativeArtifactTask = (async () => {
     if (typeof nativeBinariesForRun?.ensureAvailable !== "function") {
     updateBootStep("native binaries", {
@@ -817,6 +817,7 @@ export class RunSession {
   })();
 
   const nativeDaemonTask = (async () => {
+    await nativeArtifactTask;
     if (typeof nativeBinariesForRun?.ensureRequiredAtlasBinariesActive !== "function") {
       updateBootStep("starting daemons", {
         section: "workspace",
