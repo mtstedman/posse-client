@@ -27,7 +27,7 @@ import { grepIndexedSource, grepNonIndexed } from "../../atlas/functions/v2/retr
 import { getSharedConductor, isConductorIndexingInFlight, onConductorIndexingSuccess } from "../../atlas/functions/v2/parse/conductor.js";
 import {
   openEmbeddingResources,
-  retirePooledEmbeddingResources,
+  retirePooledEmbeddingResourcesAndWait,
   semanticDispatchEnabled,
 } from "../../atlas/functions/v2/embeddings/resources.js";
 import { fallbackQueryPlan, planQuery } from "../../atlas/functions/v2/retrieval/orchestrator/query-planner.js";
@@ -92,7 +92,8 @@ const ATLAS_EMBEDDED_RESOURCE_CACHE_TTL_MS = 5 * 60 * 1000;
  * @property {number} expiresAt
  * @property {number} refCount
  * @property {boolean} retired
- * @property {(value: any) => void} close
+ * @property {(value: any) => void | Promise<void>} close
+ * @property {Promise<void> | null} closePromise
  */
 
 /** Void the shared tree.overview/repo.status cache (post-reindex, tests). */
@@ -108,14 +109,16 @@ export async function invalidateAtlasEmbeddedResourceCache() {
   ];
   ATLAS_EMBEDDED_LEDGER_CACHE.clear();
   ATLAS_EMBEDDED_EMBEDDING_CACHE.clear();
+  const closePromises = [];
   for (const [, entry] of entries) {
     entry.retired = true;
-    if (entry.refCount <= 0) closeCachedAtlasResource(entry);
+    if (entry.refCount <= 0) closePromises.push(closeCachedAtlasResource(entry));
   }
+  await Promise.all(closePromises);
   // The cached embedding entries hold POOLED wrappers, so closing them only
   // refcounts — retire the pool entries too or the next semantic open in this
   // realm resurrects the same stale child (and its pre-warm in-memory ANN).
-  try { retirePooledEmbeddingResources(); } catch { /* best effort */ }
+  try { await retirePooledEmbeddingResourcesAndWait(); } catch { /* best effort */ }
 }
 
 onConductorIndexingSuccess(() => {
@@ -508,6 +511,7 @@ function acquireCachedAtlasResource(cache, key, open, close) {
       refCount: 0,
       retired: false,
       close,
+      closePromise: null,
     };
     cache.set(key, entry);
   } else {
@@ -534,19 +538,22 @@ function acquireCachedAtlasResource(cache, key, open, close) {
 function retireCachedAtlasResource(cache, key, entry) {
   cache.delete(key);
   entry.retired = true;
-  if (entry.refCount <= 0) closeCachedAtlasResource(entry);
+  if (entry.refCount <= 0) void closeCachedAtlasResource(entry);
 }
 
 /**
  * @param {AtlasCachedResourceEntry} entry
  */
 function closeCachedAtlasResource(entry) {
-  try {
-    const result = entry.close(entry.value);
-    if (result && typeof result.then === "function") result.catch(() => {});
-  } catch {
-    // Cache cleanup is best-effort; callers degrade on their next open.
-  }
+  if (entry.closePromise) return entry.closePromise;
+  entry.closePromise = (async () => {
+    try {
+      await entry.close(entry.value);
+    } catch {
+      // Cache cleanup is best-effort; callers degrade on their next open.
+    }
+  })();
+  return entry.closePromise;
 }
 
 /**
@@ -556,7 +563,7 @@ function releaseEmbeddedResourceLease(lease) {
   if (!lease) return;
   if (lease.entry) {
     lease.entry.refCount = Math.max(0, lease.entry.refCount - 1);
-    if (lease.entry.retired && lease.entry.refCount <= 0) closeCachedAtlasResource(lease.entry);
+    if (lease.entry.retired && lease.entry.refCount <= 0) void closeCachedAtlasResource(lease.entry);
     return;
   }
   try { lease.close?.(lease.value); } catch { /* best effort */ }

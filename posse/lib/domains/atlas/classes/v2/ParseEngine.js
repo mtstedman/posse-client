@@ -58,6 +58,7 @@ import {
   pruneEmbeddingIndexToCurrentView,
 } from "../../functions/v2/embeddings/stale-tracking.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
+import { invalidateStorageCacheNativeAsync } from "../../functions/v2/native/storage.js";
 import {
   inspectSampleForMinified,
   isOversizedForParsing,
@@ -66,7 +67,7 @@ import {
   MINIFIED_SAMPLE_BYTES,
 } from "../../functions/v2/parser/index-filters.js";
 import { sha256Hex } from "../../functions/v2/hash.js";
-import { ingestScipFile } from "../../functions/v2/scip/ingester.js";
+import { ingestScipFile, listScipFiles } from "../../functions/v2/scip/ingester.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
 import { startOnnxRefresh } from "../../functions/v2/parse/onnx-index-runner.js";
 import { hasLanguageSemantics } from "../../functions/v2/resolver/adapters/registry.js";
@@ -515,6 +516,50 @@ export class ParseEngine {
    */
   async #stageScipBatches(base, purpose, paths, opts = {}) {
     if (!this.#scipPhaseEligible(purpose) || !shouldRunScipPhase(this.#scipMode)) return [];
+    // A normal staged artifact represents the indexer's last full repository
+    // view. Feed it into the same bounded intake lane, then let current-path
+    // batches refresh any changed files while layer-mode parsing continues.
+    const existingFiles = await listScipFiles(this.#scipDir).catch(() => []);
+    if (existingFiles.length > 0) {
+      for (const [batchOrdinal, file] of existingFiles.entries()) {
+        if (typeof opts.onBatchReady === "function") {
+          await opts.onBatchReady(file, {
+            session_id: null,
+            batch_ordinal: batchOrdinal,
+            batch_count: existingFiles.length,
+            repo_rel_paths: Array.isArray(paths) ? paths : [],
+            source_languages: scipBasenameSourceLanguages(file),
+            source: "staged",
+          });
+        }
+      }
+    }
+    // A configured index command is intentionally opaque: unlike the built-in
+    // registry plans it has no reliable source-extension map, so the batch
+    // manifest cannot assign paths to it. Stage its normal persistent output
+    // and feed that artifact through the same serialized intake callback.
+    // Without this fallback boot reported that missing staging would be
+    // retried, then produced zero batches forever.
+    if (String(this.#runtimeConfig?.scipIndexCommand || "").trim()) {
+      const files = await this.#stageScipFiles(base, purpose);
+      for (const [batchOrdinal, file] of files.entries()) {
+        if (typeof opts.onBatchReady === "function") {
+          await opts.onBatchReady(file, {
+            session_id: null,
+            batch_ordinal: batchOrdinal,
+            batch_count: files.length,
+            repo_rel_paths: Array.isArray(paths) ? paths : [],
+            source_languages: Array.isArray(this.#runtimeConfig?.scipLanguages)
+              ? this.#runtimeConfig.scipLanguages
+              : [],
+            source: "configured",
+          });
+        }
+      }
+      /** @type {any} */ (base).scip_batch_session = null;
+      /** @type {any} */ (base).scip_batches_staged = files.length;
+      return files;
+    }
     try {
       const staged = await stageScipBatches({
         repoRoot: this.#repoRoot,
@@ -1500,6 +1545,10 @@ export class ParseEngine {
         const carriedMlSnapshot = this.#treeCompressionMode === "ml"
           ? this.#exportMlCompressionSnapshot(outPath)
           : null;
+        // Native retrieval keeps read handles warm between calls. Retire the
+        // exact view before replacing this rebuildable cache or Windows will
+        // reject the unlink with EBUSY/EPERM on a repeated warm.
+        await invalidateStorageCacheNativeAsync(outPath);
         removeSqliteFile(outPath);
         const canonicalHints = Array.isArray(hintPaths)
           ? hintPaths.filter(isCanonicalRepoPath).slice(0, 200)
@@ -2266,19 +2315,20 @@ export class ParseEngine {
           continue;
         }
 
+        let parsedByteSize = fileBytes ? fileBytes.length : 0;
+        if (!parsedByteSize) {
+          try { parsedByteSize = fs.statSync(absPath).size; }
+          catch { parsedByteSize = 0; }
+        }
+
         const before = beforeHash;
         if (this.#viewLayerMerge) {
           // Order-independent path: tree-sitter writes its OWN layer; the view
           // merge (buildFrom layerMerge) combines it with any SCIP layer.
-          let layerByteSize = fileBytes ? fileBytes.length : 0;
-          if (!layerByteSize) {
-            try { layerByteSize = fs.statSync(absPath).size; }
-            catch { layerByteSize = 0; }
-          }
           await this.#ledger.ingestBlobLayer({
             content_hash: parsed.content_hash,
             lang: parsed.lang,
-            byte_size: layerByteSize,
+            byte_size: parsedByteSize,
             symbols: parsed.symbols,
             edges: parsed.edges,
             source: "treesitter",
@@ -2294,7 +2344,10 @@ export class ParseEngine {
               text: `merging parser rows ${ordinal}/${total} ${repo_rel_path}`,
               language: pathLanguage,
             });
-            const merged = await /** @type {any} */ (this.#ledger).mergeBlobParseRows(parsed, {
+            const merged = await /** @type {any} */ (this.#ledger).mergeBlobParseRows({
+              ...parsed,
+              byte_size: parsedByteSize,
+            }, {
               label: "Warmer.mergeBlobParseRows",
             });
             if (Number(merged?.inserted_symbols || 0) > 0 || Number(merged?.inserted_edges || 0) > 0) {
@@ -2308,12 +2361,6 @@ export class ParseEngine {
           // Same bytes already on this branch with current parsed rows.
           await recordPathSourceStat(repo_rel_path, parsed.content_hash, fileStat);
           continue;
-        }
-
-        let byte_size = fileBytes ? fileBytes.length : 0;
-        if (!byte_size) {
-          try { byte_size = fs.statSync(absPath).size; }
-          catch { byte_size = 0; }
         }
 
         if (ledgerHasCurrentParsedBlob(this.#ledger, parsed.content_hash, { layerMerge: this.#viewLayerMerge })) {
@@ -2336,7 +2383,7 @@ export class ParseEngine {
           await this.#ledger.ingestBlob({
             content_hash: parsed.content_hash,
             lang: parsed.lang,
-            byte_size,
+            byte_size: parsedByteSize,
             symbols: parsed.symbols,
             edges: parsed.edges,
           });

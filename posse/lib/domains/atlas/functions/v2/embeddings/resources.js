@@ -125,16 +125,20 @@ export function createEmbeddingResourcePool({ idleMs = EMBEDDING_POOL_IDLE_MS } 
    * @param {string} key
    * @returns {boolean} whether an entry existed
    */
-  function retire(key) {
+  function retireEntry(key) {
     const entry = entries.get(key);
-    if (!entry) return false;
+    if (!entry) return { retired: false, closePromise: null };
     entries.delete(key);
     if (entry.idleTimer) { clearTimeout(entry.idleTimer); entry.idleTimer = null; }
     entry.retired = true;
-    if (entry.refCount <= 0) {
-      void (async () => { try { await entry.resources.close(); } catch { /* best effort */ } })();
-    }
-    return true;
+    const closePromise = entry.refCount <= 0
+      ? (async () => { try { await entry.resources.close(); } catch { /* best effort */ } })()
+      : null;
+    return { retired: true, closePromise };
+  }
+
+  function retire(key) {
+    return retireEntry(key).retired;
   }
 
   return {
@@ -159,6 +163,17 @@ export function createEmbeddingResourcePool({ idleMs = EMBEDDING_POOL_IDLE_MS } 
       for (const key of [...entries.keys()]) {
         if (retire(key)) retired += 1;
       }
+      return retired;
+    },
+    async retireAllAndWait() {
+      let retired = 0;
+      const closePromises = [];
+      for (const key of [...entries.keys()]) {
+        const result = retireEntry(key);
+        if (result.retired) retired += 1;
+        if (result.closePromise) closePromises.push(result.closePromise);
+      }
+      await Promise.all(closePromises);
       return retired;
     },
     async closeAll() {
@@ -191,6 +206,15 @@ export function closeAllPooledEmbeddingResources() {
  */
 export function retirePooledEmbeddingResources() {
   return embeddingResourcePool.retireAll();
+}
+
+/**
+ * Retire every pooled entry and wait for resources that are already idle to
+ * close. Active holders remain valid and close their retired resource when
+ * the final holder releases it.
+ */
+export function retirePooledEmbeddingResourcesAndWait() {
+  return embeddingResourcePool.retireAllAndWait();
 }
 
 export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOnly = false }) {

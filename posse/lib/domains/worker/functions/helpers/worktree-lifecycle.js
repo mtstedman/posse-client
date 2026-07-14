@@ -30,7 +30,7 @@ const MAX_SETUP_TRANSIENT_INFRA_RETRIES = 3;
 // evicts entries idle for 4× the notice interval. Stale entries are harmless
 // (a finished job's key is simply never consulted again).
 const setupDeferNoticeLastSeen = new Map();
-import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
+import { MUTATING_JOB_TYPES, WORKTREE_JOB_TYPES } from "../../../../catalog/job.js";
 import { jobNeedsGitWorktree } from "../../../git/functions/policy.js";
 import {
   disposeWorkItemAtlasGraph,
@@ -538,6 +538,13 @@ function deferTerminalCleanupIfActiveWork(wi, wtDir) {
 }
 
 export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal = null } = {}) {
+  // The catalog is the authoritative coarse boundary. Avoid invoking the
+  // key-gated native Git policy for jobs that can never own a worktree; the
+  // native method only needs to resolve the finer task-mode policy within
+  // this eligible subset.
+  if (!WORKTREE_JOB_TYPES.has(job?.job_type)) {
+    return { ok: true, wtPath: null, branchName: null, sentinelPath: null };
+  }
   const earlyPayload = MUTATING_JOB_TYPES.has(job.job_type) ? worker.parsePayload(job) : null;
   const isArtifactJob = earlyPayload
     ? (job.job_type === "artificer" || isArtifactMode(earlyPayload.task_mode || "code"))
