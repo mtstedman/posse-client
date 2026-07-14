@@ -127,6 +127,10 @@ export async function pullJinaModel({
   }
   const modelRoot = path.dirname(modelCacheDir);
   onProgress?.({ status: "resolving", modelId: ATLAS_JINA_MODEL.mlModelId });
+  const mlAvailable = await manager.ensureAvailable("ml", { refresh: true });
+  if (mlAvailable?.available !== true) {
+    throw new Error(`The native ML installer is unavailable (${mlAvailable?.reason || "unknown"}).`);
+  }
   const client = await prepareClient({ manager });
   onProgress?.({ status: "downloading", modelId: ATLAS_JINA_MODEL.mlModelId });
   const downloaded = await downloadPackage(client, ATLAS_JINA_MODEL.mlModelId);

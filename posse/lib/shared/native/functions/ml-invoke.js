@@ -6,7 +6,11 @@
 
 import path from "node:path";
 
-import { ML_NATIVE_PROTOCOL, ML_NATIVE_ROUTE } from "../../../catalog/binary.js";
+import {
+  ML_MODEL_PACKAGE_INSTALL_METHOD,
+  ML_NATIVE_PROTOCOL,
+  ML_NATIVE_ROUTE,
+} from "../../../catalog/binary.js";
 import { nativeBinaries } from "../../tools/classes/BinaryManager.js";
 
 /**
@@ -52,20 +56,22 @@ export async function runMlNativeMethodAsync(method, payload, opts) {
 
   const request = buildMlNativeMethodRequest(method, payload);
   const modelArgs = ["--model-root", modelRoot];
+  const useWorker = request.method !== ML_MODEL_PACKAGE_INSTALL_METHOD;
+  const runOptions = {
+    input: `${JSON.stringify(request)}\n`,
+    json: true,
+    timeoutMs: opts.timeoutMs,
+    signal: opts.signal,
+    worker: useWorker,
+    ...(useWorker ? { workerArgs: ["worker", "--stdio", ...modelArgs] } : {}),
+    workerFallback: true,
+    idempotent: opts.idempotent !== false,
+    requiredRoute: ML_NATIVE_ROUTE,
+  };
   const res = await manager.binary("ml").run(
     request.method,
     modelArgs,
-    {
-      input: `${JSON.stringify(request)}\n`,
-      json: true,
-      timeoutMs: opts.timeoutMs,
-      signal: opts.signal,
-      worker: true,
-      workerArgs: ["worker", "--stdio", ...modelArgs],
-      workerFallback: true,
-      idempotent: opts.idempotent !== false,
-      requiredRoute: ML_NATIVE_ROUTE,
-    },
+    runOptions,
   );
   if (!res.ok) {
     if (res.error?.name === "AbortError") throw res.error;

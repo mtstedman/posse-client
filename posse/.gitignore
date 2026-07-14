@@ -13,6 +13,8 @@ logs/
 *.sqlite-wal
 *.sqlite-journal
 .posse/
+# Locally downloaded and extracted model packages are runtime artifacts.
+/models/
 .smoke-runtime*/
 .manual-smoke-db.sqlite
 .manual-smoke-db.sqlite-journal
