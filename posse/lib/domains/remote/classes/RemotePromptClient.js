@@ -150,7 +150,7 @@ export class RemotePromptClient {
       const headers = {};
       if (body !== undefined) headers["content-type"] = "application/json";
       const pulseToken = await this.pulseTokens.getPulseToken({
-        requiredRoute: requiredRouteFor(path, method),
+        requiredRoute: requiredRouteFor(path, method, body),
       });
       if (pulseToken) {
         this.pulseTokens.assertTrustedResourceUrl(url, operation);
@@ -260,14 +260,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function requiredRouteFor(path, method) {
+function requiredRouteFor(path, method, body = undefined) {
   const key = `${String(method || "GET").toUpperCase()} ${String(path || "")}`;
   if (key === "POST /v1/prompts/compile") return "prompts:compile";
   if (key === "GET /v1/prompts/bundle") return "prompts:bundle";
+  if (key === "POST /v1/catalog/tool-surface") {
+    return body?.mcp_oauth?.requested === true ? "prompts:compile" : "catalog:read";
+  }
   if (key === "GET /v1/catalog/tool-suites"
     || key === "GET /v1/catalog/tools"
-    || key === "GET /v1/catalog/models"
-    || key === "POST /v1/catalog/tool-surface") return "catalog:read";
+    || key === "GET /v1/catalog/models") return "catalog:read";
   return null;
 }
 

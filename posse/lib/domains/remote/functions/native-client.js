@@ -33,13 +33,17 @@ export function remoteNativeRequestRoute(request) {
   const requestPath = String(request?.path || "").trim();
   if (method === "POST" && requestPath === "/v1/prompts/compile") return REMOTE_PROMPTS_COMPILE_ROUTE;
   if (method === "GET" && requestPath === "/v1/prompts/bundle") return REMOTE_PROMPTS_BUNDLE_ROUTE;
+  if (method === "POST" && requestPath === "/v1/catalog/tool-surface") {
+    return request?.body?.mcp_oauth?.requested === true
+      ? REMOTE_PROMPTS_COMPILE_ROUTE
+      : REMOTE_CATALOG_READ_ROUTE;
+  }
   if (
     (method === "GET" && [
       "/v1/catalog/tool-suites",
       "/v1/catalog/tools",
       "/v1/catalog/models",
     ].includes(requestPath))
-    || (method === "POST" && requestPath === "/v1/catalog/tool-surface")
   ) return REMOTE_CATALOG_READ_ROUTE;
   throw new Error(`remote native client refuses unsupported route: ${method} ${requestPath}`);
 }
