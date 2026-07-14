@@ -107,11 +107,17 @@ export class RemotePromptClient {
       method: "POST",
       body: request,
       operation: "remote tool-surface catalog",
+      // The currently issued native Remote client classifies this endpoint as
+      // catalog:read without inspecting the OAuth-minting request body. Keep
+      // privileged minting on the route-aware Node pulse path until that
+      // native compatibility floor advances; ordinary catalog reads remain
+      // native-backed.
+      useNativeClient: request?.mcp_oauth?.requested !== true,
     }, isRetryableRemoteRequestError);
   }
 
   async requestJsonWithRetries(options, isRetryableError = isRetryableRemoteRequestError) {
-    if (this.shouldUseNativeClient()) {
+    if (options?.useNativeClient !== false && this.shouldUseNativeClient()) {
       return await this.requestJsonNative(options, { maxRetries: this.maxRetries });
     }
     const attempts = this.maxRetries + 1;
@@ -139,8 +145,9 @@ export class RemotePromptClient {
     method = "GET",
     body = undefined,
     operation = "remote request",
+    useNativeClient = true,
   } = {}) {
-    if (this.shouldUseNativeClient()) {
+    if (useNativeClient !== false && this.shouldUseNativeClient()) {
       return await this.requestJsonNative({ path, method, body, operation }, { maxRetries: 0 });
     }
     const ac = new AbortController();
