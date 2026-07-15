@@ -70,14 +70,16 @@ function plausibleDeleteFileTarget(relPath) {
 function normalizeExistingCreateScope(payload, cwd, uniqueScopeFiles) {
   const createFiles = Array.isArray(payload.files_to_create) ? payload.files_to_create : [];
   if (createFiles.length === 0) return false;
-  const stillCreate = [];
   const existingCreate = [];
   for (const filePath of createFiles) {
     if (existingFileWithin(cwd, filePath)) existingCreate.push(filePath);
-    else stillCreate.push(filePath);
   }
   if (existingCreate.length === 0) return false;
-  payload.files_to_create = uniqueScopeFiles(stillCreate);
+  // A file created earlier on this WI branch is editable during repair, but it
+  // remains a creation relative to the target branch. Keep both declarations:
+  // modify authorizes the existing worktree path, while create lets assessment
+  // validate the final diff against main correctly.
+  payload.files_to_create = uniqueScopeFiles(createFiles);
   payload.files_to_modify = uniqueScopeFiles(payload.files_to_modify || [], existingCreate);
   return true;
 }

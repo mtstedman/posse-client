@@ -484,7 +484,9 @@ function _spawnRecoveryJobsForVerdict({
     const mergedFixRoots = _mergeUniquePaths(
       originalCreateRoots,
       explicitFixRoots,
-      inferredFixScope.create_roots,
+      // Inferred files_to_create already grants each exact path. Promoting
+      // their parent directories into create_roots broadens scheduler locks
+      // and can deadlock otherwise-disjoint repair jobs under src/ or test/.
       (isArtifactMode(origTaskMode) && origOutputRoot) ? [origOutputRoot] : [],
     );
 

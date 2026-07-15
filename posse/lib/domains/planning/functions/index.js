@@ -9,6 +9,7 @@ export * from "./plan-routing.js";
 export * from "./planner-helpers.js";
 export * from "./red-team-plan.js";
 export * from "./scope-gates.js";
+export * from "./scope-reconciliation.js";
 export * from "./state.js";
 export * from "./suggestions.js";
 export * from "./task-splitting.js";

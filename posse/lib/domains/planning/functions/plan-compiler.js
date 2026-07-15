@@ -95,6 +95,7 @@ import {
   isBroadNarrowScopedCodeTask,
   parseUnderScopedBroadGateMode,
 } from "./scope-gates.js";
+import { reconcilePlannerFileKinds } from "./scope-reconciliation.js";
 import { rewriteDependenciesAfterSplit } from "./dependency-rewrite.js";
 import { cancelSupersededPlanChildren } from "./plan-cleanup.js";
 import {
@@ -714,6 +715,18 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         if (!t || !t.title) {
           droppedTaskIndexes.add(i);
           continue;
+        }
+        const fileKindRepair = reconcilePlannerFileKinds(t, worker.projectDir);
+        if (fileKindRepair.changed) {
+          const details = [
+            fileKindRepair.movedToCreate.length > 0
+              ? `${fileKindRepair.movedToCreate.length} missing path(s) to files_to_create`
+              : null,
+            fileKindRepair.movedToModify.length > 0
+              ? `${fileKindRepair.movedToModify.length} existing path(s) to files_to_modify`
+              : null,
+          ].filter(Boolean).join(", ");
+          worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: reconciled file kinds for task "${t.title}" (${details})`);
         }
         const preValidationWi = getWorkItem(planJob.work_item_id);
         const preValidationWiMode = preValidationWi?.mode || "build";
