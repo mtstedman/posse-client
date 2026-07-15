@@ -488,8 +488,8 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     atlasGateEnabled: signed.atlasGateEnabled === true && attachment.atlasGateEnabled !== false,
     atlasPrefetchStatus: String(attachment.atlasPrefetchStatus || ""),
     atlas: { ...(plainObject(attachment.atlas) || {}) },
-    // The OAuth bearer is the immutable role/tool contract. A Job can never
-    // replace or widen this allowlist.
+    // The signed OAuth capability claims are the immutable role/tool contract.
+    // A rotating bearer and its Job attachment can never widen this allowlist.
     toolAllowlist: normalizeSuiteToolAllowlist(signed.toolAllowlist),
   };
 }

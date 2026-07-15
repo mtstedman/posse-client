@@ -60,6 +60,11 @@ export class OrderedDocumentIntake {
     return this.#done;
   }
 
+  /** Authoritative denominator once the repository path sequence is known. */
+  get totalDocuments() {
+    return this.#registered ? this.#records.length : null;
+  }
+
   /**
    * Register the authoritative file sequence. Duplicate path hints collapse to
    * one document because the final view also has one row-set per path.

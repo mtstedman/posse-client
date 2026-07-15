@@ -19,7 +19,7 @@ import { parseWorkItemMetadata } from "../../planning/functions/state.js";
 import { getResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { nativeBinaries as defaultNativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { daemonSupervisor as defaultDaemonSupervisor } from "../../../shared/tools/classes/daemon/index.js";
-import { persistentMcpOwner } from "../../../shared/tools/classes/PersistentMcpOwner.js";
+import { persistentMcpOwner as defaultPersistentMcpOwner } from "../../../shared/tools/classes/PersistentMcpOwner.js";
 import { RunBootPanelController } from "./RunBootPanelController.js";
 import { RunCloseoutController } from "./RunCloseoutController.js";
 import { RunDisplayActions } from "./RunDisplayActions.js";
@@ -66,9 +66,78 @@ function summarizeNativeArtifactResults(results) {
 export class RunSession {
   constructor(deps = {}) {
     Object.assign(this, deps);
+    this._activeWorker = null;
+    this._activeScheduler = null;
+    this._stoppedSchedulers = new WeakSet();
+    this._activeShutdown = null;
+    this._activeDisplay = null;
+    this._removeRunSignalHandlers = null;
+    this._stopRunDisplaySnapshots = null;
+    this._cleanupRunAtlas = null;
+    this._processResourceDisposal = null;
   }
 
   async run() {
+    try {
+      return await this.#run();
+    } finally {
+      await this.#disposeRunResources();
+    }
+  }
+
+  async #disposeRunResources() {
+    await this.#disposeIterationResources();
+    await this.#disposeProcessResources();
+  }
+
+  async #disposeIterationResources() {
+    const shutdown = this._activeShutdown;
+    this._activeShutdown = null;
+    try { shutdown?.uninstall?.(); } catch { /* best effort */ }
+    const removeSignalHandlers = this._removeRunSignalHandlers;
+    this._removeRunSignalHandlers = null;
+    try { removeSignalHandlers?.(); } catch { /* best effort */ }
+    const scheduler = this._activeScheduler;
+    try { this.#stopScheduler(scheduler); } catch { /* best effort */ }
+    const stopDisplaySnapshots = this._stopRunDisplaySnapshots;
+    this._stopRunDisplaySnapshots = null;
+    try { stopDisplaySnapshots?.(); } catch { /* best effort */ }
+    const display = this._activeDisplay;
+    this._activeDisplay = null;
+    try { display?.stop?.(); } catch { /* best effort */ }
+
+    const worker = this._activeWorker;
+    this._activeWorker = null;
+    const cleanupAtlas = this._cleanupRunAtlas;
+    this._cleanupRunAtlas = null;
+    try { await cleanupAtlas?.({ label: "Run cleanup", announce: false }); } catch { /* best effort */ }
+    try { await worker?.disposeAgents?.("run_session_exit"); } catch { /* best effort */ }
+  }
+
+  #stopScheduler(scheduler) {
+    if (!scheduler || this._stoppedSchedulers.has(scheduler)) return;
+    this._stoppedSchedulers.add(scheduler);
+    try {
+      scheduler.stop?.();
+      if (this._activeScheduler === scheduler) this._activeScheduler = null;
+    } catch (err) {
+      this._stoppedSchedulers.delete(scheduler);
+      throw err;
+    }
+  }
+
+  async #disposeProcessResources() {
+    if (!this._processResourceDisposal) {
+      this._processResourceDisposal = (async () => {
+        try { await (this.daemonSupervisor || defaultDaemonSupervisor)?.shutdownAll?.(); } catch { /* best effort */ }
+        try { await (this.persistentMcpOwner || defaultPersistentMcpOwner)?.close?.({ force: true }); } catch { /* best effort */ }
+        try { await (this.nativeBinaries || defaultNativeBinaries)?.disposeAll?.(); } catch { /* best effort */ }
+      })();
+    }
+    await this._processResourceDisposal;
+  }
+
+  async #run() {
     const {
       maybeAnnounceAutoMergeSetting,
       listJobs,
@@ -115,6 +184,7 @@ export class RunSession {
       closeSharedConductor: closeSharedConductorForRun = closeSharedConductor,
       nativeBinaries: nativeBinariesForRun = defaultNativeBinaries,
       daemonSupervisor: daemonSupervisorForRun = defaultDaemonSupervisor,
+      persistentMcpOwner: persistentMcpOwnerForRun = defaultPersistentMcpOwner,
       log,
       Display,
       STALL_TIMEOUT,
@@ -195,6 +265,7 @@ export class RunSession {
     listActiveFileLocks,
   });
   const stopDisplaySnapshotCaches = () => displaySnapshots.stop();
+  this._stopRunDisplaySnapshots = stopDisplaySnapshotCaches;
   const refreshDisplaySnapshotsForQueue = () => displaySnapshots.refreshForQueue();
   const setupDisplaySnapshotCaches = () => displaySnapshots.setup();
 
@@ -215,6 +286,7 @@ export class RunSession {
   const emitCloseoutStatus = (message, color = C.dim) => closeout.emitStatus(message, color);
   const flushCloseoutStatus = () => closeout.flushStatus();
   const cleanupAtlasForSession = (opts) => closeout.cleanupAtlasForSession(opts);
+  this._cleanupRunAtlas = cleanupAtlasForSession;
   const drainPendingAtlasWarmJobs = (opts) => closeout.drainPendingAtlasWarmJobs(opts);
   const runBoundedCloseoutWorktreeCleanup = (opts) => closeout.runBoundedCloseoutWorktreeCleanup(opts);
   const cleanupResidualWorktreesAfterAtlas = (opts) => closeout.cleanupResidualWorktreesAfterAtlas(opts);
@@ -225,7 +297,7 @@ export class RunSession {
     if (schedulerStopPromise) return schedulerStopPromise;
     schedulerStopPromise = new Promise((resolve) => {
       const finish = () => {
-        try { scheduler.stop(); } catch { /* best-effort */ }
+        try { this.#stopScheduler(scheduler); } catch { /* best-effort */ }
         resolve();
       };
       if (typeof setImmediate === "function") setImmediate(finish);
@@ -1030,6 +1102,7 @@ export class RunSession {
     onQueueSnapshot: handleQueueSnapshot,
     onlyWorkItemIds: scopedWorkItemIds,
   });
+  this._activeScheduler = scheduler;
 
   // During boot, scheduler events are already represented by the boot panel.
   // Once display attaches, route scheduler messages into the TUI event log.
@@ -1487,6 +1560,7 @@ export class RunSession {
         }
       };
       const formatBootCount = (value) => {
+        if (value == null || value === "") return null;
         const n = Number(value);
         if (!Number.isFinite(n)) return null;
         return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -1505,6 +1579,9 @@ export class RunSession {
         if (atlasEncodeStartedAt == null) atlasEncodeStartedAt = Date.now();
         const current = Number(event.progress_current ?? event.current ?? bootEncodeProgress?.current);
         const total = Number(event.progress_total ?? event.total ?? bootEncodeProgress?.total);
+        const progressUnit = String(
+          event.progress_unit ?? event.unit ?? bootEncodeProgress?.unit ?? "symbols",
+        ).trim().toLowerCase() || "symbols";
         const rawPercent = Number(event.percent ?? bootEncodeProgress?.percent);
         const hasCount = Number.isFinite(current) && Number.isFinite(total) && total > 0;
         const percent = Number.isFinite(rawPercent)
@@ -1514,11 +1591,37 @@ export class RunSession {
         const eta = hasCount && current > 0 && current < total
           ? formatBootEta((elapsedMs / current) * (total - current))
           : null;
+        const unitLabel = progressUnit === "documents" || progressUnit === "document"
+          ? "documents"
+          : progressUnit === "texts" || progressUnit === "text"
+            ? "texts"
+            : "symbols";
         const countDetail = hasCount
-          ? `${formatBootCount(current)}/${formatBootCount(total)} symbols`
+          ? `${formatBootCount(current)}/${formatBootCount(total)} ${unitLabel}`
           : firstLine(event.detail || event.text || bootEncodeProgress?.detail || "encoding");
-        const detail = eta ? `${countDetail} · ~${eta} left` : countDetail;
-        bootEncodeProgress = { current: hasCount ? current : null, total: hasCount ? total : null, percent, detail };
+        const phase = String(event.nativePhase || event.phase || "").trim().replace(/_/g, " ");
+        const indexedSymbols = formatBootCount(event.indexedSymbols);
+        const nativeCurrent = formatBootCount(event.nativeCurrent);
+        const nativeTotal = formatBootCount(event.nativeTotal);
+        const nativeUnit = String(event.nativeUnit || "texts").trim();
+        const nativeBatchCurrent = formatBootCount(event.nativeBatchCurrent);
+        const nativeBatchTotal = formatBootCount(event.nativeBatchTotal);
+        const activity = [];
+        if (unitLabel === "documents" && indexedSymbols != null) activity.push(`${indexedSymbols} symbols`);
+        if (phase) activity.push(phase);
+        if (nativeCurrent != null && nativeTotal != null) activity.push(`${nativeCurrent}/${nativeTotal} ${nativeUnit}`);
+        if (nativeBatchCurrent != null && nativeBatchTotal != null) {
+          activity.push(`native batch ${nativeBatchCurrent}/${nativeBatchTotal}`);
+        }
+        if (eta) activity.push(`~${eta} left`);
+        const detail = [countDetail, ...activity].filter(Boolean).join(" · ");
+        bootEncodeProgress = {
+          current: hasCount ? current : null,
+          total: hasCount ? total : null,
+          percent,
+          detail,
+          unit: progressUnit,
+        };
         bootPanel.updateEncode({
           state: "building",
           percent,
@@ -2120,9 +2223,14 @@ export class RunSession {
     bootSignalCount++;
     if (bootSignalCount >= 2) {
       try { scheduler.requestStop?.(); } catch { /* best-effort */ }
-      void cleanupAtlasForSession({ label: "Forced shutdown" });
-      closeRuntimeStateForExit();
-      process.exit(1);
+      try {
+        const cleanup = cleanupAtlasForSession({ label: "Forced shutdown" });
+        if (cleanup && typeof cleanup.then === "function") void Promise.resolve(cleanup).catch(() => {});
+      } catch { /* forced shutdown continues */ }
+      try { closeRuntimeStateForExit(); } catch { /* best-effort */ }
+      process.exitCode = 1;
+      exitProcess?.(1);
+      return;
     }
 
     if (bootShutdownRequested) return;
@@ -2131,10 +2239,22 @@ export class RunSession {
     const label = signal === "SIGTERM" ? "Shutdown" : "Ctrl+C";
     console.log(`\n  ${C.yellow}${label} during boot - releasing scheduler lock...${C.reset}`);
     console.log(`  ${C.dim}(Ctrl+C again to force-exit)${C.reset}`);
-    const stopPromise = scheduleSchedulerStop();
+    let stopPromise;
+    try {
+      stopPromise = Promise.resolve(scheduleSchedulerStop());
+    } catch {
+      try { this.#stopScheduler(scheduler); } catch { /* best-effort */ }
+      stopPromise = Promise.resolve();
+    }
+    let atlasCleanupPromise;
+    try {
+      atlasCleanupPromise = Promise.resolve(cleanupAtlasForSession({ label: "Boot cleanup" }));
+    } catch {
+      atlasCleanupPromise = Promise.resolve();
+    }
     bootCleanupPromise = Promise.allSettled([
       stopPromise,
-      cleanupAtlasForSession({ label: "Boot cleanup" }),
+      atlasCleanupPromise,
     ]).then(() => undefined);
     void bootCleanupPromise;
   };
@@ -2153,6 +2273,7 @@ export class RunSession {
       process.off("message", bootMessageCleanup);
     }
   };
+  this._removeRunSignalHandlers = removeBootSignalHandlers;
 
   process.on("SIGINT", bootSigintCleanup);
   process.on("SIGTERM", bootSigtermCleanup);
@@ -2168,6 +2289,9 @@ export class RunSession {
       onBeforeLoop,
       onBeforeLoopFatal: true,
       onBootEvent: handleSchedulerBootEvent,
+      onBootAbort: (reason) => {
+        if (!bootAbortController.signal.aborted) bootAbortController.abort(reason);
+      },
     });
   } finally {
     if (!booted) removeBootSignalHandlers();
@@ -2317,6 +2441,7 @@ export class RunSession {
   if (useTui) {
     try { recordRunDiagnostic("display.starting", { concurrency: CONCURRENCY }); } catch { /* observational */ }
     display = new Display({ concurrency: CONCURRENCY, rightMode: "monitor", projectDir: PROJECT_DIR });
+    this._activeDisplay = display;
     // Replay the most recent queue snapshot the scheduler has emitted so
     // the display opens with a fully populated view instead of a blank
     // frame that waits for the next state change.
@@ -2330,6 +2455,7 @@ export class RunSession {
   }
 
   worker = new Worker({ autoApprove: AUTO_APPROVE, projectDir: PROJECT_DIR, display, dryRun: DRY_RUN, nonInteractive, stallTimeout: STALL_TIMEOUT, leaseSec: scheduler.leaseSec });
+  this._activeWorker = worker;
 
   if (display) {
     const revivedHumanJobs = requeueWaitingHumanInputJobs();
@@ -2386,8 +2512,18 @@ export class RunSession {
     requeueForShutdown,
     refreshWorkItemStatus,
     closeRuntimeState: closeRuntimeStateForExit,
+    finalizeRuntimeResources: async () => {
+      // finishAfterScheduler already released these per-run resources. Clear
+      // the outer fallback references before the injected process-level close
+      // so a test exit stub (which returns instead of terminating) stays
+      // idempotent when RunSession's outer finally executes.
+      this._cleanupRunAtlas = null;
+      this._activeWorker = null;
+      await this.#disposeProcessResources();
+    },
     exitProcess,
   });
+  this._activeShutdown = shutdown;
   removeBootSignalHandlers();
   shutdown.install();
   try {
@@ -2415,6 +2551,10 @@ export class RunSession {
     (job) => worker.execute(job),
     schedulerCallbacks.callbacks(),
   );
+  // Scheduler.runLoop owns its successful-return stop path. Drop the outer
+  // rollback reference; exceptions retain it so RunSession's finally can
+  // release a lock when failure happened before runLoop installed its guard.
+  if (this._activeScheduler === scheduler) this._activeScheduler = null;
   try {
     recordRunDiagnostic("scheduler.run_loop_returned", {
       owner_id: scheduler.ownerId || null,
@@ -2446,8 +2586,21 @@ export class RunSession {
   // The display is still in raw mode, so Ctrl+C is intercepted by keypress and
   // emitted as process.emit("SIGINT") — without a handler, nothing happens.
   shutdown.uninstall();
-  const wrapUpSigintCleanup = () => handleWrapUpSignal({ signal: "SIGINT", display, cleanupAtlasForSession });
-  const wrapUpSigtermCleanup = () => handleWrapUpSignal({ signal: "SIGTERM", display, cleanupAtlasForSession });
+  const cleanupInterruptedWrapUp = (signal) => handleWrapUpSignal({
+    signal,
+    display,
+    cleanupAtlasForSession,
+    finalizeRuntimeResources: async () => {
+      // handleWrapUpSignal already completed the local ATLAS close. Clear its
+      // fallback reference, then await the rest of the same idempotent session
+      // teardown used for exceptions and graceful scheduler shutdown.
+      this._cleanupRunAtlas = null;
+      await this.#disposeRunResources();
+    },
+    exit: exitProcess,
+  });
+  const wrapUpSigintCleanup = () => cleanupInterruptedWrapUp("SIGINT");
+  const wrapUpSigtermCleanup = () => cleanupInterruptedWrapUp("SIGTERM");
   process.on("SIGINT", wrapUpSigintCleanup);
   process.on("SIGTERM", wrapUpSigtermCleanup);
 
@@ -2480,6 +2633,11 @@ export class RunSession {
       if (display) display.stop();
       process.off("SIGINT", wrapUpSigintCleanup);
       process.off("SIGTERM", wrapUpSigtermCleanup);
+      // A rerun stays in the same process, so process-wide daemon/MCP/native
+      // owners must remain available. Per-iteration state must not: the next
+      // call overwrites these fields and would otherwise strand the prior
+      // worker's reusable agents and ATLAS cleanup handle.
+      await this.#disposeIterationResources();
       await this.run();
       return;
     }
@@ -2526,7 +2684,7 @@ export class RunSession {
       await worker?.disposeAgents?.("run_complete");
     } catch { /* agent gate shutdown is best-effort */ }
     try {
-      await persistentMcpOwner.close({ force: true });
+      await persistentMcpOwnerForRun.close({ force: true });
     } catch { /* MCP owner shutdown is best-effort */ }
     await cleanupResidualWorktreesAfterAtlas({ label: "Run wrap-up" });
   }

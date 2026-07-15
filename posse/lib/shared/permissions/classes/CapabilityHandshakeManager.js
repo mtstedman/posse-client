@@ -47,6 +47,10 @@ export class CapabilityHandshakeManager {
   issueSync(request = {}, context = null) {
     const issued = this.issue(request, context);
     if (issued && typeof issued.then === "function") {
+      // The async issuer has already started. Observe its eventual rejection
+      // before reporting the sync/async contract error so a late mint failure
+      // cannot become an unhandled rejection in the parent process.
+      issued.catch?.(() => {});
       throw handshakeError("POSSE_CAPABILITY_ASYNC_ISSUER", "capability issuer requires an async handshake");
     }
     return issued;

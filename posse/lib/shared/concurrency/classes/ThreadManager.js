@@ -72,9 +72,9 @@ export class ThreadManager {
 
   /**
    * Run a module worker using Posse's standard `{type,result,event,error}`
-   * message protocol. The returned promise does not settle on timeout/abort
-   * until termination has been requested, so callers can safely hold resource
-   * gates around the whole worker lifetime.
+   * message protocol. The returned promise does not settle until a completed
+   * worker has exited or termination has finished, so callers can safely hold
+   * resource gates around the whole worker lifetime.
    *
    * @template T
    * @param {string | URL} workerUrl
@@ -88,6 +88,7 @@ export class ThreadManager {
    *   workerOptions?: Record<string, unknown>,
    *   unref?: boolean,
    *   stopGraceMs?: number | null,
+   *   terminalExitGraceMs?: number | null,
    * }} [opts]
    * @returns {Promise<T>}
    */
@@ -101,15 +102,34 @@ export class ThreadManager {
     workerOptions = {},
     unref = false,
     stopGraceMs = 0,
+    terminalExitGraceMs = 100,
   } = {}) {
     const maxMs = Number(timeoutMs);
     const gracefulStopMs = Number.isFinite(Number(stopGraceMs)) && Number(stopGraceMs) > 0
       ? Math.floor(Number(stopGraceMs))
       : 0;
+    const terminalGraceMs = Number.isFinite(Number(terminalExitGraceMs)) && Number(terminalExitGraceMs) > 0
+      ? Math.floor(Number(terminalExitGraceMs))
+      : 0;
     return new Promise((resolve, reject) => {
       /** @type {NodeJS.Timeout | null} */
       let timer = null;
       let settled = false;
+      if (signal?.aborted) {
+        const decorated = decorateThreadError(abortReasonToError(signal, label), {
+          code: "THREAD_ABORTED",
+          threadLabel: label,
+        });
+        emitLifecycle(onLifecycle, {
+          kind: "abort",
+          label,
+          worker_url: String(workerUrl),
+          worker_thread_id: null,
+          error: threadErrorTelemetry(decorated),
+        });
+        reject(decorated);
+        return;
+      }
       const execArgv = Array.isArray(workerOptions?.execArgv)
         ? /** @type {string[]} */ (workerOptions.execArgv)
         : undefined;
@@ -146,7 +166,7 @@ export class ThreadManager {
       /**
        * @param {(value: any) => void} fn
        * @param {unknown} value
-       * @param {{ terminate?: boolean }} [settleOpts]
+       * @param {{ terminate?: boolean, naturalExit?: boolean }} [settleOpts]
        */
       const finish = (fn, value, settleOpts = {}) => {
         if (settled) return;
@@ -156,10 +176,27 @@ export class ThreadManager {
         timer = null;
         signal?.removeEventListener?.("abort", onAbort);
         worker.removeAllListeners("message");
-        worker.removeAllListeners("error");
-        worker.removeAllListeners("exit");
         if (!terminate) {
+          worker.removeAllListeners("error");
+          worker.removeAllListeners("exit");
           fn(value);
+          return;
+        }
+        if (settleOpts.naturalExit === true && terminalGraceMs > 0) {
+          let done = false;
+          let exitTimer = null;
+          const complete = () => {
+            if (done) return;
+            done = true;
+            if (exitTimer) clearTimeout(exitTimer);
+            cleanup();
+            fn(value);
+          };
+          worker.once("exit", complete);
+          exitTimer = setTimeout(() => {
+            worker.terminate().catch(() => undefined).finally(complete);
+          }, terminalGraceMs);
+          exitTimer.unref?.();
           return;
         }
         if (gracefulStopMs <= 0) {
@@ -217,7 +254,11 @@ export class ThreadManager {
             worker_url: String(workerUrl),
             worker_thread_id: worker.threadId,
           });
-          finish(resolve, /** @type {T} */ (message.result));
+          // A protocol result means the work is complete, but it does not
+          // guarantee that the Worker has released every handle. Terminate and
+          // wait for that lifecycle to finish before releasing caller-owned
+          // gates around this promise.
+          finish(resolve, /** @type {T} */ (message.result), { terminate: true, naturalExit: true });
           return;
         }
         if (message?.type === "error") {
@@ -229,11 +270,16 @@ export class ThreadManager {
             worker_thread_id: worker.threadId,
             error: threadErrorTelemetry(err),
           });
-          finish(reject, err);
+          finish(reject, err, { terminate: true, naturalExit: true });
         }
       };
 
       const onError = (err) => {
+        // Keep this listener installed until terminate()/exit completes. A
+        // Worker can emit error after posting its terminal result; removing
+        // the listener early turns that lifecycle race into an unhandled
+        // EventEmitter error in the parent process.
+        if (settled) return;
         const decorated = decorateThreadError(err instanceof Error ? err : new Error(String(err)), {
           code: "THREAD_ERROR",
           threadLabel: label,
@@ -245,7 +291,7 @@ export class ThreadManager {
           worker_thread_id: worker.threadId,
           error: threadErrorTelemetry(decorated),
         });
-        finish(reject, decorated);
+        finish(reject, decorated, { terminate: true, naturalExit: true });
       };
 
       const onExit = (code) => {

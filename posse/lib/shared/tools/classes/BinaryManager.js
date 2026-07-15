@@ -81,6 +81,14 @@ export class BinaryManager {
     this._nativeAuthManager = opts.nativeAuthManager || null;
     this._pulseManager = opts.pulseManager || null;
     this._pulseManagerAuth = null;
+    // NativeBinary handles need one manager-scoped pulse authority, but merely
+    // constructing a handle (for example, to inspect a staged artifact) must
+    // not initialize heartbeat auth. Keep a stable forwarding facade on every
+    // handle and resolve the real broker only at the first native invocation.
+    this._handlePulseManager = Object.freeze({
+      getPulseEnvelope: (options) => this.pulseManager.getPulseEnvelope(options),
+      getCachedPulseEnvelope: (options) => this.pulseManager.getCachedPulseEnvelope(options),
+    });
     this._artifactInstaller = opts.artifactInstaller || ensureNativeBinaryArtifact;
     this._artifactCacheRoot = opts.artifactCacheRoot || null;
     this._artifactFetchImpl = opts.artifactFetchImpl || globalThis.fetch;
@@ -150,7 +158,7 @@ export class BinaryManager {
     }
     for (const handle of this._handles.values()) {
       handle._nativeAuthManager = this._nativeAuthManager;
-      if (!this._opts.pulseManager) handle._fixedPulseManager = null;
+      if (!this._opts.pulseManager) handle._fixedPulseManager = this._handlePulseManager;
     }
   }
 
@@ -162,7 +170,7 @@ export class BinaryManager {
     this._pulseManager = manager;
     this._pulseManagerAuth = this.nativeAuthManager;
     for (const handle of this._handles.values()) {
-      handle._fixedPulseManager = manager;
+      handle._fixedPulseManager = this._handlePulseManager;
       handle._pulseManager = null;
       handle._pulseManagerAuth = null;
     }
@@ -203,7 +211,7 @@ export class BinaryManager {
       // authority) now reach the handle so key/heartbeat resolution honors it.
       env: this._opts.env,
       nativeAuthManager: this.nativeAuthManager,
-      pulseManager: this.pulseManager,
+      pulseManager: this._handlePulseManager,
       exactVersion,
     });
   }
@@ -428,6 +436,7 @@ export class BinaryManager {
   async _ensureRemoteArtifact(name, { refresh = false, dryRun = false, onProgress = null } = {}) {
     const handle = this.binary(name);
     let version = nativeBinaryExactVersion(name);
+    let issuedVersion = null;
     try {
       // Do not replace a valid binary during a live run. Boot performs one
       // explicit refresh before work starts; after that, default ensures only
@@ -461,7 +470,7 @@ export class BinaryManager {
           refresh,
           requiredRoute: "artifacts:read",
         });
-        const issuedVersion = String(pulse?.nativeArtifacts?.[nativeBinaryEntry(name)?.package] || "").trim();
+        issuedVersion = String(pulse?.nativeArtifacts?.[nativeBinaryEntry(name)?.package] || "").trim() || null;
         if (issuedVersion) version = issuedVersion;
         if (version && handle.exactVersion === version && handle.isAvailable()) {
           return {
@@ -471,6 +480,7 @@ export class BinaryManager {
             path: handle.resolvePath(),
             source: "existing",
             downloaded: false,
+            current: true,
           };
         }
         const stagedHandle = version ? this._createHandle(name, this._opts.binRoot, version) : null;
@@ -483,12 +493,13 @@ export class BinaryManager {
             path: stagedHandle.resolvePath(),
             source: "staged",
             downloaded: false,
+            current: true,
           };
         }
         const cachedCurrent = version
           ? await this._activateCachedVersion(name, handle, version)
           : null;
-        if (cachedCurrent) return cachedCurrent;
+        if (cachedCurrent) return { ...cachedCurrent, current: true };
       }
       if (dryRun) {
         return version
@@ -538,10 +549,20 @@ export class BinaryManager {
         size: installed.size,
         sha256: installed.sha256,
         version: expectedVersion,
+        ...(refresh ? { current: true } : {}),
       };
     } catch (error) {
       const fallback = await this._activateCachedFallback(name, handle);
-      if (fallback) return fallback;
+      if (fallback) {
+        return {
+          ...fallback,
+          ...(refresh ? {
+            current: false,
+            issuedVersion,
+            refreshError: error?.message || String(error),
+          } : {}),
+        };
+      }
       return {
         available: false,
         name,

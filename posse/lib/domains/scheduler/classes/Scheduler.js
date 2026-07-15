@@ -1296,7 +1296,7 @@ export class Scheduler {
     log.info("scheduler", "Boot complete", { concurrency: this.concurrency, pollMs: this.pollMs, leaseSec: this.leaseSec });
   }
 
-  async boot({ onBeforeLoop, onBeforeLoopFatal = false, onBootEvent = null } = {}) {
+  async boot({ onBeforeLoop, onBeforeLoopFatal = false, onBootEvent = null, onBootAbort = null } = {}) {
     const emitBootEvent = (label, patch) => {
       if (typeof onBootEvent !== "function") return;
       try { onBootEvent({ label, ...patch }); } catch { /* observational */ }
@@ -1335,8 +1335,18 @@ export class Scheduler {
     const SCHEDULER_BOOT_OUTER_TIMEOUT_MS = 45 * 60 * 1000;
     /** @type {NodeJS.Timeout | null} */
     let bootTimeoutTimer = null;
+    // Do not release boot ownership on the first rejection while the sibling
+    // phase is still running. In particular, orphan-recovery failure used to
+    // unwind RunSession cleanup while pre-loop warmups could continue and
+    // recreate resources behind the closed supervisor. Preserve the original
+    // rejection after both phases settle; the outer timeout remains the hard
+    // ceiling for a genuinely wedged sibling.
+    const bootPhases = Promise.allSettled([recoverP, preLoopP]).then((results) => {
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed) throw failed.reason;
+    });
     const bootRace = Promise.race([
-      Promise.all([recoverP, preLoopP]),
+      bootPhases,
       new Promise((_, reject) => {
         bootTimeoutTimer = setTimeout(() => {
           const err = new Error(`Scheduler boot exceeded outer ${SCHEDULER_BOOT_OUTER_TIMEOUT_MS / 60000}min timeout — a step is wedged`);
@@ -1350,6 +1360,7 @@ export class Scheduler {
       await bootRace;
     } catch (err) {
       if (bootTimeoutTimer) clearTimeout(bootTimeoutTimer);
+      try { onBootAbort?.(err); } catch { /* best-effort cooperative cancellation */ }
       if (/** @type {any} */ (err)?.code === "SCHEDULER_BOOT_TIMEOUT") {
         this._log(`Boot: ${err.message}`, "red");
         emitBootEvent("pre-loop hooks", { section: "scheduler", status: "failed", detail: err.message });
@@ -1368,11 +1379,26 @@ export class Scheduler {
     }
     if (this._stopRequested) {
       this._log("Boot: decision=EXIT (stop requested during pre-loop hooks)", "yellow");
+      this.stop();
       return false;
     }
-    await this.runHealthChecks({ onBootEvent });
-    this.markBootComplete({ onBootEvent });
-    return true;
+    try {
+      await this.runHealthChecks({ onBootEvent });
+      if (this._stopRequested) {
+        this._log("Boot: decision=EXIT (stop requested during health checks)", "yellow");
+        this.stop();
+        return false;
+      }
+      this.markBootComplete({ onBootEvent });
+      return true;
+    } catch (err) {
+      // Every failure after lock acquisition must converge on the same release
+      // path. Health probes are external I/O and can reject after orphan and
+      // pre-loop recovery succeeded; without this guard the scheduler lock and
+      // renewal timer survived the failed boot.
+      this.stop();
+      throw err;
+    }
   }
 
   /**

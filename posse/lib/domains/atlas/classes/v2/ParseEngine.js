@@ -2506,6 +2506,7 @@ export class ParseEngine {
       wait: false,
       signal: this.#signal || undefined,
       documents,
+      getDocumentTotal: () => documents.totalDocuments,
       mergeDocument: async (document) => {
         const repoRelPath = String(document.repo_rel_path || document.document_id || "");
         const contentHash = String(document.content_hash || "");
@@ -2522,12 +2523,12 @@ export class ParseEngine {
       ...(supportsStructuredSymbols ? {} : {
         buildSymbolText: (symbol) => String(encoder.buildSymbolText(symbol) || ""),
       }),
-      embedSymbols: async (symbols, signal) => {
+      embedSymbols: async (symbols, signal, onProgress) => {
         const vectors = supportsStructuredSymbols
-          ? await encoder.encodeSymbols(symbols, signal)
+          ? await encoder.encodeSymbols(symbols, signal, onProgress)
           : typeof encoder.encodeDocuments === "function"
-            ? await encoder.encodeDocuments(symbols.map((symbol) => String(symbol.text || "")), signal)
-            : await encoder.encode(symbols.map((symbol) => String(symbol.text || "")), signal);
+            ? await encoder.encodeDocuments(symbols.map((symbol) => String(symbol.text || "")), signal, onProgress)
+            : await encoder.encode(symbols.map((symbol) => String(symbol.text || "")), signal, onProgress);
         return Array.isArray(vectors)
           ? vectors.map((vector, index) => ({ symbol_key: symbols[index].symbol_key, vector }))
           : vectors;

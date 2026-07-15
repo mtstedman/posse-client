@@ -20,6 +20,7 @@ import { nativeBinaries } from "../../tools/classes/BinaryManager.js";
  * @property {number} [timeoutMs]
  * @property {AbortSignal} [signal]
  * @property {boolean} [idempotent]
+ * @property {(event: Record<string, unknown>) => void} [onProgress]
  */
 
 /**
@@ -66,6 +67,7 @@ export async function runMlNativeMethodAsync(method, payload, opts) {
     ...(useWorker ? { workerArgs: ["worker", "--stdio", ...modelArgs] } : {}),
     workerFallback: true,
     idempotent: opts.idempotent !== false,
+    onProgress: opts.onProgress,
     requiredRoute: ML_NATIVE_ROUTE,
   };
   const res = await manager.binary("ml").run(

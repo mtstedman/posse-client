@@ -11,6 +11,7 @@ import { pathToFileURL } from "node:url";
 
 const MAX_STDIN_CONTENT_LENGTH_BYTES = 16 * 1024 * 1024;
 const MAX_STDIN_BUFFER_BYTES = MAX_STDIN_CONTENT_LENGTH_BYTES * 2;
+const MAX_OWNER_RESPONSE_BYTES = 16 * 1024 * 1024;
 const OWNER_RETRY_MS = 50;
 const OWNER_RETRY_DEADLINE_MS = 5000;
 // Handshake methods (initialize/tools/list/etc.) are idempotent and must attach
@@ -92,28 +93,62 @@ function sendMessage(payload) {
   }
 }
 
-function ownerRequest(message, { timeoutMs = OWNER_DEFAULT_REQUEST_TIMEOUT_MS } = {}) {
-  const body = JSON.stringify({ token: mcpOAuthToken, message });
+function ownerRequest(message, {
+  timeoutMs = OWNER_DEFAULT_REQUEST_TIMEOUT_MS,
+  pipePath = ownerPipe,
+  ownerBearer = ownerToken,
+  sessionToken = mcpOAuthToken,
+} = {}) {
+  const body = JSON.stringify({ token: sessionToken, message });
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn(value);
+    };
+    const fail = (error) => settle(reject, error);
     const req = http.request({
-      socketPath: ownerPipe,
+      socketPath: pipePath,
       path: "/v1/mcp/rpc",
       method: "POST",
       headers: {
-        authorization: `Bearer ${ownerToken}`,
+        authorization: `Bearer ${ownerBearer}`,
         "content-type": "application/json; charset=utf-8",
         "content-length": Buffer.byteLength(body),
       },
     }, (res) => {
       const chunks = [];
-      res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      let total = 0;
+      res.on("data", (chunk) => {
+        const bytes = Buffer.from(chunk);
+        total += bytes.length;
+        if (total > MAX_OWNER_RESPONSE_BYTES) {
+          const err = new Error(`owner response exceeded ${MAX_OWNER_RESPONSE_BYTES} bytes`);
+          err.code = "EOWNERRESPONSETOOLARGE";
+          fail(err);
+          res.destroy(err);
+          req.destroy(err);
+          return;
+        }
+        chunks.push(bytes);
+      });
+      res.on("error", fail);
+      res.on("aborted", () => {
+        const err = new Error("owner response was aborted before completion");
+        err.code = "ECONNRESET";
+        fail(err);
+      });
       res.on("end", () => {
+        if (settled) return;
         const text = Buffer.concat(chunks).toString("utf8");
         let parsed;
         try {
           parsed = text ? JSON.parse(text) : {};
         } catch {
-          reject(new Error(`owner returned invalid JSON (${res.statusCode})`));
+          fail(new Error(`owner returned invalid JSON (${res.statusCode})`));
           return;
         }
         if (res.statusCode !== 200 || parsed?.ok !== true) {
@@ -121,44 +156,75 @@ function ownerRequest(message, { timeoutMs = OWNER_DEFAULT_REQUEST_TIMEOUT_MS } 
           // 5xx means the owner accepted the request but failed transiently
           // (child busy/restarting); safe to replay for idempotent methods.
           if (Number(res.statusCode) >= 500) err.transient = true;
-          reject(err);
+          fail(err);
           return;
         }
-        resolve(parsed.message || null);
+        settle(resolve, parsed.message || null);
       });
     });
     if (timeoutMs) {
-      req.setTimeout(timeoutMs, () => {
+      // ClientRequest#setTimeout is an inactivity timeout. A wedged owner that
+      // trickles bytes can keep it alive forever, so use an absolute request
+      // deadline covering connect, headers, and the complete response body.
+      timer = setTimeout(() => {
         const err = new Error(`owner request timed out after ${timeoutMs}ms`);
         err.code = "ETIMEDOUT";
+        fail(err);
         req.destroy(err);
-      });
+      }, timeoutMs);
+      timer.unref?.();
     }
-    req.on("error", reject);
+    req.on("error", fail);
     req.write(body, "utf8");
     req.end();
   });
 }
 
-async function forwardToOwner(message) {
+export function __testOwnerRequest(message, options = {}) {
+  return ownerRequest(message, options);
+}
+
+async function forwardToOwner(message, {
+  now = Date.now,
+  deadlineMs = null,
+  requestTimeoutMs = null,
+  retryDelayMs = OWNER_RETRY_MS,
+  requestImpl = ownerRequest,
+  sleepImpl = sleep,
+} = {}) {
   const idempotent = isIdempotentMethod(message);
-  const deadline = idempotent ? OWNER_HANDSHAKE_RETRY_DEADLINE_MS : OWNER_RETRY_DEADLINE_MS;
-  const timeoutMs = idempotent ? OWNER_HANDSHAKE_REQUEST_TIMEOUT_MS : OWNER_DEFAULT_REQUEST_TIMEOUT_MS;
-  const started = Date.now();
+  const deadline = Math.max(1, Number(deadlineMs)
+    || (idempotent ? OWNER_HANDSHAKE_RETRY_DEADLINE_MS : OWNER_RETRY_DEADLINE_MS));
+  const timeoutMs = Math.max(1, Number(requestTimeoutMs)
+    || (idempotent ? OWNER_HANDSHAKE_REQUEST_TIMEOUT_MS : OWNER_DEFAULT_REQUEST_TIMEOUT_MS));
+  const deadlineAt = now() + deadline;
   let lastErr = null;
-  while (Date.now() - started <= deadline) {
+  while (now() < deadlineAt) {
+    const remainingMs = Math.max(1, deadlineAt - now());
     try {
-      return await ownerRequest(message, { timeoutMs });
+      // A handshake retry window is also its total budget. Without bounding
+      // each idempotent attempt to the time left, one timeout at the deadline
+      // starts a second full request and doubles attach latency. Tool calls
+      // retain their longer one-attempt timeout because they are not replayed
+      // after ambiguous/maybe-side-effect failures.
+      const attemptTimeoutMs = idempotent ? Math.min(timeoutMs, remainingMs) : timeoutMs;
+      return await requestImpl(message, { timeoutMs: attemptTimeoutMs });
     } catch (err) {
       lastErr = err;
       // Timeouts and transient owner 5xx are only replayed for idempotent
       // handshake methods — never auto-replay a tools/call that may have
       // partially executed.
       if (!shouldRetryOwnerForwardError(err, { idempotent })) throw err;
-      await sleep(OWNER_RETRY_MS);
+      const retryRemainingMs = deadlineAt - now();
+      if (retryRemainingMs <= 0) break;
+      await sleepImpl(Math.min(Math.max(1, Number(retryDelayMs) || OWNER_RETRY_MS), retryRemainingMs));
     }
   }
   throw lastErr || new Error("owner unavailable");
+}
+
+export function __testForwardToOwner(message, options = {}) {
+  return forwardToOwner(message, options);
 }
 
 function dispatchParsed(parsed) {

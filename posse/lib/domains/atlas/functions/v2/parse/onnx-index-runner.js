@@ -52,9 +52,10 @@ import {
  *   documentWindow?: number,
  *   wait?: boolean,
  *   signal?: AbortSignal,
+ *   getDocumentTotal?: () => number | null,
  *   mergeDocument?: (document: OnnxDocument, signal?: AbortSignal) => Promise<OnnxSymbol[]> | OnnxSymbol[],
  *   buildSymbolText?: (symbol: OnnxSymbol, document: OnnxDocument) => string,
- *   embedSymbols: (symbols: OnnxSymbol[], signal?: AbortSignal) => Promise<Array<{ symbol_key: string, vector: Buffer | Uint8Array | ArrayBufferView }>>,
+ *   embedSymbols: (symbols: OnnxSymbol[], signal?: AbortSignal, onProgress?: (event: Record<string, unknown>) => void) => Promise<Array<{ symbol_key: string, vector: Buffer | Uint8Array | ArrayBufferView }>>,
  *   commitBatch: (rows: Array<{ symbol_key: string, model_id: string, model_version: string, merged_fingerprint: string, vector: Buffer | Uint8Array | ArrayBufferView }>) => Promise<void> | void,
  *   persistWatermark?: (watermark: Record<string, unknown>) => Promise<void> | void,
  *   onDocumentProcessed?: (document: OnnxDocument) => Promise<void> | void,
@@ -83,7 +84,7 @@ export function startOnnxRefresh(opts) {
       mode,
       totalSymbols: streaming ? null : changed.length,
       streaming,
-      ...(streaming ? { documentWindow } : {}),
+      ...(streaming ? { documentWindow, totalDocuments: documentTotal(opts) } : {}),
     });
     const result = streaming
       ? await runStreamingRefresh(opts, { mode, batchSize, documentWindow, existing })
@@ -92,6 +93,7 @@ export function startOnnxRefresh(opts) {
       kind: "atlas.parse.onnx.completed",
       mode,
       ...result,
+      ...(streaming ? { totalDocuments: documentTotal(opts), unit: "documents" } : {}),
       durationMs: Date.now() - startedAt,
     });
     return result;
@@ -291,10 +293,17 @@ async function processDocumentWindow(opts, documents, state, { mode, batchSize, 
   const rowByKey = new Map();
   for (let offset = 0; offset < packedEntries.length; offset += batchSize) {
     const packed = packedEntries.slice(offset, offset + batchSize);
+    const processedDocuments = state.processedDocuments + countCompletedDocumentPrefix(remainingByDocument);
     const rows = await embedBatchRows(opts, packed.map((entry) => entry.symbol), {
       mode,
       offset: state.indexedSymbols + offset,
       totalSymbols: null,
+      onProgress: (nativeProgress) => emitStreamingProgress(opts, state, {
+        processedDocuments,
+        phase: String(nativeProgress?.phase || "inference"),
+        nativeProgress,
+        symbol: packed[packed.length - 1]?.symbol?.symbol_key || null,
+      }),
     });
     for (const row of rows) rowByKey.set(row.symbol_key, row);
   }
@@ -308,6 +317,12 @@ async function processDocumentWindow(opts, documents, state, { mode, batchSize, 
   for (let offset = 0; offset < canonicalRows.length; offset += batchSize) {
     const rows = canonicalRows.slice(offset, offset + batchSize);
     const committedEntries = entries.slice(offset, offset + batchSize);
+    emitStreamingProgress(opts, state, {
+      processedDocuments: state.processedDocuments + completedInWindow,
+      phase: "committing",
+      batchItems: rows.length,
+      symbol: rows[rows.length - 1]?.symbol_key || null,
+    });
     await commitPreparedRows(opts, rows, {
       mode,
       offset: state.indexedSymbols,
@@ -327,12 +342,9 @@ async function processDocumentWindow(opts, documents, state, { mode, batchSize, 
       processedDocuments: state.processedDocuments + completedInWindow,
       lastDocument,
     });
-    emitOnnxEvent(opts.onEvent, {
-      kind: "atlas.parse.onnx.progress",
-      mode,
-      current: state.indexedSymbols,
-      total: null,
+    emitStreamingProgress(opts, state, {
       processedDocuments: state.processedDocuments + completedInWindow,
+      phase: "committed",
       symbol: rows[rows.length - 1]?.symbol_key || null,
     });
   }
@@ -352,6 +364,11 @@ async function processDocumentWindow(opts, documents, state, { mode, batchSize, 
   }
   state.processedDocuments += documents.length;
   state.lastDocument = documents[documents.length - 1] || state.lastDocument;
+  emitStreamingProgress(opts, state, {
+    processedDocuments: state.processedDocuments,
+    phase: "documents_processed",
+    document: state.lastDocument?.document_id || null,
+  });
 }
 
 async function completeOnnxDocument(opts, document) {
@@ -383,7 +400,7 @@ async function embedAndCommitBatch(opts, batch, { mode, offset, totalSymbols }) 
   return rows;
 }
 
-async function embedBatchRows(opts, batch, { mode, offset, totalSymbols }) {
+async function embedBatchRows(opts, batch, { mode, offset, totalSymbols, onProgress = null }) {
   throwIfAborted(opts.signal);
   recordEmbeddingForensics("parse_onnx.batch.embed.start", {
     mode,
@@ -396,8 +413,21 @@ async function embedBatchRows(opts, batch, { mode, offset, totalSymbols }) {
   });
   let vectors;
   const embedStartedAt = Date.now();
+  let lastNativeProgress = null;
+  const stopActivity = startEmbeddingActivityPulse((elapsedMs) => {
+    if (typeof onProgress !== "function") return;
+    onProgress(lastNativeProgress
+      ? {
+          ...lastNativeProgress,
+          elapsedMs: Math.max(Number(lastNativeProgress.elapsedMs) || 0, elapsedMs),
+        }
+      : { kind: "ml.embedding.progress", phase: "inference", elapsedMs, source: "harness" });
+  });
   try {
-    vectors = await opts.embedSymbols(batch, opts.signal);
+    vectors = await opts.embedSymbols(batch, opts.signal, (event) => {
+      lastNativeProgress = normalizeNativeEmbeddingProgress(event);
+      if (typeof onProgress === "function") onProgress(lastNativeProgress);
+    });
   } catch (err) {
     recordEmbeddingForensics("parse_onnx.batch.embed.error", {
       mode,
@@ -407,6 +437,8 @@ async function embedBatchRows(opts, batch, { mode, offset, totalSymbols }) {
       error: errorForTelemetry(err),
     });
     throw err;
+  } finally {
+    stopActivity();
   }
   recordEmbeddingForensics("parse_onnx.batch.embed.done", {
     mode,
@@ -486,6 +518,91 @@ async function persistOnnxWatermark(opts, {
  */
 function emitOnnxEvent(onEvent, event) {
   try { emitParseEvent(onEvent, event); } catch { /* parse progress is observational */ }
+}
+
+function documentTotal(opts) {
+  try {
+    const value = typeof opts.getDocumentTotal === "function"
+      ? opts.getDocumentTotal()
+      : opts.documents?.totalDocuments;
+    const total = Number(value);
+    return Number.isInteger(total) && total >= 0 ? total : null;
+  } catch {
+    return null;
+  }
+}
+
+function emitStreamingProgress(opts, state, {
+  processedDocuments,
+  phase,
+  nativeProgress = null,
+  batchItems = null,
+  symbol = null,
+  document = null,
+}) {
+  const current = Math.max(0, Number(processedDocuments) || 0);
+  const total = documentTotal(opts);
+  const native = normalizeNativeEmbeddingProgress(nativeProgress);
+  emitOnnxEvent(opts.onEvent, {
+    kind: "atlas.parse.onnx.progress",
+    mode: opts.mode || "changed",
+    phase: String(phase || native.phase || "inference"),
+    current,
+    total,
+    unit: "documents",
+    progress_current: current,
+    progress_total: total,
+    progress_unit: "documents",
+    processedDocuments: current,
+    totalDocuments: total,
+    indexedSymbols: state.indexedSymbols,
+    skippedSymbols: state.skippedSymbols,
+    ...(batchItems == null ? {} : { batchItems: Number(batchItems) || 0 }),
+    ...(symbol ? { symbol } : {}),
+    ...(document ? { document } : {}),
+    ...(native.phase ? { nativePhase: native.phase } : {}),
+    ...(native.current == null ? {} : { nativeCurrent: native.current }),
+    ...(native.total == null ? {} : { nativeTotal: native.total }),
+    ...(native.unit ? { nativeUnit: native.unit } : {}),
+    ...(native.batchCurrent == null ? {} : { nativeBatchCurrent: native.batchCurrent }),
+    ...(native.batchTotal == null ? {} : { nativeBatchTotal: native.batchTotal }),
+    ...(native.batchItems == null ? {} : { nativeBatchItems: native.batchItems }),
+    ...(native.elapsedMs == null ? {} : { elapsedMs: native.elapsedMs }),
+    ...(native.source ? { progressSource: native.source } : {}),
+  });
+}
+
+function normalizeNativeEmbeddingProgress(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return {};
+  const source = /** @type {Record<string, unknown>} */ (event);
+  return {
+    kind: String(source.kind || "ml.embedding.progress"),
+    phase: String(source.phase || "inference"),
+    current: finiteNumberOrNull(source.current ?? source.completedTexts ?? source.completed_texts),
+    total: finiteNumberOrNull(source.total ?? source.totalTexts ?? source.total_texts),
+    unit: String(source.unit || "texts"),
+    batchCurrent: finiteNumberOrNull(source.batchCurrent ?? source.batch_current),
+    batchTotal: finiteNumberOrNull(source.batchTotal ?? source.batch_total),
+    batchItems: finiteNumberOrNull(source.batchItems ?? source.batch_items),
+    elapsedMs: finiteNumberOrNull(source.elapsedMs ?? source.elapsed_ms),
+    source: String(source.source || "native"),
+  };
+}
+
+function finiteNumberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function startEmbeddingActivityPulse(onActivity) {
+  if (typeof onActivity !== "function") return () => {};
+  const startedAt = Date.now();
+  try { onActivity(0); } catch { /* progress is observational */ }
+  const timer = setInterval(() => {
+    try { onActivity(Date.now() - startedAt); } catch { /* progress is observational */ }
+  }, 1_000);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 /**

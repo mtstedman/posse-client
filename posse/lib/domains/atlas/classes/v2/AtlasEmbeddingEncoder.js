@@ -62,14 +62,14 @@ export class AtlasEmbeddingEncoder {
     return defaultBuildSymbolText(symbol);
   }
 
-  /** @param {string[]} texts @param {AbortSignal} [signal] */
-  encode(texts, signal) {
-    return this.#encode(texts, "document", signal);
+  /** @param {string[]} texts @param {AbortSignal} [signal] @param {(event: Record<string, unknown>) => void} [onProgress] */
+  encode(texts, signal, onProgress) {
+    return this.#encode(texts, "document", signal, onProgress);
   }
 
-  /** @param {string[]} texts @param {AbortSignal} [signal] */
-  encodeDocuments(texts, signal) {
-    return this.#encode(texts, "document", signal);
+  /** @param {string[]} texts @param {AbortSignal} [signal] @param {(event: Record<string, unknown>) => void} [onProgress] */
+  encodeDocuments(texts, signal, onProgress) {
+    return this.#encode(texts, "document", signal, onProgress);
   }
 
   /** @param {string} text @param {AbortSignal} [signal] */
@@ -77,8 +77,8 @@ export class AtlasEmbeddingEncoder {
     return this.#encode([String(text || "")], "query", signal).then((vectors) => vectors[0]);
   }
 
-  /** @param {string[]} texts @param {"query" | "document"} inputKind @param {AbortSignal} [signal] */
-  async #encode(texts, inputKind, signal) {
+  /** @param {string[]} texts @param {"query" | "document"} inputKind @param {AbortSignal} [signal] @param {(event: Record<string, unknown>) => void} [onProgress] */
+  async #encode(texts, inputKind, signal, onProgress) {
     if (!Array.isArray(texts)) throw new TypeError("AtlasEmbeddingEncoder: texts must be an array");
     if (texts.length === 0) return [];
     const data = await this.#invoke(ML_EMBED_METHOD, {
@@ -92,6 +92,7 @@ export class AtlasEmbeddingEncoder {
       signal,
       timeoutMs: 300_000,
       idempotent: true,
+      onProgress,
     });
     return unpackNativeEmbeddingVectors(data, texts.length, this.dim, "Jina");
   }

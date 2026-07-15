@@ -62,20 +62,24 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
    policy can run it.
 9. **Account settings** — seeds missing ATLAS keys into `~\.posse\account.db`
    (merge-only; existing values are never overwritten).
-10. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
-   which builds the managed Python venv from `requirements.txt` and installs
-   the SCIP language environments (replaces the old standalone
-   `pip install --user` and inline SCIP steps).
-11. **Provider CLI detection** — `posse admin init --non-interactive`.
-12. **Provider API keys** — only with `-ConfigureKeys`: hidden SecureString
+10. **Provider CLI detection** — `posse admin init --non-interactive`.
+11. **Provider API keys** — only with `-ConfigureKeys`: hidden SecureString
     prompts for `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` /
     `CODEX_API_KEY`, written to
     `%USERPROFILE%\.config\posse\providers.env.ps1` with an NTFS ACL locked
     to the current user, plus optional `claude` / `codex login` launches.
-13. **Native binaries** — downloads the current authenticated `posse-atlas`,
-    `posse-git`, `posse-remote`, and `posse-vector` artifacts for the host
+12. **Native binaries** — downloads the current authenticated `posse-atlas`,
+    `posse-git`, `posse-ml`, `posse-remote`, and `posse-atlas-vector` artifacts for the host
     platform. Existing verified versions are reused. Without `POSSE_KEY`, the
-    step reports a warning and boot readiness retries later.
+    step reports a warning and the following doctor step records the install as
+    failed rather than claiming a usable runtime.
+13. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
+    which builds the managed Python venv from `requirements.txt`, installs the
+    SCIP language environments, verifies the issued native binary versions,
+    and downloads/deploys the versioned Jina embeddings package when missing or
+    stale. Jina `tar+zstd` extraction is embedded in `posse-ml`; Windows does
+    not need a system `tar`, `zstd`, or Node unpacker package. This replaces the
+    old standalone `pip install --user` and inline SCIP steps.
 14. **Validation** — boots Posse (`node orchestrator.js status`) with a
     five-minute timeout.
 15. **ATLAS smoke test** — only with `-RepoPath`.
@@ -126,6 +130,8 @@ powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
 | `-NoInstallNode` | Don't auto-install Node via winget when Node 24+ is missing |
 | `-ConfigureKeys` | Prompt for provider API keys (SecureString input, user-only ACL file) |
 | `-Force` | Re-run `npm install` even when `node_modules` looks fresh |
+| `-CommandTimeoutSeconds <sec>` | Maximum runtime for ordinary external commands (default: 1800; range: 60–86400) |
+| `-DoctorTimeoutSeconds <sec>` | Maximum runtime for first-run doctor, including Jina deployment (default: 7500; range: 60–86400) |
 | `-DryRun` | Print what would happen; make no changes |
 | `-Plain` | Disable colors, splash gradient, and spinners (also honors `NO_COLOR`) |
 
@@ -140,8 +146,12 @@ powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
 - Tools installed by winget sometimes need a new terminal before they're
   visible; the installer refreshes `PATH` from the registry to minimize this
   and says so when a tool still isn't visible.
-- If the doctor step is `partial`, run `posse doctor` after fixing the tools
-  it names; it repairs incrementally.
+- If the doctor step is `failed`, run `posse doctor` after fixing the tools it
+  names; it repairs incrementally. The installer exits nonzero while a required
+  runtime, current native binary, or Jina deployment remains unresolved.
+- External commands are killed after their configured timeout so an unattended
+  package manager, Git, npm, native download, or doctor process cannot hold the
+  installer forever.
 - `atlas.env.ps1` is rewritten each run. `providers.env.ps1` is **only**
   touched when `-ConfigureKeys` is passed, and only the keys you enter are
   updated — other lines are preserved. Account settings are merged, never

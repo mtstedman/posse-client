@@ -14,19 +14,21 @@
 //                  ledger shard is deleted. A clean shutdown therefore leaves no
 //                  file; a crash leaves the file behind as a breadcrumb.
 //   - On boot:     reap ledgers whose OWNER process is dead — kill the orphaned
-//                  child pids they list (verified by image name so a recycled
-//                  pid can't be friendly-fired), then delete the file. Ledgers
+//                  child pids they list only after executable path + OS process
+//                  birth identity match, then delete the file. Ledgers
 //                  owned by a still-alive process (a concurrent posse instance)
 //                  are left untouched.
 //
-// Files are sharded by owner pid + worker thread:
-// <home>/.posse/daemons/<ownerPid>-<threadId>.json. Boot reaping still accepts
-// the legacy unsharded <ownerPid>.json shape.
+// Files are sharded by owner pid + worker thread + process-instance nonce:
+// <home>/.posse/daemons/<ownerPid>-<threadId>-<nonce>.json. The nonce prevents
+// a process that reuses an owner pid from appending to the prior owner's shard.
+// Boot reaping still accepts legacy pid-only/thread shard names.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
+import { execFile, execFileSync } from "node:child_process";
 import { threadId } from "node:worker_threads";
 
 const LEDGER_LOCK_WAIT_MS = 5000;
@@ -34,6 +36,14 @@ const LEDGER_LOCK_RETRY_MS = 2;
 const LEDGER_LOCK_STALE_CHECK_MS = 100;
 const LEDGER_LOCK_STALE_MS = 30_000;
 const LEDGER_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
+const PROCESS_IDENTITY_TIMEOUT_MS = 5_000;
+const pendingIdentityCaptures = new Set();
+let ownProcessIdentityPromise = null;
+/** @type {Map<number, Array<(identity: any) => void>>} */
+let pendingWindowsIdentityRequests = new Map();
+let windowsIdentityBatchScheduled = false;
+let windowsIdentityBatchRunning = false;
+const LEDGER_INSTANCE_ID = crypto.randomBytes(8).toString("hex");
 
 // Global by default so any boot can find a crashed session's breadcrumbs.
 // Overridable only via the test hook below (no env/admin knob — there is no
@@ -52,11 +62,11 @@ export function setDaemonLedgerDirForTests(dir = null) {
 }
 
 function ownLedgerPath() {
-  return path.join(ledgerDir(), `${process.pid}-${threadId}.json`);
+  return path.join(ledgerDir(), `${process.pid}-${threadId}-${LEDGER_INSTANCE_ID}.json`);
 }
 
 function parseLedgerOwnerPid(name) {
-  const match = /^(\d+)(?:-\d+)?\.json$/.exec(String(name || ""));
+  const match = /^(\d+)(?:-[^.]+)*\.json$/.exec(String(name || ""));
   if (!match) return null;
   const ownerPid = Number(match[1]);
   return Number.isInteger(ownerPid) ? ownerPid : null;
@@ -154,7 +164,7 @@ function withLedgerLock(file, fn) {
   }
 }
 
-/** @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string, cwd?: string }>} */
+/** @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string, cwd?: string, birthIdentity?: Record<string, string> | null, ownerBirthIdentity?: Record<string, string> | null, captureNonce?: string }>} */
 function readLedger(file) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -188,25 +198,224 @@ function isAlive(pid) {
   }
 }
 
-/**
- * Best-effort check that live `pid` is actually the recorded daemon binary, so
- * a recycled pid (reused by an unrelated process since the crash) is never
- * killed. Returns false when it cannot positively confirm a match.
- */
-function imageMatches(pid, binBase) {
-  if (!binBase) return false;
+function linuxProcessIdentity(pid) {
   try {
-    if (process.platform === "win32") {
-      const out = execFileSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
-        encoding: "utf8",
-        timeout: 1500,
-        windowsHide: true,
-      });
-      return out.toLowerCase().includes(binBase.toLowerCase());
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const commEnd = stat.lastIndexOf(")");
+    if (commEnd < 0) return null;
+    const fieldsFromState = stat.slice(commEnd + 2).trim().split(/\s+/);
+    const startTicks = String(fieldsFromState[19] || ""); // proc stat field 22
+    const executablePath = normalizedFsPath(fs.readlinkSync(`/proc/${pid}/exe`));
+    if (!startTicks || !executablePath) return null;
+    return { kind: "linux-proc", startTicks, executablePath };
+  } catch {
+    return null;
+  }
+}
+
+function windowsIdentityArgs(pid) {
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    `$p=[System.Diagnostics.Process]::GetProcessById(${Number(pid)})`,
+    "$path=$p.MainModule.FileName",
+    "$ticks=$p.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)",
+    "$encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($path))",
+    "[Console]::Out.Write($encoded+'|'+$ticks)",
+  ].join(";");
+  return ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script];
+}
+
+function windowsIdentityBatchArgs(pids) {
+  const ids = [...new Set(pids)].filter((pid) => Number.isInteger(pid) && pid > 0);
+  const script = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    `$ids=@(${ids.join(",")})`,
+    "foreach($id in $ids){try{$p=[System.Diagnostics.Process]::GetProcessById($id);$path=$p.MainModule.FileName;$ticks=$p.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture);$encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($path));[Console]::Out.WriteLine($id.ToString()+'|'+$encoded+'|'+$ticks)}catch{}}",
+  ].join(";");
+  return ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script];
+}
+
+function parseWindowsIdentity(stdout) {
+  try {
+    const text = String(stdout || "").trim();
+    const separator = text.lastIndexOf("|");
+    if (separator <= 0) return null;
+    const executablePath = normalizedFsPath(Buffer.from(text.slice(0, separator), "base64").toString("utf8"));
+    const creationTicks = text.slice(separator + 1).trim();
+    if (!executablePath || !/^\d+$/.test(creationTicks)) return null;
+    return { kind: "windows-process", creationTicks, executablePath };
+  } catch {
+    return null;
+  }
+}
+
+function parseWindowsIdentityBatch(stdout) {
+  const identities = new Map();
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    const separator = line.indexOf("|");
+    if (separator <= 0) continue;
+    const pid = Number(line.slice(0, separator));
+    const identity = parseWindowsIdentity(line.slice(separator + 1));
+    if (Number.isInteger(pid) && identity) identities.set(pid, identity);
+  }
+  return identities;
+}
+
+function windowsProcessIdentitySync(pid) {
+  try {
+    const stdout = execFileSync("powershell.exe", windowsIdentityArgs(pid), {
+      encoding: "utf8",
+      timeout: PROCESS_IDENTITY_TIMEOUT_MS,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return parseWindowsIdentity(stdout);
+  } catch {
+    return null;
+  }
+}
+
+function windowsProcessIdentityAsync(pid) {
+  return new Promise((resolve) => {
+    const waiters = pendingWindowsIdentityRequests.get(pid) || [];
+    waiters.push(resolve);
+    pendingWindowsIdentityRequests.set(pid, waiters);
+    scheduleWindowsIdentityBatch();
+  });
+}
+
+function scheduleWindowsIdentityBatch() {
+  if (windowsIdentityBatchScheduled || windowsIdentityBatchRunning) return;
+  windowsIdentityBatchScheduled = true;
+  setImmediate(runWindowsIdentityBatch);
+}
+
+function runWindowsIdentityBatch() {
+  windowsIdentityBatchScheduled = false;
+  if (windowsIdentityBatchRunning || pendingWindowsIdentityRequests.size === 0) return;
+  windowsIdentityBatchRunning = true;
+  const ids = [...pendingWindowsIdentityRequests.keys()].slice(0, 64);
+  const requests = new Map(ids.map((pid) => [pid, pendingWindowsIdentityRequests.get(pid) || []]));
+  for (const pid of ids) pendingWindowsIdentityRequests.delete(pid);
+  execFile("powershell.exe", windowsIdentityBatchArgs(ids), {
+    encoding: "utf8",
+    timeout: PROCESS_IDENTITY_TIMEOUT_MS,
+    windowsHide: true,
+    maxBuffer: Math.max(32 * 1024, ids.length * 1024),
+  }, (error, stdout) => {
+    const identities = error ? new Map() : parseWindowsIdentityBatch(stdout);
+    for (const [pid, waiters] of requests) {
+      const identity = identities.get(pid) || null;
+      for (const resolve of waiters) resolve(identity);
     }
-    // posix: the argv buffer is NUL-separated; basename match is enough.
-    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
-    return cmdline.includes(binBase);
+    windowsIdentityBatchRunning = false;
+    scheduleWindowsIdentityBatch();
+  });
+}
+
+function processIdentitySync(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") return linuxProcessIdentity(pid);
+  if (process.platform === "win32") return windowsProcessIdentitySync(pid);
+  // macOS and other non-/proc platforms currently have no dependency-free API
+  // for arbitrary process birth identity. Fail closed instead of guessing.
+  return null;
+}
+
+function processIdentitiesSync(pids) {
+  const ids = [...new Set(pids)].filter((pid) => Number.isInteger(pid) && pid > 0);
+  const identities = new Map();
+  if (process.platform !== "win32") {
+    for (const pid of ids) identities.set(pid, processIdentitySync(pid));
+    return identities;
+  }
+  for (let offset = 0; offset < ids.length; offset += 64) {
+    const chunk = ids.slice(offset, offset + 64);
+    try {
+      const stdout = execFileSync("powershell.exe", windowsIdentityBatchArgs(chunk), {
+        encoding: "utf8",
+        timeout: PROCESS_IDENTITY_TIMEOUT_MS,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      for (const [pid, identity] of parseWindowsIdentityBatch(stdout)) identities.set(pid, identity);
+    } catch { /* missing rows remain unverifiable */ }
+  }
+  return identities;
+}
+
+function processIdentityAsync(pid) {
+  if (process.platform === "win32") return windowsProcessIdentityAsync(pid);
+  return Promise.resolve(processIdentitySync(pid));
+}
+
+function ownProcessIdentityAsync() {
+  if (!ownProcessIdentityPromise) {
+    ownProcessIdentityPromise = processIdentityAsync(process.pid).then((identity) => {
+      if (!identity) ownProcessIdentityPromise = null;
+      return identity;
+    });
+  }
+  return ownProcessIdentityPromise;
+}
+
+function identitiesEqual(expected, observed) {
+  if (!expected || !observed || expected.kind !== observed.kind) return false;
+  return expected.executablePath === observed.executablePath
+    && (expected.kind === "linux-proc"
+      ? expected.startTicks === observed.startTicks
+      : expected.creationTicks === observed.creationTicks);
+}
+
+// true = exact process, false = positively a different birth, null = legacy or
+// unavailable identity and therefore unsafe to kill.
+function verifyLedgerIdentity(pid, expected, observedIdentity = undefined) {
+  if (!expected) return null;
+  const observed = observedIdentity === undefined ? processIdentitySync(pid) : observedIdentity;
+  if (!observed) return null;
+  if (!identitiesEqual(expected, observed)) return false;
+  return true;
+}
+
+function trackIdentityCapture(promise) {
+  pendingIdentityCaptures.add(promise);
+  promise.finally(() => pendingIdentityCaptures.delete(promise));
+  return promise;
+}
+
+/** Await asynchronous Windows identity hydration before a process-ledger sweep. */
+export async function waitForPendingDaemonIdentityCaptures() {
+  await Promise.allSettled([...pendingIdentityCaptures]);
+}
+
+export const waitForPendingDaemonIdentityCapturesForTests = waitForPendingDaemonIdentityCaptures;
+
+/**
+ * Wait for this module graph's captures, then briefly poll every process-owned
+ * shard so worker-thread module graphs can finish hydrating their rows too.
+ * Rows still missing proof at the deadline remain ledgered and fail closed.
+ */
+export async function waitForOwnDaemonLedgerIdentityHydration({ timeoutMs = 5_000, pollMs = 50 } = {}) {
+  await waitForPendingDaemonIdentityCaptures();
+  if (process.platform !== "win32") return;
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  while (true) {
+    const missing = ownLedgerFiles().some((file) => readLedger(file).some((entry) => (
+      isAlive(entry.pid) && (!entry.birthIdentity || !entry.ownerBirthIdentity)
+    )));
+    if (!missing || Date.now() >= deadline) return;
+    await new Promise((resolve) => setTimeout(resolve, Math.max(10, Number(pollMs) || 50)));
+  }
+}
+
+function windowsIdentityMatchesRecordedStart(identity, startedAt) {
+  if (identity?.kind !== "windows-process") return true;
+  try {
+    const unixEpochTicks = 621355968000000000n;
+    const creationMs = Number((BigInt(identity.creationTicks) - unixEpochTicks) / 10000n);
+    return Number.isFinite(creationMs)
+      && creationMs <= Number(startedAt) + 2_000
+      && creationMs >= Number(startedAt) - 30_000;
   } catch {
     return false;
   }
@@ -230,7 +439,7 @@ function cwdIsInside(entryCwd, rootCwd) {
   return cwd === root || cwd.startsWith(`${root}/`);
 }
 
-function killLedgeredProcess(entry, { force = true, tree = false } = {}) {
+function killLedgeredProcess(entry, { force = true, tree = process.platform === "win32" } = {}) {
   const pid = Number(entry?.pid);
   if (!Number.isInteger(pid) || pid <= 0) return false;
   if (process.platform === "win32" && tree) {
@@ -261,29 +470,60 @@ function killLedgeredProcess(entry, { force = true, tree = false } = {}) {
  */
 export function recordDaemonSpawn(pid, bin, context = {}) {
   if (!Number.isInteger(pid) || /** @type {number} */ (pid) <= 0) return;
+  const numericPid = /** @type {number} */ (pid);
+  const captureNonce = crypto.randomUUID();
+  const startedAt = Date.now();
+  const immediateBirthIdentity = process.platform === "win32" ? null : processIdentitySync(numericPid);
+  const immediateOwnerIdentity = process.platform === "win32" ? null : processIdentitySync(process.pid);
+  const file = ownLedgerPath();
+  let inserted = false;
   try {
-    const file = ownLedgerPath();
     withLedgerLock(file, () => {
       const entries = readLedger(file);
       if (entries.some((e) => e.pid === pid)) return;
       entries.push({
-        pid: /** @type {number} */ (pid),
+        pid: numericPid,
         bin: path.basename(String(bin || "")),
-        startedAt: Date.now(),
+        startedAt,
         threadId,
         label: String(context?.label || "") || undefined,
         cwd: context?.cwd ? path.resolve(String(context.cwd)) : undefined,
+        birthIdentity: immediateBirthIdentity,
+        ownerBirthIdentity: immediateOwnerIdentity,
+        captureNonce,
       });
+      inserted = true;
       writeLedger(file, entries);
     });
   } catch {
     /* best effort */
   }
+  if (inserted && process.platform === "win32" && isAlive(numericPid)) {
+    const capture = Promise.all([processIdentityAsync(numericPid), ownProcessIdentityAsync()])
+      .then(([birthIdentity, ownerBirthIdentity]) => {
+        if (!birthIdentity || !ownerBirthIdentity) return;
+        withLedgerLock(file, () => {
+          const entries = readLedger(file);
+          const entry = entries.find((candidate) => (
+            candidate.pid === numericPid
+            && candidate.captureNonce === captureNonce
+            && candidate.startedAt === startedAt
+          ));
+          if (!entry) return;
+          if (!windowsIdentityMatchesRecordedStart(birthIdentity, startedAt)) return;
+          entry.birthIdentity = birthIdentity;
+          entry.ownerBirthIdentity = ownerBirthIdentity;
+          writeLedger(file, entries);
+        });
+      })
+      .catch(() => undefined);
+    trackIdentityCapture(capture);
+  }
 }
 
 /**
  * Snapshot of this process's recorded daemon children across all thread shards.
- * @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string, cwd?: string }>}
+ * @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string, cwd?: string, birthIdentity?: Record<string, string> | null, ownerBirthIdentity?: Record<string, string> | null, captureNonce?: string }>}
  */
 export function listOwnDaemonSpawns() {
   return ownLedgerFiles().flatMap((file) => withLedgerLock(file, () => readLedger(file)) || []);
@@ -293,7 +533,7 @@ export function listOwnDaemonSpawns() {
  * Snapshot this process's recorded child processes that were spawned from a cwd
  * at or inside `cwd`. Used by worktree GC to explain live Windows handles.
  * @param {string} cwd
- * @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string, cwd?: string }>}
+ * @returns {Array<{ pid: number, bin: string, startedAt: number, threadId?: number, label?: string, cwd?: string, birthIdentity?: Record<string, string> | null, ownerBirthIdentity?: Record<string, string> | null, captureNonce?: string }>}
  */
 export function listOwnDaemonSpawnsForCwd(cwd) {
   return listOwnDaemonSpawns().filter((entry) => cwdIsInside(entry.cwd, cwd));
@@ -305,7 +545,8 @@ export function listOwnDaemonSpawnsForCwd(cwd) {
  * still waiting out). Covers hosts minted by worker threads whose module-graph
  * daemons were never disposed — the exact leak class where entries accumulate
  * because the spawning thread died without observing its child's exit.
- * Image-name verified so a recycled pid is never friendly-fired.
+ * Executable-path and process-birth verified so a recycled pid is never
+ * friendly-fired. Legacy/unverifiable rows are retained but never killed.
  * @param {{ exceptPids?: Iterable<number> }} [opts]
  * @returns {{ killed: number, skipped: number }}
  */
@@ -314,7 +555,11 @@ export function reapOwnDaemonSpawns(opts = {}) {
   let skipped = 0;
   const except = new Set(opts.exceptPids || []);
   try {
-    for (const file of ownLedgerFiles()) {
+    const files = ownLedgerFiles();
+    const observedIdentities = processIdentitiesSync(files.flatMap((file) => (
+      readLedger(file).filter((entry) => isAlive(entry.pid)).map((entry) => entry.pid)
+    )));
+    for (const file of files) {
       withLedgerLock(file, () => {
         const entries = readLedger(file);
         if (!entries.length) return;
@@ -323,12 +568,16 @@ export function reapOwnDaemonSpawns(opts = {}) {
         for (const entry of entries) {
           if (except.has(entry.pid)) { remaining.push(entry); continue; }
           if (isAlive(entry.pid)) {
-            if (imageMatches(entry.pid, entry.bin)) {
+            const identityMatch = verifyLedgerIdentity(entry.pid, entry.birthIdentity, observedIdentities.get(entry.pid) ?? null);
+            if (identityMatch === true) {
               if (killLedgeredProcess(entry, { force: true })) killed++;
               else { skipped++; remaining.push(entry); continue; }
             } else {
-              // Alive but not our binary (recycled pid) — drop the stale entry.
               skipped++;
+              // A positively different birth is stale. Missing/unverifiable
+              // identity is retained so an in-flight Windows capture can still
+              // hydrate it; killing without proof would fail open.
+              if (identityMatch == null) remaining.push(entry);
             }
           }
           // Dead entries are simply dropped from the ledger.
@@ -357,7 +606,11 @@ export function reapOwnDaemonSpawnsForCwd(cwd, opts = {}) {
   let matched = 0;
   const except = new Set(opts.exceptPids || []);
   try {
-    for (const file of ownLedgerFiles()) {
+    const files = ownLedgerFiles();
+    const observedIdentities = processIdentitiesSync(files.flatMap((file) => (
+      readLedger(file).filter((entry) => isAlive(entry.pid)).map((entry) => entry.pid)
+    )));
+    for (const file of files) {
       withLedgerLock(file, () => {
         const entries = readLedger(file);
         if (!entries.length) return;
@@ -371,11 +624,13 @@ export function reapOwnDaemonSpawnsForCwd(cwd, opts = {}) {
           matched++;
           if (except.has(entry.pid)) { remaining.push(entry); continue; }
           if (isAlive(entry.pid)) {
-            if (imageMatches(entry.pid, entry.bin)) {
+            const identityMatch = verifyLedgerIdentity(entry.pid, entry.birthIdentity, observedIdentities.get(entry.pid) ?? null);
+            if (identityMatch === true) {
               if (killLedgeredProcess(entry, { force: opts.force !== false, tree: opts.tree !== false })) killed++;
               else { skipped++; remaining.push(entry); continue; }
             } else {
               skipped++;
+              if (identityMatch == null) remaining.push(entry);
               continue;
             }
           }
@@ -422,7 +677,12 @@ export function reapOrphanedDaemons() {
   const dir = ledgerDir();
   let names;
   try {
-    names = fs.readdirSync(dir);
+    // Apply the work cap to ledger shards, not arbitrary directory entries.
+    // Stale lock/temp files otherwise consume the entire 200-entry budget and
+    // can starve a real orphan ledger on every boot.
+    names = fs.readdirSync(dir).filter((name) => (
+      name.endsWith(".json") && Number.isInteger(parseLedgerOwnerPid(name))
+    ));
   } catch {
     return { killed, skipped, ledgers }; // no dir → nothing to reap
   }
@@ -430,24 +690,51 @@ export function reapOrphanedDaemons() {
   // a long synchronous stall. Real sessions leave a handful of files; anything
   // past the cap is left for the next boot's sweep.
   if (names.length > 200) names = names.slice(0, 200);
+  const identityPids = [];
   for (const name of names) {
-    if (!name.endsWith(".json")) continue;
     const ownerPid = parseLedgerOwnerPid(name);
     if (!Number.isInteger(ownerPid)) continue;
-    if (ownerPid === process.pid) continue; // our own live ledger
-    if (isAlive(ownerPid)) continue; // a concurrent live instance owns it
+    if (isAlive(ownerPid)) identityPids.push(ownerPid);
+    for (const entry of readLedger(path.join(dir, name))) {
+      if (isAlive(entry.pid)) identityPids.push(entry.pid);
+    }
+  }
+  const observedIdentities = processIdentitiesSync(identityPids);
+  for (const name of names) {
+    const ownerPid = parseLedgerOwnerPid(name);
+    if (!Number.isInteger(ownerPid)) continue;
     const file = path.join(dir, name);
-    for (const entry of readLedger(file)) {
+    const entries = readLedger(file);
+    if (isAlive(ownerPid)) {
+      const expectedOwnerIdentity = entries.find((entry) => entry.ownerBirthIdentity)?.ownerBirthIdentity || null;
+      const ownerMatch = verifyLedgerIdentity(ownerPid, expectedOwnerIdentity, observedIdentities.get(ownerPid) ?? null);
+      // Matching owner is a concurrent live instance. Legacy/unverifiable
+      // owner identity also fails closed; only a positive birth mismatch proves
+      // that the ledger pid was recycled and the original owner is gone.
+      if (ownerMatch !== false) continue;
+    }
+    const remaining = [];
+    for (const entry of entries) {
       if (!isAlive(entry.pid)) continue;
-      if (!imageMatches(entry.pid, entry.bin)) { skipped++; continue; }
+      const identityMatch = verifyLedgerIdentity(entry.pid, entry.birthIdentity, observedIdentities.get(entry.pid) ?? null);
+      if (identityMatch !== true) {
+        skipped++;
+        // A positive mismatch is a recycled child pid and can be discarded.
+        // Legacy/unverifiable live rows retain their breadcrumb for a future
+        // boot rather than permanently losing the only safe recovery record.
+        if (identityMatch == null) remaining.push(entry);
+        continue;
+      }
       try {
         if (killLedgeredProcess(entry, { force: true })) killed++;
-        else skipped++;
+        else { skipped++; remaining.push(entry); }
       } catch {
         skipped++;
+        remaining.push(entry);
       }
     }
-    try { fs.rmSync(file, { force: true }); ledgers++; } catch { /* best effort */ }
+    writeLedger(file, remaining);
+    if (remaining.length === 0 && !fs.existsSync(file)) ledgers++;
   }
   return { killed, skipped, ledgers };
 }

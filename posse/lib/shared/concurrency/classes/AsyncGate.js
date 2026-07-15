@@ -13,8 +13,28 @@ const PRIORITY_AGING_MS = 30000;
 /** @typedef {{ name?: string, maxConcurrency?: number }} QueueOptions */
 /** @typedef {"read-priority" | "fifo" | "writer-priority"} GatePolicy */
 /** @typedef {{ name?: string, policy?: GatePolicy }} ProtectedAssetGateOptions */
-/** @typedef {{ label?: string, waitMs?: number | null, onBeforeRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void | Promise<void>) | null, onRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void) | null, onCancel?: ((info: QueueInfo & { key?: string, error?: unknown }) => void) | null }} RunOptions */
+/** @typedef {{ label?: string, waitMs?: number | null, signal?: AbortSignal | null, onBeforeRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void | Promise<void>) | null, onRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void) | null, onCancel?: ((info: QueueInfo & { key?: string, error?: unknown }) => void) | null }} RunOptions */
 /** @typedef {{ waitMs: number, depthAtEnqueue: number, inFlightAtEnqueue: number, label: string, key?: string, mode?: "blocking" | "non-blocking" }} QueueInfo */
+
+function gateAbortError(signal, { key = "global", label = "work" } = {}) {
+  const reason = signal?.reason;
+  const error = new Error(reason instanceof Error ? reason.message : "Async gate wait was aborted");
+  error.name = "AbortError";
+  error.code = "ASYNC_GATE_ABORTED";
+  error.key = key;
+  error.label = label;
+  if (reason != null) error.reason = reason;
+  return error;
+}
+
+function gateClosedError(name, label = "work", reason = "gate closed", key = "global") {
+  const error = new Error(`${name} is closed (${label}): ${reason}`);
+  error.name = "AsyncGateClosedError";
+  error.code = "ASYNC_GATE_CLOSED";
+  error.key = key;
+  error.label = label;
+  return error;
+}
 
 export class AsyncWorkQueue {
   #name;
@@ -22,6 +42,7 @@ export class AsyncWorkQueue {
   #inFlight = 0;
   #pending = [];
   #nextId = 1;
+  #closed = false;
 
   /**
    * @param {QueueOptions} [options]
@@ -37,6 +58,7 @@ export class AsyncWorkQueue {
       maxConcurrency: this.#maxConcurrency,
       inFlight: this.#inFlight,
       pending: this.#pending.filter((task) => !task.cancelled).length,
+      closed: this.#closed,
     };
   }
 
@@ -46,7 +68,8 @@ export class AsyncWorkQueue {
    * @param {RunOptions} [options]
    * @returns {Promise<T>}
    */
-  run(fn, { label = "work", waitMs = DEFAULT_WAIT_MS, onBeforeRelease = null, onRelease = null, onCancel = null } = {}) {
+  run(fn, { label = "work", waitMs = DEFAULT_WAIT_MS, signal = null, onBeforeRelease = null, onRelease = null, onCancel = null } = {}) {
+    if (this.#closed) return Promise.reject(gateClosedError(this.#name, label));
     const requestedAt = Date.now();
     const unboundedWait = waitMs === null;
     const maxWaitMs = Math.max(0, Number(waitMs) || 0);
@@ -66,43 +89,59 @@ export class AsyncWorkQueue {
         onBeforeRelease,
         onRelease,
         onCancel,
+        signal,
+        onAbort: null,
       };
+      task.onAbort = signal
+        ? () => this.#cancelTask(task, gateAbortError(signal, { label }), Math.max(0, Date.now() - requestedAt))
+        : null;
+      if (signal?.aborted) {
+        this.#cancelTask(task, gateAbortError(signal, { label }), 0);
+        return;
+      }
+      if (signal && task.onAbort) signal.addEventListener?.("abort", task.onAbort, { once: true });
       if (!unboundedWait && maxWaitMs > 0) {
         task.timer = setTimeout(() => {
-          task.cancelled = true;
-          this.#pending = this.#pending.filter((entry) => entry !== task);
           const err = new AsyncGateBusyError(
             `${this.#name} queue wait timed out after ${maxWaitMs}ms (${label})`,
             { label },
           );
           err.code = "ASYNC_GATE_TIMEOUT";
-          reject(err);
-          this.#notifyCancel(task, err, maxWaitMs);
+          this.#cancelTask(task, err, maxWaitMs);
         }, maxWaitMs);
         task.timer.unref?.();
       }
       this.#pending.push(task);
       this.#drain();
       if (!unboundedWait && maxWaitMs === 0 && !task.started) {
-        task.cancelled = true;
-        this.#pending = this.#pending.filter((entry) => entry !== task);
         const err = new AsyncGateBusyError(
           `${this.#name} queue wait timed out after 0ms (${label})`,
           { label },
         );
         err.code = "ASYNC_GATE_TIMEOUT";
-        reject(err);
-        this.#notifyCancel(task, err, 0);
+        this.#cancelTask(task, err, 0);
       }
     });
   }
 
+  close({ reason = "queue closed" } = {}) {
+    if (this.#closed) return { closed: true, canceled: 0 };
+    this.#closed = true;
+    const pending = this.#pending.filter((task) => !task.cancelled && !task.started);
+    for (const task of pending) {
+      this.#cancelTask(task, gateClosedError(this.#name, task.label, reason), Math.max(0, Date.now() - task.requestedAt));
+    }
+    return { closed: true, canceled: pending.length };
+  }
+
   #drain() {
+    if (this.#closed) return;
     while (this.#inFlight < this.#maxConcurrency && this.#pending.length > 0) {
       const task = this.#pending.shift();
       if (!task || task.cancelled) continue;
       task.started = true;
       if (task.timer) clearTimeout(task.timer);
+      if (task.signal && task.onAbort) task.signal.removeEventListener?.("abort", task.onAbort);
       this.#inFlight += 1;
       const startedAt = Date.now();
       const queueInfo = {
@@ -113,6 +152,7 @@ export class AsyncWorkQueue {
       };
       let finalStatus = /** @type {"fulfilled" | "rejected"} */ ("fulfilled");
       let finalError = undefined;
+      let finalValue = undefined;
       // Keep work on an async boundary even when callers pass synchronous
       // functions; this makes queue telemetry and immediate-busy behavior
       // deterministic for callers that enqueue and then attach observers.
@@ -134,13 +174,11 @@ export class AsyncWorkQueue {
         .then(({ status, value, error }) => {
           finalStatus = status;
           finalError = error;
-          if (status === "fulfilled") task.resolve(value);
-          else task.reject(error);
+          finalValue = value;
         })
         .catch((error) => {
           finalStatus = "rejected";
           finalError = error;
-          task.reject(error);
         })
         .finally(() => {
           this.#inFlight = Math.max(0, this.#inFlight - 1);
@@ -156,6 +194,11 @@ export class AsyncWorkQueue {
             }
           }
           this.#drain();
+          // Settle only after ownership and release telemetry are complete.
+          // Callers awaiting the task can immediately enqueue follow-up work
+          // without observing a stale in-flight slot.
+          if (finalStatus === "fulfilled") task.resolve(finalValue);
+          else task.reject(finalError);
         });
     }
   }
@@ -208,12 +251,25 @@ export class AsyncWorkQueue {
       // Cancellation hooks are observational; never break queue progress.
     }
   }
+
+  #cancelTask(task, error, waitMs) {
+    if (!task || task.started || task.cancelled) return false;
+    task.cancelled = true;
+    if (task.timer) clearTimeout(task.timer);
+    if (task.signal && task.onAbort) task.signal.removeEventListener?.("abort", task.onAbort);
+    this.#pending = this.#pending.filter((entry) => entry !== task);
+    task.reject(error);
+    this.#notifyCancel(task, error, waitMs);
+    this.#drain();
+    return true;
+  }
 }
 
 export class KeyedAsyncGate {
   #name;
   #maxConcurrency;
   #queues = new Map();
+  #closed = false;
 
   /**
    * @param {QueueOptions} [options]
@@ -230,8 +286,9 @@ export class KeyedAsyncGate {
    * @param {RunOptions} [options]
    * @returns {Promise<T>}
    */
-  run(key, fn, { label = "work", waitMs = DEFAULT_WAIT_MS, onBeforeRelease = null, onRelease = null, onCancel = null } = {}) {
+  run(key, fn, { label = "work", waitMs = DEFAULT_WAIT_MS, signal = null, onBeforeRelease = null, onRelease = null, onCancel = null } = {}) {
     const normalized = normalizeGateKey(key);
+    if (this.#closed) return Promise.reject(gateClosedError(`${this.#name}:${normalized}`, label));
     let queue = this.#queues.get(normalized);
     if (!queue) {
       queue = new AsyncWorkQueue({
@@ -240,32 +297,37 @@ export class KeyedAsyncGate {
       });
       this.#queues.set(normalized, queue);
     }
+    const cleanupQueueIfIdle = () => {
+      const state = queue.snapshot();
+      if (state.inFlight !== 0 || state.pending !== 0) return;
+      queueMicrotask(() => {
+        const latest = this.#queues.get(normalized);
+        if (latest === queue && latest.snapshot().inFlight === 0 && latest.snapshot().pending === 0) {
+          this.#queues.delete(normalized);
+        }
+      });
+    };
     return queue.run(
       (info) => fn({ ...info, key: normalized }),
       {
         label,
         waitMs,
+        signal,
         onBeforeRelease: typeof onBeforeRelease === "function"
           ? (info) => onBeforeRelease({ ...info, key: normalized })
           : null,
         onCancel: typeof onCancel === "function"
-          ? (info) => onCancel({ ...info, key: normalized })
-          : null,
+          ? (info) => {
+            try { onCancel({ ...info, key: normalized }); } finally { cleanupQueueIfIdle(); }
+          }
+          : () => cleanupQueueIfIdle(),
         onRelease: (info) => {
           try {
             onRelease?.({ ...info, key: normalized });
           } catch {
             // Release hooks are observational; never break queue progress.
           }
-          const state = queue.snapshot();
-          if (state.inFlight === 0 && state.pending === 0) {
-            queueMicrotask(() => {
-              const latest = this.#queues.get(normalized);
-              if (latest === queue && latest.snapshot().inFlight === 0 && latest.snapshot().pending === 0) {
-                this.#queues.delete(normalized);
-              }
-            });
-          }
+          cleanupQueueIfIdle();
         },
       },
     );
@@ -281,11 +343,22 @@ export class KeyedAsyncGate {
   snapshot() {
     return {
       name: this.#name,
+      closed: this.#closed,
       keys: Array.from(this.#queues.entries()).map(([key, queue]) => ({
         key,
         ...queue.snapshot(),
       })),
     };
+  }
+
+  close({ reason = "gate closed" } = {}) {
+    if (this.#closed) return { closed: true, canceled: 0 };
+    this.#closed = true;
+    let canceled = 0;
+    for (const queue of this.#queues.values()) {
+      canceled += queue.close({ reason }).canceled;
+    }
+    return { closed: true, canceled };
   }
 }
 
@@ -329,6 +402,7 @@ export class ProtectedAssetGate {
   /** @type {GatePolicy} */
   #policy;
   #states = new Map();
+  #closed = false;
 
   /**
    * @param {ProtectedAssetGateOptions} [options]
@@ -347,8 +421,8 @@ export class ProtectedAssetGate {
    * @param {RunOptions} [options]
    * @returns {Promise<T>}
    */
-  runBlocking(key, fn, { label = "work", waitMs = DEFAULT_WAIT_MS, onBeforeRelease = null, onRelease = null, onCancel = null, priority = 0 } = {}) {
-    return this.#enqueue(key, "blocking", fn, { label, waitMs, onBeforeRelease, onRelease, onCancel, priority });
+  runBlocking(key, fn, { label = "work", waitMs = DEFAULT_WAIT_MS, signal = null, onBeforeRelease = null, onRelease = null, onCancel = null, priority = 0 } = {}) {
+    return this.#enqueue(key, "blocking", fn, { label, waitMs, signal, onBeforeRelease, onRelease, onCancel, priority });
   }
 
   /**
@@ -362,13 +436,14 @@ export class ProtectedAssetGate {
    * @param {RunOptions} [options]
    * @returns {Promise<T>}
    */
-  runNonBlocking(key, fn, { label = "work", waitMs = DEFAULT_WAIT_MS, onBeforeRelease = null, onRelease = null, onCancel = null } = {}) {
-    return this.#enqueue(key, "non-blocking", fn, { label, waitMs, onBeforeRelease, onRelease, onCancel });
+  runNonBlocking(key, fn, { label = "work", waitMs = DEFAULT_WAIT_MS, signal = null, onBeforeRelease = null, onRelease = null, onCancel = null } = {}) {
+    return this.#enqueue(key, "non-blocking", fn, { label, waitMs, signal, onBeforeRelease, onRelease, onCancel });
   }
 
   snapshot() {
     return {
       name: this.#name,
+      closed: this.#closed,
       keys: Array.from(this.#states.entries()).map(([key, state]) => ({
         key,
         activeReaders: state.activeReaders,
@@ -387,10 +462,12 @@ export class ProtectedAssetGate {
    * @param {RunOptions} options
    * @returns {Promise<T>}
    */
-  #enqueue(key, mode, fn, { label, waitMs, onBeforeRelease = null, onRelease = null, onCancel = null, priority = 0 }) {
+  #enqueue(key, mode, fn, { label, waitMs, signal = null, onBeforeRelease = null, onRelease = null, onCancel = null, priority = 0 }) {
     const normalized = normalizeGateKey(key);
+    if (this.#closed) return Promise.reject(gateClosedError(this.#name, label, "gate closed", normalized));
     const state = this.#stateFor(normalized);
     const requestedAt = Date.now();
+    const unboundedWait = waitMs === null;
     const maxWaitMs = Math.max(0, Number(waitMs) || 0);
     return new Promise((resolve, reject) => {
       const waiter = {
@@ -410,35 +487,58 @@ export class ProtectedAssetGate {
         onBeforeRelease,
         onRelease,
         onCancel,
+        signal,
+        onAbort: null,
       };
-      if (maxWaitMs > 0) {
+      waiter.onAbort = signal
+        ? () => this.#cancelWaiter(normalized, state, waiter, gateAbortError(signal, { key: normalized, label }), Math.max(0, Date.now() - requestedAt))
+        : null;
+      if (signal?.aborted) {
+        this.#cancelWaiter(normalized, state, waiter, gateAbortError(signal, { key: normalized, label }), 0);
+        return;
+      }
+      if (signal && waiter.onAbort) signal.addEventListener?.("abort", waiter.onAbort, { once: true });
+      if (!unboundedWait && maxWaitMs > 0) {
         waiter.timer = setTimeout(() => {
-          waiter.cancelled = true;
-          state.queue = state.queue.filter((entry) => entry !== waiter);
           const err = new AsyncGateBusyError(
             `${this.#name} queue wait timed out after ${maxWaitMs}ms (${label})`,
             { key: normalized, label },
           );
           err.code = "ASYNC_GATE_TIMEOUT";
-          reject(err);
-          this.#notifyCancel(waiter, err, maxWaitMs);
+          this.#cancelWaiter(normalized, state, waiter, err, maxWaitMs);
         }, maxWaitMs);
         waiter.timer.unref?.();
       }
       this.#insertTask(state, waiter);
       this.#drain(normalized, state);
-      if (maxWaitMs === 0 && !waiter.started) {
-        waiter.cancelled = true;
-        state.queue = state.queue.filter((entry) => entry !== waiter);
+      if (!unboundedWait && maxWaitMs === 0 && !waiter.started) {
         const err = new AsyncGateBusyError(
           `${this.#name} queue wait timed out after 0ms (${label})`,
           { key: normalized, label },
         );
         err.code = "ASYNC_GATE_TIMEOUT";
-        reject(err);
-        this.#notifyCancel(waiter, err, 0);
+        this.#cancelWaiter(normalized, state, waiter, err, 0);
       }
     });
+  }
+
+  close({ reason = "gate closed" } = {}) {
+    if (this.#closed) return { closed: true, canceled: 0 };
+    this.#closed = true;
+    let canceled = 0;
+    for (const [key, state] of this.#states.entries()) {
+      const pending = state.queue.filter((task) => !task.cancelled && !task.started);
+      for (const task of pending) {
+        if (this.#cancelWaiter(
+          key,
+          state,
+          task,
+          gateClosedError(this.#name, task.label, reason, key),
+          Math.max(0, Date.now() - task.requestedAt),
+        )) canceled += 1;
+      }
+    }
+    return { closed: true, canceled };
   }
 
   /**
@@ -504,6 +604,10 @@ export class ProtectedAssetGate {
    * @param {{ activeReaders: number, activeWriter: boolean, queue: Array<any> }} state
    */
   #drain(key, state) {
+    if (this.#closed) {
+      this.#cleanupState(key, state);
+      return;
+    }
     if (state.activeWriter) return;
     while (state.queue.length > 0) {
       const task = state.queue[0];
@@ -532,6 +636,7 @@ export class ProtectedAssetGate {
   #startReader(key, state, task) {
     task.started = true;
     if (task.timer) clearTimeout(task.timer);
+    if (task.signal && task.onAbort) task.signal.removeEventListener?.("abort", task.onAbort);
     state.activeReaders += 1;
     this.#runTask(key, state, task, () => {
       state.activeReaders = Math.max(0, state.activeReaders - 1);
@@ -546,6 +651,7 @@ export class ProtectedAssetGate {
   #startWriter(key, state, task) {
     task.started = true;
     if (task.timer) clearTimeout(task.timer);
+    if (task.signal && task.onAbort) task.signal.removeEventListener?.("abort", task.onAbort);
     state.activeWriter = true;
     this.#runTask(key, state, task, () => {
       state.activeWriter = false;
@@ -668,6 +774,18 @@ export class ProtectedAssetGate {
     }
   }
 
+  #cancelWaiter(key, state, task, error, waitMs) {
+    if (!task || task.started || task.cancelled) return false;
+    task.cancelled = true;
+    if (task.timer) clearTimeout(task.timer);
+    if (task.signal && task.onAbort) task.signal.removeEventListener?.("abort", task.onAbort);
+    state.queue = state.queue.filter((entry) => entry !== task);
+    task.reject(error);
+    this.#notifyCancel(task, error, waitMs);
+    this.#drain(key, state);
+    return true;
+  }
+
   /**
    * @param {string} key
    * @param {{ activeReaders: number, activeWriter: boolean, queue: Array<any> }} state
@@ -751,7 +869,7 @@ export class AsyncResourceGate {
     const normalized = this.normalizeKey(key);
     const releases = this.#registerBlockingBarriers(normalized, options);
     try {
-      return this.#gate.runBlocking(normalized, fn, {
+      const result = this.#gate.runBlocking(normalized, fn, {
         ...options,
         onRelease: (info) => {
           try { options.onRelease?.(info); } catch { /* caller hook is observational */ }
@@ -761,6 +879,13 @@ export class AsyncResourceGate {
           try { options.onCancel?.(info); } catch { /* caller hook is observational */ }
           this.#releaseBarriers(releases, { ...info, status: "rejected", error: info.error });
         },
+      });
+      return Promise.resolve(result).catch((err) => {
+        // A terminally closed gate rejects before it can construct a waiter,
+        // so its onCancel hook never runs. Idempotently release here as the
+        // final safety net for every rejected enqueue path.
+        this.#releaseBarriers(releases, { key: normalized, status: "rejected", error: err });
+        throw err;
       });
     } catch (err) {
       this.#releaseBarriers(releases, { key: normalized, status: "rejected", error: err });
@@ -886,6 +1011,11 @@ export class AsyncResourceGate {
         pending: releases.size,
       })),
     };
+  }
+
+  close({ reason = "resource gate closed" } = {}) {
+    if (typeof this.#gate.close !== "function") return { closed: false, canceled: 0 };
+    return this.#gate.close({ reason });
   }
 
   /**

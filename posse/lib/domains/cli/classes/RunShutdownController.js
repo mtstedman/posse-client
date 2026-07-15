@@ -15,6 +15,7 @@ export class RunShutdownController {
     requeueForShutdown = null,
     refreshWorkItemStatus = null,
     closeRuntimeState = closeRuntimeStateForExit,
+    finalizeRuntimeResources = null,
     exitProcess = process.exit,
     processRef = process,
   } = {}) {
@@ -28,6 +29,7 @@ export class RunShutdownController {
     this.flushCloseoutStatus = flushCloseoutStatus;
     this.C = C;
     this.closeRuntimeState = closeRuntimeState;
+    this.finalizeRuntimeResources = finalizeRuntimeResources;
     this.exitProcess = exitProcess;
     this.process = processRef;
     this.sigintCount = 0;
@@ -35,6 +37,9 @@ export class RunShutdownController {
     this.shutdownForceExitTimer = null;
     this.shutdownCleanupPromise = null;
     this.shutdownSweepSummary = this.emptySweepSummary();
+    this.shutdownFinishPromise = null;
+    this.installed = false;
+    this.forceExitIssued = false;
     this.cleanup = this.cleanup.bind(this);
     this.messageCleanup = (msg) => { if (msg === "shutdown") this.cleanup(); };
   }
@@ -44,6 +49,8 @@ export class RunShutdownController {
   }
 
   install() {
+    if (this.installed) return;
+    this.installed = true;
     this.process.on("SIGINT", this.cleanup);
     this.process.on("SIGTERM", this.cleanup);
     if (process.platform === "win32") {
@@ -53,12 +60,38 @@ export class RunShutdownController {
   }
 
   uninstall() {
+    if (!this.installed) return;
+    this.installed = false;
     this.process.off("SIGINT", this.cleanup);
     this.process.off("SIGTERM", this.cleanup);
     if (process.platform === "win32") {
       this.process.off("SIGBREAK", this.cleanup);
       this.process.off("message", this.messageCleanup);
     }
+  }
+
+  observeAtlasCleanup(label) {
+    try {
+      const result = this.cleanupAtlasForSession?.({ label });
+      if (result && typeof result.then === "function") void Promise.resolve(result).catch(() => {});
+    } catch { /* forced shutdown continues */ }
+  }
+
+  forceExit(label) {
+    if (this.forceExitIssued) return;
+    this.forceExitIssued = true;
+    if (this.shutdownForceExitTimer) {
+      clearTimeout(this.shutdownForceExitTimer);
+      this.shutdownForceExitTimer = null;
+    }
+    this.uninstall();
+    try { this.stopDisplaySnapshotCaches?.(); } catch { /* best effort */ }
+    try { this.getDisplay()?.stop?.(); } catch { /* best effort */ }
+    try { this.scheduler?.requestStop?.(); } catch { /* best effort */ }
+    this.observeAtlasCleanup(label);
+    try { this.closeRuntimeState?.(); } catch { /* best effort */ }
+    this.process.exitCode = 1;
+    this.exitProcess?.(1);
   }
 
   emptySweepSummary() {
@@ -135,40 +168,50 @@ export class RunShutdownController {
   cleanup() {
     this.sigintCount++;
     if (this.sigintCount >= 2) {
-      this.stopDisplaySnapshotCaches();
-      if (this.getDisplay()) this.getDisplay().stop();
-      try { this.scheduler.requestStop?.(); } catch { /* best-effort */ }
-      void this.cleanupAtlasForSession({ label: "Forced shutdown" });
-      this.closeRuntimeState();
-      this.process.exit(1);
+      this.forceExit("Forced shutdown");
+      return;
     }
 
     if (this.shutdownInProgress) return;
     this.shutdownInProgress = true;
     this.worker.shuttingDown = true;
     this.shutdownForceExitTimer = setTimeout(() => {
-      this.stopDisplaySnapshotCaches();
-      if (this.getDisplay()) this.getDisplay().stop();
-      try { this.scheduler.requestStop?.(); } catch { /* best-effort */ }
-      void this.cleanupAtlasForSession({ label: "Shutdown watchdog" });
-      this.closeRuntimeState();
-      this.process.exit(1);
+      this.forceExit("Shutdown watchdog");
     }, 45_000);
     this.shutdownForceExitTimer.unref?.();
 
-    const display = this.getDisplay();
+    let display = null;
+    try { display = this.getDisplay(); } catch { /* observational */ }
     if (display) {
-      display.cancelAllQuestions();
-      display.addEvent(`${this.C.yellow}Graceful shutdown — killing workers, stashing work...${this.C.reset}`);
-      display.addEvent(`${this.C.dim}(Ctrl+C again to force-exit)${this.C.reset}`);
-      display.requestRender({ force: true });
+      try { display.cancelAllQuestions(); } catch { /* observational */ }
+      try { display.addEvent(`${this.C.yellow}Graceful shutdown — killing workers, stashing work...${this.C.reset}`); } catch { /* observational */ }
+      try { display.addEvent(`${this.C.dim}(Ctrl+C again to force-exit)${this.C.reset}`); } catch { /* observational */ }
+      try { display.requestRender({ force: true }); } catch { /* observational */ }
     } else {
       console.log(`\n  ${this.C.yellow}Graceful shutdown — killing workers, stashing work...${this.C.reset}`);
       console.log(`  ${this.C.dim}(Ctrl+C again to force-exit)${this.C.reset}`);
     }
 
-    const killed = this.worker.killAllJobs("shutdown");
-    void this.scheduleSchedulerStop().then(() => this.startDirtySweep());
+    let killed = 0;
+    try { killed = this.worker.killAllJobs("shutdown"); } catch { /* watchdog remains armed */ }
+    const fallbackStop = () => {
+      try { this.scheduler?.stop?.(); } catch { /* best effort */ }
+    };
+    let stopPromise;
+    if (typeof this.scheduleSchedulerStop !== "function") {
+      fallbackStop();
+      stopPromise = Promise.resolve();
+    } else {
+      try {
+        stopPromise = Promise.resolve(this.scheduleSchedulerStop());
+      } catch {
+        fallbackStop();
+        stopPromise = Promise.resolve();
+      }
+    }
+    void stopPromise
+      .catch(() => { fallbackStop(); })
+      .then(() => this.startDirtySweep());
     if (display) {
       display.addEvent(`${this.C.dim}Sent kill to ${killed} worker(s)${this.C.reset}`);
       if (killed > 0) display.addEvent(`${this.C.dim}Workers will requeue after interruption cleanup completes${this.C.reset}`);
@@ -182,42 +225,71 @@ export class RunShutdownController {
     runBoundedCloseoutWorktreeCleanup,
   } = {}) {
     if (!this.shutdownInProgress) return false;
-    this.emitCloseoutStatus("Graceful shutdown - run wrap-up: starting closeout.", this.C.yellow);
-    if (schedulerStopPromise) await schedulerStopPromise;
-    if (!this.shutdownCleanupPromise) this.startDirtySweep();
-    if (this.shutdownCleanupPromise) {
-      this.emitCloseoutStatus("Graceful shutdown - run wrap-up: finishing active worktree sweep...", this.C.cyan);
-      await this.flushCloseoutStatus();
-      await this.shutdownCleanupPromise;
-    }
-    if (needsGit) {
-      this.emitCloseoutStatus("Graceful shutdown - run wrap-up: cleaning worktrees...", this.C.cyan);
-      await this.flushCloseoutStatus();
-      const cleaned = await runBoundedCloseoutWorktreeCleanup({
-        label: "Graceful shutdown - run wrap-up",
-        failureText: "worktree cleanup skipped",
+    if (!this.shutdownFinishPromise) {
+      this.shutdownFinishPromise = this.finishShutdown({
+        needsGit,
+        schedulerStopPromise,
+        runBoundedCloseoutWorktreeCleanup,
       });
-      if (cleaned) this.emitCloseoutStatus("Graceful shutdown - run wrap-up: worktrees clean.", this.C.green);
     }
-    await this.flushCloseoutStatus();
-    await this.cleanupAtlasForSession({ label: "Graceful shutdown - run wrap-up" });
-    await this.worker.disposeAgents?.("run_shutdown");
-    await this.flushCloseoutStatus();
-    this.emitCloseoutStatus("Graceful shutdown - run wrap-up: done.", this.C.green);
-    await this.flushCloseoutStatus();
-    if (this.shutdownForceExitTimer) {
-      clearTimeout(this.shutdownForceExitTimer);
-      this.shutdownForceExitTimer = null;
-    }
+    return await this.shutdownFinishPromise;
+  }
 
-    this.uninstall();
-    const hadDisplay = !!this.getDisplay();
-    this.stopDisplaySnapshotCaches();
-    if (this.getDisplay()) this.getDisplay().stop();
-    if (hadDisplay) console.log(`\n  ${this.C.green}Graceful shutdown complete.${this.C.reset}\n`);
-    this.closeRuntimeState();
-    process.exitCode = 0;
-    this.exitProcess?.(0);
+  async finishShutdown({ needsGit, schedulerStopPromise, runBoundedCloseoutWorktreeCleanup }) {
+    const settle = async (fn) => {
+      try { return await fn?.(); } catch { return undefined; }
+    };
+    const emit = (message, color) => {
+      try { this.emitCloseoutStatus?.(message, color); } catch { /* observational */ }
+    };
+    try {
+      emit("Graceful shutdown - run wrap-up: starting closeout.", this.C.yellow);
+      if (schedulerStopPromise) await settle(() => schedulerStopPromise);
+      if (!this.shutdownCleanupPromise) this.startDirtySweep();
+      if (this.shutdownCleanupPromise) {
+        emit("Graceful shutdown - run wrap-up: finishing active worktree sweep...", this.C.cyan);
+        await settle(() => this.flushCloseoutStatus?.());
+        await settle(() => this.shutdownCleanupPromise);
+      }
+      if (needsGit) {
+        emit("Graceful shutdown - run wrap-up: cleaning worktrees...", this.C.cyan);
+        await settle(() => this.flushCloseoutStatus?.());
+        const cleaned = await settle(() => runBoundedCloseoutWorktreeCleanup?.({
+          label: "Graceful shutdown - run wrap-up",
+          failureText: "worktree cleanup skipped",
+        }));
+        if (cleaned) emit("Graceful shutdown - run wrap-up: worktrees clean.", this.C.green);
+      }
+      await settle(() => this.flushCloseoutStatus?.());
+    } finally {
+      await settle(() => this.cleanupAtlasForSession?.({ label: "Graceful shutdown - run wrap-up" }));
+      await settle(() => this.worker.disposeAgents?.("run_shutdown"));
+      await settle(() => this.finalizeRuntimeResources?.());
+      await settle(() => this.flushCloseoutStatus?.());
+      // A second signal may force-exit while one of the awaited finalizers is
+      // still settling. In test/injected exits the process remains alive long
+      // enough to reach here; never overwrite that terminal failure with a
+      // later graceful exit(0).
+      if (!this.forceExitIssued) {
+        emit("Graceful shutdown - run wrap-up: done.", this.C.green);
+        await settle(() => this.flushCloseoutStatus?.());
+        if (this.shutdownForceExitTimer) {
+          clearTimeout(this.shutdownForceExitTimer);
+          this.shutdownForceExitTimer = null;
+        }
+        this.uninstall();
+        let display = null;
+        try { display = this.getDisplay?.(); } catch { /* observational */ }
+        try { this.stopDisplaySnapshotCaches?.(); } catch { /* best effort */ }
+        try { display?.stop?.(); } catch { /* best effort */ }
+        if (display) {
+          try { console.log(`\n  ${this.C.green}Graceful shutdown complete.${this.C.reset}\n`); } catch { /* observational */ }
+        }
+        try { this.closeRuntimeState?.(); } catch { /* best effort */ }
+        this.process.exitCode = 0;
+        this.exitProcess?.(0);
+      }
+    }
     return true;
   }
 }

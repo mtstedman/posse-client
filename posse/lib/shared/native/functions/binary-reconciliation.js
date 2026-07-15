@@ -16,6 +16,10 @@ function resultMessage(result, packageName, dryRun) {
   const version = String(result?.version || "").trim();
   const identity = version ? `${packageName} ${version}` : packageName;
   if (result?.available) {
+    if (result?.current === false) {
+      const detail = firstLine(result?.refreshError || "current version could not be verified");
+      return `${identity} cached but current-version check failed${detail ? `: ${detail}` : ""}`;
+    }
     if (result.downloaded) return `downloaded ${identity}`;
     return `${identity} ready${result.source ? ` (${result.source})` : ""}`;
   }
@@ -29,7 +33,7 @@ function dependencyEntry(result, { dryRun }) {
   const packageName = nativeBinaryEntry(name)?.package || name;
   const planned = dryRun && result?.available !== true && result?.planned === true;
   const installed = result?.available === true && result?.downloaded === true;
-  const ready = result?.available === true;
+  const ready = result?.available === true && result?.current !== false;
   return {
     present: true,
     label: `native ${name}`,
@@ -40,9 +44,11 @@ function dependencyEntry(result, { dryRun }) {
     source: result?.source || null,
     downloaded: result?.downloaded === true,
     ok: ready || planned,
-    status: installed ? "installed" : ready ? "ok" : planned ? "dry-run" : "failed",
-    action: installed || planned ? "download" : "none",
+    status: installed && ready ? "installed" : ready ? "ok" : planned ? "dry-run" : "failed",
+    action: installed || planned || result?.current === false ? "download" : "none",
     reason: result?.reason || null,
+    current: result?.current ?? null,
+    refresh_error: result?.refreshError || null,
     message: resultMessage(result, packageName, dryRun),
   };
 }

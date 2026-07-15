@@ -28,6 +28,7 @@ export class ParentPulseTokenManager {
     this._grants = new Map();
     this._deniedRoutes = new Set();
     this._refreshes = new Map();
+    this._generation = 0;
   }
 
   hasAuthentication() {
@@ -50,7 +51,8 @@ export class ParentPulseTokenManager {
     if (!refresh && cached && Date.now() < Number(cached.refreshAfter) * 1000) return cached;
     const inFlight = this._refreshes.get(route);
     if (inFlight) return inFlight;
-    const request = this.#requestRoute(route).finally(() => {
+    const generation = this._generation;
+    const request = this.#requestRoute(route, generation).finally(() => {
       if (this._refreshes.get(route) === request) this._refreshes.delete(route);
     });
     this._refreshes.set(route, request);
@@ -94,13 +96,14 @@ export class ParentPulseTokenManager {
   }
 
   clearAuthentication() {
+    this._generation += 1;
     this._cache.clear();
     this._grants.clear();
     this._deniedRoutes.clear();
     this._refreshes.clear();
   }
 
-  #requestRoute(route) {
+  #requestRoute(route, generation) {
     const body = JSON.stringify({
       control: "capabilityRequest",
       protocol: CAPABILITY_HANDSHAKE_PROTOCOL,
@@ -110,6 +113,15 @@ export class ParentPulseTokenManager {
       reason: "missing-or-refresh-due",
     });
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer = null;
+      const settle = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        fn(value);
+      };
+      const fail = (error) => settle(reject, error);
       const req = http.request({
         socketPath: this.pipePath,
         path: "/v1/capabilities/handshake",
@@ -123,29 +135,46 @@ export class ParentPulseTokenManager {
         const chunks = [];
         let bytes = 0;
         res.on("data", (chunk) => {
+          if (settled) return;
           bytes += chunk.length;
           if (bytes > MAX_RESPONSE_BYTES) {
-            req.destroy(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response exceeded the allowed size"));
+            const error = brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response exceeded the allowed size");
+            fail(error);
+            res.destroy(error);
+            req.destroy(error);
             return;
           }
           chunks.push(chunk);
         });
+        res.on("error", fail);
+        res.on("aborted", () => fail(brokerError(
+          "POSSE_PARENT_PULSE_INVALID_RESPONSE",
+          "parent pulse response was aborted before completion",
+        )));
         res.on("end", () => {
+          if (settled) return;
+          if (this._generation !== generation) {
+            fail(brokerError(
+              "POSSE_PARENT_PULSE_AUTH_CHANGED",
+              "parent pulse authentication changed while the route grant was being requested",
+            ));
+            return;
+          }
           if (res.statusCode !== 200) {
             const status = Number(res.statusCode) || 0;
             if (status === 401 || status === 403) {
               this._cache.delete(route);
               this._grants.delete(route);
               this._deniedRoutes.add(route);
-              reject(brokerError("POSSE_PARENT_PULSE_DENIED", `parent pulse broker denied route ${route}`));
+              fail(brokerError("POSSE_PARENT_PULSE_DENIED", `parent pulse broker denied route ${route}`));
               return;
             }
-            reject(brokerError("POSSE_PARENT_PULSE_REJECTED", `parent pulse broker rejected the request with HTTP ${status}`));
+            fail(brokerError("POSSE_PARENT_PULSE_REJECTED", `parent pulse broker rejected the request with HTTP ${status}`));
             return;
           }
           let parsed;
           try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch {
-            reject(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response was not valid JSON"));
+            fail(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response was not valid JSON"));
             return;
           }
           const grant = parsed?.grant;
@@ -154,33 +183,37 @@ export class ParentPulseTokenManager {
             || grant?.capability !== "native.pulse"
             || !Array.isArray(grant?.scopes)
             || !grant.scopes.includes(route)) {
-            reject(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response contained an invalid capability grant"));
+            fail(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response contained an invalid capability grant"));
             return;
           }
           if (!validEnvelope(envelope, route)) {
-            reject(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response did not contain the requested route grant"));
+            fail(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response did not contain the requested route grant"));
             return;
           }
           if (!validRouteGrant(grant, envelope)) {
-            reject(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response contained an invalid grant expiry"));
+            fail(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response contained an invalid grant expiry"));
             return;
           }
-          const frozen = Object.freeze({ ...envelope });
+          const frozen = Object.freeze({
+            ...envelope,
+            nativeArtifacts: Object.freeze({ ...(envelope.nativeArtifacts || {}) }),
+          });
           this._cache.set(route, frozen);
           this._grants.set(route, Object.freeze({
             expiresAt: Number(grant.expiresAt),
             pins: Object.freeze({ ...(grant.artifacts?.pins || {}) }),
             keys: Object.freeze({ ...(grant.artifacts?.keys || {}) }),
           }));
-          resolve(frozen);
+          settle(resolve, frozen);
         });
       });
-      const timer = setTimeout(() => {
-        req.destroy(brokerError("POSSE_PARENT_PULSE_TIMEOUT", `parent pulse request timed out after ${this.timeoutMs}ms`));
+      timer = setTimeout(() => {
+        const error = brokerError("POSSE_PARENT_PULSE_TIMEOUT", `parent pulse request timed out after ${this.timeoutMs}ms`);
+        fail(error);
+        req.destroy(error);
       }, this.timeoutMs);
       timer.unref?.();
-      req.on("close", () => clearTimeout(timer));
-      req.on("error", (error) => reject(error?.code
+      req.on("error", (error) => fail(error?.code
         ? error
         : brokerError("POSSE_PARENT_PULSE_UNAVAILABLE", "parent pulse broker is unavailable")));
       req.end(body);

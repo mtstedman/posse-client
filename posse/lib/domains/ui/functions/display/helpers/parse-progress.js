@@ -14,7 +14,10 @@ function parseStage(row = {}) {
   if (kind.includes(".scip.stage.")) return lang ? `scip-${lang}` : "scip";
   if (kind.includes(".scip.ingest.")) return lang ? `scip-${lang}` : "scip";
   if (kind.includes(".merge.")) return lang ? `merge-${lang}` : "merge";
-  if (kind.includes(".onnx.")) return "onnx-symbols";
+  if (kind.includes(".onnx.")) {
+    const unit = String(row.progress_unit || row.unit || "symbols").toLowerCase();
+    return unit === "documents" || unit === "document" ? "onnx-docs" : "onnx-symbols";
+  }
   if (kind.includes(".parse.parse.") || kind.includes(".warm.parse.")) return lang ? `parse-${lang}` : "parse";
   if (!kind) return lang ? `parse-${lang}` : "parse";
   return lang ? `other-${lang}` : "other";
@@ -42,6 +45,26 @@ function progressText(row = {}) {
 }
 
 function detailText(row = {}) {
+  const kind = String(row.kind || "");
+  const unit = String(row.progress_unit || row.unit || "").toLowerCase();
+  if (kind.includes(".onnx.") && (unit === "documents" || unit === "document")) {
+    const details = [];
+    const phase = String(row.nativePhase || row.phase || "").trim().replace(/_/g, " ");
+    const indexed = numeric(row.indexedSymbols);
+    const nativeCurrent = numeric(row.nativeCurrent);
+    const nativeTotal = numeric(row.nativeTotal);
+    const nativeBatchCurrent = numeric(row.nativeBatchCurrent);
+    const nativeBatchTotal = numeric(row.nativeBatchTotal);
+    if (phase) details.push(phase);
+    if (indexed != null) details.push(`${indexed} symbols`);
+    if (nativeCurrent != null && nativeTotal != null) {
+      details.push(`${nativeCurrent}/${nativeTotal} ${String(row.nativeUnit || "texts")}`);
+    }
+    if (nativeBatchCurrent != null && nativeBatchTotal != null) {
+      details.push(`batch ${nativeBatchCurrent}/${nativeBatchTotal}`);
+    }
+    if (details.length > 0) return details.join(" ");
+  }
   const file = String(row.file || "").trim();
   const symbol = String(row.symbol || "").trim();
   const line = String(row.lastLine || "").trim();

@@ -49,6 +49,14 @@ function killProcessTree(proc, { force = true, platform = process.platform, spaw
         stdio: "ignore",
         windowsHide: true,
       });
+      let fellBack = false;
+      const fallback = () => {
+        if (fellBack) return;
+        fellBack = true;
+        try { proc.kill(force ? "SIGKILL" : "SIGTERM"); } catch { /* ledger retains the child */ }
+      };
+      killer.once?.("error", fallback);
+      killer.once?.("exit", (code) => { if (code !== 0) fallback(); });
       killer.unref?.();
       return true;
     } catch {
@@ -90,31 +98,43 @@ export function ProcessTransport(opts) {
   const spawnImpl = opts.spawnImpl || spawn;
   const platform = opts.platform || process.platform;
   const maxBufferChars = opts.maxBufferChars ?? JSONL_BUFFER_MAX_CHARS;
-  /** @type {import("node:child_process").ChildProcess | null} */
-  let proc = null;
-  /** Last spawned child pid, for the process ledger (orphan reaping). */
-  let spawnedPid = null;
-  let buffer = "";
-  /** Frame-scan resume point: buffer[0..scanFrom) is known newline-free. */
-  let scanFrom = 0;
+  /** @type {{ proc: import("node:child_process").ChildProcess, pid: number | null, buffer: string, scanFrom: number, exited: boolean, exitConfirmed: boolean, retireTimer: ReturnType<typeof setTimeout> | null } | null} */
+  let active = null;
   /** @type {Array<(m: Record<string, unknown>) => void>} */
   const messageHandlers = [];
   /** @type {Array<() => void>} */
   const exitHandlers = [];
 
-  const emitExit = () => {
-    proc = null;
-    if (spawnedPid != null) { forgetDaemonSpawn(spawnedPid); spawnedPid = null; }
-    buffer = "";
-    scanFrom = 0;
+  const emitExit = (record, { confirmed = false } = {}) => {
+    if (confirmed && !record.exitConfirmed) {
+      record.exitConfirmed = true;
+      if (record.retireTimer) clearTimeout(record.retireTimer);
+      record.retireTimer = null;
+      if (record.pid != null) forgetDaemonSpawn(record.pid);
+    }
+    if (record.exited) return;
+    const shouldNotify = active == null || active === record;
+    record.exited = true;
+    if (active === record) active = null;
+    record.buffer = "";
+    record.scanFrom = 0;
+    if (!shouldNotify) return;
     for (const cb of exitHandlers) cb();
+  };
+
+  const failAndKill = (record) => {
+    if (active !== record || record.exited) return;
+    emitExit(record);
+    try { record.proc.stdin?.end(); } catch { /* ignore */ }
+    killProcessTree(record.proc, { force: true, platform, spawnImpl });
   };
 
   const transport = {
     start() {
-      if (proc && !proc.killed && proc.exitCode == null) return true;
+      if (active && !active.proc.killed && active.proc.exitCode == null) return true;
       const bin = opts.resolveBin();
       if (!bin) return false;
+      let proc;
       try {
         proc = spawnImpl(bin, opts.buildArgs(), {
           cwd: process.cwd(),
@@ -123,11 +143,27 @@ export function ProcessTransport(opts) {
           windowsHide: true,
         });
       } catch {
-        proc = null;
         return false;
       }
-      buffer = "";
-      scanFrom = 0;
+      const record = {
+        proc,
+        pid: proc.pid ?? null,
+        buffer: "",
+        scanFrom: 0,
+        exited: false,
+        exitConfirmed: false,
+        retireTimer: null,
+      };
+      active = record;
+      // Attach terminal listeners before any optional stream setup. If setup
+      // below fails synchronously, the ledger remains authoritative until the
+      // child actually exits instead of losing the only orphan breadcrumb.
+      // ChildProcess "error" is a terminal transport signal, but it is not
+      // proof that a successfully spawned pid is gone (kill/send can fail).
+      // Notify waiters once while retaining the ledger until the OS "exit".
+      proc.on("error", () => failAndKill(record));
+      proc.on("exit", () => emitExit(record, { confirmed: true }));
+      recordDaemonSpawn(record.pid, bin, { label: opts.label });
       // Don't let an idle daemon pin the event loop: unref the child and its
       // pipes so the host process can exit when its real work is done (an
       // in-flight request's own timer keeps the loop alive meanwhile). Without
@@ -136,22 +172,29 @@ export function ProcessTransport(opts) {
       proc.stdout?.unref();
       proc.stderr?.unref();
       proc.stdin?.unref();
-      proc.stdin?.on?.("error", () => {});
+      // Pipe errors (especially stdin EPIPE) mean this transport incarnation
+      // can no longer carry requests. They are not OS exit proof, so notify the
+      // daemon while retaining the ledger until the child's eventual exit.
+      proc.stdin?.on?.("error", () => failAndKill(record));
+      proc.stdout?.on?.("error", () => failAndKill(record));
+      proc.stderr?.on?.("error", () => failAndKill(record));
       proc.stdout?.setEncoding?.("utf8");
       // Hard-ledger the child so a crashed parent's orphan can be reaped at the
       // next boot (the unref above means the OS won't clean it up for us).
-      spawnedPid = proc.pid ?? null;
-      recordDaemonSpawn(spawnedPid, bin, { label: opts.label });
       proc.stdout?.on("data", (chunk) => {
-        buffer += chunk.toString("utf8");
+        // A retired child may continue draining after a replacement starts.
+        // Its late output belongs to the old incarnation and must not be
+        // decoded as a response from the replacement.
+        if (active !== record || record.exited) return;
+        record.buffer += chunk.toString("utf8");
         let newline;
         // Resume the delimiter scan where the last chunk left off — large
         // frames arrive in ~64KB pipe chunks, and rescanning the whole
         // accumulated buffer per chunk is quadratic in frame size.
-        while ((newline = buffer.indexOf("\n", scanFrom)) >= 0) {
-          const line = buffer.slice(0, newline);
-          buffer = buffer.slice(newline + 1);
-          scanFrom = 0;
+        while ((newline = record.buffer.indexOf("\n", record.scanFrom)) >= 0) {
+          const line = record.buffer.slice(0, newline);
+          record.buffer = record.buffer.slice(newline + 1);
+          record.scanFrom = 0;
           if (!line.trim()) continue;
           let message;
           try {
@@ -161,32 +204,33 @@ export function ProcessTransport(opts) {
           }
           for (const cb of messageHandlers) cb(message);
         }
-        scanFrom = buffer.length;
-        if (buffer.length > maxBufferChars) {
+        record.scanFrom = record.buffer.length;
+        if (record.buffer.length > maxBufferChars) {
           // Never silently drop a partial frame: the line's tail would still
           // arrive, corrupt the framing, and the pending request would die by
           // timeout (a 120s stall per oversized response). A host emitting a
           // frame this large is malfunctioning — kill it so the Daemon fails
           // pending requests now and callers take their fallback path.
-          transport.kill();
+          failAndKill(record);
         }
       });
       proc.stderr?.on("data", () => { /* host diagnostics; ignored */ });
-      proc.on("error", emitExit);
-      proc.on("exit", emitExit);
       return true;
     },
     send(message) {
-      proc?.stdin?.write(`${JSON.stringify(message)}\n`);
+      active?.proc.stdin?.write(`${JSON.stringify(message)}\n`);
     },
     onMessage(cb) { messageHandlers.push(cb); },
     onExit(cb) { exitHandlers.push(cb); },
     kill() {
-      const p = proc;
-      proc = null;
-      if (spawnedPid != null) { forgetDaemonSpawn(spawnedPid); spawnedPid = null; }
-      try { p?.stdin?.end(); } catch { /* ignore */ }
-      killProcessTree(p, { force: true, platform, spawnImpl });
+      const record = active;
+      active = null;
+      if (!record) return;
+      try { record.proc.stdin?.end(); } catch { /* ignore */ }
+      // Do not forget the ledger row until an OS-confirmed exit. taskkill or
+      // child.kill can fail, and deleting first converts a live orphan into an
+      // untracked process that neither shutdown nor the next boot can reap.
+      killProcessTree(record.proc, { force: true, platform, spawnImpl });
     },
     /**
      * Graceful stop. EOF on stdin is the stdio-host stop signal: the worker
@@ -197,30 +241,24 @@ export function ProcessTransport(opts) {
      * @param {number} [graceMs]
      */
     retire(graceMs = 2000) {
-      const p = proc;
-      const pid = spawnedPid;
-      if (!p) return;
+      const record = active;
+      if (!record) return;
       // Detach now: this transport reports dead, late events are ignored by
       // the Daemon's identity guard, and a fresh host can spawn immediately.
-      proc = null;
-      spawnedPid = null;
-      try { p.stdin?.end(); } catch { /* ignore */ }
-      const timer = setTimeout(() => {
-        killProcessTree(p, { force: true, platform, spawnImpl });
+      active = null;
+      try { record.proc.stdin?.end(); } catch { /* ignore */ }
+      record.retireTimer = setTimeout(() => {
+        killProcessTree(record.proc, { force: true, platform, spawnImpl });
       }, Math.max(0, graceMs));
       // Never hold the loop open for a draining host.
-      if (typeof timer.unref === "function") timer.unref();
-      p.on("exit", () => {
-        clearTimeout(timer);
-        if (pid != null) forgetDaemonSpawn(pid);
-      });
+      record.retireTimer.unref?.();
     },
     isAlive() {
-      return !!proc && !proc.killed && proc.exitCode == null;
+      return !!active && !active.proc.killed && active.proc.exitCode == null;
     },
     /** Current host pid (for shutdown reap exclusion), null when not running. */
     hostPid() {
-      return proc?.pid ?? null;
+      return active?.proc.pid ?? null;
     },
   };
   return transport;
@@ -264,11 +302,13 @@ export function ThreadTransport(opts) {
 
   const emitExit = (record) => {
     if (record.exited) return;
+    const shouldNotify = active == null || active === record;
     record.exited = true;
     if (active === record) active = null;
     if (record.retireTimer) clearTimeout(record.retireTimer);
     record.retireTimer = null;
     void releaseBridge(record);
+    if (!shouldNotify) return;
     for (const cb of exitHandlers) cb();
   };
 
@@ -305,6 +345,7 @@ export function ThreadTransport(opts) {
         active = record;
         worker.unref();
         worker.on("message", (message) => {
+          if (active !== record || record.exited) return;
           for (const cb of messageHandlers) cb(message);
         });
         worker.on("error", () => emitExit(record));

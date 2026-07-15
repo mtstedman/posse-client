@@ -56,20 +56,23 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
    env file from `~/.bashrc` / `~/.zshrc`.
 9. **Account settings** — seeds missing ATLAS keys into `~/.posse/account.db`
    (merge-only; existing values are never overwritten).
-10. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
-   which builds the managed Python venv from `requirements.txt` and installs
-   the SCIP language environments. This replaces the old `pip install --user`
-   step (which broke on PEP 668 distros like Ubuntu 23.04+/Debian 12+) — the
-   venv route works everywhere and matches what Posse does at boot.
-11. **Provider CLI detection** — `posse admin init --non-interactive`.
-12. **Provider API keys** — only with `--configure-keys`: hidden prompts for
+10. **Provider CLI detection** — `posse admin init --non-interactive`.
+11. **Provider API keys** — only with `--configure-keys`: hidden prompts for
     `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` / `CODEX_API_KEY`, written
     to `~/.config/posse/providers.env` (chmod 600), plus optional `claude` /
     `codex login` launches.
-13. **Native binaries** — downloads the current authenticated `posse-atlas`,
-    `posse-git`, `posse-remote`, and `posse-vector` artifacts for the host
+12. **Native binaries** — downloads the current authenticated `posse-atlas`,
+    `posse-git`, `posse-ml`, `posse-remote`, and `posse-atlas-vector` artifacts for the host
     platform. Existing verified versions are reused. Without `POSSE_KEY`, the
-    step reports a warning and boot readiness retries later.
+    step reports a warning and the following doctor step records the install as
+    failed rather than claiming a usable runtime.
+13. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
+    which builds the managed Python venv from `requirements.txt`, installs the
+    SCIP language environments, verifies the issued native binary versions,
+    and downloads/deploys the versioned Jina embeddings package when missing or
+    stale. Jina `tar+zstd` extraction is embedded in `posse-ml`; no system or
+    Node unpacker package is required. This replaces the old `pip install
+    --user` step (which broke on PEP 668 distros like Ubuntu 23.04+/Debian 12+).
 14. **Validation** — boots Posse (`node orchestrator.js status`).
 15. **ATLAS smoke test** — only with `--repo-path`.
 
@@ -118,6 +121,8 @@ With a smoke test against a repo:
 | `--no-install-node` | Don't auto-install Node via nvm when Node 24+ is missing |
 | `--configure-keys` | Prompt for provider API keys (hidden input, chmod 600 file) |
 | `--force` | Re-run `npm install` even if `node_modules` looks fresh |
+| `--command-timeout <sec>` | Maximum runtime for ordinary external commands (default: 1800; range: 60–86400) |
+| `--doctor-timeout <sec>` | Maximum runtime for first-run doctor, including Jina deployment (default: 7500; range: 60–86400) |
 | `--dry-run` | Print what would happen; do not execute |
 | `--plain` | Disable colors and spinners (also honors `NO_COLOR`; spinners auto-disable when not a TTY) |
 | `--help` | Show help |
@@ -131,8 +136,13 @@ With a smoke test against a repo:
 - `npm install` failures almost always name a missing system library in the
   log — the toolchain step exists to prevent the common ones (node-pty needs
   `make`/`g++`/`python3`).
-- If the doctor step is `partial`, run `posse doctor` after installing the
-  host tools it names; it repairs incrementally.
+- If the doctor step is `failed`, run `posse doctor` after installing the host
+  tools it names; it repairs incrementally. The installer exits nonzero while a
+  required runtime, current native binary, or Jina deployment remains
+  unresolved.
+- External commands and their process trees are killed after their configured
+  timeout so an unattended package manager, Git, npm, native download, or
+  doctor process cannot hold the installer forever.
 - Re-running the installer after a failure is always safe: completed steps
   skip themselves.
 - `atlas.env` is rewritten each run. `providers.env` is **only** touched when

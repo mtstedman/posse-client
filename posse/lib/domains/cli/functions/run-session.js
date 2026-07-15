@@ -138,6 +138,7 @@ export function createAsyncSnapshotCache({
     inFlight = Promise.resolve()
       .then(load)
       .then((next) => {
+        if (stopped) return value;
         if (next !== undefined) {
           value = next;
           if (typeof onUpdate === "function") onUpdate(value);
@@ -145,7 +146,7 @@ export function createAsyncSnapshotCache({
         return value;
       })
       .catch((err) => {
-        if (typeof onError === "function") onError(err);
+        if (!stopped && typeof onError === "function") onError(err);
         return value;
       })
       .finally(() => {
@@ -203,6 +204,7 @@ export function handleWrapUpSignal({
   signal = "SIGINT",
   display = null,
   cleanupAtlasForSession = null,
+  finalizeRuntimeResources = null,
   closeRuntimeState = closeRuntimeStateForExit,
   exit = process.exit,
 } = {}) {
@@ -213,15 +215,24 @@ export function handleWrapUpSignal({
     closeRuntimeState?.();
     exit(code);
   };
+  const finalize = () => {
+    try {
+      const result = finalizeRuntimeResources?.();
+      if (result && typeof result.then === "function") return Promise.resolve(result).then(finish, finish);
+    } catch {
+      // Best-effort shutdown still needs to close local state and exit.
+    }
+    finish();
+  };
   try {
     const stopResult = cleanupAtlasForSession?.({ label: "Interrupted wrap-up" });
     if (stopResult && typeof stopResult.then === "function") {
-      return stopResult.finally(finish);
+      return stopResult.then(finalize, finalize);
     }
   } catch {
-    // Best-effort shutdown still needs to close local state and exit.
+    // Continue through the complete runtime finalizer.
   }
-  finish();
+  return finalize();
 }
 
 export function bootScipLangPatchFromEvent(event = {}) {

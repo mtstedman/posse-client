@@ -23,16 +23,34 @@ function hasMappings(mappings) {
   return Array.isArray(mappings) && mappings.length > 0;
 }
 
+function looksLikeFileDestination(value) {
+  const base = String(value || "").replace(/\\/g, "/").split("/").at(-1) || "";
+  const separator = base.lastIndexOf(".");
+  if (separator < 0 || separator === base.length - 1) return false;
+  return /^[A-Za-z0-9]+$/.test(base.slice(separator + 1));
+}
+
 function promotedScopeFromMappings(mappings, { cwd = process.cwd() } = {}) {
-  return hasMappings(mappings)
-    ? CommitScope.fromPayload({ mappings }, { cwd })
-    : new CommitScope();
+  if (!hasMappings(mappings)) return new CommitScope();
+  const files = [];
+  const roots = [];
+  for (const mapping of mappings) {
+    if (!mapping || typeof mapping !== "object") continue;
+    const dest = String(mapping.dest || "").trim();
+    if (!dest) continue;
+    const wildcard = typeof mapping.pattern === "string" && mapping.pattern.startsWith("*.");
+    const fileDestination = mapping.destination_type === "file"
+      || (!wildcard && looksLikeFileDestination(dest));
+    (fileDestination ? files : roots).push(dest);
+  }
+  // Scheduler/handoff scope classification is local policy and runs during
+  // boot lock-index reconstruction. It must not start a key-gated Git daemon;
+  // actual commit-scope enforcement remains native-owned in CommitScope.
+  return new CommitScope({ files, roots, cwd });
 }
 
 async function promotedScopeFromMappingsAsync(mappings, { cwd = process.cwd() } = {}) {
-  return hasMappings(mappings)
-    ? await CommitScope.fromPayloadAsync({ mappings }, { cwd })
-    : new CommitScope();
+  return promotedScopeFromMappings(mappings, { cwd });
 }
 
 export class Scope {

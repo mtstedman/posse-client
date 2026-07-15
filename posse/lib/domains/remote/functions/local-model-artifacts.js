@@ -16,6 +16,7 @@ const CATALOG_TIMEOUT_MS = 60_000;
 const DOWNLOAD_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 const STATUS_TIMEOUT_MS = 10_000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
+const NATIVE_PROCESS_TIMEOUT_GRACE_MS = 60_000;
 
 export function defaultLocalModelArtifactRoot(homeDir = os.homedir()) {
   return path.join(homeDir, ".posse", "artifacts");
@@ -68,7 +69,7 @@ export async function downloadLocalModelArtifact(client, artifact, {
     const tracked = runRemoteNativeArtifactJson(
       REMOTE_ARTIFACT_DOWNLOAD_METHOD,
       payload,
-      { manager: client.manager, timeoutMs: 0 },
+      { manager: client.manager, timeoutMs: nativeProcessTimeoutMs(payload.timeoutMs) },
     ).then(
       (value) => ({ ok: true, value }),
       (error) => ({ ok: false, error }),
@@ -105,11 +106,14 @@ export async function downloadLocalModelArtifact(client, artifact, {
   throw new Error("The local model download did not produce a result.");
 }
 
-export async function downloadLocalModelPackage(client, modelId) {
+export async function downloadLocalModelPackage(client, modelId, {
+  timeoutMs = DOWNLOAD_TIMEOUT_MS,
+} = {}) {
   const normalizedModelId = String(modelId || "").trim();
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9])?$/.test(normalizedModelId)) {
     throw new Error("The required local model ID is invalid.");
   }
+  const effectiveTimeoutMs = positiveTimeoutMs(timeoutMs, DOWNLOAD_TIMEOUT_MS);
   for (let invocation = 0; invocation < 2; invocation += 1) {
     try {
       const value = await runRemoteNativeArtifactJson(
@@ -118,11 +122,11 @@ export async function downloadLocalModelPackage(client, modelId) {
           baseUrl: client.baseUrl,
           modelId: normalizedModelId,
           destinationRoot: client.destinationRoot,
-          timeoutMs: DOWNLOAD_TIMEOUT_MS,
+          timeoutMs: effectiveTimeoutMs,
           maxRetries: 4,
           retryDelayMs: 1_000,
         },
-        { manager: client.manager, timeoutMs: 0 },
+        { manager: client.manager, timeoutMs: nativeProcessTimeoutMs(effectiveTimeoutMs) },
       );
       return validateModelPackageDownload(value, normalizedModelId);
     } catch (error) {
@@ -217,4 +221,13 @@ function delay(ms) {
 function shouldRetryWithFreshPulse(error) {
   return /\b401\b|unauthori[sz]ed|pulse[^\n]*expired|heartbeat[^\n]*expired/i
     .test(String(error?.message || error || ""));
+}
+
+function positiveTimeoutMs(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.max(1_000, parsed) : fallback;
+}
+
+function nativeProcessTimeoutMs(operationTimeoutMs) {
+  return positiveTimeoutMs(operationTimeoutMs, DOWNLOAD_TIMEOUT_MS) + NATIVE_PROCESS_TIMEOUT_GRACE_MS;
 }

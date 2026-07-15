@@ -2,6 +2,10 @@
 
 import http from "node:http";
 
+const DEFAULT_RPC_TIMEOUT_MS = 150000;
+const DEFAULT_RPC_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const gateTokens = new WeakMap();
+
 function freezeJson(value) {
   return deepFreeze(JSON.parse(JSON.stringify(value || {})));
 }
@@ -52,7 +56,8 @@ function resultText(message = {}) {
 /**
  * Immutable role/tool contract attached to one provider agent for its entire
  * lifetime. The replaceable owner-side attachment carries Job identity, never
- * file authority, and never changes this gate's signed OAuth bearer.
+ * file authority. Its bearer rotates at attachment boundaries while the
+ * signed role/tool capability claims remain unchanged.
  */
 export class McpGate {
   constructor({
@@ -96,8 +101,13 @@ export class McpGate {
       remoteToolSurface: { value: frozenSurface, enumerable: true, configurable: false, writable: false },
       owner: { value: owner, enumerable: false, configurable: false, writable: false },
       ownerSession: { value: frozenOwnerSession, enumerable: true, configurable: false, writable: false },
-      token: { value: String(token), enumerable: false, configurable: false, writable: false },
+      token: {
+        get: () => gateTokens.get(this),
+        enumerable: false,
+        configurable: false,
+      },
     });
+    gateTokens.set(this, String(token));
     this.disposed = false;
     this.binding = null;
   }
@@ -126,6 +136,8 @@ export class McpGate {
       expectedBootId: this.ownerSession.ownerBootId,
       bootConfig: attachment,
     });
+    const { token: rotatedToken, ...publicResult } = result || {};
+    if (rotatedToken) gateTokens.set(this, String(rotatedToken));
     this.binding = freezeJson({
       jobId: attachment.jobId ?? null,
       workItemId: attachment.workItemId ?? null,
@@ -133,7 +145,7 @@ export class McpGate {
       agentCallId: attachment.agentCallId ?? null,
       cwd: attachment.cwd || "",
     });
-    return result;
+    return publicResult;
   }
 
   assertAttached({ jobId = null, workItemId = null, agentCallId = null } = {}) {
@@ -158,17 +170,45 @@ export class McpGate {
       expectedBootId: this.ownerSession.ownerBootId,
       reason,
     });
+    const { token: rotatedToken, ...publicResult } = result || {};
+    if (rotatedToken) gateTokens.set(this, String(rotatedToken));
     this.binding = null;
-    return result;
+    return publicResult;
   }
 
-  async rpc(message = {}) {
+  async rpc(message = {}, {
+    timeoutMs = DEFAULT_RPC_TIMEOUT_MS,
+    maxResponseBytes = DEFAULT_RPC_MAX_RESPONSE_BYTES,
+    signal = null,
+  } = {}) {
     if (this.disposed) throw gateError("POSSE_MCP_GATE_DISPOSED", "MCP gate has been disposed");
     if (!this.binding) throw gateError("POSSE_MCP_GATE_ATTACHMENT_MISSING", "MCP gate has no active Job attachment");
+    if (signal?.aborted) {
+      throw gateError("POSSE_MCP_GATE_ABORTED", "MCP gate request was aborted");
+    }
     const endpoint = this.owner.endpoint();
     const body = JSON.stringify({ token: this.token, message });
     const payload = await new Promise((resolve, reject) => {
-      const request = http.request({
+      let settled = false;
+      let timer = null;
+      let request = null;
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener?.("abort", onAbort);
+      };
+      const settle = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        fn(value);
+      };
+      const fail = (error) => settle(reject, error);
+      const onAbort = () => {
+        const error = gateError("POSSE_MCP_GATE_ABORTED", "MCP gate request was aborted");
+        request?.destroy(error);
+        fail(error);
+      };
+      request = http.request({
         method: "POST",
         socketPath: endpoint.pipePath,
         path: "/v1/mcp/rpc",
@@ -179,30 +219,63 @@ export class McpGate {
         },
       }, (response) => {
         const chunks = [];
-        response.on("data", (chunk) => chunks.push(chunk));
+        let total = 0;
+        response.on("error", fail);
+        response.on("aborted", () => fail(gateError(
+          "POSSE_MCP_GATE_OWNER_ABORTED",
+          "MCP owner response was aborted before completion",
+        )));
+        response.on("data", (chunk) => {
+          if (settled) return;
+          const bytes = Buffer.from(chunk);
+          total += bytes.length;
+          if (total > Math.max(1, Number(maxResponseBytes) || DEFAULT_RPC_MAX_RESPONSE_BYTES)) {
+            const error = gateError(
+              "POSSE_MCP_GATE_RESPONSE_TOO_LARGE",
+              `MCP owner response exceeded ${maxResponseBytes} bytes`,
+            );
+            fail(error);
+            response.destroy();
+            request.destroy();
+            return;
+          }
+          chunks.push(bytes);
+        });
         response.on("end", () => {
+          if (settled) return;
           try {
             const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
             if (response.statusCode !== 200 || parsed?.ok !== true) {
-              reject(gateError(
+              fail(gateError(
                 "POSSE_MCP_GATE_OWNER_REJECTED",
                 `MCP owner rejected agent gate request (${response.statusCode || "unknown"}): ${parsed?.error || "unknown"}`,
               ));
               return;
             }
-            resolve(parsed);
+            settle(resolve, parsed);
           } catch (error) {
-            reject(error);
+            fail(error);
           }
         });
       });
-      request.on("error", reject);
+      request.on("error", fail);
+      const boundedTimeoutMs = Math.max(1, Number(timeoutMs) || DEFAULT_RPC_TIMEOUT_MS);
+      timer = setTimeout(() => {
+        const error = gateError(
+          "POSSE_MCP_GATE_TIMEOUT",
+          `MCP gate request timed out after ${boundedTimeoutMs}ms`,
+        );
+        request.destroy(error);
+        fail(error);
+      }, boundedTimeoutMs);
+      timer.unref?.();
+      signal?.addEventListener?.("abort", onAbort, { once: true });
       request.end(body);
     });
     return payload?.message || null;
   }
 
-  async callTool(name, args = {}) {
+  async callTool(name, args = {}, rpcOptions = {}) {
     const message = await this.rpc({
       jsonrpc: "2.0",
       id: `agent-gate-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -211,7 +284,7 @@ export class McpGate {
         name: rpcToolName(name),
         arguments: args && typeof args === "object" ? args : {},
       },
-    });
+    }, rpcOptions);
     return resultText(message);
   }
 

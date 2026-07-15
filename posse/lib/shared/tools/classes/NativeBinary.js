@@ -551,7 +551,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {{ input?: Buffer | string, json?: boolean, timeoutMs?: number, signal?: AbortSignal, requiredRoute?: string, workerFallback?: boolean, idempotent?: boolean }} opts
+   * @param {{ input?: Buffer | string, json?: boolean, timeoutMs?: number, signal?: AbortSignal, requiredRoute?: string, workerFallback?: boolean, idempotent?: boolean, onProgress?: (event: unknown) => void }} opts
    * @returns {Promise<RunResult>}
    */
   async #runViaWorker(subcommand, args, opts) {
@@ -585,6 +585,7 @@ export class NativeBinary {
     let response = await this.#daemon().request(workerEnvelope, {
       signal: requestOpts.signal,
       timeoutMs: requestOpts.timeoutMs,
+      onProgress: requestOpts.onProgress,
     });
     if (response?._transportGone === true) {
       // The host this pulse state was delivered to is gone; the replacement
@@ -602,6 +603,7 @@ export class NativeBinary {
         response = await this.#daemon().request(workerEnvelope, {
           signal: requestOpts.signal,
           timeoutMs: requestOpts.timeoutMs,
+          onProgress: requestOpts.onProgress,
         });
       }
     }
@@ -618,7 +620,13 @@ export class NativeBinary {
       const reason = response._transportGone === true ? "transport_gone"
         : response._timedOut === true ? "timeout" : "overloaded";
       this.#noteWorkerFallback(reason, subcommand);
-      if (opts.workerFallback === false) {
+      // An overload is rejected before Daemon.send(), so a one-shot fallback
+      // cannot duplicate work. A timeout or lost transport is different: the
+      // worker may have committed before its reply disappeared. Preserve the
+      // caller's non-idempotent contract and surface the uncertain outcome
+      // instead of replaying it in a second process.
+      const replayUnsafe = opts.idempotent === false && reason !== "overloaded";
+      if (opts.workerFallback === false || replayUnsafe) {
         const error = new Error(`native ${this.name} worker unavailable (${reason})`);
         error.code = "POSSE_NATIVE_WORKER_UNAVAILABLE";
         return { ok: false, code: null, signal: null, stdout: "", stderr: error.message, error };
@@ -832,7 +840,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, worker?: boolean, workerArgs?: string[], workerFallback?: boolean, idempotent?: boolean, maxBuffer?: number, requiredRoute?: string }} [opts]
+   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, worker?: boolean, workerArgs?: string[], workerFallback?: boolean, idempotent?: boolean, maxBuffer?: number, requiredRoute?: string, onProgress?: (event: unknown) => void }} [opts]
    * @returns {Promise<RunResult>}
    */
   run(subcommand, args = [], opts = {}) {
@@ -1523,16 +1531,25 @@ export class NativeBinary {
   /** @param {import("node:child_process").ChildProcess} child */
   #kill(child) {
     if (!child || child.exitCode != null || child.killed) return;
-    if (process.platform === "win32" && child.pid) {
+    const fallback = () => {
+      if (child.exitCode != null || child.killed) return;
+      try { child.kill("SIGKILL"); } catch { /* ignore */ }
+    };
+    if (this.os === "windows" && child.pid) {
       try {
         const killer = this._spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
           stdio: "ignore",
           windowsHide: true,
         });
+        // spawn() reports a missing/broken taskkill asynchronously. Without a
+        // listener the error is unhandled and, worse, the original native
+        // process remains alive after its caller has already timed out.
+        killer.once?.("error", fallback);
+        killer.once?.("exit", (code) => { if (code !== 0) fallback(); });
         killer.unref?.();
         return;
       } catch { /* fall through to signal */ }
     }
-    try { child.kill("SIGKILL"); } catch { /* ignore */ }
+    fallback();
   }
 }

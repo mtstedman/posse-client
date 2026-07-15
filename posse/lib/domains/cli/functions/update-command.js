@@ -8,9 +8,11 @@ import { getLiveSchedulerBlockMessage } from "../../queue/functions/index.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 import { gitExecAsync } from "../../git/functions/utils.js";
 import {
+  DEFAULT_DOCTOR_COMMAND_TIMEOUT_MS,
   doctorRepoDependencies,
   formatBootDependencySync,
 } from "../../system/functions/dependency-sync.js";
+import { DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS } from "../../atlas/functions/v2/embeddings/jina-model.js";
 
 const DEFAULT_REMOTE = "origin";
 const DEFAULT_BRANCH = "main";
@@ -19,7 +21,7 @@ const GIT_TIMEOUT_MS = 120_000;
 // they get far more room than ordinary plumbing calls.
 const FETCH_TIMEOUT_MS = 600_000;
 const MERGE_TIMEOUT_MS = 300_000;
-const UPDATE_DOCTOR_TIMEOUT_MS = 20 * 60 * 1000;
+const UPDATE_DOCTOR_TIMEOUT_MS = DEFAULT_DOCTOR_COMMAND_TIMEOUT_MS;
 const UPDATE_CHECK_TIMEOUT_MS = 2_000;
 const UPDATE_CHECK_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const CHANGELOG_LIMIT = 8;
@@ -508,7 +510,7 @@ export async function updatePosseClient({
       update = {
         ok: true,
         status: "up-to-date",
-        changed: rollback ? !rollback.ok : false,
+        changed: false,
         message: `already at ${shortSha(before)}`,
         repo_root: repoRoot,
         remote,
@@ -605,7 +607,9 @@ export async function updatePosseClient({
       posseRoot: resolvedPosseRoot,
       dryRun,
       includeNativeBinaries: true,
+      includeJinaModel: true,
       timeoutMs: UPDATE_DOCTOR_TIMEOUT_MS,
+      modelTimeoutMs: DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS,
       scipMode: atlasConfig.enabled === false
         ? "off"
         : (atlasConfig.scipMode ?? atlasConfig.atlas_scip_mode ?? null),
@@ -744,6 +748,12 @@ function renderDependencySections({ log, colors, dependencies }) {
     ["Repaired", report.repaired, colors.green, `${colors.green}✓${colors.reset}`],
     ["Pending", report.pending, colors.yellow, `${colors.yellow}!${colors.reset}`],
     ["Failed", report.failed, colors.red, `${colors.red}✗${colors.reset}`],
+    [
+      "Verified native/model runtime",
+      (report.ready || []).filter((entry) => /^(?:native|model)\s/u.test(String(entry?.label || ""))),
+      colors.green,
+      `${colors.green}✓${colors.reset}`,
+    ],
   ];
   for (const [title, entries, color, glyph] of sections) {
     if (!Array.isArray(entries) || entries.length === 0) continue;
@@ -797,7 +807,7 @@ function renderUpdateHelp({ log, colors }) {
   ${colors.bold}posse update${colors.reset}
 
   Fast-forward the local Posse client checkout, show what came in, and refresh
-  runtime dependencies (posse doctor).
+  runtime dependencies, current native binaries, and Jina (posse doctor).
 
   Usage:
     posse update
@@ -806,6 +816,7 @@ function renderUpdateHelp({ log, colors }) {
     posse update --branch main
 
   The update is fast-forward only and refuses local tracked edits.
+  Each dependency command is capped at 30 minutes and Jina deployment at 2 hours.
 `);
 }
 

@@ -240,6 +240,8 @@ import {
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { ask, askMultiline, askSelectorChoice } from "./input-prompts.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
+import { daemonSupervisor } from "../../../shared/tools/classes/daemon/index.js";
+import { persistentMcpOwner } from "../../../shared/tools/classes/PersistentMcpOwner.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -2422,6 +2424,11 @@ function helpFlagRequested() {
 }
 
 async function printCommandHelp(command) {
+  // Doctor and update own richer, lazily loaded help. Dispatching them here
+  // keeps `posse <command> --help` out of bootstrap while avoiding a second
+  // copy of their timeout and safety contract in the global usage table.
+  if (command === "doctor") return cmdDoctor();
+  if (command === "update") return cmdUpdate();
   const usage = COMMAND_USAGE[command];
   if (usage) {
     usage();
@@ -2482,9 +2489,9 @@ ${aliasDiagnostic}
     ${C.dim}             serve [--show-token] [--pair]${C.reset}
     ${C.cyan}health${C.reset}     Failure/stuck-job health summary
     ${C.cyan}dashboard${C.reset}  Visual job board
-    ${C.cyan}doctor${C.reset}     Repair repo dependency/runtime requirements
+    ${C.cyan}doctor${C.reset}     Repair dependencies, native binaries, and Jina
     ${C.dim}             doctor [--dry-run] [--json]${C.reset}
-    ${C.cyan}update${C.reset}     Pull latest Posse client + refresh dependencies
+    ${C.cyan}update${C.reset}     Update Posse + dependencies, binaries, and Jina
     ${C.dim}             update [--dry-run] [--json] [--branch main]${C.reset}
     ${C.cyan}review${C.reset}     Approve/reject completed work items
     ${C.cyan}events${C.reset}     Show event log (audit trail)
@@ -2639,6 +2646,8 @@ export function runOrchestratorCli() {
       process.exitCode = 1;
     })
     .finally(async () => {
+      try { await daemonSupervisor.shutdownAll(); } catch { /* teardown is best effort */ }
+      try { await persistentMcpOwner.close({ force: true }); } catch { /* teardown is best effort */ }
       try { await nativeBinaries.disposeAll(); } catch { /* teardown is best effort */ }
       flushEventsNow();
       closeLog();

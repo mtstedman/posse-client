@@ -24,7 +24,11 @@
 // covers every thread's hosts because the ledger file is per-PROCESS.
 
 import { Daemon } from "./Daemon.js";
-import { listOwnDaemonSpawns, reapOwnDaemonSpawns } from "./process-ledger.js";
+import {
+  listOwnDaemonSpawns,
+  reapOwnDaemonSpawns,
+  waitForOwnDaemonLedgerIdentityHydration,
+} from "./process-ledger.js";
 import { appendRunTelemetry } from "../../../telemetry/functions/run-telemetry.js";
 
 const DEFAULT_SHUTDOWN_GRACE_MS = 2_000;
@@ -36,6 +40,8 @@ export class DaemonSupervisor {
     /** @type {Array<(event: { kind: string, label: string, detail?: Record<string, unknown> }) => void>} */
     this._lifecycleListeners = [];
     this._exitHookInstalled = false;
+    this._closed = false;
+    this._shutdownPromise = null;
   }
 
   /** @param {(event: { kind: string, label: string, detail?: Record<string, unknown> }) => void} cb */
@@ -59,6 +65,7 @@ export class DaemonSupervisor {
    * @returns {Daemon}
    */
   daemon(spec) {
+    if (this._closed) throw new Error("DaemonSupervisor is closed");
     const kind = String(spec?.kind || "");
     if (!kind) throw new TypeError("DaemonSupervisor.daemon requires a kind");
     if (typeof spec?.create !== "function") throw new TypeError("DaemonSupervisor.daemon requires a create factory");
@@ -81,6 +88,10 @@ export class DaemonSupervisor {
    * @param {{ label?: string }} [meta]
    */
   register(key, daemon, meta = {}) {
+    if (this._closed) {
+      try { daemon?.stop?.(); } catch { /* best effort */ }
+      throw new Error("DaemonSupervisor is closed");
+    }
     const label = String(meta.label || daemon?.label || key);
     this._entries.set(String(key), { daemon, label, createdAt: Date.now() });
     // Chain lifecycle events upward without clobbering an existing handler.
@@ -139,10 +150,19 @@ export class DaemonSupervisor {
    * @returns {Promise<{ retired: number, reaped: number, strays: number }>}
    */
   async shutdownAll(opts = {}) {
+    if (this._shutdownPromise) return await this._shutdownPromise;
+    this._closed = true;
+    const entries = [...this._entries.values()];
+    this._entries.clear();
+    this._shutdownPromise = this.#shutdownEntries(entries, opts);
+    return await this._shutdownPromise;
+  }
+
+  async #shutdownEntries(entries, opts = {}) {
     const graceMs = opts.graceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     let retired = 0;
     const retiringPids = [];
-    for (const { daemon } of this._entries.values()) {
+    for (const { daemon } of entries) {
       try {
         const pid = daemon.hostPid?.() ?? null;
         if (pid != null) retiringPids.push(pid);
@@ -155,6 +175,10 @@ export class DaemonSupervisor {
     if (retired > 0 && graceMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, graceMs + 100));
     }
+    // Windows birth identity is hydrated off the spawn critical path. Await
+    // this module graph's bounded captures before deciding that a live ledger
+    // row is unverifiable and must be retained fail-closed.
+    await waitForOwnDaemonLedgerIdentityHydration();
     // Safety net: anything still ledgered now is a stray (thread-minted host,
     // crashed creator) or a retiree that ignored EOF — kill and forget.
     const before = listOwnDaemonSpawns().length;

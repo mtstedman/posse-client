@@ -16,6 +16,8 @@ import { spawn } from "node:child_process";
 
 import {
   bootConfigFromMcpOAuthClaims,
+  DEFAULT_MCP_OAUTH_TTL_SECONDS,
+  mintMcpOAuthTokenForBootConfig,
   verifyMcpOAuthToken,
 } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/tool-params.js";
@@ -35,6 +37,7 @@ const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
 const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
+const TOKEN_CLOCK_SKEW_MS = 30 * 1000;
 const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
 const ATLAS_TOOL_ACTION_SET = new Set(ATLAS_TOOL_ACTIONS);
 const ATLAS_NESTED_ACTION_WRAPPERS = new Set(["query", "code", "repo", "agent", "workflow"]);
@@ -460,6 +463,11 @@ function jsonlParseBuffer(buffer, onMessage, { onParseError = null, maxBufferByt
     if (newlineIdx < 0) break;
     const lineBytes = next.subarray(0, newlineIdx);
     next = next.subarray(newlineIdx + 1);
+    if (lineBytes.length > maxBufferBytes) {
+      const err = new Error(`MCP session stdout JSONL frame exceeded ${maxBufferBytes} bytes`);
+      if (typeof onParseError === "function") onParseError(err, "");
+      continue;
+    }
     let line = lineBytes.toString("utf8");
     if (line.endsWith("\r")) line = line.slice(0, -1);
     line = line.trim();
@@ -601,9 +609,10 @@ class PersistentMcpSession {
   }
 
   isExpired(now = Date.now()) {
-    // Agent-owned sessions have an authoritative in-process lifecycle. The
-    // signed bearer is immutable evidence of the construction-time contract;
-    // dispatcher/Agent disposal, not token age or idle time, ends the gate.
+    // Agent-owned registration follows the authoritative in-process Agent
+    // lifecycle. Its bearer has a separate hard expiry at the RPC boundary
+    // and is rotated before reuse, so pruning registration by token age here
+    // would strand an otherwise reusable Agent before it can rotate.
     if (this.agentOwned) return false;
     const idleMs = now - (this.lastSeenAt || this.registeredAt || now);
     if (this.expiresAt && now > this.expiresAt + SESSION_TOKEN_EXPIRY_GRACE_MS) {
@@ -612,23 +621,61 @@ class PersistentMcpSession {
     return idleMs > SESSION_ORPHAN_TTL_MS;
   }
 
+  isTokenExpired(now = Date.now()) {
+    return !!this.expiresAt && now > this.expiresAt + TOKEN_CLOCK_SKEW_MS;
+  }
+
+  _rejectPending(error) {
+    for (const entry of this._pending.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+    this._pending.clear();
+  }
+
   ensureStarted() {
-    if (this._proc && this._proc.exitCode == null && !this._proc.killed) return;
+    if (this._proc && this._proc.exitCode == null) return;
     if (!this.serverSpec?.command) {
       throw new Error("MCP session has no registered server spec");
     }
     const spec = this.serverSpec;
-    this._proc = this._spawn(spec.command, spec.args || [], {
+    const proc = this._spawn(spec.command, spec.args || [], {
       cwd: spec.cwd || process.cwd(),
       env: spec.env || process.env,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
+    this._proc = proc;
     this.startedAt = Date.now();
     this.lastExit = null;
     this._stdoutBuffer = Buffer.alloc(0);
-    this._proc.stdout?.on("data", (chunk) => this._handleStdout(chunk));
-    this._proc.stderr?.on("data", (chunk) => {
+    let finished = false;
+    const finish = ({ code = null, signal = null, error = null } = {}) => {
+      if (finished || this._proc !== proc) return;
+      finished = true;
+      this.lastExit = {
+        at: Date.now(),
+        code,
+        signal,
+        ...(error ? { error: ownerErrorSummary(error) } : {}),
+      };
+      if (this._proc === proc) this._proc = null;
+      this._prewarmPromise = null;
+      this.prewarmedAt = null;
+      const failure = error || new Error(`MCP session exited (${code ?? signal ?? "unknown"})`);
+      this._rejectPending(failure);
+    };
+    const failStream = (error) => {
+      finish({ error });
+      try { proc.kill?.("SIGTERM"); } catch { /* best effort */ }
+    };
+    proc.stdin?.on?.("error", failStream);
+    proc.stdout?.on("data", (chunk) => {
+      if (this._proc !== proc) return;
+      this._handleStdout(chunk);
+    });
+    proc.stdout?.on?.("error", failStream);
+    proc.stderr?.on("data", (chunk) => {
       try {
         if (isPowershellClixmlProgressNoise(chunk)) return;
         process.stderr.write(`[posse-mcp-owner:${this.id}] ${chunk}`);
@@ -636,14 +683,9 @@ class PersistentMcpSession {
         // diagnostics only
       }
     });
-    this._proc.on("exit", (code, signal) => {
-      this.lastExit = { at: Date.now(), code, signal };
-      this._proc = null;
-      for (const entry of this._pending.values()) {
-        entry.reject(new Error(`MCP session exited (${code ?? signal ?? "unknown"})`));
-      }
-      this._pending.clear();
-    });
+    proc.stderr?.on?.("error", failStream);
+    proc.once("error", (error) => finish({ error }));
+    proc.once("exit", (code, signal) => finish({ code, signal }));
     for (const frame of Array.isArray(spec.startupFrames) ? spec.startupFrames : []) {
       this._write(frame);
     }
@@ -773,7 +815,7 @@ class PersistentMcpSession {
 
   close({ force = false, timeoutMs = 10000 } = {}) {
     const proc = this._proc;
-    if (!proc || proc.exitCode != null || proc.killed) return Promise.resolve(false);
+    if (!proc || proc.exitCode != null) return Promise.resolve(false);
     return new Promise((resolve) => {
       let settled = false;
       let procExited = false;
@@ -940,6 +982,23 @@ export class PersistentMcpOwner {
     return { sessionId: id, ...this.endpoint() };
   }
 
+  _rotateAgentSessionToken(session, now = Date.now()) {
+    if (!session?.agentOwned) return null;
+    const signedBootConfig = bootConfigFromMcpOAuthClaims(session.claims);
+    const token = mintMcpOAuthTokenForBootConfig(signedBootConfig, {
+      nowMs: now,
+      expiresInSeconds: DEFAULT_MCP_OAUTH_TTL_SECONDS,
+      jti: `agent-rotation-${crypto.randomUUID()}`,
+    });
+    const claims = verifyMcpOAuthToken(token, { nowMs: now });
+    claims.__verified = true;
+    claims.__source = session.claims?.__source || "local";
+    this._sessionIdsByTokenHash.delete(tokenHash(session.token));
+    session.update({ token, claims });
+    this._sessionIdsByTokenHash.set(tokenHash(token), session.id);
+    return token;
+  }
+
   attachAgentSession({
     sessionId,
     token,
@@ -955,6 +1014,11 @@ export class PersistentMcpOwner {
     if (!session) throw new Error("MCP agent session is not registered");
     if (!session.agentOwned) throw new Error("MCP session is not owned by an agent");
     if (!token || !tokenEqual(session.token, token)) throw new Error("MCP agent session token mismatch");
+    if (session.isTokenExpired()) {
+      const error = new Error("MCP agent session token is expired");
+      error.code = "POSSE_MCP_AGENT_TOKEN_EXPIRED";
+      throw error;
+    }
     const signedBootConfig = bootConfigFromMcpOAuthClaims(session.claims);
     const boundBootConfig = {
       ...bindAgentAttachmentToSignedContract(signedBootConfig, bootConfig),
@@ -968,13 +1032,18 @@ export class PersistentMcpOwner {
     if (!hasSuiteToolAllowlist(boundBootConfig)) {
       throw new Error("MCP agent contract is missing suite-scoped toolAllowlist");
     }
-    session.update({ bootConfig: boundBootConfig, serverSpec });
     if (serverSpec?.command) this._ensureGatewaySession({ serverSpec, prewarm: true });
+    // Rotate only after every fallible validation/setup step. Otherwise an
+    // attach error strands the caller with the old bearer and prevents its
+    // cleanup path from unregistering the session.
+    const rotatedToken = this._rotateAgentSessionToken(session);
+    session.update({ bootConfig: boundBootConfig, serverSpec });
     return {
       bound: true,
       sessionId: id,
       jobId: boundBootConfig.jobId ?? null,
       workItemId: boundBootConfig.workItemId ?? null,
+      ...(rotatedToken ? { token: rotatedToken } : {}),
     };
   }
 
@@ -1003,7 +1072,12 @@ export class PersistentMcpOwner {
         atlasAvailable: false,
       },
     });
-    return { cleared: result.bound === true, sessionId: result.sessionId, reason };
+    return {
+      cleared: result.bound === true,
+      sessionId: result.sessionId,
+      reason,
+      ...(result.token ? { token: result.token } : {}),
+    };
   }
 
   _logAttachProof(session, kind, fields = {}) {
@@ -1261,8 +1335,26 @@ export class PersistentMcpOwner {
       sendJson(res, 403, { ok: false, error: "token_session_mismatch" });
       return;
     }
+    if (session?.isTokenExpired()) {
+      this._removeSession(session.id, {
+        reason: "token_expired",
+        context: { expired: true },
+        telemetry: true,
+      });
+      sendJson(res, 401, { ok: false, error: "token_expired" });
+      return;
+    }
     if (!session) {
-      claims = verifyMcpOAuthToken(token);
+      try {
+        claims = verifyMcpOAuthToken(token);
+      } catch (err) {
+        const code = String(err?.code || "invalid_token");
+        sendJson(res, 401, {
+          ok: false,
+          error: code === "token_expired" ? "token_expired" : "invalid_token",
+        });
+        return;
+      }
       const signedBoot = bootConfigFromMcpOAuthClaims(claims);
       if (claims.agent_id || signedBoot.scopeBindingMode === "dispatcher") {
         sendJson(res, 403, { ok: false, error: "unregistered_agent_gate" });

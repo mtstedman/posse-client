@@ -17,6 +17,11 @@ import { gitExec } from "../../git/functions/utils.js";
 import { installScipLanguageDependencies } from "../../atlas/functions/v2/scip/dependencies.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
 import {
+  DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS,
+  inspectJinaModel as inspectJinaModelDefault,
+  pullJinaModel as pullJinaModelDefault,
+} from "../../atlas/functions/v2/embeddings/jina-model.js";
+import {
   DEFAULT_POSSE_ROOT,
   resolveManagedPythonRuntimeForProject,
 } from "../../runtime/functions/python-runtime.js";
@@ -25,6 +30,7 @@ const DEPENDENCY_SYNC_WORKER_URL = new URL("./dependency-sync-worker.js", import
 const DEPENDENCY_SYNC_THREAD_MANAGER = new ThreadManager();
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
+export const DEFAULT_DOCTOR_COMMAND_TIMEOUT_MS = 30 * 60 * 1000;
 const COMMAND_TIMEOUT_FORCE_KILL_GRACE_MS = 1000;
 const COMMAND_TIMEOUT_SETTLE_GRACE_MS = 1000;
 const NODE_MANIFEST_STAMP_NAME = ".posse-manifest.sha256";
@@ -1160,6 +1166,68 @@ async function ensureSimpleCommandProject(entry, opts) {
   return { present: true, root: entry.root, label: entry.label, ok: true, status: "installed", action: "install", message: `${entry.command} completed` };
 }
 
+async function ensureJinaModel(entry, opts) {
+  const inspect = opts.inspectJinaModel || inspectJinaModelDefault;
+  const pull = opts.pullJinaModel || pullJinaModelDefault;
+  const before = inspect(entry.root);
+  const base = {
+    present: true,
+    root: entry.root,
+    label: entry.label,
+    model: "jina-v2-code",
+    version: before.packageVersion || null,
+    model_cache_dir: before.modelCacheDir,
+    package_manifest: before.packageManifestPath,
+  };
+  if (before.ready) {
+    return { ...base, ok: true, status: "ok", action: "none", message: `Jina ${before.packageVersion} ready` };
+  }
+  if (opts.dryRun) {
+    return {
+      ...base,
+      ok: true,
+      status: "dry-run",
+      action: "download",
+      reason: before.reason,
+      message: "would download and deploy the current Jina code-embedding model",
+    };
+  }
+
+  opts.onProgress?.(`${entry.label}: resolving current package`);
+  try {
+    const pulled = await pull({
+      repoRoot: entry.root,
+      manager: opts.jinaModelManager,
+      timeoutMs: opts.modelTimeoutMs,
+      onProgress: (event) => {
+        const status = String(event?.status || "working");
+        opts.onProgress?.(`${entry.label}: ${status}`);
+      },
+    });
+    const after = pulled?.ready ? pulled : inspect(entry.root);
+    return {
+      ...base,
+      ...after,
+      version: after.packageVersion || pulled?.downloaded?.version || null,
+      ok: after.ready === true,
+      status: after.ready === true ? "installed" : "failed",
+      action: "download",
+      message: after.ready === true
+        ? `Jina ${after.packageVersion || pulled?.downloaded?.version || "model"} downloaded and deployed`
+        : `Jina deployment incomplete: ${after.reason || "model verification failed"}`,
+    };
+  } catch (err) {
+    return {
+      ...base,
+      ok: false,
+      status: "failed",
+      action: "download",
+      reason: before.reason,
+      message: `Jina download/deploy failed: ${firstLine(err?.message || err) || "unknown error"}`,
+    };
+  }
+}
+
 async function ensureDependencyEntry(entry, ensure, opts) {
   try {
     return await withDependencyInstallLock(opts.posseRoot, () => ensure(entry, opts), {
@@ -1241,6 +1309,7 @@ function bootDependencyEntries(result) {
     ...(Array.isArray(result.python) ? result.python : []),
     ...(Array.isArray(result.composer) ? result.composer : []),
     ...(Array.isArray(result.native) ? result.native : []),
+    ...(Array.isArray(result.models) ? result.models : []),
     ...(Array.isArray(result.scip?.results) ? result.scip.results.map((entry) => ({
       ...entry,
       present: true,
@@ -1298,14 +1367,19 @@ function buildDependencyDoctorReport(result, mode) {
  *   includeGo?: boolean,
  *   includeCargo?: boolean,
  *   includeNativeBinaries?: boolean,
+ *   includeJinaModel?: boolean,
  *   includeScip?: boolean,
  *   includeTestTools?: boolean,
  *   timeoutMs?: number | string | boolean | null,
+ *   modelTimeoutMs?: number | string | boolean | null,
  *   forceNodeInstall?: boolean,
  *   adoptNodeInstall?: boolean,
  *   onProgress?: ((message: string) => void) | null,
  *   onEvent?: ((event: Record<string, any>) => void) | null,
  *   nativeBinaryManager?: any,
+ *   jinaModelManager?: any,
+ *   inspectJinaModel?: typeof inspectJinaModelDefault,
+ *   pullJinaModel?: typeof pullJinaModelDefault,
  * }} [input]
  */
 export async function ensureBootDependencies(input = {}) {
@@ -1319,8 +1393,12 @@ export async function ensureBootDependencies(input = {}) {
     forceNodeInstall: input.forceNodeInstall === true,
     adoptNodeInstall: input.adoptNodeInstall === true,
     timeoutMs: normalizeCommandTimeoutMs(input.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS),
+    modelTimeoutMs: normalizeCommandTimeoutMs(input.modelTimeoutMs, DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS),
     onProgress: typeof input.onProgress === "function" ? input.onProgress : null,
     onEvent: typeof input.onEvent === "function" ? input.onEvent : null,
+    jinaModelManager: input.jinaModelManager || input.nativeBinaryManager || nativeBinaries,
+    inspectJinaModel: input.inspectJinaModel || inspectJinaModelDefault,
+    pullJinaModel: input.pullJinaModel || pullJinaModelDefault,
   };
 
   /** @type {any[]} */
@@ -1331,6 +1409,8 @@ export async function ensureBootDependencies(input = {}) {
   const composer = [];
   /** @type {any[]} */
   const native = [];
+  /** @type {any[]} */
+  const models = [];
   /** @type {{ ok: boolean, skipped?: string, results: any[] }} */
   let scip = { ok: true, skipped: "disabled", results: [] };
   const includeNode = input.includeNode !== false;
@@ -1339,6 +1419,7 @@ export async function ensureBootDependencies(input = {}) {
   const includeGo = input.includeGo !== false;
   const includeCargo = input.includeCargo !== false;
   const includeNativeBinaries = input.includeNativeBinaries === true;
+  const includeJinaModel = input.includeJinaModel === true;
   const includeScip = input.includeScip !== false;
   const includeTestTools = input.includeTestTools !== false;
 
@@ -1397,6 +1478,13 @@ export async function ensureBootDependencies(input = {}) {
     }));
   }
 
+  if (includeJinaModel) {
+    models.push(await ensureDependencyEntry({
+      root: projectDir,
+      label: "model jina",
+    }, ensureJinaModel, opts));
+  }
+
   if (includeScip) {
     if (scipModeEnabled(input.scipMode)) {
       const scipLanguages = neededScipLanguages({
@@ -1437,6 +1525,7 @@ export async function ensureBootDependencies(input = {}) {
     ...python,
     ...composer,
     ...native.filter((entry) => entry?.present !== false),
+    ...models,
     ...(Array.isArray(scip.results) ? scip.results.map((entry) => ({
       ...entry,
       present: true,
@@ -1460,6 +1549,7 @@ export async function ensureBootDependencies(input = {}) {
     python,
     composer,
     native: native.filter((entry) => entry?.present !== false),
+    models,
     scip,
     test_tools,
   };
@@ -1478,7 +1568,13 @@ export async function doctorRepoDependencies(input = {}) {
     projectDir: input.projectDir || process.cwd(),
     dryRun: input.dryRun === true,
     includeNativeBinaries: input.includeNativeBinaries !== false,
-    timeoutMs: Object.hasOwn(input, "timeoutMs") ? input.timeoutMs : null,
+    includeJinaModel: Object.hasOwn(input, "includeJinaModel")
+      ? input.includeJinaModel === true
+      : input.includeNativeBinaries !== false,
+    timeoutMs: Object.hasOwn(input, "timeoutMs") ? input.timeoutMs : DEFAULT_DOCTOR_COMMAND_TIMEOUT_MS,
+    modelTimeoutMs: Object.hasOwn(input, "modelTimeoutMs")
+      ? input.modelTimeoutMs
+      : DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS,
   });
   const mode = result.dry_run ? "plan" : "repair";
   return {

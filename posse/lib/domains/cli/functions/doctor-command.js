@@ -3,9 +3,11 @@ import path from "path";
 import { C } from "../../../shared/format/functions/colors.js";
 import { getAtlasIntegrationConfig } from "../../integrations/functions/atlas/config.js";
 import {
+  DEFAULT_DOCTOR_COMMAND_TIMEOUT_MS,
   doctorRepoDependencies,
   formatBootDependencySync,
 } from "../../system/functions/dependency-sync.js";
+import { DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS } from "../../atlas/functions/v2/embeddings/jina-model.js";
 
 function firstLine(value) {
   return String(value || "")
@@ -126,7 +128,8 @@ function renderDoctorHelp({ log, colors }) {
     posse doctor --json
     posse doctor --adopt-node-install
 
-  Doctor installs are not timed out by default. Boot dependency sync stays bounded.
+  Each package-manager command is capped at 30 minutes and Jina download/deploy
+  at 2 hours, so an unhealthy child process cannot hang doctor indefinitely.
   --adopt-node-install reuses a complete existing Posse node_modules tree.
 `);
 }
@@ -157,6 +160,9 @@ export async function cmdDoctor({
       dryRun,
       adoptNodeInstall,
       includeNativeBinaries: true,
+      includeJinaModel: true,
+      timeoutMs: DEFAULT_DOCTOR_COMMAND_TIMEOUT_MS,
+      modelTimeoutMs: DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS,
       scipMode: atlasConfig.enabled === false
         ? "off"
         : (atlasConfig.scipMode ?? atlasConfig.atlas_scip_mode ?? null),
@@ -197,11 +203,19 @@ export async function cmdDoctor({
   const statusColor = result.ok ? colors.green : colors.red;
   log(`\n  ${statusColor}[doctor]${colors.reset} ${mode}: ${summary}`);
   log(`  ${colors.dim}project: ${projectDir}${colors.reset}`);
-  log(`  ${colors.dim}timeout: none for doctor installs${colors.reset}`);
+  log(`  ${colors.dim}timeouts: package commands 30m; Jina download/deploy 2h${colors.reset}`);
 
   renderEntries({ log, colors, projectDir, title: "Repaired", entries: report.repaired, color: colors.green });
   renderEntries({ log, colors, projectDir, title: "Pending", entries: report.pending, color: colors.yellow });
   renderEntries({ log, colors, projectDir, title: "Failed", entries: report.failed, color: colors.red });
+  renderEntries({
+    log,
+    colors,
+    projectDir,
+    title: "Verified native/model runtime",
+    entries: (report.ready || []).filter((entry) => /^(?:native|model)\s/u.test(String(entry?.label || ""))),
+    color: colors.green,
+  });
 
   if (!report.repaired?.length && !report.pending?.length && !report.failed?.length) {
     log(`\n  ${colors.green}All dependency/runtime requirements are ready.${colors.reset}`);

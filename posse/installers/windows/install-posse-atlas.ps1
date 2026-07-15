@@ -70,6 +70,12 @@
 .PARAMETER Force
   Re-run npm install even when node_modules looks fresh.
 
+.PARAMETER CommandTimeoutSeconds
+  Maximum runtime for ordinary non-interactive commands. Default: 1800.
+
+.PARAMETER DoctorTimeoutSeconds
+  Maximum runtime for doctor, including first-time Jina deployment. Default: 7500.
+
 .PARAMETER DryRun
   Print what would happen; make no changes.
 
@@ -100,6 +106,8 @@ param(
   [switch]$NoInstallNode,
   [switch]$ConfigureKeys,
   [switch]$Force,
+  [ValidateRange(60, 86400)][int]$CommandTimeoutSeconds = 1800,
+  [ValidateRange(60, 86400)][int]$DoctorTimeoutSeconds = 7500,
   [switch]$DryRun,
   [switch]$Plain
 )
@@ -377,7 +385,7 @@ function Step-ScipLanguages {
 }
 
 # --- step engine -----------------------------------------------------------------
-$script:StepKeys = @("languages", "preflight", "packages", "node", "checkout", "composer", "npm", "shell", "seed", "doctor", "admin", "keys", "native", "validate", "smoke")
+$script:StepKeys = @("languages", "preflight", "packages", "node", "checkout", "composer", "npm", "shell", "seed", "admin", "keys", "native", "doctor", "validate", "smoke")
 $script:StepTitles = @{
   languages = "SCIP language selection"
   preflight = "Preflight checks"
@@ -388,7 +396,7 @@ $script:StepTitles = @{
   npm      = "npm dependencies"
   shell    = "Shell wiring"
   seed     = "Account settings"
-  doctor   = "Runtime doctor (Python + SCIP)"
+  doctor   = "Runtime doctor (Python + SCIP + Jina)"
   admin    = "Provider CLI detection"
   keys     = "Provider API keys"
   native   = "Native binaries"
@@ -512,7 +520,7 @@ function Invoke-Logged {
     [string]$Description,
     [string[]]$Command,
     [string]$WorkingDirectory = "",
-    [int]$TimeoutSeconds = 0
+    [int]$TimeoutSeconds = $CommandTimeoutSeconds
   )
   $cmdLine = Format-CommandLine $Command
   Write-LogOnly ""
@@ -586,12 +594,26 @@ function Invoke-Logged {
     if (-not $proc.HasExited) { Stop-InstallerProcessTree $proc }
   }
 
-  $proc.WaitForExit()
+  $processExited = $false
+  try { $processExited = $proc.WaitForExit(5000) } catch {}
+  if (-not $processExited) {
+    $timedOut = $true
+    Stop-InstallerProcessTree $proc
+    try { $processExited = $proc.WaitForExit(5000) } catch {}
+  }
+  if ($processExited) {
+    # Flush redirected async readers after the process handle has signaled.
+    $proc.WaitForExit()
+  }
   if ($script:UiSpinner) { Write-Host "`r$Esc[2K" -NoNewline }
-  $rc = if ($timedOut) { 124 } else { $proc.ExitCode }
+  $rc = if ($timedOut -or -not $processExited) { 124 } else { $proc.ExitCode }
   $elapsedTotal = [int]((Get-Date) - $started).TotalSeconds
 
-  $chunkContent = (($stdoutTask.Result, $stderrTask.Result) | Where-Object { $_ }) -join "`r`n"
+  $chunkContent = if ($processExited) {
+    (($stdoutTask.Result, $stderrTask.Result) | Where-Object { $_ }) -join "`r`n"
+  } else {
+    "process tree did not exit after cancellation"
+  }
   if ($timedOut) { $chunkContent = ($chunkContent + "`r`ntimed out after ${TimeoutSeconds}s").Trim() }
   if ($chunkContent) { Write-LogOnly $chunkContent.TrimEnd() }
 
@@ -1314,15 +1336,15 @@ function Step-Doctor {
   Step-Begin "doctor"
   if ($script:CriticalFailed) { Step-End "blocked"; return }
   if ($DryRun) {
-    Step-End "dry-run" "would run 'posse doctor' (Python venv + SCIP language environments)"
+    Step-End "dry-run" "would run 'posse doctor' (Python + SCIP + current native binaries + Jina)"
     return
   }
   Write-Info "delegating to Posse's own dependency engine (managed Python venv, SCIP indexer environments)"
-  $rc = Invoke-Logged -Description "posse doctor (first run builds Python venv + SCIP envs; this can take a few minutes)" -Command @($script:NodeBin, "orchestrator.js", "doctor", "--adopt-node-install") -WorkingDirectory $script:PosseDirResolved
-  if ($rc -eq 0) { Step-End "ok" "runtime dependencies ready" }
+  $rc = Invoke-Logged -Description "posse doctor (first run builds Python/SCIP envs and deploys Jina)" -Command @($script:NodeBin, "orchestrator.js", "doctor", "--adopt-node-install") -WorkingDirectory $script:PosseDirResolved -TimeoutSeconds $DoctorTimeoutSeconds
+  if ($rc -eq 0) { Step-End "ok" "runtime dependencies, binaries, and Jina ready" }
   else {
     Write-Warn2 "posse doctor reported unresolved dependencies - run 'posse doctor' after fixing the tools it names (log has details)"
-    Step-End "partial" "some runtime dependencies unresolved"
+    Step-End "failed" "runtime dependencies, native binaries, or Jina unresolved"
   }
 }
 
@@ -1603,10 +1625,10 @@ try {
     Invoke-InstallerStep "npm" { Step-Npm } -Critical
     Invoke-InstallerStep "shell" { Step-ShellWiring } -Critical
     Invoke-InstallerStep "seed" { Step-SeedSettings }
-    Invoke-InstallerStep "doctor" { Step-Doctor }
     Invoke-InstallerStep "admin" { Step-AdminInit }
     Invoke-InstallerStep "keys" { Step-Keys }
     Invoke-InstallerStep "native" { Step-NativeBinaries }
+    Invoke-InstallerStep "doctor" { Step-Doctor }
     Invoke-InstallerStep "validate" { Step-Validate }
     Invoke-InstallerStep "smoke" { Step-Smoke }
   }

@@ -60,6 +60,8 @@ REPO_ID=""
 REPO_PATH=""
 NODE_MIN_MAJOR="24"
 NVM_VERSION="v0.40.3"
+COMMAND_TIMEOUT_SECONDS="1800"
+DOCTOR_TIMEOUT_SECONDS="7500"
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
 SCRIPT_DIR=""
 if [[ -n "$SCRIPT_SOURCE" ]]; then
@@ -95,6 +97,8 @@ Options:
   --configure-keys        Interactively prompt for provider API keys (stored in
                           ~/.config/posse/providers.env, chmod 600)
   --force                 Re-run npm install even if node_modules looks fresh
+  --command-timeout <sec> Maximum ordinary command runtime (default: 1800)
+  --doctor-timeout <sec>  Maximum doctor runtime, including Jina (default: 7500)
   --dry-run               Print what would happen; do not execute
   --plain                 Disable colors and spinners (also honors NO_COLOR)
   --help                  Show help
@@ -131,12 +135,32 @@ while [[ $# -gt 0 ]]; do
     --no-install-node) INSTALL_NODE="false"; shift ;;
     --configure-keys) CONFIGURE_KEYS="true"; shift ;;
     --force) FORCE_REINSTALL="true"; shift ;;
+    --command-timeout) COMMAND_TIMEOUT_SECONDS="${2:?missing value for --command-timeout}"; shift 2 ;;
+    --command-timeout=*) COMMAND_TIMEOUT_SECONDS="${1#*=}"; shift ;;
+    --doctor-timeout) DOCTOR_TIMEOUT_SECONDS="${2:?missing value for --doctor-timeout}"; shift 2 ;;
+    --doctor-timeout=*) DOCTOR_TIMEOUT_SECONDS="${1#*=}"; shift ;;
     --dry-run) DRY_RUN="true"; shift ;;
     --plain|--no-color) PLAIN="true"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "[${INSTALLER_NAME}] ERROR: Unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
+
+normalize_timeout_seconds() {
+  local variable_name="$1" timeout_value="$2" timeout_number
+  if [[ ! "$timeout_value" =~ ^[0-9]{1,5}$ ]]; then
+    echo "[${INSTALLER_NAME}] ERROR: command timeouts must be whole seconds between 60 and 86400" >&2
+    exit 2
+  fi
+  timeout_number=$((10#$timeout_value))
+  if ((timeout_number < 60 || timeout_number > 86400)); then
+    echo "[${INSTALLER_NAME}] ERROR: command timeouts must be whole seconds between 60 and 86400" >&2
+    exit 2
+  fi
+  printf -v "$variable_name" '%d' "$timeout_number"
+}
+normalize_timeout_seconds COMMAND_TIMEOUT_SECONDS "$COMMAND_TIMEOUT_SECONDS"
+normalize_timeout_seconds DOCTOR_TIMEOUT_SECONDS "$DOCTOR_TIMEOUT_SECONDS"
 
 # =============================================================================
 # UI layer: colors, splash, spinner, step engine
@@ -431,7 +455,7 @@ format_command() {
 # --- step engine ---------------------------------------------------------------
 # Steps are declared up-front so numbering and the summary are stable no matter
 # where the run stops. Each step records ok/skipped/partial/failed/blocked.
-STEP_KEYS=(languages preflight packages node checkout composer npm shell seed doctor admin keys native validate smoke)
+STEP_KEYS=(languages preflight packages node checkout composer npm shell seed admin keys native doctor validate smoke)
 declare -A STEP_TITLES=(
   [languages]="SCIP language selection"
   [preflight]="Preflight checks"
@@ -442,7 +466,7 @@ declare -A STEP_TITLES=(
   [npm]="npm dependencies"
   [shell]="Shell wiring"
   [seed]="Account settings"
-  [doctor]="Runtime doctor (Python + SCIP)"
+  [doctor]="Runtime doctor (Python + SCIP + Jina)"
   [admin]="Provider CLI detection"
   [keys]="Provider API keys"
   [native]="Native binaries"
@@ -511,30 +535,60 @@ run_logged() {
   fi
 
   local chunk rc started elapsed
+  local timeout_seconds="${RUN_LOGGED_TIMEOUT_SECONDS:-$COMMAND_TIMEOUT_SECONDS}"
+  local timed_out="false"
   chunk="$(mktemp)"
   started=$SECONDS
 
   ("$@") >"$chunk" 2>&1 </dev/null &
   CMD_PID=$!
 
-  if [[ $UI_COLOR -eq 1 ]]; then
-    local i=0 nframes=${#SPINNER_FRAMES[@]}
-    while kill -0 "$CMD_PID" 2>/dev/null; do
-      elapsed=$((SECONDS - started))
+  local i=0 nframes=${#SPINNER_FRAMES[@]} plain_shown="false"
+  while kill -0 "$CMD_PID" 2>/dev/null; do
+    elapsed=$((SECONDS - started))
+    if ((elapsed >= timeout_seconds)); then
+      timed_out="true"
+      kill_process_tree "$CMD_PID" TERM
+      sleep 1
+      kill_process_tree "$CMD_PID" KILL
+      break
+    fi
+    if [[ $UI_COLOR -eq 1 ]]; then
       printf "\r\033[2K    %s%s%s %s %s(%s)%s" "$CYAN" "${SPINNER_FRAMES[i]}" "$R" "$desc" "$DIM" "$(fmt_duration $elapsed)" "$R"
       i=$(((i + 1) % nframes))
-      sleep 0.12
-    done
-    printf "\r\033[2K"
-  else
-    printf "    %s%s%s %s\n" "$DIM" "$GLYPH_DOT" "$R" "$desc"
-  fi
+    elif [[ "$plain_shown" != "true" ]]; then
+      printf "    %s%s%s %s\n" "$DIM" "$GLYPH_DOT" "$R" "$desc"
+      plain_shown="true"
+    fi
+    sleep 0.12
+  done
+  [[ $UI_COLOR -eq 1 ]] && printf "\r\033[2K"
 
-  wait "$CMD_PID"
-  rc=$?
+  if [[ "$timed_out" == "true" ]]; then
+    # SIGKILL normally leaves a reapable zombie immediately. Avoid an
+    # unbounded wait if a kernel-level I/O stall leaves the process alive.
+    local settle_deadline=$((SECONDS + 5)) process_state=""
+    while ((SECONDS < settle_deadline)); do
+      process_state="$(ps -o stat= -p "$CMD_PID" 2>/dev/null | tr -d '[:space:]')"
+      [[ -z "$process_state" || "$process_state" == Z* ]] && break
+      sleep 0.1
+    done
+    process_state="$(ps -o stat= -p "$CMD_PID" 2>/dev/null | tr -d '[:space:]')"
+    if [[ -z "$process_state" || "$process_state" == Z* ]]; then
+      wait "$CMD_PID" 2>/dev/null || true
+    fi
+    rc=124
+  else
+    wait "$CMD_PID"
+    rc=$?
+  fi
   CMD_PID=""
   elapsed=$((SECONDS - started))
   cat "$chunk" >>"$LOG_FILE"
+  if [[ "$timed_out" == "true" ]]; then
+    printf 'timed out after %ss\n' "$timeout_seconds" >>"$chunk"
+    printf 'timed out after %ss\n' "$timeout_seconds" >>"$LOG_FILE"
+  fi
 
   if [[ $rc -eq 0 ]]; then
     printf "    %s%s%s %s %s(%s)%s\n" "$GREEN" "$GLYPH_OK" "$R" "$desc" "$DIM" "$(fmt_duration $elapsed)" "$R"
@@ -553,6 +607,10 @@ run_logged() {
 run_logged_in_dir() {
   local dir="$1" desc="$2"; shift 2
   run_logged "$desc" run_in_dir_helper "$dir" "$@"
+}
+run_logged_in_dir_timeout() {
+  local timeout_seconds="$1" dir="$2" desc="$3"; shift 3
+  RUN_LOGGED_TIMEOUT_SECONDS="$timeout_seconds" run_logged "$desc" run_in_dir_helper "$dir" "$@"
 }
 run_in_dir_helper() { local dir="$1"; shift; cd "$dir" && "$@"; }
 
@@ -1297,16 +1355,16 @@ step_doctor() {
   step_begin doctor
   if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
   if [[ "$DRY_RUN" == "true" ]]; then
-    step_end dry-run "would run 'posse doctor' (Python venv + SCIP language environments)"
+    step_end dry-run "would run 'posse doctor' (Python + SCIP + current native binaries + Jina)"
     return 0
   fi
   info "delegating to Posse's own dependency engine (managed Python venv, SCIP indexer environments)"
-  if run_logged_in_dir "$POSSE_DIR" "posse doctor (first run builds Python venv + SCIP envs; this can take a few minutes)" \
+  if run_logged_in_dir_timeout "$DOCTOR_TIMEOUT_SECONDS" "$POSSE_DIR" "posse doctor (first run builds Python/SCIP envs and deploys Jina)" \
     "$NODE_BIN" orchestrator.js doctor; then
-    step_end ok "runtime dependencies ready"
+    step_end ok "runtime dependencies, binaries, and Jina ready"
   else
     warn "posse doctor reported unresolved dependencies — run 'posse doctor' after fixing the tools it names (log has details)"
-    step_end partial "some runtime dependencies unresolved"
+    step_end failed "runtime dependencies, native binaries, or Jina unresolved"
   fi
 }
 
@@ -1595,10 +1653,10 @@ run_installer_step composer false step_composer
 run_installer_step npm true step_npm
 run_installer_step shell true step_shell_wiring
 run_installer_step seed false step_seed_settings
-run_installer_step doctor false step_doctor
 run_installer_step admin false step_admin_init
 run_installer_step keys false step_keys
 run_installer_step native false step_native_binaries
+run_installer_step doctor false step_doctor
 run_installer_step validate false step_validate
 run_installer_step smoke false step_smoke
 

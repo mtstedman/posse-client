@@ -232,7 +232,10 @@ export class PulseTokenManager {
     if (inFlight) return inFlight;
     const generation = this._generation;
     const promise = this.#refreshPulse(rawKey, policy, requiredRoute, nativeIdentity).then((entry) => {
-      if (this._generation === generation) this._cache.set(cacheKey, entry);
+      if (this._generation !== generation) {
+        throw pulseError("POSSE_PULSE_AUTH_CHANGED", "heartbeat authentication changed while the pulse was being minted");
+      }
+      this._cache.set(cacheKey, entry);
       return { token: entry.token, envelope: entry.envelope };
     }).finally(() => {
       if (this._refreshes.get(cacheKey) === promise) this._refreshes.delete(cacheKey);
@@ -585,6 +588,36 @@ function assertRouteGranted(routes, requiredRoute) {
 }
 
 async function boundedResponseText(response) {
+  const declaredBytes = Number(response?.headers?.get?.("content-length"));
+  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_HEARTBEAT_RESPONSE_BYTES) {
+    try { await response?.body?.cancel?.(); } catch { /* best effort */ }
+    throw pulseError("POSSE_PULSE_INVALID_RESPONSE", "heartbeat response exceeded the allowed size");
+  }
+  const reader = response?.body?.getReader?.();
+  if (reader) {
+    const chunks = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.isBuffer(value)
+          ? value
+          : value instanceof Uint8Array
+            ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+            : Buffer.from(value || []);
+        totalBytes += chunk.byteLength;
+        if (totalBytes > MAX_HEARTBEAT_RESPONSE_BYTES) {
+          try { void Promise.resolve(reader.cancel()).catch(() => {}); } catch { /* best effort */ }
+          throw pulseError("POSSE_PULSE_INVALID_RESPONSE", "heartbeat response exceeded the allowed size");
+        }
+        chunks.push(chunk);
+      }
+    } finally {
+      try { reader.releaseLock?.(); } catch { /* best effort */ }
+    }
+    return Buffer.concat(chunks, totalBytes).toString("utf8");
+  }
   const text = await response.text();
   if (Buffer.byteLength(String(text || ""), "utf8") > MAX_HEARTBEAT_RESPONSE_BYTES) {
     throw pulseError("POSSE_PULSE_INVALID_RESPONSE", "heartbeat response exceeded the allowed size");

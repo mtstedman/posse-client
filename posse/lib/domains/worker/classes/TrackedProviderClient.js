@@ -829,6 +829,7 @@ export class TrackedProviderClient {
         ...identity,
         role: opts.role,
         providerName,
+        signal: abortSignal,
         attachment: agentJobAttachment(attemptOpts, {
           providerName,
           cwd,

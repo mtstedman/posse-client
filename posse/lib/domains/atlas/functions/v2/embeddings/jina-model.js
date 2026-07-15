@@ -12,6 +12,9 @@ import { downloadLocalModelPackage, prepareLocalModelArtifactClient } from "../.
 import { runMlNativeMethodAsync } from "../../../../../shared/native/functions/ml-invoke.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 
+export const DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+const JINA_MODEL_PACKAGE_MANIFEST = ".posse-model-package.json";
+
 /** @param {string} repoRoot */
 export function jinaModelCacheDir(_repoRoot, homeDir = os.homedir()) {
   return path.join(
@@ -90,12 +93,22 @@ export function inspectJinaModel(repoRoot, { modelCacheDir: explicitModelCacheDi
   const model = files.find((file) => /(^model(_quantized)?|_quantized)\.onnx$/i.test(path.basename(file)))
     || files.find((file) => file.toLowerCase().endsWith(".onnx"))
     || null;
+  const packageManifestPath = path.join(modelCacheDir, JINA_MODEL_PACKAGE_MANIFEST);
+  const packageManifest = readJsonObject(packageManifestPath);
+  const packageCurrent = packageManifest?.schemaVersion === 1
+    && packageManifest?.modelId === ATLAS_JINA_MODEL.mlModelId
+    && packageManifest?.version === ATLAS_JINA_MODEL.artifactRelease
+    && /^[a-f0-9]{64}$/u.test(String(packageManifest?.packageSha256 || ""));
+  const ready = Boolean(tokenizer && model && packageCurrent);
   return {
-    ready: !!tokenizer && !!model,
+    ready,
     modelCacheDir,
     tokenizer,
     model,
-    reason: tokenizer && model ? null : "model_cache_missing",
+    packageManifestPath,
+    packageVersion: packageManifest?.version || null,
+    packageSha256: packageManifest?.packageSha256 || null,
+    reason: ready ? null : tokenizer && model ? "model_package_stale" : "model_cache_missing",
   };
 }
 
@@ -108,6 +121,7 @@ export function inspectJinaModel(repoRoot, { modelCacheDir: explicitModelCacheDi
  *   prepareClient?: typeof prepareLocalModelArtifactClient,
  *   downloadPackage?: typeof downloadLocalModelPackage,
  *   installPackage?: typeof runMlNativeMethodAsync,
+ *   timeoutMs?: number,
  * }} args
  */
 export async function pullJinaModel({
@@ -118,7 +132,15 @@ export async function pullJinaModel({
   prepareClient = prepareLocalModelArtifactClient,
   downloadPackage = downloadLocalModelPackage,
   installPackage = runMlNativeMethodAsync,
+  timeoutMs = DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS,
 }) {
+  const operationBudgetMs = normalizeOperationTimeoutMs(timeoutMs);
+  const deadlineMs = Date.now() + operationBudgetMs;
+  const remainingTimeoutMs = () => {
+    const remaining = deadlineMs - Date.now();
+    if (remaining <= 0) throw new Error(`Jina download/deploy timed out after ${operationBudgetMs}ms.`);
+    return Math.max(1_000, remaining);
+  };
   const modelCacheDir = explicitModelCacheDir
     ? path.resolve(explicitModelCacheDir)
     : jinaModelCacheDir(repoRoot);
@@ -133,7 +155,15 @@ export async function pullJinaModel({
   }
   const client = await prepareClient({ manager });
   onProgress?.({ status: "downloading", modelId: ATLAS_JINA_MODEL.mlModelId });
-  const downloaded = await downloadPackage(client, ATLAS_JINA_MODEL.mlModelId);
+  const downloaded = await downloadPackage(client, ATLAS_JINA_MODEL.mlModelId, {
+    timeoutMs: remainingTimeoutMs(),
+  });
+  if (downloaded.profileId !== ATLAS_JINA_MODEL.mlProfileId
+    || downloaded.version !== ATLAS_JINA_MODEL.artifactRelease
+    || downloaded.archiveFormat !== ATLAS_JINA_MODEL.artifactArchiveFormat
+    || downloaded.archiveRoot !== ATLAS_JINA_MODEL.mlModelDirectory) {
+    throw new Error(`The Jina model package does not match ${ATLAS_JINA_MODEL.mlProfileId} ${ATLAS_JINA_MODEL.artifactRelease}.`);
+  }
   onProgress?.({
     status: "installing",
     modelId: ATLAS_JINA_MODEL.mlModelId,
@@ -150,7 +180,7 @@ export async function pullJinaModel({
   }, {
     modelRoot,
     manager,
-    timeoutMs: 0,
+    timeoutMs: remainingTimeoutMs(),
     idempotent: false,
   });
   const inspection = inspectJinaModel(repoRoot, { modelCacheDir });
@@ -196,4 +226,21 @@ function samePath(left, right) {
   return process.platform === "win32"
     ? left.toLowerCase() === right.toLowerCase()
     : left === right;
+}
+
+/** @param {string} filePath */
+function readJsonObject(filePath) {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeOperationTimeoutMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.max(1_000, parsed)
+    : DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS;
 }

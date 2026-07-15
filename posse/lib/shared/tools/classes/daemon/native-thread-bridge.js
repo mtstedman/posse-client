@@ -30,36 +30,55 @@ export function __setNativeBridgeAtlasManagerFactoryForTests(factory = null) {
 
 async function atlasManagerForBridges(options = {}) {
   if (!sharedAtlasManagerPromise) {
-    sharedAtlasManagerPromise = (async () => {
+    const priorDisposal = sharedAtlasManagerDisposal;
+    const factory = options.atlasManagerFactory || atlasManagerFactoryForTests;
+    // Record ownership before asynchronous imports/factory work. A bridge can
+    // close while creation is pending; teardown must still capture and dispose
+    // the manager once that promise resolves.
+    sharedAtlasManagerOwned = !!factory;
+    let creation = null;
+    creation = (async () => {
+      if (priorDisposal) await priorDisposal;
       const invoke = await import("../../../../domains/atlas/functions/v2/native/invoke.js");
       const injected = invoke.__atlasNativeManagerForTests?.();
-      const factory = options.atlasManagerFactory || atlasManagerFactoryForTests;
-      sharedAtlasManagerOwned = !!factory;
       if (factory) return factory();
       if (injected) return injected;
       const { nativeBinaries } = await import("../BinaryManager.js");
       return nativeBinaries;
     })().then((manager) => {
-      sharedAtlasManager = manager;
+      if (sharedAtlasManagerPromise === creation) sharedAtlasManager = manager;
       return manager;
+    }).catch((error) => {
+      if (sharedAtlasManagerPromise === creation) {
+        sharedAtlasManager = null;
+        sharedAtlasManagerPromise = null;
+        sharedAtlasManagerOwned = false;
+      }
+      throw error;
     });
+    sharedAtlasManagerPromise = creation;
   }
   return sharedAtlasManagerPromise;
 }
 
 function disposeOwnedSharedAtlasManager() {
   if (!sharedAtlasManagerOwned || atlasBridgeUsers > 0) return Promise.resolve();
-  if (sharedAtlasManagerDisposal) return sharedAtlasManagerDisposal;
   const manager = sharedAtlasManager;
   const pending = sharedAtlasManagerPromise;
+  const priorDisposal = sharedAtlasManagerDisposal;
   sharedAtlasManager = null;
   sharedAtlasManagerPromise = null;
   sharedAtlasManagerOwned = false;
-  sharedAtlasManagerDisposal = Promise.resolve(pending || manager)
+  const disposal = Promise.resolve(priorDisposal)
+    .catch(() => {})
+    .then(() => pending || manager)
     .then((resolved) => resolved?.disposeAll?.())
     .catch(() => {})
-    .finally(() => { sharedAtlasManagerDisposal = null; });
-  return sharedAtlasManagerDisposal;
+    .finally(() => {
+      if (sharedAtlasManagerDisposal === disposal) sharedAtlasManagerDisposal = null;
+    });
+  sharedAtlasManagerDisposal = disposal;
+  return disposal;
 }
 
 function rejectPendingBridgeRequests(err) {
@@ -79,6 +98,7 @@ function rejectPendingBridgeRequests(err) {
  */
 export function installNativeThreadBridge(port) {
   if (!port || typeof /** @type {any} */ (port).postMessage !== "function") return false;
+  if (workerBridgePort === port) return true;
   if (workerBridgePort && workerBridgePort !== port) {
     rejectPendingBridgeRequests(new Error("native bridge port replaced"));
     try { workerBridgePort.close?.(); } catch { /* stale port */ }
@@ -197,6 +217,7 @@ export function nativeThreadBridgeRequest(tool, method, payload, opts = {}, cont
 export function attachNativeThreadBridge(port, options = {}) {
   atlasBridgeUsers++;
   let released = false;
+  let releasePromise = null;
   /** @type {Map<number, AbortController>} */
   const activeRequests = new Map();
   const abortActiveRequests = (reason) => {
@@ -205,15 +226,27 @@ export function attachNativeThreadBridge(port, options = {}) {
     }
     activeRequests.clear();
   };
-  const releaseSharedAtlasManager = async () => {
-    if (released) return;
+  const detachPortListeners = () => {
+    port.off?.("message", onMessage);
+    port.off?.("close", onClose);
+    port.off?.("error", onError);
+  };
+  const releaseSharedAtlasManager = () => {
+    if (releasePromise) return releasePromise;
+    if (released) return Promise.resolve();
     released = true;
+    // Ownership ends synchronously. Do not leave the async message handler
+    // live while manager disposal is pending; a late worker frame could
+    // otherwise resurrect work after the bridge user count reached zero.
+    detachPortListeners();
     abortActiveRequests(new Error("native bridge closed"));
     atlasBridgeUsers = Math.max(0, atlasBridgeUsers - 1);
-    await disposeOwnedSharedAtlasManager();
+    releasePromise = disposeOwnedSharedAtlasManager();
+    return releasePromise;
   };
 
-  port.on("message", async (message) => {
+  const onMessage = async (message) => {
+    if (released) return;
     const id = Number(/** @type {any} */ (message)?.id);
     if (/** @type {any} */ (message)?.cancel === true) {
       const controller = activeRequests.get(id);
@@ -233,7 +266,9 @@ export function attachNativeThreadBridge(port, options = {}) {
       let data;
       if (tool === "atlas") {
         const { runAtlasNativeMethodAsync } = await import("../../../../domains/atlas/functions/v2/native/invoke.js");
+        if (released || controller.signal.aborted) return;
         const manager = await atlasManagerForBridges(options);
+        if (released || controller.signal.aborted) return;
         data = await runAtlasNativeMethodAsync(method, payload, {
           ...opts,
           manager,
@@ -242,6 +277,7 @@ export function attachNativeThreadBridge(port, options = {}) {
         });
       } else if (tool === "git") {
         const { runGitNativeMethodAsync } = await import("../../../../domains/git/functions/native/invoke.js");
+        if (released || controller.signal.aborted) return;
         data = await runGitNativeMethodAsync(method, payload, { ...opts, bypassNativeBridge: true, signal: controller.signal });
       } else {
         throw new Error(`Unknown native bridge tool: ${tool || "(none)"}`);
@@ -256,14 +292,17 @@ export function attachNativeThreadBridge(port, options = {}) {
     } finally {
       if (activeRequests.get(id) === controller) activeRequests.delete(id);
     }
-  });
-  port.on?.("close", () => {
+  };
+  const onClose = () => {
     try { void releaseSharedAtlasManager(); } catch { /* best effort */ }
-  });
-  port.on?.("error", (err) => {
+  };
+  const onError = (err) => {
     abortActiveRequests(err instanceof Error ? err : new Error(String(err || "native bridge port error")));
     try { void releaseSharedAtlasManager(); } catch { /* best effort */ }
-  });
+  };
+  port.on("message", onMessage);
+  port.on?.("close", onClose);
+  port.on?.("error", onError);
   port.start?.();
   port.unref?.();
   return releaseSharedAtlasManager;
