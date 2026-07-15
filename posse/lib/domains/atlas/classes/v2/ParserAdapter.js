@@ -50,7 +50,6 @@ export class ParserAdapter {
     // All supported grammars are compiled into posse-atlas. Without a usable
     // binary there is no parser at all, so avoid queueing each file only to
     // fail it individually. Staging does not change within one process.
-    if (!descriptor.native) return false;
     const testManager = __parseBufferNativeManagerForTests();
     if (testManager) return testManager.shouldUse("atlas");
     if (nativeParserUsable == null) nativeParserUsable = nativeBinaries.shouldUse("atlas");

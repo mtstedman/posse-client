@@ -9,10 +9,9 @@
 //   if (nativeBinaries.shouldUse("atlas")) { ...call binary... }
 //
 // `shouldUse` = enabled AND available (build is staged for this os/arch).
-// Git, ATLAS, ML, and vector are fully cut over: enabled is hardwired true, so
-// shouldUse reduces to availability and there is no JS fallback path. The migration
-// recipe for remaining tools: mirror in Rust, A/B against the Node oracle,
-// switch the call site to the binary, then delete the replaced Node function.
+// Every catalog binary is fully cut over: enabled is hardwired true, so
+// shouldUse reduces to availability and no setting or environment flag can
+// select a retired Node implementation.
 
 import path from "node:path";
 import {
@@ -25,7 +24,6 @@ import {
   nativeBinaryExactVersion,
   nativeBinaryRequiresIssuedVersion,
 } from "../../../catalog/binary.js";
-import { getNativeBinaryEnabled } from "../../../domains/settings/functions/tunables.js";
 import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
 import { PulseTokenManager, pulseTokenManager } from "../../native/classes/PulseTokenManager.js";
 import {
@@ -34,21 +32,6 @@ import {
   invalidateNativeArtifactCache,
 } from "../../native/functions/artifact-download.js";
 import { NativeBinary } from "./NativeBinary.js";
-
-/**
- * Parse an env override into a tri-state: `true`, `false`, or `null` (unset).
- *
- * @param {string | undefined} raw
- * @returns {boolean | null}
- */
-function envFlag(raw) {
-  if (raw == null) return null;
-  const v = String(raw).trim().toLowerCase();
-  if (v === "") return null;
-  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
-  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
-  return null;
-}
 
 export class BinaryManager {
   /**
@@ -59,7 +42,6 @@ export class BinaryManager {
    *   spawnImpl?: import("node:child_process").spawn,
    *   spawnSyncImpl?: import("node:child_process").spawnSync,
    *   env?: NodeJS.ProcessEnv,
-   *   enabledResolver?: (name: string) => boolean,
    *   nativeAuthManager?: import("../../native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
    *   pulseManager?: import("../../native/classes/PulseTokenManager.js").PulseTokenManager,
    *   artifactInstaller?: typeof ensureNativeBinaryArtifact,
@@ -70,8 +52,6 @@ export class BinaryManager {
    */
   constructor(opts = {}) {
     this._opts = opts;
-    this._env = opts.env || process.env;
-    this._enabledResolver = opts.enabledResolver || getNativeBinaryEnabled;
     // The single native-auth authority for every handle this manager owns.
     // Lazily falls back to the shared singleton (see the nativeAuthManager
     // getter): referencing it here would hit a temporal-dead-zone error during
@@ -629,26 +609,15 @@ export class BinaryManager {
   }
 
   /**
-   * Whether native invocation is enabled for a tool. Git, ATLAS, ML, and vector
-   * are hard-migrated: the native binary is the only implementation path, so
-   * neither settings nor env overrides can turn them off. Remaining tools
-   * still honor the persisted tunable and legacy env overrides.
+   * Whether native invocation is enabled for a catalog tool. Native binaries
+   * are the only implementation path, so settings and env flags cannot turn
+   * them off.
    *
    * @param {string} name
    * @returns {boolean}
    */
   enabled(name) {
-    if (!VALID_BINARY_NAMES.has(name)) return false;
-    if (name === "git" || name === "atlas" || name === "ml" || name === "vector") return true;
-    const master = envFlag(this._env.POSSE_NATIVE_BINARIES);
-    if (master != null) return master;
-    const perTool = envFlag(this._env[`POSSE_NATIVE_${name.toUpperCase()}`]);
-    if (perTool != null) return perTool;
-    try {
-      return this._enabledResolver(name) === true;
-    } catch {
-      return false;
-    }
+    return VALID_BINARY_NAMES.has(name);
   }
 
   /**

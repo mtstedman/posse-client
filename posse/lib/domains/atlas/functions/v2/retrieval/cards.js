@@ -50,7 +50,7 @@ export function parseSymbolId(id) {
 /**
  * Build a SymbolLocation from a ViewSymbol's persisted byte and line
  * ranges. Parsers compute `range_start_line` / `range_end_line` at
- * ingest time (see `attachLineRanges` in parser/languages/common.js), so
+ * ingest time by the native parser, so
  * the typical path needs no source string.
  *
  * `opts.source` is used for the buffer-overlay path, where the symbol

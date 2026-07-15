@@ -23,7 +23,6 @@ export class RemotePromptClient {
     maxResponseBytes = POSSE_REMOTE_MAX_RESPONSE_BYTES,
     fetchImpl = globalThis.fetch,
     nativeManager = nativeBinaries,
-    useNativeClient = true,
     authManager = null,
     pulseTokens = null,
     responseSigningSecret = getPosseRemoteResponseSigningSecret(),
@@ -42,7 +41,6 @@ export class RemotePromptClient {
     this.fetchImpl = fetchImpl;
     this.usesDefaultFetch = fetchImpl === globalThis.fetch;
     this.nativeManager = nativeManager;
-    this.useNativeClient = useNativeClient !== false;
     this.authManager = authManager || nativeManager?.nativeAuthManager || heartbeatAuthManager;
     this.pulseTokens = pulseTokens || (
       this.authManager === heartbeatAuthManager && fetchImpl === globalThis.fetch
@@ -107,17 +105,11 @@ export class RemotePromptClient {
       method: "POST",
       body: request,
       operation: "remote tool-surface catalog",
-      // The currently issued native Remote client classifies this endpoint as
-      // catalog:read without inspecting the OAuth-minting request body. Keep
-      // privileged minting on the route-aware Node pulse path until that
-      // native compatibility floor advances; ordinary catalog reads remain
-      // native-backed.
-      useNativeClient: request?.mcp_oauth?.requested !== true,
     }, isRetryableRemoteRequestError);
   }
 
   async requestJsonWithRetries(options, isRetryableError = isRetryableRemoteRequestError) {
-    if (options?.useNativeClient !== false && this.shouldUseNativeClient()) {
+    if (this.shouldUseNativeClient()) {
       return await this.requestJsonNative(options, { maxRetries: this.maxRetries });
     }
     const attempts = this.maxRetries + 1;
@@ -145,9 +137,8 @@ export class RemotePromptClient {
     method = "GET",
     body = undefined,
     operation = "remote request",
-    useNativeClient = true,
   } = {}) {
-    if (useNativeClient !== false && this.shouldUseNativeClient()) {
+    if (this.shouldUseNativeClient()) {
       return await this.requestJsonNative({ path, method, body, operation }, { maxRetries: 0 });
     }
     const ac = new AbortController();
@@ -213,9 +204,15 @@ export class RemotePromptClient {
   }
 
   shouldUseNativeClient() {
-    if (!this.useNativeClient || !this.usesDefaultFetch || !this.hasAuthentication()) return false;
+    if (!this.usesDefaultFetch || !this.hasAuthentication()) return false;
     if (!this.nativeAuthEnvelope()) return false;
     if (this.nativeManager?.nativeAuthManager !== this.authManager) return false;
+    // A production authenticated request belongs to the native client even if
+    // its artifact is missing. Selecting by availability here would silently
+    // resurrect the retired Node HTTP route instead of failing closed.
+    if (typeof this.nativeManager?.enabled === "function") {
+      return this.nativeManager.enabled("remote") === true;
+    }
     return this.nativeManager?.shouldUse?.("remote") === true;
   }
 

@@ -15,7 +15,6 @@
 
 import os from "os";
 import { getSetting } from "../../queue/functions/index.js";
-import { VALID_BINARY_NAMES } from "../../../catalog/binary.js";
 
 const TUNABLE_DEFAULTS = Object.freeze({
   git_atlas_post_commit_hook_timeout_ms: 600000,
@@ -39,7 +38,6 @@ const TUNABLE_DEFAULTS = Object.freeze({
   atlas_job_cache_ttl_ms: 300000,
   atlas_prefetch_cache_ttl_ms: 600000,
   atlas_corruption_cooldown_ms: 120000,
-  posse_native_remote: true,
 });
 
 const LOG_LEVEL_VALUES = new Set(["debug", "info", "warn", "error"]);
@@ -208,22 +206,6 @@ export function getAtlasPrefetchCacheTtlMs() {
 
 export function getAtlasCorruptionCooldownMs() {
   return readNonNegativeInt("atlas_corruption_cooldown_ms", TUNABLE_DEFAULTS.atlas_corruption_cooldown_ms);
-}
-
-/**
- * Whether native (Rust) binary invocation is enabled for a tool, via the
- * `posse_native_<name>` tunable. Git, ATLAS, ML, and vector are hardwired on inside
- * BinaryManager and never reach this resolver; remote auth HTTP defaults on
- * when its binary is staged. Used by BinaryManager (env overrides take
- * precedence there). Unknown tool names return false.
- *
- * @param {string} name  A catalog binary name (e.g. "remote").
- * @returns {boolean}
- */
-export function getNativeBinaryEnabled(name) {
-  if (!VALID_BINARY_NAMES.has(name)) return false;
-  const key = `posse_native_${name}`;
-  return readBoolean(key, TUNABLE_DEFAULTS[key] ?? false);
 }
 
 // Exposed for tests that want to assert default values without round-tripping

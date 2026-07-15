@@ -86,7 +86,7 @@ function remoteSurfaceSummary(surface = null) {
   };
 }
 
-function promptClientRuntimeSummary(promptClient, { useNativeClient = true } = {}) {
+function promptClientRuntimeSummary(promptClient) {
   let nativeAuth = null;
   let nativeManagerAvailable = false;
   let nativeClientSelected = false;
@@ -96,7 +96,8 @@ function promptClientRuntimeSummary(promptClient, { useNativeClient = true } = {
   return {
     authentication_present: promptClient?.hasAuthentication?.() === true,
     default_fetch: promptClient?.usesDefaultFetch === true,
-    native_client_requested: useNativeClient !== false && promptClient?.useNativeClient !== false,
+    native_client_required: promptClient?.usesDefaultFetch === true
+      && promptClient?.hasAuthentication?.() === true,
     native_auth_present: !!nativeAuth,
     native_manager_available: nativeManagerAvailable,
     native_client_selected: nativeClientSelected,
@@ -212,7 +213,6 @@ export async function resolveRemoteMcpToolSurfaceForBootConfig(bootConfig = {}, 
   fetchImpl = undefined,
   authManager = null,
   pulseTokens = null,
-  useNativeClient = true,
 } = {}) {
   if (bootConfig.remoteCatalog?.enabled !== true) {
     logRemoteGatewayTelemetry("mcp.remote_gateway.call_skipped", bootConfig, {
@@ -234,10 +234,9 @@ export async function resolveRemoteMcpToolSurfaceForBootConfig(bootConfig = {}, 
     fetchImpl,
     ...(authManager ? { authManager } : {}),
     ...(pulseTokens ? { pulseTokens } : {}),
-    useNativeClient,
   });
   const request = buildRemoteToolSurfaceRequestFromBootConfig(bootConfig);
-  const runtime = promptClientRuntimeSummary(promptClient, { useNativeClient });
+  const runtime = promptClientRuntimeSummary(promptClient);
   logRemoteGatewayTelemetry("mcp.remote_gateway.call_start", bootConfig, {
     outcome: "started",
     remote_catalog_origin: safeRemoteOrigin(baseUrl),

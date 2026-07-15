@@ -314,6 +314,11 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     sessionId: s({ maxLength: 256 }),
     taskText: s({ maxLength: 20_000 }),
     taskType: s({ enum: TASK_TYPES }),
+    vectorCandidateLimit: i({ minimum: 1, maximum: 1000 }),
+    filterDeclarationFiles: b(),
+    filterToolingPaths: b(),
+    genericSymbolFrequencyThreshold: i({ minimum: 2, maximum: 100 }),
+    hierarchicalFileLimit: i({ minimum: 1, maximum: 40 }),
   }, ["query"]),
   "symbol.card": o({
     symbolId: symbolId(),
@@ -386,6 +391,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     maxBranches: i({ minimum: 1, maximum: 100 }),
     branchFileCap: i({ minimum: 1, maximum: 500 }),
     refMatchLimit: i({ minimum: 1, maximum: 500 }),
+    siblingNumericFamilyCap: i({ minimum: 1, maximum: 500 }),
   }),
   "tree.expand": o({
     paths: repoPaths(100),

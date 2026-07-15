@@ -299,12 +299,8 @@ export const SETTINGS_CATALOG = [
   { key: "atlas_parse_band_max_rows",      default: "8",                  numeric: { integer: true, min: 1 }, adminVisible: false, description: "Internal Atlas Parse terminal band maximum row count" },
   { key: "atlas_parse_onnx_background_initial", default: "true",          valueType: "boolean", adminVisible: false, description: "Internal Atlas Parse initial ONNX embedding background flag" },
   { key: "atlas_parse_onnx_background_batch_size", default: "16",         numeric: { integer: true, min: 1 }, adminVisible: false, description: "Internal Atlas Parse background ONNX embedding batch size" },
-  // Native (Rust) binary delegation. Git and ATLAS are hardwired native in
-  // BinaryManager (no setting, no env override, no JS path); the keys below
-  // only gate tools still mid-migration, and only take effect when a compiled
-  // build is staged for the host os/arch (BinaryManager.shouldUse). Runtime
-  // env overrides POSSE_NATIVE_BINARIES / POSSE_NATIVE_<TOOL> win.
-  { key: "posse_native_remote",           default: "true",               valueType: "boolean", adminVisible: false, description: "Delegate authenticated Posse remote prompt/catalog HTTP calls to the native posse-remote binary when present" },
+  // Native heartbeat trust configuration. Binary execution is hardwired on;
+  // these settings provide the authenticated launch envelope, not a feature gate.
   { key: "posse_native_heartbeat_url",    default: "",                   adminVisible: false, description: "Heartbeat URL passed explicitly to key-gated native Posse binaries" },
   { key: "posse_native_heartbeat_public_key_url", default: "",           adminVisible: false, description: "Optional heartbeat public-key discovery URL passed explicitly to native Posse binaries" },
   { key: "posse_native_heartbeat_jwt_public_key", default: "",           adminVisible: false, description: "Ed25519 JWT public key passed explicitly to native Posse binaries" },

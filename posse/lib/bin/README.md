@@ -137,12 +137,10 @@ const data = runAtlasNativeMethod("parser.parseBuffer", {
 });
 ```
 
-Git and ATLAS are fully cut over: the native binary is the only
-implementation path, hardwired on in `BinaryManager` — no setting or env
-override can disable it, and there is no JS fallback. Tools still
-mid-migration are gated per tool with `posse_native_<tool>` settings, or at
-runtime with the `POSSE_NATIVE_BINARIES` (master) / `POSSE_NATIVE_<TOOL>`
-env overrides. `POSSE_NATIVE_BIN_ROOT` overrides the staging root (used in tests).
+Git, ATLAS, ML, vector, and Remote are fully cut over: native binaries are the
+only implementation paths and are hardwired on in `BinaryManager`. No setting
+or environment flag can select a retired Node implementation.
+`POSSE_NATIVE_BIN_ROOT` overrides the staging root for tests.
 
 ## Worker host protocol — supervision ops (`posse.daemon.v1`)
 

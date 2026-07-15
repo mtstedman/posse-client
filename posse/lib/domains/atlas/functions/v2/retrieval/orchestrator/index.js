@@ -22,6 +22,7 @@ import { buildFeedbackIndex, applyFeedbackBoost } from "./feedback-boost.js";
 import { applyTaskQueryRanking } from "./task-query-ranking.js";
 import { summarizeBackends } from "./fallback.js";
 import { fallbackQueryPlan, planQuery } from "./query-planner.js";
+import { applyPathQualityPriors, pathQualityPriorsEnabled } from "../path-priors.js";
 
 /** @typedef {import("../../contracts/api.js").View} View */
 /** @typedef {import("../../contracts/api.js").Ledger} Ledger */
@@ -43,6 +44,10 @@ import { fallbackQueryPlan, planQuery } from "./query-planner.js";
  * @property {number} [rrfK]                     Override the RRF k constant. Default 60.
  * @property {string[]} [entities]               Optional extra ledger entity types: "feedback". (Memories moved to the per-repo memory DB; they are not an FTS entity here.)
  * @property {"name" | "body" | "either"} [searchScope]
+ * @property {boolean} [filterDeclarationFiles] Apply declaration-file path priors.
+ * @property {boolean} [filterToolingPaths] Apply tooling/test/generated/legacy path priors.
+ * @property {number} [genericSymbolFrequencyThreshold] Penalize names repeated across this many files.
+ * @property {number} [hierarchicalFileLimit] Admit and interleave this many non-exact files.
  * @property {import("./query-planner-types.js").QueryPlan} [plan]
  * @property {(input: string) => import("./query-planner-types.js").QueryPlan | Promise<import("./query-planner-types.js").QueryPlan>} [planner]
  */
@@ -60,6 +65,7 @@ import { fallbackQueryPlan, planQuery } from "./query-planner.js";
  *   benchmarks can validate planning quality independently of fusion.
  * @property {import("../../contracts/tool-results.js").EntitySearchHit[]} [entities]
  * @property {RetrievalSeparation} [separation]
+ * @property {ReturnType<typeof applyPathQualityPriors>["summary"]} [pathPriors]
  */
 
 /**
@@ -157,7 +163,7 @@ async function hybridSearchWithPlan(args, plan) {
     graph: { ok: graph.ok, total: graph.total, reason: graph.reason },
   };
 
-  const { fused, separation } = await fuseAndAdjust({
+  const { fused, separation, rawScoreById } = await fuseAndAdjust({
     fts,
     vector,
     graph,
@@ -168,7 +174,22 @@ async function hybridSearchWithPlan(args, plan) {
     feedbackHalfLifeDays: options?.feedbackHalfLifeDays,
     k: options?.rrfK,
   });
-  return assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options, separation });
+  const pathPriorResult = pathQualityPriorsEnabled(options)
+    ? applyPathQualityPriors(fused, { query, plan, options, rawScoreById })
+    : null;
+  return assembleHybridResult({
+    fused: pathPriorResult?.entries || fused,
+    limit,
+    plan,
+    backendStatus,
+    ledger,
+    query,
+    repoId,
+    options,
+    separation,
+    pathPriors: pathPriorResult?.summary,
+    fusedTotal: fused.length,
+  });
 }
 
 /**
@@ -185,10 +206,12 @@ async function hybridSearchWithPlan(args, plan) {
  *   repoId?: string,
  *   options?: Parameters<typeof hybridSearch>[0]["options"],
  *   separation?: RetrievalSeparation,
+ *   pathPriors?: ReturnType<typeof applyPathQualityPriors>["summary"],
+ *   fusedTotal?: number,
  * }} args
  * @returns {HybridSearchResult}
  */
-function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options, separation }) {
+function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query, repoId, options, separation, pathPriors, fusedTotal = fused.length }) {
   const items = fused.slice(0, limit);
   const entities = runEntityFtsBackends({
     ledger,
@@ -200,11 +223,12 @@ function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query
   return {
     items,
     symbols: items.map((e) => e.payload),
-    total: fused.length,
-    truncated: fused.length > items.length,
+    total: fusedTotal,
+    truncated: fusedTotal > items.length,
     degraded: summarizeBackends(backendStatus),
     plan,
     ...(separation ? { separation } : {}),
+    ...(pathPriors ? { pathPriors } : {}),
     ...(entities.length > 0 ? { entities } : {}),
   };
 }
@@ -225,7 +249,7 @@ function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query
  *   feedbackHalfLifeDays?: number,
  *   k?: number,
  * }} args
- * @returns {Promise<{fused:FusedSymbolEntry[], separation:RetrievalSeparation}>}
+ * @returns {Promise<{fused:FusedSymbolEntry[], separation:RetrievalSeparation, rawScoreById:Map<string, number>}>}
  */
 async function fuseAndAdjust({
   fts,
@@ -241,9 +265,10 @@ async function fuseAndAdjust({
   const lists = buildFusionLists(fts, vector, graph);
   const fused = await rrfFuse(lists, { k: typeof k === "number" ? k : RRF_K });
   const separation = assessRetrievalSeparation(fused, lists);
+  const rawScoreById = new Map(fused.map((entry) => [entry.id, entry.score]));
   applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });
   await applyTaskQueryRanking(fused, taskText);
-  return { fused, separation };
+  return { fused, separation, rawScoreById };
 }
 
 /**

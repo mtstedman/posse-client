@@ -9,6 +9,7 @@ import { openEmbeddingResources } from "./resources.js";
  * @param {{
  *   query: string,
  *   limit?: number,
+ *   candidateLimit?: number,
  *   repoRoot: string,
  *   config?: Record<string, unknown>,
  * }} input
@@ -18,10 +19,11 @@ import { openEmbeddingResources } from "./resources.js";
  *   provider?: string,
  *   backend?: string,
  *   encoding?: {model:string, modelVersion:string, dim:number},
+ *   candidateLimit?: number,
  *   hits: Array<{contentHash:string, localId:number, score:number, distance:number}>,
  * }>}
  */
-export async function buildNativeVectorBridge({ query, limit = 50, repoRoot, config = {} }) {
+export async function buildNativeVectorBridge({ query, limit = 50, candidateLimit, repoRoot, config = {} }) {
   const resources = openEmbeddingResources({ repoRoot, config, readOnly: true });
   try {
     if (!resources?.enabled || !resources.encoder || !resources.index) {
@@ -56,12 +58,18 @@ export async function buildNativeVectorBridge({ query, limit = 50, repoRoot, con
         hits: [],
       };
     }
-    const topK = Math.max(1, Math.min(Math.trunc(Number(limit) || 50) * 2, 1_000));
+    const topK = Math.max(1, Math.min(
+      candidateLimit == null
+        ? Math.trunc(Number(limit) || 50) * 2
+        : Math.trunc(Number(candidateLimit) || 1),
+      1_000,
+    ));
     const hits = await index.nearest(queryVector, { k: topK, minScore: 0 });
     return {
       ok: true,
       provider: resources.provider,
       backend: resources.backend || undefined,
+      candidateLimit: topK,
       encoding: {
         model: String(encoder.model || ""),
         modelVersion: String(encoder.model_version || ""),

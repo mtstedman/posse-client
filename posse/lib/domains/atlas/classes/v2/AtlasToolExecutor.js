@@ -15,6 +15,10 @@ import {
   runAtlasNativeMethodAsync,
 } from "../../functions/v2/native/invoke.js";
 import { buildNativeVectorBridge } from "../../functions/v2/embeddings/native-vector-bridge.js";
+import {
+  applyPathQualityPriors,
+  pathQualityPriorsEnabled,
+} from "../../functions/v2/retrieval/path-priors.js";
 import { AtlasToolDispatchCache } from "./AtlasToolDispatchCache.js";
 import path from "node:path";
 
@@ -161,6 +165,76 @@ function conductorEnvelopeToToolResult(envelope) {
   catch { text = String(payload); }
   return { result: mcpTextResult(text, false), ok: true, errorMsg: null };
 }
+
+function nativeSymbolSearchArgs(action, args = {}) {
+  if (action !== "symbol.search" || !pathQualityPriorsEnabled(args)) return args;
+  const callerLimit = Math.max(1, Math.min(Math.trunc(Number(args.limit) || 50), 500));
+  const vectorLimit = Math.max(0, Math.trunc(Number(args.vectorCandidateLimit) || 0));
+  const fileWindow = Math.max(0, Math.trunc(Number(args.hierarchicalFileLimit) || 0));
+  const candidatePoolLimit = Math.min(500, Math.max(
+    callerLimit,
+    vectorLimit,
+    callerLimit * 2,
+    fileWindow * 4,
+  ));
+  return candidatePoolLimit === callerLimit ? args : { ...args, limit: candidatePoolLimit };
+}
+
+function applyNativeSymbolSearchPriors(envelope, args = {}) {
+  if (!pathQualityPriorsEnabled(args) || envelope?.ok === false || envelope?.error) return envelope;
+  if (envelope?.meta?.pathPriors?.enabled) return envelope;
+  const items = Array.isArray(envelope?.data?.items) ? envelope.data.items : null;
+  if (!items) return envelope;
+  const callerLimit = Math.max(1, Math.min(Math.trunc(Number(args.limit) || 50), 500));
+  const entries = items.map((item, index) => ({
+    id: String(item?.symbolId || item?.id || `native-symbol-${index}`),
+    score: Number.isFinite(Number(item?.score)) ? Number(item.score) : 1 / (RRF_SCORE_K + index + 1),
+    payload: item,
+    contributions: {},
+  }));
+  const rawScoreById = new Map(entries.map((entry) => [entry.id, entry.score]));
+  const result = applyPathQualityPriors(entries, {
+    query: String(args.query || ""),
+    plan: envelope?.meta?.queryPlan || null,
+    options: args,
+    rawScoreById,
+  });
+  const rankedItems = result.entries.slice(0, callerLimit).map((entry) => ({
+    ...entry.payload,
+    score: Number(entry.score.toFixed(12)),
+    ranking: {
+      ...(entry.payload?.ranking && typeof entry.payload.ranking === "object" ? entry.payload.ranking : {}),
+      pathPrior: entry.pathPrior,
+    },
+  }));
+  const originalTotal = Number(envelope?.data?.total);
+  const total = Number.isFinite(originalTotal) ? originalTotal : items.length;
+  const pathPriors = {
+    ...result.summary,
+    callerLimit,
+    deliveredCandidatePool: items.length,
+  };
+  return {
+    ...envelope,
+    data: {
+      ...envelope.data,
+      items: rankedItems,
+      total,
+      truncated: total > rankedItems.length || result.entries.length > rankedItems.length,
+    },
+    meta: {
+      ...(envelope.meta || {}),
+      pathPriors,
+      scoreScheme: {
+        ...(envelope?.meta?.scoreScheme || {}),
+        score: "path_prior_adjusted_rrf",
+        rawScore: "ranking.pathPrior.rawFusedScore",
+      },
+    },
+  };
+}
+
+const RRF_SCORE_K = 60;
 
 function withDedupeMarker(value, mode) {
   const cloned = cloneJson(value);
@@ -667,6 +741,9 @@ export class AtlasToolExecutor {
           ? await this.#nativeVectorBridge({
             query: String(request.args?.query || ""),
             limit: Number(request.args?.limit || 50),
+            candidateLimit: request.args?.vectorCandidateLimit == null
+              ? undefined
+              : Number(request.args.vectorCandidateLimit),
             repoRoot: readPayload.readRoot
               || request.config?.repoRoot
               || request.session?.bootConfig?.atlas?.repoPath
@@ -676,10 +753,11 @@ export class AtlasToolExecutor {
             config: readPayload.config || {},
           })
           : null;
+        const nativeArgs = nativeSymbolSearchArgs(request.action, request.args || {});
         const envelope = await this.#nativeToolCall({
           contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
           action: request.action,
-          args: cloneJson(request.args || {}) || {},
+          args: cloneJson(nativeArgs) || {},
           viewPath: readPayload.viewPath,
           ledgerPath: readPayload.ledgerPath,
           repoRoot: readPayload.readRoot
@@ -697,7 +775,11 @@ export class AtlasToolExecutor {
           timeoutMs,
           idempotent: true,
         });
-        return conductorEnvelopeToToolResult(envelope);
+        return conductorEnvelopeToToolResult(
+          request.action === "symbol.search"
+            ? applyNativeSymbolSearchPriors(envelope, request.args || {})
+            : envelope,
+        );
       }
       if (readPayload && typeof conductor.retrieve === "function") {
         const envelope = await conductor.retrieve(readPayload, { timeoutMs: request.waitMs || this.#waitMs });

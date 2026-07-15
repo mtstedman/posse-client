@@ -1,15 +1,6 @@
 // @ts-check
 //
-// Native mirror for parser/adapter parseBuffer.
-//
-// Migration discipline:
-//   1. Rust implements ATLAS_NATIVE_PARSE_BUFFER_METHOD.
-//   2. diffParseBufferNativeParity compares Rust output against the Node
-//      parser oracle until parity is exact for the target language/corpus.
-//   3. The call site switches to parseBufferNative.
-//   4. The matching Node parser code is deleted in the same change.
-
-import { isDeepStrictEqual } from "node:util";
+// Strict native implementation of parser/adapter parseBuffer.
 
 import { sha256Hex } from "../hash.js";
 import { isCanonicalRepoPath } from "../paths.js";
@@ -129,46 +120,4 @@ export async function parseBufferNative(args, opts = {}) {
   const runOptions = parserNativeOptionsForTests ? { ...parserNativeOptionsForTests, ...opts } : opts;
   const result = await runAtlasNativeMethodAsync(ATLAS_NATIVE_PARSE_BUFFER_METHOD, payload, runOptions);
   return parseNativeParseResult(result, payload);
-}
-
-/**
- * JSON-safe canonical form for strict A/B comparison. Optional `undefined`
- * fields vanish the same way they do across the process boundary.
- *
- * @param {unknown} result
- * @returns {unknown}
- */
-export function normalizeParseResultForNativeParity(result) {
-  return JSON.parse(JSON.stringify(result));
-}
-
-/**
- * Run the Rust mirror and compare it against a supplied Node oracle. The oracle
- * is injected so this file never imports the Node parser it is helping delete.
- *
- * @param {{
- *   bytes: Buffer | string,
- *   repo_rel_path: string,
- *   lang?: string,
- * }} args
- * @param {{
- *   nodeParseBuffer: (args: { bytes: Buffer | string, repo_rel_path: string, lang?: string }) => ParseResult,
- *   manager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
- *   timeoutMs?: number,
- * }} opts
- * @returns {Promise<{ ok: true, node: unknown, native: unknown } | { ok: false, node: unknown, native: unknown, message: string }>}
- */
-export async function diffParseBufferNativeParity(args, opts) {
-  if (typeof opts?.nodeParseBuffer !== "function") {
-    throw new TypeError("diffParseBufferNativeParity requires nodeParseBuffer");
-  }
-  const node = normalizeParseResultForNativeParity(opts.nodeParseBuffer(args));
-  const native = normalizeParseResultForNativeParity(await parseBufferNative(args, opts));
-  if (isDeepStrictEqual(native, node)) return { ok: true, node, native };
-  return {
-    ok: false,
-    node,
-    native,
-    message: "ATLAS native parser output does not match Node parser output",
-  };
 }

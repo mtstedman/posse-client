@@ -140,6 +140,10 @@ export async function symbolSearch({
         feedbackHalfLifeDays,
         entities: normalizeEntities(/** @type {any} */ (params).entities),
         searchScope: normalizeSearchScope(/** @type {any} */ (params).scope),
+        filterDeclarationFiles: /** @type {any} */ (params).filterDeclarationFiles,
+        filterToolingPaths: /** @type {any} */ (params).filterToolingPaths,
+        genericSymbolFrequencyThreshold: /** @type {any} */ (params).genericSymbolFrequencyThreshold,
+        hierarchicalFileLimit: /** @type {any} */ (params).hierarchicalFileLimit,
         planner,
       },
     });
@@ -173,6 +177,10 @@ export async function symbolSearch({
       feedbackHalfLifeDays,
       entities: normalizeEntities(/** @type {any} */ (params).entities),
       searchScope: normalizeSearchScope(/** @type {any} */ (params).scope),
+      filterDeclarationFiles: /** @type {any} */ (params).filterDeclarationFiles,
+      filterToolingPaths: /** @type {any} */ (params).filterToolingPaths,
+      genericSymbolFrequencyThreshold: /** @type {any} */ (params).genericSymbolFrequencyThreshold,
+      hierarchicalFileLimit: /** @type {any} */ (params).hierarchicalFileLimit,
       planner,
     },
   });
@@ -201,6 +209,9 @@ async function buildEnvelope({ view, result, versionId, limit, query, semanticRe
       const hit = symbolHit(entry.payload);
       hit.score = roundScore(entry.score);
       /** @type {any} */ (hit).relevance = relevanceLabel({ query, entry, rank: index + 1 });
+      if (/** @type {any} */ (entry).pathPrior) {
+        /** @type {any} */ (hit).ranking = { pathPrior: /** @type {any} */ (entry).pathPrior };
+      }
       return hit;
     });
   const seen = new Set(overlayHits.map((hit) => hit.symbolId));
@@ -222,10 +233,11 @@ async function buildEnvelope({ view, result, versionId, limit, query, semanticRe
   /** @type {any} */
   const meta = { backendHealth: result.degraded };
   meta.scoreScheme = {
-    score: "raw_rrf",
+    score: result.pathPriors ? "path_prior_adjusted_rrf" : "raw_rrf",
     rrfK: RRF_K,
     relevance: "exact|strong|weak",
   };
+  if (result.pathPriors) meta.pathPriors = result.pathPriors;
   if (result.separation) meta.separation = result.separation;
   meta.prefetch = schedulePrefetchTopCards({ view, result, versionId, ledger, repoId });
   if (result.plan) {

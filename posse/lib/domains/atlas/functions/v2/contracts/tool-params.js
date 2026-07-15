@@ -236,6 +236,11 @@
  *   are returned in SymbolSearchData.entities when feedback FTS is available.
  * @property {"name" | "body" | "either"} [scope] Search symbol names, symbol-body identifier tokens, or both. Default "either".
  * @property {string} [sessionId]             Optional live-buffer overlay namespace.
+ * @property {number} [vectorCandidateLimit] Exact ANN hits requested from the Vector bridge, 1..1000.
+ * @property {boolean} [filterDeclarationFiles] Apply declaration-file path priors unless the query asks for declarations/types.
+ * @property {boolean} [filterToolingPaths] Apply tooling/test/generated/legacy path priors unless explicitly requested.
+ * @property {number} [genericSymbolFrequencyThreshold] Penalize names repeated across this many candidate files, 2..100.
+ * @property {number} [hierarchicalFileLimit] Files admitted before final symbol interleaving, 1..40.
  */
 
 /**
@@ -296,6 +301,7 @@
  * @property {number} [maxBranches]           Max accepted containment branches. Default 12.
  * @property {number} [branchFileCap]         Max files under one accepted branch. Default 40.
  * @property {number} [refMatchLimit]         Max ref matches to score before treating the ref as broad. Default 50.
+ * @property {number} [siblingNumericFamilyCap] Optional cap for incrementing sibling filename families (for example module_000.ts, module_001.ts). Omit to disable.
  */
 
 // ============================================================================

@@ -96,8 +96,6 @@ export const SETTING_KEYS = Object.freeze({
   WORKER_PROVIDER_CIRCUIT_TTL_MS: "worker_provider_circuit_ttl_ms",
   WORKTREE_LOCK_WAIT_MS: "worktree_lock_wait_ms",
   GIT_ATLAS_POST_COMMIT_HOOK_TIMEOUT_MS: "git_atlas_post_commit_hook_timeout_ms",
-  NATIVE_REMOTE: "posse_native_remote",
-
   // Account-level keys read via getAccountSetting() directly (bypassing the
   // queue facade). Listed here so the typo-safety story is identical.
   ARTIFACT_IMAGE_PROVIDER: "artifact_image_provider",
