@@ -65,20 +65,34 @@ function pathValue(value) {
 // normalizeRoots(["C:/dev/project/out"], "C:/dev/project") → ["out"]
 // normalizeRoots(["C:/dev/project"], "C:/dev/project") → ["*"]
 // normalizeRoots(["./src", "", ".", null], "/any") → ["src"]
+// Windows-style absolute roots (drive letter / UNC) are recognized on every
+// platform: payloads and DB rows written on Windows must still resolve to
+// repo-relative scope when the orchestrator runs them on Linux/macOS.
+const WINDOWS_ABSOLUTE_RE = /^[a-zA-Z]:[\\/]|^\\\\/;
+
 export function normalizeRoots(roots, cwd = process.cwd()) {
   if (!Array.isArray(roots)) return [];
   return roots
     .map(r => {
       if (!r) return "";
       const raw = String(r).trim();
-      const isAbsolute = path.isAbsolute(raw);
+      const isAbsolute = path.isAbsolute(raw) || WINDOWS_ABSOLUTE_RE.test(raw);
       if (raw === ".") return "*";
       let n = normPath(r);
       // Strip trailing slash
       n = n.replace(/\/+$/, "");
       // Convert absolute paths to relative
       if (isAbsolute) {
-        n = normPath(path.relative(cwd, r));
+        if (path.isAbsolute(raw)) {
+          n = normPath(path.relative(cwd, r));
+        } else {
+          // Windows-style absolute path on a POSIX host: path.relative can't
+          // parse it, so compare the normalized forms directly.
+          const cwdNorm = normPath(cwd).replace(/\/+$/, "");
+          if (n === cwdNorm) n = "";
+          else if (cwdNorm && n.startsWith(cwdNorm + "/")) n = n.slice(cwdNorm.length + 1);
+          else return ""; // absolute root outside the cwd — drop it
+        }
         // Strip trailing slash again after relative conversion
         n = n.replace(/\/+$/, "");
       }

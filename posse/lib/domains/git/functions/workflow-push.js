@@ -17,11 +17,20 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     const branch = gitExec(["rev-parse", "--abbrev-ref", "HEAD"], projectDir, { nativeParity }).trim();
     const remotes = (() => {
       try {
-        return gitExec(["remote"], projectDir, { nativeParity })
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean);
+        // Enumerate remotes via a statically read-only config query: bare
+        // `git remote` fails closed to the git:mutate route under the
+        // encoder's argv policy, which read-route workflow workers (e.g.
+        // the off-main-thread collectPushOfferState task) cannot use.
+        return [...new Set(
+          gitExec(["config", "--get-regexp", "^remote\\..*\\.url$"], projectDir, { nativeParity })
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .map((line) => line.split(/\s/, 1)[0].replace(/^remote\./, "").replace(/\.url$/, ""))
+            .filter(Boolean),
+        )];
       } catch {
+        // `git config --get-regexp` exits 1 when no remotes are configured.
         return [];
       }
     })();

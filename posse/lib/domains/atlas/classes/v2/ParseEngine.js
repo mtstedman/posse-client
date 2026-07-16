@@ -652,11 +652,18 @@ export class ParseEngine {
           force: opts.force === true,
           forceIfMissing: opts.forceIfMissing === true,
           layerOnly: this.#viewLayerMerge,
-          // In layer-merge mode Tree-sitter is the sole owner of branch path
-          // deltas. Letting SCIP append from its independent startup snapshot
-          // races the tree walk and turns identical add/add writes into a
-          // before_content_hash contract failure.
-          appendLedgerEntries: !this.#viewLayerMerge,
+          // In layer-merge mode Tree-sitter owns the branch path delta for
+          // every file it parses. Letting SCIP also append those from its
+          // independent startup snapshot races the tree walk and turns
+          // identical add/add writes into a before_content_hash contract
+          // failure. But SCIP-only documents — extensions the parser does not
+          // support, or files too large to parse — have no other delta
+          // writer, so SCIP must still append those or the view build (which
+          // walks branch deltas) never sees them.
+          appendLedgerEntries: true,
+          shouldAppendPathDelta: this.#viewLayerMerge
+            ? (document) => !this.#treeSitterOwnsPathDelta(document)
+            : null,
           onDocumentsPrepared: opts.onDocumentsPrepared || undefined,
           onDocumentCommitted: opts.onDocumentCommitted || undefined,
           expectedContentHashes: opts.expectedContentHashes || undefined,
@@ -705,6 +712,24 @@ export class ParseEngine {
         });
       }
     }
+  }
+
+  /**
+   * Whether the layer-mode tree-sitter walk is the delta writer for a SCIP
+   * document's path. The walk only appends for extensions the parser adapter
+   * supports and files small enough to parse (parse failures still append —
+   * they publish an empty/partial tree layer). Everything else is SCIP-only:
+   * no other writer records the path, so SCIP appends its own delta.
+   *
+   * @param {{ repo_rel_path: string, byte_size: number }} document
+   * @returns {boolean}
+   */
+  #treeSitterOwnsPathDelta(document) {
+    const repoRelPath = String(document?.repo_rel_path || "");
+    const ext = path.extname(repoRelPath).toLowerCase();
+    if (!ext || !this.#parser || !this.#parser.supports(ext)) return false;
+    if (isOversizedForParsing(Number(document?.byte_size || 0))) return false;
+    return true;
   }
 
   /**

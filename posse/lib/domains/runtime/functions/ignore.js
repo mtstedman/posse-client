@@ -123,6 +123,18 @@ export function ensurePosseRuntimeGitignore(projectDir, {
 } = {}) {
   const projectRoot = path.resolve(projectDir || process.cwd());
   const gitignorePath = path.join(projectRoot, ".gitignore");
+  // Runtime artifacts are written separately to .git/info/exclude. Once a
+  // repository has a HEAD, changing its project-owned .gitignore during startup dirties
+  // read-only workflows and reproducible benchmark sleeves. New repositories
+  // still receive the managed block so it can be part of their initial commit.
+  if (!updateManagedBlock) {
+    try {
+      gitOutput(["rev-parse", "HEAD"], projectRoot);
+      return { changed: false, missing: [], skipped: "head_exists" };
+    } catch {
+      // No repository/HEAD yet; preserve bootstrap behavior below.
+    }
+  }
   if (!updateManagedBlock) {
     try {
       const existing = fs.readFileSync(gitignorePath, "utf-8");
@@ -158,6 +170,14 @@ export async function ensurePosseRuntimeGitignoreAsync(projectDir, {
 } = {}) {
   const projectRoot = path.resolve(projectDir || process.cwd());
   const gitignorePath = path.join(projectRoot, ".gitignore");
+  if (!updateManagedBlock) {
+    try {
+      await gitOutputAsync(["rev-parse", "HEAD"], projectRoot);
+      return { changed: false, missing: [], skipped: "head_exists" };
+    } catch {
+      // No repository/HEAD yet; preserve bootstrap behavior below.
+    }
+  }
   if (!updateManagedBlock) {
     try {
       const existing = await fs.promises.readFile(gitignorePath, "utf-8");

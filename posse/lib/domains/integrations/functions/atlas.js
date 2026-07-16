@@ -425,11 +425,17 @@ function repoStorageFor({ cwd = null, config = getAtlasIntegrationConfig() } = {
 }
 
 function atlasWarmRuntimeExists(storage = {}) {
+  // Only ATLAS-owned state counts as "warm runtime exists". The generic Posse
+  // runtime root (`.posse/`) also holds non-ATLAS artifacts (job context
+  // resources, logs, db) that appear during ordinary pipeline execution, so
+  // its existence says nothing about ATLAS: treating it as the warm runtime
+  // made the freshness gate defer cold-project dev/plan jobs behind a no-op
+  // refresh instead of proceeding degraded.
   try {
     return !!(
       storage?.ledgerDbPath && fs.existsSync(storage.ledgerDbPath)
     ) || !!(
-      storage?.repoRoot && fs.existsSync(path.join(storage.repoRoot, ".posse"))
+      storage?.atlasRoot && fs.existsSync(storage.atlasRoot)
     );
   } catch {
     return false;
@@ -573,7 +579,12 @@ export async function checkAtlasMainFreshnessGate({
   const branch = String(targetBranch || await resolveAtlasBaselineBranchAsync(storage.repoRoot) || "main").trim() || "main";
   const runtimeExists = atlasWarmRuntimeExists(storage);
   const pending = await listPendingAtlasMainWarmJobs({ cwd: storage.repoRoot, config, targetBranch: branch });
-  if (!runtimeExists) {
+  // A queued/leased main warm job is a refresh already underway (it will
+  // create the runtime if needed), so deferring behind it stays meaningful
+  // even when the on-disk ATLAS runtime does not exist yet. Only a cold
+  // runtime with nothing pending degrades: enqueueing a no-op refresh and
+  // holding plan/dev jobs behind it would stall real work for nothing.
+  if (!runtimeExists && pending.length === 0) {
     const readiness = await probeAtlasGraphReadiness({ cwd: storage.repoRoot, config });
     return {
       ready: false,

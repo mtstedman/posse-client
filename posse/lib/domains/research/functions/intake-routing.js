@@ -7,7 +7,6 @@
 // orchestration layer that orchestrator-app.js used to inline.
 
 import path from "path";
-import { execFileSync } from "node:child_process";
 
 import {
   createJob,
@@ -19,6 +18,7 @@ import {
   updateWorkItemResearchSkip,
 } from "../../queue/functions/index.js";
 import { ensureProjectMap, getCachedProjectMap } from "../../project/functions/map.js";
+import { gitExec } from "../../git/functions/utils.js";
 import { parseWorkItemMetadata } from "../../planning/functions/state.js";
 import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
 import { buildSyntheticResearchBrief, classifyResearchTask } from "./routing.js";
@@ -84,12 +84,7 @@ function isPathInsideProject(projectDir, candidate) {
 }
 
 function runGitLsFiles(projectDir, args = ["ls-files", "-z"]) {
-  return execFileSync("git", args, {
-    cwd: projectDir,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 30_000,
-  });
+  return gitExec(args, projectDir, { trim: false, timeoutMs: 30_000 });
 }
 
 function parseGitLsFiles(output) {

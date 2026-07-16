@@ -792,8 +792,10 @@ function snapshotNotePayload({ refName, stashHash, wtPath, projectDir, branchNam
 // Last-resort data preservation when the stash route is unavailable: write the
 // captured dirty state (patches + untracked file copies) to a recovery
 // directory. Both twins use this — data-preserving degradation is the
-// canonical posture, not a sync-only behavior.
-function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branchName, wiId, onMsg, status, diffPatch, stagedPatch, trackedDirty, untracked, dedupHash, headSha, recoveryRootFn = recoveryRoot }) {
+// canonical posture, not a sync-only behavior. Exported for the admin git
+// adapter, which degrades the same way but supplies its own recoveryRootFn
+// so the operator lane never depends on the native daemon.
+export function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branchName, wiId, onMsg, status, diffPatch, stagedPatch, trackedDirty, untracked, dedupHash, headSha, recoveryRootFn = recoveryRoot }) {
   // Tracked modifications exist in this snapshot only as the captured patches.
   // If patch capture failed and tracked dirt exists, a directory snapshot
   // would silently miss it — refuse so callers cannot treat it as preserved.

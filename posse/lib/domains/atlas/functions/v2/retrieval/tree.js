@@ -8,7 +8,7 @@ import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { readTreeBuildResult } from "../tree-derived.js";
 import { readLatestTreeCompressionSnapshot } from "../tree-compression.js";
 import { runAtlasNativeMethodAsync } from "../native/invoke.js";
-import { isCanonicalRepoPath } from "../paths.js";
+import { isCanonicalRepoPath, normalizeRepoPath } from "../paths.js";
 
 const TREE_RUN_KIND = "tree-derived";
 const TREE_TABLES = Object.freeze(["atlas_tree_nodes", "atlas_tree_refs", "derived_state_runs"]);
@@ -96,7 +96,23 @@ async function runTreeTraversal({ view, versionId, params = {}, action, method }
     latestRun: params.includeLatestRun === false ? null : readLatestRun(db),
     compressionSnapshot: readOptionalCompressionSnapshot(db),
   }));
+  renamePublicActionsInWarnings(result);
   return okEnvelope({ action, versionId, data: result });
+}
+
+/**
+ * Node owns the public action names ("tree.branch"); the native runtime still
+ * phrases its guidance warnings in terms of its internal method name
+ * ("tree.walk", from the tree-walk route). Translate at the shim boundary so
+ * callers are pointed at an action that actually exists.
+ *
+ * @param {Record<string, unknown>} result
+ */
+function renamePublicActionsInWarnings(result) {
+  if (!Array.isArray(result?.warnings)) return;
+  result.warnings = result.warnings.map((warning) => (
+    typeof warning === "string" ? warning.replace(/\btree\.walk\b/g, "tree.branch") : warning
+  ));
 }
 
 /**
@@ -360,11 +376,42 @@ function readOptionalCompressionSnapshot(db) {
       builtAt: latest.snapshot?.builtAt,
       summary: latest.snapshot?.summary || {},
       details: latest.snapshot?.details || {},
-      seeds: Array.isArray(latest.seeds) ? latest.seeds : [],
+      seeds: (Array.isArray(latest.seeds) ? latest.seeds : []).map(canonicalizeSeedPathLists),
     };
   } catch {
     return unavailable("tree_compression_read_failed");
   }
+}
+
+/**
+ * Seed entrypoints / likely-tests are model-written annotations, so sloppy
+ * forms ("./src//x.ts", backslashes) are expected. The pre-native scorer
+ * normalized them at match time; the native canonical check REJECTS
+ * non-canonical paths instead of normalizing, so feed it canonical forms or
+ * the seed's file pins silently vanish.
+ *
+ * @param {Record<string, any>} seed
+ */
+function canonicalizeSeedPathLists(seed) {
+  return {
+    ...seed,
+    entrypoints: canonicalSeedPaths(seed?.entrypoints),
+    likelyTests: canonicalSeedPaths(seed?.likelyTests),
+  };
+}
+
+/**
+ * @param {unknown} values
+ * @returns {string[]}
+ */
+function canonicalSeedPaths(values) {
+  /** @type {string[]} */
+  const out = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = normalizeRepoPath(String(value ?? ""));
+    if (normalized && !out.includes(normalized)) out.push(normalized);
+  }
+  return out;
 }
 
 /**

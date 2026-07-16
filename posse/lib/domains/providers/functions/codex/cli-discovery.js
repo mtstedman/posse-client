@@ -277,7 +277,11 @@ function findCodexNativeExecutableForShim(candidate, {
   arch = process.arch,
   existsSyncImpl = fs.existsSync,
 } = {}) {
-  if (platform !== "win32" || path.extname(String(candidate || "")).toLowerCase() !== ".cmd") return null;
+  // Shim paths are Windows-shaped whenever platform is win32 — use the win32
+  // path rules so injected platforms (tests, cross-host reasoning about stored
+  // Windows paths) resolve the same way a real Windows host would.
+  const winPath = platform === "win32" ? path.win32 : path;
+  if (platform !== "win32" || winPath.extname(String(candidate || "")).toLowerCase() !== ".cmd") return null;
   const target = arch === "arm64"
     ? { packageName: "codex-win32-arm64", triple: "aarch64-pc-windows-msvc" }
     : arch === "x64"
@@ -285,13 +289,13 @@ function findCodexNativeExecutableForShim(candidate, {
       : null;
   if (!target) return null;
 
-  const npmRoot = path.join(path.dirname(candidate), "node_modules");
+  const npmRoot = winPath.join(winPath.dirname(candidate), "node_modules");
   const packageRoots = [
-    path.join(npmRoot, "@openai", "codex", "node_modules", "@openai", target.packageName),
-    path.join(npmRoot, "@openai", target.packageName),
+    winPath.join(npmRoot, "@openai", "codex", "node_modules", "@openai", target.packageName),
+    winPath.join(npmRoot, "@openai", target.packageName),
   ];
   for (const packageRoot of packageRoots) {
-    const executable = path.join(packageRoot, "vendor", target.triple, "bin", "codex.exe");
+    const executable = winPath.join(packageRoot, "vendor", target.triple, "bin", "codex.exe");
     try {
       if (existsSyncImpl(executable) && !isProtectedWindowsAppCodexPath(executable)) return executable;
     } catch {

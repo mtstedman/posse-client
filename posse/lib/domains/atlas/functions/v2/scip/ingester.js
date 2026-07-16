@@ -60,6 +60,7 @@ import { getCurrentGitHeadAsync } from "../../../../integrations/functions/atlas
  *   forceIfMissing?: boolean,
  *   branch?: string | null,
  *   appendLedgerEntries?: boolean,
+ *   shouldAppendPathDelta?: ((document: { repo_rel_path: string, byte_size: number }) => boolean) | null,
  *   layerOnly?: boolean,
  *   rowsSpecVersion?: string,
  * }} args
@@ -96,6 +97,7 @@ export async function ingestScipFile({
   forceIfMissing = false,
   branch = null,
   appendLedgerEntries = true,
+  shouldAppendPathDelta = null,
   layerOnly = false,
   rowsSpecVersion = ATLAS_SCIP_ROWS_SPEC_VERSION,
 }) {
@@ -581,13 +583,18 @@ export async function ingestScipFile({
           documentsIngested++;
         }
         coveredHashes.push(document.content_hash);
-        ledgerEntriesAppended += await appendDocumentDelta({
+        // Per-document delta ownership: callers running SCIP beside another
+        // path-delta writer (the layer-mode tree-sitter walk) veto appends
+        // for paths that writer owns, while SCIP-only paths still land.
+        const appendAllowed = typeof shouldAppendPathDelta !== "function"
+          || shouldAppendPathDelta({ repo_rel_path: repoRelPath, byte_size: byteSize }) !== false;
+        ledgerEntriesAppended += appendAllowed ? await appendDocumentDelta({
           ledger,
           branch: appendBranch,
           snapshot: pathSnapshot,
           repo_rel_path: repoRelPath,
           content_hash: document.content_hash,
-        });
+        }) : 0;
         // Publish only after both the SCIP layer and its branch delta are
         // durable. Awaiting the ordered head is the document-level
         // backpressure point that prevents SCIP intake from outrunning ONNX.

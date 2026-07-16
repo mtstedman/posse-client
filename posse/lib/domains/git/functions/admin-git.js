@@ -9,6 +9,11 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
+import { getRuntimeRoot } from "../../runtime/functions/paths.js";
+// Pure-fs snapshot writer shared with the domain twins; calling it never
+// touches the native daemon (the admin lane supplies its own recoveryRootFn).
+import { writeLegacyFallbackSnapshot } from "./worktree-snapshots.js";
+
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024;
 
@@ -191,8 +196,49 @@ export function adminDeleteBranchPreservingTip(projectDir, branchName, {
   };
 }
 
+// The stash route fails on worktrees whose index holds unmerged entries
+// (stale stash-apply/merge residue) — exactly the state the merge pre-flight
+// must preserve before healing. Mirror the domain twins' degradation: write
+// the dirty state as patches + untracked copies under the runtime recovery
+// root instead of failing the operator command.
+function adminDirectoryFallbackSnapshot(wtPath, projectDir, { reason, branchName, wiId, onMsg, status }) {
+  const diffPatch = adminGitExec(["diff", "--binary"], wtPath, { trim: false });
+  const stagedPatch = adminGitExec(["diff", "--binary", "--cached"], wtPath, { trim: false });
+  const trackedDirty = [
+    ...new Set(
+      `${adminGitExec(["-c", "core.quotePath=false", "diff", "--name-only"], wtPath)}\n${adminGitExec(["-c", "core.quotePath=false", "diff", "--name-only", "--cached"], wtPath)}`
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+  ];
+  const untracked = adminGitExec(["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"], wtPath)
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  let headSha = null;
+  try { headSha = adminGitExec(["rev-parse", "HEAD"], wtPath); } catch { headSha = null; }
+  return writeLegacyFallbackSnapshot({
+    wtPath,
+    projectDir,
+    reason,
+    branchName,
+    wiId,
+    onMsg,
+    status,
+    diffPatch,
+    stagedPatch,
+    trackedDirty,
+    untracked,
+    dedupHash: null,
+    headSha,
+    recoveryRootFn: (dir) => path.join(getRuntimeRoot(dir), "recovered-worktrees"),
+  });
+}
+
 export function adminPreserveDirtyWorktreeSnapshot(wtPath, projectDir, {
   reason = "dirty-worktree",
+  branchName = null,
   wiId = null,
   onMsg = null,
 } = {}) {
@@ -205,7 +251,11 @@ export function adminPreserveDirtyWorktreeSnapshot(wtPath, projectDir, {
   try {
     const status = adminGitExec(["status", "--porcelain"], wtPath, { timeoutMs: 5000 });
     if (!String(status || "").trim()) return null;
-    adminGitExec(["stash", "push", "--include-untracked", "-m", message], wtPath);
+    try {
+      adminGitExec(["stash", "push", "--include-untracked", "-m", message], wtPath);
+    } catch {
+      return adminDirectoryFallbackSnapshot(wtPath, projectDir, { reason, branchName, wiId, onMsg, status });
+    }
     const entries = String(adminGitExec(["stash", "list", "--format=%H%x00%gd%x00%s"], wtPath) || "")
       .split(/\r?\n/)
       .map((line) => line.split("\0"))

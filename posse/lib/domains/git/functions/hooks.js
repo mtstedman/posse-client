@@ -41,6 +41,9 @@ function appendBounded(current, chunk) {
 function emit(result) {
   if (settled) return;
   settled = true;
+  const exitCode = result.status === 0 && !result.timedOut && !result.error ? 0 : 1;
+  // Pipe writes are asynchronous on POSIX — exiting before the write flushes
+  // truncates large payloads (Windows pipes flush synchronously, masking it).
   process.stdout.write(JSON.stringify({
     status: result.status,
     signal: result.signal || null,
@@ -48,8 +51,7 @@ function emit(result) {
     stdout,
     stderr,
     error: result.error || null,
-  }));
-  process.exit(result.status === 0 && !result.timedOut && !result.error ? 0 : 1);
+  }), () => process.exit(exitCode));
 }
 
 function killTree(child) {

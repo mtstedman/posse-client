@@ -352,21 +352,33 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const caseFold = (s) => (process.platform === "win32" ? s.toLowerCase() : s);
   const normRaw = (p) => String(p || "").replace(/\\/g, "/").replace(/^\.\//, "").trim();
   const norm = (p) => caseFold(normRaw(p));
-  const nestedRepoPrefix = (() => {
+  const { nestedRepoPrefix, nestedRepoRoot } = (() => {
     try {
       const repoRoot = path.resolve(gitForCommit(["rev-parse", "--show-toplevel"]));
       const rel = path.relative(repoRoot, path.resolve(cwd)).replace(/\\/g, "/").replace(/\/+$/, "");
-      if (rel && rel !== "." && isInsideRoot(path.resolve(cwd), repoRoot, { allowEqual: false, followSymlinks: false })) return rel;
+      if (rel && rel !== "." && isInsideRoot(path.resolve(cwd), repoRoot, { allowEqual: false, followSymlinks: false })) {
+        return { nestedRepoPrefix: rel, nestedRepoRoot: repoRoot };
+      }
     } catch {
       // Best effort only. Non-nested or detached environments simply skip this normalization.
     }
-    return null;
+    return { nestedRepoPrefix: null, nestedRepoRoot: null };
   })();
   const scopeCompatiblePath = (input) => {
     const normalized = normRaw(input);
     if (!normalized || normalized === "*" || !nestedRepoPrefix) return normalized;
     const prefix = `${nestedRepoPrefix}/`;
     return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
+  };
+  // Inverse of scopeCompatiblePath: the native scoped-commit transaction
+  // requires repository-relative paths (git status reports them that way), so
+  // cwd-relative scope paths must be re-prefixed when cwd is nested inside the
+  // repository.
+  const repoRelativePath = (input) => {
+    const normalized = normRaw(input);
+    if (!normalized || normalized === "*" || !nestedRepoPrefix) return normalized;
+    const prefix = `${nestedRepoPrefix}/`;
+    return normalized.startsWith(prefix) ? normalized : `${prefix}${normalized}`;
   };
   const wiId = opts?.wiId || null;
   const jobId = opts?.jobId || null;
@@ -847,16 +859,19 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
 
     const commitTimeoutBudget = gitCommitTimeoutBudget();
     const nativeResult = runGitNativeMethod("git.commitScopedTransaction", {
-      cwd,
+      // The native transaction takes repository-relative paths and stages with
+      // pathspecs interpreted relative to its cwd, so those two spaces must
+      // coincide: run it from the repository root when cwd is nested inside.
+      cwd: nestedRepoPrefix ? nestedRepoRoot : cwd,
       expectedHead: headAtScopeStart,
       message,
-      modifyPaths: [...nativeModifyPaths],
-      createPaths: [...nativeCreatePaths],
-      deletePaths: [...nativeDeletePaths],
+      modifyPaths: [...nativeModifyPaths].map(repoRelativePath),
+      createPaths: [...nativeCreatePaths].map(repoRelativePath),
+      deletePaths: [...nativeDeletePaths].map(repoRelativePath),
       modifyRoots: [],
       createRoots: [],
       deleteRoots: [],
-      requiredPaths: expectedToCommit.map((entry) => entry.path),
+      requiredPaths: expectedToCommit.map((entry) => repoRelativePath(entry.path)),
       options: {
         allowEmpty: false,
         timeoutMs: commitTimeoutBudget.processTimeoutMs,
@@ -880,11 +895,13 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       throw new Error("Git native method git.commitScopedTransaction omitted the committed hash");
     }
 
-    const committedSet = new Set(nativeResult.committedPaths.map(norm));
+    // Native results come back repository-relative; fold them to the same
+    // cwd-relative space as the admitted scope paths before comparing.
+    const committedSet = new Set(nativeResult.committedPaths.map((entry) => norm(scopeCompatiblePath(entry))));
     const skippedForPath = new Map();
     for (const entry of nativeResult.skippedPaths) {
       if (!entry || typeof entry !== "object") continue;
-      const key = norm(entry.path);
+      const key = norm(scopeCompatiblePath(entry.path));
       if (!key) continue;
       const values = skippedForPath.get(key) || [];
       values.push({
@@ -951,8 +968,14 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       quarantinedOutOfScopeMergeFiles,
       mergeAuditFailed,
       mergeAuditError,
-      committedPaths: Array.isArray(nativeResult.committedPaths) ? nativeResult.committedPaths : [],
-      nativeSkippedPaths: Array.isArray(nativeResult.skippedPaths) ? nativeResult.skippedPaths : [],
+      committedPaths: Array.isArray(nativeResult.committedPaths)
+        ? nativeResult.committedPaths.map(scopeCompatiblePath)
+        : [],
+      nativeSkippedPaths: Array.isArray(nativeResult.skippedPaths)
+        ? nativeResult.skippedPaths.map((entry) => (entry && typeof entry === "object"
+          ? { ...entry, path: scopeCompatiblePath(entry.path) }
+          : entry))
+        : [],
       rollbackStatus,
       nativeDiagnostics,
     };

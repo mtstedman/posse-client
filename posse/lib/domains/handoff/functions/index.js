@@ -40,6 +40,7 @@ import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../../catalog/job.j
 import { attachDiffNarrative, attachDiffNarrativeAsync } from "../../git/functions/diff-narrator.js";
 import { gitExec, gitExecAsync } from "../../git/functions/utils.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
+import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
 import {
   INDEXABLE_EXTENSIONS as INDEXABLE_EXTENSIONS_FROM_MODULE,
@@ -773,7 +774,20 @@ function _resolveAtlasHandoffState(recipient, packet) {
   return resolveAtlasHandoffStateFromModule(recipient, packet);
 }
 
+// Test-only seam: the real planner-slice prefetch requires a warm ATLAS index
+// for the handoff cwd, which hermetic test runners don't have. Tests that
+// exercise the ATLAS-active handoff wiring (fallback gating, tree suppression,
+// pruning-section rendering) stub the prefetch here with a deterministic
+// success/failure shape instead of depending on developer-machine index state.
+let _atlasPlannerSlicePrefetchOverride = null;
+
+export function __testSetAtlasPlannerSlicePrefetch(fn = null) {
+  assertTestContext("__testSetAtlasPlannerSlicePrefetch");
+  _atlasPlannerSlicePrefetchOverride = typeof fn === "function" ? fn : null;
+}
+
 async function _attachAtlasPlannerSlice(packet) {
+  if (_atlasPlannerSlicePrefetchOverride) return _atlasPlannerSlicePrefetchOverride(packet);
   return attachAtlasPlannerSliceFromModule(packet);
 }
 

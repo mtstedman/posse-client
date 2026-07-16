@@ -95,7 +95,7 @@ const gatewaySchema = () => o({
 // the expected gateway set explicit so tests can catch accidental removals in
 // either direction.
 export const ATLAS_MULTI_GATEWAY_ACTIONS = Object.freeze({
-  "edit.plan": Object.freeze(["query", "code"]),
+  "edit.plan": Object.freeze(["query", "code", INTERNAL_TOOL_FAMILY]),
   "code.survey": Object.freeze(["query", "code"]),
   "code.structure": Object.freeze(["query", "code"]),
 });
