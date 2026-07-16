@@ -67,10 +67,16 @@ export function logProviderCliStderrTelemetry({
   attemptId = null,
   exitCode = null,
   stderr = "",
+  attachProof = null,
   extra = {},
 } = {}) {
-  const { lines, gatewayAttachFailed } = extractMcpStderrSignals(stderr);
+  const { lines, gatewayAttachFailed: stderrSuggestsAttachFailure } = extractMcpStderrSignals(stderr);
   if (lines.length === 0) return null;
+  const attachProofPresent = !!attachProof?.initializeSeenAt && !!attachProof?.toolsListSeenAt;
+  // Tool-level MCP errors can contain phrases such as "MCP server failed"
+  // even after the owner observed a successful initialize + tools/list. Do
+  // not misclassify those model/request errors as a gateway attach failure.
+  const gatewayAttachFailed = stderrSuggestsAttachFailure && !attachProofPresent;
   appendRunTelemetry("diagnostics", {
     kind: "provider.cli_mcp_stderr",
     component: "provider_tool_surface",
@@ -81,6 +87,7 @@ export function logProviderCliStderrTelemetry({
     attempt_id: attemptId ?? null,
     exit_code: exitCode ?? null,
     gateway_attach_failed: gatewayAttachFailed,
+    gateway_attach_proof_present: attachProofPresent,
     mcp_stderr_line_count: lines.length,
     mcp_stderr_lines: lines,
     ...extra,

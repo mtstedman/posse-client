@@ -2506,6 +2506,21 @@ async function handleRequest(msg) {
 
   if (method === "notifications/initialized") return;
 
+  // Compatibility response for clients that probe every configured MCP
+  // server for resources even when initialize advertised only tools. Posse
+  // does not issue a resource surface; an empty list tells the client to
+  // discard that verification/discovery route without generating a bad
+  // request or implying a capability the agent does not have.
+  if (method === "resources/list") {
+    sendMessage(jsonRpcSuccess(id, { resources: [] }));
+    return;
+  }
+
+  if (method === "resources/templates/list") {
+    sendMessage(jsonRpcSuccess(id, { resourceTemplates: [] }));
+    return;
+  }
+
   if (method === "tools/list") {
     if (agentAuthorityError) {
       sendMessage(jsonRpcError(id, -32041, "Agent file authority is unavailable", {

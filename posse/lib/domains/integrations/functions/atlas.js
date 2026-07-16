@@ -25,6 +25,7 @@ import { openViewWithMeta, viewFreshness } from "../../atlas/functions/v2/view-h
 import { runSqliteWrite } from "../../../shared/concurrency/functions/sqlite-gate.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
+import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { sanitizeWorkerExecArgv } from "../../runtime/functions/worker-exec-argv.js";
 import { getAtlasV2BootTimeoutMs } from "../../settings/functions/tunables.js";
 import { recordEmbeddingForensics, errorForTelemetry } from "../../atlas/functions/v2/embeddings/forensics.js";
@@ -741,7 +742,7 @@ function decorateWorkerError(err, extra = {}) {
   return err;
 }
 
-function runAtlasV2BootWarmWorkerThread({
+async function runAtlasV2BootWarmWorkerThread({
   ledgerDbPath,
   repoRoot,
   defaultBranch,
@@ -753,6 +754,18 @@ function runAtlasV2BootWarmWorkerThread({
   purpose = "main-full",
 }) {
   const maxMs = resolveAtlasV2BootTimeoutMs(timeoutMs, config);
+  const vectorMode = String(config?.vectorBackend ?? config?.atlas_vector_backend ?? "").trim().toLowerCase();
+  const nativeNames = vectorMode === "off"
+    ? ["git", "atlas"]
+    : ["git", "atlas", "vector", "ml"];
+  const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(nativeNames, {
+    routesByBinary: {
+      git: ["git:read"],
+      atlas: ["atlas:methods"],
+      vector: ["atlas:vector"],
+      ml: ["ml:methods"],
+    },
+  });
   return new Promise((resolve, reject) => {
     let timer = null;
     let settled = false;
@@ -768,6 +781,7 @@ function runAtlasV2BootWarmWorkerThread({
         testBlockMs,
         purpose,
         nativeAuth: heartbeatAuthManager.getCapability(),
+        nativeRuntime,
       },
     });
     recordEmbeddingForensics("atlas.boot_worker_thread.start", {

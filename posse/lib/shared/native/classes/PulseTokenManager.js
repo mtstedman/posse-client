@@ -62,6 +62,10 @@ export class PulseTokenManager {
     this._refreshes = new Map();
     /** @type {Map<string, { rejectedAt: number, status: number | undefined, remoteCode: string | undefined }>} */
     this._nativeVersionRejections = new Map();
+    /** @type {Map<string, { cacheKey: string, requiredRoute: string, nativePackage: string | null, nativeVersion: string | null }>} */
+    this._routeHeartbeatSpecs = new Map();
+    /** @type {Map<string, NodeJS.Timeout>} */
+    this._routeHeartbeatTimers = new Map();
     this._generation = 0;
     this._heartbeatTimer = null;
     this._heartbeatRunning = false;
@@ -123,7 +127,10 @@ export class PulseTokenManager {
     this._heartbeatRunning = true;
     try {
       const token = await this.getPulseToken();
-      if (token) return token;
+      if (token) {
+        await this.#restoreRouteHeartbeats();
+        return token;
+      }
       this._heartbeatRunning = false;
       throw pulseError("POSSE_PULSE_AUTH_UNAVAILABLE", "heartbeat authentication is unavailable");
     } catch (error) {
@@ -160,6 +167,8 @@ export class PulseTokenManager {
     this._heartbeatRunning = false;
     if (this._heartbeatTimer) clearTimeout(this._heartbeatTimer);
     this._heartbeatTimer = null;
+    for (const timer of this._routeHeartbeatTimers.values()) clearTimeout(timer);
+    this._routeHeartbeatTimers.clear();
   }
 
   /**
@@ -181,6 +190,13 @@ export class PulseTokenManager {
       throw pulseError("POSSE_PULSE_AUTH_POLICY_UNAVAILABLE", "trusted heartbeat policy is unavailable");
     }
     const cacheKey = `${pulseCacheKey(rawKey, policy)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`;
+    const specKey = routeHeartbeatSpecKey(route, nativeIdentity);
+    this._routeHeartbeatSpecs.set(specKey, {
+      cacheKey,
+      requiredRoute: route,
+      nativePackage: nativeIdentity?.package || null,
+      nativeVersion: nativeIdentity?.version || null,
+    });
     const now = this.now();
     const rejected = this._nativeVersionRejections.get(cacheKey);
     if (rejected && now - rejected.rejectedAt < NATIVE_VERSION_REJECTION_TTL_MS) {
@@ -190,11 +206,15 @@ export class PulseTokenManager {
     const cached = this._cache.get(cacheKey);
     if (!refresh && cached?.envelope && now < cached.refreshAt && now < cached.expiresAt) {
       assertExactRoute(cached.routes, route);
+      this.#scheduleRouteHeartbeat(specKey, cached);
       return cached.envelope;
     }
     const minted = await this.#mintPulse(cacheKey, rawKey, policy, route, nativeIdentity);
     const refreshed = this._cache.get(cacheKey);
-    if (refreshed) assertExactRoute(refreshed.routes, route);
+    if (refreshed) {
+      assertExactRoute(refreshed.routes, route);
+      this.#scheduleRouteHeartbeat(specKey, refreshed);
+    }
     return minted.envelope;
   }
 
@@ -267,6 +287,13 @@ export class PulseTokenManager {
     this._cache.clear();
     this._refreshes.clear();
     this._nativeVersionRejections.clear();
+    for (const timer of this._routeHeartbeatTimers.values()) clearTimeout(timer);
+    this._routeHeartbeatTimers.clear();
+    // Route requirements are non-secret process capabilities, not grants.
+    // Preserve them across an in-run credential rejection so the broad
+    // heartbeat recovery can mint fresh grants for the replacement key.
+    // A stopped broker has no owner to recover them and clears everything.
+    if (!this._heartbeatRunning) this._routeHeartbeatSpecs.clear();
     this.authManager.clearAuthenticationState?.();
   }
 
@@ -285,6 +312,7 @@ export class PulseTokenManager {
     if (!this._heartbeatRunning) return;
     try {
       await this.getPulseToken({ refresh: true });
+      await this.#restoreRouteHeartbeats();
     } catch {
       if (!this._heartbeatRunning) return;
       this._heartbeatTimer = setTimeout(() => {
@@ -292,6 +320,64 @@ export class PulseTokenManager {
         void this.#refreshHeartbeat();
       }, 5_000);
       this._heartbeatTimer.unref?.();
+    }
+  }
+
+  /** Keep route-scoped grants warm for synchronous native call sites. */
+  #scheduleRouteHeartbeat(specKey, entry) {
+    if (!this._heartbeatRunning || !this._routeHeartbeatSpecs.has(specKey)) return;
+    const existing = this._routeHeartbeatTimers.get(specKey);
+    if (existing) clearTimeout(existing);
+    const delay = Math.max(250, entry.refreshAt - this.now());
+    const timer = setTimeout(() => {
+      this._routeHeartbeatTimers.delete(specKey);
+      void this.#refreshRouteHeartbeat(specKey);
+    }, delay);
+    timer.unref?.();
+    this._routeHeartbeatTimers.set(specKey, timer);
+  }
+
+  async #refreshRouteHeartbeat(specKey) {
+    if (!this._heartbeatRunning) return;
+    const spec = this._routeHeartbeatSpecs.get(specKey);
+    if (!spec) return;
+    try {
+      await this.getPulseEnvelope({
+        refresh: true,
+        requiredRoute: spec.requiredRoute,
+        nativePackage: spec.nativePackage,
+        nativeVersion: spec.nativeVersion,
+      });
+    } catch (error) {
+      if (!this._heartbeatRunning) return;
+      if (error?.code === "POSSE_PULSE_NATIVE_VERSION_UNSUPPORTED") {
+        this._routeHeartbeatSpecs.delete(specKey);
+        return;
+      }
+      const timer = setTimeout(() => {
+        this._routeHeartbeatTimers.delete(specKey);
+        void this.#refreshRouteHeartbeat(specKey);
+      }, 5_000);
+      timer.unref?.();
+      this._routeHeartbeatTimers.set(specKey, timer);
+    }
+  }
+
+  async #restoreRouteHeartbeats() {
+    if (!this._heartbeatRunning || this._routeHeartbeatSpecs.size === 0) return;
+    const specs = [...this._routeHeartbeatSpecs.values()];
+    for (const spec of specs) {
+      const cached = this._cache.get(spec.cacheKey);
+      if (cached?.envelope && this.now() < cached.refreshAt && this.now() < cached.expiresAt) {
+        this.#scheduleRouteHeartbeat(routeHeartbeatSpecKey(spec.requiredRoute, normalizedNativeIdentity(spec.nativePackage, spec.nativeVersion)), cached);
+        continue;
+      }
+      await this.getPulseEnvelope({
+        refresh: true,
+        requiredRoute: spec.requiredRoute,
+        nativePackage: spec.nativePackage,
+        nativeVersion: spec.nativeVersion,
+      });
     }
   }
 
@@ -589,6 +675,10 @@ function normalizedNativeIdentity(nativePackage, nativeVersion) {
     );
   }
   return Object.freeze({ package: packageName, version });
+}
+
+function routeHeartbeatSpecKey(route, nativeIdentity) {
+  return `${String(route || "").trim()}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`;
 }
 
 function normalizedRoutes(value) {

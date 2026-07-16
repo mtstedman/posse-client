@@ -19,6 +19,7 @@ import {
 if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
   nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
 }
+nativeBinaries.installWorkerRuntime(workerData?.nativeRuntime);
 
 /**
  * @param {Record<string, unknown>} message

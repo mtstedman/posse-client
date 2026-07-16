@@ -1273,6 +1273,7 @@ export async function callProvider(promptText, {
           attemptId,
           exitCode: code,
           stderr,
+          attachProof: stats.mcpAttachProof,
         });
       } catch { /* telemetry only */ }
 
