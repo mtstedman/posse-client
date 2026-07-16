@@ -41,6 +41,7 @@ import {
   formatPosseUpdateAvailableWarning,
 } from "../functions/update-command.js";
 import { createRunWrapUpTracker } from "../functions/review-session.js";
+import { BossyLocalStream } from "../../bridge/classes/BossyLocalStream.js";
 
 const OPEN_WORK_ITEM_STATUSES = Object.freeze(
   WORK_ITEM_STATUSES.filter((status) => !TERMINAL_WORK_ITEM_STATUSES.includes(status)),
@@ -74,6 +75,7 @@ export class RunSession {
     this._removeRunSignalHandlers = null;
     this._stopRunDisplaySnapshots = null;
     this._cleanupRunAtlas = null;
+    this._bossyLocalStream = null;
     this._processResourceDisposal = null;
   }
 
@@ -99,6 +101,9 @@ export class RunSession {
     try { removeSignalHandlers?.(); } catch { /* best effort */ }
     const scheduler = this._activeScheduler;
     try { this.#stopScheduler(scheduler); } catch { /* best effort */ }
+    const bossyLocalStream = this._bossyLocalStream;
+    this._bossyLocalStream = null;
+    try { await bossyLocalStream?.close?.(); } catch { /* best effort */ }
     const stopDisplaySnapshots = this._stopRunDisplaySnapshots;
     this._stopRunDisplaySnapshots = null;
     try { stopDisplaySnapshots?.(); } catch { /* best effort */ }
@@ -2309,6 +2314,21 @@ export class RunSession {
       console.log(`  ${C.red}Scheduler boot aborted — another instance may be running or lock is held.${C.reset}\n`);
     }
     return;
+  }
+
+  // Same-device telemetry is a raw repo-scoped socket, independent of the
+  // phone/web bridge. Failure is observational only: Bossy keeps reading the
+  // durable SQLite ledger and this run continues normally.
+  try {
+    const bossyLocalStream = typeof this.createBossyLocalStream === "function"
+      ? this.createBossyLocalStream({ projectDir: PROJECT_DIR })
+      : new BossyLocalStream({ projectDir: PROJECT_DIR });
+    await bossyLocalStream.start();
+    this._bossyLocalStream = bossyLocalStream;
+  } catch (err) {
+    log?.warn?.("bridge", "Bossy local stream unavailable", {
+      error: err?.message || String(err),
+    });
   }
 
   // Let the top-level provider warmups settle in the BACKGROUND — they must

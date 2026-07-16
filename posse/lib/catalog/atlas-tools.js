@@ -217,7 +217,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "fetch_ref": {
     type: "function",
     name: "atlas_fetch_ref",
-    description: "Citation. Fetch one or many visible hash-store citation refs from the current agent scope or its parent scopes.",
+    description: "Fetch one or more opaque refs from the current agent scope. Returned structured data may contain an immediate next-page ref. Follow that ref only when deeper results are needed; do not infer payload type from the ref or route it through the tool that originally produced it.",
     parameters: {
       type: "object",
       properties: {
@@ -613,7 +613,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.scope": {
     type: "function",
     name: "atlas_tree_scope",
-    description: "Prefetch-only task scoping. The handoff runs this with the full task text and keeps ranked candidates 1-10 inline; when more exist, nextCandidateFiles contains a universal ref for ranks 11-20. Fetching that ref reveals the next ranked page through the same field. Agents should use tree.expand (seed expansion), tree.branch, and symbol tools instead.",
+    description: "Returns the ten highest-ranked candidate files inline. When additional candidates exist, nextCandidateFiles is an opaque fetch_ref value for the next ranked page. Fetch pages sequentially and only when the visible high-value candidates are insufficient.",
     parameters: {
       type: "object",
       properties: {
@@ -709,7 +709,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_get_skeleton",
-    description: "Iris Rung 2 (~300 tokens). Fetch a deterministic code skeleton for a file or symbol without full raw bodies.",
+    description: "Structural outline for one uncovered file or symbol. Do not call for a file already covered by a successful code.survey unless the survey explicitly omitted the required structure.",
     parameters: {
       type: "object",
       properties: {
@@ -724,7 +724,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Best first content call for work that covers an AREA — audits, \"every X under Y\", or orienting in several files at once. ONE call returns per-file skeletons plus a call map for a directory or file list, replacing per-file skeleton/lens/window loops and grep-digging, and satisfies card+skeleton evidence for every file it covers. For exact file/import/fan-in inventories where code bodies are not needed, use code.structure first. Without symbols: file-level wiring map (which file calls which, counts, one representative site each). With symbols: symbol-level dig restricted to those names' neighborhoods, including unresolved name references (string dispatch grep parity). Boundary rows always show which outside symbols reach in (the doors).",
+    description: "Best first content call for a multi-file area. One call returns per-file skeleton evidence plus a call map and satisfies card-and-skeleton evidence for every covered file. Follow with a per-file tool only for a named evidence gap.",
     parameters: {
       type: "object",
       properties: {
@@ -740,7 +740,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.structure": {
     type: "function",
     name: "atlas_code_structure",
-    description: "Deterministic exact inventory for structure-map, import graph, file fan-in/fan-out, and enumeration questions. Reads indexed symbol/edge rows only: no semantic search, no raw bodies, no per-file loop. Use before code.survey when the deliverable is counts, file-to-file edges, duplicate import/fan-in reasoning, or an exact list of files/symbols under a directory. Returns pathAmbiguity and negativeEvidence when same-name stubs, tests, docs, scripts, or other decoys are relevant.",
+    description: "Exact indexed inventory for files, symbols, imports, and fan-in/fan-out. Use instead of content tools when bodies are not needed.",
     parameters: {
       type: "object",
       properties: {
@@ -771,7 +771,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_get_hot_path",
-    description: "Iris Rung 3 (~600 tokens). Fetch identifier-focused code lines with small context windows for an ATLAS symbol or a repo-relative file. AST usages match first; identifiers that only appear inside strings/comments (e.g. dispatch like $action === 'create') return as matchKind \"text\" via identifiersFoundInText, so identifiersMissing means the identifier appears nowhere in the target.",
+    description: "Identifier-focused excerpts for one named unresolved usage or branch. Do not use as a generic follow-up to code.survey or code.skeleton.",
     parameters: {
       type: "object",
       properties: {
@@ -787,7 +787,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_need_window",
-    description: "Iris Rung 4 (~2000 tokens). Request a policy-gated raw code window for one ATLAS symbol or file only after card, skeleton, or hot-path evidence is insufficient. Prefer expectedLines as a JSON number and identifiersToFind as a JSON array; legacy strings are normalized.",
+    description: "Raw code for an exact unresolved guard, ordering rule, or surrounding-text requirement. The request reason must identify what prior evidence could not establish.",
     parameters: {
       type: "object",
       properties: {
