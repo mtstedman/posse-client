@@ -296,6 +296,7 @@ export async function callProvider(promptText, {
   _remoteIssuedPolicy = null,
   _remoteToolSurface = null,
   mcpGate = null,
+  nativeColdBoot = false,
 } = {}) {
   const resolvedClaude = await getClaudeCommandAsync();
   const providerPathsForAtlas = normalizeProviderPaths({ cwd, projectDir });
@@ -370,6 +371,14 @@ export async function callProvider(promptText, {
     args.push("--setting-sources", "local");
     args.push("--disable-slash-commands");
     args.push("--strict-mcp-config");
+    if (nativeColdBoot) {
+      // Benchmark/native controls must be a genuinely fresh Claude Code
+      // agent: no CLAUDE.md, skills, plugins, hooks, configured MCP servers,
+      // prior sessions, or persisted session state. Safe mode retains Claude's
+      // built-in tools and auth/model selection.
+      args.push("--safe-mode");
+      args.push("--no-session-persistence");
+    }
 
     const providerPaths = normalizeProviderPaths({ cwd, projectDir });
     const mcpWorkspaceCwd = mcpCwd ? path.resolve(mcpCwd) : providerPaths.cwd;
@@ -563,7 +572,16 @@ export async function callProvider(promptText, {
     //   high effort OR strong tier  → [ultrathink] deep reasoning prefix
     //   medium effort (default)     → no prefix (model's natural depth)
     //   low effort                  → conciseness prefix (skip analysis, just do it)
-    const contractBlock = renderExecutionContractBlock(executionContract);
+    const contractBlock = nativeColdBoot
+      ? [
+          "Execution contract:",
+          "- This is a read-only native Claude Code research session.",
+          "- Available tools: Read, Glob, Grep.",
+          "- Use those native tools to inspect the repository before answering.",
+          "- Do not use MCP, Atlas, prior sessions, or ambient memory.",
+          "- Do not modify files.",
+        ].join("\n")
+      : renderExecutionContractBlock(executionContract);
     const stablePromptText = omitSessionPreamble
       ? ""
       : [contractBlock, stableContext].filter(Boolean).join("\n\n");
@@ -1251,7 +1269,10 @@ export async function callProvider(promptText, {
         maxOutputTokens: outputTokenLimit,
         outputTruncated: false,
         outputLimitReason: null,
-        toolUses: toolUses.length > 0 ? toolUses : null,
+        // The stream parser was active even when no tool_use blocks occurred.
+        // Preserve [] as a known zero; null is reserved for execution modes
+        // where tool telemetry is genuinely unavailable.
+        toolUses,
         atlasMethod: atlasMethodForStats,
         sessionHandle: latestSessionHandle || null,
         priorSessionHandle: priorSessionHandle || null,

@@ -35,6 +35,7 @@ import {
 import { persistentMcpOwner } from "./PersistentMcpOwner.js";
 import { McpServer } from "./McpServer.js";
 import { McpGate } from "./McpGate.js";
+import { withoutAtlasMemoryTools } from "../../policies/functions/memory-mode.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -800,7 +801,10 @@ export class McpServerConfig {
         "did not include a remote-issued agent tool contract",
       );
     }
-    const narrowedBootPayload = narrowBootConfigToRemoteSurface(bootPayload, remoteResolution.surface);
+    const issuedSurface = opts.memoryEnabled === false
+      ? withoutAtlasMemoryTools(remoteResolution.surface)
+      : remoteResolution.surface;
+    const narrowedBootPayload = narrowBootConfigToRemoteSurface(bootPayload, issuedSurface);
     if (!narrowedBootPayload.remoteToolSurface) {
       throw requiredRemoteToolSurfaceError(role, null, "returned an invalid or mismatched agent tool contract");
     }

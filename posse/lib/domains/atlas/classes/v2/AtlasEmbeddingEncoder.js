@@ -78,7 +78,7 @@ export class AtlasEmbeddingEncoder {
   }
 
   /** @param {string[]} texts @param {"query" | "document"} inputKind @param {AbortSignal} [signal] @param {(event: Record<string, unknown>) => void} [onProgress] */
-  async #encode(texts, inputKind, signal, onProgress) {
+  async #encode(texts, inputKind, signal, onProgress = null) {
     if (!Array.isArray(texts)) throw new TypeError("AtlasEmbeddingEncoder: texts must be an array");
     if (texts.length === 0) return [];
     const data = await this.#invoke(ML_EMBED_METHOD, {
@@ -92,7 +92,7 @@ export class AtlasEmbeddingEncoder {
       signal,
       timeoutMs: 300_000,
       idempotent: true,
-      onProgress,
+      ...(typeof onProgress === "function" ? { onProgress } : {}),
     });
     return unpackNativeEmbeddingVectors(data, texts.length, this.dim, "Jina");
   }

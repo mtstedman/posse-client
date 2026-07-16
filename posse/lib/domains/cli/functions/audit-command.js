@@ -10,7 +10,7 @@ import {
   listWorkItems,
 } from "../../queue/functions/index.js";
 import { getObservationsByJob } from "../../observability/functions/observations.js";
-import { dirSizeBytes, worktreeRoot } from "../../git/functions/worktree.js";
+import { dirSizeBytes, worktreeRootAsync } from "../../git/functions/worktree.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { ACTIVE_LEASE_STATUSES, COMPLETED_OUTCOME_JOB_STATUSES } from "../../../catalog/job.js";
 
@@ -52,9 +52,9 @@ function auditJobsForSelection(selector) {
     .slice(-8);
 }
 
-function runWorktreeAudit({ projectDir, targetBranch }) {
+async function runWorktreeAudit({ projectDir, targetBranch }) {
   const wis = new Map(listWorkItems().map((wi) => [wi.id, wi]));
-  const wtRoot = worktreeRoot(projectDir);
+  const wtRoot = await worktreeRootAsync(projectDir);
   if (!fs.existsSync(wtRoot)) {
     console.log(`\n  ${C.dim}No worktrees found under ${wtRoot}.${C.reset}\n`);
     return;
@@ -102,10 +102,10 @@ function runWorktreeAudit({ projectDir, targetBranch }) {
   console.log("");
 }
 
-export function runAuditCommand(args = [], { projectDir = process.cwd(), targetBranch = "main" } = {}) {
+export async function runAuditCommand(args = [], { projectDir = process.cwd(), targetBranch = "main" } = {}) {
   const auditArgs = args.filter(Boolean).map((arg) => String(arg).toLowerCase());
   if (auditArgs[0] === "worktrees") {
-    runWorktreeAudit({ projectDir, targetBranch });
+    await runWorktreeAudit({ projectDir, targetBranch });
     return;
   }
 

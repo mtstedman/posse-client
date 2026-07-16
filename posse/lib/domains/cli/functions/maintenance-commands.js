@@ -134,7 +134,7 @@ export function createMaintenanceCommands({
 
   async function prune(argv = process.argv) {
     if (refuseIfSchedulerLive("prune")) return;
-    const wtBase = worktreeRoot(projectDir);
+    const wtBase = await resolveWorktreeRoot(projectDir);
     const dryRun = argv.includes("--dry-run");
     const yes = argv.includes("--yes") || argv.includes("-y");
 

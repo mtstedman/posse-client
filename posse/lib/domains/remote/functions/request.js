@@ -3,6 +3,7 @@ import {
   HASH_REF_LANES,
   normalizeHashRefAlias,
 } from "../../../catalog/hash-store.js";
+import { atlasMemoryEnabled } from "../../../shared/policies/functions/memory-mode.js";
 
 function normalizedPath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
@@ -428,6 +429,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
   maxContextChars = null,
   includeFinalPrompt = true,
 } = {}) {
+  const memoryEnabled = atlasMemoryEnabled() && packet?.memory_mode !== "off";
   const role = packet?.recipient || "dev";
   const provider = providerName || packet?.execution_provider || packet?.provider || "claude";
   const atlasSummary = sanitizeAtlasSummary(packet?.atlas?.summary);
@@ -473,9 +475,9 @@ export function buildRemoteCompileRequest(packet, instructions, {
       project_summary: packet?.project_context || null,
       atlas_summary: atlasSummary,
       step0_context: packet?.step0_context || null,
-      memory_prefetch: memoryPrefetchForRemote(packet),
+      memory_prefetch: memoryEnabled ? memoryPrefetchForRemote(packet) : null,
       database_prefetch: databasePrefetchForRemote(packet),
-      memory_surface: packet?.memory_surface || null,
+      memory_surface: memoryEnabled ? (packet?.memory_surface || null) : null,
       hash_ref_packet: compactHashRefPacketForRemote(packet),
       file_snippets: readOnlyFileSnippets(packet),
       insights: Array.isArray(packet?.run_insights) ? packet.run_insights.map(insightForRemote) : [],
@@ -491,6 +493,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
       include_final_prompt: includeFinalPrompt,
       privacy_mode: "full_context",
       embed_extra: false,
+      memory_mode: memoryEnabled ? "on" : "off",
     },
     extra: {
       local_prompt_contract: "remote_skeleton_hash_refs",
@@ -499,6 +502,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
       ...(packet?.research_budget ? { research_budget: packet.research_budget } : {}),
       ...(packet?.fanout_context ? { fanout: packet.fanout_context } : {}),
       ...(shellPolicyHint ? { shell_policy_hint: shellPolicyHint } : {}),
+      memory_mode: memoryEnabled ? "on" : "off",
     },
   };
 }

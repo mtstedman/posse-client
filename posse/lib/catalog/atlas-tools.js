@@ -613,7 +613,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.scope": {
     type: "function",
     name: "atlas_tree_scope",
-    description: "Prefetch-only task scoping. The handoff runs this with the full task text; agents should use tree.expand (seed expansion), tree.branch, and symbol tools instead.",
+    description: "Prefetch-only task scoping. The handoff runs this with the full task text and keeps ranked candidates 1-10 inline; when more exist, nextCandidateFiles contains a universal ref for ranks 11-20. Fetching that ref reveals the next ranked page through the same field. Agents should use tree.expand (seed expansion), tree.branch, and symbol tools instead.",
     parameters: {
       type: "object",
       properties: {

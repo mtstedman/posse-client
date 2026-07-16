@@ -161,7 +161,7 @@ function readUsageRows(db, { repoId, since, limit }) {
   return db.prepare(
     `SELECT * FROM usage_events
      ${where}
-     ORDER BY ts DESC
+     ORDER BY ts DESC, rowid DESC
      LIMIT ?`,
   ).all(...params);
 }

@@ -520,10 +520,25 @@ export async function stageScipBatches({
     posseRoot,
     languages: config?.scipLanguages ?? config?.atlas_scip_languages ?? null,
   });
+  const batchPlans = [];
+  const fallbackPlans = [];
+  for (const plan of lookup.plans) {
+    if (await batchPlanEligible(root, plan)) batchPlans.push(plan);
+    else fallbackPlans.push(plan);
+  }
+  const fallback = fallbackPlans.length > 0
+    ? await ensureScipStaged({
+        repoRoot: root, scipDir: dir, mode: normalizedMode,
+        config: { ...config, scipLanguages: fallbackPlans.map((plan) => plan.indexerId).filter(Boolean) },
+        timeoutMs, posseRoot, onProgress,
+      })
+    : { files: [], results: [] };
+  const fallbackOutputKeys = new Set(fallbackPlans.map((plan) => normalizedFileKey(plan.outputPath)));
+  const fallbackFiles = (fallback.files || []).filter((file) => fallbackOutputKeys.has(normalizedFileKey(file)));
   const manifest = await buildScipBatchManifest({
     repoRoot: root,
     paths,
-    plans: lookup.plans,
+    plans: batchPlans,
     maxFiles: config?.atlasScipBatchMaxFiles ?? config?.atlas_scip_batch_max_files,
     maxSourceBytes: config?.atlasScipBatchMaxSourceBytes ?? config?.atlas_scip_batch_max_source_bytes,
   });
@@ -559,12 +574,15 @@ export async function stageScipBatches({
     })),
   };
   await writeBatchSessionManifest(sessionManifestPath, state);
+  const fallbackExtensions = new Set(fallbackPlans.flatMap((plan) => plan.sourceExtensions || []).map((value) => String(value).toLowerCase()));
   for (const unavailable of manifest.unavailable) {
+    if (unavailable.reason === "batch_indexer_unavailable"
+      && fallbackExtensions.has(path.extname(unavailable.repo_rel_path).toLowerCase())) continue;
     await notifyFileUnavailable(onFileUnavailable, unavailable);
   }
 
-  const files = [];
-  const results = [];
+  const files = [...fallbackFiles];
+  const results = (fallback.results || []).map((row) => ({ ...row, fallbackWholeProject: true }));
   const inFlight = [];
   const acknowledgeOldest = async () => {
     const pending = inFlight.shift();
@@ -576,6 +594,19 @@ export async function stageScipBatches({
   };
 
   try {
+    for (const file of fallbackFiles) {
+      const plan = fallbackPlans.find((candidate) => normalizedFileKey(candidate.outputPath) === normalizedFileKey(file));
+      await Promise.resolve(typeof onBatchReady === "function" ? onBatchReady(file, {
+        session_id: sessionId,
+        batch_ordinal: null,
+        batch_count: manifest.batchCount,
+        repo_rel_paths: pathsForPlan(paths, plan),
+        language: plan?.indexerId || null,
+        indexer: plan?.label || null,
+        source_languages: sourceLanguagesForPlan(plan || {}),
+        fallback_whole_project: true,
+      }) : undefined);
+    }
     for (const batch of manifest.batches) {
       while (inFlight.length >= maxInFlight) await acknowledgeOldest();
       emit(onProgress, `staging SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount} (${batch.documentsExpected} documents)`, {
@@ -696,7 +727,7 @@ async function stageScipBatch({ root, sessionDir, batch, onProgress }) {
         return { ok: false, outputPath, error: `source changed while staging ${document.repoRelPath}` };
       }
     }
-    await writeBatchProjectMetadata(viewRoot, batch);
+    await writeBatchProjectMetadata(root, viewRoot, batch);
     const rewritten = planWithOutputPath(batch.plan, outputPath);
     if (!rewritten.replaced) {
       return { ok: false, outputPath, error: `SCIP batch plan does not reference ${batch.plan.outputPath}` };
@@ -721,7 +752,7 @@ async function stageScipBatch({ root, sessionDir, batch, onProgress }) {
   }
 }
 
-async function writeBatchProjectMetadata(viewRoot, batch) {
+async function writeBatchProjectMetadata(root, viewRoot, batch) {
   if (batch.plan.indexerId === "typescript") {
     await fs.promises.writeFile(path.join(viewRoot, "tsconfig.json"), JSON.stringify({
       compilerOptions: { allowJs: true },
@@ -734,10 +765,34 @@ async function writeBatchProjectMetadata(viewRoot, batch) {
     await fs.promises.writeFile(path.join(viewRoot, "composer.json"), JSON.stringify({
       autoload: { classmap: batch.paths },
     }), "utf8");
+    const vendor = path.join(root, "vendor");
+    if (await fileExists(path.join(vendor, "autoload.php"))) {
+      await fs.promises.symlink(vendor, path.join(viewRoot, "vendor"), process.platform === "win32" ? "junction" : "dir");
+    }
+    return;
+  }
+  if (batch.plan.indexerId === "python") {
+    for (const name of ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"]) {
+      const source = path.join(root, name);
+      if (!await fileExists(source)) continue;
+      await fs.promises.copyFile(source, path.join(viewRoot, name));
+    }
   }
   // scip-python indexes the isolated project view with its ordinary `index`
   // command. Deliberately do not add or invoke --target-only: it emits empty
   // relative paths and breaks safe merge/parity.
+}
+
+async function batchPlanEligible(root, plan) {
+  const indexer = String(plan?.indexerId || "");
+  if (!SCIP_BATCH_STAGE_INDEXERS.has(indexer)) return false;
+  if (indexer === "php" && !await fileExists(path.join(root, "vendor", "autoload.php"))) return false;
+  return true;
+}
+
+function pathsForPlan(paths, plan) {
+  const extensions = new Set((plan?.sourceExtensions || []).map((value) => String(value).toLowerCase()));
+  return uniqueBytewiseRepoPaths(paths).filter((repoRelPath) => extensions.has(path.extname(repoRelPath).toLowerCase()));
 }
 
 async function writeBatchSessionManifest(filePath, state) {

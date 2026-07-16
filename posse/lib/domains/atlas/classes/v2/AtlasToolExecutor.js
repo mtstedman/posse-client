@@ -15,6 +15,7 @@ import {
   runAtlasNativeMethodAsync,
 } from "../../functions/v2/native/invoke.js";
 import { buildNativeVectorBridge } from "../../functions/v2/embeddings/native-vector-bridge.js";
+import { grepIndexedSource } from "../../functions/v2/retrieval/nonindexed-grep.js";
 import {
   applyPathQualityPriors,
   pathQualityPriorsEnabled,
@@ -762,9 +763,17 @@ export class AtlasToolExecutor {
           throw new Error(`ATLAS ${request.action} requires a resolved native read context`);
         }
         const timeoutMs = request.waitMs || this.#waitMs;
-        const vectorBridge = request.action === "symbol.search" && request.args?.semantic === true
+        const vectorQuery = request.action === "symbol.search"
+          ? String(request.args?.query || "")
+          : request.action === "tree.scope"
+            ? String(request.args?.taskText || "")
+            : "";
+        const vectorBridge = vectorQuery && (
+          (request.action === "symbol.search" && request.args?.semantic === true)
+          || request.action === "tree.scope"
+        )
           ? await this.#nativeVectorBridge({
-            query: String(request.args?.query || ""),
+            query: vectorQuery,
             limit: Number(request.args?.limit || 50),
             candidateLimit: request.args?.vectorCandidateLimit == null
               ? undefined
@@ -778,7 +787,9 @@ export class AtlasToolExecutor {
             config: readPayload.config || {},
           })
           : null;
-        const nativeArgs = nativeSymbolSearchArgs(request.action, request.args || {});
+        const nativeArgs = request.action === "tree.scope"
+          ? treeScopeDiscoveryArgs(request.args || {}, readPayload.readRoot)
+          : nativeSymbolSearchArgs(request.action, request.args || {});
         const envelope = await this.#nativeToolCall({
           contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
           action: request.action,
@@ -946,3 +957,31 @@ export class AtlasToolExecutor {
     }
   }
 }
+
+export function treeScopeDiscoveryArgs(args = {}, repoRoot = "") {
+  const taskText = typeof args.taskText === "string" ? args.taskText.trim() : "";
+  if (!taskText || !repoRoot) return args;
+  const wordTerms = [...new Set(
+    taskText.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || [],
+  )].filter((term) => !TREE_SCOPE_TEXT_STOP_WORDS.has(term));
+  const terms = [taskText, ...wordTerms].slice(0, 12);
+  if (terms.length === 0) return args;
+  const grep = grepIndexedSource({ repoRoot, terms, maxTotal: 20 });
+  const discoveredPaths = [];
+  const seen = new Set();
+  for (const match of Array.isArray(grep?.matches) ? grep.matches : []) {
+    const path = String(match?.path || "");
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    discoveredPaths.push(path);
+  }
+  return discoveredPaths.length > 0 ? { ...args, discoveredPaths } : args;
+}
+
+const TREE_SCOPE_TEXT_STOP_WORDS = new Set([
+  "about", "after", "again", "against", "being", "between", "could",
+  "during", "every", "first", "from", "have", "into", "only", "other",
+  "should", "than", "that", "their", "them", "then", "there", "these",
+  "they", "this", "those", "through", "under", "until", "when", "where",
+  "which", "while", "with", "without", "would",
+]);

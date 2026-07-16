@@ -1,0 +1,5 @@
+# ATLAS corpus fixtures are hashed byte-for-byte by the native indexer and the
+# results are compared against committed snapshots. Pin them to LF on every
+# platform so a CRLF working-tree checkout (Windows autocrlf) doesn't shift
+# content hashes and byte offsets out from under the snapshots.
+posse/test/fixtures/atlas-v2-corpus/** text eol=lf

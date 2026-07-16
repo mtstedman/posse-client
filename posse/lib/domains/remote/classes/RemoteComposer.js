@@ -11,6 +11,7 @@ import {
 } from "../functions/mode.js";
 import { getSetting } from "../../queue/functions/settings.js";
 import { getWorkItem } from "../../queue/functions/index.js";
+import { atlasMemoryEnabled } from "../../../shared/policies/functions/memory-mode.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import {
@@ -26,6 +27,32 @@ function joinPromptParts(parts = []) {
     .map((part) => String(part || "").trim())
     .filter(Boolean)
     .join("\n\n");
+}
+
+export function withoutRemoteMemoryContract(value) {
+  if (typeof value !== "string" || !value) return value;
+  return value
+    .replace(
+      /\n={20,}\nMEMORY CURATION\n={20,}\n[\s\S]*?(?=\n={20,}\nROLE BOUNDARIES)/u,
+      "",
+    )
+    .replace(
+      /\n\s*"memories"\s*:\s*\[[\s\S]*?\n\s*"planner_file_priorities"\s*:/u,
+      '\n  "planner_file_priorities":',
+    )
+    .replace(
+      /\n {2}- memories: REQUIRED array[\s\S]*?(?=\n {2}- planner_file_priorities:)/u,
+      "",
+    );
+}
+
+function withoutRemoteMemoryContractFields(response) {
+  if (!response || typeof response !== "object") return response;
+  const out = { ...response };
+  for (const field of ["system_prompt", "stable_context", "user_prompt", "final_prompt"]) {
+    if (typeof out[field] === "string") out[field] = withoutRemoteMemoryContract(out[field]);
+  }
+  return out;
 }
 
 function resolveFallbackReadBudget(policyFallbackReads, existingFallbackReads) {
@@ -78,7 +105,9 @@ export class RemoteComposer {
       includeFinalPrompt: true,
     });
     const started = this.now();
-    const response = await this.client.compile(request);
+    const compiledResponse = await this.client.compile(request);
+    const response = atlasMemoryEnabled() && request?.options?.memory_mode !== "off"
+      ? compiledResponse : withoutRemoteMemoryContractFields(compiledResponse);
     const latencyMs = Math.max(0, this.now() - started);
     const promptVersion = normalizePromptVersion(response?.prompt_version);
     let bundlePromptVersion = getPromptBundleVersion();

@@ -7,6 +7,7 @@ import fs from "fs";
 import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
+import { atlasMemoryEnabled } from "../../../../shared/policies/functions/memory-mode.js";
 import { BaseRole } from "../BaseRole.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import {
@@ -552,6 +553,7 @@ export class ResearcherRole extends BaseRole {
       prompt_profile: promptProfile,
       research_role_mode: roleMode,
       research_budget: researchBudget,
+      memory_mode: atlasMemoryEnabled() ? "on" : "off",
       fanout_context: roleMode === "child" || roleMode === "synth"
         ? {
             run_id: fanoutRunId,
@@ -757,7 +759,7 @@ export class ResearcherRole extends BaseRole {
     // primary/synthesis output represents the round.
     const memoryPayload = ctx.payload || parseJobPayload(job) || {};
     const isChildBranch = memoryPayload.role_mode === "child" || memoryPayload.fanout_shadow === true;
-    if (output && !isChildBranch) {
+    if (output && !isChildBranch && atlasMemoryEnabled()) {
       try {
         const persisted = await persistResearcherMemories({
           output,

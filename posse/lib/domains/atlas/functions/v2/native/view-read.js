@@ -24,6 +24,7 @@ const RESULT_BY_QUERY = Object.freeze({
   content_hash_for_path: "string",
   has_snapshot_content_hash: "boolean",
   indexed_paths: "paths",
+  indexed_paths_with_symbols: "paths",
   all_symbols: "symbols",
 });
 

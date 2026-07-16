@@ -23,6 +23,11 @@ import { ContextMeter } from "../../classes/ContextMeter.js";
 const DEFAULT_SURFACE_MIN_CHARS = 4000;
 const DEFAULT_MATERIALIZE_CHAR_CAP = CONTEXT_HASH_REF_MATERIALIZE_CHAR_CAP;
 const HASH_ADDER_BLOCKED_TOOLS = new Set(["fetch_ref"]);
+const TREE_SCOPE_INLINE_CANDIDATES = 10;
+const TREE_SCOPE_DEFERRED_PAGES = Object.freeze([
+  Object.freeze({ start: 10, end: 20 }),
+  Object.freeze({ start: 20, end: 40 }),
+]);
 
 function normalizeRef(value) {
   return normalizeHashRefAlias(value);
@@ -268,6 +273,93 @@ function contextForHashRefs(explicitContext = {}) {
 
 function hasHashRefScope(context = {}) {
   return context.attempt_id != null || context.job_id != null || context.work_item_id != null || context.agent_call_id != null;
+}
+
+/**
+ * Keep the highest-value tree.scope candidates in context while making the
+ * remainder available through the same fetch_ref path as every other value.
+ * If refs cannot be created, return the original result so no candidates are
+ * silently lost.
+ */
+export function compactTreeScopeResult(toolName, result, {
+  args = {},
+  context = {},
+  ownerScope = null,
+} = {}) {
+  if (String(toolName || "") !== "tree.scope" || typeof result !== "string") {
+    return { result, compacted: false };
+  }
+  const hashContext = contextForHashRefs(context);
+  if (!hasHashRefScope(hashContext)) return { result, compacted: false };
+
+  let envelope;
+  try {
+    envelope = JSON.parse(result);
+  } catch {
+    return { result, compacted: false };
+  }
+  const candidates = envelope?.data?.candidateFiles;
+  if (
+    !Array.isArray(candidates)
+    || candidates.length <= TREE_SCOPE_INLINE_CANDIDATES
+    || candidates.length > TREE_SCOPE_DEFERRED_PAGES.at(-1).end
+  ) {
+    return { result, compacted: false };
+  }
+
+  let nextPage = null;
+  try {
+    for (const page of [...TREE_SCOPE_DEFERRED_PAGES].reverse()) {
+      const pageCandidates = candidates.slice(page.start, page.end);
+      if (pageCandidates.length === 0) continue;
+      const rankStart = page.start + 1;
+      const rankEnd = page.start + pageCandidates.length;
+      const payloadText = JSON.stringify({
+        ok: true,
+        action: "tree.scope.candidates",
+        ranks: { start: rankStart, end: rankEnd },
+        candidateFiles: pageCandidates,
+        ...(nextPage ? { nextCandidateFiles: nextPage } : {}),
+      }, null, 2);
+      const surfaced = surfaceHashRefForContext(hashContext, {
+        entryKind: "materialized",
+        payloadText,
+        descriptor: {
+          kind: "tree_scope_candidate_page",
+          tool: "tree.scope",
+          args,
+          ranks: { start: rankStart, end: rankEnd },
+        },
+        recomputable: true,
+        objectType: "tree.scope.candidates",
+        source: "tool:tree.scope",
+        note: `ranked tree.scope candidates ${rankStart}-${rankEnd}`,
+        sizeChars: payloadText.length,
+        metadata: {
+          surfaced_by: "tree_scope_rank_compactor",
+          tool: "tree.scope",
+          rank_start: rankStart,
+          rank_end: rankEnd,
+          candidate_count: pageCandidates.length,
+        },
+      }, { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) });
+      if (!surfaced?.ok || !surfaced?.entry?.ref) return { result, compacted: false };
+      nextPage = {
+        ranks: `${rankStart}-${rankEnd}`,
+        count: pageCandidates.length,
+        ref: surfaced.entry.ref,
+      };
+    }
+  } catch (err) {
+    recordHashSurfaceFailure(hashContext, "tree.scope", result.length, err?.message || err);
+    return { result, compacted: false };
+  }
+  if (!nextPage) return { result, compacted: false };
+
+  envelope.data.candidateFiles = candidates.slice(0, TREE_SCOPE_INLINE_CANDIDATES);
+  envelope.data.nextCandidateFiles = nextPage;
+  envelope.data.candidateFilesTotal = candidates.length;
+  return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
 
 function shouldSurfaceHashRef(toolName, result, {

@@ -13,6 +13,7 @@ import {
   callAtlasMemoryAction,
 } from "../../../integrations/functions/atlas-memory.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
+import { atlasMemoryEnabled } from "../../../../shared/policies/functions/memory-mode.js";
 
 const KAIZEN_RUN_INSIGHTS_SURFACE_ENABLED = false;
 
@@ -69,6 +70,7 @@ function settingValue(settingReader, key) {
 function memorySurfaceEnabled({
   settingReader = getSetting,
 } = {}) {
+  if (!atlasMemoryEnabled()) return false;
   const configured = settingValue(settingReader, SETTING_KEYS.ATLAS_MEMORY_SURFACE) ?? "on";
   const raw = String(configured).trim().toLowerCase();
   if (["1", "true", "on", "yes"].includes(raw)) return true;

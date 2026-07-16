@@ -186,6 +186,7 @@ export const SETTINGS_GROUPS = Object.freeze([
       "atlas_live_index",
       "atlas_live_buffers",
       "atlas_memory_surface",
+      "atlas_memory_mode",
       "atlas_reindex_on_commit",
       "atlas_tool_gate_enabled",
       "atlas_boot_reindex_policy",

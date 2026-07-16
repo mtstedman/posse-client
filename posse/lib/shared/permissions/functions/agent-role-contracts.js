@@ -1,6 +1,7 @@
 // @ts-check
 
 import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
+import { atlasMemoryEnabled } from "../../policies/functions/memory-mode.js";
 
 const PROVIDER_ROLE_SET = new Set(PROVIDER_ROLE_NAMES);
 const WRITE_ROLES = new Set(["dev", "artificer"]);
@@ -30,5 +31,6 @@ export function resolveAgentRoleContract({ role, providerName = null } = {}) {
     atlasAvailable: true,
     atlasGateEnabled: true,
     disableSystemTools: false,
+    memoryEnabled: atlasMemoryEnabled(),
   });
 }

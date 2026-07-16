@@ -57,11 +57,6 @@ function tokenizeQuery(query) {
     .filter((token) => token.length >= 3 && !STOP_WORDS.has(token));
 }
 
-function shouldSkipPath(fullPath, skipDirs) {
-  const normalized = normalizePath(fullPath);
-  return Array.from(skipDirs).some((entry) => normalized.includes(`/${entry}/`) || normalized.endsWith(`/${entry}`));
-}
-
 function buildPathScore(relPath, queryTokens, missingHints) {
   const lower = relPath.toLowerCase();
   let score = 0;
@@ -171,7 +166,6 @@ function gatherCandidateFiles(rootDir, includeExt, skipDirs, maxCandidates) {
       if (!entry.isFile()) continue;
       const ext = path.extname(entry.name).toLowerCase();
       if (!includeExt.has(ext)) continue;
-      if (shouldSkipPath(full, skipDirs)) continue;
       out.push(full);
     }
   }

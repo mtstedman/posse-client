@@ -25,6 +25,17 @@ export const VOLATILE_FIELDS = Object.freeze(
     "spilloverHandle",
     // Etags derived from content; the underlying content drives equality.
     "etag",
+    // Usage token estimates: derived from serialized response byte sizes,
+    // which include volatile content (paths, timings, queue state) and so
+    // drift run-to-run even on one machine.
+    "atlasTokens",
+    "rawEquivalent",
+    "savedTokens",
+    "totalAtlasTokens",
+    "totalRawEquivalent",
+    "totalSavedTokens",
+    "overallSavingsPercent",
+    "savingsPercent",
     // Timings.
     "durationMs",
     "duration_ms",
