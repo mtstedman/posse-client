@@ -144,6 +144,10 @@ export async function symbolSearch({
         filterToolingPaths: /** @type {any} */ (params).filterToolingPaths,
         genericSymbolFrequencyThreshold: /** @type {any} */ (params).genericSymbolFrequencyThreshold,
         hierarchicalFileLimit: /** @type {any} */ (params).hierarchicalFileLimit,
+        withinFileSymbolRerank: /** @type {any} */ (params).withinFileSymbolRerank,
+        fileLexicalOverlapWeight: /** @type {any} */ (params).fileLexicalOverlapWeight,
+        monorepoPackagePriors: /** @type {any} */ (params).monorepoPackagePriors,
+        semanticQueryNormalization: /** @type {any} */ (params).semanticQueryNormalization,
         planner,
       },
     });
@@ -181,6 +185,10 @@ export async function symbolSearch({
       filterToolingPaths: /** @type {any} */ (params).filterToolingPaths,
       genericSymbolFrequencyThreshold: /** @type {any} */ (params).genericSymbolFrequencyThreshold,
       hierarchicalFileLimit: /** @type {any} */ (params).hierarchicalFileLimit,
+      withinFileSymbolRerank: /** @type {any} */ (params).withinFileSymbolRerank,
+      fileLexicalOverlapWeight: /** @type {any} */ (params).fileLexicalOverlapWeight,
+      monorepoPackagePriors: /** @type {any} */ (params).monorepoPackagePriors,
+      semanticQueryNormalization: /** @type {any} */ (params).semanticQueryNormalization,
       planner,
     },
   });

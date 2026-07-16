@@ -319,6 +319,10 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     filterToolingPaths: b(),
     genericSymbolFrequencyThreshold: i({ minimum: 2, maximum: 100 }),
     hierarchicalFileLimit: i({ minimum: 1, maximum: 40 }),
+    withinFileSymbolRerank: b(),
+    fileLexicalOverlapWeight: n({ minimum: 0, maximum: 1 }),
+    monorepoPackagePriors: b(),
+    semanticQueryNormalization: b(),
   }, ["query"]),
   "symbol.card": o({
     symbolId: symbolId(),

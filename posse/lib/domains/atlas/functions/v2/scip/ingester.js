@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeScipIndex } from "./decode.js";
-import { scipIndexToRowsNative } from "./native-rows.js";
+import { scipIndexToRowsBatchedNative, scipIndexToRowsNative } from "./native-rows.js";
 import { ATLAS_SCIP_ROWS_SPEC_VERSION, normalizeLangFromScip } from "./to-rows.js";
 import { sha256Hex } from "../hash.js";
 import { normalizeRepoPath, repoRelativeFromAbsolute } from "../paths.js";
@@ -261,7 +261,13 @@ export async function ingestScipFile({
     elapsed_ms: Date.now() - ingestStartedAtMs,
   });
   const convertStartedAtMs = Date.now();
-  const nativeRows = await scipIndexToRowsNative({ index });
+  const intakeMode = String(process.env.POSSE_ATLAS_SCIP_INTAKE_MODE || "batched").trim().toLowerCase();
+  const nativeRows = intakeMode === "batched"
+    ? await scipIndexToRowsBatchedNative({
+        index,
+        batchSize: Number(process.env.POSSE_ATLAS_SCIP_BATCH_SIZE || 32),
+      })
+    : await scipIndexToRowsNative({ index });
   const convertMs = Date.now() - convertStartedAtMs;
   const rowDocuments = normalizeNativeRowDocuments(nativeRows?.documents);
   if (expectedContentHashes && typeof expectedContentHashes === "object") {

@@ -241,6 +241,10 @@
  * @property {boolean} [filterToolingPaths] Apply tooling/test/generated/legacy path priors unless explicitly requested.
  * @property {number} [genericSymbolFrequencyThreshold] Penalize names repeated across this many candidate files, 2..100.
  * @property {number} [hierarchicalFileLimit] Files admitted before final symbol interleaving, 1..40.
+ * @property {boolean} [withinFileSymbolRerank] Reorder symbols only within result slots belonging to the same file.
+ * @property {number} [fileLexicalOverlapWeight] Native lexical file-score overlap weight, 0..1.
+ * @property {boolean} [monorepoPackagePriors] Reward generic package/path agreement in monorepos.
+ * @property {boolean} [semanticQueryNormalization] Add a normalized semantic vector probe.
  */
 
 /**

@@ -115,6 +115,25 @@ function nowMs() {
   return Date.now();
 }
 
+function recordIntakeTelemetry(base, kind, detail = {}) {
+  if (process.env.POSSE_INTAKE_BENCH_TRACE !== "1" || !base) return;
+  const target = /** @type {any} */ (base);
+  if (!target.intake_telemetry) {
+    target.intake_telemetry = { schema_version: 1, started_at_ms: nowMs(), events: [] };
+  }
+  const telemetry = target.intake_telemetry;
+  // Keep benchmark payloads bounded even for very large repositories.
+  if (telemetry.events.length >= 20_000) {
+    telemetry.events_dropped = Number(telemetry.events_dropped || 0) + 1;
+    return;
+  }
+  telemetry.events.push({
+    at_ms: nowMs() - telemetry.started_at_ms,
+    kind,
+    ...detail,
+  });
+}
+
 /**
  * @param {Ledger} ledger
  * @param {string} contentHash
@@ -2302,7 +2321,21 @@ export class ParseEngine {
             reason: "parse_error",
             message: formatAtlasError(err),
           });
-          continue;
+          if (!this.#viewLayerMerge || !contentHash || !pathLanguage) continue;
+          parsed = {
+            repo_rel_path,
+            content_hash: contentHash,
+            lang: pathLanguage,
+            symbols: [],
+            edges: [],
+            hasError: false,
+          };
+          /** @type {any} */ (base).treesitter_empty_layers = Number(/** @type {any} */ (base).treesitter_empty_layers || 0) + 1;
+          const emptyLayerPaths = Array.isArray(/** @type {any} */ (base).treesitter_empty_layer_paths)
+            ? /** @type {any} */ (base).treesitter_empty_layer_paths
+            : [];
+          emptyLayerPaths.push(repo_rel_path);
+          /** @type {any} */ (base).treesitter_empty_layer_paths = emptyLayerPaths;
         }
         if (parsed.hasError) {
           const err = new Error(`tree-sitter parse error for ${repo_rel_path}; partial extraction discarded`);
@@ -2312,7 +2345,21 @@ export class ParseEngine {
             reason: "parse_error",
             message: formatAtlasError(err),
           });
-          continue;
+          if (!this.#viewLayerMerge || !contentHash || !pathLanguage) continue;
+          parsed = {
+            repo_rel_path,
+            content_hash: contentHash,
+            lang: pathLanguage,
+            symbols: [],
+            edges: [],
+            hasError: false,
+          };
+          /** @type {any} */ (base).treesitter_empty_layers = Number(/** @type {any} */ (base).treesitter_empty_layers || 0) + 1;
+          const emptyLayerPaths = Array.isArray(/** @type {any} */ (base).treesitter_empty_layer_paths)
+            ? /** @type {any} */ (base).treesitter_empty_layer_paths
+            : [];
+          emptyLayerPaths.push(repo_rel_path);
+          /** @type {any} */ (base).treesitter_empty_layer_paths = emptyLayerPaths;
         }
 
         let parsedByteSize = fileBytes ? fileBytes.length : 0;
@@ -2497,6 +2544,7 @@ export class ParseEngine {
     const encoder = /** @type {any} */ (resources.encoder);
     const index = /** @type {any} */ (resources.index);
     const supportsStructuredSymbols = typeof encoder.encodeSymbols === "function";
+    recordIntakeTelemetry(base, "onnx.queue_started", { document_window: documentWindow });
     const runner = /** @type {any} */ (startOnnxRefresh({
       mode: "changed",
       modelId: String(encoder.model || encoder.modelId || "jina"),
@@ -2543,11 +2591,16 @@ export class ParseEngine {
         ),
       } : {}),
       onDocumentProcessed: (document) => documents.markProcessed(document),
-      onEvent: (event) => this.#emitProgress({
-        ...event,
-        stage: "embeddings",
-        stream: "system",
-      }),
+      onEvent: (event) => {
+        recordIntakeTelemetry(base, String(event?.kind || "onnx.event"), {
+          current: event?.current ?? null,
+          processed_documents: event?.processedDocuments ?? null,
+          duplicate_symbols: event?.duplicateSymbols ?? null,
+          total_duplicate_symbols: event?.totalDuplicateSymbols ?? null,
+          unique_symbols: event?.uniqueSymbols ?? null,
+        });
+        this.#emitProgress({ ...event, stage: "embeddings", stream: "system" });
+      },
     }));
     base.embeddings_streaming = true;
     /** @type {any} */ (base).embeddings_document_window = documentWindow;
@@ -2567,8 +2620,16 @@ export class ParseEngine {
       await intake.documents.done;
       /** @type {any} */ (base).embeddings_streamed_documents = Number(report?.processedDocuments || 0);
       /** @type {any} */ (base).embeddings_streamed_symbols = Number(report?.indexedSymbols || 0);
+      recordIntakeTelemetry(base, "onnx.queue_completed", {
+        documents: Number(report?.processedDocuments || 0),
+        symbols: Number(report?.indexedSymbols || 0),
+        duplicate_symbols: Number(report?.duplicateSymbols || 0),
+      });
     } catch (err) {
       /** @type {any} */ (base).embeddings_streaming_error = formatAtlasError(err);
+      recordIntakeTelemetry(base, "onnx.queue_failed", {
+        error: formatAtlasError(err),
+      });
       intake.documents.abort(err);
       logAtlasError("[Warmer.#finishDocumentEmbeddingIntake] streaming ingest failed:", err);
     } finally {
@@ -3009,6 +3070,11 @@ export class ParseEngine {
       if (useIncrementalScope) {
         /** @type {any} */ (base).embeddings_touched_paths = embeddingScope?.touchedPaths?.length ?? 0;
       }
+      const reconciliationStartedAt = nowMs();
+      recordIntakeTelemetry(base, "embeddings.reconciliation_started", {
+        recovery: !!/** @type {any} */ (base).embeddings_streaming_error,
+        scope: useIncrementalScope ? "incremental" : "full",
+      });
       const report = await ingestView({
         view,
         index: /** @type {any} */ (resources.index),
@@ -3092,6 +3158,13 @@ export class ParseEngine {
       base.embeddings_indexed = report.indexed;
       /** @type {any} */ (base).embeddings_skipped_unsupported_language = report.skippedUnsupportedLanguage || 0;
       /** @type {any} */ (base).embeddings_already_indexed = report.alreadyIndexed || 0;
+      recordIntakeTelemetry(base, "embeddings.reconciliation_completed", {
+        recovery: !!/** @type {any} */ (base).embeddings_streaming_error,
+        candidates: Number(report.candidates || 0),
+        indexed: Number(report.indexed || 0),
+        already_indexed: Number(report.alreadyIndexed || 0),
+        duration_ms: nowMs() - reconciliationStartedAt,
+      });
       if (useIncrementalScope) {
         // Incremental scope: no prune-to-view runs, so stale before-hashes
         // are removed directly — filtered by liveness so a hash whose content
@@ -3122,11 +3195,20 @@ export class ParseEngine {
           // could not see. One keys-diff also means ONE full ANN rebuild
           // (each removal path rebuilds + durable-saves the whole index —
           // running both prunes doubled the dominant cost of full warms).
+          const pruneStartedAt = nowMs();
+          const orphansBefore = Number(/** @type {any} */ (base).embeddings_orphans_pruned || 0);
+          recordIntakeTelemetry(base, "embeddings.prune_started", {
+            sibling_keep_keys: siblings.keys.length,
+          });
           await pruneEmbeddingIndexToCurrentView({
             base,
             view,
             index: resources.index,
             extraKeepKeys: siblings.keys,
+          });
+          recordIntakeTelemetry(base, "embeddings.prune_completed", {
+            removed: Math.max(0, Number(/** @type {any} */ (base).embeddings_orphans_pruned || 0) - orphansBefore),
+            duration_ms: nowMs() - pruneStartedAt,
           });
           /** @type {any} */ (base).embeddings_prune_scope = "full";
           recordEmbeddingForensics("warmer.embeddings.prune_to_view.done", {
@@ -3155,11 +3237,16 @@ export class ParseEngine {
           });
         }
       }
+      const watermarkStartedAt = nowMs();
+      recordIntakeTelemetry(base, "embeddings.watermark_started");
       await this.#writeEmbeddingWatermark({
         index: resources.index,
         view,
         viewPath,
         key: scopeDecision.key,
+      });
+      recordIntakeTelemetry(base, "embeddings.watermark_completed", {
+        duration_ms: nowMs() - watermarkStartedAt,
       });
       const cleanup = cleanupStaleEmbeddingDirs({
         repoRoot: this.#repoRoot,
@@ -3191,7 +3278,12 @@ export class ParseEngine {
       logAtlasError(`[Warmer.#ingestEmbeddingsForView] ${viewPath} threw:`, err);
     } finally {
       try { if (view) view.close(); } catch { /* ignore */ }
+      const closeStartedAt = nowMs();
+      recordIntakeTelemetry(base, "embeddings.resources_close_started");
       await resources.close();
+      recordIntakeTelemetry(base, "embeddings.resources_close_completed", {
+        duration_ms: nowMs() - closeStartedAt,
+      });
     }
   }
 

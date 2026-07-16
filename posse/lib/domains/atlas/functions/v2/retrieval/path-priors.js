@@ -225,6 +225,7 @@ export function pathPriorForCandidate(candidate, intent, options = {}) {
  *     filterToolingPaths?: boolean,
  *     genericSymbolFrequencyThreshold?: number,
  *     hierarchicalFileLimit?: number,
+ *     monorepoPackagePriors?: boolean,
  *   },
  *   rawScoreById?: Map<string, number> | Record<string, number>,
  * }} context
@@ -249,10 +250,14 @@ export function applyPathQualityPriors(entries, context) {
       filterToolingPaths: options.filterToolingPaths === true,
       rawFusedScore: rawScoreFor(entry, context?.rawScoreById),
     });
+    const packagePrior = options.monorepoPackagePriors === true
+      ? monorepoPackagePrior(entry, context?.query || "", evidence)
+      : null;
+    if (packagePrior) evidence.finalCandidateScore *= packagePrior.multiplier;
     return {
       ...entry,
       score: evidence.finalCandidateScore,
-      pathPrior: evidence,
+      pathPrior: { ...evidence, ...(packagePrior ? { monorepoPackage: packagePrior } : {}) },
       _pathPriorOriginalIndex: index,
     };
   });
@@ -270,7 +275,13 @@ export function applyPathQualityPriors(entries, context) {
       generic: true,
       genericRepresentative: representatives.get(name) === entry.id,
     });
-    return { ...entry, score: evidence.finalCandidateScore, pathPrior: evidence };
+    const packagePrior = entry.pathPrior?.monorepoPackage || null;
+    if (packagePrior) evidence.finalCandidateScore *= packagePrior.multiplier;
+    return {
+      ...entry,
+      score: evidence.finalCandidateScore,
+      pathPrior: { ...evidence, ...(packagePrior ? { monorepoPackage: packagePrior } : {}) },
+    };
   });
 
   adjusted.sort(compareAdjustedEntries);
@@ -297,6 +308,7 @@ export function applyPathQualityPriors(entries, context) {
         filterToolingPaths: options.filterToolingPaths === true,
         genericSymbolFrequencyThreshold: threshold || null,
         hierarchicalFileLimit: fileLimit || null,
+        monorepoPackagePriors: options.monorepoPackagePriors === true,
       },
       inputCandidates: input.length,
       outputCandidates: cleanEntries.length,
@@ -308,6 +320,7 @@ export function applyPathQualityPriors(entries, context) {
       protectedExactCandidates: adjusted.filter((entry) => entry.pathPrior.exactSymbolMatch || entry.pathPrior.exactPathMatch).length,
       genericNames: [...genericNames].sort(),
       genericCandidates: adjusted.filter((entry) => entry.pathPrior.genericSymbol).length,
+      packageMatchedCandidates: adjusted.filter((entry) => Number(entry.pathPrior?.monorepoPackage?.overlap || 0) > 0).length,
     },
   };
 }
@@ -316,7 +329,59 @@ export function pathQualityPriorsEnabled(options = {}) {
   return options.filterDeclarationFiles === true
     || options.filterToolingPaths === true
     || boundedInteger(options.genericSymbolFrequencyThreshold, 2, 100) != null
-    || boundedInteger(options.hierarchicalFileLimit, 1, 40) != null;
+    || boundedInteger(options.hierarchicalFileLimit, 1, 40) != null
+    || options.monorepoPackagePriors === true;
+}
+
+function monorepoPackagePrior(entry, query, baseEvidence) {
+  const path = candidatePath(candidatePayload(entry));
+  const classification = classifyRetrievalPath(path);
+  const queryTokens = genericTokens(query);
+  const packageTokens = packageIdentityTokens(path);
+  let overlap = 0;
+  for (const token of packageTokens) if (queryTokens.has(token)) overlap++;
+  const nonRuntime = classification.classes.some((pathClass) => [
+    "test", "fixture", "generated", "vendor", "tooling", "example", "docs", "legacy",
+  ].includes(pathClass));
+  let multiplier = 1;
+  const reasons = [];
+  if (overlap > 0) {
+    const reward = Math.min(0.4, 0.16 * overlap);
+    multiplier *= 1 + reward;
+    reasons.push("package_query_overlap");
+  } else if (packageTokens.size > 0 && !baseEvidence.exactSymbolMatch && !baseEvidence.exactPathMatch) {
+    multiplier *= 0.92;
+    reasons.push("unmatched_package");
+  }
+  if (nonRuntime && !baseEvidence.exactSymbolMatch && !baseEvidence.exactPathMatch) {
+    multiplier *= classification.classes.includes("legacy") ? 0.68 : 0.8;
+    reasons.push(classification.classes.includes("legacy") ? "legacy_package_tree" : "non_runtime_package_tree");
+  }
+  return {
+    overlap,
+    packageTokens: [...packageTokens].sort(),
+    multiplier,
+    reasons,
+  };
+}
+
+function packageIdentityTokens(repoPath) {
+  const segments = normalizeRepoPath(repoPath).split("/").filter(Boolean);
+  if (segments.length === 0) return new Set();
+  const roots = new Set(["app", "apps", "crate", "crates", "lib", "libs", "module", "modules", "package", "packages", "service", "services"]);
+  const rootIndex = segments.findIndex((segment) => roots.has(segment.toLowerCase()));
+  const identity = rootIndex >= 0 && segments[rootIndex + 1]
+    ? segments[rootIndex + 1]
+    : segments.length > 1 ? segments[0] : "";
+  return genericTokens(identity);
+}
+
+function genericTokens(value) {
+  return new Set(String(value || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .map((token) => token.toLowerCase())
+    .filter((token) => token.length >= 2));
 }
 
 function admitAndInterleaveFiles(entries, limit) {

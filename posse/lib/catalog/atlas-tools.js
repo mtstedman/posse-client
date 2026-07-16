@@ -400,6 +400,10 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         filterToolingPaths: { type: "boolean", description: "Experimental tooling/test/generated/legacy path-prior control." },
         genericSymbolFrequencyThreshold: { type: "integer", minimum: 2, maximum: 100, description: "Experimental repeated-name candidate ranking threshold." },
         hierarchicalFileLimit: { type: "integer", minimum: 1, maximum: 40, description: "Experimental number of files admitted before final symbol interleaving." },
+        withinFileSymbolRerank: { type: "boolean", description: "Experimental within-file symbol reranking that preserves file slots." },
+        fileLexicalOverlapWeight: { type: "number", minimum: 0, maximum: 1, description: "Experimental native lexical file-score overlap weight." },
+        monorepoPackagePriors: { type: "boolean", description: "Experimental generic monorepo package/path priors." },
+        semanticQueryNormalization: { type: "boolean", description: "Experimental normalized secondary semantic query." },
         scope: { type: "string", enum: ["name", "body", "either"], description: "Search symbol names, symbol-body identifier tokens, or both. Default either." },
         entities: {
           type: "array",

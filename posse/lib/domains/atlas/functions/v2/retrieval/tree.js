@@ -190,6 +190,7 @@ async function runTreeScope({ view, versionId, params = {}, action }) {
     maxBranches: params.maxBranches,
     branchFileCap: params.branchFileCap,
     refMatchLimit: params.refMatchLimit,
+    siblingNumericFamilyCap: params.siblingNumericFamilyCap,
     taskType: params.taskType,
     compressionSnapshot: readOptionalCompressionSnapshot(db),
   }));

@@ -365,6 +365,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
         ...(payload.maxBranches == null ? {} : { maxBranches: clampInt(payload.maxBranches, 1, 100, 12) }),
         ...(payload.branchFileCap == null ? {} : { branchFileCap: clampInt(payload.branchFileCap, 1, 500, 40) }),
         ...(payload.refMatchLimit == null ? {} : { refMatchLimit: clampInt(payload.refMatchLimit, 1, 500, 50) }),
+        ...(payload.siblingNumericFamilyCap == null ? {} : { siblingNumericFamilyCap: clampInt(payload.siblingNumericFamilyCap, 1, 500, 100) }),
       },
     };
   }

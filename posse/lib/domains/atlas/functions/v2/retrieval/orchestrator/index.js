@@ -23,6 +23,8 @@ import { applyTaskQueryRanking } from "./task-query-ranking.js";
 import { summarizeBackends } from "./fallback.js";
 import { fallbackQueryPlan, planQuery } from "./query-planner.js";
 import { applyPathQualityPriors, pathQualityPriorsEnabled } from "../path-priors.js";
+import { applyWithinFileSymbolReranking } from "./within-file-ranking.js";
+import { combineVectorResults, normalizedSemanticQuery } from "./semantic-query.js";
 
 /** @typedef {import("../../contracts/api.js").View} View */
 /** @typedef {import("../../contracts/api.js").Ledger} Ledger */
@@ -48,6 +50,10 @@ import { applyPathQualityPriors, pathQualityPriorsEnabled } from "../path-priors
  * @property {boolean} [filterToolingPaths] Apply tooling/test/generated/legacy path priors.
  * @property {number} [genericSymbolFrequencyThreshold] Penalize names repeated across this many files.
  * @property {number} [hierarchicalFileLimit] Admit and interleave this many non-exact files.
+ * @property {boolean} [withinFileSymbolRerank] Reorder symbols only within slots belonging to the same file.
+ * @property {number} [fileLexicalOverlapWeight] Native lexical file-score weight, 0..1.
+ * @property {boolean} [monorepoPackagePriors] Apply generic monorepo package/path agreement priors.
+ * @property {boolean} [semanticQueryNormalization] Add a normalized semantic vector probe.
  * @property {import("./query-planner-types.js").QueryPlan} [plan]
  * @property {(input: string) => import("./query-planner-types.js").QueryPlan | Promise<import("./query-planner-types.js").QueryPlan>} [planner]
  */
@@ -146,15 +152,22 @@ async function hybridSearchWithPlan(args, plan) {
     !!embeddingIndex &&
     !!encoder &&
     encoder.dim === embeddingIndex.dim;
-  // Bounded fan-out (3 backends) onto the serial native worker; each backend
+  const normalizedVectorQuery = wantSemantic && options?.semanticQueryNormalization === true
+    ? await normalizedSemanticQuery(query)
+    : null;
+  // Bounded fan-out onto the serial native worker; each backend
   // keeps its own native calls sequential internally.
-  const [fts, vector, graph] = await Promise.all([
+  const [fts, rawVector, normalizedVector, graph] = await Promise.all([
     runFtsBackend({ view, query, limit, plan, scope: options?.searchScope }),
     wantSemantic
       ? runVectorBackend({ view, query, limit, embeddingIndex, encoder, signal })
       : Promise.resolve({ ok: false, entries: [], raw: [], total: 0, reason: "unavailable" }),
+    wantSemantic && normalizedVectorQuery
+      ? runVectorBackend({ view, query: normalizedVectorQuery, limit, embeddingIndex, encoder, signal })
+      : Promise.resolve(null),
     runGraphBackend({ view, limit, plan }),
   ]);
+  const vector = combineVectorResults(rawVector, normalizedVector);
 
   /** @type {Record<string, { ok: boolean, total: number, reason?: string }>} */
   const backendStatus = {
@@ -174,11 +187,14 @@ async function hybridSearchWithPlan(args, plan) {
     feedbackHalfLifeDays: options?.feedbackHalfLifeDays,
     k: options?.rrfK,
   });
+  const symbolRanked = options?.withinFileSymbolRerank === true
+    ? await applyWithinFileSymbolReranking(fused, options?.taskText || query)
+    : fused;
   const pathPriorResult = pathQualityPriorsEnabled(options)
-    ? applyPathQualityPriors(fused, { query, plan, options, rawScoreById })
+    ? applyPathQualityPriors(symbolRanked, { query, plan, options, rawScoreById })
     : null;
   return assembleHybridResult({
-    fused: pathPriorResult?.entries || fused,
+    fused: pathPriorResult?.entries || symbolRanked,
     limit,
     plan,
     backendStatus,

@@ -164,9 +164,11 @@ async function runStreamingRefresh(opts, { mode, batchSize, documentWindow, exis
   const state = {
     indexedSymbols: 0,
     skippedSymbols: 0,
+    duplicateSymbols: 0,
     processedDocuments: 0,
     batchNumber: 0,
     lastDocument: null,
+    seenSymbolFingerprints: new Map(),
   };
   const source = asyncIteratorFor(opts.documents);
   const queue = [];
@@ -236,6 +238,7 @@ async function runStreamingRefresh(opts, { mode, batchSize, documentWindow, exis
   return {
     indexedSymbols: state.indexedSymbols,
     skippedSymbols: state.skippedSymbols,
+    duplicateSymbols: state.duplicateSymbols,
     processedDocuments: state.processedDocuments,
   };
 }
@@ -265,6 +268,7 @@ function wakeAll(waiters) {
 async function processDocumentWindow(opts, documents, state, { mode, batchSize, existing }) {
   const entries = [];
   const remainingByDocument = [];
+  let windowDuplicateSymbols = 0;
   for (let documentIndex = 0; documentIndex < documents.length; documentIndex++) {
     const document = documents[documentIndex];
     const symbols = await completeOnnxDocument(opts, document);
@@ -274,6 +278,19 @@ async function processDocumentWindow(opts, documents, state, { mode, batchSize, 
         state.skippedSymbols++;
         continue;
       }
+      const symbolKey = String(symbol.symbol_key || "");
+      const fingerprint = String(symbol.merged_fingerprint || "");
+      const priorFingerprint = state.seenSymbolFingerprints.get(symbolKey);
+      if (priorFingerprint != null) {
+        if (priorFingerprint !== fingerprint) {
+          throw new Error(`ONNX refresh received conflicting duplicate symbol_key '${symbolKey}'`);
+        }
+        state.duplicateSymbols++;
+        windowDuplicateSymbols++;
+        state.skippedSymbols++;
+        continue;
+      }
+      state.seenSymbolFingerprints.set(symbolKey, fingerprint);
       const completeSymbol = opts.buildSymbolText
         ? { ...symbol, text: String(opts.buildSymbolText(symbol, document) || "") }
         : symbol;
@@ -281,6 +298,15 @@ async function processDocumentWindow(opts, documents, state, { mode, batchSize, 
       changedInDocument++;
     }
     remainingByDocument.push(changedInDocument);
+  }
+
+  if (windowDuplicateSymbols > 0) {
+    emitOnnxEvent(opts.onEvent, {
+      kind: "atlas.parse.onnx.duplicates_canonicalized",
+      duplicateSymbols: windowDuplicateSymbols,
+      totalDuplicateSymbols: state.duplicateSymbols,
+      uniqueSymbols: state.seenSymbolFingerprints.size,
+    });
   }
 
   // ONNX packing is independent from SCIP/document boundaries. Sort only the
@@ -557,6 +583,7 @@ function emitStreamingProgress(opts, state, {
     totalDocuments: total,
     indexedSymbols: state.indexedSymbols,
     skippedSymbols: state.skippedSymbols,
+    duplicateSymbols: state.duplicateSymbols,
     ...(batchItems == null ? {} : { batchItems: Number(batchItems) || 0 }),
     ...(symbol ? { symbol } : {}),
     ...(document ? { document } : {}),

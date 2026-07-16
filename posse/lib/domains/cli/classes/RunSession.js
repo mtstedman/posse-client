@@ -830,10 +830,9 @@ export class RunSession {
   };
 
   // Native refresh, Git readiness, and the cached client update check can run
-  // together after repo setup. Required daemon startup waits for the complete
-  // artifact pass: artifact inspection can include synchronous version probes,
-  // and starting pulse handshakes while those probes block the event loop can
-  // exhaust the heartbeat deadline before Node can deliver the grant.
+  // together after repo setup. Required daemon startup waits for both native
+  // artifact and Git readiness passes: either can include process/native probes
+  // that stall the event loop long enough to exhaust an in-flight pulse handshake.
   const nativeArtifactTask = (async () => {
     if (typeof nativeBinariesForRun?.ensureAvailable !== "function") {
     updateBootStep("native binaries", {
@@ -888,44 +887,6 @@ export class RunSession {
     return nativeArtifactResults;
   })();
 
-  const nativeDaemonTask = (async () => {
-    await nativeArtifactTask;
-    if (typeof nativeBinariesForRun?.ensureRequiredAtlasBinariesActive !== "function") {
-      updateBootStep("starting daemons", {
-        section: "workspace",
-        status: "skipped",
-        detail: "no required native daemons",
-        force: true,
-      });
-      return [];
-    }
-    updateBootStep("starting daemons", {
-      section: "workspace",
-      status: "running",
-      detail: "starting daemons: atlas + vector",
-      force: true,
-    });
-    try {
-      const required = await nativeBinariesForRun.ensureRequiredAtlasBinariesActive();
-      updateBootStep("starting daemons", {
-        section: "workspace",
-        status: "ok",
-        detail: `${required.map((result) => result.name).join(" + ")} active`,
-        force: true,
-      });
-      return required;
-    } catch (error) {
-      updateBootStep("starting daemons", {
-        section: "workspace",
-        status: "failed",
-        detail: firstLine(error?.message || error),
-        showDetail: true,
-        force: true,
-      });
-      throw error;
-    }
-  })();
-
   // CACHED check (6h TTL): a warm cache answers from disk without touching the
   // network. A stale check is soft-bounded and continues detached so the next
   // boot can consume its refreshed cache.
@@ -959,8 +920,9 @@ export class RunSession {
     }
   })();
 
-  // Git Ready still gates the dirty-tree guard, but its native startup can run
-  // beside Atlas/vector. It joins the in-flight Git artifact refresh above.
+  // Git readiness starts beside artifact refresh, but must settle before the
+  // Atlas/vector pulse handshakes begin. It joins the in-flight Git artifact
+  // refresh above.
   const gitReadyTask = (async () => {
     updateBootStep("git ready", { section: "workspace", status: "running", detail: "starting git", force: true });
     try {
@@ -976,6 +938,44 @@ export class RunSession {
         force: true,
       });
       return { ok: false, error };
+    }
+  })();
+
+  const nativeDaemonTask = (async () => {
+    await Promise.all([nativeArtifactTask, gitReadyTask]);
+    if (typeof nativeBinariesForRun?.ensureRequiredAtlasBinariesActive !== "function") {
+      updateBootStep("starting daemons", {
+        section: "workspace",
+        status: "skipped",
+        detail: "no required native daemons",
+        force: true,
+      });
+      return [];
+    }
+    updateBootStep("starting daemons", {
+      section: "workspace",
+      status: "running",
+      detail: "starting daemons: atlas + vector",
+      force: true,
+    });
+    try {
+      const required = await nativeBinariesForRun.ensureRequiredAtlasBinariesActive();
+      updateBootStep("starting daemons", {
+        section: "workspace",
+        status: "ok",
+        detail: `${required.map((result) => result.name).join(" + ")} active`,
+        force: true,
+      });
+      return required;
+    } catch (error) {
+      updateBootStep("starting daemons", {
+        section: "workspace",
+        status: "failed",
+        detail: firstLine(error?.message || error),
+        showDetail: true,
+        force: true,
+      });
+      throw error;
     }
   })();
 
