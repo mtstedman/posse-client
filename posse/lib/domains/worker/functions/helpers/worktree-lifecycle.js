@@ -549,7 +549,8 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
   const isArtifactJob = earlyPayload
     ? (job.job_type === "artificer" || isArtifactMode(earlyPayload.task_mode || "code"))
     : false;
-  if (!jobNeedsGitWorktree(job) || isArtifactJob) {
+  // Artifact jobs are a coarse local classification and never need native Git.
+  if (isArtifactJob) {
     return { ok: true, wtPath: null, branchName: null, sentinelPath: null };
   }
 
@@ -559,6 +560,9 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
   let toleratedResidualLogged = false;
   let toleratedSiblingDirtyLogged = false;
   try {
+    if (!jobNeedsGitWorktree(job)) {
+      return { ok: true, wtPath: null, branchName: null, sentinelPath: null };
+    }
     const wi = getWorkItem(job.work_item_id);
     prepTrace = startPrepTrace({
       workItemId: wi?.id ?? job.work_item_id ?? null,

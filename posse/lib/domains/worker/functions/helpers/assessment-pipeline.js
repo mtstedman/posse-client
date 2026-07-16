@@ -432,6 +432,7 @@ function stripInternalAssessmentPolicyPayload(payload = {}) {
 function _buildRemoteAssessmentInstructions({
   job,
   taskSpec = "",
+  verificationCapabilityBlock = "",
   workflowModeBlock = "",
   atlasBlock = "",
   priorAssessmentFindings = "",
@@ -443,9 +444,10 @@ function _buildRemoteAssessmentInstructions({
   return [
     `Assess this completed task. Check the actual files, not just the dev's claims.`,
     `The local client will append local-only assessment evidence after remote prompt compilation, including any scoped git diff, file snapshots, and worker output. Use that appended evidence for verification; do not ask the human to paste repository files or diffs that are already in the workspace.`,
-    `If the dev log marks VERIFICATION_UNAVAILABLE for a command/tool, treat that as a verification gap, not proof of failure. Fail only when deterministic evidence shows a success criterion is unmet; return blocked when the only missing piece is unavailable environment/tooling.`,
+    `If the dev log marks VERIFICATION_UNAVAILABLE for a command or tool outside your issued surface, discard that optional verification method. It is not evidence of failure and is not, by itself, a reason to block.`,
     Number.isFinite(Number(fallbackReads)) ? `Fallback read budget for this assessment attempt: ${Math.max(0, Number(fallbackReads))}.` : null,
     workflowModeBlock,
+    verificationCapabilityBlock || null,
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
     ``,
@@ -456,6 +458,20 @@ function _buildRemoteAssessmentInstructions({
     assessmentDiffNarrative ? `\nSCOPED DIFF NARRATIVE:\n${assessmentDiffNarrative}` : null,
     ``,
     `The final response must be only a fenced \`\`\`json verdict block. No prose.`,
+  ].filter(Boolean).join("\n");
+}
+
+function _buildVerificationCapabilityBlock(payload = {}) {
+  const contract = payload?.verification_contract && typeof payload.verification_contract === "object"
+    ? payload.verification_contract
+    : null;
+  return [
+    `VERIFICATION CAPABILITY CONTRACT:`,
+    `Your issued tools plus the deterministic evidence attached to this prompt are the complete set of available verification methods for this attempt.`,
+    `Use those assigned capabilities. Discard browser, lint, shell, or other verification options that are not callable through the issued tool surface and are not represented by registered test evidence.`,
+    `An unavailable optional method is NOT_APPLICABLE: do not lower confidence, fail, block, or ask a human merely because it cannot be run.`,
+    `If an explicit success criterion truly requires an unavailable capability, return blocked once with the missing capability named. Do not retry the same assessment hoping the capability appears.`,
+    contract ? `Task verification contract:\n${JSON.stringify(contract, null, 2)}` : null,
   ].filter(Boolean).join("\n");
 }
 
@@ -821,6 +837,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   let taskSpec = "";
   let parsedJobPayload = parseJobPayload(job);
   const visibleJobPayload = stripInternalAssessmentPolicyPayload(parsedJobPayload);
+  const verificationCapabilityBlock = _buildVerificationCapabilityBlock(visibleJobPayload);
   const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(getWorkItem(job.work_item_id)), "assessor");
   if (Object.keys(visibleJobPayload).length > 0) {
     taskSpec = visibleJobPayload.task_spec || visibleJobPayload.instructions || JSON.stringify(visibleJobPayload, null, 2);
@@ -1080,9 +1097,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   const prompt = [
     `Assess this completed task. Check the actual files, not just the dev's claims.`,
     `Use the SCOPED DIFF NARRATIVE as the quick map of what changed, then use any SCOPED GIT DIFF below as the primary verification view for exact changes. Use SCOPED FILE SNAPSHOTS as fallback/current-state context when the diff alone is insufficient. Do not ask the human to paste repository files or diffs that are already in the workspace; if verification still fails due to environment/tooling limits, return blocked without human_questions requesting repo file contents.`,
-    `If the dev log marks VERIFICATION_UNAVAILABLE for a command/tool, treat that as a verification gap, not proof of failure. Fail only when deterministic evidence shows a success criterion is unmet; return blocked when the only missing piece is unavailable environment/tooling.`,
+    `If the dev log marks VERIFICATION_UNAVAILABLE for a command or tool outside your issued surface, discard that optional verification method. It is not evidence of failure and is not, by itself, a reason to block.`,
     Number.isFinite(Number(fallbackReads)) ? `Fallback read budget for this assessment attempt: ${Math.max(0, Number(fallbackReads))}.` : null,
     workflowModeBlock,
+    verificationCapabilityBlock,
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
     ``,
@@ -1109,6 +1127,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   const remoteAssessmentInstructions = _buildRemoteAssessmentInstructions({
     job,
     taskSpec,
+    verificationCapabilityBlock,
     workflowModeBlock,
     atlasBlock,
     priorAssessmentFindings,

@@ -11,14 +11,6 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 export function handle(job, verdict, ctx) {
   const { emitLog: log, spawnedJobs, spawnFromAssessor, reasonBrief } = ctx;
 
-  const retryReason = verdict.reasons?.[0] || "assessor requested human review before verification was exhausted";
-  if (!verdict?._disable_internal_retry && queueInternalAssessmentRetry(job, verdict, retryReason, {
-    leaseToken: ctx.leaseToken,
-    recordAssessorVerdict: ctx.recordAssessorVerdict,
-  })) {
-    return;
-  }
-
   const changed = typeof ctx.updateJobStatus === "function"
     ? ctx.updateJobStatus("waiting_on_review")
     : updateJobStatus(job.id, "waiting_on_review");

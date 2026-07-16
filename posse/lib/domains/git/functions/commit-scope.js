@@ -239,6 +239,21 @@ function firstValueByFold(paths, foldPath) {
   return map;
 }
 
+function rememberSiblingSkipped(target, file, lock) {
+  const jobId = lock?.job_id ?? null;
+  const normalizedFile = String(file || "").replace(/\\/g, "/");
+  if (target.some((entry) => String(entry?.file || "").replace(/\\/g, "/") === normalizedFile
+    && (entry?.job_id ?? null) === jobId)) return;
+  target.push({
+    file,
+    job_id: jobId,
+    path: lock?.path || null,
+    lock_kind: lock?.lock_kind || null,
+  });
+}
+
+export const __testRememberSiblingSkipped = rememberSiblingSkipped;
+
 export function repairWebAssetCreateScope(task = {}, nativeParity = {}) {
   const native = runGitNativeMethod(
     "git.repairWebAssetCreateScope",
@@ -403,14 +418,6 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     id: jobId,
     work_item_id: wiId,
   }, { locks: activeFileLocks });
-  const rememberSiblingSkipped = (target, file, lock) => {
-    target.push({
-      file,
-      job_id: lock?.job_id ?? null,
-      path: lock?.path || null,
-      lock_kind: lock?.lock_kind || null,
-    });
-  };
   const rememberUnique = (target, file) => {
     if (!target.includes(file)) target.push(file);
   };

@@ -121,6 +121,7 @@ import {
   shouldRefreshContextAfterCommand,
 } from "./command-bootstrap-policy.js";
 import { dispatchCommand } from "./dispatch.js";
+import { assertGitIdentityChecks } from "./git-readiness.js";
 import {
   getCommandPositionalArgs,
   hasArgFlag,
@@ -424,9 +425,7 @@ async function ensureGitReady() {
     tryGit(["config", "user.name"]),
     tryGit(["config", "user.email"]),
   ]);
-  if (!nameCheck.ok || !emailCheck.ok || !nameCheck.stdout || !emailCheck.stdout) {
-    throw new Error('git user identity not configured. Posse needs this to commit changes in worktrees. Run: git config user.name "Your Name" && git config user.email "you@example.com"');
-  }
+  assertGitIdentityChecks(nameCheck, emailCheck);
   if (!headCheck.ok) {
     // Repo exists but has no commits — create an initial empty commit so HEAD is valid
     console.log(`\n  ${C.yellow}Git repo has no commits. Creating initial commit so worktrees can branch from HEAD...${C.reset}`);
@@ -1297,7 +1296,7 @@ async function cmdInject() {
   }
 
   const title = description.split("\n")[0].slice(0, 100);
-  const mode = inferWiMode(description) || "build";
+  const mode = parseModeFlagFromArgv() || inferWiMode(description) || "build";
   const workflowMode = ITERATE_FLAG ? await promptForIterativeWorkflowMode() : null;
   const workflowRedTeamPlan = workflowMode ? shouldPersistIterativeRedTeamPlan() : false;
   const intakeHintsBase = parseIntakeHintsFromArgv(description, mode);
@@ -2449,12 +2448,17 @@ export async function main() {
   await init({
     requireWritableArtifacts: commandPolicy.requiresWritableArtifacts,
     refreshStartupContext: commandPolicy.refreshContextAfter,
-    showReadiness: !runBootPanelOwnsReadiness && (commandPolicy.requiresProvider || commandPolicy.refreshContextAfter),
+    showReadiness: !runBootPanelOwnsReadiness
+      && (commandPolicy.requiresProvider || commandPolicy.requiresNativeGit || commandPolicy.refreshContextAfter),
     // Only provider/scheduler dispatch owns native-daemon readiness. Read-only
     // and operator/admin commands (including Bossy status + merge) must remain
     // usable when agent MCP/native heartbeat infrastructure is unavailable.
-    ensureNativeGit: commandPolicy.requiresProvider,
-    refreshNativeGit: commandPolicy.name === "status",
+    ensureNativeGit: commandPolicy.requiresProvider || commandPolicy.requiresNativeGit,
+    // Any command that cannot proceed without Git must reconcile the exact
+    // issued artifact before minting route grants. Otherwise a release move
+    // can reject the staged handle before run boot reaches its broader native
+    // artifact refresh, and maintenance commands never reach one at all.
+    refreshNativeGit: commandPolicy.requiresNativeGit,
   });
   await maybeWarnPosseUpdateAvailable(commandPolicy);
 

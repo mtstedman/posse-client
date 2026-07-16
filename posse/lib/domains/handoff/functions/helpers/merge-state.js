@@ -21,22 +21,26 @@ export async function detectPendingMergeAsync(cwd) {
   if (!cwd) return null;
   let mergeHead = null;
   try {
-    mergeHead = (await gitTextAsync(cwd, ["rev-parse", "--verify", "MERGE_HEAD"])).trim();
-  } catch {
-    return null;
+    mergeHead = (await gitTextAsync(cwd, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])).trim();
+  } catch (err) {
+    // `rev-parse --verify --quiet` uses status 1 only for an absent ref. Native
+    // auth, transport, timeout, binary, and malformed-repository failures must
+    // remain distinguishable and block handoff rather than shrinking scope.
+    const status = Number(err?.status ?? err?.statusCode ?? err?.code);
+    if (status === 1) return null;
+    throw err;
   }
 
-  let conflicts = [];
-  try {
-    // --relative anchors paths to `cwd` rather than the git top-level.
-    const raw = await gitTextAsync(cwd, ["diff", "--name-only", "--diff-filter=U", "--relative"]);
-    conflicts = raw
-      .split("\n")
-      .map((s) => s.replace(/\\/g, "/").trim())
-      .filter(Boolean);
-  } catch {
-    // keep empty list
-  }
+  if (!mergeHead) throw new Error("git returned an empty MERGE_HEAD");
+
+  // --relative anchors paths to `cwd` rather than the git top-level. Once
+  // MERGE_HEAD exists, failure to enumerate conflicts is not equivalent to an
+  // empty conflict set and must remain visible to the caller.
+  const raw = await gitTextAsync(cwd, ["diff", "--name-only", "--diff-filter=U", "--relative"]);
+  const conflicts = raw
+    .split("\n")
+    .map((s) => s.replace(/\\/g, "/").trim())
+    .filter(Boolean);
 
   let mergeMsg = null;
   try {

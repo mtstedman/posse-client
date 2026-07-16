@@ -27,6 +27,7 @@ const DEFAULT_WAIT_MS = 120_000;
 const DEFAULT_DEDUPE_MAX = 256;
 const DEFAULT_DISPATCH_CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_DISPATCH_CACHE_MAX = 256;
+export const DEFAULT_SEMANTIC_FILE_LEXICAL_OVERLAP_WEIGHT = 0.75;
 
 const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
   "query",
@@ -166,18 +167,42 @@ function conductorEnvelopeToToolResult(envelope) {
   return { result: mcpTextResult(text, false), ok: true, errorMsg: null };
 }
 
-function nativeSymbolSearchArgs(action, args = {}) {
-  if (action !== "symbol.search" || !pathQualityPriorsEnabled(args)) return args;
-  const callerLimit = Math.max(1, Math.min(Math.trunc(Number(args.limit) || 50), 500));
-  const vectorLimit = Math.max(0, Math.trunc(Number(args.vectorCandidateLimit) || 0));
-  const fileWindow = Math.max(0, Math.trunc(Number(args.hierarchicalFileLimit) || 0));
+export function nativeSymbolSearchArgs(action, args = {}) {
+  if (action !== "symbol.search") return args;
+
+  // Atlas keeps 0.0 as the native compatibility default. The client enables
+  // the balanced semantic ranking profile verified for Atlas 0.1.19. Nullish
+  // selection is deliberate: an explicit caller value, including 0, wins.
+  const effectiveArgs = args.semantic === true && args.fileLexicalOverlapWeight == null
+    ? {
+        ...args,
+        fileLexicalOverlapWeight: DEFAULT_SEMANTIC_FILE_LEXICAL_OVERLAP_WEIGHT,
+      }
+    : args;
+
+  if (!pathQualityPriorsEnabled(effectiveArgs)) return effectiveArgs;
+
+  const callerLimit = Math.max(
+    1,
+    Math.min(Math.trunc(Number(effectiveArgs.limit) || 50), 500),
+  );
+  const vectorLimit = Math.max(
+    0,
+    Math.trunc(Number(effectiveArgs.vectorCandidateLimit) || 0),
+  );
+  const fileWindow = Math.max(
+    0,
+    Math.trunc(Number(effectiveArgs.hierarchicalFileLimit) || 0),
+  );
   const candidatePoolLimit = Math.min(500, Math.max(
     callerLimit,
     vectorLimit,
     callerLimit * 2,
     fileWindow * 4,
   ));
-  return candidatePoolLimit === callerLimit ? args : { ...args, limit: candidatePoolLimit };
+  return candidatePoolLimit === callerLimit
+    ? effectiveArgs
+    : { ...effectiveArgs, limit: candidatePoolLimit };
 }
 
 function applyNativeSymbolSearchPriors(envelope, args = {}) {

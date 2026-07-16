@@ -334,10 +334,43 @@ export class BinaryManager {
     }
     const capability = this.workerRuntimeCapability(selected);
     for (const name of selected) {
-      const entry = capability.binaries[name];
+      let entry = capability.binaries[name];
       if (!entry) continue;
       const routes = Array.isArray(routesByBinary?.[name]) ? routesByBinary[name] : [];
-      entry.pulses = await this.binary(name).workerPulseCapability(routes);
+      try {
+        entry.pulses = await this.binary(name).workerPulseCapability(routes, { strict: true });
+      } catch (error) {
+        if (error?.code !== "POSSE_PULSE_NATIVE_VERSION_UNSUPPORTED"
+          && error?.remoteCode !== "unsupported_native_version") throw error;
+
+        // A worker thread cannot repair its own binary identity because it has
+        // neither the root credential nor artifact-install authority. Reconcile
+        // once in the parent, replace the handle, then mint against that exact
+        // replacement before anything crosses workerData.
+        const rejectedVersion = this.binary(name).exactVersion || null;
+        const refreshed = await this.ensureAvailable(name, { refresh: true });
+        const replacement = this.binary(name);
+        const replacementVersion = replacement.exactVersion || null;
+        if (refreshed?.available !== true
+          || refreshed?.current === false
+          || !replacementVersion
+          || replacementVersion === rejectedVersion) {
+          const reconcileError = new Error(`Native worker runtime could not reconcile rejected ${name} artifact version`);
+          /** @type {any} */ (reconcileError).code = "NATIVE_WORKER_RUNTIME_VERSION_RECONCILIATION_FAILED";
+          /** @type {any} */ (reconcileError).cause = error;
+          /** @type {any} */ (reconcileError).result = refreshed;
+          throw reconcileError;
+        }
+        const replacementCapability = this.workerRuntimeCapability([name]).binaries[name];
+        if (!replacementCapability) {
+          const reconcileError = new Error(`Native worker runtime replacement is unavailable for ${name}`);
+          /** @type {any} */ (reconcileError).code = "NATIVE_WORKER_RUNTIME_VERSION_RECONCILIATION_FAILED";
+          throw reconcileError;
+        }
+        capability.binaries[name] = replacementCapability;
+        entry = replacementCapability;
+        entry.pulses = await replacement.workerPulseCapability(routes, { strict: true });
+      }
     }
     return capability;
   }

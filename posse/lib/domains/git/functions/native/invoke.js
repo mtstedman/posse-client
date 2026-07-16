@@ -62,12 +62,10 @@ function isHeartbeatFailureText(value) {
 }
 
 // A native heartbeat/identity failure is almost always a transient round-trip
-// blip (network/5xx/clock) at binary startup, before any git work runs. Retry a
-// couple of times here, in the leaf — BEFORE the error reaches the job layer and
-// consumes an attempt. atlas_warm has maxAttempts:1, so a single un-retried blip
-// dead-letters it; normal jobs waste a retry. Persistent auth (401/403) and
-// aborts fail fast so we never spin on a real misconfiguration. Because the
-// heartbeat is validated at process startup before mutations, retrying is safe.
+// blip (network/5xx/clock) at binary startup, before any git work runs. Async
+// calls retry here before the error reaches the job layer and consumes an
+// attempt. Sync calls cannot do that safely: blocking the JS thread also blocks
+// the background pulse mint that could make a retry succeed.
 const HEARTBEAT_RETRY_MAX_ATTEMPTS = 3;
 const HEARTBEAT_RETRY_BASE_MS = 150;
 
@@ -88,20 +86,13 @@ export function shouldRetryNativeHeartbeat(err) {
   return true;
 }
 
-function sleepMsSync(ms) {
-  const timeout = Math.max(1, Number(ms) || 1);
-  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, timeout); }
-  catch { /* best effort */ }
-}
-
 function delayMsAsync(ms) {
   return new Promise((resolve) => { setTimeout(resolve, Math.max(1, Number(ms) || 1)); });
 }
 
 /**
- * Public sync entry point. Retries only transient native heartbeat failures;
- * all other errors (including the structured `{ ok: false }` git failures)
- * propagate on the first throw, exactly as before.
+ * Public sync entry point. A cold pulse cache fails immediately so the event
+ * loop can service the background mint; retrying synchronously only delays it.
  *
  * @param {string} method
  * @param {unknown} payload
@@ -109,17 +100,7 @@ function delayMsAsync(ms) {
  * @returns {unknown}
  */
 export function runGitNativeMethod(method, payload, opts = {}) {
-  let lastErr;
-  for (let attempt = 1; attempt <= HEARTBEAT_RETRY_MAX_ATTEMPTS; attempt++) {
-    try {
-      return runGitNativeMethodOnce(method, payload, opts);
-    } catch (err) {
-      lastErr = err;
-      if (attempt >= HEARTBEAT_RETRY_MAX_ATTEMPTS || !shouldRetryNativeHeartbeat(err)) throw err;
-      sleepMsSync(HEARTBEAT_RETRY_BASE_MS * attempt);
-    }
-  }
-  throw lastErr;
+  return runGitNativeMethodOnce(method, payload, opts);
 }
 
 /**
@@ -580,12 +561,36 @@ function unwrapGitNativeMethodResponse(value) {
       ? /** @type {Record<string, unknown>} */ (obj.error)
       : null;
     const message = String(err?.message || obj.message || "Git native method failed");
-    throw new Error(message);
+    throw gitNativeError(message, err);
   }
   if (obj.ok === true && Object.prototype.hasOwnProperty.call(obj, "data")) {
     return obj.data;
   }
   return value;
+}
+
+function gitNativeError(message, source = null) {
+  const cause = source instanceof Error ? source : undefined;
+  const error = cause ? new Error(message, { cause }) : new Error(message);
+  if (source && typeof source === "object") {
+    for (const key of ["code", "errno", "status", "statusCode", "signal"]) {
+      if (source[key] != null) error[key] = source[key];
+    }
+    if (source.details !== undefined) error.details = source.details;
+  }
+  return error;
+}
+
+function gitNativeProcessError(method, res, detail) {
+  const error = gitNativeError(
+    `Git native method ${method} failed${detail ? `: ${detail}` : ""}`,
+    res?.error || null,
+  );
+  if (error.code == null) error.code = "GIT_NATIVE_METHOD_FAILED";
+  if (error.status == null && res?.code != null) error.status = res.code;
+  error.stdout = String(res?.stdout || "");
+  error.stderr = String(res?.stderr || "");
+  return error;
 }
 
 /**
@@ -660,7 +665,7 @@ function runGitNativeMethodOnce(method, payload, opts = {}) {
         error: res.error || null,
       });
     }
-    throw new Error(`Git native method ${request.method} failed${detail ? `: ${detail}` : ""}`);
+    throw gitNativeProcessError(request.method, res, detail);
   }
   try {
     return unwrapGitNativeMethodResponse(res.json);
@@ -783,7 +788,7 @@ async function runGitNativeMethodAsyncOnce(method, payload, opts = {}) {
         error: res.error || null,
       });
     }
-    throw new Error(`Git native method ${request.method} failed${detail ? `: ${detail}` : ""}`);
+    throw gitNativeProcessError(request.method, res, detail);
   }
   try {
     return unwrapGitNativeMethodResponse(res.json);

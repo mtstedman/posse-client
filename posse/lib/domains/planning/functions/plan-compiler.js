@@ -267,6 +267,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
   buildIntermediateReportTask = (task) => task,
   logBadInputFailure = () => {},
   normalizePlannerScore = (value) => value,
+  repairWebAssetCreateScope = repairWebAssetCreateScopeFromModule,
   spawnFromRole = defaultSpawnFromRole,
 } = {}) {
       const plannerRole = worker?.roleRegistry?.get?.("plan");
@@ -1252,7 +1253,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               droppedTaskIndexes.add(i);
               continue;
             }
-            const webAssetScopeRepair = repairWebAssetCreateScopeFromModule(t);
+            const webAssetScopeRepair = repairWebAssetCreateScope(t);
             if (webAssetScopeRepair.changed) {
               worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: repaired web asset create scope for task "${t.title}" → ${webAssetScopeRepair.files.join(", ")}`);
             }

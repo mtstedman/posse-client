@@ -793,7 +793,7 @@ function snapshotNotePayload({ refName, stashHash, wtPath, projectDir, branchNam
 // captured dirty state (patches + untracked file copies) to a recovery
 // directory. Both twins use this — data-preserving degradation is the
 // canonical posture, not a sync-only behavior.
-function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branchName, wiId, onMsg, status, diffPatch, stagedPatch, trackedDirty, untracked, dedupHash, headSha }) {
+function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branchName, wiId, onMsg, status, diffPatch, stagedPatch, trackedDirty, untracked, dedupHash, headSha, recoveryRootFn = recoveryRoot }) {
   // Tracked modifications exist in this snapshot only as the captured patches.
   // If patch capture failed and tracked dirt exists, a directory snapshot
   // would silently miss it — refuse so callers cannot treat it as preserved.
@@ -804,7 +804,7 @@ function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branchName, w
     return null;
   }
   const baseName = [wiId != null ? `wi-${wiId}` : null, safeFilename(reason), dedupHash].filter(Boolean).join("-");
-  const outDir = path.join(recoveryRoot(projectDir), baseName);
+  const outDir = path.join(recoveryRootFn(projectDir), baseName);
   const partDir = `${outDir}.part-${process.pid}-${Date.now()}`;
   const untrackedRel = untracked.map((relPath) => String(relPath || "").replace(/\\/g, "/")).filter(Boolean);
   // The diff/staged patches cannot carry untracked contents (the stash push
@@ -814,10 +814,10 @@ function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branchName, w
   const untrackedPreservedIn = (dir) => untrackedRel.every((relPath) =>
     fs.existsSync(path.join(dir, "untracked", ...relPath.split("/")))
   );
-  const directoryRef = () => SnapshotRef.directory(outDir, {
+  const directoryRef = (snapshotDir = outDir, metadata = {}) => SnapshotRef.directory(snapshotDir, {
     projectDir,
     worktreePath: wtPath,
-    metadata: { reason, wiId, branchName, dedupHash, headSha },
+    metadata: { reason, wiId, branchName, dedupHash, headSha, ...metadata },
   });
   const untrackedCopyWarnings = [];
   try {
@@ -873,32 +873,42 @@ function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branchName, w
     try { fs.rmSync(partDir, { recursive: true, force: true }); } catch { /* ignore */ }
     throw err;
   }
-  try {
-    fs.renameSync(partDir, outDir);
-  } catch (err) {
-    if (fs.existsSync(outDir)) {
-      // Lost a race (or could not clear a stale dir above). Reuse the
-      // winner only if it actually preserved the untracked contents.
-      if (untrackedPreservedIn(outDir)) {
-        try { fs.rmSync(partDir, { recursive: true, force: true }); } catch { /* ignore */ }
-        return directoryRef();
-      }
-      try {
-        fs.rmSync(outDir, { recursive: true, force: true });
-        fs.renameSync(partDir, outDir);
-      } catch {
-        try { fs.rmSync(partDir, { recursive: true, force: true }); } catch { /* ignore */ }
-        if (typeof onMsg === "function") {
-          onMsg(`legacy fallback snapshot could not be finalized at ${outDir}; refusing to report dirty state as preserved`);
-        }
-        return null;
-      }
+  let renameError = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (fs.existsSync(outDir) && untrackedPreservedIn(outDir)) {
+      try { fs.rmSync(partDir, { recursive: true, force: true }); } catch { /* ignore */ }
       return directoryRef();
     }
-    throw err;
+    try {
+      fs.renameSync(partDir, outDir);
+      renameError = null;
+      break;
+    } catch (err) {
+      renameError = err;
+      const retryable = process.platform === "win32" && ["EPERM", "EBUSY", "EACCES"].includes(err?.code);
+      if (!retryable || attempt === 4) break;
+      try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1)); } catch { /* best effort */ }
+    }
+  }
+  if (renameError) {
+    // The complete .part directory is the only surviving copy. Keep it with
+    // its manifest for operator recovery instead of deleting preserved data.
+    const partComplete = fs.existsSync(path.join(partDir, "manifest.json")) && untrackedPreservedIn(partDir);
+    if (partComplete) {
+      if (typeof onMsg === "function") {
+        onMsg(`legacy fallback snapshot retained for recovery at ${partDir}; finalization at ${outDir} failed: ${renameError?.message || renameError}`);
+      }
+      return directoryRef(partDir, { finalization_failed: true, intended_path: outDir });
+    }
+    if (typeof onMsg === "function") {
+      onMsg(`legacy fallback snapshot could not be finalized at ${outDir}; refusing to report dirty state as preserved`);
+    }
+    return null;
   }
   return directoryRef();
 }
+
+export const __testWriteLegacyFallbackSnapshot = writeLegacyFallbackSnapshot;
 
 export function preserveDirtyWorktreeSnapshot(
   wtPath,

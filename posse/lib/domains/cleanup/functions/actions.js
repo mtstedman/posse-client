@@ -7,8 +7,11 @@
 import fs from "fs";
 import path from "path";
 import { slugify } from "../../../shared/format/functions/slug.js";
-import { gitExec } from "../../git/functions/utils.js";
-import { deleteBranchPreservingTip, worktreeRoot } from "../../git/functions/worktree.js";
+import {
+  adminDeleteBranchPreservingTip,
+  adminGitExec as gitExec,
+  adminWorktreeRoot,
+} from "../../git/functions/admin-git.js";
 import { SNAPSHOT_REF_PREFIX } from "../../git/functions/worktree-snapshots.js";
 import { TERMINAL_JOB_STATUSES, TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { getLiveSchedulerBlockMessage, listJobsByWorkItem, logEvent } from "../../queue/functions/index.js";
@@ -333,7 +336,7 @@ function safeBranchName(name) {
 
 export function discardBranch(branch, projectDir, { force = false } = {}) {
   assertSafeWorkItemDiscard(branch, "branch", { force });
-  const result = deleteBranchPreservingTip(projectDir, branch.name, {
+  const result = adminDeleteBranchPreservingTip(projectDir, branch.name, {
     targetBranch: branch.targetBranch || undefined,
     reason: "cleanup-branch-discard",
     wiId: branch.wiId ?? null,
@@ -356,19 +359,69 @@ export function discardBranch(branch, projectDir, { force = false } = {}) {
   return { ok: true, snapshotRef: result.snapshotRef || null };
 }
 
+function canonicalManagedWorktreeTarget(projectDir, requestedPath) {
+  if (!requestedPath) throw new Error("worktree discard refused: missing path");
+  const rootPath = path.resolve(adminWorktreeRoot(projectDir));
+  const targetPath = path.resolve(requestedPath);
+  if (!isInsideRoot(targetPath, rootPath, { allowEqual: false })) {
+    throw new Error(`refusing to remove worktree outside ${rootPath}: ${targetPath}`);
+  }
+
+  let rootReal;
+  try {
+    rootReal = fs.realpathSync.native(rootPath);
+  } catch (err) {
+    throw new Error(`worktree discard refused: unable to resolve managed root ${rootPath}: ${err?.message || err}`);
+  }
+
+  // Resolve the nearest existing ancestor. This catches a symlink/junction
+  // escape even when the final target component has already gone stale.
+  let existing = targetPath;
+  const missing = [];
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    missing.unshift(path.basename(existing));
+    existing = parent;
+  }
+  let existingReal;
+  try {
+    existingReal = fs.realpathSync.native(existing);
+  } catch (err) {
+    throw new Error(`worktree discard refused: unable to resolve target ancestor ${existing}: ${err?.message || err}`);
+  }
+  const targetReal = path.resolve(existingReal, ...missing);
+  if (!isInsideRoot(targetReal, rootReal, { allowEqual: false })) {
+    throw new Error(`refusing to remove worktree outside ${rootReal}: ${targetReal}`);
+  }
+  return { targetPath, targetReal };
+}
+
+function registeredWorktreePaths(projectDir) {
+  // Listing is an authorization boundary: failure is unknown, never
+  // "unregistered" and therefore never permission for raw deletion.
+  const raw = gitExec(["worktree", "list", "--porcelain", "-z"], projectDir, {
+    trim: false,
+    timeoutMs: 10_000,
+  });
+  return String(raw || "")
+    .split("\0")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => path.resolve(line.slice("worktree ".length)));
+}
+
 export function discardWorktree(worktree, projectDir, { force = false } = {}) {
   assertSafeWorkItemDiscard(worktree, "worktree", { force });
-  try {
-    gitExec(["worktree", "remove", worktree.path, "--force"], projectDir);
-  } catch {
-    const worktreeBase = worktreeRoot(projectDir);
-    const targetPath = path.resolve(worktree.path || "");
-    if (!isInsideRoot(targetPath, worktreeBase, { allowEqual: false })) {
-      try { gitExec(["worktree", "prune"], projectDir); } catch { /* ignore */ }
-      throw new Error(`refusing to remove worktree outside ${worktreeBase}: ${targetPath}`);
-    }
-    try { fs.rmSync(targetPath, { recursive: true, force: true }); } catch { /* ignore */ }
-    try { gitExec(["worktree", "prune"], projectDir); } catch { /* ignore */ }
+  const { targetPath } = canonicalManagedWorktreeTarget(projectDir, worktree.path);
+  const registered = registeredWorktreePaths(projectDir).includes(targetPath);
+  if (registered) {
+    gitExec(["worktree", "remove", targetPath, "--force"], projectDir, { timeoutMs: 60_000 });
+  } else if (fs.existsSync(targetPath)) {
+    fs.rmSync(targetPath, { recursive: true, force: false });
+    gitExec(["worktree", "prune"], projectDir, { timeoutMs: 10_000 });
+  }
+  if (fs.existsSync(targetPath)) {
+    throw new Error(`worktree removal did not remove ${targetPath}`);
   }
   logEvent({
     event_type: EVENT_TYPES.CLEANUP_WORKTREE_DISCARDED,

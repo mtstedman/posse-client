@@ -6,11 +6,11 @@
 import fs from "fs";
 import path from "path";
 import {
-  findLegacyWorktreeForWiAsync,
-  resolveTargetBranchAsync,
-  worktreePathAsync,
-} from "../../../git/functions/worktree.js";
-import { gitExecAsync } from "../../../git/functions/utils.js";
+  adminGitExecAsync,
+  adminWorktreePath,
+  findAdminLegacyWorktree,
+} from "../../../git/functions/admin-git.js";
+import { resolveTargetBranchForAdmin } from "../../../git/functions/target-branch.js";
 
 const GIT_TIMEOUT_MS = 10000;
 const MAX_BUFFER = 1024 * 1024 * 8;
@@ -48,7 +48,7 @@ function isRuntimePath(filePath) {
 // stays responsive while the snapshot builds in the background.
 async function safeGit(cwd, args, { allowFailure = false, maxBuffer = MAX_BUFFER } = {}) {
   try {
-    return await gitExecAsync(["-c", "core.quotePath=false", ...args], cwd, {
+    return await adminGitExecAsync(["-c", "core.quotePath=false", ...args], cwd, {
       timeoutMs: GIT_TIMEOUT_MS,
       maxBuffer,
     });
@@ -212,9 +212,9 @@ function mergeSourceRows({ wi, targetBranch, wtDir, wtExists, branchRows, worktr
 
 async function resolveWorktreeDirAsync(projectDir, wiId) {
   if (wiId == null) return null;
-  const canonical = await worktreePathAsync(projectDir, wiId);
+  const canonical = adminWorktreePath(projectDir, wiId);
   if (fs.existsSync(canonical)) return canonical;
-  return await findLegacyWorktreeForWiAsync(projectDir, wiId);
+  return findAdminLegacyWorktree(projectDir, wiId);
 }
 
 function lineCount(raw = "") {
@@ -229,7 +229,7 @@ function sumFinite(files, key) {
 export async function buildAdminGitDiffSnapshot({ projectDir, workItems = [], limit = 200 } = {}) {
   const root = path.resolve(projectDir || process.cwd());
   let targetBranch = "main";
-  try { targetBranch = await resolveTargetBranchAsync(root); } catch { targetBranch = "main"; }
+  try { targetBranch = resolveTargetBranchForAdmin(root); } catch { targetBranch = "main"; }
 
   const items = [];
   const flatFiles = [];

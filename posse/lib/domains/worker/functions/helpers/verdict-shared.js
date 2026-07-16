@@ -28,6 +28,7 @@ import {
   countInternalAssessmentRetries,
   getAssessmentInternalRetryLimit,
 } from "./assessment-shared.js";
+import { isAssessorParseRetryBudgetExceeded } from "../execution/assessment-policy.js";
 import { validateScopedPath } from "../../../../shared/scope/functions/validation.js";
 import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
@@ -556,6 +557,18 @@ function _queueInternalAssessmentRetry(
 ) {
   const retryCount = countInternalAssessmentRetries(job.id);
   if (retryCount >= maxRetries) return false;
+  const retryBudget = isAssessorParseRetryBudgetExceeded(job.id);
+  if (retryBudget.exceeded) {
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      event_type: EVENT_TYPES.JOB_ASSESSMENT_PARSE_RETRY_BUDGET_EXCEEDED,
+      actor_type: EVENT_ACTORS.ASSESSOR,
+      message: `Assessment retry budget exceeded (${retryBudget.spent}/${retryBudget.cap} input tokens)`,
+      event_json: JSON.stringify(retryBudget),
+    });
+    return false;
+  }
   let payload = {};
   try {
     payload = job?.payload_json
@@ -579,6 +592,7 @@ function _queueInternalAssessmentRetry(
   }
   const previousTier = job.model_tier || "standard";
   const retryTier = _nextAssessmentRetryTier(previousTier);
+  if (retryTier === previousTier) return false;
   payload._assess_only = true;
   payload._assess_model_tier = retryTier;
   delete payload._assess_model_name;

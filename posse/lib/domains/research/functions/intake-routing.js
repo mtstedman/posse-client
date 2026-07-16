@@ -543,6 +543,12 @@ export function createOneshotDevJob(workItem, {
       risk: 1,
       oneshot: true,
       oneshot_origin: true,
+      verification_contract: {
+        version: 1,
+        required_evidence: ["actual_scoped_file_contents", "scoped_committed_diff"],
+        optional_evidence: ["registered_scoped_tests"],
+        unsupported_optional_methods: "not_applicable",
+      },
       _oneshot_reason: reason,
       _oneshot_source: oneshotSourceForPayload(routing, source),
       _assess_model_tier: "standard",

@@ -2,18 +2,9 @@
 
 import { updateJobStatus } from "../../../../queue/functions/index.js";
 import { C } from "../../../../../shared/format/functions/colors.js";
-import { queueInternalAssessmentRetry } from "../verdict-shared.js";
 
 export function handle(job, verdict, ctx) {
   const { emitLog: log, spawnedJobs, spawnFromAssessor, reasonBrief } = ctx;
-
-  const retryReason = verdict.reasons?.[0] || "assessor blocked pending more verification";
-  if (!verdict?._disable_internal_retry && queueInternalAssessmentRetry(job, verdict, retryReason, {
-    leaseToken: ctx.leaseToken,
-    recordAssessorVerdict: ctx.recordAssessorVerdict,
-  })) {
-    return;
-  }
 
   const changed = typeof ctx.updateJobStatus === "function"
     ? ctx.updateJobStatus("waiting_on_human")

@@ -105,6 +105,12 @@ function isNativeHeartbeatAuthFailure(value) {
   return /heartbeat|posse_key|pulse[\s_-]?token|identity[\s_-]?heartbeat/i.test(String(value || ""));
 }
 
+function isUnsupportedNativeVersionError(error) {
+  return error?.code === "POSSE_PULSE_NATIVE_VERSION_UNSUPPORTED"
+    || error?.code === "POSSE_NATIVE_VERSION_UNSUPPORTED"
+    || error?.remoteCode === "unsupported_native_version";
+}
+
 /**
  * @typedef {Object} RunResult
  * @property {boolean} ok
@@ -165,6 +171,8 @@ export class NativeBinary {
     this._workerAuthHandoffs = new Map();
     /** @type {Map<string, Promise<boolean>>} */
     this._workerAuthGates = new Map();
+    /** Permanent-for-this-artifact route failures. Replacing the handle clears them. */
+    this._workerAuthFailures = new Map();
     this._workerPullManaged = false;
     this._nativeAuthHandshake = null;
     this._nativeAuthHandshakePulseManager = null;
@@ -180,6 +188,8 @@ export class NativeBinary {
     this._configuredWorkerArgs = null;
     /** @type {Promise<void>} Serialize worker configurations whose startup argv differs (ML model roots). */
     this._workerArgsTail = Promise.resolve();
+    /** Exact concurrent Git reads share one serial-worker request. */
+    this._coalescedGitReads = new Map();
     /**
      * Worker→per-call fallback visibility: every time a worker-eligible
      * request degrades to a per-call spawn the daemon layer is unhealthy, and
@@ -381,12 +391,17 @@ export class NativeBinary {
         deliveredRoutes.push(route);
       }
     } catch (error) {
+      if (isUnsupportedNativeVersionError(error)) {
+        for (const route of requested) this._workerAuthFailures.set(route, error);
+      }
       for (const route of requested) this.#resolveWorkerAuthWaiters(route, false);
       appendRunTelemetry("diagnostics", {
         kind: "native.capability_handoff_failed",
         binary: this.name,
         routes: requested,
         code: String(error?.code || "POSSE_CAPABILITY_HANDOFF_FAILED"),
+        remote_code: String(error?.remoteCode || "") || null,
+        status: Number(error?.status) || null,
       });
       // The worker keeps its previous live pulse and asks again. Protected work
       // remains fail-closed if no valid grant can be handed down.
@@ -426,6 +441,7 @@ export class NativeBinary {
   }
 
   async #ensureWorkerRouteAuth(route, fallbackPulse = null) {
+    if (isUnsupportedNativeVersionError(this._workerAuthFailures.get(route))) return false;
     const daemon = this.#daemon();
     const live = this._workerAuthState.get(route)?.envelope;
     if (daemon.isHostAlive() && isValidPulseEnvelope(live)) return true;
@@ -488,7 +504,8 @@ export class NativeBinary {
       if (!isValidPulseEnvelope(fallbackPulse) || String(fallbackPulse?.route || "") !== route) {
         fallbackPulse = null;
       }
-    } catch {
+    } catch (error) {
+      if (isUnsupportedNativeVersionError(error)) this._workerAuthFailures.set(route, error);
       fallbackPulse = null;
     }
     if (!isValidPulseEnvelope(fallbackPulse)) return false;
@@ -572,6 +589,10 @@ export class NativeBinary {
       }
     }
     if (route && !(await this.#ensureWorkerRouteAuth(route))) {
+      const authFailure = this._workerAuthFailures.get(route);
+      if (isUnsupportedNativeVersionError(authFailure)) {
+        return this.#nativeVersionUnsupportedResult(authFailure);
+      }
       this.#noteWorkerFallback("auth_handshake_unavailable", subcommand);
       if (opts.workerFallback === false) return this.#nativeAuthUnavailableResult();
       return this.#runPerCall(subcommand, args, requestOpts);
@@ -813,7 +834,9 @@ export class NativeBinary {
     const inputWithAuth = this.#inputWithNativeAuthSync(opts.input, opts.requiredRoute);
     if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
       this.#retireWorkerAfterAuthFailure();
-      return this.#nativeAuthUnavailableResult();
+      return inputWithAuth.pulseCold
+        ? this.#nativePulseColdResult()
+        : this.#nativeAuthUnavailableResult();
     }
     const res = this._spawnSync(bin, fullArgs, {
       cwd: opts.cwd || process.cwd(),
@@ -847,6 +870,34 @@ export class NativeBinary {
     if (this.workerCapable && opts.worker === true) {
       if (Array.isArray(opts.workerArgs)) {
         return this.#runViaConfiguredWorker(subcommand, args, /** @type {any} */ (opts));
+      }
+      if (this.name === "git"
+        && opts.idempotent !== false
+        && !opts.signal
+        && typeof opts.onProgress !== "function"
+        && (!opts.requiredRoute || opts.requiredRoute === "git:read")) {
+        const input = typeof opts.input === "string"
+          ? opts.input
+          : Buffer.isBuffer(opts.input)
+            ? opts.input.toString("utf8")
+            : "";
+        if (input && input.length <= 64 * 1024) {
+          const key = `${subcommand || ""}\u0000${opts.timeoutMs || ""}\u0000${input}`;
+          const existing = this._coalescedGitReads.get(key);
+          if (existing) {
+            appendRunTelemetry("diagnostics", {
+              kind: "native.worker_request_coalesced",
+              binary: this.name,
+              method: subcommand,
+            });
+            return existing;
+          }
+          const request = Promise.resolve(this.#runViaWorker(subcommand, args, opts)).finally(() => {
+            if (this._coalescedGitReads.get(key) === request) this._coalescedGitReads.delete(key);
+          });
+          this._coalescedGitReads.set(key, request);
+          return request;
+        }
       }
       return this.#runViaWorker(subcommand, args, opts);
     }
@@ -882,6 +933,9 @@ export class NativeBinary {
     }
     return (async () => {
       const inputWithAuth = await this.#attachPulseAsync(parsed, opts.requiredRoute);
+      if (inputWithAuth.error) {
+        return this.#nativeVersionUnsupportedResult(inputWithAuth.error);
+      }
       if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
         this.#retireWorkerAfterAuthFailure();
         return this.#nativeAuthUnavailableResult();
@@ -988,9 +1042,10 @@ export class NativeBinary {
    * remains parent-owned.
    *
    * @param {string[]} [routes]
+   * @param {{ strict?: boolean }} [options]
    * @returns {Promise<Record<string, Record<string, unknown>>>}
    */
-  async workerPulseCapability(routes = []) {
+  async workerPulseCapability(routes = [], { strict = false } = {}) {
     if (!this.keyGated) return {};
     const selected = Array.isArray(routes) && routes.length > 0 ? routes : this.#defaultRoutes();
     const pulses = {};
@@ -1000,11 +1055,16 @@ export class NativeBinary {
       let pulse = null;
       try {
         pulse = await this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route));
-      } catch {
+      } catch (error) {
+        if (strict || isUnsupportedNativeVersionError(error)) throw error;
         pulse = null;
       }
       if (isValidPulseEnvelope(pulse) && String(/** @type {any} */ (pulse).route || "") === route) {
         pulses[route] = { .../** @type {Record<string, unknown>} */ (pulse) };
+      } else if (strict) {
+        const error = new Error(`native pulse token heartbeat auth unavailable for ${this.name}`);
+        error.code = "POSSE_NATIVE_HEARTBEAT_UNAVAILABLE";
+        throw error;
       }
     }
     return pulses;
@@ -1029,6 +1089,8 @@ export class NativeBinary {
     this.#clearWorkerAuthState();
     this._workerAuthHandoffs.clear();
     this._workerAuthGates.clear();
+    this._workerAuthFailures.clear();
+    this._coalescedGitReads.clear();
     this._runtimePulseEnvelopes.clear();
     const daemon = this._daemon;
     this._daemon = null;
@@ -1219,7 +1281,7 @@ export class NativeBinary {
    *
    * @param {{ input: Buffer | string | undefined, request: Record<string, unknown> | null, wasBuffer: boolean }} parsed
    * @param {string | undefined} requiredRoute
-   * @returns {Promise<{ input: Buffer | string | undefined, request: Record<string, unknown> | null, route: string | null }>}
+   * @returns {Promise<{ input: Buffer | string | undefined, request: Record<string, unknown> | null, route: string | null, error?: Error }>}
    */
   async #attachPulseAsync(parsed, requiredRoute) {
     const route = this.#requiredRouteFor(requiredRoute);
@@ -1227,9 +1289,18 @@ export class NativeBinary {
     if (!pulse) {
       try {
         pulse = await this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route));
-      } catch {
+      } catch (error) {
         // Mint failures fail closed below; error details (which never include
         // token material) are not propagated into the child request.
+        if (isUnsupportedNativeVersionError(error)) {
+          this._workerAuthFailures.set(route, error);
+          return {
+            input: this.#encodeNativeRequest(/** @type {Record<string, unknown>} */ (parsed.request), parsed.wasBuffer),
+            request: parsed.request,
+            route,
+            error,
+          };
+        }
         pulse = null;
       }
     }
@@ -1256,11 +1327,11 @@ export class NativeBinary {
    *
    * @param {Buffer | string | undefined} input
    * @param {string | undefined} requiredRoute
-   * @returns {{ input: Buffer | string | undefined, request: Record<string, unknown> | null, route: string | null }}
+   * @returns {{ input: Buffer | string | undefined, request: Record<string, unknown> | null, route: string | null, pulseCold?: boolean }}
    */
   #inputWithNativeAuthSync(input, requiredRoute) {
     const parsed = this.#parseNativeProtocolInput(input);
-    if (!parsed.protocol) return { input: parsed.input, request: parsed.request, route: null };
+    if (!parsed.protocol) return { input: parsed.input, request: parsed.request, route: null, pulseCold: false };
     const route = this.#requiredRouteFor(requiredRoute);
     let pulse = this.#runtimePulseFor(route);
     if (!pulse) {
@@ -1276,6 +1347,7 @@ export class NativeBinary {
         input: this.#encodeNativeRequest(/** @type {Record<string, unknown>} */ (parsed.request), parsed.wasBuffer),
         request: parsed.request,
         route,
+        pulseCold: true,
       };
     }
     const requestWithPulse = { .../** @type {Record<string, unknown>} */ (parsed.request), pulse };
@@ -1283,6 +1355,7 @@ export class NativeBinary {
       input: this.#encodeNativeRequest(requestWithPulse, parsed.wasBuffer),
       request: requestWithPulse,
       route,
+      pulseCold: false,
     };
   }
 
@@ -1352,6 +1425,7 @@ export class NativeBinary {
    */
   #noteWorkerPulse(route, envelope) {
     if (!route || !isValidPulseEnvelope(envelope)) return;
+    this._workerAuthFailures.delete(route);
     const existing = this._workerAuthState.get(route);
     if (existing && existing.envelope?.token === envelope.token) {
       if (this._workerPullManaged && existing.timer) {
@@ -1393,7 +1467,22 @@ export class NativeBinary {
       envelope = await this.#pulseManager().getPulseEnvelope(
         this.#versionedPulseOptions(route, true),
       );
-    } catch {
+    } catch (error) {
+      if (isUnsupportedNativeVersionError(error)) {
+        this._workerAuthFailures.set(route, error);
+        state.expired = true;
+        const rejectedAt = Math.floor(Date.now() / 1000);
+        this.#sendWorkerControlFrame(this.#expiredControlFrame(route, rejectedAt));
+        appendRunTelemetry("diagnostics", {
+          kind: "native.version_rejected",
+          binary: this.name,
+          route,
+          code: String(error?.code || "POSSE_PULSE_NATIVE_VERSION_UNSUPPORTED"),
+          remote_code: String(error?.remoteCode || "unsupported_native_version"),
+          status: Number(error?.status) || null,
+        });
+        return;
+      }
       envelope = null;
     }
     if (isValidPulseEnvelope(envelope)) {
@@ -1551,5 +1640,35 @@ export class NativeBinary {
       } catch { /* fall through to signal */ }
     }
     fallback();
+  }
+
+  /** @param {any} source @returns {RunResult} */
+  #nativeVersionUnsupportedResult(source) {
+    const error = new Error(`native artifact version for ${this.name} is no longer authorized; artifact reconciliation is required`);
+    error.code = "POSSE_NATIVE_VERSION_UNSUPPORTED";
+    error.status = source?.status ?? null;
+    error.remoteCode = source?.remoteCode || "unsupported_native_version";
+    return {
+      ok: false,
+      code: null,
+      signal: null,
+      stdout: "",
+      stderr: error.message,
+      error,
+    };
+  }
+
+  /** @returns {RunResult} */
+  #nativePulseColdResult() {
+    const error = new Error(`native pulse token cache cold for ${this.name}; background heartbeat mint requested`);
+    error.code = "POSSE_NATIVE_PULSE_COLD";
+    return {
+      ok: false,
+      code: null,
+      signal: null,
+      stdout: "",
+      stderr: error.message,
+      error,
+    };
   }
 }

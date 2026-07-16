@@ -11,6 +11,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_PRODUCTION_TOKEN_TTL_MS = 10 * 60 * 1000;
 const MAX_DEVELOPMENT_TOKEN_TTL_MS = 2 * 60 * 60 * 1000;
 const MAX_HEARTBEAT_RESPONSE_BYTES = 64 * 1024;
+const NATIVE_VERSION_REJECTION_TTL_MS = 60_000;
 // Native pulse contract (posse_protocol native_auth): workers should request
 // refresh no later than 15 seconds before expiry.
 const NATIVE_PULSE_REFRESH_SKEW_SECONDS = 15;
@@ -59,6 +60,8 @@ export class PulseTokenManager {
     this._cache = new Map();
     /** @type {Map<string, Promise<{ token: string, envelope: Readonly<NativePulseEnvelope> | null }>>} */
     this._refreshes = new Map();
+    /** @type {Map<string, { rejectedAt: number, status: number | undefined, remoteCode: string | undefined }>} */
+    this._nativeVersionRejections = new Map();
     this._generation = 0;
     this._heartbeatTimer = null;
     this._heartbeatRunning = false;
@@ -179,6 +182,11 @@ export class PulseTokenManager {
     }
     const cacheKey = `${pulseCacheKey(rawKey, policy)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`;
     const now = this.now();
+    const rejected = this._nativeVersionRejections.get(cacheKey);
+    if (rejected && now - rejected.rejectedAt < NATIVE_VERSION_REJECTION_TTL_MS) {
+      throw unsupportedNativeVersionError(rejected);
+    }
+    if (rejected) this._nativeVersionRejections.delete(cacheKey);
     const cached = this._cache.get(cacheKey);
     if (!refresh && cached?.envelope && now < cached.refreshAt && now < cached.expiresAt) {
       assertExactRoute(cached.routes, route);
@@ -236,7 +244,17 @@ export class PulseTokenManager {
         throw pulseError("POSSE_PULSE_AUTH_CHANGED", "heartbeat authentication changed while the pulse was being minted");
       }
       this._cache.set(cacheKey, entry);
+      this._nativeVersionRejections.delete(cacheKey);
       return { token: entry.token, envelope: entry.envelope };
+    }).catch((error) => {
+      if (error?.code === "POSSE_PULSE_NATIVE_VERSION_UNSUPPORTED") {
+        this._nativeVersionRejections.set(cacheKey, {
+          rejectedAt: this.now(),
+          status: error?.status,
+          remoteCode: error?.remoteCode,
+        });
+      }
+      throw error;
     }).finally(() => {
       if (this._refreshes.get(cacheKey) === promise) this._refreshes.delete(cacheKey);
     });
@@ -248,6 +266,7 @@ export class PulseTokenManager {
     this._generation += 1;
     this._cache.clear();
     this._refreshes.clear();
+    this._nativeVersionRejections.clear();
     this.authManager.clearAuthenticationState?.();
   }
 
@@ -348,15 +367,23 @@ export class PulseTokenManager {
     let text;
     try {
       if (response.status === 401 || response.status === 403) this.clearAuthentication();
+      // The request deadline and response-size ceiling apply to errors too.
+      // Preserve only the server's bounded machine code; arbitrary remote
+      // text is never reflected into errors or child processes.
+      text = await abortable(boundedResponseText(response), ac.signal);
       if (!response.ok) {
-        const err = pulseError("POSSE_PULSE_REJECTED", `heartbeat request was rejected with HTTP ${response.status}`);
+        const remoteCode = heartbeatErrorCode(text);
+        const code = remoteCode === "unsupported_native_version"
+          ? "POSSE_PULSE_NATIVE_VERSION_UNSUPPORTED"
+          : "POSSE_PULSE_REJECTED";
+        const err = pulseError(code, `heartbeat request was rejected with HTTP ${response.status}`);
         err.status = response.status;
+        if (remoteCode) err.remoteCode = remoteCode;
         throw err;
       }
       // The request deadline covers the complete response, not only receipt of
       // headers. Otherwise a peer can send 200 headers and stall the body
       // forever while every caller waits on the shared in-flight mint.
-      text = await abortable(boundedResponseText(response), ac.signal);
     } catch (err) {
       if (ac.signal.aborted || err?.name === "AbortError") {
         throw pulseError("POSSE_PULSE_TIMEOUT", `heartbeat request timed out after ${timeoutMs}ms`);
@@ -625,6 +652,17 @@ async function boundedResponseText(response) {
   return text;
 }
 
+function heartbeatErrorCode(text) {
+  if (!text) return null;
+  try {
+    const body = JSON.parse(text);
+    const code = String(body?.error?.code ?? body?.code ?? "").trim();
+    return /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : null;
+  } catch {
+    return null;
+  }
+}
+
 function abortable(promise, signal) {
   if (signal.aborted) return Promise.reject(abortError());
   return new Promise((resolve, reject) => {
@@ -660,6 +698,16 @@ function positiveNumber(value, fallback) {
 function pulseError(code, message) {
   const err = new Error(message);
   err.code = code;
+  return err;
+}
+
+function unsupportedNativeVersionError(rejected) {
+  const err = pulseError(
+    "POSSE_PULSE_NATIVE_VERSION_UNSUPPORTED",
+    "heartbeat rejected this native artifact version; artifact reconciliation is required",
+  );
+  if (rejected?.status != null) err.status = rejected.status;
+  if (rejected?.remoteCode) err.remoteCode = rejected.remoteCode;
   return err;
 }
 

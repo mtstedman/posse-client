@@ -308,7 +308,7 @@ export async function callProvider(promptText, {
       || deterministicReadMcp.serverConfig?.providerHomeEnv
       || null;
     const temp = makeTempOutputFile();
-    const cleanupRunTemps = (mcpAttachProofContext = null) => {
+    const cleanupRunTemps = (mcpAttachProofContext = null, { syncConfigCleanup = false } = {}) => {
       const releaseResult = cleanupDeterministicMcpSession();
       let attachProofResult = null;
       if (mcpAttachProofContext) {
@@ -329,10 +329,16 @@ export async function callProvider(promptText, {
         }
       }
       cleanupTempDir(temp.dir);
-      configRoute.cleanup();
+      if (syncConfigCleanup) {
+        configRoute.cleanup();
+      } else {
+        void Promise.resolve(configRoute.cleanupAsync?.()).catch(() => {});
+      }
       return { releaseResult, attachProofResult };
     };
-    const clearExitCleanup = codexExitCleanupRegistry.register(cleanupRunTemps);
+    const clearExitCleanup = codexExitCleanupRegistry.register(
+      () => cleanupRunTemps(null, { syncConfigCleanup: true }),
+    );
     const forceReadOnlySandbox = !!(deterministicReadMcp.active && allowWrite);
     logProviderMcpSurfaceTelemetry({
       providerName: "codex",

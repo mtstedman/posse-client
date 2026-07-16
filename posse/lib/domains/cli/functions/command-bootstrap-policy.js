@@ -8,8 +8,8 @@ const POLICY_ENTRIES = [
   { name: "add", requiresWritableArtifacts: true },
   { name: "queue", readOnly: true, requiresWritableArtifacts: false },
   { name: "plan", requiresWritableArtifacts: true },
-  { name: "run", requiresWritableArtifacts: true, requiresProvider: true, refreshContextAfter: true },
-  { name: "go", requiresWritableArtifacts: true, requiresProvider: true, refreshContextAfter: true },
+  { name: "run", requiresWritableArtifacts: true, requiresProvider: true, requiresNativeGit: true, refreshContextAfter: true },
+  { name: "go", requiresWritableArtifacts: true, requiresProvider: true, requiresNativeGit: true, refreshContextAfter: true },
   { name: "status", readOnly: true, requiresWritableArtifacts: false },
   { name: "serve", requiresWritableArtifacts: false },
   { name: "health", readOnly: true, requiresWritableArtifacts: false },
@@ -42,10 +42,10 @@ const POLICY_ENTRIES = [
   // agent/provider dispatch and must not initialize artifact or native Git
   // infrastructure before Bossy can approve a completed work item.
   { name: "merge", requiresWritableArtifacts: false },
-  { name: "prune", requiresWritableArtifacts: false },
-  { name: "purge", requiresWritableArtifacts: false },
-  { name: "cleanup", requiresWritableArtifacts: false },
-  { name: "clear", requiresWritableArtifacts: false },
+  { name: "prune", requiresWritableArtifacts: false, requiresNativeGit: true },
+  { name: "purge", requiresWritableArtifacts: false, requiresNativeGit: true },
+  { name: "cleanup", requiresWritableArtifacts: false, requiresNativeGit: true },
+  { name: "clear", requiresWritableArtifacts: false, requiresNativeGit: true },
 ];
 
 const UNKNOWN_COMMAND_BOOTSTRAP_POLICY = Object.freeze({
@@ -54,6 +54,7 @@ const UNKNOWN_COMMAND_BOOTSTRAP_POLICY = Object.freeze({
   readOnly: true,
   requiresWritableArtifacts: false,
   requiresProvider: false,
+  requiresNativeGit: false,
   refreshContextAfter: false,
 });
 
@@ -63,6 +64,7 @@ function normalizePolicyEntry(entry) {
     readOnly: Boolean(entry.readOnly),
     requiresWritableArtifacts: entry.requiresWritableArtifacts ?? !entry.readOnly,
     requiresProvider: Boolean(entry.requiresProvider),
+    requiresNativeGit: Boolean(entry.requiresNativeGit),
     refreshContextAfter: Boolean(entry.refreshContextAfter),
     aliases: Object.freeze(entry.aliases || []),
     name: entry.name,
@@ -101,6 +103,10 @@ export function requiresWritableArtifactsForCommand(command) {
 
 export function requiresProviderForCommand(command) {
   return getCommandBootstrapPolicy(command).requiresProvider;
+}
+
+export function requiresNativeGitForCommand(command) {
+  return getCommandBootstrapPolicy(command).requiresNativeGit;
 }
 
 export function shouldRefreshContextAfterCommand(command) {

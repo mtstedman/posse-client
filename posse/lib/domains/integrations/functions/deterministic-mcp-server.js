@@ -313,6 +313,7 @@ let mcpMessageSessionScoped = false;
 // unbounded re-delivery and zero delivery audit on MCP).
 let mcpAttemptId = Number(bootConfig.attemptId) || null;
 let mcpAgentCallId = Number(bootConfig.agentCallId) || null;
+const emptyOperatorFeedbackPolls = new Map();
 let agentAuthorityError = null;
 let mcpPromptChars = Math.max(0, Number(bootConfig.promptChars) || 0);
 let atlasAvailable = bootConfig.atlasAvailable === true;
@@ -1783,15 +1784,42 @@ function appendOperatorFeedbackSignal(text, toolName) {
   return signal ? `${text}${signal}` : text;
 }
 
+function operatorFeedbackPollKey() {
+  if (!mcpJobId) return null;
+  return `${mcpJobId}:${mcpAttemptId || `call-${mcpAgentCallId || "job"}`}`;
+}
+
+function setEmptyOperatorFeedbackPolls(key, count) {
+  if (!key) return;
+  if (count <= 0) emptyOperatorFeedbackPolls.delete(key);
+  else emptyOperatorFeedbackPolls.set(key, count);
+  if (emptyOperatorFeedbackPolls.size > 1000) {
+    emptyOperatorFeedbackPolls.delete(emptyOperatorFeedbackPolls.keys().next().value);
+  }
+}
+
+function resetEmptyOperatorFeedbackPollsAfterWork(toolName) {
+  if (LIVE_CHANNEL_TOOL_NAMES.has(toolName)) return;
+  setEmptyOperatorFeedbackPolls(operatorFeedbackPollKey(), 0);
+}
+
 function getOperatorFeedback(args = {}) {
   const scopeError = liveChannelSessionScopeError("get_operator_feedback");
   if (scopeError) return scopeError;
   if (!mcpJobId) return "No active job context is available for get_operator_feedback.";
+  const pollKey = operatorFeedbackPollKey();
+  const priorEmptyPolls = emptyOperatorFeedbackPolls.get(pollKey) || 0;
+  if (priorEmptyPolls >= 1 && countPendingOperatorFeedbackForJob(mcpJobId) <= 0) {
+    const error = new Error("POSSE_FEEDBACK_POLL_LIMIT: no operator feedback is pending. Stop polling; use an issued work tool or finish with the appropriate result.");
+    error.code = "POSSE_FEEDBACK_POLL_LIMIT";
+    throw error;
+  }
   const feedback = getOperatorFeedbackForJob({
     job_id: mcpJobId,
     attempt_id: mcpAttemptId,
     limit: args.limit,
   });
+  setEmptyOperatorFeedbackPolls(pollKey, feedback.length === 0 ? priorEmptyPolls + 1 : 0);
   return JSON.stringify({
     ok: true,
     acknowledgement_required: feedback.length > 0,
@@ -2789,6 +2817,7 @@ async function handleRequest(msg) {
       const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
       const responseText = appendOperatorFeedbackSignal(text, toolName);
       const ok = isSuccessfulNativeToolResult(text);
+      if (ok) resetEmptyOperatorFeedbackPollsAfterWork(toolName);
       if (ok && toolName !== "chain_verdict") {
         noteResearchExplorationStep({ toolName });
       }

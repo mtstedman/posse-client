@@ -23,6 +23,31 @@ export function cleanupTempDir(dir) {
   }
 }
 
+function cleanupConfigSpillDirAsync(dir) {
+  if (!dir) return Promise.resolve();
+  const parent = path.dirname(dir);
+  const tombstone = path.join(
+    parent,
+    `${path.basename(dir)}.cleanup-${process.pid}-${Date.now()}`,
+  );
+  let target = dir;
+  try {
+    fs.renameSync(dir, tombstone);
+    target = tombstone;
+  } catch (error) {
+    if (error?.code === "ENOENT") return Promise.resolve();
+  }
+  return fs.promises.rm(target, { recursive: true, force: true }).catch(() => {});
+}
+
+function cleanupStaleConfigSpills(parent) {
+  void fs.promises.readdir(parent, { withFileTypes: true }).then((entries) => Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory() && entry.name.includes(".cleanup-"))
+      .map((entry) => fs.promises.rm(path.join(parent, entry.name), { recursive: true, force: true }).catch(() => {})),
+  )).catch(() => {});
+}
+
 const CODEX_CONFIG_ARG_SPILL_SINGLE_LIMIT = 6000;
 const CODEX_CONFIG_ARG_SPILL_TOTAL_LIMIT = 12000;
 
@@ -57,6 +82,7 @@ export function prepareCodexConfigForSpawn(configOverrides = [], {
       configOverrides: overrides,
       codexHome: null,
       cleanup: () => {},
+      cleanupAsync: async () => {},
       spilled: false,
     };
   }
@@ -64,6 +90,7 @@ export function prepareCodexConfigForSpawn(configOverrides = [], {
   const sourceHome = getCodexHomeFromEnv(env);
   const parent = tempParent || path.join(sourceHome, ".posse-run-homes");
   fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  cleanupStaleConfigSpills(parent);
   bestEffortChmod(parent, 0o700);
   const codexHome = fs.mkdtempSync(path.join(parent, "codex-"));
   bestEffortChmod(codexHome, 0o700);
@@ -96,6 +123,7 @@ export function prepareCodexConfigForSpawn(configOverrides = [], {
     configOverrides: [],
     codexHome,
     cleanup: () => cleanupTempDir(codexHome),
+    cleanupAsync: () => cleanupConfigSpillDirAsync(codexHome),
     spilled: true,
   };
 }

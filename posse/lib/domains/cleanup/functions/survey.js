@@ -9,8 +9,7 @@ import path from "path";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { listWorkItems } from "../../queue/functions/index.js";
-import { dirSizeBytes, worktreeRoot } from "../../git/functions/worktree.js";
-import { gitExec, gitExecSafe } from "../../git/functions/utils.js";
+import { adminGitExec, adminWorktreeRoot } from "../../git/functions/admin-git.js";
 
 const TERMINAL_WI_STATUS = new Set(TERMINAL_WORK_ITEM_STATUSES);
 
@@ -18,7 +17,11 @@ function git(argv, cwd) {
   if (!Array.isArray(argv)) {
     throw new TypeError(`survey.git requires an array of args, got ${typeof argv}`);
   }
-  return gitExecSafe(argv, cwd, { timeoutMs: 10000 });
+  try {
+    return adminGitExec(argv, cwd, { timeoutMs: 10000 });
+  } catch {
+    return "";
+  }
 }
 
 function gitStatus(argv, cwd) {
@@ -28,12 +31,30 @@ function gitStatus(argv, cwd) {
   try {
     return {
       ok: true,
-      stdout: gitExec(argv, cwd, { timeoutMs: 10000 }).trim(),
+      stdout: adminGitExec(argv, cwd, { timeoutMs: 10000 }).trim(),
       error: null,
     };
   } catch (err) {
     return { ok: false, stdout: "", error: err?.message || String(err) };
   }
+}
+
+function directorySizeBytes(root) {
+  let total = 0;
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    let entries;
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) pending.push(full);
+      else if (entry.isFile()) {
+        try { total += fs.statSync(full).size; } catch { /* raced with cleanup */ }
+      }
+    }
+  }
+  return total;
 }
 
 function humanizeAge(ms) {
@@ -116,7 +137,7 @@ function surveySnapshots(projectDir) {
         wiId: manifest.work_item_id ?? null,
         trackedCount: Array.isArray(manifest.tracked_dirty) ? manifest.tracked_dirty.length : 0,
         untrackedCount: Array.isArray(manifest.untracked) ? manifest.untracked.length : 0,
-        sizeBytes: dirSizeBytes(snapshotPath),
+        sizeBytes: directorySizeBytes(snapshotPath),
         headSha: manifest.head_sha || null,
         capturedAt: Number.isFinite(capturedAt) ? new Date(capturedAt).toISOString() : null,
       });
@@ -163,7 +184,7 @@ function surveyBranches(projectDir, targetBranch) {
 }
 
 function surveyWorktrees(projectDir) {
-  const root = worktreeRoot(projectDir);
+  const root = adminWorktreeRoot(projectDir);
   if (!fs.existsSync(root)) return [];
   const entries = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory() && e.name.startsWith("wi-"));
   const wis = new Map(listWorkItems().map((w) => [w.id, w]));
