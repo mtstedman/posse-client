@@ -2306,12 +2306,17 @@ export class RunSession {
       },
     });
   } finally {
-    if (!booted) removeBootSignalHandlers();
+    if (!booted) {
+      removeBootSignalHandlers();
+      // scheduler.boot() can throw when a fatal pre-loop readiness check
+      // fails. That skips the ordinary !booted return path below, so stop the
+      // panel here as well or its render timer leaks into the next run/test.
+      try { stopBootMonitor({ final: true }); } catch { /* observational */ }
+    }
   }
   if (!booted) {
     // Boot failed/aborted — tear the panel down so we leave clean stdout
     // for the user-facing message below.
-    try { stopBootMonitor({ final: true }); } catch { /* observational */ }
     if (bootShutdownRequested) {
       if (bootCleanupPromise) await bootCleanupPromise;
       console.log(`  ${C.yellow}Scheduler boot interrupted. Lock released; safe to restart.${C.reset}\n`);
