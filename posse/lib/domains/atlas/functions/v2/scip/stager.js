@@ -1831,14 +1831,24 @@ function runScipIndexer(plan, { cwd, onProgress = null }) {
     }
     timer = setTimeout(() => {
       killProcessTree(child);
+      // SIGTERM is advisory for a wedged indexer. Escalate to SIGKILL after a
+      // short grace so ignored terminations don't accumulate live orphans
+      // holding piped stdio handles in the parent process.
+      const killTimer = setTimeout(() => {
+        if (child.exitCode == null) killProcessTree(child, { force: true });
+      }, SCIP_INDEXER_KILL_GRACE_MS);
+      killTimer.unref?.();
       finish({ ok: false, error: `timed out after ${plan.timeoutMs}ms`, sourceFiles: syntheticTotal });
     }, plan.timeoutMs);
     timer.unref?.();
   });
 }
 
-function killProcessTree(child) {
+const SCIP_INDEXER_KILL_GRACE_MS = 5000;
+
+function killProcessTree(child, { force = false } = {}) {
   if (!child?.pid) return false;
+  const signal = force ? "SIGKILL" : "SIGTERM";
   if (process.platform === "win32") {
     try {
       const killed = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
@@ -1851,13 +1861,13 @@ function killProcessTree(child) {
     }
   } else {
     try {
-      process.kill(-child.pid, "SIGTERM");
+      process.kill(-child.pid, signal);
       return true;
     } catch {
       // Fall back to killing the direct child below.
     }
   }
-  try { return child.kill("SIGTERM"); } catch { return false; }
+  try { return child.kill(signal); } catch { return false; }
 }
 
 /**

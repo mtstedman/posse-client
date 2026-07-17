@@ -1,6 +1,6 @@
 import { TOOL_INSPECT_FILE } from "../../../worker/functions/helpers/file-inspector.js";
 import { TOOL_GIT_HISTORY } from "../../../git/functions/history.js";
-import { resolveAtlasToolGateEnabled } from "./gate-settings.js";
+import { resolveAtlasToolGateEnabled, resolveAtlasProseDedup } from "./gate-settings.js";
 import { ATLAS_INDEXABLE_SOURCE_EXTENSIONS } from "./source-file-gate.js";
 import { formatAtlasBackendText, atlasBackendLabel } from "../atlas-label.js";
 import { atlasDescriptorSchemaForAction } from "../../../atlas/functions/v2/contracts/tool-schemas.js";
@@ -133,10 +133,6 @@ export const HIDDEN_ATLAS_SURFACE_ACTIONS = Object.freeze(new Set([
   "runtime.queryOutput",
   "context.summary",
   "usage.stats",
-  // Deprecated compatibility alias: symbol.card accepts the same
-  // symbolIds/symbolRefs batch inputs directly, so the plural action stays
-  // dispatchable but is hidden from provider surfaces and gateway enums.
-  "symbol.cards",
 ]));
 
 export function isAtlasActionSurfaced(action) {
@@ -392,6 +388,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "workflow": { access: "atlas", summary: "Execute multi-step native ATLAS workflows with data transforms and references." },
   "info": { access: "atlas", summary: "Report native ATLAS v2 runtime, storage, view freshness, ledger, and policy diagnostics." },
   "fetch_ref": { access: "atlas", summary: "Fetch one or more opaque refs from the current agent scope. Returned structured data may contain an immediate next-page ref; follow it only when deeper results are needed and never route it through the producer tool." },
+  "create_ref": { access: "atlas", summary: "Store an evidence chunk (inline text or a server-side slice of an existing ref) and get back a citable #ref stub for handoffs. Batchable via chunks[]; optional note travels with the stub. Synthesis stays prose; evidence moves as refs." },
   "repo.register": { access: "atlas", summary: "Register a repository with ATLAS v2 and initialize ledger/view storage." },
   "repo.status": { access: "atlas", summary: "Get ATLAS repository status, health, and latest version identifiers." },
   "repo.overview": { access: "atlas", summary: "Fetch ATLAS repository summaries, indexed coverage, directory summaries, and hotspots." },
@@ -402,7 +399,6 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "buffer.status": { access: "atlas", summary: "Inspect active ATLAS v2 editor buffer overlays." },
   "symbol.search": { access: "atlas", summary: "Search indexed symbols through ATLAS for targeted semantic discovery." },
   "symbol.card": { access: "atlas", summary: "Fetch compact symbol cards without loading whole files: one card by symbolId/symbolRef, or a batch with per-item errors via symbolIds/symbolRefs." },
-  "symbol.cards": { access: "atlas", summary: "Deprecated compatibility alias for symbol.card, which accepts the same symbolIds/symbolRefs batch inputs directly." },
   "symbol.overview": { access: "atlas", summary: "List compact call/reference sites for a symbol without full caller cards." },
   "tree.overview": { access: "atlas", summary: "Top-level code-tree orientation: root containment page plus the compressed-tree labeled area map." },
   "tree.branch": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels. Structure only — for exact file/import/fan-in inventory, follow with code.structure; for content intake, follow with code.survey." },
@@ -441,6 +437,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
 
 const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
   "fetch_ref",
+  "create_ref",
   "repo.overview",
   "tree.overview",
   "tree.scope",
@@ -1139,16 +1136,29 @@ export function renderAtlasRoleContract(role, opts = {}) {
   // (it's only loaded when the role's ATLAS attachment is active). The
   // evidence-gap selection rules are emitted by renderRouteUsageLines. The
   // closing block only needs fallback policy and the anti-fabrication rule.
+  // L5b (TOKEN-LEVERS): the handoff atlas-context prose already delivers the
+  // full retrieval/fallback policy at runtime; when atlas_prose_dedup is on we
+  // emit a compact single-statement variant here instead of the full block.
+  // Gated on runtime naming so checked-in generated contracts are unaffected.
+  const proseDedup = hasRuntimeAtlasNaming(opts) && resolveAtlasProseDedup();
   lines.push(
     "",
     ...renderRouteUsageLines(normalizedRole, routeTools, opts),
     "",
-    gateEnabled
-      ? `Use deterministic file/search/read tools only for a named evidence gap after targeted ${label} retrieval, when ${label} is unavailable or insufficient, or when you have mutated files and need exact current worktree state.`
-      : `Use deterministic file/search/read tools for a named evidence gap when ${label} is unavailable or insufficient, or when you have mutated files and need exact current worktree state.`,
-    `Use deterministic git/test/build/shell tools when those operations are not exposed through ${label}.`,
-    "Do not invent missing repo content.",
   );
+  if (proseDedup) {
+    lines.push(
+      `Use deterministic file/search/read/git/test/build/shell tools only for a named evidence gap or for operations ${label} does not expose; do not invent missing repo content.`,
+    );
+  } else {
+    lines.push(
+      gateEnabled
+        ? `Use deterministic file/search/read tools only for a named evidence gap after targeted ${label} retrieval, when ${label} is unavailable or insufficient, or when you have mutated files and need exact current worktree state.`
+        : `Use deterministic file/search/read tools for a named evidence gap when ${label} is unavailable or insufficient, or when you have mutated files and need exact current worktree state.`,
+      `Use deterministic git/test/build/shell tools when those operations are not exposed through ${label}.`,
+      "Do not invent missing repo content.",
+    );
+  }
 
   return `${lines.join("\n")}\n`;
 }

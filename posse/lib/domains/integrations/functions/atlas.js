@@ -883,6 +883,11 @@ async function runAtlasV2BootWarmWorkerThread({
           purpose,
           error: errorForTelemetry(err),
         });
+        // Terminate like the "result" path: the worker keeps a live
+        // parentPort listener, so leaving it running after a posted error
+        // pins the parent event loop forever (the thread has no other exit).
+        try { worker.unref?.(); } catch { /* best effort: error is already in hand */ }
+        try { worker.terminate().catch(() => undefined); } catch { /* worker may already be gone */ }
         finish(reject, err);
       }
     });
@@ -1926,6 +1931,9 @@ function shouldAutoRestageScip(config = {}) {
 export function reconcileAtlasDriftIfIdle(opts = {}) {
   const config = opts?.config || getAtlasIntegrationConfig();
   if (config.driftCheckEnabled !== true) return { skipped: "drift_check_disabled", backend: "atlas-v2" };
+  if (!config.enabled || !shouldUseAtlasV2({ config }) || !isAtlasIndexMaintenanceEnabled(config)) {
+    return { skipped: "atlas_disabled", backend: "atlas-v2" };
+  }
   if (shouldAutoRestageScip(config)) {
     return { skipped: "async_required_for_scip_restage", backend: "atlas-v2" };
   }
@@ -1935,21 +1943,35 @@ export function reconcileAtlasDriftIfIdle(opts = {}) {
 export async function reconcileAtlasDriftIfIdleAsync(opts = {}) {
   const config = opts?.config || getAtlasIntegrationConfig();
   if (config.driftCheckEnabled !== true) return { skipped: "drift_check_disabled", backend: "atlas-v2" };
+  // Match the sibling warm entry points: drift restage is index maintenance,
+  // so a disabled / non-v2 / maintenance-off ATLAS must not run SCIP staging.
+  if (!config.enabled || !shouldUseAtlasV2({ config }) || !isAtlasIndexMaintenanceEnabled(config)) {
+    return { skipped: "atlas_disabled", backend: "atlas-v2" };
+  }
   const idle = typeof opts?.isWorkerIdle === "function" ? !!opts.isWorkerIdle() : true;
   if (!idle) return { skipped: "workers_busy", backend: "atlas-v2" };
   const storage = repoStorageFor({ cwd: opts?.cwd, config });
   if (shouldAutoRestageScip(config)) {
-    const staged = await ensureScipStaged({
+    // Run the restage in the BACKGROUND and report completion via onStatus.
+    // The caller is the scheduler run loop: awaiting ensureScipStaged here
+    // wedged all dispatch/maintenance behind SCIP staging (up to the cold
+    // index timeout per language). Returning immediately re-arms the
+    // scheduler's drift-reindex in-flight tracking + failsafe instead.
+    const onStatus = typeof opts?.onStatus === "function" ? opts.onStatus : null;
+    const repoId = storage.repo?.repoId || null;
+    ensureScipStaged({
       repoRoot: storage.repoRoot,
       config,
       onProgress: opts?.onProgress,
-    });
-    return {
-      attempted: staged.staged === true,
-      skipped: staged.staged ? undefined : (staged.reason || "scip_restaged_not_needed"),
-      backend: "atlas-v2",
-      scip: staged,
-    };
+    }).then(
+      (staged) => {
+        try { onStatus?.({ ok: true, repoId, staged }); } catch { /* observational */ }
+      },
+      (err) => {
+        try { onStatus?.({ ok: false, repoId, error: err?.message || String(err) }); } catch { /* observational */ }
+      },
+    );
+    return { attempted: true, background: true, backend: "atlas-v2" };
   }
   return { skipped: "atlas_v2_views_rebuildable", backend: "atlas-v2" };
 }

@@ -36,6 +36,7 @@ const POLICY_ENTRIES = [
   { name: "mcp-status", readOnly: true, requiresWritableArtifacts: false },
   { name: "codex-models", readOnly: true, requiresWritableArtifacts: false },
   { name: "local-models", requiresWritableArtifacts: false },
+  { name: "native-binaries", requiresWritableArtifacts: false },
   { name: "windows-events", readOnly: true, requiresWritableArtifacts: false },
   { name: "admin", requiresWritableArtifacts: false },
   // Operator merge owns its direct-Git checks and DB updates. It is not an

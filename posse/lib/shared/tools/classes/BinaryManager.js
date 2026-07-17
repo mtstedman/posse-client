@@ -22,6 +22,8 @@ import {
   VALID_BINARY_NAMES,
   nativeBinaryEntry,
   nativeBinaryExactVersion,
+  nativeBinaryIsKeyGated,
+  nativeBinaryReleaseSource,
   nativeBinaryRequiresIssuedVersion,
 } from "../../../catalog/binary.js";
 import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
@@ -31,6 +33,10 @@ import {
   findVerifiedNativeBinaryArtifact,
   invalidateNativeArtifactCache,
 } from "../../native/functions/artifact-download.js";
+import {
+  ensureGithubReleaseBinary,
+  resolveReleaseVersion,
+} from "../../native/functions/release-download.js";
 import { NativeBinary } from "./NativeBinary.js";
 
 export class BinaryManager {
@@ -447,6 +453,11 @@ export class BinaryManager {
   }
 
   async _ensureRemoteArtifact(name, { refresh = false, dryRun = false, onProgress = null } = {}) {
+    // Release-channel binaries (bossy) are sourced from public GitHub releases,
+    // not the pulse artifact service, so they take a separate installer.
+    if (nativeBinaryReleaseSource(name)) {
+      return this._ensureReleaseArtifact(name, { refresh, dryRun, onProgress });
+    }
     const handle = this.binary(name);
     let version = nativeBinaryExactVersion(name);
     let issuedVersion = null;
@@ -513,6 +524,28 @@ export class BinaryManager {
           ? await this._activateCachedVersion(name, handle, version)
           : null;
         if (cachedCurrent) return { ...cachedCurrent, current: true };
+      }
+      // Optional binaries (non-heartbeat-gated, no required issued version) can
+      // ship without the artifact service issuing a version yet — e.g. bossy,
+      // the user-facing fleet TUI, whose committed lib/bin/bossy tree is the
+      // documented staged fallback. When no version is issued, serve that
+      // committed build instead of failing the build/doctor gate with
+      // version_not_issued. The refresh path above still downloads a newer
+      // issued version the moment the service starts publishing one, so this is
+      // graceful-until-issued, not a permanent pin.
+      if (!version
+        && !nativeBinaryIsKeyGated(name)
+        && !nativeBinaryRequiresIssuedVersion(name)
+        && handle.isAvailable()) {
+        return {
+          available: true,
+          name,
+          version: handle.exactVersion || null,
+          path: handle.resolvePath(),
+          source: "staged",
+          downloaded: false,
+          current: true,
+        };
       }
       if (dryRun) {
         return version
@@ -582,6 +615,77 @@ export class BinaryManager {
         reason: String(error?.code || "artifact_download_failed"),
         error,
       };
+    }
+  }
+
+  /**
+   * Install a release-channel binary (bossy) from its public GitHub release.
+   * Resolves the target version (pinned or latest, TTL-gated), downloads only
+   * this host's platform asset into the versioned cache, and points the handle
+   * at it. Any failure degrades to whatever is already on disk (a prior cached
+   * download or the committed staged tree) so boot never breaks on the TUI.
+   */
+  async _ensureReleaseArtifact(name, { refresh = false, dryRun = false, onProgress = null } = {}) {
+    const source = nativeBinaryReleaseSource(name);
+    const handle = this.binary(name);
+    const cacheRoot = this._artifactCacheRoot || this._opts.binRoot || undefined;
+
+    // Steady state: a validated build already resolves and no refresh asked.
+    if (!refresh && handle.isAvailable()) {
+      return { available: true, name, version: handle.exactVersion || null, path: handle.resolvePath(), source: "existing", downloaded: false };
+    }
+    let version = null;
+    try {
+      const resolved = await resolveReleaseVersion({
+        owner: source.owner,
+        repo: source.repo,
+        pkg: nativeBinaryEntry(name)?.package || name,
+        pinnedVersion: source.pinnedVersion || nativeBinaryExactVersion(name),
+        fetchImpl: this._artifactFetchImpl,
+        ...(cacheRoot ? { cacheRoot } : {}),
+      });
+      version = resolved.version;
+    } catch { /* fall through to on-disk fallback */ }
+
+    if (!version) {
+      // No release cut yet (or offline). Serve whatever is already on disk.
+      const cached = await this._activateCachedFallback(name, handle);
+      if (cached) return cached;
+      return { available: false, name, reason: "release_version_unavailable" };
+    }
+    if (dryRun) {
+      const versioned = this._createHandle(name, cacheRoot, version);
+      if (versioned.isAvailable() || handle.isAvailable()) {
+        return { available: true, name, version, path: (versioned.isAvailable() ? versioned : handle).resolvePath(), source: "existing", downloaded: false, current: true };
+      }
+      return { available: false, name, version, reason: "artifact_download_required", planned: true };
+    }
+    try {
+      const installed = await ensureGithubReleaseBinary({
+        name,
+        os: handle.os,
+        arch: handle.arch,
+        version,
+        owner: source.owner,
+        repo: source.repo,
+        fetchImpl: this._artifactFetchImpl,
+        ...(cacheRoot ? { cacheRoot } : {}),
+        ...(typeof onProgress === "function" ? { onProgress } : {}),
+      });
+      const versioned = this._createHandle(name, cacheRoot, installed.version || version);
+      if (!versioned.isAvailable()) return { available: false, name, reason: "downloaded_version_mismatch" };
+      await this._replaceHandle(name, versioned);
+      return {
+        available: true, name, version: installed.version || version,
+        path: versioned.resolvePath(), source: installed.source,
+        downloaded: installed.downloaded === true, size: installed.size, sha256: installed.sha256,
+        ...(refresh ? { current: true } : {}),
+      };
+    } catch (error) {
+      // Download failed — keep serving the last good on-disk build if any.
+      const cached = await this._activateCachedFallback(name, handle);
+      if (cached) return { ...cached, ...(refresh ? { current: false, refreshError: error?.message || String(error) } : {}) };
+      return { available: false, name, reason: String(error?.code || "release_download_failed"), error };
     }
   }
 

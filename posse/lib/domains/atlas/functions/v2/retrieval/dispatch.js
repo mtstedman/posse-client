@@ -24,7 +24,7 @@ import { sliceBuild, sliceRefresh, sliceSpilloverGet } from "./slice.js";
 import { editPlan } from "./edit-plan.js";
 import { repoRegister, repoStatus, indexRefresh, repoOverview, repoQuality } from "./repo.js";
 import { bufferPush, bufferCheckpoint, bufferStatus, makeOverlayReadFile } from "./buffer.js";
-import { symbolGetCard, symbolGetCards } from "./symbol-card.js";
+import { symbolGetCard } from "./symbol-card.js";
 import { symbolUsages } from "./usages.js";
 import { treeGrow, treeOverview, treeScope, treeWalk } from "./tree.js";
 import { codeSurvey } from "./survey.js";
@@ -42,7 +42,7 @@ import { scipIngest } from "./scip.js";
 import { info } from "./info.js";
 import { actionSearch, manual } from "./discovery.js";
 import { workflowExecute } from "./workflow.js";
-import { fetchHashRefTool } from "../../../../../shared/tools/functions/hash-adder.js";
+import { createHashRefTool, fetchHashRefTool } from "../../../../../shared/tools/functions/hash-adder.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").Ledger} Ledger */
@@ -176,6 +176,8 @@ function dispatchImpl(call, ctx) {
       }));
     case "fetch_ref":
       return /** @type {any} */ (fetchRef({ versionId: ctx.versionId, params: call, ctx }));
+    case "create_ref":
+      return /** @type {any} */ (createHash({ versionId: ctx.versionId, params: call, ctx }));
     case "repo.register":
       return /** @type {any} */ (repoRegister({
         versionId: ctx.versionId,
@@ -244,9 +246,6 @@ function dispatchImpl(call, ctx) {
     case "symbol.card":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (symbolGetCard({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
-    case "symbol.cards":
-      if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (symbolGetCards({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId, action: "symbol.cards" }));
     case "symbol.overview":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (symbolUsages({ view: ctx.view, versionId: ctx.versionId, params: call }));
@@ -396,8 +395,6 @@ const ACTION_BY_NORMALIZED_KEY = new Map(
 
 const ACTION_ALIAS_BY_NORMALIZED_KEY = new Map([
   ["symbolgetcard", "symbol.card"],
-  ["symbolgetcards", "symbol.cards"],
-  ["symbolcards", "symbol.cards"],
   ["treewalk", "tree.branch"],
 ]);
 
@@ -501,6 +498,39 @@ function fetchRef({ versionId, params, ctx }) {
       action: "fetch_ref",
       versionId,
       code: "fetch_ref_failed",
+      message: err?.message || String(err),
+    })));
+  }
+}
+
+/**
+ * @param {{ versionId: string, params: ToolCall, ctx: DispatchContext }} input
+ * @returns {AnyToolResult}
+ */
+function createHash({ versionId, params, ctx }) {
+  try {
+    const text = createHashRefTool(params, {
+      context: {
+        ...(ctx.hashRefContext || {}),
+        ...(ctx.config?.hashRefContext && typeof ctx.config.hashRefContext === "object" ? ctx.config.hashRefContext : {}),
+      },
+    });
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { ok: false, error: "invalid_create_ref_payload", text };
+    }
+    return /** @type {AnyToolResult} */ (/** @type {any} */ (okEnvelope({
+      action: "create_ref",
+      versionId,
+      data,
+    })));
+  } catch (err) {
+    return /** @type {AnyToolResult} */ (/** @type {any} */ (errorEnvelope({
+      action: "create_ref",
+      versionId,
+      code: "create_ref_failed",
       message: err?.message || String(err),
     })));
   }

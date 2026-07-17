@@ -74,6 +74,7 @@ import {
   unlockForAtlasUnavailable,
   isFallbackAtlasPrefetchStatus,
 } from "./deterministic-mcp/gate.js";
+import { resolveAtlasGatewayDedupAdvertise } from "./deterministic-mcp/gate-settings.js";
 import {
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
   MCP_OAUTH_AUDIENCE,
@@ -2546,9 +2547,15 @@ async function handleRequest(msg) {
     // Filter to the per-role allowlist so the LLM physically can't see ATLAS
     // tools its role isn't routed to. Actual execution is intercepted by the
     // parent MCP owner and routed through AtlasToolExecutor/conductor.
+    // L5a (TOKEN-LEVERS): on the owner-hot path the gateway wrappers duplicate
+    // the individual per-action tools already advertised; drop them from the
+    // advertisement when the flag is on. Role-scoped paths never carry the
+    // gateway names in atlasAllowedActions, so this is a no-op for them.
+    const dedupGateways = ownerHotGateway && resolveAtlasGatewayDedupAdvertise();
     const atlasTools = allAtlasTools
       .filter((tool) => atlasAllowedActions?.has(_stripAtlasPrefix(tool?.name)))
       .filter((tool) => isExternallyRoutedAtlasTool(tool?.name))
+      .filter((tool) => !dedupGateways || !ATLAS_GATEWAY_TOOL_NAMES.has(_stripAtlasPrefix(tool?.name)))
       .map(buildFoldedAtlasToolDescriptor);
     if (isGateActive({ scopeKey: gateScopeKey }) && atlasTools.length === 0) {
       unlockForAtlasUnavailable({ reason: "atlas_tools_unavailable", scopeKey: gateScopeKey });

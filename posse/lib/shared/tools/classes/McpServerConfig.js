@@ -36,6 +36,7 @@ import { persistentMcpOwner } from "./PersistentMcpOwner.js";
 import { McpServer } from "./McpServer.js";
 import { McpGate } from "./McpGate.js";
 import { withoutAtlasMemoryTools } from "../../policies/functions/memory-mode.js";
+import { resolveAtlasDisabledTools, resolveAtlasCodeLensCallable } from "../../../domains/integrations/functions/deterministic-mcp/gate-settings.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -804,6 +805,18 @@ export class McpServerConfig {
     const issuedSurface = opts.memoryEnabled === false
       ? withoutAtlasMemoryTools(remoteResolution.surface)
       : remoteResolution.surface;
+    const disabledAtlasTools = resolveAtlasDisabledTools();
+    if (!resolveAtlasCodeLensCallable()) disabledAtlasTools.add("code.lens");
+    if (disabledAtlasTools.size > 0) {
+      const issuedEntries = Array.isArray(issuedSurface?.tool_surface)
+        ? issuedSurface.tool_surface
+        : (Array.isArray(issuedSurface?.tools) ? issuedSurface.tools : []);
+      bootPayload.toolAllowlist = {
+        tools: issuedToolNamesForSuite(issuedEntries, "tools"),
+        atlas: issuedToolNamesForSuite(issuedEntries, "atlas")
+          .filter((name) => !disabledAtlasTools.has(String(name || "").toLowerCase())),
+      };
+    }
     const narrowedBootPayload = narrowBootConfigToRemoteSurface(bootPayload, issuedSurface);
     if (!narrowedBootPayload.remoteToolSurface) {
       throw requiredRemoteToolSurfaceError(role, null, "returned an invalid or mismatched agent tool contract");

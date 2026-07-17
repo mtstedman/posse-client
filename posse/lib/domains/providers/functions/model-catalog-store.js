@@ -30,6 +30,11 @@ const MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._\[\]:-]*$/i;
 
 // undefined = not loaded yet; null = no usable remote catalog; object = catalog.
 let _remoteCatalog;
+// catalogVersion of the JSON payload known to be persisted in account
+// settings. Tracked separately from the in-memory catalog so a fetch whose
+// persist failed (oversize / settings write error) is retried instead of the
+// version-unchanged branch stamping a fresh fetched_at over a missing row.
+let _persistedCatalogVersion = null;
 let _pricingMap = null;
 let _settingsApi = null;
 let _settingsApiPromise = null;
@@ -239,8 +244,10 @@ function loadFromSettings() {
   try {
     const json = _settingsApi.getAccountSetting(MODEL_CATALOG_SETTING_KEY);
     _remoteCatalog = json ? reviveStoredCatalog(JSON.parse(json)) : null;
+    _persistedCatalogVersion = _remoteCatalog?.catalogVersion ?? null;
   } catch {
     _remoteCatalog = null;
+    _persistedCatalogVersion = null;
   }
   _pricingMap = null;
 }
@@ -286,7 +293,6 @@ export function getRemoteProviderCatalog(provider) {
  * serialized payload exceeds the size cap. Returns { persisted }.
  */
 export function setRemoteCatalog(normalized, { persist = true, fetchedAt = null } = {}) {
-  const previousVersion = _remoteCatalog?.catalogVersion ?? null;
   _remoteCatalog = normalized ?? null;
   _pricingMap = null;
   if (!persist || !normalized) return { persisted: false };
@@ -296,10 +302,11 @@ export function setRemoteCatalog(normalized, { persist = true, fetchedAt = null 
   }
   try {
     const timestamp = fetchedAt || new Date().toISOString();
-    if (normalized.catalogVersion !== previousVersion) {
+    if (normalized.catalogVersion !== _persistedCatalogVersion) {
       const json = JSON.stringify(normalized);
       if (Buffer.byteLength(json, "utf8") > MAX_PERSISTED_JSON_BYTES) return { persisted: false };
       _settingsApi.setAccountSetting(MODEL_CATALOG_SETTING_KEY, json);
+      _persistedCatalogVersion = normalized.catalogVersion;
     }
     _settingsApi.setAccountSetting(MODEL_CATALOG_FETCHED_AT_SETTING_KEY, timestamp);
     return { persisted: true };
@@ -349,6 +356,7 @@ export function setRemoteCatalogForTest(catalog = null) {
 
 export function __resetRemoteModelCatalogStoreForTests() {
   _remoteCatalog = undefined;
+  _persistedCatalogVersion = null;
   _pricingMap = null;
   _settingsApi = null;
   _settingsApiPromise = null;

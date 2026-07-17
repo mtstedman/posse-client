@@ -29,6 +29,23 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
     tailChars: 800,
     digest: "list_files",
   }),
+  // symbol.search returns the largest per-call payloads in the research lane
+  // (~29KB observed in run28/29). Enrollment is gated by the
+  // atlas_search_result_paging setting in boundingPolicyFor so in-flight
+  // experiments keep a stable baseline; the full result stays one fetch_ref
+  // page away.
+  "symbol.search": Object.freeze({
+    capChars: 10000,
+    headChars: 7600,
+    tailChars: 900,
+    digest: "generic",
+  }),
+  "atlas.symbol.search": Object.freeze({
+    capChars: 10000,
+    headChars: 7600,
+    tailChars: 900,
+    digest: "generic",
+  }),
 });
 
 export const CONTEXT_TRIM_CLASSES = Object.freeze([

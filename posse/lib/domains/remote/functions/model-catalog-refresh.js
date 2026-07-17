@@ -75,7 +75,21 @@ export async function refreshRemoteModelCatalog({
         error: "remote model catalog payload was malformed or unsupported",
       };
     }
-    setRemoteCatalog(normalized, { persist: true });
+    const persistOutcome = setRemoteCatalog(normalized, { persist: true });
+    if (persistOutcome?.persisted === false) {
+      // Fetch succeeded but nothing durable recorded it — fetched_at was not
+      // written, so the freshness TTL can never engage and the only remaining
+      // throttle would be the 60s attempt guard. Treat it as a failure so the
+      // backoff applies instead of degrading the 24h TTL into a permanent
+      // ~60s network fetch loop. The in-memory catalog is still installed.
+      _lastFailureAt = Date.now();
+      return {
+        ok: false,
+        catalogVersion: normalized.catalogVersion,
+        staleWarnings: [],
+        error: "remote model catalog fetched but could not be persisted; backing off",
+      };
+    }
     _lastFailureAt = 0;
     const staleWarnings = validateConfiguredModels();
     return { ok: true, catalogVersion: normalized.catalogVersion, staleWarnings, error: null };

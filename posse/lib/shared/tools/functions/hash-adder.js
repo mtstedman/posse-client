@@ -9,6 +9,8 @@ import {
   isHashRefAlias,
   normalizeHashRefAlias,
 } from "../../../catalog/hash-store.js";
+import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { getSetting } from "../../../domains/queue/functions/settings.js";
 import {
   CONTEXT_BOUNDED_RETENTION_CHAR_CAP,
   CONTEXT_BOUNDING_POLICIES,
@@ -20,9 +22,35 @@ import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { logEvent } from "../../../domains/queue/functions/events.js";
 import { ContextMeter } from "../../classes/ContextMeter.js";
 
+// Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
+// lesson: changing the stamp floor globally mid-experiment shifted agent
+// behavior. Defaults below reproduce the long-standing behavior exactly;
+// set atlas_ambient_ref_stamping=on to enable the evidence-class experiment.
 const DEFAULT_SURFACE_MIN_CHARS = 4000;
+const AMBIENT_STAMPING_SURFACE_MIN_CHARS = 500;
+const EVIDENCE_REF_SURFACE_MIN_CHARS = 1;
+const EVIDENCE_REF_TOOLS = new Set([
+  "code.skeleton",
+  "code.window",
+  "code.lens",
+  "code.survey",
+  "code.structure",
+  "slice.build",
+  "slice.refresh",
+  "slice.spillover.get",
+  "symbol.card",
+  "symbol.overview",
+  "tree.branch",
+  "tree.expand",
+  "file.read",
+  "read_file",
+]);
 const DEFAULT_MATERIALIZE_CHAR_CAP = CONTEXT_HASH_REF_MATERIALIZE_CHAR_CAP;
-const HASH_ADDER_BLOCKED_TOOLS = new Set(["fetch_ref"]);
+const HASH_ADDER_BLOCKED_TOOLS = new Set(["fetch_ref", "create_ref"]);
+const CREATE_REF_MAX_TEXT_CHARS = 60000;
+const CREATE_REF_MAX_NOTE_CHARS = 300;
+const CREATE_REF_MAX_BATCH = 24;
+const CREATE_REF_OWNER_SCOPES = new Set(["work_item", "job"]);
 const TREE_SCOPE_INLINE_CANDIDATES = 10;
 const TREE_SCOPE_DEFERRED_PAGES = Object.freeze([
   Object.freeze({ start: 10, end: 20 }),
@@ -78,15 +106,34 @@ function normalizeObjectType(value) {
     .slice(0, 80);
 }
 
-function boundingPolicyFor(toolName, objectType) {
+// symbol.search enrollment is flag-gated (atlas_search_result_paging, default
+// off) so mid-experiment baselines stay stable; search_files/list_files keep
+// their long-standing unconditional policies.
+const SEARCH_PAGING_POLICY_KEYS = new Set(["symbol.search", "atlas.symbol.search"]);
+
+function searchResultPagingEnabled() {
+  try {
+    const stored = getSetting(SETTING_KEYS.ATLAS_SEARCH_RESULT_PAGING);
+    if (stored == null) return false;
+    const normalized = String(stored).trim().toLowerCase();
+    return normalized === "on" || normalized === "true" || normalized === "1" || normalized === "yes";
+  } catch {
+    return false;
+  }
+}
+
+function boundingPolicyFor(toolName, objectType, { searchPaging = null } = {}) {
   const candidates = [
     normalizeObjectType(objectType),
     normalizeObjectType(toolName),
   ].filter(Boolean);
   for (const candidate of candidates) {
-    if (CONTEXT_BOUNDING_POLICIES[candidate]) return CONTEXT_BOUNDING_POLICIES[candidate];
-    const lower = candidate.toLowerCase();
-    if (CONTEXT_BOUNDING_POLICIES[lower]) return CONTEXT_BOUNDING_POLICIES[lower];
+    for (const key of [candidate, candidate.toLowerCase()]) {
+      const policy = CONTEXT_BOUNDING_POLICIES[key];
+      if (!policy) continue;
+      if (SEARCH_PAGING_POLICY_KEYS.has(key) && !(searchPaging ?? searchResultPagingEnabled())) continue;
+      return policy;
+    }
   }
   return null;
 }
@@ -362,12 +409,277 @@ export function compactTreeScopeResult(toolName, result, {
   return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
 
+function ambientStampingEnabled() {
+  try {
+    const stored = getSetting(SETTING_KEYS.ATLAS_AMBIENT_REF_STAMPING);
+    if (stored == null) return false;
+    const normalized = String(stored).trim().toLowerCase();
+    return normalized === "on" || normalized === "true" || normalized === "1" || normalized === "yes";
+  } catch {
+    return false;
+  }
+}
+
+function surfaceMinCharsFor(toolName, { ambient = null } = {}) {
+  if (!(ambient ?? ambientStampingEnabled())) return DEFAULT_SURFACE_MIN_CHARS;
+  return EVIDENCE_REF_TOOLS.has(String(toolName || ""))
+    ? EVIDENCE_REF_SURFACE_MIN_CHARS
+    : AMBIENT_STAMPING_SURFACE_MIN_CHARS;
+}
+
+// ---- code.survey tail compaction (flag-gated, default OFF) -----------------
+// Same demand-paging move as compactTreeScopeResult: keep the highest-value
+// files' full skeleton evidence inline plus the ENTIRE call map (the survey's
+// unique cross-file value), and spill lower-ranked files' skeletons behind one
+// fetch_ref payload. Tail files remain COVERED for ladder purposes — the stub
+// keeps path + symbol names so relevance can be judged without fetching.
+const SURVEY_TAIL_INLINE_FILES = 12;
+const SURVEY_TAIL_STUB_SYMBOLS = 12;
+
+function surveyTailRefsEnabled() {
+  try {
+    const stored = getSetting(SETTING_KEYS.ATLAS_SURVEY_TAIL_REFS);
+    if (stored == null) return false;
+    const normalized = String(stored).trim().toLowerCase();
+    return normalized === "on" || normalized === "true" || normalized === "1" || normalized === "yes";
+  } catch {
+    return false;
+  }
+}
+
+export function compactCodeSurveyResult(toolName, result, {
+  args = {},
+  context = {},
+  ownerScope = null,
+  enabled = null,
+} = {}) {
+  if (String(toolName || "") !== "code.survey" || typeof result !== "string") {
+    return { result, compacted: false };
+  }
+  if (!(enabled ?? surveyTailRefsEnabled())) return { result, compacted: false };
+  const hashContext = contextForHashRefs(context);
+  if (!hasHashRefScope(hashContext)) return { result, compacted: false };
+
+  let envelope;
+  try {
+    envelope = JSON.parse(result);
+  } catch {
+    return { result, compacted: false };
+  }
+  // The MCP owner stamps the BARE survey payload ({granularity, files,
+  // callMap, ...}); dispatch envelopes nest it under .data. Accept both —
+  // run28 proved the .data-only assumption silently no-ops the owner path.
+  const data = envelope?.data && typeof envelope.data === "object"
+    ? envelope.data
+    : (Array.isArray(envelope?.files) ? envelope : null);
+  const files = Array.isArray(data?.files) ? data.files : null;
+  if (!files || files.length <= SURVEY_TAIL_INLINE_FILES) return { result, compacted: false };
+
+  // Rank by call-map involvement (edges/inbound/outbound endpoint or site
+  // mentions), then symbol count, then original order. The native side emits
+  // files in request order with no relevance signal of its own.
+  const callMap = data.callMap && typeof data.callMap === "object" ? data.callMap : {};
+  const degree = new Map();
+  const paths = files.map((file) => String(file?.path || ""));
+  for (const lane of ["edges", "inbound", "outbound"]) {
+    const edges = Array.isArray(callMap[lane]) ? callMap[lane] : [];
+    for (const edge of edges) {
+      const haystack = `${edge?.site || ""} ${edge?.from || ""} ${edge?.to || ""}`;
+      for (const path of paths) {
+        if (path && haystack.includes(path)) degree.set(path, (degree.get(path) || 0) + 1);
+      }
+    }
+  }
+  const ranked = files
+    .map((file, index) => ({ file, index, path: paths[index] }))
+    .sort((a, b) => (degree.get(b.path) || 0) - (degree.get(a.path) || 0)
+      || (Number(b.file?.symbolCount) || 0) - (Number(a.file?.symbolCount) || 0)
+      || a.index - b.index);
+  const keepOrder = (entries) => entries.sort((a, b) => a.index - b.index).map((entry) => entry.file);
+  const head = keepOrder(ranked.slice(0, SURVEY_TAIL_INLINE_FILES));
+  const tail = keepOrder(ranked.slice(SURVEY_TAIL_INLINE_FILES));
+
+  const tailPayload = JSON.stringify({ tool: "code.survey", tailFiles: tail }, null, 1);
+  let surfaced;
+  try {
+    surfaced = surfaceHashRefForContext(hashContext, {
+      entryKind: "materialized",
+      payloadText: tailPayload,
+      descriptor: {
+        kind: "tool_result",
+        tool: "code.survey",
+        args,
+        source: "tool:code.survey",
+      },
+      objectType: "code.survey.tail",
+      source: "tool:code.survey",
+      note: `full skeletons for ${tail.length} lower-ranked surveyed files`,
+      sizeChars: tailPayload.length,
+      recomputable: true,
+      metadata: { surfaced_by: "survey_tail", files: tail.length },
+    }, { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) });
+  } catch (err) {
+    recordHashSurfaceFailure(hashContext, toolName, tailPayload.length, err?.message || err);
+    return { result, compacted: false };
+  }
+  if (!surfaced?.ok || !surfaced?.entry?.ref) return { result, compacted: false };
+
+  data.files = head;
+  data.tailFiles = tail.map((file) => ({
+    path: String(file?.path || ""),
+    symbolCount: Number(file?.symbolCount) || (Array.isArray(file?.symbols) ? file.symbols.length : 0),
+    symbols: (Array.isArray(file?.symbols) ? file.symbols : [])
+      .slice(0, SURVEY_TAIL_STUB_SYMBOLS)
+      .map((symbol) => String(symbol?.name || ""))
+      .filter(Boolean),
+  }));
+  data.tailFilesRef = surfaced.entry.ref;
+  data.tailNote = `COVERED: full skeletons for these ${tail.length} lower-ranked files are stored at ${surfaced.entry.ref} (atlas.fetch_ref). They count as surveyed — do not re-survey them or call code.skeleton on them; fetch the ref only for a named evidence gap.`;
+  return { result: JSON.stringify(envelope, null, 2), compacted: true };
+}
+
+// ---- code.window / code.lens result ref-paging (flag-gated, default OFF) ----
+// L3b (TOKEN-LEVERS). Same demand-paging move as the survey tail: only fires
+// when the full result exceeds the min-chars threshold. code.lens carries a
+// matches[] array — page the lower-ranked tail. code.window is a monolithic
+// content string — keep the head lines inline (up to the char budget) and page
+// the tail lines behind one fetch_ref. Threshold from atlas_result_ref_paging_min_chars.
+const RESULT_REF_PAGING_DEFAULT_MIN_CHARS = 12000;
+const LENS_INLINE_MATCHES = 8;
+
+function resultRefPagingEnabled() {
+  try {
+    const stored = getSetting(SETTING_KEYS.ATLAS_RESULT_REF_PAGING);
+    if (stored == null) return false;
+    const n = String(stored).trim().toLowerCase();
+    return n === "on" || n === "true" || n === "1" || n === "yes";
+  } catch {
+    return false;
+  }
+}
+
+function resultRefPagingMinChars() {
+  try {
+    const raw = Number(getSetting(SETTING_KEYS.ATLAS_RESULT_REF_PAGING_MIN_CHARS));
+    return Number.isFinite(raw) && raw >= 2000 ? raw : RESULT_REF_PAGING_DEFAULT_MIN_CHARS;
+  } catch {
+    return RESULT_REF_PAGING_DEFAULT_MIN_CHARS;
+  }
+}
+
+export function compactCodeWindowLensResult(toolName, result, {
+  args = {},
+  context = {},
+  ownerScope = null,
+  enabled = null,
+  minChars = null,
+} = {}) {
+  const tool = String(toolName || "");
+  if ((tool !== "code.window" && tool !== "code.lens") || typeof result !== "string") {
+    return { result, compacted: false };
+  }
+  if (!(enabled ?? resultRefPagingEnabled())) return { result, compacted: false };
+  const min = minChars ?? resultRefPagingMinChars();
+  if (result.length <= min) return { result, compacted: false };
+  const hashContext = contextForHashRefs(context);
+  if (!hasHashRefScope(hashContext)) return { result, compacted: false };
+
+  let envelope;
+  try {
+    envelope = JSON.parse(result);
+  } catch {
+    return { result, compacted: false };
+  }
+  const data = envelope?.data && typeof envelope.data === "object" ? envelope.data : null;
+  if (!data) return { result, compacted: false };
+  const scope = { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) };
+
+  // code.lens: page the lower-ranked matches[] tail.
+  if (tool === "code.lens" && Array.isArray(data.matches) && data.matches.length > LENS_INLINE_MATCHES) {
+    const tail = data.matches.slice(LENS_INLINE_MATCHES);
+    const tailPayload = JSON.stringify({ tool: "code.lens", tailMatches: tail }, null, 1);
+    let surfaced;
+    try {
+      surfaced = surfaceHashRefForContext(hashContext, {
+        entryKind: "materialized",
+        payloadText: tailPayload,
+        descriptor: { kind: "tool_result", tool: "code.lens", args, source: "tool:code.lens" },
+        objectType: "code.lens.tail",
+        source: "tool:code.lens",
+        note: `lower-ranked code.lens matches ${LENS_INLINE_MATCHES + 1}-${data.matches.length}`,
+        sizeChars: tailPayload.length,
+        recomputable: true,
+        metadata: { surfaced_by: "result_ref_paging", tool: "code.lens", matches: tail.length },
+      }, scope);
+    } catch (err) {
+      recordHashSurfaceFailure(hashContext, tool, tailPayload.length, err?.message || err);
+      return { result, compacted: false };
+    }
+    if (!surfaced?.ok || !surfaced?.entry?.ref) return { result, compacted: false };
+    data.matches = data.matches.slice(0, LENS_INLINE_MATCHES);
+    data.tailMatchesRef = surfaced.entry.ref;
+    data.tailMatchesTotal = LENS_INLINE_MATCHES + tail.length;
+    data.tailNote = `COVERED: ${tail.length} lower-ranked matches are stored at ${surfaced.entry.ref} (atlas.fetch_ref). Fetch only for a named evidence gap.`;
+    return { result: JSON.stringify(envelope, null, 2), compacted: true };
+  }
+
+  // code.window: keep head lines inline up to the char budget, page the tail.
+  if (tool === "code.window" && typeof data.content === "string" && data.content.length > min) {
+    const lines = data.content.split("\n");
+    let headChars = 0;
+    let splitAt = lines.length;
+    for (let i = 0; i < lines.length; i++) {
+      headChars += lines[i].length + 1;
+      if (headChars >= min) { splitAt = i + 1; break; }
+    }
+    if (splitAt >= lines.length) return { result, compacted: false };
+    const headContent = lines.slice(0, splitAt).join("\n");
+    const tailContent = lines.slice(splitAt).join("\n");
+    const startLine = Number(data.startLine) || 1;
+    const tailStartLine = startLine + splitAt;
+    const tailPayload = JSON.stringify({
+      tool: "code.window",
+      repo_rel_path: data.repo_rel_path,
+      startLine: tailStartLine,
+      endLine: data.endLine,
+      content: tailContent,
+    }, null, 1);
+    let surfaced;
+    try {
+      surfaced = surfaceHashRefForContext(hashContext, {
+        entryKind: "materialized",
+        payloadText: tailPayload,
+        descriptor: { kind: "tool_result", tool: "code.window", args, source: "tool:code.window" },
+        objectType: "code.window.tail",
+        source: "tool:code.window",
+        note: `${data.repo_rel_path} lines ${tailStartLine}-${data.endLine}`,
+        sizeChars: tailPayload.length,
+        recomputable: true,
+        metadata: { surfaced_by: "result_ref_paging", tool: "code.window", tail_start_line: tailStartLine },
+      }, scope);
+    } catch (err) {
+      recordHashSurfaceFailure(hashContext, tool, tailPayload.length, err?.message || err);
+      return { result, compacted: false };
+    }
+    if (!surfaced?.ok || !surfaced?.entry?.ref) return { result, compacted: false };
+    data.content = headContent;
+    data.contentTailRef = surfaced.entry.ref;
+    data.contentTailLines = `${tailStartLine}-${data.endLine}`;
+    data.tailNote = `COVERED: lines ${tailStartLine}-${data.endLine} of ${data.repo_rel_path} are stored at ${surfaced.entry.ref} (atlas.fetch_ref). Fetch only for a named evidence gap.`;
+    return { result: JSON.stringify(envelope, null, 2), compacted: true };
+  }
+
+  return { result, compacted: false };
+}
+
 function shouldSurfaceHashRef(toolName, result, {
-  minChars = DEFAULT_SURFACE_MIN_CHARS,
+  minChars = null,
+  ambient = null,
 } = {}) {
   if (HASH_ADDER_BLOCKED_TOOLS.has(String(toolName || ""))) return false;
   if (typeof result !== "string") return false;
-  if (result.length < minChars) return false;
+  const effectiveMin = minChars ?? surfaceMinCharsFor(toolName, { ambient });
+  if (result.length < effectiveMin) return false;
   if (/^Error:/i.test(result.trimStart())) return false;
   return true;
 }
@@ -483,12 +795,14 @@ export function appendHashRefIfMajor(toolName, result, {
   objectType = null,
   note = null,
   ownerScope = null,
-  minChars = DEFAULT_SURFACE_MIN_CHARS,
+  minChars = null,
+  ambient = null,
+  searchPaging = null,
   materializeCharCap = DEFAULT_MATERIALIZE_CHAR_CAP,
 } = {}) {
   const hashContext = contextForHashRefs(context);
   if (!hasHashRefScope(hashContext)) return result;
-  if (!shouldSurfaceHashRef(toolName, result, { minChars })) {
+  if (!shouldSurfaceHashRef(toolName, result, { minChars, ambient })) {
     if (typeof result === "string") {
       recordContextMeterSample(hashContext, toolName, {
         fullSizeChars: result.length,
@@ -502,7 +816,7 @@ export function appendHashRefIfMajor(toolName, result, {
   const text = String(result);
   const sizeChars = text.length;
   const effectiveObjectType = normalizeObjectType(objectType || toolName || "tool_result") || "tool_result";
-  const boundPolicy = boundingPolicyFor(toolName, effectiveObjectType);
+  const boundPolicy = boundingPolicyFor(toolName, effectiveObjectType, { searchPaging });
   const boundedIngress = !!(boundPolicy && sizeChars > boundPolicy.capChars);
   const retainedBoundedPayload = boundedIngress && sizeChars <= CONTEXT_BOUNDED_RETENTION_CHAR_CAP;
   const materialized = sizeChars <= materializeCharCap || retainedBoundedPayload;
@@ -722,9 +1036,174 @@ export function fetchHashRefTool(args = {}, {
   }, null, 2);
 }
 
+function createRefError(error, extra = {}) {
+  return { ok: false, error, ...extra };
+}
+
+function sliceSourcePayload(payloadText, item) {
+  const text = String(payloadText ?? "");
+  const lines = String(item.lines || "").trim();
+  if (lines) {
+    const match = /^(\d+)\s*-\s*(\d+)$/.exec(lines);
+    if (!match) return { error: "invalid_lines_range (use \"start-end\", 1-based)" };
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    if (start < 1 || end < start) return { error: "invalid_lines_range (use \"start-end\", 1-based)" };
+    const rows = text.replace(/\r\n/g, "\n").split("\n");
+    if (start > rows.length) return { error: `lines_out_of_range (source has ${rows.length} lines)` };
+    return { text: rows.slice(start - 1, Math.min(end, rows.length)).join("\n"), slice: `lines:${start}-${Math.min(end, rows.length)}` };
+  }
+  const offset = Math.max(0, Number(item.offset) || 0);
+  const limit = item.limit != null ? Math.max(1, Number(item.limit) || 0) : null;
+  if (offset === 0 && limit == null) return { text, slice: null };
+  if (offset >= text.length) return { error: `offset_out_of_range (source has ${text.length} chars)` };
+  return {
+    text: text.slice(offset, limit != null ? offset + limit : undefined),
+    slice: `chars:${offset}-${limit != null ? Math.min(offset + limit, text.length) : text.length}`,
+  };
+}
+
+function createOneHashRef(hashContext, item = {}) {
+  const inlineText = typeof item.text === "string" ? item.text : null;
+  const sourceRef = item.source_ref ?? item.sourceRef ?? item.from_ref ?? null;
+  if ((inlineText == null || inlineText.trim() === "") && !sourceRef) {
+    return createRefError("create_ref requires text or source_ref");
+  }
+  if (inlineText != null && sourceRef) {
+    return createRefError("create_ref accepts text OR source_ref, not both");
+  }
+
+  let payload = inlineText;
+  let sliceNote = null;
+  let sourceAlias = null;
+  if (sourceRef) {
+    sourceAlias = normalizeRef(sourceRef);
+    if (!isHashRefAlias(sourceAlias)) return createRefError("invalid_source_ref", { source_ref: String(sourceRef) });
+    const fetched = fetchHashRefForContext(hashContext, sourceAlias);
+    if (!fetched?.ok || !fetched?.found || !fetched.entry) {
+      return createRefError("source_ref_not_found_or_not_visible", { source_ref: sourceAlias });
+    }
+    if (fetched.entry.payload_text == null) {
+      return createRefError("source_ref_not_materialized (descriptor-only payloads cannot be sliced)", { source_ref: sourceAlias });
+    }
+    const sliced = sliceSourcePayload(fetched.entry.payload_text, item);
+    if (sliced.error) return createRefError(sliced.error, { source_ref: sourceAlias });
+    payload = sliced.text;
+    sliceNote = sliced.slice;
+  }
+
+  if (typeof payload !== "string" || payload.trim() === "") {
+    return createRefError("empty_payload");
+  }
+  if (payload.length > CREATE_REF_MAX_TEXT_CHARS) {
+    return createRefError(`payload_too_large (${payload.length} chars, max ${CREATE_REF_MAX_TEXT_CHARS}); split into smaller chunks`);
+  }
+
+  const note = String(item.note ?? "").replace(/\s+/g, " ").trim().slice(0, CREATE_REF_MAX_NOTE_CHARS) || null;
+  const objectType = normalizeObjectType(item.object_type ?? item.objectType ?? "agent.chunk") || "agent.chunk";
+  const requestedScope = String(item.owner_scope ?? item.ownerScope ?? "work_item").trim();
+  if (!CREATE_REF_OWNER_SCOPES.has(requestedScope)) {
+    return createRefError(`invalid_owner_scope (use ${[...CREATE_REF_OWNER_SCOPES].join(" or ")})`);
+  }
+  // Handoff chunks default to work_item scope so any later agent in the work
+  // item (sibling jobs included) can resolve them; job scope is the opt-in.
+  const ownerScope = requestedScope === "work_item" && hashContext.work_item_id == null ? "job" : requestedScope;
+
+  let surfaced;
+  try {
+    surfaced = surfaceHashRefForContext(hashContext, {
+      entryKind: "materialized",
+      payloadText: payload,
+      descriptor: {
+        kind: "agent_chunk",
+        source: "agent:create_ref",
+        ...(sourceAlias ? { source_ref: sourceAlias, slice: sliceNote } : {}),
+      },
+      objectType,
+      source: "agent:create_ref",
+      note,
+      sizeChars: payload.length,
+      recomputable: false,
+      metadata: {
+        surfaced_by: "create_ref",
+        ...(sourceAlias ? { source_ref: sourceAlias, slice: sliceNote } : {}),
+      },
+    }, { ownerScope });
+  } catch (err) {
+    return createRefError(`create_failed: ${err?.message || err}`);
+  }
+  if (!surfaced?.ok || !surfaced?.entry?.ref) {
+    return createRefError(`create_failed: ${surfaced?.error || "store rejected the entry"}`);
+  }
+
+  recordObservation({
+    work_item_id: hashContext.work_item_id ?? null,
+    job_id: hashContext.job_id ?? null,
+    attempt_id: hashContext.attempt_id ?? null,
+    observation_type: "hash_ref.create",
+    summary: `Created ${surfaced.entry.ref} (${objectType}, ${payload.length} chars)`,
+    detail: {
+      ref: surfaced.entry.ref,
+      object_type: objectType,
+      owner_scope: ownerScope,
+      size_chars: payload.length,
+      source_ref: sourceAlias,
+      slice: sliceNote,
+    },
+  });
+
+  return {
+    ok: true,
+    ref: surfaced.entry.ref,
+    stub: refStub({ entry: { ref: surfaced.entry.ref, object_type: objectType, note }, toolName: "create_ref", sizeChars: payload.length }).trim(),
+    object_type: objectType,
+    owner_scope: ownerScope,
+    chars: payload.length,
+    ...(note ? { note } : {}),
+    ...(sourceAlias ? { source_ref: sourceAlias, slice: sliceNote } : {}),
+  };
+}
+
+/**
+ * Agent-callable minting: store a chunk of evidence (inline text, or a slice
+ * of an existing materialized ref) and get back a citable #ref + stub.
+ * Single form: { text | source_ref [+ lines|offset/limit], note?, object_type?, owner_scope? }
+ * Batch form:  { chunks: [ ...same per-item fields... ] } with per-item errors.
+ * The contract intent: synthesis stays prose; evidence moves as refs.
+ */
+export function createHashRefTool(args = {}, {
+  context = {},
+} = {}) {
+  const hashContext = contextForHashRefs(context);
+  if (!hasHashRefScope(hashContext)) {
+    return JSON.stringify({ ok: false, error: "create_ref requires an active work item / job scope" }, null, 2);
+  }
+  const batch = Array.isArray(args.chunks) ? args.chunks : null;
+  if (batch) {
+    if (batch.length === 0) return JSON.stringify({ ok: false, error: "chunks must be a non-empty array" }, null, 2);
+    if (batch.length > CREATE_REF_MAX_BATCH) {
+      return JSON.stringify({ ok: false, error: `too_many_chunks (${batch.length}, max ${CREATE_REF_MAX_BATCH})` }, null, 2);
+    }
+    const results = batch.map((item) => createOneHashRef(hashContext, item && typeof item === "object" ? item : {}));
+    const created = results.filter((entry) => entry.ok).length;
+    return JSON.stringify({
+      ok: created === results.length,
+      count: results.length,
+      created,
+      failed: results.length - created,
+      chunks: results,
+    }, null, 2);
+  }
+  return JSON.stringify(createOneHashRef(hashContext, args), null, 2);
+}
+
 export const __testHashAdderInternals = Object.freeze({
   DEFAULT_MATERIALIZE_CHAR_CAP,
   DEFAULT_SURFACE_MIN_CHARS,
+  AMBIENT_STAMPING_SURFACE_MIN_CHARS,
+  EVIDENCE_REF_SURFACE_MIN_CHARS,
+  EVIDENCE_REF_TOOLS,
+  surfaceMinCharsFor,
   boundingPolicyFor,
   overflowDigest,
   pageMaterializedText,

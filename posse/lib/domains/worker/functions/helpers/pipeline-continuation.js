@@ -53,6 +53,7 @@ import {
   createPlanAfterSkippedResearch,
 } from "../../../research/functions/intake-routing.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { workItemArtifactRoot } from "../../../artifacts/functions/index.js";
 
 const ALLOWED_BARE_DOTFILES = new Set([
   ".env",
@@ -711,9 +712,15 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
   const clarificationRound = researchPayload._clarification_round || 0;
   const MAX_CLARIFICATION_ROUNDS = 3;
 
-  // -- Question mode: research is the final step --
-  // WI completes naturally (all jobs terminal). Save answer to JSON.
-  if (metadata.mode === "question") {
+  const intakeOutputMode = String(metadata?.intake_hints?.output_mode || "").trim().toLowerCase();
+  const isReportResearch = wi?.mode === "report"
+    || researchPayload.task_mode === "report"
+    || intakeOutputMode === "question_only";
+
+  // -- Question/report mode: research is the final step --
+  // Persist the plain researcher text deterministically as the visible report;
+  // do not route it through the planner or require a structured brief appendix.
+  if (metadata.mode === "question" || isReportResearch) {
     // Even in question mode, if the researcher has questions, we need
     // human answers before we can call this "answered".
     if (hasQuestions) {
@@ -768,7 +775,10 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
     try {
       const dbPath = getRuntimeDbPath();
       const answerDir = path.join(path.dirname(dbPath), "answers");
+      const reportDir = workItemArtifactRoot(researchJob.work_item_id);
       fs.mkdirSync(answerDir, { recursive: true });
+      fs.mkdirSync(reportDir, { recursive: true });
+      fs.writeFileSync(path.join(reportDir, "report.md"), String(output || ""), "utf-8");
       fs.writeFileSync(
         path.join(answerDir, `wi-${researchJob.work_item_id}.json`),
         JSON.stringify({
@@ -781,7 +791,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
       );
     } catch { /* best effort */ }
     worker.emit(researchJob.id,
-      `${C.cyan}[pipeline]${C.reset} WI#${researchJob.work_item_id}: question answered — done`);
+      `${C.cyan}[pipeline]${C.reset} WI#${researchJob.work_item_id}: report saved — done`);
     return;
   }
 

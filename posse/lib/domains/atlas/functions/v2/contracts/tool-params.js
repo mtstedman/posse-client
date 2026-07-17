@@ -145,6 +145,26 @@
  */
 
 // ============================================================================
+// create_ref — Hash-store citation minting
+// ============================================================================
+
+/**
+ * @typedef {Object} CreateRefChunk
+ * @property {string} [text]                Inline chunk to store.
+ * @property {string} [source_ref]          Existing materialized ref to slice server-side.
+ * @property {string} [lines]               1-based line range within source_ref, e.g. "120-180".
+ * @property {number} [offset]              Character offset within source_ref payload.
+ * @property {number} [limit]               Maximum characters from source_ref payload.
+ * @property {string} [note]                Sticky "what is this" carried in the stub.
+ * @property {string} [object_type]         Stub object type label. Default agent.chunk.
+ * @property {string} [owner_scope]         work_item (default) or job.
+ */
+
+/**
+ * @typedef {CreateRefChunk & { chunks?: CreateRefChunk[] }} CreateRefParams
+ */
+
+// ============================================================================
 // repo.* — Repository status and overview
 // ============================================================================
 
@@ -260,8 +280,8 @@
  * @typedef {Object} SymbolGetCardParams
  * @property {string} [symbolId]              Required iff symbolRef is absent.
  * @property {SymbolRef} [symbolRef]          Required iff symbolId is absent.
- * @property {string[]} [symbolIds]           Batch form; returns symbol.cards-shaped data.
- * @property {SymbolRef[]} [symbolRefs]       Batch form; returns symbol.cards-shaped data.
+ * @property {string[]} [symbolIds]           Batch form; returns batch card data.
+ * @property {SymbolRef[]} [symbolRefs]       Batch form; returns batch card data.
  * @property {string} [ifNoneMatch]
  * @property {number} [minCallConfidence]     0..1
  * @property {boolean} [includeResolutionMetadata]
@@ -654,6 +674,7 @@
  *   | { action: "workflow" } & WorkflowParams
  *   | { action: "info" } & InfoParams
  *   | { action: "fetch_ref" } & FetchRefParams
+ *   | { action: "create_ref" } & CreateRefParams
  *   | { action: "repo.register" } & RepoRegisterParams
  *   | { action: "repo.status" } & RepoStatusParams
  *   | { action: "index.refresh" } & IndexRefreshParams
@@ -664,7 +685,6 @@
  *   | { action: "buffer.status" } & BufferStatusParams
  *   | { action: "symbol.search" } & SymbolSearchParams
  *   | { action: "symbol.card" } & SymbolGetCardParams
- *   | { action: "symbol.cards" } & SymbolGetCardParams
  *   | { action: "symbol.overview" } & SymbolUsagesParams
  *   | { action: "tree.overview" } & TreeOverviewParams
  *   | { action: "tree.branch" } & TreeOverviewParams
@@ -713,6 +733,7 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "workflow",
   "info",
   "fetch_ref",
+  "create_ref",
   "repo.register",
   "repo.status",
   "index.refresh",
@@ -723,7 +744,6 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "buffer.status",
   "symbol.search",
   "symbol.card",
-  "symbol.cards",
   "symbol.overview",
   "tree.overview",
   "tree.branch",

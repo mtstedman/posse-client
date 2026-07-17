@@ -990,8 +990,15 @@ export class RunSession {
     updateCheckTask,
     gitReadyTask,
   ]);
-  if (nativeArtifactsSettled.status === "rejected") throw nativeArtifactsSettled.reason;
-  if (nativeDaemonsSettled.status === "rejected") throw nativeDaemonsSettled.reason;
+  if (nativeArtifactsSettled.status === "rejected" || nativeDaemonsSettled.status === "rejected") {
+    // Tear the panel down + release the stdout intercept before rethrowing,
+    // matching the git/dirty-tree/worktree failure paths below. Without this
+    // the fatal message from the top-level CLI catch lands in the intercept
+    // buffer and the process exits silently behind a frozen boot panel.
+    try { stopBootMonitor({ final: true }); } catch { /* observational */ }
+    if (nativeArtifactsSettled.status === "rejected") throw nativeArtifactsSettled.reason;
+    throw nativeDaemonsSettled.reason;
+  }
   const gitReadyResult = gitReadySettled.status === "fulfilled"
     ? gitReadySettled.value
     : { ok: false, error: gitReadySettled.reason };
@@ -2316,6 +2323,45 @@ export class RunSession {
     return;
   }
 
+  // Ctrl+C/SIGTERM after scheduler.boot() succeeded still releases the
+  // scheduler lock via cleanupDuringBoot, but nothing below used to notice:
+  // boot would march on through the warm/gate window, attach the TUI, and die
+  // in runLoop with "called before successful boot()". Re-check at each
+  // post-boot milestone so a shutdown in that window (including one that
+  // landed just before boot reset its own stop flags) exits through the
+  // graceful interrupted-boot path instead.
+  const bailIfBootInterrupted = async () => {
+    if (!bootShutdownRequested) return false;
+    try { stopBootMonitor({ final: true }); } catch { /* observational */ }
+    if (bootCleanupPromise) await bootCleanupPromise;
+    removeBootSignalHandlers();
+    console.log(`  ${C.yellow}Scheduler boot interrupted. Lock released; safe to restart.${C.reset}\n`);
+    // Exit explicitly rather than just returning. If the interrupt landed during
+    // the ATLAS warm/gate window, a backgrounded boot-warm worker thread is
+    // fire-and-forget and never unref'd — its MessagePort keeps the event loop
+    // alive, so a bare `return` would leave the process running (up to the 90-min
+    // warm timeout) despite the "safe to restart" message, contending with any
+    // restarted instance on the index DBs. Mirror the natural-completion and
+    // signal-driven exit paths. (exitProcess is stubbed in tests, so callers
+    // still observe the `return true`.)
+    try { closeRuntimeStateForExit(); } catch { /* best-effort */ }
+    process.exitCode = 0;
+    exitProcess?.(0);
+    return true;
+  };
+  // Resolves (never rejects) when a boot shutdown aborts the controller, so
+  // the warm-phase and gate races below release immediately on Ctrl+C instead
+  // of waiting out the ATLAS warm.
+  const bootAborted = new Promise((resolve) => {
+    const settle = () => resolve({ kind: "boot-aborted" });
+    if (bootAbortController.signal.aborted) {
+      settle();
+      return;
+    }
+    bootAbortController.signal.addEventListener("abort", settle, { once: true });
+  });
+  if (await bailIfBootInterrupted()) return;
+
   // Same-device telemetry is a raw repo-scoped socket, independent of the
   // phone/web bridge. Failure is observational only: Bossy keeps reading the
   // durable SQLite ledger and this run continues normally.
@@ -2345,8 +2391,19 @@ export class RunSession {
   // finishes independently before the ATLAS×SCIP matrix + zip take over. This
   // returns at the warm's soft-timeout; the real work continues and is awaited
   // by the gate just below, so the panel keeps animating live progress.
+  //
+  // Race the phase against the Enter/headless background request: the footer
+  // advertises "hit Enter to load in the background" long before the phase's
+  // soft-timeout, and headless boots auto-request at views-ready — both must
+  // release this wait immediately. The gate below re-races the already-settled
+  // request and takes its deferred-chip + late-completion-watcher branch. When
+  // no request is made, the race waits on the phase exactly as before, so the
+  // default remains: boot holds until the ATLAS index has fully synced. The
+  // phase promise never rejects (bootWarmup converts failures to results), so
+  // leaving it un-awaited after a background win is safe.
   if (startAtlasWarmupPhase) {
-    await startAtlasWarmupPhase();
+    await Promise.race([startAtlasWarmupPhase(), atlasBootBackgroundRequest, bootAborted]);
+    if (await bailIfBootInterrupted()) return;
   }
 
   // ── TUI attach — from here on, stdout goes to the alt-screen buffer ─────
@@ -2419,6 +2476,7 @@ export class RunSession {
           (error) => ({ kind: "error", error }),
         ),
         atlasBootBackgroundRequest,
+        bootAborted,
       ]);
       if (outcome?.kind === "background") {
         updateBootStep("ATLAS warmup", {
@@ -2437,6 +2495,7 @@ export class RunSession {
       });
       repairAtlasAfterOwnerGone(`boot_wait_failed: ${firstLine(err?.message || err)}`);
     }
+    if (await bailIfBootInterrupted()) return;
   }
 
   // Resolve any pre-seeded step that never ran this boot (e.g. the git/worktree

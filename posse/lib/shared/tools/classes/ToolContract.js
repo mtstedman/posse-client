@@ -1,6 +1,35 @@
 import { normPath, normalizeRoots } from "../../scope/functions/path.js";
 import { isToolAuthorizedByIssuedSurface } from "../functions/issued-tool-policy.js";
 import { ToolCatalog } from "./ToolCatalog.js";
+import { log } from "../../telemetry/functions/logging/logger.js";
+
+// Tool names can arrive from surfaces newer than this build: the remote
+// gateway rolls the issued tool catalog forward independently of the shipped
+// client. A name this catalog has no execution metadata for must degrade to
+// "tool not offered this run", not throw — the throwing behavior dead-lettered
+// every job on older clients the first time the server issued a new tool
+// (observed with atlas.create_ref on 2026-07-17).
+const _unknownContractToolsWarned = new Set();
+function resolveContractTools(toolNames, catalog = ToolCatalog) {
+  const tools = [];
+  for (const name of Array.isArray(toolNames) ? toolNames : []) {
+    try {
+      tools.push({ name, ...catalog.getExecutionSpec(name) });
+    } catch (err) {
+      warnUnknownContractTool(name, err);
+    }
+  }
+  return tools;
+}
+function warnUnknownContractTool(name, err) {
+  const key = String(name || "");
+  if (_unknownContractToolsWarned.has(key)) return;
+  _unknownContractToolsWarned.add(key);
+  log.warn("tools", "Skipping contract tool with no execution metadata (issued surface newer than this client?)", {
+    tool: key,
+    error: err?.message || String(err),
+  });
+}
 
 const CLAUDE_AMBIENT_TOOLS = [
   "ToolSearch",
@@ -80,7 +109,14 @@ function normalizeToolAppendSpec(toolLike, catalog = ToolCatalog) {
   for (const key of Object.keys(extras)) {
     if (extras[key] === undefined) delete extras[key];
   }
-  return { name: toolName, ...catalog.getExecutionSpec(toolName), ...extras };
+  let spec;
+  try {
+    spec = catalog.getExecutionSpec(toolName);
+  } catch (err) {
+    warnUnknownContractTool(toolName, err);
+    return null;
+  }
+  return { name: toolName, ...spec, ...extras };
 }
 
 function normalizeCreateRootGlobs(createRoots = [], scopeCwd = process.cwd()) {
@@ -463,8 +499,7 @@ export class ToolContract {
         readRoots: Array.isArray(readRoots) ? readRoots : [],
         deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
       },
-      tools: toolNames
-        .map((name) => ({ name, ...ToolCatalog.getExecutionSpec(name) }))
+      tools: resolveContractTools(toolNames, ToolCatalog)
         .filter((tool) => isToolAuthorizedByIssuedSurface(tool, issuedToolSurface)),
     };
     return new ToolContract(contract);
@@ -570,7 +605,7 @@ export class ToolContract {
         readRoots: Array.isArray(readRoots) ? readRoots : [],
         deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
       },
-      tools: toolNames.map((name) => ({ name, ...catalog.getExecutionSpec(name) })),
+      tools: resolveContractTools(toolNames, catalog),
     });
   }
 

@@ -418,7 +418,7 @@
 /**
  * symbol.card returns a single SymbolCard. The envelope's `data` is
  * the card directly, unless called with batch fields (`symbolIds` /
- * `symbolRefs`), where it returns the same shape as symbol.cards.
+ * `symbolRefs`), where it returns the batch SymbolCardsData shape.
  *
  * @typedef {SymbolCard} SymbolGetCardData
  */
@@ -1338,7 +1338,6 @@
  *   | ToolResultEnvelope<BufferStatusData>     & { action: "buffer.status" }
  *   | ToolResultEnvelope<SymbolSearchData>     & { action: "symbol.search" }
  *   | ToolResultEnvelope<SymbolGetCardData | SymbolCardsData> & { action: "symbol.card" }
- *   | ToolResultEnvelope<SymbolCardsData>      & { action: "symbol.cards" }
  *   | ToolResultEnvelope<SymbolUsagesData>     & { action: "symbol.overview" }
  *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.overview" }
  *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.branch" }

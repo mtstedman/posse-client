@@ -6,7 +6,7 @@ import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
 import { ToolRegistry } from "../../../../shared/tools/classes/ToolRegistry.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/tools/functions/tool-suites.js";
 import { assertAdvertisedHaveExecutors } from "../../../../shared/tools/functions/tool-parity.js";
-import { appendHashRefIfMajor, compactTreeScopeResult } from "../../../../shared/tools/functions/hash-adder.js";
+import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensResult, compactTreeScopeResult } from "../../../../shared/tools/functions/hash-adder.js";
 import { createChainLedger } from "../../../../shared/tools/functions/chain-ledger.js";
 import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { getObservationContext } from "../../../observability/functions/observations.js";
@@ -541,10 +541,15 @@ export async function executeToolWithMap(name, argsStr, context, {
       const result = BLOCKING_NATIVE_TOOL_NAMES.has(name)
         ? await PROVIDER_TOOL_GATE.write(key, run, { label, waitMs: 120000, barrierName: label })
         : await PROVIDER_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
-      const compacted = compactTreeScopeResult(name, result, { args, context });
-      const withHashRef = compacted.compacted
-        ? compacted.result
-        : appendHashRefIfMajor(name, result, { args, context });
+      const treeCompacted = compactTreeScopeResult(name, result, { args, context });
+      if (treeCompacted.compacted) return appendLiveChannelSignal(treeCompacted.result, name);
+      // Survey tail compaction (flag-gated) runs before the ambient stamp so
+      // the stamp covers the compacted inline-head payload.
+      const surveyCompacted = compactCodeSurveyResult(name, result, { args, context });
+      // Window/lens ref-paging (flag-gated) runs after survey compaction and
+      // before the ambient stamp so the stamp covers the compacted inline head.
+      const refPaged = compactCodeWindowLensResult(name, surveyCompacted.result, { args, context });
+      const withHashRef = appendHashRefIfMajor(name, refPaged.result, { args, context });
       return appendLiveChannelSignal(withHashRef, name);
     }
     if (typeof onUnknown === "function") {

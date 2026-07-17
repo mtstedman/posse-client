@@ -217,8 +217,14 @@ export function recoverOrphanedReviewJobs({
       );
       // Grace period: don't requeue during transient failures — the child
       // may be retrying. Wait at least 30s after the review job was parked.
+      // Zero children is also a permanent trap (the human_input child failed
+      // to create, or was pruned): nothing will ever release the gate. Use a
+      // longer grace there so an in-flight child creation isn't misread.
       const reviewAge = (Date.now() - new Date(rj.updated_at).getTime()) / 1000;
-      if (allChildrenDead && reviewAge > 30) {
+      const orphaned = children.length === 0
+        ? reviewAge > 120
+        : (allChildrenDead && reviewAge > 30);
+      if (orphaned) {
         if (!hasDisplay) {
           if (!headlessOrphanedReviewParkedLogged.has(rj.id)) {
             headlessOrphanedReviewParkedLogged.add(rj.id);

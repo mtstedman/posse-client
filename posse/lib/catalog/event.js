@@ -304,6 +304,7 @@ export const EVENT_TYPES = Object.freeze({
   SCHEDULER_STARTED: "scheduler.started",
   SCHEDULER_STOPPED: "scheduler.stopped",
   SCHEDULER_WORKER_ERROR: "scheduler.worker_error",
+  SCHEDULER_WORKER_WEDGED: "scheduler.worker_wedged",
   SCHEDULER_WORKERS_ABANDONED: "scheduler.workers_abandoned",
   SCHEDULER_WORKERS_LEFT_AFTER_LOCK_LOSS: "scheduler.workers_left_after_lock_loss",
 

@@ -28,12 +28,44 @@ function resultMessage(result, packageName, dryRun) {
   return `${identity} unavailable${detail ? `: ${detail}` : ""}`;
 }
 
+// Optional binaries are user-facing extras (non-heartbeat-gated, no required
+// issued version) that may ship before the artifact service publishes a
+// version or before a per-platform build exists — e.g. bossy, the fleet TUI,
+// which is committed only for some platforms. Their absence must not fail the
+// build/doctor gate: they download on drift once issued, and degrade to
+// "not available yet" otherwise.
+function isOptionalBinary(entry) {
+  return !!entry && entry.keyGated !== true && entry.issuedVersionRequired !== true;
+}
+
 function dependencyEntry(result, { dryRun }) {
   const name = String(result?.name || "unknown");
-  const packageName = nativeBinaryEntry(name)?.package || name;
+  const entry = nativeBinaryEntry(name);
+  const packageName = entry?.package || name;
   const planned = dryRun && result?.available !== true && result?.planned === true;
   const installed = result?.available === true && result?.downloaded === true;
   const ready = result?.available === true && result?.current !== false;
+  if (!ready && !planned && isOptionalBinary(entry)) {
+    // Not issued / no build for this platform yet — non-fatal.
+    const detail = firstLine(result?.error?.message || result?.reason || "no issued version");
+    return {
+      present: true,
+      label: `native ${name}`,
+      name,
+      package: packageName,
+      version: result?.version || null,
+      path: result?.path || null,
+      source: result?.source || null,
+      downloaded: false,
+      ok: true,
+      status: "skipped",
+      action: "none",
+      reason: result?.reason || "version_not_issued",
+      current: result?.current ?? null,
+      refresh_error: null,
+      message: `${packageName} not downloaded (optional; ${detail})`,
+    };
+  }
   return {
     present: true,
     label: `native ${name}`,
@@ -59,8 +91,8 @@ function byteCount(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-function createDownloadAggregator(names, onDownloadProgress) {
-  if (typeof onDownloadProgress !== "function") return null;
+function createDownloadAggregator(names, onDownloadProgress, onBinaryProgress) {
+  if (typeof onDownloadProgress !== "function" && typeof onBinaryProgress !== "function") return null;
   const states = new Map(names.map((name) => [name, {
     name,
     package: nativeBinaryEntry(name)?.package || name,
@@ -114,6 +146,7 @@ function createDownloadAggregator(names, onDownloadProgress) {
       state.loadedBytes = byteCount(event.loadedBytes) ?? state.loadedBytes;
       state.totalBytes = byteCount(event.totalBytes) ?? state.totalBytes;
       currentName = name;
+      try { onBinaryProgress?.({ ...event, name, package: state.package }); } catch { /* observational */ }
       emit();
     },
     settled(name, result) {
@@ -128,6 +161,12 @@ function createDownloadAggregator(names, onDownloadProgress) {
         state.loadedBytes = state.totalBytes;
       }
       state.phase = "settled";
+      try {
+        onBinaryProgress?.({
+          type: "native-artifact-settled", name, package: state.package,
+          loadedBytes: state.loadedBytes, totalBytes: state.totalBytes, result,
+        });
+      } catch { /* observational */ }
       emit();
     },
   };
@@ -146,6 +185,7 @@ function createDownloadAggregator(names, onDownloadProgress) {
  *   dryRun?: boolean,
  *   onProgress?: ((message: string) => void) | null,
  *   onDownloadProgress?: ((progress: { loadedBytes: number, totalBytes: number | null, percent: number | null, currentName: string | null, currentPackage: string | null, activeCount: number, downloadCount: number }) => void) | null,
+ *   onBinaryProgress?: ((progress: any) => void) | null,
  * }} [opts]
  */
 export async function reconcileNativeBinaries({
@@ -155,12 +195,13 @@ export async function reconcileNativeBinaries({
   dryRun = false,
   onProgress = null,
   onDownloadProgress = null,
+  onBinaryProgress = null,
 } = {}) {
   if (typeof manager?.ensureAvailable !== "function") return [];
   const enabledNames = names.filter((name) => {
     try { return manager.enabled?.(name) === true; } catch { return false; }
   });
-  const downloadAggregator = createDownloadAggregator(enabledNames, onDownloadProgress);
+  const downloadAggregator = createDownloadAggregator(enabledNames, onDownloadProgress, onBinaryProgress);
   return await Promise.all(enabledNames.map(async (name) => {
     const packageName = nativeBinaryEntry(name)?.package || name;
     onProgress?.(`native ${name}: checking ${packageName}`);

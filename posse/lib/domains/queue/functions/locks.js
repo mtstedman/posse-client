@@ -90,7 +90,16 @@ export function getLiveSchedulerBlockMessage(lockName = "main", { graceMs = LIVE
 // Refuse to steal a lock whose heartbeat has advanced within this many seconds.
 // Renewed every loop tick by the holder; a fresh acquired_at means the live
 // holder is still ticking, so a steal would race a healthy scheduler.
-const FORCE_ACQUIRE_LIVENESS_SEC = 30;
+//
+// This MUST exceed the renewal cadence (LOCK_RENEW_SEC = 30s) with margin: at
+// exactly 30s a holder whose renewal tick is even milliseconds late — e.g. its
+// main thread blocked on a large synchronous better-sqlite3 op, an event the
+// lease renewal telemetry explicitly anticipates — becomes stealable, and then
+// keeps dispatching from its run loop until its next failed renewal (~30s
+// later), a dual-scheduling window. 45s tolerates one fully-missed renewal
+// cycle while still beating the lock's 60s (LOCK_RENEW_SEC*2) natural DB expiry,
+// so a genuinely dead holder is still force-recovered faster than expiry.
+const FORCE_ACQUIRE_LIVENESS_SEC = 45;
 
 export function forceAcquireSchedulerLock(lockName, ownerId, durationSec = 60) {
   const db = getDb();

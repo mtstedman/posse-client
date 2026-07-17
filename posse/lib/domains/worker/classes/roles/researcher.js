@@ -8,6 +8,7 @@ import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
 import { atlasMemoryEnabled } from "../../../../shared/policies/functions/memory-mode.js";
+import { getAccountSetting } from "../../../settings/functions/account-settings.js";
 import { BaseRole } from "../BaseRole.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import {
@@ -120,10 +121,33 @@ function fanoutBranchKind(payload = {}) {
   return kind === "web" ? "web" : "module";
 }
 
-function researchPromptProfile(roleMode) {
+function researchPromptProfile(roleMode, { reportMode = false } = {}) {
   if (roleMode === "child") return "researcher_fanout_child";
   if (roleMode === "synth") return "researcher_fanout_synthesis";
+  if (reportMode) return tightAnswerContractEnabled() ? "researcher_report_tight" : "researcher_report";
   return "researcher";
+}
+
+// L2 (TOKEN-LEVERS-PLAN): tight researcher answer contract, default OFF.
+// Selects the researcher_report_tight remote prompt profile for report/
+// question research jobs. The remote must ship the tight profile before this
+// is flipped on — an unknown profile falls back to the base researcher role
+// prompt on old remotes, which is the wrong contract for report jobs.
+function tightAnswerContractEnabled() {
+  try {
+    const value = String(getAccountSetting("atlas_answer_contract_tight") || "off").trim().toLowerCase();
+    return value === "on" || value === "true" || value === "1" || value === "yes";
+  } catch {
+    return false;
+  }
+}
+
+function isResearchReportMode(workItem, payload, intakeHints) {
+  const mode = String(payload?.task_mode || workItem?.mode || "").trim().toLowerCase();
+  return mode === "report"
+    || mode === "question"
+    || intakeHints?.output_mode === "question_only"
+    || intakeHints?.deliverable_type === "answer";
 }
 
 function truncateForPrompt(value, maxChars, label) {
@@ -460,7 +484,6 @@ export class ResearcherRole extends BaseRole {
       cwdError: replanCwd.error,
     });
     const roleMode = normalizeResearchRoleMode(payload.role_mode);
-    const promptProfile = researchPromptProfile(roleMode);
     const webOnlyAnswer = payload.web_only_answer === true;
     const fanoutRunId = payload.fanout_run_id || null;
     const childJobIds = parseChildJobIds(payload);
@@ -471,6 +494,8 @@ export class ResearcherRole extends BaseRole {
       : getResearchBudget(workItem, payload);
     const deepthink = isResearchBudgetDeep(researchBudget);
     const intakeHints = getWorkItemIntakeHints(workItem, workItem?.mode || "build");
+    const reportMode = roleMode === "solo" && isResearchReportMode(workItem, payload, intakeHints);
+    const promptProfile = researchPromptProfile(roleMode, { reportMode });
     const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(workItem), this.getRole());
     const webFetchCachePreload = buildWebFetchCachePreload(job.work_item_id);
     const imageRoutingSummary = describeArtifactRoutingForPrompt("image");
@@ -637,6 +662,7 @@ export class ResearcherRole extends BaseRole {
       projectDir,
       promptProfile,
       researchBudget,
+      researchReportMode: reportMode,
       researchRetrySynthesisMode: retrySynthesisMode,
       researchRoleMode: roleMode,
       researcherPacket,
@@ -644,7 +670,9 @@ export class ResearcherRole extends BaseRole {
     });
 
     return [
-      "Research the following topic for a development work item.",
+      reportMode
+        ? "Research the following assigned task and return the finished user-facing report."
+        : "Research the following topic for a development work item.",
       "",
       promptLiteral("WORK ITEM", workItem.title),
       promptLiteral("DESCRIPTION", roleMode === "child"
@@ -662,8 +690,12 @@ export class ResearcherRole extends BaseRole {
       assessmentReplanEvidenceBlock,
       atlasHandoffBlock || null,
       retrySynthesisMode ? buildResearchRetryShapeBlock({ atlasActive: !!researcherPacket?.atlas?.active }) : "",
-      payloadRetrySynthesisMode ? "TURN-BUDGET RETRY MODE:\nPrevious research exceeded a deterministic turn/tool budget. Produce a partial planner-ready brief from available context and salvage; only make targeted verification reads if absolutely necessary.\n" : "",
-      priorResearch ? `PRIOR RESEARCH BRIEF:\n${priorResearch}\n` : "",
+      payloadRetrySynthesisMode
+        ? reportMode
+          ? "TURN-BUDGET RETRY MODE:\nPrevious research exceeded a deterministic turn/tool budget. Produce the concise finished report now from available context and salvage; make only a targeted verification read if essential to an assigned goal. Do not produce a planner brief or structured appendix.\n"
+          : "TURN-BUDGET RETRY MODE:\nPrevious research exceeded a deterministic turn/tool budget. Produce a partial planner-ready brief from available context and salvage; only make targeted verification reads if absolutely necessary.\n"
+        : "",
+      priorResearch ? `${reportMode ? "PRIOR RESEARCH REPORT" : "PRIOR RESEARCH BRIEF"}:\n${priorResearch}\n` : "",
       humanAnswers ? `HUMAN ANSWERS (to your previous questions):\n${humanAnswers}\n` : "",
       priorAttemptLogs ? `PRIOR ATTEMPT (ran out of turns - do NOT repeat these reads, summarize your findings promptly):\n${priorAttemptLogs}\n` : "",
       retrySalvageBlock ? `${retrySalvageBlock}\n` : "",
@@ -721,7 +753,7 @@ export class ResearcherRole extends BaseRole {
     return {
       role: this.getRole(),
       roleMode,
-      promptProfile: ctx.promptProfile || researchPromptProfile(roleMode),
+      promptProfile: ctx.promptProfile || researchPromptProfile(roleMode, { reportMode: !!ctx.researchReportMode }),
       allowWrite: false,
       modelTier: ctx.tier,
       reasoningEffort: researchBudgetToReasoningEffort(researchBudget, job.reasoning_effort || "medium"),

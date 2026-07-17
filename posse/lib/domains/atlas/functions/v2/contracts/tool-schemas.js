@@ -114,7 +114,6 @@ const CODE_SHARED_ACTIONS = Object.freeze(
 const QUERY_GATEWAY_ACTIONS = Object.freeze([
   "symbol.search",
   "symbol.card",
-  "symbol.cards",
   "symbol.overview",
   "tree.branch",
   "tree.expand",
@@ -248,6 +247,26 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     limit: i({ minimum: 1, maximum: 60000 }),
     search: s({ maxLength: 512 }),
   }),
+  create_ref: o({
+    text: s({ maxLength: 60000 }),
+    source_ref: s({ maxLength: 512 }),
+    lines: s({ maxLength: 32 }),
+    offset: i({ minimum: 0 }),
+    limit: i({ minimum: 1, maximum: 60000 }),
+    note: s({ maxLength: 300 }),
+    object_type: s({ maxLength: 80 }),
+    owner_scope: s({ enum: ["work_item", "job"] }),
+    chunks: a(o({
+      text: s({ maxLength: 60000 }),
+      source_ref: s({ maxLength: 512 }),
+      lines: s({ maxLength: 32 }),
+      offset: i({ minimum: 0 }),
+      limit: i({ minimum: 1, maximum: 60000 }),
+      note: s({ maxLength: 300 }),
+      object_type: s({ maxLength: 80 }),
+      owner_scope: s({ enum: ["work_item", "job"] }),
+    }), { maxItems: 24 }),
+  }),
 
   "repo.register": o({
     repoId: s({ maxLength: 256 }),
@@ -330,13 +349,6 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     symbolIds: symbolIds(100),
     symbolRefs: a(looseSymbolRef(), { maxItems: 100 }),
     ifNoneMatch: s({ maxLength: 512 }),
-    minCallConfidence: n({ minimum: 0, maximum: 1 }),
-    includeResolutionMetadata: b(),
-    sessionId: s({ maxLength: 256 }),
-  }),
-  "symbol.cards": o({
-    symbolIds: symbolIds(100),
-    symbolRefs: a(looseSymbolRef(), { maxItems: 100 }),
     minCallConfidence: n({ minimum: 0, maximum: 1 }),
     includeResolutionMetadata: b(),
     sessionId: s({ maxLength: 256 }),

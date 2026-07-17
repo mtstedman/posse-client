@@ -7,7 +7,18 @@ import { getSetting } from "../../../queue/functions/settings.js";
 export const DEFAULT_RUNTIME_RETENTION_DAYS = 90;
 export const RUNTIME_RETENTION_INTERVAL_MS = 60 * 60 * 1000;
 
-let _lastRuntimeRetentionAt = 0;
+// Initialized to module load time so the first pass runs one interval into
+// the process lifetime, not on the scheduler loop's very first tick — that
+// tick lands right at boot, exactly when the prune backlog is largest and the
+// loop can least afford a long synchronous transaction.
+let _lastRuntimeRetentionAt = Date.now();
+
+// Chunked-delete bounds. Each chunk is its own implicit transaction, so a
+// pass never holds one giant write transaction; a pass that hits the cap
+// reports truncated:true and the caller re-arms sooner than the full interval.
+const RETENTION_DELETE_CHUNK = 2000;
+const RETENTION_MAX_CHUNKS_PER_TABLE = 10;
+const RETENTION_TRUNCATED_RETRY_MS = 5 * 60 * 1000;
 
 const RETENTION_TARGETS = Object.freeze([
   Object.freeze({ table: "events", column: "created_at" }),
@@ -112,18 +123,36 @@ export function runRuntimeRetention({
   const nowIso = new Date(nowMs).toISOString();
   const cutoff = cutoffIsoForRetention(days, nowMs);
   const deleted = {};
-  const totalDeleted = db.transaction(() => {
-    let total = 0;
-    for (const target of RETENTION_TARGETS) {
-      if (!tableExists(db, target.table)) {
-        deleted[target.table] = 0;
-        continue;
-      }
-      const info = db.prepare(`DELETE FROM ${target.table} WHERE ${target.column} < ?`).run(cutoff);
-      const changes = Number(info?.changes || 0);
-      deleted[target.table] = changes;
-      total += changes;
+  let totalDeleted = 0;
+  let truncated = false;
+  // Bulk age-based tables are pruned in bounded chunks, each chunk its own
+  // implicit transaction, so this never blocks the caller (the scheduler
+  // loop) behind one unbounded DELETE of a multi-month backlog.
+  for (const target of RETENTION_TARGETS) {
+    if (!tableExists(db, target.table)) {
+      deleted[target.table] = 0;
+      continue;
     }
+    const chunkStmt = db.prepare(`
+      DELETE FROM ${target.table}
+      WHERE rowid IN (
+        SELECT rowid FROM ${target.table} WHERE ${target.column} < ? LIMIT ?
+      )
+    `);
+    let tableTotal = 0;
+    for (let i = 0; i < RETENTION_MAX_CHUNKS_PER_TABLE; i++) {
+      const changes = Number(chunkStmt.run(cutoff, RETENTION_DELETE_CHUNK)?.changes || 0);
+      tableTotal += changes;
+      if (changes < RETENTION_DELETE_CHUNK) break;
+      if (i === RETENTION_MAX_CHUNKS_PER_TABLE - 1) truncated = true;
+    }
+    deleted[target.table] = tableTotal;
+    totalDeleted += tableTotal;
+  }
+  // The scoped prunes (terminal-job artifacts/attempts, expired insights) are
+  // naturally bounded by job turnover; keep them atomic in one transaction.
+  totalDeleted += db.transaction(() => {
+    let total = 0;
     const artifactChanges = pruneOldArtifacts(db, cutoff);
     deleted.artifacts = artifactChanges;
     total += artifactChanges;
@@ -150,6 +179,7 @@ export function runRuntimeRetention({
     cutoff,
     deleted,
     totalDeleted,
+    truncated,
     checkpoint: checkpointResult,
   };
 }
@@ -165,12 +195,19 @@ export function maybeRunRuntimeRetention({
   _lastRuntimeRetentionAt = nowMs;
   try {
     const result = runRuntimeRetention({ nowMs });
+    if (result.attempted && result.truncated) {
+      // Backlog exceeded the per-pass chunk cap — re-arm well before the
+      // full interval so the remainder drains in bounded slices instead of
+      // silently waiting another hour per pass.
+      _lastRuntimeRetentionAt = nowMs - Math.max(0, intervalMs - RETENTION_TRUNCATED_RETRY_MS);
+    }
     if (result.attempted && result.totalDeleted > 0) {
       log.info("admin", "Runtime DB retention pruned old rows", {
         retentionDays: result.retentionDays,
         cutoff: result.cutoff,
         deleted: result.deleted,
         totalDeleted: result.totalDeleted,
+        truncated: result.truncated === true,
       });
     }
     return result;

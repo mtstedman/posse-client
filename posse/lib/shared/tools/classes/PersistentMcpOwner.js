@@ -23,10 +23,11 @@ import {
 import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/tool-params.js";
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
+import { noteAtlasPressureAndGetNudge } from "../../../domains/integrations/functions/deterministic-mcp/gate.js";
 import { recordToolUseObservations } from "../../../domains/observability/functions/observations.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
-import { appendHashRefIfMajor, fetchHashRefTool } from "../functions/hash-adder.js";
+import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensResult, createHashRefTool, fetchHashRefTool } from "../functions/hash-adder.js";
 import {
   bindAgentAttachmentToSignedContract,
   isInternalAtlasAction,
@@ -35,6 +36,17 @@ import {
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
+// A child that produces NO response across this many consecutive request
+// timeouts is treated as wedged (event loop blocked, native deadlock) rather
+// than merely slow, and is force-killed so the next request respawns it. Any
+// response resets the counter, so a legitimately long single call does not
+// trip it. The gateway is stateless per request, so respawn loses nothing.
+const MAX_CONSECUTIVE_REQUEST_TIMEOUTS = 2;
+// Minimum spacing between child (re)spawns. Without it, a server spec that
+// crashes on startup turns every forwarded request into a fresh, heavy Node
+// process spawn — a hot crash-loop. The shim already treats the resulting
+// backoff error as a transient 5xx and retries.
+const GATEWAY_RESTART_BACKOFF_MS = 2000;
 const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
 const TOKEN_CLOCK_SKEW_MS = 30 * 1000;
@@ -373,14 +385,25 @@ function isAtlasFetchRefTool(toolName, toolArgs) {
   return requested.suite === "atlas" && requested.name === "fetch_ref";
 }
 
+function isAtlasCreateHashTool(toolName, toolArgs) {
+  const requested = requestedToolPolicyName(toolName, toolArgs);
+  return requested.suite === "atlas" && requested.name === "create_ref";
+}
+
 function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
   if (!result || result.isError === true) return result;
   const first = result?.content?.[0];
   if (!first || first.type !== "text" || typeof first.text !== "string") return result;
   const requested = requestedToolPolicyName(toolName, toolArgs);
-  const stamped = appendHashRefIfMajor(requested.name || toolName, first.text, {
-    args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
-    context: hashRefToolContext(session),
+  const args = toolArgs && typeof toolArgs === "object" ? toolArgs : {};
+  const context = hashRefToolContext(session);
+  // Flag-gated survey tail compaction runs before the ambient stamp so the
+  // stamp covers the compacted (inline-head) payload.
+  const compacted = compactCodeSurveyResult(requested.name || toolName, first.text, { args, context });
+  const refPaged = compactCodeWindowLensResult(requested.name || toolName, compacted.result, { args, context });
+  const stamped = appendHashRefIfMajor(requested.name || toolName, refPaged.result, {
+    args,
+    context,
     source: `atlas:${requested.name || toolName}`,
     objectType: requested.name ? `atlas.${requested.name}` : "atlas.tool_result",
   });
@@ -396,6 +419,32 @@ function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
  * text. Advisory: any failure (or a non-text result) leaves the result
  * untouched — a signal lookup must never break a successful ATLAS call.
  */
+/* L3a (atlas_gate_nudge): count lens/window ladder pressure on the owner
+ * ATLAS lane (the claude/MCP transport, where the embedded tool loop's gate
+ * hooks never run) and append the in-band steering nudge to the triggering
+ * result when the flag is on. Shadow-mode (flag off) still records the
+ * observation; this helper then appends nothing. */
+function appendOwnerAtlasPressureNudge(result, session, toolName, toolArgs) {
+  try {
+    if (result?.isError === true) return result;
+    const jobId = session?.bootConfig?.jobId ?? null;
+    const nudge = noteAtlasPressureAndGetNudge({
+      action: toolName,
+      args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
+      scopeKey: jobId != null ? `job:${jobId}` : (session?.id || null),
+    });
+    if (!nudge) return result;
+    const first = result?.content?.[0];
+    if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+    return {
+      ...result,
+      content: [{ ...first, text: `${first.text}\n\n${nudge}` }, ...result.content.slice(1)],
+    };
+  } catch {
+    return result;
+  }
+}
+
 function appendOwnerOperatorFeedbackSignal(result, session) {
   try {
     const signal = operatorFeedbackSignalTextForJob(session?.bootConfig?.jobId ?? null);
@@ -511,6 +560,8 @@ class PersistentMcpSession {
     this._stdoutBuffer = Buffer.alloc(0);
     this._pending = new Map();
     this._seq = 0;
+    this._consecutiveTimeouts = 0;
+    this._crashesSinceHealthy = 0;
     this.startedAt = null;
     this.lastExit = null;
     this.prewarmedAt = null;
@@ -638,6 +689,19 @@ class PersistentMcpSession {
     if (!this.serverSpec?.command) {
       throw new Error("MCP session has no registered server spec");
     }
+    // Respawn backoff: a spec that crashes on startup would otherwise hot-loop
+    // one heavy Node spawn per forwarded request. Allow the first respawn after
+    // a crash immediately (a single restart is normal and several tests depend
+    // on it), but once the child has died repeatedly without ever answering,
+    // throttle spawns to one per backoff window. The crash counter resets on any
+    // healthy response, so this only engages for a genuinely broken child.
+    if (this._crashesSinceHealthy >= 2
+      && this.lastExit?.at
+      && Date.now() - this.lastExit.at < GATEWAY_RESTART_BACKOFF_MS) {
+      const err = new Error("MCP session restarting; backing off after repeated exits");
+      err.code = "GATEWAY_RESTART_BACKOFF";
+      throw err;
+    }
     const spec = this.serverSpec;
     const proc = this._spawn(spec.command, spec.args || [], {
       cwd: spec.cwd || process.cwd(),
@@ -648,6 +712,7 @@ class PersistentMcpSession {
     this._proc = proc;
     this.startedAt = Date.now();
     this.lastExit = null;
+    this._consecutiveTimeouts = 0;
     this._stdoutBuffer = Buffer.alloc(0);
     let finished = false;
     const finish = ({ code = null, signal = null, error = null } = {}) => {
@@ -660,6 +725,7 @@ class PersistentMcpSession {
         ...(error ? { error: ownerErrorSummary(error) } : {}),
       };
       if (this._proc === proc) this._proc = null;
+      this._crashesSinceHealthy += 1;
       this._prewarmPromise = null;
       this.prewarmedAt = null;
       const failure = error || new Error(`MCP session exited (${code ?? signal ?? "unknown"})`);
@@ -704,6 +770,17 @@ class PersistentMcpSession {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this._pending.delete(internalId);
+        // A wedged child (blocked event loop, native deadlock) never answers,
+        // so the caller's timeout is the only signal. Count consecutive
+        // no-response timeouts; once the child looks wedged rather than slow,
+        // force-kill it. Its exit drives finish() → rejects remaining pending,
+        // and the next request respawns a fresh child via ensureStarted. Without
+        // this the single shared gateway child stays wedged forever, costing
+        // every subsequent request a full 120s timeout.
+        this._consecutiveTimeouts += 1;
+        if (this._consecutiveTimeouts >= MAX_CONSECUTIVE_REQUEST_TIMEOUTS) {
+          try { this.stop({ force: true }); } catch { /* best effort; exit path handles pending */ }
+        }
         reject(new Error(`MCP session request timed out after ${DEFAULT_REQUEST_TIMEOUT_MS}ms`));
       }, DEFAULT_REQUEST_TIMEOUT_MS);
       timer.unref?.();
@@ -784,6 +861,10 @@ class PersistentMcpSession {
     if (!entry) return;
     this._pending.delete(id);
     clearTimeout(entry.timer);
+    // The child answered — it is alive and responsive, so clear any accumulated
+    // timeout strikes and crash-loop history.
+    this._consecutiveTimeouts = 0;
+    this._crashesSinceHealthy = 0;
     const restored = { ...message, id: entry.originalId };
     entry.resolve(restored);
   }
@@ -1476,8 +1557,9 @@ export class PersistentMcpOwner {
     const startedAt = Date.now();
     const context = attachTelemetryContext(session, this.bootId);
     try {
-      if (isAtlasFetchRefTool(toolName, toolArgs)) {
-        let result = mcpToolTextPayload(fetchHashRefTool(toolArgs || {}, {
+      if (isAtlasFetchRefTool(toolName, toolArgs) || isAtlasCreateHashTool(toolName, toolArgs)) {
+        const hashStoreTool = isAtlasCreateHashTool(toolName, toolArgs) ? createHashRefTool : fetchHashRefTool;
+        let result = mcpToolTextPayload(hashStoreTool(toolArgs || {}, {
           context: hashRefToolContext(session),
         }));
         result = appendOwnerOperatorFeedbackSignal(result, session);
@@ -1507,6 +1589,7 @@ export class PersistentMcpOwner {
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
       result = appendHashRefToMcpTextResult(result, toolName, toolArgs, session);
+      result = appendOwnerAtlasPressureNudge(result, session, toolName, toolArgs);
       // ATLAS calls are the bulk of a retrieval-phase agent's tool traffic;
       // without the signal here (the gateway only appends it to native
       // tools), an MCP-transport agent deep in an ATLAS-only phase learns

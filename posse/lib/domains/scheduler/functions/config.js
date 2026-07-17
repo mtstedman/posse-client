@@ -12,7 +12,12 @@ export function readPositiveIntSetting(key, fallback = null) {
 }
 
 export function readBoolSetting(key, fallback = false) {
-  const raw = getSetting(key);
+  let raw;
+  try {
+    raw = getSetting(key);
+  } catch {
+    return !!fallback;
+  }
   if (raw == null || String(raw).trim() === "") return !!fallback;
   return /^(1|true|yes|on)$/i.test(String(raw).trim());
 }

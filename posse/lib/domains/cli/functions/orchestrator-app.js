@@ -563,6 +563,7 @@ let _adminWorktreesModulePromise = null;
 let _serveCommandModulePromise = null;
 let _diagnosticCommandsModulePromise = null;
 let _localModelsCommandModulePromise = null;
+let _nativeBinariesCommandModulePromise = null;
 let _concurrency = null;
 let _stallTimeout = undefined;
 
@@ -632,6 +633,11 @@ async function loadDiagnosticCommandsModule() {
 async function loadLocalModelsCommandModule() {
   _localModelsCommandModulePromise ||= import("./local-models-command.js");
   return _localModelsCommandModulePromise;
+}
+
+async function loadNativeBinariesCommandModule() {
+  _nativeBinariesCommandModulePromise ||= import("./native-binaries-command.js");
+  return _nativeBinariesCommandModulePromise;
 }
 
 async function loadAtlasModule() {
@@ -2415,6 +2421,9 @@ const COMMAND_USAGE = {
     console.log(`  Lists signed local models with download size and recommended memory.`);
     console.log(`  Downloads always require an interactive, size-aware confirmation.\n`);
   },
+  "native-binaries": () => {
+    console.log(`\n  Usage: posse native-binaries\n  Reconcile native artifacts and emit NDJSON progress.\n`);
+  },
 };
 
 function helpFlagRequested() {
@@ -2531,6 +2540,7 @@ ${aliasDiagnostic}
     ${C.dim}             codex-models [validate|list] [oauth|api|auto]${C.reset}
     ${C.cyan}local-models${C.reset} List/download signed local models with size and system recommendations
     ${C.dim}             local-models [list [--json] | download [shorthand]]${C.reset}
+    ${C.cyan}native-binaries${C.reset} Reconcile signed native artifacts (NDJSON progress)
     ${C.cyan}windows-events${C.reset} Probe Windows crash/resource events into the run dir
     ${C.dim}             windows-events [--around ISO] [--minutes N] [--json]${C.reset}
     ${C.cyan}audit${C.reset}      Provider/handoff audit for jobs or work items
@@ -2570,6 +2580,7 @@ ${aliasDiagnostic}
       ${C.cyan}--concurrency N${C.reset}  Run N workers in parallel       ${C.dim}(default: ${getCatalogRuntimeFallbackInt("scheduler_concurrency", 3)})${C.reset}
     ${C.cyan}--no-tui${C.reset}         Disable split-screen display (classic output)
     ${C.cyan}--non-interactive${C.reset} Suppress terminal prompts; leave app gates open instead
+    ${C.cyan}--bossy${C.reset}          Open the Bossy fleet TUI for this machine's posses instead of the CLI
     ${C.cyan}--dry-run${C.reset}        Research + plan only — dev jobs auto-pass without execution
     ${C.cyan}--stall-timeout N${C.reset}  Seconds before killing stalled process ${C.dim}(default: ${getCatalogRuntimeFallbackInt("stall_timeout", 600)})${C.reset}
 
@@ -2592,6 +2603,7 @@ ${aliasDiagnostic}
 }
 
 async function dispatchResolvedCommand(command) {
+  const cmdNativeBinaries = async () => (await loadNativeBinariesCommandModule()).cmdNativeBinaries();
   const { handled, result } = await dispatchCommand(command, {
     add: cmdAdd,
     queue: cmdQueue,
@@ -2624,6 +2636,7 @@ async function dispatchResolvedCommand(command) {
     "mcp-status": cmdMcpStatus,
     "codex-models": cmdCodexModels,
     "local-models": cmdLocalModels,
+    "native-binaries": cmdNativeBinaries,
     "windows-events": cmdWindowsEvents,
     admin: cmdAdmin,
     merge: cmdMerge,
@@ -2644,8 +2657,10 @@ async function dispatchResolvedCommand(command) {
 }
 
 export function runOrchestratorCli() {
+  let fatal = false;
   return main()
     .catch((err) => {
+      fatal = true;
       console.error(`\n${C.red}Fatal: ${err.message}${C.reset}`);
       process.exitCode = 1;
     })
@@ -2658,5 +2673,14 @@ export function runOrchestratorCli() {
       closeObservationLog();
       closePromptLog();
       closeDb();
+      if (fatal) {
+        // A fatal error can strand non-unref'd resources — e.g. a backgrounded
+        // ATLAS boot-warm worker thread whose MessagePort pins the event loop —
+        // leaving the process printing "Fatal:" and then hanging indefinitely.
+        // The clean-exit path handles this with an explicit exit in RunSession;
+        // mirror it here once teardown has finished. stderr was written and
+        // teardown awaited above, so nothing user-visible is truncated.
+        setImmediate(() => process.exit(process.exitCode ?? 1));
+      }
     });
 }

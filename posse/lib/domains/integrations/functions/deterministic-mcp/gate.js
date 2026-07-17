@@ -5,6 +5,7 @@ import {
   GATED_ROLES,
   MEANINGFUL_ATLAS_ACTIONS,
 } from "./tool-descriptors.js";
+import { resolveAtlasGateNudgeEnabled } from "./gate-settings.js";
 
 const REQUIRED_MEANINGFUL_ATLAS_CALLS = 3;
 const FALLBACK_STRIKE_LIMIT = REQUIRED_MEANINGFUL_ATLAS_CALLS;
@@ -111,7 +112,17 @@ export function getRequiredMeaningfulAtlasCalls() {
 
 export function noteAtlasCall({ action = "", ok = false, empty = false, args = {}, artifacts = null, cwd = null, scopeKey = null } = {}) {
   _getGate(scopeKey).noteAtlasCall({ action, ok, empty, args, artifacts, cwd });
-  maybeRecordAtlasShadowTokenPressure({ action, args, artifacts, scopeKey });
+  return maybeRecordAtlasShadowTokenPressure({ action, args, artifacts, scopeKey });
+}
+
+/* L3a (TOKEN-LEVERS-PLAN): pressure counting + in-band nudge WITHOUT the
+ * lock-gate side effects. For callers outside the gateway/embedded tool loops
+ * (the MCP owner's ATLAS executor path), where the per-process ToolGate
+ * instance is unrelated but ladder pressure should still be counted and — when
+ * atlas_gate_nudge is on — steered in-band. Returns the nudge text to append
+ * to the triggering tool result, or null. */
+export function noteAtlasPressureAndGetNudge({ action = "", args = {}, artifacts = null, scopeKey = null } = {}) {
+  return maybeRecordAtlasShadowTokenPressure({ action, args, artifacts, scopeKey });
 }
 
 export function unlockForAtlasUnavailable({ reason = "atlas_unavailable", scopeKey = null } = {}) {
@@ -195,11 +206,12 @@ export function noteAtlasToolResult(result, { action = "", args = {}, cwd = null
   const text = typeof result === "string" ? result : String(result ?? "");
   const errored = /^Error:/i.test(text);
   const empty = !errored && (text.trim().length === 0 || text.trim() === "ATLAS returned no output.");
-  noteAtlasCall({ action, ok: !errored, empty, args, cwd, scopeKey });
+  const nudge = noteAtlasCall({ action, ok: !errored, empty, args, cwd, scopeKey });
   if (errored) {
     const unlockNotice = unlockGateForDeadAtlasResult(text, { scopeKey });
     if (unlockNotice) return `${text}\n\n${unlockNotice}`;
   }
+  if (nudge && !errored) return `${text}\n\n${nudge}`;
   return text;
 }
 
@@ -268,10 +280,15 @@ function maybeRecordAtlasShadowTokenPressure({ action = "", args = {}, artifacts
   const windowCount = Number(entry.byAction["code.window"] || 0);
   const shouldEmitTotal = entry.total >= PRESSURE_TOTAL_THRESHOLD && !entry.emitted.has("total");
   const shouldEmitWindow = windowCount >= PRESSURE_WINDOW_THRESHOLD && !entry.emitted.has("window");
-  if (!shouldEmitTotal && !shouldEmitWindow) return;
+  if (!shouldEmitTotal && !shouldEmitWindow) return null;
 
   if (shouldEmitTotal) entry.emitted.add("total");
   if (shouldEmitWindow) entry.emitted.add("window");
+  // L3a: with atlas_gate_nudge on, the threshold crossing steers the agent
+  // in-band (returned nudge text appended to the triggering tool result)
+  // instead of observation-only shadow mode.
+  const nudgeEnabled = resolveAtlasGateNudgeEnabled();
+  const recommendation = "Summarize the remaining evidence gap, use one area survey/structure call, or switch to a single targeted native-read exception instead of continuing per-file ladder loops.";
   try {
     const ctx = getObservationContext() || {};
     recordObservation({
@@ -279,10 +296,10 @@ function maybeRecordAtlasShadowTokenPressure({ action = "", args = {}, artifacts
       job_id: ctx.job_id ?? null,
       attempt_id: ctx.attempt_id ?? null,
       observation_type: "atlas.shadow.token_pressure",
-      summary: `ATLAS shadow token pressure: ${entry.total} lens/window call(s) for ${target}`,
+      summary: `ATLAS ${nudgeEnabled ? "active" : "shadow"} token pressure: ${entry.total} lens/window call(s) for ${target}`,
       detail: {
         kind: "atlas_shadow_token_pressure",
-        mode: "shadow",
+        mode: nudgeEnabled ? "active" : "shadow",
         scope,
         target,
         total_ladder_calls: entry.total,
@@ -293,12 +310,18 @@ function maybeRecordAtlasShadowTokenPressure({ action = "", args = {}, artifacts
           total: PRESSURE_TOTAL_THRESHOLD,
           code_window: PRESSURE_WINDOW_THRESHOLD,
         },
-        recommendation: "Summarize the remaining evidence gap, use one area survey/structure call, or switch to a single targeted native-read exception instead of continuing per-file ladder loops.",
+        recommendation,
       },
     });
   } catch {
     // Token-pressure telemetry is advisory only.
   }
+  if (!nudgeEnabled) return null;
+  return [
+    `[token-pressure] ${entry.total} lens/window call(s) against ${target} so far`,
+    `(${Number(entry.byAction["code.lens"] || 0)} lens, ${windowCount} window).`,
+    recommendation,
+  ].join(" ");
 }
 
 function normalizeAtlasActionForPressure(action, args = {}) {

@@ -177,19 +177,17 @@ export async function symbolGetCard({ view, versionId, params, repoRoot, ledger,
  *   repoRoot?: string,
  *   ledger?: import("../contracts/api.js").Ledger,
  *   repoId?: string | null,
- *   action?: "symbol.card" | "symbol.cards",
+ *   action?: "symbol.card",
  * }} args
  */
-export async function symbolGetCards({ view, versionId, params, repoRoot, ledger, repoId, action = "symbol.cards" }) {
+export async function symbolGetCards({ view, versionId, params, repoRoot, ledger, repoId, action = "symbol.card" }) {
   const requests = collectCardRequests(params);
   if (requests.length === 0) {
     return errorEnvelope({
       action,
       versionId,
       code: "invalid_params",
-      message: action === "symbol.card"
-        ? "symbol.card requires symbolId, symbolRef, symbolIds, or symbolRefs"
-        : "symbol.cards requires symbolIds or symbolRefs",
+      message: "symbol.card requires symbolId, symbolRef, symbolIds, or symbolRefs",
     });
   }
 

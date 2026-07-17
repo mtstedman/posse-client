@@ -18,6 +18,7 @@ import {
   LOCK_HOLDING_JOB_STATUSES,
   TERMINAL_JOB_STATUSES,
   isPushOfferJob,
+  runImmediateTransaction,
 } from "../../queue/functions/common.js";
 import {
   addCrossWiMergeDependency,
@@ -123,12 +124,18 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 const SCHEDULER_BOOT_MAINTENANCE_WORKER_URL = new URL("../functions/boot-maintenance-worker.js", import.meta.url);
 const SCHEDULER_BOOT_THREAD_MANAGER = new ThreadManager();
 
-function runSchedulerBootMaintenanceInWorker() {
+function runSchedulerBootMaintenanceInWorker({ ownerId = null, lockName = "main" } = {}) {
   return SCHEDULER_BOOT_THREAD_MANAGER.run(SCHEDULER_BOOT_MAINTENANCE_WORKER_URL, {
     label: "Scheduler boot DB maintenance",
     timeoutMs: 120_000,
     workerData: {
       dbPath: getRuntimeDbPath(),
+      // Passed so the worker can confirm we still hold the scheduler lock before
+      // force-requeuing every active lease. Guards the shutdown-during-boot race:
+      // if a Ctrl+C released the lock and a restarted instance already took it,
+      // this dying worker must not clobber the new owner's fresh leases.
+      lockName,
+      ownerId,
     },
   });
 }
@@ -151,6 +158,13 @@ const RUN_BACKGROUND_JOB_TYPES_LIST = [...RUN_BACKGROUND_JOB_TYPES];
 // agent work. A constant, derived from runtime state — NOT a user setting.
 const BACKGROUND_JOB_CONCURRENCY = 1;
 const RUN_LOOP_KEEPALIVE_INTERVAL_MS = 30_000;
+
+// Runtime-watchdog escalation. After the first runtime kill the worker owns
+// the abort path; if its promise still hasn't settled, re-send the kill on
+// this cadence and, past the wedged threshold, emit a one-shot event so the
+// permanently occupied compute slot is visible in telemetry.
+const RUNTIME_KILL_RETRY_MS = 60_000;
+const RUNTIME_KILL_WEDGED_MS = 5 * 60_000;
 
 // Holder types that represent SYSTEM holds, not agent-vs-agent contention.
 // They must never be counted as the agent pipeline being "on lock".
@@ -349,7 +363,13 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
 
   let handoff;
   try {
-    handoff = db.inTransaction ? applyHandoff() : db.transaction(applyHandoff)();
+    // Route through runImmediateTransaction (not a raw db.transaction) so the
+    // deferred wake emissions the lock release + payload update queue while
+    // db.inTransaction get flushed on commit / discarded on rollback. A native
+    // db.transaction bypasses those lifecycle hooks, which would leak a
+    // released-lock wake into the next unrelated commit (index drops a
+    // still-held lock) or drop a real one on an unrelated rollback.
+    handoff = runImmediateTransaction(db, applyHandoff);
   } catch (err) {
     logEvent({
       work_item_id: job.work_item_id,
@@ -460,21 +480,6 @@ export class Scheduler {
     this._reconcileAtlasDriftIfIdle = opts.reconcileAtlasDriftIfIdle || reconcileAtlasDriftIfIdleAsync;
     this._atlasDriftCheckIntervalMs = opts.atlasDriftCheckIntervalMs || null;
     this._atlasDriftReindexFailsafeMs = opts.atlasDriftReindexFailsafeMs || null;
-
-    // Job-dispatch gate. Holds leasing until the initial (cold) ATLAS index
-    // build resolves, so the full index is built pre-flight — before the main
-    // loop processes jobs. The loop still polls, renews the lock, requeues
-    // expired leases, and runs deadlock detection while held, so the scheduler
-    // lock cannot starve. Resolves immediately when the index is already warm
-    // (no hold) and on build error (jobs proceed with degraded ATLAS rather
-    // than wedging forever). Incremental re-warms during the run are NOT gated.
-    this._dispatchReadyResolved = !opts.dispatchReady;
-    if (opts.dispatchReady && typeof opts.dispatchReady.then === "function") {
-      opts.dispatchReady.then(
-        () => { this._dispatchReadyResolved = true; },
-        () => { this._dispatchReadyResolved = true; },
-      );
-    }
 
     // Incremental-warm dispatch hold (see ATLAS_INDEXING_HOLD_MAX_MS above).
     // Complements the cold-boot gate: this one reacts to live conductor
@@ -787,12 +792,7 @@ export class Scheduler {
     // 2. Deadlock detection
     this._cancelDeadlockedJobs();
 
-    // 2b. Hold dispatch until the initial (cold) ATLAS index build is ready.
-    // The loop above (lock renewal, expired-lease requeue, deadlock checks)
-    // keeps running, so holding here cannot starve the scheduler lock.
-    if (!this._dispatchReadyResolved) return null;
-
-    // 2c. Hold non-warm dispatch while the ATLAS conductor is mid-(re)index.
+    // 2b. Hold non-warm dispatch while the ATLAS conductor is mid-(re)index.
     const atlasIndexingHold = this._atlasIndexingDispatchHold();
 
     // 3. Find next runnable job
@@ -860,6 +860,17 @@ export class Scheduler {
       if (typeof onBootEvent !== "function") return;
       try { onBootEvent({ label, ...patch }); } catch { /* observational */ }
     };
+    const ok = await this._acquireBootLockPhases(emitBootEvent);
+    if (!ok) {
+      // Terminal panel status for every failure path. The individual exit
+      // branches below log their specific reason; without a terminal emit the
+      // boot panel's "lock acquired" row spins forever after an aborted boot.
+      emitBootEvent("lock acquired", { section: "scheduler", status: "failed", detail: "scheduler lock unavailable" });
+    }
+    return ok;
+  }
+
+  async _acquireBootLockPhases(emitBootEvent) {
     this._stopRequested = false;
     this._stopMarked = false;
     this._lockLost = false;
@@ -1125,7 +1136,10 @@ export class Scheduler {
     // This SQLite maintenance is intentionally run in a worker thread. The DB
     // library is synchronous, so doing this on the parent event loop can freeze
     // boot indicators, signal handling, and scheduler-lock renewal.
-    const bootMaintenance = await runSchedulerBootMaintenanceInWorker();
+    const bootMaintenance = await runSchedulerBootMaintenanceInWorker({
+      ownerId: this.ownerId,
+      lockName: this.schedulerLock?.lockName || "main",
+    });
     const orphaned = Number(bootMaintenance?.orphaned || 0);
     if (orphaned > 0) {
       this._log(`Boot: recovered ${orphaned} orphaned job(s) from previous run`);
@@ -1377,6 +1391,15 @@ export class Scheduler {
       this.stop();
       return false;
     }
+    if (this._lockLost) {
+      // Renewal can lose the lock while orphan recovery / pre-loop hooks run
+      // (renewal starts at lock acquisition). _stopForSchedulerLockLoss only
+      // sets _lockLost/_running — without this check boot would "complete"
+      // and runLoop would throw instead of reporting a clean boot failure.
+      this._log("Boot: decision=EXIT (scheduler lock lost during boot phases)", "red");
+      this.stop();
+      return false;
+    }
     if (this._stopRequested) {
       this._log("Boot: decision=EXIT (stop requested during pre-loop hooks)", "yellow");
       this.stop();
@@ -1384,6 +1407,11 @@ export class Scheduler {
     }
     try {
       await this.runHealthChecks({ onBootEvent });
+      if (this._lockLost) {
+        this._log("Boot: decision=EXIT (scheduler lock lost during health checks)", "red");
+        this.stop();
+        return false;
+      }
       if (this._stopRequested) {
         this._log("Boot: decision=EXIT (stop requested during health checks)", "yellow");
         this.stop();
@@ -1483,7 +1511,7 @@ export class Scheduler {
     let atlasDriftReindexStartedAt = 0;
     let atlasDriftReindexChild = null;
     let atlasDriftReindexDisabledUntilRestart = false;
-    const killedForRuntime = new Set(); // jobIds already killed by runtime watchdog
+    const killedForRuntime = new Map(); // jobId -> { firstKillAt, lastKillAt, wedgedLogged }
 
     // Plan 12(c): periodic ATLAS-drift reconciliation. Flag-gated via the
     // DB-backed atlas_drift_check setting. Cheap no-op when disabled or when
@@ -1497,6 +1525,11 @@ export class Scheduler {
     // table grows. A 60s sweep keeps it bounded without measurable overhead.
     let lastStaleLockSweep = Date.now();
     const STALE_LOCK_SWEEP_MS = 60_000;
+
+    // Headless-gate recovery sweeps run on their own cadence (they scan every
+    // parked review/human gate and all gate logic uses 30s+ grace windows).
+    let lastHeadlessRecoverySweep = 0;
+    const HEADLESS_RECOVERY_SWEEP_MS = 15_000;
 
     try {
       let idleCount = 0;
@@ -1591,47 +1624,56 @@ export class Scheduler {
         // Headless human_input timeout: if no display is available, waiting_on_human
         // jobs will sit forever. After the configured headless human timeout, fail them and
         // recover the chain so dependents don't get deadlock-canceled.
-        recoverHeadlessHumanTimeouts({
-          hasDisplay: this._hasDisplay,
-          headlessNonHumanWaitingLogged,
-          ownerId: this.ownerId,
-          log: (msg, color) => this._log(msg, color),
-          eventTypes: EVENT_TYPES,
-          eventActors: EVENT_ACTORS,
-          terminalJobStatuses: TERMINAL_JOB_STATUSES,
-          readHeadlessHumanTimeoutSec,
-          queue: {
-            hasJobs,
-            listJobs,
-            isPushOfferJob,
-            parseJobPayload,
-            getJob,
-            getDependents,
-            updateJobStatus,
-            removeDependency,
-            refreshWorkItemStatus,
-            logEvent,
-          },
-        });
+        //
+        // Throttled: both recovery sweeps scan every parked gate (per-WI job
+        // lists), gate on 30s+ grace periods, and ticks fire on every queue
+        // state change — running them each tick is pure overhead while a
+        // review gate sits waiting for a human.
+        const runHeadlessRecoverySweeps = Date.now() - lastHeadlessRecoverySweep > HEADLESS_RECOVERY_SWEEP_MS;
+        if (runHeadlessRecoverySweeps) {
+          lastHeadlessRecoverySweep = Date.now();
+          recoverHeadlessHumanTimeouts({
+            hasDisplay: this._hasDisplay,
+            headlessNonHumanWaitingLogged,
+            ownerId: this.ownerId,
+            log: (msg, color) => this._log(msg, color),
+            eventTypes: EVENT_TYPES,
+            eventActors: EVENT_ACTORS,
+            terminalJobStatuses: TERMINAL_JOB_STATUSES,
+            readHeadlessHumanTimeoutSec,
+            queue: {
+              hasJobs,
+              listJobs,
+              isPushOfferJob,
+              parseJobPayload,
+              getJob,
+              getDependents,
+              updateJobStatus,
+              removeDependency,
+              refreshWorkItemStatus,
+              logEvent,
+            },
+          });
 
-        // Also check for orphaned waiting_on_review jobs whose human_input
-        // child has already failed/timed out — these are permanent traps.
-        recoverOrphanedReviewJobs({
-          hasDisplay: this._hasDisplay,
-          headlessOrphanedReviewParkedLogged,
-          log: (msg, color) => this._log(msg, color),
-          eventTypes: EVENT_TYPES,
-          eventActors: EVENT_ACTORS,
-          deadlockTerminalStatuses: DEADLOCK_TERMINAL_STATUSES,
-          queue: {
-            hasJobs,
-            listJobs,
-            listJobsByWorkItem,
-            updateJobStatus,
-            refreshWorkItemStatus,
-            logEvent,
-          },
-        });
+          // Also check for orphaned waiting_on_review jobs whose human_input
+          // child has already failed/timed out — these are permanent traps.
+          recoverOrphanedReviewJobs({
+            hasDisplay: this._hasDisplay,
+            headlessOrphanedReviewParkedLogged,
+            log: (msg, color) => this._log(msg, color),
+            eventTypes: EVENT_TYPES,
+            eventActors: EVENT_ACTORS,
+            deadlockTerminalStatuses: DEADLOCK_TERMINAL_STATUSES,
+            queue: {
+              hasJobs,
+              listJobs,
+              listJobsByWorkItem,
+              updateJobStatus,
+              refreshWorkItemStatus,
+              logEvent,
+            },
+          });
+        }
 
         this._cancelDeadlockedJobs();
 
@@ -1707,7 +1749,16 @@ export class Scheduler {
           atlasDriftReindexChild = null;
         }
 
-        if (atlasDriftReindexInFlight && activeWorkers.size === 0) {
+        // Hold dispatch briefly at the start of a drift restage so fresh jobs
+        // don't attach to a half-rebuilt index, but bound the hold like the
+        // conductor-indexing hold: ATLAS is a freshness accelerator, not a
+        // run gate, and a full restage can take tens of minutes — jobs that
+        // become runnable mid-restage must dispatch after the grace window.
+        if (
+          atlasDriftReindexInFlight
+          && activeWorkers.size === 0
+          && Date.now() - atlasDriftReindexStartedAt < this._atlasIndexingHoldMaxMs
+        ) {
           this._invokeCallback("onSlotStatus", onSlotStatus, {
             idle: this.concurrency,
             blockedByLock: 0,
@@ -1863,12 +1914,26 @@ export class Scheduler {
                 ...queuedCohortJobIdsForJob(job),
               ]);
               if (jobScope.files.length > 0 || jobScope.createRoots.length > 0) {
-                const conflict = findFileConflict(jobScope, heldLocks, { allowJobIds });
-                if (conflict) {
+                // findFileConflict returns only the FIRST conflicting lock, so a
+                // job whose scope collides with two different holders needs a
+                // re-check after each cross-WI handoff clears one — otherwise a
+                // second, non-handoffable conflict (e.g. an actively running
+                // job holding another path in scope) is never seen and the job
+                // leases with skipConflictCheck:true straight past it. Bounded
+                // by scope size (each handoff releases one path) so a handoff
+                // that fails to clear its lock cannot spin.
+                let blockedByLock = false;
+                const conflictResolveCap = jobScope.files.length + jobScope.createRoots.length + 1;
+                for (let resolveAttempt = 0; ; resolveAttempt++) {
+                  const conflict = findFileConflict(jobScope, heldLocks, { allowJobIds });
+                  if (!conflict) break;
                   const conflictType = conflict.lock?.lock_tier === "work_item" ? "work_item" : "job";
-                  if (conflictType === "work_item" && prepareCrossWiFileSyncHandoff(job, { type: "work_item", ...conflict }, this.ownerId)) {
+                  if (conflictType === "work_item"
+                    && resolveAttempt < conflictResolveCap
+                    && prepareCrossWiFileSyncHandoff(job, { type: "work_item", ...conflict }, this.ownerId)) {
                     ({ lockedFiles, lockedRoots, activeWorktreeWIs, heldLocks } = queueLockIndex.snapshot());
-                  } else {
+                    continue;
+                  }
                   const conflictPath = conflict.candidate?.path || conflict.lock?.path || jobScope.files[0] || jobScope.createRoots[0] || "unknown";
                   rememberBlockedLock({
                     job_id: job.id,
@@ -1882,9 +1947,10 @@ export class Scheduler {
                       : `#${job.id} waits on ${conflictPath}; held by job #${conflict.lock?.job_id}`,
                   });
                   skipJobIds.add(job.id);
-                  continue;
-                  }
+                  blockedByLock = true;
+                  break;
                 }
+                if (blockedByLock) continue;
                 if (shadowConflictMetricsEnabled) {
                   strictShadowOverlaps = collectStrictOnlyRootConflicts(jobScope, lockedRoots);
                 }
@@ -1951,31 +2017,52 @@ export class Scheduler {
 
           this._invokeCallback("onJobStart", onJobStart, leasedJob);
 
-          const workerPromise = workerCallback(leasedJob)
+          // Promise.resolve().then guards against a workerCallback that throws
+          // synchronously (or returns a non-promise): without it the throw
+          // escapes to the tick-level catch with the lease still held and no
+          // activeWorkers entry, leaving the job stuck until lease expiry.
+          const workerPromise = Promise.resolve()
+            .then(() => workerCallback(leasedJob))
             .catch((err) => {
-              this._log(`WI#${job.work_item_id} worker error on job #${job.id}: ${err.message}`, "red");
-              logEvent({
-                work_item_id: job.work_item_id,
-                job_id: job.id,
-                event_type: EVENT_TYPES.SCHEDULER_WORKER_ERROR,
-                actor_type: EVENT_ACTORS.SCHEDULER,
-                message: err.message,
-              });
-              const retryAt = new Date(Date.now() + 1000).toISOString();
-              const released = this.leaseManager.releaseWithoutAttemptPenalty(
-                { jobId: leasedJob.id, token: leasedJob._leaseToken || lease.leaseToken },
-                "queued",
-                { readyAt: retryAt },
-              );
-              if (released) {
-                this._log(`WI#${job.work_item_id} worker error on job #${job.id}: released lease and requeued`, "yellow");
+              // The recovery body itself can throw — releaseWithoutAttemptPenalty
+              // runs BEGIN IMMEDIATE (SQLITE_BUSY under cross-process contention,
+              // exactly the conditions that cause worker errors), and _log fans
+              // out to a display callback that can throw during teardown. If any
+              // of that escaped, workerPromise would reject with no handler
+              // attached (shutdown's Promise.all only attaches at loop exit) and
+              // the orchestrator's unhandledRejection guard would fatally exit the
+              // whole run. Contain it here so a worker error only loses one job.
+              try {
+                this._log(`WI#${job.work_item_id} worker error on job #${job.id}: ${err.message}`, "red");
                 logEvent({
                   work_item_id: job.work_item_id,
                   job_id: job.id,
                   event_type: EVENT_TYPES.SCHEDULER_WORKER_ERROR,
                   actor_type: EVENT_ACTORS.SCHEDULER,
-                  message: `Worker promise rejected; released lease and requeued: ${err.message}`,
+                  message: err.message,
                 });
+                const retryAt = new Date(Date.now() + 1000).toISOString();
+                const released = this.leaseManager.releaseWithoutAttemptPenalty(
+                  { jobId: leasedJob.id, token: leasedJob._leaseToken || lease.leaseToken },
+                  "queued",
+                  { readyAt: retryAt },
+                );
+                if (released) {
+                  this._log(`WI#${job.work_item_id} worker error on job #${job.id}: released lease and requeued`, "yellow");
+                  logEvent({
+                    work_item_id: job.work_item_id,
+                    job_id: job.id,
+                    event_type: EVENT_TYPES.SCHEDULER_WORKER_ERROR,
+                    actor_type: EVENT_ACTORS.SCHEDULER,
+                    message: `Worker promise rejected; released lease and requeued: ${err.message}`,
+                  });
+                }
+              } catch (recoveryErr) {
+                // Last-resort: never let the recovery path reject. The lease, if
+                // still held, self-heals via expiry.
+                try {
+                  this._log(`WI#${job.work_item_id} worker error recovery failed on job #${job.id}: ${recoveryErr?.message || recoveryErr}`, "red");
+                } catch { /* display teardown */ }
               }
             })
             .finally(() => {
@@ -1986,7 +2073,12 @@ export class Scheduler {
               lastProgressTime = Date.now(); // job completion counts as progress
               this._invokeCallback("onJobEnd", onJobEnd, leasedJob);
               this._wakeSleeps();
-            });
+            })
+            // Terminal guard: the .finally body (_wakeSleeps, onJobEnd callback)
+            // can also throw. Nothing awaits workerPromise until shutdown, so an
+            // unhandled rejection here would fatally exit the run. Swallow it —
+            // the .catch/.finally above already did the meaningful recovery.
+            .catch(() => {});
 
           activeWorkers.set(job.id, { promise: workerPromise, job: leasedJob, startTime: Date.now() });
           if (isBackground) backgroundWorkerCount++;
@@ -2050,11 +2142,36 @@ export class Scheduler {
           const now = Date.now();
           for (const [jobId, entry] of activeWorkers) {
             if (entry.job.job_type === "human_input") continue;
-            if (killedForRuntime.has(jobId)) continue; // already killed, waiting for cleanup
+            const killState = killedForRuntime.get(jobId);
+            if (killState) {
+              // Kill was sent but the worker promise hasn't settled. There is
+              // no top-level abort race around job execution, so a single
+              // signal-ignoring await can hold this compute slot forever.
+              // Re-send the kill periodically and surface a wedged event once
+              // so the stuck slot is visible instead of silent.
+              if (now - killState.lastKillAt >= RUNTIME_KILL_RETRY_MS) {
+                killState.lastKillAt = now;
+                this._invokeCallback("onKillJob", onKillJob, jobId, "runtime_exceeded");
+              }
+              if (!killState.wedgedLogged && now - killState.firstKillAt >= RUNTIME_KILL_WEDGED_MS) {
+                killState.wedgedLogged = true;
+                const stuckSec = Math.round((now - killState.firstKillAt) / 1000);
+                this._log(`WI#${entry.job.work_item_id} job #${jobId} still running ${stuckSec}s after runtime kill — worker is ignoring abort; compute slot is stuck until it exits`, "red");
+                logEvent({
+                  job_id: jobId,
+                  work_item_id: entry.job.work_item_id,
+                  event_type: EVENT_TYPES.SCHEDULER_WORKER_WEDGED,
+                  actor_type: EVENT_ACTORS.SCHEDULER,
+                  actor_id: this.ownerId,
+                  message: `Worker still running ${stuckSec}s after runtime kill; abort is not being honored`,
+                });
+              }
+              continue;
+            }
             const runtimeSec = (now - entry.startTime) / 1000;
             const runtimeLimitSec = maxJobRuntimeSecFor(entry.job);
             if (runtimeSec > runtimeLimitSec) {
-              killedForRuntime.add(jobId);
+              killedForRuntime.set(jobId, { firstKillAt: now, lastKillAt: now, wedgedLogged: false });
               this._log(`WI#${entry.job.work_item_id} job #${jobId} exceeded max runtime (${Math.ceil(runtimeSec)}s > ${runtimeLimitSec}s) — killing for escalation`, "red");
               logEvent({
                 job_id: jobId,
@@ -2092,31 +2209,43 @@ export class Scheduler {
         // Plan 12(c): periodic ATLAS-drift reconciliation. Runs in a try/catch
         // so a transient git or fs error never crashes the scheduler loop.
         const atlasDriftCheckIntervalMs = this._atlasDriftCheckIntervalMs || readAtlasDriftCheckIntervalMs();
-        if (!atlasDriftReindexDisabledUntilRestart && Date.now() - lastAtlasDriftCheck >= atlasDriftCheckIntervalMs) {
+        if (
+          !atlasDriftReindexDisabledUntilRestart
+          && !atlasDriftReindexInFlight
+          && Date.now() - lastAtlasDriftCheck >= atlasDriftCheckIntervalMs
+        ) {
           lastAtlasDriftCheck = Date.now();
           try {
-            let statusReportedSynchronously = false;
+            let statusReported = false;
             const outcome = await this._reconcileAtlasDriftIfIdle({
               cwd: process.cwd(),
               isWorkerIdle: () => activeWorkers.size === 0,
-              onStatus: ({ ok, error, repoId }) => {
-                statusReportedSynchronously = true;
+              onStatus: ({ ok, error, repoId, staged }) => {
+                statusReported = true;
                 atlasDriftReindexInFlight = false;
                 atlasDriftReindexStartedAt = 0;
                 atlasDriftReindexChild = null;
-                log[ok ? "info" : "warn"]("atlas", ok ? "Drift reindex complete" : "Drift reindex failed", {
-                  repoId: repoId || null, error: error || null,
-                });
+                if (!ok) {
+                  log.warn("atlas", "Drift reindex failed", { repoId: repoId || null, error: error || null });
+                } else if (staged?.staged === true) {
+                  log.info("atlas", "Drift reindex complete", { repoId: repoId || null });
+                } else {
+                  log.debug("atlas", "Drift check found nothing to restage", { repoId: repoId || null });
+                }
               },
             });
+            // v2 restages run in the background and settle via onStatus; a
+            // legacy outcome may still expose a child process handle. Either
+            // way, arm the in-flight tracking so the failsafe above can bound
+            // a restage that never reports back.
             const reindexChild = outcome.reindex?.child || outcome.child || null;
-            if (outcome.attempted && reindexChild && !statusReportedSynchronously) {
+            if (outcome.attempted && (outcome.background || reindexChild) && !statusReported) {
               atlasDriftReindexInFlight = true;
               atlasDriftReindexStartedAt = Date.now();
               atlasDriftReindexChild = reindexChild;
-              this._log(`ATLAS drift reindex started (HEAD ${String(outcome.head || "").slice(0, 8)} != ${String(outcome.lastIndexed || "").slice(0, 8)})`);
+              log.debug("atlas", "ATLAS drift restage running in background", {});
             } else if (outcome.skipped === "workers_busy") {
-              log.debug("atlas", "Drift reindex deferred", { head: outcome.head, lastIndexed: outcome.lastIndexed });
+              log.debug("atlas", "Drift reindex deferred", {});
             }
           } catch (err) {
             log.warn("atlas", "Drift reconciliation errored", { error: err?.message || String(err) });
@@ -2258,7 +2387,12 @@ export class Scheduler {
         activeWorkers,
       });
     } catch { /* observational */ }
-    this.schedulerLock.release();
+    // Guarded: releaseSchedulerLock runs a DELETE that can throw SQLITE_BUSY
+    // under the same cross-process contention that triggers lock-loss shutdown.
+    // Unguarded, that throw escapes stop() out of the run-loop finally, masking
+    // the loop's real error and skipping the SCHEDULER_STOPPED event. A stale
+    // lock row is self-healing (heartbeat-stale force-steal on next boot).
+    try { this.schedulerLock.release(); } catch { /* best-effort; lock self-heals via expiry */ }
 
     logEvent({
       event_type: EVENT_TYPES.SCHEDULER_STOPPED,
@@ -2291,8 +2425,14 @@ export class Scheduler {
   }
 
   _log(msg, color = "yellow") {
-    if (this._onEvent) this._onEvent(msg, color);
-    else console.log(`  ${C[color] || ""}[scheduler] ${msg}${C.reset}`);
+    // The display callback can throw (e.g. screen torn down mid-shutdown). _log
+    // runs from timer callbacks (lock-loss abort) and the worker-error recovery
+    // path, where an escaping throw becomes an uncaught exception / unhandled
+    // rejection and fatally exits the run. Never let logging do that.
+    try {
+      if (this._onEvent) this._onEvent(msg, color);
+      else console.log(`  ${C[color] || ""}[scheduler] ${msg}${C.reset}`);
+    } catch { /* logging must never break the caller */ }
   }
 
   /**

@@ -557,6 +557,8 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
       queueWaitMs: 30000,
       jobCacheTtlMs: 300000,
       prefetchCacheTtlMs: 600000,
+      prefetchEntrypointRank: false,
+      surveyEdgeCap: 0,
       corruptionCooldownMs: 120000,
       jobCacheEnabled: false,
       driftCheckEnabled: false,
@@ -622,6 +624,8 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbEmbeddedQueueWaitMs = useLiveSettings ? readDbSetting("atlas_embedded_queue_wait_ms") : null;
   const dbJobCacheTtlMs = useLiveSettings ? readDbSetting("atlas_job_cache_ttl_ms") : null;
   const dbPrefetchCacheTtlMs = useLiveSettings ? readDbSetting("atlas_prefetch_cache_ttl_ms") : null;
+  const dbPrefetchEntrypointRank = useLiveSettings ? readDbSettingBool("atlas_prefetch_entrypoint_rank") : null;
+  const dbSurveyEdgeCap = useLiveSettings ? readDbSetting("atlas_survey_edge_cap") : null;
   const dbCorruptionCooldownMs = useLiveSettings ? readDbSetting("atlas_corruption_cooldown_ms") : null;
   const dbJobCache = useLiveSettings ? readDbSettingBool("atlas_job_cache") : null;
   const dbDriftCheck = useLiveSettings ? readDbSettingBool("atlas_drift_check") : null;
@@ -733,6 +737,14 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const queueWaitMs = parseIntOrNull(firstProvided(explicitValue("queueWaitMs", "atlas_embedded_queue_wait_ms", "POSSE_ATLAS_EMBEDDED_QUEUE_WAIT_MS"), dbEmbeddedQueueWaitMs)) ?? 30000;
   const jobCacheTtlMs = parseIntOrNull(firstProvided(explicitValue("jobCacheTtlMs", "atlas_job_cache_ttl_ms", "POSSE_ATLAS_JOB_CACHE_TTL_MS"), dbJobCacheTtlMs)) ?? 300000;
   const prefetchCacheTtlMs = parseIntOrNull(firstProvided(explicitValue("prefetchCacheTtlMs", "atlas_prefetch_cache_ttl_ms", "POSSE_ATLAS_PREFETCH_CACHE_TTL_MS"), dbPrefetchCacheTtlMs)) ?? 600000;
+  const explicitPrefetchEntrypointRank = explicitValue("prefetchEntrypointRank", "atlas_prefetch_entrypoint_rank");
+  const prefetchEntrypointRank = provided(explicitPrefetchEntrypointRank) && String(explicitPrefetchEntrypointRank).trim() !== ""
+    ? parseBool(explicitPrefetchEntrypointRank)
+    : (dbPrefetchEntrypointRank === true);
+  const surveyEdgeCap = Math.max(0, parseIntOrNull(firstProvided(
+    explicitValue("surveyEdgeCap", "atlas_survey_edge_cap"),
+    dbSurveyEdgeCap,
+  )) ?? 0);
   const corruptionCooldownMs = parseIntOrNull(firstProvided(explicitValue("corruptionCooldownMs", "atlas_corruption_cooldown_ms", "POSSE_ATLAS_CORRUPTION_COOLDOWN_MS"), dbCorruptionCooldownMs)) ?? 120000;
   const explicitJobCache = explicitValue("jobCacheEnabled", "atlas_job_cache", "POSSE_ATLAS_JOB_CACHE");
   const jobCacheEnabled = provided(explicitJobCache) && String(explicitJobCache).trim() !== ""
@@ -795,6 +807,8 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     queueWaitMs,
     jobCacheTtlMs,
     prefetchCacheTtlMs,
+    prefetchEntrypointRank,
+    surveyEdgeCap,
     corruptionCooldownMs,
     jobCacheEnabled,
     driftCheckEnabled,

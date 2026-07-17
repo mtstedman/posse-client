@@ -153,6 +153,7 @@ const ATLAS_V2_VIEW_OPTIONAL_ACTIONS = new Set([
   "workflow",
   "info",
   "fetch_ref",
+  "create_ref",
   "repo.register",
   "index.refresh",
   "buffer.push",
@@ -188,6 +189,7 @@ const ATLAS_V2_VIEW_FRESHNESS_EXEMPT_ACTIONS = new Set([
   "action.search",
   "manual",
   "fetch_ref",
+  "create_ref",
   "repo.status",
 ]);
 const ATLAS_V2_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent", "internal"]);
@@ -1064,7 +1066,7 @@ function canUseAtlasToolExecutor(action, payload, config = {}) {
   if (action.startsWith("buffer.") || action.startsWith("runtime.")) return false;
   if (action === "memory.store" || action === "memory.feedback") return false;
   if (action === "policy.set" || action === "agent.feedback") return false;
-  if (action === "fetch_ref") return false;
+  if (action === "fetch_ref" || action === "create_ref") return false;
   return true;
 }
 
@@ -1409,7 +1411,7 @@ async function executeEmbeddedAtlasV2Tool({
       && !action.startsWith("runtime.")
       && action !== "memory.store"
       && action !== "policy.set" && action !== "agent.feedback"
-      && action !== "fetch_ref";
+      && action !== "fetch_ref" && action !== "create_ref";
     let envelope = null;
     let conductorFellBack = false;
     if (conductorEligible) {
