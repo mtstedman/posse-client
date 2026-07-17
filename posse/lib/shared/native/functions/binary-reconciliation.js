@@ -30,10 +30,9 @@ function resultMessage(result, packageName, dryRun) {
 
 // Optional binaries are user-facing extras (non-heartbeat-gated, no required
 // issued version) that may ship before the artifact service publishes a
-// version or before a per-platform build exists — e.g. bossy, the fleet TUI,
-// which is committed only for some platforms. Their absence must not fail the
-// build/doctor gate: they download on drift once issued, and degrade to
-// "not available yet" otherwise.
+// version or before a per-platform build exists — e.g. bossy, the fleet TUI.
+// Their absence must not fail the build/doctor gate: they download on drift
+// once issued, and degrade to "not available yet" otherwise.
 function isOptionalBinary(entry) {
   return !!entry && entry.keyGated !== true && entry.issuedVersionRequired !== true;
 }

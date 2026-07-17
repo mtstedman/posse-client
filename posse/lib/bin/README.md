@@ -11,9 +11,10 @@ filenames — lives in the catalog at
 both the deploy scripts and the runtime resolver
 ([`lib/shared/tools/classes/BinaryManager.js`](../shared/tools/classes/BinaryManager.js)).
 
-Bossy is a standalone fleet TUI rather than a runtime helper. Its own
-green-gated deployment workflow stages release builds under `lib/bin/bossy/`;
-it is intentionally not registered in the helper-binary catalog.
+Bossy is a standalone fleet TUI rather than a runtime helper, but it uses the
+same authenticated artifact catalog and versioned cache. Its deployment stages
+release builds in the server artifact catalog; this repository does not carry
+or accept an unversioned `lib/bin/bossy/<os>/<arch>` fallback.
 
 ## Layout
 
@@ -44,10 +45,6 @@ lib/bin/
     windows/{x64,arm64}/posse-atlas-vector.exe
     linux/{x64,arm64}/posse-atlas-vector
     macos/posse-atlas-vector     # universal
-  bossy/
-    windows/{x64,arm64}/bossy.exe
-    linux/{x64,arm64}/bossy
-    macos/bossy                  # universal in CI
 ```
 
 The runtime resolver selects `<tool>/<os>/<arch>/<file>` for the host, falling
@@ -65,7 +62,8 @@ npm run pull:native
 ```
 
 The command mints an `artifacts:read` pulse, selects the exact package versions
-issued by the server, verifies each SHA-256, and reuses a valid cached artifact.
+issued by the server (including Bossy when issued), verifies each SHA-256, and
+reuses a valid cached artifact.
 Normal `posse run` boot performs the same check for every enabled binary, so the
 explicit pull is primarily useful for prefetching or diagnosing artifact access.
 Boot is the automatic update boundary: once a run accepts a valid artifact, the

@@ -6,47 +6,25 @@
 //
 // Resolution order:
 //   1. BOSSY_BIN            — explicit operator override, must exist
-//   2. staged catalog build — lib/bin/bossy/<os>/<arch>/bossy(.exe), with the
-//                             os-level file accepted for macOS universal
+//   2. verified cache       — versioned artifact downloaded by native pull
 //   3. `bossy` on PATH      — a system install
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { platformTokens, exeSuffix } from "../../../shared/platform/functions/native-platform.js";
 import { findVerifiedNativeBinaryArtifact } from "../../../shared/native/functions/artifact-download.js";
-
-const POSSE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
-
-function stagedCandidates() {
-  let tokens;
-  try {
-    tokens = platformTokens();
-  } catch {
-    return []; // unsupported platform: fall through to PATH resolution
-  }
-  const file = "bossy" + exeSuffix();
-  return [
-    path.join(POSSE_ROOT, "lib", "bin", "bossy", tokens.os, tokens.arch, file),
-    path.join(POSSE_ROOT, "lib", "bin", "bossy", tokens.os, file),
-  ];
-}
 
 /**
  * Resolve the Bossy executable to launch.
  *
  * @param {{ env?: NodeJS.ProcessEnv }} [opts]
- * @returns {{ target: string, source: "env" | "staged" | "path" } | { error: string }}
+ * @returns {{ target: string, source: "env" | "path" } | { error: string }}
  */
 export function resolveBossyBinary({ env = process.env } = {}) {
   const override = String(env.BOSSY_BIN || "").trim();
   if (override) {
     if (fs.existsSync(override)) return { target: override, source: "env" };
     return { error: `BOSSY_BIN is set but does not exist: ${override}` };
-  }
-  for (const candidate of stagedCandidates()) {
-    if (fs.existsSync(candidate)) return { target: candidate, source: "staged" };
   }
   // Delegate the PATH walk to spawn itself; a missing install surfaces as
   // ENOENT and gets the guidance message below.
@@ -74,7 +52,7 @@ export async function launchBossy({ argv = process.argv.slice(2), env = process.
         name: "bossy", os: tokens.os, arch: tokens.arch,
       });
       if (cached?.binaryPath) resolved = { target: cached.binaryPath, source: "cache" };
-    } catch { /* staged/PATH fallback remains valid */ }
+    } catch { /* PATH fallback remains valid */ }
   }
   if (resolved.error) {
     console.error(`\nCannot launch Bossy: ${resolved.error}\n`);
@@ -86,7 +64,7 @@ export async function launchBossy({ argv = process.argv.slice(2), env = process.
     child.on("error", (err) => {
       if (err && err.code === "ENOENT") {
         console.error("\nCannot launch Bossy: no `bossy` executable was found.");
-        console.error("Install it on PATH, stage it under lib/bin/bossy/, or set BOSSY_BIN to the binary.\n");
+        console.error("Run `npm run pull:native`, install it on PATH, or set BOSSY_BIN to the binary.\n");
       } else {
         console.error(`\nCannot launch Bossy: ${err?.message || err}\n`);
       }

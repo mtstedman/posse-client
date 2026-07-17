@@ -53,7 +53,6 @@ function defineBinary(pkg, files, {
   workerCapable = false,
   exactVersion = null,
   issuedVersionRequired = false,
-  releaseSource = null,
 } = {}) {
   return Object.freeze({
     package: pkg,
@@ -65,11 +64,6 @@ function defineBinary(pkg, files, {
     workerCapable,
     exactVersion,
     issuedVersionRequired,
-    // When set, the binary is distributed via a public GitHub release channel
-    // rather than the pulse-authenticated artifact service. Each host downloads
-    // only its own platform's asset on demand (see release-download.js), so the
-    // repo carries no committed per-OS binaries. { owner, repo, pinnedVersion? }.
-    releaseSource: releaseSource ? Object.freeze({ ...releaseSource }) : null,
     platforms: Object.freeze({
       windows: Object.freeze({
         sourceFile: files.windows,
@@ -117,15 +111,12 @@ export const NATIVE_BINARIES = Object.freeze({
     { workerCapable: true, issuedVersionRequired: true },
   ),
   // The Bossy fleet TUI. A user-facing dashboard, not a method binary: no
-  // heartbeat gating, no worker daemon. Distributed via its own public GitHub
-  // release channel (posse-bossy), NOT the pulse artifact service: each host
-  // downloads only its own platform's asset on demand into the versioned
-  // native cache, so the Posse repo carries no committed bossy binaries. Leave
-  // pinnedVersion unset to track the latest release (TTL-gated) without a Posse
-  // commit per Bossy release; set it to freeze a specific version.
+  // heartbeat gating and no worker daemon. Bossy is published to the same
+  // pulse-authenticated artifact catalog as the method binaries, then cached
+  // by version for the current platform. The Posse repo carries no Bossy
+  // binary payloads.
   bossy: defineBinary("bossy", { windows: "bossy.exe", posix: "bossy" }, {
     keyGated: false,
-    releaseSource: { owner: "mtstedman", repo: "posse-bossy" },
   }),
 });
 
@@ -187,15 +178,4 @@ export function nativeBinaryRequiresIssuedVersion(name) {
 
 export function nativeBinaryExactVersion(name) {
   return nativeBinaryEntry(name)?.exactVersion || null;
-}
-
-/**
- * Release-channel coordinates for a binary distributed via public GitHub
- * releases instead of the pulse artifact service, or null. Shape:
- * { owner, repo, pinnedVersion? }.
- *
- * @param {string} name
- */
-export function nativeBinaryReleaseSource(name) {
-  return nativeBinaryEntry(name)?.releaseSource || null;
 }
