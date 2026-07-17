@@ -125,6 +125,21 @@ export const NATIVE_BINARIES = Object.freeze({
 // to remember to update.
 export const BINARY_NAMES = Object.freeze(Object.keys(NATIVE_BINARIES));
 export const VALID_BINARY_NAMES = new Set(BINARY_NAMES);
+export const BINARY_PACKAGE_NAMES = Object.freeze(
+  BINARY_NAMES.map((name) => NATIVE_BINARIES[name].package),
+);
+export const VALID_BINARY_PACKAGE_NAMES = new Set(BINARY_PACKAGE_NAMES);
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Heartbeat package validation derives from the canonical registry so package
+// ids such as `bossy` do not disappear merely because they lack a `posse-`
+// prefix. Keep this regex unflagged: callers reuse the singleton with `test()`.
+export const NATIVE_BINARY_PACKAGE_PATTERN = new RegExp(
+  `^(?:${BINARY_PACKAGE_NAMES.map(escapeRegExp).join("|")})$`,
+);
 
 /**
  * @param {string} name

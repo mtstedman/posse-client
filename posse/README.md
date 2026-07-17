@@ -218,6 +218,20 @@ Run static checks plus tests:
 npm run check
 ```
 
+## Continuous Integration and Deployment
+
+Operator deployment definitions live in
+`/home/mason/repos/deployment/posse/CI`. The repository-root
+`.github/workflows/ci.yml` is the GitHub-required mirror of the canonical
+workflow there. Run
+`/home/mason/repos/deployment/shared/CI/sync-workflow-mirrors.sh --check` to
+verify that every repository mirror is current.
+
+The compatibility launchers under `scripts/` delegate to the centralized
+native deployment and clean-client sync implementations. Only committed work
+can be published: pushing or synchronizing reconstructs the client from the
+pushed source and does not preserve uncommitted, in-flight changes.
+
 `npm test` first runs `scripts/clean-test-artifacts.mjs`, then
 `scripts/run-tests.mjs`. The runner executes `test/core.test.js` plus every
 root-level `test/test-*.test.js` file.

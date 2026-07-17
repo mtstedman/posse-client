@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { heartbeatAuthManager } from "./HeartbeatAuthManager.js";
 import { isLoopbackHostname } from "../functions/auth.js";
 import { scopeGrantedBy } from "../../permissions/functions/scope-grants.js";
+import { NATIVE_BINARY_PACKAGE_PATTERN } from "../../../catalog/binary.js";
 
 const DEFAULT_REFRESH_SKEW_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -649,7 +650,7 @@ function normalizedNativeArtifactVersions(value) {
   for (const [name, rawVersion] of Object.entries(value)) {
     const packageName = String(name || "").trim();
     const version = String(rawVersion || "").trim();
-    if (!/^posse-[a-z0-9-]+$/.test(packageName)) continue;
+    if (!NATIVE_BINARY_PACKAGE_PATTERN.test(packageName)) continue;
     if (!/^[a-zA-Z0-9._-]{1,64}$/.test(version) || version.includes("..")) continue;
     versions[packageName] = version;
   }
@@ -666,7 +667,7 @@ function normalizedNativeIdentity(nativePackage, nativeVersion) {
       "nativePackage and nativeVersion must be provided together",
     );
   }
-  if (!/^posse-[a-z0-9-]+$/.test(packageName)
+  if (!NATIVE_BINARY_PACKAGE_PATTERN.test(packageName)
     || !/^[a-zA-Z0-9._-]{1,64}$/.test(version)
     || version.includes("..")) {
     throw pulseError(

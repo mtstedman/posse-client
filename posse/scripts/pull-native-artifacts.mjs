@@ -27,7 +27,7 @@ if (failed) process.exitCode = 1;
 
 function parseArgs(argv) {
   if (argv.includes("--help") || argv.includes("-h")) {
-    console.log(`Usage: npm run pull:native -- [atlas|git|ml|remote|vector ...]
+    console.log(`Usage: npm run pull:native -- [${BINARY_NAMES.join("|")} ...]
 
 Pulls all server-issued Posse native binaries by default. Pass one or more
 binary names to pull only those artifacts.`);
