@@ -227,10 +227,11 @@ workflow there. Run
 `/home/mason/repos/deployment/shared/CI/sync-workflow-mirrors.sh --check` to
 verify that every repository mirror is current.
 
-The compatibility launchers under `scripts/` delegate to the centralized
-native deployment and clean-client sync implementations. Only committed work
-can be published: pushing or synchronizing reconstructs the client from the
-pushed source and does not preserve uncommitted, in-flight changes.
+Native deployment and clean-client synchronization run directly from the
+centralized `CI/` directory; there are no repository-local deployment
+launchers. Only committed work can be published: pushing or synchronizing
+reconstructs the client from the pushed source and does not preserve
+uncommitted, in-flight changes.
 
 `npm test` first runs `scripts/clean-test-artifacts.mjs`, then
 `scripts/run-tests.mjs`. The runner executes `test/core.test.js` plus every

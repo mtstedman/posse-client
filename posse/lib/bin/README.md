@@ -110,8 +110,10 @@ written to disk.
 If the binaries were already built elsewhere, deploy existing artifacts:
 
 ```bash
-npm run deploy:rust-binaries -- --artifact-root <path-to-rust-target>
-npm run deploy:rust-binaries:all -- --artifact-root <path-to-rust-target>
+node /home/mason/repos/deployment/posse/CI/deploy-rust-binaries.mjs \
+  --artifact-root <path-to-rust-target>
+node /home/mason/repos/deployment/posse/CI/deploy-rust-binaries.mjs \
+  --platform all --artifact-root <path-to-rust-target>
 ```
 
 Run with `--dry-run` first to see the planned actions.
