@@ -539,6 +539,18 @@ export function createMergeWorkflowHelpers(context, {
       });
     };
 
+    if (String(branch || "").trim() === String(targetBranch || "").trim()) {
+      const message = `Merge refused: work-item branch ${branch} resolved as its own target; configure or restore the repository trunk before merging`;
+      log(message, {
+        json: {
+          branch,
+          target: targetBranch,
+          self_merge: true,
+        },
+      });
+      return { ok: false, selfMerge: true, message };
+    }
+
     const mergeBlockers = wiId == null ? [] : listCrossWiMergeBlockers(wiId);
     if (mergeBlockers.length > 0) {
       const blockers = mergeBlockers.map((blocker) => {

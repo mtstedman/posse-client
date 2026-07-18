@@ -1,7 +1,7 @@
 // lib/domains/git/functions/workflow-push.js
 // Push-offer gate and push execution workflow helpers.
 
-import { logEvent } from "../../queue/functions/index.js";
+import { listWorkItems, logEvent } from "../../queue/functions/index.js";
 import { markOpenPushOfferGatePushed, upsertPushOfferGate } from "../../queue/functions/push-offer.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -11,6 +11,12 @@ import { GIT_MERGE_TIMEOUT_MS } from "./workflow-git-utils.js";
 
 export function createPushWorkflowHelpers(context, { auditWorktreeState, askSingleKeyYesNo }) {
   const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, nonInteractive, askFn, nativeParity } = context;
+
+  function workItemForBranch(branchName) {
+    const branch = String(branchName || "").trim();
+    if (!branch) return null;
+    return listWorkItems().find((wi) => String(wi?.branch_name || "").trim() === branch) || null;
+  }
 
   function collectPushOfferState(mergedCount) {
     const targetBranch = currentTargetBranch();
@@ -53,6 +59,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     }
 
     const pushBranch = pushBranchInfo.branch;
+    const pushBranchWorkItem = workItemForBranch(pushBranch);
     const pushBranchRemote = (() => {
       try {
         return gitExec(["config", "--get", `branch.${pushBranch}.remote`], projectDir, { nativeParity }).trim();
@@ -103,6 +110,11 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       mergedCount,
       pushBranchInfo,
       pushBranch,
+      pushBranchWorkItem: pushBranchWorkItem ? {
+        wiId: pushBranchWorkItem.id,
+        title: pushBranchWorkItem.title,
+        mergeState: pushBranchWorkItem.merge_state,
+      } : null,
       effectiveRemote,
       workingTreeStatus,
       unmergedWIs,
@@ -115,6 +127,16 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
   }
 
   function executePush({ effectiveRemote, pushBranch, mergedCount = 0 }) {
+    const pushBranchWorkItem = workItemForBranch(pushBranch);
+    if (pushBranchWorkItem) {
+      return {
+        ok: false,
+        reason: "work_item_push_target",
+        wiId: pushBranchWorkItem.id,
+        pushBranch,
+      };
+    }
+
     try {
       const markerCheck = gitExec([
         "grep",
@@ -211,6 +233,14 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
 
     const pushBranch = state.pushBranch;
     const effectiveRemote = state.effectiveRemote;
+    if (state.pushBranchWorkItem) {
+      const wiId = state.pushBranchWorkItem.wiId ?? state.pushBranchWorkItem.wi_id ?? "?";
+      console.log(`\n  ${C.red}${C.bold}\u2717 Refusing to push work-item branch ${C.cyan}${pushBranch}${C.reset}${C.red}.${C.reset}`);
+      console.log(`  ${C.yellow}WI#${wiId} must be merged into ${targetBranch} before any remote push.${C.reset}`);
+      console.log(`  ${C.dim}Set Repo -> git & merge -> target_branch if trunk was detected incorrectly, then run posse merge/review.${C.reset}`);
+      console.log("");
+      return;
+    }
     if (mergedCount > 0) {
       console.log(`\n  ${C.bold}${mergedCount} work item(s) merged into ${C.cyan}${pushBranch}${C.reset}`);
     } else {
@@ -282,6 +312,8 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       try {
         markOpenPushOfferGatePushed({ remote: effectiveRemote, branch: pushBranch, via: "terminal" });
       } catch { /* gate close is best-effort; supersede covers stragglers */ }
+    } else if (pushed.reason === "work_item_push_target") {
+      console.log(`  ${C.red}\u2717 Refusing to push work-item branch ${pushBranch}; merge WI#${pushed.wiId ?? "?"} into ${targetBranch} first.${C.reset}`);
     } else if (pushed.reason === "conflict_markers") {
       const files = Array.isArray(pushed.files) ? pushed.files : [];
       console.log(`  ${C.red}\u2717 Conflict markers found in ${files.length} file(s) — refusing to push:${C.reset}`);

@@ -83,6 +83,13 @@ export async function executeGitPushGate(jobId, args = {}, context = {}, deps = 
   }
   if (!state?.hasRemote) return { ok: false, reason: "no_remote" };
   if (!state.pushBranch) return { ok: false, reason: "no_push_branch" };
+  if (state.pushBranchWorkItem) {
+    return {
+      ok: false,
+      reason: "work_item_push_target",
+      message: `Refusing to push work-item branch ${state.pushBranch}; merge it into the repository target branch first`,
+    };
+  }
 
   const aheadCount = Number.isFinite(state.aheadCount) ? state.aheadCount : null;
   if (aheadCount === 0) {

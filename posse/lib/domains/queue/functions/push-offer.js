@@ -118,6 +118,9 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
   if (!state.hasRemote || !state.pushBranch) {
     return { ok: false, reason: "no_push_target" };
   }
+  if (state.pushBranchWorkItem) {
+    return { ok: false, reason: "work_item_push_target" };
+  }
   if ((aheadCount ?? 0) <= 0 && mergedCount <= 0) {
     return { ok: false, reason: "nothing_to_push" };
   }

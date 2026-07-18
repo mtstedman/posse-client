@@ -209,7 +209,7 @@ export const SETTINGS_CATALOG = [
   { key: "headless_human_timeout_sec", default: "600", numeric: { integer: true, min: 1 }, description: "Seconds to wait for human input in headless mode" },
   { key: "default_max_attempts",  default: "3", numeric: { integer: true, min: 1 }, description: "Default maximum attempts per job" },
   { key: "scheduler_shadow_conflict_metrics", default: "true", valueType: "boolean", description: "Emit shadow metrics for relaxed scheduler root-root conflicts that strict mode would block" },
-  { key: "target_branch",         default: "", scope: "repo", description: "Repo merge target branch (empty = auto-detect current/upstream/remote default/main/master)" },
+  { key: "target_branch",         default: "", scope: "repo", description: "Repo merge target branch (empty = auto-detect remote default/main/master before the current terminal branch)" },
   { key: "git_commit_style",      default: "off", scope: "repo", options: GIT_COMMIT_STYLE_VALUES, description: "Commit subject policy: off, Conventional Commits, or Conventional Commits decorated with Gitmoji; enabled modes use one standard-tier assessor pass over the scoped diff" },
   { key: "session_recycle_mode",  default: "off", options: SESSION_RECYCLE_MODE_VALUES, description: "Session recycling mode: off, dev-fix, or full" },
   { key: "session_recycle_strict_provider", default: "true", valueType: "boolean", description: "Reset recycled lanes instead of resuming when a later job chooses a different provider" },

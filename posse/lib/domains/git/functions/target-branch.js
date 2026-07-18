@@ -119,6 +119,25 @@ export function resolveTargetBranchForAdmin(projectDir) {
     }
   }
 
+  const remoteDefault = adminStripRemotePrefix(adminGitValue(projectDir, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]));
+  if (remoteDefault && adminLocalBranchExists(projectDir, remoteDefault) && !adminIsWorkItemBranch(remoteDefault, known)) {
+    return normalizeResolvedTargetBranch(projectDir, { branch: remoteDefault, warnings });
+  }
+
+  // An operator may launch Posse from a terminal feature branch. Prefer the
+  // repository's conventional trunk before treating that caller branch as the
+  // merge target; otherwise the final WI is squash-merged into itself and the
+  // push offer publishes the feature branch instead of trunk.
+  const hasMain = adminLocalBranchExists(projectDir, "main");
+  const hasMaster = adminLocalBranchExists(projectDir, "master");
+  if (hasMain || hasMaster) {
+    if (hasMain && hasMaster) warnings.push("Both 'main' and 'master' exist - using 'main'.");
+    return normalizeResolvedTargetBranch(projectDir, {
+      branch: hasMain ? "main" : "master",
+      warnings,
+    });
+  }
+
   const current = adminGitValue(projectDir, ["rev-parse", "--abbrev-ref", "HEAD"]);
   if (current && current !== "HEAD" && adminLocalBranchExists(projectDir, current) && !adminIsWorkItemBranch(current, known)) {
     return normalizeResolvedTargetBranch(projectDir, { branch: current, warnings });
@@ -129,11 +148,6 @@ export function resolveTargetBranchForAdmin(projectDir) {
     return normalizeResolvedTargetBranch(projectDir, { branch: upstream, warnings });
   }
 
-  const remoteDefault = adminStripRemotePrefix(adminGitValue(projectDir, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]));
-  if (remoteDefault && adminLocalBranchExists(projectDir, remoteDefault) && !adminIsWorkItemBranch(remoteDefault, known)) {
-    return normalizeResolvedTargetBranch(projectDir, { branch: remoteDefault, warnings });
-  }
-
   const localBranches = adminGitValue(projectDir, ["branch", "--format=%(refname:short)"])
     .split(/\r?\n/)
     .map((branch) => branch.trim())
@@ -142,11 +156,8 @@ export function resolveTargetBranchForAdmin(projectDir) {
     return normalizeResolvedTargetBranch(projectDir, { branch: localBranches[0], warnings });
   }
 
-  const hasMain = adminLocalBranchExists(projectDir, "main");
-  const hasMaster = adminLocalBranchExists(projectDir, "master");
-  if (hasMain && hasMaster) warnings.push("Both 'main' and 'master' exist - using 'main'.");
   return normalizeResolvedTargetBranch(projectDir, {
-    branch: hasMain ? "main" : (hasMaster ? "master" : "main"),
+    branch: "main",
     warnings,
   });
 }
