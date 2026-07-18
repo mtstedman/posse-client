@@ -7,7 +7,9 @@
 import fs from "fs";
 import path from "path";
 import {
+  ATLAS_JINA_MODEL,
   DEFAULT_ATLAS_EMBEDDING_PROVIDER,
+  atlasEmbeddingModelForId,
   normalizeAtlasEmbeddingModelId,
 } from "../../../../../catalog/atlas.js";
 import { embeddingsRoot } from "../runtime-paths.js";
@@ -15,7 +17,7 @@ import { AtlasEmbeddingEncoder } from "../../../classes/v2/AtlasEmbeddingEncoder
 import { RustEmbeddingIndex, embeddingModelDirName } from "../../../classes/v2/RustEmbeddingIndex.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { errorForTelemetry, recordEmbeddingForensics } from "./forensics.js";
-import { ensureJinaMlModelRoot, inspectJinaModel } from "./jina-model.js";
+import { ensureAtlasEmbeddingModelRoot, inspectAtlasEmbeddingModel } from "./jina-model.js";
 
 /** @typedef {import("../contracts/embeddings.js").EmbeddingEncoder} EmbeddingEncoder */
 /** @typedef {import("../contracts/embeddings.js").EmbeddingIndex} EmbeddingIndexContract */
@@ -224,9 +226,12 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOn
   const provider = normalizeAtlasEmbeddingModelId(
     config.atlasEmbeddingModelId ?? config.atlas_embedding_model_id,
   );
+  const activeModel = atlasEmbeddingModelForId(provider);
   const vectorBackend = "posse-vector";
   const nativeManager = config.nativeManager ?? config.nativeVectorManager ?? nativeBinaries;
-  const modelCacheDir = config.atlasJinaModelCacheDir
+  const modelCacheDir = config.atlasEmbeddingModelCacheDir
+    ? path.resolve(String(config.atlasEmbeddingModelCacheDir))
+    : activeModel.modelId === ATLAS_JINA_MODEL.modelId && config.atlasJinaModelCacheDir
     ? path.resolve(String(config.atlasJinaModelCacheDir))
     : null;
   const modelVersion = String(config.atlasEmbeddingModelVersion || "").trim() || null;
@@ -245,26 +250,28 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOn
   if (!repoRoot) {
     return disabled(provider, "missing_repo_root", vectorBackend, { repoRoot });
   }
-  const jina = inspectJinaModel(repoRoot, { modelCacheDir: modelCacheDir || undefined });
-  if (!jina.ready) {
-    return disabled(provider, "jina_model_cache_missing", vectorBackend, {
+  const modelInspection = inspectAtlasEmbeddingModel(activeModel, repoRoot, { modelCacheDir: modelCacheDir || undefined });
+  if (!modelInspection.ready) {
+    return disabled(provider, `${activeModel.modelId}_model_cache_missing`, vectorBackend, {
       repoRoot,
-      model_cache_dir: jina.modelCacheDir,
+      model_cache_dir: modelInspection.modelCacheDir,
+      model_id: activeModel.modelId,
     });
   }
 
   // Mode is part of the pool identity: a read-only child (no quarantine, no
   // saves) must never be handed to a caller that intends to write.
   const poolKey = embeddingChildPoolEnabled(config, env)
-    ? `${embeddingsRoot(repoRoot)}|${provider}|${vectorBackend}|${jina.modelCacheDir}|${modelVersion || "default"}|batch=${batchSize || "default"}|threads=${intraOpThreads || "default"}|${readOnly ? "ro" : "rw"}`
+    ? `${embeddingsRoot(repoRoot)}|${provider}|${vectorBackend}|${modelInspection.modelCacheDir}|${modelVersion || "default"}|batch=${batchSize || "default"}|threads=${intraOpThreads || "default"}|${readOnly ? "ro" : "rw"}`
     : null;
   const build = () => {
     if (!nativeManager.shouldUse("ml")) throw new Error("posse-ml unavailable");
     if (!nativeManager.shouldUse("vector")) throw new Error("posse-atlas-vector unavailable");
-    const modelRoot = ensureJinaMlModelRoot(jina.modelCacheDir);
+    const modelRoot = ensureAtlasEmbeddingModelRoot(activeModel, modelInspection.modelCacheDir);
     const encoder = new AtlasEmbeddingEncoder({
       repoRoot,
-      modelCacheDir: jina.modelCacheDir,
+      modelConfig: activeModel,
+      modelCacheDir: modelInspection.modelCacheDir,
       modelRoot,
       modelVersion,
       batchSize,

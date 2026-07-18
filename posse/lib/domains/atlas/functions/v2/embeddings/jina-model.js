@@ -17,15 +17,19 @@ const JINA_MODEL_PACKAGE_MANIFEST = ".posse-model-package.json";
 
 /** @param {string} repoRoot */
 export function jinaModelCacheDir(_repoRoot, homeDir = os.homedir()) {
+  return atlasEmbeddingModelCacheDir(ATLAS_JINA_MODEL, homeDir);
+}
+
+export function atlasEmbeddingModelCacheDir(modelConfig, homeDir = os.homedir()) {
   return path.join(
     homeDir,
     ".posse",
     "artifacts",
     "models",
-    ATLAS_JINA_MODEL.artifactTask,
-    ATLAS_JINA_MODEL.artifactPublisher,
-    ATLAS_JINA_MODEL.artifactRelease,
-    ATLAS_JINA_MODEL.mlModelDirectory,
+    modelConfig.artifactTask,
+    modelConfig.artifactPublisher,
+    modelConfig.artifactRelease,
+    modelConfig.mlModelDirectory,
   );
 }
 
@@ -39,14 +43,18 @@ export function jinaModelCacheDir(_repoRoot, homeDir = os.homedir()) {
  * @returns {string} absolute model root for posse-ml's --model-root
  */
 export function ensureJinaMlModelRoot(modelCacheDir) {
+  return ensureAtlasEmbeddingModelRoot(ATLAS_JINA_MODEL, modelCacheDir);
+}
+
+export function ensureAtlasEmbeddingModelRoot(modelConfig, modelCacheDir) {
   const cacheDir = path.resolve(String(modelCacheDir || ""));
   if (!String(modelCacheDir || "").trim() || !directoryExists(cacheDir)) {
-    const error = new Error(`Jina model cache is not a directory: ${cacheDir}`);
-    /** @type {any} */ (error).code = "JINA_MODEL_CACHE_MISSING";
+    const error = new Error(`${modelConfig.modelId} model cache is not a directory: ${cacheDir}`);
+    /** @type {any} */ (error).code = "ATLAS_EMBEDDING_MODEL_CACHE_MISSING";
     throw error;
   }
 
-  if (path.basename(cacheDir).toLowerCase() === ATLAS_JINA_MODEL.mlModelDirectory.toLowerCase()) {
+  if (path.basename(cacheDir).toLowerCase() === modelConfig.mlModelDirectory.toLowerCase()) {
     return path.dirname(cacheDir);
   }
 
@@ -55,7 +63,7 @@ export function ensureJinaMlModelRoot(modelCacheDir) {
     ".posse-ml-model-roots",
     encodeURIComponent(path.basename(cacheDir)),
   );
-  const canonicalDir = path.join(adapterRoot, ATLAS_JINA_MODEL.mlModelDirectory);
+  const canonicalDir = path.join(adapterRoot, modelConfig.mlModelDirectory);
   fs.mkdirSync(adapterRoot, { recursive: true });
 
   if (pathEntryExists(canonicalDir)) {
@@ -64,8 +72,8 @@ export function ensureJinaMlModelRoot(modelCacheDir) {
     if (actual && expected && samePath(actual, expected) && directoryExists(canonicalDir)) {
       return adapterRoot;
     }
-    const error = new Error(`Jina ML model adapter points at an unexpected path: ${canonicalDir}`);
-    /** @type {any} */ (error).code = "JINA_ML_MODEL_ROOT_CONFLICT";
+    const error = new Error(`${modelConfig.modelId} ML model adapter points at an unexpected path: ${canonicalDir}`);
+    /** @type {any} */ (error).code = "ATLAS_EMBEDDING_ML_MODEL_ROOT_CONFLICT";
     throw error;
   }
 
@@ -73,7 +81,7 @@ export function ensureJinaMlModelRoot(modelCacheDir) {
     fs.symlinkSync(cacheDir, canonicalDir, process.platform === "win32" ? "junction" : "dir");
   } catch (cause) {
     const error = new Error(`Unable to prepare posse-ml model root at ${adapterRoot}`);
-    /** @type {any} */ (error).code = "JINA_ML_MODEL_ROOT_UNAVAILABLE";
+    /** @type {any} */ (error).code = "ATLAS_EMBEDDING_ML_MODEL_ROOT_UNAVAILABLE";
     /** @type {any} */ (error).cause = cause;
     throw error;
   }
@@ -85,9 +93,18 @@ export function ensureJinaMlModelRoot(modelCacheDir) {
  * @param {{ modelCacheDir?: string }} [options]
  */
 export function inspectJinaModel(repoRoot, { modelCacheDir: explicitModelCacheDir } = {}) {
+  return inspectAtlasEmbeddingModel(ATLAS_JINA_MODEL, repoRoot, { modelCacheDir: explicitModelCacheDir });
+}
+
+/**
+ * @param {typeof ATLAS_JINA_MODEL} modelConfig
+ * @param {string} repoRoot
+ * @param {{ modelCacheDir?: string }} [options]
+ */
+export function inspectAtlasEmbeddingModel(modelConfig, repoRoot, { modelCacheDir: explicitModelCacheDir } = {}) {
   const modelCacheDir = explicitModelCacheDir
     ? path.resolve(explicitModelCacheDir)
-    : jinaModelCacheDir(repoRoot);
+    : atlasEmbeddingModelCacheDir(modelConfig);
   const files = collectFiles(modelCacheDir, 0);
   const tokenizer = files.find((file) => path.basename(file).toLowerCase() === "tokenizer.json") || null;
   const model = files.find((file) => /(^model(_quantized)?|_quantized)\.onnx$/i.test(path.basename(file)))
@@ -96,8 +113,8 @@ export function inspectJinaModel(repoRoot, { modelCacheDir: explicitModelCacheDi
   const packageManifestPath = path.join(modelCacheDir, JINA_MODEL_PACKAGE_MANIFEST);
   const packageManifest = readJsonObject(packageManifestPath);
   const packageCurrent = packageManifest?.schemaVersion === 1
-    && packageManifest?.modelId === ATLAS_JINA_MODEL.mlModelId
-    && packageManifest?.version === ATLAS_JINA_MODEL.artifactRelease
+    && packageManifest?.modelId === modelConfig.mlModelId
+    && packageManifest?.version === modelConfig.artifactRelease
     && /^[a-f0-9]{64}$/u.test(String(packageManifest?.packageSha256 || ""));
   const ready = Boolean(tokenizer && model && packageCurrent);
   return {

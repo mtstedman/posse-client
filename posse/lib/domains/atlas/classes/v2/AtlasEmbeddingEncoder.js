@@ -2,7 +2,7 @@
 
 import path from "node:path";
 
-import { ATLAS_JINA_MODEL } from "../../../../catalog/atlas.js";
+import { ATLAS_JINA_MODEL, atlasEmbeddingModelForId } from "../../../../catalog/atlas.js";
 import { ML_EMBED_METHOD } from "../../../../catalog/binary.js";
 import { runMlNativeMethodAsync } from "../../../../shared/native/functions/ml-invoke.js";
 import {
@@ -14,6 +14,10 @@ import { unpackNativeEmbeddingVectors } from "../../functions/v2/embeddings/unpa
 
 export const ATLAS_JINA_MODEL_VERSION =
   `onnx-${ATLAS_JINA_MODEL.modelId}-${ATLAS_JINA_MODEL.dim}-${ATLAS_JINA_MODEL.dtype}-text${TEXT_SHAPE_VERSION}`;
+
+export function atlasEmbeddingModelVersion(modelConfig = ATLAS_JINA_MODEL) {
+  return `onnx-${modelConfig.modelId}-${modelConfig.dim}-${modelConfig.dtype}-text${TEXT_SHAPE_VERSION}`;
+}
 
 // The active production encoder. Jina artifacts are staged explicitly, while
 // tokenization, pooling, normalization, and ONNX execution live in posse-ml.
@@ -36,9 +40,17 @@ export class AtlasEmbeddingEncoder {
   #modelRoot;
   #invoke;
 
-  /** @param {{ repoRoot?: string, modelCacheDir?: string, modelRoot?: string, modelVersion?: string, batchSize?: number, intraOpThreads?: number, invoke?: typeof runMlNativeMethodAsync, manager?: import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager }} [options] */
-  constructor({ repoRoot, modelCacheDir = null, modelRoot = null, modelVersion = null, batchSize = null, intraOpThreads = null, invoke = null, manager = null } = {}) {
+  /** @param {{ repoRoot?: string, modelId?: string, modelConfig?: typeof ATLAS_JINA_MODEL, modelCacheDir?: string, modelRoot?: string, modelVersion?: string, batchSize?: number, intraOpThreads?: number, invoke?: typeof runMlNativeMethodAsync, manager?: import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager }} [options] */
+  constructor({ repoRoot, modelId = null, modelConfig = null, modelCacheDir = null, modelRoot = null, modelVersion = null, batchSize = null, intraOpThreads = null, invoke = null, manager = null } = {}) {
     if (!repoRoot) throw new TypeError("AtlasEmbeddingEncoder: repoRoot is required");
+    const activeModel = modelConfig || atlasEmbeddingModelForId(modelId);
+    this.model = activeModel.indexModel;
+    this.model_version = atlasEmbeddingModelVersion(activeModel);
+    this.modelName = activeModel.modelName;
+    this.modelId = activeModel.modelId;
+    this.mlModelId = activeModel.mlModelId;
+    this.dim = activeModel.dim;
+    this.dtype = activeModel.dtype;
     this.#modelCacheDir = modelCacheDir ? path.resolve(modelCacheDir) : jinaModelCacheDir(repoRoot);
     this.#modelRoot = modelRoot ? path.resolve(modelRoot) : path.dirname(this.#modelCacheDir);
     if (modelVersion) this.model_version = String(modelVersion);
@@ -94,7 +106,7 @@ export class AtlasEmbeddingEncoder {
       idempotent: true,
       ...(typeof onProgress === "function" ? { onProgress } : {}),
     });
-    return unpackNativeEmbeddingVectors(data, texts.length, this.dim, "Jina");
+    return unpackNativeEmbeddingVectors(data, texts.length, this.dim, this.modelName || "ATLAS");
   }
 
   dispose() {}

@@ -108,9 +108,20 @@ export const ATLAS_JINA_MODEL = Object.freeze({
 });
 
 export const ATLAS_CODERANK_MODEL = Object.freeze({
+  label: "CodeRankEmbed int8 (ONNX)",
   provider: "nomic-ai/CodeRankEmbed",
+  indexModel: "local-onnx",
   modelName: "nomic-ai/CodeRankEmbed",
+  modelId: "coderank-embed-int8",
+  mlModelId: "coderank-embed-int8",
+  mlModelDirectory: "coderank-embed-int8",
+  mlProfileId: "coderank-embed-v1",
+  artifactTask: "embedding",
+  artifactPublisher: "nomic",
+  artifactRelease: "coderank-embed-int8-v1",
+  artifactArchiveFormat: "tar+zstd",
   dim: 768,
+  dtype: "int8",
 });
 
 // Only models that are fully wired through the native artifact/runtime path
@@ -118,6 +129,7 @@ export const ATLAS_CODERANK_MODEL = Object.freeze({
 // complete; adding it here will automatically expose it in admin settings.
 export const ATLAS_EMBEDDING_MODEL_OPTIONS = Object.freeze([
   Object.freeze({ value: ATLAS_JINA_MODEL.modelId, label: ATLAS_JINA_MODEL.label }),
+  Object.freeze({ value: ATLAS_CODERANK_MODEL.modelId, label: ATLAS_CODERANK_MODEL.label }),
 ]);
 export const VALID_ATLAS_EMBEDDING_MODEL_IDS = new Set(
   ATLAS_EMBEDDING_MODEL_OPTIONS.map((entry) => entry.value),
@@ -129,6 +141,13 @@ export function normalizeAtlasEmbeddingModelId(value) {
   return VALID_ATLAS_EMBEDDING_MODEL_IDS.has(modelId)
     ? modelId
     : DEFAULT_ATLAS_EMBEDDING_MODEL_ID;
+}
+
+export function atlasEmbeddingModelForId(value) {
+  const modelId = normalizeAtlasEmbeddingModelId(value);
+  return modelId === ATLAS_CODERANK_MODEL.modelId
+    ? ATLAS_CODERANK_MODEL
+    : ATLAS_JINA_MODEL;
 }
 
 export const DEFAULT_ATLAS_EMBEDDING_PROVIDER = ATLAS_JINA_MODEL.provider;
