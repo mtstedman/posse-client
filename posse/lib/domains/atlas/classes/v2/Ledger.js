@@ -94,7 +94,7 @@ export class Ledger {
     this.#interner = new Interner(this.#db);
     this.#scipIndex = new ScipIndexStore(this.#db, this.#interner);
     this.#sourceStats = new SourceStatsStore(this.#db, this.#dbPath, this.#interner);
-    this.#blob = new BlobStore(this.#db, this.#dbPath, this.#interner);
+    this.#blob = new BlobStore(this.#db, this.#interner);
     this.#feedback = new FeedbackStore(this.#db, this.#dbPath);
   }
 

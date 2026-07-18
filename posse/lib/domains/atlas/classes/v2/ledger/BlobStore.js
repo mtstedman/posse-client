@@ -108,8 +108,6 @@ function symbolMergeKey(sym) {
 export class BlobStore {
   /** @type {import("better-sqlite3").Database} */
   #db;
-  /** @type {string} */
-  #dbPath;
   /** @type {import("./Interner.js").Interner} */
   #interner;
   /** @type {Record<string, import("better-sqlite3").Statement>} */
@@ -119,12 +117,10 @@ export class BlobStore {
 
   /**
    * @param {import("better-sqlite3").Database} db
-   * @param {string} dbPath
    * @param {import("./Interner.js").Interner} interner
    */
-  constructor(db, dbPath, interner) {
+  constructor(db, interner) {
     this.#db = db;
-    this.#dbPath = dbPath;
     this.#interner = interner;
     const blobColumns = tableExists(db, "blobs") ? tableColumnSet(db, "blobs") : new Set();
     const blobSymbolColumns = tableExists(db, "blob_symbols") ? tableColumnSet(db, "blob_symbols") : new Set();
