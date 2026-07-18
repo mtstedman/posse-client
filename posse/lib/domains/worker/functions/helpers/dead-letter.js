@@ -162,7 +162,7 @@ function buildFastFailureProviderHint(job, attempts = []) {
   return [
     "Repeated fast failures suggest a provider spawn/config issue (3 attempts <1000ms with identical error).",
     `Current setting: ${provider.key}=${provider.effective} (effective source: ${provider.source}; ${dbPart}).`,
-    `If needed, switch provider now with: node orchestrator.js admin set ${provider.key} claude`,
+    `If needed, switch provider now with: posse admin set ${provider.key} claude`,
   ].join("\n");
 }
 

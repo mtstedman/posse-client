@@ -425,7 +425,11 @@ export class HashRefStore {
     };
 
     const result = runImmediateTransaction(this.db, run);
-    if (entryKind === "materialized") this._enforceMaterializedBudget();
+    if (entryKind === "materialized") {
+      this._enforceMaterializedBudget({
+        preserveRefOnTimestampTie: result.rematerialized ? result.entry?.ref : null,
+      });
+    }
     return {
       ...result,
       entry: this._selectDeserializedRef(result.entry?.ref),
@@ -658,7 +662,7 @@ export class HashRefStore {
     `).run(nowIso(), row.id);
   }
 
-  _enforceMaterializedBudget() {
+  _enforceMaterializedBudget({ preserveRefOnTimestampTie = null } = {}) {
     const statsQuery = this.db.prepare(`
       SELECT COUNT(*) AS count, COALESCE(SUM(length(COALESCE(payload_text, ''))), 0) AS chars
       FROM ${this.config.table}
@@ -678,9 +682,11 @@ export class HashRefStore {
         WHERE ${this.config.ownerColumn} = ?
           AND entry_kind = 'materialized'
           AND COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) != 1
-        ORDER BY updated_at ASC, id ASC
+        ORDER BY updated_at ASC,
+                 CASE WHEN ref = ? THEN 1 ELSE 0 END ASC,
+                 id ASC
         LIMIT 1
-      `).get(this.ownerId);
+      `).get(this.ownerId, preserveRefOnTimestampTie || "");
       if (!row) break;
       this._evictMaterializedRow(row);
     }

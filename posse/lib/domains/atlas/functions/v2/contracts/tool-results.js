@@ -751,6 +751,7 @@
  * @property {number} startLine
  * @property {number} endLine
  * @property {boolean} truncated
+ * @property {string} matchStatus             Whether identifier matching was exact, fallback, or absent.
  * @property {CalledFromBreadcrumb[]} [calledFrom]  Top definitions here by distinct calling files.
  * @property {string} [etag]
  */

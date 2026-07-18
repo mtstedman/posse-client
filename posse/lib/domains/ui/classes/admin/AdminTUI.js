@@ -404,7 +404,7 @@ export class AdminTUI {
       }
     }
 
-    lines.push("", "Tip: run `node orchestrator.js admin` in a fully interactive terminal for the live TUI.");
+    lines.push("", "Tip: run `posse admin` in a fully interactive terminal for the live TUI.");
     return lines.join("\n");
   }
 

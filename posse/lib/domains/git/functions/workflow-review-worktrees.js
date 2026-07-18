@@ -189,9 +189,9 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
 
       if (unmerged.length > 0) {
         console.log(`\n  ${C.cyan}Unmerged branches${C.reset} \u2014 these have commits that didn't make it into ${targetBranch}:`);
-        console.log(`    To review and merge:  ${C.bold}node orchestrator.js merge <WI-ID>${C.reset}`);
+        console.log(`    To review and merge:  ${C.bold}posse merge <WI-ID>${C.reset}`);
         console.log(`    To inspect the diff:  ${C.bold}git diff ${targetBranch}...<branch-name>${C.reset}`);
-        console.log(`    To discard:           ${C.bold}node orchestrator.js purge${C.reset} (interactive, asks per branch)`);
+        console.log(`    To discard:           ${C.bold}posse purge${C.reset} (interactive, asks per branch)`);
       }
 
       if (dirty.length > 0) {
@@ -203,7 +203,7 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
 
       if (orphans.length > 0) {
         console.log(`\n  ${C.cyan}Orphaned worktrees${C.reset} \u2014 WI is done but worktree/branch wasn't cleaned up:`);
-        console.log(`    To clean all: ${C.bold}node orchestrator.js purge${C.reset}`);
+        console.log(`    To clean all: ${C.bold}posse purge${C.reset}`);
       }
 
       if (targetDirty) {

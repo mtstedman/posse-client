@@ -146,6 +146,7 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
     startLine: Number(result.startLine || 1),
     endLine: Number(result.endLine || 1),
     truncated: result.truncated === true,
+    matchStatus: String(result.matchStatus || ""),
     ...(calledFrom.length > 0 ? { calledFrom } : {}),
     etag,
   };

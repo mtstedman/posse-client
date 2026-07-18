@@ -142,7 +142,7 @@ Or run planning and execution together:
 posse go
 ```
 
-Use `node orchestrator.js help` for the full CLI reference.
+Use `posse help` for the full CLI reference.
 
 ## Upgrade Notes
 

@@ -2220,17 +2220,17 @@ async function cmdAdmin() {
     await loadRemotePromptBundle();
   };
   const printAdminUsage = () => {
-    console.log("\n  Usage: node orchestrator.js admin [init|snapshot|worktrees|memory|settings|list|get <key>|set <key> <value>|tui]\n");
+    console.log("\n  Usage: posse admin [init|snapshot|worktrees|memory|settings|list|get <key>|set <key> <value>|tui]\n");
   };
   const setAdminSettingFromArgs = (key, value, usageLabel = "admin set", extraArgs = []) => {
     if (!key || typeof value === "undefined") {
-      console.log(`\n  Usage: node orchestrator.js ${usageLabel} <setting_key> <value>\n`);
+      console.log(`\n  Usage: posse ${usageLabel} <setting_key> <value>\n`);
       process.exitCode = 2;
       return;
     }
     if (extraArgs.length > 0) {
       console.log(`\n  ${C.red}Unexpected extra argument:${C.reset} ${extraArgs[0]}`);
-      console.log(`  Usage: node orchestrator.js ${usageLabel} <setting_key> <value>\n`);
+      console.log(`  Usage: posse ${usageLabel} <setting_key> <value>\n`);
       process.exitCode = 2;
       return;
     }
@@ -2296,7 +2296,7 @@ async function cmdAdmin() {
     }
     if (settingsAction) {
       console.log(`\n  ${C.red}Unknown admin settings action:${C.reset} ${adminArg1}`);
-      console.log("  Usage: node orchestrator.js admin settings [set <setting_key> <value>]\n");
+      console.log("  Usage: posse admin settings [set <setting_key> <value>]\n");
       process.exitCode = 2;
       return;
     }
@@ -2308,7 +2308,7 @@ async function cmdAdmin() {
 
   if (adminAction === "get") {
     if (!adminArg1) {
-      console.log("\n  Usage: node orchestrator.js admin get <setting_key>\n");
+      console.log("\n  Usage: posse admin get <setting_key>\n");
       process.exitCode = 2;
       return;
     }

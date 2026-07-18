@@ -1488,6 +1488,7 @@ export function atlasSliceSkeletonPrefetchLimit(recipient) {
 }
 
 const ATLAS_TREE_SCOPE_MAX_FILES = 24;
+const ATLAS_TREE_SCOPE_RANK_POOL_FILES = 40;
 
 function _atlasConfidenceBand(value) {
   const n = Number(value);
@@ -1498,20 +1499,80 @@ function _atlasConfidenceBand(value) {
   return "low";
 }
 
+
+function _atlasCandidateVersionFamily(filePath) {
+  const parts = String(filePath || "").replace(/\\/g, "/").split("/");
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    const match = /^v(\d+)$/i.exec(parts[index]);
+    if (match) {
+      return {
+        prefix: parts.slice(0, index).join("/").toLowerCase(),
+        label: parts[index].toLowerCase(),
+        version: Number(match[1]),
+      };
+    }
+  }
+  return null;
+}
+
+function _atlasPrefetchCandidateScore(entry, versionFamilies, taskText) {
+  const score = Number(entry?.score || 0);
+  const family = _atlasCandidateVersionFamily(entry?.path);
+  if (!family || family.version >= (versionFamilies.get(family.prefix) || family.version)) {
+    return score;
+  }
+  const mentioned = String(taskText || "").toLowerCase().split(/[^a-z0-9]+/).includes(family.label);
+  return mentioned ? score : score * 0.65;
+}
+
+
+export function rankAtlasTreeScopeCandidates(candidates, {
+  prefetchMode = null,
+  entrypointRank = false,
+  taskText = "",
+  maxFiles = ATLAS_TREE_SCOPE_MAX_FILES,
+} = {}) {
+  const rows = (Array.isArray(candidates) ? candidates : [])
+    .filter((entry) => entry && !entry.generated);
+  if (!entrypointRank || prefetchMode !== "broad") return rows.slice(0, maxFiles);
+  const versionFamilies = new Map();
+  for (const entry of rows) {
+    const family = _atlasCandidateVersionFamily(entry.path);
+    if (family) versionFamilies.set(family.prefix, Math.max(versionFamilies.get(family.prefix) || 0, family.version));
+  }
+  return rows
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => {
+      const aNonProduction = !!(a.entry.test || a.entry.example || a.entry.config);
+      const bNonProduction = !!(b.entry.test || b.entry.example || b.entry.config);
+      if (aNonProduction !== bNonProduction) return aNonProduction ? 1 : -1;
+      const scoreDelta = _atlasPrefetchCandidateScore(b.entry, versionFamilies, taskText)
+        - _atlasPrefetchCandidateScore(a.entry, versionFamilies, taskText);
+      return scoreDelta || a.index - b.index;
+    })
+    .slice(0, maxFiles)
+    .map(({ entry }) => entry);
+}
+
 // Tree-first discovery: condense the task text + known seed files into the
 // tree-derived candidate scope (deterministic containment tree + scope sidecar
 // + compressed-tree seed annotations). When usable, this IS the handoff
 // prefetch; the graph slice only runs as a fallback when the tree is
 // unavailable or empty.
-async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, action = "tree.scope" }) {
+async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, action = "tree.scope", prefetchMode = null }) {
   try {
+    const entrypointRank = packet.atlas_config?.prefetchEntrypointRank === true && prefetchMode === "broad";
     const raw = await executeEmbeddedAtlasTool(action, {
       ...(taskText ? { taskText } : {}),
       paths: seedFiles,
-      maxFiles: ATLAS_TREE_SCOPE_MAX_FILES,
+      maxFiles: entrypointRank
+        ? ATLAS_TREE_SCOPE_RANK_POOL_FILES
+        : ATLAS_TREE_SCOPE_MAX_FILES,
     }, {
       cwd: packet.cwd,
-      config: packet.atlas_config || undefined,
+      config: packet.atlas_config
+        ? { ...packet.atlas_config, prefetchEntrypointRank: entrypointRank }
+        : undefined,
       origin: "prefetch",
     });
     if (String(raw || "").startsWith("Error:")) {
@@ -1526,11 +1587,13 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
       return { ok: false, action, error: String(data.reason || `${action}_unavailable`).slice(0, 300) };
     }
     const rawCandidates = atlasResultField(action, parsed, "candidateFiles");
-    const candidates = Array.isArray(rawCandidates) ? rawCandidates : [];
+    const candidates = rankAtlasTreeScopeCandidates(rawCandidates, {
+      prefetchMode,
+      entrypointRank,
+      taskText,
+    });
     const candidateFiles = _uniqueAtlasPaths(
-      candidates
-        .filter((entry) => entry && !entry.generated)
-        .map((entry) => entry.path),
+      candidates.map((entry) => entry.path),
       ATLAS_TREE_SCOPE_MAX_FILES,
     );
     const rawDirs = atlasResultField(action, parsed, "candidateDirs");
@@ -1649,6 +1712,7 @@ export async function attachAtlasPlannerSlice(packet) {
             taskText: plan.useTaskText ? taskText : null,
             seedFiles: plan.seedFiles,
             action: treeAction,
+            prefetchMode: plan.mode,
           })
           : Promise.resolve(null),
         wantSymbolCards

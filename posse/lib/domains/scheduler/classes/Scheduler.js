@@ -76,6 +76,7 @@ import { yieldNow } from "../../runtime/functions/yield.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import {
   formatProviderAuthLivenessProbe,
+  formatWorkspaceHealthCriticalDetail,
   formatWorkspaceHealthProbe,
   providerAuthLivenessProbe,
   workspaceHealthProbeAsync,
@@ -1218,7 +1219,7 @@ export class Scheduler {
     emitBootEvent("workspace health", {
       section: "workspace",
       status: workspaceHealth.status === "critical" ? "failed" : "ok",
-      detail: workspaceHealth.status === "critical" ? (workspaceHealth.summary || "critical") : "",
+      detail: workspaceHealth.status === "critical" ? formatWorkspaceHealthCriticalDetail(workspaceHealth) : "",
     });
     try {
       logEvent({

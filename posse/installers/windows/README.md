@@ -80,7 +80,7 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
     stale. Jina `tar+zstd` extraction is embedded in `posse-ml`; Windows does
     not need a system `tar`, `zstd`, or Node unpacker package. This replaces the
     old standalone `pip install --user` and inline SCIP steps.
-14. **Validation** — boots Posse (`node orchestrator.js status`) with a
+14. **Validation** — boots Posse (`posse status`) with a
     five-minute timeout.
 15. **ATLAS smoke test** — only with `-RepoPath`.
 
@@ -182,6 +182,16 @@ With `-ConfigureKeys`, the installer prompts (hidden via
 If you prefer to manage keys yourself, omit `-ConfigureKeys` and set them
 with `setx`, 1Password CLI, or however you already manage secrets. The
 installer only detects and warns in that mode.
+
+### Native heartbeat clock skew
+
+Native binaries verify short-lived heartbeat tokens offline. If the Windows
+clock differs from the Posse server by more than 30 seconds, a native command
+can report `invalid posse_key` even though the configured `POSSE_KEY` is valid.
+Synchronize **Settings > Time & language > Date & time > Sync now**, or run
+`w32tm /resync /rediscover` from an Administrator PowerShell session, then
+retry the command. This error is not by itself proof that the raw key was
+revoked or entered incorrectly.
 
 ## Parity with the Linux script
 

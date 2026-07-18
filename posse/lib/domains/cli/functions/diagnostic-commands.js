@@ -557,7 +557,7 @@ export async function cmdCodexModels({ projectDir }) {
   const authMode = String(args[1] || "oauth").trim().toLowerCase();
 
   if (!["validate", "list"].includes(subcommand)) {
-    console.log("\n  Usage: node orchestrator.js codex-models [validate|list] [oauth|api|auto]\n");
+    console.log("\n  Usage: posse codex-models [validate|list] [oauth|api|auto]\n");
     return null;
   }
 

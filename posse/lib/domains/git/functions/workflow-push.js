@@ -243,7 +243,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       for (const item of unmergedWIs) {
         console.log(`    ${C.cyan}WI#${item.wiId}${C.reset} ${(item.title || "").slice(0, 50)} \u2014 ${item.message}`);
       }
-      console.log(`  ${C.dim}Use 'node orchestrator.js review' or 'merge' to include them.${C.reset}`);
+      console.log(`  ${C.dim}Use 'posse review' or 'posse merge' to include them.${C.reset}`);
     }
 
     // Persist the offer as a bridge gate FIRST, regardless of TTY: the

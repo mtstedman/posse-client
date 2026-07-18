@@ -628,7 +628,7 @@ export function createStartupDirtyGuardHelpers(context) {
       });
       if (snapshotDir) {
         console.log(`  ${C.yellow}[git] Preserved ${fileCount} target-branch change(s) to ${snapshotDir} before ${reason}${C.reset}`);
-        console.log(`  ${C.dim}[git] To restore later, run 'node orchestrator.js cleanup' and choose snapshot restore.${C.reset}`);
+        console.log(`  ${C.dim}[git] To restore later, run 'posse cleanup' and choose snapshot restore.${C.reset}`);
         logEvent({
           event_type: EVENT_TYPES.GIT_TARGET_BRANCH_SNAPSHOTTED,
           actor_type: EVENT_ACTORS.SYSTEM,

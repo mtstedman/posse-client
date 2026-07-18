@@ -20,6 +20,15 @@ const REMOTE_ARTIFACT_METHODS = new Set([
   REMOTE_MODEL_PACKAGE_DOWNLOAD_METHOD,
 ]);
 
+const INVALID_POSSE_KEY_RE = /\binvalid posse_key\b/iu;
+
+/** @param {unknown} value */
+function nativeHeartbeatFailureDetail(value) {
+  const message = String(value || "").trim();
+  if (!INVALID_POSSE_KEY_RE.test(message)) return message;
+  return `${message} (native heartbeat validation can also fail when the system clock differs from the server by more than 30 seconds; sync the system clock and retry)`;
+}
+
 /**
  * Select the same endpoint-specific pulse grant enforced by posse-remote.
  * The child forwards this pulse as the API bearer after verifying it offline,
@@ -163,9 +172,11 @@ export async function runRemoteNativeRequestJson(request, opts = {}) {
       requiredRoute,
     });
   } catch (error) {
-    const message = String(error?.message || error || "native process failed")
-      .replace(/^remote native method request-json failed:?\s*/i, "")
-      .trim();
+    const message = nativeHeartbeatFailureDetail(
+      String(error?.message || error || "native process failed")
+        .replace(/^remote native method request-json failed:?\s*/i, "")
+        .trim(),
+    );
     throw new Error(`remote native request ${request.method || "GET"} ${request.path} failed${message ? `: ${message}` : ""}`);
   }
 }

@@ -91,6 +91,7 @@ export const DEFAULT_SERVER_NAME = "atlas-v2";
 // default; CodeRank is staged for a future explicit model selector and must
 // not be activated merely because its runtime method is available.
 export const ATLAS_JINA_MODEL = Object.freeze({
+  label: "Jina v2 code (ONNX)",
   provider: "jina-v2-code",
   indexModel: "local-onnx",
   modelName: "jinaai/jina-embeddings-v2-base-code",
@@ -111,6 +112,24 @@ export const ATLAS_CODERANK_MODEL = Object.freeze({
   modelName: "nomic-ai/CodeRankEmbed",
   dim: 768,
 });
+
+// Only models that are fully wired through the native artifact/runtime path
+// belong in this selector. CodeRank remains staged above until that contract is
+// complete; adding it here will automatically expose it in admin settings.
+export const ATLAS_EMBEDDING_MODEL_OPTIONS = Object.freeze([
+  Object.freeze({ value: ATLAS_JINA_MODEL.modelId, label: ATLAS_JINA_MODEL.label }),
+]);
+export const VALID_ATLAS_EMBEDDING_MODEL_IDS = new Set(
+  ATLAS_EMBEDDING_MODEL_OPTIONS.map((entry) => entry.value),
+);
+export const DEFAULT_ATLAS_EMBEDDING_MODEL_ID = ATLAS_JINA_MODEL.modelId;
+
+export function normalizeAtlasEmbeddingModelId(value) {
+  const modelId = String(value || "").trim().toLowerCase();
+  return VALID_ATLAS_EMBEDDING_MODEL_IDS.has(modelId)
+    ? modelId
+    : DEFAULT_ATLAS_EMBEDDING_MODEL_ID;
+}
 
 export const DEFAULT_ATLAS_EMBEDDING_PROVIDER = ATLAS_JINA_MODEL.provider;
 

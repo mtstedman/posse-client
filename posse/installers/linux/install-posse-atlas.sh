@@ -1387,12 +1387,12 @@ step_validate() {
   step_begin validate
   if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
   if [[ "$DRY_RUN" == "true" ]]; then
-    step_end dry-run "would run node orchestrator.js status"
+    step_end dry-run "would run posse status"
     return 0
   fi
   local -a cmd=("$NODE_BIN" orchestrator.js status)
   command -v timeout >/dev/null 2>&1 && cmd=(timeout 300 "${cmd[@]}")
-  if run_logged_in_dir "$POSSE_DIR" "boot posse (orchestrator.js status)" "${cmd[@]}"; then
+  if run_logged_in_dir "$POSSE_DIR" "boot posse (posse status)" "${cmd[@]}"; then
     step_end ok "posse boots cleanly"
   else
     warn "posse failed to boot — run 'posse status' in ${POSSE_DIR} to see the error"
@@ -1532,7 +1532,7 @@ step_smoke() {
     "$NODE_BIN" ./orchestrator.js atlas-smoke "$REPO_PATH" "$SMOKE_QUERY" "$SMOKE_PROVIDER"; then
     step_end ok "smoke test passed"
   else
-    warn "atlas-smoke failed — run it manually: node orchestrator.js atlas-smoke $(format_command "$REPO_PATH" "$SMOKE_QUERY" "$SMOKE_PROVIDER")"
+    warn "atlas-smoke failed — run it manually: posse atlas-smoke $(format_command "$REPO_PATH" "$SMOKE_QUERY" "$SMOKE_PROVIDER")"
     step_end failed "smoke test failed; see log"
   fi
 }

@@ -74,7 +74,7 @@ export function validateCodeLadder(args) {
  * @param {{ action: keyof typeof RUNG_BY_ACTION, sessionId?: string | null, symbolId?: string | null, file?: string | null }} recordArgs
  */
 export function annotateCodeLadder(envelope, ladder, recordArgs) {
-  if (envelope?.ok && ladder.complied) recordCodeLadderStep(recordArgs);
+  if (codeLadderEvidenceServed(recordArgs.action, envelope)) recordCodeLadderStep(recordArgs);
   if (ladder.warnings.length > 0) {
     envelope.meta = {
       ...(envelope.meta || {}),
@@ -87,6 +87,13 @@ export function annotateCodeLadder(envelope, ladder, recordArgs) {
     };
   }
   return envelope;
+}
+
+function codeLadderEvidenceServed(action, envelope) {
+  if (!envelope?.ok) return false;
+  if (action === "code.skeleton") return String(envelope.data?.content || "").trim().length > 0;
+  if (action === "code.lens") return envelope.data != null;
+  return false;
 }
 
 export function __resetCodeLadderForTests() {

@@ -293,7 +293,8 @@ export function formatWorkspaceHealthProbe(probe) {
   const disk = probe?.checks?.disk || {};
   if (disk.status !== "unknown") {
     const gb = disk.free_bytes != null ? (disk.free_bytes / 1024 / 1024 / 1024).toFixed(1) : "?";
-    parts.push(`disk ${disk.status} (${gb} GB free)`);
+    const percent = disk.free_ratio != null ? `${(disk.free_ratio * 100).toFixed(1)}%` : "?";
+    parts.push(`disk ${disk.status} (${gb} GB free, ${percent})`);
   } else {
     parts.push(`disk unknown (${disk.error || "unavailable"})`);
   }
@@ -304,6 +305,23 @@ export function formatWorkspaceHealthProbe(probe) {
   const recovered = probe?.checks?.recovered_worktrees || {};
   parts.push(`recovered backlog ${recovered.count || 0}`);
   return parts.join("; ");
+}
+
+export function formatWorkspaceHealthCriticalDetail(probe) {
+  const reasons = [];
+  const disk = probe?.checks?.disk || {};
+  if (disk.status === "critical") {
+    const gb = disk.free_bytes != null ? (disk.free_bytes / 1024 / 1024 / 1024).toFixed(1) : "?";
+    const percent = disk.free_ratio != null ? `${(disk.free_ratio * 100).toFixed(1)}%` : "?";
+    reasons.push(`Low space: ${gb} GB free (${percent})`);
+  }
+  const worktrees = probe?.checks?.worktrees || {};
+  if (worktrees.status === "critical") {
+    const count = worktrees.active_count ?? 0;
+    const capacity = worktrees.cap != null ? `${count}/${worktrees.cap}` : String(count);
+    reasons.push(`Worktree slots full: ${capacity} active`);
+  }
+  return reasons.join("; ") || "Critical workspace condition";
 }
 
 export function branchStalenessCheck({

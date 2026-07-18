@@ -1367,10 +1367,10 @@ function Step-Validate {
   Step-Begin "validate"
   if ($script:CriticalFailed) { Step-End "blocked"; return }
   if ($DryRun) {
-    Step-End "dry-run" "would run node orchestrator.js status"
+    Step-End "dry-run" "would run posse status"
     return
   }
-  $rc = Invoke-Logged -Description "boot posse (orchestrator.js status)" -Command @($script:NodeBin, "orchestrator.js", "status") -WorkingDirectory $script:PosseDirResolved -TimeoutSeconds 300
+  $rc = Invoke-Logged -Description "boot posse (posse status)" -Command @($script:NodeBin, "orchestrator.js", "status") -WorkingDirectory $script:PosseDirResolved -TimeoutSeconds 300
   if ($rc -eq 0) { Step-End "ok" "posse boots cleanly" }
   else {
     Write-Warn2 ("posse failed to boot - run 'posse status' in {0} to see the error" -f $script:PosseDirResolved)
@@ -1532,7 +1532,7 @@ function Step-Smoke {
   $rc = Invoke-Logged -Description ("atlas-smoke {0} (query: {1})" -f $repoLabel, $SmokeQuery) -Command @($script:NodeBin, "orchestrator.js", "atlas-smoke", $RepoPath, $SmokeQuery, $SmokeProvider) -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Step-End "ok" "smoke test passed" }
   else {
-    Write-Warn2 ("atlas-smoke failed - run it manually: node orchestrator.js atlas-smoke {0} {1} {2}" -f $RepoPath, $SmokeQuery, $SmokeProvider)
+    Write-Warn2 ("atlas-smoke failed - run it manually: posse atlas-smoke {0} {1} {2}" -f $RepoPath, $SmokeQuery, $SmokeProvider)
     Step-End "failed" "smoke test failed; see log"
   }
 }

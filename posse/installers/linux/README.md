@@ -73,7 +73,7 @@ server process. ATLAS runtime configuration lives in `~/.posse/account.db`
     stale. Jina `tar+zstd` extraction is embedded in `posse-ml`; no system or
     Node unpacker package is required. This replaces the old `pip install
     --user` step (which broke on PEP 668 distros like Ubuntu 23.04+/Debian 12+).
-14. **Validation** — boots Posse (`node orchestrator.js status`).
+14. **Validation** — boots Posse (`posse status`).
 15. **ATLAS smoke test** — only with `--repo-path`.
 
 ## Prereqs

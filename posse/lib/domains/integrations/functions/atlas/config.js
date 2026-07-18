@@ -10,6 +10,7 @@ import { normalizeAbsolutePath } from "./shared.js";
 import {
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
+  ATLAS_EMBEDDING_MODEL_OPTIONS,
   ATLAS_PHASE_VALUES,
   ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
   ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES,
@@ -22,6 +23,7 @@ import {
   ATLAS_V2_MODE_VALUES,
   VALID_ATLAS_AUTO_FEEDBACK_MODES,
   VALID_ATLAS_BOOT_REINDEX_POLICIES,
+  VALID_ATLAS_EMBEDDING_MODEL_IDS,
   VALID_ATLAS_PHASES,
   VALID_ATLAS_SCIP_LANGUAGES,
   VALID_ATLAS_SCIP_MODES,
@@ -33,6 +35,7 @@ import {
   DEFAULT_HTTP_HOST,
   DEFAULT_HTTP_PORT,
   DEFAULT_SERVER_NAME,
+  DEFAULT_ATLAS_EMBEDDING_MODEL_ID,
   PROVIDER_ATLAS_SUPPORT,
 } from "../../../../catalog/atlas.js";
 import { MODEL_TIERS } from "../../../../catalog/model.js";
@@ -41,6 +44,7 @@ import { normalizeAtlasV2Mode } from "../atlas-v2-mode.js";
 export {
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
+  ATLAS_EMBEDDING_MODEL_OPTIONS,
   ATLAS_PHASE_VALUES,
   ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT,
   ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES,
@@ -53,6 +57,7 @@ export {
   ATLAS_V2_MODE_VALUES,
   VALID_ATLAS_AUTO_FEEDBACK_MODES,
   VALID_ATLAS_BOOT_REINDEX_POLICIES,
+  VALID_ATLAS_EMBEDDING_MODEL_IDS,
   VALID_ATLAS_PHASES,
   VALID_ATLAS_SCIP_LANGUAGES,
   VALID_ATLAS_SCIP_MODES,
@@ -64,6 +69,7 @@ export {
   DEFAULT_HTTP_HOST,
   DEFAULT_HTTP_PORT,
   DEFAULT_SERVER_NAME,
+  DEFAULT_ATLAS_EMBEDDING_MODEL_ID,
   PROVIDER_ATLAS_SUPPORT,
 };
 
@@ -536,6 +542,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
       treeCompressionMaxSeeds: 80,
       treeCompressionModelMaxSeeds: 40,
       treeCompressionMlEnabled: false,
+      atlasEmbeddingModelId: DEFAULT_ATLAS_EMBEDDING_MODEL_ID,
       viewLayerMerge: false,
       viewWaitMs: 2500,
       autoRefreshStale: true,
@@ -610,6 +617,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbTreeCompressionModelTier = useLiveSettings ? readDbSetting("atlas_tree_compression_model_tier") : null;
   const dbTreeCompressionMaxSeeds = useLiveSettings ? readDbSetting("atlas_tree_compression_max_seeds") : null;
   const dbTreeCompressionModelMaxSeeds = useLiveSettings ? readDbSetting("atlas_tree_compression_model_max_seeds") : null;
+  const dbEmbeddingModelId = useLiveSettings ? readDbSetting("atlas_embedding_model_id") : null;
   const dbViewWaitMs = useLiveSettings ? readDbSetting("atlas_v2_view_wait_ms") : null;
   const dbAutoRefreshStale = useLiveSettings ? readDbSettingBool("atlas_v2_auto_refresh_stale") : null;
   const dbServerUrl = useLiveSettings ? readDbSetting("atlas_url") : null;
@@ -714,6 +722,14 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     explicitValue("treeCompressionModelMaxSeeds", "atlasTreeCompressionModelMaxSeeds", "atlas_tree_compression_model_max_seeds"),
     dbTreeCompressionModelMaxSeeds,
   )) ?? 40));
+  const rawEmbeddingModelId = String(firstProvided(
+    explicitValue("atlasEmbeddingModelId", "embeddingModelId", "atlas_embedding_model_id"),
+    dbEmbeddingModelId,
+    DEFAULT_ATLAS_EMBEDDING_MODEL_ID,
+  )).trim().toLowerCase();
+  const atlasEmbeddingModelId = VALID_ATLAS_EMBEDDING_MODEL_IDS.has(rawEmbeddingModelId)
+    ? rawEmbeddingModelId
+    : DEFAULT_ATLAS_EMBEDDING_MODEL_ID;
   const dbViewLayerMerge = useLiveSettings ? readDbSetting("atlas_view_layer_merge") : null;
   const viewLayerMerge = String(firstProvided(explicitValue("viewLayerMerge", "atlasViewLayerMerge", "atlas_view_layer_merge"), dbViewLayerMerge, "on")).trim().toLowerCase() === "on";
   const viewWaitMs = parseIntOrNull(firstProvided(explicitValue("viewWaitMs", "atlas_v2_view_wait_ms"), dbViewWaitMs)) ?? 2500;
@@ -788,6 +804,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     treeCompressionMaxSeeds,
     treeCompressionModelMaxSeeds,
     treeCompressionMlEnabled: treeCompressionMode === "ml",
+    atlasEmbeddingModelId,
     viewLayerMerge,
     viewWaitMs,
     autoRefreshStale,

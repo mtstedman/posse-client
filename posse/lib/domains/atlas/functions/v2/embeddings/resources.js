@@ -6,7 +6,10 @@
 
 import fs from "fs";
 import path from "path";
-import { DEFAULT_ATLAS_EMBEDDING_PROVIDER } from "../../../../../catalog/atlas.js";
+import {
+  DEFAULT_ATLAS_EMBEDDING_PROVIDER,
+  normalizeAtlasEmbeddingModelId,
+} from "../../../../../catalog/atlas.js";
 import { embeddingsRoot } from "../runtime-paths.js";
 import { AtlasEmbeddingEncoder } from "../../../classes/v2/AtlasEmbeddingEncoder.js";
 import { RustEmbeddingIndex, embeddingModelDirName } from "../../../classes/v2/RustEmbeddingIndex.js";
@@ -218,7 +221,9 @@ export function retirePooledEmbeddingResourcesAndWait() {
 }
 
 export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOnly = false }) {
-  const provider = DEFAULT_ATLAS_EMBEDDING_PROVIDER;
+  const provider = normalizeAtlasEmbeddingModelId(
+    config.atlasEmbeddingModelId ?? config.atlas_embedding_model_id,
+  );
   const vectorBackend = "posse-vector";
   const nativeManager = config.nativeManager ?? config.nativeVectorManager ?? nativeBinaries;
   const modelCacheDir = config.atlasJinaModelCacheDir
@@ -267,6 +272,7 @@ export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOn
       manager: nativeManager,
     });
     const result = openIndexForBackend({
+      provider,
       encoder,
       repoRoot,
       readOnly,
@@ -369,13 +375,14 @@ function disabled(provider, reason, backend = null, details = {}) {
 
 /**
  * @param {{
+ *   provider?: string,
  *   encoder: EmbeddingEncoder,
  *   repoRoot: string,
  *   nativeVectorManager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  * }} args
  * @returns {OpenEmbeddingResourcesResult}
  */
-function openIndexForBackend({ encoder, repoRoot, readOnly = false, nativeVectorManager = nativeBinaries }) {
+function openIndexForBackend({ provider = DEFAULT_ATLAS_EMBEDDING_PROVIDER, encoder, repoRoot, readOnly = false, nativeVectorManager = nativeBinaries }) {
   const root = embeddingsRoot(repoRoot);
   if (!nativeVectorManager.shouldUse("vector")) {
     throw new Error("posse-atlas-vector unavailable");
@@ -388,7 +395,7 @@ function openIndexForBackend({ encoder, repoRoot, readOnly = false, nativeVector
     readOnly,
     manager: nativeVectorManager,
   });
-  return enabled({ provider: DEFAULT_ATLAS_EMBEDDING_PROVIDER, backend: "posse-vector", encoder, index });
+  return enabled({ provider, backend: "posse-vector", encoder, index });
 }
 
 /**
