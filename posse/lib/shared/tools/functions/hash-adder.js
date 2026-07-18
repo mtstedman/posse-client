@@ -538,7 +538,7 @@ export function compactCodeSurveyResult(toolName, result, {
   return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
 
-// ---- code.window / code.lens result ref-paging (flag-gated, default OFF) ----
+// ---- code.window / code.lens result ref-paging (flag-gated, default ON) -----
 // L3b (TOKEN-LEVERS). Same demand-paging move as the survey tail: only fires
 // when the full result exceeds the min-chars threshold. code.lens carries a
 // matches[] array — page the lower-ranked tail. code.window is a monolithic
