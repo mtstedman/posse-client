@@ -156,6 +156,7 @@ export function toStorageSettingKey(settingKey = "") {
 // promoted into an operator-facing section.
 export const SETTINGS_PANES = Object.freeze([
   Object.freeze({ id: "atlas", label: "ATLAS" }),
+  Object.freeze({ id: "tokens", label: "Tokens" }),
   Object.freeze({ id: "agents", label: "Agents" }),
   Object.freeze({ id: "providers", label: "Providers" }),
   Object.freeze({ id: "images", label: "Images" }),
@@ -191,7 +192,6 @@ export const SETTINGS_GROUPS = Object.freeze([
       "atlas_tool_gate_enabled",
       "atlas_boot_reindex_policy",
       "atlas_drift_check",
-      "atlas_shadow_guardrails",
       "atlas_auto_feedback",
       "posse_kaizen_to_atlas",
     ]),
@@ -225,6 +225,50 @@ export const SETTINGS_GROUPS = Object.freeze([
       "atlas_v2_boot_soft_timeout_ms",
       "atlas_handoff_prefetch_timeout_ms",
       "git_atlas_post_commit_hook_timeout_ms",
+    ]),
+  },
+  // ── Tokens pane ──
+  {
+    id: "token_atlas_experiments",
+    pane: "tokens",
+    label: "ATLAS A/B levers",
+    keys: Object.freeze([
+      "atlas_answer_contract_tight",
+      "atlas_search_result_paging",
+      "atlas_result_ref_paging",
+      "atlas_result_ref_paging_min_chars",
+      "atlas_survey_tail_refs",
+      "atlas_ambient_ref_stamping",
+      "atlas_gate_nudge",
+      "atlas_prefetch_entrypoint_rank",
+      "atlas_survey_edge_cap",
+      "atlas_gateway_dedup_advertise",
+      "atlas_prose_dedup",
+      "atlas_tools_disabled",
+      "atlas_code_lens_callable",
+    ]),
+  },
+  {
+    id: "token_rolling_context",
+    pane: "tokens",
+    label: "Rolling context",
+    keys: Object.freeze([
+      "context_compaction_mode",
+      "context_compaction_trigger_input_tokens",
+      "context_compaction_session_reset_input_tokens",
+      "context_compaction_recent_target_tokens",
+    ]),
+  },
+  {
+    id: "token_shadow_flows",
+    pane: "tokens",
+    label: "Shadow & flow experiments",
+    keys: Object.freeze([
+      "atlas_shadow_guardrails",
+      "research_fanout",
+      "research_traversal_completion_check",
+      "research_traversal_completion_max_chars",
+      "session_recycle_mode",
     ]),
   },
   // ── Agents pane ──
@@ -362,13 +406,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     pane: "general",
     label: "Behavior",
     keys: Object.freeze([
-      "research_fanout",
       "scheduler_concurrency",
-      "session_recycle_mode",
-      "context_compaction_mode",
-      "context_compaction_trigger_input_tokens",
-      "context_compaction_session_reset_input_tokens",
-      "context_compaction_recent_target_tokens",
     ]),
   },
   {
@@ -416,6 +454,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     label: "git & merge",
     keys: Object.freeze([
       "target_branch",
+      "git_commit_style",
     ]),
   },
   {
@@ -456,8 +495,6 @@ export const SETTINGS_GROUPS = Object.freeze([
     label: "hook & worktree overrides",
     keys: Object.freeze([
       "worktree_clean_ignored",
-      "research_traversal_completion_check",
-      "research_traversal_completion_max_chars",
       "fix_scope_handoff_guard",
     ]),
   },

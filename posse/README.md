@@ -314,6 +314,14 @@ Mutating jobs run in per-work-item git worktrees. Successful dev/fix/promote
 jobs are committed on the work-item branch. Failed or interrupted work is
 snapshotted before cleanup when possible.
 
+The Admin **Repo → git & merge → git_commit_style** setting controls generated
+commit subjects. **off** preserves the original message. **conventional** and
+**gitmoji** each make exactly one narrow classification call over the scoped
+diff using the configured assessor provider at its standard model tier, then
+pass the structured result to posse-git. Gitmoji mode retains the
+machine-readable Conventional Commit prefix. Invalid or unavailable classifier
+output blocks the commit before staging.
+
 Recovery snapshots are stored as local refs under `refs/posse/snapshots/*` with
 metadata in `refs/notes/posse-snapshots`.
 

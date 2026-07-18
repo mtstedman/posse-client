@@ -43,6 +43,7 @@ export const SETTING_KEYS = Object.freeze({
   DISABLE_SYSTEM_TOOLS: "disable_system_tools",
   FILE_REQUEST_LOW_RISK_EXTENSIONS: "file_request_low_risk_extensions",
   FIX_SCOPE_HANDOFF_GUARD: "fix_scope_handoff_guard",
+  GIT_COMMIT_STYLE: "git_commit_style",
   HANDOFF_MAX_CONTEXT_CHARS: "handoff_max_context_chars",
   HANDOFF_MAX_PRELOAD_TOTAL_BYTES: "handoff_max_preload_total_bytes",
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES: "handoff_preload_editable_file_bodies",
@@ -125,6 +126,7 @@ export const CLAUDE_EXECUTION_MODE_VALUES = Object.freeze(["print", "interactive
 export const CONTEXT_COMPACTION_MODE_VALUES = Object.freeze(["off", "shadow", "inject", "enforce"]);
 export const DELEGATION_MODE_VALUES = Object.freeze(["js", "ml"]);
 export const FIX_SCOPE_HANDOFF_GUARD_VALUES = Object.freeze(["off", "auto", "warn", "enforce"]);
+export const GIT_COMMIT_STYLE_VALUES = Object.freeze(["off", "conventional", "gitmoji"]);
 export const HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES = Object.freeze(["off", "small", "always"]);
 export const KAIZEN_TO_ATLAS_MODE_VALUES = Object.freeze(["off", "shadow", "write"]);
 export const LOG_LEVEL_VALUES = Object.freeze(["debug", "info", "warn", "error"]);

@@ -845,6 +845,9 @@ export class AdminSettingsController {
       atlas: [
         ...dbSettingsByPane.atlas,
       ],
+      tokens: [
+        ...dbSettingsByPane.tokens,
+      ],
       agents: [
         ...agentSettings,
       ],
@@ -869,6 +872,7 @@ export class AdminSettingsController {
     };
     const editableSettings = [
       ...paneEditableSettings.atlas,
+      ...paneEditableSettings.tokens,
       ...paneEditableSettings.agents,
       ...paneEditableSettings.providers,
       ...paneEditableSettings.images,
@@ -1813,6 +1817,10 @@ export class AdminSettingsController {
       renderDbGroupsForPane("atlas");
     };
 
+    const renderTokensPane = () => {
+      renderDbGroupsForPane("tokens");
+    };
+
     const renderGeneralPane = () => {
       renderDbGroupsForPane("general");
 
@@ -1859,6 +1867,8 @@ export class AdminSettingsController {
 
     if (settingsPane === "atlas") {
       renderAtlasPane();
+    } else if (settingsPane === "tokens") {
+      renderTokensPane();
     } else if (settingsPane === "agents") {
       renderAgentsPane();
     } else if (settingsPane === "providers") {
@@ -1875,6 +1885,7 @@ export class AdminSettingsController {
       // "all" — non-interactive snapshots and tests render every pane in the
       // same order paneEditableSettings concatenates them.
       renderAtlasPane();
+      renderTokensPane();
       renderAgentsPane();
       renderProvidersPane();
       renderImagesPane();

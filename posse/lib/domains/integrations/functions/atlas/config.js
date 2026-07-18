@@ -756,7 +756,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const explicitPrefetchEntrypointRank = explicitValue("prefetchEntrypointRank", "atlas_prefetch_entrypoint_rank");
   const prefetchEntrypointRank = provided(explicitPrefetchEntrypointRank) && String(explicitPrefetchEntrypointRank).trim() !== ""
     ? parseBool(explicitPrefetchEntrypointRank)
-    : (dbPrefetchEntrypointRank === true);
+    : (dbPrefetchEntrypointRank == null ? true : dbPrefetchEntrypointRank === true);
   const surveyEdgeCap = Math.max(0, parseIntOrNull(firstProvided(
     explicitValue("surveyEdgeCap", "atlas_survey_edge_cap"),
     dbSurveyEdgeCap,

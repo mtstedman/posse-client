@@ -7,8 +7,8 @@ import fs from "fs";
 import path from "path";
 import { runHook } from "./hooks.js";
 import { gitExec, gitCurrentHash } from "./utils.js";
-import { withWorktreeLock } from "./worktree.js";
-import { withBranchLock } from "./worktree-locks.js";
+import { withWorktreeLock, withWorktreeLockAsync } from "./worktree.js";
+import { withBranchLock, withBranchLockAsync } from "./worktree-locks.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { listActiveFileLocks } from "../../queue/functions/file-locks.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
@@ -21,6 +21,11 @@ import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAu
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { UNSCOPED_GIT_ADD_TASK_MODES } from "../../../catalog/artifact.js";
 import { runGitNativeMethod } from "./native/invoke.js";
+import {
+  classifyScopedCommit,
+  collectScopedCommitDiff,
+  getGitCommitStyle,
+} from "./commit-message-policy.js";
 
 const GIT_COMMAND_TIMEOUT_MS = 60_000;
 const DEFAULT_GIT_COMMIT_CORE_TIMEOUT_MS = 60_000;
@@ -290,6 +295,15 @@ function withCommitBranchLock(cwd, opts = {}, fn) {
   });
 }
 
+async function withCommitBranchLockAsync(cwd, opts = {}, fn) {
+  if (opts?.branchLock === false) return await fn();
+  const branchName = currentBranchForCommitLock(cwd, opts);
+  if (!branchName) return await fn();
+  return await withBranchLockAsync(cwd, branchName, opts?.projectDir || cwd, fn, {
+    waitMs: opts?.branchLockWaitMs ?? opts?.worktreeLockWaitMs,
+  });
+}
+
 export function gitCommitAll(message, cwd, scope = null, opts = {}) {
   const commitWithBranchLock = () => withCommitBranchLock(cwd, opts, () =>
     gitCommitAllUnlocked(message, cwd, scope, opts)
@@ -304,13 +318,54 @@ export async function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
   if (typeof opts?.beforeCommitHook === "function") {
     throw new Error("gitCommitAllAsync cannot serialize beforeCommitHook; wrap the whole caller off the main thread instead");
   }
-  const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
-    routesByBinary: { git: ["git:read", "git:mutate"] },
-  });
-  return GIT_COMMIT_THREAD_MANAGER.run(new URL("./commit-worker.js", import.meta.url), {
-    label: "git commit worker",
-    timeoutMs: gitCommitTimeoutBudget().processTimeoutMs + GIT_COMMIT_WORKER_OVERHEAD_MS,
-    workerData: { message, cwd, scope, opts, nativeAuth: heartbeatAuthManager.getCapability(), nativeRuntime },
+  const style = getGitCommitStyle(opts?.projectDir || cwd);
+  const runWorker = async (workerOpts) => {
+    const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
+      routesByBinary: { git: ["git:read", "git:mutate"] },
+    });
+    return await GIT_COMMIT_THREAD_MANAGER.run(new URL("./commit-worker.js", import.meta.url), {
+      label: "git commit worker",
+      timeoutMs: gitCommitTimeoutBudget().processTimeoutMs + GIT_COMMIT_WORKER_OVERHEAD_MS,
+      workerData: { message, cwd, scope, opts: workerOpts, nativeAuth: heartbeatAuthManager.getCapability(), nativeRuntime },
+    });
+  };
+  if (style === "off") return await runWorker(opts);
+
+  const classifyAndCommit = async () => {
+    const bundle = collectScopedCommitDiff(cwd, scope, {
+      nativeParity: opts?.nativeParity || {},
+    });
+    if (bundle.paths.length > 0) {
+      const secretsResult = runHook("secrets_scan", { cwd, paths: bundle.paths });
+      if (!secretsResult.ok) {
+        const err = new Error("Secrets detected in scoped files — commit classification blocked");
+        err.hookOutput = secretsResult.output;
+        throw err;
+      }
+    }
+    const commitPolicy = await classifyScopedCommit({
+      style,
+      originalMessage: message,
+      diff: bundle.diff,
+      truncated: bundle.truncated,
+      cwd,
+      providerResolver: opts?.commitPolicyProviderResolver || null,
+    });
+    const {
+      commitPolicyProviderResolver: _providerResolver,
+      ...serializableOpts
+    } = opts;
+    return await runWorker({
+      ...serializableOpts,
+      worktreeLock: false,
+      branchLock: false,
+      commitPolicy,
+    });
+  };
+  const withBranch = () => withCommitBranchLockAsync(cwd, opts, classifyAndCommit);
+  if (opts?.worktreeLock === false) return await withBranch();
+  return await withWorktreeLockAsync(cwd, opts?.projectDir || cwd, withBranch, {
+    waitMs: opts?.worktreeLockWaitMs,
   });
 }
 
@@ -865,6 +920,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       cwd: nestedRepoPrefix ? nestedRepoRoot : cwd,
       expectedHead: headAtScopeStart,
       message,
+      ...(opts?.commitPolicy ? { commitPolicy: opts.commitPolicy } : {}),
       modifyPaths: [...nativeModifyPaths].map(repoRelativePath),
       createPaths: [...nativeCreatePaths].map(repoRelativePath),
       deletePaths: [...nativeDeletePaths].map(repoRelativePath),
