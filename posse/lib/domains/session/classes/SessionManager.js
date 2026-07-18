@@ -17,7 +17,6 @@ import {
   providerCoverageForReuse,
   transitionAllowsRecycling,
 } from "../functions/eligibility.js";
-import { computeOverlap } from "../functions/overlap.js";
 import { skillRecyclePolicyForJob } from "../functions/skill-policy.js";
 import { isSessionResumeCapableProvider } from "../../providers/functions/provider.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
@@ -230,10 +229,7 @@ export class SessionManager {
 
     if (session) {
       const previousJob = session.parent_job_id ? getJobRow(session.parent_job_id) : null;
-      const overlap = previousJob && job
-        ? computeOverlap(previousJob, job)
-        : null;
-      if (!previousJob || !transitionAllowsRecycling(previousJob.job_type, job?.job_type, { overlap })) {
+      if (!previousJob || !transitionAllowsRecycling(previousJob.job_type, job?.job_type)) {
         releaseSessionHandle(session.id, session.leaseToken);
         invalidateSessionLane(laneResult.lane.id, "transition_not_allowed");
         const resetLane = this.ensureLaneForJob(job, {
@@ -253,7 +249,6 @@ export class SessionManager {
           transition: {
             from: previousJob?.job_type || null,
             to: job?.job_type || null,
-            overlap,
           },
         };
       }

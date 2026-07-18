@@ -114,7 +114,7 @@ export function validateRemoteCompileReadinessResponse(response) {
 
   requireContains(errors, "system_prompt", systemPrompt, "ROLE CLASS: dev");
   requireContains(errors, "system_prompt", systemPrompt, "FILE SCOPE CONTRACT");
-  requireContains(errors, "system_prompt", systemPrompt, "DEV LOG FORMAT");
+  requireContains(errors, "system_prompt", systemPrompt, "DEV RESULT FORMAT");
   requireContains(errors, "stable_context", stableContext, "STABLE EXECUTION CONTEXT");
   requireAnyContains(errors, "stable_context", stableContext, ["raw_source_policy: no_raw_source", "source_policy: no_raw_source"], "no raw-source policy");
   requireAnyContains(errors, "stable_context", stableContext, ["context_contract: remote_skeleton_hash_refs", "enrichment_owner: local_client"], "remote skeleton/hash-ref or legacy enrichment contract");

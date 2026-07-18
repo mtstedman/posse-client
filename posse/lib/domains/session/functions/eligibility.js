@@ -57,7 +57,7 @@ export function providerCoverageForReuse({
   };
 }
 
-export function transitionAllowsRecycling(fromJobType, toJobType, { overlap = null, overlapThreshold = 0.5 } = {}) {
+export function transitionAllowsRecycling(fromJobType, toJobType) {
   const fromLane = providerRoleForJobType(fromJobType);
   const toLane = providerRoleForJobType(toJobType);
   if (!isRecyclableLane(toLane) || fromLane !== toLane) return false;
@@ -67,10 +67,9 @@ export function transitionAllowsRecycling(fromJobType, toJobType, { overlap = nu
   if (fromType === "dev" && toType === "fix") return true;
   if (fromType === "fix" && toType === "fix") return true;
   if (fromType === "plan" && toType === "plan") return true;
-  // fix -> dev is intentionally denied for v1. A fresh dev job after a fix is
-  // treated as a new sibling task and must pass the dev -> dev overlap gate.
-  if (fromType === "dev" && toType === "dev") {
-    return Number(overlap) >= overlapThreshold;
-  }
+  // A dev -> dev transition is a sibling task. Even identical file scope can
+  // carry different requirements and handoff evidence, so it always starts a
+  // fresh provider session. Retries of one job resume through the attempt path.
+  if (fromType === "dev" && toType === "dev") return false;
   return false;
 }

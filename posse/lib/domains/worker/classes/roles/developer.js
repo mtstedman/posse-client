@@ -20,6 +20,7 @@ import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../
 import {
   extractCheckpointFromOutput as defaultExtractCheckpointFromOutput,
   loadCheckpoint as defaultLoadCheckpoint,
+  parseAgentCompletionLog as defaultParseAgentCompletionLog,
   scopedDeleteTargets as defaultScopedDeleteTargets,
 } from "../../functions/helpers/mutation-guards.js";
 import {
@@ -41,6 +42,7 @@ const DEFAULT_DEPS = {
   extractCheckpointFromOutput: defaultExtractCheckpointFromOutput,
   loadCheckpoint: defaultLoadCheckpoint,
   loadNudges: () => "",
+  parseAgentCompletionLog: defaultParseAgentCompletionLog,
   scopedDeleteTargets: defaultScopedDeleteTargets,
   shortJobTitle: defaultShortJobTitle,
   uniqueScopeFiles: defaultUniqueScopeFiles,
@@ -312,6 +314,7 @@ export class DeveloperRole extends BaseRole {
       checkpointTokenThreshold,
       extractCheckpointFromOutput,
       currentExecutionProvider,
+      parseAgentCompletionLog,
       shortJobTitle,
     } = this.roleDeps();
     let remainingExpandFileBudget = ctx.remainingExpandFileBudget;
@@ -391,14 +394,14 @@ export class DeveloperRole extends BaseRole {
       }
     }
 
-    const devLogMatch = output.match(/---\s*DEV LOG START\s*---\s*([\s\S]*?)---\s*DEV LOG END\s*---/);
-    if (devLogMatch) {
+    const completion = parseAgentCompletionLog(output);
+    if (completion.found && completion.kind === "dev") {
       storeArtifact({
         work_item_id: job.work_item_id,
         job_id: job.id,
         attempt_id: ctx.attemptId,
         artifact_type: "log",
-        content_long: devLogMatch[1].trim(),
+        content_long: completion.body,
       });
     }
 

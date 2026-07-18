@@ -35,13 +35,19 @@ function uniqueScopeFiles(...groups) {
   return [...new Set(groups.flat().filter(Boolean))];
 }
 
+const COMPLETION_BLOCK_RE = /---\s*(DEV RESULT|DEV LOG|ARTIFICER LOG) START\s*---\s*([\s\S]*?)---\s*\1 END\s*---/i;
+
+function matchAgentCompletionBlock(output) {
+  return String(output || "").match(COMPLETION_BLOCK_RE);
+}
+
 export function extractCheckpointFromOutput(output) {
   if (!output || typeof output !== "string") return null;
 
   const parts = [];
-  const logMatch = output.match(/---\s*DEV LOG START\s*---\s*([\s\S]*?)---\s*DEV LOG END\s*---/i);
+  const logMatch = matchAgentCompletionBlock(output);
   if (logMatch) {
-    parts.push(`PREVIOUS ATTEMPT DEV LOG:\n${logMatch[1].trim()}`);
+    parts.push(`PREVIOUS ATTEMPT ${logMatch[1].toUpperCase()}:\n${logMatch[2].trim()}`);
   }
 
   const fileOps = [];
@@ -53,7 +59,7 @@ export function extractCheckpointFromOutput(output) {
     parts.push(`FILES TOUCHED IN PREVIOUS ATTEMPT:\n${[...new Set(fileOps)].map((file) => `  - ${file}`).join("\n")}`);
   }
 
-  const fileRequestMatch = output.match(/FILE_REQUEST[\s\S]*?(?:FILE_REQUEST_END|---\s*DEV LOG|$)/i);
+  const fileRequestMatch = output.match(/FILE_REQUEST[\s\S]*?(?:FILE_REQUEST_END|---\s*DEV (?:RESULT|LOG)|$)/i);
   if (fileRequestMatch) {
     parts.push(`PENDING FILE REQUESTS:\n${fileRequestMatch[0].trim().slice(0, 500)}`);
   }
@@ -140,7 +146,7 @@ function chooseAgentBlockReason(body) {
 
 export function parseAgentCompletionLog(output = "") {
   const text = String(output || "");
-  const match = text.match(/---\s*(DEV|ARTIFICER) LOG START\s*---\s*([\s\S]*?)---\s*(?:DEV|ARTIFICER) LOG END\s*---/i);
+  const match = matchAgentCompletionBlock(text);
   if (!match) {
     return {
       found: false,
@@ -153,6 +159,7 @@ export function parseAgentCompletionLog(output = "") {
     };
   }
 
+  const label = String(match[1] || "").toUpperCase();
   const body = String(match[2] || "").trim();
   const statusMatch = body.match(/^\s*status:\s*([A-Z_ -]+)/im);
   const rawStatus = statusMatch?.[1]
@@ -168,7 +175,7 @@ export function parseAgentCompletionLog(output = "") {
 
   return {
     found: true,
-    kind: String(match[1] || "").toLowerCase(),
+    kind: label === "ARTIFICER LOG" ? "artificer" : "dev",
     body,
     status,
     blockReason,

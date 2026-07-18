@@ -146,6 +146,311 @@ export function toStorageSettingKey(settingKey = "") {
   return TURN_BASE_KEY_REVERSE_MAP[settingKey] || settingKey;
 }
 
+// Storage keys are intentionally stable machine identifiers. The admin UI
+// presents a separate operator-facing label so changing the wording never
+// breaks persisted settings, environment overrides, or automation.
+const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
+  atlas_v2: "ATLAS retrieval",
+  atlas_phases: "Enabled ATLAS roles",
+  atlas_live_funnel: "Prompt context injection",
+  atlas_live_index: "Live edit indexing",
+  atlas_live_buffers: "Live edit buffers",
+  atlas_memory_surface: "Memory lookups",
+  atlas_memory_mode: "ATLAS memory",
+  atlas_tool_gate_enabled: "Require ATLAS retrieval first",
+  atlas_reindex_on_commit: "Reindex after merges",
+  atlas_boot_reindex_policy: "Startup reindex policy",
+  atlas_drift_check: "Index drift checks",
+  atlas_scip_mode: "SCIP indexing",
+  atlas_scip_languages: "SCIP languages",
+  atlas_scip_restage_policy: "SCIP refresh policy",
+  atlas_embedding_model_id: "Embedding model",
+  atlas_tree_compression_mode: "Tree summary mode",
+  artifact_image_provider: "Image artifact provider",
+  claude_run_budget_pct_session: "Claude run budget (%)",
+  codex_auth_mode: "Codex authentication",
+  codex_run_budget_pct_session: "Codex run budget (%)",
+  openai_run_budget_usd: "OpenAI run budget",
+  openai_daily_budget_usd: "OpenAI daily budget",
+  openai_account_limit_tokens_session: "OpenAI session token limit",
+  openai_account_limit_tokens_week: "OpenAI weekly token limit",
+  grok_run_budget_usd: "Grok run budget",
+  grok_daily_budget_usd: "Grok daily budget",
+  grok_image_budget_usd: "Grok image budget",
+  openai_image_budget_usd: "OpenAI image budget",
+  scheduler_concurrency: "Concurrent workers",
+  scheduler_max_active_worktrees: "Active worktree limit",
+  stall_timeout: "Stalled job timeout",
+  max_job_runtime_sec: "Job runtime limit",
+  headless_human_timeout_sec: "Headless approval timeout",
+  default_max_attempts: "Attempts per job",
+  auto_merge_completed: "Auto-merge approved work",
+  plan_approval_mode: "Require plan approval",
+  startup_dirty_tree_policy: "Dirty tree at startup",
+  fix_scope_handoff_guard: "Fix scope expansion",
+  file_request_low_risk_extensions: "Low-risk file extensions",
+  web_tools_enabled: "Web research tools",
+  posse_log_scrub_secrets: "Remove secrets from logs",
+  session_recycle_mode: "Reuse agent sessions",
+  posse_wi_failure_threshold: "Failures before human review",
+  posse_max_fix_chain_depth: "Consecutive fix limit",
+  posse_max_replans: "Replan limit",
+  posse_max_file_request_depth: "File request follow-up limit",
+  snapshot_retention_days: "Snapshot retention",
+  snapshot_max_bytes: "Snapshot storage limit",
+  snapshot_max_refs: "Snapshot count limit",
+  snapshot_dedup: "Deduplicate snapshots",
+  skills_enabled: "Planner-selected skills",
+  skills_disabled_ids: "Disabled skills",
+  posse_log_level: "Log level",
+  posse_retention_days: "Telemetry retention",
+  posse_display_max_events: "Live event history",
+  posse_display_event_rate_limit_per_sec: "Live event rate limit",
+  target_branch: "Merge target branch",
+  git_commit_style: "Commit message style",
+  bridge_port: "Bridge port",
+  bridge_label: "Bridge name",
+  project_db_enabled: "Agent database access",
+  project_db_type: "Database type",
+  project_db_permissions: "Allowed database operations",
+  project_db_database: "Database name or file",
+  project_db_host: "Database host",
+  project_db_port: "Database port",
+  project_db_username: "Database username",
+  project_db_password: "Database password",
+  planner_max_tasks: "Tasks per plan",
+  planner_under_scoped_broad_gate: "Under-scoped plan policy",
+  delegation_mode: "Delegation engine",
+  model_catalog_enforcement: "Unknown model policy",
+  model_catalog_cache_ms: "Model catalog refresh interval",
+  claude_execution_mode: "Claude execution mode",
+  posse_kaizen_to_atlas: "Kaizen-to-ATLAS promotion (reserved)",
+  posse_db_telemetry_tail_limit: "Database telemetry tail",
+  atlas_answer_contract_tight: "Compact research answers",
+  atlas_search_result_paging: "Page large search results",
+  atlas_result_ref_paging: "Page large code results",
+  atlas_result_ref_paging_min_chars: "Code result paging threshold",
+  atlas_survey_tail_refs: "Compact survey results",
+  atlas_ambient_ref_stamping: "Reusable result references",
+  atlas_gate_nudge: "Large-result query suggestions",
+  atlas_prefetch_entrypoint_rank: "Prefer entry points during prefetch",
+  atlas_survey_edge_cap: "Survey relationship limit",
+  atlas_gateway_dedup_advertise: "Hide redundant gateway tools",
+  atlas_prose_dedup: "Compact repeated policy text",
+  atlas_tools_disabled: "Hidden ATLAS actions",
+  atlas_code_lens_callable: "Allow code lens tool",
+  atlas_view_layer_merge: "Layered ATLAS views",
+  atlas_shadow_guardrails: "ATLAS shadow guardrails",
+  atlas_auto_feedback: "ATLAS job feedback",
+  atlas_tree_compression_provider: "Tree summary provider",
+  atlas_tree_compression_model_tier: "Tree summary model tier",
+  atlas_tree_compression_max_seeds: "Stored tree summary seeds",
+  atlas_tree_compression_model_max_seeds: "Model tree summary seeds",
+  git_atlas_post_commit_hook_timeout_ms: "Post-commit reindex timeout",
+  atlas_scip_index_command: "Custom SCIP index command",
+  atlas_scip_index_args: "Custom SCIP index arguments",
+  atlas_scip_index_timeout_ms: "SCIP index timeout",
+  atlas_scip_cold_index_timeout_ms: "First SCIP index timeout",
+  atlas_scip_max_age_hours: "SCIP index maximum age",
+  context_compaction_mode: "Rolling context experiment",
+  context_compaction_trigger_input_tokens: "Context pressure threshold",
+  context_compaction_session_reset_input_tokens: "Session reset threshold",
+  context_compaction_recent_target_tokens: "Recent context target",
+  research_fanout: "Parallel research",
+  research_traversal_completion_check: "Traversal completion check",
+  research_traversal_completion_max_chars: "Traversal check text limit",
+  scheduler_poll_ms: "Scheduler poll interval",
+  scheduler_repair_poll_ms: "Scheduler repair interval",
+  default_lease_seconds: "Job lease duration",
+  worker_lease_renew_max_transient_errors: "Lease renewal error limit",
+  lease_requeue_grace_sec: "Expired lease grace period",
+  worker_provider_circuit_ttl_ms: "Provider failure cooldown",
+  worktree_lock_wait_ms: "Worktree lock wait",
+  scheduler_shadow_conflict_metrics: "Shadow conflict metrics",
+  session_recycle_strict_provider: "Reset sessions on provider change",
+  posse_session_lease_ttl: "Reused session lease duration",
+  worktree_clean_ignored: "Clean ignored worktree files",
+  skip_hooks: "Skip all safety hooks",
+  skip_hook_secrets_scan: "Skip secret scanning",
+  skip_hook_post_dev_verify: "Skip developer verification",
+  skip_hook_pre_push_gate: "Skip pre-push checks",
+  pre_assess_cmd: "Command before assessment",
+  pre_push_verify_cmd: "Command before push",
+  assessor_fallback_reads: "Assessor fallback reads",
+  assessor_fallback_reads_retry_step: "Extra reads per retry",
+  assessor_internal_retry_limit: "Assessment retry limit",
+  assessor_parse_retry_input_tokens_cap: "Parse retry token limit",
+  handoff_max_prompt_chars: "Handoff prompt size limit",
+  handoff_max_context_chars: "Handoff context size limit",
+  handoff_preload_editable_file_bodies: "Preload editable files",
+  handoff_max_file_bytes: "Single handoff file limit",
+  handoff_max_preload_total_bytes: "Editable preload limit",
+  handoff_max_related_files_total_bytes: "Related file preload limit",
+  posse_remote_timeout_ms: "Remote prompt timeout",
+  context_expand_max_steps: "Missing-context retry limit",
+  context_expand_file_budget_per_attempt: "Files added per context retry",
+  claude_usage_cache_ms: "Claude usage refresh interval",
+  claude_usage_backoff_ms: "Claude usage retry delay",
+  codex_usage_cache_ms: "Codex usage refresh interval",
+  codex_usage_backoff_ms: "Codex usage retry delay",
+  posse_fanout_child_timeout_sec: "Research child queue timeout",
+});
+
+const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
+  atlas_v2: "Use ATLAS for code search and context. Turn it off only when ATLAS is unavailable.",
+  atlas_phases: "Choose which agent roles receive ATLAS context.",
+  atlas_live_funnel: "Add ATLAS search results and code context to agent prompts.",
+  atlas_live_index: "Let running jobs search edits that have not been merged yet.",
+  atlas_live_buffers: "Send developer write and edit buffers to the live ATLAS index.",
+  atlas_memory_surface: "Look for saved ATLAS memory attached to relevant files and symbols.",
+  atlas_memory_mode: "Enable ATLAS memory lookup, tools, prompts, and saved memory.",
+  atlas_tool_gate_enabled: "Require agents to try ATLAS before using general file and search tools.",
+  atlas_reindex_on_commit: "Update the ATLAS index after Posse merges a commit.",
+  atlas_boot_reindex_policy: "Choose when startup refreshes the ATLAS index: always, only when missing, or when needed.",
+  atlas_drift_check: "Periodically check whether the ATLAS index still matches the current commit.",
+  atlas_scip_mode: "Use SCIP symbol indexes during ATLAS startup and search.",
+  atlas_scip_languages: "Choose which languages get SCIP indexing and scoped lint support. Saving may install managed indexers.",
+  atlas_scip_restage_policy: "Choose when existing SCIP indexes are rebuilt.",
+  atlas_embedding_model_id: "Choose the local model ATLAS uses to find code with similar meaning.",
+  atlas_tree_compression_mode: "Choose how ATLAS builds compact repository summaries: off, deterministic, or model-assisted.",
+  scheduler_concurrency: "Number of worker jobs Posse may run at the same time when no command-line override is provided.",
+  scheduler_max_active_worktrees: "Optional cap on work-item worktrees running at the same time. Leave blank for no separate cap.",
+  stall_timeout: "Stop a job after this many seconds without progress. Leave blank for 600 seconds.",
+  max_job_runtime_sec: "Stop any job that exceeds this total runtime. Leave blank to use twice the stalled-job timeout.",
+  headless_human_timeout_sec: "How long a non-interactive run waits for required human input before timing out.",
+  default_max_attempts: "How many times a job may be attempted before its normal failure handling begins.",
+  auto_merge_completed: "Merge work automatically after it passes assessment.",
+  plan_approval_mode: "Pause for human approval before a generated plan starts running.",
+  startup_dirty_tree_policy: "Choose whether startup blocks on uncommitted changes or commits them before work begins.",
+  fix_scope_handoff_guard: "Controls fixes that name existing files outside their approved scope. Auto/warn adds those files; enforce blocks the handoff; off ignores them.",
+  file_request_low_risk_extensions: "Extra file extensions developers may request without high-risk approval. Protected, package, and CI paths stay high risk.",
+  web_tools_enabled: "Allow researcher and artificer agents to use configured web search and page-fetch tools.",
+  posse_log_scrub_secrets: "Hide values that look like secrets before prompts and model output are written to logs.",
+  session_recycle_mode: "Reuse compatible agent sessions between jobs: off, developer fixes only, or all supported jobs.",
+  posse_wi_failure_threshold: "Send a work item for human review after this many failed developer or fix jobs.",
+  posse_max_fix_chain_depth: "Send a work item for human review after this many fixes in a row.",
+  posse_max_replans: "Send a work item for human review after this many requests for a new plan.",
+  posse_max_file_request_depth: "Maximum number of follow-up rounds allowed while approving a developer's file request.",
+  snapshot_retention_days: "Number of days to keep recoverable snapshots of uncommitted work.",
+  snapshot_max_bytes: "Maximum total disk space used by recoverable snapshots, in bytes.",
+  snapshot_max_refs: "Maximum number of recoverable snapshot references to keep.",
+  snapshot_dedup: "Reuse an existing snapshot when the uncommitted work is identical.",
+  skills_enabled: "Allow the planner to attach relevant skills to developer jobs.",
+  skills_disabled_ids: "Skills disabled by an administrator. Newly installed skills remain enabled unless listed here.",
+  posse_log_level: "Lowest severity written to the runtime log: debug, info, warn, or error.",
+  posse_retention_days: "Days to keep runtime telemetry in the database. Set to 0 to keep it indefinitely.",
+  posse_display_max_events: "Maximum number of recent events retained by the live terminal display.",
+  posse_display_event_rate_limit_per_sec: "Event rate at which the terminal starts dropping display-only updates to remain responsive.",
+  target_branch: "Branch completed work merges into. Leave blank to detect the repository's default branch.",
+  git_commit_style: "Choose plain subjects, Conventional Commits, or Conventional Commits with Gitmoji.",
+  bridge_port: "Local port used by this repository's Posse bridge. Leave blank to choose an available port starting at 7531.",
+  bridge_label: "Optional name used to identify this repository's local bridge.",
+  project_db_enabled: "Allow agents to query the project database using the permissions below.",
+  project_db_type: "Database engine used by this repository: SQLite, PostgreSQL, or MySQL.",
+  project_db_permissions: "Database operations agents may use. Read-only roles can still only read.",
+  project_db_database: "SQLite file path relative to the repository, or the PostgreSQL/MySQL database name.",
+  project_db_host: "Host name for PostgreSQL or MySQL. SQLite does not use this setting.",
+  project_db_port: "Port for PostgreSQL or MySQL. SQLite does not use this setting.",
+  project_db_username: "Username for PostgreSQL or MySQL. SQLite does not use this setting.",
+  project_db_password: "Password for PostgreSQL or MySQL. It is stored securely and never displayed; leave blank to keep it unchanged.",
+  planner_max_tasks: "Maximum number of tasks the planner may place in one plan.",
+  planner_under_scoped_broad_gate: "Choose whether broad plans with too little file scope are allowed, warned about, or rejected.",
+  delegation_mode: "Choose whether delegation is handled by deterministic code or a model.",
+  atlas_answer_contract_tight: "Use shorter, citation-focused research answers. Turn off to restore the standard research response format.",
+  atlas_search_result_paging: "Keep large symbol-search results compact and make the remaining results available on demand.",
+  atlas_result_ref_paging: "Keep large code-window and code-lens results compact and make the remaining content available on demand.",
+  atlas_result_ref_paging_min_chars: "Result size, in characters, at which code-window and code-lens paging begins.",
+  atlas_survey_tail_refs: "Keep the highest-ranked survey files inline and make lower-ranked file summaries available on demand.",
+  atlas_ambient_ref_stamping: "Make more ATLAS results available through reusable result references. This is an experiment.",
+  atlas_gate_nudge: "Suggest a narrower ATLAS query when a result becomes too large. This is an experiment.",
+  atlas_prefetch_entrypoint_rank: "Prefer likely entry points and heavily imported files during ATLAS prefetch. Turn off for the older ranking.",
+  atlas_survey_edge_cap: "Maximum total relationship rows returned by a code survey. Set to 0 to use the normal per-section limits.",
+  atlas_gateway_dedup_advertise: "Hide redundant ATLAS gateway wrappers when their individual tools are already available. Turn off for the older tool list.",
+  atlas_prose_dedup: "Use the shorter copy of repeated ATLAS policy text. Turn off to restore the older full text in every role prompt.",
+  atlas_tools_disabled: "Comma-separated ATLAS actions to hide from new agent sessions. Leave blank to expose all normal actions.",
+  atlas_code_lens_callable: "Allow agents to call code lens directly. Turning it off does not remove internal code-lens support.",
+  atlas_view_layer_merge: "Build ATLAS views from the current per-source symbol layers. Turn off only to use the legacy flat-table fallback.",
+  atlas_shadow_guardrails: "Collect diagnostic ATLAS guardrail results without changing agent behavior.",
+  context_compaction_mode: "Controls the unfinished rolling-context experiment. Shadow records estimates; other active modes are experimental.",
+  context_compaction_trigger_input_tokens: "Input-token level at which rolling-context shadow measurements begin.",
+  context_compaction_session_reset_input_tokens: "Resumed-session input-token level used to model a future context reset.",
+  context_compaction_recent_target_tokens: "Amount of the most recent conversation the rolling-context estimate tries to keep unchanged.",
+  research_fanout: "Controls parallel research fanout: off, telemetry-only shadow mode, or active.",
+  research_traversal_completion_check: "Controls the experimental check for incomplete code traversal before a researcher or developer hands off.",
+  research_traversal_completion_max_chars: "Maximum amount of traversal-check guidance added to a researcher or developer handoff.",
+  posse_kaizen_to_atlas: "Reserved for a retired integration path. It currently has no effect.",
+});
+
+const ADMIN_LABEL_WORDS = Object.freeze({
+  api: "API",
+  atlas: "ATLAS",
+  db: "database",
+  dev: "developer",
+  id: "ID",
+  ids: "IDs",
+  jwt: "JWT",
+  max: "maximum",
+  mcp: "MCP",
+  ml: "ML",
+  ms: "milliseconds",
+  onnx: "ONNX",
+  openai: "OpenAI",
+  pct: "percent",
+  scip: "SCIP",
+  sec: "seconds",
+  ttl: "retention time",
+  ui: "UI",
+  usd: "USD",
+  v2: "v2",
+  wi: "work item",
+});
+
+function titleCaseLabel(value = "") {
+  if (!value) return "Setting";
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+}
+
+function roleLabel(role = "") {
+  if (role === "dev") return "Developer";
+  return titleCaseLabel(role);
+}
+
+export function humanizeSettingKey(settingKey = "") {
+  const displayKey = toDisplaySettingKey(settingKey);
+  const roleBaseTurns = displayKey.match(/^base_turns_(.+)$/);
+  if (roleBaseTurns) return `${roleLabel(roleBaseTurns[1])} base turns`;
+  const roleOutputTokens = displayKey.match(/^max_output_tokens_(.+)$/);
+  if (roleOutputTokens) return `${roleLabel(roleOutputTokens[1])} output token limit`;
+  const roleProviders = displayKey.match(/^provider_(.+)$/);
+  if (roleProviders) return `${roleLabel(roleProviders[1])} providers`;
+
+  const words = displayKey
+    .split("_")
+    .filter(Boolean);
+  if (words[0] === "posse") words.shift();
+  const rendered = words.map((word) => ADMIN_LABEL_WORDS[word] || word).join(" ");
+  return titleCaseLabel(rendered);
+}
+
+const SETTINGS_CATALOG_BY_KEY = new Map(SETTINGS_CATALOG.map((entry) => [entry.key, entry]));
+
+export function getAdminSettingPresentation(settingKey = "", entry = null) {
+  const displayKey = toDisplaySettingKey(settingKey);
+  const storageKey = toStorageSettingKey(displayKey);
+  const catalogEntry = SETTINGS_CATALOG_BY_KEY.get(storageKey);
+  const label = entry?.label
+    || ADMIN_SETTING_LABEL_OVERRIDES[displayKey]
+    || catalogEntry?.label
+    || humanizeSettingKey(displayKey);
+  const description = ADMIN_SETTING_DESCRIPTION_OVERRIDES[displayKey]
+    || entry?.adminDescription
+    || entry?.description
+    || catalogEntry?.adminDescription
+    || catalogEntry?.description
+    || `Controls ${label.toLowerCase()}.`;
+  return { label, description };
+}
+
 // ── Admin settings panes & groups ───────────────────────────────────────────
 //
 // The admin TUI settings tab is split into broad panes (switched with ←/→).
@@ -156,7 +461,6 @@ export function toStorageSettingKey(settingKey = "") {
 // promoted into an operator-facing section.
 export const SETTINGS_PANES = Object.freeze([
   Object.freeze({ id: "atlas", label: "ATLAS" }),
-  Object.freeze({ id: "tokens", label: "Tokens" }),
   Object.freeze({ id: "agents", label: "Agents" }),
   Object.freeze({ id: "providers", label: "Providers" }),
   Object.freeze({ id: "images", label: "Images" }),
@@ -179,7 +483,7 @@ export const SETTINGS_GROUPS = Object.freeze([
   {
     id: "atlas_core",
     pane: "atlas",
-    label: "Atlas",
+    label: "Core",
     keys: Object.freeze([
       "atlas_v2",
       "atlas_phases",
@@ -188,12 +492,17 @@ export const SETTINGS_GROUPS = Object.freeze([
       "atlas_live_buffers",
       "atlas_memory_surface",
       "atlas_memory_mode",
-      "atlas_reindex_on_commit",
       "atlas_tool_gate_enabled",
+    ]),
+  },
+  {
+    id: "atlas_indexing",
+    pane: "atlas",
+    label: "Index Updates",
+    keys: Object.freeze([
+      "atlas_reindex_on_commit",
       "atlas_boot_reindex_policy",
       "atlas_drift_check",
-      "atlas_auto_feedback",
-      "posse_kaizen_to_atlas",
     ]),
   },
   {
@@ -204,71 +513,15 @@ export const SETTINGS_GROUPS = Object.freeze([
       "atlas_scip_mode",
       "atlas_scip_languages",
       "atlas_scip_restage_policy",
-      "atlas_scip_index_command",
-      "atlas_scip_index_args",
-      "atlas_scip_index_timeout_ms",
-      "atlas_scip_cold_index_timeout_ms",
-      "atlas_scip_max_age_hours",
     ]),
   },
   {
-    id: "atlas_tree_encode",
+    id: "atlas_search",
     pane: "atlas",
-    label: "Tree / Encode",
+    label: "Search & Encoding",
     keys: Object.freeze([
-      "atlas_view_layer_merge",
+      "atlas_embedding_model_id",
       "atlas_tree_compression_mode",
-      "atlas_tree_compression_provider",
-      "atlas_tree_compression_model_tier",
-      "atlas_tree_compression_max_seeds",
-      "atlas_tree_compression_model_max_seeds",
-      "atlas_v2_boot_soft_timeout_ms",
-      "atlas_handoff_prefetch_timeout_ms",
-      "git_atlas_post_commit_hook_timeout_ms",
-    ]),
-  },
-  // ── Tokens pane ──
-  {
-    id: "token_atlas_experiments",
-    pane: "tokens",
-    label: "ATLAS A/B levers",
-    keys: Object.freeze([
-      "atlas_answer_contract_tight",
-      "atlas_search_result_paging",
-      "atlas_result_ref_paging",
-      "atlas_result_ref_paging_min_chars",
-      "atlas_survey_tail_refs",
-      "atlas_ambient_ref_stamping",
-      "atlas_gate_nudge",
-      "atlas_prefetch_entrypoint_rank",
-      "atlas_survey_edge_cap",
-      "atlas_gateway_dedup_advertise",
-      "atlas_prose_dedup",
-      "atlas_tools_disabled",
-      "atlas_code_lens_callable",
-    ]),
-  },
-  {
-    id: "token_rolling_context",
-    pane: "tokens",
-    label: "Rolling context",
-    keys: Object.freeze([
-      "context_compaction_mode",
-      "context_compaction_trigger_input_tokens",
-      "context_compaction_session_reset_input_tokens",
-      "context_compaction_recent_target_tokens",
-    ]),
-  },
-  {
-    id: "token_shadow_flows",
-    pane: "tokens",
-    label: "Shadow & flow experiments",
-    keys: Object.freeze([
-      "atlas_shadow_guardrails",
-      "research_fanout",
-      "research_traversal_completion_check",
-      "research_traversal_completion_max_chars",
-      "session_recycle_mode",
     ]),
   },
   // ── Agents pane ──
@@ -402,11 +655,16 @@ export const SETTINGS_GROUPS = Object.freeze([
   },
   // ── General pane ──
   {
-    id: "behavior",
+    id: "runtime",
     pane: "general",
-    label: "Behavior",
+    label: "Runtime",
     keys: Object.freeze([
       "scheduler_concurrency",
+      "scheduler_max_active_worktrees",
+      "stall_timeout",
+      "max_job_runtime_sec",
+      "headless_human_timeout_sec",
+      "default_max_attempts",
     ]),
   },
   {
@@ -425,15 +683,27 @@ export const SETTINGS_GROUPS = Object.freeze([
     keys: Object.freeze([
       "auto_merge_completed",
       "plan_approval_mode",
+      "startup_dirty_tree_policy",
+      "fix_scope_handoff_guard",
+      "file_request_low_risk_extensions",
       "web_tools_enabled",
       "posse_log_scrub_secrets",
-      "skip_hooks",
-      "skip_hook_secrets_scan",
-      "skip_hook_post_dev_verify",
-      "skip_hook_pre_push_gate",
-      "startup_dirty_tree_policy",
-      "pre_assess_cmd",
-      "pre_push_verify_cmd",
+    ]),
+  },
+  {
+    id: "workflow",
+    pane: "general",
+    label: "Workflow & Recovery",
+    keys: Object.freeze([
+      "session_recycle_mode",
+      "posse_wi_failure_threshold",
+      "posse_max_fix_chain_depth",
+      "posse_max_replans",
+      "posse_max_file_request_depth",
+      "snapshot_retention_days",
+      "snapshot_max_bytes",
+      "snapshot_max_refs",
+      "snapshot_dedup",
     ]),
   },
   {
@@ -451,7 +721,7 @@ export const SETTINGS_GROUPS = Object.freeze([
   {
     id: "repo_git",
     pane: "repo",
-    label: "git & merge",
+    label: "Git & Merge",
     keys: Object.freeze([
       "target_branch",
       "git_commit_style",
@@ -460,7 +730,7 @@ export const SETTINGS_GROUPS = Object.freeze([
   {
     id: "bridge",
     pane: "repo",
-    label: "local bridge",
+    label: "Local Bridge",
     keys: Object.freeze([
       "bridge_port",
       "bridge_label",
@@ -468,11 +738,81 @@ export const SETTINGS_GROUPS = Object.freeze([
   },
   // ── Debug pane ──
   {
+    id: "atlas_experiments",
+    pane: "debug",
+    label: "ATLAS Experiments & Rollbacks",
+    keys: Object.freeze([
+      "atlas_answer_contract_tight",
+      "atlas_search_result_paging",
+      "atlas_result_ref_paging",
+      "atlas_result_ref_paging_min_chars",
+      "atlas_survey_tail_refs",
+      "atlas_ambient_ref_stamping",
+      "atlas_gate_nudge",
+      "atlas_prefetch_entrypoint_rank",
+      "atlas_survey_edge_cap",
+      "atlas_gateway_dedup_advertise",
+      "atlas_prose_dedup",
+      "atlas_tools_disabled",
+      "atlas_code_lens_callable",
+      "atlas_view_layer_merge",
+      "atlas_shadow_guardrails",
+    ]),
+  },
+  {
+    id: "atlas_advanced",
+    pane: "debug",
+    label: "ATLAS Advanced Tuning",
+    keys: Object.freeze([
+      "atlas_auto_feedback",
+      "atlas_tree_compression_provider",
+      "atlas_tree_compression_model_tier",
+      "atlas_tree_compression_max_seeds",
+      "atlas_tree_compression_model_max_seeds",
+      "atlas_v2_boot_soft_timeout_ms",
+      "atlas_handoff_prefetch_timeout_ms",
+      "git_atlas_post_commit_hook_timeout_ms",
+    ]),
+  },
+  {
+    id: "atlas_scip_advanced",
+    pane: "debug",
+    label: "SCIP Advanced Tuning",
+    keys: Object.freeze([
+      "atlas_scip_index_command",
+      "atlas_scip_index_args",
+      "atlas_scip_index_timeout_ms",
+      "atlas_scip_cold_index_timeout_ms",
+      "atlas_scip_max_age_hours",
+    ]),
+  },
+  {
+    id: "context_experiments",
+    pane: "debug",
+    label: "Context & Research Experiments",
+    keys: Object.freeze([
+      "context_compaction_mode",
+      "context_compaction_trigger_input_tokens",
+      "context_compaction_session_reset_input_tokens",
+      "context_compaction_recent_target_tokens",
+      "research_fanout",
+      "research_traversal_completion_check",
+      "research_traversal_completion_max_chars",
+    ]),
+  },
+  {
+    id: "legacy_reserved",
+    pane: "debug",
+    label: "Legacy & Reserved",
+    keys: Object.freeze([
+      "posse_kaizen_to_atlas",
+    ]),
+  },
+  {
     id: "scheduler_tuning",
     pane: "debug",
-    label: "scheduler tuning",
+    label: "Scheduler Internals",
     keys: Object.freeze([
-      "scheduler_max_active_worktrees",
       "scheduler_poll_ms",
       "scheduler_repair_poll_ms",
       "default_lease_seconds",
@@ -480,10 +820,6 @@ export const SETTINGS_GROUPS = Object.freeze([
       "lease_requeue_grace_sec",
       "worker_provider_circuit_ttl_ms",
       "worktree_lock_wait_ms",
-      "stall_timeout",
-      "max_job_runtime_sec",
-      "headless_human_timeout_sec",
-      "default_max_attempts",
       "scheduler_shadow_conflict_metrics",
       "session_recycle_strict_provider",
       "posse_session_lease_ttl",
@@ -492,27 +828,21 @@ export const SETTINGS_GROUPS = Object.freeze([
   {
     id: "hook_overrides",
     pane: "debug",
-    label: "hook & worktree overrides",
+    label: "Hooks & Overrides",
     keys: Object.freeze([
       "worktree_clean_ignored",
-      "fix_scope_handoff_guard",
-    ]),
-  },
-  {
-    id: "snapshots",
-    pane: "debug",
-    label: "snapshots & recovery",
-    keys: Object.freeze([
-      "snapshot_retention_days",
-      "snapshot_max_bytes",
-      "snapshot_max_refs",
-      "snapshot_dedup",
+      "skip_hooks",
+      "skip_hook_secrets_scan",
+      "skip_hook_post_dev_verify",
+      "skip_hook_pre_push_gate",
+      "pre_assess_cmd",
+      "pre_push_verify_cmd",
     ]),
   },
   {
     id: "assessor",
     pane: "debug",
-    label: "assessor",
+    label: "Assessor Tuning",
     keys: Object.freeze([
       "assessor_fallback_reads",
       "assessor_fallback_reads_retry_step",
@@ -523,7 +853,7 @@ export const SETTINGS_GROUPS = Object.freeze([
   {
     id: "handoff",
     pane: "debug",
-    label: "handoff & context",
+    label: "Handoff & Context Tuning",
     keys: Object.freeze([
       "handoff_max_prompt_chars",
       "handoff_max_context_chars",
@@ -534,13 +864,12 @@ export const SETTINGS_GROUPS = Object.freeze([
       "posse_remote_timeout_ms",
       "context_expand_max_steps",
       "context_expand_file_budget_per_attempt",
-      "file_request_low_risk_extensions",
     ]),
   },
   {
     id: "usage_polling",
     pane: "debug",
-    label: "usage polling",
+    label: "Provider Usage Polling",
     keys: Object.freeze([
       "claude_usage_cache_ms",
       "claude_usage_backoff_ms",
@@ -549,15 +878,12 @@ export const SETTINGS_GROUPS = Object.freeze([
     ]),
   },
   {
-    id: "limits",
+    id: "debug_limits",
     pane: "debug",
-    label: "limits",
+    label: "Research Internals",
     keys: Object.freeze([
-      "posse_wi_failure_threshold",
-      "posse_max_fix_chain_depth",
-      "posse_max_replans",
-      "posse_max_file_request_depth",
       "posse_fanout_child_timeout_sec",
+      "posse_db_telemetry_tail_limit",
     ]),
   },
 ]);

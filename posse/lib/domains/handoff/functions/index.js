@@ -96,9 +96,6 @@ import {
   packetToDynamicContextString as packetToDynamicContextStringFromModule,
 } from "./helpers/context-render.js";
 import {
-  expandHashRefHandoffPacketProofs as expandHashRefHandoffPacketProofsFromModule,
-} from "./helpers/hash-ref-packet.js";
-import {
   DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS,
   buildTraversalCompletionCheck as buildTraversalCompletionCheckFromModule,
 } from "./helpers/traversal-completeness.js";
@@ -1688,22 +1685,10 @@ function _expandHashRefProofs(packet) {
   if (!packet || !(packet.recipient === "dev" || packet.job_type === "fix")) return null;
   const sourcePacket = packet.hash_ref_packet || packet.dev_brief?.hash_ref_packet || null;
   if (!sourcePacket) return null;
-  const result = expandHashRefHandoffPacketProofsFromModule(sourcePacket, {
-    context: {
-      work_item_id: packet.work_item_id || null,
-      job_id: packet.job_id || null,
-    },
-  });
-  if (result.packet) {
-    packet.hash_ref_packet = result.packet;
-    if (packet.dev_brief && typeof packet.dev_brief === "object") {
-      packet.dev_brief.hash_ref_packet = result.packet;
-    }
-  }
-  if (result.dropped?.length > 0) {
-    packet.hash_ref_packet_dropped = result.dropped;
-  }
-  return result;
+  // Developer evidence is pull-on-demand. Expanding proof bodies here paid to
+  // load and carry content that the mandatory remote compiler strips again.
+  packet.hash_ref_packet = sourcePacket;
+  return { packet: sourcePacket, dropped: [], skipped: "pull_on_demand" };
 }
 
 function _applyTraversalCompletionCheck(packet) {

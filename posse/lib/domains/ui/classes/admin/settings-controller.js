@@ -68,7 +68,7 @@ import { closePromptLog, promptPreviewText, readRecentPrompts } from "../../../.
 import { closeOutputLog, readRecentOutputs } from "../../../../shared/telemetry/functions/logging/output-log.js";
 import { closeLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { buildCurrentRoleContract } from "../../../worker/functions/role-contract-view.js";
-import { getCatalogEntry, isAdminVisibleCatalogKey, isCatalogKey } from "../../../settings/functions/catalog.js";
+import { isAdminVisibleCatalogKey, isCatalogKey } from "../../../settings/functions/catalog.js";
 import {
   loadSkillManifests,
   parseSkillIds,
@@ -110,6 +110,7 @@ import {
   PROJECT_DB_PERMISSION_OPTIONS,
   SETTINGS_GROUPS,
   SETTINGS_PANES,
+  getAdminSettingPresentation,
   settingsPaneForKey,
   SKILL_SETTING_PREFIX,
   SYNTHETIC_SETTING_KEYS,
@@ -702,7 +703,7 @@ export class AdminSettingsController {
         setting_value: providerValue,
         updated_at: null,
         description: `Provider for image artifacts; selectable: ${selectableProviders.map((option) => option.value).join(", ") || "none"}`,
-        label: "image artifact provider",
+        label: "Image artifact provider",
         source: savedProvider ? "global" : "config",
         provider: providerValue,
       },
@@ -845,9 +846,6 @@ export class AdminSettingsController {
       atlas: [
         ...dbSettingsByPane.atlas,
       ],
-      tokens: [
-        ...dbSettingsByPane.tokens,
-      ],
       agents: [
         ...agentSettings,
       ],
@@ -872,7 +870,6 @@ export class AdminSettingsController {
     };
     const editableSettings = [
       ...paneEditableSettings.atlas,
-      ...paneEditableSettings.tokens,
       ...paneEditableSettings.agents,
       ...paneEditableSettings.providers,
       ...paneEditableSettings.images,
@@ -953,7 +950,7 @@ export class AdminSettingsController {
         setting_value: effective,
         updated_at: null,
         description: `Comma-separated providers for ${role}; selectable: ${selectable.join(", ")}`,
-        label: `${role} providers`,
+        label: getAdminSettingPresentation(`provider_${role}`).label,
         source,
         db_value: storedVal || "",
         role,
@@ -968,7 +965,7 @@ export class AdminSettingsController {
       setting_value: storedVal || "js",
       updated_at: null,
       description: `Delegation engine mode; options: ${DELEGATION_MODE_OPTIONS.join(", ")}`,
-      label: "delegation mode",
+      label: getAdminSettingPresentation("delegation_mode").label,
       source: storedVal ? "global" : "default",
       db_value: storedVal || "",
     }];
@@ -1054,6 +1051,7 @@ export class AdminSettingsController {
     const selected = this._getSelectedEditableSetting();
     if (!selected) return;
     this._editError = "";
+    this._editLabel = getAdminSettingPresentation(selected.setting_key, selected).label;
     const storageKey = selected.storage_key || toStorageSettingKey(selected.setting_key);
     if (PROJECT_DB_SETTING_KEYS.has(storageKey)) {
       this._startProjectDbEdit(selected, storageKey, initialValue);
@@ -1233,6 +1231,7 @@ export class AdminSettingsController {
     this._editing = false;
     this._editBuf = "";
     this._editKey = "";
+    this._editLabel = "";
     this._editStorageKey = "";
     this._editProviderChoices = [];
     this._editProviderIndex = 0;
@@ -1492,7 +1491,8 @@ export class AdminSettingsController {
 
   _buildEditValueNavLines(fullW) {
     const instructions = `${C.dim}[Enter] Save  [Esc] Cancel${C.reset}`;
-    const prefixText = ` Editing ${this._editKey}: `;
+    const editLabel = this._editLabel || getAdminSettingPresentation(this._editKey).label;
+    const prefixText = ` Editing ${editLabel}: `;
     const available = Math.max(8, fullW - stripAnsi(prefixText).length - stripAnsi(instructions).length - 2);
     const editBuf = this._editStorageKey === "project_db_password"
       ? "*".repeat(this._editBuf.length)
@@ -1500,7 +1500,7 @@ export class AdminSettingsController {
     const visibleValue = clipPlainTail(editBuf, available);
     const clipped = visibleValue.startsWith("\u2026");
     const lines = [
-      ` ${C.yellow}Editing ${this._editKey}:${C.reset} ${C.bold}${visibleValue}${C.reset}  ${instructions}`,
+      ` ${C.yellow}Editing ${editLabel}:${C.reset} ${C.bold}${visibleValue}${C.reset}  ${instructions}`,
     ];
     if (clipped) {
       lines.push(` ${C.dim}Input clipped on the left so your latest typing stays visible.${C.reset}`);
@@ -1513,7 +1513,8 @@ export class AdminSettingsController {
 
   _getEditValueCursorPosition(fullW, navStartRow) {
     const instructions = `${C.dim}[Enter] Save  [Esc] Cancel${C.reset}`;
-    const prefixText = ` Editing ${this._editKey}: `;
+    const editLabel = this._editLabel || getAdminSettingPresentation(this._editKey).label;
+    const prefixText = ` Editing ${editLabel}: `;
     const available = Math.max(8, fullW - stripAnsi(prefixText).length - stripAnsi(instructions).length - 2);
     const editBuf = this._editStorageKey === "project_db_password"
       ? "*".repeat(this._editBuf.length)
@@ -1524,6 +1525,7 @@ export class AdminSettingsController {
   }
 
   _buildEditBooleanNavLines() {
+    const editLabel = this._editLabel || getAdminSettingPresentation(this._editKey).label;
     const toggles = this._editBooleanChoices.map((choice, index) => {
       const selected = index === this._editBooleanIndex;
       const marker = selected ? `${C.green}[x]${C.reset}` : `${C.dim}[ ]${C.reset}`;
@@ -1531,13 +1533,14 @@ export class AdminSettingsController {
       return `${marker} ${label}`;
     }).join(` ${C.dim}|${C.reset} `);
     return [
-      ` ${C.yellow}Editing ${this._editKey}:${C.reset} ${toggles}`,
+      ` ${C.yellow}Editing ${editLabel}:${C.reset} ${toggles}`,
       ` ${C.dim}[←→/↑↓] Choose  [t/f] Jump  [Enter] Save  [Esc] Cancel${C.reset}`,
     ];
   }
 
   _buildEditModelNavLines() {
-    const lines = [` ${C.yellow}Editing ${this._editKey}:${C.reset}`];
+    const editLabel = this._editLabel || getAdminSettingPresentation(this._editKey).label;
+    const lines = [` ${C.yellow}Editing ${editLabel}:${C.reset}`];
     for (let index = 0; index < this._editModelChoices.length; index++) {
       const choice = this._editModelChoices[index];
       const selected = index === this._editModelIndex;
@@ -1594,12 +1597,15 @@ export class AdminSettingsController {
     const selectedSetting = editableSettings[this._settingsIndex] || null;
     const selectedKey = this._editing ? this._editKey : selectedSetting?.setting_key;
     const isHighlightedSetting = (settingKey) => selectedKey === settingKey;
-    // Compute the key column width from the longest setting key across every
-    // pane (not just the active one) so columns stay flush when switching
-    // panes. Clamp into a sane range so descriptions still get most of the
-    // row width.
+    // Compute the setting column width from the longest human-readable label
+    // across every pane (not the storage keys) so columns stay flush when
+    // switching panes. Clamp into a sane range so explanations still get most
+    // of the row width.
     const longestKeyLen = (settingsSnapshot.editableSettings || []).reduce(
-      (max, s) => Math.max(max, String(s.setting_key || "").length),
+      (max, s) => Math.max(
+        max,
+        getAdminSettingPresentation(s.setting_key, s).label.length,
+      ),
       0,
     );
     const keyWidth = clampSettingsKeyColumnWidth(longestKeyLen);
@@ -1616,7 +1622,7 @@ export class AdminSettingsController {
       // value column stays aligned rather than shifting right.
       return `${s.slice(0, keyWidth - 1)}…`;
     };
-    const hdr = `  ${"#".padStart(2)} ${"Key".padEnd(keyWidth)} ${"Value".padEnd(valueWidth)} ${"Description".padEnd(descWidth)}`;
+    const hdr = `  ${"#".padStart(2)} ${"Setting".padEnd(keyWidth)} ${"Value".padEnd(valueWidth)} ${"Explanation".padEnd(descWidth)}`;
     const sectionDivider = ` ${C.dim}${"-".repeat(Math.max(1, inner))}${C.reset}`;
     let rowIndex = 1;
 
@@ -1632,7 +1638,8 @@ export class AdminSettingsController {
     };
     const pushEditableRow = (settingKey, value, desc, valueColor = C.cyan, options = {}) => {
       const isHighlighted = isHighlightedSetting(settingKey);
-      const paddedKey = padKey(settingKey);
+      const displayLabel = options.label || getAdminSettingPresentation(settingKey).label;
+      const paddedKey = padKey(displayLabel);
       const keyBase = options.dimmed && !isHighlighted
         ? `${C.dim}${paddedKey}${C.reset}`
         : paddedKey;
@@ -1646,15 +1653,8 @@ export class AdminSettingsController {
       rowIndex += 1;
     };
 
-    // Resolution order:
-    //   1. entry's own .description (set by builders like _getSkillSettingEntries)
-    //   2. catalog entry's description (the canonical doc string)
-    //   3. placeholder so every row has tooltip text
     const resolveDesc = (displayKey, entry) => {
-      if (entry?.description) return entry.description;
-      const catalog = getCatalogEntry(toStorageSettingKey(displayKey));
-      if (catalog?.description) return catalog.description;
-      return "(no description; add one in SETTINGS_CATALOG)";
+      return getAdminSettingPresentation(displayKey, entry).description;
     };
 
     // ── Database settings, split into focused groups per pane ─────────────
@@ -1665,7 +1665,7 @@ export class AdminSettingsController {
     const pushDbSettingRow = (key) => {
       const s = settingsByKey.get(key);
       if (!s) return false;
-      pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(key, s));
+      pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(key, s), C.cyan, { label: s.label });
       return true;
     };
     const pushModelSettingRow = (s) => {
@@ -1674,7 +1674,7 @@ export class AdminSettingsController {
       const desc = `${s.description} (${providerLabel}, ${source}; using ${s.effective_model || "?"})`;
       const displayValue = formatModelSettingDisplayValue(s);
       const valueColor = s.setting_value ? C.cyan : C.dim;
-      pushEditableRow(s.setting_key, displayValue, desc, valueColor);
+      pushEditableRow(s.setting_key, displayValue, desc, valueColor, { label: s.label });
     };
     const pushProviderSettingRow = (s, { dimWhenDelegatorInactive = true } = {}) => {
       const envNote = s.source === "global" && s.env_value
@@ -1685,7 +1685,10 @@ export class AdminSettingsController {
       const isDelegatorInactive = dimWhenDelegatorInactive && s.setting_key === "provider_delegator" && delegationMode === "js";
       const desc = `${s.description} (${s.source}${envNote})${isDelegatorInactive ? " - currently handled by system" : ""}`;
       const valueColor = isDelegatorInactive ? C.dim : C.cyan;
-      pushEditableRow(s.setting_key, formatProviderSettingValue(s), desc, valueColor, { dimmed: isDelegatorInactive });
+      pushEditableRow(s.setting_key, formatProviderSettingValue(s), desc, valueColor, {
+        dimmed: isDelegatorInactive,
+        label: s.label,
+      });
     };
     const renderDbGroupsForPane = (paneId) => {
       const placedKeys = new Set();
@@ -1697,7 +1700,7 @@ export class AdminSettingsController {
         pushTableHeader();
         for (const key of present) {
           const s = settingsByKey.get(key);
-          pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(key, s));
+          pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(key, s), C.cyan, { label: s.label });
           placedKeys.add(key);
         }
         lines.push("");
@@ -1710,7 +1713,7 @@ export class AdminSettingsController {
         pushSection("misc", "(unmapped — add to SETTINGS_GROUPS)");
         pushTableHeader();
         for (const s of ungrouped) {
-          pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(s.setting_key, s));
+          pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(s.setting_key, s), C.cyan, { label: s.label });
         }
         lines.push("");
       }
@@ -1727,7 +1730,7 @@ export class AdminSettingsController {
         if (providerRow) pushProviderSettingRow(providerRow);
         if (hasDelegation) {
           const s = delegationSettings[0];
-          pushEditableRow(s.setting_key, s.setting_value || "", `${s.description} (${s.source})`);
+          pushEditableRow(s.setting_key, s.setting_value || "", `${s.description} (${s.source})`, C.cyan, { label: s.label });
         }
         for (const key of section.keys) {
           if (key === "delegation_mode") continue;
@@ -1767,7 +1770,7 @@ export class AdminSettingsController {
           const baseDesc = s.description || "";
           const liveHint = getProviderUsageSettingHint(s.setting_key, providerUsageWindowMap);
           const desc = liveHint ? `${baseDesc} (${liveHint})` : baseDesc;
-          pushEditableRow(s.setting_key, s.setting_value || "", desc);
+          pushEditableRow(s.setting_key, s.setting_value || "", desc, C.cyan, { label: s.label });
         }
         lines.push("");
       }
@@ -1796,7 +1799,7 @@ export class AdminSettingsController {
         pushSection("Image Routing", "(artifact image provider)");
         pushTableHeader();
         for (const s of artifactSettings) {
-          pushEditableRow(s.setting_key, s.setting_value || "", s.description || "");
+          pushEditableRow(s.setting_key, s.setting_value || "", s.description || "", C.cyan, { label: s.label });
         }
         lines.push("");
       }
@@ -1817,10 +1820,6 @@ export class AdminSettingsController {
       renderDbGroupsForPane("atlas");
     };
 
-    const renderTokensPane = () => {
-      renderDbGroupsForPane("tokens");
-    };
-
     const renderGeneralPane = () => {
       renderDbGroupsForPane("general");
 
@@ -1830,7 +1829,7 @@ export class AdminSettingsController {
       } else {
         pushTableHeader();
         for (const s of skillSettings) {
-          pushEditableRow(s.setting_key, s.setting_value || "", s.description || "");
+          pushEditableRow(s.setting_key, s.setting_value || "", s.description || "", C.cyan, { label: s.label });
         }
       }
       lines.push("");
@@ -1848,7 +1847,7 @@ export class AdminSettingsController {
       pushSection("Project Database", "(opt-in agent SQL access; stored in this repo's .posse/db)");
       pushTableHeader();
       for (const s of projectDbSettings) {
-        pushEditableRow(s.setting_key, s.setting_value || "", s.description || "");
+        pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(s.setting_key, s), C.cyan, { label: s.label });
       }
       lines.push("");
 
@@ -1867,8 +1866,6 @@ export class AdminSettingsController {
 
     if (settingsPane === "atlas") {
       renderAtlasPane();
-    } else if (settingsPane === "tokens") {
-      renderTokensPane();
     } else if (settingsPane === "agents") {
       renderAgentsPane();
     } else if (settingsPane === "providers") {
@@ -1885,7 +1882,6 @@ export class AdminSettingsController {
       // "all" — non-interactive snapshots and tests render every pane in the
       // same order paneEditableSettings concatenates them.
       renderAtlasPane();
-      renderTokensPane();
       renderAgentsPane();
       renderProvidersPane();
       renderImagesPane();

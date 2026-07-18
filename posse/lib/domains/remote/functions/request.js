@@ -102,6 +102,8 @@ function readOnlyFileSnippets(packet = {}) {
 const MAX_HASH_REFS_PER_LANE = 24;
 const MAX_HASH_WHY_CHARS = 180;
 const MAX_HASH_DROPPED_REFS = 12;
+const MAX_DEV_HANDOFF_FILES = 16;
+const MAX_DEV_HANDOFF_SUMMARY_CHARS = 700;
 
 function compactText(value, max = 220) {
   return String(value || "")
@@ -112,6 +114,75 @@ function compactText(value, max = 220) {
 
 function objectValue(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function compactDevHandoffPriority(value, fallbackRank) {
+  const source = objectValue(value);
+  if (!source) return null;
+  const filePath = normalizedPath(compactText(source.path || source.file || source.file_path, 220));
+  if (!filePath) return null;
+  const rank = Number(source.rank);
+  const out = {
+    path: filePath,
+    rank: Number.isFinite(rank) && rank > 0 ? Math.floor(rank) : fallbackRank,
+  };
+  const usefulness = compactText(source.usefulness, 60);
+  const evidence = compactText(source.evidence, 60);
+  const reason = compactText(source.reason || source.why, 180);
+  if (usefulness && usefulness !== "unspecified") out.usefulness = usefulness;
+  if (evidence && evidence !== "unspecified") out.evidence = evidence;
+  if (reason) out.reason = reason;
+  return out;
+}
+
+function compactDevHandoffForRemote(packet = {}) {
+  const role = String(packet?.recipient || packet?.job_type || "").trim().toLowerCase();
+  if (role !== "dev" && role !== "fix") return null;
+
+  const brief = objectValue(packet?._raw_payload?.dev_brief)
+    || objectValue(packet?.dev_brief);
+  const briefSource = compactText(brief?.source || brief?.evidence_source, 40).toLowerCase();
+  const atlasBacked = briefSource === "atlas";
+  const writeScope = uniqueStrings([
+    ...(packet?.files_to_modify || []),
+    ...(packet?.files_to_create || []),
+    ...(packet?.files_to_delete || []),
+  ]);
+  const keyFiles = uniqueStrings([
+    ...(Array.isArray(brief?.key_files) ? brief.key_files : []),
+    ...writeScope,
+  ]).slice(0, MAX_DEV_HANDOFF_FILES);
+  const keyFileSet = new Set(keyFiles);
+  const relatedFiles = uniqueStrings([
+    ...(Array.isArray(brief?.related_files) ? brief.related_files : []),
+    ...(packet?.related_files || []),
+  ]).filter((filePath) => !keyFileSet.has(filePath)).slice(0, MAX_DEV_HANDOFF_FILES);
+
+  const priorities = [];
+  const seenPriorities = new Set();
+  for (const value of Array.isArray(brief?.planner_file_priorities) ? brief.planner_file_priorities : []) {
+    const priority = compactDevHandoffPriority(value, priorities.length + 1);
+    if (!priority || seenPriorities.has(priority.path)) continue;
+    seenPriorities.add(priority.path);
+    priorities.push(priority);
+    if (priorities.length >= MAX_DEV_HANDOFF_FILES) break;
+  }
+
+  const summary = compactText(
+    brief?.summary || brief?.synthesis || packet?.title || packet?._raw_payload?.title,
+    MAX_DEV_HANDOFF_SUMMARY_CHARS,
+  );
+  return {
+    source: atlasBacked ? "atlas" : "planner_scope",
+    ...(summary ? { summary } : {}),
+    ...(keyFiles.length > 0 ? { key_files: keyFiles } : {}),
+    ...(relatedFiles.length > 0 ? { related_files: relatedFiles } : {}),
+    ...(priorities.length > 0 ? { planner_file_priorities: priorities } : {}),
+  };
+}
+
+export function __testCompactDevHandoffForRemote(packet = {}) {
+  return compactDevHandoffForRemote(packet);
 }
 
 function normalizeRef(value) {
@@ -478,6 +549,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
       memory_prefetch: memoryEnabled ? memoryPrefetchForRemote(packet) : null,
       database_prefetch: databasePrefetchForRemote(packet),
       memory_surface: memoryEnabled ? (packet?.memory_surface || null) : null,
+      dev_handoff: compactDevHandoffForRemote(packet),
       hash_ref_packet: compactHashRefPacketForRemote(packet),
       file_snippets: readOnlyFileSnippets(packet),
       insights: Array.isArray(packet?.run_insights) ? packet.run_insights.map(insightForRemote) : [],

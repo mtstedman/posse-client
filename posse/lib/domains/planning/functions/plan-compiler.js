@@ -1671,12 +1671,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           });
           if (reissuedPacket.packet) {
             activeHashRefPacket = reissuedPacket.packet;
-            if (devBriefResult.brief) devBriefResult.brief.hash_ref_packet = activeHashRefPacket;
             const existingPayload = parseJobPayload(job);
             existingPayload.hash_ref_packet = activeHashRefPacket;
-            if (existingPayload.dev_brief && typeof existingPayload.dev_brief === "object") {
-              existingPayload.dev_brief.hash_ref_packet = activeHashRefPacket;
-            }
             if (reissuedPacket.dropped.length > 0) {
               existingPayload.dropped_hash_ref_packet_refs = reissuedPacket.dropped;
             }

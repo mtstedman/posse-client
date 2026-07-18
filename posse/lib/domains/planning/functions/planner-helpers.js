@@ -294,7 +294,6 @@ export function sanitizePlannerDevBrief(value, projectDir) {
     support: triage.support,
     decoy: triage.decoy,
   });
-  if (hashRefPacket.packet) brief.hash_ref_packet = hashRefPacket.packet;
 
   const hasSubstance = Object.keys(brief).some((key) => key !== "source");
   return {

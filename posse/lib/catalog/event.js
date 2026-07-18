@@ -99,6 +99,9 @@ export const EVENT_TYPES = Object.freeze({
   // ── one-shot routing ───────────────────────────────────────────────────
   ONESHOT_DEMOTED: "oneshot.demoted",
   ONESHOT_FIX_SCOPE_GATED: "oneshot.fix_scope_gated",
+  ONESHOT_SCOPE_CANDIDATES: "oneshot.scope_candidates",
+  ONESHOT_SCOPE_SELECTION_REQUESTED: "oneshot.scope_selection_requested",
+  ONESHOT_SCOPE_SELECTION_RESOLVED: "oneshot.scope_selection_resolved",
 
   // ── cleanup ─────────────────────────────────────────────────────────────
   CLEANUP_BRANCH_DISCARDED: "cleanup.branch_discarded",

@@ -14,6 +14,7 @@ import { getProviderTierDefaults } from "../../../providers/functions/model-cata
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
 import { formatRelativeTime as fmtRelativeTime, formatTokens as fmtTokens } from "../../../../shared/format/functions/units.js";
 import {
+  getAdminSettingPresentation,
   NUMERIC_SETTING_RULES,
   toDisplaySettingKey,
   toStorageSettingKey,
@@ -22,10 +23,13 @@ import {
 export function toDisplaySettingEntry(entry) {
   if (!entry || typeof entry !== "object") return entry;
   const storageKey = entry.storage_key || entry.setting_key;
+  const displayKey = toDisplaySettingKey(storageKey);
+  const presentation = getAdminSettingPresentation(displayKey, entry);
   return {
     ...entry,
-    setting_key: toDisplaySettingKey(storageKey),
+    setting_key: displayKey,
     storage_key: storageKey,
+    ...presentation,
   };
 }
 

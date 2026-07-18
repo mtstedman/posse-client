@@ -110,22 +110,34 @@ function listTrackedFiles(projectDir, candidates = []) {
   return byNormalized;
 }
 
-function resolveOneshotCandidateFromTrackedFiles({ projectDir = null, requestText = "", routing = null } = {}) {
-  if (!projectDir || routing?.bucket !== "oneshot_candidate") return null;
-  if (Array.isArray(routing?.candidate_files) && routing.candidate_files.length > 0) return null;
+export function rankOneshotTrackedFileCandidates({ projectDir = null, requestText = "", maxCandidates = 10 } = {}) {
+  if (!projectDir) return [];
+  const limit = Math.max(1, Math.min(50, Number(maxCandidates) || 10));
   const requestTokens = tokenizeForPathMatch(requestText);
-  if (requestTokens.size === 0) return null;
+  if (requestTokens.size === 0) return [];
 
   let tracked = [];
   try {
     tracked = listAllTrackedFiles(projectDir);
   } catch {
-    return null;
+    return [];
   }
-  const ranked = tracked
+  return tracked
     .map((file) => scoreTrackedFileForText(file, requestTokens))
     .filter((entry) => entry.strong && entry.score >= 4)
-    .sort((a, b) => b.score - a.score || a.file.length - b.file.length || a.file.localeCompare(b.file));
+    .sort((a, b) => b.score - a.score || a.file.length - b.file.length || a.file.localeCompare(b.file))
+    .slice(0, limit);
+}
+
+function resolveOneshotCandidateFromTrackedFiles({ projectDir = null, requestText = "", routing = null } = {}) {
+  if (!projectDir || routing?.bucket !== "oneshot_candidate") return null;
+  if (Array.isArray(routing?.candidate_files) && routing.candidate_files.length > 0) return null;
+  const ranked = rankOneshotTrackedFileCandidates({
+    projectDir,
+    requestText,
+    // Only the first two entries are needed to prove a unique best score.
+    maxCandidates: 2,
+  });
   if (ranked.length === 0) return null;
   if (ranked.length > 1 && ranked[0].score === ranked[1].score) return null;
   // Decide uniqueness before applying risk policy. If the best match is a
@@ -409,6 +421,7 @@ export function createOneshotDevJob(workItem, {
   redTeamPlan = false,
   demotionSource = "intake_gate",
   requirePathCorroboration = false,
+  demoteOnGateFailure = true,
 } = {}) {
   const requestedCandidates = candidateFiles || routing?.candidate_files || [];
   const reason = routing?.reason || "one-shot trivial edit";
@@ -436,22 +449,30 @@ export function createOneshotDevJob(workItem, {
     // Risk-signal demotions (security/concurrency/ambiguity/broad scope) go
     // back to research; trivial-but-unsafe scope goes back to planning.
     const demotionTarget = gate.reclassify === "research" ? "research" : "plan";
+    const demotionSuppressed = demoteOnGateFailure === false;
     logEvent({
       work_item_id: workItem.id,
       job_id: parentJob?.id || null,
       event_type: EVENT_TYPES.ONESHOT_DEMOTED,
       actor_type: EVENT_ACTORS.SYSTEM,
-      message: `One-shot demoted to ${demotionTarget === "research" ? "research" : "planning"}: ${gate.reason}`,
+      message: demotionSuppressed
+        ? `One-shot scope rejected without fallback: ${gate.reason}`
+        : `One-shot demoted to ${demotionTarget === "research" ? "research" : "planning"}: ${gate.reason}`,
       event_json: {
         source,
         demotion_source: demotionSource,
-        demotion_target: demotionTarget,
+        demotion_target: demotionSuppressed ? "none" : demotionTarget,
+        demotion_suppressed: demotionSuppressed,
         reason: gate.reason,
         candidate_files: gate.candidate_files,
         gate_results: gate.gate_results,
         routing_reason: reason,
       },
     });
+    if (demotionSuppressed) {
+      refreshWorkItemStatus(workItem.id);
+      return { kind: "rejected", job: null, routing, gate, demoted: false, rejected: true };
+    }
     if (demotionTarget === "research") {
       const reclassified = classifyResearchTask({
         title: workItem?.title || "",
@@ -554,6 +575,58 @@ export function createOneshotDevJob(workItem, {
   return { kind: "dev", job: devJob, routing: syntheticRouting, gate, demoted: false };
 }
 
+export function createOneshotScopeSelectionJob(workItem, {
+  routing,
+  source = null,
+  projectDir = null,
+  deepthinkBudget = "normal",
+} = {}) {
+  const taskText = workItemText(workItem);
+  const lexicalCandidates = rankOneshotTrackedFileCandidates({
+    projectDir,
+    requestText: taskText,
+    maxCandidates: 10,
+  });
+  const job = createJob({
+    work_item_id: workItem.id,
+    job_type: "human_input",
+    title: `Choose one-shot file: ${(workItem.title || `WI#${workItem.id}`).slice(0, 52)}`,
+    priority: workItem.priority,
+    model_tier: "cheap",
+    reasoning_effort: "low",
+    payload_json: JSON.stringify({
+      review_type: "oneshot_scope_selection",
+      questions: ["Posse is resolving the most likely file for this one-shot request."],
+      context: "ATLAS candidate discovery will run before this question is displayed.",
+      oneshot_scope: {
+        version: 1,
+        status: "pending",
+        task_text: taskText,
+        max_candidates: 10,
+        lexical_candidates: lexicalCandidates,
+        candidates: [],
+        routing: routing || null,
+        source,
+        fallback_budget: normalizeResearchBudget(deepthinkBudget, routing?.budget || "low"),
+      },
+    }),
+  });
+  logEvent({
+    work_item_id: workItem.id,
+    job_id: job.id,
+    event_type: EVENT_TYPES.ONESHOT_SCOPE_SELECTION_REQUESTED,
+    actor_type: EVENT_ACTORS.SYSTEM,
+    message: `Explicit one-shot needs file selection; queued human scope gate #${job.id}`,
+    event_json: JSON.stringify({
+      routing_reason: routing?.reason || null,
+      lexical_candidates: lexicalCandidates.map((entry) => entry.file),
+      source,
+    }),
+  });
+  refreshWorkItemStatus(workItem.id);
+  return job;
+}
+
 export function createPreflightResearchJob(workItem, {
   deepthinkBudget = "normal",
   deepthinkBudgetExplicit = false,
@@ -637,6 +710,21 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
         demotionSource: "deterministic_scope",
       });
       return { ...outcome, routing: outcome.routing };
+    }
+    if (
+      effectiveRouting.oneshot_source === "explicit"
+      && (!Array.isArray(effectiveRouting.candidate_files) || effectiveRouting.candidate_files.length === 0)
+      && projectDir
+      && !redTeamPlan
+      && !isPlanApprovalEnabled()
+    ) {
+      const job = createOneshotScopeSelectionJob(workItem, {
+        routing: effectiveRouting,
+        source,
+        projectDir,
+        deepthinkBudget: actualBudget,
+      });
+      return { kind: "human_input", job, routing: effectiveRouting };
     }
     const job = createPreflightResearchJob(workItem, {
       deepthinkBudget,

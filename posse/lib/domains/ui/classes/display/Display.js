@@ -1044,7 +1044,8 @@ export class Display {
     }
 
     // Skip JSON blobs — but NOT inside dev log markers (that's real output)
-    const isDevLog = clean.includes("DEV LOG START") || clean.includes("DEV LOG END")
+    const isDevLog = clean.includes("DEV RESULT START") || clean.includes("DEV RESULT END")
+      || clean.includes("DEV LOG START") || clean.includes("DEV LOG END")
       || clean.includes("ARTIFICER LOG START") || clean.includes("ARTIFICER LOG END")
       || clean.includes("MISSING_CONTEXT") || clean.includes("BLOCKED")
       || clean.includes("FILE_REQUEST");
@@ -1076,7 +1077,7 @@ export class Display {
     }
 
     // Skip dev log markers and raw artifact dumps
-    if (/^---\s*(DEV LOG|RESEARCH|PLAN|OUTPUT)/.test(clean)) {
+    if (/^---\s*(DEV RESULT|DEV LOG|RESEARCH|PLAN|OUTPUT)/.test(clean)) {
       ws.suppressed++;
       return;
     }

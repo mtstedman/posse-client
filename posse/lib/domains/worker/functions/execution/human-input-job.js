@@ -9,6 +9,7 @@ import {
   getDependents,
   getEvents,
   getJob,
+  getWorkItem,
   getAttempts,
   extendJobMaxAttempts,
   incrementAndCreateAttempt,
@@ -25,8 +26,18 @@ import {
   applyPartialWorkTurnExtension,
   commitScopedPartialWorkAsync,
 } from "../helpers/partial-work.js";
+import {
+  createOneshotDevJob,
+  createPlanAfterSkippedResearch,
+} from "../../../research/functions/intake-routing.js";
+import {
+  formatOneshotScopeSelection,
+  parseOneshotScopeSelection,
+  resolveOneshotScopeCandidates,
+} from "../../../research/functions/oneshot-scope-selection.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
+const ONESHOT_SCOPE_REVIEW_TYPE = "oneshot_scope_selection";
 import { getAssessmentInternalRetryLimit } from "../helpers/assessment-shared.js";
 import { refreshAndExtractInsights } from "../helpers/insights.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
@@ -69,8 +80,82 @@ async function dropPartialWorkStashAsync(worker, origJob, wtPath) {
   });
 }
 
-export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = null } = {}) {
-  const payload = worker.parsePayload(job);
+export async function prepareOneshotScopeSelection(worker, job, payload, {
+  resolveCandidates = resolveOneshotScopeCandidates,
+} = {}) {
+  if (payload?.review_type !== ONESHOT_SCOPE_REVIEW_TYPE) return { job, payload };
+  const scope = payload.oneshot_scope && typeof payload.oneshot_scope === "object"
+    ? payload.oneshot_scope
+    : {};
+  let resolution = {
+    candidates: Array.isArray(scope.candidates) ? scope.candidates : [],
+    atlas_ok: scope.atlas_ok === true,
+    atlas_error: scope.atlas_error || null,
+  };
+
+  if (scope.status !== "ready") {
+    try {
+      resolution = await resolveCandidates({
+        projectDir: worker.projectDir,
+        taskText: scope.task_text || "",
+        lexicalCandidates: scope.lexical_candidates || [],
+        maxCandidates: scope.max_candidates || 10,
+      });
+    } catch (err) {
+      resolution = {
+        candidates: [],
+        atlas_ok: false,
+        atlas_error: String(err?.message || err).slice(0, 300),
+      };
+    }
+  }
+
+  const candidates = (Array.isArray(resolution.candidates) ? resolution.candidates : [])
+    .filter((entry) => entry && typeof entry.file === "string")
+    .slice(0, 10);
+  const prompt = formatOneshotScopeSelection({
+    candidates,
+    atlasError: resolution.atlas_error || null,
+  });
+  const nextPayload = {
+    ...payload,
+    questions: [prompt.question],
+    context: prompt.context,
+    oneshot_scope: {
+      ...scope,
+      status: "ready",
+      candidates,
+      atlas_ok: resolution.atlas_ok === true,
+      atlas_error: resolution.atlas_error || null,
+    },
+  };
+  updateJobPayload(job.id, JSON.stringify(nextPayload));
+  const refreshedJob = getJob(job.id) || { ...job, payload_json: JSON.stringify(nextPayload) };
+
+  if (scope.status !== "ready") {
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      event_type: EVENT_TYPES.ONESHOT_SCOPE_CANDIDATES,
+      actor_type: resolution.atlas_ok ? EVENT_ACTORS.ATLAS : EVENT_ACTORS.SYSTEM,
+      message: `Prepared ${candidates.length} one-shot file candidate(s) for human selection`,
+      event_json: JSON.stringify({
+        candidates: candidates.map((entry) => ({ file: entry.file, source: entry.source || null })),
+        atlas_ok: resolution.atlas_ok === true,
+        atlas_error: resolution.atlas_error || null,
+      }),
+    });
+  }
+  return { job: refreshedJob, payload: nextPayload };
+}
+
+export async function runHumanInputJob(worker, job, {
+  leaseToken,
+  abortSignal = null,
+  resolveOneshotCandidates = resolveOneshotScopeCandidates,
+} = {}) {
+  let payload = worker.parsePayload(job);
+  let activeJob = job;
   const attempt = incrementAndCreateAttempt(job.id, leaseToken, "human", "human", null);
   if (!attempt) {
     logAttemptSkippedStaleLease(job, "human", "Skipped human_input attempt because the lease was stale or expired");
@@ -126,7 +211,15 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
       return;
     }
 
-    const output = await worker._humanInputHandler(job, abortSignal);
+    if (payload.review_type === ONESHOT_SCOPE_REVIEW_TYPE) {
+      const prepared = await prepareOneshotScopeSelection(worker, activeJob, payload, {
+        resolveCandidates: resolveOneshotCandidates,
+      });
+      activeJob = prepared.job;
+      payload = prepared.payload;
+    }
+
+    const output = await worker._humanInputHandler(activeJob, abortSignal);
     worker._throwIfKilled(job.id);
 
     if (output === null) {
@@ -162,6 +255,79 @@ export async function runHumanInputJob(worker, job, { leaseToken, abortSignal = 
       return released;
     };
     try {
+    if (payload.review_type === ONESHOT_SCOPE_REVIEW_TYPE) {
+      handledReviewDecision = true;
+      const answers = extractHumanAnswers(output);
+      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
+      const scope = payload.oneshot_scope || {};
+      const selection = parseOneshotScopeSelection(lastAnswer, scope.candidates || []);
+      const wi = getWorkItem(job.work_item_id);
+      let continuation = null;
+      let continuationKind = null;
+
+      if (!wi) {
+        finalHumanStatus = "failed";
+      } else if (selection.action === "select" && selection.file) {
+        const routing = {
+          ...(scope.routing || {}),
+          bucket: "oneshot",
+          reason: `human selected one-shot scope: ${selection.file}`,
+          candidate_files: [selection.file],
+          oneshot_source: "scope",
+        };
+        const outcome = createOneshotDevJob(wi, {
+          routing,
+          source: "human_scope_selection",
+          projectDir: worker.projectDir,
+          candidateFiles: [selection.file],
+          parentJob: job,
+          demotionSource: "human_scope_selection",
+          demoteOnGateFailure: false,
+        });
+        continuation = outcome.job || null;
+        continuationKind = outcome.kind || continuation?.job_type || null;
+        if (!continuation) finalHumanStatus = "failed";
+      } else if (selection.action === "plan") {
+        continuation = createPlanAfterSkippedResearch(wi, {
+          routing: {
+            ...(scope.routing || {}),
+            bucket: "no_research",
+            reason: "user explicitly selected planning from the one-shot scope gate",
+          },
+          budget: scope.fallback_budget || "low",
+          source: "human_scope_selection",
+          parentJob: job,
+        });
+        continuationKind = "plan";
+      } else {
+        finalHumanStatus = "failed";
+      }
+
+      if (continuation) addDependency(continuation.id, job.id, "hard");
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt.attempt.id,
+        event_type: EVENT_TYPES.ONESHOT_SCOPE_SELECTION_RESOLVED,
+        actor_type: EVENT_ACTORS.HUMAN,
+        message: continuation
+          ? `One-shot scope selection spawned ${continuation.job_type} job #${continuation.id}`
+          : `One-shot scope selection ended without a continuation (${selection.action})`,
+        event_json: JSON.stringify({
+          action: selection.action,
+          selected_file: selection.file || null,
+          continuation_job_id: continuation?.id || null,
+          continuation_job_type: continuation?.job_type || continuationKind,
+          candidate_files: (scope.candidates || []).map((entry) => entry.file),
+        }),
+      });
+      if (continuation) {
+        worker.emit(job.id, `${C.cyan}[human] One-shot scope selected; queued ${continuation.job_type} job #${continuation.id}${C.reset}`);
+      } else {
+        worker.emit(job.id, `${C.yellow}[human] One-shot scope answer was not actionable; no plan or dev job was queued${C.reset}`);
+      }
+    }
+
     if (Array.isArray(payload.file_requests) && payload.file_requests.length > 0) {
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);

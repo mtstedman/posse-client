@@ -125,6 +125,7 @@ import {
   HIDDEN_SETTING_KEYS,
   NUMERIC_SETTING_RULES,
   PROVIDER_SETTING_KEYS,
+  getAdminSettingPresentation,
   ATLAS_PHASE_OPTIONS,
   ATLAS_PHASE_SETTING_KEYS,
   ATLAS_PHASE_VALUES,
@@ -191,6 +192,7 @@ export class AdminTUI {
     this._done = null;
     this._editing = false;
     this._editKey = "";
+    this._editLabel = "";
     this._editBuf = "";
     this._editCursor = 0;
     this._editStorageKey = "";
@@ -420,8 +422,10 @@ export class AdminTUI {
       const sourceDetail = entry.source === "env"
         ? `env${entry.db_value ? `, global=${entry.db_value}` : ""}`
         : entry.source || "default";
-      lines.push(`${entry.setting_key} = ${entry.setting_value || ""}`);
-      if (entry.description) lines.push(`  ${entry.description}`);
+      const presentation = getAdminSettingPresentation(entry.setting_key, entry);
+      lines.push(`${presentation.label} = ${entry.setting_value || ""}`);
+      lines.push(`  Setting ID: ${entry.setting_key}`);
+      if (presentation.description) lines.push(`  ${presentation.description}`);
       lines.push(`  source: ${sourceDetail}`);
       lines.push("");
     }
@@ -1258,22 +1262,24 @@ export class AdminTUI {
     } else if (this._editing === "editBoolean") {
       navLines.push(...this._buildEditBooleanNavLines());
     } else if (this._editing === "editProviders") {
+      const editLabel = this._editLabel || getAdminSettingPresentation(this._editKey).label;
       const toggles = this._editProviderChoices.map((choice, index) => {
         const marker = choice.enabled ? `${C.green}[x]${C.reset}` : `${C.dim}[ ]${C.reset}`;
         const label = `${index + 1}:${choice.label || choice.provider}`;
         if (index === this._editProviderIndex) return `${C.yellow}>${marker} ${label}<${C.reset}`;
         return `${marker} ${label}`;
       }).join(` ${C.dim}|${C.reset} `);
-      navLines.push(` ${C.yellow}Editing ${this._editKey}:${C.reset} ${toggles}`);
+      navLines.push(` ${C.yellow}Editing ${editLabel}:${C.reset} ${toggles}`);
       navLines.push(` ${C.dim}[←→/↑↓] Move  [Space] Toggle  [1-4/c-o-x-g] Jump/Toggle  [Enter] Save  [Esc] Cancel${C.reset}`);
     } else if (this._editing === "editPhases") {
+      const editLabel = this._editLabel || getAdminSettingPresentation(this._editKey).label;
       const toggles = this._editPhaseChoices.map((choice, index) => {
         const marker = choice.enabled ? `${C.green}[x]${C.reset}` : `${C.dim}[ ]${C.reset}`;
         const label = `${index + 1}:${choice.label}`;
         if (index === this._editPhaseIndex) return `${C.yellow}>${marker} ${label}<${C.reset}`;
         return `${marker} ${label}`;
       }).join(` ${C.dim}|${C.reset} `);
-      navLines.push(` ${C.yellow}Editing ${this._editKey}:${C.reset} ${toggles}`);
+      navLines.push(` ${C.yellow}Editing ${editLabel}:${C.reset} ${toggles}`);
       navLines.push(` ${C.dim}[←→/↑↓] Move  [Space] Toggle  [1-9] Jump  [Enter] Save  [Esc] Cancel${C.reset}`);
       if (this._editError) navLines.push(` ${C.red}${this._editError}${C.reset}`);
     } else if (this._editing === "editSkills") {

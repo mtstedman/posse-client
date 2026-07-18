@@ -47,23 +47,6 @@ function renderDevBriefFilePriorities(entries) {
   ];
 }
 
-function renderDevBriefRefs(brief) {
-  if (brief?.hash_ref_packet) return [];
-  const lines = [];
-  for (const lane of ["proof", "support", "decoy"]) {
-    const refs = Array.isArray(brief?.[lane]) ? brief[lane] : [];
-    if (refs.length === 0) continue;
-    lines.push(`${lane}:`);
-    for (const ref of refs) {
-      const hash = compactLine(ref?.hash || ref?.ref || ref?.ref_hash || ref, 40);
-      if (!hash) continue;
-      const why = compactLine(ref?.why || ref?.reason || ref?.note || "", 180);
-      lines.push(`- ${hash}${why ? ` - ${why}` : ""}`);
-    }
-  }
-  return lines;
-}
-
 function renderPlannerDevBrief(brief) {
   if (!isAtlasDevBrief(brief)) return "";
   const lines = [
@@ -91,12 +74,6 @@ function renderPlannerDevBrief(brief) {
       const normalized = compactLine(filePath, 220);
       if (normalized) lines.push(`- ${normalized}`);
     }
-  }
-  const refs = renderDevBriefRefs(brief);
-  if (refs.length > 0) {
-    lines.push("");
-    lines.push("Hash refs:");
-    lines.push(...refs);
   }
   return lines.join("\n");
 }

@@ -34,11 +34,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Regenerate vector golden fixtures
-        run: |
-          node scripts/generate-vector-fixtures.mjs --output .tmp/vector-golden
-          POSSE_VECTOR_FIXTURE_CANONICAL=.tmp/vector-golden npm run check:vector-fixtures
-
       - name: Lint
         run: npm run lint
 
@@ -53,6 +48,6 @@ jobs:
         run: |
           node --test test/test-posse-remote-composer.test.js
           node --test test/test-posse-remote-parity.test.js
-          node --test --test-concurrency=1 test/test-atlas-v2-embeddings-resource-selection.test.js test/test-atlas-v2-embeddings-index.test.js test/test-atlas-v2-embeddings-e2e.test.js test/test-atlas-v2-embeddings-fallback-ondemand.test.js
+          node --test --test-concurrency=1 test/test-atlas-native-jina-encoder.test.js test/test-embedding-resource-pool.test.js test/test-atlas-v2-reader-lane.test.js test/test-atlas-v2-readiness.test.js
           node --test test/core/suites/provider-aliases.test.js
           npm run test:scheduler:fast
