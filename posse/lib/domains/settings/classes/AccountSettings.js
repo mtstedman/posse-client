@@ -440,6 +440,8 @@ export class AccountSettings {
     this._migrateAtlasToolGateDefault();
     this._migrateAtlasResultRefPagingDefault();
     this._migrateAtlasPrefetchEntrypointRankDefault();
+    this._migrateAtlasGatewayDedupAdvertiseDefault();
+    this._migrateAtlasProseDedupDefault();
     const stmt = this._db.prepare(
       `INSERT OR IGNORE INTO account_settings (setting_key, setting_value) VALUES (?, ?)`,
     );
@@ -487,6 +489,48 @@ export class AccountSettings {
            SET setting_value = 'on',
                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
          WHERE setting_key = 'atlas_prefetch_entrypoint_rank'
+           AND lower(trim(setting_value)) = 'off'`,
+      )
+      .run();
+    this._db
+      .prepare(`INSERT OR IGNORE INTO account_settings (setting_key, setting_value) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+      .run(markerKey);
+  }
+
+  _migrateAtlasGatewayDedupAdvertiseDefault() {
+    const markerKey = "atlas_gateway_dedup_advertise_default_migrated_at";
+    const marker = this._db
+      .prepare(`SELECT setting_value FROM account_settings WHERE setting_key = ?`)
+      .get(markerKey);
+    if (marker) return;
+
+    this._db
+      .prepare(
+        `UPDATE account_settings
+           SET setting_value = 'on',
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE setting_key = 'atlas_gateway_dedup_advertise'
+           AND lower(trim(setting_value)) = 'off'`,
+      )
+      .run();
+    this._db
+      .prepare(`INSERT OR IGNORE INTO account_settings (setting_key, setting_value) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+      .run(markerKey);
+  }
+
+  _migrateAtlasProseDedupDefault() {
+    const markerKey = "atlas_prose_dedup_default_migrated_at";
+    const marker = this._db
+      .prepare(`SELECT setting_value FROM account_settings WHERE setting_key = ?`)
+      .get(markerKey);
+    if (marker) return;
+
+    this._db
+      .prepare(
+        `UPDATE account_settings
+           SET setting_value = 'on',
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE setting_key = 'atlas_prose_dedup'
            AND lower(trim(setting_value)) = 'off'`,
       )
       .run();
