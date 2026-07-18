@@ -6,6 +6,8 @@
 import { createHash } from "node:crypto";
 import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 
+const SCIP_FIRST_FRAME_BATCH_SIZE = 8;
+
 /**
  * @param {{ index: Record<string, any>, timeoutMs?: number }} input
  * @returns {Promise<Record<string, any>>}
@@ -27,10 +29,7 @@ export async function scipIndexToRowsBatchedNative({ index, timeoutMs = 120_000,
   const nativeIndex = scipIndexForNative(index);
   const documents = Array.isArray(nativeIndex.documents) ? nativeIndex.documents : [];
   const size = Math.max(1, Math.min(4096, Math.trunc(Number(batchSize) || 32)));
-  const configuredFirstSize = Math.trunc(Number(process.env.POSSE_ATLAS_SCIP_FIRST_BATCH_SIZE) || 0);
-  const firstSize = configuredFirstSize > 0
-    ? Math.max(1, Math.min(size, configuredFirstSize))
-    : size;
+  const firstSize = Math.min(size, SCIP_FIRST_FRAME_BATCH_SIZE);
   if (documents.length <= firstSize) return scipIndexToRowsNative({ index, timeoutMs });
   const batches = scipDocumentBatches(documents, size, firstSize);
   const filesetHash = scipFilesetHash(documents);
@@ -101,10 +100,10 @@ export function __testScipIndexForNative(index) {
   return scipIndexForNative(index);
 }
 
-export function __testScipBatchSizes({ documentCount, batchSize, firstBatchSize }) {
+export function __testScipBatchSizes({ documentCount, batchSize }) {
   const count = Math.max(0, Math.trunc(Number(documentCount) || 0));
   const size = Math.max(1, Math.min(4096, Math.trunc(Number(batchSize) || 32)));
-  const first = Math.max(1, Math.min(size, Math.trunc(Number(firstBatchSize) || size)));
+  const first = Math.min(size, SCIP_FIRST_FRAME_BATCH_SIZE);
   return scipDocumentBatches(Array.from({ length: count }, (_, index) => index), size, first).map((batch) => batch.length);
 }
 
