@@ -98,7 +98,7 @@ function defineBinary(pkg, files, {
 }
 
 export const NATIVE_BINARIES = Object.freeze({
-  atlas: defineBinary("posse-atlas", { windows: "posse-atlas.exe", posix: "posse-atlas" }, { workerCapable: true }),
+  atlas: defineBinary("posse-atlas", { windows: "posse-atlas.exe", posix: "posse-atlas" }, { workerCapable: true, issuedVersionRequired: true }),
   git: defineBinary("posse-git", { windows: "posse-git.exe", posix: "posse-git" }, { workerCapable: true }),
   ml: defineBinary(
     "posse-ml",

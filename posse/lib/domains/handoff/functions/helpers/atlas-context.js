@@ -267,6 +267,9 @@ function _collectAtlasSeedSymbols(packet, maxItems = 24) {
  * prefetch consumes the strongest available, dropping weaker proxies:
  *   researcher          → tree.scope(taskText + lexical guesses): nothing
  *                         better exists yet, so guessing earns its keep.
+ *                         In broad entrypoint-ranking mode, lexical guesses
+ *                         are not sent as exact seeds because exact seeds are
+ *                         pinned ahead of the ranked production entrypoints.
  *   planner w/ seeds    → tree.scope(taskText + validated seeds), lexical
  *                         scan dropped — rg-guesses only dilute the brief.
  *   dev w/ file scope   → tree.expand(edit set), no task text — dev tasks are
@@ -283,7 +286,13 @@ export function resolveAtlasPrefetchPlan(packet) {
   if (role === "planner" && validatedSeeds.length > 0) {
     return { mode: "planner-seeded", action: "tree.scope", seedFiles: validatedSeeds, useTaskText: true };
   }
-  return { mode: "broad", action: "tree.scope", seedFiles: _collectAtlasSeedFiles(packet), useTaskText: true };
+  const entrypointRank = packet?.atlas_config?.prefetchEntrypointRank === true;
+  return {
+    mode: "broad",
+    action: "tree.scope",
+    seedFiles: entrypointRank ? validatedSeeds : _collectAtlasSeedFiles(packet),
+    useTaskText: true,
+  };
 }
 
 function _collectExplicitAtlasPrefetchFiles(packet) {

@@ -33,6 +33,16 @@ import {
 } from "../../native/functions/artifact-download.js";
 import { NativeBinary } from "./NativeBinary.js";
 
+const NATIVE_VERSION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+function pinnedNativeVersion(name, env) {
+  const key = "POSSE_NATIVE_" + name.toUpperCase() + "_VERSION";
+  const value = String((env || process.env)[key] || "").trim();
+  if (!value) return undefined;
+  if (!NATIVE_VERSION_PATTERN.test(value)) throw new RangeError("Invalid " + key);
+  return value;
+}
+
 export class BinaryManager {
   /**
    * @param {{
@@ -192,7 +202,7 @@ export class BinaryManager {
       env: this._opts.env,
       nativeAuthManager: this.nativeAuthManager,
       pulseManager: this._handlePulseManager,
-      exactVersion,
+      exactVersion: exactVersion === undefined ? pinnedNativeVersion(name, this._opts.env) : exactVersion,
     });
   }
 
