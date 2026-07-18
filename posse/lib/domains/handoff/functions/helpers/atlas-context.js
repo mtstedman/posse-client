@@ -277,7 +277,7 @@ function _collectAtlasSeedSymbols(packet, maxItems = 24) {
  *                         set, and task terms mostly re-find the seeds.
  *   any role w/o seeds  → the researcher-shaped broad scope.
  */
-export function resolveAtlasPrefetchPlan(packet) {
+export function resolveAtlasPrefetchPlan(packet, atlasConfig = packet?.atlas_config || getAtlasIntegrationConfig()) {
   const role = String(packet?.recipient || "").trim().toLowerCase();
   const validatedSeeds = _collectValidatedAtlasSeedFiles(packet);
   if (role === "dev" && validatedSeeds.length > 0) {
@@ -286,7 +286,7 @@ export function resolveAtlasPrefetchPlan(packet) {
   if (role === "planner" && validatedSeeds.length > 0) {
     return { mode: "planner-seeded", action: "tree.scope", seedFiles: validatedSeeds, useTaskText: true };
   }
-  const entrypointRank = packet?.atlas_config?.prefetchEntrypointRank === true;
+  const entrypointRank = atlasConfig?.prefetchEntrypointRank === true;
   return {
     mode: "broad",
     action: "tree.scope",
@@ -1568,9 +1568,10 @@ export function rankAtlasTreeScopeCandidates(candidates, {
 // + compressed-tree seed annotations). When usable, this IS the handoff
 // prefetch; the graph slice only runs as a fallback when the tree is
 // unavailable or empty.
-async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, action = "tree.scope", prefetchMode = null }) {
+async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, action = "tree.scope", prefetchMode = null, atlasConfig = null }) {
   try {
-    const entrypointRank = packet.atlas_config?.prefetchEntrypointRank === true && prefetchMode === "broad";
+    const effectiveAtlasConfig = atlasConfig || packet.atlas_config || getAtlasIntegrationConfig();
+    const entrypointRank = effectiveAtlasConfig?.prefetchEntrypointRank === true && prefetchMode === "broad";
     const raw = await executeEmbeddedAtlasTool(action, {
       ...(taskText ? { taskText } : {}),
       paths: seedFiles,
@@ -1579,8 +1580,8 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
         : ATLAS_TREE_SCOPE_MAX_FILES,
     }, {
       cwd: packet.cwd,
-      config: packet.atlas_config
-        ? { ...packet.atlas_config, prefetchEntrypointRank: entrypointRank }
+      config: effectiveAtlasConfig
+        ? { ...effectiveAtlasConfig, prefetchEntrypointRank: entrypointRank }
         : undefined,
       origin: "prefetch",
     });
@@ -1704,7 +1705,8 @@ export async function attachAtlasPlannerSlice(packet) {
     // resolveAtlasPrefetchPlan). Tree-first: when the tree pass is usable it
     // IS the prefetch — no graph slice runs; slice.build remains only as the
     // fallback when the tree is unavailable or produced nothing.
-    const plan = resolveAtlasPrefetchPlan(packet);
+    const atlasConfig = packet.atlas_config || getAtlasIntegrationConfig();
+    const plan = resolveAtlasPrefetchPlan(packet, atlasConfig);
     const seedSymbols = _collectAtlasSeedSymbols(packet);
     const treeAction = plan.action === "tree.expand" && tools.has("tree.expand") ? "tree.expand" : "tree.scope";
     const treeToolAvailable = tools.has("tree.scope") || (plan.action === "tree.expand" && tools.has("tree.expand"));
@@ -1722,6 +1724,7 @@ export async function attachAtlasPlannerSlice(packet) {
             seedFiles: plan.seedFiles,
             action: treeAction,
             prefetchMode: plan.mode,
+            atlasConfig,
           })
           : Promise.resolve(null),
         wantSymbolCards
