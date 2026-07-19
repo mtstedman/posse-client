@@ -458,7 +458,7 @@ function _normalizeHintPath(value) {
 export function buildResearchIntakePreload(projectDir, hints, { atlasCoveredFiles = null } = {}) {
   if (!hints) return "";
   const safeHints = normalizeIntakeHints(hints);
-  if (!_hasMaterialResearchPreloadHints(safeHints)) return "";
+  const hasMaterialPreloadHints = _hasMaterialResearchPreloadHints(safeHints);
   const sections = [];
   // Researchers need the semantic request shape, not the scheduler's two
   // overlapping output-routing representations. Planner/assessor rendering
@@ -469,6 +469,8 @@ export function buildResearchIntakePreload(projectDir, hints, { atlasCoveredFile
     semanticKeys: true,
   });
   if (hintBlock) sections.push(hintBlock);
+
+  if (!hasMaterialPreloadHints) return sections.join("\n\n");
 
   for (const dir of (safeHints.suspected_dirs || []).slice(0, 3)) {
     const fullDir = _resolveWithinProject(projectDir, dir);
