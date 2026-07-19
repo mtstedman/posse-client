@@ -7,7 +7,10 @@ import {
   BRIDGE_FRAME_TYPES,
   BRIDGE_PROTOCOL_VERSION,
 } from "../../../catalog/bridge.js";
-import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import {
+  ONESHOT_SCOPE_SELECTION_SUBTYPE,
+  TERMINAL_JOB_STATUSES,
+} from "../../../catalog/job.js";
 import {
   AGENT_ACTIVITY_KINDS,
   AGENT_ACTIVITY_PROTOCOL,
@@ -78,9 +81,24 @@ function resolutionForJob(job, payload = {}) {
 function gateKindForJob(job, payload = {}) {
   if (payload?.subtype === "push_offer") return "push";
   if (payload?.subtype === "plan_approval") return "plan";
+  if (
+    payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
+    || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE
+  ) return "human_input";
   if (payload?.review_type) return "review";
   if (job?.status === "waiting_on_review") return "review";
   return "human_input";
+}
+
+function isReadyOneshotScopeSelection(payload = {}) {
+  const isScopeSelection = payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
+    || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE;
+  if (!isScopeSelection) return true;
+  return payload?.selector?.status === "ready" || payload?.oneshot_scope?.status === "ready";
+}
+
+function isOpenGateJob(job, payload = {}) {
+  return OPEN_GATE_STATUSES.has(job?.status) && isReadyOneshotScopeSelection(payload);
 }
 
 function promptFromGatePayload(payload) {
@@ -243,6 +261,7 @@ export class ChangeStream extends EventEmitter {
     this.jobCursor = { updatedAt: "", id: 0 };
     this.useBridgeChangeSeq = false;
     this.gateStatusByJobId = new Map();
+    this.gateAnnouncedByJobId = new Map();
     this.replay = [];
     // instance_status: emit on change, min interval apart.
     this.instanceStatusMinIntervalMs = Math.max(250, Number(instanceStatusMinIntervalMs) || 2_000);
@@ -313,18 +332,22 @@ export class ChangeStream extends EventEmitter {
 
   seedGateStatuses() {
     this.gateStatusByJobId.clear();
+    this.gateAnnouncedByJobId.clear();
     // Terminal gates are not seeded: they can never reopen, so tracking them
     // would only grow the map for the daemon's lifetime. An untracked terminal
     // job that gets touched again emits nothing (gate_closed requires a known
     // previous status), which is the desired behavior.
     const rows = this.db.prepare(`
-      SELECT id, status
+      SELECT id, status, payload_json
       FROM jobs
       WHERE job_type = 'human_input'
     `).all();
     for (const row of rows) {
       if (TERMINAL_JOB_STATUS_SET.has(row.status)) continue;
-      this.gateStatusByJobId.set(Number(row.id), row.status);
+      const jobId = Number(row.id);
+      const payload = parseJsonField(row.payload_json) || {};
+      this.gateStatusByJobId.set(jobId, row.status);
+      this.gateAnnouncedByJobId.set(jobId, isOpenGateJob(row, payload));
     }
   }
 
@@ -610,18 +633,19 @@ export class ChangeStream extends EventEmitter {
   emitGateTransition(row) {
     if (row.job_type !== "human_input") return;
     const jobId = Number(row.id);
+    const payload = parseJsonField(row.payload_json) || {};
     const previousStatus = this.gateStatusByJobId.get(jobId);
-    const wasOpen = OPEN_GATE_STATUSES.has(previousStatus);
-    const isOpen = OPEN_GATE_STATUSES.has(row.status);
+    const wasAnnounced = this.gateAnnouncedByJobId.get(jobId) === true;
+    const isOpen = isOpenGateJob(row, payload);
     const wasTerminal = TERMINAL_JOB_STATUS_SET.has(previousStatus);
     const isTerminal = TERMINAL_JOB_STATUS_SET.has(row.status);
-    const closedByNonterminalStatus = wasOpen
+    const closedByNonterminalStatus = wasAnnounced
       && !isOpen
       && NONTERMINAL_GATE_CLOSE_STATUSES.has(row.status);
 
-    if (isOpen && !wasOpen) {
+    if (isOpen && !wasAnnounced) {
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.GATE_OPENED, gatePayloadForJob(row));
-    } else if ((isTerminal && previousStatus !== undefined && !wasTerminal) || closedByNonterminalStatus) {
+    } else if ((isTerminal && wasAnnounced && !wasTerminal) || closedByNonterminalStatus) {
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.GATE_CLOSED, gateClosedPayloadForJob(row));
     }
     // Evict terminal gates instead of tracking them forever — human-input
@@ -629,8 +653,10 @@ export class ChangeStream extends EventEmitter {
     // daemon does.
     if (isTerminal || closedByNonterminalStatus) {
       this.gateStatusByJobId.delete(jobId);
+      this.gateAnnouncedByJobId.delete(jobId);
     } else {
       this.gateStatusByJobId.set(jobId, row.status);
+      this.gateAnnouncedByJobId.set(jobId, wasAnnounced || isOpen);
     }
   }
 

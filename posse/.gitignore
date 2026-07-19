@@ -64,6 +64,7 @@ scripts/task-ab/**/*.grade.output.json
 scripts/task-ab/**/*.grade.error.txt
 scripts/task-ab/**/results.jsonl
 scripts/task-ab/**/grades.jsonl
+scripts/task-ab/**/acceptance-gate.json
 scripts/task-ab/**/matrix.html
 scripts/task-ab/**/matrix.md
 

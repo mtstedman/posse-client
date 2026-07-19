@@ -46,6 +46,23 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
     tailChars: 900,
     digest: "generic",
   }),
+  // A batch symbol.card response can easily exceed the Claude terminal's
+  // tool-result ceiling because every card carries hydrated callers/callees.
+  // Keep a useful inline window and retain the complete JSON behind fetch_ref.
+  // Unlike the search experiment this is an unconditional transport-safety
+  // bound: an oversized MCP success must not be rewritten into a client error.
+  "symbol.card": Object.freeze({
+    capChars: 20000,
+    headChars: 14000,
+    tailChars: 1200,
+    digest: "symbol_card",
+  }),
+  "atlas.symbol.card": Object.freeze({
+    capChars: 20000,
+    headChars: 14000,
+    tailChars: 1200,
+    digest: "symbol_card",
+  }),
 });
 
 export const CONTEXT_TRIM_CLASSES = Object.freeze([

@@ -19,6 +19,7 @@ import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/revi
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { redactBridgeValue } from "./redaction.js";
 import { composeInstanceStatus } from "./instance-status.js";
+import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -97,9 +98,20 @@ function promptFromGatePayload(payload, fallback = null) {
 function gateKindForJob(job, payload = {}) {
   if (payload?.subtype === "push_offer") return "push";
   if (payload?.subtype === "plan_approval") return "plan";
+  if (
+    payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
+    || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE
+  ) return "human_input";
   if (payload?.review_type) return "review";
   if (job?.status === "waiting_on_review") return "review";
   return "human_input";
+}
+
+function isReadyOneshotScopeSelection(payload = {}) {
+  const isScopeSelection = payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
+    || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE;
+  if (!isScopeSelection) return true;
+  return payload?.selector?.status === "ready" || payload?.oneshot_scope?.status === "ready";
 }
 
 export function normalizeGate(job) {
@@ -120,7 +132,11 @@ export function normalizeGate(job) {
 }
 
 function isOpenGateJob(job) {
-  return job?.job_type === "human_input" && OPEN_GATE_STATUSES.has(job.status);
+  if (job?.job_type !== "human_input" || !OPEN_GATE_STATUSES.has(job.status)) return false;
+  const payload = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
+    ? job.payload
+    : parseJobPayload(job);
+  return isReadyOneshotScopeSelection(payload);
 }
 
 function summarizeWorkItem(wi) {
@@ -129,7 +145,7 @@ function summarizeWorkItem(wi) {
     ...normalizeWorkItem(wi),
     active_job_count: activeJobCount(jobs),
     jobs,
-    open_gates: jobs.map(normalizeGate).filter(Boolean).filter((gate) => OPEN_GATE_STATUSES.has(gate.status)),
+    open_gates: jobs.filter(isOpenGateJob).map(normalizeGate).filter(Boolean),
     reviewable: shouldIncludeWorkItemInApprovalQueue(wi, jobs),
   };
 }
@@ -175,7 +191,7 @@ export function getWorkItemState(workItemId, { eventLimit = 50 } = {}) {
   return {
     work_item: normalizeWorkItem(wi),
     jobs,
-    open_gates: jobs.map(normalizeGate).filter(Boolean).filter((gate) => OPEN_GATE_STATUSES.has(gate.status)),
+    open_gates: jobs.filter(isOpenGateJob).map(normalizeGate).filter(Boolean),
     events: getEventsByWorkItem(workItemId, boundedLimit(eventLimit, 50)).map(normalizeEvent),
     reviewable: shouldIncludeWorkItemInApprovalQueue(wi, jobs),
   };

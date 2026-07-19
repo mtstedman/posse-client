@@ -24,6 +24,10 @@ export const JOB_TYPES = Object.freeze([
 ]);
 export const JOB_TYPE_LIST_SQL = sqlList(JOB_TYPES);
 
+// Typed human-input subtypes. These are coordination gates, not assessor
+// reviews, even when older persisted jobs used the same value in review_type.
+export const ONESHOT_SCOPE_SELECTION_SUBTYPE = "oneshot_scope_selection";
+
 export const JOB_STATUSES = Object.freeze([
   "queued",
   "leased",

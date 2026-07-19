@@ -155,6 +155,35 @@ export function formatOneshotScopeSelection({ candidates = [], atlasError = null
   };
 }
 
+export function buildOneshotScopeSelector(candidates = [], { status = "ready" } = {}) {
+  const rows = (Array.isArray(candidates) ? candidates : [])
+    .filter((entry) => entry && typeof entry.file === "string")
+    .slice(0, DEFAULT_MAX_CANDIDATES);
+  return {
+    type: "single_select",
+    status,
+    required: true,
+    accepts_exact_path: rows.length > 0,
+    options: [
+      ...rows.map((entry, index) => ({
+        value: String(index + 1),
+        label: entry.file,
+        description: entry.source === "atlas" ? "ATLAS semantic match" : "Filename match",
+      })),
+      {
+        value: "plan",
+        label: "Use planned flow",
+        description: "Skip research and create a plan for this request.",
+      },
+      {
+        value: "cancel",
+        label: "Cancel request",
+        description: "Stop without creating a plan or development job.",
+      },
+    ],
+  };
+}
+
 export function parseOneshotScopeSelection(answer, candidates = []) {
   const text = String(answer || "").trim();
   const lower = text.toLowerCase();

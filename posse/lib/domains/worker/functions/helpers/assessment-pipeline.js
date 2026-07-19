@@ -314,6 +314,58 @@ export function __testBuildCommittedScopeViolationVerdict(assessmentContext = nu
   return _buildCommittedScopeViolationVerdict(assessmentContext, cwd);
 }
 
+function _addedScopedDiffText(scopedDiff = "") {
+  return String(scopedDiff || "")
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+    .map((line) => line.slice(1))
+    .join("\n");
+}
+
+function _disabledRequiredTestMarkers(scopedDiff = "") {
+  const added = _addedScopedDiffText(scopedDiff);
+  if (!added) return [];
+  const patterns = [
+    /\b(?:describe|it|test)\.(?:skip|todo)\s*\(/gi,
+    /\b(?:xdescribe|xit|xtest)\s*\(/gi,
+    /@(?:pytest\.mark\.skip|unittest\.skip|Disabled)\b/gi,
+    /\bpytest\.skip\s*\(/gi,
+    /#\s*\[\s*ignore\s*\]/gi,
+  ];
+  const propertyMarkers = [...added.matchAll(/\b(?:todo|skip)\s*:\s*([^,}\n]+)/gi)]
+    .filter((match) => String(match[1] || "").trim().toLowerCase() !== "false")
+    .map((match) => match[0]);
+  return [...new Set([
+    ...patterns.flatMap((pattern) => added.match(pattern) || []),
+    ...propertyMarkers,
+  ])];
+}
+
+function _buildDisabledRequiredTestsVerdict({ assessmentContext = null, taskSpec = "" } = {}) {
+  const scopedDiff = assessmentContext?.scoped_git_diff || assessmentContext?.branch_net_diff || "";
+  const markers = _disabledRequiredTestMarkers(scopedDiff);
+  if (markers.length === 0) return null;
+  const requirement = String(taskSpec || "");
+  const requiresActiveTests = /\b(?:test|tests|testing|regression|coverage|assertion|assertions)\b/i.test(requirement);
+  const explicitlyAllowsDisabledTests = /\b(?:allow|keep|preserve|create|add)\b[^.\n]{0,100}\b(?:skipped|disabled|todo|ignored)\b/i.test(requirement);
+  if (!requiresActiveTests || explicitlyAllowsDisabledTests) return null;
+  return {
+    verdict: "fail",
+    confidence: "high",
+    reasons: [
+      `Deterministic completion violation: required test work added disabled/TODO coverage (${markers.join(", ")}). Skipped required assertions do not satisfy the task even when the test command exits successfully.`,
+    ],
+    spawn_jobs: [],
+    human_questions: [],
+    suggestions: [],
+    raw: "",
+  };
+}
+
+export function __testBuildDisabledRequiredTestsVerdict(options = {}) {
+  return _buildDisabledRequiredTestsVerdict(options);
+}
+
 function _looksLikeAssessorVerdictObject(value) {
   return !!value
     && typeof value === "object"
@@ -431,6 +483,7 @@ function stripInternalAssessmentPolicyPayload(payload = {}) {
 
 function _buildRemoteAssessmentInstructions({
   job,
+  rootObjective = "",
   taskSpec = "",
   verificationCapabilityBlock = "",
   workflowModeBlock = "",
@@ -450,6 +503,9 @@ function _buildRemoteAssessmentInstructions({
     verificationCapabilityBlock || null,
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
+    ``,
+    rootObjective ? `ORIGINAL WORK ITEM OBJECTIVE (semantic guardrail):\n${rootObjective}` : null,
+    rootObjective ? `Use the original objective only to detect a weakened, contradicted, or omitted requirement within this task's scoped responsibility. Do not assign this developer work owned by a sibling task.` : null,
     ``,
     `TASK SPECIFICATION:`,
     taskSpec || `Title: ${job?.title || ""}`,
@@ -838,7 +894,9 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   let parsedJobPayload = parseJobPayload(job);
   const visibleJobPayload = stripInternalAssessmentPolicyPayload(parsedJobPayload);
   const verificationCapabilityBlock = _buildVerificationCapabilityBlock(visibleJobPayload);
-  const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(getWorkItem(job.work_item_id)), "assessor");
+  const workItem = getWorkItem(job.work_item_id);
+  const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(workItem), "assessor");
+  const rootObjective = String(workItem?.description || workItem?.title || "").trim();
   if (Object.keys(visibleJobPayload).length > 0) {
     taskSpec = visibleJobPayload.task_spec || visibleJobPayload.instructions || JSON.stringify(visibleJobPayload, null, 2);
   } else if (job.payload_json) {
@@ -1030,6 +1088,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   if (deterministicScopeViolation) {
     return deterministicScopeViolation;
   }
+  const disabledRequiredTestsViolation = _buildDisabledRequiredTestsVerdict({ assessmentContext, taskSpec });
+  if (disabledRequiredTestsViolation) {
+    return disabledRequiredTestsViolation;
+  }
 
   const providerScope = buildAssessmentProviderScope({ cwd, assessmentContext });
   const registeredTestScopeFiles = _mergeUniquePaths(
@@ -1059,7 +1121,6 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   let assessorAtlasPrefetchStatus = null;
   let assessorPacket = null;
   try {
-    const workItemForAssessor = getWorkItem(job.work_item_id);
     const packetPayload = {
       ...parsedJobPayload,
       task_spec: taskSpec || parsedJobPayload.task_spec || parsedJobPayload.instructions || job.title,
@@ -1069,7 +1130,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       create_roots: providerScope.createRoots.length > 0 ? providerScope.createRoots : (parsedJobPayload.create_roots || []),
     };
     assessorPacket = buildRoutingPacket(job, {
-      workItem: workItemForAssessor,
+      workItem,
       payload: packetPayload,
       role: "assessor",
       effectiveTier: modelTier,
@@ -1104,6 +1165,9 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
     ``,
+    rootObjective ? `ORIGINAL WORK ITEM OBJECTIVE (semantic guardrail):\n${rootObjective}` : null,
+    rootObjective ? `Use the original objective only to detect a weakened, contradicted, or omitted requirement within this task's scoped responsibility. Do not assign this developer work owned by a sibling task.` : null,
+    ``,
     `TASK SPECIFICATION:`,
     taskSpec || `Title: ${job.title}`,
     fileVerification,
@@ -1126,6 +1190,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
 
   const remoteAssessmentInstructions = _buildRemoteAssessmentInstructions({
     job,
+    rootObjective,
     taskSpec,
     verificationCapabilityBlock,
     workflowModeBlock,

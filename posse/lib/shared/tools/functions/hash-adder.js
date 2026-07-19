@@ -205,6 +205,40 @@ function genericDigest(text) {
   };
 }
 
+function symbolCardDigest(text) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(String(text || ""));
+  } catch {
+    return genericDigest(text);
+  }
+  const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  const cards = Array.isArray(data?.cards)
+    ? data.cards
+    : (data?.symbolId ? [data] : []);
+  const errors = Array.isArray(data?.errors) ? data.errors : [];
+  return {
+    char_count: String(text || "").length,
+    card_count: cards.length,
+    error_count: errors.length,
+    cards: cards.slice(0, 100).map((card) => ({
+      symbolId: card?.symbolId || null,
+      name: card?.name || null,
+      qualifiedName: card?.qualifiedName || null,
+      kind: card?.kind || null,
+      file: card?.location?.repo_rel_path || card?.repo_rel_path || null,
+      line: Number(card?.location?.startLine ?? card?.startLine) || null,
+      signature: typeof card?.signature === "string" ? card.signature.slice(0, 300) : null,
+    })),
+    errors: errors.slice(0, 100).map((error) => ({
+      index: error?.index ?? null,
+      symbolId: error?.symbolId || null,
+      symbolRef: error?.symbolRef || null,
+      message: String(error?.message || error?.error || "").slice(0, 300),
+    })),
+  };
+}
+
 function overflowDigest(text, policy, toolName, args = {}) {
   const digestKind = policy?.digest || "generic";
   const base = {
@@ -219,6 +253,7 @@ function overflowDigest(text, policy, toolName, args = {}) {
   }
   if (digestKind === "search_files") return { ...base, ...parseSearchRows(text) };
   if (digestKind === "list_files") return { ...base, ...listDigest(text) };
+  if (digestKind === "symbol_card") return { ...base, ...symbolCardDigest(text) };
   return { ...base, ...genericDigest(text) };
 }
 

@@ -22,6 +22,7 @@ import { gitExec } from "../../git/functions/utils.js";
 import { parseWorkItemMetadata } from "../../planning/functions/state.js";
 import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
 import { buildSyntheticResearchBrief, classifyResearchTask } from "./routing.js";
+import { buildOneshotScopeSelector } from "./oneshot-scope-selection.js";
 import {
   evaluateOneshotRequestEligibility,
   isOneshotRiskyTargetPath,
@@ -47,6 +48,7 @@ import {
   researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 
 const ONESHOT_SOURCES = new Set(["explicit", "heuristic", "scope", "fuzzy", "intake", "preflight", "internal"]);
 
@@ -595,9 +597,10 @@ export function createOneshotScopeSelectionJob(workItem, {
     model_tier: "cheap",
     reasoning_effort: "low",
     payload_json: JSON.stringify({
-      review_type: "oneshot_scope_selection",
+      subtype: ONESHOT_SCOPE_SELECTION_SUBTYPE,
       questions: ["Posse is resolving the most likely file for this one-shot request."],
       context: "ATLAS candidate discovery will run before this question is displayed.",
+      selector: buildOneshotScopeSelector([], { status: "pending" }),
       oneshot_scope: {
         version: 1,
         status: "pending",

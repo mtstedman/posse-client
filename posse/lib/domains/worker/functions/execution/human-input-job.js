@@ -31,13 +31,14 @@ import {
   createPlanAfterSkippedResearch,
 } from "../../../research/functions/intake-routing.js";
 import {
+  buildOneshotScopeSelector,
   formatOneshotScopeSelection,
   parseOneshotScopeSelection,
   resolveOneshotScopeCandidates,
 } from "../../../research/functions/oneshot-scope-selection.js";
+import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../../catalog/job.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
-const ONESHOT_SCOPE_REVIEW_TYPE = "oneshot_scope_selection";
 import { getAssessmentInternalRetryLimit } from "../helpers/assessment-shared.js";
 import { refreshAndExtractInsights } from "../helpers/insights.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
@@ -57,6 +58,11 @@ import {
   latestArtifactText,
 } from "./job-helpers.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+
+function isOneshotScopeSelectionPayload(payload) {
+  return payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
+    || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE;
+}
 
 async function dropPartialWorkStashAsync(worker, origJob, wtPath) {
   return await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
@@ -83,7 +89,7 @@ async function dropPartialWorkStashAsync(worker, origJob, wtPath) {
 export async function prepareOneshotScopeSelection(worker, job, payload, {
   resolveCandidates = resolveOneshotScopeCandidates,
 } = {}) {
-  if (payload?.review_type !== ONESHOT_SCOPE_REVIEW_TYPE) return { job, payload };
+  if (!isOneshotScopeSelectionPayload(payload)) return { job, payload };
   const scope = payload.oneshot_scope && typeof payload.oneshot_scope === "object"
     ? payload.oneshot_scope
     : {};
@@ -119,8 +125,10 @@ export async function prepareOneshotScopeSelection(worker, job, payload, {
   });
   const nextPayload = {
     ...payload,
+    subtype: ONESHOT_SCOPE_SELECTION_SUBTYPE,
     questions: [prompt.question],
     context: prompt.context,
+    selector: buildOneshotScopeSelector(candidates, { status: "ready" }),
     oneshot_scope: {
       ...scope,
       status: "ready",
@@ -211,7 +219,7 @@ export async function runHumanInputJob(worker, job, {
       return;
     }
 
-    if (payload.review_type === ONESHOT_SCOPE_REVIEW_TYPE) {
+    if (isOneshotScopeSelectionPayload(payload)) {
       const prepared = await prepareOneshotScopeSelection(worker, activeJob, payload, {
         resolveCandidates: resolveOneshotCandidates,
       });
@@ -255,7 +263,7 @@ export async function runHumanInputJob(worker, job, {
       return released;
     };
     try {
-    if (payload.review_type === ONESHOT_SCOPE_REVIEW_TYPE) {
+    if (isOneshotScopeSelectionPayload(payload)) {
       handledReviewDecision = true;
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
@@ -299,6 +307,9 @@ export async function runHumanInputJob(worker, job, {
           parentJob: job,
         });
         continuationKind = "plan";
+      } else if (selection.action === "cancel") {
+        finalHumanStatus = "canceled";
+        continuationKind = "canceled";
       } else {
         finalHumanStatus = "failed";
       }
@@ -323,6 +334,8 @@ export async function runHumanInputJob(worker, job, {
       });
       if (continuation) {
         worker.emit(job.id, `${C.cyan}[human] One-shot scope selected; queued ${continuation.job_type} job #${continuation.id}${C.reset}`);
+      } else if (selection.action === "cancel") {
+        worker.emit(job.id, `${C.yellow}[human] One-shot scope selection canceled; no plan or dev job was queued${C.reset}`);
       } else {
         worker.emit(job.id, `${C.yellow}[human] One-shot scope answer was not actionable; no plan or dev job was queued${C.reset}`);
       }

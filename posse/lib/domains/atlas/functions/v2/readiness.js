@@ -321,14 +321,20 @@ function inspectTreeCompression(repoRoot, config) {
         stale = Number(row?.stale) || 0;
       } catch { /* leave counts at 0 */ }
     }
-    const coverage = total > 0 ? Math.round(((total - stale) / total) * 100) : 100;
+    if (total <= 0) {
+      return {
+        layer: "tree-compression",
+        status: "failed",
+        coverage: 0,
+        detail: `snapshot ${snapshot.id} has no seeds`,
+      };
+    }
+    const coverage = Math.round(((total - stale) / total) * 100);
     return {
       layer: "tree-compression",
       status: stale > 0 && total > 0 && stale >= total ? "stale" : "ready",
       coverage,
-      detail: total > 0
-        ? `${total} seeds (${stale} stale labels, ${snapshot.profile || "default"} profile)`
-        : `snapshot ${snapshot.id} (${snapshot.profile || "default"} profile)`,
+      detail: `${total} seeds (${stale} stale labels, ${snapshot.profile || "default"} profile)`,
     };
   } finally {
     try { viewDb.close(); } catch { /* ignore */ }

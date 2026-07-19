@@ -499,6 +499,10 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
       write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
     }),
+    // Internal one-turn JSON model passes are not Jobs and therefore cannot
+    // possess an Agent-bound MCP gate. Their prompts explicitly prohibit tool
+    // use, and this empty contract keeps that boundary true at the CLI layer.
+    model_pass: Object.freeze({ read: [], write: [] }),
     preflight: Object.freeze({ read: [], write: [] }),
     delegator: Object.freeze({ read: [], write: [] }),
     default: Object.freeze({

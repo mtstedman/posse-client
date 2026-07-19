@@ -159,10 +159,10 @@ export class PlannerRole extends BaseRole {
     const atlasDevBriefContract = plannerCtx.plannerPacket?.atlas?.active
       ? [
           "ATLAS-ONLY DEV BRIEF CONTRACT:",
-          "When a dev code task needs task-specific ATLAS/hash-ref evidence, add dev_brief to that dev task only.",
+          "Add a task-specific dev_brief to every dev code task supported by this ATLAS research packet. Each brief must contain only that developer's read guidance and evidence; never copy a sibling task's handoff.",
           "Shape: dev_brief: { source: \"atlas\", summary, key_files, related_files, planner_file_priorities, proof, support, decoy }.",
           "Use the same file fields as researcher output: key_files, related_files, and planner_file_priorities. Tailor them to this one dev task; do not copy the whole research brief or repeat task requirements in summary.",
-          "Use proof/support/decoy only for hash refs from ATLAS-backed evidence. Put each ref in dev_brief only: never repeat hash-ref stubs in task_spec or success_criteria. Refs stay as compact durable intake; dev agents fetch exact evidence on demand only when they will rely on it. Decoy refs must include a short why. Omit dev_brief when only standard brief prose supports the task; dispatch will derive a compact scope handoff.",
+          "Carry each task-relevant research hash ref into exactly one dev_brief proof/support/decoy lane instead of repeating or discarding it. Put refs in dev_brief only: never repeat hash-ref stubs in task_spec or success_criteria. Refs stay as compact durable intake; dev agents fetch exact evidence on demand only when they will rely on it. Decoy refs must include a short why.",
           "",
         ].join("\n")
       : "";
@@ -182,6 +182,8 @@ export class PlannerRole extends BaseRole {
       plannerCtx.projectDir ? `You have Read, Glob, and Grep tools. Project root: ${plannerCtx.projectDir.replace(/\\/g, "/")}` : null,
       "",
       "Output a JSON array of tasks. Each task must have: title, compact task_spec, 3-7 non-overlapping success_criteria, depends_on_index.",
+      "SEMANTIC FIDELITY: The task array must collectively preserve every requirement in the original work item. Keep universal quantifiers, negations, exactness constraints, ordering rules, limits, and exceptions intact; never weaken an unconditional requirement by adding a condition.",
+      "Before responding, silently compare every task_spec and success criterion with the original work item. Correct any omission or contradiction, especially distinctions such as nullish versus falsy values and every/all/any versus some.",
       "For dev tasks, keep task_spec near 1,200 characters and never above 2,000. Do not paste source bodies, research summaries, evidence prose, or hash-ref stubs into task_spec/success_criteria; use task-specific dev_brief and its ref lanes instead.",
       "Default code tasks may omit job_type (or use job_type \"dev\" with task_mode \"code\"); non-code tasks set job_type per the pipeline routing context.",
       "Optional: model_tier and reasoning_effort are planner hints; deterministic scope/risk policy may lower or raise them before dispatch.",

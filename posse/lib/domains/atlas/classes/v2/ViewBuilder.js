@@ -1195,8 +1195,15 @@ function treeCompressionSnapshotLooksCurrent(viewDb) {
     const latest = viewDb.prepare(
       "SELECT status FROM derived_state_runs WHERE kind = 'tree-compression-snapshot' ORDER BY id DESC LIMIT 1",
     ).get();
-    const snapshot = viewDb.prepare("SELECT COUNT(*) AS cnt FROM atlas_tree_compression_snapshots").get();
-    return Number(snapshot?.cnt || 0) > 0 && String(latest?.status || "") === "ok";
+    const snapshot = viewDb.prepare(
+      "SELECT id FROM atlas_tree_compression_snapshots ORDER BY id DESC LIMIT 1",
+    ).get();
+    const seeds = snapshot
+      ? viewDb.prepare(
+        "SELECT COUNT(*) AS cnt FROM atlas_tree_compression_seeds WHERE snapshot_id = ?",
+      ).get(snapshot.id)
+      : null;
+    return Number(seeds?.cnt || 0) > 0 && String(latest?.status || "") === "ok";
   } catch {
     return false;
   }

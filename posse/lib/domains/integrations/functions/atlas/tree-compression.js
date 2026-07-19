@@ -91,21 +91,27 @@ function buildProviderAnnotator({ providerName, modelTier, cwd }) {
   return async ({ prompt }) => {
     const { getProvider } = await import("../../../providers/functions/provider.js");
     const provider = getProvider("researcher", providerName);
-    const result = await provider.callProvider(prompt, {
-      role: "planner",
-      roleMode: "synth",
-      allowWrite: false,
-      modelTier,
-      reasoningEffort: "low",
-      activity: "ATLAS tree compression ML pass",
-      silent: true,
-      autoApprove: true,
-      maxTurns: 1,
-      cwd: cwd || process.cwd(),
-      disableAtlas: true,
-      skipRolePrompt: true,
-    });
+    const result = await provider.callProvider(prompt, treeCompressionProviderCallOptions({ modelTier, cwd }));
     return result?.output ?? "";
+  };
+}
+
+export function treeCompressionProviderCallOptions({ modelTier, cwd } = {}) {
+  return {
+    // This is a no-tool, one-turn JSON transform, not a dispatched planner
+    // Agent. Giving it planner role incorrectly requires a Job-bound MCP gate.
+    role: "model_pass",
+    roleMode: "synth",
+    allowWrite: false,
+    modelTier,
+    reasoningEffort: "low",
+    activity: "ATLAS tree compression ML pass",
+    silent: true,
+    autoApprove: true,
+    maxTurns: 1,
+    cwd: cwd || process.cwd(),
+    disableAtlas: true,
+    skipRolePrompt: true,
   };
 }
 

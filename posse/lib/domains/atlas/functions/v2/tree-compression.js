@@ -142,6 +142,12 @@ export async function refreshTreeCompressionSnapshot(db, opts = {}) {
     if (!snapshot.available) {
       throw new Error(snapshot.reason || "tree_compression_source_unavailable");
     }
+    if (!Array.isArray(snapshot.seeds) || snapshot.seeds.length === 0) {
+      throw new Error("tree_compression_seed_empty");
+    }
+    if (Number(snapshot?.summary?.totals?.nodes || 0) <= 0) {
+      throw new Error("tree_compression_nodes_empty");
+    }
 
     db.exec("SAVEPOINT tree_compression_refresh");
     try {
