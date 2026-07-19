@@ -264,9 +264,9 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
       `- If the reason describes specific content, implement it fully`,
       `- Match the style and conventions of surrounding code/files`,
       `- Include necessary imports, exports, and boilerplate`,
-      `- If the file's purpose is genuinely unclear, create it with a`,
-      `  structured placeholder and a TODO comment — but prefer implementing`,
-      `  over placeholders`,
+      `- Never create a placeholder, empty stub, disabled test, or TODO-only`,
+      `  substitute. If required semantics remain unknowable after scoped`,
+      `  inspection, report that blocker in DEV RESULT.`,
     ];
     if (projectContext) {
       parts.push(``, `PROJECT CONTEXT:`, projectContext);

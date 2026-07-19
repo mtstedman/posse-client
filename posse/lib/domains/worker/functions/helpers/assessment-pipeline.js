@@ -23,6 +23,7 @@ import {
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { extractJsonResult } from "../../../../shared/format/functions/json.js";
+import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
 import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import { isArtifactMode, buildManifest, validateManifestAgainstContract } from "../../../artifacts/functions/index.js";
@@ -483,33 +484,25 @@ function stripInternalAssessmentPolicyPayload(payload = {}) {
 
 function _buildRemoteAssessmentInstructions({
   job,
+  workItem,
   taskSpec = "",
-  verificationCapabilityBlock = "",
   workflowModeBlock = "",
   atlasBlock = "",
   priorAssessmentFindings = "",
-  fileVerification = "",
-  registeredTestRunEvidence = "",
-  assessmentDiffNarrative = "",
   fallbackReads = null,
 } = {}) {
   return [
-    `Assess this completed task. Check the actual files, not just the dev's claims.`,
-    `The local client will append local-only assessment evidence after remote prompt compilation, including any scoped git diff, file snapshots, and worker output. Use that appended evidence for verification; do not ask the human to paste repository files or diffs that are already in the workspace.`,
-    `If the dev log marks VERIFICATION_UNAVAILABLE for a command or tool outside your issued surface, discard that optional verification method. It is not evidence of failure and is not, by itself, a reason to block.`,
     Number.isFinite(Number(fallbackReads)) ? `Fallback read budget for this assessment attempt: ${Math.max(0, Number(fallbackReads))}.` : null,
     workflowModeBlock,
-    verificationCapabilityBlock || null,
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
     ``,
+    `ORIGINAL WORK ITEM OBJECTIVE:`,
+    promptLiteral("TITLE", workItem?.title || ""),
+    promptLiteral("DESCRIPTION", workItem?.description || "(none)"),
+    ``,
     `TASK SPECIFICATION:`,
     taskSpec || `Title: ${job?.title || ""}`,
-    fileVerification ? `\nFILE VERIFICATION SUMMARY:\n${fileVerification}` : null,
-    registeredTestRunEvidence ? `\nREGISTERED POSSE TEST RUN SUMMARY:\n${registeredTestRunEvidence}` : null,
-    assessmentDiffNarrative ? `\nSCOPED DIFF NARRATIVE:\n${assessmentDiffNarrative}` : null,
-    ``,
-    `The final response must be only a fenced \`\`\`json verdict block. No prose.`,
   ].filter(Boolean).join("\n");
 }
 
@@ -754,11 +747,6 @@ function _buildLocalAssessmentEvidence({
     registeredTestRunEvidence || null,
     `WORKER OUTPUT:`,
     truncatedOutput,
-    ``,
-    `═══════════════════════════════════════════════════════════`,
-    `YOUR RESPONSE MUST BE ONLY A FENCED \`\`\`json VERDICT BLOCK.`,
-    `NO PROSE. NO EXPLANATION. JUST THE JSON VERDICT.`,
-    `═══════════════════════════════════════════════════════════`,
   ].filter(Boolean).join("\n");
 }
 
@@ -915,14 +903,15 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     : "";
   const assessmentFileSnapshots = _buildAssessmentFileSnapshots({ cwd, assessmentContext, taskSpec });
 
-  // Extract the structured log (DEV LOG or ARTIFICER LOG) as the primary
+  // Extract the structured DEV/ARTIFICER result (with legacy log support) as
+  // the primary
   // assessment input. The assessor reads actual files for verification — it
   // doesn't need the full tool-call stream. Only include the raw stream as
   // a fallback if no structured log is found.
-  const logMatch = output.match(/---\s*(?:DEV|ARTIFICER) LOG START\s*---\s*([\s\S]*?)---\s*(?:DEV|ARTIFICER) LOG END\s*---/);
+  const logMatch = output.match(/---\s*(DEV (?:RESULT|LOG)|ARTIFICER (?:RESULT|LOG)) START\s*---\s*([\s\S]*?)---\s*\1 END\s*---/i);
   let truncatedOutput;
   if (logMatch) {
-    truncatedOutput = `AGENT COMPLETION LOG:\n${logMatch[1].trim()}`;
+    truncatedOutput = `AGENT COMPLETION RESULT:\n${logMatch[2].trim()}`;
     // If the log references issues, include a small window of raw output
     // around the log for context (last 3000 chars before the log)
     const logStart = output.indexOf(logMatch[0]);
@@ -1153,12 +1142,16 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   const prompt = [
     `Assess this completed task. Check the actual files, not just the dev's claims.`,
     `Use the SCOPED DIFF NARRATIVE as the quick map of what changed, then use any SCOPED GIT DIFF below as the primary verification view for exact changes. Use SCOPED FILE SNAPSHOTS as fallback/current-state context when the diff alone is insufficient. Do not ask the human to paste repository files or diffs that are already in the workspace; if verification still fails due to environment/tooling limits, return blocked without human_questions requesting repo file contents.`,
-    `If the dev log marks VERIFICATION_UNAVAILABLE for a command or tool outside your issued surface, discard that optional verification method. It is not evidence of failure and is not, by itself, a reason to block.`,
+    `If the bounded role result marks VERIFICATION_UNAVAILABLE for a command or tool outside your issued surface, discard that optional verification method. It is not evidence of failure and is not, by itself, a reason to block.`,
     Number.isFinite(Number(fallbackReads)) ? `Fallback read budget for this assessment attempt: ${Math.max(0, Number(fallbackReads))}.` : null,
     workflowModeBlock,
     verificationCapabilityBlock,
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
+    ``,
+    `ORIGINAL WORK ITEM OBJECTIVE:`,
+    promptLiteral("TITLE", workItem?.title || ""),
+    promptLiteral("DESCRIPTION", workItem?.description || "(none)"),
     ``,
     `TASK SPECIFICATION:`,
     taskSpec || `Title: ${job.title}`,
@@ -1182,14 +1175,11 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
 
   const remoteAssessmentInstructions = _buildRemoteAssessmentInstructions({
     job,
+    workItem,
     taskSpec,
-    verificationCapabilityBlock,
     workflowModeBlock,
     atlasBlock,
     priorAssessmentFindings,
-    fileVerification,
-    registeredTestRunEvidence,
-    assessmentDiffNarrative,
     fallbackReads,
   });
   const localAssessmentEvidence = _buildLocalAssessmentEvidence({

@@ -219,7 +219,7 @@ export class DeveloperRole extends BaseRole {
           "DB-ONLY TASK MODE:",
           `- This job's entire change is in the project database, made through the project_db_query tool (granted permissions: ${dbGrants.join(", ")}).`,
           "- File tools are read-only for this job: do not attempt repo edits, file creation, or FILE_REQUESTs for this work.",
-          "- Verify your changes with SELECT/inspection statements and put that evidence in the dev log criteria_check.",
+          "- Inspect the resulting state with SELECT when useful. The worker records issued-tool evidence; do not copy it into DEV RESULT.",
           "- A COMPLETE status with zero file changes is the expected success shape for this task.",
         ].join("\n")
         : null,
@@ -228,10 +228,10 @@ export class DeveloperRole extends BaseRole {
 
   buildContract() {
     // No local prompt text: the dev role prompt (prompts/roles/dev.md) and the
-    // DEV LOG contract (prompts/contracts/dev-log.md) are the relay-compiled
+    // DEV RESULT contract (prompts/contracts/dev-log.md) are the relay-compiled
     // system prompt. They own execute-exactly, hard file scope,
-    // VERIFIED_NO_CHANGE (no decorative churn), the DEV LOG markers/fields, and
-    // the criteria_check rules incl. VERIFICATION_UNAVAILABLE. All prompts
+    // VERIFIED_NO_CHANGE (no decorative churn), the result markers/fields, and
+    // VERIFICATION_UNAVAILABLE semantics. All prompts are
     // remote-owned (artificer pattern).
     return "";
   }

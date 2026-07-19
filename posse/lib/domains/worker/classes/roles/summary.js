@@ -11,6 +11,7 @@ import {
   spawnFailureForRole,
   spawnSuccessForRole,
 } from "../../../../shared/policies/functions/spawn-policy.js";
+import { getPromptBundleRolePrompt } from "../../../remote/functions/prompt-bundle.js";
 
 const DEFAULT_DEPS = {
   currentExecutionProvider: defaultCurrentExecutionProvider,
@@ -39,8 +40,7 @@ export class SummaryRole extends BaseRole {
   buildContract({ job } = {}) {
     const { loadNudges } = this.roleDeps();
     return [
-      "Summarize all the work done for this work item.",
-      "",
+      getPromptBundleRolePrompt("summary").trim(),
       job ? loadNudges(job.id) : "",
     ].filter(Boolean).join("\n");
   }
@@ -53,6 +53,7 @@ export class SummaryRole extends BaseRole {
       modelTier: ctx.tier,
       reasoningEffort: "low",
       activity: `summarizing: ${shortJobTitle(job).slice(0, 40)}`,
+      skipRolePrompt: true,
     };
   }
 

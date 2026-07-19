@@ -1,6 +1,6 @@
 // lib/domains/worker/functions/helpers/artifact-output.js
 //
-// Helpers for artifact manifests, artificer log parsing, and fallback
+// Helpers for artifact manifests, artificer result parsing, and fallback
 // artifact materialization when the model returns usable content without files.
 
 import fs from "fs";
@@ -27,15 +27,15 @@ export function filterNewOrChangedManifestFiles(fullManifest, preManifestState =
 
 export function hasStructuredArtificerLog(output = "") {
   const text = String(output || "");
-  const match = text.match(/---\s*ARTIFICER LOG START\s*---\s*([\s\S]*?)---\s*ARTIFICER LOG END\s*---/i);
+  const match = text.match(/---\s*ARTIFICER (RESULT|LOG) START\s*---\s*([\s\S]*?)---\s*ARTIFICER \1 END\s*---/i);
   if (!match) return false;
-  return /status:\s*(COMPLETE|BLOCKED|PARTIAL)/i.test(match[1] || "");
+  return /status:\s*(COMPLETE|BLOCKED|PARTIAL)/i.test(match[2] || "");
 }
 
 export function extractArtificerLog(output = "") {
   const text = String(output || "");
-  const match = text.match(/---\s*ARTIFICER LOG START\s*---\s*([\s\S]*?)---\s*ARTIFICER LOG END\s*---/i);
-  return match ? match[1].trim() : "";
+  const match = text.match(/---\s*ARTIFICER (RESULT|LOG) START\s*---\s*([\s\S]*?)---\s*ARTIFICER \1 END\s*---/i);
+  return match ? match[2].trim() : "";
 }
 
 export function structuredArtificerStatus(output = "") {
@@ -57,7 +57,7 @@ export function artifactOutputClaimsReusableComplete(output = "") {
 
 export function stripArtificerLog(output = "") {
   return String(output || "")
-    .replace(/---\s*ARTIFICER LOG START\s*---[\s\S]*?---\s*ARTIFICER LOG END\s*---/i, "")
+    .replace(/---\s*ARTIFICER (RESULT|LOG) START\s*---[\s\S]*?---\s*ARTIFICER \1 END\s*---/i, "")
     .trim();
 }
 

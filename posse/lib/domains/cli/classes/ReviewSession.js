@@ -27,7 +27,6 @@ export class ReviewSession {
     const {
       autoMergeCompletedWorkItems,
       listWorkItems,
-      isReviewableWorkItem,
       NO_TUI,
       Display,
       cmdDashboard,
@@ -87,7 +86,7 @@ export class ReviewSession {
   } else if (!reviewAutoMerge.acquired) {
     console.log(`\n  ${C.yellow}Auto-merge skipped: another merge is already in progress.${C.reset}`);
   }
-  const workItems = listWorkItems(["complete", "failed"]).filter(isReviewableWorkItem);
+  const workItems = this.listReviewableWorkItemsForApproval();
 
   if (workItems.length === 0) {
     if (targetDirtyAtReviewStart) {

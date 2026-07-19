@@ -23,6 +23,13 @@ function settingValue(key) {
 }
 
 export function getPosseRemoteUrl() {
+  // The frozen task A/B harness may target an isolated loopback compiler so
+  // prompt-policy candidates can be exercised before deployment. Production
+  // continues to use the singular compiled origin.
+  if (process.env.POSSE_TEST_RUN) {
+    const testUrl = String(process.env.POSSE_REMOTE_URL || "").trim();
+    if (testUrl) return testUrl;
+  }
   // Singular authoritative remote — the compiled default. No longer a settable
   // knob: `posse_remote_url` was an early-testing override that could strand the
   // client (and native heartbeat auth) on a dead localhost endpoint. Always

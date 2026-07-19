@@ -89,6 +89,7 @@ export const SETTING_KEYS = Object.freeze({
   ATLAS_RESULT_REF_PAGING: "atlas_result_ref_paging",
   ATLAS_RESULT_REF_PAGING_MIN_CHARS: "atlas_result_ref_paging_min_chars",
   ATLAS_PREFETCH_ENTRYPOINT_RANK: "atlas_prefetch_entrypoint_rank",
+  ATLAS_SURVEY_BRIEF_EDGE_COUNT: "atlas_survey_brief_edge_count",
   ATLAS_SURVEY_EDGE_CAP: "atlas_survey_edge_cap",
   ATLAS_TOOLS_DISABLED: "atlas_tools_disabled",
   ATLAS_TREE_COMPRESSION_MODE: "atlas_tree_compression_mode",

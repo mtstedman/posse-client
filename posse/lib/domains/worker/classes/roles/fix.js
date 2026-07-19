@@ -329,8 +329,8 @@ export class FixRole extends BaseRole {
 
   buildContract() {
     // No local prompt text. Fix compiles as role "dev", so the dev role prompt
-    // (dev.md) + DEV LOG contract (dev-log.md) are the relay-compiled system
-    // prompt (VERIFIED_NO_CHANGE, DEV LOG format, criteria_check rules incl.
+    // (dev.md) + DEV RESULT contract (dev-log.md) are the relay-compiled system
+    // prompt (VERIFIED_NO_CHANGE, compact result semantics incl.
     // VERIFICATION_UNAVAILABLE). The fix-retry framing is already carried by the
     // injected FIX INSTRUCTIONS + assessor feedback + PREVIOUS DEV OUTPUT
     // context in this role's run(). All prompts remote-owned (artificer pattern).

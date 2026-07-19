@@ -130,7 +130,7 @@ export class PlannerRole extends BaseRole {
         plannerCtx.desiredOutputsBlock,
         job ? loadNudges(job.id, { attemptId: plannerCtx.attemptId }) : "",
         plannerCtx.plannerRoutingContext,
-        plannerCtx.projectDir ? `You have Read, Glob, and Grep tools. Project root: ${plannerCtx.projectDir.replace(/\\/g, "/")}` : null,
+        plannerCtx.projectDir ? `PROJECT ROOT: ${plannerCtx.projectDir.replace(/\\/g, "/")}` : null,
         "",
         "Do NOT emit the final executable task JSON array.",
         "Do NOT create a compromise plan by averaging ideas.",
@@ -179,25 +179,9 @@ export class PlannerRole extends BaseRole {
       plannerCtx.desiredOutputsBlock,
       job ? loadNudges(job.id, { attemptId: plannerCtx.attemptId }) : "",
       plannerCtx.plannerRoutingContext,
-      plannerCtx.projectDir ? `You have Read, Glob, and Grep tools. Project root: ${plannerCtx.projectDir.replace(/\\/g, "/")}` : null,
+      plannerCtx.projectDir ? `PROJECT ROOT: ${plannerCtx.projectDir.replace(/\\/g, "/")}` : null,
       "",
-      "Output a JSON array of tasks. Each task must have: title, compact task_spec, 3-7 non-overlapping success_criteria, depends_on_index.",
-      "SEMANTIC FIDELITY: The task array must collectively preserve every requirement in the original work item. Keep universal quantifiers, negations, exactness constraints, ordering rules, limits, and exceptions intact; never weaken an unconditional requirement by adding a condition.",
-      "Before responding, silently compare every task_spec and success criterion with the original work item. Correct any omission or contradiction, especially distinctions such as nullish versus falsy values and every/all/any versus some.",
-      "For dev tasks, keep task_spec near 1,200 characters and never above 2,000. Do not paste source bodies, research summaries, evidence prose, or hash-ref stubs into task_spec/success_criteria; use task-specific dev_brief and its ref lanes instead.",
-      "Default code tasks may omit job_type (or use job_type \"dev\" with task_mode \"code\"); non-code tasks set job_type per the pipeline routing context.",
-      "Optional: model_tier and reasoning_effort are planner hints; deterministic scope/risk policy may lower or raise them before dispatch.",
-      "For repo code tasks (job_type \"dev\", task_mode \"code\"), include dev_mode using one allowed value from the planner dev-mode contract.",
-      "Optional: skills: [\"<id>\", ...] for dev code tasks only. Choose only ids listed in Available dev skills; omit skills when none apply. Do not set skills on artificer, promote, or human_input tasks.",
-      "Optional: deepthink_budget: \"low\" | \"normal\" | \"high\" | \"xhigh\" for tasks that need lower or higher analysis/tool-turn budget. Legacy deepthink: true is also accepted and maps to high.",
-      "For repo code tasks, include risk: 1-5, risk_tags: [\"auth\" | \"security\" | \"schema\" | \"migration\" | \"persistence\" | \"delete\" | \"payment\" | \"concurrency\" | \"git\", ...], and scope_confidence: \"high\" | \"medium\" | \"low\".",
-      "Do not emit complexity; downstream budget is derived from declared scope, risk, verification path, and deterministic structural facts.",
       atlasDevBriefContract,
-      "If job_type is \"promote\", also include mappings: [{ pattern, dest }] and optionally source_dir. Use promote for deterministic artifact copies from .posse/resources/artifacts into repo paths.",
-      "For repo code tasks, include file scope explicitly: files_to_modify (existing files to edit), files_to_create (exact new files), files_to_delete (exact existing files to remove), and create_roots only when a free-write directory is truly needed.",
-      "For non-code tasks, artifact tasks, promote tasks, and human_input tasks, omit files_to_modify unless the task genuinely edits an existing repo file.",
-      "Use files_to_delete whenever a task requires removing files. Do not hide deletions inside prose alone.",
-      "For report/content/image/intake_processing tasks, use the absolute artifact directories above as output_root and create_roots. These paths are stable across all execution contexts.",
     ].filter(Boolean).join("\n");
   }
 
@@ -419,7 +403,7 @@ export class PlannerRole extends BaseRole {
       image: [
         "==== WORK ITEM MODE: image ====",
         "This WI produces IMAGE ARTIFACTS, NOT repo code changes.",
-        "The artificer agent has a built-in generate_image tool (OpenAI or Grok, selected by Posse image routing) - it does NOT need to write scripts, install packages, or call APIs manually.",
+        "The artificer uses its issued image-generation capability; it does not need a generation script, package installation, or manual API call.",
         "",
         "PLANNING RULES:",
         "- Each image task should be ONE task: \"Generate [description]\"",
@@ -497,15 +481,12 @@ export class PlannerRole extends BaseRole {
         ].filter(Boolean).join("\n")
       : "";
     const plannerRoutingContext = [
-      "PIPELINE ROUTING CONTEXT (treat this as source-of-truth project configuration):",
-      "- Non-code deliverables belong to the ARTIFICER role unless the task is a deterministic promote copy step.",
+      "RUNTIME ROUTING CATALOG (authoritative for this work item):",
       `- ${plannerImageRoutingSummary}`,
       `- Image providers: available=${plannerImageProviders.join(", ")}, selected=${plannerImageProtocol.provider}, model=${plannerImageProtocol.model || getDefaultImageModel(plannerImageProtocol.provider)}`,
       `- Image provider readiness: ${plannerImageReadinessSummary}`,
       `- Admin-backed provider selections: planner=${job.provider || getProviderName("planner")}, artificer=${getProviderName("artificer")}, dev=${getProviderName("dev")}`,
       availableSkillsBlock,
-      "- If a task produces images, reports, generated content, or intake outputs, route it to job_type \"artificer\" with the matching task_mode.",
-      "- If repo code must consume artificer output, insert a \"promote\" job between the artificer task and the dev task.",
       // Conditional: empty when this repo has no project-db config, so
       // unconfigured repos see no db-task guidance at all.
       ...buildProjectDbRoutingLines(worker.projectDir),

@@ -35,7 +35,7 @@ function uniqueScopeFiles(...groups) {
   return [...new Set(groups.flat().filter(Boolean))];
 }
 
-const COMPLETION_BLOCK_RE = /---\s*(DEV RESULT|DEV LOG|ARTIFICER LOG) START\s*---\s*([\s\S]*?)---\s*\1 END\s*---/i;
+const COMPLETION_BLOCK_RE = /---\s*(DEV RESULT|DEV LOG|ARTIFICER RESULT|ARTIFICER LOG) START\s*---\s*([\s\S]*?)---\s*\1 END\s*---/i;
 
 function matchAgentCompletionBlock(output) {
   return String(output || "").match(COMPLETION_BLOCK_RE);
@@ -175,7 +175,7 @@ export function parseAgentCompletionLog(output = "") {
 
   return {
     found: true,
-    kind: label === "ARTIFICER LOG" ? "artificer" : "dev",
+    kind: label.startsWith("ARTIFICER ") ? "artificer" : "dev",
     body,
     status,
     blockReason,

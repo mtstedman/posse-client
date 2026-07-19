@@ -186,7 +186,7 @@ function _buildImageArtifactRecoveryPayload({
       "- Use the built-in `generate_image` tool for each PNG that must be created or replaced.",
       "- Do not create Python/Pillow scripts, JavaScript/canvas helpers, shell scripts, SVG source files, Markdown notes, disabled helpers, or any other sidecar files in output_root.",
       "- output_root must contain only the final image deliverables when the job finishes.",
-      "- If `generate_image` is unavailable or cannot complete the requested assets, report BLOCKED or PARTIAL in the ARTIFICER LOG instead of synthesizing images with code.",
+      "- If `generate_image` is unavailable or cannot complete the requested assets, report BLOCKED or PARTIAL in ARTIFICER RESULT instead of synthesizing images with code.",
       "",
       originalTaskSpec ? `ORIGINAL TASK:\n${originalTaskSpec}` : null,
       `REPAIR INSTRUCTIONS:\n${safeInstructions}`,

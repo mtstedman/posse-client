@@ -4,7 +4,7 @@
 // Uses better-sqlite3 (synchronous) for simplicity and atomicity.
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
-import { MUTATING_JOB_TYPES } from "../../../catalog/job.js";
+import { MUTATING_JOB_TYPES, ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
 import { parseJobPayload } from "./payload.js";
@@ -24,7 +24,7 @@ import {
   now,
   runImmediateTransaction,
 } from "./common.js";
-import { logEvent } from "./events.js";
+import { flushEventsNow, logEvent } from "./events.js";
 import { getIntSetting, getSetting } from "./settings.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
@@ -458,15 +458,54 @@ function reviewGateNeedsRetirement(job) {
   return !["succeeded", "canceled"].includes(job?.status);
 }
 
+const REVIEW_SETTLEMENT_ORIGINAL_STATUSES = new Set([
+  "waiting_on_human",
+  "waiting_on_review",
+  "blocked",
+  "awaiting_assessment",
+]);
+
+function workItemApprovalGateOriginalJobId(job) {
+  if (job?.job_type !== "human_input") return null;
+  const payload = parseJobPayload(job);
+  const originalJobId = Number(payload.original_job_id || job.parent_job_id);
+  return Number.isInteger(originalJobId) && originalJobId > 0 ? originalJobId : null;
+}
+
+function canRetireHumanGateForWorkItemApproval(job) {
+  if (job?.job_type !== "human_input" || isPushOfferJob(job)) return false;
+  const payload = parseJobPayload(job);
+  if (payload.subtype === "plan_approval") return false;
+  if (
+    payload.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
+    || payload.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE
+  ) return false;
+  return reviewGateNeedsRetirement(job);
+}
+
 function pendingWorkItemReviewSettlement(id) {
   const jobs = listJobsByWorkItem(id);
+  // Explicit work-item approval is the terminal decision for recovery and
+  // assessor gates too. Older gates were sometimes untyped, and recovery
+  // originals can be failed/blocked/awaiting assessment rather than exactly
+  // waiting_on_review. Keep pre-work plan and one-shot selection gates
+  // protected: those authorize work that has not happened yet.
+  const gates = jobs.filter(canRetireHumanGateForWorkItemApproval);
+  const referencedOriginalIds = new Set(
+    gates.map(workItemApprovalGateOriginalJobId).filter((jobId) => jobId != null),
+  );
   const originals = jobs.filter((job) => (
-    job.job_type !== "human_input" && job.status === "waiting_on_review"
-  ));
-  const originalIds = new Set(originals.map((job) => Number(job.id)));
-  const gates = jobs.filter((job) => (
-    reviewGateNeedsRetirement(job)
-    && originalIds.has(reviewGateOriginalJobId(job))
+    job.job_type !== "human_input"
+    && (
+      job.status === "waiting_on_review"
+      || (
+        referencedOriginalIds.has(Number(job.id))
+        && (
+          REVIEW_SETTLEMENT_ORIGINAL_STATUSES.has(job.status)
+          || job.assessor_verdict === "needs_review"
+        )
+      )
+    )
   ));
   return { originals, gates };
 }
@@ -485,14 +524,16 @@ function settleWorkItemReviewPlan(id, plan, { resolution }) {
   }
 
   for (const job of plan.originals || []) {
-    if (!forceUpdateJobStatus(job.id, "succeeded", {
-      expectedStatuses: ["waiting_on_review"],
-    })) {
-      continue;
+    let changed = false;
+    if (REVIEW_SETTLEMENT_ORIGINAL_STATUSES.has(job.status)) {
+      changed = forceUpdateJobStatus(job.id, "succeeded", {
+        expectedStatuses: [job.status],
+      }) || changed;
     }
-    if (job.assessor_verdict !== "pass") {
-      setAssessorVerdict(job.id, "pass", "high", { force: true });
+    if (job.assessor_verdict === "needs_review") {
+      changed = setAssessorVerdict(job.id, "pass", "high", { force: true }) || changed;
     }
+    if (!changed) continue;
     logEvent({
       work_item_id: id,
       job_id: job.id,
@@ -512,7 +553,8 @@ function settleMergedWorkItemReviewJobs(id) {
   const jobs = listJobsByWorkItem(id);
   const plan = {
     originals: jobs.filter((job) => (
-      job.job_type !== "human_input" && job.status === "waiting_on_review"
+      job.job_type !== "human_input"
+      && (job.status === "waiting_on_review" || job.assessor_verdict === "needs_review")
     )),
     // Once the work item is actually merged, every remaining review gate is
     // stale even if its original row was already made terminal elsewhere.
@@ -553,14 +595,44 @@ export function cancelPendingReviewGatesForOriginal(originalJobId, { exceptJobId
 
 /** Repair review rows left behind by older/racing merge finalization. */
 export function reconcileMergedWorkItemReviewStates() {
+  // A merge event is durable evidence that Git completed even if the process
+  // died before merge_state was written. Flush first so this repair sees both
+  // persisted and just-buffered events without nesting event writes inside its
+  // transaction.
+  flushEventsNow();
   return runInTransaction(() => {
-    const merged = listWorkItems().filter((wi) => wi.merge_state === "merged");
+    const db = getDb();
+    const merged = db.prepare(`
+      SELECT DISTINCT wi.*
+      FROM work_items wi
+      LEFT JOIN events event
+        ON event.work_item_id = wi.id
+       AND event.event_type = ?
+      WHERE wi.merge_state = 'merged'
+         OR event.id IS NOT NULL
+      ORDER BY wi.created_at
+    `).all(EVENT_TYPES.WORK_ITEM_MERGED);
     let workItems = 0;
     let resolved = 0;
     let canceled = 0;
     for (const wi of merged) {
+      let changed = false;
+      if (wi.merge_state !== "merged") {
+        db.prepare(`
+          UPDATE work_items SET merge_state = 'merged', updated_at = ? WHERE id = ?
+        `).run(now(), wi.id);
+        releaseWorkItemLocksForMergeState(wi.id, "merged");
+        clearCrossWiMergeDependenciesForWorkItem(wi.id, "work_item_merged_recovered");
+        changed = true;
+      }
       const result = settleMergedWorkItemReviewJobs(wi.id);
-      if (result.resolved > 0 || result.canceled > 0) workItems += 1;
+      if (wi.status !== "complete") {
+        changed = updateWorkItemStatus(wi.id, "complete", {
+          allowTerminalFailureBlockers: true,
+          resolvePendingReviews: true,
+        }) || changed;
+      }
+      if (changed || result.resolved > 0 || result.canceled > 0) workItems += 1;
       resolved += result.resolved;
       canceled += result.canceled;
     }

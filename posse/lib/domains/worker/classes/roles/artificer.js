@@ -180,25 +180,9 @@ export class ArtificerRole extends BaseRole {
 
     const taskMode = payload.task_mode || "content";
     const needsImageGeneration = !!(payload.needs_image_generation || taskMode === "image");
-    const imageGenerationContract = needsImageGeneration
-      ? [
-        "IMAGE GENERATION CONTRACT:",
-        "- Use the built-in `generate_image` tool for new or replacement image deliverables.",
-        "- Do not generate images by writing Python/Pillow scripts, JavaScript/canvas helpers, shell scripts, SVG source files, Markdown notes, disabled helpers, or other sidecar files.",
-        "- The output folder must contain only final deliverable image files when you finish.",
-        "- If `generate_image` is unavailable or cannot satisfy the task, report BLOCKED or PARTIAL in the ARTIFICER LOG instead of inventing a code-based image pipeline.",
-        "",
-      ].join("\n")
-      : null;
-
     const outputRootDisplay = outputRoot || "(not set - check task spec)";
     const buildArtificerPrompt = async (extraSections = []) => buildPromptAsync(packet, [
       loadNudges(job.id, { attemptId: ctx.attemptId }),
-      "Produce the deliverables described below.",
-      "Your working directory IS the output folder. Use plain filenames (e.g. \"image.png\", \"report.md\") - they will land in the correct output directory.",
-      "Do not edit repo source files.",
-      imageGenerationContract,
-      "",
       promptLiteral("WORK ITEM", workItem.title),
       promptLiteral("TASK", job.title),
       "",
@@ -211,9 +195,6 @@ export class ArtificerRole extends BaseRole {
       promptLiteral("INSTRUCTIONS", payload.task_spec || job.title),
       "",
       ...extraSections,
-      "You must write the deliverable file(s) into output_root before finishing.",
-      "When finished, output your completion log between --- ARTIFICER LOG START --- and --- ARTIFICER LOG END --- markers.",
-      "Include: task_id, status (COMPLETE or BLOCKED or PARTIAL), summary, deliverables, criteria_check.",
     ].filter(Boolean).join("\n"));
 
     const prompt = await buildArtificerPrompt();
@@ -409,7 +390,7 @@ export class ArtificerRole extends BaseRole {
         layer: "artificer",
         upstream: "artificer_output",
         classification: "missing_structured_log",
-        detail: `${job.provider || getProviderName("artificer")} returned artifact output without ARTIFICER LOG wrapper`,
+        detail: `${job.provider || getProviderName("artificer")} returned artifact output without an ARTIFICER RESULT wrapper`,
         snippet: output,
       });
       const fallbackPool = Array.isArray(job._allowedProviders) && job._allowedProviders.length > 0
@@ -453,14 +434,14 @@ export class ArtificerRole extends BaseRole {
       }
     }
 
-    const logMatch = output.match(/---\s*ARTIFICER LOG START\s*---\s*([\s\S]*?)---\s*ARTIFICER LOG END\s*---/);
+    const logMatch = output.match(/---\s*ARTIFICER (RESULT|LOG) START\s*---\s*([\s\S]*?)---\s*ARTIFICER \1 END\s*---/i);
     if (logMatch) {
       storeArtifact({
         work_item_id: job.work_item_id,
         job_id: job.id,
         attempt_id: ctx.attemptId,
         artifact_type: "log",
-        content_long: logMatch[1].trim(),
+        content_long: logMatch[2].trim(),
       });
     }
 

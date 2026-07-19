@@ -28,6 +28,7 @@ import {
   spawnFailureForRole,
   spawnSuccessForRole,
 } from "../../../../shared/policies/functions/spawn-policy.js";
+import { getPromptBundleRolePrompt } from "../../../remote/functions/prompt-bundle.js";
 
 const DEFAULT_DEPS = {
   buildDeterministicDelegations: defaultBuildDeterministicDelegations,
@@ -115,15 +116,8 @@ export class DelegateRole extends BaseRole {
   buildContract({ job } = {}) {
     const { loadNudges } = this.roleDeps();
     return [
-      "You are a delegator. Assign the optimal provider and model tier to each task.",
-      "",
+      getPromptBundleRolePrompt("delegator").trim(),
       job ? loadNudges(job.id) : "",
-      "IMPORTANT: You may ONLY assign providers from the list above for each role.",
-      "Dev and fix jobs use the \"dev\" role providers. Assess jobs use \"assessor\" providers.",
-      "",
-      "ROUTING RULE: To maintain comparison data, route at least 15-20% of tasks to each",
-      "available provider (not 100% to one). Without samples from both providers, there is",
-      "no basis for knowing which performs better. Spread tasks - don't converge to one provider.",
     ].filter(Boolean).join("\n");
   }
 
@@ -135,6 +129,7 @@ export class DelegateRole extends BaseRole {
       modelTier: ctx.tier,
       reasoningEffort: job.reasoning_effort || "low",
       activity: `delegating: ${shortJobTitle(job).slice(0, 40)}`,
+      skipRolePrompt: true,
     };
   }
 

@@ -10,6 +10,7 @@ import {
   getInsightsByWorkItem,
   listJobsByWorkItem,
   listWorkItems,
+  reconcileMergedWorkItemReviewStates,
 } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { workItemCost } from "../../billing/functions/cost.js";
@@ -353,6 +354,10 @@ export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
 }
 
 export function listReviewableWorkItemsForApproval(isReviewableWorkItem) {
+  // Standalone `posse review` does not pass through RunSession boot. Repair
+  // persisted merge/review races here as well so an already-merged item cannot
+  // strand the approval screen indefinitely.
+  reconcileMergedWorkItemReviewStates();
   const predicate = typeof isReviewableWorkItem === "function" ? isReviewableWorkItem : () => true;
   return listWorkItems(["complete", "failed"]).filter(predicate);
 }

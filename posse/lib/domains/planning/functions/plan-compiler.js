@@ -1702,12 +1702,11 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             attempt_id: null,
             artifact_type: "response",
             content_long: [
-              "--- ARTIFICER LOG START ---",
+              "--- ARTIFICER RESULT START ---",
               "status: COMPLETE",
               `summary: ${reuseMsg}`,
-              `deliverables: ${t._planner_reuse_existing_outputs.join(", ")}`,
-              "criteria_check: planner verified existing outputs before execution",
-              "--- ARTIFICER LOG END ---",
+              "notes: none",
+              "--- ARTIFICER RESULT END ---",
             ].join("\n"),
           });
           logEvent({

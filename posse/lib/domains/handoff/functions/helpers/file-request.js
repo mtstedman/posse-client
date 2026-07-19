@@ -188,7 +188,7 @@ export function parseFileRequest(output) {
     const inFence = fenceState.inFence;
     const nextFenceState = nextMarkdownFenceState(fenceState, line);
     if (!inFence && /^\s*FILE_REQUEST_END\s*$/i.test(line)) break;
-    if (!inFence && /^---\s*(?:DEV|ARTIFICER) LOG/i.test(line)) break;
+    if (!inFence && /^---\s*(?:DEV|ARTIFICER) (?:RESULT|LOG)/i.test(line)) break;
     if (!inFence) blockLines.push(line);
     fenceState = nextFenceState;
   }

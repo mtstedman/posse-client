@@ -218,6 +218,10 @@ export class RemotePromptClient {
   }
 
   shouldUseNativeClient() {
+    // Candidate prompt-policy harnesses run against an isolated loopback Rust
+    // compiler before its native-client artifact exists. Keep this escape
+    // hatch test-only; production remains hard-wired to the native client.
+    if (process.env.POSSE_TEST_RUN && process.env.POSSE_REMOTE_FORCE_NODE === "1") return false;
     if (!this.usesDefaultFetch || !this.hasAuthentication()) return false;
     if (!this.nativeAuthEnvelope()) return false;
     if (this.nativeManager?.nativeAuthManager !== this.authManager) return false;

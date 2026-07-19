@@ -1955,7 +1955,9 @@ function _finishAtlasSurveyPrefetch(packet, result, startedAt) {
   const durationMs = Date.now() - startedAt;
   const out = { ...result, durationMs };
   _recordAtlasSurveyPrefetchDiagnostic(packet, out);
-  return _compactAtlasSurveyPrefetchResult(out);
+  return _compactAtlasSurveyPrefetchResult(out, {
+    edgeLimit: _surveyBriefEdgeLimit(packet),
+  });
 }
 
 const MAX_SURVEY_BRIEF_FILES = 10;
@@ -1964,12 +1966,18 @@ const MAX_SURVEY_BRIEF_SYMBOLS = 8;
 const MAX_SURVEY_BRIEF_SYMBOLS_PER_FILE = 4;
 const SURVEY_REF_PAGE_FILES = 10;
 
-function _compactAtlasSurveyPrefetchResult(result) {
+function _surveyBriefEdgeLimit(packet) {
+  const config = packet?.atlas_config || getAtlasIntegrationConfig();
+  const parsed = Number(config?.surveyBriefEdgeCount);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(32, Math.floor(parsed))) : MAX_SURVEY_BRIEF_EDGES;
+}
+
+function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIEF_EDGES } = {}) {
   if (!result?.ok) return result;
   const files = Array.isArray(result.files) ? result.files : [];
   const callMap = result.callMap && typeof result.callMap === "object" ? result.callMap : null;
   const metrics = result.metrics && typeof result.metrics === "object" ? result.metrics : {};
-  const summary = _compactSurveyCallMap(callMap, metrics);
+  const summary = _compactSurveyCallMap(callMap, metrics, { edgeLimit });
   const fileCount = Number.isFinite(Number(metrics.fileCount))
     ? Number(metrics.fileCount)
     : files.length;
@@ -2009,12 +2017,12 @@ function _compactAtlasSurveyPrefetchResult(result) {
   };
 }
 
-function _compactSurveyCallMap(callMap, metrics = {}) {
+function _compactSurveyCallMap(callMap, metrics = {}, { edgeLimit = MAX_SURVEY_BRIEF_EDGES } = {}) {
   const internal = Array.isArray(callMap?.edges) ? callMap.edges : [];
   const inbound = Array.isArray(callMap?.inbound) ? callMap.inbound : [];
   const outbound = Array.isArray(callMap?.outbound) ? callMap.outbound : [];
   const unresolved = Array.isArray(callMap?.unresolved) ? callMap.unresolved : [];
-  const topEdges = _compactSurveyTopEdges({ inbound, outbound, internal, unresolved });
+  const topEdges = _compactSurveyTopEdges({ inbound, outbound, internal, unresolved }, edgeLimit);
   return {
     counts: {
       internal: _finiteMetric(metrics.internalEdgeCount, internal.length),
@@ -2023,18 +2031,36 @@ function _compactSurveyCallMap(callMap, metrics = {}) {
       unresolved: _finiteMetric(metrics.unresolvedEdgeCount, unresolved.length),
     },
     topEdges,
-    topSymbols: _compactSurveyEdgeSymbols(topEdges),
+    topSymbols: _compactSurveyEdgeSymbols(topEdges, edgeLimit > MAX_SURVEY_BRIEF_EDGES ? 16 : MAX_SURVEY_BRIEF_SYMBOLS),
     truncated: !!(callMap?.edgesTruncated || callMap?.inboundTruncated || callMap?.outboundTruncated),
   };
 }
 
-function _compactSurveyTopEdges({ inbound = [], outbound = [], internal = [], unresolved = [] } = {}) {
-  return [
-    ..._compactSurveyEdges(inbound, "inbound", MAX_SURVEY_BRIEF_EDGES),
-    ..._compactSurveyEdges(outbound, "outbound", MAX_SURVEY_BRIEF_EDGES),
-    ..._compactSurveyEdges(internal, "internal", MAX_SURVEY_BRIEF_EDGES),
-    ..._compactSurveyEdges(unresolved, "unresolved", MAX_SURVEY_BRIEF_EDGES),
-  ].slice(0, MAX_SURVEY_BRIEF_EDGES);
+function _compactSurveyTopEdges({ inbound = [], outbound = [], internal = [], unresolved = [] } = {}, limit = MAX_SURVEY_BRIEF_EDGES) {
+  const boundedLimit = Math.max(0, Math.min(32, Math.floor(Number(limit) || 0)));
+  const groups = [
+    _compactSurveyEdges(inbound, "inbound", boundedLimit),
+    _compactSurveyEdges(outbound, "outbound", boundedLimit),
+    _compactSurveyEdges(internal, "internal", boundedLimit),
+    _compactSurveyEdges(unresolved, "unresolved", boundedLimit),
+  ];
+  if (boundedLimit <= MAX_SURVEY_BRIEF_EDGES) return groups.flat().slice(0, boundedLimit);
+
+  // Expanded previews should reveal more kinds of topology, not merely extend
+  // a long list of inbound test hubs. Round-robin each count-ranked category;
+  // the complete unabridged map remains in the retained survey pages.
+  const balanced = [];
+  for (let rank = 0; balanced.length < boundedLimit; rank += 1) {
+    let added = false;
+    for (const group of groups) {
+      if (!group[rank]) continue;
+      balanced.push(group[rank]);
+      added = true;
+      if (balanced.length >= boundedLimit) break;
+    }
+    if (!added) break;
+  }
+  return balanced;
 }
 
 function _finiteMetric(value, fallback = 0) {
@@ -2063,7 +2089,7 @@ function _compactSurveySymbolName(value) {
     .slice(0, 120);
 }
 
-function _compactSurveyEdgeSymbols(edges) {
+function _compactSurveyEdgeSymbols(edges, limit = MAX_SURVEY_BRIEF_SYMBOLS) {
   const counts = new Map();
   let order = 0;
   for (const edge of Array.isArray(edges) ? edges : []) {
@@ -2081,7 +2107,7 @@ function _compactSurveyEdgeSymbols(edges) {
   }
   return [...counts.values()]
     .sort((a, b) => a.order - b.order || b.count - a.count)
-    .slice(0, MAX_SURVEY_BRIEF_SYMBOLS)
+    .slice(0, Math.max(0, Number(limit) || 0))
     .map(({ symbol, count }) => ({ symbol, count }));
 }
 
@@ -2788,7 +2814,9 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
     ? Number(sc.fileCount)
     : (Array.isArray(sc.files) ? sc.files.length : 0);
   if (fileCount > 0) lines.push(`  files covered: ${fileCount}${sc.truncated ? " (survey hit file cap)" : ""}`);
-  const summary = sc.callMapSummary || _compactSurveyCallMap(sc.callMap, sc.metrics || {});
+  const summary = sc.callMapSummary || _compactSurveyCallMap(sc.callMap, sc.metrics || {}, {
+    edgeLimit: _surveyBriefEdgeLimit(packet),
+  });
   const counts = summary?.counts || {};
   const countParts = [
     Number.isFinite(Number(counts.internal)) ? `internal=${counts.internal}` : null,
@@ -2797,6 +2825,11 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
     Number.isFinite(Number(counts.unresolved)) ? `unresolved=${counts.unresolved}` : null,
   ].filter(Boolean);
   if (countParts.length > 0) lines.push(`  edge counts: ${countParts.join(", ")}`);
+  if ((Array.isArray(summary?.topEdges) && summary.topEdges.length > 0)
+    || (Array.isArray(summary?.topSymbols) && summary.topSymbols.length > 0)) {
+    lines.push("  ranked relationship preview (navigation signal, not proof): `path#symbol` identifies an endpoint; `from -> to` is a static call/reference direction, not runtime order. `[inbound]` enters this survey scope, `[outbound]` leaves it, and an untagged edge stays inside it; `xN` counts indexed sites, not executions.");
+    lines.push("  Use these candidates to choose likely entrypoints, ownership handoffs, and scope boundaries, then open the retained survey page for exact sites and branch evidence.");
+  }
   const topSymbols = Array.isArray(summary?.topSymbols) ? summary.topSymbols : [];
   if (topSymbols.length > 0) {
     lines.push(`  top edge symbols: ${topSymbols.map((entry) => `${entry.symbol}${entry.count > 1 ? ` (${entry.count})` : ""}`).join(", ")}`);
