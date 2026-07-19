@@ -571,6 +571,11 @@ export function materializeCodeSurveyPages(data, {
         sizeChars: payloadText.length,
         metadata: {
           surfaced_by: "survey_snapshot_pager",
+          // A cursor is only useful while every frozen page remains
+          // materialized. Keep survey pages out of the ordinary LRU budget so
+          // storing a later page cannot degrade an earlier cursor to a
+          // descriptor that would have to rerun code.survey.
+          bounded_ingress: true,
           tool: "code.survey",
           rank_start: rankStart,
           rank_end: rankEnd,
