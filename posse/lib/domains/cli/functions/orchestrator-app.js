@@ -553,6 +553,7 @@ let _reviewSessionModulePromise = null;
 let _adminTuiModulePromise = null;
 let _adminSettingsModulePromise = null;
 let _adminCatalogModulePromise = null;
+let _adminContractCommandModulePromise = null;
 let _providerCliInitModulePromise = null;
 let _auditCommandModulePromise = null;
 let _reportCommandsModulePromise = null;
@@ -618,6 +619,11 @@ async function loadUpdateCommandModule() {
 async function loadAdminWorktreesModule() {
   _adminWorktreesModulePromise ||= import("./admin-worktrees.js");
   return _adminWorktreesModulePromise;
+}
+
+async function loadAdminContractCommandModule() {
+  _adminContractCommandModulePromise ||= import("./admin-contract-command.js");
+  return _adminContractCommandModulePromise;
 }
 
 async function loadServeCommandModule() {
@@ -2200,6 +2206,25 @@ async function maybeWarnPosseUpdateAvailable(commandPolicy) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 async function cmdAdmin() {
+  const adminArgs = getCommandPositionalArgs(process.argv.slice(3));
+  const adminAction = adminArgs[0]?.toLowerCase();
+  const adminArg1 = adminArgs[1];
+  const adminArg2 = adminArgs[2];
+
+  if (hasArgFlag("--json")) {
+    const { runAdminJsonCommand } = await loadAdminContractCommandModule();
+    const jsonOptions = { projectDir: PROJECT_DIR };
+    if (hasArgFlag("--stdin-value")) {
+      jsonOptions.stdinValueFD = 0;
+    }
+    if (adminAction === "settings" && adminArg1?.toLowerCase() === "set") {
+      runAdminJsonCommand("set", adminArgs.slice(2), jsonOptions);
+    } else {
+      runAdminJsonCommand(adminAction, adminArgs.slice(1), jsonOptions);
+    }
+    return;
+  }
+
   _adminTuiModulePromise ||= import("../../ui/classes/admin/AdminTUI.js");
   _adminSettingsModulePromise ||= import("../../ui/classes/admin/settings-controller.js");
   _adminCatalogModulePromise ||= import("../../settings/functions/admin-catalog.js");
@@ -2212,15 +2237,11 @@ async function cmdAdmin() {
     _adminSettingsModulePromise,
     _adminCatalogModulePromise,
   ]);
-  const adminArgs = getCommandPositionalArgs(process.argv.slice(3));
-  const adminAction = adminArgs[0]?.toLowerCase();
-  const adminArg1 = adminArgs[1];
-  const adminArg2 = adminArgs[2];
   const ensureAdminPromptBundle = async () => {
     await loadRemotePromptBundle();
   };
   const printAdminUsage = () => {
-    console.log("\n  Usage: posse admin [init|snapshot|worktrees|memory|settings|list|get <key>|set <key> <value>|tui]\n");
+    console.log("\n  Usage: posse admin [init|snapshot|worktrees|memory|settings|list|get <key>|set <key> <value>|clear <key>|tui]\n");
   };
   const setAdminSettingFromArgs = (key, value, usageLabel = "admin set", extraArgs = []) => {
     if (!key || typeof value === "undefined") {
@@ -2325,6 +2346,17 @@ async function cmdAdmin() {
 
   if (adminAction === "set") {
     setAdminSettingFromArgs(adminArg1, adminArg2, "admin set", adminArgs.slice(3));
+    return;
+  }
+
+  if (adminAction === "clear" || adminAction === "unset") {
+    if (!adminArg1 || adminArgs.length !== 2) {
+      console.log("\n  Usage: posse admin clear <setting_key>\n");
+      process.exitCode = 2;
+      return;
+    }
+    const { runAdminHumanClearCommand } = await loadAdminContractCommandModule();
+    runAdminHumanClearCommand(adminArg1, { projectDir: PROJECT_DIR });
     return;
   }
 
@@ -2528,7 +2560,7 @@ ${aliasDiagnostic}
     ${C.cyan}replay${C.reset}     Compressed replay packet for one agent call
     ${C.dim}             replay <agent-call-id> [--json] [--exact-prompt]${C.reset}
     ${C.cyan}usage${C.reset}      Show cached provider usage/quota tracker
-    ${C.dim}             usage [--refresh|--force-refresh]${C.reset}
+    ${C.dim}             usage [--json] [--refresh|--force-refresh]${C.reset}
     ${C.cyan}atlas-smoke${C.reset}  Run Posse's local ATLAS smoke test against a repo
     ${C.dim}             atlas-smoke <repoPath> [query] [provider]${C.reset}
     ${C.cyan}atlas${C.reset}        Atlas admin commands
@@ -2546,7 +2578,7 @@ ${aliasDiagnostic}
     ${C.cyan}audit${C.reset}      Provider/handoff audit for jobs or work items
     ${C.dim}             audit | audit <jobId> | audit wi<id> | audit worktrees${C.reset}
     ${C.cyan}admin${C.reset}      Stats, session history, and settings management
-    ${C.dim}             admin init [--provider-clis-only] | admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin settings${C.reset}
+    ${C.dim}             admin init [--provider-clis-only] | admin describe --json | admin set/clear [--json] | admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin settings${C.reset}
     ${C.cyan}merge${C.reset}      Merge a completed WI branch
     ${C.cyan}prune${C.reset}      Clean up orphaned worktrees
     ${C.dim}             prune [--dry-run]${C.reset}

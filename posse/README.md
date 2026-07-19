@@ -171,6 +171,23 @@ Use `posse help` for the full CLI reference.
 - `merge`: merge approved work.
 - `prune`, `purge`, `cleanup`, `clear`: maintenance and reset commands.
 
+### Native provider and admin JSON
+
+`posse usage --json` emits one bounded `posse.provider_usage.v1` document on
+stdout. Use `--refresh` for a normal provider refresh and `--force-refresh` for
+an operator-forced probe; diagnostics remain on stderr. The payload preserves
+finite, unlimited, and unknown capacity windows, budget configured-vs-unset
+state (including numeric zero), and measured-vs-unavailable spend without raw
+provider responses or credentials. Human `posse usage` output is unchanged.
+
+`posse admin describe --json` emits the generated `posse.admin.v1` settings
+catalog, including type, scope, numeric/options metadata, editability, and
+source/default state. Sensitive rows expose presence only. Mutations use
+`posse admin set <key> <value> --json` and `posse admin clear <key> --json`;
+callers handling secrets should use `posse admin set <key> --json --stdin-value`
+so the value never enters argv. JSON errors are stable envelopes; the existing
+human admin commands remain compatible.
+
 ## Local Model Downloads
 
 Run `posse local-models` for an interactive selector, or use

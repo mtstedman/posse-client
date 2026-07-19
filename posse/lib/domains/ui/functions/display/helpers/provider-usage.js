@@ -17,6 +17,7 @@ import {
   brandGauge,
   brandRule,
   providerBrandColor,
+  unlimitedCapacityGauge,
 } from "./brand.js";
 import { estimateBillableInputTokens, estimateCallCost } from "../../../../billing/functions/pricing.js";
 import { EVENT_TYPES } from "../../../../../catalog/event.js";
@@ -310,6 +311,7 @@ function _windowHasDisplaySignal(window) {
   const utilizationPct = Number(window.utilizationPct);
   const observedPct = Number(window.observedPct);
   return (
+    window.unlimited === true ||
     (Number.isFinite(usedTokens) && usedTokens > 0) ||
     (Number.isFinite(limitTokens) && limitTokens > 0) ||
     (Number.isFinite(utilizationPct) && utilizationPct > 0) ||
@@ -452,10 +454,12 @@ export function _buildQueueProviderUsageLines(width, maxLines, summaries = [], o
       const week = summary?.windows?.find((window) => window.key === "week");
       for (const [label, window] of [["S", session], ["W", week]]) {
         const pct = _windowPct(window);
-        const gauge = brandGauge(pct) || _emptyProviderGauge();
+        const gauge = window?.unlimited === true
+          ? unlimitedCapacityGauge()
+          : brandGauge(pct) || _emptyProviderGauge();
         // Keep the row compact; color on the bar and percentage carries pressure.
         const tag = `${gauge.tierColor}[${label}]${C.reset}`;
-        const resetSuffix = _resetSuffix(window, nowMs);
+        const resetSuffix = window?.unlimited === true ? "" : _resetSuffix(window, nowMs);
         const marker = gauge.glyph ? ` ${gauge.glyph}` : "";
         block.push(fit(
           `   ${tag} ${gauge.bar} ${gauge.pctText}${marker}${resetSuffix}`,

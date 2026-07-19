@@ -8,6 +8,7 @@
 
 import { sha256Hex } from "./hash.js";
 import { runAtlasNativeMethodAsync } from "./native/invoke.js";
+import { atlasTreeNativeTimeoutMs } from "./tree-native-timeout.js";
 
 export const TREE_COMPRESSION_RUN_KIND = "tree-compression-snapshot";
 export const TREE_COMPRESSION_PROFILE = "quick_dirty_tree_ml_features_v0";
@@ -223,7 +224,10 @@ export async function buildTreeCompressionSnapshot(db, opts = {}) {
       maxDepth: opts.maxDepth,
       maxFilesPerSeed: opts.maxFilesPerSeed,
     },
-    opts.nativeManager ? { manager: opts.nativeManager } : {},
+    {
+      ...(opts.nativeManager ? { manager: opts.nativeManager } : {}),
+      timeoutMs: atlasTreeNativeTimeoutMs(tree.symbolFiles.length),
+    },
   ));
 }
 

@@ -7,6 +7,7 @@
 import { sha256Hex } from "./hash.js";
 import { normalizeRepoPath } from "./paths.js";
 import { runAtlasNativeMethodAsync } from "./native/invoke.js";
+import { atlasTreeNativeTimeoutMs } from "./tree-native-timeout.js";
 
 const TREE_RUN_KIND = "tree-derived";
 
@@ -197,7 +198,9 @@ export async function refreshTreeDerivedState(db) {
   let tree;
   try {
     request = readTreeBuildRequest(db);
-    tree = await runAtlasNativeMethodAsync("tree-build", request);
+    tree = await runAtlasNativeMethodAsync("tree-build", request, {
+      timeoutMs: atlasTreeNativeTimeoutMs(request.symbols.length),
+    });
     validateNativeTree(tree, { symbolCount: request.symbols.length });
   } catch (err) {
     const durationMs = Date.now() - started;

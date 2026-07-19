@@ -198,12 +198,22 @@ export function providerDailyBudgetSettingKey(provider) {
 
 export function renderUsdUsageBar(usedUsd, budgetUsd, width = 18) {
   const safeWidth = Math.max(8, width | 0);
-  if (!(budgetUsd > 0)) return `${C.dim}[${"?".repeat(safeWidth)}]${C.reset}`;
-  const ratio = Math.max(0, Math.min(1, usedUsd / budgetUsd));
+  if (!Number.isFinite(budgetUsd) || budgetUsd < 0) return `${C.dim}[${"?".repeat(safeWidth)}]${C.reset}`;
+  const ratio = budgetUsd === 0
+    ? (usedUsd > 0 ? 1 : 0)
+    : Math.max(0, Math.min(1, usedUsd / budgetUsd));
   const filled = Math.max(0, Math.min(safeWidth, Math.round(ratio * safeWidth)));
   const empty = Math.max(0, safeWidth - filled);
   const barColor = ratio >= 0.9 ? C.red : ratio >= 0.75 ? C.yellow : C.green;
   return `${C.dim}[${C.reset}${barColor}${"#".repeat(filled)}${C.dim}${".".repeat(empty)}${C.reset}${C.dim}]${C.reset}`;
+}
+
+export function configuredUsdBudget(value) {
+  if (value == null || String(value).trim() === "") return { configured: false, value: null };
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0
+    ? { configured: true, value: parsed }
+    : { configured: true, value: null };
 }
 
 export function shortRunStartLabel(iso) {

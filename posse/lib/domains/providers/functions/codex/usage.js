@@ -222,6 +222,10 @@ function parseCodexStatusText(text, nowMs = Date.now()) {
 
 function normalizeCodexStatusSummary(parsed, nowMs = Date.now()) {
   const local = buildCodexLocalUsageSummary(nowMs);
+  const windows = Array.isArray(parsed?.windows) ? parsed.windows.map((window) => ({ ...window })) : [];
+  if (windows.some((window) => window.key === "week") && !windows.some((window) => window.key === "session")) {
+    windows.unshift(buildUnlimitedCodexSessionWindow());
+  }
   return {
     provider: "codex",
     source: "codex-cli-status",
@@ -231,7 +235,7 @@ function normalizeCodexStatusSummary(parsed, nowMs = Date.now()) {
     sessionId: parsed?.sessionId || null,
     credits: parsed?.credits || null,
     localUsedTokens: local.localUsedTokens || 0,
-    windows: Array.isArray(parsed?.windows) ? parsed.windows.map((window) => ({ ...window })) : [],
+    windows,
     fetchedAt: new Date(nowMs).toISOString(),
   };
 }
@@ -263,21 +267,120 @@ function formatCodexWindowLabel(baseKey, durationMins, limitLabel = null) {
   return `${prefix}Week`;
 }
 
+const CODEX_WINDOW_IDENTITY_FIELDS = [
+  ["windowKind", "window_kind"],
+  ["windowType", "window_type"],
+  ["windowId", "window_id"],
+  ["kind", null],
+  ["type", null],
+  ["id", null],
+  ["name", null],
+  ["label", null],
+];
+
+function classifyCodexWindowIdentity(rawWindow) {
+  for (const [camelKey, snakeKey] of CODEX_WINDOW_IDENTITY_FIELDS) {
+    const rawValue = readRateLimitField(rawWindow, camelKey, snakeKey);
+    if (rawValue == null || String(rawValue).trim() === "") continue;
+    const label = String(rawValue).trim().slice(0, 80);
+    const normalized = normalizeCodexLimitKey(label);
+    if (!normalized || normalized === "primary" || normalized === "secondary") continue;
+    if (/^(?:session|5h|5-hour|five-hour|five-hours)$/.test(normalized)) {
+      return { kind: "session", label, explicit: true };
+    }
+    if (/^(?:week|weekly|7d|7-day|seven-day|seven-days)$/.test(normalized)) {
+      return { kind: "week", label, explicit: true };
+    }
+    return { kind: "provider-specific", label, explicit: true };
+  }
+  return { kind: null, label: null, explicit: false };
+}
+
+function classifyCodexWindow(rawWindow, position) {
+  const identity = classifyCodexWindowIdentity(rawWindow);
+  const durationRaw = readRateLimitField(rawWindow, "windowDurationMins", "window_duration_mins");
+  const durationMins = Number(durationRaw);
+  const hasUsableDuration = Number.isFinite(durationMins) && durationMins > 0;
+  if (identity.kind) {
+    return { ...identity, durationMins: hasUsableDuration ? durationMins : null };
+  }
+  if (hasUsableDuration) {
+    if (durationMins === 300) return { kind: "session", label: null, explicit: true, durationMins };
+    if (durationMins === 10_080) return { kind: "week", label: null, explicit: true, durationMins };
+    return { kind: "provider-specific", label: null, explicit: true, durationMins };
+  }
+  return {
+    kind: position === "secondary" ? "week" : "session",
+    label: null,
+    explicit: false,
+    durationMins: null,
+  };
+}
+
+function buildUnlimitedCodexSessionWindow() {
+  return {
+    key: "session",
+    label: "Session",
+    durationMs: null,
+    utilizationPct: null,
+    usageUnit: "unlimited",
+    usedTokens: null,
+    limitTokens: null,
+    remainingTokens: null,
+    remainingPct: null,
+    exhausted: false,
+    resetAt: null,
+    limitId: "codex",
+    unlimited: true,
+  };
+}
+
+function providerSpecificCodexWindowKey({ keyPrefix, position, identityLabel, durationMins }) {
+  const identityKey = normalizeCodexLimitKey(identityLabel || "")
+    || (Number.isFinite(durationMins) ? `${durationMins}m` : "window");
+  return `${keyPrefix || "provider_"}${position}_${identityKey}`;
+}
+
+function formatProviderSpecificCodexWindowLabel({ limitLabel, identityLabel, durationMins }) {
+  const prefix = limitLabel ? `${limitLabel} ` : "";
+  const identity = identityLabel || "Provider window";
+  const duration = Number.isFinite(durationMins) && durationMins > 0
+    ? ` (${durationMins}m)`
+    : "";
+  return `${prefix}${identity}${duration}`;
+}
+
 function normalizeCodexRateLimitWindow(rawWindow, {
-  key,
-  baseKey,
+  position,
+  keyPrefix = "",
   limitId = "codex",
   limitLabel = null,
 } = {}) {
   if (!rawWindow || typeof rawWindow !== "object") return null;
+  const classification = classifyCodexWindow(rawWindow, position);
   const usedPct = clampPercent(readRateLimitField(rawWindow, "usedPercent", "used_percent"));
   if (usedPct == null) return null;
-  const durationMinsRaw = readRateLimitField(rawWindow, "windowDurationMins", "window_duration_mins");
-  const durationMins = Number(durationMinsRaw);
+  const { durationMins } = classification;
   const resetSeconds = readRateLimitField(rawWindow, "resetsAt", "resets_at");
+  const baseKey = classification.kind;
+  const key = baseKey === "session" || baseKey === "week"
+    ? `${keyPrefix}${baseKey}`
+    : providerSpecificCodexWindowKey({
+        keyPrefix,
+        position,
+        identityLabel: classification.label,
+        durationMins,
+      });
+  const label = baseKey === "session" || baseKey === "week"
+    ? formatCodexWindowLabel(baseKey, durationMins, limitLabel)
+    : formatProviderSpecificCodexWindowLabel({
+        limitLabel,
+        identityLabel: classification.label,
+        durationMins,
+      });
   return {
     key,
-    label: formatCodexWindowLabel(baseKey, Number.isFinite(durationMins) ? durationMins : null, limitLabel),
+    label,
     durationMs: Number.isFinite(durationMins) && durationMins > 0 ? durationMins * 60 * 1000 : null,
     utilizationPct: usedPct,
     usageUnit: "percent",
@@ -288,6 +391,8 @@ function normalizeCodexRateLimitWindow(rawWindow, {
     exhausted: usedPct >= 100,
     resetAt: unixSecondsToIso(resetSeconds),
     limitId,
+    unlimited: false,
+    identityExplicit: classification.explicit,
   };
 }
 
@@ -306,6 +411,7 @@ function normalizeCodexCredits(rawCredits) {
 function normalizeCodexRateLimitSnapshot(snapshot, {
   baseKeyPrefix = "",
   limitLabel = null,
+  canonicalLimit = false,
 } = {}) {
   if (!snapshot || typeof snapshot !== "object") return [];
   const limitId = String(
@@ -315,28 +421,61 @@ function normalizeCodexRateLimitSnapshot(snapshot, {
       || "codex"
   );
   const keyPrefix = baseKeyPrefix ? `${normalizeCodexLimitKey(baseKeyPrefix)}_` : "";
-  return [
-    normalizeCodexRateLimitWindow(readRateLimitField(snapshot, "primary"), {
-      key: `${keyPrefix}session`,
-      baseKey: "session",
+  const primary = readRateLimitField(snapshot, "primary");
+  const secondary = readRateLimitField(snapshot, "secondary");
+  const rawWindows = [
+    { position: "primary", rawWindow: primary },
+    { position: "secondary", rawWindow: secondary },
+  ];
+  const classified = rawWindows.map(({ position, rawWindow }) => ({
+    position,
+    rawWindow,
+    classification: rawWindow && typeof rawWindow === "object"
+      ? classifyCodexWindow(rawWindow, position)
+      : null,
+  }));
+  const windows = [
+    normalizeCodexRateLimitWindow(primary, {
+      position: "primary",
+      keyPrefix,
       limitId,
       limitLabel,
     }),
-    normalizeCodexRateLimitWindow(readRateLimitField(snapshot, "secondary"), {
-      key: `${keyPrefix}week`,
-      baseKey: "week",
+    normalizeCodexRateLimitWindow(secondary, {
+      position: "secondary",
+      keyPrefix,
       limitId,
       limitLabel,
     }),
   ].filter(Boolean);
+  const hasExplicitWeekly = classified.some((entry) =>
+    entry.classification?.explicit && entry.classification.kind === "week"
+  );
+  const hasSessionSignal = classified.some((entry) => entry.classification?.kind === "session");
+  if (canonicalLimit && hasExplicitWeekly && !hasSessionSignal && !windows.some((window) => window.key === "session")) {
+    windows.unshift(buildUnlimitedCodexSessionWindow());
+  }
+  return windows;
 }
 
 function normalizeCodexRateLimitsResponse(payload, nowMs = Date.now()) {
   const raw = payload && typeof payload === "object" ? payload : {};
   const primarySnapshot = readRateLimitField(raw, "rateLimits", "rate_limits") || {};
   const byLimitId = readRateLimitField(raw, "rateLimitsByLimitId", "rate_limits_by_limit_id") || {};
-  const windows = normalizeCodexRateLimitSnapshot(primarySnapshot);
-  const primaryLimitId = String(readRateLimitField(primarySnapshot, "limitId", "limit_id") || "codex");
+  const rawPrimaryLimitId = readRateLimitField(primarySnapshot, "limitId", "limit_id");
+  const primaryLimitId = String(rawPrimaryLimitId || "codex");
+  const normalizedPrimaryLimitId = normalizeCodexLimitKey(primaryLimitId);
+  const canonicalLimit = rawPrimaryLimitId == null
+    || normalizedPrimaryLimitId === "codex"
+    || normalizedPrimaryLimitId === "default";
+  const primaryLimitName = readRateLimitField(primarySnapshot, "limitName", "limit_name");
+  const windows = normalizeCodexRateLimitSnapshot(primarySnapshot, canonicalLimit
+    ? { canonicalLimit: true }
+    : {
+        baseKeyPrefix: primaryLimitId,
+        limitLabel: String(primaryLimitName || primaryLimitId),
+        canonicalLimit: false,
+      });
 
   if (byLimitId && typeof byLimitId === "object") {
     for (const [limitId, snapshot] of Object.entries(byLimitId)) {

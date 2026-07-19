@@ -54,6 +54,7 @@ import {
   countPendingOperatorFeedbackForJob,
   getOperatorFeedbackForJob,
   recordAgentActivity,
+  requestJobScopeExpansion,
 } from "../../queue/functions/index.js";
 import { guardToolWriteLock } from "../../queue/functions/write-lock-guard.js";
 import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.js";
@@ -1245,12 +1246,42 @@ function resolveMutationPath(toolName, displayPath) {
   }
 }
 
+function requestScopeWithinJob(args = {}) {
+  const result = requestJobScopeExpansion({
+    jobId: mcpJobId,
+    workItemId: mcpWorkItemId,
+    attemptId: mcpAttemptId,
+    agentCallId: mcpAgentCallId,
+    path: args.path,
+    access: args.access,
+    operation: args.operation,
+    reason: args.reason,
+    source: "deterministic_mcp_internal_tool",
+  });
+  return JSON.stringify(result, null, 2);
+}
+
 function writeFileWithinScope(args = {}) {
   if (!writeEnabled) return "Error: Write access is not granted for this role.";
   const resolved = resolveMutationPath("write_file", args.path);
   if (resolved.error) return resolved.error;
   const protectedErr = protectedMutationError("write_file", args.path, resolved.path);
   if (protectedErr) return protectedErr;
+  const exists = fs.existsSync(resolved.path);
+  const allowed = exists
+    ? effectiveScopePredicates.canEdit(resolved.path)
+    : effectiveScopePredicates.canCreate(resolved.path);
+  if (!allowed) {
+    if (!mcpJobId) {
+      return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
+    }
+    return requestScopeWithinJob({
+      path: relativePathFromCwd(workspaceCwd, resolved.path),
+      access: exists ? "modify" : "create",
+      operation: "write_file",
+      reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
+    });
+  }
   return execWriteFile(args || {}, workspaceCwd, effectiveScopePredicates);
 }
 
@@ -1260,6 +1291,17 @@ function editFileWithinScope(args = {}) {
   if (resolved.error) return resolved.error;
   const protectedErr = protectedMutationError("edit_file", args.path, resolved.path);
   if (protectedErr) return protectedErr;
+  if (!effectiveScopePredicates.canEdit(resolved.path)) {
+    if (!mcpJobId) {
+      return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope.`;
+    }
+    return requestScopeWithinJob({
+      path: relativePathFromCwd(workspaceCwd, resolved.path),
+      access: "modify",
+      operation: "edit_file",
+      reason: "edit_file requires this existing file to complete the active job",
+    });
+  }
   return execEditFile(args || {}, workspaceCwd, effectiveScopePredicates);
 }
 
@@ -1858,6 +1900,7 @@ function ackOperatorFeedback(args = {}) {
 // embedded OpenAI/Grok runtime builds from. Executors and role gating are
 // unchanged; the registry is the single declaration both runtimes share.
 let mcpToolRegistry = declareToolSuites(new ToolRegistry());
+mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
 mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -2019,6 +2062,7 @@ function rebuildNativeToolSchemas() {
 
 function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry = declareToolSuites(new ToolRegistry());
+  mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
   mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));

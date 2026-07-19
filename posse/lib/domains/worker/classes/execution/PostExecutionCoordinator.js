@@ -11,6 +11,7 @@ import {
   listActiveFileLocks,
   logEvent,
   rewireDependency,
+  settleJobScopeExpansionAttempt,
   setAttemptCommitHash,
   setJobResult,
   storeArtifact,
@@ -190,6 +191,51 @@ export async function handlePostExecutionForWorker({
             + (pendingFileRequests.needsApproval?.length || 0);
           return total > 0;
         };
+        const scopePauseJob = getJob(job.id);
+        const scopePausePayload = scopePauseJob ? this.parsePayload(scopePauseJob) : {};
+        const pendingScopeRequest = scopePausePayload?._pending_scope_request;
+        if (
+          scopePauseJob?.status === "waiting_on_human"
+          && pendingScopeRequest
+          && (!pendingScopeRequest.attempt_id || Number(pendingScopeRequest.attempt_id) === Number(attempt.id))
+        ) {
+          if (wtPath) {
+            try {
+              if (await gitHasChangesAsync(wtPath)) {
+                const siblingLocks = activeSiblingWriteLocks(job);
+                if (siblingLocks.length === 0) {
+                  await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
+                    reason: `scope-request-job-${job.id}`,
+                    branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+                    wiId: job.work_item_id,
+                  });
+                }
+              }
+            } catch (resetErr) {
+              logEvent({
+                work_item_id: job.work_item_id,
+                job_id: job.id,
+                attempt_id: attempt.id,
+                event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+                actor_type: EVENT_ACTORS.WORKER,
+                message: `Scope-request pause left dirty state for setup recovery: ${resetErr?.message || String(resetErr)}`,
+              });
+            }
+          }
+          completeAttempt(attempt.id, {
+            status: "interrupted",
+            duration_ms: Date.now() - startTime,
+            error_text: `Paused for scope approval: ${pendingScopeRequest.path}`,
+          });
+          const settled = settleJobScopeExpansionAttempt({ jobId: job.id, attemptId: attempt.id });
+          this.emit(
+            job.id,
+            `${C.yellow}[scope] WI#${job.work_item_id} job #${job.id}: provider call paused for ${pendingScopeRequest.path}${settled.finalized ? `; human decision ${settled.decision}` : "; awaiting human decision"}${C.reset}`,
+          );
+          refreshAndExtractInsightsFromModule(job.work_item_id);
+          this._cleanupWorktreeIfDone(job.work_item_id);
+          return;
+        }
         const agentCompletionLog = MUTATING_JOB_TYPES.has(job.job_type)
           ? parseAgentCompletionLogFromModule(output)
           : { found: false, status: null, body: "", blockReason: null, verifiedNoChange: false };

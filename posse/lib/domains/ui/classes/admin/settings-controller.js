@@ -26,7 +26,6 @@ import {
   loadReportIndex,
   loadReports,
   matchesHotkey,
-  normalizeNumericSettingValue,
   normalizeRawInput,
   parseJsonObject,
   parseProviderList,
@@ -60,7 +59,7 @@ import {
   getConfiguredImageModel,
   getConfiguredImageProviders,
 } from "../../../artifacts/functions/index.js";
-import { getConfiguredProviderUsage, inferProviderWindowLimit, providerRegistry } from "../../../providers/functions/provider.js";
+import { getConfiguredProviderUsage, inferProviderWindowLimit } from "../../../providers/functions/provider.js";
 import { getRuntimeDbPath, getRuntimeLogDir, getRuntimeReportsDir } from "../../../runtime/functions/paths.js";
 import { jobReportStatus, workItemDisplayStatus } from "../display/Display.js";
 import { getAccountSetting, getAccountSettingsPathForDisplay } from "../../../settings/functions/account-settings.js";
@@ -68,7 +67,7 @@ import { closePromptLog, promptPreviewText, readRecentPrompts } from "../../../.
 import { closeOutputLog, readRecentOutputs } from "../../../../shared/telemetry/functions/logging/output-log.js";
 import { closeLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { buildCurrentRoleContract } from "../../../worker/functions/role-contract-view.js";
-import { isAdminVisibleCatalogKey, isCatalogKey } from "../../../settings/functions/catalog.js";
+import { isAdminVisibleCatalogKey } from "../../../settings/functions/catalog.js";
 import {
   loadSkillManifests,
   parseSkillIds,
@@ -82,7 +81,6 @@ import {
   getDefaultTierModel,
   getImageModelOptions,
   getProviderTierDefaults,
-  getTextModelOptions,
 } from "../../../providers/functions/model-catalog.js";
 import { PROVIDER_ROLE_NAMES } from "../../../providers/functions/roles.js";
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
@@ -95,6 +93,10 @@ import {
 } from "../../../../shared/format/functions/units.js";
 import {
   ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS,
+  ADMIN_AGENT_SETTING_SECTIONS as AGENT_SETTING_SECTIONS,
+  ADMIN_IMAGE_SETTING_SECTIONS as IMAGE_SETTING_SECTIONS,
+  ADMIN_PROVIDER_CATALOG_SETTING_KEYS as PROVIDER_CATALOG_SETTING_KEYS,
+  ADMIN_PROVIDER_SETTING_SECTIONS as PROVIDER_SETTING_SECTIONS,
   BOOLEAN_SETTING_KEYS,
   DEFAULT_ACCOUNT_SETTING_ROWS,
   DELEGATION_MODE_OPTIONS,
@@ -118,10 +120,15 @@ import {
   toStorageSettingKey,
 } from "../../../settings/functions/admin-catalog.js";
 import {
+  getModelChoicesForEntry,
+  getSelectableImageProviders,
+  isAdminProviderOption,
+  validateAdminSettingValue,
+} from "../../../settings/functions/admin-validation.js";
+export { validateAdminSettingValue };
+import {
   readProjectDbConfig,
   writeProjectDbConfig,
-  normalizePermissions as normalizeProjectDbPermissions,
-  PROJECT_DB_TYPES,
 } from "../../../../shared/tools/functions/toolkit/project-db/config.js";
 import { installScipLanguageDependencies } from "../../../atlas/functions/v2/scip/dependencies.js";
 import { brandRule } from "../../functions/display/helpers/brand.js";
@@ -134,43 +141,6 @@ const PROVIDER_USAGE_SETTING_DEFS = [
 
 const MODEL_SETTING_KEYS = new Set(MODEL_SETTING_DEFS.map((def) => def.key));
 const PROVIDER_USAGE_SETTING_KEYS = new Set(PROVIDER_USAGE_SETTING_DEFS.map((def) => def.key));
-const PROTECTED_REMOTE_AUTH_SETTING_KEYS = new Set([
-  "posse_native_heartbeat_url",
-  "posse_native_heartbeat_public_key_url",
-  "posse_native_heartbeat_jwt_public_key",
-  "posse_native_heartbeat_jwt_public_key_sha256",
-  "posse_native_heartbeat_jwt_audience",
-]);
-
-const AGENT_SETTING_SECTIONS = Object.freeze([
-  Object.freeze({ role: "researcher", label: "Researcher", keys: Object.freeze(["base_turns_researcher", "max_output_tokens_researcher"]) }),
-  Object.freeze({ role: "planner", label: "Planner", keys: Object.freeze(["base_turns_planner", "max_output_tokens_planner", "planner_max_tasks", "planner_under_scoped_broad_gate"]) }),
-  Object.freeze({ role: "dev", label: "Dev", keys: Object.freeze(["base_turns_dev", "max_output_tokens_dev"]) }),
-  Object.freeze({ role: "artificer", label: "Artificer", keys: Object.freeze(["max_output_tokens_artificer"]) }),
-  Object.freeze({ role: "preflight", label: "Preflight", keys: Object.freeze(["max_output_tokens_preflight"]) }),
-  Object.freeze({ role: "assessor", label: "Assessor", keys: Object.freeze(["base_turns_assessor", "max_output_tokens_assessor"]) }),
-  Object.freeze({ role: "delegator", label: "Delegator", keys: Object.freeze(["delegation_mode", "max_output_tokens_delegator"]) }),
-]);
-
-const PROVIDER_SETTING_SECTIONS = Object.freeze([
-  Object.freeze({ provider: "claude", label: "Claude", budgetKeys: Object.freeze(["claude_run_budget_pct_session"]) }),
-  Object.freeze({ provider: "codex", label: "Codex", budgetKeys: Object.freeze(["codex_auth_mode", "codex_run_budget_pct_session"]) }),
-  Object.freeze({ provider: "openai", label: "OpenAI", budgetKeys: Object.freeze(["openai_run_budget_usd", "openai_daily_budget_usd", "openai_account_limit_tokens_session", "openai_account_limit_tokens_week"]) }),
-  Object.freeze({ provider: "grok", label: "Grok", budgetKeys: Object.freeze(["grok_run_budget_usd", "grok_daily_budget_usd"]) }),
-  Object.freeze({ provider: "copilot", label: "Copilot", budgetKeys: Object.freeze([]) }),
-]);
-
-const PROVIDER_CATALOG_SETTING_KEYS = Object.freeze([
-  "model_catalog_enforcement",
-  "model_catalog_cache_ms",
-  "claude_execution_mode",
-]);
-
-const IMAGE_SETTING_SECTIONS = Object.freeze([
-  Object.freeze({ provider: "grok", label: "Grok", budgetKeys: Object.freeze(["grok_image_budget_usd"]) }),
-  Object.freeze({ provider: "openai", label: "OpenAI", budgetKeys: Object.freeze(["openai_image_budget_usd"]) }),
-]);
-
 function setSettingWithRuntimeSync(settingKey, value, projectDir = null) {
   setSetting(settingKey, value, { projectDir });
 }
@@ -487,37 +457,6 @@ function getEffectiveImageModelSetting(def) {
   };
 }
 
-function getModelChoicesForEntry(entry) {
-  if (!entry) return [{ value: "", label: "(default: tier model)" }];
-  const currentValue = safeGetSetting(entry.key);
-  if (entry.kind === "image") {
-    return getImageModelOptions(entry.provider, { currentValue }).slice();
-  }
-  const baseChoices = getTextModelOptions(entry.provider, { includeDefault: true, currentValue });
-  if (baseChoices.length === 0) return [{ value: "", label: "(default: tier model)" }];
-  if (entry.provider === "claude" && entry.tier === "standard") {
-    const defaultModel = getDefaultTierModel("claude", "standard") || "sonnet";
-    return [{ value: "", label: `(default: ${defaultModel})` }, ...baseChoices.slice(1)];
-  }
-  return baseChoices.slice();
-}
-
-function isAdminProviderOption(providerName) {
-  const provider = String(providerName || "").trim().toLowerCase();
-  if (!provider || !providerRegistry.has(provider)) return false;
-  const mod = providerRegistry.get(provider);
-  if (typeof mod?.hasCredentials === "function") {
-    try { return !!mod.hasCredentials(); } catch { return false; }
-  }
-  // Claude has no cheap credential probe; avoid CLI readiness checks while
-  // rendering settings and let the boot provider panel report readiness.
-  return true;
-}
-
-function getSelectableImageProviders() {
-  return IMAGE_PROVIDER_OPTIONS.filter((option) => isAdminProviderOption(option.value));
-}
-
 function getProviderUsageStoredValue(settingKey) {
   const globalValue = getAccountSetting(settingKey);
   if (globalValue != null && String(globalValue).trim() !== "") return String(globalValue);
@@ -526,121 +465,6 @@ function getProviderUsageStoredValue(settingKey) {
 
 function setProviderUsageStoredValue(settingKey, value) {
   setSettingWithRuntimeSync(settingKey, value);
-}
-
-export function validateAdminSettingValue(settingKey, value) {
-  const storageKey = toStorageSettingKey(String(settingKey || "").trim());
-  if (!storageKey) return { ok: false, error: "Setting key is required." };
-  const rawValue = String(value ?? "");
-  const trimmed = rawValue.trim();
-
-  if (PROTECTED_REMOTE_AUTH_SETTING_KEYS.has(storageKey)) {
-    return {
-      ok: false,
-      error: `${settingKey} is managed by the compiled remote auth policy and cannot be changed through admin settings.`,
-    };
-  }
-
-  if (PROJECT_DB_SETTING_KEYS.has(storageKey)) {
-    if (storageKey === "project_db_enabled") {
-      const lower = trimmed.toLowerCase();
-      if (lower !== "true" && lower !== "false") return { ok: false, error: "project_db_enabled must be true or false." };
-      return { ok: true, storageKey, value: lower };
-    }
-    if (storageKey === "project_db_type") {
-      if (trimmed === "") return { ok: true, storageKey, value: "" };
-      const lower = trimmed.toLowerCase();
-      if (!PROJECT_DB_TYPES.includes(lower)) return { ok: false, error: `project_db_type must be one of: ${PROJECT_DB_TYPES.join(", ")}` };
-      return { ok: true, storageKey, value: lower };
-    }
-    if (storageKey === "project_db_permissions") {
-      return { ok: true, storageKey, value: normalizeProjectDbPermissions(trimmed).join(",") };
-    }
-    if (storageKey === "project_db_port") {
-      if (trimmed === "") return { ok: true, storageKey, value: "" };
-      if (!/^\d+$/.test(trimmed)) return { ok: false, error: "project_db_port must be a number." };
-      return { ok: true, storageKey, value: trimmed };
-    }
-    // host / database / username / password: free text (password kept verbatim).
-    return { ok: true, storageKey, value: rawValue };
-  }
-
-  if (storageKey.startsWith(SKILL_SETTING_PREFIX)) {
-    const lower = trimmed.toLowerCase();
-    if (lower !== "true" && lower !== "false") {
-      return { ok: false, error: `${settingKey} must be true or false.` };
-    }
-    return { ok: true, storageKey, value: lower };
-  }
-
-  if (!isCatalogKey(storageKey) && !/^[a-z0-9]+_(?:account_)?limit_tokens_(?:session|week)$/i.test(storageKey) && !/^[a-z0-9]+_observed_pct_(?:session|week)$/i.test(storageKey)) {
-    return { ok: false, error: `Unknown setting: ${settingKey}` };
-  }
-
-  if (PROVIDER_SETTING_KEYS.has(storageKey)) {
-    if (trimmed === "") return { ok: true, storageKey, value: "" };
-    const selectable = new Set(PROVIDER_OPTIONS.filter((provider) => isAdminProviderOption(provider)));
-    const picked = [...new Set(trimmed.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
-    const invalid = picked.filter((provider) => !selectable.has(provider));
-    if (invalid.length > 0) {
-      return { ok: false, error: `${settingKey} provider must be one of: ${[...selectable].join(", ") || "none available"}.` };
-    }
-    if (picked.length === 0) {
-      return { ok: false, error: `${settingKey} requires at least one provider.` };
-    }
-    return { ok: true, storageKey, value: picked.join(",") };
-  }
-
-  if (ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS.has(storageKey)) {
-    if (trimmed === "") return { ok: true, storageKey, value: "" };
-    const selectable = getSelectableImageProviders().map((option) => option.value);
-    const provider = trimmed.toLowerCase();
-    if (!selectable.includes(provider)) {
-      return { ok: false, error: `${settingKey} must be one of: ${selectable.join(", ") || "none available"}.` };
-    }
-    return { ok: true, storageKey, value: provider };
-  }
-
-  const enumChoices = ENUM_SETTING_OPTIONS[storageKey];
-  if (enumChoices) {
-    const allowed = enumChoices.map((choice) => choice.value);
-    const normalized = trimmed.toLowerCase();
-    if (!allowed.includes(normalized)) {
-      return { ok: false, error: `${settingKey} must be one of: ${allowed.join(", ")}.` };
-    }
-    return { ok: true, storageKey, value: normalized };
-  }
-
-  if (BOOLEAN_SETTING_KEYS.has(storageKey)) {
-    const normalized = trimmed.toLowerCase();
-    if (normalized !== "true" && normalized !== "false") {
-      return { ok: false, error: `${settingKey} must be true or false.` };
-    }
-    return { ok: true, storageKey, value: normalized };
-  }
-
-  if (MULTI_SETTING_KEYS.has(storageKey)) {
-    const allowed = MULTI_SETTING_VALUES[storageKey] || new Set();
-    const picked = [...new Set(trimmed.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
-    const invalid = picked.filter((entry) => !allowed.has(entry));
-    if (invalid.length > 0 || picked.length === 0) {
-      return { ok: false, error: `${settingKey} must include one or more of: ${[...allowed].join(", ")}.` };
-    }
-    return { ok: true, storageKey, value: picked.join(",") };
-  }
-
-  if (MODEL_SETTING_KEYS.has(storageKey)) {
-    const def = MODEL_SETTING_DEFS.find((entry) => entry.key === storageKey);
-    const allowed = getModelChoicesForEntry(def).map((choice) => choice.value);
-    if (trimmed !== "" && !allowed.includes(trimmed)) {
-      return { ok: false, error: `${settingKey} must be a configured model choice or empty for default.` };
-    }
-    return { ok: true, storageKey, value: trimmed };
-  }
-
-  const normalized = normalizeNumericSettingValue(storageKey, rawValue);
-  if (!normalized.ok) return normalized;
-  return { ok: true, storageKey, value: normalized.value };
 }
 
 function safeGetSetting(key, projectDir = null) {

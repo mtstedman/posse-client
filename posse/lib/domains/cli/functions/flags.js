@@ -251,6 +251,7 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--red-team-iterate", takesValue: false, category: "boolean" },
   { name: "--redteam-iterate", takesValue: false, category: "boolean" },
   { name: "--json", takesValue: false, category: "boolean" },
+  { name: "--stdin-value", takesValue: false, category: "boolean" },
   { name: "--non-interactive", takesValue: false, category: "boolean" },
   { name: "--no-tui", takesValue: false, category: "boolean" },
   { name: "--no-auto-merge", takesValue: false, category: "boolean" },
@@ -393,4 +394,3 @@ export function hasIntakeHintFlags() {
   return ["--intent", "--oneshot", "--deliverable", "--output", "--files", "--dirs", "--input-contexts", "--contexts", "--subtasks", "--constraints"]
     .some((flag) => hasArgFlag(flag));
 }
-

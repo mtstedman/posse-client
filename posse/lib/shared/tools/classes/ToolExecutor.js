@@ -27,6 +27,7 @@ export class ToolExecutor {
     allowWrite = false,
     jobId = null,
     gate = null,
+    requestScope = null,
     safePathImpl = safePath,
     createToolkit = createDeterministicToolkit,
     createBash = createBashExecutor,
@@ -36,6 +37,7 @@ export class ToolExecutor {
     this.allowWrite = !!allowWrite;
     this.jobId = jobId;
     this.gate = gate || null;
+    this.requestScope = typeof requestScope === "function" ? requestScope : null;
     this._safePath = safePathImpl;
     this._bash = createBash();
     this._toolkit = createToolkit({ safePath: safePathImpl });
@@ -68,6 +70,7 @@ export class ToolExecutor {
     const toolkit = this._toolkit;
     return {
       read_file: (args) => toolkit.execReadFile(args, ctx.cwd, ctx.scopePredicates),
+      request_scope: (args) => this._requestScope(args),
       write_file: (args) => this._writeFile(args, toolkit, ctx),
       edit_file: (args) => this._editFile(args, toolkit, ctx),
       list_files: (args) => toolkit.execListFiles(args, ctx.cwd, ctx.scopePredicates),
@@ -106,6 +109,27 @@ export class ToolExecutor {
       return `Error: ${toolName} is not wired into this runtime.`;
     }
     return fn(args, ctx.cwd, ctx.scopePredicates);
+  }
+
+  _requestScope(args = {}) {
+    if (!this.requestScope) {
+      return JSON.stringify({
+        ok: false,
+        code: "scope_request_unavailable",
+        paused: false,
+        path: args.path || null,
+        access: args.access || null,
+        operation: args.operation || null,
+        message: "No active job context is available for a scope request.",
+      }, null, 2);
+    }
+    return this.requestScope({
+      path: args.path,
+      access: args.access,
+      operation: args.operation,
+      reason: args.reason || "",
+      jobId: this.jobId,
+    });
   }
 
   _cleanImage(args, toolkit, ctx) {
@@ -188,8 +212,20 @@ export class ToolExecutor {
     const writeStat = this._lstatIfExists(writePath);
     const writeSymlinkErr = this._symlinkMutationError("write_file", args.path, writeStat);
     if (writeSymlinkErr) return writeSymlinkErr;
-    if (!ctx.scopePredicates.canCreate(writePath)) {
-      return `Error: write_file blocked - ${args.path} is outside the allowed creation scope (not in files_to_create or create_roots).`;
+    const exists = !!writeStat;
+    const allowed = exists
+      ? ctx.scopePredicates.canEdit(writePath)
+      : ctx.scopePredicates.canCreate(writePath);
+    if (!allowed) {
+      if (!this.requestScope) {
+        return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
+      }
+      return this._requestScope({
+        path: relativePathFromCwd(ctx.cwd, writePath),
+        access: exists ? "modify" : "create",
+        operation: "write_file",
+        reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
+      });
     }
     return toolkit.execWriteFile(args, ctx.cwd, ctx.scopePredicates);
   }
@@ -203,7 +239,15 @@ export class ToolExecutor {
     const editSymlinkErr = this._symlinkMutationError("edit_file", args.path, editStat);
     if (editSymlinkErr) return editSymlinkErr;
     if (!ctx.scopePredicates.canEdit(editPath)) {
-      return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope (not in files_to_modify or create_roots).`;
+      if (!this.requestScope) {
+        return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope (not in files_to_modify or create_roots).`;
+      }
+      return this._requestScope({
+        path: relativePathFromCwd(ctx.cwd, editPath),
+        access: "modify",
+        operation: "edit_file",
+        reason: "edit_file requires this existing file to complete the active job",
+      });
     }
     return toolkit.execEditFile(args, ctx.cwd, ctx.scopePredicates);
   }

@@ -189,3 +189,20 @@ export function brandGauge(pct, { width = 20, colors = C } = {}) {
     clamped,
   };
 }
+
+/**
+ * An unlimited-capacity gauge is deliberately separate from pressure gauges:
+ * a full green bar means capacity is available without a reported finite cap.
+ */
+export function unlimitedCapacityGauge({ width = 20, colors = C } = {}) {
+  const safeWidth = Math.max(1, Math.min(120, Number(width) || 20));
+  const bar = `${colors.dim}▕${colors.reset}${colors.green}${"█".repeat(safeWidth)}${colors.reset}${colors.dim}▏${colors.reset}`;
+  return {
+    bar,
+    pctText: `${colors.green}${colors.bold}${"∞".padStart(4, " ")}${colors.reset}`,
+    glyph: "",
+    tierColor: colors.green,
+    clamped: null,
+    unlimited: true,
+  };
+}

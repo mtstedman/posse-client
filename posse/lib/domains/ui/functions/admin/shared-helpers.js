@@ -9,6 +9,7 @@
 import fs from "fs";
 import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
+import { unlimitedCapacityGauge } from "../display/helpers/brand.js";
 import { getRuntimeDbPath, getRuntimeReportsDir } from "../../../runtime/functions/paths.js";
 import { getProviderTierDefaults } from "../../../providers/functions/model-catalog.js";
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
@@ -167,7 +168,11 @@ export function renderUsageBar(usedTokens, limitTokens, width = 18) {
 
 export function formatProviderUsageWindow(window) {
   const parts = [`${window.label}:`];
-  if (window.limitTokens != null) {
+  if (window.unlimited === true) {
+    const gauge = unlimitedCapacityGauge({ width: 18 });
+    parts.push(gauge.bar);
+    parts.push(gauge.pctText);
+  } else if (window.limitTokens != null) {
     parts.push(renderUsageBar(window.usedTokens, window.limitTokens));
     parts.push(`${fmtTokens(window.usedTokens)} used`);
     parts.push(`of ${fmtTokens(window.limitTokens)}`);
@@ -175,12 +180,17 @@ export function formatProviderUsageWindow(window) {
     if (window.limitSource === "inferred_percent" && window.observedPct != null) {
       parts.push(`${C.dim}inferred from ${window.observedPct}%${C.reset}`);
     }
+  } else if (Number.isFinite(window.utilizationPct)) {
+    const utilizationPct = Math.max(0, Math.min(100, Number(window.utilizationPct)));
+    parts.push(renderUsageBar(utilizationPct, 100));
+    parts.push(`${utilizationPct.toFixed(utilizationPct >= 10 ? 0 : 1)}% used`);
+    parts.push(`${C.dim}${(100 - utilizationPct).toFixed(utilizationPct >= 10 ? 0 : 1)}% remaining${C.reset}`);
   } else {
     parts.push(renderUsageBar(0, null));
     parts.push(`${fmtTokens(window.usedTokens)} used`);
     parts.push(`${C.dim}remaining unavailable${C.reset}`);
   }
-  if (window.resetAt) {
+  if (window.unlimited !== true && window.resetAt) {
     parts.push(`${C.dim}next drop ${fmtRelativeTime(window.resetAt)}${C.reset}`);
   }
   return parts.join(`  ${C.dim}|${C.reset}  `);

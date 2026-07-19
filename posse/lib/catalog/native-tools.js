@@ -96,6 +96,43 @@ export const TOOL_EDIT_FILE = {
   },
 };
 
+// Internal-only coordination primitive. It is deliberately present in the
+// canonical catalog so every runtime can execute the same operation, but its
+// tool-suite declaration advertises it on no transport. Out-of-scope mutation
+// handlers invoke it themselves; agents do not spend a second tool call asking
+// for the scope they just demonstrated they need.
+export const TOOL_REQUEST_SCOPE = {
+  type: "function",
+  name: "request_scope",
+  description:
+    "Pause the current job and request human approval for one exact file path outside its writable scope.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description: "Exact repository-relative file path that needs writable scope.",
+      },
+      access: {
+        type: "string",
+        enum: ["modify", "create"],
+        description: "Whether the job needs permission to modify an existing file or create a new file.",
+      },
+      operation: {
+        type: "string",
+        enum: ["write_file", "edit_file"],
+        description: "Mutation that encountered the scope boundary.",
+      },
+      reason: {
+        type: "string",
+        description: "Short explanation of why this path is required for the current task.",
+      },
+    },
+    required: ["path", "access", "operation"],
+    additionalProperties: false,
+  },
+};
+
 export const TOOL_LIST_FILES = {
   type: "function",
   name: "list_files",

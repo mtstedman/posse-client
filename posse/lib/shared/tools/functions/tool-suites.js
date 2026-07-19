@@ -58,6 +58,7 @@ const TOOLS_SUITE = [
   { name: "run_test_suite", mutatesWorktree: false, advertise: ["mcp"] },
   // Embedded-executable helpers, advertised on no transport today.
   { name: "pull_brief", mutatesWorktree: false, advertise: [] },
+  { name: "request_scope", mutatesWorktree: false, advertise: [] },
   { name: "resize_image", mutatesWorktree: false, advertise: [] },
   { name: "optimize_image", mutatesWorktree: false, advertise: [] },
   { name: "reencode_image", mutatesWorktree: false, advertise: [] },

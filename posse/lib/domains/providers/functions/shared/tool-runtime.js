@@ -1,3 +1,4 @@
+import fs from "fs";
 import path from "path";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../../runtime/functions/protected-paths.js";
 import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncGate.js";
@@ -16,6 +17,7 @@ import {
   countPendingOperatorFeedbackForJob,
   getOperatorFeedbackForJob,
   recordAgentActivity,
+  requestJobScopeExpansion,
 } from "../../../queue/functions/index.js";
 
 const PROVIDER_TOOL_GATE = new AsyncResourceGate({ name: "provider native tool" });
@@ -306,6 +308,21 @@ export function createStandardToolHandlerMap({
     return ledger;
   };
   const handlers = {
+    request_scope(args, ctx) {
+      const ambient = getObservationContext() || {};
+      const result = requestJobScopeExpansion({
+        jobId: ambient.job_id,
+        workItemId: ambient.work_item_id,
+        attemptId: ambient.attempt_id,
+        agentCallId: ambient.agent_call_id,
+        path: args.path,
+        access: args.access,
+        operation: args.operation,
+        reason: args.reason,
+        source: "embedded_internal_tool",
+      });
+      return JSON.stringify(result, null, 2);
+    },
     chain_read(args, ctx) {
       return embeddedChainLedger(ctx).chainRead(args);
     },
@@ -374,8 +391,21 @@ export function createStandardToolHandlerMap({
       const writePath = safePath(ctx.cwd, args.path, ctx.scopePredicates);
       const protectedErr = protectedMutationError("write_file", args.path, writePath, ctx);
       if (protectedErr) return protectedErr;
-      if (!ctx.scopePredicates.canCreate(writePath)) {
-        return `Error: write_file blocked - ${args.path} is outside the allowed creation scope (not in files_to_create or create_roots). If this is a new file, it must be in files_to_create. Use FILE_REQUEST if you need out-of-scope files created.`;
+      const exists = fs.existsSync(writePath);
+      const allowed = exists
+        ? ctx.scopePredicates.canEdit(writePath)
+        : ctx.scopePredicates.canCreate(writePath);
+      if (!allowed) {
+        const ambient = getObservationContext() || {};
+        if (ambient.job_id == null) {
+          return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
+        }
+        return handlers.request_scope({
+          path: relativePathFromCwd(ctx.cwd, writePath),
+          access: exists ? "modify" : "create",
+          operation: "write_file",
+          reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
+        }, ctx);
       }
       return deterministicWriteFile(args, ctx.cwd, ctx.scopePredicates);
     },
@@ -385,7 +415,16 @@ export function createStandardToolHandlerMap({
       const protectedErr = protectedMutationError("edit_file", args.path, editPath, ctx);
       if (protectedErr) return protectedErr;
       if (!ctx.scopePredicates.canEdit(editPath)) {
-        return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope (not in files_to_modify or create_roots)`;
+        const ambient = getObservationContext() || {};
+        if (ambient.job_id == null) {
+          return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope (not in files_to_modify or create_roots).`;
+        }
+        return handlers.request_scope({
+          path: relativePathFromCwd(ctx.cwd, editPath),
+          access: "modify",
+          operation: "edit_file",
+          reason: "edit_file requires this existing file to complete the active job",
+        }, ctx);
       }
       return deterministicEditFile(args, ctx.cwd, ctx.scopePredicates);
     },

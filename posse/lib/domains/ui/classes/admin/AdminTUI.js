@@ -55,6 +55,7 @@ import {
   providerDashboardLabel,
   providerCostQualifier,
   providerDailyBudgetSettingKey,
+  configuredUsdBudget,
   renderUsdUsageBar,
   safeGetSetting,
 } from "./admin-tui-helpers.js";
@@ -319,10 +320,10 @@ export class AdminTUI {
 
       const budgetKey = providerDailyBudgetSettingKey(provider);
       if (budgetKey) {
-        const budget = Number(safeGetSetting(budgetKey));
-        if (Number.isFinite(budget) && budget > 0) {
+        const budget = configuredUsdBudget(safeGetSetting(budgetKey));
+        if (budget.configured && budget.value != null) {
           const todayCost = Number(todayByProvider.get(provider)?.costUsd) || 0;
-          lines.push(fit(`   Today ${renderUsdUsageBar(todayCost, budget)}  ${fmtUsd(todayCost)} / ${fmtUsd(budget)} daily budget`, inner));
+          lines.push(fit(`   Today ${renderUsdUsageBar(todayCost, budget.value)}  ${fmtUsd(todayCost)} / ${fmtUsd(budget.value)} daily budget`, inner));
         }
       }
     }

@@ -10,14 +10,24 @@
 import path from "path";
 import { execFileSync } from "child_process";
 import { C } from "../../../shared/format/functions/colors.js";
-import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
+import { roleBrandColor, unlimitedCapacityGauge } from "../../ui/functions/display/helpers/brand.js";
 import { getCommandPositionalArgs } from "./flags.js";
 import { readRecentPrompts } from "../../../shared/telemetry/functions/logging/prompt-log.js";
-import { getAgentCallStats, getResearcherGuardrailStats, getScopeContextHealthMetrics, listAgentCalls } from "../../queue/functions/index.js";
+import { getAgentCallStats, getResearcherGuardrailStats, getScopeContextHealthMetrics, getSetting, listAgentCalls } from "../../queue/functions/index.js";
 import { buildAgentCallReplayPacket, formatReplayPacket } from "../../observability/functions/recovery/job-replay.js";
 import { appendRunTelemetry, getRunTelemetryDir } from "../../../shared/telemetry/functions/run-telemetry.js";
+import {
+  getCurrentRunProviderUsage,
+  getLatestRunStartedAtIso,
+  getTodayProviderUsage,
+} from "../../ui/functions/display/helpers/provider-usage.js";
+import {
+  buildProviderUsageDocument,
+  serializeProviderUsageDocument,
+} from "../../providers/functions/provider-usage-contract.js";
 
 function fmtUsagePct(value) {
+  if (value == null || value === "") return "?%";
   const n = Number(value);
   if (!Number.isFinite(n)) return "?%";
   return `${n.toFixed(n >= 10 ? 0 : 1)}%`;
@@ -25,6 +35,9 @@ function fmtUsagePct(value) {
 
 function renderUsageBarByPct(pct, width = 18) {
   const safeWidth = Math.max(8, width | 0);
+  if (pct == null || pct === "" || !Number.isFinite(Number(pct))) {
+    return `${C.dim}[${"?".repeat(safeWidth)}]${C.reset}`;
+  }
   const ratio = Math.max(0, Math.min(1, Number(pct || 0) / 100));
   const filled = Math.max(0, Math.min(safeWidth, Math.round(ratio * safeWidth)));
   const empty = Math.max(0, safeWidth - filled);
@@ -459,42 +472,98 @@ $events | Sort-Object time_created | ConvertTo-Json -Depth 4
   return result;
 }
 
-export async function cmdUsage({ projectDir, loadProviderModule }) {
-  const refreshRequested = process.argv.includes("--refresh") || process.argv.includes("--force-refresh");
-  const ignoreBackoff = process.argv.includes("--force-refresh");
+export async function cmdUsage({
+  projectDir,
+  loadProviderModule,
+  args = process.argv.slice(3),
+  stdout = null,
+  stderr = null,
+  now = () => new Date(),
+  getRunStartedAt = getLatestRunStartedAtIso,
+  getCurrentRunUsage = getCurrentRunProviderUsage,
+  getTodayUsage = getTodayProviderUsage,
+  readSetting = (key) => getSetting(key, { projectDir }),
+} = {}) {
+  const jsonOutput = args.includes("--json");
+  const refreshRequested = args.includes("--refresh") || args.includes("--force-refresh");
+  const ignoreBackoff = args.includes("--force-refresh");
+  const writeStdout = typeof stdout === "function"
+    ? stdout
+    : (value) => process.stdout.write(String(value));
+  const writeStderr = typeof stderr === "function"
+    ? stderr
+    : (value) => process.stderr.write(String(value));
+  const logLine = (value = "") => {
+    if (typeof stdout === "function") stdout(`${value}\n`);
+    else console.log(value);
+  };
+  const providerErrors = [];
   const { getConfiguredProviderUsage, getConfiguredProviderUsageAsync } = await loadProviderModule();
   const summaries = refreshRequested
-    ? await getConfiguredProviderUsageAsync({ cwd: projectDir, forceRefresh: true, ignoreBackoff, timeoutMs: 5_000 })
-    : getConfiguredProviderUsage({ cwd: projectDir });
+    ? await getConfiguredProviderUsageAsync({
+        cwd: projectDir,
+        forceRefresh: true,
+        ignoreBackoff,
+        timeoutMs: 5_000,
+        onError: (provider) => providerErrors.push(String(provider || "unknown")),
+      })
+    : getConfiguredProviderUsage({
+        cwd: projectDir,
+        onError: (provider) => providerErrors.push(String(provider || "unknown")),
+      });
+  for (const provider of providerErrors) {
+    writeStderr(`posse usage: ${provider} usage unavailable\n`);
+  }
+
+  if (jsonOutput) {
+    const generatedAt = now();
+    const runStartedAt = getRunStartedAt();
+    const document = buildProviderUsageDocument({
+      summaries,
+      currentRunUsage: runStartedAt ? getCurrentRunUsage({ runStartedAtIso: runStartedAt }) : [],
+      todayUsage: getTodayUsage({ nowDate: generatedAt }),
+      runStartedAt,
+      generatedAt,
+      readSetting,
+    });
+    writeStdout(serializeProviderUsageDocument(document));
+    return document;
+  }
+
   if (!summaries.length) {
-    console.log("\n  No provider usage data available.\n");
+    logLine("\n  No provider usage data available.\n");
     return;
   }
 
-  console.log(`\n  ${C.bold}Provider Usage${C.reset}\n`);
+  logLine(`\n  ${C.bold}Provider Usage${C.reset}\n`);
   for (const summary of summaries) {
     const meta = [summary.subscriptionType, summary.rateLimitTier].filter(Boolean).join(" / ");
-    console.log(`  ${C.bold}${summary.provider}${C.reset}${meta ? ` ${C.dim}(${meta})${C.reset}` : ""} ${C.dim}[${summary.source || "unknown"}]${C.reset}`);
+    logLine(`  ${C.bold}${summary.provider}${C.reset}${meta ? ` ${C.dim}(${meta})${C.reset}` : ""} ${C.dim}[${summary.source || "unknown"}]${C.reset}`);
     for (const window of summary.windows || []) {
+      if (window.unlimited === true) {
+        const gauge = unlimitedCapacityGauge({ width: 18 });
+        logLine(`    ${window.label.padEnd(18)} ${gauge.bar} ${gauge.pctText}`);
+        continue;
+      }
       if (window.usageUnit === "currency") {
         const used = Number.isFinite(window.usedAmount) ? `$${window.usedAmount.toFixed(2)}` : "?";
         const limit = Number.isFinite(window.limitAmount) ? `$${window.limitAmount.toFixed(2)}` : "?";
-        console.log(`    ${window.label.padEnd(18)} ${used} / ${limit}${window.enabled ? "" : ` ${C.dim}(disabled)${C.reset}`}`);
+        logLine(`    ${window.label.padEnd(18)} ${used} / ${limit}${window.enabled ? "" : ` ${C.dim}(disabled)${C.reset}`}`);
         continue;
       }
 
       const pct = Number.isFinite(window.utilizationPct)
         ? window.utilizationPct
-        : (window.limitTokens > 0 ? ((window.usedTokens || 0) / window.limitTokens) * 100 : 0);
+        : (window.limitTokens > 0 ? ((window.usedTokens || 0) / window.limitTokens) * 100 : null);
       const usageText = window.limitTokens != null
         ? `${(window.usedTokens || 0).toLocaleString()} / ${window.limitTokens.toLocaleString()} tokens`
         : Number.isFinite(window.usedTokens)
           ? `${window.usedTokens.toLocaleString()} tokens observed`
         : `${fmtUsagePct(pct)} used`;
       const resetText = window.resetAt ? ` ${C.dim}| next drop ${fmtRelativeUsageTime(window.resetAt)}${C.reset}` : "";
-      console.log(`    ${window.label.padEnd(18)} ${renderUsageBarByPct(pct)} ${fmtUsagePct(pct).padStart(6)} ${C.dim}|${C.reset} ${usageText}${resetText}`);
+      logLine(`    ${window.label.padEnd(18)} ${renderUsageBarByPct(pct)} ${fmtUsagePct(pct).padStart(6)} ${C.dim}|${C.reset} ${usageText}${resetText}`);
     }
-    console.log("");
+    logLine("");
   }
 }
 

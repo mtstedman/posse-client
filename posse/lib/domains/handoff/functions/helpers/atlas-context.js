@@ -39,6 +39,7 @@ const LEXICAL_PREFETCH_CACHE_MAX = 64;
 const LEXICAL_PREFETCH_SCAN_LIMIT = 120_000;
 const LEXICAL_PREFETCH_RG_MAX_BUFFER = 16 * 1024 * 1024;
 const LEXICAL_PREFETCH_CACHE = new Map();
+const ATLAS_AREA_MAP_PREFETCH_TIMEOUT_MS = 5_000;
 
 const ATLAS_DB_PREFETCH_RG_PATTERN = [
   "\\bselect\\b",
@@ -1642,9 +1643,14 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
   }
 }
 
-// Top-level orientation for every handoff: tree.overview's compressed-tree
-// area map. Fetched independently of the discovery pass so a slice fallback
-// or a seed-only grow still opens with the "what lives where" map.
+export function atlasAreaMapFromTreeScope(treeScope) {
+  return Array.isArray(treeScope?.areaMap) ? treeScope.areaMap.slice(0, 16) : [];
+}
+
+// Top-level orientation fallback for handoffs whose tree.scope/tree.expand did
+// not already carry the compressed-tree area map. This is deliberately
+// bounded below the whole handoff budget: orientation is optional and must not
+// discard a usable scope result if tree.overview stalls on a very large tree.
 async function _prefetchAtlasAreaMap(packet) {
   try {
     const raw = await executeEmbeddedAtlasTool("tree.overview", {
@@ -1655,6 +1661,7 @@ async function _prefetchAtlasAreaMap(packet) {
       cwd: packet.cwd,
       config: packet.atlas_config || undefined,
       origin: "prefetch",
+      timeoutMs: ATLAS_AREA_MAP_PREFETCH_TIMEOUT_MS,
     });
     if (String(raw || "").startsWith("Error:")) return [];
     const parsed = extractAtlasJsonPayload(raw);
@@ -1717,7 +1724,7 @@ export async function attachAtlasPlannerSlice(packet) {
     let areaMap = [];
     if (treeToolAvailable || wantSymbolCards || tools.has("tree.overview")) {
       packet.atlas_slice_prefetch_attempted = true;
-      [treeScope, seedSymbolCards, areaMap] = await Promise.all([
+      [treeScope, seedSymbolCards] = await Promise.all([
         treeToolAvailable
           ? _prefetchAtlasTreeScope(packet, {
             taskText: plan.useTaskText ? taskText : null,
@@ -1730,14 +1737,15 @@ export async function attachAtlasPlannerSlice(packet) {
         wantSymbolCards
           ? _prefetchSeedSymbolCards(packet, { symbolIds: seedSymbols })
           : Promise.resolve([]),
-        tools.has("tree.overview")
-          ? _prefetchAtlasAreaMap(packet)
-          : Promise.resolve([]),
       ]);
     }
-    // The overview's map is authoritative top-level orientation; the scope
-    // pass's copy is the fallback when overview is unavailable.
-    if (areaMap.length === 0 && Array.isArray(treeScope?.areaMap)) areaMap = treeScope.areaMap;
+    // tree.scope/tree.expand already carries the same compressed-tree area map.
+    // Reuse it instead of redundantly traversing the entire tree. Only the
+    // slice-fallback path needs the separately bounded overview request.
+    areaMap = atlasAreaMapFromTreeScope(treeScope);
+    if (areaMap.length === 0 && tools.has("tree.overview")) {
+      areaMap = await _prefetchAtlasAreaMap(packet);
+    }
 
     if (treeScope?.ok && treeScope.candidateFiles.length > 0) {
       await _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards, areaMap, prefetchMode: plan.mode, taskText, seedSymbols });

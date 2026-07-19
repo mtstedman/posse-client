@@ -41,6 +41,56 @@ export const PROJECT_DB_PERMISSION_OPTIONS = Object.freeze([
   Object.freeze({ value: "alter", label: "alter (ALTER)" }),
 ]);
 
+export const PROJECT_DB_SETTING_DEFS = Object.freeze([
+  Object.freeze({ key: "project_db_enabled", default: "false", valueType: "boolean" }),
+  Object.freeze({ key: "project_db_type", default: "", options: PROJECT_DB_TYPE_OPTIONS }),
+  Object.freeze({ key: "project_db_permissions", default: "", options: PROJECT_DB_PERMISSION_OPTIONS, multi: true }),
+  Object.freeze({ key: "project_db_database", default: "" }),
+  Object.freeze({ key: "project_db_host", default: "" }),
+  Object.freeze({ key: "project_db_port", default: "", numeric: Object.freeze({ integer: true, min: 0 }) }),
+  Object.freeze({ key: "project_db_username", default: "" }),
+  Object.freeze({ key: "project_db_password", default: "", sensitive: true }),
+]);
+
+// Visual ordering for specialized AdminTUI rows lives beside the ordinary
+// settings groups so machine projections and the interactive editor cannot
+// silently acquire separate policy tables.
+export const ADMIN_AGENT_SETTING_SECTIONS = Object.freeze([
+  Object.freeze({ role: "researcher", label: "Researcher", keys: Object.freeze(["base_turns_researcher", "max_output_tokens_researcher"]) }),
+  Object.freeze({ role: "planner", label: "Planner", keys: Object.freeze(["base_turns_planner", "max_output_tokens_planner", "planner_max_tasks", "planner_under_scoped_broad_gate"]) }),
+  Object.freeze({ role: "dev", label: "Dev", keys: Object.freeze(["base_turns_dev", "max_output_tokens_dev"]) }),
+  Object.freeze({ role: "artificer", label: "Artificer", keys: Object.freeze(["max_output_tokens_artificer"]) }),
+  Object.freeze({ role: "preflight", label: "Preflight", keys: Object.freeze(["max_output_tokens_preflight"]) }),
+  Object.freeze({ role: "assessor", label: "Assessor", keys: Object.freeze(["base_turns_assessor", "max_output_tokens_assessor"]) }),
+  Object.freeze({ role: "delegator", label: "Delegator", keys: Object.freeze(["delegation_mode", "max_output_tokens_delegator"]) }),
+]);
+
+export const ADMIN_PROVIDER_SETTING_SECTIONS = Object.freeze([
+  Object.freeze({ provider: "claude", label: "Claude", budgetKeys: Object.freeze(["claude_run_budget_pct_session"]) }),
+  Object.freeze({ provider: "codex", label: "Codex", budgetKeys: Object.freeze(["codex_auth_mode", "codex_run_budget_pct_session"]) }),
+  Object.freeze({ provider: "openai", label: "OpenAI", budgetKeys: Object.freeze(["openai_run_budget_usd", "openai_daily_budget_usd", "openai_account_limit_tokens_session", "openai_account_limit_tokens_week"]) }),
+  Object.freeze({ provider: "grok", label: "Grok", budgetKeys: Object.freeze(["grok_run_budget_usd", "grok_daily_budget_usd"]) }),
+  Object.freeze({ provider: "copilot", label: "Copilot", budgetKeys: Object.freeze([]) }),
+]);
+
+export const ADMIN_PROVIDER_CATALOG_SETTING_KEYS = Object.freeze([
+  "model_catalog_enforcement",
+  "model_catalog_cache_ms",
+  "claude_execution_mode",
+]);
+
+export const ADMIN_IMAGE_SETTING_SECTIONS = Object.freeze([
+  Object.freeze({ provider: "grok", label: "Grok", budgetKeys: Object.freeze(["grok_image_budget_usd"]) }),
+  Object.freeze({ provider: "openai", label: "OpenAI", budgetKeys: Object.freeze(["openai_image_budget_usd"]) }),
+]);
+
+export const ADMIN_CREDENTIAL_SETTING_DEFS = Object.freeze([
+  Object.freeze({ key: "OPENAI_API_KEY", label: "OpenAI API key", description: "OpenAI API credential (environment-managed).", env: "OPENAI_API_KEY" }),
+  Object.freeze({ key: "CODEX_API_KEY", label: "Codex API key", description: "Optional Codex CLI API credential (environment-managed).", env: "CODEX_API_KEY" }),
+  Object.freeze({ key: "XAI_API_KEY", label: "xAI API key", description: "xAI/Grok API credential (environment-managed).", env: "XAI_API_KEY" }),
+  Object.freeze({ key: "CLAUDE_CODE_OAUTH_TOKEN", label: "Claude OAuth token", description: "Claude OAuth credential (environment-managed).", env: "CLAUDE_CODE_OAUTH_TOKEN" }),
+]);
+
 export const BOOLEAN_SETTING_KEYS = new Set(
   SETTINGS_CATALOG
     .filter((entry) => isCatalogBooleanSetting(entry.key))
@@ -352,7 +402,7 @@ const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   project_db_host: "Host name for PostgreSQL or MySQL. SQLite does not use this setting.",
   project_db_port: "Port for PostgreSQL or MySQL. SQLite does not use this setting.",
   project_db_username: "Username for PostgreSQL or MySQL. SQLite does not use this setting.",
-  project_db_password: "Password for PostgreSQL or MySQL. It is stored securely and never displayed; leave blank to keep it unchanged.",
+  project_db_password: "Password for PostgreSQL or MySQL. It is stored securely and never displayed; leave blank to keep it unchanged, or clear it to remove it.",
   planner_max_tasks: "Maximum number of tasks the planner may place in one plan.",
   planner_under_scoped_broad_gate: "Choose whether broad plans with too little file scope are allowed, warned about, or rejected.",
   delegation_mode: "Choose whether delegation is handled by deterministic code or a model.",

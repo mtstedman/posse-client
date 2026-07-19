@@ -14,6 +14,7 @@ import {
   extendJobMaxAttempts,
   incrementAndCreateAttempt,
   logEvent,
+  resolveJobScopeExpansion,
   rewireDependency,
   setAttemptCommitHash,
   storeArtifact,
@@ -338,6 +339,33 @@ export async function runHumanInputJob(worker, job, {
         worker.emit(job.id, `${C.yellow}[human] One-shot scope selection canceled; no plan or dev job was queued${C.reset}`);
       } else {
         worker.emit(job.id, `${C.yellow}[human] One-shot scope answer was not actionable; no plan or dev job was queued${C.reset}`);
+      }
+    }
+
+    if (payload.review_type === "scope_expansion_request" && payload.scope_request) {
+      handledReviewDecision = true;
+      const answers = extractHumanAnswers(output);
+      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
+      const decision = classifyApprovalAnswer(lastAnswer);
+      const approved = decision === "approved";
+      const resolved = resolveJobScopeExpansion({
+        approvalJobId: job.id,
+        approved,
+        answer: lastAnswer,
+      });
+      if (!resolved.ok) {
+        finalHumanStatus = "failed";
+        worker.emit(job.id, `${C.yellow}[human] Scope request could not be resolved (${resolved.code || "unknown"})${C.reset}`);
+      } else if (approved) {
+        worker.emit(
+          job.id,
+          `${C.green}[human] Approved ${resolved.request.access} scope for ${resolved.request.path}; ${resolved.requeued ? `requeued job #${resolved.job.id}` : `job #${resolved.job.id} will requeue as soon as its paused provider call exits`}${C.reset}`,
+        );
+      } else {
+        worker.emit(
+          job.id,
+          `${C.yellow}[human] Denied scope for ${resolved.request.path}; ${resolved.finalized ? `job #${resolved.job.id} failed out-of-scope` : `job #${resolved.job.id} will fail as soon as its paused provider call exits`}${C.reset}`,
+        );
       }
     }
 
