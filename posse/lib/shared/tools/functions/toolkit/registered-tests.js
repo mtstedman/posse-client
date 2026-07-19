@@ -19,6 +19,7 @@ const MAX_FAILURE_CHARS = 6000;
 const MAX_TARGET_FILES = 80;
 const MAX_TARGET_SYMBOLS = 120;
 const MAX_TARGET_IMPORTS = 80;
+const MAX_TEST_BATCH = 24;
 const DEFAULT_TIMEOUT_MS = 30000;
 const WORKSPACE_AUDIT_MAX_FILE_BYTES = 50 * 1024 * 1024;
 const WORKSPACE_AUDIT_MAX_TOTAL_BYTES = 250 * 1024 * 1024;
@@ -975,7 +976,7 @@ export function createRegisteredTestSuite({ args = {}, cwd, actor = {}, db = get
   };
 }
 
-export function createRegisteredTest({ args = {}, cwd, actor = {}, scopeFiles = [], db = getDb() } = {}) {
+function createRegisteredTestSingle({ args = {}, cwd, actor = {}, scopeFiles = [], db = getDb() } = {}) {
   ensureRegisteredTestTables(db);
   const suite = resolveSuite(db, args);
   if (!suite) {
@@ -1007,8 +1008,10 @@ export function createRegisteredTest({ args = {}, cwd, actor = {}, scopeFiles = 
     return {
       ok: false,
       registered: false,
+      passed: false,
       summary: "test registration rejected: test failed",
       suite: suitePublic(suite),
+      test: { name, slug: slugify(args.slug || name) },
       failure: registrationRun.failure,
       duration_ms: registrationRun.duration_ms,
       tmp_cleaned: registrationRun.tmp_cleaned,
@@ -1065,6 +1068,7 @@ export function createRegisteredTest({ args = {}, cwd, actor = {}, scopeFiles = 
   return {
     ok: true,
     registered: true,
+    passed: true,
     created: !existing,
     updated: !!existing,
     summary: existing ? "test updated and passed registration" : "test registered and passed",
@@ -1076,7 +1080,7 @@ export function createRegisteredTest({ args = {}, cwd, actor = {}, scopeFiles = 
   };
 }
 
-export function runRegisteredTest({ args = {}, cwd, actor = {}, scopeFiles = [], db = getDb() } = {}) {
+function runRegisteredTestSingle({ args = {}, cwd, actor = {}, scopeFiles = [], db = getDb() } = {}) {
   ensureRegisteredTestTables(db);
   const test = resolveTest(db, args);
   if (!test) {
@@ -1111,6 +1115,7 @@ export function runRegisteredTest({ args = {}, cwd, actor = {}, scopeFiles = [],
   updateTestLastRun(db, test.id, result);
   return {
     ok: result.ok,
+    passed: result.ok,
     summary: result.ok ? "test passed" : "test failed",
     suite: suitePublic(suite),
     test: testPublic(test),
@@ -1118,6 +1123,112 @@ export function runRegisteredTest({ args = {}, cwd, actor = {}, scopeFiles = [],
     duration_ms: result.duration_ms,
     tmp_cleaned: result.tmp_cleaned,
     failure: result.failure,
+  };
+}
+
+function normalizeTestBatch(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("tests must be a non-empty array for a batch call.");
+  }
+  if (value.length > MAX_TEST_BATCH) {
+    throw new Error(`tests exceeds the ${MAX_TEST_BATCH}-item batch limit.`);
+  }
+  return value;
+}
+
+function batchItemFailure(item, index, err, summary, { registration = false } = {}) {
+  const attemptedName = item && typeof item === "object" && !Array.isArray(item)
+    ? String(item.name ?? item.test ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_NAME_CHARS) || null
+    : null;
+  return {
+    ok: false,
+    ...(registration ? { registered: false } : {}),
+    passed: false,
+    summary,
+    input_index: index,
+    test: { name: attemptedName },
+    failure: { message: compactScrubbed(err?.message || String(err)) },
+  };
+}
+
+function inheritedBatchArgs(args = {}, item = {}) {
+  const shared = {};
+  for (const key of ["suite_id", "suite", "timeout_ms"]) {
+    if (args[key] != null) shared[key] = args[key];
+  }
+  return { ...shared, ...item };
+}
+
+export function createRegisteredTest(options = {}) {
+  const args = options?.args || {};
+  if (!Object.prototype.hasOwnProperty.call(args, "tests")) {
+    return createRegisteredTestSingle(options);
+  }
+  const items = normalizeTestBatch(args.tests);
+  const results = items.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return batchItemFailure(item, index, new Error("each tests entry must be an object."), "test registration rejected: invalid batch item", { registration: true });
+    }
+    try {
+      return {
+        input_index: index,
+        ...createRegisteredTestSingle({
+          ...options,
+          args: inheritedBatchArgs(args, item),
+        }),
+      };
+    } catch (err) {
+      return batchItemFailure(item, index, err, "test registration rejected: invalid test definition", { registration: true });
+    }
+  });
+  const registered = results.filter((result) => result.ok && result.registered && result.passed).length;
+  const failed = results.length - registered;
+  return {
+    ok: failed === 0,
+    summary: failed === 0
+      ? `all ${registered} tests registered and passed`
+      : `${registered} of ${results.length} tests registered and passed; ${failed} rejected`,
+    total: results.length,
+    registered,
+    passed: registered,
+    failed,
+    results,
+  };
+}
+
+export function runRegisteredTest(options = {}) {
+  const args = options?.args || {};
+  if (!Object.prototype.hasOwnProperty.call(args, "tests")) {
+    return runRegisteredTestSingle(options);
+  }
+  const items = normalizeTestBatch(args.tests);
+  const results = items.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return batchItemFailure(item, index, new Error("each tests entry must be an object."), "registered test not run: invalid batch item");
+    }
+    try {
+      return {
+        input_index: index,
+        ...runRegisteredTestSingle({
+          ...options,
+          args: inheritedBatchArgs(args, item),
+        }),
+      };
+    } catch (err) {
+      return batchItemFailure(item, index, err, "registered test not run: invalid test selector");
+    }
+  });
+  const passed = results.filter((result) => result.ok && result.passed).length;
+  const failed = results.length - passed;
+  return {
+    ok: failed === 0,
+    summary: failed === 0
+      ? `all ${passed} registered tests passed`
+      : `${failed} of ${results.length} registered tests failed`,
+    total: results.length,
+    passed,
+    failed,
+    results,
   };
 }
 

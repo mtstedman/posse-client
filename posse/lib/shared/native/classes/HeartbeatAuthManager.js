@@ -194,7 +194,7 @@ function normalizeUrl(url) {
 }
 
 function capabilityError(message) {
-  const err = new Error(message);
+  const err = /** @type {Error & { code: string }} */ (new Error(message));
   err.code = "POSSE_NATIVE_AUTH_CAPABILITY_REJECTED";
   return err;
 }

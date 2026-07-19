@@ -246,6 +246,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     offset: i({ minimum: 0 }),
     limit: i({ minimum: 1, maximum: 60000 }),
     search: s({ maxLength: 512 }),
+    search_mode: s({ enum: ["auto", "literal", "regex"] }),
   }),
   create_ref: o({
     text: s({ maxLength: 60000 }),

@@ -2782,6 +2782,7 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
     }
     lines.push(`  This survey has already run. atlas.fetch_ref opens a stored survey page; it does not rerun ${label}.`);
     lines.push(`  If the compact preview omits something likely covered by this survey, fetch page 1 or follow next 10 before making a new retrieval call. Run ${label} only for a materially different path or symbol scope.`);
+    lines.push("  When parallel versions or implementations exist, search the stored survey pages for the task's exact named concepts before choosing the governing path; rank is candidate order, not a version decision.");
   }
   const fileCount = Number.isFinite(Number(sc.fileCount))
     ? Number(sc.fileCount)

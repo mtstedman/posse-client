@@ -24,6 +24,7 @@ import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contract
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
 import { noteAtlasPressureAndGetNudge } from "../../../domains/integrations/functions/deterministic-mcp/gate.js";
+import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
 import { recordToolUseObservations } from "../../../domains/observability/functions/observations.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
@@ -52,7 +53,7 @@ const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
 const TOKEN_CLOCK_SKEW_MS = 30 * 1000;
 const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
-const ATLAS_TOOL_ACTION_SET = new Set(ATLAS_TOOL_ACTIONS);
+const ATLAS_TOOL_ACTION_SET = /** @type {Set<string>} */ (new Set(ATLAS_TOOL_ACTIONS));
 const ATLAS_NESTED_ACTION_WRAPPERS = new Set(["query", "code", "repo", "agent", "workflow"]);
 
 function randomToken() {
@@ -496,8 +497,18 @@ function mcpToolResultErrorText(result = null) {
   return capString(contentText || structured || "ATLAS tool returned an error", 700);
 }
 
+/**
+ * @param {{
+ *   session?: any,
+ *   toolName?: string,
+ *   toolArgs?: Record<string, any>,
+ *   result?: any,
+ *   error?: any,
+ * }} [observation]
+ */
 function recordOwnerToolObservation({ session, toolName, toolArgs, result = null, error = null } = {}) {
   const boot = session?.bootConfig || {};
+  const outcome = error ? "failed" : classifyMcpToolResult(result);
   const errorText = error
     ? capString(error?.message || String(error), 700)
     : mcpToolResultErrorText(result);
@@ -510,7 +521,9 @@ function recordOwnerToolObservation({ session, toolName, toolArgs, result = null
       tool_uses: [{
         tool: toolName,
         input: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
-        ...(errorText ? { status: "error", error: errorText } : {}),
+        outcome,
+        ...(outcome === "failed" && errorText ? { status: "failed", error: errorText } : {}),
+        ...(outcome === "rejected" && errorText ? { status: "rejected", rejection: errorText } : {}),
       }],
     });
   } catch (recordErr) {
@@ -558,6 +571,7 @@ export function __testJsonlParseBuffer(buffer, onMessage, opts = {}) {
 }
 
 class PersistentMcpSession {
+  /** @param {Record<string, any>} [options] */
   constructor({
     id,
     token,
@@ -611,6 +625,7 @@ class PersistentMcpSession {
     };
   }
 
+  /** @param {Record<string, any>} [options] */
   update({ token, claims, bootConfig, serverSpec, agentOwned = undefined } = {}) {
     if (token) this.token = token;
     if (claims) {
@@ -745,7 +760,9 @@ class PersistentMcpSession {
     if (this._crashesSinceHealthy >= 2
       && this.lastExit?.at
       && Date.now() - this.lastExit.at < GATEWAY_RESTART_BACKOFF_MS) {
-      const err = new Error("MCP session restarting; backing off after repeated exits");
+      const err = /** @type {Error & { code: string }} */ (
+        new Error("MCP session restarting; backing off after repeated exits")
+      );
       err.code = "GATEWAY_RESTART_BACKOFF";
       throw err;
     }
@@ -997,6 +1014,7 @@ class PersistentMcpSession {
 }
 
 export class PersistentMcpOwner {
+  /** @param {Record<string, any>} [options] */
   constructor({
     pipePath = null,
     token = randomToken(),
@@ -1063,6 +1081,7 @@ export class PersistentMcpOwner {
     return this.endpoint();
   }
 
+  /** @param {Record<string, any>} [options] */
   registerSession({ token, bootConfig = {}, serverSpec = null, prewarm = true, agentOwned = false } = {}) {
     this.pruneExpiredSessions({ reason: "register_prune" });
     const claims = verifyMcpOAuthToken(token);
@@ -1127,6 +1146,7 @@ export class PersistentMcpOwner {
     return token;
   }
 
+  /** @param {Record<string, any>} [options] */
   attachAgentSession({
     sessionId,
     token,
@@ -1143,7 +1163,9 @@ export class PersistentMcpOwner {
     if (!session.agentOwned) throw new Error("MCP session is not owned by an agent");
     if (!token || !tokenEqual(session.token, token)) throw new Error("MCP agent session token mismatch");
     if (session.isTokenExpired()) {
-      const error = new Error("MCP agent session token is expired");
+      const error = /** @type {Error & { code: string }} */ (
+        new Error("MCP agent session token is expired")
+      );
       error.code = "POSSE_MCP_AGENT_TOKEN_EXPIRED";
       throw error;
     }
@@ -1175,6 +1197,7 @@ export class PersistentMcpOwner {
     };
   }
 
+  /** @param {Record<string, any>} [options] */
   detachAgentSession({
     sessionId,
     token,
@@ -1272,6 +1295,7 @@ export class PersistentMcpOwner {
     };
   }
 
+  /** @param {Record<string, any>} [options] */
   unregisterSession({ sessionId = null, token = null, expectedBootId = null, reason = "provider_exit", context = null } = {}) {
     if (expectedBootId && expectedBootId !== this.bootId) {
       return { released: false, reason: "owner_mismatch", sessionCount: this._sessions.size };
@@ -1305,6 +1329,7 @@ export class PersistentMcpOwner {
     return { released, sessionCount: this._sessions.size };
   }
 
+  /** @param {Record<string, any>} [options] */
   _ensureGatewaySession({ serverSpec = null, prewarm = true } = {}) {
     if (!serverSpec?.command) return null;
     if (!this._gatewaySession) {

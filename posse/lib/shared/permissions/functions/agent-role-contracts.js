@@ -11,6 +11,8 @@ const READ_DB_ROLES = new Set(["researcher", "planner", "assessor"]);
  * Return the dispatcher-owned maximum tool contract for a provider agent.
  * No Job/WI values are accepted here: those belong exclusively to the live
  * owner-side scope binding and may only narrow this role contract.
+ *
+ * @param {{ role?: string, providerName?: string | null }} [identity]
  */
 export function resolveAgentRoleContract({ role, providerName = null } = {}) {
   const normalizedRole = String(role || "").trim().toLowerCase();

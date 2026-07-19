@@ -71,6 +71,7 @@ export class ParentPulseTokenManager {
     return envelope;
   }
 
+  /** @param {{ refresh?: boolean, requiredRoute?: string }} [options] */
   async getPulseToken({ refresh = false, requiredRoute } = {}) {
     if (!requiredRoute) {
       throw brokerError("POSSE_PULSE_ROUTE_REQUIRED", "a child broker cannot request an unscoped pulse token");
@@ -213,7 +214,7 @@ export class ParentPulseTokenManager {
         req.destroy(error);
       }, this.timeoutMs);
       timer.unref?.();
-      req.on("error", (error) => fail(error?.code
+      req.on("error", (error) => fail(/** @type {any} */ (error)?.code
         ? error
         : brokerError("POSSE_PARENT_PULSE_UNAVAILABLE", "parent pulse broker is unavailable")));
       req.end(body);
@@ -247,7 +248,7 @@ function positiveNumber(value, fallback) {
 }
 
 function brokerError(code, message) {
-  const error = new Error(message);
+  const error = /** @type {Error & { code: string }} */ (new Error(message));
   error.code = code;
   return error;
 }

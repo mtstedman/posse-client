@@ -18,6 +18,8 @@ const NATIVE_VERSION_REJECTION_TTL_MS = 60_000;
 const NATIVE_PULSE_REFRESH_SKEW_SECONDS = 15;
 const NATIVE_PULSE_MIN_REFRESH_DELAY_SECONDS = 5;
 
+/** @typedef {Error & { code: string, status?: number | null, remoteCode?: string }} PulseError */
+
 /**
  * @typedef {Object} NativePulseEnvelope
  * @property {string} token        Compact Ed25519 JWT minted by the heartbeat.
@@ -787,7 +789,7 @@ function positiveNumber(value, fallback) {
 }
 
 function pulseError(code, message) {
-  const err = new Error(message);
+  const err = /** @type {PulseError} */ (new Error(message));
   err.code = code;
   return err;
 }

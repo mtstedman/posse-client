@@ -17,10 +17,23 @@ function deepFreeze(value) {
 }
 
 function gateError(code, message) {
-  const error = new Error(message);
+  const error = /** @type {Error & { code: string }} */ (new Error(message));
   error.code = code;
   return error;
 }
+
+/**
+ * @typedef {object} McpGateOptions
+ * @property {string | number} [id]
+ * @property {string} [role]
+ * @property {string} [providerName]
+ * @property {string} [token]
+ * @property {Record<string, any>} [claims]
+ * @property {Record<string, any>} [contractBootConfig]
+ * @property {Record<string, any> | null} [remoteToolSurface]
+ * @property {any} [owner]
+ * @property {Record<string, any>} [ownerSession]
+ */
 
 function rpcToolName(name) {
   const raw = String(name || "").trim();
@@ -60,6 +73,34 @@ function resultText(message = {}) {
  * signed role/tool capability claims remain unchanged.
  */
 export class McpGate {
+  /** @type {string} */
+  id;
+
+  /** @type {string} */
+  role;
+
+  /** @type {string} */
+  providerName;
+
+  /** @type {Record<string, any>} */
+  claims;
+
+  /** @type {Record<string, any>} */
+  contractBootConfig;
+
+  /** @type {Record<string, any> | null} */
+  remoteToolSurface;
+
+  /** @type {any} */
+  owner;
+
+  /** @type {Record<string, any>} */
+  ownerSession;
+
+  /** @type {string | undefined} */
+  token;
+
+  /** @param {McpGateOptions} [options] */
   constructor({
     id,
     role,
@@ -112,6 +153,7 @@ export class McpGate {
     this.binding = null;
   }
 
+  /** @param {{ role?: string, providerName?: string | null }} [request] */
   assertCompatible({ role, providerName = null } = {}) {
     const requestedRole = String(role || "").trim().toLowerCase();
     const requestedProvider = String(providerName || "").trim().toLowerCase();

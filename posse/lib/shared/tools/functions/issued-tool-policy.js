@@ -39,13 +39,22 @@ const WRITE_TOOL_NAMES = new Set([
 ]);
 const TRUSTED_REMOTE_POLICY_OBJECTS = new WeakSet();
 
-const EMPTY_TOOL_POLICY = Object.freeze({
+/**
+ * @typedef {object} IssuedToolPolicy
+ * @property {boolean} allow_read
+ * @property {boolean} allow_write
+ * @property {boolean} allow_shell
+ * @property {boolean} allow_tests
+ * @property {number} fallback_reads
+ */
+
+const EMPTY_TOOL_POLICY = /** @type {Readonly<IssuedToolPolicy>} */ (Object.freeze({
   allow_read: false,
   allow_write: false,
   allow_shell: false,
   allow_tests: false,
   fallback_reads: 0,
-});
+}));
 
 const EMPTY_WEB_ACCESS = Object.freeze({
   role: "",
@@ -160,6 +169,14 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
   return true;
 }
 
+/**
+ * @param {unknown} value
+ * @param {{
+ *   policy?: Readonly<IssuedToolPolicy>,
+ *   projectDbCapability?: string,
+ *   atlasAvailable?: boolean,
+ * }} [options]
+ */
 export function normalizeIssuedToolSurface(value, {
   policy = EMPTY_TOOL_POLICY,
   projectDbCapability = "none",
@@ -504,6 +521,7 @@ function packetTaskMode(packet = {}, opts = {}) {
   ).trim().toLowerCase();
 }
 
+/** @param {Record<string, any>} [options] */
 export function narrowProviderOptionsToRemoteIssuance(options = {}) {
   const opts = { ...options };
   delete opts._remoteIssuedPolicy;

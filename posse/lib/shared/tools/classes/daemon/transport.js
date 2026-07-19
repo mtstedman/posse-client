@@ -169,9 +169,9 @@ export function ProcessTransport(opts) {
       // in-flight request's own timer keeps the loop alive meanwhile). Without
       // this, `node --test` files finish but never exit and the runner hangs.
       proc.unref();
-      proc.stdout?.unref();
-      proc.stderr?.unref();
-      proc.stdin?.unref();
+      /** @type {any} */ (proc.stdout)?.unref?.();
+      /** @type {any} */ (proc.stderr)?.unref?.();
+      /** @type {any} */ (proc.stdin)?.unref?.();
       // Pipe errors (especially stdin EPIPE) mean this transport incarnation
       // can no longer carry requests. They are not OS exit proof, so notify the
       // daemon while retaining the ledger until the child's eventual exit.
@@ -319,7 +319,7 @@ export function ThreadTransport(opts) {
       let bridgeDispose = null;
       try {
         const workerData = { ...(opts.workerData || {}) };
-        /** @type {Transferable[]} */
+        /** @type {import("node:worker_threads").Transferable[]} */
         const transferList = [];
         if (opts.nativeBridge === true) {
           const channel = new MessageChannel();

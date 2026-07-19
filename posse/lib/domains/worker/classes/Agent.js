@@ -3,16 +3,45 @@
 import crypto from "node:crypto";
 
 function agentError(code, message) {
-  const error = new Error(message);
+  const error = /** @type {Error & { code: string }} */ (new Error(message));
   error.code = code;
   return error;
 }
+
+/**
+ * @typedef {object} AgentOptions
+ * @property {string | null} [id]
+ * @property {string} [key]
+ * @property {string} [role]
+ * @property {string} [providerName]
+ * @property {any} [mcpGate]
+ * @property {boolean} [reusable]
+ */
 
 /**
  * A provider agent. Its MCP gate is a mandatory immutable dependency; the
  * Dispatcher attaches Job identity while tools resolve live file authority.
  */
 export class Agent {
+  /** @type {string} */
+  id;
+
+  /** @type {string} */
+  key;
+
+  /** @type {string} */
+  role;
+
+  /** @type {string} */
+  providerName;
+
+  /** @type {boolean} */
+  reusable;
+
+  /** @type {any} */
+  mcpGate;
+
+  /** @param {AgentOptions} [options] */
   constructor({ id = null, key, role, providerName, mcpGate, reusable = false } = {}) {
     if (!key) throw new TypeError("Agent requires a dispatcher key");
     if (!role) throw new TypeError("Agent requires a role");

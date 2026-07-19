@@ -249,13 +249,20 @@ function monitorFeedbackSuffix(row = {}) {
 // as a fallback for rows that never recorded an outcome (ok == null): legacy
 // observation logs and replay rows, where the summary text is the only signal.
 function monitorToolMeta(row = {}) {
-  if (row.ok === false) return { glyph: "\u2715", color: C.red, label: "err" };
-  if (row.ok === true) return { glyph: "\u2713", color: C.green, label: "done" };
+  const outcome = String(row.outcome || "").trim().toLowerCase();
+  if (outcome === "rejected") return { glyph: "\u2298", color: C.yellow, label: "rejected", outcome };
+  if (outcome === "failed") return { glyph: "\u2715", color: C.red, label: "failed", outcome };
+  if (outcome === "succeeded") return { glyph: "\u2713", color: C.green, label: "done", outcome };
+  if (row.ok === false) return { glyph: "\u2715", color: C.red, label: "failed", outcome: "failed" };
+  if (row.ok === true) return { glyph: "\u2713", color: C.green, label: "done", outcome: "succeeded" };
   const text = `${row.observation_type || ""} ${row.summary || ""}`.toLowerCase();
-  if (/\b(error|failed|fail|denied|cancelled|canceled)\b/.test(text)) {
-    return { glyph: "\u2715", color: C.red, label: "err" };
+  if (/\b(rejected|denied|cancelled|canceled|blocked)\b/.test(text)) {
+    return { glyph: "\u2298", color: C.yellow, label: "rejected", outcome: "rejected" };
   }
-  return { glyph: "\u2713", color: C.green, label: "done" };
+  if (/\b(error|failed|fail)\b/.test(text)) {
+    return { glyph: "\u2715", color: C.red, label: "failed", outcome: "failed" };
+  }
+  return { glyph: "\u2713", color: C.green, label: "done", outcome: "succeeded" };
 }
 
 
@@ -1032,9 +1039,12 @@ export class DisplayRightPanelRenderer {
     const glyphColor = inFlight ? C.cyan : meta.color;
     // In-flight rows read as "running"; completed ones show their measured
     // duration (both come from the start/finish pair collapsed upstream).
+    const duration = Number.isFinite(row.duration_ms) ? fmtDur(row.duration_ms) : "";
     const status = inFlight
       ? `${C.cyan}running${C.reset}`
-      : (Number.isFinite(row.duration_ms) ? `${C.dim}${fmtDur(row.duration_ms)}${C.reset}` : "");
+      : (meta.outcome === "failed" || meta.outcome === "rejected"
+          ? `${meta.color}${meta.label}${C.reset}${duration ? ` ${C.dim}${duration}${C.reset}` : ""}`
+          : (duration ? `${C.dim}${duration}${C.reset}` : ""));
     // No timestamp: glyph → module → command → info, status pinned at the end.
     const moduleColor = module === "atlas" ? C.magenta : C.blue;
     const commandText = command ? `${C.cyan}${command}${C.reset} ` : "";
@@ -1047,11 +1057,36 @@ export class DisplayRightPanelRenderer {
 
 
 
+  _formatFailedToolDetailRows(row, width) {
+    const meta = monitorToolMeta(row);
+    if (meta.outcome !== "failed") return [];
+    const safeWidth = Math.max(18, width | 0);
+    const error = _sanitizeDisplayLine(row.error || "No error diagnostic was recorded for this failed call.");
+    const firstPrefix = `   ${C.red}\u21b3 error:${C.reset} `;
+    const nextPrefix = "            ";
+    const firstWidth = Math.max(8, safeWidth - stripAnsi(firstPrefix).length - 2);
+    const nextWidth = Math.max(8, safeWidth - nextPrefix.length - 2);
+    return wrapHanging(error, firstWidth, nextWidth).map((line, index) =>
+      `${index === 0 ? firstPrefix : nextPrefix}${C.brightWhite}${line}${C.reset}`);
+  }
+
+
+
+  _formatMonitorToolRows(row, width) {
+    return [
+      this._formatMonitorToolRow(row, width),
+      ...this._formatFailedToolDetailRows(row, width),
+    ];
+  }
+
+
+
   _buildMonitorFeedbackToolLanes(agent, width, height) {
     const toolActivity = this._monitorToolActivityForJob(agent.jobId, { limit: 60 });
     const feedbackEntries = this._monitorFeedbackEntries(agent, toolActivity.feedbackToolRows, { limit: 60 });
     const toolRows = [...toolActivity.toolRows]
       .sort((a, b) => (Date.parse(b.created_at || "") || 0) - (Date.parse(a.created_at || "") || 0));
+    const renderedToolRows = toolRows.flatMap((row) => this._formatMonitorToolRows(row, width));
 
     // Two full-width boxes stacked to tile the pane: FEEDBACK on top (the larger
     // share) and TOOLS below. Box chrome is 4 lines (top, title, mid, bottom), so
@@ -1166,7 +1201,7 @@ export class DisplayRightPanelRenderer {
       this._monitorToolRatchetJob = agent.jobId;
       this._monitorToolRatchetH = 0;
     }
-    let toolBoxH = Math.max(MIN_TOOLS_H, Math.min(toolRows.length + 4, toolCap));
+    let toolBoxH = Math.max(MIN_TOOLS_H, Math.min(renderedToolRows.length + 4, toolCap));
     toolBoxH = Math.min(Math.max(toolBoxH, this._monitorToolRatchetH), toolCap);
     this._monitorToolRatchetH = toolBoxH;
     let feedbackBoxH = rest - toolBoxH;
@@ -1178,7 +1213,7 @@ export class DisplayRightPanelRenderer {
       count: toolRows.length,
       color: C.cyan,
       width,
-      rows: toolRows.slice(0, toolContent).map((row) => this._formatMonitorToolRow(row, width)),
+      rows: renderedToolRows.slice(0, toolContent),
       emptyText: "no tool calls yet",
       fixedRows: toolContent,
     });
@@ -1700,15 +1735,21 @@ export class DisplayRightPanelRenderer {
         const when = String(r.created_at || "").slice(11, 19) || "--:--:--";
         const jobId = r.job_id != null ? `#${r.job_id}` : "#?";
         const tool = String(r.observation_type || "tool.?").replace(/^tool\./, "");
+        const meta = monitorToolMeta(r);
         const summary = stripRedundantToolSummaryLabel(tool, r.summary);
-        const prefix = ` ${C.dim}${when}${C.reset} ${jobId.padStart(5)} ${C.cyan}${tool}${C.reset} `;
-        const prefixLen = when.length + 1 + Math.max(jobId.length, 5) + 1 + tool.length + 2;
-        const budget = Math.max(10, width - prefixLen - 2);
+        const prefix = ` ${C.dim}${when}${C.reset} ${meta.color}${meta.glyph}${C.reset} ${jobId.padStart(5)} ${C.cyan}${tool}${C.reset} `;
+        const prefixLen = when.length + 3 + Math.max(jobId.length, 5) + 1 + tool.length + 2;
+        const outcomeHint = meta.outcome === "failed" || meta.outcome === "rejected"
+          ? ` ${meta.color}${meta.label}${C.reset}`
+          : "";
+        const outcomeLen = outcomeHint ? meta.label.length + 1 : 0;
+        const budget = Math.max(10, width - prefixLen - outcomeLen - 2);
         const repeatHint = r._repeatCount > 1 ? ` ${C.dim}x${r._repeatCount}${C.reset}` : "";
         const repeatLen = r._repeatCount > 1 ? String(` x${r._repeatCount}`).length : 0;
         const summaryBudget = Math.max(10, budget - repeatLen);
         const summaryShort = summary.length > summaryBudget ? summary.slice(0, summaryBudget - 1) + "\u2026" : summary;
-        toolLines.push(`${prefix}${summaryShort}${repeatHint}`);
+        toolLines.push(`${prefix}${summaryShort}${repeatHint}${outcomeHint}`);
+        toolLines.push(...this._formatFailedToolDetailRows(r, width));
       }
     } else {
       toolLines.push(` ${C.dim}No recent tool invocations${C.reset}`);

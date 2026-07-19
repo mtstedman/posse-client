@@ -51,6 +51,8 @@ const CREATE_REF_MAX_TEXT_CHARS = 60000;
 const CREATE_REF_MAX_NOTE_CHARS = 300;
 const CREATE_REF_MAX_BATCH = 24;
 const CREATE_REF_OWNER_SCOPES = new Set(["work_item", "job"]);
+const FETCH_REF_SEARCH_MODES = new Set(["auto", "literal", "regex"]);
+const FETCH_REF_REGEX_HINT = /[\\^$.*+?()[\]{}|]/;
 const TREE_SCOPE_INLINE_CANDIDATES = 10;
 const TREE_SCOPE_DEFERRED_PAGES = Object.freeze([
   Object.freeze({ start: 10, end: 20 }),
@@ -298,11 +300,32 @@ function pageMaterializedText(text, args = {}) {
   const limit = parsePositiveInt(args.limit, CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS, CONTEXT_FETCH_REF_MAX_LIMIT_CHARS);
   const search = String(args.search || "").trim();
   if (search) {
-    const lower = search.toLowerCase();
-    const rows = [];
     const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+    const requestedModeValue = String(args.search_mode ?? args.searchMode ?? "auto").trim().toLowerCase();
+    const requestedMode = FETCH_REF_SEARCH_MODES.has(requestedModeValue) ? requestedModeValue : "auto";
+    const literalNeedle = search.toLowerCase();
+    const literalRows = [];
     for (let i = 0; i < lines.length; i += 1) {
-      if (lines[i].toLowerCase().includes(lower)) rows.push(`${i + 1}:${lines[i]}`);
+      if (lines[i].toLowerCase().includes(literalNeedle)) literalRows.push(`${i + 1}:${lines[i]}`);
+    }
+
+    let rows = literalRows;
+    let searchMode = "literal";
+    let searchError = null;
+    const shouldTryRegex = requestedMode === "regex"
+      || (requestedMode === "auto" && literalRows.length === 0 && FETCH_REF_REGEX_HINT.test(search));
+    if (shouldTryRegex) {
+      try {
+        const expression = new RegExp(search, "i");
+        rows = [];
+        for (let i = 0; i < lines.length; i += 1) {
+          if (expression.test(lines[i])) rows.push(`${i + 1}:${lines[i]}`);
+        }
+        searchMode = "regex";
+      } catch (err) {
+        searchError = `invalid_regex: ${err?.message || err}`;
+        if (requestedMode === "regex") rows = [];
+      }
     }
     const rowOffset = parsePositiveInt(args.offset, 0);
     const selected = [];
@@ -319,6 +342,9 @@ function pageMaterializedText(text, args = {}) {
       page: {
         mode: "search",
         search,
+        search_mode: searchMode,
+        requested_search_mode: requestedMode,
+        search_error: searchError,
         offset: rowOffset,
         limit,
         returned_chars: selected.join("\n").length,
@@ -1042,7 +1068,41 @@ function fetchResultText(result, args = {}) {
   }, null, 2);
 }
 
-function recordFetchObservation(hashContext, ref, result) {
+function fetchDeliveryDetail(renderedText) {
+  try {
+    const rendered = JSON.parse(String(renderedText || "{}"));
+    const page = rendered?.page && typeof rendered.page === "object" ? rendered.page : {};
+    const returnedChars = Number.isFinite(Number(page.returned_chars))
+      ? Number(page.returned_chars)
+      : (typeof rendered?.text === "string" ? rendered.text.length : null);
+    return {
+      object_type: rendered?.object_type || null,
+      page_mode: page.mode || null,
+      search_mode: page.search_mode || null,
+      requested_search_mode: page.requested_search_mode || null,
+      match_count: Number.isFinite(Number(page.match_count)) ? Number(page.match_count) : null,
+      returned_chars: returnedChars,
+      has_more: page.has_more === true,
+      empty: rendered?.ok === true && returnedChars === 0,
+      search_error: page.search_error || null,
+    };
+  } catch {
+    return {
+      object_type: null,
+      page_mode: null,
+      search_mode: null,
+      requested_search_mode: null,
+      match_count: null,
+      returned_chars: null,
+      has_more: false,
+      empty: false,
+      search_error: null,
+    };
+  }
+}
+
+function recordFetchObservation(hashContext, ref, result, renderedText = null) {
+  const delivery = fetchDeliveryDetail(renderedText);
   try {
     logEvent({
       work_item_id: hashContext.work_item_id ?? null,
@@ -1057,6 +1117,7 @@ function recordFetchObservation(hashContext, ref, result) {
         ok: result?.ok === true,
         found: result?.found === true,
         error: result?.error || null,
+        ...delivery,
       },
     });
   } catch {
@@ -1073,6 +1134,7 @@ function recordFetchObservation(hashContext, ref, result) {
       ok: result?.ok === true,
       found: result?.found === true,
       error: result?.error || null,
+      ...delivery,
     },
   });
 }
@@ -1102,14 +1164,16 @@ export function fetchHashRefTool(args = {}, {
   if (refs.length === 0) return JSON.stringify({ ok: false, error: "fetch_ref requires ref or refs" }, null, 2);
   if (refs.length === 1 && !Array.isArray(args.refs) && !Array.isArray(args.hashes)) {
     const result = isHashRefAlias(refs[0]) ? fetchHashRefForContext(hashContext, refs[0]) : invalidRefResult(refs[0]);
-    recordFetchObservation(hashContext, refs[0], result);
-    return fetchResultText(result, args);
+    const rendered = fetchResultText(result, args);
+    recordFetchObservation(hashContext, refs[0], result, rendered);
+    return rendered;
   }
 
   const results = refs.map((ref) => {
     const result = isHashRefAlias(ref) ? fetchHashRefForContext(hashContext, ref) : invalidRefResult(ref);
-    recordFetchObservation(hashContext, ref, result);
-    return parseFetchPayload(fetchResultText(result, args));
+    const rendered = fetchResultText(result, args);
+    recordFetchObservation(hashContext, ref, result, rendered);
+    return parseFetchPayload(rendered);
   });
   const found = results.filter((entry) => entry?.ok === true).length;
   return JSON.stringify({

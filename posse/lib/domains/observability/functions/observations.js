@@ -182,6 +182,19 @@ const HARNESS_SYSTEM_TYPE_SUFFIXES = Object.freeze([".prefetch", ".autofeedback"
 // rows stay queryable through the admin ATLAS report, but they should not read
 // like agent tool calls in the live/recent feed.
 const DISPLAY_TOOL_EXCLUDE_SUFFIXES = HARNESS_SYSTEM_TYPE_SUFFIXES;
+const TOOL_OUTCOMES = new Set(["succeeded", "rejected", "failed"]);
+
+function normalizedToolOutcome(value, { ok = null, status = "", error = "" } = {}) {
+  const explicit = String(value || "").trim().toLowerCase();
+  if (TOOL_OUTCOMES.has(explicit)) return explicit;
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  if (["succeeded", "success", "completed"].includes(normalizedStatus)) return "succeeded";
+  if (["rejected", "denied", "cancelled", "canceled"].includes(normalizedStatus)) return "rejected";
+  if (["failed", "error"].includes(normalizedStatus) || error) return "failed";
+  if (ok === true) return "succeeded";
+  if (ok === false) return "failed";
+  return null;
+}
 
 function _rowDetailObject(row) {
   if (row && row.detail && typeof row.detail === "object") return row.detail;
@@ -215,6 +228,11 @@ function _collapseToolInvocationRows(rows) {
       if (inv && finishedInv.has(inv)) continue; // finish row supersedes it
       out.push({ ...row, observation_type: type.slice(0, -".started".length), _inFlight: true, _durationMs: null, _ok: null });
     } else {
+      const outcome = normalizedToolOutcome(detail?.outcome, {
+        ok: typeof detail?.ok === "boolean" ? detail.ok : null,
+        status: detail?.status,
+        error: detail?.error,
+      });
       out.push({
         ...row,
         _inFlight: false,
@@ -223,6 +241,11 @@ function _collapseToolInvocationRows(rows) {
         // so consumers don't have to sniff the summary text for "failed". Absent
         // (null) means the row never recorded an outcome (legacy/replay row).
         _ok: typeof detail?.ok === "boolean" ? detail.ok : null,
+        _outcome: outcome,
+        _error: typeof detail?.error === "string" ? detail.error : null,
+        _rejectionReason: typeof detail?.rejection_reason === "string"
+          ? detail.rejection_reason
+          : null,
       });
     }
   }
@@ -251,6 +274,9 @@ function enrichToolInvocationRows(db, rows, { includeUnscoped = true } = {}) {
       in_flight: !!row._inFlight,
       duration_ms: row._durationMs ?? null,
       ok: typeof row._ok === "boolean" ? row._ok : null,
+      outcome: row._outcome ?? null,
+      error: row._error ?? null,
+      rejection_reason: row._rejectionReason ?? null,
     });
   }
   return enriched;
@@ -982,11 +1008,19 @@ function _summarizeToolUse(toolUse, cwd = null) {
     const hint = _atlasSummaryHint(input, atlasAction);
     const displayName = formatAtlasToolDisplayName(atlasAction) || `atlas ${atlasAction}`;
     const status = String(toolUse.status || "").trim().toLowerCase();
-    const errorText = String(toolUse.error || "").trim();
-    const statusSuffix = status === "cancelled"
-      ? " cancelled"
+    const rejectedStatus = ["rejected", "denied", "cancelled", "canceled"].includes(status);
+    const rawErrorText = String(toolUse.error || "").trim();
+    const errorText = rejectedStatus ? "" : rawErrorText;
+    const rejectionText = String(toolUse.rejection || (rejectedStatus ? rawErrorText : "")).trim();
+    const outcome = normalizedToolOutcome(toolUse.outcome, {
+      status,
+      error: errorText,
+    });
+    const statusSuffix = rejectedStatus
+      ? " rejected"
       : (errorText ? " failed" : "");
-    const errorSuffix = errorText ? `: ${_truncate(errorText, 80)}` : "";
+    const diagnosticText = errorText || rejectionText;
+    const errorSuffix = diagnosticText ? `: ${_truncate(diagnosticText, 80)}` : "";
     // Tool-use stream observations are always agent-initiated — prefetch
     // flows through _recordAtlasToolObservation directly and never becomes a
     // tool_use event on the wire.
@@ -1004,7 +1038,9 @@ function _summarizeToolUse(toolUse, cwd = null) {
         transport: toolLower.startsWith("mcp__") ? "mcp" : null,
         status: status || (errorText ? "error" : null),
         ok: status || errorText ? false : null,
+        outcome,
         error: errorText || null,
+        rejection_reason: rejectionText || null,
       },
     };
   }
@@ -1129,7 +1165,10 @@ export function finishToolInvocation(invocation, {
   input = null,
   cwd = null,
   ok = true,
+  outcome = null,
+  resultSummary = null,
   error = null,
+  rejection = null,
   work_item_id = undefined,
   job_id = undefined,
   attempt_id = undefined,
@@ -1141,21 +1180,26 @@ export function finishToolInvocation(invocation, {
     const context = getObservationContext() || {};
     const inv = invocation?.inv ?? null;
     const durationMs = invocation?.startedAtMs ? Math.max(0, Date.now() - invocation.startedAtMs) : null;
+    const resolvedOutcome = normalizedToolOutcome(outcome, { ok, error });
     const detail = {
       ...(summary.detail && typeof summary.detail === "object" ? summary.detail : {}),
       ...(extraDetail && typeof extraDetail === "object" ? extraDetail : {}),
       ...(inv ? { inv } : {}),
       phase: "finish",
       ok: !!ok,
+      outcome: resolvedOutcome,
       ...(durationMs != null ? { duration_ms: durationMs } : {}),
       ...(error ? { error: String(error).slice(0, 200) } : {}),
+      ...(rejection ? { rejection_reason: String(rejection).slice(0, 200) } : {}),
     };
     recordObservation({
       work_item_id: work_item_id ?? context.work_item_id ?? null,
       job_id: job_id ?? context.job_id ?? null,
       attempt_id: attempt_id ?? context.attempt_id ?? null,
       observation_type: summary.observation_type,
-      summary: ok ? summary.summary : `${summary.summary} — failed`,
+      summary: resultSummary || (resolvedOutcome === "succeeded"
+        ? summary.summary
+        : `${summary.summary} — ${resolvedOutcome || "failed"}`),
       detail,
     });
   } catch { /* best effort */ }
@@ -1185,11 +1229,23 @@ export function recordToolUseObservations({
   for (const toolUse of tool_uses) {
     const summary = _summarizeToolUse(toolUse, cwd);
     if (!summary) continue;
+    const status = String(toolUse?.status || "").trim();
+    const rejectedStatus = ["rejected", "denied", "cancelled", "canceled"].includes(status.toLowerCase());
+    const rawError = String(toolUse?.error || "").trim();
+    const error = rejectedStatus ? "" : rawError;
+    const rejection = String(toolUse?.rejection || (rejectedStatus ? rawError : "")).trim();
+    const outcome = normalizedToolOutcome(toolUse?.outcome, { status, error });
+    const detail = {
+      ...(summary.detail && typeof summary.detail === "object" ? summary.detail : {}),
+      ...(outcome ? { outcome, ok: outcome === "succeeded" } : {}),
+      ...(error ? { error: error.slice(0, 200) } : {}),
+      ...(rejection ? { rejection_reason: rejection.slice(0, 200) } : {}),
+    };
     const key = `${summary.observation_type}|${summary.summary}`;
     if (seen.has(key)) continue;
     seen.add(key);
     if (TOOL_REPLAY_DEDUPE_WINDOW_MS > 0 && summary.observation_type.startsWith("tool.")) {
-      const fingerprint = `${summary.observation_type}|${JSON.stringify(summary.detail || {})}`;
+      const fingerprint = `${summary.observation_type}|${JSON.stringify(detail)}`;
       if (!_rememberToolReplayFingerprint(replayBucketKey, fingerprint, now)) continue;
     }
     recordObservation({
@@ -1198,7 +1254,7 @@ export function recordToolUseObservations({
       attempt_id: resolvedAttemptId,
       observation_type: summary.observation_type,
       summary: summary.summary,
-      detail: summary.detail,
+      detail,
     });
   }
 }

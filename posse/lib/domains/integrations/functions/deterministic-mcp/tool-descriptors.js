@@ -347,12 +347,12 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   },
   create_test: {
     access: "shell",
-    summary: "Register or update one test in a suite, rejecting it unless it passes immediately.",
+    summary: "Register or update one or many tests in a suite; every candidate runs first and a failing candidate is never persisted.",
     observation: { type: "tool.create_test", label: "CreateTest", format: "generic", targetKeys: ["suite_id", "suite", "name", "target_files", "target_symbols"] },
   },
   run_test: {
     access: "shell",
-    summary: "Run one DB-backed registered test and return compact pass/fail feedback.",
+    summary: "Run one or many DB-backed registered tests and return per-test suite/name and pass/fail feedback.",
     observation: { type: "tool.run_test", label: "RunTest", format: "generic", targetKeys: ["test_id", "suite_id", "suite", "test"] },
   },
   run_test_suite: {
@@ -394,7 +394,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "manual": { access: "atlas", summary: "Return compact native ATLAS v2 API reference entries." },
   "workflow": { access: "atlas", summary: "Execute multi-step native ATLAS workflows with data transforms and references." },
   "info": { access: "atlas", summary: "Report native ATLAS v2 runtime, storage, view freshness, ledger, and policy diagnostics." },
-  "fetch_ref": { access: "atlas", summary: "Traverse one or more opaque refs from the current agent scope. A ref or returned next-page cursor opens the already-stored result; it is not a fresh retrieval and does not rerun the originating tool. Follow cursors while likely results remain; call the originating tool again only for a materially different scope." },
+  "fetch_ref": { access: "atlas", summary: "Traverse one or more opaque refs from the current agent scope. A ref or returned next-page cursor opens the already-stored result; it is not a fresh retrieval and does not rerun the originating tool. Use search for focused matches; auto mode preserves literals and otherwise accepts repository-search regex/OR syntax. Follow cursors while likely results remain; call the originating tool again only for a materially different scope." },
   "create_ref": { access: "atlas", summary: "Store an evidence chunk (inline text or a server-side slice of an existing ref) and get back a #ref stub. Batchable via chunks[]; the optional note is retained with the stored ref." },
   "repo.register": { access: "atlas", summary: "Register a repository with ATLAS v2 and initialize ledger/view storage." },
   "repo.status": { access: "atlas", summary: "Get ATLAS repository status, health, and latest version identifiers." },
@@ -417,7 +417,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "code.skeleton": { access: "atlas", summary: "Structural outline for one file or symbol, including signatures and containment without full bodies." },
   "code.lens": { access: "atlas", summary: "Identifier-focused excerpts for named usages or branches within selected files." },
   "code.window": { access: "atlas", summary: "Raw code windows for exact guards, ordering, surrounding text, identifiers, or line ranges within selected files." },
-  "code.survey": { access: "atlas", summary: "Multi-file content map with per-file symbols and structural summaries plus a call map. Surveys over ten files return the first ten and pagination.cursor for the already-stored next ten. Traverse it with atlas.fetch_ref using pagination.cursor.args, then follow each returned next cursor until no cursor remains. This opens stored pages and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope." },
+  "code.survey": { access: "atlas", summary: "Multi-file content map with per-file symbols and structural summaries plus a call map. Surveys over ten files return the first ten and pagination.cursor for the already-stored next ten. Traverse it with atlas.fetch_ref using pagination.cursor.args, then follow each returned next cursor until no cursor remains. Search stored pages for exact task concepts before choosing among parallel versions or implementations; rank is not a version decision. This opens stored pages and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope." },
   "code.structure": { access: "atlas", summary: "Exact indexed inventory for files, symbols, imports, and fan-in/fan-out. Use instead of content tools when bodies are not needed." },
   "code.db": { access: "atlas", summary: "Internal WI/setup DB query inventory. Not routed through agent gateways." },
   "context": { access: "atlas", summary: "Request generated ATLAS context (taskType + contextMode) for precise/broad retrieval." },

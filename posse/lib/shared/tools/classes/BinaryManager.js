@@ -35,6 +35,24 @@ import { NativeBinary } from "./NativeBinary.js";
 
 const NATIVE_VERSION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
+/**
+ * @typedef {object} PulseEnvelopeProvider
+ * @property {(options: any) => Promise<Readonly<Record<string, any>> | null>} getPulseEnvelope
+ * @property {(options: any) => Readonly<Record<string, any>> | null} getCachedPulseEnvelope
+ * @property {(() => Promise<unknown>) | undefined} [startHeartbeat]
+ * @property {(() => void) | undefined} [stopHeartbeat]
+ */
+
+/**
+ * @typedef {object} WorkerRuntimeBinaryCapability
+ * @property {string} bundleRoot
+ * @property {string} binaryPath
+ * @property {string | null} exactVersion
+ * @property {string} os
+ * @property {string} arch
+ * @property {Record<string, Record<string, unknown>>} [pulses]
+ */
+
 function pinnedNativeVersion(name, env) {
   const key = "POSSE_NATIVE_" + name.toUpperCase() + "_VERSION";
   const value = String((env || process.env)[key] || "").trim();
@@ -53,11 +71,11 @@ export class BinaryManager {
    *   spawnSyncImpl?: import("node:child_process").spawnSync,
    *   env?: NodeJS.ProcessEnv,
    *   nativeAuthManager?: import("../../native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
-   *   pulseManager?: import("../../native/classes/PulseTokenManager.js").PulseTokenManager,
+   *   pulseManager?: PulseEnvelopeProvider,
    *   artifactInstaller?: typeof ensureNativeBinaryArtifact,
    *   artifactCacheRoot?: string,
    *   artifactFetchImpl?: typeof fetch,
-   *   artifactPulseTokens?: import("../../native/classes/PulseTokenManager.js").PulseTokenManager,
+   *   artifactPulseTokens?: PulseEnvelopeProvider,
    * }} [opts]
    */
   constructor(opts = {}) {
@@ -75,10 +93,10 @@ export class BinaryManager {
     // constructing a handle (for example, to inspect a staged artifact) must
     // not initialize heartbeat auth. Keep a stable forwarding facade on every
     // handle and resolve the real broker only at the first native invocation.
-    this._handlePulseManager = Object.freeze({
+    this._handlePulseManager = /** @type {Readonly<PulseEnvelopeProvider>} */ (Object.freeze({
       getPulseEnvelope: (options) => this.pulseManager.getPulseEnvelope(options),
       getCachedPulseEnvelope: (options) => this.pulseManager.getCachedPulseEnvelope(options),
-    });
+    }));
     this._artifactInstaller = opts.artifactInstaller || ensureNativeBinaryArtifact;
     this._artifactCacheRoot = opts.artifactCacheRoot || null;
     this._artifactFetchImpl = opts.artifactFetchImpl || globalThis.fetch;
@@ -123,7 +141,7 @@ export class BinaryManager {
   }
 
   async startHeartbeat() {
-    return this.pulseManager.startHeartbeat();
+    return this.pulseManager.startHeartbeat?.();
   }
 
   stopHeartbeat() {
@@ -152,6 +170,7 @@ export class BinaryManager {
     }
   }
 
+  /** @param {PulseEnvelopeProvider} manager */
   setPulseManager(manager) {
     if (!manager || typeof manager.getPulseEnvelope !== "function") {
       throw new TypeError("BinaryManager requires a pulse manager");
@@ -305,7 +324,7 @@ export class BinaryManager {
           ...available,
           available: false,
           active: false,
-          reason: String(result?.error?.code || "worker_unresponsive"),
+          reason: String(/** @type {any} */ (result?.error)?.code || "worker_unresponsive"),
         };
       }
       return { ...available, active: true };
@@ -314,7 +333,7 @@ export class BinaryManager {
         ...available,
         available: false,
         active: false,
-        reason: String(error?.code || "worker_start_failed"),
+        reason: String(/** @type {any} */ (error)?.code || "worker_start_failed"),
         error,
       };
     }
@@ -328,7 +347,7 @@ export class BinaryManager {
    *
    * @param {readonly string[]} [names]
    * @param {{ routesByBinary?: Record<string, string[]> }} [options]
-   * @returns {Promise<{ version: 1, binaries: Record<string, { bundleRoot: string, binaryPath: string, exactVersion: string | null, os: string, arch: string, pulses?: Record<string, Record<string, unknown>> }> }>}
+   * @returns {Promise<{ version: 1, binaries: Record<string, WorkerRuntimeBinaryCapability> }>}
    */
   async prepareWorkerRuntime(names = BINARY_NAMES, { routesByBinary = {} } = {}) {
     const selected = [...new Set(names.filter((name) => VALID_BINARY_NAMES.has(name)))];
@@ -391,6 +410,7 @@ export class BinaryManager {
    * @param {readonly string[]} [names]
    */
   workerRuntimeCapability(names = BINARY_NAMES) {
+    /** @type {Record<string, WorkerRuntimeBinaryCapability>} */
     const binaries = {};
     for (const name of [...new Set(names)]) {
       if (!VALID_BINARY_NAMES.has(name)) continue;
@@ -405,7 +425,7 @@ export class BinaryManager {
         arch: handle.arch,
       };
     }
-    return { version: 1, binaries };
+    return { version: /** @type {1} */ (1), binaries };
   }
 
   /**

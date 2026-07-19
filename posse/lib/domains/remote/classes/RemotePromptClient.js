@@ -15,6 +15,20 @@ import { runRemoteNativeRequestJson } from "../functions/native-client.js";
 const DEFAULT_REMOTE_PROMPT_TIMEOUT_MS = 60_000;
 
 export class RemotePromptClient {
+  /**
+   * @param {{
+   *   baseUrl?: string,
+   *   timeoutMs?: number,
+   *   maxRetries?: number,
+   *   retryDelayMs?: number,
+   *   maxResponseBytes?: number,
+   *   fetchImpl?: typeof globalThis.fetch,
+   *   nativeManager?: any,
+   *   authManager?: any,
+   *   pulseTokens?: any,
+   *   responseSigningSecret?: string,
+   * }} [options]
+   */
   constructor({
     baseUrl,
     timeoutMs = DEFAULT_REMOTE_PROMPT_TIMEOUT_MS,

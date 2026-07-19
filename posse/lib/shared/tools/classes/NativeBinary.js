@@ -111,6 +111,31 @@ function isUnsupportedNativeVersionError(error) {
     || error?.remoteCode === "unsupported_native_version";
 }
 
+/** @typedef {Error & { code?: string, status?: number | null, remoteCode?: string }} NativeBinaryError */
+
+/**
+ * @typedef {object} PulseEnvelopeProvider
+ * @property {(options: any) => Promise<Readonly<Record<string, any>> | null>} getPulseEnvelope
+ * @property {(options: any) => Readonly<Record<string, any>> | null} getCachedPulseEnvelope
+ */
+
+/**
+ * @typedef {object} NativeRunOptions
+ * @property {Buffer | string} [input]
+ * @property {boolean} [json]
+ * @property {string} [cwd]
+ * @property {NodeJS.ProcessEnv} [env]
+ * @property {number} [timeoutMs]
+ * @property {AbortSignal} [signal]
+ * @property {boolean} [worker]
+ * @property {string[]} [workerArgs]
+ * @property {boolean} [workerFallback]
+ * @property {boolean} [idempotent]
+ * @property {number} [maxBuffer]
+ * @property {string} [requiredRoute]
+ * @property {(event: unknown) => void} [onProgress]
+ */
+
 /**
  * @typedef {Object} RunResult
  * @property {boolean} ok
@@ -131,7 +156,7 @@ export class NativeBinary {
    *   arch?: string,
    *   env?: NodeJS.ProcessEnv,
    *   nativeAuthManager?: import("../../native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
-   *   pulseManager?: import("../../native/classes/PulseTokenManager.js").PulseTokenManager,
+   *   pulseManager?: PulseEnvelopeProvider,
    *   exactVersion?: string | null,
    *   heartbeatVersion?: string | null,
    *   spawnImpl?: typeof spawn,
@@ -226,7 +251,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {{ workerArgs: string[] } & Record<string, any>} opts
+   * @param {NativeRunOptions & { workerArgs: string[] }} opts
    * @returns {Promise<RunResult>}
    */
   async #runViaConfiguredWorker(subcommand, args, opts) {
@@ -568,7 +593,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {{ input?: Buffer | string, json?: boolean, timeoutMs?: number, signal?: AbortSignal, requiredRoute?: string, workerFallback?: boolean, idempotent?: boolean, onProgress?: (event: unknown) => void }} opts
+   * @param {NativeRunOptions} opts
    * @returns {Promise<RunResult>}
    */
   async #runViaWorker(subcommand, args, opts) {
@@ -648,7 +673,9 @@ export class NativeBinary {
       // instead of replaying it in a second process.
       const replayUnsafe = opts.idempotent === false && reason !== "overloaded";
       if (opts.workerFallback === false || replayUnsafe) {
-        const error = new Error(`native ${this.name} worker unavailable (${reason})`);
+        const error = /** @type {NativeBinaryError} */ (
+          new Error(`native ${this.name} worker unavailable (${reason})`)
+        );
         error.code = "POSSE_NATIVE_WORKER_UNAVAILABLE";
         return { ok: false, code: null, signal: null, stdout: "", stderr: error.message, error };
       }
@@ -662,7 +689,9 @@ export class NativeBinary {
         error: requestOpts.signal ? signalAbortError(requestOpts.signal) : new Error("aborted"),
       };
     }
-    if (response?.ok === false && isNativeHeartbeatAuthFailure(response?.error?.message || response?.message)) {
+    if (response?.ok === false && isNativeHeartbeatAuthFailure(
+      /** @type {any} */ (response?.error)?.message || response?.message,
+    )) {
       this.#retireWorkerAfterAuthFailure();
     }
     return {
@@ -802,7 +831,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, key?: string, worker?: boolean, signal?: AbortSignal, requiredRoute?: string }} [opts]
+   * @param {NativeRunOptions} [opts]
    * @returns {RunResult}
    */
   runSync(subcommand, args = [], opts = {}) {
@@ -824,7 +853,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, requiredRoute?: string }} [opts]
+   * @param {NativeRunOptions} [opts]
    * @returns {RunResult}
    */
   #runSyncPerCall(subcommand, args = [], opts = {}) {
@@ -863,7 +892,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} [args]
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, worker?: boolean, workerArgs?: string[], workerFallback?: boolean, idempotent?: boolean, maxBuffer?: number, requiredRoute?: string, onProgress?: (event: unknown) => void }} [opts]
+   * @param {NativeRunOptions} [opts]
    * @returns {Promise<RunResult>}
    */
   run(subcommand, args = [], opts = {}) {
@@ -909,7 +938,7 @@ export class NativeBinary {
    *
    * @param {string | null} subcommand
    * @param {string[]} args
-   * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, maxBuffer?: number, requiredRoute?: string }} [opts]
+   * @param {NativeRunOptions} [opts]
    * @returns {Promise<RunResult>}
    */
   #runPerCall(subcommand, args = [], opts = {}) {
@@ -1048,6 +1077,7 @@ export class NativeBinary {
   async workerPulseCapability(routes = [], { strict = false } = {}) {
     if (!this.keyGated) return {};
     const selected = Array.isArray(routes) && routes.length > 0 ? routes : this.#defaultRoutes();
+    /** @type {Record<string, Record<string, unknown>>} */
     const pulses = {};
     for (const routeValue of [...new Set(selected)]) {
       const route = String(routeValue || "").trim();
@@ -1062,7 +1092,9 @@ export class NativeBinary {
       if (isValidPulseEnvelope(pulse) && String(/** @type {any} */ (pulse).route || "") === route) {
         pulses[route] = { .../** @type {Record<string, unknown>} */ (pulse) };
       } else if (strict) {
-        const error = new Error(`native pulse token heartbeat auth unavailable for ${this.name}`);
+        const error = /** @type {NativeBinaryError} */ (
+          new Error(`native pulse token heartbeat auth unavailable for ${this.name}`)
+        );
         error.code = "POSSE_NATIVE_HEARTBEAT_UNAVAILABLE";
         throw error;
       }
@@ -1200,7 +1232,7 @@ export class NativeBinary {
    * from (and kept in lockstep with) the current auth manager, so a swapped
    * authority (BinaryManager.setNativeAuthManager) rebuilds the broker.
    *
-   * @returns {import("../../native/classes/PulseTokenManager.js").PulseTokenManager}
+   * @returns {PulseEnvelopeProvider}
    */
   #pulseManager() {
     if (this._fixedPulseManager) return this._fixedPulseManager;
@@ -1566,7 +1598,9 @@ export class NativeBinary {
     // (isNativeHeartbeatAuthFailure here, shouldRetryNativeHeartbeat in the
     // git invoke boundary) match on "heartbeat"/"pulse token". Never include
     // token material in this message.
-    const error = new Error(`native pulse token heartbeat auth unavailable for ${this.name}; refusing to start key-gated binary`);
+    const error = /** @type {NativeBinaryError} */ (
+      new Error(`native pulse token heartbeat auth unavailable for ${this.name}; refusing to start key-gated binary`)
+    );
     error.code = "POSSE_NATIVE_HEARTBEAT_UNAVAILABLE";
     return {
       ok: false,
@@ -1644,7 +1678,9 @@ export class NativeBinary {
 
   /** @param {any} source @returns {RunResult} */
   #nativeVersionUnsupportedResult(source) {
-    const error = new Error(`native artifact version for ${this.name} is no longer authorized; artifact reconciliation is required`);
+    const error = /** @type {NativeBinaryError} */ (
+      new Error(`native artifact version for ${this.name} is no longer authorized; artifact reconciliation is required`)
+    );
     error.code = "POSSE_NATIVE_VERSION_UNSUPPORTED";
     error.status = source?.status ?? null;
     error.remoteCode = source?.remoteCode || "unsupported_native_version";
@@ -1660,7 +1696,9 @@ export class NativeBinary {
 
   /** @returns {RunResult} */
   #nativePulseColdResult() {
-    const error = new Error(`native pulse token cache cold for ${this.name}; background heartbeat mint requested`);
+    const error = /** @type {NativeBinaryError} */ (
+      new Error(`native pulse token cache cold for ${this.name}; background heartbeat mint requested`)
+    );
     error.code = "POSSE_NATIVE_PULSE_COLD";
     return {
       ok: false,

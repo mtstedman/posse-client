@@ -49,6 +49,7 @@ import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
 import { normalizeProjectDbCapability } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, runWithObservationContext } from "../../observability/functions/observations.js";
+import { registeredTestToolResultObservation } from "../../observability/functions/registered-test-tool-result.js";
 import {
   acknowledgeOperatorFeedback,
   countPendingOperatorFeedbackForJob,
@@ -117,6 +118,7 @@ import {
   jsonRpcError,
   hiddenSessionFromParams,
   stripHiddenSessionParam,
+  classifyNativeToolResult,
   isSuccessfulNativeToolResult,
 } from "./deterministic-mcp/json-rpc.js";
 
@@ -2911,6 +2913,7 @@ async function handleRequest(msg) {
       const result = await handler(args);
       const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
       const responseText = appendOperatorFeedbackSignal(text, toolName);
+      const outcome = classifyNativeToolResult(text);
       const ok = isSuccessfulNativeToolResult(text);
       if (ok) resetEmptyOperatorFeedbackPollsAfterWork(toolName);
       if (ok && toolName !== "chain_verdict") {
@@ -2918,15 +2921,26 @@ async function handleRequest(msg) {
       }
       const atlasLiveBuffer = ok ? await maybePushAtlasLiveBufferForToolObservation({ toolName, args }) : null;
       const readStats = ok ? nativeReadResultStats(toolName, text) : null;
+      const registeredTestResult = registeredTestToolResultObservation({
+        tool: toolName,
+        input: recordInput,
+        resultText: text,
+      });
+      const resultDiagnostic = registeredTestResult?.error || capString(text, 300);
       finishToolInvocation(toolInvocation, {
         tool: toolName,
         input: recordInput,
         cwd: workspaceCwd,
         ok,
-        ...(atlasLiveBuffer || readStats ? {
+        outcome,
+        ...(registeredTestResult?.summary ? { resultSummary: registeredTestResult.summary } : {}),
+        ...(outcome === "failed" ? { error: resultDiagnostic } : {}),
+        ...(outcome === "rejected" ? { rejection: resultDiagnostic } : {}),
+        ...(atlasLiveBuffer || readStats || registeredTestResult?.detail ? {
           extraDetail: {
             ...(atlasLiveBuffer ? { atlas_live_buffer: atlasLiveBuffer } : {}),
             ...(readStats || {}),
+            ...(registeredTestResult?.detail ? { registered_test_result: registeredTestResult.detail } : {}),
           },
         } : {}),
       });
@@ -2947,6 +2961,7 @@ async function handleRequest(msg) {
         input: recordInput,
         cwd: workspaceCwd,
         ok: false,
+        outcome: "failed",
         error: safeError,
       });
       appendToolLog({

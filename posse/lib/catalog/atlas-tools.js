@@ -217,7 +217,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "fetch_ref": {
     type: "function",
     name: "atlas_fetch_ref",
-    description: "Traverse one or more opaque refs from the current agent scope. A ref or returned next-page cursor opens the already-stored result; it is not a fresh retrieval and does not rerun the originating tool. Follow returned cursors while the missing material is likely in that dataset. Call the originating tool again only for a materially different path, symbol, query, or scope; do not infer payload type from the ref.",
+    description: "Traverse one or more opaque refs from the current agent scope. A ref or returned next-page cursor opens the already-stored result; it is not a fresh retrieval and does not rerun the originating tool. Follow returned cursors while the missing material is likely in that dataset. Use search for focused stored-result matches; auto mode preserves literal matches and otherwise accepts the same regex/OR syntax as repository search. Call the originating tool again only for a materially different path, symbol, query, or scope; do not infer payload type from the ref.",
     parameters: {
       type: "object",
       properties: {
@@ -226,7 +226,8 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         hashes: { type: "array", items: { type: "string" }, description: "Alias for refs." },
         offset: { type: "integer", description: "Character offset for paged materialized refs; for search mode, matched-row offset. Default: 0." },
         limit: { type: "integer", description: "Maximum characters to return from each materialized ref page. Default: 8000, max: 60000." },
-        search: { type: "string", description: "Optional case-insensitive literal search within materialized ref text. Returns matching numbered lines instead of a raw offset page." },
+        search: { type: "string", description: "Optional case-insensitive search within materialized ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. Returns matching numbered lines instead of a raw offset page." },
+        search_mode: { type: "string", enum: ["auto", "literal", "regex"], description: "Search interpretation. Default: auto (literal first, then regex when the query contains regex syntax)." },
       },
       required: [],
       additionalProperties: false,
@@ -732,7 +733,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Multi-file content map with per-file symbols and structural summaries plus a call map. Surveys over ten files return the first ten and pagination.cursor for the already-stored next ten. Traverse it with atlas.fetch_ref using pagination.cursor.args, then follow each returned next cursor until no cursor remains. This opens stored pages and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope.",
+    description: "Multi-file content map with per-file symbols and structural summaries plus a call map. Surveys over ten files return the first ten and pagination.cursor for the already-stored next ten. Traverse it with atlas.fetch_ref using pagination.cursor.args, then follow each returned next cursor until no cursor remains. Search stored pages for the task's exact named concepts before choosing among parallel versions or implementations; rank is candidate order, not a version decision. This opens stored pages and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope.",
     parameters: {
       type: "object",
       properties: {

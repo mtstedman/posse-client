@@ -3,7 +3,7 @@
 import { resolveAgentRoleContract } from "../functions/agent-role-contracts.js";
 
 function dispatchError(code, message, { name = "Error", reason = null } = {}) {
-  const error = new Error(message);
+  const error = /** @type {Error & { code: string, reason?: unknown }} */ (new Error(message));
   error.name = name;
   error.code = code;
   if (reason != null) error.reason = reason;
@@ -87,9 +87,7 @@ export class AgentDispatcher {
     if (!agentKey) throw new TypeError("AgentDispatcher.acquireAgent requires a key");
     if (!normalizedRole) throw new TypeError("AgentDispatcher.acquireAgent requires a role");
     if (this.closed) {
-      const error = new Error("AgentDispatcher is closed");
-      error.code = "POSSE_AGENT_DISPATCHER_CLOSED";
-      throw error;
+      throw dispatchError("POSSE_AGENT_DISPATCHER_CLOSED", "AgentDispatcher is closed");
     }
     if (!this.gateFactory || !this.agentFactory) {
       throw new TypeError("AgentDispatcher requires gateFactory and agentFactory to mint agents");
@@ -124,9 +122,10 @@ export class AgentDispatcher {
       }
       if (this.closed) {
         try { mcpGate.dispose?.({ reason: "dispatcher_closed_during_gate_mint" }); } catch { /* best effort */ }
-        const error = new Error("AgentDispatcher closed while minting an MCP gate");
-        error.code = "POSSE_AGENT_DISPATCHER_CLOSED";
-        throw error;
+        throw dispatchError(
+          "POSSE_AGENT_DISPATCHER_CLOSED",
+          "AgentDispatcher closed while minting an MCP gate",
+        );
       }
       if (mcpGate.id && String(mcpGate.id) !== agentKey) {
         try { mcpGate.dispose?.({ reason: "agent_gate_identity_mismatch" }); } catch { /* best effort */ }
@@ -167,16 +166,15 @@ export class AgentDispatcher {
     let agent = null;
     try {
       if (this.closed) {
-        const error = new Error("AgentDispatcher closed before Job attachment");
-        error.code = "POSSE_AGENT_DISPATCHER_CLOSED";
-        throw error;
+        throw dispatchError(
+          "POSSE_AGENT_DISPATCHER_CLOSED",
+          "AgentDispatcher closed before Job attachment",
+        );
       }
       agent = await this.acquireAgent(identity);
       if (signal?.aborted) throw dispatchAbortError(signal);
       if (agent.disposed) {
-        const error = new Error("AgentDispatcher selected a disposed Agent");
-        error.code = "POSSE_AGENT_DISPOSED";
-        throw error;
+        throw dispatchError("POSSE_AGENT_DISPOSED", "AgentDispatcher selected a disposed Agent");
       }
       const lease = agent.attachJob(attachment);
       reservation.agent = agent;
@@ -198,6 +196,7 @@ export class AgentDispatcher {
     }
   }
 
+  /** @param {Record<string, any>} [options] */
   async release({ agent, lease, retain = false, reason = "provider_attempt_complete" } = {}) {
     if (!agent) return { released: false, reason: "missing_agent" };
     const registered = this.agents.get(agent.key);

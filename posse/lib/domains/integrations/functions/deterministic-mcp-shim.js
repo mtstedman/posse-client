@@ -40,16 +40,19 @@ const IDEMPOTENT_METHODS = new Set([
   "ping",
 ]);
 
+/** @typedef {Error & { code?: string, transient?: boolean }} OwnerForwardError */
+
 function isIdempotentMethod(message) {
   const method = String(message?.method || "");
   return IDEMPOTENT_METHODS.has(method) || method.startsWith("notifications/");
 }
 
 export function shouldRetryOwnerForwardError(err, { idempotent }) {
-  const code = String(err?.code || "");
+  const ownerError = /** @type {OwnerForwardError} */ (err);
+  const code = String(ownerError?.code || "");
   if (PRE_CONNECT_RETRY_CODES.includes(code)) return true;
   if (idempotent && MAYBE_SIDE_EFFECT_RETRY_CODES.includes(code)) return true;
-  return idempotent && (code === "ETIMEDOUT" || err?.transient === true);
+  return idempotent && (code === "ETIMEDOUT" || ownerError?.transient === true);
 }
 
 function argValue(name) {
@@ -126,7 +129,9 @@ function ownerRequest(message, {
         const bytes = Buffer.from(chunk);
         total += bytes.length;
         if (total > MAX_OWNER_RESPONSE_BYTES) {
-          const err = new Error(`owner response exceeded ${MAX_OWNER_RESPONSE_BYTES} bytes`);
+          const err = /** @type {OwnerForwardError} */ (
+            new Error(`owner response exceeded ${MAX_OWNER_RESPONSE_BYTES} bytes`)
+          );
           err.code = "EOWNERRESPONSETOOLARGE";
           fail(err);
           res.destroy(err);
@@ -137,7 +142,9 @@ function ownerRequest(message, {
       });
       res.on("error", fail);
       res.on("aborted", () => {
-        const err = new Error("owner response was aborted before completion");
+        const err = /** @type {OwnerForwardError} */ (
+          new Error("owner response was aborted before completion")
+        );
         err.code = "ECONNRESET";
         fail(err);
       });
@@ -152,7 +159,9 @@ function ownerRequest(message, {
           return;
         }
         if (res.statusCode !== 200 || parsed?.ok !== true) {
-          const err = new Error(parsed?.error || `owner request failed (${res.statusCode})`);
+          const err = /** @type {OwnerForwardError} */ (
+            new Error(parsed?.error || `owner request failed (${res.statusCode})`)
+          );
           // 5xx means the owner accepted the request but failed transiently
           // (child busy/restarting); safe to replay for idempotent methods.
           if (Number(res.statusCode) >= 500) err.transient = true;
@@ -167,7 +176,9 @@ function ownerRequest(message, {
       // trickles bytes can keep it alive forever, so use an absolute request
       // deadline covering connect, headers, and the complete response body.
       timer = setTimeout(() => {
-        const err = new Error(`owner request timed out after ${timeoutMs}ms`);
+        const err = /** @type {OwnerForwardError} */ (
+          new Error(`owner request timed out after ${timeoutMs}ms`)
+        );
         err.code = "ETIMEDOUT";
         fail(err);
         req.destroy(err);

@@ -99,6 +99,9 @@ export class CapabilityHandshakeManager {
   }
 }
 
+/**
+ * @param {{ requestId?: string, capability?: string, scopes?: string[], reason?: string }} [request]
+ */
 export function capabilityRequest({ requestId, capability, scopes = [], reason = "missing" } = {}) {
   return normalizeRequest({
     control: "capabilityRequest",
@@ -187,7 +190,7 @@ function deepFreeze(value) {
 }
 
 function handshakeError(code, message) {
-  const error = new Error(message);
+  const error = /** @type {Error & { code: string }} */ (new Error(message));
   error.code = code;
   return error;
 }

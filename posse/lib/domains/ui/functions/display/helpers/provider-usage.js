@@ -9,6 +9,7 @@ import {
 import { getDb } from "../../../../../shared/storage/functions/index.js";
 import { providerUsageRuntimeCache } from "../../../../providers/classes/usage-runtime-cache-singleton.js";
 import {
+  displayColumnWidth,
   _fmtTokens,
   _fmtUsd,
   fit,
@@ -402,6 +403,22 @@ function _emptyProviderGauge({ width = 20 } = {}) {
   };
 }
 
+function _appendProviderUsageSuffix(line, suffix, rowWidth) {
+  if (!suffix || displayColumnWidth(line) + displayColumnWidth(suffix) > rowWidth) return line;
+  return `${line}${suffix}`;
+}
+
+function _providerGaugeLayout(rowWidth, windows, nowMs) {
+  const fixedColumns = displayColumnWidth("   [S] ") + 2 + 1 + 4; // prefix + bar caps + gap + percent
+  const resetColumns = Math.max(0, ...windows.map((window) =>
+    displayColumnWidth(window?.unlimited === true ? "" : _resetSuffix(window, nowMs))));
+  const withReset = rowWidth - fixedColumns - resetColumns;
+  if (withReset >= 4) {
+    return { gaugeWidth: Math.min(20, withReset), includeReset: true };
+  }
+  return { gaugeWidth: Math.max(1, Math.min(20, rowWidth - fixedColumns)), includeReset: false };
+}
+
 export function _buildQueueProviderUsageLines(width, maxLines, summaries = [], opts = {}) {
   if (maxLines <= 0) return [];
   const summariesByProvider = _summaryByProvider(summaries);
@@ -413,13 +430,14 @@ export function _buildQueueProviderUsageLines(width, maxLines, summaries = [], o
   if (runUsage.length === 0) return [];
 
   const lines = [];
-  const ruleWidth = Math.max(20, Math.min(width, 56));
+  const rowWidth = Math.max(1, width - 1);
+  const ruleWidth = Math.max(20, Math.min(width, 120));
   const nowMs = Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now();
 
   for (const usage of runUsage) {
     const block = [];
     const brand = providerBrandColor(usage.provider);
-    block.push(brandRule({ label: _providerLabel(usage.provider), color: brand, width: ruleWidth }));
+    block.push(fit(brandRule({ label: _providerLabel(usage.provider), color: brand, width: ruleWidth }), rowWidth));
 
     const cachedInputTokens = Math.min(
       Math.max(0, Number(usage.usedInputTokens) || 0),
@@ -443,7 +461,16 @@ export function _buildQueueProviderUsageLines(width, maxLines, summaries = [], o
     const costSuffix = usage.costUsd > 0
       ? `  ${C.dim}·${C.reset}  ${C.dim}${_fmtUsd(usage.costUsd)} ${_providerCostQualifier(usage.provider)}${C.reset}`
       : "";
-    block.push(fit(`   ${C.bold}${brand}${tokens}${C.reset} ${C.dim}${tokenLabel}${C.reset}${cacheSuffix}${costSuffix}`, Math.max(1, width - 1)));
+    const compactCostSuffix = usage.costUsd > 0
+      ? `  ${C.dim}·${C.reset}  ${C.dim}${_fmtUsd(usage.costUsd)}${C.reset}`
+      : "";
+    let headline = `   ${C.bold}${brand}${tokens}${C.reset} ${C.dim}${tokenLabel}${C.reset}`;
+    headline = _appendProviderUsageSuffix(headline, cacheSuffix, rowWidth);
+    const withFullCost = _appendProviderUsageSuffix(headline, costSuffix, rowWidth);
+    headline = withFullCost === headline
+      ? _appendProviderUsageSuffix(headline, compactCostSuffix, rowWidth)
+      : withFullCost;
+    block.push(fit(headline, rowWidth));
 
     if (usage.provider === "claude" || usage.provider === "codex") {
       let summary = summariesByProvider.get(usage.provider);
@@ -452,18 +479,20 @@ export function _buildQueueProviderUsageLines(width, maxLines, summaries = [], o
       }
       const session = summary?.windows?.find((window) => window.key === "session");
       const week = summary?.windows?.find((window) => window.key === "week");
+      const windows = [session, week];
+      const gaugeLayout = _providerGaugeLayout(rowWidth, windows, nowMs);
       for (const [label, window] of [["S", session], ["W", week]]) {
         const pct = _windowPct(window);
         const gauge = window?.unlimited === true
-          ? unlimitedCapacityGauge()
-          : brandGauge(pct) || _emptyProviderGauge();
+          ? unlimitedCapacityGauge({ width: gaugeLayout.gaugeWidth })
+          : brandGauge(pct, { width: gaugeLayout.gaugeWidth }) || _emptyProviderGauge({ width: gaugeLayout.gaugeWidth });
         // Keep the row compact; color on the bar and percentage carries pressure.
         const tag = `${gauge.tierColor}[${label}]${C.reset}`;
-        const resetSuffix = window?.unlimited === true ? "" : _resetSuffix(window, nowMs);
+        const resetSuffix = gaugeLayout.includeReset && window?.unlimited !== true ? _resetSuffix(window, nowMs) : "";
         const marker = gauge.glyph ? ` ${gauge.glyph}` : "";
         block.push(fit(
           `   ${tag} ${gauge.bar} ${gauge.pctText}${marker}${resetSuffix}`,
-          Math.max(1, width - 1),
+          rowWidth,
         ));
       }
     }

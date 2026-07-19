@@ -18,7 +18,7 @@ const CODE_WORKTREE_JOB_TYPES = new Set(["dev", "fix"]);
 const WI_RESOURCE_CATEGORIES = Object.freeze(["artifacts", "workspace", "inputs", "context"]);
 
 function authorityError(code, message) {
-  const error = new Error(message);
+  const error = /** @type {Error & { code: string }} */ (new Error(message));
   error.code = code;
   return error;
 }

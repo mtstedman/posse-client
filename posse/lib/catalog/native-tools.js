@@ -603,8 +603,9 @@ export const TOOL_CREATE_TEST = {
   type: "function",
   name: "create_test",
   description:
-    "Register or update a test inside one existing suite. The test source must resolve to a function that returns/resolves true; " +
-    "registration is rejected if the test fails. Declare the production files/functions the test covers so Posse can scope future runs. " +
+    "Register or update one or many tests inside an existing suite. For a batch, provide shared suite_id/suite plus tests (max 24); each result is reported independently. " +
+    "Every candidate is executed before it can be inserted or updated and must return/resolve exactly true. A failing candidate is never added, and a failing update never replaces the last passing definition. " +
+    "Declare the production files/functions each test covers so Posse can scope future runs. " +
     "The harness runs from a temp directory and deletes it after the run; put all scratch files in the provided tmp path.",
   parameters: {
     type: "object",
@@ -655,8 +656,53 @@ export const TOOL_CREATE_TEST = {
           "Test source. JavaScript can be an async function/lambda, default export, or named export. Python should define function_name, test, run, or main. Return true to pass.",
       },
       timeout_ms: { type: "integer", description: "Per-test timeout in milliseconds. Default: 30000, max: 120000." },
+      tests: {
+        type: "array",
+        minItems: 1,
+        maxItems: 24,
+        description:
+          "Batch form (max 24). Each candidate is run before registration; failed candidates remain unregistered while valid candidates continue. Uses the outer suite_id/suite and optional timeout_ms by default.",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Human-readable test name." },
+            slug: { type: "string", description: "Optional stable test slug. Defaults from name." },
+            explanation: { type: "string", description: "What this test checks and why it belongs in the suite." },
+            language: { type: "string", enum: ["javascript", "python"], description: "Runtime language for the test function." },
+            function_name: { type: "string", description: "Optional test function/export name." },
+            target_files: {
+              type: "array",
+              items: { type: "string" },
+              description: "Workspace-relative production file paths covered by this test.",
+            },
+            target_symbols: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional production functions/classes/symbols covered by this test.",
+            },
+            target_imports: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  path: { type: "string", description: "Workspace-relative file to import." },
+                  symbols: { type: "array", items: { type: "string" } },
+                  default: { type: "string" },
+                  namespace: { type: "string" },
+                },
+                required: ["path"],
+                additionalProperties: false,
+              },
+            },
+            test: { type: "string", description: "Test source. It must return/resolve exactly true to be registered." },
+            timeout_ms: { type: "integer", description: "Optional per-test timeout override in milliseconds." },
+          },
+          required: ["name", "explanation", "language", "target_files", "test"],
+          additionalProperties: false,
+        },
+      },
     },
-    required: ["name", "explanation", "language", "target_files", "test"],
+    required: [],
     additionalProperties: false,
   },
 };
@@ -665,7 +711,8 @@ export const TOOL_RUN_TEST = {
   type: "function",
   name: "run_test",
   description:
-    "Run one registered Posse test by id, or by suite plus test name/slug. Returns pass/fail plus compact failure feedback.",
+    "Run one or many registered Posse tests. Select one by id or by suite plus test name/slug; for a batch, provide tests (max 24). " +
+    "Returns per-test suite/name identity, pass/fail, and compact failure feedback without stopping the batch after one failure.",
   parameters: {
     type: "object",
     properties: {
@@ -674,6 +721,23 @@ export const TOOL_RUN_TEST = {
       suite: { type: "string", description: "Suite name or slug when selecting by test name." },
       test: { type: "string", description: "Test name or slug when test_id is omitted." },
       timeout_ms: { type: "integer", description: "Per-test timeout in milliseconds. Default: 30000, max: 120000." },
+      tests: {
+        type: "array",
+        minItems: 1,
+        maxItems: 24,
+        description:
+          "Batch form (max 24). Each item selects a test by test_id or by test name/slug using the outer suite_id/suite. Results preserve input order.",
+        items: {
+          type: "object",
+          properties: {
+            test_id: { type: "integer", description: "Registered test id." },
+            test: { type: "string", description: "Test name or slug when test_id is omitted." },
+            timeout_ms: { type: "integer", description: "Optional per-test timeout override in milliseconds." },
+          },
+          required: [],
+          additionalProperties: false,
+        },
+      },
     },
     required: [],
     additionalProperties: false,

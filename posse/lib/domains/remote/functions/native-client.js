@@ -34,7 +34,7 @@ function nativeHeartbeatFailureDetail(value) {
  * The child forwards this pulse as the API bearer after verifying it offline,
  * so an umbrella native-process grant cannot authorize the HTTP request.
  *
- * @param {{ method?: string, path: string }} request
+ * @param {{ method?: string, path: string, body?: any }} request
  * @returns {string}
  */
 export function remoteNativeRequestRoute(request) {
@@ -91,6 +91,15 @@ function unwrapRemoteNativeResponse(value) {
   return value;
 }
 
+/**
+ * @param {string} method
+ * @param {unknown} payload
+ * @param {{
+ *   manager?: import("../../../shared/tools/classes/BinaryManager.js").BinaryManager,
+ *   requiredRoute?: string,
+ *   timeoutMs?: number,
+ * }} [options]
+ */
 async function runRemoteNativeMethodJson(method, payload, {
   manager = nativeBinaries,
   requiredRoute,

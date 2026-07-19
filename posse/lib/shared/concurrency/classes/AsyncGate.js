@@ -13,12 +13,15 @@ const PRIORITY_AGING_MS = 30000;
 /** @typedef {{ name?: string, maxConcurrency?: number }} QueueOptions */
 /** @typedef {"read-priority" | "fifo" | "writer-priority"} GatePolicy */
 /** @typedef {{ name?: string, policy?: GatePolicy }} ProtectedAssetGateOptions */
-/** @typedef {{ label?: string, waitMs?: number | null, signal?: AbortSignal | null, onBeforeRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void | Promise<void>) | null, onRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void) | null, onCancel?: ((info: QueueInfo & { key?: string, error?: unknown }) => void) | null }} RunOptions */
+/** @typedef {{ label?: string, waitMs?: number | null, signal?: AbortSignal | null, priority?: number, onBeforeRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void | Promise<void>) | null, onRelease?: ((info: QueueInfo & { key?: string, status?: "fulfilled" | "rejected", error?: unknown }) => void) | null, onCancel?: ((info: QueueInfo & { key?: string, error?: unknown }) => void) | null }} RunOptions */
 /** @typedef {{ waitMs: number, depthAtEnqueue: number, inFlightAtEnqueue: number, label: string, key?: string, mode?: "blocking" | "non-blocking" }} QueueInfo */
+/** @typedef {Error & { code: string, key: string, label: string, reason?: unknown }} GateError */
 
 function gateAbortError(signal, { key = "global", label = "work" } = {}) {
   const reason = signal?.reason;
-  const error = new Error(reason instanceof Error ? reason.message : "Async gate wait was aborted");
+  const error = /** @type {GateError} */ (
+    new Error(reason instanceof Error ? reason.message : "Async gate wait was aborted")
+  );
   error.name = "AbortError";
   error.code = "ASYNC_GATE_ABORTED";
   error.key = key;
@@ -28,7 +31,7 @@ function gateAbortError(signal, { key = "global", label = "work" } = {}) {
 }
 
 function gateClosedError(name, label = "work", reason = "gate closed", key = "global") {
-  const error = new Error(`${name} is closed (${label}): ${reason}`);
+  const error = /** @type {GateError} */ (new Error(`${name} is closed (${label}): ${reason}`));
   error.name = "AsyncGateClosedError";
   error.code = "ASYNC_GATE_CLOSED";
   error.key = key;

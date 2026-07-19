@@ -231,7 +231,7 @@ export function freezeEnvelope(envelope) {
 }
 
 function nativeAuthPolicyError(code, message) {
-  const err = new Error(message);
+  const err = /** @type {Error & { code: string }} */ (new Error(message));
   err.code = code;
   return err;
 }

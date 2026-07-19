@@ -1634,6 +1634,12 @@ export class Display {
   _formatMonitorToolRow(...args) {
     return this._rightPanelRenderer._formatMonitorToolRow.call(this, ...args);
   }
+  _formatFailedToolDetailRows(...args) {
+    return this._rightPanelRenderer._formatFailedToolDetailRows.call(this, ...args);
+  }
+  _formatMonitorToolRows(...args) {
+    return this._rightPanelRenderer._formatMonitorToolRows.call(this, ...args);
+  }
   _buildMonitorFeedbackToolLanes(...args) {
     return this._rightPanelRenderer._buildMonitorFeedbackToolLanes.call(this, ...args);
   }

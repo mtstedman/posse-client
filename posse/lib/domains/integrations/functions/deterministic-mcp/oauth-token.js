@@ -292,7 +292,7 @@ function timingSafeTokenEqual(left, right) {
 }
 
 function tokenError(code, message) {
-  const err = new Error(message);
+  const err = /** @type {Error & { code: string }} */ (new Error(message));
   err.code = code;
   return err;
 }
