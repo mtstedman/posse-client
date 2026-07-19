@@ -3,6 +3,7 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import {
   addDependency,
+  cancelPendingReviewGatesForOriginal,
   clearStallResume,
   completeAttempt,
   createJob,
@@ -16,6 +17,7 @@ import {
   logEvent,
   resolveJobScopeExpansion,
   rewireDependency,
+  setAssessorVerdict,
   setAttemptCommitHash,
   storeArtifact,
   updateJobPayload,
@@ -40,6 +42,7 @@ import {
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../../catalog/job.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
+const REVIEW_DECISION_ORIGINAL_STATUS_SET = new Set(["waiting_on_review", "awaiting_assessment"]);
 import { getAssessmentInternalRetryLimit } from "../helpers/assessment-shared.js";
 import { refreshAndExtractInsights } from "../helpers/insights.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
@@ -680,42 +683,77 @@ export async function runHumanInputJob(worker, job, {
         });
       }
     }
-    releaseHumanLease(finalHumanStatus);
+    const humanLeaseReleased = releaseHumanLease(finalHumanStatus);
+    if (humanLeaseReleased === false) {
+      worker.emit(job.id, `${C.yellow}[human] Ignored stale answer for review job #${job.id}; its lease was already closed${C.reset}`);
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt.attempt.id,
+        event_type: EVENT_TYPES.JOB_HUMAN_RESOLUTION_FAILED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: "Ignored human-input resolution because the gate lease was already closed",
+      });
+      refreshAndExtractInsights(job.work_item_id);
+      return;
+    }
+    if (handledReviewDecision && payload.original_job_id && payload.review_type) {
+      cancelPendingReviewGatesForOriginal(payload.original_job_id, { exceptJobId: job.id });
+    }
 
     if (!handledReviewDecision && payload.original_job_id && payload.review_type) {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       const reviewDecision = classifyReviewAnswer(lastAnswer);
-      if (origJob) {
+      if (origJob && !REVIEW_DECISION_ORIGINAL_STATUS_SET.has(origJob.status)) {
+        handledReviewDecision = true;
+        cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
+        worker.emit(job.id, `${C.yellow}[human] Ignored stale review gate #${job.id}; original job #${origJob.id} is already ${origJob.status}${C.reset}`);
+      } else if (origJob) {
         if (reviewDecision === "pass") {
-          await worker._setJobRowStatus(origJob, "succeeded");
           handledReviewDecision = true;
-          worker.emit(job.id, `${C.green}[human] Review passed job #${origJob.id}${C.reset}`);
-          logEvent({
-            work_item_id: job.work_item_id,
-            job_id: origJob.id,
-            attempt_id: attempt.attempt.id,
-            event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
-            actor_type: EVENT_ACTORS.WORKER,
-            message: `Human review passed original job via job #${job.id}`,
+          const settled = await worker._setJobRowStatus(origJob, "succeeded", {
+            expectedStatuses: [...REVIEW_DECISION_ORIGINAL_STATUS_SET],
+            force: true,
           });
+          if (settled !== false) {
+            setAssessorVerdict(origJob.id, "pass", "high", { force: true });
+            cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
+            worker.emit(job.id, `${C.green}[human] Review passed job #${origJob.id}${C.reset}`);
+            logEvent({
+              work_item_id: job.work_item_id,
+              job_id: origJob.id,
+              attempt_id: attempt.attempt.id,
+              event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
+              actor_type: EVENT_ACTORS.WORKER,
+              message: `Human review passed original job via job #${job.id}`,
+            });
+          }
         } else if (reviewDecision === "fail") {
-          await worker._setJobRowStatus(origJob, "failed");
           handledReviewDecision = true;
-          worker.emit(job.id, `${C.yellow}[human] Review failed job #${origJob.id}${C.reset}`);
-          logEvent({
-            work_item_id: job.work_item_id,
-            job_id: origJob.id,
-            attempt_id: attempt.attempt.id,
-            event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
-            actor_type: EVENT_ACTORS.WORKER,
-            message: `Human review failed original job via job #${job.id}`,
+          const settled = await worker._setJobRowStatus(origJob, "failed", {
+            expectedStatuses: [...REVIEW_DECISION_ORIGINAL_STATUS_SET],
+            force: true,
           });
+          if (settled !== false) {
+            setAssessorVerdict(origJob.id, "fail", "high", { force: true });
+            cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
+            worker.emit(job.id, `${C.yellow}[human] Review failed job #${origJob.id}${C.reset}`);
+            logEvent({
+              work_item_id: job.work_item_id,
+              job_id: origJob.id,
+              attempt_id: attempt.attempt.id,
+              event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
+              actor_type: EVENT_ACTORS.WORKER,
+              message: `Human review failed original job via job #${job.id}`,
+            });
+          }
         } else if (payload.review_type === "assessment_transport_error" && reviewDecision === "retry") {
           const maxAssessRetries = getAssessmentInternalRetryLimit();
           const origEvents = getEvents(origJob.id, 50);
           const retryCount = origEvents.filter((event) => event.event_type === "job.review_retry_assessment").length;
+          cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
           if (retryCount >= maxAssessRetries) {
             const retryLimitReview = createJob({
               work_item_id: job.work_item_id,
@@ -760,6 +798,7 @@ export async function runHumanInputJob(worker, job, {
           });
         } else if (reviewDecision === "replan") {
           handledReviewDecision = true;
+          cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
           const emitFn = (msg) => worker.emit(job.id, msg);
           processVerdict(origJob, {
             verdict: "needs_replan",
@@ -769,17 +808,24 @@ export async function runHumanInputJob(worker, job, {
             human_questions: [],
           }, { emit: emitFn, autoApprove: worker.autoApprove });
         } else if (reviewDecision === "skip") {
-          await worker._setJobRowStatus(origJob, "canceled");
           handledReviewDecision = true;
-          worker.emit(job.id, `${C.yellow}[human] Review skipped job #${origJob.id}${C.reset}`);
-          logEvent({
-            work_item_id: job.work_item_id,
-            job_id: origJob.id,
-            attempt_id: attempt.attempt.id,
-            event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
-            actor_type: EVENT_ACTORS.WORKER,
-            message: `Human skipped original job via review job #${job.id}`,
+          const settled = await worker._setJobRowStatus(origJob, "canceled", {
+            expectedStatuses: [...REVIEW_DECISION_ORIGINAL_STATUS_SET],
+            force: true,
           });
+          if (settled !== false) {
+            setAssessorVerdict(origJob.id, "not_assessed", null, { force: true });
+            cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
+            worker.emit(job.id, `${C.yellow}[human] Review skipped job #${origJob.id}${C.reset}`);
+            logEvent({
+              work_item_id: job.work_item_id,
+              job_id: origJob.id,
+              attempt_id: attempt.attempt.id,
+              event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
+              actor_type: EVENT_ACTORS.WORKER,
+              message: `Human skipped original job via review job #${job.id}`,
+            });
+          }
         }
       }
     }
@@ -789,6 +835,9 @@ export async function runHumanInputJob(worker, job, {
       const unblockable = new Set(["waiting_on_human", "waiting_on_review", "blocked", "awaiting_assessment"]);
       if (origJob && unblockable.has(origJob.status)) {
         await worker._setJobRowStatus(origJob, "queued");
+        if (payload.review_type) {
+          cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
+        }
         worker.emit(job.id, `${C.cyan}[human] Unblocked job #${origJob.id} - requeued${C.reset}`);
         logEvent({
           work_item_id: job.work_item_id,

@@ -156,7 +156,10 @@ export class ReviewSession {
         console.log(`     ${C.red}Approval blocked: ${report.finalAssessment.reason}${C.reset}`);
         continue;
       }
-      const completionOk = updateWorkItemStatus(wi.id, "complete", { allowTerminalFailureBlockers: true });
+      const completionOk = updateWorkItemStatus(wi.id, "complete", {
+        allowTerminalFailureBlockers: true,
+        resolvePendingReviews: true,
+      });
       if (completionOk === false) {
         console.log(`     ${C.red}Approval blocked: active jobs or dirty review state must be resolved before merge.${C.reset}`);
         continue;
@@ -221,7 +224,11 @@ export class ReviewSession {
       const newDesc = reason
         ? `${wi.description}\n\n---\nPREVIOUS ATTEMPT REJECTED: ${reason}`
         : wi.description;
-      requeueWorkItemAfterRejection(wi.id, { description: newDesc });
+      const requeued = requeueWorkItemAfterRejection(wi.id, { description: newDesc, feedback: reason });
+      if (!requeued) {
+        console.log(`     ${C.red}Rejected, but active work prevented a safe retry; leaving WI unchanged${C.reset}\n`);
+        continue;
+      }
 
       logEvent({
         work_item_id: wi.id,
@@ -759,7 +766,10 @@ export class ReviewSession {
         display.requestRender({ force: true });
         return false;
       }
-      const completionOk = updateWorkItemStatus(wiId, "complete", { allowTerminalFailureBlockers: true });
+      const completionOk = updateWorkItemStatus(wiId, "complete", {
+        allowTerminalFailureBlockers: true,
+        resolvePendingReviews: true,
+      });
       if (completionOk === false) {
         item._mergeResult = `${C.red}\u2717 Approval blocked: active required jobs remain; resolve them before merging${C.reset}`;
         display.requestRender({ force: true });
@@ -825,7 +835,11 @@ export class ReviewSession {
           item._mergeResult = `${C.red}\u2717 branch cleanup failed; WI unchanged${C.reset}`;
           return;
         }
-        requeueWorkItemAfterRejection(wiId);
+        const requeued = requeueWorkItemAfterRejection(wiId);
+        if (!requeued) {
+          item._mergeResult = `${C.red}\u2717 active work prevented a safe retry; WI unchanged${C.reset}`;
+          return;
+        }
         logEvent({
           work_item_id: wiId,
           event_type: EVENT_TYPES.WORK_ITEM_REJECTED,

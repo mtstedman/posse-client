@@ -507,6 +507,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
   const requestInstructions = dedupeAtlasSummaryFromInstructions(instructions, packet?.atlas?.summary, atlasSummary);
   const shellPolicyHint = assessorShellPolicyHint(role, packet);
   const promptProfile = packet?.prompt_profile || packet?.promptProfile || null;
+  const renderJobIdentity = role !== "researcher";
   const selectedSkills = Array.isArray(packet?.skills_attached)
     ? packet.skills_attached
     : (Array.isArray(packet?.skills) ? packet.skills : []);
@@ -516,16 +517,18 @@ export function buildRemoteCompileRequest(packet, instructions, {
     provider,
     job_type: packet?.job_type || role,
     governance_tier: packet?.governance_tier || "mvp",
-    work_item: {
-      id: packet?.work_item_id ?? null,
-    },
-    job: {
-      id: packet?.job_id ?? null,
-      title: packet?.title || "",
-      job_type: packet?.job_type || null,
-      model_tier: packet?.model_tier || null,
-      reasoning_effort: packet?.reasoning_effort || null,
-    },
+    ...(renderJobIdentity ? {
+      work_item: {
+        id: packet?.work_item_id ?? null,
+      },
+      job: {
+        id: packet?.job_id ?? null,
+        title: packet?.title || "",
+        job_type: packet?.job_type || null,
+        model_tier: packet?.model_tier || null,
+        reasoning_effort: packet?.reasoning_effort || null,
+      },
+    } : {}),
     instructions: requestInstructions,
     attempt: {
       count: packet?.attempt?.count ?? 1,
@@ -543,7 +546,9 @@ export function buildRemoteCompileRequest(packet, instructions, {
       test_command: packet?.test_command || null,
     },
     context: {
-      project_summary: packet?.project_context || null,
+      // Researcher instructions already carry the work-item description. Do
+      // not make the relay render the same question again as PROJECT SUMMARY.
+      project_summary: role === "researcher" ? null : (packet?.project_context || null),
       atlas_summary: atlasSummary,
       step0_context: packet?.step0_context || null,
       memory_prefetch: memoryEnabled ? memoryPrefetchForRemote(packet) : null,

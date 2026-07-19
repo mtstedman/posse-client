@@ -353,15 +353,23 @@ export function buildWorkflowModeBlock(workflowConfig, role = "planner") {
   ].join("\n");
 }
 
-export function buildIntakeHintsBlock(hints) {
+export function buildIntakeHintsBlock(hints, {
+  includeOutputRouting = true,
+  heading = "INTAKE HINTS (treat as user-provided routing bias, not guaranteed truth):",
+  semanticKeys = false,
+} = {}) {
   if (!hints) return "";
   const lines = [
-    `INTAKE HINTS (treat as user-provided routing bias, not guaranteed truth):`,
-    `- intent_type: ${hints.intent_type || "unknown"}`,
-    `- deliverable_type: ${hints.deliverable_type || "unknown"}`,
-    `- output_mode: ${hints.output_mode || "unknown"}`,
-    `- desired_outputs: ${(Array.isArray(hints.desired_outputs) && hints.desired_outputs.length > 0) ? hints.desired_outputs.join(", ") : "unknown"}`,
+    heading,
+    `- ${semanticKeys ? "intent" : "intent_type"}: ${hints.intent_type || "unknown"}`,
+    `- ${semanticKeys ? "deliverable" : "deliverable_type"}: ${hints.deliverable_type || "unknown"}`,
   ];
+  if (includeOutputRouting) {
+    lines.push(
+      `- output_mode: ${hints.output_mode || "unknown"}`,
+      `- desired_outputs: ${(Array.isArray(hints.desired_outputs) && hints.desired_outputs.length > 0) ? hints.desired_outputs.join(", ") : "unknown"}`,
+    );
+  }
   if (hints.suspected_files?.length) {
     lines.push(`- suspected_files:`);
     for (const file of hints.suspected_files) lines.push(`  - ${file}`);
@@ -452,7 +460,14 @@ export function buildResearchIntakePreload(projectDir, hints, { atlasCoveredFile
   const safeHints = normalizeIntakeHints(hints);
   if (!_hasMaterialResearchPreloadHints(safeHints)) return "";
   const sections = [];
-  const hintBlock = buildIntakeHintsBlock(safeHints);
+  // Researchers need the semantic request shape, not the scheduler's two
+  // overlapping output-routing representations. Planner/assessor rendering
+  // keeps the full block because those fields drive artifact/job routing.
+  const hintBlock = buildIntakeHintsBlock(safeHints, {
+    includeOutputRouting: false,
+    heading: "REQUEST SHAPE (routing bias, not guaranteed truth):",
+    semanticKeys: true,
+  });
   if (hintBlock) sections.push(hintBlock);
 
   for (const dir of (safeHints.suspected_dirs || []).slice(0, 3)) {

@@ -235,7 +235,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "create_ref": {
     type: "function",
     name: "atlas_create_ref",
-    description: "Citation-store minting. Store a chunk of evidence and get back a citable #ref stub for handoffs. Synthesis stays prose; evidence moves as refs. Accepts inline text, or a slice of an existing materialized ref (source_ref + lines/offset), or a batch via chunks[]. The optional note travels with the stub as its 'what is this'.",
+    description: "Citation-store minting. Store a chunk of evidence and get back a #ref stub. Accepts inline text, a slice of an existing materialized ref (source_ref + lines/offset), or a batch via chunks[]. The optional note is retained with the stored ref.",
     parameters: {
       type: "object",
       properties: {
@@ -456,7 +456,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.card": {
     type: "function",
     name: "atlas_symbol_card",
-    description: "Iris Rung 1 (~100 tokens). Fetch compact symbol cards: one card by symbolId or symbolRef, or a batch via symbolIds/symbolRefs with per-item errors. Cards carry signature, summary, callers/callees, relationship metrics, and location.",
+    description: "Fetch compact symbol cards without loading whole files: one card by symbolId or symbolRef, or a batch via symbolIds/symbolRefs with per-item errors. Cards carry signature, summary, callers/callees, relationship metrics, and location.",
     parameters: {
       type: "object",
       properties: {
@@ -607,7 +607,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         refType: { type: "string", enum: ["cluster", "process"], description: "Direct leaf ref lookup type." },
         refId: { type: "string", description: "Cluster/process id for ref lookup." },
         maxDepth: { type: "integer", description: "Descendant depth from focused node(s). Default 1, max 8." },
-        limit: { type: "integer", description: "Maximum nodes to return. Default 100, max 500." },
+        limit: { type: "integer", description: "Maximum nodes to return. Optional: when omitted, ATLAS chooses 100-250 from indexed repository size. Max 500." },
         offset: { type: "integer", description: "Page offset into the focused subtree." },
         includeAggregates: { type: "boolean", description: "Include aggregate counts/raw metrics on each node. Default true." },
         includeTerms: { type: "boolean", description: "Include generated search terms on each node. Default false." },
@@ -717,7 +717,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_get_skeleton",
-    description: "Structural outline for one uncovered file or symbol. Do not call for a file already covered by a successful code.survey unless the survey explicitly omitted the required structure.",
+    description: "Structural outline for one file or symbol, including signatures and containment without full bodies.",
     parameters: {
       type: "object",
       properties: {
@@ -732,14 +732,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Best first content call for a multi-file area. One call returns per-file skeleton evidence plus a call map and satisfies card-and-skeleton evidence for every covered file. Follow with a per-file tool only for a named evidence gap.",
+    description: "Multi-file content map with per-file symbols and structural summaries plus a call map. Surveys over ten files return the first ten plus a backed pagination.cursor to pre-stored ten-file hash pages; follow the cursor instead of surveying the same scope again.",
     parameters: {
       type: "object",
       properties: {
         paths: { type: ["string", "array"], items: { type: "string" }, description: "Repository-relative directory prefix or file path — one string or an array of them, e.g. \"src/billing\" or [\"lib/a.js\", \"lib/b.js\"]. Resolves up to 64 indexed files." },
         symbols: { type: "array", items: { type: "string" }, description: "Optional. Dig terms: restrict the survey to these symbol names' neighborhoods (max 16)." },
         maxFiles: { type: "integer", description: "Optional. Cap on files surveyed. Default 64." },
-        sessionId: { type: "string", description: "Optional session namespace for ladder credit (matches other code.* actions)." },
+        sessionId: { type: "string", description: "Optional session namespace shared with related code retrieval calls." },
       },
       required: ["paths"],
       additionalProperties: false,
@@ -779,7 +779,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_get_hot_path",
-    description: "Identifier-focused excerpts for one named unresolved usage or branch. Do not use as a generic follow-up to code.survey or code.skeleton.",
+    description: "Identifier-focused excerpts for named usages or branches within selected files.",
     parameters: {
       type: "object",
       properties: {
@@ -795,7 +795,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_need_window",
-    description: "Raw code for an exact unresolved guard, ordering rule, or surrounding-text requirement. The request reason must identify what prior evidence could not establish.",
+    description: "Raw code windows for exact guards, ordering, surrounding text, identifiers, or line ranges within selected files.",
     parameters: {
       type: "object",
       properties: {

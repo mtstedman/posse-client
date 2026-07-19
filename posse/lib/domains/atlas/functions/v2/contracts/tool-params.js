@@ -300,7 +300,7 @@
  * @property {TreeRefType} [refType]          Direct leaf ref lookup type.
  * @property {string} [refId]                 Cluster/process id for ref lookup.
  * @property {number} [maxDepth]              Descendant depth from focused node(s), default 1, max 8.
- * @property {number} [limit]                 Page size, default 100, max 500.
+ * @property {number} [limit]                 Page size. tree.branch chooses 100-250 from indexed repo size when omitted; max 500. tree.overview defaults to 100.
  * @property {number} [offset]                Page offset.
  * @property {boolean} [includeAggregates]    Include aggregate JSON on each node. Default true.
  * @property {boolean} [includeTerms]         Include generated terms on each node. Default false.

@@ -23,9 +23,6 @@ import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { persistResearcherMemories } from "../../functions/helpers/research-memories.js";
 import {
   contextDir,
-  describeArtifactRoutingForPrompt,
-  getConfiguredImageProviders,
-  getResolvedImageProtocol,
   wiScopeId,
 } from "../../../artifacts/functions/index.js";
 import {
@@ -42,15 +39,12 @@ import {
   buildWorkflowModeBlock,
 } from "../../../intake/functions/hints.js";
 import { currentExecutionProvider, extractResearchRetryContext } from "../../functions/helpers/diagnostics.js";
-import { getProviderName, isProviderReady } from "../../../providers/functions/provider.js";
-import { getDefaultImageModel } from "../../../providers/functions/model-catalog.js";
 import { collectAtlasCoveredFiles, composePromptRemoteAware, handoff, parseResearcherStructuredOutput, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
 import {
   getResearchBudget as defaultGetResearchBudget,
   isDeepthinkTask as defaultIsDeepthinkTask,
   isResearchBudgetDeep as defaultIsResearchBudgetDeep,
   researchBudgetFromDeepthink,
-  researchBudgetPromptBlock as defaultResearchBudgetPromptBlock,
   researchBudgetToMaxTurnsOverride as defaultResearchBudgetToMaxTurnsOverride,
   researchBudgetToReasoningEffort as defaultResearchBudgetToReasoningEffort,
   shortJobTitle as defaultShortJobTitle,
@@ -79,7 +73,6 @@ const DEFAULT_DEPS = {
   isDeepthinkTask: defaultIsDeepthinkTask,
   isResearchBudgetDeep: defaultIsResearchBudgetDeep,
   loadNudges: () => "",
-  researchBudgetPromptBlock: defaultResearchBudgetPromptBlock,
   researchBudgetToMaxTurnsOverride: defaultResearchBudgetToMaxTurnsOverride,
   researchBudgetToReasoningEffort: defaultResearchBudgetToReasoningEffort,
   shortJobTitle: defaultShortJobTitle,
@@ -470,7 +463,6 @@ export class ResearcherRole extends BaseRole {
       isDeepthinkTask,
       isResearchBudgetDeep,
       loadNudges,
-      researchBudgetPromptBlock,
     } = this.roleDeps();
 
     const workItem = getWorkItem(job.work_item_id);
@@ -498,30 +490,6 @@ export class ResearcherRole extends BaseRole {
     const promptProfile = researchPromptProfile(roleMode, { reportMode });
     const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(workItem), this.getRole());
     const webFetchCachePreload = buildWebFetchCachePreload(job.work_item_id);
-    const imageRoutingSummary = describeArtifactRoutingForPrompt("image");
-    const imageProviders = getConfiguredImageProviders();
-    const imageProtocol = getResolvedImageProtocol();
-    const imageReadinessSummary = imageProviders
-      .map((provider) => {
-        const readiness = isProviderReady(provider, "images");
-        return `${provider}:${readiness.ready ? "available" : `unavailable (${readiness.reason || "unknown reason"})`}`;
-      })
-      .join(", ");
-    const roleProviders = {
-      [this.getRole()]: job.provider || getProviderName(this.getRole()),
-      planner: getProviderName("planner"),
-      artificer: getProviderName("artificer"),
-    };
-    const routingContext = [
-      "PIPELINE ROUTING CONTEXT (treat this as source-of-truth project configuration):",
-      "- Image deliverables belong to the ARTIFICER role, not ad hoc repo scripts, unless explicit task output binding says otherwise.",
-      `- ${imageRoutingSummary}`,
-      `- Image providers: available=${imageProviders.join(", ")}, selected=${imageProtocol.provider}, model=${imageProtocol.model || getDefaultImageModel(imageProtocol.provider)}`,
-      `- Image provider readiness: ${imageReadinessSummary}`,
-      `- Admin-backed provider selections: researcher=${roleProviders.researcher}, planner=${roleProviders.planner}, artificer=${roleProviders.artificer}`,
-      "- Do not claim the project has no image generation path when this routing context says image artifact routing is available.",
-      "",
-    ].join("\n");
 
     const priorResearch = roleMode === "synth" ? "" : getArtifactsByWorkItem(job.work_item_id, "response")
       .filter((artifact) => {
@@ -609,6 +577,11 @@ export class ResearcherRole extends BaseRole {
       researcherPacket = await handoff({
         recipient: this.getRole(),
         data: {
+          // Prefetch runs inside handoff. Supply machine identity before that
+          // work begins so materialized Atlas evidence can be owned by this
+          // job and exposed as durable fetch_ref cursor pages. The remote
+          // request compiler keeps these fields out of researcher prompts.
+          ...packetFields,
           cwd: projectDir,
           execution_provider: researcherExecProvider,
           title: workItem.title || "",
@@ -669,21 +642,23 @@ export class ResearcherRole extends BaseRole {
       workItem,
     });
 
+    const descriptionText = roleMode === "child"
+      ? truncateForPrompt(workItem.description || "(none)", FANOUT_CHILD_DESCRIPTION_CHAR_LIMIT, "description")
+      : workItem.description || "(none)";
+    const researchRequest = payload.instructions || payload.task_spec || job.title;
+    const requestDuplicatesDescription = roleMode !== "child"
+      && String(researchRequest || "").trim() === String(workItem.description || "").trim();
+
     return [
       reportMode
-        ? "Research the following assigned task and return the finished user-facing report."
+        ? "Research the assigned task and return a thorough, concise report. Cover every requested aspect and support material claims with evidence."
         : "Research the following topic for a development work item.",
       "",
       promptLiteral("WORK ITEM", workItem.title),
-      promptLiteral("DESCRIPTION", roleMode === "child"
-        ? truncateForPrompt(workItem.description || "(none)", FANOUT_CHILD_DESCRIPTION_CHAR_LIMIT, "description")
-        : workItem.description || "(none)"),
-      roleMode === "child" ? "" : researchBudgetPromptBlock(researchBudget, "researcher"),
-      "",
+      promptLiteral("DESCRIPTION", descriptionText),
       roleMode === "child" ? "" : workflowModeBlock,
       includeResearchPreload && hintedPreload ? `${hintedPreload}\n` : "",
       roleMode !== "synth" && !focusedFanoutChild && webFetchCachePreload ? `${webFetchCachePreload}\n` : "",
-      roleMode !== "synth" && !focusedFanoutChild && !webOnlyAnswer ? routingContext : "",
       webOnlyAnswer ? buildWebOnlyAnswerBlock(payload) : "",
       roleMode === "child" ? buildFanoutChildBlock(payload) : "",
       roleMode === "synth" ? buildFanoutSynthBlock(payload, childBriefs) : "",
@@ -700,7 +675,7 @@ export class ResearcherRole extends BaseRole {
       priorAttemptLogs ? `PRIOR ATTEMPT (ran out of turns - do NOT repeat these reads, summarize your findings promptly):\n${priorAttemptLogs}\n` : "",
       retrySalvageBlock ? `${retrySalvageBlock}\n` : "",
       loadNudges(job.id, { attemptId: ctx.attemptId }),
-      promptLiteral("RESEARCH REQUEST", payload.instructions || payload.task_spec || job.title),
+      requestDuplicatesDescription ? "" : promptLiteral("RESEARCH REQUEST", researchRequest),
     ].filter(Boolean).join("\n");
   }
 

@@ -7,6 +7,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { extractJson } from "../../../../shared/format/functions/json.js";
 import { getAtlasDeterministicToolDefinitions } from "../../../../shared/tools/functions/toolkit/atlas.js";
+import { materializeCodeSurveyPages } from "../../../../shared/tools/functions/hash-adder.js";
 import { getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { executeEmbeddedAtlasTool } from "../../../integrations/functions/atlas-embedded.js";
 import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
@@ -683,6 +684,28 @@ function _hashRefContextForPacket(packet) {
     attempt_id: obs.attempt_id ?? null,
     agent_call_id: obs.agent_call_id ?? null,
   };
+}
+
+function _surfaceAtlasSurveyRef(packet, data) {
+  const context = _hashRefContextForPacket(packet);
+  const ownerScope = context.job_id != null && context.work_item_id != null
+    ? "job"
+    : context.work_item_id != null
+      ? "work_item"
+      : null;
+  if (!ownerScope || !data || typeof data !== "object") return null;
+  return materializeCodeSurveyPages(data, {
+    context,
+    ownerScope,
+    source: "atlas:prefetch:code.survey",
+    objectType: "atlas.code.survey",
+    pageSize: SURVEY_REF_PAGE_FILES,
+  });
+}
+
+export function __testSurfaceAtlasSurveyRef(packet, data) {
+  assertTestContext("__testSurfaceAtlasSurveyRef");
+  return _surfaceAtlasSurveyRef(packet, data);
 }
 
 function _surfaceDbBucketRef(packet, { db, operation, queries, metadata = {} }) {
@@ -1780,9 +1803,10 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
     maxFiles: ATLAS_EXACT_PREFETCH_MAX_FILES,
   });
 
-  // Area handoffs: pre-surface a compact code.survey pointer so the agent knows
-  // a call map exists for this scope, without pushing the whole graph/skeleton
-  // body into every prompt. Any miss falls back to the skeleton pass below.
+  // Area handoffs: pre-surface a compact code.survey summary plus a job-visible
+  // hash and ten-file continuation pages. The agent can expand the exact
+  // prefetched result without executing the survey again. Any miss falls back
+  // to the skeleton pass below.
   // Embedded prefetch call: code.survey runs via executeEmbeddedAtlasTool
   // (origin:"prefetch") and does NOT require the agent/internal tool surface to
   // expose it (it is an agent-surface action, absent from internalAtlasTools).
@@ -1808,9 +1832,9 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
   });
   const surveyOk = surveyContext?.ok === true;
 
-  // The compact survey pointer is rendered even at higher trim levels. If the
-  // survey is unavailable, keep a bounded structural floor by skeletonizing the
-  // top ranked files instead of only explicit prefetch files.
+  // The compact survey evidence is rendered even at higher trim levels. If the
+  // survey is unavailable, keep a bounded structural floor by skeletonizing
+  // the top ranked files instead of only explicit prefetch files.
   const skeletonMaxFiles = atlasSliceSkeletonPrefetchLimit(packet.recipient);
   const exactOkPaths = _pathSet(exactFiles.filter((item) => item?.ok).map((item) => item.file));
   const skeletons = (!surveyOk && skeletonMaxFiles > 0)
@@ -1889,6 +1913,7 @@ async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDi
         retries,
       }, startedAt);
     }
+    const evidenceRef = _surfaceAtlasSurveyRef(packet, data);
     return _finishAtlasSurveyPrefetch(packet, {
       ok: true,
       attempted: true,
@@ -1899,6 +1924,7 @@ async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDi
       metrics: data.metrics || null,
       granularity: data.granularity || null,
       truncated: !!data.truncated,
+      evidenceRef,
       retries,
     }, startedAt);
   } catch (err) {
@@ -1932,9 +1958,11 @@ function _finishAtlasSurveyPrefetch(packet, result, startedAt) {
   return _compactAtlasSurveyPrefetchResult(out);
 }
 
-const MAX_SURVEY_POINTER_FILES = 8;
-const MAX_SURVEY_POINTER_EDGES = 8;
-const MAX_SURVEY_POINTER_SYMBOLS = 8;
+const MAX_SURVEY_BRIEF_FILES = 10;
+const MAX_SURVEY_BRIEF_EDGES = 8;
+const MAX_SURVEY_BRIEF_SYMBOLS = 8;
+const MAX_SURVEY_BRIEF_SYMBOLS_PER_FILE = 4;
+const SURVEY_REF_PAGE_FILES = 10;
 
 function _compactAtlasSurveyPrefetchResult(result) {
   if (!result?.ok) return result;
@@ -1945,6 +1973,23 @@ function _compactAtlasSurveyPrefetchResult(result) {
   const fileCount = Number.isFinite(Number(metrics.fileCount))
     ? Number(metrics.fileCount)
     : files.length;
+  const fileSummaries = files.slice(0, MAX_SURVEY_BRIEF_FILES).map((file) => ({
+    path: String(file?.path || "").trim(),
+    symbolCount: Number.isFinite(Number(file?.symbolCount))
+      ? Number(file.symbolCount)
+      : (Array.isArray(file?.symbols) ? file.symbols.length : 0),
+    truncated: !!file?.truncated,
+    symbols: (Array.isArray(file?.symbols) ? file.symbols : [])
+      .slice(0, MAX_SURVEY_BRIEF_SYMBOLS_PER_FILE)
+      .map((symbol) => ({
+        name: String(symbol?.qualifiedName || symbol?.name || "").trim(),
+        kind: String(symbol?.kind || "symbol").trim(),
+        line: Number.isFinite(Number(symbol?.line ?? symbol?.startLine))
+          ? Number(symbol.line ?? symbol.startLine)
+          : null,
+      }))
+      .filter((symbol) => symbol.name),
+  })).filter((file) => file.path);
   return {
     ok: true,
     attempted: !!result.attempted,
@@ -1956,11 +2001,10 @@ function _compactAtlasSurveyPrefetchResult(result) {
     retries: Number(result.retries || 0),
     durationMs: result.durationMs,
     fileCount,
-    topFiles: files
-      .map((file) => String(file?.path || "").trim())
-      .filter(Boolean)
-      .slice(0, MAX_SURVEY_POINTER_FILES),
+    fileSummaries,
+    topFiles: fileSummaries.map((file) => file.path),
     callMapSummary: summary,
+    evidenceRef: result.evidenceRef || null,
     fullPayloadOmitted: true,
   };
 }
@@ -1986,11 +2030,11 @@ function _compactSurveyCallMap(callMap, metrics = {}) {
 
 function _compactSurveyTopEdges({ inbound = [], outbound = [], internal = [], unresolved = [] } = {}) {
   return [
-    ..._compactSurveyEdges(inbound, "inbound", MAX_SURVEY_POINTER_EDGES),
-    ..._compactSurveyEdges(outbound, "outbound", MAX_SURVEY_POINTER_EDGES),
-    ..._compactSurveyEdges(internal, "internal", MAX_SURVEY_POINTER_EDGES),
-    ..._compactSurveyEdges(unresolved, "unresolved", MAX_SURVEY_POINTER_EDGES),
-  ].slice(0, MAX_SURVEY_POINTER_EDGES);
+    ..._compactSurveyEdges(inbound, "inbound", MAX_SURVEY_BRIEF_EDGES),
+    ..._compactSurveyEdges(outbound, "outbound", MAX_SURVEY_BRIEF_EDGES),
+    ..._compactSurveyEdges(internal, "internal", MAX_SURVEY_BRIEF_EDGES),
+    ..._compactSurveyEdges(unresolved, "unresolved", MAX_SURVEY_BRIEF_EDGES),
+  ].slice(0, MAX_SURVEY_BRIEF_EDGES);
 }
 
 function _finiteMetric(value, fallback = 0) {
@@ -2037,7 +2081,7 @@ function _compactSurveyEdgeSymbols(edges) {
   }
   return [...counts.values()]
     .sort((a, b) => a.order - b.order || b.count - a.count)
-    .slice(0, MAX_SURVEY_POINTER_SYMBOLS)
+    .slice(0, MAX_SURVEY_BRIEF_SYMBOLS)
     .map(({ symbol, count }) => ({ symbol, count }));
 }
 
@@ -2528,27 +2572,13 @@ export function classifyAtlasPrefetchRelevance(packet, recipient = packet?.recip
 function renderRequiredRetrievalOrderLine(packet) {
   const label = atlasBackendLabel(packet?.atlas);
   const available = new Set(displayableAtlasTools(packet?.atlas?.tools, packet?.atlas));
-  const hasEvidenceTools = [
-    "symbol.search",
-    "tree.branch",
-    "tree.expand",
-    "code.structure",
-    "code.survey",
-    "symbol.card",
-    "code.skeleton",
-    "code.lens",
-    "code.window",
-  ].some((tool) => available.has(tool));
-  const gapPolicy = hasEvidenceTools
-    ? `Discovery and tree results choose the likely scope. Use ${displayAtlasToolName("code.structure", packet?.atlas)} for exact indexed inventory when bodies are unnecessary, or one ${displayAtlasToolName("code.survey", packet?.atlas)} call for multi-file content understanding; a successful survey already satisfies card-and-skeleton evidence for every covered file. Per-file evidence tools are alternatives for named residual gaps, not mandatory sequential steps. Before another retrieval call, name the unresolved material claim and choose the cheapest tool that can answer it. If no specific claim remains, stop retrieving and synthesize.`
-    : "";
   const gateEnabled = packet?.atlas?.gateEnabled != null
     ? !!packet.atlas.gateEnabled
     : resolveAtlasToolGateEnabled();
   const prefetchStatus = String(packet?.atlas?.prefetchStatus || "").toLowerCase();
   if (!gateEnabled) {
     if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-      return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use prefetch as the first code map, then make only targeted additional ${label} calls for specific evidence gaps. ${gapPolicy} If ${label} evidence already answers the question, do not re-read the source natively. Use standard tools for a named gap: ${label} unavailable or still insufficient after a focused attempt, non-indexed config/data/docs where the raw text is the object, files you mutated needing exact current worktree state, or git/test/build/shell operations.`;
+      return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use it directly when it answers the question; do not repeat the same lookup or re-read that evidence natively. Use standard tools when ${label} is unavailable or insufficient, for non-indexed config/data/docs where the raw text is the object, for exact current worktree state after mutations, or for git/test/build/shell operations.`;
     }
     if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
       return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Try a task-relevant ${label} retrieval first when possible, then use standard tools for whatever ${label} could not answer, stating the gap.`;
@@ -2557,10 +2587,10 @@ function renderRequiredRetrievalOrderLine(packet) {
     const examples = firstTools.length > 0
       ? ` (start with ${firstTools.join(" / ")})`
       : "";
-    return `${label} RETRIEVAL POLICY: use ${label} tools when possible for repository discovery and codebase understanding${examples}. ${gapPolicy} Treat ${label} output as a map of concepts, relationships, content, and likely behavior, then read only the few decisive files needed to verify an unresolved exact detail. Use standard tools when ${label} is unavailable, still insufficient after a focused attempt, the target is non-indexed config/data/docs, you have mutated files and need exact current worktree state, git/test/build/shell operations are required, or ${label} does not expose the needed operation.`;
+    return `${label} RETRIEVAL POLICY: use ${label} tools when possible for repository discovery and codebase understanding${examples}. Use returned evidence directly when it answers the task. Use standard tools when ${label} is unavailable or insufficient, the target is non-indexed config/data/docs, you have mutated files and need exact current worktree state, git/test/build/shell operations are required, or ${label} does not expose the needed operation.`;
   }
   if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-    return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context (prefetch does not count as active ${label} use). ${gapPolicy} Answer from prefetch plus targeted ${label} evidence calls, and stop when the evidence is sufficient. Never call ${label} merely to make native tools available. Native read/search/list tools are the exception, not the next step — use them only for a named evidence gap (${label} stale/empty/conflicting after a focused attempt, non-indexed config/data/docs where the raw text is the object, files you mutated needing exact worktree state, or exact surrounding text ${label} could not provide) and state that gap when you do.`;
+    return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context (prefetch does not count as active ${label} use). Use it directly when it answers the task, and do not repeat the same lookup. Native read/search/list tools are for information ${label} cannot supply, non-indexed config/data/docs where raw text is the object, exact current worktree state after mutations, or git/test/build/shell operations.`;
   }
   if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
     return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Make focused ${label} retrieval calls for the exact task or scoped files; if a focused attempt still cannot answer, use native tools for that named gap and state what ${label} left unanswered.`;
@@ -2569,7 +2599,7 @@ function renderRequiredRetrievalOrderLine(packet) {
   const examples = firstTools.length > 0
     ? ` (start with ${firstTools.join(" / ")})`
     : "";
-  return `REQUIRED RETRIEVAL POLICY: ${label} is the inspection path${examples}. ${gapPolicy} Prefetch and internal bookkeeping calls do not count as retrieval. Never call ${label} merely to make native tools available, and if ${label} evidence is sufficient do not re-read the source natively. Native list/search/read tools are for named evidence gaps only: ${label} unavailable or stale/empty/conflicting after a focused attempt, non-indexed config/data/docs where the raw text is the object, files you mutated needing exact current worktree state, exact surrounding text ${label} could not provide, or operations ${label} does not expose (git/test/build/shell). When you use one, state the precise gap and the ${label} result that was insufficient.`;
+  return `REQUIRED RETRIEVAL POLICY: ${label} is the inspection path${examples}. Prefetch and internal bookkeeping calls do not count as retrieval. Use ${label} evidence directly when it answers the task and do not repeat the same lookup. Native list/search/read tools are for information ${label} cannot supply, non-indexed config/data/docs where raw text is the object, exact current worktree state after mutations, or operations ${label} does not expose (git/test/build/shell).`;
 }
 
 function renderAtlasContextSection(packet) {
@@ -2600,7 +2630,7 @@ function renderAtlasContextSection(packet) {
     atlasHeading(`${label} CONTEXT`),
     hasCallableTools
       ? `${label} is active for this handoff; use the listed ${label} tools when they can answer the task.`
-      : `${label} context prefetch is active for this handoff, but no callable ${label} tools are exposed in this provider session. Use the prefetched context as a code map and continue with deterministic file/search/edit tools for exact evidence.`,
+      : `${label} context prefetch is active for this handoff. Use the prefetched context and its backed cursor pages as the initial code map.`,
     atlasField("Phase", packet.atlas.phase),
     atlasField("Repo target", packet.atlas.repo?.repoPath),
     hasCallableTools ? atlasField(`Preferred ${label} tools`, displayAtlasToolList(packet.atlas.tools, packet.atlas)) : null,
@@ -2706,16 +2736,50 @@ function _renderExactFileBlock(item, trim) {
   return lines;
 }
 
-// Render a prefetched code.survey as a compact pointer. The full per-file
-// skeletons and call graph stay pull-only via code.survey.
-function _renderAtlasSurveySection(sc, packet) {
+function _surveyRefStub(evidenceRef) {
+  const ref = String(evidenceRef?.ref || "").trim();
+  if (!/^#[a-z0-9]{4,12}$/i.test(ref)) return null;
+  const objectType = String(evidenceRef?.objectType || "atlas.code.survey")
+    .replace(/[^0-9A-Za-z_.:-]+/g, "_")
+    .slice(0, 80);
+  const sizeChars = Math.max(0, Number(evidenceRef?.sizeChars) || 0);
+  const note = String(evidenceRef?.note || "prefetched survey page 1")
+    .replace(/["\\\]\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
+  return `[ref_hash ${objectType} ${sizeChars} chars ${ref}${note ? ` note="${note}"` : ""}]`;
+}
+
+function _surveyFileSummaries(sc) {
+  if (Array.isArray(sc?.fileSummaries)) return sc.fileSummaries;
+  return (Array.isArray(sc?.files) ? sc.files : []).map((file) => ({
+    path: file?.path,
+    symbolCount: file?.symbolCount,
+    truncated: file?.truncated,
+    symbols: file?.symbols,
+  }));
+}
+
+// Render the compact inline part of an already-prefetched code.survey. The
+// exact survey is stored as ten-file evidenceRef pages so the agent can walk
+// that snapshot without paying to execute code.survey a second time.
+function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
   const lines = [];
   const label = displayAtlasToolName("code.survey", packet?.atlas);
   const target = _formatSurveyScopeTarget(sc?.scope) || `${Number(sc.fileCount || 0)} files`;
   const dig = sc.symbols ? `, dig: ${sc.symbols.join(", ")}` : "";
-  lines.push(`Area survey pointer (${label} over ${target}${dig}) - compact call-map signal only; pull the full survey for specific symbols or edges you will trace.`);
-  const args = _surveyPullArgs(sc);
-  if (args) lines.push(`  pull: ${label} ${args}`);
+  lines.push(`Area survey (prefetched with ${label} over ${target}${dig}):`);
+  const refStub = _surveyRefStub(sc?.evidenceRef);
+  if (refStub) {
+    lines.push(`  survey page 1: ${refStub}`);
+    const cursor = sc?.evidenceRef?.cursor || sc?.evidenceRef?.nextPage;
+    const cursorRef = cursor?.args?.ref || cursor?.ref;
+    if (cursorRef) {
+      lines.push(`  next 10: atlas.fetch_ref {"ref":"${cursorRef}"}`);
+    }
+    lines.push(`  The survey snapshot is already stored in cursor pages; do not rerun ${label} for this scope.`);
+  }
   const fileCount = Number.isFinite(Number(sc.fileCount))
     ? Number(sc.fileCount)
     : (Array.isArray(sc.files) ? sc.files.length : 0);
@@ -2743,24 +2807,36 @@ function _renderAtlasSurveySection(sc, packet) {
     }
     if (summary.truncated) lines.push("    (edge sample truncated)");
   }
+  const allFileSummaries = _surveyFileSummaries(sc);
+  const hasSymbolSummaries = allFileSummaries.some((file) => Array.isArray(file?.symbols) && file.symbols.length > 0);
   const topFiles = Array.isArray(sc.topFiles)
     ? sc.topFiles
-    : (Array.isArray(sc.files) ? sc.files.map((file) => file?.path).filter(Boolean).slice(0, MAX_SURVEY_POINTER_FILES) : []);
-  if (topFiles.length > 0) {
+    : (Array.isArray(sc.files) ? sc.files.map((file) => file?.path).filter(Boolean).slice(0, MAX_SURVEY_BRIEF_FILES) : []);
+  if (topFiles.length > 0 && !hasSymbolSummaries) {
     lines.push(`  top files in survey scope: ${topFiles.join(", ")}`);
   }
+  const fileCap = trim >= 2 ? 4 : trim >= 1 ? 6 : MAX_SURVEY_BRIEF_FILES;
+  const symbolCap = trim >= 2 ? 2 : trim >= 1 ? 3 : MAX_SURVEY_BRIEF_SYMBOLS_PER_FILE;
+  const fileSummaries = allFileSummaries.slice(0, fileCap);
+  if (fileSummaries.some((file) => Array.isArray(file?.symbols) && file.symbols.length > 0)) {
+    lines.push("  surveyed symbols by file (`path#symbol` means `symbol` in repo-relative `path`):");
+    for (const file of fileSummaries) {
+      const symbols = (Array.isArray(file?.symbols) ? file.symbols : []).slice(0, symbolCap);
+      if (symbols.length === 0) continue;
+      const total = Number(file?.symbolCount || symbols.length);
+      const remainder = Math.max(0, total - symbols.length);
+      const rendered = symbols.map((symbol) => {
+        const name = String(symbol?.qualifiedName || symbol?.name || "(anonymous)");
+        const kind = String(symbol?.kind || "symbol");
+        const line = Number.isFinite(Number(symbol?.line ?? symbol?.startLine))
+          ? `:${Number(symbol.line ?? symbol.startLine)}`
+          : "";
+        return `${name} [${kind}]${line}`;
+      });
+      lines.push(`    - ${file.path}: ${rendered.join(", ")}${remainder > 0 ? ` (+${remainder} more in survey ref)` : ""}`);
+    }
+  }
   return lines;
-}
-
-function _surveyPullArgs(sc) {
-  const scope = sc?.scope || {};
-  if (!scope.inject) return "";
-  const args = {
-    paths: scope.paths,
-    maxFiles: MAX_SURVEY_FILES,
-    ...(sc.symbols ? { symbols: sc.symbols } : {}),
-  };
-  return JSON.stringify(args);
 }
 
 function _renderAtlasSurveyMissSection(sc, packet) {
@@ -2770,7 +2846,7 @@ function _renderAtlasSurveyMissSection(sc, packet) {
   const source = sc?.scope?.source ? ` (scope source: ${sc.scope.source})` : "";
   return [
     `Area survey (${label} over ${target}) was attempted but unavailable${source}: ${reason}.`,
-    `If call edges or exhaustive area structure matter, call ${label} over that scope if available; otherwise name the remaining material claim and choose the cheapest per-file evidence tool that can answer it instead of treating tree scope as a call map.`,
+    `If call edges or exhaustive area structure matter, retry ${label} over that scope when available; otherwise continue with the available indexed evidence and report the resulting limitation instead of treating tree scope as a call map.`,
   ];
 }
 
@@ -2787,15 +2863,6 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     atlasField("Repo", slice.repoId || ATLAS_MISSING_VALUE),
   ].filter(Boolean);
 
-  // Exact raw code is a residual-gap tool, not a mandatory step after cards,
-  // skeletons, or an area survey. Keep that selection rule on the live handoff
-  // path so it reaches the agent regardless of the remote contract.
-  if (trim < 3) {
-    lines.push(
-      `Use ${displayAtlasToolName("code.window", packet?.atlas)} only when an exact guard, ordering rule, surrounding-text requirement, or raw implementation detail remains unresolved; name what the existing prefetch, survey, card, skeleton, or lens evidence could not establish.`,
-    );
-  }
-
   // Orientation first: the compressed tree's labeled area map tells the
   // agent what lives where before any file list — rendered regardless of
   // which discovery pass produced the candidates (tree.overview supplies it
@@ -2806,7 +2873,8 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     : (Array.isArray(slice.treeScope?.areaMap) ? slice.treeScope.areaMap : []);
   if (trim < 2 && renderedAreaMap.length > 0) {
     const walkTool = displayAtlasToolName("tree.branch", packet.atlas);
-    lines.push(`Repo area map (compressed tree; drill into a branch with ${walkTool} {path, maxDepth}):`);
+    lines.push("This is the compressed file-system tree.");
+    lines.push(`A branch can be drilled into with ${walkTool} {path, maxDepth}; omit limit to use the repo-sized default (100-250 nodes).`);
     for (const area of renderedAreaMap) {
       lines.push(`- ${area.path} — ${area.label}${area.labelStale ? " (label predates recent changes here)" : ""}`);
     }
@@ -2868,7 +2936,7 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
   }
 
   if (slice.surveyContext?.ok) {
-    for (const line of _renderAtlasSurveySection(slice.surveyContext, packet)) lines.push(line);
+    for (const line of _renderAtlasSurveySection(slice.surveyContext, packet, { trim })) lines.push(line);
   } else if (slice.surveyContext?.attempted) {
     for (const line of _renderAtlasSurveyMissSection(slice.surveyContext, packet)) lines.push(line);
   }
@@ -2897,8 +2965,13 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     lines.push("Top cards unavailable in this payload; rely on file paths below.");
   }
 
-  const displayedFiles = Array.isArray(slice.filePaths) ? slice.filePaths : [];
-  const rankedFiles = Array.isArray(slice.rankedFiles) ? slice.rankedFiles : displayedFiles;
+  const surveyCovered = _pathSet([
+    ...(Array.isArray(slice.surveyContext?.topFiles) ? slice.surveyContext.topFiles : []),
+    ..._surveyFileSummaries(slice.surveyContext).map((file) => file?.path).filter(Boolean),
+  ]);
+  const allDisplayedFiles = Array.isArray(slice.filePaths) ? slice.filePaths : [];
+  const displayedFiles = allDisplayedFiles.filter((filePath) => !surveyCovered.has(String(filePath).toLowerCase()));
+  const rankedFiles = Array.isArray(slice.rankedFiles) ? slice.rankedFiles : allDisplayedFiles;
   if (displayedFiles.length > 0) {
     const exactTargets = Array.isArray(slice.exactFiles) && slice.exactFiles.length > 0;
     lines.push(exactTargets
@@ -2906,7 +2979,7 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
       : `${isTreeSourced ? "Tree" : "Slice"}-ranked candidate files (not prefetched):`);
     lines.push(...atlasListLines(displayedFiles, (filePath) => `- ${filePath}`));
   }
-  const displayedSet = _pathSet(displayedFiles);
+  const displayedSet = _pathSet([...displayedFiles, ...surveyCovered]);
   const hiddenRankedCount = rankedFiles.filter((filePath) => !displayedSet.has(filePath.toLowerCase())).length;
   if (hiddenRankedCount > 0 && displayedFiles.length > 0) {
     lines.push(`Additional ATLAS-ranked candidates were withheld from prefetch (${hiddenRankedCount} hidden).`);
@@ -2938,10 +3011,6 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     lines.push(...atlasListLines(usefulFrontier, atlasFrontierLine));
   }
 
-  const evidenceNoun = isTreeSourced ? "tree scope" : "summaries";
-  lines.push(skeletons.length > 0
-    ? `Use the ${evidenceNoun} + skeletons above before escalating to raw file reads.`
-    : `Use the ${evidenceNoun} above before escalating to raw file reads.`);
   return lines.join("\n");
 }
 

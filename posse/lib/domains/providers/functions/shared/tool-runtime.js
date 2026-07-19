@@ -582,9 +582,10 @@ export async function executeToolWithMap(name, argsStr, context, {
         : await PROVIDER_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
       const treeCompacted = compactTreeScopeResult(name, result, { args, context });
       if (treeCompacted.compacted) return appendLiveChannelSignal(treeCompacted.result, name);
-      // Survey tail compaction (flag-gated) runs before the ambient stamp so
-      // the stamp covers the compacted inline-head payload.
+      // Surveys materialize into stable ten-file cursor pages. The compacted
+      // result already owns its snapshot ref, so do not stamp a duplicate.
       const surveyCompacted = compactCodeSurveyResult(name, result, { args, context });
+      if (surveyCompacted.compacted) return appendLiveChannelSignal(surveyCompacted.result, name);
       // Window/lens ref-paging (flag-gated) runs after survey compaction and
       // before the ambient stamp so the stamp covers the compacted inline head.
       const refPaged = compactCodeWindowLensResult(name, surveyCompacted.result, { args, context });

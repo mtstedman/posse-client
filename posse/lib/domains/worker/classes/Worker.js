@@ -511,9 +511,9 @@ export class Worker {
     });
   }
 
-  async _setJobRowStatus(jobRow, status) {
+  async _setJobRowStatus(jobRow, status, opts = undefined) {
     if (!jobRow) return;
-    await new Job({ row: jobRow, deps: this.jobDeps }).setStatus(status);
+    return await new Job({ row: jobRow, deps: this.jobDeps }).setStatus(status, opts);
   }
 
   _logFinalizerFailure(job, kind, err) {

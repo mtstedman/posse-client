@@ -138,6 +138,10 @@ export function jobIsDisplaySuccess(job, jobs = []) {
 
 export function workItemDisplayStatus(wi, jobs = []) {
   const terminal = new Set(TERMINAL_JOB_STATUSES);
+  // Merge approval is authoritative. Any review job that raced with merge
+  // finalization is stale and must not resurrect the work item in the queue;
+  // legitimate follow-up work first clears merge_state through the reopen API.
+  if (wi?.merge_state === "merged") return "complete";
   const status = wi?.status || "unknown";
   const activeJobs = jobs.filter((job) => !terminal.has(job.status));
   if (status !== "canceled" && activeJobs.length > 0) {

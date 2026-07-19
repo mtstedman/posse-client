@@ -200,6 +200,7 @@ export class RunSession {
       RUN_WORK_ITEM_IDS = [],
       requeueForShutdown,
       requeueWaitingHumanInputJobs,
+      reconcileMergedWorkItemReviewStates,
       refreshWorkItemStatus,
       inferWiMode,
       researchBudgetMetadata,
@@ -353,6 +354,7 @@ export class RunSession {
     }
     return created;
   };
+  try { reconcileMergedWorkItemReviewStates?.(); } catch { /* best-effort repair of legacy merged review rows */ }
   refreshRunVisibleWorkItems();
   const seedableRunItems = isScopedRun
     ? scopedWorkItemIds.map((id) => getWorkItem(id)).filter(Boolean)

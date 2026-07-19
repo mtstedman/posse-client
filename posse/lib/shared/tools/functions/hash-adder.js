@@ -462,24 +462,109 @@ function surfaceMinCharsFor(toolName, { ambient = null } = {}) {
     : AMBIENT_STAMPING_SURFACE_MIN_CHARS;
 }
 
-// ---- code.survey tail compaction (flag-gated, default OFF) -----------------
-// Same demand-paging move as compactTreeScopeResult: keep the highest-value
-// files' full skeleton evidence inline plus the ENTIRE call map (the survey's
-// unique cross-file value), and spill lower-ranked files' skeletons behind one
-// fetch_ref payload. Tail files remain COVERED for ladder purposes — the stub
-// keeps path + symbol names so relevance can be judged without fetching.
-const SURVEY_TAIL_INLINE_FILES = 12;
-const SURVEY_TAIL_STUB_SYMBOLS = 12;
+// ---- code.survey snapshot paging -------------------------------------------
+// A survey is materialized once as ordinary hash-map pages. Page 1 owns the
+// survey-wide call map/metrics and the first ten file records; every page owns
+// at most ten files and carries a backed fetch_ref cursor to the next page.
+// There is deliberately no second, monolithic copy of the full survey.
+const SURVEY_PAGE_FILES = 10;
 
-function surveyTailRefsEnabled() {
+function surveyFetchCursor(page) {
+  if (!page?.ref) return null;
+  return {
+    label: "next 10",
+    call: "atlas.fetch_ref",
+    args: { ref: page.ref },
+    ranks: page.ranks,
+    count: page.count,
+  };
+}
+
+export function materializeCodeSurveyPages(data, {
+  args = {},
+  context = {},
+  ownerScope = null,
+  source = "tool:code.survey",
+  objectType = "atlas.code.survey",
+  pageSize = SURVEY_PAGE_FILES,
+} = {}) {
+  const hashContext = contextForHashRefs(context);
+  const files = Array.isArray(data?.files) ? data.files : null;
+  if (!files || files.length === 0 || !hasHashRefScope(hashContext)) return null;
+  const safePageSize = Math.max(1, Math.min(50, Number(pageSize) || SURVEY_PAGE_FILES));
+  const totalFiles = files.length;
+  const { files: _files, ...surveyMetadata } = data;
+  const resolvedOwnerScope = ownerScope || (hashContext.job_id != null ? "job" : "work_item");
+  let nextPage = null;
+  let firstPage = null;
+
   try {
-    const stored = getSetting(SETTING_KEYS.ATLAS_SURVEY_TAIL_REFS);
-    if (stored == null) return false;
-    const normalized = String(stored).trim().toLowerCase();
-    return normalized === "on" || normalized === "true" || normalized === "1" || normalized === "yes";
-  } catch {
-    return false;
+    const finalStart = Math.floor((totalFiles - 1) / safePageSize) * safePageSize;
+    for (let start = finalStart; start >= 0; start -= safePageSize) {
+      const pageFiles = files.slice(start, start + safePageSize);
+      const rankStart = start + 1;
+      const rankEnd = start + pageFiles.length;
+      const cursor = surveyFetchCursor(nextPage);
+      const payloadText = JSON.stringify({
+        ok: true,
+        action: "code.survey.page",
+        pagination: {
+          pageSize: safePageSize,
+          totalFiles,
+          current: { ranks: `${rankStart}-${rankEnd}`, count: pageFiles.length },
+          ...(cursor ? { cursor } : {}),
+        },
+        ...(start === 0 ? { survey: surveyMetadata } : {}),
+        files: pageFiles,
+      }, null, 2);
+      const surfaced = surfaceHashRefForContext(hashContext, {
+        entryKind: "materialized",
+        payloadText,
+        descriptor: {
+          kind: "survey_file_page",
+          tool: "code.survey",
+          args,
+          ranks: { start: rankStart, end: rankEnd },
+          source,
+        },
+        recomputable: true,
+        objectType: start === 0 ? objectType : `${objectType}.page`,
+        source,
+        note: start === 0
+          ? `survey page 1: files ${rankStart}-${rankEnd} plus call map and metrics`
+          : `survey files ${rankStart}-${rankEnd}`,
+        sizeChars: payloadText.length,
+        metadata: {
+          surfaced_by: "survey_snapshot_pager",
+          tool: "code.survey",
+          rank_start: rankStart,
+          rank_end: rankEnd,
+          file_count: pageFiles.length,
+          total_files: totalFiles,
+        },
+      }, { ownerScope: resolvedOwnerScope });
+      if (!surfaced?.ok || !surfaced?.entry?.ref) return null;
+      const currentPage = {
+        ranks: `${rankStart}-${rankEnd}`,
+        count: pageFiles.length,
+        ref: surfaced.entry.ref,
+      };
+      if (start === 0) {
+        firstPage = {
+          ...currentPage,
+          objectType,
+          sizeChars: payloadText.length,
+          note: `survey page 1; follow the next 10 cursor instead of rerunning code.survey`,
+          cursor,
+        };
+      }
+      nextPage = currentPage;
+    }
+  } catch (err) {
+    recordHashSurfaceFailure(hashContext, "code.survey", 0, err?.message || err);
+    return null;
   }
+  return firstPage;
 }
 
 export function compactCodeSurveyResult(toolName, result, {
@@ -491,7 +576,7 @@ export function compactCodeSurveyResult(toolName, result, {
   if (String(toolName || "") !== "code.survey" || typeof result !== "string") {
     return { result, compacted: false };
   }
-  if (!(enabled ?? surveyTailRefsEnabled())) return { result, compacted: false };
+  if (enabled === false) return { result, compacted: false };
   const hashContext = contextForHashRefs(context);
   if (!hasHashRefScope(hashContext)) return { result, compacted: false };
 
@@ -508,73 +593,35 @@ export function compactCodeSurveyResult(toolName, result, {
     ? envelope.data
     : (Array.isArray(envelope?.files) ? envelope : null);
   const files = Array.isArray(data?.files) ? data.files : null;
-  if (!files || files.length <= SURVEY_TAIL_INLINE_FILES) return { result, compacted: false };
+  if (!files || files.length <= SURVEY_PAGE_FILES) return { result, compacted: false };
 
-  // Rank by call-map involvement (edges/inbound/outbound endpoint or site
-  // mentions), then symbol count, then original order. The native side emits
-  // files in request order with no relevance signal of its own.
-  const callMap = data.callMap && typeof data.callMap === "object" ? data.callMap : {};
-  const degree = new Map();
-  const paths = files.map((file) => String(file?.path || ""));
-  for (const lane of ["edges", "inbound", "outbound"]) {
-    const edges = Array.isArray(callMap[lane]) ? callMap[lane] : [];
-    for (const edge of edges) {
-      const haystack = `${edge?.site || ""} ${edge?.from || ""} ${edge?.to || ""}`;
-      for (const path of paths) {
-        if (path && haystack.includes(path)) degree.set(path, (degree.get(path) || 0) + 1);
-      }
-    }
-  }
-  const ranked = files
-    .map((file, index) => ({ file, index, path: paths[index] }))
-    .sort((a, b) => (degree.get(b.path) || 0) - (degree.get(a.path) || 0)
-      || (Number(b.file?.symbolCount) || 0) - (Number(a.file?.symbolCount) || 0)
-      || a.index - b.index);
-  const keepOrder = (entries) => entries.sort((a, b) => a.index - b.index).map((entry) => entry.file);
-  const head = keepOrder(ranked.slice(0, SURVEY_TAIL_INLINE_FILES));
-  const tail = keepOrder(ranked.slice(SURVEY_TAIL_INLINE_FILES));
+  const snapshot = materializeCodeSurveyPages(data, {
+    args,
+    context: hashContext,
+    ownerScope,
+    source: "tool:code.survey",
+  });
+  if (!snapshot?.ref || !snapshot?.cursor) return { result, compacted: false };
 
-  const tailPayload = JSON.stringify({ tool: "code.survey", tailFiles: tail }, null, 1);
-  let surfaced;
-  try {
-    surfaced = surfaceHashRefForContext(hashContext, {
-      entryKind: "materialized",
-      payloadText: tailPayload,
-      descriptor: {
-        kind: "tool_result",
-        tool: "code.survey",
-        args,
-        source: "tool:code.survey",
-      },
-      objectType: "code.survey.tail",
-      source: "tool:code.survey",
-      note: `full skeletons for ${tail.length} lower-ranked surveyed files`,
-      sizeChars: tailPayload.length,
-      recomputable: true,
-      metadata: { surfaced_by: "survey_tail", files: tail.length },
-    }, { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) });
-  } catch (err) {
-    recordHashSurfaceFailure(hashContext, toolName, tailPayload.length, err?.message || err);
-    return { result, compacted: false };
-  }
-  if (!surfaced?.ok || !surfaced?.entry?.ref) return { result, compacted: false };
-
-  data.files = head;
-  data.tailFiles = tail.map((file) => ({
-    path: String(file?.path || ""),
-    symbolCount: Number(file?.symbolCount) || (Array.isArray(file?.symbols) ? file.symbols.length : 0),
-    symbols: (Array.isArray(file?.symbols) ? file.symbols : [])
-      .slice(0, SURVEY_TAIL_STUB_SYMBOLS)
-      .map((symbol) => String(symbol?.name || ""))
-      .filter(Boolean),
-  }));
-  data.tailFilesRef = surfaced.entry.ref;
-  data.tailNote = `COVERED: full skeletons for these ${tail.length} lower-ranked files are stored at ${surfaced.entry.ref} (atlas.fetch_ref). They count as surveyed — do not re-survey them or call code.skeleton on them; fetch the ref only for a named evidence gap.`;
+  data.files = files.slice(0, SURVEY_PAGE_FILES);
+  data.filesTotal = files.length;
+  data.pagination = {
+    pageSize: SURVEY_PAGE_FILES,
+    totalFiles: files.length,
+    current: { ranks: `1-${SURVEY_PAGE_FILES}`, count: SURVEY_PAGE_FILES },
+    cursor: snapshot.cursor,
+  };
+  data.surveyRef = {
+    ref: snapshot.ref,
+    objectType: snapshot.objectType,
+    sizeChars: snapshot.sizeChars,
+  };
+  data.surveyNote = `Survey snapshot is already stored in ${SURVEY_PAGE_FILES}-file hash pages. Follow pagination.cursor for the next 10; do not rerun code.survey for this scope.`;
   return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
 
 // ---- code.window / code.lens result ref-paging (flag-gated, default ON) -----
-// L3b (TOKEN-LEVERS). Same demand-paging move as the survey tail: only fires
+// L3b (TOKEN-LEVERS). Same demand-paging move as survey cursor pages: only fires
 // when the full result exceeds the min-chars threshold. code.lens carries a
 // matches[] array — page the lower-ranked tail. code.window is a monolithic
 // content string — keep the head lines inline (up to the char budget) and page

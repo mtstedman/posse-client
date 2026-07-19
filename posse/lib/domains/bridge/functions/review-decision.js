@@ -65,7 +65,10 @@ export function approveReview(workItemId, { actor = "bridge" } = {}) {
   const reviewable = requireReviewableWorkItem(wi);
   if (!reviewable.ok) return reviewable;
 
-  const completionOk = updateWorkItemStatus(wi.id, "complete", { allowTerminalFailureBlockers: true });
+  const completionOk = updateWorkItemStatus(wi.id, "complete", {
+    allowTerminalFailureBlockers: true,
+    resolvePendingReviews: true,
+  });
   if (completionOk === false) return { ok: false, reason: "completion_blocked" };
 
   const fresh = getWorkItem(wi.id) || wi;
@@ -103,6 +106,7 @@ export function rejectReview(workItemId, { actor = "bridge", reason = null, allo
 
   const updated = requeueWorkItemAfterRejection(wi.id, {
     description: rejectionDescription(wi, reason),
+    feedback: reason,
   });
   if (!updated) return { ok: false, reason: "requeue_failed" };
 

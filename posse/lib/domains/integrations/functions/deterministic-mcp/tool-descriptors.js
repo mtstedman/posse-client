@@ -395,7 +395,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "workflow": { access: "atlas", summary: "Execute multi-step native ATLAS workflows with data transforms and references." },
   "info": { access: "atlas", summary: "Report native ATLAS v2 runtime, storage, view freshness, ledger, and policy diagnostics." },
   "fetch_ref": { access: "atlas", summary: "Fetch one or more opaque refs from the current agent scope. Returned structured data may contain an immediate next-page ref; follow it only when deeper results are needed and never route it through the producer tool." },
-  "create_ref": { access: "atlas", summary: "Store an evidence chunk (inline text or a server-side slice of an existing ref) and get back a citable #ref stub for handoffs. Batchable via chunks[]; optional note travels with the stub. Synthesis stays prose; evidence moves as refs." },
+  "create_ref": { access: "atlas", summary: "Store an evidence chunk (inline text or a server-side slice of an existing ref) and get back a #ref stub. Batchable via chunks[]; the optional note is retained with the stored ref." },
   "repo.register": { access: "atlas", summary: "Register a repository with ATLAS v2 and initialize ledger/view storage." },
   "repo.status": { access: "atlas", summary: "Get ATLAS repository status, health, and latest version identifiers." },
   "repo.overview": { access: "atlas", summary: "Fetch ATLAS repository summaries, indexed coverage, directory summaries, and hotspots." },
@@ -408,16 +408,16 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "symbol.card": { access: "atlas", summary: "Fetch compact symbol cards without loading whole files: one card by symbolId/symbolRef, or a batch with per-item errors via symbolIds/symbolRefs." },
   "symbol.overview": { access: "atlas", summary: "List compact call/reference sites for a symbol without full caller cards." },
   "tree.overview": { access: "atlas", summary: "Top-level code-tree orientation: root containment page plus the compressed-tree labeled area map." },
-  "tree.branch": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels. Structure only — for exact file/import/fan-in inventory, follow with code.structure; for content intake, follow with code.survey." },
+  "tree.branch": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels. Its optional limit defaults from indexed repository size (100-250 nodes). Structure only — for exact file/import/fan-in inventory, follow with code.structure; for content intake, follow with code.survey." },
   "tree.scope": { access: "atlas", summary: "Returns the ten highest-ranked candidate files inline. When more exist, nextCandidateFiles is an opaque fetch_ref value for the next ranked page; fetch pages sequentially only when needed." },
   "tree.expand": { access: "atlas", summary: "Grow scope from validated seed files/areas: surrounding branches, siblings, tests, entrypoints, risk metrics." },
   "slice.build": { access: "atlas", summary: "Build a task-scoped ATLAS slice for bounded dependency context." },
   "slice.refresh": { access: "atlas", summary: "Refresh an ATLAS slice incrementally instead of rebuilding from scratch." },
   "edit.plan": { access: "atlas", summary: "Preview symbol/file-scoped edit candidates with preconditions before using write tools." },
-  "code.skeleton": { access: "atlas", summary: "Structural outline for one uncovered file or symbol. Do not call for a file already covered by a successful code.survey unless required structure was omitted." },
-  "code.lens": { access: "atlas", summary: "Identifier-focused excerpts for one named unresolved usage or branch. Do not use as a generic follow-up to code.survey or code.skeleton." },
-  "code.window": { access: "atlas", summary: "Raw code for an exact unresolved guard, ordering rule, or surrounding-text requirement. Identify what prior evidence could not establish." },
-  "code.survey": { access: "atlas", summary: "Best first content call for a multi-file area. Returns per-file skeleton evidence plus a call map and satisfies card-and-skeleton evidence for every covered file; use per-file tools only for named gaps." },
+  "code.skeleton": { access: "atlas", summary: "Structural outline for one file or symbol, including signatures and containment without full bodies." },
+  "code.lens": { access: "atlas", summary: "Identifier-focused excerpts for named usages or branches within selected files." },
+  "code.window": { access: "atlas", summary: "Raw code windows for exact guards, ordering, surrounding text, identifiers, or line ranges within selected files." },
+  "code.survey": { access: "atlas", summary: "Multi-file content map with per-file symbols and structural summaries plus a call map. Surveys over ten files return the first ten plus a backed pagination.cursor to pre-stored ten-file hash pages; follow the cursor instead of surveying the same scope again." },
   "code.structure": { access: "atlas", summary: "Exact indexed inventory for files, symbols, imports, and fan-in/fan-out. Use instead of content tools when bodies are not needed." },
   "code.db": { access: "atlas", summary: "Internal WI/setup DB query inventory. Not routed through agent gateways." },
   "context": { access: "atlas", summary: "Request generated ATLAS context (taskType + contextMode) for precise/broad retrieval." },
@@ -970,7 +970,6 @@ function renderActiveAtlasFallbackLines(opts = {}) {
     return [
       `${label} is the inspection path; native reads are the exception for a named evidence gap, never the reward for making enough ${label} calls.`,
       `For indexable source files (${extensions}), discovery is file-scoped: before reading a given source file natively, attempt task-relevant ${label} discovery against that same file or a symbol, tree, or code result that returns that file — often that answers the question and no native read is needed.`,
-      `For a named residual file gap, use ${renderAtlasToolNameForContract("code.skeleton", opts)} only for an uncovered structural outline, ${renderAtlasToolNameForContract("code.lens", opts)} for one unresolved identifier or branch, and ${renderAtlasToolNameForContract("code.window", opts)} only for exact raw guards, ordering, or surrounding text.`,
       `Each indexable source file needs its own focused ${label} attempt before a native read of it.`,
       `Never make ${label} calls merely to make native tools available; aim every retrieval at your actual evidence gap and stop when the evidence is sufficient.`,
       `For broad audits, sweeps, enumerations, or unfamiliar areas: pick the area with ${renderAtlasToolNameForContract("tree.branch", opts)} or ${renderAtlasToolNameForContract("tree.expand", opts)} (structure only — no code content). If the deliverable is exact file/import/fan-in inventory, use ONE ${renderAtlasToolNameForContract("code.structure", opts)} call; if content understanding is needed, use ONE ${renderAtlasToolNameForContract("code.survey", opts)} call over that directory or file list. These area calls can surface pathAmbiguity or negativeEvidence when duplicate/stub decoys are detected.`,
@@ -1043,7 +1042,7 @@ function renderRouteUsageLines(role, tools, opts = {}) {
   const providerLine = renderProviderNamingLine(opts);
   if (providerLine) lines.push(providerLine);
   lines.push(...renderPrefetchGuidance(opts));
-  lines.push(`${label} should build code-content understanding, not just file discovery: use results to explain what the code does, how data flows, and which exact files need verification; before another retrieval call, name the unresolved material claim and choose the cheapest tool that can answer it.`);
+  lines.push(`${label} provides indexed code context for explaining behavior, data flow, and relevant files. Use returned evidence directly when it answers the task, and do not repeat an already successful lookup.`);
   if (tools.some((tool) => ["query", "code", "repo", "agent", "workflow"].includes(tool))) {
     lines.push(`${label} gateway/workflow tools may take nested action names; nested actions must also appear in this role route. Do not use a wrapper to bypass routing.`);
   }
@@ -1055,41 +1054,9 @@ function renderRouteUsageLines(role, tools, opts = {}) {
   pushAvailableToolLine(discovery, tools, "tree.branch", "best first call when you know a path, symbol, or branch and need the structure around it (paths, counts, areas — no code content).", opts);
   pushAvailableToolLine(discovery, tools, "tree.expand", "best first call when you have seed files, symbols, or areas and need nearby structure, siblings, tests, or entrypoints.", opts);
   pushAvailableToolLine(discovery, tools, "code.structure", "exact indexed inventory for files, symbols, imports, and fan-in/fan-out; use instead of content tools when bodies are not needed.", opts);
-  pushAvailableToolLine(discovery, tools, "code.survey", "best first content call for a multi-file area: one call returns per-file skeleton evidence plus a call map and satisfies card-and-skeleton evidence for every covered file.", opts);
   if (discovery.length) {
     lines.push("", "Discovery starters:");
     lines.push(...discovery);
-  }
-
-  // These tools are alternatives selected by the remaining evidence gap.
-  // Define the shared anti-repetition policy once, then list only the
-  // selection rules for tools actually issued to this role.
-  const LADDER_TOOLS = ["symbol.card", "code.skeleton", "code.lens", "code.window"];
-  const hasLadder = LADDER_TOOLS.some((tool) => tools.includes(tool));
-  if (hasLadder) {
-    const surveyName = renderAtlasToolNameForContract("code.survey", opts);
-    const cardName = renderAtlasToolNameForContract("symbol.card", opts);
-    const skeletonName = renderAtlasToolNameForContract("code.skeleton", opts);
-    const lensName = renderAtlasToolNameForContract("code.lens", opts);
-    lines.push(
-      "",
-      `Iris evidence tools are alternatives selected by the remaining evidence gap, not mandatory sequential steps. ${surveyName} already satisfies card-and-skeleton evidence for every file it covers. Do not call ${cardName}, ${skeletonName}, or ${lensName} merely to repeat survey output. Before another retrieval call, name the unresolved material claim and choose the cheapest tool that can answer it. If no specific claim remains, stop retrieving and synthesize.`,
-    );
-    lines.push("Evidence-gap selection rules:");
-    if (tools.includes("code.skeleton")) {
-      lines.push(`- Use ${skeletonName} only for an uncovered single file that needs a structural outline.`);
-    }
-    if (tools.includes("code.lens")) {
-      lines.push(`- Use ${lensName} only when a named identifier, usage, or branch remains unresolved and a focused excerpt can answer it.`);
-    }
-    if (tools.includes("code.window")) {
-      lines.push(`- Use ${renderAtlasToolNameForContract("code.window", opts)} only when exact guards, ordering, surrounding text, or raw implementation details are required; the request reason must identify what prior evidence could not establish.`);
-    }
-    lines.push("- Do not call a narrower tool merely to confirm facts already present in a successful area call.");
-    lines.push("- Stop when every material claim has sufficient evidence. Do not retrieve only to increase ATLAS call count or unlock native tools.");
-    if (role === "planner" && !tools.includes("code.window")) {
-      lines.push("Planner routes do not include code.window. If exact raw details are still required, name the unresolved claim and the exact missing symbols or files for downstream verification.");
-    }
   }
 
   if (tools.includes("review.risk")) {

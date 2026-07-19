@@ -4,6 +4,7 @@
 // Uses better-sqlite3 (synchronous) for simplicity and atomicity.
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { MUTATING_JOB_TYPES } from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
 import { parseJobPayload } from "./payload.js";
@@ -325,7 +326,10 @@ export function listWorkItems(statusFilter = null) {
   return db.prepare(`SELECT * FROM work_items ORDER BY created_at`).all();
 }
 
-export function updateWorkItemStatus(id, status, { allowTerminalFailureBlockers = false } = {}) {
+export function updateWorkItemStatus(id, status, {
+  allowTerminalFailureBlockers = false,
+  resolvePendingReviews = false,
+} = {}) {
   const db = getDb();
   const execute = () => {
     const ts = now();
@@ -351,9 +355,19 @@ export function updateWorkItemStatus(id, status, { allowTerminalFailureBlockers 
 
     if (status === "complete") {
       const blockers = completionBlockersForWorkItem(id);
-      const effectiveBlockers = allowTerminalFailureBlockers
+      const reviewPlan = resolvePendingReviews
+        ? pendingWorkItemReviewSettlement(id)
+        : null;
+      const resolvableReviewJobIds = new Set([
+        ...(reviewPlan?.originals || []).map((job) => job.id),
+        ...(reviewPlan?.gates || []).map((job) => job.id),
+      ]);
+      let effectiveBlockers = allowTerminalFailureBlockers
         ? blockers.filter((job) => !FAILED_JOB_STATUS_SET.has(job.status))
         : blockers;
+      if (resolvePendingReviews) {
+        effectiveBlockers = effectiveBlockers.filter((job) => !resolvableReviewJobIds.has(job.id));
+      }
       if (effectiveBlockers.length > 0) {
         logEvent({
           work_item_id: id,
@@ -374,7 +388,12 @@ export function updateWorkItemStatus(id, status, { allowTerminalFailureBlockers 
         });
         return false;
       }
+      if (reviewPlan) {
+        settleWorkItemReviewPlan(id, reviewPlan, { resolution: "work_item_approved" });
+      }
     }
+
+    if (status === "canceled") cancelInactiveWorkItemJobs(id);
 
     // - started_at: set once on first start, never overwritten (COALESCE(existing, new))
     // - completed_at: set on terminal states, CLEARED on non-terminal states
@@ -427,39 +446,245 @@ export function setWorkItemBranch(id, branchName, mergeBaseHash) {
   `).run(branchName, mergeBaseHash, now(), id);
 }
 
-export function setMergeState(id, mergeState) {
-  const db = getDb();
-  db.prepare(`
-    UPDATE work_items SET merge_state = ?, updated_at = ? WHERE id = ?
-  `).run(mergeState, now(), id);
-  releaseWorkItemLocksForMergeState(id, mergeState);
-  if (mergeState === "merged") {
-    clearCrossWiMergeDependenciesForWorkItem(id, "work_item_merged");
-  }
+function reviewGateOriginalJobId(job) {
+  if (job?.job_type !== "human_input" || isPushOfferJob(job)) return null;
+  const payload = parseJobPayload(job);
+  if (!String(payload.review_type || "").trim()) return null;
+  const originalJobId = Number(payload.original_job_id);
+  return Number.isInteger(originalJobId) && originalJobId > 0 ? originalJobId : null;
 }
 
-export function requeueWorkItemAfterRejection(id, { description = null } = {}) {
+function reviewGateNeedsRetirement(job) {
+  return !["succeeded", "canceled"].includes(job?.status);
+}
+
+function pendingWorkItemReviewSettlement(id) {
+  const jobs = listJobsByWorkItem(id);
+  const originals = jobs.filter((job) => (
+    job.job_type !== "human_input" && job.status === "waiting_on_review"
+  ));
+  const originalIds = new Set(originals.map((job) => Number(job.id)));
+  const gates = jobs.filter((job) => (
+    reviewGateNeedsRetirement(job)
+    && originalIds.has(reviewGateOriginalJobId(job))
+  ));
+  return { originals, gates };
+}
+
+function settleWorkItemReviewPlan(id, plan, { resolution }) {
+  let resolved = 0;
+  let canceled = 0;
+  for (const job of plan.gates || []) {
+    if (reviewGateNeedsRetirement(job)) {
+      if (forceUpdateJobStatus(job.id, "canceled", {
+        expectedStatuses: [job.status],
+      })) {
+        canceled += 1;
+      }
+    }
+  }
+
+  for (const job of plan.originals || []) {
+    if (!forceUpdateJobStatus(job.id, "succeeded", {
+      expectedStatuses: ["waiting_on_review"],
+    })) {
+      continue;
+    }
+    if (job.assessor_verdict !== "pass") {
+      setAssessorVerdict(job.id, "pass", "high", { force: true });
+    }
+    logEvent({
+      work_item_id: id,
+      job_id: job.id,
+      event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: resolution === "work_item_merged"
+        ? "Pending job review resolved by approved work-item merge"
+        : "Pending job review resolved by explicit work-item approval",
+      event_json: JSON.stringify({ resolution }),
+    });
+    resolved += 1;
+  }
+  return { resolved, canceled };
+}
+
+function settleMergedWorkItemReviewJobs(id) {
+  const jobs = listJobsByWorkItem(id);
+  const plan = {
+    originals: jobs.filter((job) => (
+      job.job_type !== "human_input" && job.status === "waiting_on_review"
+    )),
+    // Once the work item is actually merged, every remaining review gate is
+    // stale even if its original row was already made terminal elsewhere.
+    gates: jobs.filter((job) => (
+      reviewGateNeedsRetirement(job) && reviewGateOriginalJobId(job) != null
+    )),
+  };
+  const result = settleWorkItemReviewPlan(id, plan, { resolution: "work_item_merged" });
+  const settledIds = new Set([
+    ...plan.originals.map((job) => Number(job.id)),
+    ...plan.gates.map((job) => Number(job.id)),
+  ]);
+  for (const job of jobs) {
+    if (settledIds.has(Number(job.id))) continue;
+    if (TERMINAL_JOB_STATUS_SET.has(job.status)) continue;
+    if (NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type) || isPushOfferJob(job)) continue;
+    if (forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: [job.status] })) {
+      result.canceled += 1;
+    }
+  }
+  return result;
+}
+
+export function cancelPendingReviewGatesForOriginal(originalJobId, { exceptJobId = null } = {}) {
+  return runInTransaction(() => {
+    const original = getJob(originalJobId);
+    if (!original) return 0;
+    let canceled = 0;
+    for (const job of listJobsByWorkItem(original.work_item_id)) {
+      if (Number(job.id) === Number(exceptJobId)) continue;
+      if (reviewGateOriginalJobId(job) !== Number(originalJobId)) continue;
+      if (!reviewGateNeedsRetirement(job)) continue;
+      if (forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: [job.status] })) canceled += 1;
+    }
+    return canceled;
+  });
+}
+
+/** Repair review rows left behind by older/racing merge finalization. */
+export function reconcileMergedWorkItemReviewStates() {
+  return runInTransaction(() => {
+    const merged = listWorkItems().filter((wi) => wi.merge_state === "merged");
+    let workItems = 0;
+    let resolved = 0;
+    let canceled = 0;
+    for (const wi of merged) {
+      const result = settleMergedWorkItemReviewJobs(wi.id);
+      if (result.resolved > 0 || result.canceled > 0) workItems += 1;
+      resolved += result.resolved;
+      canceled += result.canceled;
+    }
+    return { workItems, resolved, canceled };
+  });
+}
+
+export function setMergeState(id, mergeState) {
   const db = getDb();
-  const current = getWorkItem(id);
-  if (!current) return false;
+  const execute = () => {
+    db.prepare(`
+      UPDATE work_items SET merge_state = ?, updated_at = ? WHERE id = ?
+    `).run(mergeState, now(), id);
+    if (mergeState === "merged") {
+      // A successful human/system merge is the terminal approval decision for
+      // this work item. A review raised in the narrow completion-to-merge
+      // window must not leave its original job parked or its human gate open.
+      settleMergedWorkItemReviewJobs(id);
+      clearCrossWiMergeDependenciesForWorkItem(id, "work_item_merged");
+    }
+    releaseWorkItemLocksForMergeState(id, mergeState);
+  };
+  if (db.inTransaction) execute();
+  else runImmediateTransaction(db, execute);
+}
 
-  const ts = now();
-  const nextDescription = description == null ? current.description : description;
-  const result = db.prepare(`
-    UPDATE work_items
-    SET status = 'queued',
-        description = ?,
-        merge_state = NULL,
-        completed_at = NULL,
-        updated_at = ?
-    WHERE id = ?
-  `).run(nextDescription, ts, id);
-  if (result.changes === 0) return false;
+export function requeueWorkItemAfterRejection(id, { description = null, feedback = null } = {}) {
+  return runInTransaction(() => {
+    const db = getDb();
+    const current = getWorkItem(id);
+    if (!current) return false;
 
-  releaseWorkItemFileLocks(id, "work_item_rejected");
-  clearCrossWiMergeDependenciesForWorkItem(id, "work_item_requeued");
-  invalidateSessionLanesForWorkItemInternal(id, "work_item_requeued");
-  return true;
+    const jobs = listJobsByWorkItem(id);
+    const activeRequiredJob = jobs.find((job) => (
+      ACTIVE_LEASE_STATUS_SET.has(job.status) && job.job_type !== "atlas_warm"
+    ));
+    if (activeRequiredJob) return false;
+
+    const ts = now();
+    const nextDescription = description == null ? current.description : description;
+    const guidance = String(feedback || "The previous implementation was rejected during human review. Reinspect the requested behavior and correct the implementation before resubmitting.")
+      .trim()
+      .slice(0, 2000);
+    const mutatingJobs = jobs.filter((job) => MUTATING_JOB_TYPES.has(job.job_type));
+    const mutatingParentIds = new Set(
+      mutatingJobs.map((job) => Number(job.parent_job_id)).filter((jobId) => jobId > 0),
+    );
+    let retryJobs = mutatingJobs.filter((job) => !mutatingParentIds.has(Number(job.id)));
+    if (retryJobs.length === 0) {
+      const fallback = [...jobs].reverse().find((job) => (
+        job.job_type !== "human_input" && job.job_type !== "atlas_warm"
+      ));
+      retryJobs = fallback ? [fallback] : [];
+    }
+    if (retryJobs.length === 0) {
+      retryJobs = [createJob({
+        work_item_id: id,
+        job_type: "plan",
+        title: `Replan after review rejection: ${(current.title || `WI#${id}`).slice(0, 80)}`,
+        priority: current.priority || "normal",
+        model_tier: "standard",
+        reasoning_effort: "medium",
+        payload_json: JSON.stringify({
+          task_spec: nextDescription || current.title || `Replan WI#${id}`,
+          replan_after_review_rejection: true,
+        }),
+      })];
+    }
+
+    for (const job of jobs) {
+      if (job.job_type === "atlas_warm" || TERMINAL_JOB_STATUS_SET.has(job.status)) continue;
+      forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: [job.status] });
+    }
+    for (const job of jobs) {
+      if (reviewGateOriginalJobId(job) == null || !reviewGateNeedsRetirement(job)) continue;
+      forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: [job.status] });
+    }
+
+    for (const job of retryJobs) {
+      const fresh = getJob(job.id) || job;
+      const payload = parseJobPayload(fresh);
+      const instructionKey = fresh.job_type === "fix" && String(payload.fix_instructions || "").trim()
+        ? "fix_instructions"
+        : "task_spec";
+      const priorInstructions = String(payload[instructionKey] || payload.task_spec || fresh.title || "").trim();
+      payload[instructionKey] = [
+        priorInstructions,
+        `HUMAN REVIEW REJECTION:\n${guidance}`,
+      ].filter(Boolean).join("\n\n");
+      payload._review_retry = {
+        rejected_at: ts,
+        feedback: guidance,
+      };
+      updateJobPayload(fresh.id, JSON.stringify(payload));
+      if (!forceUpdateJobStatus(fresh.id, "queued", { expectedStatuses: [fresh.status] })) continue;
+      db.prepare(`
+        UPDATE jobs
+        SET assessor_verdict = 'not_assessed',
+            assessor_confidence = NULL,
+            result_json = NULL,
+            last_error = NULL,
+            ready_at = ?,
+            max_attempts = MAX(COALESCE(max_attempts, 0), attempt_count + 1, 1),
+            updated_at = ?
+        WHERE id = ?
+      `).run(ts, ts, fresh.id);
+    }
+
+    const result = db.prepare(`
+      UPDATE work_items
+      SET status = 'queued',
+          description = ?,
+          merge_state = NULL,
+          completed_at = NULL,
+          updated_at = ?
+      WHERE id = ?
+    `).run(nextDescription, ts, id);
+    if (result.changes === 0) return false;
+
+    releaseWorkItemFileLocks(id, "work_item_rejected");
+    clearCrossWiMergeDependenciesForWorkItem(id, "work_item_requeued");
+    invalidateSessionLanesForWorkItemInternal(id, "work_item_requeued");
+    return true;
+  });
 }
 
 export function reopenWorkItemForFollowUp(id, { status = "planning", reason = "follow_up" } = {}) {
@@ -1008,6 +1233,22 @@ export function cancelWorkItemJobs(workItemId) {
 
     return canceled;
   });
+}
+
+// A status-only cancellation has no process handle with which to stop a live
+// worker. Retire every runnable/parked child immediately, but leave active
+// leases visible until their owner exits so worktree cleanup cannot race a
+// process that may still be writing. RunDisplayActions kills workers first and
+// then uses cancelWorkItemJobs() for the stronger interactive cancellation.
+function cancelInactiveWorkItemJobs(workItemId) {
+  const canceled = [];
+  for (const job of listJobsByWorkItem(workItemId)) {
+    if (TERMINAL_JOB_STATUS_SET.has(job.status) || ACTIVE_LEASE_STATUS_SET.has(job.status)) continue;
+    if (forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: [job.status] })) {
+      canceled.push(job.id);
+    }
+  }
+  return canceled;
 }
 
 /**

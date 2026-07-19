@@ -397,16 +397,20 @@ function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
   const requested = requestedToolPolicyName(toolName, toolArgs);
   const args = toolArgs && typeof toolArgs === "object" ? toolArgs : {};
   const context = hashRefToolContext(session);
-  // Flag-gated survey tail compaction runs before the ambient stamp so the
-  // stamp covers the compacted (inline-head) payload.
+  // Surveys materialize into stable ten-file cursor pages. A compacted survey
+  // already contains its page-1 hash, so do not stamp a duplicate payload.
   const compacted = compactCodeSurveyResult(requested.name || toolName, first.text, { args, context });
-  const refPaged = compactCodeWindowLensResult(requested.name || toolName, compacted.result, { args, context });
-  const stamped = appendHashRefIfMajor(requested.name || toolName, refPaged.result, {
-    args,
-    context,
-    source: `atlas:${requested.name || toolName}`,
-    objectType: requested.name ? `atlas.${requested.name}` : "atlas.tool_result",
-  });
+  const refPaged = compacted.compacted
+    ? compacted
+    : compactCodeWindowLensResult(requested.name || toolName, compacted.result, { args, context });
+  const stamped = compacted.compacted
+    ? compacted.result
+    : appendHashRefIfMajor(requested.name || toolName, refPaged.result, {
+        args,
+        context,
+        source: `atlas:${requested.name || toolName}`,
+        objectType: requested.name ? `atlas.${requested.name}` : "atlas.tool_result",
+      });
   if (stamped === first.text) return result;
   return {
     ...result,

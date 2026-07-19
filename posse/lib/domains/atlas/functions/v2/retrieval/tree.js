@@ -13,6 +13,21 @@ import { isCanonicalRepoPath, normalizeRepoPath } from "../paths.js";
 const TREE_RUN_KIND = "tree-derived";
 const TREE_TABLES = Object.freeze(["atlas_tree_nodes", "atlas_tree_refs", "derived_state_runs"]);
 
+export function defaultTreeBranchLimitForFileCount(fileCount) {
+  const files = Math.max(0, Number(fileCount) || 0);
+  if (files <= 1_000) return 100;
+  if (files <= 5_000) return 150;
+  if (files <= 15_000) return 200;
+  return 250;
+}
+
+function indexedTreeFileCount(tree) {
+  const nodes = Array.isArray(tree?.nodes) ? tree.nodes : [];
+  const direct = nodes.filter((node) => node?.kind === "file").length;
+  const aggregate = nodes.reduce((max, node) => Math.max(max, Number(node?.descendantFileCount) || 0), 0);
+  return Math.max(direct, aggregate);
+}
+
 function treeFocusRequested(params = {}) {
   return !!(params.path || params.nodeId || params.symbolId || params.refId || params.refType);
 }
@@ -80,15 +95,21 @@ async function runTreeTraversal({ view, versionId, params = {}, action, method }
       },
     });
   }
+  const tree = readTreeBuildResult(db, { for: "traversal" });
+  const indexedFileCount = indexedTreeFileCount(tree);
+  const explicitLimit = Number.isInteger(params.limit) ? params.limit : null;
+  const effectiveLimit = explicitLimit ?? (action === "tree.branch"
+    ? defaultTreeBranchLimitForFileCount(indexedFileCount)
+    : undefined);
   const result = /** @type {Record<string, unknown>} */ (await runAtlasNativeMethodAsync(method, {
-    tree: readTreeBuildResult(db, { for: "traversal" }),
+    tree,
     path: params.path,
     nodeId: params.nodeId,
     symbolId: params.symbolId,
     refType: params.refType,
     refId: params.refId,
     maxDepth: params.maxDepth,
-    limit: params.limit,
+    limit: effectiveLimit,
     offset: params.offset,
     includeAggregates: params.includeAggregates,
     includeTerms: params.includeTerms === true,
@@ -96,6 +117,10 @@ async function runTreeTraversal({ view, versionId, params = {}, action, method }
     latestRun: params.includeLatestRun === false ? null : readLatestRun(db),
     compressionSnapshot: readOptionalCompressionSnapshot(db),
   }));
+  if (action === "tree.branch") {
+    result.limitSource = explicitLimit == null ? "repo_size_default" : "explicit";
+    result.indexedFileCount = indexedFileCount;
+  }
   renamePublicActionsInWarnings(result);
   return okEnvelope({ action, versionId, data: result });
 }
