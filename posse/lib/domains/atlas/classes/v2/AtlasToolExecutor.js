@@ -794,10 +794,19 @@ export class AtlasToolExecutor {
         const nativeArgs = request.action === "tree.scope"
           ? treeScopeDiscoveryArgs(request.args || {}, readPayload.readRoot)
           : nativeSymbolSearchArgs(request.action, request.args || {});
+        // code.survey's agent-visible map is deliberately compact, but its
+        // hash ref must be able to search every symbol collected by that same
+        // survey. This private runtime flag asks the native complete-tool path
+        // for a lean full-symbol snapshot; the hash pager consumes it before
+        // the result reaches the model. It is intentionally absent from the
+        // advertised tool schema.
+        const completeToolArgs = request.action === "code.survey"
+          ? { ...nativeArgs, _backedSnapshot: true }
+          : nativeArgs;
         const envelope = await this.#nativeToolCall({
           contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
           action: request.action,
-          args: cloneJson(nativeArgs) || {},
+          args: cloneJson(completeToolArgs) || {},
           viewPath: readPayload.viewPath,
           ledgerPath: readPayload.ledgerPath,
           repoRoot: readPayload.readRoot

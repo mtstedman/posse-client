@@ -733,7 +733,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Multi-file content map with per-file symbols and structural summaries plus a call map. Surveys over ten files return the first ten and pagination.cursor for the already-stored next ten. Traverse it with atlas.fetch_ref using pagination.cursor.args, then follow each returned next cursor until no cursor remains. Search stored pages for the task's exact named concepts before choosing among parallel versions or implementations; rank is candidate order, not a version decision. This opens stored pages and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope.",
+    description: "Multi-file content map with ranked per-file symbol previews and a call map. Its surveyRef stores the full surveyed symbol inventory; surveys over ten files also return pagination.cursor for the already-stored next ten. Search/fetch the stored pages with atlas.fetch_ref, then follow each returned next cursor until none remains. Search stored pages for the task's exact named concepts before choosing among parallel versions or implementations; rank is candidate order, not a version decision. This traverses the completed survey and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope.",
     parameters: {
       type: "object",
       properties: {

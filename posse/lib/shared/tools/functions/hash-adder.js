@@ -517,11 +517,17 @@ export function materializeCodeSurveyPages(data, {
   pageSize = SURVEY_PAGE_FILES,
 } = {}) {
   const hashContext = contextForHashRefs(context);
-  const files = Array.isArray(data?.files) ? data.files : null;
+  // Native complete-tool surveys carry a private lean snapshot containing
+  // every symbol from the surveyed files. The public `files` list remains the
+  // ranked compact map. Store the complete snapshot, never the already-capped
+  // preview, and omit the private carrier from page metadata.
+  const files = Array.isArray(data?._snapshotFiles)
+    ? data._snapshotFiles
+    : (Array.isArray(data?.files) ? data.files : null);
   if (!files || files.length === 0 || !hasHashRefScope(hashContext)) return null;
   const safePageSize = Math.max(1, Math.min(50, Number(pageSize) || SURVEY_PAGE_FILES));
   const totalFiles = files.length;
-  const { files: _files, ...surveyMetadata } = data;
+  const { files: _files, _snapshotFiles: _snapshotFiles, ...surveyMetadata } = data;
   const resolvedOwnerScope = ownerScope || (hashContext.job_id != null ? "job" : "work_item");
   let nextPage = null;
   let firstPage = null;
@@ -622,7 +628,10 @@ export function compactCodeSurveyResult(toolName, result, {
     ? envelope.data
     : (Array.isArray(envelope?.files) ? envelope : null);
   const files = Array.isArray(data?.files) ? data.files : null;
-  if (!files || files.length <= SURVEY_PAGE_FILES) return { result, compacted: false };
+  const snapshotFiles = Array.isArray(data?._snapshotFiles) ? data._snapshotFiles : null;
+  if (!files || (!snapshotFiles && files.length <= SURVEY_PAGE_FILES)) {
+    return { result, compacted: false };
+  }
 
   const snapshot = materializeCodeSurveyPages(data, {
     args,
@@ -630,22 +639,33 @@ export function compactCodeSurveyResult(toolName, result, {
     ownerScope,
     source: "tool:code.survey",
   });
-  if (!snapshot?.ref || !snapshot?.cursor) return { result, compacted: false };
+  // `_snapshotFiles` is an internal transport only. Even if materialization
+  // fails, never expose the potentially large private carrier to the model.
+  delete data._snapshotFiles;
+  if (!snapshot?.ref) {
+    return { result: JSON.stringify(envelope, null, 2), compacted: false };
+  }
 
   data.files = files.slice(0, SURVEY_PAGE_FILES);
-  data.filesTotal = files.length;
-  data.pagination = {
-    pageSize: SURVEY_PAGE_FILES,
-    totalFiles: files.length,
-    current: { ranks: `1-${SURVEY_PAGE_FILES}`, count: SURVEY_PAGE_FILES },
-    cursor: snapshot.cursor,
-  };
+  const totalFiles = snapshotFiles?.length || files.length;
+  data.filesTotal = totalFiles;
+  if (snapshot.cursor) {
+    const firstCount = Math.min(SURVEY_PAGE_FILES, totalFiles);
+    data.pagination = {
+      pageSize: SURVEY_PAGE_FILES,
+      totalFiles,
+      current: { ranks: `1-${firstCount}`, count: firstCount },
+      cursor: snapshot.cursor,
+    };
+  }
   data.surveyRef = {
     ref: snapshot.ref,
     objectType: snapshot.objectType,
     sizeChars: snapshot.sizeChars,
   };
-  data.surveyNote = `This survey has already run. atlas.fetch_ref traverses a stored ${SURVEY_PAGE_FILES}-file survey page; it is not a fresh retrieval and does not rerun code.survey. Follow pagination.cursor while missing material is likely in this result; call code.survey again only for a materially different path or symbol scope.`;
+  data.surveyNote = snapshot.cursor
+    ? `This survey has already run. atlas.fetch_ref traverses a stored ${SURVEY_PAGE_FILES}-file survey page containing the full surveyed symbol inventory; it is not a fresh retrieval and does not rerun code.survey. Follow pagination.cursor while missing material is likely in this result; call code.survey again only for a materially different path or symbol scope.`
+    : "This survey has already run. atlas.fetch_ref opens its stored full-symbol snapshot; it is not a fresh retrieval and does not rerun code.survey. Call code.survey again only for a materially different path or symbol scope.";
   return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
 
