@@ -28,11 +28,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: posse/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        # The public package intentionally does not publish a package-lock.json.
+        run: npm install --no-audit --no-fund
 
       - name: Lint
         run: npm run lint
@@ -44,10 +43,9 @@ jobs:
         continue-on-error: true
         run: npm run typecheck
 
-      - name: Run focused tests
+      # The clean-client publication strips the private test harness. Validate
+      # the shipped runtime and package surface instead of naming removed files.
+      - name: Validate public client
         run: |
-          node --test test/test-posse-remote-composer.test.js
-          node --test test/test-posse-remote-parity.test.js
-          node --test --test-concurrency=1 test/test-atlas-native-jina-encoder.test.js test/test-embedding-resource-pool.test.js test/test-atlas-v2-reader-lane.test.js test/test-atlas-v2-readiness.test.js
-          node --test test/core/suites/provider-aliases.test.js
-          npm run test:scheduler:fast
+          node --check orchestrator.js
+          npm pack --dry-run --ignore-scripts
