@@ -7,6 +7,7 @@ import {
   getTextModelOptions,
 } from "../../providers/functions/model-catalog.js";
 import { providerRegistry } from "../../providers/functions/provider.js";
+import { isProviderEnabledByCatalog } from "../../providers/functions/model-catalog-store.js";
 import {
   normalizePermissions as normalizeProjectDbPermissions,
   PROJECT_DB_TYPES,
@@ -38,8 +39,11 @@ export const PROTECTED_REMOTE_AUTH_SETTING_KEYS = new Set([
 
 export function isAdminProviderOption(providerName) {
   const provider = String(providerName || "").trim().toLowerCase();
-  if (!provider || !providerRegistry.has(provider)) return false;
+  if (!provider || !isProviderEnabledByCatalog(provider) || !providerRegistry.has(provider)) return false;
   const mod = providerRegistry.get(provider);
+  if (provider === "posse-local" && typeof mod?.isReady === "function") {
+    try { return mod.isReady()?.ready === true; } catch { return false; }
+  }
   if (typeof mod?.hasCredentials === "function") {
     try { return !!mod.hasCredentials(); } catch { return false; }
   }

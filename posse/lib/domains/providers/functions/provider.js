@@ -15,6 +15,7 @@ import { classifyProviderError } from "./shared/api-resilience.js";
 import { providerRegistry, optionalProvidersMissingModule, reloadOptionalProvider } from "../classes/registry-singleton.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { getDefaultTierModel, PROVIDER_OPTIONS } from "./model-catalog.js";
+import { isProviderEnabledByCatalog } from "./model-catalog-store.js";
 import { resolveEffectiveTierModel } from "./model-catalog-validate.js";
 import {
   DELEGATION_PROVIDER_ROLE_NAMES,
@@ -452,6 +453,9 @@ export async function repairMissingProviderDependencies({
  */
 export function isProviderReady(providerName, capability = null) {
   const canonicalName = canonicalProviderName(providerName);
+  if (!isProviderEnabledByCatalog(canonicalName)) {
+    return { ready: false, reason: `provider "${canonicalName}" is disabled by the model catalog` };
+  }
   if (!providerRegistry.has(canonicalName)) {
     const loadErr = providerRegistry.getLoadError(canonicalName);
     return { ready: false, reason: providerLoadErrorReason(canonicalName, loadErr) };
@@ -499,6 +503,7 @@ export function isProviderReady(providerName, capability = null) {
 
 export function isProviderSelectable(providerName) {
   const canonicalName = canonicalProviderName(providerName);
+  if (!isProviderEnabledByCatalog(canonicalName)) return false;
   if (canonicalName === "claude") return isProviderReady("claude", null).ready;
   if (!providerRegistry.has(canonicalName)) return false;
 

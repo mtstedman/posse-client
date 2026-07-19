@@ -24,12 +24,12 @@ const MODEL_TIER_DEFAULTS = Object.freeze({
   openai: Object.freeze({
     cheap: Object.freeze({ model: "gpt-5.4-mini" }),
     standard: Object.freeze({ model: "gpt-5.4" }),
-    strong: Object.freeze({ model: "gpt-5.5" }),
+    strong: Object.freeze({ model: "gpt-5.6" }),
   }),
   codex: Object.freeze({
     cheap: Object.freeze({ model: "gpt-5.4-mini" }),
     standard: Object.freeze({ model: "gpt-5.4" }),
-    strong: Object.freeze({ model: "gpt-5.5" }),
+    strong: Object.freeze({ model: "gpt-5.6" }),
   }),
   grok: Object.freeze({
     cheap: Object.freeze({ model: "grok-build-0.1" }),
@@ -128,8 +128,10 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "gpt-5.4-codex",
     "gpt-5.5",
     "gpt-5.5-pro",
+    "gpt-5.6",
   ]),
   codex: Object.freeze([
+    "gpt-5.6",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -306,6 +308,7 @@ export const MODEL_SETTING_DEFS = Object.freeze([
 ]);
 
 export const CODEX_OAUTH_SUPPORTED_MODELS = Object.freeze([
+  "gpt-5.6",
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",

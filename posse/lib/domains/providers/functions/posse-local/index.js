@@ -9,6 +9,7 @@ import { getSetting } from "../../../queue/functions/index.js";
 import { runMlNativeMethodAsync } from "../../../../shared/native/functions/ml-invoke.js";
 import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
 import { extractJson } from "../../../../shared/format/functions/json.js";
+import { isProviderEnabledByCatalog } from "../model-catalog-store.js";
 import { getProviderTierDefaults } from "../model-catalog.js";
 import { selectExecutionModel } from "../shared/model-selection.js";
 
@@ -62,12 +63,27 @@ export function getCredentialEnvVars() {
   return [];
 }
 
-export function isReady() {
+export function isReady({
+  manager = nativeBinaries,
+  modelRoot = defaultLocalGenerationModelRoot(),
+} = {}) {
+  if (!isProviderEnabledByCatalog("posse-local")) {
+    return { ready: false, reason: "local text generation is disabled by the model catalog" };
+  }
   if (process.arch !== "x64" || !["linux", "win32"].includes(process.platform)) {
     return { ready: false, reason: "local Qwen/Gemma generation supports Linux x64 and Windows x64" };
   }
-  if (!nativeBinaries.shouldUse("ml")) {
+  if (!manager.shouldUse("ml")) {
     return { ready: false, reason: "native ML runtime is disabled" };
+  }
+  const selected = getModelTierConfig("standard").model;
+  const installedDirectory = path.join(path.resolve(modelRoot), `${selected}-int4-cpu`);
+  if (!fs.existsSync(path.join(installedDirectory, ".posse-model-package.json"))) {
+    const shorthand = selected === QWEN_LOCAL_MODEL_ID ? "qwen-code" : "gemma-it";
+    return {
+      ready: false,
+      reason: `local model ${selected} is not installed; run: posse local-models download ${shorthand}`,
+    };
   }
   return { ready: true, reason: null };
 }
@@ -105,6 +121,12 @@ export async function callProvider(promptText, opts = {}) {
   if (allowWrite || projectDbWrite || needsImageGeneration) {
     const error = new Error("The local Qwen/Gemma provider is prompt-only and cannot run tools, modify files, query project databases, or generate images.");
     error.code = "POSSE_LOCAL_TOOLS_UNSUPPORTED";
+    throw error;
+  }
+  const readiness = isReady({ manager, modelRoot });
+  if (!readiness.ready) {
+    const error = new Error(readiness.reason || "The local text-generation provider is unavailable.");
+    error.code = "POSSE_LOCAL_NOT_READY";
     throw error;
   }
   if (priorSessionHandle) {

@@ -149,6 +149,7 @@ export function normalizeRemoteModelCatalog(raw) {
     const textModels = normalizeModelList(entry.text_models);
     if (textModels.length === 0) continue;
     providers[provider] = {
+      enabled: typeof entry.enabled === "boolean" ? entry.enabled : null,
       tierDefaults: normalizeTierDefaults(entry.tier_defaults),
       textModels,
       imageModels: normalizeModelList(entry.image_models),
@@ -197,6 +198,7 @@ function reviveStoredCatalog(parsed) {
     if (!Array.isArray(entry.textModels) || entry.textModels.length === 0) continue;
     const validModel = (model) => model != null && typeof model === "object" && typeof model.id === "string" && model.id !== "";
     providers[provider] = {
+      enabled: typeof entry.enabled === "boolean" ? entry.enabled : null,
       tierDefaults: entry.tierDefaults != null && typeof entry.tierDefaults === "object" ? entry.tierDefaults : {},
       textModels: entry.textModels.filter(validModel).map((model) => ({
         id: model.id,
@@ -284,6 +286,20 @@ export function getRemoteProviderCatalog(provider) {
   const catalog = getRemoteCatalog();
   if (!catalog) return null;
   return catalog.providers[normalizeName(provider)] || null;
+}
+
+/**
+ * Whether the signed remote model catalog permits selecting a provider for
+ * generation. Existing cloud providers stay enabled when an older cached
+ * catalog lacks the additive flag. The pre-release local provider is
+ * intentionally fail-closed until the catalog explicitly enables it.
+ */
+export function isProviderEnabledByCatalog(provider) {
+  const normalized = normalizeName(provider);
+  const entry = getRemoteProviderCatalog(normalized);
+  if (entry?.enabled === true) return true;
+  if (entry?.enabled === false) return false;
+  return normalized !== "posse-local";
 }
 
 /**

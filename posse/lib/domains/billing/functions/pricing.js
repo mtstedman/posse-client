@@ -50,12 +50,14 @@ const DEFAULT_PRICING = Object.freeze({
   "openai:gpt-5.4-pro":  { tier: "strong",   input: 30.00, output: 180.00 },
   "openai:gpt-5.5":      { tier: "strong",   input: 5.00, output: 30.00, cachedInput: 0.50 },
   "openai:gpt-5.5-pro":  { tier: "strong",   input: 30.00, output: 180.00 },
+  "openai:gpt-5.6":      { tier: "strong",   input: 5.00, output: 30.00, cachedInput: 0.50 },
 
   // Codex CLI (OpenAI-backed)
   "codex:gpt-5.3-codex": { tier: "standard", input: 1.75, output: 14.00, cachedInput: 0.175 },
   "codex:gpt-5.4":       { tier: "strong",   input: 2.50, output: 15.00, cachedInput: 0.25 },
   "codex:gpt-5.4-mini":  { tier: "cheap",    input: 0.75, output: 4.50, cachedInput: 0.075 },
   "codex:gpt-5.5":       { tier: "strong",   input: 5.00, output: 30.00, cachedInput: 0.50 },
+  "codex:gpt-5.6":       { tier: "strong",   input: 5.00, output: 30.00, cachedInput: 0.50 },
 
   // xAI Grok (approximate; adjust via admin when verified)
   "grok:grok-3-mini":                   { tier: "cheap",    input: 0.30, output: 0.50 },
