@@ -16,6 +16,7 @@ import { nativeBinaries } from "../../tools/classes/BinaryManager.js";
 /**
  * @typedef {Object} MlNativeMethodRunOptions
  * @property {string} modelRoot Absolute directory containing canonical model-ID subdirectories.
+ * @property {string} [runtimeRoot] Absolute directory for materialized generation runtime libraries.
  * @property {import("../../tools/classes/BinaryManager.js").BinaryManager} [manager]
  * @property {number} [timeoutMs]
  * @property {AbortSignal} [signal]
@@ -57,6 +58,12 @@ export async function runMlNativeMethodAsync(method, payload, opts) {
 
   const request = buildMlNativeMethodRequest(method, payload);
   const modelArgs = ["--model-root", modelRoot];
+  if (opts.runtimeRoot != null) {
+    if (!path.isAbsolute(String(opts.runtimeRoot))) {
+      throw new TypeError("ML native runtimeRoot must be absolute");
+    }
+    modelArgs.push("--runtime-root", path.resolve(String(opts.runtimeRoot)));
+  }
   const useWorker = request.method !== ML_MODEL_PACKAGE_INSTALL_METHOD;
   const runOptions = {
     input: `${JSON.stringify(request)}\n`,
@@ -68,6 +75,7 @@ export async function runMlNativeMethodAsync(method, payload, opts) {
     workerFallback: true,
     idempotent: opts.idempotent !== false,
     onProgress: opts.onProgress,
+    retireWorkerOnAbort: method === "ml.generate",
     requiredRoute: ML_NATIVE_ROUTE,
   };
   const res = await manager.binary("ml").run(

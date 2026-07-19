@@ -1,11 +1,16 @@
 // @ts-check
 
 import { C } from "../../../shared/format/functions/colors.js";
+import path from "node:path";
+
+import { ML_MODEL_PACKAGE_INSTALL_METHOD } from "../../../catalog/binary.js";
+import { runMlNativeMethodAsync } from "../../../shared/native/functions/ml-invoke.js";
 import {
-  downloadLocalModelArtifact,
+  downloadLocalModelPackage,
   fetchLocalModelArtifactCatalog,
   prepareLocalModelArtifactClient,
 } from "../../remote/functions/local-model-artifacts.js";
+import { defaultLocalGenerationModelRoot } from "../../providers/functions/posse-local/index.js";
 import { askSelectorChoice } from "./input-prompts.js";
 
 const CANCEL_SELECTION = "__cancel__";
@@ -17,7 +22,9 @@ export async function runLocalModelsCommand(argv = [], {
   nonInteractive = false,
   prepareClient = prepareLocalModelArtifactClient,
   fetchCatalog = fetchLocalModelArtifactCatalog,
-  downloadModel = downloadLocalModelArtifact,
+  downloadModel = downloadLocalModelPackage,
+  installModel = runMlNativeMethodAsync,
+  modelRoot = defaultLocalGenerationModelRoot(),
   askChoice = askSelectorChoice,
 } = {}) {
   const args = (Array.isArray(argv) ? argv : [])
@@ -96,22 +103,57 @@ export async function runLocalModelsCommand(argv = [], {
     return { action: "cancel", artifact, catalog };
   }
 
+  writeLine(output, `  ${colors.cyan}Preparing the native ML runtime...${colors.reset}`);
+  const mlAvailable = await client.manager?.ensureAvailable?.("ml", { refresh: true });
+  if (mlAvailable?.available !== true) {
+    throw new Error(`The native ML runtime is unavailable (${mlAvailable?.reason || "unknown"}).`);
+  }
+
   writeLine(output, `  ${colors.cyan}Starting verified download to ${terminalText(client.destinationRoot)}${colors.reset}`);
-  let progressRendered = false;
-  const onProgress = (status) => {
-    progressRendered = true;
-    output.write(`\r\x1b[2K  ${formatLocalModelDownloadProgress(status, colors)}`);
-  };
   try {
-    const result = await downloadModel(client, artifact, { onProgress });
-    if (progressRendered) writeLine(output);
+    const result = await downloadModel(client, artifact.artifactId, {
+      expectedProfileId: `${artifact.artifactId}-int4-cpu`,
+      expectedVersion: artifact.version,
+      expectedArchiveFormat: artifact.archiveFormat,
+      expectedArchiveRoot: artifact.family,
+      expectedBytes: artifact.bytes,
+      expectedSha256: artifact.sha256,
+    });
+    assertSelectedPackage(result, artifact);
+    writeLine(output, `  ${colors.cyan}Installing verified package for local generation...${colors.reset}`);
+    const installed = await installModel(ML_MODEL_PACKAGE_INSTALL_METHOD, {
+      modelId: result.modelId,
+      version: result.version,
+      archiveFormat: result.archiveFormat,
+      archiveRoot: result.archiveRoot,
+      packagePath: result.filePath,
+      expectedBytes: result.bytes,
+      expectedSha256: result.sha256,
+    }, {
+      modelRoot: path.resolve(modelRoot),
+      manager: client.manager,
+      timeoutMs: 24 * 60 * 60 * 1000,
+      idempotent: false,
+    });
     const cached = result?.cached === true ? "already verified in cache" : "downloaded and SHA-256 verified";
-    writeLine(output, `  ${colors.green}Ready:${colors.reset} ${terminalText(result?.filePath || "unknown path")}`);
+    writeLine(output, `  ${colors.green}Ready:${colors.reset} ${terminalText(installed?.modelPath || "unknown path")}`);
     writeLine(output, `  ${colors.dim}${size} · ${cached}${colors.reset}`);
-    return { action: "download", artifact, catalog, result };
+    return { action: "download", artifact, catalog, result, installed };
   } catch (error) {
-    if (progressRendered) writeLine(output);
     throw error;
+  }
+}
+
+function assertSelectedPackage(result, artifact) {
+  const expectedProfileId = `${artifact.artifactId}-int4-cpu`;
+  if (result?.modelId !== artifact.artifactId
+    || result?.profileId !== expectedProfileId
+    || result?.version !== artifact.version
+    || result?.archiveFormat !== artifact.archiveFormat
+    || result?.archiveRoot !== artifact.family
+    || result?.bytes !== artifact.bytes
+    || result?.sha256 !== artifact.sha256) {
+    throw new Error("The downloaded model package does not match the signed selection.");
   }
 }
 

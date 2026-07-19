@@ -134,6 +134,7 @@ function isUnsupportedNativeVersionError(error) {
  * @property {number} [maxBuffer]
  * @property {string} [requiredRoute]
  * @property {(event: unknown) => void} [onProgress]
+ * @property {boolean} [retireWorkerOnAbort]
  */
 
 /**
@@ -682,6 +683,12 @@ export class NativeBinary {
       return this.#runPerCall(subcommand, args, requestOpts);
     }
     if (response?._aborted === true) {
+      if (requestOpts.retireWorkerOnAbort === true) {
+        // Serial native generation cannot consume a cancellation frame while
+        // it is inside the engine. Detach and immediately terminate that host;
+        // the next request starts a clean worker with no half-live model state.
+        this.#daemon().retire({ graceMs: 0 });
+      }
       // Rebuild a real AbortError from the signal so callers preserve abort
       // identity (a cancelled native call must not read as a git failure).
       return {

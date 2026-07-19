@@ -9,6 +9,7 @@ export * from "./copilot/CopilotProvider.js";
 export * from "./grok/GrokProvider.js";
 export * from "./InteractiveCliSession.js";
 export * from "./openai/OpenAIProvider.js";
+export * from "./posse-local/PosseLocalProvider.js";
 export * from "./ProviderRegistry.js";
 export * from "./ProviderRuntimeState.js";
 export * from "./ProviderUsageRuntimeCache.js";

@@ -8,6 +8,7 @@ import { CodexProvider } from "./codex/CodexProvider.js";
 import { OpenAIProvider } from "./openai/OpenAIProvider.js";
 import { GrokProvider } from "./grok/GrokProvider.js";
 import { CopilotProvider } from "./copilot/CopilotProvider.js";
+import { PosseLocalProvider } from "./posse-local/PosseLocalProvider.js";
 
 const PROVIDER_CLASS_BY_NAME = Object.freeze({
   claude: ClaudeProvider,
@@ -15,6 +16,7 @@ const PROVIDER_CLASS_BY_NAME = Object.freeze({
   openai: OpenAIProvider,
   grok: GrokProvider,
   copilot: CopilotProvider,
+  "posse-local": PosseLocalProvider,
 });
 
 export class ProviderRegistry {

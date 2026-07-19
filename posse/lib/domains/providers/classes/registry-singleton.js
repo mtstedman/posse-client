@@ -9,12 +9,14 @@
 // callers don't have to know where it's constructed.
 
 import * as claude from "../functions/claude/index.js";
+import * as posseLocal from "../functions/posse-local/index.js";
 import { ProviderRegistry } from "./ProviderRegistry.js";
 
 const PROVIDER_ALIASES = {};
 
 export const providerRegistry = new ProviderRegistry({ aliases: PROVIDER_ALIASES });
 providerRegistry.register("claude", claude);
+providerRegistry.register("posse-local", posseLocal);
 
 // Optional providers are loaded best-effort. Missing dependencies (e.g. no
 // openai SDK installed, or its transitive `agentkeepalive` shim pruned from

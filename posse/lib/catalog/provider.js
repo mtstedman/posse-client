@@ -3,7 +3,7 @@
 // Provider identifiers, labels, and the role registry that maps job types to
 // the role responsible for spawning, executing, and assessing them.
 
-export const PROVIDER_OPTIONS = Object.freeze(["claude", "openai", "codex", "grok", "copilot"]);
+export const PROVIDER_OPTIONS = Object.freeze(["claude", "openai", "codex", "grok", "copilot", "posse-local"]);
 
 export const PROVIDER_LABELS = Object.freeze({
   claude: "Claude",
@@ -11,6 +11,7 @@ export const PROVIDER_LABELS = Object.freeze({
   codex: "Codex",
   grok: "Grok",
   copilot: "Copilot",
+  "posse-local": "Local (Qwen / Gemma)",
 });
 
 export const PROVIDER_ROLE_NAMES = Object.freeze([

@@ -71,6 +71,7 @@ export const ADMIN_PROVIDER_SETTING_SECTIONS = Object.freeze([
   Object.freeze({ provider: "openai", label: "OpenAI", budgetKeys: Object.freeze(["openai_run_budget_usd", "openai_daily_budget_usd", "openai_account_limit_tokens_session", "openai_account_limit_tokens_week"]) }),
   Object.freeze({ provider: "grok", label: "Grok", budgetKeys: Object.freeze(["grok_run_budget_usd", "grok_daily_budget_usd"]) }),
   Object.freeze({ provider: "copilot", label: "Copilot", budgetKeys: Object.freeze([]) }),
+  Object.freeze({ provider: "posse-local", label: "Local (Qwen / Gemma)", budgetKeys: Object.freeze([]) }),
 ]);
 
 export const ADMIN_PROVIDER_CATALOG_SETTING_KEYS = Object.freeze([

@@ -108,6 +108,12 @@ export async function downloadLocalModelArtifact(client, artifact, {
 
 export async function downloadLocalModelPackage(client, modelId, {
   timeoutMs = DOWNLOAD_TIMEOUT_MS,
+  expectedProfileId = null,
+  expectedVersion = null,
+  expectedArchiveFormat = null,
+  expectedArchiveRoot = null,
+  expectedBytes = null,
+  expectedSha256 = null,
 } = {}) {
   const normalizedModelId = String(modelId || "").trim();
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9])?$/.test(normalizedModelId)) {
@@ -122,6 +128,12 @@ export async function downloadLocalModelPackage(client, modelId, {
           baseUrl: client.baseUrl,
           modelId: normalizedModelId,
           destinationRoot: client.destinationRoot,
+          ...(expectedProfileId != null ? { expectedProfileId } : {}),
+          ...(expectedVersion != null ? { expectedVersion } : {}),
+          ...(expectedArchiveFormat != null ? { expectedArchiveFormat } : {}),
+          ...(expectedArchiveRoot != null ? { expectedArchiveRoot } : {}),
+          ...(expectedBytes != null ? { expectedBytes } : {}),
+          ...(expectedSha256 != null ? { expectedSha256 } : {}),
           timeoutMs: effectiveTimeoutMs,
           maxRetries: 4,
           retryDelayMs: 1_000,
@@ -176,6 +188,8 @@ function validateCatalogArtifact(artifact) {
     || !String(artifact.artifactId || "").trim()
     || !String(artifact.version || "").trim()
     || !String(artifact.displayName || "").trim()
+    || !String(artifact.family || "").trim()
+    || !String(artifact.archiveFormat || "").trim()
     || !/^[a-f0-9]{64}$/.test(String(artifact.sha256 || ""))
     || !Number.isSafeInteger(artifact.bytes)
     || artifact.bytes <= 0

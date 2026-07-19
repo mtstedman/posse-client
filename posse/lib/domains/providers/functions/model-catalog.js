@@ -44,6 +44,11 @@ const MODEL_TIER_DEFAULTS = Object.freeze({
     standard: Object.freeze({ model: "gpt-5.4" }),
     strong: Object.freeze({ model: "gpt-5.4" }),
   }),
+  "posse-local": Object.freeze({
+    cheap: Object.freeze({ model: "qwen2.5-coder-3b-instruct" }),
+    standard: Object.freeze({ model: "qwen2.5-coder-3b-instruct" }),
+    strong: Object.freeze({ model: "gemma-2-2b-it" }),
+  }),
 });
 
 const DEFAULT_TIER_MODEL_FALLBACK = Object.freeze({
@@ -161,6 +166,10 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "gpt-5.4",
     "gpt-5",
     "gpt-5-mini",
+  ]),
+  "posse-local": Object.freeze([
+    "qwen2.5-coder-3b-instruct",
+    "gemma-2-2b-it",
   ]),
 });
 
