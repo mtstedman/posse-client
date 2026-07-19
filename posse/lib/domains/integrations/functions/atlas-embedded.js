@@ -38,7 +38,7 @@ import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import { gitCurrentHashAsync } from "../../git/functions/utils.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
-import { clearSharedAtlasToolExecutorReadContexts, getSharedAtlasToolExecutor } from "../../atlas/functions/v2/tools/executor.js";
+import { getSharedAtlasToolExecutor, invalidateSharedAtlasToolExecutorReadCaches } from "../../atlas/functions/v2/tools/executor.js";
 import {
   getAtlasEmbeddedQueueWaitMs,
   getAtlasEmbeddedTimeoutMs,
@@ -123,7 +123,11 @@ export async function invalidateAtlasEmbeddedResourceCache() {
 
 onConductorIndexingSuccess(() => {
   invalidateAtlasSharedReadCache();
-  clearSharedAtlasToolExecutorReadContexts();
+  // Read contexts contain stable view/ledger paths, not open handles. Dropping
+  // every WI context after any repository finishes indexing strands active
+  // MCP jobs: their next native-complete Atlas call has no way to reconstruct
+  // the WI context. Invalidate replay caches while preserving those paths.
+  invalidateSharedAtlasToolExecutorReadCaches();
   void invalidateAtlasEmbeddedResourceCache();
 });
 

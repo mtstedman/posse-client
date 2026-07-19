@@ -277,7 +277,7 @@ function renderBoundedResult(text, {
   const lines = [
     `[bounded_result ${objectLabel}: full payload ${sizeChars} chars; showing ${head.length}${tail ? `+${tail.length}` : ""} chars; omitted ${omitted} chars]`,
     materialized
-      ? `[bounded_result recovery: fetch_ref ref=${entry?.ref || ""} offset=<char_offset> limit=<chars> search=<literal> pages the stored payload]`
+      ? `[bounded_result traversal: atlas.fetch_ref {"ref":"${entry?.ref || ""}","offset":<char_offset>,"limit":<chars>} opens this stored result; it is not a fresh ${toolName || "tool"} call. Continue with page.next_offset or use search=<literal>]`
       : `[bounded_result recovery: payload exceeded retention cap; digest+fingerprints kept; re-run ${toolName || "the tool"} with narrower args]`,
     "[overflow_digest]",
     digestText,
@@ -402,6 +402,7 @@ export function compactTreeScopeResult(toolName, result, {
         ranks: { start: rankStart, end: rankEnd },
         candidateFiles: pageCandidates,
         ...(nextPage ? { nextCandidateFiles: nextPage } : {}),
+        traversalNote: "This is a stored tree.scope page. atlas.fetch_ref follows nextCandidateFiles without rerunning tree.scope. Call tree.scope again only for a materially different query or scope.",
       }, null, 2);
       const surfaced = surfaceHashRefForContext(hashContext, {
         entryKind: "materialized",
@@ -441,6 +442,7 @@ export function compactTreeScopeResult(toolName, result, {
   envelope.data.candidateFiles = candidates.slice(0, TREE_SCOPE_INLINE_CANDIDATES);
   envelope.data.nextCandidateFiles = nextPage;
   envelope.data.candidateFilesTotal = candidates.length;
+  envelope.data.traversalNote = "nextCandidateFiles points to the next stored page. atlas.fetch_ref traverses it without rerunning tree.scope. Follow nextCandidateFiles until absent; call tree.scope again only for a materially different query or scope.";
   return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
 
@@ -516,6 +518,7 @@ export function materializeCodeSurveyPages(data, {
         },
         ...(start === 0 ? { survey: surveyMetadata } : {}),
         files: pageFiles,
+        traversalNote: "This is a stored code.survey page. atlas.fetch_ref follows pagination.cursor without rerunning code.survey. Follow cursors until absent; call code.survey again only for a materially different path or symbol scope.",
       }, null, 2);
       const surfaced = surfaceHashRefForContext(hashContext, {
         entryKind: "materialized",
@@ -554,7 +557,7 @@ export function materializeCodeSurveyPages(data, {
           ...currentPage,
           objectType,
           sizeChars: payloadText.length,
-          note: `survey page 1; follow the next 10 cursor instead of rerunning code.survey`,
+          note: "survey page 1; next 10 is already cached",
           cursor,
         };
       }
@@ -616,7 +619,7 @@ export function compactCodeSurveyResult(toolName, result, {
     objectType: snapshot.objectType,
     sizeChars: snapshot.sizeChars,
   };
-  data.surveyNote = `Survey snapshot is already stored in ${SURVEY_PAGE_FILES}-file hash pages. Follow pagination.cursor for the next 10; do not rerun code.survey for this scope.`;
+  data.surveyNote = `This survey has already run. atlas.fetch_ref traverses a stored ${SURVEY_PAGE_FILES}-file survey page; it is not a fresh retrieval and does not rerun code.survey. Follow pagination.cursor while missing material is likely in this result; call code.survey again only for a materially different path or symbol scope.`;
   return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
 
@@ -701,7 +704,7 @@ export function compactCodeWindowLensResult(toolName, result, {
     data.matches = data.matches.slice(0, LENS_INLINE_MATCHES);
     data.tailMatchesRef = surfaced.entry.ref;
     data.tailMatchesTotal = LENS_INLINE_MATCHES + tail.length;
-    data.tailNote = `COVERED: ${tail.length} lower-ranked matches are stored at ${surfaced.entry.ref} (atlas.fetch_ref). Fetch only for a named evidence gap.`;
+    data.tailNote = `COVERED: ${tail.length} lower-ranked matches are stored at ${surfaced.entry.ref}. atlas.fetch_ref traverses this stored code.lens tail; it is not a fresh code.lens call. Fetch it when the missing match is likely among the lower-ranked results.`;
     return { result: JSON.stringify(envelope, null, 2), compacted: true };
   }
 
@@ -747,7 +750,7 @@ export function compactCodeWindowLensResult(toolName, result, {
     data.content = headContent;
     data.contentTailRef = surfaced.entry.ref;
     data.contentTailLines = `${tailStartLine}-${data.endLine}`;
-    data.tailNote = `COVERED: lines ${tailStartLine}-${data.endLine} of ${data.repo_rel_path} are stored at ${surfaced.entry.ref} (atlas.fetch_ref). Fetch only for a named evidence gap.`;
+    data.tailNote = `COVERED: lines ${tailStartLine}-${data.endLine} of ${data.repo_rel_path} are stored at ${surfaced.entry.ref}. atlas.fetch_ref traverses this stored code.window tail; it is not a fresh code.window call. Fetch it when the missing lines are likely in this window.`;
     return { result: JSON.stringify(envelope, null, 2), compacted: true };
   }
 
@@ -926,7 +929,7 @@ export function appendHashRefIfMajor(toolName, result, {
     note,
     boundedIngress
       ? (materialized
-        ? "bounded view; fetch_ref pages the rest"
+        ? `bounded stored result; atlas.fetch_ref traverses the rest without rerunning ${toolName || "the source tool"}`
         : `bounded view; payload exceeded retention cap; re-run ${toolName || "the tool"} with narrower args`)
       : "",
   ].filter(Boolean).join(" | ") || null;
@@ -1018,7 +1021,7 @@ function fetchResultText(result, args = {}) {
         full_size_chars: fullText.length,
       },
       notice: paged.page.has_more
-        ? "fetch_ref returned a bounded page. Call fetch_ref again with page.next_offset as offset, or use search to recover a focused slice."
+        ? "atlas.fetch_ref returned a bounded page from the same stored dataset; this is not a fresh originating-tool call. Continue with page.next_offset as offset, or use search for a focused slice."
         : undefined,
     }, null, 2);
   }

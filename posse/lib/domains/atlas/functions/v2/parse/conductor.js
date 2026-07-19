@@ -66,6 +66,10 @@ export function createConductorDaemon(opts = {}) {
   /** @type {null | (() => void)} */
   let readerWriteIdleResolve = null;
   let readerWriteIdle = Promise.resolve();
+  let readerInFlight = 0;
+  /** @type {null | (() => void)} */
+  let readerReadIdleResolve = null;
+  let readerReadIdle = Promise.resolve();
 
   const createReaderEntry = (slot) => ({
     slot,
@@ -108,6 +112,22 @@ export function createConductorDaemon(opts = {}) {
     try { resolve?.(); } catch { /* observational */ }
   };
 
+  const noteReaderReadStart = () => {
+    if (readerInFlight === 0) {
+      readerReadIdle = new Promise((resolve) => { readerReadIdleResolve = resolve; });
+    }
+    readerInFlight++;
+  };
+
+  const noteReaderReadEnd = () => {
+    readerInFlight = Math.max(0, readerInFlight - 1);
+    if (readerInFlight !== 0) return;
+    const resolve = readerReadIdleResolve;
+    readerReadIdleResolve = null;
+    readerReadIdle = Promise.resolve();
+    try { resolve?.(); } catch { /* observational */ }
+  };
+
   const disposeReaderEntry = async (entry) => {
     if (!entry) return;
     if (readerEntries[entry.slot] === entry) readerEntries[entry.slot] = null;
@@ -139,10 +159,14 @@ export function createConductorDaemon(opts = {}) {
   };
 
   const callReader = async (payload, reqOpts) => {
-    while (readerWriteDepth > 0 && aliveReaderEntries().length === 0) {
+    // A queued writer closes reader admission at this boundary. Do not rely on
+    // daemon liveness here: an allocated lane may still be spawning, and that
+    // already-admitted request must drain before the writer can bind.
+    while (readerWriteDepth > 0) {
       await readerWriteIdle;
     }
     const entry = pickReaderEntry();
+    noteReaderReadStart();
     entry.inFlight++;
     try {
       return await call(entry.daemon, payload, reqOpts);
@@ -151,6 +175,7 @@ export function createConductorDaemon(opts = {}) {
       throw err;
     } finally {
       entry.inFlight = Math.max(0, entry.inFlight - 1);
+      noteReaderReadEnd();
     }
   };
 
@@ -245,6 +270,10 @@ export function createConductorDaemon(opts = {}) {
     noteReaderWriteStart();
     const heldReaders = [];
     try {
+      // Drain every request admitted before the writer latch, including a
+      // reader whose daemon transport is still spawning. Only after this
+      // resolves may the writer acquire the host-side holds and bind.
+      await readerReadIdle;
       const readers = aliveReaderEntries();
       if (readers.length === 0) return { readers: [] };
       const targets = readerWriteTargets(opts);

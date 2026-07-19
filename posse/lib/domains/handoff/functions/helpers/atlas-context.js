@@ -2634,6 +2634,7 @@ function renderAtlasContextSection(packet) {
     atlasField("Phase", packet.atlas.phase),
     atlasField("Repo target", packet.atlas.repo?.repoPath),
     hasCallableTools ? atlasField(`Preferred ${label} tools`, displayAtlasToolList(packet.atlas.tools, packet.atlas)) : null,
+    "STORED RESULT TRAVERSAL: pagination.cursor, *Ref fields, and [bounded_result traversal] point into the already-returned stored dataset. atlas.fetch_ref follows them; it is not a fresh retrieval and does not rerun the originating tool. Traverse them when missing material is likely in that result. Call the original tool again only for a materially different path, symbol, query, or scope.",
     // Explicit priority framing keeps the loaded ATLAS backend as the default
     // discovery path while
     // preserving deterministic tools for exact worktree state and edits.
@@ -2773,12 +2774,14 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
   const refStub = _surveyRefStub(sc?.evidenceRef);
   if (refStub) {
     lines.push(`  survey page 1: ${refStub}`);
+    lines.push(`  page 1: atlas.fetch_ref {"ref":"${sc.evidenceRef.ref}"}`);
     const cursor = sc?.evidenceRef?.cursor || sc?.evidenceRef?.nextPage;
     const cursorRef = cursor?.args?.ref || cursor?.ref;
     if (cursorRef) {
       lines.push(`  next 10: atlas.fetch_ref {"ref":"${cursorRef}"}`);
     }
-    lines.push(`  The survey snapshot is already stored in cursor pages; do not rerun ${label} for this scope.`);
+    lines.push(`  This survey has already run. atlas.fetch_ref opens a stored survey page; it does not rerun ${label}.`);
+    lines.push(`  If the compact preview omits something likely covered by this survey, fetch page 1 or follow next 10 before making a new retrieval call. Run ${label} only for a materially different path or symbol scope.`);
   }
   const fileCount = Number.isFinite(Number(sc.fileCount))
     ? Number(sc.fileCount)

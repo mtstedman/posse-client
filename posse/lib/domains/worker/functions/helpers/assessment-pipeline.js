@@ -483,7 +483,6 @@ function stripInternalAssessmentPolicyPayload(payload = {}) {
 
 function _buildRemoteAssessmentInstructions({
   job,
-  rootObjective = "",
   taskSpec = "",
   verificationCapabilityBlock = "",
   workflowModeBlock = "",
@@ -503,9 +502,6 @@ function _buildRemoteAssessmentInstructions({
     verificationCapabilityBlock || null,
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
-    ``,
-    rootObjective ? `ORIGINAL WORK ITEM OBJECTIVE (semantic guardrail):\n${rootObjective}` : null,
-    rootObjective ? `Use the original objective only to detect a weakened, contradicted, or omitted requirement within this task's scoped responsibility. Do not assign this developer work owned by a sibling task.` : null,
     ``,
     `TASK SPECIFICATION:`,
     taskSpec || `Title: ${job?.title || ""}`,
@@ -896,7 +892,6 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   const verificationCapabilityBlock = _buildVerificationCapabilityBlock(visibleJobPayload);
   const workItem = getWorkItem(job.work_item_id);
   const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(workItem), "assessor");
-  const rootObjective = String(workItem?.description || workItem?.title || "").trim();
   if (Object.keys(visibleJobPayload).length > 0) {
     taskSpec = visibleJobPayload.task_spec || visibleJobPayload.instructions || JSON.stringify(visibleJobPayload, null, 2);
   } else if (job.payload_json) {
@@ -1165,9 +1160,6 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
     ``,
-    rootObjective ? `ORIGINAL WORK ITEM OBJECTIVE (semantic guardrail):\n${rootObjective}` : null,
-    rootObjective ? `Use the original objective only to detect a weakened, contradicted, or omitted requirement within this task's scoped responsibility. Do not assign this developer work owned by a sibling task.` : null,
-    ``,
     `TASK SPECIFICATION:`,
     taskSpec || `Title: ${job.title}`,
     fileVerification,
@@ -1190,7 +1182,6 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
 
   const remoteAssessmentInstructions = _buildRemoteAssessmentInstructions({
     job,
-    rootObjective,
     taskSpec,
     verificationCapabilityBlock,
     workflowModeBlock,

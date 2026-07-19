@@ -72,6 +72,7 @@ import {
   isUnlocked as isGateUnlocked,
   checkNativeToolAllowed,
   buildLockedToolError,
+  noteAtlasCall,
   unlockForAtlasUnavailable,
   isFallbackAtlasPrefetchStatus,
 } from "./deterministic-mcp/gate.js";
@@ -1988,6 +1989,8 @@ for (const [toolName, handler] of [...TOOL_EXECUTORS.entries()]) {
 }
 
 let activeRuntimeSessionKey = "";
+const ownerAtlasGateEventSeqByScope = new Map();
+const OWNER_ATLAS_GATE_SCOPE_LIMIT = 5000;
 
 function runtimeSessionKey(config = bootConfig) {
   const token = String(config?.mcpOAuth?.tokenId || "").trim();
@@ -2000,9 +2003,34 @@ function runtimeSessionKey(config = bootConfig) {
 
 function gateScopeKeyForBootConfig(config = bootConfig) {
   const token = String(config?.mcpOAuth?.tokenId || "").trim();
-  if (token) return `mcp:${token}`;
   const jobId = Number(config?.jobId) || null;
+  if (token) return `mcp:${token}${jobId != null ? `|job:${jobId}` : ""}`;
   return jobId != null ? `job:${jobId}` : null;
+}
+
+function applyOwnerAtlasGateEvents(config = bootConfig, scopeKey = gateScopeKey) {
+  const events = Array.isArray(config?.ownerAtlasGateEvents) ? config.ownerAtlasGateEvents : [];
+  if (!scopeKey || events.length === 0) return;
+  let seenSeq = Number(ownerAtlasGateEventSeqByScope.get(scopeKey) || 0);
+  for (const event of events) {
+    const seq = Number(event?.seq) || 0;
+    if (seq <= seenSeq) continue;
+    noteAtlasCall({
+      action: String(event?.action || ""),
+      args: event?.args && typeof event.args === "object" ? event.args : {},
+      ok: event?.ok === true,
+      empty: event?.empty === true,
+      cwd: workspaceCwd,
+      scopeKey,
+    });
+    seenSeq = seq;
+  }
+  ownerAtlasGateEventSeqByScope.set(scopeKey, seenSeq);
+  while (ownerAtlasGateEventSeqByScope.size > OWNER_ATLAS_GATE_SCOPE_LIMIT) {
+    const oldest = ownerAtlasGateEventSeqByScope.keys().next().value;
+    if (oldest == null) break;
+    ownerAtlasGateEventSeqByScope.delete(oldest);
+  }
 }
 
 function computeDeclaredNativeToolNamesForCurrentBoot() {
@@ -2295,6 +2323,7 @@ function applyRuntimeBootConfig(nextConfig = {}) {
     atlasLabel: atlasBackendLabel(atlasAvailable ? getAtlasIntegrationConfig() : null),
     scopeKey: gateScopeKeyForBootConfig(bootConfig),
   });
+  applyOwnerAtlasGateEvents(bootConfig, gateScopeKey);
   if (atlasAvailable && isFallbackAtlasPrefetchStatus(atlasPrefetchStatus)) {
     unlockForAtlasUnavailable({ reason: `prefetch_${atlasPrefetchStatus}`, scopeKey: gateScopeKey });
   }

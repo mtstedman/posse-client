@@ -695,6 +695,10 @@ export class AtlasToolExecutor {
   clearReadContexts() {
     this.#readContexts.clear();
     this.#readContextVersions.clear();
+    this.invalidateReadCaches();
+  }
+
+  invalidateReadCaches() {
     this.#recentDedupe.clear();
     this.#dispatchCache?.clear?.();
   }

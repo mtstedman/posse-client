@@ -71,6 +71,7 @@ export function collectTraversalCompletionTaskText(packet = {}) {
   push(payload.request);
   push(payload.question);
   push(payload.prompt);
+  push(packet.project_context);
   push(packet.instructions);
   push(packet.success_criteria);
   push(payload.success_criteria);

@@ -159,7 +159,7 @@ export class PlannerRole extends BaseRole {
     const atlasDevBriefContract = plannerCtx.plannerPacket?.atlas?.active
       ? [
           "ATLAS-ONLY DEV BRIEF CONTRACT:",
-          "Add a task-specific dev_brief to every dev code task supported by this ATLAS research packet. Each brief must contain only that developer's read guidance and evidence; never copy a sibling task's handoff.",
+          "Add a task-specific dev_brief to every dev code task supported by this ATLAS research packet. Each brief must contain only that task's scoped read guidance and evidence.",
           "Shape: dev_brief: { source: \"atlas\", summary, key_files, related_files, planner_file_priorities, proof, support, decoy }.",
           "Use the same file fields as researcher output: key_files, related_files, and planner_file_priorities. Tailor them to this one dev task; do not copy the whole research brief or repeat task requirements in summary.",
           "Carry each task-relevant research hash ref into exactly one dev_brief proof/support/decoy lane instead of repeating or discarding it. Put refs in dev_brief only: never repeat hash-ref stubs in task_spec or success_criteria. Refs stay as compact durable intake; dev agents fetch exact evidence on demand only when they will rely on it. Decoy refs must include a short why.",

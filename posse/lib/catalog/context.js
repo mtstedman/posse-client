@@ -63,6 +63,59 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
     tailChars: 1200,
     digest: "symbol_card",
   }),
+  // Structural Atlas payloads are compact JSON but can still reach 75-130KB
+  // on large repositories. Claude spills results above its inline ceiling to
+  // a temporary file, which adds a redundant native read (and can prompt a
+  // Windows-only Get-Content command on Linux). Keep the full result behind
+  // fetch_ref and deliver a transport-safe preview.
+  "code.structure": Object.freeze({
+    capChars: 18000,
+    headChars: 13000,
+    tailChars: 1000,
+    digest: "generic",
+  }),
+  "atlas.code.structure": Object.freeze({
+    capChars: 18000,
+    headChars: 13000,
+    tailChars: 1000,
+    digest: "generic",
+  }),
+  "code.skeleton": Object.freeze({
+    capChars: 18000,
+    headChars: 13000,
+    tailChars: 1000,
+    digest: "generic",
+  }),
+  "atlas.code.skeleton": Object.freeze({
+    capChars: 18000,
+    headChars: 13000,
+    tailChars: 1000,
+    digest: "generic",
+  }),
+  "tree.branch": Object.freeze({
+    capChars: 18000,
+    headChars: 13000,
+    tailChars: 1000,
+    digest: "generic",
+  }),
+  "atlas.tree.branch": Object.freeze({
+    capChars: 18000,
+    headChars: 13000,
+    tailChars: 1000,
+    digest: "generic",
+  }),
+  "tree.expand": Object.freeze({
+    capChars: 18000,
+    headChars: 13000,
+    tailChars: 1000,
+    digest: "generic",
+  }),
+  "atlas.tree.expand": Object.freeze({
+    capChars: 18000,
+    headChars: 13000,
+    tailChars: 1000,
+    digest: "generic",
+  }),
 });
 
 export const CONTEXT_TRIM_CLASSES = Object.freeze([

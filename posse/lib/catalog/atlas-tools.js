@@ -217,7 +217,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "fetch_ref": {
     type: "function",
     name: "atlas_fetch_ref",
-    description: "Fetch one or more opaque refs from the current agent scope. Returned structured data may contain an immediate next-page ref. Follow that ref only when deeper results are needed; do not infer payload type from the ref or route it through the tool that originally produced it.",
+    description: "Traverse one or more opaque refs from the current agent scope. A ref or returned next-page cursor opens the already-stored result; it is not a fresh retrieval and does not rerun the originating tool. Follow returned cursors while the missing material is likely in that dataset. Call the originating tool again only for a materially different path, symbol, query, or scope; do not infer payload type from the ref.",
     parameters: {
       type: "object",
       properties: {
@@ -621,7 +621,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.scope": {
     type: "function",
     name: "atlas_tree_scope",
-    description: "Returns the ten highest-ranked candidate files inline. When additional candidates exist, nextCandidateFiles is an opaque fetch_ref value for the next ranked page. Fetch pages sequentially and only when the visible high-value candidates are insufficient.",
+    description: "Returns the ten highest-ranked candidate files inline. When additional candidates exist, nextCandidateFiles is an opaque atlas.fetch_ref value for the already-stored next ranked page. Traverse pages sequentially while likely candidates remain; this does not rerun tree.scope. Call tree.scope again only for a materially different query or scope.",
     parameters: {
       type: "object",
       properties: {
@@ -732,7 +732,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Multi-file content map with per-file symbols and structural summaries plus a call map. Surveys over ten files return the first ten plus a backed pagination.cursor to pre-stored ten-file hash pages; follow the cursor instead of surveying the same scope again.",
+    description: "Multi-file content map with per-file symbols and structural summaries plus a call map. Surveys over ten files return the first ten and pagination.cursor for the already-stored next ten. Traverse it with atlas.fetch_ref using pagination.cursor.args, then follow each returned next cursor until no cursor remains. This opens stored pages and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope.",
     parameters: {
       type: "object",
       properties: {

@@ -36,6 +36,7 @@ import {
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
+const MAX_OWNER_ATLAS_GATE_EVENTS = 64;
 // A child that produces NO response across this many consecutive request
 // timeouts is treated as wedged (event loop blocked, native deadlock) rather
 // than merely slow, and is force-killed so the next request respawns it. Any
@@ -303,9 +304,11 @@ function injectSessionContext(message, session) {
     ? { ...outbound.params }
     : {};
   delete params._posseSession;
+  const bootConfig = stripGatewaySessionTokenFields(session.bootConfig || {});
+  bootConfig.ownerAtlasGateEvents = session.atlasGateEventsSnapshot();
   params._posseSession = {
     sessionId: session.id,
-    bootConfig: stripGatewaySessionTokenFields(session.bootConfig || {}),
+    bootConfig,
   };
   outbound.params = params;
   return outbound;
@@ -473,6 +476,17 @@ function mcpToolCallSuccess(response = null) {
   return !/^(?:Error:|AUDIT ERROR:)/i.test(String(text || ""));
 }
 
+function atlasGateResultState(result = null) {
+  const text = Array.isArray(result?.content)
+    ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("")
+    : "";
+  const ok = !!result && result.isError !== true && !/^(?:Error:|AUDIT ERROR:)/i.test(text.trimStart());
+  return {
+    ok,
+    empty: ok && (text.trim().length === 0 || text.trim() === "ATLAS returned no output."),
+  };
+}
+
 function mcpToolResultErrorText(result = null) {
   if (!result?.isError) return "";
   const contentText = Array.isArray(result?.content)
@@ -579,6 +593,8 @@ class PersistentMcpSession {
     this.lastSeenAt = now;
     this.expiresAt = Number.isFinite(Number(claims?.exp)) ? Number(claims.exp) * 1000 : null;
     this.attachProof = this._newAttachProof();
+    this._atlasGateEventSeq = 0;
+    this._atlasGateEvents = [];
   }
 
   _newAttachProof() {
@@ -603,7 +619,15 @@ class PersistentMcpSession {
       this.tokenSource = claims.__source || (this.tokenVerified ? "local" : "registered");
       this.expiresAt = Number.isFinite(Number(claims?.exp)) ? Number(claims.exp) * 1000 : this.expiresAt;
     }
-    if (bootConfig) this.bootConfig = bootConfig;
+    if (bootConfig) {
+      const previousJobId = this.bootConfig?.jobId ?? null;
+      const previousWorkItemId = this.bootConfig?.workItemId ?? null;
+      this.bootConfig = bootConfig;
+      if (previousJobId !== (bootConfig.jobId ?? null) || previousWorkItemId !== (bootConfig.workItemId ?? null)) {
+        this._atlasGateEventSeq = 0;
+        this._atlasGateEvents = [];
+      }
+    }
     if (serverSpec) this.serverSpec = serverSpec;
     if (agentOwned !== undefined && (agentOwned === true) !== this.agentOwned) {
       throw new Error("MCP session ownership cannot change after registration");
@@ -661,6 +685,25 @@ class PersistentMcpSession {
       method: method || this.attachProof.lastMethod || null,
       error: ownerErrorSummary(err),
     };
+  }
+
+  noteAtlasGateEvent({ action = "", args = {}, ok = false, empty = false } = {}) {
+    const normalizedAction = String(action || "").trim();
+    if (!normalizedAction) return;
+    this._atlasGateEvents.push({
+      seq: ++this._atlasGateEventSeq,
+      action: normalizedAction,
+      args: cloneJson(args && typeof args === "object" ? args : {}),
+      ok: ok === true,
+      empty: empty === true,
+    });
+    if (this._atlasGateEvents.length > MAX_OWNER_ATLAS_GATE_EVENTS) {
+      this._atlasGateEvents.splice(0, this._atlasGateEvents.length - MAX_OWNER_ATLAS_GATE_EVENTS);
+    }
+  }
+
+  atlasGateEventsSnapshot() {
+    return cloneJson(this._atlasGateEvents) || [];
   }
 
   isExpired(now = Date.now()) {
@@ -1560,6 +1603,7 @@ export class PersistentMcpOwner {
   async _executeAtlasToolCall({ message, session, toolName, toolArgs }) {
     const startedAt = Date.now();
     const context = attachTelemetryContext(session, this.bootId);
+    const requested = requestedToolPolicyName(toolName, toolArgs);
     try {
       if (isAtlasFetchRefTool(toolName, toolArgs) || isAtlasCreateHashTool(toolName, toolArgs)) {
         const hashStoreTool = isAtlasCreateHashTool(toolName, toolArgs) ? createHashRefTool : fetchHashRefTool;
@@ -1592,6 +1636,11 @@ export class PersistentMcpOwner {
       let result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
+      session.noteAtlasGateEvent?.({
+        action: requested.name || toolName,
+        args: toolArgs,
+        ...atlasGateResultState(result),
+      });
       result = appendHashRefToMcpTextResult(result, toolName, toolArgs, session);
       result = appendOwnerAtlasPressureNudge(result, session, toolName, toolArgs);
       // ATLAS calls are the bulk of a retrieval-phase agent's tool traffic;
@@ -1610,6 +1659,12 @@ export class PersistentMcpOwner {
       });
       return mcpToolResultMessage(message, result);
     } catch (err) {
+      session.noteAtlasGateEvent?.({
+        action: requested.name || toolName,
+        args: toolArgs,
+        ok: false,
+        empty: false,
+      });
       appendRunTelemetry("diagnostics", {
         kind: "mcp.owner.atlas_tool_call",
         ...context,
