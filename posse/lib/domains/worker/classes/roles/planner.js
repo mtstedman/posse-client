@@ -498,6 +498,7 @@ export class PlannerRole extends BaseRole {
       job_id: job.id,
       title: job.title,
       model_tier: ctx.tier || job.model_tier || "standard",
+      model_name: job._executionModelName || job.model_name || null,
       reasoning_effort: job.reasoning_effort || "medium",
       governance_tier: workItem?.governance_tier || "mvp",
       execution_provider: plannerExecProvider,
@@ -586,7 +587,9 @@ export class PlannerRole extends BaseRole {
     if (!remoteInstructions) {
       throw new Error(`${this.constructor.name} produced empty prompt`);
     }
-    const prompt = await composePromptRemoteAware(ctx.plannerPacket, remoteInstructions);
+    const prompt = await composePromptRemoteAware(ctx.plannerPacket, remoteInstructions, {
+      providerName: ctx.providerName,
+    });
     if (ctx?.promptArtifact && !ctx.promptArtifact.stored && job) {
       storeArtifact({
         work_item_id: job.work_item_id,

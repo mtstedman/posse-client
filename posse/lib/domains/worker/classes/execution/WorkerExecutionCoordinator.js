@@ -36,6 +36,7 @@ import {
 import {
   handleCatastrophicExecuteError as handleCatastrophicExecuteErrorFromModule,
   handleExecuteAttemptError as handleExecuteAttemptErrorFromModule,
+  handlePendingScopeApprovalPause as handlePendingScopeApprovalPauseFromModule,
 } from "../../functions/helpers/attempt-errors.js";
 import {
   isProviderError as _isProviderError,
@@ -280,6 +281,13 @@ export class WorkerExecutionCoordinator {
         });
       } catch (err) {
         worker._releasePendingSessionRecycleForJob(job.id);
+        const scopePauseHandled = await handlePendingScopeApprovalPauseFromModule(worker, {
+          attempt,
+          job,
+          startTime,
+          wtPath,
+        });
+        if (scopePauseHandled) return;
         const partialHandled = await worker._handlePartialWorkFailure({
           attempt,
           attemptCount,

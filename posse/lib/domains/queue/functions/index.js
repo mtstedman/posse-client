@@ -25,7 +25,7 @@ import {
   runImmediateTransaction,
 } from "./common.js";
 import { flushEventsNow, logEvent } from "./events.js";
-import { getIntSetting, getSetting } from "./settings.js";
+import { getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
 import { listUnresolvedActionableFailures } from "./failure-actionability.js";
@@ -73,6 +73,7 @@ export {
   getLatestAttempt,
   incrementAndCreateAttempt,
   setAttemptCommitHash,
+  setAttemptModelName,
   setAttemptSession,
 } from "./attempts.js";
 
@@ -959,7 +960,7 @@ export function createJob({
   parent_job_id = null,
   priority = "normal",
   model_tier = "standard",
-  reasoning_effort = "medium",
+  reasoning_effort = null,
   provider = null,
   token_budget_input = null,
   token_budget_output = null,
@@ -977,6 +978,9 @@ export function createJob({
   if (max_attempts == null) {
     try { max_attempts = getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3); } catch { max_attempts = 3; }
   }
+  const resolvedReasoningEffort = reasoning_effort == null
+    ? getDefaultReasoningEffortForRole(job_type)
+    : reasoning_effort;
   const stmt = db.prepare(`
     INSERT INTO jobs (
       work_item_id, job_type, title, parent_job_id,
@@ -989,7 +993,7 @@ export function createJob({
   `);
   const info = stmt.run(
     work_item_id, job_type, title, parent_job_id,
-    priority, model_tier, reasoning_effort, provider,
+    priority, model_tier, resolvedReasoningEffort, provider,
     token_budget_input, token_budget_output, context_budget_chars,
     max_attempts,
     typeof payload_json === "object" && payload_json !== null ? JSON.stringify(payload_json) : payload_json,

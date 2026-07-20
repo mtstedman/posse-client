@@ -6,6 +6,7 @@ import {
   JOB_TYPE_ROLE_REGISTRY,
   JOB_TYPE_TO_PROVIDER_ROLE,
 } from "../../../catalog/provider.js";
+import { JOB_REASONING_EFFORTS } from "../../../catalog/job.js";
 
 export {
   PROVIDER_ROLE_NAMES,
@@ -16,6 +17,10 @@ export {
 
 export function providerSettingKeyForRole(role) {
   return `provider_${role}`;
+}
+
+export function reasoningEffortSettingKeyForRole(role) {
+  return `reasoning_effort_${role}`;
 }
 
 export function providerRoleForJobType(jobTypeOrRole = "dev") {
@@ -54,3 +59,19 @@ export const PROVIDER_ROLE_SETTING_DEFS = Object.freeze(
       : `Comma-separated provider list for ${role} role (empty = claude)`,
   }))
 );
+
+export const ROLE_REASONING_EFFORT_SETTING_DEFS = Object.freeze(
+  PROVIDER_ROLE_NAMES.map((role) => Object.freeze({
+    key: reasoningEffortSettingKeyForRole(role),
+    default: role === "preflight" ? "low" : "medium",
+    options: JOB_REASONING_EFFORTS,
+    description: `Default reasoning strength for new ${role} jobs; explicit job and workflow overrides take precedence`,
+  }))
+);
+
+export function defaultReasoningEffortForRole(role) {
+  const normalized = providerRoleForJobType(role);
+  return ROLE_REASONING_EFFORT_SETTING_DEFS.find((entry) => (
+    entry.key === reasoningEffortSettingKeyForRole(normalized)
+  ))?.default || "medium";
+}

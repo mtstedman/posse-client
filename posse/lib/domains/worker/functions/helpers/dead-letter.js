@@ -475,7 +475,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhauste
           freshJob.attempt_count + 1,
           { resolveModel },
         );
-        const nextModel = resolveModel(nextTier);
+        const nextModel = freshJob.model_name || resolveModel(nextTier);
         if (nextModel && nextModel !== lastModel) {
           sameErrorRepeat = false;
           worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: same error repeated, but next attempt swaps model ${lastModel} -> ${nextModel} — allowing retry${C.reset}`);

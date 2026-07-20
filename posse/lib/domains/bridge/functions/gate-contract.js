@@ -23,6 +23,7 @@ export function bridgeGateAnswerContract(payload = {}) {
   const choices = humanInputChoicesForPayload(payload);
   if (choices.length === 0) return {};
   return {
+    answer_mode: "enum",
     choices,
     answer_command: BRIDGE_COMMANDS.ASK,
     answer_schema: {

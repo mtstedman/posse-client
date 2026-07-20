@@ -108,7 +108,7 @@ export class PreflightRole extends BaseRole {
       role: this.getRole(),
       allowWrite: false,
       modelTier: ctx.tier || job.model_tier || "cheap",
-      reasoningEffort: "low",
+      reasoningEffort: job.reasoning_effort || "low",
       activity: `routing: ${(job.title || "").replace(/^Preflight:\s*/i, "").slice(0, 40)}`,
       skipRolePrompt: true,
       maxTurns: 2,

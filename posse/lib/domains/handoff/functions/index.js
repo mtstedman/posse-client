@@ -947,6 +947,7 @@ export function buildRoutingPacket(job, opts) {
 
     // ── Model ──
     model_tier: effectiveTier || job.model_tier || "standard",
+    model_name: opts.modelName || job?._executionModelName || job?.model_name || null,
     reasoning_effort: job.reasoning_effort || "medium",
     dev_mode: devMode,
     dev_mode_contract: renderSelectedDevModeContract(devMode),
@@ -955,7 +956,7 @@ export function buildRoutingPacket(job, opts) {
 
     // ── Governance ──
     governance_tier: workItem?.governance_tier || "mvp",
-    execution_provider: opts.jobProvider || job?.provider || null,
+    execution_provider: opts.jobProvider || job?._executionProvider || job?.provider || null,
 
     // ── Attempt ──
     attempt: {
@@ -1949,8 +1950,8 @@ export async function composePromptRemoteAware(packet, instructions, opts = {}) 
   const composer = await timeHandoffStep(packet, "prompt.remote_composer_init", () => opts.composer || getDefaultRemoteComposer());
   const remoteOpts = {
     providerName: opts.providerName || packet?.execution_provider || null,
-    maxPromptChars: _maxPromptChars(),
-    maxContextChars: _maxContextChars(),
+    maxPromptChars: Number(opts.maxPromptChars) > 0 ? Number(opts.maxPromptChars) : _maxPromptChars(),
+    maxContextChars: Number(opts.maxContextChars) > 0 ? Number(opts.maxContextChars) : _maxContextChars(),
   };
 
   try {

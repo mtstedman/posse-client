@@ -1246,6 +1246,7 @@ export class TrackedProviderClient {
       job_id,
       work_item_id,
     }, () => jobProvider || selectProviderName(opts.role));
+    const initialProviderName = providerName;
     const configuredPool = await timeProviderSetupPhase("provider.pool", {
       role: opts.role,
       provider: providerName,
@@ -1333,17 +1334,19 @@ export class TrackedProviderClient {
       job_id,
       work_item_id,
     }, () => provider.getModelTierConfig?.(tier) || provider.MODEL_TIERS?.[tier] || provider.MODEL_TIERS?.standard || {});
+    const providerChangedBeforeExecution = providerName !== initialProviderName;
+    const effectiveJobModelName = providerChangedBeforeExecution ? null : jobModelName;
     const selectedExecutionModelName = await timeProviderSetupPhase("provider.model_resolve", {
       role: opts.role,
       provider: providerName,
       job_id,
       work_item_id,
-    }, () => resolvePrimaryExecutionModelName(jobModelName, opts, tierConfig));
+    }, () => resolvePrimaryExecutionModelName(effectiveJobModelName, opts, tierConfig));
     // Catalog enforcement keeps tier-config models honest, but an explicit
     // per-job pin is the user's call: the cached catalog snapshot can lag a
     // newly released model, and silently swapping a pinned model for the tier
     // default would run (and bill) a model the job never selected.
-    const jobPinnedModel = !!jobModelName && selectedExecutionModelName === jobModelName;
+    const jobPinnedModel = !!effectiveJobModelName && selectedExecutionModelName === effectiveJobModelName;
     const executionModelName = jobPinnedModel
       ? selectedExecutionModelName
       : resolveCatalogSafeTierModel(providerName, tier, selectedExecutionModelName);

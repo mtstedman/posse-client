@@ -115,3 +115,10 @@ export function humanInputChoiceFromAnswer(answer, choices = []) {
   }
   return null;
 }
+
+export function exactHumanInputChoiceFromAnswer(answer, choices = []) {
+  const text = String(answer || "").trim();
+  if (!text) return null;
+  return normalizeHumanInputChoices(choices, { limit: Number.POSITIVE_INFINITY })
+    .find((choice) => choice === text) || null;
+}

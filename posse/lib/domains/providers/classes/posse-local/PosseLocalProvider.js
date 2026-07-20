@@ -5,7 +5,7 @@ export class PosseLocalProvider extends BaseProvider {
   static capabilities = Object.freeze({
     images: false,
     sessionResume: false,
-    toolAttachment: null,
+    toolAttachment: "function",
     localGeneration: true,
   });
 

@@ -1200,8 +1200,9 @@ export async function handlePostExecutionForWorker({
               const nextTier = attemptCount < maxAttempts
                 ? provider.escalateTier(job.model_tier, attemptCount + 1, { resolveModel: resolveTierModel })
                 : effectiveTier;
-              if (nextTier !== effectiveTier) {
-                this.emit(job.id, `${C.yellow}[idempotency] WI#${job.work_item_id} job #${job.id}: identical output, but next attempt escalates ${effectiveTier} ? ${nextTier} — allowing retry${C.reset}`);
+              const nextModel = job.model_name || resolveTierModel(nextTier);
+              if (nextModel && nextModel !== modelName) {
+                this.emit(job.id, `${C.yellow}[idempotency] WI#${job.work_item_id} job #${job.id}: identical output, but next attempt swaps model ${modelName} -> ${nextModel} — allowing retry${C.reset}`);
                 // Fall through to no-op guard / assessment instead of dead-lettering
               } else {
                 this.emit(job.id, `${C.red}[idempotency] WI#${job.work_item_id} job #${job.id}: identical output (same tier next) — dead-lettering${C.reset}`);

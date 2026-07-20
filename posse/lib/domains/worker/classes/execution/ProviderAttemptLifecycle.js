@@ -2,6 +2,7 @@ import fs from "fs";
 import {
   completeAttempt,
   incrementAndCreateAttempt,
+  setAttemptModelName,
   updateJobProvider,
 } from "../../../queue/functions/index.js";
 import {
@@ -126,7 +127,8 @@ export class ProviderAttemptLifecycle {
 
     const prelimCount = (job.attempt_count || 0) + 1;
     let effectiveTier = researchRetrySynthesisTier || provider.escalateTier(job.model_tier, prelimCount, { resolveModel: resolveTierModel });
-    const modelName = tierModelName(effectiveTier, { role, providerName: executionProvider || undefined });
+    let modelName = job.model_name
+      || tierModelName(effectiveTier, { role, providerName: executionProvider || undefined });
 
     const result = incrementAndCreateAttempt(job.id, leaseToken, role, modelName, job.reasoning_effort);
     if (!result) {
@@ -140,7 +142,14 @@ export class ProviderAttemptLifecycle {
     // Recalculate tier if attempt drifted (provider already resolved above with job.provider).
     if (attemptCount > prelimCount && !researchRetrySynthesisTier) {
       effectiveTier = provider.escalateTier(job.model_tier, attemptCount, { resolveModel: resolveTierModel });
+      const driftedModelName = job.model_name || resolveTierModel(effectiveTier);
+      if (driftedModelName !== modelName) {
+        modelName = driftedModelName;
+        setAttemptModelName(attempt.id, modelName);
+        attempt.model_name = modelName;
+      }
     }
+    job._executionModelName = modelName;
 
     if (researchRetrySynthesisTier && effectiveTier !== job.model_tier) {
       worker.emit(job.id, `${C.yellow}[research-retry] WI#${job.work_item_id} job #${job.id}: pinned retry synthesis to ${effectiveTier} tier (attempt ${attemptCount})${C.reset}`);

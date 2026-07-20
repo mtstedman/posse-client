@@ -3,6 +3,7 @@ import {
   HASH_REF_LANES,
   normalizeHashRefAlias,
 } from "../../../catalog/hash-store.js";
+import { localModelProfile } from "../../../catalog/local-model.js";
 import { atlasMemoryEnabled } from "../../../shared/policies/functions/memory-mode.js";
 
 function normalizedPath(value) {
@@ -32,7 +33,7 @@ function nonNegativeInteger(value) {
   return Math.floor(parsed);
 }
 
-function capabilitiesFromPacket(packet = {}) {
+function capabilitiesFromPacket(packet = {}, providerName = null) {
   const explicit = packet?.capabilities || packet?.local_capabilities || {};
   const tools = explicit.tools || {};
   const atlas = packet?.atlas || {};
@@ -71,7 +72,7 @@ function capabilitiesFromPacket(packet = {}) {
     : localProjectDbCapability;
   const imageGenerationAvailable = !!(packet?.needs_image_generation || packet?.needsImageGeneration);
 
-  return {
+  const capabilities = {
     tools: {
       read: narrowBoolCapability(tools.read, packet?.tool_policy?.allow_read === true),
       write: narrowBoolCapability(tools.write, packet?.tool_policy?.allow_write === true),
@@ -82,10 +83,33 @@ function capabilitiesFromPacket(packet = {}) {
     },
     atlas: atlasCapabilities,
   };
+  const provider = String(providerName || packet?.execution_provider || packet?.provider || "")
+    .trim()
+    .toLowerCase()
+    .replaceAll("_", "-");
+  if (provider !== "posse-local") return capabilities;
+
+  const localToolRole = ["planner", "dev", "artificer"].includes(role);
+  const localWriteRole = ["dev", "artificer"].includes(role);
+  return {
+    tools: {
+      read: localToolRole && capabilities.tools.read,
+      write: localWriteRole && capabilities.tools.write,
+      shell: false,
+      tests: false,
+      image_generation: false,
+      project_db: "none",
+    },
+    atlas: {
+      available: false,
+      backend: null,
+      transport: null,
+    },
+  };
 }
 
-export function __testCapabilitiesFromPacket(packet = {}) {
-  return capabilitiesFromPacket(packet);
+export function __testCapabilitiesFromPacket(packet = {}, providerName = null) {
+  return capabilitiesFromPacket(packet, providerName);
 }
 
 function readOnlyFileSnippets(packet = {}) {
@@ -512,6 +536,22 @@ export function buildRemoteCompileRequest(packet, instructions, {
   const memoryEnabled = atlasMemoryEnabled() && packet?.memory_mode !== "off";
   const role = packet?.recipient || "dev";
   const provider = providerName || packet?.execution_provider || packet?.provider || "claude";
+  const normalizedProvider = String(provider).trim().toLowerCase().replaceAll("_", "-");
+  const normalizedPacketProvider = String(packet?.execution_provider || packet?.provider || "")
+    .trim()
+    .toLowerCase()
+    .replaceAll("_", "-");
+  const localProfile = normalizedProvider === "posse-local"
+    ? localModelProfile(packet?.model_name || null, packet?.model_tier || "standard")
+    : null;
+  const projectedModelName = localProfile?.modelId
+    || (normalizedProvider === normalizedPacketProvider ? packet?.model_name || null : null);
+  const boundedMaxPromptChars = localProfile && Number(maxPromptChars) > 0
+    ? Math.min(Number(maxPromptChars), localProfile.remoteMaxPromptChars)
+    : (localProfile ? localProfile.remoteMaxPromptChars : maxPromptChars);
+  const boundedMaxContextChars = localProfile && Number(maxContextChars) > 0
+    ? Math.min(Number(maxContextChars), localProfile.remoteMaxContextChars)
+    : (localProfile ? localProfile.remoteMaxContextChars : maxContextChars);
   const atlasSummary = sanitizeAtlasSummary(packet?.atlas?.summary);
   const requestInstructions = dedupeAtlasSummaryFromInstructions(instructions, packet?.atlas?.summary, atlasSummary);
   const shellPolicyHint = assessorShellPolicyHint(role, packet);
@@ -535,6 +575,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
         title: packet?.title || "",
         job_type: packet?.job_type || null,
         model_tier: packet?.model_tier || null,
+        model_name: projectedModelName,
         reasoning_effort: packet?.reasoning_effort || null,
       },
     } : {}),
@@ -568,12 +609,12 @@ export function buildRemoteCompileRequest(packet, instructions, {
       file_snippets: readOnlyFileSnippets(packet),
       insights: Array.isArray(packet?.run_insights) ? packet.run_insights.map(insightForRemote) : [],
     },
-    capabilities: capabilitiesFromPacket(packet),
+    capabilities: capabilitiesFromPacket(packet, provider),
     skills: selectedSkills,
     requested_skills: Array.isArray(packet?.requested_skills) ? packet.requested_skills : [],
     limits: {
-      max_prompt_chars: maxPromptChars,
-      max_context_chars: maxContextChars,
+      max_prompt_chars: boundedMaxPromptChars,
+      max_context_chars: boundedMaxContextChars,
     },
     options: {
       include_final_prompt: includeFinalPrompt,

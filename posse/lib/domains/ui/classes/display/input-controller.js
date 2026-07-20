@@ -472,8 +472,17 @@ export class DisplayInputController {
 
     // ── Normal mode ──
     if (this._inputMode === "question") {
+      const fixedChoices = Array.isArray(this._activeQ?.choices) ? this._activeQ.choices : [];
       const digit = digitInput(str, key);
       if (digit != null && this._submitChoice(digit - 1)) {
+        this.requestRender({ force: true });
+        return;
+      }
+      if (fixedChoices.length > 0) {
+        // Closed-choice gates are deliberately not text fields. Ignoring
+        // free-form/Enter/Escape here prevents an unsupported answer from
+        // being submitted and immediately re-surfaced as a no-op loop.
+        this._inputBuf = "";
         this.requestRender({ force: true });
         return;
       }

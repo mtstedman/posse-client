@@ -31,6 +31,7 @@ import {
   sanitizeScopedFixPaths as _sanitizeScopedFixPaths,
 } from "../verdict-shared.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
+import { HUMAN_INPUT_ACTION_ENUMS } from "../../../../../catalog/human-input.js";
 
 function _positiveFixEditTargets(instructions = "", paths = []) {
   const source = String(instructions || "").toLowerCase();
@@ -268,10 +269,13 @@ function _escalateWiFailureThreshold({ job, verdict, failedCount, threshold, log
     priority: "urgent",
     model_tier: "cheap",
     payload_json: JSON.stringify({
+      original_job_id: job.id,
+      review_type: "blocked_recovery",
+      choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
       questions: [
-        `Work item has ${failedCount} failed dev/fix jobs and needs your guidance.\n\nLatest failure: "${job.title}"\nAssessor reasons: ${verdict.reasons.join("; ")}\n\n--- FULL FAILURE HISTORY ---\n${failureHistory}\n\nWhat should we do? Options:\n- Provide specific fix instructions (e.g. "use X approach instead of Y")\n- Simplify the task scope\n- Skip this work item\n- Retry with a different model tier`,
+        `Work item has ${failedCount} failed dev/fix jobs and needs a terminal recovery decision.\n\nLatest failure: "${job.title}"\nAssessor reasons: ${verdict.reasons.join("; ")}\n\n--- FULL FAILURE HISTORY ---\n${failureHistory}`,
       ],
-      context: `Automatic escalation: failure threshold (${failedCount}/${threshold}) exceeded. No more fix jobs will be spawned until you provide direction. The failure history above shows every error and assessor complaint so you can diagnose the root cause.`,
+      context: `Automatic escalation: failure threshold (${failedCount}/${threshold}) exceeded. Choose retry, replan, skip, pass, or fail. The decision is applied directly to failed job #${job.id}; it is not an informational no-op.`,
     }),
   });
   spawnedJobs.push(escalationJob);
@@ -310,10 +314,13 @@ function _escalateFixChainDepth({ job, verdict, fixChainDepth, maxFixChainDepth,
     priority: "high",
     model_tier: "cheap",
     payload_json: JSON.stringify({
+      original_job_id: job.id,
+      review_type: "blocked_recovery",
+      choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
       questions: [
-        `Job "${job.title}" has been through ${fixChainDepth} fix cycles and is still failing.\n\nLatest assessor reasons: ${verdict.reasons.join("; ")}\n\n--- FIX CHAIN HISTORY ---\n${chainHistory}\n\nThe same approach keeps failing. What should we try differently?`,
+        `Job "${job.title}" has been through ${fixChainDepth} fix cycles and is still failing.\n\nLatest assessor reasons: ${verdict.reasons.join("; ")}\n\n--- FIX CHAIN HISTORY ---\n${chainHistory}`,
       ],
-      context: `Fix chain: ${fixChainDepth} deep. Each fix attempt tried to address the assessor's feedback but the underlying issue persists. This likely needs a fundamentally different approach, not another retry.`,
+      context: `Fix chain: ${fixChainDepth} deep. Choose retry, replan, skip, pass, or fail. The decision is applied directly to failed job #${job.id}; it is not an informational no-op.`,
     }),
   });
   spawnedJobs.push(chainEscalation);

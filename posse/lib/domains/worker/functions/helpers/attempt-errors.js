@@ -13,8 +13,10 @@ import {
   incrementAttemptCount,
   logEvent,
   setJobError,
+  settleJobScopeExpansionAttempt,
   storeArtifact,
 } from "../../../queue/functions/index.js";
+import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { getProviderBackoff, getProviderName } from "../../../providers/functions/provider.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
@@ -162,6 +164,62 @@ function isNudgeKillReason(reason) {
   return reason === "operator_nudge" || reason === "user_nudge";
 }
 
+export async function handlePendingScopeApprovalPause(worker, {
+  attempt,
+  job,
+  startTime,
+  wtPath = null,
+} = {}) {
+  const currentJob = getJob(job?.id);
+  const payload = currentJob ? parseJobPayload(currentJob) : {};
+  const pending = payload?._pending_scope_request;
+  if (
+    currentJob?.status !== "waiting_on_human"
+    || !pending
+    || (pending.attempt_id && Number(pending.attempt_id) !== Number(attempt?.id))
+  ) return false;
+
+  if (wtPath) {
+    try {
+      if (await gitHasChangesAsync(wtPath) && !deferInterruptedCleanupIfSiblingLocks(job, "scope-request")) {
+        await snapshotAndResetDirtyWorktreeAsync(wtPath, worker?.projectDir || wtPath, {
+          reason: `scope-request-job-${job.id}`,
+          branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+          wiId: job.work_item_id,
+        });
+      }
+    } catch (resetErr) {
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt?.id || null,
+        event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Scope-request pause left dirty state for setup recovery: ${resetErr?.message || String(resetErr)}`,
+      });
+    }
+  }
+
+  if (attempt?.id) {
+    completeAttempt(attempt.id, {
+      status: "interrupted",
+      duration_ms: Date.now() - startTime,
+      error_text: `Paused for scope approval: ${pending.path}`,
+    });
+  }
+  const settled = settleJobScopeExpansionAttempt({
+    jobId: job.id,
+    attemptId: attempt?.id || null,
+  });
+  worker?.emit?.(
+    job.id,
+    `${C.yellow}[scope] WI#${job.work_item_id} job #${job.id}: provider exited after requesting ${pending.path}${settled.finalized ? `; human decision ${settled.decision}` : "; awaiting human decision"}${C.reset}`,
+  );
+  refreshAndExtractInsights(job.work_item_id);
+  worker?._cleanupWorktreeIfDone?.(job.work_item_id);
+  return true;
+}
+
 function handlePreAttemptInterruption(worker, { job, leaseToken, outerErr }) {
   const killReason = killReasonForPreAttemptError(worker, job, outerErr);
   if (!killReason) return false;
@@ -293,6 +351,13 @@ export async function handleExecuteAttemptError(worker, {
     worker._cleanupWorktreeIfDone(job.work_item_id);
     return;
   }
+
+  if (await handlePendingScopeApprovalPause(worker, {
+    attempt,
+    job,
+    startTime,
+    wtPath,
+  })) return;
 
   // Worker was killed because the user hit Ctrl+C or the lease expired.
   // Stash any partial work, requeue without consuming an attempt.

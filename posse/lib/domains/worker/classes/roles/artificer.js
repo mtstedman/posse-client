@@ -181,7 +181,7 @@ export class ArtificerRole extends BaseRole {
     const taskMode = payload.task_mode || "content";
     const needsImageGeneration = !!(payload.needs_image_generation || taskMode === "image");
     const outputRootDisplay = outputRoot || "(not set - check task spec)";
-    const buildArtificerPrompt = async (extraSections = []) => buildPromptAsync(packet, [
+    const buildArtificerInstructions = (extraSections = []) => [
       loadNudges(job.id, { attemptId: ctx.attemptId }),
       promptLiteral("WORK ITEM", workItem.title),
       promptLiteral("TASK", job.title),
@@ -195,16 +195,13 @@ export class ArtificerRole extends BaseRole {
       promptLiteral("INSTRUCTIONS", payload.task_spec || job.title),
       "",
       ...extraSections,
-    ].filter(Boolean).join("\n"));
-
-    const prompt = await buildArtificerPrompt();
-    storeArtifact({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      attempt_id: ctx.attemptId,
-      artifact_type: "prompt",
-      content_long: promptPersistenceSummary({ prompt, packet, role: this.getRole(), provider: ctx.providerName }),
-    });
+    ].filter(Boolean).join("\n");
+    const buildArtificerPrompt = async (extraSections = [], providerName = ctx.providerName) => buildPromptAsync(
+      packet,
+      buildArtificerInstructions(extraSections),
+      { providerName },
+    );
+    const promptInstructions = buildArtificerInstructions();
 
     const rawExpandSteps = getIntSetting(SETTING_KEYS.CONTEXT_EXPAND_MAX_STEPS, 2);
     const maxExpandSteps = Number.isFinite(rawExpandSteps) ? Math.max(0, Math.min(3, rawExpandSteps)) : 2;
@@ -225,13 +222,32 @@ export class ArtificerRole extends BaseRole {
       outputRoot,
       packet,
       payload,
-      prompt,
+      prompt: null,
+      promptArtifact: { stored: false },
       projectDir,
       remainingExpandFileBudget: Number.isFinite(rawExpandFileBudget) ? Math.max(0, rawExpandFileBudget) : 8,
       taskMode,
       workItem,
     });
 
+    return promptInstructions;
+  }
+
+  async composePrompt({ contextText, job, ctx } = {}) {
+    const prompt = await buildPromptAsync(ctx.packet, contextText, {
+      providerName: ctx.providerName,
+    });
+    ctx.prompt = prompt;
+    if (!ctx.promptArtifact?.stored) {
+      storeArtifact({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: ctx.attemptId,
+        artifact_type: "prompt",
+        content_long: promptPersistenceSummary({ prompt, packet: ctx.packet, role: this.getRole(), provider: ctx.providerName }),
+      });
+      ctx.promptArtifact.stored = true;
+    }
     return prompt;
   }
 
@@ -288,17 +304,19 @@ export class ArtificerRole extends BaseRole {
       selectFallbackProvider,
       shortJobTitle,
     } = this.roleDeps();
-    let prompt = ctx.prompt;
+    let promptSections = [];
     let remainingExpandFileBudget = ctx.remainingExpandFileBudget;
 
     if (looksLikePermissionRequest(output)) {
       emit(worker, job.id, `${C.yellow}[artificer]${C.reset} WI#${job.work_item_id} job #${job.id}: permission-style response detected - retrying with explicit write instruction`);
-      const permissionRetryPrompt = await ctx.buildArtificerPrompt([
+      const permissionSections = [
         "Write permission is already granted inside output_root and create_roots for this task.",
         "Do NOT ask for approval or permission.",
         "Use the available file-writing tools and create the deliverable files now.",
         "",
-      ]);
+      ];
+      const permissionRetryPrompt = await ctx.buildArtificerPrompt(permissionSections);
+      promptSections = permissionSections;
       storeArtifact({
         work_item_id: job.work_item_id,
         job_id: job.id,
@@ -309,9 +327,9 @@ export class ArtificerRole extends BaseRole {
       const retry = await this.providerClient.call(permissionRetryPrompt, {
         ...this.buildOpts(job, ctx),
         activity: `producing job #${job.id} (permission retry): ${shortJobTitle(job).slice(0, 30)}`,
+        buildFallbackPrompt: ({ providerName }) => ctx.buildArtificerPrompt(permissionSections, providerName),
       }, this.buildMeta(job, ctx));
       output = retry.output;
-      prompt = permissionRetryPrompt;
     }
 
     for (let expandStep = 0; expandStep < ctx.maxExpandSteps; expandStep++) {
@@ -349,13 +367,15 @@ export class ArtificerRole extends BaseRole {
 
       ctx.packet.related_files = [...new Set([...(ctx.packet.related_files || []), ...filesForStep])];
       await handoff(ctx.packet);
-      const expandedPrompt = await ctx.buildArtificerPrompt([
+      const expandedSections = [
         "ADDITIONAL CONTEXT (requested by previous attempt):",
         packetToDynamicContextString(ctx.packet),
         "",
         "You now have additional context. Continue and produce the deliverables.",
         "",
-      ]);
+      ];
+      const expandedPrompt = await ctx.buildArtificerPrompt(expandedSections);
+      promptSections = expandedSections;
       storeArtifact({
         work_item_id: job.work_item_id,
         job_id: job.id,
@@ -367,9 +387,9 @@ export class ArtificerRole extends BaseRole {
       const retry = await this.providerClient.call(expandedPrompt, {
         ...this.buildOpts(job, ctx),
         activity: `producing job #${job.id} (context retry ${expandStep + 1}): ${shortJobTitle(job).slice(0, 24)}`,
+        buildFallbackPrompt: ({ providerName }) => ctx.buildArtificerPrompt(expandedSections, providerName),
       }, this.buildMeta(job, ctx));
       output = retry.output;
-      prompt = expandedPrompt;
       if (remainingExpandFileBudget <= 0) {
         const stillMissing = parseMissingContext(output, { maxFiles: 1 });
         if (stillMissing && stillMissing.length > 0) {
@@ -408,7 +428,8 @@ export class ArtificerRole extends BaseRole {
           summary: `${activeProvider} -> ${fallbackName}`,
           detail: { role: "artificer", from: activeProvider, to: fallbackName, provider_pool: fallbackPool, reason: "malformed_artifact_output" },
         });
-        const fallback = await this.providerClient.call(prompt, {
+        const fallbackPrompt = await ctx.buildArtificerPrompt(promptSections, fallbackName);
+        const fallback = await this.providerClient.call(fallbackPrompt, {
           ...this.buildOpts(job, ctx),
           activity: `producing job #${job.id} (fallback): ${shortJobTitle(job).slice(0, 32)}`,
           allowedProviders: fallbackPool,

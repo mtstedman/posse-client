@@ -125,7 +125,9 @@ export class AssessorRole extends BaseRole {
     if (!remoteInstructions) {
       throw new Error(`${this.constructor.name} produced empty prompt`);
     }
-    return await composePromptRemoteAware(ctx.packet, remoteInstructions);
+    return await composePromptRemoteAware(ctx.packet, remoteInstructions, {
+      providerName: ctx.providerName,
+    });
   }
 
   buildOpts(job, ctx) {

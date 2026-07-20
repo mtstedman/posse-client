@@ -289,6 +289,10 @@ export class DisplayBottomInputRenderer {
       lines.push(...bodyLines);
 
       lines.push("");
+      if (Array.isArray(q.choices) && q.choices.length > 0) {
+        lines.push(` ${C.green}${C.bold}Choose one option with [1-${Math.min(q.choices.length, 9)}].${C.reset} ${C.dim}Free-form text is not accepted.${C.reset}`);
+        return lines;
+      }
       const cursor = this._spinIdx % 2 === 0 ? "\u2588" : "\u258c";
       const maxBuf = width - 5;
       const displayBuf = this._inputBuf.length > maxBuf

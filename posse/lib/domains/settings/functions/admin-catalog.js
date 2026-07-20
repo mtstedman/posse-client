@@ -56,13 +56,13 @@ export const PROJECT_DB_SETTING_DEFS = Object.freeze([
 // settings groups so machine projections and the interactive editor cannot
 // silently acquire separate policy tables.
 export const ADMIN_AGENT_SETTING_SECTIONS = Object.freeze([
-  Object.freeze({ role: "researcher", label: "Researcher", keys: Object.freeze(["base_turns_researcher", "max_output_tokens_researcher"]) }),
-  Object.freeze({ role: "planner", label: "Planner", keys: Object.freeze(["base_turns_planner", "max_output_tokens_planner", "planner_max_tasks", "planner_under_scoped_broad_gate"]) }),
-  Object.freeze({ role: "dev", label: "Dev", keys: Object.freeze(["base_turns_dev", "max_output_tokens_dev"]) }),
-  Object.freeze({ role: "artificer", label: "Artificer", keys: Object.freeze(["max_output_tokens_artificer"]) }),
-  Object.freeze({ role: "preflight", label: "Preflight", keys: Object.freeze(["max_output_tokens_preflight"]) }),
-  Object.freeze({ role: "assessor", label: "Assessor", keys: Object.freeze(["base_turns_assessor", "max_output_tokens_assessor"]) }),
-  Object.freeze({ role: "delegator", label: "Delegator", keys: Object.freeze(["delegation_mode", "max_output_tokens_delegator"]) }),
+  Object.freeze({ role: "researcher", label: "Researcher", keys: Object.freeze(["reasoning_effort_researcher", "base_turns_researcher", "max_output_tokens_researcher"]) }),
+  Object.freeze({ role: "planner", label: "Planner", keys: Object.freeze(["reasoning_effort_planner", "base_turns_planner", "max_output_tokens_planner", "planner_max_tasks", "planner_under_scoped_broad_gate"]) }),
+  Object.freeze({ role: "dev", label: "Dev", keys: Object.freeze(["reasoning_effort_dev", "base_turns_dev", "max_output_tokens_dev"]) }),
+  Object.freeze({ role: "artificer", label: "Artificer", keys: Object.freeze(["reasoning_effort_artificer", "max_output_tokens_artificer"]) }),
+  Object.freeze({ role: "preflight", label: "Preflight", keys: Object.freeze(["reasoning_effort_preflight", "max_output_tokens_preflight"]) }),
+  Object.freeze({ role: "assessor", label: "Assessor", keys: Object.freeze(["reasoning_effort_assessor", "base_turns_assessor", "max_output_tokens_assessor"]) }),
+  Object.freeze({ role: "delegator", label: "Delegator", keys: Object.freeze(["delegation_mode", "reasoning_effort_delegator", "max_output_tokens_delegator"]) }),
 ]);
 
 export const ADMIN_PROVIDER_SETTING_SECTIONS = Object.freeze([
@@ -476,6 +476,8 @@ export function humanizeSettingKey(settingKey = "") {
   if (roleBaseTurns) return `${roleLabel(roleBaseTurns[1])} base turns`;
   const roleOutputTokens = displayKey.match(/^max_output_tokens_(.+)$/);
   if (roleOutputTokens) return `${roleLabel(roleOutputTokens[1])} output token limit`;
+  const roleReasoningEffort = displayKey.match(/^reasoning_effort_(.+)$/);
+  if (roleReasoningEffort) return `${roleLabel(roleReasoningEffort[1])} reasoning strength`;
   const roleProviders = displayKey.match(/^provider_(.+)$/);
   if (roleProviders) return `${roleLabel(roleProviders[1])} providers`;
 
@@ -584,6 +586,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     pane: "agents",
     label: "Researcher",
     keys: Object.freeze([
+      "reasoning_effort_researcher",
       "base_turns_researcher",
       "max_output_tokens_researcher",
     ]),
@@ -593,6 +596,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     pane: "agents",
     label: "Planner",
     keys: Object.freeze([
+      "reasoning_effort_planner",
       "base_turns_planner",
       "max_output_tokens_planner",
       "planner_max_tasks",
@@ -604,6 +608,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     pane: "agents",
     label: "Dev",
     keys: Object.freeze([
+      "reasoning_effort_dev",
       "base_turns_dev",
       "max_output_tokens_dev",
     ]),
@@ -613,6 +618,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     pane: "agents",
     label: "Artificer",
     keys: Object.freeze([
+      "reasoning_effort_artificer",
       "max_output_tokens_artificer",
     ]),
   },
@@ -621,6 +627,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     pane: "agents",
     label: "Preflight",
     keys: Object.freeze([
+      "reasoning_effort_preflight",
       "max_output_tokens_preflight",
     ]),
   },
@@ -629,6 +636,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     pane: "agents",
     label: "Assessor",
     keys: Object.freeze([
+      "reasoning_effort_assessor",
       "base_turns_assessor",
       "max_output_tokens_assessor",
     ]),
@@ -639,6 +647,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     label: "Delegator",
     keys: Object.freeze([
       "delegation_mode",
+      "reasoning_effort_delegator",
       "max_output_tokens_delegator",
     ]),
   },
@@ -996,6 +1005,13 @@ export const TUNING_SETTING_KEYS = new Set([
   "context_expand_file_budget_per_attempt",
   "planner_max_tasks",
   "planner_under_scoped_broad_gate",
+  "reasoning_effort_researcher",
+  "reasoning_effort_planner",
+  "reasoning_effort_dev",
+  "reasoning_effort_artificer",
+  "reasoning_effort_preflight",
+  "reasoning_effort_assessor",
+  "reasoning_effort_delegator",
   "base_turns_researcher",
   "base_turns_planner",
   "base_turns_dev",

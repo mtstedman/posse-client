@@ -67,6 +67,7 @@ const RETRY_SYNTHESIS_MAX_TURNS = 10;
 const FANOUT_CHILD_DESCRIPTION_CHAR_LIMIT = 1200;
 const FANOUT_CHILD_EVIDENCE_TOKEN_TARGET = 900;
 const FANOUT_SYNTHESIS_TOKEN_TARGET = 1800;
+const REPOSITORY_GUIDANCE_MAX_CHARS = 12000;
 
 const DEFAULT_DEPS = {
   getResearchBudget: defaultGetResearchBudget,
@@ -81,6 +82,34 @@ const DEFAULT_DEPS = {
 function parsePayload(worker, job) {
   if (typeof worker?.parsePayload === "function") return worker.parsePayload(job);
   return parseJobPayload(job);
+}
+
+function loadExplicitRepositoryGuidance(payload, projectDir) {
+  const requested = String(payload?.repository_guidance_file || "").trim();
+  if (!requested) return "";
+  if (requested !== path.basename(requested) || !["CLAUDE.md", "AGENTS.md"].includes(requested)) {
+    throw new Error(`Unsupported repository guidance file: ${requested}`);
+  }
+  const root = path.resolve(String(projectDir || ""));
+  const target = path.resolve(root, requested);
+  if (!target.startsWith(`${root}${path.sep}`)) {
+    throw new Error(`Repository guidance escapes project root: ${requested}`);
+  }
+  let stat;
+  try {
+    stat = fs.statSync(target);
+  } catch {
+    throw new Error(`Requested repository guidance is missing: ${target}`);
+  }
+  if (!stat.isFile()) throw new Error(`Requested repository guidance is not a file: ${target}`);
+  const content = fs.readFileSync(target, "utf8").trim();
+  if (!content) throw new Error(`Requested repository guidance is empty: ${target}`);
+  const bounded = truncateForPrompt(content, REPOSITORY_GUIDANCE_MAX_CHARS, requested);
+  return [
+    `REPOSITORY GUIDANCE (${requested}; shared control/treatment input):`,
+    bounded,
+    `END REPOSITORY GUIDANCE (${requested})`,
+  ].join("\n");
 }
 
 function normalizeResearchRoleMode(value) {
@@ -542,6 +571,7 @@ export class ResearcherRole extends BaseRole {
       job_id: job.id,
       title: job.title,
       model_tier: ctx.tier || job.model_tier || "standard",
+      model_name: job._executionModelName || job.model_name || null,
       reasoning_effort: job.reasoning_effort || "medium",
       prompt_profile: promptProfile,
       research_role_mode: roleMode,
@@ -570,6 +600,8 @@ export class ResearcherRole extends BaseRole {
       },
       success_criteria: Array.isArray(payload.success_criteria) ? payload.success_criteria : [],
       test_command: payload.test_command || null,
+      allow_atlas_handoff_prefetch: payload.allow_atlas_handoff_prefetch,
+      allow_researcher_atlas_context_prefetch: payload.allow_researcher_atlas_context_prefetch,
     };
     const projectContextLimit = roleMode === "child" ? FANOUT_CHILD_DESCRIPTION_CHAR_LIMIT : 4000;
     const projectContext = truncateForPrompt(payload.task_spec || workItem.description || "", projectContextLimit, "fanout child context");
@@ -699,6 +731,7 @@ export class ResearcherRole extends BaseRole {
       throw new Error(`${this.constructor.name} produced empty prompt`);
     }
     return await composePromptRemoteAware(ctx.researcherPacket, remoteInstructions, {
+      providerName: ctx.providerName,
       ...(this.deps?.remoteComposer ? { composer: this.deps.remoteComposer } : {}),
     });
   }
@@ -725,6 +758,10 @@ export class ResearcherRole extends BaseRole {
       : roleMode === "child"
         ? "researching branch"
         : "researching";
+    const repositoryGuidance = loadExplicitRepositoryGuidance(ctx.payload, ctx.projectDir);
+    const stableContext = [ctx.researcherPacket?.stable_context, repositoryGuidance]
+      .filter((part) => part != null && String(part).trim() !== "")
+      .join("\n\n") || null;
     return {
       role: this.getRole(),
       roleMode,
@@ -735,7 +772,7 @@ export class ResearcherRole extends BaseRole {
       deepthink: isResearchBudgetDeep(researchBudget),
       ...(effectiveMaxTurns ? { maxTurns: effectiveMaxTurns } : {}),
       activity: `${activityPrefix}: ${shortJobTitle(job).replace(/^Research(?:\s*\((?:self-resolve|follow-up|[^)]*)\))?:\s*/i, "").slice(0, 40)}`,
-      stableContext: ctx.researcherPacket?.stable_context || null,
+      stableContext,
       remoteSystemPrompt: ctx.researcherPacket?.remote_system_prompt || null,
       atlasPrefetchStatus: ctx.researcherPacket?.atlas?.prefetchStatus || null,
       sessionPacket: ctx.researcherPacket || null,

@@ -3,6 +3,12 @@ import path from "path";
 import { gitExec } from "../../git/functions/utils.js";
 import { normalizeProjectDir } from "../../runtime/functions/paths.js";
 import { SETTINGS_CATALOG, getCatalogEntry } from "../../settings/functions/catalog.js";
+import { JOB_REASONING_EFFORTS } from "../../../catalog/job.js";
+import {
+  defaultReasoningEffortForRole,
+  providerRoleForJobType,
+  reasoningEffortSettingKeyForRole,
+} from "../../providers/functions/roles.js";
 import {
   getAccountRepoSetting,
   getAccountSetting,
@@ -75,6 +81,19 @@ export function getProviderForRole(role) {
     if (dbVal) return dbVal;
   } catch { /* DB not ready */ }
   return "claude";
+}
+
+export function getDefaultReasoningEffortForRole(roleOrJobType) {
+  const role = providerRoleForJobType(roleOrJobType);
+  const fallback = defaultReasoningEffortForRole(role);
+  try {
+    const configured = String(getSetting(reasoningEffortSettingKeyForRole(role)) || "")
+      .trim()
+      .toLowerCase();
+    return JOB_REASONING_EFFORTS.includes(configured) ? configured : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export function setSetting(key, value, options = {}) {

@@ -17,6 +17,7 @@ const TOOL_ATTACHMENT_BY_PROVIDER = Object.freeze({
   grok: "function",
   codex: "deterministic-bridge",
   copilot: "mcp",
+  "posse-local": "function",
 });
 
 function _toolAttachmentModeFor(providerName) {

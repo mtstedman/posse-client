@@ -8,7 +8,7 @@ import { now } from "../../queue/functions/common.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isReviewGateJob } from "./review-decision.js";
 import {
-  humanInputChoiceFromAnswer,
+  exactHumanInputChoiceFromAnswer,
   humanInputChoicesForPayload,
 } from "../../../catalog/human-input.js";
 
@@ -98,7 +98,7 @@ export async function answerHumanInput(jobId, args = {}, { projectDir = process.
   if (answers.length === 0 || answers.every((answer) => String(answer?.answer ?? answer ?? "").trim() === "")) {
     return { ok: false, reason: "empty_answer" };
   }
-  if (choices.length > 0 && !humanInputChoiceFromAnswer(latestAnswerText(answers), choices)) {
+  if (choices.length > 0 && !exactHumanInputChoiceFromAnswer(latestAnswerText(answers), choices)) {
     return {
       ok: false,
       reason: "invalid_choice",

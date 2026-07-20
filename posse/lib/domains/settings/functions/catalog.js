@@ -20,7 +20,10 @@ import {
   PROVIDER_OPTIONS,
   getDefaultTierModel,
 } from "../../providers/functions/model-catalog.js";
-import { PROVIDER_ROLE_SETTING_DEFS } from "../../providers/functions/roles.js";
+import {
+  PROVIDER_ROLE_SETTING_DEFS,
+  ROLE_REASONING_EFFORT_SETTING_DEFS,
+} from "../../providers/functions/roles.js";
 
 // Value enums for individual settings live in the catalogue (split by domain
 // — generic settings in lib/catalog/settings.js, ATLAS-specific in
@@ -125,6 +128,7 @@ export const SETTINGS_CATALOG = [
   // Provider keys default empty so admin code falls through persisted setting
   // before using the hardcoded default.
   ...PROVIDER_ROLE_SETTING_DEFS,
+  ...ROLE_REASONING_EFFORT_SETTING_DEFS,
   { key: "delegation_mode",     default: "js", options: DELEGATION_MODE_VALUES, description: "Delegation engine mode: js or ml" },
 
   // ── Model selection (empty = use provider tier default) ──────────────────

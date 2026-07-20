@@ -904,35 +904,44 @@ export class AtlasToolExecutor {
     if (context) return context;
     if (!wiKey && !ATLAS_NATIVE_COMPLETE_TOOL_ACTIONS.has(request.action)) return null;
     if (!wiKey) {
-      const config = request.config || {};
-      const session = request.session || {};
-      const boot = session.bootConfig || session || {};
-      const repoRoot = config.repoRoot || config.cwd || boot?.atlas?.repoPath || boot?.cwd || null;
-      if (!repoRoot) return null;
-      const resolved = {
-        viewPath: mainViewPath(repoRoot),
-        ledgerPath: ledgerDbPath(repoRoot),
-        versionId: String(config.versionId || boot?.atlas?.versionId || "main"),
-        readRoot: String(repoRoot),
-        repoId: config.repoId || boot?.atlas?.repoId || null,
-        config,
-      };
+      const resolved = this.#requestReadContext(request);
+      if (!resolved) return null;
       this.setReadContext(request.repoKey, resolved);
       return resolved;
     }
-    if (typeof conductor?.resolveReadContext !== "function") return null;
-    const resolved = await conductor.resolveReadContext({
-      workItemKey: wiKey,
-      workItemId: wiKey.replace(/^wi-/, ""),
-      repoKey: request.repoKey,
-      config: request.config || null,
-      session: request.session || null,
-      source: request.source || null,
-    });
-    if (!resolved || typeof resolved !== "object") return null;
-    this.setReadContext({ workItemId: wiKey }, resolved);
+    const resolved = typeof conductor?.resolveReadContext === "function"
+      ? await conductor.resolveReadContext({
+        workItemKey: wiKey,
+        workItemId: wiKey.replace(/^wi-/, ""),
+        repoKey: request.repoKey,
+        config: request.config || null,
+        session: request.session || null,
+        source: request.source || null,
+      })
+      : null;
+    const effective = resolved && typeof resolved === "object"
+      ? resolved
+      : this.#requestReadContext(request);
+    if (!effective) return null;
+    this.setReadContext({ workItemId: wiKey }, effective);
     context = this.#readContexts.get(wiKey);
     return context || null;
+  }
+
+  #requestReadContext(request) {
+    const config = request.config || {};
+    const session = request.session || {};
+    const boot = session.bootConfig || session || {};
+    const repoRoot = config.repoRoot || config.cwd || boot?.atlas?.repoPath || boot?.cwd || null;
+    if (!repoRoot) return null;
+    return {
+      viewPath: mainViewPath(repoRoot),
+      ledgerPath: ledgerDbPath(repoRoot),
+      versionId: String(config.versionId || boot?.atlas?.versionId || "main"),
+      readRoot: String(repoRoot),
+      repoId: config.repoId || boot?.atlas?.repoId || null,
+      config,
+    };
   }
 
   #readContextVersion(context) {

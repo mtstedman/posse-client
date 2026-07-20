@@ -1549,7 +1549,7 @@ export class AdminSettingsController {
         const hasDbRows = section.keys.some((key) => key !== "delegation_mode" && settingsByKey.has(key));
         const hasDelegation = section.role === "delegator" && delegationSettings[0];
         if (!providerRow && !hasDbRows && !hasDelegation) continue;
-        pushSection(section.label, "(enabled; provider, turn limit, token cap)");
+        pushSection(section.label, "(enabled; provider, reasoning, turn limit, token cap)");
         pushTableHeader();
         if (providerRow) pushProviderSettingRow(providerRow);
         if (hasDelegation) {

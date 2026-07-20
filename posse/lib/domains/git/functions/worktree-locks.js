@@ -10,7 +10,7 @@
 
 import fs from "fs";
 import path from "path";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { setTimeout as sleepAsyncTimer } from "node:timers/promises";
 import { threadId } from "node:worker_threads";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
@@ -20,7 +20,7 @@ import { ensurePosseGitInfoExclude } from "../../runtime/functions/ignore.js";
 import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { WorktreeLock, AsyncWorktreeLock } from "../classes/WorktreeLock.js";
-import { runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
+import { runGitNativeMethod } from "./native/invoke.js";
 
 const WORKTREE_LOCK_STALE_MS = 2 * 60 * 1000;
 const WORKTREE_LOCK_WAIT_MS = 3 * 60 * 1000;
@@ -566,13 +566,10 @@ export async function releaseWorktreeLockAsync(lockOrPath, maybeLock = null) {
 // info/exclude write, and payload normalization live once so the sync/async
 // twins send identical requests.
 //
-// ROUTING INVARIANT: every worktree/stash lock-path RESOLUTION call site passes
-// `{ disabled: true }` so the path is computed by the Node implementation on
-// both the sync worker lane and the async lifecycle lane. Lock paths are pure
-// path computations; if one lane resolved via the native binary and the other
-// via Node, a native/Node disagreement would make the lanes lock DIFFERENT
-// files and silently break cross-lane mutual exclusion. (Branch locks resolve
-// via native on both twins — consistent, so left as-is.)
+// ROUTING INVARIANT: worktree/stash lock paths are computed locally on both the
+// sync worker lane and the async lifecycle lane. They are needed before native
+// Git readiness is guaranteed, and a cold pulse must never disable locking or
+// divert partial-work recovery. Branch locks still resolve through native Git.
 function lockPathRequestPayload(wtPath, projectDir, extra = {}) {
   const runtimeRoot = getRuntimeRoot(projectDir || wtPath);
   try { ensurePosseGitInfoExclude(projectDir || wtPath); } catch { /* best effort */ }
@@ -584,20 +581,70 @@ function lockPathRequestPayload(wtPath, projectDir, extra = {}) {
   };
 }
 
-export function worktreeLockPath(wtPath, projectDir = null, nativeParity = {}) {
-  return runGitNativeMethod("git.worktree.lockPath", lockPathRequestPayload(wtPath, projectDir), nativeParity);
+function lockSafeFilename(value, fallback) {
+  const source = String(value || fallback || "");
+  const safe = source
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return safe || "x";
 }
 
-export function gitStashLockPath(wtPath, projectDir = null, nativeParity = {}) {
-  return runGitNativeMethod("git.worktree.stashLockPath", lockPathRequestPayload(wtPath, projectDir), nativeParity);
+function localLockPath(runtimeRoot, directory, value, fallback) {
+  const resolved = path.resolve(value);
+  const lockKey = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  const hash = createHash("sha256").update(lockKey).digest("hex").slice(0, 16);
+  const base = lockSafeFilename(path.basename(resolved) || fallback, fallback).slice(0, 40);
+  return path.join(runtimeRoot, directory, `${base}-${hash}.lock`);
 }
 
-export async function gitStashLockPathAsync(wtPath, projectDir = null, { signal = null, nativeParity = {} } = {}) {
-  return await runGitNativeMethodAsync(
-    "git.worktree.stashLockPath",
-    lockPathRequestPayload(wtPath, projectDir),
-    { ...nativeParity, signal },
-  );
+function localGitCommonDir(wtPath) {
+  const resolvedWorktree = path.resolve(wtPath);
+  const dotGit = path.join(resolvedWorktree, ".git");
+  try {
+    if (fs.statSync(dotGit).isDirectory()) return dotGit;
+  } catch { /* inspect a possible gitfile below */ }
+
+  try {
+    const match = /^gitdir:\s*(.+)$/im.exec(fs.readFileSync(dotGit, "utf8"));
+    if (match?.[1]) {
+      const gitDir = path.resolve(resolvedWorktree, match[1].trim());
+      try {
+        const common = fs.readFileSync(path.join(gitDir, "commondir"), "utf8").trim();
+        if (common) return path.resolve(gitDir, common);
+      } catch { /* a submodule gitdir is already its common dir */ }
+      return gitDir;
+    }
+  } catch { /* not a gitfile */ }
+
+  // A bare repository has no .git entry; match `rev-parse --git-common-dir`
+  // returning the repository root when its basic control files are present.
+  try {
+    if (
+      fs.statSync(path.join(resolvedWorktree, "objects")).isDirectory()
+      && fs.statSync(path.join(resolvedWorktree, "HEAD")).isFile()
+    ) return resolvedWorktree;
+  } catch { /* not a bare repository */ }
+  return null;
+}
+
+export function worktreeLockPath(wtPath, projectDir = null, _nativeParity = {}) {
+  const request = lockPathRequestPayload(wtPath, projectDir);
+  return localLockPath(request.runtimeRoot, "worktree-locks", request.wtPath, "worktree");
+}
+
+export function gitStashLockPath(wtPath, projectDir = null, _nativeParity = {}) {
+  const request = lockPathRequestPayload(wtPath, projectDir);
+  // refs/stash is shared by linked worktrees, so key this lock by the main
+  // repository's common Git directory rather than by one worktree lane.
+  const repoIdentity = localGitCommonDir(request.wtPath)
+    || request.projectDir
+    || request.wtPath;
+  return localLockPath(request.runtimeRoot, "git-stash-locks", repoIdentity, "repo");
+}
+
+export async function gitStashLockPathAsync(wtPath, projectDir = null, { signal = null } = {}) {
+  throwIfAborted(signal);
+  return gitStashLockPath(wtPath, projectDir);
 }
 
 export function gitBranchLockPath(wtPath, branchName, projectDir = null, nativeParity = {}) {

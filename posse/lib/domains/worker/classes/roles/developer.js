@@ -241,7 +241,9 @@ export class DeveloperRole extends BaseRole {
       .filter((part) => part != null && String(part) !== "")
       .join("\n");
     if (ctx.promptState) ctx.promptState.taskInstructions = taskInstructions;
-    const prompt = await buildPromptAsync(ctx.packet, taskInstructions);
+    const prompt = await buildPromptAsync(ctx.packet, taskInstructions, {
+      providerName: ctx.providerName,
+    });
     if (ctx?.promptArtifact && !ctx.promptArtifact.stored && job) {
       storeArtifact({
         work_item_id: job.work_item_id,

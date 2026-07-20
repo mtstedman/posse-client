@@ -95,6 +95,11 @@ export function setAttemptCommitHash(attemptId, commitHash) {
   db.prepare(`UPDATE job_attempts SET commit_hash = ? WHERE id = ?`).run(commitHash, attemptId);
 }
 
+export function setAttemptModelName(attemptId, modelName) {
+  const db = getDb();
+  db.prepare(`UPDATE job_attempts SET model_name = ? WHERE id = ?`).run(modelName, attemptId);
+}
+
 export function setAttemptSession(attemptId, {
   sessionId = null,
   leaseToken = null,

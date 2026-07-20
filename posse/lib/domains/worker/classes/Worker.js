@@ -392,6 +392,12 @@ const ATLAS_FRESHNESS_GATED_JOB_TYPES = new Set(["plan", "dev", "fix"]);
 const ATLAS_FRESHNESS_GATE_MAX_DEFERRALS = 3;
 const ATLAS_FRESHNESS_GATE_DEFAULT_DELAY_MS = 2500;
 
+function atlasRequiredByAbHarness(env = process.env) {
+  const required = /^(1|true|yes|on)$/i.test(String(env?.POSSE_AB_REQUIRE_ATLAS || "").trim());
+  const harness = String(env?.POSSE_AB_HARNESS || "").trim();
+  return required && !!harness;
+}
+
 function atlasFreshnessDeferralCount(payload = {}) {
   const value = Number(payload?._atlas_freshness_deferrals || 0);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
@@ -1229,10 +1235,15 @@ export class Worker {
       return { ok: false, deferred: true, gate, readyAt };
     }
 
-    const message = `Proceeding with ${job.job_type} job after ATLAS freshness gate degraded (${gate.reason || "atlas_not_ready"})`;
+    const requireAtlas = atlasRequiredByAbHarness();
+    const message = requireAtlas
+      ? `Stopped ${job.job_type} job because the A/B harness requires a fresh ATLAS main view (${gate.reason || "atlas_not_ready"})`
+      : `Proceeding with ${job.job_type} job after ATLAS freshness gate degraded (${gate.reason || "atlas_not_ready"})`;
     this.emit(
       job.id,
-      `${C.yellow}[atlas] WI#${job.work_item_id} job #${job.id}: main view not fresh after ${priorDeferrals} deferral(s); proceeding with degraded ATLAS${C.reset}`,
+      requireAtlas
+        ? `${C.red}[atlas] WI#${job.work_item_id} job #${job.id}: main view not fresh after ${priorDeferrals} deferral(s); ATLAS-required harness is stopping before provider execution${C.reset}`
+        : `${C.yellow}[atlas] WI#${job.work_item_id} job #${job.id}: main view not fresh after ${priorDeferrals} deferral(s); proceeding with degraded ATLAS${C.reset}`,
     );
     logEvent({
       work_item_id: job.work_item_id,
@@ -1249,8 +1260,14 @@ export class Worker {
         target_branch: gate.targetBranch || null,
         pending_warm_job_ids: pendingIds,
         readiness: gate.readiness || null,
+        atlas_required_by_harness: requireAtlas,
+        provider_execution_blocked: requireAtlas,
       }),
     });
+    if (requireAtlas) {
+      this._releaseWithoutAttemptPenalty(job, leaseToken, "dead_letter");
+      return { ok: false, degraded: true, halted: true, requireAtlas: true, gate };
+    }
     return { ok: true, degraded: true, gate };
   }
 
