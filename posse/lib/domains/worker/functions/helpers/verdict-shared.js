@@ -708,6 +708,17 @@ function _looksLikeScopedFilePath(value = "") {
   return true;
 }
 
+function _normalizeInferredScopeCandidate(value = "") {
+  const normalized = String(value || "").trim().replace(/\\/g, "/");
+  // Assessor evidence often links to an absolute file inside a Posse
+  // worktree. The generic token regex cannot retain the leading slash, so the
+  // link target otherwise looks like a new repo-relative `tmp/...` path and
+  // falsely expands a one-shot fix scope. Collapse only the known worktree
+  // layout back to the path inside that worktree.
+  const worktreePath = normalized.match(/(?:^|\/)\.posse-worktrees\/[^/]+\/(.+)$/i);
+  return worktreePath?.[1] || normalized;
+}
+
 export function _extractScopedPathsFromInstructions(text = "") {
   const source = String(text || "");
   if (!source.trim()) {
@@ -716,11 +727,11 @@ export function _extractScopedPathsFromInstructions(text = "") {
 
   const candidates = new Set();
   for (const match of source.matchAll(/`([^`\r\n]+)`/g)) {
-    const value = match[1].trim().replace(/\\/g, "/");
+    const value = _normalizeInferredScopeCandidate(match[1]);
     if (_looksLikeScopedFilePath(value)) candidates.add(value);
   }
   for (const match of source.matchAll(/\b([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+|[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)\b/g)) {
-    const value = match[1].trim().replace(/\\/g, "/");
+    const value = _normalizeInferredScopeCandidate(match[1]);
     if (_looksLikeScopedFilePath(value)) candidates.add(value);
   }
 
