@@ -260,6 +260,10 @@ function acceptsLocalFinalOutput(validate, content) {
   }
 }
 
+function isBareLocalMissingContext(output) {
+  return /^(?:```(?:tool_code|text)?\s*)?MISSING_CONTEXT(?:\s*```)?$/i.test(String(output || "").trim());
+}
+
 function localToolProtocolRepairPrompt(output, generation = null) {
   const truncated = String(generation?.finishReason || "").trim().toLowerCase() === "length";
   const encodedAsset = /(?:data:image|base64|background-image\s*:|url\s*\()/i.test(String(output || ""));
@@ -337,6 +341,7 @@ export function formatGemmaLocalToolResult(name, result, maxChars = MAX_LOCAL_TO
  *   formatResult?: (name: string, result: unknown) => string,
  *   completeSuppressedReplay?: (name: string, args: Record<string, unknown>, result: unknown, context: {executedMutations: Array<{name: string, args: Record<string, unknown>, result: unknown}>}) => string | null,
  *   finalOutputHint?: string | null,
+ *   missingContextCall?: {name: string, arguments: Record<string, unknown>} | null,
  *   validateFinalOutput?: (content: string) => boolean,
  *   turnLimit?: number,
  * }} [options]
@@ -349,6 +354,7 @@ export async function runLocalPlannerToolLoop({
   formatResult = formatLocalToolResult,
   completeSuppressedReplay = null,
   finalOutputHint = null,
+  missingContextCall = null,
   validateFinalOutput = null,
   turnLimit = LOCAL_PLANNER_TOOL_TURN_LIMIT,
 } = {}) {
@@ -374,13 +380,29 @@ export async function runLocalPlannerToolLoop({
   let lastToolFingerprint = null;
   let lastToolResult = null;
   let finalizationAttempted = false;
+  let missingContextRecovered = false;
   const finalizationEvidence = [];
 
   while (true) {
     const generation = await generate(conversation);
     generations.push(generation);
     const content = String(generation?.content || "").trim();
-    const call = parseLocalToolCall(content);
+    let call = parseLocalToolCall(content);
+    if (!call
+      && !missingContextRecovered
+      && plainObject(missingContextCall)
+      && isBareLocalMissingContext(content)) {
+      const name = String(missingContextCall.name || "").trim();
+      const args = plainObject(missingContextCall.arguments);
+      if (name && args) {
+        missingContextRecovered = true;
+        call = {
+          name,
+          arguments: args,
+          raw: JSON.stringify({ name, arguments: args }),
+        };
+      }
+    }
     if (!call) {
       if (finalizationAttempted && (looksLikeLocalToolCallAttempt(content) || looksLikeLocalToolDefinitionEcho(content))) {
         const error = new Error("Local model returned another tool-shaped response after tool mode was closed.");

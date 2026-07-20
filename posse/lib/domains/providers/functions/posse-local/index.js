@@ -429,6 +429,12 @@ export async function callProvider(promptText, opts = {}) {
       finalOutputHint: role === "planner"
         ? "Return only the planner task JSON array required by the original request. Its first non-whitespace character must be [ and its last must be ]."
         : `Return only the required ${role} result block in the original format, with an honest COMPLETE or BLOCKED status.`,
+      missingContextCall: LOCAL_FILE_WRITE_ROLES.has(role)
+        && exactWriteTarget
+        && maxReads > 0
+        && toolDefinitions.some((tool) => String(tool?.name || "") === "read_file")
+        ? { name: "read_file", arguments: { path: exactWriteTarget } }
+        : null,
       validateFinalOutput: role === "planner" ? validLocalPlannerOutput : null,
       generate,
       execute: async (name, args) => {
