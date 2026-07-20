@@ -39,7 +39,7 @@ import {
   buildWorkflowModeBlock,
 } from "../../../intake/functions/hints.js";
 import { currentExecutionProvider, extractResearchRetryContext } from "../../functions/helpers/diagnostics.js";
-import { collectAtlasCoveredFiles, composePromptRemoteAware, handoff, parseResearcherStructuredOutput, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
+import { collectAtlasCoveredFiles, composePromptRemoteAware, handoff, parseResearcherStructuredOutput, renderAtlasHandoffSections, sanitizeResearcherStructuredOutput } from "../../../handoff/functions/index.js";
 import {
   getResearchBudget as defaultGetResearchBudget,
   isDeepthinkTask as defaultIsDeepthinkTask,
@@ -752,6 +752,7 @@ export class ResearcherRole extends BaseRole {
   }
 
   async processOutput(output, _stats, job, ctx) {
+    output = sanitizeResearcherStructuredOutput(output);
     storeArtifact({
       work_item_id: job.work_item_id,
       job_id: job.id,

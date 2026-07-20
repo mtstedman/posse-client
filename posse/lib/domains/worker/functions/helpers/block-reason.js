@@ -27,11 +27,16 @@ const GATEWAY_IDENTITY = /(mcp__posse[-_]?gateway|posse[-\s]?gateway|posse mcp g
 const UNAVAILABLE = /(not connected|unavailable|not available|not callable|could not (?:call|invoke|be called|be invoked)|failed to (?:connect|attach|start|initialize)|did not (?:start|connect)|disconnect|no such tool)/i;
 const GENERIC_MCP = /\bmcp\b/i;
 const GENERIC_MCP_TARGET = /(gateway|server|tool)/i;
-const SCOPED_FILE_TOOL_TARGET = /(scoped\s+(?:read|edit|write|file)(?:\s*\/\s*(?:read|edit|write|file))*\s+(?:gateway\s+)?tools?|scoped\s+repository\s+mutation|required\s+posse\s+file\s+tools?|(?:read|edit|write|file)(?:\s*\/\s*(?:read|edit|write|file))+\s+gateway\s+tools?)/i;
+const SCOPED_FILE_TOOL_TARGET = /(scoped\s+(?:read|edit|write|file)(?:\s*\/\s*(?:read|edit|write|file))*\s+(?:gateway\s+)?(?:tools?|actions?)|scoped\s+repository\s+mutation|required\s+posse\s+file\s+tools?|(?:read|edit|write|file)(?:\s*\/\s*(?:read|edit|write|file))+\s+gateway\s+(?:tools?|actions?))/i;
 const MISSING_EXECUTABLE_ACCESS = /(?:missing|no|without)\s+executable\s+access/i;
 const REQUIRED_EXECUTABLE_TOOL_TARGET = /(atlas\.fetch_ref|repository\s+read|scoped\s+file[-\s]write\s+tools?)/i;
 const TOOL_ROUTING_FAILURE = /(?:deterministic\s+)?tool(?:[-\s]surface)?\s+routing.*(?:feedback[-\s]?poll\s+errors?|instead of\s+(?:scoped\s+)?(?:file|repository)\s+access)/i;
 const REQUIRED_FILE_ACCESS_FAILURE = /(?:instead of\s+(?:scoped\s+)?(?:file|repository)\s+access|could not be\s+(?:inspected|read|modified|written))/i;
+const DETERMINISTIC_SCOPED_READ_FAILURE = /missing\s+exact\s+file\s+contents\s+for\s+[`'\"]?[a-z0-9_./\\-]+[`'\"]?.*atlas\s+could\s+not\s+read\s+the\s+file.*no\s+usable\s+deterministic\s+read\s+response\s+was\s+available/i;
+const SCOPED_PATH_MUTATION_FAILURE = /scoped\s+[`'\"]?[a-z0-9_./\\-]+[`'\"]?\s+(?:edit|write|mutation)(?:\s+and\s+verification)?\s+remain(?:s)?\s+undone\s+due\s+unavailable\s+posse\s+file\s+mutation\s+tool\s+access/i;
+const REQUIRED_EXECUTION_CAPABILITY_FAILURE = /missing\s+execution\s+capability\s+prevented\s+reading,\s*editing,\s*and\s+running\s+[`'\"]?node\s+--test\s+[a-z0-9_./\\-]+[`'\"]?/i;
+const SCOPED_EXECUTABLE_ACCESS_FAILURE = /missing\s+executable\s+access\s+to\s+[`'\"]?[a-z0-9_./\\-]+[`'\"]?\s+through\s+the\s+provided\s+posse\s+tools\s+prevented\s+any\s+in-scope\s+change/i;
+const HUMAN_FILE_AUTHORITY_REQUIRED = /(?:human|operator)\s+(?:permission|approval)|credentials?|access\s+policy|scope\s+expansion/i;
 
 /**
  * Returns true when a BLOCKED reason (or attempt error_text) looks like a
@@ -65,6 +70,22 @@ export function isTransientMcpInfraBlock(reason) {
   // the feedback poller instead. Match that exact routing/file-access shape,
   // not generic poll errors or genuine filesystem permission requests.
   if (TOOL_ROUTING_FAILURE.test(text) && REQUIRED_FILE_ACCESS_FAILURE.test(text)) return true;
+
+  // A detached repair surface may report the assigned file path but fail both
+  // ATLAS and the deterministic read fallback. Require all three parts of that
+  // exact shape, and never absorb genuine permission or scope requests.
+  if (DETERMINISTIC_SCOPED_READ_FAILURE.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
+
+  // A one-shot provider may identify the assigned path and the unavailable
+  // Posse mutation surface without calling it a gateway. Keep the full
+  // path/edit/undone/tool-access shape to avoid swallowing product decisions.
+  if (SCOPED_PATH_MUTATION_FAILURE.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
+
+  // Codex may describe the absent deterministic read/write/test surface as a
+  // missing execution capability, or bind missing executable access directly
+  // to the assigned path. Both are retryable only in their full scoped shapes.
+  if (REQUIRED_EXECUTION_CAPABILITY_FAILURE.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
+  if (SCOPED_EXECUTABLE_ACCESS_FAILURE.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
 
   // Canonical phrasings emitted by the dev agent when the gateway is missing.
   if (/not connected to this execution environment/i.test(text)) return true;

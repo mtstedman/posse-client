@@ -61,6 +61,7 @@ import {
   normalizeResearcherKeySymbols as normalizeResearcherKeySymbolsFromModule,
   parseResearcherStructuredOutput as parseResearcherStructuredOutputFromModule,
   researcherOutputNeedsHuman as researcherOutputNeedsHumanFromModule,
+  sanitizeResearcherStructuredOutput as sanitizeResearcherStructuredOutputFromModule,
 } from "./helpers/researcher-output.js";
 import { detectPendingMergeAsync as detectPendingMergeAsyncFromModule } from "./helpers/merge-state.js";
 import {
@@ -800,6 +801,21 @@ async function _attachAtlasDbPrefetch(packet) {
   return attachAtlasDbPrefetchFromModule(packet);
 }
 
+function _atlasHandoffPrefetchAllowed(packet) {
+  const values = [
+    packet?.context_hints?.allow_atlas_handoff_prefetch,
+    packet?.context_hints?.allowAtlasHandoffPrefetch,
+    packet?._raw_payload?.allow_atlas_handoff_prefetch,
+    packet?._raw_payload?.allowAtlasHandoffPrefetch,
+  ];
+  const explicit = values.find((value) => value !== undefined && value !== null);
+  if (explicit === undefined) return true;
+  if (typeof explicit === "string") {
+    return !["0", "false", "no", "off"].includes(explicit.trim().toLowerCase());
+  }
+  return explicit !== false && explicit !== 0;
+}
+
 function _applyToolPolicy(recipient, packet) {
   const base = TOOL_POLICIES[recipient] || TOOL_POLICIES.dev;
   const hints = packet.context_hints || {};
@@ -1479,19 +1495,40 @@ export async function handoff(input) {
   };
   let atlasPrefetchStepError = null;
   const atlasPrefetchPacket = { ...packet };
-  await timeHandoffStep(packet, "atlas.prefetch", () => runWithObservationContext(prefetchCtx, async () => {
-    await Promise.all([
-      _attachAtlasPlannerSlice(atlasPrefetchPacket),
-      _attachAtlasAssessorPrefetch(atlasPrefetchPacket),
-      _attachAtlasResearcherPrefetch(atlasPrefetchPacket),
-      _attachAtlasDbPrefetch(atlasPrefetchPacket),
-    ]);
-  }), {
-    timeoutMs: atlasHandoffPrefetchTimeoutMs(),
-    timeoutGraceMs: HANDOFF_TIMEOUT_GRACE_MS,
-  }).catch((err) => {
-    atlasPrefetchStepError = err;
-  });
+  const atlasHandoffPrefetchAllowed = _atlasHandoffPrefetchAllowed(packet);
+  if (atlasHandoffPrefetchAllowed) {
+    await timeHandoffStep(packet, "atlas.prefetch", () => runWithObservationContext(prefetchCtx, async () => {
+      await Promise.all([
+        _attachAtlasPlannerSlice(atlasPrefetchPacket),
+        _attachAtlasAssessorPrefetch(atlasPrefetchPacket),
+        _attachAtlasResearcherPrefetch(atlasPrefetchPacket),
+        _attachAtlasDbPrefetch(atlasPrefetchPacket),
+      ]);
+    }), {
+      timeoutMs: atlasHandoffPrefetchTimeoutMs(),
+      timeoutGraceMs: HANDOFF_TIMEOUT_GRACE_MS,
+    }).catch((err) => {
+      atlasPrefetchStepError = err;
+    });
+  } else if (packet.atlas?.active) {
+    packet.atlas.prefetchOptOut = true;
+    try {
+      recordObservation({
+        work_item_id: packet.work_item_id ?? null,
+        job_id: packet.job_id ?? null,
+        attempt_id: parentCtx.attempt_id ?? null,
+        observation_type: "atlas.prefetch.skipped",
+        summary: "ATLAS handoff prefetch skipped by explicit packet opt-out",
+        detail: {
+          kind: "atlas_prefetch_skipped",
+          origin: "handoff",
+          reason: "allow_atlas_handoff_prefetch=false",
+        },
+      });
+    } catch {
+      // Optional telemetry must not block a cold-context handoff.
+    }
+  }
 
   if (!atlasPrefetchStepError) {
     copyAtlasPrefetchFields(packet, atlasPrefetchPacket);
@@ -2081,6 +2118,10 @@ export function normalizeResearcherFilePriorities(parsed) {
 
 export function normalizeResearcherCitationTriage(parsed, opts = {}) {
   return normalizeResearcherCitationTriageFromModule(parsed, opts);
+}
+
+export function sanitizeResearcherStructuredOutput(output) {
+  return sanitizeResearcherStructuredOutputFromModule(output);
 }
 
 export {

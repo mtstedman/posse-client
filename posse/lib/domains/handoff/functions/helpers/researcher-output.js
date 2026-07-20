@@ -146,6 +146,39 @@ export function normalizeResearcherCitationTriage(parsed, opts = {}) {
 }
 
 /**
+ * Rewrite the final structured appendix so every material ref is delivered in
+ * one lane only. Models occasionally repeat a ref in proof/support/decoy even
+ * though downstream normalization is first-lane-wins; sanitizing before the
+ * response artifact is stored keeps the durable handoff canonical too.
+ *
+ * @param {string} output
+ * @returns {string}
+ */
+export function sanitizeResearcherStructuredOutput(output) {
+  if (!output || typeof output !== "string") return output;
+  const blocks = [...output.matchAll(/```json\s*([\s\S]*?)```/gi)];
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    const block = blocks[index];
+    const extracted = extractJsonResult(block[1]);
+    if (!extracted.found || extracted.repaired) continue;
+    const parsed = extracted.value;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    if (!HASH_REF_LANES.some((lane) => Array.isArray(parsed[lane]))) continue;
+
+    const triage = normalizeResearcherCitationTriage(parsed);
+    const normalized = { ...parsed };
+    for (const lane of HASH_REF_LANES) {
+      normalized[lane] = triage[lane].map(({ hash, why }) => (
+        why ? [hash, why] : [hash]
+      ));
+    }
+    const replacement = `\`\`\`json\n${JSON.stringify(normalized, null, 2)}\n\`\`\``;
+    return output.slice(0, block.index) + replacement + output.slice(block.index + block[0].length);
+  }
+  return output;
+}
+
+/**
  * Normalize the researcher's `memories` appendix field: durable findings the
  * pipeline persists deterministically (no agent tool calls). Hard-capped per
  * round, length-bounded, deduped by title — the appendix is
