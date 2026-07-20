@@ -372,7 +372,6 @@ export function prepareVerdictForDispatch(job, verdict) {
         ...prepared,
         verdict: "needs_review",
         confidence,
-        _disable_internal_retry: true,
         reasons: [
           `Deterministic assessment policy requires ${passConfidenceFloor} confidence to pass this risk profile; assessor returned ${confidence}.`,
           ...(prepared.reasons || []),

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { ML_GENERATE_METHOD } from "../../../../catalog/binary.js";
+import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getSetting } from "../../../queue/functions/index.js";
 import { runMlNativeMethodAsync } from "../../../../shared/native/functions/ml-invoke.js";
 import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
@@ -63,11 +64,21 @@ export function getCredentialEnvVars() {
   return [];
 }
 
+export function isLocalGenerationEnabled({ getSettingFn = getSetting } = {}) {
+  if (isProviderEnabledByCatalog("posse-local")) return true;
+  try {
+    return /^(1|true|yes|on)$/i.test(String(getSettingFn(SETTING_KEYS.POSSE_LOCAL_GENERATION_ENABLED) || "").trim());
+  } catch {
+    return false;
+  }
+}
+
 export function isReady({
   manager = nativeBinaries,
   modelRoot = defaultLocalGenerationModelRoot(),
+  getSettingFn = getSetting,
 } = {}) {
-  if (!isProviderEnabledByCatalog("posse-local")) {
+  if (!isLocalGenerationEnabled({ getSettingFn })) {
     return { ready: false, reason: "local text generation is disabled by the model catalog" };
   }
   if (process.arch !== "x64" || !["linux", "win32"].includes(process.platform)) {

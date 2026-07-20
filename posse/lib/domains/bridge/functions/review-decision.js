@@ -9,7 +9,10 @@ import {
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
-import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
+import {
+  isHumanInputCoordinationPayload,
+  isHumanInputReviewPayload,
+} from "../../../catalog/human-input.js";
 
 const OPEN_REVIEW_GATE_STATUSES = new Set(["queued", "waiting_on_human", "waiting_on_review"]);
 
@@ -23,11 +26,8 @@ export function isReviewGateJob(job, payload = null) {
   if (!job || job.job_type !== "human_input") return false;
   const parsed = payload || parseJobPayload(job);
   if (parsed?.subtype === "plan_approval") return false;
-  if (
-    parsed?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
-    || parsed?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE
-  ) return false;
-  if (parsed?.review_type) return true;
+  if (isHumanInputCoordinationPayload(parsed)) return false;
+  if (isHumanInputReviewPayload(parsed)) return true;
   return job.status === "waiting_on_review";
 }
 

@@ -88,6 +88,7 @@ import { jobReportStatus, workItemDisplayStatus } from "../display/Display.js";
 import { FAILED_JOB_STATUSES } from "../../../../catalog/job.js";
 import { getAccountSettingsPathForDisplay } from "../../../settings/functions/account-settings.js";
 import { closePromptLog, promptPreviewText, readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
+import { PROMPT_BODY_STORAGE_NOTICE } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import { closeOutputLog, readRecentOutputs } from "../../../../shared/telemetry/functions/logging/output-log.js";
 import { closeLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { buildCurrentRoleContract } from "../../../worker/functions/role-contract-view.js";
@@ -2288,6 +2289,9 @@ export class AdminTUI {
     lines.push(`  ${C.bold}Prompt${C.reset}${prompt ? `  ${C.dim}(${prompt.prompt_chars || 0} chars, ts ${prompt.ts})${C.reset}` : ""}`);
     if (!prompt) {
       lines.push(`    ${C.dim}Not in log (older than 3-day retention, or captured before agent_call_id was added).${C.reset}`);
+    } else if (prompt.prompt_redacted) {
+      lines.push(`    ${C.dim}${PROMPT_BODY_STORAGE_NOTICE}${C.reset}`);
+      lines.push(`    ${C.dim}Local metadata was recorded successfully; this is not a persistence error.${C.reset}`);
     } else {
       const promptText = String(prompt.prompt || "");
       const promptLines = promptText.split("\n").slice(0, 80);
@@ -2442,7 +2446,12 @@ export class AdminTUI {
         lines.push("");
       }
 
-      if (rec.system_prompt && !inlineSystemDuplicate) {
+      if (rec.prompt_redacted) {
+        lines.push(` ${C.bold}RECORDED PROMPT METADATA${C.reset}`);
+        lines.push(` ${C.dim}${PROMPT_BODY_STORAGE_NOTICE}${C.reset}`);
+        lines.push(` ${C.dim}Local metadata was recorded successfully; this is not a persistence error.${C.reset}`);
+        lines.push("");
+      } else if (rec.system_prompt && !inlineSystemDuplicate) {
         lines.push(` ${C.bold}RECORDED SYSTEM PROMPT / ATTACHED ROLE CONTRACTS${C.reset}`);
         const systemLines = systemText.split(/\r?\n/).slice(0, 40);
         for (const sl of systemLines) lines.push(` ${C.dim}${sl.slice(0, inner - 2)}${C.reset}`);
@@ -2453,18 +2462,20 @@ export class AdminTUI {
       } else {
         lines.push(` ${C.bold}RECORDED PROVIDER PROMPT${C.reset}`);
       }
-      const text = userPromptText;
-      const paragraphs = text.split(/\r?\n/);
-      for (const line of paragraphs) {
-        if (!line) { lines.push(""); continue; }
-        let remaining = line;
-        while (remaining.length > inner - 2) {
-          lines.push(` ${remaining.slice(0, inner - 2)}`);
-          remaining = remaining.slice(inner - 2);
+      if (!rec.prompt_redacted) {
+        const text = userPromptText;
+        const paragraphs = text.split(/\r?\n/);
+        for (const line of paragraphs) {
+          if (!line) { lines.push(""); continue; }
+          let remaining = line;
+          while (remaining.length > inner - 2) {
+            lines.push(` ${remaining.slice(0, inner - 2)}`);
+            remaining = remaining.slice(inner - 2);
+          }
+          lines.push(` ${remaining}`);
         }
-        lines.push(` ${remaining}`);
+        lines.push("");
       }
-      lines.push("");
       return lines;
     }
 

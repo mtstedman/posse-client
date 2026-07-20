@@ -20,6 +20,7 @@ import {
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { redactBridgeValue } from "../functions/redaction.js";
 import { composeInstanceStatus } from "../functions/instance-status.js";
+import { bridgeGateAnswerContract, bridgeGateKindForJob } from "../functions/gate-contract.js";
 import { workItemCost } from "../../billing/functions/cost.js";
 
 const DEFAULT_REPLAY_LIMIT = 1000;
@@ -78,18 +79,6 @@ function resolutionForJob(job, payload = {}) {
   return "answered";
 }
 
-function gateKindForJob(job, payload = {}) {
-  if (payload?.subtype === "push_offer") return "push";
-  if (payload?.subtype === "plan_approval") return "plan";
-  if (
-    payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
-    || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE
-  ) return "human_input";
-  if (payload?.review_type) return "review";
-  if (job?.status === "waiting_on_review") return "review";
-  return "human_input";
-}
-
 function isReadyOneshotScopeSelection(payload = {}) {
   const isScopeSelection = payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
     || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE;
@@ -114,11 +103,12 @@ function gatePayloadForJob(job) {
   return {
     job_id: Number(job.id),
     work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),
-    kind: gateKindForJob(job, payload),
+    kind: bridgeGateKindForJob(job, payload),
     title: job.title || "",
     prompt: promptFromGatePayload(payload),
     opened_at: job.updated_at || job.created_at || null,
     status: job.status,
+    ...bridgeGateAnswerContract(payload),
     payload: redactBridgeValue(payload),
   };
 }

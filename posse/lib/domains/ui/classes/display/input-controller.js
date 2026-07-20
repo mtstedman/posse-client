@@ -150,7 +150,10 @@ export class DisplayInputController {
       if (flatIdx < cursor + remaining) {
         const targetIdx = qSet.currentIdx + (flatIdx - cursor);
         while (qSet.currentIdx < targetIdx) {
-          qSet.answers.push({ question: qSet.questions[qSet.currentIdx], answer: "(skipped)" });
+          qSet.answers.push({
+            question: qSet.questions[qSet.currentIdx],
+            answer: qSet.escapeAnswer || "(skipped)",
+          });
           qSet.currentIdx++;
         }
         this._inputMode = "question";
@@ -249,23 +252,35 @@ export class DisplayInputController {
     }
   }
 
+  _submitChoice(choiceIndex) {
+    if (!this._activeQ || this._inputBuf.length > 0) return false;
+    const choices = Array.isArray(this._activeQ.choices) ? this._activeQ.choices : [];
+    const choice = choices[choiceIndex];
+    if (typeof choice !== "string" || !choice.trim()) return false;
+    this._inputBuf = choice.trim();
+    this._submitAnswer();
+    return true;
+  }
+
   _skipQuestion() {
     if (!this._activeQ) return;
     const q = this._activeQ;
-
-    q.answers.push({
-      question: q.questions[q.currentIdx],
-      answer: "(skipped)",
-    });
-
+    const finalQuestionIdx = q.escapeAnswer ? q.questions.length : q.currentIdx + 1;
+    while (q.currentIdx < finalQuestionIdx) {
+      q.answers.push({
+        question: q.questions[q.currentIdx],
+        answer: q.escapeAnswer || "(skipped)",
+      });
+      q.currentIdx++;
+    }
     this._inputBuf = "";
-    q.currentIdx++;
 
     if (q.currentIdx >= q.questions.length) {
       q.resolve(q.answers);
       this._removeQuestionSet(q);
       const wiTag3 = q.workItemId ? `WI#${q.workItemId} ` : "";
-      this.addEvent(`${C.dim}${wiTag3}Questions for job #${q.jobId} done (some skipped)${C.reset}`);
+      const resolution = q.escapeAnswer ? `continued with ${q.escapeLabel || "best judgment"}` : "some skipped";
+      this.addEvent(`${C.dim}${wiTag3}Questions for job #${q.jobId} done (${resolution})${C.reset}`);
       this._startAnswering();
     }
   }
@@ -457,6 +472,11 @@ export class DisplayInputController {
 
     // ── Normal mode ──
     if (this._inputMode === "question") {
+      const digit = digitInput(str, key);
+      if (digit != null && this._submitChoice(digit - 1)) {
+        this.requestRender({ force: true });
+        return;
+      }
       this._handleBufferedInputKeypress(str, key, {
         onReturn: () => this._submitAnswer(),
         onEscape: () => this._skipQuestion(),

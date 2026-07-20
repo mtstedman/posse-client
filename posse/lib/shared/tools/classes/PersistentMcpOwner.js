@@ -25,7 +25,18 @@ import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
 import { noteAtlasPressureAndGetNudge } from "../../../domains/integrations/functions/deterministic-mcp/gate.js";
 import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
-import { recordToolUseObservations } from "../../../domains/observability/functions/observations.js";
+import {
+  recordObservation,
+  recordToolUseObservations,
+  researchExplorationObservationStatus,
+} from "../../../domains/observability/functions/observations.js";
+import {
+  RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
+  buildResearchCitationFetchGateText,
+  buildResearchSynthesisRequiredText,
+  isResearchAtlasCitationFetchAction,
+  isResearchAtlasExplorationAction,
+} from "../../../domains/integrations/functions/deterministic-mcp/research-synthesis.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
 import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensResult, createHashRefTool, fetchHashRefTool } from "../functions/hash-adder.js";
@@ -355,6 +366,40 @@ function mcpToolTextPayload(text) {
   };
 }
 
+function isMemoryToolAction(action) {
+  return String(action || "").startsWith("memory.");
+}
+
+function terminalMemoryToolRejection(action) {
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        ok: false,
+        action: String(action || "memory"),
+        status: "rejected",
+        code: "memory_tools_disabled_for_run",
+        retryable: false,
+        message: "Memory tools are optional and are disabled for this agent run after an earlier error. No action was performed. Do not call another memory tool; continue the primary task.",
+      }),
+    }],
+    // This is an admission rejection, not another execution error. Returning a
+    // normal MCP result lets provider agents leave their error-recovery loop;
+    // the structured text still classifies as rejected in Posse telemetry.
+    isError: false,
+  };
+}
+
+function appendTerminalMemoryToolNotice(result) {
+  const first = result?.content?.[0];
+  if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+  const notice = "MEMORY_TOOL_TERMINAL: Memory is optional. Do not retry this call, invent or substitute a memory ID, or call another memory tool to report this error. Continue the assigned task without memory tools.";
+  return {
+    ...result,
+    content: [{ ...first, text: `${first.text}\n\n${notice}` }, ...result.content.slice(1)],
+  };
+}
+
 function mcpToolResultMessage(message, result) {
   const id = message && Object.prototype.hasOwnProperty.call(message, "id") ? message.id : null;
   if (id == null) return null;
@@ -362,6 +407,86 @@ function mcpToolResultMessage(message, result) {
     jsonrpc: "2.0",
     id,
     result,
+  };
+}
+
+function ownerResearchSynthesisAdmission(session, requestedAction) {
+  const boot = session?.bootConfig || {};
+  const citationFetch = isResearchAtlasCitationFetchAction(requestedAction);
+  const exploration = isResearchAtlasExplorationAction(requestedAction);
+  if (String(boot.role || "") !== "researcher" || (!exploration && !citationFetch)) {
+    return { tracked: false, blocked: false, explorationSteps: 0 };
+  }
+  const status = researchExplorationObservationStatus({
+    jobId: boot.jobId ?? null,
+    attemptId: boot.attemptId ?? null,
+  });
+  const citationFetches = Math.max(0, Number(status.citation_fetches || 0));
+  if (citationFetch) {
+    const synthesisRequired = status.synthesis_required === true;
+    return {
+      tracked: true,
+      blocked: !synthesisRequired || citationFetches >= 1,
+      blockReason: synthesisRequired ? "budget_exhausted" : "before_synthesis",
+      citationFetch: true,
+      citationFetches,
+      explorationSteps: Math.max(0, Number(status.exploration_steps || 0)),
+      synthesisRequired,
+    };
+  }
+  return {
+    tracked: true,
+    blocked: Number(status.exploration_steps || 0) >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
+    blockReason: "exploration_ceiling",
+    citationFetch: false,
+    citationFetches,
+    explorationSteps: Math.max(0, Number(status.exploration_steps || 0)),
+    synthesisRequired: status.synthesis_required === true,
+  };
+}
+
+function recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName) {
+  const boot = session?.bootConfig || {};
+  const current = researchExplorationObservationStatus({
+    jobId: boot.jobId ?? null,
+    attemptId: boot.attemptId ?? null,
+  });
+  if (current.synthesis_required) return;
+  recordObservation({
+    work_item_id: boot.workItemId ?? null,
+    job_id: boot.jobId ?? null,
+    attempt_id: boot.attemptId ?? null,
+    observation_type: "research.synthesis_required",
+    summary: `Research synthesis required after ${explorationSteps} exploration calls with 0 stale calls`,
+    detail: {
+      kind: "research_synthesis_required",
+      exploration_steps: explorationSteps,
+      stale_steps: 0,
+      min_exploration_steps: RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
+      stale_exploration_steps: 0,
+      last_novel_evidence_step: null,
+      relevant_files: null,
+      irrelevant_files: null,
+      reason: `exploration_steps=${explorationSteps}; stale_steps=0; absolute_ceiling=${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}; last_tool=${toolName}; source=mcp_owner`,
+    },
+  });
+}
+
+function appendOwnerResearchSynthesisNotice(result, session, toolName, admission) {
+  if (!admission?.tracked || admission.citationFetch) return result;
+  const explorationSteps = admission.explorationSteps + 1;
+  if (explorationSteps < RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) return result;
+  recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName);
+  const notice = buildResearchSynthesisRequiredText({
+    explorationSteps,
+    absoluteCeilingReached: true,
+    toolName,
+  });
+  const first = result?.content?.[0];
+  if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+  return {
+    ...result,
+    content: [{ ...first, text: `${first.text}\n\n${notice}` }, ...result.content.slice(1)],
   };
 }
 
@@ -1032,6 +1157,9 @@ export class PersistentMcpOwner {
     this._sessionIdsByTokenHash = new Map();
     this._gatewaySession = null;
     this._gatewayRetirements = new Set();
+    // A memory failure is terminal only for the agent session that observed
+    // it. Weak keys avoid extending the lifetime of detached MCP sessions.
+    this._terminalMemoryToolSessions = new WeakSet();
     this._startedAt = null;
     this._listenError = null;
   }
@@ -1629,6 +1757,56 @@ export class PersistentMcpOwner {
     const startedAt = Date.now();
     const context = attachTelemetryContext(session, this.bootId);
     const requested = requestedToolPolicyName(toolName, toolArgs);
+    const memoryAction = isMemoryToolAction(requested.name);
+    if (memoryAction && this._terminalMemoryToolSessions.has(session)) {
+      const result = terminalMemoryToolRejection(requested.name);
+      recordOwnerToolObservation({ session, toolName, toolArgs, result });
+      appendRunTelemetry("diagnostics", {
+        kind: "mcp.owner.atlas_tool_call",
+        ...context,
+        outcome: "rejected",
+        tool_name: toolName,
+        duration_ms: Date.now() - startedAt,
+        reason: "memory_tools_disabled_for_run",
+      });
+      return mcpToolResultMessage(message, result);
+    }
+    const synthesisAdmission = ownerResearchSynthesisAdmission(session, requested.name);
+    if (synthesisAdmission.blocked) {
+      if (!synthesisAdmission.citationFetch) {
+        recordOwnerResearchSynthesisRequired(
+          session,
+          synthesisAdmission.explorationSteps,
+          toolName,
+        );
+      }
+      const result = {
+        content: [{
+          type: "text",
+          text: synthesisAdmission.citationFetch
+            ? buildResearchCitationFetchGateText({ reason: synthesisAdmission.blockReason })
+            : buildResearchSynthesisRequiredText({
+              explorationSteps: synthesisAdmission.explorationSteps,
+              absoluteCeilingReached: true,
+              toolName,
+            }),
+        }],
+        isError: true,
+      };
+      appendRunTelemetry("diagnostics", {
+        kind: synthesisAdmission.citationFetch
+          ? "mcp.owner.research_citation_fetch_gate"
+          : "mcp.owner.research_synthesis_gate",
+        ...context,
+        outcome: "rejected",
+        tool_name: toolName,
+        exploration_steps: synthesisAdmission.explorationSteps,
+        citation_fetches: synthesisAdmission.citationFetches,
+        reason: synthesisAdmission.blockReason,
+        duration_ms: Date.now() - startedAt,
+      });
+      return mcpToolResultMessage(message, result);
+    }
     try {
       if (isAtlasFetchRefTool(toolName, toolArgs) || isAtlasCreateHashTool(toolName, toolArgs)) {
         const hashStoreTool = isAtlasCreateHashTool(toolName, toolArgs) ? createHashRefTool : fetchHashRefTool;
@@ -1637,6 +1815,12 @@ export class PersistentMcpOwner {
         }));
         result = appendOwnerOperatorFeedbackSignal(result, session);
         recordOwnerToolObservation({ session, toolName, toolArgs, result });
+        result = appendOwnerResearchSynthesisNotice(
+          result,
+          session,
+          toolName,
+          synthesisAdmission,
+        );
         appendRunTelemetry("diagnostics", {
           kind: "mcp.owner.atlas_tool_call",
           ...context,
@@ -1661,6 +1845,10 @@ export class PersistentMcpOwner {
       let result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
+      if (memoryAction && result?.isError === true) {
+        this._terminalMemoryToolSessions.add(session);
+        result = appendTerminalMemoryToolNotice(result);
+      }
       session.noteAtlasGateEvent?.({
         action: requested.name || toolName,
         args: toolArgs,
@@ -1674,6 +1862,12 @@ export class PersistentMcpOwner {
       // about pending operator feedback late or never.
       result = appendOwnerOperatorFeedbackSignal(result, session);
       recordOwnerToolObservation({ session, toolName, toolArgs, result });
+      result = appendOwnerResearchSynthesisNotice(
+        result,
+        session,
+        toolName,
+        synthesisAdmission,
+      );
       appendRunTelemetry("diagnostics", {
         kind: "mcp.owner.atlas_tool_call",
         ...context,
@@ -1699,9 +1893,20 @@ export class PersistentMcpOwner {
         error: ownerErrorSummary(err),
       });
       recordOwnerToolObservation({ session, toolName, toolArgs, error: err });
+      let result = mcpToolErrorPayload(String(err?.message || err || "ATLAS tool execution failed"), err);
+      if (memoryAction) {
+        this._terminalMemoryToolSessions.add(session);
+        result = appendTerminalMemoryToolNotice(result);
+      }
+      result = appendOwnerResearchSynthesisNotice(
+        result,
+        session,
+        toolName,
+        synthesisAdmission,
+      );
       return mcpToolResultMessage(
         message,
-        mcpToolErrorPayload(String(err?.message || err || "ATLAS tool execution failed"), err),
+        result,
       );
     }
   }

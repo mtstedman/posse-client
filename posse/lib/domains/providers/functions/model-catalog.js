@@ -29,7 +29,9 @@ const MODEL_TIER_DEFAULTS = Object.freeze({
   codex: Object.freeze({
     cheap: Object.freeze({ model: "gpt-5.4-mini" }),
     standard: Object.freeze({ model: "gpt-5.4" }),
-    strong: Object.freeze({ model: "gpt-5.6" }),
+    // ChatGPT-authenticated Codex CLI rejects gpt-5.6. Keep it known for
+    // API-backed validation, but do not make it the OAuth runtime default.
+    strong: Object.freeze({ model: "gpt-5.5" }),
   }),
   grok: Object.freeze({
     cheap: Object.freeze({ model: "grok-build-0.1" }),
@@ -308,7 +310,6 @@ export const MODEL_SETTING_DEFS = Object.freeze([
 ]);
 
 export const CODEX_OAUTH_SUPPORTED_MODELS = Object.freeze([
-  "gpt-5.6",
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",

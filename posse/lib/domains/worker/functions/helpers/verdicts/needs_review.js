@@ -8,8 +8,32 @@ import {
 } from "../verdict-shared.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 
+function isAssessmentDispositionQuestion(question) {
+  const text = String(question || "").trim().toLowerCase();
+  return /should (?:this|it) pass or fail/.test(text)
+    || /\bpass\s*\/\s*fail\b/.test(text)
+    || /\bindicate pass(?:\s+or\s+|\s*\/\s*)fail\b/.test(text);
+}
+
 export function handle(job, verdict, ctx) {
   const { emitLog: log, spawnedJobs, spawnFromAssessor, reasonBrief } = ctx;
+
+  const explicitHumanQuestions = Array.isArray(verdict.human_questions)
+    ? verdict.human_questions.filter((question) => String(question || "").trim())
+    : [];
+  const hasOperatorOnlyQuestion = explicitHumanQuestions.some((question) => !isAssessmentDispositionQuestion(question));
+  const retryReason = verdict.reasons?.[0] || "assessment could not reach a confident terminal verdict";
+  if (
+    !hasOperatorOnlyQuestion
+    && !verdict?._disable_internal_retry
+    && queueInternalAssessmentRetry(job, verdict, retryReason, {
+      leaseToken: ctx.leaseToken,
+      recordAssessorVerdict: ctx.recordAssessorVerdict,
+    })
+  ) {
+    log(`${C.yellow}[assessor] NEEDS REVIEW${C.reset} WI#${job.work_item_id} job #${job.id}: retrying assessment at a stronger tier before asking the operator${reasonBrief}`);
+    return;
+  }
 
   const changed = typeof ctx.updateJobStatus === "function"
     ? ctx.updateJobStatus("waiting_on_review")
@@ -19,8 +43,8 @@ export function handle(job, verdict, ctx) {
 
   // Always spawn a human_input job. Without one, waiting_on_review is a
   // permanent trap with no mechanism to unblock.
-  const questions = (verdict.human_questions && verdict.human_questions.length > 0)
-    ? verdict.human_questions
+  const questions = explicitHumanQuestions.length > 0
+    ? explicitHumanQuestions
     : [`Job #${job.id} ("${job.title}") needs human review.\nReasons: ${verdict.reasons.join("; ")}\nShould this pass or fail?`];
   const humanJob = spawnFromAssessor("failed", "human_input", {
     work_item_id: job.work_item_id,

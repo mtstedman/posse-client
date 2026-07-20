@@ -954,11 +954,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "memory.feedback": {
     type: "function",
     name: "atlas_memory_feedback",
-    description: "Memory. Issue positive or actionable negative feedback for an existing memory after you actually used or checked it. Do not call merely because a memory exists or was unhelpful.",
+    description: "Memory. Optionally issue positive or actionable negative feedback for an existing memory after you actually used or checked it. Do not call merely because a memory exists or was unhelpful. If feedback is rejected or fails, do not retry, invent another ID, or call another memory tool to report the error; continue the primary task.",
     parameters: {
       type: "object",
       properties: {
-        memoryId: { type: "string", description: "Memory ID returned by memory.get." },
+        memoryId: { type: "string", description: "Exact memory ID returned by memory.get. Never invent or substitute a placeholder ID." },
         verdict: { type: "string", enum: ["used", "stale", "wrong", "duplicate"], description: "Role-relative verdict. Use 'used' only when the memory materially informed the work; use negative verdicts only with evidence. Do not call feedback for merely unhelpful memories." },
         detail: { type: "string", description: "Optional short evidence note (one sentence)." },
       },

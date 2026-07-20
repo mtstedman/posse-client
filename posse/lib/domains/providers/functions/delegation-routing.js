@@ -143,7 +143,9 @@ export function buildDeterministicDelegations(pendingJobs = [], {
 }
 
 export function selectFallbackProvider(allProviders = [], providerName, needsImageGeneration = false) {
-  const fallbackProviders = allProviders;
+  const fallbackProviders = Array.isArray(allProviders) ? allProviders : [];
+  // The configured pool is an authorization boundary. Do not invent Claude
+  // when an operator or experiment explicitly pins a role to one provider.
   return fallbackProviders.find((p) => p !== providerName)
-    || (!needsImageGeneration && providerName !== "claude" ? "claude" : null);
+    || null;
 }

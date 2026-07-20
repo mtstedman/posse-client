@@ -5,13 +5,14 @@
 
 import fs from "fs";
 import path from "path";
-import { isRepoFileAccessQuestion } from "./human-question-classifier.js";
+import { sanitizeHumanQuestions } from "./human-question-classifier.js";
 import { kaizenRunInsightsEnabled } from "./insights.js";
 import {
   addDependency,
   createJob,
   getArtifactsByWorkItem,
   getDependents,
+  getJob,
   listJobsByWorkItem,
   getWorkItem,
   logEvent,
@@ -91,6 +92,17 @@ function findExistingPlanForResearch(researchJob) {
       && job.status !== "canceled"
     )
     .sort((a, b) => a.id - b.id)[0] || null;
+}
+
+function researchFollowsCompletedHumanClarification(researchJob, researchPayload) {
+  if (researchPayload?._human_clarification_completed === true) return true;
+  const parentId = Number(researchPayload?._human_clarification_job_id || researchJob?.parent_job_id);
+  if (!Number.isInteger(parentId) || parentId <= 0) return false;
+  const parentJob = getJob(parentId);
+  if (!parentJob || parentJob.job_type !== "human_input" || parentJob.status !== "succeeded") return false;
+  const parentPayload = parseJobPayload(parentJob);
+  return parentPayload?.allow_best_judgment === true
+    || /^Researcher questions:/i.test(String(parentJob.title || ""));
 }
 
 // Symmetric to findExistingPlanForResearch: detect a continuation that
@@ -703,12 +715,13 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
 
   // -- Detect researcher questions --
   const extractedQuestions = isFanoutSynth ? [] : extractResearcherQuestions(output);
-  const hasQuestions = extractedQuestions.length > 0;
 
   // Is this already a self-resolution attempt? Check payload for the flag.
   const researchBudget = getResearchBudget(wi, researchPayload);
   const isSelfResolve = !!researchPayload._self_resolve;
   const isLoopback = !!researchPayload._is_loopback;
+  const clarificationAlreadyHandled = researchFollowsCompletedHumanClarification(researchJob, researchPayload);
+  const hasQuestions = extractedQuestions.length > 0 && !clarificationAlreadyHandled;
   const clarificationRound = researchPayload._clarification_round || 0;
   const MAX_CLARIFICATION_ROUNDS = 3;
 
@@ -716,6 +729,13 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
   const isReportResearch = wi?.mode === "report"
     || researchPayload.task_mode === "report"
     || intakeOutputMode === "question_only";
+
+  if (clarificationAlreadyHandled && extractedQuestions.length > 0) {
+    worker?.emit?.(
+      researchJob.id,
+      `${C.yellow}[pipeline]${C.reset} WI#${researchJob.work_item_id}: researcher still reported ${extractedQuestions.length} open question(s) after operator clarification; continuing with available evidence instead of prompting again`,
+    );
+  }
 
   // -- Question/report mode: research is the final step --
   // Persist the plain researcher text deterministically as the visible report;
@@ -736,6 +756,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
           original_job_id: researchJob.id,
           questions,
           context: "The researcher needs clarification before the answer is complete.",
+          allow_best_judgment: true,
         }),
       });
       worker.emit(researchJob.id,
@@ -760,9 +781,11 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
           payload_json: JSON.stringify({
             _is_loopback: true,
             _clarification_round: nextRound,
+            _human_clarification_completed: true,
+            _human_clarification_job_id: humanJob.id,
             deepthink_budget: researchBudget,
             deepthink: isResearchBudgetDeep(researchBudget),
-            instructions: "Continue the research with the human's answers incorporated. The previous research brief and human answers are in the artifacts.",
+            instructions: "Continue the research with the human's answer incorporated. If the operator selected best judgment, resolve remaining uncertainty from repository evidence and explicit assumptions. Do not ask the operator another clarification question; finish the report.",
           }),
         });
         addDependency(followUp.id, humanJob.id, "hard");
@@ -875,6 +898,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
         original_job_id: researchJob.id,
         questions,
         context: "The researcher tried to self-resolve but still needs human clarification before planning can proceed.",
+        allow_best_judgment: true,
       }),
     });
 
@@ -896,11 +920,13 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
         payload_json: JSON.stringify({
           _is_loopback: true,
           _clarification_round: nextRound,
+          _human_clarification_completed: true,
+          _human_clarification_job_id: humanJob.id,
           ...replanPayloadFields(researchPayload),
           ...planningPayload,
           deepthink_budget: researchBudget,
           deepthink: isResearchBudgetDeep(researchBudget),
-          instructions: "Continue the research with the human's answers incorporated. The previous research brief and human answers are in the artifacts.",
+          instructions: "Continue the research with the human's answer incorporated. If the operator selected best judgment, resolve remaining uncertainty from repository evidence and explicit assumptions. Do not ask the operator another clarification question; produce the planner-ready brief now.",
         }),
       });
       addDependency(followUp.id, humanJob.id, "hard");
@@ -983,7 +1009,7 @@ export function extractResearcherQuestions(output) {
       })
       .filter(Boolean) : [];
     if (structured.questions_for_human === true) {
-      return structuredQuestions.filter((q) => !isRepoFileAccessQuestion(q, { context: output }));
+      return sanitizeHumanQuestions(structuredQuestions, { context: output });
     }
   }
 
@@ -1009,7 +1035,7 @@ export function extractResearcherQuestions(output) {
       }
     }
   }
-  const filteredQuestions = questions.filter((q) => !isRepoFileAccessQuestion(q, { context: output }));
+  const filteredQuestions = sanitizeHumanQuestions(questions, { context: output });
   if (filteredQuestions.length > 0) {
     return filteredQuestions;
   }

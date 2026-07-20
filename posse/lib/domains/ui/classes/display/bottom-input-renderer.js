@@ -73,6 +73,22 @@ function buildQuestionContextDisplayLines(context, width, maxLines = 6) {
   return lines;
 }
 
+function buildQuestionChoiceDisplayLine(choices, width) {
+  if (!Array.isArray(choices) || choices.length === 0) return null;
+  const normalized = choices
+    .slice(0, 9)
+    .map((choice) => _sanitizeDisplayLine(String(choice || "")).trim())
+    .filter(Boolean);
+  const text = normalized
+    .map((choice, index) => `[${index + 1}] ${choice}`)
+    .join("  ");
+  if (!text) return null;
+  const prefix = " Options: ";
+  const available = Math.max(10, width - prefix.length);
+  const clipped = text.length > available ? `${text.slice(0, Math.max(1, available - 1))}…` : text;
+  return ` ${C.cyan}${C.bold}Options:${C.reset} ${clipped}`;
+}
+
 export class DisplayBottomInputRenderer {
 
 
@@ -241,9 +257,11 @@ export class DisplayBottomInputRenderer {
       const bodyLines = [];
       const qLineW = width - 5;
       const maxQuestionBodyLines = Math.max(6, Math.min(14, this.rows - 10));
+      const choiceLine = buildQuestionChoiceDisplayLine(q.choices, qLineW);
+      const choiceLines = choiceLine ? [choiceLine] : [];
 
       lines.push("");
-      const maxContextLines = Math.max(0, Math.min(6, maxQuestionBodyLines - 4));
+      const maxContextLines = Math.max(0, Math.min(6, maxQuestionBodyLines - 4 - choiceLines.length));
       const contextLines = buildQuestionContextDisplayLines(q.context, qLineW, maxContextLines);
       bodyLines.push(...contextLines);
 
@@ -252,11 +270,12 @@ export class DisplayBottomInputRenderer {
       const wrappedQuestionLines = _wrapQuestionBodyLines(qText, qLineW);
       bodyLines.push(...wrappedQuestionLines);
 
-      if (bodyLines.length > maxQuestionBodyLines) {
+      if (bodyLines.length + choiceLines.length > maxQuestionBodyLines) {
         const reservedPrefix = contextLines.length + 1;
-        const availableQuestionSlots = Math.max(3, maxQuestionBodyLines - reservedPrefix);
-        const headCount = Math.max(1, Math.ceil(availableQuestionSlots / 2));
-        const tailCount = Math.max(1, availableQuestionSlots - headCount - 1);
+        const availableQuestionSlots = Math.max(2, maxQuestionBodyLines - reservedPrefix - choiceLines.length);
+        const visibleQuestionSlots = Math.max(1, availableQuestionSlots - 1);
+        const headCount = Math.max(1, Math.ceil(visibleQuestionSlots / 2));
+        const tailCount = Math.max(0, visibleQuestionSlots - headCount);
         const preservedPrefix = bodyLines.slice(0, reservedPrefix);
         const questionHead = wrappedQuestionLines.slice(0, headCount);
         const questionTail = tailCount > 0 ? wrappedQuestionLines.slice(-tailCount) : [];
@@ -266,6 +285,7 @@ export class DisplayBottomInputRenderer {
         bodyLines.push(` ${C.dim}... question clipped; showing beginning and end${C.reset}`);
         bodyLines.push(...questionTail);
       }
+      bodyLines.push(...choiceLines);
       lines.push(...bodyLines);
 
       lines.push("");
@@ -276,7 +296,8 @@ export class DisplayBottomInputRenderer {
         : this._inputBuf;
       lines.push(` ${C.green}>${C.reset} ${displayBuf}${cursor}`);
       lines.push("");
-      lines.push(` ${C.dim}[Enter] submit  [Esc] skip${C.reset}`);
+      const escapeAction = q.escapeAnswer ? q.escapeLabel || "best judgment" : "skip";
+      lines.push(` ${C.dim}[Enter] submit  [Esc] ${escapeAction}${C.reset}`);
       return lines;
     }
 

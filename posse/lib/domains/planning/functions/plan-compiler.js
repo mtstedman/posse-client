@@ -41,7 +41,11 @@ import {
   workItemArtifactRoot,
   wiScopeId,
 } from "../../artifacts/functions/index.js";
-import { hasWritableScope, parseResearcherStructuredOutput } from "../../handoff/functions/index.js";
+import {
+  hasWritableScope,
+  normalizeResearcherCitationTriage,
+  parseResearcherStructuredOutput,
+} from "../../handoff/functions/index.js";
 import { projectDbEffectivePermissions } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import {
   normalizeRiskTags,
@@ -90,7 +94,10 @@ import {
   hasRequestedImageGenerationOutput,
 } from "./image-outputs.js";
 import { sanitizePlannerDevBrief } from "./planner-helpers.js";
-import { reissueHashRefHandoffPacket } from "../../handoff/functions/helpers/hash-ref-packet.js";
+import {
+  normalizeHashRefHandoffPacket,
+  reissueHashRefHandoffPacket,
+} from "../../handoff/functions/helpers/hash-ref-packet.js";
 import {
   isBroadNarrowScopedCodeTask,
   parseUnderScopedBroadGateMode,
@@ -320,6 +327,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           const sourceJob = artifact?.job_id ? getJob(artifact.job_id) : null;
           return sourceJob?.job_type === "research";
         });
+      let researchMaterialFallbackPacket = null;
 
       const releasePromoteClaimsForJob = (jobId) => {
         const group = promoteClaimsByJobId.get(jobId);
@@ -443,6 +451,20 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       for (const artifact of researchArtifacts) {
         const parsed = parseResearcherStructuredOutput(String(artifact?.content_long || ""));
         if (!parsed) continue;
+        const triage = normalizeResearcherCitationTriage(parsed, {
+          maxRefsPerLane: 16,
+          maxWhyChars: 180,
+        });
+        const materialLane = triage.proof.length > 0 ? "proof" : triage.support.length > 0 ? "support" : null;
+        if (materialLane) {
+          const fallback = normalizeHashRefHandoffPacket({
+            source: "atlas",
+            destination: "handoff",
+            synthesis: parsed.synthesis || "",
+            [materialLane]: [triage[materialLane][0]],
+          }, { maxRefsPerLane: 1 });
+          if (fallback.packet) researchMaterialFallbackPacket = fallback.packet;
+        }
         const plannerFilePriorities = Array.isArray(parsed.planner_file_priorities)
           ? parsed.planner_file_priorities
           : Array.isArray(parsed.ranked_files)
@@ -1565,6 +1587,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dropped ${droppedCount} ATLAS dev_brief item(s) in task "${t.title}"`);
         }
         let activeHashRefPacket = devBriefResult.hashRefPacket || null;
+        if (!activeHashRefPacket && atlasDevBriefsEnabled && finalJobType === "dev" && taskMode === "code" && researchMaterialFallbackPacket) {
+          activeHashRefPacket = researchMaterialFallbackPacket;
+          worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: filled missing ATLAS hash_ref_packet for task "${t.title}" from the researcher's highest-priority material ref`);
+        }
         const payloadJson = finalJobType === "promote"
           ? JSON.stringify(normalizedPromotePayload)
           : JSON.stringify({

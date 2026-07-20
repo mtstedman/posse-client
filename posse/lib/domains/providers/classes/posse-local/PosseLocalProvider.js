@@ -12,4 +12,11 @@ export class PosseLocalProvider extends BaseProvider {
   constructor({ module } = {}) {
     super({ name: PosseLocalProvider.name, module });
   }
+
+  isLocalGenerationEnabled(options = {}) {
+    if (typeof this.module.isLocalGenerationEnabled === "function") {
+      return this.module.isLocalGenerationEnabled(options);
+    }
+    return false;
+  }
 }

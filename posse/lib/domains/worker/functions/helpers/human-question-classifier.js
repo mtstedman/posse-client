@@ -90,6 +90,13 @@ function looksLikeApprovalQuestion(text) {
     || source.includes("pass or fail?");
 }
 
+function asksAboutCodeIntent(text) {
+  const source = lower(text);
+  return /\b(?:is|are|was|were)\b[\s\S]{0,220}\b(?:intentional|intended|by design)\b/.test(source)
+    || /\b(?:intent|semantics|behavior)\s+of\s+(?:the\s+)?(?:code|implementation|function|method|hook|handler|callback)\b/.test(source)
+    || /\bshould\b[\s\S]{0,100}\b(?:error|exception|hook|callback|handler|method|function|return value)\b[\s\S]{0,100}\b(?:propagate|bubble|reach|surface|swallow|ignore|run)\b/.test(source);
+}
+
 function looksLikeExternalInfoQuestion(text) {
   const source = lower(text);
   return source.includes("what is the user's preference")
@@ -126,6 +133,15 @@ export function classifyHumanQuestion(question, { context = "" } = {}) {
       category: "repo_file_access",
       allowHuman: false,
       reason: "asks the human for repository file contents, diffs, or line confirmation",
+      text,
+    };
+  }
+
+  if (asksAboutCodeIntent(text) && (hasRepoLikePath(surrounding) || hasCodeReference(surrounding))) {
+    return {
+      category: "code_intent",
+      allowHuman: false,
+      reason: "asks the operator to infer repository implementation intent that the agent must resolve from code, tests, docs, or history",
       text,
     };
   }

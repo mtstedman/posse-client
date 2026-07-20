@@ -6,8 +6,7 @@ import {
   getImageModelOptions,
   getTextModelOptions,
 } from "../../providers/functions/model-catalog.js";
-import { providerRegistry } from "../../providers/functions/provider.js";
-import { isProviderEnabledByCatalog } from "../../providers/functions/model-catalog-store.js";
+import { isProviderEnabledForAccount, providerRegistry } from "../../providers/functions/provider.js";
 import {
   normalizePermissions as normalizeProjectDbPermissions,
   PROJECT_DB_TYPES,
@@ -39,11 +38,12 @@ export const PROTECTED_REMOTE_AUTH_SETTING_KEYS = new Set([
 
 export function isAdminProviderOption(providerName) {
   const provider = String(providerName || "").trim().toLowerCase();
-  if (!provider || !isProviderEnabledByCatalog(provider) || !providerRegistry.has(provider)) return false;
+  if (!provider || !isProviderEnabledForAccount(provider) || !providerRegistry.has(provider)) return false;
   const mod = providerRegistry.get(provider);
-  if (provider === "posse-local" && typeof mod?.isReady === "function") {
-    try { return mod.isReady()?.ready === true; } catch { return false; }
-  }
+  // Admin is where an operator configures a staged local provider. Once the
+  // opt-in is set, expose its route/model rows before installation; execution
+  // still fails closed through isProviderReady().
+  if (provider === "posse-local") return true;
   if (typeof mod?.hasCredentials === "function") {
     try { return !!mod.hasCredentials(); } catch { return false; }
   }

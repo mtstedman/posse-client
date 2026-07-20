@@ -58,6 +58,7 @@ export const SETTING_KEYS = Object.freeze({
   RESEARCH_TRAVERSAL_COMPLETION_MAX_CHARS: "research_traversal_completion_max_chars",
   POSSE_REMOTE_RESPONSE_SIGNING_SECRET: "posse_remote_response_signing_secret",
   POSSE_REMOTE_TIMEOUT_MS: "posse_remote_timeout_ms",
+  POSSE_LOCAL_GENERATION_ENABLED: "posse_local_generation_enabled",
   KAIZEN_TO_ATLAS: "posse_kaizen_to_atlas",
   LOG_SCRUB_SECRETS: "posse_log_scrub_secrets",
   LOG_LEVEL: "posse_log_level",

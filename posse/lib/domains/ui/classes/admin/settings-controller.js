@@ -653,7 +653,7 @@ export class AdminSettingsController {
     const providerPanelSettings = [
       ...PROVIDER_SETTING_SECTIONS.flatMap((section) => [
         ...textModelSettings.filter((entry) => entry.provider === section.provider),
-        ...dbRowsForKeys(section.budgetKeys),
+        ...dbRowsForKeys(section.settingKeys),
       ]),
       ...dbRowsForKeys(PROVIDER_CATALOG_SETTING_KEYS),
     ];
@@ -661,7 +661,7 @@ export class AdminSettingsController {
       ...artifactSettings,
       ...IMAGE_SETTING_SECTIONS.flatMap((section) => [
         ...imageModelSettings.filter((entry) => entry.provider === section.provider),
-        ...dbRowsForKeys(section.budgetKeys),
+        ...dbRowsForKeys(section.settingKeys),
       ]),
     ];
     // Per-pane editable lists. Order here MUST match the visual row order
@@ -1567,15 +1567,17 @@ export class AdminSettingsController {
     const renderProvidersPane = () => {
       for (const section of PROVIDER_SETTING_SECTIONS) {
         const models = textModelSettings.filter((s) => s.provider === section.provider);
-        const budgetKeys = section.budgetKeys.filter((key) => settingsByKey.has(key));
-        if (models.length === 0 && budgetKeys.length === 0) continue;
-        const budgetNote = section.provider === "claude" || section.provider === "codex"
-          ? "models and % session run budget"
-          : "models and USD run budget";
-        pushSection(section.label, `(${budgetNote})`);
+        const settingKeys = section.settingKeys.filter((key) => settingsByKey.has(key));
+        if (models.length === 0 && settingKeys.length === 0) continue;
+        const sectionNote = section.provider === "posse-local"
+          ? "native embedding and text-generation models"
+          : section.provider === "claude" || section.provider === "codex"
+            ? "models and % session run budget"
+            : "models and USD run budget";
+        pushSection(section.label, `(${sectionNote})`);
         pushTableHeader();
         for (const s of models) pushModelSettingRow(s);
-        for (const key of budgetKeys) pushDbSettingRow(key);
+        for (const key of settingKeys) pushDbSettingRow(key);
         lines.push("");
       }
 
@@ -1630,12 +1632,12 @@ export class AdminSettingsController {
 
       for (const section of IMAGE_SETTING_SECTIONS) {
         const models = imageModelSettings.filter((s) => s.provider === section.provider);
-        const budgetKeys = section.budgetKeys.filter((key) => settingsByKey.has(key));
-        if (models.length === 0 && budgetKeys.length === 0) continue;
+        const settingKeys = section.settingKeys.filter((key) => settingsByKey.has(key));
+        if (models.length === 0 && settingKeys.length === 0) continue;
         pushSection(section.label, "(image model and USD budget)");
         pushTableHeader();
         for (const s of models) pushModelSettingRow(s);
-        for (const key of budgetKeys) pushDbSettingRow(key);
+        for (const key of settingKeys) pushDbSettingRow(key);
         lines.push("");
       }
     };

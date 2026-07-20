@@ -136,6 +136,7 @@ export const SETTINGS_CATALOG = [
   { key: "model_catalog_enforcement", default: "warn_and_fallback", options: MODEL_CATALOG_ENFORCEMENT_VALUES, description: "Stale configured-model handling: warn_and_fallback substitutes the tier default at runtime, warn_only keeps the configured model, off disables validation" },
   { key: "model_catalog_json", default: "", adminVisible: false, description: "Cached remote model/pricing catalog payload (auto-updated)" },
   { key: "model_catalog_fetched_at", default: "", adminVisible: false, description: "Timestamp of the last successful model catalog fetch (auto-updated)" },
+  { key: "posse_local_generation_enabled", default: "false", valueType: "boolean", description: "Operator opt-in for staged posse-local text generation when the signed model catalog has not enabled the provider" },
 
   // ── Token caps and observed-usage calibration ────────────────────────────
   { key: "claude_limit_tokens_session", default: "", numeric: { integer: true, min: 0 }, description: "Token cap for Claude's 5-hour rolling window" },

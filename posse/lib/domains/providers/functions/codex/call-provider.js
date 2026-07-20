@@ -236,8 +236,6 @@ export async function callProvider(promptText, {
     ];
     const remoteSystemPromptText = String(remoteSystemPrompt || "").trim();
     const promptPrelude = remoteSystemPromptText;
-    const shellDiscipline = __testBuildShellDisciplineBlock({ platform: process.platform, atlasAttachment: promptAtlasAttachment, atlasPrefetchStatus });
-    const roleGuard = __testBuildCodexRoleGuardBlock({ role, allowWrite });
     let executionContract = buildExecutionContract({
       provider: "codex",
       role,
@@ -259,6 +257,13 @@ export async function callProvider(promptText, {
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);
     executionContract = adaptExecutionContractForProvider(executionContract, "codex");
+    const shellDiscipline = __testBuildShellDisciplineBlock({
+      platform: process.platform,
+      atlasAttachment: promptAtlasAttachment,
+      atlasPrefetchStatus,
+      executionContract,
+    });
+    const roleGuard = __testBuildCodexRoleGuardBlock({ role, allowWrite, executionContract });
     const contractBlock = renderExecutionContractBlock(executionContract);
     const atlasUnavailableReason = isFallbackAtlasPrefetchStatus(atlasPrefetchStatus)
       ? `preflight status ${String(atlasPrefetchStatus || "failed")}`
@@ -285,7 +290,9 @@ export async function callProvider(promptText, {
     }
     const finalPrompt = [
       developerInstructionRoute.inlinePromptPrelude ? `ROLE INSTRUCTIONS:\n${developerInstructionRoute.inlinePromptPrelude}` : null,
-      Number.isFinite(Number(fallbackReads)) ? `FALLBACK READ BUDGET: ${Math.max(0, Number(fallbackReads))}` : null,
+      fallbackReads != null && fallbackReads !== "" && Number.isFinite(Number(fallbackReads))
+        ? `FALLBACK READ BUDGET: ${Math.max(0, Number(fallbackReads))}`
+        : null,
       turnLimit ? `MAX TURNS: ${turnLimit}` : null,
       resumeContractNote,
       `WORKING DIRECTORY: ${workingDir}`,

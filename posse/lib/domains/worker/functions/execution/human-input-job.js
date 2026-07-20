@@ -40,9 +40,20 @@ import {
   resolveOneshotScopeCandidates,
 } from "../../../research/functions/oneshot-scope-selection.js";
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../../catalog/job.js";
+import {
+  humanInputChoiceFromAnswer,
+  humanInputChoicesForPayload,
+  isHumanInputReviewPayload,
+} from "../../../../catalog/human-input.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const REVIEW_DECISION_ORIGINAL_STATUS_SET = new Set(["waiting_on_review", "awaiting_assessment"]);
+const DEAD_LETTER_RECOVERY_REVIEW_TYPES = new Set([
+  "dead_letter_recovery",
+  "research_dead_letter_recovery",
+  "oneshot_dead_letter_recovery",
+  "stall_exhausted_recovery",
+]);
 import { getAssessmentInternalRetryLimit } from "../helpers/assessment-shared.js";
 import { refreshAndExtractInsights } from "../helpers/insights.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
@@ -245,6 +256,35 @@ export async function runHumanInputJob(worker, job, {
       worker._cleanupWorktreeIfDone(job.work_item_id);
       return;
     }
+    const actionChoices = humanInputChoicesForPayload(payload);
+    const uncataloguedReview = isHumanInputReviewPayload(payload) && actionChoices.length === 0;
+    if (actionChoices.length > 0 || uncataloguedReview) {
+      const answers = extractHumanAnswers(output);
+      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
+      // Blocked recovery deliberately accepts free-form operational guidance
+      // as an implicit retry; its dedicated classifier below preserves that
+      // long-standing contract while still recognizing explicit actions.
+      const invalidClosedChoice = actionChoices.length > 0
+        && payload.review_type !== "blocked_recovery"
+        && !humanInputChoiceFromAnswer(lastAnswer, actionChoices);
+      const invalidUncataloguedReview = uncataloguedReview
+        && classifyReviewAnswer(lastAnswer) === "unknown";
+      if (invalidClosedChoice || invalidUncataloguedReview) {
+        const choiceMessage = actionChoices.length > 0
+          ? `Human input did not select one of: ${actionChoices.join(", ")}`
+          : `Human input did not provide a recognized action for review type ${payload.review_type}`;
+        completeAttempt(attempt.attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          error_text: choiceMessage,
+        });
+        worker.emit(job.id, `${C.yellow}[human] ${choiceMessage}; keeping the gate open${C.reset}`);
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+        refreshAndExtractInsights(job.work_item_id);
+        worker._cleanupWorktreeIfDone(job.work_item_id);
+        return;
+      }
+    }
     storeArtifact({
       work_item_id: job.work_item_id,
       job_id: job.id,
@@ -372,7 +412,11 @@ export async function runHumanInputJob(worker, job, {
       }
     }
 
-    if (Array.isArray(payload.file_requests) && payload.file_requests.length > 0) {
+    if (
+      Array.isArray(payload.file_requests)
+      && payload.file_requests.length > 0
+      && payload.review_type !== "blocked_recovery"
+    ) {
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       const decision = classifyApprovalAnswer(lastAnswer);
@@ -606,7 +650,7 @@ export async function runHumanInputJob(worker, job, {
       }
     }
 
-    if (payload.original_job_id && (payload.review_type === "dead_letter_recovery" || payload.review_type === "stall_exhausted_recovery")) {
+    if (payload.original_job_id && DEAD_LETTER_RECOVERY_REVIEW_TYPES.has(payload.review_type)) {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
@@ -830,14 +874,15 @@ export async function runHumanInputJob(worker, job, {
       }
     }
 
-    if (payload.original_job_id && !handledReviewDecision) {
+    // Untyped clarification jobs may resume their origin after collecting
+    // free-form input. Typed review/recovery gates must resolve through an
+    // explicit action branch above; silently requeueing an unknown action is
+    // what turns a malformed or stale review contract into a human-input loop.
+    if (payload.original_job_id && !handledReviewDecision && !payload.review_type) {
       const origJob = getJob(payload.original_job_id);
       const unblockable = new Set(["waiting_on_human", "waiting_on_review", "blocked", "awaiting_assessment"]);
       if (origJob && unblockable.has(origJob.status)) {
         await worker._setJobRowStatus(origJob, "queued");
-        if (payload.review_type) {
-          cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
-        }
         worker.emit(job.id, `${C.cyan}[human] Unblocked job #${origJob.id} - requeued${C.reset}`);
         logEvent({
           work_item_id: job.work_item_id,

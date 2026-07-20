@@ -11,6 +11,7 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
 import { markTelemetryRowsMirrored, pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
 import { appendRunTelemetry, getRunTelemetryStartedAt, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
+import { isResearchAtlasExplorationAction } from "../../integrations/functions/deterministic-mcp/research-synthesis.js";
 
 let _fd = null;
 let _currentDate = "";
@@ -24,6 +25,15 @@ const TOOL_REPLAY_DEDUPE_WINDOW_MS = 1500;
 const TOOL_REPLAY_BUCKET_MAX = 256;
 const TOOL_REPLAY_MAX_BUCKETS = 512;
 const _recentToolReplay = new Map(); // jobId -> Map<fingerprint, atMs>
+const RESEARCH_EXPLORATION_OBSERVATION_TYPES = Object.freeze([
+  "tool.atlas",
+  "tool.chain_verdict",
+  "tool.list",
+  "tool.search",
+  "tool.git_history",
+  "tool.inspect",
+  "tool.hash",
+]);
 
 function _trimToolReplayBucket(bucket, now) {
   if (!bucket) return;
@@ -486,6 +496,58 @@ export function recordObservation({
       original_type: observation_type,
     }, "record_failed");
     return false;
+  }
+}
+
+export function researchExplorationObservationStatus({ jobId = null, attemptId = null } = {}) {
+  const normalizedAttemptId = Number(attemptId);
+  const normalizedJobId = Number(jobId);
+  const useAttempt = Number.isInteger(normalizedAttemptId) && normalizedAttemptId > 0;
+  const scopeId = useAttempt ? normalizedAttemptId : normalizedJobId;
+  if (!Number.isInteger(scopeId) || scopeId <= 0) {
+    return { exploration_steps: 0, synthesis_required: false, citation_fetches: 0 };
+  }
+  try {
+    const db = getDb();
+    const scopeColumn = useAttempt ? "attempt_id" : "job_id";
+    const placeholders = RESEARCH_EXPLORATION_OBSERVATION_TYPES.map(() => "?").join(", ");
+    const explorationRows = db.prepare(`
+      SELECT observation_type, detail_json
+      FROM job_observations
+      WHERE ${scopeColumn} = ?
+        AND observation_type IN (${placeholders})
+    `).all(scopeId, ...RESEARCH_EXPLORATION_OBSERVATION_TYPES);
+    const explorationCount = explorationRows.reduce((count, row) => {
+      if (row.observation_type !== "tool.atlas") return count + 1;
+      try {
+        const detail = JSON.parse(String(row.detail_json || "{}"));
+        return count + (isResearchAtlasExplorationAction(detail?.action) ? 1 : 0);
+      } catch {
+        // A malformed historic Atlas observation remains conservatively
+        // counted so damaged telemetry cannot silently reopen discovery.
+        return count + 1;
+      }
+    }, 0);
+    const synthesis = db.prepare(`
+      SELECT 1 AS present
+      FROM job_observations
+      WHERE ${scopeColumn} = ?
+        AND observation_type = 'research.synthesis_required'
+      LIMIT 1
+    `).get(scopeId);
+    const citationFetches = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM job_observations
+      WHERE ${scopeColumn} = ?
+        AND observation_type = 'hash_ref.fetch'
+    `).get(scopeId);
+    return {
+      exploration_steps: Math.max(0, explorationCount),
+      synthesis_required: synthesis?.present === 1,
+      citation_fetches: Math.max(0, Number(citationFetches?.count || 0)),
+    };
+  } catch {
+    return { exploration_steps: 0, synthesis_required: false, citation_fetches: 0 };
   }
 }
 

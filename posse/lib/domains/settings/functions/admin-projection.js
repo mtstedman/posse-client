@@ -319,7 +319,7 @@ export function projectAdminDescription({
     for (const def of MODEL_SETTING_DEFS) {
       if ((def.kind || "text") === "text" && def.provider === section.provider) push(def.key, "providers", group);
     }
-    for (const key of section.budgetKeys) push(key, "providers", group);
+    for (const key of section.settingKeys) push(key, "providers", group);
   }
   for (const key of ADMIN_PROVIDER_CATALOG_SETTING_KEYS) push(key, "providers", "provider_catalog");
 
@@ -347,7 +347,7 @@ export function projectAdminDescription({
     for (const def of MODEL_SETTING_DEFS) {
       if (def.kind === "image" && def.provider === section.provider) push(def.key, "images", group);
     }
-    for (const key of section.budgetKeys) push(key, "images", group);
+    for (const key of section.settingKeys) push(key, "images", group);
   }
 
   pushCatalogPane("general");

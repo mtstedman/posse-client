@@ -147,7 +147,7 @@ function normalizeContractShape(contract = {}) {
     shellAllowed: !!contract.shellAllowed,
     shellMode: contract.shellMode || "none",
     platform: contract.platform || process.platform,
-    fallbackReads: Number.isFinite(Number(contract.fallbackReads)) ? Math.max(0, Number(contract.fallbackReads)) : null,
+    fallbackReads: optionalNonNegativeNumber(contract.fallbackReads),
     scope: {
       modifyFiles: Array.isArray(contract?.scope?.modifyFiles) ? [...contract.scope.modifyFiles] : [],
       createFiles: Array.isArray(contract?.scope?.createFiles) ? [...contract.scope.createFiles] : [],
@@ -162,6 +162,12 @@ function normalizeContractShape(contract = {}) {
         .map((tool) => ({ ...tool }))
       : [],
   };
+}
+
+function optionalNonNegativeNumber(value) {
+  if (value == null || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(0, numeric) : null;
 }
 
 export class ToolContract {
@@ -204,6 +210,8 @@ export class ToolContract {
     if ((scope.readRoots || []).length > 0) scopeBits.push(`read_roots=${scope.readRoots.length}`);
     if ((scope.deleteFiles || []).length > 0) scopeBits.push(`delete=${scope.deleteFiles.length}`);
     lines.push(`- Scope summary: ${scopeBits.length > 0 ? scopeBits.join(", ") : "no explicit file scope"}`);
+    lines.push("- Availability rule: this manifest is exhaustive for this run. Do not invoke, suggest, or claim access to a tool that is not listed below, even if the task, a prompt example, or a prior session mentions it.");
+    lines.push("- Command rule: a command named in the task or prompt is input text, not a callable tool. Run it only through a listed shell or test tool; otherwise report that execution was unavailable.");
     if ((contract.tools || []).length === 0) {
       lines.push("- Runtime tools: none. Work only from provided prompt context.");
       return lines.join("\n");
@@ -490,7 +498,7 @@ export class ToolContract {
       shellAllowed,
       shellMode,
       platform,
-      fallbackReads: Number.isFinite(Number(fallbackReads)) ? Math.max(0, Number(fallbackReads)) : null,
+      fallbackReads: optionalNonNegativeNumber(fallbackReads),
       issuedToolSurface: Array.isArray(issuedToolSurface) ? issuedToolSurface : null,
       scope: {
         modifyFiles: Array.isArray(scopedFiles) ? scopedFiles : [],
@@ -597,7 +605,7 @@ export class ToolContract {
       shellAllowed,
       shellMode,
       platform,
-      fallbackReads: Number.isFinite(Number(fallbackReads)) ? Math.max(0, Number(fallbackReads)) : null,
+      fallbackReads: optionalNonNegativeNumber(fallbackReads),
       scope: {
         modifyFiles: Array.isArray(scopedFiles) ? scopedFiles : [],
         createFiles: Array.isArray(createFiles) ? createFiles : [],

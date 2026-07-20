@@ -284,6 +284,8 @@ function compactHashRefPacketForRemote(packet = {}) {
   const source = compactText(sourcePacket.source || sourcePacket.evidence_source || "atlas", 40).toLowerCase();
   if (source !== "atlas") return null;
   const lanes = {};
+  const seen = new Set();
+  const duplicateDropped = [];
   const capDropped = [];
   const truncatedLanes = {};
   for (const lane of HASH_REF_LANES) {
@@ -291,22 +293,28 @@ function compactHashRefPacketForRemote(packet = {}) {
       ? sourcePacket.lanes[lane]
       : (Array.isArray(sourcePacket?.[lane]) ? sourcePacket[lane] : []);
     lanes[lane] = [];
-    const seen = new Set();
     let omittedCount = 0;
     for (let index = 0; index < entries.length; index += 1) {
       const entry = entries[index];
+      const compact = compactHashRefEntry(entry);
+      if (!compact) continue;
+      if (seen.has(compact.ref)) {
+        duplicateDropped.push({
+          lane,
+          ref: compact.ref,
+          reason: "duplicate_ref",
+        });
+        continue;
+      }
       if (lanes[lane].length >= MAX_HASH_REFS_PER_LANE) {
         omittedCount += 1;
-        const ref = normalizeRef(objectValue(entry)?.ref ?? objectValue(entry)?.hash ?? objectValue(entry)?.ref_hash ?? entry);
         capDropped.push({
           lane,
-          ...(ref ? { ref } : {}),
+          ref: compact.ref,
           reason: "lane_cap_truncated",
         });
         continue;
       }
-      const compact = compactHashRefEntry(entry);
-      if (!compact || seen.has(compact.ref)) continue;
       seen.add(compact.ref);
       lanes[lane].push(compact);
     }
@@ -317,6 +325,7 @@ function compactHashRefPacketForRemote(packet = {}) {
   const dropped = [
     ...(Array.isArray(sourcePacket.dropped) ? sourcePacket.dropped : []),
     ...(Array.isArray(sourcePacket.upstream_dropped) ? sourcePacket.upstream_dropped : []),
+    ...duplicateDropped,
     ...capDropped,
   ].map(compactHashRefDropped).filter(Boolean).slice(0, MAX_HASH_DROPPED_REFS);
   return {

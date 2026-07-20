@@ -210,7 +210,7 @@ export class Display {
     this._rawInputFallbackTimers = new Set();
 
     // ── Input / question state ──
-    this._questionQueue = [];   // { id, jobId, questions, context, answers, currentIdx, resolve, reject }
+    this._questionQueue = [];   // { id, jobId, questions, context, choices, escapeAnswer, escapeLabel, answers, currentIdx, resolve, reject }
     this._nextQId = 1;
     this._inputMode = false;    // "question" | "inject" | "kill" | false
     this._activeQ = null;       // the question-set currently being answered
@@ -1124,7 +1124,11 @@ export class Display {
 
   // ── Question API ──────────────────────────────────────────────────────
 
-  askQuestions(jobId, questions, context, workItemId = null) {
+  askQuestions(jobId, questions, context, workItemId = null, {
+    choices = [],
+    escapeAnswer = null,
+    escapeLabel = null,
+  } = {}) {
     return new Promise((resolve, reject) => {
       if (this._aborted) {
         reject(new Error("Display aborted"));
@@ -1137,6 +1141,9 @@ export class Display {
         workItemId,
         questions,
         context,
+        choices: Array.isArray(choices) ? choices : [],
+        escapeAnswer: typeof escapeAnswer === "string" && escapeAnswer.trim() ? escapeAnswer.trim() : null,
+        escapeLabel: typeof escapeLabel === "string" && escapeLabel.trim() ? escapeLabel.trim() : null,
         answers: [],
         currentIdx: 0,
         resolve,
@@ -1453,6 +1460,10 @@ export class Display {
 
   _submitAnswer(...args) {
     return this._inputController._submitAnswer.call(this, ...args);
+  }
+
+  _submitChoice(...args) {
+    return this._inputController._submitChoice.call(this, ...args);
   }
 
   _skipQuestion(...args) {

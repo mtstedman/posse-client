@@ -7,6 +7,10 @@ import { getJob } from "../../queue/functions/index.js";
 import { now } from "../../queue/functions/common.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isReviewGateJob } from "./review-decision.js";
+import {
+  humanInputChoiceFromAnswer,
+  humanInputChoicesForPayload,
+} from "../../../catalog/human-input.js";
 
 const DEFAULT_BRIDGE_LEASE_SECONDS = 300;
 
@@ -31,6 +35,19 @@ function normalizeAnswers(questions, args = {}) {
 
 function leaseExpiry(seconds = DEFAULT_BRIDGE_LEASE_SECONDS) {
   return new Date(Date.now() + Math.max(1, Number(seconds) || DEFAULT_BRIDGE_LEASE_SECONDS) * 1000).toISOString();
+}
+
+function answerText(answer) {
+  if (typeof answer === "string") return answer.trim();
+  return String(answer?.answer ?? "").trim();
+}
+
+function latestAnswerText(answers = []) {
+  for (let index = answers.length - 1; index >= 0; index--) {
+    const text = answerText(answers[index]);
+    if (text && text.toLowerCase() !== "(skipped)") return text;
+  }
+  return "";
 }
 
 function claimHumanInputJob(jobId, { leaseSeconds = DEFAULT_BRIDGE_LEASE_SECONDS } = {}) {
@@ -70,7 +87,8 @@ export async function answerHumanInput(jobId, args = {}, { projectDir = process.
   if (payload?.subtype === "push_offer") {
     return { ok: false, reason: "use_git_push" };
   }
-  if (!allowReviewGateAnswer && isReviewGateJob(current, payload)) {
+  const choices = humanInputChoicesForPayload(payload);
+  if (!allowReviewGateAnswer && isReviewGateJob(current, payload) && choices.length === 0) {
     return { ok: false, reason: "use_review_approve_or_reject" };
   }
   const questions = Array.isArray(payload?.questions) && payload.questions.length > 0
@@ -79,6 +97,14 @@ export async function answerHumanInput(jobId, args = {}, { projectDir = process.
   const answers = normalizeAnswers(questions, args);
   if (answers.length === 0 || answers.every((answer) => String(answer?.answer ?? answer ?? "").trim() === "")) {
     return { ok: false, reason: "empty_answer" };
+  }
+  if (choices.length > 0 && !humanInputChoiceFromAnswer(latestAnswerText(answers), choices)) {
+    return {
+      ok: false,
+      reason: "invalid_choice",
+      choices,
+      message: `Answer must select one of: ${choices.join(", ")}`,
+    };
   }
 
   const claim = claimHumanInputJob(id, { leaseSeconds: args.lease_seconds });

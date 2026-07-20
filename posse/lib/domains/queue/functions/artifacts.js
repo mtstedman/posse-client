@@ -1,13 +1,20 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
 import { readRunArtifactPayload, writeRunArtifactPayload } from "../../../shared/telemetry/functions/run-telemetry.js";
+import { normalizePromptPersistenceSummary } from "../../../shared/telemetry/functions/logging/prompt-persistence.js";
 
 let _artifactHydrateSampleCounter = 0;
 
+function normalizeArtifactPresentation(row) {
+  if (!row || row.artifact_type !== "prompt" || row.content_long == null) return row;
+  const contentLong = normalizePromptPersistenceSummary(row.content_long);
+  return contentLong === row.content_long ? row : { ...row, content_long: contentLong };
+}
+
 function hydrateArtifactRow(row) {
   if (!row) return row;
-  if (row.storage_kind !== "file_path" || (!row.file_path && !row.url)) return row;
-  if (row.content_long != null || row.content_json != null) return row;
+  if (row.storage_kind !== "file_path" || (!row.file_path && !row.url)) return normalizeArtifactPresentation(row);
+  if (row.content_long != null || row.content_json != null) return normalizeArtifactPresentation(row);
   const byteSize = Number(row.byte_size || 0);
   const shouldSampleMemory = byteSize >= 512 * 1024 || (_artifactHydrateSampleCounter++ % 50 === 0);
   if (shouldSampleMemory) {
@@ -36,11 +43,11 @@ function hydrateArtifactRow(row) {
       byte_size: Number.isFinite(byteSize) ? byteSize : null,
     });
   }
-  return {
+  return normalizeArtifactPresentation({
     ...row,
     content_long: payload.content_long,
     content_json: payload.content_json,
-  };
+  });
 }
 
 function hydrateArtifactRows(rows) {

@@ -1,10 +1,22 @@
 import { DatedRotatingLog } from "./DatedRotatingLog.js";
 import { scrubSecrets } from "./secret-scrub.js";
 import { appendRunTelemetry } from "../../functions/run-telemetry.js";
+import {
+  PROMPT_BODY_STORAGE_REASON,
+  promptMetadataPreview,
+} from "../../functions/logging/prompt-persistence.js";
 
 export function promptPreviewText(recordOrText, { max = 160 } = {}) {
   if (typeof recordOrText === "object" && recordOrText?.prompt_redacted) {
-    const preview = String(recordOrText.preview || "PROMPT CONTENT NOT PERSISTED");
+    // Rebuild policy previews from structured metadata instead of replaying the
+    // legacy "CONTENT NOT PERSISTED" marker. This fixes historical records at
+    // presentation time without rewriting their immutable log files.
+    const preview = promptMetadataPreview({
+      role: recordOrText.role,
+      provider: recordOrText.provider,
+      promptChars: recordOrText.prompt_chars,
+      systemPromptChars: recordOrText.system_prompt_chars,
+    });
     return preview.length > max ? preview.slice(0, Math.max(0, max - 1)) + "..." : preview;
   }
   const prompt = typeof recordOrText === "string"
@@ -44,8 +56,9 @@ export class PromptLog extends DatedRotatingLog {
     filePrefix = "prompts-",
     fileSuffix = ".log",
     persistContent = true,
+    onOpenError = null,
   } = {}) {
-    super({ dir, retentionDays, filePrefix, fileSuffix });
+    super({ dir, retentionDays, filePrefix, fileSuffix, onOpenError });
     this.persistContent = persistContent;
   }
 
@@ -70,13 +83,12 @@ export class PromptLog extends DatedRotatingLog {
     const scrubbedSystemPrompt = this.persistContent && typeof systemPromptText === "string"
       ? scrubSecrets(systemPromptText)
       : null;
-    const metadataPreview = [
-      "PROMPT CONTENT NOT PERSISTED",
-      role ? `role=${role}` : null,
-      provider ? `provider=${provider}` : null,
-      `prompt_chars=${promptText.length}`,
-      typeof systemPromptText === "string" ? `system_prompt_chars=${systemPromptText.length}` : null,
-    ].filter(Boolean).join(" ");
+    const metadataPreview = promptMetadataPreview({
+      role,
+      provider,
+      promptChars: promptText.length,
+      systemPromptChars: typeof systemPromptText === "string" ? systemPromptText.length : null,
+    });
     const record = {
       ts: new Date().toISOString(),
       agent_call_id,
@@ -98,14 +110,15 @@ export class PromptLog extends DatedRotatingLog {
         : metadataPreview,
       prompt: scrubbedPrompt,
       prompt_redacted: !this.persistContent,
-      prompt_redaction_reason: this.persistContent ? null : "prompt_and_skill_content_are_remote_owned",
+      prompt_redaction_reason: this.persistContent ? null : PROMPT_BODY_STORAGE_REASON,
+      prompt_body_storage: this.persistContent ? "local_scrubbed" : "remote_owned",
       system_prompt_chars: typeof systemPromptText === "string" ? systemPromptText.length : null,
       system_prompt: scrubbedSystemPrompt,
       system_prompt_files: this.persistContent && Array.isArray(systemPromptFiles) && systemPromptFiles.length > 0 ? systemPromptFiles : null,
     };
     let wrote = false;
     try { wrote = this.write(JSON.stringify(record)); } catch { wrote = false; }
-    try { appendRunTelemetry("prompts", record); } catch { /* best effort */ }
+    try { appendRunTelemetry("prompts", record); } catch { /* best effort mirror */ }
     return wrote;
   }
 
@@ -143,7 +156,12 @@ function registerDefaultPromptLogExitHandlers() {
 
 export function getDefaultPromptLog() {
   if (!_defaultPromptLog) {
-    _defaultPromptLog = new PromptLog({ persistContent: false });
+    _defaultPromptLog = new PromptLog({
+      persistContent: false,
+      onOpenError: (err, logDir) => {
+        process.stderr.write(`[prompt-log] Cannot persist prompt metadata in ${logDir}: ${err.message}\n`);
+      },
+    });
     registerDefaultPromptLogExitHandlers();
   }
   return _defaultPromptLog;

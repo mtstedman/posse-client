@@ -48,7 +48,7 @@ import { createChainLedger } from "../../../shared/tools/functions/chain-ledger.
 import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
 import { normalizeProjectDbCapability } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
-import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, runWithObservationContext } from "../../observability/functions/observations.js";
+import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, researchExplorationObservationStatus, runWithObservationContext } from "../../observability/functions/observations.js";
 import { registeredTestToolResultObservation } from "../../observability/functions/registered-test-tool-result.js";
 import {
   acknowledgeOperatorFeedback,
@@ -113,6 +113,15 @@ import {
 } from "./deterministic-mcp/boot-config-parse.js";
 import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
 import { resolveAgentFileAuthority } from "./deterministic-mcp/agent-file-authority.js";
+import {
+  RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
+  RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
+  RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
+  buildResearchCitationFetchGateText,
+  buildResearchSynthesisRequiredText,
+  isResearchAtlasCitationFetchAction,
+  isResearchAtlasExplorationAction,
+} from "./deterministic-mcp/research-synthesis.js";
 import {
   jsonRpcSuccess,
   jsonRpcError,
@@ -339,8 +348,6 @@ let remoteToolCatalogConfig = bootConfig.remoteCatalog && typeof bootConfig.remo
 let remoteToolCatalogPreload = bootConfig.remoteToolSurface && typeof bootConfig.remoteToolSurface === "object"
   ? bootConfig.remoteToolSurface
   : null;
-const RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS = 12;
-const RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS = 4;
 const RESEARCH_NATIVE_EXPLORATION_TOOLS = new Set([
   "chain_verdict",
   "list_files",
@@ -1612,14 +1619,32 @@ function saveResearchState() {
 }
 
 function isResearchExplorationTool(toolName, { requestedAtlasTool = false } = {}) {
-  if (requestedAtlasTool) return true;
   const normalized = String(toolName || "");
-  if (normalized.startsWith("atlas.") || normalized.startsWith("atlas_")) return true;
+  if (requestedAtlasTool || normalized.startsWith("atlas.") || normalized.startsWith("atlas_")) {
+    return isResearchAtlasExplorationAction(normalized);
+  }
   return RESEARCH_NATIVE_EXPLORATION_TOOLS.has(normalized);
 }
 
 function researchSynthesisStaleStepCount() {
   return Math.max(0, Number(researchState.explorationSteps || 0) - Number(researchState.lastNovelEvidenceStep || 0));
+}
+
+function syncResearchSynthesisStateFromObservations() {
+  if (!isResearcherRole || !mcpJobId) return;
+  const observed = researchExplorationObservationStatus({
+    jobId: mcpJobId,
+    attemptId: mcpAttemptId,
+  });
+  researchState.explorationSteps = Math.max(
+    Number(researchState.explorationSteps || 0),
+    Number(observed.exploration_steps || 0),
+  );
+  if (observed.synthesis_required && !researchState.synthesisRequiredAt) {
+    researchState.synthesisRequiredAt = new Date().toISOString();
+    researchState.synthesisReason = `exploration_steps=${researchState.explorationSteps}; absolute_ceiling=${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}; source=owner_observation`;
+    researchState.synthesisNoticeEmitted = true;
+  }
 }
 
 function researchSynthesisStatus() {
@@ -1661,16 +1686,20 @@ function recordResearchSynthesisRequiredObservation() {
 }
 
 function maybeMarkResearchSynthesisRequired({ toolName = null } = {}) {
+  syncResearchSynthesisStateFromObservations();
   if (!isResearcherRole || researchState.synthesisRequiredAt) return false;
   const explorationSteps = Number(researchState.explorationSteps || 0);
   const staleSteps = researchSynthesisStaleStepCount();
-  if (explorationSteps < RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS) return false;
-  if (staleSteps < RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS) return false;
+  const absoluteCeilingReached = explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
+  const staleCeilingReached = explorationSteps >= RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS
+    && staleSteps >= RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS;
+  if (!absoluteCeilingReached && !staleCeilingReached) return false;
 
   researchState.synthesisRequiredAt = new Date().toISOString();
   researchState.synthesisReason = [
     `exploration_steps=${explorationSteps}`,
     `stale_steps=${staleSteps}`,
+    absoluteCeilingReached ? `absolute_ceiling=${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}` : null,
     toolName ? `last_tool=${toolName}` : null,
   ].filter(Boolean).join("; ");
   recordResearchSynthesisRequiredObservation();
@@ -1689,21 +1718,42 @@ function noteResearchExplorationStep({ toolName, requestedAtlasTool = false, nov
 }
 
 function shouldBlockForResearchSynthesis(toolName, { requestedAtlasTool = false } = {}) {
+  maybeMarkResearchSynthesisRequired({ toolName });
   if (!isResearcherRole || !researchState.synthesisRequiredAt) return false;
   const normalized = String(toolName || "");
   if (normalized === "chain_verdict" && researchState.currentlyReading) return false;
-  if (requestedAtlasTool || normalized.startsWith("atlas.") || normalized.startsWith("atlas_")) return true;
+  if (requestedAtlasTool || normalized.startsWith("atlas.") || normalized.startsWith("atlas_")) {
+    return isResearchAtlasExplorationAction(normalized);
+  }
   return RESEARCH_NATIVE_SYNTHESIS_GATED_TOOLS.has(normalized);
+}
+
+function researchCitationFetchGate(toolName) {
+  if (!isResearcherRole || !isResearchAtlasCitationFetchAction(toolName)) return null;
+  maybeMarkResearchSynthesisRequired({ toolName });
+  syncResearchSynthesisStateFromObservations();
+  const observed = researchExplorationObservationStatus({
+    jobId: mcpJobId,
+    attemptId: mcpAttemptId,
+  });
+  if (!researchState.synthesisRequiredAt) {
+    return { reason: "before_synthesis", citationFetches: Number(observed.citation_fetches || 0) };
+  }
+  if (Number(observed.citation_fetches || 0) >= 1) {
+    return { reason: "budget_exhausted", citationFetches: Number(observed.citation_fetches || 0) };
+  }
+  return null;
 }
 
 function buildResearchSynthesisRequiredMessage(toolName) {
   const status = researchSynthesisStatus() || {};
-  return [
-    `RESEARCH SYNTHESIS REQUIRED: deterministic cap reached before ${toolName || "another tool call"}.`,
-    `Exploration calls: ${status.exploration_steps || 0}; no new relevant file in the last ${status.stale_steps || 0} exploration calls.`,
-    "Stop tool use and return a partial planner-ready brief now.",
-    "Include files/symbols consulted, why each mattered, unknowns, and stop_reason=deterministic_synthesize_now_no_novel_evidence.",
-  ].join("\n");
+  const absoluteCeilingReached = String(status.reason || "").includes("absolute_ceiling=");
+  return buildResearchSynthesisRequiredText({
+    explorationSteps: status.exploration_steps || 0,
+    staleSteps: status.stale_steps || 0,
+    absoluteCeilingReached,
+    toolName,
+  });
 }
 
 function chainRead(args) {
@@ -2690,6 +2740,23 @@ async function handleRequest(msg) {
       canonicalTool: toolName,
       arguments: sanitizeForLog(args),
     });
+
+    const citationFetchGate = researchCitationFetchGate(requestedToolName);
+    if (citationFetchGate) {
+      appendToolLog({
+        event: "research_citation_fetch_gate",
+        requestId: id ?? null,
+        tool: requestedToolName,
+        canonicalTool: toolName,
+        reason: citationFetchGate.reason,
+        citationFetches: citationFetchGate.citationFetches,
+      });
+      sendMessage(jsonRpcSuccess(id, {
+        content: [{ type: "text", text: buildResearchCitationFetchGateText({ reason: citationFetchGate.reason }) }],
+        isError: true,
+      }));
+      return;
+    }
 
     if (shouldBlockForResearchSynthesis(requestedToolName, { requestedAtlasTool })) {
       const errorText = buildResearchSynthesisRequiredMessage(requestedToolName);

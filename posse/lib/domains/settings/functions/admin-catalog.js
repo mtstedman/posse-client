@@ -66,12 +66,12 @@ export const ADMIN_AGENT_SETTING_SECTIONS = Object.freeze([
 ]);
 
 export const ADMIN_PROVIDER_SETTING_SECTIONS = Object.freeze([
-  Object.freeze({ provider: "claude", label: "Claude", budgetKeys: Object.freeze(["claude_run_budget_pct_session"]) }),
-  Object.freeze({ provider: "codex", label: "Codex", budgetKeys: Object.freeze(["codex_auth_mode", "codex_run_budget_pct_session"]) }),
-  Object.freeze({ provider: "openai", label: "OpenAI", budgetKeys: Object.freeze(["openai_run_budget_usd", "openai_daily_budget_usd", "openai_account_limit_tokens_session", "openai_account_limit_tokens_week"]) }),
-  Object.freeze({ provider: "grok", label: "Grok", budgetKeys: Object.freeze(["grok_run_budget_usd", "grok_daily_budget_usd"]) }),
-  Object.freeze({ provider: "copilot", label: "Copilot", budgetKeys: Object.freeze([]) }),
-  Object.freeze({ provider: "posse-local", label: "Local (Qwen / Gemma)", budgetKeys: Object.freeze([]) }),
+  Object.freeze({ provider: "claude", label: "Claude", settingKeys: Object.freeze(["claude_run_budget_pct_session"]) }),
+  Object.freeze({ provider: "codex", label: "Codex", settingKeys: Object.freeze(["codex_auth_mode", "codex_run_budget_pct_session"]) }),
+  Object.freeze({ provider: "openai", label: "OpenAI", settingKeys: Object.freeze(["openai_run_budget_usd", "openai_daily_budget_usd", "openai_account_limit_tokens_session", "openai_account_limit_tokens_week"]) }),
+  Object.freeze({ provider: "grok", label: "Grok", settingKeys: Object.freeze(["grok_run_budget_usd", "grok_daily_budget_usd"]) }),
+  Object.freeze({ provider: "copilot", label: "Copilot", settingKeys: Object.freeze([]) }),
+  Object.freeze({ provider: "posse-local", label: "Local Models", settingKeys: Object.freeze(["posse_local_generation_enabled", "atlas_embedding_model_id"]) }),
 ]);
 
 export const ADMIN_PROVIDER_CATALOG_SETTING_KEYS = Object.freeze([
@@ -81,8 +81,8 @@ export const ADMIN_PROVIDER_CATALOG_SETTING_KEYS = Object.freeze([
 ]);
 
 export const ADMIN_IMAGE_SETTING_SECTIONS = Object.freeze([
-  Object.freeze({ provider: "grok", label: "Grok", budgetKeys: Object.freeze(["grok_image_budget_usd"]) }),
-  Object.freeze({ provider: "openai", label: "OpenAI", budgetKeys: Object.freeze(["openai_image_budget_usd"]) }),
+  Object.freeze({ provider: "grok", label: "Grok", settingKeys: Object.freeze(["grok_image_budget_usd"]) }),
+  Object.freeze({ provider: "openai", label: "OpenAI", settingKeys: Object.freeze(["openai_image_budget_usd"]) }),
 ]);
 
 export const ADMIN_CREDENTIAL_SETTING_DEFS = Object.freeze([
@@ -274,6 +274,7 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   delegation_mode: "Delegation engine",
   model_catalog_enforcement: "Unknown model policy",
   model_catalog_cache_ms: "Model catalog refresh interval",
+  posse_local_generation_enabled: "Experimental local generation",
   claude_execution_mode: "Claude execution mode",
   posse_kaizen_to_atlas: "Kaizen-to-ATLAS promotion (reserved)",
   posse_db_telemetry_tail_limit: "Database telemetry tail",
@@ -349,6 +350,7 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
 });
 
 const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
+  posse_local_generation_enabled: "Allow the staged posse-local provider to appear in Admin for an operator-run test. Runtime checks still require a supported platform, the native ML worker, and an installed model package.",
   atlas_v2: "Use ATLAS for code search and context. Turn it off only when ATLAS is unavailable.",
   atlas_phases: "Choose which agent roles receive ATLAS context.",
   atlas_live_funnel: "Add ATLAS search results and code context to agent prompts.",
@@ -571,9 +573,8 @@ export const SETTINGS_GROUPS = Object.freeze([
   {
     id: "atlas_search",
     pane: "atlas",
-    label: "Search & Encoding",
+    label: "Tree Summaries",
     keys: Object.freeze([
-      "atlas_embedding_model_id",
       "atlas_tree_compression_mode",
     ]),
   },
@@ -677,6 +678,15 @@ export const SETTINGS_GROUPS = Object.freeze([
     keys: Object.freeze([
       "grok_run_budget_usd",
       "grok_daily_budget_usd",
+    ]),
+  },
+  {
+    id: "provider_local_models",
+    pane: "providers",
+    label: "Local Models",
+    keys: Object.freeze([
+      "posse_local_generation_enabled",
+      "atlas_embedding_model_id",
     ]),
   },
   {

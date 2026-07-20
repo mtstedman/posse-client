@@ -16,7 +16,7 @@ const BLOCKED_MUTATING_COMMAND = new RegExp(
   "i",
 );
 const BLOCKED_INLINE_SCRIPT_WRITE = /\b(?:node\s+-e|python3?\s+-c)\b[\s\S]*(?:writeFile|appendFile|createWriteStream|fs\.(?:rm|unlink|mkdir|rename|copyFile)|open\s*\(|Path\s*\([^)]*\)\.write|shutil\.|os\.(?:remove|unlink|mkdir|rmdir|rename))/i;
-const READONLY_BASH_ALLOWLIST = /^\s*(npm\s+test|npm\s+run|npx\s+(?:tsc|eslint|prettier|jest|vitest|mocha)\b|pnpm\s+(test|run|exec)|yarn\s+(test|run)|tsc\s|eslint\s|prettier\s|jest\s|vitest\s|mocha\s|pip\s+show|python3?\s+-m\s+(?:pytest|unittest|build)\b|pytest\s|ruff\s|mypy\s|flake8\s|black\s+--check|php\s|composer\s+(test|run)|phpunit\s|cargo\s+(test|check|build|clippy)|rustfmt\s+--check|go\s+(test|vet|build)|make\s|cmake\s|gradle\s|mvn\s|dotnet\s+(test|build)|cat\s|head\s|tail\s|ls\s|find\s|wc\s|file\s|du\s|diff\s|sort\s|uniq\s|grep\s|rg\s|git\s+diff|git\s+log|git\s+status|git\s+show|echo\s|pwd|whoami)/i;
+const READONLY_BASH_ALLOWLIST = /^\s*(npm\s+test|npm\s+run|node\s+--test\b|npx\s+(?:tsc|eslint|prettier|jest|vitest|mocha)\b|pnpm\s+(test|run|exec)|yarn\s+(test|run)|tsc\s|eslint\s|prettier\s|jest\s|vitest\s|mocha\s|pip\s+show|python3?\s+-m\s+(?:pytest|unittest|build)\b|pytest\s|ruff\s|mypy\s|flake8\s|black\s+--check|php\s|composer\s+(test|run)|phpunit\s|cargo\s+(test|check|build|clippy)|rustfmt\s+--check|go\s+(test|vet|build)|make\s|cmake\s|gradle\s|mvn\s|dotnet\s+(test|build)|cat\s|head\s|tail\s|ls\s|find\s|wc\s|file\s|du\s|diff\s|sort\s|uniq\s|grep\s|rg\s|git\s+diff|git\s+log|git\s+status|git\s+show|echo\s|pwd|whoami)/i;
 const PHP_SYNTAX_LINT_FLAG_RE = /(?:^|\s)(?:-l|--syntax-check)(?:\s|$)/i;
 const FIND_MUTATING_FLAGS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir"]);
 const GO_OUTPUT_FLAGS = new Set(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"]);
@@ -24,6 +24,7 @@ const CARGO_OUTPUT_FLAGS = new Set(["--target-dir", "--out-dir"]);
 const DOTNET_OUTPUT_FLAGS = new Set(["-o", "--output"]);
 const TSC_OUTPUT_FLAGS = new Set(["--outdir", "--outfile", "--tsbuildinfofile"]);
 const TEST_OUTPUT_FLAGS = new Set(["--junitxml", "--html", "--self-contained-html", "--cov-report", "--basetemp", "--result-log", "--report-log"]);
+const NODE_TEST_MUTATING_FLAGS = new Set(["--test-reporter-destination", "--test-update-snapshots"]);
 const PYTHON_BUILD_OUTPUT_FLAGS = new Set(["--outdir"]);
 const SORT_OUTPUT_FLAGS = new Set(["-o", "--output"]);
 const FIXER_FLAGS = new Set(["--fix", "--write"]);
@@ -146,6 +147,9 @@ function blockedBashArgumentReason(command) {
   }
   if ((commandName === "pytest" || commandName === "ruff" || commandName === "mypy" || commandName === "flake8") && hasFlag(lower.slice(1), TEST_OUTPUT_FLAGS)) {
     return `${commandName} explicit output path`;
+  }
+  if (commandName === "node" && lower[1] === "--test" && hasFlag(lower.slice(2), NODE_TEST_MUTATING_FLAGS)) {
+    return "node test mutating output flag";
   }
   if ((commandName === "python" || commandName === "python3") && lower[1] === "-m") {
     if (lower[2] === "pytest" && hasFlag(lower.slice(3), TEST_OUTPUT_FLAGS)) {

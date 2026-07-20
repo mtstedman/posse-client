@@ -776,7 +776,9 @@ export class TrackedProviderClient {
             model_tier: tier,
           },
         });
-        recordPrompt({
+        // Existing injected/test recorders may be void-returning; only an
+        // explicit false from the real recorder means both local sinks failed.
+        const promptMetadataPersisted = recordPrompt({
           agent_call_id: agentCallId,
           job_id,
           work_item_id,
@@ -790,7 +792,16 @@ export class TrackedProviderClient {
           prompt: promptText,
           systemPrompt,
           systemPromptFiles,
-        });
+        }) !== false;
+        if (!promptMetadataPersisted) {
+          log.warn("worker", "Prompt metadata could not be persisted locally", {
+            workItemId: work_item_id,
+            jobId: job_id,
+            agentCallId,
+            role: opts.role,
+            provider: providerName,
+          });
+        }
         recordRecoveryCheckpoint?.({
           work_item_id,
           job_id,
@@ -802,7 +813,8 @@ export class TrackedProviderClient {
           extra: {
             prompt_chars: promptText.length,
             system_prompt_chars: typeof systemPrompt === "string" ? systemPrompt.length : null,
-            prompt_content_persisted: false,
+            prompt_body_storage: "remote_owned",
+            prompt_metadata_persisted: promptMetadataPersisted,
           },
         });
       },

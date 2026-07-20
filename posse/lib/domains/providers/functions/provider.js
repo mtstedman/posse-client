@@ -37,6 +37,18 @@ function canonicalProviderName(providerName) {
   return providerRegistry.canonicalName(providerName);
 }
 
+export function isProviderEnabledForAccount(providerName) {
+  const canonicalName = canonicalProviderName(providerName);
+  if (isProviderEnabledByCatalog(canonicalName)) return true;
+  if (canonicalName !== "posse-local" || !providerRegistry.has(canonicalName)) return false;
+  const provider = providerRegistry.get(canonicalName);
+  try {
+    return provider?.isLocalGenerationEnabled?.() === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Returns a fresh Set of canonical provider names whose modules declare
  * `capabilities.images = true`. Computed live so providers loaded after
@@ -453,7 +465,7 @@ export async function repairMissingProviderDependencies({
  */
 export function isProviderReady(providerName, capability = null) {
   const canonicalName = canonicalProviderName(providerName);
-  if (!isProviderEnabledByCatalog(canonicalName)) {
+  if (!isProviderEnabledForAccount(canonicalName)) {
     return { ready: false, reason: `provider "${canonicalName}" is disabled by the model catalog` };
   }
   if (!providerRegistry.has(canonicalName)) {
@@ -503,7 +515,7 @@ export function isProviderReady(providerName, capability = null) {
 
 export function isProviderSelectable(providerName) {
   const canonicalName = canonicalProviderName(providerName);
-  if (!isProviderEnabledByCatalog(canonicalName)) return false;
+  if (!isProviderEnabledForAccount(canonicalName)) return false;
   if (canonicalName === "claude") return isProviderReady("claude", null).ready;
   if (!providerRegistry.has(canonicalName)) return false;
 
