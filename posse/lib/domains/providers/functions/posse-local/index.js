@@ -72,6 +72,20 @@ function toolResultFailed(result) {
   return result?.isError === true || /^Error:/i.test(String(result || "").trim());
 }
 
+function validLocalPlannerOutput(content) {
+  const parsed = extractJson(String(content || ""));
+  return Array.isArray(parsed)
+    && parsed.every((task) => (
+      task
+      && typeof task === "object"
+      && !Array.isArray(task)
+      && typeof task.title === "string"
+      && task.title.trim()
+      && typeof task.description === "string"
+      && task.description.trim()
+    ));
+}
+
 function suppressedReplayCompletion(role, targetPath, name, args, result, context = {}) {
   if (normalizedScopedPath(args?.path) !== targetPath) return null;
   if (toolResultFailed(result)) return null;
@@ -409,6 +423,7 @@ export async function callProvider(promptText, opts = {}) {
       finalOutputHint: role === "planner"
         ? "Return only the planner task JSON array required by the original request. Its first non-whitespace character must be [ and its last must be ]."
         : `Return only the required ${role} result block in the original format, with an honest COMPLETE or BLOCKED status.`,
+      validateFinalOutput: role === "planner" ? validLocalPlannerOutput : null,
       generate,
       execute: async (name, args) => {
         if (name === "read_file") {
