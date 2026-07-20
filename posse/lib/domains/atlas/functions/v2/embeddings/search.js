@@ -4,6 +4,8 @@
 // against an EmbeddingIndex, then resolve hits back to ViewSymbol rows
 // via (content_hash, local_id).
 
+import { fuseEmbeddingChannelHits } from "./documentation-channel.js";
+
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
 /** @typedef {import("../contracts/embeddings.js").EmbeddingEncoder} EmbeddingEncoder */
@@ -14,7 +16,9 @@
  * @typedef {Object} SemanticHit
  * @property {ViewSymbol} symbol
  * @property {number} score        In [0, 1]; higher = closer.
- * @property {number} distance     Raw cosine distance from the ANN.
+ * @property {number} distance     Fused cosine-distance equivalent after channel weighting.
+ * @property {Array<"code" | "documentation">} channels Vector channels that supported the hit.
+ * @property {{ code: number | null, documentation: number | null }} channelScores
  */
 
 /**
@@ -49,14 +53,27 @@ export async function semanticSearch({ query, view, index, encoder, k, minScore,
   if (!(queryVector instanceof Float32Array) || queryVector.length !== encoder.dim) {
     throw new Error("semanticSearch: encoder returned no valid vector for query");
   }
-  const hits = await index.nearest(queryVector, { k: topK, minScore: minS });
+  // Both logical channels share one ANN. Over-fetch before channel-aware
+  // deduplication so a strong documentation neighborhood cannot crowd the
+  // corresponding code candidates (or vice versa) out of the final top-k.
+  const rawHits = await index.nearest(queryVector, {
+    k: Math.min(1_000, Math.max(topK, topK * 6)),
+    minScore: 0,
+  });
+  const hits = fuseEmbeddingChannelHits(rawHits, { k: topK, minScore: minS });
 
   /** @type {SemanticHit[]} */
   const out = [];
   for (const h of hits) {
     const sym = await view.query.getByContentLocal(h.content_hash, h.local_id);
     if (!sym) continue; // Embedding referenced a blob that's not in this view.
-    out.push({ symbol: sym, score: h.score, distance: h.distance });
+    out.push({
+      symbol: sym,
+      score: h.score,
+      distance: h.distance,
+      channels: h.channels,
+      channelScores: h.channel_scores,
+    });
   }
   return out;
 }

@@ -6,6 +6,8 @@
 // orphaned vectors). They hold no instance state — `base`, `view`, and `index`
 // are all threaded in by the caller.
 
+import { embeddingKeysForSymbol } from "./documentation-channel.js";
+
 /** @typedef {import("../contracts/jobs.js").AtlasWarmJobResult} AtlasWarmJobResult */
 /** @typedef {import("../../../classes/v2/View.js").View} View */
 
@@ -31,14 +33,30 @@ export function staleEmbeddingHashes(base) {
 }
 
 /**
- * @param {{ base: AtlasWarmJobResult, index: any, hashes?: string[] | null }} args
+ * @param {{ base: AtlasWarmJobResult, index: any, hashes?: string[] | null, ledger?: any }} args
  * @returns {Promise<void>}
  */
-export async function pruneStaleEmbeddingHashes({ base, index, hashes = null }) {
+export async function pruneStaleEmbeddingHashes({ base, index, hashes = null, ledger = null }) {
   const candidates = Array.isArray(hashes) ? hashes : staleEmbeddingHashes(base);
   const unique = [...new Set(candidates.map((v) => String(v || "").trim()).filter(Boolean))];
   if (unique.length === 0 || typeof index?.removeByContentHash !== "function") return;
-  const removed = await index.removeByContentHash(unique);
+  const channelHashes = [...unique];
+  if (typeof ledger?.getBlobSymbols === "function") {
+    for (const contentHash of unique) {
+      try {
+        const symbols = ledger.getBlobSymbols(contentHash);
+        for (const symbol of Array.isArray(symbols) ? symbols : []) {
+          const documentationKey = embeddingKeysForSymbol(symbol)
+            .find((key) => key.channel === "documentation");
+          if (documentationKey) channelHashes.push(documentationKey.content_hash);
+        }
+      } catch {
+        // The ordinary source-hash prune is still safe. A documentation orphan
+        // is view-filtered at read time and the next full prune removes it.
+      }
+    }
+  }
+  const removed = await index.removeByContentHash([...new Set(channelHashes)]);
   if (Number.isFinite(Number(removed)) && Number(removed) > 0) {
     /** @type {any} */ (base).embeddings_pruned = Number(removed);
   }
@@ -67,10 +85,7 @@ export async function pruneEmbeddingIndexToCurrentView({ base, view, index, extr
     /** @type {any} */ (base).embeddings_prune_skipped_keep_cap = symbols.length;
     return;
   }
-  const keep = symbols.map((symbol) => ({
-    content_hash: symbol.content_hash,
-    local_id: symbol.local_id,
-  }));
+  const keep = symbols.flatMap((symbol) => embeddingKeysForSymbol(symbol));
   for (const key of extraKeepKeys) {
     if (key && key.content_hash != null) keep.push({ content_hash: key.content_hash, local_id: key.local_id });
   }

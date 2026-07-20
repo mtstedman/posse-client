@@ -59,6 +59,15 @@ function singleExactWriteTarget({ scopedFiles, createFiles, createRoots, deleteF
   return targets.length === 1 ? targets[0] : null;
 }
 
+function bindMissingContextExampleToExactTarget(promptText, targetPath) {
+  const prompt = String(promptText || "");
+  if (!targetPath) return prompt;
+  return prompt.replace(
+    /(MISSING_CONTEXT:\s*\r?\n\s*-\s*)path\/to\/needed\/file\.js/g,
+    `$1${targetPath}`,
+  );
+}
+
 function toolResultFailed(result) {
   return result?.isError === true || /^Error:/i.test(String(result || "").trim());
 }
@@ -210,7 +219,10 @@ export async function callProvider(promptText, opts = {}) {
     recordFinalPrompt = null,
     cwd = null,
     fallbackReads = null,
-    mcpGate = null,
+    // AgentDispatcher attaches this capability as non-enumerable so option
+    // spreads cannot leak it. Read the original options as the fallback after
+    // remote-policy narrowing performs its defensive shallow copy.
+    mcpGate = opts?.mcpGate || null,
     _remoteIssuedPolicy = null,
     manager = nativeBinaries,
     modelRoot = defaultLocalGenerationModelRoot(),
@@ -327,7 +339,7 @@ export async function callProvider(promptText, opts = {}) {
     .map((value) => String(value || "").trim())
     .filter(Boolean)
     .join("\n\n");
-  const user = String(promptText || "");
+  const user = bindMissingContextExampleToExactTarget(promptText, exactWriteTarget);
   const messages = [
     ...(system ? [{ role: "system", content: system }] : []),
     { role: "user", content: user },

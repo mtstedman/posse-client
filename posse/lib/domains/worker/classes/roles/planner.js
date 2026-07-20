@@ -482,6 +482,8 @@ export class PlannerRole extends BaseRole {
       data: {
         cwd: worker.projectDir,
         execution_provider: plannerExecProvider,
+        disableAtlas: payload.disableAtlas === true,
+        disableAtlasReason: payload.disableAtlasReason || null,
         title: workItem.title || "",
         project_context: (payload.task_spec || workItem.description || "").slice(0, 4000),
         files_to_modify: [],

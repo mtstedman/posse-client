@@ -65,6 +65,7 @@ import { normalizeAssessorConfidence } from "./verdict-shared.js";
 import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
 import {
   emitResearchComplete as emitAtlasV2ResearchComplete,
+  getAtlasWarmJobCompletion,
   isAtlasV2EmissionEnabled,
 } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
@@ -121,34 +122,40 @@ function normalizeAtlasResearchFiles(files) {
 }
 
 function emitAtlasV2ResearchCompleteIfEnabled(job, output) {
-  if (!isAtlasV2EmissionEnabled()) return;
+  if (!isAtlasV2EmissionEnabled()) {
+    return { enabled: false, ok: true, warmJobId: null, skipped: "atlas_v2_disabled" };
+  }
   try {
     const artifacts = getArtifacts(job.id, "summary");
     const files = normalizeAtlasResearchFiles(
       extractResearcherFiles([...artifacts, { content_long: output || "" }]),
     );
     const wi = getWorkItem(job.work_item_id);
-    emitAtlasV2ResearchComplete({
-      payload: {
-        wi_id: Number(job.work_item_id),
-        branch: String(wi?.branch_name || `wi-${job.work_item_id}`),
-        files,
-      },
-      jobId: job.id,
-      onError: (err) => {
-        log.warn("atlas-v2", "Failed to emit research_complete outbox event", {
-          jobId: job.id,
-          wiId: job.work_item_id,
-          error: err?.message || String(err),
-        });
-      },
-    });
+    return {
+      enabled: true,
+      ...emitAtlasV2ResearchComplete({
+        payload: {
+          wi_id: Number(job.work_item_id),
+          branch: String(wi?.branch_name || `wi-${job.work_item_id}`),
+          files,
+        },
+        jobId: job.id,
+        onError: (err) => {
+          log.warn("atlas-v2", "Failed to emit research_complete outbox event", {
+            jobId: job.id,
+            wiId: job.work_item_id,
+            error: err?.message || String(err),
+          });
+        },
+      }),
+    };
   } catch (err) {
     log.warn("atlas-v2", "Failed to prepare research_complete outbox event", {
       jobId: job.id,
       wiId: job.work_item_id,
       error: err?.message || String(err),
     });
+    return { enabled: true, ok: false, warmJobId: null, skipped: "outbox_error" };
   }
 }
 
@@ -747,6 +754,11 @@ function _buildLocalAssessmentEvidence({
     registeredTestRunEvidence || null,
     `WORKER OUTPUT:`,
     truncatedOutput,
+    ``,
+    `FINAL RESPONSE CONTRACT`,
+    `Return only one fenced \`\`\`json block containing this object shape:`,
+    `{"verdict":"pass|fail|blocked|needs_replan|needs_review","confidence":"high|medium|low|none","reasons":["specific evidence"],"spawn_jobs":[],"human_questions":[],"suggestions":[]}`,
+    `Use verdict "fail" when required fixes remain. Never return a bare PASS, FAIL, or NEEDS_FIX label and never add prose outside the JSON fence.`,
   ].filter(Boolean).join("\n");
 }
 
@@ -1123,8 +1135,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       lastError: null,
       cwd,
       jobProvider: providerOverride || job.provider || null,
-      disableAtlas: artifactAssessmentRoute,
-      disableAtlasReason: artifactAssessmentRoute ? "artifact route" : null,
+      disableAtlas: artifactAssessmentRoute || !!job._atlasDisabledForWorkItem,
+      disableAtlasReason: artifactAssessmentRoute
+        ? "artifact route"
+        : (job._atlasDisabledForWorkItem ? "ATLAS evidence warm did not succeed" : null),
       context_hints: Number.isFinite(Number(fallbackReads))
         ? { allow_fallback_reads: Math.max(0, Number(fallbackReads)) }
         : {},
@@ -1595,6 +1609,36 @@ export async function runPostExecutionAssessment(worker, {
     spawnedFileRequestFollowUp = true;
     return true;
   };
+
+  // A commit warm is emitted before this function runs. Park this job as
+  // assess-only until the worker has inspected that exact warm. The worker
+  // defers active warms, binds only after success, and applies the configured
+  // fail-closed/degraded policy to failed or missing warms. Keeping all three
+  // outcomes on that single gate prevents an inline assessor from binding the
+  // previous ledger head and avoids waiting inside executions that may not
+  // have a background scheduler lane.
+  const currentPayload = parseJobPayload(job);
+  const evidenceWarmJobId = Number(currentPayload?._atlas_evidence_warm_job_id);
+  const evidenceWarmRequired = currentPayload?._atlas_evidence_warm_required === true;
+  if (evidenceWarmRequired || (Number.isInteger(evidenceWarmJobId) && evidenceWarmJobId > 0)) {
+    const hasEvidenceWarmJob = Number.isInteger(evidenceWarmJobId) && evidenceWarmJobId > 0;
+    const evidenceWarm = getAtlasWarmJobCompletion(hasEvidenceWarmJob ? evidenceWarmJobId : null);
+    if (!evidenceWarm.ok) {
+      currentPayload._assess_only = true;
+      job.payload_json = JSON.stringify(currentPayload);
+      updateJobPayload(job.id, job.payload_json);
+      completeAttempt(attempt.id, {
+        status: "succeeded",
+        duration_ms: Date.now() - startTime,
+        output_chars: output.length,
+      });
+      const warmLabel = hasEvidenceWarmJob ? `#${evidenceWarmJobId}` : "(missing)";
+      worker.emit(job.id, `${C.dim}[atlas] WI#${job.work_item_id} job #${job.id}: commit warm ${warmLabel} is ${evidenceWarm.status || evidenceWarm.skipped || "pending"}; deferring evidence binding to assess-only retry${C.reset}`);
+      worker._releaseLease(job, leaseToken, "queued");
+      refreshAndExtractInsights(job.work_item_id);
+      return;
+    }
+  }
 
   // Skip assessment when the job made no file changes but has file requests.
   const skipAssessForFileRequest = !hasFileChanges && hasPendingFileRequests();
@@ -2368,8 +2412,11 @@ export async function runPostExecutionAssessment(worker, {
   });
 
   if (job.job_type === "research") {
-    emitAtlasV2ResearchCompleteIfEnabled(job, output);
-    worker._spawnPlanAfterResearch(job, output);
+    const warmEmission = emitAtlasV2ResearchCompleteIfEnabled(job, output);
+    worker._spawnPlanAfterResearch(job, output, {
+      atlasEvidenceWarmJobId: warmEmission?.warmJobId || null,
+      atlasEvidenceWarmRequired: warmEmission?.enabled === true,
+    });
   } else if (job.job_type === "preflight") {
     worker._spawnResearchAfterPreflight(job, output);
   }

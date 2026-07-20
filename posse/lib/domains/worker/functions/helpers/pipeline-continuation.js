@@ -17,6 +17,7 @@ import {
   getWorkItem,
   logEvent,
   storeInsight,
+  updateJobPayload,
   updateWorkItemResearchSkip,
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
@@ -683,7 +684,7 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
   return researchJob;
 }
 
-export function spawnPlanAfterResearch(worker, researchJob, output) {
+export function spawnPlanAfterResearch(worker, researchJob, output, options = {}) {
   const wi = getWorkItem(researchJob.work_item_id);
   if (wi?.research_skipped) {
     updateWorkItemResearchSkip(researchJob.work_item_id, { skipped: false, reason: null });
@@ -939,6 +940,17 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
 
   const existingPlanJob = findExistingPlanForResearch(researchJob);
   if (existingPlanJob) {
+    const atlasEvidenceWarmJobId = Number(options.atlasEvidenceWarmJobId);
+    const atlasEvidenceWarmRequired = options.atlasEvidenceWarmRequired === true;
+    const hasAtlasEvidenceWarmJob = Number.isInteger(atlasEvidenceWarmJobId) && atlasEvidenceWarmJobId > 0;
+    if (hasAtlasEvidenceWarmJob || atlasEvidenceWarmRequired) {
+      const existingPayload = parseJobPayload(existingPlanJob);
+      if (hasAtlasEvidenceWarmJob) existingPayload._atlas_evidence_warm_job_id = atlasEvidenceWarmJobId;
+      else delete existingPayload._atlas_evidence_warm_job_id;
+      if (atlasEvidenceWarmRequired) existingPayload._atlas_evidence_warm_required = true;
+      existingPlanJob.payload_json = JSON.stringify(existingPayload);
+      updateJobPayload(existingPlanJob.id, existingPlanJob.payload_json);
+    }
     if (terminalHumanGate) addDependency(existingPlanJob.id, terminalHumanGate.id, "hard");
     worker?.emit?.(researchJob.id,
       `${C.cyan}[pipeline]${C.reset} WI#${researchJob.work_item_id}: existing plan job #${existingPlanJob.id} already follows research #${researchJob.id} - skipping duplicate plan spawn`);
@@ -961,6 +973,10 @@ export function spawnPlanAfterResearch(worker, researchJob, output) {
     ...replanPayloadFields(researchPayload),
     deepthink_budget: researchBudget,
     deepthink: isResearchBudgetDeep(researchBudget),
+    ...(Number.isInteger(Number(options.atlasEvidenceWarmJobId)) && Number(options.atlasEvidenceWarmJobId) > 0
+      ? { _atlas_evidence_warm_job_id: Number(options.atlasEvidenceWarmJobId) }
+      : {}),
+    ...(options.atlasEvidenceWarmRequired === true ? { _atlas_evidence_warm_required: true } : {}),
   };
   if (isRedTeamPlanningPayload(researchPayload)) {
     const chain = createRedTeamPlanChain({

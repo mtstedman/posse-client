@@ -20,9 +20,10 @@ export class AssessmentSession {
   }
 
   async assess() {
+    const trackedCall = this.providerClient?.trackedCall || this.providerClient?.call;
     const result = await assessResult(this.job, this.output, {
       ...this.options,
-      ...(this.providerClient ? { trackedCall: this.providerClient.trackedCall?.bind(this.providerClient) } : {}),
+      ...(typeof trackedCall === "function" ? { trackedCall: trackedCall.bind(this.providerClient) } : {}),
     });
     this._last = result;
     this._history.push({
@@ -45,4 +46,3 @@ export class AssessmentSession {
     return [...this._history];
   }
 }
-

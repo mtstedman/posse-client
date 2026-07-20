@@ -2,7 +2,7 @@
 //
 // Worker-thread entry point for per-layer readiness inspection. The readiness
 // pass runs synchronous better-sqlite3 COUNT(*) scans over the view's symbols
-// and every embedding model's vectors table — on a large repo that blocks the
+// and the active embedding model's vectors table — on a large repo that blocks the
 // CLI event loop (TUI rendering, scheduler lock-renew heartbeat) when invoked
 // mid-run, e.g. from the backgrounded-boot failure handlers. Running it here
 // keeps the main thread responsive; the caller enqueues repair warms from the

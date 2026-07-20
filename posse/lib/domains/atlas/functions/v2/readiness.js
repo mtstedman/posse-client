@@ -22,6 +22,12 @@ import {
 import { stagerMetaPathForOutput } from "./scip/stager-meta.js";
 import { semanticLanguageTags } from "./resolver/adapters/registry.js";
 import { shouldRunScipPhase } from "../../../integrations/functions/atlas-v2-mode.js";
+import { DOCUMENTATION_KEY_PREFIX } from "./embeddings/documentation-channel.js";
+import {
+  atlasEmbeddingModelForId,
+  normalizeAtlasEmbeddingModelId,
+} from "../../../../catalog/atlas.js";
+import { atlasEmbeddingModelVersion } from "./embeddings/model-version.js";
 
 /**
  * @typedef {"ready" | "warming" | "failed" | "stale" | "off"} AtlasLayerStatus
@@ -78,7 +84,7 @@ function formatCount(value) {
 
 /**
  * @param {string} repoRoot
- * @returns {{ views: AtlasLayerReadiness, treesitter: AtlasLayerReadiness, candidates: number, eligibleCandidates: number }}
+ * @returns {{ views: AtlasLayerReadiness, treesitter: AtlasLayerReadiness, candidates: number, eligibleCandidates: number, eligibleDocumentationCandidates: number }}
  */
 function inspectViewAndTreesitter(repoRoot) {
   const viewPath = mainViewPath(repoRoot);
@@ -87,6 +93,7 @@ function inspectViewAndTreesitter(repoRoot) {
   const viewDb = openReadonly(viewPath);
   let candidates = 0;
   let eligibleCandidates = 0;
+  let eligibleDocumentationCandidates = 0;
 
   /** @type {AtlasLayerReadiness} */
   let views;
@@ -151,6 +158,12 @@ function inspectViewAndTreesitter(repoRoot) {
         eligibleCandidates = Number(
           viewDb.prepare(`SELECT COUNT(*) AS c FROM symbols WHERE lang IN (${placeholders})`).get(...tags)?.c,
         ) || 0;
+        eligibleDocumentationCandidates = Number(
+          viewDb.prepare(`
+            SELECT COUNT(*) AS c FROM symbols
+            WHERE lang IN (${placeholders}) AND doc IS NOT NULL AND TRIM(doc) <> ''
+          `).get(...tags)?.c,
+        ) || 0;
       } catch { /* leave 0 */ }
       const branch = meta.branch || "main";
       const viewSeq = Number(meta.ledger_seq);
@@ -184,7 +197,7 @@ function inspectViewAndTreesitter(repoRoot) {
     try { ledgerDb?.close(); } catch { /* ignore */ }
     try { viewDb?.close(); } catch { /* ignore */ }
   }
-  return { views, treesitter, candidates, eligibleCandidates };
+  return { views, treesitter, candidates, eligibleCandidates, eligibleDocumentationCandidates };
 }
 
 /**
@@ -344,14 +357,19 @@ function inspectTreeCompression(repoRoot, config) {
 /**
  * @param {string} repoRoot
  * @param {Record<string, any>} config
- * @param {number} candidates  Encodable symbol count of the main view (embedding
- *   denominator) — symbols with language semantics only, matching what the
- *   embeddings ingest will ever write to keys.db.
+ * @param {number} codeCandidates Encodable symbol count of the main view.
+ * @param {number} documentationCandidates Encodable symbols with documentation.
  * @param {number} parity
  * @returns {AtlasLayerReadiness[]}
  */
-function inspectEmbeddings(repoRoot, config, candidates, parity) {
+function inspectEmbeddings(repoRoot, config, codeCandidates, documentationCandidates, parity) {
   const root = embeddingsRoot(repoRoot);
+  const activeModelId = normalizeAtlasEmbeddingModelId(
+    config.atlasEmbeddingModelId ?? config.atlas_embedding_model_id,
+  );
+  const configuredVersion = String(config.atlasEmbeddingModelVersion || "").trim();
+  const activeModelVersion = configuredVersion
+    || atlasEmbeddingModelVersion(atlasEmbeddingModelForId(activeModelId));
   /** @type {AtlasLayerReadiness[]} */
   const layers = [];
   let dirs = [];
@@ -366,11 +384,19 @@ function inspectEmbeddings(repoRoot, config, candidates, parity) {
     const modelDir = path.join(root, dir.name);
     const keysDb = openReadonly(path.join(modelDir, "keys.db"));
     if (!keysDb) continue;
-    let vectors = 0;
+    let codeVectors = 0;
+    let documentationVectors = 0;
     let modelVersion = dir.name;
     try {
-      if (tableExists(keysDb, "vectors")) {
-        vectors = Number(keysDb.prepare("SELECT COUNT(*) AS c FROM vectors").get()?.c) || 0;
+      if (tableExists(keysDb, "vectors") && tableExists(keysDb, "keys")) {
+        const counts = /** @type {any} */ (keysDb.prepare(`
+          SELECT
+            SUM(CASE WHEN k.content_hash LIKE ? THEN 1 ELSE 0 END) AS documentation,
+            SUM(CASE WHEN k.content_hash LIKE 'atlas-doc-v%:%' THEN 0 ELSE 1 END) AS code
+          FROM vectors v JOIN keys k ON k.uid = v.uid
+        `).get(`${DOCUMENTATION_KEY_PREFIX}%`));
+        codeVectors = Number(counts?.code) || 0;
+        documentationVectors = Number(counts?.documentation) || 0;
       }
       if (tableExists(keysDb, "meta")) {
         const row = /** @type {any} */ (keysDb.prepare("SELECT value FROM meta WHERE key = 'model_version'").get());
@@ -379,24 +405,34 @@ function inspectEmbeddings(repoRoot, config, candidates, parity) {
     } catch { /* leave defaults */ } finally {
       try { keysDb.close(); } catch { /* ignore */ }
     }
+    // Stale model directories remain for the cleanup grace window. They are
+    // not repair targets and must not make current-model readiness look warm.
+    if (modelVersion !== activeModelVersion) continue;
     const inflight = fs.existsSync(path.join(modelDir, "inflight.json"));
     const layer = `embeddings:${modelVersion}`;
-    if (candidates <= 0) {
+    const expectedVectors = codeCandidates + documentationCandidates;
+    const currentVectors = codeVectors + documentationVectors;
+    if (expectedVectors <= 0) {
       layers.push({
         layer,
         status: inflight ? "warming" : "ready",
         coverage: null,
-        detail: `${formatCount(vectors)} vectors (no view symbol count to compare)`,
+        detail: `${formatCount(currentVectors)} vectors (no view symbol count to compare)`,
       });
       continue;
     }
-    const coverage = Math.min(100, Math.round((vectors / candidates) * 100));
-    const atParity = vectors / candidates >= parity;
+    const coveredCode = Math.min(codeCandidates, codeVectors);
+    const coveredDocumentation = Math.min(documentationCandidates, documentationVectors);
+    const coverage = Math.min(100, Math.round(((coveredCode + coveredDocumentation) / expectedVectors) * 100));
+    const codeAtParity = codeCandidates <= 0 || codeVectors / codeCandidates >= parity;
+    const documentationAtParity = documentationCandidates <= 0
+      || documentationVectors / documentationCandidates >= parity;
+    const atParity = codeAtParity && documentationAtParity;
     layers.push({
       layer,
       status: !atParity || inflight ? "warming" : "ready",
       coverage,
-      detail: `${formatCount(vectors)}/${formatCount(candidates)} symbols${inflight ? " (encode in flight or interrupted)" : ""}`,
+      detail: `${formatCount(codeVectors)}/${formatCount(codeCandidates)} code, ${formatCount(documentationVectors)}/${formatCount(documentationCandidates)} docs${inflight ? " (encode in flight or interrupted)" : ""}`,
     });
   }
   if (layers.length === 0) {
@@ -419,13 +455,18 @@ function inspectEmbeddings(repoRoot, config, candidates, parity) {
  */
 export function computeAtlasLayerReadiness({ repoRoot, config = {}, parity = ATLAS_EMBEDDINGS_PARITY }) {
   const root = String(repoRoot || "");
-  const { views, treesitter, eligibleCandidates } = inspectViewAndTreesitter(root);
+  const {
+    views,
+    treesitter,
+    eligibleCandidates,
+    eligibleDocumentationCandidates,
+  } = inspectViewAndTreesitter(root);
   const layers = [
     treesitter,
     ...inspectScipLayers(root, config),
     views,
     inspectTreeCompression(root, config),
-    ...inspectEmbeddings(root, config, eligibleCandidates, parity),
+    ...inspectEmbeddings(root, config, eligibleCandidates, eligibleDocumentationCandidates, parity),
   ];
   const notReady = layers.filter((layer) => layer.status !== "ready" && layer.status !== "off");
   return { layers, notReady };

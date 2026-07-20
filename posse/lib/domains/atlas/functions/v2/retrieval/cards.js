@@ -5,6 +5,7 @@
 // produces identically-shaped outputs.
 
 import { sha256Hex } from "../hash.js";
+import { compactDocumentationSummary } from "../embeddings/documentation-channel.js";
 import { isDefaultVisibleSymbol, isNoisyLocalSymbol } from "./hygiene.js";
 import { applyDbAccessToCard } from "./db-symbol-access.js";
 
@@ -343,7 +344,8 @@ function signatureFromSymbol(sym) {
  * @returns {string | null}
  */
 function summaryFromSymbol(sym) {
-  if (typeof sym.doc === "string" && sym.doc.trim()) return sym.doc.trim();
+  const documentation = compactDocumentationSummary(sym.doc);
+  if (documentation) return documentation;
   const visibility = sym.visibility ? `${sym.visibility} ` : "";
   const qualified = sym.qualified_name || sym.name;
   const lang = languageLabel(sym.lang);

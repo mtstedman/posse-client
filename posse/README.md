@@ -146,8 +146,8 @@ Use `posse help` for the full CLI reference.
 
 ## Upgrade Notes
 
-- Admin-set global model overrides act as defaults; explicit per-job model names
-  and delegator/escalation choices take precedence.
+- Admin-set global model overrides act as fallbacks; explicit per-job model
+  names and cheap/standard/strong tier routing take precedence.
 
 ## Core Commands
 

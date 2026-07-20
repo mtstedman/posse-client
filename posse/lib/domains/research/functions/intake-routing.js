@@ -52,6 +52,15 @@ import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 
 const ONESHOT_SOURCES = new Set(["explicit", "heuristic", "scope", "fuzzy", "intake", "preflight", "internal"]);
 
+export function oneshotReasoningEffort(routing = {}) {
+  // One-shot removes both researcher and planner calls, so even a trivial
+  // edit needs enough deliberation to inspect, implement, and verify in one
+  // developer context. Natural one-shots are deliberately narrow and stay at
+  // medium; an explicitly elevated routing budget gets high effort without
+  // forcing every typo/copy edit onto the strongest model tier.
+  return normalizeResearchBudget(routing?.budget, "low") === "low" ? "medium" : "high";
+}
+
 function intersection(left, right) {
   const out = [];
   for (const value of left) {
@@ -532,6 +541,7 @@ export function createOneshotDevJob(workItem, {
   });
 
   const effectiveRequestedText = requestedText || workItem?.title || `WI#${workItem.id}`;
+  const reasoningEffort = oneshotReasoningEffort(routing);
   const taskSpec = [
     effectiveRequestedText,
     "",
@@ -544,7 +554,7 @@ export function createOneshotDevJob(workItem, {
     parent_job_id: parentJob?.id || null,
     priority: workItem.priority,
     model_tier: "standard",
-    reasoning_effort: "low",
+    reasoning_effort: reasoningEffort,
     planner_risk_score: 1,
     payload_json: JSON.stringify({
       task_spec: taskSpec,
@@ -570,6 +580,7 @@ export function createOneshotDevJob(workItem, {
       _oneshot_reason: reason,
       _oneshot_source: oneshotSourceForPayload(routing, source),
       _assess_model_tier: "standard",
+      _assess_reasoning_effort: reasoningEffort,
     }),
   });
 

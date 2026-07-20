@@ -46,6 +46,10 @@ import { reconcileEmbeddings, resumeEmbeddingsSlice } from "../../functions/v2/e
 import { ATLAS_EMBEDDINGS_WARM_SLICE_SYMBOLS } from "../../functions/v2/contracts/jobs.js";
 import { errorForTelemetry, recordEmbeddingForensics } from "../../functions/v2/embeddings/forensics.js";
 import { cleanupStaleEmbeddingDirs, openEmbeddingResources } from "../../functions/v2/embeddings/resources.js";
+import {
+  DOCUMENTATION_TEXT_SHAPE_VERSION,
+  embeddingKeysForSymbol,
+} from "../../functions/v2/embeddings/documentation-channel.js";
 import { openViewWithMeta, removeSqliteFile, viewFreshness } from "../../functions/v2/view-health.js";
 import { viewCanServeBranch } from "../../functions/v2/view-can-serve.js";
 import { sourceStatRecord, sourceStatMatches } from "../../functions/v2/source-stats.js";
@@ -2978,8 +2982,22 @@ export class ParseEngine {
     }
     try {
       const watermark = await index.getEmbeddingWatermark(key);
-      if (Number(watermark?.ledger_seq) === embeddingScope.previousLedgerSeq) {
+      if (
+        Number(watermark?.ledger_seq) === embeddingScope.previousLedgerSeq
+        && Number(watermark?.documentation_text_shape_version) === DOCUMENTATION_TEXT_SHAPE_VERSION
+      ) {
         return { mode: "incremental", key, reason: "watermark_match", watermark: watermark || null };
+      }
+      if (
+        Number(watermark?.ledger_seq) === embeddingScope.previousLedgerSeq
+        && Number(watermark?.documentation_text_shape_version) !== DOCUMENTATION_TEXT_SHAPE_VERSION
+      ) {
+        return {
+          mode: "full",
+          key,
+          reason: "documentation_shape_mismatch",
+          watermark: watermark || null,
+        };
       }
       return {
         mode: "full",
@@ -3009,6 +3027,7 @@ export class ParseEngine {
         view_path: path.resolve(viewPath),
         branch: meta.branch,
         ledger_seq: Number.isInteger(meta.ledger_seq) ? meta.ledger_seq : 0,
+        documentation_text_shape_version: DOCUMENTATION_TEXT_SHAPE_VERSION,
         view_built_at: meta.built_at ?? null,
         updated_at: new Date().toISOString(),
       });
@@ -3082,7 +3101,7 @@ export class ParseEngine {
           return { ok: false, reason: `${path.basename(candidate)}: keep-set truncated at scan cap` };
         }
         for (const symbol of symbols) {
-          keys.push({ content_hash: symbol.content_hash, local_id: symbol.local_id });
+          keys.push(...embeddingKeysForSymbol(symbol));
         }
       } catch (err) {
         return { ok: false, reason: `${path.basename(candidate)}: ${/** @type {any} */ (err)?.message || err}` };
@@ -3229,6 +3248,9 @@ export class ParseEngine {
       base.embeddings_provider = resources.provider;
       base.embeddings_candidates = report.candidates;
       base.embeddings_indexed = report.indexed;
+      /** @type {any} */ (base).embeddings_documentation_candidates = report.documentationCandidates;
+      /** @type {any} */ (base).embeddings_documentation_indexed = report.documentationIndexed;
+      /** @type {any} */ (base).embeddings_documentation_already_indexed = report.documentationAlreadyIndexed;
       /** @type {any} */ (base).embeddings_skipped_unsupported_language = report.skippedUnsupportedLanguage || 0;
       /** @type {any} */ (base).embeddings_already_indexed = report.alreadyIndexed || 0;
       recordIntakeTelemetry(base, "embeddings.reconciliation_completed", {
@@ -3245,6 +3267,7 @@ export class ParseEngine {
         await pruneStaleEmbeddingHashes({
           base,
           index: resources.index,
+          ledger: this.#ledger,
           hashes: await this.#staleHashesSafeToPrune({ view, base }),
         });
         recordEmbeddingForensics("warmer.embeddings.prune_stale_hashes.done", {
@@ -3295,6 +3318,7 @@ export class ParseEngine {
           await pruneStaleEmbeddingHashes({
             base,
             index: resources.index,
+            ledger: this.#ledger,
             hashes: await this.#staleHashesSafeToPrune({ view, base }),
           });
           recordEmbeddingForensics("warmer.embeddings.prune_stale_hashes.done", {

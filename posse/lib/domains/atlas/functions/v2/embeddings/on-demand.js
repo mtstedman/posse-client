@@ -5,6 +5,7 @@
 // stay cheap and semantic search pays only for missing symbols.
 
 import { ingestView } from "./ingest.js";
+import { embeddingKeysForSymbol } from "./documentation-channel.js";
 import { hasLanguageSemantics } from "../resolver/adapters/registry.js";
 import {
   errorForTelemetry,
@@ -302,7 +303,7 @@ async function encodeMissingSymbols({ view, index, encoder, repoRoot, missing, t
       indexed: result.indexed,
       report: result,
     });
-    return { skipped: false, missing: missing.length, encoded: result.indexed };
+    return { skipped: false, missing: missing.length, encoded: result.indexedSymbols };
   } catch (err) {
     const aborted = controller.signal.aborted;
     const reason = aborted
@@ -328,7 +329,7 @@ async function encodeMissingSymbols({ view, index, encoder, repoRoot, missing, t
 }
 
 /**
- * @param {{ view: View, index: EmbeddingIndex, encoder: EmbeddingEncoder }}
+ * @param {{ view: View, index: EmbeddingIndex, encoder: EmbeddingEncoder }} args
  */
 function inFlightKey({ view, index, encoder }) {
   const viewKey = typeof /** @type {any} */ (view)._dbPath === "function"
@@ -376,8 +377,9 @@ async function missingSymbols({ index, symbols: rawSymbols }) {
       if (!symbol?.content_hash || !Number.isInteger(symbol.local_id)) {
         continue;
       }
-      keys.push({ content_hash: symbol.content_hash, local_id: symbol.local_id });
-      candidates.push(symbol);
+      const required = embeddingKeysForSymbol(symbol);
+      keys.push(...required);
+      candidates.push({ symbol, required });
     }
     try {
       const result = await index.containsMany(keys);
@@ -386,7 +388,9 @@ async function missingSymbols({ index, symbols: rawSymbols }) {
         : Array.isArray(result)
           ? new Set(result.map(String))
           : new Set();
-      return candidates.filter((symbol) => !present.has(symbolKey(symbol)));
+      return candidates
+        .filter((candidate) => candidate.required.some((key) => !present.has(embeddingKeyString(key))))
+        .map((candidate) => candidate.symbol);
     } catch {
       // Fall back to per-symbol checks below.
     }
@@ -400,23 +404,25 @@ async function missingSymbols({ index, symbols: rawSymbols }) {
     if (!symbol?.content_hash || !Number.isInteger(symbol.local_id)) {
       continue;
     }
-    let present = false;
-    try {
-      present = !!(await index.contains(symbol.content_hash, symbol.local_id));
-    } catch {
-      present = false;
+    let complete = true;
+    for (const key of embeddingKeysForSymbol(symbol)) {
+      try {
+        if (!(await index.contains(key.content_hash, key.local_id))) {
+          complete = false;
+          break;
+        }
+      } catch {
+        complete = false;
+        break;
+      }
     }
-    if (!present) missing.push(symbol);
+    if (!complete) missing.push(symbol);
   }
   return missing;
 }
 
-/**
- * @param {ViewSymbol} symbol
- * @returns {string}
- */
-function symbolKey(symbol) {
-  return `${symbol.content_hash}\0${symbol.local_id}`;
+function embeddingKeyString(key) {
+  return `${key.content_hash}\0${key.local_id}`;
 }
 
 function encoderTelemetry(encoder) {

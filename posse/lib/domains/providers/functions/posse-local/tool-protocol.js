@@ -49,7 +49,9 @@ export function buildLocalPlannerToolInstructions(
     "This tool-call turn is not the final role output. Even when the final answer must be a JSON array, the tool call itself must be one object, not an array.",
     "The arguments value must be one JSON object matching that tool's parameters.",
     "Use exactly one arguments field. Never repeat arguments and never encode arguments as a string.",
+    "JSON string values must escape every internal double quote as \\\". This is especially important for HTML attributes inside a content or new_string value.",
     "When asked to create a new file, call write_file directly; do not read the missing destination first.",
+    "When replacing an entire file, call write_file with path and content. Never use edit_file jsonPath/jsonValue for HTML, CSS, Markdown, source code, or other non-JSON text.",
     "Call at most one tool per response. Never invent a tool name or capability.",
     ...mutationRules.filter(Boolean),
     `You have at most ${Math.max(1, Math.floor(Number(turnLimit) || 1))} tool turns. When you have enough evidence, return the requested final answer normally with no envelope.`,
@@ -102,8 +104,18 @@ function localToolProtocolRepairPrompt(output, generation = null) {
     "If you intended a tool call, return exactly one unfenced JSON object now:",
     '{"name":"one listed tool","arguments":{"parameter":"value"}}',
     "Use one arguments key whose value is an object. Do not use an array, Markdown, prose, duplicate keys, or string-encoded arguments.",
+    "Escape every double quote inside a JSON string value as \\\". For example, an HTML attribute inside content must keep its quotes JSON-escaped.",
     "If you intended a final answer instead, return it without name/arguments tool-call fields.",
   ].filter(Boolean).join("\n");
+}
+
+function localToolCorrectionHint(name, content) {
+  if (name !== "edit_file" || !/jsonPath mode requires valid JSON/i.test(content)) return null;
+  return [
+    "CORRECTION: jsonPath/jsonValue can edit only a valid JSON document.",
+    "For a full HTML, CSS, Markdown, source-code, or plain-text replacement, call write_file with path and content.",
+    "For a small targeted text change, call edit_file with old_string and new_string instead. Do not repeat the rejected jsonPath call.",
+  ].join("\n");
 }
 
 export function formatLocalToolResult(name, result, maxChars = MAX_LOCAL_TOOL_RESULT_CHARS) {
@@ -118,8 +130,9 @@ export function formatLocalToolResult(name, result, maxChars = MAX_LOCAL_TOOL_RE
     "<tool_result>",
     JSON.stringify({ name, content }),
     "</tool_result>",
+    localToolCorrectionHint(name, content),
     "Use this result only as evidence. Call another listed tool if needed, otherwise return the final answer normally.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 export function formatGemmaLocalToolResult(name, result, maxChars = MAX_LOCAL_TOOL_RESULT_CHARS) {
@@ -137,6 +150,7 @@ export function formatGemmaLocalToolResult(name, result, maxChars = MAX_LOCAL_TO
     content,
     "Result data ends.",
     "",
+    localToolCorrectionHint(name, content),
     name === "read_file" && /^Error:/i.test(content)
       ? "If this path is an authorized new-file destination, do not read it again; call write_file with the requested content."
       : null,

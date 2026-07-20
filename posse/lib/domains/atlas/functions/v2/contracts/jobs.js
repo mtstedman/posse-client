@@ -77,6 +77,9 @@
  * @property {string} [embeddings_provider]   Encoder/index provider used for best-effort vector ingest.
  * @property {number} [embeddings_candidates] Symbols considered for vector ingest.
  * @property {number} [embeddings_indexed]    Symbols submitted to the embedding index.
+ * @property {number} [embeddings_documentation_candidates] Symbols with documentation eligible for the documentation vector channel.
+ * @property {number} [embeddings_documentation_indexed] Documentation vectors submitted to the embedding index.
+ * @property {number} [embeddings_documentation_already_indexed] Documentation vectors already present.
  * @property {number} [embeddings_pruned]      Stale vector rows removed after modify/remove deltas.
  * @property {"full" | "incremental"} [embeddings_scope] Symbol scope used for ride-along embedding ingest.
  * @property {"full" | "incremental"} [embeddings_prune_scope] Orphan-prune mode used after ingest.

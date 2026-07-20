@@ -5,19 +5,15 @@ import path from "node:path";
 import { ATLAS_JINA_MODEL, atlasEmbeddingModelForId } from "../../../../catalog/atlas.js";
 import { ML_EMBED_METHOD } from "../../../../catalog/binary.js";
 import { runMlNativeMethodAsync } from "../../../../shared/native/functions/ml-invoke.js";
-import {
-  defaultBuildSymbolText,
-  TEXT_SHAPE_VERSION,
-} from "../../functions/v2/embeddings/build-symbol-text.js";
+import { defaultBuildSymbolText } from "../../functions/v2/embeddings/build-symbol-text.js";
+import { atlasEmbeddingModelVersion } from "../../functions/v2/embeddings/model-version.js";
 import { jinaModelCacheDir } from "../../functions/v2/embeddings/jina-model.js";
 import { unpackNativeEmbeddingVectors } from "../../functions/v2/embeddings/unpack-native-vectors.js";
 
 export const ATLAS_JINA_MODEL_VERSION =
-  `onnx-${ATLAS_JINA_MODEL.modelId}-${ATLAS_JINA_MODEL.dim}-${ATLAS_JINA_MODEL.dtype}-text${TEXT_SHAPE_VERSION}`;
+  atlasEmbeddingModelVersion(ATLAS_JINA_MODEL);
 
-export function atlasEmbeddingModelVersion(modelConfig = ATLAS_JINA_MODEL) {
-  return `onnx-${modelConfig.modelId}-${modelConfig.dim}-${modelConfig.dtype}-text${TEXT_SHAPE_VERSION}`;
-}
+export { atlasEmbeddingModelVersion };
 
 // The active production encoder. Jina artifacts are staged explicitly, while
 // tokenization, pooling, normalization, and ONNX execution live in posse-ml.

@@ -3,10 +3,10 @@
 // Embedding contracts for v1. Workstream H owns the implementation.
 //
 // Design summary:
-//   * Embeddings are content-addressed by (content_hash, local_id), the
-//     same identity used for SymbolRow. Once a blob's symbols are
-//     embedded under a given (model, model_version), the result is
-//     immutable and shareable across worktrees.
+//   * Code embeddings are content-addressed by (content_hash, local_id), the
+//     same identity used for SymbolRow. Documentation embeddings share the
+//     physical store under a versioned opaque key that carries the source hash
+//     plus an independent documentation-text fingerprint.
 //   * One embedding store per ledger lives at <repo>/.posse/atlas/embeddings/
 //     containing both the on-disk vector blobs and an ANN index per
 //     (model, model_version) tuple.
@@ -20,7 +20,7 @@
  * One embedding row, content-addressed alongside its source symbol.
  *
  * @typedef {Object} EmbeddingRow
- * @property {string} content_hash            Matches SymbolRow.content_hash.
+ * @property {string} content_hash            Code: SymbolRow.content_hash. Documentation: versioned opaque channel key.
  * @property {number} local_id                Matches SymbolRow.local_id.
  * @property {string} model                   Stable model identifier, e.g. "all-minilm-l6-v2".
  * @property {string} model_version           Model version string for cache busting.
@@ -30,8 +30,8 @@
  */
 
 /**
- * One nearest-neighbor hit. Symbol identity is by (content_hash, local_id)
- * so the caller can join into the view's symbols table for display data.
+ * One nearest-neighbor hit. Raw documentation-channel hits use an opaque
+ * content_hash and must be decoded/fused before joining into the view.
  *
  * @typedef {Object} EmbeddingHit
  * @property {string} content_hash
@@ -105,6 +105,15 @@
  *   successful warm to self-heal orphan rows left by interrupted or rebuilt
  *   views.
  *
+ * @property {(keys: Array<{ content_hash: string, local_id: number }>, meta?: Record<string, any>) => void | Promise<void>} [markEncoding]
+ *   Persist a crash-recovery breadcrumb before an encode batch begins.
+ *
+ * @property {() => void | Promise<void>} [clearEncoding]
+ *   Clear the crash-recovery breadcrumb after its rows commit.
+ *
+ * @property {() => Record<string, any> | null | Promise<Record<string, any> | null>} [readInflight]
+ *   Read an interrupted encode breadcrumb during reconciliation.
+ *
  * @property {(vector: Float32Array, opts?: EmbeddingSearchOptions) => EmbeddingHit[] | Promise<EmbeddingHit[]>} nearest
  *   Top-k by cosine similarity. Vector must have length === dim.
  *
@@ -126,6 +135,8 @@
  * @property {string} signature_hash
  * @property {string | null} [signature_text]
  * @property {string | null} [doc]        Doc comment / docstring, if present.
+ *   Canonical code embedding text excludes this field; the documentation
+ *   channel embeds it independently.
  * @property {string | null} [body_lead]  Leading slice of the symbol body
  *   (e.g. first ~5 lines). Optional — `ingestView` populates it when
  *   `repoRoot` is supplied so the encoder has natural-language vocabulary
@@ -160,7 +171,7 @@
  * @property {(symbol: EmbeddingSymbolInput) => string} buildSymbolText
  *   Canonicalize the text representation of a symbol used for embedding.
  *   Concrete implementations decide what to include (name, qualified
- *   name, signature, doc, ...) — but the function must be deterministic
+ *   name, signature, body lead, ...) — but the function must be deterministic
  *   so the same symbol always produces the same input string under the
  *   same encoder version.
  */

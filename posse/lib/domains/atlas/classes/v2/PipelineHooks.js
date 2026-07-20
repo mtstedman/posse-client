@@ -22,6 +22,7 @@ import { ledgerBranchForWi } from "../../functions/v2/runtime-paths.js";
 import { getAtlasIntegrationConfig } from "../../../integrations/functions/atlas/config.js";
 import { normalizeAtlasV2Mode } from "../../../integrations/functions/atlas-v2-mode.js";
 import { getRetrievalCache } from "./RetrievalCache.js";
+import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 
 /** @typedef {import("../../functions/v2/contracts/events.js").AtlasEventName} AtlasEventName */
 /** @typedef {import("../../functions/v2/contracts/events.js").ResearchCompletePayload} ResearchCompletePayload */
@@ -36,6 +37,7 @@ import { getRetrievalCache } from "./RetrievalCache.js";
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmPurpose} AtlasWarmPurpose */
 
 const ATLAS_ACTOR_TYPE = "atlas";
+const ATLAS_WARM_TERMINAL_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 /** @type {ReadonlySet<AtlasEventName>} */
 const CACHE_INVALIDATING_EVENTS = new Set([
   ATLAS_EVENTS.DEV_COMMITTED,
@@ -48,6 +50,36 @@ const CACHE_INVALIDATING_EVENTS = new Set([
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+/**
+ * Read the exact warm state used by an agent-facing ATLAS handoff fence.
+ * Merely enqueueing the warm is insufficient: the scheduler runs ATLAS on a
+ * background lane, so a planner/dev/assessor can otherwise bind evidence from
+ * the previous ledger head while the warm is still queued.
+ */
+export function getAtlasWarmJobCompletion(warmJobId) {
+  const id = Number(warmJobId);
+  if (!Number.isInteger(id) || id <= 0) {
+    return { ok: false, completed: false, skipped: "missing_warm_job_id", warmJobId: null };
+  }
+  const row = getDb().prepare(`
+    SELECT id, job_type, status, result_json, last_error
+    FROM jobs
+    WHERE id = ?
+  `).get(id);
+  if (!row || row.job_type !== ATLAS_WARM_JOB_TYPE) {
+    return { ok: false, completed: false, skipped: "warm_job_missing", warmJobId: id };
+  }
+  const completed = ATLAS_WARM_TERMINAL_STATUS_SET.has(row.status);
+  return {
+    ok: completed && row.status === "succeeded",
+    completed,
+    status: row.status,
+    resultJson: row.result_json || null,
+    error: row.last_error || null,
+    warmJobId: id,
+  };
 }
 
 function parseJsonObject(value, fallback = {}) {

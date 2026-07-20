@@ -963,7 +963,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
             });
             job._atlasConfig = joined.config || null;
             job._atlasGraphDbPath = joined.graphDbPath || null;
-            job._atlasDisabledForWorkItem = !!joined.disableAtlas;
+            job._atlasDisabledForWorkItem = !!job._atlasDisabledForWorkItem || !!joined.disableAtlas;
             if (joined.state === "up_to_date") {
               worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph up to date${C.reset}`);
             } else if (joined.state === "seeded_refresh") {

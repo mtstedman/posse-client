@@ -12,6 +12,7 @@
 import { performance } from "node:perf_hooks";
 
 import { hasLanguageSemantics } from "../resolver/adapters/registry.js";
+import { documentationEmbeddingKey } from "./documentation-channel.js";
 import {
   errorForTelemetry,
   recordEmbeddingForensics,
@@ -31,10 +32,14 @@ const DEFAULT_BATCH_SIZE = 64;
 /**
  * @typedef {Object} IngestReport
  * @property {number} candidates         Symbols eligible for embedding.
- * @property {number} indexed            Vectors actually inserted into the index.
+ * @property {number} indexed            Code vectors actually inserted into the index.
  * @property {number} skipped            Symbols the encoder declined to embed (empty text).
  * @property {number} skippedUnsupportedLanguage Symbols skipped because ATLAS has no language semantics for them.
  * @property {number} alreadyIndexed     Symbols already present in the vector index.
+ * @property {number} indexedSymbols     Symbols for which at least one missing channel was inserted.
+ * @property {number} documentationCandidates Symbols with non-empty documentation.
+ * @property {number} documentationIndexed Documentation vectors actually inserted.
+ * @property {number} documentationAlreadyIndexed Documentation vectors already present.
  * @property {number} batches            Encoder invocations issued.
  */
 
@@ -115,6 +120,10 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
     skipped: 0,
     skippedUnsupportedLanguage: rawSymbols.length - symbols.length,
     alreadyIndexed: 0,
+    indexedSymbols: 0,
+    documentationCandidates: 0,
+    documentationIndexed: 0,
+    documentationAlreadyIndexed: 0,
     batches: 0,
   };
 
@@ -180,40 +189,67 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         symbols: summarizeSymbols(batch),
       });
       const supportsStructuredSymbols = typeof encoder.encodeSymbols === "function";
-      /** @type {ViewSymbol[]} */
-      const kept = [];
-      /** @type {ViewSymbol[]} */
-      const symbolPayloads = [];
-      /** @type {string[]} */
-      const texts = [];
+      /** @type {Array<{ symbol: ViewSymbol, key: { content_hash: string, local_id: number }, text: string | null }>} */
+      const codeInputs = [];
+      /** @type {Array<{ symbol: ViewSymbol, key: { content_hash: string, local_id: number }, text: string }>} */
+      const documentationInputs = [];
+      /** @type {Map<string, ViewSymbol>} */
+      const keptBySymbolKey = new Map();
       let batchAlreadyIndexed = 0;
       let batchSkipped = 0;
       const containsStartedAt = performance.now();
-      const alreadyIndexedKeys = await symbolsAlreadyIndexed(index, batch);
+      /** @type {Map<string, ReturnType<typeof documentationEmbeddingKey>>} */
+      const documentationBySymbolKey = new Map();
+      const requiredKeys = [];
+      for (const symbol of batch) {
+        requiredKeys.push({ content_hash: symbol.content_hash, local_id: symbol.local_id });
+        const documentation = documentationEmbeddingKey(symbol);
+        documentationBySymbolKey.set(symbolKey(symbol), documentation);
+        if (documentation) requiredKeys.push(documentation);
+      }
+      const alreadyIndexedKeys = await embeddingKeysAlreadyIndexed(index, requiredKeys);
       const containsMs = elapsedSince(containsStartedAt);
       currentBatchTiming.containsMs += containsMs;
       timings.containsMs += containsMs;
       for (const s of batch) {
-        if (alreadyIndexedKeys.has(symbolKey(s))) {
+        const codeKey = { content_hash: s.content_hash, local_id: s.local_id };
+        const documentation = documentationBySymbolKey.get(symbolKey(s)) || null;
+        if (documentation) {
+          report.documentationCandidates++;
+          if (alreadyIndexedKeys.has(embeddingKeyString(documentation))) {
+            report.documentationAlreadyIndexed++;
+          }
+        }
+        const codePresent = alreadyIndexedKeys.has(embeddingKeyString(codeKey));
+        const documentationPresent = !documentation
+          || alreadyIndexedKeys.has(embeddingKeyString(documentation));
+        if (codePresent && documentationPresent) {
           report.alreadyIndexed++;
           batchAlreadyIndexed++;
           continue;
         }
-        if (supportsStructuredSymbols) {
-          kept.push(s);
-          symbolPayloads.push(s);
-          continue;
+        if (!codePresent) {
+          let text = null;
+          if (!supportsStructuredSymbols) {
+            const textStartedAt = performance.now();
+            text = encoder.buildSymbolText(s);
+            currentBatchTiming.textBuildMs += elapsedSince(textStartedAt);
+            if (!text || text.length === 0) {
+              report.skipped++;
+              batchSkipped++;
+            } else {
+              codeInputs.push({ symbol: s, key: codeKey, text });
+              keptBySymbolKey.set(symbolKey(s), s);
+            }
+          } else {
+            codeInputs.push({ symbol: s, key: codeKey, text });
+            keptBySymbolKey.set(symbolKey(s), s);
+          }
         }
-        const textStartedAt = performance.now();
-        const text = encoder.buildSymbolText(s);
-        currentBatchTiming.textBuildMs += elapsedSince(textStartedAt);
-        if (!text || text.length === 0) {
-          report.skipped++;
-          batchSkipped++;
-          continue;
+        if (documentation && !documentationPresent) {
+          documentationInputs.push({ symbol: s, key: documentation, text: documentation.text });
+          keptBySymbolKey.set(symbolKey(s), s);
         }
-        kept.push(s);
-        texts.push(text);
       }
       // Count the WHOLE batch toward per-language progress up front — every
       // symbol is accounted for whether it gets newly encoded below or was
@@ -227,7 +263,7 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         languageCurrent.set(lang, (languageCurrent.get(lang) || 0) + 1);
       }
       processed += batch.length;
-      const expectedCount = supportsStructuredSymbols ? symbolPayloads.length : texts.length;
+      const expectedCount = codeInputs.length + documentationInputs.length;
       timings.sourceReadMs += currentBatchTiming.sourceReadMs;
       timings.textBuildMs += currentBatchTiming.textBuildMs;
       currentBatchTiming.symbols = batch.length;
@@ -252,8 +288,8 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
       // known (not silent) gap for reconciliation. Cleared after add() commits.
       // Best-effort — never let the breadcrumb break ingest.
       try {
-        index.markEncoding?.(
-          kept.map((s) => ({ content_hash: s.content_hash, local_id: s.local_id })),
+        await index.markEncoding?.(
+          [...codeInputs, ...documentationInputs].map((input) => input.key),
           { batch: batchNumber },
         );
       } catch { /* best effort */ }
@@ -264,15 +300,44 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         offset: i,
         supports_structured_symbols: supportsStructuredSymbols,
         expected_count: expectedCount,
-        kept: summarizeSymbols(kept),
-        texts: supportsStructuredSymbols ? null : summarizeTexts(texts),
+        code_count: codeInputs.length,
+        documentation_count: documentationInputs.length,
+        kept: summarizeSymbols([...keptBySymbolKey.values()]),
+        texts: supportsStructuredSymbols
+          ? summarizeTexts(documentationInputs.map((input) => input.text))
+          : summarizeTexts([
+              ...codeInputs.map((input) => String(input.text || "")),
+              ...documentationInputs.map((input) => input.text),
+            ]),
         encoder: encoderTelemetry(encoder),
       });
-      let vectors;
+      /** @type {Float32Array[]} */
+      let codeVectors = [];
+      /** @type {Float32Array[]} */
+      let documentationVectors = [];
       try {
-        vectors = supportsStructuredSymbols
-          ? await encoder.encodeSymbols(symbolPayloads, signal)
-          : await encodeTexts(texts);
+        if (supportsStructuredSymbols && codeInputs.length > 0) {
+          // Structured encoders receive an explicitly blank documentation field:
+          // canonical code vectors must not silently absorb JSDoc again.
+          codeVectors = await encoder.encodeSymbols(
+            codeInputs.map((input) => ({ ...input.symbol, doc: null })),
+            signal,
+          );
+          report.batches++;
+        }
+        if (supportsStructuredSymbols && documentationInputs.length > 0) {
+          documentationVectors = await encodeTexts(documentationInputs.map((input) => input.text));
+          report.batches++;
+        }
+        if (!supportsStructuredSymbols) {
+          const vectors = await encodeTexts([
+            ...codeInputs.map((input) => String(input.text || "")),
+            ...documentationInputs.map((input) => input.text),
+          ]);
+          codeVectors = vectors.slice(0, codeInputs.length);
+          documentationVectors = vectors.slice(codeInputs.length);
+          report.batches++;
+        }
       } catch (err) {
         recordEmbeddingForensics("ingest.batch.encode.error", {
           view_path: viewPathForTelemetry(view),
@@ -291,21 +356,30 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         batch: batchNumber,
         offset: i,
         expected_count: expectedCount,
-        vector_count: Array.isArray(vectors) ? vectors.length : null,
+        vector_count: codeVectors.length + documentationVectors.length,
+        code_vector_count: codeVectors.length,
+        documentation_vector_count: documentationVectors.length,
         elapsed_ms: roundMs(currentBatchTiming.encodeMs),
       });
-      if (!Array.isArray(vectors) || vectors.length !== expectedCount) {
+      if (codeVectors.length !== codeInputs.length || documentationVectors.length !== documentationInputs.length) {
         throw new Error(
-          `ingestView: encoder returned ${Array.isArray(vectors) ? vectors.length : "non-array"} vectors for ${expectedCount} inputs`,
+          `ingestView: encoder returned ${codeVectors.length + documentationVectors.length} vectors for ${expectedCount} inputs`,
         );
       }
       /** @type {EmbeddingIngest[]} */
       const rows = [];
-      for (let k = 0; k < kept.length; k++) {
+      for (let k = 0; k < codeInputs.length; k++) {
         rows.push({
-          content_hash: kept[k].content_hash,
-          local_id: kept[k].local_id,
-          vector: vectors[k],
+          content_hash: codeInputs[k].key.content_hash,
+          local_id: codeInputs[k].key.local_id,
+          vector: codeVectors[k],
+        });
+      }
+      for (let k = 0; k < documentationInputs.length; k++) {
+        rows.push({
+          content_hash: documentationInputs[k].key.content_hash,
+          local_id: documentationInputs[k].key.local_id,
+          vector: documentationVectors[k],
         });
       }
       const indexAddStartedAt = performance.now();
@@ -330,7 +404,7 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         throw err;
       }
       // Batch durably committed to keys.db — clear the in-flight breadcrumb.
-      try { index.clearEncoding?.(); } catch { /* best effort */ }
+      try { await index.clearEncoding?.(); } catch { /* best effort */ }
       currentBatchTiming.indexAddMs += elapsedSince(indexAddStartedAt);
       const indexTiming = getLastAddTiming(index);
       if (indexTiming) currentBatchTiming.indexTiming = indexTiming;
@@ -343,8 +417,9 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         index_timing: indexTiming,
       });
       timings.indexAddMs += currentBatchTiming.indexAddMs;
-      report.indexed += rows.length;
-      report.batches++;
+      report.indexed += codeInputs.length;
+      report.documentationIndexed += documentationInputs.length;
+      report.indexedSymbols += keptBySymbolKey.size;
       currentBatchTiming.totalMs += elapsedSince(batchStartedAt);
       emitProgress(true);
     }
@@ -359,7 +434,7 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
   // Reached only on full success (a throw/abort skips this and the finally above
   // re-throws), so the in-flight breadcrumb should be clear. Belt-and-suspenders
   // in case the last batch's per-batch clear was missed.
-  try { index.clearEncoding?.(); } catch { /* best effort */ }
+  try { await index.clearEncoding?.(); } catch { /* best effort */ }
   recordEmbeddingForensics("ingest.done", {
     view_path: viewPathForTelemetry(view),
     report,
@@ -431,14 +506,10 @@ function timingSnapshot(timings = {}, startedAt = null) {
 
 /**
  * @param {EmbeddingIndex} index
- * @param {ViewSymbol[]} symbols
+ * @param {Array<{ content_hash: string, local_id: number }>} keys
  * @returns {Promise<Set<string>>}
  */
-async function symbolsAlreadyIndexed(index, symbols) {
-  const keys = symbols.map((symbol) => ({
-    content_hash: symbol.content_hash,
-    local_id: symbol.local_id,
-  }));
+async function embeddingKeysAlreadyIndexed(index, keys) {
   if (typeof index?.containsMany === "function") {
     try {
       const result = await index.containsMany(keys);
@@ -449,18 +520,18 @@ async function symbolsAlreadyIndexed(index, symbols) {
     }
   }
   const out = new Set();
-  for (const symbol of symbols) {
-    if (await symbolAlreadyIndexed(index, symbol)) {
-      out.add(symbolKey(symbol));
+  for (const key of keys) {
+    if (await embeddingKeyAlreadyIndexed(index, key)) {
+      out.add(embeddingKeyString(key));
     }
   }
   return out;
 }
 
-async function symbolAlreadyIndexed(index, symbol) {
+async function embeddingKeyAlreadyIndexed(index, key) {
   if (typeof index?.contains !== "function") return false;
   try {
-    return !!(await index.contains(symbol.content_hash, symbol.local_id));
+    return !!(await index.contains(key.content_hash, key.local_id));
   } catch {
     return false;
   }
@@ -468,6 +539,10 @@ async function symbolAlreadyIndexed(index, symbol) {
 
 function symbolKey(symbol) {
   return `${symbol.content_hash}\0${symbol.local_id}`;
+}
+
+function embeddingKeyString(key) {
+  return `${key.content_hash}\0${key.local_id}`;
 }
 
 function viewPathForTelemetry(view) {

@@ -4,6 +4,10 @@
 // posse-atlas-vector owns ANN. Node only transports nearest hits into execute-tool.
 
 import { openEmbeddingResources } from "./resources.js";
+import {
+  DOCUMENTATION_TEXT_SHAPE_VERSION,
+  fuseEmbeddingChannelHits,
+} from "./documentation-channel.js";
 
 /**
  * @param {{
@@ -18,7 +22,7 @@ import { openEmbeddingResources } from "./resources.js";
  *   reason?: string,
  *   provider?: string,
  *   backend?: string,
- *   encoding?: {model:string, modelVersion:string, dim:number},
+ *   encoding?: {model:string, modelVersion:string, dim:number, channels?: {code:boolean, documentation:number}},
  *   candidateLimit?: number,
  *   hits: Array<{contentHash:string, localId:number, score:number, distance:number}>,
  * }>}
@@ -64,7 +68,11 @@ export async function buildNativeVectorBridge({ query, limit = 50, candidateLimi
         : Math.trunc(Number(candidateLimit) || 1),
       1_000,
     ));
-    const hits = await index.nearest(queryVector, { k: topK, minScore: 0 });
+    const rawHits = await index.nearest(queryVector, {
+      k: Math.min(1_000, Math.max(topK, topK * 6)),
+      minScore: 0,
+    });
+    const hits = fuseEmbeddingChannelHits(rawHits, { k: topK, minScore: 0 });
     return {
       ok: true,
       provider: resources.provider,
@@ -74,6 +82,7 @@ export async function buildNativeVectorBridge({ query, limit = 50, candidateLimi
         model: String(encoder.model || ""),
         modelVersion: String(encoder.model_version || ""),
         dim: encoder.dim,
+        channels: { code: true, documentation: DOCUMENTATION_TEXT_SHAPE_VERSION },
       },
       hits: (Array.isArray(hits) ? hits : []).map((hit) => ({
         contentHash: String(hit.content_hash || ""),

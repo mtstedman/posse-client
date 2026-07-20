@@ -239,6 +239,7 @@ import {
 } from "../functions/execution/atlas-warm-job.js";
 import {
   emitDevCommitted as emitAtlasV2DevCommitted,
+  getAtlasWarmJobCompletion,
   isAtlasV2EmissionEnabled,
 } from "../../atlas/classes/v2/PipelineHooks.js";
 import {
@@ -388,7 +389,7 @@ export function gcWorktreesAsync(projectDir, onMsg = () => {}, opts = {}) {
 // --- Worker Class -----------------------------------------------------------
 
 const PROVIDER_CIRCUIT_TTL_MS = 5 * 60 * 1000;
-const ATLAS_FRESHNESS_GATED_JOB_TYPES = new Set(["plan", "dev", "fix"]);
+const ATLAS_FRESHNESS_GATED_JOB_TYPES = new Set(["plan", "dev", "fix", "assess"]);
 const ATLAS_FRESHNESS_GATE_MAX_DEFERRALS = 3;
 const ATLAS_FRESHNESS_GATE_DEFAULT_DELAY_MS = 2500;
 
@@ -1183,6 +1184,96 @@ export class Worker {
     }
 
     const payload = this.parsePayload(job);
+    if (job.job_type === "assess"
+      && payload?._atlas_evidence_warm_required !== true
+      && !(Number.isInteger(Number(payload?._atlas_evidence_warm_job_id)) && Number(payload._atlas_evidence_warm_job_id) > 0)) {
+      const upstreamFence = getDependencies(job.id)
+        .map((dependency) => getJob(dependency.depends_on_job_id))
+        .filter(Boolean)
+        .map((dependencyJob) => this.parsePayload(dependencyJob))
+        .find((dependencyPayload) => dependencyPayload?._atlas_evidence_warm_required === true
+          || (Number.isInteger(Number(dependencyPayload?._atlas_evidence_warm_job_id))
+            && Number(dependencyPayload._atlas_evidence_warm_job_id) > 0));
+      if (upstreamFence) {
+        payload._atlas_evidence_warm_required = upstreamFence._atlas_evidence_warm_required === true;
+        if (Number.isInteger(Number(upstreamFence._atlas_evidence_warm_job_id))
+          && Number(upstreamFence._atlas_evidence_warm_job_id) > 0) {
+          payload._atlas_evidence_warm_job_id = Number(upstreamFence._atlas_evidence_warm_job_id);
+        }
+        job.payload_json = JSON.stringify(payload);
+        updateJobPayload(job.id, job.payload_json);
+      }
+    }
+    const evidenceWarmJobId = Number(payload?._atlas_evidence_warm_job_id);
+    const hasEvidenceWarmJob = Number.isInteger(evidenceWarmJobId) && evidenceWarmJobId > 0;
+    const evidenceWarmRequired = payload?._atlas_evidence_warm_required === true;
+    if (hasEvidenceWarmJob || evidenceWarmRequired) {
+      const evidenceWarm = getAtlasWarmJobCompletion(hasEvidenceWarmJob ? evidenceWarmJobId : null);
+      const missingWarm = ["missing_warm_job_id", "warm_job_missing"].includes(evidenceWarm.skipped);
+      const warmLabel = hasEvidenceWarmJob ? `#${evidenceWarmJobId}` : "(missing)";
+      if (!evidenceWarm.completed && !missingWarm) {
+        const config = getAtlasIntegrationConfig();
+        const delayMs = Math.max(100, Math.min(1000, atlasFreshnessGateDelayMs(config)));
+        const readyAt = new Date(Date.now() + delayMs).toISOString();
+        const message = `Deferred ${job.job_type} job until ATLAS evidence warm ${warmLabel} fully completes`;
+        this.emit(
+          job.id,
+          `${C.dim}[atlas] WI#${job.work_item_id} job #${job.id}: evidence warm ${warmLabel} is ${evidenceWarm.status || "pending"}; retrying in ${delayMs}ms${C.reset}`,
+        );
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          event_type: EVENT_TYPES.ATLAS_FRESHNESS_GATE_DEFERRED,
+          actor_type: EVENT_ACTORS.ATLAS,
+          message,
+          event_json: JSON.stringify({
+            job_type: job.job_type,
+            ready_at: readyAt,
+            delay_ms: delayMs,
+            reason: "atlas_evidence_warm_pending",
+            action: "defer",
+            pending_warm_job_ids: hasEvidenceWarmJob ? [evidenceWarmJobId] : [],
+            warm_status: evidenceWarm.status || null,
+          }),
+        });
+        this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+        return { ok: false, deferred: true, gate: { reason: "atlas_evidence_warm_pending", warmJob: evidenceWarm }, readyAt };
+      }
+      if (!evidenceWarm.ok) {
+        const requireAtlas = atlasRequiredByAbHarness();
+        const reason = missingWarm ? "atlas_evidence_warm_missing" : "atlas_evidence_warm_failed";
+        const message = requireAtlas
+          ? `Stopped ${job.job_type} because required ATLAS evidence warm ${warmLabel} did not succeed`
+          : `Disabled ATLAS for ${job.job_type}; evidence warm ${warmLabel} did not succeed`;
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          event_type: EVENT_TYPES.ATLAS_FRESHNESS_GATE_DEGRADED,
+          actor_type: EVENT_ACTORS.ATLAS,
+          message,
+          event_json: JSON.stringify({
+            job_type: job.job_type,
+            reason,
+            warm_job_id: hasEvidenceWarmJob ? evidenceWarmJobId : null,
+            warm_status: evidenceWarm.status || null,
+            atlas_required_by_harness: requireAtlas,
+            provider_execution_blocked: requireAtlas,
+          }),
+        });
+        if (requireAtlas) {
+          this.emit(job.id, `${C.red}[atlas] WI#${job.work_item_id} job #${job.id}: required evidence warm ${warmLabel} did not succeed; stopping before provider execution${C.reset}`);
+          this._releaseWithoutAttemptPenalty(job, leaseToken, "dead_letter");
+          return { ok: false, degraded: true, halted: true, requireAtlas: true, gate: { reason, warmJob: evidenceWarm } };
+        }
+        payload.disableAtlas = true;
+        payload.disableAtlasReason = `${reason}: ${warmLabel}`;
+        job.payload_json = JSON.stringify(payload);
+        job._atlasDisabledForWorkItem = true;
+        updateJobPayload(job.id, job.payload_json);
+        this.emit(job.id, `${C.yellow}[atlas] WI#${job.work_item_id} job #${job.id}: evidence warm ${warmLabel} did not succeed; binding without ATLAS${C.reset}`);
+        return { ok: true, degraded: true, gate: { reason, warmJob: evidenceWarm } };
+      }
+    }
     if (payload?._assess_only && ASSESSABLE_JOB_TYPES.has(job?.job_type)) {
       return { ok: true, skipped: "assess_only" };
     }
@@ -1384,6 +1475,7 @@ export class Worker {
     const job = jobOrId && typeof jobOrId === "object" ? jobOrId : null;
     const jobId = job?.id ?? jobOrId;
     const suppressTerminalWiRefresh = options?.suppressTerminalWiRefresh === true;
+    let emission = null;
 
     // ATLAS v2 transactional outbox: emit `atlas.dev_committed` and enqueue a
     // companion warm job. A branch-local warm is still useful while a completed
@@ -1407,7 +1499,7 @@ export class Worker {
               .filter(Boolean);
           } catch { paths = []; }
         }
-        emitAtlasV2DevCommitted({
+        emission = emitAtlasV2DevCommitted({
           payload: {
             wi_id: Number(job.work_item_id),
             branch: branchName || "",
@@ -1423,6 +1515,7 @@ export class Worker {
       } catch (emitErr) {
         // Outbox errors must never block the pipeline.
         this.emit(jobId, `${C.dim}[atlas-v2] outbox emit skipped: ${emitErr?.message?.split?.("\n")?.[0] || emitErr}${C.reset}`);
+        emission = { ok: false, warmJobId: null, skipped: "outbox_error" };
       }
     }
 
@@ -1430,13 +1523,15 @@ export class Worker {
     try {
       atlasConfig = job?._atlasConfig || getAtlasIntegrationConfig();
     } catch {
-      return;
+      return { emission, skipped: "atlas_config_error" };
     }
-    if (!atlasConfig.enabled || job?._atlasDisabledForWorkItem) return;
+    if (!atlasConfig.enabled || job?._atlasDisabledForWorkItem) {
+      return { emission, skipped: "atlas_disabled" };
+    }
     const shortHash = commitHash ? String(commitHash).slice(0, 8) : "";
     if (suppressTerminalWiRefresh) {
       this.emit(jobId, `${C.dim}[atlas] reindex skipped after ${shortHash} (commit warm explicitly suppressed)${C.reset}`);
-      return;
+      return { emission, skipped: "commit_warm_suppressed" };
     }
     const reindexCwd = job?._worktreePath || this.projectDir;
     const repoKey = String(reindexCwd || this.projectDir);
@@ -1444,7 +1539,7 @@ export class Worker {
     const lastKickAt = Number(this._lastAtlasReindexKickAtByRepo.get(repoKey) || 0);
     if (lastKickAt > 0 && nowMs - lastKickAt < 60_000) {
       this.emit(jobId, `${C.dim}[atlas] reindex skipped after ${shortHash} (cooldown; latest commit will be picked up by the next refresh)${C.reset}`);
-      return;
+      return { emission, skipped: "reindex_cooldown" };
     }
     this._lastAtlasReindexKickAtByRepo.set(repoKey, nowMs);
     const result = reindexAtlasAfterCommit({
@@ -1464,6 +1559,7 @@ export class Worker {
     } else if (result.skipped === "reindex_in_progress") {
       this.emit(jobId, `${C.dim}[atlas] reindex queued (in-progress run will replay)${C.reset}`);
     }
+    return { emission, reindex: result };
   }
 
   parsePayload(job) {

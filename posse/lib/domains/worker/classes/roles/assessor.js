@@ -75,7 +75,11 @@ export class AssessorRole extends BaseRole {
       || payload.assessment_context?.task_mode
       || payload.task_mode
       || "code";
-    const disableAtlas = job.job_type === "artificer" || isArtifactMode(taskMode);
+    const artifactAssessmentRoute = job.job_type === "artificer" || isArtifactMode(taskMode);
+    const disableAtlas = artifactAssessmentRoute || payload.disableAtlas === true;
+    const disableAtlasReason = artifactAssessmentRoute
+      ? "artifact route"
+      : (payload.disableAtlasReason || null);
     const intakeHints = getWorkItemIntakeHints(workItem, workItem?.mode || "build");
     const intakeHintsBlock = buildIntakeHintsBlock(intakeHints);
     const packet = buildRoutingPacket(job, {
@@ -88,7 +92,7 @@ export class AssessorRole extends BaseRole {
       lastError: job.last_error || null,
       cwd: job._worktreePath || worker.projectDir,
       disableAtlas,
-      disableAtlasReason: disableAtlas ? "artifact route" : null,
+      disableAtlasReason,
     });
     await handoff(packet);
 

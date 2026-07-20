@@ -15,6 +15,7 @@ import {
   setAttemptCommitHash,
   setJobResult,
   storeArtifact,
+  updateJobPayload,
 } from "../../../queue/functions/index.js";
 import { parseFileRequest, splitFileRequestsByRisk } from "../../../handoff/functions/index.js";
 import { isArtifactMode } from "../../../artifacts/functions/index.js";
@@ -824,7 +825,18 @@ export async function handlePostExecutionForWorker({
                 },
               });
               this.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} ${branchName}: ${commitHash.slice(0, 8)} — ${shortJobTitleFromModule(job).slice(0, 40)}${C.reset}`);
-              void this._kickAtlasReindex(job, commitHash);
+              const atlasRefresh = await this._kickAtlasReindex(job, commitHash);
+              if (atlasRefresh?.emission) {
+                const refreshedPayload = this.parsePayload(job);
+                refreshedPayload._atlas_evidence_warm_required = true;
+                if (atlasRefresh.emission.warmJobId) {
+                  refreshedPayload._atlas_evidence_warm_job_id = atlasRefresh.emission.warmJobId;
+                } else {
+                  delete refreshedPayload._atlas_evidence_warm_job_id;
+                }
+                job.payload_json = JSON.stringify(refreshedPayload);
+                updateJobPayload(job.id, job.payload_json);
+              }
 
               const outputContract = filesCommittedUnknown
                 ? { ok: true }
