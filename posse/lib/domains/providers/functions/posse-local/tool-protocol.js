@@ -93,12 +93,22 @@ export function buildLocalPlannerToolInstructions(
     .map(protocolToolDefinition)
     .filter((tool) => tool.name);
   if (definitions.length === 0) return "";
+  const availableNames = new Set(definitions.map((tool) => tool.name));
 
   const mutationRules = allowFileWrites
     ? [
       "Only write_file and edit_file may mutate files, and only when the exact tool is listed below.",
       "All file mutations are checked by the signed runtime gate against the active Job scope. Treat a scope or authorization error as final; do not try alternate paths to bypass it.",
       writeScope ? `Authorized file scope: ${JSON.stringify(writeScope)}` : null,
+      availableNames.has("write_file")
+        ? "When asked to create a new file or replace an entire file, call write_file directly with path and string content; do not read a missing destination first."
+        : null,
+      availableNames.has("edit_file") && !availableNames.has("write_file")
+        ? "write_file is unavailable for this existing-file job. Preserve the file and use edit_file with exact old_string/new_string or another listed text-edit mode."
+        : null,
+      availableNames.has("edit_file")
+        ? "Never use edit_file jsonPath/jsonValue for HTML, CSS, Markdown, source code, or other non-JSON text."
+        : null,
       "Shell commands, database writes, image generation, test execution, moves, copies, directory creation, and deletion are unavailable.",
     ]
     : [
@@ -114,8 +124,6 @@ export function buildLocalPlannerToolInstructions(
     "The arguments value must be one JSON object matching that tool's parameters.",
     "Use exactly one arguments field. Never repeat arguments and never encode arguments as a string.",
     "JSON string values must escape every internal double quote as \\\". This is especially important for HTML attributes inside a content or new_string value.",
-    "When asked to create a new file, call write_file directly; do not read the missing destination first.",
-    "When replacing an entire file, call write_file with path and content. Never use edit_file jsonPath/jsonValue for HTML, CSS, Markdown, source code, or other non-JSON text.",
     "Call at most one tool per response. Never invent a tool name or capability.",
     ...mutationRules.filter(Boolean),
     `You have at most ${Math.max(1, Math.floor(Number(turnLimit) || 1))} tool turns. When you have enough evidence, return the requested final answer normally with no envelope.`,

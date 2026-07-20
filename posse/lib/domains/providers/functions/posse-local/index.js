@@ -341,6 +341,7 @@ export async function callProvider(promptText, opts = {}) {
       if (entry?.capabilityFlags?.shell) return false;
       if (entry?.capabilityFlags?.write) {
         if (exactCreateTarget && String(tool?.name || "") === "edit_file") return false;
+        if (exactWriteTarget && !exactCreateTarget && String(tool?.name || "") === "write_file") return false;
         return fileWriteAuthorized && LOCAL_FILE_WRITE_TOOLS.has(String(tool?.name || ""));
       }
       return true;
