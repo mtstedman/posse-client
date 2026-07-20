@@ -312,6 +312,13 @@ export async function callProvider(promptText, opts = {}) {
       projectDir: workingDir,
     })
     : null;
+  const exactWriteTarget = fileWriteAuthorized
+    ? singleExactWriteTarget({ scopedFiles, createFiles, createRoots, deleteFiles })
+    : null;
+  const exactCreateTarget = exactWriteTarget
+    && (createFiles || []).map(normalizedScopedPath).includes(exactWriteTarget)
+    ? exactWriteTarget
+    : null;
   const toolDefinitions = (executionContract
     ? buildEmbeddedToolDefinitions(executionContract)
     : [])
@@ -319,6 +326,7 @@ export async function callProvider(promptText, opts = {}) {
       const entry = ToolCatalog.get(tool?.name);
       if (entry?.capabilityFlags?.shell) return false;
       if (entry?.capabilityFlags?.write) {
+        if (exactCreateTarget && String(tool?.name || "") === "edit_file") return false;
         return fileWriteAuthorized && LOCAL_FILE_WRITE_TOOLS.has(String(tool?.name || ""));
       }
       return true;
@@ -332,9 +340,6 @@ export async function callProvider(promptText, opts = {}) {
     } : null,
   });
   const toolMode = toolDefinitions.length > 0;
-  const exactWriteTarget = fileWriteAuthorized
-    ? singleExactWriteTarget({ scopedFiles, createFiles, createRoots, deleteFiles })
-    : null;
   const system = [remoteSystemPrompt, stableContext, toolInstructions]
     .map((value) => String(value || "").trim())
     .filter(Boolean)
@@ -401,6 +406,9 @@ export async function callProvider(promptText, opts = {}) {
           context,
         )
         : null,
+      finalOutputHint: role === "planner"
+        ? "Return only the planner task JSON array required by the original request. Its first non-whitespace character must be [ and its last must be ]."
+        : `Return only the required ${role} result block in the original format, with an honest COMPLETE or BLOCKED status.`,
       generate,
       execute: async (name, args) => {
         if (name === "read_file") {

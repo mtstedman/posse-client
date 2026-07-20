@@ -13,10 +13,25 @@ function localToolResultFailed(result) {
 }
 
 function protocolToolDefinition(tool) {
+  const name = String(tool?.name || "").trim();
+  const description = String(tool?.description || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/(?<=[.!?])\s/, 1)[0]
+    .slice(0, 180);
+  const parameters = plainObject(tool?.parameters);
+  const properties = plainObject(parameters?.properties) || {};
+  const required = new Set(Array.isArray(parameters?.required) ? parameters.required : []);
+  const argumentsSummary = Object.entries(properties).map(([key, value]) => {
+    const schema = plainObject(value) || {};
+    const type = Array.isArray(schema.enum) && schema.enum.length > 0
+      ? `${String(schema.type || "value")}(${schema.enum.map(String).join("|")})`
+      : String(schema.type || "value");
+    return `${key}:${type}:${required.has(key) ? "required" : "optional"}`;
+  });
   return {
-    name: String(tool?.name || ""),
-    description: String(tool?.description || ""),
-    parameters: plainObject(tool?.parameters) || { type: "object" },
+    name,
+    line: `- ${name}: ${description || "Authorized runtime tool."} Arguments: ${argumentsSummary.length > 0 ? argumentsSummary.join(", ") : "none (use {})"}.`,
   };
 }
 
@@ -55,8 +70,8 @@ export function buildLocalPlannerToolInstructions(
     "Call at most one tool per response. Never invent a tool name or capability.",
     ...mutationRules.filter(Boolean),
     `You have at most ${Math.max(1, Math.floor(Number(turnLimit) || 1))} tool turns. When you have enough evidence, return the requested final answer normally with no envelope.`,
-    "Available tools:",
-    JSON.stringify(definitions),
+    "Available tools (reference signatures only; these lines are not tool-call JSON):",
+    ...definitions.map((tool) => tool.line),
   ].join("\n");
 }
 
@@ -88,6 +103,43 @@ function looksLikeLocalToolCallAttempt(output) {
   const text = String(output || "").trim();
   if (!text || !/(?:^<tool_call>|^```(?:json|tool_code)?|^[{[])/i.test(text)) return false;
   return /["']name["']\s*:/.test(text) && /["']arguments["']\s*:/.test(text);
+}
+
+function looksLikeLocalToolDefinitionEcho(output) {
+  const text = String(output || "").trim();
+  const fenced = text.match(/^```(?:json|tool_code)?\s*\n?([\s\S]*?)\s*```$/i);
+  const body = fenced?.[1]
+    || ((text.startsWith("{") && text.endsWith("}")) ? text : null);
+  if (!body) return false;
+  try {
+    const object = plainObject(JSON.parse(body));
+    return Boolean(
+      object
+      && String(object.name || "").trim()
+      && typeof object.description === "string"
+      && plainObject(object.parameters)
+      && !plainObject(object.arguments),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function localToolFinalizationPrompt(finalOutputHint = null) {
+  return [
+    "TOOL MODE IS NOW CLOSED. The runtime will not execute another tool call in this response.",
+    "Do not call, copy, define, describe, or wrap a tool. Do not return name/arguments/description/parameters fields.",
+    "Using only the evidence already present in this conversation, return the final role output required by the original request now.",
+    finalOutputHint,
+  ].filter(Boolean).join("\n");
+}
+
+function localToolDefinitionEchoRepairPrompt(finalOutputHint = null) {
+  return [
+    "PROTOCOL ERROR: You copied an available tool definition instead of calling a tool or returning the required final role output. No tool ran.",
+    "Do not repeat or describe any tool schema. Return the final role output required by the original request now.",
+    finalOutputHint,
+  ].filter(Boolean).join("\n");
 }
 
 function localToolProtocolRepairPrompt(output, generation = null) {
@@ -166,6 +218,7 @@ export function formatGemmaLocalToolResult(name, result, maxChars = MAX_LOCAL_TO
  *   execute?: (name: string, args: Record<string, unknown>) => Promise<unknown>,
  *   formatResult?: (name: string, result: unknown) => string,
  *   completeSuppressedReplay?: (name: string, args: Record<string, unknown>, result: unknown, context: {executedMutations: Array<{name: string, args: Record<string, unknown>, result: unknown}>}) => string | null,
+ *   finalOutputHint?: string | null,
  *   turnLimit?: number,
  * }} [options]
  */
@@ -176,6 +229,7 @@ export async function runLocalPlannerToolLoop({
   execute,
   formatResult = formatLocalToolResult,
   completeSuppressedReplay = null,
+  finalOutputHint = null,
   turnLimit = LOCAL_PLANNER_TOOL_TURN_LIMIT,
 } = {}) {
   if (typeof generate !== "function") throw new TypeError("runLocalPlannerToolLoop requires generate");
@@ -195,6 +249,7 @@ export async function runLocalPlannerToolLoop({
   let mutationEpoch = 0;
   let lastToolFingerprint = null;
   let lastToolResult = null;
+  let finalizationAttempted = false;
 
   while (true) {
     const generation = await generate(conversation);
@@ -202,6 +257,19 @@ export async function runLocalPlannerToolLoop({
     const content = String(generation?.content || "").trim();
     const call = parseLocalToolCall(content);
     if (!call) {
+      if (finalizationAttempted && (looksLikeLocalToolCallAttempt(content) || looksLikeLocalToolDefinitionEcho(content))) {
+        const error = new Error("Local model returned another tool-shaped response after tool mode was closed.");
+        /** @type {any} */ (error).code = "POSSE_LOCAL_TOOL_FINALIZATION";
+        throw error;
+      }
+      if (protocolRepairsSinceTool < 1 && looksLikeLocalToolDefinitionEcho(content)) {
+        protocolRepairsSinceTool += 1;
+        conversation.push(
+          { role: "assistant", content },
+          { role: "user", content: localToolDefinitionEchoRepairPrompt(finalOutputHint) },
+        );
+        continue;
+      }
       if (protocolRepairsSinceTool < 1 && looksLikeLocalToolCallAttempt(content)) {
         protocolRepairsSinceTool += 1;
         conversation.push(
@@ -232,9 +300,17 @@ export async function runLocalPlannerToolLoop({
         return { content: completion.trim(), generations, toolUses, toolTurns };
       }
       if (repairedDuplicateFingerprints.has(replayRepairKey)) {
-        const error = new Error("Local model repeated an identical tool call after a correction turn.");
-        /** @type {any} */ (error).code = "POSSE_LOCAL_TOOL_REPLAY";
-        throw error;
+        if (finalizationAttempted) {
+          const error = new Error("Local model repeated an identical tool call after tool mode was closed.");
+          /** @type {any} */ (error).code = "POSSE_LOCAL_TOOL_REPLAY";
+          throw error;
+        }
+        finalizationAttempted = true;
+        conversation.push(
+          { role: "assistant", content: call.raw },
+          { role: "user", content: localToolFinalizationPrompt(finalOutputHint) },
+        );
+        continue;
       }
       repairedDuplicateFingerprints.add(replayRepairKey);
       conversation.push(
@@ -252,9 +328,17 @@ export async function runLocalPlannerToolLoop({
       continue;
     }
     if (toolTurns >= limit) {
-      const error = new Error(`Local model exceeded the ${limit}-turn tool limit.`);
-      /** @type {any} */ (error).code = "POSSE_LOCAL_TOOL_TURN_LIMIT";
-      throw error;
+      if (finalizationAttempted) {
+        const error = new Error(`Local model exceeded the ${limit}-turn tool limit after tool mode was closed.`);
+        /** @type {any} */ (error).code = "POSSE_LOCAL_TOOL_TURN_LIMIT";
+        throw error;
+      }
+      finalizationAttempted = true;
+      conversation.push(
+        { role: "assistant", content: call.raw },
+        { role: "user", content: localToolFinalizationPrompt(finalOutputHint) },
+      );
+      continue;
     }
 
     toolTurns += 1;
