@@ -13,7 +13,6 @@ import {
   getAttempts,
   getIntSetting,
   getJob,
-  getSetting,
   getWorkItem,
   logEvent,
   storeArtifact,
@@ -23,9 +22,6 @@ import { parseJobPayload } from "../../../queue/functions/payload.js";
 import {
   artifactsDir,
   contextDir,
-  describeArtifactRoutingForPrompt,
-  getConfiguredImageProviders,
-  getResolvedImageProtocol,
   inputsDir,
   wiScopeId,
   workspaceDir,
@@ -48,8 +44,6 @@ import {
 } from "../../../intake/functions/hints.js";
 import { currentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import { getExplicitIntakeBindings } from "../../../planning/functions/plan-routing.js";
-import { getProviderName, isProviderReady } from "../../../providers/functions/provider.js";
-import { getDefaultImageModel } from "../../../providers/functions/model-catalog.js";
 import { getEnabledSkillsForRole } from "../../../../shared/skills/functions/registry.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import {
@@ -428,16 +422,7 @@ export class PlannerRole extends BaseRole {
       ],
     };
 
-    const plannerImageRoutingSummary = describeArtifactRoutingForPrompt("image");
-    const plannerImageProviders = getConfiguredImageProviders();
-    const plannerImageProtocol = getResolvedImageProtocol();
     const explicitBindings = getExplicitIntakeBindings(workItem);
-    const plannerImageReadinessSummary = plannerImageProviders
-      .map((provider) => {
-        const readiness = isProviderReady(provider, "images");
-        return `${provider}:${readiness.ready ? "available" : `unavailable (${readiness.reason || "unknown reason"})`}`;
-      })
-      .join(", ");
     const enabledDevSkills = getEnabledSkillsForRole("dev");
     const renderSkillAllowlist = (skills) => {
       if (!skills.length) return "- dev: none";
@@ -481,11 +466,7 @@ export class PlannerRole extends BaseRole {
         ].filter(Boolean).join("\n")
       : "";
     const plannerRoutingContext = [
-      "RUNTIME ROUTING CATALOG (authoritative for this work item):",
-      `- ${plannerImageRoutingSummary}`,
-      `- Image providers: available=${plannerImageProviders.join(", ")}, selected=${plannerImageProtocol.provider}, model=${plannerImageProtocol.model || getDefaultImageModel(plannerImageProtocol.provider)}`,
-      `- Image provider readiness: ${plannerImageReadinessSummary}`,
-      `- Admin-backed provider selections: planner=${job.provider || getProviderName("planner")}, artificer=${getProviderName("artificer")}, dev=${getProviderName("dev")}`,
+      "PLANNING CAPABILITIES (authoritative for this work item):",
       availableSkillsBlock,
       // Conditional: empty when this repo has no project-db config, so
       // unconfigured repos see no db-task guidance at all.

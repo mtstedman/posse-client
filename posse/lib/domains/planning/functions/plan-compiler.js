@@ -115,6 +115,36 @@ import { normPath } from "../../../shared/scope/functions/path.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 const FRONTEND_DESIGN_SKILL_ID = "frontend-design";
+const REPORT_DELIVERABLE_EXTENSIONS = "md|txt|json|csv|html";
+const REPORT_DELIVERABLE_PATH = String.raw`[A-Za-z0-9][A-Za-z0-9._/-]*\.(?:${REPORT_DELIVERABLE_EXTENSIONS})`;
+
+function inferNamedReportDeliverables(task = {}) {
+  const taskText = [task.task_spec, task.instructions]
+    .filter(Boolean)
+    .join("\n");
+  const criteriaText = Array.isArray(task.success_criteria)
+    ? task.success_criteria.filter(Boolean).join("\n")
+    : "";
+  const candidates = [];
+  const patterns = [
+    new RegExp(String.raw`\b(?:named|called)\s+[\x60'\"]?(${REPORT_DELIVERABLE_PATH})[\x60'\"]?`, "gi"),
+    new RegExp(String.raw`[\x60'\"]?(${REPORT_DELIVERABLE_PATH})[\x60'\"]?\s+(?:exists?|is\s+(?:created|generated|present|produced|written))\b`, "gi"),
+  ];
+  for (const [text, pattern] of [
+    [taskText, patterns[0]],
+    [criteriaText, patterns[0]],
+    [criteriaText, patterns[1]],
+  ]) {
+    for (const match of text.matchAll(pattern)) {
+      const candidate = String(match[1] || "").replace(/\\/g, "/").replace(/^\.\//, "");
+      if (!candidate || path.posix.isAbsolute(candidate)) continue;
+      const segments = candidate.split("/");
+      if (segments.some((segment) => !segment || segment === "." || segment === "..")) continue;
+      if (!candidates.includes(candidate)) candidates.push(candidate);
+    }
+  }
+  return candidates;
+}
 
 function normalizePromoteDestinationFile(value, projectDir) {
   const raw = String(value || "").trim();
@@ -1336,8 +1366,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           }
 
           if (taskMode === "report" && (!Array.isArray(t.files_to_create) || t.files_to_create.length === 0)) {
-            t.files_to_create = ["report.md"];
-            worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: synthesized report deliverable file for task "${t.title}"`);
+            const namedDeliverables = inferNamedReportDeliverables(t);
+            t.files_to_create = namedDeliverables.length > 0 ? namedDeliverables : ["report.md"];
+            const source = namedDeliverables.length > 0 ? "named" : "default";
+            worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: synthesized ${source} report deliverable file scope for task "${t.title}"`);
           }
 
           if (taskMode !== "content") {

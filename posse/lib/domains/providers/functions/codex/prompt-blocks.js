@@ -155,7 +155,12 @@ export function __testBuildCodexRoleGuardBlock({
   }
   if (role === "artificer") {
     const rules = ["ARTIFICER TOOL PRIORITY:"];
-    if (has("write_file")) rules.push("- Use the exact listed write_file surface for artifacts you create.");
+    if (has("write_file")) {
+      rules.push("- Use the exact listed write_file surface for artifacts you create.");
+      rules.push("- When writable artifact scope is listed, try that exact write_file surface and report its actual error before claiming writes are unavailable or returning BLOCKED.");
+    } else if (allowWrite) {
+      rules.push("- The job describes writable artifact scope, but this run exposes no write_file surface. Report the capability mismatch without claiming that an unlisted tool was attempted.");
+    }
     if (has("read_file") || has("list_files")) {
       const labels = [has("read_file") ? "read_file" : null, has("list_files") ? "list_files" : null].filter(Boolean).join("/");
       rules.push(`- Use the listed ${labels} ${has("read_file") && has("list_files") ? "surfaces" : "surface"} to inspect inputs; do not call either tool when absent.`);
