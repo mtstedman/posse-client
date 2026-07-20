@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { normPath } from "../../../shared/scope/functions/path.js";
 import { TOOL_CATALOG, TOOL_OBSERVATION_ALIASES } from "../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { isPosseMcpGatewaySurfaceName, stripPosseMcpGatewayPrefix } from "../../integrations/functions/mcp-gateway.js";
 import { redactBridgeValue, redactString } from "../../bridge/functions/redaction.js";
@@ -503,21 +504,35 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
   const normalizedAttemptId = Number(attemptId);
   const normalizedJobId = Number(jobId);
   const useAttempt = Number.isInteger(normalizedAttemptId) && normalizedAttemptId > 0;
-  const scopeId = useAttempt ? normalizedAttemptId : normalizedJobId;
-  if (!Number.isInteger(scopeId) || scopeId <= 0) {
+  const useJob = Number.isInteger(normalizedJobId) && normalizedJobId > 0;
+  if (!useAttempt && !useJob) {
     return { exploration_steps: 0, synthesis_required: false, citation_fetches: 0 };
   }
   try {
     const db = getDb();
-    const scopeColumn = useAttempt ? "attempt_id" : "job_id";
+    const scopeWhere = useAttempt && useJob
+      ? "job_id = ? AND (attempt_id = ? OR attempt_id IS NULL)"
+      : useAttempt ? "attempt_id = ?" : "job_id = ?";
+    const scopeParams = useAttempt && useJob
+      ? [normalizedJobId, normalizedAttemptId]
+      : [useAttempt ? normalizedAttemptId : normalizedJobId];
     const placeholders = RESEARCH_EXPLORATION_OBSERVATION_TYPES.map(() => "?").join(", ");
     const explorationRows = db.prepare(`
       SELECT observation_type, detail_json
       FROM job_observations
-      WHERE ${scopeColumn} = ?
+      WHERE ${scopeWhere}
         AND observation_type IN (${placeholders})
-    `).all(scopeId, ...RESEARCH_EXPLORATION_OBSERVATION_TYPES);
+    `).all(...scopeParams, ...RESEARCH_EXPLORATION_OBSERVATION_TYPES);
     const explorationCount = explorationRows.reduce((count, row) => {
+      if (row.observation_type === "tool.chain_verdict") {
+        try {
+          const detail = JSON.parse(String(row.detail_json || "{}"));
+          const guidancePath = normPath(detail?.path).toUpperCase();
+          if (guidancePath === "AGENTS.MD" || guidancePath === "CLAUDE.MD") return count;
+        } catch {
+          // Malformed verdict telemetry remains conservatively counted.
+        }
+      }
       if (row.observation_type !== "tool.atlas") return count + 1;
       try {
         const detail = JSON.parse(String(row.detail_json || "{}"));
@@ -531,16 +546,16 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
     const synthesis = db.prepare(`
       SELECT 1 AS present
       FROM job_observations
-      WHERE ${scopeColumn} = ?
+      WHERE ${scopeWhere}
         AND observation_type = 'research.synthesis_required'
       LIMIT 1
-    `).get(scopeId);
+    `).get(...scopeParams);
     const citationFetches = db.prepare(`
       SELECT COUNT(*) AS count
       FROM job_observations
-      WHERE ${scopeColumn} = ?
+      WHERE ${scopeWhere}
         AND observation_type = 'hash_ref.fetch'
-    `).get(scopeId);
+    `).get(...scopeParams);
     return {
       exploration_steps: Math.max(0, explorationCount),
       synthesis_required: synthesis?.present === 1,

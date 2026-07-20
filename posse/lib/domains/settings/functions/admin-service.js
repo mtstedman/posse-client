@@ -125,7 +125,7 @@ export function describeAdminSettings({
       selectableProviders,
       selectableImageProviders,
       modelStates: MODEL_SETTING_DEFS
-        .filter((def) => selectableProviders.includes(def.provider))
+        .filter((def) => def.kind === "image" || selectableProviders.includes(def.provider))
         .map((def) => modelState(def, projectDir)),
       skillManifests: loadSkillManifests(),
       disabledSkillIds: parseSkillIds(settingValue(SETTING_KEYS.SKILLS_DISABLED_IDS, projectDir) || ""),

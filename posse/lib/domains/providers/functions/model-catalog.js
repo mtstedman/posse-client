@@ -131,9 +131,15 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "gpt-5.5",
     "gpt-5.5-pro",
     "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
   ]),
   codex: Object.freeze([
     "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -437,8 +443,15 @@ export function getTextModelOptions(provider, { includeDefault = true, defaultLa
 }
 
 /** Option list for image model dropdowns, built from the merged catalog. */
-export function getImageModelOptions(provider, { currentValue = null } = {}) {
-  const options = [...buildModelOptionList(getMergedImageModels(provider), { includeDefault: false })];
+export function getImageModelOptions(provider, {
+  currentValue = null,
+  includeDefault = false,
+  defaultLabel = "(default: provider image model)",
+} = {}) {
+  const options = [...buildModelOptionList(getMergedImageModels(provider), {
+    includeDefault,
+    defaultLabel,
+  })];
   const annotated = annotatedCurrentValueOption(provider, "image", currentValue);
   if (annotated && !options.some((option) => option.value === annotated.value)) options.push(annotated);
   return Object.freeze(options);

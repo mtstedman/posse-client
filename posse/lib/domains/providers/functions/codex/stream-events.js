@@ -69,8 +69,15 @@ export function __testBuildCloseStats({
 function normalizeTurnCount(value) {
   if (value == null) return null;
   const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return null;
-  return Math.floor(n);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const count = Math.floor(n);
+  return count > 0 ? count : null;
+}
+
+export function isTurnCompletedEvent(msg) {
+  const body = _extractCodexEventBody(msg);
+  const type = String(body?.type || "").trim().toLowerCase().replaceAll("_", ".");
+  return type === "turn.completed";
 }
 
 export function extractTurnCountFromEvent(msg) {

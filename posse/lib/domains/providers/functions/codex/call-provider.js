@@ -36,7 +36,7 @@ import { isCodexResumeHandleExpiredError } from "./errors.js";
 import { getMaxTurns, getModelOverride, getModelTierConfig, normalizeModelForAuthMode } from "./model-config.js";
 import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRoute, buildCodexDeterministicReadConfigOverridesAsync, buildCodexSystemToolLockdownOverrides } from "./request-builders.js";
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
-import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractTurnCountFromEvent, extractUsageFromEvent, summarizeJsonEvent } from "./stream-events.js";
+import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
 
 export async function callProvider(promptText, {
   role = "planner",
@@ -516,6 +516,7 @@ export async function callProvider(promptText, {
     let lastMeaningfulActivity = lastActivity;
     const seenStderrNotices = new Set();
     const toolUses = [];
+    let completedTurnEvents = 0;
     let stdoutLineBuffer = "";
     const LINE_BUF_MAX = 16 * 1024 * 1024;
     const handleStdoutLine = (raw) => {
@@ -531,6 +532,7 @@ export async function callProvider(promptText, {
         if (totals.longContextInputTokens != null) longContextInputTokens = totals.longContextInputTokens;
         const turnCount = extractTurnCountFromEvent(msg);
         if (turnCount != null) latestTurnCount = Math.max(latestTurnCount ?? 0, turnCount);
+        if (isTurnCompletedEvent(msg)) completedTurnEvents++;
         const extracted = _extractCodexToolUse(msg);
         const extractedEntries = Array.isArray(extracted) ? extracted : (extracted ? [extracted] : []);
         const webToolUses = extractedEntries.filter((entry) => entry && isWebToolName(entry.tool));
@@ -659,7 +661,10 @@ export async function callProvider(promptText, {
         toolUsesLoggedByToolkit: !!deterministicReadMcp.active,
         sessionHandle: latestSessionHandle,
         priorSessionHandle: resumeSessionHandle,
-        numTurns: latestTurnCount ?? toolUses.length,
+        // Current Codex JSONL emits turn.completed without a numeric count.
+        // Count those lifecycle events; tool calls are not turns and can be
+        // absent when the deterministic MCP gateway owns their telemetry.
+        numTurns: latestTurnCount ?? (completedTurnEvents > 0 ? completedTurnEvents : null),
         maxTurns: turnLimit,
         maxOutputTokens: outputTokenLimit,
         outputTruncated: false,

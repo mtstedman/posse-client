@@ -6,6 +6,7 @@
 // The pure decision logic stays in routing.js. This module is the
 // orchestration layer that orchestrator-app.js used to inline.
 
+import fs from "node:fs";
 import path from "path";
 
 import {
@@ -121,6 +122,21 @@ function listTrackedFiles(projectDir, candidates = []) {
   return byNormalized;
 }
 
+function explicitAbsentOneshotCreate({ projectDir, candidate, requestText }) {
+  const normalizedCandidate = normalizeCandidatePath(candidate);
+  const normalizedText = String(requestText || "").replace(/\\/g, "/").toLowerCase();
+  const exactPathNamed = normalizedCandidate
+    && normalizedText.includes(normalizedCandidate.toLowerCase());
+  const explicitCreate = /\bcreate\b/i.test(String(requestText || ""));
+  const targetPath = path.resolve(projectDir, normalizedCandidate);
+  return {
+    ok: Boolean(explicitCreate && exactPathNamed && !fs.existsSync(targetPath)),
+    explicit_create: explicitCreate,
+    exact_path_named: exactPathNamed,
+    target_absent: !fs.existsSync(targetPath),
+  };
+}
+
 export function rankOneshotTrackedFileCandidates({ projectDir = null, requestText = "", maxCandidates = 10 } = {}) {
   if (!projectDir) return [];
   const limit = Math.max(1, Math.min(50, Number(maxCandidates) || 10));
@@ -234,13 +250,25 @@ function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPl
     const canonical = tracked.get(key);
     result.checks.git_tracked = canonical ? { ok: true, canonical_path: canonical } : { ok: false };
     if (!canonical) {
-      result.ok = false;
-      result.reason = "not_git_tracked";
-      continue;
+      const createTarget = explicitAbsentOneshotCreate({
+        projectDir,
+        candidate,
+        requestText,
+      });
+      result.checks.create_target = createTarget;
+      if (!createTarget.ok) {
+        result.ok = false;
+        result.reason = "not_git_tracked";
+        continue;
+      }
+      result.canonical_path = candidate;
+      result.operation = "create";
+    } else {
+      result.canonical_path = canonical;
+      result.operation = "modify";
     }
-    result.canonical_path = canonical;
 
-    const targetRisk = oneshotTargetRisk(canonical);
+    const targetRisk = oneshotTargetRisk(result.canonical_path);
     result.checks.target_risk = { ok: !targetRisk, reason: targetRisk || null };
     if (targetRisk) {
       result.ok = false;
@@ -249,7 +277,7 @@ function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPl
     }
 
     if (requirePathCorroboration) {
-      const corroboration = oneshotPathCorroboration(corroborationText || requestText, canonical);
+      const corroboration = oneshotPathCorroboration(corroborationText || requestText, result.canonical_path);
       result.checks.path_corroboration = corroboration;
       if (!corroboration.ok) {
         result.ok = false;
@@ -527,6 +555,7 @@ export function createOneshotDevJob(workItem, {
   }
 
   const [file] = gate.candidate_files;
+  const operation = gate.gate_results?.[0]?.operation === "create" ? "create" : "modify";
   const syntheticRouting = {
     ...routing,
     reason,
@@ -562,8 +591,8 @@ export function createOneshotDevJob(workItem, {
         `The requested edit is complete: ${workItem.title || effectiveRequestedText}`,
         "The change is internally consistent; nothing the request implies was left un-updated.",
       ],
-      files_to_modify: [file],
-      files_to_create: [],
+      files_to_modify: operation === "modify" ? [file] : [],
+      files_to_create: operation === "create" ? [file] : [],
       files_to_delete: [],
       create_roots: [],
       task_mode: "code",

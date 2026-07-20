@@ -40,6 +40,7 @@ export {
   __testAppendCodexToolUseEvent,
   extractUsageFromEvent as __testExtractCodexUsageFromEvent,
   extractTurnCountFromEvent as __testExtractCodexTurnCountFromEvent,
+  isTurnCompletedEvent as __testIsCodexTurnCompletedEvent,
   codexUsageEventDedupeKey as __testCodexUsageEventDedupeKey,
   createCodexUsageAccumulator as __testCreateCodexUsageAccumulator,
 } from "./stream-events.js";

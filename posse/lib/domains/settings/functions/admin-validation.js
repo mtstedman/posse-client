@@ -2,6 +2,7 @@ import {
   IMAGE_PROVIDER_OPTIONS,
   MODEL_SETTING_DEFS,
   PROVIDER_OPTIONS,
+  getDefaultImageModel,
   getDefaultTierModel,
   getImageModelOptions,
   getTextModelOptions,
@@ -64,7 +65,12 @@ export function getModelChoicesForEntry(entry) {
   if (!entry) return [{ value: "", label: "(default: tier model)" }];
   const currentValue = entry.currentValue ?? entry.setting_value ?? "";
   if (entry.kind === "image") {
-    return getImageModelOptions(entry.provider, { currentValue }).slice();
+    const defaultModel = getDefaultImageModel(entry.provider);
+    return getImageModelOptions(entry.provider, {
+      currentValue,
+      includeDefault: true,
+      defaultLabel: `(default: ${defaultModel})`,
+    }).slice();
   }
   const baseChoices = getTextModelOptions(entry.provider, { includeDefault: true, currentValue });
   if (baseChoices.length === 0) return [{ value: "", label: "(default: tier model)" }];

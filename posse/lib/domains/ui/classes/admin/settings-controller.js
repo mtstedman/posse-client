@@ -67,7 +67,7 @@ import { closePromptLog, promptPreviewText, readRecentPrompts } from "../../../.
 import { closeOutputLog, readRecentOutputs } from "../../../../shared/telemetry/functions/logging/output-log.js";
 import { closeLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { buildCurrentRoleContract } from "../../../worker/functions/role-contract-view.js";
-import { isAdminVisibleCatalogKey } from "../../../settings/functions/catalog.js";
+import { getCatalogEntry, isAdminVisibleCatalogKey } from "../../../settings/functions/catalog.js";
 import {
   loadSkillManifests,
   parseSkillIds,
@@ -412,6 +412,32 @@ function getSettingsValueColumnWidth(innerWidth, keyColumnWidth = SETTINGS_KEY_C
   return Math.max(16, Math.min(28, innerWidth - reserved));
 }
 
+export function adminSettingValuePresentation(value, source, {
+  defaultColor = C.magenta,
+  configuredColor = C.cyan,
+} = {}) {
+  const text = value == null
+    ? "(none)"
+    : (String(value).trim() === "" ? "(empty)" : String(value));
+  return {
+    text,
+    color: source === "default" ? defaultColor : configuredColor,
+  };
+}
+
+function withCatalogSource(entry) {
+  const storageKey = entry?.storage_key || toStorageSettingKey(entry?.setting_key);
+  const catalogEntry = getCatalogEntry(storageKey);
+  if (!catalogEntry) return entry;
+  const defaultValue = catalogEntry.default == null ? "" : String(catalogEntry.default);
+  const settingValue = String(entry?.setting_value ?? "");
+  return {
+    ...entry,
+    default_value: defaultValue,
+    source: settingValue === defaultValue ? "default" : entry.source,
+  };
+}
+
 function getEffectiveModelSetting(def) {
   const stored = safeGetSetting(def.key);
   const providerDefaults = getModelProviderDefaults(def.provider);
@@ -549,7 +575,7 @@ export class AdminSettingsController {
       updated_at: null,
       description: `${skill.name}: ${skill.when_to_use || skill.description || "planner-selectable skill"}`,
       label: skill.name,
-      source: "skills",
+      source: disabled.has(skill.id) ? "global" : "default",
       skill_id: skill.id,
     }));
   }
@@ -607,7 +633,7 @@ export class AdminSettingsController {
       !PROVIDER_SETTING_KEYS.has(entry.setting_key) &&
       !ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS.has(entry.setting_key) &&
       !SYNTHETIC_SETTING_KEYS.has(entry.setting_key)
-    ).map((entry) => toDisplaySettingEntry(entry));
+    ).map((entry) => toDisplaySettingEntry(withCatalogSource(entry)));
 
     // Sort dbSettings to match the visual order in SETTINGS_GROUPS so that
     // ↑/↓ navigation walks through the same sequence the user sees, and so
@@ -724,7 +750,7 @@ export class AdminSettingsController {
   _getModelSettingEntries() {
     const selectableProviders = new Set(this._getSelectableProviders());
     return MODEL_SETTING_DEFS
-      .filter((def) => selectableProviders.has(def.provider))
+      .filter((def) => def.kind === "image" || selectableProviders.has(def.provider))
       .map((def) => {
         const resolved = def.kind === "image"
           ? getEffectiveImageModelSetting(def)
@@ -784,13 +810,14 @@ export class AdminSettingsController {
 
   _getDelegationSettingEntries() {
     const storedVal = safeGetSetting("delegation_mode");
+    const defaultValue = String(getCatalogEntry("delegation_mode")?.default || "js");
     return [{
       setting_key: "delegation_mode",
       setting_value: storedVal || "js",
       updated_at: null,
       description: `Delegation engine mode; options: ${DELEGATION_MODE_OPTIONS.join(", ")}`,
       label: getAdminSettingPresentation("delegation_mode").label,
-      source: storedVal ? "global" : "default",
+      source: !storedVal || storedVal === defaultValue ? "default" : "global",
       db_value: storedVal || "",
     }];
   }
@@ -1398,6 +1425,7 @@ export class AdminSettingsController {
       )).join(` ${C.dim}|${C.reset} `);
       lines.push(` ${paneBar}  ${C.dim}press \u2190/\u2192 to switch${C.reset}`);
     }
+    lines.push(` ${C.magenta}default/inherited${C.reset} ${C.dim}|${C.reset} ${C.cyan}saved/configured${C.reset} ${C.dim}| blank values show as (empty) or (none)${C.reset}`);
     lines.push("");
 
     const settingsSnapshot = this._getSettingsSnapshot();
@@ -1473,7 +1501,11 @@ export class AdminSettingsController {
       // Pad/truncate description to `descWidth` so every row ends at the same
       // column — gives the table a uniform rectangular silhouette.
       const descCell = fit(`${descColor}${desc || ""}${C.reset}`, descWidth);
-      lines.push(`  ${String(rowIndex).padStart(2)} ${keyStr} ${fit(`${valueColor}${value || ""}${C.reset}`, valueWidth)} ${descCell}`);
+      const valuePresentation = adminSettingValuePresentation(value, options.source, {
+        defaultColor: C.magenta,
+        configuredColor: valueColor,
+      });
+      lines.push(`  ${String(rowIndex).padStart(2)} ${keyStr} ${fit(`${valuePresentation.color}${valuePresentation.text}${C.reset}`, valueWidth)} ${descCell}`);
       rowIndex += 1;
     };
 
@@ -1489,7 +1521,10 @@ export class AdminSettingsController {
     const pushDbSettingRow = (key) => {
       const s = settingsByKey.get(key);
       if (!s) return false;
-      pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(key, s), C.cyan, { label: s.label });
+      pushEditableRow(s.setting_key, s.setting_value, resolveDesc(key, s), C.cyan, {
+        label: s.label,
+        source: s.source,
+      });
       return true;
     };
     const pushModelSettingRow = (s) => {
@@ -1498,7 +1533,10 @@ export class AdminSettingsController {
       const desc = `${s.description} (${providerLabel}, ${source}; using ${s.effective_model || "?"})`;
       const displayValue = formatModelSettingDisplayValue(s);
       const valueColor = s.setting_value ? C.cyan : C.dim;
-      pushEditableRow(s.setting_key, displayValue, desc, valueColor, { label: s.label });
+      pushEditableRow(s.setting_key, displayValue, desc, valueColor, {
+        label: s.label,
+        source: s.source,
+      });
     };
     const pushProviderSettingRow = (s, { dimWhenDelegatorInactive = true } = {}) => {
       const envNote = s.source === "global" && s.env_value
@@ -1512,6 +1550,7 @@ export class AdminSettingsController {
       pushEditableRow(s.setting_key, formatProviderSettingValue(s), desc, valueColor, {
         dimmed: isDelegatorInactive,
         label: s.label,
+        source: s.source,
       });
     };
     const renderDbGroupsForPane = (paneId) => {
@@ -1524,7 +1563,10 @@ export class AdminSettingsController {
         pushTableHeader();
         for (const key of present) {
           const s = settingsByKey.get(key);
-          pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(key, s), C.cyan, { label: s.label });
+          pushEditableRow(s.setting_key, s.setting_value, resolveDesc(key, s), C.cyan, {
+            label: s.label,
+            source: s.source,
+          });
           placedKeys.add(key);
         }
         lines.push("");
@@ -1537,7 +1579,10 @@ export class AdminSettingsController {
         pushSection("misc", "(unmapped — add to SETTINGS_GROUPS)");
         pushTableHeader();
         for (const s of ungrouped) {
-          pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(s.setting_key, s), C.cyan, { label: s.label });
+          pushEditableRow(s.setting_key, s.setting_value, resolveDesc(s.setting_key, s), C.cyan, {
+            label: s.label,
+            source: s.source,
+          });
         }
         lines.push("");
       }
@@ -1554,7 +1599,10 @@ export class AdminSettingsController {
         if (providerRow) pushProviderSettingRow(providerRow);
         if (hasDelegation) {
           const s = delegationSettings[0];
-          pushEditableRow(s.setting_key, s.setting_value || "", `${s.description} (${s.source})`, C.cyan, { label: s.label });
+          pushEditableRow(s.setting_key, s.setting_value, `${s.description} (${s.source})`, C.cyan, {
+            label: s.label,
+            source: s.source,
+          });
         }
         for (const key of section.keys) {
           if (key === "delegation_mode") continue;
@@ -1596,7 +1644,10 @@ export class AdminSettingsController {
           const baseDesc = s.description || "";
           const liveHint = getProviderUsageSettingHint(s.setting_key, providerUsageWindowMap);
           const desc = liveHint ? `${baseDesc} (${liveHint})` : baseDesc;
-          pushEditableRow(s.setting_key, s.setting_value || "", desc, C.cyan, { label: s.label });
+          pushEditableRow(s.setting_key, s.setting_value, desc, C.cyan, {
+            label: s.label,
+            source: s.source,
+          });
         }
         lines.push("");
       }
@@ -1625,7 +1676,10 @@ export class AdminSettingsController {
         pushSection("Image Routing", "(artifact image provider)");
         pushTableHeader();
         for (const s of artifactSettings) {
-          pushEditableRow(s.setting_key, s.setting_value || "", s.description || "", C.cyan, { label: s.label });
+          pushEditableRow(s.setting_key, s.setting_value, s.description || "", C.cyan, {
+            label: s.label,
+            source: s.source,
+          });
         }
         lines.push("");
       }
@@ -1655,7 +1709,10 @@ export class AdminSettingsController {
       } else {
         pushTableHeader();
         for (const s of skillSettings) {
-          pushEditableRow(s.setting_key, s.setting_value || "", s.description || "", C.cyan, { label: s.label });
+          pushEditableRow(s.setting_key, s.setting_value, s.description || "", C.cyan, {
+            label: s.label,
+            source: s.source,
+          });
         }
       }
       lines.push("");
@@ -1673,7 +1730,10 @@ export class AdminSettingsController {
       pushSection("Project Database", "(opt-in agent SQL access; stored in this repo's .posse/db)");
       pushTableHeader();
       for (const s of projectDbSettings) {
-        pushEditableRow(s.setting_key, s.setting_value || "", resolveDesc(s.setting_key, s), C.cyan, { label: s.label });
+        pushEditableRow(s.setting_key, s.setting_value, resolveDesc(s.setting_key, s), C.cyan, {
+          label: s.label,
+          source: s.source,
+        });
       }
       lines.push("");
 

@@ -216,6 +216,7 @@ export function projectAdminDescription({
     (Array.isArray(modelStates) ? modelStates : []).map((state) => [String(state.key), state]),
   );
   const selectableProviderSet = new Set(selectableProviders.map((provider) => String(provider)));
+  const imageProviderSet = new Set(IMAGE_PROVIDER_OPTIONS.map((option) => String(option.value)));
   const safeSelectableImageProviders = selectableImageProviders
     .filter((option) => IMAGE_PROVIDER_VALUES.has(String(option?.value ?? option)));
   const disabledSkills = new Set(disabledSkillIds.map((id) => String(id)));
@@ -227,7 +228,11 @@ export function projectAdminDescription({
     if (!isAdminVisibleCatalogKey(entry.key) || HIDDEN_SETTING_KEYS.has(entry.key)) continue;
     if (MODEL_SETTING_KEYS.has(entry.key)) {
       const modelDef = MODEL_SETTING_DEFS.find((def) => def.key === entry.key);
-      if (!modelDef || !selectableProviderSet.has(modelDef.provider)) continue;
+      if (!modelDef || (
+        modelDef.kind === "image"
+          ? !imageProviderSet.has(modelDef.provider)
+          : !selectableProviderSet.has(modelDef.provider)
+      )) continue;
     }
     const displayKey = toDisplaySettingKey(entry.key);
     const presentation = getAdminSettingPresentation(displayKey);
