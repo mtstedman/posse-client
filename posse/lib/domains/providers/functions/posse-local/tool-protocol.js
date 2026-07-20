@@ -335,10 +335,11 @@ export function formatGemmaLocalToolResult(name, result, maxChars = MAX_LOCAL_TO
 /**
  * @param {{
  *   messages?: Array<{role: string, content: string}>,
- *   tools?: Array<{name?: string}>,
+ *   tools?: Array<{name?: string, parameters?: Record<string, unknown>}>,
  *   generate?: (messages: Array<{role: string, content: string}>) => Promise<any>,
  *   execute?: (name: string, args: Record<string, unknown>) => Promise<unknown>,
  *   formatResult?: (name: string, result: unknown) => string,
+ *   normalizeCall?: (call: {name: string, arguments: Record<string, unknown>, raw: string}) => {name: string, arguments: Record<string, unknown>, raw?: string} | null,
  *   completeSuppressedReplay?: (name: string, args: Record<string, unknown>, result: unknown, context: {executedMutations: Array<{name: string, args: Record<string, unknown>, result: unknown}>}) => string | null,
  *   finalOutputHint?: string | null,
  *   missingContextCall?: {name: string, arguments: Record<string, unknown>} | null,
@@ -352,6 +353,7 @@ export async function runLocalPlannerToolLoop({
   generate,
   execute,
   formatResult = formatLocalToolResult,
+  normalizeCall = null,
   completeSuppressedReplay = null,
   finalOutputHint = null,
   missingContextCall = null,
@@ -365,7 +367,7 @@ export async function runLocalPlannerToolLoop({
   const originalMessages = messages.map((message) => ({ ...message }));
   const conversation = originalMessages.map((message) => ({ ...message }));
   const toolsByName = new Map(tools
-    .map((tool) => [String(tool?.name || "").trim(), tool])
+    .map((tool) => /** @type {[string, {name?: string, parameters?: Record<string, unknown>}]} */ ([String(tool?.name || "").trim(), tool]))
     .filter(([name]) => name));
   const allowedNames = new Set(toolsByName.keys());
   const limit = Math.max(1, Math.floor(Number(turnLimit) || LOCAL_PLANNER_TOOL_TURN_LIMIT));
@@ -400,6 +402,21 @@ export async function runLocalPlannerToolLoop({
           name,
           arguments: args,
           raw: JSON.stringify({ name, arguments: args }),
+        };
+      }
+    }
+    if (call && typeof normalizeCall === "function") {
+      const normalized = normalizeCall(call);
+      const normalizedName = String(normalized?.name || "").trim();
+      const normalizedArguments = plainObject(normalized?.arguments);
+      if (normalizedName && normalizedArguments) {
+        call = {
+          name: normalizedName,
+          arguments: normalizedArguments,
+          raw: String(normalized?.raw || JSON.stringify({
+            name: normalizedName,
+            arguments: normalizedArguments,
+          })),
         };
       }
     }

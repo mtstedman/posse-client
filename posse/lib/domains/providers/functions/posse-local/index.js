@@ -68,6 +68,38 @@ function bindMissingContextExampleToExactTarget(promptText, targetPath) {
   );
 }
 
+function explicitExactEditIntent(promptText, targetPath) {
+  if (!targetPath) return null;
+  const prompt = String(promptText || "");
+  const pattern = /\breplace\s+(?:the\s+)?exact\s+(?:paragraph\s+)?text\s+(["'`])([^\r\n]{1,2000}?)\1\s+with\s+(["'`])([^\r\n]{1,2000}?)\3/gi;
+  const replacements = new Map();
+  for (const match of prompt.matchAll(pattern)) {
+    const oldString = String(match[2] || "");
+    const newString = String(match[4] || "");
+    if (!oldString || !newString || oldString === newString) continue;
+    replacements.set(JSON.stringify([oldString, newString]), { oldString, newString });
+  }
+  if (replacements.size !== 1) return null;
+  const replacement = [...replacements.values()][0];
+  return {
+    name: "edit_file",
+    arguments: {
+      path: targetPath,
+      old_string: replacement.oldString,
+      new_string: replacement.newString,
+    },
+  };
+}
+
+function repairNoopExactEditCall(call, exactIntent) {
+  if (!exactIntent || call?.name !== "edit_file") return call;
+  const args = call?.arguments;
+  if (normalizedScopedPath(args?.path) !== exactIntent.arguments.path) return call;
+  if (typeof args?.old_string !== "string" || typeof args?.new_string !== "string") return call;
+  if (args.old_string !== args.new_string) return call;
+  return exactIntent;
+}
+
 function toolResultFailed(result) {
   return result?.isError === true || /^Error:/i.test(String(result || "").trim());
 }
@@ -333,6 +365,9 @@ export async function callProvider(promptText, opts = {}) {
     && (createFiles || []).map(normalizedScopedPath).includes(exactWriteTarget)
     ? exactWriteTarget
     : null;
+  const exactEditIntent = exactWriteTarget && !exactCreateTarget
+    ? explicitExactEditIntent(promptText, exactWriteTarget)
+    : null;
   const toolDefinitions = (executionContract
     ? buildEmbeddedToolDefinitions(executionContract)
     : [])
@@ -416,6 +451,9 @@ export async function callProvider(promptText, opts = {}) {
       formatResult: (name, result) => selected === GEMMA_LOCAL_MODEL_ID
         ? formatGemmaLocalToolResult(name, result, profile.maxToolResultChars)
         : formatLocalToolResult(name, result, profile.maxToolResultChars),
+      normalizeCall: exactEditIntent
+        ? (call) => repairNoopExactEditCall(call, exactEditIntent)
+        : null,
       completeSuppressedReplay: exactWriteTarget
         ? (name, args, result, context) => suppressedReplayCompletion(
           role,
