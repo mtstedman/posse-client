@@ -33,6 +33,7 @@ import {
   closeRuntimeStateForExit,
   firstLine,
   handleWrapUpSignal,
+  summarizeRunCompletion,
   bootScipLangPatchFromEvent,
   scopeScipEventToSourceLanguage,
 } from "../functions/run-session.js";
@@ -395,6 +396,11 @@ export class RunSession {
   }
   if (runnableOrActiveJobs.length === 0 && parkedJobs.length > 0 && !useTui) {
     console.log(`\n  ${C.yellow}No runnable jobs. ${parkedJobs.length} parked/waiting job(s) need the TUI or operator action before work can continue.${C.reset}\n`);
+    process.exitCode = summarizeRunCompletion(
+      [...new Set(parkedJobs.map((job) => Number(job.work_item_id)))]
+        .map((id) => getWorkItem(id))
+        .filter(Boolean),
+    ).exitCode;
     return;
   }
 
@@ -403,6 +409,9 @@ export class RunSession {
       const scopedSummary = describeScopedWorkItems();
       const suffix = scopedSummary ? ` (${scopedSummary})` : "";
       console.log(`\n  No runnable jobs for scoped work item(s): ${scopedWorkItemIds.join(", ")}${suffix}.\n`);
+      process.exitCode = summarizeRunCompletion(
+        scopedWorkItemIds.map((id) => getWorkItem(id)).filter(Boolean),
+      ).exitCode;
       return;
     }
     const iterateResult = await processIterativeWrapUp({
@@ -433,6 +442,7 @@ export class RunSession {
         .join(", ");
       const more = openWorkItems.length > 5 ? `, +${openWorkItems.length - 5} more` : "";
       console.log(`\n  No runnable jobs. ${openWorkItems.length} open work item(s) are parked or blocked: ${summary}${more}.\n`);
+      process.exitCode = summarizeRunCompletion(openWorkItems).exitCode;
       return;
     }
     console.log(`\n  No runnable jobs. Use 'plan' to create jobs from queued items.\n`);
@@ -2782,12 +2792,29 @@ export class RunSession {
   // alive, so the process hangs after "Run wrap-up: done." instead of exiting
   // (Enter does nothing; only Ctrl+C escapes). Every signal-driven exit path
   // already exits explicitly; mirror them here — record the clean shutdown,
-  // flush runtime state, and exit. Reaching this line means a clean run: reruns
-  // return inside the try (so they skip this and the innermost run exits), and
-  // errors propagate past the finally, so exit code 0 is correct.
+  // flush runtime state, and exit. Scheduler drainage is not itself a success
+  // verdict: a job can dead-letter cleanly and leave its work item failed.
+  // Aggregate work-item state accounts for successful fix-child recovery while
+  // still returning a truthful shell status for failed/canceled work.
+  const completion = summarizeRunCompletion(
+    [...wiIds].map((id) => getWorkItem(id)).filter(Boolean),
+  );
+  if (!completion.ok) {
+    const unsuccessful = completion.failures.length > 0
+      ? completion.failures
+      : completion.incomplete;
+    const detail = unsuccessful
+      .map((item) => `WI#${item.id ?? "?"} ${item.status}`)
+      .join(", ");
+    const label = completion.failures.length > 0
+      ? "Run completed with unsuccessful work item(s)"
+      : "Run stopped with work item(s) still requiring action";
+    const color = completion.failures.length > 0 ? C.red : C.yellow;
+    console.error(`\n  ${color}${label}: ${detail}.${C.reset}\n`);
+  }
   closeRuntimeStateForExit();
-  process.exitCode = 0;
-  exitProcess?.(0);
+  process.exitCode = completion.exitCode;
+  exitProcess?.(completion.exitCode);
 
   }
 }

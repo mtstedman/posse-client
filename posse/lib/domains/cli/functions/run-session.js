@@ -47,6 +47,35 @@ export function firstLine(value, fallback = "unknown") {
 }
 
 /**
+ * Derive the shell outcome from the final aggregate state of the work items
+ * handled by this run. Individual failed jobs are not sufficient: a failed
+ * parent followed by a successful fix child is a recovered work item and must
+ * still exit successfully. Failed/canceled work exits 1; operator-gated work
+ * exits 2 so headless callers can distinguish "needs action" from failure.
+ *
+ * @param {Array<{ id?: number, status?: string }>} [workItems]
+ */
+export function summarizeRunCompletion(workItems = []) {
+  const failures = workItems
+    .filter((item) => item && (item.status === "failed" || item.status === "canceled"))
+    .map((item) => ({ id: Number(item.id) || null, status: item.status }));
+  const incomplete = workItems
+    .filter((item) => item && (
+      item.status === "blocked"
+      || item.status === "waiting_on_human"
+      || item.status === "waiting_on_review"
+    ))
+    .map((item) => ({ id: Number(item.id) || null, status: item.status }));
+  const exitCode = failures.length > 0 ? 1 : (incomplete.length > 0 ? 2 : 0);
+  return {
+    ok: exitCode === 0,
+    exitCode,
+    failures,
+    incomplete,
+  };
+}
+
+/**
  * @param {{ stdout?: any, stderr?: any }} [input]
  */
 export function createTerminalOutputIntercept({ stdout = process.stdout, stderr = process.stderr } = {}) {
