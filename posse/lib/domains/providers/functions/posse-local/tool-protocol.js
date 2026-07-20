@@ -107,6 +107,9 @@ export function buildLocalPlannerToolInstructions(
         ? "write_file is unavailable for this existing-file job. Preserve the file and use edit_file with exact old_string/new_string or another listed text-edit mode."
         : null,
       availableNames.has("edit_file")
+        ? "For an exact text replacement, use this call shape with literal task values: {\"name\":\"edit_file\",\"arguments\":{\"path\":\"file.txt\",\"old_string\":\"old text\",\"new_string\":\"new text\"}}"
+        : null,
+      availableNames.has("edit_file")
         ? "Never use edit_file jsonPath/jsonValue for HTML, CSS, Markdown, source code, or other non-JSON text."
         : null,
       "Shell commands, database writes, image generation, test execution, moves, copies, directory creation, and deletion are unavailable.",

@@ -345,6 +345,11 @@ export async function callProvider(promptText, opts = {}) {
         return fileWriteAuthorized && LOCAL_FILE_WRITE_TOOLS.has(String(tool?.name || ""));
       }
       return true;
+    })
+    .sort((left, right) => {
+      if (!fileWriteAuthorized) return 0;
+      const priority = (tool) => LOCAL_FILE_WRITE_TOOLS.has(String(tool?.name || "")) ? 0 : 1;
+      return priority(left) - priority(right);
     });
   const toolInstructions = buildLocalPlannerToolInstructions(toolDefinitions, toolTurnLimit, {
     allowFileWrites: fileWriteAuthorized,
