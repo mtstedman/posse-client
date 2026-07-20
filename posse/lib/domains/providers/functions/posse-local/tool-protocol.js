@@ -35,6 +35,55 @@ function protocolToolDefinition(tool) {
   };
 }
 
+function localSchemaTypeError(value, schema, label) {
+  if (!schema || typeof schema !== "object") return null;
+  if (Array.isArray(schema.enum) && !schema.enum.some((entry) => Object.is(entry, value))) {
+    return `${label} must be one of: ${schema.enum.map(String).join(", ")}`;
+  }
+  if (Array.isArray(schema.anyOf) && !schema.anyOf.some((candidate) => !localSchemaTypeError(value, candidate, label))) {
+    return `${label} does not match any allowed schema`;
+  }
+  if (Array.isArray(schema.oneOf) && schema.oneOf.filter((candidate) => !localSchemaTypeError(value, candidate, label)).length !== 1) {
+    return `${label} must match exactly one allowed schema`;
+  }
+  const type = String(schema.type || "").trim();
+  if (!type) return null;
+  if (type === "string" && typeof value !== "string") return `${label} must be a string`;
+  if (type === "boolean" && typeof value !== "boolean") return `${label} must be a boolean`;
+  if (type === "number" && (typeof value !== "number" || !Number.isFinite(value))) return `${label} must be a finite number`;
+  if (type === "integer" && (!Number.isInteger(value))) return `${label} must be an integer`;
+  if (type === "array") {
+    if (!Array.isArray(value)) return `${label} must be an array`;
+    for (let index = 0; index < value.length; index += 1) {
+      const itemError = localSchemaTypeError(value[index], schema.items, `${label}[${index}]`);
+      if (itemError) return itemError;
+    }
+  }
+  if (type === "object") {
+    const object = plainObject(value);
+    if (!object) return `${label} must be an object`;
+    const properties = plainObject(schema.properties) || {};
+    for (const required of Array.isArray(schema.required) ? schema.required : []) {
+      if (!Object.hasOwn(object, required)) return `${label}.${required} is required`;
+    }
+    if (schema.additionalProperties === false) {
+      const extra = Object.keys(object).find((key) => !Object.hasOwn(properties, key));
+      if (extra) return `${label}.${extra} is not allowed`;
+    }
+    for (const [key, child] of Object.entries(properties)) {
+      if (!Object.hasOwn(object, key)) continue;
+      const childError = localSchemaTypeError(object[key], child, `${label}.${key}`);
+      if (childError) return childError;
+    }
+  }
+  return null;
+}
+
+function validateLocalToolArguments(tool, args) {
+  const error = localSchemaTypeError(args, plainObject(tool?.parameters) || { type: "object" }, "arguments");
+  return error ? `Error: Invalid ${tool?.name || "tool"} arguments: ${error}. No tool ran.` : null;
+}
+
 export function buildLocalPlannerToolInstructions(
   tools = [],
   turnLimit = LOCAL_PLANNER_TOOL_TURN_LIMIT,
@@ -291,7 +340,10 @@ export async function runLocalPlannerToolLoop({
 
   const originalMessages = messages.map((message) => ({ ...message }));
   const conversation = originalMessages.map((message) => ({ ...message }));
-  const allowedNames = new Set(tools.map((tool) => String(tool?.name || "")).filter(Boolean));
+  const toolsByName = new Map(tools
+    .map((tool) => [String(tool?.name || "").trim(), tool])
+    .filter(([name]) => name));
+  const allowedNames = new Set(toolsByName.keys());
   const limit = Math.max(1, Math.floor(Number(turnLimit) || LOCAL_PLANNER_TOOL_TURN_LIMIT));
   const generations = [];
   const toolUses = [];
@@ -422,10 +474,15 @@ export async function runLocalPlannerToolLoop({
     if (!allowedNames.has(call.name)) {
       result = `Error: Tool "${call.name}" is not authorized by the active execution contract.`;
     } else {
-      try {
-        result = await execute(call.name, call.arguments);
-      } catch (error) {
-        result = `Error: ${error?.message || String(error)}`;
+      const argumentError = validateLocalToolArguments(toolsByName.get(call.name), call.arguments);
+      if (argumentError) {
+        result = argumentError;
+      } else {
+        try {
+          result = await execute(call.name, call.arguments);
+        } catch (error) {
+          result = `Error: ${error?.message || String(error)}`;
+        }
       }
     }
     lastToolResult = result;
