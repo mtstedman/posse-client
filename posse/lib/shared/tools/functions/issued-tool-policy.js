@@ -158,8 +158,9 @@ function canonicalToolEntry(entry, fallbackSuite = "") {
   return { suite, name, canonical: `${suite}.${name}` };
 }
 
-function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable) {
+function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, coordinationAvailable = false) {
   if (!tool) return false;
+  if (tool.suite === "tools" && tool.name === "agent_handoff") return coordinationAvailable === true;
   if (!policy.allow_read) return false;
   if (tool.suite === "atlas") return atlasAvailable !== false;
   if (tool.name === "project_db_query") return projectDbCapability !== "none";
@@ -175,18 +176,20 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
  *   policy?: Readonly<IssuedToolPolicy>,
  *   projectDbCapability?: string,
  *   atlasAvailable?: boolean,
+ *   coordinationAvailable?: boolean,
  * }} [options]
  */
 export function normalizeIssuedToolSurface(value, {
   policy = EMPTY_TOOL_POLICY,
   projectDbCapability = "none",
   atlasAvailable = true,
+  coordinationAvailable = false,
 } = {}) {
   const entries = Array.isArray(value) ? value : [];
   const out = [];
   for (const entry of entries) {
     const tool = canonicalToolEntry(entry);
-    if (!toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable)) continue;
+    if (!toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, coordinationAvailable)) continue;
     if (!out.includes(tool.canonical)) out.push(tool.canonical);
   }
   return out;
@@ -301,6 +304,7 @@ function failClosedIssuedPolicy() {
     toolAllowlist: { tools: [], atlas: [] },
     webAccess: { ...EMPTY_WEB_ACCESS },
     projectDbCapability: "none",
+    coordination: { agentHandoffV1: false, subAgentV1: false },
   };
   TRUSTED_REMOTE_POLICY_OBJECTS.add(policy);
   return policy;
@@ -325,9 +329,14 @@ export function normalizeRemoteIssuedPolicy(value, {
   );
   const atlas = plainObject(source.atlas);
   const atlasAvailable = atlas ? atlas.available === true : true;
+  const coordinationSource = plainObject(source.coordination);
+  const coordination = {
+    agentHandoffV1: coordinationSource?.agent_handoff_v1 === true,
+    subAgentV1: false,
+  };
   const toolSurface = normalizeIssuedToolSurface(
     Array.isArray(source.tool_surface) ? source.tool_surface : source.tools,
-    { policy: toolPolicy, projectDbCapability, atlasAvailable },
+    { policy: toolPolicy, projectDbCapability, atlasAvailable, coordinationAvailable: coordination.agentHandoffV1 },
   );
   const webAccess = normalizeWebAccess(source.web_access || source.webAccess, role);
   const issued = {
@@ -341,6 +350,10 @@ export function normalizeRemoteIssuedPolicy(value, {
     projectDbCapability: toolSurface.includes("tools.project_db_query")
       ? projectDbCapability
       : "none",
+    coordination: {
+      agentHandoffV1: coordination.agentHandoffV1 && toolSurface.includes("tools.agent_handoff"),
+      subAgentV1: false,
+    },
   };
   TRUSTED_REMOTE_POLICY_OBJECTS.add(issued);
   return issued;
@@ -369,6 +382,10 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
     tool_policy: { ...issued.toolPolicy },
     web_access: { ...issued.webAccess },
     project_db_capability: issued.projectDbCapability,
+    coordination: {
+      agent_handoff_v1: issued.coordination.agentHandoffV1,
+      sub_agent_v1: false,
+    },
   };
 }
 
@@ -474,6 +491,10 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     attachment.projectDbCapability || (attachment.projectDbWrite === true ? "write" : "none"),
   );
   const projectDbCapability = intersectProjectDbCapabilities(signedDb, requestedDb);
+  const toolAllowlist = normalizeSuiteToolAllowlist(signed.toolAllowlist);
+  if (attachment.agentHandoff !== true) {
+    toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "agent_handoff");
+  }
   return {
     ...signed,
     agentId: signed.agentId || "",
@@ -507,7 +528,7 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     atlas: { ...(plainObject(attachment.atlas) || {}) },
     // The signed OAuth capability claims are the immutable role/tool contract.
     // A rotating bearer and its Job attachment can never widen this allowlist.
-    toolAllowlist: normalizeSuiteToolAllowlist(signed.toolAllowlist),
+    toolAllowlist,
   };
 }
 
@@ -533,7 +554,19 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
   );
   if (!consumesRemote) return opts;
 
-  const issued = normalizeRemoteIssuedPolicy(packet.remote_issuance, {
+  const remoteIssuance = plainObject(packet.remote_issuance);
+  const localAgentHandoff = packet?.agent_coordination?.agent_handoff_v1 === true;
+  const executionIssuance = remoteIssuance && !localAgentHandoff
+    ? {
+        ...remoteIssuance,
+        coordination: {
+          ...(plainObject(remoteIssuance.coordination) || {}),
+          agent_handoff_v1: false,
+          sub_agent_v1: false,
+        },
+      }
+    : remoteIssuance;
+  const issued = normalizeRemoteIssuedPolicy(executionIssuance, {
     expectedRole: opts.role,
   });
   const taskMode = packetTaskMode(packet, opts);
@@ -569,7 +602,7 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
       issued.toolPolicy.fallback_reads,
     ),
     _remoteIssuedPolicy: issued,
-    _remoteToolSurface: sanitizeRemoteToolSurfaceResponse(packet.remote_issuance, {
+    _remoteToolSurface: sanitizeRemoteToolSurfaceResponse(executionIssuance, {
       expectedRole: opts.role,
     }),
   };

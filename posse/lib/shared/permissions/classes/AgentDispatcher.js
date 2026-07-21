@@ -79,6 +79,7 @@ export class AgentDispatcher {
     role,
     providerName = null,
     reusable = false,
+    agentHandoff = false,
   } = /** @type {any} */ ({})) {
     const agentKey = String(key || "").trim();
     const lineageKey = String(logicalKey || agentKey).trim();
@@ -111,6 +112,7 @@ export class AgentDispatcher {
       const roleContract = this.roleContractResolver({
         role: normalizedRole,
         providerName: normalizedProvider,
+        agentHandoff: agentHandoff === true,
       });
       const mcpGate = await this.gateFactory({
         key: agentKey,

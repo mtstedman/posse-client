@@ -50,7 +50,22 @@ import {
   resolveContextCompactionConfig,
 } from "../../settings/functions/context-compaction.js";
 import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
-import { narrowProviderOptionsToRemoteIssuance } from "../../../shared/tools/functions/issued-tool-policy.js";
+import {
+  issuedToolSurfaceForProviderPolicy,
+  narrowProviderOptionsToRemoteIssuance,
+} from "../../../shared/tools/functions/issued-tool-policy.js";
+import { finalizeAgentHandoffForProvider } from "../../handoff/functions/agent-handoff.js";
+import { TOOL_AGENT_HANDOFF } from "../../../catalog/native-tools.js";
+
+const AGENT_HANDOFF_TOOL_SCHEMA_CHARS = JSON.stringify(TOOL_AGENT_HANDOFF).length;
+
+function terminalHandoffContractChars(options = {}) {
+  const systemPrompt = String(options.remoteSystemPrompt || options.systemPrompt || "");
+  const contract = systemPrompt
+    .split(/\r?\n/)
+    .find((line) => line.startsWith("EXPERIMENTAL TERMINAL HANDOFF CONTRACT:"));
+  return contract?.length || 0;
+}
 
 const DEFAULT_PROVIDER_ERROR_PATTERNS = [
   /overloaded_error/i,
@@ -295,17 +310,22 @@ function providerAgentIdentity(opts = {}, {
   const lane = String(decision?.key?.lane || role || "agent").trim().toLowerCase();
   const provider = String(providerName || "").trim().toLowerCase();
   const skillKey = String(decision?.key?.skillKey || "");
+  const agentHandoff = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
+    .includes("tools.agent_handoff");
+  const coordinationKey = agentHandoff ? "handoff" : "off";
   if (laneId != null) {
     return {
-      key: `session-lane:${laneId}:${provider}:${lane}`,
+      key: `session-lane:${laneId}:${provider}:${lane}:coord-${coordinationKey}`,
       logicalKey: `wi:${workItemId ?? "none"}:${provider}:${lane}:${skillKey}`,
       reusable: true,
+      agentHandoff,
     };
   }
   return {
     key: `agent-call:${agentCallId}:${provider}:${lane}`,
     logicalKey: `agent-call:${agentCallId}:${provider}:${lane}`,
     reusable: false,
+    agentHandoff,
   };
 }
 
@@ -313,6 +333,8 @@ function agentJobAttachment(opts = {}, context = {}) {
   const atlasConfig = opts.atlasConfig && typeof opts.atlasConfig === "object"
     ? opts.atlasConfig
     : {};
+  const agentHandoff = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
+    .includes("tools.agent_handoff");
   return {
     role: opts.role,
     providerName: context.providerName,
@@ -329,6 +351,7 @@ function agentJobAttachment(opts = {}, context = {}) {
     projectDbCapability: opts.projectDbCapability || (opts.projectDbWrite === true ? "write" : "none"),
     allowImageHelpers: opts.allowImageHelpers !== false,
     allowImageGeneration: opts.needsImageGeneration === true,
+    agentHandoff,
     atlasAvailable: opts.disableAtlas !== true && atlasConfig.enabled !== false,
     atlasGateEnabled: opts.atlasGateEnabled !== false,
     atlasPrefetchStatus: opts.atlasPrefetchStatus || "",
@@ -821,7 +844,7 @@ export class TrackedProviderClient {
     };
 
     const dispatcher = this.worker?.agentDispatcher;
-    const identity = providerAgentIdentity(opts, {
+    const identity = providerAgentIdentity(effectiveCapabilityOpts, {
       providerName,
       role: opts.role,
       workItemId: work_item_id,
@@ -880,12 +903,45 @@ export class TrackedProviderClient {
         prompt_chars: prompt.length,
         atlas_method: opts.disableAtlas ? null : (opts.atlasMethod || null),
       });
-      const { output, stats = {} } = await runWithObservationContext(
+      const { output: providerOutput, stats = {} } = await runWithObservationContext(
         callObservationContext,
         () => provider.call(prompt, attemptOpts),
       );
       if (abortSignal?.aborted) {
         throw providerCallAbortedError(abortSignal, this.worker, job_id);
+      }
+      const handoffRequired = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffV1 === true
+        && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.agent_handoff_v1 === true;
+      const handoffFinalization = finalizeAgentHandoffForProvider({
+        agentCallId,
+        output: providerOutput,
+        required: handoffRequired,
+      });
+      const output = handoffFinalization.output;
+      if (handoffFinalization.applied) {
+        recordObservation({
+          work_item_id,
+          job_id,
+          attempt_id: observationContext?.attempt_id ?? null,
+          agent_call_id: agentCallId,
+          observation_type: "agent_handoff.committed",
+          summary: `Committed terminal agent handoff (${handoffFinalization.digest.slice(0, 12)})`,
+          detail: {
+            protocol: "posse.agent_handoff.v1",
+            digest: handoffFinalization.digest,
+            report_calls: handoffFinalization.reportCalls,
+            evidence_chars: handoffFinalization.evidenceChars,
+            materialized_packet_chars: handoffFinalization.materializedPacketChars,
+            continuation_prose_chars: handoffFinalization.continuationProseChars,
+            tool_schema_chars: AGENT_HANDOFF_TOOL_SCHEMA_CHARS,
+            tool_schema_estimated_tokens: Math.ceil(AGENT_HANDOFF_TOOL_SCHEMA_CHARS / 4),
+            terminal_prompt_contract_chars: terminalHandoffContractChars(effectiveCapabilityOpts),
+            provider_input_tokens: stats.inputTokens ?? null,
+            provider_output_tokens: stats.outputTokens ?? null,
+            provider_output_discarded: handoffFinalization.continuationProseChars > 0,
+            terminality: "authoritative_output_only",
+          },
+        });
       }
       recordMemorySample("provider.call.after_success", {
         agent_call_id: agentCallId,
@@ -898,7 +954,7 @@ export class TrackedProviderClient {
         duration_ms: stats.durationMs ?? null,
         input_tokens: stats.inputTokens ?? null,
         output_tokens: stats.outputTokens ?? null,
-        output_chars: stats.outputChars ?? (typeof output === "string" ? output.length : null),
+        output_chars: stats.outputChars ?? (typeof providerOutput === "string" ? providerOutput.length : null),
         turns_used: stats.numTurns ?? null,
         max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
         output_truncated: stats.outputTruncated === true,
@@ -1015,6 +1071,16 @@ export class TrackedProviderClient {
           output_truncated: stats.outputTruncated === true,
           duration_ms: stats.durationMs ?? null,
           tool_uses: toolUsesForReplay.length,
+          agent_handoff: handoffFinalization.applied ? {
+            digest: handoffFinalization.digest,
+            report_calls: handoffFinalization.reportCalls,
+            evidence_chars: handoffFinalization.evidenceChars,
+            materialized_packet_chars: handoffFinalization.materializedPacketChars,
+            continuation_prose_chars: handoffFinalization.continuationProseChars,
+            tool_schema_chars: AGENT_HANDOFF_TOOL_SCHEMA_CHARS,
+            tool_schema_estimated_tokens: Math.ceil(AGENT_HANDOFF_TOOL_SCHEMA_CHARS / 4),
+            terminal_prompt_contract_chars: terminalHandoffContractChars(effectiveCapabilityOpts),
+          } : null,
         },
       });
 

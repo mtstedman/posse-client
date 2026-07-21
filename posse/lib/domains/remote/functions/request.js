@@ -82,6 +82,10 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
       project_db: ["read", "write"].includes(projectDbCapability) ? projectDbCapability : "none",
     },
     atlas: atlasCapabilities,
+    coordination: {
+      agent_handoff_v1: packet?.agent_coordination?.agent_handoff_v1 === true,
+      sub_agent_v1: false,
+    },
   };
   const provider = String(providerName || packet?.execution_provider || packet?.provider || "")
     .trim()
@@ -104,6 +108,10 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
       available: false,
       backend: null,
       transport: null,
+    },
+    coordination: {
+      agent_handoff_v1: capabilities.coordination.agent_handoff_v1,
+      sub_agent_v1: false,
     },
   };
 }

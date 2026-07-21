@@ -581,6 +581,7 @@ export function runWithObservationContext(context = {}, fn) {
     work_item_id: context.work_item_id ?? null,
     job_id: context.job_id ?? null,
     attempt_id: context.attempt_id ?? null,
+    agent_call_id: context.agent_call_id ?? null,
     role: context.role ?? null,
   }, fn);
 }
@@ -591,6 +592,7 @@ export function enterObservationContext(context = {}) {
     work_item_id: context.work_item_id ?? null,
     job_id: context.job_id ?? null,
     attempt_id: context.attempt_id ?? null,
+    agent_call_id: context.agent_call_id ?? null,
     role: context.role ?? null,
   });
 }

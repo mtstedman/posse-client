@@ -30,6 +30,7 @@ import {
 // lib/catalog/atlas.js). Imported here for use inside SETTINGS_CATALOG below
 // and re-exported so admin UI / validation imports keep their existing paths.
 import {
+  AGENT_COORDINATION_MODE_VALUES,
   CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
   CONTEXT_COMPACTION_MODE_VALUES,
@@ -66,6 +67,7 @@ import {
 } from "../../../catalog/atlas.js";
 
 export {
+  AGENT_COORDINATION_MODE_VALUES,
   CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
   CONTEXT_COMPACTION_MODE_VALUES,
@@ -269,6 +271,7 @@ export const SETTINGS_CATALOG = [
   { key: "research_traversal_completion_max_chars", default: "1600", numeric: { integer: true, min: 1 }, description: "Maximum rendered characters for the traversal completion check directive" },
   { key: "atlas_shadow_guardrails", default: "shadow", options: ATLAS_SHADOW_GUARDRAILS_MODE_VALUES, description: "Telemetry-only ATLAS guardrails for deploy provenance, exact-count, negative-evidence, and token-pressure A/B miss patterns" },
   { key: "plan_approval_mode",   default: "false", valueType: "boolean", description: "Require human approval before executing plans" },
+  { key: "agent_coordination_mode", default: "off", scope: "repo", options: AGENT_COORDINATION_MODE_VALUES, description: "Experimental terminal handoff reporting: off or handoff. The forward-compatible subagents value currently enables only agent_handoff; no sub-agent tool is implemented." },
   { key: "disable_system_tools", default: "true", valueType: "boolean", adminVisible: false, description: "Disable Claude's native Read/Write/Grep/Glob/Edit/Bash; agents use only the deterministic MCP + ATLAS tool surface" },
 
   // ── Assessor tuning ──────────────────────────────────────────────────────

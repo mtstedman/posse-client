@@ -11,6 +11,10 @@ import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensRes
 import { createChainLedger } from "../../../../shared/tools/functions/chain-ledger.js";
 import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { getObservationContext } from "../../../observability/functions/observations.js";
+import {
+  rejectAgentHandoffForLaterTool,
+  stageAgentHandoff,
+} from "../../../handoff/functions/agent-handoff.js";
 import { execProjectDbQuery } from "../../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   acknowledgeOperatorFeedback,
@@ -18,6 +22,7 @@ import {
   getOperatorFeedbackForJob,
   recordAgentActivity,
   requestJobScopeExpansion,
+  getIntSetting,
 } from "../../../queue/functions/index.js";
 
 const PROVIDER_TOOL_GATE = new AsyncResourceGate({ name: "provider native tool" });
@@ -153,6 +158,9 @@ const OBSERVED_TOOL_FORMATTERS = {
   },
   ack_operator_feedback(input = {}) {
     return { target: String(input.interaction_id || ""), summary: `AckFeedback: #${input.interaction_id || "?"} ${input.decision || "accepted"}` };
+  },
+  agent_handoff(input = {}) {
+    return { target: input.profile || "", summary: `AgentHandoff: ${input.profile || "?"} ${input.outcome || "?"}` };
   },
   read_file(input = {}) {
     return { target: input.path || "", summary: `Read: ${input.path || "?"}` };
@@ -308,6 +316,24 @@ export function createStandardToolHandlerMap({
     return ledger;
   };
   const handlers = {
+    agent_handoff(args, ctx) {
+      const ambient = getObservationContext() || {};
+      const receipt = stageAgentHandoff(args || {}, {
+        context: ambient,
+        role: ctx?.role || ctx?.declaredScope?.role || "",
+        maxHandoffs: (ctx?.role || ctx?.declaredScope?.role) === "planner"
+          ? getIntSetting("planner_max_tasks", 50)
+          : 1,
+      });
+      return JSON.stringify({
+        ok: true,
+        protocol: "posse.agent_handoff.v1",
+        status: receipt.status,
+        digest: receipt.digest,
+        call_count: receipt.callCount,
+        terminal: true,
+      });
+    },
     request_scope(args, ctx) {
       const ambient = getObservationContext() || {};
       const result = requestJobScopeExpansion({
@@ -564,6 +590,12 @@ export async function executeToolWithMap(name, argsStr, context, {
   const args = parsed.value;
 
   try {
+    const ambient = getObservationContext() || {};
+    const violatesTerminalHandoff = () => name !== "agent_handoff"
+      && rejectAgentHandoffForLaterTool(ambient.agent_call_id, name);
+    if (violatesTerminalHandoff()) {
+      return "Error: agent_handoff was already staged; later tool calls invalidate the terminal report";
+    }
     const handler = handlers[name];
     if (typeof handler === "function") {
       const run = () => handler(args, context);
@@ -573,13 +605,21 @@ export async function executeToolWithMap(name, argsStr, context, {
       // meant a 120s bash hold could fail the operator's own recovery path
       // with gate contention.
       if (LIVE_CHANNEL_TOOL_NAMES.has(name)) {
-        return appendLiveChannelSignal(await run(), name);
+        const result = await run();
+        if (violatesTerminalHandoff()) {
+          return "Error: agent_handoff was staged while this tool was running; the terminal report was invalidated";
+        }
+        return appendLiveChannelSignal(result, name);
       }
       const label = `tool.${name}`;
       const key = nativeToolGateKey(context?.cwd);
       const result = BLOCKING_NATIVE_TOOL_NAMES.has(name)
         ? await PROVIDER_TOOL_GATE.write(key, run, { label, waitMs: 120000, barrierName: label })
         : await PROVIDER_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
+      if (name === "agent_handoff") return result;
+      if (violatesTerminalHandoff()) {
+        return "Error: agent_handoff was staged while this tool was running; the terminal report was invalidated";
+      }
       const treeCompacted = compactTreeScopeResult(name, result, { args, context });
       if (treeCompacted.compacted) return appendLiveChannelSignal(treeCompacted.result, name);
       // Surveys materialize into stable ten-file cursor pages. The compacted
@@ -594,6 +634,9 @@ export async function executeToolWithMap(name, argsStr, context, {
     }
     if (typeof onUnknown === "function") {
       const result = await onUnknown(name, args, context);
+      if (violatesTerminalHandoff()) {
+        return "Error: agent_handoff was staged while this tool was running; the terminal report was invalidated";
+      }
       return appendLiveChannelSignal(result, name);
     }
     return `Error: Unknown tool "${name}"`;

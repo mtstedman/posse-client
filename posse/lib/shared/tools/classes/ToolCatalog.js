@@ -27,6 +27,7 @@ function freezeEntry(entry = {}) {
       write: !!entry?.capabilityFlags?.write,
       shell: !!entry?.capabilityFlags?.shell,
       atlas: !!entry?.capabilityFlags?.atlas,
+      coordination: !!entry?.capabilityFlags?.coordination,
     }),
   });
 }
@@ -37,6 +38,7 @@ function deriveCapabilityFlags(access = "unknown") {
     write: access === "write",
     shell: access === "shell",
     atlas: access === "atlas",
+    coordination: access === "coordination",
   });
 }
 
@@ -72,16 +74,18 @@ export class ToolCatalog {
   static forRole(roleName, {
     allowWrite = false,
     needsImageGeneration = false,
+    agentHandoff = false,
   } = {}) {
-    return getBaseToolNamesForRole(roleName, !!allowWrite, { needsImageGeneration });
+    return getBaseToolNamesForRole(roleName, !!allowWrite, { needsImageGeneration, agentHandoff });
   }
 
   static forProvider(providerName, roleName, {
     allowWrite = false,
     needsImageGeneration = false,
+    agentHandoff = false,
   } = {}) {
     const _provider = String(providerName || "").trim().toLowerCase();
-    const names = this.forRole(roleName, { allowWrite, needsImageGeneration });
+    const names = this.forRole(roleName, { allowWrite, needsImageGeneration, agentHandoff });
     return names.filter((name) => !!this.get(name));
   }
 

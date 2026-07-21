@@ -180,6 +180,10 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
         project_db: bootConfig.projectDbCapability || (bootConfig.projectDbWrite === true ? "write" : "none"),
       },
       atlas: atlasCapabilities,
+      coordination: {
+        agent_handoff_v1: bootConfig.agentHandoff === true,
+        sub_agent_v1: false,
+      },
     },
     mcp_oauth: {
       // Known coordination-only roles resolve an intentionally empty surface.

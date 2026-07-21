@@ -133,6 +133,107 @@ export const TOOL_REQUEST_SCOPE = {
   },
 };
 
+export const TOOL_AGENT_HANDOFF = {
+  type: "function",
+  name: "agent_handoff",
+  description:
+    "Submit the terminal posse.agent_handoff.v1 report. Use hash-ref selectors only; Posse resolves exact evidence locally. " +
+    "This must be the final tool call. Its response is a receipt, not the evidence or report.",
+  parameters: {
+    type: "object",
+    properties: {
+      protocol: { type: "string", enum: ["posse.agent_handoff.v1"] },
+      profile: {
+        type: "string",
+        enum: [
+          "researcher.pipeline.v1",
+          "researcher.report.v1",
+          "planner.plan.v1",
+          "dev.result.v1",
+          "artificer.result.v1",
+          "assessor.verdict.v1",
+        ],
+      },
+      outcome: {
+        type: "string",
+        enum: ["success", "complete", "gap", "input_required", "failed", "blocked", "pass", "fail", "needs_replan", "needs_review"],
+      },
+      handoffs: {
+        type: "array",
+        minItems: 1,
+        maxItems: 50,
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string", minLength: 1, maxLength: 40 },
+            depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 40 } },
+            target: {
+              type: "object",
+              properties: {
+                kind: { type: "string", enum: ["agent", "system", "pipeline", "result"] },
+                role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "$pipeline", "$result"] },
+              },
+              required: ["kind"],
+              additionalProperties: false,
+            },
+            intent: { type: "string", minLength: 1, maxLength: 1000 },
+            report: {
+              type: "object",
+              properties: {
+                summary: { type: "string", maxLength: 2000 },
+                claims: {
+                  type: "array",
+                  maxItems: 12,
+                  items: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 2,
+                    items: {
+                      oneOf: [
+                        { type: "string", minLength: 1, maxLength: 1000 },
+                        {
+                          type: "object",
+                          properties: {
+                            proof: { type: "array", maxItems: 8, items: { oneOf: [{ type: "string" }, { type: "object" }] } },
+                            support: { type: "array", maxItems: 8, items: { oneOf: [{ type: "string" }, { type: "object" }] } },
+                            decoy: { type: "array", maxItems: 8, items: { type: "array", minItems: 2, maxItems: 2 } },
+                            prose: { type: "string", maxLength: 2000 },
+                          },
+                          additionalProperties: false,
+                        },
+                      ],
+                    },
+                  },
+                },
+                scope: {
+                  type: "object",
+                  properties: {
+                    files_to_modify: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+                    files_to_create: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+                    files_to_delete: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+                    create_roots: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+                  },
+                  additionalProperties: false,
+                },
+                constraints: { type: "array", maxItems: 50, items: { type: "string", maxLength: 1000 } },
+                success_criteria: { type: "array", maxItems: 50, items: { type: "string", maxLength: 1000 } },
+                questions: { type: "array", maxItems: 50, items: { type: "string", maxLength: 1000 } },
+                payload: { type: "object", properties: {}, additionalProperties: false },
+              },
+              required: ["summary", "claims"],
+              additionalProperties: false,
+            },
+          },
+          required: ["id", "depends_on", "target", "intent", "report"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["protocol", "profile", "outcome", "handoffs"],
+    additionalProperties: false,
+  },
+};
+
 export const TOOL_LIST_FILES = {
   type: "function",
   name: "list_files",

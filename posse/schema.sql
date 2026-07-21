@@ -565,6 +565,36 @@ CREATE INDEX IF NOT EXISTS idx_agent_calls_work_item
 CREATE INDEX IF NOT EXISTS idx_agent_calls_atlas_prefetch
   ON agent_calls(role, atlas_prefetch_status);
 
+CREATE TABLE IF NOT EXISTS agent_handoff_packets (
+  agent_call_id INTEGER PRIMARY KEY,
+  work_item_id INTEGER,
+  job_id INTEGER,
+  attempt_id INTEGER,
+  role TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('staged','committed','rejected')),
+  materialized_packet_json TEXT NOT NULL CHECK (json_valid(materialized_packet_json)),
+  packet_digest TEXT NOT NULL CHECK (length(packet_digest) = 64),
+  evidence_chars INTEGER NOT NULL DEFAULT 0,
+  stage_count INTEGER NOT NULL DEFAULT 1,
+  continuation_prose_chars INTEGER NOT NULL DEFAULT 0,
+  rejection_code TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  committed_at TEXT,
+  FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE CASCADE,
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_handoff_packets_job
+  ON agent_handoff_packets(job_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_agent_handoff_packets_status
+  ON agent_handoff_packets(status, created_at);
+
 CREATE TABLE IF NOT EXISTS agent_interactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   work_item_id INTEGER,

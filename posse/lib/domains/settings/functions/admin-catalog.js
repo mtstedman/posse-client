@@ -56,6 +56,7 @@ export const PROJECT_DB_SETTING_DEFS = Object.freeze([
 // settings groups so machine projections and the interactive editor cannot
 // silently acquire separate policy tables.
 export const ADMIN_AGENT_SETTING_SECTIONS = Object.freeze([
+  Object.freeze({ role: "coordination", label: "Coordination", keys: Object.freeze(["agent_coordination_mode"]) }),
   Object.freeze({ role: "researcher", label: "Researcher", keys: Object.freeze(["reasoning_effort_researcher", "base_turns_researcher", "max_output_tokens_researcher"]) }),
   Object.freeze({ role: "planner", label: "Planner", keys: Object.freeze(["reasoning_effort_planner", "base_turns_planner", "max_output_tokens_planner", "planner_max_tasks", "planner_under_scoped_broad_gate"]) }),
   Object.freeze({ role: "dev", label: "Dev", keys: Object.freeze(["reasoning_effort_dev", "base_turns_dev", "max_output_tokens_dev"]) }),
@@ -581,6 +582,12 @@ export const SETTINGS_GROUPS = Object.freeze([
     ]),
   },
   // ── Agents pane ──
+  {
+    id: "agent_coordination",
+    pane: "agents",
+    label: "Coordination",
+    keys: Object.freeze(["agent_coordination_mode"]),
+  },
   {
     id: "agent_researcher",
     pane: "agents",

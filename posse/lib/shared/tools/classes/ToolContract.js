@@ -484,7 +484,12 @@ export class ToolContract {
     issuedToolSurface = null,
   } = {}) {
     const toolNames = includeBaseTools
-      ? ToolCatalog.forRole(role, { allowWrite, needsImageGeneration })
+      ? ToolCatalog.forRole(role, {
+          allowWrite,
+          needsImageGeneration,
+          agentHandoff: Array.isArray(issuedToolSurface)
+            && issuedToolSurface.includes("tools.agent_handoff"),
+        })
       : [];
     const shellAllowed = toolNames.includes("bash");
     const shellMode = !shellAllowed
@@ -621,6 +626,7 @@ export class ToolContract {
     return ToolCatalog.forRole(role, {
       allowWrite: !!allowWrite,
       needsImageGeneration: !!opts.needsImageGeneration,
+      agentHandoff: !!opts.agentHandoff,
     });
   }
 }

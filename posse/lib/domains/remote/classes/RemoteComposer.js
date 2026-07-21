@@ -350,13 +350,20 @@ function applyRemoteIssuanceToPacket(packet, response) {
   const issued = normalizeRemoteIssuedPolicy(issuance, {
     expectedRole: packet.recipient || packet.job_type,
   });
+  const localHandoffEnabled = packet?.agent_coordination?.agent_handoff_v1 === true;
+  const handoffEnabled = issued.valid
+    && localHandoffEnabled
+    && issued.coordination?.agentHandoffV1 === true;
+  const effectiveToolSurface = issued.toolSurface.filter(
+    (name) => name !== "tools.agent_handoff" || handoffEnabled,
+  );
   packet.remote_issuance = {
     ...(issuance && typeof issuance === "object" ? issuance : {}),
     source: issued.valid ? "posse-remote" : "invalid",
     role: issued.role,
     provider: issued.provider,
     tool_policy: { ...issued.toolPolicy },
-    tool_surface: issued.toolSurface.slice(),
+    tool_surface: effectiveToolSurface.slice(),
     web_access: { ...issued.webAccess },
     project_db_capability: issued.projectDbCapability,
     atlas: {
@@ -365,8 +372,19 @@ function applyRemoteIssuanceToPacket(packet, response) {
       agent_surface: issued.toolAllowlist.atlas.map((name) => `atlas.${name}`),
       internal_surface: [],
     },
+    coordination: {
+      agent_handoff_v1: handoffEnabled,
+      sub_agent_v1: false,
+      status: "experimental",
+    },
   };
-  packet.remote_tool_surface = issued.toolSurface.slice();
+  packet.remote_tool_surface = effectiveToolSurface.slice();
+  packet.agent_coordination = {
+    ...(packet.agent_coordination || {}),
+    agent_handoff_v1: handoffEnabled,
+    sub_agent_v1: false,
+    remote_acknowledged: issued.coordination?.agentHandoffV1 === true,
+  };
   const policy = issued.toolPolicy;
   packet.tool_policy = {
     allow_read: clampPolicyGrant(policy.allow_read, localPolicy, "allow_read"),

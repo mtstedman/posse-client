@@ -816,7 +816,7 @@ function _atlasHandoffPrefetchAllowed(packet) {
   return explicit !== false && explicit !== 0;
 }
 
-function _applyToolPolicy(recipient, packet) {
+function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) {
   const base = TOOL_POLICIES[recipient] || TOOL_POLICIES.dev;
   const hints = packet.context_hints || {};
 
@@ -829,6 +829,19 @@ function _applyToolPolicy(recipient, packet) {
 
   packet.budgets = {
     fallback_reads_remaining: _resolveFallbackReadBudget(recipient, base.fallback_reads, hints),
+  };
+
+  const coordinationMode = String(readSetting(SETTING_KEYS.AGENT_COORDINATION_MODE) || "off")
+    .trim()
+    .toLowerCase();
+  const handoffEnabled = coordinationMode === "handoff" || coordinationMode === "subagents";
+  packet.agent_coordination = {
+    mode: ["off", "handoff", "subagents"].includes(coordinationMode) ? coordinationMode : "off",
+    agent_handoff_v1: handoffEnabled,
+    // Forward-compatible setting value only. The sub-agent surface remains absent.
+    sub_agent_v1: false,
+    status: "experimental",
+    source: "repo_setting_snapshot",
   };
 }
 
@@ -2133,4 +2146,4 @@ export {
 } from "./helpers/hash-ref-packet.js";
 
 // ─── Test-only exports ──────────────────────────────────────────────────────
-export { _parseFunctions, _buildSmartPreload };
+export { _parseFunctions, _buildSmartPreload, _applyToolPolicy as __testApplyToolPolicy };

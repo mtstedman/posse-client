@@ -772,6 +772,46 @@ export function createHashRefStoreTables(db) {
   `);
 }
 
+export function createAgentHandoffPacketTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_handoff_packets (
+      agent_call_id INTEGER PRIMARY KEY,
+      work_item_id INTEGER,
+      job_id INTEGER,
+      attempt_id INTEGER,
+      role TEXT NOT NULL,
+      profile TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('staged','committed','rejected')),
+      materialized_packet_json TEXT NOT NULL CHECK (json_valid(materialized_packet_json)),
+      packet_digest TEXT NOT NULL CHECK (length(packet_digest) = 64),
+      evidence_chars INTEGER NOT NULL DEFAULT 0,
+      stage_count INTEGER NOT NULL DEFAULT 1,
+      continuation_prose_chars INTEGER NOT NULL DEFAULT 0,
+      rejection_code TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      committed_at TEXT,
+      FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE CASCADE,
+      FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+      FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_handoff_packets_job
+      ON agent_handoff_packets(job_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_handoff_packets_status
+      ON agent_handoff_packets(status, created_at);
+  `);
+  const hasStageCount = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM pragma_table_info('agent_handoff_packets')
+    WHERE name = 'stage_count'
+  `).get();
+  if (Number(hasStageCount?.count || 0) === 0) {
+    db.exec(`ALTER TABLE agent_handoff_packets ADD COLUMN stage_count INTEGER NOT NULL DEFAULT 1`);
+  }
+}
+
 export function copyCompatibleColumns(db, fromTable, toTable, aliases = {}) {
   const oldCols = new Set(getTableColumnNames(db, fromTable));
   const newCols = getTableColumnNames(db, toTable);
@@ -2508,6 +2548,7 @@ export function getDb() {
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);
 
   createHashRefStoreTables(_db);
+  createAgentHandoffPacketTable(_db);
   installJsonValidityTriggers(_db);
 
   return _db;

@@ -239,6 +239,7 @@ function expectedMcpToolNames(role, bootPayload = {}) {
   try {
     return getDeterministicMcpToolNames(role, {
       needsImageGeneration: bootPayload.allowImageGeneration === true,
+      agentHandoff: bootPayload.agentHandoff === true,
     });
   } catch {
     return [];
@@ -426,6 +427,7 @@ function buildDeterministicMcpBootPayload(role, {
   allowWrite = null,
   projectDbWrite = false,
   projectDbCapability = null,
+  agentHandoff = false,
 } = {}) {
   const resolvedProjectRoot = path.resolve(projectRoot || cwd || process.cwd());
   const resolvedAtlasConfig = atlasConfig || getAtlasIntegrationConfig();
@@ -433,7 +435,10 @@ function buildDeterministicMcpBootPayload(role, {
     ? atlasAvailable
     : resolvedAtlasConfig.enabled;
   const allowImageGeneration = roleUsesDeterministicImageMcp(role) && !!needsImageGeneration;
-  const expectedTools = getDeterministicMcpToolNames(role, { needsImageGeneration: allowImageGeneration });
+  const expectedTools = getDeterministicMcpToolNames(role, {
+    needsImageGeneration: allowImageGeneration,
+    agentHandoff: agentHandoff === true,
+  });
   const allowShell = expectedTools.includes("bash");
   const requestedProjectDbCapability = normalizeProjectDbCapability(
     projectDbCapability || (projectDbWrite === true ? "write" : "none"),
@@ -467,6 +472,7 @@ function buildDeterministicMcpBootPayload(role, {
       projectDbWrite: projectDbWrite === true && requestedProjectDbCapability === "write",
       allowImageHelpers: roleUsesDeterministicImageHelpers(role),
       allowImageGeneration,
+      agentHandoff: agentHandoff === true,
       role,
       providerName: providerName || null,
       disableSystemTools,

@@ -38,8 +38,12 @@ import {
   isSensitiveEnvFileOrTargetPath,
   safePath,
 } from "../../../shared/tools/functions/toolkit/index.js";
-import { TOOL_PROJECT_DB_QUERY } from "../../../catalog/native-tools.js";
+import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY } from "../../../catalog/native-tools.js";
 import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
+import {
+  rejectAgentHandoffForLaterTool,
+  stageAgentHandoff,
+} from "../../handoff/functions/agent-handoff.js";
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../shared/tools/functions/tool-suites.js";
@@ -53,6 +57,7 @@ import { registeredTestToolResultObservation } from "../../observability/functio
 import {
   acknowledgeOperatorFeedback,
   countPendingOperatorFeedbackForJob,
+  getIntSetting,
   getOperatorFeedbackForJob,
   recordAgentActivity,
   requestJobScopeExpansion,
@@ -848,6 +853,10 @@ function buildRemoteToolSurfaceRequest() {
         project_db: projectDbCapabilityGrant,
       },
       atlas: atlasCapabilities,
+      coordination: {
+        agent_handoff_v1: tokenToolAllowlistForSuite("tools")?.has("agent_handoff") === true,
+        sub_agent_v1: false,
+      },
     },
     mcp_oauth: {
       requested: true,
@@ -1072,6 +1081,7 @@ const TEST_TOOL_NAMES = new Set([
 ]);
 
 const ALL_NATIVE_TOOL_NAMES = Object.freeze([
+  "agent_handoff",
   "read_file",
   "chain_read",
   "chain_verdict",
@@ -2100,6 +2110,7 @@ function rebuildNativeToolSchemas() {
   DECLARED_NATIVE_TOOL_NAMES = computeDeclaredNativeToolNamesForCurrentBoot();
   DECLARED_NATIVE_TOOL_NAME_SET = new Set(DECLARED_NATIVE_TOOL_NAMES);
   TOOL_SCHEMAS = [];
+  addToolSchema(TOOL_AGENT_HANDOFF);
   if (ownerHotGateway) {
     addToolSchema(TOOL_READ_FILE);
     addToolSchema(TOOL_CHAIN_READ);
@@ -2143,6 +2154,26 @@ function rebuildNativeToolSchemas() {
 function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry = declareToolSuites(new ToolRegistry());
   mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
+  mcpToolRegistry.attach("agent_handoff", (args) => {
+    const receipt = stageAgentHandoff(args || {}, {
+      context: {
+        workItemId: mcpWorkItemId,
+        jobId: mcpJobId,
+        attemptId: mcpAttemptId,
+        agentCallId: mcpAgentCallId,
+      },
+      role: roleName,
+      maxHandoffs: roleName === "planner" ? getIntSetting("planner_max_tasks", 50) : 1,
+    });
+    return JSON.stringify({
+      ok: true,
+      protocol: "posse.agent_handoff.v1",
+      status: receipt.status,
+      digest: receipt.digest,
+      call_count: receipt.callCount,
+      terminal: true,
+    });
+  });
   mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -2738,8 +2769,30 @@ async function handleRequest(msg) {
       requestId: id ?? null,
       tool: requestedToolName,
       canonicalTool: toolName,
-      arguments: sanitizeForLog(args),
+      arguments: toolName === "agent_handoff"
+        ? {
+            protocol: args?.protocol || null,
+            profile: args?.profile || null,
+            outcome: args?.outcome || null,
+            handoff_count: Array.isArray(args?.handoffs) ? args.handoffs.length : null,
+          }
+        : sanitizeForLog(args),
     });
+
+    if (toolName !== "agent_handoff" && rejectAgentHandoffForLaterTool(mcpAgentCallId, toolName)) {
+      const errorText = "agent_handoff was already staged; later tool calls invalidate the terminal report";
+      appendToolLog({
+        event: "agent_handoff_terminal_violation",
+        requestId: id ?? null,
+        tool: requestedToolName,
+        canonicalTool: toolName,
+      });
+      sendMessage(jsonRpcSuccess(id, {
+        content: [{ type: "text", text: errorText }],
+        isError: true,
+      }));
+      return;
+    }
 
     const citationFetchGate = researchCitationFetchGate(requestedToolName);
     if (citationFetchGate) {
@@ -2969,9 +3022,16 @@ async function handleRequest(msg) {
     // For chain_verdict the file path lives in the server's chain state, not
     // in the tool args. Enrich the recorded input so the observation actually
     // identifies which file the verdict applies to.
-    const recordInput = (toolName === "chain_verdict" && researchState?.currentlyReading?.path)
-      ? { ...args, path: researchState.currentlyReading.path }
-      : args;
+    const recordInput = toolName === "agent_handoff"
+      ? {
+          protocol: args?.protocol || null,
+          profile: args?.profile || null,
+          outcome: args?.outcome || null,
+          handoff_count: Array.isArray(args?.handoffs) ? args.handoffs.length : null,
+        }
+      : (toolName === "chain_verdict" && researchState?.currentlyReading?.path)
+        ? { ...args, path: researchState.currentlyReading.path }
+        : args;
     // Record the request the moment it's made (append-only "<type>.started"),
     // then close it with the completion row on every exit path so duration and
     // success/failure are captured — not just successful completions.

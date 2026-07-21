@@ -15,6 +15,7 @@ export const SETTING_KEYS = Object.freeze({
   ASSESSOR_FALLBACK_READS_RETRY_STEP: "assessor_fallback_reads_retry_step",
   ASSESSOR_INTERNAL_RETRY_LIMIT: "assessor_internal_retry_limit",
   ASSESSOR_PARSE_RETRY_INPUT_TOKENS_CAP: "assessor_parse_retry_input_tokens_cap",
+  AGENT_COORDINATION_MODE: "agent_coordination_mode",
   AUTO_MERGE_COMPLETED: "auto_merge_completed",
   BRIDGE_BIND_HOST: "bridge_bind_host",
   BRIDGE_IDENTITY_MIGRATED_TO: "bridge_identity_migrated_to",
@@ -138,6 +139,7 @@ export const CODEX_AUTH_MODE_OPTIONS = Object.freeze([
 ]);
 
 export const CLAUDE_EXECUTION_MODE_VALUES = Object.freeze(["print", "interactive"]);
+export const AGENT_COORDINATION_MODE_VALUES = Object.freeze(["off", "handoff", "subagents"]);
 export const CONTEXT_COMPACTION_MODE_VALUES = Object.freeze(["off", "shadow", "inject", "enforce"]);
 export const DELEGATION_MODE_VALUES = Object.freeze(["js", "ml"]);
 export const FIX_SCOPE_HANDOFF_GUARD_VALUES = Object.freeze(["off", "auto", "warn", "enforce"]);

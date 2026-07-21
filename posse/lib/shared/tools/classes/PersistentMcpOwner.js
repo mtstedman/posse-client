@@ -23,6 +23,7 @@ import {
 import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/tool-params.js";
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
+import { rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
 import { noteAtlasPressureAndGetNudge } from "../../../domains/integrations/functions/deterministic-mcp/gate.js";
 import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
 import {
@@ -1699,8 +1700,50 @@ export class PersistentMcpOwner {
           return;
         }
         const requested = requestedToolPolicyName(toolName, toolArgs);
+        if (requested.name !== "agent_handoff"
+          && rejectAgentHandoffForLaterTool(session?.bootConfig?.agentCallId, requested.name || toolName)) {
+          sendJson(res, 200, {
+            ok: true,
+            bootId: this.bootId,
+            sessionId: id,
+            message: {
+              jsonrpc: "2.0",
+              id: message?.id ?? null,
+              result: {
+                content: [{
+                  type: "text",
+                  text: "agent_handoff was already staged; later tool calls invalidate the terminal report",
+                }],
+                isError: true,
+              },
+            },
+          });
+          return;
+        }
         if (requested.suite === "atlas") {
           const response = await this._executeAtlasToolCall({ message, session, toolName, toolArgs });
+          if (rejectAgentHandoffForLaterTool(
+            session?.bootConfig?.agentCallId,
+            requested.name || toolName,
+          )) {
+            sendJson(res, 200, {
+              ok: true,
+              bootId: this.bootId,
+              sessionId: id,
+              message: {
+                jsonrpc: "2.0",
+                id: message?.id ?? null,
+                result: {
+                  content: [{
+                    type: "text",
+                    text: "agent_handoff was staged while this ATLAS tool was running; the terminal report was invalidated",
+                  }],
+                  isError: true,
+                },
+              },
+            });
+            return;
+          }
           sendJson(res, 200, {
             ok: true,
             bootId: this.bootId,
