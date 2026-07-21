@@ -1085,6 +1085,7 @@ const TEST_TOOL_NAMES = new Set([
 ]);
 
 const ALL_NATIVE_TOOL_NAMES = Object.freeze([
+  "sub_agent",
   "agent_handoff",
   "read_file",
   "chain_read",
