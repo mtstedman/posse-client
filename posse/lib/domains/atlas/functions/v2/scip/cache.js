@@ -222,11 +222,11 @@ function mergeScipDocuments(documents) {
     const rel = String(doc?.relative_path || "");
     const existing = byPath.get(rel);
     if (!existing) {
-      const copy = {
+      const copy = /** @type {ScipDocument & { _occurrenceKeys?: Set<string> }} */ ({
         ...doc,
         occurrences: [],
         symbols: [],
-      };
+      });
       copy._occurrenceKeys = new Set();
       appendOccurrences(copy, doc.occurrences);
       appendSymbols(copy, doc.symbols);

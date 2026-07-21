@@ -88,6 +88,9 @@ export function getUsageEventDropStats() {
   return { droppedReadOnly: _readOnlyDrops };
 }
 
+/**
+ * @param {{ ledger?: import("../contracts/api.js").Ledger, action: string, repoId?: string | null, versionId?: string | null, startedAt: number, envelope: any, taskType?: string | null }} args
+ */
 export function recordAtlasUsageEvent({ ledger, action, repoId, versionId, startedAt, envelope, taskType = null }) {
   if (action === "usage.stats") return;
   const db = ledgerDb(ledger);

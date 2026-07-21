@@ -23,10 +23,10 @@ export class EnvironmentInstallHarness {
    * @param {Record<string, any>} event
    */
   emit(event) {
-    const normalized = {
+    const normalized = /** @type {Record<string, any>} */ ({
       kind: "environment.install.progress",
       ...event,
-    };
+    });
     if (!normalized.message) normalized.message = formatStepMessage(normalized);
     if (this.#onEvent) {
       try { this.#onEvent(normalized); } catch { /* observational */ }

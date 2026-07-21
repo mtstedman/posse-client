@@ -135,8 +135,11 @@ export async function runLocalModelsCommand(argv = [], {
       timeoutMs: 24 * 60 * 60 * 1000,
       idempotent: false,
     });
+    const installedResult = installed && typeof installed === "object"
+      ? /** @type {Record<string, unknown>} */ (installed)
+      : {};
     const cached = result?.cached === true ? "already verified in cache" : "downloaded and SHA-256 verified";
-    writeLine(output, `  ${colors.green}Ready:${colors.reset} ${terminalText(installed?.modelPath || "unknown path")}`);
+    writeLine(output, `  ${colors.green}Ready:${colors.reset} ${terminalText(installedResult.modelPath || "unknown path")}`);
     writeLine(output, `  ${colors.dim}${size} · ${cached}${colors.reset}`);
     return { action: "download", artifact, catalog, result, installed };
   } catch (error) {

@@ -174,4 +174,7 @@
  *   name, signature, body lead, ...) — but the function must be deterministic
  *   so the same symbol always produces the same input string under the
  *   same encoder version.
+ *
+ * @property {() => void | Promise<void>} [dispose]
+ *   Release encoder-owned runtime resources when present.
  */

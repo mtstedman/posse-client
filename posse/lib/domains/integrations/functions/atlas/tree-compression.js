@@ -13,6 +13,23 @@ import {
 import { getAtlasIntegrationConfig } from "./config.js";
 
 /**
+ * @typedef {Object} TreeCompressionModelPassResult
+ * @property {boolean} ok
+ * @property {boolean} [skipped]
+ * @property {string} [reason]
+ * @property {string} [profile]
+ * @property {number} [durationMs]
+ * @property {number} [snapshotId]
+ * @property {number} [seedCount]
+ * @property {string | null} [sourceSignature]
+ * @property {number} [modelSeedCount]
+ * @property {number} [deltaSeeds]
+ * @property {number} [unannotatedSeeds]
+ * @property {number} [carriedForwardSeeds]
+ * @property {string} [error]
+ */
+
+/**
  * @param {{
  *   viewDb?: import("better-sqlite3").Database | null,
  *   viewPath?: string | null,
@@ -20,6 +37,7 @@ import { getAtlasIntegrationConfig } from "./config.js";
  *   config?: Record<string, any> | null,
  *   annotator?: ((args: { prompt: string, input: any, snapshot: any }) => any | Promise<any>) | null,
  * }} [opts]
+ * @returns {Promise<TreeCompressionModelPassResult>}
  */
 export async function runAtlasTreeCompressionModelPass(opts = {}) {
   const config = opts.config || getAtlasIntegrationConfig();
@@ -87,6 +105,9 @@ export async function runAtlasTreeCompressionModelPass(opts = {}) {
   }
 }
 
+/**
+ * @param {{ providerName: string, modelTier: string, cwd: string | null }} args
+ */
 function buildProviderAnnotator({ providerName, modelTier, cwd }) {
   return async ({ prompt }) => {
     const { getProvider } = await import("../../../providers/functions/provider.js");
@@ -96,6 +117,7 @@ function buildProviderAnnotator({ providerName, modelTier, cwd }) {
   };
 }
 
+/** @param {{ modelTier?: string, cwd?: string | null }} [options] */
 export function treeCompressionProviderCallOptions({ modelTier, cwd } = {}) {
   return {
     // This is a no-tool, one-turn JSON transform, not a dispatched planner

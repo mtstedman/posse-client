@@ -7,6 +7,8 @@
 const MAX_SYMBOL_ACCESS_ENTRIES = 4096;
 const MAX_SITES_PER_SYMBOL = 24;
 
+/** @typedef {import("../contracts/tool-results.js").SymbolDbAccess} SymbolDbAccess */
+
 /** @type {Map<string, any>} */
 const dbAccessBySymbolId = new Map();
 
@@ -53,20 +55,21 @@ export function dbAccessForSymbolId(symbolId) {
  */
 export function compactDbAccess(dbAccess, maxSites = 8) {
   if (!dbAccess || typeof dbAccess !== "object") return null;
+  const source = /** @type {Record<string, any>} */ (dbAccess);
   const cap = clampInt(maxSites, 8, 0, MAX_SITES_PER_SYMBOL);
-  const compact = {
-    access: normalizeStringArray(dbAccess.access),
-    operations: normalizeStringArray(dbAccess.operations),
-    targets: normalizeStringArray(dbAccess.targets),
-    readCount: Number(dbAccess.readCount || 0),
-    writeCount: Number(dbAccess.writeCount || 0),
-    schemaCount: Number(dbAccess.schemaCount || 0),
-    telemetryCount: Number(dbAccess.telemetryCount || 0),
-    ambiguousLineCount: Number(dbAccess.ambiguousLineCount || 0),
-  };
-  const reads = compactSites(dbAccess.reads, cap);
-  const writes = compactSites(dbAccess.writes, cap);
-  const schema = compactSites(dbAccess.schema, cap);
+  const compact = /** @type {SymbolDbAccess} */ ({
+    access: normalizeStringArray(source.access).filter((value) => value === "read" || value === "write" || value === "schema"),
+    operations: normalizeStringArray(source.operations),
+    targets: normalizeStringArray(source.targets),
+    readCount: Number(source.readCount || 0),
+    writeCount: Number(source.writeCount || 0),
+    schemaCount: Number(source.schemaCount || 0),
+    telemetryCount: Number(source.telemetryCount || 0),
+    ambiguousLineCount: Number(source.ambiguousLineCount || 0),
+  });
+  const reads = compactSites(source.reads, cap);
+  const writes = compactSites(source.writes, cap);
+  const schema = compactSites(source.schema, cap);
   if (reads.length > 0) compact.reads = reads;
   if (writes.length > 0) compact.writes = writes;
   if (schema.length > 0) compact.schema = schema;

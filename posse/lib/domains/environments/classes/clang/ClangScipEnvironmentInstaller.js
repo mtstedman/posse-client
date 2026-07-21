@@ -83,18 +83,8 @@ export class ClangScipEnvironmentInstaller extends ScipLanguageEnvironmentInstal
     });
   }
 
-  async status() {
-    const found = await this.resolveInstalledCommand();
-    if (found) return this.ok("ok", "installed");
-    if (this.platform === "win32") {
-      return {
-        language: "clang",
-        ok: true,
-        status: "skipped",
-        message: "scip-clang has no Windows build (WSL or atlas_scip_index_command)",
-      };
-    }
-    return this.failed(`missing scip-clang (PATH or ${this.expectedCommandPath(this.commandSegments, "scip-clang")}); posse doctor installs it`);
+  status() {
+    return this.statusSync();
   }
 
   statusSync() {

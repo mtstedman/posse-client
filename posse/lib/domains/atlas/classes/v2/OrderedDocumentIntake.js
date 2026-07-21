@@ -108,7 +108,7 @@ export class OrderedDocumentIntake {
   async waitForReadAhead(repoRelPath) {
     const record = this.#byPath.get(String(repoRelPath || ""));
     if (!record || record.ordinal < this.#processed + this.#readAhead || this.#closed) return;
-    await new Promise((resolve) => this.#windowWaiters.push(resolve));
+    await new Promise((resolve) => this.#windowWaiters.push(() => resolve()));
     return this.waitForReadAhead(repoRelPath);
   }
 

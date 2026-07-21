@@ -23,6 +23,7 @@ import { hydrateNativeBlastRadius, hydrateNativeSlice } from "../../functions/v2
 /** @typedef {import("../../functions/v2/contracts/api.js").ViewEdge} ViewEdge */
 /** @typedef {import("../../functions/v2/contracts/api.js").SymbolSearchOptions} SymbolSearchOptions */
 /** @typedef {import("../../functions/v2/contracts/api.js").SliceOptions} SliceOptions */
+/** @typedef {import("better-sqlite3").Database} SqliteDatabase */
 
 /** @implements {ViewContract} */
 export class View {
@@ -104,7 +105,7 @@ export class View {
    * dormant until the branch/view points at them.
    *
    * @param {{
-   *   ledger: { _unsafeDb?: () => Database.Database },
+   *   ledger: { _unsafeDb?: () => SqliteDatabase },
    *   lang: string,
    *   contentHashes?: string[] | null,
    * }} args
@@ -199,7 +200,7 @@ export class View {
   // Internals — used by ViewBuilder for write-side population.
   // ---------------------------------------------------------------------------
 
-  /** @returns {Database.Database} */
+  /** @returns {SqliteDatabase} */
   _unsafeDb() {
     return this.#db;
   }
@@ -310,7 +311,7 @@ export class View {
         });
       },
 
-      indexedPathsWithSymbols: (names, opts = {}) => {
+      indexedPathsWithSymbols: async (names, opts = {}) => {
         if (!Array.isArray(names) || names.length === 0) return [];
         if (opts.pathPrefix) assertPathPrefix("indexedPathsWithSymbols", opts.pathPrefix);
         return read("indexed_paths_with_symbols", {
@@ -425,7 +426,7 @@ export function normalizeViewMeta(values) {
 }
 
 /**
- * @param {Database.Database} db
+ * @param {SqliteDatabase} db
  * @param {string} key
  * @returns {string | null}
  */
@@ -437,7 +438,7 @@ function viewMetaValue(db, key) {
 }
 
 /**
- * @param {Database.Database} db
+ * @param {SqliteDatabase} db
  * @param {string} key
  * @param {string} value
  */
@@ -448,7 +449,7 @@ function viewSetMetaValue(db, key, value) {
 }
 
 /**
- * @param {Database.Database} ledgerDb
+ * @param {SqliteDatabase} ledgerDb
  * @param {string} lang
  * @param {string[] | null} contentHashes
  * @returns {{ treesitter: string | null, scip: string | null, sources: string[] }}
@@ -479,8 +480,8 @@ function latestLayerWatermarks(ledgerDb, lang, contentHashes) {
 }
 
 /**
- * @param {Database.Database} viewDb
- * @param {Database.Database} ledgerDb
+ * @param {SqliteDatabase} viewDb
+ * @param {SqliteDatabase} ledgerDb
  * @param {string} lang
  * @param {string[] | null} contentHashes
  * @returns {string[]}
@@ -511,8 +512,8 @@ function normalizeHashFilter(values) {
 
 /**
  * @param {{
- *   viewDb: Database.Database,
- *   ledgerDb: Database.Database,
+ *   viewDb: SqliteDatabase,
+ *   ledgerDb: SqliteDatabase,
  *   lang: string,
  *   contentHash: string,
  * }} args
@@ -544,7 +545,7 @@ function materializeLayeredContentHash({ viewDb, ledgerDb, lang, contentHash }) 
 }
 
 /**
- * @param {Database.Database} ledgerDb
+ * @param {SqliteDatabase} ledgerDb
  * @param {string} contentHash
  * @param {string} lang
  * @returns {Array<{ id: number, source: "treesitter" | "scip", metadata: Record<string, any> }>}
@@ -576,8 +577,8 @@ function latestLayersForContentHash(ledgerDb, contentHash, lang) {
 
 /**
  * @param {{
- *   viewDb: Database.Database,
- *   ledgerDb: Database.Database,
+ *   viewDb: SqliteDatabase,
+ *   ledgerDb: SqliteDatabase,
  *   layers: Array<{ id: number, source: "treesitter" | "scip", metadata: Record<string, any> }>,
  *   repoRelPath: string,
  *   contentHash: string,
@@ -749,7 +750,7 @@ function materializeLayeredPath({ viewDb, ledgerDb, layers, repoRelPath, content
 }
 
 /**
- * @param {Database.Database} ledgerDb
+ * @param {SqliteDatabase} ledgerDb
  * @param {number} layerId
  * @returns {any[]}
  */
@@ -765,7 +766,7 @@ function layerSymbols(ledgerDb, layerId) {
 }
 
 /**
- * @param {Database.Database} ledgerDb
+ * @param {SqliteDatabase} ledgerDb
  * @param {number} layerId
  * @returns {any[]}
  */
@@ -800,7 +801,7 @@ function objectOrEmpty(value) {
 }
 
 /**
- * @param {Database.Database} db
+ * @param {SqliteDatabase} db
  * @param {string} table
  * @param {string} column
  */

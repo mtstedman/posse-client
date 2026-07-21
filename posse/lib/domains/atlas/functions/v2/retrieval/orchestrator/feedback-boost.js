@@ -36,7 +36,7 @@ const MAX_ABS_SIGNAL = 3;
  * orchestrator passes this to {@link applyFeedbackBoost}. Returns null
  * when no ledger is available so callers can skip the boost cheaply.
  *
- * @param {{ ledger?: Ledger, taskType?: string, taskText?: string, sinceTs?: string, halfLifeDays?: number }} args
+ * @param {{ ledger?: Ledger, taskType?: string, taskText?: string, sinceTs?: string, halfLifeDays?: number, onSummary?: (summary: Record<string, unknown>) => void }} args
  * @returns {Map<string, FeedbackAggregate> | null}
  */
 export function buildFeedbackIndex({ ledger, taskType, taskText, sinceTs, halfLifeDays, onSummary }) {

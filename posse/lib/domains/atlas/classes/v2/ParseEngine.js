@@ -291,7 +291,7 @@ export class ParseEngine {
   #scipDir;
   /** @type {boolean} */
   #viewLayerMerge;
-  /** @type {string} */
+  /** @type {"off" | "deterministic" | "ml"} */
   #treeCompressionMode;
   /** @type {number} */
   #treeCompressionMaxSeeds;
@@ -365,6 +365,7 @@ export class ParseEngine {
     this.#defaultBranchEnsured = true;
   }
 
+  /** @returns {import("../../functions/v2/contracts/api.js").BuildOptions} */
   #viewBuildOptions() {
     return {
       repoRoot: this.#repoRoot,
@@ -2918,7 +2919,7 @@ export class ParseEngine {
    * unchanged seeds forward and only the deltas reach the model. Main warms
    * only (work-item views are ephemeral), mode-gated, and never fails the warm.
    *
-   * @param {{ viewPath: string, base: AtlasWarmJobResult, purpose: string }} args
+   * @param {{ viewPath: string, base: AtlasWarmJobResult, purpose: string, triggerEvent?: string | null }} args
    * @returns {Promise<void>}
    */
   async #maybeReseedTreeCompression({ viewPath, base, purpose, triggerEvent = null }) {
@@ -2943,13 +2944,16 @@ export class ParseEngine {
         cwd: this.#repoRoot,
         config: this.#runtimeConfig,
       });
-      base.tree_compression_reseed = result && typeof result === "object"
+      const reseed = result && typeof result === "object"
+        ? /** @type {Record<string, any>} */ (result)
+        : null;
+      base.tree_compression_reseed = reseed
         ? {
-            ok: result.ok === true,
-            profile: result.profile ?? null,
-            deltaSeeds: result.deltaSeeds ?? null,
-            carriedForwardSeeds: result.carriedForwardSeeds ?? null,
-            error: result.error ?? null,
+            ok: reseed.ok === true,
+            profile: reseed.profile ?? null,
+            deltaSeeds: reseed.deltaSeeds ?? null,
+            carriedForwardSeeds: reseed.carriedForwardSeeds ?? null,
+            error: reseed.error ?? null,
           }
         : null;
     } catch (err) {
@@ -3329,7 +3333,7 @@ export class ParseEngine {
           /** @type {any} */ (base).embeddings_prune_scope = "skipped_sibling_unreadable";
           recordEmbeddingForensics("warmer.embeddings.prune_to_view.skipped", {
             view_path: viewPath,
-            reason: `sibling_view_unreadable: ${siblings.reason}`,
+            reason: `sibling_view_unreadable: ${"reason" in siblings ? siblings.reason : "unknown"}`,
             base,
           });
         }

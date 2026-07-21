@@ -412,6 +412,7 @@
  * @property {number} [maxFiles]              Optional. Default 64, max 128.
  * @property {boolean} [includeSymbols]       Include per-file symbol summaries. Default true.
  * @property {boolean} [includeEdges]         Include exact internal/inbound/outbound edges. Default true.
+ * @property {string} [sessionId]             Optional ladder-credit namespace (matches code.* actions).
  */
 
 /**
@@ -561,6 +562,7 @@
 
 /**
  * @typedef {Object} MemoryStoreParams
+ * @property {string} [repoId]
  * @property {string} title
  * @property {string} content
  * @property {MemoryDomain[]} [domains]   Logical domain tags for filtering; default general.
@@ -571,6 +573,7 @@
 
 /**
  * @typedef {Object} MemoryFeedbackParams
+ * @property {string} [repoId]
  * @property {string} memoryId
  * @property {"used" | "stale" | "wrong" | "duplicate"} verdict
  * @property {string} [detail]                Short evidence note.
@@ -578,6 +581,7 @@
 
 /**
  * @typedef {Object} MemorySurfaceParams
+ * @property {string} [repoId]
  * @property {string[]} [symbolIds]
  * @property {string[]} [fileRelPaths]
  * @property {Array<"general" | MemoryDomain>} [domains]   Whitelist filter; omit for all.
@@ -585,6 +589,7 @@
 
 /**
  * @typedef {Object} MemoryGetParams
+ * @property {string} [repoId]
  * @property {string[]} [symbolIds]
  * @property {string[]} [fileRelPaths]
  * @property {Array<"general" | MemoryDomain>} [domains]   Whitelist filter; omit for all.

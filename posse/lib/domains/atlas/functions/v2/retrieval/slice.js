@@ -99,6 +99,7 @@ const REFRESH_DIFF_LIMIT = 100;
  *   encoder?: EmbeddingEncoder,
  *   taskType?: TaskType,
  *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
+ *   onDemandEmbeddingFill?: boolean,
  * }} args
  * @returns {Promise<SliceBuildEnvelope>}
  */

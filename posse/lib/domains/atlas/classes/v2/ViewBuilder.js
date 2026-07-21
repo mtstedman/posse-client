@@ -1063,7 +1063,7 @@ async function refreshTreeDerivedStateIfChanged(viewDb, opts = {}) {
 
 /**
  * @param {import("better-sqlite3").Database} viewDb
- * @param {{ force?: boolean }} [opts]
+ * @param {{ force?: boolean, mode?: "off" | "deterministic" | "ml", maxSeeds?: number }} [opts]
  */
 async function refreshTreeCompressionSnapshotIfChanged(viewDb, opts = {}) {
   const mode = normalizeTreeCompressionMode(opts.mode);

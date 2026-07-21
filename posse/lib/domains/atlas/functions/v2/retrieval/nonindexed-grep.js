@@ -143,8 +143,10 @@ function firstLineOf(text) {
  *   maxMatchesScanned?: number,
  *   cursor?: string | number | null,
  *   offset?: number,
+ *   globArgs?: string[] | null,
+ *   matchKind?: "grep-nonindexed" | "grep-source-text",
  * }} args
- * @returns {{ matches: Array<{ path: string, line: number, text: string, matchKind: "grep-nonindexed", score: number, scoreSignals: Record<string, unknown> }>, truncated: boolean, filesMatched: number, nextCursor: string | null, offset: number, totalCollected: number } | null}
+ * @returns {{ matches: Array<{ path: string, line: number, text: string, matchKind: "grep-nonindexed" | "grep-source-text", score: number, scoreSignals: Record<string, unknown> }>, truncated: boolean, filesMatched: number, nextCursor: string | null, offset: number, totalCollected: number } | null}
  */
 export function grepNonIndexed({
   repoRoot,
@@ -210,7 +212,7 @@ export function grepNonIndexed({
       }
     }
 
-    /** @type {Array<{ path: string, line: number, text: string, matchKind: "grep-nonindexed" }>} */
+    /** @type {Array<{ path: string, line: number, text: string, matchKind: "grep-nonindexed" | "grep-source-text" }>} */
     const matches = [];
     const filesSeen = new Set();
     let truncated = false;

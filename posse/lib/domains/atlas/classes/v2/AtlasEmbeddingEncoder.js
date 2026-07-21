@@ -15,16 +15,26 @@ export const ATLAS_JINA_MODEL_VERSION =
 
 export { atlasEmbeddingModelVersion };
 
+/** @typedef {import("../../functions/v2/contracts/embeddings.js").EmbeddingEncoder} EmbeddingEncoder */
+/** @typedef {ReturnType<typeof atlasEmbeddingModelForId>} AtlasEmbeddingModelConfig */
+
 // The active production encoder. Jina artifacts are staged explicitly, while
 // tokenization, pooling, normalization, and ONNX execution live in posse-ml.
-/** @implements {import("../../functions/v2/contracts/embeddings.js").EmbeddingEncoder} */
+/** @implements {EmbeddingEncoder} */
 export class AtlasEmbeddingEncoder {
+  /** @type {string} */
   model = ATLAS_JINA_MODEL.indexModel;
+  /** @type {string} */
   model_version = ATLAS_JINA_MODEL_VERSION;
+  /** @type {string} */
   modelName = ATLAS_JINA_MODEL.modelName;
+  /** @type {string} */
   modelId = ATLAS_JINA_MODEL.modelId;
+  /** @type {string} */
   mlModelId = ATLAS_JINA_MODEL.mlModelId;
+  /** @type {number} */
   dim = ATLAS_JINA_MODEL.dim;
+  /** @type {string} */
   dtype = ATLAS_JINA_MODEL.dtype;
   atlasBacked = true;
   /** @type {number | null} */
@@ -36,7 +46,7 @@ export class AtlasEmbeddingEncoder {
   #modelRoot;
   #invoke;
 
-  /** @param {{ repoRoot?: string, modelId?: string, modelConfig?: typeof ATLAS_JINA_MODEL, modelCacheDir?: string, modelRoot?: string, modelVersion?: string, batchSize?: number, intraOpThreads?: number, invoke?: typeof runMlNativeMethodAsync, manager?: import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager }} [options] */
+  /** @param {{ repoRoot?: string, modelId?: string, modelConfig?: AtlasEmbeddingModelConfig, modelCacheDir?: string, modelRoot?: string, modelVersion?: string, batchSize?: number, intraOpThreads?: number, invoke?: typeof runMlNativeMethodAsync, manager?: import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager }} [options] */
   constructor({ repoRoot, modelId = null, modelConfig = null, modelCacheDir = null, modelRoot = null, modelVersion = null, batchSize = null, intraOpThreads = null, invoke = null, manager = null } = {}) {
     if (!repoRoot) throw new TypeError("AtlasEmbeddingEncoder: repoRoot is required");
     const activeModel = modelConfig || atlasEmbeddingModelForId(modelId);

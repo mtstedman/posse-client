@@ -66,13 +66,14 @@ export async function downloadLocalModelArtifact(client, artifact, {
   const interval = Math.max(100, Number(pollIntervalMs) || DEFAULT_POLL_INTERVAL_MS);
   for (let invocation = 0; invocation < 2; invocation += 1) {
     let settled = false;
+    /** @type {Promise<{ ok: true, value: unknown } | { ok: false, error: any }>} */
     const tracked = runRemoteNativeArtifactJson(
       REMOTE_ARTIFACT_DOWNLOAD_METHOD,
       payload,
       { manager: client.manager, timeoutMs: nativeProcessTimeoutMs(payload.timeoutMs) },
     ).then(
-      (value) => ({ ok: true, value }),
-      (error) => ({ ok: false, error }),
+      (value) => ({ ok: /** @type {const} */ (true), value }),
+      (error) => ({ ok: /** @type {const} */ (false), error }),
     ).finally(() => {
       settled = true;
     });
@@ -99,7 +100,7 @@ export async function downloadLocalModelArtifact(client, artifact, {
     }
 
     const outcome = await tracked;
-    if (outcome.ok) return outcome.value;
+    if (outcome.ok === true) return outcome.value;
     if (invocation === 0 && shouldRetryWithFreshPulse(outcome.error)) continue;
     throw outcome.error;
   }

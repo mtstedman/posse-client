@@ -252,6 +252,7 @@ export class Ledger {
    *   fileset_hash?: string,
    *   indexed_at?: string,
    *   status?: "indexed" | "failed" | "stale",
+   *   metadata?: Record<string, any>,
    * }} layer
    * @param {{ waitMs?: number, label?: string }} [opts]
    * @returns {Promise<{ layer_id: number, source: "treesitter" | "scip", symbols: number, edges: number }>}

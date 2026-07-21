@@ -129,7 +129,7 @@ export function treeCompressionInputSignature(db) {
 
 /**
  * @param {import("better-sqlite3").Database} db
- * @param {{ maxSeeds?: number, maxDepth?: number, maxFilesPerSeed?: number }} [opts]
+ * @param {{ maxSeeds?: number, maxDepth?: number, maxFilesPerSeed?: number, nativeManager?: import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager }} [opts]
  * @returns {Promise<{ ok: boolean, durationMs: number, snapshotId?: number, seedCount: number, profile: string, sourceSignature: string | null, error?: string }>}
  */
 export async function refreshTreeCompressionSnapshot(db, opts = {}) {
@@ -194,7 +194,7 @@ export async function refreshTreeCompressionSnapshot(db, opts = {}) {
 
 /**
  * @param {import("better-sqlite3").Database} db
- * @param {{ maxSeeds?: number, maxDepth?: number, maxFilesPerSeed?: number }} [opts]
+ * @param {{ maxSeeds?: number, maxDepth?: number, maxFilesPerSeed?: number, nativeManager?: import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager }} [opts]
  */
 export async function buildTreeCompressionSnapshot(db, opts = {}) {
   const missing = missingTables(db, REQUIRED_SOURCE_TABLES);
@@ -362,7 +362,7 @@ export function buildTreeCompressionModelPassPrompt(modelInput) {
  *   annotations?: any,
  *   annotator?: ((args: { prompt: string, input: any, snapshot: any }) => any | Promise<any>),
  *   modelMetadata?: Record<string, unknown>,
- *   nativeManager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
+ *   nativeManager?: import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  * }} [opts]
  * @returns {Promise<{ ok: boolean, durationMs: number, snapshotId?: number, seedCount: number, profile: string, sourceSignature: string | null, modelSeedCount?: number, deltaSeeds?: number, unannotatedSeeds?: number, carriedForwardSeeds?: number, error?: string }>}
  */
@@ -400,6 +400,7 @@ export async function refreshTreeCompressionSnapshotWithModelPass(db, opts = {})
     // content deltas are fatal; an unlabeled backlog just waits for the next
     // annotator-equipped pass, and the annotate call below still rebuilds the
     // snapshot with every prior annotation carried forward.
+    /** @type {any} */
     let rawAnnotations = { seeds: [] };
     if (opts.annotations !== undefined) {
       rawAnnotations = opts.annotations;
@@ -701,7 +702,7 @@ function readPriorMlSnapshot(db) {
  * surface), falling back to the latest deterministic one.
  *
  * @param {import("better-sqlite3").Database} db
- * @param {{ seedLimit?: number, profile?: string }} [opts]
+ * @param {{ seedLimit?: number, profile?: string, withStaleness?: boolean }} [opts]
  */
 export function readLatestTreeCompressionSnapshot(db, opts = {}) {
   if (missingTables(db, ["atlas_tree_compression_snapshots", "atlas_tree_compression_seeds"]).length > 0) {

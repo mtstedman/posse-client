@@ -37,7 +37,7 @@ export function shouldRunAtlasNativeParity(opts = {}) {
  *   method: string,
  *   payload: unknown,
  *   nodeResult: unknown,
- *   manager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
+ *   manager?: import("./invoke.js").AtlasNativeManager,
  *   timeoutMs?: number,
  *   key?: string,
  *   auth?: Record<string, unknown>,
@@ -75,7 +75,7 @@ export function diffAtlasNativeParity(args) {
  * @param {{
  *   operation: Record<string, unknown>,
  *   nodeResult: unknown,
- *   manager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
+ *   manager?: import("./invoke.js").AtlasNativeManager,
  *   timeoutMs?: number,
  *   key?: string,
  *   auth?: Record<string, unknown>,

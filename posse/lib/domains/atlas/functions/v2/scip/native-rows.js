@@ -9,7 +9,7 @@ import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 const SCIP_FIRST_FRAME_BATCH_SIZE = 8;
 
 /**
- * @param {{ index: Record<string, any>, timeoutMs?: number }} input
+ * @param {{ index?: Record<string, any>, timeoutMs?: number }} input
  * @returns {Promise<Record<string, any>>}
  */
 export async function scipIndexToRowsNative({ index, timeoutMs = 120_000 } = {}) {
@@ -24,6 +24,10 @@ export async function scipIndexToRowsNative({ index, timeoutMs = 120_000 } = {})
   }));
 }
 
+/**
+ * @param {{ index?: Record<string, any>, timeoutMs?: number, batchSize?: number }} input
+ * @returns {Promise<Record<string, any>>}
+ */
 export async function scipIndexToRowsBatchedNative({ index, timeoutMs = 120_000, batchSize = 32 } = {}) {
   if (!index || typeof index !== "object") throw new TypeError("scipIndexToRowsBatchedNative: index is required");
   const nativeIndex = scipIndexForNative(index);
@@ -89,7 +93,7 @@ function scipFilesetHash(documents) {
     const repoPath = String(document?.relative_path || document?.relativePath || "");
     const bytes = document?.source_bytes ?? document?.sourceBytes;
     const content = bytes && (Array.isArray(bytes) || ArrayBuffer.isView(bytes))
-      ? Buffer.from(bytes)
+      ? Buffer.from(/** @type {any} */ (bytes))
       : Buffer.from(String(document?.text || ""), "utf8");
     return [repoPath, createHash("sha256").update(content).digest("hex")];
   }).sort((left, right) => Buffer.compare(Buffer.from(left[0]), Buffer.from(right[0])));

@@ -69,6 +69,8 @@ function isHeartbeatFailureText(value) {
 const HEARTBEAT_RETRY_MAX_ATTEMPTS = 3;
 const HEARTBEAT_RETRY_BASE_MS = 150;
 
+/** @typedef {Error & { code?: string | number, errno?: string | number, status?: string | number, statusCode?: string | number, signal?: string, stdout?: string, stderr?: string, details?: unknown }} GitNativeError */
+
 function isPersistentNativeAuthError(err) {
   const status = Number(err?.status || err?.statusCode || err?.cause?.status || err?.cause?.statusCode || 0);
   if (status === 401 || status === 403) return true;
@@ -161,6 +163,9 @@ function nativeAuthTelemetry(manager, auth) {
   };
 }
 
+/**
+ * @param {{ method?: string, asyncMode?: boolean, bridge?: boolean, workerRequested?: boolean | null, workerEligible?: boolean | null, manager?: import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager, auth?: Record<string, unknown> | null, detail?: string, error?: any }} [input]
+ */
 function logNativeHeartbeatFailure({ method, asyncMode = false, bridge = false, workerRequested = null, workerEligible = null, manager, auth, detail = "", error = null } = {}) {
   appendRunTelemetry("diagnostics", {
     kind: "native.heartbeat.failure",
@@ -509,6 +514,7 @@ export function gitNativeMethodRoute(method, payload = null) {
  * @property {Record<string, unknown>} [auth]
  * @property {boolean} [bypassNativeBridge]
  * @property {boolean} [worker]
+ * @property {number} [maxBuffer]
  * @property {(value: unknown) => unknown} [normalizeNodeResult]
  * @property {(value: unknown) => unknown} [normalizeNativeResult]
  * @property {(value: unknown) => unknown} [mapNativeReturn]
@@ -569,18 +575,25 @@ function unwrapGitNativeMethodResponse(value) {
   return value;
 }
 
+/**
+ * @param {string} message
+ * @param {Record<string, any> | Error | null} [source]
+ * @returns {GitNativeError}
+ */
 function gitNativeError(message, source = null) {
   const cause = source instanceof Error ? source : undefined;
-  const error = cause ? new Error(message, { cause }) : new Error(message);
+  const error = /** @type {GitNativeError} */ (cause ? new Error(message, { cause }) : new Error(message));
   if (source && typeof source === "object") {
+    const sourceRecord = /** @type {Record<string, any>} */ (source);
     for (const key of ["code", "errno", "status", "statusCode", "signal"]) {
-      if (source[key] != null) error[key] = source[key];
+      if (sourceRecord[key] != null) error[key] = sourceRecord[key];
     }
-    if (source.details !== undefined) error.details = source.details;
+    if (sourceRecord.details !== undefined) error.details = sourceRecord.details;
   }
   return error;
 }
 
+/** @returns {GitNativeError} */
 function gitNativeProcessError(method, res, detail) {
   const error = gitNativeError(
     `Git native method ${method} failed${detail ? `: ${detail}` : ""}`,
@@ -605,7 +618,7 @@ function gitNativeProcessError(method, res, detail) {
 function runGitNativeMethodOnce(method, payload, opts = {}) {
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("git")) {
-    const unavailable = new Error(`Git native method unavailable: ${method}`);
+    const unavailable = gitNativeError(`Git native method unavailable: ${method}`);
     unavailable.code = "GIT_NATIVE_UNAVAILABLE";
     throw unavailable;
   }
@@ -727,7 +740,7 @@ async function runGitNativeMethodAsyncOnce(method, payload, opts = {}) {
   }
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("git")) {
-    const unavailable = new Error(`Git native method unavailable: ${method}`);
+    const unavailable = gitNativeError(`Git native method unavailable: ${method}`);
     unavailable.code = "GIT_NATIVE_UNAVAILABLE";
     throw unavailable;
   }

@@ -971,7 +971,7 @@
  * @property {string} generatedContext        Provider-ready prompt fragment.
  * @property {number} estimatedTokens
  * @property {number} actionsConsumed
- * @property {SurfacedMemory[]} [memories]
+ * @property {MemoryGetRow[]} [memories]
  * @property {boolean} [truncated]
  * @property {ContextBudgetUsage} [budgetUsage]
  */

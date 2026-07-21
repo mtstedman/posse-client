@@ -272,7 +272,7 @@ async function runTreeScope({ view, versionId, params = {}, action }) {
  * are examined. Position is only the fallback ordering.
  *
  * @param {{ view: import("../contracts/api.js").View, params?: import("../contracts/tool-params.js").TreeScopeParams, maxPaths?: number, maxSymbolsPerFile?: number }} args
- * @returns {WidenedCaller[]}
+ * @returns {Promise<WidenedCaller[]>}
  */
 export async function collectScopeWidenedPaths({ view, params = {}, maxPaths = 8, maxSymbolsPerFile = 12 }) {
   if (!view?.query || typeof view.query.symbolsInFile !== "function" || typeof view.query.callers !== "function") {

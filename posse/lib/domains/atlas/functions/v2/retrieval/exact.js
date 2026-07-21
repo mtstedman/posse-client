@@ -15,7 +15,7 @@ const MAX_STRUCTURE_FILES = 128;
  * @param {{
  *   view: import("../contracts/api.js").View,
  *   versionId: string,
- *   params?: import("../contracts/tool-params.js").CodeStructureParams,
+ *   params?: Partial<import("../contracts/tool-params.js").CodeStructureParams>,
  *   repoRoot?: string,
  * }} args
  */

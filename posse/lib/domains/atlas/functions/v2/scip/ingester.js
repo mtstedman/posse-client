@@ -44,6 +44,21 @@ import { getCurrentGitHeadAsync } from "../../../../integrations/functions/atlas
  */
 
 /**
+ * Combine the caller's config hash with the SCIP→rows spec version. A version
+ * bump changes this value, so `findScipIndexId` no longer matches the prior
+ * record (forcing a re-ingest) and `ingestBlobLayer` writes a fresh layer that
+ * supersedes the stale one.
+ * @param {string | undefined} configHash
+ * @param {string} rowsSpecVersion
+ * @returns {string}
+ */
+function scipRowsConfigHash(configHash, rowsSpecVersion) {
+  const base = String(configHash || "");
+  const tag = `scip-rows@${String(rowsSpecVersion || "")}`;
+  return base ? `${base} ${tag}` : tag;
+}
+
+/**
  * @param {{
  *   ledger: Ledger,
  *   scipPath?: string,
@@ -66,21 +81,6 @@ import { getCurrentGitHeadAsync } from "../../../../integrations/functions/atlas
  * }} args
  * @returns {Promise<ScipIngestResult>}
  */
-/**
- * Combine the caller's config hash with the SCIP→rows spec version. A version
- * bump changes this value, so `findScipIndexId` no longer matches the prior
- * record (forcing a re-ingest) and `ingestBlobLayer` writes a fresh layer that
- * supersedes the stale one.
- * @param {string | undefined} configHash
- * @param {string} rowsSpecVersion
- * @returns {string}
- */
-function scipRowsConfigHash(configHash, rowsSpecVersion) {
-  const base = String(configHash || "");
-  const tag = `scip-rows@${String(rowsSpecVersion || "")}`;
-  return base ? `${base} ${tag}` : tag;
-}
-
 export async function ingestScipFile({
   ledger,
   scipPath,
@@ -109,7 +109,7 @@ export async function ingestScipFile({
   const effectiveConfigHash = scipRowsConfigHash(configHash, rowsSpecVersion);
 
   const ingestStartedAtMs = Date.now();
-  let buf = bytes;
+  let buf = bytes ? Buffer.from(bytes) : undefined;
   let effectiveProducedAt = producedAt;
   if (!buf) {
     if (!scipPath) throw new TypeError("ingestScipFile: scipPath or bytes is required");
@@ -635,7 +635,7 @@ export async function ingestScipFile({
     });
     return { status, recordedId };
   });
-  const status = writeResult.status;
+  const status = /** @type {"complete" | "partial"} */ (writeResult.status);
   const recordedId = writeResult.recordedId;
 
   const staleScip = documentsMissingText > 0;
@@ -735,6 +735,10 @@ async function appendDocumentDelta({ ledger, branch, snapshot, repo_rel_path, co
   return 1;
 }
 
+/**
+ * @param {{ buf: Buffer, err: unknown, onEvent?: (event: { kind: string, [k: string]: any }) => void, scipPath?: string }} args
+ * @returns {ScipIngestResult}
+ */
 function handleScipIndexDecodeFailure({ buf, err, onEvent, scipPath }) {
   const message = err instanceof Error ? err.message : String(err);
   const filesetHash = sha256Hex(buf);

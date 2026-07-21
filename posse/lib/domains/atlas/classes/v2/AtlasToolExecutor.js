@@ -529,7 +529,7 @@ export class AtlasToolExecutor {
    *
    * @param {AtlasToolRequest} request
    */
-  async executeTool(request = {}) {
+  async executeTool(request = /** @type {AtlasToolRequest} */ ({})) {
     const toolName = String(request.toolName || "").trim();
     if (!toolName) throw new Error("AtlasToolExecutor.executeTool requires toolName");
     const args = request.args && typeof request.args === "object" ? request.args : {};
@@ -597,7 +597,7 @@ export class AtlasToolExecutor {
    *
    * @param {AtlasToolRequest & { result?: any }} request
    */
-  async scheduleDeterministicWriteRefresh(request = {}) {
+  async scheduleDeterministicWriteRefresh(request = /** @type {AtlasToolRequest & { result?: any }} */ ({})) {
     const toolName = String(request.toolName || "").trim();
     if (toolName !== "write_file" && toolName !== "edit_file") return null;
     const args = request.args && typeof request.args === "object" ? request.args : {};

@@ -81,6 +81,7 @@ const isCascadeDetail = (detail) => CASCADE_DETAIL_RE.test(String(detail || ""))
  * @param {{
  *   C: Record<string, string>,
  *   columns?: () => number,
+ *   onChange?: ((steps: Array<Record<string, unknown>>) => void) | null,
  * }} deps
  */
 export function createBootPanel({ C, columns = () => 100, onChange = null }) {
@@ -110,7 +111,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
    * Each step row: { status: 'pending'|'running'|'ok'|'warning'|'failed'|'skipped'|'deferred',
    *                  detail: string, percent: number|null, section: string,
    *                  startedAt: number, finishedAt: number|null }
-   * @type {Map<string, { status: string, detail: string, percent: number | null, section: string, startedAt: number, finishedAt: number | null }>}
+   * @type {Map<string, { status: string, detail: string, percent: number | null, section: string, startedAt: number, finishedAt: number | null, activity?: string }>}
    */
   const steps = new Map();
   // Insertion order per section dictates render order.
@@ -532,7 +533,11 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
   // a quiet done/total so the row still reads as advancing. The leading section
   // glyph already spins, so the body carries no spinner of its own.
   const runningSectionBody = (labels) => {
-    const entries = labels.map((l) => [l, steps.get(l)]).filter(([, s]) => s);
+    /** @type {Array<[string, NonNullable<ReturnType<typeof steps.get>>]>} */
+    const entries = labels.flatMap((label) => {
+      const step = steps.get(label);
+      return step ? [[label, step]] : [];
+    });
     // Most-recently-STARTED running step wins (ties → later insertion), not
     // first-inserted: the background dependency check stays "running" for most
     // of boot, and by insertion order it would pin the row to "checking
@@ -589,7 +594,11 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
         // carries the health, so per-name glyphs are just noise. Anything
         // not-ok: per-provider chips ordered worst-first, so a failure survives
         // truncation; the full reason still renders in the notes section below.
-        const provs = labels.map((l) => [l, steps.get(l)]).filter(([, s]) => s);
+        /** @type {Array<[string, NonNullable<ReturnType<typeof steps.get>>]>} */
+        const provs = labels.flatMap((label) => {
+          const step = steps.get(label);
+          return step ? [[label, step]] : [];
+        });
         const anyNotOk = provs.some(([, s]) => s.status !== "ok");
         let body;
         if (!anyNotOk) {

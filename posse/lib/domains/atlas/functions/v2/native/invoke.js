@@ -37,7 +37,7 @@ function effectiveRunOptions(opts) {
  * silently re-read settings/env.
  *
  * @param {NativeMethodRunOptions} opts
- * @param {import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager} manager
+ * @param {AtlasNativeManager} manager
  * @returns {Record<string, unknown> | null}
  */
 function resolveAtlasAuthEnvelope(opts, manager) {
@@ -49,8 +49,15 @@ function resolveAtlasAuthEnvelope(opts, manager) {
 }
 
 /**
+ * @typedef {Object} AtlasNativeManager
+ * @property {(name: string) => boolean} shouldUse
+ * @property {(name: string) => { runSync: (method: string, args?: string[], opts?: Record<string, any>) => any, run: (method: string, args?: string[], opts?: Record<string, any>) => Promise<any> }} binary
+ * @property {(() => Record<string, unknown> | null)} [nativeAuthEnvelope]
+ */
+
+/**
  * @typedef {Object} NativeMethodRunOptions
- * @property {import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager} [manager]
+ * @property {AtlasNativeManager} [manager]
  * @property {number} [timeoutMs]
  * @property {boolean} [disabled]
  * @property {Record<string, unknown>} [auth]

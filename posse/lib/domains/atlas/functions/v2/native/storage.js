@@ -107,6 +107,15 @@ export function invalidateStorageCacheNativeAsync(paths, opts = {}) {
   return runAtlasNativeMethodAsync(ATLAS_STORAGE_CACHE_INVALIDATE_METHOD, { paths: normalized }, opts);
 }
 
+/**
+ * @param {{
+ *   ledgerPath: string,
+ *   branch: string,
+ *   atSeq: number,
+ *   outPath: string,
+ *   options?: import("../contracts/api.js").BuildOptions,
+ * }} args
+ */
 function buildViewPayload({ ledgerPath, branch, atSeq, outPath, options = {} }) {
   const hint = options.hint;
   return {

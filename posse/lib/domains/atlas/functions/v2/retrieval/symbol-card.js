@@ -264,7 +264,7 @@ function collectCardRequests(params) {
 
   const addSymbolRef = (value) => {
     const normalized = normalizeBatchSymbolRef(value);
-    if (!normalized.ok) {
+    if (normalized.ok === false) {
       const requestIndex = index++;
       requests.push({
         index: requestIndex,
@@ -370,7 +370,7 @@ function effectiveRepo(repoId) {
  *   minCallConfidence: number,
  *   includeResolutionMetadata: boolean,
  * }} args
- * @returns {SymbolCard}
+ * @returns {Promise<SymbolCard>}
  */
 async function buildOverlayCard({ repoRoot, sessionId, target, minCallConfidence, includeResolutionMetadata }) {
   const { entry, symbol } = target;

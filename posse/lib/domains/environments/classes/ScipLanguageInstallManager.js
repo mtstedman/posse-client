@@ -120,7 +120,7 @@ export class ScipLanguageInstallManager {
   getStatus() {
     return this.languages.map((language) => {
       const installer = this.createInstaller(language);
-      if (language === "clang") return installer.statusSync();
+      if ("statusSync" in installer && typeof installer.statusSync === "function") return installer.statusSync();
       return installer.status();
     });
   }

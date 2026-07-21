@@ -24,7 +24,7 @@ const MAX_DIG_TERMS = 16;
  * @param {{
  *   view: import("../contracts/api.js").View,
  *   versionId: string,
- *   params?: import("../contracts/tool-params.js").CodeSurveyParams,
+ *   params?: Partial<import("../contracts/tool-params.js").CodeSurveyParams>,
  *   repoRoot?: string,
  * }} args
  */

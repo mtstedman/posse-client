@@ -10,6 +10,7 @@ import { toRanked } from "../rrf.js";
 /** @typedef {import("../../../contracts/api.js").ViewSymbol} ViewSymbol */
 /** @typedef {import("../query-planner-types.js").QueryPlan} QueryPlan */
 
+/** @type {readonly ("calls" | "references" | "uses_type" | "imports" | "extends" | "implements")[]} */
 const GRAPH_EDGE_KINDS = Object.freeze([
   "calls",
   "references",
@@ -46,24 +47,24 @@ export async function runGraphBackend({ view, limit, plan }) {
           depth: 2,
           maxSymbols,
           minConfidence: 0.5,
-          edgeKinds: GRAPH_EDGE_KINDS,
+          edgeKinds: [...GRAPH_EDGE_KINDS],
         })).symbols
       : view.query.slice
         ? await view.query.slice(seedIds, {
             depth: 2,
             maxSymbols,
             minConfidence: 0.5,
-            edgeKinds: GRAPH_EDGE_KINDS,
+            edgeKinds: [...GRAPH_EDGE_KINDS],
           })
         : null;
     if (!slice) {
       return { ok: false, entries: [], raw: [], total: 0, reason: "unavailable" };
     }
-    const symbols = uniqueSymbols(slice)
+    const symbols = uniqueSymbols(/** @type {ViewSymbol[]} */ (slice))
       .sort((a, b) => sliceImpact(b) - sliceImpact(a) || a.name.localeCompare(b.name));
     return {
       ok: true,
-      entries: toRanked(symbols, symbolIdOf),
+      entries: toRanked(symbols, /** @type {(symbol: ViewSymbol) => string} */ (symbolIdOf)),
       raw: symbols,
       total: symbols.length,
     };

@@ -420,6 +420,16 @@ function _resolveObservationScopeForInsert(db, {
   };
 }
 
+/**
+ * @param {{
+ *   work_item_id?: number | null,
+ *   job_id?: number | null,
+ *   attempt_id?: number | null,
+ *   observation_type?: string,
+ *   summary?: string,
+ *   detail?: unknown,
+ * }} input
+ */
 export function recordObservation({
   work_item_id = null,
   job_id = null,

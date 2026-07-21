@@ -37,7 +37,7 @@ import { ensureAtlasEmbeddingModelRoot, inspectAtlasEmbeddingModel } from "./jin
  * Semantic capability is always installed. Individual requests still choose
  * semantic or lexical behavior through their explicit `semantic` argument.
  *
- * @param {Record<string, unknown>} config
+ * @param {Record<string, unknown>} _config
  * @returns {boolean}
  */
 export function semanticDispatchEnabled(_config = {}) {
@@ -74,6 +74,10 @@ const EMBEDDING_POOL_IDLE_MS = Number(process.env.POSSE_ATLAS_EMBEDDING_POOL_IDL
 // + D (in-host flush serialization) remove concurrent writers regardless of
 // pooling, and it ran clean under load. An explicit falsey value (0/false/off/no)
 // is the escape hatch.
+/**
+ * @param {Record<string, any>} [config]
+ * @param {Record<string, any>} [env]
+ */
 export function embeddingChildPoolEnabled(config = {}, env = {}) {
   const raw = config?.atlasEmbeddingChildPool
     ?? config?.atlas_embedding_child_pool
@@ -128,7 +132,7 @@ export function createEmbeddingResourcePool({ idleMs = EMBEDDING_POOL_IDLE_MS } 
    * same stale in-memory ANN back.
    *
    * @param {string} key
-   * @returns {boolean} whether an entry existed
+   * @returns {{ retired: boolean, closePromise: Promise<void> | null }} retirement state
    */
   function retireEntry(key) {
     const entry = entries.get(key);
@@ -222,6 +226,10 @@ export function retirePooledEmbeddingResourcesAndWait() {
   return embeddingResourcePool.retireAllAndWait();
 }
 
+/**
+ * @param {{ repoRoot: string, config?: Record<string, any>, env?: Record<string, any>, readOnly?: boolean }} args
+ * @returns {OpenEmbeddingResourcesResult}
+ */
 export function openEmbeddingResources({ repoRoot, config = {}, env = {}, readOnly = false }) {
   const provider = normalizeAtlasEmbeddingModelId(
     config.atlasEmbeddingModelId ?? config.atlas_embedding_model_id,
@@ -385,6 +393,7 @@ function disabled(provider, reason, backend = null, details = {}) {
  *   provider?: string,
  *   encoder: EmbeddingEncoder,
  *   repoRoot: string,
+ *   readOnly?: boolean,
  *   nativeVectorManager?: import("../../../../../shared/tools/classes/BinaryManager.js").BinaryManager,
  * }} args
  * @returns {OpenEmbeddingResourcesResult}

@@ -109,6 +109,17 @@ const SCIP_INDEXER_SENSITIVE_ENV_KEY_RE = /api[_-]?key|token|secret|credential|p
  */
 
 /**
+ * @typedef {Object} ScipIndexerRunResult
+ * @property {boolean} ok
+ * @property {number | null} [status]
+ * @property {string | null} [signal]
+ * @property {string} [error]
+ * @property {string[]} [sourceFiles]
+ * @property {number} [scipDocuments]
+ * @property {Record<string, any> | null} [sanitizer]
+ */
+
+/**
  * Ensure a `.scip` file is staged for the repo when SCIP mode is enabled.
  * Existing staged files win; otherwise this launches a configured or
  * auto-detected indexer as a child process and streams progress.
@@ -419,7 +430,9 @@ export async function buildScipBatchManifest({
     });
   }
 
+  /** @type {Array<{ batchOrdinal: number, firstDocumentOrdinal: number, lastDocumentOrdinal: number, documentsExpected: number, batchHash: string, plan: ScipStagePlan, sourceBytes: number, paths: string[], documents: typeof documents }>} */
   const batches = [];
+  /** @type {(typeof batches)[number] | null} */
   let current = null;
   for (const document of documents) {
     const planChanged = current && current.plan !== document.plan;
@@ -431,8 +444,12 @@ export async function buildScipBatchManifest({
       current = {
         batchOrdinal: batches.length,
         firstDocumentOrdinal: document.documentOrdinal,
+        lastDocumentOrdinal: document.documentOrdinal,
+        documentsExpected: 0,
+        batchHash: "",
         plan: document.plan,
         sourceBytes: 0,
+        paths: [],
         documents: [],
       };
       batches.push(current);
@@ -708,6 +725,10 @@ export async function stageScipBatches({
   }
 }
 
+/**
+ * @param {{ root: string, sessionDir: string, batch: any, onProgress?: ((event: Record<string, any>) => void) | null }} args
+ * @returns {Promise<ScipIndexerRunResult & { outputPath: string, sha256?: string }>}
+ */
 async function stageScipBatch({ root, sessionDir, batch, onProgress }) {
   const batchName = `batch-${String(batch.batchOrdinal).padStart(5, "0")}`;
   const outputDir = path.join(sessionDir, batchName);
@@ -1230,7 +1251,7 @@ async function stagePlanThroughGate(plan, { cwd, policy, currentHead, maxAgeHour
 /**
  * @param {ScipStagePlan} plan
  * @param {{ cwd: string, repoRoot?: string, allowedPaths?: string[] | null, onProgress?: ((event: Record<string, any>) => void) | null }} opts
- * @returns {Promise<{ ok: boolean, status?: number | null, signal?: string | null, error?: string }>}
+ * @returns {Promise<ScipIndexerRunResult>}
  */
 async function runScipIndexerAtomic(plan, {
   cwd,
@@ -1713,7 +1734,7 @@ async function replaceFile(from, to) {
 /**
  * @param {ScipStagePlan} plan
  * @param {{ cwd: string, onProgress?: ((event: Record<string, any>) => void) | null }} opts
- * @returns {Promise<{ ok: boolean, status?: number | null, signal?: string | null, error?: string }>}
+ * @returns {Promise<ScipIndexerRunResult>}
  */
 function runScipIndexer(plan, { cwd, onProgress = null }) {
   return new Promise((resolve) => {

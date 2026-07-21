@@ -17,7 +17,7 @@ const MAX_QUERY_SYMBOLS = 12;
  * @param {{
  *   view: import("../contracts/api.js").View,
  *   versionId: string,
- *   params?: import("../contracts/tool-params.js").CodeDbParams,
+ *   params?: Partial<import("../contracts/tool-params.js").CodeDbParams>,
  *   repoRoot?: string,
  * }} args
  */

@@ -67,6 +67,7 @@ function warnOnceDimMismatch(encoder, index) {
  *   repoId?: string | null,
  *   repoRoot?: string,
  *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
+ *   onDemandEmbeddingFill?: boolean,
  * }} args
  * @returns {Promise<ReturnType<typeof okEnvelope<SymbolSearchData>>>}
  */

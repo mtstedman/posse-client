@@ -1980,7 +1980,8 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
     // pure daemon handlers stay filesystem-pure. Best-effort and additive.
     if (prepared.action === "symbol.search") {
       const sidecarRepoRoot = repo?.repoPath || config?.requestedRepoPath || cwd || process.cwd();
-      const sidecarQuery = typeof prepared.payload?.query === "string" ? prepared.payload.query : args?.query;
+      const sidecarPayload = /** @type {Record<string, any>} */ (prepared.payload || {});
+      const sidecarQuery = typeof sidecarPayload.query === "string" ? sidecarPayload.query : args?.query;
       output = attachNonIndexedGrepSidecar({
         output,
         repoRoot: sidecarRepoRoot,

@@ -126,7 +126,7 @@ async function hydrateContextMemories({ sliceEnv, versionId, ledger, repoId, vie
  *   versionId: string,
  *   params: ContextParams,
  *   maxTokens: number,
- * }}
+ * }} args
  */
 function finishContextBuild({ sliceEnv, versionId, params, maxTokens }) {
   if (!sliceEnv.ok) {
@@ -179,7 +179,7 @@ export async function contextSummary({ view, versionId, params, ledger, repoRoot
  *   contextEnv: any,
  *   versionId: string,
  *   params: ContextSummaryParams,
- * }}
+ * }} args
  */
 function finishContextSummary({ contextEnv, versionId, params }) {
   if (!contextEnv.ok) {

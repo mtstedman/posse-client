@@ -16,6 +16,7 @@
  *   | "atlas.merged_to_main"
  *   | "atlas.main_advanced"
  *   | "atlas.scip_restage_requested"
+ *   | "atlas.scip_staged"
  *   | "atlas.wi_cleanup"
  *   | "atlas.embeddings_resume"
  *   | "atlas.self_repair"

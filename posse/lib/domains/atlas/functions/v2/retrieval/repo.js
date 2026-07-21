@@ -1257,7 +1257,7 @@ function combinedHitRate(cards, slices) {
 }
 
 /**
- * @param {{ config?: Record<string, unknown>, embeddingStatus?: { enabled?: boolean, provider?: string | null, backend?: string | null, indexedCount?: number, reason?: string | null } | null, view?: View, edges?: ReturnType<typeof computeEdgeStats>, repoRoot?: string }} args
+ * @param {{ config?: Record<string, unknown>, embeddingStatus?: { enabled?: boolean, provider?: string | null, backend?: string | null, indexedCount?: number, reason?: string | null } | null, view?: View, edges?: Awaited<ReturnType<typeof computeEdgeStats>>, repoRoot?: string }} args
  */
 function buildSemanticStatus({ config = {}, embeddingStatus = null, view, edges, repoRoot }) {
   const dispatchEnabled = semanticDispatchEnabled(config);
@@ -1288,7 +1288,7 @@ function normalizeWiEmbeddingsMode(config = {}) {
 }
 
 /**
- * @param {{ meta: ReturnType<View["meta"]>, freshness: { current: boolean, reason: string | null }, versionId: string }} args
+ * @param {{ meta: Awaited<ReturnType<View["meta"]>>, freshness: { current: boolean, reason: string | null }, versionId: string }} args
  */
 function buildIndexProgress({ meta, freshness, versionId }) {
   const lastVersionId = `${meta.branch}@${meta.ledger_seq}`;
@@ -1573,7 +1573,7 @@ function configFlag(value) {
 /**
  * @param {View} view
  * @param {{ includeTaxonomy?: boolean, cacheKey?: string | null }} [opts]
- * @returns {{ total: number, resolved: number, unresolved: number, unresolvedRate: number, internal: number, external: number, runtimeExternal?: number, dynamicReceiver?: number, importScopedExternal?: number, localUnbound?: number, selfReceiver?: number, trueUnresolved?: number, byKind: Record<string, number>, callTotal: number, callResolved: number, callResolutionRate: number, taxonomy?: Record<string, number> | null, taxonomyUnavailable?: string }}
+ * @returns {Promise<{ total: number, resolved: number, unresolved: number, unresolvedRate: number, internal: number, external: number, runtimeExternal?: number, dynamicReceiver?: number, importScopedExternal?: number, localUnbound?: number, selfReceiver?: number, trueUnresolved?: number, byKind: Record<string, number>, callTotal: number, callResolved: number, callResolutionRate: number, taxonomy?: Record<string, number> | null, taxonomyUnavailable?: string }>}
  */
 async function computeEdgeStats(view, opts = {}) {
   const includeTaxonomy = opts.includeTaxonomy === true;

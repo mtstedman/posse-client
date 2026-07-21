@@ -207,6 +207,7 @@ export function buildAtlasAutoFeedbackCandidate(observations = [], {
 // Resolve relevant-verdict file paths into symbol IDs via skeleton lookups.
 // Bounded and best-effort: at most 5 files, 8 symbols each — enough to seed
 // the feedback ledger without turning the finalizer into a retrieval pass.
+/** @param {unknown[]} observations @param {{ cwd?: string | null, config?: any, maxSymbolsPerFile?: number }} [options] */
 async function resolveRelevantPathSymbols(observations, { cwd, config, maxSymbolsPerFile = 8 } = {}) {
   const parsed = observations.map(normalizeObservation).filter(Boolean);
   const paths = collectRelevantVerdictPaths(parsed);

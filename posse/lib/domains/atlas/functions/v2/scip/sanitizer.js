@@ -13,9 +13,9 @@ export { SCIP_SANITIZER_POLICY_VERSION };
 
 /**
  * @param {{
- *   inputPath: string,
+ *   inputPath?: string,
  *   outputPath?: string,
- *   repoRoot: string,
+ *   repoRoot?: string,
  *   plan?: Record<string, any> | null,
  *   allowedPaths?: string[] | null,
  *   onProgress?: ((event: Record<string, any>) => void) | null,
@@ -44,7 +44,7 @@ export async function sanitizeScipOutputFileNative({
     files: scopedPaths.length,
     source: "batch",
     ref: null,
-  } : computeScipPlanFilesetManifest({ repoRoot: root, plan: plan || {} });
+  } : computeScipPlanFilesetManifest({ repoRoot: root, plan: /** @type {any} */ (plan || {}) });
   if (!manifest.ok && manifest.reason !== "fileset_unsupported") {
     throw new Error(`SCIP sanitizer manifest failed: ${manifest.reason || "fileset_scan_failed"}`);
   }
@@ -67,7 +67,10 @@ export async function sanitizeScipOutputFileNative({
   }, {
     timeoutMs: sanitizerTimeoutMs(plan),
   });
-  const metrics = normalizeSanitizerMetrics(result?.metrics);
+  const response = result && typeof result === "object"
+    ? /** @type {Record<string, any>} */ (result)
+    : {};
+  const metrics = normalizeSanitizerMetrics(response.metrics);
   emit(onProgress, `sanitized SCIP output ${path.basename(outFile)} (${metrics.kept_documents}/${metrics.raw_documents} documents kept)`, {
     kind: "atlas.scip.sanitize_completed",
     language: plan?.indexerId || null,
@@ -85,7 +88,7 @@ export async function sanitizeScipOutputFileNative({
   return {
     metrics,
     manifest,
-    policyVersion: String(result?.policyVersion || result?.policy_version || SCIP_SANITIZER_POLICY_VERSION),
+    policyVersion: String(response.policyVersion || response.policy_version || SCIP_SANITIZER_POLICY_VERSION),
   };
 }
 

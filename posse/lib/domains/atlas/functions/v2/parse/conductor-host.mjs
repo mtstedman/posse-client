@@ -86,10 +86,14 @@ async function getView(ledgerPath, dbPath) {
 }
 
 runDaemonThread(async (payload, _message, emitProgress) => {
-  const op = String(payload?.op || "");
+  if (!payload || typeof payload !== "object") {
+    throw new TypeError("conductor request payload must be an object");
+  }
+  const request = /** @type {Record<string, any>} */ (payload);
+  const op = String(request.op || "");
   switch (op) {
     case "info":
-      return { openTargets: [...handles.keys()], dbWriteDepth: dbWrite.depth?.() ?? null };
+      return { openTargets: [...handles.keys()], dbWriteDepth: dbWrite.active + dbWrite.pending };
 
     case "stage": {
       // Parallel SCIP generation, gated by the stage semaphore. A `lang`
@@ -97,14 +101,14 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // normalize; unknown values fall back to all detected languages);
       // without it the run covers every detected language.
       const { ensureScipStaged } = await import("../scip/stager.js");
-      const lang = String(payload.lang || "").trim();
+      const lang = String(request.lang || "").trim();
       const config = lang
-        ? { ...(payload.config || {}), scipLanguages: [lang] }
-        : payload.config;
+        ? { ...(request.config || {}), scipLanguages: [lang] }
+        : request.config;
       return scipStage.run(() => ensureScipStaged({
-        repoRoot: payload.repoRoot,
-        scipDir: payload.scipDir,
-        mode: payload.mode,
+        repoRoot: request.repoRoot,
+        scipDir: request.scipDir,
+        mode: request.mode,
         config,
       }));
     }
@@ -112,14 +116,13 @@ runDaemonThread(async (payload, _message, emitProgress) => {
     case "ingest": {
       // Write one staged .scip file into the Ledger — serialized on the write
       // queue (the gate), reading the staged output, writing ledger.db here.
-      const ledger = await getLedger(payload.ledgerPath, payload.dbPath);
+      const ledger = await getLedger(request.ledgerPath, request.dbPath);
       const { ingestScipFile } = await import("../scip/ingester.js");
       return dbWrite.run(() => ingestScipFile({
         ledger,
-        scipPath: payload.scipPath,
-        repoRoot: payload.repoRoot,
-        branch: payload.branch ?? null,
-        lang: payload.lang,
+        scipPath: request.scipPath,
+        repoRoot: request.repoRoot,
+        branch: request.branch ?? null,
       }));
     }
 
@@ -129,17 +132,17 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // owning the ledger. This subsumes stage+ingest; merge ("zip") still runs
       // as a separate write-queue step. ParseEngine's own scip/tree overlap is
       // the co-promise, internalized.
-      const ledger = await getLedger(payload.ledgerPath, payload.dbPath);
+      const ledger = await getLedger(request.ledgerPath, request.dbPath);
       const { ParseEngine } = await import("../../../classes/v2/ParseEngine.js");
       const { sharedParserAdapter } = await import("../../../classes/v2/ParserAdapter.js");
       const engine = new ParseEngine({
         ledger,
         parserAdapter: sharedParserAdapter,
-        repoRoot: payload.repoRoot,
-        defaultBranch: payload.branch ?? "main",
-        config: payload.config,
-        scipMode: payload.scipMode,
-        scipDir: payload.scipDir,
+        repoRoot: request.repoRoot,
+        defaultBranch: request.branch ?? "main",
+        config: request.config,
+        scipMode: request.scipMode,
+        scipDir: request.scipDir,
         // Stream ParseEngine's per-stage progress back over the daemon's progress
         // channel so callers (the TUI readiness bars) can render live movement —
         // this is the per-stage progress the strict request/response path dropped.
@@ -150,13 +153,13 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         deferEmbeddings: true,
       });
       try {
-        const result = await dbWrite.run(() => engine.handleWarmJob(payload.job ?? { paths: payload.paths ?? [] }));
+        const result = await dbWrite.run(() => engine.handleWarmJob(request.job ?? { paths: request.paths ?? [] }));
         // Outside dbWrite.run, still inside this request: progress events keep
         // streaming and the response carries the embeddings result fields the
         // flush writes into `result` (captured by reference at defer time).
         // Serialized per repo so this index's ANN save/rename can't race a
         // concurrent warm's in this host (single in-host embedding writer).
-        await runEmbeddingWriteExclusive(payload.repoRoot || payload.ledgerPath, () => engine.flushDeferredEmbeddings());
+        await runEmbeddingWriteExclusive(request.repoRoot || request.ledgerPath, () => engine.flushDeferredEmbeddings());
         return result;
       } finally {
         // The warm may have rewritten the on-disk ANN; cached retrieval-side
@@ -172,7 +175,23 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // back-compat with direct host callers; same request-scoped handles,
       // deliberately NOT on the write queue.
       const { runConductorRetrieve } = await import("./retrieve-runner.js");
-      return runConductorRetrieve(payload);
+      if (!request.call || typeof request.call !== "object" || Array.isArray(request.call)) {
+        throw new TypeError("conductor retrieve requires an object call payload");
+      }
+      const versionId = String(request.versionId || "").trim();
+      if (!versionId) throw new TypeError("conductor retrieve requires versionId");
+      return runConductorRetrieve({
+        call: request.call,
+        versionId,
+        viewPath: request.viewPath,
+        ledgerPath: request.ledgerPath,
+        readRoot: request.readRoot,
+        repoId: request.repoId,
+        semantic: request.semantic === true,
+        taskText: request.taskText,
+        taskType: request.taskType,
+        config: request.config,
+      });
     }
 
     case "debug.block": {
@@ -183,7 +202,7 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // outside `node --test`.
       const { assertTestContext } = await import("../../../../runtime/functions/test-context.js");
       assertTestContext("conductor debug.block");
-      const ms = Math.min(30_000, Math.max(0, Number(/** @type {any} */ (payload)?.ms) || 0));
+      const ms = Math.min(30_000, Math.max(0, Number(request.ms) || 0));
       const start = Date.now();
       while (Date.now() - start < ms) { /* sync busy-wait */ }
       return { blockedMs: Date.now() - start };
@@ -192,13 +211,13 @@ runDaemonThread(async (payload, _message, emitProgress) => {
     case "merge": {
       // The "zip" — serialized on the write queue, scoped by contentHashes
       // (null = full/boot). Reads Ledger, writes View, in this thread.
-      const ledger = await getLedger(payload.ledgerPath, payload.dbPath);
-      const view = await getView(payload.ledgerPath, payload.dbPath);
+      const ledger = await getLedger(request.ledgerPath, request.dbPath);
+      const view = await getView(request.ledgerPath, request.dbPath);
       try {
         return await dbWrite.run(() => view.mergeLanguageLayers({
           ledger,
-          lang: payload.lang,
-          contentHashes: payload.contentHashes ?? null,
+          lang: request.lang,
+          contentHashes: request.contentHashes ?? null,
         }));
       } finally {
         const { invalidateConductorRetrieveResources } = await import("./retrieve-runner.js");

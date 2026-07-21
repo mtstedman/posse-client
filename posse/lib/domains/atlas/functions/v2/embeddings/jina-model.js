@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ATLAS_JINA_MODEL } from "../../../../../catalog/atlas.js";
+import { ATLAS_JINA_MODEL, atlasEmbeddingModelForId } from "../../../../../catalog/atlas.js";
 import { ML_MODEL_PACKAGE_INSTALL_METHOD } from "../../../../../catalog/binary.js";
 import { downloadLocalModelPackage, prepareLocalModelArtifactClient } from "../../../../remote/functions/local-model-artifacts.js";
 import { runMlNativeMethodAsync } from "../../../../../shared/native/functions/ml-invoke.js";
@@ -15,7 +15,9 @@ import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManage
 export const DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const JINA_MODEL_PACKAGE_MANIFEST = ".posse-model-package.json";
 
-/** @param {string} repoRoot */
+/** @typedef {ReturnType<typeof atlasEmbeddingModelForId>} AtlasEmbeddingModelConfig */
+
+/** @param {string} _repoRoot */
 export function jinaModelCacheDir(_repoRoot, homeDir = os.homedir()) {
   return atlasEmbeddingModelCacheDir(ATLAS_JINA_MODEL, homeDir);
 }
@@ -97,7 +99,7 @@ export function inspectJinaModel(repoRoot, { modelCacheDir: explicitModelCacheDi
 }
 
 /**
- * @param {typeof ATLAS_JINA_MODEL} modelConfig
+ * @param {AtlasEmbeddingModelConfig} modelConfig
  * @param {string} repoRoot
  * @param {{ modelCacheDir?: string }} [options]
  */

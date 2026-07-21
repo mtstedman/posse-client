@@ -228,60 +228,60 @@
 /**
  * @typedef {Object} ViewQuery
  *
- * @property {() => { symbol_count: number, file_count: number, by_lang: Record<string, number>, by_kind: Record<string, number> }} [stats]
- * @property {() => { total: number, internal: number, external: number, resolved: number, call_total: number, call_resolved: number, by_kind: Record<string, number>, by_source: Record<string, { total: number, resolved: number, external: number, unresolved: number }> }} [edgeStats]
- * @property {() => { global_id: number, fan_in: number, fan_out: number }[]} [symbolMetrics]
- * @property {() => { unresolved_edges: any[], import_edges: any[], symbol_names: string[] }} [edgeTaxonomyInput]
+ * @property {() => Promise<{ symbol_count: number, file_count: number, by_lang: Record<string, number>, by_kind: Record<string, number> }>} [stats]
+ * @property {() => Promise<{ total: number, internal: number, external: number, resolved: number, call_total: number, call_resolved: number, by_kind: Record<string, number>, by_source: Record<string, { total: number, resolved: number, external: number, unresolved: number }> }>} [edgeStats]
+ * @property {() => Promise<{ global_id: number, fan_in: number, fan_out: number }[]>} [symbolMetrics]
+ * @property {() => Promise<{ unresolved_edges: any[], import_edges: any[], symbol_names: string[] }>} [edgeTaxonomyInput]
  *
- * @property {(name: string, opts?: SymbolSearchOptions) => ViewSymbol[]} findSymbol
+ * @property {(name: string, opts?: SymbolSearchOptions) => Promise<ViewSymbol[]>} findSymbol
  *
- * @property {(global_id: number) => ViewSymbol | null} getSymbol
+ * @property {(global_id: number) => Promise<ViewSymbol | null>} getSymbol
  *
- * @property {(repo_rel_path: string) => ViewSymbol[]} symbolsInFile
+ * @property {(repo_rel_path: string) => Promise<ViewSymbol[]>} symbolsInFile
  *
- * @property {(global_id: number) => ViewEdge[]} callers
+ * @property {(global_id: number) => Promise<ViewEdge[]>} callers
  *   Resolved edges where `to_global_id === global_id`.
  *
- * @property {(global_id: number) => ViewEdge[]} callees
+ * @property {(global_id: number) => Promise<ViewEdge[]>} callees
  *   Resolved edges where `from_global_id === global_id`.
  *
  * @property {(global_id: number) => Promise<{ callers: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>, callees: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }> }>} symbolNeighborhood
  *   Both edge directions with their relevant endpoint symbols bulk-resolved
  *   by the native daemon under one storage read.
  *
- * @property {(name: string) => ViewEdge[]} unresolvedReferencesTo
+ * @property {(name: string) => Promise<ViewEdge[]>} unresolvedReferencesTo
  *   Edges with no internal or external binding and `to_name = name`. Useful
  *   when adding a new declaration to find latent references.
  *
- * @property {(seedGlobalIds: number[], opts?: SliceOptions) => ViewSymbol[]} slice
+ * @property {(seedGlobalIds: number[], opts?: SliceOptions) => Promise<ViewSymbol[]>} slice
  *   N-hop symbol neighborhood starting from `seedGlobalIds`.
  *
- * @property {(seedGlobalIds: number[], opts?: SliceOptions) => { symbols: ViewSymbol[], frontier: { symbol: ViewSymbol, score: number, why: string }[] }} [sliceWithMetadata]
+ * @property {(seedGlobalIds: number[], opts?: SliceOptions) => Promise<{ symbols: ViewSymbol[], frontier: { symbol: ViewSymbol, score: number, why: string }[] }>} [sliceWithMetadata]
  *   Weighted neighborhood plus top not-yet-included expansion candidates.
  *
- * @property {(paths: string[]) => ViewSymbol[]} blastRadius
+ * @property {(paths: string[]) => Promise<ViewSymbol[]>} blastRadius
  *   All symbols that transitively reference any symbol defined in any of
  *   the given files. Used by assessor / planner to scope reviews.
  *
- * @property {(content_hash: string, local_id: number) => ViewSymbol | null} getByContentLocal
+ * @property {(content_hash: string, local_id: number) => Promise<ViewSymbol | null>} getByContentLocal
  *   Look up a single symbol by its stable cross-view identity
  *   `(content_hash, local_id)`. The view-local `global_id` is unstable,
  *   so retrieval handlers that receive a SymbolId — encoded as
  *   `"<content_hash>:<local_id>"` — use this to resolve back to a
  *   ViewSymbol regardless of which view was queried last.
  *
- * @property {(content_hash: string) => boolean} [hasContentHash]
+ * @property {(content_hash: string) => Promise<boolean>} [hasContentHash]
  *   Fast liveness check for a source blob represented in the current view.
- * @property {(repo_rel_path: string) => string | null} [contentHashForPath]
- * @property {(content_hash: string) => boolean} [hasSnapshotContentHash]
+ * @property {(repo_rel_path: string) => Promise<string | null>} [contentHashForPath]
+ * @property {(content_hash: string) => Promise<boolean>} [hasSnapshotContentHash]
  *
- * @property {(opts?: { limit?: number, pathPrefix?: string }) => string[]} [indexedPaths]
+ * @property {(opts?: { limit?: number, pathPrefix?: string }) => Promise<string[]>} [indexedPaths]
  *   Bounded, lexically ordered inventory of paths in the view snapshot.
- * @property {(names: string[], opts?: { limit?: number, pathPrefix?: string }) => string[]} [indexedPathsWithSymbols]
+ * @property {(names: string[], opts?: { limit?: number, pathPrefix?: string }) => Promise<string[]>} [indexedPathsWithSymbols]
  *   Bounded, lexically ordered paths containing an exact symbol-name match.
  *   Name and path filters are applied in storage before the result limit.
  *
- * @property {(opts?: { limit?: number, pathPrefix?: string }) => ViewSymbol[]} allSymbols
+ * @property {(opts?: { limit?: number, pathPrefix?: string }) => Promise<ViewSymbol[]>} allSymbols
  *   Enumerate every symbol in the view. Used by stats, overview, and
  *   delta computation where FTS-based search cannot guarantee full
  *   coverage. Callers should pass a `limit` for large views; consumers
@@ -292,7 +292,7 @@
 /**
  * @typedef {Object} View
  *
- * @property {() => ViewMeta} meta
+ * @property {() => Promise<ViewMeta>} meta
  *
  * @property {ViewQuery} query
  *
@@ -341,7 +341,7 @@
  *   outPath: string,
  *   options?: BuildOptions,
  *   onProgress?: ((event: { phase: string, current: number, total: number }) => void) | null,
- * }) => ViewMeta} buildFrom
+ * }) => Promise<ViewMeta>} buildFrom
  *   Build a view at `outPath` that represents `branch` at `atSeq`. The
  *   file at `outPath` must not exist; builder creates it. Walks branch
  *   lineage to assemble path_to_blob, then materializes all reachable
@@ -351,8 +351,9 @@
  *   view: View,
  *   ledger: Ledger,
  *   entries: LedgerEntry[],
+ *   options?: BuildOptions,
  *   onProgress?: ((event: { phase: string, current: number, total: number }) => void) | null,
- * }) => ViewMeta} incrementalApply
+ * }) => Promise<ViewMeta>} incrementalApply
  *   Apply `entries` (all from the same branch, in seq order, all with seq
  *   greater than `view.meta().ledger_seq`) to an already-built view.
  *   Mutates the view DB. Returns updated ViewMeta.
@@ -393,7 +394,7 @@
  * @property {() => string[]} languages
  *   Languages this adapter supports. Lowercase tags matching SymbolRow.lang.
  *
- * @property {(args: { bytes: Buffer | string, repo_rel_path: string, lang?: string }) => ParseResult} [parseBuffer]
+ * @property {(args: { bytes: Buffer | string, repo_rel_path: string, lang?: string }) => Promise<ParseResult>} [parseBuffer]
  *   Optional zero-copy entry point used by warm jobs after they have already
  *   read bytes to compute the content hash.
  */

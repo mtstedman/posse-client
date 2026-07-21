@@ -148,7 +148,7 @@ export async function enqueueAtlasSelfRepairInWorker({
   targetBranch = "main",
   onError = undefined,
   timeoutMs = 120_000,
-} = {}) {
+}) {
   if (config?.enabled === false) {
     return { ok: false, skipped: "atlas_disabled", summary: "atlas disabled", layers: [], actions: [] };
   }
@@ -306,6 +306,7 @@ function atlasBootFreshnessRequiresFullWarm(viewStatus = null) {
   return /layer-merge|schema|format/.test(reason);
 }
 
+/** @param {{ ledgerPresent?: boolean, mainViewPresent?: boolean, viewStatus?: any, policy?: string }} [state] */
 function atlasBootRequiresFullWarm({ ledgerPresent, mainViewPresent, viewStatus = null, policy = "smart" } = {}) {
   if (policy === "always") return true;
   if (!ledgerPresent || !mainViewPresent) return true;
@@ -316,6 +317,7 @@ function atlasBootRequiresFullWarm({ ledgerPresent, mainViewPresent, viewStatus 
   return false;
 }
 
+/** @param {{ ledgerPresent?: boolean, mainViewPresent?: boolean, viewStatus?: any }} [state] */
 function atlasBootIndexCurrent({ ledgerPresent, mainViewPresent, viewStatus = null } = {}) {
   return !!(
     ledgerPresent
@@ -327,6 +329,7 @@ function atlasBootIndexCurrent({ ledgerPresent, mainViewPresent, viewStatus = nu
   );
 }
 
+/** @param {{ ledgerPresent?: boolean, mainViewPresent?: boolean, viewStatus?: any, policy?: string, purpose?: string }} [state] */
 function atlasBootIndexNotice({
   ledgerPresent,
   mainViewPresent,
@@ -753,6 +756,7 @@ function decorateWorkerError(err, extra = {}) {
   return err;
 }
 
+/** @param {{ ledgerDbPath: string, repoRoot: string, defaultBranch: string, mainViewDbPath: string, config?: Record<string, any>, onProgress?: ((event: any) => void) | null, timeoutMs?: number | null, testBlockMs?: number, purpose?: string }} args */
 async function runAtlasV2BootWarmWorkerThread({
   ledgerDbPath,
   repoRoot,

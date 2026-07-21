@@ -232,7 +232,7 @@ function rootStats(root) {
  *   content: string,
  *   version?: number | null,
  *   updatedAt?: string,
- *   metadata?: Record<string, unknown>,
+ *   metadata?: { eventType?: unknown, timestamp?: unknown, language?: unknown, dirty?: unknown, cursor?: unknown, selections?: unknown },
  * }} args
  * @returns {Promise<OverlayEntry>}
  */
@@ -274,6 +274,10 @@ async function makeEntry({ root, filePath, sessionId, content, version = null, u
 }
 
 /** Rehydrate persisted overlay content; symbol consumers parse it lazily. */
+/**
+ * @param {{ root: string, filePath: string, sessionId: string, content: string, version?: number | null, updatedAt?: string, metadata?: { eventType?: unknown, timestamp?: unknown, language?: unknown, dirty?: unknown, cursor?: unknown, selections?: unknown } }} args
+ * @returns {OverlayEntry}
+ */
 function makePersistedEntry({ root, filePath, sessionId, content, version = null, updatedAt, metadata = {} }) {
   const eventType = normalizeEventType(metadata.eventType);
   return {
@@ -383,7 +387,7 @@ function loadPersistedBuffers(root) {
 
 /**
  * @param {{ repoRoot?: string, versionId: string, params: BufferPushParams }} args
- * @returns {ReturnType<typeof okEnvelope<BufferPushData>> | ReturnType<typeof errorEnvelope>}
+ * @returns {Promise<ReturnType<typeof okEnvelope<BufferPushData>> | ReturnType<typeof errorEnvelope>>}
  */
 export async function bufferPush({ repoRoot, versionId, params }) {
   if (!params.filePath || !isCanonicalRepoPath(params.filePath)) {
@@ -729,7 +733,7 @@ export function makeOverlayReadFile({ repoRoot, sessionId, baseReadFile }) {
 
 /**
  * @param {{ repoRoot?: string, sessionId?: string, filePath?: string }} args
- * @returns {{ entry: OverlayEntry, symbol: ViewSymbol }[]}
+ * @returns {Promise<{ entry: OverlayEntry, symbol: ViewSymbol }[]>}
  */
 export async function getOverlaySymbols({ repoRoot, sessionId, filePath } = {}) {
   const entries = await getOverlayEntries({ repoRoot, sessionId, filePath });
@@ -808,7 +812,7 @@ export async function getOverlayEntries({ repoRoot, sessionId, filePath } = {}) 
 
 /**
  * @param {{ repoRoot?: string, sessionId?: string, symbolId?: string }} args
- * @returns {{ entry: OverlayEntry, symbol: ViewSymbol } | null}
+ * @returns {Promise<{ entry: OverlayEntry, symbol: ViewSymbol } | null>}
  */
 export async function findOverlaySymbol({ repoRoot, sessionId, symbolId }) {
   const parsed = parseSymbolId(symbolId);
@@ -820,7 +824,7 @@ export async function findOverlaySymbol({ repoRoot, sessionId, symbolId }) {
 
 /**
  * @param {{ repoRoot?: string, sessionId?: string, ref?: { name?: string, file?: string, kind?: string } }} args
- * @returns {{ entry: OverlayEntry, symbol: ViewSymbol } | null}
+ * @returns {Promise<{ entry: OverlayEntry, symbol: ViewSymbol } | null>}
  */
 export async function findOverlaySymbolByRef({ repoRoot, sessionId, ref }) {
   if (!ref?.name) return null;

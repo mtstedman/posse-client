@@ -40,7 +40,8 @@ const DEFAULT_POSSE_ROOT = path.resolve(THIS_DIR, "..", "..", "..", "..", "..", 
  *   args: string[],
  *   markers: string[],
  *   sourceExtensions: string[],
- *   sourceLanguages: string[],
+ *   sourceLanguages?: string[],
+ *   requiresMarker?: boolean,
  * }} ScipIndexerCandidate
  *
  * @typedef {{
@@ -52,6 +53,7 @@ const DEFAULT_POSSE_ROOT = path.resolve(THIS_DIR, "..", "..", "..", "..", "..", 
  * }} ScipIndexerLookup
  */
 
+/** @type {readonly Readonly<ScipIndexerCandidate>[]} */
 const SCIP_INDEXERS = Object.freeze([
   Object.freeze({
     id: "typescript",
@@ -475,7 +477,7 @@ const SCIP_FILESET_INPUTS_BY_INDEXER = Object.freeze({
  * extensions plus language config/dependency files. A docs-only commit should
  * therefore leave every language fileset hash unchanged.
  *
- * @param {{ repoRoot: string, plan: ScipStagePlan, ref?: string | null }} input
+ * @param {{ repoRoot?: string, plan?: Partial<ScipStagePlan>, ref?: string | null }} input
  * @returns {{ ok: boolean, hash: string | null, files: number, source: string, ref: string | null, reason?: string }}
  */
 export function computeScipPlanFilesetHash({ repoRoot, plan, ref = null } = {}) {
@@ -519,7 +521,7 @@ export function computeScipPlanFilesetHash({ repoRoot, plan, ref = null } = {}) 
  * This deliberately shares the fileset source with computeScipPlanFilesetHash:
  * gitignore-aware worktree entries first, filesystem scan only as a fallback.
  *
- * @param {{ repoRoot: string, plan: ScipStagePlan, ref?: string | null }} input
+ * @param {{ repoRoot?: string, plan?: Partial<ScipStagePlan>, ref?: string | null }} input
  * @returns {{ ok: boolean, paths: string[], files: number, source: string, ref: string | null, reason?: string }}
  */
 export function computeScipPlanFilesetManifest({ repoRoot, plan, ref = null } = {}) {

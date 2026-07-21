@@ -210,8 +210,9 @@ function viewLayerMergeMismatch(meta, expected) {
  *   timeoutMs?: number,
  *   intervalMs?: number,
  *   layerMerge?: boolean | null,
+ *   allowStale?: boolean,
  * }} args
- * @returns {Promise<ReturnType<typeof openViewWithMeta> & { freshness?: ReturnType<typeof viewFreshness>, attempts?: number }>}
+ * @returns {Promise<ReturnType<typeof openViewWithMeta> & { freshness?: ReturnType<typeof viewFreshness>, attempts?: number, stale?: boolean }>}
  */
 export async function waitForCurrentView({
   viewPaths,
@@ -232,7 +233,7 @@ export async function waitForCurrentView({
     seen.add(p);
     paths.push(p);
   }
-  /** @type {ReturnType<typeof openViewWithMeta> & { freshness?: ReturnType<typeof viewFreshness>, attempts?: number }} */
+  /** @type {ReturnType<typeof openViewWithMeta> & { freshness?: ReturnType<typeof viewFreshness>, attempts?: number, stale?: boolean }} */
   let last = {
     ok: false,
     exists: false,

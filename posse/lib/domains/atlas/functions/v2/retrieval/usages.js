@@ -18,7 +18,7 @@ const FILE_GROUP_LIMIT = 200;
  * before deciding whether to spend tokens on full cards.
  *
  * @param {{ view: View, versionId: string, params: SymbolUsagesParams }} args
- * @returns {ReturnType<typeof okEnvelope<SymbolUsagesData>> | ReturnType<typeof errorEnvelope>}
+ * @returns {Promise<ReturnType<typeof okEnvelope<SymbolUsagesData>> | ReturnType<typeof errorEnvelope>>}
  */
 export async function symbolUsages({ view, versionId, params }) {
   const parsed = parseSymbolId(params.symbolId);

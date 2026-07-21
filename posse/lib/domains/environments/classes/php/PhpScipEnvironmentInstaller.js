@@ -59,7 +59,10 @@ export class PhpScipEnvironmentInstaller extends ScipLanguageEnvironmentInstalle
       if (!resolved) return this.failed("PHP/Composer not found; install PHP CLI or composer, then retry");
       return resolved;
     });
-    if (composer?.ok === false) return composer;
+    if (!composer || !("command" in composer)) {
+      if (composer && "language" in composer) return composer;
+      return this.failed("Composer resolution returned an invalid command");
+    }
 
     const install = await this.runStep(4, "run composer install", async () => {
       const run = await runCommand(composer.command, [...composer.args, "install"], {

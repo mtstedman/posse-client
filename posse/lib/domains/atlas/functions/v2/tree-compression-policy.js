@@ -23,6 +23,10 @@ export function shouldRunMlTreeCompressionReseed({ purpose, mode, triggerEvent }
   return { run: true, reason: null };
 }
 
+/**
+ * @param {unknown} value
+ * @returns {"off" | "deterministic" | "ml"}
+ */
 export function normalizeTreeCompressionMode(value) {
   const raw = String(value || "deterministic").trim().toLowerCase();
   if (raw === "off" || raw === "deterministic" || raw === "ml") return raw;
