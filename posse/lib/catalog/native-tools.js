@@ -173,6 +173,9 @@ export const TOOL_AGENT_HANDOFF = {
             depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 40 } },
             target: {
               type: "object",
+              description:
+                "Profile target: researcher.pipeline.v1, dev.result.v1, artificer.result.v1, and assessor.verdict.v1 use pipeline/$pipeline; " +
+                "researcher.report.v1 uses result/$result; planner.plan.v1 uses agent/dev|artificer or system/human_input|promote.",
               properties: {
                 kind: { type: "string", enum: ["agent", "system", "pipeline", "result"] },
                 role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "$pipeline", "$result"] },
@@ -183,14 +186,18 @@ export const TOOL_AGENT_HANDOFF = {
             intent: { type: "string", minLength: 1, maxLength: 1000 },
             report: {
               type: "object",
+              description:
+                "Allowed fields are summary, claims, scope, constraints, success_criteria, questions, and payload. " +
+                "Omit payload or pass {}; put repository paths in scope and explanation in summary or claims.",
               properties: {
                 summary: { type: "string", maxLength: 2000 },
                 claims: {
                   type: "array",
                   maxItems: 12,
                   description:
-                    'Exact tuple form: [["claim", {"proof":["#ref:1-3"], "support":["#ref"], "decoy":[["#ref","reason"]], "prose":"optional synthesis"}]]. ' +
-                    "The evidence object is optional. Evidence lanes accept only opaque hash-ref selectors, never file paths or path:line strings.",
+                    'Exact tuple form: [["specific claim text", {"proof":["#ref:1-3"], "support":["#ref"], "decoy":[["#ref","reason"]], "prose":"optional synthesis without refs"}]]. ' +
+                    "The evidence object is optional. Put hash refs only in proof, support, and decoy selector positions; never put them in claim text or prose. " +
+                    "Evidence lanes accept only opaque hash-ref selectors, never file paths or path:line strings.",
                   items: {
                     type: "array",
                     minItems: 1,
@@ -225,7 +232,12 @@ export const TOOL_AGENT_HANDOFF = {
                 constraints: { type: "array", maxItems: 50, items: { type: "string", maxLength: 1000 } },
                 success_criteria: { type: "array", maxItems: 50, items: { type: "string", maxLength: 1000 } },
                 questions: { type: "array", maxItems: 50, items: { type: "string", maxLength: 1000 } },
-                payload: { type: "object", properties: {}, additionalProperties: false },
+                payload: {
+                  type: "object",
+                  description: "Reserved. Omit this field or pass an empty object.",
+                  properties: {},
+                  additionalProperties: false,
+                },
               },
               required: ["summary", "claims"],
               additionalProperties: false,
