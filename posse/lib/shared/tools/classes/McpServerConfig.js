@@ -933,7 +933,13 @@ export class McpServerConfig {
       error.code = "POSSE_AGENT_MCP_GATE_REQUIRED";
       throw error;
     }
-    const { bootPayload, resolvedAtlasConfig, allowImageGeneration } = buildDeterministicMcpBootPayload(role, opts);
+    const { bootPayload, resolvedAtlasConfig, allowImageGeneration } = buildDeterministicMcpBootPayload(role, {
+      ...opts,
+      // The immutable Agent gate is the authority for this capability. Keep
+      // provider-side projection and telemetry aligned with the signed role
+      // contract instead of requiring every adapter to copy this flag.
+      agentHandoff: opts.mcpGate?.contractBootConfig?.agentHandoff === true,
+    });
     let remoteResolution = null;
     let remoteResolutionError = null;
     const remoteStartedAt = Date.now();

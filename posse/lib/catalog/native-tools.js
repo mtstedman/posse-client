@@ -157,6 +157,10 @@ export const TOOL_AGENT_HANDOFF = {
       outcome: {
         type: "string",
         enum: ["success", "complete", "gap", "input_required", "failed", "blocked", "pass", "fail", "needs_replan", "needs_review"],
+        description:
+          "Profile-specific outcome: researcher.pipeline.v1=success|gap|input_required; researcher.report.v1=complete; " +
+          "planner.plan.v1=success; dev.result.v1 and artificer.result.v1=complete|failed|blocked; " +
+          "assessor.verdict.v1=pass|fail|needs_replan|needs_review|blocked.",
       },
       handoffs: {
         type: "array",
@@ -184,6 +188,9 @@ export const TOOL_AGENT_HANDOFF = {
                 claims: {
                   type: "array",
                   maxItems: 12,
+                  description:
+                    'Exact tuple form: [["claim", {"proof":["#ref:1-3"], "support":["#ref"], "decoy":[["#ref","reason"]], "prose":"optional synthesis"}]]. ' +
+                    "The evidence object is optional. Evidence lanes accept only opaque hash-ref selectors, never file paths or path:line strings.",
                   items: {
                     type: "array",
                     minItems: 1,
