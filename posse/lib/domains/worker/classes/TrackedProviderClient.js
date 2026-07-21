@@ -351,6 +351,7 @@ function agentJobAttachment(opts = {}, context = {}) {
     .includes("tools.sub_agent");
   return {
     role: opts.role,
+    agentCallRole: opts._agentCallRole || null,
     providerName: context.providerName,
     cwd: opts.mcpCwd || opts.cwd || context.cwd || context.projectDir || process.cwd(),
     jobId: context.jobId ?? opts.jobId ?? null,

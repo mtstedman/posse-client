@@ -499,6 +499,10 @@ export function narrowBootConfigToSignedClaims(signedBootConfig = {}, callerBoot
 export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attachmentBootConfig = {}) {
   const signed = plainObject(signedBootConfig) || {};
   const attachment = plainObject(attachmentBootConfig) || {};
+  const agentCallRole = String(attachment.agentCallRole || "").trim().toLowerCase();
+  const runtimeRole = signed.coordinationChild === true && agentCallRole === "subagent"
+    ? "subagent"
+    : signed.role;
   const signedDb = normalizeProjectDbCapability(
     signed.projectDbCapability || (signed.projectDbWrite === true ? "write" : "none"),
   );
@@ -515,6 +519,7 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
   }
   return {
     ...signed,
+    role: runtimeRole,
     agentId: signed.agentId || "",
     scopeBindingMode: "dispatcher",
     cwd: String(attachment.cwd || ""),
