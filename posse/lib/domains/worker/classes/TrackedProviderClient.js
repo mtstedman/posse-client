@@ -1051,11 +1051,22 @@ export class TrackedProviderClient {
       }
       const handoffRequired = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffV1 === true
         && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.agent_handoff_v1 === true;
-      const handoffFinalization = finalizeAgentHandoffForProvider({
-        agentCallId,
-        output: providerOutput,
-        required: handoffRequired,
-      });
+      let handoffFinalization;
+      try {
+        handoffFinalization = finalizeAgentHandoffForProvider({
+          agentCallId,
+          output: providerOutput,
+          required: handoffRequired,
+        });
+      } catch (error) {
+        error.output ??= providerOutput;
+        error.stats = {
+          ...stats,
+          output: stats.output ?? providerOutput,
+          outputChars: stats.outputChars ?? providerOutput.length,
+        };
+        throw error;
+      }
       const output = handoffFinalization.output;
       if (handoffFinalization.applied) {
         recordObservation({
