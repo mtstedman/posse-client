@@ -6,6 +6,7 @@ import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js"
 const DEFAULT_RPC_TIMEOUT_MS = 150000;
 const DEFAULT_RPC_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const gateTokens = new WeakMap();
+const gateState = new WeakMap();
 
 function freezeJson(value) {
   return deepFreeze(JSON.parse(JSON.stringify(value || {})));
@@ -101,6 +102,12 @@ export class McpGate {
   /** @type {string | undefined} */
   token;
 
+  /** @type {boolean} */
+  disposed;
+
+  /** @type {Record<string, any> | null} */
+  binding;
+
   /** @param {McpGateOptions} [options] */
   constructor({
     id,
@@ -148,14 +155,23 @@ export class McpGate {
         enumerable: false,
         configurable: false,
       },
+      disposed: {
+        get: () => gateState.get(this)?.disposed !== false,
+        enumerable: true,
+        configurable: false,
+      },
+      binding: {
+        get: () => gateState.get(this)?.binding || null,
+        enumerable: true,
+        configurable: false,
+      },
     });
     gateTokens.set(this, String(token));
-    this.disposed = false;
-    this.binding = null;
+    gateState.set(this, { disposed: false, binding: null });
   }
 
-  /** @param {{ role?: string, providerName?: string | null }} [request] */
-  assertCompatible({ role, providerName = null } = {}) {
+  /** @param {{ role?: string, providerName?: string | null, coordinationChild?: boolean | null }} [request] */
+  assertCompatible({ role, providerName = null, coordinationChild = null } = {}) {
     const requestedRole = String(role || "").trim().toLowerCase();
     const requestedProvider = String(providerName || "").trim().toLowerCase();
     if (requestedRole && requestedRole !== this.role) {
@@ -165,6 +181,13 @@ export class McpGate {
       throw gateError(
         "POSSE_MCP_GATE_PROVIDER_MISMATCH",
         `MCP gate provider ${this.providerName} cannot attach to ${requestedProvider}`,
+      );
+    }
+    if (coordinationChild != null
+      && (this.contractBootConfig?.coordinationChild === true) !== (coordinationChild === true)) {
+      throw gateError(
+        "POSSE_MCP_GATE_COORDINATION_IDENTITY_MISMATCH",
+        "MCP gate citation-child identity does not match the requested Agent dispatch",
       );
     }
     if (this.disposed) throw gateError("POSSE_MCP_GATE_DISPOSED", "MCP gate has been disposed");
@@ -181,7 +204,7 @@ export class McpGate {
     });
     const { token: rotatedToken, ...publicResult } = result || {};
     if (rotatedToken) gateTokens.set(this, String(rotatedToken));
-    this.binding = freezeJson({
+    gateState.get(this).binding = freezeJson({
       jobId: attachment.jobId ?? null,
       workItemId: attachment.workItemId ?? null,
       attemptId: attachment.attemptId ?? null,
@@ -215,7 +238,7 @@ export class McpGate {
     });
     const { token: rotatedToken, ...publicResult } = result || {};
     if (rotatedToken) gateTokens.set(this, String(rotatedToken));
-    this.binding = null;
+    gateState.get(this).binding = null;
     return publicResult;
   }
 
@@ -342,8 +365,9 @@ export class McpGate {
 
   dispose({ reason = "agent_disposed" } = {}) {
     if (this.disposed) return { released: false, reason: "already_disposed" };
-    this.disposed = true;
-    this.binding = null;
+    const state = gateState.get(this);
+    state.disposed = true;
+    state.binding = null;
     return this.owner.unregisterSession({
       sessionId: this.ownerSession.sessionId,
       token: this.token,

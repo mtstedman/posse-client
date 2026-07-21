@@ -148,6 +148,7 @@ function normalizeContractShape(contract = {}) {
     shellMode: contract.shellMode || "none",
     platform: contract.platform || process.platform,
     fallbackReads: optionalNonNegativeNumber(contract.fallbackReads),
+    agentHandoffCompactV1: contract.agentHandoffCompactV1 === true,
     scope: {
       modifyFiles: Array.isArray(contract?.scope?.modifyFiles) ? [...contract.scope.modifyFiles] : [],
       createFiles: Array.isArray(contract?.scope?.createFiles) ? [...contract.scope.createFiles] : [],
@@ -482,6 +483,7 @@ export class ToolContract {
     platform = process.platform,
     includeBaseTools = true,
     issuedToolSurface = null,
+    agentHandoffCompactV1 = false,
   } = {}) {
     const toolNames = includeBaseTools
       ? ToolCatalog.forRole(role, {
@@ -506,6 +508,7 @@ export class ToolContract {
       shellMode,
       platform,
       fallbackReads: optionalNonNegativeNumber(fallbackReads),
+      agentHandoffCompactV1: agentHandoffCompactV1 === true,
       issuedToolSurface: Array.isArray(issuedToolSurface) ? issuedToolSurface : null,
       scope: {
         modifyFiles: Array.isArray(scopedFiles) ? scopedFiles : [],

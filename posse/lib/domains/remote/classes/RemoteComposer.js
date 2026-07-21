@@ -18,7 +18,10 @@ import {
   estimateTokensFromChars,
   resolveContextCompactionConfig,
 } from "../../settings/functions/context-compaction.js";
-import { normalizeRemoteIssuedPolicy } from "../../../shared/tools/functions/issued-tool-policy.js";
+import {
+  deriveRemoteToolSurfaceNarrowing,
+  normalizeRemoteIssuedPolicy,
+} from "../../../shared/tools/functions/issued-tool-policy.js";
 
 const DEFAULT_LOCAL_ENRICHMENT_ENABLED = false;
 
@@ -106,6 +109,9 @@ export class RemoteComposer {
     });
     const started = this.now();
     const compiledResponse = await this.client.compile(request);
+    const authorityIssuance = typeof this.client.consumeCompileIssuance === "function"
+      ? this.client.consumeCompileIssuance(compiledResponse)
+      : null;
     const response = atlasMemoryEnabled() && request?.options?.memory_mode !== "off"
       ? compiledResponse : withoutRemoteMemoryContractFields(compiledResponse);
     const latencyMs = Math.max(0, this.now() - started);
@@ -145,7 +151,7 @@ export class RemoteComposer {
         wiId: packet?.work_item_id || null,
       });
     }
-    applyRemoteIssuanceToPacket(packet, response);
+    applyRemoteIssuanceToPacket(packet, response, { authorityIssuance });
     const systemPrompt = String(response?.system_prompt || "").trim() || null;
     const stableContext = String(response?.stable_context || "").trim() || null;
     const remoteUserPrompt = String(response?.user_prompt || "").trim() || null;
@@ -343,9 +349,9 @@ function recordPromptSectionAccounting(packet, composed, { readSetting = getSett
   } catch { /* accounting must never break compose */ }
 }
 
-function applyRemoteIssuanceToPacket(packet, response) {
+function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = null } = {}) {
   if (!packet || !response) return;
-  const issuance = response.issuance || null;
+  const issuance = authorityIssuance || response.issuance || null;
   const localPolicy = localPolicyCeiling(packet.tool_policy);
   const issued = normalizeRemoteIssuedPolicy(issuance, {
     expectedRole: packet.recipient || packet.job_type,
@@ -354,6 +360,8 @@ function applyRemoteIssuanceToPacket(packet, response) {
   const handoffEnabled = issued.valid
     && localHandoffEnabled
     && issued.coordination?.agentHandoffV1 === true;
+  const compactHandoffEnabled = handoffEnabled
+    && issued.coordination?.agentHandoffCompactV1 === true;
   const localSubAgentEnabled = packet?.agent_coordination?.sub_agent_v1 === true;
   const subAgentEnabled = issued.valid
     && handoffEnabled
@@ -365,7 +373,7 @@ function applyRemoteIssuanceToPacket(packet, response) {
     (name) => (name !== "tools.agent_handoff" || handoffEnabled)
       && (name !== "tools.sub_agent" || subAgentEnabled),
   );
-  packet.remote_issuance = {
+  const projectedIssuance = {
     ...(issuance && typeof issuance === "object" ? issuance : {}),
     source: issued.valid ? "posse-remote" : "invalid",
     role: issued.role,
@@ -382,18 +390,26 @@ function applyRemoteIssuanceToPacket(packet, response) {
     },
     coordination: {
       agent_handoff_v1: handoffEnabled,
+      agent_handoff_compact_v1: compactHandoffEnabled,
       sub_agent_v1: subAgentEnabled,
       sub_agent_next_input_v1: subAgentNextInputEnabled,
       status: "experimental",
     },
   };
+  packet.remote_issuance = deriveRemoteToolSurfaceNarrowing(
+    authorityIssuance,
+    projectedIssuance,
+    { expectedRole: packet.recipient || packet.job_type },
+  ) || projectedIssuance;
   packet.remote_tool_surface = effectiveToolSurface.slice();
   packet.agent_coordination = {
     ...(packet.agent_coordination || {}),
     agent_handoff_v1: handoffEnabled,
+    agent_handoff_compact_v1: compactHandoffEnabled,
     sub_agent_v1: subAgentEnabled,
     sub_agent_next_input_v1: subAgentNextInputEnabled,
     remote_acknowledged: issued.coordination?.agentHandoffV1 === true,
+    compact_remote_acknowledged: issued.coordination?.agentHandoffCompactV1 === true,
     sub_agent_remote_acknowledged: issued.coordination?.subAgentV1 === true,
     sub_agent_next_input_remote_acknowledged: issued.coordination?.subAgentNextInputV1 === true,
   };

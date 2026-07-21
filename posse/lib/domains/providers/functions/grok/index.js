@@ -399,6 +399,7 @@ export async function callProvider(promptText, {
     allowWrite,
     projectDbWrite,
     issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
+    agentHandoffCompactV1: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
     needsImageGeneration,
     scopedFiles,
     createFiles,

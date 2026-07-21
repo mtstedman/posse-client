@@ -17,6 +17,7 @@ import { processVerdict } from "../roles/assessor.js";
 import {
   attachAssessmentDiffContextAsync,
 } from "../../../handoff/functions/index.js";
+import { isRetryableTerminalHandoffError } from "../../../handoff/functions/agent-handoff.js";
 import {
   isArtifactMode,
 } from "../../../artifacts/functions/index.js";
@@ -35,6 +36,9 @@ import {
   assessmentRetryFallbackReads as _assessmentRetryFallbackReads,
   buildPriorAssessmentFindings as _buildPriorAssessmentFindings,
 } from "../../functions/execution/assessment-policy.js";
+import {
+  assessmentTerminalHandoffRetryDecision,
+} from "../../functions/helpers/assessment-pipeline.js";
 import {
   logAttemptSkippedStaleLease as _logAttemptSkippedStaleLease,
 } from "../../functions/execution/attempt-logging.js";
@@ -66,6 +70,50 @@ const ATTEMPT_STATUS_MAP = {
   waiting_on_human: "interrupted",
   blocked: "blocked",
 };
+
+export function retryAssessmentOnlyAfterTerminalHandoffError(
+  worker,
+  job,
+  leaseToken,
+  error,
+  { attemptId = null, delayMs = 2_000, now = () => Date.now() } = {},
+) {
+  if (!isRetryableTerminalHandoffError(error)) return false;
+  preserveAssessmentOnlyRetryPayload(worker, job);
+  const retryDecision = assessmentTerminalHandoffRetryDecision(job.id, error, {
+    currentAttemptId: attemptId,
+  });
+  if (!retryDecision.retryWithoutPenalty) {
+    worker.emit(
+      job.id,
+      `${C.yellow}[assess-only] Terminal handoff retry limit reached (${retryDecision.failureCount}/${retryDecision.penaltyFreeRetryLimit}) — using normal attempt budget${C.reset}`,
+    );
+    return false;
+  }
+  const readyAt = new Date(now() + delayMs).toISOString();
+  worker.emit(job.id, `${C.yellow}[assess-only] Missing terminal handoff — retrying assessor only${C.reset}`);
+  worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+  return true;
+}
+
+export function preserveAssessmentOnlyRetryPayload(worker, job) {
+  const retryPayload = worker.parsePayload(job);
+  retryPayload._assess_only = true;
+  const nextPayloadJson = JSON.stringify(retryPayload);
+  updateJobPayload(job.id, nextPayloadJson);
+  job.payload_json = nextPayloadJson;
+  return retryPayload;
+}
+
+export function resolveAssessmentOnlyProvider(job = {}) {
+  const role = "assessor";
+  const provider = getProvider(role, job.provider || undefined);
+  return {
+    role,
+    provider,
+    providerName: String(job.provider || provider?.name || "").trim() || null,
+  };
+}
 
 export class AssessmentHandoffAdapter {
   constructor(worker) {
@@ -136,10 +184,9 @@ export class AssessmentHandoffAdapter {
     }
 
     // Re-run assessment with the stored output (reuse the existing attempt).
-    const role = worker._roleFor(job.job_type);
-    const provider = getProvider(role, job.provider || undefined);
+    const { role, provider, providerName } = resolveAssessmentOnlyProvider(job);
     const assessAttemptCount = assessAttempt.attemptCount || (prevAttempts.length + 1);
-    const resolveAssessModel = (tier) => tierModelName(tier, { role, providerName: job.provider || undefined });
+    const resolveAssessModel = (tier) => tierModelName(tier, { role, providerName });
     const effectiveTier = assessModelTierOverride || provider.escalateTier(job.model_tier, assessAttemptCount, { resolveModel: resolveAssessModel });
     const internalAssessRetries = countInternalAssessmentRetries(job.id);
     const priorAssessmentFindings = _buildPriorAssessmentFindings(job.id);
@@ -180,6 +227,7 @@ export class AssessmentHandoffAdapter {
           reasoningEffort: assessReasoningEffortOverride || job.reasoning_effort || "medium",
           fallbackReads: _assessmentRetryFallbackReads(effectiveTier, internalAssessRetries),
           priorAssessmentFindings,
+          providerOverride: providerName,
           cwd: (isArtifactMode(jobPayloadForAssess.task_mode || "code") && jobPayloadForAssess.output_root)
             ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
             : (wtPath || worker.projectDir),
@@ -218,7 +266,15 @@ export class AssessmentHandoffAdapter {
         error_text: assessErr.message,
       });
       worker.emit(job.id, `${C.red}[assess-only] Assessment failed: ${assessErr.message.split("\n")[0]}${C.reset}`);
-      worker._retryOrFail(job, leaseToken, `Assessment failed: ${assessErr.message}`);
+      if (!retryAssessmentOnlyAfterTerminalHandoffError(worker, job, leaseToken, assessErr, {
+        attemptId: assessAttempt.attempt.id,
+      })) {
+        // The developer's committed output remains authoritative. Any normal
+        // retry after an assessor infrastructure/provider failure must resume
+        // assessment instead of spending another developer call.
+        preserveAssessmentOnlyRetryPayload(worker, job);
+        worker._retryOrFail(job, leaseToken, `Assessment failed: ${assessErr.message}`);
+      }
     }
     return { handled: true, currentAttemptId: assessAttempt.attempt.id };
   }

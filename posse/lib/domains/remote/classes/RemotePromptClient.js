@@ -13,8 +13,25 @@ import { getPosseRemoteResponseSigningSecret } from "../functions/mode.js";
 import { runRemoteNativeRequestJson } from "../functions/native-client.js";
 
 const DEFAULT_REMOTE_PROMPT_TIMEOUT_MS = 60_000;
+const TRUSTED_COMPILE_ISSUANCES = new WeakSet();
+
+function deepFreezeJson(value) {
+  const clone = JSON.parse(JSON.stringify(value));
+  const freeze = (entry) => {
+    if (!entry || typeof entry !== "object" || Object.isFrozen(entry)) return entry;
+    for (const child of Object.values(entry)) freeze(child);
+    return Object.freeze(entry);
+  };
+  return freeze(clone);
+}
+
+export function isRemotePromptClientIssuance(value) {
+  return !!value && typeof value === "object" && TRUSTED_COMPILE_ISSUANCES.has(value);
+}
 
 export class RemotePromptClient {
+  #compileIssuances = new WeakMap();
+
   /**
    * @param {{
    *   baseUrl?: string,
@@ -72,12 +89,28 @@ export class RemotePromptClient {
   }
 
   async compile(request) {
-    return this.requestJsonWithRetries({
+    const response = await this.requestJsonWithRetries({
       path: "/v1/prompts/compile",
       method: "POST",
       body: request,
       operation: "remote prompt compile",
     }, isRetryableRemoteRequestError);
+    if (response && typeof response === "object") {
+      const issuance = response.issuance && typeof response.issuance === "object"
+        ? deepFreezeJson(response.issuance)
+        : null;
+      this.#compileIssuances.set(response, issuance);
+    }
+    return response;
+  }
+
+  consumeCompileIssuance(response) {
+    if (!response || !this.#compileIssuances.has(response)) return null;
+    const issuance = this.#compileIssuances.get(response);
+    this.#compileIssuances.delete(response);
+    if (!issuance) return null;
+    TRUSTED_COMPILE_ISSUANCES.add(issuance);
+    return issuance;
   }
 
   async compileOnce(request) {

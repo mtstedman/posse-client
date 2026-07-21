@@ -203,9 +203,23 @@ export function getAgentCallStats() {
       AVG(duration_ms) as avg_duration_ms,
       SUM(prompt_chars) as total_prompt_chars,
       SUM(output_chars) as total_output_chars,
-      SUM(input_tokens) as total_input_tokens,
-      SUM(cached_input_tokens) as total_cached_input_tokens,
-      SUM(output_tokens) as total_output_tokens,
+      CASE
+        WHEN SUM(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL OR cached_input_tokens IS NULL THEN 1 ELSE 0 END) > 0 THEN NULL
+        ELSE SUM(input_tokens)
+      END as total_input_tokens,
+      SUM(COALESCE(input_tokens, 0)) as measured_input_tokens,
+      CASE
+        WHEN SUM(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL OR cached_input_tokens IS NULL THEN 1 ELSE 0 END) > 0 THEN NULL
+        ELSE SUM(cached_input_tokens)
+      END as total_cached_input_tokens,
+      SUM(COALESCE(cached_input_tokens, 0)) as measured_cached_input_tokens,
+      CASE
+        WHEN SUM(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL OR cached_input_tokens IS NULL THEN 1 ELSE 0 END) > 0 THEN NULL
+        ELSE SUM(output_tokens)
+      END as total_output_tokens,
+      SUM(COALESCE(output_tokens, 0)) as measured_output_tokens,
+      SUM(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL OR cached_input_tokens IS NULL THEN 1 ELSE 0 END) as token_usage_unknown_calls,
+      SUM(CASE WHEN input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND cached_input_tokens IS NOT NULL THEN 1 ELSE 0 END) as token_usage_known_calls,
       SUM(turns_used) as total_turns_used,
       SUM(output_truncated) as output_truncated_count,
       SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succeeded,
@@ -544,9 +558,14 @@ export function listWorkItemsWithCallRollups({ limit = 200 } = {}) {
       COALESCE(ac.succeeded_calls, 0)  AS succeeded_calls,
       COALESCE(ac.failed_calls, 0)     AS failed_calls,
       COALESCE(ac.running_calls, 0)    AS running_calls,
-      COALESCE(ac.input_tokens, 0)     AS input_tokens,
-      COALESCE(ac.cached_input_tokens, 0) AS cached_input_tokens,
-      COALESCE(ac.output_tokens, 0)    AS output_tokens,
+      CASE WHEN ac.call_count IS NULL THEN 0 ELSE ac.input_tokens END AS input_tokens,
+      CASE WHEN ac.call_count IS NULL THEN 0 ELSE ac.cached_input_tokens END AS cached_input_tokens,
+      CASE WHEN ac.call_count IS NULL THEN 0 ELSE ac.output_tokens END AS output_tokens,
+      COALESCE(ac.measured_input_tokens, 0) AS measured_input_tokens,
+      COALESCE(ac.measured_cached_input_tokens, 0) AS measured_cached_input_tokens,
+      COALESCE(ac.measured_output_tokens, 0) AS measured_output_tokens,
+      COALESCE(ac.token_usage_unknown_calls, 0) AS token_usage_unknown_calls,
+      COALESCE(ac.token_usage_known_calls, 0) AS token_usage_known_calls,
       COALESCE(ac.total_duration_ms, 0) AS total_duration_ms,
       COALESCE(ac.cost_usd, 0)         AS cost_usd,
       COALESCE(jc.job_count, 0)        AS job_count,
@@ -559,9 +578,23 @@ export function listWorkItemsWithCallRollups({ limit = 200 } = {}) {
         SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded_calls,
         SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END) AS failed_calls,
         SUM(CASE WHEN status = 'running'   THEN 1 ELSE 0 END) AS running_calls,
-        SUM(COALESCE(input_tokens, 0))                    AS input_tokens,
-        SUM(COALESCE(cached_input_tokens, 0))             AS cached_input_tokens,
-        SUM(COALESCE(output_tokens, 0))                   AS output_tokens,
+        CASE
+          WHEN SUM(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL OR cached_input_tokens IS NULL THEN 1 ELSE 0 END) > 0 THEN NULL
+          ELSE SUM(input_tokens)
+        END AS input_tokens,
+        CASE
+          WHEN SUM(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL OR cached_input_tokens IS NULL THEN 1 ELSE 0 END) > 0 THEN NULL
+          ELSE SUM(cached_input_tokens)
+        END AS cached_input_tokens,
+        CASE
+          WHEN SUM(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL OR cached_input_tokens IS NULL THEN 1 ELSE 0 END) > 0 THEN NULL
+          ELSE SUM(output_tokens)
+        END AS output_tokens,
+        SUM(COALESCE(input_tokens, 0))                    AS measured_input_tokens,
+        SUM(COALESCE(cached_input_tokens, 0))             AS measured_cached_input_tokens,
+        SUM(COALESCE(output_tokens, 0))                   AS measured_output_tokens,
+        SUM(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL OR cached_input_tokens IS NULL THEN 1 ELSE 0 END) AS token_usage_unknown_calls,
+        SUM(CASE WHEN input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND cached_input_tokens IS NOT NULL THEN 1 ELSE 0 END) AS token_usage_known_calls,
         SUM(COALESCE(duration_ms, 0))                     AS total_duration_ms,
         SUM(COALESCE(cost_estimate_usd, 0))               AS cost_usd
       FROM agent_calls

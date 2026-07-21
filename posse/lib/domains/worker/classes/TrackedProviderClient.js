@@ -52,6 +52,7 @@ import {
 import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
 import {
   issuedToolSurfaceForProviderPolicy,
+  isRegisteredRemoteToolSurface,
   narrowProviderOptionsToRemoteIssuance,
 } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { finalizeAgentHandoffForProvider } from "../../handoff/functions/agent-handoff.js";
@@ -66,10 +67,13 @@ import {
   buildCitationChildPrompt,
   subAgentRuntime,
 } from "../../sub-agent/classes/SubAgentRuntime.js";
+import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 
-function agentHandoffToolSchemaChars(role) {
+function agentHandoffToolSchemaChars(role, compactCompletion = false) {
   const normalizedRole = String(role || "").trim().toLowerCase();
-  const schema = normalizedRole === "dev" || normalizedRole === "fix"
+  const schema = !compactCompletion
+    ? TOOL_AGENT_HANDOFF
+    : normalizedRole === "dev" || normalizedRole === "fix"
     ? TOOL_AGENT_HANDOFF_DEV
     : normalizedRole === "artificer"
       ? TOOL_AGENT_HANDOFF_ARTIFICER
@@ -356,6 +360,14 @@ function providerAgentIdentity(opts = {}, {
       agentHandoff,
       subAgent,
       coordinationChild,
+      ...(coordinationChild && opts._coordinationChildPermitId
+        ? { coordinationChildPermitId: opts._coordinationChildPermitId }
+        : {}),
+      ...(coordinationChild && opts._coordinationChildRemoteToolSurface
+        ? { remoteToolSurface: opts._coordinationChildRemoteToolSurface }
+        : (!coordinationChild && isRegisteredRemoteToolSurface(opts._remoteToolSurface)
+          ? { remoteToolSurface: opts._remoteToolSurface }
+          : {})),
     };
   }
   return {
@@ -365,6 +377,14 @@ function providerAgentIdentity(opts = {}, {
     agentHandoff,
     subAgent,
     coordinationChild,
+    ...(coordinationChild && opts._coordinationChildPermitId
+      ? { coordinationChildPermitId: opts._coordinationChildPermitId }
+      : {}),
+    ...(coordinationChild && opts._coordinationChildRemoteToolSurface
+      ? { remoteToolSurface: opts._coordinationChildRemoteToolSurface }
+      : (!coordinationChild && isRegisteredRemoteToolSurface(opts._remoteToolSurface)
+        ? { remoteToolSurface: opts._remoteToolSurface }
+        : {})),
   };
 }
 
@@ -458,6 +478,7 @@ function childOnlyRemoteIssuance(parentOptions = {}, { providerName, role } = {}
     atlas: { available: false, agent_surface: [], internal_surface: [] },
     coordination: {
       agent_handoff_v1: true,
+      agent_handoff_compact_v1: source?.coordination?.agent_handoff_compact_v1 === true,
       sub_agent_v1: false,
       sub_agent_next_input_v1: childCursorIssued,
       status: "experimental",
@@ -889,7 +910,10 @@ export class TrackedProviderClient {
     const effectiveCapabilityOpts = narrowProviderOptionsToRemoteIssuance(opts);
     const handoffRequired = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffV1 === true
       && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.agent_handoff_v1 === true;
-    const handoffToolSchemaChars = agentHandoffToolSchemaChars(opts.role);
+    const handoffToolSchemaChars = agentHandoffToolSchemaChars(
+      opts.role,
+      effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
+    );
     const terminalAbortController = handoffRequired ? new AbortController() : null;
     const providerAbortSignal = combinedAbortSignal(abortSignal, terminalAbortController?.signal);
     let terminalHandoffStop = null;
@@ -1044,6 +1068,12 @@ export class TrackedProviderClient {
               providerName,
               role: childRole,
             });
+            const childPermitId = `${batchId}:${dispatchId}:${requestId}`;
+            const childGateSurface = McpServerConfig.issueCitationChildRemoteSurface(agent.mcpGate, {
+              permitId: childPermitId,
+              role: childRole,
+              providerName,
+            });
             const childSessionPacket = {
               remote_prompt_composed: true,
               remote_issuance: childIssuance,
@@ -1051,6 +1081,7 @@ export class TrackedProviderClient {
               agent_coordination: {
                 mode: "handoff",
                 agent_handoff_v1: true,
+                agent_handoff_compact_v1: childIssuance.coordination.agent_handoff_compact_v1 === true,
                 sub_agent_v1: false,
                 sub_agent_next_input_v1: childIssuance.coordination.sub_agent_next_input_v1 === true,
                 remote_acknowledged: true,
@@ -1083,6 +1114,8 @@ export class TrackedProviderClient {
                 allowedProviders: [providerName],
                 abortSignal: childSignal,
                 _subAgentChild: true,
+                _coordinationChildPermitId: childPermitId,
+                _coordinationChildRemoteToolSurface: childGateSurface,
                 _agentCallRole: "subagent",
                 _subAgentCursor: { batchId, dispatchId },
               },
@@ -1169,6 +1202,11 @@ export class TrackedProviderClient {
             terminal_prompt_contract_chars: terminalHandoffContractChars(effectiveCapabilityOpts),
             provider_input_tokens: stats.inputTokens ?? null,
             provider_output_tokens: stats.outputTokens ?? null,
+            provider_usage_status: stats.inputTokens != null && stats.outputTokens != null
+              ? "measured"
+              : terminalProviderError != null
+                ? "unavailable_after_terminal_stop"
+                : "unavailable",
             provider_output_discarded: handoffFinalization.continuationProseChars > 0,
             provider_short_circuited: terminalProviderError != null,
             provider_stop_code: terminalProviderError?.code || null,

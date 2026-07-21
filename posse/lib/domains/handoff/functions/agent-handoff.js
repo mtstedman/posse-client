@@ -14,8 +14,19 @@ export const AGENT_HANDOFF_LIMITS = Object.freeze({
   maxSelectorLines: 40,
   maxSelectorChars: 4000,
   maxEvidenceChars: 12000,
+  maxCitationChildEvidenceChars: 4000,
   maxNarrativeChars: 4000,
+  maxCitationChildNarrativeChars: 2000,
 });
+
+const PLANNER_TASK_MODES = new Set([
+  "code",
+  "report",
+  "content",
+  "image",
+  "intake_processing",
+  "db",
+]);
 
 const PROFILE_POLICY = Object.freeze({
   "researcher.pipeline.v1": Object.freeze({ roles: ["researcher"], outcomes: ["success", "gap", "input_required"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
@@ -34,6 +45,13 @@ function fail(code, message) {
   const err = new Error(message);
   err.code = code;
   throw err;
+}
+
+export function isRetryableTerminalHandoffError(error) {
+  if (String(error?.code || "") !== "TERMINAL_PROTOCOL_ERROR") return false;
+  return /agent_handoff was required but no report was staged|agent_handoff was rejected/i.test(
+    String(error?.message || ""),
+  );
 }
 
 function plainObject(value) {
@@ -150,8 +168,19 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
 }
 
 function normalizeScope(value, label) {
-  const source = exactKeys(value || {}, ["files_to_modify", "files_to_create", "files_to_delete", "create_roots"], label);
+  const source = exactKeys(
+    value || {},
+    ["task_mode", "files_to_modify", "files_to_create", "files_to_delete", "create_roots"],
+    label,
+  );
   const out = {};
+  if (source.task_mode != null) {
+    const taskMode = boundedString(source.task_mode, `${label}.task_mode`, 40).toLowerCase();
+    if (!PLANNER_TASK_MODES.has(taskMode)) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.task_mode is not supported: ${taskMode}`);
+    }
+    out.task_mode = taskMode;
+  }
   for (const key of ["files_to_modify", "files_to_create", "files_to_delete", "create_roots"]) {
     if (source[key] != null) out[key] = stringArray(source[key], `${label}.${key}`, 100, 500);
   }
@@ -240,6 +269,135 @@ function validateDependencyGraph(handoffs) {
     visited.add(id);
   }
   for (const id of ids) visit(id);
+}
+
+const EXPLICIT_TASK_COUNT_WORDS = Object.freeze({
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+});
+
+function parsedTaskCount(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (Object.hasOwn(EXPLICIT_TASK_COUNT_WORDS, normalized)) {
+    return EXPLICIT_TASK_COUNT_WORDS[normalized];
+  }
+  const numeric = Number(normalized);
+  return Number.isInteger(numeric) && numeric > 0 && numeric <= 50 ? numeric : null;
+}
+
+export function explicitPlannerTaskCount(value) {
+  const text = String(value || "").toLowerCase().replace(/[^a-z0-9-]+/g, " ");
+  const count = "(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|[1-4][0-9]|50)";
+  const noun = "(?:(?:dev|developer|artificer)\\s+)?(?:jobs?|tasks?|handoffs?)";
+  const patterns = [
+    new RegExp(`\\bexactly\\s+${count}\\s+(?:[a-z-]+\\s+){0,4}${noun}\\b`),
+    new RegExp(`\\b(?:create|produce|plan|assign|return)\\s+${count}\\s+(?:[a-z-]+\\s+){0,4}${noun}\\b`),
+    new RegExp(`\\bsplit\\s+(?:the\\s+work\\s+)?into\\s+${count}\\s+(?:[a-z-]+\\s+){0,4}${noun}\\b`),
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const parsed = parsedTaskCount(match?.[1]);
+    if (parsed != null) return parsed;
+  }
+  return null;
+}
+
+function validatePlannerPacketSemantics(packet) {
+  if (packet.profile !== "planner.plan.v1" || packet.outcome !== "success") return;
+  for (const [index, handoff] of packet.handoffs.entries()) {
+    if ((handoff.report?.questions || []).length > 0) {
+      fail(
+        "AGENT_HANDOFF_SEMANTIC_INVALID",
+        `planner success handoffs[${index}] cannot contain unresolved questions`,
+      );
+    }
+    if (handoff.target?.kind !== "agent") continue;
+    const scope = handoff.report?.scope || {};
+    const taskMode = String(scope.task_mode || "code").trim().toLowerCase();
+    const writablePaths = [
+      ...(scope.files_to_modify || []),
+      ...(scope.files_to_create || []),
+      ...(scope.files_to_delete || []),
+      ...(scope.create_roots || []),
+    ];
+    if ((handoff.report?.success_criteria || []).length === 0) {
+      fail(
+        "AGENT_HANDOFF_SEMANTIC_INVALID",
+        `planner success handoffs[${index}] requires non-empty success criteria`,
+      );
+    }
+    if (taskMode === "db") {
+      if (handoff.target?.role !== "dev") {
+        fail(
+          "AGENT_HANDOFF_SEMANTIC_INVALID",
+          `planner success handoffs[${index}] task_mode db requires target role dev`,
+        );
+      }
+      if (writablePaths.length > 0) {
+        fail(
+          "AGENT_HANDOFF_SEMANTIC_INVALID",
+          `planner success handoffs[${index}] task_mode db requires empty file scope`,
+        );
+      }
+    } else if (writablePaths.length === 0) {
+      fail(
+        "AGENT_HANDOFF_SEMANTIC_INVALID",
+        `planner success handoffs[${index}] task_mode ${taskMode} requires non-empty writable scope`,
+      );
+    }
+  }
+}
+
+function validateCitationChildPacketSemantics(packet) {
+  if (packet.profile !== "citation_synthesis.v1") return;
+  const report = packet.handoffs[0]?.report || {};
+  if (Object.keys(report.scope || {}).length > 0) {
+    fail(
+      "AGENT_HANDOFF_SEMANTIC_INVALID",
+      "citation synthesis cannot return scope fields",
+    );
+  }
+  for (const key of ["constraints", "success_criteria", "questions"]) {
+    if ((report[key] || []).length > 0) {
+      fail(
+        "AGENT_HANDOFF_SEMANTIC_INVALID",
+        `citation synthesis cannot return ${key}`,
+      );
+    }
+  }
+}
+
+function validatePlannerPacketAgainstWorkItem(packet, workItem) {
+  if (packet.profile !== "planner.plan.v1" || packet.outcome !== "success" || !workItem) return;
+  const workItemText = `${workItem.title || ""}\n${workItem.description || ""}`;
+  const expectedCount = explicitPlannerTaskCount(workItemText);
+  const executableHandoffs = packet.handoffs.filter((handoff) => handoff.target?.kind === "agent");
+  if (expectedCount != null && executableHandoffs.length !== expectedCount) {
+    fail(
+      "AGENT_HANDOFF_SEMANTIC_INVALID",
+      `planner handoff count ${executableHandoffs.length} does not match the explicit work-item count ${expectedCount}`,
+    );
+  }
+  if (expectedCount > 1 && /\bdependent\b/i.test(workItemText)) {
+    const dependencyCount = executableHandoffs.reduce(
+      (sum, handoff) => sum + (handoff.depends_on || []).length,
+      0,
+    );
+    if (dependencyCount === 0) {
+      fail(
+        "AGENT_HANDOFF_SEMANTIC_INVALID",
+        "planner handoffs must preserve the work item's explicit dependency requirement",
+      );
+    }
+  }
 }
 
 const COMPLETION_ARGUMENT_KEYS = Object.freeze([
@@ -401,8 +559,11 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
     const successCriteria = report.success_criteria == null ? [] : stringArray(report.success_criteria, `handoffs[${index}].report.success_criteria`);
     const questions = report.questions == null ? [] : stringArray(report.questions, `handoffs[${index}].report.questions`);
     entryCounters.narrative += [...constraints, ...successCriteria, ...questions].reduce((sum, text) => sum + text.length, 0);
-    if (entryCounters.narrative > AGENT_HANDOFF_LIMITS.maxNarrativeChars) {
-      fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}] exceeds the ${AGENT_HANDOFF_LIMITS.maxNarrativeChars}-character narrative limit`);
+    const narrativeLimit = normalizedRole === "subagent"
+      ? AGENT_HANDOFF_LIMITS.maxCitationChildNarrativeChars
+      : AGENT_HANDOFF_LIMITS.maxNarrativeChars;
+    if (entryCounters.narrative > narrativeLimit) {
+      fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}] exceeds the ${narrativeLimit}-character narrative limit for role ${normalizedRole || "unknown"}`);
     }
     counters.narrative += entryCounters.narrative;
     counters.evidence += entryCounters.evidence;
@@ -424,7 +585,14 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
     };
   });
   validateDependencyGraph(handoffs);
-  if (counters.evidence > AGENT_HANDOFF_LIMITS.maxEvidenceChars) fail("AGENT_HANDOFF_EVIDENCE_TOO_LARGE", `Materialized evidence exceeds ${AGENT_HANDOFF_LIMITS.maxEvidenceChars} characters`);
+  validatePlannerPacketSemantics({ profile, outcome, handoffs });
+  validateCitationChildPacketSemantics({ profile, outcome, handoffs });
+  const evidenceLimit = normalizedRole === "subagent"
+    ? AGENT_HANDOFF_LIMITS.maxCitationChildEvidenceChars
+    : AGENT_HANDOFF_LIMITS.maxEvidenceChars;
+  if (counters.evidence > evidenceLimit) {
+    fail("AGENT_HANDOFF_EVIDENCE_TOO_LARGE", `Materialized evidence exceeds ${evidenceLimit} characters for role ${normalizedRole || "unknown"}`);
+  }
   return {
     protocol: AGENT_HANDOFF_PROTOCOL,
     profile,
@@ -478,6 +646,10 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
   };
   const effectiveRole = String(call.role || role || "");
   const packet = materializeAgentHandoff(args, { context: resolvedContext, role: effectiveRole, maxHandoffs });
+  const workItem = resolvedContext.workItemId
+    ? database.prepare("SELECT title, description FROM work_items WHERE id = ?").get(resolvedContext.workItemId)
+    : null;
+  validatePlannerPacketAgainstWorkItem(packet, workItem);
   packet.agent_call_id = agentCallId;
   packet.work_item_id = resolvedContext.workItemId;
   packet.job_id = resolvedContext.jobId;
@@ -656,6 +828,7 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
         task_spec: reportText || handoff.intent,
         success_criteria: handoff.report.success_criteria.length ? handoff.report.success_criteria : [handoff.intent],
         depends_on_index: handoff.depends_on.map((id) => indexes.get(id)),
+        task_mode: handoff.report.scope.task_mode || "code",
         files_to_modify: handoff.report.scope.files_to_modify || [],
         files_to_create: handoff.report.scope.files_to_create || [],
         files_to_delete: handoff.report.scope.files_to_delete || [],

@@ -44,7 +44,10 @@ export function buildEmbeddedToolDefinitions(contract, overrides = {}) {
       continue;
     }
     if (!EMBEDDED_DETERMINISTIC_TOOLS.has(name)) continue;
-    const schema = ToolCatalog.getSchema(name, { role: contract?.role });
+    const schema = ToolCatalog.getSchema(name, {
+      role: contract?.role,
+      compactCompletion: contract?.agentHandoffCompactV1 === true,
+    });
     if (schema) map[name] = schema;
   }
   return buildProviderToolDefinitions(map, contract);

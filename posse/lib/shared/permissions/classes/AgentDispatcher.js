@@ -1,6 +1,7 @@
 // @ts-check
 
 import { resolveAgentRoleContract } from "../functions/agent-role-contracts.js";
+import { isRegisteredRemoteToolSurface } from "../../tools/functions/issued-tool-policy.js";
 
 function dispatchError(code, message, { name = "Error", reason = null } = {}) {
   const error = /** @type {Error & { code: string, reason?: unknown }} */ (new Error(message));
@@ -82,11 +83,14 @@ export class AgentDispatcher {
     agentHandoff = false,
     subAgent = false,
     coordinationChild = false,
+    coordinationChildPermitId = null,
+    remoteToolSurface = null,
   } = /** @type {any} */ ({})) {
     const agentKey = String(key || "").trim();
     const lineageKey = String(logicalKey || agentKey).trim();
     const normalizedRole = String(role || "").trim().toLowerCase();
     const normalizedProvider = String(providerName || "").trim().toLowerCase();
+    const effectiveReusable = coordinationChild === true ? false : reusable === true;
     if (!agentKey) throw new TypeError("AgentDispatcher.acquireAgent requires a key");
     if (!normalizedRole) throw new TypeError("AgentDispatcher.acquireAgent requires a role");
     if (this.closed) {
@@ -100,10 +104,34 @@ export class AgentDispatcher {
     if (existing?.tainted) {
       await this.destroyAgent(existing, { reason: "agent_scope_release_failed" });
     } else if (existing && !existing.disposed) {
-      existing.mcpGate.assertCompatible?.({ role: normalizedRole, providerName: normalizedProvider });
+      if (coordinationChild === true) {
+        throw dispatchError(
+          "POSSE_AGENT_CHILD_IDENTITY_REUSED",
+          "Citation-child Agent identities are single-use",
+        );
+      }
+      existing.mcpGate.assertCompatible?.({
+        role: normalizedRole,
+        providerName: normalizedProvider,
+        coordinationChild: coordinationChild === true,
+      });
       return existing;
     }
-    if (this.pending.has(agentKey)) return await this.pending.get(agentKey);
+    if (this.pending.has(agentKey)) {
+      if (coordinationChild === true) {
+        throw dispatchError(
+          "POSSE_AGENT_CHILD_IDENTITY_REUSED",
+          "Citation-child Agent identities cannot share a pending gate mint",
+        );
+      }
+      const pendingAgent = await this.pending.get(agentKey);
+      pendingAgent.mcpGate.assertCompatible?.({
+        role: normalizedRole,
+        providerName: normalizedProvider,
+        coordinationChild: coordinationChild === true,
+      });
+      return pendingAgent;
+    }
 
     const creation = (async () => {
       const previousKey = this.agentKeyByLogicalKey.get(lineageKey);
@@ -122,6 +150,13 @@ export class AgentDispatcher {
         key: agentKey,
         logicalKey: lineageKey,
         ...roleContract,
+        // Citation children carry the parent's single-use child permit. Gate
+        // minting verifies that permit before intersecting it with the fixed
+        // two-tool child allowlist.
+        ...(remoteToolSurface && typeof remoteToolSurface === "object"
+          && (coordinationChild === true || isRegisteredRemoteToolSurface(remoteToolSurface))
+          ? { remoteToolSurface, coordinationChildPermitId }
+          : {}),
       });
       if (!mcpGate || !mcpGate.token) {
         throw new Error("AgentDispatcher gate factory did not return an immutable MCP gate");
@@ -145,7 +180,7 @@ export class AgentDispatcher {
           role: normalizedRole,
           providerName: normalizedProvider,
           mcpGate,
-          reusable,
+          reusable: effectiveReusable,
         });
       } catch (error) {
         try { mcpGate.dispose?.({ reason: "agent_constructor_failed" }); } catch { /* best effort */ }

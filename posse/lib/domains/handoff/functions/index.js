@@ -839,6 +839,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
   packet.agent_coordination = {
     mode: ["off", "handoff", "subagents"].includes(coordinationMode) ? coordinationMode : "off",
     agent_handoff_v1: handoffEnabled,
+    agent_handoff_compact_v1: handoffEnabled,
     sub_agent_v1: subAgentEnabled,
     status: "experimental",
     source: "repo_setting_snapshot",

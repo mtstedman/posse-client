@@ -37,6 +37,7 @@ import {
   handoff,
   renderAtlasHandoffSections,
 } from "../../../handoff/functions/index.js";
+import { isRetryableTerminalHandoffError } from "../../../handoff/functions/agent-handoff.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
 import {
@@ -97,6 +98,51 @@ function markAssessmentRetryAssessOnly(job) {
   updateJobPayload(job.id, nextPayloadJson);
   job.payload_json = nextPayloadJson;
   return true;
+}
+
+const ASSESSMENT_TERMINAL_HANDOFF_PENALTY_FREE_RETRY_LIMIT = 1;
+
+function isStoredTerminalHandoffFailure(attempt) {
+  if (!attempt?.error_text) return false;
+  return isRetryableTerminalHandoffError({
+    code: "TERMINAL_PROTOCOL_ERROR",
+    message: attempt.error_text,
+  });
+}
+
+/**
+ * Allow one fast, penalty-free assessor retry for a missing/rejected terminal
+ * handoff. The completed attempt rows are the durable counter so restarts do
+ * not reset the budget. Later protocol failures must use normal job retry
+ * accounting instead of decrementing attempt_count indefinitely.
+ */
+export function assessmentTerminalHandoffRetryDecision(
+  jobId,
+  error,
+  {
+    currentAttemptId = null,
+    penaltyFreeRetryLimit = ASSESSMENT_TERMINAL_HANDOFF_PENALTY_FREE_RETRY_LIMIT,
+  } = {},
+) {
+  if (!isRetryableTerminalHandoffError(error)) {
+    return {
+      retryable: false,
+      retryWithoutPenalty: false,
+      failureCount: 0,
+      penaltyFreeRetryLimit,
+    };
+  }
+  const normalizedLimit = Math.max(0, Number.parseInt(String(penaltyFreeRetryLimit), 10) || 0);
+  const storedFailures = getAttempts(jobId).filter(isStoredTerminalHandoffFailure);
+  const currentFailureStored = currentAttemptId != null
+    && storedFailures.some((attempt) => Number(attempt.id) === Number(currentAttemptId));
+  const failureCount = storedFailures.length + (currentFailureStored ? 0 : 1);
+  return {
+    retryable: true,
+    retryWithoutPenalty: failureCount <= normalizedLimit,
+    failureCount,
+    penaltyFreeRetryLimit: normalizedLimit,
+  };
 }
 
 function _mergeUniquePaths(...groups) {
@@ -2246,17 +2292,27 @@ export async function runPostExecutionAssessment(worker, {
       const assessErrMessage = String(assessErr?.message || "");
       const turnBudgetExhausted = /exhausted turn budget|turn budget exhausted|tool(?: use| call)?s?.{0,40}(?:exhausted|limit|max|budget)/i.test(assessErrMessage);
       const stallKilled = !!assessErr?.stallKill || /stalled.*killed|killed by stall detector/i.test(assessErrMessage);
-      if (isProviderError(assessErr) || assessErr?.assessmentRetryable || turnBudgetExhausted || stallKilled) {
+      const terminalHandoffRetry = assessmentTerminalHandoffRetryDecision(job.id, assessErr, {
+        currentAttemptId: attempt.id,
+      });
+      const terminalHandoffMissing = terminalHandoffRetry.retryable;
+      if (isProviderError(assessErr) || assessErr?.assessmentRetryable || turnBudgetExhausted || stallKilled || terminalHandoffMissing) {
         const retryLabel = assessErr?.assessmentRetryable
           ? "Environment/tooling error during assessment"
-          : (stallKilled
-            ? "Assessment stalled"
-            : (turnBudgetExhausted
-              ? "Assessment turn budget exhausted"
-              : "Provider error during assessment"));
+          : (terminalHandoffMissing
+            ? (terminalHandoffRetry.retryWithoutPenalty
+              ? "Assessment terminal handoff missing"
+              : "Assessment terminal handoff retry limit reached")
+            : (stallKilled
+              ? "Assessment stalled"
+              : (turnBudgetExhausted
+                ? "Assessment turn budget exhausted"
+                : "Provider error during assessment")));
         worker.emit(job.id, `${C.yellow}[assessor] ${retryLabel} - requeuing: ${assessErr.message?.split("\n")[0]?.slice(0, 120)}${C.reset}`);
         completeAttempt(attempt.id, {
-          status: "interrupted",
+          status: terminalHandoffMissing && !terminalHandoffRetry.retryWithoutPenalty
+            ? "failed"
+            : "interrupted",
           duration_ms: Date.now() - startTime,
           error_text: assessErr?.assessmentRetryable
             ? `Assessment environment error: ${assessErr.message}`
@@ -2264,7 +2320,9 @@ export async function runPostExecutionAssessment(worker, {
               ? `Assessment stalled: ${assessErr.message}`
               : (turnBudgetExhausted
                 ? `Assessment turn budget exhausted: ${assessErr.message}`
-                : `Assessment provider error: ${assessErr.message}`)),
+                : (terminalHandoffMissing
+                  ? `Assessment terminal handoff error: ${assessErr.message}`
+                  : `Assessment provider error: ${assessErr.message}`))),
         });
 
         if (wtPath) {
@@ -2330,11 +2388,15 @@ export async function runPostExecutionAssessment(worker, {
                 ? EVENT_TYPES.JOB_ASSESSMENT_TURN_BUDGET_EXHAUSTED
                 : EVENT_TYPES.JOB_ASSESSMENT_PROVIDER_ERROR)),
           actor_type: EVENT_ACTORS.WORKER,
-          message: `${retryLabel} - requeuing without penalty: ${assessErr.message?.split("\n")[0]}`,
+          message: `${retryLabel} - ${terminalHandoffMissing && !terminalHandoffRetry.retryWithoutPenalty
+            ? "requeuing within normal attempt budget"
+            : "requeuing without penalty"}: ${assessErr.message?.split("\n")[0]}`,
         });
 
         const assessProvider = job.provider || getProviderName("assessor");
-        const assessBackoff = assessErr?.assessmentRetryable
+        const assessBackoff = terminalHandoffMissing
+          ? 2
+          : assessErr?.assessmentRetryable
           ? 5
           : (turnBudgetExhausted || stallKilled
             ? 2
@@ -2352,7 +2414,11 @@ export async function runPostExecutionAssessment(worker, {
             message: `Failed to mark assessment retry as assess-only: ${markErr?.message || markErr}`,
           });
         }
-        worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+        if (terminalHandoffMissing && !terminalHandoffRetry.retryWithoutPenalty) {
+          worker._retryOrFail(job, leaseToken, `Assessment failed: ${assessErr.message}`);
+        } else {
+          worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+        }
       } else {
         worker.emit(job.id, `${C.red}[assessor] Transport error: ${assessErr.message}${C.reset}`);
         completeAttempt(attempt.id, {

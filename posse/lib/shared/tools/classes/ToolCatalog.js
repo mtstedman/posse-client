@@ -52,11 +52,11 @@ export class ToolCatalog {
     return getToolCatalogEntry(key) || null;
   }
 
-  static getSchema(name, { role = null } = {}) {
+  static getSchema(name, { role = null, compactCompletion = false } = {}) {
     const entry = this.get(name);
     if (entry) {
       if (String(name || "").trim() === "agent_handoff" && role) {
-        return getToolSchemaForRole(name, role);
+        return getToolSchemaForRole(name, role, { compactCompletion });
       }
       return entry.schema || null;
     }

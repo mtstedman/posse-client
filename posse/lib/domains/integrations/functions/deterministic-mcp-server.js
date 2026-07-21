@@ -862,6 +862,7 @@ function buildRemoteToolSurfaceRequest() {
       atlas: atlasCapabilities,
       coordination: {
         agent_handoff_v1: tokenToolAllowlistForSuite("tools")?.has("agent_handoff") === true,
+        agent_handoff_compact_v1: tokenToolAllowlistForSuite("tools")?.has("agent_handoff") === true,
         sub_agent_v1: tokenToolAllowlistForSuite("tools")?.has("sub_agent") === true,
       },
     },
@@ -1188,7 +1189,13 @@ function addToolSchema(schema) {
   }
 }
 
-addToolSchema(getToolSchemaForRole("agent_handoff", roleName));
+function compactAgentHandoffIssued() {
+  return remoteToolCatalogPreload?.coordination?.agent_handoff_compact_v1 === true;
+}
+
+addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
+  compactCompletion: compactAgentHandoffIssued(),
+}));
 addToolSchema(TOOL_SUB_AGENT);
 addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
 
@@ -2173,7 +2180,9 @@ function rebuildNativeToolSchemas() {
   DECLARED_NATIVE_TOOL_NAMES = computeDeclaredNativeToolNamesForCurrentBoot();
   DECLARED_NATIVE_TOOL_NAME_SET = new Set(DECLARED_NATIVE_TOOL_NAMES);
   TOOL_SCHEMAS = [];
-  addToolSchema(getToolSchemaForRole("agent_handoff", roleName));
+  addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
+    compactCompletion: compactAgentHandoffIssued(),
+  }));
   addToolSchema(TOOL_SUB_AGENT);
   addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
   if (ownerHotGateway) {

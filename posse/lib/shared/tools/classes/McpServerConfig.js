@@ -29,6 +29,7 @@ import { resolveRemoteMcpToolSurfaceForBootConfig } from "../../../domains/integ
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import {
   issuedToolNamesForSuite,
+  isRegisteredRemoteToolSurface,
   narrowBootConfigToRemoteSurface,
   normalizeProjectDbCapability,
 } from "../functions/issued-tool-policy.js";
@@ -40,6 +41,46 @@ import { resolveAtlasDisabledTools, resolveAtlasCodeLensCallable } from "../../.
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const MINTED_AGENT_GATES = new WeakSet();
+const ISSUED_CITATION_CHILD_SURFACES = new WeakMap();
+const CITATION_CHILD_PERMIT_TTL_MS = 120_000;
+
+function deepFreezeJson(value) {
+  const clone = JSON.parse(JSON.stringify(value));
+  const freeze = (entry) => {
+    if (!entry || typeof entry !== "object" || Object.isFrozen(entry)) return entry;
+    for (const child of Object.values(entry)) freeze(child);
+    return Object.freeze(entry);
+  };
+  return freeze(clone);
+}
+
+function consumeCitationChildPermit(surface, {
+  role,
+  providerName,
+  permitId,
+  nowMs = Date.now(),
+} = {}) {
+  const permit = surface && typeof surface === "object"
+    ? ISSUED_CITATION_CHILD_SURFACES.get(surface)
+    : null;
+  const requestedRole = String(role || "").trim().toLowerCase();
+  const requestedProvider = String(providerName || "").trim().toLowerCase();
+  const requestedPermitId = String(permitId || "").trim();
+  if (!permit
+    || permit.consumed
+    || nowMs > permit.expiresAt
+    || !MINTED_AGENT_GATES.has(permit.parentGate)
+    || permit.parentGate.disposed === true
+    || permit.parentGate.binding !== permit.parentBinding
+    || requestedRole !== permit.role
+    || requestedProvider !== permit.providerName
+    || requestedPermitId !== permit.permitId) {
+    return null;
+  }
+  permit.consumed = true;
+  return permit;
+}
 
 function normalizedEnv(env = {}) {
   const out = {};
@@ -96,6 +137,7 @@ function projectCitationChildRemoteSurface(surface = {}) {
     atlas: { available: false, agent_surface: [], internal_surface: [] },
     coordination: {
       agent_handoff_v1: hasHandoff,
+      agent_handoff_compact_v1: source?.coordination?.agent_handoff_compact_v1 === true,
       sub_agent_v1: false,
       sub_agent_next_input_v1: hasCursor,
       status: "experimental",
@@ -841,6 +883,18 @@ export class McpServerConfig {
   }
 
   static async mintAgentGate(role, opts = {}) {
+    if (opts.coordinationChild === true) {
+      const permit = consumeCitationChildPermit(opts.remoteToolSurface, {
+        role,
+        providerName: opts.providerName,
+        permitId: opts.coordinationChildPermitId,
+      });
+      if (!permit) {
+        const error = new Error("Citation-child MCP gates require a live parent-issued, single-use tool permit");
+        error.code = "POSSE_AGENT_CHILD_ISSUANCE_UNTRUSTED";
+        throw error;
+      }
+    }
     const agentId = String(opts.agentId || opts.key || crypto.randomUUID());
     const agentRuntimeCwd = path.resolve(opts.agentRuntimeCwd || opts.projectDir || process.cwd());
     const { bootPayload, resolvedAtlasConfig } = buildDeterministicMcpBootPayload(role, {
@@ -852,7 +906,7 @@ export class McpServerConfig {
     let remoteResolution = null;
     let remoteResolutionError = null;
     try {
-      remoteResolution = opts.remoteToolSurface && typeof opts.remoteToolSurface === "object"
+      remoteResolution = opts.coordinationChild === true || isRegisteredRemoteToolSurface(opts.remoteToolSurface)
         ? {
             surface: opts.remoteToolSurface,
             mcpOAuthToken: String(opts.remoteMcpOAuthToken || ""),
@@ -926,7 +980,7 @@ export class McpServerConfig {
       oauth_source: "local-agent",
       session_count: persistentMcpOwner.status()?.sessionCount ?? null,
     });
-    return new McpGate({
+    const gate = new McpGate({
       id: agentId,
       role,
       providerName: bootPayload.providerName,
@@ -937,6 +991,48 @@ export class McpServerConfig {
       owner: persistentMcpOwner,
       ownerSession: registration,
     });
+    MINTED_AGENT_GATES.add(gate);
+    return gate;
+  }
+
+  static issueCitationChildRemoteSurface(parentGate, {
+    permitId,
+    role = parentGate?.role,
+    providerName = parentGate?.providerName,
+    nowMs = Date.now(),
+  } = {}) {
+    const normalizedPermitId = String(permitId || "").trim();
+    if (!parentGate || !MINTED_AGENT_GATES.has(parentGate) || parentGate.disposed === true) {
+      const error = new Error("Citation-child tool issuance requires a live parent MCP gate");
+      error.code = "POSSE_AGENT_CHILD_PARENT_GATE_UNTRUSTED";
+      throw error;
+    }
+    parentGate.assertCompatible({ role, providerName });
+    parentGate.assertAttached({});
+    if (!normalizedPermitId) {
+      const error = new Error("Citation-child tool issuance requires a dispatch permit id");
+      error.code = "POSSE_AGENT_CHILD_PERMIT_ID_REQUIRED";
+      throw error;
+    }
+    const surface = deepFreezeJson(projectCitationChildRemoteSurface(parentGate.remoteToolSurface));
+    const names = new Set(Array.isArray(surface.tool_surface) ? surface.tool_surface : []);
+    if (!names.has("tools.agent_handoff") || !names.has("tools.sub_agent_next_input")) {
+      const error = new Error("Parent MCP gate did not receive the complete citation-child tool surface");
+      error.code = "POSSE_AGENT_CHILD_SURFACE_INCOMPLETE";
+      throw error;
+    }
+    ISSUED_CITATION_CHILD_SURFACES.set(surface, {
+      consumed: false,
+      expiresAt: nowMs + CITATION_CHILD_PERMIT_TTL_MS,
+      parentGateId: parentGate.id,
+      parentGate,
+      parentSessionId: parentGate.ownerSession?.sessionId || null,
+      parentBinding: parentGate.binding,
+      permitId: normalizedPermitId,
+      role: String(role || "").trim().toLowerCase(),
+      providerName: String(providerName || "").trim().toLowerCase(),
+    });
+    return surface;
   }
 
   static forDeterministicRead(role, {

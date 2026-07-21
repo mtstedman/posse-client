@@ -266,7 +266,14 @@ export const TOOL_AGENT_HANDOFF = {
                 },
                 scope: {
                   type: "object",
+                  description:
+                    "Planner task execution scope. Set task_mode to db only for a dev task whose entire write surface is project_db_query; db requires empty file arrays. Other agent task modes require writable file or create-root scope.",
                   properties: {
+                    task_mode: {
+                      type: "string",
+                      enum: ["code", "report", "content", "image", "intake_processing", "db"],
+                      default: "code",
+                    },
                     files_to_modify: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
                     files_to_create: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
                     files_to_delete: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },

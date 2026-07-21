@@ -785,8 +785,9 @@ export function getToolSchema(name) {
   return TOOL_CATALOG[name]?.schema || null;
 }
 
-export function getToolSchemaForRole(name, role) {
+export function getToolSchemaForRole(name, role, { compactCompletion = false } = {}) {
   if (name !== "agent_handoff") return getToolSchema(name);
+  if (!compactCompletion) return TOOL_AGENT_HANDOFF;
   const normalizedRole = String(role || "").trim().toLowerCase();
   if (normalizedRole === "dev" || normalizedRole === "fix") return TOOL_AGENT_HANDOFF_DEV;
   if (normalizedRole === "artificer") return TOOL_AGENT_HANDOFF_ARTIFICER;

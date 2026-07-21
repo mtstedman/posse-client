@@ -8,6 +8,7 @@
 // authority above the remote response.
 
 import { INTERNAL_ATLAS_SURFACE_ACTION_SET } from "../../../catalog/internal-tools.js";
+import { isRemotePromptClientIssuance } from "../../../domains/remote/classes/RemotePromptClient.js";
 
 const KNOWN_ISSUED_ROLES = new Set([
   "researcher",
@@ -38,6 +39,7 @@ const WRITE_TOOL_NAMES = new Set([
   "generate_image",
 ]);
 const TRUSTED_REMOTE_POLICY_OBJECTS = new WeakSet();
+const TRUSTED_REMOTE_SURFACE_OBJECTS = new WeakSet();
 
 /**
  * @typedef {object} IssuedToolPolicy
@@ -315,7 +317,11 @@ function failClosedIssuedPolicy() {
     webAccess: { ...EMPTY_WEB_ACCESS },
     projectDbCapability: "none",
     childToolSurface: [],
-    coordination: { agentHandoffV1: false, subAgentV1: false },
+    coordination: {
+      agentHandoffV1: false,
+      agentHandoffCompactV1: false,
+      subAgentV1: false,
+    },
   };
   TRUSTED_REMOTE_POLICY_OBJECTS.add(policy);
   return policy;
@@ -343,6 +349,8 @@ export function normalizeRemoteIssuedPolicy(value, {
   const coordinationSource = plainObject(source.coordination);
   const coordination = {
     agentHandoffV1: coordinationSource?.agent_handoff_v1 === true,
+    agentHandoffCompactV1: coordinationSource?.agent_handoff_v1 === true
+      && coordinationSource?.agent_handoff_compact_v1 === true,
     subAgentV1: coordinationSource?.agent_handoff_v1 === true
       && coordinationSource?.sub_agent_v1 === true,
     subAgentNextInputV1: coordinationSource?.agent_handoff_v1 === true
@@ -367,24 +375,32 @@ export function normalizeRemoteIssuedPolicy(value, {
     subAgentAvailable: false,
     subAgentNextInputAvailable: coordination.subAgentNextInputV1,
   }).filter((name) => name === "tools.sub_agent_next_input");
+  const subAgentEnabled = coordination.subAgentV1
+    && coordination.subAgentNextInputV1
+    && childToolSurface.includes("tools.sub_agent_next_input")
+    && toolSurface.includes("tools.agent_handoff")
+    && toolSurface.includes("tools.sub_agent");
+  const effectiveToolSurface = subAgentEnabled
+    ? toolSurface
+    : toolSurface.filter((name) => name !== "tools.sub_agent");
   const webAccess = normalizeWebAccess(source.web_access || source.webAccess, role);
   const issued = {
     valid: true,
     role,
     provider,
     toolPolicy,
-    toolSurface,
+    toolSurface: effectiveToolSurface,
     childToolSurface,
-    toolAllowlist: issuedToolAllowlist(toolSurface),
+    toolAllowlist: issuedToolAllowlist(effectiveToolSurface),
     webAccess,
     projectDbCapability: toolSurface.includes("tools.project_db_query")
       ? projectDbCapability
       : "none",
     coordination: {
       agentHandoffV1: coordination.agentHandoffV1 && toolSurface.includes("tools.agent_handoff"),
-      subAgentV1: coordination.subAgentV1
-        && toolSurface.includes("tools.agent_handoff")
-        && toolSurface.includes("tools.sub_agent"),
+      agentHandoffCompactV1: coordination.agentHandoffCompactV1
+        && toolSurface.includes("tools.agent_handoff"),
+      subAgentV1: subAgentEnabled,
       ...(coordination.subAgentNextInputV1 && childToolSurface.includes("tools.sub_agent_next_input")
         ? { subAgentNextInputV1: true }
         : {}),
@@ -418,7 +434,7 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
         : { suite: tool.suite, name: tool.canonical, local_name: tool.name };
     })
     .filter(Boolean);
-  return {
+  const sanitized = {
     ...source,
     role: issued.role,
     provider: issued.provider,
@@ -430,11 +446,70 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
     project_db_capability: issued.projectDbCapability,
     coordination: {
       agent_handoff_v1: issued.coordination.agentHandoffV1,
+      agent_handoff_compact_v1: issued.coordination.agentHandoffCompactV1,
       sub_agent_v1: issued.coordination.subAgentV1,
       sub_agent_next_input_v1: "subAgentNextInputV1" in issued.coordination
         && issued.coordination.subAgentNextInputV1 === true,
     },
   };
+  if (!isRegisteredRemoteToolSurface(source)) return sanitized;
+  const frozen = deepFreezeJson(sanitized);
+  TRUSTED_REMOTE_SURFACE_OBJECTS.add(frozen);
+  return frozen;
+}
+
+export function isRegisteredRemoteToolSurface(value) {
+  return !!value && typeof value === "object" && (
+    TRUSTED_REMOTE_SURFACE_OBJECTS.has(value)
+    || isRemotePromptClientIssuance(value)
+  );
+}
+
+function deepFreezeJson(value) {
+  const clone = JSON.parse(JSON.stringify(value));
+  const freeze = (entry) => {
+    if (!entry || typeof entry !== "object" || Object.isFrozen(entry)) return entry;
+    for (const child of Object.values(entry)) freeze(child);
+    return Object.freeze(entry);
+  };
+  return freeze(clone);
+}
+
+export function deriveRemoteToolSurfaceNarrowing(authorityValue, candidateValue, opts = {}) {
+  if (!isRegisteredRemoteToolSurface(authorityValue)) return null;
+  const authority = normalizeRemoteIssuedPolicy(authorityValue, opts);
+  const candidate = normalizeRemoteIssuedPolicy(candidateValue, opts);
+  const authorityNextInput = "subAgentNextInputV1" in authority.coordination
+    && authority.coordination.subAgentNextInputV1 === true;
+  const candidateNextInput = "subAgentNextInputV1" in candidate.coordination
+    && candidate.coordination.subAgentNextInputV1 === true;
+  if (!authority.valid || !candidate.valid
+    || authority.role !== candidate.role
+    || authority.provider !== candidate.provider
+    || candidate.toolSurface.some((tool) => !authority.toolSurface.includes(tool))
+    || candidate.childToolSurface.some((tool) => !authority.childToolSurface.includes(tool))
+    || candidate.toolPolicy.allow_read && !authority.toolPolicy.allow_read
+    || candidate.toolPolicy.allow_write && !authority.toolPolicy.allow_write
+    || candidate.toolPolicy.allow_shell && !authority.toolPolicy.allow_shell
+    || candidate.toolPolicy.allow_tests && !authority.toolPolicy.allow_tests
+    || candidate.toolPolicy.fallback_reads > authority.toolPolicy.fallback_reads
+    || projectDbRank(candidate.projectDbCapability) > projectDbRank(authority.projectDbCapability)
+    || candidate.webAccess.general_discovery && !authority.webAccess.general_discovery
+    || candidate.webAccess.live_documentation_verification && !authority.webAccess.live_documentation_verification
+    || candidate.webAccess.asset_sourcing_or_fetching && !authority.webAccess.asset_sourcing_or_fetching
+    || candidate.webAccess.network_access && !authority.webAccess.network_access
+    || candidate.webAccess.image_generation_eligible && !authority.webAccess.image_generation_eligible
+    || candidate.coordination.agentHandoffV1 && !authority.coordination.agentHandoffV1
+    || candidate.coordination.agentHandoffCompactV1 && !authority.coordination.agentHandoffCompactV1
+    || candidate.coordination.subAgentV1 && !authority.coordination.subAgentV1
+    || candidateNextInput && !authorityNextInput) {
+    return null;
+  }
+  const sanitized = sanitizeRemoteToolSurfaceResponse(candidateValue, opts);
+  if (!sanitized) return null;
+  const frozen = deepFreezeJson(sanitized);
+  TRUSTED_REMOTE_SURFACE_OBJECTS.add(frozen);
+  return frozen;
 }
 
 export function narrowBootConfigToRemoteSurface(bootConfig = {}, remoteSurface = null) {
@@ -612,8 +687,9 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
 
   const remoteIssuance = plainObject(packet.remote_issuance);
   const localAgentHandoff = packet?.agent_coordination?.agent_handoff_v1 === true;
+  const localAgentHandoffCompact = packet?.agent_coordination?.agent_handoff_compact_v1 === true;
   const localSubAgent = packet?.agent_coordination?.sub_agent_v1 === true;
-  const executionIssuance = opts._subAgentChild === true
+  let executionIssuance = opts._subAgentChild === true
     ? remoteIssuance
     : (remoteIssuance && (!localAgentHandoff || !localSubAgent)
     ? {
@@ -621,10 +697,16 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
         coordination: {
           ...(plainObject(remoteIssuance.coordination) || {}),
           agent_handoff_v1: localAgentHandoff,
+          agent_handoff_compact_v1: localAgentHandoff && localAgentHandoffCompact,
           sub_agent_v1: localSubAgent,
         },
       }
     : remoteIssuance);
+  if (remoteIssuance && executionIssuance !== remoteIssuance) {
+    executionIssuance = deriveRemoteToolSurfaceNarrowing(remoteIssuance, executionIssuance, {
+      expectedRole: opts.role,
+    }) || executionIssuance;
+  }
   const issued = normalizeRemoteIssuedPolicy(executionIssuance, {
     expectedRole: opts.role,
   });
