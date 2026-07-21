@@ -152,15 +152,16 @@ export const TOOL_AGENT_HANDOFF = {
           "dev.result.v1",
           "artificer.result.v1",
           "assessor.verdict.v1",
+          "citation_synthesis.v1",
         ],
       },
       outcome: {
         type: "string",
-        enum: ["success", "complete", "gap", "input_required", "failed", "blocked", "pass", "fail", "needs_replan", "needs_review"],
+        enum: ["success", "complete", "partial", "gap", "input_required", "failed", "blocked", "pass", "fail", "needs_replan", "needs_review"],
         description:
           "Profile-specific outcome: researcher.pipeline.v1=success|gap|input_required; researcher.report.v1=complete; " +
           "planner.plan.v1=success; dev.result.v1 and artificer.result.v1=complete|failed|blocked; " +
-          "assessor.verdict.v1=pass|fail|needs_replan|needs_review|blocked.",
+          "assessor.verdict.v1=pass|fail|needs_replan|needs_review|blocked; citation_synthesis.v1=complete|partial|failed.",
       },
       handoffs: {
         type: "array",
@@ -175,10 +176,11 @@ export const TOOL_AGENT_HANDOFF = {
               type: "object",
               description:
                 "Profile target: researcher.pipeline.v1, dev.result.v1, artificer.result.v1, and assessor.verdict.v1 use pipeline/$pipeline; " +
-                "researcher.report.v1 uses result/$result; planner.plan.v1 uses agent/dev|artificer or system/human_input|promote.",
+                "researcher.report.v1 uses result/$result; planner.plan.v1 uses agent/dev|artificer or system/human_input|promote; " +
+                "citation_synthesis.v1 uses parent/$parent.",
               properties: {
-                kind: { type: "string", enum: ["agent", "system", "pipeline", "result"] },
-                role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "$pipeline", "$result"] },
+                kind: { type: "string", enum: ["agent", "system", "pipeline", "result", "parent"] },
+                role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "$pipeline", "$result", "$parent"] },
               },
               required: ["kind"],
               additionalProperties: false,
@@ -250,6 +252,88 @@ export const TOOL_AGENT_HANDOFF = {
     },
     required: ["protocol", "profile", "outcome", "handoffs"],
     additionalProperties: false,
+  },
+};
+
+const SUB_AGENT_REQUEST = {
+  type: "object",
+  properties: {
+    id: { type: "string", minLength: 1, maxLength: 40 },
+    profile: { type: "string", enum: ["citation_synthesis.v1"] },
+    intent: { type: "string", minLength: 1, maxLength: 1000 },
+    inputs: {
+      type: "array",
+      minItems: 1,
+      maxItems: 3,
+      description: "Ordered hash-ref selectors already visible to the parent. Use exact line slices when only part of a result matters.",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string", minLength: 1, maxLength: 40 },
+          ref: { type: "string", pattern: "^#[0-9A-Za-z]{4,12}(?::(?:L)?[0-9]+-(?:L)?[0-9]+)?$" },
+        },
+        required: ["id", "ref"],
+        additionalProperties: false,
+      },
+    },
+    budget: {
+      type: "object",
+      properties: {
+        timeout_ms: { type: "integer", minimum: 5000, maximum: 60000 },
+      },
+      additionalProperties: false,
+    },
+  },
+  required: ["id", "profile", "intent", "inputs"],
+  additionalProperties: false,
+};
+
+export const TOOL_SUB_AGENT = {
+  type: "function",
+  name: "sub_agent",
+  description:
+    "Dispatch or control an admin-gated batch of one to three isolated citation agents. " +
+    "Children see only the selected hash-ref slices and terminal agent_handoff. Use wait_all when the answer is needed before continuing; async returns immediately and status collects results.",
+  parameters: {
+    oneOf: [
+      {
+        type: "object",
+        properties: {
+          op: { type: "string", enum: ["dispatch"] },
+          protocol: { type: "string", enum: ["posse.sub_agent.v1"] },
+          requests: { type: "array", minItems: 1, maxItems: 3, items: SUB_AGENT_REQUEST },
+          completion: {
+            type: "object",
+            properties: { mode: { type: "string", enum: ["async", "wait_all"] } },
+            required: ["mode"],
+            additionalProperties: false,
+          },
+        },
+        required: ["op", "protocol", "requests", "completion"],
+        additionalProperties: false,
+      },
+      {
+        type: "object",
+        properties: {
+          op: { type: "string", enum: ["status"] },
+          protocol: { type: "string", enum: ["posse.sub_agent.v1"] },
+          batch_id: { type: "string", minLength: 12, maxLength: 80 },
+          wait_ms: { type: "integer", minimum: 0, maximum: 5000 },
+        },
+        required: ["op", "protocol", "batch_id"],
+        additionalProperties: false,
+      },
+      {
+        type: "object",
+        properties: {
+          op: { type: "string", enum: ["cancel"] },
+          protocol: { type: "string", enum: ["posse.sub_agent.v1"] },
+          batch_id: { type: "string", minLength: 12, maxLength: 80 },
+        },
+        required: ["op", "protocol", "batch_id"],
+        additionalProperties: false,
+      },
+    ],
   },
 };
 

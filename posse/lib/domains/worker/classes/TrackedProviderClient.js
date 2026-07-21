@@ -56,6 +56,10 @@ import {
 } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { finalizeAgentHandoffForProvider } from "../../handoff/functions/agent-handoff.js";
 import { TOOL_AGENT_HANDOFF } from "../../../catalog/native-tools.js";
+import {
+  buildCitationChildPrompt,
+  subAgentRuntime,
+} from "../../sub-agent/classes/SubAgentRuntime.js";
 
 const AGENT_HANDOFF_TOOL_SCHEMA_CHARS = JSON.stringify(TOOL_AGENT_HANDOFF).length;
 
@@ -267,6 +271,7 @@ function codexReuseContractAllowsScope(opts = {}) {
 function isSessionReuseCandidate({ providerName, opts, job_id, work_item_id }) {
   const provider = String(providerName || "").toLowerCase();
   if (!provider) return false;
+  if (opts?._subAgentChild === true) return false;
   // Provider self-declares session-resume support via the capabilities flag
   // on its module. Replaces a hardcoded ["openai","claude","codex"] whitelist
   // so a new provider that supports resume just sets capabilities.sessionResume.
@@ -312,13 +317,18 @@ function providerAgentIdentity(opts = {}, {
   const skillKey = String(decision?.key?.skillKey || "");
   const agentHandoff = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
     .includes("tools.agent_handoff");
-  const coordinationKey = agentHandoff ? "handoff" : "off";
+  const subAgent = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
+    .includes("tools.sub_agent");
+  const coordinationChild = opts._subAgentChild === true;
+  const coordinationKey = coordinationChild ? "child" : (subAgent ? "subagents" : (agentHandoff ? "handoff" : "off"));
   if (laneId != null) {
     return {
       key: `session-lane:${laneId}:${provider}:${lane}:coord-${coordinationKey}`,
       logicalKey: `wi:${workItemId ?? "none"}:${provider}:${lane}:${skillKey}`,
       reusable: true,
       agentHandoff,
+      subAgent,
+      coordinationChild,
     };
   }
   return {
@@ -326,6 +336,8 @@ function providerAgentIdentity(opts = {}, {
     logicalKey: `agent-call:${agentCallId}:${provider}:${lane}`,
     reusable: false,
     agentHandoff,
+    subAgent,
+    coordinationChild,
   };
 }
 
@@ -335,6 +347,8 @@ function agentJobAttachment(opts = {}, context = {}) {
     : {};
   const agentHandoff = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
     .includes("tools.agent_handoff");
+  const subAgent = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
+    .includes("tools.sub_agent");
   return {
     role: opts.role,
     providerName: context.providerName,
@@ -352,6 +366,8 @@ function agentJobAttachment(opts = {}, context = {}) {
     allowImageHelpers: opts.allowImageHelpers !== false,
     allowImageGeneration: opts.needsImageGeneration === true,
     agentHandoff,
+    subAgent,
+    coordinationChild: opts._subAgentChild === true,
     atlasAvailable: opts.disableAtlas !== true && atlasConfig.enabled !== false,
     atlasGateEnabled: opts.atlasGateEnabled !== false,
     atlasPrefetchStatus: opts.atlasPrefetchStatus || "",
@@ -367,6 +383,63 @@ function agentJobAttachment(opts = {}, context = {}) {
     },
     disableSystemTools: opts.disableSystemTools === true,
   };
+}
+
+function childOnlyRemoteIssuance(parentOptions = {}, { providerName, role } = {}) {
+  const source = parentOptions?.sessionPacket?.remote_issuance
+    || parentOptions?._remoteToolSurface
+    || {};
+  const sourceTools = Array.isArray(source.tools) ? source.tools : [];
+  return {
+    ...source,
+    source: "posse-remote",
+    role,
+    provider: providerName,
+    tools: sourceTools.filter((entry) => {
+      const name = String(entry?.name || entry?.local_name || entry || "");
+      return name === "tools.agent_handoff" || name === "agent_handoff";
+    }),
+    tool_surface: ["tools.agent_handoff"],
+    tool_policy: {
+      allow_read: false,
+      allow_write: false,
+      allow_shell: false,
+      allow_tests: false,
+      fallback_reads: 0,
+    },
+    web_access: {
+      role,
+      mode: "none",
+      general_discovery: false,
+      live_documentation_verification: false,
+      asset_sourcing_or_fetching: false,
+      network_access: false,
+      image_generation_eligible: false,
+    },
+    project_db_capability: "none",
+    atlas: { available: false, agent_surface: [], internal_surface: [] },
+    coordination: {
+      agent_handoff_v1: true,
+      sub_agent_v1: false,
+      status: "experimental",
+    },
+  };
+}
+
+function combinedAbortSignal(...signals) {
+  const active = signals.filter((signal) => signal && typeof signal.addEventListener === "function");
+  if (active.length === 0) return null;
+  if (active.length === 1) return active[0];
+  if (typeof AbortSignal.any === "function") return AbortSignal.any(active);
+  const controller = new AbortController();
+  for (const signal of active) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
+  }
+  return controller.signal;
 }
 
 export class TrackedProviderClient {
@@ -730,7 +803,7 @@ export class TrackedProviderClient {
       work_item_id,
       job_id,
       attempt_id: observationContext?.attempt_id ?? null,
-      role: opts.role,
+      role: opts._agentCallRole || opts.role,
       model_tier: tier,
       model_name: modelName,
       activity: opts.activity,
@@ -853,6 +926,7 @@ export class TrackedProviderClient {
     let agent = null;
     let agentLease = null;
     let retainReusableAgent = false;
+    let unregisterSubAgentParent = null;
 
     try {
       if (!dispatcher || typeof dispatcher.dispatch !== "function") {
@@ -891,6 +965,70 @@ export class TrackedProviderClient {
           writable: false,
         },
       });
+      const subAgentEnabled = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.subAgentV1 === true
+        && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.sub_agent_v1 === true
+        && opts._subAgentChild !== true;
+      if (subAgentEnabled) {
+        unregisterSubAgentParent = subAgentRuntime.registerParent({
+          agentCallId,
+          runChild: async ({ intent, evidence, signal, requestId }) => {
+            const childRole = String(opts.role || "researcher");
+            const childIssuance = childOnlyRemoteIssuance(effectiveCapabilityOpts, {
+              providerName,
+              role: childRole,
+            });
+            const childSessionPacket = {
+              remote_prompt_composed: true,
+              remote_issuance: childIssuance,
+              remote_tool_surface: ["tools.agent_handoff"],
+              agent_coordination: {
+                mode: "handoff",
+                agent_handoff_v1: true,
+                sub_agent_v1: false,
+                remote_acknowledged: true,
+              },
+            };
+            const childSignal = combinedAbortSignal(abortSignal, signal);
+            return await this.call(
+              buildCitationChildPrompt({ intent, evidence }),
+              {
+                role: childRole,
+                modelTier: tier,
+                modelName,
+                reasoningEffort: "low",
+                activity: `citation child ${requestId}`,
+                allowWrite: false,
+                allowShell: false,
+                allowTests: false,
+                projectDbCapability: "none",
+                projectDbWrite: false,
+                needsImageGeneration: false,
+                disableAtlas: true,
+                disableSystemTools: true,
+                fallbackReads: 0,
+                maxTurns: 4,
+                maxOutputTokens: 4096,
+                skipRolePrompt: true,
+                recyclingMode: "fresh",
+                sessionPacket: childSessionPacket,
+                remoteSystemPrompt: "POSSE CITATION CHILD: use only the supplied evidence and make terminal agent_handoff your sole final action. Do not browse, mutate, dispatch, or add prose after the receipt.",
+                allowedProviders: [providerName],
+                abortSignal: childSignal,
+                _subAgentChild: true,
+                _agentCallRole: "subagent",
+              },
+              {
+                job_id,
+                work_item_id,
+                cwd,
+                jobProvider: providerName,
+                jobModelName: modelName,
+                complexity: "low",
+              },
+            );
+          },
+        });
+      }
       this.worker._startSessionRecycleLeaseRenewal?.(opts._sessionRecycle);
       recordMemorySample("provider.call.before", {
         agent_call_id: agentCallId,
@@ -1242,6 +1380,7 @@ export class TrackedProviderClient {
       throw err;
     } finally {
       try {
+        unregisterSubAgentParent?.();
         try {
           if (agent && agentLease) await dispatcher.release({
             agent,
@@ -1461,11 +1600,14 @@ export class TrackedProviderClient {
       }
     }
 
+    const explicitAbortSignal = opts.abortSignal && typeof opts.abortSignal.addEventListener === "function"
+      ? opts.abortSignal
+      : null;
     const existingAbortController = job_id ? this.worker._abortControllers.get(job_id) : null;
-    const ac = existingAbortController || new AbortController();
-    const createdAbortController = !!job_id && !existingAbortController;
+    const ac = explicitAbortSignal ? null : (existingAbortController || new AbortController());
+    const createdAbortController = !!job_id && !explicitAbortSignal && !existingAbortController;
     if (createdAbortController) this.worker._abortControllers.set(job_id, ac);
-    opts = { ...opts, abortSignal: ac.signal };
+    opts = { ...opts, abortSignal: explicitAbortSignal || ac.signal };
 
     const sessionPrepared = await timeProviderSetupPhase("provider.session_prepare", {
       role: opts.role,
@@ -1526,7 +1668,7 @@ export class TrackedProviderClient {
         job_id,
         cwd,
         observationContext,
-        abortSignal: ac.signal,
+        abortSignal: opts.abortSignal,
       });
       if (preflightFallback) {
         if (job_id) {
@@ -1588,7 +1730,7 @@ export class TrackedProviderClient {
               attempt_id: ambient.attempt_id ?? null,
               role: opts.role ?? ambient.role ?? null,
             },
-            abortSignal: ac.signal,
+            abortSignal: opts.abortSignal,
           });
           if (job_id) {
             updateJobProvider(job_id, providerName, retry.stats?.modelName || runtimeFallbackModel || null);

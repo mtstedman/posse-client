@@ -24,6 +24,7 @@ import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contract
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
 import { rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
+import { executeSubAgent, subAgentCompletionSignal } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
 import { noteAtlasPressureAndGetNudge } from "../../../domains/integrations/functions/deterministic-mcp/gate.js";
 import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
 import {
@@ -1720,6 +1721,61 @@ export class PersistentMcpOwner {
           });
           return;
         }
+        if (requested.suite === "tools" && requested.name === "sub_agent") {
+          const startedAt = Date.now();
+          try {
+            const result = await executeSubAgent(toolArgs, {
+              context: {
+                workItemId: session?.bootConfig?.workItemId,
+                jobId: session?.bootConfig?.jobId,
+                attemptId: session?.bootConfig?.attemptId,
+                agentCallId: session?.bootConfig?.agentCallId,
+              },
+            });
+            recordObservation({
+              work_item_id: session?.bootConfig?.workItemId ?? null,
+              job_id: session?.bootConfig?.jobId ?? null,
+              attempt_id: session?.bootConfig?.attemptId ?? null,
+              observation_type: "tool.sub_agent",
+              summary: `Sub-agent ${toolArgs?.op || "operation"} completed`,
+              detail: {
+                op: toolArgs?.op || null,
+                batch_id: result?.batch_id || toolArgs?.batch_id || null,
+                status: result?.status || null,
+                parent_agent_call_id: session?.bootConfig?.agentCallId ?? null,
+                duration_ms: Date.now() - startedAt,
+              },
+            });
+            sendJson(res, 200, {
+              ok: true,
+              bootId: this.bootId,
+              sessionId: id,
+              message: {
+                jsonrpc: "2.0",
+                id: message?.id ?? null,
+                result: {
+                  content: [{ type: "text", text: JSON.stringify(result) }],
+                  isError: false,
+                },
+              },
+            });
+          } catch (error) {
+            sendJson(res, 200, {
+              ok: true,
+              bootId: this.bootId,
+              sessionId: id,
+              message: {
+                jsonrpc: "2.0",
+                id: message?.id ?? null,
+                result: {
+                  content: [{ type: "text", text: `Error executing sub_agent: ${String(error?.message || error).slice(0, 500)}` }],
+                  isError: true,
+                },
+              },
+            });
+          }
+          return;
+        }
         if (requested.suite === "atlas") {
           const response = await this._executeAtlasToolCall({ message, session, toolName, toolArgs });
           if (rejectAgentHandoffForLaterTool(
@@ -1754,6 +1810,21 @@ export class PersistentMcpOwner {
         }
       }
       let response = await this._gatewaySession.request(injectSessionContext(message, session));
+      if (message.method === "tools/call") {
+        const requested = requestedToolPolicyName(
+          String(message?.params?.name || ""),
+          message?.params?.arguments || {},
+        );
+        const signal = subAgentCompletionSignal(
+          session?.bootConfig?.agentCallId,
+          requested.name || String(message?.params?.name || ""),
+        );
+        const content = response?.result?.content;
+        if (signal && Array.isArray(content)) {
+          const textPart = content.find((part) => part?.type === "text" && typeof part.text === "string");
+          if (textPart) textPart.text += signal;
+        }
+      }
       if (message.method === "tools/call" && mcpToolCallSuccess(response)) {
         void this._scheduleAtlasWriteRefresh({ message, session, response }).catch((err) => {
           appendRunTelemetry("diagnostics", {

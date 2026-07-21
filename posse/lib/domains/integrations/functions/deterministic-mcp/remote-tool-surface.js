@@ -172,7 +172,7 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
     requested_suites: requestedRemoteToolSuites(bootConfig),
     local_capabilities: {
       tools: {
-        read: true,
+        read: bootConfig.coordinationChild !== true,
         write: bootConfig.allowWrite === true,
         shell: bootConfig.allowShell === true,
         tests: bootConfig.allowTests === true,
@@ -182,7 +182,7 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
       atlas: atlasCapabilities,
       coordination: {
         agent_handoff_v1: bootConfig.agentHandoff === true,
-        sub_agent_v1: false,
+        sub_agent_v1: bootConfig.subAgent === true,
       },
     },
     mcp_oauth: {

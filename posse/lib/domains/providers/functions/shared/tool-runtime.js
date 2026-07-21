@@ -15,6 +15,11 @@ import {
   rejectAgentHandoffForLaterTool,
   stageAgentHandoff,
 } from "../../../handoff/functions/agent-handoff.js";
+import {
+  assertSubAgentParentReady,
+  executeSubAgent,
+  subAgentCompletionSignal,
+} from "../../../sub-agent/classes/SubAgentRuntime.js";
 import { execProjectDbQuery } from "../../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   acknowledgeOperatorFeedback,
@@ -96,7 +101,8 @@ function appendLiveChannelSignal(result, toolName) {
   if (typeof result !== "string") return result;
   let signal = "";
   try {
-    signal = liveChannelSignalForAmbient(toolName);
+    const ambient = getObservationContext() || {};
+    signal = `${liveChannelSignalForAmbient(toolName)}${subAgentCompletionSignal(ambient.agent_call_id, toolName)}`;
   } catch {
     return result;
   }
@@ -161,6 +167,9 @@ const OBSERVED_TOOL_FORMATTERS = {
   },
   agent_handoff(input = {}) {
     return { target: input.profile || "", summary: `AgentHandoff: ${input.profile || "?"} ${input.outcome || "?"}` };
+  },
+  sub_agent(input = {}) {
+    return { target: input.batch_id || input.op || "", summary: `SubAgent: ${input.op || "?"}` };
   },
   read_file(input = {}) {
     return { target: input.path || "", summary: `Read: ${input.path || "?"}` };
@@ -318,6 +327,7 @@ export function createStandardToolHandlerMap({
   const handlers = {
     agent_handoff(args, ctx) {
       const ambient = getObservationContext() || {};
+      assertSubAgentParentReady(ambient.agent_call_id);
       const receipt = stageAgentHandoff(args || {}, {
         context: ambient,
         role: ctx?.role || ctx?.declaredScope?.role || "",
@@ -333,6 +343,11 @@ export function createStandardToolHandlerMap({
         call_count: receipt.callCount,
         terminal: true,
       });
+    },
+    async sub_agent(args) {
+      const ambient = getObservationContext() || {};
+      const result = await executeSubAgent(args || {}, { context: ambient });
+      return JSON.stringify(result);
     },
     request_scope(args, ctx) {
       const ambient = getObservationContext() || {};
@@ -616,7 +631,7 @@ export async function executeToolWithMap(name, argsStr, context, {
       const result = BLOCKING_NATIVE_TOOL_NAMES.has(name)
         ? await PROVIDER_TOOL_GATE.write(key, run, { label, waitMs: 120000, barrierName: label })
         : await PROVIDER_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
-      if (name === "agent_handoff") return result;
+      if (name === "agent_handoff" || name === "sub_agent") return result;
       if (violatesTerminalHandoff()) {
         return "Error: agent_handoff was staged while this tool was running; the terminal report was invalidated";
       }

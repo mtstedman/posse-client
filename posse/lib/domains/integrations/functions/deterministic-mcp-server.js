@@ -38,12 +38,16 @@ import {
   isSensitiveEnvFileOrTargetPath,
   safePath,
 } from "../../../shared/tools/functions/toolkit/index.js";
-import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY } from "../../../catalog/native-tools.js";
+import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY, TOOL_SUB_AGENT } from "../../../catalog/native-tools.js";
 import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   rejectAgentHandoffForLaterTool,
   stageAgentHandoff,
 } from "../../handoff/functions/agent-handoff.js";
+import {
+  assertSubAgentParentReady,
+  executeSubAgent,
+} from "../../sub-agent/classes/SubAgentRuntime.js";
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../shared/tools/functions/tool-suites.js";
@@ -855,7 +859,7 @@ function buildRemoteToolSurfaceRequest() {
       atlas: atlasCapabilities,
       coordination: {
         agent_handoff_v1: tokenToolAllowlistForSuite("tools")?.has("agent_handoff") === true,
-        sub_agent_v1: false,
+        sub_agent_v1: tokenToolAllowlistForSuite("tools")?.has("sub_agent") === true,
       },
     },
     mcp_oauth: {
@@ -2111,6 +2115,7 @@ function rebuildNativeToolSchemas() {
   DECLARED_NATIVE_TOOL_NAME_SET = new Set(DECLARED_NATIVE_TOOL_NAMES);
   TOOL_SCHEMAS = [];
   addToolSchema(TOOL_AGENT_HANDOFF);
+  addToolSchema(TOOL_SUB_AGENT);
   if (ownerHotGateway) {
     addToolSchema(TOOL_READ_FILE);
     addToolSchema(TOOL_CHAIN_READ);
@@ -2155,6 +2160,7 @@ function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry = declareToolSuites(new ToolRegistry());
   mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
   mcpToolRegistry.attach("agent_handoff", (args) => {
+    assertSubAgentParentReady(mcpAgentCallId);
     const receipt = stageAgentHandoff(args || {}, {
       context: {
         workItemId: mcpWorkItemId,
@@ -2173,6 +2179,17 @@ function attachToolExecutorsForCurrentBoot() {
       call_count: receipt.callCount,
       terminal: true,
     });
+  });
+  mcpToolRegistry.attach("sub_agent", async (args) => {
+    const result = await executeSubAgent(args || {}, {
+      context: {
+        workItemId: mcpWorkItemId,
+        jobId: mcpJobId,
+        attemptId: mcpAttemptId,
+        agentCallId: mcpAgentCallId,
+      },
+    });
+    return JSON.stringify(result);
   });
   mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));

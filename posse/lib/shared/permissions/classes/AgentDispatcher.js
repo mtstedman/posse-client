@@ -80,6 +80,8 @@ export class AgentDispatcher {
     providerName = null,
     reusable = false,
     agentHandoff = false,
+    subAgent = false,
+    coordinationChild = false,
   } = /** @type {any} */ ({})) {
     const agentKey = String(key || "").trim();
     const lineageKey = String(logicalKey || agentKey).trim();
@@ -113,6 +115,8 @@ export class AgentDispatcher {
         role: normalizedRole,
         providerName: normalizedProvider,
         agentHandoff: agentHandoff === true,
+        subAgent: subAgent === true,
+        coordinationChild: coordinationChild === true,
       });
       const mcpGate = await this.gateFactory({
         key: agentKey,

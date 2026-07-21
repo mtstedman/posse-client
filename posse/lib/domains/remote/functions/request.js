@@ -84,7 +84,7 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
     atlas: atlasCapabilities,
     coordination: {
       agent_handoff_v1: packet?.agent_coordination?.agent_handoff_v1 === true,
-      sub_agent_v1: false,
+      sub_agent_v1: packet?.agent_coordination?.sub_agent_v1 === true,
     },
   };
   const provider = String(providerName || packet?.execution_provider || packet?.provider || "")
@@ -111,7 +111,7 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
     },
     coordination: {
       agent_handoff_v1: capabilities.coordination.agent_handoff_v1,
-      sub_agent_v1: false,
+      sub_agent_v1: capabilities.coordination.sub_agent_v1,
     },
   };
 }

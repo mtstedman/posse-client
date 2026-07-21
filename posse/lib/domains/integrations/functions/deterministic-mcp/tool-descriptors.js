@@ -74,6 +74,7 @@ import {
   TOOL_GENERATE_IMAGE,
   TOOL_PROJECT_DB_QUERY,
   TOOL_AGENT_HANDOFF,
+  TOOL_SUB_AGENT,
 } from "../../../../catalog/native-tools.js";
 
 export {
@@ -111,6 +112,7 @@ export {
   TOOL_GENERATE_IMAGE,
   TOOL_PROJECT_DB_QUERY,
   TOOL_AGENT_HANDOFF,
+  TOOL_SUB_AGENT,
 } from "../../../../catalog/native-tools.js";
 
 import { ATLAS_TOOL_DEFS_RAW } from "../../../../catalog/atlas-tools.js";
@@ -212,6 +214,12 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
     access: "coordination",
     summary: "Submit the terminal structured handoff report using backend-materialized evidence selectors.",
     observation: { type: "tool.agent_handoff", label: "AgentHandoff", format: "generic", targetKeys: ["profile", "outcome"] },
+  },
+  sub_agent: {
+    access: "coordination",
+    summary: "Dispatch or control a bounded batch of isolated citation-synthesis agents.",
+    budgetExempt: true,
+    observation: { type: "tool.sub_agent", label: "SubAgent", format: "generic", targetKeys: ["op", "batch_id"] },
   },
   read_file: {
     access: "read",
@@ -644,6 +652,7 @@ export const TOOL_OBSERVATION_ALIASES = Object.freeze({
 
 const NATIVE_SCHEMAS = Object.freeze({
   agent_handoff: TOOL_AGENT_HANDOFF,
+  sub_agent: TOOL_SUB_AGENT,
   read_file: TOOL_READ_FILE,
   write_file: TOOL_WRITE_FILE,
   edit_file: TOOL_EDIT_FILE,
@@ -682,7 +691,7 @@ const NATIVE_SCHEMAS = Object.freeze({
 });
 
 function roleAllowlistForTool(toolName) {
-  if (toolName === "agent_handoff") {
+  if (toolName === "agent_handoff" || toolName === "sub_agent") {
     return new Set(["researcher", "planner", "dev", "artificer", "assessor"]);
   }
   const roles = [];
@@ -761,7 +770,7 @@ export function getToolExecutionSpec(name) {
   return TOOL_EXECUTION_SPECS[name] || null;
 }
 
-export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration = false, agentHandoff = false } = {}) {
+export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration = false, agentHandoff = false, subAgent = false } = {}) {
   const config = ROLE_TOOL_ALLOWLISTS[role] || ROLE_TOOL_ALLOWLISTS.default;
   const key = allowWrite ? "write" : "read";
   const names = [...(config[key] || [])];
@@ -770,6 +779,9 @@ export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration
   }
   if (agentHandoff && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
     names.unshift("agent_handoff");
+  }
+  if (subAgent && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
+    names.unshift("sub_agent");
   }
   return names;
 }
@@ -801,6 +813,7 @@ export function roleUsesDeterministicImageHelpers(role) {
 export function getDeterministicMcpToolNames(role, {
   needsImageGeneration = false,
   agentHandoff = false,
+  subAgent = false,
 } = {}) {
   if (!roleUsesDeterministicReadMcp(role)) return [];
   if (role === "preflight" || role === "delegator") return [];
@@ -835,6 +848,9 @@ export function getDeterministicMcpToolNames(role, {
   }
   if (agentHandoff && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
     tools.unshift("agent_handoff");
+  }
+  if (subAgent && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
+    tools.unshift("sub_agent");
   }
   return tools;
 }

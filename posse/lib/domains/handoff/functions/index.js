@@ -835,11 +835,11 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
     .trim()
     .toLowerCase();
   const handoffEnabled = coordinationMode === "handoff" || coordinationMode === "subagents";
+  const subAgentEnabled = coordinationMode === "subagents";
   packet.agent_coordination = {
     mode: ["off", "handoff", "subagents"].includes(coordinationMode) ? coordinationMode : "off",
     agent_handoff_v1: handoffEnabled,
-    // Forward-compatible setting value only. The sub-agent surface remains absent.
-    sub_agent_v1: false,
+    sub_agent_v1: subAgentEnabled,
     status: "experimental",
     source: "repo_setting_snapshot",
   };

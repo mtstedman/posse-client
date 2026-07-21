@@ -158,9 +158,10 @@ function canonicalToolEntry(entry, fallbackSuite = "") {
   return { suite, name, canonical: `${suite}.${name}` };
 }
 
-function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, coordinationAvailable = false) {
+function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, coordination = {}) {
   if (!tool) return false;
-  if (tool.suite === "tools" && tool.name === "agent_handoff") return coordinationAvailable === true;
+  if (tool.suite === "tools" && tool.name === "agent_handoff") return coordination.agentHandoff === true;
+  if (tool.suite === "tools" && tool.name === "sub_agent") return coordination.subAgent === true;
   if (!policy.allow_read) return false;
   if (tool.suite === "atlas") return atlasAvailable !== false;
   if (tool.name === "project_db_query") return projectDbCapability !== "none";
@@ -177,6 +178,7 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
  *   projectDbCapability?: string,
  *   atlasAvailable?: boolean,
  *   coordinationAvailable?: boolean,
+ *   subAgentAvailable?: boolean,
  * }} [options]
  */
 export function normalizeIssuedToolSurface(value, {
@@ -184,12 +186,16 @@ export function normalizeIssuedToolSurface(value, {
   projectDbCapability = "none",
   atlasAvailable = true,
   coordinationAvailable = false,
+  subAgentAvailable = false,
 } = {}) {
   const entries = Array.isArray(value) ? value : [];
   const out = [];
   for (const entry of entries) {
     const tool = canonicalToolEntry(entry);
-    if (!toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, coordinationAvailable)) continue;
+    if (!toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, {
+      agentHandoff: coordinationAvailable,
+      subAgent: subAgentAvailable,
+    })) continue;
     if (!out.includes(tool.canonical)) out.push(tool.canonical);
   }
   return out;
@@ -332,11 +338,18 @@ export function normalizeRemoteIssuedPolicy(value, {
   const coordinationSource = plainObject(source.coordination);
   const coordination = {
     agentHandoffV1: coordinationSource?.agent_handoff_v1 === true,
-    subAgentV1: false,
+    subAgentV1: coordinationSource?.agent_handoff_v1 === true
+      && coordinationSource?.sub_agent_v1 === true,
   };
   const toolSurface = normalizeIssuedToolSurface(
     Array.isArray(source.tool_surface) ? source.tool_surface : source.tools,
-    { policy: toolPolicy, projectDbCapability, atlasAvailable, coordinationAvailable: coordination.agentHandoffV1 },
+    {
+      policy: toolPolicy,
+      projectDbCapability,
+      atlasAvailable,
+      coordinationAvailable: coordination.agentHandoffV1,
+      subAgentAvailable: coordination.subAgentV1,
+    },
   );
   const webAccess = normalizeWebAccess(source.web_access || source.webAccess, role);
   const issued = {
@@ -352,7 +365,9 @@ export function normalizeRemoteIssuedPolicy(value, {
       : "none",
     coordination: {
       agentHandoffV1: coordination.agentHandoffV1 && toolSurface.includes("tools.agent_handoff"),
-      subAgentV1: false,
+      subAgentV1: coordination.subAgentV1
+        && toolSurface.includes("tools.agent_handoff")
+        && toolSurface.includes("tools.sub_agent"),
     },
   };
   TRUSTED_REMOTE_POLICY_OBJECTS.add(issued);
@@ -384,7 +399,7 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
     project_db_capability: issued.projectDbCapability,
     coordination: {
       agent_handoff_v1: issued.coordination.agentHandoffV1,
-      sub_agent_v1: false,
+      sub_agent_v1: issued.coordination.subAgentV1,
     },
   };
 }
@@ -495,6 +510,9 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
   if (attachment.agentHandoff !== true) {
     toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "agent_handoff");
   }
+  if (attachment.subAgent !== true) {
+    toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "sub_agent");
+  }
   return {
     ...signed,
     agentId: signed.agentId || "",
@@ -556,13 +574,14 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
 
   const remoteIssuance = plainObject(packet.remote_issuance);
   const localAgentHandoff = packet?.agent_coordination?.agent_handoff_v1 === true;
-  const executionIssuance = remoteIssuance && !localAgentHandoff
+  const localSubAgent = packet?.agent_coordination?.sub_agent_v1 === true;
+  const executionIssuance = remoteIssuance && (!localAgentHandoff || !localSubAgent)
     ? {
         ...remoteIssuance,
         coordination: {
           ...(plainObject(remoteIssuance.coordination) || {}),
-          agent_handoff_v1: false,
-          sub_agent_v1: false,
+          agent_handoff_v1: localAgentHandoff,
+          sub_agent_v1: localSubAgent,
         },
       }
     : remoteIssuance;

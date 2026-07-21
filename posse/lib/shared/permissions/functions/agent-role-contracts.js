@@ -13,28 +13,33 @@ const HANDOFF_ROLES = new Set(["researcher", "planner", "dev", "artificer", "ass
  * No Job/WI values are accepted here: those belong exclusively to the live
  * owner-side scope binding and may only narrow this role contract.
  *
- * @param {{ role?: string, providerName?: string | null, agentHandoff?: boolean }} [identity]
+ * @param {{ role?: string, providerName?: string | null, agentHandoff?: boolean, subAgent?: boolean, coordinationChild?: boolean }} [identity]
  */
-export function resolveAgentRoleContract({ role, providerName = null, agentHandoff = false } = {}) {
+export function resolveAgentRoleContract({ role, providerName = null, agentHandoff = false, subAgent = false, coordinationChild = false } = {}) {
   const normalizedRole = String(role || "").trim().toLowerCase();
   const normalizedProvider = String(providerName || "").trim().toLowerCase();
   if (!PROVIDER_ROLE_SET.has(normalizedRole)) {
     throw new Error(`Unknown provider agent role: ${normalizedRole || "<empty>"}`);
   }
-  const projectDbCapability = normalizedRole === "dev"
+  const child = coordinationChild === true;
+  const projectDbCapability = child
+    ? "none"
+    : normalizedRole === "dev"
     ? "write"
     : (READ_DB_ROLES.has(normalizedRole) ? "read" : "none");
   return Object.freeze({
     role: normalizedRole,
     providerName: normalizedProvider,
-    allowWrite: WRITE_ROLES.has(normalizedRole),
+    allowWrite: !child && WRITE_ROLES.has(normalizedRole),
     projectDbCapability,
     projectDbWrite: projectDbCapability === "write",
-    needsImageGeneration: normalizedRole === "artificer",
-    atlasAvailable: true,
+    needsImageGeneration: !child && normalizedRole === "artificer",
+    atlasAvailable: !child,
     atlasGateEnabled: true,
-    disableSystemTools: false,
-    memoryEnabled: atlasMemoryEnabled(),
+    disableSystemTools: child,
+    memoryEnabled: !child && atlasMemoryEnabled(),
     agentHandoff: agentHandoff === true && HANDOFF_ROLES.has(normalizedRole),
+    subAgent: !child && subAgent === true && HANDOFF_ROLES.has(normalizedRole),
+    coordinationChild: child,
   });
 }

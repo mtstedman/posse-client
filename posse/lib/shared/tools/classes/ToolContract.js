@@ -489,6 +489,8 @@ export class ToolContract {
           needsImageGeneration,
           agentHandoff: Array.isArray(issuedToolSurface)
             && issuedToolSurface.includes("tools.agent_handoff"),
+          subAgent: Array.isArray(issuedToolSurface)
+            && issuedToolSurface.includes("tools.sub_agent"),
         })
       : [];
     const shellAllowed = toolNames.includes("bash");
@@ -627,6 +629,7 @@ export class ToolContract {
       allowWrite: !!allowWrite,
       needsImageGeneration: !!opts.needsImageGeneration,
       agentHandoff: !!opts.agentHandoff,
+      subAgent: !!opts.subAgent,
     });
   }
 }

@@ -240,6 +240,7 @@ function expectedMcpToolNames(role, bootPayload = {}) {
     return getDeterministicMcpToolNames(role, {
       needsImageGeneration: bootPayload.allowImageGeneration === true,
       agentHandoff: bootPayload.agentHandoff === true,
+      subAgent: bootPayload.subAgent === true,
     });
   } catch {
     return [];
@@ -428,6 +429,8 @@ function buildDeterministicMcpBootPayload(role, {
   projectDbWrite = false,
   projectDbCapability = null,
   agentHandoff = false,
+  subAgent = false,
+  coordinationChild = false,
 } = {}) {
   const resolvedProjectRoot = path.resolve(projectRoot || cwd || process.cwd());
   const resolvedAtlasConfig = atlasConfig || getAtlasIntegrationConfig();
@@ -438,6 +441,7 @@ function buildDeterministicMcpBootPayload(role, {
   const expectedTools = getDeterministicMcpToolNames(role, {
     needsImageGeneration: allowImageGeneration,
     agentHandoff: agentHandoff === true,
+    subAgent: subAgent === true,
   });
   const allowShell = expectedTools.includes("bash");
   const requestedProjectDbCapability = normalizeProjectDbCapability(
@@ -473,6 +477,8 @@ function buildDeterministicMcpBootPayload(role, {
       allowImageHelpers: roleUsesDeterministicImageHelpers(role),
       allowImageGeneration,
       agentHandoff: agentHandoff === true,
+      subAgent: subAgent === true,
+      coordinationChild: coordinationChild === true,
       role,
       providerName: providerName || null,
       disableSystemTools,
@@ -494,6 +500,7 @@ function buildDeterministicMcpBootPayload(role, {
         jobCacheTtlMs: resolvedAtlasConfig?.jobCacheTtlMs ?? null,
         autoRefreshStale: resolvedAtlasConfig?.autoRefreshStale ?? null,
       },
+      ...(coordinationChild === true ? { toolAllowlist: { tools: ["agent_handoff"], atlas: [] } } : {}),
       remoteCatalog: {
         enabled: remoteCatalogEnabled,
         mode: remoteCatalogMode,
@@ -812,6 +819,9 @@ export class McpServerConfig {
     const issuedSurface = opts.memoryEnabled === false
       ? withoutAtlasMemoryTools(remoteResolution.surface)
       : remoteResolution.surface;
+    if (opts.coordinationChild === true) {
+      bootPayload.toolAllowlist = { tools: ["agent_handoff"], atlas: [] };
+    }
     const disabledAtlasTools = resolveAtlasDisabledTools();
     if (!resolveAtlasCodeLensCallable()) disabledAtlasTools.add("code.lens");
     if (disabledAtlasTools.size > 0) {
@@ -939,6 +949,8 @@ export class McpServerConfig {
       // provider-side projection and telemetry aligned with the signed role
       // contract instead of requiring every adapter to copy this flag.
       agentHandoff: opts.mcpGate?.contractBootConfig?.agentHandoff === true,
+      subAgent: opts.mcpGate?.contractBootConfig?.subAgent === true,
+      coordinationChild: opts.mcpGate?.contractBootConfig?.coordinationChild === true,
     });
     let remoteResolution = null;
     let remoteResolutionError = null;

@@ -23,6 +23,7 @@ const PROFILE_POLICY = Object.freeze({
   "dev.result.v1": Object.freeze({ roles: ["dev", "fix"], outcomes: ["complete", "failed", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
   "artificer.result.v1": Object.freeze({ roles: ["artificer"], outcomes: ["complete", "failed", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
   "assessor.verdict.v1": Object.freeze({ roles: ["assessor"], outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
+  "citation_synthesis.v1": Object.freeze({ roles: ["subagent"], outcomes: ["complete", "partial", "failed"], targetKinds: ["parent"], maxHandoffs: 1 }),
 });
 
 const TABLE = "agent_handoff_packets";
@@ -105,7 +106,7 @@ function provenanceKind(entry) {
   return /agent|assistant|prose/.test(label) ? "Agent Prose" : "FullToolCall";
 }
 
-function materializeSelector(selectorValue, context) {
+export function materializeAgentHandoffEvidenceSelector(selectorValue, context) {
   const selector = parseAgentHandoffEvidenceSelector(selectorValue);
   const fetched = fetchHashRefForContext(context, selector.ref);
   if (!fetched?.found || !fetched.entry) {
@@ -171,7 +172,7 @@ function materializeClaim(value, claimIndex, context, counters) {
     if (!Array.isArray(detail[lane])) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${lane} must be an array`);
     out[lane] = detail[lane].map((selector) => {
       selectorCount += 1;
-      const evidence = materializeSelector(selector, context);
+      const evidence = materializeAgentHandoffEvidenceSelector(selector, context);
       counters.evidence += evidence.excerpt.length;
       return evidence;
     });
@@ -181,7 +182,7 @@ function materializeClaim(value, claimIndex, context, counters) {
     out.decoy = detail.decoy.map((entry, index) => {
       if (!Array.isArray(entry) || entry.length !== 2) fail("AGENT_HANDOFF_SCHEMA_INVALID", `decoy[${index}] must be [selector, reason]`);
       selectorCount += 1;
-      const evidence = materializeSelector(entry[0], context);
+      const evidence = materializeAgentHandoffEvidenceSelector(entry[0], context);
       const reason = boundedString(entry[1], `decoy[${index}][1]`, 500);
       counters.evidence += evidence.excerpt.length;
       counters.narrative += reason.length;
@@ -210,6 +211,8 @@ function validateTarget(target, policy, profile, label) {
     fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} pipeline target role must be $pipeline when present`);
   } else if (kind === "result" && role != null && role !== "$result") {
     fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} result target role must be $result when present`);
+  } else if (kind === "parent" && role != null && role !== "$parent") {
+    fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} parent target role must be $parent when present`);
   }
   return role == null ? { kind } : { kind, role };
 }
@@ -467,7 +470,7 @@ function verifyPacketEvidenceAtCommit(packet) {
     agentCallId: positiveInt(packet.agent_call_id),
   };
   for (const evidence of packetEvidence(packet)) {
-    const verified = materializeSelector({ ref: evidence.ref, lines: evidence.lines }, context);
+    const verified = materializeAgentHandoffEvidenceSelector({ ref: evidence.ref, lines: evidence.lines }, context);
     if (verified.source_content_sha256 !== evidence.source_content_sha256
       || verified.excerpt_sha256 !== evidence.excerpt_sha256
       || verified.excerpt !== evidence.excerpt) {

@@ -75,17 +75,19 @@ export class ToolCatalog {
     allowWrite = false,
     needsImageGeneration = false,
     agentHandoff = false,
+    subAgent = false,
   } = {}) {
-    return getBaseToolNamesForRole(roleName, !!allowWrite, { needsImageGeneration, agentHandoff });
+    return getBaseToolNamesForRole(roleName, !!allowWrite, { needsImageGeneration, agentHandoff, subAgent });
   }
 
   static forProvider(providerName, roleName, {
     allowWrite = false,
     needsImageGeneration = false,
     agentHandoff = false,
+    subAgent = false,
   } = {}) {
     const _provider = String(providerName || "").trim().toLowerCase();
-    const names = this.forRole(roleName, { allowWrite, needsImageGeneration, agentHandoff });
+    const names = this.forRole(roleName, { allowWrite, needsImageGeneration, agentHandoff, subAgent });
     return names.filter((name) => !!this.get(name));
   }
 
