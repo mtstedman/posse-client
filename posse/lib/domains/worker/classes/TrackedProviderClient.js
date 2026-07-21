@@ -55,13 +55,29 @@ import {
   narrowProviderOptionsToRemoteIssuance,
 } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { finalizeAgentHandoffForProvider } from "../../handoff/functions/agent-handoff.js";
-import { TOOL_AGENT_HANDOFF } from "../../../catalog/native-tools.js";
+import { agentHandoffTerminator } from "../../handoff/classes/AgentHandoffTerminator.js";
+import {
+  TOOL_AGENT_HANDOFF,
+  TOOL_AGENT_HANDOFF_ARTIFICER,
+  TOOL_AGENT_HANDOFF_DEV,
+  TOOL_AGENT_HANDOFF_REPORT,
+} from "../../../catalog/native-tools.js";
 import {
   buildCitationChildPrompt,
   subAgentRuntime,
 } from "../../sub-agent/classes/SubAgentRuntime.js";
 
-const AGENT_HANDOFF_TOOL_SCHEMA_CHARS = JSON.stringify(TOOL_AGENT_HANDOFF).length;
+function agentHandoffToolSchemaChars(role) {
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  const schema = normalizedRole === "dev" || normalizedRole === "fix"
+    ? TOOL_AGENT_HANDOFF_DEV
+    : normalizedRole === "artificer"
+      ? TOOL_AGENT_HANDOFF_ARTIFICER
+      : ["researcher", "planner", "assessor", "citation_synthesis"].includes(normalizedRole)
+        ? TOOL_AGENT_HANDOFF_REPORT
+        : TOOL_AGENT_HANDOFF;
+  return JSON.stringify(schema).length;
+}
 
 function terminalHandoffContractChars(options = {}) {
   const systemPrompt = String(options.remoteSystemPrompt || options.systemPrompt || "");
@@ -102,6 +118,15 @@ function providerCallAbortedError(abortSignal, worker, jobId) {
   const killReason = jobId != null ? worker?._killReasons?.get?.(jobId) : null;
   if (killReason) err._killReason = killReason;
   return err;
+}
+
+function terminalHandoffAbortReason(event = {}) {
+  const error = new Error("Terminal agent_handoff receipt acknowledged; stopping provider generation");
+  error.name = "AbortError";
+  error.code = "POSSE_AGENT_HANDOFF_TERMINAL";
+  error.agentCallId = event.agentCallId ?? null;
+  error.digest = event.digest || null;
+  return error;
 }
 
 async function timeProviderSetupPhase(label, meta, fn, { warnMs = SLOW_PROVIDER_SETUP_PHASE_MS } = {}) {
@@ -222,6 +247,8 @@ const DEFAULT_DEPS = {
   retainReplayOutput,
   retainReplayPrompt,
   retainReplayToolUses,
+  agentHandoffTerminator,
+  finalizeAgentHandoffForProvider,
 };
 
 function nonNegativeTokenCount(value) {
@@ -391,16 +418,26 @@ function childOnlyRemoteIssuance(parentOptions = {}, { providerName, role } = {}
     || parentOptions?._remoteToolSurface
     || {};
   const sourceTools = Array.isArray(source.tools) ? source.tools : [];
+  const childTools = Array.isArray(source.child_tools) ? source.child_tools : [];
+  const issuedChildCursorTools = childTools.filter((entry) => {
+    const name = String(entry?.name || entry?.local_name || entry || "");
+    return name === "tools.sub_agent_next_input" || name === "sub_agent_next_input";
+  });
+  const childCursorIssued = issuedChildCursorTools.length > 0;
   return {
     ...source,
     source: "posse-remote",
     role,
     provider: providerName,
-    tools: sourceTools.filter((entry) => {
+    tools: [...sourceTools.filter((entry) => {
       const name = String(entry?.name || entry?.local_name || entry || "");
       return name === "tools.agent_handoff" || name === "agent_handoff";
-    }),
-    tool_surface: ["tools.agent_handoff"],
+    }), ...issuedChildCursorTools],
+    child_tools: [],
+    tool_surface: [
+      ...(childCursorIssued ? ["tools.sub_agent_next_input"] : []),
+      "tools.agent_handoff",
+    ],
     tool_policy: {
       allow_read: false,
       allow_write: false,
@@ -422,6 +459,7 @@ function childOnlyRemoteIssuance(parentOptions = {}, { providerName, role } = {}
     coordination: {
       agent_handoff_v1: true,
       sub_agent_v1: false,
+      sub_agent_next_input_v1: childCursorIssued,
       status: "experimental",
     },
   };
@@ -849,13 +887,27 @@ export class TrackedProviderClient {
       },
     });
     const effectiveCapabilityOpts = narrowProviderOptionsToRemoteIssuance(opts);
+    const handoffRequired = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffV1 === true
+      && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.agent_handoff_v1 === true;
+    const handoffToolSchemaChars = agentHandoffToolSchemaChars(opts.role);
+    const terminalAbortController = handoffRequired ? new AbortController() : null;
+    const providerAbortSignal = combinedAbortSignal(abortSignal, terminalAbortController?.signal);
+    let terminalHandoffStop = null;
+    let terminalProviderError = null;
+    const unregisterAgentHandoffTerminal = handoffRequired
+      ? this.deps.agentHandoffTerminator.subscribe(agentCallId, (event) => {
+          if (terminalHandoffStop) return;
+          terminalHandoffStop = event;
+          terminalAbortController.abort(terminalHandoffAbortReason(event));
+        })
+      : null;
     const attemptOpts = {
       ...effectiveCapabilityOpts,
       maxOutputTokens: resolvedMaxOutputTokens,
       attemptId: observationContext?.attempt_id ?? opts.attemptId ?? null,
       agentCallId,
       promptChars: prompt.length,
-      abortSignal,
+      abortSignal: providerAbortSignal,
       recordFinalPrompt: (finalPrompt, { systemPrompt = null, systemPromptFiles = null } = {}) => {
         const promptText = typeof finalPrompt === "string" ? finalPrompt : String(finalPrompt ?? "");
         retainReplayPrompt?.(agentCallId, {
@@ -928,8 +980,16 @@ export class TrackedProviderClient {
     let agentLease = null;
     let retainReusableAgent = false;
     let unregisterSubAgentParent = null;
+    let unregisterSubAgentChild = null;
 
     try {
+      if (effectiveCapabilityOpts?._subAgentCursor) {
+        unregisterSubAgentChild = subAgentRuntime.bindChild({
+          agentCallId,
+          batchId: effectiveCapabilityOpts._subAgentCursor.batchId,
+          dispatchId: effectiveCapabilityOpts._subAgentCursor.dispatchId,
+        });
+      }
       if (!dispatcher || typeof dispatcher.dispatch !== "function") {
         const error = new Error("Provider dispatch requires an AgentDispatcher with MCP gate minting");
         error.code = "POSSE_AGENT_DISPATCHER_REQUIRED";
@@ -972,7 +1032,13 @@ export class TrackedProviderClient {
       if (subAgentEnabled) {
         unregisterSubAgentParent = subAgentRuntime.registerParent({
           agentCallId,
-          runChild: async ({ intent, evidence, signal, requestId }) => {
+          authorizedToolSurface: effectiveCapabilityOpts?._remoteToolSurface?.tools
+            || effectiveCapabilityOpts?.sessionPacket?.remote_issuance?.tools
+            || [],
+          executeInput: async ({ tool, arguments: inputArguments, signal }) => (
+            await agent.mcpGate.callTool(tool, inputArguments, { signal })
+          ),
+          runChild: async ({ batchId, dispatchId, intent, manifest, maxInputs, signal, requestId }) => {
             const childRole = String(opts.role || "researcher");
             const childIssuance = childOnlyRemoteIssuance(effectiveCapabilityOpts, {
               providerName,
@@ -981,17 +1047,18 @@ export class TrackedProviderClient {
             const childSessionPacket = {
               remote_prompt_composed: true,
               remote_issuance: childIssuance,
-              remote_tool_surface: ["tools.agent_handoff"],
+              remote_tool_surface: childIssuance.tool_surface.slice(),
               agent_coordination: {
                 mode: "handoff",
                 agent_handoff_v1: true,
                 sub_agent_v1: false,
+                sub_agent_next_input_v1: childIssuance.coordination.sub_agent_next_input_v1 === true,
                 remote_acknowledged: true,
               },
             };
             const childSignal = combinedAbortSignal(abortSignal, signal);
             return await this.call(
-              buildCitationChildPrompt({ intent, evidence }),
+              buildCitationChildPrompt({ intent, manifest, maxInputs }),
               {
                 role: childRole,
                 modelTier: tier,
@@ -1007,16 +1074,17 @@ export class TrackedProviderClient {
                 disableAtlas: true,
                 disableSystemTools: true,
                 fallbackReads: 0,
-                maxTurns: 4,
+                maxTurns: Math.min(6, maxInputs + 3),
                 maxOutputTokens: 4096,
                 skipRolePrompt: true,
                 recyclingMode: "fresh",
                 sessionPacket: childSessionPacket,
-                remoteSystemPrompt: "POSSE CITATION CHILD: use only the supplied evidence and make terminal agent_handoff your sole final action. Do not browse, mutate, dispatch, or add prose after the receipt.",
+                remoteSystemPrompt: "POSSE CITATION CHILD: use only sub_agent_next_input to consume the backend-owned ordered inputs, then make terminal agent_handoff your sole final action. Do not browse, mutate, dispatch, or add prose after the receipt.",
                 allowedProviders: [providerName],
                 abortSignal: childSignal,
                 _subAgentChild: true,
                 _agentCallRole: "subagent",
+                _subAgentCursor: { batchId, dispatchId },
               },
               {
                 job_id,
@@ -1042,18 +1110,31 @@ export class TrackedProviderClient {
         prompt_chars: prompt.length,
         atlas_method: opts.disableAtlas ? null : (opts.atlasMethod || null),
       });
-      const { output: providerOutput, stats = {} } = await runWithObservationContext(
-        callObservationContext,
-        () => provider.call(prompt, attemptOpts),
-      );
+      let providerResult;
+      try {
+        providerResult = await runWithObservationContext(
+          callObservationContext,
+          () => provider.call(prompt, attemptOpts),
+        );
+      } catch (error) {
+        if (!terminalHandoffStop || abortSignal?.aborted) throw error;
+        terminalProviderError = error;
+        providerResult = { output: "", stats: error?.stats || {} };
+      }
       if (abortSignal?.aborted) {
         throw providerCallAbortedError(abortSignal, this.worker, job_id);
       }
-      const handoffRequired = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffV1 === true
-        && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.agent_handoff_v1 === true;
+      const providerOutput = typeof providerResult?.output === "string" ? providerResult.output : "";
+      const stats = {
+        ...(providerResult?.stats || {}),
+        ...(terminalHandoffStop ? {
+          terminalHandoffStopped: terminalProviderError != null,
+          terminalHandoffAcknowledged: true,
+        } : {}),
+      };
       let handoffFinalization;
       try {
-        handoffFinalization = finalizeAgentHandoffForProvider({
+        handoffFinalization = this.deps.finalizeAgentHandoffForProvider({
           agentCallId,
           output: providerOutput,
           required: handoffRequired,
@@ -1069,7 +1150,7 @@ export class TrackedProviderClient {
       }
       const output = handoffFinalization.output;
       if (handoffFinalization.applied) {
-        recordObservation({
+        this.deps.recordObservation({
           work_item_id,
           job_id,
           attempt_id: observationContext?.attempt_id ?? null,
@@ -1083,13 +1164,17 @@ export class TrackedProviderClient {
             evidence_chars: handoffFinalization.evidenceChars,
             materialized_packet_chars: handoffFinalization.materializedPacketChars,
             continuation_prose_chars: handoffFinalization.continuationProseChars,
-            tool_schema_chars: AGENT_HANDOFF_TOOL_SCHEMA_CHARS,
-            tool_schema_estimated_tokens: Math.ceil(AGENT_HANDOFF_TOOL_SCHEMA_CHARS / 4),
+            tool_schema_chars: handoffToolSchemaChars,
+            tool_schema_estimated_tokens: Math.ceil(handoffToolSchemaChars / 4),
             terminal_prompt_contract_chars: terminalHandoffContractChars(effectiveCapabilityOpts),
             provider_input_tokens: stats.inputTokens ?? null,
             provider_output_tokens: stats.outputTokens ?? null,
             provider_output_discarded: handoffFinalization.continuationProseChars > 0,
-            terminality: "authoritative_output_only",
+            provider_short_circuited: terminalProviderError != null,
+            provider_stop_code: terminalProviderError?.code || null,
+            terminality: terminalHandoffStop
+              ? "receipt_acknowledged_provider_stopped"
+              : "authoritative_output_only",
           },
         });
       }
@@ -1157,7 +1242,7 @@ export class TrackedProviderClient {
         opts,
       });
 
-      if (opts._sessionRecycle && (stats.sessionHandle || stats.responseId)) {
+      if (!terminalHandoffStop && opts._sessionRecycle && (stats.sessionHandle || stats.responseId)) {
         this.worker._registerSessionRecycleResult?.({
           ...opts._sessionRecycle,
           mode: opts.recyclingMode || "fresh",
@@ -1167,7 +1252,8 @@ export class TrackedProviderClient {
           tokensFreshEstimate: opts._sessionRecycle.fullPromptEstimateTokens,
         });
       }
-      retainReusableAgent = identity.reusable === true
+      retainReusableAgent = !terminalHandoffStop
+        && identity.reusable === true
         && !!(stats.sessionHandle || stats.responseId || opts.priorSessionHandle);
 
       retainReplayOutput?.(agentCallId, {
@@ -1227,8 +1313,8 @@ export class TrackedProviderClient {
             evidence_chars: handoffFinalization.evidenceChars,
             materialized_packet_chars: handoffFinalization.materializedPacketChars,
             continuation_prose_chars: handoffFinalization.continuationProseChars,
-            tool_schema_chars: AGENT_HANDOFF_TOOL_SCHEMA_CHARS,
-            tool_schema_estimated_tokens: Math.ceil(AGENT_HANDOFF_TOOL_SCHEMA_CHARS / 4),
+            tool_schema_chars: handoffToolSchemaChars,
+            tool_schema_estimated_tokens: Math.ceil(handoffToolSchemaChars / 4),
             terminal_prompt_contract_chars: terminalHandoffContractChars(effectiveCapabilityOpts),
           } : null,
         },
@@ -1392,7 +1478,9 @@ export class TrackedProviderClient {
       throw err;
     } finally {
       try {
+        unregisterAgentHandoffTerminal?.();
         unregisterSubAgentParent?.();
+        unregisterSubAgentChild?.();
         try {
           if (agent && agentLease) await dispatcher.release({
             agent,

@@ -359,6 +359,8 @@ function applyRemoteIssuanceToPacket(packet, response) {
     && handoffEnabled
     && localSubAgentEnabled
     && issued.coordination?.subAgentV1 === true;
+  const subAgentNextInputEnabled = subAgentEnabled
+    && issued.coordination?.subAgentNextInputV1 === true;
   const effectiveToolSurface = issued.toolSurface.filter(
     (name) => (name !== "tools.agent_handoff" || handoffEnabled)
       && (name !== "tools.sub_agent" || subAgentEnabled),
@@ -381,6 +383,7 @@ function applyRemoteIssuanceToPacket(packet, response) {
     coordination: {
       agent_handoff_v1: handoffEnabled,
       sub_agent_v1: subAgentEnabled,
+      sub_agent_next_input_v1: subAgentNextInputEnabled,
       status: "experimental",
     },
   };
@@ -389,8 +392,10 @@ function applyRemoteIssuanceToPacket(packet, response) {
     ...(packet.agent_coordination || {}),
     agent_handoff_v1: handoffEnabled,
     sub_agent_v1: subAgentEnabled,
+    sub_agent_next_input_v1: subAgentNextInputEnabled,
     remote_acknowledged: issued.coordination?.agentHandoffV1 === true,
     sub_agent_remote_acknowledged: issued.coordination?.subAgentV1 === true,
+    sub_agent_next_input_remote_acknowledged: issued.coordination?.subAgentNextInputV1 === true,
   };
   const policy = issued.toolPolicy;
   packet.tool_policy = {

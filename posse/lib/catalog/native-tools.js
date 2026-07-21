@@ -133,15 +133,58 @@ export const TOOL_REQUEST_SCOPE = {
   },
 };
 
+export const DEV_COMPLETION_STATUSES = Object.freeze([
+  "COMPLETE",
+  "VERIFIED_NO_CHANGE",
+  "PARTIAL",
+  "BLOCKED",
+]);
+
+export const ARTIFICER_COMPLETION_STATUSES = Object.freeze([
+  "COMPLETE",
+  "PARTIAL",
+  "BLOCKED",
+]);
+
+const COMPLETION_FILE_REQUEST = {
+  type: "object",
+  properties: {
+    path: { type: "string", minLength: 1, maxLength: 500 },
+    reason: { type: "string", minLength: 1, maxLength: 1000 },
+  },
+  required: ["path", "reason"],
+  additionalProperties: false,
+};
+
+const TERMINAL_COMPLETION_PARAMETERS = {
+  type: "object",
+  description:
+    "Dev/fix and artificer completion form. Omit status for COMPLETE. Other statuses require their matching semantic field; the runtime derives the profile, target, and deterministic evidence.",
+  properties: {
+    status: { type: "string", enum: DEV_COMPLETION_STATUSES, default: "COMPLETE" },
+    no_change_rationale: { type: "string", minLength: 1, maxLength: 1000 },
+    remaining_work: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", minLength: 1, maxLength: 1000 } },
+    blocker: { type: "string", minLength: 1, maxLength: 1000 },
+    verification_unavailable: { type: "string", minLength: 1, maxLength: 1000 },
+    evidence_gap: { type: "string", minLength: 1, maxLength: 1000 },
+    file_requests: { type: "array", minItems: 1, maxItems: 16, items: COMPLETION_FILE_REQUEST },
+  },
+  additionalProperties: false,
+};
+
 export const TOOL_AGENT_HANDOFF = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Submit the terminal posse.agent_handoff.v1 report. Use hash-ref selectors only; Posse resolves exact evidence locally. " +
-    "This must be the final tool call. Its response is a receipt, not the evidence or report.",
+    "Finish the current agent turn with a terminal handoff. Dev/fix and artificer use the compact completion form; call agent_handoff() for normal COMPLETE. " +
+    "Other roles submit posse.agent_handoff.v1 with hash-ref selectors. Posse ends provider generation after acknowledging the receipt.",
   parameters: {
-    type: "object",
-    properties: {
+    oneOf: [
+      TERMINAL_COMPLETION_PARAMETERS,
+      {
+        type: "object",
+        description: "Semantic report form for researcher, planner, assessor, and citation-synthesis roles. Legacy dev/artificer reports remain accepted during migration.",
+        properties: {
       protocol: { type: "string", enum: ["posse.agent_handoff.v1"] },
       profile: {
         type: "string",
@@ -248,9 +291,74 @@ export const TOOL_AGENT_HANDOFF = {
           required: ["id", "depends_on", "target", "intent", "report"],
           additionalProperties: false,
         },
+        },
+        },
+        required: ["protocol", "profile", "outcome", "handoffs"],
+        additionalProperties: false,
       },
+    ],
+  },
+};
+
+// Providers receive one of these role projections so completion roles do not
+// pay the prompt cost of the semantic report protocol. TOOL_AGENT_HANDOFF
+// remains the permissive runtime/catalog schema for migration compatibility.
+export const TOOL_AGENT_HANDOFF_DEV = {
+  type: "function",
+  name: "agent_handoff",
+  description:
+    "Finish dev/fix work. Call with no arguments for COMPLETE; use only the matching exceptional fields when work is unchanged, partial, blocked, unverified, or needs files. The receipt ends provider generation.",
+  parameters: {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: DEV_COMPLETION_STATUSES, default: "COMPLETE" },
+      no_change_rationale: { type: "string", minLength: 1, maxLength: 1000 },
+      remaining_work: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", minLength: 1, maxLength: 1000 } },
+      blocker: { type: "string", minLength: 1, maxLength: 1000 },
+      verification_unavailable: { type: "string", minLength: 1, maxLength: 1000 },
+      file_requests: { type: "array", minItems: 1, maxItems: 16, items: COMPLETION_FILE_REQUEST },
     },
-    required: ["protocol", "profile", "outcome", "handoffs"],
+    additionalProperties: false,
+  },
+};
+
+export const TOOL_AGENT_HANDOFF_ARTIFICER = {
+  type: "function",
+  name: "agent_handoff",
+  description:
+    "Finish artificer work. Call with no arguments for COMPLETE; use only the matching exceptional fields when work is partial, blocked, or has an evidence gap. The receipt ends provider generation.",
+  parameters: {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: ARTIFICER_COMPLETION_STATUSES, default: "COMPLETE" },
+      remaining_work: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", minLength: 1, maxLength: 1000 } },
+      blocker: { type: "string", minLength: 1, maxLength: 1000 },
+      evidence_gap: { type: "string", minLength: 1, maxLength: 1000 },
+    },
+    additionalProperties: false,
+  },
+};
+
+export const TOOL_AGENT_HANDOFF_REPORT = {
+  type: "function",
+  name: "agent_handoff",
+  description:
+    "Finish the current researcher, planner, assessor, or citation-synthesis turn with one posse.agent_handoff.v1 semantic report. The receipt ends provider generation.",
+  parameters: TOOL_AGENT_HANDOFF.parameters.oneOf[1],
+};
+
+export const TOOL_SUB_AGENT_NEXT_INPUT = {
+  type: "function",
+  name: "sub_agent_next_input",
+  description:
+    "Advance an isolated citation child through its backend-owned ordered inputs. " +
+    "Start at position 0 and use only the returned next_position; exact-position replay is idempotent.",
+  parameters: {
+    type: "object",
+    properties: {
+      position: { type: "integer", minimum: 0, maximum: 2 },
+    },
+    required: ["position"],
     additionalProperties: false,
   },
 };
@@ -265,21 +373,38 @@ const SUB_AGENT_REQUEST = {
       type: "array",
       minItems: 1,
       maxItems: 3,
-      description: "Ordered hash-ref selectors already visible to the parent. Use exact line slices when only part of a result matters.",
+      description: "Ordered evidence refs or deterministic read calls selected by the parent. Children materialize them lazily through a private cursor.",
       items: {
-        type: "object",
-        properties: {
-          id: { type: "string", minLength: 1, maxLength: 40 },
-          ref: { type: "string", pattern: "^#[0-9A-Za-z]{4,12}(?::(?:L)?[0-9]+-(?:L)?[0-9]+)?$" },
-        },
-        required: ["id", "ref"],
-        additionalProperties: false,
+        oneOf: [
+          {
+            type: "object",
+            properties: {
+              id: { type: "string", minLength: 1, maxLength: 40 },
+              kind: { type: "string", enum: ["ref"] },
+              ref: { type: "string", pattern: "^#[0-9A-Za-z]{4,12}(?::(?:L)?[0-9]+-(?:L)?[0-9]+)?$" },
+            },
+            required: ["id", "kind", "ref"],
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            properties: {
+              id: { type: "string", minLength: 1, maxLength: 40 },
+              kind: { type: "string", enum: ["call"] },
+              tool: { type: "string", minLength: 1, maxLength: 120 },
+              arguments: { type: "object" },
+            },
+            required: ["id", "kind", "tool", "arguments"],
+            additionalProperties: false,
+          },
+        ],
       },
     },
     budget: {
       type: "object",
       properties: {
         timeout_ms: { type: "integer", minimum: 5000, maximum: 60000 },
+        max_inputs: { type: "integer", minimum: 1, maximum: 3 },
       },
       additionalProperties: false,
     },
@@ -293,7 +418,7 @@ export const TOOL_SUB_AGENT = {
   name: "sub_agent",
   description:
     "Dispatch or control an admin-gated batch of one to three isolated citation agents. " +
-    "Children see only the selected hash-ref slices and terminal agent_handoff. Use wait_all when the answer is needed before continuing; async returns immediately and status collects results.",
+    "Children receive a private lazy input cursor plus terminal agent_handoff. Use wait_all when the answer is needed before continuing; async returns immediately and status collects results.",
   parameters: {
     oneOf: [
       {

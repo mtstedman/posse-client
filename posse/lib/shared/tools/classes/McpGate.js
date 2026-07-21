@@ -1,6 +1,7 @@
 // @ts-check
 
 import http from "node:http";
+import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
 
 const DEFAULT_RPC_TIMEOUT_MS = 150000;
 const DEFAULT_RPC_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -314,6 +315,15 @@ export class McpGate {
       signal?.addEventListener?.("abort", onAbort, { once: true });
       request.end(body);
     });
+    if (payload?.terminalHandoffReceipt === true) {
+      setImmediate(() => {
+        void this.rpc({
+          jsonrpc: "2.0",
+          method: AGENT_HANDOFF_RECEIPT_NOTIFICATION,
+          params: {},
+        }, { timeoutMs: 5000 }).catch(() => {});
+      });
+    }
     return payload?.message || null;
   }
 

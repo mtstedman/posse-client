@@ -306,6 +306,7 @@ export async function callProvider(promptText, {
   disableAtlas = false,
   atlasConfig = null,
   _remoteIssuedPolicy = null,
+  _subAgentChild = false,
   mcpGate = null,
 } = {}) {
   // Circuit breaker - if Grok was recently rate-limited, fail fast so the
@@ -390,9 +391,10 @@ export async function callProvider(promptText, {
     _remoteIssuedPolicy = narrowed._remoteIssuedPolicy || null;
   }
 
+  const executionRole = _subAgentChild === true ? "subagent" : role;
   let executionContract = buildExecutionContract({
     provider: "grok",
-    role,
+    role: executionRole,
     roleMode,
     allowWrite,
     projectDbWrite,

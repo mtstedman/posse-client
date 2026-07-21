@@ -1,6 +1,7 @@
 import crypto from "crypto";
 
 import { HASH_REF_ALIAS_PATTERN, normalizeHashRefAlias } from "../../../catalog/hash-store.js";
+import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "../../../catalog/native-tools.js";
 import { fetchHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { createAgentHandoffPacketTable, getDb } from "../../../shared/storage/functions/index.js";
 
@@ -241,17 +242,136 @@ function validateDependencyGraph(handoffs) {
   for (const id of ids) visit(id);
 }
 
+const COMPLETION_ARGUMENT_KEYS = Object.freeze([
+  "status",
+  "no_change_rationale",
+  "remaining_work",
+  "blocker",
+  "verification_unavailable",
+  "evidence_gap",
+  "file_requests",
+]);
+
+function looksLikeTerminalCompletion(value) {
+  const source = plainObject(value);
+  if (!source) return false;
+  return !["protocol", "profile", "outcome", "handoffs"].some((key) => Object.hasOwn(source, key));
+}
+
+function optionalCompletionString(source, key) {
+  return source[key] == null
+    ? null
+    : boundedString(source[key], key, 1000);
+}
+
+function materializeTerminalCompletion(args, role) {
+  if (!["dev", "fix", "artificer"].includes(role)) {
+    fail("AGENT_HANDOFF_PROFILE_INVALID", `Role ${role || "unknown"} cannot use the compact completion form`);
+  }
+  const source = exactKeys(args || {}, COMPLETION_ARGUMENT_KEYS, "agent_handoff");
+  const allowedStatuses = role === "artificer"
+    ? ARTIFICER_COMPLETION_STATUSES
+    : DEV_COMPLETION_STATUSES;
+  const status = String(source.status || "COMPLETE").trim().toUpperCase();
+  if (!allowedStatuses.includes(status)) {
+    fail("AGENT_HANDOFF_OUTCOME_INVALID", `${role} completion does not allow status ${status || "<empty>"}`);
+  }
+
+  const noChangeRationale = optionalCompletionString(source, "no_change_rationale");
+  const blocker = optionalCompletionString(source, "blocker");
+  const verificationUnavailable = optionalCompletionString(source, "verification_unavailable");
+  const evidenceGap = optionalCompletionString(source, "evidence_gap");
+  const remainingWork = source.remaining_work == null
+    ? []
+    : stringArray(source.remaining_work, "remaining_work", 20, 1000);
+  if (source.file_requests != null && !Array.isArray(source.file_requests)) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "file_requests must be an array");
+  }
+  const fileRequests = source.file_requests == null
+    ? []
+    : source.file_requests.map((raw, index) => {
+        const request = exactKeys(raw, ["path", "reason"], `file_requests[${index}]`);
+        return {
+          path: boundedString(request.path, `file_requests[${index}].path`, 500),
+          reason: boundedString(request.reason, `file_requests[${index}].reason`, 1000),
+        };
+      });
+  if (fileRequests.length > 16) fail("AGENT_HANDOFF_TOO_LARGE", "file_requests exceeds 16 items");
+
+  if (status === "VERIFIED_NO_CHANGE" && !noChangeRationale) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "VERIFIED_NO_CHANGE requires no_change_rationale");
+  }
+  if (status === "PARTIAL" && remainingWork.length === 0) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "PARTIAL requires remaining_work");
+  }
+  if (status === "BLOCKED" && !blocker) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "BLOCKED requires blocker");
+  }
+  if (status !== "VERIFIED_NO_CHANGE" && noChangeRationale) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "no_change_rationale is only valid for VERIFIED_NO_CHANGE");
+  }
+  if (status !== "PARTIAL" && remainingWork.length > 0) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "remaining_work is only valid for PARTIAL");
+  }
+  if (status !== "BLOCKED" && blocker) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "blocker is only valid for BLOCKED");
+  }
+  if (role === "artificer" && (verificationUnavailable || fileRequests.length > 0)) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "artificer completion does not allow verification_unavailable or file_requests");
+  }
+  if (role !== "artificer" && evidenceGap) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "evidence_gap is only valid for artificer completion");
+  }
+
+  const profile = role === "artificer" ? "artificer.result.v1" : "dev.result.v1";
+  return {
+    protocol: AGENT_HANDOFF_PROTOCOL,
+    profile,
+    outcome: status.toLowerCase(),
+    role,
+    completion: {
+      status,
+      ...(noChangeRationale ? { no_change_rationale: noChangeRationale } : {}),
+      ...(remainingWork.length ? { remaining_work: remainingWork } : {}),
+      ...(blocker ? { blocker } : {}),
+      ...(verificationUnavailable ? { verification_unavailable: verificationUnavailable } : {}),
+      ...(evidenceGap ? { evidence_gap: evidenceGap } : {}),
+      ...(fileRequests.length ? { file_requests: fileRequests } : {}),
+    },
+    handoffs: [{
+      id: "result",
+      depends_on: [],
+      target: { kind: "pipeline", role: "$pipeline" },
+      intent: "Terminal completion",
+      report: {
+        summary: "",
+        claims: [],
+        scope: {},
+        constraints: [],
+        success_criteria: [],
+        questions: [],
+        payload: {},
+      },
+    }],
+    evidence_chars: 0,
+    authoritative: true,
+  };
+}
+
 export function materializeAgentHandoff(args, { context = {}, role = "", maxHandoffs = null } = {}) {
   const serialized = JSON.stringify(args ?? null);
   if (Buffer.byteLength(serialized, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
     fail("AGENT_HANDOFF_TOO_LARGE", `agent_handoff exceeds ${AGENT_HANDOFF_LIMITS.maxCallBytes} bytes`);
+  }
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  if (looksLikeTerminalCompletion(args || {})) {
+    return materializeTerminalCompletion(args || {}, normalizedRole);
   }
   const source = exactKeys(args, ["protocol", "profile", "outcome", "handoffs"], "agent_handoff");
   if (source.protocol !== AGENT_HANDOFF_PROTOCOL) fail("AGENT_HANDOFF_PROTOCOL_INVALID", `protocol must be ${AGENT_HANDOFF_PROTOCOL}`);
   const profile = boundedString(source.profile, "profile", 80);
   const policy = PROFILE_POLICY[profile];
   if (!policy) fail("AGENT_HANDOFF_PROFILE_INVALID", `Unsupported profile: ${profile}`);
-  const normalizedRole = String(role || "").trim().toLowerCase();
   if (!policy.roles.includes(normalizedRole)) fail("AGENT_HANDOFF_PROFILE_INVALID", `Role ${normalizedRole || "unknown"} cannot use ${profile}`);
   const outcome = boundedString(source.outcome, "outcome", 40);
   if (!policy.outcomes.includes(outcome)) fail("AGENT_HANDOFF_OUTCOME_INVALID", `${profile} does not allow outcome ${outcome}`);
@@ -479,7 +599,53 @@ function verifyPacketEvidenceAtCommit(packet) {
   }
 }
 
+function boundedWords(value, maxWords = 30) {
+  const words = String(value || "").trim().split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return words.join(" ");
+  return `${words.slice(0, maxWords).join(" ")}…`;
+}
+
+function renderCompletionCompatibilityOutput(packet) {
+  const completion = packet.completion || {};
+  const status = String(completion.status || "COMPLETE").toUpperCase();
+  const artificer = packet.profile === "artificer.result.v1";
+  const label = artificer ? "ARTIFICER RESULT" : "DEV RESULT";
+  const summary = status === "VERIFIED_NO_CHANGE"
+    ? "The requested end state already exists."
+    : status === "PARTIAL"
+      ? "Available assigned work was completed."
+      : status === "BLOCKED"
+        ? "Assigned work could not be completed."
+        : artificer
+          ? "All assigned deliverables were produced."
+          : "All assigned work was completed.";
+  let notes = "none";
+  if (completion.verification_unavailable) {
+    notes = `VERIFICATION_UNAVAILABLE: ${completion.verification_unavailable}`;
+  } else if (completion.evidence_gap) {
+    notes = `EVIDENCE_GAP: ${completion.evidence_gap}`;
+  } else if (status === "VERIFIED_NO_CHANGE") {
+    notes = completion.no_change_rationale;
+  } else if (status === "PARTIAL") {
+    notes = `Remaining: ${(completion.remaining_work || []).join("; ")}`;
+  } else if (status === "BLOCKED") {
+    notes = completion.blocker;
+  }
+  const result = `--- ${label} START ---\nstatus: ${status}\nsummary: ${summary}\nnotes: ${boundedWords(notes)}\n--- ${label} END ---`;
+  const fileRequests = Array.isArray(completion.file_requests) ? completion.file_requests : [];
+  if (fileRequests.length === 0) return result;
+  const requestBlock = [
+    "FILE_REQUEST:",
+    ...fileRequests.map((request) => `- ${request.path} — ${request.reason}`),
+    "FILE_REQUEST_END",
+  ].join("\n");
+  return `${requestBlock}\n${result}`;
+}
+
 export function renderAgentHandoffCompatibilityOutput(packet) {
+  if (packet.completion && ["dev.result.v1", "artificer.result.v1"].includes(packet.profile)) {
+    return renderCompletionCompatibilityOutput(packet);
+  }
   if (packet.profile === "planner.plan.v1") {
     const indexes = new Map(packet.handoffs.map((handoff, index) => [handoff.id, index]));
     const tasks = packet.handoffs.map((handoff) => {

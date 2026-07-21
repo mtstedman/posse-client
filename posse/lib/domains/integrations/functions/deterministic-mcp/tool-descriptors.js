@@ -74,7 +74,11 @@ import {
   TOOL_GENERATE_IMAGE,
   TOOL_PROJECT_DB_QUERY,
   TOOL_AGENT_HANDOFF,
+  TOOL_AGENT_HANDOFF_DEV,
+  TOOL_AGENT_HANDOFF_ARTIFICER,
+  TOOL_AGENT_HANDOFF_REPORT,
   TOOL_SUB_AGENT,
+  TOOL_SUB_AGENT_NEXT_INPUT,
 } from "../../../../catalog/native-tools.js";
 
 export {
@@ -112,6 +116,10 @@ export {
   TOOL_GENERATE_IMAGE,
   TOOL_PROJECT_DB_QUERY,
   TOOL_AGENT_HANDOFF,
+  TOOL_AGENT_HANDOFF_DEV,
+  TOOL_AGENT_HANDOFF_ARTIFICER,
+  TOOL_AGENT_HANDOFF_REPORT,
+  TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_SUB_AGENT,
 } from "../../../../catalog/native-tools.js";
 
@@ -220,6 +228,12 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
     summary: "Dispatch or control a bounded batch of isolated citation-synthesis agents.",
     budgetExempt: true,
     observation: { type: "tool.sub_agent", label: "SubAgent", format: "generic", targetKeys: ["op", "batch_id"] },
+  },
+  sub_agent_next_input: {
+    access: "coordination",
+    summary: "Advance a citation child's backend-owned ordered input cursor.",
+    budgetExempt: true,
+    observation: { type: "tool.sub_agent_next_input", label: "SubAgentInput", format: "generic", targetKeys: ["position"] },
   },
   read_file: {
     access: "read",
@@ -653,6 +667,7 @@ export const TOOL_OBSERVATION_ALIASES = Object.freeze({
 const NATIVE_SCHEMAS = Object.freeze({
   agent_handoff: TOOL_AGENT_HANDOFF,
   sub_agent: TOOL_SUB_AGENT,
+  sub_agent_next_input: TOOL_SUB_AGENT_NEXT_INPUT,
   read_file: TOOL_READ_FILE,
   write_file: TOOL_WRITE_FILE,
   edit_file: TOOL_EDIT_FILE,
@@ -691,7 +706,11 @@ const NATIVE_SCHEMAS = Object.freeze({
 });
 
 function roleAllowlistForTool(toolName) {
-  if (toolName === "agent_handoff" || toolName === "sub_agent") {
+  if (toolName === "sub_agent_next_input") return new Set(["subagent"]);
+  if (toolName === "agent_handoff") {
+    return new Set(["researcher", "planner", "dev", "artificer", "assessor", "subagent"]);
+  }
+  if (toolName === "sub_agent") {
     return new Set(["researcher", "planner", "dev", "artificer", "assessor"]);
   }
   const roles = [];
@@ -766,11 +785,23 @@ export function getToolSchema(name) {
   return TOOL_CATALOG[name]?.schema || null;
 }
 
+export function getToolSchemaForRole(name, role) {
+  if (name !== "agent_handoff") return getToolSchema(name);
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  if (normalizedRole === "dev" || normalizedRole === "fix") return TOOL_AGENT_HANDOFF_DEV;
+  if (normalizedRole === "artificer") return TOOL_AGENT_HANDOFF_ARTIFICER;
+  if (["researcher", "planner", "assessor", "citation_synthesis", "subagent"].includes(normalizedRole)) {
+    return TOOL_AGENT_HANDOFF_REPORT;
+  }
+  return TOOL_AGENT_HANDOFF;
+}
+
 export function getToolExecutionSpec(name) {
   return TOOL_EXECUTION_SPECS[name] || null;
 }
 
 export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration = false, agentHandoff = false, subAgent = false } = {}) {
+  if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
   const config = ROLE_TOOL_ALLOWLISTS[role] || ROLE_TOOL_ALLOWLISTS.default;
   const key = allowWrite ? "write" : "read";
   const names = [...(config[key] || [])];
@@ -815,6 +846,7 @@ export function getDeterministicMcpToolNames(role, {
   agentHandoff = false,
   subAgent = false,
 } = {}) {
+  if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
   if (!roleUsesDeterministicReadMcp(role)) return [];
   if (role === "preflight" || role === "delegator") return [];
   const tools = [...DETERMINISTIC_READ_TOOLS];

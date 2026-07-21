@@ -38,7 +38,7 @@ import {
   isSensitiveEnvFileOrTargetPath,
   safePath,
 } from "../../../shared/tools/functions/toolkit/index.js";
-import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY, TOOL_SUB_AGENT } from "../../../catalog/native-tools.js";
+import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY, TOOL_SUB_AGENT, TOOL_SUB_AGENT_NEXT_INPUT } from "../../../catalog/native-tools.js";
 import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   rejectAgentHandoffForLaterTool,
@@ -47,6 +47,8 @@ import {
 import {
   assertSubAgentParentReady,
   executeSubAgent,
+  executeSubAgentNextInput,
+  prepareSubAgentHandoff,
 } from "../../sub-agent/classes/SubAgentRuntime.js";
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
@@ -104,6 +106,7 @@ import {
   buildFoldedAtlasToolDescriptor,
   buildNativeToolDescriptor,
   getDeterministicMcpToolNames,
+  getToolSchemaForRole,
   isBlockedFoldedAtlasTool,
   isExternallyRoutedAtlasTool,
   isFallbackOnlyAtlasTool,
@@ -1086,6 +1089,7 @@ const TEST_TOOL_NAMES = new Set([
 
 const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "sub_agent",
+  "sub_agent_next_input",
   "agent_handoff",
   "read_file",
   "chain_read",
@@ -1183,6 +1187,10 @@ function addToolSchema(schema) {
     TOOL_SCHEMAS.push(schema);
   }
 }
+
+addToolSchema(getToolSchemaForRole("agent_handoff", roleName));
+addToolSchema(TOOL_SUB_AGENT);
+addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
 
 // Researcher gets chain_read + chain_verdict instead of read_file — enforces the audit ledger.
 // Owner-hot mode keeps every tool implementation loaded; per-session shims/owner
@@ -1963,12 +1971,62 @@ function ackOperatorFeedback(args = {}) {
   }, null, 2);
 }
 
+function executeAgentHandoff(args = {}) {
+  assertSubAgentParentReady(mcpAgentCallId);
+  prepareSubAgentHandoff(mcpAgentCallId, args);
+  const receipt = stageAgentHandoff(args, {
+    context: {
+      workItemId: mcpWorkItemId,
+      jobId: mcpJobId,
+      attemptId: mcpAttemptId,
+      agentCallId: mcpAgentCallId,
+    },
+    role: roleName,
+    maxHandoffs: roleName === "planner" ? getIntSetting("planner_max_tasks", 50) : 1,
+  });
+  return JSON.stringify({
+    ok: true,
+    protocol: "posse.agent_handoff.v1",
+    status: receipt.status,
+    digest: receipt.digest,
+    call_count: receipt.callCount,
+    terminal: true,
+  });
+}
+
+async function executeSubAgentTool(args = {}) {
+  const result = await executeSubAgent(args, {
+    context: {
+      workItemId: mcpWorkItemId,
+      jobId: mcpJobId,
+      attemptId: mcpAttemptId,
+      agentCallId: mcpAgentCallId,
+    },
+  });
+  return JSON.stringify(result);
+}
+
+async function executeSubAgentNextInputTool(args = {}) {
+  const result = await executeSubAgentNextInput(args, {
+    context: {
+      workItemId: mcpWorkItemId,
+      jobId: mcpJobId,
+      attemptId: mcpAttemptId,
+      agentCallId: mcpAgentCallId,
+    },
+  });
+  return JSON.stringify(result);
+}
+
 // Attach this server's executors to a ToolRegistry seeded with the shared suite
 // metadata, so the MCP runtime's handler set flows through the same registry the
 // embedded OpenAI/Grok runtime builds from. Executors and role gating are
 // unchanged; the registry is the single declaration both runtimes share.
 let mcpToolRegistry = declareToolSuites(new ToolRegistry());
 mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
+mcpToolRegistry.attach("agent_handoff", (args) => executeAgentHandoff(args || {}));
+mcpToolRegistry.attach("sub_agent", (args) => executeSubAgentTool(args || {}));
+mcpToolRegistry.attach("sub_agent_next_input", (args) => executeSubAgentNextInputTool(args || {}));
 mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -2115,8 +2173,9 @@ function rebuildNativeToolSchemas() {
   DECLARED_NATIVE_TOOL_NAMES = computeDeclaredNativeToolNamesForCurrentBoot();
   DECLARED_NATIVE_TOOL_NAME_SET = new Set(DECLARED_NATIVE_TOOL_NAMES);
   TOOL_SCHEMAS = [];
-  addToolSchema(TOOL_AGENT_HANDOFF);
+  addToolSchema(getToolSchemaForRole("agent_handoff", roleName));
   addToolSchema(TOOL_SUB_AGENT);
+  addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
   if (ownerHotGateway) {
     addToolSchema(TOOL_READ_FILE);
     addToolSchema(TOOL_CHAIN_READ);
@@ -2160,38 +2219,9 @@ function rebuildNativeToolSchemas() {
 function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry = declareToolSuites(new ToolRegistry());
   mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
-  mcpToolRegistry.attach("agent_handoff", (args) => {
-    assertSubAgentParentReady(mcpAgentCallId);
-    const receipt = stageAgentHandoff(args || {}, {
-      context: {
-        workItemId: mcpWorkItemId,
-        jobId: mcpJobId,
-        attemptId: mcpAttemptId,
-        agentCallId: mcpAgentCallId,
-      },
-      role: roleName,
-      maxHandoffs: roleName === "planner" ? getIntSetting("planner_max_tasks", 50) : 1,
-    });
-    return JSON.stringify({
-      ok: true,
-      protocol: "posse.agent_handoff.v1",
-      status: receipt.status,
-      digest: receipt.digest,
-      call_count: receipt.callCount,
-      terminal: true,
-    });
-  });
-  mcpToolRegistry.attach("sub_agent", async (args) => {
-    const result = await executeSubAgent(args || {}, {
-      context: {
-        workItemId: mcpWorkItemId,
-        jobId: mcpJobId,
-        attemptId: mcpAttemptId,
-        agentCallId: mcpAgentCallId,
-      },
-    });
-    return JSON.stringify(result);
-  });
+  mcpToolRegistry.attach("agent_handoff", (args) => executeAgentHandoff(args || {}));
+  mcpToolRegistry.attach("sub_agent", (args) => executeSubAgentTool(args || {}));
+  mcpToolRegistry.attach("sub_agent_next_input", (args) => executeSubAgentNextInputTool(args || {}));
   mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));

@@ -270,6 +270,7 @@ export async function callProvider(promptText, opts = {}) {
     // remote-policy narrowing performs its defensive shallow copy.
     mcpGate = opts?.mcpGate || null,
     _remoteIssuedPolicy = null,
+    _subAgentChild = false,
     manager = nativeBinaries,
     modelRoot = defaultLocalGenerationModelRoot(),
     runtimeRoot = defaultLocalGenerationRuntimeRoot(),
@@ -337,7 +338,9 @@ export async function callProvider(promptText, opts = {}) {
       Number(maxTurns) || profile.maxToolTurns,
     )),
   );
-  const toolRoleEligible = (role === "planner" && !allowWrite)
+  const executionRole = _subAgentChild === true ? "subagent" : role;
+  const toolRoleEligible = _subAgentChild === true
+    || (role === "planner" && !allowWrite)
     || (LOCAL_FILE_WRITE_ROLES.has(role) && fileWriteAuthorized);
   const toolEligible = toolRoleEligible
     && LOCAL_MODEL_IDS.includes(selected)
@@ -346,7 +349,7 @@ export async function callProvider(promptText, opts = {}) {
   const executionContract = toolEligible
     ? buildExecutionContract({
       provider: "posse-local",
-      role,
+      role: executionRole,
       allowWrite,
       issuedToolSurface,
       scopedFiles,
@@ -441,10 +444,11 @@ export async function callProvider(promptText, opts = {}) {
   let content;
   let toolUses = null;
   let toolTurns = 0;
-  if (toolMode) {
-    let readCount = 0;
-    const maxReads = Math.max(0, Number(fallbackReads) || 0);
-    const loop = await runLocalPlannerToolLoop({
+  try {
+    if (toolMode) {
+      let readCount = 0;
+      const maxReads = Math.max(0, Number(fallbackReads) || 0);
+      const loop = await runLocalPlannerToolLoop({
       messages,
       tools: toolDefinitions,
       turnLimit: toolTurnLimit,
@@ -484,14 +488,40 @@ export async function callProvider(promptText, opts = {}) {
         }
         return await mcpGate.callTool(name, args);
       },
-    });
-    content = loop.content;
-    toolUses = loop.toolUses;
-    toolTurns = loop.toolTurns;
-    for (const line of content.split("\n")) onLine?.(line);
-  } else {
-    const result = await generate(messages, { stream: true });
-    content = String(result?.content || "").trim();
+      });
+      content = loop.content;
+      toolUses = loop.toolUses;
+      toolTurns = loop.toolTurns;
+      for (const line of content.split("\n")) onLine?.(line);
+    } else {
+      const result = await generate(messages, { stream: true });
+      content = String(result?.content || "").trim();
+    }
+  } catch (error) {
+    const usage = nativeResults.reduce((totals, result) => ({
+      inputTokens: totals.inputTokens + (Number(result?.usage?.inputTokens) || 0),
+      outputTokens: totals.outputTokens + (Number(result?.usage?.outputTokens) || 0),
+    }), { inputTokens: 0, outputTokens: 0 });
+    if (!error.stats) {
+      error.stats = {
+        durationMs: Date.now() - started,
+        outputChars: 0,
+        promptChars: user.length,
+        exitCode: 1,
+        modelName: selected,
+        inputTokens: usage.inputTokens || null,
+        outputTokens: usage.outputTokens || null,
+        role,
+        modelTier,
+        reasoningEffort: "disabled",
+        maxTurns: toolMode ? toolTurnLimit : 1,
+        maxOutputTokens: outputLimit,
+        numTurns: toolTurns,
+        toolUses,
+        costUsd: 0,
+      };
+    }
+    throw error;
   }
 
   const usage = nativeResults.reduce((totals, result) => ({

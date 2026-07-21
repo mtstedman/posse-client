@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
+import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
 import {
   bootConfigFromMcpOAuthClaims,
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
@@ -23,8 +24,14 @@ import {
 import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/tool-params.js";
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
-import { rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
-import { executeSubAgent, subAgentCompletionSignal } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
+import { getAgentHandoffRecord, rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
+import { agentHandoffTerminator } from "../../../domains/handoff/classes/AgentHandoffTerminator.js";
+import {
+  executeSubAgent,
+  executeSubAgentNextInput,
+  prepareSubAgentHandoff,
+  subAgentCompletionSignal,
+} from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
 import { noteAtlasPressureAndGetNudge } from "../../../domains/integrations/functions/deterministic-mcp/gate.js";
 import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
 import {
@@ -1684,6 +1691,27 @@ export class PersistentMcpOwner {
       });
     }
     try {
+      if (method === AGENT_HANDOFF_RECEIPT_NOTIFICATION) {
+        const agentCallId = session?.bootConfig?.agentCallId;
+        const record = getAgentHandoffRecord(agentCallId);
+        const accepted = record && ["staged", "committed"].includes(record.status);
+        if (accepted) {
+          agentHandoffTerminator.acknowledge(agentCallId, {
+            source: "mcp_receipt",
+            role: session?.bootConfig?.role || null,
+            sessionId: id,
+            digest: record.packet_digest || null,
+          });
+        }
+        sendJson(res, 200, {
+          ok: true,
+          bootId: this.bootId,
+          sessionId: id,
+          message: null,
+          acknowledged: accepted === true,
+        });
+        return;
+      }
       if (!this._gatewaySession) {
         throw new Error("MCP hot gateway has not been registered");
       }
@@ -1701,6 +1729,26 @@ export class PersistentMcpOwner {
           return;
         }
         const requested = requestedToolPolicyName(toolName, toolArgs);
+        if (requested.suite === "tools" && requested.name === "agent_handoff") {
+          try {
+            prepareSubAgentHandoff(session?.bootConfig?.agentCallId, toolArgs);
+          } catch (error) {
+            sendJson(res, 200, {
+              ok: true,
+              bootId: this.bootId,
+              sessionId: id,
+              message: {
+                jsonrpc: "2.0",
+                id: message?.id ?? null,
+                result: {
+                  content: [{ type: "text", text: `Error executing agent_handoff: ${String(error?.message || error).slice(0, 500)}` }],
+                  isError: true,
+                },
+              },
+            });
+            return;
+          }
+        }
         if (requested.name !== "agent_handoff"
           && rejectAgentHandoffForLaterTool(session?.bootConfig?.agentCallId, requested.name || toolName)) {
           sendJson(res, 200, {
@@ -1719,6 +1767,62 @@ export class PersistentMcpOwner {
               },
             },
           });
+          return;
+        }
+        if (requested.suite === "tools" && requested.name === "sub_agent_next_input") {
+          const startedAt = Date.now();
+          try {
+            const result = await executeSubAgentNextInput(toolArgs, {
+              context: {
+                workItemId: session?.bootConfig?.workItemId,
+                jobId: session?.bootConfig?.jobId,
+                attemptId: session?.bootConfig?.attemptId,
+                agentCallId: session?.bootConfig?.agentCallId,
+              },
+            });
+            recordObservation({
+              work_item_id: session?.bootConfig?.workItemId ?? null,
+              job_id: session?.bootConfig?.jobId ?? null,
+              attempt_id: session?.bootConfig?.attemptId ?? null,
+              observation_type: "tool.sub_agent_next_input",
+              summary: `Sub-agent input ${toolArgs?.position ?? "?"} materialized`,
+              detail: {
+                position: toolArgs?.position ?? null,
+                input_id: result?.input?.id || null,
+                ok: result?.ok === true,
+                next_position: result?.next_position ?? null,
+                child_agent_call_id: session?.bootConfig?.agentCallId ?? null,
+                duration_ms: Date.now() - startedAt,
+              },
+            });
+            sendJson(res, 200, {
+              ok: true,
+              bootId: this.bootId,
+              sessionId: id,
+              message: {
+                jsonrpc: "2.0",
+                id: message?.id ?? null,
+                result: {
+                  content: [{ type: "text", text: JSON.stringify(result) }],
+                  isError: false,
+                },
+              },
+            });
+          } catch (error) {
+            sendJson(res, 200, {
+              ok: true,
+              bootId: this.bootId,
+              sessionId: id,
+              message: {
+                jsonrpc: "2.0",
+                id: message?.id ?? null,
+                result: {
+                  content: [{ type: "text", text: `Error executing sub_agent_next_input: ${String(error?.message || error).slice(0, 500)}` }],
+                  isError: true,
+                },
+              },
+            });
+          }
           return;
         }
         if (requested.suite === "tools" && requested.name === "sub_agent") {
@@ -1845,11 +1949,21 @@ export class PersistentMcpOwner {
           request_count: session.attachProof.requestCount,
         });
       }
+      const completedTool = message.method === "tools/call"
+        ? requestedToolPolicyName(
+            String(message?.params?.name || ""),
+            message?.params?.arguments || {},
+          )
+        : null;
+      const terminalHandoffReceipt = completedTool?.suite === "tools"
+        && completedTool.name === "agent_handoff"
+        && mcpToolCallSuccess(response);
       sendJson(res, 200, {
         ok: true,
         bootId: this.bootId,
         sessionId: id,
         message: response,
+        ...(terminalHandoffReceipt ? { terminalHandoffReceipt: true } : {}),
       });
     } catch (err) {
       session.noteOwnerError(err, method);

@@ -18,6 +18,8 @@ import {
 import {
   assertSubAgentParentReady,
   executeSubAgent,
+  executeSubAgentNextInput,
+  prepareSubAgentHandoff,
   subAgentCompletionSignal,
 } from "../../../sub-agent/classes/SubAgentRuntime.js";
 import { execProjectDbQuery } from "../../../../shared/tools/functions/toolkit/project-db/query.js";
@@ -170,6 +172,9 @@ const OBSERVED_TOOL_FORMATTERS = {
   },
   sub_agent(input = {}) {
     return { target: input.batch_id || input.op || "", summary: `SubAgent: ${input.op || "?"}` };
+  },
+  sub_agent_next_input(input = {}) {
+    return { target: String(input.position ?? ""), summary: `SubAgentInput: ${input.position ?? "?"}` };
   },
   read_file(input = {}) {
     return { target: input.path || "", summary: `Read: ${input.path || "?"}` };
@@ -328,6 +333,7 @@ export function createStandardToolHandlerMap({
     agent_handoff(args, ctx) {
       const ambient = getObservationContext() || {};
       assertSubAgentParentReady(ambient.agent_call_id);
+      prepareSubAgentHandoff(ambient.agent_call_id, args || {});
       const receipt = stageAgentHandoff(args || {}, {
         context: ambient,
         role: ctx?.role || ctx?.declaredScope?.role || "",
@@ -347,6 +353,11 @@ export function createStandardToolHandlerMap({
     async sub_agent(args) {
       const ambient = getObservationContext() || {};
       const result = await executeSubAgent(args || {}, { context: ambient });
+      return JSON.stringify(result);
+    },
+    async sub_agent_next_input(args) {
+      const ambient = getObservationContext() || {};
+      const result = await executeSubAgentNextInput(args || {}, { context: ambient });
       return JSON.stringify(result);
     },
     request_scope(args, ctx) {
@@ -631,7 +642,7 @@ export async function executeToolWithMap(name, argsStr, context, {
       const result = BLOCKING_NATIVE_TOOL_NAMES.has(name)
         ? await PROVIDER_TOOL_GATE.write(key, run, { label, waitMs: 120000, barrierName: label })
         : await PROVIDER_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
-      if (name === "agent_handoff" || name === "sub_agent") return result;
+      if (name === "agent_handoff" || name === "sub_agent" || name === "sub_agent_next_input") return result;
       if (violatesTerminalHandoff()) {
         return "Error: agent_handoff was staged while this tool was running; the terminal report was invalidated";
       }

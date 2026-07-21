@@ -31,6 +31,8 @@ const OWNER_DEFAULT_REQUEST_TIMEOUT_MS = 150000;
 // them only for idempotent methods.
 const PRE_CONNECT_RETRY_CODES = ["ENOENT", "ECONNREFUSED"];
 const MAYBE_SIDE_EFFECT_RETRY_CODES = ["EPIPE", "ECONNRESET"];
+const AGENT_HANDOFF_RECEIPT_NOTIFICATION = "notifications/posse/agent_handoff_receipt";
+const TERMINAL_HANDOFF_RECEIPT = Symbol("terminalHandoffReceipt");
 const IDEMPOTENT_METHODS = new Set([
   "initialize",
   "tools/list",
@@ -84,16 +86,23 @@ function jsonRpcError(id, code, message) {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-function sendMessage(payload) {
+function sendMessage(payload, onFlushed = null) {
   if (!payload) return;
   const body = JSON.stringify(payload);
+  const flushed = typeof onFlushed === "function" ? onFlushed : undefined;
   if (outboundFraming === "lsp") {
     const bytes = Buffer.from(body, "utf8");
     process.stdout.write(`Content-Length: ${bytes.byteLength}\r\n\r\n`, "utf8");
-    process.stdout.write(bytes);
+    process.stdout.write(bytes, flushed);
   } else {
-    process.stdout.write(`${body}\n`, "utf8");
+    process.stdout.write(`${body}\n`, "utf8", flushed);
   }
+}
+
+function sendMessageAndWaitForFlush(payload) {
+  return new Promise((resolve) => {
+    sendMessage(payload, resolve);
+  });
 }
 
 function ownerRequest(message, {
@@ -168,7 +177,14 @@ function ownerRequest(message, {
           fail(err);
           return;
         }
-        settle(resolve, parsed.message || null);
+        const forwarded = parsed.message || null;
+        if (forwarded && parsed.terminalHandoffReceipt === true) {
+          Object.defineProperty(forwarded, TERMINAL_HANDOFF_RECEIPT, {
+            value: true,
+            enumerable: false,
+          });
+        }
+        settle(resolve, forwarded);
       });
     });
     if (timeoutMs) {
@@ -241,7 +257,18 @@ export function __testForwardToOwner(message, options = {}) {
 function dispatchParsed(parsed) {
   requestQueue = requestQueue.then(async () => {
     const response = await forwardToOwner(parsed);
-    if (response) sendMessage(response);
+    if (!response) return;
+    const terminalHandoffReceipt = response[TERMINAL_HANDOFF_RECEIPT] === true;
+    if (!terminalHandoffReceipt) {
+      sendMessage(response);
+      return;
+    }
+    await sendMessageAndWaitForFlush(response);
+    await ownerRequest({
+      jsonrpc: "2.0",
+      method: AGENT_HANDOFF_RECEIPT_NOTIFICATION,
+      params: {},
+    }, { timeoutMs: 5000 }).catch(() => {});
   }).catch((err) => {
     const id = parsed && Object.prototype.hasOwnProperty.call(parsed, "id") ? parsed.id : null;
     if (id == null) {

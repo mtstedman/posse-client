@@ -51,6 +51,58 @@ function normalizedEnv(env = {}) {
   return out;
 }
 
+function projectCitationChildRemoteSurface(surface = {}) {
+  const source = surface && typeof surface === "object" ? surface : {};
+  const entries = [
+    ...(Array.isArray(source.tools) ? source.tools : []),
+    ...(Array.isArray(source.child_tools) ? source.child_tools : []),
+  ];
+  const selected = entries.filter((entry) => {
+    const name = String(entry?.name || entry?.local_name || entry || "");
+    return [
+      "tools.agent_handoff",
+      "agent_handoff",
+      "tools.sub_agent_next_input",
+      "sub_agent_next_input",
+    ].includes(name);
+  });
+  const hasHandoff = selected.some((entry) => /(?:^|\.)agent_handoff$/.test(String(entry?.name || entry?.local_name || entry || "")));
+  const hasCursor = selected.some((entry) => /(?:^|\.)sub_agent_next_input$/.test(String(entry?.name || entry?.local_name || entry || "")));
+  return {
+    ...source,
+    tools: selected,
+    child_tools: [],
+    tool_surface: [
+      ...(hasCursor ? ["tools.sub_agent_next_input"] : []),
+      ...(hasHandoff ? ["tools.agent_handoff"] : []),
+    ],
+    tool_policy: {
+      allow_read: false,
+      allow_write: false,
+      allow_shell: false,
+      allow_tests: false,
+      fallback_reads: 0,
+    },
+    web_access: {
+      role: source.role || "subagent",
+      mode: "none",
+      general_discovery: false,
+      live_documentation_verification: false,
+      asset_sourcing_or_fetching: false,
+      network_access: false,
+      image_generation_eligible: false,
+    },
+    project_db_capability: "none",
+    atlas: { available: false, agent_surface: [], internal_surface: [] },
+    coordination: {
+      agent_handoff_v1: hasHandoff,
+      sub_agent_v1: false,
+      sub_agent_next_input_v1: hasCursor,
+      status: "experimental",
+    },
+  };
+}
+
 const DETERMINISTIC_MCP_ENV_EXACT = new Set([
   "APPDATA",
   "COMSPEC",
@@ -500,7 +552,7 @@ function buildDeterministicMcpBootPayload(role, {
         jobCacheTtlMs: resolvedAtlasConfig?.jobCacheTtlMs ?? null,
         autoRefreshStale: resolvedAtlasConfig?.autoRefreshStale ?? null,
       },
-      ...(coordinationChild === true ? { toolAllowlist: { tools: ["agent_handoff"], atlas: [] } } : {}),
+      ...(coordinationChild === true ? { toolAllowlist: { tools: ["sub_agent_next_input", "agent_handoff"], atlas: [] } } : {}),
       remoteCatalog: {
         enabled: remoteCatalogEnabled,
         mode: remoteCatalogMode,
@@ -544,7 +596,10 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
     throw error;
   }
   mcpGate.assertCompatible({ role, providerName: bootPayload.providerName });
-  const narrowedBootPayload = narrowBootConfigToRemoteSurface(bootPayload, remoteToolSurface);
+  const effectiveRemoteToolSurface = bootPayload.coordinationChild === true
+    ? projectCitationChildRemoteSurface(remoteToolSurface)
+    : remoteToolSurface;
+  const narrowedBootPayload = narrowBootConfigToRemoteSurface(bootPayload, effectiveRemoteToolSurface);
   if (!narrowedBootPayload.remoteToolSurface) {
     throw requiredRemoteToolSurfaceError(role, null, "returned an invalid or mismatched remote-issued tool surface");
   }
@@ -816,11 +871,14 @@ export class McpServerConfig {
         "did not include a remote-issued agent tool contract",
       );
     }
-    const issuedSurface = opts.memoryEnabled === false
-      ? withoutAtlasMemoryTools(remoteResolution.surface)
+    const resolvedSurface = opts.coordinationChild === true
+      ? projectCitationChildRemoteSurface(remoteResolution.surface)
       : remoteResolution.surface;
+    const issuedSurface = opts.memoryEnabled === false
+      ? withoutAtlasMemoryTools(resolvedSurface)
+      : resolvedSurface;
     if (opts.coordinationChild === true) {
-      bootPayload.toolAllowlist = { tools: ["agent_handoff"], atlas: [] };
+      bootPayload.toolAllowlist = { tools: ["sub_agent_next_input", "agent_handoff"], atlas: [] };
     }
     const disabledAtlasTools = resolveAtlasDisabledTools();
     if (!resolveAtlasCodeLensCallable()) disabledAtlasTools.add("code.lens");

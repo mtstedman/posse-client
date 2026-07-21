@@ -162,6 +162,7 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
   if (!tool) return false;
   if (tool.suite === "tools" && tool.name === "agent_handoff") return coordination.agentHandoff === true;
   if (tool.suite === "tools" && tool.name === "sub_agent") return coordination.subAgent === true;
+  if (tool.suite === "tools" && tool.name === "sub_agent_next_input") return coordination.subAgentNextInput === true;
   if (!policy.allow_read) return false;
   if (tool.suite === "atlas") return atlasAvailable !== false;
   if (tool.name === "project_db_query") return projectDbCapability !== "none";
@@ -179,6 +180,7 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
  *   atlasAvailable?: boolean,
  *   coordinationAvailable?: boolean,
  *   subAgentAvailable?: boolean,
+ *   subAgentNextInputAvailable?: boolean,
  * }} [options]
  */
 export function normalizeIssuedToolSurface(value, {
@@ -187,6 +189,7 @@ export function normalizeIssuedToolSurface(value, {
   atlasAvailable = true,
   coordinationAvailable = false,
   subAgentAvailable = false,
+  subAgentNextInputAvailable = false,
 } = {}) {
   const entries = Array.isArray(value) ? value : [];
   const out = [];
@@ -195,6 +198,7 @@ export function normalizeIssuedToolSurface(value, {
     if (!toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, {
       agentHandoff: coordinationAvailable,
       subAgent: subAgentAvailable,
+      subAgentNextInput: subAgentNextInputAvailable,
     })) continue;
     if (!out.includes(tool.canonical)) out.push(tool.canonical);
   }
@@ -310,6 +314,7 @@ function failClosedIssuedPolicy() {
     toolAllowlist: { tools: [], atlas: [] },
     webAccess: { ...EMPTY_WEB_ACCESS },
     projectDbCapability: "none",
+    childToolSurface: [],
     coordination: { agentHandoffV1: false, subAgentV1: false },
   };
   TRUSTED_REMOTE_POLICY_OBJECTS.add(policy);
@@ -340,6 +345,8 @@ export function normalizeRemoteIssuedPolicy(value, {
     agentHandoffV1: coordinationSource?.agent_handoff_v1 === true,
     subAgentV1: coordinationSource?.agent_handoff_v1 === true
       && coordinationSource?.sub_agent_v1 === true,
+    subAgentNextInputV1: coordinationSource?.agent_handoff_v1 === true
+      && coordinationSource?.sub_agent_next_input_v1 === true,
   };
   const toolSurface = normalizeIssuedToolSurface(
     Array.isArray(source.tool_surface) ? source.tool_surface : source.tools,
@@ -349,8 +356,17 @@ export function normalizeRemoteIssuedPolicy(value, {
       atlasAvailable,
       coordinationAvailable: coordination.agentHandoffV1,
       subAgentAvailable: coordination.subAgentV1,
+      subAgentNextInputAvailable: coordination.subAgentNextInputV1,
     },
   );
+  const childToolSurface = normalizeIssuedToolSurface(source.child_tools, {
+    policy: toolPolicy,
+    projectDbCapability: "none",
+    atlasAvailable: false,
+    coordinationAvailable: coordination.agentHandoffV1,
+    subAgentAvailable: false,
+    subAgentNextInputAvailable: coordination.subAgentNextInputV1,
+  }).filter((name) => name === "tools.sub_agent_next_input");
   const webAccess = normalizeWebAccess(source.web_access || source.webAccess, role);
   const issued = {
     valid: true,
@@ -358,6 +374,7 @@ export function normalizeRemoteIssuedPolicy(value, {
     provider,
     toolPolicy,
     toolSurface,
+    childToolSurface,
     toolAllowlist: issuedToolAllowlist(toolSurface),
     webAccess,
     projectDbCapability: toolSurface.includes("tools.project_db_query")
@@ -368,6 +385,9 @@ export function normalizeRemoteIssuedPolicy(value, {
       subAgentV1: coordination.subAgentV1
         && toolSurface.includes("tools.agent_handoff")
         && toolSurface.includes("tools.sub_agent"),
+      ...(coordination.subAgentNextInputV1 && childToolSurface.includes("tools.sub_agent_next_input")
+        ? { subAgentNextInputV1: true }
+        : {}),
     },
   };
   TRUSTED_REMOTE_POLICY_OBJECTS.add(issued);
@@ -388,11 +408,22 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
         : { suite: tool.suite, name: tool.canonical, local_name: tool.name };
     })
     .filter(Boolean);
+  const allowedChild = new Set(issued.childToolSurface);
+  const childTools = (Array.isArray(source.child_tools) ? source.child_tools : [])
+    .map((entry) => {
+      const tool = canonicalToolEntry(entry);
+      if (!tool || !allowedChild.has(tool.canonical)) return null;
+      return plainObject(entry)
+        ? { ...entry }
+        : { suite: tool.suite, name: tool.canonical, local_name: tool.name };
+    })
+    .filter(Boolean);
   return {
     ...source,
     role: issued.role,
     provider: issued.provider,
     tools,
+    child_tools: childTools,
     tool_surface: issued.toolSurface.slice(),
     tool_policy: { ...issued.toolPolicy },
     web_access: { ...issued.webAccess },
@@ -400,6 +431,8 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
     coordination: {
       agent_handoff_v1: issued.coordination.agentHandoffV1,
       sub_agent_v1: issued.coordination.subAgentV1,
+      sub_agent_next_input_v1: "subAgentNextInputV1" in issued.coordination
+        && issued.coordination.subAgentNextInputV1 === true,
     },
   };
 }
@@ -580,7 +613,9 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
   const remoteIssuance = plainObject(packet.remote_issuance);
   const localAgentHandoff = packet?.agent_coordination?.agent_handoff_v1 === true;
   const localSubAgent = packet?.agent_coordination?.sub_agent_v1 === true;
-  const executionIssuance = remoteIssuance && (!localAgentHandoff || !localSubAgent)
+  const executionIssuance = opts._subAgentChild === true
+    ? remoteIssuance
+    : (remoteIssuance && (!localAgentHandoff || !localSubAgent)
     ? {
         ...remoteIssuance,
         coordination: {
@@ -589,7 +624,7 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
           sub_agent_v1: localSubAgent,
         },
       }
-    : remoteIssuance;
+    : remoteIssuance);
   const issued = normalizeRemoteIssuedPolicy(executionIssuance, {
     expectedRole: opts.role,
   });

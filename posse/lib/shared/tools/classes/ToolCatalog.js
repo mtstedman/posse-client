@@ -7,6 +7,7 @@ import {
   getToolCatalogEntry,
   getToolExecutionSpec,
   getToolSchema,
+  getToolSchemaForRole,
 } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 
 const RUNTIME_TOOL_OVERRIDES = new Map();
@@ -51,9 +52,14 @@ export class ToolCatalog {
     return getToolCatalogEntry(key) || null;
   }
 
-  static getSchema(name) {
+  static getSchema(name, { role = null } = {}) {
     const entry = this.get(name);
-    if (entry) return entry.schema || null;
+    if (entry) {
+      if (String(name || "").trim() === "agent_handoff" && role) {
+        return getToolSchemaForRole(name, role);
+      }
+      return entry.schema || null;
+    }
     return getToolSchema(name) || null;
   }
 
