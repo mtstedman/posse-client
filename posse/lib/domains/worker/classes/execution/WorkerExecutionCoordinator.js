@@ -77,6 +77,31 @@ export class WorkerExecutionCoordinator {
       // wall-clock time awaiting worktree locks, git merges, or ATLAS graph prep.
       jobLease.start();
 
+      // A CLI dry run is research + planning only. Mutating leaves are marked
+      // successful without creating a worktree, opening a provider session, or
+      // recording an execution attempt. Keep this before every freshness/setup
+      // gate so a preview cannot acquire mutation infrastructure by accident.
+      if (worker.dryRun && MUTATING_JOB_TYPES.has(job.job_type)) {
+        const result = {
+          dry_run: true,
+          execution_skipped: true,
+          job_type: job.job_type,
+          reason: "cli_dry_run",
+        };
+        if (!worker._releaseLease(job, leaseToken, "succeeded")) return;
+        await wrappedJob.setResult(result);
+        recordObservation({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          attempt_id: null,
+          observation_type: "job.dry_run",
+          summary: `${job.job_type} auto-passed without execution`,
+          detail: result,
+        });
+        worker.emit(job.id, `${C.cyan}[dry-run]${C.reset} WI#${job.work_item_id} job #${job.id}: ${job.job_type} auto-passed without execution`);
+        return;
+      }
+
       const atlasFreshnessGate = await worker._gateAtlasFreshnessBeforePlanningOrDev(job, leaseToken, {
         signal: executeAbortController?.signal || null,
       });
