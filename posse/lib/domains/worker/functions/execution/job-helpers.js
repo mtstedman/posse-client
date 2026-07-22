@@ -88,6 +88,7 @@ export function resolveCallCostEstimate(stats) {
     stats?.total_cost_usd,
   ];
   for (const value of candidates) {
+    if (value == null || String(value).trim() === "") continue;
     const numeric = Number(value);
     if (Number.isFinite(numeric) && numeric >= 0) return numeric;
   }

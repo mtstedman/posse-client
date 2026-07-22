@@ -61,6 +61,7 @@ import { agentHandoffTerminator } from "../../handoff/classes/AgentHandoffTermin
 import {
   TOOL_AGENT_HANDOFF,
   TOOL_AGENT_HANDOFF_ARTIFICER,
+  TOOL_AGENT_HANDOFF_ASSESSOR,
   TOOL_AGENT_HANDOFF_DEV,
   TOOL_AGENT_HANDOFF_REPORT,
 } from "../../../catalog/native-tools.js";
@@ -78,9 +79,11 @@ function agentHandoffToolSchemaTelemetry(role, compactCompletion = false) {
     ? TOOL_AGENT_HANDOFF_DEV
     : normalizedRole === "artificer"
       ? TOOL_AGENT_HANDOFF_ARTIFICER
-      : ["researcher", "planner", "assessor", "citation_synthesis", "subagent"].includes(normalizedRole)
-        ? TOOL_AGENT_HANDOFF_REPORT
-        : TOOL_AGENT_HANDOFF;
+      : normalizedRole === "assessor"
+        ? TOOL_AGENT_HANDOFF_ASSESSOR
+        : ["researcher", "planner", "citation_synthesis", "subagent"].includes(normalizedRole)
+          ? TOOL_AGENT_HANDOFF_REPORT
+          : TOOL_AGENT_HANDOFF;
   const serialized = JSON.stringify(schema);
   return {
     name: schema.name || "agent_handoff",
@@ -249,6 +252,7 @@ function defaultResolveCallCostEstimate(stats) {
     stats?.total_cost_usd,
   ];
   for (const value of candidates) {
+    if (value == null || String(value).trim() === "") continue;
     const numeric = Number(value);
     if (Number.isFinite(numeric) && numeric >= 0) return numeric;
   }

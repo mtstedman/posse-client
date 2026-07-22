@@ -206,6 +206,12 @@ export const TOOL_AGENT_HANDOFF = {
           "planner.plan.v1=success; dev.result.v1 and artificer.result.v1=complete|failed|blocked; " +
           "assessor.verdict.v1=pass|fail|needs_replan|needs_review|blocked; citation_synthesis.v1=complete|partial|failed.",
       },
+      confidence: {
+        type: "string",
+        enum: ["low", "medium", "high"],
+        description:
+          "Assessor confidence in the terminal verdict. Required by the assessor role projection; accepted here for staggered client/prompt rollout.",
+      },
       handoffs: {
         type: "array",
         minItems: 1,
@@ -220,7 +226,7 @@ export const TOOL_AGENT_HANDOFF = {
               description:
                 "Profile target: researcher.pipeline.v1, dev.result.v1, artificer.result.v1, and assessor.verdict.v1 use pipeline/$pipeline; " +
                 "researcher.report.v1 uses result/$result; planner.plan.v1 uses agent/dev|artificer or system/human_input|promote; " +
-                "citation_synthesis.v1 uses parent/$parent.",
+                "citation_synthesis.v1 uses parent/$parent. For system/promote, put each exact repository destination file in report.scope.files_to_create or files_to_modify; Posse derives deterministic mappings.",
               properties: {
                 kind: { type: "string", enum: ["agent", "system", "pipeline", "result", "parent"] },
                 role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "$pipeline", "$result", "$parent"] },
@@ -242,6 +248,7 @@ export const TOOL_AGENT_HANDOFF = {
                   description:
                     'Exact tuple form: [["specific claim text", {"proof":["#ref:1-3"], "support":["#ref"], "decoy":[["#ref","reason"]], "prose":"optional synthesis without refs"}]]. ' +
                     "The evidence object is optional. Put hash refs only in proof, support, and decoy selector positions; never put them in claim text or prose. " +
+                    "Proof accepts only storage-owned tool evidence; agent-created prose refs may appear only in support or decoy. " +
                     "Evidence lanes accept only opaque hash-ref selectors, never file paths or path:line strings.",
                   items: {
                     type: "array",
@@ -267,7 +274,7 @@ export const TOOL_AGENT_HANDOFF = {
                 scope: {
                   type: "object",
                   description:
-                    "Planner task execution scope. Set task_mode to db only for a dev task whose entire write surface is project_db_query; db requires empty file arrays. Other agent task modes require writable file or create-root scope.",
+                    "Planner task execution scope. Set task_mode to db only for a dev task whose entire write surface is project_db_query; db requires empty file arrays. Other agent task modes require writable file or create-root scope. A system/promote task requires exact destination files in files_to_create or files_to_modify.",
                   properties: {
                     task_mode: {
                       type: "string",
@@ -350,8 +357,27 @@ export const TOOL_AGENT_HANDOFF_REPORT = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish the current researcher, planner, assessor, or citation-synthesis turn with one posse.agent_handoff.v1 semantic report. The receipt ends provider generation.",
-  parameters: TOOL_AGENT_HANDOFF.parameters.oneOf[1],
+    "Finish the current researcher, planner, or citation-synthesis turn with one posse.agent_handoff.v1 semantic report. The receipt ends provider generation.",
+  parameters: (() => {
+    const semantic = TOOL_AGENT_HANDOFF.parameters.oneOf[1];
+    const parameters = {
+      ...semantic,
+      properties: { ...semantic.properties },
+    };
+    delete parameters.properties.confidence;
+    return parameters;
+  })(),
+};
+
+export const TOOL_AGENT_HANDOFF_ASSESSOR = {
+  type: "function",
+  name: "agent_handoff",
+  description:
+    "Finish the current assessor turn with one posse.agent_handoff.v1 verdict report and an explicit confidence level. The receipt ends provider generation.",
+  parameters: {
+    ...TOOL_AGENT_HANDOFF.parameters.oneOf[1],
+    required: [...TOOL_AGENT_HANDOFF.parameters.oneOf[1].required, "confidence"],
+  },
 };
 
 export const TOOL_SUB_AGENT_NEXT_INPUT = {

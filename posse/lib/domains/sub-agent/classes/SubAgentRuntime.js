@@ -495,16 +495,24 @@ export class SubAgentRuntime {
         }
         sourceEvidence = {
           excerpt: text,
-          provenance: { kind: "FullToolCall", source: selected.tool, object_type: "tool_result" },
+          provenance: { kind: "Tool Result", source: selected.tool, object_type: "tool_result" },
           source_content_sha256: crypto.createHash("sha256").update(text).digest("hex"),
         };
       }
 
       const freshRef = `#${crypto.randomBytes(6).toString("hex")}`;
+      const sourceProvenanceKind = sourceEvidence.provenance?.kind;
+      const surfacedObjectType = sourceProvenanceKind === "Agent Prose"
+        ? "agent_prose"
+        : sourceProvenanceKind === "Full Tool Call"
+          ? "full_tool_call"
+          : sourceProvenanceKind === "Tool Result"
+            ? "tool_result"
+            : "materialized_text";
       const surfaced = surfaceHashRefForContext(entry.parentContext, {
         ref: freshRef,
         payloadText: sourceEvidence.excerpt,
-        objectType: sourceEvidence.provenance?.kind === "Agent Prose" ? "agent_prose" : "tool_result",
+        objectType: surfacedObjectType,
         source: sourceEvidence.provenance?.source
           || (selected.kind === "call" ? selected.tool : "delegated_evidence"),
         metadata: {

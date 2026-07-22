@@ -1,12 +1,94 @@
 // lib/domains/providers/functions/codex/request-builders.js
 
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
+import { LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/tools/functions/tool-suites.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, roleUsesDeterministicReadMcp } from "../../../integrations/functions/deterministic-mcp.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../integrations/functions/mcp-gateway.js";
 import { _toCodexConfigKey, _toTomlLiteral, appendCodexMcpEnvOverrides } from "./config-format.js";
 
 const CODEX_DEVELOPER_INSTRUCTIONS_SOFT_LIMIT = 24000;
+const CODEX_COORDINATION_MCP_SERVER_SUFFIX = "coordination";
+const CODEX_EAGER_COORDINATION_TOOL_NAMES = new Set([
+  "agent_handoff",
+  ...LIVE_CHANNEL_TOOL_NAMES,
+]);
+
+function rawToolsMcpName(toolName = "") {
+  const name = String(toolName || "").trim();
+  if (!name) return "";
+  return name.startsWith("tools.") ? name : `tools.${name}`;
+}
+
+function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverConfig, {
+  toolNames = [],
+} = {}) {
+  configOverrides.push(
+    `mcp_servers.${serverKey}.command=${_toTomlLiteral(serverConfig.command)}`,
+    `mcp_servers.${serverKey}.args=${_toTomlLiteral(serverConfig.args || [])}`,
+  );
+  if (serverConfig.cwd) {
+    configOverrides.push(`mcp_servers.${serverKey}.cwd=${_toTomlLiteral(serverConfig.cwd)}`);
+  }
+  appendCodexMcpEnvOverrides(configOverrides, serverKey, serverConfig.env, {
+    extraAllowedKeys: toolNames.includes("generate_image")
+      ? ["OPENAI_API_KEY", "XAI_API_KEY"]
+      : [],
+  });
+}
+
+function buildCodexDeterministicMcpAttachment(serverConfig) {
+  const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
+  const toolNames = Array.isArray(serverConfig.tools) ? serverConfig.tools : [];
+  const eagerTools = toolNames.filter((name) => CODEX_EAGER_COORDINATION_TOOL_NAMES.has(name));
+  const eagerServerKey = eagerTools.length > 0
+    ? _toCodexConfigKey(`${serverKey}_${CODEX_COORDINATION_MCP_SERVER_SUFFIX}`)
+    : null;
+  const configOverrides = [];
+
+  appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverConfig, { toolNames });
+  if (eagerServerKey) {
+    const rawEagerTools = eagerTools.map(rawToolsMcpName);
+    // Codex 0.145+ defers every ordinary MCP namespace when tool_search is
+    // available. Partition the required coordination tools into a second,
+    // filtered namespace and mark that namespace direct-only. This guarantees
+    // startup visibility without eagerly loading the rest of the gateway.
+    configOverrides.push(
+      `mcp_servers.${serverKey}.disabled_tools=${_toTomlLiteral(rawEagerTools)}`,
+    );
+    appendCodexMcpServerLaunchOverrides(configOverrides, eagerServerKey, serverConfig, {
+      toolNames: eagerTools,
+    });
+    configOverrides.push(
+      `mcp_servers.${eagerServerKey}.enabled_tools=${_toTomlLiteral(rawEagerTools)}`,
+      `mcp_servers.${eagerServerKey}.required=true`,
+      `features.code_mode.direct_only_tool_namespaces=${_toTomlLiteral([`mcp__${eagerServerKey}`])}`,
+    );
+  }
+
+  const contractTools = toolNames.flatMap((toolName) => buildMcpSurfaceToolDescriptors(
+    [toolName],
+    {
+      providerName: "codex",
+      serverName: CODEX_EAGER_COORDINATION_TOOL_NAMES.has(toolName) && eagerServerKey
+        ? eagerServerKey
+        : serverKey,
+    },
+  ));
+
+  return {
+    active: true,
+    tools: toolNames,
+    eagerTools,
+    atlasTools: Array.isArray(serverConfig.atlasTools) ? serverConfig.atlasTools : [],
+    contractTools,
+    configOverrides,
+    serverConfig,
+    serverKey,
+    eagerServerKey,
+    providerHomeEnv: serverConfig.providerHomeEnv || null,
+  };
+}
 
 export function buildCodexDeveloperInstructionRoute({
   promptPrelude = "",
@@ -202,34 +284,7 @@ export function buildCodexDeterministicReadConfigOverrides(role, cwd, {
     };
   }
 
-  const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
-  const configOverrides = [
-    `mcp_servers.${serverKey}.command=${_toTomlLiteral(serverConfig.command)}`,
-    `mcp_servers.${serverKey}.args=${_toTomlLiteral(serverConfig.args || [])}`,
-  ];
-  const toolNames = Array.isArray(serverConfig.tools) ? serverConfig.tools : [];
-  if (serverConfig.cwd) {
-    configOverrides.push(`mcp_servers.${serverKey}.cwd=${_toTomlLiteral(serverConfig.cwd)}`);
-  }
-  appendCodexMcpEnvOverrides(configOverrides, serverKey, serverConfig.env, {
-    extraAllowedKeys: toolNames.includes("generate_image")
-      ? ["OPENAI_API_KEY", "XAI_API_KEY"]
-      : [],
-  });
-
-  return {
-    active: true,
-    tools: toolNames,
-    atlasTools: Array.isArray(serverConfig.atlasTools) ? serverConfig.atlasTools : [],
-    contractTools: buildMcpSurfaceToolDescriptors(toolNames, {
-      providerName: "codex",
-      serverName: serverKey,
-    }),
-    configOverrides,
-    serverConfig,
-    serverKey,
-    providerHomeEnv: serverConfig.providerHomeEnv || null,
-  };
+  return buildCodexDeterministicMcpAttachment(serverConfig);
 }
 
 export function __testBuildCodexDeterministicReadConfigOverrides(role, cwd, options = {}) {
@@ -309,34 +364,7 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     };
   }
 
-  const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
-  const configOverrides = [
-    `mcp_servers.${serverKey}.command=${_toTomlLiteral(serverConfig.command)}`,
-    `mcp_servers.${serverKey}.args=${_toTomlLiteral(serverConfig.args || [])}`,
-  ];
-  const toolNames = Array.isArray(serverConfig.tools) ? serverConfig.tools : [];
-  if (serverConfig.cwd) {
-    configOverrides.push(`mcp_servers.${serverKey}.cwd=${_toTomlLiteral(serverConfig.cwd)}`);
-  }
-  appendCodexMcpEnvOverrides(configOverrides, serverKey, serverConfig.env, {
-    extraAllowedKeys: toolNames.includes("generate_image")
-      ? ["OPENAI_API_KEY", "XAI_API_KEY"]
-      : [],
-  });
-
-  return {
-    active: true,
-    tools: toolNames,
-    atlasTools: Array.isArray(serverConfig.atlasTools) ? serverConfig.atlasTools : [],
-    contractTools: buildMcpSurfaceToolDescriptors(toolNames, {
-      providerName: "codex",
-      serverName: serverKey,
-    }),
-    configOverrides,
-    serverConfig,
-    serverKey,
-    providerHomeEnv: serverConfig.providerHomeEnv || null,
-  };
+  return buildCodexDeterministicMcpAttachment(serverConfig);
 }
 
 export function buildCodexSystemToolLockdownOverrides({ disableSystemTools = false } = {}) {

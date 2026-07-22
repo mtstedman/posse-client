@@ -76,6 +76,7 @@ import {
   TOOL_AGENT_HANDOFF,
   TOOL_AGENT_HANDOFF_DEV,
   TOOL_AGENT_HANDOFF_ARTIFICER,
+  TOOL_AGENT_HANDOFF_ASSESSOR,
   TOOL_AGENT_HANDOFF_REPORT,
   TOOL_SUB_AGENT,
   TOOL_SUB_AGENT_NEXT_INPUT,
@@ -118,6 +119,7 @@ export {
   TOOL_AGENT_HANDOFF,
   TOOL_AGENT_HANDOFF_DEV,
   TOOL_AGENT_HANDOFF_ARTIFICER,
+  TOOL_AGENT_HANDOFF_ASSESSOR,
   TOOL_AGENT_HANDOFF_REPORT,
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_SUB_AGENT,
@@ -791,7 +793,8 @@ export function getToolSchemaForRole(name, role, { compactCompletion = false } =
   const normalizedRole = String(role || "").trim().toLowerCase();
   if (normalizedRole === "dev" || normalizedRole === "fix") return TOOL_AGENT_HANDOFF_DEV;
   if (normalizedRole === "artificer") return TOOL_AGENT_HANDOFF_ARTIFICER;
-  if (["researcher", "planner", "assessor", "citation_synthesis", "subagent"].includes(normalizedRole)) {
+  if (normalizedRole === "assessor") return TOOL_AGENT_HANDOFF_ASSESSOR;
+  if (["researcher", "planner", "citation_synthesis", "subagent"].includes(normalizedRole)) {
     return TOOL_AGENT_HANDOFF_REPORT;
   }
   return TOOL_AGENT_HANDOFF;

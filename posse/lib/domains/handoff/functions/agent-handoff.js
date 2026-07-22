@@ -10,6 +10,12 @@ import { HASH_REF_ALIAS_PATTERN, normalizeHashRefAlias } from "../../../catalog/
 import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "../../../catalog/native-tools.js";
 import { fetchHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { createAgentHandoffPacketTable, getDb } from "../../../shared/storage/functions/index.js";
+import { validatePlannedTask } from "../../planning/functions/plan-routing.js";
+import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
+import {
+  detectSensitiveAgentHandoffText,
+  findCopiedAgentHandoffEvidence,
+} from "./agent-handoff-boundaries.js";
 
 export const AGENT_HANDOFF_PROTOCOL = "posse.agent_handoff.v1";
 export const AGENT_HANDOFF_LIMITS = Object.freeze({
@@ -81,6 +87,10 @@ function boundedString(value, label, max, { required = true, allowRef = false } 
   if (!allowRef && /#[0-9a-z]{4,12}\b/i.test(text)) {
     fail("AGENT_HANDOFF_REF_OUTSIDE_SELECTOR", `${label} contains a hash ref outside an evidence selector`);
   }
+  const sensitiveLabel = detectSensitiveAgentHandoffText(text);
+  if (sensitiveLabel) {
+    fail("AGENT_HANDOFF_SENSITIVE_CONTENT", `${label} contains sensitive content (${sensitiveLabel})`);
+  }
   return text;
 }
 
@@ -127,8 +137,28 @@ function normalizedLines(payload) {
 }
 
 function provenanceKind(entry) {
-  const label = `${entry?.object_type || ""} ${entry?.source || ""}`.toLowerCase();
-  return /agent|assistant|prose/.test(label) ? "Agent Prose" : "FullToolCall";
+  const objectType = String(entry?.object_type || "").trim().toLowerCase();
+  const source = String(entry?.source || "").trim().toLowerCase();
+  if (
+    source === "agent:create_ref"
+    || /(?:^|[._:-])(?:agent|assistant|prose)(?:[._:-]|$)/.test(objectType)
+  ) {
+    return "Agent Prose";
+  }
+  if (["full_tool_call", "tool_call_envelope", "tool.call.envelope"].includes(objectType)) {
+    return "Full Tool Call";
+  }
+  if (
+    objectType === "tool_result"
+    || source.startsWith("tool:")
+    || source.startsWith("tools.")
+    || source.startsWith("atlas:")
+    || source.startsWith("atlas.")
+    || (source.startsWith("sub_agent:") && objectType === "tool_result")
+  ) {
+    return "Tool Result";
+  }
+  return "Materialized Text";
 }
 
 export function materializeAgentHandoffEvidenceSelector(selectorValue, context) {
@@ -209,6 +239,12 @@ function materializeClaim(value, claimIndex, context, counters) {
     out[lane] = detail[lane].map((selector) => {
       selectorCount += 1;
       const evidence = materializeAgentHandoffEvidenceSelector(selector, context);
+      if (lane === "proof" && !["Tool Result", "Full Tool Call"].includes(evidence.provenance.kind)) {
+        fail(
+          "AGENT_HANDOFF_PROOF_PROVENANCE_INVALID",
+          `claims[${claimIndex}] proof requires storage-owned tool evidence; ${evidence.ref} is ${evidence.provenance.kind}`,
+        );
+      }
       counters.evidence += evidence.excerpt.length;
       return evidence;
     });
@@ -233,6 +269,17 @@ function materializeClaim(value, claimIndex, context, counters) {
     counters.narrative += out.prose.length;
   }
   return [claim, out];
+}
+
+function plannerPromoteMappings(handoff) {
+  const destinations = [...new Set([
+    ...(handoff.report?.scope?.files_to_modify || []),
+    ...(handoff.report?.scope?.files_to_create || []),
+  ].map((value) => String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").trim()).filter(Boolean))];
+  return destinations.map((dest) => ({
+    pattern: dest.split("/").filter(Boolean).at(-1) || "",
+    dest,
+  }));
 }
 
 function validateTarget(target, policy, profile, label) {
@@ -286,6 +333,29 @@ function validatePlannerPacketSemantics(packet) {
         `planner success handoffs[${index}] cannot contain unresolved questions`,
       );
     }
+    if (handoff.target?.kind === "system") {
+      if (handoff.target?.role === "promote") {
+        if ((handoff.report?.scope?.files_to_delete || []).length > 0) {
+          fail(
+            "AGENT_HANDOFF_SEMANTIC_INVALID",
+            `planner success handoffs[${index}] promote cannot delete destination files`,
+          );
+        }
+        if (plannerPromoteMappings(handoff).length === 0) {
+          fail(
+            "AGENT_HANDOFF_SEMANTIC_INVALID",
+            `planner success handoffs[${index}] promote requires exact destination files in scope.files_to_create or scope.files_to_modify`,
+          );
+        }
+        for (const [mappingIndex, mapping] of plannerPromoteMappings(handoff).entries()) {
+          const pathError = validateScopedPath(mapping.dest, `handoffs[${index}] promote destination[${mappingIndex}]`);
+          if (pathError) {
+            fail("AGENT_HANDOFF_SEMANTIC_INVALID", pathError);
+          }
+        }
+      }
+      continue;
+    }
     if (handoff.target?.kind !== "agent") continue;
     const scope = handoff.report?.scope || {};
     const taskMode = String(scope.task_mode || "code").trim().toLowerCase();
@@ -320,6 +390,56 @@ function validatePlannerPacketSemantics(packet) {
         `planner success handoffs[${index}] task_mode ${taskMode} requires non-empty writable scope`,
       );
     }
+  }
+}
+
+function narrativeFragmentsForHandoff(handoff, handoffIndex) {
+  const report = handoff.report || {};
+  const fragments = [
+    { label: `handoffs[${handoffIndex}].intent`, text: handoff.intent },
+    { label: `handoffs[${handoffIndex}].report.summary`, text: report.summary },
+  ];
+  for (const [claimIndex, claim] of (report.claims || []).entries()) {
+    fragments.push({ label: `handoffs[${handoffIndex}].report.claims[${claimIndex}]`, text: claim[0] });
+    const detail = claim[1] || {};
+    if (detail.prose) {
+      fragments.push({ label: `handoffs[${handoffIndex}].report.claims[${claimIndex}].prose`, text: detail.prose });
+    }
+    for (const [decoyIndex, decoy] of (detail.decoy || []).entries()) {
+      fragments.push({ label: `handoffs[${handoffIndex}].report.claims[${claimIndex}].decoy[${decoyIndex}].reason`, text: decoy[1] });
+    }
+  }
+  for (const key of ["constraints", "success_criteria", "questions"]) {
+    for (const [index, text] of (report[key] || []).entries()) {
+      fragments.push({ label: `handoffs[${handoffIndex}].report.${key}[${index}]`, text });
+    }
+  }
+  for (const [key, values] of Object.entries(report.scope || {})) {
+    for (const [index, text] of (Array.isArray(values) ? values : [values]).entries()) {
+      fragments.push({ label: `handoffs[${handoffIndex}].report.scope.${key}[${index}]`, text });
+    }
+  }
+  return fragments;
+}
+
+function validateNarrativeEvidenceBoundary(handoff, handoffIndex) {
+  const evidence = [];
+  for (const claim of handoff.report?.claims || []) {
+    const detail = claim[1] || {};
+    for (const lane of ["proof", "support"]) {
+      evidence.push(...(detail[lane] || []).map((entry) => entry.excerpt));
+    }
+    evidence.push(...(detail.decoy || []).map(([entry]) => entry.excerpt));
+  }
+  const overlap = findCopiedAgentHandoffEvidence(
+    narrativeFragmentsForHandoff(handoff, handoffIndex),
+    evidence,
+  );
+  if (overlap) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_COPY_OUTSIDE_SELECTOR",
+      `${overlap.label} copies at least ${overlap.overlapChars} normalized characters from selected evidence outside a selector`,
+    );
   }
 }
 
@@ -551,7 +671,7 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
   if (looksLikeTerminalCompletion(args || {})) {
     return materializeTerminalCompletion(args || {}, normalizedRole);
   }
-  const source = exactKeys(args, ["protocol", "profile", "outcome", "handoffs"], "agent_handoff");
+  const source = exactKeys(args, ["protocol", "profile", "outcome", "confidence", "handoffs"], "agent_handoff");
   if (source.protocol !== AGENT_HANDOFF_PROTOCOL) fail("AGENT_HANDOFF_PROTOCOL_INVALID", `protocol must be ${AGENT_HANDOFF_PROTOCOL}`);
   const profile = boundedString(source.profile, "profile", 80);
   const policy = PROFILE_POLICY[profile];
@@ -559,6 +679,17 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
   if (!policy.roles.includes(normalizedRole)) fail("AGENT_HANDOFF_PROFILE_INVALID", `Role ${normalizedRole || "unknown"} cannot use ${profile}`);
   const outcome = boundedString(source.outcome, "outcome", 40);
   if (!policy.outcomes.includes(outcome)) fail("AGENT_HANDOFF_OUTCOME_INVALID", `${profile} does not allow outcome ${outcome}`);
+  let confidence = null;
+  if (profile === "assessor.verdict.v1") {
+    confidence = source.confidence == null
+      ? "medium"
+      : boundedString(source.confidence, "confidence", 20);
+    if (!["low", "medium", "high"].includes(confidence)) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", "assessor confidence must be low, medium, or high");
+    }
+  } else if (source.confidence != null) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", `confidence is not valid for ${profile}`);
+  }
   if (!Array.isArray(source.handoffs) || source.handoffs.length < 1) fail("AGENT_HANDOFF_SCHEMA_INVALID", "handoffs must contain at least one entry");
   const localLimit = Number.isInteger(maxHandoffs) && maxHandoffs > 0 ? maxHandoffs : policy.maxHandoffs;
   const effectiveLimit = Math.min(policy.maxHandoffs, localLimit);
@@ -594,7 +725,7 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
     counters.narrative += entryCounters.narrative;
     counters.evidence += entryCounters.evidence;
     if (report.payload != null) exactKeys(report.payload, [], `handoffs[${index}].report.payload`);
-    return {
+    const handoff = {
       id,
       depends_on: dependsOn,
       target: validateTarget(entry.target, policy, profile, `handoffs[${index}].target`),
@@ -609,9 +740,13 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
         payload: {},
       },
     };
+    validateNarrativeEvidenceBoundary(handoff, index);
+    return handoff;
   });
   validateDependencyGraph(handoffs);
-  validatePlannerPacketSemantics({ profile, outcome, handoffs });
+  const semanticPacket = { profile, outcome, handoffs };
+  validatePlannerPacketSemantics(semanticPacket);
+  validatePlannerCompatibilityTasks(semanticPacket);
   validateCitationChildPacketSemantics({ profile, outcome, handoffs });
   const evidenceLimit = normalizedRole === "subagent"
     ? AGENT_HANDOFF_LIMITS.maxCitationChildEvidenceChars
@@ -623,6 +758,7 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
     protocol: AGENT_HANDOFF_PROTOCOL,
     profile,
     outcome,
+    ...(confidence == null ? {} : { confidence }),
     role: normalizedRole,
     handoffs,
     evidence_chars: counters.evidence,
@@ -686,20 +822,24 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
   const existing = handoffRow(agentCallId, database);
   if (existing) {
     if (existing.packet_digest === digest && ["staged", "committed"].includes(existing.status)) {
-      database.prepare(`
-        UPDATE ${TABLE}
-        SET stage_count=stage_count+1, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        WHERE agent_call_id=?
-      `).run(agentCallId);
+      if (existing.status === "staged") {
+        database.prepare(`
+          UPDATE ${TABLE}
+          SET stage_count=stage_count+1, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          WHERE agent_call_id=? AND status='staged'
+        `).run(agentCallId);
+      }
       return {
         ok: true,
         status: existing.status,
         digest,
         idempotent: true,
-        callCount: Number(existing.stage_count || 1) + 1,
+        callCount: Number(existing.stage_count || 1) + (existing.status === "staged" ? 1 : 0),
       };
     }
-    database.prepare(`UPDATE ${TABLE} SET status='rejected', rejection_code='duplicate_conflict', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE agent_call_id=?`).run(agentCallId);
+    if (existing.status === "staged") {
+      database.prepare(`UPDATE ${TABLE} SET status='rejected', rejection_code='duplicate_conflict', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE agent_call_id=? AND status='staged'`).run(agentCallId);
+    }
     fail("AGENT_HANDOFF_DUPLICATE_CONFLICT", "A different agent_handoff is already staged for this agent call");
   }
   database.prepare(`
@@ -724,12 +864,14 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
 
 export function rejectAgentHandoffForLaterTool(agentCallId, toolName, { db = getDb() } = {}) {
   const row = handoffRow(agentCallId, db);
-  if (!row || row.status !== "staged") return false;
-  ensureSchema(db).prepare(`
-    UPDATE ${TABLE}
-    SET status='rejected', rejection_code=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-    WHERE agent_call_id=? AND status='staged'
-  `).run(`later_tool:${String(toolName || "unknown").slice(0, 80)}`, Number(agentCallId));
+  if (!row || !["staged", "committed"].includes(row.status)) return false;
+  if (row.status === "staged") {
+    ensureSchema(db).prepare(`
+      UPDATE ${TABLE}
+      SET status='rejected', rejection_code=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE agent_call_id=? AND status='staged'
+    `).run(`later_tool:${String(toolName || "unknown").slice(0, 80)}`, Number(agentCallId));
+  }
   return true;
 }
 
@@ -841,16 +983,12 @@ function renderCompletionCompatibilityOutput(packet) {
   return `${requestBlock}\n${result}`;
 }
 
-export function renderAgentHandoffCompatibilityOutput(packet) {
-  if (packet.completion && ["dev.result.v1", "artificer.result.v1"].includes(packet.profile)) {
-    return renderCompletionCompatibilityOutput(packet);
-  }
-  if (packet.profile === "planner.plan.v1") {
-    const indexes = new Map(packet.handoffs.map((handoff, index) => [handoff.id, index]));
-    const tasks = packet.handoffs.map((handoff) => {
-      const reportText = renderReport(handoff.report);
-      const refs = evidenceRefs(handoff.report);
-      return {
+function plannerCompatibilityTasks(packet) {
+  const indexes = new Map(packet.handoffs.map((handoff, index) => [handoff.id, index]));
+  return packet.handoffs.map((handoff) => {
+    const reportText = renderReport(handoff.report);
+    const refs = evidenceRefs(handoff.report);
+    const task = {
         title: handoff.intent,
         task_spec: reportText || handoff.intent,
         success_criteria: handoff.report.success_criteria.length ? handoff.report.success_criteria : [handoff.intent],
@@ -873,8 +1011,34 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
           planner_file_priorities: (handoff.report.scope.files_to_modify || []).map((path, index) => ({ path, rank: index + 1 })),
           ...refs,
         },
-      };
-    });
+    };
+    if (handoff.target.kind === "system" && handoff.target.role === "promote") {
+      task.mappings = plannerPromoteMappings(handoff);
+    }
+    return task;
+  });
+}
+
+function validatePlannerCompatibilityTasks(packet) {
+  if (packet.profile !== "planner.plan.v1" || packet.outcome !== "success") return;
+  const tasks = plannerCompatibilityTasks(packet);
+  for (const [index, task] of tasks.entries()) {
+    const errors = validatePlannedTask(task, index, tasks.length);
+    if (errors.length > 0) {
+      fail(
+        "AGENT_HANDOFF_SEMANTIC_INVALID",
+        `planner success handoffs[${index}] is not downstream-valid: ${errors.join("; ")}`,
+      );
+    }
+  }
+}
+
+export function renderAgentHandoffCompatibilityOutput(packet) {
+  if (packet.completion && ["dev.result.v1", "artificer.result.v1"].includes(packet.profile)) {
+    return renderCompletionCompatibilityOutput(packet);
+  }
+  if (packet.profile === "planner.plan.v1") {
+    const tasks = plannerCompatibilityTasks(packet);
     return `\`\`\`json\n${JSON.stringify(tasks, null, 2)}\n\`\`\``;
   }
   const first = packet.handoffs[0];
@@ -882,7 +1046,7 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
   if (packet.profile === "assessor.verdict.v1") {
     return `\`\`\`json\n${JSON.stringify({
       verdict: packet.outcome,
-      confidence: "medium",
+      confidence: packet.confidence || "medium",
       reasons: [first.report.summary, ...first.report.claims.map((claim) => claim[0])].filter(Boolean),
       spawn_jobs: [],
       human_questions: first.report.questions,
