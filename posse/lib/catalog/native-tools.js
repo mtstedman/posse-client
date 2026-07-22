@@ -645,15 +645,20 @@ const PLANNER_AGENT_REPORT = exactReport({
   ...AGENT_HANDOFF_PLANNER_REPORT_FIELDS,
 }, ["summary", "claims", "scope", "success_criteria"]);
 
-const PLANNER_HANDOFF = exactHandoff({
-  oneOf: [
-    exactTarget("agent", "dev"),
-    exactTarget("agent", "artificer"),
-    exactTarget("system", "human_input"),
-    exactTarget("system", "promote"),
-    exactTarget("system", "no_tasks"),
-  ],
-}, PLANNER_AGENT_REPORT);
+const PLANNER_TARGET = {
+  type: "object",
+  description:
+    "Use exactly {kind:\"agent\",role:\"dev\"} or {kind:\"agent\",role:\"artificer\"} for executable work. " +
+    "System handoffs use kind=system with role human_input, promote, or no_tasks. Do not combine kind and role into one string.",
+  properties: {
+    kind: { type: "string", enum: ["agent", "system"] },
+    role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "no_tasks"] },
+  },
+  required: ["kind", "role"],
+  additionalProperties: false,
+};
+
+const PLANNER_HANDOFF = exactHandoff(PLANNER_TARGET, PLANNER_AGENT_REPORT);
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
