@@ -638,27 +638,26 @@ const RESEARCHER_REPORT = exactReport({
   research: AGENT_HANDOFF_RESEARCH_DATA,
 });
 
-const PLANNER_AGENT_REPORT = exactReport({
-  scope: PLANNER_SCOPE,
-  constraints: HANDOFF_STRING_LIST,
-  success_criteria: { ...HANDOFF_STRING_LIST, minItems: 1 },
-  ...AGENT_HANDOFF_PLANNER_REPORT_FIELDS,
-}, ["summary", "claims", "scope", "success_criteria"]);
-
-const PLANNER_TARGET = {
+const PLANNER_COMPACT_TASK = {
   type: "object",
   description:
-    "Use exactly {kind:\"agent\",role:\"dev\"} or {kind:\"agent\",role:\"artificer\"} for executable work. " +
-    "System handoffs use kind=system with role human_input, promote, or no_tasks. Do not combine kind and role into one string.",
+    "One planner task. Posse derives the canonical target from role, supplies protocol/profile/outcome, " +
+    "and defaults omitted depends_on, claims, and constraints to empty arrays.",
   properties: {
-    kind: { type: "string", enum: ["agent", "system"] },
+    id: { type: "string", minLength: 1, maxLength: 40 },
+    depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 40 } },
     role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "no_tasks"] },
+    intent: { type: "string", minLength: 1, maxLength: 1000 },
+    summary: { type: "string", minLength: 1, maxLength: 2000 },
+    claims: HANDOFF_CLAIMS,
+    scope: PLANNER_SCOPE,
+    constraints: HANDOFF_STRING_LIST,
+    success_criteria: { ...HANDOFF_STRING_LIST, minItems: 1 },
+    ...AGENT_HANDOFF_PLANNER_REPORT_FIELDS,
   },
-  required: ["kind", "role"],
+  required: ["id", "role", "intent", "summary", "scope", "success_criteria"],
   additionalProperties: false,
 };
-
-const PLANNER_HANDOFF = exactHandoff(PLANNER_TARGET, PLANNER_AGENT_REPORT);
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
@@ -672,14 +671,29 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   maxHandoffs: 1,
 });
 
-export const TOOL_AGENT_HANDOFF_PLANNER = semanticRoleTool({
+export const TOOL_AGENT_HANDOFF_PLANNER = {
+  type: "function",
+  name: "agent_handoff",
   description:
-    "Finish planning with exact executable or system handoffs. Use outcome complete with one system/no_tasks handoff only when no executable work is required. Preserve planner execution metadata; do not submit confidence or payload. The receipt ends provider generation.",
-  profile: "planner.plan.v1",
-  outcomes: ["success", "complete"],
-  handoff: PLANNER_HANDOFF,
-  maxHandoffs: 50,
-});
+    "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
+    "Use role dev or artificer for executable work; human_input, promote, and no_tasks are system roles. " +
+    "Use exactly one no_tasks task only when no work is required. Correct example: " +
+    '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and tests.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["Focused tests pass"]}]}. ' +
+    "Do not add protocol, profile, outcome, target, report, ref, or payload. The receipt ends provider generation.",
+  parameters: {
+    type: "object",
+    properties: {
+      tasks: {
+        type: "array",
+        minItems: 1,
+        maxItems: 50,
+        items: PLANNER_COMPACT_TASK,
+      },
+    },
+    required: ["tasks"],
+    additionalProperties: false,
+  },
+};
 
 export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   description:

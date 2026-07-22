@@ -59,6 +59,19 @@ const PLANNER_REPORT_KEYS = Object.freeze([
   "payload",
 ]);
 
+const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
+  "id",
+  "depends_on",
+  "role",
+  "intent",
+  "summary",
+  "claims",
+  "scope",
+  "constraints",
+  "success_criteria",
+  ...PLANNER_REPORT_METADATA_KEYS,
+]);
+
 const PROFILE_POLICY = Object.freeze({
   "researcher.pipeline.v1": Object.freeze({ roles: ["researcher"], outcomes: ["success", "gap", "input_required"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
   "researcher.report.v1": Object.freeze({ roles: ["researcher"], outcomes: ["complete"], targetKinds: ["result"], maxHandoffs: 1 }),
@@ -738,6 +751,57 @@ function looksLikeTerminalCompletion(value) {
   return !["protocol", "profile", "outcome", "handoffs"].some((key) => Object.hasOwn(source, key));
 }
 
+export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  const candidate = plainObject(args);
+  if (normalizedRole !== "planner" || !candidate || !Object.hasOwn(candidate, "tasks")) return args;
+
+  const source = exactKeys(candidate, ["tasks"], "agent_handoff");
+  if (!Array.isArray(source.tasks) || source.tasks.length < 1) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.tasks must contain at least one task");
+  }
+  if (source.tasks.length > 50) {
+    fail("AGENT_HANDOFF_TOO_LARGE", "agent_handoff.tasks exceeds 50 entries");
+  }
+
+  const handoffs = source.tasks.map((raw, index) => {
+    const task = exactKeys(raw, PLANNER_COMPACT_TASK_KEYS, `agent_handoff.tasks[${index}]`);
+    for (const key of ["id", "role", "intent", "summary", "scope", "success_criteria"]) {
+      if (task[key] == null) {
+        fail("AGENT_HANDOFF_SCHEMA_INVALID", `agent_handoff.tasks[${index}].${key} is required`);
+      }
+    }
+    const taskRole = boundedString(task.role, `agent_handoff.tasks[${index}].role`, 40);
+    const targetKind = ["dev", "artificer"].includes(taskRole) ? "agent" : "system";
+    const report = {
+      summary: task.summary,
+      claims: task.claims ?? [],
+      scope: task.scope ?? {},
+      constraints: task.constraints ?? [],
+      success_criteria: task.success_criteria ?? [],
+    };
+    for (const key of PLANNER_REPORT_METADATA_KEYS) {
+      if (task[key] != null) report[key] = task[key];
+    }
+    return {
+      id: task.id,
+      depends_on: task.depends_on ?? [],
+      target: { kind: targetKind, role: taskRole },
+      intent: task.intent,
+      report,
+    };
+  });
+  const noTasks = handoffs.length === 1
+    && handoffs[0].target.kind === "system"
+    && handoffs[0].target.role === "no_tasks";
+  return {
+    protocol: AGENT_HANDOFF_PROTOCOL,
+    profile: "planner.plan.v1",
+    outcome: noTasks ? "complete" : "success",
+    handoffs,
+  };
+}
+
 function optionalCompletionString(source, key) {
   return source[key] == null
     ? null
@@ -1028,20 +1092,21 @@ function failCollectedAgentHandoffIssues(issues) {
 }
 
 export function materializeAgentHandoff(args, { context = {}, role = "", maxHandoffs = null } = {}) {
-  const serialized = JSON.stringify(args ?? null);
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  const normalizedArgs = normalizePlannerAgentHandoffArgs(args, { role: normalizedRole });
+  const serialized = JSON.stringify(normalizedArgs ?? null);
   if (Buffer.byteLength(serialized, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
     fail("AGENT_HANDOFF_TOO_LARGE", `agent_handoff exceeds ${AGENT_HANDOFF_LIMITS.maxCallBytes} bytes`);
   }
-  const normalizedRole = String(role || "").trim().toLowerCase();
-  if (looksLikeTerminalCompletion(args || {})) {
-    return materializeTerminalCompletion(args || {}, normalizedRole);
+  if (looksLikeTerminalCompletion(normalizedArgs || {})) {
+    return materializeTerminalCompletion(normalizedArgs || {}, normalizedRole);
   }
-  failCollectedAgentHandoffIssues(collectAgentHandoffValidationIssues(args, {
+  failCollectedAgentHandoffIssues(collectAgentHandoffValidationIssues(normalizedArgs, {
     context,
     role: normalizedRole,
     maxHandoffs,
   }));
-  const source = exactKeys(args, ["protocol", "profile", "outcome", "confidence", "handoffs"], "agent_handoff");
+  const source = exactKeys(normalizedArgs, ["protocol", "profile", "outcome", "confidence", "handoffs"], "agent_handoff");
   if (source.protocol !== AGENT_HANDOFF_PROTOCOL) fail("AGENT_HANDOFF_PROTOCOL_INVALID", `protocol must be ${AGENT_HANDOFF_PROTOCOL}`);
   const profile = boundedString(source.profile, "profile", 80);
   const policy = PROFILE_POLICY[profile];
