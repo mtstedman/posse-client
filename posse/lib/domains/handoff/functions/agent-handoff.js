@@ -1,5 +1,11 @@
 import crypto from "crypto";
 
+import {
+  AGENT_HANDOFF_PLANNER_CONTRACT_KEYS,
+  AGENT_HANDOFF_PLANNER_CONTRACT_VERSION,
+  AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES,
+  AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR,
+} from "../../../catalog/handoff.js";
 import { HASH_REF_ALIAS_PATTERN, normalizeHashRefAlias } from "../../../catalog/hash-store.js";
 import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "../../../catalog/native-tools.js";
 import { fetchHashRefForContext } from "../../queue/functions/hash-refs.js";
@@ -271,45 +277,6 @@ function validateDependencyGraph(handoffs) {
   for (const id of ids) visit(id);
 }
 
-const EXPLICIT_TASK_COUNT_WORDS = Object.freeze({
-  one: 1,
-  two: 2,
-  three: 3,
-  four: 4,
-  five: 5,
-  six: 6,
-  seven: 7,
-  eight: 8,
-  nine: 9,
-  ten: 10,
-});
-
-function parsedTaskCount(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (Object.hasOwn(EXPLICIT_TASK_COUNT_WORDS, normalized)) {
-    return EXPLICIT_TASK_COUNT_WORDS[normalized];
-  }
-  const numeric = Number(normalized);
-  return Number.isInteger(numeric) && numeric > 0 && numeric <= 50 ? numeric : null;
-}
-
-export function explicitPlannerTaskCount(value) {
-  const text = String(value || "").toLowerCase().replace(/[^a-z0-9-]+/g, " ");
-  const count = "(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|[1-4][0-9]|50)";
-  const noun = "(?:(?:dev|developer|artificer)\\s+)?(?:jobs?|tasks?|handoffs?)";
-  const patterns = [
-    new RegExp(`\\bexactly\\s+${count}\\s+(?:[a-z-]+\\s+){0,4}${noun}\\b`),
-    new RegExp(`\\b(?:create|produce|plan|assign|return)\\s+${count}\\s+(?:[a-z-]+\\s+){0,4}${noun}\\b`),
-    new RegExp(`\\bsplit\\s+(?:the\\s+work\\s+)?into\\s+${count}\\s+(?:[a-z-]+\\s+){0,4}${noun}\\b`),
-  ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    const parsed = parsedTaskCount(match?.[1]);
-    if (parsed != null) return parsed;
-  }
-  return null;
-}
-
 function validatePlannerPacketSemantics(packet) {
   if (packet.profile !== "planner.plan.v1" || packet.outcome !== "success") return;
   for (const [index, handoff] of packet.handoffs.entries()) {
@@ -375,26 +342,84 @@ function validateCitationChildPacketSemantics(packet) {
   }
 }
 
-function validatePlannerPacketAgainstWorkItem(packet, workItem) {
-  if (packet.profile !== "planner.plan.v1" || packet.outcome !== "success" || !workItem) return;
-  const workItemText = `${workItem.title || ""}\n${workItem.description || ""}`;
-  const expectedCount = explicitPlannerTaskCount(workItemText);
-  const executableHandoffs = packet.handoffs.filter((handoff) => handoff.target?.kind === "agent");
-  if (expectedCount != null && executableHandoffs.length !== expectedCount) {
-    fail(
-      "AGENT_HANDOFF_SEMANTIC_INVALID",
-      `planner handoff count ${executableHandoffs.length} does not match the explicit work-item count ${expectedCount}`,
+function invalidPlannerContract(message) {
+  fail(
+    AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR,
+    `work-item metadata.agent_handoff.planner_contract ${message}`,
+  );
+}
+
+function plannerContractFromWorkItem(workItem) {
+  if (!workItem?.metadata_json) return null;
+  let metadata;
+  try {
+    metadata = JSON.parse(workItem.metadata_json);
+  } catch {
+    invalidPlannerContract("must be valid JSON");
+  }
+  const metadataObject = plainObject(metadata);
+  if (!metadataObject || metadataObject.agent_handoff == null) return null;
+  const agentHandoff = plainObject(metadataObject.agent_handoff);
+  if (!agentHandoff) invalidPlannerContract("parent must be an object");
+  if (!Object.hasOwn(agentHandoff, "planner_contract")) return null;
+  const contract = plainObject(agentHandoff.planner_contract);
+  if (!contract) invalidPlannerContract("must be an object");
+  for (const key of Object.keys(contract)) {
+    if (!AGENT_HANDOFF_PLANNER_CONTRACT_KEYS.includes(key)) invalidPlannerContract(`does not allow ${key}`);
+  }
+  if (contract.version !== AGENT_HANDOFF_PLANNER_CONTRACT_VERSION) {
+    invalidPlannerContract(`requires numeric version ${AGENT_HANDOFF_PLANNER_CONTRACT_VERSION}`);
+  }
+  const hasExactExecutableHandoffs = Object.hasOwn(contract, "exact_executable_handoffs");
+  const exactExecutableHandoffs = contract.exact_executable_handoffs;
+  const plannerLimit = PROFILE_POLICY["planner.plan.v1"].maxHandoffs;
+  if (hasExactExecutableHandoffs && (
+    !Number.isInteger(exactExecutableHandoffs)
+    || exactExecutableHandoffs < 1
+    || exactExecutableHandoffs > plannerLimit
+  )) {
+    invalidPlannerContract(`exact_executable_handoffs must be an integer from 1 through ${plannerLimit}`);
+  }
+  const hasDependencyEdges = Object.hasOwn(contract, "dependency_edges");
+  const dependencyEdges = contract.dependency_edges;
+  if (hasDependencyEdges && !AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES.includes(dependencyEdges)) {
+    invalidPlannerContract(
+      `dependency_edges must be one of: ${AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES.join(", ")}`,
     );
   }
-  if (expectedCount > 1 && /\bdependent\b/i.test(workItemText)) {
-    const dependencyCount = executableHandoffs.reduce(
+  return {
+    exactExecutableHandoffs: hasExactExecutableHandoffs ? exactExecutableHandoffs : null,
+    dependencyEdges: hasDependencyEdges ? dependencyEdges : "unconstrained",
+  };
+}
+
+function validatePlannerPacketAgainstWorkItem(packet, workItem) {
+  if (packet.profile !== "planner.plan.v1" || packet.outcome !== "success" || !workItem) return;
+  const contract = plannerContractFromWorkItem(workItem);
+  if (!contract) return;
+  const executableHandoffs = packet.handoffs.filter((handoff) => handoff.target?.kind === "agent");
+  if (contract.exactExecutableHandoffs != null
+    && executableHandoffs.length !== contract.exactExecutableHandoffs) {
+    fail(
+      "AGENT_HANDOFF_SEMANTIC_INVALID",
+      `planner contract requires exactly ${contract.exactExecutableHandoffs} executable handoffs; received ${executableHandoffs.length}`,
+    );
+  }
+  if (contract.dependencyEdges !== "unconstrained") {
+    const dependencyCount = packet.handoffs.reduce(
       (sum, handoff) => sum + (handoff.depends_on || []).length,
       0,
     );
-    if (dependencyCount === 0) {
+    if (contract.dependencyEdges === "at_least_one" && dependencyCount === 0) {
       fail(
         "AGENT_HANDOFF_SEMANTIC_INVALID",
-        "planner handoffs must preserve the work item's explicit dependency requirement",
+        "planner contract requires at least one dependency edge",
+      );
+    }
+    if (contract.dependencyEdges === "none" && dependencyCount > 0) {
+      fail(
+        "AGENT_HANDOFF_SEMANTIC_INVALID",
+        "planner contract forbids dependency edges",
       );
     }
   }
@@ -512,6 +537,7 @@ function materializeTerminalCompletion(args, role) {
       },
     }],
     evidence_chars: 0,
+    narrative_chars: 0,
     authoritative: true,
   };
 }
@@ -600,6 +626,7 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
     role: normalizedRole,
     handoffs,
     evidence_chars: counters.evidence,
+    narrative_chars: counters.narrative,
     authoritative: true,
   };
 }
@@ -647,7 +674,7 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
   const effectiveRole = String(call.role || role || "");
   const packet = materializeAgentHandoff(args, { context: resolvedContext, role: effectiveRole, maxHandoffs });
   const workItem = resolvedContext.workItemId
-    ? database.prepare("SELECT title, description FROM work_items WHERE id = ?").get(resolvedContext.workItemId)
+    ? database.prepare("SELECT metadata_json FROM work_items WHERE id = ?").get(resolvedContext.workItemId)
     : null;
   validatePlannerPacketAgainstWorkItem(packet, workItem);
   packet.agent_call_id = agentCallId;

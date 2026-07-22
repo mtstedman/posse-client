@@ -1196,9 +1196,10 @@ export function recordToolInvocation({
   const summary = _summarizeToolUse({ tool, input }, cwd);
   if (!summary) return;
   const context = getObservationContext() || {};
+  const agentCallId = context.agent_call_id ?? null;
   const detail = extraDetail && typeof extraDetail === "object"
-    ? { ...(summary.detail || {}), ...extraDetail }
-    : summary.detail;
+    ? { ...(summary.detail || {}), ...extraDetail, ...(agentCallId != null ? { agent_call_id: agentCallId } : {}) }
+    : { ...(summary.detail || {}), ...(agentCallId != null ? { agent_call_id: agentCallId } : {}) };
   recordObservation({
     work_item_id: work_item_id ?? context.work_item_id ?? null,
     job_id: job_id ?? context.job_id ?? null,
@@ -1229,6 +1230,7 @@ export function beginToolInvocation({
     if (!summary) return null;
     const context = getObservationContext() || {};
     const resolvedJobId = job_id ?? context.job_id ?? null;
+    const agentCallId = context.agent_call_id ?? null;
     const startedAtMs = Date.now();
     const inv = `${resolvedJobId ?? "g"}-${startedAtMs}-${++_toolInvocationSeq}`;
     recordObservation({
@@ -1237,7 +1239,12 @@ export function beginToolInvocation({
       attempt_id: attempt_id ?? context.attempt_id ?? null,
       observation_type: `${summary.observation_type}.started`,
       summary: summary.summary,
-      detail: { ...(summary.detail && typeof summary.detail === "object" ? summary.detail : {}), inv, phase: "start" },
+      detail: {
+        ...(summary.detail && typeof summary.detail === "object" ? summary.detail : {}),
+        inv,
+        phase: "start",
+        ...(agentCallId != null ? { agent_call_id: agentCallId } : {}),
+      },
     });
     return { inv, startedAtMs };
   } catch {
@@ -1267,6 +1274,7 @@ export function finishToolInvocation(invocation, {
     const summary = _summarizeToolUse({ tool, input }, cwd);
     if (!summary) return;
     const context = getObservationContext() || {};
+    const agentCallId = context.agent_call_id ?? null;
     const inv = invocation?.inv ?? null;
     const durationMs = invocation?.startedAtMs ? Math.max(0, Date.now() - invocation.startedAtMs) : null;
     const resolvedOutcome = normalizedToolOutcome(outcome, { ok, error });
@@ -1280,6 +1288,7 @@ export function finishToolInvocation(invocation, {
       ...(durationMs != null ? { duration_ms: durationMs } : {}),
       ...(error ? { error: String(error).slice(0, 200) } : {}),
       ...(rejection ? { rejection_reason: String(rejection).slice(0, 200) } : {}),
+      ...(agentCallId != null ? { agent_call_id: agentCallId } : {}),
     };
     recordObservation({
       work_item_id: work_item_id ?? context.work_item_id ?? null,
@@ -1312,6 +1321,7 @@ export function recordToolUseObservations({
   const resolvedWorkItemId = work_item_id ?? context.work_item_id ?? null;
   const resolvedJobId = job_id ?? context.job_id ?? null;
   const resolvedAttemptId = attempt_id ?? context.attempt_id ?? null;
+  const resolvedAgentCallId = context.agent_call_id ?? null;
   const seen = new Set();
   const now = Date.now();
   const replayBucketKey = resolvedJobId == null ? "__global__" : String(resolvedJobId);
@@ -1329,6 +1339,7 @@ export function recordToolUseObservations({
       ...(outcome ? { outcome, ok: outcome === "succeeded" } : {}),
       ...(error ? { error: error.slice(0, 200) } : {}),
       ...(rejection ? { rejection_reason: rejection.slice(0, 200) } : {}),
+      ...(resolvedAgentCallId != null ? { agent_call_id: resolvedAgentCallId } : {}),
     };
     const key = `${summary.observation_type}|${summary.summary}`;
     if (seen.has(key)) continue;

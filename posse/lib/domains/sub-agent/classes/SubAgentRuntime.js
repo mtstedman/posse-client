@@ -3,6 +3,7 @@
 import crypto from "node:crypto";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { isSubAgentEvidenceSafeAtlasTool } from "../../../catalog/sub-agent.js";
 import { getSetting } from "../../queue/functions/index.js";
 import {
   getAgentHandoffRecord,
@@ -162,7 +163,18 @@ function delay(ms) {
 }
 
 function requestDigest(value) {
-  return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return crypto.createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => entry === undefined ? "null" : stableJson(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function canonicalToolName(value) {
@@ -228,7 +240,8 @@ function normalizeCursorToolInput(rawInput, label, authorizedTools) {
   }
   const tool = canonicalToolName(boundedString(selected.tool, `${label}.tool`, 120));
   const entry = authorizedTools.get(tool);
-  const readOnly = entry && !entry.mutating && (entry.access === "read" || tool.startsWith("atlas."));
+  const readOnly = entry && !entry.mutating
+    && (entry.access === "read" || isSubAgentEvidenceSafeAtlasTool(tool));
   if (!readOnly || FORBIDDEN_CURSOR_TOOLS.has(tool)) {
     throw runtimeError("SUB_AGENT_INPUT_TOOL_FORBIDDEN", `${tool} is not an issued read-only parent tool`, { stage: "validation" });
   }
@@ -377,6 +390,11 @@ export class SubAgentRuntime {
       const batch = batchId ? this.batches.get(batchId) : null;
       if (batch) {
         batch.parentClosed = true;
+        this.#abortBatch(batch, (entry) => runtimeError(
+          "SUB_AGENT_PARENT_CLOSED",
+          `Parent closed while child ${entry.id} was running`,
+          { stage: "control" },
+        ));
         batch.settledPromise?.finally(() => {
           const timer = setTimeout(() => {
             if (this.batches.get(batch.id) === batch) this.batches.delete(batch.id);
@@ -415,6 +433,10 @@ export class SubAgentRuntime {
     const binding = this.childBindings.get(childCallId);
     if (!binding) throw runtimeError("SUB_AGENT_CURSOR_UNBOUND", "sub_agent_next_input requires an active citation child", { stage: "cursor" });
     const { entry } = binding;
+    if (entry.controller.signal.aborted) {
+      throw entry.controller.signal.reason
+        || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled", { stage: "cursor" });
+    }
     const input = exactObject(args, ["position"], "sub_agent_next_input");
     const position = Number(input.position);
     if (!Number.isInteger(position) || position < 0) {
@@ -457,6 +479,10 @@ export class SubAgentRuntime {
           arguments: selected.arguments,
           signal: entry.controller.signal,
         });
+        if (entry.controller.signal.aborted) {
+          throw entry.controller.signal.reason
+            || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled", { stage: "cursor" });
+        }
         const text = typeof raw === "string" ? raw : JSON.stringify(raw);
         const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
         if (!text.trim()) throw runtimeError("SUB_AGENT_INPUT_EMPTY", `${selected.tool} returned no evidence`, { stage: "cursor" });
@@ -511,6 +537,10 @@ export class SubAgentRuntime {
     const binding = this.childBindings.get(positiveId(agentCallId));
     if (!binding) return false;
     const { entry } = binding;
+    if (entry.controller.signal.aborted) {
+      throw entry.controller.signal.reason
+        || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled", { stage: "terminal" });
+    }
     if (entry.sealed) throw runtimeError("SUB_AGENT_CURSOR_SEALED", "Citation child already submitted its terminal handoff", { stage: "terminal" });
     if (entry.consumedEvidence.length === 0 && packet?.outcome !== "failed") {
       throw runtimeError("SUB_AGENT_EVIDENCE_REQUIRED", "Citation child must consume at least one successful cursor input", { stage: "terminal" });
@@ -707,10 +737,18 @@ export class SubAgentRuntime {
 
   async #runEntry(batch, entry, runChild) {
     entry.status = "running";
-    const timeout = setTimeout(() => entry.controller.abort(runtimeError("SUB_AGENT_TIMEOUT", `Child ${entry.id} exceeded ${entry.timeoutMs}ms`, { stage: "child" })), entry.timeoutMs);
+    let hardReject = null;
+    const hardSettlement = new Promise((_, reject) => {
+      hardReject = reject;
+    });
+    entry.hardSettle = (reason) => hardReject?.(reason);
+    const timeout = setTimeout(() => this.#abortEntry(
+      entry,
+      runtimeError("SUB_AGENT_TIMEOUT", `Child ${entry.id} exceeded ${entry.timeoutMs}ms`, { stage: "child" }),
+    ), entry.timeoutMs);
     timeout.unref?.();
     try {
-      const result = await runChild({
+      const childRun = Promise.resolve().then(() => runChild({
         batchId: batch.id,
         dispatchId: entry.handle,
         requestId: entry.id,
@@ -719,19 +757,23 @@ export class SubAgentRuntime {
         maxInputs: entry.maxInputs,
         timeoutMs: entry.timeoutMs,
         signal: entry.controller.signal,
-      });
+      }));
+      const result = await Promise.race([childRun, hardSettlement]);
       const record = getAgentHandoffRecord(result?.agentCallId);
       if (!record || record.status !== "committed" || record.packet?.profile !== "citation_synthesis.v1") {
         throw runtimeError("SUB_AGENT_TERMINAL_REPORT_MISSING", `Child ${entry.id} did not commit a citation report`, { stage: "terminal" });
       }
       const cited = validateChildEvidenceScope(record.packet, entry.consumedEvidence);
       entry.packet = sanitizePacket(record.packet);
+      const consumable = Math.min(entry.inputs.length, entry.maxInputs);
       entry.coverage = {
         authorized: entry.inputs.length,
+        consumable,
         consumed: entry.cursorPosition,
         selected: cited.length,
-        unconsumed: Math.max(0, entry.inputs.length - entry.cursorPosition),
-        stopped_early: entry.cursorPosition < entry.inputs.length,
+        unconsumed: Math.max(0, consumable - entry.cursorPosition),
+        inaccessible_by_budget: Math.max(0, entry.inputs.length - consumable),
+        stopped_early: entry.cursorPosition < consumable,
       };
       entry.usage = usageFromChild(result);
       entry.status = "completed";
@@ -741,7 +783,20 @@ export class SubAgentRuntime {
       if (error?.stats) entry.usage = usageFromChild({ stats: error.stats, agentCallId: error.agentCallId });
     } finally {
       clearTimeout(timeout);
+      entry.hardSettle = null;
       this.activeChildren = Math.max(0, this.activeChildren - 1);
+    }
+  }
+
+  #abortEntry(entry, reason) {
+    if (!["admitted", "running"].includes(entry.status)) return;
+    if (!entry.controller.signal.aborted) entry.controller.abort(reason);
+    entry.hardSettle?.(entry.controller.signal.reason || reason);
+  }
+
+  #abortBatch(batch, reasonForEntry) {
+    for (const entry of batch.entries) {
+      this.#abortEntry(entry, reasonForEntry(entry));
     }
   }
 
@@ -770,11 +825,11 @@ export class SubAgentRuntime {
   async #cancel(input, parentCallId) {
     exactObject(input, ["op", "protocol", "batch_id"], "sub_agent.cancel");
     const batch = this.#ownedBatch(input, parentCallId);
-    for (const entry of batch.entries) {
-      if (["admitted", "running"].includes(entry.status)) {
-        entry.controller.abort(runtimeError("SUB_AGENT_CANCELLED", `Child ${entry.id} was cancelled by its parent`, { stage: "control" }));
-      }
-    }
+    this.#abortBatch(batch, (entry) => runtimeError(
+      "SUB_AGENT_CANCELLED",
+      `Child ${entry.id} was cancelled by its parent`,
+      { stage: "control" },
+    ));
     await batch.settledPromise;
     batch.acknowledged = true;
     return publicBatch(batch, { includeResults: true });
