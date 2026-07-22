@@ -108,6 +108,12 @@ function normalizeObjectType(value) {
     .slice(0, 80);
 }
 
+function normalizedLinesForHandoff(value) {
+  const lines = String(value ?? "").replace(/\r\n?/g, "\n").split("\n");
+  if (lines.length > 1 && lines.at(-1) === "") lines.pop();
+  return lines.length;
+}
+
 // symbol.search enrollment is flag-gated (atlas_search_result_paging, default
 // off) so mid-experiment baselines stay stable; search_files/list_files keep
 // their long-standing unconditional policies.
@@ -1058,6 +1064,8 @@ function fetchResultText(result, args = {}) {
   if (entry.entry_kind === "materialized") {
     const fullText = entry.payload_text || "";
     const paged = pageMaterializedText(fullText, args);
+    const handoffLines = String(fullText).replace(/\r\n?/g, "\n").split("\n");
+    if (handoffLines.length > 1 && handoffLines.at(-1) === "") handoffLines.pop();
     return JSON.stringify({
       ok: true,
       ref: entry.ref,
@@ -1066,6 +1074,8 @@ function fetchResultText(result, args = {}) {
       note: entry.note,
       content_hash: entry.content_hash,
       size_chars: entry.size_chars,
+      handoff_line_count: handoffLines.length,
+      handoff_requires_slice: handoffLines.length > 40 || fullText.length > 4000,
       text: paged.text,
       page: {
         ...paged.page,
@@ -1326,6 +1336,7 @@ function createOneHashRef(hashContext, item = {}) {
     },
   });
 
+  const handoffLineCount = normalizedLinesForHandoff(payload);
   return {
     ok: true,
     ref: surfaced.entry.ref,
@@ -1333,6 +1344,9 @@ function createOneHashRef(hashContext, item = {}) {
     object_type: objectType,
     owner_scope: ownerScope,
     chars: payload.length,
+    lines: handoffLineCount,
+    authorship: sourceAlias ? "server_slice" : "agent_authored",
+    handoff_requires_slice: handoffLineCount > 40 || payload.length > 4000,
     ...(note ? { note } : {}),
     ...(sourceAlias ? { source_ref: sourceAlias, slice: sliceNote } : {}),
   };

@@ -3139,7 +3139,13 @@ async function handleRequest(msg) {
       });
       sendMessage(jsonRpcSuccess(id, { content: [{ type: "text", text: responseText }] }));
     } catch (err) {
-      const safeError = capString(err?.message || String(err), 300);
+      const handoffIssues = toolName === "agent_handoff" && Array.isArray(err?.issues)
+        ? err.issues.slice(0, 24).map((issue) => ({
+            code: String(issue?.code || "AGENT_HANDOFF_SCHEMA_INVALID").slice(0, 120),
+            message: capString(issue?.message || "Invalid agent_handoff arguments", 500),
+          }))
+        : [];
+      const safeError = capString(err?.message || String(err), toolName === "agent_handoff" ? 2400 : 300);
       finishToolInvocation(toolInvocation, {
         tool: toolName,
         input: recordInput,
@@ -3160,6 +3166,15 @@ async function handleRequest(msg) {
       sendMessage(jsonRpcSuccess(id, {
         content: [{ type: "text", text: `Error executing ${requestedToolName}: ${safeError}` }],
         isError: true,
+        ...(toolName === "agent_handoff" ? {
+          structuredContent: {
+            error: {
+              code: String(err?.code || "AGENT_HANDOFF_REJECTED").slice(0, 120),
+              message: safeError,
+              ...(handoffIssues.length > 0 ? { issues: handoffIssues } : {}),
+            },
+          },
+        } : {}),
       }));
     }
     return;

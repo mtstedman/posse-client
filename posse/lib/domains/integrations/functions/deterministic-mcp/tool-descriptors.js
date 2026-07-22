@@ -77,7 +77,11 @@ import {
   TOOL_AGENT_HANDOFF_DEV,
   TOOL_AGENT_HANDOFF_ARTIFICER,
   TOOL_AGENT_HANDOFF_ASSESSOR,
+  TOOL_AGENT_HANDOFF_CITATION,
+  TOOL_AGENT_HANDOFF_PLANNER,
+  TOOL_AGENT_HANDOFF_RESEARCHER,
   TOOL_AGENT_HANDOFF_REPORT,
+  getAgentHandoffToolSchemaForRole,
   TOOL_SUB_AGENT,
   TOOL_SUB_AGENT_NEXT_INPUT,
 } from "../../../../catalog/native-tools.js";
@@ -120,6 +124,9 @@ export {
   TOOL_AGENT_HANDOFF_DEV,
   TOOL_AGENT_HANDOFF_ARTIFICER,
   TOOL_AGENT_HANDOFF_ASSESSOR,
+  TOOL_AGENT_HANDOFF_CITATION,
+  TOOL_AGENT_HANDOFF_PLANNER,
+  TOOL_AGENT_HANDOFF_RESEARCHER,
   TOOL_AGENT_HANDOFF_REPORT,
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_SUB_AGENT,
@@ -789,15 +796,7 @@ export function getToolSchema(name) {
 
 export function getToolSchemaForRole(name, role, { compactCompletion = false } = {}) {
   if (name !== "agent_handoff") return getToolSchema(name);
-  if (!compactCompletion) return TOOL_AGENT_HANDOFF;
-  const normalizedRole = String(role || "").trim().toLowerCase();
-  if (normalizedRole === "dev" || normalizedRole === "fix") return TOOL_AGENT_HANDOFF_DEV;
-  if (normalizedRole === "artificer") return TOOL_AGENT_HANDOFF_ARTIFICER;
-  if (normalizedRole === "assessor") return TOOL_AGENT_HANDOFF_ASSESSOR;
-  if (["researcher", "planner", "citation_synthesis", "subagent"].includes(normalizedRole)) {
-    return TOOL_AGENT_HANDOFF_REPORT;
-  }
-  return TOOL_AGENT_HANDOFF;
+  return getAgentHandoffToolSchemaForRole(role, { compactCompletion });
 }
 
 export function getToolExecutionSpec(name) {

@@ -353,32 +353,255 @@ export const TOOL_AGENT_HANDOFF_ARTIFICER = {
   },
 };
 
-export const TOOL_AGENT_HANDOFF_REPORT = {
-  type: "function",
-  name: "agent_handoff",
-  description:
-    "Finish the current researcher, planner, or citation-synthesis turn with one posse.agent_handoff.v1 semantic report. The receipt ends provider generation.",
-  parameters: (() => {
-    const semantic = TOOL_AGENT_HANDOFF.parameters.oneOf[1];
-    const parameters = {
-      ...semantic,
-      properties: { ...semantic.properties },
-    };
-    delete parameters.properties.confidence;
-    return parameters;
-  })(),
+const HANDOFF_REF = {
+  type: "string",
+  pattern: "^#[0-9a-z]{4,12}$",
+  description: "Opaque hash ref only; never a file path or path:line citation.",
 };
 
-export const TOOL_AGENT_HANDOFF_ASSESSOR = {
-  type: "function",
-  name: "agent_handoff",
+const HANDOFF_EVIDENCE_SELECTOR = {
+  type: "object",
   description:
-    "Finish the current assessor turn with one posse.agent_handoff.v1 verdict report and an explicit confidence level. The receipt ends provider generation.",
-  parameters: {
-    ...TOOL_AGENT_HANDOFF.parameters.oneOf[1],
-    required: [...TOOL_AGENT_HANDOFF.parameters.oneOf[1].required, "confidence"],
+    "Select bounded stored evidence. Omit lines only when the ref is at most 40 lines and 4000 characters. " +
+    "For larger refs, first create a server-side source_ref slice no larger than those limits. " +
+    "Inline authored create_ref chunks are support/decoy only; direct tool refs and verified source_ref slices may be proof.",
+  properties: {
+    ref: HANDOFF_REF,
+    lines: {
+      type: "object",
+      description: "Optional 1-based window. count cannot exceed the runtime 40-line limit.",
+      properties: {
+        start: { type: "integer", minimum: 1 },
+        count: { type: "integer", minimum: 1, maximum: 40 },
+      },
+      required: ["start", "count"],
+      additionalProperties: false,
+    },
   },
+  required: ["ref"],
+  additionalProperties: false,
 };
+
+const HANDOFF_DECOY = {
+  type: "object",
+  properties: {
+    selector: HANDOFF_EVIDENCE_SELECTOR,
+    reason: { type: "string", minLength: 1, maxLength: 500 },
+  },
+  required: ["selector", "reason"],
+  additionalProperties: false,
+};
+
+const HANDOFF_CLAIM = {
+  type: "object",
+  description:
+    "One specific claim with optional evidence. Hash refs belong only in proof, support, or decoy selectors, never in claim or prose. " +
+    "Proof requires a direct storage-owned tool ref or a verified server-side source_ref slice; inline agent-authored refs are not proof.",
+  properties: {
+    claim: { type: "string", minLength: 1, maxLength: 1000 },
+    proof: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
+    support: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
+    decoy: { type: "array", maxItems: 8, items: HANDOFF_DECOY },
+    prose: { type: "string", maxLength: 2000 },
+  },
+  required: ["claim"],
+  additionalProperties: false,
+};
+
+const HANDOFF_CLAIMS = {
+  type: "array",
+  maxItems: 12,
+  items: HANDOFF_CLAIM,
+};
+
+const HANDOFF_STRING_LIST = {
+  type: "array",
+  maxItems: 50,
+  items: { type: "string", minLength: 1, maxLength: 1000 },
+};
+
+const RESEARCHER_SCOPE = {
+  type: "object",
+  description: "Verified downstream seed files. These are research seeds, not write authority.",
+  properties: {
+    key_files: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
+    related_files: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
+  },
+  additionalProperties: false,
+};
+
+const PLANNER_SCOPE = {
+  type: "object",
+  description:
+    "Exact execution scope. db requires target dev and empty file arrays; other agent tasks require writable file or create-root scope. " +
+    "system/promote requires exact destination files in files_to_create or files_to_modify.",
+  properties: {
+    task_mode: {
+      type: "string",
+      enum: ["code", "report", "content", "image", "intake_processing", "db"],
+      default: "code",
+    },
+    files_to_modify: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+    files_to_create: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+    files_to_delete: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+    create_roots: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+  },
+  additionalProperties: false,
+};
+
+const COMMON_HANDOFF_FIELDS = {
+  id: { type: "string", minLength: 1, maxLength: 40 },
+  depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 40 } },
+  intent: { type: "string", minLength: 1, maxLength: 1000 },
+};
+
+function exactTarget(kind, role) {
+  return {
+    type: "object",
+    properties: {
+      kind: { type: "string", enum: [kind] },
+      role: { type: "string", enum: [role] },
+    },
+    required: ["kind", "role"],
+    additionalProperties: false,
+  };
+}
+
+function exactReport(properties, required = ["summary", "claims"]) {
+  return {
+    type: "object",
+    properties: {
+      summary: { type: "string", maxLength: 2000 },
+      claims: HANDOFF_CLAIMS,
+      ...properties,
+    },
+    required,
+    additionalProperties: false,
+  };
+}
+
+function exactHandoff(target, report) {
+  return {
+    type: "object",
+    properties: { ...COMMON_HANDOFF_FIELDS, target, report },
+    required: ["id", "depends_on", "target", "intent", "report"],
+    additionalProperties: false,
+  };
+}
+
+function semanticRoleTool({ description, profile, profiles = [profile], outcomes, handoff, maxHandoffs, confidence = false }) {
+  return {
+    type: "function",
+    name: "agent_handoff",
+    description,
+    parameters: {
+      type: "object",
+      properties: {
+        protocol: { type: "string", enum: ["posse.agent_handoff.v1"] },
+        profile: { type: "string", enum: profiles },
+        outcome: { type: "string", enum: outcomes },
+        ...(confidence ? {
+          confidence: {
+            type: "string",
+            enum: ["low", "medium", "high"],
+            description: "Required confidence in the assessor's terminal verdict.",
+          },
+        } : {}),
+        handoffs: {
+          type: "array",
+          minItems: 1,
+          maxItems: maxHandoffs,
+          items: handoff,
+        },
+      },
+      required: ["protocol", "profile", "outcome", ...(confidence ? ["confidence"] : []), "handoffs"],
+      additionalProperties: false,
+    },
+  };
+}
+
+const RESEARCHER_REPORT = exactReport({
+  scope: RESEARCHER_SCOPE,
+  constraints: HANDOFF_STRING_LIST,
+  questions: HANDOFF_STRING_LIST,
+});
+
+const PLANNER_AGENT_REPORT = exactReport({
+  scope: PLANNER_SCOPE,
+  constraints: HANDOFF_STRING_LIST,
+  success_criteria: { ...HANDOFF_STRING_LIST, minItems: 1 },
+}, ["summary", "claims", "scope", "success_criteria"]);
+
+const PLANNER_HANDOFF = exactHandoff({
+  oneOf: [
+    exactTarget("agent", "dev"),
+    exactTarget("agent", "artificer"),
+    exactTarget("system", "human_input"),
+    exactTarget("system", "promote"),
+  ],
+}, PLANNER_AGENT_REPORT);
+
+export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
+  description:
+    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. Use named claim objects; do not submit confidence or payload. The receipt ends provider generation.",
+  profile: "researcher.pipeline.v1",
+  profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
+  outcomes: ["success", "gap", "input_required", "complete"],
+  handoff: exactHandoff({
+    oneOf: [exactTarget("pipeline", "$pipeline"), exactTarget("result", "$result")],
+  }, RESEARCHER_REPORT),
+  maxHandoffs: 1,
+});
+
+export const TOOL_AGENT_HANDOFF_PLANNER = semanticRoleTool({
+  description:
+    "Finish planning with exact executable or system handoffs. Use named claim objects, exact scope, and checkable success criteria; do not submit confidence or payload. The receipt ends provider generation.",
+  profile: "planner.plan.v1",
+  outcomes: ["success"],
+  handoff: PLANNER_HANDOFF,
+  maxHandoffs: 50,
+});
+
+export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
+  description:
+    "Finish citation synthesis with one parent report. Use named claim objects; do not submit confidence, scope, payload, constraints, success criteria, or questions. The receipt ends provider generation.",
+  profile: "citation_synthesis.v1",
+  outcomes: ["complete", "partial", "failed"],
+  handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({})),
+  maxHandoffs: 1,
+});
+
+// Backward-compatible internal export. New role projection code must select
+// the exact researcher/planner/citation schemas above instead of this alias.
+export const TOOL_AGENT_HANDOFF_REPORT = TOOL_AGENT_HANDOFF_RESEARCHER;
+
+export const TOOL_AGENT_HANDOFF_ASSESSOR = semanticRoleTool({
+  description:
+    "Finish assessment with one exact verdict report and explicit confidence. Use named claim objects; do not submit payload or execution scope. The receipt ends provider generation.",
+  profile: "assessor.verdict.v1",
+  outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
+  confidence: true,
+  handoff: exactHandoff(exactTarget("pipeline", "$pipeline"), exactReport({
+    questions: HANDOFF_STRING_LIST,
+  })),
+  maxHandoffs: 1,
+});
+
+export function getAgentHandoffToolSchemaForRole(role, { compactCompletion = false } = {}) {
+  if (!compactCompletion) return TOOL_AGENT_HANDOFF;
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  if (normalizedRole === "dev" || normalizedRole === "fix") return TOOL_AGENT_HANDOFF_DEV;
+  if (normalizedRole === "artificer") return TOOL_AGENT_HANDOFF_ARTIFICER;
+  if (normalizedRole === "assessor") return TOOL_AGENT_HANDOFF_ASSESSOR;
+  if (normalizedRole === "researcher") return TOOL_AGENT_HANDOFF_RESEARCHER;
+  if (normalizedRole === "planner") return TOOL_AGENT_HANDOFF_PLANNER;
+  if (["citation_synthesis", "subagent"].includes(normalizedRole)) return TOOL_AGENT_HANDOFF_CITATION;
+  return TOOL_AGENT_HANDOFF;
+}
+
+// Provider-facing schemas intentionally differ from the permissive migration
+// schema in TOOL_AGENT_HANDOFF. Runtime accepts legacy tuple claims and selector
+// strings while the local and remote prompt/compiler layers roll forward.
 
 export const TOOL_SUB_AGENT_NEXT_INPUT = {
   type: "function",

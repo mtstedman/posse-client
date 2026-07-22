@@ -59,11 +59,7 @@ import {
 import { finalizeAgentHandoffForProvider } from "../../handoff/functions/agent-handoff.js";
 import { agentHandoffTerminator } from "../../handoff/classes/AgentHandoffTerminator.js";
 import {
-  TOOL_AGENT_HANDOFF,
-  TOOL_AGENT_HANDOFF_ARTIFICER,
-  TOOL_AGENT_HANDOFF_ASSESSOR,
-  TOOL_AGENT_HANDOFF_DEV,
-  TOOL_AGENT_HANDOFF_REPORT,
+  getAgentHandoffToolSchemaForRole,
 } from "../../../catalog/native-tools.js";
 import {
   buildCitationChildPrompt,
@@ -72,18 +68,7 @@ import {
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 
 function agentHandoffToolSchemaTelemetry(role, compactCompletion = false) {
-  const normalizedRole = String(role || "").trim().toLowerCase();
-  const schema = !compactCompletion
-    ? TOOL_AGENT_HANDOFF
-    : normalizedRole === "dev" || normalizedRole === "fix"
-    ? TOOL_AGENT_HANDOFF_DEV
-    : normalizedRole === "artificer"
-      ? TOOL_AGENT_HANDOFF_ARTIFICER
-      : normalizedRole === "assessor"
-        ? TOOL_AGENT_HANDOFF_ASSESSOR
-        : ["researcher", "planner", "citation_synthesis", "subagent"].includes(normalizedRole)
-          ? TOOL_AGENT_HANDOFF_REPORT
-          : TOOL_AGENT_HANDOFF;
+  const schema = getAgentHandoffToolSchemaForRole(role, { compactCompletion });
   const serialized = JSON.stringify(schema);
   return {
     name: schema.name || "agent_handoff",

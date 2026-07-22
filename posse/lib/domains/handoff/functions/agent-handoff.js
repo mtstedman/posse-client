@@ -116,9 +116,19 @@ export function parseAgentHandoffEvidenceSelector(value) {
     const selector = exactKeys(value, ["ref", "lines"], "evidence selector");
     ref = normalizeHashRefAlias(selector.ref);
     if (selector.lines != null) {
-      const lines = exactKeys(selector.lines, ["start", "end"], "evidence selector.lines");
+      const lines = exactKeys(selector.lines, ["start", "end", "count"], "evidence selector.lines");
       start = Number(lines.start);
-      end = Number(lines.end);
+      if (lines.count != null && lines.end != null) {
+        fail("AGENT_HANDOFF_SELECTOR_INVALID", `Evidence line range for ${ref} must use count or end, not both`);
+      }
+      const count = lines.count == null ? null : Number(lines.count);
+      end = count == null ? Number(lines.end) : start + count - 1;
+      if (count != null && (!Number.isInteger(count) || count < 1 || count > AGENT_HANDOFF_LIMITS.maxSelectorLines)) {
+        fail(
+          "AGENT_HANDOFF_SELECTOR_INVALID",
+          `Evidence line count for ${ref} must be an integer from 1 through ${AGENT_HANDOFF_LIMITS.maxSelectorLines}`,
+        );
+      }
     }
   }
   if (!HASH_REF_ALIAS_PATTERN.test(ref || "")) fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid evidence ref: ${String(ref || "")}`);
@@ -136,7 +146,7 @@ function normalizedLines(payload) {
   return lines;
 }
 
-function provenanceKind(entry) {
+function directProvenance(entry) {
   const objectType = String(entry?.object_type || "").trim().toLowerCase();
   const source = String(entry?.source || "").trim().toLowerCase();
   if (
@@ -159,6 +169,77 @@ function provenanceKind(entry) {
     return "Tool Result";
   }
   return "Materialized Text";
+}
+
+function exactDerivedSlice(sourceText, slice) {
+  const value = String(sourceText ?? "");
+  const lineMatch = /^lines:(\d+)-(\d+)$/.exec(String(slice || ""));
+  if (lineMatch) {
+    const start = Number(lineMatch[1]);
+    const end = Number(lineMatch[2]);
+    // Match atlas.create_ref's server-side line slicer byte-for-byte. This is
+    // deliberately separate from terminal excerpt normalization below.
+    const lines = value.replace(/\r\n/g, "\n").split("\n");
+    if (start < 1 || end < start || end > lines.length) return null;
+    return lines.slice(start - 1, end).join("\n");
+  }
+  const charMatch = /^chars:(\d+)-(\d+)$/.exec(String(slice || ""));
+  if (charMatch) {
+    const start = Number(charMatch[1]);
+    const end = Number(charMatch[2]);
+    if (start < 0 || end < start || end > value.length) return null;
+    return value.slice(start, end);
+  }
+  return null;
+}
+
+function evidenceProvenance(entry, context, seen = new Set()) {
+  const kind = directProvenance(entry);
+  const source = String(entry?.source || "").trim().toLowerCase();
+  if (source !== "agent:create_ref") {
+    return {
+      kind,
+      source: entry?.source || null,
+      object_type: entry?.object_type || "text",
+    };
+  }
+
+  const sourceRef = normalizeHashRefAlias(entry?.descriptor?.source_ref ?? entry?.metadata?.source_ref);
+  const slice = entry?.descriptor?.slice ?? entry?.metadata?.slice;
+  if (!sourceRef || !slice || seen.has(sourceRef)) {
+    return {
+      kind: "Agent Prose",
+      source: entry?.source || null,
+      object_type: entry?.object_type || "text",
+    };
+  }
+  const fetched = fetchHashRefForContext(context, sourceRef);
+  const sourceEntry = fetched?.found ? fetched.entry : null;
+  if (!sourceEntry || sourceEntry.entry_kind !== "materialized" || sourceEntry.payload_text == null) {
+    return {
+      kind: "Agent Prose",
+      source: entry?.source || null,
+      object_type: entry?.object_type || "text",
+    };
+  }
+  const derived = exactDerivedSlice(sourceEntry.payload_text, slice);
+  if (derived == null || derived !== String(entry?.payload_text ?? "")) {
+    return {
+      kind: "Agent Prose",
+      source: entry?.source || null,
+      object_type: entry?.object_type || "text",
+    };
+  }
+  const nextSeen = new Set(seen);
+  nextSeen.add(sourceRef);
+  const origin = evidenceProvenance(sourceEntry, context, nextSeen);
+  return {
+    kind: origin.kind,
+    source: origin.source,
+    object_type: entry?.object_type || sourceEntry.object_type || "text",
+    derived_from: sourceRef,
+    derivation: "server_slice",
+  };
 }
 
 export function materializeAgentHandoffEvidenceSelector(selectorValue, context) {
@@ -188,6 +269,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
   if (excerpt.length > AGENT_HANDOFF_LIMITS.maxSelectorChars) {
     fail("AGENT_HANDOFF_EVIDENCE_TOO_LARGE", `Evidence ${selector.ref}:${start}-${end} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorChars} characters`);
   }
+  const provenance = evidenceProvenance(entry, context);
   return {
     selector: `${selector.ref}:L${start}-L${end}`,
     ref: selector.ref,
@@ -195,20 +277,20 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
     excerpt,
     excerpt_sha256: crypto.createHash("sha256").update(excerpt).digest("hex"),
     source_content_sha256: entry.content_hash,
-    provenance: {
-      kind: provenanceKind(entry),
-      source: entry.source || null,
-      object_type: entry.object_type || "text",
-    },
+    provenance,
   };
 }
 
-function normalizeScope(value, label) {
+function normalizeScope(value, label, profile) {
   const source = exactKeys(
     value || {},
-    ["task_mode", "files_to_modify", "files_to_create", "files_to_delete", "create_roots"],
+    ["task_mode", "files_to_modify", "files_to_create", "files_to_delete", "create_roots", "key_files", "related_files"],
     label,
   );
+  if (!["researcher.pipeline.v1", "researcher.report.v1"].includes(profile)
+    && (source.key_files != null || source.related_files != null)) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} does not allow researcher seed fields for ${profile}`);
+  }
   const out = {};
   if (source.task_mode != null) {
     const taskMode = boundedString(source.task_mode, `${label}.task_mode`, 40).toLowerCase();
@@ -217,20 +299,31 @@ function normalizeScope(value, label) {
     }
     out.task_mode = taskMode;
   }
-  for (const key of ["files_to_modify", "files_to_create", "files_to_delete", "create_roots"]) {
+  for (const key of ["files_to_modify", "files_to_create", "files_to_delete", "create_roots", "key_files", "related_files"]) {
     if (source[key] != null) out[key] = stringArray(source[key], `${label}.${key}`, 100, 500);
   }
   return out;
 }
 
+function normalizeClaimInput(value, claimIndex) {
+  if (Array.isArray(value)) return value;
+  const source = exactKeys(value, ["claim", "proof", "support", "decoy", "prose"], `claims[${claimIndex}]`);
+  const detail = {};
+  for (const lane of ["proof", "support", "decoy", "prose"]) {
+    if (source[lane] != null) detail[lane] = source[lane];
+  }
+  return Object.keys(detail).length > 0 ? [source.claim, detail] : [source.claim];
+}
+
 function materializeClaim(value, claimIndex, context, counters) {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 2) {
+  const normalized = normalizeClaimInput(value, claimIndex);
+  if (!Array.isArray(normalized) || normalized.length < 1 || normalized.length > 2) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", `claims[${claimIndex}] must be [claim, optional evidence]`);
   }
-  const claim = boundedString(value[0], `claims[${claimIndex}][0]`, 1000);
+  const claim = boundedString(normalized[0], `claims[${claimIndex}][0]`, 1000);
   counters.narrative += claim.length;
-  if (value.length === 1) return [claim];
-  const detail = exactKeys(value[1], ["proof", "support", "decoy", "prose"], `claims[${claimIndex}][1]`);
+  if (normalized.length === 1) return [claim];
+  const detail = exactKeys(normalized[1], ["proof", "support", "decoy", "prose"], `claims[${claimIndex}][1]`);
   const out = {};
   let selectorCount = 0;
   for (const lane of ["proof", "support"]) {
@@ -252,10 +345,16 @@ function materializeClaim(value, claimIndex, context, counters) {
   if (detail.decoy != null) {
     if (!Array.isArray(detail.decoy)) fail("AGENT_HANDOFF_SCHEMA_INVALID", "decoy must be an array");
     out.decoy = detail.decoy.map((entry, index) => {
-      if (!Array.isArray(entry) || entry.length !== 2) fail("AGENT_HANDOFF_SCHEMA_INVALID", `decoy[${index}] must be [selector, reason]`);
+      const normalizedEntry = Array.isArray(entry)
+        ? entry
+        : (() => {
+            const object = exactKeys(entry, ["selector", "reason"], `decoy[${index}]`);
+            return [object.selector, object.reason];
+          })();
+      if (normalizedEntry.length !== 2) fail("AGENT_HANDOFF_SCHEMA_INVALID", `decoy[${index}] must be [selector, reason]`);
       selectorCount += 1;
-      const evidence = materializeAgentHandoffEvidenceSelector(entry[0], context);
-      const reason = boundedString(entry[1], `decoy[${index}][1]`, 500);
+      const evidence = materializeAgentHandoffEvidenceSelector(normalizedEntry[0], context);
+      const reason = boundedString(normalizedEntry[1], `decoy[${index}][1]`, 500);
       counters.evidence += evidence.excerpt.length;
       counters.narrative += reason.length;
       return [evidence, reason];
@@ -662,6 +761,192 @@ function materializeTerminalCompletion(args, role) {
   };
 }
 
+function collectAgentHandoffValidationIssues(args, { context = {}, role = "", maxHandoffs = null } = {}) {
+  const issues = [];
+  const seen = new Set();
+  const capture = (fn) => {
+    try {
+      return fn();
+    } catch (error) {
+      const code = String(error?.code || "AGENT_HANDOFF_SCHEMA_INVALID");
+      const message = String(error?.message || "Invalid agent_handoff arguments");
+      const key = `${code}\0${message}`;
+      if (!seen.has(key) && issues.length < 24) {
+        seen.add(key);
+        issues.push({ code, message });
+      }
+      return null;
+    }
+  };
+
+  const serialized = JSON.stringify(args ?? null);
+  if (Buffer.byteLength(serialized, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
+    issues.push({
+      code: "AGENT_HANDOFF_TOO_LARGE",
+      message: `agent_handoff exceeds ${AGENT_HANDOFF_LIMITS.maxCallBytes} bytes`,
+    });
+  }
+  const source = capture(() => exactKeys(args, ["protocol", "profile", "outcome", "confidence", "handoffs"], "agent_handoff"));
+  if (!source) return issues;
+
+  if (source.protocol !== AGENT_HANDOFF_PROTOCOL) {
+    issues.push({ code: "AGENT_HANDOFF_PROTOCOL_INVALID", message: `protocol must be ${AGENT_HANDOFF_PROTOCOL}` });
+  }
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  const profile = capture(() => boundedString(source.profile, "profile", 80));
+  const policy = profile ? PROFILE_POLICY[profile] : null;
+  if (profile && !policy) {
+    issues.push({ code: "AGENT_HANDOFF_PROFILE_INVALID", message: `Unsupported profile: ${profile}` });
+  } else if (policy && !policy.roles.includes(normalizedRole)) {
+    issues.push({
+      code: "AGENT_HANDOFF_PROFILE_INVALID",
+      message: `Role ${normalizedRole || "unknown"} cannot use ${profile}`,
+    });
+  }
+  const outcome = capture(() => boundedString(source.outcome, "outcome", 40));
+  if (policy && outcome && !policy.outcomes.includes(outcome)) {
+    issues.push({
+      code: "AGENT_HANDOFF_OUTCOME_INVALID",
+      message: `${profile} does not allow outcome ${outcome}`,
+    });
+  }
+  if (profile === "assessor.verdict.v1") {
+    if (source.confidence == null) {
+      issues.push({
+        code: "AGENT_HANDOFF_SCHEMA_INVALID",
+        message: "assessor confidence is required and must be low, medium, or high",
+      });
+    } else if (!["low", "medium", "high"].includes(String(source.confidence))) {
+      issues.push({
+        code: "AGENT_HANDOFF_SCHEMA_INVALID",
+        message: "assessor confidence must be low, medium, or high",
+      });
+    }
+  } else if (source.confidence != null) {
+    issues.push({
+      code: "AGENT_HANDOFF_SCHEMA_INVALID",
+      message: `confidence is not valid for ${profile || "this profile"}`,
+    });
+  }
+
+  if (!Array.isArray(source.handoffs) || source.handoffs.length < 1) {
+    issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: "handoffs must contain at least one entry" });
+    return issues;
+  }
+  const policyLimit = policy?.maxHandoffs || 50;
+  const localLimit = Number.isInteger(maxHandoffs) && maxHandoffs > 0 ? maxHandoffs : policyLimit;
+  const effectiveLimit = Math.min(policyLimit, localLimit);
+  if (source.handoffs.length > effectiveLimit) {
+    issues.push({ code: "AGENT_HANDOFF_TOO_LARGE", message: `handoffs exceeds ${effectiveLimit} entries` });
+  }
+
+  for (const [handoffIndex, raw] of source.handoffs.slice(0, effectiveLimit).entries()) {
+    const label = `handoffs[${handoffIndex}]`;
+    const entry = capture(() => exactKeys(raw, ["id", "depends_on", "target", "intent", "report"], label));
+    if (!entry) continue;
+    capture(() => boundedString(entry.id, `${label}.id`, 40));
+    capture(() => stringArray(entry.depends_on, `${label}.depends_on`, effectiveLimit, 40));
+    capture(() => boundedString(entry.intent, `${label}.intent`, 1000));
+    if (policy && profile) capture(() => validateTarget(entry.target, policy, profile, `${label}.target`));
+
+    const report = capture(() => exactKeys(
+      entry.report,
+      ["summary", "claims", "scope", "constraints", "success_criteria", "questions", "payload"],
+      `${label}.report`,
+    ));
+    if (!report) continue;
+    capture(() => boundedString(report.summary, `${label}.report.summary`, 2000, { required: false }));
+    capture(() => normalizeScope(report.scope || {}, `${label}.report.scope`, profile));
+    for (const key of ["constraints", "success_criteria", "questions"]) {
+      if (report[key] != null) capture(() => stringArray(report[key], `${label}.report.${key}`));
+    }
+    if (report.payload != null) capture(() => exactKeys(report.payload, [], `${label}.report.payload`));
+
+    if (!Array.isArray(report.claims)) {
+      issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: `${label}.report.claims must be an array` });
+      continue;
+    }
+    if (report.claims.length > AGENT_HANDOFF_LIMITS.maxClaims) {
+      issues.push({
+        code: "AGENT_HANDOFF_TOO_LARGE",
+        message: `${label}.report.claims exceeds ${AGENT_HANDOFF_LIMITS.maxClaims} claims`,
+      });
+    }
+    for (const [claimIndex, rawClaim] of report.claims.slice(0, AGENT_HANDOFF_LIMITS.maxClaims).entries()) {
+      const claimLabel = `${label}.report.claims[${claimIndex}]`;
+      const claim = capture(() => normalizeClaimInput(rawClaim, claimIndex));
+      if (!claim || claim.length < 1 || claim.length > 2) {
+        if (claim) {
+          issues.push({
+            code: "AGENT_HANDOFF_SCHEMA_INVALID",
+            message: `${claimLabel} must be a named claim object or [claim, optional evidence]`,
+          });
+        }
+        continue;
+      }
+      capture(() => boundedString(claim[0], `${claimLabel}.claim`, 1000));
+      if (claim.length === 1) continue;
+      const detail = capture(() => exactKeys(claim[1], ["proof", "support", "decoy", "prose"], `${claimLabel}.evidence`));
+      if (!detail) continue;
+      if (detail.prose != null) capture(() => boundedString(detail.prose, `${claimLabel}.prose`, 2000, { required: false }));
+      let selectorCount = 0;
+      for (const lane of ["proof", "support"]) {
+        if (detail[lane] == null) continue;
+        if (!Array.isArray(detail[lane])) {
+          issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: `${claimLabel}.${lane} must be an array` });
+          continue;
+        }
+        for (const selector of detail[lane]) {
+          selectorCount += 1;
+          const evidence = capture(() => materializeAgentHandoffEvidenceSelector(selector, context));
+          if (lane === "proof" && evidence && !["Tool Result", "Full Tool Call"].includes(evidence.provenance.kind)) {
+            issues.push({
+              code: "AGENT_HANDOFF_PROOF_PROVENANCE_INVALID",
+              message: `${claimLabel}.proof requires storage-owned tool evidence; ${evidence.ref} is ${evidence.provenance.kind}`,
+            });
+          }
+        }
+      }
+      if (detail.decoy != null) {
+        if (!Array.isArray(detail.decoy)) {
+          issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: `${claimLabel}.decoy must be an array` });
+        } else {
+          for (const [decoyIndex, rawDecoy] of detail.decoy.entries()) {
+            const decoy = Array.isArray(rawDecoy)
+              ? rawDecoy
+              : capture(() => {
+                  const object = exactKeys(rawDecoy, ["selector", "reason"], `${claimLabel}.decoy[${decoyIndex}]`);
+                  return [object.selector, object.reason];
+                });
+            if (!decoy || decoy.length !== 2) continue;
+            selectorCount += 1;
+            capture(() => materializeAgentHandoffEvidenceSelector(decoy[0], context));
+            capture(() => boundedString(decoy[1], `${claimLabel}.decoy[${decoyIndex}].reason`, 500));
+          }
+        }
+      }
+      if (selectorCount > AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim) {
+        issues.push({
+          code: "AGENT_HANDOFF_TOO_LARGE",
+          message: `${claimLabel} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim} selectors`,
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+function failCollectedAgentHandoffIssues(issues) {
+  if (!Array.isArray(issues) || issues.length === 0) return;
+  if (issues.length === 1) fail(issues[0].code, issues[0].message);
+  const error = new Error(
+    `agent_handoff rejected with ${issues.length} issues: ${issues.map((issue, index) => `${index + 1}. ${issue.message}`).join(" | ")}`,
+  );
+  error.code = "AGENT_HANDOFF_VALIDATION_FAILED";
+  error.issues = issues;
+  throw error;
+}
+
 export function materializeAgentHandoff(args, { context = {}, role = "", maxHandoffs = null } = {}) {
   const serialized = JSON.stringify(args ?? null);
   if (Buffer.byteLength(serialized, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
@@ -671,6 +956,11 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
   if (looksLikeTerminalCompletion(args || {})) {
     return materializeTerminalCompletion(args || {}, normalizedRole);
   }
+  failCollectedAgentHandoffIssues(collectAgentHandoffValidationIssues(args, {
+    context,
+    role: normalizedRole,
+    maxHandoffs,
+  }));
   const source = exactKeys(args, ["protocol", "profile", "outcome", "confidence", "handoffs"], "agent_handoff");
   if (source.protocol !== AGENT_HANDOFF_PROTOCOL) fail("AGENT_HANDOFF_PROTOCOL_INVALID", `protocol must be ${AGENT_HANDOFF_PROTOCOL}`);
   const profile = boundedString(source.profile, "profile", 80);
@@ -681,9 +971,10 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
   if (!policy.outcomes.includes(outcome)) fail("AGENT_HANDOFF_OUTCOME_INVALID", `${profile} does not allow outcome ${outcome}`);
   let confidence = null;
   if (profile === "assessor.verdict.v1") {
-    confidence = source.confidence == null
-      ? "medium"
-      : boundedString(source.confidence, "confidence", 20);
+    if (source.confidence == null) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", "assessor confidence is required and must be low, medium, or high");
+    }
+    confidence = boundedString(source.confidence, "confidence", 20);
     if (!["low", "medium", "high"].includes(confidence)) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", "assessor confidence must be low, medium, or high");
     }
@@ -733,7 +1024,7 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
       report: {
         summary,
         claims,
-        scope: normalizeScope(report.scope || {}, `handoffs[${index}].report.scope`),
+        scope: normalizeScope(report.scope || {}, `handoffs[${index}].report.scope`, profile),
         constraints,
         success_criteria: successCriteria,
         questions,
@@ -1058,13 +1349,15 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
   if (packet.profile === "researcher.pipeline.v1") {
     const refs = evidenceRefs(first.report);
     const files = [...new Set([
+      ...(first.report.scope.key_files || []),
       ...(first.report.scope.files_to_modify || []),
       ...(first.report.scope.files_to_create || []),
     ])];
+    const relatedFiles = [...new Set(first.report.scope.related_files || [])];
     return `${report}\n\n\`\`\`json\n${JSON.stringify({
       synthesis: first.report.summary,
       key_files: files,
-      related_files: [],
+      related_files: relatedFiles,
       planner_file_priorities: files.map((path, index) => ({ path, rank: index + 1, reason: "agent_handoff evidence" })),
       proof: refs.proof,
       support: refs.support,
