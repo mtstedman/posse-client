@@ -172,6 +172,111 @@ const TERMINAL_COMPLETION_PARAMETERS = {
   additionalProperties: false,
 };
 
+const AGENT_HANDOFF_ATLAS_SYMBOL_ID = {
+  type: "string",
+  pattern: "^[0-9a-f]{64}:[0-9]+$",
+  description: "Opaque ATLAS symbol ID copied verbatim from an ATLAS result.",
+};
+
+const AGENT_HANDOFF_RESEARCH_DATA = {
+  type: "object",
+  description: "Structured researcher metadata that the compatibility pipeline preserves for downstream planning and memory persistence.",
+  properties: {
+    key_symbols: { type: "array", maxItems: 12, items: AGENT_HANDOFF_ATLAS_SYMBOL_ID },
+    memories: {
+      type: "array",
+      maxItems: 2,
+      items: {
+        type: "object",
+        properties: {
+          title: { type: "string", minLength: 1, maxLength: 120 },
+          content: { type: "string", minLength: 1, maxLength: 1200 },
+          key_files: { type: "array", maxItems: 12, items: { type: "string", minLength: 1, maxLength: 500 } },
+          key_symbols: { type: "array", maxItems: 12, items: AGENT_HANDOFF_ATLAS_SYMBOL_ID },
+        },
+        required: ["title", "content"],
+        additionalProperties: false,
+      },
+    },
+    planner_file_priorities: {
+      type: "array",
+      maxItems: 100,
+      items: {
+        type: "object",
+        properties: {
+          path: { type: "string", minLength: 1, maxLength: 500 },
+          rank: { type: "integer", minimum: 1, maximum: 100 },
+          usefulness: { type: "string", enum: ["primary", "supporting", "context", "low"] },
+          evidence: { type: "string", enum: ["audited_file_read", "atlas", "search", "prior_research", "web"] },
+          reason: { type: "string", minLength: 1, maxLength: 240 },
+        },
+        required: ["path", "rank", "usefulness", "evidence", "reason"],
+        additionalProperties: false,
+      },
+    },
+    patterns: {
+      type: "array",
+      maxItems: 50,
+      description: "Terminal array form of the fallback pattern-name to description object.",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 80 },
+          description: { type: "string", minLength: 1, maxLength: 500 },
+        },
+        required: ["name", "description"],
+        additionalProperties: false,
+      },
+    },
+    scope_estimate: {
+      type: "object",
+      properties: {
+        confidence: { type: "string", enum: ["high", "medium", "low"] },
+        likely_touch_count: { type: "integer", minimum: 0, maximum: 1000 },
+        unknowns: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 1000 } },
+        scope_reasons: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 1000 } },
+      },
+      required: ["confidence", "likely_touch_count", "unknowns", "scope_reasons"],
+      additionalProperties: false,
+    },
+    question_details: {
+      type: "array",
+      maxItems: 50,
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string", minLength: 1, maxLength: 40 },
+          category: { type: "string", enum: ["data-handling", "security", "convention", "config", "unclear-pattern"] },
+          question: { type: "string", minLength: 1, maxLength: 1000 },
+          context: { type: "string", minLength: 1, maxLength: 1000 },
+          impact: { type: "string", minLength: 1, maxLength: 1000 },
+        },
+        required: ["id", "category", "question", "context", "impact"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["key_symbols", "memories", "planner_file_priorities", "patterns"],
+  additionalProperties: false,
+};
+
+const AGENT_HANDOFF_PLANNER_REPORT_FIELDS = {
+  dev_mode: {
+    type: "string",
+    enum: ["feature_impl", "bug_fix", "defensive_change", "refactor", "cleanup", "hotfix"],
+  },
+  risk: { type: "integer", minimum: 1, maximum: 5 },
+  risk_tags: { type: "array", maxItems: 20, items: { type: "string", minLength: 1, maxLength: 80 } },
+  scope_confidence: { type: "string", enum: ["high", "medium", "low"] },
+  skills: { type: "array", maxItems: 20, items: { type: "string", minLength: 1, maxLength: 100 } },
+  deepthink_budget: { type: "string", enum: ["low", "normal", "high", "xhigh"] },
+  model_tier: { type: "string", enum: ["cheap", "standard", "strong"] },
+  reasoning_effort: { type: "string", enum: ["low", "medium", "high"] },
+  priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
+  skip_assessment: { type: "boolean" },
+  test_command: { type: "string", minLength: 1, maxLength: 1000 },
+};
+
 export const TOOL_AGENT_HANDOFF = {
   type: "function",
   name: "agent_handoff",
@@ -203,7 +308,7 @@ export const TOOL_AGENT_HANDOFF = {
         enum: ["success", "complete", "partial", "gap", "input_required", "failed", "blocked", "pass", "fail", "needs_replan", "needs_review"],
         description:
           "Profile-specific outcome: researcher.pipeline.v1=success|gap|input_required; researcher.report.v1=complete; " +
-          "planner.plan.v1=success; dev.result.v1 and artificer.result.v1=complete|failed|blocked; " +
+          "planner.plan.v1=success|complete; dev.result.v1 and artificer.result.v1=complete|failed|blocked; " +
           "assessor.verdict.v1=pass|fail|needs_replan|needs_review|blocked; citation_synthesis.v1=complete|partial|failed.",
       },
       confidence: {
@@ -225,11 +330,11 @@ export const TOOL_AGENT_HANDOFF = {
               type: "object",
               description:
                 "Profile target: researcher.pipeline.v1, dev.result.v1, artificer.result.v1, and assessor.verdict.v1 use pipeline/$pipeline; " +
-                "researcher.report.v1 uses result/$result; planner.plan.v1 uses agent/dev|artificer or system/human_input|promote; " +
+                "researcher.report.v1 uses result/$result; planner.plan.v1 uses agent/dev|artificer or system/human_input|promote|no_tasks; " +
                 "citation_synthesis.v1 uses parent/$parent. For system/promote, put each exact repository destination file in report.scope.files_to_create or files_to_modify; Posse derives deterministic mappings.",
               properties: {
                 kind: { type: "string", enum: ["agent", "system", "pipeline", "result", "parent"] },
-                role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "$pipeline", "$result", "$parent"] },
+                role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "no_tasks", "$pipeline", "$result", "$parent"] },
               },
               required: ["kind"],
               additionalProperties: false,
@@ -238,7 +343,7 @@ export const TOOL_AGENT_HANDOFF = {
             report: {
               type: "object",
               description:
-                "Allowed fields are summary, claims, scope, constraints, success_criteria, questions, and payload. " +
+                "Allowed fields are summary, claims, scope, constraints, success_criteria, questions, research, planner execution metadata, and payload. " +
                 "Omit payload or pass {}; put repository paths in scope and explanation in summary or claims.",
               properties: {
                 summary: { type: "string", maxLength: 2000 },
@@ -285,12 +390,17 @@ export const TOOL_AGENT_HANDOFF = {
                     files_to_create: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
                     files_to_delete: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
                     create_roots: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+                    output_root: { type: "string", maxLength: 500 },
+                    key_files: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+                    related_files: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
                   },
                   additionalProperties: false,
                 },
                 constraints: { type: "array", maxItems: 50, items: { type: "string", maxLength: 1000 } },
                 success_criteria: { type: "array", maxItems: 50, items: { type: "string", maxLength: 1000 } },
                 questions: { type: "array", maxItems: 50, items: { type: "string", maxLength: 1000 } },
+                research: AGENT_HANDOFF_RESEARCH_DATA,
+                ...AGENT_HANDOFF_PLANNER_REPORT_FIELDS,
                 payload: {
                   type: "object",
                   description: "Reserved. Omit this field or pass an empty object.",
@@ -445,6 +555,7 @@ const PLANNER_SCOPE = {
     files_to_create: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
     files_to_delete: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
     create_roots: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+    output_root: { type: "string", maxLength: 500 },
   },
   additionalProperties: false,
 };
@@ -524,12 +635,14 @@ const RESEARCHER_REPORT = exactReport({
   scope: RESEARCHER_SCOPE,
   constraints: HANDOFF_STRING_LIST,
   questions: HANDOFF_STRING_LIST,
+  research: AGENT_HANDOFF_RESEARCH_DATA,
 });
 
 const PLANNER_AGENT_REPORT = exactReport({
   scope: PLANNER_SCOPE,
   constraints: HANDOFF_STRING_LIST,
   success_criteria: { ...HANDOFF_STRING_LIST, minItems: 1 },
+  ...AGENT_HANDOFF_PLANNER_REPORT_FIELDS,
 }, ["summary", "claims", "scope", "success_criteria"]);
 
 const PLANNER_HANDOFF = exactHandoff({
@@ -538,6 +651,7 @@ const PLANNER_HANDOFF = exactHandoff({
     exactTarget("agent", "artificer"),
     exactTarget("system", "human_input"),
     exactTarget("system", "promote"),
+    exactTarget("system", "no_tasks"),
   ],
 }, PLANNER_AGENT_REPORT);
 
@@ -555,9 +669,9 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
 
 export const TOOL_AGENT_HANDOFF_PLANNER = semanticRoleTool({
   description:
-    "Finish planning with exact executable or system handoffs. Use named claim objects, exact scope, and checkable success criteria; do not submit confidence or payload. The receipt ends provider generation.",
+    "Finish planning with exact executable or system handoffs. Use outcome complete with one system/no_tasks handoff only when no executable work is required. Preserve planner execution metadata; do not submit confidence or payload. The receipt ends provider generation.",
   profile: "planner.plan.v1",
-  outcomes: ["success"],
+  outcomes: ["success", "complete"],
   handoff: PLANNER_HANDOFF,
   maxHandoffs: 50,
 });

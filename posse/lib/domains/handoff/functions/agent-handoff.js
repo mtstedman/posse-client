@@ -16,6 +16,12 @@ import {
   detectSensitiveAgentHandoffText,
   findCopiedAgentHandoffEvidence,
 } from "./agent-handoff-boundaries.js";
+import {
+  normalizePlannerReportMetadata,
+  normalizeResearchData,
+  PLANNER_REPORT_METADATA_KEYS,
+  structuredStringLength,
+} from "./helpers/terminal-report-metadata.js";
 
 export const AGENT_HANDOFF_PROTOCOL = "posse.agent_handoff.v1";
 export const AGENT_HANDOFF_LIMITS = Object.freeze({
@@ -29,6 +35,7 @@ export const AGENT_HANDOFF_LIMITS = Object.freeze({
   maxCitationChildEvidenceChars: 4000,
   maxNarrativeChars: 4000,
   maxCitationChildNarrativeChars: 2000,
+  maxStructuredMetadataChars: 12000,
 });
 
 const PLANNER_TASK_MODES = new Set([
@@ -40,10 +47,22 @@ const PLANNER_TASK_MODES = new Set([
   "db",
 ]);
 
+const PLANNER_REPORT_KEYS = Object.freeze([
+  "summary",
+  "claims",
+  "scope",
+  "constraints",
+  "success_criteria",
+  "questions",
+  "research",
+  ...PLANNER_REPORT_METADATA_KEYS,
+  "payload",
+]);
+
 const PROFILE_POLICY = Object.freeze({
   "researcher.pipeline.v1": Object.freeze({ roles: ["researcher"], outcomes: ["success", "gap", "input_required"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
   "researcher.report.v1": Object.freeze({ roles: ["researcher"], outcomes: ["complete"], targetKinds: ["result"], maxHandoffs: 1 }),
-  "planner.plan.v1": Object.freeze({ roles: ["planner"], outcomes: ["success"], targetKinds: ["agent", "system"], maxHandoffs: 50 }),
+  "planner.plan.v1": Object.freeze({ roles: ["planner"], outcomes: ["success", "complete"], targetKinds: ["agent", "system"], maxHandoffs: 50 }),
   "dev.result.v1": Object.freeze({ roles: ["dev", "fix"], outcomes: ["complete", "failed", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
   "artificer.result.v1": Object.freeze({ roles: ["artificer"], outcomes: ["complete", "failed", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
   "assessor.verdict.v1": Object.freeze({ roles: ["assessor"], outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
@@ -284,12 +303,15 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
 function normalizeScope(value, label, profile) {
   const source = exactKeys(
     value || {},
-    ["task_mode", "files_to_modify", "files_to_create", "files_to_delete", "create_roots", "key_files", "related_files"],
+    ["task_mode", "files_to_modify", "files_to_create", "files_to_delete", "create_roots", "output_root", "key_files", "related_files"],
     label,
   );
   if (!["researcher.pipeline.v1", "researcher.report.v1"].includes(profile)
     && (source.key_files != null || source.related_files != null)) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} does not allow researcher seed fields for ${profile}`);
+  }
+  if (profile !== "planner.plan.v1" && source.output_root != null) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} does not allow output_root for ${profile}`);
   }
   const out = {};
   if (source.task_mode != null) {
@@ -302,6 +324,7 @@ function normalizeScope(value, label, profile) {
   for (const key of ["files_to_modify", "files_to_create", "files_to_delete", "create_roots", "key_files", "related_files"]) {
     if (source[key] != null) out[key] = stringArray(source[key], `${label}.${key}`, 100, 500);
   }
+  if (source.output_root != null) out.output_root = boundedString(source.output_root, `${label}.output_root`, 500);
   return out;
 }
 
@@ -387,7 +410,7 @@ function validateTarget(target, policy, profile, label) {
   if (!policy.targetKinds.includes(kind)) fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} does not allow target kind ${kind}`);
   const role = out.role == null ? null : boundedString(out.role, `${label}.role`, 40);
   if (profile === "planner.plan.v1") {
-    const allowed = kind === "agent" ? ["dev", "artificer"] : ["human_input", "promote"];
+    const allowed = kind === "agent" ? ["dev", "artificer"] : ["human_input", "promote", "no_tasks"];
     if (!allowed.includes(role)) fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} target ${kind} requires one of: ${allowed.join(", ")}`);
   } else if (kind === "pipeline" && role != null && role !== "$pipeline") {
     fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} pipeline target role must be $pipeline when present`);
@@ -424,8 +447,46 @@ function validateDependencyGraph(handoffs) {
 }
 
 function validatePlannerPacketSemantics(packet) {
-  if (packet.profile !== "planner.plan.v1" || packet.outcome !== "success") return;
+  if (packet.profile !== "planner.plan.v1") return;
+  if (packet.outcome === "complete") {
+    const [handoff] = packet.handoffs;
+    if (packet.handoffs.length !== 1
+      || handoff?.target?.kind !== "system"
+      || handoff?.target?.role !== "no_tasks") {
+      fail(
+        "AGENT_HANDOFF_SEMANTIC_INVALID",
+        "planner complete requires exactly one system/no_tasks handoff",
+      );
+    }
+    if ((handoff.depends_on || []).length > 0) {
+      fail("AGENT_HANDOFF_SEMANTIC_INVALID", "planner complete system/no_tasks cannot depend on another handoff");
+    }
+    if (!String(handoff.report?.summary || "").trim()) {
+      fail("AGENT_HANDOFF_SEMANTIC_INVALID", "planner complete system/no_tasks requires a summary reason");
+    }
+    if (Object.keys(handoff.report?.scope || {}).length > 0) {
+      fail("AGENT_HANDOFF_SEMANTIC_INVALID", "planner complete system/no_tasks requires empty scope");
+    }
+    if ((handoff.report?.success_criteria || []).length === 0) {
+      fail("AGENT_HANDOFF_SEMANTIC_INVALID", "planner complete system/no_tasks requires a completion criterion");
+    }
+    if ((handoff.report?.questions || []).length > 0) {
+      fail("AGENT_HANDOFF_SEMANTIC_INVALID", "planner complete system/no_tasks cannot contain unresolved questions");
+    }
+    const metadataKey = PLANNER_REPORT_METADATA_KEYS.find((key) => handoff.report?.[key] != null);
+    if (metadataKey) {
+      fail("AGENT_HANDOFF_SEMANTIC_INVALID", `planner complete system/no_tasks cannot contain ${metadataKey}`);
+    }
+    return;
+  }
+  if (packet.outcome !== "success") return;
   for (const [index, handoff] of packet.handoffs.entries()) {
+    if (handoff.target?.kind === "system" && handoff.target?.role === "no_tasks") {
+      fail(
+        "AGENT_HANDOFF_SEMANTIC_INVALID",
+        `planner success handoffs[${index}] cannot target system/no_tasks; use outcome complete`,
+      );
+    }
     if ((handoff.report?.questions || []).length > 0) {
       fail(
         "AGENT_HANDOFF_SEMANTIC_INVALID",
@@ -517,6 +578,23 @@ function narrativeFragmentsForHandoff(handoff, handoffIndex) {
     for (const [index, text] of (Array.isArray(values) ? values : [values]).entries()) {
       fragments.push({ label: `handoffs[${handoffIndex}].report.scope.${key}[${index}]`, text });
     }
+  }
+  const appendStructuredFragments = (value, label) => {
+    if (typeof value === "string") {
+      fragments.push({ label, text: value });
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => appendStructuredFragments(entry, `${label}[${index}]`));
+      return;
+    }
+    if (plainObject(value)) {
+      for (const [key, entry] of Object.entries(value)) appendStructuredFragments(entry, `${label}.${key}`);
+    }
+  };
+  if (report.research) appendStructuredFragments(report.research, `handoffs[${handoffIndex}].report.research`);
+  for (const key of PLANNER_REPORT_METADATA_KEYS) {
+    if (report[key] != null) appendStructuredFragments(report[key], `handoffs[${handoffIndex}].report.${key}`);
   }
   return fragments;
 }
@@ -613,7 +691,7 @@ function plannerContractFromWorkItem(workItem) {
 }
 
 function validatePlannerPacketAgainstWorkItem(packet, workItem) {
-  if (packet.profile !== "planner.plan.v1" || packet.outcome !== "success" || !workItem) return;
+  if (packet.profile !== "planner.plan.v1" || !workItem) return;
   const contract = plannerContractFromWorkItem(workItem);
   if (!contract) return;
   const executableHandoffs = packet.handoffs.filter((handoff) => handoff.target?.kind === "agent");
@@ -851,12 +929,14 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
 
     const report = capture(() => exactKeys(
       entry.report,
-      ["summary", "claims", "scope", "constraints", "success_criteria", "questions", "payload"],
+      PLANNER_REPORT_KEYS,
       `${label}.report`,
     ));
     if (!report) continue;
     capture(() => boundedString(report.summary, `${label}.report.summary`, 2000, { required: false }));
     capture(() => normalizeScope(report.scope || {}, `${label}.report.scope`, profile));
+    if (report.research != null) capture(() => normalizeResearchData(report.research, `${label}.report.research`, profile));
+    capture(() => normalizePlannerReportMetadata(report, `${label}.report`, profile));
     for (const key of ["constraints", "success_criteria", "questions"]) {
       if (report[key] != null) capture(() => stringArray(report[key], `${label}.report.${key}`));
     }
@@ -996,7 +1076,8 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
     const dependsOn = stringArray(entry.depends_on, `handoffs[${index}].depends_on`, effectiveLimit, 40);
     const intent = boundedString(entry.intent, `handoffs[${index}].intent`, 1000);
     entryCounters.narrative += intent.length;
-    const report = exactKeys(entry.report, ["summary", "claims", "scope", "constraints", "success_criteria", "questions", "payload"], `handoffs[${index}].report`);
+    const reportLabel = `handoffs[${index}].report`;
+    const report = exactKeys(entry.report, PLANNER_REPORT_KEYS, reportLabel);
     const summary = boundedString(report.summary, `handoffs[${index}].report.summary`, 2000, { required: false });
     entryCounters.narrative += summary.length;
     if (!Array.isArray(report.claims) || report.claims.length > AGENT_HANDOFF_LIMITS.maxClaims) {
@@ -1006,7 +1087,16 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
     const constraints = report.constraints == null ? [] : stringArray(report.constraints, `handoffs[${index}].report.constraints`);
     const successCriteria = report.success_criteria == null ? [] : stringArray(report.success_criteria, `handoffs[${index}].report.success_criteria`);
     const questions = report.questions == null ? [] : stringArray(report.questions, `handoffs[${index}].report.questions`);
+    const research = normalizeResearchData(report.research, `${reportLabel}.research`, profile);
+    const plannerMetadata = normalizePlannerReportMetadata(report, reportLabel, profile);
     entryCounters.narrative += [...constraints, ...successCriteria, ...questions].reduce((sum, text) => sum + text.length, 0);
+    const structuredMetadataLength = structuredStringLength(research) + structuredStringLength(plannerMetadata);
+    if (structuredMetadataLength > AGENT_HANDOFF_LIMITS.maxStructuredMetadataChars) {
+      fail(
+        "AGENT_HANDOFF_TOO_LARGE",
+        `handoffs[${index}] exceeds the ${AGENT_HANDOFF_LIMITS.maxStructuredMetadataChars}-character structured metadata limit`,
+      );
+    }
     const narrativeLimit = normalizedRole === "subagent"
       ? AGENT_HANDOFF_LIMITS.maxCitationChildNarrativeChars
       : AGENT_HANDOFF_LIMITS.maxNarrativeChars;
@@ -1028,6 +1118,8 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
         constraints,
         success_criteria: successCriteria,
         questions,
+        ...(research == null ? {} : { research }),
+        ...plannerMetadata,
         payload: {},
       },
     };
@@ -1279,6 +1371,11 @@ function plannerCompatibilityTasks(packet) {
   return packet.handoffs.map((handoff) => {
     const reportText = renderReport(handoff.report);
     const refs = evidenceRefs(handoff.report);
+    const metadata = Object.fromEntries(
+      PLANNER_REPORT_METADATA_KEYS
+        .filter((key) => handoff.report[key] != null)
+        .map((key) => [key, handoff.report[key]]),
+    );
     const task = {
         title: handoff.intent,
         task_spec: reportText || handoff.intent,
@@ -1289,13 +1386,11 @@ function plannerCompatibilityTasks(packet) {
         files_to_create: handoff.report.scope.files_to_create || [],
         files_to_delete: handoff.report.scope.files_to_delete || [],
         create_roots: handoff.report.scope.create_roots || [],
-        dev_mode: "standard",
-        risk: "medium",
-        risk_tags: ["agent_handoff_experimental"],
-        scope_confidence: "medium",
+        ...(handoff.report.scope.output_root ? { output_root: handoff.report.scope.output_root } : {}),
+        ...metadata,
         job_type: handoff.target.role === "artificer" ? "artificer" : handoff.target.role,
         dev_brief: {
-          source: "agent_handoff",
+          source: "hash_ref_store",
           summary: handoff.report.summary,
           key_files: handoff.report.scope.files_to_modify || [],
           related_files: [],
@@ -1329,6 +1424,10 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
     return renderCompletionCompatibilityOutput(packet);
   }
   if (packet.profile === "planner.plan.v1") {
+    if (packet.outcome === "complete") {
+      const completion = packet.handoffs[0];
+      return `NO_TASKS_NEEDED: ${completion.report.summary || completion.intent}`;
+    }
     const tasks = plannerCompatibilityTasks(packet);
     return `\`\`\`json\n${JSON.stringify(tasks, null, 2)}\n\`\`\``;
   }
@@ -1348,23 +1447,37 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
   if (packet.profile === "artificer.result.v1") return `--- ARTIFICER RESULT START ---\n${report}\n--- ARTIFICER RESULT END ---`;
   if (packet.profile === "researcher.pipeline.v1") {
     const refs = evidenceRefs(first.report);
+    const research = first.report.research || {};
     const files = [...new Set([
       ...(first.report.scope.key_files || []),
       ...(first.report.scope.files_to_modify || []),
       ...(first.report.scope.files_to_create || []),
     ])];
     const relatedFiles = [...new Set(first.report.scope.related_files || [])];
+    const plannerFilePriorities = Array.isArray(research.planner_file_priorities)
+      ? research.planner_file_priorities
+      : files.map((path, index) => ({ path, rank: index + 1, reason: "agent_handoff evidence" }));
+    const patterns = Object.fromEntries(
+      (research.patterns || []).map((entry) => [entry.name, entry.description]),
+    );
+    const questions = Array.isArray(research.question_details) && research.question_details.length > 0
+      ? research.question_details
+      : first.report.questions;
     return `${report}\n\n\`\`\`json\n${JSON.stringify({
       synthesis: first.report.summary,
       key_files: files,
       related_files: relatedFiles,
-      planner_file_priorities: files.map((path, index) => ({ path, rank: index + 1, reason: "agent_handoff evidence" })),
+      key_symbols: research.key_symbols || [],
+      memories: research.memories || [],
+      planner_file_priorities: plannerFilePriorities,
       proof: refs.proof,
       support: refs.support,
       decoy: refs.decoy,
+      patterns,
       constraints: first.report.constraints,
+      ...(research.scope_estimate ? { scope_estimate: research.scope_estimate } : {}),
       questions_for_human: packet.outcome === "input_required",
-      questions: first.report.questions,
+      questions,
     }, null, 2)}\n\`\`\``;
   }
   return report;

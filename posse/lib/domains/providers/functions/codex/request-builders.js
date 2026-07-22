@@ -1,17 +1,18 @@
 // lib/domains/providers/functions/codex/request-builders.js
 
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
-import { LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/tools/functions/tool-suites.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, roleUsesDeterministicReadMcp } from "../../../integrations/functions/deterministic-mcp.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../integrations/functions/mcp-gateway.js";
 import { _toCodexConfigKey, _toTomlLiteral, appendCodexMcpEnvOverrides } from "./config-format.js";
 
 const CODEX_DEVELOPER_INSTRUCTIONS_SOFT_LIMIT = 24000;
-const CODEX_COORDINATION_MCP_SERVER_SUFFIX = "coordination";
-const CODEX_EAGER_COORDINATION_TOOL_NAMES = new Set([
-  "agent_handoff",
-  ...LIVE_CHANNEL_TOOL_NAMES,
+const CODEX_LAZY_MCP_SERVER_SUFFIX = "lazy";
+// Remote issuance has already narrowed this surface by role, task mode, and
+// operator policy. Keep that issued surface direct by default: a tool belongs
+// here only when it is intentionally safe to require tool_search before use.
+const CODEX_LAZY_TOOL_NAMES = new Set([
+  "project_db_query",
 ]);
 
 function rawToolsMcpName(toolName = "") {
@@ -40,29 +41,43 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
 function buildCodexDeterministicMcpAttachment(serverConfig) {
   const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
   const toolNames = Array.isArray(serverConfig.tools) ? serverConfig.tools : [];
-  const eagerTools = toolNames.filter((name) => CODEX_EAGER_COORDINATION_TOOL_NAMES.has(name));
-  const eagerServerKey = eagerTools.length > 0
-    ? _toCodexConfigKey(`${serverKey}_${CODEX_COORDINATION_MCP_SERVER_SUFFIX}`)
+  const atlasTools = Array.isArray(serverConfig.atlasTools) ? serverConfig.atlasTools : [];
+  const lazyTools = toolNames.filter((name) => CODEX_LAZY_TOOL_NAMES.has(name));
+  const directTools = toolNames.filter((name) => !CODEX_LAZY_TOOL_NAMES.has(name));
+  const lazyServerKey = lazyTools.length > 0
+    ? _toCodexConfigKey(`${serverKey}_${CODEX_LAZY_MCP_SERVER_SUFFIX}`)
     : null;
+  const directServerKeys = [];
   const configOverrides = [];
 
   appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverConfig, { toolNames });
-  if (eagerServerKey) {
-    const rawEagerTools = eagerTools.map(rawToolsMcpName);
-    // Codex 0.145+ defers every ordinary MCP namespace when tool_search is
-    // available. Partition the required coordination tools into a second,
-    // filtered namespace and mark that namespace direct-only. This guarantees
-    // startup visibility without eagerly loading the rest of the gateway.
+  const baseDisabledTools = lazyTools.map(rawToolsMcpName);
+  if (baseDisabledTools.length > 0) {
     configOverrides.push(
-      `mcp_servers.${serverKey}.disabled_tools=${_toTomlLiteral(rawEagerTools)}`,
+      `mcp_servers.${serverKey}.disabled_tools=${_toTomlLiteral(baseDisabledTools)}`,
     );
-    appendCodexMcpServerLaunchOverrides(configOverrides, eagerServerKey, serverConfig, {
-      toolNames: eagerTools,
+  }
+  // The base gateway carries scoped repository tools plus every role-issued
+  // ATLAS action. Those are prerequisites for the execution contract and the
+  // ATLAS-first gate, so they must never depend on model-initiated discovery.
+  if (directTools.length > 0 || atlasTools.length > 0) {
+    configOverrides.push(`mcp_servers.${serverKey}.required=true`);
+    directServerKeys.push(serverKey);
+  }
+  if (lazyServerKey) {
+    const rawLazyTools = lazyTools.map(rawToolsMcpName);
+    appendCodexMcpServerLaunchOverrides(configOverrides, lazyServerKey, serverConfig, {
+      toolNames: lazyTools,
     });
     configOverrides.push(
-      `mcp_servers.${eagerServerKey}.enabled_tools=${_toTomlLiteral(rawEagerTools)}`,
-      `mcp_servers.${eagerServerKey}.required=true`,
-      `features.code_mode.direct_only_tool_namespaces=${_toTomlLiteral([`mcp__${eagerServerKey}`])}`,
+      `mcp_servers.${lazyServerKey}.enabled_tools=${_toTomlLiteral(rawLazyTools)}`,
+    );
+  }
+  if (directServerKeys.length > 0) {
+    configOverrides.push(
+      `features.code_mode.direct_only_tool_namespaces=${_toTomlLiteral(
+        directServerKeys.map((key) => `mcp__${key}`),
+      )}`,
     );
   }
 
@@ -70,8 +85,8 @@ function buildCodexDeterministicMcpAttachment(serverConfig) {
     [toolName],
     {
       providerName: "codex",
-      serverName: CODEX_EAGER_COORDINATION_TOOL_NAMES.has(toolName) && eagerServerKey
-        ? eagerServerKey
+      serverName: CODEX_LAZY_TOOL_NAMES.has(toolName) && lazyServerKey
+        ? lazyServerKey
         : serverKey,
     },
   ));
@@ -79,13 +94,15 @@ function buildCodexDeterministicMcpAttachment(serverConfig) {
   return {
     active: true,
     tools: toolNames,
-    eagerTools,
-    atlasTools: Array.isArray(serverConfig.atlasTools) ? serverConfig.atlasTools : [],
+    directTools,
+    lazyTools,
+    atlasTools,
     contractTools,
     configOverrides,
     serverConfig,
     serverKey,
-    eagerServerKey,
+    lazyServerKey,
+    directServerKeys,
     providerHomeEnv: serverConfig.providerHomeEnv || null,
   };
 }
