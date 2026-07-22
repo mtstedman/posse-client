@@ -16,7 +16,8 @@ import { buildRuntimeEnv, normalizeProviderPaths } from "../../../runtime/functi
 import { C } from "../../../../shared/format/functions/colors.js";
 import { hasProviderVisibleAtlasMcpTools } from "../shared/atlas-mcp.js";
 import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry, logProviderMcpAttachProofTelemetry } from "../shared/mcp-telemetry.js";
-import { buildWindowsSpawn, terminateSpawnedProcess, trackSpawnedProcess } from "../shared/windows-spawn.js";
+import { buildWindowsSpawn, trackSpawnedProcess } from "../shared/windows-spawn.js";
+import { ProviderProcessTerminator } from "../../classes/ProviderProcessTerminator.js";
 import { selectExecutionModel } from "../shared/model-selection.js";
 import { resolveProviderStallTimeout } from "../shared/stall-timeout.js";
 import { getMaxOutputTokensForProvider } from "../shared/turns.js";
@@ -478,26 +479,11 @@ export async function callProvider(promptText, {
       return;
     }
 
-    const forceKillTimers = new Set();
-    const scheduleForceKill = () => {
-      const timer = setTimeout(() => {
-        forceKillTimers.delete(timer);
-        terminateSpawnedProcess(proc, { force: true });
-      }, 3000);
-      forceKillTimers.add(timer);
-      if (typeof timer.unref === "function") timer.unref();
-    };
-    const clearForceKillTimers = () => {
-      for (const timer of forceKillTimers) clearTimeout(timer);
-      forceKillTimers.clear();
-    };
+    const processTerminator = new ProviderProcessTerminator(proc);
 
     if (abortSignal) {
       const onAbort = () => {
-        terminateSpawnedProcess(proc, { force: process.platform === "win32" });
-        if (process.platform !== "win32") {
-          scheduleForceKill();
-        }
+        processTerminator.requestAbort(abortSignal.reason);
       };
       if (abortSignal.aborted) onAbort();
       else {
@@ -569,10 +555,7 @@ export async function callProvider(promptText, {
           ? `no assessor progress for ${(semanticStallMs / 1000)}s`
           : `no output for ${(stallMs / 1000)}s`;
         emit(`${C.red}!! Stalled (${stallKillReason}) -- killing process${C.reset}`);
-        terminateSpawnedProcess(proc, { force: process.platform === "win32" });
-        if (process.platform !== "win32") {
-          scheduleForceKill();
-        }
+        processTerminator.requestTermination("stall_detector");
       }
     }, 500);
 
@@ -619,7 +602,7 @@ export async function callProvider(promptText, {
 
     proc.on("error", (err) => {
       clearInterval(heartbeat);
-      clearForceKillTimers();
+      processTerminator.cancelTimer();
       clearExitCleanup();
       cleanupRunTemps({ deterministicReadMcp, exitCode: null, phase: "provider_error" });
       reject(buildSpawnError(err));
@@ -627,9 +610,9 @@ export async function callProvider(promptText, {
 
     proc.on("close", (code) => {
       clearInterval(heartbeat);
-      clearForceKillTimers();
       clearExitCleanup();
       const durationMs = Date.now() - startTime;
+      const termination = processTerminator.noteClose();
       if (stdoutLineBuffer.trim()) {
         handleStdoutLine(stdoutLineBuffer.trim());
         stdoutLineBuffer = "";
@@ -673,6 +656,7 @@ export async function callProvider(promptText, {
       });
       stats.mcpAttachProof = mcpCleanup?.attachProofResult?.proof || null;
       stats.mcpAttachMissingProof = mcpCleanup?.attachProofResult?.missingProof === true;
+      Object.assign(stats, termination);
 
       // Persist MCP-relevant CLI stderr (only when present) so a gateway
       // attach-under-load failure leaves a trace even on a clean exit.

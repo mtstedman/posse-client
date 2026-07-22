@@ -4,6 +4,7 @@
 // owns lease and attempt lifecycle; this client owns model dispatch, call
 // logging, prompt/output capture, observation wrapping, and provider fallback.
 
+import crypto from "crypto";
 import path from "path";
 import {
   completeAgentCall,
@@ -69,7 +70,7 @@ import {
 } from "../../sub-agent/classes/SubAgentRuntime.js";
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 
-function agentHandoffToolSchemaChars(role, compactCompletion = false) {
+function agentHandoffToolSchemaTelemetry(role, compactCompletion = false) {
   const normalizedRole = String(role || "").trim().toLowerCase();
   const schema = !compactCompletion
     ? TOOL_AGENT_HANDOFF
@@ -77,10 +78,15 @@ function agentHandoffToolSchemaChars(role, compactCompletion = false) {
     ? TOOL_AGENT_HANDOFF_DEV
     : normalizedRole === "artificer"
       ? TOOL_AGENT_HANDOFF_ARTIFICER
-      : ["researcher", "planner", "assessor", "citation_synthesis"].includes(normalizedRole)
+      : ["researcher", "planner", "assessor", "citation_synthesis", "subagent"].includes(normalizedRole)
         ? TOOL_AGENT_HANDOFF_REPORT
         : TOOL_AGENT_HANDOFF;
-  return JSON.stringify(schema).length;
+  const serialized = JSON.stringify(schema);
+  return {
+    name: schema.name || "agent_handoff",
+    sha256: crypto.createHash("sha256").update(serialized).digest("hex"),
+    chars: serialized.length,
+  };
 }
 
 function terminalHandoffContractChars(options = {}) {
@@ -131,6 +137,36 @@ function terminalHandoffAbortReason(event = {}) {
   error.agentCallId = event.agentCallId ?? null;
   error.digest = event.digest || null;
   return error;
+}
+
+function expectedCoordinationMode(options = {}) {
+  return String(
+    options._expectedAgentCoordinationMode
+    || process.env.TASK_AB_EXPECT_COORDINATION_MODE
+    || "",
+  ).trim().toLowerCase();
+}
+
+function assertExpectedCoordination(options, { localHandoff, remoteHandoff } = {}) {
+  const expected = expectedCoordinationMode(options);
+  if (!expected) return;
+  const localSubAgent = options?.sessionPacket?.agent_coordination?.sub_agent_v1 === true;
+  const remoteSubAgent = options?._remoteIssuedPolicy?.coordination?.subAgentV1 === true;
+  const handoffExpected = expected === "handoff" || expected === "subagents";
+  const subAgentExpected = expected === "subagents";
+  if (!["off", "handoff", "subagents"].includes(expected)
+    || localHandoff !== handoffExpected
+    || remoteHandoff !== handoffExpected
+    || localSubAgent !== subAgentExpected
+    || remoteSubAgent !== subAgentExpected) {
+    const error = new Error(
+      `Task A/B coordination preflight mismatch: expected ${expected || "<invalid>"}, `
+      + `local_handoff=${localHandoff} remote_handoff=${remoteHandoff} `
+      + `local_subagent=${localSubAgent} remote_subagent=${remoteSubAgent}`,
+    );
+    error.code = "TASK_AB_COORDINATION_PREFLIGHT_FAILED";
+    throw error;
+  }
 }
 
 async function timeProviderSetupPhase(label, meta, fn, { warnMs = SLOW_PROVIDER_SETUP_PHASE_MS } = {}) {
@@ -851,6 +887,13 @@ export class TrackedProviderClient {
       retainReplayToolUses,
       runWithObservationContext,
     } = this.deps;
+    const effectiveCapabilityOpts = narrowProviderOptionsToRemoteIssuance(opts);
+    const localHandoffCapability = effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.agent_handoff_v1 === true;
+    const remoteHandoffCapability = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffV1 === true;
+    assertExpectedCoordination(effectiveCapabilityOpts, {
+      localHandoff: localHandoffCapability,
+      remoteHandoff: remoteHandoffCapability,
+    });
     const resolvedMaxTurns = positiveIntegerOrNull(opts.maxTurns);
     const resolvedMaxOutputTokens = positiveIntegerOrNull(opts.maxOutputTokens)
       || getMaxOutputTokensForProvider(providerName, { role: opts.role });
@@ -907,10 +950,8 @@ export class TrackedProviderClient {
         max_output_tokens_configured: resolvedMaxOutputTokens,
       },
     });
-    const effectiveCapabilityOpts = narrowProviderOptionsToRemoteIssuance(opts);
-    const handoffRequired = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffV1 === true
-      && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.agent_handoff_v1 === true;
-    const handoffToolSchemaChars = agentHandoffToolSchemaChars(
+    const handoffRequired = remoteHandoffCapability && localHandoffCapability;
+    const handoffToolSchema = agentHandoffToolSchemaTelemetry(
       opts.role,
       effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
     );
@@ -918,10 +959,16 @@ export class TrackedProviderClient {
     const providerAbortSignal = combinedAbortSignal(abortSignal, terminalAbortController?.signal);
     let terminalHandoffStop = null;
     let terminalProviderError = null;
+    let terminalAbortIssuedAt = null;
+    let providerReturnedAt = null;
     const unregisterAgentHandoffTerminal = handoffRequired
       ? this.deps.agentHandoffTerminator.subscribe(agentCallId, (event) => {
           if (terminalHandoffStop) return;
-          terminalHandoffStop = event;
+          terminalHandoffStop = {
+            ...event,
+            acknowledgedAt: Number(event?.acknowledgedAt) || Date.now(),
+          };
+          terminalAbortIssuedAt = Date.now();
           terminalAbortController.abort(terminalHandoffAbortReason(event));
         })
       : null;
@@ -1150,10 +1197,12 @@ export class TrackedProviderClient {
           () => provider.call(prompt, attemptOpts),
         );
       } catch (error) {
+        providerReturnedAt = Date.now();
         if (!terminalHandoffStop || abortSignal?.aborted) throw error;
         terminalProviderError = error;
         providerResult = { output: "", stats: error?.stats || {} };
       }
+      providerReturnedAt ??= Date.now();
       if (abortSignal?.aborted) {
         throw providerCallAbortedError(abortSignal, this.worker, job_id);
       }
@@ -1161,7 +1210,8 @@ export class TrackedProviderClient {
       const stats = {
         ...(providerResult?.stats || {}),
         ...(terminalHandoffStop ? {
-          terminalHandoffStopped: terminalProviderError != null,
+          terminalHandoffStopped: true,
+          terminalHandoffProviderError: terminalProviderError != null,
           terminalHandoffAcknowledged: true,
         } : {}),
       };
@@ -1183,6 +1233,9 @@ export class TrackedProviderClient {
       }
       const output = handoffFinalization.output;
       if (handoffFinalization.applied) {
+        const materializedOutput = String(output ?? "");
+        const receiptAt = Number(terminalHandoffStop?.acknowledgedAt) || null;
+        const providerCloseAt = Number(stats.providerCloseAt) || providerReturnedAt;
         this.deps.recordObservation({
           work_item_id,
           job_id,
@@ -1191,15 +1244,26 @@ export class TrackedProviderClient {
           observation_type: "agent_handoff.committed",
           summary: `Committed terminal agent handoff (${handoffFinalization.digest.slice(0, 12)})`,
           detail: {
+            agent_call_id: agentCallId,
             protocol: "posse.agent_handoff.v1",
             digest: handoffFinalization.digest,
+            packet_profile: handoffFinalization.packet?.profile || null,
+            packet_outcome: handoffFinalization.packet?.outcome || null,
             report_calls: handoffFinalization.reportCalls,
             evidence_chars: handoffFinalization.evidenceChars,
             materialized_packet_chars: handoffFinalization.materializedPacketChars,
             continuation_prose_chars: handoffFinalization.continuationProseChars,
-            tool_schema_chars: handoffToolSchemaChars,
-            tool_schema_estimated_tokens: Math.ceil(handoffToolSchemaChars / 4),
+            materialized_output_chars: materializedOutput.length,
+            materialized_output_sha256: crypto.createHash("sha256").update(materializedOutput).digest("hex"),
+            tool_schema_name: handoffToolSchema.name,
+            tool_schema_sha256: handoffToolSchema.sha256,
+            tool_schema_chars: handoffToolSchema.chars,
+            tool_schema_estimated_tokens: Math.ceil(handoffToolSchema.chars / 4),
             terminal_prompt_contract_chars: terminalHandoffContractChars(effectiveCapabilityOpts),
+            expected_coordination_mode: expectedCoordinationMode(effectiveCapabilityOpts) || null,
+            local_capability: localHandoffCapability,
+            remote_capability: remoteHandoffCapability,
+            required: handoffRequired,
             provider_input_tokens: stats.inputTokens ?? null,
             provider_output_tokens: stats.outputTokens ?? null,
             provider_usage_status: stats.inputTokens != null && stats.outputTokens != null
@@ -1208,8 +1272,31 @@ export class TrackedProviderClient {
                 ? "unavailable_after_terminal_stop"
                 : "unavailable",
             provider_output_discarded: handoffFinalization.continuationProseChars > 0,
-            provider_short_circuited: terminalProviderError != null,
+            provider_short_circuited: terminalHandoffStop != null,
             provider_stop_code: terminalProviderError?.code || null,
+            receipt_acknowledged: terminalHandoffStop != null,
+            receipt_acknowledged_at_ms: receiptAt,
+            terminal_abort_issued: terminalAbortIssuedAt != null,
+            terminal_abort_issued_at_ms: terminalAbortIssuedAt,
+            receipt_to_abort_ms: receiptAt != null && terminalAbortIssuedAt != null
+              ? Math.max(0, terminalAbortIssuedAt - receiptAt)
+              : null,
+            provider_returned_at_ms: providerReturnedAt,
+            provider_close_at_ms: providerCloseAt,
+            provider_close_after_receipt_ms: receiptAt != null && providerCloseAt != null
+              ? Math.max(0, providerCloseAt - receiptAt)
+              : null,
+            provider_abort_observed: stats.abortObserved === true,
+            graceful_termination_attempted: stats.gracefulTerminationAttempted === true,
+            force_kill_timer_fired: stats.forceKillTimerFired === true,
+            force_kill_used: stats.forceKillUsed === true,
+            external_abort_observed: abortSignal?.aborted === true,
+            mcp_attach_proof: stats.mcpAttachProof ? {
+              initialize_seen_at: stats.mcpAttachProof.initializeSeenAt ?? null,
+              tools_list_seen_at: stats.mcpAttachProof.toolsListSeenAt ?? null,
+              last_method: stats.mcpAttachProof.lastMethod || null,
+              last_request_at: stats.mcpAttachProof.lastRequestAt ?? null,
+            } : null,
             terminality: terminalHandoffStop
               ? "receipt_acknowledged_provider_stopped"
               : "authoritative_output_only",
@@ -1351,8 +1438,9 @@ export class TrackedProviderClient {
             evidence_chars: handoffFinalization.evidenceChars,
             materialized_packet_chars: handoffFinalization.materializedPacketChars,
             continuation_prose_chars: handoffFinalization.continuationProseChars,
-            tool_schema_chars: handoffToolSchemaChars,
-            tool_schema_estimated_tokens: Math.ceil(handoffToolSchemaChars / 4),
+            tool_schema_chars: handoffToolSchema.chars,
+            tool_schema_sha256: handoffToolSchema.sha256,
+            tool_schema_estimated_tokens: Math.ceil(handoffToolSchema.chars / 4),
             terminal_prompt_contract_chars: terminalHandoffContractChars(effectiveCapabilityOpts),
           } : null,
         },
