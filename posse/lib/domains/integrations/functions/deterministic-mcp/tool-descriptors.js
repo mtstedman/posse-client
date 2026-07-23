@@ -301,12 +301,12 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   },
   write_file: {
     access: "write",
-    summary: "Create or overwrite allowed files.",
+    summary: "Create or overwrite allowed files, optionally marking them executable.",
     observation: { type: "tool.write", label: "Write", format: "file", pathKeys: ["file_path", "path"], requireTarget: true },
   },
   edit_file: {
     access: "write",
-    summary: "Patch existing allowed files without shell editing.",
+    summary: "Patch existing allowed files or update their executable permission without shell editing.",
     observation: { type: "tool.edit", label: "Edit", format: "edit", pathKeys: ["file_path", "path"], requireTarget: true },
   },
   request_scope: {

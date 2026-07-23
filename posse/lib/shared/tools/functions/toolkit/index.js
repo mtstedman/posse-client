@@ -610,6 +610,13 @@ export function createDeterministicToolkit({
     }
   }
 
+  function setFileExecutable(filePath, executable) {
+    const stat = fs.statSync(filePath);
+    const permissions = stat.mode & 0o7777;
+    const nextPermissions = executable ? permissions | 0o111 : permissions & ~0o111;
+    if (nextPermissions !== permissions) fs.chmodSync(filePath, nextPermissions);
+  }
+
   function execWriteFile(args, cwd, scopePredicates) {
     let filePath;
     try {
@@ -631,7 +638,10 @@ export function createDeterministicToolkit({
     if (lockErr) return lockErr;
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     writeTextFileAtomic(filePath, args.content);
-    return `File written: ${filePath} (${args.content.length} chars)`;
+    if (args.executable !== undefined) {
+      setFileExecutable(filePath, Boolean(args.executable));
+    }
+    return `File written: ${filePath} (${args.content.length} chars${args.executable === undefined ? "" : `, executable=${Boolean(args.executable)}`})`;
   }
 
   function execEditFile(args, cwd, scopePredicates) {
@@ -660,6 +670,7 @@ export function createDeterministicToolkit({
     const append = args.append;
     const jsonPath = firstDefined(args.jsonPath, args.json_path);
     const jsonValueProvided = hasOwn(args, "jsonValue") || hasOwn(args, "json_value");
+    const executableRequested = args.executable !== undefined;
     const modes = [
       exactRequested && "old_string/new_string",
       replaceLines !== undefined && "replaceLines",
@@ -667,12 +678,18 @@ export function createDeterministicToolkit({
       insertAt !== undefined && "insertAt",
       append !== undefined && "append",
       (jsonPath !== undefined || jsonValueProvided) && "jsonPath/jsonValue",
+      executableRequested && "executable",
     ].filter(Boolean);
     if (modes.length === 0) {
-      return "Error: edit_file requires exactly one edit mode: old_string/new_string, replaceLines, replacePattern, insertAt, append, or jsonPath/jsonValue.";
+      return "Error: edit_file requires exactly one edit mode: old_string/new_string, replaceLines, replacePattern, insertAt, append, jsonPath/jsonValue, or executable.";
     }
     if (modes.length > 1) {
       return `Error: edit_file accepts only one edit mode per call; received ${modes.join(", ")}.`;
+    }
+
+    if (modes[0] === "executable") {
+      setFileExecutable(filePath, Boolean(args.executable));
+      return `File mode updated: ${filePath} (executable=${Boolean(args.executable)})`;
     }
 
     if (modes[0] === "replaceLines") {

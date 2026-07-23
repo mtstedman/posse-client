@@ -31,12 +31,18 @@ export const TOOL_READ_FILE = {
 export const TOOL_WRITE_FILE = {
   type: "function",
   name: "write_file",
-  description: "Create a new file or overwrite an existing file with the given content.",
+  description:
+    "Create a new file or overwrite an existing file with the given content. " +
+    "Set executable=true when the resulting file must be directly executable.",
   parameters: {
     type: "object",
     properties: {
       path: { type: "string", description: "File path to write" },
       content: { type: "string", description: "Full content to write to the file" },
+      executable: {
+        type: "boolean",
+        description: "Set or clear the file's executable permission bits after writing. Omit to preserve the existing/default mode.",
+      },
     },
     required: ["path", "content"],
     additionalProperties: false,
@@ -48,7 +54,7 @@ export const TOOL_EDIT_FILE = {
   name: "edit_file",
   description:
     "Edit an existing file within the allowed scope. Provide exactly one mode: exact old_string/new_string, " +
-    "replaceLines, replacePattern, insertAt, append, or jsonPath/jsonValue.",
+    "replaceLines, replacePattern, insertAt, append, jsonPath/jsonValue, or executable.",
   parameters: {
     type: "object",
     properties: {
@@ -90,6 +96,10 @@ export const TOOL_EDIT_FILE = {
       append: { type: "string", description: "Content to append to the file." },
       jsonPath: { type: "string", description: "Dot-separated JSON path to update." },
       jsonValue: { description: "Value to write when jsonPath is used." },
+      executable: {
+        type: "boolean",
+        description: "Set or clear the file's executable permission bits without changing its content.",
+      },
     },
     required: ["path"],
     additionalProperties: false,
