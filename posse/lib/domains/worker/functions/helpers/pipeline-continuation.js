@@ -258,33 +258,38 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
   // Helper: build a rich task_spec for the file-create dev job
   const buildFileCreateSpec = (files) => {
     const fileDesc = files
-      .map(r => `- ${r.path}${r.reason ? ` — ${r.reason}` : ""}`)
+      .map(r => {
+        const reason = String(r.reason || "").trim();
+        const boundedReason = reason.length > 180 ? `${reason.slice(0, 179).trimEnd()}…` : reason;
+        return `- ${r.path}${boundedReason ? ` — ${boundedReason}` : ""}`;
+      })
       .join("\n");
+    const boundedOriginSpec = originSpec.length > 650
+      ? `${originSpec.slice(0, 649).trimEnd()}…`
+      : originSpec;
     const parts = [
-      `CONTEXT: This is a file-creation job spawned by job #${originJob.id}.`,
-      `The original task was: ${originJob.title}`,
-      `Original task spec:\n${originSpec}`,
+      `FILE-CREATION CONTINUATION FOR JOB #${originJob.id}: ${originJob.title}`,
+      `Original objective:\n${boundedOriginSpec}`,
+      ``,
+      `INSTRUCTIONS:`,
+      `Create every scoped file completely from the original objective and its`,
+      `request reason. Match repository conventions and include required imports,`,
+      `exports, tests, and boilerplate. Do not create placeholders, disabled tests,`,
+      `or TODO-only output. Report a blocker if required semantics remain unknown.`,
       ``,
       `FILES TO CREATE:`,
       fileDesc,
-      ``,
-      `INSTRUCTIONS:`,
-      `Create each file listed above. Use the original task spec and project`,
-      `context to understand what content each file needs. Read existing files`,
-      `in the worktree for patterns, conventions, and imports to follow.`,
-      ``,
-      `For each file:`,
-      `- If the reason describes specific content, implement it fully`,
-      `- Match the style and conventions of surrounding code/files`,
-      `- Include necessary imports, exports, and boilerplate`,
-      `- Never create a placeholder, empty stub, disabled test, or TODO-only`,
-      `  substitute. If required semantics remain unknowable after scoped`,
-      `  inspection, report that blocker in DEV RESULT.`,
     ];
     if (projectContext) {
-      parts.push(``, `PROJECT CONTEXT:`, projectContext);
+      const boundedProjectContext = projectContext.length > 350
+        ? `${projectContext.slice(0, 349).trimEnd()}…`
+        : projectContext;
+      parts.push(``, `PROJECT CONTEXT:`, boundedProjectContext);
     }
-    return parts.join("\n");
+    const taskSpec = parts.join("\n");
+    return taskSpec.length > 2000
+      ? `${taskSpec.slice(0, 1999).trimEnd()}…`
+      : taskSpec;
   };
 
   // Helper: deduplicate file paths and derive create_roots from parent dirs
