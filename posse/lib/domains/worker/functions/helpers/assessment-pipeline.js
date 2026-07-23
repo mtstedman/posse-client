@@ -545,6 +545,7 @@ function _buildRemoteAssessmentInstructions({
   workItem,
   taskSpec = "",
   workflowModeBlock = "",
+  verificationCapabilityBlock = "",
   atlasBlock = "",
   priorAssessmentFindings = "",
   fallbackReads = null,
@@ -552,6 +553,8 @@ function _buildRemoteAssessmentInstructions({
   return [
     Number.isFinite(Number(fallbackReads)) ? `Fallback read budget for this assessment attempt: ${Math.max(0, Number(fallbackReads))}.` : null,
     workflowModeBlock,
+    verificationCapabilityBlock,
+    `If the bounded role result marks VERIFICATION_UNAVAILABLE, keep the completion status tied to product work. Treat the unavailable method as NOT_APPLICABLE when attached evidence or one obvious equivalent invocation establishes the criterion; it is not, by itself, a reason to block.`,
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
     ``,
@@ -573,7 +576,9 @@ function _buildVerificationCapabilityBlock(payload = {}) {
     `Your issued tools plus the deterministic evidence attached to this prompt are the complete set of available verification methods for this attempt.`,
     `Use those assigned capabilities. Discard browser, lint, shell, or other verification options that are not callable through the issued tool surface and are not represented by registered test evidence.`,
     `An unavailable optional method is NOT_APPLICABLE: do not lower confidence, fail, block, or ask a human merely because it cannot be run.`,
-    `If an explicit success criterion truly requires an unavailable capability, return blocked once with the missing capability named. Do not retry the same assessment hoping the capability appears.`,
+    `A configured test command is a verification recipe, not product behavior, unless the objective explicitly requires that literal invocation to work. If its launcher is unavailable, one obvious equivalent launcher or targeted invocation may establish the same criterion.`,
+    `Do not request a repository file or human intervention solely to supply an executable alias or change test discovery after equivalent evidence proves the behavior.`,
+    `If no equivalent evidence can establish a genuinely required criterion, return blocked once with the missing capability named. Do not retry the same assessment hoping the capability appears.`,
     contract ? `Task verification contract:\n${JSON.stringify(contract, null, 2)}` : null,
   ].filter(Boolean).join("\n");
 }
@@ -1207,7 +1212,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   const prompt = [
     `Assess this completed task. Check the actual files, not just the dev's claims.`,
     `Use the SCOPED DIFF NARRATIVE as the quick map of what changed, then use any SCOPED GIT DIFF below as the primary verification view for exact changes. Use SCOPED FILE SNAPSHOTS as fallback/current-state context when the diff alone is insufficient. Do not ask the human to paste repository files or diffs that are already in the workspace; if verification still fails due to environment/tooling limits, return blocked without human_questions requesting repo file contents.`,
-    `If the bounded role result marks VERIFICATION_UNAVAILABLE for a command or tool outside your issued surface, discard that optional verification method. It is not evidence of failure and is not, by itself, a reason to block.`,
+    `If the bounded role result marks VERIFICATION_UNAVAILABLE, keep the completion status tied to product work. Treat the unavailable method as NOT_APPLICABLE when attached evidence or one obvious equivalent invocation establishes the criterion; it is not, by itself, a reason to block.`,
     Number.isFinite(Number(fallbackReads)) ? `Fallback read budget for this assessment attempt: ${Math.max(0, Number(fallbackReads))}.` : null,
     workflowModeBlock,
     verificationCapabilityBlock,
@@ -1243,6 +1248,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     workItem,
     taskSpec,
     workflowModeBlock,
+    verificationCapabilityBlock,
     atlasBlock,
     priorAssessmentFindings,
     fallbackReads,

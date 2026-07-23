@@ -128,7 +128,7 @@ export function __testBuildCodexRoleGuardBlock({
       rules.push(`- Use active retrieval context first when available, then the listed manifest entries (${labels}) for exact worktree inspection.`);
     }
     if (has("bash")) {
-      rules.push("- If a test_command is provided, run it after file changes through the exact listed bash surface. The command string is not a tool name.");
+      rules.push("- If a test_command is provided, run it after file changes through the exact listed bash surface. If only its launcher is unavailable, try one obvious equivalent launcher or targeted invocation; keep completion status tied to product work and report the exact unavailable command. The command string is not a tool name.");
     } else {
       rules.push("- No bash surface is listed. Do not attempt a provided test_command or any PowerShell/shell command; report verification as unavailable.");
     }
