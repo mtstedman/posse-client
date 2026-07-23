@@ -416,7 +416,19 @@ function normalizeDecoyInput(value, label) {
   return [selector, reason ?? "Excluded from supporting evidence."];
 }
 
-function materializeClaim(value, claimIndex, context, counters) {
+function isAllowedProofProvenance(evidence, { allowAgentProse = false } = {}) {
+  const kind = evidence?.provenance?.kind;
+  return ["Tool Result", "Full Tool Call"].includes(kind)
+    || (allowAgentProse && kind === "Agent Prose");
+}
+
+function materializeClaim(
+  value,
+  claimIndex,
+  context,
+  counters,
+  { allowAgentProseProof = false } = {},
+) {
   const normalized = normalizeClaimInput(value, claimIndex);
   if (!Array.isArray(normalized) || normalized.length < 1 || normalized.length > 2) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", `claims[${claimIndex}] must be [claim, optional evidence]`);
@@ -433,7 +445,9 @@ function materializeClaim(value, claimIndex, context, counters) {
     out[lane] = detail[lane].map((selector) => {
       selectorCount += 1;
       const evidence = materializeAgentHandoffEvidenceSelector(selector, context);
-      if (lane === "proof" && !["Tool Result", "Full Tool Call"].includes(evidence.provenance.kind)) {
+      if (lane === "proof" && !isAllowedProofProvenance(evidence, {
+        allowAgentProse: allowAgentProseProof,
+      })) {
         fail(
           "AGENT_HANDOFF_PROOF_PROVENANCE_INVALID",
           `claims[${claimIndex}] proof requires storage-owned tool evidence; ${evidence.ref} is ${evidence.provenance.kind}`,
@@ -1042,6 +1056,8 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
   }
   const normalizedRole = String(role || "").trim().toLowerCase();
   const profile = capture(() => boundedString(source.profile, "profile", 80));
+  const allowAgentProseProof = normalizedRole === "assessor"
+    && profile === "assessor.verdict.v1";
   const policy = profile ? PROFILE_POLICY[profile] : null;
   if (profile && !policy) {
     issues.push({ code: "AGENT_HANDOFF_PROFILE_INVALID", message: `Unsupported profile: ${profile}` });
@@ -1164,7 +1180,9 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
         for (const selector of detail[lane]) {
           selectorCount += 1;
           const evidence = capture(() => materializeAgentHandoffEvidenceSelector(selector, context));
-          if (lane === "proof" && evidence && !["Tool Result", "Full Tool Call"].includes(evidence.provenance.kind)) {
+          if (lane === "proof" && evidence && !isAllowedProofProvenance(evidence, {
+            allowAgentProse: allowAgentProseProof,
+          })) {
             issues.push({
               code: "AGENT_HANDOFF_PROOF_PROVENANCE_INVALID",
               message: `${claimLabel}.proof requires storage-owned tool evidence; ${evidence.ref} is ${evidence.provenance.kind}`,
@@ -1280,7 +1298,16 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
     if (!Array.isArray(report.claims) || report.claims.length > AGENT_HANDOFF_LIMITS.maxClaims) {
       fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}].report.claims exceeds ${AGENT_HANDOFF_LIMITS.maxClaims} claims`);
     }
-    const claims = report.claims.map((claim, claimIndex) => materializeClaim(claim, claimIndex, context, entryCounters));
+    const claims = report.claims.map((claim, claimIndex) => materializeClaim(
+      claim,
+      claimIndex,
+      context,
+      entryCounters,
+      {
+        allowAgentProseProof: normalizedRole === "assessor"
+          && profile === "assessor.verdict.v1",
+      },
+    ));
     const constraints = report.constraints == null ? [] : stringArray(report.constraints, `handoffs[${index}].report.constraints`);
     const successCriteria = report.success_criteria == null ? [] : stringArray(report.success_criteria, `handoffs[${index}].report.success_criteria`);
     const questions = report.questions == null ? [] : stringArray(report.questions, `handoffs[${index}].report.questions`);

@@ -540,7 +540,7 @@ const ASSESSOR_CLAIM = {
   type: "object",
   description:
     "One verdict claim. Use exactly claim plus optional summary and optional proof. " +
-    "proof contains stored hash-ref strings such as #abcd; omit proof when no stored ref applies.",
+    "proof contains visible stored hash-ref strings such as #abcd; terminal assessor proof may use either tool-owned evidence or agent-authored prose refs.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 1000 },
     summary: { type: "string", maxLength: 4000 },
@@ -824,7 +824,7 @@ export const TOOL_AGENT_HANDOFF_REPORT = TOOL_AGENT_HANDOFF_RESEARCHER;
 
 export const TOOL_AGENT_HANDOFF_ASSESSOR = semanticRoleTool({
   description:
-    "Finish assessment with one exact verdict report and explicit confidence. claims must be an array; each item uses claim plus optional summary and optional proof containing only stored hash-ref strings. " +
+    "Finish assessment with one exact verdict report and explicit confidence. claims must be an array; each item uses claim plus optional summary and optional proof containing only visible stored hash-ref strings. Terminal assessor proof may use tool-owned evidence or agent-authored prose refs. " +
     "Do not use keyed claims, name/prose aliases, or free-form/path/line/tool evidence objects. Do not submit payload or execution scope. The receipt ends provider generation.",
   profile: "assessor.verdict.v1",
   outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
