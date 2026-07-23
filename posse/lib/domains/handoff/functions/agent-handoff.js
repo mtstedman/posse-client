@@ -886,10 +886,427 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
   };
 }
 
-function normalizeSemanticAgentHandoffArgs(args, { role = "" } = {}) {
+function firstAssessorText(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (!Array.isArray(value)) continue;
+    for (const entry of value) {
+      if (typeof entry === "string" && entry.trim()) return entry.trim();
+      const object = plainObject(entry);
+      if (!object) continue;
+      const nested = firstAssessorText(
+        object.summary,
+        object.prose,
+        object.claim,
+        object.reason,
+      );
+      if (nested) return nested;
+    }
+  }
+  return "";
+}
+
+function compactAssessorProof(value, outcome) {
+  const fallback = `Assessor submitted a terminal ${outcome} verdict.`;
+  return String(value || fallback)
+    .replace(/#[0-9a-z]{4,12}(?::L?\d+(?:-L?\d+)?|:\d+(?:-\d+)?)?/gi, "stored evidence")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+function compactAssessorQuestions(...values) {
+  const questions = values.find((value) => Array.isArray(value)) || [];
+  return questions
+    .filter((value) => typeof value === "string" && value.trim())
+    .slice(0, 3)
+    .map((value) => value.trim().slice(0, 240));
+}
+
+function hasCanonicalAssessorEnvelope(source) {
+  if (!Array.isArray(source.handoffs) || source.handoffs.length < 1) {
+    return false;
+  }
+  const topKeys = new Set(["protocol", "profile", "outcome", "confidence", "handoffs"]);
+  if (Object.keys(source).some((key) => !topKeys.has(key))) return false;
+  const entryKeys = new Set([
+    "id",
+    "depends_on",
+    "target",
+    "intent",
+    "report",
+    ...PLANNER_REPORT_KEYS,
+  ]);
+  return source.handoffs.every((raw) => {
+    const entry = plainObject(raw);
+    if (!entry || Object.keys(entry).some((key) => !entryKeys.has(key))) return false;
+    const target = plainObject(entry.target);
+    if (target?.kind !== "pipeline" || target?.role !== "$pipeline") return false;
+    const report = plainObject(entry.report);
+    return !report || Object.keys(report).every((key) => PLANNER_REPORT_KEYS.includes(key));
+  });
+}
+
+function normalizeAssessorTerminalArgs(source) {
+  if (hasCanonicalAssessorEnvelope(source)) return null;
+  const entries = Array.isArray(source.handoffs)
+    ? source.handoffs.map((entry) => plainObject(entry)).filter(Boolean)
+    : [];
+  const first = entries[0] || {};
+  const report = plainObject(first.report) || {};
+  const outcomeCandidates = [
+    source.verdict,
+    source.outcome,
+    source.status,
+    first.verdict,
+    first.outcome,
+    first.status,
+    report.verdict,
+    report.outcome,
+    report.status,
+  ].filter((value) => typeof value === "string" && value.trim());
+  const normalizedOutcomes = [...new Set(
+    outcomeCandidates.map((value) => value.trim().toLowerCase()),
+  )];
+  if (normalizedOutcomes.length > 1) {
+    fail(
+      "AGENT_HANDOFF_SCHEMA_INVALID",
+      "agent_handoff contains conflicting assessor verdicts",
+    );
+  }
+  const outcome = normalizedOutcomes[0];
+  if (!outcome) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.verdict is required");
+  }
+  const proof = compactAssessorProof(firstAssessorText(
+    source.proof,
+    first.proof,
+    report.proof,
+    report.summary,
+    first.summary,
+    source.summary,
+    source.reasons,
+    first.reasons,
+    report.reasons,
+    report.claims,
+    first.claims,
+  ), outcome);
+  const questions = compactAssessorQuestions(
+    source.questions,
+    source.human_questions,
+    first.questions,
+    first.human_questions,
+    report.questions,
+    report.human_questions,
+  );
+  return {
+    protocol: AGENT_HANDOFF_PROTOCOL,
+    profile: "assessor.verdict.v1",
+    outcome,
+    confidence: source.confidence || first.confidence || report.confidence || "medium",
+    handoffs: [{
+      id: "verdict",
+      depends_on: [],
+      target: { kind: "pipeline", role: "$pipeline" },
+      intent: "Submit terminal assessor verdict",
+      report: {
+        summary: proof,
+        claims: [],
+        scope: {},
+        constraints: [],
+        success_criteria: [],
+        questions,
+        payload: {},
+      },
+    }],
+  };
+}
+
+function compactResearcherText(value, fallback = "") {
+  return String(value || fallback)
+    .replace(/#[0-9a-z]{4,12}(?::L?\d+(?:-L?\d+)?|:\d+(?:-\d+)?)?/gi, "stored evidence")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function researcherEvidenceSelector(value, context) {
+  let candidate = value;
+  if (Array.isArray(candidate)) candidate = candidate[0];
+  const object = plainObject(candidate);
+  if (object) candidate = object.selector ?? (
+    object.ref == null
+      ? null
+      : { ref: object.ref, ...(object.lines == null ? {} : { lines: object.lines }) }
+  );
+  if (candidate == null) return null;
+  try {
+    const parsed = parseAgentHandoffEvidenceSelector(candidate);
+    if (parsed.start != null) return candidate;
+    const fetched = fetchHashRefForContext(context, parsed.ref);
+    if (!fetched?.found || fetched.entry?.entry_kind !== "materialized"
+      || fetched.entry?.payload_text == null) {
+      return null;
+    }
+    const lineCount = normalizedLines(fetched.entry.payload_text).length;
+    const end = Math.min(Math.max(1, lineCount), AGENT_HANDOFF_LIMITS.recommendedSelectorLines);
+    return `${parsed.ref}:L1-L${end}`;
+  } catch {
+    return null;
+  }
+}
+
+function researcherEvidenceSelectors(value, context) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => researcherEvidenceSelector(entry, context))
+    .filter(Boolean)
+    .slice(0, AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim);
+}
+
+function researcherClaims(value, { proof = [], support = [], context = {} } = {}) {
+  const inputs = Array.isArray(value) ? value : [];
+  const claims = inputs.slice(0, AGENT_HANDOFF_LIMITS.maxClaims).flatMap((raw, index) => {
+    if (Array.isArray(raw)) return [raw];
+    const source = plainObject(raw);
+    if (!source) return [];
+    const claim = firstAssessorText(source.claim, source.name, source.title)
+      || `Research finding ${index + 1}`;
+    const prose = firstAssessorText(
+      source.prose,
+      source.summary,
+      source.description,
+      source.reason,
+    );
+    const detail = {};
+    const claimProof = researcherEvidenceSelectors(source.proof, context);
+    const claimSupport = researcherEvidenceSelectors(source.support, context);
+    if (claimProof.length) detail.proof = claimProof;
+    if (claimSupport.length) detail.support = claimSupport;
+    if (prose) detail.prose = compactResearcherText(prose);
+    return [[compactResearcherText(claim), detail]];
+  });
+  const globalProof = researcherEvidenceSelectors(proof, context);
+  const globalSupport = researcherEvidenceSelectors(support, context);
+  if (globalProof.length || globalSupport.length) {
+    const detail = {};
+    if (globalProof.length) detail.proof = globalProof;
+    if (globalSupport.length) detail.support = globalSupport;
+    claims.push(["Research evidence", detail]);
+  }
+  return claims.slice(0, AGENT_HANDOFF_LIMITS.maxClaims);
+}
+
+function researcherStringArray(...values) {
+  const value = values.find((candidate) => Array.isArray(candidate)) || [];
+  return value
+    .filter((entry) => typeof entry === "string" && entry.trim())
+    .map((entry) => compactResearcherText(entry))
+    .filter(Boolean);
+}
+
+function researcherFilePriorities(value, keyFiles) {
+  if (!Array.isArray(value)) {
+    return keyFiles.map((path, index) => ({
+      path,
+      rank: index + 1,
+      usefulness: "primary",
+      evidence: "atlas",
+      reason: "Selected terminal research seed.",
+    }));
+  }
+  return value.flatMap((raw) => {
+    const entry = plainObject(raw);
+    const path = firstAssessorText(entry?.path, entry?.file);
+    if (!path) return [];
+    const usefulness = ["primary", "supporting", "context", "low"]
+      .includes(String(entry.usefulness || "").toLowerCase())
+      ? String(entry.usefulness).toLowerCase()
+      : "primary";
+    const evidence = ["audited_file_read", "atlas", "search", "prior_research", "web"]
+      .includes(String(entry.evidence || "").toLowerCase())
+      ? String(entry.evidence).toLowerCase()
+      : "atlas";
+    return [{
+      path: compactResearcherText(path),
+      usefulness,
+      evidence,
+      reason: compactResearcherText(
+        entry.reason,
+        "Selected terminal research seed.",
+      ).slice(0, 240),
+    }];
+  }).map((entry, index) => ({ ...entry, rank: index + 1 }));
+}
+
+function hasCanonicalResearcherEnvelope(source) {
+  if (!Array.isArray(source.handoffs) || source.handoffs.length < 1) return false;
+  if (!["researcher.pipeline.v1", "researcher.report.v1"].includes(source.profile)) {
+    return false;
+  }
+  const expectedTarget = source.profile === "researcher.report.v1"
+    ? { kind: "result", role: "$result" }
+    : { kind: "pipeline", role: "$pipeline" };
+  return source.handoffs.every((raw) => {
+    const entry = plainObject(raw);
+    if (!entry) return false;
+    const target = plainObject(entry.target);
+    return target?.kind === expectedTarget.kind && target?.role === expectedTarget.role;
+  });
+}
+
+function normalizeResearcherTerminalArgs(source, context) {
+  if (!Array.isArray(source.handoffs) || hasCanonicalResearcherEnvelope(source)) {
+    return null;
+  }
+  const first = source.handoffs.map((entry) => plainObject(entry)).find(Boolean) || {};
+  const report = plainObject(first.report) || plainObject(source.report) || {};
+  const research = plainObject(report.research) || {};
+  const reportScope = plainObject(report.scope) || {};
+  const outcomeInput = firstAssessorText(
+    source.outcome,
+    source.status,
+    first.outcome,
+    report.outcome,
+  ).toLowerCase();
+  const profile = outcomeInput === "complete"
+    ? "researcher.report.v1"
+    : "researcher.pipeline.v1";
+  const outcome = profile === "researcher.report.v1"
+    ? "complete"
+    : (["success", "gap", "input_required"].includes(outcomeInput)
+        ? outcomeInput
+        : "success");
+  const keyFiles = researcherStringArray(
+    first.key_files,
+    first.keyFiles,
+    reportScope.key_files,
+    research.key_files,
+    research.keyFiles,
+    research.files,
+    source.key_files,
+  ).slice(0, 100);
+  const relatedFiles = researcherStringArray(
+    first.related_files,
+    first.relatedFiles,
+    reportScope.related_files,
+    research.related_files,
+    research.relatedFiles,
+    source.related_files,
+  ).slice(0, 100);
+  const priorities = first.file_priorities
+    ?? first.filePriorities
+    ?? research.planner_file_priorities
+    ?? research.file_priorities
+    ?? research.filePriorities
+    ?? source.file_priorities;
+  const keySymbols = researcherStringArray(
+    first.key_symbols,
+    first.keySymbols,
+    research.key_symbols,
+    research.keySymbols,
+    source.key_symbols,
+  ).filter((value) => /^[0-9a-f]{64}:[0-9]+$/.test(value)).slice(0, 12);
+  const patternsInput = [
+    first.patterns,
+    research.patterns,
+    source.patterns,
+  ].find((value) => Array.isArray(value)) || [];
+  const patterns = patternsInput.flatMap((raw) => {
+    const entry = plainObject(raw);
+    const name = firstAssessorText(entry?.name, entry?.label);
+    const description = firstAssessorText(entry?.description, entry?.summary);
+    if (!name || !description) return [];
+    return [{
+      name: compactResearcherText(name).slice(0, 80),
+      description: compactResearcherText(description).slice(0, 500),
+    }];
+  }).slice(0, 50);
+  const memoriesInput = [
+    first.memories,
+    research.memories,
+    source.memories,
+  ].find((value) => Array.isArray(value)) || [];
+  const memories = memoriesInput.flatMap((raw) => {
+    const entry = plainObject(raw);
+    const title = firstAssessorText(entry?.title);
+    const content = firstAssessorText(entry?.content, entry?.summary);
+    if (!title || !content) return [];
+    return [{
+      title: compactResearcherText(title).slice(0, 120),
+      content: compactResearcherText(content).slice(0, 1200),
+      key_files: researcherStringArray(entry.key_files, entry.keyFiles).slice(0, 12),
+      key_symbols: researcherStringArray(entry.key_symbols, entry.keySymbols)
+        .filter((value) => /^[0-9a-f]{64}:[0-9]+$/.test(value))
+        .slice(0, 12),
+    }];
+  }).slice(0, 2);
+  const claims = researcherClaims(
+    first.claims ?? report.claims ?? research.claims ?? source.claims,
+    {
+      proof: first.proof ?? report.proof ?? research.proof ?? source.proof,
+      support: first.support ?? report.support ?? research.support ?? source.support,
+      context,
+    },
+  );
+  const target = profile === "researcher.report.v1"
+    ? { kind: "result", role: "$result" }
+    : { kind: "pipeline", role: "$pipeline" };
+  return {
+    protocol: AGENT_HANDOFF_PROTOCOL,
+    profile,
+    outcome,
+    handoffs: [{
+      id: "research",
+      depends_on: [],
+      target,
+      intent: "Submit terminal research",
+      report: {
+        summary: compactResearcherText(
+          first.summary ?? report.summary ?? source.summary,
+          "Research complete.",
+        ).slice(0, AGENT_HANDOFF_LIMITS.maxSummaryChars),
+        claims,
+        scope: { key_files: keyFiles, related_files: relatedFiles },
+        constraints: researcherStringArray(
+          first.constraints,
+          report.constraints,
+          source.constraints,
+        ),
+        success_criteria: researcherStringArray(
+          first.success_criteria,
+          first.successCriteria,
+          report.success_criteria,
+          source.success_criteria,
+        ),
+        questions: researcherStringArray(
+          first.questions,
+          report.questions,
+          source.questions,
+        ),
+        research: {
+          key_symbols: keySymbols,
+          memories,
+          planner_file_priorities: researcherFilePriorities(priorities, keyFiles),
+          patterns,
+        },
+        payload: {},
+      },
+    }],
+  };
+}
+
+function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {}) {
   const source = plainObject(args);
   const normalizedRole = String(role || "agent").trim().toLowerCase() || "agent";
   if (!source) return args;
+  if (normalizedRole === "assessor") {
+    const normalizedAssessor = normalizeAssessorTerminalArgs(source);
+    if (normalizedAssessor) return normalizedAssessor;
+  }
+  if (normalizedRole === "researcher") {
+    const normalizedResearcher = normalizeResearcherTerminalArgs(source, context);
+    if (normalizedResearcher) return normalizedResearcher;
+  }
   const compactResearcherKeys = [
     "profile",
     "outcome",
@@ -1332,7 +1749,7 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
   const normalizedRole = String(role || "").trim().toLowerCase();
   const normalizedArgs = normalizeSemanticAgentHandoffArgs(
     normalizePlannerAgentHandoffArgs(args, { role: normalizedRole }),
-    { role: normalizedRole },
+    { role: normalizedRole, context },
   );
   const serialized = JSON.stringify(normalizedArgs ?? null);
   if (Buffer.byteLength(serialized, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
