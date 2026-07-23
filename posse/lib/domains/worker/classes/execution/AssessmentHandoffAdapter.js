@@ -48,6 +48,11 @@ import {
 import {
   shortJobTitle as shortJobTitleFromModule,
 } from "../../../../shared/policies/functions/role-utils.js";
+import {
+  clearPendingAssessmentFileRequests,
+  flattenPendingAssessmentFileRequests,
+  readPendingAssessmentFileRequests,
+} from "../../functions/helpers/assessment-file-requests.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",
@@ -115,6 +120,25 @@ export function resolveAssessmentOnlyProvider(job = {}) {
   };
 }
 
+export function spawnDeferredAssessmentFileRequestFollowUp(
+  worker,
+  job,
+  freshJob,
+  pendingFileRequests,
+  attemptId,
+) {
+  if (freshJob?.status !== "succeeded" || !pendingFileRequests) return false;
+  worker._spawnFileRequestFollowUp(job, pendingFileRequests, attemptId);
+  const persistedJob = getJob(job.id) || freshJob || job;
+  const payload = worker.parsePayload(persistedJob);
+  if (clearPendingAssessmentFileRequests(payload)) {
+    const nextPayloadJson = JSON.stringify(payload);
+    updateJobPayload(job.id, nextPayloadJson);
+    job.payload_json = nextPayloadJson;
+  }
+  return true;
+}
+
 export class AssessmentHandoffAdapter {
   constructor(worker) {
     this.worker = worker;
@@ -129,6 +153,7 @@ export class AssessmentHandoffAdapter {
 
     const assessStart = Date.now();
     const cleanPayload = worker.parsePayload(job);
+    const pendingFileRequests = readPendingAssessmentFileRequests(cleanPayload);
     const assessModelTierOverride = typeof cleanPayload?._assess_model_tier === "string"
       ? cleanPayload._assess_model_tier
       : null;
@@ -210,7 +235,7 @@ export class AssessmentHandoffAdapter {
         allowed_create_roots: jobPayloadForAssess.create_roots || [],
         files_committed: [],
         files_reverted: [],
-        files_requested: [],
+        files_requested: flattenPendingAssessmentFileRequests(pendingFileRequests),
       }, (isArtifactMode(jobPayloadForAssess.task_mode || "code") && jobPayloadForAssess.output_root)
         ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
         : (wtPath || worker.projectDir));
@@ -257,6 +282,13 @@ export class AssessmentHandoffAdapter {
         duration_ms: Date.now() - assessStart,
         output_chars: storedOutput.length,
       });
+      spawnDeferredAssessmentFileRequestFollowUp(
+        worker,
+        job,
+        freshJob,
+        pendingFileRequests,
+        assessAttempt.attempt.id,
+      );
       refreshAndExtractInsightsFromModule(job.work_item_id);
       worker._cleanupWorktreeIfDone(job.work_item_id);
     } catch (assessErr) {

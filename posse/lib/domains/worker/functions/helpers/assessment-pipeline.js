@@ -72,6 +72,9 @@ import {
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { ensureRegisteredTestTables, runRegisteredTest } from "../../../../shared/tools/functions/toolkit/registered-tests.js";
+import {
+  persistPendingAssessmentFileRequests,
+} from "./assessment-file-requests.js";
 
 function readSettingText(key) {
   try {
@@ -90,10 +93,11 @@ function readSettingBool(key, fallback = false) {
   return fallback;
 }
 
-function markAssessmentRetryAssessOnly(job) {
+function markAssessmentRetryAssessOnly(job, pendingFileRequests = null) {
   if (!job || !ASSESSABLE_JOB_TYPES.has(job.job_type)) return false;
   const payload = parseJobPayload(job);
   payload._assess_only = true;
+  persistPendingAssessmentFileRequests(payload, pendingFileRequests);
   const nextPayloadJson = JSON.stringify(payload);
   updateJobPayload(job.id, nextPayloadJson);
   job.payload_json = nextPayloadJson;
@@ -1671,6 +1675,7 @@ export async function runPostExecutionAssessment(worker, {
     const evidenceWarm = getAtlasWarmJobCompletion(hasEvidenceWarmJob ? evidenceWarmJobId : null);
     if (!evidenceWarm.ok) {
       currentPayload._assess_only = true;
+      persistPendingAssessmentFileRequests(currentPayload, pendingFileRequests);
       job.payload_json = JSON.stringify(currentPayload);
       updateJobPayload(job.id, job.payload_json);
       completeAttempt(attempt.id, {
@@ -2403,7 +2408,7 @@ export async function runPostExecutionAssessment(worker, {
             : getProviderBackoff(assessProvider, assessErr).backoffSec);
         const readyAt = new Date(Date.now() + assessBackoff * 1000).toISOString();
         try {
-          markAssessmentRetryAssessOnly(job);
+          markAssessmentRetryAssessOnly(job, pendingFileRequests);
         } catch (markErr) {
           logEvent({
             work_item_id: job.work_item_id,
