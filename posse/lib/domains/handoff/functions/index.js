@@ -841,6 +841,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
     agent_handoff_v1: handoffEnabled,
     agent_handoff_compact_v1: handoffEnabled,
     agent_handoff_compact_v2: handoffEnabled,
+    agent_handoff_compact_v3: handoffEnabled,
     sub_agent_v1: subAgentEnabled,
     status: "experimental",
     source: "repo_setting_snapshot",

@@ -67,8 +67,8 @@ import {
 } from "../../sub-agent/classes/SubAgentRuntime.js";
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 
-function agentHandoffToolSchemaTelemetry(role, compactCompletion = false) {
-  const schema = getAgentHandoffToolSchemaForRole(role, { compactCompletion });
+function agentHandoffToolSchemaTelemetry(role, compactCompletion = false, compactV3 = false) {
+  const schema = getAgentHandoffToolSchemaForRole(role, { compactCompletion, compactV3 });
   const serialized = JSON.stringify(schema);
   return {
     name: schema.name || "agent_handoff",
@@ -513,6 +513,7 @@ function childOnlyRemoteIssuance(parentOptions = {}, { providerName, role } = {}
       agent_handoff_v1: true,
       agent_handoff_compact_v1: source?.coordination?.agent_handoff_compact_v1 === true,
       agent_handoff_compact_v2: source?.coordination?.agent_handoff_compact_v2 === true,
+      agent_handoff_compact_v3: source?.coordination?.agent_handoff_compact_v3 === true,
       sub_agent_v1: false,
       sub_agent_next_input_v1: childCursorIssued,
       status: "experimental",
@@ -952,6 +953,7 @@ export class TrackedProviderClient {
     const handoffToolSchema = agentHandoffToolSchemaTelemetry(
       opts.role,
       effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
+      effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true,
     );
     const terminalAbortController = handoffRequired ? new AbortController() : null;
     const providerAbortSignal = combinedAbortSignal(abortSignal, terminalAbortController?.signal);
@@ -1128,6 +1130,7 @@ export class TrackedProviderClient {
                 agent_handoff_v1: true,
                 agent_handoff_compact_v1: childIssuance.coordination.agent_handoff_compact_v1 === true,
                 agent_handoff_compact_v2: childIssuance.coordination.agent_handoff_compact_v2 === true,
+                agent_handoff_compact_v3: childIssuance.coordination.agent_handoff_compact_v3 === true,
                 sub_agent_v1: false,
                 sub_agent_next_input_v1: childIssuance.coordination.sub_agent_next_input_v1 === true,
                 remote_acknowledged: true,

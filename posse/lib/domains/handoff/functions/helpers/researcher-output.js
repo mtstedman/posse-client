@@ -5,9 +5,11 @@
 import { extractJsonResult } from "../../../../shared/format/functions/json.js";
 import { sanitizeAtlasSymbolIdList } from "../../../atlas/functions/v2/symbol-id.js";
 import {
+  formatHashRefSelector,
   HASH_REF_LANES,
   isHashRefAlias,
   normalizeHashRefAlias,
+  parseHashRefSelector,
 } from "../../../../catalog/hash-store.js";
 
 /**
@@ -71,20 +73,42 @@ function normalizeCitationWhy(value, maxChars = RESEARCHER_CITATION_WHY_MAX) {
 }
 
 function citationEntryParts(entry) {
-  if (typeof entry === "string") return { rawRef: entry, why: "" };
-  if (Array.isArray(entry)) {
+  if (typeof entry === "string") {
+    const selector = parseHashRefSelector(entry);
     return {
-      rawRef: entry[0],
+      rawRef: selector?.ref || entry,
+      lines: selector?.lines || null,
+      why: "",
+    };
+  }
+  if (Array.isArray(entry)) {
+    const selector = typeof entry[0] === "string"
+      ? parseHashRefSelector(entry[0])
+      : null;
+    return {
+      rawRef: selector?.ref || entry[0]?.ref || entry[0]?.hash || entry[0],
+      lines: selector?.lines || entry[0]?.lines || null,
       why: normalizeCitationWhy(entry[1]),
     };
   }
   if (entry && typeof entry === "object") {
+    const selector = parseHashRefSelector(entry.selector ?? entry.hash ?? entry.ref ?? entry.ref_hash);
     return {
-      rawRef: entry.hash ?? entry.ref ?? entry.ref_hash,
+      rawRef: selector?.ref || entry.hash || entry.ref || entry.ref_hash,
+      lines: selector?.lines || entry.lines || null,
       why: normalizeCitationWhy(entry.why ?? entry.note ?? entry.reason),
     };
   }
   return { rawRef: "", why: "" };
+}
+
+function normalizeCitationLines(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const start = Number(value.start);
+  const count = value.count == null ? null : Number(value.count);
+  const end = count == null ? Number(value.end) : start + count - 1;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) return null;
+  return { start, end };
 }
 
 /**
@@ -122,21 +146,24 @@ export function normalizeResearcherCitationTriage(parsed, opts = {}) {
       if (out[lane].length >= maxRefsPerLane) break;
       const parts = citationEntryParts(entry);
       const hash = normalizeHashRefAlias(parts.rawRef);
+      const lines = normalizeCitationLines(parts.lines);
+      const selector = formatHashRefSelector(hash, lines);
       const why = normalizeCitationWhy(parts.why, maxWhyChars);
       if (!isHashRefAlias(hash)) {
         out.dropped.push({ lane, ref: String(parts.rawRef || "").trim(), reason: "invalid_ref" });
         continue;
       }
-      if (seen.has(hash)) {
-        out.dropped.push({ lane, ref: hash, reason: "duplicate_ref" });
+      if (seen.has(selector)) {
+        out.dropped.push({ lane, ref: selector, reason: "duplicate_ref" });
         continue;
       }
       if (lane === "decoy" && !why) {
         out.dropped.push({ lane, ref: hash, reason: "missing_decoy_why" });
         continue;
       }
-      seen.add(hash);
+      seen.add(selector);
       const normalized = { hash };
+      if (lines) normalized.lines = lines;
       if (why) normalized.why = why;
       out[lane].push(normalized);
     }
@@ -168,8 +195,8 @@ export function sanitizeResearcherStructuredOutput(output) {
     const triage = normalizeResearcherCitationTriage(parsed);
     const normalized = { ...parsed };
     for (const lane of HASH_REF_LANES) {
-      normalized[lane] = triage[lane].map(({ hash, why }) => (
-        why ? [hash, why] : [hash]
+      normalized[lane] = triage[lane].map(({ hash, lines, why }) => (
+        why ? [formatHashRefSelector(hash, lines), why] : [formatHashRefSelector(hash, lines)]
       ));
     }
     const replacement = `\`\`\`json\n${JSON.stringify(normalized, null, 2)}\n\`\`\``;

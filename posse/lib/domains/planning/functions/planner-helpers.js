@@ -72,6 +72,7 @@ export function applyPlannerRoleModePolicy(packet, { planningMode = "normal", ro
     agent_handoff_v1: false,
     agent_handoff_compact_v1: false,
     agent_handoff_compact_v2: false,
+    agent_handoff_compact_v3: false,
     sub_agent_v1: false,
   };
   return packet;

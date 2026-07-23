@@ -888,8 +888,108 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
 
 function normalizeSemanticAgentHandoffArgs(args, { role = "" } = {}) {
   const source = plainObject(args);
-  if (!source || !Array.isArray(source.handoffs)) return args;
   const normalizedRole = String(role || "agent").trim().toLowerCase() || "agent";
+  if (!source) return args;
+  const compactResearcherKeys = [
+    "profile",
+    "outcome",
+    "summary",
+    "claims",
+    "key_files",
+    "related_files",
+    "key_symbols",
+    "memories",
+    "file_priorities",
+    "patterns",
+    "questions",
+  ];
+  if (normalizedRole === "researcher"
+    && !Array.isArray(source.handoffs)
+    && compactResearcherKeys.some((key) => Object.hasOwn(source, key))) {
+    const compact = exactKeys(
+      source,
+      compactResearcherKeys,
+      "agent_handoff",
+    );
+    const profile = compact.profile;
+    const keyFiles = compact.key_files ?? [];
+    const priorities = compact.file_priorities ?? keyFiles.map((path, index) => ({
+      path,
+      rank: index + 1,
+      usefulness: "primary",
+      evidence: "atlas",
+      reason: "Selected terminal research seed.",
+    }));
+    const target = profile === "researcher.report.v1"
+      ? { kind: "result", role: "$result" }
+      : { kind: "pipeline", role: "$pipeline" };
+    return {
+      protocol: AGENT_HANDOFF_PROTOCOL,
+      profile,
+      outcome: compact.outcome,
+      handoffs: [{
+        id: "research",
+        depends_on: [],
+        target,
+        intent: "Submit terminal research",
+        report: {
+          summary: compact.summary,
+          claims: compact.claims ?? [],
+          scope: {
+            key_files: keyFiles,
+            related_files: compact.related_files ?? [],
+          },
+          constraints: [],
+          success_criteria: [],
+          questions: compact.questions ?? [],
+          research: {
+            key_symbols: compact.key_symbols ?? [],
+            memories: compact.memories ?? [],
+            planner_file_priorities: priorities,
+            patterns: compact.patterns ?? [],
+          },
+          payload: {},
+        },
+      }],
+    };
+  }
+  if (normalizedRole === "assessor" && !Array.isArray(source.handoffs)) {
+    const compact = exactKeys(
+      source,
+      ["verdict", "outcome", "confidence", "proof", "questions"],
+      "agent_handoff",
+    );
+    const outcome = compatibilityAlias(compact, "verdict", "outcome", "agent_handoff");
+    if (outcome == null) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.verdict is required");
+    }
+    const proof = boundedString(compact.proof, "agent_handoff.proof", 500);
+    const questions = compact.questions == null
+      ? []
+      : stringArray(compact.questions, "agent_handoff.questions", 3, 240);
+    return {
+      protocol: AGENT_HANDOFF_PROTOCOL,
+      profile: "assessor.verdict.v1",
+      outcome,
+      confidence: compact.confidence || "medium",
+      handoffs: [{
+        id: "verdict",
+        depends_on: [],
+        target: { kind: "pipeline", role: "$pipeline" },
+        intent: "Submit terminal assessor verdict",
+        report: {
+          summary: proof,
+          claims: [],
+          scope: {},
+          constraints: [],
+          success_criteria: [],
+          questions,
+          payload: {},
+        },
+      }],
+    };
+  }
+  if (!Array.isArray(source.handoffs)) return args;
   return {
     ...source,
     handoffs: source.handoffs.map((raw, index) => {
@@ -1483,9 +1583,7 @@ export function rejectAgentHandoffForLaterTool(agentCallId, toolName, { db = get
 }
 
 function renderEvidence(evidence, lane) {
-  const title = `${lane} — ${evidence.provenance.kind} · ${evidence.provenance.source || evidence.provenance.object_type} · ${evidence.selector}`;
-  const quoted = evidence.excerpt.split("\n").map((line) => `> ${line}`).join("\n");
-  return `${title}\n${quoted}`;
+  return `${lane}: ${evidence.selector}`;
 }
 
 function renderReport(report) {
@@ -1497,7 +1595,7 @@ function renderReport(report) {
     for (const lane of ["proof", "support"]) {
       for (const evidence of detail[lane] || []) parts.push(renderEvidence(evidence, lane[0].toUpperCase() + lane.slice(1)));
     }
-    for (const [evidence, reason] of detail.decoy || []) parts.push(`${renderEvidence(evidence, "Decoy")}\nWhy decoy: ${reason}`);
+    for (const [evidence, reason] of detail.decoy || []) parts.push(`${renderEvidence(evidence, "Decoy")} — ${reason}`);
     if (detail.prose) parts.push(`Agent synthesis: ${detail.prose}`);
   }
   if (report.constraints.length) parts.push(`Constraints:\n${report.constraints.map((entry) => `- ${entry}`).join("\n")}`);
@@ -1508,14 +1606,57 @@ function renderReport(report) {
 
 function evidenceRefs(report) {
   const lanes = { proof: [], support: [], decoy: [] };
+  const selector = (item) => ({
+    ref: item.ref,
+    ...(item.lines ? {
+      lines: {
+        start: item.lines.start,
+        count: item.lines.end - item.lines.start + 1,
+      },
+    } : {}),
+  });
   for (const claim of report.claims || []) {
     const detail = claim[1] || {};
     for (const lane of ["proof", "support"]) {
-      for (const item of detail[lane] || []) lanes[lane].push([item.ref]);
+      for (const item of detail[lane] || []) lanes[lane].push(selector(item));
     }
-    for (const [item, reason] of detail.decoy || []) lanes.decoy.push([item.ref, reason]);
+    for (const [item, reason] of detail.decoy || []) lanes.decoy.push({
+      ...selector(item),
+      why: reason,
+    });
   }
   return lanes;
+}
+
+const PLANNER_TASK_SPEC_MAX_CHARS = 2000;
+
+function plannerTaskSpec(handoff) {
+  const report = handoff.report || {};
+  const sections = [];
+  const summary = String(report.summary || handoff.intent || "").trim();
+  if (summary) sections.push(summary);
+  const claims = [...new Set(
+    (report.claims || [])
+      .map((claim) => String(claim?.[0] || "").trim())
+      .filter(Boolean),
+  )];
+  if (claims.length > 0) {
+    sections.push(`Material context:\n${claims.map((claim) => `- ${claim}`).join("\n")}`);
+  }
+  const constraints = [...new Set(
+    (report.constraints || []).map((constraint) => String(constraint || "").trim()).filter(Boolean),
+  )];
+  if (constraints.length > 0) {
+    sections.push(`Constraints:\n${constraints.map((constraint) => `- ${constraint}`).join("\n")}`);
+  }
+  const taskSpec = sections.join("\n\n") || String(handoff.intent || "").trim();
+  if (taskSpec.length > PLANNER_TASK_SPEC_MAX_CHARS) {
+    fail(
+      "AGENT_HANDOFF_TOO_LARGE",
+      `planner task_spec exceeds ${PLANNER_TASK_SPEC_MAX_CHARS} characters; shorten summary, claims, or constraints`,
+    );
+  }
+  return taskSpec;
 }
 
 function packetEvidence(packet) {
@@ -1593,8 +1734,9 @@ function renderCompletionCompatibilityOutput(packet) {
 function plannerCompatibilityTasks(packet) {
   const indexes = new Map(packet.handoffs.map((handoff, index) => [handoff.id, index]));
   return packet.handoffs.map((handoff) => {
-    const reportText = renderReport(handoff.report);
+    const taskSpec = plannerTaskSpec(handoff);
     const refs = evidenceRefs(handoff.report);
+    const hasRefs = Object.values(refs).some((entries) => entries.length > 0);
     const metadata = Object.fromEntries(
       PLANNER_REPORT_METADATA_KEYS
         .filter((key) => handoff.report[key] != null)
@@ -1602,7 +1744,7 @@ function plannerCompatibilityTasks(packet) {
     );
     const task = {
         title: handoff.intent,
-        task_spec: reportText || handoff.intent,
+        task_spec: taskSpec,
         success_criteria: handoff.report.success_criteria.length ? handoff.report.success_criteria : [handoff.intent],
         depends_on_index: handoff.depends_on.map((id) => indexes.get(id)),
         task_mode: handoff.report.scope.task_mode || "code",
@@ -1615,7 +1757,7 @@ function plannerCompatibilityTasks(packet) {
         job_type: handoff.target.role === "artificer" ? "artificer" : handoff.target.role,
         dev_brief: {
           source: "hash_ref_store",
-          summary: handoff.report.summary,
+          ...(hasRefs ? {} : { summary: handoff.report.summary }),
           key_files: handoff.report.scope.files_to_modify || [],
           related_files: [],
           planner_file_priorities: (handoff.report.scope.files_to_modify || []).map((path, index) => ({ path, rank: index + 1 })),
@@ -1658,10 +1800,15 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
   const first = packet.handoffs[0];
   const report = renderReport(first.report);
   if (packet.profile === "assessor.verdict.v1") {
+    const reasons = [...new Set(
+      [first.report.summary, ...first.report.claims.map((claim) => claim[0])]
+        .map((reason) => String(reason || "").trim())
+        .filter(Boolean),
+    )];
     return `\`\`\`json\n${JSON.stringify({
       verdict: packet.outcome,
       confidence: packet.confidence || "medium",
-      reasons: [first.report.summary, ...first.report.claims.map((claim) => claim[0])].filter(Boolean),
+      reasons,
       spawn_jobs: [],
       human_questions: first.report.questions,
       suggestions: [],
@@ -1687,8 +1834,9 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
     const questions = Array.isArray(research.question_details) && research.question_details.length > 0
       ? research.question_details
       : first.report.questions;
-    return `${report}\n\n\`\`\`json\n${JSON.stringify({
+    return `\`\`\`json\n${JSON.stringify({
       synthesis: first.report.summary,
+      claims: first.report.claims.map((claim) => claim[0]).filter(Boolean),
       key_files: files,
       related_files: relatedFiles,
       key_symbols: research.key_symbols || [],

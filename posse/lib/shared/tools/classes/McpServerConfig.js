@@ -139,6 +139,7 @@ function projectCitationChildRemoteSurface(surface = {}) {
       agent_handoff_v1: hasHandoff,
       agent_handoff_compact_v1: source?.coordination?.agent_handoff_compact_v1 === true,
       agent_handoff_compact_v2: source?.coordination?.agent_handoff_compact_v2 === true,
+      agent_handoff_compact_v3: source?.coordination?.agent_handoff_compact_v3 === true,
       sub_agent_v1: false,
       sub_agent_next_input_v1: hasCursor,
       status: "experimental",

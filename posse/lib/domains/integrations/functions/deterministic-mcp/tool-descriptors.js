@@ -794,9 +794,12 @@ export function getToolSchema(name) {
   return TOOL_CATALOG[name]?.schema || null;
 }
 
-export function getToolSchemaForRole(name, role, { compactCompletion = false } = {}) {
+export function getToolSchemaForRole(name, role, {
+  compactCompletion = false,
+  compactV3 = false,
+} = {}) {
   if (name !== "agent_handoff") return getToolSchema(name);
-  return getAgentHandoffToolSchemaForRole(role, { compactCompletion });
+  return getAgentHandoffToolSchemaForRole(role, { compactCompletion, compactV3 });
 }
 
 export function getToolExecutionSpec(name) {

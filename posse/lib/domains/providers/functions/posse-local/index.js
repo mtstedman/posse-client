@@ -597,6 +597,7 @@ export async function callProvider(promptText, opts = {}) {
       allowWrite,
       issuedToolSurface,
       agentHandoffCompactV1: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
+      agentHandoffCompactV3: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true,
       scopedFiles,
       createFiles,
       createRoots,

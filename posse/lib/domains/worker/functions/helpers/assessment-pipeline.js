@@ -74,6 +74,7 @@ import { getDb } from "../../../../shared/storage/functions/index.js";
 import { ensureRegisteredTestTables, runRegisteredTest } from "../../../../shared/tools/functions/toolkit/registered-tests.js";
 import {
   persistPendingAssessmentFileRequests,
+  shouldDeferAssessmentToFileRequestContinuation,
 } from "./assessment-file-requests.js";
 
 function readSettingText(key) {
@@ -1691,8 +1692,15 @@ export async function runPostExecutionAssessment(worker, {
     }
   }
 
-  // Skip assessment when the job made no file changes but has file requests.
-  const skipAssessForFileRequest = !hasFileChanges && hasPendingFileRequests();
+  // When a file-request continuation is guaranteed, assess the combined branch
+  // after that continuation instead of paying for an intermediate verdict over
+  // work the pipeline already knows is incomplete. Human-gated continuations
+  // retain the checkpoint assessment unless this run auto-approves the gate.
+  const skipAssessForFileRequest = shouldDeferAssessmentToFileRequestContinuation({
+    pendingFileRequests,
+    hasFileChanges,
+    autoApprove: worker.autoApprove,
+  });
   const skipAssessForSatisfiedNoop = satisfiedNoop && !verifiedNoChange;
   const shouldRunAssessment = ASSESSABLE_JOB_TYPES.has(job.job_type)
     && !worker.dryRun

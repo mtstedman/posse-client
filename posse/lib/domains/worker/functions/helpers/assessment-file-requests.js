@@ -55,3 +55,13 @@ export function flattenPendingAssessmentFileRequests(pendingFileRequests) {
   return [...normalized.autoApproved, ...normalized.needsApproval];
 }
 
+export function shouldDeferAssessmentToFileRequestContinuation({
+  pendingFileRequests,
+  hasFileChanges,
+  autoApprove = false,
+} = {}) {
+  const normalized = normalizePendingAssessmentFileRequests(pendingFileRequests);
+  if (!normalized) return false;
+  if (!hasFileChanges) return true;
+  return normalized.needsApproval.length === 0 || autoApprove === true;
+}

@@ -492,86 +492,47 @@ const HANDOFF_EVIDENCE_SELECTOR = {
   additionalProperties: false,
 };
 
+const COMPACT_HANDOFF_SELECTOR = {
+  type: "string",
+  pattern: "^#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?$",
+  description: "Opaque stored ref, preferably narrowed to an inclusive line range such as #abcd:L23-L40.",
+};
+
 const HANDOFF_DECOY = {
   type: "object",
-  description: "Canonical selector/reason decoy. Flat ref/lines and summary are accepted as migration aliases.",
   properties: {
-    selector: HANDOFF_EVIDENCE_SELECTOR,
-    ref: HANDOFF_REF,
-    lines: HANDOFF_EVIDENCE_SELECTOR.properties.lines,
+    selector: COMPACT_HANDOFF_SELECTOR,
     reason: { type: "string", minLength: 1, maxLength: 500 },
-    summary: { type: "string", minLength: 1, maxLength: 500 },
   },
-  anyOf: [
-    { type: "object", required: ["selector"] },
-    { type: "object", required: ["ref"] },
-  ],
+  required: ["selector", "reason"],
   additionalProperties: false,
 };
 
 const HANDOFF_CLAIM = {
   type: "object",
   description:
-    "One specific claim with optional evidence. Use summary for brief synthesis. Hash refs belong only in proof, support, or decoy selectors, never in claim or summary. " +
-    "Proof requires a direct storage-owned tool ref or a verified server-side source_ref slice; inline agent-authored refs are not proof.",
+    "One concise claim. Evidence is stored by ref; use line-range selectors instead of copying tool output.",
   properties: {
-    claim: { type: "string", minLength: 1, maxLength: 1000 },
-    name: { type: "string", minLength: 1, maxLength: 1000, description: "Deprecated migration alias for claim." },
-    proof: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
-    support: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
-    decoy: { type: "array", maxItems: 8, items: HANDOFF_DECOY },
-    summary: { type: "string", maxLength: 4000, description: "Optional claim synthesis. Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
-    prose: { type: "string", maxLength: 4000, description: "Deprecated migration alias for summary." },
-  },
-  anyOf: [
-    { type: "object", required: ["claim"] },
-    { type: "object", required: ["name"] },
-  ],
-  additionalProperties: false,
-};
-
-const HANDOFF_CLAIMS = {
-  type: "array",
-  maxItems: 12,
-  items: HANDOFF_CLAIM,
-};
-
-const ASSESSOR_CLAIM = {
-  type: "object",
-  description:
-    "One verdict claim. Use exactly claim plus optional summary and optional proof. " +
-    "proof contains visible stored hash-ref strings such as #abcd; terminal assessor proof may use either tool-owned evidence or agent-authored prose refs.",
-  properties: {
-    claim: { type: "string", minLength: 1, maxLength: 1000 },
-    summary: { type: "string", maxLength: 4000 },
-    proof: { type: "array", maxItems: 8, items: HANDOFF_REF },
+    claim: { type: "string", minLength: 1, maxLength: 240 },
+    proof: { type: "array", maxItems: 4, items: COMPACT_HANDOFF_SELECTOR },
+    support: { type: "array", maxItems: 4, items: COMPACT_HANDOFF_SELECTOR },
+    decoy: { type: "array", maxItems: 2, items: HANDOFF_DECOY },
+    summary: { type: "string", maxLength: 300 },
   },
   required: ["claim"],
   additionalProperties: false,
 };
 
-const ASSESSOR_CLAIMS = {
+const HANDOFF_CLAIMS = {
   type: "array",
-  description:
-    "A JSON array of verdict claims, never an object keyed by claim labels.",
-  maxItems: 12,
-  items: ASSESSOR_CLAIM,
+  maxItems: 6,
+  items: HANDOFF_CLAIM,
 };
 
 const HANDOFF_STRING_LIST = {
   type: "array",
   maxItems: 50,
   items: { type: "string", minLength: 1, maxLength: 1000 },
-};
-
-const RESEARCHER_SCOPE = {
-  type: "object",
-  description: "Verified downstream seed files. These are research seeds, not write authority.",
-  properties: {
-    key_files: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
-    related_files: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
-  },
-  additionalProperties: false,
 };
 
 const PLANNER_SCOPE = {
@@ -674,14 +635,7 @@ function semanticRoleTool({ description, profile, profiles = [profile], outcomes
   };
 }
 
-const RESEARCHER_REPORT = exactReport({
-  scope: RESEARCHER_SCOPE,
-  constraints: HANDOFF_STRING_LIST,
-  questions: HANDOFF_STRING_LIST,
-  research: AGENT_HANDOFF_RESEARCH_DATA,
-});
-
-const PLANNER_COMPACT_TASK = {
+const PLANNER_COMPACT_TASK_V3 = {
   type: "object",
   description:
     "One planner task. Posse derives the canonical target from role, supplies protocol/profile/outcome, " +
@@ -768,6 +722,96 @@ const CITATION_HANDOFF_FIELDS = {
   intent: { type: "string", minLength: 1, maxLength: 200 },
 };
 
+const V2_HANDOFF_DECOY = {
+  type: "object",
+  description: "Canonical selector/reason decoy. Flat ref/lines and summary are accepted as migration aliases.",
+  properties: {
+    selector: HANDOFF_EVIDENCE_SELECTOR,
+    ref: HANDOFF_REF,
+    lines: HANDOFF_EVIDENCE_SELECTOR.properties.lines,
+    reason: { type: "string", minLength: 1, maxLength: 500 },
+    summary: { type: "string", minLength: 1, maxLength: 500 },
+  },
+  anyOf: [
+    { type: "object", required: ["selector"] },
+    { type: "object", required: ["ref"] },
+  ],
+  additionalProperties: false,
+};
+
+const V2_HANDOFF_CLAIM = {
+  type: "object",
+  description:
+    "One specific claim with optional evidence. Use summary for brief synthesis. Hash refs belong only in proof, support, or decoy selectors, never in claim or summary. " +
+    "Proof requires a direct storage-owned tool ref or a verified server-side source_ref slice; inline agent-authored refs are not proof.",
+  properties: {
+    claim: { type: "string", minLength: 1, maxLength: 1000 },
+    name: { type: "string", minLength: 1, maxLength: 1000, description: "Deprecated migration alias for claim." },
+    proof: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
+    support: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
+    decoy: { type: "array", maxItems: 8, items: V2_HANDOFF_DECOY },
+    summary: { type: "string", maxLength: 4000, description: "Optional claim synthesis. Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
+    prose: { type: "string", maxLength: 4000, description: "Deprecated migration alias for summary." },
+  },
+  anyOf: [
+    { type: "object", required: ["claim"] },
+    { type: "object", required: ["name"] },
+  ],
+  additionalProperties: false,
+};
+
+const V2_HANDOFF_CLAIMS = {
+  type: "array",
+  maxItems: 12,
+  items: V2_HANDOFF_CLAIM,
+};
+
+const V2_RESEARCHER_SCOPE = {
+  type: "object",
+  description: "Verified downstream seed files. These are research seeds, not write authority.",
+  properties: {
+    key_files: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
+    related_files: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
+  },
+  additionalProperties: false,
+};
+
+const V2_RESEARCHER_REPORT = exactReport({
+  scope: V2_RESEARCHER_SCOPE,
+  constraints: HANDOFF_STRING_LIST,
+  questions: HANDOFF_STRING_LIST,
+  research: AGENT_HANDOFF_RESEARCH_DATA,
+}, ["summary"], { claims: V2_HANDOFF_CLAIMS });
+
+const V2_PLANNER_COMPACT_TASK = {
+  ...PLANNER_COMPACT_TASK_V3,
+  properties: {
+    ...PLANNER_COMPACT_TASK_V3.properties,
+    claims: V2_HANDOFF_CLAIMS,
+  },
+};
+
+const V2_ASSESSOR_CLAIM = {
+  type: "object",
+  description:
+    "One verdict claim. Use exactly claim plus optional summary and optional proof. " +
+    "proof contains visible stored hash-ref strings such as #abcd; terminal assessor proof may use either tool-owned evidence or agent-authored prose refs.",
+  properties: {
+    claim: { type: "string", minLength: 1, maxLength: 1000 },
+    summary: { type: "string", maxLength: 4000 },
+    proof: { type: "array", maxItems: 8, items: HANDOFF_REF },
+  },
+  required: ["claim"],
+  additionalProperties: false,
+};
+
+const V2_ASSESSOR_CLAIMS = {
+  type: "array",
+  description: "A JSON array of verdict claims, never an object keyed by claim labels.",
+  maxItems: 12,
+  items: V2_ASSESSOR_CLAIM,
+};
+
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
     "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. Use named claim objects with summary for optional synthesis. Prefer 40-line evidence slices and 2000-character summaries; bounded overflow is accepted up to the schema hard ceilings. Do not submit confidence or payload. The receipt ends provider generation.",
@@ -776,7 +820,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   outcomes: ["success", "gap", "input_required", "complete"],
   handoff: exactHandoff({
     oneOf: [exactTarget("pipeline", "$pipeline"), exactTarget("result", "$result")],
-  }, RESEARCHER_REPORT),
+  }, V2_RESEARCHER_REPORT),
   maxHandoffs: 1,
 });
 
@@ -797,7 +841,145 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
         type: "array",
         minItems: 1,
         maxItems: 50,
-        items: PLANNER_COMPACT_TASK,
+        items: V2_PLANNER_COMPACT_TASK,
+      },
+    },
+    required: ["tasks"],
+    additionalProperties: false,
+  },
+};
+
+export const TOOL_AGENT_HANDOFF_ASSESSOR = semanticRoleTool({
+  description:
+    "Finish assessment with one exact verdict report and explicit confidence. claims must be an array; each item uses claim plus optional summary and optional proof containing only visible stored hash-ref strings. Terminal assessor proof may use tool-owned evidence or agent-authored prose refs. " +
+    "Do not use keyed claims, name/prose aliases, or free-form/path/line/tool evidence objects. Do not submit payload or execution scope. The receipt ends provider generation.",
+  profile: "assessor.verdict.v1",
+  outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
+  confidence: true,
+  handoff: {
+    type: "object",
+    description: "Use exactly one nested target and report; do not flatten report fields or add compatibility aliases.",
+    properties: {
+      target: exactTarget("pipeline", "$pipeline"),
+      report: exactReport({
+        questions: HANDOFF_STRING_LIST,
+      }, ["summary", "claims"], { claims: V2_ASSESSOR_CLAIMS }),
+    },
+    required: ["target", "report"],
+    additionalProperties: false,
+  },
+  maxHandoffs: 1,
+});
+
+export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
+  type: "function",
+  name: "agent_handoff",
+  description:
+    "Finish research with a compact brief. Cite narrow line-range refs instead of copying tool output. The receipt ends provider generation.",
+  parameters: {
+    type: "object",
+    properties: {
+      profile: {
+        type: "string",
+        enum: ["researcher.pipeline.v1", "researcher.report.v1"],
+      },
+      outcome: {
+        type: "string",
+        enum: ["success", "gap", "input_required", "complete"],
+      },
+      summary: { type: "string", minLength: 1, maxLength: 800 },
+      claims: { ...HANDOFF_CLAIMS, default: [] },
+      key_files: {
+        type: "array",
+        maxItems: 12,
+        items: { type: "string", minLength: 1, maxLength: 300 },
+      },
+      related_files: {
+        type: "array",
+        maxItems: 12,
+        items: { type: "string", minLength: 1, maxLength: 300 },
+      },
+      key_symbols: {
+        type: "array",
+        maxItems: 8,
+        items: AGENT_HANDOFF_ATLAS_SYMBOL_ID,
+      },
+      memories: {
+        type: "array",
+        maxItems: 2,
+        items: {
+          type: "object",
+          properties: {
+            title: { type: "string", minLength: 1, maxLength: 80 },
+            content: { type: "string", minLength: 1, maxLength: 400 },
+            key_files: {
+              type: "array",
+              maxItems: 8,
+              items: { type: "string", minLength: 1, maxLength: 300 },
+            },
+          },
+          required: ["title", "content"],
+          additionalProperties: false,
+        },
+      },
+      file_priorities: {
+        type: "array",
+        maxItems: 12,
+        items: {
+          type: "object",
+          properties: {
+            path: { type: "string", minLength: 1, maxLength: 300 },
+            rank: { type: "integer", minimum: 1, maximum: 12 },
+            usefulness: { type: "string", enum: ["primary", "supporting", "context", "low"] },
+            evidence: { type: "string", enum: ["audited_file_read", "atlas", "search", "prior_research", "web"] },
+            reason: { type: "string", minLength: 1, maxLength: 160 },
+          },
+          required: ["path", "rank", "usefulness", "evidence", "reason"],
+          additionalProperties: false,
+        },
+      },
+      patterns: {
+        type: "array",
+        maxItems: 8,
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string", minLength: 1, maxLength: 80 },
+            description: { type: "string", minLength: 1, maxLength: 240 },
+          },
+          required: ["name", "description"],
+          additionalProperties: false,
+        },
+      },
+      questions: {
+        type: "array",
+        maxItems: 5,
+        items: { type: "string", minLength: 1, maxLength: 240 },
+      },
+    },
+    required: ["profile", "outcome", "summary"],
+    additionalProperties: false,
+  },
+};
+
+export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
+  type: "function",
+  name: "agent_handoff",
+  description:
+    "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
+    "Use role dev or artificer for executable work; human_input, promote, and no_tasks are system roles. " +
+    "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and 2000-character summaries; bounded overflow is accepted up to the schema hard ceilings. " +
+    "Use exactly one no_tasks task only when no work is required. Correct example: " +
+    '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and tests.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["Focused tests pass"]}]}. ' +
+    "Use only fields shown in the task schema; do not wrap tasks in another report envelope. The receipt ends provider generation.",
+  parameters: {
+    type: "object",
+    properties: {
+      tasks: {
+        type: "array",
+        minItems: 1,
+        maxItems: 50,
+        items: PLANNER_COMPACT_TASK_V3,
       },
     },
     required: ["tasks"],
@@ -822,36 +1004,52 @@ export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
 // the exact researcher/planner/citation schemas above instead of this alias.
 export const TOOL_AGENT_HANDOFF_REPORT = TOOL_AGENT_HANDOFF_RESEARCHER;
 
-export const TOOL_AGENT_HANDOFF_ASSESSOR = semanticRoleTool({
+export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
+  type: "function",
+  name: "agent_handoff",
   description:
-    "Finish assessment with one exact verdict report and explicit confidence. claims must be an array; each item uses claim plus optional summary and optional proof containing only visible stored hash-ref strings. Terminal assessor proof may use tool-owned evidence or agent-authored prose refs. " +
-    "Do not use keyed claims, name/prose aliases, or free-form/path/line/tool evidence objects. Do not submit payload or execution scope. The receipt ends provider generation.",
-  profile: "assessor.verdict.v1",
-  outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
-  confidence: true,
-  handoff: {
+    "Finish assessment with one verdict and a brief prose proof. Do not create or copy evidence solely for this call. The receipt ends provider generation.",
+  parameters: {
     type: "object",
-    description: "Use exactly one nested target and report; do not flatten report fields or add compatibility aliases.",
     properties: {
-      target: exactTarget("pipeline", "$pipeline"),
-      report: exactReport({
-        questions: HANDOFF_STRING_LIST,
-      }, ["summary", "claims"], { claims: ASSESSOR_CLAIMS }),
+      verdict: {
+        type: "string",
+        enum: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
+      },
+      proof: {
+        type: "string",
+        minLength: 1,
+        maxLength: 500,
+        description: "One concise sentence stating the decisive verified fact or remaining defect.",
+      },
+      questions: {
+        type: "array",
+        maxItems: 3,
+        items: { type: "string", minLength: 1, maxLength: 240 },
+      },
     },
-    required: ["target", "report"],
+    required: ["verdict", "proof"],
     additionalProperties: false,
   },
-  maxHandoffs: 1,
-});
+};
 
-export function getAgentHandoffToolSchemaForRole(role, { compactCompletion = false } = {}) {
+export function getAgentHandoffToolSchemaForRole(role, {
+  compactCompletion = false,
+  compactV3 = false,
+} = {}) {
   if (!compactCompletion) return TOOL_AGENT_HANDOFF;
   const normalizedRole = String(role || "").trim().toLowerCase();
   if (normalizedRole === "dev" || normalizedRole === "fix") return TOOL_AGENT_HANDOFF_DEV;
   if (normalizedRole === "artificer") return TOOL_AGENT_HANDOFF_ARTIFICER;
-  if (normalizedRole === "assessor") return TOOL_AGENT_HANDOFF_ASSESSOR;
-  if (normalizedRole === "researcher") return TOOL_AGENT_HANDOFF_RESEARCHER;
-  if (normalizedRole === "planner") return TOOL_AGENT_HANDOFF_PLANNER;
+  if (normalizedRole === "assessor") {
+    return compactV3 ? TOOL_AGENT_HANDOFF_ASSESSOR_V3 : TOOL_AGENT_HANDOFF_ASSESSOR;
+  }
+  if (normalizedRole === "researcher") {
+    return compactV3 ? TOOL_AGENT_HANDOFF_RESEARCHER_V3 : TOOL_AGENT_HANDOFF_RESEARCHER;
+  }
+  if (normalizedRole === "planner") {
+    return compactV3 ? TOOL_AGENT_HANDOFF_PLANNER_V3 : TOOL_AGENT_HANDOFF_PLANNER;
+  }
   if (["citation_synthesis", "subagent"].includes(normalizedRole)) return TOOL_AGENT_HANDOFF_CITATION;
   return TOOL_AGENT_HANDOFF;
 }

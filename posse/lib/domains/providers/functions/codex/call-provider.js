@@ -245,6 +245,7 @@ export async function callProvider(promptText, {
       projectDbWrite,
       issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
       agentHandoffCompactV1: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
+      agentHandoffCompactV3: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true,
       scopedFiles,
       createFiles,
       createRoots,

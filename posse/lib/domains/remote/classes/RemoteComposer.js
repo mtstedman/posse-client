@@ -364,6 +364,8 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
     && issued.coordination?.agentHandoffCompactV1 === true;
   const compactHandoffV2Enabled = compactHandoffEnabled
     && issued.coordination?.agentHandoffCompactV2 === true;
+  const compactHandoffV3Enabled = compactHandoffV2Enabled
+    && issued.coordination?.agentHandoffCompactV3 === true;
   const localSubAgentEnabled = packet?.agent_coordination?.sub_agent_v1 === true;
   const subAgentEnabled = issued.valid
     && handoffEnabled
@@ -394,6 +396,7 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
       agent_handoff_v1: handoffEnabled,
       agent_handoff_compact_v1: compactHandoffEnabled,
       agent_handoff_compact_v2: compactHandoffV2Enabled,
+      agent_handoff_compact_v3: compactHandoffV3Enabled,
       sub_agent_v1: subAgentEnabled,
       sub_agent_next_input_v1: subAgentNextInputEnabled,
       status: "experimental",
@@ -410,11 +413,13 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
     agent_handoff_v1: handoffEnabled,
     agent_handoff_compact_v1: compactHandoffEnabled,
     agent_handoff_compact_v2: compactHandoffV2Enabled,
+    agent_handoff_compact_v3: compactHandoffV3Enabled,
     sub_agent_v1: subAgentEnabled,
     sub_agent_next_input_v1: subAgentNextInputEnabled,
     remote_acknowledged: issued.coordination?.agentHandoffV1 === true,
     compact_remote_acknowledged: issued.coordination?.agentHandoffCompactV1 === true,
     compact_v2_remote_acknowledged: issued.coordination?.agentHandoffCompactV2 === true,
+    compact_v3_remote_acknowledged: issued.coordination?.agentHandoffCompactV3 === true,
     sub_agent_remote_acknowledged: issued.coordination?.subAgentV1 === true,
     sub_agent_next_input_remote_acknowledged: issued.coordination?.subAgentNextInputV1 === true,
   };

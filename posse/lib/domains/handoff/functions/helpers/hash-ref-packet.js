@@ -1,8 +1,10 @@
 import {
+  formatHashRefSelector,
   HASH_REF_DESTINATION_SET,
   HASH_REF_LANES,
   isHashRefAlias,
   normalizeHashRefAlias,
+  parseHashRefSelector,
 } from "../../../../catalog/hash-store.js";
 import {
   fetchHashRefForContext,
@@ -31,18 +33,32 @@ function normalizeDestination(value) {
 }
 
 function entryParts(entry, maxWhyChars) {
-  if (typeof entry === "string") return { ref: entry, why: "" };
-  if (Array.isArray(entry)) {
+  if (typeof entry === "string") {
+    const selector = parseHashRefSelector(entry);
     return {
-      ref: entry[0],
+      ref: selector?.ref || entry,
+      lines: selector?.lines || null,
+      why: "",
+    };
+  }
+  if (Array.isArray(entry)) {
+    const selector = typeof entry[0] === "string"
+      ? parseHashRefSelector(entry[0])
+      : null;
+    return {
+      ref: selector?.ref || entry[0]?.ref || entry[0]?.hash || entry[0],
+      lines: selector?.lines || entry[0]?.lines || null,
       why: compactText(entry[1], maxWhyChars),
     };
   }
   if (entry && typeof entry === "object") {
+    const selector = parseHashRefSelector(entry.selector ?? entry.ref ?? entry.hash ?? entry.ref_hash);
     return {
-      ref: entry.ref ?? entry.hash ?? entry.ref_hash,
+      ref: selector?.ref || entry.ref || entry.hash || entry.ref_hash,
+      lines: selector?.lines || entry.lines || null,
       why: compactText(entry.why ?? entry.reason ?? entry.note, maxWhyChars),
       sourceRef: entry.source_ref ?? entry.sourceRef ?? null,
+      sourceSelector: entry.source_selector ?? entry.sourceSelector ?? null,
       objectType: entry.object_type ?? entry.objectType ?? null,
       entryKind: entry.entry_kind ?? entry.entryKind ?? null,
       sizeChars: entry.size_chars ?? entry.sizeChars ?? null,
@@ -53,6 +69,15 @@ function entryParts(entry, maxWhyChars) {
     };
   }
   return { ref: "", why: "" };
+}
+
+function normalizeLineRange(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const start = Number(value.start);
+  const count = value.count == null ? null : Number(value.count);
+  const end = count == null ? Number(value.end) : start + count - 1;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) return null;
+  return { start, end };
 }
 
 function packetLaneSource(input, lane) {
@@ -170,23 +195,32 @@ export function normalizeHashRefHandoffPacket(input, opts = {}) {
       if (lanes[lane].length >= maxRefsPerLane) break;
       const parts = entryParts(entry, maxWhyChars);
       const ref = normalizeHashRefAlias(parts.ref);
+      const lines = normalizeLineRange(parts.lines);
+      const selector = formatHashRefSelector(ref, lines);
       const why = compactText(parts.why, maxWhyChars);
       if (!isHashRefAlias(ref)) {
         dropped.push({ lane, ref: String(parts.ref || "").trim(), reason: "invalid_ref" });
         continue;
       }
-      if (seen.has(ref)) {
-        dropped.push({ lane, ref, reason: "duplicate_ref" });
+      if (seen.has(selector)) {
+        dropped.push({ lane, ref: selector, reason: "duplicate_ref" });
         continue;
       }
       if (lane === "decoy" && !why) {
         dropped.push({ lane, ref, reason: "missing_decoy_why" });
         continue;
       }
-      seen.add(ref);
+      seen.add(selector);
       const normalized = { ref };
+      if (lines) normalized.lines = lines;
       if (why) normalized.why = why;
       if (parts.sourceRef) normalized.source_ref = normalizeHashRefAlias(parts.sourceRef);
+      if (parts.sourceSelector && parseHashRefSelector(parts.sourceSelector)) {
+        normalized.source_selector = formatHashRefSelector(
+          parseHashRefSelector(parts.sourceSelector).ref,
+          parseHashRefSelector(parts.sourceSelector).lines,
+        );
+      }
       if (parts.objectType) normalized.object_type = compactText(parts.objectType, 80);
       if (parts.entryKind) normalized.entry_kind = compactText(parts.entryKind, 40);
       if (parts.sizeChars != null && Number.isFinite(Number(parts.sizeChars))) {
@@ -228,15 +262,25 @@ export function normalizeHashRefHandoffPacket(input, opts = {}) {
   return { packet, dropped };
 }
 
-function entryForResurface(fetchResult) {
+function selectedPayloadText(payloadText, lines) {
+  if (!lines) return String(payloadText || "");
+  const sourceLines = String(payloadText || "").replace(/\r\n?/g, "\n").split("\n");
+  if (lines.end > sourceLines.length) return null;
+  return sourceLines.slice(lines.start - 1, lines.end).join("\n");
+}
+
+function entryForResurface(fetchResult, laneEntry = null) {
   const entry = fetchResult?.entry;
   if (!entry) return null;
   if (entry.entry_kind === "materialized") {
+    const payloadText = selectedPayloadText(entry.payload_text, laneEntry?.lines);
+    if (payloadText == null) return null;
     return {
       entryKind: "materialized",
-      payloadText: entry.payload_text || "",
+      payloadText,
     };
   }
+  if (laneEntry?.lines) return null;
   return {
     entryKind: "descriptor",
     descriptor: entry.descriptor,
@@ -257,20 +301,22 @@ function resurfaceEntry(fetchResult, laneEntry, {
   packet,
 } = {}) {
   const sourceEntry = fetchResult?.entry;
-  const surfacedEntry = entryForResurface(fetchResult);
+  const surfacedEntry = entryForResurface(fetchResult, laneEntry);
   if (!sourceEntry || !surfacedEntry) return null;
+  const sourceSelector = formatHashRefSelector(laneEntry.ref, laneEntry.lines);
   const surfaced = surfaceHashRefForContext(targetContext, {
     ...surfacedEntry,
-    contentHash: sourceEntry.content_hash,
+    ...(laneEntry.lines ? {} : { contentHash: sourceEntry.content_hash }),
     objectType: sourceEntry.object_type,
-    source: sourceEntry.source || `hash_ref:${laneEntry.ref}`,
+    source: sourceEntry.source || `hash_ref:${sourceSelector}`,
     note: noteWithWhy(sourceEntry.note, laneEntry.why),
-    sizeChars: sourceEntry.size_chars,
+    ...(laneEntry.lines ? {} : { sizeChars: sourceEntry.size_chars }),
     versionId: sourceEntry.version_id,
     metadata: {
       ...(sourceEntry.metadata || {}),
       reissued_by: "hash_ref_handoff",
       source_ref: laneEntry.ref,
+      ...(laneEntry.lines ? { source_lines: laneEntry.lines, source_selector: sourceSelector } : {}),
       handoff_destination: packet?.destination || "handoff",
     },
   }, { ownerScope: targetOwnerScope });
@@ -278,6 +324,7 @@ function resurfaceEntry(fetchResult, laneEntry, {
   return {
     ref: surfaced.entry.ref,
     source_ref: laneEntry.ref,
+    ...(laneEntry.lines ? { source_selector: sourceSelector } : {}),
     ...(laneEntry.why ? { why: laneEntry.why } : {}),
     object_type: surfaced.entry.object_type,
     entry_kind: surfaced.entry.entry_kind,
@@ -313,15 +360,17 @@ export function reissueHashRefHandoffPacket(input, {
       } catch {
         targetFetchResult = null;
       }
-      if (targetFetchResult?.ok && targetFetchResult?.found && targetFetchResult.entry) {
+      if (!laneEntry.lines && targetFetchResult?.ok && targetFetchResult?.found && targetFetchResult.entry) {
         packet.lanes[lane].push(laneEntry);
         reissued += 1;
         continue;
       }
 
-      let fetchResult = null;
+      let fetchResult = targetFetchResult?.ok && targetFetchResult?.found && targetFetchResult.entry
+        ? targetFetchResult
+        : null;
       try {
-        fetchResult = fetchHashRefForContext(sourceContext, laneEntry.ref);
+        if (!fetchResult) fetchResult = fetchHashRefForContext(sourceContext, laneEntry.ref);
       } catch (err) {
         fetchResult = { ok: false, found: false, ref: laneEntry.ref, error: err?.message || "fetch_failed" };
       }
@@ -570,8 +619,9 @@ export function renderHashRefHandoffPacket(input, opts = {}) {
     lines.push("");
     lines.push(`${lane}:`);
     for (const entry of refs) {
+      const selector = formatHashRefSelector(entry.ref, entry.lines);
       const details = [
-        entry.source_ref ? `from ${entry.source_ref}` : "",
+        entry.source_selector ? `from ${entry.source_selector}` : (entry.source_ref ? `from ${entry.source_ref}` : ""),
         entry.object_type ? `type=${entry.object_type}` : "",
         Number.isFinite(Number(entry.size_chars)) ? `${Number(entry.size_chars)} chars` : "",
         lane === "proof" && packet.proof_expansions?.some((expanded) => expanded.ref === entry.ref) ? "expanded inline" : "",
@@ -579,7 +629,7 @@ export function renderHashRefHandoffPacket(input, opts = {}) {
         entry.unresolved ? `unresolved=${entry.error || "true"}` : "",
         entry.why ? entry.why : "",
       ].filter(Boolean);
-      lines.push(`- ${entry.ref}${details.length > 0 ? ` - ${details.join("; ")}` : ""}`);
+      lines.push(`- ${selector}${details.length > 0 ? ` - ${details.join("; ")}` : ""}`);
       const previewLines = lane === "proof" ? [] : renderPreview(entry.preview);
       for (const previewLine of previewLines) {
         lines.push(`  ${previewLine}`);
