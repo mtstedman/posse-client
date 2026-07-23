@@ -100,8 +100,252 @@ function repairNoopExactEditCall(call, exactIntent) {
   return exactIntent;
 }
 
+function repairModelNativeFullFileEditCall(call, targetPath, exactSource) {
+  if (!targetPath || call?.name !== "edit_file") return call;
+  const args = call?.arguments;
+  if (!args || typeof args.content !== "string") return call;
+  if (args.path != null && normalizedScopedPath(args.path) !== targetPath) return call;
+  if (typeof exactSource !== "string") {
+    return {
+      name: "read_file",
+      arguments: { path: targetPath },
+    };
+  }
+  const sourceHasTrailingNewline = /\r?\n$/.test(exactSource);
+  const sourceLineCount = exactSource.split(/\r?\n/).length - (sourceHasTrailingNewline ? 1 : 0);
+  const lineDecodedContent = !args.content.includes("\n") && /\\[nr]/.test(args.content)
+    ? args.content
+      .replace(/\\r\\n/g, "\n")
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t")
+    : args.content;
+  // Local models sometimes escape source delimiters as if a single-quoted
+  // string were nested inside JSON. Decode only quote escapes that sit at a
+  // source-token boundary; preserve apostrophes/quotes embedded in literals.
+  const decodedContent = lineDecodedContent
+    .replace(/(^|[\s(=,:;])\\'/gm, "$1'")
+    .replace(/\\'(?=[\s),.;}\]])/g, "'")
+    .replace(/(^|[\s(=,:;])\\"/gm, '$1"')
+    .replace(/\\"(?=[\s),.;}\]])/g, '"');
+  const sourceExtension = path.extname(targetPath).toLowerCase();
+  const sourceContent = new Set([".js", ".cjs", ".mjs", ".jsx", ".ts", ".tsx"]).has(sourceExtension)
+    ? decodedContent.replace(
+      /\/((?:\\.|[^/\r\n])+)\/([dgimsuvy]*)/g,
+      (_literal, body, flags) => `/${String(body).replace(/\\\\(?=[bBdDsSwW])/g, "\\")}/${flags}`,
+    )
+    : decodedContent;
+  const replacement = sourceHasTrailingNewline && !/\r?\n$/.test(sourceContent)
+    ? `${sourceContent}\n`
+    : sourceContent;
+  return {
+    name: "edit_file",
+    arguments: {
+      path: targetPath,
+      replaceLines: {
+        start: 0,
+        end: sourceLineCount,
+        content: replacement,
+      },
+    },
+  };
+}
+
+function normalizeJavascriptRegexEscapes(value, targetPath) {
+  if (typeof value !== "string") return value;
+  const sourceExtension = path.extname(targetPath).toLowerCase();
+  if (!new Set([".js", ".cjs", ".mjs", ".jsx", ".ts", ".tsx"]).has(sourceExtension)) {
+    return value;
+  }
+  return value.replace(
+    /\/((?:\\.|[^/\r\n])+)\/([dgimsuvy]*)/g,
+    (_literal, body, flags) => `/${String(body).replace(/\\\\(?=[bBdDsSwW])/g, "\\")}/${flags}`,
+  );
+}
+
+function repairModelNativeExactEditCall(call, targetPath, exactSource) {
+  if (!targetPath || call?.name !== "edit_file" || typeof exactSource !== "string") return call;
+  const args = call?.arguments;
+  if (!args || typeof args.old_string !== "string" || typeof args.new_string !== "string") return call;
+  if (args.path != null && normalizedScopedPath(args.path) !== targetPath) return call;
+  const normalizedOld = normalizeJavascriptRegexEscapes(args.old_string, targetPath);
+  const normalizedNew = normalizeJavascriptRegexEscapes(args.new_string, targetPath);
+  const candidates = [...new Set([
+    normalizedOld,
+    normalizedOld.trim(),
+  ].filter(Boolean))];
+  const exactOld = candidates.find((candidate) => exactSource.includes(candidate));
+  if (!exactOld) return {
+    ...call,
+    arguments: { ...args, new_string: normalizedNew },
+  };
+  return {
+    ...call,
+    arguments: {
+      ...args,
+      path: targetPath,
+      old_string: exactOld,
+      new_string: normalizedNew,
+    },
+  };
+}
+
+function exactEditRecoveryHint(name, result, targetPath, exactSource) {
+  if (name !== "edit_file" || typeof exactSource !== "string") return null;
+  const content = typeof result === "string" ? result : JSON.stringify(result ?? null);
+  if (!/old_string not found|made no changes|POSSE_LOCAL_LITERAL_CONSTRAINT/i.test(content)) return null;
+  return [
+    `EXACT EDIT RECOVERY: ${targetPath} is already loaded. Do not guess another old_string.`,
+    "Return the full corrected file through this exact adapter envelope:",
+    '{"tool":"edit_file","content":"FULL CORRECTED FILE CONTENT"}',
+    "The content must implement every literal constraint from the original task and assessor feedback while preserving unrelated source.",
+  ].join("\n");
+}
+
+function isRecoverableExactEditFailure(name, result, targetPath, exactSource) {
+  if (name !== "edit_file" || !targetPath || typeof exactSource !== "string") return false;
+  const content = typeof result === "string" ? result : JSON.stringify(result ?? null);
+  return /old_string not found|made no changes|POSSE_LOCAL_LITERAL_CONSTRAINT/i.test(content);
+}
+
+function localLiteralConstraintExpansion(promptText) {
+  const prompt = String(promptText || "");
+  const rules = [];
+  if (/lowercase(?:\s+only)?\s+ASCII|lowercase\s+ASCII\s+letters?/i.test(prompt)) {
+    rules.push([
+      "ASCII-only lowercasing: do not call toLowerCase() on the whole value.",
+      "Use value.replace(/[A-Z]/g, (character) => character.toLowerCase()) so non-ASCII characters stay unchanged.",
+    ].join(" "));
+  }
+  if (/(?:runs?\s+of\s+)?spaces?\s+(?:or|and)\s+underscores?/i.test(prompt)) {
+    rules.push([
+      "Literal space/underscore separators: use /[ _]+/g for the inner separator run.",
+      "Do not use \\s there; edge whitespace trimming is a separate trim() operation.",
+    ].join(" "));
+  }
+  if (/remove\s+leading\s*(?:\/|and)\s*trailing\s+hyphens?/i.test(prompt)) {
+    rules.push("Hyphen removal: replace the leading/trailing hyphen regex with the empty string '', never with another hyphen.");
+  }
+  if (rules.length === 0) return null;
+  return [
+    "LOCAL LITERAL CONSTRAINT EXPANSION (mechanically derived from the task):",
+    ...rules.map((rule) => `- ${rule}`),
+    "Apply these category-preserving recipes to the loaded source; they are required behavior, not optional examples.",
+  ].join("\n");
+}
+
+function localMutationText(args) {
+  if (typeof args?.new_string === "string") return args.new_string;
+  if (typeof args?.content === "string") return args.content;
+  if (typeof args?.replaceLines?.content === "string") return args.replaceLines.content;
+  return null;
+}
+
+function repairLocalLiteralConstraintText(promptText, content) {
+  const prompt = String(promptText || "");
+  let repaired = String(content || "");
+  if (/lowercase(?:\s+only)?\s+ASCII|lowercase\s+ASCII\s+letters?/i.test(prompt)
+    && /\.toLowerCase\(\)/.test(repaired)
+    && !/\[A-Z\]/.test(repaired)) {
+    repaired = repaired.replace(
+      /\.toLowerCase\(\)/g,
+      ".replace(/[A-Z]/g, (character) => character.toLowerCase())",
+    );
+  }
+  if (/(?:runs?\s+of\s+)?spaces?\s+(?:or|and)\s+underscores?/i.test(prompt)) {
+    repaired = repaired
+      .replace(/\/\\s\+\|_\+?\/g/g, "/[ _]+/g")
+      .replace(/\/_\+?\|\\s\+\/g/g, "/[ _]+/g");
+  }
+  if (/remove\s+leading\s*(?:\/|and)\s*trailing\s+hyphens?/i.test(prompt)) {
+    repaired = repaired.replace(
+      /(\.replace\(\/\^-\+\|-\+\$\/g,\s*)(["'])-\2(\))/g,
+      "$1$2$2$3",
+    );
+  }
+  return repaired;
+}
+
+function repairLocalLiteralConstraintCall(call, promptText) {
+  if (call?.name !== "edit_file") return call;
+  const args = call?.arguments;
+  const content = localMutationText(args);
+  if (!args || content == null) return call;
+  const repaired = repairLocalLiteralConstraintText(promptText, content);
+  if (repaired === content) return call;
+  if (typeof args.new_string === "string") {
+    return { ...call, arguments: { ...args, new_string: repaired } };
+  }
+  if (typeof args.content === "string") {
+    return { ...call, arguments: { ...args, content: repaired } };
+  }
+  return {
+    ...call,
+    arguments: {
+      ...args,
+      replaceLines: { ...args.replaceLines, content: repaired },
+    },
+  };
+}
+
+function localLiteralConstraintViolation(promptText, args) {
+  const prompt = String(promptText || "");
+  const content = localMutationText(args);
+  if (typeof content !== "string") return null;
+  const violations = [];
+  if (/lowercase(?:\s+only)?\s+ASCII|lowercase\s+ASCII\s+letters?/i.test(prompt)
+    && /\.toLowerCase\(\)/.test(content)
+    && !/\[A-Z\]/.test(content)) {
+    violations.push("whole-value toLowerCase() widens ASCII-only lowercasing; use an explicit [A-Z] replacement callback");
+  }
+  if (/(?:runs?\s+of\s+)?spaces?\s+(?:or|and)\s+underscores?/i.test(prompt)
+    && /\\s/.test(content)
+    && !/\[ _\]\+/.test(content)) {
+    violations.push("\\s widens the requested literal space/underscore separator class; use /[ _]+/g");
+  }
+  if (/remove\s+leading\s*(?:\/|and)\s*trailing\s+hyphens?/i.test(prompt)
+    && /\.replace\(\/\^-\+\|-\+\$\/g,\s*(["'])-\1\)/.test(content)) {
+    violations.push("leading/trailing hyphens must be replaced with the empty string, not another hyphen");
+  }
+  if (violations.length === 0) return null;
+  return `Error: POSSE_LOCAL_LITERAL_CONSTRAINT: ${violations.join("; ")}. No file mutation ran. Apply the literal constraint expansion and retry with the full corrected file.`;
+}
+
 function toolResultFailed(result) {
-  return result?.isError === true || /^Error:/i.test(String(result || "").trim());
+  return result?.isError === true
+    || result?.ok === false
+    || /^Error:/i.test(String(result || "").trim());
+}
+
+function structuredReadContent(result) {
+  if (result && typeof result === "object" && typeof result.content === "string") {
+    return result.content;
+  }
+  if (typeof result !== "string") return null;
+  try {
+    const parsed = JSON.parse(result);
+    return parsed && typeof parsed === "object" && typeof parsed.content === "string"
+      ? parsed.content
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function validLocalRoleOutput(role, content) {
+  const text = String(content || "").trim();
+  const label = role === "artificer" ? "ARTIFICER RESULT" : "DEV RESULT";
+  const statuses = role === "artificer"
+    ? "COMPLETE|PARTIAL|BLOCKED"
+    : "COMPLETE|VERIFIED_NO_CHANGE|PARTIAL|BLOCKED";
+  const exact = text.match(new RegExp(
+    `^---\\s*${label} START\\s*---\\s*([\\s\\S]*?)\\s*---\\s*${label} END\\s*---$`,
+    "i",
+  ));
+  if (exact && new RegExp(`^\\s*status:\\s*(?:${statuses})\\s*$`, "im").test(exact[1])) return true;
+  // Preserve the compact legacy response accepted by existing direct provider
+  // callers. Worker execution still materializes/enforces the canonical block.
+  return new RegExp(`^${label}:\\s*(?:${statuses})$`, "i").test(text);
 }
 
 function validLocalPlannerOutput(content) {
@@ -372,6 +616,11 @@ export async function callProvider(promptText, opts = {}) {
   const exactEditIntent = exactWriteTarget && !exactCreateTarget
     ? explicitExactEditIntent(promptText, exactWriteTarget)
     : null;
+  const exactTargetPreloaded = !!(
+    exactWriteTarget
+    && String(stableContext || "").includes("PRELOADED EDITABLE FILE CONTEXT:")
+    && String(stableContext || "").includes(`=== ${exactWriteTarget}`)
+  );
   const toolDefinitions = (executionContract
     ? buildEmbeddedToolDefinitions(executionContract)
     : [])
@@ -390,16 +639,33 @@ export async function callProvider(promptText, opts = {}) {
       const priority = (tool) => LOCAL_FILE_WRITE_TOOLS.has(String(tool?.name || "")) ? 0 : 1;
       return priority(left) - priority(right);
     });
-  const toolInstructions = buildLocalPlannerToolInstructions(toolDefinitions, toolTurnLimit, {
+  const terminalHandoffIssued = toolDefinitions.some((tool) => String(tool?.name || "") === "agent_handoff");
+  // Terminal local calls may need one bounded protocol correction plus the
+  // final handoff after the ordinary tool budget. These are coordination
+  // repairs, not extra mutation authority.
+  const localLoopTurnLimit = terminalHandoffIssued
+    ? toolTurnLimit + 2
+    : toolTurnLimit;
+  const requireMutationBeforeFinal = terminalHandoffIssued
+    && fileWriteAuthorized
+    && !!exactWriteTarget;
+  const toolInstructions = buildLocalPlannerToolInstructions(toolDefinitions, localLoopTurnLimit, {
     allowFileWrites: fileWriteAuthorized,
     writeScope: fileWriteAuthorized ? {
       modifyFiles: scopedFiles || [],
       createFiles: createFiles || [],
       createRoots: createRoots || [],
     } : null,
+    requiredFinalTool: terminalHandoffIssued ? "agent_handoff" : null,
+    requireMutationBeforeFinal,
   });
   const toolMode = toolDefinitions.length > 0;
-  const system = [remoteSystemPrompt, stableContext, toolInstructions]
+  const system = [
+    remoteSystemPrompt,
+    stableContext,
+    localLiteralConstraintExpansion(promptText),
+    toolInstructions,
+  ]
     .map((value) => String(value || "").trim())
     .filter(Boolean)
     .join("\n\n");
@@ -448,16 +714,75 @@ export async function callProvider(promptText, opts = {}) {
   try {
     if (toolMode) {
       let readCount = 0;
+      let successfulExactRead = exactTargetPreloaded;
+      let successfulMutation = false;
+      let recoverableExactEditFailure = false;
+      let exactSourceContent = null;
       const maxReads = Math.max(0, Number(fallbackReads) || 0);
       const loop = await runLocalPlannerToolLoop({
       messages,
       tools: toolDefinitions,
-      turnLimit: toolTurnLimit,
-      formatResult: (name, result) => selected === GEMMA_LOCAL_MODEL_ID
-        ? formatGemmaLocalToolResult(name, result, profile.maxToolResultChars)
-        : formatLocalToolResult(name, result, profile.maxToolResultChars),
-      normalizeCall: exactEditIntent
-        ? (call) => repairNoopExactEditCall(call, exactEditIntent)
+      turnLimit: localLoopTurnLimit,
+      formatResult: (name, result) => {
+        const formatted = selected === GEMMA_LOCAL_MODEL_ID
+          ? formatGemmaLocalToolResult(name, result, profile.maxToolResultChars)
+          : formatLocalToolResult(name, result, profile.maxToolResultChars);
+        if (!terminalHandoffIssued) return formatted;
+        const recoveryHint = exactEditRecoveryHint(
+          name,
+          result,
+          exactWriteTarget,
+          exactSourceContent,
+        );
+        recoverableExactEditFailure = isRecoverableExactEditFailure(
+          name,
+          result,
+          exactWriteTarget,
+          exactSourceContent,
+        ) || (recoverableExactEditFailure && !successfulMutation);
+        const nextAction = requireMutationBeforeFinal && !successfulMutation
+          ? recoverableExactEditFailure
+            ? 'NEXT ACTION REQUIRED: The prior edit failure is recoverable. Return {"tool":"edit_file","content":"FULL CORRECTED FILE CONTENT"} now. Do not return prose or agent_handoff.'
+            : "NEXT ACTION REQUIRED: No file mutation has succeeded. Return exactly one edit_file or write_file JSON call now using the exact source above. Do not return prose and do not call agent_handoff yet."
+          : name === "agent_handoff" && !toolResultFailed(result)
+            ? "The terminal handoff is staged. Wait for its receipt; do not call another tool or return prose."
+            : "NEXT ACTION REQUIRED: Return exactly one agent_handoff JSON call now. Do not return prose or a role-result block.";
+        return [formatted, recoveryHint, nextAction].filter(Boolean).join("\n");
+      },
+      normalizeCall: exactWriteTarget
+        ? (call) => {
+          const fullFileRepaired = repairModelNativeFullFileEditCall(
+            call,
+            exactWriteTarget,
+            exactSourceContent,
+          );
+          const exactEditRepaired = repairModelNativeExactEditCall(
+            fullFileRepaired,
+            exactWriteTarget,
+            exactSourceContent,
+          );
+          const literalConstraintRepaired = repairLocalLiteralConstraintCall(
+            exactEditRepaired,
+            promptText,
+          );
+          const repaired = exactEditIntent
+            ? repairNoopExactEditCall(literalConstraintRepaired, exactEditIntent)
+            : literalConstraintRepaired;
+          const mutationBeforeRead = !exactCreateTarget
+            && !exactTargetPreloaded
+            && readCount === 0
+            && maxReads > 0
+            && toolDefinitions.some((tool) => String(tool?.name || "") === "read_file")
+            && LOCAL_FILE_WRITE_TOOLS.has(String(repaired?.name || ""))
+            && normalizedScopedPath(repaired?.arguments?.path) === exactWriteTarget;
+          if (mutationBeforeRead) {
+            return {
+              name: "read_file",
+              arguments: { path: exactWriteTarget },
+            };
+          }
+          return repaired;
+        }
         : null,
       completeSuppressedReplay: exactWriteTarget
         ? (name, args, result, context) => suppressedReplayCompletion(
@@ -478,16 +803,71 @@ export async function callProvider(promptText, opts = {}) {
         && toolDefinitions.some((tool) => String(tool?.name || "") === "read_file")
         ? { name: "read_file", arguments: { path: exactWriteTarget } }
         : null,
-      validateFinalOutput: role === "planner" ? validLocalPlannerOutput : null,
+      requiredFinalTool: terminalHandoffIssued ? "agent_handoff" : null,
+      requireMutationBeforeFinal,
+      validateFinalOutput: role === "planner"
+        ? validLocalPlannerOutput
+        : LOCAL_FILE_WRITE_ROLES.has(role) && !terminalHandoffIssued
+          ? (output) => validLocalRoleOutput(role, output)
+          : null,
       generate,
       execute: async (name, args) => {
+        if (
+          name === "agent_handoff"
+          && fileWriteAuthorized
+          && exactWriteTarget
+          && !successfulMutation
+        ) {
+          const status = String(args?.status || "COMPLETE").trim().toUpperCase();
+          const blocker = String(args?.blocker || "").trim();
+          if (
+            status === "BLOCKED"
+            && successfulExactRead
+            && /\b(?:missing|unavailable|cannot access|can't access)\b[\s\S]*\b(?:context|source|file)\b/i.test(blocker)
+          ) {
+            return `Error: ${exactWriteTarget} was read successfully and its raw source is present in the prior tool result. Do not report missing context; use edit_file with an exact old_string copied from that content.`;
+          }
+          if (status === "BLOCKED" && successfulExactRead && recoverableExactEditFailure) {
+            return `Error: The rejected edit is recoverable and ${exactWriteTarget} is fully loaded. Do not finish BLOCKED. Return {"tool":"edit_file","content":"FULL CORRECTED FILE CONTENT"} with every task and assessor constraint applied.`;
+          }
+          if (!new Set(["BLOCKED", "VERIFIED_NO_CHANGE"]).has(status)) {
+            return "Error: A successful file mutation is required before COMPLETE or PARTIAL agent_handoff. The prior read_file result contains raw exact source; context is not missing. Use the authorized edit_file or write_file tool now, then submit agent_handoff.";
+          }
+        }
+        let callArgs = args;
+        if (LOCAL_FILE_WRITE_TOOLS.has(name)
+          && normalizedScopedPath(args?.path) === exactWriteTarget) {
+          const constraintError = localLiteralConstraintViolation(promptText, args);
+          if (constraintError) return constraintError;
+        }
         if (name === "read_file") {
           readCount += 1;
           if (readCount > maxReads) {
             return `Error: Fallback read budget exhausted (max ${maxReads}). Use the supplied context or another authorized retrieval tool.`;
           }
+          if (args.maxBytes == null && args.search == null && args.jsonPath == null) {
+            callArgs = {
+              ...args,
+              // Structured read mode includes raw content separately from its
+              // display-only numbered view. Reserve space for result metadata.
+              maxBytes: Math.max(1, profile.maxToolResultChars - 768),
+            };
+          }
         }
-        return await mcpGate.callTool(name, args);
+        const result = await mcpGate.callTool(name, callArgs);
+        if (
+          name === "read_file"
+          && normalizedScopedPath(callArgs?.path) === exactWriteTarget
+          && !toolResultFailed(result)
+        ) {
+          successfulExactRead = true;
+          exactSourceContent = structuredReadContent(result) ?? exactSourceContent;
+        }
+        if (LOCAL_FILE_WRITE_TOOLS.has(name) && !toolResultFailed(result)) {
+          successfulMutation = true;
+          recoverableExactEditFailure = false;
+        }
+        return result;
       },
       });
       content = loop.content;
@@ -515,7 +895,7 @@ export async function callProvider(promptText, opts = {}) {
         role,
         modelTier,
         reasoningEffort: "disabled",
-        maxTurns: toolMode ? toolTurnLimit : 1,
+        maxTurns: toolMode ? localLoopTurnLimit : 1,
         maxOutputTokens: outputLimit,
         numTurns: toolTurns,
         toolUses,
@@ -551,7 +931,7 @@ export async function callProvider(promptText, opts = {}) {
       role,
       modelTier,
       reasoningEffort: "disabled",
-      maxTurns: toolMode ? toolTurnLimit : 1,
+      maxTurns: toolMode ? localLoopTurnLimit : 1,
       maxOutputTokens: outputLimit,
       outputTruncated,
       outputLimitReason: outputTruncated ? "max_output_tokens" : null,

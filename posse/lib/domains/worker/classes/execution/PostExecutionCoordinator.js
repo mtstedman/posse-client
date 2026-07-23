@@ -242,6 +242,36 @@ export async function handlePostExecutionForWorker({
           ? parseAgentCompletionLogFromModule(output)
           : { found: false, status: null, body: "", blockReason: null, verifiedNoChange: false };
 
+        if (
+          MUTATING_JOB_TYPES.has(job.job_type)
+          && String(executionProvider || "").trim().toLowerCase() === "posse-local"
+        ) {
+          const expectedKind = job.job_type === "artificer" ? "artificer" : "dev";
+          const allowedStatuses = expectedKind === "artificer"
+            ? new Set(["COMPLETE", "PARTIAL", "BLOCKED"])
+            : new Set(["COMPLETE", "VERIFIED_NO_CHANGE", "PARTIAL", "BLOCKED"]);
+          const validCompletion = agentCompletionLog.found
+            && agentCompletionLog.kind === expectedKind
+            && allowedStatuses.has(agentCompletionLog.status);
+          if (!validCompletion) {
+            const completionMsg = `${expectedKind} returned no valid terminal result block; expected a canonical ${expectedKind === "dev" ? "DEV" : "ARTIFICER"} RESULT/LOG block with a supported status`;
+            this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: ${completionMsg}${C.reset}`);
+            storePostAgentFailureCheckpoint({
+              job,
+              attemptId: attempt.id,
+              output,
+              failureNote: completionMsg,
+            });
+            completeAttempt(attempt.id, {
+              status: "failed",
+              duration_ms: Date.now() - startTime,
+              error_text: completionMsg,
+            });
+            this._retryOrFail(job, leaseToken, completionMsg);
+            return;
+          }
+        }
+
         if (agentCompletionLog.status === "BLOCKED" && MUTATING_JOB_TYPES.has(job.job_type)) {
           const blockReason = agentCompletionLog.blockReason || "Agent reported BLOCKED";
           const blockMsg = `Agent BLOCKED: ${blockReason}`;

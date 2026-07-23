@@ -64,6 +64,19 @@ export function normalizePlannerRoleMode(value) {
   return ["normal", "primary", "redteam", "synth"].includes(raw) ? raw : "normal";
 }
 
+export function applyPlannerRoleModePolicy(packet, { planningMode = "normal", roleMode = "normal" } = {}) {
+  if (!packet || planningMode !== "dual_redteam" || roleMode !== "redteam") return packet;
+  packet.prompt_profile = "planner_redteam";
+  packet.agent_coordination = {
+    ...(packet.agent_coordination || {}),
+    agent_handoff_v1: false,
+    agent_handoff_compact_v1: false,
+    agent_handoff_compact_v2: false,
+    sub_agent_v1: false,
+  };
+  return packet;
+}
+
 export function isQuestionOnlyBinding(explicitBindings = {}) {
   const desiredOutputs = Array.isArray(explicitBindings.desiredOutputs)
     ? explicitBindings.desiredOutputs

@@ -129,8 +129,10 @@ export function resolveAtlasHandoffState(recipient, packet) {
     gateEnabled,
     internalTools: Array.isArray(resolved.internalTools) ? resolved.internalTools.slice() : [],
     required: !!resolved.required,
+    providerFallback: resolved.providerFallback === true,
     failClosed: !!resolved.failClosed,
     requiredFailureReason: resolved.requiredFailureReason || null,
+    unavailableReason: resolved.unavailableReason || null,
   };
 }
 

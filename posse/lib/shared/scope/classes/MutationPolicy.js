@@ -181,6 +181,20 @@ function looksLikeInferredDeletePath(value) {
   return INFERRED_DELETE_FILE_EXTENSIONS.has(ext);
 }
 
+function looksLikeUnquotedInferredDeletePath(value) {
+  const candidate = String(value || "").replace(/\\/g, "/").trim();
+  if (!looksLikeInferredDeletePath(candidate)) return false;
+  if (!candidate.includes("/")) return true;
+  // A slash alone is not enough to make ordinary prose a filesystem path.
+  // For example, "remove leading/trailing hyphens" must not infer a deletion
+  // target named "leading/trailing". Extensionless directory targets remain
+  // supported when quoted or supplied explicitly through files_to_delete.
+  const basename = candidate.split("/").filter(Boolean).at(-1) || "";
+  const dot = basename.lastIndexOf(".");
+  if (dot <= 0 || dot === basename.length - 1) return false;
+  return INFERRED_DELETE_FILE_EXTENSIONS.has(basename.slice(dot + 1).toLowerCase());
+}
+
 function lineBoundsAt(text, index) {
   const start = Math.max(0, text.lastIndexOf("\n", Math.max(0, index - 1)) + 1);
   const endIndex = text.indexOf("\n", index);
@@ -424,6 +438,7 @@ export function inferDeletionTargets(job, payload) {
       const candidate = match[1];
       const following = text.slice(match.index + match[0].length).trimStart();
       if (/^(?:e\.g|i\.e)$/i.test(candidate)) continue;
+      if (!looksLikeUnquotedInferredDeletePath(candidate)) continue;
       if (!candidate.includes("/") && /^(?:files?|apps?|projects?|backends?|frontends?|services?|stacks?|runtimes?|dependencies|packages?)\b/i.test(following)) {
         continue;
       }

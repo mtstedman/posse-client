@@ -198,8 +198,14 @@ export class DeveloperRole extends BaseRole {
     });
 
     if (deleteOnlyTask) {
+      const summary = `Deterministic delete handoff completed. Deleted ${deleteOutcome.deleted.length} file(s); ${deleteOutcome.alreadyAbsent.length} already absent.`;
       ctx.providerResult = {
-        output: `Deterministic delete handoff completed. Deleted ${deleteOutcome.deleted.length} file(s); ${deleteOutcome.alreadyAbsent.length} already absent.`,
+        output: [
+          "--- DEV RESULT START ---",
+          "status: COMPLETE",
+          `summary: ${summary}`,
+          "--- DEV RESULT END ---",
+        ].join("\n"),
         stats: {},
       };
       worker.emit(job.id, `${C.cyan}[handoff]${C.reset} WI#${job.work_item_id} job #${job.id}: delete-only task satisfied without agent call`);

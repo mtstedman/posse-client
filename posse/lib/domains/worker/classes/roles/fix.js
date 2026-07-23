@@ -305,8 +305,14 @@ export class FixRole extends BaseRole {
     });
 
     if (fixDeleteOnlyTask) {
+      const summary = `Deterministic delete handoff completed. Deleted ${fixDeleteOutcome.deleted.length} file(s); ${fixDeleteOutcome.alreadyAbsent.length} already absent.`;
       ctx.providerResult = {
-        output: `Deterministic delete handoff completed. Deleted ${fixDeleteOutcome.deleted.length} file(s); ${fixDeleteOutcome.alreadyAbsent.length} already absent.`,
+        output: [
+          "--- DEV RESULT START ---",
+          "status: COMPLETE",
+          `summary: ${summary}`,
+          "--- DEV RESULT END ---",
+        ].join("\n"),
         stats: {},
       };
       worker.emit(job.id, `${C.cyan}[handoff]${C.reset} WI#${job.work_item_id} job #${job.id}: delete-only fix satisfied without agent call`);

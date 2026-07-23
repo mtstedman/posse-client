@@ -174,6 +174,14 @@ function renderPacketContextString(packet, {
     addSection(lines.join("\n"), { required: true, key: "merge_in_progress" });
   }
 
+  if (includeDynamic && packet.atlas?.providerFallback) {
+    addSection([
+      "UPSTREAM ATLAS -> LOCAL DEV CONTEXT ADAPTER:",
+      "Upstream roles may use ATLAS normally. This local role has no ATLAS tool transport, so its handoff is expanded into deterministic plain-text context.",
+      "Treat the planner/dev brief, success criteria, exact writable scope, and preloaded source snapshots below as the readable handoff. Use only the listed deterministic tools for current worktree state and edits.",
+    ].join("\n"), { required: true, key: "atlas_provider_fallback_adapter" });
+  }
+
   const atlasMeta = includeDynamic
     ? renderAtlasHandoffSectionsWithMeta(packet)
     : { text: "", charCount: 0, originalLength: 0, trimLevel: null, truncated: false };
@@ -364,7 +372,7 @@ function renderPacketContextString(packet, {
 
       if (preloadedParts.length > 0) {
         const preloadBlock = `PRELOADED EDITABLE FILE CONTEXT:\n${preloadedParts.join("\n\n")}`;
-        if (packet.pending_merge) {
+        if (packet.pending_merge || packet.atlas?.providerFallback) {
           addSection(preloadBlock, { required: true, key: "editable_file_preload" });
         } else {
           queueOptional(preloadBlock, { key: "editable_file_preload" });

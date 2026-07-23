@@ -512,6 +512,7 @@ function childOnlyRemoteIssuance(parentOptions = {}, { providerName, role } = {}
     coordination: {
       agent_handoff_v1: true,
       agent_handoff_compact_v1: source?.coordination?.agent_handoff_compact_v1 === true,
+      agent_handoff_compact_v2: source?.coordination?.agent_handoff_compact_v2 === true,
       sub_agent_v1: false,
       sub_agent_next_input_v1: childCursorIssued,
       status: "experimental",
@@ -1126,6 +1127,7 @@ export class TrackedProviderClient {
                 mode: "handoff",
                 agent_handoff_v1: true,
                 agent_handoff_compact_v1: childIssuance.coordination.agent_handoff_compact_v1 === true,
+                agent_handoff_compact_v2: childIssuance.coordination.agent_handoff_compact_v2 === true,
                 sub_agent_v1: false,
                 sub_agent_next_input_v1: childIssuance.coordination.sub_agent_next_input_v1 === true,
                 remote_acknowledged: true,

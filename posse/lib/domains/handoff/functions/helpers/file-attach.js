@@ -114,7 +114,13 @@ export function readFile(relPath, cwd, deps = {}) {
     const numbered = raw.split("\n")
       .map((ln, i) => `${String(i + 1).padStart(4)}\t${ln}`)
       .join("\n");
-    return { content: numbered, size: stat.size, exists: true, lineCount: raw.split(/\r?\n/).length };
+    return {
+      content: numbered,
+      rawContent: raw,
+      size: stat.size,
+      exists: true,
+      lineCount: raw.split(/\r?\n/).length,
+    };
   } catch {
     return { content: null, size: 0, exists: false };
   }
@@ -233,10 +239,12 @@ export function attachEditableFiles(packet, deps = {}) {
   const smart_preloads = {};
   const editable_file_metadata = {};
   const normalizedPreloadMode = String(preloadMode || "off").trim().toLowerCase();
-  const atlasPrefetchActive = !!packet?.atlas?.active && !packet?.atlas?.prefetchFailed && !forcePreload;
+  const providerFallbackExpansion = packet?.atlas?.providerFallback === true;
+  const forcePlainPreload = forcePreload || providerFallbackExpansion;
+  const atlasPrefetchActive = !!packet?.atlas?.active && !packet?.atlas?.prefetchFailed && !forcePlainPreload;
   const effectivePreloadMode = atlasPrefetchActive ? "off" : normalizedPreloadMode;
   const shouldPreloadBodies = !atlasPrefetchActive
-    && (forcePreload || normalizedPreloadMode === "always" || normalizedPreloadMode === "small");
+    && (forcePlainPreload || normalizedPreloadMode === "always" || normalizedPreloadMode === "small");
   const preloadAllowlist = Array.isArray(packet?.editable_file_preload_allowlist)
     ? new Set(packet.editable_file_preload_allowlist.map((entry) => String(entry || "").replace(/\\/g, "/")))
     : null;
@@ -321,7 +329,9 @@ export function attachEditableFiles(packet, deps = {}) {
         reason: "file_too_large",
       };
     } else {
-      editable_files[relPath] = result.exists ? result.content : null;
+      editable_files[relPath] = result.exists
+        ? (providerFallbackExpansion && typeof result.rawContent === "string" ? result.rawContent : result.content)
+        : null;
       editable_file_metadata[relPath] = {
         exists: !!result.exists,
         size: result.size || 0,
@@ -338,7 +348,9 @@ export function attachEditableFiles(packet, deps = {}) {
 
   packet.editable_files = editable_files;
   packet.editable_file_metadata = editable_file_metadata;
-  packet.editable_file_preload_mode = forcePreload && !atlasPrefetchActive ? "forced" : effectivePreloadMode;
+  packet.editable_file_preload_mode = providerFallbackExpansion
+    ? "provider-fallback-expanded"
+    : forcePreload && !atlasPrefetchActive ? "forced" : effectivePreloadMode;
   packet.smart_preloads = smart_preloads;
   packet.dropped_files = dropped_files;
 }

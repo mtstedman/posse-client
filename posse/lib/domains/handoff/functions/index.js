@@ -840,6 +840,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
     mode: ["off", "handoff", "subagents"].includes(coordinationMode) ? coordinationMode : "off",
     agent_handoff_v1: handoffEnabled,
     agent_handoff_compact_v1: handoffEnabled,
+    agent_handoff_compact_v2: handoffEnabled,
     sub_agent_v1: subAgentEnabled,
     status: "experimental",
     source: "repo_setting_snapshot",
@@ -1469,6 +1470,27 @@ export async function handoff(input) {
   // mutually exclusive. Pending merge handoffs are the exception because ATLAS
   // cannot see uncommitted conflict markers; those force local context.
   packet.atlas = await timeHandoffStep(packet, "atlas.resolve", () => _resolveAtlasHandoffState(recipient, packet));
+  if (packet.atlas?.providerFallback) {
+    try {
+      recordObservation({
+        work_item_id: packet.work_item_id ?? null,
+        job_id: packet.job_id ?? null,
+        attempt_id: getObservationContext()?.attempt_id ?? null,
+        observation_type: "atlas.provider_fallback",
+        summary: `ATLAS required mode used standard non-ATLAS context for ${packet.atlas.provider}`,
+        detail: {
+          kind: "atlas_provider_fallback",
+          provider: packet.atlas.provider,
+          role: recipient,
+          fallback: "standard_non_atlas_expanded",
+          context_adapter: "expanded_plaintext",
+          reason: packet.atlas.unavailableReason || "provider_non_atlas_fallback",
+        },
+      });
+    } catch {
+      // Optional telemetry must not block the deterministic fallback handoff.
+    }
+  }
   if (packet.atlas?.failClosed) {
     const reason = packet.atlas.requiredFailureReason || "unavailable";
     const err = new Error(`ATLAS required mode blocked handoff for ${recipient} (${reason}).`);

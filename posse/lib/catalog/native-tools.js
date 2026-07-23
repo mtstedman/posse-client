@@ -324,8 +324,8 @@ export const TOOL_AGENT_HANDOFF = {
         items: {
           type: "object",
           properties: {
-            id: { type: "string", minLength: 1, maxLength: 40 },
-            depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 40 } },
+            id: { type: "string", minLength: 1, maxLength: 80, description: "Keep IDs at 40 characters or fewer when practical; 80 is the hard safety ceiling." },
+            depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 80 } },
             target: {
               type: "object",
               description:
@@ -346,7 +346,7 @@ export const TOOL_AGENT_HANDOFF = {
                 "Allowed fields are summary, claims, scope, constraints, success_criteria, questions, research, planner execution metadata, and payload. " +
                 "Omit payload or pass {}; put repository paths in scope and explanation in summary or claims.",
               properties: {
-                summary: { type: "string", maxLength: 2000 },
+                summary: { type: "string", maxLength: 4000, description: "Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
                 claims: {
                   type: "array",
                   maxItems: 12,
@@ -368,7 +368,7 @@ export const TOOL_AGENT_HANDOFF = {
                             proof: { type: "array", maxItems: 8, items: { oneOf: [{ type: "string" }, { type: "object" }] } },
                             support: { type: "array", maxItems: 8, items: { oneOf: [{ type: "string" }, { type: "object" }] } },
                             decoy: { type: "array", maxItems: 8, items: { type: "array", minItems: 2, maxItems: 2 } },
-                            prose: { type: "string", maxLength: 2000 },
+                            prose: { type: "string", maxLength: 4000, description: "Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
                           },
                           additionalProperties: false,
                         },
@@ -472,17 +472,17 @@ const HANDOFF_REF = {
 const HANDOFF_EVIDENCE_SELECTOR = {
   type: "object",
   description:
-    "Select bounded stored evidence. Omit lines only when the ref is at most 40 lines and 4000 characters. " +
-    "For larger refs, first create a server-side source_ref slice no larger than those limits. " +
+    "Select bounded stored evidence. Prefer slices of at most 40 lines and 4000 characters; the runtime hard ceiling is 300 lines and 24000 characters per selector. " +
+    "For larger refs, first create a tighter server-side source_ref slice. Keep total evidence near 12000 characters; 32000 is the non-child hard ceiling. " +
     "Inline authored create_ref chunks are support/decoy only; direct tool refs and verified source_ref slices may be proof.",
   properties: {
     ref: HANDOFF_REF,
     lines: {
       type: "object",
-      description: "Optional 1-based window. count cannot exceed the runtime 40-line limit.",
+      description: "Optional 1-based window. Target at most 40 lines; count cannot exceed the 300-line hard safety ceiling.",
       properties: {
         start: { type: "integer", minimum: 1 },
-        count: { type: "integer", minimum: 1, maximum: 40 },
+        count: { type: "integer", minimum: 1, maximum: 300 },
       },
       required: ["start", "count"],
       additionalProperties: false,
@@ -494,27 +494,39 @@ const HANDOFF_EVIDENCE_SELECTOR = {
 
 const HANDOFF_DECOY = {
   type: "object",
+  description: "Canonical selector/reason decoy. Flat ref/lines and summary are accepted as migration aliases.",
   properties: {
     selector: HANDOFF_EVIDENCE_SELECTOR,
+    ref: HANDOFF_REF,
+    lines: HANDOFF_EVIDENCE_SELECTOR.properties.lines,
     reason: { type: "string", minLength: 1, maxLength: 500 },
+    summary: { type: "string", minLength: 1, maxLength: 500 },
   },
-  required: ["selector", "reason"],
+  anyOf: [
+    { type: "object", required: ["selector"] },
+    { type: "object", required: ["ref"] },
+  ],
   additionalProperties: false,
 };
 
 const HANDOFF_CLAIM = {
   type: "object",
   description:
-    "One specific claim with optional evidence. Hash refs belong only in proof, support, or decoy selectors, never in claim or prose. " +
+    "One specific claim with optional evidence. Use summary for brief synthesis. Hash refs belong only in proof, support, or decoy selectors, never in claim or summary. " +
     "Proof requires a direct storage-owned tool ref or a verified server-side source_ref slice; inline agent-authored refs are not proof.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 1000 },
+    name: { type: "string", minLength: 1, maxLength: 1000, description: "Deprecated migration alias for claim." },
     proof: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
     support: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
     decoy: { type: "array", maxItems: 8, items: HANDOFF_DECOY },
-    prose: { type: "string", maxLength: 2000 },
+    summary: { type: "string", maxLength: 4000, description: "Optional claim synthesis. Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
+    prose: { type: "string", maxLength: 4000, description: "Deprecated migration alias for summary." },
   },
-  required: ["claim"],
+  anyOf: [
+    { type: "object", required: ["claim"] },
+    { type: "object", required: ["name"] },
+  ],
   additionalProperties: false,
 };
 
@@ -561,9 +573,9 @@ const PLANNER_SCOPE = {
 };
 
 const COMMON_HANDOFF_FIELDS = {
-  id: { type: "string", minLength: 1, maxLength: 40 },
-  depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 40 } },
-  intent: { type: "string", minLength: 1, maxLength: 1000 },
+  id: { type: "string", minLength: 1, maxLength: 80, description: "Optional; Posse generates a deterministic ID when omitted. Target 40 characters or fewer; 80 is the hard ceiling." },
+  depends_on: { type: "array", maxItems: 50, default: [], items: { type: "string", minLength: 1, maxLength: 80 } },
+  intent: { type: "string", minLength: 1, maxLength: 1000, description: "Optional; Posse supplies a terminal-intent stub when omitted." },
 };
 
 function exactTarget(kind, role) {
@@ -578,12 +590,16 @@ function exactTarget(kind, role) {
   };
 }
 
-function exactReport(properties, required = ["summary", "claims"]) {
+function exactReport(properties, required = ["summary"], {
+  summaryMaxLength = 4000,
+  claims = HANDOFF_CLAIMS,
+  summaryDescription = "Target 2000 characters or fewer; 4000 is the hard safety ceiling.",
+} = {}) {
   return {
     type: "object",
     properties: {
-      summary: { type: "string", maxLength: 2000 },
-      claims: HANDOFF_CLAIMS,
+      summary: { type: "string", maxLength: summaryMaxLength, description: summaryDescription },
+      claims: { ...claims, default: [] },
       ...properties,
     },
     required,
@@ -591,11 +607,16 @@ function exactReport(properties, required = ["summary", "claims"]) {
   };
 }
 
-function exactHandoff(target, report) {
+function exactHandoff(target, report, { commonFields = COMMON_HANDOFF_FIELDS } = {}) {
   return {
     type: "object",
-    properties: { ...COMMON_HANDOFF_FIELDS, target, report },
-    required: ["id", "depends_on", "target", "intent", "report"],
+    description: "Use nested report. Flat report fields remain accepted as migration aliases.",
+    properties: { ...commonFields, target, report, ...report.properties },
+    required: ["target"],
+    anyOf: [
+      { type: "object", required: ["report"] },
+      ...Object.keys(report.properties).map((key) => ({ type: "object", required: [key] })),
+    ],
     additionalProperties: false,
   };
 }
@@ -642,26 +663,92 @@ const PLANNER_COMPACT_TASK = {
   type: "object",
   description:
     "One planner task. Posse derives the canonical target from role, supplies protocol/profile/outcome, " +
-    "and defaults omitted depends_on, claims, and constraints to empty arrays.",
+    "and defaults omitted id and intent to deterministic stubs plus depends_on, claims, and constraints to empty arrays.",
   properties: {
-    id: { type: "string", minLength: 1, maxLength: 40 },
-    depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 40 } },
+    id: { type: "string", minLength: 1, maxLength: 80, description: "Optional; Posse generates task-N when omitted. Target 40 characters or fewer; 80 is the hard ceiling." },
+    depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 80 } },
     role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "no_tasks"] },
+    job_type: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "no_tasks"], description: "Deprecated migration alias for role." },
     intent: { type: "string", minLength: 1, maxLength: 1000 },
-    summary: { type: "string", minLength: 1, maxLength: 2000 },
+    summary: { type: "string", minLength: 1, maxLength: 4000, description: "Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
     claims: HANDOFF_CLAIMS,
     scope: PLANNER_SCOPE,
     constraints: HANDOFF_STRING_LIST,
     success_criteria: { ...HANDOFF_STRING_LIST, minItems: 1 },
     ...AGENT_HANDOFF_PLANNER_REPORT_FIELDS,
   },
-  required: ["id", "role", "intent", "summary", "scope", "success_criteria"],
+  required: ["summary", "scope", "success_criteria"],
+  anyOf: [
+    { type: "object", required: ["role"] },
+    { type: "object", required: ["job_type"] },
+  ],
   additionalProperties: false,
+};
+
+const CITATION_EVIDENCE_SELECTOR = {
+  ...HANDOFF_EVIDENCE_SELECTOR,
+  description: "Citation-child selector. The selected evidence is limited to 40 lines and the 4000-character child evidence budget.",
+  properties: {
+    ...HANDOFF_EVIDENCE_SELECTOR.properties,
+    lines: {
+      ...HANDOFF_EVIDENCE_SELECTOR.properties.lines,
+      properties: {
+        ...HANDOFF_EVIDENCE_SELECTOR.properties.lines.properties,
+        count: { type: "integer", minimum: 1, maximum: 40 },
+      },
+    },
+  },
+};
+
+const CITATION_DECOY = {
+  type: "object",
+  properties: {
+    selector: CITATION_EVIDENCE_SELECTOR,
+    ref: HANDOFF_REF,
+    lines: CITATION_EVIDENCE_SELECTOR.properties.lines,
+    reason: { type: "string", minLength: 1, maxLength: 100 },
+    summary: { type: "string", minLength: 1, maxLength: 100 },
+  },
+  anyOf: [
+    { type: "object", required: ["selector"] },
+    { type: "object", required: ["ref"] },
+  ],
+  additionalProperties: false,
+};
+
+const CITATION_CLAIM = {
+  type: "object",
+  description: "Concise citation-child claim. claim/name and summary/prose are migration aliases; prefer claim and summary.",
+  properties: {
+    claim: { type: "string", minLength: 1, maxLength: 200 },
+    name: { type: "string", minLength: 1, maxLength: 200 },
+    proof: { type: "array", maxItems: 8, items: CITATION_EVIDENCE_SELECTOR },
+    support: { type: "array", maxItems: 8, items: CITATION_EVIDENCE_SELECTOR },
+    decoy: { type: "array", maxItems: 1, items: CITATION_DECOY },
+    summary: { type: "string", maxLength: 200 },
+    prose: { type: "string", maxLength: 200 },
+  },
+  anyOf: [
+    { type: "object", required: ["claim"] },
+    { type: "object", required: ["name"] },
+  ],
+  additionalProperties: false,
+};
+
+const CITATION_CLAIMS = {
+  type: "array",
+  maxItems: 2,
+  items: CITATION_CLAIM,
+};
+
+const CITATION_HANDOFF_FIELDS = {
+  ...COMMON_HANDOFF_FIELDS,
+  intent: { type: "string", minLength: 1, maxLength: 200 },
 };
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
-    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. Use named claim objects; do not submit confidence or payload. The receipt ends provider generation.",
+    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. Use named claim objects with summary for optional synthesis. Prefer 40-line evidence slices and 2000-character summaries; bounded overflow is accepted up to the schema hard ceilings. Do not submit confidence or payload. The receipt ends provider generation.",
   profile: "researcher.pipeline.v1",
   profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
   outcomes: ["success", "gap", "input_required", "complete"],
@@ -677,9 +764,10 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; human_input, promote, and no_tasks are system roles. " +
+    "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and 2000-character summaries; bounded overflow is accepted up to the schema hard ceilings. " +
     "Use exactly one no_tasks task only when no work is required. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and tests.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["Focused tests pass"]}]}. ' +
-    "Do not add protocol, profile, outcome, target, report, ref, or payload. The receipt ends provider generation.",
+    "Use only fields shown in the task schema; do not wrap tasks in another report envelope. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
@@ -697,10 +785,14 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
 
 export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   description:
-    "Finish citation synthesis with one parent report. Use named claim objects; do not submit confidence, scope, payload, constraints, success criteria, or questions. The receipt ends provider generation.",
+    "Finish citation synthesis with one parent report. Use named claim objects with summary for optional synthesis; citation-child ceilings remain strict. Do not submit confidence, scope, payload, constraints, success criteria, or questions. The receipt ends provider generation.",
   profile: "citation_synthesis.v1",
   outcomes: ["complete", "partial", "failed"],
-  handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({})),
+  handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({}, ["summary"], {
+    summaryMaxLength: 800,
+    claims: CITATION_CLAIMS,
+    summaryDescription: "At most 800 characters. Together with intent, claims, claim synthesis, and decoy reasons, total narrative cannot exceed 2000 characters.",
+  }), { commonFields: CITATION_HANDOFF_FIELDS }),
   maxHandoffs: 1,
 });
 
@@ -710,7 +802,7 @@ export const TOOL_AGENT_HANDOFF_REPORT = TOOL_AGENT_HANDOFF_RESEARCHER;
 
 export const TOOL_AGENT_HANDOFF_ASSESSOR = semanticRoleTool({
   description:
-    "Finish assessment with one exact verdict report and explicit confidence. Use named claim objects; do not submit payload or execution scope. The receipt ends provider generation.",
+    "Finish assessment with one exact verdict report and explicit confidence. Use named claim objects with summary for optional synthesis. Prefer 40-line evidence slices and 2000-character summaries; bounded overflow is accepted up to the schema hard ceilings. Do not submit payload or execution scope. The receipt ends provider generation.",
   profile: "assessor.verdict.v1",
   outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
   confidence: true,
@@ -733,8 +825,8 @@ export function getAgentHandoffToolSchemaForRole(role, { compactCompletion = fal
 }
 
 // Provider-facing schemas intentionally differ from the permissive migration
-// schema in TOOL_AGENT_HANDOFF. Runtime accepts legacy tuple claims and selector
-// strings while the local and remote prompt/compiler layers roll forward.
+// schema in TOOL_AGENT_HANDOFF. Runtime accepts legacy tuple claims, `prose`
+// aliases, and selector strings while prompts advertise one canonical shape.
 
 export const TOOL_SUB_AGENT_NEXT_INPUT = {
   type: "function",

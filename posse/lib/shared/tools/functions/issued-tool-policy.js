@@ -320,6 +320,7 @@ function failClosedIssuedPolicy() {
     coordination: {
       agentHandoffV1: false,
       agentHandoffCompactV1: false,
+      agentHandoffCompactV2: false,
       subAgentV1: false,
     },
   };
@@ -351,6 +352,9 @@ export function normalizeRemoteIssuedPolicy(value, {
     agentHandoffV1: coordinationSource?.agent_handoff_v1 === true,
     agentHandoffCompactV1: coordinationSource?.agent_handoff_v1 === true
       && coordinationSource?.agent_handoff_compact_v1 === true,
+    agentHandoffCompactV2: coordinationSource?.agent_handoff_v1 === true
+      && coordinationSource?.agent_handoff_compact_v1 === true
+      && coordinationSource?.agent_handoff_compact_v2 === true,
     subAgentV1: coordinationSource?.agent_handoff_v1 === true
       && coordinationSource?.sub_agent_v1 === true,
     subAgentNextInputV1: coordinationSource?.agent_handoff_v1 === true
@@ -400,6 +404,8 @@ export function normalizeRemoteIssuedPolicy(value, {
       agentHandoffV1: coordination.agentHandoffV1 && toolSurface.includes("tools.agent_handoff"),
       agentHandoffCompactV1: coordination.agentHandoffCompactV1
         && toolSurface.includes("tools.agent_handoff"),
+      agentHandoffCompactV2: coordination.agentHandoffCompactV2
+        && toolSurface.includes("tools.agent_handoff"),
       subAgentV1: subAgentEnabled,
       ...(coordination.subAgentNextInputV1 && childToolSurface.includes("tools.sub_agent_next_input")
         ? { subAgentNextInputV1: true }
@@ -447,6 +453,7 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
     coordination: {
       agent_handoff_v1: issued.coordination.agentHandoffV1,
       agent_handoff_compact_v1: issued.coordination.agentHandoffCompactV1,
+      agent_handoff_compact_v2: issued.coordination.agentHandoffCompactV2,
       sub_agent_v1: issued.coordination.subAgentV1,
       sub_agent_next_input_v1: "subAgentNextInputV1" in issued.coordination
         && issued.coordination.subAgentNextInputV1 === true,
@@ -501,6 +508,7 @@ export function deriveRemoteToolSurfaceNarrowing(authorityValue, candidateValue,
     || candidate.webAccess.image_generation_eligible && !authority.webAccess.image_generation_eligible
     || candidate.coordination.agentHandoffV1 && !authority.coordination.agentHandoffV1
     || candidate.coordination.agentHandoffCompactV1 && !authority.coordination.agentHandoffCompactV1
+    || candidate.coordination.agentHandoffCompactV2 && !authority.coordination.agentHandoffCompactV2
     || candidate.coordination.subAgentV1 && !authority.coordination.subAgentV1
     || candidateNextInput && !authorityNextInput) {
     return null;
@@ -688,6 +696,7 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
   const remoteIssuance = plainObject(packet.remote_issuance);
   const localAgentHandoff = packet?.agent_coordination?.agent_handoff_v1 === true;
   const localAgentHandoffCompact = packet?.agent_coordination?.agent_handoff_compact_v1 === true;
+  const localAgentHandoffCompactV2 = packet?.agent_coordination?.agent_handoff_compact_v2 === true;
   const localSubAgent = packet?.agent_coordination?.sub_agent_v1 === true;
   let executionIssuance = opts._subAgentChild === true
     ? remoteIssuance
@@ -698,6 +707,7 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
           ...(plainObject(remoteIssuance.coordination) || {}),
           agent_handoff_v1: localAgentHandoff,
           agent_handoff_compact_v1: localAgentHandoff && localAgentHandoffCompact,
+          agent_handoff_compact_v2: localAgentHandoff && localAgentHandoffCompact && localAgentHandoffCompactV2,
           sub_agent_v1: localSubAgent,
         },
       }

@@ -863,6 +863,7 @@ function buildRemoteToolSurfaceRequest() {
       coordination: {
         agent_handoff_v1: tokenToolAllowlistForSuite("tools")?.has("agent_handoff") === true,
         agent_handoff_compact_v1: tokenToolAllowlistForSuite("tools")?.has("agent_handoff") === true,
+        agent_handoff_compact_v2: tokenToolAllowlistForSuite("tools")?.has("agent_handoff") === true,
         sub_agent_v1: tokenToolAllowlistForSuite("tools")?.has("sub_agent") === true,
       },
     },

@@ -85,6 +85,7 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
     coordination: {
       agent_handoff_v1: packet?.agent_coordination?.agent_handoff_v1 === true,
       agent_handoff_compact_v1: packet?.agent_coordination?.agent_handoff_v1 === true,
+      agent_handoff_compact_v2: packet?.agent_coordination?.agent_handoff_compact_v2 === true,
       sub_agent_v1: packet?.agent_coordination?.sub_agent_v1 === true,
     },
   };
@@ -113,6 +114,7 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
     coordination: {
       agent_handoff_v1: capabilities.coordination.agent_handoff_v1,
       agent_handoff_compact_v1: capabilities.coordination.agent_handoff_compact_v1,
+      agent_handoff_compact_v2: capabilities.coordination.agent_handoff_compact_v2,
       sub_agent_v1: capabilities.coordination.sub_agent_v1,
     },
   };

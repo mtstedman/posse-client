@@ -69,6 +69,7 @@ import {
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import {
   emit,
+  applyPlannerRoleModePolicy,
   normalizePlannerRoleMode,
   isQuestionOnlyBinding,
   queueQuestionAnswerTask,
@@ -133,20 +134,27 @@ export class PlannerRole extends BaseRole {
       ].filter(Boolean).join("\n");
     }
 
+    const terminalPlannerHandoff = plannerCtx.plannerPacket?.agent_coordination?.agent_handoff_compact_v1 === true;
     const modeInstructions = dualMode && roleMode === "primary"
       ? [
           "DUAL PLANNING MODE: PRIMARY PLANNER.",
           "Create the best candidate plan, but this output will be reviewed by a red-team planner and will not directly create write-layer jobs.",
-          "Still output the normal JSON task array so the synthesis planner can compare concrete task structure.",
+          terminalPlannerHandoff
+            ? "Submit the concrete candidate task structure through the issued terminal handoff. Posse will render it as the JSON candidate consumed by synthesis."
+            : "Output the normal JSON task array so the synthesis planner can compare concrete task structure.",
           "",
         ].join("\n")
       : dualMode && roleMode === "synth"
         ? [
             "DUAL PLANNING MODE: SYNTHESIS PLANNER.",
-            "You are the only planner in this chain allowed to emit the final executable task JSON array.",
+            terminalPlannerHandoff
+              ? "You are the only planner in this chain allowed to submit the final executable task batch through the issued terminal handoff."
+              : "You are the only planner in this chain allowed to emit the final executable task JSON array.",
             "Use the research brief, the primary planner output, and the red-team critique to produce one authoritative write-layer plan.",
             "Preserve the strongest parts of the primary plan, apply concrete red-team corrections, and avoid blending incompatible approaches.",
-            "Output the final JSON task array using the standard planner contract.",
+            terminalPlannerHandoff
+              ? "Make the terminal handoff your sole final action; Posse will render the canonical JSON task array for downstream scheduling."
+              : "Output the final JSON task array using the standard planner contract.",
             "",
           ].join("\n")
         : "";
@@ -156,7 +164,7 @@ export class PlannerRole extends BaseRole {
         ? [
             "ATLAS COMPACT HANDOFF ROUTING:",
             "Do not add dev_brief to a compact agent_handoff task. Posse derives the downstream dev brief from the task's scope and claims.",
-            "Claims are optional. When evidence materially supports the plan, each claim object uses claim plus optional proof, support, decoy, and prose; never use name or summary as claim keys.",
+            "Claims are optional. When evidence materially supports the plan, use claim plus optional proof, support, decoy, and the synthesis field named by the issued schema. Do not emit an unadvertised compatibility alias.",
             "Put hash refs only in proof, support, or decoy selector objects. Never put refs in narrative fields, task scope, or success criteria.",
             "",
           ].join("\n")
@@ -412,21 +420,22 @@ export class PlannerRole extends BaseRole {
         "- Each image task should be ONE task: \"Generate [description]\"",
         "- Do NOT plan tasks like \"write generation script\" or \"execute script\" - the tool handles this",
         "- Do NOT plan API setup, package installation, or script writing tasks",
-        "- ALL tasks MUST use task_mode \"image\" or \"content\"",
-        "- Do NOT emit files_to_modify - images go to output_root",
+        "- With terminal handoff, use role \"artificer\" and put task_mode \"image\" or \"content\" inside scope; fallback JSON keeps job_type/task_mode at the task top level",
+        "- Do NOT grant files_to_modify - images go to output_root",
         `- Set output_root to: ${artifactDir}`,
         "- Include output_root in create_roots",
-        "- Set needs_image_generation: true for tasks that generate images",
-        "- The task_spec should describe the image to generate, not how to generate it",
+        "- In terminal handoff, put output_root and create_roots inside scope",
+        "- The terminal summary/intent, or fallback task_spec, should describe the image to generate rather than how to generate it",
         "",
       ],
       report: [
         "==== WORK ITEM MODE: report ====",
         "This WI produces TEXT/DATA ARTIFACTS, NOT repo code changes.",
-        "- ALL tasks MUST use task_mode \"report\" or \"content\"",
-        "- Do NOT emit files_to_modify - reports go to output_root",
+        "- With terminal handoff, use role \"artificer\" and put task_mode \"report\" or \"content\" inside scope; fallback JSON keeps job_type/task_mode at the task top level",
+        "- Do NOT grant files_to_modify - reports go to output_root",
         `- Set output_root to: ${artifactDir}`,
         "- Include output_root in create_roots",
+        "- In terminal handoff, put output_root and create_roots inside scope",
         "",
       ],
     };
@@ -450,10 +459,10 @@ export class PlannerRole extends BaseRole {
           "EXPLICIT OUTPUT BINDING (user-selected - treat as a strong planning constraint, not a hint):",
           `- output_mode is explicitly bound to "${explicitBindings.outputMode}"`,
           explicitBindings.outputMode === "repo"
-            ? "- Plan repo-edit tasks: use job_type \"dev\", task_mode \"code\", and target real repo files/surfaces"
+            ? "- Plan repo-edit tasks: terminal handoff uses role \"dev\" with scope.task_mode \"code\"; fallback JSON uses job_type \"dev\" and top-level task_mode \"code\". Target real repo files/surfaces."
             : explicitBindings.outputMode === "artifact"
-              ? "- Plan artifact tasks: use job_type \"artificer\" or \"promote\" and target artifact output directories, not repo edits"
-              : "- Plan exactly one visible answer task: use job_type \"artificer\", task_mode \"report\", and write answer.md under output_root; do not invent repo-edit tasks",
+              ? "- Plan artifact tasks: terminal handoff uses role \"artificer\" or \"promote\"; fallback JSON uses the matching job_type. Target artifact output directories, not repo edits."
+              : "- Plan exactly one visible answer task: terminal handoff uses role \"artificer\" with scope.task_mode \"report\"; fallback JSON uses job_type \"artificer\" and top-level task_mode \"report\". Write answer.md under output_root and do not invent repo-edit tasks.",
           "- Do NOT override this binding just because the wording sounds visual, design-oriented, or mock-like",
           "",
         ].join("\n")
@@ -502,6 +511,7 @@ export class PlannerRole extends BaseRole {
         },
       },
     });
+    applyPlannerRoleModePolicy(plannerPacket, { planningMode, roleMode: plannerRoleMode });
     const plannerAttempts = getAttempts(job.id);
     Object.assign(plannerPacket, {
       job_type: job.job_type,
@@ -625,6 +635,7 @@ export class PlannerRole extends BaseRole {
     const maxTurns = researchBudgetToMaxTurnsOverride(ctx.researchBudget, "planner");
     return {
       role: this.getRole(),
+      roleMode: ctx.plannerRoleMode || "normal",
       allowWrite: false,
       modelTier: ctx.tier,
       reasoningEffort: researchBudgetToReasoningEffort(ctx.researchBudget, job.reasoning_effort || "medium"),

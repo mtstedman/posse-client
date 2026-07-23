@@ -26,14 +26,22 @@ import {
 export const AGENT_HANDOFF_PROTOCOL = "posse.agent_handoff.v1";
 export const AGENT_HANDOFF_LIMITS = Object.freeze({
   maxCallBytes: 256 * 1024,
-  maxEntryBytes: 16 * 1024,
+  maxEntryBytes: 32 * 1024,
   maxClaims: 12,
   maxSelectorsPerClaim: 8,
-  maxSelectorLines: 40,
-  maxSelectorChars: 4000,
-  maxEvidenceChars: 12000,
+  recommendedIdChars: 40,
+  maxIdChars: 80,
+  recommendedSummaryChars: 2000,
+  maxSummaryChars: 4000,
+  recommendedSelectorLines: 40,
+  maxSelectorLines: 300,
+  recommendedSelectorChars: 4000,
+  maxSelectorChars: 24000,
+  recommendedEvidenceChars: 12000,
+  maxEvidenceChars: 32000,
   maxCitationChildEvidenceChars: 4000,
-  maxNarrativeChars: 4000,
+  recommendedNarrativeChars: 4000,
+  maxNarrativeChars: 12000,
   maxCitationChildNarrativeChars: 2000,
   maxStructuredMetadataChars: 12000,
 });
@@ -63,6 +71,7 @@ const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
   "id",
   "depends_on",
   "role",
+  "job_type",
   "intent",
   "summary",
   "claims",
@@ -100,6 +109,28 @@ export function isRetryableTerminalHandoffError(error) {
 
 function plainObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function sameCompatibilityValue(left, right) {
+  if (left === right) return true;
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
+function compatibilityAlias(source, canonicalKey, aliasKey, label) {
+  const canonicalPresent = source[canonicalKey] != null;
+  const aliasPresent = source[aliasKey] != null;
+  if (canonicalPresent && aliasPresent
+    && !sameCompatibilityValue(source[canonicalKey], source[aliasKey])) {
+    fail(
+      "AGENT_HANDOFF_SCHEMA_INVALID",
+      `${label}.${canonicalKey} conflicts with compatibility alias ${label}.${aliasKey}`,
+    );
+  }
+  return canonicalPresent ? source[canonicalKey] : source[aliasKey];
 }
 
 function exactKeys(value, allowed, label) {
@@ -343,12 +374,46 @@ function normalizeScope(value, label, profile) {
 
 function normalizeClaimInput(value, claimIndex) {
   if (Array.isArray(value)) return value;
-  const source = exactKeys(value, ["claim", "proof", "support", "decoy", "prose"], `claims[${claimIndex}]`);
+  const label = `claims[${claimIndex}]`;
+  const source = exactKeys(value, ["claim", "name", "proof", "support", "decoy", "prose", "summary"], label);
+  const claim = compatibilityAlias(source, "claim", "name", label);
+  const prose = compatibilityAlias(source, "prose", "summary", label);
   const detail = {};
-  for (const lane of ["proof", "support", "decoy", "prose"]) {
+  for (const lane of ["proof", "support", "decoy"]) {
     if (source[lane] != null) detail[lane] = source[lane];
   }
-  return Object.keys(detail).length > 0 ? [source.claim, detail] : [source.claim];
+  if (prose != null) detail.prose = prose;
+  return Object.keys(detail).length > 0 ? [claim, detail] : [claim];
+}
+
+function normalizeClaimDetail(value, label) {
+  const source = exactKeys(value, ["proof", "support", "decoy", "prose", "summary"], label);
+  const prose = compatibilityAlias(source, "prose", "summary", label);
+  return {
+    ...(source.proof == null ? {} : { proof: source.proof }),
+    ...(source.support == null ? {} : { support: source.support }),
+    ...(source.decoy == null ? {} : { decoy: source.decoy }),
+    ...(prose == null ? {} : { prose }),
+  };
+}
+
+function normalizeDecoyInput(value, label) {
+  if (Array.isArray(value)) return value;
+  const source = exactKeys(value, ["selector", "ref", "lines", "reason", "summary"], label);
+  const refSelector = source.ref == null ? null : {
+    ref: source.ref,
+    ...(source.lines == null ? {} : { lines: source.lines }),
+  };
+  if (source.selector != null && refSelector != null
+    && !sameCompatibilityValue(source.selector, refSelector)) {
+    fail(
+      "AGENT_HANDOFF_SCHEMA_INVALID",
+      `${label}.selector conflicts with compatibility alias ${label}.ref`,
+    );
+  }
+  const selector = source.selector ?? refSelector;
+  const reason = compatibilityAlias(source, "reason", "summary", label);
+  return [selector, reason ?? "Excluded from supporting evidence."];
 }
 
 function materializeClaim(value, claimIndex, context, counters) {
@@ -359,7 +424,7 @@ function materializeClaim(value, claimIndex, context, counters) {
   const claim = boundedString(normalized[0], `claims[${claimIndex}][0]`, 1000);
   counters.narrative += claim.length;
   if (normalized.length === 1) return [claim];
-  const detail = exactKeys(normalized[1], ["proof", "support", "decoy", "prose"], `claims[${claimIndex}][1]`);
+  const detail = normalizeClaimDetail(normalized[1], `claims[${claimIndex}][1]`);
   const out = {};
   let selectorCount = 0;
   for (const lane of ["proof", "support"]) {
@@ -381,12 +446,7 @@ function materializeClaim(value, claimIndex, context, counters) {
   if (detail.decoy != null) {
     if (!Array.isArray(detail.decoy)) fail("AGENT_HANDOFF_SCHEMA_INVALID", "decoy must be an array");
     out.decoy = detail.decoy.map((entry, index) => {
-      const normalizedEntry = Array.isArray(entry)
-        ? entry
-        : (() => {
-            const object = exactKeys(entry, ["selector", "reason"], `decoy[${index}]`);
-            return [object.selector, object.reason];
-          })();
+      const normalizedEntry = normalizeDecoyInput(entry, `decoy[${index}]`);
       if (normalizedEntry.length !== 2) fail("AGENT_HANDOFF_SCHEMA_INVALID", `decoy[${index}] must be [selector, reason]`);
       selectorCount += 1;
       const evidence = materializeAgentHandoffEvidenceSelector(normalizedEntry[0], context);
@@ -400,7 +460,12 @@ function materializeClaim(value, claimIndex, context, counters) {
     fail("AGENT_HANDOFF_TOO_LARGE", `claims[${claimIndex}] exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim} selectors`);
   }
   if (detail.prose != null) {
-    out.prose = boundedString(detail.prose, `claims[${claimIndex}].prose`, 2000, { required: false });
+    out.prose = boundedString(
+      detail.prose,
+      `claims[${claimIndex}].prose`,
+      AGENT_HANDOFF_LIMITS.maxSummaryChars,
+      { required: false },
+    );
     counters.narrative += out.prose.length;
   }
   return [claim, out];
@@ -766,12 +831,17 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
 
   const handoffs = source.tasks.map((raw, index) => {
     const task = exactKeys(raw, PLANNER_COMPACT_TASK_KEYS, `agent_handoff.tasks[${index}]`);
-    for (const key of ["id", "role", "intent", "summary", "scope", "success_criteria"]) {
+    for (const key of ["summary", "scope", "success_criteria"]) {
       if (task[key] == null) {
         fail("AGENT_HANDOFF_SCHEMA_INVALID", `agent_handoff.tasks[${index}].${key} is required`);
       }
     }
-    const taskRole = boundedString(task.role, `agent_handoff.tasks[${index}].role`, 40);
+    const label = `agent_handoff.tasks[${index}]`;
+    const taskRoleInput = compatibilityAlias(task, "role", "job_type", label);
+    if (taskRoleInput == null) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.role is required`);
+    }
+    const taskRole = boundedString(taskRoleInput, `${label}.role`, 40);
     const targetKind = ["dev", "artificer"].includes(taskRole) ? "agent" : "system";
     const report = {
       summary: task.summary,
@@ -784,10 +854,10 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
       if (task[key] != null) report[key] = task[key];
     }
     return {
-      id: task.id,
+      id: task.id ?? `task-${index + 1}`,
       depends_on: task.depends_on ?? [],
       target: { kind: targetKind, role: taskRole },
-      intent: task.intent,
+      intent: task.intent ?? `Execute ${task.id ?? `task-${index + 1}`} as summarized`,
       report,
     };
   });
@@ -799,6 +869,42 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
     profile: "planner.plan.v1",
     outcome: noTasks ? "complete" : "success",
     handoffs,
+  };
+}
+
+function normalizeSemanticAgentHandoffArgs(args, { role = "" } = {}) {
+  const source = plainObject(args);
+  if (!source || !Array.isArray(source.handoffs)) return args;
+  const normalizedRole = String(role || "agent").trim().toLowerCase() || "agent";
+  return {
+    ...source,
+    handoffs: source.handoffs.map((raw, index) => {
+      const rawEntry = plainObject(raw);
+      if (!rawEntry) return raw;
+      const entry = { ...rawEntry };
+      const flatReportKeys = PLANNER_REPORT_KEYS.filter((key) => Object.hasOwn(entry, key));
+      const reportSource = plainObject(entry.report);
+      if (reportSource || flatReportKeys.length > 0) {
+        const report = { ...(reportSource || {}) };
+        for (const key of flatReportKeys) {
+          if (report[key] != null && !sameCompatibilityValue(report[key], entry[key])) {
+            fail(
+              "AGENT_HANDOFF_SCHEMA_INVALID",
+              `handoffs[${index}].report.${key} conflicts with flat compatibility field handoffs[${index}].${key}`,
+            );
+          }
+          if (report[key] == null) report[key] = entry[key];
+          delete entry[key];
+        }
+        if (report.summary == null) report.summary = "";
+        if (report.claims == null) report.claims = [];
+        entry.report = report;
+      }
+      if (entry.id == null) entry.id = `${normalizedRole}-handoff-${index + 1}`;
+      if (entry.depends_on == null) entry.depends_on = [];
+      if (entry.intent == null) entry.intent = `Submit ${normalizedRole} terminal handoff`;
+      return entry;
+    }),
   };
 }
 
@@ -986,8 +1092,13 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
     const label = `handoffs[${handoffIndex}]`;
     const entry = capture(() => exactKeys(raw, ["id", "depends_on", "target", "intent", "report"], label));
     if (!entry) continue;
-    capture(() => boundedString(entry.id, `${label}.id`, 40));
-    capture(() => stringArray(entry.depends_on, `${label}.depends_on`, effectiveLimit, 40));
+    capture(() => boundedString(entry.id, `${label}.id`, AGENT_HANDOFF_LIMITS.maxIdChars));
+    capture(() => stringArray(
+      entry.depends_on,
+      `${label}.depends_on`,
+      effectiveLimit,
+      AGENT_HANDOFF_LIMITS.maxIdChars,
+    ));
     capture(() => boundedString(entry.intent, `${label}.intent`, 1000));
     if (policy && profile) capture(() => validateTarget(entry.target, policy, profile, `${label}.target`));
 
@@ -997,7 +1108,12 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       `${label}.report`,
     ));
     if (!report) continue;
-    capture(() => boundedString(report.summary, `${label}.report.summary`, 2000, { required: false }));
+    capture(() => boundedString(
+      report.summary,
+      `${label}.report.summary`,
+      AGENT_HANDOFF_LIMITS.maxSummaryChars,
+      { required: false },
+    ));
     capture(() => normalizeScope(report.scope || {}, `${label}.report.scope`, profile));
     if (report.research != null) capture(() => normalizeResearchData(report.research, `${label}.report.research`, profile));
     capture(() => normalizePlannerReportMetadata(report, `${label}.report`, profile));
@@ -1030,9 +1146,14 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       }
       capture(() => boundedString(claim[0], `${claimLabel}.claim`, 1000));
       if (claim.length === 1) continue;
-      const detail = capture(() => exactKeys(claim[1], ["proof", "support", "decoy", "prose"], `${claimLabel}.evidence`));
+      const detail = capture(() => normalizeClaimDetail(claim[1], `${claimLabel}.evidence`));
       if (!detail) continue;
-      if (detail.prose != null) capture(() => boundedString(detail.prose, `${claimLabel}.prose`, 2000, { required: false }));
+      if (detail.prose != null) capture(() => boundedString(
+        detail.prose,
+        `${claimLabel}.prose`,
+        AGENT_HANDOFF_LIMITS.maxSummaryChars,
+        { required: false },
+      ));
       let selectorCount = 0;
       for (const lane of ["proof", "support"]) {
         if (detail[lane] == null) continue;
@@ -1056,12 +1177,10 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
           issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: `${claimLabel}.decoy must be an array` });
         } else {
           for (const [decoyIndex, rawDecoy] of detail.decoy.entries()) {
-            const decoy = Array.isArray(rawDecoy)
-              ? rawDecoy
-              : capture(() => {
-                  const object = exactKeys(rawDecoy, ["selector", "reason"], `${claimLabel}.decoy[${decoyIndex}]`);
-                  return [object.selector, object.reason];
-                });
+            const decoy = capture(() => normalizeDecoyInput(
+              rawDecoy,
+              `${claimLabel}.decoy[${decoyIndex}]`,
+            ));
             if (!decoy || decoy.length !== 2) continue;
             selectorCount += 1;
             capture(() => materializeAgentHandoffEvidenceSelector(decoy[0], context));
@@ -1093,7 +1212,10 @@ function failCollectedAgentHandoffIssues(issues) {
 
 export function materializeAgentHandoff(args, { context = {}, role = "", maxHandoffs = null } = {}) {
   const normalizedRole = String(role || "").trim().toLowerCase();
-  const normalizedArgs = normalizePlannerAgentHandoffArgs(args, { role: normalizedRole });
+  const normalizedArgs = normalizeSemanticAgentHandoffArgs(
+    normalizePlannerAgentHandoffArgs(args, { role: normalizedRole }),
+    { role: normalizedRole },
+  );
   const serialized = JSON.stringify(normalizedArgs ?? null);
   if (Buffer.byteLength(serialized, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
     fail("AGENT_HANDOFF_TOO_LARGE", `agent_handoff exceeds ${AGENT_HANDOFF_LIMITS.maxCallBytes} bytes`);
@@ -1137,13 +1259,23 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
     }
     const entryCounters = { evidence: 0, narrative: 0 };
     const entry = exactKeys(raw, ["id", "depends_on", "target", "intent", "report"], `handoffs[${index}]`);
-    const id = boundedString(entry.id, `handoffs[${index}].id`, 40);
-    const dependsOn = stringArray(entry.depends_on, `handoffs[${index}].depends_on`, effectiveLimit, 40);
+    const id = boundedString(entry.id, `handoffs[${index}].id`, AGENT_HANDOFF_LIMITS.maxIdChars);
+    const dependsOn = stringArray(
+      entry.depends_on,
+      `handoffs[${index}].depends_on`,
+      effectiveLimit,
+      AGENT_HANDOFF_LIMITS.maxIdChars,
+    );
     const intent = boundedString(entry.intent, `handoffs[${index}].intent`, 1000);
     entryCounters.narrative += intent.length;
     const reportLabel = `handoffs[${index}].report`;
     const report = exactKeys(entry.report, PLANNER_REPORT_KEYS, reportLabel);
-    const summary = boundedString(report.summary, `handoffs[${index}].report.summary`, 2000, { required: false });
+    const summary = boundedString(
+      report.summary,
+      `handoffs[${index}].report.summary`,
+      AGENT_HANDOFF_LIMITS.maxSummaryChars,
+      { required: false },
+    );
     entryCounters.narrative += summary.length;
     if (!Array.isArray(report.claims) || report.claims.length > AGENT_HANDOFF_LIMITS.maxClaims) {
       fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}].report.claims exceeds ${AGENT_HANDOFF_LIMITS.maxClaims} claims`);

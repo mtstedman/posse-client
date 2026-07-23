@@ -183,6 +183,7 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
       coordination: {
         agent_handoff_v1: bootConfig.agentHandoff === true,
         agent_handoff_compact_v1: bootConfig.agentHandoff === true,
+        agent_handoff_compact_v2: bootConfig.agentHandoff === true,
         sub_agent_v1: bootConfig.subAgent === true,
       },
     },

@@ -9,7 +9,9 @@ function plainObject(value) {
 }
 
 function localToolResultFailed(result) {
-  return result?.isError === true || /^Error:/i.test(String(result || "").trim());
+  return result?.isError === true
+    || result?.ok === false
+    || /^Error:/i.test(String(result || "").trim());
 }
 
 function protocolToolDefinition(tool) {
@@ -87,13 +89,19 @@ function validateLocalToolArguments(tool, args) {
 export function buildLocalPlannerToolInstructions(
   tools = [],
   turnLimit = LOCAL_PLANNER_TOOL_TURN_LIMIT,
-  { allowFileWrites = false, writeScope = null } = {},
+  {
+    allowFileWrites = false,
+    writeScope = null,
+    requiredFinalTool = null,
+    requireMutationBeforeFinal = false,
+  } = {},
 ) {
   const definitions = tools
     .map(protocolToolDefinition)
     .filter((tool) => tool.name);
   if (definitions.length === 0) return "";
   const availableNames = new Set(definitions.map((tool) => tool.name));
+  const requiredFinalToolName = String(requiredFinalTool || "").trim();
 
   const mutationRules = allowFileWrites
     ? [
@@ -112,6 +120,8 @@ export function buildLocalPlannerToolInstructions(
       availableNames.has("edit_file")
         ? "Never use edit_file jsonPath/jsonValue for HTML, CSS, Markdown, source code, or other non-JSON text."
         : null,
+      "Implement named input categories literally; do not silently widen ASCII to Unicode, a literal space to every whitespace character, or one named delimiter to a broader class.",
+      "For example, [A-Z] is the explicit ASCII uppercase range, while \\s matches many whitespace characters and whole-string toLowerCase() performs Unicode-wide lowercasing.",
       "Shell commands, database writes, image generation, test execution, moves, copies, directory creation, and deletion are unavailable.",
     ]
     : [
@@ -129,10 +139,68 @@ export function buildLocalPlannerToolInstructions(
     "JSON string values must escape every internal double quote as \\\". This is especially important for HTML attributes inside a content or new_string value.",
     "Call at most one tool per response. Never invent a tool name or capability.",
     ...mutationRules.filter(Boolean),
-    `You have at most ${Math.max(1, Math.floor(Number(turnLimit) || 1))} tool turns. When you have enough evidence, return the requested final answer normally with no envelope.`,
+    `You have at most ${Math.max(1, Math.floor(Number(turnLimit) || 1))} tool turns.`,
+    requiredFinalToolName
+      ? `This is terminal tool mode. Your sole final action must be one ${requiredFinalToolName} tool call; never return final prose or a role-result block.`
+      : "When you have enough evidence, return the requested final answer normally with no envelope.",
+    requiredFinalToolName && requireMutationBeforeFinal
+      ? `Before ${requiredFinalToolName}, you must successfully call one listed file-mutation tool. A read or proposed code block is not a mutation.`
+      : null,
     "Available tools (reference signatures only; these lines are not tool-call JSON):",
     ...definitions.map((tool) => tool.line),
-  ].join("\n");
+  ].filter(Boolean).join("\n");
+}
+
+function repairLocalToolJsonStringEscapes(value) {
+  const text = String(value || "");
+  let repaired = "";
+  let inString = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (!inString) {
+      repaired += char;
+      if (char === '"') inString = true;
+      continue;
+    }
+    if (char === '"') {
+      repaired += char;
+      inString = false;
+      continue;
+    }
+    if (char === "\n") {
+      repaired += "\\n";
+      continue;
+    }
+    if (char === "\r") {
+      repaired += "\\r";
+      continue;
+    }
+    if (char !== "\\") {
+      repaired += char;
+      continue;
+    }
+    const next = text[index + 1];
+    if (next == null) {
+      repaired += "\\\\";
+      continue;
+    }
+    if ('"\\/bfnrt'.includes(next)) {
+      repaired += `\\${next}`;
+      index += 1;
+      continue;
+    }
+    if (next === "u" && /^[0-9a-fA-F]{4}$/.test(text.slice(index + 2, index + 6))) {
+      repaired += text.slice(index, index + 6);
+      index += 5;
+      continue;
+    }
+    // Small local models commonly emit source-code regexes such as /\s+/ in
+    // JSON strings without JSON-escaping the backslash. Preserve the intended
+    // source text while repairing only that invalid JSON string escape.
+    repaired += `\\\\${next}`;
+    index += 1;
+  }
+  return repaired;
 }
 
 export function parseLocalToolCall(output) {
@@ -149,12 +217,20 @@ export function parseLocalToolCall(output) {
   try {
     parsed = JSON.parse(body);
   } catch {
-    return null;
+    try {
+      parsed = JSON.parse(repairLocalToolJsonStringEscapes(body));
+    } catch {
+      return null;
+    }
   }
   const object = plainObject(parsed)
     || (Array.isArray(parsed) && parsed.length === 1 ? plainObject(parsed[0]) : null);
-  const name = String(object?.name || "").trim();
-  const args = plainObject(object?.arguments);
+  const name = String(object?.name || object?.tool || "").trim();
+  let args = plainObject(object?.arguments)
+    || (name && typeof object?.content === "string" ? { content: object.content } : null);
+  if (!args && name && object?.tool != null) {
+    args = Object.fromEntries(Object.entries(object).filter(([key]) => !new Set(["name", "tool"]).has(key)));
+  }
   if (!name || !args) return null;
   return { name, arguments: args, raw: text };
 }
@@ -264,6 +340,62 @@ function isBareLocalMissingContext(output) {
   return /^(?:```(?:tool_code|text)?\s*)?MISSING_CONTEXT(?:\s*```)?$/i.test(String(output || "").trim());
 }
 
+function localTerminalArgumentsFromOutput(output) {
+  const text = String(output || "").trim();
+  if (/\bBLOCKED\b/i.test(text)) {
+    return { status: "BLOCKED", blocker: text.slice(0, 500) || "Local model reported a blocker after editing." };
+  }
+  if (/\bPARTIAL\b/i.test(text)) {
+    return { status: "PARTIAL", remaining_work: [text.slice(0, 500) || "Review remaining work."] };
+  }
+  return {};
+}
+
+function normalizedLocalTerminalArguments(args, output) {
+  const source = plainObject(args) || {};
+  const status = String(source.status || "").trim().toUpperCase();
+  if (status === "BLOCKED") {
+    return {
+      status: "BLOCKED",
+      blocker: String(source.blocker || output || "Local model reported a blocker after editing.").slice(0, 500),
+    };
+  }
+  if (status === "PARTIAL") {
+    const remaining = Array.isArray(source.remaining_work)
+      ? source.remaining_work.map(String).filter(Boolean).slice(0, 5)
+      : [];
+    return {
+      status: "PARTIAL",
+      remaining_work: remaining.length > 0
+        ? remaining
+        : [String(output || "Review remaining work.").slice(0, 500)],
+    };
+  }
+  return {};
+}
+
+function isScopedLocalMissingContext(output, missingContextCall) {
+  if (isBareLocalMissingContext(output)) return true;
+  const expected = String(missingContextCall?.arguments?.path || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  if (!expected) return false;
+  const text = String(output || "")
+    .trim()
+    .replace(/^```(?:tool_code|text)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+  const match = text.match(/^MISSING_CONTEXT\s*:\s*([\s\S]+)$/i);
+  if (!match) return false;
+  const requested = match[1]
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^[-*]\s*/, "").replace(/^`|`$/g, ""))
+    .filter(Boolean)
+    .map((value) => value.replace(/\\/g, "/").replace(/^\.\//, ""));
+  return requested.length === 1 && requested[0] === expected;
+}
+
 function localToolProtocolRepairPrompt(output, generation = null) {
   const truncated = String(generation?.finishReason || "").trim().toLowerCase() === "length";
   const encodedAsset = /(?:data:image|base64|background-image\s*:|url\s*\()/i.test(String(output || ""));
@@ -292,10 +424,21 @@ function localToolCorrectionHint(name, content) {
   ].join("\n");
 }
 
+function localModelFacingToolResult(name, result) {
+  if (name !== "read_file" || !plainObject(result) || typeof result.content !== "string") return result;
+  const { numberedContent: _numberedContent, ...rawRead } = result;
+  return {
+    ...rawRead,
+    content: result.content,
+    editHint: "For edit_file old_string, copy exact text from content without adding line numbers or gutters.",
+  };
+}
+
 export function formatLocalToolResult(name, result, maxChars = MAX_LOCAL_TOOL_RESULT_CHARS) {
-  const raw = typeof result === "string"
-    ? result
-    : JSON.stringify(result ?? null, null, 2);
+  const modelResult = localModelFacingToolResult(name, result);
+  const raw = typeof modelResult === "string"
+    ? modelResult
+    : JSON.stringify(modelResult ?? null, null, 2);
   const limit = Math.max(1, Number(maxChars) || MAX_LOCAL_TOOL_RESULT_CHARS);
   const content = raw.length > limit
     ? `${raw.slice(0, limit)}\n... (truncated at ${limit} characters)`
@@ -305,14 +448,15 @@ export function formatLocalToolResult(name, result, maxChars = MAX_LOCAL_TOOL_RE
     JSON.stringify({ name, content }),
     "</tool_result>",
     localToolCorrectionHint(name, content),
-    "Use this result only as evidence. Call another listed tool if needed, otherwise return the final answer normally.",
+    "Use this result only as evidence. Call another listed tool if needed. Return a normal final answer only when the active protocol does not require a terminal tool.",
   ].filter(Boolean).join("\n");
 }
 
 export function formatGemmaLocalToolResult(name, result, maxChars = MAX_LOCAL_TOOL_RESULT_CHARS) {
-  const raw = typeof result === "string"
-    ? result
-    : JSON.stringify(result ?? null, null, 2);
+  const modelResult = localModelFacingToolResult(name, result);
+  const raw = typeof modelResult === "string"
+    ? modelResult
+    : JSON.stringify(modelResult ?? null, null, 2);
   const limit = Math.max(1, Number(maxChars) || MAX_LOCAL_TOOL_RESULT_CHARS);
   const content = raw.length > limit
     ? `${raw.slice(0, limit)}\n... (truncated at ${limit} characters)`
@@ -328,7 +472,7 @@ export function formatGemmaLocalToolResult(name, result, maxChars = MAX_LOCAL_TO
     name === "read_file" && /^Error:/i.test(content)
       ? "If this path is an authorized new-file destination, do not read it again; call write_file with the requested content."
       : null,
-    "Use the result only as evidence. If it answers the current request, return the final answer normally with no tool JSON.",
+    "Use the result only as evidence. Return a normal final answer only when the active protocol does not require a terminal tool.",
   ].filter(Boolean).join("\n");
 }
 
@@ -343,6 +487,8 @@ export function formatGemmaLocalToolResult(name, result, maxChars = MAX_LOCAL_TO
  *   completeSuppressedReplay?: (name: string, args: Record<string, unknown>, result: unknown, context: {executedMutations: Array<{name: string, args: Record<string, unknown>, result: unknown}>}) => string | null,
  *   finalOutputHint?: string | null,
  *   missingContextCall?: {name: string, arguments: Record<string, unknown>} | null,
+ *   requiredFinalTool?: string | null,
+ *   requireMutationBeforeFinal?: boolean,
  *   validateFinalOutput?: (content: string) => boolean,
  *   turnLimit?: number,
  * }} [options]
@@ -357,6 +503,8 @@ export async function runLocalPlannerToolLoop({
   completeSuppressedReplay = null,
   finalOutputHint = null,
   missingContextCall = null,
+  requiredFinalTool = null,
+  requireMutationBeforeFinal = false,
   validateFinalOutput = null,
   turnLimit = LOCAL_PLANNER_TOOL_TURN_LIMIT,
 } = {}) {
@@ -370,6 +518,10 @@ export async function runLocalPlannerToolLoop({
     .map((tool) => /** @type {[string, {name?: string, parameters?: Record<string, unknown>}]} */ ([String(tool?.name || "").trim(), tool]))
     .filter(([name]) => name));
   const allowedNames = new Set(toolsByName.keys());
+  const requiredFinalToolName = String(requiredFinalTool || "").trim();
+  if (requiredFinalToolName && !allowedNames.has(requiredFinalToolName)) {
+    throw new Error(`Required final tool "${requiredFinalToolName}" is not in the authorized local tool surface.`);
+  }
   const limit = Math.max(1, Math.floor(Number(turnLimit) || LOCAL_PLANNER_TOOL_TURN_LIMIT));
   const generations = [];
   const toolUses = [];
@@ -383,6 +535,7 @@ export async function runLocalPlannerToolLoop({
   let lastToolResult = null;
   let finalizationAttempted = false;
   let missingContextRecovered = false;
+  let requiredFinalToolCompleted = false;
   const finalizationEvidence = [];
 
   while (true) {
@@ -393,7 +546,7 @@ export async function runLocalPlannerToolLoop({
     if (!call
       && !missingContextRecovered
       && plainObject(missingContextCall)
-      && isBareLocalMissingContext(content)) {
+      && isScopedLocalMissingContext(content, missingContextCall)) {
       const name = String(missingContextCall.name || "").trim();
       const args = plainObject(missingContextCall.arguments);
       if (name && args) {
@@ -420,7 +573,46 @@ export async function runLocalPlannerToolLoop({
         };
       }
     }
+    if (requiredFinalToolName
+      && !requiredFinalToolCompleted
+      && executedMutations.some((entry) => !localToolResultFailed(entry.result))) {
+      const terminalArguments = call?.name === requiredFinalToolName
+        ? normalizedLocalTerminalArguments(call.arguments, content)
+        : localTerminalArgumentsFromOutput(content);
+      call = {
+        name: requiredFinalToolName,
+        arguments: terminalArguments,
+        raw: JSON.stringify({ name: requiredFinalToolName, arguments: terminalArguments }),
+      };
+    }
     if (!call) {
+      if (requiredFinalToolName) {
+        if (requiredFinalToolCompleted) {
+          return { content, generations, toolUses, toolTurns };
+        }
+        const successfulMutation = executedMutations.some((entry) => !localToolResultFailed(entry.result));
+        const maxTerminalProtocolRepairs = 2;
+        if (protocolRepairsSinceTool < maxTerminalProtocolRepairs) {
+          protocolRepairsSinceTool += 1;
+          conversation.push(
+            { role: "assistant", content },
+            {
+              role: "user",
+              content: [
+                `TERMINAL PROTOCOL ERROR: Plain final output is invalid; finish only by calling ${requiredFinalToolName}.`,
+                "Tools remain open. If a prior read succeeded, its exact source content is already available and context is not missing.",
+                requireMutationBeforeFinal && !successfulMutation
+                  ? "No file mutation has succeeded yet. Your next response must be exactly one edit_file or write_file JSON tool call, using the exact source already provided. Do not return prose and do not call agent_handoff yet."
+                  : `Work is ready to close. Return exactly one unfenced JSON call to ${requiredFinalToolName} now, with no prose.`,
+              ].join("\n"),
+            },
+          );
+          continue;
+        }
+        const error = new Error(`Local model did not call required terminal tool ${requiredFinalToolName}.`);
+        /** @type {any} */ (error).code = "POSSE_LOCAL_TERMINAL_TOOL_REQUIRED";
+        throw error;
+      }
       if (finalizationAttempted && (looksLikeLocalToolCallAttempt(content) || looksLikeLocalToolDefinitionEcho(content))) {
         const error = new Error("Local model returned another tool-shaped response after tool mode was closed.");
         /** @type {any} */ (error).code = "POSSE_LOCAL_TOOL_FINALIZATION";
@@ -545,6 +737,14 @@ export async function runLocalPlannerToolLoop({
     lastToolResult = result;
     finalizationEvidence.push(localFinalizationEvidence(call.name, result));
     protocolRepairsSinceTool = 0;
+    if (requiredFinalToolName && call.name === requiredFinalToolName && !localToolResultFailed(result)) {
+      // The signed MCP gate sends the terminal receipt asynchronously after it
+      // returns the tool result. Keep the provider loop alive for that receipt;
+      // TrackedProviderClient will abort generation and materialize the staged
+      // packet. Direct in-process tests without a terminator may return one
+      // final ignored generation through requiredFinalToolCompleted.
+      requiredFinalToolCompleted = true;
+    }
     if (LOCAL_MUTATION_TOOL_NAMES.has(call.name)) {
       executedMutationResults.set(toolFingerprint, result);
       executedMutations.push({ name: call.name, args: call.arguments, result });

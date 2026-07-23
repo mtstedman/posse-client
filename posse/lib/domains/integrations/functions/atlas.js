@@ -2196,9 +2196,27 @@ export function resolveAtlasExecutionAttachment(args = {}) {
     workItemId,
   });
   const active = split ? !!(baseActive && split.treatment) : baseActive;
-  const method = split ? split.method : "atlas-v2";
-  const unavailableReason = active ? null : (split && baseActive ? "atlas_split_control" : "atlas_route_inactive");
-  const failClosed = !!(required && route.shouldAdvertise && !active);
+  // Local generation intentionally has no ATLAS tool transport. Required mode
+  // still fails closed for providers that are expected to support ATLAS, but a
+  // local role degrades to the ordinary deterministic handoff instead of
+  // making the whole workflow impossible. This is an explicit provider policy,
+  // not the general required-mode fallback behavior.
+  const providerFallback = !!(
+    required
+    && route.shouldAdvertise
+    && !active
+    && provider === "posse-local"
+    && !support.supported
+  );
+  const method = providerFallback
+    ? "standard-non-atlas"
+    : split ? split.method : "atlas-v2";
+  const unavailableReason = active
+    ? null
+    : providerFallback
+      ? "provider_non_atlas_fallback"
+      : (split && baseActive ? "atlas_split_control" : "atlas_route_inactive");
+  const failClosed = !!(required && route.shouldAdvertise && !active && !providerFallback);
   return {
     provider,
     transport: support.transport,
@@ -2215,6 +2233,7 @@ export function resolveAtlasExecutionAttachment(args = {}) {
     method,
     split,
     required,
+    providerFallback,
     failClosed,
     requiredFailureReason: failClosed ? unavailableReason : null,
     tools: active ? filteredRouteTools(route) : [],
