@@ -662,15 +662,17 @@ export class Ledger {
   // ---------------------------------------------------------------------------
 
   /**
-   * Discard every parsed-symbol / edge row tied to `content_hash`, inside a
-   * single transaction. The blob row remains because symbol_deltas points at
-   * blobs(content_hash); `ingestBlob` can refill parse rows for a blob whose
-   * parsed rows were cleared.
+   * Destructively reset the flat parse projection for `content_hash`, inside a
+   * single transaction. This deletes its symbols and outgoing edges plus every
+   * cross-blob exact edge that targets one of its local IDs. The blob row
+   * remains because symbol_deltas points at blobs(content_hash), and versioned
+   * blob-layer rows remain available for audit/rebuild.
    *
    * Opt-in only — used by `posse atlas-v2 scip reparse` so operators can
    * migrate an existing tree-sitter-only ledger to SCIP, and by the
    * main-merge warmer when staged SCIP must refresh blobs that just landed on
-   * the default branch.
+   * the default branch. Callers must rebuild dependent compiler/flat
+   * projections after invoking it; this is not a non-destructive reparse.
    *
    * @param {{ content_hash: string }} input
    * @param {{ waitMs?: number, label?: string }} [opts]

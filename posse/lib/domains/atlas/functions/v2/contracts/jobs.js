@@ -93,6 +93,9 @@
  * @property {boolean} [embeddings_streaming] True when embedding intake ran concurrently with ordered document ingestion.
  * @property {{ ok: boolean, skipped?: string, profile?: string | null, deltaSeeds?: number | null, carriedForwardSeeds?: number | null, error?: string | null } | null} [tree_compression_reseed] Best-effort ML tree-compression reseed outcome.
  * @property {boolean} [scip_staged_fresh]    For purpose === "scip-restage": true when the restage staged fresh artifacts (not already-staged/no-op), so the executor can enqueue the main-incremental intake that consumes them.
+ * @property {AtlasRebuildRequirement} [rebuild_required] Native storage rejected an unsafe incremental refresh and requires the named rebuild scope.
+ * @property {boolean} [rebuild_retry_attempted] Boot ownership reset rebuildable data and retried exactly once.
+ * @property {boolean} [rebuild_recovered] The one-shot boot rebuild completed without another rebuild requirement.
  * @property {boolean} [truncated]            True when a hard warmer cap limited the scan.
  * @property {string} [truncation_reason]
  * @property {number} duration_ms
@@ -102,8 +105,15 @@
 /**
  * @typedef {Object} AtlasWarmSkip
  * @property {string} repo_rel_path
- * @property {"unsupported_lang" | "read_error" | "parse_error" | "size_exceeded" | "minified_skip" | "busy" | "infra_unavailable"} reason
+ * @property {"unsupported_lang" | "read_error" | "parse_error" | "size_exceeded" | "minified_skip" | "busy" | "infra_unavailable" | "rebuild_required"} reason
  * @property {string} [message]
+ */
+
+/**
+ * @typedef {Object} AtlasRebuildRequirement
+ * @property {"ledger"} scope
+ * @property {string} contentHash
+ * @property {"compiler_projection" | "cross_blob_exact_edge" | "compiler_projection_and_cross_blob_exact_edge"} reason
  */
 
 // ============================================================================

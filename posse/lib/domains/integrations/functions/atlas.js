@@ -942,6 +942,61 @@ async function runAtlasV2BootWarmWorkerThread({
   });
 }
 
+function atlasLedgerRebuildRequirement(result) {
+  const requirement = result?.rebuild_required;
+  if (!requirement || typeof requirement !== "object" || requirement.scope !== "ledger") return null;
+  const contentHash = String(requirement.contentHash || "");
+  const reason = String(requirement.reason || "");
+  if (!/^[0-9a-f]{64}$/u.test(contentHash) || !reason) return null;
+  return { scope: "ledger", contentHash, reason };
+}
+
+/**
+ * Run the boot index owner with one bounded recovery for a native storage
+ * rebuild requirement. The first worker has closed its ledger and native
+ * daemon before returning this result, so the parent can safely reset the
+ * rebuildable generation and start one full retry.
+ *
+ * Dependencies are injectable only to keep the one-shot policy directly
+ * testable without spawning workers or deleting fixture databases.
+ *
+ * @param {any} args
+ * @param {string} purpose
+ * @param {{ runWarm?: (args: any) => Promise<any>, reset?: (args: { repoRoot: string }) => Promise<any> }} [dependencies]
+ */
+export async function runAtlasV2BootWarmWithRebuildRecovery(
+  args,
+  purpose,
+  {
+    runWarm = runAtlasV2BootWarmWorkerThread,
+    reset = resetAtlasRebuildableData,
+  } = {},
+) {
+  const first = await runWarm({ ...args, purpose });
+  const requirement = atlasLedgerRebuildRequirement(first);
+  if (!requirement) return first;
+
+  emitBootProgress(args.onProgress, {
+    kind: "line",
+    stream: "system",
+    stage: "index",
+    text: `ATLAS ${requirement.scope} rebuild required (${requirement.reason}); resetting rebuildable data`,
+  });
+  const resetResult = await reset({ repoRoot: args.repoRoot });
+  emitBootProgress(args.onProgress, {
+    kind: "line",
+    stream: "system",
+    stage: "index",
+    text: `ATLAS rebuild reset cleared ${resetResult?.removed?.length || 0} stores; retrying full index once`,
+  });
+  const retried = await runWarm({ ...args, purpose: "main-full" });
+  return {
+    ...retried,
+    rebuild_retry_attempted: true,
+    rebuild_recovered: !atlasLedgerRebuildRequirement(retried),
+  };
+}
+
 /**
  * @param {string} repoRoot
  * @param {Record<string, any>} [config]
@@ -1039,11 +1094,10 @@ function runAtlasV2BootWarmInWorker(args) {
           text: `ATLAS data schema reset: cleared ${reset.removed.length} rebuildable stores; memory and settings preserved`,
         });
       }
-      return runAtlasV2BootWarmWorkerThread({
-        ...args,
-        timeoutMs,
+      return runAtlasV2BootWarmWithRebuildRecovery(
+        { ...args, timeoutMs },
         purpose,
-      });
+      );
     },
     {
       label: "ATLAS v2 boot worker",

@@ -270,11 +270,17 @@ export class BlobStore {
          ORDER BY edge_id ASC`,
       ),
 
-      // Reingest: drop parsed rows tied to a blob while keeping the blob row
-      // itself. symbol_deltas references blobs(content_hash), so deleting the
-      // blob would violate FK constraints in production ledgers.
+      // Reingest: destructively drop the flat projection while keeping the
+      // blob and versioned layer rows. Exact inbound local-id edges must go
+      // too because a replacement backend may assign different local IDs.
       reingestDeleteEdges: db.prepare(
         "DELETE FROM blob_edges WHERE from_content_hash = ?",
+      ),
+      reingestDeleteInboundExactEdges: db.prepare(
+        `DELETE FROM blob_edges
+         WHERE to_content_hash = ?
+           AND from_content_hash <> ?
+           AND to_local_id IS NOT NULL`,
       ),
       mergeDeleteSourceEdges: db.prepare(
         "DELETE FROM blob_edges WHERE from_content_hash = ? AND source = ?",
@@ -746,15 +752,15 @@ export class BlobStore {
   }
 
   /**
-   * Discard every parsed-symbol / edge row tied to `content_hash`, inside a
-   * single transaction. The blob row remains because symbol_deltas points at
-   * blobs(content_hash); `ingestBlob` can refill parse rows for a blob whose
-   * parsed rows were cleared.
+   * Destructively reset the blob's flat parse projection inside a single
+   * transaction. Its symbols, outgoing edges, and inbound exact local-ID
+   * edges are removed. The blob and versioned layer rows remain.
    *
    * Opt-in only — used by `posse atlas-v2 scip reparse` so operators can
    * migrate an existing tree-sitter-only ledger to SCIP, and by the
    * main-merge warmer when staged SCIP must refresh blobs that just landed on
-   * the default branch.
+   * the default branch. Callers must rebuild dependent flat/compiler
+   * projections after invoking it.
    *
    * @param {{ content_hash: string }} input
    * @returns {{ removed_symbols: number, removed_edges: number, removed_blob: number }}
@@ -773,7 +779,11 @@ export class BlobStore {
     const counts = { removed_symbols: 0, removed_edges: 0, removed_blob: 0 };
     const txn = this.#db.transaction(() => {
       const edgesInfo = this.#stmt.reingestDeleteEdges.run(content_hash);
-      counts.removed_edges = Number(edgesInfo.changes) || 0;
+      const inboundInfo = this.#stmt.reingestDeleteInboundExactEdges.run(
+        content_hash,
+        content_hash,
+      );
+      counts.removed_edges = (Number(edgesInfo.changes) || 0) + (Number(inboundInfo.changes) || 0);
       const symbolsInfo = this.#stmt.reingestDeleteSymbols.run(content_hash);
       counts.removed_symbols = Number(symbolsInfo.changes) || 0;
       this.#stmt.reingestClearBlobParseVersion.run(content_hash);

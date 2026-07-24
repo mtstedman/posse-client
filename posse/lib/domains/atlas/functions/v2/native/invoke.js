@@ -99,7 +99,14 @@ function unwrapAtlasNativeMethodResponse(value) {
       ? /** @type {Record<string, unknown>} */ (obj.error)
       : null;
     const message = String(err?.message || obj.message || "ATLAS native method failed");
-    throw new Error(message);
+    const failure = new Error(message);
+    if (typeof err?.code === "string" && err.code) {
+      /** @type {any} */ (failure).code = err.code;
+    }
+    if (err?.details && typeof err.details === "object" && !Array.isArray(err.details)) {
+      /** @type {any} */ (failure).details = { .../** @type {Record<string, unknown>} */ (err.details) };
+    }
+    throw failure;
   }
   if (obj.ok === true && Object.prototype.hasOwnProperty.call(obj, "data")) {
     return obj.data;

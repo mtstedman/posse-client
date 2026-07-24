@@ -99,6 +99,7 @@ export { shouldRunMlTreeCompressionReseed };
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmJobPayload} AtlasWarmJobPayload */
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmJobResult} AtlasWarmJobResult */
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmPurpose} AtlasWarmPurpose */
+/** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasRebuildRequirement} AtlasRebuildRequirement */
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmSkip} AtlasWarmSkip */
 /** @typedef {import("../../functions/v2/contracts/api.js").ViewSymbol} ViewSymbol */
 
@@ -1039,6 +1040,16 @@ export class ParseEngine {
       }
     } catch (err) {
       if (isAbortLikeError(err)) throw err;
+      const rebuildRequired = atlasRebuildRequirement(err);
+      if (rebuildRequired) {
+        base.rebuild_required = rebuildRequired;
+        base.skipped = [{
+          repo_rel_path: ".",
+          reason: "rebuild_required",
+          message: formatAtlasError(err),
+        }];
+        return finalize(base, start);
+      }
       // Treat any unexpected exception as "warming failed" — surface in
       // result rather than throwing. Callers (the executor) decide
       // whether to log as info or escalate.
@@ -3449,6 +3460,32 @@ function isAbortLikeError(err) {
   return anyErr.name === "AbortError"
     || anyErr.code === "ABORT_ERR"
     || anyErr.code === "DAEMON_ABORTED";
+}
+
+/**
+ * @param {unknown} err
+ * @returns {AtlasRebuildRequirement | null}
+ */
+function atlasRebuildRequirement(err) {
+  const anyErr = /** @type {any} */ (err);
+  if (anyErr?.code !== "ATLAS_REBUILD_REQUIRED") return null;
+  const details = anyErr?.details;
+  if (!details || typeof details !== "object" || details.scope !== "ledger") return null;
+  const contentHash = String(details.contentHash || "");
+  const reason = String(details.reason || "");
+  if (
+    !/^[0-9a-f]{64}$/u.test(contentHash)
+    || ![
+      "compiler_projection",
+      "cross_blob_exact_edge",
+      "compiler_projection_and_cross_blob_exact_edge",
+    ].includes(reason)
+  ) return null;
+  return {
+    scope: "ledger",
+    contentHash,
+    reason: /** @type {AtlasRebuildRequirement["reason"]} */ (reason),
+  };
 }
 
 function orderedUniquePaths(paths) {
