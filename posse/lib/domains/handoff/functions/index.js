@@ -831,7 +831,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
     fallback_reads_remaining: _resolveFallbackReadBudget(recipient, base.fallback_reads, hints),
   };
 
-  const coordinationMode = String(readSetting(SETTING_KEYS.AGENT_COORDINATION_MODE) || "off")
+  const coordinationMode = String(readSetting(SETTING_KEYS.AGENT_COORDINATION_MODE) || "handoff")
     .trim()
     .toLowerCase();
   const handoffEnabled = coordinationMode === "handoff" || coordinationMode === "subagents";

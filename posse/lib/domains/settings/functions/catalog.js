@@ -271,7 +271,7 @@ export const SETTINGS_CATALOG = [
   { key: "research_traversal_completion_max_chars", default: "1600", numeric: { integer: true, min: 1 }, description: "Maximum rendered characters for the traversal completion check directive" },
   { key: "atlas_shadow_guardrails", default: "shadow", options: ATLAS_SHADOW_GUARDRAILS_MODE_VALUES, description: "Telemetry-only ATLAS guardrails for deploy provenance, exact-count, negative-evidence, and token-pressure A/B miss patterns" },
   { key: "plan_approval_mode",   default: "false", valueType: "boolean", description: "Require human approval before executing plans" },
-  { key: "agent_coordination_mode", default: "off", scope: "repo", options: AGENT_COORDINATION_MODE_VALUES, description: "Experimental agent coordination: off, terminal handoff reports, or handoff reports plus bounded citation sub-agents." },
+  { key: "agent_coordination_mode", default: "handoff", scope: "repo", options: AGENT_COORDINATION_MODE_VALUES, description: "Agent coordination: terminal handoff reports by default, off to disable them, or subagents to add bounded citation sub-agents." },
   { key: "disable_system_tools", default: "true", valueType: "boolean", adminVisible: false, description: "Disable Claude's native Read/Write/Grep/Glob/Edit/Bash; agents use only the deterministic MCP + ATLAS tool surface" },
 
   // ── Assessor tuning ──────────────────────────────────────────────────────
