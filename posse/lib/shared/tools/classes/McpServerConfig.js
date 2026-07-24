@@ -1058,11 +1058,19 @@ export class McpServerConfig {
     atlasConfig = null,
     remoteToolSurface = null,
     remoteMcpOAuthToken = "",
+    disableAgentTools = false,
   } = {}) {
     if (!roleUsesDeterministicReadMcp(role)) {
       return new McpServerConfig({
         ready: false,
         reason: "role_not_enabled",
+        name: POSSE_MCP_GATEWAY_SERVER_NAME,
+      });
+    }
+    if (disableAgentTools) {
+      return new McpServerConfig({
+        ready: false,
+        reason: "agent_tools_disabled",
         name: POSSE_MCP_GATEWAY_SERVER_NAME,
       });
     }
@@ -1092,6 +1100,12 @@ export class McpServerConfig {
 
   static async forDeterministicReadAsync(role, opts = {}) {
     if (!roleUsesDeterministicReadMcp(role)) {
+      return McpServerConfig.forDeterministicRead(role, opts);
+    }
+    if (opts.disableAgentTools) {
+      // A call that opts out of agent tools mounts no MCP surface, so there is
+      // no attachment to authorize; the gate requirement applies only when a
+      // tool surface will be issued.
       return McpServerConfig.forDeterministicRead(role, opts);
     }
     if (!opts.mcpGate || typeof opts.mcpGate.assertAttached !== "function") {

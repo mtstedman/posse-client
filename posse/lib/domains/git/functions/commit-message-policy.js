@@ -266,6 +266,9 @@ export async function classifyScopedCommit({
     maxTurns: 1,
     cwd,
     disableAtlas: true,
+    // Single-turn text-to-JSON call: no tool surface is mounted, so no agent
+    // MCP gate is required.
+    disableAgentTools: true,
     skipRolePrompt: true,
   });
   const parsed = provider.extractJson

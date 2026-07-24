@@ -296,6 +296,7 @@ export async function callProvider(promptText, {
   _remoteIssuedPolicy = null,
   _remoteToolSurface = null,
   mcpGate = null,
+  disableAgentTools = false,
   nativeColdBoot = false,
 } = {}) {
   const resolvedClaude = await getClaudeCommandAsync();
@@ -430,6 +431,7 @@ export async function callProvider(promptText, {
       atlasConfig,
       remoteToolSurface: _remoteToolSurface,
       mcpGate,
+      disableAgentTools,
     });
     if (deterministicReadMcp.serverConfig?.ownerSession) {
       let released = false;

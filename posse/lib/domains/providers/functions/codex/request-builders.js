@@ -255,6 +255,7 @@ export function buildCodexDeterministicReadConfigOverrides(role, cwd, {
   atlasGateEnabled = false,
   atlasConfig = null,
   mcpGate = null,
+  disableAgentTools = false,
 } = {}) {
   const enabled = roleUsesDeterministicReadMcp(role);
   if (!enabled) {
@@ -290,6 +291,7 @@ export function buildCodexDeterministicReadConfigOverrides(role, cwd, {
     atlasGateEnabled,
     atlasConfig,
     mcpGate,
+    disableAgentTools,
   });
   if (!serverConfig?.ready) {
     return {
@@ -332,6 +334,7 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
   remoteToolSurface = null,
   remoteMcpOAuthToken = "",
   mcpGate = null,
+  disableAgentTools = false,
 } = {}) {
   const enabled = roleUsesDeterministicReadMcp(role);
   if (!enabled) {
@@ -370,6 +373,7 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     remoteToolSurface,
     remoteMcpOAuthToken,
     mcpGate,
+    disableAgentTools,
   });
   if (!serverConfig?.ready) {
     return {
