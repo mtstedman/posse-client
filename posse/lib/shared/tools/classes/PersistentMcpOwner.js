@@ -27,9 +27,11 @@ import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/fun
 import { getAgentHandoffRecord, rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
 import { agentHandoffTerminator } from "../../../domains/handoff/classes/AgentHandoffTerminator.js";
 import {
+  assertSubAgentParentReady,
   executeSubAgent,
   executeSubAgentNextInput,
   prepareSubAgentHandoff,
+  sealSubAgentHandoff,
   subAgentCompletionSignal,
 } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
 import { noteAtlasPressureAndGetNudge } from "../../../domains/integrations/functions/deterministic-mcp/gate.js";
@@ -1716,6 +1718,7 @@ export class PersistentMcpOwner {
         throw new Error("MCP hot gateway has not been registered");
       }
       const policy = sessionToolPolicy(session);
+      let preparedSubAgentHandoff = false;
       if (message.method === "tools/call") {
         const toolName = String(message?.params?.name || "");
         const toolArgs = message?.params?.arguments || {};
@@ -1731,7 +1734,11 @@ export class PersistentMcpOwner {
         const requested = requestedToolPolicyName(toolName, toolArgs);
         if (requested.suite === "tools" && requested.name === "agent_handoff") {
           try {
-            prepareSubAgentHandoff(session?.bootConfig?.agentCallId, toolArgs);
+            assertSubAgentParentReady(session?.bootConfig?.agentCallId);
+            preparedSubAgentHandoff = prepareSubAgentHandoff(
+              session?.bootConfig?.agentCallId,
+              toolArgs,
+            );
           } catch (error) {
             sendJson(res, 200, {
               ok: true,
@@ -1933,6 +1940,12 @@ export class PersistentMcpOwner {
           String(message?.params?.name || ""),
           message?.params?.arguments || {},
         );
+        if (preparedSubAgentHandoff
+          && requested.suite === "tools"
+          && requested.name === "agent_handoff"
+          && mcpToolCallSuccess(response)) {
+          sealSubAgentHandoff(session?.bootConfig?.agentCallId);
+        }
         const signal = subAgentCompletionSignal(
           session?.bootConfig?.agentCallId,
           requested.name || String(message?.params?.name || ""),

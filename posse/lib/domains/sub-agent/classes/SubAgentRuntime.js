@@ -11,6 +11,7 @@ import {
   parseAgentHandoffEvidenceSelector,
 } from "../../handoff/functions/agent-handoff.js";
 import { surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
+import { canonicalAtlasActionName } from "../../../shared/tools/functions/mcp-surface.js";
 
 export const SUB_AGENT_PROTOCOL = "posse.sub_agent.v1";
 export const SUB_AGENT_LIMITS = Object.freeze({
@@ -30,13 +31,17 @@ export const SUB_AGENT_LIMITS = Object.freeze({
   maxRequestBytes: 32 * 1024,
 });
 
+const DEFAULT_REGISTRY_TTL_MS = 8 * 60 * 60 * 1000;
+const DEFAULT_SETTLED_BATCH_RETENTION_MS = 60_000;
+const MAX_CURSOR_RETRIES_PER_POSITION = 1;
+
 const FORBIDDEN_CURSOR_TOOLS = new Set([
   "tools.agent_handoff",
   "tools.sub_agent",
   "tools.sub_agent_next_input",
   "atlas.create_ref",
   "atlas.memory.feedback",
-]);
+].map(canonicalToolName));
 
 function runtimeError(code, message, { retryable = false, stage = "runtime" } = {}) {
   const error = /** @type {Error & { code: string, retryable: boolean, stage: string }} */ (new Error(message));
@@ -47,7 +52,13 @@ function runtimeError(code, message, { retryable = false, stage = "runtime" } = 
 }
 
 function exactObject(value, keys, label) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  const prototype = value && typeof value === "object"
+    ? Object.getPrototypeOf(value)
+    : null;
+  if (!value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || (prototype !== Object.prototype && prototype !== null)) {
     throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label} must be an object`, { stage: "validation" });
   }
   for (const key of Object.keys(value)) {
@@ -112,25 +123,25 @@ function packetEvidence(packet) {
   const evidence = [];
   for (const handoff of packet?.handoffs || []) {
     for (const claim of handoff?.report?.claims || []) {
-      const detail = claim?.[1] || {};
+      const detail = Array.isArray(claim)
+        ? claim?.[1] || {}
+        : claim && typeof claim === "object"
+          ? claim
+          : {};
       for (const lane of ["proof", "support"]) {
         for (const item of detail[lane] || []) evidence.push(item);
       }
-      for (const item of detail.decoy || []) evidence.push(item?.[0]);
-    }
-  }
-  return evidence.filter(Boolean);
-}
-
-function rawPacketEvidence(packet) {
-  const evidence = [];
-  for (const handoff of packet?.handoffs || []) {
-    for (const claim of handoff?.report?.claims || []) {
-      const detail = claim?.[1] || {};
-      for (const lane of ["proof", "support"]) {
-        for (const item of detail[lane] || []) evidence.push(item);
+      for (const item of detail.decoy || []) {
+        if (Array.isArray(item)) {
+          evidence.push(item[0]);
+        } else if (item && typeof item === "object") {
+          evidence.push(item.selector ?? (
+            item.ref == null
+              ? null
+              : { ref: item.ref, ...(item.lines == null ? {} : { lines: item.lines }) }
+          ));
+        }
       }
-      for (const item of detail.decoy || []) evidence.push(item?.[0]);
     }
   }
   return evidence.filter(Boolean);
@@ -179,9 +190,11 @@ function stableJson(value) {
 
 function canonicalToolName(value) {
   const raw = String(value || "").trim();
+  const atlasAction = canonicalAtlasActionName(raw);
+  if (atlasAction) return `atlas.${atlasAction}`;
   if (raw.startsWith("tools.") || raw.startsWith("atlas.")) return raw;
   if (raw.startsWith("tools_")) return `tools.${raw.slice("tools_".length)}`;
-  if (raw.startsWith("atlas_")) return `atlas.${raw.slice("atlas_".length).replaceAll("_", ".")}`;
+  if (raw.startsWith("atlas_")) return `atlas.${raw.slice("atlas_".length)}`;
   return raw.includes(".") ? `atlas.${raw}` : `tools.${raw}`;
 }
 
@@ -264,8 +277,13 @@ function visibleManifest(entry) {
   }));
 }
 
+function consumableInputs(entry) {
+  return entry.maxInputs;
+}
+
 function cursorEvidenceResponse(entry, input, position, evidence) {
   const lines = evidence.excerpt.replace(/\r\n?/g, "\n").split("\n");
+  const consumable = consumableInputs(entry);
   return {
     ok: true,
     protocol: SUB_AGENT_PROTOCOL,
@@ -281,14 +299,15 @@ function cursorEvidenceResponse(entry, input, position, evidence) {
       lines: lines.map((text, index) => ({ line: evidence.lines.start + index, text })),
     },
     consumed: entry.cursorPosition,
-    remaining: Math.max(0, Math.min(entry.inputs.length, entry.maxInputs) - entry.cursorPosition),
-    next_position: entry.cursorPosition < Math.min(entry.inputs.length, entry.maxInputs)
+    remaining: Math.max(0, consumable - entry.cursorPosition),
+    next_position: entry.cursorPosition < consumable
       ? entry.cursorPosition
       : null,
   };
 }
 
 function cursorFailureResponse(entry, input, position, error) {
+  const consumable = consumableInputs(entry);
   return {
     ok: false,
     protocol: SUB_AGENT_PROTOCOL,
@@ -298,10 +317,23 @@ function cursorFailureResponse(entry, input, position, error) {
     input: { id: input.id, kind: input.kind, ...(input.tool ? { source: input.tool } : {}) },
     error: safeError(error),
     consumed: entry.cursorPosition,
-    remaining: Math.max(0, Math.min(entry.inputs.length, entry.maxInputs) - entry.cursorPosition),
-    next_position: entry.cursorPosition < Math.min(entry.inputs.length, entry.maxInputs)
+    remaining: Math.max(0, consumable - entry.cursorPosition),
+    next_position: entry.cursorPosition < consumable
       ? entry.cursorPosition
       : null,
+  };
+}
+
+function coverageForEntry(entry, selected = entry.selectedEvidenceCount) {
+  const consumable = consumableInputs(entry);
+  return {
+    authorized: entry.inputs.length,
+    consumable,
+    consumed: entry.cursorPosition,
+    selected,
+    unconsumed: Math.max(0, consumable - entry.cursorPosition),
+    inaccessible_by_budget: Math.max(0, entry.inputs.length - consumable),
+    stopped_early: entry.cursorPosition < consumable,
   };
 }
 
@@ -316,12 +348,13 @@ function publicEntry(entry) {
       usage: entry.usage,
     };
   }
-  if (entry.status === "failed" || entry.status === "cancelled") {
+  if (["failed", "cancelled", "timed_out"].includes(entry.status)) {
     return {
       id: entry.id,
       handle: entry.handle,
       status: entry.status,
       error: entry.error,
+      coverage: entry.coverage,
       ...(entry.usage ? { usage: entry.usage } : {}),
     };
   }
@@ -363,9 +396,23 @@ export function buildCitationChildPrompt(input = {}) {
 }
 
 export class SubAgentRuntime {
-  constructor({ readSetting = getSetting, maxActiveChildren = SUB_AGENT_LIMITS.maxActiveChildren } = {}) {
+  constructor({
+    readSetting = getSetting,
+    maxActiveChildren = SUB_AGENT_LIMITS.maxActiveChildren,
+    registryTtlMs = DEFAULT_REGISTRY_TTL_MS,
+    settledBatchRetentionMs = DEFAULT_SETTLED_BATCH_RETENTION_MS,
+  } = {}) {
     this.readSetting = readSetting;
     this.maxActiveChildren = maxActiveChildren;
+    const configuredRegistryTtlMs = Number(registryTtlMs);
+    const configuredBatchRetentionMs = Number(settledBatchRetentionMs);
+    this.registryTtlMs = Number.isFinite(configuredRegistryTtlMs) && configuredRegistryTtlMs > 0
+      ? configuredRegistryTtlMs
+      : DEFAULT_REGISTRY_TTL_MS;
+    this.settledBatchRetentionMs = Number.isFinite(configuredBatchRetentionMs)
+      && configuredBatchRetentionMs >= 0
+      ? configuredBatchRetentionMs
+      : DEFAULT_SETTLED_BATCH_RETENTION_MS;
     this.parents = new Map();
     this.batches = new Map();
     this.batchByParent = new Map();
@@ -376,6 +423,8 @@ export class SubAgentRuntime {
   registerParent({ agentCallId, runChild, executeInput = null, authorizedToolSurface = [] }) {
     const id = positiveId(agentCallId);
     if (!id || typeof runChild !== "function") return () => {};
+    const previous = this.parents.get(id);
+    if (previous) previous.accepting = false;
     const registration = {
       runChild,
       executeInput: typeof executeInput === "function" ? executeInput : null,
@@ -383,9 +432,15 @@ export class SubAgentRuntime {
       accepting: true,
     };
     this.parents.set(id, registration);
-    return () => {
+    let expiryTimer = null;
+    let deregistered = false;
+    const deregister = () => {
+      if (deregistered) return;
+      deregistered = true;
+      if (expiryTimer) clearTimeout(expiryTimer);
       registration.accepting = false;
-      if (this.parents.get(id) === registration) this.parents.delete(id);
+      if (this.parents.get(id) !== registration) return;
+      this.parents.delete(id);
       const batchId = this.batchByParent.get(id);
       const batch = batchId ? this.batches.get(batchId) : null;
       if (batch) {
@@ -399,11 +454,14 @@ export class SubAgentRuntime {
           const timer = setTimeout(() => {
             if (this.batches.get(batch.id) === batch) this.batches.delete(batch.id);
             if (this.batchByParent.get(id) === batch.id) this.batchByParent.delete(id);
-          }, 60_000);
+          }, this.settledBatchRetentionMs);
           timer.unref?.();
         });
       }
     };
+    expiryTimer = setTimeout(deregister, this.registryTtlMs);
+    expiryTimer.unref?.();
+    return deregister;
   }
 
   bindChild({ agentCallId, batchId, dispatchId }) {
@@ -419,7 +477,12 @@ export class SubAgentRuntime {
     const binding = { batch, entry };
     entry.childAgentCallId = id;
     this.childBindings.set(id, binding);
+    const expiryTimer = setTimeout(() => {
+      if (this.childBindings.get(id) === binding) this.childBindings.delete(id);
+    }, Math.min(this.registryTtlMs, entry.timeoutMs + this.settledBatchRetentionMs));
+    expiryTimer.unref?.();
     return () => {
+      clearTimeout(expiryTimer);
       if (this.childBindings.get(id) === binding) this.childBindings.delete(id);
     };
   }
@@ -462,6 +525,7 @@ export class SubAgentRuntime {
     entry.cursorClaim = position;
     const selected = entry.inputs[position];
     let response;
+    let cacheResponse = true;
     try {
       let sourceEvidence;
       if (selected.kind === "ref") {
@@ -532,12 +596,20 @@ export class SubAgentRuntime {
       entry.consumedEvidence.push({ id: selected.id, position, evidence });
       response = cursorEvidenceResponse(entry, selected, position, evidence);
     } catch (error) {
-      entry.cursorPosition += 1;
+      const retries = entry.cursorRetries.get(position) || 0;
+      if (error?.retryable === true
+        && !entry.controller.signal.aborted
+        && retries < MAX_CURSOR_RETRIES_PER_POSITION) {
+        entry.cursorRetries.set(position, retries + 1);
+        cacheResponse = false;
+      } else {
+        entry.cursorPosition += 1;
+      }
       response = cursorFailureResponse(entry, selected, position, error);
     } finally {
       entry.cursorClaim = null;
     }
-    entry.cursorResults.set(position, response);
+    if (cacheResponse) entry.cursorResults.set(position, response);
     return response;
   }
 
@@ -554,7 +626,8 @@ export class SubAgentRuntime {
       throw runtimeError("SUB_AGENT_EVIDENCE_REQUIRED", "Citation child must consume at least one successful cursor input", { stage: "terminal" });
     }
     const authorized = entry.consumedEvidence.map((item) => item.evidence);
-    const selectedEvidence = rawPacketEvidence(packet);
+    const selectedEvidence = packetEvidence(packet);
+    entry.selectedEvidenceCount = selectedEvidence.length;
     if (selectedEvidence.length === 0 && packet?.outcome !== "failed") {
       throw runtimeError("SUB_AGENT_EVIDENCE_REQUIRED", "Citation child terminal report must cite consumed cursor evidence", { stage: "terminal" });
     }
@@ -569,7 +642,13 @@ export class SubAgentRuntime {
         throw runtimeError("SUB_AGENT_EVIDENCE_SCOPE_VIOLATION", `Citation child referenced unconsumed evidence ${selector.ref}`, { stage: "terminal" });
       }
     }
-    entry.sealed = true;
+    return true;
+  }
+
+  sealChildHandoff(agentCallId) {
+    const binding = this.childBindings.get(positiveId(agentCallId));
+    if (!binding) return false;
+    binding.entry.sealed = true;
     return true;
   }
 
@@ -720,7 +799,9 @@ export class SubAgentRuntime {
         cursorAttempts: 0,
         cursorClaim: null,
         cursorResults: new Map(),
+        cursorRetries: new Map(),
         consumedEvidence: [],
+        selectedEvidenceCount: 0,
         sealed: false,
         childAgentCallId: null,
       })),
@@ -732,7 +813,11 @@ export class SubAgentRuntime {
 
     const tasks = batch.entries.map((entry) => this.#runEntry(batch, entry, registration.runChild));
     batch.settledPromise = Promise.allSettled(tasks).then(() => {
-      batch.status = batch.entries.every((entry) => entry.status === "cancelled") ? "cancelled" : "settled";
+      batch.status = batch.entries.every((entry) => entry.status === "timed_out")
+        ? "timed_out"
+        : batch.entries.every((entry) => entry.status === "cancelled")
+          ? "cancelled"
+          : "settled";
       return batch;
     });
     if (completion.mode === "wait_all") {
@@ -756,16 +841,22 @@ export class SubAgentRuntime {
     ), entry.timeoutMs);
     timeout.unref?.();
     try {
-      const childRun = Promise.resolve().then(() => runChild({
-        batchId: batch.id,
-        dispatchId: entry.handle,
-        requestId: entry.id,
-        intent: entry.intent,
-        manifest: visibleManifest(entry),
-        maxInputs: entry.maxInputs,
-        timeoutMs: entry.timeoutMs,
-        signal: entry.controller.signal,
-      }));
+      const childRun = Promise.resolve().then(() => {
+        if (entry.controller.signal.aborted) {
+          throw entry.controller.signal.reason
+            || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled before dispatch", { stage: "control" });
+        }
+        return runChild({
+          batchId: batch.id,
+          dispatchId: entry.handle,
+          requestId: entry.id,
+          intent: entry.intent,
+          manifest: visibleManifest(entry),
+          maxInputs: entry.maxInputs,
+          timeoutMs: entry.timeoutMs,
+          signal: entry.controller.signal,
+        });
+      });
       const result = await Promise.race([childRun, hardSettlement]);
       const record = getAgentHandoffRecord(result?.agentCallId);
       if (!record || record.status !== "committed" || record.packet?.profile !== "citation_synthesis.v1") {
@@ -773,21 +864,18 @@ export class SubAgentRuntime {
       }
       const cited = validateChildEvidenceScope(record.packet, entry.consumedEvidence);
       entry.packet = sanitizePacket(record.packet);
-      const consumable = Math.min(entry.inputs.length, entry.maxInputs);
-      entry.coverage = {
-        authorized: entry.inputs.length,
-        consumable,
-        consumed: entry.cursorPosition,
-        selected: cited.length,
-        unconsumed: Math.max(0, consumable - entry.cursorPosition),
-        inaccessible_by_budget: Math.max(0, entry.inputs.length - consumable),
-        stopped_early: entry.cursorPosition < consumable,
-      };
+      entry.coverage = coverageForEntry(entry, cited.length);
       entry.usage = usageFromChild(result);
       entry.status = "completed";
     } catch (error) {
-      entry.status = entry.controller.signal.aborted ? "cancelled" : "failed";
-      entry.error = safeError(entry.controller.signal.reason || error);
+      const failure = entry.controller.signal.reason || error;
+      entry.status = failure?.code === "SUB_AGENT_TIMEOUT"
+        ? "timed_out"
+        : entry.controller.signal.aborted
+          ? "cancelled"
+          : "failed";
+      entry.error = safeError(failure);
+      entry.coverage = coverageForEntry(entry);
       if (error?.stats) entry.usage = usageFromChild({ stats: error.stats, agentCallId: error.agentCallId });
     } finally {
       clearTimeout(timeout);
@@ -856,6 +944,10 @@ export async function executeSubAgentNextInput(args, options = {}) {
 
 export function prepareSubAgentHandoff(agentCallId, packet) {
   return subAgentRuntime.prepareChildHandoff(agentCallId, packet);
+}
+
+export function sealSubAgentHandoff(agentCallId) {
+  return subAgentRuntime.sealChildHandoff(agentCallId);
 }
 
 export function subAgentCompletionSignal(agentCallId, toolName = "") {

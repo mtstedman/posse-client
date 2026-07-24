@@ -20,6 +20,7 @@ import {
   executeSubAgent,
   executeSubAgentNextInput,
   prepareSubAgentHandoff,
+  sealSubAgentHandoff,
   subAgentCompletionSignal,
 } from "../../../sub-agent/classes/SubAgentRuntime.js";
 import { execProjectDbQuery } from "../../../../shared/tools/functions/toolkit/project-db/query.js";
@@ -333,7 +334,7 @@ export function createStandardToolHandlerMap({
     agent_handoff(args, ctx) {
       const ambient = getObservationContext() || {};
       assertSubAgentParentReady(ambient.agent_call_id);
-      prepareSubAgentHandoff(ambient.agent_call_id, args || {});
+      const preparedSubAgentHandoff = prepareSubAgentHandoff(ambient.agent_call_id, args || {});
       const receipt = stageAgentHandoff(args || {}, {
         context: ambient,
         role: ctx?.role || ctx?.declaredScope?.role || "",
@@ -341,6 +342,7 @@ export function createStandardToolHandlerMap({
           ? getIntSetting("planner_max_tasks", 50)
           : 1,
       });
+      if (preparedSubAgentHandoff) sealSubAgentHandoff(ambient.agent_call_id);
       return JSON.stringify({
         ok: true,
         protocol: "posse.agent_handoff.v1",

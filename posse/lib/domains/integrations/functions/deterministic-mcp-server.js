@@ -49,6 +49,7 @@ import {
   executeSubAgent,
   executeSubAgentNextInput,
   prepareSubAgentHandoff,
+  sealSubAgentHandoff,
 } from "../../sub-agent/classes/SubAgentRuntime.js";
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
@@ -1983,7 +1984,7 @@ function ackOperatorFeedback(args = {}) {
 
 function executeAgentHandoff(args = {}) {
   assertSubAgentParentReady(mcpAgentCallId);
-  prepareSubAgentHandoff(mcpAgentCallId, args);
+  const preparedSubAgentHandoff = prepareSubAgentHandoff(mcpAgentCallId, args);
   const receipt = stageAgentHandoff(args, {
     context: {
       workItemId: mcpWorkItemId,
@@ -1994,6 +1995,7 @@ function executeAgentHandoff(args = {}) {
     role: roleName,
     maxHandoffs: roleName === "planner" ? getIntSetting("planner_max_tasks", 50) : 1,
   });
+  if (preparedSubAgentHandoff) sealSubAgentHandoff(mcpAgentCallId);
   return JSON.stringify({
     ok: true,
     protocol: "posse.agent_handoff.v1",

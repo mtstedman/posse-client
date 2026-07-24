@@ -11,7 +11,6 @@ export const SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOLS = Object.freeze([
   "atlas.manual",
   "atlas.info",
   "atlas.fetch_ref",
-  "atlas.fetch.ref",
   "atlas.repo.status",
   "atlas.repo.overview",
   "atlas.repo.quality",
@@ -43,7 +42,6 @@ export const SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOLS = Object.freeze([
   "atlas.policy.get",
   "atlas.usage.stats",
   "atlas.runtime.queryOutput",
-  "atlas.runtime.query.output",
 ]);
 
 const SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOL_SET = new Set(SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOLS);
