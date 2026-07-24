@@ -13,7 +13,9 @@ import {
   listAllowedBridgeCommands,
 } from "../functions/command-dispatch.js";
 import {
+  createBridgeHealthProof,
   isAuthorizedRequest,
+  isBridgeHealthNonce,
   timingSafeTokenEqual,
 } from "../functions/auth.js";
 import {
@@ -217,7 +219,26 @@ export class LocalServer {
   async handleRequest(req, res) {
     const url = new URL(req.url || "/", `http://${this.host}:${this.port}`);
     if (url.pathname === "/healthz") {
-      sendJson(res, 200, { ok: true });
+      const body = {
+        ok: true,
+        protocol_version: BRIDGE_PROTOCOL_VERSION,
+        instance_id: this.instanceId,
+      };
+      const nonce = url.searchParams.get("nonce");
+      if (nonce !== null) {
+        if (!isBridgeHealthNonce(nonce)) {
+          sendJson(res, 400, { error: "invalid_health_nonce" });
+          return;
+        }
+        body.challenge_nonce = nonce;
+        body.challenge_proof = createBridgeHealthProof({
+          token: this.token,
+          instanceId: this.instanceId,
+          port: this.address().port,
+          nonce,
+        });
+      }
+      sendJson(res, 200, body);
       return;
     }
     if (!url.pathname.startsWith("/v1/")) {

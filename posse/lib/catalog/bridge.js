@@ -1,4 +1,5 @@
 export const BRIDGE_PROTOCOL_VERSION = 1;
+export const BRIDGE_HEALTH_PROOF_CONTEXT = `posse-bridge-health-v${BRIDGE_PROTOCOL_VERSION}`;
 
 export const BRIDGE_COMMANDS = Object.freeze({
   QUEUE_LIST: "queue.list",

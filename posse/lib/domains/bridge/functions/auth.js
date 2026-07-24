@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
+import { BRIDGE_HEALTH_PROOF_CONTEXT } from "../../../catalog/bridge.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import {
   claimAccountSettingIfAbsent,
@@ -13,6 +14,7 @@ import {
 import { getDefaultAccountSettings } from "../../settings/classes/AccountSettings.js";
 
 const TOKEN_BYTES = 32;
+const BRIDGE_HEALTH_NONCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const DEFAULT_RELAY_WS_URL = "wss://app.yourposseai.com/v1/instance";
 // Port scan range when no repo port is persisted. Two repos serving
 // concurrently land on consecutive ports; the winner is persisted so the
@@ -76,6 +78,34 @@ export function rotateBridgeLocalToken() {
   const token = randomToken();
   writeSetting(SETTING_KEYS.BRIDGE_LOCAL_TOKEN, token);
   return token;
+}
+
+export function isBridgeHealthNonce(value) {
+  return BRIDGE_HEALTH_NONCE_PATTERN.test(String(value || ""));
+}
+
+export function createBridgeHealthProof({
+  token,
+  instanceId,
+  port,
+  nonce,
+}) {
+  const normalizedToken = String(token || "");
+  const normalizedInstanceId = String(instanceId || "").trim();
+  const normalizedPort = Number(port);
+  if (!normalizedToken) throw new Error("bridge health proof requires a token");
+  if (!normalizedInstanceId) throw new Error("bridge health proof requires an instance id");
+  if (!Number.isInteger(normalizedPort) || normalizedPort < 1 || normalizedPort > 65535) {
+    throw new Error("bridge health proof requires a valid port");
+  }
+  if (!isBridgeHealthNonce(nonce)) throw new Error("invalid_health_nonce");
+  const message = [
+    BRIDGE_HEALTH_PROOF_CONTEXT,
+    normalizedInstanceId,
+    String(normalizedPort),
+    String(nonce),
+  ].join("\n");
+  return crypto.createHmac("sha256", normalizedToken).update(message, "utf8").digest("base64url");
 }
 
 /**
