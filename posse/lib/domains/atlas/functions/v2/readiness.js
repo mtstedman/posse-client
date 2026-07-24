@@ -28,6 +28,7 @@ import {
   normalizeAtlasEmbeddingModelId,
 } from "../../../../catalog/atlas.js";
 import { atlasEmbeddingModelVersion } from "./embeddings/model-version.js";
+import { treeCompressionSnapshotIsValidEmpty } from "./tree-compression.js";
 
 /**
  * @typedef {"ready" | "warming" | "failed" | "stale" | "off"} AtlasLayerStatus
@@ -315,7 +316,7 @@ function inspectTreeCompression(repoRoot, config) {
       return { layer: "tree-compression", status: "warming", coverage: 0, detail: "no compression snapshot yet" };
     }
     const snapshot = /** @type {any} */ (viewDb.prepare(
-      "SELECT id, built_at, profile, status FROM atlas_tree_compression_snapshots ORDER BY id DESC LIMIT 1",
+      "SELECT id, built_at, profile, status, summary_json AS summaryJson FROM atlas_tree_compression_snapshots ORDER BY id DESC LIMIT 1",
     ).get());
     if (!snapshot) {
       return { layer: "tree-compression", status: "warming", coverage: 0, detail: "no compression snapshot yet" };
@@ -335,6 +336,14 @@ function inspectTreeCompression(repoRoot, config) {
       } catch { /* leave counts at 0 */ }
     }
     if (total <= 0) {
+      if (treeCompressionSnapshotIsValidEmpty(viewDb, snapshot)) {
+        return {
+          layer: "tree-compression",
+          status: "ready",
+          coverage: 100,
+          detail: `empty repository (0 seeds, ${snapshot.profile || "default"} profile)`,
+        };
+      }
       return {
         layer: "tree-compression",
         status: "failed",

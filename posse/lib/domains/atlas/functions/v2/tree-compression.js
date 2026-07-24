@@ -24,6 +24,50 @@ const REQUIRED_SOURCE_TABLES = Object.freeze([
 ]);
 
 /**
+ * A root-only tree is a valid deterministic result for a repository with no
+ * indexable source files. Keep this distinct from a non-empty tree that
+ * unexpectedly produced no seeds, which remains a fail-closed error.
+ *
+ * @param {unknown} value
+ */
+export function treeCompressionSummaryIsEmpty(value) {
+  const summary = typeof value === "string" ? parseJsonObject(value) : value;
+  const totals = summary && typeof summary === "object" && !Array.isArray(summary)
+    ? /** @type {any} */ (summary).totals
+    : null;
+  return Boolean(totals && typeof totals === "object" && !Array.isArray(totals)
+    && ["nodes", "dirs", "files", "symbols", "seeds"].every(
+      (key) => Number.isInteger(totals[key]) && totals[key] === 0,
+    ));
+}
+
+/**
+ * Cross-check an empty compression summary against the persisted view. This
+ * prevents a malformed or stale zero-seed snapshot from hiding missing
+ * coverage in a repository that actually contains indexed source.
+ *
+ * @param {import("better-sqlite3").Database} db
+ * @param {{ id?: number, summaryJson?: unknown, summary?: unknown } | null | undefined} snapshot
+ */
+export function treeCompressionSnapshotIsValidEmpty(db, snapshot) {
+  if (!snapshot || !Number.isInteger(Number(snapshot.id))) return false;
+  if (!treeCompressionSummaryIsEmpty(snapshot.summaryJson ?? snapshot.summary)) return false;
+  try {
+    const count = (sql, ...params) => Number(db.prepare(sql).get(...params)?.cnt || 0);
+    return count("SELECT COUNT(*) AS cnt FROM symbols") === 0
+      && count("SELECT COUNT(*) AS cnt FROM path_to_blob") === 0
+      && count("SELECT COUNT(*) AS cnt FROM atlas_tree_nodes") === 1
+      && count("SELECT COUNT(*) AS cnt FROM atlas_tree_nodes WHERE node_id = 'root'") === 1
+      && count(
+        "SELECT COUNT(*) AS cnt FROM atlas_tree_compression_seeds WHERE snapshot_id = ?",
+        Number(snapshot.id),
+      ) === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * @param {import("better-sqlite3").Database} db
  */
 export function ensureTreeCompressionTables(db) {
@@ -143,10 +187,13 @@ export async function refreshTreeCompressionSnapshot(db, opts = {}) {
     if (!snapshot.available) {
       throw new Error(snapshot.reason || "tree_compression_source_unavailable");
     }
-    if (!Array.isArray(snapshot.seeds) || snapshot.seeds.length === 0) {
+    const validEmpty = treeCompressionSummaryIsEmpty(snapshot.summary);
+    if (!Array.isArray(snapshot.seeds)
+      || (snapshot.seeds.length === 0 && !validEmpty)
+      || (snapshot.seeds.length > 0 && validEmpty)) {
       throw new Error("tree_compression_seed_empty");
     }
-    if (Number(snapshot?.summary?.totals?.nodes || 0) <= 0) {
+    if (!validEmpty && Number(snapshot?.summary?.totals?.nodes || 0) <= 0) {
       throw new Error("tree_compression_nodes_empty");
     }
 

@@ -26,7 +26,11 @@ import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
 import { resolveEdges } from "../../functions/v2/resolver/index.js";
 import { graphDerivedInputSignature, refreshGraphDerivedState } from "../../functions/v2/graph-derived.js";
 import { refreshTreeDerivedState, treeDerivedInputSignature } from "../../functions/v2/tree-derived.js";
-import { refreshTreeCompressionSnapshot, treeCompressionInputSignature } from "../../functions/v2/tree-compression.js";
+import {
+  refreshTreeCompressionSnapshot,
+  treeCompressionInputSignature,
+  treeCompressionSnapshotIsValidEmpty,
+} from "../../functions/v2/tree-compression.js";
 import { normalizeTreeCompressionMode } from "../../functions/v2/tree-compression-policy.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
 import { normalizeLangFromScip } from "../../functions/v2/scip/to-rows.js";
@@ -1196,14 +1200,15 @@ function treeCompressionSnapshotLooksCurrent(viewDb) {
       "SELECT status FROM derived_state_runs WHERE kind = 'tree-compression-snapshot' ORDER BY id DESC LIMIT 1",
     ).get();
     const snapshot = viewDb.prepare(
-      "SELECT id FROM atlas_tree_compression_snapshots ORDER BY id DESC LIMIT 1",
+      "SELECT id, summary_json AS summaryJson FROM atlas_tree_compression_snapshots ORDER BY id DESC LIMIT 1",
     ).get();
     const seeds = snapshot
       ? viewDb.prepare(
         "SELECT COUNT(*) AS cnt FROM atlas_tree_compression_seeds WHERE snapshot_id = ?",
       ).get(snapshot.id)
       : null;
-    return Number(seeds?.cnt || 0) > 0 && String(latest?.status || "") === "ok";
+    return (Number(seeds?.cnt || 0) > 0 || treeCompressionSnapshotIsValidEmpty(viewDb, snapshot))
+      && String(latest?.status || "") === "ok";
   } catch {
     return false;
   }
