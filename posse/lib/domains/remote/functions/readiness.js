@@ -35,9 +35,12 @@ function probePacket({ cwd = process.cwd(), providerName = "claude" } = {}) {
       escalated: true,
     },
     files_to_modify: [PROBE_FILE],
-    files_to_create: ["src/remote-readiness-created.js"],
+    // A dev/fix compile request may carry only already-materialized exact
+    // writing scope. Creation declarations remain planner/control-plane data,
+    // so the readiness probe must not manufacture them.
+    files_to_create: [],
     files_to_delete: [],
-    create_roots: ["src/generated"],
+    create_roots: [],
     related_files: [PROBE_FILE],
     related_files_content: {
       [PROBE_FILE]: RAW_SOURCE_SENTINEL,
