@@ -42,8 +42,10 @@ import {
   researchExplorationObservationStatus,
 } from "../../../domains/observability/functions/observations.js";
 import {
+  RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
+  buildResearchCurtainCallText,
   buildResearchSynthesisRequiredText,
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
@@ -486,13 +488,21 @@ function recordOwnerResearchSynthesisRequired(session, explorationSteps, toolNam
 function appendOwnerResearchSynthesisNotice(result, session, toolName, admission) {
   if (!admission?.tracked || admission.citationFetch) return result;
   const explorationSteps = admission.explorationSteps + 1;
-  if (explorationSteps < RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) return result;
-  recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName);
-  const notice = buildResearchSynthesisRequiredText({
-    explorationSteps,
-    absoluteCeilingReached: true,
-    toolName,
-  });
+  let notice = null;
+  if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) {
+    recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName);
+    notice = buildResearchSynthesisRequiredText({
+      explorationSteps,
+      absoluteCeilingReached: true,
+    });
+  } else if (
+    explorationSteps
+    >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
+      - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS
+  ) {
+    notice = buildResearchCurtainCallText({ explorationSteps });
+  }
+  if (!notice) return result;
   const first = result?.content?.[0];
   if (!first || first.type !== "text" || typeof first.text !== "string") return result;
   return {
@@ -2043,7 +2053,6 @@ export class PersistentMcpOwner {
             : buildResearchSynthesisRequiredText({
               explorationSteps: synthesisAdmission.explorationSteps,
               absoluteCeilingReached: true,
-              toolName,
             }),
         }],
         isError: true,

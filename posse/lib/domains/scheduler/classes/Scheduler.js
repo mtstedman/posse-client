@@ -474,7 +474,10 @@ export class Scheduler {
       renewSec: LOCK_RENEW_SEC,
       durationSec: LOCK_RENEW_SEC * 2,
       lockStarvationThresholdMs: opts.lockStarvationThresholdMs || LOCK_RENEW_SEC * 1500,
-      lockRenewalErrorMaxMs: Math.max(1, Number(opts.lockRenewalErrorMaxMs) || LOCK_RENEW_SEC * 2 * 1000),
+      // No local fallback: SchedulerLockLease derives a default strictly
+      // below the DB row TTL so sustained renewal errors concede the lock
+      // before another scheduler can plain-acquire the expired row.
+      lockRenewalErrorMaxMs: opts.lockRenewalErrorMaxMs,
       emit: (message, color) => this._log(message, color),
       onLockLost: (message, options) => this._stopForSchedulerLockLoss(message, options),
     });

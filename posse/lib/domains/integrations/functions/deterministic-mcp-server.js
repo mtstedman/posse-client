@@ -127,10 +127,12 @@ import {
 import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
 import { resolveAgentFileAuthority } from "./deterministic-mcp/agent-file-authority.js";
 import {
+  RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
   RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
+  buildResearchCurtainCallText,
   buildResearchSynthesisRequiredText,
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
@@ -1690,10 +1692,28 @@ function syncResearchSynthesisStateFromObservations() {
     jobId: mcpJobId,
     attemptId: mcpAttemptId,
   });
+  const priorExplorationSteps = Number(researchState.explorationSteps || 0);
+  const observedExplorationSteps = Number(observed.exploration_steps || 0);
   researchState.explorationSteps = Math.max(
-    Number(researchState.explorationSteps || 0),
-    Number(observed.exploration_steps || 0),
+    priorExplorationSteps,
+    observedExplorationSteps,
   );
+  // An increase sourced from the shared observation ledger represents work
+  // completed by the persistent owner (normally Atlas) rather than by this
+  // gateway process. Treat it as recent progress for the gateway-local stale
+  // guard. The aggregate absolute ceiling still bounds repeated owner calls.
+  const lastSuccessfulOwnerExplorationStep = Number(
+    observed.last_successful_owner_exploration_step || 0,
+  );
+  if (
+    observedExplorationSteps > priorExplorationSteps
+    && lastSuccessfulOwnerExplorationStep > 0
+  ) {
+    researchState.lastNovelEvidenceStep = Math.max(
+      Number(researchState.lastNovelEvidenceStep || 0),
+      lastSuccessfulOwnerExplorationStep,
+    );
+  }
   if (observed.synthesis_required && !researchState.synthesisRequiredAt) {
     researchState.synthesisRequiredAt = new Date().toISOString();
     researchState.synthesisReason = `exploration_steps=${researchState.explorationSteps}; absolute_ceiling=${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}; source=owner_observation`;
@@ -1799,15 +1819,30 @@ function researchCitationFetchGate(toolName) {
   return null;
 }
 
-function buildResearchSynthesisRequiredMessage(toolName) {
+function buildResearchSynthesisRequiredMessage() {
   const status = researchSynthesisStatus() || {};
   const absoluteCeilingReached = String(status.reason || "").includes("absolute_ceiling=");
   return buildResearchSynthesisRequiredText({
     explorationSteps: status.exploration_steps || 0,
     staleSteps: status.stale_steps || 0,
     absoluteCeilingReached,
-    toolName,
   });
+}
+
+function appendResearchExplorationNotice(text, toolName) {
+  if (!isResearcherRole || !isResearchExplorationTool(toolName)) return text;
+  const explorationSteps = Number(researchState.explorationSteps || 0);
+  let notice = null;
+  if (researchState.synthesisRequiredAt) {
+    notice = buildResearchSynthesisRequiredMessage(toolName);
+  } else if (
+    explorationSteps
+    >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
+      - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS
+  ) {
+    notice = buildResearchCurtainCallText({ explorationSteps });
+  }
+  return notice ? `${text}\n\n${notice}` : text;
 }
 
 function chainRead(args) {
@@ -3122,12 +3157,15 @@ async function handleRequest(msg) {
     try {
       const result = await handler(args);
       const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
-      const responseText = appendOperatorFeedbackSignal(text, toolName);
+      let responseText = appendOperatorFeedbackSignal(text, toolName);
       const outcome = classifyNativeToolResult(text);
       const ok = isSuccessfulNativeToolResult(text);
       if (ok) resetEmptyOperatorFeedbackPollsAfterWork(toolName);
       if (ok && toolName !== "chain_verdict") {
         noteResearchExplorationStep({ toolName });
+      }
+      if (ok) {
+        responseText = appendResearchExplorationNotice(responseText, toolName);
       }
       const atlasLiveBuffer = ok ? await maybePushAtlasLiveBufferForToolObservation({ toolName, args }) : null;
       const readStats = ok ? nativeReadResultStats(toolName, text) : null;

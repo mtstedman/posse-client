@@ -183,6 +183,12 @@ export class RunBootPanelController {
       if (i > 0) buf += "\n";
       buf += `${rows[i] || ""}\x1b[K`;
     }
+    // Clearing rows left over from a taller frame leaves the terminal cursor
+    // at the old bottom. Bring it back to the new bottom before recording the
+    // shorter height; otherwise the next render moves up from the wrong row
+    // and stamps another top border into the previous frame.
+    const clearedRows = rowsToWrite - rows.length;
+    if (clearedRows > 0 && rows.length > 0) buf += `\x1b[${clearedRows}A`;
     if (final) buf += "\n";
     this.terminalOutputIntercept.writeStdout(buf);
     this.renderedRows = final ? 0 : rows.length;

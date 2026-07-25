@@ -174,10 +174,13 @@ function shouldMergeTreeSitterRowsForScipBlob({ ledger, contentHash, repoRelPath
     const rows = /** @type {Array<{ source: string, cnt: number }>} */ (
       db.prepare(
         `SELECT source, COUNT(*) AS cnt
-         FROM blob_symbols
-         WHERE content_hash = ?
+         FROM (
+           SELECT source FROM blob_symbols WHERE content_hash = ?
+           UNION ALL
+           SELECT source FROM blob_edges WHERE from_content_hash = ?
+         )
          GROUP BY source`,
-      ).all(contentHash)
+      ).all(contentHash, contentHash)
     );
     const hasScip = rows.some((row) => row.source === "scip" && Number(row.cnt || 0) > 0);
     const hasTreeSitter = rows.some((row) => row.source === "treesitter" && Number(row.cnt || 0) > 0);
@@ -2341,7 +2344,7 @@ export class ParseEngine {
           && beforeHash === contentHash
           && ledgerHasCurrentParsedBlob(this.#ledger, contentHash, { layerMerge: this.#viewLayerMerge });
         const mergeExistingScipRows = !this.#viewLayerMerge
-          && currentParsedBlob
+          && contentHash
           && shouldMergeTreeSitterRowsForScipBlob({
             ledger: this.#ledger,
             contentHash,
@@ -2439,6 +2442,38 @@ export class ParseEngine {
         }
 
         const before = beforeHash;
+        if (
+          mergeExistingScipRows
+          && typeof /** @type {any} */ (this.#ledger).mergeBlobParseRows === "function"
+        ) {
+          await reportIndexProgress(repo_rel_path, {
+            force: true,
+            stage: "writing ledger",
+            current: ordinal,
+            text: `merging parser rows ${ordinal}/${total} ${repo_rel_path}`,
+            language: pathLanguage,
+          });
+          const merged = await /** @type {any} */ (this.#ledger).mergeBlobParseRows({
+            ...parsed,
+            byte_size: parsedByteSize,
+          }, {
+            label: "Warmer.mergeBlobParseRows",
+          });
+          if (Number(merged?.inserted_symbols || 0) > 0 || Number(merged?.inserted_edges || 0) > 0) {
+            /** @type {any} */ (base).parser_rows_merged = Number(/** @type {any} */ (base).parser_rows_merged || 0)
+              + Number(merged?.inserted_symbols || 0);
+            /** @type {any} */ (base)._forceViewRebuild = true;
+          }
+          base.blobs_reused++;
+          base.paths_indexed++;
+          await recordPathSourceStat(repo_rel_path, parsed.content_hash, fileStat);
+          await documentIntake?.markTreeSitter({
+            repo_rel_path,
+            content_hash: parsed.content_hash,
+          });
+          documentPublished = true;
+          continue;
+        }
         if (this.#viewLayerMerge) {
           // Order-independent path: tree-sitter writes its OWN layer; the view
           // merge (buildFrom layerMerge) combines it with any SCIP layer.
@@ -2453,28 +2488,6 @@ export class ParseEngine {
           base.blobs_ingested++;
         } else {
         if (before === parsed.content_hash && ledgerHasCurrentParsedBlob(this.#ledger, parsed.content_hash, { layerMerge: this.#viewLayerMerge })) {
-          if (mergeExistingScipRows && typeof /** @type {any} */ (this.#ledger).mergeBlobParseRows === "function") {
-            await reportIndexProgress(repo_rel_path, {
-              force: true,
-              stage: "writing ledger",
-              current: ordinal,
-              text: `merging parser rows ${ordinal}/${total} ${repo_rel_path}`,
-              language: pathLanguage,
-            });
-            const merged = await /** @type {any} */ (this.#ledger).mergeBlobParseRows({
-              ...parsed,
-              byte_size: parsedByteSize,
-            }, {
-              label: "Warmer.mergeBlobParseRows",
-            });
-            if (Number(merged?.inserted_symbols || 0) > 0 || Number(merged?.inserted_edges || 0) > 0) {
-              /** @type {any} */ (base).parser_rows_merged = Number(/** @type {any} */ (base).parser_rows_merged || 0)
-                + Number(merged?.inserted_symbols || 0);
-              /** @type {any} */ (base)._forceViewRebuild = true;
-              base.blobs_reused++;
-              base.paths_indexed++;
-            }
-          }
           // Same bytes already on this branch with current parsed rows.
           await recordPathSourceStat(repo_rel_path, parsed.content_hash, fileStat);
           continue;

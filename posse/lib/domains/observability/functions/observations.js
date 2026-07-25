@@ -516,7 +516,12 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
   const useAttempt = Number.isInteger(normalizedAttemptId) && normalizedAttemptId > 0;
   const useJob = Number.isInteger(normalizedJobId) && normalizedJobId > 0;
   if (!useAttempt && !useJob) {
-    return { exploration_steps: 0, synthesis_required: false, citation_fetches: 0 };
+    return {
+      exploration_steps: 0,
+      last_successful_owner_exploration_step: 0,
+      synthesis_required: false,
+      citation_fetches: 0,
+    };
   }
   try {
     const db = getDb();
@@ -532,27 +537,37 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       FROM job_observations
       WHERE ${scopeWhere}
         AND observation_type IN (${placeholders})
+      ORDER BY id ASC
     `).all(...scopeParams, ...RESEARCH_EXPLORATION_OBSERVATION_TYPES);
-    const explorationCount = explorationRows.reduce((count, row) => {
+    let explorationCount = 0;
+    let lastSuccessfulOwnerExplorationStep = 0;
+    for (const row of explorationRows) {
       if (row.observation_type === "tool.chain_verdict") {
         try {
           const detail = JSON.parse(String(row.detail_json || "{}"));
           const guidancePath = normPath(detail?.path).toUpperCase();
-          if (guidancePath === "AGENTS.MD" || guidancePath === "CLAUDE.MD") return count;
+          if (guidancePath === "AGENTS.MD" || guidancePath === "CLAUDE.MD") continue;
         } catch {
           // Malformed verdict telemetry remains conservatively counted.
         }
       }
-      if (row.observation_type !== "tool.atlas") return count + 1;
+      if (row.observation_type !== "tool.atlas") {
+        explorationCount += 1;
+        continue;
+      }
       try {
         const detail = JSON.parse(String(row.detail_json || "{}"));
-        return count + (isResearchAtlasExplorationAction(detail?.action) ? 1 : 0);
+        if (!isResearchAtlasExplorationAction(detail?.action)) continue;
+        explorationCount += 1;
+        if (detail?.outcome === "succeeded" || detail?.ok === true) {
+          lastSuccessfulOwnerExplorationStep = explorationCount;
+        }
       } catch {
         // A malformed historic Atlas observation remains conservatively
         // counted so damaged telemetry cannot silently reopen discovery.
-        return count + 1;
+        explorationCount += 1;
       }
-    }, 0);
+    }
     const synthesis = db.prepare(`
       SELECT 1 AS present
       FROM job_observations
@@ -568,11 +583,17 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
     `).get(...scopeParams);
     return {
       exploration_steps: Math.max(0, explorationCount),
+      last_successful_owner_exploration_step: Math.max(0, lastSuccessfulOwnerExplorationStep),
       synthesis_required: synthesis?.present === 1,
       citation_fetches: Math.max(0, Number(citationFetches?.count || 0)),
     };
   } catch {
-    return { exploration_steps: 0, synthesis_required: false, citation_fetches: 0 };
+    return {
+      exploration_steps: 0,
+      last_successful_owner_exploration_step: 0,
+      synthesis_required: false,
+      citation_fetches: 0,
+    };
   }
 }
 

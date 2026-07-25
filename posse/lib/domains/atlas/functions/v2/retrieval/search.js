@@ -264,11 +264,12 @@ async function buildEnvelope({ view, result, versionId, limit, query, semanticRe
   if (semanticRequested) {
     const ensureIncomplete = !!embeddingEnsureStatus?.incomplete;
     const ensureReason = ensureIncomplete ? (embeddingEnsureStatus.reason || "encoding_incomplete") : null;
+    const degradedReason = vector?.ok ? ensureReason : (vector?.reason || ensureReason || "unavailable");
     meta.semantic = {
       requested: true,
       available: !!vector?.ok,
       provider: encoder?.model || null,
-      degradedReason: vector?.ok ? ensureReason : (vector?.reason || ensureReason || "unavailable"),
+      ...(degradedReason ? { degradedReason } : {}),
       encoding: embeddingEnsureStatus ? {
         skipped: !!embeddingEnsureStatus.skipped,
         incomplete: ensureIncomplete,

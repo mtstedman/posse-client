@@ -77,7 +77,7 @@
  * @property {boolean} requested
  * @property {boolean} available
  * @property {string | null} provider
- * @property {string | null} degradedReason
+ * @property {string} [degradedReason]         Present only when semantic retrieval degraded.
  */
 
 /**
@@ -752,6 +752,7 @@
  * @property {number} endLine
  * @property {boolean} truncated
  * @property {string} matchStatus             Whether identifier matching was exact, fallback, or absent.
+ * @property {string} [degradedReason]         Stable degradation reason; omitted when the result is complete.
  * @property {CalledFromBreadcrumb[]} [calledFrom]  Top definitions here by distinct calling files.
  * @property {string} [etag]
  */
@@ -773,6 +774,7 @@
  * @property {string[]} identifiersMissing
  * @property {boolean} truncated
  * @property {number} omittedMatchCount
+ * @property {string} [degradedReason]         Stable degradation reason; omitted when the result is complete.
  * @property {CalledFromBreadcrumb[]} [calledFrom]  Breadcrumbs for the definitions being read.
  * @property {string} [etag]
  */

@@ -147,6 +147,9 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
     endLine: Number(result.endLine || 1),
     truncated: result.truncated === true,
     matchStatus: String(result.matchStatus || ""),
+    ...(typeof result.degradedReason === "string" && result.degradedReason
+      ? { degradedReason: result.degradedReason }
+      : {}),
     ...(calledFrom.length > 0 ? { calledFrom } : {}),
     etag,
   };
@@ -232,6 +235,9 @@ function finishCodeHotPath({ versionId, params, targetPath, symbolId, sessionId,
     identifiersMissing: Array.isArray(hotPath.identifiersMissing) ? hotPath.identifiersMissing : [],
     truncated: hotPath.truncated === true,
     omittedMatchCount: Math.max(0, Number(hotPath.omittedMatchCount) || 0),
+    ...(typeof hotPath.degradedReason === "string" && hotPath.degradedReason
+      ? { degradedReason: hotPath.degradedReason }
+      : {}),
     ...(calledFrom.length > 0 ? { calledFrom } : {}),
     etag,
   };

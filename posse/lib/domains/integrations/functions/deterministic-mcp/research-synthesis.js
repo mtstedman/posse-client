@@ -1,6 +1,7 @@
 export const RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS = 12;
 export const RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS = 4;
-export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS = 12;
+export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS = 16;
+export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 2;
 
 const NON_EXPLORATION_ATLAS_ACTIONS = new Set([
   "buffer.push",
@@ -41,7 +42,22 @@ export function buildResearchCitationFetchGateText({ reason = "before_synthesis"
   }
   return [
     "CITATION FETCH DEFERRED: atlas.fetch_ref is reserved for the synthesis phase.",
-    "Continue bounded discovery without fetching a ref. After RESEARCH SYNTHESIS REQUIRED, fetch at most one surfaced load-bearing ref with a focused search, then answer.",
+    "atlas.fetch_ref is not a research-budget workaround. After RESEARCH CLOSEOUT REQUIRED, the runtime may admit one exact retrieval of a ref surfaced before the curtain call, only when its stored payload is essential to a final claim. It does not reopen discovery or permit another producer-tool call.",
+  ].join("\n");
+}
+
+export function buildResearchCurtainCallText({
+  explorationSteps = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
+    - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
+} = {}) {
+  const remainingCalls = Math.max(
+    0,
+    RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - Number(explorationSteps || 0),
+  );
+  return [
+    `RESEARCH CURTAIN CALL: ${remainingCalls} targeted exploration call${remainingCalls === 1 ? "" : "s"} ${remainingCalls === 1 ? "remains" : "remain"} before mandatory closeout.`,
+    "Use them only to close an exact, answer-critical evidence gap that is already named. Do not start a new research branch, repeat an earlier search/read, or use atlas.fetch_ref as a discovery workaround.",
+    "Then stop tool use and synthesize the final report with the information already gathered.",
   ].join("\n");
 }
 
@@ -49,15 +65,18 @@ export function buildResearchSynthesisRequiredText({
   explorationSteps = 0,
   staleSteps = 0,
   absoluteCeilingReached = true,
-  toolName = null,
 } = {}) {
+  const stopReason = absoluteCeilingReached
+    ? "deterministic_research_tool_ceiling"
+    : "deterministic_synthesize_now_no_novel_evidence";
   return [
-    `RESEARCH SYNTHESIS REQUIRED: deterministic cap reached before ${toolName || "another tool call"}.`,
+    "RESEARCH CLOSEOUT REQUIRED: deterministic exploration limit reached.",
     absoluteCeilingReached
       ? `Exploration calls: ${explorationSteps}; absolute ceiling: ${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}.`
       : `Exploration calls: ${explorationSteps}; no new relevant file in the last ${staleSteps} exploration calls.`,
-    "Stop discovery and return a partial planner-ready brief now.",
-    "Citation-only exception: if a surfaced hash ref is load-bearing and its exact stored payload is still needed, fetch that ref once with atlas.fetch_ref before answering. This opens existing evidence; it does not reopen exploration.",
-    "Include files/symbols consulted, why each mattered, unknowns, and stop_reason=deterministic_synthesize_now_no_novel_evidence.",
+    "No further discovery calls are available. Use the remaining model turns to synthesize the best-supported final research report from the information already gathered and complete the terminal handoff.",
+    "Before answering, audit every requested deliverable: state the supported finding with evidence, or name the specific unresolved gap under Limitations. Do not emit empty sections, placeholder bullets, or unsupported completion claims.",
+    "Do not use atlas.fetch_ref or another full tool call to extend research. The only runtime exception is one exact retrieval of a ref surfaced before the curtain call when its stored payload is already known to be essential to a final claim; it does not reopen discovery.",
+    `Include files/symbols consulted, why each mattered, unknowns, and stop_reason=${stopReason}.`,
   ].join("\n");
 }

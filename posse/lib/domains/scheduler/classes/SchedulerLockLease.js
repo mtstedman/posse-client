@@ -16,7 +16,12 @@ export class SchedulerLockLease {
     renewSec = 30,
     durationSec = renewSec * 2,
     lockStarvationThresholdMs = renewSec * 1500,
-    lockRenewalErrorMaxMs = renewSec * 2 * 1000,
+    // Must stay strictly below durationSec (the DB row TTL): once the row
+    // expires, a booting scheduler plain-acquires it with no heartbeat guard,
+    // so a holder that only concedes AT the TTL can dispatch in parallel with
+    // the new owner. Concede half a renewal period early instead.
+    lockRenewalErrorMaxMs = Math.max(renewSec * 1000, (durationSec - renewSec / 2) * 1000),
+    renewalErrorRetryMs = Math.max(1000, Math.min(5000, (renewSec * 1000) / 6)),
     acquireLockFn = acquireSchedulerLock,
     forceAcquireLockFn = forceAcquireSchedulerLock,
     renewLockFn = renewSchedulerLock,
@@ -27,6 +32,8 @@ export class SchedulerLockLease {
     onLockLost = () => {},
     setIntervalFn = setInterval,
     clearIntervalFn = clearInterval,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
     nowMs = () => Date.now(),
   } = {}) {
     this.lockName = lockName;
@@ -34,7 +41,10 @@ export class SchedulerLockLease {
     this.renewSec = Math.max(1, Number(renewSec) || 30);
     this.durationSec = Math.max(1, Number(durationSec) || this.renewSec * 2);
     this.lockStarvationThresholdMs = Math.max(1, Number(lockStarvationThresholdMs) || this.renewSec * 1500);
-    this.lockRenewalErrorMaxMs = Math.max(1, Number(lockRenewalErrorMaxMs) || this.renewSec * 2 * 1000);
+    this.lockRenewalErrorMaxMs = Math.max(1, Number(lockRenewalErrorMaxMs)
+      || Math.max(this.renewSec * 1000, (this.durationSec - this.renewSec / 2) * 1000));
+    this.renewalErrorRetryMs = Math.max(1, Number(renewalErrorRetryMs)
+      || Math.max(1000, Math.min(5000, (this.renewSec * 1000) / 6)));
     this.acquireLockFn = acquireLockFn;
     this.forceAcquireLockFn = forceAcquireLockFn;
     this.renewLockFn = renewLockFn;
@@ -45,9 +55,12 @@ export class SchedulerLockLease {
     this.onLockLost = onLockLost;
     this.setIntervalFn = setIntervalFn;
     this.clearIntervalFn = clearIntervalFn;
+    this.setTimeoutFn = setTimeoutFn;
+    this.clearTimeoutFn = clearTimeoutFn;
     this.nowMs = nowMs;
     this.held = false;
     this.interval = null;
+    this.errorRetryTimer = null;
     this.lastRenewedAt = 0;
     this.lastStarvedAt = 0;
     this.renewalErrorCount = 0;
@@ -118,12 +131,17 @@ export class SchedulerLockLease {
         });
         return false;
       }
-      this.emit(`Scheduler lock renewal errored (transient - will retry next interval): ${errorText}`, "yellow");
+      // Retry well before the next 30s interval tick: with the give-up
+      // threshold below the DB TTL, waiting a full renewal period would
+      // quantize the loss decision back to (or past) row expiry.
+      this.#scheduleErrorRetry();
+      this.emit(`Scheduler lock renewal errored (transient - retrying in ${Math.ceil(this.renewalErrorRetryMs / 1000)}s): ${errorText}`, "yellow");
       log.warn("scheduler", "scheduler lock renewal errored (transient)", {
         error: errorText,
         errorCount: this.renewalErrorCount,
         elapsedSinceSuccessMs,
         maxErrorMs: this.lockRenewalErrorMaxMs,
+        retryMs: this.renewalErrorRetryMs,
       });
       return true;
     }
@@ -134,7 +152,25 @@ export class SchedulerLockLease {
     this.renewalErrorCount = 0;
     this.renewalFirstErrorAt = 0;
     this.lastRenewedAt = nowMs;
+    this.#clearErrorRetry();
     return true;
+  }
+
+  #scheduleErrorRetry() {
+    if (this.errorRetryTimer) return;
+    this.errorRetryTimer = this.setTimeoutFn(() => {
+      this.errorRetryTimer = null;
+      if (!this.held) return;
+      this.renewNow();
+    }, this.renewalErrorRetryMs);
+    this.errorRetryTimer?.unref?.();
+  }
+
+  #clearErrorRetry() {
+    if (this.errorRetryTimer) {
+      this.clearTimeoutFn(this.errorRetryTimer);
+      this.errorRetryTimer = null;
+    }
   }
 
   maybeLogStarvation(nowMs = this.nowMs()) {
@@ -186,6 +222,7 @@ export class SchedulerLockLease {
       this.clearIntervalFn(this.interval);
       this.interval = null;
     }
+    this.#clearErrorRetry();
     return this;
   }
 
