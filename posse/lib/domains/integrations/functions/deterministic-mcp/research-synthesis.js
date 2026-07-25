@@ -1,6 +1,8 @@
 export const RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS = 12;
 export const RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS = 4;
-export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS = 16;
+// Leave enough room for broad source-read tasks to close late-discovered gaps;
+// the curtain call still reserves the final two calls for targeted closure.
+export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS = 30;
 export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 2;
 
 const NON_EXPLORATION_ATLAS_ACTIONS = new Set([

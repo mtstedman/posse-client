@@ -158,12 +158,16 @@ function researchSuccessCriteria(value) {
     .map((entry) => String(entry || "").trim())
     .filter(Boolean)
     .filter((entry) => {
-      const executionOnly = [
+      const testResponsibility = [
         /\b(?:run|execute|rerun)\b.{0,40}\btests?\b/i,
         /\b(?:tests?|test suite|checks?)\b.{0,40}\b(?:pass|passing|green|succeed|successful)\b/i,
+        /\b(?:inspect|read|review|cite|use)\b.{0,60}\b(?:tests?|test source|test suite)\b/i,
+        /\b(?:tests?|test source|test suite)\b.{0,60}\b(?:prove|show|identify|demonstrate|verify|validate|corroborate)\b/i,
+        /\btest[- ]backed\b/i,
+        /\bexecutable invariants?\b/i,
         /\b(?:npm test|pnpm test|yarn test|cargo test|pytest|go test)\b/i,
       ].some((pattern) => pattern.test(entry));
-      return !executionOnly;
+      return !testResponsibility;
     });
 }
 
@@ -615,9 +619,9 @@ export class ResearcherRole extends BaseRole {
         last_error: job.last_error || researcherAttempts.at(-1)?.error_text || null,
         escalated: ctx.tier && ctx.tier !== job.model_tier,
       },
-      // Researchers are read-only and have no test runner. Preserve factual
-      // completion criteria, but do not poison their prompt with execution-only
-      // gates or a command they cannot invoke.
+      // Testing is another role's responsibility. Preserve factual completion
+      // criteria, but do not grade read-only research on test execution,
+      // test-source inspection, or test-backed evidence.
       success_criteria: researchSuccessCriteria(payload.success_criteria),
       test_command: null,
       allow_atlas_handoff_prefetch: payload.allow_atlas_handoff_prefetch,
