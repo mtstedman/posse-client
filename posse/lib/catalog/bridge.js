@@ -11,6 +11,7 @@ export const BRIDGE_COMMANDS = Object.freeze({
   STATE_SNAPSHOT: "state.snapshot",
   RUN_START: "run.start",
   ATLAS_WARM: "atlas.warm",
+  JOB_NUDGE: "job.nudge",
   ASK: "ask",
   REVIEW_APPROVE: "review.approve",
   REVIEW_REJECT: "review.reject",

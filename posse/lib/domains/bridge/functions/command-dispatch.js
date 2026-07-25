@@ -23,13 +23,19 @@ import { answerHumanInput } from "./human-input-answer.js";
 import { approveReview, rejectReview, resolveReviewGateJob } from "./review-decision.js";
 import { executeGitPushGate } from "./git-push-gate.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { addBridgeWorkItem, startBridgeRun, warmBridgeAtlas } from "./work-control.js";
+import {
+  addBridgeWorkItem,
+  nudgeBridgeJob,
+  startBridgeRun,
+  warmBridgeAtlas,
+} from "./work-control.js";
 
 const ALLOWED_COMMAND_SET = new Set(BRIDGE_ALLOWED_COMMANDS);
 const MUTATING_COMMAND_SET = new Set([
   BRIDGE_COMMANDS.QUEUE_ADD,
   BRIDGE_COMMANDS.RUN_START,
   BRIDGE_COMMANDS.ATLAS_WARM,
+  BRIDGE_COMMANDS.JOB_NUDGE,
   BRIDGE_COMMANDS.ASK,
   BRIDGE_COMMANDS.REVIEW_APPROVE,
   BRIDGE_COMMANDS.REVIEW_REJECT,
@@ -219,6 +225,9 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
 
     case BRIDGE_COMMANDS.ATLAS_WARM:
       return warmBridgeAtlas(args, context);
+
+    case BRIDGE_COMMANDS.JOB_NUDGE:
+      return nudgeBridgeJob(args, context);
 
     case BRIDGE_COMMANDS.ASK: {
       const jobId = jobIdArg(args);

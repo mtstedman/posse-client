@@ -2,7 +2,13 @@ import {
   ATLAS_WARM_JOB_POLICY,
   ATLAS_WARM_JOB_TYPE,
 } from "../../atlas/functions/v2/contracts/jobs.js";
-import { createWorkItem, getLiveSchedulerBlockMessage } from "../../queue/functions/index.js";
+import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import {
+  createOperatorNudge,
+  createWorkItem,
+  getJob,
+  getLiveSchedulerBlockMessage,
+} from "../../queue/functions/index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { projectBridgeWorkItem } from "./state-snapshot.js";
 
@@ -37,6 +43,37 @@ export async function startBridgeRun(args = {}, context = {}) {
     return { ok: false, reason: "run_launcher_unavailable" };
   }
   return context.startPosse(args);
+}
+
+const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
+const NUDGE_BODY_MAX_CHARS = 4000;
+
+/**
+ * Deliver operator guidance to a live job. Running agents pick the nudge up
+ * at their next checkpoint via get_operator_feedback; latest nudge wins
+ * (createOperatorNudge supersedes prior actives atomically).
+ */
+export function nudgeBridgeJob(args = {}, context = {}) {
+  const jobId = Number(args.job_id ?? args.jobId);
+  if (!Number.isInteger(jobId) || jobId <= 0) return { ok: false, reason: "invalid_job_id" };
+  const body = String(args.body ?? "").trim();
+  if (!body) return { ok: false, reason: "invalid_body" };
+  if (body.length > NUDGE_BODY_MAX_CHARS) {
+    return { ok: false, reason: "invalid_body", message: "nudge body is too long" };
+  }
+  const job = getJob(jobId);
+  if (!job) return { ok: false, reason: "no_such_job" };
+  if (TERMINAL_JOB_STATUS_SET.has(job.status)) {
+    return { ok: false, reason: "job_not_active" };
+  }
+  const row = createOperatorNudge({
+    job_id: jobId,
+    work_item_id: Number(job.work_item_id) || null,
+    body,
+    source: "bridge",
+    author: String(context.actor || "remote-operator"),
+  });
+  return { interaction_id: Number(row.id) };
 }
 
 /**
