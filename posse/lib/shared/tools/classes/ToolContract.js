@@ -47,7 +47,21 @@ const CLAUDE_AMBIENT_TOOLS = [
   "TaskOutput",
   "TaskStop",
 ].join(",");
-const ALL_CLAUDE_NATIVE_TOOLS = `Read,Glob,Grep,Write,Edit,Bash,WebFetch,WebSearch,NotebookEdit,Task,TodoWrite,${CLAUDE_AMBIENT_TOOLS}`;
+export const CLAUDE_NATIVE_TOOL_NAMES = Object.freeze([
+  "Read",
+  "Glob",
+  "Grep",
+  "Write",
+  "Edit",
+  "Bash",
+  "WebFetch",
+  "WebSearch",
+  "NotebookEdit",
+  "Task",
+  "TodoWrite",
+  ...CLAUDE_AMBIENT_TOOLS.split(","),
+]);
+const ALL_CLAUDE_NATIVE_TOOLS = CLAUDE_NATIVE_TOOL_NAMES.join(",");
 const ASSESSOR_CLAUDE_NATIVE_DISALLOW = `Read,Glob,Grep,Bash,Write,Edit,WebFetch,WebSearch,NotebookEdit,Task,TodoWrite,${CLAUDE_AMBIENT_TOOLS}`;
 
 function stripWebToolsFromList(listStr) {

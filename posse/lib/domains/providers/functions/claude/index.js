@@ -9,7 +9,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { getSetting } from "../../../queue/functions/index.js";
-import { appendExecutionTools, buildClaudeCliToolConfig, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
+import { appendExecutionTools, buildClaudeCliToolConfig, buildExecutionContract, CLAUDE_NATIVE_TOOL_NAMES, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
 import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap, formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { buildRuntimeEnv, normalizeProviderPaths } from "../../../runtime/functions/paths.js";
@@ -98,48 +98,94 @@ export function scrubClaudeChildEnv(childEnv = {}) {
   if (childEnv.MCP_CONNECTION_NONBLOCKING === undefined) {
     childEnv.MCP_CONNECTION_NONBLOCKING = "0";
   }
+  // Posse's current Claude surface is deliberately upfront-loaded. In print
+  // mode Claude 2.1 can still defer --mcp-config tools despite alwaysLoad, so
+  // disable tool-search deferral at the child boundary as the authoritative
+  // fallback. A future lazy database surface can opt back in explicitly.
+  if (childEnv.ENABLE_TOOL_SEARCH === undefined) {
+    childEnv.ENABLE_TOOL_SEARCH = "false";
+  }
   return childEnv;
 }
 
+// Claude Code defers MCP schemas behind ToolSearch by default. Posse's isolated
+// workers intentionally do not expose that ambient discovery surface, so every
+// explicitly attached server must opt into upfront loading. A future lazy
+// server can opt out deliberately with alwaysLoad:false.
+export function applyClaudeMcpLoadingPolicy(mcpServers = {}) {
+  return Object.fromEntries(Object.entries(mcpServers).map(([name, config]) => [
+    name,
+    config && typeof config === "object" && !Array.isArray(config)
+      ? {
+          ...config,
+          alwaysLoad: config.alwaysLoad !== false,
+        }
+      : config,
+  ]));
+}
+
 // Translate a tool-contract decision + the attached MCP server names into the
-// CLI's positive permission flags ({ toolsArg, allowedToolsArg }). We never emit
-// --dangerously-skip-permissions (refused as root on Linux): --tools pins the
-// built-in surface positively and --allowedTools grants exactly the Posse-owned
-// MCP servers plus any surfaced read/web native tools.
+// CLI's permission flags. We never emit --dangerously-skip-permissions (refused
+// as root on Linux). Without MCP, --tools pins the built-in surface positively.
+// With MCP, an explicit --tools list suppresses MCP tools in Claude 2.1 even
+// though that flag's help describes built-ins only, so use the equivalent
+// native-tool denylist plus --allowedTools instead.
 //
 // toClaudeCliFlags expresses the MCP-active branches as a blocklist
 // (tools === null = "all built-ins minus disallowedTools"). The only built-ins
 // meant to survive that blocklist are the web tools, and only for web-enabled
 // roles (researcher/artificer) — where toClaudeCliFlags strips WebFetch/WebSearch
-// out of disallowedTools. We reconstruct those survivors positively so --tools
-// never silently drops web access (the artificer+MCP+web case, whose null branch
-// precedes its web branch), while still disabling the rest of the native surface
-// (no DesignSync/Workflow/TaskCreate leak a raw blocklist would let through).
+// out of disallowedTools. For an explicit positive built-in list, derive its
+// complement from the known native catalog so switching to a denylist for MCP
+// does not widen the built-in surface.
 export function buildClaudeToolPermissionArgs(cliToolConfig = {}, mcpServerNames = []) {
-  let toolsArg;
+  let nativeToolsArg;
   if (cliToolConfig.tools != null) {
-    toolsArg = cliToolConfig.tools;
+    nativeToolsArg = cliToolConfig.tools;
   } else {
     const disallowed = new Set(
       String(cliToolConfig.disallowedTools || "")
         .split(",").map((t) => t.trim()).filter(Boolean),
     );
-    toolsArg = ["WebFetch", "WebSearch"].filter((t) => !disallowed.has(t)).join(",");
+    nativeToolsArg = ["WebFetch", "WebSearch"].filter((t) => !disallowed.has(t)).join(",");
   }
+  // Claude permission rules target callable tool names, not a bare server id.
+  // Grant the documented server wildcard so every upfront-loaded tool from the
+  // attached server is callable without an interactive permission prompt.
+  const mcpRules = (mcpServerNames || []).map((name) => `mcp__${name}__*`);
+  const availableNativeRules = String(nativeToolsArg || "")
+    .split(",").map((rule) => rule.trim()).filter(Boolean);
+  const mcpActive = mcpRules.length > 0;
+  const toolsArg = mcpActive ? null : nativeToolsArg;
+  const disallowedToolsArg = mcpActive
+    ? [...new Set([
+        ...String(cliToolConfig.disallowedTools || "").split(",").map((rule) => rule.trim()).filter(Boolean),
+        ...(cliToolConfig.tools != null
+          ? CLAUDE_NATIVE_TOOL_NAMES.filter((rule) => !availableNativeRules.includes(rule))
+          : []),
+      ])].join(",")
+    : null;
   const allowRules = [];
   if (cliToolConfig.dangerouslySkipPermissions) {
     // Previously-bypassed branches surface only read-only (Read/Glob/Grep), web
     // (WebFetch/WebSearch), or — in the gateway-down fallback — operator-opted-in
     // autoApprove tools. A bare allow of the surfaced set reproduces the prior
     // permissiveness without the flag, and unlike the flag it runs as root.
-    if (toolsArg) allowRules.push(toolsArg);
+    if (nativeToolsArg) allowRules.push(nativeToolsArg);
   } else if (cliToolConfig.allowedTools) {
     // Scoped branches carry precise Write(...)/Edit(...)/Bash(...) rules; keep
     // them verbatim so file scoping is preserved (do not widen with bare tools).
     allowRules.push(cliToolConfig.allowedTools);
   }
-  for (const name of (mcpServerNames || [])) allowRules.push(`mcp__${name}`);
-  return { toolsArg, allowedToolsArg: allowRules.filter(Boolean).join(",") };
+  const alreadyAllowedBare = new Set(
+    cliToolConfig.dangerouslySkipPermissions ? availableNativeRules : [],
+  );
+  allowRules.push(...mcpRules.filter((rule) => !alreadyAllowedBare.has(rule)));
+  return {
+    toolsArg,
+    disallowedToolsArg,
+    allowedToolsArg: allowRules.filter(Boolean).join(","),
+  };
 }
 
 const ISOLATED_SYSTEM_PROMPT = [
@@ -518,16 +564,21 @@ export async function callProvider(promptText, {
     // atlas.* suites from a single process, so do not attach a second ATLAS
     // MCP server when the gateway is already active.
     const atlasServedByGateway = !!deterministicReadMcp.active;
-    const mergedMcpServers = {
+    const mergedMcpServers = applyClaudeMcpLoadingPolicy({
       ...(deterministicReadMcp.payload?.mcpServers || {}),
       ...(atlasServedByGateway || !atlasReadyForMcp ? {} : (atlasMcpPayload?.mcpServers || {})),
-    };
+    });
     const mcpServerNames = Object.keys(mergedMcpServers);
 
     // Permission route — single, platform-uniform path (never
     // --dangerously-skip-permissions; see buildClaudeToolPermissionArgs).
-    const { toolsArg, allowedToolsArg } = buildClaudeToolPermissionArgs(cliToolConfig, mcpServerNames);
-    args.push("--tools", toolsArg);
+    const { toolsArg, disallowedToolsArg, allowedToolsArg } = buildClaudeToolPermissionArgs(cliToolConfig, mcpServerNames);
+    if (toolsArg != null) {
+      args.push("--tools", toolsArg);
+    }
+    if (disallowedToolsArg) {
+      args.push("--disallowedTools", disallowedToolsArg);
+    }
     if (allowedToolsArg) {
       args.push("--allowedTools", allowedToolsArg);
     }

@@ -1276,6 +1276,26 @@ function buildGatewayNativeToolDescriptor(schema) {
   };
 }
 
+function normalizeGatewayToolInputSchema(tool) {
+  const inputSchema = tool?.inputSchema;
+  const normalized = inputSchema && typeof inputSchema === "object" && !Array.isArray(inputSchema)
+    ? inputSchema
+    : { properties: {}, additionalProperties: false };
+  if (normalized.type === "object") return tool;
+  // Claude Code 2.1 validates MCP inputSchema more narrowly than JSON Schema:
+  // a top-level oneOf is valid MCP, but Claude rejects the entire tools/list
+  // unless every schema also declares type:"object". Gateway tools always
+  // receive an argument object, so adding the explicit type preserves the
+  // existing branch constraints while keeping the catalog interoperable.
+  return {
+    ...tool,
+    inputSchema: {
+      ...normalized,
+      type: "object",
+    },
+  };
+}
+
 function protectedMutationError(toolName, displayPath, absolutePath) {
   const relPath = relativePathFromCwd(workspaceCwd, absolutePath);
   const reason = protectedMutablePathReason(relPath);
@@ -2786,7 +2806,7 @@ async function handleRequest(msg) {
         atlasCatalogSource: atlasAllowedActions && atlasAllowedActions !== _atlasAllowedActions ? "remote" : "local",
       });
     }
-    const tools = [...nativeTools, ...atlasTools];
+    const tools = [...nativeTools, ...atlasTools].map(normalizeGatewayToolInputSchema);
     appendToolLog({
       event: "tools_list",
       requestId: id ?? null,
