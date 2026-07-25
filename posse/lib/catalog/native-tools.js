@@ -539,6 +539,25 @@ const HANDOFF_CLAIMS = {
   items: HANDOFF_CLAIM,
 };
 
+const RESEARCHER_HANDOFF_CLAIM = {
+  ...HANDOFF_CLAIM,
+  description:
+    "One section of the terminal research report. Put the substantive answer in claim and summary; ordinary repository path:line citations are allowed there. Evidence refs are optional.",
+  properties: {
+    ...HANDOFF_CLAIM.properties,
+    claim: { type: "string", minLength: 1, maxLength: 1000 },
+    summary: { type: "string", maxLength: 4000 },
+  },
+};
+
+const RESEARCHER_HANDOFF_CLAIMS = {
+  type: "array",
+  description:
+    "For researcher.report.v1 this must be non-empty and contain the substantive terminal report; a summary-only report is rejected. researcher.pipeline.v1 may leave it empty.",
+  maxItems: 12,
+  items: RESEARCHER_HANDOFF_CLAIM,
+};
+
 const HANDOFF_STRING_LIST = {
   type: "array",
   maxItems: 50,
@@ -885,7 +904,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research with compact report content. Summary and claim prose are the answer and may contain ordinary repository path:line citations. " +
+    "Finish research with compact report content. For researcher.report.v1, claims must contain the substantive terminal report; a summary by itself is invalid. Summary and claim prose are the answer and may contain ordinary repository path:line citations. " +
     "Evidence refs are optional transport for exact stored excerpts; when useful, select a narrow range such as #abcd:L23-L40 instead of copying tool output. " +
     "For researcher.report.v1, Posse renders the prose and expands any selected refs into the final Markdown report; researcher.pipeline.v1 remains a compact planner handoff. Do not fetch or create refs solely for this call. The receipt ends provider generation.",
   parameters: {
@@ -900,7 +919,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         enum: ["success", "gap", "input_required", "complete"],
       },
       summary: { type: "string", minLength: 1, maxLength: 800 },
-      claims: { ...HANDOFF_CLAIMS, default: [] },
+      claims: { ...RESEARCHER_HANDOFF_CLAIMS, default: [] },
       key_files: {
         type: "array",
         maxItems: 12,

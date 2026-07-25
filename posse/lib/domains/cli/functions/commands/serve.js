@@ -299,15 +299,48 @@ export async function runPairCommand(
   // Repo-scoped: adopt the relay-minted identity as one unit. Keeping the
   // pre-pair local UUID here makes the socket authenticate successfully but
   // causes every event to be rejected by the relay as instance_mismatch.
-  setBridgeRelayIdentity(
-    { instanceId, label: instanceLabel, token },
-    projectDir,
-  );
+  // The relay has already committed the pair at this point, so a persist
+  // failure here silently strands the repo as "paired but never online" —
+  // verify the write landed before claiming success.
+  try {
+    setBridgeRelayIdentity(
+      { instanceId, label: instanceLabel, token },
+      projectDir,
+    );
+  } catch (err) {
+    console.log(`\n  ${C.red}Pair confirmed on the relay but storing the identity locally FAILED:${C.reset} ${err?.message || err}`);
+    console.log(`  ${C.dim}Nothing was persisted — this repo will look paired on the phone but stay offline.`);
+    console.log(`  Retry \`posse serve --pair\` before the QR expires (the same confirm is replay-safe), or after expiry re-pair from scratch.${C.reset}\n`);
+    return { ok: false, reason: "persist_failed", error: err?.message || String(err) };
+  }
+  const persisted = getBridgeConfig(projectDir);
+  if (!persisted.relayToken || persisted.instanceId !== instanceId) {
+    console.log(`\n  ${C.red}Pair confirmed on the relay but the stored identity does not read back.${C.reset}`);
+    console.log(`  ${C.dim}Expected instance ${instanceId}; read ${persisted.instanceId || "nothing"} (token ${persisted.relayToken ? "present" : "missing"}).`);
+    console.log(`  Re-run \`posse serve --pair\` — the phone-side pairing already exists and will be replaced.${C.reset}\n`);
+    return { ok: false, reason: "persist_verify_failed" };
+  }
   console.log(`  ${C.green}Paired.${C.reset}`);
   console.log(`  ${C.dim}Instance:${C.reset} ${instanceLabel} (${instanceId})`);
   console.log(`  ${C.dim}Relay identity stored for this repo.${C.reset}`);
   console.log(`  ${C.dim}Next:${C.reset} run \`posse serve\`, or enable the bridge from Bossy's Remote tab.\n`);
   return { ok: true, paired: true, instance: body.instance };
+}
+
+/**
+ * Wait until the relay handshake reaches a decisive state. Pairing exists but
+ * a silently failing relay link looks identical to "no UX" from the phone, so
+ * serve must not print its banner and go quiet while unauthenticated.
+ */
+async function waitForRelayOutcome(bridge, timeoutMs = 10_000, pollMs = 250) {
+  const deadline = Date.now() + timeoutMs;
+  let status = bridge.relayStatus?.() ?? { state: "disabled" };
+  while (Date.now() < deadline) {
+    status = bridge.relayStatus?.() ?? { state: "disabled" };
+    if (status.state === "online" || status.state === "unauthorized") return status;
+    await sleep(pollMs);
+  }
+  return status;
 }
 
 function waitForShutdown() {
@@ -370,6 +403,23 @@ export async function runServeCommand(argv = [], {
   if (info.relayEnabled) console.log(`  ${C.dim}Relay:${C.reset} ${info.relayUrl}`);
   console.log(`  ${C.dim}Commands:${C.reset} ${listAllowedBridgeCommands().join(", ")}`);
   console.log(`  ${C.dim}Press Ctrl-C to stop.${C.reset}\n`);
+
+  // Remote reachability is the whole point of serve — never go quiet while
+  // the relay link is missing or rejected.
+  if (!info.relayEnabled) {
+    console.log(`  ${C.yellow}NOT PAIRED with the relay.${C.reset} Phones and the web portal cannot see this repo.`);
+    console.log(`  ${C.dim}Run \`posse serve --pair\` to pair it, then start serve again. LAN-only clients still work.${C.reset}\n`);
+  } else if (wait) {
+    const relay = await waitForRelayOutcome(bridge);
+    if (relay.state === "online") {
+      console.log(`  ${C.green}Relay connected${C.reset} — this repo is ONLINE for phones and the web portal.\n`);
+    } else if (relay.state === "unauthorized") {
+      console.log(`  ${C.red}Relay REJECTED this bridge credential${relay.last_error ? ` (${relay.last_error})` : ""}.${C.reset}`);
+      console.log(`  ${C.dim}The pairing is stale or revoked — run \`posse serve --pair\` to re-pair.${C.reset}\n`);
+    } else {
+      console.log(`  ${C.yellow}Relay not connected yet${C.reset} (${relay.state}${relay.last_error ? ` — ${relay.last_error}` : ""}). Retrying in the background; phones see this repo as offline until it connects.\n`);
+    }
+  }
 
   if (!wait) return { ok: true, bridge, info };
 

@@ -1841,6 +1841,12 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
           && profile === "assessor.verdict.v1",
       },
     ));
+    if (profile === "researcher.report.v1" && claims.length === 0) {
+      fail(
+        "AGENT_HANDOFF_SCHEMA_INVALID",
+        "researcher.report.v1 requires at least one substantive prose claim; evidence refs remain optional",
+      );
+    }
     const constraints = report.constraints == null ? [] : stringArray(report.constraints, `handoffs[${index}].report.constraints`);
     const successCriteria = report.success_criteria == null ? [] : stringArray(report.success_criteria, `handoffs[${index}].report.success_criteria`);
     const questions = report.questions == null ? [] : stringArray(report.questions, `handoffs[${index}].report.questions`);

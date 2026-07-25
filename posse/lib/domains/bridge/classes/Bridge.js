@@ -122,6 +122,16 @@ export class Bridge {
     throw lastErr || new Error("no free bridge port in scan range");
   }
 
+  /** Live relay connection status, or a disabled stub when unpaired. */
+  relayStatus() {
+    if (this.relayClient) return this.relayClient.status();
+    return {
+      state: this.config.relayToken ? "connecting" : "disabled",
+      authenticated: false,
+      last_error: null,
+    };
+  }
+
   info(address = null) {
     const resolved = address || this.localServer?.address() || {
       host: this.config.bindHost,
