@@ -197,6 +197,41 @@ export function setBridgeRelayToken(token, projectDir = process.cwd()) {
   writeRepoSetting(SETTING_KEYS.BRIDGE_RELAY_TOKEN, token, projectDir);
 }
 
+/**
+ * Adopt the identity minted by the relay when QR pairing completes.
+ *
+ * The relay token is written last because its presence is the persisted
+ * "paired" marker consumed by Bossy. A failed earlier write therefore cannot
+ * leave a repo looking paired while it still publishes events under a
+ * different instance id. Clear any previous token first so re-pairing has
+ * the same invariant.
+ */
+export function setBridgeRelayIdentity(
+  { instanceId, label = "", token },
+  projectDir = process.cwd(),
+) {
+  const normalizedInstanceId = String(instanceId || "").trim();
+  const normalizedLabel = String(label || "").trim();
+  const normalizedToken = String(token || "").trim();
+  if (!normalizedInstanceId) throw new Error("bridge relay identity requires an instance id");
+  if (!normalizedToken) throw new Error("bridge relay identity requires a token");
+
+  writeRepoSetting(SETTING_KEYS.BRIDGE_RELAY_TOKEN, "", projectDir);
+  writeRepoSetting(
+    SETTING_KEYS.BRIDGE_INSTANCE_ID,
+    normalizedInstanceId,
+    projectDir,
+  );
+  if (normalizedLabel) {
+    writeRepoSetting(SETTING_KEYS.BRIDGE_LABEL, normalizedLabel, projectDir);
+  }
+  writeRepoSetting(
+    SETTING_KEYS.BRIDGE_RELAY_TOKEN,
+    normalizedToken,
+    projectDir,
+  );
+}
+
 export function getBridgeRelayUrl() {
   const relayUrl = readSetting(SETTING_KEYS.BRIDGE_RELAY_URL) || DEFAULT_RELAY_WS_URL;
   let parsed = null;

@@ -87,6 +87,13 @@ export class Bridge {
         projectDir: this.projectDir,
         getHeadEventId: () => this.changeStream?.headEventId() || 0,
         tailBridgeEvents: (args) => this.changeStream?.tailFrames(args) || { events: [], head_event_id: 0 },
+        getRelayStatus: () => this.relayClient?.status() || {
+          state: this.config.relayToken ? "connecting" : "disabled",
+          authenticated: false,
+          last_error: null,
+          connected_at: null,
+          authenticated_at: null,
+        },
       });
       try {
         const address = await server.start();
@@ -120,6 +127,10 @@ export class Bridge {
       token: this.config.token,
       relayUrl: this.config.relayUrl,
       relayEnabled: Boolean(this.config.relayToken),
+      relayStatus: this.relayClient?.status() || {
+        state: this.config.relayToken ? "connecting" : "disabled",
+        authenticated: false,
+      },
       instanceId: this.config.instanceId,
       label: this.config.label,
     };

@@ -11,6 +11,7 @@ import {
 
 const DEFAULT_RECONNECT_BASE_MS = 1000;
 const DEFAULT_RECONNECT_MAX_MS = 30000;
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20000;
 
 function safeJsonParse(text) {
   try {
@@ -33,6 +34,7 @@ export class RelayClient extends EventEmitter {
     WebSocketImpl = globalThis.WebSocket,
     reconnectBaseMs = DEFAULT_RECONNECT_BASE_MS,
     reconnectMaxMs = DEFAULT_RECONNECT_MAX_MS,
+    handshakeTimeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS,
   } = {}) {
     super();
     this.url = url;
@@ -46,10 +48,20 @@ export class RelayClient extends EventEmitter {
     this.WebSocketImpl = WebSocketImpl;
     this.reconnectBaseMs = Math.max(100, Number(reconnectBaseMs) || DEFAULT_RECONNECT_BASE_MS);
     this.reconnectMaxMs = Math.max(this.reconnectBaseMs, Number(reconnectMaxMs) || DEFAULT_RECONNECT_MAX_MS);
+    this.handshakeTimeoutMs = Math.max(10, Number(handshakeTimeoutMs) || DEFAULT_HANDSHAKE_TIMEOUT_MS);
     this.socket = null;
     this.stopped = true;
     this.reconnectTimer = null;
     this.reconnectAttempt = 0;
+    this.connectionGeneration = 0;
+    this.handshakeTimer = null;
+    this.connectionStatus = {
+      state: this.token ? "idle" : "disabled",
+      authenticated: false,
+      last_error: null,
+      connected_at: null,
+      authenticated_at: null,
+    };
   }
 
   start() {
@@ -57,37 +69,65 @@ export class RelayClient extends EventEmitter {
     if (typeof this.WebSocketImpl !== "function") return { ok: false, reason: "websocket_unavailable" };
     if (this.socket) return { ok: true };
     this.stopped = false;
+    this.updateStatus("connecting", { last_error: null });
     this.connect();
     return { ok: true };
   }
 
   connect() {
     if (this.stopped || this.socket) return;
-    const ws = new this.WebSocketImpl(this.url);
+    const generation = ++this.connectionGeneration;
+    let ws;
+    try {
+      ws = new this.WebSocketImpl(this.url);
+    } catch (err) {
+      this.updateStatus("error", {
+        authenticated: false,
+        last_error: err?.message || String(err),
+      });
+      this.emitError(err);
+      this.scheduleReconnect();
+      return;
+    }
     this.socket = ws;
-    ws.addEventListener("open", () => this.handleOpen());
-    ws.addEventListener("message", (event) => this.handleMessage(event.data));
-    ws.addEventListener("close", () => this.handleClose());
-    ws.addEventListener("error", (event) => this.handleError(event));
+    this.armHandshakeTimeout(ws, generation);
+    this.updateStatus(this.reconnectAttempt > 0 ? "reconnecting" : "connecting", {
+      authenticated: false,
+      connected_at: null,
+    });
+    ws.addEventListener("open", () => this.handleOpen(ws, generation));
+    ws.addEventListener("message", (event) => this.handleMessage(event.data, ws, generation));
+    ws.addEventListener("close", () => this.handleClose(ws, generation));
+    ws.addEventListener("error", (event) => this.handleError(event, ws, generation));
   }
 
-  handleOpen() {
-    this.reconnectAttempt = 0;
-    this.send({
+  ownsSocket(ws, generation) {
+    return this.socket === ws && this.connectionGeneration === generation;
+  }
+
+  handleOpen(ws, generation) {
+    if (!this.ownsSocket(ws, generation)) return;
+    this.updateStatus("authenticating", {
+      authenticated: false,
+      connected_at: new Date().toISOString(),
+      last_error: null,
+    });
+    if (!this.send({
       v: BRIDGE_PROTOCOL_VERSION,
       type: BRIDGE_FRAME_TYPES.HELLO,
       role: "bridge",
       bearer: this.token,
       instance_id: this.instanceId,
       label: this.label,
-    });
+    })) return;
     // Clients now request snapshots explicitly via the `state.snapshot`
     // command after subscribing. We no longer broadcast a free snapshot
     // here because the relay doesn't track which clients are new.
     this.emit("open");
   }
 
-  async handleMessage(data) {
+  async handleMessage(data, ws = this.socket, generation = this.connectionGeneration) {
+    if (!this.ownsSocket(ws, generation)) return;
     const text = typeof data === "string" ? data : Buffer.from(data || "").toString("utf8");
     const frame = safeJsonParse(text);
     if (!frame || typeof frame !== "object") {
@@ -96,19 +136,43 @@ export class RelayClient extends EventEmitter {
     }
     if (Number(frame.v) !== BRIDGE_PROTOCOL_VERSION) {
       this.send(createErrorAck(frame.id ?? frame.command_id ?? null, "unsupported_version"));
-      this.close();
+      this.failSocket(ws, generation, new Error("relay protocol version mismatch"));
+      return;
+    }
+    if (frame.type === BRIDGE_FRAME_TYPES.ACK && frame.command_id === "hello") {
+      if (frame.ok) {
+        this.markAuthenticated();
+      } else {
+        this.clearHandshakeTimeout();
+        this.updateStatus("unauthorized", {
+          authenticated: false,
+          last_error: frame.error?.message || "relay authentication failed",
+        });
+        const socket = this.socket;
+        this.socket = null;
+        try { socket?.close?.(); } catch {}
+        // A repository owner may have disabled relay access temporarily from
+        // the phone. Keep a bounded backoff running so re-enabling does not
+        // require restarting `posse serve`.
+        this.scheduleReconnect({ preserveStatus: true });
+      }
       return;
     }
     if (frame.type === BRIDGE_FRAME_TYPES.PING) {
+      this.markAuthenticated();
       this.send({ v: BRIDGE_PROTOCOL_VERSION, type: BRIDGE_FRAME_TYPES.PONG });
       return;
     }
-    if (frame.type === BRIDGE_FRAME_TYPES.PONG) return;
+    if (frame.type === BRIDGE_FRAME_TYPES.PONG) {
+      this.markAuthenticated();
+      return;
+    }
     // The relay does not originate hello frames at us, and snapshots are
     // now client-driven via `state.snapshot`. We accept and ignore inbound
     // hellos for forward compatibility but don't broadcast snapshots.
     if (frame.type === BRIDGE_FRAME_TYPES.HELLO) return;
     if (frame.type !== BRIDGE_FRAME_TYPES.COMMAND) return;
+    this.markAuthenticated();
     try {
       const ack = await this.dispatch(frame, {
         projectDir: this.projectDir,
@@ -122,24 +186,95 @@ export class RelayClient extends EventEmitter {
     }
   }
 
-  handleClose() {
+  handleClose(ws = this.socket, generation = this.connectionGeneration) {
+    if (!this.ownsSocket(ws, generation)) return;
+    this.clearHandshakeTimeout();
     this.socket = null;
+    this.updateStatus("offline", {
+      authenticated: false,
+      connected_at: null,
+    });
     this.emit("close");
     this.scheduleReconnect();
   }
 
-  handleError(event) {
+  handleError(event, ws = this.socket, generation = this.connectionGeneration) {
+    if (!this.ownsSocket(ws, generation)) return;
     const err = event?.error || event;
+    this.failSocket(ws, generation, err || new Error("relay websocket error"));
+  }
+
+  failSocket(ws, generation, err) {
+    if (!this.ownsSocket(ws, generation)) return;
+    this.clearHandshakeTimeout();
+    this.socket = null;
+    this.updateStatus("error", {
+      authenticated: false,
+      connected_at: null,
+      last_error: err?.message || String(err),
+    });
+    this.emitError(err);
+    try { ws?.close?.(); } catch {}
+    this.scheduleReconnect();
+  }
+
+  emitError(err) {
     if (this.listenerCount("error") > 0) this.emit("error", err);
   }
 
-  scheduleReconnect() {
+  markAuthenticated() {
+    if (this.connectionStatus.authenticated) return;
+    this.clearHandshakeTimeout();
+    this.reconnectAttempt = 0;
+    this.updateStatus("online", {
+      authenticated: true,
+      authenticated_at: new Date().toISOString(),
+      last_error: null,
+    });
+  }
+
+  status() {
+    return { ...this.connectionStatus };
+  }
+
+  updateStatus(state, patch = {}) {
+    this.connectionStatus = {
+      ...this.connectionStatus,
+      ...patch,
+      state,
+    };
+    this.emit("status", this.status());
+  }
+
+  armHandshakeTimeout(ws, generation) {
+    this.clearHandshakeTimeout();
+    this.handshakeTimer = setTimeout(() => {
+      this.handshakeTimer = null;
+      this.failSocket(
+        ws,
+        generation,
+        new Error("relay websocket authentication timed out"),
+      );
+    }, this.handshakeTimeoutMs);
+    this.handshakeTimer.unref?.();
+  }
+
+  clearHandshakeTimeout() {
+    if (!this.handshakeTimer) return;
+    clearTimeout(this.handshakeTimer);
+    this.handshakeTimer = null;
+  }
+
+  scheduleReconnect({ preserveStatus = false } = {}) {
     if (this.stopped || this.reconnectTimer) return;
     const delay = Math.min(
       this.reconnectMaxMs,
       this.reconnectBaseMs * (2 ** Math.min(this.reconnectAttempt, 8)),
     );
     this.reconnectAttempt += 1;
+    if (!preserveStatus) {
+      this.updateStatus("reconnecting", { authenticated: false });
+    }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
@@ -150,8 +285,15 @@ export class RelayClient extends EventEmitter {
   send(frame) {
     const openState = this.WebSocketImpl?.OPEN ?? 1;
     if (!this.socket || this.socket.readyState !== openState) return false;
-    this.socket.send(JSON.stringify(frame));
-    return true;
+    const socket = this.socket;
+    const generation = this.connectionGeneration;
+    try {
+      socket.send(JSON.stringify(frame));
+      return true;
+    } catch (err) {
+      this.failSocket(socket, generation, err);
+      return false;
+    }
   }
 
   close() {
@@ -160,12 +302,18 @@ export class RelayClient extends EventEmitter {
 
   stop() {
     this.stopped = true;
+    this.clearHandshakeTimeout();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
     const socket = this.socket;
     this.socket = null;
+    this.connectionGeneration += 1;
     try { socket?.close?.(); } catch {}
+    this.updateStatus(this.token ? "stopped" : "disabled", {
+      authenticated: false,
+      connected_at: null,
+    });
   }
 }

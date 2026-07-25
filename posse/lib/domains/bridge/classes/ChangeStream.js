@@ -18,9 +18,13 @@ import {
   EVENT_TYPES,
 } from "../../../catalog/event.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
-import { redactBridgeValue } from "../functions/redaction.js";
 import { composeInstanceStatus } from "../functions/instance-status.js";
 import { bridgeGateAnswerContract, bridgeGateKindForJob } from "../functions/gate-contract.js";
+import {
+  projectBridgeGateDetail,
+  projectBridgeJob,
+  projectBridgeWorkItem,
+} from "../functions/state-snapshot.js";
 import { workItemCost } from "../../billing/functions/cost.js";
 
 const DEFAULT_REPLAY_LIMIT = 1000;
@@ -48,7 +52,7 @@ function parseJsonField(text) {
   try {
     return JSON.parse(text);
   } catch {
-    return { raw: String(text) };
+    return null;
   }
 }
 
@@ -109,7 +113,7 @@ function gatePayloadForJob(job) {
     opened_at: job.updated_at || job.created_at || null,
     status: job.status,
     ...bridgeGateAnswerContract(payload),
-    payload: redactBridgeValue(payload),
+    payload: projectBridgeGateDetail(payload),
   };
 }
 
@@ -130,7 +134,6 @@ function eventGateJobId(row) {
 
 function payloadForDbEvent(row) {
   const event = parseJsonField(row.event_json);
-  const redactedEvent = redactBridgeValue(event);
   const kind = eventKindForEventType(row.event_type);
   if (kind === BRIDGE_EVENT_KINDS.AGENT_ACTIVITY) {
     if (
@@ -171,7 +174,6 @@ function payloadForDbEvent(row) {
       title: row.message || "Plan approval",
       prompt: null,
       opened_at: row.created_at || null,
-      event: redactedEvent,
     };
   }
   if (kind === BRIDGE_EVENT_KINDS.GATE_CLOSED) {
@@ -180,31 +182,9 @@ function payloadForDbEvent(row) {
       work_item_id: row.work_item_id == null ? null : Number(row.work_item_id),
       resolution: resolutionForEventType(row.event_type),
       closed_at: row.created_at || null,
-      event: redactedEvent,
     };
   }
-  const { event_json: _eventJson, ...safeRow } = row;
-  return {
-    ...safeRow,
-    event: redactedEvent,
-  };
-}
-
-function normalizeJobPayload(row) {
-  const { payload_json: _payloadJson, result_json: _resultJson, ...safeRow } = row;
-  return {
-    ...safeRow,
-    payload: redactBridgeValue(parseJsonField(row.payload_json)),
-    result: redactBridgeValue(parseJsonField(row.result_json)),
-  };
-}
-
-function normalizeWorkItemPayload(row) {
-  const { metadata_json: _metadataJson, ...safeRow } = row;
-  return {
-    ...safeRow,
-    metadata: redactBridgeValue(parseJsonField(row.metadata_json)),
-  };
+  return null;
 }
 
 function stripBridgeFrame(frame) {
@@ -557,7 +537,10 @@ export class ChangeStream extends EventEmitter {
     `).all(this.workItemCursor.updatedAt, this.workItemCursor.updatedAt, this.workItemCursor.id);
     for (const row of rows) {
       this.workItemCursor = { updatedAt: row.updated_at || this.workItemCursor.updatedAt, id: Number(row.id) };
-      this.emitBridgeEvent(BRIDGE_EVENT_KINDS.WORK_ITEM_UPDATED, normalizeWorkItemPayload(row));
+      this.emitBridgeEvent(
+        BRIDGE_EVENT_KINDS.WORK_ITEM_UPDATED,
+        projectBridgeWorkItem(row, this.activeJobCountForWorkItem(row.id)),
+      );
     }
   }
 
@@ -571,8 +554,16 @@ export class ChangeStream extends EventEmitter {
     `).all(this.workItemCursor.seq);
     for (const row of rows) {
       this.workItemCursor = { seq: Math.max(Number(this.workItemCursor.seq || 0), Number(row.bridge_change_seq || 0)) };
-      this.emitBridgeEvent(BRIDGE_EVENT_KINDS.WORK_ITEM_UPDATED, normalizeWorkItemPayload(row));
+      this.emitBridgeEvent(
+        BRIDGE_EVENT_KINDS.WORK_ITEM_UPDATED,
+        projectBridgeWorkItem(row, this.activeJobCountForWorkItem(row.id)),
+      );
     }
+  }
+
+  activeJobCountForWorkItem(workItemId) {
+    const rows = this.db.prepare(`SELECT status FROM jobs WHERE work_item_id = ?`).all(workItemId);
+    return rows.filter((row) => !TERMINAL_JOB_STATUS_SET.has(row.status)).length;
   }
 
   pollJobs() {
@@ -590,7 +581,7 @@ export class ChangeStream extends EventEmitter {
     `).all(this.jobCursor.updatedAt, this.jobCursor.updatedAt, this.jobCursor.id);
     for (const row of rows) {
       this.jobCursor = { updatedAt: row.updated_at || this.jobCursor.updatedAt, id: Number(row.id) };
-      const jobPayload = normalizeJobPayload(row);
+      const jobPayload = projectBridgeJob(row);
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.JOB_UPDATED, jobPayload);
       this.emitGateTransition(row);
       this.markCostDirtyOnTerminal(row);
@@ -607,7 +598,7 @@ export class ChangeStream extends EventEmitter {
     `).all(this.jobCursor.seq);
     for (const row of rows) {
       this.jobCursor = { seq: Math.max(Number(this.jobCursor.seq || 0), Number(row.bridge_change_seq || 0)) };
-      const jobPayload = normalizeJobPayload(row);
+      const jobPayload = projectBridgeJob(row);
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.JOB_UPDATED, jobPayload);
       this.emitGateTransition(row);
       this.markCostDirtyOnTerminal(row);

@@ -3,7 +3,7 @@ import readline from "node:readline";
 import { Bridge } from "../../../bridge/classes/Bridge.js";
 import {
   getBridgeConfig,
-  setBridgeRelayToken,
+  setBridgeRelayIdentity,
 } from "../../../bridge/functions/auth.js";
 import { listAllowedBridgeCommands } from "../../../bridge/functions/command-dispatch.js";
 import { resolvePosseKey } from "../../../remote/functions/client.js";
@@ -112,6 +112,7 @@ export async function runPairCommand(
     argv = [],
     promptCode = promptForConfirmationCode,
     retryDelayMs = 2_000,
+    confirmRetryLimit = 3,
     posseKey = undefined,
     authManager = null,
     pulseTokens = null,
@@ -203,6 +204,7 @@ export async function runPairCommand(
   const expiresAt = qrExpiresAtMs(startBody?.expires_at);
   let body;
   let confirmed = false;
+  let transientConfirmFailures = 0;
 
   while (Date.now() < expiresAt) {
     if (!confirmationCode) confirmationCode = normalizeConfirmationCode(await promptCode());
@@ -231,6 +233,13 @@ export async function runPairCommand(
         redirect: "error",
       });
     } catch (err) {
+      transientConfirmFailures += 1;
+      if (transientConfirmFailures < Math.max(1, Number(confirmRetryLimit) || 1)) {
+        console.log(`\n  ${C.yellow}Relay confirmation response was interrupted; retrying the same pair safely.${C.reset}\n`);
+        const remainingMs = expiresAt - Date.now();
+        if (remainingMs > 0) await sleep(Math.min(retryDelayMs, remainingMs));
+        continue;
+      }
       console.log(`\n  ${C.red}Network error contacting relay:${C.reset} ${err?.message || err}\n`);
       return { ok: false, reason: "network_error" };
     }
@@ -239,6 +248,15 @@ export async function runPairCommand(
     if (confirmRes.ok) {
       confirmed = true;
       break;
+    }
+    if (confirmRes.status >= 500) {
+      transientConfirmFailures += 1;
+      if (transientConfirmFailures < Math.max(1, Number(confirmRetryLimit) || 1)) {
+        console.log(`\n  ${C.yellow}Relay confirmation failed transiently; retrying the same pair safely.${C.reset}\n`);
+        const remainingMs = expiresAt - Date.now();
+        if (remainingMs > 0) await sleep(Math.min(retryDelayMs, remainingMs));
+        continue;
+      }
     }
 
     const code = body?.error?.code;
@@ -271,14 +289,24 @@ export async function runPairCommand(
     console.log(`\n  ${C.red}Relay accepted code but returned no bridge_token.${C.reset}\n`);
     return { ok: false, reason: "missing_bridge_token", body };
   }
+  const instanceId = String(body?.instance?.id || "").trim();
+  if (!instanceId) {
+    console.log(`\n  ${C.red}Relay accepted code but returned no instance id.${C.reset}\n`);
+    return { ok: false, reason: "missing_instance_id", body };
+  }
 
-  // Repo-scoped: this pairing belongs to THIS repo's bridge instance.
-  setBridgeRelayToken(token, projectDir);
   const instanceLabel = body?.instance?.label || config.label;
-  const instanceId = body?.instance?.id || "(unknown id)";
+  // Repo-scoped: adopt the relay-minted identity as one unit. Keeping the
+  // pre-pair local UUID here makes the socket authenticate successfully but
+  // causes every event to be rejected by the relay as instance_mismatch.
+  setBridgeRelayIdentity(
+    { instanceId, label: instanceLabel, token },
+    projectDir,
+  );
   console.log(`  ${C.green}Paired.${C.reset}`);
   console.log(`  ${C.dim}Instance:${C.reset} ${instanceLabel} (${instanceId})`);
-  console.log(`  ${C.dim}Relay token stored for this repo.${C.reset}\n`);
+  console.log(`  ${C.dim}Relay identity stored for this repo.${C.reset}`);
+  console.log(`  ${C.dim}Next:${C.reset} run \`posse serve\`, or enable the bridge from Bossy's Remote tab.\n`);
   return { ok: true, paired: true, instance: body.instance };
 }
 

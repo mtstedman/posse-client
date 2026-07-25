@@ -166,6 +166,7 @@ export class LocalServer {
     dispatch = dispatchBridgeCommandFrame,
     getHeadEventId = () => 0,
     tailBridgeEvents = null,
+    getRelayStatus = null,
     maxWsFrameBytes = DEFAULT_MAX_WS_FRAME_BYTES,
     wsHelloTimeoutMs = DEFAULT_WS_HELLO_TIMEOUT_MS,
   } = {}) {
@@ -178,6 +179,7 @@ export class LocalServer {
     this.dispatch = dispatch;
     this.getHeadEventId = getHeadEventId;
     this.tailBridgeEvents = tailBridgeEvents;
+    this.getRelayStatus = getRelayStatus;
     this.maxWsFrameBytes = Math.max(1024, Number(maxWsFrameBytes) || DEFAULT_MAX_WS_FRAME_BYTES);
     this.wsHelloTimeoutMs = Math.max(1000, Number(wsHelloTimeoutMs) || DEFAULT_WS_HELLO_TIMEOUT_MS);
     this.server = null;
@@ -224,6 +226,9 @@ export class LocalServer {
         protocol_version: BRIDGE_PROTOCOL_VERSION,
         instance_id: this.instanceId,
       };
+      if (typeof this.getRelayStatus === "function") {
+        body.relay = this.getRelayStatus();
+      }
       const nonce = url.searchParams.get("nonce");
       if (nonce !== null) {
         if (!isBridgeHealthNonce(nonce)) {

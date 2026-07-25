@@ -17,13 +17,17 @@ import {
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { redactBridgeValue } from "./redaction.js";
 import { composeInstanceStatus } from "./instance-status.js";
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 import { bridgeGateAnswerContract, bridgeGateKindForJob } from "./gate-contract.js";
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
+const MAX_SUMMARY_CHARS = 4_000;
+const MAX_GATE_OPTIONS = 20;
+const MAX_GATE_OPTION_VALUE_CHARS = 80;
+const MAX_GATE_OPTION_LABEL_CHARS = 200;
+const MAX_UNMERGED_WORK_ITEMS = 20;
 const OPEN_GATE_STATUSES = new Set(["queued", "waiting_on_human"]);
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
@@ -39,36 +43,131 @@ function parseJsonField(text) {
   try {
     return JSON.parse(text);
   } catch {
-    return { raw: String(text) };
+    return null;
   }
 }
 
-function normalizeWorkItem(row) {
+function boundedText(value, maxChars = MAX_SUMMARY_CHARS) {
+  if (value == null) return null;
+  return String(value).slice(0, maxChars);
+}
+
+function finiteNumber(value, fallback = null) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+/**
+ * Project a work-item row onto the public control protocol. Never spread a
+ * database row here: columns such as `source`, descriptions, metadata, and
+ * future raw fields are intentionally outside the remote-control boundary.
+ */
+export function projectBridgeWorkItem(row, activeJobs = 0) {
   if (!row) return null;
-  const { metadata_json: _metadataJson, ...safeRow } = row;
   return {
-    ...safeRow,
-    metadata: redactBridgeValue(parseJsonField(row.metadata_json)),
+    id: finiteNumber(row.id, 0),
+    title: boundedText(row.title, MAX_SUMMARY_CHARS) || "",
+    status: String(row.status || ""),
+    priority: String(row.priority || "normal"),
+    active_job_count: Math.max(0, finiteNumber(activeJobs, 0)),
   };
 }
 
-function normalizeJob(row) {
+/**
+ * Project a job row onto the fields understood by Pocket Posse. Payloads,
+ * results, logs, and provider output remain local even after redaction because
+ * the relay's contract is summaries/ids/status only.
+ */
+export function projectBridgeJob(row) {
   if (!row) return null;
-  const { payload_json: _payloadJson, result_json: _resultJson, ...safeRow } = row;
   return {
-    ...safeRow,
-    payload: redactBridgeValue(parseJobPayload(row)),
-    result: redactBridgeValue(parseJsonField(row.result_json)),
+    id: finiteNumber(row.id, 0),
+    work_item_id: row.work_item_id == null ? null : finiteNumber(row.work_item_id, null),
+    job_type: String(row.job_type || ""),
+    title: boundedText(row.title, MAX_SUMMARY_CHARS) || "",
+    status: String(row.status || ""),
+    provider: row.provider == null ? null : boundedText(row.provider, 200),
+    model_name: row.model_name == null ? null : boundedText(row.model_name, 300),
   };
 }
 
-function normalizeEvent(row) {
+/**
+ * Project persisted event rows to audit-style metadata. The nested event JSON
+ * is deliberately excluded; even a redacted object can contain prohibited
+ * source-shaped keys and is not consumed by the phone.
+ */
+export function projectBridgeEventRecord(row) {
   if (!row) return null;
-  const { event_json: _eventJson, ...safeRow } = row;
+  const eventType = String(row.event_type || "");
   return {
-    ...safeRow,
-    event: redactBridgeValue(parseJsonField(row.event_json)),
+    id: finiteNumber(row.id, 0),
+    work_item_id: row.work_item_id == null ? null : finiteNumber(row.work_item_id, null),
+    job_id: row.job_id == null ? null : finiteNumber(row.job_id, null),
+    attempt_id: row.attempt_id == null ? null : finiteNumber(row.attempt_id, null),
+    event_type: eventType,
+    actor_type: row.actor_type == null ? null : boundedText(row.actor_type, 100),
+    actor_id: row.actor_id == null ? null : boundedText(row.actor_id, 200),
+    message: boundedText(row.message, MAX_SUMMARY_CHARS) || "",
+    created_at: row.created_at == null ? null : String(row.created_at),
   };
+}
+
+function projectSelectorOptions(options) {
+  if (!Array.isArray(options)) return [];
+  return options
+    .slice(0, MAX_GATE_OPTIONS)
+    .map((option) => {
+      if (!option || typeof option !== "object") return null;
+      const value = boundedText(option.value, MAX_GATE_OPTION_VALUE_CHARS);
+      const label = boundedText(option.label, MAX_GATE_OPTION_LABEL_CHARS);
+      if (!value || !label) return null;
+      return { value, label };
+    })
+    .filter(Boolean);
+}
+
+function projectSelector(selector) {
+  if (!selector || typeof selector !== "object" || Array.isArray(selector)) return null;
+  const projected = {};
+  if (selector.status != null) projected.status = boundedText(selector.status, 80);
+  const options = projectSelectorOptions(selector.options);
+  if (options.length > 0) projected.options = options;
+  return Object.keys(projected).length > 0 ? projected : null;
+}
+
+function projectUnmergedWorkItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items.slice(0, MAX_UNMERGED_WORK_ITEMS).map((item) => ({
+    wi_id: item?.wi_id == null ? null : finiteNumber(item.wi_id, null),
+    title: boundedText(item?.title, 240) || "",
+    branch: boundedText(item?.branch, 240) || "",
+  }));
+}
+
+/**
+ * Strict allowlist for kind-specific gate details. This keeps push metadata
+ * and one-shot selector choices useful without tunnelling arbitrary job
+ * payloads through a field named `payload`.
+ */
+export function projectBridgeGateDetail(payload = {}) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const detail = {};
+  for (const key of ["subtype", "review_type", "remote", "push_branch", "target_branch"]) {
+    if (payload[key] != null) detail[key] = boundedText(payload[key], 240);
+  }
+  for (const key of ["ahead_count", "merged_count"]) {
+    if (payload[key] != null) detail[key] = finiteNumber(payload[key], null);
+  }
+  if (typeof payload.working_tree_dirty === "boolean") {
+    detail.working_tree_dirty = payload.working_tree_dirty;
+  }
+  const unmerged = projectUnmergedWorkItems(payload.unmerged_wis);
+  if (unmerged.length > 0) detail.unmerged_wis = unmerged;
+  const selector = projectSelector(payload.selector);
+  if (selector) detail.selector = selector;
+  const oneshotScope = projectSelector(payload.oneshot_scope);
+  if (oneshotScope) detail.oneshot_scope = oneshotScope;
+  return Object.keys(detail).length > 0 ? detail : null;
 }
 
 function hasSinceCursor(value) {
@@ -78,7 +177,7 @@ function hasSinceCursor(value) {
 function normalizeLatestEvents(rows) {
   return rows
     .sort((a, b) => Number(a.id) - Number(b.id))
-    .map(normalizeEvent);
+    .map(projectBridgeEventRecord);
 }
 
 function activeJobCount(jobs = []) {
@@ -117,7 +216,7 @@ export function normalizeGate(job) {
     opened_at: job.updated_at || job.created_at || null,
     status: job.status,
     ...bridgeGateAnswerContract(payload),
-    payload: redactBridgeValue(payload),
+    payload: projectBridgeGateDetail(payload),
   };
 }
 
@@ -130,14 +229,8 @@ function isOpenGateJob(job) {
 }
 
 function summarizeWorkItem(wi) {
-  const jobs = listJobsByWorkItem(wi.id).map(normalizeJob);
-  return {
-    ...normalizeWorkItem(wi),
-    active_job_count: activeJobCount(jobs),
-    jobs,
-    open_gates: jobs.filter(isOpenGateJob).map(normalizeGate).filter(Boolean),
-    reviewable: shouldIncludeWorkItemInApprovalQueue(wi, jobs),
-  };
+  const rawJobs = listJobsByWorkItem(wi.id);
+  return projectBridgeWorkItem(wi, activeJobCount(rawJobs));
 }
 
 export function listQueueState({ status = null, limit = DEFAULT_LIMIT } = {}) {
@@ -161,7 +254,7 @@ export function listJobsState({ work_item_id = null, workItemId = null, status =
   if (status && Array.isArray(status) && status.length === 0) rows = [];
   const capped = rows.slice(0, boundedLimit(limit));
   return {
-    jobs: capped.map(normalizeJob),
+    jobs: capped.map(projectBridgeJob),
   };
 }
 
@@ -177,29 +270,30 @@ export function listGatesState({ work_item_id = null, workItemId = null, limit =
 export function getWorkItemState(workItemId, { eventLimit = 50 } = {}) {
   const wi = getWorkItem(workItemId);
   if (!wi) return null;
-  const jobs = listJobsByWorkItem(workItemId).map(normalizeJob);
+  const rawJobs = listJobsByWorkItem(workItemId);
+  const jobs = rawJobs.map(projectBridgeJob);
   return {
-    work_item: normalizeWorkItem(wi),
+    work_item: projectBridgeWorkItem(wi, activeJobCount(rawJobs)),
     jobs,
-    open_gates: jobs.filter(isOpenGateJob).map(normalizeGate).filter(Boolean),
-    events: getEventsByWorkItem(workItemId, boundedLimit(eventLimit, 50)).map(normalizeEvent),
-    reviewable: shouldIncludeWorkItemInApprovalQueue(wi, jobs),
+    open_gates: rawJobs.filter(isOpenGateJob).map(normalizeGate).filter(Boolean),
+    events: getEventsByWorkItem(workItemId, boundedLimit(eventLimit, 50)).map(projectBridgeEventRecord),
+    reviewable: shouldIncludeWorkItemInApprovalQueue(wi, rawJobs),
   };
 }
 
 export function getJobState(jobId) {
   const job = getJob(jobId);
-  return normalizeJob(job);
+  return projectBridgeJob(job);
 }
 
 export function tailEvents({ workItemId = null, sinceId = null, limit = DEFAULT_LIMIT } = {}) {
   const capped = boundedLimit(limit);
   const hasSince = hasSinceCursor(sinceId);
   if (workItemId != null) {
-    if (hasSince) return getEventsByWorkItemSinceId(workItemId, sinceId, capped).map(normalizeEvent);
+    if (hasSince) return getEventsByWorkItemSinceId(workItemId, sinceId, capped).map(projectBridgeEventRecord);
     return normalizeLatestEvents(getEventsByWorkItem(workItemId, capped));
   }
-  if (hasSince) return getEventsSinceId(sinceId, capped).map(normalizeEvent);
+  if (hasSince) return getEventsSinceId(sinceId, capped).map(projectBridgeEventRecord);
   return normalizeLatestEvents(getEvents(null, capped));
 }
 
@@ -222,17 +316,11 @@ export function tailEventsEnvelope({
   };
 }
 
-export function collectStateSnapshot({ limit = DEFAULT_LIMIT, eventLimit = 50, headEventId = 0 } = {}) {
+export function collectStateSnapshot({ limit = DEFAULT_LIMIT, headEventId = 0 } = {}) {
   const capped = boundedLimit(limit);
   const workItems = listWorkItems().slice(0, capped).map(summarizeWorkItem);
   const activeJobs = listJobs().filter((job) => !TERMINAL_JOB_STATUS_SET.has(job.status));
-  const jobs = activeJobs.slice(0, capped).map(normalizeJob);
-  const pendingHumanInputJobs = activeJobs.filter(isOpenGateJob);
-  const pendingHumanInput = pendingHumanInputJobs.slice(0, capped).map(normalizeJob);
-  const pendingPlanGates = pendingHumanInputJobs
-    .filter((job) => parseJobPayload(job)?.subtype === "plan_approval")
-    .slice(0, capped)
-    .map(normalizeJob);
+  const jobs = activeJobs.slice(0, capped).map(projectBridgeJob);
   const openGates = activeJobs.filter(isOpenGateJob).slice(0, capped).map(normalizeGate).filter(Boolean);
   let instanceStatus = null;
   try {
@@ -246,10 +334,6 @@ export function collectStateSnapshot({ limit = DEFAULT_LIMIT, eventLimit = 50, h
     work_items: workItems,
     jobs,
     open_gates: openGates,
-    events: tailEvents({ limit: eventLimit }),
-    pending_human_input: pendingHumanInput,
-    pending_plan_gates: pendingPlanGates,
-    reviewable_work_items: workItems.filter((wi) => wi.reviewable),
     instance_status: instanceStatus,
   };
 }
