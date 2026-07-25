@@ -4,7 +4,11 @@
 // Manages waiting state, timeout behavior, and abort-aware answer collection.
 
 import { C } from "../../../../shared/format/functions/colors.js";
-import { updateJobStatus } from "../../../queue/functions/index.js";
+import {
+  getHumanGate,
+  getJob,
+  updateJobStatus,
+} from "../../../queue/functions/index.js";
 import { humanInputChoicesForPayload } from "../../../../catalog/human-input.js";
 
 export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment using the available evidence and explicit assumptions.";
@@ -12,10 +16,10 @@ export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment usi
 const HARNESS_REVIEW_ANSWERS = Object.freeze({
   partial_work_recovery: "commit",
   blocked_recovery: "fail",
-  dead_letter_recovery: "skip",
-  research_dead_letter_recovery: "skip",
-  oneshot_dead_letter_recovery: "skip",
-  stall_exhausted_recovery: "skip",
+  dead_letter_recovery: "explicit_waiver",
+  research_dead_letter_recovery: "explicit_waiver",
+  oneshot_dead_letter_recovery: "explicit_waiver",
+  stall_exhausted_recovery: "explicit_waiver",
   assessment: "fail",
   needs_review: "fail",
   assessment_parse_error: "fail",
@@ -102,9 +106,47 @@ export function resolveHumanInputPrompt(job, payload = {}) {
   };
 }
 
+export function buildHumanPromptIdentity(job, payload = {}, {
+  nowMs = Date.now(),
+} = {}) {
+  const gate = getHumanGate(job.id);
+  const originalJobId = Number(
+    gate?.original_job_id
+    ?? payload.original_job_id
+    ?? payload.plan_job_id
+    ?? job.parent_job_id
+  );
+  const lineage = [];
+  const seen = new Set();
+  let cursor = Number.isInteger(originalJobId) && originalJobId > 0
+    ? getJob(originalJobId)
+    : null;
+  while (cursor && lineage.length < 8 && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    lineage.unshift({
+      job_id: cursor.id,
+      job_type: cursor.job_type,
+      title: String(cursor.title || "").slice(0, 100),
+    });
+    cursor = cursor.parent_job_id ? getJob(cursor.parent_job_id) : null;
+  }
+  const createdMs = Date.parse(job.created_at || "");
+  return {
+    work_item_id: job.work_item_id ?? null,
+    original_job_id: Number.isInteger(originalJobId) && originalJobId > 0 ? originalJobId : null,
+    gate_job_id: job.id,
+    gate_kind: gate?.gate_kind || payload.gate_kind || payload.review_type || payload.subtype || "clarification",
+    gate_generation: Number(gate?.generation || 1),
+    age_ms: Number.isFinite(createdMs) ? Math.max(0, nowMs - createdMs) : null,
+    retry_chain: lineage,
+  };
+}
+
 export async function runHumanInputHandler(worker, job, abortSignal = null) {
   const payload = worker.parsePayload(job);
   const { questions, context, promptOptions } = resolveHumanInputPrompt(job, payload);
+  const promptIdentity = buildHumanPromptIdentity(job, payload);
+  promptOptions.promptIdentity = promptIdentity;
 
   if (worker.nonInteractive && isAbHarnessEnvironment()) {
     const answer = unattendedHarnessAnswerForPayload(payload, { autoApprove: worker.autoApprove });
@@ -116,6 +158,7 @@ export async function runHumanInputHandler(worker, job, abortSignal = null) {
       return JSON.stringify({
         questions,
         answers: questions.map((question) => ({ question, answer })),
+        prompt_identity: promptIdentity,
         unattended: true,
         source: "ab_harness",
       });
@@ -136,7 +179,7 @@ export async function runHumanInputHandler(worker, job, abortSignal = null) {
         timeout,
         ...(aborted ? [aborted] : []),
       ]);
-      return JSON.stringify({ questions, answers });
+      return JSON.stringify({ questions, answers, prompt_identity: promptIdentity });
     } finally {
       clearTimeout(timer);
     }

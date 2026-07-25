@@ -1128,6 +1128,7 @@ export class Display {
     choices = [],
     escapeAnswer = null,
     escapeLabel = null,
+    promptIdentity = null,
   } = {}) {
     return new Promise((resolve, reject) => {
       if (this._aborted) {
@@ -1142,6 +1143,9 @@ export class Display {
         questions,
         context,
         choices: Array.isArray(choices) ? choices : [],
+        promptIdentity: promptIdentity && typeof promptIdentity === "object"
+          ? promptIdentity
+          : null,
         escapeAnswer: typeof escapeAnswer === "string" && escapeAnswer.trim() ? escapeAnswer.trim() : null,
         escapeLabel: typeof escapeLabel === "string" && escapeLabel.trim() ? escapeLabel.trim() : null,
         answers: [],

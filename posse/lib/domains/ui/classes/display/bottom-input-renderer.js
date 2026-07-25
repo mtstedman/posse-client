@@ -89,6 +89,25 @@ function buildQuestionChoiceDisplayLine(choices, width) {
   return ` ${C.cyan}${C.bold}Options:${C.reset} ${clipped}`;
 }
 
+function humanPromptIdentityLabel(q) {
+  const identity = q?.promptIdentity || {};
+  const fields = [];
+  if (identity.work_item_id) fields.push(`WI#${identity.work_item_id}`);
+  if (identity.original_job_id) fields.push(`original #${identity.original_job_id}`);
+  fields.push(`gate #${identity.gate_job_id || q?.jobId || "?"}`);
+  if (identity.gate_generation) fields.push(`gen ${identity.gate_generation}`);
+  if (identity.gate_kind) fields.push(String(identity.gate_kind));
+  if (Number.isFinite(identity.age_ms)) {
+    const ageSec = Math.max(0, Math.floor(identity.age_ms / 1000));
+    fields.push(ageSec >= 60 ? `age ${Math.floor(ageSec / 60)}m` : `age ${ageSec}s`);
+  }
+  const chain = Array.isArray(identity.retry_chain)
+    ? identity.retry_chain.map((entry) => `#${entry.job_id}`).filter(Boolean)
+    : [];
+  if (chain.length > 1) fields.push(`chain ${chain.join("→")}`);
+  return fields.join(" · ");
+}
+
 export class DisplayBottomInputRenderer {
 
 
@@ -265,7 +284,7 @@ export class DisplayBottomInputRenderer {
       const contextLines = buildQuestionContextDisplayLines(q.context, qLineW, maxContextLines);
       bodyLines.push(...contextLines);
 
-      const qHeader = ` ${C.yellow}${C.bold}\u26a0 Q${qNum}/${qTotal}${C.reset} ${C.dim}(job #${q.jobId})${C.reset}`;
+      const qHeader = ` ${C.yellow}${C.bold}\u26a0 Q${qNum}/${qTotal}${C.reset} ${C.dim}(${humanPromptIdentityLabel(q)})${C.reset}`;
       bodyLines.push(qHeader);
       const wrappedQuestionLines = _wrapQuestionBodyLines(qText, qLineW);
       bodyLines.push(...wrappedQuestionLines);

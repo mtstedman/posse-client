@@ -1,5 +1,7 @@
 // lib/domains/worker/functions/helpers/verdicts/fail.js
 
+import { createHash } from "node:crypto";
+
 import {
   addDependency,
   countFailedJobs,
@@ -54,6 +56,44 @@ function _filterToInheritedScope(paths = [], inherited = []) {
   return (Array.isArray(paths) ? paths : [])
     .map((entry) => String(entry || "").replace(/\\/g, "/"))
     .filter((entry) => entry && allowed.has(entry));
+}
+
+function _fixSatisfiabilityFingerprint({
+  reasons = [],
+  requiredPaths = [],
+  modify = [],
+  create = [],
+  remove = [],
+  roots = [],
+  planGeneration = 1,
+} = {}) {
+  const normalized = {
+    reasons: (Array.isArray(reasons) ? reasons : [reasons])
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+      .sort(),
+    required_paths: [...new Set(requiredPaths.map(_normalizeScopePath).filter(Boolean))].sort(),
+    scope: {
+      modify: [...new Set(modify.map(_normalizeScopePath).filter(Boolean))].sort(),
+      create: [...new Set(create.map(_normalizeScopePath).filter(Boolean))].sort(),
+      delete: [...new Set(remove.map(_normalizeScopePath).filter(Boolean))].sort(),
+      roots: [...new Set(roots.map(_normalizeScopePath).filter(Boolean))].sort(),
+    },
+    plan_generation: Number(planGeneration) || 1,
+  };
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+function _lineageHasFixFingerprint(job, fingerprint) {
+  let cursor = job;
+  const seen = new Set();
+  while (cursor && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    const payload = parseJobPayload(cursor);
+    if (payload?._fix_satisfiability_fingerprint === fingerprint) return true;
+    cursor = cursor.parent_job_id ? getJob(cursor.parent_job_id) : null;
+  }
+  return false;
 }
 
 function _isImageArtifactRecovery({ taskMode = "code", needsImageGeneration = false, outputRoot = null } = {}) {
@@ -480,12 +520,17 @@ function _spawnRecoveryJobsForVerdict({
     });
     const inheritedEditableScope = _mergeFixEditableScope(originalFiles, originalCreateFiles);
     const inheritedExplicitModify = _filterToInheritedScope(explicitFixModify, inheritedEditableScope);
+    const inheritedScopeSet = new Set(inheritedEditableScope.map(_normalizeScopePath));
+    const requiredScopeExpansion = _mergeUniquePaths(explicitFixModify, inferredFixModify)
+      .map(_normalizeScopePath)
+      .filter((filePath) => filePath && !inheritedScopeSet.has(filePath));
     const mergedFixCreate = _mergeUniquePaths(originalCreateFiles, explicitFixCreate, inferredFixScope.files_to_create);
     const mergedFixDelete = _mergeUniquePaths(originalDeleteFiles, inferredGeneratedDeletes);
     const mergedFixModify = _mergeUniquePaths(
       inheritedEditableScope,
       inheritedExplicitModify,
       inferredFixModify,
+      requiredScopeExpansion,
       mergedFixCreate,
     );
     const mergedFixRoots = _mergeUniquePaths(
@@ -646,12 +691,39 @@ function _spawnRecoveryJobsForVerdict({
       continue;
     }
 
-    const oneshotScopeExpansions = origOneshotOrigin
-      ? _oneshotFixScopeExpansions({ origCtx, mergedFixModify, mergedFixCreate, mergedFixDelete, mergedFixRoots })
-      : [];
-
-    const fixJob = spawnFromAssessor("failed", "fix", {
+    const fixFingerprint = _fixSatisfiabilityFingerprint({
+      reasons: verdict.reasons,
+      requiredPaths: requiredScopeExpansion,
+      modify: mergedFixModify,
+      create: mergedFixCreate,
+      remove: mergedFixDelete,
+      roots: mergedFixRoots,
+      planGeneration: currentPayload.plan_generation || currentPayload._plan_generation || 1,
+    });
+    const fixPayload = {
+      original_job_id: job.id,
+      original_title: job.title,
+      fix_instructions: fixInstructions,
+      assessor_feedback: verdict.reasons,
+      files_to_modify: mergedFixModify,
+      files_to_create: mergedFixCreate,
+      files_to_delete: mergedFixDelete,
+      create_roots: mergedFixRoots,
+      task_mode: origTaskMode,
+      output_root: origOutputRoot,
+      needs_image_generation: origNeedsImageGen,
+      success_criteria: originalSuccessCriteria,
+      _planner_set_files: origPlannerSetFiles,
+      _fix_satisfiability_fingerprint: fixFingerprint,
+      ...oneshotPayloadFields,
+      // Fix jobs inherit the original scope as editable context; the
+      // assessor verifies success after the fix, so don't require every
+      // inherited file to be re-committed on each repair attempt.
+      declared_output_contract: false,
+    };
+    const proposedFix = {
       work_item_id: job.work_item_id,
+      job_type: "fix",
       title: _normalizeFixTitle(spec.title || job.title),
       parent_job_id: job.id,
       priority: job.priority,
@@ -659,26 +731,84 @@ function _spawnRecoveryJobsForVerdict({
       model_tier: job.model_tier,
       reasoning_effort: job.reasoning_effort,
       skills: job.skills || null,
-      payload_json: JSON.stringify({
-        original_job_id: job.id,
-        original_title: job.title,
-        fix_instructions: fixInstructions,
-        assessor_feedback: verdict.reasons,
-        files_to_modify: mergedFixModify,
-        files_to_create: mergedFixCreate,
-        files_to_delete: mergedFixDelete,
-        create_roots: mergedFixRoots,
-        task_mode: origTaskMode,
-        output_root: origOutputRoot,
-        needs_image_generation: origNeedsImageGen,
-        success_criteria: originalSuccessCriteria,
-        _planner_set_files: origPlannerSetFiles,
-        ...oneshotPayloadFields,
-        // Fix jobs inherit the original scope as editable context; the
-        // assessor verifies success after the fix, so don't require every
-        // inherited file to be re-committed on each repair attempt.
-        declared_output_contract: false,
-      }),
+      payload_json: fixPayload,
+    };
+
+    if (_lineageHasFixFingerprint(job, fixFingerprint)) {
+      const repeatedGate = spawnFromAssessor("failed", "human_input", {
+        work_item_id: job.work_item_id,
+        title: `Repeated fix chain: ${job.title.slice(0, 70)}`,
+        parent_job_id: job.id,
+        priority: "high",
+        model_tier: "cheap",
+        payload_json: JSON.stringify({
+          original_job_id: job.id,
+          gate_kind: "fix_chain_exhausted",
+          review_type: "blocked_recovery",
+          choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
+          questions: [
+            `The same failure/scope fingerprint (${fixFingerprint.slice(0, 12)}) already occurred in this fix lineage.`,
+            "Choose retry_with_changes with materially new guidance, replan, pass, fail, or explicit_waiver.",
+          ],
+          context: "Posse did not enqueue another identical fix because it would repeat an unsatisfiable repair loop.",
+          fix_satisfiability_fingerprint: fixFingerprint,
+        }),
+      });
+      spawnedJobs.push(repeatedGate);
+      dependencyReplacementJobs.push({ job: repeatedGate, label: "fix-chain review" });
+      log(`${C.yellow}[assessor]${C.reset} repeated fix fingerprint; opened human gate #${repeatedGate.id} instead of another fix`);
+      continue;
+    }
+
+    if (requiredScopeExpansion.length > 0) {
+      const scopeGate = spawnFromAssessor("failed", "human_input", {
+        work_item_id: job.work_item_id,
+        title: `Approve fix scope: ${requiredScopeExpansion.slice(0, 3).join(", ")}${requiredScopeExpansion.length > 3 ? ` (+${requiredScopeExpansion.length - 3})` : ""}`,
+        parent_job_id: job.id,
+        priority: "high",
+        model_tier: "cheap",
+        payload_json: JSON.stringify({
+          original_job_id: job.id,
+          gate_kind: "scope_expansion_required",
+          review_type: "scope_expansion_required",
+          questions: [
+            [
+              `The assessor's proposed fix requires existing path(s) outside the current writable scope:`,
+              ...requiredScopeExpansion.map((filePath) => `- ${filePath}`),
+              "",
+              "Approve to create the staged fix with these exact paths, or reject to stop the repair chain.",
+            ].join("\n"),
+          ],
+          context: `Pre-enqueue fix satisfiability gate; fingerprint ${fixFingerprint.slice(0, 12)}.`,
+          file_requests: requiredScopeExpansion.map((filePath) => ({
+            path: filePath,
+            reason: "assessor-required existing path outside inherited fix scope",
+            risk: "high",
+          })),
+          proposed_fix: proposedFix,
+          fix_satisfiability_fingerprint: fixFingerprint,
+        }),
+      });
+      spawnedJobs.push(scopeGate);
+      dependencyReplacementJobs.push({ job: scopeGate, label: "fix-scope review" });
+      log(`${C.yellow}[assessor]${C.reset} staged fix behind scope approval #${scopeGate.id}; no fix job was enqueued`);
+      continue;
+    }
+
+    const oneshotScopeExpansions = origOneshotOrigin
+      ? _oneshotFixScopeExpansions({ origCtx, mergedFixModify, mergedFixCreate, mergedFixDelete, mergedFixRoots })
+      : [];
+
+    const fixJob = spawnFromAssessor("failed", "fix", {
+      work_item_id: job.work_item_id,
+      title: proposedFix.title,
+      parent_job_id: job.id,
+      priority: job.priority,
+      provider: (job.job_type === "dev" || job.job_type === "fix") ? (job.provider || null) : null,
+      model_tier: job.model_tier,
+      reasoning_effort: job.reasoning_effort,
+      skills: job.skills || null,
+      payload_json: JSON.stringify(fixPayload),
     });
     spawnedJobs.push(fixJob);
     dependencyReplacementJobs.push({ job: fixJob, label: "fix" });

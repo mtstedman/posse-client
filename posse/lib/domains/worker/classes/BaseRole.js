@@ -79,6 +79,15 @@ export class BaseRole {
         return await timeRolePhase(role, "composePrompt", job, () => this.composePrompt({ contextText, contract, job, ctx: providerCtx }));
       };
       const prompt = await buildPromptForProvider(ctx.providerName);
+      const providerOpts = this.buildOpts(job, ctx);
+      if (
+        providerOpts?.role === "dev"
+        && ((providerOpts.createFiles?.length || 0) > 0 || (providerOpts.createRoots?.length || 0) > 0)
+      ) {
+        throw new Error(
+          "Writing-provider contract rejected creation authority: handoff must materialize exact files and pass them as scopedFiles.",
+        );
+      }
       const { output, stats = {} } = await timeRolePhase(
         role,
         "providerClient.call",
@@ -86,7 +95,7 @@ export class BaseRole {
         () => this.providerClient.call(
           prompt,
           {
-            ...this.buildOpts(job, ctx),
+            ...providerOpts,
             buildFallbackPrompt: ({ providerName }) => buildPromptForProvider(providerName),
           },
           this.buildMeta(job, ctx),

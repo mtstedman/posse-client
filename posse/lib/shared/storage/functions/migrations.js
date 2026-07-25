@@ -32,7 +32,7 @@ import {
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 7;
+export const HOST_SCHEMA_VERSION = 8;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -391,4 +391,133 @@ export function repairAtlasV2HostSchema(db) {
 
 export function __testRepairAtlasV2HostSchema(db) {
   return repairAtlasV2HostSchema(db);
+}
+
+const HUMAN_GATE_JOB_COLUMNS = Object.freeze([
+  ["assessment_state", "TEXT NOT NULL DEFAULT 'not_started'"],
+  ["assessment_attempt_count", "INTEGER NOT NULL DEFAULT 0"],
+  ["assessment_max_attempts", "INTEGER NOT NULL DEFAULT 3"],
+  ["assessment_last_error", "TEXT"],
+  ["assessment_completed_at", "TEXT"],
+  ["state_version", "INTEGER NOT NULL DEFAULT 0"],
+]);
+
+function tableExists(db, tableName) {
+  return !!db.prepare(
+    `SELECT 1 AS one FROM sqlite_master WHERE type='table' AND name=?`
+  ).get(tableName);
+}
+
+/**
+ * Host schema v8 separates implementation attempts from assessment retries and
+ * makes every human-input job an explicit, durable gate contract.
+ */
+export function needsHumanGateAssessmentSchemaRepair(db) {
+  if (!tableExists(db, "jobs")) return false;
+  const jobColumns = new Set(getTableColumnNames(db, "jobs"));
+  const attemptColumns = tableExists(db, "job_attempts")
+    ? new Set(getTableColumnNames(db, "job_attempts"))
+    : new Set();
+  return (
+    HUMAN_GATE_JOB_COLUMNS.some(([name]) => !jobColumns.has(name))
+    || !attemptColumns.has("attempt_kind")
+    || !tableExists(db, "human_gates")
+    || !tableExists(db, "human_gate_outbox")
+    || !tableExists(db, "file_materializations")
+  );
+}
+
+export function repairHumanGateAssessmentSchema(db) {
+  if (!tableExists(db, "jobs")) return false;
+  let changed = false;
+  const jobColumns = new Set(getTableColumnNames(db, "jobs"));
+  for (const [name, declaration] of HUMAN_GATE_JOB_COLUMNS) {
+    if (jobColumns.has(name)) continue;
+    db.exec(`ALTER TABLE jobs ADD COLUMN ${quoteIdent(name)} ${declaration}`);
+    changed = true;
+  }
+  if (tableExists(db, "job_attempts")) {
+    const attemptColumns = new Set(getTableColumnNames(db, "job_attempts"));
+    if (!attemptColumns.has("attempt_kind")) {
+      db.exec(`ALTER TABLE job_attempts ADD COLUMN attempt_kind TEXT NOT NULL DEFAULT 'implementation'`);
+      changed = true;
+    }
+  }
+
+  if (!tableExists(db, "human_gates")) changed = true;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS human_gates (
+      gate_job_id INTEGER PRIMARY KEY,
+      gate_kind TEXT NOT NULL,
+      contract_version INTEGER NOT NULL DEFAULT 1,
+      original_job_id INTEGER,
+      generation INTEGER NOT NULL DEFAULT 1,
+      gate_state TEXT NOT NULL DEFAULT 'open'
+        CHECK (gate_state IN ('open','resolving','resolved','superseded')),
+      expected_original_status TEXT,
+      allowed_source_states_json TEXT NOT NULL
+        CHECK (json_valid(allowed_source_states_json)),
+      allowed_actions_json TEXT NOT NULL
+        CHECK (json_valid(allowed_actions_json)),
+      resolution_action TEXT,
+      resolution_payload_json TEXT
+        CHECK (resolution_payload_json IS NULL OR json_valid(resolution_payload_json)),
+      idempotency_key TEXT UNIQUE,
+      resolver_lease_token TEXT,
+      resolution_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      resolved_at TEXT,
+      FOREIGN KEY (gate_job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+      FOREIGN KEY (original_job_id) REFERENCES jobs(id) ON DELETE SET NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_human_gates_one_active
+      ON human_gates(original_job_id, gate_kind)
+      WHERE original_job_id IS NOT NULL
+        AND gate_state IN ('open','resolving');
+    CREATE INDEX IF NOT EXISTS idx_human_gates_state
+      ON human_gates(gate_state, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_human_gates_original
+      ON human_gates(original_job_id, generation);
+
+    CREATE TABLE IF NOT EXISTS human_gate_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      gate_job_id INTEGER NOT NULL,
+      operation_key TEXT NOT NULL UNIQUE,
+      operation_type TEXT NOT NULL,
+      payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+      state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending','running','completed','failed')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      completed_at TEXT,
+      FOREIGN KEY (gate_job_id) REFERENCES human_gates(gate_job_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_human_gate_outbox_pending
+      ON human_gate_outbox(state, created_at);
+
+    CREATE TABLE IF NOT EXISTS file_materializations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL,
+      work_item_id INTEGER,
+      generation INTEGER NOT NULL DEFAULT 1,
+      path TEXT NOT NULL,
+      operation_key TEXT NOT NULL UNIQUE,
+      created_parent_dirs_json TEXT NOT NULL DEFAULT '[]'
+        CHECK (json_valid(created_parent_dirs_json)),
+      materialized_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+      FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+      UNIQUE (job_id, generation, path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_file_materializations_job
+      ON file_materializations(job_id, generation);
+  `);
+  return changed;
+}
+
+export function __testRepairHumanGateAssessmentSchema(db) {
+  return repairHumanGateAssessmentSchema(db);
 }

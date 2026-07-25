@@ -4,6 +4,7 @@ import {
   getEventsByWorkItemSinceId,
   getEventsSinceId,
   getHeadEventId,
+  getHumanGate,
   getJob,
   getWorkItem,
   listJobs,
@@ -202,11 +203,32 @@ function isReadyOneshotScopeSelection(payload = {}) {
   return payload?.selector?.status === "ready" || payload?.oneshot_scope?.status === "ready";
 }
 
+function gateRetryChain(originalJobId) {
+  const lineage = [];
+  const seen = new Set();
+  let cursor = originalJobId ? getJob(originalJobId) : null;
+  while (cursor && lineage.length < 8 && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    lineage.unshift({
+      job_id: Number(cursor.id),
+      job_type: cursor.job_type,
+      title: boundedText(cursor.title, 100) || "",
+    });
+    cursor = cursor.parent_job_id ? getJob(cursor.parent_job_id) : null;
+  }
+  return lineage;
+}
+
 export function normalizeGate(job) {
   if (!job || job.job_type !== "human_input") return null;
   const payload = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
     ? job.payload
     : parseJobPayload(job);
+  const contract = getHumanGate(job.id);
+  const originalJobId = contract?.original_job_id == null
+    ? null
+    : Number(contract.original_job_id);
+  const createdMs = Date.parse(job.created_at || job.updated_at || "");
   return {
     job_id: Number(job.id),
     work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),
@@ -215,6 +237,16 @@ export function normalizeGate(job) {
     prompt: promptFromGatePayload(payload),
     opened_at: job.updated_at || job.created_at || null,
     status: job.status,
+    identity: {
+      work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),
+      original_job_id: originalJobId,
+      gate_job_id: Number(job.id),
+      gate_kind: contract?.gate_kind || payload.gate_kind || payload.review_type || payload.subtype || "clarification",
+      gate_generation: Number(contract?.generation || 1),
+      gate_state: contract?.gate_state || "open",
+      age_ms: Number.isFinite(createdMs) ? Math.max(0, Date.now() - createdMs) : null,
+      retry_chain: gateRetryChain(originalJobId),
+    },
     ...bridgeGateAnswerContract(payload),
     payload: projectBridgeGateDetail(payload),
   };

@@ -3,11 +3,13 @@ export const BRIDGE_HEALTH_PROOF_CONTEXT = `posse-bridge-health-v${BRIDGE_PROTOC
 
 export const BRIDGE_COMMANDS = Object.freeze({
   QUEUE_LIST: "queue.list",
+  QUEUE_ADD: "queue.add",
   WORK_ITEM_GET: "work_item.get",
   JOBS_LIST: "jobs.list",
   EVENTS_TAIL: "events.tail",
   GATES_LIST: "gates.list",
   STATE_SNAPSHOT: "state.snapshot",
+  RUN_START: "run.start",
   ASK: "ask",
   REVIEW_APPROVE: "review.approve",
   REVIEW_REJECT: "review.reject",

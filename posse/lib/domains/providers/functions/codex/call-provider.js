@@ -89,6 +89,7 @@ export async function callProvider(promptText, {
   _remoteToolSurface = null,
   mcpGate = null,
   disableAgentTools = false,
+  sandboxModeOverride = null,
 } = {}) {
   const readiness = await isReadyAsync();
   if (!readiness.ready) {
@@ -262,14 +263,16 @@ export async function callProvider(promptText, {
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);
     executionContract = adaptExecutionContractForProvider(executionContract, "codex");
-    const shellDiscipline = __testBuildShellDisciplineBlock({
+    const shellDiscipline = skipRolePrompt ? null : __testBuildShellDisciplineBlock({
       platform: process.platform,
       atlasAttachment: promptAtlasAttachment,
       atlasPrefetchStatus,
       executionContract,
     });
-    const roleGuard = __testBuildCodexRoleGuardBlock({ role, allowWrite, executionContract });
-    const contractBlock = renderExecutionContractBlock(executionContract);
+    const roleGuard = skipRolePrompt
+      ? null
+      : __testBuildCodexRoleGuardBlock({ role, allowWrite, executionContract });
+    const contractBlock = skipRolePrompt ? null : renderExecutionContractBlock(executionContract);
     const atlasUnavailableReason = isFallbackAtlasPrefetchStatus(atlasPrefetchStatus)
       ? `preflight status ${String(atlasPrefetchStatus || "failed")}`
       : `transport ${atlasAttachment.transport}`;
@@ -283,7 +286,7 @@ export async function callProvider(promptText, {
     const developerInstructionRoute = buildCodexDeveloperInstructionRoute({
       promptPrelude,
       contractBlock,
-      stableContext,
+      stableContext: skipRolePrompt ? null : stableContext,
       atlasNote,
       strictMcpNote,
       webToolsNote,
@@ -377,6 +380,7 @@ export async function callProvider(promptText, {
       reasoningEffort,
       configOverrides: configRoute.configOverrides,
       forceReadOnlySandbox,
+      sandboxModeOverride,
       priorSessionHandle: resumeSessionHandle,
     });
 

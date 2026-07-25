@@ -113,6 +113,9 @@ import {
   directoryTree as directoryTreeFromModule,
   readFile as readFileFromModule,
 } from "./helpers/file-attach.js";
+import {
+  materializeWritingScope as materializeWritingScopeFromModule,
+} from "./helpers/file-materialization.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { getDefaultRemoteComposer } from "../../remote/classes/RemoteComposer.js";
 import { getPosseRemoteMode, getPosseRemoteTimeoutMs } from "../../remote/functions/mode.js";
@@ -512,6 +515,10 @@ export function isZeroEditCodeTask(scope = {}) {
 
 export function assertHandoffScopePreflight(packet) {
   return assertHandoffScopePreflightFromModule(packet);
+}
+
+export function materializeWritingScope(packet) {
+  return materializeWritingScopeFromModule(packet);
 }
 
 export function sanitizePendingMergeConflicts(cwd, conflicts = []) {
@@ -1464,6 +1471,7 @@ export async function handoff(input) {
     }
   }
 
+  await timeHandoffStep(packet, "scope.materialize", () => materializeWritingScope(packet));
   await timeHandoffStep(packet, "scope.preflight", () => assertHandoffScopePreflight(packet));
 
   // Step 1: ATLAS attachment + required-mode fail-closed checks. Resolve this

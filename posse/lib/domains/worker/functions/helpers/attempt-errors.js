@@ -38,6 +38,7 @@ import {
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { processVerdict } from "./process-verdict.js";
 
 function deferInterruptedCleanupIfSiblingLocks(job, label) {
   const siblingLocks = activeSiblingWriteLocks(job);
@@ -358,6 +359,51 @@ export async function handleExecuteAttemptError(worker, {
     startTime,
     wtPath,
   })) return;
+
+  if (err?.code === "HANDOFF_FILE_MATERIALIZATION_FAILED") {
+    const message = String(err?.message || "Writing scope could not be materialized");
+    completeAttempt(attempt.id, {
+      status: "interrupted",
+      duration_ms: Date.now() - startTime,
+      error_text: message,
+    });
+    setJobError(job.id, message);
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      attempt_id: attempt.id,
+      event_type: EVENT_TYPES.JOB_ATTEMPT_FAILED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Writing handoff rejected before provider start: ${message}`,
+      event_json: JSON.stringify({
+        code: err.code,
+        path: err.path || null,
+        create_roots: err.create_roots || null,
+      }),
+    });
+    processVerdict(currentJob || job, {
+      verdict: "needs_replan",
+      confidence: "high",
+      reasons: [
+        `The writing scope is not executable and must be corrected before another provider starts: ${message}`,
+      ],
+      spawn_jobs: [],
+      human_questions: [],
+      suggestions: [],
+    }, {
+      emit: (line) => worker.emit(job.id, line),
+      autoApprove: worker.autoApprove,
+      leaseToken,
+    });
+    decrementAttemptCount(job.id);
+    worker.emit(
+      job.id,
+      `${C.yellow}[handoff] WI#${job.work_item_id} job #${job.id}: rejected unsatisfiable scope before provider execution; routed to deterministic replan${C.reset}`,
+    );
+    refreshAndExtractInsights(job.work_item_id);
+    worker._cleanupWorktreeIfDone(job.work_item_id);
+    return;
+  }
 
   // Worker was killed because the user hit Ctrl+C or the lease expired.
   // Stash any partial work, requeue without consuming an attempt.

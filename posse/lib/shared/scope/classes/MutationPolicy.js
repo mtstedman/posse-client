@@ -1,5 +1,6 @@
 import { Scope } from "./Scope.js";
 import { validateScopedPath } from "../functions/validation.js";
+import fs from "fs";
 import path from "path";
 import { agentHiddenReadablePathReason } from "../functions/agent-hidden-paths.js";
 
@@ -16,8 +17,7 @@ const BLOCKED_MUTATING_COMMAND = new RegExp(
   "i",
 );
 const BLOCKED_INLINE_SCRIPT_WRITE = /\b(?:node\s+-e|python3?\s+-c)\b[\s\S]*(?:writeFile|appendFile|createWriteStream|fs\.(?:rm|unlink|mkdir|rename|copyFile)|open\s*\(|Path\s*\([^)]*\)\.write|shutil\.|os\.(?:remove|unlink|mkdir|rmdir|rename))/i;
-const READONLY_BASH_ALLOWLIST = /^\s*(npm\s+test|npm\s+run|node\s+--test\b|npx\s+(?:tsc|eslint|prettier|jest|vitest|mocha)\b|pnpm\s+(test|run|exec)|yarn\s+(test|run)|tsc\s|eslint\s|prettier\s|jest\s|vitest\s|mocha\s|pip\s+show|python3?\s+-m\s+(?:pytest|unittest|build)\b|pytest\s|ruff\s|mypy\s|flake8\s|black\s+--check|php\s|composer\s+(test|run)|phpunit\s|cargo\s+(test|check|build|clippy)|rustfmt\s+--check|go\s+(test|vet|build)|make\s|cmake\s|gradle\s|mvn\s|dotnet\s+(test|build)|cat\s|head\s|tail\s|ls\s|find\s|wc\s|file\s|du\s|diff\s|sort\s|uniq\s|grep\s|rg\s|git\s+diff|git\s+log|git\s+status|git\s+show|echo\s|pwd|whoami)/i;
-const PHP_SYNTAX_LINT_FLAG_RE = /(?:^|\s)(?:-l|--syntax-check)(?:\s|$)/i;
+const READONLY_BASH_ALLOWLIST = /^\s*(npm\s+test|npm\s+run|node\s+--test\b|npx\s+(?:tsc|eslint|prettier|jest|vitest|mocha)\b|pnpm\s+(test|run|exec)|yarn\s+(test|run)|tsc\s|eslint\s|prettier\s|jest\s|vitest\s|mocha\s|pip\s+show|python3?\s+-m\s+(?:pytest|unittest|build)\b|pytest\s|ruff\s|mypy\s|flake8\s|black\s+--check|composer\s+(test|run)|phpunit\s|cargo\s+(test|check|build|clippy)|rustfmt\s+--check|go\s+(test|vet|build)|make\s|cmake\s|gradle\s|mvn\s|dotnet\s+(test|build)|cat\s|head\s|tail\s|ls\s|find\s|wc\s|file\s|du\s|diff\s|sort\s|uniq\s|grep\s|rg\s|git\s+diff|git\s+log|git\s+status|git\s+show|echo\s|pwd|whoami)/i;
 const FIND_MUTATING_FLAGS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir"]);
 const GO_OUTPUT_FLAGS = new Set(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"]);
 const CARGO_OUTPUT_FLAGS = new Set(["--target-dir", "--out-dir"]);
@@ -56,11 +56,6 @@ function normalizeRoots(values = [], cwd = process.cwd()) {
     if (normalized) roots.push(normalized);
   }
   return [...new Set(roots)];
-}
-
-function isPhpSyntaxLintCommand(command) {
-  const text = String(command || "");
-  return /^\s*php(?:\s|$)/i.test(text) && PHP_SYNTAX_LINT_FLAG_RE.test(text);
 }
 
 function shellWords(command) {
@@ -163,6 +158,62 @@ function blockedBashArgumentReason(command) {
     return "sort explicit output path";
   }
   return null;
+}
+
+function syntaxOperandAllowed(policy, token) {
+  const cleaned = cleanShellPathToken(token);
+  if (!cleaned || cleaned.startsWith("-")) return false;
+  const full = path.isAbsolute(cleaned) ? cleaned : path.resolve(policy.cwd, cleaned);
+  let regular = false;
+  try {
+    const stat = fs.lstatSync(full);
+    regular = stat.isFile() && !stat.isSymbolicLink();
+  } catch {
+    regular = false;
+  }
+  return regular && (policy.canEdit(full) || policy.isWithinScopeRoot(full));
+}
+
+function scopedSyntaxCommand(policy, command) {
+  const tokens = shellWords(command);
+  if (tokens.length === 0) return { recognized: false };
+  const name = shellCommandName(tokens[0]);
+  let operands = null;
+  if (name === "node" && tokens[1] === "--check" && tokens.length === 3) {
+    operands = [tokens[2]];
+  } else if (name === "php" && ["-l", "--syntax-check"].includes(tokens[1]) && tokens.length === 3) {
+    operands = [tokens[2]];
+  } else if (name === "ruby" && tokens[1] === "-c" && tokens.length === 3) {
+    operands = [tokens[2]];
+  } else if ((name === "bash" || name === "sh") && tokens[1] === "-n" && tokens.length === 3) {
+    operands = [tokens[2]];
+  } else if (name === "shellcheck") {
+    const allowedFlagsWithValues = new Set(["-s", "--shell", "-S", "--severity"]);
+    const allowedFlags = new Set(["-x", "--external-sources"]);
+    operands = [];
+    for (let index = 1; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (allowedFlagsWithValues.has(token)) {
+        index += 1;
+        if (index >= tokens.length) return { recognized: true, error: "syntax command flag is missing its value" };
+      } else if (allowedFlags.has(token)) {
+        continue;
+      } else if (token.startsWith("-")) {
+        return { recognized: true, error: `syntax command flag is not allowed: ${token}` };
+      } else {
+        operands.push(token);
+      }
+    }
+    if (operands.length === 0) {
+      return { recognized: true, error: "syntax command requires at least one scoped file" };
+    }
+  } else {
+    return { recognized: false };
+  }
+  const outside = operands.filter((operand) => !syntaxOperandAllowed(policy, operand));
+  return outside.length > 0
+    ? { recognized: true, error: `syntax operand is outside declared existing-file scope: ${outside.join(", ")}` }
+    : { recognized: true, error: null };
 }
 
 function normalizeRel(value) {
@@ -635,8 +686,12 @@ export class MutationPolicy {
       if (blockedArgReason) {
         return { ok: false, error: `Error: Mutating bash argument blocked (${blockedArgReason}) - bash is limited to read-only inspection and test/build runners. Use scoped file tools for workspace changes: ${sub.slice(0, 100)}` };
       }
-      if (isPhpSyntaxLintCommand(sub)) {
-        return { ok: false, error: "Error: PHP syntax lint must use run_scoped_checks with checks:[\"lint\"] for the declared scope instead of bash/php -l." };
+      const syntax = scopedSyntaxCommand(this, sub);
+      if (syntax.recognized) {
+        if (syntax.error) {
+          return { ok: false, error: `Error: ${syntax.error}. Use run_scoped_checks for the declared scope.` };
+        }
+        continue;
       }
       if (!READONLY_BASH_ALLOWLIST.test(sub)) {
         return { ok: false, error: `Error: Command not in allowlist - bash is restricted to test/build/lint runners and read-only utilities. File writes must go through write_file/edit_file: ${sub.slice(0, 100)}` };

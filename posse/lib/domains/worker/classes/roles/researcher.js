@@ -44,6 +44,7 @@ import {
   getResearchBudget as defaultGetResearchBudget,
   isDeepthinkTask as defaultIsDeepthinkTask,
   isResearchBudgetDeep as defaultIsResearchBudgetDeep,
+  maxTurnsOverrideFromPayload as defaultMaxTurnsOverrideFromPayload,
   researchBudgetFromDeepthink,
   researchBudgetToMaxTurnsOverride as defaultResearchBudgetToMaxTurnsOverride,
   researchBudgetToReasoningEffort as defaultResearchBudgetToReasoningEffort,
@@ -74,6 +75,7 @@ const DEFAULT_DEPS = {
   isDeepthinkTask: defaultIsDeepthinkTask,
   isResearchBudgetDeep: defaultIsResearchBudgetDeep,
   loadNudges: () => "",
+  maxTurnsOverrideFromPayload: defaultMaxTurnsOverrideFromPayload,
   researchBudgetToMaxTurnsOverride: defaultResearchBudgetToMaxTurnsOverride,
   researchBudgetToReasoningEffort: defaultResearchBudgetToReasoningEffort,
   shortJobTitle: defaultShortJobTitle,
@@ -739,13 +741,15 @@ export class ResearcherRole extends BaseRole {
   buildOpts(job, ctx) {
     const {
       isResearchBudgetDeep,
+      maxTurnsOverrideFromPayload,
       researchBudgetToMaxTurnsOverride,
       researchBudgetToReasoningEffort,
       shortJobTitle,
     } = this.roleDeps();
     const researchBudget = ctx.researchBudget || "normal";
     const roleMode = ctx.researchRoleMode || "solo";
-    const maxTurns = researchBudgetToMaxTurnsOverride(researchBudget, "researcher", { roleMode });
+    const maxTurns = maxTurnsOverrideFromPayload(ctx.payload)
+      || researchBudgetToMaxTurnsOverride(researchBudget, "researcher", { roleMode });
     const retryMaxTurns = ctx.researchRetrySynthesisMode
       ? Math.min(maxTurns || RETRY_SYNTHESIS_MAX_TURNS, RETRY_SYNTHESIS_MAX_TURNS)
       : null;

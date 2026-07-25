@@ -1,5 +1,6 @@
 import { ChangeStream } from "./ChangeStream.js";
 import { LocalServer } from "./LocalServer.js";
+import { PosseRunLauncher } from "./PosseRunLauncher.js";
 import { RelayClient } from "./RelayClient.js";
 import {
   BRIDGE_PORT_SCAN_END,
@@ -21,6 +22,7 @@ export class Bridge {
     this.localServer = null;
     this.changeStream = null;
     this.relayClient = null;
+    this.runLauncher = new PosseRunLauncher({ projectDir: this.projectDir });
   }
 
   async start() {
@@ -42,6 +44,7 @@ export class Bridge {
           projectDir: this.projectDir,
           tailBridgeEvents: (args) => this.changeStream?.tailFrames(args) || { events: [], head_event_id: 0 },
           getHeadEventId: () => this.changeStream?.headEventId() || 0,
+          startPosse: () => this.runLauncher.start(),
         });
         this.relayClient.on("error", (err) => {
           try {
@@ -94,6 +97,7 @@ export class Bridge {
           connected_at: null,
           authenticated_at: null,
         },
+        startPosse: () => this.runLauncher.start(),
       });
       try {
         const address = await server.start();

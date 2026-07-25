@@ -167,6 +167,7 @@ export class LocalServer {
     getHeadEventId = () => 0,
     tailBridgeEvents = null,
     getRelayStatus = null,
+    startPosse = null,
     maxWsFrameBytes = DEFAULT_MAX_WS_FRAME_BYTES,
     wsHelloTimeoutMs = DEFAULT_WS_HELLO_TIMEOUT_MS,
   } = {}) {
@@ -180,6 +181,7 @@ export class LocalServer {
     this.getHeadEventId = getHeadEventId;
     this.tailBridgeEvents = tailBridgeEvents;
     this.getRelayStatus = getRelayStatus;
+    this.startPosse = startPosse;
     this.maxWsFrameBytes = Math.max(1024, Number(maxWsFrameBytes) || DEFAULT_MAX_WS_FRAME_BYTES);
     this.wsHelloTimeoutMs = Math.max(1000, Number(wsHelloTimeoutMs) || DEFAULT_WS_HELLO_TIMEOUT_MS);
     this.server = null;
@@ -433,6 +435,7 @@ export class LocalServer {
       actor: "bridge",
       tailBridgeEvents: typeof this.tailBridgeEvents === "function" ? this.tailBridgeEvents : null,
       getHeadEventId: typeof this.getHeadEventId === "function" ? this.getHeadEventId : null,
+      startPosse: typeof this.startPosse === "function" ? this.startPosse : null,
     };
   }
 

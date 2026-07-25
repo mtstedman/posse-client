@@ -1,11 +1,13 @@
 import path from "path";
 import {
   completeAttempt,
+  createJob,
   getArtifacts,
   getAttempts,
   getJob,
-  incrementAndCreateAttempt,
+  incrementAndCreateAssessmentAttempt,
   isLeaseValid,
+  setAssessmentLifecycle,
   updateJobPayload,
 } from "../../../queue/functions/index.js";
 import {
@@ -36,9 +38,6 @@ import {
   assessmentRetryFallbackReads as _assessmentRetryFallbackReads,
   buildPriorAssessmentFindings as _buildPriorAssessmentFindings,
 } from "../../functions/execution/assessment-policy.js";
-import {
-  assessmentTerminalHandoffRetryDecision,
-} from "../../functions/helpers/assessment-pipeline.js";
 import {
   logAttemptSkippedStaleLease as _logAttemptSkippedStaleLease,
 } from "../../functions/execution/attempt-logging.js";
@@ -81,23 +80,12 @@ export function retryAssessmentOnlyAfterTerminalHandoffError(
   job,
   leaseToken,
   error,
-  { attemptId = null, delayMs = 2_000, now = () => Date.now() } = {},
+  { delayMs = 2_000 } = {},
 ) {
   if (!isRetryableTerminalHandoffError(error)) return false;
   preserveAssessmentOnlyRetryPayload(worker, job);
-  const retryDecision = assessmentTerminalHandoffRetryDecision(job.id, error, {
-    currentAttemptId: attemptId,
-  });
-  if (!retryDecision.retryWithoutPenalty) {
-    worker.emit(
-      job.id,
-      `${C.yellow}[assess-only] Terminal handoff retry limit reached (${retryDecision.failureCount}/${retryDecision.penaltyFreeRetryLimit}) — using normal attempt budget${C.reset}`,
-    );
-    return false;
-  }
-  const readyAt = new Date(now() + delayMs).toISOString();
   worker.emit(job.id, `${C.yellow}[assess-only] Missing terminal handoff — retrying assessor only${C.reset}`);
-  worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+  parkAssessmentFailure(worker, job, leaseToken, error, { delayMs });
   return true;
 }
 
@@ -118,6 +106,44 @@ export function resolveAssessmentOnlyProvider(job = {}) {
     provider,
     providerName: String(job.provider || provider?.name || "").trim() || null,
   };
+}
+
+function parkAssessmentFailure(worker, job, leaseToken, error, {
+  delayMs = 2_000,
+} = {}) {
+  const fresh = getJob(job.id) || job;
+  const count = Number(fresh.assessment_attempt_count || 0);
+  const max = Math.max(1, Number(fresh.assessment_max_attempts || 3));
+  const message = String(error?.message || error || "Assessment unavailable");
+  preserveAssessmentOnlyRetryPayload(worker, job);
+  if (count >= max) {
+    setAssessmentLifecycle(job.id, "assessment_needs_human", { error: message });
+    const reviewJob = createJob({
+      work_item_id: job.work_item_id,
+      job_type: "human_input",
+      title: `Assessment unavailable: ${String(job.title || "").slice(0, 70)}`,
+      parent_job_id: job.id,
+      priority: "high",
+      model_tier: "cheap",
+      payload_json: JSON.stringify({
+        original_job_id: job.id,
+        gate_kind: "assessment_retry_exhausted",
+        review_type: "assessment_retry_limit",
+        questions: [
+          `Assessment for job #${job.id} could not complete after ${count} attempt(s): ${message.split("\n")[0].slice(0, 180)}`,
+          "Choose retry_assessment, pass, fail, explicit waiver, or replan.",
+        ],
+        context: "The implementation commit is preserved. This gate controls assessment only.",
+      }),
+    });
+    worker.emit(job.id, `${C.yellow}[assess-only] Assessment retry budget exhausted; opened review gate #${reviewJob.id}${C.reset}`);
+    worker._releaseLease(job, leaseToken, "waiting_on_review");
+    return { gated: true, reviewJob };
+  }
+  setAssessmentLifecycle(job.id, "assessment_unavailable", { error: message });
+  const readyAt = new Date(Date.now() + delayMs).toISOString();
+  worker._releaseLease(job, leaseToken, "queued", { readyAt });
+  return { gated: false, readyAt };
 }
 
 export function spawnDeferredAssessmentFileRequestFollowUp(
@@ -178,13 +204,38 @@ export class AssessmentHandoffAdapter {
       : (prevOutput.length > 0 ? prevOutput[prevOutput.length - 1].content_long : "");
 
     if (!lastWithCommit || !storedOutput) {
-      worker.emit(job.id, `${C.yellow}[assess-only]${C.reset} WI#${job.work_item_id} job #${job.id}: no prior commit found — running full execution`);
-      return { handled: false };
+      const missing = new Error("Assessment evidence is unavailable: no prior committed output was found.");
+      setAssessmentLifecycle(job.id, "assessment_needs_human", { error: missing.message });
+      const reviewJob = createJob({
+        work_item_id: job.work_item_id,
+        job_type: "human_input",
+        title: `Assessment evidence unavailable: ${String(job.title || "").slice(0, 60)}`,
+        parent_job_id: job.id,
+        priority: "high",
+        model_tier: "cheap",
+        payload_json: JSON.stringify({
+          original_job_id: job.id,
+          gate_kind: "assessor_evidence_unavailable",
+          review_type: "assessment_parse_error",
+          questions: [
+            `Job #${job.id} was queued for assessment-only recovery, but its commit/output evidence is missing.`,
+            "Choose retry_assessment after restoring evidence, pass, fail, explicit waiver, or replan.",
+          ],
+        }),
+      });
+      worker.emit(job.id, `${C.yellow}[assess-only] Missing prior evidence; opened review gate #${reviewJob.id}${C.reset}`);
+      worker._releaseLease(job, leaseToken, "waiting_on_review");
+      return { handled: true };
     }
 
     worker.emit(job.id, `${C.cyan}[assess-only]${C.reset} WI#${job.work_item_id} job #${job.id}: orphaned assessment — skipping dev, re-assessing prior commit ${lastWithCommit.commit_hash.slice(0, 8)}`);
 
-    const assessAttempt = incrementAndCreateAttempt(job.id, leaseToken, "assessor", null, job.reasoning_effort);
+    const assessAttempt = incrementAndCreateAssessmentAttempt(
+      job.id,
+      leaseToken,
+      null,
+      job.reasoning_effort,
+    );
     if (!assessAttempt) {
       _logAttemptSkippedStaleLease(job, "assessor", "Skipped assess-only attempt because the lease was stale or expired");
       worker.emit(job.id, `${C.red}[stale-lease] WI#${job.work_item_id} job #${job.id} — lease lost before assess-only execution${C.reset}`);
@@ -274,6 +325,13 @@ export class AssessmentHandoffAdapter {
       const emitFn = (msg) => worker.emit(job.id, msg);
       processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
       const freshJob = getJob(job.id);
+      if (freshJob?.status === "succeeded") {
+        setAssessmentLifecycle(job.id, "assessment_passed", { completed: true });
+      } else if (freshJob?.status === "failed") {
+        setAssessmentLifecycle(job.id, "assessment_failed", { completed: true });
+      } else if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
+        setAssessmentLifecycle(job.id, "assessment_needs_human");
+      }
       if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
         worker._releaseLease(job, leaseToken, freshJob.status);
       }
@@ -298,15 +356,10 @@ export class AssessmentHandoffAdapter {
         error_text: assessErr.message,
       });
       worker.emit(job.id, `${C.red}[assess-only] Assessment failed: ${assessErr.message.split("\n")[0]}${C.reset}`);
-      if (!retryAssessmentOnlyAfterTerminalHandoffError(worker, job, leaseToken, assessErr, {
-        attemptId: assessAttempt.attempt.id,
-      })) {
-        // The developer's committed output remains authoritative. Any normal
-        // retry after an assessor infrastructure/provider failure must resume
-        // assessment instead of spending another developer call.
-        preserveAssessmentOnlyRetryPayload(worker, job);
-        worker._retryOrFail(job, leaseToken, `Assessment failed: ${assessErr.message}`);
-      }
+      // The developer's committed output remains authoritative. Assessment
+      // transport/tool/protocol failures have their own retry budget and can
+      // only end in an assessment recovery gate.
+      parkAssessmentFailure(worker, job, leaseToken, assessErr);
     }
     return { handled: true, currentAttemptId: assessAttempt.attempt.id };
   }

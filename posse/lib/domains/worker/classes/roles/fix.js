@@ -84,6 +84,29 @@ function normalizeExistingCreateScope(payload, cwd, uniqueScopeFiles) {
   return true;
 }
 
+function scopePathKey(value) {
+  const normalized = String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function normalizeAbsentDeleteScope(payload, cwd, deleteFiles, uniqueScopeFiles) {
+  const modifyFiles = uniqueScopeFiles(payload.files_to_modify || []);
+  if (modifyFiles.length === 0 || deleteFiles.length === 0) return false;
+
+  const deleteKeys = new Set(deleteFiles.map(scopePathKey));
+  const absentDeleteFiles = modifyFiles.filter((filePath) => {
+    if (!deleteKeys.has(scopePathKey(filePath))) return false;
+    const resolved = resolvePathWithin(cwd, String(filePath || ""), { allowEqual: false });
+    return !!resolved && !fs.existsSync(resolved);
+  });
+  if (absentDeleteFiles.length === 0) return false;
+
+  const absentKeys = new Set(absentDeleteFiles.map(scopePathKey));
+  payload.files_to_modify = modifyFiles.filter((filePath) => !absentKeys.has(scopePathKey(filePath)));
+  payload.files_to_delete = uniqueScopeFiles(payload.files_to_delete || [], absentDeleteFiles);
+  return true;
+}
+
 function looksLikeGeneratedArtifactCleanup(job, payload, deleteFiles) {
   const targets = (Array.isArray(deleteFiles) ? deleteFiles : []).filter(Boolean);
   if (targets.length === 0 || !targets.every((target) => isGeneratedArtifactPath(target) && !isGeneratedArtifactDirectoryPath(target))) return false;
@@ -154,6 +177,13 @@ export class FixRole extends BaseRole {
     }
     payloadDirty = normalizeExistingCreateScope(payload, fixCwd, uniqueScopeFiles) || payloadDirty;
     let fixDeleteFiles = scopedDeleteTargets(job, payload);
+    payloadDirty = normalizeAbsentDeleteScope(
+      payload,
+      fixCwd,
+      fixDeleteFiles,
+      uniqueScopeFiles,
+    ) || payloadDirty;
+    fixDeleteFiles = scopedDeleteTargets(job, payload);
     const generatedArtifactCleanup = looksLikeGeneratedArtifactCleanup(job, payload, fixDeleteFiles);
     const outOfScopeFileCleanup = looksLikeOutOfScopeFileCleanup(job, payload, fixDeleteFiles);
     const outOfScopeDeleteFiles = outOfScopeFileCleanup
@@ -213,7 +243,7 @@ export class FixRole extends BaseRole {
       worker.emit(job.id, `${C.cyan}[handoff]${C.reset} WI#${job.work_item_id} job #${job.id}: added ${packet.fix_scope_guard_added.length} fix target(s) to writable scope`);
     }
     let handoffScopeChanged = Array.isArray(packet.fix_scope_guard_added) && packet.fix_scope_guard_added.length > 0;
-    for (const key of ["files_to_modify", "files_to_create", "files_to_delete", "create_roots"]) {
+    for (const key of ["files_to_modify", "files_to_delete"]) {
       const next = uniqueScopeFiles(packet[key] || []);
       if (JSON.stringify(payload[key] || []) !== JSON.stringify(next)) {
         payload[key] = next;
@@ -277,11 +307,10 @@ export class FixRole extends BaseRole {
     const fixFallbackReads = packet.budgets?.fallback_reads_remaining ?? null;
     const fixTaskMode = payload.task_mode || "code";
     const fixNeedsImageGen = !!payload.needs_image_generation;
-    const primedFixCreateFiles = worker.primeCreatableFiles(fixCwd, fixCreateFiles);
-    const fixEditableScope = uniqueScopeFiles(fixFiles, fixCreateFiles);
+    const fixEditableScope = uniqueScopeFiles(fixFiles);
     const fixDeleteOnlyTask = fixEditableScope.length === 0 && fixCreateFiles.length === 0 && fixCreateRoots.length === 0 && fixDeleteFiles.length > 0;
-    if (primedFixCreateFiles.length > 0) {
-      worker.emit(job.id, `${C.cyan}[scope]${C.reset} WI#${job.work_item_id} job #${job.id}: pre-created ${primedFixCreateFiles.length} scoped file(s) to avoid creation prompts`);
+    if (Array.isArray(packet.materialized_files) && packet.materialized_files.length > 0) {
+      worker.emit(job.id, `${C.cyan}[scope]${C.reset} WI#${job.work_item_id} job #${job.id}: materialized ${packet.materialized_files.length} planned file(s) before provider handoff`);
     }
 
     Object.assign(ctx, {
@@ -371,8 +400,6 @@ export class FixRole extends BaseRole {
       role: this.getRole(),
       allowWrite: true,
       scopedFiles: ctx.fixEditableScope.length > 0 ? ctx.fixEditableScope : null,
-      createFiles: ctx.fixCreateFiles.length > 0 ? ctx.fixCreateFiles : null,
-      createRoots: ctx.fixCreateRoots.length > 0 ? ctx.fixCreateRoots : null,
       deleteFiles: ctx.fixDeleteFiles.length > 0 ? ctx.fixDeleteFiles : null,
       stableContext: ctx.packet.stable_context || null,
       remoteSystemPrompt: ctx.packet.remote_system_prompt || null,

@@ -2,6 +2,11 @@ import fs from "fs";
 import path from "path";
 import { spawnSync } from "child_process";
 import { resolveManagedPythonRuntimeForProject } from "../../../../domains/runtime/functions/python-runtime.js";
+import {
+  groupVerificationFiles,
+  packageManagerRun,
+  verificationReadinessManifest,
+} from "./verification-readiness.js";
 
 const JS_SOURCE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"]);
 const PHP_SOURCE_EXTENSIONS = new Set([".php"]);
@@ -10,6 +15,8 @@ const GO_SOURCE_EXTENSIONS = new Set([".go"]);
 const RUST_SOURCE_EXTENSIONS = new Set([".rs"]);
 const C_SOURCE_EXTENSIONS = new Set([".c", ".h"]);
 const CPP_SOURCE_EXTENSIONS = new Set([".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"]);
+const RUBY_SOURCE_EXTENSIONS = new Set([".rb"]);
+const SHELL_SOURCE_EXTENSIONS = new Set([".sh", ".bash"]);
 const CLANG_SOURCE_EXTENSIONS = new Set([...C_SOURCE_EXTENSIONS, ...CPP_SOURCE_EXTENSIONS]);
 const SOURCE_EXTENSIONS = new Set([
   ...JS_SOURCE_EXTENSIONS,
@@ -18,6 +25,8 @@ const SOURCE_EXTENSIONS = new Set([
   ...GO_SOURCE_EXTENSIONS,
   ...RUST_SOURCE_EXTENSIONS,
   ...CLANG_SOURCE_EXTENSIONS,
+  ...RUBY_SOURCE_EXTENSIONS,
+  ...SHELL_SOURCE_EXTENSIONS,
 ]);
 const MAX_SCOPE_ROOT_FILES = 250;
 const MAX_FAILURES = 60;
@@ -133,6 +142,16 @@ function clangLintableFiles(cwd, files = []) {
     .filter((file) => CLANG_SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
 }
 
+function rubyLintableFiles(cwd, files = []) {
+  return existingFiles(cwd, files)
+    .filter((file) => RUBY_SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
+}
+
+function shellLintableFiles(cwd, files = []) {
+  return existingFiles(cwd, files)
+    .filter((file) => SHELL_SOURCE_EXTENSIONS.has(path.extname(file).toLowerCase()));
+}
+
 function compact(value, max = MAX_OUTPUT_CHARS) {
   const text = String(value || "").trim();
   if (text.length <= max) return text;
@@ -190,10 +209,6 @@ function packageScript(cwd, name) {
   } catch {
     return null;
   }
-}
-
-function npmCommand() {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
 function commandUnavailable(result) {
@@ -289,9 +304,49 @@ function runScopedJsLint(cwd, targets) {
     return { name: "eslint", status: "skipped", reason: "no JS/TS lintable scoped files", targets: [] };
   }
   const eslint = eslintBin(cwd);
+  const lintScript = packageScript(cwd, "lint");
+  const packageManager = (() => {
+    const group = groupVerificationFiles(cwd, targets)[0];
+    return group?.package_manager_ready ? group.package_manager : null;
+  })();
+  if (!eslint && (!lintScript || !packageManager)) {
+    const syntaxTargets = targets.filter((file) => [".js", ".mjs", ".cjs"].includes(path.extname(file).toLowerCase()));
+    const unsupportedTargets = targets.filter((file) => !syntaxTargets.includes(file));
+    const failures = [];
+    let durationMs = 0;
+    for (const file of syntaxTargets) {
+      const syntax = runProcess(process.execPath, ["--check", file], cwd);
+      durationMs += syntax.durationMs;
+      if (syntax.exitCode !== 0) {
+        failures.push(parseGenericLintFinding({
+          result: syntax,
+          cwd,
+          file,
+          rule: "node --check",
+          fallback: "JavaScript syntax check failed",
+        }));
+      }
+    }
+    return {
+      name: "javascript-syntax",
+      status: failures.length > 0
+        ? "failed"
+        : (unsupportedTargets.length > 0 || syntaxTargets.length === 0 ? "unavailable" : "passed"),
+      reason: unsupportedTargets.length > 0
+        ? `eslint unavailable and node --check cannot verify: ${unsupportedTargets.join(", ")}`
+        : (syntaxTargets.length === 0 ? "no runnable JavaScript syntax adapter" : null),
+      targets,
+      command: syntaxTargets.length > 0 ? "node --check <scoped javascript files>" : null,
+      durationMs,
+      failures,
+    };
+  }
+  const invocation = packageManager
+    ? packageManagerRun(packageManager, "lint", ["--format", "json", ...targets])
+    : null;
   const result = eslint
     ? runProcess(process.execPath, [eslint, "--format", "json", ...targets], cwd)
-    : runProcess(npmCommand(), ["run", "lint", "--", "--format", "json", ...targets], cwd);
+    : runProcess(invocation.command, invocation.args, cwd);
   const findings = parseEslintFindings(result.stdout, result.stderr, cwd)
     .filter((finding) => finding.severity === "error");
   return {
@@ -306,14 +361,14 @@ function runScopedJsLint(cwd, targets) {
 }
 
 function parsePythonLintFinding(result, cwd, file) {
-  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `python -m py_compile exited ${result.exitCode}`;
+  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `python AST parse exited ${result.exitCode}`;
   const lineMatch = text.match(/\bFile\s+"[^"]+",\s+line\s+(\d+)\b/i);
   const errorMatch = text.match(/\b(?:SyntaxError|IndentationError|TabError):\s*([^\n]+)/i);
   return {
     file: relPath(cwd, file) || file,
     line: lineMatch ? Number(lineMatch[1]) : null,
     column: null,
-    rule: "python -m py_compile",
+    rule: "python ast.parse",
     message: errorMatch ? errorMatch[0].trim() : text,
     severity: "error",
   };
@@ -321,14 +376,14 @@ function parsePythonLintFinding(result, cwd, file) {
 
 function runScopedPythonLint(cwd, targets) {
   if (targets.length === 0) {
-    return { name: "python-lint", status: "skipped", reason: "no Python lintable scoped files", targets: [] };
+    return { name: "python-lint", status: "skipped", reason: "no Python syntax scoped files", targets: [] };
   }
 
   const python = resolvePythonCommand(cwd);
   if (!python) {
     return {
       name: "python-lint",
-      status: "skipped",
+      status: "unavailable",
       reason: "python executable not available",
       targets,
     };
@@ -338,7 +393,11 @@ function runScopedPythonLint(cwd, targets) {
   let unavailable = false;
   let durationMs = 0;
   for (const file of targets) {
-    const result = runProcess(python.command, [...python.args, "-m", "py_compile", file], cwd);
+    const result = runProcess(
+      python.command,
+      [...python.args, "-c", "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])", file],
+      cwd,
+    );
     durationMs += result.durationMs;
     if (commandUnavailable(result)) {
       unavailable = true;
@@ -353,7 +412,7 @@ function runScopedPythonLint(cwd, targets) {
   if (unavailable) {
     return {
       name: "python-lint",
-      status: "skipped",
+      status: "unavailable",
       reason: "python executable not available",
       targets,
       durationMs,
@@ -364,7 +423,7 @@ function runScopedPythonLint(cwd, targets) {
     name: "python-lint",
     status: failures.length === 0 ? "passed" : "failed",
     targets,
-    command: `${python.display} -m py_compile ${targets.length === 1 ? targets[0] : "<scoped python files>"}`,
+    command: `${python.display} -c ast.parse ${targets.length === 1 ? targets[0] : "<scoped python files>"}`,
     durationMs,
     failures,
   };
@@ -413,7 +472,7 @@ function runScopedGoLint(cwd, targets) {
   if (unavailable) {
     return {
       name: "go-lint",
-      status: "skipped",
+      status: "unavailable",
       reason: "gofmt executable not available",
       targets,
       durationMs,
@@ -460,7 +519,7 @@ function runScopedRustLint(cwd, targets) {
   if (unavailable) {
     return {
       name: "rust-lint",
-      status: "skipped",
+      status: "unavailable",
       reason: "rustfmt executable not available",
       targets,
       durationMs,
@@ -550,7 +609,7 @@ function runScopedClangLint(cwd, targets) {
   if (unavailable) {
     return {
       name: "clang-lint",
-      status: "skipped",
+      status: "unavailable",
       reason: "clang/gcc executable not available",
       targets,
       durationMs,
@@ -604,7 +663,7 @@ function runScopedPhpLint(cwd, targets) {
   if (unavailable) {
     return {
       name: "php-lint",
-      status: "skipped",
+      status: "unavailable",
       reason: "php executable not available",
       targets,
       durationMs,
@@ -616,6 +675,82 @@ function runScopedPhpLint(cwd, targets) {
     status: failures.length === 0 ? "passed" : "failed",
     targets,
     command: `php -l ${targets.length === 1 ? targets[0] : "<scoped php files>"}`,
+    durationMs,
+    failures,
+  };
+}
+
+function runScopedRubySyntax(cwd, targets) {
+  if (targets.length === 0) {
+    return { name: "ruby-syntax", status: "skipped", reason: "no Ruby syntax scoped files", targets: [] };
+  }
+  const failures = [];
+  let durationMs = 0;
+  for (const file of targets) {
+    const result = runProcess("ruby", ["-c", file], cwd);
+    durationMs += result.durationMs;
+    if (commandUnavailable(result)) {
+      return {
+        name: "ruby-syntax",
+        status: "unavailable",
+        reason: "ruby executable not available",
+        targets,
+        durationMs,
+      };
+    }
+    if (result.exitCode !== 0) {
+      failures.push(parseGenericLintFinding({
+        result,
+        cwd,
+        file,
+        rule: "ruby -c",
+        fallback: "Ruby syntax check failed",
+      }));
+    }
+  }
+  return {
+    name: "ruby-syntax",
+    status: failures.length === 0 ? "passed" : "failed",
+    targets,
+    command: `ruby -c ${targets.length === 1 ? targets[0] : "<scoped ruby files>"}`,
+    durationMs,
+    failures,
+  };
+}
+
+function runScopedShellSyntax(cwd, targets) {
+  if (targets.length === 0) {
+    return { name: "shell-syntax", status: "skipped", reason: "no shell syntax scoped files", targets: [] };
+  }
+  const failures = [];
+  let durationMs = 0;
+  for (const file of targets) {
+    const result = runProcess("bash", ["-n", file], cwd);
+    durationMs += result.durationMs;
+    if (commandUnavailable(result)) {
+      return {
+        name: "shell-syntax",
+        status: "unavailable",
+        reason: "bash executable not available",
+        targets,
+        durationMs,
+      };
+    }
+    if (result.exitCode !== 0) {
+      failures.push(parseGenericLintFinding({
+        result,
+        cwd,
+        file,
+        rule: "bash -n",
+        fallback: "Shell syntax check failed",
+      }));
+    }
+  }
+  return {
+    name: "shell-syntax",
+    status: failures.length === 0 ? "passed" : "failed",
+    targets,
+    command: `bash -n ${targets.length === 1 ? targets[0] : "<scoped shell files>"}`,
     durationMs,
     failures,
   };
@@ -634,13 +769,18 @@ function runScopedLint(cwd, files) {
     runScopedGoLint(cwd, goLintableFiles(cwd, files)),
     runScopedRustLint(cwd, rustLintableFiles(cwd, files)),
     runScopedClangLint(cwd, clangLintableFiles(cwd, files)),
+    runScopedRubySyntax(cwd, rubyLintableFiles(cwd, files)),
+    runScopedShellSyntax(cwd, shellLintableFiles(cwd, files)),
   ].filter((check) => check.targets?.length > 0);
   const failed = subchecks.filter((check) => check.status === "failed");
   const passed = subchecks.filter((check) => check.status === "passed");
+  const unavailable = subchecks.filter((check) => check.status === "unavailable");
   const skipped = subchecks.filter((check) => check.status === "skipped");
   const status = failed.length > 0
     ? "failed"
-    : passed.length > 0
+    : unavailable.length > 0
+      ? "unavailable"
+      : passed.length > 0
       ? "passed"
       : "skipped";
   const failures = failed.flatMap((check) =>
@@ -649,8 +789,8 @@ function runScopedLint(cwd, files) {
 
   // A skipped language subcheck alongside passes must stay visible at the top
   // level; otherwise "passed" can overstate scoped lint coverage.
-  const skippedNote = skipped.length > 0 && status !== "skipped"
-    ? skipped.map((check) => `${check.name} skipped: ${check.reason || "unknown reason"}`).join("; ")
+  const skippedNote = [...unavailable, ...skipped].length > 0 && status !== "skipped"
+    ? [...unavailable, ...skipped].map((check) => `${check.name} ${check.status}: ${check.reason || "unknown reason"}`).join("; ")
     : null;
   return {
     name: "lint",
@@ -676,11 +816,24 @@ function runScopedLint(cwd, files) {
   };
 }
 
-function runTypecheck(cwd) {
+function runTypecheck(cwd, {
+  packageManager = null,
+  packageManagerReady = null,
+} = {}) {
   if (!packageScript(cwd, "typecheck")) {
-    return { name: "typecheck", status: "skipped", reason: "package.json has no typecheck script" };
+    return { name: "typecheck", status: "unavailable", reason: "package.json has no typecheck script" };
   }
-  const result = runProcess(npmCommand(), ["run", "typecheck"], cwd, { timeoutMs: 180000 });
+  if (!packageManager || packageManagerReady === false) {
+    return {
+      name: "typecheck",
+      status: "unavailable",
+      reason: packageManager
+        ? `${packageManager} executable is not available`
+        : "package manager could not be resolved",
+    };
+  }
+  const invocation = packageManagerRun(packageManager, "typecheck");
+  const result = runProcess(invocation.command, invocation.args, cwd, { timeoutMs: 180000 });
   const failureOutput = compact(`${result.stdout}\n${result.stderr}`) || result.error || `typecheck exited ${result.exitCode}`;
   return {
     name: "typecheck",
@@ -691,42 +844,125 @@ function runTypecheck(cwd) {
   };
 }
 
+function projectFailurePath(projectCwd, group, file) {
+  if (!file) return file;
+  const full = path.resolve(group.root, file);
+  return relPath(projectCwd, full) || file;
+}
+
+function combineRootChecks(name, projectCwd, entries) {
+  const normalized = entries.map(({ group, check }) => ({
+    group,
+    check: {
+      ...check,
+      failures: (check.failures || []).map((failure) => ({
+        ...failure,
+        file: projectFailurePath(projectCwd, group, failure.file),
+      })),
+    },
+  }));
+  const failed = normalized.filter(({ check }) => check.status === "failed");
+  const unavailable = normalized.filter(({ check }) => ["unavailable", "skipped"].includes(check.status));
+  const passed = normalized.filter(({ check }) => check.status === "passed");
+  const status = failed.length > 0
+    ? "failed"
+    : unavailable.length > 0
+      ? "unavailable"
+      : passed.length > 0
+        ? "passed"
+        : "unavailable";
+  return {
+    name,
+    status,
+    reason: status === "unavailable"
+      ? unavailable.map(({ group, check }) => (
+          `${group.root_relative}: ${check.reason || check.status}`
+        )).join("; ") || "no runnable verifier"
+      : null,
+    targets: normalized.flatMap(({ group }) => group.project_files),
+    command: normalized.map(({ check }) => check.command).filter(Boolean).join(" && ") || null,
+    durationMs: normalized.reduce((sum, { check }) => sum + (Number(check.durationMs) || 0), 0),
+    failures: failed.flatMap(({ check }) => check.failures || []),
+    output: failed.map(({ check }) => check.output).filter(Boolean).join("\n") || null,
+    subchecks: normalized.flatMap(({ group, check }) => (
+      Array.isArray(check.subchecks) && check.subchecks.length > 0
+        ? check.subchecks.map((subcheck) => ({
+            ...subcheck,
+            root: group.root_relative,
+          }))
+        : [{
+            name: check.name,
+            root: group.root_relative,
+            status: check.status,
+            reason: check.reason || null,
+            target_count: check.targets?.length ?? null,
+            command: check.command || null,
+          }]
+    )),
+  };
+}
+
 export function runScopedChecks({ args = {}, cwd, declaredScope = {} } = {}) {
   const requested = Array.isArray(args.checks) && args.checks.length > 0
     ? args.checks.map((check) => String(check).trim().toLowerCase()).filter(Boolean)
     : ["lint"];
   const scope = args.scope && typeof args.scope === "object" ? args.scope : declaredScope;
   const files = declaredScopeFiles(cwd, scope);
+  const groups = groupVerificationFiles(cwd, files);
   const checks = [];
-  if (requested.includes("lint")) checks.push(runScopedLint(cwd, files));
-  if (requested.includes("typecheck")) checks.push(runTypecheck(cwd));
+  if (requested.includes("lint")) {
+    checks.push(combineRootChecks(
+      "lint",
+      cwd,
+      groups.map((group) => ({
+        group,
+        check: runScopedLint(group.root, group.files),
+      })),
+    ));
+  }
+  if (requested.includes("typecheck")) {
+    checks.push(combineRootChecks(
+      "typecheck",
+      cwd,
+      groups.map((group) => ({
+        group,
+        check: runTypecheck(group.root, {
+          packageManager: group.package_manager,
+          packageManagerReady: group.package_manager_ready,
+        }),
+      })),
+    ));
+  }
   if (checks.length === 0) {
     return {
-      ok: true,
-      summary: "no checks requested",
+      ok: false,
+      status: "unavailable",
+      summary: "no supported checks requested",
       scoped_files: files,
+      readiness: verificationReadinessManifest(cwd, files, requested),
       checks: [],
     };
   }
   const failed = checks.filter((check) => check.status === "failed");
+  const unavailable = checks.filter((check) => check.status === "unavailable");
   const failures = failed.flatMap((check) =>
     (check.failures || []).map((failure) => ({ check: check.name, ...failure }))
   );
   const outputFailures = failed
     .filter((check) => !check.failures?.length && check.output)
     .map((check) => ({ check: check.name, message: check.output }));
-  const ok = failed.length === 0;
-  // Keep skip caveats in the headline: agents act on ok/summary alone, and a
-  // bare "all checks passed" over a skipped subcheck overstates coverage.
-  const skipNotes = ok
-    ? checks.filter((check) => check.status !== "failed" && check.reason).map((check) => `${check.name}: ${check.reason}`)
-    : [];
+  const ok = failed.length === 0 && unavailable.length === 0;
+  const status = failed.length > 0 ? "failed" : (unavailable.length > 0 ? "unavailable" : "passed");
   return {
     ok,
-    summary: ok
-      ? (skipNotes.length ? `all checks passed (${skipNotes.join("; ")})` : "all checks passed")
-      : `${failed.map((check) => check.name).join(", ")} failed`,
+    status,
+    summary: status === "passed"
+      ? "all requested checks passed"
+      : (status === "unavailable"
+        ? `${unavailable.map((check) => check.name).join(", ")} unavailable`
+        : `${failed.map((check) => check.name).join(", ")} failed`),
     scoped_files: files,
+    readiness: verificationReadinessManifest(cwd, files, requested),
     checks: checks.map((check) => ({
       name: check.name,
       status: check.status,

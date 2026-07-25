@@ -6,6 +6,7 @@ import path from "path";
 import fs from "fs";
 import { spawn, spawnSync } from "child_process";
 import {
+  beginAttachedAssessmentAttempt,
   completeAttempt,
   createJob,
   getArtifacts,
@@ -16,6 +17,7 @@ import {
   isLeaseValid,
   logEvent,
   setJobError,
+  setAssessmentLifecycle,
   storeArtifact,
   updateJobPayload,
   updateJobStatus,
@@ -105,48 +107,85 @@ function markAssessmentRetryAssessOnly(job, pendingFileRequests = null) {
   return true;
 }
 
-const ASSESSMENT_TERMINAL_HANDOFF_PENALTY_FREE_RETRY_LIMIT = 1;
+function updateAssessmentLifecycleFromVerdict(jobId, freshJob, verdict = null) {
+  if (freshJob?.status === "succeeded" || verdict?.verdict === "pass") {
+    setAssessmentLifecycle(jobId, "assessment_passed", { completed: true });
+  } else if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
+    setAssessmentLifecycle(jobId, "assessment_needs_human");
+  } else if (freshJob?.status === "failed" || verdict?.verdict === "fail") {
+    setAssessmentLifecycle(jobId, "assessment_failed", { completed: true });
+  }
+}
 
-function isStoredTerminalHandoffFailure(attempt) {
-  if (!attempt?.error_text) return false;
-  return isRetryableTerminalHandoffError({
-    code: "TERMINAL_PROTOCOL_ERROR",
-    message: attempt.error_text,
+function routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, {
+  pendingFileRequests = null,
+  readyAt = null,
+} = {}) {
+  const message = String(error?.message || error || "Assessment unavailable");
+  markAssessmentRetryAssessOnly(job, pendingFileRequests);
+  const fresh = getJob(job.id) || job;
+  const count = Number(fresh.assessment_attempt_count || 0);
+  const max = Math.max(1, Number(fresh.assessment_max_attempts || 3));
+  if (count >= max) {
+    setAssessmentLifecycle(job.id, "assessment_needs_human", { error: message });
+    const reviewJob = createJob({
+      work_item_id: job.work_item_id,
+      job_type: "human_input",
+      title: `Assessment unavailable: ${String(job.title || "").slice(0, 70)}`,
+      parent_job_id: job.id,
+      priority: "high",
+      model_tier: "cheap",
+      payload_json: JSON.stringify({
+        original_job_id: job.id,
+        gate_kind: "assessment_retry_exhausted",
+        review_type: "assessment_retry_limit",
+        questions: [
+          `Assessment for job #${job.id} could not complete after ${count} attempt(s): ${message.split("\n")[0].slice(0, 180)}`,
+          "Choose retry_assessment, pass, fail, explicit waiver, or replan.",
+        ],
+        context: "The implementation attempt and commit are preserved. This gate controls assessment only.",
+      }),
+    });
+    worker.emit(job.id, `${C.yellow}[assessor] Assessment retry budget exhausted; opened review gate #${reviewJob.id}${C.reset}`);
+    worker._releaseLease(job, leaseToken, "waiting_on_review");
+    return { gated: true, reviewJob };
+  }
+  setAssessmentLifecycle(job.id, "assessment_unavailable", { error: message });
+  worker._releaseLease(job, leaseToken, "queued", {
+    readyAt: readyAt || new Date(Date.now() + 2_000).toISOString(),
   });
+  return { gated: false };
 }
 
 /**
- * Allow one fast, penalty-free assessor retry for a missing/rejected terminal
- * handoff. The completed attempt rows are the durable counter so restarts do
- * not reset the budget. Later protocol failures must use normal job retry
- * accounting instead of decrementing attempt_count indefinitely.
+ * Classify terminal handoff failures against the independent assessment
+ * budget. Implementation attempt accounting is deliberately irrelevant.
  */
 export function assessmentTerminalHandoffRetryDecision(
   jobId,
   error,
-  {
-    currentAttemptId = null,
-    penaltyFreeRetryLimit = ASSESSMENT_TERMINAL_HANDOFF_PENALTY_FREE_RETRY_LIMIT,
-  } = {},
 ) {
+  const fresh = getJob(jobId);
+  const failureCount = Number(fresh?.assessment_attempt_count || 0);
+  const assessmentMaxAttempts = Math.max(
+    1,
+    Number(fresh?.assessment_max_attempts || 3),
+  );
   if (!isRetryableTerminalHandoffError(error)) {
     return {
       retryable: false,
-      retryWithoutPenalty: false,
-      failureCount: 0,
-      penaltyFreeRetryLimit,
+      retryAssessmentOnly: false,
+      exhausted: false,
+      failureCount,
+      assessmentMaxAttempts,
     };
   }
-  const normalizedLimit = Math.max(0, Number.parseInt(String(penaltyFreeRetryLimit), 10) || 0);
-  const storedFailures = getAttempts(jobId).filter(isStoredTerminalHandoffFailure);
-  const currentFailureStored = currentAttemptId != null
-    && storedFailures.some((attempt) => Number(attempt.id) === Number(currentAttemptId));
-  const failureCount = storedFailures.length + (currentFailureStored ? 0 : 1);
   return {
     retryable: true,
-    retryWithoutPenalty: failureCount <= normalizedLimit,
+    retryAssessmentOnly: true,
+    exhausted: failureCount >= assessmentMaxAttempts,
     failureCount,
-    penaltyFreeRetryLimit: normalizedLimit,
+    assessmentMaxAttempts,
   };
 }
 
@@ -1711,6 +1750,10 @@ export async function runPostExecutionAssessment(worker, {
   const shouldRunAssessment = ASSESSABLE_JOB_TYPES.has(job.job_type)
     && !worker.dryRun
     && !worker._shouldSkipAssessment(job);
+  if (shouldRunAssessment && !skipAssessForFileRequest) {
+    setAssessmentLifecycle(job.id, "implementation_complete");
+    beginAttachedAssessmentAttempt(job.id, leaseToken);
+  }
   if (shouldRunAssessment && skipAssessForSatisfiedNoop) {
     updateJobStatus(job.id, "awaiting_assessment", leaseToken != null ? { leaseToken } : {});
     syncAssessorWorkerDisplay(worker.display, job, {
@@ -1753,6 +1796,7 @@ export async function runPostExecutionAssessment(worker, {
     });
 
     const freshJob = getJob(job.id);
+    updateAssessmentLifecycleFromVerdict(job.id, freshJob, verdict);
     const finalStatus = freshJob?.status === "succeeded" ? "succeeded" : "failed";
     completeAttempt(attempt.id, {
       status: finalStatus,
@@ -1851,12 +1895,14 @@ export async function runPostExecutionAssessment(worker, {
             },
           });
           completeAttempt(attempt.id, {
-            status: "failed",
+            status: "succeeded",
             duration_ms: Date.now() - startTime,
             error_text: hookMsg,
           });
           setJobError(job.id, hookMsg);
-          worker._retryOrFail(job, leaseToken, hookMsg);
+          routeAssessmentInfrastructureFailure(worker, job, leaseToken, new Error(hookMsg), {
+            pendingFileRequests,
+          });
           return;
         }
         worker.emit(job.id, `${C.green}[pre-assess] Passed${C.reset}`);
@@ -1880,12 +1926,14 @@ export async function runPostExecutionAssessment(worker, {
           detail: { command: preAssessCmd, cwd: wtPath, status: "failed" },
         });
         completeAttempt(attempt.id, {
-          status: "failed",
+          status: "succeeded",
           duration_ms: Date.now() - startTime,
           error_text: hookMsg,
         });
         setJobError(job.id, hookMsg);
-        worker._retryOrFail(job, leaseToken, hookMsg);
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, hookErr, {
+          pendingFileRequests,
+        });
         return;
       }
     }
@@ -2054,6 +2102,7 @@ export async function runPostExecutionAssessment(worker, {
         });
 
         const freshJob = getJob(job.id);
+        updateAssessmentLifecycleFromVerdict(job.id, freshJob, verdict);
         const finalStatus = freshJob?.status === "succeeded" ? "succeeded" : "failed";
         completeAttempt(attempt.id, {
           status: finalStatus,
@@ -2292,6 +2341,7 @@ export async function runPostExecutionAssessment(worker, {
         detail: { reasons: verdict.reasons || [], spawn_jobs: verdict.spawn_jobs || [] },
       });
       const freshJob = getJob(job.id);
+      updateAssessmentLifecycleFromVerdict(job.id, freshJob, verdict);
       if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
         worker._releaseLease(job, leaseToken, freshJob.status);
       }
@@ -2311,17 +2361,13 @@ export async function runPostExecutionAssessment(worker, {
       const assessErrMessage = String(assessErr?.message || "");
       const turnBudgetExhausted = /exhausted turn budget|turn budget exhausted|tool(?: use| call)?s?.{0,40}(?:exhausted|limit|max|budget)/i.test(assessErrMessage);
       const stallKilled = !!assessErr?.stallKill || /stalled.*killed|killed by stall detector/i.test(assessErrMessage);
-      const terminalHandoffRetry = assessmentTerminalHandoffRetryDecision(job.id, assessErr, {
-        currentAttemptId: attempt.id,
-      });
+      const terminalHandoffRetry = assessmentTerminalHandoffRetryDecision(job.id, assessErr);
       const terminalHandoffMissing = terminalHandoffRetry.retryable;
       if (isProviderError(assessErr) || assessErr?.assessmentRetryable || turnBudgetExhausted || stallKilled || terminalHandoffMissing) {
         const retryLabel = assessErr?.assessmentRetryable
           ? "Environment/tooling error during assessment"
           : (terminalHandoffMissing
-            ? (terminalHandoffRetry.retryWithoutPenalty
-              ? "Assessment terminal handoff missing"
-              : "Assessment terminal handoff retry limit reached")
+            ? "Assessment terminal handoff missing"
             : (stallKilled
               ? "Assessment stalled"
               : (turnBudgetExhausted
@@ -2329,9 +2375,9 @@ export async function runPostExecutionAssessment(worker, {
                 : "Provider error during assessment")));
         worker.emit(job.id, `${C.yellow}[assessor] ${retryLabel} - requeuing: ${assessErr.message?.split("\n")[0]?.slice(0, 120)}${C.reset}`);
         completeAttempt(attempt.id, {
-          status: terminalHandoffMissing && !terminalHandoffRetry.retryWithoutPenalty
-            ? "failed"
-            : "interrupted",
+          // This row is the implementation attempt. The implementation and
+          // commit completed even though its attached assessment did not.
+          status: "succeeded",
           duration_ms: Date.now() - startTime,
           error_text: assessErr?.assessmentRetryable
             ? `Assessment environment error: ${assessErr.message}`
@@ -2407,9 +2453,7 @@ export async function runPostExecutionAssessment(worker, {
                 ? EVENT_TYPES.JOB_ASSESSMENT_TURN_BUDGET_EXHAUSTED
                 : EVENT_TYPES.JOB_ASSESSMENT_PROVIDER_ERROR)),
           actor_type: EVENT_ACTORS.WORKER,
-          message: `${retryLabel} - ${terminalHandoffMissing && !terminalHandoffRetry.retryWithoutPenalty
-            ? "requeuing within normal attempt budget"
-            : "requeuing without penalty"}: ${assessErr.message?.split("\n")[0]}`,
+          message: `${retryLabel} - routing through the independent assessment budget: ${assessErr.message?.split("\n")[0]}`,
         });
 
         const assessProvider = job.provider || getProviderName("assessor");
@@ -2433,15 +2477,14 @@ export async function runPostExecutionAssessment(worker, {
             message: `Failed to mark assessment retry as assess-only: ${markErr?.message || markErr}`,
           });
         }
-        if (terminalHandoffMissing && !terminalHandoffRetry.retryWithoutPenalty) {
-          worker._retryOrFail(job, leaseToken, `Assessment failed: ${assessErr.message}`);
-        } else {
-          worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
-        }
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, assessErr, {
+          pendingFileRequests,
+          readyAt,
+        });
       } else {
         worker.emit(job.id, `${C.red}[assessor] Transport error: ${assessErr.message}${C.reset}`);
         completeAttempt(attempt.id, {
-          status: "failed",
+          status: "succeeded",
           duration_ms: Date.now() - startTime,
           error_text: `Assessment transport error: ${assessErr.message}`,
         });
@@ -2453,25 +2496,9 @@ export async function runPostExecutionAssessment(worker, {
           actor_type: EVENT_ACTORS.WORKER,
           message: `Assessment failed — flagging for review: ${assessErr.message}`,
         });
-        const reviewJob = createJob({
-          work_item_id: job.work_item_id,
-          job_type: "human_input",
-          title: `Assessment failed: ${job.title.slice(0, 70)}`,
-          parent_job_id: job.id,
-          priority: "high",
-          model_tier: "cheap",
-          payload_json: JSON.stringify({
-            original_job_id: job.id,
-            questions: [
-              `Assessment for job #${job.id} ("${job.title}") failed with a transport error: ${assessErr.message?.split("\n")[0]?.slice(0, 150)}`,
-              `The dev work is committed but unverified. Retry assessment, pass manually, or fail?`,
-            ],
-            context: `Assessment transport error. The dev work may be correct but could not be verified.`,
-            review_type: "assessment_transport_error",
-          }),
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, assessErr, {
+          pendingFileRequests,
         });
-        worker.emit(job.id, `${C.yellow}[worker] Spawned review job #${reviewJob.id} for assessment failure${C.reset}`);
-        worker._releaseLease(job, leaseToken, "waiting_on_review");
         refreshAndExtractInsights(job.work_item_id);
         worker._cleanupWorktreeIfDone(job.work_item_id);
       }

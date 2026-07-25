@@ -24,10 +24,11 @@ import { isHighRiskPath } from "../../handoff/functions/helpers/file-request.js"
 export const ONESHOT_COMPLEX_SIGNAL_RE = /\b(?:race|concurren\w*|security|auth|authorization|authentication|lock|locking|deadlock|transaction|migration|corruption|data\s+loss|permission|credential|secret|encryption|oauth|session)\b/i;
 export const ONESHOT_AMBIGUOUS_SIGNAL_RE = /\b(?:investigate|figure\s+out\s+why|diagnose|debug\s+why|root\s+cause|trace\s+why|why\s+(?:is|does|did)|flaky|intermittent)\b/i;
 export const ONESHOT_BROAD_SCOPE_SIGNAL_RE = /\b(?:all|every|each|across|whole|entire)\b/i;
-export const ONESHOT_LOW_BLAST_SCOPE_RE = /\b(?:keep|limit(?:ed)?|scop(?:e|ed)|single[-\s]?file|one[-\s]?file|only|do\s+not\s+change|don't\s+change|without\s+changing|no\s+(?:runtime\s+)?behaviou?r|smallest\s+change)\b/i;
+export const ONESHOT_LOW_BLAST_SCOPE_RE = /\b(?:single[-\s]?file|one[-\s]?file|scop(?:e|ed)\s+to|(?:keep|limit(?:ed)?)[^.\n]{0,100}\bfile|(?:modify|edit|change|touch)\s+only|do\s+not\s+change|don't\s+change|without\s+changing|no\s+(?:runtime\s+)?behaviou?r|smallest\s+change)\b/i;
 export const ONESHOT_RENAME_SIGNAL_RE = /\b(?:rename|renaming)\b/i;
 export const ONESHOT_FORMAT_SWEEP_SIGNAL_RE = /\bformatting\b/i;
 export const ONESHOT_EXTERNAL_VERIFICATION_SIGNAL_RE = /(?:\b(?:run|execute|verify|check|pass)\b[\s\S]{0,80}\b(?:browser|playwright|cypress|selenium|puppeteer|visual\s+regression|end[-\s]?to[-\s]?end|e2e|lint(?:er|ing)?|eslint)\b|\b(?:browser|playwright|cypress|selenium|puppeteer|visual\s+regression|end[-\s]?to[-\s]?end|e2e|lint(?:er|ing)?|eslint)\b[\s\S]{0,80}\b(?:test|suite|check|verify|pass|run)\b)/i;
+export const ONESHOT_MULTI_OUTPUT_SIGNAL_RE = /(?:\b(?:build|create|implement|scaffold)\b[^.\n]{0,120}\b(?:project|library|package|application|service|cli)\b|\b(?:including|plus|along\s+with)\b[^.\n]{0,160}\b(?:tests?|test\s+suite|cli|package|documentation)\b|\b(?:implementation|source|package|cli)\b[^.\n]{0,100}\band\s+(?:unit\s+|integration\s+)?tests?\b)/i;
 
 const REPO_OUTPUT_MODES = new Set(["", "auto", "repo"]);
 const NON_CODE_INTENTS = new Set(["image", "report", "question", "analysis"]);
@@ -244,6 +245,7 @@ function oneshotSignalMatches(text) {
   if (ONESHOT_RENAME_SIGNAL_RE.test(value)) signals.push("rename_requested");
   if (ONESHOT_FORMAT_SWEEP_SIGNAL_RE.test(value)) signals.push("formatting_requested");
   if (ONESHOT_EXTERNAL_VERIFICATION_SIGNAL_RE.test(value)) signals.push("external_verification_signal");
+  if (ONESHOT_MULTI_OUTPUT_SIGNAL_RE.test(value)) signals.push("multi_output_signal");
   return signals;
 }
 

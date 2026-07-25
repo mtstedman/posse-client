@@ -5,27 +5,188 @@
 // assessor reviews. Keep their action enums and bridge classification here so
 // the TUI, bridge snapshots, and bridge answer validation cannot drift.
 
-import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "./job.js";
+import {
+  FAILED_JOB_STATUSES,
+  JOB_STATUSES,
+  ONESHOT_SCOPE_SELECTION_SUBTYPE,
+} from "./job.js";
 
 const freezeChoices = (choices) => Object.freeze([...choices]);
+const DEFAULT_HUMAN_GATE_SOURCE_STATES = Object.freeze(
+  JOB_STATUSES.filter((status) => !["leased", "awaiting_assessment", "canceled"].includes(status)),
+);
 
 export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   scope_expansion_request: freezeChoices(["approve", "deny"]),
+  scope_expansion_required: freezeChoices(["approve", "reject"]),
   partial_work_recovery: freezeChoices(["extend", "commit", "revert"]),
-  blocked_recovery: freezeChoices(["retry", "skip", "replan", "pass", "fail"]),
-  dead_letter_recovery: freezeChoices(["retry", "skip"]),
-  research_dead_letter_recovery: freezeChoices(["retry", "skip"]),
-  oneshot_dead_letter_recovery: freezeChoices(["retry", "skip"]),
-  stall_exhausted_recovery: freezeChoices(["retry", "skip"]),
-  assessment: freezeChoices(["pass", "fail", "skip", "replan"]),
-  needs_review: freezeChoices(["pass", "fail", "skip", "replan"]),
-  assessment_parse_error: freezeChoices(["pass", "fail", "skip", "replan"]),
-  unknown_verdict: freezeChoices(["pass", "fail", "skip", "replan"]),
-  assessment_transport_error: freezeChoices(["retry", "pass", "fail", "skip", "replan"]),
-  assessment_retry_limit: freezeChoices(["pass", "fail", "skip", "replan"]),
-  replan_limit: freezeChoices(["replan", "pass", "fail", "skip"]),
+  blocked_recovery: freezeChoices(["retry_with_changes", "explicit_waiver", "replan", "pass", "fail"]),
+  dead_letter_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
+  research_dead_letter_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
+  oneshot_dead_letter_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
+  stall_exhausted_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
+  assessment: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  needs_review: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  assessment_parse_error: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  unknown_verdict: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  assessment_transport_error: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  assessment_retry_limit: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  replan_limit: freezeChoices(["replan", "pass", "fail", "explicit_waiver"]),
   artifact_routing_admin: freezeChoices(["acknowledge"]),
 });
+
+export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
+  "developer_blocked",
+  "assessor_evidence_unavailable",
+  "blocked_cycle_exhausted",
+  "failure_threshold_exhausted",
+  "fix_chain_exhausted",
+  "assessment_transport_unavailable",
+  "assessment_retry_exhausted",
+  "dead_letter_recovery",
+  "artifact_routing_unavailable",
+  "scope_expansion_required",
+]);
+
+export const CANONICAL_HUMAN_GATE_ACTIONS = Object.freeze([
+  "pass",
+  "fail",
+  "explicit_waiver",
+  "retry_assessment",
+  "retry_with_changes",
+  "replan",
+  "recheck",
+]);
+
+const HUMAN_GATE_CONTRACTS = Object.freeze({
+  scope_expansion_request: {
+    gate_kind: "scope_expansion_required",
+    allowed_actions: ["approve", "deny", "reject"],
+    allowed_source_states: ["running", "blocked", "waiting_on_human", "waiting_on_review", "succeeded"],
+  },
+  scope_expansion_required: {
+    gate_kind: "scope_expansion_required",
+    allowed_actions: ["approve", "reject", "deny"],
+    allowed_source_states: ["failed", "blocked", "waiting_on_human", "waiting_on_review"],
+  },
+  partial_work_recovery: {
+    gate_kind: "blocked_cycle_exhausted",
+    allowed_actions: ["extend", "commit", "revert"],
+    allowed_source_states: ["running", "blocked", "waiting_on_human"],
+  },
+  blocked_recovery: {
+    gate_kind: "developer_blocked",
+    allowed_actions: ["retry_with_changes", "explicit_waiver", "replan", "pass", "fail"],
+    allowed_source_states: ["blocked", "waiting_on_human", "waiting_on_review", ...FAILED_JOB_STATUSES],
+  },
+  dead_letter_recovery: {
+    gate_kind: "dead_letter_recovery",
+    allowed_actions: ["retry_with_changes", "explicit_waiver"],
+    allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
+  },
+  research_dead_letter_recovery: {
+    gate_kind: "dead_letter_recovery",
+    allowed_actions: ["retry_with_changes", "explicit_waiver"],
+    allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
+  },
+  oneshot_dead_letter_recovery: {
+    gate_kind: "dead_letter_recovery",
+    allowed_actions: ["retry_with_changes", "explicit_waiver"],
+    allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
+  },
+  stall_exhausted_recovery: {
+    gate_kind: "failure_threshold_exhausted",
+    allowed_actions: ["retry_with_changes", "explicit_waiver"],
+    allowed_source_states: [...FAILED_JOB_STATUSES, "blocked", "waiting_on_human"],
+  },
+  assessment_transport_error: {
+    gate_kind: "assessment_transport_unavailable",
+    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
+  },
+  assessment_retry_limit: {
+    gate_kind: "assessment_retry_exhausted",
+    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
+  },
+  assessment_parse_error: {
+    gate_kind: "assessor_evidence_unavailable",
+    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
+  },
+  unknown_verdict: {
+    gate_kind: "assessor_evidence_unavailable",
+    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
+  },
+  needs_review: {
+    gate_kind: "assessor_evidence_unavailable",
+    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
+  },
+  replan_limit: {
+    gate_kind: "fix_chain_exhausted",
+    allowed_actions: ["replan", "pass", "fail", "explicit_waiver"],
+    allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
+  },
+  artifact_routing_admin: {
+    gate_kind: "artifact_routing_unavailable",
+    allowed_actions: ["acknowledge"],
+    allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
+  },
+  assessment: {
+    gate_kind: "assessment_review",
+    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
+  },
+});
+
+const HUMAN_GATE_ACTION_ALIASES = Object.freeze({
+  retry: "retry_with_changes",
+  skip: "explicit_waiver",
+});
+
+function gateSource(payload = {}) {
+  if (payload?.subtype === "plan_approval") return "plan_approval";
+  if (payload?.subtype === "push_offer") return "push_offer";
+  if (
+    payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
+    || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE
+  ) return ONESHOT_SCOPE_SELECTION_SUBTYPE;
+  const reviewType = String(payload?.review_type || "").trim();
+  if (HUMAN_GATE_CONTRACTS[reviewType]) return reviewType;
+  if (Array.isArray(payload?.file_requests) && payload.file_requests.length > 0) {
+    return "scope_expansion_request";
+  }
+  return String(payload?.gate_kind || payload?.review_type || "clarification");
+}
+
+export function canonicalHumanGateAction(action) {
+  const normalized = String(action || "").trim();
+  return HUMAN_GATE_ACTION_ALIASES[normalized] || normalized || null;
+}
+
+export function humanGateContractForPayload(payload = {}, {
+  parentJobId = null,
+} = {}) {
+  const source = gateSource(payload);
+  const registered = HUMAN_GATE_CONTRACTS[source];
+  const explicitChoices = humanInputChoicesForPayload(payload);
+  const originalJobId = Number(
+    payload?.original_job_id
+    ?? payload?.plan_job_id
+    ?? parentJobId
+  );
+  const fallbackActions = explicitChoices.length > 0 ? explicitChoices : ["respond"];
+  const gateKind = registered?.gate_kind || source;
+  return {
+    gate_kind: gateKind,
+    contract_version: 1,
+    original_job_id: Number.isInteger(originalJobId) && originalJobId > 0 ? originalJobId : null,
+    allowed_source_states: [...(registered?.allowed_source_states || DEFAULT_HUMAN_GATE_SOURCE_STATES)],
+    allowed_actions: [...new Set(registered?.allowed_actions || fallbackActions)],
+  };
+}
 
 export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
   "scope_expansion_request",
@@ -45,6 +206,9 @@ const HUMAN_INPUT_CHOICE_ALIASES = Object.freeze({
   reject: /\b(reject|rejected|deny|denied|no|decline|declined|cancel|canceled|cancelled|block|blocked)\b/i,
   retry: /\b(retry|rertry|re-try|rerun|re-run|reassess|re-assess|try again|run again|replan|re-plan|simplify|split|narrow|claude|openai|codex|grok)\b/i,
   skip: /\b(skip|skipped|unblock|ignore|bypass|cancel|canceled|cancelled)\b/i,
+  retry_assessment: /\b(retry|rertry|re-try|rerun|re-run|reassess|re-assess|try again|run again)\b/i,
+  retry_with_changes: /\b(retry|rertry|re-try|rerun|re-run|try again|run again|simplify|split|narrow|claude|openai|codex|grok)\b/i,
+  explicit_waiver: /\b(skip|skipped|waive|waiver|unblock|ignore|bypass|cancel|canceled|cancelled)\b/i,
   replan: /\b(replan|re-plan|split|narrow|change plan)\b/i,
   pass: /\b(pass|passed|approve|approved|accept|accepted|mark done|succeed|succeeded)\b/i,
   fail: /\b(fail|failed|reject|rejected|dead[- ]?letter|deadletter|abandon|stop)\b/i,

@@ -99,6 +99,18 @@ CREATE TABLE IF NOT EXISTS jobs (
 
   max_attempts INTEGER NOT NULL DEFAULT 3,
   attempt_count INTEGER NOT NULL DEFAULT 0,
+  assessment_state TEXT NOT NULL DEFAULT 'not_started' CHECK (
+    assessment_state IN (
+      'not_started','implementation_complete','assessment_pending',
+      'assessment_passed','assessment_failed','assessment_needs_human',
+      'assessment_unavailable','assessment_waived'
+    )
+  ),
+  assessment_attempt_count INTEGER NOT NULL DEFAULT 0,
+  assessment_max_attempts INTEGER NOT NULL DEFAULT 3,
+  assessment_last_error TEXT,
+  assessment_completed_at TEXT,
+  state_version INTEGER NOT NULL DEFAULT 0,
   human_escalation_count INTEGER NOT NULL DEFAULT 0,
 
   lease_owner TEXT,
@@ -158,6 +170,78 @@ CREATE INDEX IF NOT EXISTS idx_jobs_lease_owner
 
 CREATE INDEX IF NOT EXISTS idx_jobs_parent_job
   ON jobs(parent_job_id);
+
+CREATE TABLE IF NOT EXISTS human_gates (
+  gate_job_id INTEGER PRIMARY KEY,
+  gate_kind TEXT NOT NULL,
+  contract_version INTEGER NOT NULL DEFAULT 1,
+  original_job_id INTEGER,
+  generation INTEGER NOT NULL DEFAULT 1,
+  gate_state TEXT NOT NULL DEFAULT 'open'
+    CHECK (gate_state IN ('open','resolving','resolved','superseded')),
+  expected_original_status TEXT,
+  allowed_source_states_json TEXT NOT NULL CHECK (json_valid(allowed_source_states_json)),
+  allowed_actions_json TEXT NOT NULL CHECK (json_valid(allowed_actions_json)),
+  resolution_action TEXT,
+  resolution_payload_json TEXT
+    CHECK (resolution_payload_json IS NULL OR json_valid(resolution_payload_json)),
+  idempotency_key TEXT UNIQUE,
+  resolver_lease_token TEXT,
+  resolution_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  resolved_at TEXT,
+  FOREIGN KEY (gate_job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (original_job_id) REFERENCES jobs(id) ON DELETE SET NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_human_gates_one_active
+  ON human_gates(original_job_id, gate_kind)
+  WHERE original_job_id IS NOT NULL
+    AND gate_state IN ('open','resolving');
+
+CREATE INDEX IF NOT EXISTS idx_human_gates_state
+  ON human_gates(gate_state, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_human_gates_original
+  ON human_gates(original_job_id, generation);
+
+CREATE TABLE IF NOT EXISTS human_gate_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  gate_job_id INTEGER NOT NULL,
+  operation_key TEXT NOT NULL UNIQUE,
+  operation_type TEXT NOT NULL,
+  payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+  state TEXT NOT NULL DEFAULT 'pending'
+    CHECK (state IN ('pending','running','completed','failed')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  completed_at TEXT,
+  FOREIGN KEY (gate_job_id) REFERENCES human_gates(gate_job_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_human_gate_outbox_pending
+  ON human_gate_outbox(state, created_at);
+
+CREATE TABLE IF NOT EXISTS file_materializations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL,
+  work_item_id INTEGER,
+  generation INTEGER NOT NULL DEFAULT 1,
+  path TEXT NOT NULL,
+  operation_key TEXT NOT NULL UNIQUE,
+  created_parent_dirs_json TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(created_parent_dirs_json)),
+  materialized_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+  UNIQUE (job_id, generation, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_materializations_job
+  ON file_materializations(job_id, generation);
 
 CREATE TABLE IF NOT EXISTS bridge_change_sequence (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -230,6 +314,9 @@ CREATE TABLE IF NOT EXISTS job_attempts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id INTEGER NOT NULL,
   attempt_number INTEGER NOT NULL,
+  attempt_kind TEXT NOT NULL DEFAULT 'implementation' CHECK (
+    attempt_kind IN ('implementation','assessment','human')
+  ),
   worker_type TEXT NOT NULL CHECK (worker_type IN ('researcher','planner','delegator','dev','assessor','system','human','artificer','preflight')),
   model_name TEXT,
   reasoning_effort TEXT CHECK (reasoning_effort IN ('low','medium','high')),

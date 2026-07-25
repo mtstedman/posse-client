@@ -23,9 +23,12 @@ import { answerHumanInput } from "./human-input-answer.js";
 import { approveReview, rejectReview, resolveReviewGateJob } from "./review-decision.js";
 import { executeGitPushGate } from "./git-push-gate.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { addBridgeWorkItem, startBridgeRun } from "./work-control.js";
 
 const ALLOWED_COMMAND_SET = new Set(BRIDGE_ALLOWED_COMMANDS);
 const MUTATING_COMMAND_SET = new Set([
+  BRIDGE_COMMANDS.QUEUE_ADD,
+  BRIDGE_COMMANDS.RUN_START,
   BRIDGE_COMMANDS.ASK,
   BRIDGE_COMMANDS.REVIEW_APPROVE,
   BRIDGE_COMMANDS.REVIEW_REJECT,
@@ -128,7 +131,7 @@ function explicitJobIdArg(args = {}) {
 function auditMutatingCommand(name, args = {}, context = {}, result = {}) {
   if (!MUTATING_COMMAND_SET.has(name)) return;
   const jobId = explicitJobIdArg(args);
-  let wiId = workItemIdArg(args);
+  let wiId = workItemIdArg(args) || numberArg(result?.work_item, "id");
   if (!wiId && jobId) {
     const job = getJob(jobId);
     wiId = Number(job?.work_item_id) || null;
@@ -181,6 +184,9 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
     case BRIDGE_COMMANDS.QUEUE_LIST:
       return listQueueState(args);
 
+    case BRIDGE_COMMANDS.QUEUE_ADD:
+      return addBridgeWorkItem(args, context);
+
     case BRIDGE_COMMANDS.WORK_ITEM_GET: {
       const wiId = workItemIdArg(args);
       if (!wiId) return { ok: false, reason: "invalid_work_item_id" };
@@ -206,6 +212,9 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
 
     case BRIDGE_COMMANDS.GATES_LIST:
       return listGatesState(args);
+
+    case BRIDGE_COMMANDS.RUN_START:
+      return startBridgeRun(args, context);
 
     case BRIDGE_COMMANDS.ASK: {
       const jobId = jobIdArg(args);

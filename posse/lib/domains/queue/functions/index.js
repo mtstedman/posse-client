@@ -47,6 +47,10 @@ import {
 } from "./leases.js";
 import { findDeadlockedJobs } from "./dependencies.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import {
+  findActiveHumanGateForPayload,
+  registerHumanGate,
+} from "./human-gates.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
@@ -68,10 +72,14 @@ function isActiveIterativeWorkItemRecord(wi) {
 }
 
 export {
+  beginAttachedAssessmentAttempt,
   completeAttempt,
+  extendAssessmentMaxAttempts,
   getAttempts,
   getLatestAttempt,
   incrementAndCreateAttempt,
+  incrementAndCreateAssessmentAttempt,
+  setAssessmentLifecycle,
   setAttemptCommitHash,
   setAttemptModelName,
   setAttemptSession,
@@ -147,6 +155,17 @@ export {
   storeInsight,
   updateInsightPromotion,
 } from "./insights.js";
+
+export {
+  beginHumanGateResolution,
+  completeHumanGateResolution,
+  enqueueHumanGateEffect,
+  getHumanGate,
+  humanGateIdempotencyKey,
+  reconcileHumanGates,
+  reopenHumanGateResolution,
+  supersedeHumanGate,
+} from "./human-gates.js";
 
 export {
   reconcileOrphanedAttempts,
@@ -981,44 +1000,69 @@ export function createJob({
   const resolvedReasoningEffort = reasoning_effort == null
     ? getDefaultReasoningEffortForRole(job_type)
     : reasoning_effort;
-  const stmt = db.prepare(`
-    INSERT INTO jobs (
+  const serializedPayload = typeof payload_json === "object" && payload_json !== null
+    ? JSON.stringify(payload_json)
+    : payload_json;
+  const execute = () => {
+    if (job_type === "human_input") {
+      const active = findActiveHumanGateForPayload(serializedPayload, { parentJobId: parent_job_id });
+      if (active?.gate_job_id) {
+        return getJob(active.gate_job_id);
+      }
+    }
+    const stmt = db.prepare(`
+      INSERT INTO jobs (
+        work_item_id, job_type, title, parent_job_id,
+        priority, model_tier, reasoning_effort, provider,
+        token_budget_input, token_budget_output, context_budget_chars,
+        max_attempts, payload_json, ready_at,
+        planner_complexity_score, planner_risk_score,
+        planner_context_score, planner_failure_cost_score, skills
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const info = stmt.run(
       work_item_id, job_type, title, parent_job_id,
-      priority, model_tier, reasoning_effort, provider,
+      priority, model_tier, resolvedReasoningEffort, provider,
       token_budget_input, token_budget_output, context_budget_chars,
-      max_attempts, payload_json, ready_at,
+      max_attempts,
+      serializedPayload,
+      ready_at || now(),
       planner_complexity_score, planner_risk_score,
-      planner_context_score, planner_failure_cost_score, skills
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const info = stmt.run(
-    work_item_id, job_type, title, parent_job_id,
-    priority, model_tier, resolvedReasoningEffort, provider,
-    token_budget_input, token_budget_output, context_budget_chars,
-    max_attempts,
-    typeof payload_json === "object" && payload_json !== null ? JSON.stringify(payload_json) : payload_json,
-    ready_at || now(),
-    planner_complexity_score, planner_risk_score,
-    planner_context_score, planner_failure_cost_score,
-    normalizeSkillsColumn(skills),
-  );
+      planner_context_score, planner_failure_cost_score,
+      normalizeSkillsColumn(skills),
+    );
 
-  const job = getJob(info.lastInsertRowid);
-  logEvent({
-    work_item_id, job_id: job.id,
-    event_type: EVENT_TYPES.JOB_CREATED,
-    actor_type: EVENT_ACTORS.SYSTEM,
-    message: `Created ${job_type} job: ${title}`,
-    event_json: job_type === "promote"
-      ? JSON.stringify({ visible: false, internal_mutation_job: true })
-      : null,
-  });
-  notifyQueueStateChanged({
-    reason: "job_created",
-    jobId: job.id,
-    workItemId: work_item_id,
-  });
-  return job;
+    const job = getJob(info.lastInsertRowid);
+    if (job_type === "human_input") {
+      const gate = registerHumanGate({
+        gateJobId: job.id,
+        payload: serializedPayload,
+        parentJobId: parent_job_id,
+      });
+      if (gate.gate_job_id !== job.id) {
+        db.prepare(`DELETE FROM jobs WHERE id = ?`).run(job.id);
+        return getJob(gate.gate_job_id);
+      }
+    }
+    logEvent({
+      work_item_id, job_id: job.id,
+      event_type: EVENT_TYPES.JOB_CREATED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Created ${job_type} job: ${title}`,
+      event_json: job_type === "promote"
+        ? JSON.stringify({ visible: false, internal_mutation_job: true })
+        : null,
+    });
+    notifyQueueStateChanged({
+      reason: "job_created",
+      jobId: job.id,
+      workItemId: work_item_id,
+    });
+    return job;
+  };
+  return job_type === "human_input" && !db.inTransaction
+    ? runImmediateTransaction(db, execute)
+    : execute();
 }
 
 export function getJob(id) {
@@ -1098,6 +1142,7 @@ export function updateJobStatus(id, status, { expectedStatuses = null, leaseToke
     const result = db.prepare(`
       UPDATE jobs
       SET status = ?, updated_at = ?,
+          state_version = state_version + 1,
           started_at = COALESCE(?, started_at),
           finished_at = ${isTerminal ? "COALESCE(?, finished_at)" : "NULL"},
           lease_owner = ${shouldClearLease ? "NULL" : "lease_owner"},
@@ -1108,6 +1153,25 @@ export function updateJobStatus(id, status, { expectedStatuses = null, leaseToke
     if (result.changes === 0) return false;
 
     const job = getJob(id);
+    if (job?.job_type === "human_input" && status === "succeeded") {
+      db.prepare(`
+        UPDATE human_gates
+        SET gate_state = 'resolved',
+            resolver_lease_token = NULL,
+            resolved_at = COALESCE(resolved_at, ?),
+            updated_at = ?
+        WHERE gate_job_id = ? AND gate_state IN ('open','resolving')
+      `).run(now(), now(), id);
+    } else if (job?.job_type === "human_input" && status === "canceled") {
+      db.prepare(`
+        UPDATE human_gates
+        SET gate_state = 'superseded',
+            resolver_lease_token = NULL,
+            resolved_at = COALESCE(resolved_at, ?),
+            updated_at = ?
+        WHERE gate_job_id = ? AND gate_state IN ('open','resolving')
+      `).run(now(), now(), id);
+    }
     logEvent({
       work_item_id: job?.work_item_id, job_id: id,
       event_type: EVENT_TYPES.JOB_STATUS_CHANGED,

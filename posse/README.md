@@ -32,7 +32,15 @@ Key behavior:
 - ATLAS semantic search with optional local ONNX embeddings:
   [setup](docs/atlas/embeddings-local-setup.md).
 - Artifact workflows for reports, content, images, and intake processing.
-- Human-input and review gates when automation should pause.
+- Durable typed human-input and review gates with one authoritative,
+  idempotent resolution per original job and recovery kind.
+- Independent assessment retry accounting: assessor transport/tool failures
+  preserve completed implementation and escalate assessment only.
+- Handoff-owned creation materialization: planners declare exact
+  `files_to_create`, but writing providers receive existing
+  `files_to_modify` paths and no generic creation authority.
+- Manifest-root-aware verification readiness with explicit `passed`,
+  `failed`, and `unavailable` outcomes.
 
 ## Repository Map
 

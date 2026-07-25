@@ -137,9 +137,13 @@ export function buildCodexExecArgs({
   reasoningEffort = null,
   configOverrides = [],
   forceReadOnlySandbox = false,
+  sandboxModeOverride = null,
   priorSessionHandle = null,
 } = {}) {
-  const sandboxMode = (allowWrite && !forceReadOnlySandbox) ? "workspace-write" : "read-only";
+  const requestedSandboxMode = String(sandboxModeOverride || "").trim();
+  const sandboxMode = ["read-only", "workspace-write", "danger-full-access"].includes(requestedSandboxMode)
+    ? requestedSandboxMode
+    : (allowWrite && !forceReadOnlySandbox) ? "workspace-write" : "read-only";
   const resumeHandle = normalizeCodexSessionHandle(priorSessionHandle);
   const args = [
     ...codexArgs,

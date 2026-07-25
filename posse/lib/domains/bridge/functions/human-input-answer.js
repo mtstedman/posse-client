@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { Worker } from "../../worker/classes/Worker.js";
 import { runHumanInputJob } from "../../worker/functions/execution/human-input-job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { getJob } from "../../queue/functions/index.js";
+import { getHumanGate, getJob } from "../../queue/functions/index.js";
 import { now } from "../../queue/functions/common.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isReviewGateJob } from "./review-decision.js";
@@ -62,7 +62,8 @@ function claimHumanInputJob(jobId, { leaseSeconds = DEFAULT_BRIDGE_LEASE_SECONDS
         lease_owner = ?,
         lease_token = ?,
         lease_expires_at = ?,
-        updated_at = ?
+        updated_at = ?,
+        state_version = state_version + 1
     WHERE id = ?
       AND job_type = 'human_input'
       AND status IN ('queued', 'waiting_on_human')
@@ -81,6 +82,19 @@ export async function answerHumanInput(jobId, args = {}, { projectDir = process.
   if (current.job_type !== "human_input") return { ok: false, reason: "not_human_input" };
 
   const payload = parseJobPayload(current);
+  const contract = getHumanGate(id);
+  if (
+    args.gate_generation != null
+    && Number(args.gate_generation) !== Number(contract?.generation || 1)
+  ) {
+    return { ok: false, reason: "stale_gate_generation" };
+  }
+  if (
+    args.original_job_id != null
+    && Number(args.original_job_id) !== Number(contract?.original_job_id)
+  ) {
+    return { ok: false, reason: "original_job_mismatch" };
+  }
   if (payload?.subtype === "plan_approval") {
     return { ok: false, reason: "use_plan_approve_or_reject" };
   }

@@ -1159,6 +1159,13 @@ function normalizeResearcherTerminalArgs(source, context) {
     return null;
   }
   const first = source.handoffs.map((entry) => plainObject(entry)).find(Boolean) || {};
+  if ((typeof first.content === "string" && first.content.trim())
+    || (typeof first.report === "string" && first.report.trim())) {
+    fail(
+      "AGENT_HANDOFF_SCHEMA_INVALID",
+      "researcher report prose must use compact summary and claims with evidence selectors; handoffs[].content and string-valued handoffs[].report cannot be materialized safely",
+    );
+  }
   const report = plainObject(first.report) || plainObject(source.report) || {};
   const research = plainObject(report.research) || {};
   const reportScope = plainObject(report.scope) || {};
@@ -1168,9 +1175,12 @@ function normalizeResearcherTerminalArgs(source, context) {
     first.outcome,
     report.outcome,
   ).toLowerCase();
-  const profile = outcomeInput === "complete"
+  const requestedProfile = ["researcher.pipeline.v1", "researcher.report.v1"].includes(source.profile)
+    ? source.profile
+    : null;
+  const profile = requestedProfile || (outcomeInput === "complete"
     ? "researcher.report.v1"
-    : "researcher.pipeline.v1";
+    : "researcher.pipeline.v1");
   const outcome = profile === "researcher.report.v1"
     ? "complete"
     : (["success", "gap", "input_required"].includes(outcomeInput)
@@ -2003,7 +2013,53 @@ function renderEvidence(evidence, lane) {
   return `${lane}: ${evidence.selector}`;
 }
 
-function renderReport(report) {
+function renderExpandedEvidence(report) {
+  const bySelector = new Map();
+  const add = (evidence, lane, reason = null) => {
+    if (!evidence?.selector || !evidence?.excerpt) return;
+    const existing = bySelector.get(evidence.selector);
+    if (existing) {
+      existing.lanes.add(lane);
+      if (reason) existing.reasons.add(reason);
+      return;
+    }
+    bySelector.set(evidence.selector, {
+      evidence,
+      lanes: new Set([lane]),
+      reasons: new Set(reason ? [reason] : []),
+    });
+  };
+  for (const claim of report.claims || []) {
+    const detail = claim[1] || {};
+    for (const lane of ["proof", "support"]) {
+      for (const evidence of detail[lane] || []) add(evidence, lane);
+    }
+    for (const [evidence, reason] of detail.decoy || []) add(evidence, "decoy", reason);
+  }
+  if (bySelector.size === 0) return "";
+  const sections = [];
+  for (const { evidence, lanes, reasons } of bySelector.values()) {
+    const provenance = evidence.provenance || {};
+    const source = [provenance.source, provenance.object_type].filter(Boolean).join(" · ")
+      || provenance.kind
+      || "materialized evidence";
+    const quoted = String(evidence.excerpt)
+      .replace(/\r\n?/g, "\n")
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n");
+    sections.push([
+      `### ${evidence.selector}`,
+      `Lanes: ${[...lanes].join(", ")}  `,
+      `Source: ${source}`,
+      ...(reasons.size > 0 ? [`Excluded because: ${[...reasons].join("; ")}`] : []),
+      quoted,
+    ].join("\n\n"));
+  }
+  return `## Expanded evidence\n\n${sections.join("\n\n")}`;
+}
+
+function renderReport(report, { expandEvidence = false } = {}) {
   const parts = [];
   if (report.summary) parts.push(`Summary: ${report.summary}`);
   for (const claim of report.claims) {
@@ -2018,6 +2074,10 @@ function renderReport(report) {
   if (report.constraints.length) parts.push(`Constraints:\n${report.constraints.map((entry) => `- ${entry}`).join("\n")}`);
   if (report.success_criteria.length) parts.push(`Success criteria:\n${report.success_criteria.map((entry) => `- ${entry}`).join("\n")}`);
   if (report.questions.length) parts.push(`Questions:\n${report.questions.map((entry) => `- ${entry}`).join("\n")}`);
+  if (expandEvidence) {
+    const evidence = renderExpandedEvidence(report);
+    if (evidence) parts.push(evidence);
+  }
   return parts.join("\n\n");
 }
 
@@ -2215,7 +2275,9 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
     return `\`\`\`json\n${JSON.stringify(tasks, null, 2)}\n\`\`\``;
   }
   const first = packet.handoffs[0];
-  const report = renderReport(first.report);
+  const report = renderReport(first.report, {
+    expandEvidence: packet.profile === "researcher.report.v1",
+  });
   if (packet.profile === "assessor.verdict.v1") {
     const reasons = [...new Set(
       [first.report.summary, ...first.report.claims.map((claim) => claim[0])]

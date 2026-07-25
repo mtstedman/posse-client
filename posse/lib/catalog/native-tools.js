@@ -885,7 +885,8 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research with a compact brief. Cite narrow line-range refs instead of copying tool output. The receipt ends provider generation.",
+    "Finish research with compact structured findings. Cite every relied-on Atlas result once using narrow line-range refs instead of copying tool output. " +
+    "For researcher.report.v1, Posse deterministically expands those refs into the final Markdown report; researcher.pipeline.v1 remains a compact planner handoff. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {

@@ -3,13 +3,14 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import {
   addDependency,
+  beginHumanGateResolution,
   cancelPendingReviewGatesForOriginal,
   clearStallResume,
   completeAttempt,
+  completeHumanGateResolution,
   createJob,
-  forceUpdateJobStatus,
+  extendAssessmentMaxAttempts,
   getDependents,
-  getEvents,
   getJob,
   getWorkItem,
   getAttempts,
@@ -18,10 +19,14 @@ import {
   logEvent,
   resolveJobScopeExpansion,
   rewireDependency,
+  reopenHumanGateResolution,
+  supersedeHumanGate,
   setAssessorVerdict,
+  setAssessmentLifecycle,
   setAttemptCommitHash,
   storeArtifact,
   updateJobPayload,
+  updateWorkItemStatus,
 } from "../../../queue/functions/index.js";
 import { withWorktreeLockAsync, worktreePathAsync } from "../../../git/functions/worktree.js";
 import { acquireWorktreeLockAsync, gitStashLockPath } from "../../../git/functions/worktree-locks.js";
@@ -44,7 +49,6 @@ import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../../catalog/job.js";
 import {
   humanInputChoiceFromAnswer,
   humanInputChoicesForPayload,
-  humanInputChoicesForReviewType,
   isHumanInputReviewPayload,
 } from "../../../../catalog/human-input.js";
 
@@ -55,33 +59,21 @@ const REVIEW_DECISION_ORIGINAL_STATUS_SET = new Set([
   "blocked",
   "awaiting_assessment",
 ]);
-const HUMAN_RESOLUTION_PARKED_ORIGINAL_STATUS_SET = new Set([
-  ...REVIEW_DECISION_ORIGINAL_STATUS_SET,
-]);
 const DEAD_LETTER_RECOVERY_REVIEW_TYPES = new Set([
   "dead_letter_recovery",
   "research_dead_letter_recovery",
   "oneshot_dead_letter_recovery",
   "stall_exhausted_recovery",
 ]);
+const ASSESSMENT_REVIEW_TYPES = new Set([
+  "assessment",
+  "needs_review",
+  "assessment_parse_error",
+  "unknown_verdict",
+  "assessment_transport_error",
+  "assessment_retry_limit",
+]);
 
-function failParkedOriginalAfterGateFailure(worker, gateJob, payload) {
-  const originalJobId = Number(payload.original_job_id);
-  if (!Number.isInteger(originalJobId) || originalJobId <= 0) return false;
-  const original = getJob(originalJobId);
-  if (!original || !HUMAN_RESOLUTION_PARKED_ORIGINAL_STATUS_SET.has(original.status)) return false;
-  const changed = forceUpdateJobStatus(original.id, "failed", {
-    expectedStatuses: [original.status],
-  });
-  if (changed) {
-    worker.emit(
-      gateJob.id,
-      `${C.yellow}[human] Failed unresolved original job #${original.id} instead of leaving an orphaned gate${C.reset}`,
-    );
-  }
-  return changed;
-}
-import { getAssessmentInternalRetryLimit } from "../helpers/assessment-shared.js";
 import { refreshAndExtractInsights } from "../helpers/insights.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import {
@@ -252,7 +244,11 @@ export async function runHumanInputJob(worker, job, {
         actor_type: EVENT_ACTORS.WORKER,
         message: `Ignored stale generic researcher placeholder; canceled ${dependents.length} dependent(s)`,
       });
-      worker._releaseLease(job, leaseToken, "succeeded");
+      supersedeHumanGate(
+        job.id,
+        "legacy placeholder human-input job was retired automatically",
+      );
+      worker._releaseLease(job, leaseToken, "canceled");
       if (origJob && origJob.job_type === "research" && originalResearchOutput) {
         worker._spawnPlanAfterResearch(origJob, originalResearchOutput);
       }
@@ -312,18 +308,37 @@ export async function runHumanInputJob(worker, job, {
         return;
       }
     }
-    storeArtifact({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      attempt_id: attempt.attempt.id,
-      artifact_type: "response",
-      content_long: output || "(human input collected)",
+    const resolutionAnswers = extractHumanAnswers(output);
+    const resolutionAnswer = extractLatestActionableHumanAnswerText(resolutionAnswers);
+    const resolutionMetadata = [...resolutionAnswers].reverse().find((answer) => (
+      answer && typeof answer === "object" && answer.metadata && typeof answer.metadata === "object"
+    ))?.metadata || null;
+    let selectedAction = humanInputChoiceFromAnswer(resolutionAnswer, actionChoices);
+    if (!selectedAction && payload.review_type === "blocked_recovery") {
+      selectedAction = classifyBlockedRecoveryAnswer(resolutionAnswer) || "retry";
+    }
+    if (!selectedAction && payload.review_type) {
+      const reviewAction = classifyReviewAnswer(resolutionAnswer);
+      if (reviewAction !== "unknown") selectedAction = reviewAction;
+    }
+    selectedAction ||= "respond";
+    const resolutionClaim = beginHumanGateResolution({
+      gateJobId: job.id,
+      leaseToken,
+      action: selectedAction,
+      idempotencyKey: resolutionMetadata?.idempotency_key || null,
     });
-    completeAttempt(attempt.attempt.id, {
-      status: "succeeded",
-      duration_ms: Date.now() - startTime,
-      output_chars: (output || "").length,
-    });
+    if (!resolutionClaim.ok) {
+      completeAttempt(attempt.attempt.id, {
+        status: "interrupted",
+        duration_ms: Date.now() - startTime,
+        error_text: `Human gate resolution rejected: ${resolutionClaim.reason}`,
+      });
+      worker.emit(job.id, `${C.yellow}[human] Answer was not applied (${resolutionClaim.reason}); keeping the gate open${C.reset}`);
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+      refreshAndExtractInsights(job.work_item_id);
+      return;
+    }
 
     let finalHumanStatus = "succeeded";
     let handledReviewDecision = false;
@@ -380,8 +395,8 @@ export async function runHumanInputJob(worker, job, {
         });
         continuationKind = "plan";
       } else if (selection.action === "cancel") {
-        finalHumanStatus = "canceled";
         continuationKind = "canceled";
+        updateWorkItemStatus(job.work_item_id, "canceled");
       } else {
         finalHumanStatus = "failed";
       }
@@ -445,13 +460,13 @@ export async function runHumanInputJob(worker, job, {
       && payload.file_requests.length > 0
       && payload.review_type !== "blocked_recovery"
     ) {
+      handledReviewDecision = true;
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       const decision = classifyApprovalAnswer(lastAnswer);
       const dependents = getDependents(job.id);
 
       if (decision === "rejected") {
-        finalHumanStatus = "failed";
         for (const dep of dependents) {
           const depJob = getJob(dep.job_id);
           if (!depJob) continue;
@@ -469,7 +484,35 @@ export async function runHumanInputJob(worker, job, {
           event_json: JSON.stringify({ file_requests: payload.file_requests }),
         });
       } else if (decision === "approved") {
-        worker.emit(job.id, `${C.green}[human] File creation approved - ${dependents.length} gated dependent(s) can proceed${C.reset}`);
+        if (payload.proposed_fix && typeof payload.proposed_fix === "object") {
+          const proposed = payload.proposed_fix;
+          if (proposed.job_type !== "fix" || Number(proposed.work_item_id) !== Number(job.work_item_id)) {
+            throw new Error("Scope gate proposed_fix contract is invalid");
+          }
+          const fixJob = createJob({
+            work_item_id: job.work_item_id,
+            job_type: "fix",
+            title: String(proposed.title || "Approved fix").slice(0, 180),
+            parent_job_id: Number(proposed.parent_job_id) || Number(payload.original_job_id) || null,
+            priority: proposed.priority || "high",
+            provider: proposed.provider || null,
+            model_tier: proposed.model_tier || "standard",
+            reasoning_effort: proposed.reasoning_effort || "medium",
+            skills: proposed.skills || null,
+            payload_json: proposed.payload_json || {},
+          });
+          for (const dependency of Array.isArray(proposed.dependencies) ? proposed.dependencies : []) {
+            const dependencyId = Number(dependency?.job_id);
+            if (Number.isInteger(dependencyId) && dependencyId > 0) {
+              addDependency(fixJob.id, dependencyId, dependency?.dependency_kind || "hard");
+            }
+          }
+          for (const dependent of dependents) {
+            rewireDependency(dependent.job_id, job.id, fixJob.id, dependent.dependency_kind);
+          }
+          worker.emit(job.id, `${C.cyan}[human] Approved scope expansion and created fix job #${fixJob.id}${C.reset}`);
+        }
+        worker.emit(job.id, `${C.green}[human] Scope request approved - ${dependents.length} gated dependent(s) can proceed${C.reset}`);
         logEvent({
           work_item_id: job.work_item_id,
           job_id: job.id,
@@ -593,7 +636,12 @@ export async function runHumanInputJob(worker, job, {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const decision = classifyBlockedRecoveryAnswer(lastAnswer);
+      const exactRecoveryAction = humanInputChoiceFromAnswer(lastAnswer, actionChoices);
+      const decision = exactRecoveryAction === "explicit_waiver"
+        ? "skip"
+        : (exactRecoveryAction === "retry_with_changes"
+          ? "retry"
+          : classifyBlockedRecoveryAnswer(lastAnswer));
       handledReviewDecision = true;
       const restoreGateDependentsToOriginal = () => {
         if (!origJob) return 0;
@@ -693,7 +741,12 @@ export async function runHumanInputJob(worker, job, {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const decision = classifyDeadLetterRecoveryAnswer(lastAnswer);
+      const exactRecoveryAction = humanInputChoiceFromAnswer(lastAnswer, actionChoices);
+      const decision = exactRecoveryAction === "explicit_waiver"
+        ? { action: "skip", provider: null }
+        : (exactRecoveryAction === "retry_with_changes"
+          ? { ...classifyDeadLetterRecoveryAnswer(lastAnswer), action: "retry" }
+          : classifyDeadLetterRecoveryAnswer(lastAnswer));
       handledReviewDecision = true;
 
       if (decision.action === "skip") {
@@ -766,33 +819,17 @@ export async function runHumanInputJob(worker, job, {
         });
       }
     }
-    const customTypedChoice = Boolean(
-      payload.review_type
-      && actionChoices.length > 0
-      && humanInputChoicesForReviewType(payload.review_type).length === 0
-    );
-    if (!handledReviewDecision && customTypedChoice && payload.original_job_id) {
-      const origJob = getJob(payload.original_job_id);
-      const unblockable = new Set(["waiting_on_human", "waiting_on_review", "blocked", "awaiting_assessment"]);
-      if (origJob && unblockable.has(origJob.status)) {
-        await worker._setJobRowStatus(origJob, "queued");
-        handledReviewDecision = true;
-        worker.emit(job.id, `${C.cyan}[human] Applied custom choice and requeued job #${origJob.id}${C.reset}`);
-        logEvent({
-          work_item_id: job.work_item_id,
-          job_id: origJob.id,
-          event_type: EVENT_TYPES.JOB_UNBLOCKED,
-          actor_type: EVENT_ACTORS.WORKER,
-          message: `Requeued after custom typed human choice (job #${job.id})`,
-        });
-      }
-    }
-
     if (!handledReviewDecision && payload.original_job_id && payload.review_type) {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const reviewDecision = classifyReviewAnswer(lastAnswer);
+      const exactAction = humanInputChoiceFromAnswer(lastAnswer, actionChoices);
+      const reviewDecision = exactAction === "retry_assessment"
+        ? "retry"
+        : (exactAction === "explicit_waiver"
+          ? "skip"
+          : classifyReviewAnswer(lastAnswer));
+      const assessmentReview = ASSESSMENT_REVIEW_TYPES.has(payload.review_type);
       if (origJob && !REVIEW_DECISION_ORIGINAL_STATUS_SET.has(origJob.status)) {
         handledReviewDecision = true;
         cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
@@ -806,6 +843,9 @@ export async function runHumanInputJob(worker, job, {
           });
           if (settled !== false) {
             setAssessorVerdict(origJob.id, "pass", "high", { force: true });
+            if (assessmentReview) {
+              setAssessmentLifecycle(origJob.id, "assessment_passed", { completed: true });
+            }
             cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
             worker.emit(job.id, `${C.green}[human] Review passed job #${origJob.id}${C.reset}`);
             logEvent({
@@ -825,6 +865,9 @@ export async function runHumanInputJob(worker, job, {
           });
           if (settled !== false) {
             setAssessorVerdict(origJob.id, "fail", "high", { force: true });
+            if (assessmentReview) {
+              setAssessmentLifecycle(origJob.id, "assessment_failed", { completed: true });
+            }
             cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
             worker.emit(job.id, `${C.yellow}[human] Review failed job #${origJob.id}${C.reset}`);
             logEvent({
@@ -836,53 +879,28 @@ export async function runHumanInputJob(worker, job, {
               message: `Human review failed original job via job #${job.id}`,
             });
           }
-        } else if (payload.review_type === "assessment_transport_error" && reviewDecision === "retry") {
-          const maxAssessRetries = getAssessmentInternalRetryLimit();
-          const origEvents = getEvents(origJob.id, 50);
-          const retryCount = origEvents.filter((event) => event.event_type === "job.review_retry_assessment").length;
+        } else if (assessmentReview && reviewDecision === "retry") {
           cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
           pendingReviewGatesAlreadyCanceled = true;
-          if (retryCount >= maxAssessRetries) {
-            const retryLimitReview = createJob({
-              work_item_id: job.work_item_id,
-              job_type: "human_input",
-              title: `Assessment retry limit: ${origJob.title.slice(0, 60)}`,
-              parent_job_id: origJob.id,
-              priority: "urgent",
-              model_tier: "cheap",
-              payload_json: JSON.stringify({
-                original_job_id: origJob.id,
-                review_type: "assessment_retry_limit",
-                questions: ["Assessment retries are exhausted. Should this pass, fail, skip, or replan?"],
-              }),
-            });
-            await worker._setJobRowStatus(origJob, "waiting_on_review");
-            handledReviewDecision = true;
-            worker.emit(job.id, `${C.yellow}[human] Assessment retry limit (${maxAssessRetries}) reached for job #${origJob.id} - spawned forced review job #${retryLimitReview.id}${C.reset}`);
-            logEvent({
-              work_item_id: job.work_item_id,
-              job_id: origJob.id,
-              attempt_id: attempt.attempt.id,
-              event_type: EVENT_TYPES.JOB_REVIEW_RETRY_LIMIT,
-              actor_type: EVENT_ACTORS.WORKER,
-              message: `Assessment retry limit reached - spawned forced-resolution review job #${retryLimitReview.id} for job #${origJob.id}`,
-            });
-          } else {
-            const origPayload = worker.parsePayload(origJob);
-            origPayload._assess_only = true;
-            updateJobPayload(origJob.id, JSON.stringify(origPayload));
-            await worker._setJobRowStatus(origJob, "queued");
-            handledReviewDecision = true;
-            worker.emit(job.id, `${C.cyan}[human] Review requested assessment retry (${retryCount + 1}/${maxAssessRetries}) for job #${origJob.id}${C.reset}`);
-            logEvent({
-              work_item_id: job.work_item_id,
-              job_id: origJob.id,
-              attempt_id: attempt.attempt.id,
-              event_type: EVENT_TYPES.JOB_REVIEW_RETRY_ASSESSMENT,
-              actor_type: EVENT_ACTORS.WORKER,
-              message: `Human requested assessment retry (${retryCount + 1}/${maxAssessRetries}) via job #${job.id}`,
-            });
-          }
+          const nextAssessmentAttempt = Number(origJob.assessment_attempt_count || 0) + 1;
+          extendAssessmentMaxAttempts(origJob.id, nextAssessmentAttempt);
+          const origPayload = worker.parsePayload(origJob);
+          origPayload._assess_only = true;
+          updateJobPayload(origJob.id, JSON.stringify(origPayload));
+          setAssessmentLifecycle(origJob.id, "assessment_unavailable", {
+            error: `Human requested another assessment via gate #${job.id}`,
+          });
+          await worker._setJobRowStatus(origJob, "queued");
+          handledReviewDecision = true;
+          worker.emit(job.id, `${C.cyan}[human] Queued assessment-only retry #${nextAssessmentAttempt} for job #${origJob.id}${C.reset}`);
+          logEvent({
+            work_item_id: job.work_item_id,
+            job_id: origJob.id,
+            attempt_id: attempt.attempt.id,
+            event_type: EVENT_TYPES.JOB_REVIEW_RETRY_ASSESSMENT,
+            actor_type: EVENT_ACTORS.WORKER,
+            message: `Human requested assessment-only retry #${nextAssessmentAttempt} via job #${job.id}`,
+          });
         } else if (reviewDecision === "replan") {
           handledReviewDecision = true;
           cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
@@ -896,24 +914,35 @@ export async function runHumanInputJob(worker, job, {
           }, { emit: emitFn, autoApprove: worker.autoApprove });
         } else if (reviewDecision === "skip") {
           handledReviewDecision = true;
-          const settled = await worker._setJobRowStatus(origJob, "canceled", {
+          const targetStatus = assessmentReview ? "succeeded" : "canceled";
+          const settled = await worker._setJobRowStatus(origJob, targetStatus, {
             expectedStatuses: [...REVIEW_DECISION_ORIGINAL_STATUS_SET],
             force: true,
           });
           if (settled !== false) {
             setAssessorVerdict(origJob.id, "not_assessed", null, { force: true });
+            if (assessmentReview) {
+              setAssessmentLifecycle(origJob.id, "assessment_waived", { completed: true });
+            }
             cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
-            worker.emit(job.id, `${C.yellow}[human] Review skipped job #${origJob.id}${C.reset}`);
+            worker.emit(job.id, `${C.yellow}[human] Review explicitly waived for job #${origJob.id}${C.reset}`);
             logEvent({
               work_item_id: job.work_item_id,
               job_id: origJob.id,
               attempt_id: attempt.attempt.id,
               event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
               actor_type: EVENT_ACTORS.WORKER,
-              message: `Human skipped original job via review job #${job.id}`,
+              message: `Human explicitly waived review via job #${job.id}`,
             });
           }
         }
+      }
+      if (!handledReviewDecision && actionChoices.length > 0) {
+        finalHumanStatus = "failed";
+        worker.emit(
+          job.id,
+          `${C.yellow}[human] Review type ${payload.review_type} has no registered action handler; keeping the gate open${C.reset}`,
+        );
       }
     }
 
@@ -967,7 +996,44 @@ export async function runHumanInputJob(worker, job, {
       cancelPendingReviewGatesForOriginal(payload.original_job_id, { exceptJobId: job.id });
     }
     if (finalHumanStatus === "failed") {
-      failParkedOriginalAfterGateFailure(worker, job, payload);
+      reopenHumanGateResolution({
+        gateJobId: job.id,
+        leaseToken,
+        error: "The selected action could not be applied; the gate remains open.",
+      });
+      completeAttempt(attempt.attempt.id, {
+        status: "failed",
+        duration_ms: Date.now() - startTime,
+        output_chars: (output || "").length,
+        error_text: "Human action could not be applied; gate reopened",
+      });
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+      refreshAndExtractInsights(job.work_item_id);
+      return;
+    }
+    storeArtifact({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      attempt_id: attempt.attempt.id,
+      artifact_type: "response",
+      content_long: output || "(human input collected)",
+    });
+    completeAttempt(attempt.attempt.id, {
+      status: "succeeded",
+      duration_ms: Date.now() - startTime,
+      output_chars: (output || "").length,
+    });
+    const resolutionCompleted = completeHumanGateResolution({
+      gateJobId: job.id,
+      leaseToken,
+      resolution: {
+        action: resolutionClaim.action,
+        answer: String(resolutionAnswer || "").slice(0, 4000),
+        attempt_id: attempt.attempt.id,
+      },
+    });
+    if (!resolutionCompleted.ok) {
+      throw new Error(`Human gate completion failed: ${resolutionCompleted.reason}`);
     }
     const humanLeaseReleased = releaseHumanLease(finalHumanStatus);
     if (humanLeaseReleased === false) {
@@ -993,7 +1059,11 @@ export async function runHumanInputJob(worker, job, {
         output_chars: (output || "").length,
         error_text: `Post-answer resolution failed: ${message}`,
       });
-      failParkedOriginalAfterGateFailure(worker, job, payload);
+      reopenHumanGateResolution({
+        gateJobId: job.id,
+        leaseToken,
+        error: message,
+      });
       try {
         logEvent({
           work_item_id: job.work_item_id,
@@ -1007,7 +1077,9 @@ export async function runHumanInputJob(worker, job, {
         // The original answer is already recorded; audit logging is best-effort.
       }
       if (!leaseReleased) {
-        try { releaseHumanLease("failed"); } catch { /* best-effort terminal closeout */ }
+        try {
+          worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+        } catch { /* best-effort gate reopening */ }
       }
       try { refreshAndExtractInsights(job.work_item_id); } catch { /* best effort */ }
     }
@@ -1021,6 +1093,11 @@ export async function runHumanInputJob(worker, job, {
       duration_ms: Date.now() - startTime,
       error_text: err.message,
     });
-    worker._retryOrFail(job, leaseToken, err.message);
+    reopenHumanGateResolution({
+      gateJobId: job.id,
+      leaseToken,
+      error: err.message,
+    });
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
   }
 }

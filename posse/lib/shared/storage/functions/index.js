@@ -16,10 +16,12 @@ import {
   needsArtifactsSchemaRepair,
   needsRunInsightsPromotionSchemaRepair,
   needsAtlasV2HostSchemaRepair,
+  needsHumanGateAssessmentSchemaRepair,
   needsWorkItemsGovernanceTierRepair,
   rebuildArtifactsTable,
   repairRunInsightsPromotionSchema,
   repairAtlasV2HostSchema,
+  repairHumanGateAssessmentSchema,
   repairWorkItemsGovernanceTierSchema,
   runHostMigration,
 } from "./migrations.js";
@@ -31,6 +33,7 @@ export {
   __testRepairArtifactsTableSchema,
   __testRepairRunInsightsPromotionSchema,
   __testRepairAtlasV2HostSchema,
+  __testRepairHumanGateAssessmentSchema,
   __testRepairWorkItemsGovernanceTierSchema,
   getHostSchemaVersion as __testGetHostSchemaVersion,
   runHostMigration as __testRunHostMigration,
@@ -400,6 +403,18 @@ export function jobsCreateSql(tableName = "jobs") {
           context_budget_chars INTEGER,
           max_attempts INTEGER NOT NULL DEFAULT 3,
           attempt_count INTEGER NOT NULL DEFAULT 0,
+          assessment_state TEXT NOT NULL DEFAULT 'not_started' CHECK (
+            assessment_state IN (
+              'not_started','implementation_complete','assessment_pending',
+              'assessment_passed','assessment_failed','assessment_needs_human',
+              'assessment_unavailable','assessment_waived'
+            )
+          ),
+          assessment_attempt_count INTEGER NOT NULL DEFAULT 0,
+          assessment_max_attempts INTEGER NOT NULL DEFAULT 3,
+          assessment_last_error TEXT,
+          assessment_completed_at TEXT,
+          state_version INTEGER NOT NULL DEFAULT 0,
           human_escalation_count INTEGER NOT NULL DEFAULT 0,
           lease_owner TEXT,
           lease_token TEXT UNIQUE,
@@ -445,6 +460,9 @@ export function jobAttemptsCreateSql(tableName = "job_attempts") {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           job_id INTEGER NOT NULL,
           attempt_number INTEGER NOT NULL,
+          attempt_kind TEXT NOT NULL DEFAULT 'implementation' CHECK (
+            attempt_kind IN ('implementation','assessment','human')
+          ),
           worker_type TEXT NOT NULL CHECK (worker_type IN (${JOB_ATTEMPT_WORKER_TYPE_LIST_SQL})),
           model_name TEXT,
           reasoning_effort TEXT CHECK (reasoning_effort IN (${JOB_REASONING_EFFORT_LIST_SQL})),
@@ -2543,6 +2561,12 @@ export function getDb() {
     name: "agent_calls_extended_thinking",
     needs: needsAgentCallsExtendedThinkingRepair,
     migrate: repairAgentCallsExtendedThinkingSchema,
+  });
+  runHostMigration(_db, {
+    version: 8,
+    name: "human_gate_assessment_lifecycle",
+    needs: needsHumanGateAssessmentSchemaRepair,
+    migrate: repairHumanGateAssessmentSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

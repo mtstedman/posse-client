@@ -162,11 +162,10 @@ export class DeveloperRole extends BaseRole {
     const fallbackReads = packet.budgets?.fallback_reads_remaining ?? null;
     const taskMode = payload.task_mode || "code";
     const needsImageGeneration = !!payload.needs_image_generation;
-    const primedCreateFiles = worker.primeCreatableFiles(devCwd, createFiles);
-    const editableScope = uniqueScopeFiles(files, createFiles);
+    const editableScope = uniqueScopeFiles(files);
     const deleteOnlyTask = editableScope.length === 0 && createFiles.length === 0 && createRoots.length === 0 && deleteFiles.length > 0;
-    if (primedCreateFiles.length > 0) {
-      worker.emit(job.id, `${C.cyan}[scope]${C.reset} WI#${job.work_item_id} job #${job.id}: pre-created ${primedCreateFiles.length} scoped file(s) to avoid creation prompts`);
+    if (Array.isArray(packet.materialized_files) && packet.materialized_files.length > 0) {
+      worker.emit(job.id, `${C.cyan}[scope]${C.reset} WI#${job.work_item_id} job #${job.id}: materialized ${packet.materialized_files.length} planned file(s) before provider handoff`);
     }
 
     const rawExpandSteps = getIntSetting(SETTING_KEYS.CONTEXT_EXPAND_MAX_STEPS, 2);
@@ -273,8 +272,6 @@ export class DeveloperRole extends BaseRole {
       allowWrite: !ctx.dbOnlyTask,
       projectDbWrite: !!ctx.dbOnlyTask,
       scopedFiles: ctx.editableScope.length > 0 ? ctx.editableScope : null,
-      createFiles: ctx.createFiles.length > 0 ? ctx.createFiles : null,
-      createRoots: ctx.createRoots.length > 0 ? ctx.createRoots : null,
       deleteFiles: ctx.deleteFiles.length > 0 ? ctx.deleteFiles : null,
       stableContext: ctx.packet.stable_context || null,
       remoteSystemPrompt: ctx.packet.remote_system_prompt || null,
