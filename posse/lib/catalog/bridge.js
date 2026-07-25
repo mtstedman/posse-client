@@ -10,6 +10,7 @@ export const BRIDGE_COMMANDS = Object.freeze({
   GATES_LIST: "gates.list",
   STATE_SNAPSHOT: "state.snapshot",
   RUN_START: "run.start",
+  ATLAS_WARM: "atlas.warm",
   ASK: "ask",
   REVIEW_APPROVE: "review.approve",
   REVIEW_REJECT: "review.reject",

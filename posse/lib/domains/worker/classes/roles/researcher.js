@@ -152,6 +152,21 @@ function researchPromptProfile(roleMode, { reportMode = false } = {}) {
   return "researcher";
 }
 
+function researchSuccessCriteria(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean)
+    .filter((entry) => {
+      const executionOnly = [
+        /\b(?:run|execute|rerun)\b.{0,40}\btests?\b/i,
+        /\b(?:tests?|test suite|checks?)\b.{0,40}\b(?:pass|passing|green|succeed|successful)\b/i,
+        /\b(?:npm test|pnpm test|yarn test|cargo test|pytest|go test)\b/i,
+      ].some((pattern) => pattern.test(entry));
+      return !executionOnly;
+    });
+}
+
 // L2 (TOKEN-LEVERS-PLAN): tight researcher answer contract, default OFF.
 // Selects the researcher_report_tight remote prompt profile for report/
 // question research jobs. The remote must ship the tight profile before this
@@ -600,8 +615,11 @@ export class ResearcherRole extends BaseRole {
         last_error: job.last_error || researcherAttempts.at(-1)?.error_text || null,
         escalated: ctx.tier && ctx.tier !== job.model_tier,
       },
-      success_criteria: Array.isArray(payload.success_criteria) ? payload.success_criteria : [],
-      test_command: payload.test_command || null,
+      // Researchers are read-only and have no test runner. Preserve factual
+      // completion criteria, but do not poison their prompt with execution-only
+      // gates or a command they cannot invoke.
+      success_criteria: researchSuccessCriteria(payload.success_criteria),
+      test_command: null,
       allow_atlas_handoff_prefetch: payload.allow_atlas_handoff_prefetch,
       allow_researcher_atlas_context_prefetch: payload.allow_researcher_atlas_context_prefetch,
     };

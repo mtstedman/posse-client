@@ -885,8 +885,9 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research with compact structured findings. Cite every relied-on Atlas result once using narrow line-range refs instead of copying tool output. " +
-    "For researcher.report.v1, Posse deterministically expands those refs into the final Markdown report; researcher.pipeline.v1 remains a compact planner handoff. The receipt ends provider generation.",
+    "Finish research with compact report content. Summary and claim prose are the answer and may contain ordinary repository path:line citations. " +
+    "Evidence refs are optional transport for exact stored excerpts; when useful, select a narrow range such as #abcd:L23-L40 instead of copying tool output. " +
+    "For researcher.report.v1, Posse renders the prose and expands any selected refs into the final Markdown report; researcher.pipeline.v1 remains a compact planner handoff. Do not fetch or create refs solely for this call. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {

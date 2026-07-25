@@ -229,7 +229,7 @@ function cloneJson(value) {
 export const TOOL_EXECUTION_SPECS = Object.freeze({
   agent_handoff: {
     access: "coordination",
-    summary: "Submit the terminal structured handoff report using backend-materialized evidence selectors.",
+    summary: "Submit the terminal structured handoff report; any selected evidence is materialized backend-side.",
     observation: { type: "tool.agent_handoff", label: "AgentHandoff", format: "generic", targetKeys: ["profile", "outcome"] },
   },
   sub_agent: {

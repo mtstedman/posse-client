@@ -67,18 +67,20 @@ export class Bridge {
   }
 
   /**
-   * Bind the local server. A persisted repo port is used as-is; otherwise
-   * scan the shared range for a free port and persist the winner so the
-   * port stays stable for LAN clients. Two repos serving concurrently land
-   * on different ports instead of colliding.
+   * Bind the local server. A persisted repo port is preferred so the port
+   * stays stable for LAN clients, but it is only a preference: another
+   * repo's bridge (or any process) may hold it, and refusing to rescan
+   * would block `posse serve` in this repo entirely. On a busy preferred
+   * port, fall back to scanning the shared range and persist the winner.
    */
   async startLocalServer() {
+    const scanRange = Array.from(
+      { length: BRIDGE_PORT_SCAN_END - BRIDGE_PORT_SCAN_START + 1 },
+      (_, i) => BRIDGE_PORT_SCAN_START + i,
+    );
     const candidates = this.config.port
-      ? [this.config.port]
-      : Array.from(
-          { length: BRIDGE_PORT_SCAN_END - BRIDGE_PORT_SCAN_START + 1 },
-          (_, i) => BRIDGE_PORT_SCAN_START + i,
-        );
+      ? [this.config.port, ...scanRange.filter((port) => port !== this.config.port)]
+      : scanRange;
     let lastErr = null;
     for (const port of candidates) {
       const server = new LocalServer({
@@ -102,7 +104,7 @@ export class Bridge {
       try {
         const address = await server.start();
         this.localServer = server;
-        if (!this.config.port) {
+        if (this.config.port !== address.port) {
           this.config.port = address.port;
           try {
             setBridgePort(address.port, this.projectDir);

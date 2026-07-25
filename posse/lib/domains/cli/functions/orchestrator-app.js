@@ -2705,14 +2705,14 @@ export function runOrchestratorCli() {
       closeObservationLog();
       closePromptLog();
       closeDb();
-      if (fatal) {
-        // A fatal error can strand non-unref'd resources — e.g. a backgrounded
-        // ATLAS boot-warm worker thread whose MessagePort pins the event loop —
-        // leaving the process printing "Fatal:" and then hanging indefinitely.
-        // The clean-exit path handles this with an explicit exit in RunSession;
-        // mirror it here once teardown has finished. stderr was written and
-        // teardown awaited above, so nothing user-visible is truncated.
-        setImmediate(() => process.exit(process.exitCode ?? 1));
-      }
+      // Non-unref'd resources — a backgrounded ATLAS boot-warm worker thread
+      // whose MessagePort pins the event loop, daemon threads, lingering
+      // sockets — can outlive teardown and leave a zombie process. For
+      // `posse serve` the zombie also keeps the bridge port bound, so the
+      // next serve (any repo) finds it busy while the old process ignores
+      // Ctrl-C. Teardown was awaited and all logs flushed above, so exit
+      // explicitly on every path, mirroring RunSession's clean-exit and the
+      // old fatal-only guard here.
+      setImmediate(() => process.exit(process.exitCode ?? (fatal ? 1 : 0)));
     });
 }

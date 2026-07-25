@@ -1,5 +1,6 @@
 import { DEV_MODE_ORDER } from "../../../../shared/policies/functions/dev-modes.js";
 import { detectSensitiveAgentHandoffText } from "../agent-handoff-boundaries.js";
+import { filterKnownHandoffFields } from "./field-diagnostics.js";
 
 export const PLANNER_REPORT_METADATA_KEYS = Object.freeze([
   "dev_mode",
@@ -43,6 +44,8 @@ function plainObject(value) {
 function exactKeys(value, allowed, label) {
   const object = plainObject(value);
   if (!object) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be an object`);
+  const filtered = filterKnownHandoffFields(object, allowed, label);
+  if (filtered) return filtered;
   for (const key of Object.keys(object)) {
     if (!allowed.includes(key)) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.${key} is not allowed`);
   }

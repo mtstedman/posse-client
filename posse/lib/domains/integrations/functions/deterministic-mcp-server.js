@@ -2050,6 +2050,22 @@ function executeAgentHandoff(args = {}) {
     role: roleName,
     maxHandoffs: roleName === "planner" ? getIntSetting("planner_max_tasks", 50) : 1,
   });
+  if (receipt.diagnostics) {
+    try {
+      _recordObservation({
+        work_item_id: mcpWorkItemId ?? undefined,
+        job_id: mcpJobId ?? undefined,
+        attempt_id: mcpAttemptId ?? undefined,
+        observation_type: "handoff.unknown_fields_ignored",
+        summary: `Agent handoff ignored ${receipt.diagnostics.ignored_field_count} unrecognized field(s)`,
+        detail: {
+          severity: "warn",
+          agent_call_id: mcpAgentCallId ?? null,
+          ...receipt.diagnostics,
+        },
+      });
+    } catch { /* best effort */ }
+  }
   if (preparedSubAgentHandoff) sealSubAgentHandoff(mcpAgentCallId);
   return JSON.stringify({
     ok: true,
@@ -2058,6 +2074,7 @@ function executeAgentHandoff(args = {}) {
     digest: receipt.digest,
     call_count: receipt.callCount,
     terminal: true,
+    ...(receipt.diagnostics ? { diagnostics: receipt.diagnostics } : {}),
   });
 }
 

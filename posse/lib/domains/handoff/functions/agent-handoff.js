@@ -22,6 +22,10 @@ import {
   PLANNER_REPORT_METADATA_KEYS,
   structuredStringLength,
 } from "./helpers/terminal-report-metadata.js";
+import {
+  filterKnownHandoffFields,
+  runWithHandoffFieldDiagnostics,
+} from "./helpers/field-diagnostics.js";
 
 export const AGENT_HANDOFF_PROTOCOL = "posse.agent_handoff.v1";
 export const AGENT_HANDOFF_LIMITS = Object.freeze({
@@ -136,6 +140,8 @@ function compatibilityAlias(source, canonicalKey, aliasKey, label) {
 function exactKeys(value, allowed, label) {
   const object = plainObject(value);
   if (!object) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be an object`);
+  const filtered = filterKnownHandoffFields(object, allowed, label);
+  if (filtered) return filtered;
   for (const key of Object.keys(object)) {
     if (!allowed.includes(key)) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.${key} is not allowed`);
   }
@@ -1755,7 +1761,7 @@ function failCollectedAgentHandoffIssues(issues) {
   throw error;
 }
 
-export function materializeAgentHandoff(args, { context = {}, role = "", maxHandoffs = null } = {}) {
+function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHandoffs = null } = {}) {
   const normalizedRole = String(role || "").trim().toLowerCase();
   const normalizedArgs = normalizeSemanticAgentHandoffArgs(
     normalizePlannerAgentHandoffArgs(args, { role: normalizedRole }),
@@ -1901,6 +1907,31 @@ export function materializeAgentHandoff(args, { context = {}, role = "", maxHand
   };
 }
 
+export function materializeAgentHandoff(args, options = {}) {
+  const serialized = JSON.stringify(args ?? null);
+  if (Buffer.byteLength(serialized, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
+    fail("AGENT_HANDOFF_TOO_LARGE", `agent_handoff exceeds ${AGENT_HANDOFF_LIMITS.maxCallBytes} bytes`);
+  }
+  const {
+    value: packet,
+    ignoredFieldCount,
+    ignoredFields,
+  } = runWithHandoffFieldDiagnostics(() => materializeAgentHandoffStrict(args, options));
+  if (ignoredFieldCount > 0) {
+    Object.defineProperties(packet, {
+      ignored_field_count: {
+        value: ignoredFieldCount,
+        enumerable: false,
+      },
+      ignored_fields: {
+        value: Object.freeze(ignoredFields),
+        enumerable: false,
+      },
+    });
+  }
+  return packet;
+}
+
 function ensureSchema(db = getDb()) {
   if (READY_DBS.has(db)) return db;
   createAgentHandoffPacketTable(db);
@@ -1943,6 +1974,12 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
   };
   const effectiveRole = String(call.role || role || "");
   const packet = materializeAgentHandoff(args, { context: resolvedContext, role: effectiveRole, maxHandoffs });
+  const diagnostics = packet.ignored_field_count > 0
+    ? {
+        ignored_field_count: packet.ignored_field_count,
+        ignored_fields: packet.ignored_fields,
+      }
+    : null;
   const workItem = resolvedContext.workItemId
     ? database.prepare("SELECT metadata_json FROM work_items WHERE id = ?").get(resolvedContext.workItemId)
     : null;
@@ -1969,6 +2006,7 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
         digest,
         idempotent: true,
         callCount: Number(existing.stage_count || 1) + (existing.status === "staged" ? 1 : 0),
+        ...(diagnostics ? { diagnostics } : {}),
       };
     }
     if (existing.status === "staged") {
@@ -1993,7 +2031,14 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
     digest,
     packet.evidence_chars,
   );
-  return { ok: true, status: "staged", digest, idempotent: false, callCount: 1 };
+  return {
+    ok: true,
+    status: "staged",
+    digest,
+    idempotent: false,
+    callCount: 1,
+    ...(diagnostics ? { diagnostics } : {}),
+  };
 }
 
 export function rejectAgentHandoffForLaterTool(agentCallId, toolName, { db = getDb() } = {}) {
