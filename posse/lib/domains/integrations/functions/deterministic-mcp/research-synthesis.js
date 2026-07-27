@@ -141,12 +141,60 @@ function buildResearchCoverageChecklistText(taskText, { explorationAvailable = t
   ].join("\n");
 }
 
+function researchFocusItems(taskText) {
+  const checklist = extractResearchCoverageChecklist(taskText);
+  const named = checklist.filter((item) => /^Cover named focus area:\s*/i.test(item));
+  return named.length > 0 ? named : checklist;
+}
+
+export function buildResearchCoverageProgressText({
+  explorationSteps = 1,
+  taskText = "",
+} = {}) {
+  const items = researchFocusItems(taskText);
+  if (items.length === 0) return "";
+
+  // The first exploration call is orientation. Allocate every subsequent call
+  // before the two-call curtain across the task's independent focus areas.
+  // This keeps a researcher from exhausting the budget by repeatedly
+  // deepening the first useful file while other named mechanisms remain
+  // untouched. The allocation is advisory rather than a hard rejection:
+  // evidence can satisfy more than one row, and a completed row should be
+  // skipped rather than padded with redundant calls.
+  const targetedCalls = Math.max(
+    1,
+    RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
+      - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS
+      - 1,
+  );
+  const nextTargetPosition = Math.max(
+    0,
+    Math.min(targetedCalls - 1, Number(explorationSteps || 0) - 1),
+  );
+  const targetIndex = Math.min(
+    items.length - 1,
+    Math.floor((nextTargetPosition * items.length) / targetedCalls),
+  );
+  const callsInTarget = Math.max(
+    1,
+    Math.min(2, Math.ceil(targetedCalls / items.length)),
+  );
+  const target = items[targetIndex].replace(/^Cover named focus area:\s*/i, "");
+
+  return [
+    `NEXT COVERAGE SLOT ${targetIndex + 1}/${items.length}: ${target}.`,
+    `Budget up to ${callsInTarget} focused call${callsInTarget === 1 ? "" : "s"} for discovery plus the exact governing body/branch, then advance.`,
+    "Do not reopen an already-supported file or mechanism just to add detail. If this slot is already supported by exact evidence, immediately advance to the next unsupported focus area.",
+  ].join("\n");
+}
+
 export function buildResearchCoverageStartText({ taskText = "" } = {}) {
   const checklist = buildResearchCoverageChecklistText(taskText);
   return [
     "RESEARCH EVIDENCE PLAN: use the deterministic checklist below from the start of exploration.",
     checklist,
     "Treat every named focus-area row as an independent evidence obligation. Before broadening or revisiting a supported path, obtain the exact governing body or branch for an unsupported row.",
+    "After the orientation call, the runtime assigns bounded coverage slots across the named focus areas. Use at most one discovery call and one exact-body call per slot unless the returned slot budget explicitly permits more.",
   ].join("\n");
 }
 

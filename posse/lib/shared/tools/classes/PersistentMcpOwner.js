@@ -46,6 +46,7 @@ import {
   RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
+  buildResearchCoverageProgressText,
   buildResearchCoverageStartText,
   buildResearchCurtainCallText,
   buildResearchSynthesisRequiredText,
@@ -502,9 +503,11 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
   const explorationSteps = admission.explorationSteps + 1;
   let notice = null;
   if (explorationSteps === 1) {
-    notice = buildResearchCoverageStartText({
-      taskText: ownerResearchTaskText(session),
-    });
+    const taskText = ownerResearchTaskText(session);
+    notice = [
+      buildResearchCoverageStartText({ taskText }),
+      buildResearchCoverageProgressText({ explorationSteps, taskText }),
+    ].filter(Boolean).join("\n\n");
   } else if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) {
     recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName);
     notice = buildResearchSynthesisRequiredText({
@@ -518,6 +521,11 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
       - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS
   ) {
     notice = buildResearchCurtainCallText({
+      explorationSteps,
+      taskText: ownerResearchTaskText(session),
+    });
+  } else {
+    notice = buildResearchCoverageProgressText({
       explorationSteps,
       taskText: ownerResearchTaskText(session),
     });
