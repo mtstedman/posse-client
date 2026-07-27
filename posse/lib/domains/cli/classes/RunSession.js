@@ -201,6 +201,7 @@ export class RunSession {
       RUN_WORK_ITEM_IDS = [],
       requeueForShutdown,
       requeueWaitingHumanInputJobs,
+      reconcileHumanGates,
       reconcileMergedWorkItemReviewStates,
       refreshWorkItemStatus,
       inferWiMode,
@@ -2552,6 +2553,18 @@ export class RunSession {
 
   worker = new Worker({ autoApprove: AUTO_APPROVE, projectDir: PROJECT_DIR, display, dryRun: DRY_RUN, nonInteractive, stallTimeout: STALL_TIMEOUT, leaseSec: scheduler.leaseSec });
   this._activeWorker = worker;
+
+  // Heal gate/job drift before reviving prompts: without this, a gate left
+  // in 'resolving' by a crashed resolver rejects every answer — re-prompted
+  // or via the bridge — with gate_not_open forever.
+  try {
+    const reconciled = reconcileHumanGates();
+    if (reconciled.registered + reconciled.reopened + reconciled.retired > 0) {
+      display?.addEvent(`${C.cyan}Reconciled human gates: ${reconciled.registered} registered, ${reconciled.reopened} reopened, ${reconciled.retired} retired${C.reset}`);
+    }
+  } catch (reconcileErr) {
+    display?.addEvent(`${C.yellow}Human-gate reconcile failed: ${reconcileErr?.message || reconcileErr}${C.reset}`);
+  }
 
   if (display) {
     const revivedHumanJobs = requeueWaitingHumanInputJobs();

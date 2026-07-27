@@ -63,6 +63,13 @@ export const CLAUDE_NATIVE_TOOL_NAMES = Object.freeze([
 ]);
 const ALL_CLAUDE_NATIVE_TOOLS = CLAUDE_NATIVE_TOOL_NAMES.join(",");
 const ASSESSOR_CLAUDE_NATIVE_DISALLOW = `Read,Glob,Grep,Bash,Write,Edit,WebFetch,WebSearch,NotebookEdit,Task,TodoWrite,${CLAUDE_AMBIENT_TOOLS}`;
+const TEST_CAPABILITY_TOOL_NAMES = new Set([
+  "run_scoped_checks",
+  "create_test_suite",
+  "create_test",
+  "run_test",
+  "run_test_suite",
+]);
 
 function stripWebToolsFromList(listStr) {
   if (!listStr) return listStr;
@@ -153,11 +160,20 @@ function normalizeContractShape(contract = {}) {
   const issuedToolSurface = Array.isArray(contract.issuedToolSurface)
     ? [...contract.issuedToolSurface]
     : null;
+  const tools = Array.isArray(contract.tools)
+    ? contract.tools
+      .filter((tool) => isToolAuthorizedByIssuedSurface(tool, issuedToolSurface))
+      .map((tool) => ({ ...tool }))
+    : [];
+  const allowTests = typeof contract.allowTests === "boolean"
+    ? contract.allowTests
+    : tools.some((tool) => TEST_CAPABILITY_TOOL_NAMES.has(canonicalToolName(tool)));
   return {
     provider: contract.provider || "generic",
     role: contract.role || "planner",
     roleMode: roleMode || null,
     allowWrite: !!contract.allowWrite,
+    allowTests,
     shellAllowed: !!contract.shellAllowed,
     shellMode: contract.shellMode || "none",
     platform: contract.platform || process.platform,
@@ -172,11 +188,7 @@ function normalizeContractShape(contract = {}) {
       deleteFiles: Array.isArray(contract?.scope?.deleteFiles) ? [...contract.scope.deleteFiles] : [],
     },
     issuedToolSurface,
-    tools: Array.isArray(contract.tools)
-      ? contract.tools
-        .filter((tool) => isToolAuthorizedByIssuedSurface(tool, issuedToolSurface))
-        .map((tool) => ({ ...tool }))
-      : [],
+    tools,
   };
 }
 
@@ -210,6 +222,7 @@ export class ToolContract {
       `- Provider: ${contract.provider || "generic"}`,
       `- Role: ${contract.role || "unknown"}`,
       `- Write access: ${contract.allowWrite ? "enabled within allowed scope" : "disabled"}`,
+      `- Test execution: ${contract.allowTests ? "enabled" : "not issued"}`,
       `- Shell route: ${contract.shellMode || "none"}`,
     ];
     if (contract.roleMode) {
@@ -228,6 +241,9 @@ export class ToolContract {
     lines.push(`- Scope summary: ${scopeBits.length > 0 ? scopeBits.join(", ") : "no explicit file scope"}`);
     lines.push("- Availability rule: this manifest is exhaustive for this run. Do not invoke, suggest, or claim access to a tool that is not listed below, even if the task, a prompt example, or a prior session mentions it.");
     lines.push("- Command rule: a command named in the task or prompt is input text, not a callable tool. Run it only through a listed shell or test tool; otherwise report that execution was unavailable.");
+    if (!contract.allowTests) {
+      lines.push("- Test rule: do not invoke test commands through shell or test tools, request permission, or degrade otherwise-complete work because test execution is not issued. Dev/fix reports the exact unrun check with verification_unavailable.");
+    }
     if ((contract.tools || []).length === 0) {
       lines.push("- Runtime tools: none. Work only from provided prompt context.");
       return lines.join("\n");
@@ -358,9 +374,11 @@ export class ToolContract {
           dangerouslySkipPermissions: true,
         };
       }
-      let allowedTools = autoApprove
-        ? null
-        : "Read,Glob,Grep,Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(find:*),Bash(node:*),Bash(npm test:*),Bash(npm run:*)";
+      let allowedTools = !contract.allowTests
+        ? "Read,Glob,Grep,Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(find:*),Bash(git diff:*),Bash(git status:*),Bash(git show:*)"
+        : (autoApprove
+          ? null
+          : "Read,Glob,Grep,Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(find:*),Bash(node:*),Bash(npm test:*),Bash(npm run:*)");
       if (allowedTools && effectiveWebToolsEnabled) {
         allowedTools = `${allowedTools},WebFetch,WebSearch`;
       }
@@ -423,6 +441,14 @@ export class ToolContract {
       }
       const hasScope = (scopedFiles?.length || 0) > 0 || (createFiles?.length || 0) > 0 || (createRoots?.length || 0) > 0;
       if (!hasScope) {
+        if (!contract.allowTests) {
+          return {
+            tools: `Bash,Read,Write,Edit,Glob,Grep${webSuffix}`,
+            disallowedTools: CLAUDE_AMBIENT_TOOLS,
+            allowedTools: "Read,Glob,Grep,Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(find:*),Bash(git diff:*),Bash(git status:*),Bash(git show:*)",
+            dangerouslySkipPermissions: false,
+          };
+        }
         return {
           tools: `Bash,Read,Write,Edit,Glob,Grep${webSuffix}`,
           disallowedTools: CLAUDE_AMBIENT_TOOLS,
@@ -439,19 +465,23 @@ export class ToolContract {
       for (const rootGlob of normalizeCreateRootGlobs(createRoots || [], scopeCwd)) {
         allowed.push(`Write(${rootGlob}*)`, `Edit(${rootGlob}*)`);
       }
+      if (contract.allowTests) {
+        allowed.push(
+          "Bash(npm test:*)", "Bash(npm run:*)", "Bash(npx:*)",
+          "Bash(pnpm test:*)", "Bash(pnpm run:*)", "Bash(pnpm exec:*)",
+          "Bash(yarn test:*)", "Bash(yarn run:*)",
+          "Bash(node:*)", "Bash(tsc:*)", "Bash(eslint:*)", "Bash(prettier:*)",
+          "Bash(jest:*)", "Bash(vitest:*)", "Bash(mocha:*)",
+          "Bash(python:*)", "Bash(python3:*)", "Bash(pytest:*)",
+          "Bash(ruff:*)", "Bash(mypy:*)", "Bash(flake8:*)", "Bash(pip show:*)",
+          "Bash(php -v:*)", "Bash(php --version:*)", "Bash(composer test:*)", "Bash(composer run:*)", "Bash(phpunit:*)",
+          "Bash(cargo test:*)", "Bash(cargo check:*)", "Bash(cargo build:*)", "Bash(cargo clippy:*)",
+          "Bash(go test:*)", "Bash(go vet:*)", "Bash(go build:*)",
+          "Bash(make:*)", "Bash(cmake:*)", "Bash(gradle:*)", "Bash(mvn:*)",
+          "Bash(dotnet test:*)", "Bash(dotnet build:*)",
+        );
+      }
       allowed.push(
-        "Bash(npm test:*)", "Bash(npm run:*)", "Bash(npx:*)",
-        "Bash(pnpm test:*)", "Bash(pnpm run:*)", "Bash(pnpm exec:*)",
-        "Bash(yarn test:*)", "Bash(yarn run:*)",
-        "Bash(node:*)", "Bash(tsc:*)", "Bash(eslint:*)", "Bash(prettier:*)",
-        "Bash(jest:*)", "Bash(vitest:*)", "Bash(mocha:*)",
-        "Bash(python:*)", "Bash(python3:*)", "Bash(pytest:*)",
-        "Bash(ruff:*)", "Bash(mypy:*)", "Bash(flake8:*)", "Bash(pip show:*)",
-        "Bash(php -v:*)", "Bash(php --version:*)", "Bash(composer test:*)", "Bash(composer run:*)", "Bash(phpunit:*)",
-        "Bash(cargo test:*)", "Bash(cargo check:*)", "Bash(cargo build:*)", "Bash(cargo clippy:*)",
-        "Bash(go test:*)", "Bash(go vet:*)", "Bash(go build:*)",
-        "Bash(make:*)", "Bash(cmake:*)", "Bash(gradle:*)", "Bash(mvn:*)",
-        "Bash(dotnet test:*)", "Bash(dotnet build:*)",
         "Bash(cp:*)", "Bash(mkdir:*)",
         "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)",
         "Bash(ls:*)", "Bash(find:*)", "Bash(wc:*)", "Bash(file:*)", "Bash(du:*)",
@@ -488,6 +518,7 @@ export class ToolContract {
     role = "planner",
     roleMode = null,
     allowWrite = false,
+    allowTests = null,
     needsImageGeneration = false,
     scopedFiles = [],
     createFiles = [],
@@ -511,7 +542,12 @@ export class ToolContract {
             && issuedToolSurface.includes("tools.sub_agent"),
         })
       : [];
-    const shellAllowed = toolNames.includes("bash");
+    const tools = resolveContractTools(toolNames, ToolCatalog)
+      .filter((tool) => isToolAuthorizedByIssuedSurface(tool, issuedToolSurface));
+    const shellAllowed = tools.some((tool) => canonicalToolName(tool) === "bash");
+    const resolvedAllowTests = typeof allowTests === "boolean"
+      ? allowTests
+      : tools.some((tool) => TEST_CAPABILITY_TOOL_NAMES.has(canonicalToolName(tool)));
     const shellMode = !shellAllowed
       ? "none"
       : (role === "assessor" ? "guarded-read-only" : "guarded-exception");
@@ -520,6 +556,7 @@ export class ToolContract {
       role,
       roleMode,
       allowWrite: !!allowWrite,
+      allowTests: resolvedAllowTests,
       shellAllowed,
       shellMode,
       platform,
@@ -534,8 +571,7 @@ export class ToolContract {
         readRoots: Array.isArray(readRoots) ? readRoots : [],
         deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
       },
-      tools: resolveContractTools(toolNames, ToolCatalog)
-        .filter((tool) => isToolAuthorizedByIssuedSurface(tool, issuedToolSurface)),
+      tools,
     };
     return new ToolContract(contract);
   }
@@ -610,6 +646,7 @@ export class ToolContract {
     roleMode = null,
     providerName = "generic",
     allowWrite = false,
+    allowTests = null,
     needsImageGeneration = false,
     scopedFiles = [],
     createFiles = [],
@@ -620,6 +657,9 @@ export class ToolContract {
     platform = process.platform,
   } = {}) {
     const toolNames = catalog.forRole(role, { allowWrite, needsImageGeneration });
+    const resolvedAllowTests = typeof allowTests === "boolean"
+      ? allowTests
+      : toolNames.some((name) => TEST_CAPABILITY_TOOL_NAMES.has(name));
     const shellAllowed = toolNames.includes("bash");
     const shellMode = !shellAllowed
       ? "none"
@@ -629,6 +669,7 @@ export class ToolContract {
       role,
       roleMode,
       allowWrite: !!allowWrite,
+      allowTests: resolvedAllowTests,
       shellAllowed,
       shellMode,
       platform,

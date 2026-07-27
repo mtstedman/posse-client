@@ -88,7 +88,7 @@ const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
 const PROFILE_POLICY = Object.freeze({
   "researcher.pipeline.v1": Object.freeze({ roles: ["researcher"], outcomes: ["success", "gap", "input_required"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
   "researcher.report.v1": Object.freeze({ roles: ["researcher"], outcomes: ["complete"], targetKinds: ["result"], maxHandoffs: 1 }),
-  "planner.plan.v1": Object.freeze({ roles: ["planner"], outcomes: ["success", "complete"], targetKinds: ["agent", "system"], maxHandoffs: 50 }),
+  "planner.plan.v1": Object.freeze({ roles: ["planner"], outcomes: ["success"], targetKinds: ["agent", "system"], maxHandoffs: 50 }),
   "dev.result.v1": Object.freeze({ roles: ["dev", "fix"], outcomes: ["complete", "failed", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
   "artificer.result.v1": Object.freeze({ roles: ["artificer"], outcomes: ["complete", "failed", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
   "assessor.verdict.v1": Object.freeze({ roles: ["assessor"], outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
@@ -508,7 +508,7 @@ function validateTarget(target, policy, profile, label) {
   if (!policy.targetKinds.includes(kind)) fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} does not allow target kind ${kind}`);
   const role = out.role == null ? null : boundedString(out.role, `${label}.role`, 40);
   if (profile === "planner.plan.v1") {
-    const allowed = kind === "agent" ? ["dev", "artificer"] : ["human_input", "promote", "no_tasks"];
+    const allowed = kind === "agent" ? ["dev", "artificer"] : ["promote"];
     if (!allowed.includes(role)) fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} target ${kind} requires one of: ${allowed.join(", ")}`);
   } else if (kind === "pipeline" && role != null && role !== "$pipeline") {
     fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} pipeline target role must be $pipeline when present`);
@@ -546,45 +546,8 @@ function validateDependencyGraph(handoffs) {
 
 function validatePlannerPacketSemantics(packet) {
   if (packet.profile !== "planner.plan.v1") return;
-  if (packet.outcome === "complete") {
-    const [handoff] = packet.handoffs;
-    if (packet.handoffs.length !== 1
-      || handoff?.target?.kind !== "system"
-      || handoff?.target?.role !== "no_tasks") {
-      fail(
-        "AGENT_HANDOFF_SEMANTIC_INVALID",
-        "planner complete requires exactly one system/no_tasks handoff",
-      );
-    }
-    if ((handoff.depends_on || []).length > 0) {
-      fail("AGENT_HANDOFF_SEMANTIC_INVALID", "planner complete system/no_tasks cannot depend on another handoff");
-    }
-    if (!String(handoff.report?.summary || "").trim()) {
-      fail("AGENT_HANDOFF_SEMANTIC_INVALID", "planner complete system/no_tasks requires a summary reason");
-    }
-    if (Object.keys(handoff.report?.scope || {}).length > 0) {
-      fail("AGENT_HANDOFF_SEMANTIC_INVALID", "planner complete system/no_tasks requires empty scope");
-    }
-    if ((handoff.report?.success_criteria || []).length === 0) {
-      fail("AGENT_HANDOFF_SEMANTIC_INVALID", "planner complete system/no_tasks requires a completion criterion");
-    }
-    if ((handoff.report?.questions || []).length > 0) {
-      fail("AGENT_HANDOFF_SEMANTIC_INVALID", "planner complete system/no_tasks cannot contain unresolved questions");
-    }
-    const metadataKey = PLANNER_REPORT_METADATA_KEYS.find((key) => handoff.report?.[key] != null);
-    if (metadataKey) {
-      fail("AGENT_HANDOFF_SEMANTIC_INVALID", `planner complete system/no_tasks cannot contain ${metadataKey}`);
-    }
-    return;
-  }
   if (packet.outcome !== "success") return;
   for (const [index, handoff] of packet.handoffs.entries()) {
-    if (handoff.target?.kind === "system" && handoff.target?.role === "no_tasks") {
-      fail(
-        "AGENT_HANDOFF_SEMANTIC_INVALID",
-        `planner success handoffs[${index}] cannot target system/no_tasks; use outcome complete`,
-      );
-    }
     if ((handoff.report?.questions || []).length > 0) {
       fail(
         "AGENT_HANDOFF_SEMANTIC_INVALID",
@@ -881,13 +844,10 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
       report,
     };
   });
-  const noTasks = handoffs.length === 1
-    && handoffs[0].target.kind === "system"
-    && handoffs[0].target.role === "no_tasks";
   return {
     protocol: AGENT_HANDOFF_PROTOCOL,
     profile: "planner.plan.v1",
-    outcome: noTasks ? "complete" : "success",
+    outcome: "success",
     handoffs,
   };
 }
@@ -1069,27 +1029,72 @@ function researcherEvidenceSelectors(value, context) {
     .slice(0, AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim);
 }
 
+function researcherClaimFromNarrative(value, index) {
+  const text = compactResearcherText(value);
+  if (!text) {
+    fail(
+      "AGENT_HANDOFF_SCHEMA_INVALID",
+      `claims[${index}] must contain substantive claim text`,
+    );
+  }
+  if (text.length <= 1000) return { claim: text, prose: "" };
+  if (text.length > AGENT_HANDOFF_LIMITS.maxSummaryChars) {
+    fail(
+      "AGENT_HANDOFF_TOO_LARGE",
+      `claims[${index}].text exceeds ${AGENT_HANDOFF_LIMITS.maxSummaryChars} characters`,
+    );
+  }
+  const colon = text.indexOf(":");
+  const sentence = text.search(/[.!?](?:\s|$)/);
+  const preferredEnd = colon >= 20 && colon <= 240
+    ? colon + 1
+    : (sentence >= 20 && sentence < 500 ? sentence + 1 : Math.min(240, text.length));
+  let claim = text.slice(0, preferredEnd).trim();
+  if (claim.length < text.length && !/[.!?:]$/.test(claim)) {
+    const lastSpace = claim.lastIndexOf(" ");
+    if (lastSpace >= 40) claim = claim.slice(0, lastSpace);
+    claim = `${claim}…`;
+  }
+  return { claim, prose: text };
+}
+
 function researcherClaims(value, { proof = [], support = [], context = {} } = {}) {
   const inputs = Array.isArray(value) ? value : [];
   const claims = inputs.slice(0, AGENT_HANDOFF_LIMITS.maxClaims).flatMap((raw, index) => {
     if (Array.isArray(raw)) return [raw];
+    if (typeof raw === "string") {
+      const normalized = researcherClaimFromNarrative(raw, index);
+      return [[
+        normalized.claim,
+        ...(normalized.prose ? [{ prose: normalized.prose }] : []),
+      ]];
+    }
     const source = plainObject(raw);
     if (!source) return [];
-    const claim = firstAssessorText(source.claim, source.name, source.title)
-      || `Research finding ${index + 1}`;
-    const prose = firstAssessorText(
+    const explicitClaim = firstAssessorText(source.claim, source.name, source.title);
+    const narrative = firstAssessorText(
+      source.text,
       source.prose,
       source.summary,
       source.description,
       source.reason,
     );
+    if (!explicitClaim && !narrative) {
+      fail(
+        "AGENT_HANDOFF_SCHEMA_INVALID",
+        `claims[${index}] must include claim, name, title, text, prose, summary, description, or reason`,
+      );
+    }
+    const normalized = explicitClaim
+      ? { claim: compactResearcherText(explicitClaim), prose: compactResearcherText(narrative) }
+      : researcherClaimFromNarrative(narrative, index);
     const detail = {};
     const claimProof = researcherEvidenceSelectors(source.proof, context);
     const claimSupport = researcherEvidenceSelectors(source.support, context);
     if (claimProof.length) detail.proof = claimProof;
     if (claimSupport.length) detail.support = claimSupport;
-    if (prose) detail.prose = compactResearcherText(prose);
-    return [[compactResearcherText(claim), detail]];
+    if (normalized.prose) detail.prose = normalized.prose;
+    return [[normalized.claim, detail]];
   });
   const globalProof = researcherEvidenceSelectors(proof, context);
   const globalSupport = researcherEvidenceSelectors(support, context);
@@ -2318,10 +2323,6 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
     return renderCompletionCompatibilityOutput(packet);
   }
   if (packet.profile === "planner.plan.v1") {
-    if (packet.outcome === "complete") {
-      const completion = packet.handoffs[0];
-      return `NO_TASKS_NEEDED: ${completion.report.summary || completion.intent}`;
-    }
     const tasks = plannerCompatibilityTasks(packet);
     return `\`\`\`json\n${JSON.stringify(tasks, null, 2)}\n\`\`\``;
   }

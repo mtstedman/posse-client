@@ -3,9 +3,11 @@ import {
   canonicalHumanGateAction,
   humanGateContractForPayload,
 } from "../../../catalog/human-input.js";
+import { EVENT_TYPES } from "../../../catalog/event.js";
 import { TERMINAL_JOB_STATUSES_SQL } from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { now, runImmediateTransaction } from "./common.js";
+import { flushEventsNow } from "./events.js";
 
 const ACTIVE_GATE_STATES = Object.freeze(["open", "resolving"]);
 
@@ -334,6 +336,11 @@ export function enqueueHumanGateEffect({
 }
 
 export function reconcileHumanGates() {
+  // Reconciliation uses durable timeout events to distinguish an abandoned
+  // gate that should reopen from a headless timeout that must stay terminal.
+  // logEvent() is buffered, so make same-process timeout events visible before
+  // entering the reconciliation transaction.
+  flushEventsNow();
   const db = getDb();
   return executeTransaction(db, () => {
     let registered = 0;
@@ -372,8 +379,41 @@ export function reconcileHumanGates() {
       }
     }
 
+    // A gate stuck in 'resolving' whose resolver died (crash between
+    // beginHumanGateResolution and completeHumanGateResolution) rejects
+    // every later answer with gate_not_open — permanently, because the
+    // stale resolver_lease_token can never be presented again. A live
+    // resolver always holds a current lease on the gate job, so a
+    // lease-free (or lease-expired) resolving gate on a non-terminal job
+    // is safe to reopen.
+    const abandoned = db.prepare(`
+      SELECT hg.gate_job_id
+      FROM human_gates hg
+      JOIN jobs j ON j.id = hg.gate_job_id
+      WHERE hg.gate_state = 'resolving'
+        AND j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+        AND (j.lease_token IS NULL OR j.lease_expires_at IS NULL OR j.lease_expires_at < ?)
+    `).all(now());
+    for (const row of abandoned) {
+      db.prepare(`
+        UPDATE human_gates
+        SET gate_state='open', resolution_action=NULL, idempotency_key=NULL,
+            resolver_lease_token=NULL,
+            resolution_error='Resolver disappeared mid-resolution; gate reopened',
+            updated_at=?
+        WHERE gate_job_id=? AND gate_state='resolving'
+      `).run(now(), row.gate_job_id);
+      reopened += 1;
+    }
+
     const inconsistent = db.prepare(`
-      SELECT hg.gate_job_id, hg.gate_state, j.status
+      SELECT hg.gate_job_id, hg.gate_state, j.status,
+             EXISTS (
+               SELECT 1
+               FROM events e
+               WHERE e.job_id = hg.gate_job_id
+                 AND e.event_type = '${EVENT_TYPES.JOB_HEADLESS_TIMEOUT}'
+             ) AS headless_timed_out
       FROM human_gates hg
       JOIN jobs j ON j.id = hg.gate_job_id
       WHERE hg.gate_state IN ('open','resolving')
@@ -388,13 +428,17 @@ export function reconcileHumanGates() {
           WHERE gate_job_id=?
         `).run(now(), now(), row.gate_job_id);
         retired += 1;
-      } else if (row.status === "canceled") {
+      } else if (row.status === "canceled" || row.headless_timed_out) {
         db.prepare(`
           UPDATE human_gates
           SET gate_state='superseded', resolved_at=?, updated_at=?,
-              resolver_lease_token=NULL
+              resolver_lease_token=NULL,
+              resolution_error=COALESCE(
+                resolution_error,
+                CASE WHEN ? THEN 'Human gate timed out in headless mode' ELSE 'Human gate was canceled' END
+              )
           WHERE gate_job_id=?
-        `).run(now(), now(), row.gate_job_id);
+        `).run(now(), now(), row.headless_timed_out ? 1 : 0, row.gate_job_id);
         retired += 1;
       } else {
         db.prepare(`

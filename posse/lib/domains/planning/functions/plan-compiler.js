@@ -329,7 +329,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         });
         tasks = tasks.slice(0, maxTasks);
       }
-      // Planners may only emit dev or human_input — other types are internal pipeline types.
+      // Planners may emit executable work or deterministic promotion. Human
+      // gates and other coordination jobs are runtime-owned.
       // Defense-in-depth: LLMs can conflate task_mode values with job_type (e.g. "content").
       const PLANNER_ALLOWED_TYPES = PLANNER_ALLOWED_JOB_TYPES;
       const VALID_TIERS = new Set(["cheap", "standard", "strong"]);
@@ -1446,7 +1447,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         let provider = null;
         const compiledRole = delegationRoleForJobTypeFromModule(finalJobType);
         const compiledRoleProviders = getAvailableProviders(compiledRole);
-        if (finalJobType !== "promote" && finalJobType !== "human_input" && compiledRoleProviders.length <= 1) {
+        if (finalJobType !== "promote" && compiledRoleProviders.length <= 1) {
           provider = compiledRoleProviders[0] || getProviderName(compiledRole);
         }
         let imageRoute = null;
@@ -1912,7 +1913,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
 
       // ── Spawn delegator if multi-provider is configured ──
       // Only include jobs that actually need provider assignment (dev/fix/artificer).
-      // Promote and human_input are deterministic — no provider needed.
+      // Promote is deterministic and does not need provider assignment.
       propagateDroppedPlannerDependencies();
 
       if (createdCount === 0) {

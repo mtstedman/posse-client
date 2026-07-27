@@ -45,6 +45,9 @@ import {
   removeDependency,
   getWorkItem,
   expireStaleSessionLeases,
+  reconcileHumanGates,
+  resurfaceParkedHumanGates,
+  supersedeHumanGate,
   crossWiMergeDependencyWouldCycle,
   workItemCanReleaseFileLock,
   getQueueWakeGeneration,
@@ -97,6 +100,7 @@ import {
   readAtlasDriftCheckIntervalMs,
   readBoolSetting,
   readHeadlessHumanTimeoutSec,
+  readHumanGateResnoozeSec,
   readPositiveIntSetting,
 } from "../functions/config.js";
 import {
@@ -1535,6 +1539,12 @@ export class Scheduler {
     let lastHeadlessRecoverySweep = 0;
     const HEADLESS_RECOVERY_SWEEP_MS = 15_000;
 
+    // Human-gate maintenance: heal gate/job drift (stuck 'resolving' rows)
+    // and re-surface parked gates after their snooze so a skipped or
+    // timed-out prompt comes back without a restart.
+    let lastHumanGateMaintenanceSweep = 0;
+    const HUMAN_GATE_MAINTENANCE_SWEEP_MS = 60_000;
+
     try {
       let idleCount = 0;
       let lastProgressTime = Date.now(); // progress watchdog
@@ -1653,6 +1663,7 @@ export class Scheduler {
               getJob,
               getDependents,
               updateJobStatus,
+              supersedeHumanGate,
               removeDependency,
               refreshWorkItemStatus,
               logEvent,
@@ -1677,6 +1688,28 @@ export class Scheduler {
               logEvent,
             },
           });
+        }
+
+        if (Date.now() - lastHumanGateMaintenanceSweep > HUMAN_GATE_MAINTENANCE_SWEEP_MS) {
+          lastHumanGateMaintenanceSweep = Date.now();
+          try {
+            const reconciled = reconcileHumanGates();
+            if (reconciled.reopened > 0 || reconciled.retired > 0 || reconciled.registered > 0) {
+              this._log(`Human-gate reconcile: ${reconciled.registered} registered, ${reconciled.reopened} reopened, ${reconciled.retired} retired`, "yellow");
+            }
+          } catch (reconcileErr) {
+            this._log(`Human-gate reconcile failed: ${reconcileErr.message}`, "yellow");
+          }
+          if (this._hasDisplay) {
+            try {
+              const resurfaced = resurfaceParkedHumanGates({ snoozeSec: readHumanGateResnoozeSec() });
+              if (resurfaced.length > 0) {
+                this._log(`Re-surfaced ${resurfaced.length} parked human gate(s) after snooze`, "cyan");
+              }
+            } catch (resurfaceErr) {
+              this._log(`Parked-gate resurface sweep failed: ${resurfaceErr.message}`, "yellow");
+            }
+          }
         }
 
         this._cancelDeadlockedJobs();

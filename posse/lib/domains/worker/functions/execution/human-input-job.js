@@ -265,7 +265,7 @@ export async function runHumanInputJob(worker, job, {
       payload = prepared.payload;
     }
 
-    const output = await worker._humanInputHandler(activeJob, abortSignal);
+    const output = await worker._humanInputHandler(activeJob, abortSignal, { leaseToken });
     worker._throwIfKilled(job.id);
 
     if (output === null) {
@@ -443,14 +443,16 @@ export async function runHumanInputJob(worker, job, {
         finalHumanStatus = "failed";
         worker.emit(job.id, `${C.yellow}[human] Scope request could not be resolved (${resolved.code || "unknown"})${C.reset}`);
       } else if (approved) {
+        const batchSize = Array.isArray(resolved.request.batch) ? resolved.request.batch.length : 1;
         worker.emit(
           job.id,
-          `${C.green}[human] Approved ${resolved.request.access} scope for ${resolved.request.path}; ${resolved.requeued ? `requeued job #${resolved.job.id}` : `job #${resolved.job.id} will requeue as soon as its paused provider call exits`}${C.reset}`,
+          `${C.green}[human] Approved ${resolved.request.access} scope for ${resolved.request.path}${batchSize > 1 ? ` (+${batchSize - 1} batched)` : ""}; ${resolved.requeued ? `requeued job #${resolved.job.id}` : `job #${resolved.job.id} will requeue as soon as its paused provider call exits`}${C.reset}`,
         );
       } else {
+        const batchSize = Array.isArray(resolved.request?.batch) ? resolved.request.batch.length : 1;
         worker.emit(
           job.id,
-          `${C.yellow}[human] Denied scope for ${resolved.request.path}; ${resolved.finalized ? `job #${resolved.job.id} failed out-of-scope` : `job #${resolved.job.id} will fail as soon as its paused provider call exits`}${C.reset}`,
+          `${C.yellow}[human] Denied scope for ${resolved.request.path}${batchSize > 1 ? ` (+${batchSize - 1} batched)` : ""}; ${resolved.finalized ? `job #${resolved.job.id} failed out-of-scope` : `job #${resolved.job.id} will fail as soon as its paused provider call exits`}${C.reset}`,
         );
       }
     }

@@ -1164,6 +1164,32 @@ export class Display {
     });
   }
 
+  /**
+   * Withdraw queued prompts for one job whose gate was parked (display
+   * timeout or abort). Without this the stale entry stays answerable and a
+   * late answer resolves into the asker's already-settled race \u2014 silently
+   * dropped while the gate sits parked.
+   */
+  cancelQuestionsForJob(jobId) {
+    const targetJobId = Number(jobId);
+    if (!Number.isFinite(targetJobId)) return 0;
+    const targets = this._questionQueue.filter((q) => Number(q.jobId) === targetJobId);
+    for (const q of targets) {
+      this._removeQuestionSet(q);
+      try { q.reject(new Error("Prompt withdrawn \u2014 the gate was parked")); } catch { /* race already settled */ }
+    }
+    if (targets.length > 0) {
+      if (targets.includes(this._activeQ)) {
+        this._activeQ = null;
+        this._inputBuf = "";
+        if (this._inputMode === "question") this._inputMode = false;
+        this._drainQuestions();
+      }
+      this.addEvent(`${C.yellow}\u21b6 Prompt for job #${targetJobId} withdrawn (gate parked; it will resurface)${C.reset}`);
+    }
+    return targets.length;
+  }
+
   cancelAllQuestions() {
     this._aborted = true;
     this._inputMode = false;

@@ -214,6 +214,7 @@ export const SETTINGS_CATALOG = [
   { key: "stall_timeout",         default: "", runtimeFallback: "600", numeric: { integer: true, min: 1 }, description: "Seconds before a stalled job is killed (empty = 600)" },
   { key: "max_job_runtime_sec",   default: "", numeric: { integer: true, min: 1 }, description: "Maximum seconds a job may run before runtime cancellation (empty = 2x stall_timeout)" },
   { key: "headless_human_timeout_sec", default: "600", numeric: { integer: true, min: 1 }, description: "Seconds to wait for human input in headless mode" },
+  { key: "human_gate_resnooze_sec", default: "600", numeric: { integer: true, min: 30 }, description: "Seconds a parked human gate snoozes before the scheduler re-surfaces its prompt (display sessions only)" },
   { key: "default_max_attempts",  default: "3", numeric: { integer: true, min: 1 }, description: "Default maximum attempts per job" },
   { key: "scheduler_shadow_conflict_metrics", default: "true", valueType: "boolean", description: "Emit shadow metrics for relaxed scheduler root-root conflicts that strict mode would block" },
   { key: "target_branch",         default: "", scope: "repo", description: "Repo merge target branch (empty = auto-detect remote default/main/master before the current terminal branch)" },
@@ -224,6 +225,7 @@ export const SETTINGS_CATALOG = [
 
   // ── Pipeline / escalation limits ─────────────────────────────────────────
   { key: "posse_wi_failure_threshold", default: "5", numeric: { integer: true, min: 1 }, description: "Failed dev/fix jobs per work item before assessor escalates to human_input" },
+  { key: "scope_auto_approval", default: "true", valueType: "boolean", description: "Auto-approve mechanical scope requests (create-root-covered paths, test files for dev/fix, generated lockfiles) instead of opening a human gate" },
   { key: "posse_max_fix_chain_depth", default: "2", numeric: { integer: true, min: 1 }, description: "Maximum fix-chain depth (fix→fix→fix…) before escalating to human_input" },
   { key: "posse_max_replans", default: "3", numeric: { integer: true, min: 1 }, description: "Maximum needs_replan loops per work item before escalating to human_input" },
   { key: "posse_max_file_request_depth", default: "2", numeric: { integer: true, min: 0 }, description: "Maximum follow-up depth for dev file-request approval chains" },

@@ -48,6 +48,7 @@ export function recoverHeadlessHumanTimeouts({
     getJob,
     getDependents,
     updateJobStatus,
+    supersedeHumanGate,
     removeDependency,
     refreshWorkItemStatus,
     logEvent,
@@ -154,6 +155,7 @@ export function recoverHeadlessHumanTimeouts({
 
         // 3. Now fail the human_input job itself.
         updateJobStatus(hj.id, "failed");
+        supersedeHumanGate(hj.id, "Human gate timed out in headless mode");
         logEvent({
           work_item_id: hj.work_item_id,
           job_id: hj.id,

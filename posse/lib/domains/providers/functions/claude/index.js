@@ -296,6 +296,7 @@ export async function callProvider(promptText, {
   role = "planner",
   roleMode = null,
   allowWrite = false,
+  allowTests = true,
   projectDbWrite = false, // db-mode dev: project_db_query gets the write lane while file tools stay read-only
   projectDbCapability = "none",
   modelTier = "standard",
@@ -532,6 +533,7 @@ export async function callProvider(promptText, {
       role,
       roleMode,
       allowWrite,
+      allowTests,
       projectDbWrite,
       issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
       agentHandoffCompactV1: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,

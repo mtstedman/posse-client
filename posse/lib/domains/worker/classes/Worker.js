@@ -830,8 +830,8 @@ export class Worker {
 
   // --- Handler: Human Input ---------------------------------------------
 
-  async _humanInputHandler(job, abortSignal = null) {
-    return runHumanInputHandler(this, job, abortSignal);
+  async _humanInputHandler(job, abortSignal = null, { leaseToken = null } = {}) {
+    return runHumanInputHandler(this, job, abortSignal, { leaseToken });
   }
 
   // --- Kill Support -----------------------------------------------------

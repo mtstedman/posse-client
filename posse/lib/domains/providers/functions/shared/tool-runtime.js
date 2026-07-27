@@ -375,6 +375,11 @@ export function createStandardToolHandlerMap({
         reason: args.reason,
         source: "embedded_internal_tool",
       });
+      if (result?.auto === true && result?.approved === true && result?.path) {
+        // Widen the live per-attempt predicates so the retried write passes
+        // now; the durable grant is already in the job payload.
+        ctx?.scopePredicates?.policy?.grantWritePath?.(result.path);
+      }
       return JSON.stringify(result, null, 2);
     },
     chain_read(args, ctx) {

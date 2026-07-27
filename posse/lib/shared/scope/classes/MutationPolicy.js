@@ -561,6 +561,19 @@ export class MutationPolicy {
       this.cwd,
       new Set(["artifacts", "workspace", "inputs"]),
     ));
+    this._grantedWritePaths = new Set();
+  }
+
+  // Live grant from mid-attempt scope auto-approval. The policy is built once
+  // per provider call from a payload snapshot, so a path granted by
+  // request_scope during the call must be added here for the retried write to
+  // pass without restarting the attempt. The durable grant lives in the job
+  // payload (written by requestJobScopeExpansion) for later attempts.
+  grantWritePath(filePath) {
+    const rel = relFromCandidate(this.cwd, filePath);
+    if (!rel || !isCwdOrDescendantRel(rel)) return false;
+    this._grantedWritePaths.add(rel);
+    return true;
   }
 
   static fromJob(job = {}, payload = null, { cwd = process.cwd() } = {}) {
@@ -614,6 +627,7 @@ export class MutationPolicy {
     const rel = relFromCandidate(this.cwd, filePath);
     return this.scope.modifyFiles.includes(rel)
       || this.scope.createFiles.includes(rel)
+      || this._grantedWritePaths.has(rel)
       || matchesCreateRoot(rel, this.scope.createRoots)
       || matchesExternalRoot(filePath, this.externalCreateRoots);
   }
@@ -622,6 +636,7 @@ export class MutationPolicy {
     const rel = relFromCandidate(this.cwd, filePath);
     return this.scope.createFiles.includes(rel)
       || this.scope.modifyFiles.includes(rel)
+      || this._grantedWritePaths.has(rel)
       || matchesCreateRoot(rel, this.scope.createRoots)
       || matchesExternalRoot(filePath, this.externalCreateRoots);
   }

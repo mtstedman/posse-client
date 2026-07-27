@@ -758,6 +758,8 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
   return {
     ...opts,
     allowWrite: opts.allowWrite === true && issued.toolPolicy.allow_write && writeToolIssued,
+    allowShell: opts.allowShell !== false && issued.toolPolicy.allow_shell,
+    allowTests: opts.allowTests !== false && issued.toolPolicy.allow_tests,
     projectDbCapability: effectiveDb,
     projectDbWrite: opts.projectDbWrite === true && effectiveDb === "write",
     needsImageGeneration: opts.needsImageGeneration === true && imageIssued,

@@ -27,6 +27,7 @@ export function __testBuildShellDisciplineBlock({
   const hasEditFile = contractHasTool(toolNames, "edit_file");
   const hasFileMutation = hasWriteFile || hasEditFile;
   const hasShell = contractHasTool(toolNames, "bash");
+  const allowTests = executionContract?.allowTests === true;
   const registeredTestTools = ["create_test_suite", "create_test", "run_test", "run_test_suite"]
     .filter((name) => contractHasTool(toolNames, name));
   const rules = [
@@ -60,8 +61,12 @@ export function __testBuildShellDisciplineBlock({
   }
   if (hasShell) {
     rules.push("- Do NOT use shell for normal file reads, searches, listings, diffs, or edits when a listed file tool can do the job.");
-    rules.push("- Shell is an exception path only. Use the exact manifest entry whose canonical label is bash for explicit test/build commands, required toolchain commands, or specifically requested command output.");
-    rules.push("- A provided test_command is command input for that listed bash tool; it is not itself a callable tool.");
+    rules.push(allowTests
+      ? "- Shell is an exception path only. Use the exact manifest entry whose canonical label is bash for explicit test/build commands, required toolchain commands, or specifically requested command output."
+      : "- Shell is an exception path only. Test execution is not issued; use bash only for a non-test build/toolchain operation or specifically requested command output.");
+    rules.push(allowTests
+      ? "- A provided test_command is command input for that listed bash tool; it is not itself a callable tool."
+      : "- A provided test_command is not callable in this run. Do not invoke it through bash, seek permission, or retry another test runner.");
   } else {
     rules.push("- Shell command execution is unavailable in this run because no manifest entry has the canonical label bash. Do not invoke PowerShell, pwsh, bash, shell, or a provided test_command; report that command verification was unavailable.");
   }
@@ -69,6 +74,9 @@ export function __testBuildShellDisciplineBlock({
     rules.push(`- Registered-test capabilities are limited to the listed manifest entries with canonical labels: ${registeredTestTools.join(", ")}. Do not call any other test-suite tool.`);
   } else {
     rules.push("- Registered-test tools are unavailable in this run. Do not call create_test_suite, create_test, run_test, or run_test_suite.");
+  }
+  if (!allowTests) {
+    rules.push("- Keep completion tied to product work: unavailable tests alone must not cause PARTIAL or BLOCKED. Dev/fix reports the exact unrun check with verification_unavailable.");
   }
 
   if (platform !== "win32" || !hasShell) {
@@ -112,6 +120,7 @@ export function __testBuildCodexRoleGuardBlock({
 } = {}) {
   const toolNames = contractToolNames(executionContract);
   const has = (name) => contractHasTool(toolNames, name);
+  const allowTests = executionContract?.allowTests === true;
   if (role === "dev") {
     const rules = ["DEV TOOL PRIORITY:"];
     if (has("write_file") || has("edit_file")) {
@@ -127,8 +136,10 @@ export function __testBuildCodexRoleGuardBlock({
       const labels = [has("read_file") ? "read_file" : null, has("list_files") ? "list_files" : null, has("search_files") ? "search_files" : null].filter(Boolean).join(", ");
       rules.push(`- Use active retrieval context first when available, then the listed manifest entries (${labels}) for exact worktree inspection.`);
     }
-    if (has("bash")) {
+    if (has("bash") && allowTests) {
       rules.push("- If a test_command is provided, run it after file changes through the exact listed bash surface. If only its launcher is unavailable, try one obvious equivalent launcher or targeted invocation; keep completion status tied to product work and report the exact unavailable command. The command string is not a tool name.");
+    } else if (has("bash")) {
+      rules.push("- Bash is listed, but test execution is not issued. Do not attempt a provided test_command through bash or another runner; finish completed product work as COMPLETE and set verification_unavailable.");
     } else {
       rules.push("- No bash surface is listed. Do not attempt a provided test_command or any PowerShell/shell command; report verification as unavailable.");
     }
@@ -145,9 +156,11 @@ export function __testBuildCodexRoleGuardBlock({
       rules.push(`- Verify files with the listed manifest entries (${labels}); when retrieval evidence is active, start there first.`);
     }
     if (has("run_scoped_checks")) rules.push("- Use the listed run_scoped_checks surface for lint/typecheck first, including PHP syntax checks.");
-    if (has("bash")) {
+    if (has("bash") && allowTests) {
       rules.push("- Use the exact listed bash surface only for explicit verification commands such as a provided test command or a narrow project test/build command.");
       rules.push("- Do not use shell-based search to decide whether the implementation changed the right files.");
+    } else if (has("bash")) {
+      rules.push("- Bash is listed for non-test inspection, but test execution is not issued. Do not run a test command through it or request permission; assess the available deterministic evidence.");
     } else {
       rules.push("- Shell and provided test-command execution are unavailable because no bash surface is listed. Do not attempt PowerShell or shell commands.");
     }

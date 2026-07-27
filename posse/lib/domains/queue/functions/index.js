@@ -26,6 +26,7 @@ import {
 } from "./common.js";
 import { flushEventsNow, logEvent } from "./events.js";
 import { getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
+import { classifyAutoApprovableScopeRequest } from "../../../shared/policies/functions/scope-auto-approval.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
 import { listUnresolvedActionableFailures } from "./failure-actionability.js";
@@ -1468,7 +1469,38 @@ function parseJobPayloadObject(job) {
   }
 }
 
+function scopeRequestBatchEntries(request = {}) {
+  const batch = Array.isArray(request.batch) ? request.batch.filter((entry) => entry?.path) : [];
+  if (batch.length > 0) return batch;
+  return request.path
+    ? [{ path: request.path, access: request.access, operation: request.operation, reason: request.reason }]
+    : [];
+}
+
+function scopeGateQuestionText(job, request) {
+  const entries = scopeRequestBatchEntries(request);
+  return [
+    `Job #${job.id} (${job.title}) attempted to write outside its writable scope:`,
+    ...entries.map((entry) => `  ${entry.path} (${entry.access})${entry.reason ? ` — ${entry.reason}` : ""}`),
+    entries.length === 1
+      ? `Approve to add this exact path to ${entries[0].access === "modify" ? "files_to_modify" : "files_to_create"} and retry the job, or deny to fail it with an out-of-scope error.`
+      : `Approve to add these ${entries.length} exact paths to the job's writable scope and retry the job, or deny to fail it with an out-of-scope error.`,
+    `Reply with "approve" or "deny".`,
+  ].join("\n");
+}
+
+function scopeRequestDeniedError(request = {}) {
+  const entries = scopeRequestBatchEntries(request);
+  if (entries.length === 1) {
+    const [entry] = entries;
+    return `Out-of-scope ${entry.operation || request.operation || "write"} denied for ${entry.path}.`;
+  }
+  const paths = entries.map((entry) => entry.path);
+  return `Out-of-scope writes denied for ${paths.join(", ") || "the requested paths"}.`;
+}
+
 function scopeRequestResult({ request, humanJobId = null, reused = false } = {}) {
+  const batchSize = scopeRequestBatchEntries(request || {}).length;
   return {
     ok: false,
     code: "scope_approval_pending",
@@ -1479,7 +1511,7 @@ function scopeRequestResult({ request, humanJobId = null, reused = false } = {})
     access: request?.access || null,
     operation: request?.operation || null,
     reused,
-    message: `The current job is paused until a human approves or denies writable scope for ${request?.path || "the requested path"}.`,
+    message: `The current job is paused until a human approves or denies writable scope for ${request?.path || "the requested path"}${batchSize > 1 ? ` (+${batchSize - 1} batched path(s))` : ""}.`,
   };
 }
 
@@ -1525,30 +1557,146 @@ export function requestJobScopeExpansion({
       return { ok: false, code: "scope_request_context_mismatch", paused: false, message: "The scope request does not belong to the active work item." };
     }
     const payload = parseJobPayloadObject(current);
-    const pending = payload._pending_scope_request;
-    if (pending && typeof pending === "object") {
-      if (
-        pending.path === normalizedPath
-        && pending.access === normalizedAccess
-        && pending.operation === normalizedOperation
-      ) {
+    const pending = payload._pending_scope_request && typeof payload._pending_scope_request === "object"
+      ? payload._pending_scope_request
+      : null;
+    if (pending) {
+      const pendingEntries = scopeRequestBatchEntries(pending);
+      if (pendingEntries.some((entry) =>
+        entry.path === normalizedPath
+        && entry.access === normalizedAccess
+        && entry.operation === normalizedOperation)) {
         return scopeRequestResult({ request: pending, humanJobId: pending.approval_job_id || null, reused: true });
       }
-      return {
-        ok: false,
-        code: "scope_approval_already_pending",
-        paused: true,
-        request_id: pending.id || null,
-        path: pending.path || null,
-        message: `Job #${normalizedJobId} is already paused for a scope decision on ${pending.path || "another path"}.`,
-      };
     }
-    if (current.status !== "running") {
+    if (!pending && current.status !== "running") {
       return {
         ok: false,
         code: "scope_request_job_inactive",
         paused: false,
         message: `Job #${normalizedJobId} cannot request scope while its status is ${current.status}.`,
+      };
+    }
+
+    // Mechanical path classes are granted without a human gate: the payload
+    // scope is widened durably here, and the caller's live predicates are
+    // widened by the tool handler so the retried write succeeds within the
+    // same attempt instead of costing a pause → gate → re-run cycle.
+    let autoApprovalEnabled = true;
+    try {
+      autoApprovalEnabled = String(getSetting(SETTING_KEYS.SCOPE_AUTO_APPROVAL) ?? "true") !== "false";
+    } catch { /* default on */ }
+    const autoClass = autoApprovalEnabled
+      ? classifyAutoApprovableScopeRequest({
+        path: normalizedPath,
+        jobType: current.job_type,
+        createRoots: payload.create_roots,
+      })
+      : null;
+    if (autoClass) {
+      const field = normalizedAccess === "modify" ? "files_to_modify" : "files_to_create";
+      const nextPayload = { ...payload };
+      nextPayload[field] = [...new Set([
+        ...(Array.isArray(nextPayload[field]) ? nextPayload[field] : []),
+        normalizedPath,
+      ])];
+      nextPayload._scope_auto_approvals = [
+        ...(Array.isArray(nextPayload._scope_auto_approvals) ? nextPayload._scope_auto_approvals : []),
+        {
+          path: normalizedPath,
+          access: normalizedAccess,
+          operation: normalizedOperation,
+          reason: autoClass.reason,
+          approved_at: now(),
+        },
+      ].slice(-20);
+      updateJobPayload(current.id, JSON.stringify(nextPayload));
+      logEvent({
+        work_item_id: current.work_item_id,
+        job_id: current.id,
+        attempt_id: Number(attemptId) || null,
+        event_type: EVENT_TYPES.JOB_SCOPE_REQUEST_APPROVED,
+        actor_type: EVENT_ACTORS.SYSTEM,
+        message: `Auto-approved ${normalizedAccess} scope (${autoClass.reason}): ${normalizedPath}`,
+        event_json: JSON.stringify({
+          path: normalizedPath,
+          access: normalizedAccess,
+          operation: normalizedOperation,
+          auto: true,
+          reason: autoClass.reason,
+        }),
+      });
+      return {
+        ok: true,
+        code: "scope_auto_approved",
+        paused: false,
+        approved: true,
+        auto: true,
+        path: normalizedPath,
+        access: normalizedAccess,
+        operation: normalizedOperation,
+        reason: autoClass.reason,
+        message: `Scope auto-approved (${autoClass.reason}) for ${normalizedPath}. Retry the ${normalizedOperation} now.`,
+      };
+    }
+
+    if (pending) {
+      // Batch a further out-of-scope path onto the open gate instead of
+      // bouncing it: the paused provider call can surface several missing
+      // paths while it unwinds, and each bounced path would cost another
+      // full pause → gate → answer → re-run cycle on the next attempt.
+      const gateJob = pending.approval_job_id ? getJob(pending.approval_job_id) : null;
+      const gateOpen = !!gateJob
+        && gateJob.job_type === "human_input"
+        && ["queued", "waiting_on_human"].includes(gateJob.status);
+      if (!gateOpen) {
+        return {
+          ok: false,
+          code: "scope_approval_already_pending",
+          paused: true,
+          request_id: pending.id || null,
+          path: pending.path || null,
+          message: `Job #${normalizedJobId} is already paused for a scope decision on ${pending.path || "another path"}.`,
+        };
+      }
+      const entry = {
+        path: normalizedPath,
+        access: normalizedAccess,
+        operation: normalizedOperation,
+        reason: String(reason || "").trim().slice(0, 500),
+      };
+      const batch = [...scopeRequestBatchEntries(pending), entry];
+      const updatedPending = { ...pending, batch };
+      updateJobPayload(current.id, JSON.stringify({
+        ...payload,
+        _pending_scope_request: updatedPending,
+      }));
+      const gatePayload = parseJobPayloadObject(gateJob);
+      updateJobPayload(gateJob.id, JSON.stringify({
+        ...gatePayload,
+        scope_request: updatedPending,
+        questions: [scopeGateQuestionText(current, updatedPending)],
+      }));
+      logEvent({
+        work_item_id: current.work_item_id,
+        job_id: current.id,
+        attempt_id: Number(attemptId) || null,
+        event_type: EVENT_TYPES.JOB_SCOPE_REQUESTED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Added ${normalizedAccess} scope request to pending approval batch: ${normalizedPath}`,
+        event_json: JSON.stringify({ request: updatedPending, approval_job_id: gateJob.id, appended: entry }),
+      });
+      return {
+        ok: false,
+        code: "scope_approval_batched",
+        paused: true,
+        request_id: pending.id || null,
+        approval_job_id: gateJob.id,
+        path: normalizedPath,
+        access: normalizedAccess,
+        operation: normalizedOperation,
+        batched_paths: batch.map((batched) => batched.path),
+        message: `Added ${normalizedPath} to the pending scope approval batch (${batch.length} paths). One human decision covers the whole batch.`,
       };
     }
 
@@ -1564,6 +1712,12 @@ export function requestJobScopeExpansion({
       attempt_id: Number(attemptId) || null,
       agent_call_id: Number(agentCallId) || null,
     };
+    request.batch = [{
+      path: normalizedPath,
+      access: normalizedAccess,
+      operation: normalizedOperation,
+      reason: request.reason,
+    }];
     const humanJob = createJob({
       work_item_id: current.work_item_id,
       job_type: "human_input",
@@ -1575,13 +1729,7 @@ export function requestJobScopeExpansion({
         original_job_id: current.id,
         review_type: SCOPE_REQUEST_REVIEW_TYPE,
         scope_request: request,
-        questions: [[
-          `Job #${current.id} (${current.title}) attempted ${normalizedOperation} on a file outside its writable scope:`,
-          `  ${normalizedPath}`,
-          request.reason ? `Reason: ${request.reason}` : null,
-          `Approve to add this exact path to ${normalizedAccess === "modify" ? "files_to_modify" : "files_to_create"} and retry the job, or deny to fail it with an out-of-scope error.`,
-          `Reply with "approve" or "deny".`,
-        ].filter(Boolean).join("\n")],
+        questions: [scopeGateQuestionText(current, request)],
         context: `The request was surfaced automatically by the internal request_scope tool after ${normalizedOperation} hit the job's scope boundary.`,
       }),
     });
@@ -1636,11 +1784,17 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
       answer: String(answer || "").slice(0, 300),
     };
     if (approved === true) {
-      const field = request.access === "modify" ? "files_to_modify" : "files_to_create";
-      nextPayload[field] = [...new Set([
-        ...(Array.isArray(nextPayload[field]) ? nextPayload[field] : []),
-        request.path,
-      ])];
+      // The pending request from the original job is authoritative for the
+      // batch contents: appends update it in the same transaction as the
+      // gate payload, and it reflects every path the answer covers.
+      const entries = scopeRequestBatchEntries(pending);
+      for (const entry of entries) {
+        const field = entry.access === "modify" ? "files_to_modify" : "files_to_create";
+        nextPayload[field] = [...new Set([
+          ...(Array.isArray(nextPayload[field]) ? nextPayload[field] : []),
+          entry.path,
+        ])];
+      }
       const executionSettled = pending.execution_settled === true;
       if (executionSettled) delete nextPayload._pending_scope_request;
       updateJobPayload(original.id, JSON.stringify(nextPayload));
@@ -1652,17 +1806,17 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
         job_id: original.id,
         event_type: EVENT_TYPES.JOB_SCOPE_REQUEST_APPROVED,
         actor_type: EVENT_ACTORS.HUMAN,
-        message: `Approved ${request.access} scope: ${request.path}`,
+        message: `Approved scope for ${entries.map((entry) => entry.path).join(", ")}`,
         event_json: JSON.stringify({ request, approval_job_id: humanJob.id, answer: String(answer || "").slice(0, 300) }),
       });
-      return { ok: true, approved: true, requeued: executionSettled, job: getJob(original.id), request };
+      return { ok: true, approved: true, requeued: executionSettled, job: getJob(original.id), request: pending };
     }
 
     nextPayload._scope_request_denials = [
       ...(Array.isArray(nextPayload._scope_request_denials) ? nextPayload._scope_request_denials : []),
-      { ...request, denied_at: now(), answer: String(answer || "").slice(0, 300) },
+      { ...pending, denied_at: now(), answer: String(answer || "").slice(0, 300) },
     ].slice(-20);
-    const error = `Out-of-scope ${request.operation} denied for ${request.path}.`;
+    const error = scopeRequestDeniedError(pending);
     const executionSettled = pending.execution_settled === true;
     if (executionSettled) delete nextPayload._pending_scope_request;
     updateJobPayload(original.id, JSON.stringify(nextPayload));
@@ -1710,7 +1864,7 @@ export function settleJobScopeExpansionAttempt({ jobId, attemptId = null } = {})
     if (settled.decision === "rejected") {
       delete nextPayload._pending_scope_request;
       updateJobPayload(original.id, JSON.stringify(nextPayload));
-      const error = `Out-of-scope ${settled.operation} denied for ${settled.path}.`;
+      const error = scopeRequestDeniedError(settled);
       setJobError(original.id, error);
       updateJobStatus(original.id, "failed", { expectedStatuses: ["waiting_on_human"], force: true });
       return { ok: true, decision: "rejected", finalized: true, job: getJob(original.id), request: settled, error };
@@ -1831,6 +1985,75 @@ export function requeueWaitingHumanInputJobs() {
       refreshWorkItemStatus(workItemId);
     }
 
+    return parked.map((job) => ({ job_id: job.id, work_item_id: job.work_item_id }));
+  };
+
+  if (db.inTransaction) return execute();
+  return runImmediateTransaction(db, execute);
+}
+
+/**
+ * Mid-session revival of parked human gates. A gate parks (waiting_on_human,
+ * lease released) when its prompt is skipped, times out, or its answer fails
+ * validation — and nothing else requeues it until the next boot, so it would
+ * never be prompted again this session. Requeue parked, unleased, still-open
+ * gates whose updated_at is older than the snooze window so they resurface
+ * without a restart. Live prompts and bridge claims hold a renewed lease and
+ * are left alone; push offers are answered out-of-band by design.
+ */
+export function resurfaceParkedHumanGates({ snoozeSec = 600 } = {}) {
+  const db = getDb();
+  const execute = () => {
+    const ts = now();
+    const effectiveSnoozeSec = Math.max(30, Number(snoozeSec) || 600);
+    const cutoff = new Date(Date.now() - effectiveSnoozeSec * 1000).toISOString();
+    const parked = db.prepare(`
+      SELECT j.id, j.work_item_id, j.job_type, j.payload_json
+      FROM jobs j
+      LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.status = 'waiting_on_human'
+        AND j.job_type = 'human_input'
+        AND (j.lease_token IS NULL OR j.lease_expires_at IS NULL OR j.lease_expires_at < ?)
+        AND j.updated_at < ?
+        AND (hg.gate_job_id IS NULL OR hg.gate_state = 'open')
+    `).all(ts, cutoff).filter((job) => !isPushOfferJob(job));
+
+    if (parked.length === 0) return [];
+
+    const placeholders = parked.map(() => "?").join(",");
+    db.prepare(`
+      UPDATE jobs
+      SET status = 'queued',
+          lease_owner = NULL,
+          lease_token = NULL,
+          lease_expires_at = NULL,
+          started_at = NULL,
+          finished_at = NULL,
+          updated_at = ?
+      WHERE id IN (${placeholders})
+        AND status = 'waiting_on_human'
+        AND job_type = 'human_input'
+        AND (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?)
+    `).run(now(), ...parked.map((job) => job.id), now());
+
+    for (const job of parked) {
+      releaseJobLocksForStatus(job.id, "queued");
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.JOB_HUMAN_PROMPT_REQUEUED,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        message: `Re-surfaced parked human gate after ${effectiveSnoozeSec}s snooze`,
+      });
+      notifyQueueStateChanged({
+        reason: "job_human_prompt_requeued",
+        jobId: job.id,
+        workItemId: job.work_item_id,
+      });
+    }
+    for (const workItemId of new Set(parked.map((job) => job.work_item_id).filter(Boolean))) {
+      refreshWorkItemStatus(workItemId);
+    }
     return parked.map((job) => ({ job_id: job.id, work_item_id: job.work_item_id }));
   };
 

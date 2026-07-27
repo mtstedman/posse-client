@@ -142,7 +142,7 @@ export function buildHumanPromptIdentity(job, payload = {}, {
   };
 }
 
-export async function runHumanInputHandler(worker, job, abortSignal = null) {
+export async function runHumanInputHandler(worker, job, abortSignal = null, { leaseToken = null } = {}) {
   const payload = worker.parsePayload(job);
   const { questions, context, promptOptions } = resolveHumanInputPrompt(job, payload);
   const promptIdentity = buildHumanPromptIdentity(job, payload);
@@ -166,7 +166,11 @@ export async function runHumanInputHandler(worker, job, abortSignal = null) {
   }
 
   if (worker.display && worker.display.askQuestions) {
-    updateJobStatus(job.id, "waiting_on_human");
+    // The worker still holds the lease here: pass its token or the guarded
+    // UPDATE (lease_token IS NULL) silently no-ops and the job stays
+    // "running" for the whole prompt — invisible to and unclaimable by the
+    // bridge, and missed by every waiting_on_human sweep.
+    updateJobStatus(job.id, "waiting_on_human", { leaseToken });
     const DISPLAY_TIMEOUT_MS = 3600 * 1000;
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -180,12 +184,18 @@ export async function runHumanInputHandler(worker, job, abortSignal = null) {
         ...(aborted ? [aborted] : []),
       ]);
       return JSON.stringify({ questions, answers, prompt_identity: promptIdentity });
+    } catch (err) {
+      // Withdraw the queued TUI prompt: leaving it would let the user
+      // "answer" a gate that was already parked, silently dropping the
+      // answer into the settled race.
+      try { worker.display.cancelQuestionsForJob?.(job.id); } catch { /* display hygiene only */ }
+      throw err;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  updateJobStatus(job.id, "waiting_on_human");
+  updateJobStatus(job.id, "waiting_on_human", { leaseToken });
   worker.emit(job.id, `${C.yellow}[human] Needs input: ${questions[0]}${C.reset}`);
   return null;
 }

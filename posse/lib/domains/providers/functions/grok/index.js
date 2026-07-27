@@ -270,6 +270,7 @@ export async function callProvider(promptText, {
   role = "planner",
   roleMode = null,
   allowWrite = false,
+  allowTests = true,
   projectDbWrite = false,
   projectDbCapability = "none",
   scopedFiles = null,   // files_to_modify
@@ -375,6 +376,7 @@ export async function callProvider(promptText, {
     const narrowed = narrowProviderOptionsToRemoteIssuance({
       role,
       allowWrite,
+      allowTests,
       projectDbWrite,
       projectDbCapability,
       needsImageGeneration,
@@ -383,6 +385,7 @@ export async function callProvider(promptText, {
       sessionPacket: remoteAssessorPrompt.packet,
     });
     allowWrite = narrowed.allowWrite;
+    allowTests = narrowed.allowTests;
     projectDbWrite = narrowed.projectDbWrite;
     projectDbCapability = narrowed.projectDbCapability;
     needsImageGeneration = narrowed.needsImageGeneration;
@@ -397,6 +400,7 @@ export async function callProvider(promptText, {
     role: executionRole,
     roleMode,
     allowWrite,
+    allowTests,
     projectDbWrite,
     issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
     agentHandoffCompactV1: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,

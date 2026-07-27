@@ -452,7 +452,6 @@ export class PlannerRole extends BaseRole {
     const availableSkillsBlock = [
       "Available dev skills (optional planner-selected prompt attachments; choose only these ids for dev code tasks):",
       renderSkillAllowlist(enabledDevSkills),
-      "- artificer/promote/human_input: skills are not attached",
     ].join("\n");
     const plannerOutputBindingRules = explicitBindings.outputMode
       ? [
@@ -714,15 +713,30 @@ export class PlannerRole extends BaseRole {
         queueQuestionAnswerTask(worker, job, ctx, { reason, output, storeResponse: true });
         return output;
       }
-      emit(worker, job.id, `${C.cyan}[planner]${C.reset} WI#${job.work_item_id}: no tasks needed - ${reason}`);
+      emit(worker, job.id, `${C.red}[planner]${C.reset} WI#${job.work_item_id}: rejected terminal no-task plan - ${reason}`);
+      storeArtifact({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: ctx.attemptId,
+        artifact_type: "response",
+        content_long: output,
+      });
       storeArtifact({
         work_item_id: job.work_item_id,
         job_id: job.id,
         attempt_id: ctx.attemptId,
         artifact_type: "summary",
-        content_long: `Planner: no tasks needed. ${reason}`,
+        content_long: `Planner terminal no-task output rejected. ${reason}`,
       });
-      return output;
+      logBadInputFailure(job, {
+        attemptId: ctx.attemptId,
+        layer: "planner",
+        upstream: "planner_output",
+        classification: "terminal_no_tasks",
+        detail: "Planning cannot terminate an ordinary work item; downstream executable verification is required",
+        snippet: output,
+      });
+      throw new Error("Planner attempted terminal no-task completion; downstream executable verification is required");
     }
 
     if (dualMode && roleMode !== "synth") {

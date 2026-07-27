@@ -17,9 +17,9 @@ work item
   -> researcher
   -> planner
   -> delegator (optional, when multiple providers are enabled)
-  -> dev / artificer / promote / human_input
+  -> dev / artificer / promote
   -> assessor
-  -> fix or human review when needed
+  -> fix or an internal human gate when needed
 ```
 
 Key behavior:

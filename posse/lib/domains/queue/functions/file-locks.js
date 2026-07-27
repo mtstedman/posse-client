@@ -144,7 +144,6 @@ function locksConflict(scope, locks, {
   allowJobId = null,
   allowJobIds = null,
   ignoreSameWorkItemLocks = false,
-  relaxSameWorkItemRoots = false,
 } = {}) {
   const conflict = (lock, candidate) => {
     if (candidate.lock_kind === "file" && lock.lock_kind === "file") return candidate.path === lock.path;
@@ -157,7 +156,6 @@ function locksConflict(scope, locks, {
   };
 
   const candidates = scopeToLockRows(scope);
-  const hasExactCandidateFiles = candidates.some((candidate) => candidate.lock_kind === "file");
   const allowedJobIds = new Set([
     ...(allowJobIds ? [...allowJobIds] : []),
     ...(allowJobId != null ? [allowJobId] : []),
@@ -168,19 +166,7 @@ function locksConflict(scope, locks, {
       && Number(lock.work_item_id) === Number(allowWorkItemId);
     if (ignoreSameWorkItemLocks && sameWorkItem) continue;
     if (lock.job_id != null && allowedJobIds.has(Number(lock.job_id))) continue;
-    const hit = candidates.find((candidate) => {
-      if (
-        relaxSameWorkItemRoots
-        && sameWorkItem
-        && hasExactCandidateFiles
-        && lock.path !== "*"
-        && candidate.path !== "*"
-        && (lock.lock_kind === "root" || candidate.lock_kind === "root")
-      ) {
-        return false;
-      }
-      return conflict(lock, candidate);
-    });
+    const hit = candidates.find((candidate) => conflict(lock, candidate));
     if (hit) return { lock, candidate: hit };
   }
   return null;
@@ -314,7 +300,6 @@ export function findWriteLockConflict(job, scope = getJobWriteScope(job)) {
     allowJobId: job.id,
     allowJobIds,
     allowWorkItemId: job.work_item_id,
-    relaxSameWorkItemRoots: true,
   });
   if (jobConflict) return { type: "job", ...jobConflict };
   return null;

@@ -473,13 +473,28 @@ function shouldRenderAssessorReadOnlyShell(packet, localPolicy) {
 }
 
 function renderLocalPolicyOverlay(packet, { localPolicy = null } = {}) {
-  if (!shouldRenderAssessorReadOnlyShell(packet, localPolicy || packet?.tool_policy)) return "";
-  return [
-    "LOCAL EXECUTION POLICY NOTE:",
-    "- Assessor shell policy: read-only bash is allowed for inspection and verification commands only.",
-    "- Use run_scoped_checks for lint/typecheck, including PHP syntax checks; do not run php -l or php --syntax-check through bash.",
-    "- Assessors have no write permission. Bash must not modify files.",
-  ].join("\n");
+  const policy = localPolicy || packet?.tool_policy;
+  const role = String(packet?.recipient || packet?.job_type || "").trim().toLowerCase();
+  const sections = [];
+  if (shouldRenderAssessorReadOnlyShell(packet, policy)) {
+    sections.push([
+      "LOCAL EXECUTION POLICY NOTE:",
+      "- Assessor shell policy: read-only bash is allowed for inspection and verification commands only.",
+      "- Use run_scoped_checks for lint/typecheck, including PHP syntax checks; do not run php -l or php --syntax-check through bash.",
+      "- Assessors have no write permission. Bash must not modify files.",
+    ].join("\n"));
+  }
+  if (policy?.allow_tests === false && ["dev", "assessor"].includes(role)) {
+    sections.push([
+      "LOCAL TEST EXECUTION POLICY:",
+      "- Test execution is not issued for this attempt. Do not invoke a test command, test runner, run_scoped_checks, registered-test tool, or shell-based test route.",
+      "- Do not spend turns requesting test permission or retrying an unavailable test route.",
+      role === "dev"
+        ? "- Complete finished product work as COMPLETE and use verification_unavailable to report the exact unrun check; unavailable tests alone must not degrade the result to PARTIAL or BLOCKED."
+        : "- Assess the available code and deterministic evidence. Missing test authority alone is not a defect and must not force a blocked verdict.",
+    ].join("\n"));
+  }
+  return sections.join("\n\n");
 }
 
 function clampPolicyGrant(remoteGrant, localPolicy, key) {

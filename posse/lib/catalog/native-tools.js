@@ -318,7 +318,7 @@ export const TOOL_AGENT_HANDOFF = {
         enum: ["success", "complete", "partial", "gap", "input_required", "failed", "blocked", "pass", "fail", "needs_replan", "needs_review"],
         description:
           "Profile-specific outcome: researcher.pipeline.v1=success|gap|input_required; researcher.report.v1=complete; " +
-          "planner.plan.v1=success|complete; dev.result.v1 and artificer.result.v1=complete|failed|blocked; " +
+          "planner.plan.v1=success; dev.result.v1 and artificer.result.v1=complete|failed|blocked; " +
           "assessor.verdict.v1=pass|fail|needs_replan|needs_review|blocked; citation_synthesis.v1=complete|partial|failed.",
       },
       confidence: {
@@ -340,11 +340,11 @@ export const TOOL_AGENT_HANDOFF = {
               type: "object",
               description:
                 "Profile target: researcher.pipeline.v1, dev.result.v1, artificer.result.v1, and assessor.verdict.v1 use pipeline/$pipeline; " +
-                "researcher.report.v1 uses result/$result; planner.plan.v1 uses agent/dev|artificer or system/human_input|promote|no_tasks; " +
+                "researcher.report.v1 uses result/$result; planner.plan.v1 uses agent/dev|artificer or system/promote; " +
                 "citation_synthesis.v1 uses parent/$parent. For system/promote, put each exact repository destination file in report.scope.files_to_create or files_to_modify; Posse derives deterministic mappings.",
               properties: {
                 kind: { type: "string", enum: ["agent", "system", "pipeline", "result", "parent"] },
-                role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "no_tasks", "$pipeline", "$result", "$parent"] },
+                role: { type: "string", enum: ["dev", "artificer", "promote", "$pipeline", "$result", "$parent"] },
               },
               required: ["kind"],
               additionalProperties: false,
@@ -672,8 +672,8 @@ const PLANNER_COMPACT_TASK_V3 = {
   properties: {
     id: { type: "string", minLength: 1, maxLength: 80, description: "Optional; Posse generates task-N when omitted. Target 40 characters or fewer; 80 is the hard ceiling." },
     depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 80 } },
-    role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "no_tasks"] },
-    job_type: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "no_tasks"], description: "Deprecated migration alias for role." },
+    role: { type: "string", enum: ["dev", "artificer", "promote"] },
+    job_type: { type: "string", enum: ["dev", "artificer", "promote"], description: "Deprecated migration alias for role." },
     intent: { type: "string", minLength: 1, maxLength: 1000 },
     summary: { type: "string", minLength: 1, maxLength: 4000, description: "Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
     claims: HANDOFF_CLAIMS,
@@ -858,10 +858,10 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
   name: "agent_handoff",
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
-    "Use role dev or artificer for executable work; human_input, promote, and no_tasks are system roles. " +
+    "Use role dev or artificer for executable work; promote is a system role. " +
     "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and 2000-character summaries; bounded overflow is accepted up to the schema hard ceilings. " +
-    "Use exactly one no_tasks task only when no work is required. Correct example: " +
-    '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and tests.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["Focused tests pass"]}]}. ' +
+    "Planning is never terminal: if research suggests the requested state already exists, emit a narrow dev task to verify that state so downstream execution and assessment own the no-op decision. Correct example: " +
+    '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
     "Use only fields shown in the task schema; do not wrap tasks in another report envelope. The receipt ends provider generation.",
   parameters: {
     type: "object",
@@ -998,10 +998,10 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
   name: "agent_handoff",
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
-    "Use role dev or artificer for executable work; human_input, promote, and no_tasks are system roles. " +
+    "Use role dev or artificer for executable work; promote is a system role. " +
     "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and 2000-character summaries; bounded overflow is accepted up to the schema hard ceilings. " +
-    "Use exactly one no_tasks task only when no work is required. Correct example: " +
-    '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and tests.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["Focused tests pass"]}]}. ' +
+    "Planning is never terminal: if research suggests the requested state already exists, emit a narrow dev task to verify that state so downstream execution and assessment own the no-op decision. Correct example: " +
+    '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
     "Use only fields shown in the task schema; do not wrap tasks in another report envelope. The receipt ends provider generation.",
   parameters: {
     type: "object",

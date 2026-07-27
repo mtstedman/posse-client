@@ -30,16 +30,22 @@ const RISK_TAG_ALIASES = Object.freeze({
   locking: "concurrency",
 });
 
+// Inference patterns require wording that is actually about the risk.
+// Bare generic words (key, token, role, policy, lock, remove, table,
+// commit, worker, ...) appear constantly in ordinary task prose and would
+// inflate the risk score — and with it the assessor's pass-confidence
+// floor — for tasks that carry none of the tagged risk. Critical tags
+// especially must come from compound phrases, not single common words.
 const RISK_PATTERNS = Object.freeze([
-  ["auth", /\b(auth|oauth|login|session|permission|policy|role|acl)\b/i],
-  ["security", /\b(secret|credential|token|password|encrypt|decrypt|key|csrf|xss|security)\b/i],
-  ["schema", /\b(schema|ddl|column|table|index|constraint)\b/i],
+  ["auth", /\b(auth|authn|authz|authenticat\w*|authoriz\w*|oauth|login|sign[- ]?in|acl|access[- ]control|role[- ]based|session (?:token|cookie|hijack\w*|fixation)|permission (?:check\w*|model|boundar\w*))\b/i],
+  ["security", /\b(secret\w*|credential\w*|password\w*|encrypt\w*|decrypt\w*|csrf|xss|security|vulnerab\w*|(?:api|private|signing|ssh|encryption) key\w*|(?:access|auth|bearer|refresh|session) token\w*)\b/i],
+  ["schema", /\b(schema|ddl|(?:alter|create|drop) table|(?:add|drop|rename) column|foreign key|unique constraint)\b/i],
   ["migration", /\b(migration|migrate|backfill|rollout)\b/i],
-  ["persistence", /\b(database|sqlite|postgres|mysql|sql|persist|storage|transaction)\b/i],
-  ["delete", /\b(delete|remove|purge|destroy|drop)\b/i],
+  ["persistence", /\b(database|sqlite|postgres|mysql|sql|transaction\w*|persist\w*)\b/i],
+  ["delete", /\b(purge|truncate|rm -rf|destructive|delet\w* (?:data|records?|rows?|files?|users?|accounts?)|drop (?:table|column|database))\b/i],
   ["payment", /\b(payment|billing|invoice|checkout|subscription|refund)\b/i],
-  ["concurrency", /\b(concurrency|parallel|race|lock|lease|thread|worker|deadlock)\b/i],
-  ["git", /\b(git|merge|branch|commit|rebase|worktree)\b/i],
+  ["concurrency", /\b(concurrenc\w*|race condition|data race|deadlock|mutex|thread[- ]?safe\w*|lock (?:contention|ordering))\b/i],
+  ["git", /\b(rebase|force[- ]?push|cherry[- ]?pick|git (?:history|config|hooks?))\b/i],
 ]);
 
 const CRITICAL_RISK_TAGS = new Set(["auth", "security", "payment", "migration"]);
@@ -96,17 +102,16 @@ export function normalizeRiskTags(values = []) {
   return out;
 }
 
+// Prose fields only. File path lists and shell commands are full of
+// risk-pattern words as identifiers (policies/, roles/, session.js,
+// key-codes.ts, ...) that say nothing about what the task actually does;
+// matching them tagged nearly every task in path-heavy repositories.
 function collectText(task = {}) {
   return [
     task.title,
     task.task_spec,
     task.instructions,
-    task.test_command,
     ...(Array.isArray(task.success_criteria) ? task.success_criteria : [task.success_criteria]),
-    ...(Array.isArray(task.files_to_modify) ? task.files_to_modify : []),
-    ...(Array.isArray(task.files_to_create) ? task.files_to_create : []),
-    ...(Array.isArray(task.files_to_delete) ? task.files_to_delete : []),
-    ...(Array.isArray(task.create_roots) ? task.create_roots : []),
   ].filter(Boolean).join("\n");
 }
 
@@ -272,8 +277,15 @@ function resolveAssessorPolicy({
   if (!facts.has_test_command && facts.is_code_task) {
     modelTier = maxTier(modelTier, "standard");
     reasoningEffort = maxEffort(reasoningEffort, "medium");
-    if (!passConfidenceFloor) passConfidenceFloor = "medium";
     reasons.push("code task has no registered test command");
+    // Without an executable verification step, an honest assessor tops out
+    // at medium confidence — demanding "high" here just converts every pass
+    // into a needs_review human gate. Cap the floor at what is attainable
+    // and compensate with the stronger assessor tier above instead.
+    if (passConfidenceFloor === "high") {
+      passConfidenceFloor = "medium";
+      reasons.push("pass-confidence floor capped at medium: no executable verification available");
+    }
   }
 
   if (facts.scope_file_count >= 6 || facts.create_roots_count >= 2) {

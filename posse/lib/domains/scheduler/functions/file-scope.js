@@ -49,17 +49,7 @@ function schedulerLocksConflict(lock, candidate) {
   return false;
 }
 
-function relaxesSameWorkItemRootConflict(jobScope, lock, candidate) {
-  // Same-WI parallelism relies on exact file declarations for write isolation;
-  // the worktree commit lock still serializes final git integration.
-  if (!Array.isArray(jobScope?.files) || jobScope.files.length === 0) return false;
-  if (jobScope.workItemId == null || lock?.work_item_id == null) return false;
-  if (Number(jobScope.workItemId) !== Number(lock.work_item_id)) return false;
-  if (lock.path === "*" || candidate.path === "*") return false;
-  return lockKind(lock) === "root" || lockKind(candidate) === "root";
-}
-
-export function findFileConflict(jobScope, heldLocks = [], { relaxSameWorkItemRoots = true, allowJobIds = null } = {}) {
+export function findFileConflict(jobScope, heldLocks = [], { allowJobIds = null } = {}) {
   const candidates = scopeToSchedulerLocks(jobScope);
   const allowedJobIds = new Set([
     ...(allowJobIds ? [...allowJobIds] : []),
@@ -79,9 +69,6 @@ export function findFileConflict(jobScope, heldLocks = [], { relaxSameWorkItemRo
         return false;
       }
       if (lock?.job_id != null && allowedJobIds.has(Number(lock.job_id))) {
-        return false;
-      }
-      if (relaxSameWorkItemRoots && relaxesSameWorkItemRootConflict(jobScope, lock, candidate)) {
         return false;
       }
       return schedulerLocksConflict(lock, candidate);

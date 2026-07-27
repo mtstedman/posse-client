@@ -66,6 +66,7 @@ export const SETTING_KEYS = Object.freeze({
   DB_TELEMETRY_TAIL_LIMIT: "posse_db_telemetry_tail_limit",
   RETENTION_DAYS: "posse_retention_days",
   SCHEDULER_CONCURRENCY: "scheduler_concurrency",
+  SCOPE_AUTO_APPROVAL: "scope_auto_approval",
   SESSION_RECYCLE_STRICT_PROVIDER: "session_recycle_strict_provider",
   STARTUP_DIRTY_TREE_POLICY: "startup_dirty_tree_policy",
   ATLAS_MEMORY_SURFACE: "atlas_memory_surface",

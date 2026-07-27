@@ -1312,7 +1312,7 @@ function resolveMutationPath(toolName, displayPath) {
   }
 }
 
-function requestScopeWithinJob(args = {}) {
+function requestScopeExpansionWithinJob(args = {}) {
   const result = requestJobScopeExpansion({
     jobId: mcpJobId,
     workItemId: mcpWorkItemId,
@@ -1324,7 +1324,16 @@ function requestScopeWithinJob(args = {}) {
     reason: args.reason,
     source: "deterministic_mcp_internal_tool",
   });
-  return JSON.stringify(result, null, 2);
+  if (result?.auto === true && result?.approved === true && result?.path) {
+    // Widen the live predicates so the retried write passes now; the
+    // durable grant is already in the job payload.
+    effectiveScopePredicates?.policy?.grantWritePath?.(result.path);
+  }
+  return result;
+}
+
+function requestScopeWithinJob(args = {}) {
+  return JSON.stringify(requestScopeExpansionWithinJob(args), null, 2);
 }
 
 function writeFileWithinScope(args = {}) {
@@ -1341,12 +1350,16 @@ function writeFileWithinScope(args = {}) {
     if (!mcpJobId) {
       return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
     }
-    return requestScopeWithinJob({
+    const scopeResult = requestScopeExpansionWithinJob({
       path: relativePathFromCwd(workspaceCwd, resolved.path),
       access: exists ? "modify" : "create",
       operation: "write_file",
       reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
     });
+    if (!(scopeResult?.auto === true && scopeResult?.approved === true)) {
+      return JSON.stringify(scopeResult, null, 2);
+    }
+    // Auto-approved: complete the original write in the same call.
   }
   return execWriteFile(args || {}, workspaceCwd, effectiveScopePredicates);
 }
@@ -1361,12 +1374,16 @@ function editFileWithinScope(args = {}) {
     if (!mcpJobId) {
       return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope.`;
     }
-    return requestScopeWithinJob({
+    const scopeResult = requestScopeExpansionWithinJob({
       path: relativePathFromCwd(workspaceCwd, resolved.path),
       access: "modify",
       operation: "edit_file",
       reason: "edit_file requires this existing file to complete the active job",
     });
+    if (!(scopeResult?.auto === true && scopeResult?.approved === true)) {
+      return JSON.stringify(scopeResult, null, 2);
+    }
+    // Auto-approved: complete the original edit in the same call.
   }
   return execEditFile(args || {}, workspaceCwd, effectiveScopePredicates);
 }

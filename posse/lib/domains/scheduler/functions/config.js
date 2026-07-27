@@ -30,6 +30,7 @@ export const LOCK_RENEW_SEC = 30;
 export const PROGRESS_TIMEOUT_SEC = 300;
 export const MAX_RUNNABLE_SCAN_PER_TICK = 25;
 export const HEADLESS_HUMAN_TIMEOUT_SEC = getCatalogRuntimeFallbackInt("headless_human_timeout_sec", 600);
+export const HUMAN_GATE_RESNOOZE_SEC = getCatalogRuntimeFallbackInt("human_gate_resnooze_sec", 600);
 export const STALL_TIMEOUT_SEC = getCatalogRuntimeFallbackInt("stall_timeout", 600);
 export const MAX_JOB_RUNTIME_SEC_OVERRIDE = null;
 
@@ -69,6 +70,10 @@ export function readMaxJobRuntimeSecOverride() {
 
 export function readHeadlessHumanTimeoutSec() {
   return readPositiveIntSetting("headless_human_timeout_sec", HEADLESS_HUMAN_TIMEOUT_SEC);
+}
+
+export function readHumanGateResnoozeSec() {
+  return readPositiveIntSetting("human_gate_resnooze_sec", HUMAN_GATE_RESNOOZE_SEC);
 }
 
 export function readAtlasDriftCheckIntervalMs() {
