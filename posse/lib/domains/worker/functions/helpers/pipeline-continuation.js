@@ -125,6 +125,8 @@ function replanPayloadFields(payload = {}) {
   if (payload.replan_reason) fields.replan_reason = payload.replan_reason;
   if (payload.original_job_id != null) fields.original_job_id = payload.original_job_id;
   if (payload.original_title) fields.original_title = payload.original_title;
+  if (payload.test_command) fields.test_command = payload.test_command;
+  if (payload._task_ab_test_command === true) fields._task_ab_test_command = true;
   return fields;
 }
 

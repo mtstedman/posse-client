@@ -308,6 +308,12 @@ export function createJobsFromPlan(worker, planJob, tasks, {
   spawnFromRole = defaultSpawnFromRole,
 } = {}) {
       const plannerRole = worker?.roleRegistry?.get?.("plan");
+      const planJobPayload = parseJobPayload(planJob);
+      const pinnedTestCommand = planJobPayload._task_ab_test_command === true
+        && typeof planJobPayload.test_command === "string"
+        && planJobPayload.test_command.trim()
+        ? planJobPayload.test_command.trim()
+        : null;
       const jobMap = new Map(); // dependency target by planner task index
       const pendingDependencyLinks = [];
       const duplicateTaskClaims = new Map(); // semantic planner task -> first job created for it
@@ -1645,7 +1651,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               create_roots: t.create_roots || [],
               ...(Array.isArray(t.must_modify) && t.must_modify.length > 0 ? { must_modify: t.must_modify } : {}),
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
-              test_command: t.test_command || null,
+              test_command: pinnedTestCommand || t.test_command || null,
               ...(devBriefResult.brief ? { dev_brief: devBriefResult.brief } : {}),
               ...(activeHashRefPacket ? { hash_ref_packet: activeHashRefPacket } : {}),
               ...(devBriefResult.droppedFiles.length > 0 ? { dropped_dev_brief_files: devBriefResult.droppedFiles } : {}),
@@ -1879,7 +1885,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               files_to_delete: t.files_to_delete || [],
               create_roots: t.create_roots || [],
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
-              test_command: t.test_command || null,
+              test_command: pinnedTestCommand || t.test_command || null,
               ...(devBriefResult.brief ? { dev_brief: devBriefResult.brief } : {}),
               ...(activeHashRefPacket ? { hash_ref_packet: activeHashRefPacket } : {}),
               ...(devBriefResult.droppedFiles.length > 0 ? { dropped_dev_brief_files: devBriefResult.droppedFiles } : {}),
