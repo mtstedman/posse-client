@@ -1,7 +1,7 @@
 export const RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS = 12;
 export const RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS = 4;
 // Leave enough room for broad source-read tasks to close late-discovered gaps;
-// the curtain call still reserves the final two calls for targeted closure.
+// the curtain call reserves the final four calls for targeted closure.
 const DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS = 30;
 const configuredExplorationCeiling = Number(
   process.env.POSSE_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
@@ -13,7 +13,7 @@ export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS =
         + RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS
   ? configuredExplorationCeiling
   : DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
-export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 2;
+export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 4;
 const RESEARCH_COVERAGE_CHECKLIST_MAX_ITEMS = 20;
 const RESEARCH_COVERAGE_CHECKLIST_ITEM_MAX_CHARS = 260;
 
@@ -141,60 +141,21 @@ function buildResearchCoverageChecklistText(taskText, { explorationAvailable = t
   ].join("\n");
 }
 
-function researchFocusItems(taskText) {
-  const checklist = extractResearchCoverageChecklist(taskText);
-  const named = checklist.filter((item) => /^Cover named focus area:\s*/i.test(item));
-  return named.length > 0 ? named : checklist;
-}
-
-export function buildResearchCoverageProgressText({
-  explorationSteps = 1,
-  taskText = "",
-} = {}) {
-  const items = researchFocusItems(taskText);
-  if (items.length === 0) return "";
-
-  // The first exploration call is orientation. Allocate every subsequent call
-  // before the two-call curtain across the task's independent focus areas.
-  // This keeps a researcher from exhausting the budget by repeatedly
-  // deepening the first useful file while other named mechanisms remain
-  // untouched. The allocation is advisory rather than a hard rejection:
-  // evidence can satisfy more than one row, and a completed row should be
-  // skipped rather than padded with redundant calls.
-  const targetedCalls = Math.max(
-    1,
-    RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
-      - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS
-      - 1,
-  );
-  const nextTargetPosition = Math.max(
-    0,
-    Math.min(targetedCalls - 1, Number(explorationSteps || 0) - 1),
-  );
-  const targetIndex = Math.min(
-    items.length - 1,
-    Math.floor((nextTargetPosition * items.length) / targetedCalls),
-  );
-  const callsInTarget = Math.max(
-    1,
-    Math.min(2, Math.ceil(targetedCalls / items.length)),
-  );
-  const target = items[targetIndex].replace(/^Cover named focus area:\s*/i, "");
-
-  return [
-    `NEXT COVERAGE SLOT ${targetIndex + 1}/${items.length}: ${target}.`,
-    `Budget up to ${callsInTarget} focused call${callsInTarget === 1 ? "" : "s"} for discovery plus the exact governing body/branch, then advance.`,
-    "Do not reopen an already-supported file or mechanism just to add detail. If this slot is already supported by exact evidence, immediately advance to the next unsupported focus area.",
-  ].join("\n");
-}
-
 export function buildResearchCoverageStartText({ taskText = "" } = {}) {
   const checklist = buildResearchCoverageChecklistText(taskText);
   return [
     "RESEARCH EVIDENCE PLAN: use the deterministic checklist below from the start of exploration.",
     checklist,
     "Treat every named focus-area row as an independent evidence obligation. Before broadening or revisiting a supported path, obtain the exact governing body or branch for an unsupported row.",
-    "After the orientation call, the runtime assigns bounded coverage slots across the named focus areas. Use at most one discovery call and one exact-body call per slot unless the returned slot budget explicitly permits more.",
+  ].join("\n");
+}
+
+export function buildResearchMidpointAuditText({ taskText = "" } = {}) {
+  return [
+    "RESEARCH MIDPOINT AUDIT: half of the exploration budget is now used.",
+    buildResearchCoverageChecklistText(taskText),
+    "Pause before deepening the current trail. Identify every checklist row that still lacks its exact governing helper body, precedence branch, failure path, or lifecycle boundary.",
+    "Continue flexibly with the highest-materiality unsupported row. Do not follow a fixed file order, and do not spend another call on a mechanism that already has exact evidence while a named focus area remains unsupported.",
   ].join("\n");
 }
 
