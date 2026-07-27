@@ -1697,6 +1697,48 @@ function runShellCommandAsync(command, { cwd, timeoutMs = 120000 } = {}) {
   });
 }
 
+export async function runPinnedTaskAbAssessmentCommand(payload = {}, {
+  cwd = null,
+  timeoutMs = 120000,
+} = {}) {
+  const command = taskAbPinnedTestCommand(payload);
+  if (!command || !cwd) return null;
+  try {
+    const result = await runShellCommandAsync(command, { cwd, timeoutMs });
+    return {
+      command,
+      cwd,
+      status: "passed",
+      ok: true,
+      code: result.code,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      evidence: taskAbTestEvidence(command, {
+        ok: true,
+        code: result.code,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      }),
+    };
+  } catch (error) {
+    return {
+      command,
+      cwd,
+      status: "failed",
+      ok: false,
+      code: error.code ?? null,
+      stdout: error.stdout || "",
+      stderr: error.stderr || error.message || "",
+      evidence: taskAbTestEvidence(command, {
+        ok: false,
+        code: error.code,
+        stdout: error.stdout,
+        stderr: error.stderr || error.message,
+      }),
+    };
+  }
+}
+
 export async function runPostExecutionAssessment(worker, {
   attempt,
   committedHash,

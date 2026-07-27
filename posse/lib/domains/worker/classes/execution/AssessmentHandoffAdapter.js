@@ -35,6 +35,12 @@ import {
   refreshAndExtractInsights as refreshAndExtractInsightsFromModule,
 } from "../../functions/helpers/insights.js";
 import {
+  runPinnedTaskAbAssessmentCommand,
+} from "../../functions/helpers/assessment-pipeline.js";
+import {
+  recordObservation,
+} from "../../../observability/functions/observations.js";
+import {
   assessmentRetryFallbackReads as _assessmentRetryFallbackReads,
   buildPriorAssessmentFindings as _buildPriorAssessmentFindings,
 } from "../../functions/execution/assessment-policy.js";
@@ -275,6 +281,34 @@ export class AssessmentHandoffAdapter {
     try {
       const jobPayloadForAssess = worker.parsePayload(job);
       const assessAc = worker._abortControllers.get(job.id);
+      const assessmentCwd = (isArtifactMode(jobPayloadForAssess.task_mode || "code") && jobPayloadForAssess.output_root)
+        ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
+        : (wtPath || worker.projectDir);
+      const taskAbTestRun = await runPinnedTaskAbAssessmentCommand(jobPayloadForAssess, {
+        cwd: assessmentCwd,
+      });
+      if (taskAbTestRun) {
+        worker.emit(
+          job.id,
+          `${taskAbTestRun.ok ? C.green : C.red}[assessor-test] ${taskAbTestRun.ok ? "Passed" : "Failed"}: ${taskAbTestRun.command}${C.reset}`,
+        );
+        recordObservation({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          attempt_id: assessAttempt.attempt.id,
+          observation_type: "command.pre_assess",
+          summary: `Pinned task A/B assessor test command ${taskAbTestRun.status}`,
+          detail: {
+            command: taskAbTestRun.command,
+            cwd: taskAbTestRun.cwd,
+            status: taskAbTestRun.status,
+            source: "task_ab_acceptance",
+            exit_code: taskAbTestRun.code,
+            stdout: taskAbTestRun.stdout,
+            stderr: taskAbTestRun.stderr,
+          },
+        });
+      }
       const assessmentContext = await attachAssessmentDiffContextAsync({
         task_mode: jobPayloadForAssess.task_mode || "code",
         manifest: null,
@@ -287,9 +321,10 @@ export class AssessmentHandoffAdapter {
         files_committed: [],
         files_reverted: [],
         files_requested: flattenPendingAssessmentFileRequests(pendingFileRequests),
-      }, (isArtifactMode(jobPayloadForAssess.task_mode || "code") && jobPayloadForAssess.output_root)
-        ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
-        : (wtPath || worker.projectDir));
+      }, assessmentCwd);
+      if (taskAbTestRun?.evidence) {
+        assessmentContext.task_ab_test_evidence = taskAbTestRun.evidence;
+      }
       const assessmentSession = new AssessmentSession({
         job,
         output: storedOutput,
@@ -304,9 +339,7 @@ export class AssessmentHandoffAdapter {
           fallbackReads: _assessmentRetryFallbackReads(effectiveTier, internalAssessRetries),
           priorAssessmentFindings,
           providerOverride: providerName,
-          cwd: (isArtifactMode(jobPayloadForAssess.task_mode || "code") && jobPayloadForAssess.output_root)
-            ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
-            : (wtPath || worker.projectDir),
+          cwd: assessmentCwd,
           assessmentContext,
         },
       });
