@@ -302,6 +302,45 @@ function renderBoundedResult(text, {
   return lines.join("\n");
 }
 
+function boundedSearchRow({
+  line,
+  lineNumber,
+  matchStart = 0,
+  matchLength = 0,
+  maxChars,
+}) {
+  const prefix = `${lineNumber}:`;
+  const value = String(line || "");
+  const budget = Math.max(0, Number(maxChars) || 0);
+  if (budget <= prefix.length) {
+    return {
+      text: prefix.slice(0, budget),
+      truncated: value.length > 0,
+    };
+  }
+  const available = budget - prefix.length;
+  if (value.length <= available) {
+    return { text: `${prefix}${value}`, truncated: false };
+  }
+
+  const marker = "…";
+  const rawBudget = Math.max(1, available - (marker.length * 2));
+  const safeMatchStart = Math.max(0, Math.min(Number(matchStart) || 0, value.length));
+  const safeMatchLength = Math.max(0, Math.min(Number(matchLength) || 0, value.length - safeMatchStart));
+  const matchCenter = safeMatchStart + Math.floor(safeMatchLength / 2);
+  let start = Math.max(0, matchCenter - Math.floor(rawBudget / 2));
+  start = Math.min(start, Math.max(0, value.length - rawBudget));
+  let end = Math.min(value.length, start + rawBudget);
+  const leading = start > 0 ? marker : "";
+  const trailing = end < value.length ? marker : "";
+  const exactBudget = Math.max(1, available - leading.length - trailing.length);
+  if (end - start > exactBudget) end = start + exactBudget;
+  return {
+    text: `${prefix}${leading}${value.slice(start, end)}${trailing}`.slice(0, budget),
+    truncated: true,
+  };
+}
+
 function pageMaterializedText(text, args = {}) {
   const limit = parsePositiveInt(args.limit, CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS, CONTEXT_FETCH_REF_MAX_LIMIT_CHARS);
   const search = String(args.search || "").trim();
@@ -312,7 +351,15 @@ function pageMaterializedText(text, args = {}) {
     const literalNeedle = search.toLowerCase();
     const literalRows = [];
     for (let i = 0; i < lines.length; i += 1) {
-      if (lines[i].toLowerCase().includes(literalNeedle)) literalRows.push(`${i + 1}:${lines[i]}`);
+      const matchStart = lines[i].toLowerCase().indexOf(literalNeedle);
+      if (matchStart >= 0) {
+        literalRows.push({
+          line: lines[i],
+          lineNumber: i + 1,
+          matchStart,
+          matchLength: search.length,
+        });
+      }
     }
 
     let rows = literalRows;
@@ -325,7 +372,15 @@ function pageMaterializedText(text, args = {}) {
         const expression = new RegExp(search, "i");
         rows = [];
         for (let i = 0; i < lines.length; i += 1) {
-          if (expression.test(lines[i])) rows.push(`${i + 1}:${lines[i]}`);
+          const match = expression.exec(lines[i]);
+          if (match) {
+            rows.push({
+              line: lines[i],
+              lineNumber: i + 1,
+              matchStart: match.index,
+              matchLength: match[0]?.length || 0,
+            });
+          }
         }
         searchMode = "regex";
       } catch (err) {
@@ -336,13 +391,19 @@ function pageMaterializedText(text, args = {}) {
     const rowOffset = parsePositiveInt(args.offset, 0);
     const selected = [];
     let chars = 0;
+    let truncatedMatchRows = 0;
     for (const row of rows.slice(rowOffset)) {
-      const nextChars = chars + row.length + (selected.length > 0 ? 1 : 0);
-      if (selected.length > 0 && nextChars > limit) break;
-      selected.push(row);
-      chars = nextChars;
+      const separatorChars = selected.length > 0 ? 1 : 0;
+      const remaining = limit - chars - separatorChars;
+      if (remaining <= 0) break;
+      const rendered = boundedSearchRow({ ...row, maxChars: remaining });
+      if (!rendered.text) break;
+      selected.push(rendered.text);
+      if (rendered.truncated) truncatedMatchRows += 1;
+      chars += rendered.text.length + separatorChars;
       if (chars >= limit) break;
     }
+    const selectedRowCount = selected.length;
     return {
       text: selected.join("\n"),
       page: {
@@ -355,8 +416,9 @@ function pageMaterializedText(text, args = {}) {
         limit,
         returned_chars: selected.join("\n").length,
         match_count: rows.length,
-        next_offset: rowOffset + selected.length < rows.length ? rowOffset + selected.length : null,
-        has_more: rowOffset + selected.length < rows.length,
+        truncated_match_rows: truncatedMatchRows,
+        next_offset: rowOffset + selectedRowCount < rows.length ? rowOffset + selectedRowCount : null,
+        has_more: rowOffset + selectedRowCount < rows.length,
       },
     };
   }
@@ -1116,6 +1178,9 @@ function fetchDeliveryDetail(renderedText) {
       search_mode: page.search_mode || null,
       requested_search_mode: page.requested_search_mode || null,
       match_count: Number.isFinite(Number(page.match_count)) ? Number(page.match_count) : null,
+      truncated_match_rows: Number.isFinite(Number(page.truncated_match_rows))
+        ? Number(page.truncated_match_rows)
+        : null,
       returned_chars: returnedChars,
       has_more: page.has_more === true,
       empty: rendered?.ok === true && returnedChars === 0,
@@ -1128,6 +1193,7 @@ function fetchDeliveryDetail(renderedText) {
       search_mode: null,
       requested_search_mode: null,
       match_count: null,
+      truncated_match_rows: null,
       returned_chars: null,
       has_more: false,
       empty: false,
