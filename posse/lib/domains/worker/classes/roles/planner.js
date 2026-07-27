@@ -485,6 +485,11 @@ export class PlannerRole extends BaseRole {
     const plannerRoutingContext = [
       "PLANNING CAPABILITIES (authoritative for this work item):",
       availableSkillsBlock,
+      "One-time test intake for code tasks:",
+      "- Identify one narrow existing repository-declared test command per dev/fix task and set test_command on that task.",
+      "- Prefer a package/manifest script or a single recognized test runner. Do not compose shell pipelines, setup steps, or cleanup commands.",
+      "- The worker freezes that command before DEV and runs it once before and once after implementation; DEV must not run it.",
+      "- If no existing suite applies, omit test_command instead of inventing one. Test execution is verification metadata, not a success criterion.",
       // Conditional: empty when this repo has no project-db config, so
       // unconfigured repos see no db-task guidance at all.
       ...buildProjectDbRoutingLines(worker.projectDir),

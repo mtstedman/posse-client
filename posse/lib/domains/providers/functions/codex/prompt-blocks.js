@@ -80,7 +80,7 @@ export function __testBuildShellDisciplineBlock({
     rules.push("- Registered-test tools are unavailable in this run. Do not call create_test_suite, create_test, run_test, or run_test_suite.");
   }
   if (role === "dev") {
-    rules.push("- Test execution is delegated to the assessor. Do not mark verification unavailable solely because DEV did not run tests.");
+    rules.push("- Test execution is delegated to the orchestration/assessment layer. Do not mark verification unavailable solely because DEV did not run tests.");
   } else if (!canRunTests) {
     rules.push("- Keep completion tied to product work: unavailable tests alone must not cause PARTIAL or BLOCKED. Dev/fix reports the exact unrun check with verification_unavailable.");
   }
@@ -142,7 +142,7 @@ export function __testBuildCodexRoleGuardBlock({
       const labels = [has("read_file") ? "read_file" : null, has("list_files") ? "list_files" : null, has("search_files") ? "search_files" : null].filter(Boolean).join(", ");
       rules.push(`- Use active retrieval context first when available, then the listed manifest entries (${labels}) for exact worktree inspection.`);
     }
-    rules.push("- Test execution is not issued to DEV. Do not run tests, linters, scoped checks, or a provided test_command; test execution belongs to the assessor.");
+    rules.push("- Test execution is not issued to DEV. Do not run tests, linters, scoped checks, or a provided test_command; the orchestration/assessment layer owns test execution.");
     rules.push("- You may create or update test source files when the task requires them, using the normal scoped file tools; do not execute those tests.");
     rules.push("- Finish completed product work as COMPLETE; the assessor handles verification.");
     if (!has("bash")) rules.push("- No bash surface is listed. Do not attempt any PowerShell or shell command.");
@@ -157,7 +157,7 @@ export function __testBuildCodexRoleGuardBlock({
     }
     if (has("run_scoped_checks")) rules.push("- Use the listed run_scoped_checks surface for lint/typecheck first, including PHP syntax checks.");
     if (has("bash") && allowTests) {
-      rules.push("- Use the exact listed bash surface only for explicit verification commands. Test execution belongs to the assessor: run a provided test_command once; if only its launcher is unavailable, use at most one obvious equivalent invocation.");
+      rules.push("- If a DETERMINISTIC TEST EXECUTION RECEIPT is attached, treat it as ground truth and do not rerun its command. Otherwise use the exact listed bash surface only for an explicit verification command, at most once.");
       rules.push("- Do not use shell-based search to decide whether the implementation changed the right files.");
     } else if (has("bash")) {
       rules.push("- Bash is listed for non-test inspection, but test execution is not issued. Do not run a test command through it or request permission; assess the available deterministic evidence.");

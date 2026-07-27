@@ -5,6 +5,7 @@ import {
   getArtifacts,
   getAttempts,
   getJob,
+  getWorkItem,
   incrementAndCreateAssessmentAttempt,
   isLeaseValid,
   setAssessmentLifecycle,
@@ -35,8 +36,13 @@ import {
   refreshAndExtractInsights as refreshAndExtractInsightsFromModule,
 } from "../../functions/helpers/insights.js";
 import {
-  runPinnedTaskAbAssessmentCommand,
-} from "../../functions/helpers/assessment-pipeline.js";
+  ensurePostChangeTestReceipt,
+  renderTestExecutionEvidence,
+  testReceiptObservationDetail,
+} from "../../functions/helpers/test-execution-receipt.js";
+import {
+  snapshotAndResetDirtyWorktreeAsync,
+} from "../../../git/functions/worktree.js";
 import {
   recordObservation,
 } from "../../../observability/functions/observations.js";
@@ -284,30 +290,41 @@ export class AssessmentHandoffAdapter {
       const assessmentCwd = (isArtifactMode(jobPayloadForAssess.task_mode || "code") && jobPayloadForAssess.output_root)
         ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
         : (wtPath || worker.projectDir);
-      const taskAbTestRun = await runPinnedTaskAbAssessmentCommand(jobPayloadForAssess, {
+      const deterministicTestRun = await ensurePostChangeTestReceipt({
+        job,
+        payload: jobPayloadForAssess,
         cwd: assessmentCwd,
+        commitHash: lastWithCommit.commit_hash || null,
+        attemptId: assessAttempt.attempt.id,
+        cleanupWorktree: wtPath
+          ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
+              reason: `test-post-change-side-effects-wi-${job.work_item_id}-job-${job.id}`,
+              branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+              wiId: job.work_item_id,
+              onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-test] ${message}${C.reset}`),
+            })
+          : null,
       });
-      if (taskAbTestRun) {
+      const postReceipt = deterministicTestRun?.post_change || null;
+      if (postReceipt) {
         worker.emit(
           job.id,
-          `${taskAbTestRun.ok ? C.green : C.red}[assessor-test] ${taskAbTestRun.ok ? "Passed" : "Failed"}: ${taskAbTestRun.command}${C.reset}`,
+          `${postReceipt.status === "passed" ? C.green : postReceipt.status === "failed" ? C.red : C.yellow}[assessor-test] ${postReceipt.reused ? "Reused" : "Ran"} frozen command: ${postReceipt.status}${C.reset}`,
         );
         recordObservation({
           work_item_id: job.work_item_id,
           job_id: job.id,
           attempt_id: assessAttempt.attempt.id,
           observation_type: "command.pre_assess",
-          summary: `Pinned task A/B assessor test command ${taskAbTestRun.status}`,
+          summary: `Frozen ${postReceipt.source || "planner"} test command ${postReceipt.status}`,
           detail: {
-            command: taskAbTestRun.command,
-            cwd: taskAbTestRun.cwd,
-            status: taskAbTestRun.status,
-            source: "task_ab_acceptance",
-            exit_code: taskAbTestRun.code,
-            stdout: taskAbTestRun.stdout,
-            stderr: taskAbTestRun.stderr,
+            ...testReceiptObservationDetail(postReceipt),
+            cwd: assessmentCwd,
           },
         });
+        if (["infrastructure_error", "unavailable"].includes(postReceipt.status)) {
+          throw new Error(`Deterministic post-change test execution unavailable: ${postReceipt.reason || postReceipt.status}`);
+        }
       }
       const assessmentContext = await attachAssessmentDiffContextAsync({
         task_mode: jobPayloadForAssess.task_mode || "code",
@@ -322,8 +339,9 @@ export class AssessmentHandoffAdapter {
         files_reverted: [],
         files_requested: flattenPendingAssessmentFileRequests(pendingFileRequests),
       }, assessmentCwd);
-      if (taskAbTestRun?.evidence) {
-        assessmentContext.task_ab_test_evidence = taskAbTestRun.evidence;
+      const deterministicTestEvidence = renderTestExecutionEvidence(deterministicTestRun || {});
+      if (deterministicTestEvidence) {
+        assessmentContext.task_ab_test_evidence = deterministicTestEvidence;
       }
       const assessmentSession = new AssessmentSession({
         job,

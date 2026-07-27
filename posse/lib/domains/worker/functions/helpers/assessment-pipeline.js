@@ -78,6 +78,11 @@ import {
   persistPendingAssessmentFileRequests,
   shouldDeferAssessmentToFileRequestContinuation,
 } from "./assessment-file-requests.js";
+import {
+  ensurePostChangeTestReceipt,
+  renderTestExecutionEvidence,
+  testReceiptObservationDetail,
+} from "./test-execution-receipt.js";
 
 function readSettingText(key) {
   try {
@@ -616,7 +621,7 @@ function _buildVerificationCapabilityBlock(payload = {}) {
     `Use those assigned capabilities. Discard browser, lint, shell, or other verification options that are not callable through the issued tool surface and are not represented by registered test evidence.`,
     `An unavailable optional method is NOT_APPLICABLE: do not lower confidence, fail, block, or ask a human merely because it cannot be run.`,
     `A configured test command is a verification recipe, not product behavior, unless the objective explicitly requires that literal invocation to work. If its launcher is unavailable, one obvious equivalent launcher or targeted invocation may establish the same criterion.`,
-    `When DETERMINISTIC ASSESSOR TEST EXECUTION evidence is attached, that command was run by the assessment layer against the completed worktree. Treat its exit status and output as ground truth.`,
+    `When a DETERMINISTIC TEST EXECUTION RECEIPT or DETERMINISTIC ASSESSOR TEST EXECUTION is attached, the orchestration layer already ran that frozen command outside model context. Treat the receipt as ground truth and do not rerun the command.`,
     `Do not request a repository file or human intervention solely to supply an executable alias or change test discovery after equivalent evidence proves the behavior.`,
     `If no equivalent evidence can establish a genuinely required criterion, return blocked once with the missing capability named. Do not retry the same assessment hoping the capability appears.`,
     contract ? `Task verification contract:\n${JSON.stringify(contract, null, 2)}` : null,
@@ -1896,38 +1901,91 @@ export async function runPostExecutionAssessment(worker, {
       attempt: attempt.attempt_number || job.attempt_count || 1,
     });
 
-    const pinnedTaskAbTestCmd = taskAbPinnedTestCommand(currentPayload);
-    const preAssessCmd = pinnedTaskAbTestCmd || readSettingText("pre_assess_cmd") || null;
-    const taskAbTestRun = !!pinnedTaskAbTestCmd;
     let taskAbAssessmentEvidence = "";
+    let deterministicTestRun = null;
+    try {
+      deterministicTestRun = await ensurePostChangeTestReceipt({
+        job,
+        payload: currentPayload,
+        cwd: wtPath,
+        commitHash: committedHash || branchNetDiff?.head || null,
+        attemptId: attempt.id,
+        cleanupWorktree: wtPath
+          ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
+              reason: `test-post-change-side-effects-wi-${job.work_item_id}-job-${job.id}`,
+              branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+              wiId: job.work_item_id,
+              onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-test] ${message}${C.reset}`),
+            })
+          : null,
+      });
+    } catch (testError) {
+      const testInfraMsg = `Deterministic post-change test execution failed to initialize: ${testError?.message || testError}`;
+      completeAttempt(attempt.id, {
+        status: "succeeded",
+        duration_ms: Date.now() - startTime,
+        error_text: testInfraMsg,
+      });
+      setJobError(job.id, testInfraMsg);
+      routeAssessmentInfrastructureFailure(worker, job, leaseToken, testError, {
+        pendingFileRequests,
+      });
+      return;
+    }
+    if (deterministicTestRun?.post_change) {
+      const postReceipt = deterministicTestRun.post_change;
+      const source = postReceipt.source || "planner";
+      worker.emit(
+        job.id,
+        `${postReceipt.status === "passed" ? C.green : postReceipt.status === "failed" ? C.red : C.yellow}[assessor-test] ${postReceipt.reused ? "Reused" : "Ran"} frozen command: ${postReceipt.status}${C.reset}`,
+      );
+      recordObservation({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt.id,
+        observation_type: "command.pre_assess",
+        summary: `Frozen ${source} test command ${postReceipt.status}`,
+        detail: {
+          ...testReceiptObservationDetail(postReceipt),
+          cwd: wtPath,
+        },
+      });
+      taskAbAssessmentEvidence = renderTestExecutionEvidence(deterministicTestRun);
+      if (["infrastructure_error", "unavailable"].includes(postReceipt.status)) {
+        const testInfraMsg = `Deterministic post-change test execution unavailable: ${postReceipt.reason || postReceipt.status}`;
+        completeAttempt(attempt.id, {
+          status: "succeeded",
+          duration_ms: Date.now() - startTime,
+          error_text: testInfraMsg,
+        });
+        setJobError(job.id, testInfraMsg);
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, new Error(testInfraMsg), {
+          pendingFileRequests,
+        });
+        return;
+      }
+    }
+
+    const preAssessCmd = readSettingText("pre_assess_cmd") || null;
     const hooksSkipped = readSettingBool("skip_hooks", false) || readSettingBool("skip_hook_post_dev_verify", false);
     if (shouldRunPreAssessCommand({
       command: preAssessCmd,
       wtPath,
-      preAssessAlreadyVerified: taskAbTestRun ? false : preAssessAlreadyVerified,
-      hooksSkipped: taskAbTestRun ? false : hooksSkipped,
+      preAssessAlreadyVerified,
+      hooksSkipped,
     })) {
       try {
-        const commandLabel = taskAbTestRun ? "assessor-test" : "pre-assess";
-        worker.emit(job.id, `${C.dim}[${commandLabel}] Running: ${preAssessCmd}${C.reset}`);
+        worker.emit(job.id, `${C.dim}[pre-assess] Running: ${preAssessCmd}${C.reset}`);
         recordObservation({
           work_item_id: job.work_item_id,
           job_id: job.id,
           attempt_id: attempt.id,
           observation_type: "command.pre_assess",
-          summary: taskAbTestRun ? "Running pinned task A/B assessor test command" : "Running pre-assess command",
-          detail: { command: preAssessCmd, cwd: wtPath, source: taskAbTestRun ? "task_ab_acceptance" : "setting" },
+          summary: "Running pre-assess command",
+          detail: { command: preAssessCmd, cwd: wtPath, source: "setting" },
         });
         const preAssessBeforePorcelain = await gitPorcelainZAsync(wtPath);
-        const commandResult = await runShellCommandAsync(preAssessCmd, { cwd: wtPath, timeoutMs: 120000 });
-        if (taskAbTestRun) {
-          taskAbAssessmentEvidence = taskAbTestEvidence(preAssessCmd, {
-            ok: true,
-            code: commandResult.code,
-            stdout: commandResult.stdout,
-            stderr: commandResult.stderr,
-          });
-        }
+        await runShellCommandAsync(preAssessCmd, { cwd: wtPath, timeoutMs: 120000 });
         const preAssessAfterPorcelain = await gitPorcelainZAsync(wtPath);
         const dirtyEntries = diffPorcelainEntries(preAssessBeforePorcelain, preAssessAfterPorcelain);
         if (dirtyEntries.length > 0 || preAssessAfterPorcelain !== preAssessBeforePorcelain) {
@@ -1993,23 +2051,23 @@ export async function runPostExecutionAssessment(worker, {
           });
           return;
         }
-        worker.emit(job.id, `${C.green}[${taskAbTestRun ? "assessor-test" : "pre-assess"}] Passed${C.reset}`);
+        worker.emit(job.id, `${C.green}[pre-assess] Passed${C.reset}`);
         recordObservation({
           work_item_id: job.work_item_id,
           job_id: job.id,
           attempt_id: attempt.id,
           observation_type: "command.pre_assess",
-          summary: taskAbTestRun ? "Pinned task A/B assessor test command passed" : "Pre-assess command passed",
+          summary: "Pre-assess command passed",
           detail: {
             command: preAssessCmd,
             cwd: wtPath,
             status: "passed",
-            source: taskAbTestRun ? "task_ab_acceptance" : "setting",
+            source: "setting",
           },
         });
       } catch (hookErr) {
-        const hookMsg = `${taskAbTestRun ? "Pinned assessor test" : "Pre-assessment hook"} failed: ${hookErr.message.split("\n")[0]}`;
-        worker.emit(job.id, `${C.red}[${taskAbTestRun ? "assessor-test" : "pre-assess"}] ${hookMsg}${C.reset}`);
+        const hookMsg = `Pre-assessment hook failed: ${hookErr.message.split("\n")[0]}`;
+        worker.emit(job.id, `${C.red}[pre-assess] ${hookMsg}${C.reset}`);
         recordObservation({
           work_item_id: job.work_item_id,
           job_id: job.id,
@@ -2020,28 +2078,19 @@ export async function runPostExecutionAssessment(worker, {
             command: preAssessCmd,
             cwd: wtPath,
             status: "failed",
-            source: taskAbTestRun ? "task_ab_acceptance" : "setting",
+            source: "setting",
           },
         });
-        if (taskAbTestRun) {
-          taskAbAssessmentEvidence = taskAbTestEvidence(preAssessCmd, {
-            ok: false,
-            code: hookErr.code,
-            stdout: hookErr.stdout,
-            stderr: hookErr.stderr || hookErr.message,
-          });
-        } else {
-          completeAttempt(attempt.id, {
-            status: "succeeded",
-            duration_ms: Date.now() - startTime,
-            error_text: hookMsg,
-          });
-          setJobError(job.id, hookMsg);
-          routeAssessmentInfrastructureFailure(worker, job, leaseToken, hookErr, {
-            pendingFileRequests,
-          });
-          return;
-        }
+        completeAttempt(attempt.id, {
+          status: "succeeded",
+          duration_ms: Date.now() - startTime,
+          error_text: hookMsg,
+        });
+        setJobError(job.id, hookMsg);
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, hookErr, {
+          pendingFileRequests,
+        });
+        return;
       }
     }
 

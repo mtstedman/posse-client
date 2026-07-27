@@ -24,6 +24,7 @@ import {
 } from "./helpers/terminal-report-metadata.js";
 import {
   filterKnownHandoffFields,
+  recordHandoffProofDegradation,
   runWithHandoffFieldDiagnostics,
 } from "./helpers/field-diagnostics.js";
 
@@ -428,12 +429,16 @@ function isAllowedProofProvenance(evidence, { allowAgentProse = false } = {}) {
     || (allowAgentProse && kind === "Agent Prose");
 }
 
+function isDegradableAgentProof(evidence, { allowAgentProse = false } = {}) {
+  return !allowAgentProse && evidence?.provenance?.kind === "Agent Prose";
+}
+
 function materializeClaim(
   value,
   claimIndex,
   context,
   counters,
-  { allowAgentProseProof = false } = {},
+  { allowAgentProseProof = false, handoffIndex = 0 } = {},
 ) {
   const normalized = normalizeClaimInput(value, claimIndex);
   if (!Array.isArray(normalized) || normalized.length < 1 || normalized.length > 2) {
@@ -448,20 +453,35 @@ function materializeClaim(
   for (const lane of ["proof", "support"]) {
     if (detail[lane] == null) continue;
     if (!Array.isArray(detail[lane])) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${lane} must be an array`);
-    out[lane] = detail[lane].map((selector) => {
+    const materialized = [];
+    for (const selector of detail[lane]) {
       selectorCount += 1;
       const evidence = materializeAgentHandoffEvidenceSelector(selector, context);
       if (lane === "proof" && !isAllowedProofProvenance(evidence, {
         allowAgentProse: allowAgentProseProof,
       })) {
-        fail(
-          "AGENT_HANDOFF_PROOF_PROVENANCE_INVALID",
-          `claims[${claimIndex}] proof requires storage-owned tool evidence; ${evidence.ref} is ${evidence.provenance.kind}`,
-        );
+        if (!isDegradableAgentProof(evidence, { allowAgentProse: allowAgentProseProof })) {
+          fail(
+            "AGENT_HANDOFF_PROOF_PROVENANCE_INVALID",
+            `claims[${claimIndex}] proof requires storage-owned tool evidence; ${evidence.ref} is ${evidence.provenance.kind}`,
+          );
+        }
+        out.support ||= [];
+        out.support.push(evidence);
+        recordHandoffProofDegradation({
+          path: `handoffs[${handoffIndex}].report.claims[${claimIndex}]`,
+          selector: evidence.selector,
+          ref: evidence.ref,
+          provenance: evidence.provenance.kind,
+        });
+      } else {
+        materialized.push(evidence);
       }
       counters.evidence += evidence.excerpt.length;
-      return evidence;
-    });
+    }
+    if (materialized.length > 0) {
+      out[lane] = [...(out[lane] || []), ...materialized];
+    }
   }
   if (detail.decoy != null) {
     if (!Array.isArray(detail.decoy)) fail("AGENT_HANDOFF_SCHEMA_INVALID", "decoy must be an array");
@@ -1720,6 +1740,8 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
           const evidence = capture(() => materializeAgentHandoffEvidenceSelector(selector, context));
           if (lane === "proof" && evidence && !isAllowedProofProvenance(evidence, {
             allowAgentProse: allowAgentProseProof,
+          }) && !isDegradableAgentProof(evidence, {
+            allowAgentProse: allowAgentProseProof,
           })) {
             issues.push({
               code: "AGENT_HANDOFF_PROOF_PROVENANCE_INVALID",
@@ -1844,6 +1866,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
       {
         allowAgentProseProof: normalizedRole === "assessor"
           && profile === "assessor.verdict.v1",
+        handoffIndex: index,
       },
     ));
     if (profile === "researcher.report.v1" && claims.length === 0) {
@@ -1927,6 +1950,8 @@ export function materializeAgentHandoff(args, options = {}) {
     value: packet,
     ignoredFieldCount,
     ignoredFields,
+    degradedProofCount,
+    degradedProofs,
   } = runWithHandoffFieldDiagnostics(() => materializeAgentHandoffStrict(args, options));
   if (ignoredFieldCount > 0) {
     Object.defineProperties(packet, {
@@ -1936,6 +1961,18 @@ export function materializeAgentHandoff(args, options = {}) {
       },
       ignored_fields: {
         value: Object.freeze(ignoredFields),
+        enumerable: false,
+      },
+    });
+  }
+  if (degradedProofCount > 0) {
+    Object.defineProperties(packet, {
+      degraded_proof_count: {
+        value: degradedProofCount,
+        enumerable: false,
+      },
+      degraded_proofs: {
+        value: Object.freeze(degradedProofs),
         enumerable: false,
       },
     });
@@ -1985,12 +2022,17 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
   };
   const effectiveRole = String(call.role || role || "");
   const packet = materializeAgentHandoff(args, { context: resolvedContext, role: effectiveRole, maxHandoffs });
-  const diagnostics = packet.ignored_field_count > 0
-    ? {
-        ignored_field_count: packet.ignored_field_count,
-        ignored_fields: packet.ignored_fields,
-      }
-    : null;
+  const diagnostics = {
+    ...(packet.ignored_field_count > 0 ? {
+      ignored_field_count: packet.ignored_field_count,
+      ignored_fields: packet.ignored_fields,
+    } : {}),
+    ...(packet.degraded_proof_count > 0 ? {
+      degraded_proof_count: packet.degraded_proof_count,
+      degraded_proofs: packet.degraded_proofs,
+    } : {}),
+  };
+  const hasDiagnostics = Object.keys(diagnostics).length > 0;
   const workItem = resolvedContext.workItemId
     ? database.prepare("SELECT metadata_json FROM work_items WHERE id = ?").get(resolvedContext.workItemId)
     : null;
@@ -2017,7 +2059,7 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
         digest,
         idempotent: true,
         callCount: Number(existing.stage_count || 1) + (existing.status === "staged" ? 1 : 0),
-        ...(diagnostics ? { diagnostics } : {}),
+        ...(hasDiagnostics ? { diagnostics } : {}),
       };
     }
     if (existing.status === "staged") {
@@ -2048,7 +2090,7 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
     digest,
     idempotent: false,
     callCount: 1,
-    ...(diagnostics ? { diagnostics } : {}),
+    ...(hasDiagnostics ? { diagnostics } : {}),
   };
 }
 

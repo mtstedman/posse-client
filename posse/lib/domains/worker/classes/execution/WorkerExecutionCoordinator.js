@@ -34,6 +34,13 @@ import {
   clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule,
 } from "../../functions/helpers/worktree-lifecycle.js";
 import {
+  ensurePreDevelopmentTestBaseline,
+  testReceiptObservationDetail,
+} from "../../functions/helpers/test-execution-receipt.js";
+import {
+  snapshotAndResetDirtyWorktreeAsync,
+} from "../../../git/functions/worktree.js";
+import {
   handleCatastrophicExecuteError as handleCatastrophicExecuteErrorFromModule,
   handleExecuteAttemptError as handleExecuteAttemptErrorFromModule,
   handlePendingScopeApprovalPause as handlePendingScopeApprovalPauseFromModule,
@@ -165,6 +172,45 @@ export class WorkerExecutionCoordinator {
       });
       if (assessOnly.currentAttemptId) currentAttemptId = assessOnly.currentAttemptId;
       if (assessOnly.handled) return;
+
+      // Freeze and execute the explicit test plan before DEV sees the task.
+      // The receipt is persisted outside the routing packet, so baseline output
+      // cannot become implementation feedback or leak between benchmark arms.
+      const baselinePayload = worker.parsePayload(job);
+      const baselineReceipt = await ensurePreDevelopmentTestBaseline({
+        job,
+        payload: baselinePayload,
+        cwd: wtPath,
+        cleanupWorktree: wtPath
+          ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
+              reason: `test-baseline-side-effects-wi-${job.work_item_id}-job-${job.id}`,
+              branchName: branchName || null,
+              wiId: job.work_item_id,
+              signal: executeAbortController?.signal || null,
+              onMsg: (message) => worker.emit(job.id, `${C.dim}[test-intake] ${message}${C.reset}`),
+            })
+          : null,
+      });
+      if (baselineReceipt) {
+        const baselineLabel = baselineReceipt.reused
+          ? "reused"
+          : baselineReceipt.status;
+        worker.emit(
+          job.id,
+          `${C.dim}[test-intake] WI#${job.work_item_id} job #${job.id}: frozen baseline ${baselineLabel} (${baselineReceipt.command})${C.reset}`,
+        );
+        recordObservation({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          attempt_id: null,
+          observation_type: "command.test_execution",
+          summary: `Frozen pre-development test baseline ${baselineLabel}`,
+          detail: testReceiptObservationDetail(baselineReceipt),
+        });
+        if (baselineReceipt.status === "infrastructure_error") {
+          throw new Error(`Pre-development test cleanup failed: ${baselineReceipt.reason || "worktree remained dirty"}`);
+        }
+      }
 
       // -- Create attempt record --
       const attemptContext = await this.attemptLifecycle.prepare({
