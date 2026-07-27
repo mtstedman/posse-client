@@ -14,7 +14,7 @@ export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS =
   ? configuredExplorationCeiling
   : DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
 export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 2;
-const RESEARCH_COVERAGE_CHECKLIST_MAX_ITEMS = 12;
+const RESEARCH_COVERAGE_CHECKLIST_MAX_ITEMS = 20;
 const RESEARCH_COVERAGE_CHECKLIST_ITEM_MAX_CHARS = 260;
 
 const NON_EXPLORATION_ATLAS_ACTIONS = new Set([
@@ -77,16 +77,30 @@ function isTestExecutionCriterion(value) {
     || /\btests?\b.{0,50}\b(?:pass|passes|passing|green|succeed|succeeds)\b/.test(item);
 }
 
+function expandNamedFocusAreaItem(value) {
+  const item = boundedCoverageItem(value);
+  const match = /^(?:covers?|addresses?)\s+every\s+named\s+focus\s+areas?\s*:\s*(.+)$/i.exec(item);
+  if (!match) return [item];
+  const areas = match[1]
+    .split(/\s*,\s*(?:and\s+)?|\s+\band\b\s+/i)
+    .map((area) => boundedCoverageItem(area))
+    .filter(Boolean);
+  return areas.length > 1
+    ? areas.map((area) => `Cover named focus area: ${area}`)
+    : [item];
+}
+
 function uniqueCoverageItems(items) {
   const seen = new Set();
   const result = [];
   for (const candidate of items) {
-    const item = boundedCoverageItem(candidate);
-    const key = item.toLowerCase();
-    if (!item || seen.has(key) || isTestExecutionCriterion(item)) continue;
-    seen.add(key);
-    result.push(item);
-    if (result.length >= RESEARCH_COVERAGE_CHECKLIST_MAX_ITEMS) break;
+    for (const item of expandNamedFocusAreaItem(candidate)) {
+      const key = item.toLowerCase();
+      if (!item || seen.has(key) || isTestExecutionCriterion(item)) continue;
+      seen.add(key);
+      result.push(item);
+      if (result.length >= RESEARCH_COVERAGE_CHECKLIST_MAX_ITEMS) return result;
+    }
   }
   return result;
 }
@@ -127,6 +141,15 @@ function buildResearchCoverageChecklistText(taskText, { explorationAvailable = t
   ].join("\n");
 }
 
+export function buildResearchCoverageStartText({ taskText = "" } = {}) {
+  const checklist = buildResearchCoverageChecklistText(taskText);
+  return [
+    "RESEARCH EVIDENCE PLAN: use the deterministic checklist below from the start of exploration.",
+    checklist,
+    "Treat every named focus-area row as an independent evidence obligation. Before broadening or revisiting a supported path, obtain the exact governing body or branch for an unsupported row.",
+  ].join("\n");
+}
+
 export function buildResearchCurtainCallText({
   explorationSteps = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
@@ -140,6 +163,7 @@ export function buildResearchCurtainCallText({
     `RESEARCH CURTAIN CALL: ${remainingCalls} targeted exploration call${remainingCalls === 1 ? "" : "s"} ${remainingCalls === 1 ? "remains" : "remain"} before mandatory closeout.`,
     buildResearchCoverageChecklistText(taskText),
     "Use each remaining call only to close an exact unsupported checklist item with the governing helper body, precedence branch, failure path, or lifecycle boundary. Do not start a new research branch, repeat an earlier search/read, or use atlas.fetch_ref as a discovery workaround.",
+    "For code.window or code.lens, target exactly one named mechanism and pass exactly one identifiersToFind entry per remaining call. Bundling identifiers can omit the load-bearing body while appearing complete.",
     "Do not leave a named focus area unsupported while spending a call on an already-supported area. Do not stop early merely to report a limitation that an available exact call can close.",
     "Then stop tool use and synthesize the final report with the information already gathered.",
   ].join("\n");

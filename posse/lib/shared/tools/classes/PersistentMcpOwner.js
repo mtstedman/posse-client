@@ -46,6 +46,7 @@ import {
   RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
+  buildResearchCoverageStartText,
   buildResearchCurtainCallText,
   buildResearchSynthesisRequiredText,
   isResearchAtlasCitationFetchAction,
@@ -500,7 +501,11 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
   if (!admission?.tracked || admission.citationFetch) return result;
   const explorationSteps = admission.explorationSteps + 1;
   let notice = null;
-  if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) {
+  if (explorationSteps === 1) {
+    notice = buildResearchCoverageStartText({
+      taskText: ownerResearchTaskText(session),
+    });
+  } else if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) {
     recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName);
     notice = buildResearchSynthesisRequiredText({
       explorationSteps,
@@ -679,6 +684,10 @@ function recordOwnerToolObservation({ session, toolName, toolArgs, result = null
       job_id: boot.jobId ?? null,
       attempt_id: boot.attemptId ?? null,
       cwd: boot.cwd || null,
+      // Every call reaching the owner was actually executed (and billed).
+      // Provider replay dedupe can collapse distinct structured symbol refs
+      // after display normalization, corrupting the research budget ledger.
+      dedupe_replays: false,
       tool_uses: [{
         tool: toolName,
         input: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
@@ -1193,6 +1202,11 @@ export class PersistentMcpOwner {
     this._sessionIdsByTokenHash = new Map();
     this._gatewaySession = null;
     this._gatewayRetirements = new Set();
+    // Provider clients may issue multiple MCP tool calls concurrently. Keep
+    // research admission, execution, and observation recording ordered per
+    // attempt so parallel calls cannot consume a terminal evidence slot
+    // without appearing in the aggregate exploration count.
+    this._atlasToolCallQueues = new Map();
     // A memory failure is terminal only for the agent session that observed
     // it. Weak keys avoid extending the lifetime of detached MCP sessions.
     this._terminalMemoryToolSessions = new WeakSet();
@@ -1583,6 +1597,7 @@ export class PersistentMcpOwner {
     await Promise.allSettled([...this._gatewayRetirements]);
     this._gatewaySession = null;
     this._gatewayRetirements.clear();
+    this._atlasToolCallQueues.clear();
     this._sessions.clear();
     this._sessionIdsByTokenHash.clear();
     const server = this._server;
@@ -2033,7 +2048,28 @@ export class PersistentMcpOwner {
     }
   }
 
-  async _executeAtlasToolCall({ message, session, toolName, toolArgs }) {
+  async _executeAtlasToolCall(args) {
+    const boot = args?.session?.bootConfig || {};
+    const queueKey = [
+      boot.jobId ?? "no-job",
+      boot.attemptId ?? "no-attempt",
+      args?.session?.id || "no-session",
+    ].join(":");
+    const prior = this._atlasToolCallQueues.get(queueKey) || Promise.resolve();
+    const current = prior
+      .catch(() => {})
+      .then(() => this._executeAtlasToolCallSerial(args));
+    const tail = current.catch(() => {});
+    this._atlasToolCallQueues.set(queueKey, tail);
+    void tail.finally(() => {
+      if (this._atlasToolCallQueues.get(queueKey) === tail) {
+        this._atlasToolCallQueues.delete(queueKey);
+      }
+    });
+    return current;
+  }
+
+  async _executeAtlasToolCallSerial({ message, session, toolName, toolArgs }) {
     const startedAt = Date.now();
     const context = attachTelemetryContext(session, this.bootId);
     const requested = requestedToolPolicyName(toolName, toolArgs);

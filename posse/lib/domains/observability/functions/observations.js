@@ -1336,6 +1336,7 @@ export function recordToolUseObservations({
   attempt_id = null,
   tool_uses = [],
   cwd = null,
+  dedupe_replays = true,
 } = {}) {
   if (!Array.isArray(tool_uses) || tool_uses.length === 0) return;
   const context = getObservationContext() || {};
@@ -1365,7 +1366,11 @@ export function recordToolUseObservations({
     const key = `${summary.observation_type}|${summary.summary}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    if (TOOL_REPLAY_DEDUPE_WINDOW_MS > 0 && summary.observation_type.startsWith("tool.")) {
+    if (
+      dedupe_replays
+      && TOOL_REPLAY_DEDUPE_WINDOW_MS > 0
+      && summary.observation_type.startsWith("tool.")
+    ) {
       const fingerprint = `${summary.observation_type}|${JSON.stringify(detail)}`;
       if (!_rememberToolReplayFingerprint(replayBucketKey, fingerprint, now)) continue;
     }
