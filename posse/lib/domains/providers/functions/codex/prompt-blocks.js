@@ -70,7 +70,9 @@ export function __testBuildShellDisciplineBlock({
       ? "- A provided test_command is command input for that listed bash tool; it is not itself a callable tool."
       : "- A provided test_command is not callable in this run. Do not invoke it through bash, seek permission, or retry another test runner.");
   } else {
-    rules.push("- Shell command execution is unavailable in this run because no manifest entry has the canonical label bash. Do not invoke PowerShell, pwsh, bash, shell, or a provided test_command; report that command verification was unavailable.");
+    rules.push(role === "dev"
+      ? "- Shell and test execution are deliberately withheld from DEV. Implement through deterministic file tools and hand off the exact unrun verification command to the assessor; do not mark the implementation unavailable solely because DEV did not execute it."
+      : "- Shell command execution is unavailable in this run because no manifest entry has the canonical label bash. Do not invoke PowerShell, pwsh, bash, shell, or a provided test_command; report that command verification was unavailable.");
   }
   if (registeredTestTools.length > 0) {
     rules.push(`- Registered-test capabilities are limited to the listed manifest entries with canonical labels: ${registeredTestTools.join(", ")}. Do not call any other test-suite tool.`);

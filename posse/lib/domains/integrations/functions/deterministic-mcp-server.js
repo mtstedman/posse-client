@@ -1058,7 +1058,10 @@ function dedupeReadFile(args = {}) {
   return result;
 }
 
-let allowBash = ownerHotGateway || ["dev", "artificer", "assessor"].includes(roleName);
+// DEV authors source (including test source) through scoped deterministic file
+// tools. Command execution belongs to the assessor, so DEV must not receive a
+// generic shell escape hatch that can bypass the test/check role boundary.
+let allowBash = ownerHotGateway || ["artificer", "assessor"].includes(roleName);
 let execBash = allowBash ? createBashExecutor() : null;
 // Opt-in project DB access: advertised + attached only when this repo has it
 // configured (enabled + a db type + a grant usable by this session's
@@ -1162,7 +1165,7 @@ function runtimeToolAvailable(toolName) {
   if (WRITE_TOOL_NAMES.has(toolName)) return writeEnabled;
   if (TEST_TOOL_NAMES.has(toolName)) {
     const legacyRoleAllowsTests = bootConfig?.mcpOAuth?.verified !== true
-      && (roleName === "dev" || roleName === "assessor");
+      && roleName === "assessor";
     return (ownerHotGateway && !mcpMessageSessionScoped)
       || bootConfig.allowTests === true
       || legacyRoleAllowsTests;
@@ -1234,7 +1237,7 @@ if (writeEnabled) {
 if (allowBash) {
   addToolSchema(TOOL_BASH);
 }
-if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
+if (ownerHotGateway || roleName === "assessor") {
   addToolSchema(TOOL_RUN_SCOPED_CHECKS);
   addToolSchema(TOOL_CREATE_TEST_SUITE);
   addToolSchema(TOOL_CREATE_TEST);
@@ -2155,9 +2158,7 @@ if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
   mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
   mcpToolRegistry.attach("run_test", (args) => execRunTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
   mcpToolRegistry.attach("run_test_suite", (args) => execRunTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-  // Test authoring is a dev-only mutation; the assessor may run tests to verify
-  // but must not create them.
-  if (ownerHotGateway || roleName === "dev") {
+  if (ownerHotGateway) {
     mcpToolRegistry.attach("create_test_suite", (args) => execCreateTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
     mcpToolRegistry.attach("create_test", (args) => execCreateTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
   }
@@ -2304,7 +2305,7 @@ function rebuildNativeToolSchemas() {
     }
   }
   if (allowBash) addToolSchema(TOOL_BASH);
-  if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
+  if (ownerHotGateway || roleName === "assessor") {
     addToolSchema(TOOL_RUN_SCOPED_CHECKS);
     addToolSchema(TOOL_CREATE_TEST_SUITE);
     addToolSchema(TOOL_CREATE_TEST);
@@ -2353,8 +2354,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
     mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
     mcpToolRegistry.attach("run_test", (args) => execRunTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
     mcpToolRegistry.attach("run_test_suite", (args) => execRunTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-    // Test authoring is a dev-only mutation; the assessor may run but not create.
-    if (ownerHotGateway || roleName === "dev") {
+    if (ownerHotGateway) {
       mcpToolRegistry.attach("create_test_suite", (args) => execCreateTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
       mcpToolRegistry.attach("create_test", (args) => execCreateTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
     }
