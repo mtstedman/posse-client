@@ -1595,6 +1595,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               taskMode,
               currentModelTier: modelTier,
               currentReasoningEffort: reasoningEffort,
+              taskAbPinnedTestCommand: Boolean(pinnedTestCommand),
             })
           : null;
         const resolvedModelTier = finalJobType === "promote"

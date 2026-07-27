@@ -251,6 +251,7 @@ function resolveAssessorPolicy({
   facts,
   riskScore,
   riskTags,
+  taskAbPinnedTestCommand = false,
 }) {
   let modelTier = "cheap";
   let reasoningEffort = "low";
@@ -288,6 +289,11 @@ function resolveAssessorPolicy({
     }
   }
 
+  if (taskAbPinnedTestCommand && passConfidenceFloor === "high") {
+    passConfidenceFloor = "medium";
+    reasons.push("task A/B deterministic assessor evidence caps pass-confidence floor at medium");
+  }
+
   if (facts.scope_file_count >= 6 || facts.create_roots_count >= 2) {
     modelTier = maxTier(modelTier, "standard");
     reasoningEffort = maxEffort(reasoningEffort, "medium");
@@ -308,6 +314,7 @@ export function resolveTaskExecutionPolicy({
   taskMode = "code",
   currentModelTier = "standard",
   currentReasoningEffort = "medium",
+  taskAbPinnedTestCommand = false,
 } = {}) {
   const facts = buildTaskStructuralFacts(task, { jobType, taskMode });
   const plannerRiskScore = normalizePolicyScore(task.planner_risk_score ?? task.risk, null);
@@ -344,6 +351,7 @@ export function resolveTaskExecutionPolicy({
     facts,
     riskScore,
     riskTags,
+    taskAbPinnedTestCommand,
   });
 
   return {
