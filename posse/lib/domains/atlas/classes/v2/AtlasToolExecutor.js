@@ -681,8 +681,11 @@ export class AtlasToolExecutor {
     if (previous !== version) this.#clearRecentDedupeForRepo(key);
   }
 
-  hasReadContext(scope) {
-    return this.#readContexts.has(readContextKeyFor(scope));
+  hasReadContext(scope, expected = null) {
+    const context = this.#readContexts.get(readContextKeyFor(scope));
+    if (!context) return false;
+    if (expected?.readRoot == null) return true;
+    return normalizeRepoKey(context.readRoot) === normalizeRepoKey(expected.readRoot);
   }
 
   clearReadContext(scope) {

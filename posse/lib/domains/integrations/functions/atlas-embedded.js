@@ -1213,7 +1213,8 @@ async function executeEmbeddedAtlasViaExecutor({
   const repoRoot = repo?.repoPath || config?.requestedRepoPath || cwd || process.cwd();
   const executor = getSharedAtlasToolExecutor();
   const scope = atlasExecutorReadScope(workItemId, repoRoot);
-  if (!executor.hasReadContext(scope)) {
+  const expectedReadRoot = cwd || repoRoot;
+  if (!executor.hasReadContext(scope, { readRoot: expectedReadRoot })) {
     const context = await resolveEmbeddedAtlasV2ReadContext({ action, payload, cwd, config, repo });
     if (context) executor.setReadContext(scope, context);
   }

@@ -14,6 +14,7 @@ function contractHasTool(toolNames, name) {
 
 export function __testBuildShellDisciplineBlock({
   platform = process.platform,
+  role = null,
   atlasAttachment = null,
   executionContract = null,
 } = {}) {
@@ -28,6 +29,7 @@ export function __testBuildShellDisciplineBlock({
   const hasFileMutation = hasWriteFile || hasEditFile;
   const hasShell = contractHasTool(toolNames, "bash");
   const allowTests = executionContract?.allowTests === true;
+  const canRunTests = allowTests && role !== "dev";
   const registeredTestTools = ["create_test_suite", "create_test", "run_test", "run_test_suite"]
     .filter((name) => contractHasTool(toolNames, name));
   const rules = [
@@ -61,10 +63,10 @@ export function __testBuildShellDisciplineBlock({
   }
   if (hasShell) {
     rules.push("- Do NOT use shell for normal file reads, searches, listings, diffs, or edits when a listed file tool can do the job.");
-    rules.push(allowTests
+    rules.push(canRunTests
       ? "- Shell is an exception path only. Use the exact manifest entry whose canonical label is bash for explicit test/build commands, required toolchain commands, or specifically requested command output."
       : "- Shell is an exception path only. Test execution is not issued; use bash only for a non-test build/toolchain operation or specifically requested command output.");
-    rules.push(allowTests
+    rules.push(canRunTests
       ? "- A provided test_command is command input for that listed bash tool; it is not itself a callable tool."
       : "- A provided test_command is not callable in this run. Do not invoke it through bash, seek permission, or retry another test runner.");
   } else {
@@ -75,7 +77,9 @@ export function __testBuildShellDisciplineBlock({
   } else {
     rules.push("- Registered-test tools are unavailable in this run. Do not call create_test_suite, create_test, run_test, or run_test_suite.");
   }
-  if (!allowTests) {
+  if (role === "dev") {
+    rules.push("- Test execution is delegated to the assessor. Do not mark verification unavailable solely because DEV did not run tests.");
+  } else if (!canRunTests) {
     rules.push("- Keep completion tied to product work: unavailable tests alone must not cause PARTIAL or BLOCKED. Dev/fix reports the exact unrun check with verification_unavailable.");
   }
 
@@ -136,16 +140,10 @@ export function __testBuildCodexRoleGuardBlock({
       const labels = [has("read_file") ? "read_file" : null, has("list_files") ? "list_files" : null, has("search_files") ? "search_files" : null].filter(Boolean).join(", ");
       rules.push(`- Use active retrieval context first when available, then the listed manifest entries (${labels}) for exact worktree inspection.`);
     }
-    if (has("bash") && allowTests) {
-      rules.push("- If a test_command is provided, run it after file changes through the exact listed bash surface. If only its launcher is unavailable, try one obvious equivalent launcher or targeted invocation; keep completion status tied to product work and report the exact unavailable command. The command string is not a tool name.");
-    } else if (has("bash")) {
-      rules.push("- Bash is listed, but test execution is not issued. Do not attempt a provided test_command through bash or another runner; finish completed product work as COMPLETE and set verification_unavailable.");
-    } else {
-      rules.push("- No bash surface is listed. Do not attempt a provided test_command or any PowerShell/shell command; report verification as unavailable.");
-    }
-    if (has("run_scoped_checks")) {
-      rules.push("- For lint/typecheck, including PHP syntax checks, use the listed run_scoped_checks surface before considering shell.");
-    }
+    rules.push("- Test execution is not issued to DEV. Do not run tests, linters, scoped checks, or a provided test_command; test execution belongs to the assessor.");
+    rules.push("- You may create or update test source files when the task requires them, using the normal scoped file tools; do not execute those tests.");
+    rules.push("- Finish completed product work as COMPLETE; the assessor handles verification.");
+    if (!has("bash")) rules.push("- No bash surface is listed. Do not attempt any PowerShell or shell command.");
     if (has("bash")) rules.push("- Do not use shell for ad-hoc repository discovery when listed retrieval or file/search tools can answer the question.");
     return rules.join("\n");
   }
@@ -157,7 +155,7 @@ export function __testBuildCodexRoleGuardBlock({
     }
     if (has("run_scoped_checks")) rules.push("- Use the listed run_scoped_checks surface for lint/typecheck first, including PHP syntax checks.");
     if (has("bash") && allowTests) {
-      rules.push("- Use the exact listed bash surface only for explicit verification commands such as a provided test command or a narrow project test/build command.");
+      rules.push("- Use the exact listed bash surface only for explicit verification commands. Test execution belongs to the assessor: run a provided test_command once; if only its launcher is unavailable, use at most one obvious equivalent invocation.");
       rules.push("- Do not use shell-based search to decide whether the implementation changed the right files.");
     } else if (has("bash")) {
       rules.push("- Bash is listed for non-test inspection, but test execution is not issued. Do not run a test command through it or request permission; assess the available deterministic evidence.");

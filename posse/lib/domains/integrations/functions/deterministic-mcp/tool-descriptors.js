@@ -518,7 +518,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       // write capability comes from the projectDbWrite override, not the
       // file-write grant. No file mutation tools on this lane.
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "bash", "project_db_query"],
-      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "create_test_suite", "create_test", "run_test", "run_test_suite", "bash", "project_db_query"],
+      write: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "bash", "project_db_query"],
     }),
     artificer: Object.freeze({
       read: ["agent_feedback", "get_operator_feedback", "ack_operator_feedback"],
@@ -862,15 +862,8 @@ export function getDeterministicMcpToolNames(role, {
   if (roleUsesDeterministicImageMcp(role)) tools.push(...DETERMINISTIC_IMAGE_MUTATION_TOOLS);
   if (roleUsesDeterministicImageMcp(role) && needsImageGeneration) tools.push(...DETERMINISTIC_IMAGE_TOOLS);
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push(...DETERMINISTIC_OCR_TOOLS);
-  // Dev authors and runs tests; the assessor may run tests to verify but must
-  // not author them (test creation is a dev-only mutation).
-  if (role === "dev") tools.push(
-    "run_scoped_checks",
-    "create_test_suite",
-    "create_test",
-    "run_test",
-    "run_test_suite",
-  );
+  // Test execution belongs to the assessor. Dev can still author test source
+  // through its normal scoped file tools, but receives no test runner surface.
   if (role === "assessor") tools.push("run_scoped_checks", "run_test", "run_test_suite");
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push("bash");
   if (role === "planner") tools.push("get_brief");

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { ATLAS_INDEXABLE_SOURCE_EXTENSIONS } from "../../../../catalog/files.js";
 
@@ -59,6 +60,18 @@ export function isIndexableSourcePath(value, { cwd = null } = {}) {
   if (!normalized) return false;
   const ext = path.posix.extname(normalized.toLowerCase());
   return ATLAS_INDEXABLE_SOURCE_EXTENSIONS.has(ext);
+}
+
+export function isEmptySourceFileForGate(value, { cwd = null } = {}) {
+  const normalized = normalizeRepoPathForGate(value, { cwd });
+  if (!normalized || !cwd) return false;
+  try {
+    const target = path.resolve(String(cwd), ...normalized.split("/"));
+    const stat = fs.lstatSync(target);
+    return stat.isFile() && !stat.isSymbolicLink() && stat.size === 0;
+  } catch {
+    return false;
+  }
 }
 
 function addPath(out, value, { cwd = null, onlyIndexable = true } = {}) {

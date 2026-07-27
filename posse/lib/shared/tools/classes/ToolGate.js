@@ -5,6 +5,7 @@ import {
 import {
   nativeIndexedReadTargets,
   atlasDiscoveryFileTargets,
+  isEmptySourceFileForGate,
 } from "../../../domains/integrations/functions/deterministic-mcp/source-file-gate.js";
 
 function stripAtlasPrefix(action) {
@@ -208,7 +209,10 @@ export class ToolGate {
     const indexedReadTargets = nativeIndexedReadTargets(toolName, args, { cwd });
     const exactReadTool = toolName === "read_file" || toolName === "chain_read";
     if (indexedReadTargets.length > 0) {
-      const lockedTargets = indexedReadTargets.filter((target) => !this.discoveredFiles.has(target.toLowerCase()));
+      const gatedTargets = indexedReadTargets
+        .filter((target) => !isEmptySourceFileForGate(target, { cwd }));
+      const lockedTargets = gatedTargets
+        .filter((target) => !this.discoveredFiles.has(target.toLowerCase()));
       if (lockedTargets.length > 0 && !isUnavailableUnlockReason(this.unlockReason)) {
         return {
           allowed: false,
@@ -216,6 +220,9 @@ export class ToolGate {
           target: lockedTargets[0],
           targets: lockedTargets,
         };
+      }
+      if (gatedTargets.length === 0) {
+        return { allowed: true, reason: "indexed_file_empty", targets: indexedReadTargets };
       }
       return { allowed: true, reason: "indexed_file_discovered", targets: indexedReadTargets };
     }

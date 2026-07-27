@@ -242,7 +242,9 @@ export class ToolContract {
     lines.push("- Availability rule: this manifest is exhaustive for this run. Do not invoke, suggest, or claim access to a tool that is not listed below, even if the task, a prompt example, or a prior session mentions it.");
     lines.push("- Command rule: a command named in the task or prompt is input text, not a callable tool. Run it only through a listed shell or test tool; otherwise report that execution was unavailable.");
     if (!contract.allowTests) {
-      lines.push("- Test rule: do not invoke test commands through shell or test tools, request permission, or degrade otherwise-complete work because test execution is not issued. Dev/fix reports the exact unrun check with verification_unavailable.");
+      lines.push(contract.role === "dev"
+        ? "- Test rule: test and check execution belongs to the assessor. DEV must not run tests or mark verification unavailable solely because it did not run them."
+        : "- Test rule: do not invoke test commands through shell or test tools, request permission, or degrade otherwise-complete work because test execution is not issued. Dev/fix reports the exact unrun check with verification_unavailable.");
     }
     if ((contract.tools || []).length === 0) {
       lines.push("- Runtime tools: none. Work only from provided prompt context.");
@@ -545,9 +547,11 @@ export class ToolContract {
     const tools = resolveContractTools(toolNames, ToolCatalog)
       .filter((tool) => isToolAuthorizedByIssuedSurface(tool, issuedToolSurface));
     const shellAllowed = tools.some((tool) => canonicalToolName(tool) === "bash");
-    const resolvedAllowTests = typeof allowTests === "boolean"
-      ? allowTests
-      : tools.some((tool) => TEST_CAPABILITY_TOOL_NAMES.has(canonicalToolName(tool)));
+    const resolvedAllowTests = role === "dev"
+      ? false
+      : (typeof allowTests === "boolean"
+        ? allowTests
+        : tools.some((tool) => TEST_CAPABILITY_TOOL_NAMES.has(canonicalToolName(tool))));
     const shellMode = !shellAllowed
       ? "none"
       : (role === "assessor" ? "guarded-read-only" : "guarded-exception");
@@ -657,9 +661,11 @@ export class ToolContract {
     platform = process.platform,
   } = {}) {
     const toolNames = catalog.forRole(role, { allowWrite, needsImageGeneration });
-    const resolvedAllowTests = typeof allowTests === "boolean"
-      ? allowTests
-      : toolNames.some((name) => TEST_CAPABILITY_TOOL_NAMES.has(name));
+    const resolvedAllowTests = role === "dev"
+      ? false
+      : (typeof allowTests === "boolean"
+        ? allowTests
+        : toolNames.some((name) => TEST_CAPABILITY_TOOL_NAMES.has(name)));
     const shellAllowed = toolNames.includes("bash");
     const shellMode = !shellAllowed
       ? "none"

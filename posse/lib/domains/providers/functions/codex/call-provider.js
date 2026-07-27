@@ -267,6 +267,7 @@ export async function callProvider(promptText, {
     executionContract = adaptExecutionContractForProvider(executionContract, "codex");
     const shellDiscipline = skipRolePrompt ? null : __testBuildShellDisciplineBlock({
       platform: process.platform,
+      role,
       atlasAttachment: promptAtlasAttachment,
       atlasPrefetchStatus,
       executionContract,
