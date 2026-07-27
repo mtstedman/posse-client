@@ -24,6 +24,7 @@ import {
 import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/tool-params.js";
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
+import { getWorkItem } from "../../../domains/queue/functions/index.js";
 import { getAgentHandoffRecord, rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
 import { agentHandoffTerminator } from "../../../domains/handoff/classes/AgentHandoffTerminator.js";
 import {
@@ -485,6 +486,16 @@ function recordOwnerResearchSynthesisRequired(session, explorationSteps, toolNam
   });
 }
 
+function ownerResearchTaskText(session) {
+  const workItemId = session?.bootConfig?.workItemId ?? null;
+  if (workItemId == null) return "";
+  try {
+    return String(getWorkItem(workItemId)?.description || "");
+  } catch {
+    return "";
+  }
+}
+
 function appendOwnerResearchSynthesisNotice(result, session, toolName, admission) {
   if (!admission?.tracked || admission.citationFetch) return result;
   const explorationSteps = admission.explorationSteps + 1;
@@ -494,13 +505,17 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     notice = buildResearchSynthesisRequiredText({
       explorationSteps,
       absoluteCeilingReached: true,
+      taskText: ownerResearchTaskText(session),
     });
   } else if (
     explorationSteps
     >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
       - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS
   ) {
-    notice = buildResearchCurtainCallText({ explorationSteps });
+    notice = buildResearchCurtainCallText({
+      explorationSteps,
+      taskText: ownerResearchTaskText(session),
+    });
   }
   if (!notice) return result;
   const first = result?.content?.[0];
@@ -2053,6 +2068,7 @@ export class PersistentMcpOwner {
             : buildResearchSynthesisRequiredText({
               explorationSteps: synthesisAdmission.explorationSteps,
               absoluteCeilingReached: true,
+              taskText: ownerResearchTaskText(session),
             }),
         }],
         isError: true,

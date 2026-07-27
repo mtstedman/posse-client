@@ -64,6 +64,7 @@ import { registeredTestToolResultObservation } from "../../observability/functio
 import {
   acknowledgeOperatorFeedback,
   countPendingOperatorFeedbackForJob,
+  getWorkItem,
   getIntSetting,
   getOperatorFeedbackForJob,
   recordAgentActivity,
@@ -1846,7 +1847,17 @@ function buildResearchSynthesisRequiredMessage() {
     explorationSteps: status.exploration_steps || 0,
     staleSteps: status.stale_steps || 0,
     absoluteCeilingReached,
+    taskText: researchTaskText(),
   });
+}
+
+function researchTaskText() {
+  if (!isResearcherRole || mcpWorkItemId == null) return "";
+  try {
+    return String(getWorkItem(mcpWorkItemId)?.description || "");
+  } catch {
+    return "";
+  }
 }
 
 function appendResearchExplorationNotice(text, toolName) {
@@ -1860,7 +1871,10 @@ function appendResearchExplorationNotice(text, toolName) {
     >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
       - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS
   ) {
-    notice = buildResearchCurtainCallText({ explorationSteps });
+    notice = buildResearchCurtainCallText({
+      explorationSteps,
+      taskText: researchTaskText(),
+    });
   }
   return notice ? `${text}\n\n${notice}` : text;
 }

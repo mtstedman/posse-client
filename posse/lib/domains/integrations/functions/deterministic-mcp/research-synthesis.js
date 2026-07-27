@@ -14,6 +14,8 @@ export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS =
   ? configuredExplorationCeiling
   : DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
 export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 2;
+const RESEARCH_COVERAGE_CHECKLIST_MAX_ITEMS = 12;
+const RESEARCH_COVERAGE_CHECKLIST_ITEM_MAX_CHARS = 260;
 
 const NON_EXPLORATION_ATLAS_ACTIONS = new Set([
   "buffer.push",
@@ -58,9 +60,77 @@ export function buildResearchCitationFetchGateText({ reason = "before_synthesis"
   ].join("\n");
 }
 
+function boundedCoverageItem(value) {
+  const item = String(value || "")
+    .replace(/^\s*(?:[-*]|\d+[.)])\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!item) return "";
+  return item.length <= RESEARCH_COVERAGE_CHECKLIST_ITEM_MAX_CHARS
+    ? item
+    : `${item.slice(0, RESEARCH_COVERAGE_CHECKLIST_ITEM_MAX_CHARS - 3).trimEnd()}...`;
+}
+
+function isTestExecutionCriterion(value) {
+  const item = String(value || "").toLowerCase();
+  return /\b(?:run|runs|running|execute|executes|executing)\b.{0,50}\btests?\b/.test(item)
+    || /\btests?\b.{0,50}\b(?:pass|passes|passing|green|succeed|succeeds)\b/.test(item);
+}
+
+function uniqueCoverageItems(items) {
+  const seen = new Set();
+  const result = [];
+  for (const candidate of items) {
+    const item = boundedCoverageItem(candidate);
+    const key = item.toLowerCase();
+    if (!item || seen.has(key) || isTestExecutionCriterion(item)) continue;
+    seen.add(key);
+    result.push(item);
+    if (result.length >= RESEARCH_COVERAGE_CHECKLIST_MAX_ITEMS) break;
+  }
+  return result;
+}
+
+export function extractResearchCoverageChecklist(taskText = "") {
+  const text = String(taskText || "").replace(/\r\n?/g, "\n");
+  if (!text.trim()) return [];
+
+  const assigned = /(?:^|\n)\s*Assigned goals:\s*\n([\s\S]*?)(?=\n\s*\n|$)/i.exec(text)?.[1] || "";
+  const assignedItems = assigned
+    .split("\n")
+    .filter((line) => /^\s*[-*]\s+\S/.test(line));
+  if (assignedItems.length > 0) return uniqueCoverageItems(assignedItems);
+
+  const deliverables = /\bDeliverables:\s*([\s\S]*?)(?=\n\s*\n|$)/i.exec(text)?.[1] || "";
+  if (!deliverables) return [];
+  return uniqueCoverageItems(
+    deliverables
+      .split(/(?:^|[;])\s*(?=\(\d+\))/)
+      .map((item) => item.replace(/^\(\d+\)\s*/, "")),
+  );
+}
+
+function buildResearchCoverageChecklistText(taskText, { explorationAvailable = true } = {}) {
+  const items = extractResearchCoverageChecklist(taskText);
+  if (items.length === 0) {
+    return [
+      explorationAvailable
+        ? "FINAL COVERAGE AUDIT: re-read the assigned task and use the remaining call only for its highest-confidence missing source-body or branch evidence."
+        : "FINAL COVERAGE AUDIT: re-read the assigned task and visibly address each requested deliverable from the evidence already gathered.",
+      "Do not revisit a supported mechanism. Broad topology, symbol names, and nearby code are not substitutes for the governing helper body.",
+    ].join("\n");
+  }
+  return [
+    "DETERMINISTIC COVERAGE CHECKLIST (derived from the assigned task; every item is required):",
+    ...items.map((item, index) => `${index + 1}. ${item}`),
+    "Privately mark each item supported or unsupported from evidence already gathered. Use remaining calls one-per-unsupported-item, highest materiality first. A broad result, symbol name, or nearby helper is not exact body/branch evidence.",
+  ].join("\n");
+}
+
 export function buildResearchCurtainCallText({
   explorationSteps = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
+  taskText = "",
 } = {}) {
   const remainingCalls = Math.max(
     0,
@@ -68,7 +138,9 @@ export function buildResearchCurtainCallText({
   );
   return [
     `RESEARCH CURTAIN CALL: ${remainingCalls} targeted exploration call${remainingCalls === 1 ? "" : "s"} ${remainingCalls === 1 ? "remains" : "remain"} before mandatory closeout.`,
-    "Use them only to close an exact, answer-critical evidence gap that is already named. Do not start a new research branch, repeat an earlier search/read, or use atlas.fetch_ref as a discovery workaround.",
+    buildResearchCoverageChecklistText(taskText),
+    "Use each remaining call only to close an exact unsupported checklist item with the governing helper body, precedence branch, failure path, or lifecycle boundary. Do not start a new research branch, repeat an earlier search/read, or use atlas.fetch_ref as a discovery workaround.",
+    "Do not leave a named focus area unsupported while spending a call on an already-supported area. Do not stop early merely to report a limitation that an available exact call can close.",
     "Then stop tool use and synthesize the final report with the information already gathered.",
   ].join("\n");
 }
@@ -77,6 +149,7 @@ export function buildResearchSynthesisRequiredText({
   explorationSteps = 0,
   staleSteps = 0,
   absoluteCeilingReached = true,
+  taskText = "",
 } = {}) {
   const stopReason = absoluteCeilingReached
     ? "deterministic_research_tool_ceiling"
@@ -86,8 +159,9 @@ export function buildResearchSynthesisRequiredText({
     absoluteCeilingReached
       ? `Exploration calls: ${explorationSteps}; absolute ceiling: ${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}.`
       : `Exploration calls: ${explorationSteps}; no new relevant file in the last ${staleSteps} exploration calls.`,
+    buildResearchCoverageChecklistText(taskText, { explorationAvailable: false }),
     "No further discovery calls are available. Use the remaining model turns to synthesize the best-supported final research report from the information already gathered and complete the terminal handoff.",
-    "Before answering, audit every requested deliverable: state the supported finding with evidence, or name the specific unresolved gap under Limitations. Do not emit empty sections, placeholder bullets, or unsupported completion claims.",
+    "Before answering, audit every requested deliverable and visibly address every checklist item. Use exact evidence already gathered; only name a specific unresolved gap under Limitations when the required source was genuinely unavailable. Do not emit empty sections, placeholder bullets, or unsupported completion claims.",
     "Do not use atlas.fetch_ref or another full tool call to extend research. The only runtime exception is one exact retrieval of a ref surfaced before the curtain call when its stored payload is already known to be essential to a final claim; it does not reopen discovery.",
     `Include files/symbols consulted, why each mattered, unknowns, and stop_reason=${stopReason}.`,
   ].join("\n");
