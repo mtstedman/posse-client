@@ -392,6 +392,10 @@ function _extractOriginalPayloadContext(job) {
   const origNeedsImageGen = !!origPayload.needs_image_generation;
   const origPlannerSetFiles = !!origPayload._planner_set_files;
   const origOneshotOrigin = origPayload.oneshot === true || origPayload.oneshot_origin === true;
+  const originalTestCommand = typeof origPayload.test_command === "string"
+    ? origPayload.test_command.trim()
+    : "";
+  const origTaskAbTestCommand = origPayload._task_ab_test_command === true && !!originalTestCommand;
   if (isArtifactMode(origTaskMode) && origOutputRoot) {
     originalCreateRoots = _mergeUniquePaths(originalCreateRoots, [origOutputRoot]);
   }
@@ -399,7 +403,7 @@ function _extractOriginalPayloadContext(job) {
     originalFiles, originalCreateFiles, originalDeleteFiles, originalCreateRoots,
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
-    origOneshotOrigin,
+    origOneshotOrigin, originalTestCommand, origTaskAbTestCommand,
   };
 }
 
@@ -479,7 +483,7 @@ function _spawnRecoveryJobsForVerdict({
     originalFiles, originalCreateFiles, originalDeleteFiles, originalCreateRoots,
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
-    origOneshotOrigin,
+    origOneshotOrigin, originalTestCommand, origTaskAbTestCommand,
   } = origCtx;
   // One-shot lineage marker survives every recovery spawn so later fixes and
   // file-request follow-ups keep the tightened one-shot policies.
@@ -713,6 +717,8 @@ function _spawnRecoveryJobsForVerdict({
       output_root: origOutputRoot,
       needs_image_generation: origNeedsImageGen,
       success_criteria: originalSuccessCriteria,
+      ...(originalTestCommand ? { test_command: originalTestCommand } : {}),
+      ...(origTaskAbTestCommand ? { _task_ab_test_command: true } : {}),
       _planner_set_files: origPlannerSetFiles,
       _fix_satisfiability_fingerprint: fixFingerprint,
       ...oneshotPayloadFields,

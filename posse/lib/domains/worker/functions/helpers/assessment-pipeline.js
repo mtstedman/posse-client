@@ -616,6 +616,7 @@ function _buildVerificationCapabilityBlock(payload = {}) {
     `Use those assigned capabilities. Discard browser, lint, shell, or other verification options that are not callable through the issued tool surface and are not represented by registered test evidence.`,
     `An unavailable optional method is NOT_APPLICABLE: do not lower confidence, fail, block, or ask a human merely because it cannot be run.`,
     `A configured test command is a verification recipe, not product behavior, unless the objective explicitly requires that literal invocation to work. If its launcher is unavailable, one obvious equivalent launcher or targeted invocation may establish the same criterion.`,
+    `When DETERMINISTIC ASSESSOR TEST EXECUTION evidence is attached, that command was run by the assessment layer against the completed worktree. Treat its exit status and output as ground truth.`,
     `Do not request a repository file or human intervention solely to supply an executable alias or change test discovery after equivalent evidence proves the behavior.`,
     `If no equivalent evidence can establish a genuinely required criterion, return blocked once with the missing capability named. Do not retry the same assessment hoping the capability appears.`,
     contract ? `Task verification contract:\n${JSON.stringify(contract, null, 2)}` : null,
@@ -1062,6 +1063,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       files_requested = [],
     } = assessmentContext;
     const sections = [];
+
+    if (assessmentContext.task_ab_test_evidence) {
+      sections.push(String(assessmentContext.task_ab_test_evidence));
+    }
 
     // Task mode context
     if (task_mode !== "code") {
@@ -1512,6 +1517,35 @@ export function shouldRunPreAssessCommand({
     && !hooksSkipped;
 }
 
+export function taskAbPinnedTestCommand(payload = {}) {
+  if (payload?._task_ab_test_command !== true) return "";
+  return typeof payload?.test_command === "string"
+    ? payload.test_command.trim()
+    : "";
+}
+
+function taskAbTestEvidence(command, result = {}) {
+  const status = result.ok === true ? "PASS" : "FAIL";
+  const output = [result.stdout, result.stderr]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(-4000);
+  return [
+    `DETERMINISTIC ASSESSOR TEST EXECUTION (${status}):`,
+    `command: ${command}`,
+    `exit_code: ${result.code ?? "unknown"}`,
+    output ? `output:\n${output}` : "output: (empty)",
+    result.ok === true
+      ? "The assessment layer ran this exact harness command successfully."
+      : "The assessment layer ran this exact harness command and it failed. Verdict MUST NOT be pass unless later attached evidence shows a successful rerun.",
+  ].join("\n");
+}
+
+export function __testTaskAbTestEvidence(command, result = {}) {
+  return taskAbTestEvidence(command, result);
+}
+
 async function gitPorcelainZAsync(wtPath) {
   return gitExecAsync(["status", "--porcelain=v1", "-z"], wtPath, { trim: false });
 }
@@ -1820,26 +1854,38 @@ export async function runPostExecutionAssessment(worker, {
       attempt: attempt.attempt_number || job.attempt_count || 1,
     });
 
-    const preAssessCmd = readSettingText("pre_assess_cmd") || null;
+    const pinnedTaskAbTestCmd = taskAbPinnedTestCommand(currentPayload);
+    const preAssessCmd = pinnedTaskAbTestCmd || readSettingText("pre_assess_cmd") || null;
+    const taskAbTestRun = !!pinnedTaskAbTestCmd;
+    let taskAbAssessmentEvidence = "";
     const hooksSkipped = readSettingBool("skip_hooks", false) || readSettingBool("skip_hook_post_dev_verify", false);
     if (shouldRunPreAssessCommand({
       command: preAssessCmd,
       wtPath,
-      preAssessAlreadyVerified,
-      hooksSkipped,
+      preAssessAlreadyVerified: taskAbTestRun ? false : preAssessAlreadyVerified,
+      hooksSkipped: taskAbTestRun ? false : hooksSkipped,
     })) {
       try {
-        worker.emit(job.id, `${C.dim}[pre-assess] Running: ${preAssessCmd}${C.reset}`);
+        const commandLabel = taskAbTestRun ? "assessor-test" : "pre-assess";
+        worker.emit(job.id, `${C.dim}[${commandLabel}] Running: ${preAssessCmd}${C.reset}`);
         recordObservation({
           work_item_id: job.work_item_id,
           job_id: job.id,
           attempt_id: attempt.id,
           observation_type: "command.pre_assess",
-          summary: "Running pre-assess command",
-          detail: { command: preAssessCmd, cwd: wtPath },
+          summary: taskAbTestRun ? "Running pinned task A/B assessor test command" : "Running pre-assess command",
+          detail: { command: preAssessCmd, cwd: wtPath, source: taskAbTestRun ? "task_ab_acceptance" : "setting" },
         });
         const preAssessBeforePorcelain = await gitPorcelainZAsync(wtPath);
-        await runShellCommandAsync(preAssessCmd, { cwd: wtPath, timeoutMs: 120000 });
+        const commandResult = await runShellCommandAsync(preAssessCmd, { cwd: wtPath, timeoutMs: 120000 });
+        if (taskAbTestRun) {
+          taskAbAssessmentEvidence = taskAbTestEvidence(preAssessCmd, {
+            ok: true,
+            code: commandResult.code,
+            stdout: commandResult.stdout,
+            stderr: commandResult.stderr,
+          });
+        }
         const preAssessAfterPorcelain = await gitPorcelainZAsync(wtPath);
         const dirtyEntries = diffPorcelainEntries(preAssessBeforePorcelain, preAssessAfterPorcelain);
         if (dirtyEntries.length > 0 || preAssessAfterPorcelain !== preAssessBeforePorcelain) {
@@ -1905,36 +1951,55 @@ export async function runPostExecutionAssessment(worker, {
           });
           return;
         }
-        worker.emit(job.id, `${C.green}[pre-assess] Passed${C.reset}`);
+        worker.emit(job.id, `${C.green}[${taskAbTestRun ? "assessor-test" : "pre-assess"}] Passed${C.reset}`);
         recordObservation({
           work_item_id: job.work_item_id,
           job_id: job.id,
           attempt_id: attempt.id,
           observation_type: "command.pre_assess",
-          summary: "Pre-assess command passed",
-          detail: { command: preAssessCmd, cwd: wtPath, status: "passed" },
+          summary: taskAbTestRun ? "Pinned task A/B assessor test command passed" : "Pre-assess command passed",
+          detail: {
+            command: preAssessCmd,
+            cwd: wtPath,
+            status: "passed",
+            source: taskAbTestRun ? "task_ab_acceptance" : "setting",
+          },
         });
       } catch (hookErr) {
-        const hookMsg = `Pre-assessment hook failed: ${hookErr.message.split("\n")[0]}`;
-        worker.emit(job.id, `${C.red}[pre-assess] ${hookMsg}${C.reset}`);
+        const hookMsg = `${taskAbTestRun ? "Pinned assessor test" : "Pre-assessment hook"} failed: ${hookErr.message.split("\n")[0]}`;
+        worker.emit(job.id, `${C.red}[${taskAbTestRun ? "assessor-test" : "pre-assess"}] ${hookMsg}${C.reset}`);
         recordObservation({
           work_item_id: job.work_item_id,
           job_id: job.id,
           attempt_id: attempt.id,
           observation_type: "command.pre_assess",
           summary: hookMsg,
-          detail: { command: preAssessCmd, cwd: wtPath, status: "failed" },
+          detail: {
+            command: preAssessCmd,
+            cwd: wtPath,
+            status: "failed",
+            source: taskAbTestRun ? "task_ab_acceptance" : "setting",
+          },
         });
-        completeAttempt(attempt.id, {
-          status: "succeeded",
-          duration_ms: Date.now() - startTime,
-          error_text: hookMsg,
-        });
-        setJobError(job.id, hookMsg);
-        routeAssessmentInfrastructureFailure(worker, job, leaseToken, hookErr, {
-          pendingFileRequests,
-        });
-        return;
+        if (taskAbTestRun) {
+          taskAbAssessmentEvidence = taskAbTestEvidence(preAssessCmd, {
+            ok: false,
+            code: hookErr.code,
+            stdout: hookErr.stdout,
+            stderr: hookErr.stderr || hookErr.message,
+          });
+        } else {
+          completeAttempt(attempt.id, {
+            status: "succeeded",
+            duration_ms: Date.now() - startTime,
+            error_text: hookMsg,
+          });
+          setJobError(job.id, hookMsg);
+          routeAssessmentInfrastructureFailure(worker, job, leaseToken, hookErr, {
+            pendingFileRequests,
+          });
+          return;
+        }
       }
     }
 
@@ -2146,6 +2211,9 @@ export async function runPostExecutionAssessment(worker, {
       }, (isArtifactMode(taskMode) && jobPayloadForAssess.output_root)
         ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
         : (wtPath || worker.projectDir));
+      if (taskAbAssessmentEvidence) {
+        assessmentContext.task_ab_test_evidence = taskAbAssessmentEvidence;
+      }
       const assessOpts = {
         silent: worker.silent,
         autoApprove: worker.autoApprove,
